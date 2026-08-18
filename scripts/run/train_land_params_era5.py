@@ -5,11 +5,15 @@ GLOBAL, physically-bounded land parameters to minimise the land surface-temperat
 AND albedo bias vs ERA5 (skin temperature + forecast albedo). Trainable, per-PFT
 where it makes sense:
 
-    pft_alb (17)   per-PFT snow-free albedo            [0.05, 0.45]
-    pft_emis (17)  per-PFT emissivity                  [0.90, 0.995]
-    glac_alb       glacier/ice-sheet ice albedo        [0.40, 0.75]
-    snow_max       max snow albedo                     [0.55, 0.85]
-    ch             bulk heat-transfer coefficient      [1e-3, 6e-3]
+    pft_alb (17)      per-PFT snow-free albedo         (physical per-PFT bounds)
+    pft_emis (17)     per-PFT emissivity               [0.94, 0.99]
+    pft_wmax (17)     bucket capacity [kg/m2]          [60, 320]
+    pft_snowmask (17) canopy snow-cover masking        [0.2, 1.2] (1 = legacy)
+    glac_alb          glacier/ice-sheet ice albedo     [0.45, 0.85]
+    snow_max/min      fresh / aged snow albedo         [0.60,0.90] / [0.45,0.75]
+    snow_dcrit        tanh SWE half-cover scale        [3, 60] kg/m2
+    snow_tau_days     snow-albedo age e-folding        [1, 20] d
+    ch                bulk heat-transfer coefficient   [2e-3, 5e-3]
 
 (Roughness z0 is intentionally NOT trained: the constant bulk-flux scheme fixes the
 exchange coefficient, so z0 has zero gradient; switch to the MOST scheme to calibrate
@@ -82,7 +86,12 @@ _PFT_WMAX_LO, _PFT_WMAX_HI = 60.0, 320.0
 # it (real root-zone uptake); the slab's storage knob is pft_wmax.
 BOUNDS = dict(pft_alb=(_PFT_ALB_LO, _PFT_ALB_HI), pft_emis=(0.94, 0.99),
               pft_wmax=(_PFT_WMAX_LO, _PFT_WMAX_HI),
-              glac_alb=(0.45, 0.75), snow_max=(0.60, 0.85), ch=(2.0e-3, 5.0e-3))
+              glac_alb=(0.45, 0.85), snow_max=(0.60, 0.90), ch=(2.0e-3, 5.0e-3),
+              # snow-albedo scalars unfrozen for the NH dark bias (previously only
+              # snow_max trained; min/cover-scale/age at LandAlbedoConfig defaults)
+              snow_min=(0.45, 0.75), snow_dcrit=(3.0, 60.0), snow_tau_days=(1.0, 20.0),
+              # per-PFT snow-cover masking (canopy snow burial; 1 = legacy cover)
+              pft_snowmask=(0.2, 1.2))
 _STEPS_PER_MONTH = 120                          # 6-h steps over ~30 days
 _DT = 6 * 3600.0
 # Latent-heat loss weight: LE MSE is O(10^2-10^3) (W/m2)^2 vs skin-T MSE O(10) K^2,
@@ -148,6 +157,10 @@ def init_raw_params() -> dict:
         pft_wmax=jnp.asarray(np.full(_N_PFT, _inv(150.0, "pft_wmax"))),
         glac_alb=jnp.asarray(_inv(0.55, "glac_alb")),
         snow_max=jnp.asarray(_inv(0.80, "snow_max")),
+        snow_min=jnp.asarray(_inv(0.50, "snow_min")),
+        snow_dcrit=jnp.asarray(_inv(20.0, "snow_dcrit")),
+        snow_tau_days=jnp.asarray(_inv(5.0, "snow_tau_days")),
+        pft_snowmask=jnp.asarray(np.full(_N_PFT, _inv(1.0, "pft_snowmask"))),
         ch=jnp.asarray(_inv(3.0e-3, "ch")))
 
 
@@ -163,7 +176,11 @@ def _land_params(cp, data):
         theta_wp=data["wp"], theta_fc=data["fc"], Vc_max25=other[:, _PI["Vc_max25"]],
         LCMA=other[:, _PI["LCMA"]], g1=other[:, _PI["g1"]])
     cfg = LandConfig(snow_albedo_feedback=True, Ch_land=cp["ch"], Cd_land=cp["ch"],
-                     land_albedo=LandAlbedoConfig(alpha_snow_max=cp["snow_max"]))
+                     land_albedo=LandAlbedoConfig(
+                         alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
+                         snow_depth_crit=cp["snow_dcrit"],
+                         tau_snow_decay=cp["snow_tau_days"] * 86400.0,
+                         snow_cover_scale=data["pft"] @ cp["pft_snowmask"]))
     return lp, cfg
 
 

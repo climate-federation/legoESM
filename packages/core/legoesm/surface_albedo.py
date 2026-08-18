@@ -82,6 +82,14 @@ class LandAlbedoConfig(NamedTuple):
     # top-layer volumetric water falls below ``soil_dry_albedo_ref``.
     soil_dry_albedo_boost: float = 0.11   # max dry-soil albedo increment
     soil_dry_albedo_ref: float = 0.275    # theta [m3/m3] above which no brightening
+    # Per-cell SCALE on the snow-cover fraction (CLM-style canopy snow masking):
+    # a tall canopy stays exposed above the snowpack, so a forest cell's EFFECTIVE
+    # snow-covered fraction (as seen by shortwave) is smaller than the Niu-Yang
+    # ground cover (<1), while open tundra/grass may whiten faster than the global
+    # snow_depth_crit implies (>1 allowed; the blended fraction is clipped to 1).
+    # None = 1 everywhere (legacy, byte-identical).  Typically a PFT-weighted
+    # per-cell array from a calibrated per-PFT masking table.
+    snow_cover_scale: object = None
 
 
 class IceAlbedoConfig(NamedTuple):
@@ -325,6 +333,15 @@ def land_albedo(
                  else base_albedo)
     f_snow = (snow_cover_fraction(snow_depth, config) if f_snow_override is None
               else f_snow_override)
+    if config.snow_cover_scale is not None:
+        # Canopy snow masking: scale the effective snow-covered fraction (forest
+        # canopies hide ground snow, scale<1; open tundra whitens faster, scale>1)
+        # and scale the banded pre-aggregate by the same factor (it is linear in
+        # the per-band cover) so both paths stay consistent.
+        scale = jnp.asarray(config.snow_cover_scale)
+        f_snow = jnp.clip(f_snow * scale, 0.0, 1.0)
+        if snow_contrib_override is not None:
+            snow_contrib_override = snow_contrib_override * jnp.clip(scale, 0.0, None)
     if snow_contrib_override is not None:
         # Banded path: each elevation band already blended its own age-decayed snow
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.

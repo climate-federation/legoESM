@@ -204,6 +204,12 @@ BOUNDS_EXT = dict(
     # equilibrium root-zone soil moisture can be pulled toward ERA5 (the soil-moisture
     # target is what makes the retention trainable — skin T alone could not constrain it).
     pft_smscale=(0.7, 1.3),
+    # per-PFT snow-cover masking scale (CLM-style canopy snow burial): forests hide
+    # ground snow (<1), open tundra/grass may whiten faster than the global
+    # snow_depth_crit implies (>1); 1.0 = legacy full Niu-Yang cover.  The NH>55
+    # albedo mosaic (forests +0.05 too bright, tundra/grass -0.05..-0.09 too dark)
+    # is exactly the signature this closes.
+    pft_snowmask=(0.2, 1.2),
     # per-PFT SCALE on the per-cell texture-derived soil thermal k_solid / C_solid
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
@@ -259,6 +265,7 @@ def init_ext_params() -> dict:
         pft_wp=_inv_ext(wp0, "pft_wp"),
         pft_fcgap=_inv_ext(np.clip(fc0 - wp0, 0.04, 0.29), "pft_fcgap"),
         pft_smscale=_inv_ext(full(1.0), "pft_smscale"),    # start at texture porosity
+        pft_snowmask=_inv_ext(full(1.0), "pft_snowmask"),  # start at legacy full cover
         # init scales so texture*scale ~ the previous effective inertia (texture
         # k_base~5 -> k_scale~0.35 gives k_solid~1.8; C_base~2.3e6 -> c_scale~0.9)
         pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
@@ -408,6 +415,7 @@ def build_multilayer_cfg(cp, data):
             alpha_glacier_ice=cp["glac_ice_alb"])
             if _ELEV_BANDS_ON else None),
         land_albedo=LandAlbedoConfig(
+            snow_cover_scale=data["pft"] @ cp["pft_snowmask"],  # canopy snow masking
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
             tau_snow_decay=cp["snow_tau_days"] * 86400.0,    # days -> seconds
