@@ -32,7 +32,8 @@ A physical-validity guard drops any numerically-diverged legoESM cells
 Monthly climatologies are cached as netcdf in ``<outdir>/cache`` so re-runs
 are fast; use ``--force`` to rebuild.
 
-Requires only xarray + netCDF4 + matplotlib.  On derecho/casper::
+Requires xarray + netCDF4 + matplotlib + legoesm (for the shared physical
+constants — any legoESM conda env has all four).  On derecho/casper::
 
   /glade/work/linnia/conda-envs/legoesm-lmip/bin/python \
       scripts/validate/compare_lmip_biophys_clm.py
@@ -65,14 +66,18 @@ OBS_SOURCES = {
 }
 
 # --------------------------------------------------------------------------
-# Constants / unit conversions
+# Constants / unit conversions (physical constants from legoesm.constants —
+# same values the model ran with; note R_earth = 6371.229 km, the model's
+# CESM-convention radius, not the generic 6371 km)
 # --------------------------------------------------------------------------
-MW_C = 12.011                            # g C per mol
+from legoesm import constants  # noqa: E402
+
+MW_C = 12.011                            # g C per mol (molar mass, unit conv)
 UMOL2G_DAY = MW_C * 1e-6 * 86400.0       # umol/m2/s -> gC/m2/day (FPSN -> GPP)
-LV = 2.501e6                             # J/kg latent heat of vaporisation
+LV = constants.L_v                       # J/kg latent heat of vaporisation
 WM2_TO_MMDAY = 86400.0 / LV              # 1 W/m2 -> mm/day (~0.03455)
-R_EARTH = 6.371e6                        # m
-DAYS_YR = 365.0
+R_EARTH = constants.R_earth              # m
+DAYS_YR = 365.0                          # noleap calendar year length
 
 # CLM5 PFT indices (17 incl. bare) aggregated into 8 biome classes —
 # identical to the LEAP/lego_analysis mask so figures are comparable.
