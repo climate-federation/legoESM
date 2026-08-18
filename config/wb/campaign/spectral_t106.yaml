@@ -127,6 +127,13 @@ loss:
   ps_scale: 1000.0
 
 neural_gcm:
+  # #1464: the learned column arm has NO momentum head, so without this it
+  # runs with no surface drag at all, while the classical arm it is scored
+  # against inherits smagorinsky turbulence by default.  With it, the two arms
+  # differ in their thermodynamics and nothing else, which is the only way the
+  # comparison means anything.  Any neural-vs-classical table produced before
+  # this was set is not a comparison and is superseded.
+  surface_drag: true
   nn_hidden: 384
   nn_layers: 4
 sfno:

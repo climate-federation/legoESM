@@ -199,3 +199,43 @@ def test_campaign_builder_wires_the_drag_when_asked():
         "is back to running with no surface drag (#1464)")
     assert "surface_drag" in src, (
         "the opt-in flag is gone; the campaign cannot request the drag")
+
+
+def test_every_committed_neural_campaign_actually_asks_for_the_drag():
+    """The other half, and the one that was missing: does anything OPT IN?
+
+    The hook above shipped opt-in so that no existing campaign changed
+    silently — and then no campaign opted in, so the fix was unreachable and
+    the degradation table it was written to explain could not move. A lever
+    that no committed configuration selects is not a fix.
+
+    Any YAML that carries a ``neural_gcm:`` block builds the learned arm, and
+    that arm has no momentum head. If such a config does not ask for the drag,
+    it runs a model with no surface friction at all — and if it is then scored
+    against a classical arm, the two differ by a momentum sink before anything
+    the network did.
+    """
+    import pathlib
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    offenders = []
+    checked = 0
+    for path in sorted((root / "config").rglob("*.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text(errors="replace"))
+        except yaml.YAMLError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        block = doc.get("neural_gcm")
+        if not isinstance(block, dict):
+            continue
+        checked += 1
+        if block.get("surface_drag") is not True:
+            offenders.append(str(path.relative_to(root)))
+    assert checked, "no config carries a neural_gcm block — update this test"
+    assert not offenders, (
+        "these configs build the learned arm with no surface drag, so a "
+        "comparison against a classical arm is confounded before it starts: "
+        + ", ".join(offenders))
