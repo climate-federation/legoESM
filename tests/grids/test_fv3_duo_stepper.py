@@ -46,7 +46,7 @@ numeric bound below is MEASURED (job 9425294, the LEGOESM_FV3_TOL_MEASURE
 sweep) and set to measured x 10, keeping its class label.  The loosest
 bounds in the file are the full-step jit-vs-eager wind gaps
 (u 7.511e-07, v 7.456e-07; the localisers place them in the stage chain
-at 5.646e-07), CHARACTERISED by probe job 9433881 as selector bit-flips
+at 5.646e-07), PLAUSIBLE-MECHANISM (see scope note) by probe job 9433881 as selector bit-flips
 at 6 of 2052 cells -- see ``_JIT_EAGER_BOUND`` for the record and the
 flip-cell census gate that now accompanies the magnitude bound.
 
@@ -1132,7 +1132,7 @@ def test_tier3_eager_replay_isolates_the_jit_gap(replay):
 # =====================================================================
 
 # Per-field jit-vs-eager bounds, MEASURED in job 9404093; the wind
-# entries CHARACTERISED by probe job 9433881
+# entries PLAUSIBLE-MECHANISM (see scope note) by probe job 9433881
 # (scripts/validate/fv3_duo_jit_gap_localiser.py).
 #
 # THE WIND GAP IS SELECTOR BIT-FLIPS BETWEEN TWO LEGAL COMPILATIONS,
@@ -1179,7 +1179,7 @@ _JIT_EAGER_BOUND = {
     "delp": 1.9e-13, "pt": 4.2e-14,
     # MEASURED (job 9425294 sweep): u 7.511e-07, v 7.456e-07; bounds =
     # measured x 10.  [class: jit-vs-eager, selector bit-flips at 6 of
-    # 2052 cells -- CHARACTERISED, probe job 9433881; see block above]
+    # 2052 cells -- PLAUSIBLE-MECHANISM (see scope note), probe job 9433881; see block above]
     "u": 7.6e-06, "v": 7.5e-06,
 }
 
@@ -1189,7 +1189,7 @@ _JIT_EAGER_BOUND = {
 # the D-grid tail): probe job 9433881 shows the SAME 6 cells as the
 # full step, injected by d_sw3's PPM selector flips -- see the
 # _JIT_EAGER_BOUND block.  [class: jit-vs-eager localiser,
-# selector bit-flips CHARACTERISED]
+# selector bit-flips PLAUSIBLE-MECHANISM (see scope note)]
 _ACOUSTIC_JIT_BOUND = {
     "delp": 1.3e-13, "pt": 4.2e-14, "u": 5.7e-06, "v": 5.7e-06,
 }
@@ -1199,6 +1199,22 @@ _ACOUSTIC_JIT_BOUND = {
 # stage chain; bound = measured x 10.  This is the census half of the
 # wind gates: selector bit-flips touch a handful of cells, a systematic
 # lowering defect touches hundreds.
+# SCOPE NOTE (codex BLOCKER + GLM MAJOR, 2026-08-18, both reviews of
+# the first version of these comments): the selector-flip mechanism is
+# PLAUSIBLE, NOT observed -- the probe compares stage outputs, never the
+# smt5/smt6 predicate itself, and "large discontinuous jump + inventory
+# of discontinuities" names a candidate, not a culprit. Upgrading to
+# CONFIRMED needs the predicate exported from the kernel under BOTH
+# compilations and a forced-flip reproduction (deferred; production
+# debug surface). "Saturates/does not compound" is measured ONLY at
+# C12 / Williamson-2 / DT=450 / CPU / 8 steps -- the growth table is
+# equally consistent with steady per-step re-injection diluted by
+# advection, and NO claim is made for other resolutions, states, decks,
+# backends, or horizons. The census below is a SPARSITY REGRESSION
+# GUARD for this fixture, not a benign-vs-defect classifier: a
+# systematic regression touching 7-60 cells, or the same 6 cells at
+# <10x magnitude, passes it (the magnitude bound gates the latter only
+# beyond its own x10 headroom).
 _FLIP_CELL_BOUND = 60
 _FLIP_CELL_THRESH = 1e-10
 

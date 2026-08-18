@@ -289,8 +289,20 @@ def main() -> int:
           flush=True)
     jit_full = jstep_mod.make_acoustic_step_sixface_jit()(jctx, jstates0,
                                                           DT)
+    _seen_gap = 0.0
     for k in ("delp", "pt", "u", "v"):
-        _census(jit_full[k], ref[k], f"full-chain jit.{k}")
+        _r = _census(jit_full[k], ref[k], f"full-chain jit.{k}")
+        if k in ("u", "v"):
+            _seen_gap = max(_seen_gap, _r)
+    # HARD-ASSERT control 2 (codex MAJOR: the docstring promised this and
+    # the first version only printed). The probe's whole analysis assumes
+    # it reproduces the harvest's ~5.6e-07 wind gap; a broken jit path or
+    # changed backend producing 0.0 or 1e-3 here would invalidate every
+    # downstream section, so it refuses instead of continuing.
+    assert 1e-8 < _seen_gap < 1e-5, (
+        f"instrument control: full-chain jit wind gap {_seen_gap:.3e} is "
+        f"outside the expected [1e-8, 1e-5] band (harvest ~5.6e-07) -- "
+        f"the probe is not measuring the phenomenon it analyses.")
 
     # ================================================================
     # (b) stage bisection -- prefixes jitted whole
