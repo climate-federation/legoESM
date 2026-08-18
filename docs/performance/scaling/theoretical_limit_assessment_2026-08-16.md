@@ -248,9 +248,17 @@ Known blockers and exits:
    NCCL-specific init behaviour under the thin-band halo/pole-window
    graph. PRACTICAL RULE until root-caused in the pad-window code:
    keep bands ≥ ~15 rows (n_lat/n_dev ≥ 15); the preflight should
-   refuse thinner. Root-cause hunt = code reading of the band
-   halo/pole-fold window construction at nrows=12, no cluster time
-   needed to start.
+   refuse thinner. Root-cause status (2026-08-18, job
+   27037112): the compiled program is STRUCTURALLY IDENTICAL at 12-
+   and 15-row bands — 25 collective-permutes + 1 all-reduce, same
+   source-target pairs, and the halo messages are the SAME SIZE in
+   both configs (only the local tile height differs). So the model
+   code is exonerated; the deadlock lives in the GPU runtime stack's
+   communicator initialization and its trigger is UNKNOWN (honest
+   label: cause unknown; every falsifiable candidate we could name is
+   refuted). Mitigation shipped: preflight guard (bands ≥ 15 rows,
+   escape hatch env) + the LL2880 working point. Revisit only on a
+   jaxlib/NCCL upgrade.
 3. Harness: the in-flight 192 arms run **12 timed steps**; the
    campaign's own lesson is 12 steps = 7.7 % spread on identical
    arms, 60 steps = 0.3 %. Fine for "does it run at 192 / rough
