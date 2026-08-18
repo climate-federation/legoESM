@@ -2710,6 +2710,84 @@ def _build_rim_rings(global_mesh, partitions, max_lc, max_le,
     return cell_rim, edge_rim
 
 
+def _build_rim_plan(global_mesh, partitions, cell_rim, rim_width,
+                    stencil_depth):
+    """Per-device compact RIM SUBMESH plan for the interior/rim split.
+
+    For each device the rim cells (owned cells with ``1 <= cell_rim <=
+    rim_width``) become the "owned" block of a synthetic TWO-RANK
+    partition of the global mesh (everything else rank 1), whose
+    ``halo_depth=stencil_depth`` closure is exactly the stencil
+    neighbourhood the unchanged RHS needs; :func:`build_local_mesh`
+    then emits the compact remapped mesh. No new partition logic — the
+    correctness of closure/remap rides on the production builders.
+
+    Returns a list (one entry per device) of dicts:
+
+    * ``sub_mesh`` — compact ``VoronoiMesh`` (rim cells first).
+    * ``n_rim_cells`` / ``n_rim_edges`` — the owned block sizes; rows
+      ``[0:n_rim_cells)`` of a cell tendency computed on ``sub_mesh``
+      are the recompute targets.
+    * ``cell_gather`` / ``edge_gather`` — device-LOCAL row indices
+      (into the post-fill local buffers) supplying each submesh
+      cell/edge, in submesh order.
+    * ``cell_scatter`` / ``edge_scatter`` — device-LOCAL owned row
+      indices receiving rows ``[0:n_rim_*)`` of the submesh tendency.
+
+    Raises if any closure entity falls outside the device's local
+    (owned+halo) region — the caller must hold
+    ``rim_width + stencil_depth <= halo_depth`` of the device
+    partition, and this asserts it entity-by-entity rather than
+    trusting the inequality.
+
+    Setup-time only (numpy); wiring pads/stacks these per-device plans
+    for shard_map separately.
+    """
+    from legoesm.parallel.voronoi_partition import (
+        build_local_mesh, partition_voronoi_mesh,
+    )
+
+    nCells = int(global_mesh.nCells)
+    plans = []
+    for d, part in enumerate(partitions):
+        n_owned = part.n_owned_cells
+        rim_mask = ((cell_rim[d, :n_owned] >= 1)
+                    & (cell_rim[d, :n_owned] <= rim_width))
+        rim_local = np.where(rim_mask)[0]
+        rim_global = np.asarray(part.local_cells)[rim_local]
+
+        synth_owner = np.ones(nCells, dtype=np.int32)
+        synth_owner[rim_global] = 0
+        rim_part = partition_voronoi_mesh(
+            global_mesh, 2, 0, method="sfc", halo_depth=stencil_depth,
+            cell_owner=synth_owner,
+        )
+        sub_mesh = build_local_mesh(global_mesh, rim_part)
+
+        cell_gather = part.cell_g2l[np.asarray(rim_part.local_cells)]
+        edge_gather = part.edge_g2l[np.asarray(rim_part.local_edges)]
+        if (cell_gather < 0).any() or (edge_gather < 0).any():
+            raise ValueError(
+                f"rim plan device {d}: closure leaves the device-local "
+                f"region ({int((cell_gather < 0).sum())} cells, "
+                f"{int((edge_gather < 0).sum())} edges) — rim_width="
+                f"{rim_width} + stencil_depth={stencil_depth} exceeds "
+                f"the partition halo depth")
+
+        n_rim_cells = rim_part.n_owned_cells
+        n_rim_edges = rim_part.n_owned_edges
+        plans.append({
+            "sub_mesh": sub_mesh,
+            "n_rim_cells": int(n_rim_cells),
+            "n_rim_edges": int(n_rim_edges),
+            "cell_gather": cell_gather.astype(np.int64),
+            "edge_gather": edge_gather.astype(np.int64),
+            "cell_scatter": cell_gather[:n_rim_cells].astype(np.int64),
+            "edge_scatter": edge_gather[:n_rim_edges].astype(np.int64),
+        })
+    return plans
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 
