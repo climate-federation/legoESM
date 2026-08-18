@@ -174,6 +174,7 @@ class Data:
         if 'time' in lf.dims:
             lf = lf.isel(time=0, drop=True)
         self.lego = self._lego_clim()
+        self.lego_lf = lf
         self.lego_w = (cell_area(lf.lat.values, lf.lon.values) * lf
                        ).rename('lego_weight')
 
@@ -192,6 +193,7 @@ class Data:
         clm0 = sorted(glob.glob(os.path.join(clm_dir, f'*.h0.{y0}-*.nc')))[0]
         ds0 = xr.open_dataset(clm0)
         clm_lf = ds0['landfrac'].fillna(0.0)
+        self.clm_lf = clm_lf
         self.clm_w = (ds0['area'].fillna(0.0) * 1e6 * clm_lf
                       ).rename('clm_weight')            # km2 -> m2
         self.clm = self._clm_clim().where(clm_lf > 0)
@@ -368,13 +370,17 @@ def fig_lh_gpp(D, outdir):
                              constrained_layout=True)
 
     # -- (a,b) latent-heat maps on native grids, shared colour scale --
-    maps = [(lh_l, D.lego_w,
+    # display-only: hide mostly-ocean coastal fringe cells & tiny islands
+    # (stats/weights are untouched)
+    MAP_LF_MIN = 0.1
+    maps = [(lh_l, D.lego_lf,
              f'legoESM  ({float(wmean(lh_l, D.lego_w)):.1f} W m$^{{-2}}$)'),
-            (lh_c, D.clm_w,
+            (lh_c, D.clm_lf,
              f'CLM5.1-SP  ({float(wmean(lh_c, D.clm_w)):.1f} W m$^{{-2}}$)')]
-    for ax, letter, (da, w, title) in zip(axes[:2], 'ab', maps):
+    for ax, letter, (da, lf, title) in zip(axes[:2], 'ab', maps):
         lon2, lat2 = np.meshgrid(da.lon, da.lat)
-        pm = ax.pcolormesh(lon2, lat2, da.where(w > 0), cmap='Blues',
+        pm = ax.pcolormesh(lon2, lat2, da.where(lf >= MAP_LF_MIN),
+                           cmap='Blues',
                            vmin=0, vmax=120, shading='auto', rasterized=True)
         ax.set_title(title, fontsize=7.5)
         ax.set_ylim(-60, 90)
