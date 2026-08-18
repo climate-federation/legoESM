@@ -347,13 +347,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
     parser.add_argument("--mpas-conservative-tracer-clamp",
-                        action="store_true", default=False,
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="MPAS floors: borrow the clipped negative tracer "
                              "deficit back from the positive cells in the same "
                              "column instead of the mass-CREATING plain "
                              "max(q,0).  The naive clamp invents ~+30 kg/m2/yr "
-                             "of water on a century AMIP run (measured); this "
-                             "cuts that 10.4x.  Off = bit-identical to before.")
+                             "of water on a century AMIP run (measured); the "
+                             "borrow cuts that 10.4x.  ON by default (owner "
+                             "decision 2026-08-16: conserving form always); "
+                             "--no-mpas-conservative-tracer-clamp restores the "
+                             "legacy clamp for bit-comparison runs.")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,

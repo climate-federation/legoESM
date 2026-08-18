@@ -470,3 +470,78 @@ def test_mpi_abort_on_uncaught_success_no_abort():
 
     assert ok() == 42
     assert comm.aborts == []          # clean return -> never aborts
+
+
+# ---- non-finite guard: one poisoned sample must not kill the epoch ----
+
+def test_nonfinite_gradient_sample_is_skipped_not_poisoning():
+    """One sample produces a NaN gradient (the WB classical arm's scene
+    2016-09-01 06Z under XLA fusion, jobs 26929456/26956014): the optimizer
+    update must be SKIPPED for it — parameters unchanged by that sample,
+    later samples still train, epoch mean finite (over the finite samples
+    only). Without the guard this exact sequence poisons the params and
+    every subsequent loss."""
+    w = jnp.array([2.0, 3.0])
+    optimizer = optax.sgd(0.05)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        # x[0] == 0 -> sqrt(0) inside the loss -> NaN gradient, finite loss.
+        return jnp.sum((p * x) ** 2) + jnp.sqrt(jnp.sum(p ** 2) * x[0])
+
+    poisoned = jnp.array([0.0, 0.0])
+    good = jnp.array([1.0, 0.5])
+    params, _, hist = mpi_data_parallel_training_loop(
+        loss, w, opt_state, optimizer, [poisoned, good, good],
+        n_epochs=2, num_processes=1)
+    # Guard held: params finite and trained; epoch mean finite.
+    assert bool(jnp.all(jnp.isfinite(params)))
+    assert all(np.isfinite(h) for h in hist)
+    assert hist[-1] < hist[0]          # the good samples actually trained
+
+
+def test_nonfinite_guard_skips_update_and_returns_nan_loss():
+    """Step-level contract: a non-finite gradient leaves params and opt_state
+    IDENTICAL and returns a NaN loss (the loop's skip marker)."""
+    from legoesm.training.data_parallel import (
+        build_dp_value_and_grad, mpi_data_parallel_train_step,
+    )
+
+    w = jnp.array([1.0, 2.0])
+    optimizer = optax.adam(0.1)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        return jnp.sqrt(jnp.sum(p ** 2) * x[0])   # x[0]=0 -> NaN grad
+
+    vg = build_dp_value_and_grad(loss)
+    p2, o2, l2 = mpi_data_parallel_train_step(
+        vg, w, opt_state, optimizer, jnp.array([0.0, 1.0]), 1)
+    np.testing.assert_array_equal(np.asarray(p2), np.asarray(w))
+    # Optimizer state untouched too (codex: the docstring claims it, so
+    # assert it — a skipped step must not advance moments or the schedule).
+    for a, b in zip(jax.tree.leaves(o2), jax.tree.leaves(opt_state)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    assert float(l2) != float(l2)      # NaN marker
+    # And a FINITE sample still updates.
+    p3, o3, l3 = mpi_data_parallel_train_step(
+        vg, w, opt_state, optimizer, jnp.array([1.0, 1.0]), 1)
+    assert not np.allclose(np.asarray(p3), np.asarray(w))
+    assert np.isfinite(float(l3))
+
+
+def test_systemic_skipping_aborts_loudly():
+    """GLM guard review: a mostly-skipped epoch is systemic breakage, not the
+    per-scene guard's job — the loop must RAISE, never no-op 'train'."""
+    w = jnp.array([1.0, 2.0])
+    optimizer = optax.sgd(0.1)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        return jnp.sqrt(jnp.sum(p ** 2) * x[0])   # x[0]=0 -> NaN grad
+
+    poisoned = jnp.array([0.0, 0.0])
+    with pytest.raises(RuntimeError, match="systemic"):
+        mpi_data_parallel_training_loop(
+            loss, w, opt_state, optimizer, [poisoned] * 4,
+            n_epochs=1, num_processes=1)

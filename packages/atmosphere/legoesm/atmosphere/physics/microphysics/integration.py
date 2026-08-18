@@ -107,6 +107,52 @@ def get_microphysics_fn(config: MicrophysicsConfig):
     return _get_microphysics_fn(config)
 
 
+# --- Droplet-number storage convention (one place, every lane) -------------
+# The dycores advect every tracer with a MASS-MIXING-RATIO operator: the
+# quantity is invariant following a parcel.  A per-VOLUME number density is
+# not — number conservation in a material volume carries a divergence term the
+# operator drops — so a per-volume N_c/N_r advected that way drifts against its
+# own mass, and the diagnosed droplet size q*rho/N goes wrong by the density
+# change along the trajectory.
+#
+# So cloud and rain number are STORED and TRANSPORTED per MASS [1/kg], exactly
+# as ice number always has been, and converted to the per-VOLUME [1/m^3] the
+# microphysics formulas and the radiation effective-radius coupling expect only
+# at the bridge, where rho is already in hand.  Ratios of two per-mass scalars
+# are then transport-invariant, which is the property the size diagnosis needs.
+#
+# The alternative — freezing N_c/N_r in place — was tried and is worse: it
+# leaves the mass moving while the number stays, so the size error is O(1)
+# rather than bounded by the density change.
+_PER_MASS_NUMBER_SPECIES = ("N_c", "N_r")
+
+
+def number_per_mass_to_per_volume(n_per_mass, rho):
+    """Stored [1/kg] -> the [1/m^3] the microphysics formulas expect."""
+    return n_per_mass * rho
+
+
+def number_per_volume_to_per_mass(n_per_volume, rho):
+    """Microphysics [1/m^3] -> the [1/kg] that transports like a mixing ratio.
+
+    EXACT for a tendency, not an approximation.  What the schemes return is a
+    process RATE — activation, collection, evaporation — with no dilution term
+    in it, and the air mass of a parcel does not change, so dividing by rho is
+    the whole conversion.  Writing the chain rule
+    ``d(N/rho)/dt = (dN/dt)/rho - (N/rho^2) drho/dt`` and keeping the second
+    term would DOUBLE-COUNT dilution: that term is what cancels the ``-N div(u)``
+    the material derivative of a per-volume density carries, and the rate does
+    not contain it.  The dycore's mixing-ratio advection carries the density
+    change instead (GLM review, 2026-08-14).
+
+    The residual is ordinary operator splitting — the rate is evaluated at the
+    start-of-step density — worth about half of ``w*dt/H``: ~1% for stratiform
+    ascent at a 1800 s step, and ~15% inside a deep convective core at 300 s,
+    where the answer is a shorter physics step, not a chain-rule term.
+    """
+    return n_per_volume / jnp.maximum(rho, 1.0e-12)
+
+
 def _min_tracer_slots_for_config(scheme_name: str, scheme_config=None) -> int:
     """Minimum tracer slots for a scheme, including opt-in config features."""
     if (scheme_name == "sdm"
@@ -292,8 +338,9 @@ def _make_hydrostatic_microphysics(
             q_i=_get_tracer("q_i"),
             q_s=_get_tracer("q_s"),
             q_g=_get_tracer("q_g"),
-            N_c=_get_tracer("N_c"),
-            N_r=_get_tracer("N_r"),
+            # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
+            N_c=number_per_mass_to_per_volume(_get_tracer("N_c"), rho),
+            N_r=number_per_mass_to_per_volume(_get_tracer("N_r"), rho),
             N_i=_get_tracer("N_i"),
         )
 
@@ -386,8 +433,12 @@ def _make_hydrostatic_microphysics(
         # Units follow MicrophysicsOutput: N_c/N_r are per-VOLUME [1/(m^3 s)]
         # (Seifert-Beheng), N_i is per-MASS [1/(kg s)] (Morrison/Thompson).
         _num_tends = {
-            "N_c": (micro_out.dN_c_dt, "1/(m^3 s)"),
-            "N_r": (micro_out.dN_r_dt, "1/(m^3 s)"),
+            # Converted back to the per-MASS storage convention the dycores
+            # transport (see _PER_MASS_NUMBER_SPECIES).
+            "N_c": (number_per_volume_to_per_mass(micro_out.dN_c_dt, rho),
+                    "1/(kg s)"),
+            "N_r": (number_per_volume_to_per_mass(micro_out.dN_r_dt, rho),
+                    "1/(kg s)"),
             "N_i": (micro_out.dN_i_dt, "1/(kg s)"),
         }
         for _nname, (_ntend, _nunits) in _num_tends.items():
@@ -530,8 +581,8 @@ def _make_nonhydrostatic_microphysics(
             q_i=_get_tracer(3),
             q_s=_get_tracer(4),
             q_g=_get_tracer(5),
-            N_c=_get_tracer(6),
-            N_r=_get_tracer(7),
+            N_c=number_per_mass_to_per_volume(_get_tracer(6), rho_col),
+            N_r=number_per_mass_to_per_volume(_get_tracer(7), rho_col),
             N_i=_get_tracer(8),
         )
 
@@ -563,7 +614,9 @@ def _make_nonhydrostatic_microphysics(
         tend_fields = [
             micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
             micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
-            micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+            number_per_volume_to_per_mass(micro_out.dN_c_dt, rho_col),
+            number_per_volume_to_per_mass(micro_out.dN_r_dt, rho_col),
+            micro_out.dN_i_dt,
         ]
         for idx, field in enumerate(tend_fields):
             if n_tracers > idx:
@@ -741,7 +794,9 @@ def _make_plane_microphysics(
         hydrometeors = HydrometeorState(
             q_c=_get_tracer(1), q_r=_get_tracer(2), q_i=_get_tracer(3),
             q_s=_get_tracer(4), q_g=_get_tracer(5),
-            N_c=_get_tracer(6), N_r=_get_tracer(7), N_i=_get_tracer(8),
+            N_c=number_per_mass_to_per_volume(_get_tracer(6), rho_col),
+            N_r=number_per_mass_to_per_volume(_get_tracer(7), rho_col),
+            N_i=_get_tracer(8),
             # Slot [9] = prognostic snow number ⇒ double-moment snow; absent
             # (≤9 slots) ⇒ None ⇒ single-moment snow (Morrison falls back).
             N_s=(_get_tracer(9) if n_tracers > 9 else None),
@@ -774,7 +829,9 @@ def _make_plane_microphysics(
         tend_fields = [
             micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
             micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
-            micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+            number_per_volume_to_per_mass(micro_out.dN_c_dt, rho_col),
+            number_per_volume_to_per_mass(micro_out.dN_r_dt, rho_col),
+            micro_out.dN_i_dt,
             # Slot [9] = snow-number tendency (double-moment snow); None for
             # single-moment schemes ⇒ skipped below.
             micro_out.dN_s_dt,
@@ -946,7 +1003,9 @@ def _make_mpas_nh_microphysics(
         hydrometeors = HydrometeorState(
             q_c=_get_tracer(1), q_r=_get_tracer(2), q_i=_get_tracer(3),
             q_s=_get_tracer(4), q_g=_get_tracer(5),
-            N_c=_get_tracer(6), N_r=_get_tracer(7), N_i=_get_tracer(8),
+            N_c=number_per_mass_to_per_volume(_get_tracer(6), rho_col),
+            N_r=number_per_mass_to_per_volume(_get_tracer(7), rho_col),
+            N_i=_get_tracer(8),
         )
 
         if is_ml:
@@ -974,7 +1033,9 @@ def _make_mpas_nh_microphysics(
         tend_fields = [
             micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
             micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
-            micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+            number_per_volume_to_per_mass(micro_out.dN_c_dt, rho_col),
+            number_per_volume_to_per_mass(micro_out.dN_r_dt, rho_col),
+            micro_out.dN_i_dt,
         ]
         for idx, field in enumerate(tend_fields):
             if n_tracers > idx:
@@ -1118,8 +1179,9 @@ def _make_spectral_pe_microphysics(
             q_i=_get_tracer("q_i"),
             q_s=_get_tracer("q_s"),
             q_g=_get_tracer("q_g"),
-            N_c=_get_tracer("N_c"),
-            N_r=_get_tracer("N_r"),
+            # stored per MASS, used per VOLUME — see _PER_MASS_NUMBER_SPECIES
+            N_c=number_per_mass_to_per_volume(_get_tracer("N_c"), rho),
+            N_r=number_per_mass_to_per_volume(_get_tracer("N_r"), rho),
             N_i=_get_tracer("N_i"),
         )
 
@@ -1159,7 +1221,11 @@ def _make_spectral_pe_microphysics(
                 if name not in state.tracers:
                     continue
                 template = state.tracers[name]
-                tend_grid = getattr(micro_out, attr).reshape(
+                _tend_col = getattr(micro_out, attr)
+                if name in _PER_MASS_NUMBER_SPECIES:
+                    # Back to the per-MASS storage the dycore transports.
+                    _tend_col = number_per_volume_to_per_mass(_tend_col, rho)
+                tend_grid = _tend_col.reshape(
                     n_lat, n_lon, nlev,
                 )
                 if hasattr(template, "data") and hasattr(template, "replace"):

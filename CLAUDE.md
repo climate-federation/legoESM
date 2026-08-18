@@ -18,6 +18,7 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - ERA5: `era5_to_state.py` lat-lon → grid, Zarr cache.
 - Losses: `training/losses.py` imports `ml/loss.py`. No dup.
 - **MPI AD**: `global_sum_mpi` (allreduce SUM) full VJP. MPI halo: `_sendrecv_vjp` custom_vjp. `fix_mass`/`zero_mean_tendency` flow grads via global reductions. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
+- **NO INERT PARAMETERS EVER (STRICT, user 2026-08-17).** Every leaf of a trainable pytree must carry loss gradient. Mode-inactive params get frozen OUT of the trainable set (`_inactive_keys` pattern), and the first training step gates the rest via `assert_no_inert` (`train_land_params_era5.py`) — a zero-gradient leaf aborts the run. Any new trainer/calibrator adopts both pieces; a param "wired in but off" without being frozen out is a defect.
 
 ## Operating Mode
 - **TERSE BY DEFAULT.** Drop articles/filler/pleasantries/hedging; fragments fine. Report `[thing] [state] [next]`, not prose. No restating what was just done, no feature tours, no explaining a simplification at more length than the code. Numbers/tables over narration. Full prose ONLY when asked for it (report/walkthrough), or for security warnings, irreversible-action confirmations, and multi-step sequences where fragments risk misread. Code/commits/PRs/docstrings: written normally.

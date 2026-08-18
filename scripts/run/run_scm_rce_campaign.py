@@ -1168,7 +1168,7 @@ def _preseed_column_tracers(scm: SingleColumnModel, microphysics_scheme: str) ->
                 data=jnp.zeros_like(template),
                 name=name,
                 dims=DIMS_3D,
-                units="kg/kg" if not name.startswith("N_") else "1",
+                units="kg/kg" if not name.startswith("N_") else "1/kg",
             )
     slots = min_tracer_slots(microphysics_scheme)
     if slots > len(("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")):
@@ -1277,6 +1277,9 @@ def _make_microphysics_precip_diagnostic(cfg: PhysicsConfig, dt: float):
         p_half_col = sigma_coord.pressure_at_half(p_s).reshape(ncol, nlev + 1)
         q_v = _column_tracer(state, "q_v", ncol, nlev, dtype)
         rho = _compute_rho(T_col, p_full_col, q_v)
+        from legoesm.atmosphere.physics.microphysics.integration import (
+            number_per_mass_to_per_volume,
+        )
         dz = _compute_layer_dz(T_col, p_half_col, q_v)
         hydrometeors = HydrometeorState(
             q_c=_column_tracer(state, "q_c", ncol, nlev, dtype),
@@ -1284,8 +1287,12 @@ def _make_microphysics_precip_diagnostic(cfg: PhysicsConfig, dt: float):
             q_i=_column_tracer(state, "q_i", ncol, nlev, dtype),
             q_s=_column_tracer(state, "q_s", ncol, nlev, dtype),
             q_g=_column_tracer(state, "q_g", ncol, nlev, dtype),
-            N_c=_column_tracer(state, "N_c", ncol, nlev, dtype),
-            N_r=_column_tracer(state, "N_r", ncol, nlev, dtype),
+            # Stored per MASS; the scheme wants per VOLUME (production bridge
+            # convention, microphysics/integration.py).
+            N_c=number_per_mass_to_per_volume(
+                _column_tracer(state, "N_c", ncol, nlev, dtype), rho),
+            N_r=number_per_mass_to_per_volume(
+                _column_tracer(state, "N_r", ncol, nlev, dtype), rho),
             N_i=_column_tracer(state, "N_i", ncol, nlev, dtype),
         )
         micro_out = micro_fn(

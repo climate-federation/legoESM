@@ -164,6 +164,9 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
             "(missing the 'spectral_layout' marker)."
         )
 
+    def _early_name(n):
+        return n.decode() if isinstance(n, bytes | np.bytes_) else str(n)
+
     def _load_coeff(arr_in):
         """jnp.asarray with a LOUD x64 guard: complex128 coefficients silently
         downcast to complex64 when JAX x64 is disabled — the spectral transforms
@@ -178,6 +181,26 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
                 "silently downcast the coefficients to complex64."
             )
         return out
+
+    # Refuse an old-convention droplet number BEFORE loading anything.
+    # Droplet number is stored PER MASS [1/kg] since 2026-08-14; an older
+    # checkpoint holds it per VOLUME with nothing else to tell the two apart,
+    # and reloading it as-is scales every droplet count by the air density.
+    # Mirrors the MPAS restart refusal.
+    _early_names = ([_early_name(n) for n in d["tracer_names"]]
+                    if "tracer_names" in keys else [])
+    if any(n in ("N_c", "N_r") for n in _early_names):
+        _stamp = (str(np.asarray(d["number_convention"]).item())
+                  if "number_convention" in keys else None)
+        if _stamp != "per_mass":
+            raise ValueError(
+                "spectral checkpoint carries cloud/rain droplet number "
+                "written under the old PER-VOLUME convention (no "
+                "'number_convention' stamp); the model now stores them "
+                "PER MASS [1/kg]. Re-run from the initial state, or divide "
+                "the stored N_c/N_r by air density and add "
+                "number_convention='per_mass' to the file."
+            )
 
     fields = {}
     for name in _SPECTRAL_COEFF_NAMES:

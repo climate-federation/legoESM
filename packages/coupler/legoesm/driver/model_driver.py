@@ -24,6 +24,7 @@ from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
     energy_consistent_moisture_floor,
+    conservative_positive_clip, is_borrow_eligible_tracer,
 )
 from legoesm.core.tracers import (
     TracerRegistry,
@@ -807,6 +808,33 @@ def _is_mpas_cell_partitioned(drv) -> bool:
             and (getattr(drv, "_mpi_world_size", 1) or 1) > 1)
 
 
+def _validate_number_convention(payload, tracer_names) -> None:
+    """Refuse a restart whose droplet number uses the old per-VOLUME units.
+
+    Cloud and rain number are stored PER MASS [1/kg] since 2026-08-14 so the
+    dycores' mass-mixing-ratio advection is the right operator for them. A file
+    written before that holds [1/m^3]; reloading it as per-mass is wrong by the
+    air density — roughly 1.2 near the surface and 2.5 in the upper
+    troposphere — and nothing else in the file distinguishes the two. Fail
+    loudly rather than continue with silently wrong droplet sizes.
+    """
+    if not any(n in ("N_c", "N_r") for n in tracer_names):
+        return
+    stamp = payload.get("number_convention") if hasattr(payload, "get") else None
+    if stamp is None and "number_convention" in payload:
+        stamp = payload["number_convention"]
+    stamp = None if stamp is None else str(np.asarray(stamp).item())
+    if stamp != "per_mass":
+        raise ValueError(
+            "This restart carries cloud/rain droplet number written under the "
+            "old PER-VOLUME convention (no 'number_convention' stamp); the "
+            "model now stores them PER MASS [1/kg]. Loading it as-is would "
+            "scale droplet number by the air density. Re-run from the initial "
+            "state, or divide the stored N_c/N_r by air density and add "
+            "number_convention='per_mass' to the file."
+        )
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -1043,10 +1071,32 @@ class ModelDriver:
         return {k: self.tracers[k] for k in self._DOUBLE_MOMENT_TRACERS
                 if self.tracers.get(k) is not None}
 
+    def _conserving_floor(self, field, dp=None):
+        """Column-conserving non-negativity for a per-mass field
+        ``(..., nlev)``: clip negatives, rescale the column's positives so
+        the TRUE layer-mass (dp) weighted integral is unchanged (owner
+        decision 2026-08-16: conserving form always — the plain
+        ``max(q, 0)`` invents mass at every overdraw/undershoot, the
+        MPAS-century +30 kg/m2/yr class). dp from ``pressure_at_half`` is
+        hybrid-correct and reduces to ``dsigma * p_s`` on pure sigma (the
+        per-column ``p_s`` cancels in the rescale); non-positive dp (broken
+        hybrid layer over terrain) is zero-weighted rather than divided by —
+        mirrors the MPAS floors stage. Pass a precomputed ``dp`` when
+        flooring several fields against the same ``p_s`` (the double-moment
+        loop) to skip recomputing it per field."""
+        if dp is None:
+            _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+            dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+        fixed, _created = conservative_positive_clip(field, dp, axis=-1)
+        return fixed
+
     def _apply_double_moment_tendencies(self, phys_out, dt) -> None:
         """Integrate the ice/snow/graupel + number tracers one step from the
-        matching ``PhysicsOutput`` tendencies, clipped non-negative. No-op
-        unless the full-moisture registry is active (q_i present)."""
+        matching ``PhysicsOutput`` tendencies, floored non-negative by the
+        column-conserving borrow (every one of these is per-mass and
+        borrow-eligible; a plain clip invented number at x2.2/day compound on
+        century3 until N_i overflowed). No-op unless the full-moisture
+        registry is active (q_i present)."""
         if not (isinstance(self.tracers, dict)
                 and self.tracer_registry.has("q_i")):
             return
@@ -1055,9 +1105,13 @@ class ModelDriver:
             "q_g": phys_out.dq_g_dt, "N_c": phys_out.dN_c_dt,
             "N_r": phys_out.dN_r_dt, "N_i": phys_out.dN_i_dt,
         }
+        _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+        _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
         for k, tend in _upd.items():
             if self.tracers.get(k) is not None:
-                self.tracers[k] = jnp.maximum(self.tracers[k] + dt * tend, 0.0)
+                assert is_borrow_eligible_tracer(k), k
+                self.tracers[k] = self._conserving_floor(
+                    self.tracers[k] + dt * tend, dp=_dp)
 
     def _checkpoint_carry_aux(self) -> dict | None:
         """``self._carry_aux`` augmented with the evolved double-moment tracers
@@ -1074,6 +1128,9 @@ class ModelDriver:
         dm = self._double_moment_step_inputs()
         for k, v in dm.items():
             base[f"dmtr_{k}"] = v
+        if any(k in ("N_c", "N_r") for k in dm):
+            # Same per-mass droplet-number stamp as the MPAS/spectral writers.
+            base["dmtr_number_convention"] = np.asarray("per_mass")
         # Tag the convection carry with its scheme (codex round 8): a
         # scheme change that keeps the carry SHAPE (mass_flux<->edmf
         # both carry (ncol,); the profile-prognostic schemes all carry
@@ -1104,7 +1161,20 @@ class ModelDriver:
         if not (isinstance(self._carry_aux, dict)
                 and isinstance(_tracers, dict)):
             return
-        for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
+        _stamp = self._carry_aux.pop("dmtr_number_convention", None)
+        _keys = [k for k in self._carry_aux if k.startswith("dmtr_")]
+        if any(k in ("dmtr_N_c", "dmtr_N_r") for k in _keys):
+            _stamp = None if _stamp is None else str(np.asarray(_stamp).item())
+            if _stamp != "per_mass":
+                raise ValueError(
+                    "checkpoint carries cloud/rain droplet number written "
+                    "under the old PER-VOLUME convention (no "
+                    "'dmtr_number_convention' stamp); the model now stores "
+                    "them PER MASS [1/kg]. Re-run from the initial state, or "
+                    "divide the stored N_c/N_r by air density and add the "
+                    "stamp."
+                )
+        for key in _keys:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
 
     @staticmethod
@@ -4994,6 +5064,11 @@ class ModelDriver:
             # byte-identical to before.
             if trc_d is not None:
                 _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
+                # Droplet number is stored PER MASS [1/kg] since 2026-08-14.
+                # Stamp it: a file written under the old per-VOLUME convention
+                # reloaded as per-mass is wrong by the air density, silently,
+                # and there is no other way to tell the two apart.
+                _save["number_convention"] = np.asarray("per_mass")
                 for _k in trc_d:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             # Multilayer (Richards) land columns (MPAS port): same namespaced
@@ -5095,6 +5170,8 @@ class ModelDriver:
             )
             if s.tracers is not None:
                 _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                # Same per-mass droplet-number stamp as the MPAS writer above.
+                _save["number_convention"] = np.asarray("per_mass")
                 for _k in s.tracers:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
             # #1310: persist the anchored mass-fixer target.  With
@@ -5664,12 +5741,15 @@ class ModelDriver:
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             if "tracer_names" in d:
                 _names = [str(n) for n in d["tracer_names"]]
+                _validate_number_convention(d, _names)
                 self.state = self.state._replace(tracers={
                     _k: Field(
                         data=(scatter_to_local(
                                   jnp.asarray(d[f"trc_{_k}"]), part, "cell")
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
-                        name=_k, dims=("nCells", "nlev"), units="kg/kg")
+                        name=_k, dims=("nCells", "nlev"),
+                        units=("1/kg" if _k in ("N_c", "N_r", "N_i")
+                               else "kg/kg"))
                     for _k in _names
                 })
             # Multilayer (Richards) land columns (MPAS port): stage the
@@ -13057,9 +13137,11 @@ class ModelDriver:
         if self.config.energy_consistent_moisture_clip:
             self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
         else:
-            self.q_v = jnp.maximum(_qv_raw, 0.0)
-        self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-        self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+            # Conserving form always (owner decision 2026-08-16): the plain
+            # ``max(q, 0)`` invented water at every physics overdraw.
+            self.q_v = self._conserving_floor(_qv_raw)
+        self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+        self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
         self._apply_double_moment_tendencies(phys_out, DT)
 
         if MICROPHYSICS == "none":
@@ -13075,8 +13157,11 @@ class ModelDriver:
                 u=self.state.u.replace(data=self.state.u.data + DT * phys_out.du_dt),
                 v=self.state.v.replace(data=self.state.v.data + DT * phys_out.dv_dt),
             )
-        self.q_v = jnp.maximum(
-            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff), 0.0
+        # Conserving form always (owner decision 2026-08-16): the
+        # hyperdiffusion tail is non-monotone, so its floor is the same
+        # mass-creating clamp class as the physics floors above.
+        self.q_v = self._conserving_floor(
+            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
         )
         self.state = self.state._replace(
             u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
@@ -13207,9 +13292,10 @@ class ModelDriver:
             if self.config.energy_consistent_moisture_clip:
                 self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
             else:
-                self.q_v = jnp.maximum(_qv_raw, 0.0)
-            self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-            self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+                # Conserving form always (owner decision 2026-08-16).
+                self.q_v = self._conserving_floor(_qv_raw)
+            self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+            self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
 
             # Apply ice/number tracer tendencies when full registry is active
             self._apply_double_moment_tendencies(phys_out, DT)
@@ -13247,10 +13333,10 @@ class ModelDriver:
                     self.state.p_s.data, dsigma, self.grid,
                 )
 
-            # Moisture smoothing
-            self.q_v = jnp.maximum(
-                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff),
-                0.0,
+            # Moisture smoothing — conserving floor (owner decision
+            # 2026-08-16), same class as the warmup-lane site.
+            self.q_v = self._conserving_floor(
+                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
             )
 
             # Rayleigh friction

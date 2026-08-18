@@ -236,6 +236,29 @@ Known blockers and exits:
    microbench the 2-D pad body alone @16-64 first (prices fold +
    corner traffic); only then wire the GPU lane. The √-bytes claim
    is unpriced until then.
+2b. **The 192-rank hang RESOLVED to a thin-band trigger (2026-08-18,
+   job 27036060): LL2880@192 (15-row bands) runs clean — 6.74 ms,
+   63.98 GC/s, the lane's best throughput — while LL2304@192 (12-row
+   bands) deadlocks NCCL channel setup on the first call.** Seven
+   candidates refuted along the way (latency-hiding scheduler,
+   fused-halo path, XLA comm-splitting, CUMEM allocator, mcp2p pair,
+   P2P transport, eager connect); rank count refuted by this receipt
+   and by 16-row bands at 144 working. The same 12-row program runs
+   fine on CPU virtual devices, so the comm pattern is legal —
+   NCCL-specific init behaviour under the thin-band halo/pole-window
+   graph. PRACTICAL RULE until root-caused in the pad-window code:
+   keep bands ≥ ~15 rows (n_lat/n_dev ≥ 15); the preflight should
+   refuse thinner. Root-cause status (2026-08-18, job
+   27037112): the compiled program is STRUCTURALLY IDENTICAL at 12-
+   and 15-row bands — 25 collective-permutes + 1 all-reduce, same
+   source-target pairs, and the halo messages are the SAME SIZE in
+   both configs (only the local tile height differs). So the model
+   code is exonerated; the deadlock lives in the GPU runtime stack's
+   communicator initialization and its trigger is UNKNOWN (honest
+   label: cause unknown; every falsifiable candidate we could name is
+   refuted). Mitigation shipped: preflight guard (bands ≥ 15 rows,
+   escape hatch env) + the LL2880 working point. Revisit only on a
+   jaxlib/NCCL upgrade.
 3. Harness: the in-flight 192 arms run **12 timed steps**; the
    campaign's own lesson is 12 steps = 7.7 % spread on identical
    arms, 60 steps = 0.3 %. Fine for "does it run at 192 / rough
@@ -283,6 +306,35 @@ for this panel's measured point.
    (codex r1): the production ocean SPMD wrapper is wholly 1-D
    band-based — no 2-D state/geometry/sharding factory exists. Park
    until the panel-a 2-D microbench prices the pattern.
+
+## What FESOM2's scaling imports to (user question 2026-08-17)
+
+The FESOM2 curve on the figure is the native FORTRAN reference, not a
+JAX result. Its scaling mechanisms map onto levers this assessment
+already carries — ranked by our own receipts:
+
+1. **Exact per-pair message sizes** (FESOM's precomputed exchange
+   lists) → our per-round-MAX padding ships 2.0× the true halo
+   (receipt 26998727); the import is the ragged path after its
+   zero-slice pruning fix. Both MPAS and ocean lanes.
+2. **Node-aware partitioning + rank placement** (hierarchical METIS,
+   intra-node neighbours preferred) → unmeasured here; offline
+   receipt cheap (extend the partition scorer with an intra-node pair
+   fraction).
+3. **Rank-local mesh setup** (no global mesh per rank, ever) → we
+   OOM-patched the symptom (int32 maps); the full import removes the
+   setup wall entirely for >200-rank MPAS.
+4. **Non-blocking overlap of halo exchange with interior compute** →
+   refuted on the NCCL stack for many-round exchanges; becomes viable
+   again exactly when lever 1 collapses the exchange to 1-2
+   collectives.
+5. Their per-op comm cost is intrinsically small (persistent MPI) →
+   our equivalent was the 1.230 ms per-op residual, already cut by
+   the mcp2p env pair (−13..−18 %).
+
+Note the control: our CPU-MPI lanes already scale FESOM-like (lat-lon
+2-D eff 0.83 @512), so the gap is GPU-lane NCCL behaviour, not model
+structure — consistent with every receipt above.
 
 ## What NOT to build (measured refutations, still binding)
 

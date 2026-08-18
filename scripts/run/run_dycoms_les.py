@@ -208,8 +208,13 @@ def build(args, dtype):
     tr = jnp.zeros((ny, nx, nz, args.n_tracers), dtype)
     tr = tr.at[..., 0].set(qv_col[None, None, :])
     tr = tr.at[..., 1].set(qc_col[None, None, :])
-    tr = tr.at[..., 6].set(jnp.where(qc_col > 0.0, _NC_RF01, 0.0)
-                           [None, None, :])
+    # Droplet number is STORED per MASS [1/kg]; the RF01 observation is a
+    # concentration [1/m^3], so divide by the reference density of the layer it
+    # is seeded into.  ``Nc_0`` below stays per volume — that is a scheme
+    # parameter, not a transported tracer.
+    _nc_per_mass = jnp.where(
+        qc_col > 0.0, _NC_RF01 / jnp.asarray(ref.rho_c, dtype), 0.0)
+    tr = tr.at[..., 6].set(_nc_per_mass[None, None, :])
     st = sl.SpectralLESState(
         u=u3, v=v3, w=w3, rhs_u_prev=jnp.zeros_like(u3),
         rhs_v_prev=jnp.zeros_like(v3), rhs_w_prev=jnp.zeros_like(w3),
