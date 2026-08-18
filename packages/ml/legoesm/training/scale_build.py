@@ -437,10 +437,14 @@ def _build_mode_components_spectral(cfg, yml):
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 clubb_top_press=_clubb_top, **_schemes)
-        # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
-        # kwarg, same as in the AIMIP trainer, where prescribed SST enters
-        # through the surface scheme rather than the physics signature.
-        uses_forcing = False
+        # The sample's forcing carries ERA5 skin temperature and the scene's
+        # real calendar.  It used to be dropped here: the surface then sat at
+        # the lowest model level's own air temperature (zero sensible heat
+        # flux by construction) and radiation ran every scene on a
+        # spring-equinox noon sun.  The rollout now anchors the bulk-flux
+        # surface temperature to the prescribed field and advances the real
+        # calendar through the window.
+        uses_forcing = True
         split_rad_interval = _rad_interval
 
     elif cfg.mode == "neural_gcm":
