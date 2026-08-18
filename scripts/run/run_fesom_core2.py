@@ -49,6 +49,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Timestep [s]; 1800 is the published CORE2 setting.")
     p.add_argument("--year", type=int, default=1958,
                    help="JRA55-do forcing year (the Zenodo package ships 1958).")
+    p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
+                   help="Sea-ice cold start: 'fesom' = the C-faithful "
+                        "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
+                        "NEMO's January Ice_initialization.nc (needs "
+                        "--ice-init-file) -- the NEMO-matched choice for a "
+                        "January start (the fesom seed loads the summer SH "
+                        "with ~40% ice whose melt freshens the Antarctic).")
+    p.add_argument("--ice-init-file", default=None,
+                   help="Path to NEMO Ice_initialization.nc (at_i/ht_i/ht_s "
+                        "on eORCA1). Required with --ice-ic nemo.")
     p.add_argument("--forcing", default="jra55",
                    choices=("jra55", "core2_nyf"),
                    help="Atmospheric forcing: 'jra55' = JRA55-do --year (the "
@@ -149,11 +159,24 @@ def main() -> int:
         raise SystemExit("FATAL: mesh has ice-shelf cavity nodes; the "
                          "snapshot writer does not support them")
     state = cold_start_state(mesh, args.ic_dir)
+    if args.ice_ic == "nemo":
+        # January ice climatology instead of the C-faithful a_ice=0.9-where-
+        # SST<0 seed, which loads the SH with ~40% mid-summer ice whose melt
+        # builds a fresh Antarctic cap (measured 2026-08-18). The static
+        # forcing a_ice mask is unchanged (prognostic ice supersedes it).
+        from fesom_jax.nemo_ice_ic import seed_ice_from_nemo
+        state = seed_ice_from_nemo(state, mesh, args.ice_init_file)
+        print(f"[ice-ic] NEMO January climatology from {args.ice_init_file}",
+              flush=True)
+    elif args.ice_ic != "fesom":
+        raise SystemExit(f"unknown --ice-ic {args.ice_ic!r}")
     if np.asarray(state.T).shape[0] != mesh.nod2D:
         raise SystemExit("cold_start_state returned non-node-first tracers")
     sst0 = jnp.asarray(state.T[:, 0])
 
     t0 = time.time()
+    if args.ice_ic == "nemo" and not args.ice_init_file:
+        raise SystemExit("--ice-ic nemo requires --ice-init-file")
     if args.forcing == "core2_nyf":
         if not args.nyf_zarr:
             raise SystemExit("--forcing core2_nyf requires --nyf-zarr")
@@ -182,6 +205,7 @@ def main() -> int:
                                 sys.modules["fesom_jax"].__file__).parent)},
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
                    "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
+                   "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
