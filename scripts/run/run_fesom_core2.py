@@ -56,6 +56,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) boundary "
                         "value (fesom-jax cb389c7) -- the first ORCA1-card "
                         "branch for the three-grid convergence.")
+    p.add_argument("--tke-mxl0-anchor", default="off", choices=("on", "off"),
+                   help="NEMO ln_mxl0 surface mixing-length anchor (ORCA1 "
+                        "sets .true.; NEMO pairs it with the Dirichlet BC — "
+                        "running dirichlet without it is a half-port).")
     p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
                    help="Sea-ice cold start: 'fesom' = the C-faithful "
                         "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
@@ -214,6 +218,7 @@ def main() -> int:
                    "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
                    "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
                    "tke_surface_bc": args.tke_surface_bc,
+                   "tke_mxl0_anchor": args.tke_mxl0_anchor,
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
@@ -235,7 +240,9 @@ def main() -> int:
     # with is_first_step=False -- exactly integrate()'s own internal split
     # (integrate.py:153-165), just re-entered per chunk so only one day of
     # forcing is resident.
-    _tke_cfg = TkeConfig(use_dirichlet=(args.tke_surface_bc == "dirichlet"))
+    _tke_cfg = TkeConfig(
+        use_dirichlet=(args.tke_surface_bc == "dirichlet"),
+        use_mxl0_anchor=(args.tke_mxl0_anchor == "on"))
     cfgs = dict(ale_cfg=AleConfig(), tke_cfg=_tke_cfg, gm_cfg=GMConfig(),
                 ice_cfg=IceConfig(whichEVP=1))
 
