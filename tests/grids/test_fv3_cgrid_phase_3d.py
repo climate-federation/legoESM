@@ -1010,11 +1010,17 @@ def test_cgrid_nh_pressure_phase_3d_jit_matches_eager(jctx_topo,
     eager = jphase.cgrid_nh_pressure_phase_3d(*args, **kw)
     fast = fn(*args, **kw)
     for name in eager:
-        # MEASURED (job 9425294 sweep): worst ws3 1.625e-09 -- ws = (zs - gz_bot)/dt is a
-        # difference of nearly equal terms, so FMA contraction is amplified
-        # by the cancellation (uc/vc <= 6.0e-14, others <= 2.2e-15); bound =
-        # measured x 10 = 1.7e-08.  Named in the sweep report: the only
-        # cgrid gate measured above 1e-9.
+        # MEASURED (job 9425294 sweep): worst ws3 1.625e-09, 265
+        # cells, max|diff| 1.137e-14 (uc/vc <= 6.0e-14, others <=
+        # 2.2e-15); bound = measured x 10 = 1.7e-08. The only cgrid
+        # gate above 1e-9. UNEXPLAINED (codex MAJOR: the first version
+        # of this comment presented a mechanism as established).
+        # PLAUSIBLE mechanism only: ws = (zs - gz_bot)/dt is a
+        # difference of nearly equal terms, so FMA contraction under
+        # jit would be amplified by the cancellation -- but no stage
+        # split or contraction-control experiment has been run, and a
+        # reader picking this up starts from that measurement, not from
+        # a conclusion.
         _cmp(fast[name], eager[name], f"jit-vs-eager nh.{name}", 1.7e-8)
 
 

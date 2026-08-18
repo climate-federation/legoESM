@@ -225,9 +225,14 @@ def _cmp(got, ref, name, tol):
 
     ok = np.isfinite(a) & ~sa
     if not ok.any():
-        # every cell is a sentinel or a tripwire: the two mask checks
-        # above ARE the whole gate, and they were exact.
-        return 0.0
+        # every cell is a sentinel or a tripwire. The mask checks above
+        # were exact -- but a comparison with NO physical cell must not
+        # read as "0.0 measured" (codex MAJOR: it would enter the
+        # harvest as exact agreement while certifying nothing). Loud in
+        # both modes.
+        raise AssertionError(
+            f"{name}: no physical cells to compare -- every cell is a "
+            f"sentinel/tripwire; the fixture is vacuous for this gate")
     scale = max(float(np.abs(b[ok]).max()), 1e-30)
     rel = float(np.abs(a[ok] - b[ok]).max()) / scale
     # MEASUREMENT MODE (LEGOESM_FV3_TOL_MEASURE=1): print and skip ONLY
@@ -1188,8 +1193,9 @@ def test_jit_gap_localiser_stage_chain(jctx, jstates0):
     two localisers name the kernel.  If it already shows here, the tail
     is exonerated and the SW chain is the subject.
 
-    Either outcome is a result; the bound is provisional so the run
-    PRINTS the number in both cases.
+    Either outcome is a result; the bound is _ACOUSTIC_JIT_BOUND (the
+    sweep's measured x 10, job 9425294 -- no longer provisional) and
+    the run PRINTS the number in both cases.
     """
     eager = jstep_mod.acoustic_step_sixface(jctx, jstates0, DT)
     fn = jstep_mod.make_acoustic_step_sixface_jit()

@@ -80,6 +80,14 @@ def gate_scalar(name, measured, tol, quantity="rel"):
     return measured
 
 
+# A smallest-passing check_grads tolerance above this is a gradient
+# DEFECT finding, never a bound candidate; see gated_check_grads. 1e-3
+# sits an order above the worst honest FD-vs-AD gap measured on a
+# conditioning-limited group (2.1e-4, nh_core job 9425294) and well
+# below a plainly wrong Jacobian (O(1)).
+_GRAD_DEFECT_CAP = 1.0e-3
+
+
 def gated_check_grads(name, f, args, order, modes=("fwd", "rev"),
                       eps=None, atol=None, rtol=None):
     """``jax.test_util.check_grads`` with the campaign's measure mode.
@@ -107,6 +115,18 @@ def gated_check_grads(name, f, args, order, modes=("fwd", "rev"),
               f"(bound {float(atol):.3e}, quantity smallest-passing "
               f"check_grads atol=rtol, order={order}, eps={eps})",
               flush=True)
+        # LAUNDERING CAP (codex MINOR, taken): a smallest-passing
+        # tolerance above _GRAD_DEFECT_CAP is a gradient FINDING, not
+        # a bound candidate -- the mechanical x10 protocol must not be
+        # able to bless it. The value is printed first (the census
+        # needs it), then the sweep is stopped loudly.
+        if shown > _GRAD_DEFECT_CAP:
+            raise AssertionError(
+                f"{name}: smallest-passing check_grads tolerance "
+                f"{shown:.3e} exceeds _GRAD_DEFECT_CAP="
+                f"{_GRAD_DEFECT_CAP:g} -- a derivative this far from "
+                f"its FD is a defect to investigate, not a bound to "
+                f"write.")
         return
     check_grads(f, args, order=order, modes=modes, eps=eps, atol=atol,
                 rtol=rtol)

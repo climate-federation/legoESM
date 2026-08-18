@@ -259,9 +259,12 @@ def _cmp(got, ref, name, tol):
 
     ok = np.isfinite(a) & ~fa
     if not ok.any():
-        # every cell is a fill or a tripwire: the two mask checks above
-        # ARE the whole gate, and they were exact.
-        return 0.0, 0
+        # every cell is a fill or a tripwire. The mask checks above were
+        # exact -- but a comparison with NO physical cell must not read
+        # as "0.0 measured" (codex MAJOR). Loud in both modes.
+        raise AssertionError(
+            f"{name}: no physical cells to compare -- every cell is a "
+            f"fill/tripwire; the fixture is vacuous for this gate")
     diff = np.abs(a[ok] - b[ok])
     scale = float(np.median(np.abs(b[ok])))
     if not (scale > 0.0):

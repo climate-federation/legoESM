@@ -957,9 +957,13 @@ def test_xppm_check_grads_single_cell(order, iord, smooth):
     # MEASURED (job 9425294 sweep): worst smallest-passing check_grads
     # atol=rtol is 1e-10 (iord=8, order=2); bound = one decade up =
     # 1e-9.  [class: smooth-region FD, O(1) dynamic range]
+    # (codex BLOCKER: this call still carried atol=rtol=1e-5 after the
+    # comment above advertised 1e-9 -- a gradient regression of four
+    # orders would have passed. The executable bound now IS the
+    # advertised bound.)
     gated_check_grads(f"xppm check_grads iord={iord} order={order}", f,
                       (jnp.asarray(0.0),), order=order, modes=("fwd", "rev"),
-                      eps=1e-3, atol=1e-5, rtol=1e-5)
+                      eps=1e-3, atol=1e-9, rtol=1e-9)
 
 
 # =====================================================================
