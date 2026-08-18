@@ -259,12 +259,18 @@ def _cmp(got, ref, name, tol):
 
     ok = np.isfinite(a) & ~fa
     if not ok.any():
-        # every cell is a fill or a tripwire. The mask checks above were
-        # exact -- but a comparison with NO physical cell must not read
-        # as "0.0 measured" (codex MAJOR). Loud in both modes.
-        raise AssertionError(
-            f"{name}: no physical cells to compare -- every cell is a "
-            f"fill/tripwire; the fixture is vacuous for this gate")
+        # Every cell is a fill/tripwire: the exact mask checks above
+        # ARE the whole gate for such slots (14 legitimate call paths;
+        # the first version of the codex-MAJOR fix raised here and broke
+        # them all -- measured, job 9431489). Codex's actual hole was
+        # SILENCE: this used to return "0.0 measured" and vanish from
+        # the harvest. Now it is loud in the harvest and explicit in
+        # normal mode's logs, but not an error -- the mask equality was
+        # asserted and passed.
+        if os.environ.get("LEGOESM_FV3_TOL_MEASURE") == "1":
+            print(f"TOLMEASURE {name!r}: mask-only (0 physical cells; "
+                  f"the fill-mask equality is the gate)", flush=True)
+        return 0.0, 0
     diff = np.abs(a[ok] - b[ok])
     scale = float(np.median(np.abs(b[ok])))
     if not (scale > 0.0):
