@@ -76,6 +76,13 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  # #1464: the learned arm here has NO surface stress and cannot be given one.
+  # This config runs the lat-lon training core, where the learned arm is built
+  # on a different path that does not read surface_drag at all — setting the
+  # flag would be a no-op that still perturbs the stored seconds-per-step
+  # baselines. Marked rather than silently left: any neural-versus-classical
+  # number from this config is confounded by the missing momentum sink.
+  surface_drag_confounded: true
   nn_hidden: 256
   nn_layers: 4
 sfno:
