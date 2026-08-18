@@ -71,7 +71,7 @@ rc=0
 
 NODES=16; GPN=4; NDEV=$((NODES * GPN))
 BASE_XLA="--xla_gpu_shard_autotuning=false"
-MH="--xla_gpu_unsupported_enable_ragged_all_to_all_multi_host_decomposer=true"
+# MH decomposer flag REFUTED 27039649: hangs compile at 8 ranks/2 nodes.
 OS="--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=true"
 
 run_arm () {  # tag ragged extra_xla_flags
@@ -94,15 +94,20 @@ run_arm () {  # tag ragged extra_xla_flags
   sleep 15
 }
 
-# GPU PARITY GATE first (cheap, 2 nodes, s6@8 = multi-host): wide+ragged
-# combined path — and the MH/OS decomposer flags — must reproduce the serial
-# reference before any timing arm is trusted (codex: the combined
-# wide+ragged path had no parity coverage; the historical ragged parity
-# gate 26821453 was narrow-halo).
-echo "=== parity gate: s6@8 wide=1 ragged=1 MH+OS ==="
+# GPU PARITY GATE first (cheap, 2 nodes, s6@8 = multi-host), NARROW mode.
+# Why narrow (jobs 27039649 + 27040145): the bench parity tolerances are
+# the EXACT-exchange floor (u x64 1e-5); the wide path is only
+# physically-equivalent (documented outer-ring recompute, band 1e-2 —
+# test_mpas_wide_halo), so wide configs fail that gate BY CONTRACT
+# (u 2.66e-3 at s6@8, ppermute and ragged IDENTICAL — the ragged
+# machinery moves the same rows). Narrow ragged multi-host is the real
+# correctness gap and the exact tolerances legitimately apply to it.
+# The OS flag is included (it compiled+ran in 27039649 arm c); the MH
+# decomposer flag HANGS compile (arms b/d) and is excluded everywhere.
+echo "=== parity gate: s6@8 wide=0 ragged=1 OS ==="
 env -u NCCL_MIN_NCHANNELS -u NCCL_MAX_NCHANNELS -u NCCL_P2P_NET_CHUNKSIZE \
-    XLA_FLAGS="$BASE_XLA $MH $OS" \
-    LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=1 JAX_ENABLE_X64=0 \
+    XLA_FLAGS="$BASE_XLA $OS" \
+    LEGOESM_MPAS_WIDE_HALO=0 LEGOESM_MPAS_RAGGED_HALO=1 JAX_ENABLE_X64=0 \
   timeout 900 srun --export=ALL --nodes=2 --ntasks=8 --ntasks-per-node=4 \
     --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
@@ -110,15 +115,13 @@ env -u NCCL_MIN_NCHANNELS -u NCCL_MAX_NCHANNELS -u NCCL_P2P_NET_CHUNKSIZE \
     --steps 4 --warmup 1 --lloyd 0 --partition-method sfc \
     --halo-strategy ppermute --parity-gate \
     --out "$OUTDIR/parity_s6np8.jsonl" \
-  || { echo "WIDE+RAGGED PARITY GATE FAILED — timing arms not run"; exit 5; }
+  || { echo "NARROW RAGGED PARITY GATE FAILED — timing arms not run"; exit 5; }
 
 # Node-ramp warm-up arm, discarded (campaign lesson: lost 3 runs to ramp).
 run_arm warmup_discard 0
 run_arm col_a 0
 run_arm rag_plain 1
-run_arm rag_mh 1 "$MH"
 run_arm rag_os 1 "$OS"
-run_arm rag_mh_os 1 "$MH $OS"
 run_arm col_b 0
 
 echo "=== RESULTS ==="
@@ -127,8 +130,7 @@ set +e
 import json, math, sys, pathlib
 out = pathlib.Path(sys.argv[1])
 WANT = {"col_a": "ppermute", "rag_plain": "ppermute_ragged",
-        "rag_mh": "ppermute_ragged", "rag_os": "ppermute_ragged",
-        "rag_mh_os": "ppermute_ragged", "col_b": "ppermute"}
+        "rag_os": "ppermute_ragged", "col_b": "ppermute"}
 t = {}
 bad = False
 for tag, eff in WANT.items():
@@ -155,7 +157,7 @@ if bad or len(t) != len(WANT):
 ctrl = 0.5 * (t["col_a"] + t["col_b"])
 spread = abs(t["col_a"] - t["col_b"]) / ctrl
 print(f"control mean {ctrl:.3f} ms, A/A2 spread {100*spread:.1f}%")
-for tag in ("rag_plain", "rag_mh", "rag_os", "rag_mh_os"):
+for tag in ("rag_plain", "rag_os"):
     ratio = t[tag] / ctrl
     verdict = ("INCONCLUSIVE (within control spread)"
                if abs(ratio - 1.0) <= 2 * spread else

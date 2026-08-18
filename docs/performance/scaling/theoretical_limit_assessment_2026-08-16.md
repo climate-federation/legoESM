@@ -160,6 +160,21 @@ Ranked levers:
    recorded) and/or padding size-classes instead of one global max;
    (iii) **~0.6 ms masking/machinery** — HLO census of the
    no-staging arm (single-node, cheap) before any lever is named.
+2a. **2026-08-18 receipts (jobs 27039649 + 27040145), read before
+   touching the ragged/wide levers:**
+   (i) the WIDE-halo step is only PHYSICALLY equivalent to the exact
+   step (documented outer-ring recompute, band 1e-2 — its unit test),
+   so the bench parity gate (exact-exchange tolerances, u x64 1e-5)
+   fails wide configs BY CONTRACT (u 2.66e-3 at s6@8, x64-confirmed,
+   narrow clean at 1e-9). Not a regression; do not parity-gate wide
+   arms with exact tolerances.
+   (ii) ragged and coloured ppermute produce IDENTICAL fields under
+   wide at s6@8 — the ragged machinery moves the same rows multi-node;
+   its correctness gap is closed by a NARROW multi-host parity gate.
+   (iii) XLA's multi-host ragged decomposer flag HANGS compile at 2
+   nodes (arms b/d) — REFUTED as a lever on this jaxlib; the one-shot
+   kernel flag compiles and runs (arm c) and stays on the ladder
+   (GLM predicts inert cross-node; the ladder decides).
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
