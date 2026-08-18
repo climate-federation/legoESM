@@ -10,7 +10,7 @@ CTSM5.1-dev land-only simulation driven by the same CRU-JRA forcing
                                  global total) with each obs product as its
                                  own line
 * ``fig_lmip_seasonal_biome`` — biome-mean seasonal cycles of latent heat and
-                                 GPP (model IQR shading across cells; one
+                                 GPP (model area-weighted IQR shading; one
                                  line per obs product)
 
 NO regridding anywhere: every dataset (legoESM 2 deg, CLM f19, obs 0.5 deg)
@@ -432,7 +432,8 @@ def fig_lh_gpp(D, outdir):
 
 def fig_seasonal_biome(D, outdir):
     """Biome-mean seasonal cycles of LH and GPP for 4 forest/woody biomes.
-    Models with IQR shading across cells; one line per obs product.  Biome
+    Models with area-weighted IQR shading across cells; one line per obs
+    product.  Biome
     masks are nearest-sampled onto each dataset's native grid."""
     import matplotlib.lines as mlines
     import matplotlib.pyplot as plt
@@ -462,14 +463,16 @@ def fig_seasonal_biome(D, outdir):
                 line = wmean(oda.where(m), ow.where(m, 0.0))
                 col, ls = OBS_STYLE[p]
                 ax.plot(mon, line, color=col, ls=ls, lw=0.9)
-            # models: line + IQR shading across cells
+            # models: line + area-weighted IQR shading across cells (same
+            # weighting as the mean, so the band always brackets the line)
             for da, w, bm, col, ls in [
                     (D.lego[var], D.lego_w, bm_lego, C_LEGO, LS_LEGO),
                     (D.clm[var], D.clm_w, bm_clm, C_CLM, LS_CLM)]:
                 m = bm == i
                 sub = da.where(m & (w > 0))
                 line = wmean(sub, w.where(m, 0.0))
-                q = sub.quantile([0.25, 0.75], dim=('lat', 'lon'))
+                q = sub.weighted(w.where(m, 0.0).fillna(0)).quantile(
+                    [0.25, 0.75], dim=('lat', 'lon'))
                 ax.fill_between(mon, q.sel(quantile=0.25),
                                 q.sel(quantile=0.75), color=col,
                                 alpha=0.18, lw=0)
@@ -492,7 +495,8 @@ def fig_seasonal_biome(D, outdir):
     fig.legend(handles=handles, loc='lower center', ncol=4, frameon=False,
                bbox_to_anchor=(0.5, -0.05))
     fig.suptitle(f'Latent heat & GPP seasonality by biome ({D.y0}-{D.y1}; '
-                 'shading = model IQR across cells)', fontsize=7.5)
+                 'shading = model area-weighted IQR across cells)',
+                 fontsize=7.5)
     savefig(fig, outdir, 'fig_lmip_seasonal_biome')
 
 
