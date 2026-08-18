@@ -216,7 +216,19 @@ def main() -> int:
 
     _scan_day_jit = jax.jit(_scan_day)
     n_steps = n_days * steps_per_day
-    all_dates = surface_forcing.dates_for_steps(args.year, args.dt, n_steps)
+    # core2_nyf is a perpetual 365-day climatology: generate the calendar in a
+    # fixed NON-LEAP year so no Feb-29 is ever injected into the cycle (codex
+    # 9431498 HIGH -- a 1960 leap day would shift the atmospheric season by a
+    # day and desynchronise the SSS/chl month), and refuse runs longer than
+    # one cycle until a true no-leap generator exists.
+    if args.forcing == "core2_nyf":
+        if n_days > 365:
+            raise SystemExit("--forcing core2_nyf supports <= 365 days per "
+                             "run (perpetual-year calendar); split the run.")
+        _date_year = 1959                     # any non-leap year
+    else:
+        _date_year = args.year
+    all_dates = surface_forcing.dates_for_steps(_date_year, args.dt, n_steps)
     t_start = time.time()
     wetmask = np.asarray(mesh.node_layer_mask[:, 0]) > 0
     for day in range(1, n_days + 1):
