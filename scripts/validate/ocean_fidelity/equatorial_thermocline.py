@@ -89,6 +89,19 @@ def main() -> int:
                          "`mass_flux_w` is a VELOCITY [m/s], so one side has "
                          "to be divided by the cell area e1t*e2t before they "
                          "are the same quantity.")
+    ap.add_argument("--nemo-w-var", default="wocetr_eff",
+                    choices=("wocetr_eff", "wo"),
+                    help="which NEMO vertical field the wfile carries. "
+                         "`wocetr_eff` is a TRANSPORT [m3/s] (hourly trd1h_T; "
+                         "needs --mesh-mask for the area divide). `wo` is a "
+                         "VELOCITY [m/s] (the 5-day grid_W files) and is "
+                         "compared directly.")
+    ap.add_argument("--nemo-w-recs", default=None,
+                    help="record selection in the wfile, `K` or `A:B` "
+                         "(python slice, stop-exclusive). Default: all "
+                         "records, averaged. Use this to MATCH the window of "
+                         "the snapshot (e.g. `17:18` = days 86-90 of a 5-day "
+                         "file against a day-90 snapshot).")
     ap.add_argument("--w-depth-m", type=float, default=50.0,
                     help="depth at which the equatorial vertical velocity is "
                          "compared. 50 m sits inside the upwelling core and "
@@ -199,7 +212,7 @@ def main() -> int:
           f"[tilt] ours {tl:+.1f} m, NEMO {tn:+.1f} m")
 
     if a.nemo_wfile:
-        if not a.mesh_mask:
+        if a.nemo_w_var == "wocetr_eff" and not a.mesh_mask:
             raise SystemExit("--nemo-wfile requires --mesh-mask: wocetr_eff is "
                              "m3/s and our mass_flux_w is m/s, and without the "
                              "cell area the two are not the same quantity.")
@@ -253,31 +266,48 @@ def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
     ds = nc.Dataset(a.nemo_wfile)
     try:
         wn = np.ma.filled(np.ma.masked_invalid(
-            ds.variables["wocetr_eff"][:]), np.nan).astype(np.float64)
+            ds.variables[a.nemo_w_var][:]), np.nan).astype(np.float64)
         zw = np.asarray(ds.variables["depthw"][:], dtype=np.float64)
-        nav_lat = np.asarray(ds.variables["nav_lat_grid_T"][:])
-        nav_lon = np.asarray(ds.variables["nav_lon_grid_T"][:])
+        # trd1h_T names its coords nav_lat_grid_T; the 5-day grid_W nav_lat.
+        latname = ("nav_lat_grid_T" if "nav_lat_grid_T" in ds.variables
+                   else "nav_lat")
+        nav_lat = np.asarray(ds.variables[latname][:])
+        nav_lon = np.asarray(ds.variables[latname.replace("lat", "lon")][:])
     finally:
         ds.close()
+    if a.nemo_w_recs is not None:
+        if ":" in a.nemo_w_recs:
+            lo, hi = (int(x) for x in a.nemo_w_recs.split(":"))
+            wn = wn[lo:hi]
+        else:
+            wn = wn[int(a.nemo_w_recs):int(a.nemo_w_recs) + 1]
+        if wn.shape[0] == 0:
+            raise SystemExit(f"--nemo-w-recs {a.nemo_w_recs} selects no "
+                             "records -- refusing an empty mean.")
     n_rec = wn.shape[0]
-    wn = np.nanmean(wn, axis=0)                      # 24-hour mean
+    wn = np.nanmean(wn, axis=0)
     kn = int(np.argmin(np.abs(zw - a.w_depth_m)))
 
-    dsm = nc.Dataset(a.mesh_mask)
-    try:
-        e1t = np.asarray(dsm.variables["e1t"][:], dtype=np.float64).squeeze()
-        e2t = np.asarray(dsm.variables["e2t"][:], dtype=np.float64).squeeze()
-    finally:
-        dsm.close()
-    # wocetr_eff is written on the (331,360) inner frame; the mesh_mask is the
-    # full (332,362). Slice with the SAME native window the rest of this
-    # campaign uses rather than guessing an offset here.
-    from global_tracer_content import _NATIVE_J, _NATIVE_I
-    area = (e1t * e2t)[_NATIVE_J, _NATIVE_I]
-    if area.shape != wn.shape[1:]:
-        raise SystemExit(f"area {area.shape} vs wocetr_eff {wn.shape[1:]} -- "
-                         "frames do not match; do not divide.")
-    wn_ms = wn[kn] / area                            # m3/s -> m/s
+    if a.nemo_w_var == "wocetr_eff":
+        dsm = nc.Dataset(a.mesh_mask)
+        try:
+            e1t = np.asarray(dsm.variables["e1t"][:],
+                             dtype=np.float64).squeeze()
+            e2t = np.asarray(dsm.variables["e2t"][:],
+                             dtype=np.float64).squeeze()
+        finally:
+            dsm.close()
+        # wocetr_eff is written on the (331,360) inner frame; the mesh_mask is
+        # the full (332,362). Slice with the SAME native window the rest of
+        # this campaign uses rather than guessing an offset here.
+        from global_tracer_content import _NATIVE_J, _NATIVE_I
+        area = (e1t * e2t)[_NATIVE_J, _NATIVE_I]
+        if area.shape != wn.shape[1:]:
+            raise SystemExit(f"area {area.shape} vs wocetr_eff {wn.shape[1:]}"
+                             " -- frames do not match; do not divide.")
+        wn_ms = wn[kn] / area                        # m3/s -> m/s
+    else:
+        wn_ms = wn[kn]                               # wo is already m/s
 
     lm = np.isfinite(np.asarray(L["mask"], dtype=np.float64))
     ours, _ = regrid(w_l[..., kl], L["lat"], L["lon"],
@@ -291,8 +321,10 @@ def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
     print()
     print(f"Equatorial vertical velocity at {z_if[kl]:.1f} m (ours) / "
           f"{zw[kn]:.1f} m (NEMO), band mean, m/s x 1e6.")
-    print(f"  NEMO side is a {n_rec}-record mean of wocetr_eff [m3/s] divided "
-          f"by e1t*e2t; ours is mass_flux_w [m/s] from the snapshot.")
+    src = ("wocetr_eff [m3/s] divided by e1t*e2t"
+           if a.nemo_w_var == "wocetr_eff" else "wo [m/s]")
+    print(f"  NEMO side is a {n_rec}-record mean of {src}; ours is "
+          f"mass_flux_w [m/s] from the snapshot (instantaneous).")
     rows = np.nonzero(band)[0]
     box = (tgt_lon >= 180.0) & (tgt_lon <= 280.0)    # 180-80W, the cold tongue
     bo = np.nanmean(ours[np.ix_(rows, np.nonzero(box)[0])])
@@ -314,9 +346,9 @@ def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
               "convention before reading anything into the magnitude.")
     else:
         print(f"[upwelling] ours / NEMO = {bo / bt:.2f} in the 180-80W box. "
-              "Read only a LARGE departure from 1: the two sides are at "
-              "different times (instantaneous snapshot vs 24 h mean at the end "
-              "of NEMO's first year), which is worth more than 10-20%.")
+              "Read only a LARGE departure from 1: ours is an instantaneous "
+              "snapshot against a NEMO time mean, which is worth more than "
+              "10-20%.")
 
 
 if __name__ == "__main__":
