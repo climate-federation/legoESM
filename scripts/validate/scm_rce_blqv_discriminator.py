@@ -131,15 +131,23 @@ def main(argv: list[str] | None = None) -> int:
         hard_saturation_adjustment=True)
     hb_base, _st2 = camp.apply_subsidence_solve_override(
         hb_base, "implicit_flux", category="convection")
+    # Each arm is (config, surface_wind_m_s or None for the default 5.0).
+    # The wind arms answer the boundary-condition question directly: SAM's
+    # surface fluxes are driven by resolved gusts (no imposed mean wind), and
+    # our fixed 5 m/s is the surrogate — wind2/wind8 bracket it so the
+    # sensitivity of the equilibrium surface state to that choice is MEASURED.
     arm_cfgs = {
-        "control": base,
-        "entrainment": _with_louis_override(
+        "control": (base, None),
+        "entrainment": (_with_louis_override(
             base, cloudtop_entrainment_efficiency=args.entrainment_efficiency),
-        "coare3": _with_louis_override(base, bulk_scheme="coare3"),
-        "hb": hb_base,
+            None),
+        "coare3": (_with_louis_override(base, bulk_scheme="coare3"), None),
+        "hb": (hb_base, None),
         # The downdraft pair: emanuel without and with the ported shaft.
-        "emanuel_ctl": dd_base,
-        "downdraft": dd_cfg,
+        "emanuel_ctl": (dd_base, None),
+        "downdraft": (dd_cfg, None),
+        "wind2": (base, 2.0),
+        "wind8": (base, 8.0),
     }
 
     results = {}
@@ -153,9 +161,11 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise SystemExit(f"unknown arms {unknown}; known={sorted(arm_cfgs)}")
     for arm in _arm_list:
-        cfg = arm_cfgs[arm]
+        cfg, wind = arm_cfgs[arm]
+        wind_kw = {} if wind is None else {"surface_wind_m_s": wind}
         run = camp.run_cached(
             cache, cfg, ref, label=f"blqv:{arm}", days=args.days, dt=args.dt,
+            **wind_kw,
             analysis_days=args.analysis_days, require_equilibrium=False,
             require_realism=False, equil_T_tol_K=camp.EQUIL_T_TOL_K,
             equil_qv_tol=camp.EQUIL_QV_TOL,
