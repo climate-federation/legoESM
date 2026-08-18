@@ -259,6 +259,17 @@ Ranked levers:
    STATUS: spec complete, build NOT started — this is the next major
    work item; est. multi-session. The rim ring builder + tests are
    committed (65eaea84d).
+   BUILD ROUTE (2026-08-18, reuse discovery): the compact rim submesh
+   needs NO new partition logic — feed the existing partition builder a
+   synthetic two-rank ownership (device d's rim cells owned by rank 0,
+   everything else rank 1, halo_depth = RHS stencil radius) and its
+   closure IS the rim closure; `build_local_mesh` then emits the
+   remapped compact mesh the unchanged RHS runs on (external refs -1,
+   already masked by the TRiSK operators). Remaining new code: the
+   static gather map (device-local buffer -> submesh order), the rim
+   scatter of the four tendency channels, per-device padding to the max
+   rim size, and the poison-verified stencil width. Phase 1 = builder +
+   CPU test (operator on submesh == operator on full mesh at rim rows).
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
