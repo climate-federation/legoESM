@@ -58,12 +58,12 @@ from legoesm.land.canopy.radiative_transfer import (                 # noqa: E40
     split_sw_components,
     canopy_shortwave_rt,
     _APAR_CONVERSION,
-    PAR_FRACTION, NIR_FRACTION, UV_FRACTION,
+    _PAR_FRACTION, _NIR_FRACTION, _UV_FRACTION,
     _ERBS_KT_LOW, _ERBS_KT_HIGH, _ERBS_LOW_SLOPE,
     _ERBS_MID_C0, _ERBS_MID_C1, _ERBS_MID_C2, _ERBS_MID_C3, _ERBS_MID_C4,
     _ERBS_FD_HIGH,
     _SIGMA_PAR, _SIGMA_NIR, _RHO_PAR_SOIL, _RHO_NIR_SOIL,
-    _KPB_PAR, _KD_PAR, _KD_NIR_COEF, RHO_UV, _KB_BEAM,
+    _KPB_PAR, _KD_PAR, _KD_NIR_COEF, _RHO_UV, _KB_BEAM,
     _NIGHT_RAMP_CENTER_WM2, _NIGHT_RAMP_HALFWIDTH_WM2,
 )
 
@@ -394,9 +394,9 @@ def test_rt_constants_match_published_literals():
     physical inputs (0 <= CI <= 1): the Beer fraction (1-e^{-kb L_CI})/(kb LAI) is
     analytically in [0, CI] ⊆ [0,1], so it has no dedicated canary; it only guards
     against out-of-range CI, which is not runtime-constrained.)"""
-    assert PAR_FRACTION == _O_PAR_FRAC == 0.48
-    assert NIR_FRACTION == _O_NIR_FRAC == 0.50
-    assert UV_FRACTION == _O_UV_FRAC == 0.02
+    assert _PAR_FRACTION == _O_PAR_FRAC == 0.48
+    assert _NIR_FRACTION == _O_NIR_FRAC == 0.50
+    assert _UV_FRACTION == _O_UV_FRAC == 0.02
     assert _ERBS_KT_LOW == _O_KT_LOW == 0.22
     assert _ERBS_KT_HIGH == _O_KT_HIGH == 0.80
     assert _ERBS_LOW_SLOPE == _O_LOW_SLOPE == 0.09
@@ -409,7 +409,7 @@ def test_rt_constants_match_published_literals():
     assert _KPB_PAR == _O_KPB_PAR == 0.46
     assert _KD_PAR == _O_KD_PAR == 0.72
     assert _KD_NIR_COEF == _O_KD_NIR_COEF == 0.35
-    assert RHO_UV == _O_RHO_UV == 0.05
+    assert _RHO_UV == _O_RHO_UV == 0.05
     assert _KB_BEAM == _O_KB_BEAM == 0.5
     assert _APAR_CONVERSION == _O_APAR_CONV == 4.56
     assert _NIGHT_RAMP_CENTER_WM2 == _O_RAMP_CENTER == 30.0
@@ -419,7 +419,7 @@ def test_rt_constants_match_published_literals():
 # --- AD-safety -----------------------------------------------------------------
 
 def _par_diff(sw, cz):
-    # PAR_diff = PAR_FRACTION * f_d(k_t) * sw_down — grad wrt sw_down traverses
+    # PAR_diff = _PAR_FRACTION * f_d(k_t) * sw_down — grad wrt sw_down traverses
     # the Erbs quartic (NOT identically sw_down, unlike the full-sum which is).
     return split_sw_components(sw, cz)[1][0]
 
