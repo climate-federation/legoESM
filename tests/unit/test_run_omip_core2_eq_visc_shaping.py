@@ -80,11 +80,15 @@ def test_ah_profile_file_round_trip_and_helper(tmp_path):
     a = p.parse_args(["--A-h-profile-file", "/x/eddy.nc"])
     assert a.A_h_profile_file == "/x/eddy.nc"
 
-    # synthetic file: 20000 everywhere, 1000 within 2 deg of the equator
+    # synthetic file: 20000 everywhere, a 1000 plateau within 4 deg of the
+    # equator. Rows are 4 deg apart, so a NARROWER plateau would put the test
+    # grid's +-1 deg centres on the interp ramp between 1000 and 20000
+    # (ratio 0.29) -- the first version asserted <0.2 against exactly that
+    # ramp value; the helper was right, the fixture was not.
     ny, nx = 41, 8
     lat = np.linspace(-80, 80, ny)[:, None] * np.ones((1, nx))
     ahm = np.full((1, 3, ny, nx), 20000.0)
-    ahm[:, :, np.abs(lat[:, 0]) < 2.0, :] = 1000.0
+    ahm[:, :, np.abs(lat[:, 0]) <= 4.0, :] = 1000.0
     f = tmp_path / "eddy.nc"
     ds = nc4.Dataset(f, "w")
     ds.createDimension("t", 1); ds.createDimension("z", 3)
@@ -99,7 +103,7 @@ def test_ah_profile_file_round_trip_and_helper(tmp_path):
     prof = _ah_profile_from_file(g, str(f), 20000.0)
     prof = np.asarray(prof)
     lat_deg = np.degrees(np.asarray(g.lat))
-    assert prof[np.argmin(np.abs(lat_deg))] < 0.2       # ~0.05 at the equator
+    assert prof[np.argmin(np.abs(lat_deg))] < 0.1       # 0.05 on the plateau
     assert abs(prof[np.argmin(np.abs(lat_deg - 45))] - 1.0) < 0.05
 
     from legoesm.ocean.state import LatLonCGridOceanConfig
