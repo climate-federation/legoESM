@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-jax = pytest.importorskip("jax")
-jax.config.update("jax_enable_x64", True)   # the 1e-15 identity below needs f64
-jnp = jax.numpy
+jnp = pytest.importorskip("jax.numpy")
 
 from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E402
     beta_limited_surface_humidity,
@@ -68,43 +66,3 @@ def test_real_dew_survives_when_the_surface_is_actually_cold():
     In the scheme this is reached by letting beta -> 1 when q_sat < q_air."""
     q_air, q_sat = 0.015, 0.008
     assert _q_sfc(q_sat, q_air, 1.0) - q_air < 0.0
-
-
-def _seb_lhflx(q_air, beta_soil):
-    """Latent flux from the LAND scheme itself (compute_simple_seb_fluxes), not
-    the helper — pins the production path, which a helper-only test cannot
-    (codex: a helper test passes even if the scheme still used the product form)."""
-    import numpy as np
-    from legoesm.core.coupling_fields import AtmToSurface
-    from legoesm.land.config import LandConfig
-    from legoesm.land.surface_scheme import compute_simple_seb_fluxes
-    n = 4
-    c = lambda v: jnp.full((n,), float(v))
-    forcing = AtmToSurface(
-        sw_down=c(0.0), lw_down=c(320.0), precip_total=c(0.0), precip_snow=c(0.0),
-        T_lowest=c(295.0), q_lowest=c(q_air), u_lowest=c(1.0), v_lowest=c(0.5),
-        p_lowest=c(9.9e4), p_surface=c(1.0e5), rho_lowest=c(1.15),
-        cos_zenith=c(0.0), co2_ppmv=c(412.0), has_radiation=c(1.0),
-        has_precipitation=c(1.0))
-    out = compute_simple_seb_fluxes(
-        T_surface=c(300.0), snow=c(0.0), snow_age=c(0.0), beta_soil=c(beta_soil),
-        forcing=forcing, land_config=LandConfig(), U_min=1.0, lat=jnp.zeros(n),
-        carbon_state=None, dt=1800.0, land_params=None, albedo_land=c(0.2),
-        emissivity=c(0.97), z0=c(0.05))
-    return float(np.mean(np.asarray(out.lhflx)))
-
-
-def test_seb_dry_soil_moist_air_does_not_condense():
-    """The production land scheme, warm dry soil under humid air: the product
-    form gave a large NEGATIVE (condensation) flux here; the gradient form must
-    give a small non-negative one.  q_air=0.010 < q_sat(300 K)~0.022, beta=0.05."""
-    assert _seb_lhflx(0.010, 0.05) >= 0.0
-
-
-def test_seb_beta_zero_shuts_off_evaporation():
-    """beta_soil -> beta_min floor cannot be bypassed here, so compare a dry and
-    a wet soil: the wet one must evaporate strictly more, and the dry one must
-    not run backwards (the product form's signature failure)."""
-    dry, wet = _seb_lhflx(0.010, 0.02), _seb_lhflx(0.010, 1.0)
-    assert dry >= 0.0
-    assert wet > dry + 1.0

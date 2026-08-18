@@ -251,19 +251,19 @@ def compute_simple_seb_fluxes(
     # stability (the guard's purpose) and never destabilises.  Consumed by
     # solve_soil_thermal(surface_conductance=...).
     T_sfc_lin = T_surface + _SURFACE_LIN_DT_K
-    # Linearisation evaluates the SAME gradient-form humidity as the flux above
-    # (product form here would make lhflx_lin inconsistent with lhflx and
-    # mis-size the latent damping slope).  The dew bypass is re-evaluated at the
-    # perturbed saturation so the branch matches what the flux would do at T+dT.
-    q_sat_lin = jnp.where(
+    # The SAME bounded-gradient + dew-bypass formula as the actual flux above.
+    # Review caught the first pass leaving the product form here: the baseline
+    # flux then used one formula and the perturbed flux another, so the finite
+    # difference carried an artificial -(1-beta)*q_air offset and the >=0 clamp
+    # on the inferred conductance could zero the implicit latent damping.
+    _q_sat_lin = jnp.where(
         has_snow,
         saturation_mixing_ratio_ice(T_sfc_lin, forcing.p_surface),
         saturation_mixing_ratio(T_sfc_lin, forcing.p_surface),
     )
-    beta_eff_lin = jnp.where(has_snow, 1.0, beta)
-    beta_eff_lin = jnp.where(q_sat_lin < forcing.q_lowest, 1.0, beta_eff_lin)
+    _beta_lin = jnp.where(_q_sat_lin < forcing.q_lowest, 1.0, beta_effective)
     q_sfc_lin = beta_limited_surface_humidity(
-        q_sat_lin, forcing.q_lowest, jnp.ones_like(q_sat_lin), beta_eff_lin)
+        _q_sat_lin, forcing.q_lowest, jnp.ones_like(_q_sat_lin), _beta_lin)
     if land_config.bulk_scheme in ("most", "coare3", "large_yeager"):
         _, _, shflx_lin, lhflx_lin, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,

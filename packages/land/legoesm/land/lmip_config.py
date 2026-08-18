@@ -75,7 +75,12 @@ _STOMATA_SANITY_BOUNDS = (
     ("gs_max", 0.05, 1.5),         # mol m-2 s-1
 )
 
-_DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
+# The public CESM inputdata naming, which is what `download_lmip_data.sh`
+# stages off-site and what the reader itself defaults to
+# (`cru_jra.CRUJRA_FILE_PREFIX`).  It used to be the glade-only
+# `_filled_antarct_and_grnlnd_` variant, so the two defaults in this repo
+# disagreed and every template asked for files no download could produce.
+_DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_0.5x0.5"
 
 
 class LMIPConfig(NamedTuple):

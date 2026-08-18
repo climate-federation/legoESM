@@ -1465,14 +1465,7 @@ class PhysicsPipeline:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
-            # MOIST (virtual-T) density, the same basis every other bridge
-            # uses for the per-mass droplet-number conversion below — a dry
-            # rho here biased that round trip by (1+0.61 q_v) systematically
-            # (codex final round).  dz keeps the same rho so hydrostatic
-            # thickness stays consistent with the density handed to the
-            # scheme.
-            from legoesm.atmosphere.physics._shared import compute_rho
-            rho_col = compute_rho(T_col, p_full_col, q_v_col)
+            rho_col = p_full_col / (constants.R_d * T_col)
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             dz_col = dp_col / (rho_col * constants.g)
             _z = jnp.zeros_like(q_c_col)
@@ -1505,13 +1498,6 @@ class PhysicsPipeline:
                     "forcing (--aerosol-forcing external) or disable "
                     "--aerosol-ccn."
                 )
-            # Droplet number is stored per MASS and used per VOLUME; both
-            # the branch below and the tendency write-back need these, so
-            # bind them once, outside the branch.
-            from legoesm.atmosphere.physics.microphysics.integration import (  # noqa: E501
-                number_per_mass_to_per_volume,
-                number_per_volume_to_per_mass,
-            )
             _nc_aer_specified = _nc_aer_wanted and aerosol_od is not None
             if _nc_aer_specified:
                 from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
@@ -1529,19 +1515,14 @@ class PhysicsPipeline:
                     _n_ccn[:, None], q_c_col.shape,
                 )
             else:
-                # Stored per MASS [#/kg]; the scheme wants per VOLUME.  The
-                # aerosol-CCN branch above is already per volume and must
-                # NOT be converted again.
-                _n_c_col = (number_per_mass_to_per_volume(
-                    ad.flatten_3d(N_c), rho_col) if N_c is not None else _z)
+                _n_c_col = ad.flatten_3d(N_c) if N_c is not None else _z
             hydrometeors = HydrometeorState(
                 q_c=q_c_col, q_r=q_r_col,
                 q_i=ad.flatten_3d(q_i) if q_i is not None else _z,
                 q_s=ad.flatten_3d(q_s) if q_s is not None else _z,
                 q_g=ad.flatten_3d(q_g) if q_g is not None else _z,
                 N_c=_n_c_col,
-                N_r=(number_per_mass_to_per_volume(
-                    ad.flatten_3d(N_r), rho_col) if N_r is not None else _z),
+                N_r=ad.flatten_3d(N_r) if N_r is not None else _z,
                 N_i=ad.flatten_3d(N_i) if N_i is not None else _z,
             )
             if (
@@ -1580,11 +1561,8 @@ class PhysicsPipeline:
             dq_i_dt = ad.unflatten_3d(micro_out.dq_i_dt)
             dq_s_dt = ad.unflatten_3d(micro_out.dq_s_dt)
             dq_g_dt = ad.unflatten_3d(micro_out.dq_g_dt)
-            # Back to the per-MASS storage the dycore advects.
-            dN_c_dt = ad.unflatten_3d(
-                number_per_volume_to_per_mass(micro_out.dN_c_dt, rho_col))
-            dN_r_dt = ad.unflatten_3d(
-                number_per_volume_to_per_mass(micro_out.dN_r_dt, rho_col))
+            dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
+            dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
             dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
             _c = micro_out.dq_v_to_qc_dt
             _micro_dq_v_to_qc = (
@@ -2412,18 +2390,7 @@ class PhysicsPipeline:
             # liquid/ice effective radii — N_c per-VOLUME [#/m³], N_i per-MASS
             # [#/kg], passed raw (same convention as the dynamical-core paths).
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
-            # Stored per MASS; cloud optics wants per VOLUME.  The aerosol
-            # override below is already per volume and replaces, not scales.
-            if N_c is None:
-                n_cloud_col = None
-            else:
-                from legoesm.atmosphere.physics._shared import compute_rho
-                from legoesm.atmosphere.physics.microphysics.integration import (  # noqa: E501
-                    number_per_mass_to_per_volume,
-                )
-                n_cloud_col = number_per_mass_to_per_volume(
-                    ad.flatten_3d(N_c),
-                    compute_rho(T_col, p_full_col, q_v_col))
+            n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
@@ -3310,14 +3277,6 @@ def _resolve_convection(config):
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
-            # NOTE the CAPE quasi-equilibrium heating-ceiling lever
-            # (cape_sink_heating_ratio / cape_relaxation_sink) is NOT on this
-            # branch's BechtoldConfig — it lives on the C12-pilot branch
-            # (22335607c).  Passing the kwargs here made EVERY driver run with
-            # convection="bechtold" die at setup with an unexpected-keyword
-            # TypeError; the experiment config never carried the knobs on this
-            # branch, so only the hardcoded defaults were ever reachable and
-            # dropping them changes no answer.
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3351,6 +3310,13 @@ def _resolve_convection(config):
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
             rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
+            delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
+            capdcycl_land_tau_scale=getattr(
+                config, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            subcloud_evap_scale=getattr(config, 'bechtold_subcloud_evap_scale', 1.0),
+            rhebc_land=getattr(config, 'bechtold_rhebc_land', 0.75),
+            rhebc_land_deep=getattr(config, 'bechtold_rhebc_land_deep', 0.70),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(

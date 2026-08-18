@@ -1,4 +1,4 @@
-# Land spin-up for the MPAS AMIP campaign (v6 dual-target land bake) — 5 years of CRU-JRA, on the run's
+# Land spin-up for the MPAS AMIP campaign — 5 years of CRU-JRA, on the run's
 # own mesh, in the run's own land configuration.
 #
 # WHY THIS EXISTS. Turning the land model on in the coupled AMIP run from a cold

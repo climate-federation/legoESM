@@ -221,18 +221,29 @@ def test_multilayer_land_still_rejected_on_spectral():
         ]), parser)
 
 
-def test_canopy_schemes_rejected_on_mpas():
-    """Canopy surface schemes (two_leaf/clm_ml) need the coupled pipeline's
-    clm_ml threading — only simple_seb is wired on the MPAS lane; a canopy
-    selection must fail early, not silently run simple_seb."""
+def test_clm_ml_rejected_on_mpas_but_two_leaf_is_not():
+    """Only ``clm_ml`` is refused on the MPAS lane.
+
+    It needs the coupled pipeline's per-column canopy grid threading, which
+    this lane does not have, so selecting it must fail early rather than
+    silently run something else. ``two_leaf`` is not refused: the MPAS land
+    step dispatches to it, and refusing it would leave a resistance-based land
+    surface unreachable on the lane the AMIP campaign runs on.
+
+    SCOPE: this pins the ARGUMENT GUARD, nothing downstream. Whether the
+    canopy's solved humidity and fluxes actually reach the atmosphere is a
+    separate question — that hand-over sits behind its own switch, which
+    defaults off — and is pinned by the land-boundary tests, not here.
+    """
     parser = build_arg_parser()
-    for scheme in ("two_leaf", "clm_ml"):
-        with pytest.raises(SystemExit):
-            _postprocess_args(parser.parse_args([
-                "--dataset", "analytical",
-                "--grid-type", "mpas", "--discretization", "mpas",
-                "--use-multilayer-land", "--land-surface-scheme", scheme,
-            ]), parser)
+    mpas_args = ["--dataset", "analytical",
+                 "--grid-type", "mpas", "--discretization", "mpas",
+                 "--use-multilayer-land", "--land-surface-scheme"]
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args(mpas_args + ["clm_ml"]), parser)
+    args = _postprocess_args(parser.parse_args(mpas_args + ["two_leaf"]),
+                             parser)
+    assert args.land_surface_scheme == "two_leaf"
 
 
 def test_clm_surfdata_path_flows_to_config():
@@ -3447,6 +3458,99 @@ def test_bechtold_rprcon_dnoprc_thread_and_validate():
         ExperimentConfig(bechtold_dnoprc=1.0e-2).validate_strict()
 
 
+def test_bechtold_epsilon_deep_delta_deep_thread_and_validate():
+    """bechtold_epsilon_deep / bechtold_delta_deep (the IFS deep plume-mixing
+    rates) thread into the hot-loop BechtoldConfig on BOTH resolvers; defaults
+    byte-identical; validate_strict bounds enforced.  Before this wiring the
+    deep entrainment rate could not be set from any MIP driver at all, and the
+    param spec excluded it on the false ground that the in-scheme (1.3-RH)
+    height factor made it "not a constant tunable" -- that factor MULTIPLIES
+    the base rate, exactly as it does for delta_deep, which was always tunable.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    cfg = ExperimentConfig(convection="bechtold", bechtold_epsilon_deep=4.0e-3,
+                           bechtold_delta_deep=2.0e-4)
+    leaf = _resolve_convection(cfg)[1]
+    assert (leaf.epsilon_deep, leaf.delta_deep) == (4.0e-3, 2.0e-4)
+    cc = convection_config_for(cfg)
+    assert (cc.bechtold.epsilon_deep, cc.bechtold.delta_deep) == (4.0e-3, 2.0e-4)
+    d = _resolve_convection(ExperimentConfig(convection="bechtold"))[1]
+    assert (d.epsilon_deep, d.delta_deep) == (1.75e-3, 0.75e-4)
+    with pytest.raises(ValueError, match="bechtold_epsilon_deep"):
+        ExperimentConfig(bechtold_epsilon_deep=1.0).validate_strict()
+    with pytest.raises(ValueError, match="bechtold_delta_deep"):
+        ExperimentConfig(bechtold_delta_deep=1.0e-2).validate_strict()
+
+
+def test_bechtold_mixing_rates_are_settable_from_a_params_file():
+    """The --params route, not just the constructor.
+
+    Deleting either scalar-map entry leaves the constructor test above green
+    while making the knob unreachable from every driver, which is the exact
+    state this wiring was written to end.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+    )
+    m = build_atm_scalar_param_map()
+    base = ExperimentConfig(convection="bechtold")
+    cfg = apply_params_to_config(
+        base, {"atm.conv.BechtoldConfig.epsilon_deep": 3.0e-3,
+               "atm.conv.BechtoldConfig.delta_deep": 3.0e-5},
+        scalar_param_map=m)
+    leaf = convection_config_for(cfg).bechtold
+    assert (leaf.epsilon_deep, leaf.delta_deep) == (3.0e-3, 3.0e-5)
+    with pytest.raises(SystemExit):
+        apply_params_to_config(
+            base, {"atm.conv.BechtoldConfig.epsilon_deep": 1.0},
+            scalar_param_map=m)
+
+
+def test_amip_round_trip_keeps_the_tuned_convection_scalars():
+    """A legacy-format restart must not silently reset a TUNED convection knob.
+
+    The legacy flat schema is a deliberate SUBSET of ExperimentConfig -- some
+    140 fields are outside it by design -- so this is not a claim that nothing
+    is dropped. It pins the convection scalars the AMIP campaign actually sets
+    on its arms, which before 2026-08-13 were dropped: a run restarted from a
+    legacy checkpoint quietly continued on defaults, which would have surfaced
+    as "the knob does nothing" rather than as an error.
+
+    Codex, reviewing the first version of this test, showed that a
+    prefix-based "every convection scalar" assertion was false -- e.g.
+    ``sbm_T_min_convect`` is dropped too. Widening the flat schema to satisfy
+    that claim is a separate change; this test states only what it checks.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+    tuned = {
+        "bechtold_epsilon_deep": 3.0e-3,
+        "bechtold_delta_deep": 3.0e-5,
+        "bechtold_rprcon": 5.0e-3,
+        "bechtold_dnoprc": 1.0e-4,
+        "bechtold_downdraft_entrain_rate": 5.0e-4,
+        "bechtold_downdraft_detrain_scale_m": 900.0,
+        "convective_precip_efficiency": 0.6,
+        "autoconv_q_c_crit": 3.0e-4,
+    }
+    missing = sorted(k for k in tuned
+                     if k not in AMIPExperimentConfig._fields)
+    assert not missing, f"campaign-tuned knobs absent from the flat schema: {missing}"
+
+    cfg = ExperimentConfig(convection="bechtold", **tuned)
+    back = ExperimentConfig.from_amip_config(cfg.to_amip_config())
+    for k, v in tuned.items():
+        assert getattr(back, k) == v, f"{k} reset by the AMIP round-trip"
+
+
 def test_inplume_conversion_responds_to_rprcon():
     """Non-vacuity: the in-plume conversion must produce MORE precip at
     higher rprcon and at lower dnoprc on a moist synthetic plume profile —
@@ -3510,3 +3614,45 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
          "--mpas-vert-advection-scheme", "van_leer"]), parser))
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
         cfg_hyb.validate_strict()
+
+
+def test_cmip_resolution_deg_round_trips():
+    """--cmip-resolution-deg reaches OutputConfig; default unchanged.
+
+    The CMOR output grid must track the mesh: a refined run written at the
+    5-degree default throws the refinement away, and the tropical rain band --
+    one to two cells wide -- cannot be scored at all. Before this flag the
+    field was reachable from no driver.
+    """
+    from scripts.run import run_amip
+    from legoesm.driver.config import OutputConfig
+
+    p = run_amip.build_arg_parser()
+    a = p.parse_args(["--cmip-resolution-deg", "2.5"])
+    assert a.cmip_resolution_deg == 2.5
+    assert p.parse_args([]).cmip_resolution_deg == OutputConfig().cmip_resolution_deg
+
+
+def test_capdcycl_land_tau_scale_reaches_the_kernel_and_defaults_to_ifs():
+    """The land diurnal-CAPE timescale is a knob, not just an on/off flag.
+
+    The flag disables the diurnal subtraction over BOTH surfaces; this scales
+    only the land branch, which is the one whose IFS value assumes a ~10 km
+    mesh. 1.0 must reproduce the flag-on behaviour exactly, or every run in the
+    campaign so far changes meaning.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import convection_config_for
+    from legoesm.driver.run_config_yaml import (
+        apply_params_to_config,
+        build_atm_scalar_param_map,
+    )
+    assert convection_config_for(
+        ExperimentConfig(convection="bechtold")).bechtold.capdcycl_land_tau_scale == 1.0
+    cfg = apply_params_to_config(
+        ExperimentConfig(convection="bechtold"),
+        {"atm.conv.BechtoldConfig.capdcycl_land_tau_scale": 0.25},
+        scalar_param_map=build_atm_scalar_param_map())
+    assert convection_config_for(cfg).bechtold.capdcycl_land_tau_scale == 0.25
+    with pytest.raises(ValueError, match="capdcycl_land_tau_scale"):
+        ExperimentConfig(bechtold_capdcycl_land_tau_scale=5.0).validate_strict()
