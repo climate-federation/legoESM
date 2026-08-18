@@ -48,13 +48,18 @@ loss:
   ps_scale: 1000.0
 
 neural_gcm:
-  # #1464: the learned column arm has NO momentum head, so without this it
-  # runs with no surface drag at all, while the classical arm it is scored
-  # against inherits smagorinsky turbulence by default.  With it, the two arms
-  # differ in their thermodynamics and nothing else, which is the only way the
-  # comparison means anything.  Any neural-vs-classical table produced before
-  # this was set is not a comparison and is superseded.
+  # #1464: the learned column has NO momentum head, so without this it runs
+  # with no physical surface stress at all, while the classical arm it is
+  # scored against carries `classical.turbulence` below. The scheme here MUST
+  # equal that one — giving the learned arm a *different* momentum scheme
+  # swaps one confound for another. Both arms already share hyperdiffusion and
+  # the spectral filter; the asymmetry this removes is the surface stress
+  # specifically. Intended to remove the confound, not yet shown to move the
+  # 12/16 table: the closing artifact is the re-scored comparison.
+  # NOTE only reached on the spectral training core; on the lat-lon core the
+  # learned arm is built elsewhere and this key is not read.
   surface_drag: true
+  surface_drag_scheme: "louis"
   nn_hidden: 64
   nn_layers: 2
 sfno:

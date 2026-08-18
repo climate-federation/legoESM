@@ -201,41 +201,72 @@ def test_campaign_builder_wires_the_drag_when_asked():
         "the opt-in flag is gone; the campaign cannot request the drag")
 
 
-def test_every_committed_neural_campaign_actually_asks_for_the_drag():
-    """The other half, and the one that was missing: does anything OPT IN?
+def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
+    """The invariant that makes the comparison mean something.
 
-    The hook above shipped opt-in so that no existing campaign changed
-    silently — and then no campaign opted in, so the fix was unreachable and
-    the degradation table it was written to explain could not move. A lever
-    that no committed configuration selects is not a fix.
+    The learned column has no momentum head, so on its own it runs with no
+    physical surface stress while the classical arm it is scored against
+    carries whatever `classical.turbulence` names. Handing the learned arm a
+    momentum sink is only half of it: hand it a DIFFERENT scheme and the two
+    arms still differ by their turbulence, which is the same confound wearing
+    a new label. So for every config that enables the drag, the scheme must
+    equal the classical arm's.
 
-    Any YAML that carries a ``neural_gcm:`` block builds the learned arm, and
-    that arm has no momentum head. If such a config does not ask for the drag,
-    it runs a model with no surface friction at all — and if it is then scored
-    against a classical arm, the two differ by a momentum sink before anything
-    the network did.
+    The converse is checked too. The drag builder refuses prognostic schemes,
+    because it threads no physics state and would re-seed the carry from the
+    floor every step, so a campaign whose classical arm runs one of those
+    cannot be equalised yet and must NOT enable the drag — enabling it would
+    raise at build time, and picking a stateless stand-in would equalise
+    nothing.
     """
     import pathlib
     import yaml
 
+    from legoesm.training.neural_gcm_spectral import (
+        make_turbulence_only_spectral_physics,
+    )
+
+    stateful = ("tke", "mynn25", "clubb", "clubb_lite", "edmf")
     root = pathlib.Path(__file__).resolve().parents[2]
-    offenders = []
-    checked = 0
-    for path in sorted((root / "config").rglob("*.yaml")):
+    mismatched, refusable, checked = [], [], 0
+    for path in sorted((root / "config").rglob("*.y*ml")):
         try:
             doc = yaml.safe_load(path.read_text(errors="replace"))
         except yaml.YAMLError:
             continue
         if not isinstance(doc, dict):
             continue
-        block = doc.get("neural_gcm")
-        if not isinstance(block, dict):
+        neural = doc.get("neural_gcm")
+        classical = doc.get("classical")
+        if not isinstance(neural, dict) or not isinstance(classical, dict):
             continue
         checked += 1
-        if block.get("surface_drag") is not True:
-            offenders.append(str(path.relative_to(root)))
-    assert checked, "no config carries a neural_gcm block — update this test"
-    assert not offenders, (
-        "these configs build the learned arm with no surface drag, so a "
-        "comparison against a classical arm is confounded before it starts: "
-        + ", ".join(offenders))
+        rel = str(path.relative_to(root))
+        classical_scheme = classical.get("turbulence")
+        if not neural.get("surface_drag"):
+            continue
+        if classical_scheme in stateful:
+            refusable.append(f"{rel}: classical is {classical_scheme!r}, "
+                             "which the drag builder refuses")
+            continue
+        drag_scheme = neural.get("surface_drag_scheme")
+        if drag_scheme != classical_scheme:
+            mismatched.append(
+                f"{rel}: learned arm gets {drag_scheme!r}, classical arm runs "
+                f"{classical_scheme!r}")
+    assert checked, "no config pairs a neural_gcm block with a classical block"
+    assert not mismatched, (
+        "these campaigns would score two arms whose momentum schemes differ, "
+        "which is the confound this flag exists to remove: "
+        + "; ".join(mismatched))
+    assert not refusable, (
+        "these campaigns enable a drag their classical scheme cannot be "
+        "matched to; the builder raises on them: " + "; ".join(refusable))
+
+    # And the schemes we DO select must actually build, or the campaign dies
+    # on its first step rather than in this test.
+    for scheme in ("louis", "smagorinsky"):
+        assert make_turbulence_only_spectral_physics(600.0, scheme) is not None
+    for scheme in stateful:
+        with pytest.raises(ValueError, match="PROGNOSTIC"):
+            make_turbulence_only_spectral_physics(600.0, scheme)
