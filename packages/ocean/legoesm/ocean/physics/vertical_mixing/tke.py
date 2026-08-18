@@ -2037,15 +2037,18 @@ def tke_vertical_mixing(
     # consumers identically to NEMO either way.
     _shear_disc = getattr(cfg, "tke_shear_production", "squared_centered")
     if _shear_disc not in (
-            "squared_centered", "nemo_burchard", "nemo_face_native"):
+            "squared_centered", "nemo_burchard", "nemo_face_native",
+            "nemo_face_native_now2"):
         raise ValueError(
             "Unknown TKEConfig.tke_shear_production shear-discretization: "
             "must be one of ('squared_centered', 'nemo_burchard', "
-            f"'nemo_face_native'), got {_shear_disc!r}.")
+            "'nemo_face_native', 'nemo_face_native_now2'), "
+            f"got {_shear_disc!r}.")
     _face_native_inputs = (u_face_now, v_face_now, u_face_before,
                           v_face_before, face_masks_3d)
-    if _shear_disc == "nemo_face_native":
-        if u_before_cell is None or v_before_cell is None:
+    if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
+        if _shear_disc == "nemo_face_native" and (
+                u_before_cell is None or v_before_cell is None):
             raise ValueError(
                 "TKEConfig.tke_shear_production='nemo_face_native' "
                 "requires u_before_cell and v_before_cell (the carried "

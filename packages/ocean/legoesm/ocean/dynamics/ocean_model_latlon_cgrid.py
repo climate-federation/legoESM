@@ -2529,6 +2529,10 @@ class LatLonCGridOceanModel:
                     f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
+            # "nemo_face_native_now2" = the face-native SPATIAL geometry at
+            # NOW^2 time levels — the RK3-oracle-compatible variant (ORCA1 is
+            # compiled key_RK3, so no Nbb velocity exists to be faithful TO);
+            # it needs no before-state and runs under any integrator.
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int not in _leapfrog_family):
                 raise ValueError(

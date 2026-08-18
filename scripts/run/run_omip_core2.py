@@ -850,11 +850,13 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # tripole under --partial-cell.
     if shear_production is not None:
         if shear_production not in ("squared_centered", "nemo_face_native",
-                                    "nemo_burchard"):
+                                    "nemo_face_native_now2", "nemo_burchard"):
             raise ValueError(
                 f"orca1_zdftke_config shear_production {shear_production!r} "
                 "invalid; expected 'squared_centered', 'nemo_face_native' "
-                "(NEMO zdf_sh2) or 'nemo_burchard'.")
+                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_now2' "
+                "(same face geometry at NOW^2 -- the key_RK3 oracle variant) "
+                "or 'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
@@ -4765,6 +4767,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "fesom-mimic card (fesom-jax has no etau term).")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
+                            "nemo_face_native_now2",
                             "nemo_burchard"],
                    help="TKE shear-production discretisation for "
                         "--tripole-vmix tke. None (default) keeps the card "
