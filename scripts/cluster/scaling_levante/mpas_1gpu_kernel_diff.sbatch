@@ -67,8 +67,12 @@ OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/kern_diff_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_jit_cache_j${SLURM_JOB_ID}"
 mkdir -p "$LEGOESM_JIT_CACHE_DIR"
-NSYS_BIN="${NSYS_BIN:-$(command -v nsys)}"
-[ -n "$NSYS_BIN" ] || { echo "nsys not on PATH; cannot profile"; exit 3; }
+# Absolute path, the same one this campaign's other capture jobs use and
+# verified present. nsys is not on PATH here and needs no module load; a
+# `command -v nsys` lookup exits the job eleven seconds in.
+NSYS_BIN="${NSYS_BIN:-/sw/spack-levante/cuda-12.2.0-2ttufp/nsight-systems-2023.2.3/target-linux-x64/nsys}"
+[ -x "$NSYS_BIN" ] || { echo "nsys not executable: $NSYS_BIN"; exit 3; }
+"$NSYS_BIN" --version || exit 3
 rc=0
 STEPS="${STEPS:-300}"
 

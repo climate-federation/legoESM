@@ -128,3 +128,30 @@ def test_nocomm_reaches_the_packed_body_the_measurement_actually_runs():
     assert not np.allclose(off, on), (
         "the packed exchange is unaffected by the no-comm knob, so the "
         "budget receipt measured a path the knob never touched")
+
+
+def test_ballast_resolver_and_bit_identity(monkeypatch):
+    """The payload knob must scale bytes without touching the answer.
+
+    Unlike the no-comm knob this one is a CONTROL: if it changed any value
+    the payload slope it measures would be confounded by different
+    arithmetic.
+    """
+    from legoesm.parallel.latlon_spmd import _resolve_halo_ballast
+
+    assert _resolve_halo_ballast("") == 1
+    assert _resolve_halo_ballast("1") == 1
+    assert _resolve_halo_ballast("4") == 4
+    for bad in ("0", "9", "01", "two", " 2", "-1"):
+        with pytest.raises(ValueError, match="LEGOESM_LATLON_HALO_BALLAST"):
+            _resolve_halo_ballast(bad)
+
+    mesh = _mesh()
+    rng = np.random.default_rng(2024)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+
+    monkeypatch.delenv("LEGOESM_LATLON_HALO_BALLAST", raising=False)
+    off = _pad(field, mesh)
+    monkeypatch.setenv("LEGOESM_LATLON_HALO_BALLAST", "3")
+    on = _pad(field, mesh)
+    np.testing.assert_allclose(on, off, rtol=0, atol=0)

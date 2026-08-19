@@ -105,15 +105,17 @@ pin_hosts () {  # nodes -> comma-separated first N allocation hosts
   echo "$ALLOC_HOSTS" | head -n "$1" | paste -sd,
 }
 
-run_arm () {  # ndev nocomm tag
-  local NDEV=$1 NC=$2 TAG=$3
+run_arm () {  # ndev nocomm tag [ballast]
+  local NDEV=$1 NC=$2 TAG=$3 BAL=${4:-1}
   local NODES=$(( (NDEV + GPN - 1) / GPN ))
   local NTPN=$(( NDEV < GPN ? NDEV : GPN ))
   local HOSTS
   HOSTS=$(pin_hosts "$NODES")
-  echo "=== LL${NLAT}@${NDEV} nocomm=$NC [$TAG] $(date +%T) hosts=$HOSTS ==="
+  echo "=== LL${NLAT}@${NDEV} nocomm=$NC ballast=$BAL [$TAG] "\
+       "$(date +%T) hosts=$HOSTS ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
-  LEGOESM_LATLON_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
+  LEGOESM_LATLON_HALO_NOCOMM=$NC LEGOESM_LATLON_HALO_BALLAST=$BAL \
+  JAX_ENABLE_X64=0 \
     timeout 1500 srun --export=ALL --nodelist="$HOSTS" \
       --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$NTPN" --gpus-per-node="$NTPN" \
@@ -129,11 +131,24 @@ run_arm () {  # ndev nocomm tag
 # Discarded warm-up arm: the node ramp must not alias into the first timed
 # arm (this campaign lost three runs to exactly that).
 run_arm "$FIRST_DEV" 0 warmup_discard
+# BALLAST_ARMS=1 adds a doubled-payload pair per device count. Bytes on
+# the wire double; the collective count, the schedule, the arithmetic and
+# the answer do not. That separates the two ways communication can cost:
+# payload, which a smaller halo would cut, and per-operation cost, which it
+# would not. The lat-band decomposition gives every device the SAME halo
+# bytes at every device count, yet the measured communication time doubled
+# from 32 to 64 devices -- so this is the question that decides whether a
+# two-dimensional decomposition is worth building.
+BALLAST_ARMS="${BALLAST_ARMS:-0}"
 for ND in $DEVS; do
   run_arm "$ND" 0 "full_${ND}_a"
   run_arm "$ND" 1 "nc_${ND}_a"
   run_arm "$ND" 0 "full_${ND}_b"
   run_arm "$ND" 1 "nc_${ND}_b"
+  if [ "$BALLAST_ARMS" = "1" ]; then
+    run_arm "$ND" 0 "b2_${ND}_a" 2
+    run_arm "$ND" 0 "b2_${ND}_b" 2
+  fi
 done
 
 echo "=== RECEIPTS ==="
@@ -143,11 +158,12 @@ if [ "$rc" -ne 0 ]; then
   echo "ABORT: an arm failed (rc=$rc); no verdict"
   exit "$rc"
 fi
-"$PY" - "$OUTDIR" "$DEVS" <<'EOF'
+BALLAST_ARMS="$BALLAST_ARMS" "$PY" - "$OUTDIR" "$DEVS" <<'EOF'
 import json, os, sys
 
 outdir = sys.argv[1]
 DEVS = tuple(sorted(int(d) for d in sys.argv[2].split()))
+BALLAST = os.environ.get("BALLAST_ARMS", "0") == "1"
 # Single-GPU LL2048 ladder point (job 27051113), same build and flags.
 T1 = 201.4807
 
@@ -162,7 +178,7 @@ def med(tag):
 rows = {}
 missing = []
 for nd in DEVS:
-    for kind in ("full", "nc"):
+    for kind in (("full", "nc", "b2") if BALLAST else ("full", "nc")):
         for rep in ("a", "b"):
             tag = f"{kind}_{nd}_{rep}"
             try:
@@ -192,6 +208,13 @@ for nd in DEVS:
     if abs(comm) < 0.5 * spread * full:
         print(f"      ndev={nd}: INCONCLUSIVE — comm term is inside the "
               f"arm spread")
+    if BALLAST:
+        b2 = (rows[f"b2_{nd}_a"] + rows[f"b2_{nd}_b"]) / 2
+        payload = b2 - full
+        per_op = comm - payload
+        print(f"      ndev={nd}: doubling the payload costs {payload:+.3f} ms"
+              f"  =>  of {comm:.3f} ms of communication, {payload:.3f} is "
+              f"payload and {per_op:.3f} is per-operation cost")
     if nd == 128:
         verdict_row = (comm, excess, spread, full)
 

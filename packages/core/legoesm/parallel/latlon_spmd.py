@@ -24,6 +24,7 @@ methodology.  ``check_vma=False`` follows the cube SPMD halo bodies.
 """
 from __future__ import annotations
 
+import re
 from functools import partial
 
 import jax
@@ -71,18 +72,73 @@ def _resolve_halo_nocomm(env_value: str) -> bool:
         f"a typo must not silently enable it.")
 
 
-def _halo_ppermute(x, axis_name, perm):
-    """Halo ``ppermute``, or the no-comm timing substitute.
+#: Canonical decimal integer, no sign / whitespace / underscores / leading
+#: zeros -- the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
 
-    Single choke point for every lat-lon SPMD halo exchange so the
-    ``LEGOESM_LATLON_HALO_NOCOMM`` budget arm covers all of them at once.
-    Resolved at TRACE time (a Python branch on a static env value), so the
-    compiled program contains one path or the other, never a select.
+
+def _resolve_halo_ballast(env_value: str) -> int:
+    """Resolve ``LEGOESM_LATLON_HALO_BALLAST``: wire-payload multiplier for
+    the lat-band exchange; ``''``/``'1'`` = off (default).
+
+    A MEASUREMENT knob, never a production one, and unlike the no-comm knob
+    it is bit-identical: each message is sent ``N`` times and the copies are
+    dropped on receipt, so the bytes scale while the collective count, the
+    schedule, the arithmetic and the answer do not.  The step's response to
+    ``N`` IS the bandwidth term.
+
+    Why it is needed here: the lat-band decomposition gives every device a
+    FIXED halo -- two rows of the whole longitude circle -- no matter how
+    many devices there are, yet the measured communication time doubled
+    between 32 and 64 devices (0.676 to 1.483 ms).  Constant bytes and
+    rising time means the cost is per-operation, not payload, and that
+    distinction decides whether a two-dimensional decomposition (which cuts
+    bytes but adds collectives) can help at all.
+
+    Unknown or non-canonical values raise (dispatch hardening): a typo must
+    not silently run a different payload multiple.
+    """
+    if env_value in ("", "1"):
+        return 1
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_LATLON_HALO_BALLAST={env_value!r}: must be a canonical "
+            f"decimal integer >= 1 (empty or '1' = off)")
+    n = int(env_value)
+    if not 1 <= n <= 8:
+        raise ValueError(
+            f"LEGOESM_LATLON_HALO_BALLAST={n}: out of range 1..8. It "
+            f"multiplies every halo message, so a large value runs the node "
+            f"out of memory rather than measuring anything.")
+    return n
+
+
+def _halo_ppermute(x, axis_name, perm):
+    """Halo ``ppermute``, or one of the two timing substitutes.
+
+    Single choke point for every lat-lon SPMD halo exchange so a budget arm
+    covers all of them at once.  Both knobs resolve at TRACE time (a Python
+    branch on a static env value), so the compiled program contains one path
+    or the other, never a select.
+
+    ``LEGOESM_LATLON_HALO_NOCOMM=1`` drops the collective entirely (wrong
+    answers, times the program without communication).
+    ``LEGOESM_LATLON_HALO_BALLAST=N`` sends N copies and keeps the first
+    (bit-identical answers, times the payload slope).
     """
     import os
 
     if _resolve_halo_nocomm(os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", "")):
         return jax.lax.optimization_barrier(x)
+    ballast = _resolve_halo_ballast(
+        os.environ.get("LEGOESM_LATLON_HALO_BALLAST", ""))
+    if ballast > 1:
+        rows = x.shape[0]
+        recv = jax.lax.ppermute(
+            jnp.concatenate([x] * ballast, axis=0), axis_name, perm)
+        # The kept slice is the same buffer that would have been sent, so
+        # the answer is unchanged; only the bytes on the wire scale.
+        return recv[:rows]
     return jax.lax.ppermute(x, axis_name, perm)
 
 
