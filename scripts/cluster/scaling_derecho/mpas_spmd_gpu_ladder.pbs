@@ -1,0 +1,152 @@
+#!/bin/bash -l
+#PBS -N legoesm_mpas_ladder
+#PBS -A P08010000
+#PBS -q main
+#PBS -l job_priority=regular
+#PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# MPAS icosahedral SPMD (jax.distributed + NCCL) GPU strong-scaling ladder on
+# Derecho: 1 -> 2 -> 4 -> 8 -> 16 A100 across 4 nodes, per subdivision level,
+# one bench invocation per rung. NCCL-lane counterpart of the route-A
+# icosahedral sweep in scaling_gpu.sh — a SEPARATE curve/lane; never splice
+# its rungs onto a route-A figure (different transport and harness).
+#
+# Float32 by default (the MPAS campaign protocol); X64=1 for float64.
+# Model defaults apply (size-aware halo colouring ON); WIDE=1 arms the
+# wide (communication-avoiding) halo as a separate-curve lever.
+#
+# Mesh: lloyd-0 labelled synthetic scaling mesh (scaling receipts only,
+# never physics). Levels <= 8 build routinely — rungs run N=1 FIRST so a
+# single process builds and caches each mesh before the multi-rank rungs
+# load it. Level 9+ requires the prewarm
+# (scripts/data/prewarm_voronoi_mesh.py --level 9 --lloyd 0, same cache dir,
+# and note the cache is precision-keyed: an X64=1 ladder needs its own
+# prewarm run with JAX_ENABLE_X64=1).
+#
+# --reorder-for is pinned to the ladder's LARGEST rung so every rung times
+# the identical reordered mesh (the bench's own guidance for curves).
+#
+# SUBMIT (from the repo root):
+#   qsub -v LEGOESM_NCCL_OFI_LIB=<libdir> \
+#        scripts/cluster/scaling_derecho/mpas_spmd_gpu_ladder.pbs
+# Knobs via qsub -v (quote the whole -v arg if a value contains spaces;
+# values must never contain commas — qsub -v splits on them):
+#   SUBDIV="6 7 8"           subdivision levels (10*4^L+2 cells)
+#   GPU_RANKS="1 2 4 8 16"   ladder; rungs above the granted GPUs are skipped
+#   NLEV=26  STEPS=65  WARMUP=5
+#   X64=0                    0 = float32 (default here), 1 = float64
+#   WIDE=0                   1 = wide halo (LEGOESM_MPAS_WIDE_HALO)
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if [ ! -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    echo "ERROR: submit from the repo root (PBS_O_WORKDIR=$SUBMIT_DIR)" >&2
+    exit 1
+fi
+export JAX_PLATFORMS=cuda
+export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
+# shellcheck source=_env.sh
+source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"
+cd "$REPO"
+
+SUBDIV="${SUBDIV:-6 7 8}"
+GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
+NLEV="${NLEV:-26}"
+STEPS="${STEPS:-65}"; WARMUP="${WARMUP:-5}"
+X64="${X64:-0}"
+WIDE="${WIDE:-0}"
+export JAX_ENABLE_X64="$X64"
+export LEGOESM_MPAS_WIDE_HALO="$WIDE"
+export LEGOESM_MESH_CACHE_DIR="${LEGOESM_MESH_CACHE_DIR:-/glade/work/$USER/legoesm_mesh_cache}"
+
+# NCCL owns GPU traffic; GPU-aware cray-mpich OFF (mixed-stack deadlock hazard)
+export MPICH_GPU_SUPPORT_ENABLED=0
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
+if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    # Fail fast on a bad path: NCCL_NET below FORCES this transport, so a
+    # wrong dir kills every multi-rank rung deep inside NCCL init.
+    if ! ls "${LEGOESM_NCCL_OFI_LIB}"/libnccl-net*.so* >/dev/null 2>&1; then
+        echo "ERROR: LEGOESM_NCCL_OFI_LIB='${LEGOESM_NCCL_OFI_LIB}'" >&2
+        echo "       contains no libnccl-net*.so — pass the aws-ofi-nccl lib dir" >&2
+        echo "       (e.g. /glade/work/\$USER/nccl-ofi/<tag>/lib)." >&2
+        exit 1
+    fi
+    export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
+    export NCCL_NET="AWS Libfabric"
+    echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
+else
+    export NCCL_IB_DISABLE=1
+    export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+    echo "WARNING: LEGOESM_NCCL_OFI_LIB unset -> NCCL on TCP sockets;"
+    echo "         curve points on sockets are NOT production numbers."
+fi
+
+TOTAL_GPUS=$(( $(sort -u "$PBS_NODEFILE" | wc -l) * 4 ))
+RMAX=$(echo "$GPU_RANKS" | tr ' ' '\n' | sort -n | tail -1)
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/mpas_spmd_${STAMP}}"
+mkdir -p "$OUTDIR"
+COORD_HOST="$(head -n 1 "$PBS_NODEFILE")"
+BASE_PORT="${BASE_PORT:-29900}"
+# Per-rank shim: one GPU per rank + bridge the PALS rank id to the OMPI env
+# contract the bench's --coordinator path reads (mc_nccl_canary.sh pattern).
+SHIM='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; '\
+'export OMPI_COMM_WORLD_RANK=${PALS_RANKID:-${OMPI_COMM_WORLD_RANK:-0}}; '\
+'exec "$@"'
+
+echo "=== HOSTS ==="; sort -u "$PBS_NODEFILE"; date
+echo "ladder=[$GPU_RANKS] subdiv=[$SUBDIV] nlev=$NLEV steps=$STEPS x64=$X64 wide=$WIDE"
+echo "reorder-for=$RMAX outdir=$OUTDIR"
+
+rc=0; i=0
+for L in $SUBDIV; do
+  for N in $GPU_RANKS; do
+    if [ "$N" -gt "$TOTAL_GPUS" ]; then
+        echo "!!! SKIP N=$N > granted $TOTAL_GPUS GPUs" >&2
+        continue
+    fi
+    PPN=$(( N < 4 ? N : 4 ))
+    PORT=$(( BASE_PORT + i )); i=$(( i + 1 ))
+    export OMPI_COMM_WORLD_SIZE="$N"
+    export LEGOESM_JAX_COORDINATOR="${COORD_HOST}:${PORT}"
+    echo "=== s${L} N=${N} (ppn=$PPN, coord ${COORD_HOST}:${PORT}) ==="
+    timeout 1500 mpiexec -n "$N" --ppn "$PPN" bash -c "$SHIM" _ \
+        "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
+        --multicontroller --coordinator "${COORD_HOST}:${PORT}" \
+        --n-devices "$N" \
+        --subdivision "$L" --nlev "$NLEV" \
+        --steps "$STEPS" --warmup "$WARMUP" --lloyd 0 \
+        --partition-method sfc --reorder-for "$RMAX" \
+        --out "$OUTDIR/s${L}_n${N}.jsonl" < /dev/null \
+        || { echo "s${L} N=${N} FAILED"; rc=1; }
+    sleep 15
+  done
+done
+
+echo "=== RECEIPTS (per-rung steady medians) ==="
+"$PY" - "$OUTDIR" <<'EOF' || rc=1
+import glob, json, os, sys
+d = sys.argv[1]
+files = sorted(glob.glob(os.path.join(d, "s*_n*.jsonl")))
+if not files:
+    print("NO OUTPUT FILES — NO VERDICT")
+    sys.exit(1)
+bad = 0
+for f in files:
+    lines = open(f).readlines()
+    if len(lines) != 1:
+        print(f"{os.path.basename(f)}: {len(lines)} lines (stale/partial)")
+        bad += 1
+        continue
+    r = json.loads(lines[0])
+    print(f"{os.path.basename(f)[:-6]:10s} "
+          f"steady_median_ms={r.get('steady_median_ms')} "
+          f"valid={r.get('valid')} n_devices={r.get('n_devices')}")
+if bad:
+    sys.exit(1)
+EOF
+echo "DONE rc=$rc"; exit $rc
