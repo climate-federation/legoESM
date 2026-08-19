@@ -54,6 +54,13 @@ def main(argv=None) -> int:
                    help="default: the case's own length")
     p.add_argument("--every", type=int, default=30,
                    help="print every Nth step")
+    p.add_argument("--freeze-flux", action="store_true",
+                   help="hold the surface flux at its t=0 value. THE "
+                        "discriminator for Wangara: CBL drives the SAME "
+                        "prescribed-flux machinery with a constant value and "
+                        "is healthy, so freezing Wangara's separates 'the "
+                        "time-varying/traced route is broken' from 'something "
+                        "else about this case is'.")
     args = p.parse_args(argv)
 
     drv = _load_driver()
@@ -62,8 +69,14 @@ def main(argv=None) -> int:
     prescribed = case.forcing.prescribe == "fluxes"
     if drv.surface_flux_varies_in_time(case):
         import dataclasses
-        case = dataclasses.replace(
-            case, forcing=case.forcing._replace(flux_to_closure=True))
+        if args.freeze_flux:
+            w0 = float(case.forcing.w_th_s(0.0))
+            case = dataclasses.replace(case, forcing=case.forcing._replace(
+                flux_to_closure=True, w_th_s=lambda _t, _w=w0: _w))
+            print(f"FLUX FROZEN at w'T' = {w0:.5f} K m/s (t=0)")
+        else:
+            case = dataclasses.replace(
+                case, forcing=case.forcing._replace(flux_to_closure=True))
     cfg = drv.build_physics_config(
         "clubb", prescribed_fluxes=prescribed, microphysics="none",
         simple_lw=args.case in drv._SIMPLE_LW_CASES,
