@@ -701,6 +701,202 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
     return body
 
 
+def _chan_pack(slabs):
+    """Pack slabs that share their two leading axes into one buffer.
+
+    Every slab is viewed as ``(d0, d1, -1)`` and the views are concatenated
+    on that trailing channel axis.  The two leading axes survive, which is
+    what lets the packed buffer go through the SAME lon ring, row flip and
+    column take the per-field path uses -- a ravel would destroy them.
+    """
+    views = [x.reshape(x.shape[0], x.shape[1], -1) for x in slabs]
+    widths = [int(v.shape[2]) for v in views]
+    return jnp.concatenate(views, axis=2), widths
+
+
+def _chan_unpack(buf, widths, slabs):
+    """Inverse of :func:`_chan_pack`, restoring each slab's shape.
+
+    ``buf``'s two leading axes may differ from the inputs' (the ring pads
+    them), so each piece is reshaped to the leading axes of the BUFFER plus
+    the slab's trailing axes.
+    """
+    out, off = [], 0
+    for w, ref in zip(widths, slabs):
+        piece = buf[:, :, off:off + w]
+        out.append(piece.reshape(buf.shape[0], buf.shape[1], *ref.shape[2:]))
+        off += w
+    return out
+
+
+def make_latlon_2d_packed_pad_body(mesh, specs):
+    """PACKED multi-field 2-D TILE halo body — the tiled twin of
+    :func:`make_latlon_band_packed_pad_body`.
+
+    Why it exists, with the receipt. The tiled decomposition moves 5.3x
+    fewer halo bytes than latitude bands at 64 devices (3.483 MB against
+    18.515, counted from the compiled program) and yet measured 27% SLOWER,
+    because the packed stage-entry exchange refuses any mesh that is not
+    one-dimensional and the tiled lane therefore ran one message PER FIELD:
+    108 messages against the band lane's 13, at about 26 microseconds each
+    against one microsecond packed (jobs 27078940, 27078941). This body
+    carries every field of a stage's epoch in ONE message per direction, so
+    the byte cut survives without the message count.
+
+    Message count per call, independent of the number of fields: two for
+    the latitude cut, two for the longitude ring, and three for the pole
+    fold (its own ring pair plus the antipodal exchange). The per-field
+    path costs that many PER FIELD.
+
+    ``specs`` — STATIC tuple, one ``("fold", halo, negate)`` entry per field,
+    the same fold family :func:`make_latlon_2d_pad_body` handles. All fields
+    must share one halo depth, since they ride in one buffer. A ``"wall"``
+    entry raises: the lat-only wall pad has its own body and packing it here
+    would silently apply fold semantics to it.
+
+    Bit-identical to calling :func:`make_latlon_2d_pad_body` once per field:
+    the exchange is a bit-copy, the pack is a reshape and a concatenate, and
+    every per-field semantic -- the pole fold's sign flip and its window
+    column map -- is applied AFTER the split, never on the packed buffer.
+
+    Even ``p_lon`` with ``w >= 4h`` only, which is the tiling the campaign
+    runs. Odd ``p_lon`` needs the all_gather fold, whose packed form is a
+    follow-up; it raises rather than silently falling back to the per-field
+    path, because a silent fallback here is exactly the 108-message defect
+    this body exists to remove.
+
+    Returns ``body(*fields) -> tuple(padded_fields)`` for use INSIDE a
+    shard_map over a ``("lat", "lon")`` mesh.
+    """
+    if tuple(mesh.axis_names) != ("lat", "lon"):
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: needs a 2-D ('lat', 'lon') "
+            f"tile mesh; got {tuple(mesh.axis_names)}. The band twin is "
+            f"make_latlon_band_packed_pad_body.")
+    specs = tuple(tuple(sp) for sp in specs)
+    if not specs:
+        raise ValueError("specs must name >= 1 field")
+    halos = set()
+    for sp in specs:
+        if sp[0] != "fold":
+            raise ValueError(
+                f"make_latlon_2d_packed_pad_body: only 'fold' specs are "
+                f"packed here; got {sp[0]!r}. The lat-only wall pad has its "
+                f"own body — packing it here would apply fold semantics to "
+                f"it.")
+        if len(sp) != 3:
+            raise ValueError(f"fold spec must be (kind, halo, negate): {sp}")
+        halos.add(int(sp[1]))
+    if len(halos) != 1:
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: all fields must share one halo "
+            f"depth to ride in one buffer; got {sorted(halos)}")
+    halo = halos.pop()
+    n_fields = len(specs)
+
+    p_lat = int(mesh.shape["lat"])
+    p_lon = int(mesh.shape["lon"])
+    if p_lon > 1 and p_lon % 2:
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: odd lon split {p_lon} needs "
+            f"the all_gather pole fold, whose packed form is not built. Use "
+            f"an even lon split, or the per-field body.")
+    perm_north, perm_south = latlon_band_perms(p_lat)
+
+    def body(*fields):
+        if len(fields) != n_fields:
+            raise ValueError(
+                f"packed 2-D pad body built for {n_fields} fields, got "
+                f"{len(fields)}")
+
+        # 1. ONE latitude message per direction, all fields.
+        if p_lat == 1:
+            north_recv = [jnp.zeros_like(f[:halo]) for f in fields]
+            south_recv = [jnp.zeros_like(f[-halo:]) for f in fields]
+        else:
+            south_edges = [f[:halo] for f in fields]
+            north_edges = [f[-halo:] for f in fields]
+            sbuf, sw = _chan_pack(south_edges)
+            nbuf, nw = _chan_pack(north_edges)
+            north_recv = _chan_unpack(
+                _halo_ppermute(sbuf, "lat", perm_north), sw, south_edges)
+            south_recv = _chan_unpack(
+                _halo_ppermute(nbuf, "lat", perm_south), nw, north_edges)
+        exts = [jnp.concatenate([s, f, n], axis=0)
+                for s, f, n in zip(south_recv, fields, north_recv)]
+
+        # 2. ONE longitude message per direction, all fields, on the
+        #    lat-extended blocks — which is what fills the corners.
+        if p_lon == 1:
+            exts = [lon_ring_ghosts_spmd(e, mesh, halo=halo) for e in exts]
+        else:
+            perm_to_west, perm_to_east = latlon_lon_ring_perms(p_lon)
+            west_edges = [e[:, :halo] for e in exts]
+            east_edges = [e[:, -halo:] for e in exts]
+            wbuf, ww = _chan_pack(west_edges)
+            ebuf, ew = _chan_pack(east_edges)
+            east_ghost = _chan_unpack(
+                _halo_ppermute(wbuf, "lon", perm_to_west), ww, west_edges)
+            west_ghost = _chan_unpack(
+                _halo_ppermute(ebuf, "lon", perm_to_east), ew, east_edges)
+            exts = [jnp.concatenate([w, e, ea], axis=1)
+                    for w, e, ea in zip(west_ghost, exts, east_ghost)]
+
+        # 3. Pole fold. The two collectives it needs — the 2h ring extension
+        #    and the antipodal exchange — run ONCE on a packed buffer; the
+        #    row mirror, the sign flip and the window column map are local
+        #    and stay per field, which is what keeps this bit-identical to
+        #    the per-field body.
+        b = jax.lax.axis_index("lat")
+        s_edges = [f[:halo] for f in fields]
+        n_edges = [f[-halo:] for f in fields]
+        if p_lon == 1:
+            pad_lon = ((0, 0), (halo, halo))
+            def _fold_all(edges):
+                return [_pole_fold(
+                            jnp.pad(e, pad_lon + ((0, 0),) * (e.ndim - 2),
+                                    mode="wrap"), sp[2])
+                        for e, sp in zip(edges, specs)]
+            s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
+        else:
+            w_tile = fields[0].shape[1]
+            if w_tile < 4 * halo:
+                raise ValueError(
+                    f"make_latlon_2d_packed_pad_body: tile lon width "
+                    f"{w_tile} is under 4x the halo {halo}; the antipodal "
+                    f"fold needs a 2h ring extension on each side.")
+            c = jax.lax.axis_index("lon")
+            W = w_tile * p_lon
+            perm_anti = [(src, (src + p_lon // 2) % p_lon)
+                         for src in range(p_lon)]
+            t = jnp.arange(w_tile + 2 * halo)
+            r = jnp.where(c * w_tile + t < W // 2 + halo, t + 2 * halo, t)
+
+            def _fold_all(edges):
+                buf, widths = _chan_pack(edges)
+                ext = lon_ring_ghosts_spmd(buf, mesh, halo=2 * halo)
+                recv = _halo_ppermute(ext, "lon", perm_anti)
+                pieces = _chan_unpack(recv, widths, edges)
+                out = []
+                for piece, sp in zip(pieces, specs):
+                    sign = -1.0 if sp[2] else 1.0
+                    out.append(jnp.take(sign * piece[::-1], r, axis=1))
+                return out
+
+            s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
+
+        out = []
+        for e, sf, nf in zip(exts, s_fold, n_fold):
+            south_ghost = jnp.where(b == 0, sf, e[:halo])
+            north_ghost = jnp.where(b == p_lat - 1, nf, e[-halo:])
+            out.append(jnp.concatenate(
+                [south_ghost, e[halo:e.shape[0] - halo], north_ghost],
+                axis=0))
+        return tuple(out)
+
+    return body
+
+
 def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
                                    south_value: float = 0.0,
                                    north_value: float = 0.0):
