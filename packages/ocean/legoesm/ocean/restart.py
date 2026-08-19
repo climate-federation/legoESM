@@ -325,24 +325,28 @@ _SLOT_POLICY: dict[str, str] = {
     # run_omip asymmetry (written on save, silently dropped on load because the
     # fresh template slot is None).
     #
-    # UNVERIFIED IN THIS TREE, and deliberately labelled as such: none of the
-    # three is a state field here yet, so there is no producer or reader to
-    # check the DIAGNOSTIC claim against.  It is taken from #1442's design, not
-    # from code — which is exactly the kind of claim this repo requires to be
-    # re-verified at the point of use.  ``test_pre_registered_mass_flux_slots_
-    # are_not_yet_state_fields`` is the tripwire: it goes RED the day any of
-    # them becomes a real slot, forcing whoever lands #1440/#1442 to CONFIRM
-    # that the step recomputes it before any consumer reads it.  If it turns
-    # out to be a carry, move it to _SLOT_PROGNOSTIC there — do not delete the
-    # test to make it pass.
+    # VERIFIED IN CODE, 2026-08-19, when #1440/#1442 landed and these stopped
+    # being a design claim: the lat-lon C-grid step writes all five through one
+    # constructor each (``mass_flux_fields`` / ``salt_flux_fields``) inside its
+    # own step body, and NOTHING in the ocean package ever reads
+    # ``state.mass_flux_*`` or ``state.salt_flux_*_int`` — they are write-only
+    # capture slots for the transport diagnostic.  A slot no consumer reads
+    # cannot cold-start a continuation, so not persisting it is correct.
+    # ``test_nothing_reads_the_captured_flux_slots`` pins that property; if a
+    # consumer ever appears, move the slot to _SLOT_PROGNOSTIC rather than
+    # deleting the test.
     "mass_flux_u": _SLOT_DIAGNOSTIC, "mass_flux_v": _SLOT_DIAGNOSTIC,
     "mass_flux_w": _SLOT_DIAGNOSTIC,
+    # The salt partners of the same capture (#1442), same reasoning, same
+    # single constructor.  Main's other archive format lists all five together
+    # in ``DIAGNOSTIC_SLOTS`` above for the same reason.
+    "salt_flux_u_int": _SLOT_DIAGNOSTIC, "salt_flux_v_int": _SLOT_DIAGNOSTIC,
 }
-# The three slots above are classified from #1442's DESIGN, not from a
-# producer in this tree.  Named here so the tripwire test and the policy stay
-# in one place.
-_PRE_REGISTERED_UNVERIFIED: tuple[str, ...] = (
+# The captured-flux slots, named once so the policy and the test that pins
+# their read-only property stay in one place.
+_CAPTURED_FLUX_SLOTS: tuple[str, ...] = (
     "mass_flux_u", "mass_flux_v", "mass_flux_w",
+    "salt_flux_u_int", "salt_flux_v_int",
 )
 
 # Derived from the policy so the two can never drift apart.

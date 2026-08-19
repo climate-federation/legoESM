@@ -95,6 +95,12 @@ _SLOT_KIND = {
     "u": "field", "v": "field", "T": "field", "S": "field", "eta": "field",
     "H_bathy": "field", "land_mask": "field", "u_mask": "field",
     "v_mask": "field", "w": "field",
+    # Captured tracer-transport fluxes (#1440/#1442): Fields, built by the
+    # step's own single constructors, classified DIAGNOSTIC in the policy and
+    # therefore not persisted -- listed here so the "every slot is decided"
+    # ratchet stays closed over them.
+    "mass_flux_u": "field", "mass_flux_v": "field", "mass_flux_w": "field",
+    "salt_flux_u_int": "field", "salt_flux_v_int": "field",
     # optional Field carries
     "T_som": "field", "S_som": "field",
     "T_flux_div_prev": "field", "S_flux_div_prev": "field",
@@ -163,7 +169,7 @@ def test_the_partition_enumerates_fields_rather_than_listing_names():
     from collections import namedtuple
 
     from legoesm.ocean.restart import (
-        _PRE_REGISTERED_UNVERIFIED, _SLOT_DIAGNOSTIC, _SLOT_POLICY,
+        _CAPTURED_FLUX_SLOTS, _SLOT_DIAGNOSTIC, _SLOT_POLICY,
         classify_restart_slots,
     )
 
@@ -177,46 +183,39 @@ def test_the_partition_enumerates_fields_rather_than_listing_names():
                       **{novel: jnp.zeros((2, 2))})
     with pytest.raises(KeyError, match=novel):
         classify_restart_slots(st)
-    # ...and the three #1440/#1442 mass-flux slots are pre-registered as
-    # DIAGNOSTIC, including the VERTICAL partner, so that PR lands without
-    # tripping the gate.
-    for name in _PRE_REGISTERED_UNVERIFIED:
+    # ...and the five #1440/#1442 captured-flux slots are classified
+    # DIAGNOSTIC by policy, including the VERTICAL partner and the salt pair.
+    for name in _CAPTURED_FLUX_SLOTS:
         assert _SLOT_POLICY[name] == _SLOT_DIAGNOSTIC, (
             f"{name} must be excluded from the restart contract by policy, not "
             "by omission")
 
 
-def test_pre_registered_mass_flux_slots_are_not_yet_state_fields():
-    """TRIPWIRE for a classification made from a DESIGN, not from code.
+def test_a_resumed_state_still_serves_the_transport_diagnostic():
+    """The claim the tripwire was waiting on, now that it can be checked.
 
-    ``mass_flux_u``/``_v``/``_w`` are labelled DIAGNOSTIC on the strength of
-    #1440/#1442's description; none of them is a state field in this tree, so
-    there is no producer or reader HERE to check that claim against.  This goes
-    RED the day any of them becomes a real slot — at which point whoever lands
-    that PR must CONFIRM from the step that it is recomputed before any
-    consumer reads it, and reclassify it as ``_SLOT_PROGNOSTIC`` if it is not.
+    The five captured-flux slots were classified as diagnostics from a DESIGN,
+    because none of them was a state field in this tree yet. They are now, and
+    they DO have a reader -- the section-transport diagnostic. That reader is
+    what makes the classification checkable: not persisting a slot is only
+    safe if every consumer copes with its absence, which is exactly the state
+    a resumed run presents.
 
-    Do not delete this test to make it pass; that is the failure mode it exists
-    to prevent — a carry silently pre-approved as a diagnostic would resume
-    cold-started AND bypass the unclassified-slot gate entirely.
+    So this exercises it: hand the diagnostic a state with the captured slots
+    empty -- a resume -- and it must reconstruct rather than fail or hand back
+    a cold-started value. If a consumer ever appears that CANNOT reconstruct,
+    move the slot to ``_SLOT_PROGNOSTIC`` rather than deleting this test.
     """
-    from legoesm.core.state import MPASOceanState
-    from legoesm.ice.state import SeaIceState
-    from legoesm.ocean.restart import _PRE_REGISTERED_UNVERIFIED
-    from legoesm.ocean.state import OceanState
+    from legoesm.ocean.diagnostics_sections import mass_fluxes_from_state
 
-    live = sorted(
-        f"{cls.__name__}.{n}"
-        for cls in (OceanState, LatLonCGridOceanState, MPASOceanState,
-                    SeaIceState, DynamicSeaIceState)
-        for n in _PRE_REGISTERED_UNVERIFIED if n in cls._fields
-    )
-    assert not live, (
-        f"{live} are now REAL state fields, but their DIAGNOSTIC classification "
-        "was taken from #1442's design and never verified against a producer.  "
-        "Confirm from the step that each is recomputed before any consumer "
-        "reads it (then remove this tripwire, citing that evidence in the "
-        "commit message), or reclassify it as _SLOT_PROGNOSTIC.")
+    grid, z_coord, state = _base_state()
+    assert state.mass_flux_u is None, (
+        "fixture already carries a stored flux; this test would then not be "
+        "exercising the resumed case")
+    mfu, mfv = mass_fluxes_from_state(state, z_coord, grid)
+    assert mfu is not None and mfv is not None
+    assert np.all(np.isfinite(np.asarray(mfu)))
+    assert np.all(np.isfinite(np.asarray(mfv)))
 
 
 def test_unclassified_slot_raises_at_save_and_at_validate():
@@ -303,8 +302,16 @@ def _fill_all_slots(state):
     kind, so the round-trip exercises all three serialisation paths."""
     rng = np.random.default_rng(7)
     upd = {}
+    from legoesm.ocean.restart import _CAPTURED_FLUX_SLOTS
+
     for i, name in enumerate(LatLonCGridOceanState._fields):
         if getattr(state, name) is not None:
+            continue
+        # The captured-flux slots are classified DIAGNOSTIC and deliberately
+        # not written, so a filled one comes back empty and the round-trip
+        # would be comparing a state against a different pytree rather than
+        # against a lost carry.
+        if name in _CAPTURED_FLUX_SLOTS:
             continue
         kind = _SLOT_KIND[name]
         if kind == "field":
