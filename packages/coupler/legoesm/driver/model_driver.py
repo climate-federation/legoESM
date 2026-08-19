@@ -7118,6 +7118,17 @@ class ModelDriver:
                 "fv3duo_ckpt_step_*.npz.")
         loaded_step = 0
         if restart_bundle is not None:
+            if loaded is not None and start_day is not None \
+                    and start_day != loaded[1]:
+                # codex MAJOR: only the STEP was bound, so
+                # run(start_step=step, start_day=<anything>) was accepted
+                # and wrote snapshots stamped with a shifted day. The dry
+                # dynamics never reads day, so the bitwise state test
+                # stayed green while the provenance drifted.
+                raise ValueError(
+                    f"fv3_duo restart: start_day={start_day} does not match "
+                    f"the loaded checkpoint day {loaded[1]}; the pair is "
+                    f"the checkpoint's, not the caller's.")
             if loaded is None or start_step != loaded[0]:
                 raise ValueError(
                     f"fv3_duo restart: start_step={start_step} does not "
@@ -7318,6 +7329,11 @@ class ModelDriver:
                 _hydrostatic=np.bool_(mcfg.hydrostatic),
                 _km=np.int64(mcfg.km),
                 _resolution=np.int64(self.model.grid.n),
+                # nq is CONTRACT, not decoration: the loader checks the
+                # tracer leaves against it, because a contiguity check
+                # alone accepts the empty set and resumes with tracers
+                # silently dropped (codex BLOCKER 2026-08-19).
+                _nq=np.int64(len(bundle["q"])),
                 _git_sha=git_provenance(Path(__file__)).commit,
                 **arrays)
         os.replace(tmp, path)
@@ -7405,10 +7421,30 @@ class ModelDriver:
                     f"{'present' if 'omga' in files else 'MISSING'}.")
             qi = sorted(int(nm[len("q_"):]) for nm in files
                         if nm.startswith("q_"))
-            if qi != list(range(len(qi))):
+            # CONTIGUITY IS NOT ENOUGH (codex BLOCKER 2026-08-19): the
+            # empty set is trivially contiguous, so a checkpoint whose
+            # q_* leaves were all dropped loaded as q=[] and RESUMED
+            # SUCCESSFULLY -- silent tracer loss, invisible to a bitwise
+            # state test because zvir=0 keeps the tracer dynamically
+            # passive. The count is part of the deck contract and is
+            # stamped in the checkpoint, so check against it.
+            # _nq is METADATA, so it is read raw and carries the "_"
+            # prefix of the other stamps: routing it through _leaf made
+            # the fp64 lossy-leaf guard refuse an int64 count (job
+            # 9441043 -- the guard working, my naming wrong).
+            n_expect = (int(np.asarray(d["_nq"])) if "_nq" in files
+                        else None)
+            if n_expect is None:
                 raise ValueError(
-                    f"fv3_duo checkpoint {path.name}: tracer indices "
-                    f"{qi} are not contiguous from 0.")
+                    f"fv3_duo checkpoint {path.name} predates the _nq stamp "
+                    f"and cannot prove its tracer set is complete; rewrite "
+                    f"it with the current writer.")
+            if qi != list(range(n_expect)):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name}: tracer leaves {qi} "
+                    f"are not exactly q_0..q_{n_expect - 1} as the stamped "
+                    f"nq={n_expect} requires (an empty or short set would "
+                    f"otherwise resume with tracers silently dropped).")
             q = [_leaf(f"q_{i}") for i in qi]
             omga = _leaf("omga")
             nh = None

@@ -615,6 +615,36 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="float64"):
             drv.load_checkpoint(p)
 
+    def test_start_day_must_match_the_checkpoint(self, tmp_path):
+        """The (step, day) pair is the checkpoint's, not the caller's.
+
+        codex MAJOR: only start_step was bound, so a caller could pass
+        any start_day and the run wrote snapshots stamped with a shifted
+        day. The dry dynamics never reads day, so the bitwise state test
+        stayed green while provenance drifted.
+        """
+        from legoesm.driver.model_driver import ModelDriver
+        d = tmp_path / "sd"
+        d.mkdir()
+        cfg = _fv3_duo_config(output_dir=str(d), days=1, checkpoint_days=1)
+        drv = ModelDriver(cfg, output_dir=d)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+        ck = sorted(d.glob("fv3duo_ckpt_step_*.npz"))[-1]
+        # FRESH directory for the second config: the run manifest refuses
+        # to mix two configs' provenance in one directory, and days=1 ->
+        # days=2 is a different config (that guard is right; my first
+        # version of this test tripped it).
+        d2 = tmp_path / "sd2"
+        d2.mkdir()
+        drv2 = ModelDriver(_fv3_duo_config(output_dir=str(d2), days=2,
+                                           checkpoint_days=1),
+                           output_dir=d2)
+        drv2.setup()
+        step, day = drv2.load_checkpoint(ck)
+        with pytest.raises(ValueError, match="does not match the loaded"):
+            drv2.run(start_step=step, start_day=day + 0.5)
+
     def test_bare_start_step_refused(self, restart_driver):
         """A start_step without a load_checkpoint-staged bundle has no
         state to resume from — refused, pointing at load_checkpoint."""
@@ -657,11 +687,34 @@ class TestFV3DuoRestart:
         assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
         assert not list(dir_b.glob("*.tmp"))
 
-        fa = drv_a._fv3_duo_flatten_bundle(drv_a.state)
-        fb = drv_b._fv3_duo_flatten_bundle(drv_b.state)
-        assert set(fa) == set(fb)
+        # INDEPENDENT ENUMERATION (codex MAJOR 2026-08-19): comparing via
+        # the writer's own _fv3_duo_flatten_bundle made the "EVERY array"
+        # claim circular -- deleting a member from that helper would drop
+        # it from persistence AND from this comparison at once, and q and
+        # omga are exactly the members that would not otherwise show
+        # (q is dynamically passive at zvir=0; omga is output-only).
+        # This walks the bundle structure directly instead.
+        def _walk(b):
+            out = {}
+            for k, v in b["state"].items():
+                out[f"state.{k}"] = np.asarray(v)
+            for k, v in b["press"].items():
+                out[f"press.{k}"] = np.asarray(v)
+            for i, qt in enumerate(b["q"]):
+                out[f"q[{i}]"] = np.asarray(qt)
+            out["omga"] = np.asarray(b["omga"])
+            if b.get("nh") is not None:
+                for k, v in b["nh"].items():
+                    out[f"nh.{k}"] = np.asarray(v)
+            return out
+
+        fa, fb = _walk(drv_a.state), _walk(drv_b.state)
+        assert set(fa) == set(fb), (sorted(set(fa) ^ set(fb)))
+        # the enumeration must actually cover the contract
+        assert any(k.startswith("q[") for k in fa), "no tracer compared"
+        assert "omga" in fa
         if model_type == "nonhydrostatic":
-            assert any(nm.startswith("nh_") for nm in fa), \
+            assert any(k.startswith("nh.") for k in fa), \
                 "NH arm persisted no nh carry"
         diffs = [nm for nm in sorted(fa)
                  if fa[nm].shape != fb[nm].shape
