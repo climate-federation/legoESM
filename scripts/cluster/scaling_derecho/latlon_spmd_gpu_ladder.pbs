@@ -58,6 +58,15 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-hsn}"
 export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
 if [ -n "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    # Fail fast on a bad path: NCCL_NET below FORCES this transport, so a
+    # wrong dir kills every multi-rank rung deep inside NCCL init (measured
+    # 2026-08-18: a literal placeholder here cost all n>1 rungs).
+    if ! ls "${LEGOESM_NCCL_OFI_LIB}"/libnccl-net*.so* >/dev/null 2>&1; then
+        echo "ERROR: LEGOESM_NCCL_OFI_LIB='${LEGOESM_NCCL_OFI_LIB}'" >&2
+        echo "       contains no libnccl-net*.so — pass the aws-ofi-nccl lib dir" >&2
+        echo "       (e.g. /glade/work/\$USER/nccl-ofi/<tag>/lib)." >&2
+        exit 1
+    fi
     export LD_LIBRARY_PATH="${LEGOESM_NCCL_OFI_LIB}:${LD_LIBRARY_PATH:-}"
     export NCCL_NET="AWS Libfabric"
     echo "NCCL transport: aws-ofi-nccl from $LEGOESM_NCCL_OFI_LIB"
