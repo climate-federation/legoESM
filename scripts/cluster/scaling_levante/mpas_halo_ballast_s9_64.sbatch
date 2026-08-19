@@ -177,7 +177,7 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         # therefore whatever grows with device count that is NOT the
         # halo: the mass-fix allreduce across nodes, and jitter.
         print(f"  staging (nocomm - nostage) = {nc - ns:+.3f} ms")
-        print(f"  nostage@{NDEV} = {ns:.3f} ms   (compare the 4-device "
+        print(f"  nostage@{ndev} = {ns:.3f} ms   (compare the 4-device "
               f"nostage arm: 2.725 ms at the SAME per-device load; the "
               f"difference is the residual that grows with device count)")
     # A ratio smaller than half the arm spread is not a result.
@@ -207,5 +207,12 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         else:
             print("VERDICT: intermediate -- reprice before acting")
 EOF
+gate_rc=$?
+# A crashed gate must not report the job COMPLETED: this block exited
+# non-zero on a NameError once while the job still exited 0.
+if [ "$gate_rc" -ne 0 ]; then
+  echo "RECEIPT GATE exited $gate_rc"
+  rc=$gate_rc
+fi
 echo "DONE rc=$rc"
 exit $rc
