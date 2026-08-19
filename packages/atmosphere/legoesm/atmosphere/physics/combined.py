@@ -753,7 +753,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
             if _led is not None:
                 combined = combined._replace(ledger_rows=_led)
-            # rad_heating is carried UNCHANGED (not in phys_updates).
+            # rad_heating is carried UNCHANGED (not in phys_updates), but the
+            # PRECIPITATION is fresh on this sub-step (microphysics runs every
+            # step) and must be stored, or the cold-pool gust would hold a
+            # stale rain pulse for the entire radiation interval instead of the
+            # documented single step.
+            _store_sfc_precip(phys_updates, precip_accum)
             phys_state_out = update_physics_state(phys_state, phys_updates)
             return combined, phys_state_out
 

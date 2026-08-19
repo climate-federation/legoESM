@@ -221,3 +221,95 @@ def test_density_enters_the_scaling():
     rho = jnp.asarray([1.0, 8.0])
     g = convective_gust_wind(p, 1.0, rho)
     assert float(g[0]) / float(g[1]) == pytest.approx(2.0, rel=1e-6)
+
+
+# --- Review-driven gates (codex adversarial pass) ---------------------------
+
+def test_gust_does_not_square_the_momentum_stress():
+    """tau must scale as U_eff*u_i, NOT U_eff^2 (the COARE convention).
+
+    The first implementation pre-scaled (u, v) by U_eff/|U|, which makes the
+    constant-coefficient stress rho*Cd*U_eff^2 and turns an isotropic
+    unresolved gust into a resolved directional momentum source as |U| -> 0 --
+    exactly the regime the term exists for.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    n = 1
+    u = jnp.full((n,), 2.0); v = jnp.zeros((n,))
+    T = jnp.full((n,), 298.0); q = jnp.full((n,), 0.016)
+    T_s = jnp.full((n,), 300.0); q_s = jnp.full((n,), 0.02)
+    rho = jnp.full((n,), _RHO)
+    rain = _rates([10.0])
+    cfg = SurfaceLayerConfig(convective_gustiness_coeff=1.0)
+
+    tau_x = float(np.asarray(compute_surface_fluxes(
+        u, v, T, q, T_s, q_s, rho, cfg, sfc_precip=rain)[0])[0])
+
+    gust = float(convective_gust_wind(rain, 1.0, rho)[0])
+    speed = float(np.sqrt(4.0 + 1e-4))
+    u_eff = float(np.sqrt(speed ** 2 + gust ** 2))
+    expected = -float(rho[0]) * cfg.Cd_neutral * u_eff * float(u[0])
+    squared = -float(rho[0]) * cfg.Cd_neutral * u_eff * u_eff
+    assert tau_x == pytest.approx(expected, rel=1e-6), (
+        "stress is not the COARE U_eff*u_i form")
+    assert abs(tau_x - squared) > 1e-6, "stress still squares the gust"
+
+
+def test_a_scheme_that_cannot_apply_the_gust_is_rejected_loudly():
+    """A config that looks enabled but does nothing is worse than an error."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        validate_cold_pool_gustiness,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import (
+        SurfaceLayerConfig, YSUConfig,
+    )
+
+    enabled = YSUConfig(surface=SurfaceLayerConfig(
+        convective_gustiness_coeff=1.0))
+    with pytest.raises(ValueError, match="cold-pool gustiness"):
+        validate_cold_pool_gustiness("ysu", enabled)
+    # Off is always fine, on every scheme.
+    validate_cold_pool_gustiness("ysu", YSUConfig())
+
+
+def test_a_mismatched_carry_is_rejected_not_truncated():
+    """Silently slicing an oversized carry would hand a shard the wrong
+    geographic columns."""
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        _read_sfc_precip,
+    )
+    from legoesm.atmosphere.physics.turbulence.config import (
+        LouisConfig, SurfaceLayerConfig,
+    )
+
+    class _PS:
+        sfc_precip = jnp.zeros((32,))
+
+    cfg = LouisConfig(surface=SurfaceLayerConfig(
+        convective_gustiness_coeff=1.0))
+    with pytest.raises(ValueError, match="columns"):
+        _read_sfc_precip(_PS(), "louis", cfg, 8, jnp.float64)
+
+
+def test_existing_direct_constructors_still_work():
+    """The field must be APPENDED with a default; a mid-tuple insert broke two
+    committed test constructors with TypeError."""
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE, PhysicsState,
+    )
+
+    n, nlev = 4, 6
+    ps = PhysicsState(
+        tke=jnp.zeros((n, nlev)), conv_prog_profile=jnp.zeros((n, nlev)),
+        conv_stoch_state=jnp.zeros((n,)), gwd_spectrum=jnp.zeros((n, 1, 1)),
+        prng_key=jax.random.PRNGKey(0),
+        surface_T_sfc_override=jnp.full((n,), NO_SFC_T_OVERRIDE),
+        qke=jnp.zeros((n, nlev)), clubb_moments=jnp.zeros((n, 15, nlev + 1)),
+        rad_heating=jnp.zeros((n, nlev)),
+        col_index=jnp.arange(n, dtype=jnp.int32),
+    )
+    assert ps.sfc_precip is None

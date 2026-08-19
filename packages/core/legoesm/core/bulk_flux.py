@@ -806,6 +806,7 @@ def compute_most_fluxes(
     L_latent=None,
     thermo_convention="legoesm",
     gustiness_w_zi=None,
+    u_gust_extra=None,
     gustiness_beta=1.25,
     return_2m=False,
     z_diag=2.0,
@@ -870,6 +871,11 @@ def compute_most_fluxes(
         (SST-dependent ``L_vap(T_sfc)``, moist ``cp_air(q_atm)``) — up to
         ~3 % LH at warm SST and ~1-2 % SH in the humid tropics.  An
         explicit ``L_latent`` overrides the L choice either way.
+    u_gust_extra : array or None
+        Extra gust wind [m/s] from a source outside this routine (the
+        precipitation-driven cold-pool term, ``convective_gust_wind``), added
+        in quadrature to the bulk wind.  ``None`` leaves every existing caller
+        byte-identical.
     gustiness_w_zi : float or None
         COARE convective-gustiness BL depth z_i [m].  None (default) =
         scheme-native: 600 m for ``"coare3"`` (AeroBulk/Fairall 2003 —
@@ -1000,6 +1006,14 @@ def compute_most_fluxes(
         z_q = z_ref
 
     wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-4)
+    if u_gust_extra is not None:
+        # Externally-supplied gust (cold-pool / precipitation-driven), added in
+        # quadrature to the bulk wind exactly like the scheme-native w* term
+        # below.  It enters the SCALAR wind only: the stress normalisation
+        # further down keeps one raw component for direction and magnitude
+        # (tau = -rho Cd U_eff u_i), which is the AeroBulk/COARE convention and
+        # the reason this must NOT be applied by pre-scaling (u, v).
+        wind_speed = jnp.sqrt(wind_speed ** 2 + u_gust_extra ** 2)
     dT = T_sfc - T_atm
     dq = q_sfc - q_atm
     # Virtual-T moisture coefficient = 1/ε − 1 ≈ 0.6078 (canonical, not 0.61).

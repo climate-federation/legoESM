@@ -161,7 +161,6 @@ class PhysicsState(NamedTuple):
     qke: jnp.ndarray
     clubb_moments: jnp.ndarray
     rad_heating: jnp.ndarray
-    sfc_precip: jnp.ndarray
     # GLOBAL column ids, shape (ncol,) int32 — the decomposition-invariant
     # identity for per-column stochastic draws (Bechtold AR1 folds the
     # per-step sub-key with each column's GLOBAL id).  Sharding-aware by
@@ -206,6 +205,21 @@ class PhysicsState(NamedTuple):
     # pytree; byte-identical for runs that never read it).  Appended LAST
     # with a default so existing direct constructors are unaffected.
     conv_precip: jnp.ndarray = None
+    # TOTAL surface precipitation [kg/m^2/s], shape (ncol,), written by the
+    # combined-physics accumulator from whichever modules produce precip
+    # (microphysics on the hydrostatic/SCM lane), consumed one step LAGGED by
+    # the turbulence surface-flux call for the cold-pool gustiness term
+    # (SurfaceLayerConfig.convective_gustiness_coeff, off by default).
+    #
+    # Distinct from ``conv_precip`` above, which is the CONVECTIVE component
+    # written on the MPAS path for radiation's Slingo cloud fraction: on the
+    # hydrostatic/SCM lane convection emits no surface precipitation at all
+    # (microphysics owns it), so reusing that field would leave the gust
+    # reading zeros forever.  Appended LAST with a default so existing direct
+    # constructors are unaffected -- the same convention as every field above,
+    # and the thing an earlier revision of THIS field got wrong by inserting
+    # it mid-tuple (two test constructors raised TypeError).
+    sfc_precip: jnp.ndarray = None
 
 
 # Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
@@ -374,7 +388,6 @@ def init_physics_state(
         qke=qke,
         clubb_moments=clubb_moments,
         rad_heating=rad_heating,
-        sfc_precip=sfc_precip,
         col_index=jnp.arange(ncol, dtype=jnp.int32),
         aerosol_number=aerosol_number,
         cloud_fraction=cloud_fraction,
@@ -386,6 +399,7 @@ def init_physics_state(
         # Lagged convective surface precip for the standalone-path Slingo
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
+        sfc_precip=sfc_precip,
     )
 
 

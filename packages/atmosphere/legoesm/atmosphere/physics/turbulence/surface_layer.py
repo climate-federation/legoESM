@@ -129,11 +129,17 @@ def compute_surface_fluxes(
     # --- Cold-pool gustiness ------------------------------------------------
     # Static Python gate on a compile-time config value (feature gating, not
     # data-dependent selection), so the term costs nothing and changes nothing
-    # when off.  The gust inflates the wind SPEED that drives the exchange, and
-    # is applied by scaling (u, v) so that the stress DIRECTION is unchanged
-    # while |U| carries the gust -- the same treatment the coupler's
-    # apply_gustiness call gives it.  Applied here, before the branch, so the
-    # constant-coefficient and MOST paths cannot diverge.
+    # when off.
+    #
+    # The gust enters the SCALAR wind only.  Pre-scaling (u, v) -- the first
+    # version of this -- makes the constant-coefficient stress
+    # rho*Cd*U_eff*|u_eff| = rho*Cd*U_eff^2, whereas the AeroBulk/COARE
+    # convention next door is tau = -rho*Cd*U_eff*u_i: ONE factor of the
+    # gust-inclusive wind, one RAW component for direction and magnitude
+    # (bulk_flux.py, "Stress normalization").  Squaring it also turns an
+    # isotropic unresolved gust into a resolved directional momentum source as
+    # |U| -> 0, which is the regime this term exists for.
+    u_gust = None
     if config.convective_gustiness_coeff != 0.0 and sfc_precip is not None:
         from legoesm.core.bulk_flux import convective_gust_wind
 
@@ -141,19 +147,7 @@ def compute_surface_fluxes(
             sfc_precip, config.convective_gustiness_coeff, rho,
             cap=config.convective_gustiness_cap,
         )
-        speed = jnp.sqrt(u ** 2 + v ** 2 + _WIND_SPEED_FLOOR_M2_S2)
-        # sqrt(|U|^2 + u_gust^2) / |U| -- the quadrature combination of
-        # apply_gustiness, re-expressed as a scale factor so the two wind
-        # COMPONENTS (and hence the stress direction) stay consistent.
-        scale = jnp.sqrt(speed ** 2 + u_gust ** 2) / speed
-        u = u * scale
-        v = v * scale
-    # Route every stability-dependent bulk scheme — the fixed-roughness
-    # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
-    # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
-    # uses the local roughness ``config.z0`` via the neutral log law and the
-    # selectable ``stability_scheme`` stable branch; without this it would fall
-    # through to the constant-Cd path and silently ignore z0 and stability.
+
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
@@ -162,6 +156,7 @@ def compute_surface_fluxes(
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
+            u_gust_extra=u_gust,
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
             unstable_gamma=config.most_unstable_gamma,
@@ -175,7 +170,11 @@ def compute_surface_fluxes(
     Ch = config.Ch_neutral
 
     # Wind speed with minimum to avoid division by zero
-    wind_speed = jnp.sqrt(u ** 2 + v ** 2 + 1e-4)  # coeff-ok: wind-speed floor [m^2/s^2]
+    wind_speed = jnp.sqrt(u ** 2 + v ** 2 + _WIND_SPEED_FLOOR_M2_S2)
+    if u_gust is not None:
+        # Scalar wind only -- (u, v) stay raw, so simple_bulk_fluxes below
+        # produces tau = -rho*Cd*wind_speed*u_i, the COARE convention.
+        wind_speed = jnp.sqrt(wind_speed ** 2 + u_gust ** 2)
 
     # Friction velocity
     ustar = jnp.sqrt(Cd) * wind_speed

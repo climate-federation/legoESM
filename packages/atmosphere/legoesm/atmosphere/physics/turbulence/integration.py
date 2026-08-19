@@ -219,14 +219,44 @@ def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
     return "tke"
 
 
+#: Turbulence schemes whose kernel accepts ``sfc_precip`` and therefore can
+#: apply the precipitation-driven cold-pool gustiness.  Every OTHER scheme
+#: calls the same ``compute_surface_fluxes`` but has no channel for the
+#: precipitation, so enabling the term there would be a silent no-op — the
+#: exact failure mode the dispatch-hardening rule exists to prevent.  Grow this
+#: set only together with the kernel signature it names.
+_COLD_POOL_GUST_SCHEMES = frozenset({"louis"})
+
+
+def validate_cold_pool_gustiness(scheme_name, scheme_config) -> None:
+    """Reject a cold-pool gustiness setting the active scheme cannot honour.
+
+    Raises rather than silently ignoring the coefficient: a config that looks
+    enabled but does nothing is worse than an error, because the run produces
+    plausible numbers under a parameterization the user believes is active.
+    Called at FACTORY time on the static config, never inside a traced body.
+    """
+    surface = getattr(scheme_config, "surface", None)
+    coeff = getattr(surface, "convective_gustiness_coeff", 0.0) if surface \
+        else 0.0
+    if coeff != 0.0 and scheme_name not in _COLD_POOL_GUST_SCHEMES:
+        raise ValueError(
+            f"turbulence scheme {scheme_name!r} cannot apply the cold-pool "
+            f"gustiness (convective_gustiness_coeff={coeff!r}): only "
+            f"{sorted(_COLD_POOL_GUST_SCHEMES)} thread the surface "
+            "precipitation into compute_surface_fluxes. Set the coefficient "
+            "to 0.0, or use a scheme that consumes it."
+        )
+
+
 def _read_sfc_precip(phys_state, scheme_name, scheme_config, ncol, dtype):
     """Surface precipitation for the cold-pool gustiness term, or ``None``.
 
-    Returns ``None`` unless the active scheme actually consumes it AND the term
-    is enabled, so a scheme without the ``sfc_precip`` keyword is never handed
-    one and every existing run keeps its exact call signature.
+    Returns ``None`` unless the active scheme consumes it AND the term is
+    enabled, so a scheme without the ``sfc_precip`` keyword is never handed one
+    and every existing run keeps its exact call signature.
     """
-    if scheme_name != "louis":
+    if scheme_name not in _COLD_POOL_GUST_SCHEMES:
         return None
     surface = getattr(scheme_config, "surface", None)
     if surface is None or getattr(
@@ -234,8 +264,21 @@ def _read_sfc_precip(phys_state, scheme_name, scheme_config, ncol, dtype):
         return None
     stored = getattr(phys_state, "sfc_precip", None) if phys_state else None
     if stored is None:
+        # Field defaults to None (appended-last convention) and is zeros before
+        # the first precipitating step; either way a dry column is correct.
         return jnp.zeros((ncol,), dtype=dtype)
-    return jnp.reshape(stored, (-1,))[:ncol].astype(dtype)
+    flat = jnp.reshape(stored, (-1,))
+    if flat.shape[0] != ncol:
+        # NEVER silently slice: an oversized carry would hand this rank the
+        # first ncol columns of a global field (the wrong geography), and an
+        # undersized one would fail later through an opaque broadcast.
+        raise ValueError(
+            f"PhysicsState.sfc_precip has {flat.shape[0]} columns but the "
+            f"turbulence call has {ncol}. The cold-pool gustiness carry must "
+            "be the local column set; a mismatched carry is a decomposition "
+            "or restart error, not something to truncate."
+        )
+    return flat.astype(dtype)
 
 
 def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
@@ -430,6 +473,7 @@ def _make_hydrostatic_turbulence(
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    validate_cold_pool_gustiness(scheme_name, scheme_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
 
@@ -602,6 +646,7 @@ def _make_mpas_turbulence(
     Audit 2026-05-12 finding MEDIUM #10.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    validate_cold_pool_gustiness(scheme_name, scheme_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     # Resolved once here from the static kernel, so an unsupported scheme
@@ -883,6 +928,7 @@ def _make_nonhydrostatic_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    validate_cold_pool_gustiness(scheme_name, scheme_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     if carry_field in ("qke", "clubb_moments"):
@@ -1049,6 +1095,7 @@ def _make_spectral_pe_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
+    validate_cold_pool_gustiness(scheme_name, scheme_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
     if carry_field in ("qke", "clubb_moments"):
