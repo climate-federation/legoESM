@@ -7282,6 +7282,41 @@ def main() -> int:
                       f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
                       f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
                       f"area-wtd over wet)", flush=True)
+                # PER-BAND split (2026-08-19). The SO freshwater budget probe
+                # localised the missing Antarctic summer fresh layer to the
+                # runoff+ice channel (NEMO: 16.7e-6 kg/m2/s of a 30.4 total,
+                # while our P-E already matches NEMO's open-ocean E-P), and a
+                # GLOBAL Sv total cannot show whether OUR runoff+ice reaches
+                # that band. Same fields, area-weighted mean per band, in the
+                # probe's units so the two are directly comparable.
+                _latb = np.degrees(np.asarray(getattr(grid, "lat_T", None)
+                                              if getattr(grid, "lat_T", None)
+                                              is not None else grid.lat))
+                if _latb.shape == _wb.shape:
+                    _wgt = np.cos(np.deg2rad(_latb)) * _wb
+                    print("[fwbudget-bands] 1e-6 kg/m2/s, + = into ocean "
+                          "(evap column is +up):", flush=True)
+                    for _bn, (_lo, _hi) in (("antarctic_S_of_45S", (-90, -45)),
+                                            ("SH_midlat_45S_23S", (-45, -23)),
+                                            ("arctic_N_of_45N", (45, 90))):
+                        _m = (_latb >= _lo) & (_latb < _hi) & (_wgt > 0)
+                        if not _m.any():
+                            continue
+                        def _bm(_x):
+                            if _x is None:
+                                return 0.0
+                            _a = np.asarray(_x)
+                            return float((_a[_m] * _wgt[_m]).sum()
+                                         / _wgt[_m].sum())
+                        _p, _e = _bm(fw.precip), _bm(fw.evap)
+                        _r, _i = _bm(fw.runoff), _bm(fw.ice_fw)
+                        print(f"[fwbudget-bands]   {_bn:22s} P={1e6*_p:8.2f} "
+                              f"E={1e6*_e:8.2f} R={1e6*_r:8.2f} "
+                              f"ice={1e6*_i:8.2f}  P-E+R+ice="
+                              f"{1e6*(_p-_e+_r+_i):8.2f}", flush=True)
+                else:
+                    print(f"[fwbudget-bands] SKIPPED: lat {_latb.shape} does "
+                          f"not align with the mask {_wb.shape}", flush=True)
             # _ocean_step = single-device model.step (default), the lat-band
             # SPMD global-in/global-out step (--n-gpus > 1), or the PERSISTENT
             # sharded inner step (--spmd-persistent-state); all apply the
