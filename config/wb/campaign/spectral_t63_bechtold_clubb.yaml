@@ -158,6 +158,14 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  surface_drag_confounded: "builder_refuses_classical_scheme"
+  # #1464: NOT enabled here, deliberately. This campaign's classical arm runs
+  # `clubb`, and the learned arm's drag builder refuses prognostic schemes
+  # (clubb/tke/mynn25/clubb_lite/edmf) because it threads no PhysicsState and
+  # would re-seed the carry from the floor every step. Giving the learned arm
+  # `smagorinsky` or `louis` instead would equalise nothing — it would just
+  # change which scheme the two arms differ by. Enable once the builder can
+  # thread the CLUBB carry.
   nn_hidden: 256
   nn_layers: 4
 sfno:

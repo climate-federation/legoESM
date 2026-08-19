@@ -172,6 +172,7 @@ def _mpi_rank_size():
     return mpi_rank_size()
 
 
+
 def main(argv=None):
     cfg = build_scale_config_from_args(argv)
 
