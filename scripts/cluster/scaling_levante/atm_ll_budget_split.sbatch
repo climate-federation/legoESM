@@ -82,6 +82,11 @@ export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
 rc=0
 
 NLAT="${NLAT:-2048}"; NLON=$((2 * NLAT)); GPN=4
+# Device counts to split, largest first. Overridable so the ladder can be
+# cut into smaller allocations that clear the queue sooner (a 32-node job
+# waits behind everything; two 8/16-node jobs do not).
+DEVS="${DEVS:-128 64 32}"
+FIRST_DEV="${DEVS%% *}"
 
 run_arm () {  # ndev nocomm tag
   local NDEV=$1 NC=$2 TAG=$3
@@ -103,8 +108,8 @@ run_arm () {  # ndev nocomm tag
 
 # Discarded warm-up arm: the node ramp must not alias into the first timed
 # arm (this campaign lost three runs to exactly that).
-run_arm 128 0 warmup_discard
-for ND in 128 64 32; do
+run_arm "$FIRST_DEV" 0 warmup_discard
+for ND in $DEVS; do
   run_arm "$ND" 0 "full_${ND}_a"
   run_arm "$ND" 1 "nc_${ND}_a"
   run_arm "$ND" 0 "full_${ND}_b"
@@ -112,11 +117,11 @@ for ND in 128 64 32; do
 done
 
 echo "=== RECEIPTS ==="
-"$PY" - "$OUTDIR" <<'EOF'
+"$PY" - "$OUTDIR" "$DEVS" <<'EOF'
 import json, os, sys
 
 outdir = sys.argv[1]
-DEVS = (32, 64, 128)
+DEVS = tuple(sorted(int(d) for d in sys.argv[2].split()))
 # Single-GPU LL2048 ladder point (job 27051113), same build and flags.
 T1 = 201.4807
 
@@ -161,15 +166,18 @@ for nd in DEVS:
     if abs(comm) < 0.5 * spread * full:
         print(f"      ndev={nd}: INCONCLUSIVE — comm term is inside the "
               f"arm spread")
-    if nd == 128:
-        verdict_row = (comm, excess)
+    if nd == max(DEVS):
+        verdict_row = (comm, excess, nd)
 
-comm, excess = verdict_row
+comm, excess, nd_v = verdict_row
+if nd_v != 128:
+    print(f"NOTE: gate thresholds were written for 128 devices; the largest "
+          f"row here is {nd_v}, so the verdict below is indicative only")
 if comm >= 1.2:
-    print("VERDICT: CONFIRMS comm-bound at 128 — communication is at least "
+    print("VERDICT: CONFIRMS comm-bound at the top row — communication is at least "
           "half the excess over ideal; comm levers are the right target")
 elif comm <= 0.4:
-    print("VERDICT: REFUTES comm-bound at 128 — the excess is local work "
+    print("VERDICT: REFUTES comm-bound at the top row — the excess is local work "
           "that stopped shrinking; comm levers aim at the wrong term")
     sys.exit(6)
 else:
