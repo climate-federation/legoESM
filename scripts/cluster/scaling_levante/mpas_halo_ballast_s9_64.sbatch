@@ -77,15 +77,26 @@ OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ballast_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
 mkdir -p "$LEGOESM_JIT_CACHE_DIR"
+# Match the 2^n ladder's environment so a split measured here can be
+# compared against a ladder point: the NCCL multi-channel p2p pair
+# (-13..-18 % at s9@64) and the shard-autotuning disable that this
+# jaxlib needs at >= 64 ranks.
+export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 rc=0
 
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
+# Halo variant under test. The 2^n ladder runs RAGGED=1 (the current
+# lane best, 5.73 ms at s9@64); the original ballast receipt ran the
+# coloured schedule, so the variant has to be selectable or the split
+# belongs to a configuration nothing else is measured in.
+RAGGED="${RAGGED:-0}"
 NDEV=$((NODES * GPN))
 
 run_arm () {  # ballast tag [nocomm] [nostage]
   local BAL=$1 TAG=$2 NC=${3:-0} NS=${4:-0}
-  echo "=== s${SUBDIV}@${NDEV} wide=1 ballast=$BAL nocomm=$NC nostage=$NS [$TAG] ==="
-  LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
+  echo "=== s${SUBDIV}@${NDEV} wide=1 ragged=$RAGGED ballast=$BAL nocomm=$NC nostage=$NS [$TAG] ==="
+  LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO="$RAGGED" \
   LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC \
   LEGOESM_MPAS_HALO_NOSTAGE=$NS JAX_ENABLE_X64=0 \
     timeout 1800 srun --nodes="$NODES" --ntasks="$NDEV" \

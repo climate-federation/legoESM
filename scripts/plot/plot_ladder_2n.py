@@ -26,12 +26,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# (label, receipt-filename glob). One curve per entry.
+# (label prefix, receipt-filename glob, colour, marker). The problem size in
+# each label is READ FROM THE RECEIPT, never typed here -- a hand-typed cell
+# count is one refactor away from labelling the wrong mesh.
+# Several filename conventions exist because the job scripts were renamed
+# mid-campaign; a point re-measured under the newer name must not be missed,
+# so each series lists every glob that has ever held its receipts and the
+# HIGHEST job id wins for a given device count.
 SERIES = [
-    ("MPAS L9 (40,962 cells x 26 lev)", "mpas_n*.jsonl", "#0072B2", "o"),
-    ("MPAS L10 (163,842 cells x 26 lev)", "mpas_s10_n*.jsonl", "#56B4E9", "s"),
-    ("lat-lon 2048x4096 L26", "latlon_n*.jsonl", "#D55E00", "^"),
-    ("lat-lon 4096x8192 L26", "latlon_4096_n*.jsonl", "#E69F00", "D"),
+    ("MPAS L9", ("mpas_n*.jsonl", "mpas_s9_n*.jsonl"), "#0072B2", "o"),
+    ("MPAS L10", ("mpas_s10_n*.jsonl",), "#56B4E9", "s"),
+    ("lat-lon", ("latlon_n*.jsonl",), "#D55E00", "^"),
+    ("lat-lon", ("latlon_4096_n*.jsonl",), "#E69F00", "D"),
 ]
 
 # Levante's gpu partition holds 63 A100 nodes x 4 GPUs = 252 devices, so 128
@@ -39,21 +45,46 @@ SERIES = [
 MACHINE_MAX_POW2 = 128
 
 
-def load(receipt_dir: str, pattern: str):
-    """Return [(n_devices, ms, job_id)] sorted by device count."""
-    points = []
-    for path in glob.glob(os.path.join(receipt_dir, pattern)):
-        with open(path) as fh:
-            lines = [ln for ln in fh if ln.strip()]
-        if not lines:
-            continue
-        rec = json.loads(lines[-1])  # last line = final receipt for that arm
-        ms = rec.get("steady_median_ms")
-        n = rec.get("n_devices")
-        if ms is None or n is None:
-            raise ValueError(f"{path}: receipt has no steady_median_ms/n_devices")
-        points.append((n, float(ms), rec.get("metadata", {}).get("slurm_job_id")))
-    return sorted(points)
+def _size_label(rec):
+    """Problem size straight from the receipt, never typed by hand."""
+    nlev = rec.get("nlev") or rec.get("n_levels")
+    if rec.get("n_cells") and nlev:
+        return f"{rec['n_cells']:,} cells x {nlev} lev"
+    if rec.get("n_lat") and rec.get("n_lon") and nlev:
+        return f"{rec['n_lat']}x{rec['n_lon']} x {nlev} lev"
+    return None
+
+
+def load(receipt_dir: str, patterns):
+    """Return ([(n_devices, ms, job_id)] sorted by device count, size label).
+
+    A file may hold several lines when a point was re-measured; the LAST line
+    is that file's current receipt.  When two FILES carry the same device
+    count (a re-measurement landed under a newer filename), the higher SLURM
+    job id wins -- job ids increase with time on this cluster.
+    """
+    best = {}
+    size = None
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(receipt_dir, pattern)):
+            with open(path) as fh:
+                lines = [ln for ln in fh if ln.strip()]
+            if not lines:
+                continue
+            rec = json.loads(lines[-1])
+            ms = rec.get("steady_median_ms")
+            n = rec.get("n_devices")
+            if ms is None or n is None:
+                raise ValueError(
+                    f"{path}: receipt has no steady_median_ms/n_devices")
+            job = rec.get("metadata", {}).get("slurm_job_id")
+            key = int(job) if job and str(job).isdigit() else -1
+            if n not in best or key > best[n][0]:
+                best[n] = (key, float(ms), job)
+            if size is None:
+                size = _size_label(rec)
+    points = sorted((n, v[1], v[2]) for n, v in best.items())
+    return points, size
 
 
 def main() -> None:
@@ -65,10 +96,12 @@ def main() -> None:
     fig, (ax, axe) = plt.subplots(1, 2, figsize=(12.5, 5.0))
 
     for label, pattern, color, marker in SERIES:
-        pts = load(args.receipts, pattern)
+        pts, size = load(args.receipts, pattern)
         if not pts:
             print(f"[skip] no receipts for {pattern}")
             continue
+        if size:
+            label = f"{label} ({size})"
         n = [p[0] for p in pts]
         ms = [p[1] for p in pts]
         print(f"{label}")
