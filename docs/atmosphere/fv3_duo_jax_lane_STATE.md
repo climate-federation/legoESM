@@ -541,6 +541,34 @@ claims BITWISE parity with a sequential NumPy loop — unroll over the
 static trip count there. Under jit everything is compiled anyway and
 only the ~1e-14 parity contract holds.
 
+## The NumPy lane's NH gap is LOCALISED (2026-08-19) — and it is small
+
+The 6.6116e-04 headline was a tiny-signal RELATIVE reading: the
+absolute gap is **1.3003e-07 m/s in w** against an oracle one-step w
+tendency of 1.9661e-04 m/s; every other field sits at <= 8.4e-07 of
+its own tendency. (Jobs 9433917/9435591, probe
+scripts/validate/fv3_native/nh_substep_w_trace.py.)
+
+CONFIRMED properties: w-only; 100% boundary-ring, corner-adjacent,
+argmax k=0, decaying downward by 4 orders; face classes {1,2,4,5} and
+{3,6} carry bit-close values — deterministic geometry, not noise; a
+STANDING floor (1.300e-07 at N = 1, 3, 10 steps — the relative number
+FALLS as the tendency grows); w_limiter is a proven no-op (True/False
+twin bitwise); constants and every deck parameter match the oracle
+echo (GFS both sides); coherent boundary-METRIC perturbation at 1e-12
+and 1e-10 moves it NOT AT ALL — the shared-floor hypothesis is
+REFUTED at the metric level.
+
+Localised to the acoustic-tail w path: Riem_Solver3 writes essentially
+all of w every substep, and the kord_wz remap's own increment at the
+residual's site class is the same order — the data in hand cannot rank
+them. CAUSE UNKNOWN, and said so. The named discriminator: the
+fv3_recon debug oracle build has dyncore_dump2d — dump oracle w
+post-dyn_core/pre-remap and score the port's pre-remap w against it
+(one run splits acoustic vs remap). Weaker third suspect: ext-bundle
+boundary fill feeding the solver (amat6/ext bases were outside the
+perturbation scope).
+
 ## OPEN, and honestly labelled (codex MAJOR, 2026-08-16)
 
 TWO TOLERANCES ARE NOT EXPLAINED, and both were briefly mislabelled by
