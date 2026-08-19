@@ -615,6 +615,62 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="float64"):
             drv.load_checkpoint(p)
 
+    def test_restart_chain_is_bitwise(self, tmp_path):
+        """TWO bounces, not one (GLM 2026-08-19).
+
+        A single split point cannot see a bug phase-locked to the
+        cadence or to the first-restarted step: N -> ckpt -> M -> ckpt
+        -> K must equal N+M+K straight through. Also exercises loading a
+        checkpoint that was itself written by a restarted run.
+        """
+        from legoesm.driver.model_driver import ModelDriver
+        mk = dict(days=3, checkpoint_days=1, model_type="hydrostatic")
+        da, db = tmp_path / "ca", tmp_path / "cb"
+        da.mkdir(), db.mkdir()
+        drv_a = ModelDriver(_fv3_duo_config(output_dir=str(da), **mk),
+                            output_dir=da)
+        drv_a.setup()
+        assert drv_a.run() == "COMPLETED"
+        dt = drv_a.config.dycore.dt
+        n1 = max(1, int(86400.0 / dt))
+
+        # bounce 1: fresh driver from day 1
+        drv_b = ModelDriver(_fv3_duo_config(output_dir=str(db), **mk),
+                            output_dir=db)
+        drv_b.setup()
+        st, dy = drv_b.load_checkpoint(
+            da / f"fv3duo_ckpt_step_{n1:09d}.npz")
+        assert drv_b.run(start_step=st, start_day=dy) == "COMPLETED"
+        # bounce 2: another fresh driver, from the checkpoint B WROTE at
+        # day 2 -- i.e. a restart of a restart.
+        dc = tmp_path / "cc"
+        dc.mkdir()
+        drv_c = ModelDriver(_fv3_duo_config(output_dir=str(dc), **mk),
+                            output_dir=dc)
+        drv_c.setup()
+        st2, dy2 = drv_c.load_checkpoint(
+            db / f"fv3duo_ckpt_step_{2 * n1:09d}.npz")
+        assert drv_c.run(start_step=st2, start_day=dy2) == "COMPLETED"
+
+        def _walk(b):
+            out = {}
+            for k, v in b["state"].items():
+                out[f"state.{k}"] = np.asarray(v)
+            for k, v in b["press"].items():
+                out[f"press.{k}"] = np.asarray(v)
+            for i, qt in enumerate(b["q"]):
+                out[f"q[{i}]"] = np.asarray(qt)
+            out["omga"] = np.asarray(b["omga"])
+            return out
+
+        fa, fc = _walk(drv_a.state), _walk(drv_c.state)
+        assert set(fa) == set(fc)
+        diffs = [nm for nm in sorted(fa)
+                 if fa[nm].shape != fc[nm].shape
+                 or fa[nm].dtype != fc[nm].dtype
+                 or fa[nm].tobytes() != fc[nm].tobytes()]
+        assert not diffs, f"restart CHAIN is not bitwise: {diffs}"
+
     def test_start_day_must_match_the_checkpoint(self, tmp_path):
         """The (step, day) pair is the checkpoint's, not the caller's.
 
@@ -716,8 +772,11 @@ class TestFV3DuoRestart:
         if model_type == "nonhydrostatic":
             assert any(k.startswith("nh.") for k in fa), \
                 "NH arm persisted no nh carry"
+        # dtype BEFORE tobytes (GLM MINOR): equal byte counts compare
+        # equal across float64x3 vs int64x3, so bytes alone leaves a hole.
         diffs = [nm for nm in sorted(fa)
                  if fa[nm].shape != fb[nm].shape
+                 or fa[nm].dtype != fb[nm].dtype
                  or fa[nm].tobytes() != fb[nm].tobytes()]
         assert not diffs, (
             f"restart is NOT bitwise; differing arrays: {diffs}")

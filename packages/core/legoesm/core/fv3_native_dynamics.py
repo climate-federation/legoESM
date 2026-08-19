@@ -57,11 +57,17 @@ is the pre-dyn_core ``delp`` (``:472-478``), copied per ``n_map``.
 The remap then makes its ``nr`` tracer passes through
 ``fv_mapz.F90:330-342`` as before.
 
-The tracers still do not FEED BACK on this deck, and the guards that
-keep that visible remain: ``zvir != 0`` (the ``dp1 = zvir*q(sphum)``
-coupling at ``:291``/``:402`` and the ``pt/(1 + r_vir*q)`` at
-``fv_mapz.F90:975``) and ``consv_te != 0`` (the total-energy fixer)
-are refused, exactly as before.
+MOIST FEEDBACK IS NOW ENABLED ON THE HYDROSTATIC ARM (2026-08-19).
+``zvir != 0`` forms ``dp1 = zvir*q(sphum)`` (``:291``) once before the
+k_split loop and couples it into ``pt*(1+dp1)/pkz`` (``:402``), with
+the closing ``pt/(1 + r_vir*q)`` at ``fv_mapz.F90:975`` consuming the
+POST-transport humidity.  On the PINNED (adiabatic) deck zvir is 0 and
+the tracers remain passengers, which is why the certified 1.1866e-09
+parity is unaffected.  Still refused, and gated by behavioural tests:
+``consv_te != 0`` (the total-energy fixer, ``fv_mapz.F90:628-747``) and
+moist NON-hydrostatic, whose ``pkz`` multiplies the log argument by
+``(1+dp1)`` at ``:307-309`` while ``p_var_nonhydrostatic`` computes the
+dry form.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------

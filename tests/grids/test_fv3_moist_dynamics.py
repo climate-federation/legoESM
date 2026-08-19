@@ -84,23 +84,53 @@ def test_halo_is_untouched_by_either_arm():
         assert np.array_equal(pt[halo, :], before[halo, :])
 
 
-@pytest.mark.parametrize("bad", [None, True, 1.5, -1, 99])
-def test_sphum_index_is_validated_not_guessed(bad):
-    """A guessed index silently couples the wrong species (the reason
-    the driver validates instead of defaulting)."""
+def _minimal_step_kwargs(**over):
+    """Arguments that reach the entry guards and nothing beyond them.
+
+    The guards under test all fire before ctx/state are read (the only
+    prior checks are k_split/n_split, the six-face length check, and
+    require_uniform_damping_lane), so dummies suffice -- and if a guard
+    is ever MOVED below the dynamics, these calls stop raising, which is
+    exactly what a source-grep test could not detect.
+    """
+    six = [{} for _ in range(6)]
+    kw = dict(ctx={}, state=six, press=[{} for _ in range(6)],
+              bdt=60.0, km=KM, k_split=1, n_split=2, ptop=100.0,
+              ak=np.zeros(KM + 1), bk=np.zeros(KM + 1), akap=2.0 / 7.0,
+              cp_air=1004.6, kord_mt=9, kord_tm=-9, kord_tr=9,
+              q=[[np.zeros((MA, MA, KM))] for _ in range(6)],
+              zvir=0.61, sphum_index=0, hydrostatic=True)
+    kw.update(over)
+    return kw
+
+
+@pytest.mark.parametrize("bad,match", [
+    (None, "sphum_index"),
+    (True, "sphum_index"),
+    (1.5, "sphum_index"),
+    (-1, "out of range"),
+    (99, "out of range"),
+])
+def test_sphum_index_is_validated_not_guessed(bad, match):
+    """BEHAVIOURAL (codex MAJOR 2026-08-19): the first version of this
+    test parametrized five bad values, never passed them anywhere, and
+    grepped the source instead -- it would have passed with the guard
+    deleted. It now calls the function."""
     from legoesm.core.fv3_native_dynamics import fv_dynamics_step
-    import inspect
-    src = inspect.getsource(fv_dynamics_step)
-    assert "sphum_index" in src and "silently" in src, (
-        "the zvir guard must name what a wrong index would do")
+    with pytest.raises(ValueError, match=match):
+        fv_dynamics_step(**_minimal_step_kwargs(sphum_index=bad))
+
+
+def test_no_tracers_with_zvir_is_refused():
+    from legoesm.core.fv3_native_dynamics import fv_dynamics_step
+    with pytest.raises(ValueError, match="no tracers|nq > 0"):
+        fv_dynamics_step(**_minimal_step_kwargs(q=[[] for _ in range(6)]))
 
 
 def test_unported_moist_arms_still_refuse():
-    """consv_te and the NH moist pkz are NOT ported — both must raise."""
+    """consv_te and the NH moist pkz must RAISE, not be greppable."""
     from legoesm.core.fv3_native_dynamics import fv_dynamics_step
-    import inspect
-    src = inspect.getsource(fv_dynamics_step)
-    assert "consv_te != 0.0" in src, "the energy-fixer refusal vanished"
-    assert "fv_dynamics.F90:307-309" in src, (
-        "the NH moist pkz refusal vanished -- running it dry applies a "
-        "pkz missing the virtual-temperature factor on every NH step")
+    with pytest.raises(NotImplementedError, match="consv_te"):
+        fv_dynamics_step(**_minimal_step_kwargs(zvir=0.0, consv_te=1.0))
+    with pytest.raises(NotImplementedError, match="307-309|non-hydrostatic"):
+        fv_dynamics_step(**_minimal_step_kwargs(hydrostatic=False))

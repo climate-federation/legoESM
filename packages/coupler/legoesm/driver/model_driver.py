@@ -7091,6 +7091,21 @@ class ModelDriver:
         instead treats ``--days`` as the number of days *this job*
         advances and its chain launchers pass remaining days — do not
         copy that convention here.  Restart flows ONLY through
+        WHY THE BUNDLE IS SUFFICIENT (stated, not assumed -- GLM
+        2026-08-19 flagged that "restart is bitwise" proves only that the
+        DYNAMICAL STATE round-trips, and is blind to whatever the driver
+        loop carries): this lane carries NO loop state. There are no
+        diagnostic accumulators (snapshots are written straight from the
+        bundle, no time-means), the blowup guard is stateless (it
+        re-evaluates each snapshot from scratch), the CFL clamp is a pure
+        function of the config, and the step loop runs over GLOBAL step
+        numbers (``range(loaded_step + 1, n_steps_total + 1)``), so the
+        diagnostic and checkpoint cadences are pure functions of the
+        restored step and their phase is restart-invariant by
+        construction. Any FUTURE loop state -- an accumulator, a
+        hysteretic clamp, a physics carry -- breaks that invariant and
+        must join the bundle, not the loop.
+
         ``load_checkpoint`` on an ``fv3duo_ckpt_v1`` file, which stages
         the FULL persisted bundle (state/press/q/omga/nh, fp64) —
         nothing is rebuilt from delp, so the resumed trajectory is
@@ -7318,7 +7333,11 @@ class ModelDriver:
         arrays = self._fv3_duo_flatten_bundle(bundle)
         mcfg = self.model.config
         path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
-        tmp = path.with_name(path.name + ".tmp")
+        # UNIQUE tmp name (GLM 2026-08-19): a fixed "<name>.tmp" lets two
+        # concurrent writers in one directory interleave their bytes, and
+        # os.replace then atomically publishes garbage -- an atomic rename
+        # of a non-atomically-produced file is not atomicity.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         with open(tmp, "wb") as fh:
             np.savez(
                 fh,
@@ -7336,7 +7355,19 @@ class ModelDriver:
                 _nq=np.int64(len(bundle["q"])),
                 _git_sha=git_provenance(Path(__file__)).commit,
                 **arrays)
+            # fsync BEFORE the rename, and the directory after it: page
+            # cache survives SIGKILL but not node loss, and os.replace is
+            # metadata-only. Without this the claim is "kill-atomic", not
+            # crash-durable -- and crash durability is what a checkpoint
+            # is for (GLM 2026-08-19).
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
+        _dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(_dfd)
+        finally:
+            os.close(_dfd)
         logger.info("  fv3_duo checkpoint: step %d day %.3f -> %s",
                     step, day, path.name)
 
