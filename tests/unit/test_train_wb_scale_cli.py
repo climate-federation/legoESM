@@ -118,14 +118,17 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
     calls that under ``eqx.filter_value_and_grad``.  With a cold optics cache
     the NetCDF gas-optics load then runs against Equinox tracers and the job
     dies with TracerArrayConversionError (job 26905933, six minutes of ERA5
-    loading wasted first).  ``main`` must therefore build the segment once with
-    CONCRETE params, before the training loop.
+    loading wasted first).  The entry point must therefore build the segment
+    once with CONCRETE params, before the training loop.
+
+    Inspects ``_main``, which HOLDS the body; the public ``main`` is a
+    three-line wrapper that only applies the MPI-abort guard.
     """
     import ast
 
     tree = ast.parse(_ENTRY.read_text())
     main = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "main")
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
 
     # It must be a bare statement in main's OWN body: a call nested in an inner
     # def is the traced one this guards against, and one wrapped in ``if
@@ -136,7 +139,7 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
             and isinstance(stmt.value, ast.Call)
             and isinstance(stmt.value.func, ast.Name)
             and stmt.value.func.id == "make_run_seg"]
-    assert warm, ("main() must call make_run_seg(...) as an unconditional "
+    assert warm, ("_main() must call make_run_seg(...) as an unconditional "
                   "top-level statement — it warms the RRTMGP optics-table "
                   "cache outside the trace")
     assert any(isinstance(a, ast.Name) and a.id == "params"
@@ -151,3 +154,107 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
     assert era5, "ERA5 loader call not found — did main() get restructured?"
     assert min(c.lineno for c in warm) < min(era5), (
         "the warm-up must run BEFORE the ERA5 load, not after it")
+
+
+def _entry_ast():
+    import ast
+    return ast.parse(_ENTRY.read_text())
+
+
+def test_the_entrypoint_aborts_the_whole_job_when_one_rank_dies():
+    """Under MPI a rank that raises anywhere -- data load, the reachability
+    probe, the training loop -- must MPI_Abort, or its peers block forever in
+    the next collective.  ``main`` exists only to apply that guard."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    def _is_guard(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "mpi_abort_on_uncaught"
+                and any(isinstance(a, ast.Name) and a.id == "_main"
+                        for a in node.args))
+
+    # The guarded wrapper must be CALLED, not merely built: an unused
+    # ``mpi_abort_on_uncaught(_main)`` guards nothing.
+    invoked = [n for n in ast.walk(main)
+               if isinstance(n, ast.Call) and _is_guard(n.func)]
+    assert invoked, "main() must CALL mpi_abort_on_uncaught(_main)(...)"
+
+
+def test_the_freeze_is_reached_only_through_the_mode_gate():
+    """A neural model must never be frozen on a zero gradient (its decoder is
+    zero-initialized, so every upstream weight is dead at step 0).  The gate is
+    only worth anything if the call site actually sits behind it."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    calls = [n for n in ast.walk(main)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "freeze_unreachable"]
+    assert calls, "_main() must call freeze_unreachable"
+    # Only the TRUE branch counts: a call in the `else` would run for exactly
+    # the neural modes the gate exists to protect.
+    in_true_branch = set()
+    for stmt in ast.walk(main):
+        if not isinstance(stmt, ast.If):
+            continue
+        if not any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                   and c.func.id == "_uses_reachability_freeze"
+                   for c in ast.walk(stmt.test)):
+            continue
+        for body_stmt in stmt.body:
+            in_true_branch.update(id(n) for n in ast.walk(body_stmt))
+    assert all(id(c) in in_true_branch for c in calls), (
+        "every freeze_unreachable(...) call must sit in the TRUE branch of an "
+        "`if _uses_reachability_freeze(...)`")
+
+
+def test_the_epoch_checkpoint_carries_the_frozen_parameters():
+    """A frozen leaf lives in ``static``; a checkpoint written from the
+    trainable half alone would silently drop 100+ parameters."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    writes = [n for n in ast.walk(main)
+              if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Attribute)
+              and n.func.attr == "tree_serialise_leaves"]
+    assert writes, "_main() must write an epoch checkpoint"
+    for w in writes:
+        # Both halves are named: the CURRENT trainable leaves the loop handed
+        # back (serialising the stale outer `arr` would write epoch-0 values)
+        # and the frozen half.
+        combines = [c for a in w.args for c in ast.walk(a)
+                    if isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "combine"
+                    and [x.id for x in c.args
+                         if isinstance(x, ast.Name)] == ["cur_arr", "static"]]
+        assert combines, ("the checkpoint must serialise "
+                          "eqx.combine(cur_arr, static)")
+
+
+def test_the_frozen_parameters_are_re_measured_after_training():
+    """The freeze is decided on the untrained model; the run must say which
+    frozen parameters became reachable once the live ones moved."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    loop = [n.lineno for n in ast.walk(main)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "mpi_data_parallel_training_loop"]
+    remeasure = [n.lineno for n in ast.walk(main)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "measure_leaf_reachability"]
+    assert loop and remeasure, "_main() must train and then re-measure"
+    assert max(remeasure) > max(loop), (
+        "the re-measurement must run AFTER the training loop -- on the trained "
+        "parameters, not the initial ones")

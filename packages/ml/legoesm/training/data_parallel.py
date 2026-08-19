@@ -67,6 +67,12 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
     rank 0 blocked in the allreduce until walltime (~11 h). Aborting on any rank
     converts that hang into an immediate, clean job death.
 
+    A CLEAN ``SystemExit`` is exempt: ``--help`` and ``sys.exit(0)`` are not a
+    dead rank, and aborting on them would turn printing the usage text into an
+    MPI_Abort. The test matches the interpreter's own exit status rather than
+    truthiness -- clean only for ``None`` and an integer zero, so
+    ``sys.exit("usage error")`` (which exits 1) still aborts.
+
     Single-rank / no ``mpi4py`` -> transparent passthrough (the exception just
     propagates), so serial training and unit tests are unaffected. Usable bare
     (``@mpi_abort_on_uncaught``) or parameterised (``@mpi_abort_on_uncaught(comm=c)``).
@@ -78,6 +84,18 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
         def _wrapped(*args, **kwargs):
             try:
                 return f(*args, **kwargs)
+            except SystemExit as exc:
+                # A CLEAN exit is not a dead rank. ``--help`` and any
+                # ``sys.exit(0)`` raise SystemExit(0) through this wrapper, and
+                # aborting on it would turn "print the usage text" into
+                # MPI_Abort. Anything else IS a failure and still aborts --
+                # matching the interpreter, which exits 0 only for None and an
+                # integer 0, and exits 1 for a string or any other object
+                # (``sys.exit("")`` is a FAILING exit despite being falsy).
+                if not (exc.code is None
+                        or (isinstance(exc.code, int) and exc.code == 0)):
+                    _abort_multirank_job(comm, code=code)
+                raise
             except BaseException:
                 _abort_multirank_job(comm, code=code)
                 raise

@@ -49,6 +49,44 @@ class ScaleConfig(NamedTuple):
     n_days: int | None = None
 
 
+# Scenes used for the POST-TRAINING reachability report.  A subsample, not the
+# whole shard, because this one only REPORTS -- the freeze decision itself
+# reads every sample (see the block in ``_main``), so no sampling question
+# touches what the run trains.  Spread evenly rather than taken from the front,
+# because consecutive WeatherBench samples are six hours apart and are nearly
+# the same weather.  How much of the year that spread covers is the config's
+# business, not this constant's: the campaign deck lists 60 one-day windows at
+# twelve month-starts, while config/wb/scale/train_07deg.yaml leaves its
+# train_windows commented out and gets three days of one January.
+_N_REACHABILITY_REPORT = 24
+
+
+def _uses_reachability_freeze(mode: str) -> bool:
+    """Whether ``mode``'s parameters may be frozen on a zero-gradient probe.
+
+    ONLY the scheme-parameter mode.  There, a zero gradient over the whole
+    shard is strong evidence that the selected schemes do not read that knob at
+    all — usually because it belongs to a scheme or a mode this run does not
+    select — and that is a property of the configuration, which training does
+    not change.  It is EVIDENCE, not proof: a knob behind a physical gate that
+    no scene opens looks identical, which is what the post-training
+    re-measurement exists to catch.
+
+    A NEURAL model must never be filtered this way.  ``sfno`` is the sharp
+    case: the registry ZEROES its decoder weight and bias by policy, so the
+    untrained model emits exactly-zero tendencies and epoch 0 integrates the
+    pure dycore — and by the chain rule EVERY upstream weight then has an
+    exactly-zero gradient at step 0.  Freezing on that evidence would leave the
+    decoder as the only trainable thing in the network, permanently.
+    ``neural_gcm`` is not zero-initialized (it scales its output by 0.01
+    instead), but the argument is the same in kind: a neural weight's zero
+    gradient is a property of the CURRENT weights, which the next update
+    changes, not of the configuration.  Only a scheme knob can be unreachable
+    in a way that training will never fix.
+    """
+    return mode == "physics"
+
+
 def _parse_hours(s):
     if not s:
         return ()
@@ -173,20 +211,28 @@ def _mpi_rank_size():
 
 
 def main(argv=None):
+    """Entry point, wrapped so that under a MULTI-rank job a rank which dies
+    anywhere (data load, the reachability probe, the training loop) MPI_Aborts
+    the whole job instead of leaving its peers blocked forever in the next
+    collective (#985).  Transparent at a single rank."""
+    from legoesm.training.data_parallel import mpi_abort_on_uncaught
+    return mpi_abort_on_uncaught(_main)(argv)
+
+
+def _main(argv=None):
     cfg = build_scale_config_from_args(argv)
 
     # Heavy imports here so --help / the CLI test stay JAX-free.
     import logging
 
+    import equinox as eqx
     import jax
     import jax.numpy as jnp
-    import equinox as eqx
     import yaml
-
+    from legoesm.ml.training import TrainingConfig, create_optimizer
     from legoesm.training.data_parallel import (
         mpi_data_parallel_training_loop,
     )
-    from legoesm.ml.training import create_optimizer, TrainingConfig
 
     rank, nproc = _mpi_rank_size()
     logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING)
@@ -252,7 +298,6 @@ def main(argv=None):
     from legoesm.training.losses import combined_loss
     from legoesm.training.scale_build import rollout_hours
     sigma_full = jnp.asarray(sigma.sigma_full)
-    arr, static = eqx.partition(params, eqx.is_inexact_array)
 
     # The rollout horizon MUST match the target's lead time: load_era5_samples
     # pairs each IC with the state rollout_hours later (the first
@@ -260,11 +305,73 @@ def main(argv=None):
     # would score a 24 h forecast against a 6 h target.
     roll_steps = int(rollout_hours(cfg, yml) * 3600.0 / dt)
 
-    def loss_fn(arr_leaves, sample):
-        trainable = eqx.combine(arr_leaves, static)
+    def _loss(trainable, sample):
         ic, target, forcing = sample
         pred = make_run_seg(trainable).raw(ic, roll_steps, forcing)
         return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
+
+    # --- NO INERT PARAMETERS: freeze what this configuration cannot reach ---
+    # The trainable bundle carries a knob for every scheme family and for the
+    # switched-off modes of the families that ARE selected, so a large part of
+    # it has no gradient path in any one run: measured on the classical arm,
+    # 110 of 157 leaves had an exactly-zero gradient on all 48 probe scenes.
+    # Left in the optimized set they land in the checkpoint and the tuned
+    # report next to the parameters the loss actually moved, with nothing to
+    # tell them apart — the run ships "tuned" values for parameters it never
+    # trained.  (They also drift under AdamW's decoupled weight decay, but only
+    # by ~1e-5 relative over the campaign's 12 epochs: real, and not the
+    # reason.)  They are frozen here instead: still applied to the physics,
+    # never updated, and named in the log.
+    #
+    # Reachability is MEASURED, because a hand-kept list of scheme names and
+    # mode flags rots the moment a scheme gains a switch.  It is a GLOBAL
+    # property under MPI, or the ranks would partition differently and the
+    # per-step gradient allreduce would mismatch.  Cost: one extra compile of
+    # the probe program, plus one forward+adjoint per probe scene before the
+    # epoch loop and again after it.
+    if _uses_reachability_freeze(cfg.mode):
+        from legoesm.training.inert_params import (
+            freeze_unreachable,
+            measure_leaf_reachability,
+            mpi_max_reduce,
+            probe_indices,
+        )
+        _probe_static = eqx.partition(params, eqx.is_inexact_array)[1]
+        # Kept alive past the freeze: the same program re-measures on the
+        # TRAINED parameters at the end of the run (no second compile).
+        _probe_vg = eqx.filter_jit(jax.value_and_grad(
+            lambda a, s: _loss(eqx.combine(a, _probe_static), s)))
+        # n_probe=None => every sample in the shard.  That costs one extra
+        # forward+adjoint pass over the data (one epoch-equivalent of the
+        # twelve a link trains) and removes the SAMPLING risk entirely: a leaf
+        # is frozen iff it is zero on every scene in the shard.  It does NOT
+        # make the answer exact for the whole run -- the gradients are those of
+        # the INITIAL parameters, and a gate that opens as the live parameters
+        # move is exactly the case the post-training report below exists to
+        # catch.  The loss carries no parameter regularizer and the probe
+        # applies no gradient clipping, so an exactly-zero gradient here is a
+        # real disconnection on these scenes, not a value clipped to zero.
+        arr, static, frozen_names, n_probe_used = freeze_unreachable(
+            params, _probe_vg, local, n_probe=None, num_processes=nproc)
+        n_live = len(jax.tree.leaves(arr))
+        log.info("trainable leaves: %d live, %d frozen (unreachable on every "
+                 "one of %d usable probe scenes)",
+                 n_live, len(frozen_names), n_probe_used)
+        if frozen_names:
+            log.warning("FROZEN, no gradient on any scene in this shard at "
+                        "the initial parameters: %s",
+                        ", ".join(frozen_names))
+        if n_live == 0:
+            raise RuntimeError(
+                "every trainable leaf is unreachable in this configuration -- "
+                "the run would optimize nothing. Check the selected schemes "
+                "and the rollout length before relaunching.")
+    else:
+        arr, static = eqx.partition(params, eqx.is_inexact_array)
+        frozen_names, _probe_vg = [], None
+
+    def loss_fn(arr_leaves, sample):
+        return _loss(eqx.combine(arr_leaves, static), sample)
 
     total_steps = cfg.n_epochs * max(len(local), 1)
     # Honor the YAML warmup but clamp it safely below total_steps (see
@@ -291,6 +398,72 @@ def main(argv=None):
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc, on_epoch=on_epoch)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
+
+    # The freeze was decided on the UNTRAINED model.  A leaf can become
+    # reachable once the live parameters move and open a gate no probe scene
+    # opened — the clear case here is the microphysics, which is dead only
+    # because every sample starts with exactly zero cloud condensate.  Nothing
+    # unfreezes mid-run (that would rebuild the optimizer state and recompile),
+    # so measure it now and SAY so, rather than let the next run inherit the
+    # same blind spot silently.  Same probe program as before, hence no new
+    # compile; every rank runs it because it ends in a collective.
+    if frozen_names:
+        _after, _names_after, _n_checked = measure_leaf_reachability(
+            _probe_vg, params,
+            [local[i] for i in probe_indices(len(local),
+                                             _N_REACHABILITY_REPORT)],
+            n_probe=_N_REACHABILITY_REPORT, reduce=mpi_max_reduce(nproc))
+        _frozen = set(frozen_names)
+        # Report the MAGNITUDE and every NAME, not a yes/no: a gradient of
+        # 1e-30 is numerical dust, and the only non-arbitrary scale for "big
+        # enough to matter" comes from the parameters this run actually
+        # trained.
+        # Finite positives only: a leaf can carry the probe's "connected but
+        # the scene was poisoned" infinity, and that is a sentinel, not a
+        # magnitude — it must not enter the scale.
+        _live = [m for nm, m in zip(_names_after, _after)
+                 if nm not in _frozen and 0.0 < m < float("inf")]
+        # A low QUANTILE rather than the minimum: one trained parameter sitting
+        # at 1e-20 of numerical dust would otherwise collapse the scale and
+        # make every wakeup look material (GLM).  Nearest-rank 5th percentile,
+        # which IS the minimum when fewer than 20 parameters are live -- there
+        # is no lower order statistic to take.
+        _floor = (sorted(_live)[max(0, -(-len(_live) // 20) - 1)]
+                  if _live else 0.0)
+        # The infinity is the probe's "connected, but that scene's gradient
+        # was non-finite" marker, NOT a magnitude — reported separately rather
+        # than printed as an enormous gradient.
+        woke = sorted(((m, nm) for nm, m in zip(_names_after, _after)
+                       if nm in _frozen and 0.0 < m < float("inf")),
+                      reverse=True)
+        woke_poisoned = sorted(nm for nm, m in zip(_names_after, _after)
+                               if nm in _frozen and m == float("inf"))
+        if rank == 0:
+            if woke:
+                log.warning(
+                    "%d of the %d frozen parameters are REACHABLE on the "
+                    "trained model and were NOT trained; %d of them carry a "
+                    "gradient at least as large as the fifth-percentile "
+                    "gradient among the parameters this run did train (%.3g). "
+                    "The magnitudes are in the raw "
+                    "pre-constraint space, so read each against that scale, "
+                    "not against each other. Relaunch with these in the "
+                    "trainable set to use them: %s",
+                    len(woke), len(frozen_names),
+                    sum(1 for m, _ in woke if m >= _floor), _floor,
+                    ", ".join(f"{nm} ({m:.3g})" for m, nm in woke))
+            if woke_poisoned:
+                log.warning(
+                    "%d further frozen parameters were reached by a NON-FINITE "
+                    "gradient on the trained model: connected, but carrying no "
+                    "usable magnitude: %s",
+                    len(woke_poisoned), ", ".join(woke_poisoned))
+            if not woke and not woke_poisoned:
+                log.info("all %d frozen parameters are still unreachable on "
+                         "the trained model, over the %d scene(s) this check "
+                         "measured (a subsample of the shard: a leaf that "
+                         "wakes only on one of the others would not show up "
+                         "here)", len(frozen_names), _n_checked)
 
     if cfg.eval_wb2 and rank == 0:
         log.info("running WB2 scorecard on the held-out window ...")
