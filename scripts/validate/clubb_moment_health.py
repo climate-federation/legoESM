@@ -80,7 +80,7 @@ def main(argv=None) -> int:
     print(f"clubb on {args.case}: {nsteps} steps of {case.dt} s "
           f"({hours:.2f} h), nlev={args.nlev}")
     print(f"{'step':>6} {'hour':>6} {'w_T_sfc':>10} {'min wp2':>11} "
-          f"{'max|wp3|':>11} {'max|Skw|':>11} {'max|thl|':>9}")
+          f"{'max|wp3|':>11} {'max|Skw|':>11} {'thl_bot':>9} {'min thl':>9}")
 
     step_fn, tend_fn = scm._step_fn, scm._tend_fn
     state, phys = scm.state, scm.phys_state
@@ -110,7 +110,8 @@ def main(argv=None) -> int:
         print(f"{k:6d} {t/3600.0:6.2f} {wth:10.5f} "
               f"{float(np.nanmin(wp2)):11.3e} {float(np.nanmax(np.abs(wp3))):11.3e} "
               f"{s_max:11.3e} "
-              f"{float(np.nanmax(np.abs(np.asarray(m.thlm)))):9.2f}")
+              f"{float(np.asarray(m.thlm)[0, 0]):9.2f} "
+              f"{float(np.nanmin(np.asarray(m.thlm))):9.2f}")
         if not np.isfinite(s_max):
             print(f"  NON-FINITE at step {k}; stopping")
             break
