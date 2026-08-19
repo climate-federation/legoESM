@@ -228,7 +228,26 @@ def build_sharded_held_suarez_state_atm_latlon(
     # did -- the tiled lane's alternative is a global build plus a device_put
     # onto a cross-process sharding, which XLA services with an all-gather
     # and which asked for 105 GiB per device at 2048x4096 on 64 devices.
-    _tiled = tuple(mesh.axis_names) == ("lat", "lon")
+    _axes = tuple(mesh.axis_names)
+    if _axes not in (("lat",), ("lat", "lon")):
+        # Anything else -- a swapped ("lon", "lat"), a third axis, a renamed
+        # one -- would silently fall through to the band layout and build a
+        # state whose shards do not match the step's expectations.
+        raise ValueError(
+            f"build_sharded_held_suarez_state_atm_latlon: mesh axes must be "
+            f"('lat',) or ('lat', 'lon'); got {_axes}")
+    _tiled = _axes == ("lat", "lon")
+    _p_lat = int(mesh.shape["lat"])
+    if grid.n_lat % _p_lat:
+        raise ValueError(
+            f"n_lat {grid.n_lat} is not divisible by the mesh's lat split "
+            f"{_p_lat}")
+    if _tiled:
+        _p_lon = int(mesh.shape["lon"])
+        if grid.n_lon % _p_lon:
+            raise ValueError(
+                f"n_lon {grid.n_lon} is not divisible by the mesh's lon "
+                f"split {_p_lon}")
 
     def _make(gshape, cb):
         if _tiled:

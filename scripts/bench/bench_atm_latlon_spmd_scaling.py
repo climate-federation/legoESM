@@ -234,9 +234,21 @@ def main() -> int:
         preflight_or_exit, validate_band_rows_gpu, validate_divisibility,
         validate_memory,
     )
+    # With a tiled split the latitude rows divide by p_lat, NOT by the device
+    # count: an 8-device 2x4 tiling of 12 rows is uniform and legal, and the
+    # band check would reject it at submit time.
+    _p_lon_pre = max(1, int(args.p_lon))
+    if args.n_devices % _p_lon_pre:
+        raise SystemExit(
+            f"--p-lon {_p_lon_pre} does not divide --n-devices "
+            f"{args.n_devices}")
+    _p_lat_pre = args.n_devices // _p_lon_pre
     if args.mode == "strong":
-        preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
+        preflight_or_exit(validate_divisibility, args.n_lat, _p_lat_pre,
                           axis="n_lat")
+        if _p_lon_pre > 1:
+            preflight_or_exit(validate_divisibility, args.n_lon, _p_lon_pre,
+                              axis="n_lon")
     # Thin-band NCCL-init deadlock guard: only the multi-node GPU lane is
     # affected (the same program runs on CPU virtual devices), and it burns
     # a full walltime silently, so refuse at submit time.
@@ -244,7 +256,7 @@ def main() -> int:
         preflight_or_exit(validate_band_rows_gpu,
                           (args.n_lat if args.mode == "strong"
                            else args.nlat_per_dev * args.n_devices),
-                          args.n_devices, axis="n_lat")
+                          _p_lat_pre, axis="n_lat")
     _n_lat_est = (args.n_lat if args.mode == "strong"
                   else args.nlat_per_dev * args.n_devices)
     _est = preflight_or_exit(
@@ -479,8 +491,12 @@ def main() -> int:
     _measured_med = med if valid else None
     # Honest per-device geometry residency (from the real band-grid shapes):
     # the default lane replicates all-band stacks; the segment lane shards.
-    geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd) if nd > 1
-                  else None)
+    # atm_latlon_geometry_bytes builds nd latitude BANDS. For a tiled run
+    # that is the wrong geometry, and reporting it would be a fabricated
+    # number rather than a missing one, so emit null until a tiled
+    # calculation exists.
+    geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd)
+                  if nd > 1 and p_lon == 1 else None)
 
     # Communication accounting (audit item 4) + calibrated T_bound (item 8).
     # nd=1: zero inter-device traffic is a FACT (recorded as 0), so the
@@ -628,7 +644,8 @@ def main() -> int:
             # falsifiable from the record alone.
             "nccl": (_nccl_report if args.multicontroller
                      else None),
-            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
+            "cells_per_device": ((n_lat // p_lat) * (args.n_lon // p_lon)
+                                 * args.nlev),
         },
     ))
     if not valid:
