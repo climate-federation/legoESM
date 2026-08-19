@@ -29,6 +29,12 @@ cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
 OUTDIR="$SCRATCH/legoesm_scaling/ladder2n"
 mkdir -p "$OUTDIR"
 SUBDIV="${SUBDIV:-9}"; NLAT="${NLAT:-2048}"; NLON=$((2 * NLAT))
+# Partitioner for the MPAS lane. The graph partitioner measured 5.5 to
+# 19.3% faster than the space-filling curve at 8, 16, 32 and 64 devices in
+# controlled A/Bs, but those ran the coloured exchange while this ladder
+# runs the ragged one — so its points cannot be mixed into this curve and
+# the ladder has to be re-run to show the gain honestly.
+PARTITION="${PARTITION:-sfc}"
 GPN=4; NODES=$(( (NDEV + GPN - 1) / GPN ))
 NTPN=$(( NDEV < GPN ? NDEV : GPN ))
 echo "=== ladder $LANE ndev=$NDEV nodes=$NODES $(date +%T) git=$(git rev-parse --short HEAD) ==="
@@ -45,9 +51,9 @@ if [ "$LANE" = "mpas" ]; then
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
       --multicontroller --n-devices "$NDEV" --subdivision "$SUBDIV" --nlev 26 \
-      --steps 60 --warmup 5 --lloyd 0 --partition-method sfc \
+      --steps 60 --warmup 5 --lloyd 0 --partition-method "$PARTITION" \
       --halo-strategy ppermute --reorder-for "$NDEV" \
-      --out "$OUTDIR/mpas_s${SUBDIV}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
+      --out "$OUTDIR/mpas_s${SUBDIV}_${PARTITION}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
 else
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   JAX_ENABLE_X64=0 \
@@ -60,7 +66,7 @@ else
       --steps 60 --warmup 10 \
       --out "$OUTDIR/latlon_${NLAT}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
 fi
-if [ "$LANE" = "mpas" ]; then F="$OUTDIR/mpas_s${SUBDIV}_n${NDEV}.jsonl"; else F="$OUTDIR/latlon_${NLAT}_n${NDEV}.jsonl"; fi
+if [ "$LANE" = "mpas" ]; then F="$OUTDIR/mpas_s${SUBDIV}_${PARTITION}_n${NDEV}.jsonl"; else F="$OUTDIR/latlon_${NLAT}_n${NDEV}.jsonl"; fi
 "$PY" -c "
 import json, math, sys
 rows = [json.loads(l) for l in open('$F')]
