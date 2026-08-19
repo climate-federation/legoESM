@@ -197,6 +197,100 @@ def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
     return jnp.sqrt(u ** 2 + v ** 2 + gustiness ** 2)
 
 
+# --- Precipitation-driven (cold-pool) gustiness -----------------------------
+# Reference precipitation rate for the gust scaling [kg/m^2/s].  1 mm/day
+# expressed in the model's flux units, so the coefficient below is "the gust
+# wind at 1 mm/day" and reads in m/s.  A pure unit conversion, not a tunable.
+_GUST_PRECIP_REF_KG_M2_S = 1.0 / 86_400.0
+# Exponent of the precipitation scaling.  1/3 follows the convective velocity
+# scale w_* = (g/theta * B * h)^(1/3) when the downdraft buoyancy production B
+# is taken proportional to the rain-evaporation rate, i.e. to the precipitation
+# flux.  Exposed as a config field so the exponent is a measured choice rather
+# than a buried constant.
+_GUST_PRECIP_EXPONENT = 1.0 / 3.0
+# Additive floor inside the fractional power (see convective_gust_wind): keeps
+# the gradient finite at zero precipitation, where a bare x**(1/3) has an
+# infinite derivative.  Shifts u_gust by <0.5 % at 1 mm/day.
+_GUST_RATIO_FLOOR = 1e-6
+
+
+def convective_gust_wind(
+    precip: jax.Array,
+    coeff: float,
+    *,
+    exponent: float = _GUST_PRECIP_EXPONENT,
+    cap: float = 0.0,
+) -> jax.Array:
+    """Cold-pool gust wind ``u_gust`` [m/s] from the surface precipitation rate.
+
+    Deep convection ventilates the sub-cloud layer with evaporatively cooled
+    downdraft air that spreads as a density current.  Those cold pools, not the
+    mean wind, carry the air-sea fluxes in a light-wind convective regime: a
+    cloud-resolving model with NO imposed mean wind still evaporates
+    ~2.7 mm/day, while a single column driven only by its resolved wind and the
+    boundary-layer free-convection ``w_*`` term reaches ~0.7-0.9 (measured,
+    RCEMIP1 RCE at 300 K).  The boundary-layer ``w_*`` gustiness that COARE 3.0
+    carries internally scales with the SURFACE buoyancy flux and therefore
+    collapses in exactly the warm, moist, near-neutral state this term exists
+    to break; the precipitation rate is the observable that stays large.
+
+    ``u_gust = coeff * (P / P_ref)**exponent``, optionally capped.
+
+    Sign/units convention: ``precip`` is a surface precipitation MASS FLUX
+    [kg/m^2/s], positive DOWNWARD (falling), the sense of
+    ``MicrophysicsOutput.precipitation``.  Negative values are clamped to zero
+    rather than raising, so an upstream sign error cannot become a NaN gradient
+    here; ``coeff = 0`` disables the term entirely and is the default.
+
+    The result is intended for :func:`apply_gustiness`, which combines it in
+    quadrature with the resolved wind — never added linearly, and never used as
+    a replacement wind.
+
+    Parameters
+    ----------
+    precip : array
+        Surface precipitation rate [kg/m^2/s] (= mm/s of liquid water).
+    coeff : float
+        Gust wind at the reference rate of 1 mm/day [m/s].  ``0.0`` disables.
+    exponent : float, optional
+        Power of the precipitation ratio.
+    cap : float, optional
+        Upper bound on ``u_gust`` [m/s]; ``0.0`` means uncapped.  A cap breaks
+        the gust -> flux -> convection -> precipitation -> gust feedback loop,
+        which is otherwise unbounded in an equilibrium column.
+
+    Returns
+    -------
+    array
+        Gust wind [m/s], non-negative and finite at ``precip = 0``.
+
+    References
+    ----------
+    - Redelsperger, Guichard & Mondon (2000), J. Climate 13, 402-421 —
+      mesoscale (cold-pool) enhancement of surface fluxes parameterized from
+      the convective precipitation rate.
+    - Jabouille, Redelsperger & Lafore (1996), MWR 124, 816-837 — TOGA-COARE
+      gustiness from convective activity.
+    - Beljaars (1995), QJRMS 121, 255-270 — the quadrature combination used by
+      :func:`apply_gustiness`.
+    """
+    if coeff == 0.0:
+        # Static Python branch on a compile-time constant (feature gating):
+        # returns an exact zero array so the quadrature is untouched and every
+        # existing run stays byte-identical.  NOT jnp.where, which would trace
+        # the fractional power and can emit NaN gradients at precip = 0.
+        return jnp.zeros_like(precip)
+    ratio = jnp.maximum(precip, 0.0) / _GUST_PRECIP_REF_KG_M2_S
+    # Offset inside the power keeps d(u_gust)/d(precip) finite at precip = 0,
+    # where a bare ratio**(1/3) has an infinite derivative — the AD hazard that
+    # a fractional power always carries.
+    gust = coeff * (ratio + _GUST_RATIO_FLOOR) ** exponent
+    if cap > 0.0:
+        gust = jnp.minimum(gust, cap)
+    return gust
+
+
+
 # Floors for the neutral log-law drag. _LN_RATIO_FLOOR is the same 0.5 the
 # iterative solver applies to its own denominator (``_denom_floor`` in
 # compute_most_fluxes), so the neutral limit is bounded exactly as the in-loop
