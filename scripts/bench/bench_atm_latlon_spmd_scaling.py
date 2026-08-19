@@ -394,8 +394,18 @@ def main() -> int:
         seg_fn = make_sharded_atm_latlon_segment(
             model, mesh, seg_n, physics_fn=physics_fn)
     elif p_lon > 1:
+        # shard_geometry=False, matching what the band lane has always
+        # defaulted to. The tiled factory defaults to SHARDED geometry
+        # stacks, and a sharded global array cannot be closed over by a
+        # multi-process program -- every tiled arm died with "Closing over
+        # jax.Array that spans non-addressable devices ... float32[4,8,512,
+        # 512]", which is the per-tile geometry stack. Replicated stacks are
+        # addressable everywhere, which is why the band lane never hit this.
+        # Cost is the whole grid's geometry on every device, about 0.4 GB
+        # here, independent of the device count.
         step = make_sharded_atm_latlon_step_2d(model, mesh,
-                                               physics_fn=physics_fn)
+                                               physics_fn=physics_fn,
+                                               shard_geometry=False)
     else:
         step = make_sharded_atm_latlon_step(model, mesh,
                                             physics_fn=physics_fn)
