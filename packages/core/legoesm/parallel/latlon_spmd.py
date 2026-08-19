@@ -40,6 +40,52 @@ from legoesm.parallel.shard_map_compat import shard_map
 _FOLD_REF_HALO = 2
 
 
+def _resolve_halo_nocomm(env_value: str) -> bool:
+    """Resolve ``LEGOESM_LATLON_HALO_NOCOMM``: ``'1'`` replaces every lat-lon
+    halo ``ppermute`` with an optimization barrier; ``''``/``'0'`` off
+    (default).
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- each device
+    keeps its OWN edge rows instead of the neighbour's, so every ghost row is
+    wrong and the run is meaningless as physics.  It exists because the step
+    time alone cannot be split: the profiler on this stack does not record
+    the halo collectives, so ``full - nocomm`` is the only way to price the
+    wire time plus the wait for the slowest peer against the SAME program.
+    Every other line -- the pack, the concatenate, the split, the pole fold,
+    the wall constants, the kernel count and the shapes -- is unchanged.
+
+    The barrier (rather than a bare identity) is load-bearing: without it the
+    receive-side slices fold back to the send-side buffer and XLA deletes the
+    pack, so the arm would time a different program.  Same lesson as
+    ``sharded_dynamics._resolve_halo_nocomm``, whose MPAS knob this mirrors.
+
+    Never valid in production.  Unknown values raise (dispatch hardening).
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_LATLON_HALO_NOCOMM={env_value!r}: must be '0' or '1' "
+        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
+
+
+def _halo_ppermute(x, axis_name, perm):
+    """Halo ``ppermute``, or the no-comm timing substitute.
+
+    Single choke point for every lat-lon SPMD halo exchange so the
+    ``LEGOESM_LATLON_HALO_NOCOMM`` budget arm covers all of them at once.
+    Resolved at TRACE time (a Python branch on a static env value), so the
+    compiled program contains one path or the other, never a select.
+    """
+    import os
+
+    if _resolve_halo_nocomm(os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", "")):
+        return jax.lax.optimization_barrier(x)
+    return jax.lax.ppermute(x, axis_name, perm)
+
+
 def latlon_band_perms(n_dev: int):
     """Static (src, dst) permutation pairs over the 1-D ``lat`` band axis.
 
@@ -107,8 +153,8 @@ def lon_ring_ghosts_spmd(f, mesh, halo: int = 1):
     perm_to_west, perm_to_east = latlon_lon_ring_perms(p_lon)
     # My EAST ghost = east neighbour's west edge (sources send WEST edges to
     # their west neighbour); my WEST ghost = west neighbour's east edge.
-    east_ghost = jax.lax.ppermute(f[:, :halo], "lon", perm_to_west)
-    west_ghost = jax.lax.ppermute(f[:, -halo:], "lon", perm_to_east)
+    east_ghost = _halo_ppermute(f[:, :halo], "lon", perm_to_west)
+    west_ghost = _halo_ppermute(f[:, -halo:], "lon", perm_to_east)
     return jnp.concatenate([west_ghost, f, east_ghost], axis=1)
 
 
@@ -137,7 +183,7 @@ def reconstruct_vface_lower(v_lower, axis: str, perm_north):
     -------
     array ``(n_lat_band + 1, n_lon[, nlev])`` — the band's full v-faces.
     """
-    boundary = jax.lax.ppermute(v_lower[0:1], axis, perm_north)
+    boundary = _halo_ppermute(v_lower[0:1], axis, perm_north)
     return jnp.concatenate([v_lower, boundary], axis=0)
 
 
@@ -199,7 +245,7 @@ def reconstruct_vface_lower_multi(v_lowers, axis: str, perm_north):
             flats.append(row.reshape(1, w))
         buf = jnp.concatenate(flats, axis=1)
         # ONE ppermute for the whole dtype group (north band receives 0).
-        recv = jax.lax.ppermute(buf, axis, perm_north)
+        recv = _halo_ppermute(buf, axis, perm_north)
         off = 0
         for k, i in enumerate(idxs):
             w = widths[k]
@@ -249,7 +295,7 @@ def reconstruct_uface_left(u_left, axis: str, p_lon: int):
         boundary = u_left[:, 0:1]
     else:
         perm_to_west, _ = latlon_lon_ring_perms(p_lon)
-        boundary = jax.lax.ppermute(u_left[:, 0:1], axis, perm_to_west)
+        boundary = _halo_ppermute(u_left[:, 0:1], axis, perm_to_west)
     return jnp.concatenate([u_left, boundary], axis=1)
 
 
@@ -389,7 +435,7 @@ def partner_pole_fold_window(edge, lon_index, mesh, halo: int, negate: bool):
     # 2. ONE antipodal ppermute over the lon ring (shift by p_lon/2 is a
     # bijection, and c' != c for every even p_lon >= 2).
     perm_anti = [(s, (s + p_lon // 2) % p_lon) for s in range(p_lon)]
-    recv = jax.lax.ppermute(ext, "lon", perm_anti)
+    recv = _halo_ppermute(ext, "lon", perm_anti)
     # 3. lat-mirror + sign (the _pole_fold row flip), then the window
     # column map (derivation above; seam-straddling windows mix branches).
     sign = -1.0 if negate else 1.0
@@ -463,8 +509,8 @@ def make_latlon_band_pad_body(mesh, halo: int = 1, negate: bool = False):
         # so row 0 is the SOUTH edge, row -1 the NORTH edge).
         south_edge = data_lon[:halo]   # my south rows -> band below (b-1)'s N ghost
         north_edge = data_lon[-halo:]  # my north rows -> band above (b+1)'s S ghost
-        north_recv = jax.lax.ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
-        south_recv = jax.lax.ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
+        north_recv = _halo_ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
+        south_recv = _halo_ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
 
         # 3. pole fold at the end bands (ppermute non-targets receive zeros).
         b = jax.lax.axis_index(axis)
@@ -559,8 +605,8 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
             north_recv = jnp.zeros_like(tile[:halo])
             south_recv = jnp.zeros_like(tile[-halo:])
         else:
-            north_recv = jax.lax.ppermute(tile[:halo], "lat", perm_north)
-            south_recv = jax.lax.ppermute(tile[-halo:], "lat", perm_south)
+            north_recv = _halo_ppermute(tile[:halo], "lat", perm_north)
+            south_recv = _halo_ppermute(tile[-halo:], "lat", perm_south)
         ext = jnp.concatenate([south_recv, tile, north_recv], axis=0)
 
         # 2. longitude ring ghosts on the lat-EXTENDED block (fills corners
@@ -621,8 +667,8 @@ def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
         # leaves lon untouched).
         south_edge = tile[:halo]       # my south rows -> band below (b-1)'s N ghost
         north_edge = tile[-halo:]      # my north rows -> band above (b+1)'s S ghost
-        north_recv = jax.lax.ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
-        south_recv = jax.lax.ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
+        north_recv = _halo_ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
+        south_recv = _halo_ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
 
         # CONSTANT wall pad at the physical pole end bands (ppermute non-targets
         # receive zeros from these rows, but the where below overrides them with
@@ -706,8 +752,8 @@ def make_latlon_band_wall_multi_pad_body(mesh, halo: int = 1,
             south_buf = jnp.concatenate([s for s, _ in flats], axis=1)
             north_buf = jnp.concatenate([n for _, n in flats], axis=1)
             # ONE ppermute pair for the whole dtype group.
-            north_recv = jax.lax.ppermute(south_buf, axis, perm_north)
-            south_recv = jax.lax.ppermute(north_buf, axis, perm_south)
+            north_recv = _halo_ppermute(south_buf, axis, perm_north)
+            south_recv = _halo_ppermute(north_buf, axis, perm_south)
             off = 0
             for k, i in enumerate(idxs):
                 w = widths[k]
@@ -859,8 +905,8 @@ def make_latlon_band_packed_pad_body(mesh, specs):
             # ONE ppermute pair for the whole dtype group.  My NORTH ghost
             # = north neighbour's south rows (perm_north sends s -> s-1);
             # my SOUTH ghost = south neighbour's north rows.
-            n_recv_buf = jax.lax.ppermute(south_buf, axis, perm_north)
-            s_recv_buf = jax.lax.ppermute(north_buf, axis, perm_south)
+            n_recv_buf = _halo_ppermute(south_buf, axis, perm_north)
+            s_recv_buf = _halo_ppermute(north_buf, axis, perm_south)
             off = 0
             for k, i in enumerate(idxs):
                 h = int(specs[i][1])
