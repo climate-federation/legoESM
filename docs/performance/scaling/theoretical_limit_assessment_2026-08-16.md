@@ -621,3 +621,78 @@ lucky value.
 - Do not quote the padded-byte verdict string in the partition A/B
   harness. It was written for a bytes hypothesis, and at 8 devices there
   are no bytes to save.
+
+## Addendum, later on 2026-08-19 — the icosahedral cause, and three tiled blockers
+
+### The icosahedral stall is a level-count tax on the unstructured kernels
+
+One GPU, no devices, no collectives, float32, 163,842 cells, 60 timed
+steps per arm, two replicates, spreads at or under 1% apart from a single
+4.8% outlier. Cost per cell per level, picoseconds:
+
+  13 3520 | 16 1547 | 18 2318 | 20 1524 | 21 2578 | 22 4910 | 24 4147
+  25 4224 | 26 4755 | 27 3861 | 28 4058 | 30 4591 | 31 3741 | 32 1629
+  34 2949 | 36 1706 | 40 1664 | 52 1621
+
+Cheap: 16, 20, 32, 36, 40, 52. Expensive: everything from 22 to 31, plus
+18, 21 and 34. The step is 22.6 ms at 30 levels and 8.5 ms at 32 — more
+work, a third of the time. Production runs 26, at 3.1x the cheapest.
+
+That IS the 8-to-16 device stall: at 16 devices each device holds 163,841
+cells at 26 levels, and the parallel step (18.9 ms) matches the
+single-GPU step at that shape (20.2 ms).
+
+Two explanations were tested and both REFUTED by the table:
+- byte alignment of a cell's column — 24 and 28 levels give 96- and
+  112-byte strides, both multiples of the 16-byte vector width, and both
+  are expensive;
+- cache capacity — 52 levels holds the largest live set measured and is
+  among the cheapest.
+An earlier commit asserted the alignment rule from five samples and was
+retracted when the finer scan arrived. The cause is UNKNOWN.
+
+It is NOT a compiler or hardware property. The lat-lon core over the same
+level counts on one GPU is flat: 851 to 954 picoseconds per column per
+level, 1.12x end to end, 26 levels at 1.04x the cheapest, every arm to
+0.0% (job 27078027). So it belongs to the unstructured core's kernels —
+which points at the neighbour gathers over irregular connectivity, the one
+structure the lat-lon core does not have.
+
+Shipped: an advisory raised from the unstructured model's constructor (NOT
+from the shared vertical-coordinate factory, which serves both lanes)
+carrying the measured table, disclaiming a cause, and saying counts absent
+from the table are unmeasured rather than cheap.
+
+### Three blockers cleared on the tiled lat-lon lane, none of them visible in tests
+
+The tiled step, its state layout and its pole masks already existed and
+were gated by single-process tests. Getting it onto the cluster took
+three fixes, and each failure mode was invisible to those tests:
+
+1. The initial state was built globally and handed to the tiled sharder,
+   which XLA services with an all-gather: 105 GiB per device at 2048x4096
+   on 64 devices. Fixed by making the existing shard-local builder take
+   either mesh — the only band-specific thing in it was the partition
+   spec.
+2. The benchmark rejected legal tiled runs, because it checked that the
+   latitude rows divide by the DEVICE count, which is the band rule.
+3. The tiled factory defaults to SHARDED geometry stacks, and a
+   multi-process program may not close over a sharded global array. Every
+   tiled arm died on "Closing over jax.Array that spans non-addressable
+   devices ... float32[4,8,512,512]". The band lane has always defaulted
+   to replicated stacks; the bench now asks for the same.
+
+Compiled-program census, unchanged by any of the above: latitude bands
+move 18.515 MB per device per step in 13 collectives, a 2x8 tiling moves
+3.483 MB in 108, and there is no all-gather in the tiled program.
+
+### Standing prediction for the tiled A/B
+
+Communication at 64 devices is 1.464 ms, of which 1.450 is payload and
+0.014 per-operation across 13 messages — about one microsecond each,
+measured with the packing control. At that price 108 messages cost about
+0.1 ms and the payload falls 5.3x to 0.27, so the tiled step should land
+near 3.75 ms against 4.841 for bands. If it lands at or above 4.8, the
+per-message cost does not extrapolate from 13 messages to 108 and the
+next move is packing the tiled exchanges the way the band lane packs its
+own, not abandoning tiling.
