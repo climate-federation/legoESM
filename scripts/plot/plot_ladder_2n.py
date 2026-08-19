@@ -35,6 +35,12 @@ import matplotlib.pyplot as plt
 # HIGHEST job id wins for a given device count.
 SERIES = [
     ("MPAS L9", ("mpas_n*.jsonl", "mpas_s9_n*.jsonl"), "#0072B2", "o"),
+    # Same mesh, same exchange, only the partitioner differs — the one
+    # confirmed win of the campaign, measured 5.5 to 19.3% in controlled
+    # A/Bs and re-run here in the ladder's own configuration so the two
+    # curves are comparable.
+    ("MPAS L9, graph partition", ("mpas_s9_metis_n*.jsonl",),
+     "#009E73", "v"),
     ("MPAS L10", ("mpas_s10_n*.jsonl",), "#56B4E9", "s"),
     ("lat-lon", ("latlon_n*.jsonl",), "#D55E00", "^"),
     ("lat-lon", ("latlon_4096_n*.jsonl",), "#E69F00", "D"),
