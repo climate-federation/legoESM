@@ -121,7 +121,16 @@ _LEVELS_MEASURED_FAST = tuple(
 
 
 def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
-    """Warn when the level count was MEASURED to be an expensive one.
+    """Warn when the level count was MEASURED expensive ON THE UNSTRUCTURED CORE.
+
+    SCOPE, and it is narrow. The lat-lon core was measured over the same
+    level counts on one GPU and is FLAT: 16 through 40 levels span 851 to
+    954 picoseconds per column per level, a 1.12x spread end to end, with 26
+    levels at 1.04x the cheapest and every arm reproducing to 0.0% (job
+    27078027). So this is NOT a compiler or hardware property that every
+    model pays -- it belongs to the unstructured core's kernels, and this
+    function is called from there rather than from the vertical-coordinate
+    factories, which serve both.
 
     On this model, in float32, on one A100, the cost per cell per level
     varies by a factor of three between level counts, and NOT in any pattern
@@ -156,8 +165,8 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
     active precision policy when omitted; the measurement is float32 and
     other widths are left alone rather than extrapolated.
 
-    ``where`` names the coordinate being built so the message points at the
-    call the user can change.
+    ``where`` names the caller so the message points at the model being
+    built.
     """
     import warnings
 
@@ -181,8 +190,9 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
         return
     best = min(_LEVEL_COST_PS[n] for n in _LEVELS_MEASURED_FAST)
     warnings.warn(
-        f"{where}: {n_levels} vertical levels was MEASURED expensive on this "
-        f"model — {cost} picoseconds per cell per level against {best} for "
+        f"{where}: {n_levels} vertical levels was MEASURED expensive on the "
+        f"unstructured core — {cost} picoseconds per cell per level against "
+        f"{best} for "
         f"the cheapest counts measured, a factor of {cost / best:.1f}. At "
         f"163,842 cells the step is 22.6 ms at 30 levels and 8.5 ms at 32: "
         f"more work, a third of the time. Level counts measured cheap: "
@@ -191,8 +201,10 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
         f"capacity were both tested and both refuted — so this is a table of "
         f"measurements, not a rule, and counts absent from it are unmeasured "
         f"rather than cheap. If {n_levels} is a physics requirement, keep it "
-        f"and expect the cost. Re-measure on different hardware or a "
-        f"different compiler before trusting any of it.",
+        f"and expect the cost. The lat-lon core does NOT show this — it is "
+        f"flat to 1.12x across the same level counts — so this is specific "
+        f"to the unstructured kernels. Re-measure on different hardware or "
+        f"a different compiler before trusting any of it.",
         stacklevel=3,
     )
 
@@ -243,10 +255,6 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    # None: resolved from the precision policy, because the stride that
-    # matters is the STATE arrays' and this coordinate may be higher
-    # precision than they are.
-    warn_if_unaligned_levels(n_levels, where="create_sigma_coordinate")
     if tropopause_refine == 1.0:
         # Uniform (default) — kept as the literal linspace so the untouched
         # path stays bit-identical to the pre-refinement code.
@@ -1194,7 +1202,6 @@ def create_hybrid_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    warn_if_unaligned_levels(n_levels, where="create_hybrid_coordinate")
     A_half = jnp.asarray(A_half, dtype=dtype)
     B_half = jnp.asarray(B_half, dtype=dtype)
 
@@ -3360,7 +3367,6 @@ def create_height_coordinate(
     # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
     # Use JAX default dtype (float64 when x64 is enabled, float32 otherwise)
     z_half = jnp.linspace(H, 0.0, n_levels + 1)
-    warn_if_unaligned_levels(n_levels, where="create_height_coordinate")
     return create_height_coordinate_from_z_half(
         z_half, theta_ref_fn=theta_ref_fn, p_sfc=p_sfc,
     )

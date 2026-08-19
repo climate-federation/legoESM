@@ -782,6 +782,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     ):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
+        # The unstructured core's cost per cell per level varies threefold
+        # with the level count, and the lat-lon core measured flat over the
+        # same counts — so the advisory belongs here, not in the shared
+        # vertical-coordinate factory.
+        from legoesm.grids.vertical import warn_if_unaligned_levels
+        warn_if_unaligned_levels(
+            getattr(sigma_coord, "n_levels", 0),
+            where="MPASPrimitiveEquationModel")
         self.config = config or MPASPrimitiveEquationConfig()
         # Pre-compute the global total area once at construction time so
         # the per-step mass fixer does not include this constant in its

@@ -85,12 +85,20 @@ def test_not_extrapolated_to_other_precisions():
         warn_if_unaligned_levels(26, np.float64, where="test")
 
 
-def test_the_real_factory_warns_at_26_levels():
-    with pytest.warns(UserWarning, match="create_sigma_coordinate"):
-        create_sigma_coordinate(26, dtype=np.float32)
-
-
-def test_the_real_factory_is_silent_at_32_levels():
+def test_the_shared_coordinate_factory_does_not_warn():
+    """The lat-lon core was measured over the same level counts and is flat
+    to 1.12x, so a warning from the SHARED vertical-coordinate factory would
+    fire on a lane that does not pay the cost. It belongs to the
+    unstructured core and is raised from there."""
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
+        create_sigma_coordinate(26, dtype=np.float32)
         create_sigma_coordinate(32, dtype=np.float32)
+
+
+def test_message_scopes_itself_to_the_unstructured_core():
+    with pytest.warns(UserWarning) as rec:
+        warn_if_unaligned_levels(26, np.float32, where="test")
+    text = str(rec[0].message)
+    assert "unstructured core" in text, text
+    assert "lat-lon core does NOT show this" in text, text
