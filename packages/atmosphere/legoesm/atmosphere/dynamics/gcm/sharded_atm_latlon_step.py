@@ -161,7 +161,13 @@ def build_sharded_held_suarez_state_atm_latlon(
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
 ) -> CGridLatLonHydrostaticState:
-    """Band-local Held-Suarez C-grid state, directly in the sharded layout.
+    """Shard-local Held-Suarez C-grid state, directly in the sharded layout.
+
+    Works for BOTH device meshes: a ``("lat",)`` band mesh and a
+    ``("lat", "lon")`` tile mesh.  The only difference is the partition spec
+    and, for the tile mesh, that ``u`` is created already in its ``u_left``
+    layout (east periodic-seam column dropped, as
+    :func:`shard_state_atm_latlon_2d` does).
 
     The #1100 invariant for multi-process runs: **neither global builds nor
     ``device_put`` replication** — every global-shaped leaf is created with
@@ -215,9 +221,21 @@ def build_sharded_held_suarez_state_atm_latlon(
     def _slice_shape(gshape, idx):
         return tuple(len(range(*sl.indices(n))) for sl, n in zip(idx, gshape))
 
+    # Band mesh -> shard on latitude only; tile mesh -> shard on both. The
+    # callbacks below already take a per-dimension index tuple, so they need
+    # no change: the only band-specific thing in this builder was the
+    # partition spec. Building tile-local matters as much here as band-local
+    # did -- the tiled lane's alternative is a global build plus a device_put
+    # onto a cross-process sharding, which XLA services with an all-gather
+    # and which asked for 105 GiB per device at 2048x4096 on 64 devices.
+    _tiled = tuple(mesh.axis_names) == ("lat", "lon")
+
     def _make(gshape, cb):
-        sharding = NamedSharding(mesh, P("lat", *((None,) * (len(gshape) - 1))))
-        return jax.make_array_from_callback(gshape, sharding, cb)
+        if _tiled:
+            spec = P("lat", "lon", *((None,) * (len(gshape) - 2)))
+        else:
+            spec = P("lat", *((None,) * (len(gshape) - 1)))
+        return jax.make_array_from_callback(gshape, NamedSharding(mesh, spec), cb)
 
     def _zeros_cb(gshape):
         return lambda idx: jnp.zeros(_slice_shape(gshape, idx), dtype=_dtype)
@@ -237,7 +255,9 @@ def build_sharded_held_suarez_state_atm_latlon(
         return (p_s_init * jnp.exp(
             -phis_block / (constants.R_d * T_init))).astype(_dtype)
 
-    sh_u = (n_lat, n_lon + 1, nlev)
+    # The tiled layout also drops u's east periodic-seam column (u_left),
+    # exactly as shard_state_atm_latlon_2d does; the band layout keeps it.
+    sh_u = (n_lat, n_lon, nlev) if _tiled else (n_lat, n_lon + 1, nlev)
     sh_vlow = (n_lat, n_lon, nlev)   # sharded layout: pole-wall face dropped
     sh_T = (n_lat, n_lon, nlev)
     sh_2d = (n_lat, n_lon)

@@ -298,8 +298,7 @@ def main() -> int:
         build_sharded_held_suarez_state_atm_latlon,
         make_sharded_atm_latlon_segment,
         make_sharded_atm_latlon_step,
-        make_sharded_atm_latlon_step_2d,
-        shard_state_atm_latlon_2d)
+        make_sharded_atm_latlon_step_2d)
     seg_n = int(args.segment_steps)
     if seg_n < 0:
         raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
@@ -368,16 +367,11 @@ def main() -> int:
             mesh = jax.sharding.Mesh(
                 np.array(jax.devices()[:nd]).reshape(p_lat, p_lon),
                 axis_names=("lat", "lon"))
-            # The tiled layout shards a GLOBAL state rather than building it
-            # tile-local, so this lane pays a one-off global build per
-            # process. That is setup cost, not step cost, but it bounds the
-            # resolution this lane can reach until a tile-local builder
-            # exists.
-            _stage("building global IC for the tiled lane")
-            _model_unused, c_global = _build(n_lat, args.n_lon, args.nlev)
-            del _model_unused
-            c = shard_state_atm_latlon_2d(c_global, mesh)
-            del c_global
+            # Tile-local IC, same builder as the band lane: a global build
+            # plus a device_put onto a cross-process sharding is serviced by
+            # an all-gather and asked for 105 GiB per device here.
+            c = build_sharded_held_suarez_state_atm_latlon(
+                model.grid, model.sigma_coord, mesh)
         else:
             mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
                                      axis_names=("lat",))
