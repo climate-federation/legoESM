@@ -177,6 +177,19 @@ def main() -> int:
                         "scripts/bench/analyze_jax_trace_gaps.py). One "
                         "block only — tracing from step 0 fills the 1M-"
                         "event cap with compile-phase host events.")
+    p.add_argument("--p-lon", type=int, default=1,
+                   help="Longitude split of the device mesh. 1 (default) is "
+                        "the production latitude-band lane. >1 tiles in BOTH "
+                        "directions, which is the only way this lane's halo "
+                        "shrinks as devices are added: a band always "
+                        "exchanges two rows of the WHOLE longitude circle, "
+                        "so its halo bytes are the same at 8 devices and at "
+                        "128, while a tile's boundary shrinks with its area. "
+                        "Measured at 128 devices the halo moves 18.5 MB per "
+                        "device per step and communication is 42 percent of "
+                        "the "
+                        "step; a 16x8 tiling moves 1,280 boundary cells per "
+                        "tile against 8,192 for a band.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
@@ -284,7 +297,9 @@ def main() -> int:
         atm_latlon_geometry_bytes,
         build_sharded_held_suarez_state_atm_latlon,
         make_sharded_atm_latlon_segment,
-        make_sharded_atm_latlon_step)
+        make_sharded_atm_latlon_step,
+        make_sharded_atm_latlon_step_2d,
+        shard_state_atm_latlon_2d)
     seg_n = int(args.segment_steps)
     if seg_n < 0:
         raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
@@ -307,9 +322,33 @@ def main() -> int:
         raise SystemExit(
             f"--multicontroller: --n-devices ({nd}) must equal the GLOBAL "
             f"device count ({avail} across {jax.process_count()} processes).")
+    p_lon = int(args.p_lon)
+    if p_lon < 1:
+        raise SystemExit(f"--p-lon must be >= 1, got {p_lon}")
+    if nd % p_lon != 0:
+        raise SystemExit(
+            f"--p-lon {p_lon} does not divide --n-devices {nd}")
+    p_lat = nd // p_lon
     n_lat = args.n_lat if args.mode == "strong" else args.nlat_per_dev * nd
-    if n_lat % nd != 0:
-        raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
+    if p_lon == 1:
+        if n_lat % nd != 0:
+            raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
+    else:
+        # Tiled lane: BOTH directions have to divide, and the segment lane
+        # is band-only, so refuse rather than silently running bands.
+        if n_lat % p_lat != 0:
+            raise SystemExit(
+                f"n_lat {n_lat} not divisible by p_lat {p_lat} "
+                f"(= n_devices / p_lon)")
+        if args.n_lon % p_lon != 0:
+            raise SystemExit(
+                f"n_lon {args.n_lon} not divisible by --p-lon {p_lon}")
+        if seg_n > 0:
+            raise SystemExit(
+                "--segment-steps is not wired for --p-lon > 1; run the "
+                "tiled lane in the default per-step mode")
+        if nd == 1:
+            raise SystemExit("--p-lon > 1 needs more than one device")
 
     if nd == 1:
         model, c0 = _build(n_lat, args.n_lon, args.nlev)
@@ -325,14 +364,32 @@ def main() -> int:
         _stage("building model geometry (host)")
         model = _build_model(n_lat, args.n_lon, args.nlev)
         _stage("geometry built; creating mesh + band-local IC")
-        mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
-                                 axis_names=("lat",))
-        c = build_sharded_held_suarez_state_atm_latlon(
-            model.grid, model.sigma_coord, mesh)
+        if p_lon > 1:
+            mesh = jax.sharding.Mesh(
+                np.array(jax.devices()[:nd]).reshape(p_lat, p_lon),
+                axis_names=("lat", "lon"))
+            # The tiled layout shards a GLOBAL state rather than building it
+            # tile-local, so this lane pays a one-off global build per
+            # process. That is setup cost, not step cost, but it bounds the
+            # resolution this lane can reach until a tile-local builder
+            # exists.
+            _stage("building global IC for the tiled lane")
+            _model_unused, c_global = _build(n_lat, args.n_lon, args.nlev)
+            del _model_unused
+            c = shard_state_atm_latlon_2d(c_global, mesh)
+            del c_global
+        else:
+            mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
+                                     axis_names=("lat",))
+            c = build_sharded_held_suarez_state_atm_latlon(
+                model.grid, model.sigma_coord, mesh)
     _stage("IC built; constructing step/segment fn")
     if seg_n > 0:
         seg_fn = make_sharded_atm_latlon_segment(
             model, mesh, seg_n, physics_fn=physics_fn)
+    elif p_lon > 1:
+        step = make_sharded_atm_latlon_step_2d(model, mesh,
+                                               physics_fn=physics_fn)
     else:
         step = make_sharded_atm_latlon_step(model, mesh,
                                             physics_fn=physics_fn)
@@ -544,7 +601,7 @@ def main() -> int:
         precision="float64" if jax.config.jax_enable_x64 else "float32",
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
-        decomposition="band" if nd > 1 else "none",
+        decomposition=("band" if p_lon == 1 else f"tiles_{p_lat}x{p_lon}") if nd > 1 else "none",
         # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
         # share lives in extra.cells_per_device — a single-process 4-device
         # SPMD run has 1 rank owning ALL cells (codex finding 3).
@@ -556,6 +613,13 @@ def main() -> int:
             "steps": args.steps,
             "warmup": args.warmup,
             "multicontroller": bool(args.multicontroller),
+            # Which decomposition ran. Without this a tiled row and a band
+            # row are indistinguishable in the receipt, and the whole point
+            # of the tiled lane is that it moves different bytes.
+            "p_lat": p_lat,
+            "p_lon": p_lon,
+            "decomposition": ("lat_bands" if p_lon == 1
+                              else f"tiles_{p_lat}x{p_lon}"),
             # M2b compiled-segment lane facts: a segment row is falsifiable
             # from the record alone (block timings + geometry residency +
             # the finite/validity verdict — codex batch4).
