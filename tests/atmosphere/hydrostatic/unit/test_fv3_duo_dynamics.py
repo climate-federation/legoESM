@@ -404,8 +404,14 @@ class TestFV3DuoDefaultDenyWall:
         from legoesm.supported_matrix import ATMOSPHERE_MATRIX
         entries = [e for e in ATMOSPHERE_MATRIX
                    if e.canonical_name == "fv3_duo_primitive_equations"]
-        assert len(entries) == 1
-        assert "nonhydrostatic" in entries[0].note
+        # TWO rows, one per dynamics axis, because one class carries both
+        # behind a static switch. The test asserted a single row and then
+        # read its note, so it was reading the hydrostatic row -- which has
+        # none -- and had never passed.
+        assert {e.dynamics for e in entries} == {"hydrostatic",
+                                                 "nonhydrostatic"}
+        nh = [e for e in entries if e.dynamics == "nonhydrostatic"]
+        assert len(nh) == 1 and "hydrostatic switch" in nh[0].note
 
 
 # ---------------------------------------------------------------------
@@ -549,7 +555,12 @@ def test_wall_default_surface_is_frozen():
 
 # ponytail: filled by the first CI run's failure message; the VALUE is
 # the reviewable artifact, the mechanism is above.
-_WALL_SURFACE_SHA256 = "46d2fa25c5d0830dfeaf8a0d6a0d3ffae9cc0a2384aee0b0c4a6993d54c39142"
+#
+# 2026-08-19, merging main: the default surface gained a CMOR output
+# resolution and a land diurnal-convection timescale. Neither is read on this
+# lane -- it is dry and runs no physics -- so both stay DENIED and the allow
+# list is unchanged. That re-review is what this hash exists to force.
+_WALL_SURFACE_SHA256 = "d1c310b152e798119b0692d095e68d1fc04197f6c396a811e991abd6da47fe2b"
 
 
 def test_wall_leaf_types_are_scalar():
