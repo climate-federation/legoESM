@@ -920,3 +920,41 @@ def test_a_resumed_viscosity_schedule_is_fast_forwarded():
         "nothing advances the viscosity-schedule index on resume")
     assert "start_day" in src.split("visc_seg_idx + 1 < len(visc_schedule)")[0][-400:], (
         "the fast-forward does not compare against the restart's day")
+
+
+def test_a_resumed_leg_reads_the_forcing_records_it_would_have_read():
+    """The property both driver defects were instances of (GLM-5.2).
+
+    A state round-trip compares fields; it never compares WHICH forcing record
+    was applied, so it passes while the physics is driven by the wrong day.
+    The forcing index is a pure function of the absolute step, so the check is
+    whether the driver's own loop bound yields the tail of the continuous
+    sequence -- which is exactly what iterating from one instead of from the
+    checkpoint's step destroyed.
+
+    The bound is read from the driver rather than restated here, so reverting
+    the fix turns this red rather than leaving it comparing a copy of itself.
+    """
+    import ast
+
+    main = _driver_main_ast()
+    loop = next(n for n in ast.walk(main)
+                if isinstance(n, ast.For) and isinstance(n.target, ast.Name)
+                and n.target.id == "step"
+                and isinstance(n.iter, ast.Call)
+                and getattr(n.iter.func, "id", None) == "range")
+    bound = ast.unparse(loop.iter)
+
+    n_steps, start_step = 8, 3
+    steps = list(eval(bound, {"range": range},                # noqa: S307
+                      {"n_steps": n_steps, "start_step": start_step}))
+    continuous = [_idx_t(s, DT, N_REC) for s in range(1, n_steps + 1)]
+    resumed = [_idx_t(s, DT, N_REC) for s in steps]
+
+    assert len(set(continuous)) > 1, (
+        "the forcing record does not move across this window, so the check "
+        "would pass on a constant sequence")
+    assert resumed == continuous[start_step:], (
+        f"a leg resumed at step {start_step} applies forcing records "
+        f"{resumed} where continuing would apply {continuous[start_step:]}; "
+        "the run is driven by the wrong days and no state comparison sees it")
