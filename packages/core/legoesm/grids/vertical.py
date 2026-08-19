@@ -101,6 +101,67 @@ class SigmaCoordinate(NamedTuple):
         return self.dsigma * p_s[..., None]
 
 
+#: A column of state is contiguous in the vertical, so one cell's column is
+#: ``itemsize * n_levels`` bytes.  The GPU memory path wants that stride to be
+#: a multiple of 16 bytes, which is what lets the level dimension be read and
+#: written as 128-bit vector accesses; when it is not, only every other column
+#: starts on a vector boundary and the rest fall back.
+_LEVEL_ROW_ALIGN_BYTES = 16
+
+
+def warn_if_unaligned_levels(n_levels: int, dtype, *, where: str) -> None:
+    """Warn when the level count makes each column's byte stride unaligned.
+
+    MEASURED on one A100, icosahedral dynamical core, float32, 163,842 cells,
+    60 timed steps with arm spreads under 1% (2026-08-19).  Cost per cell per
+    level against the byte stride of one column:
+
+        levels 13 (52 B)  3.52     levels 20 ( 80 B)  1.54
+        levels 26 (104 B) 4.75     levels 32 (128 B)  1.62
+                                   levels 52 (208 B)  1.62
+
+    Every level count whose stride is a multiple of 16 bytes runs at about
+    1.6; the two that are not run at 3.5 and 4.8.  At 163,842 cells the step
+    is 20.2 ms at 26 levels and 8.5 ms at 32 -- MORE work, less time -- and
+    on the largest mesh tested 32 levels beat 26 by 25%.
+
+    A warning rather than an error: an unaligned level count is a
+    performance cliff, not a wrong answer, and a deliberate choice (matching
+    another model's grid, a published configuration) has to stay possible.
+
+    ``where`` names the coordinate being built so the message points at the
+    call the user can change.
+    """
+    import warnings
+
+    try:
+        itemsize = int(np.dtype(dtype).itemsize)
+    except TypeError:
+        # An unusual dtype object is not a reason to fail coordinate
+        # construction; skip the advisory rather than raise from it.
+        return
+    n_levels = int(n_levels)
+    if itemsize <= 0 or n_levels <= 0:
+        return
+    row_bytes = itemsize * n_levels
+    if row_bytes % _LEVEL_ROW_ALIGN_BYTES == 0:
+        return
+    step = max(1, _LEVEL_ROW_ALIGN_BYTES // itemsize)
+    lower = (n_levels // step) * step
+    upper = lower + step
+    hint = f"{upper}" if lower < 1 else f"{lower} or {upper}"
+    warnings.warn(
+        f"{where}: {n_levels} levels gives a {row_bytes}-byte column stride, "
+        f"which is not a multiple of {_LEVEL_ROW_ALIGN_BYTES}. On GPU this "
+        f"costs up to 3x per level because only every other column starts on "
+        f"a vector boundary — measured 20.2 ms/step at 26 levels against "
+        f"8.5 ms at 32 on the same mesh. Use {hint} levels, or pad the level "
+        f"dimension and mask the padding, unless this exact count is "
+        f"required.",
+        stacklevel=3,
+    )
+
+
 def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
@@ -147,6 +208,7 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
+    warn_if_unaligned_levels(n_levels, dtype, where="create_sigma_coordinate")
     if tropopause_refine == 1.0:
         # Uniform (default) — kept as the literal linspace so the untouched
         # path stays bit-identical to the pre-refinement code.
@@ -1094,6 +1156,7 @@ def create_hybrid_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
+    warn_if_unaligned_levels(n_levels, dtype, where="create_hybrid_coordinate")
     A_half = jnp.asarray(A_half, dtype=dtype)
     B_half = jnp.asarray(B_half, dtype=dtype)
 
@@ -3259,6 +3322,8 @@ def create_height_coordinate(
     # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
     # Use JAX default dtype (float64 when x64 is enabled, float32 otherwise)
     z_half = jnp.linspace(H, 0.0, n_levels + 1)
+    warn_if_unaligned_levels(n_levels, z_half.dtype,
+                             where="create_height_coordinate")
     return create_height_coordinate_from_z_half(
         z_half, theta_ref_fn=theta_ref_fn, p_sfc=p_sfc,
     )
