@@ -102,3 +102,15 @@ def test_two_lanes_that_failed_differently_do_not_compare_equal():
 
     # and two lanes that failed the SAME way still compare fine
     mod._cmp(a, np.array([1.0, np.nan, 3.0]), "field", 0.0)
+
+
+def test_the_job_certifies_the_compiled_path():
+    """The scorer's default may stay eager; this job's claim may not.
+
+    The table this job produces is the lane's certification, and the lane
+    deploys the compiled step. Measuring the eager one certifies a path
+    nobody runs (GLM-5.2)."""
+    body = _JOB.read_text()
+    assert "--jit" in body, (
+        "the parity job scores the eager step, so its table does not describe "
+        "the solver the model actually runs")

@@ -40,8 +40,15 @@ mkdir -p "$OUT"
 
 for BK in numpy jax; do
   echo "########## ARM=$ARM BACKEND=$BK"
+  # The JAX arm runs the COMPILED step, because that is the one the model
+  # deploys. The scorer's own default stays eager so the historical number
+  # remains reproducible, but the claim THIS JOB certifies is about the
+  # shipped solver, and compilation can reassociate arithmetic and flip a
+  # limiter branch. Set JIT=0 to reproduce the old eager comparison.
+  JITARG=""
+  [ "$BK" = "jax" ] && [ "${JIT:-1}" != "0" ] && JITARG="--jit"
   timeout 10800 $PY scripts/validate/fv3_native/full_step_oracle_parity.py \
-    --backend "$BK" $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
+    --backend "$BK" $EXTRA $JITARG --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
   RC=$?
   echo "rc=$RC"
   # A backend that DIED is not a backend that agreed. Without this the loop
