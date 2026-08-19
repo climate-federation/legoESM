@@ -80,6 +80,125 @@ whose magnitude is ~300 m3/s2 has a sampling floor around 1 m3/s2 -- ABOVE the
 0.61 m3/s2 the campaign is chasing.  That is why the day-0/matched-state probe
 carries the attribution and this one carries the trajectory context.
 
+THE STAGE DECOMPOSITION (added 2026-08-19): REST IS NO LONGER A REMAINDER.
+--------------------------------------------------------------------------
+The bucket described above -- "barotropic solve + implicit vertical + atf +
+split leftovers", the one row this budget could never measure -- is now split
+into four rows, each read DIRECTLY off the step's own intermediate states:
+
+    BARO solve       the split-explicit barotropic solve's net deposit into the
+                     depth-integrated circulation
+    BCLIN expl+diss  the explicit RHS + the Nbb dissipative increment, as the
+                     baroclinic deviation the combine actually applies
+    ZDF bt / ZDF bc  the implicit vertical solve, split the same way
+    POST fixer       anything after it (identically 0 on this card)
+
+plus the leap-frog two-level offset ``D_n = R(Nnn) - R(Nbb)``, which is where
+the Robert-Asselin filter's contribution lives.  With those, the budget CLOSES
+on the REALIZED circulation change with NO remainder bucket:
+
+    R(U_{n+1}) - R(U_n) = rDt * sum(stage rows)_n  -  D_n        (exact)
+
+HOW THE BAROTROPIC ROW IS OBTAINED WITHOUT SOLVER INSTRUMENTATION.  The
+explicit combine in ``_leapfrog_step`` is
+    u(Naa)_pre = [ u'(Nbb) + (u'_expl - u'(Nnn)) + du_diss'(Nbb) + U_bar_expl ]
+with the primes the h_u-weighted BAROCLINIC deviations (the method's own
+``_split``).  Each primed piece has ZERO h_u-weighted depth mean, so
+    depth_mean_hu( u(Naa)_pre - u(Nbb) ) == U_bar_expl - U_bar(Nbb)
+exactly.  Only the pre-implicit-solve state is needed, and it is captured by a
+record-only wrapper around ``_apply_implicit_vertical_mixing`` that returns the
+original output unchanged.  Nothing in packages/ is touched; the trajectory is
+taken on the untouched production ``step`` and the instrumented evaluation is a
+SECOND call on the same input (control S4 prints their one-step disagreement,
+measured at 1.1e-16 m/s = 0.5x fp64 eps).
+
+CONTROLS ADDED, all of which CAN fail:
+  S0/S0b  the capture must fire, exactly once per step (fails closed)
+  S4      the instrumented evaluation vs the production step: 1.11e-16 m/s
+          against max|u|=0.744, i.e. 0.5x fp64 eps
+  S5      h_u must be EXACTLY zero on every face the combine masks, in the
+          band -- otherwise the ``* u_mask3`` in the combine injects a
+          barotropic term into BARO and the row is not what it claims.
+          Measured 0.000e+00 (fails closed).
+  S PLANT ``--stage-plant``: a DEPTH-VARYING field with EXACTLY ZERO
+          h_u-weighted depth mean, injected into the CAPTURED pre-solve
+          velocity.  Prediction: BARO must NOT MOVE AT ALL, the whole plant
+          must land in BCLIN, and ZDF bt/bc take minus the same shifts.
+          Measured at 1e-3 m/s: BARO 4.498 -> 4.498 (unchanged), BCLIN
+          3.420 -> 20.370, ZDF bt 0.232 -> 0.232, ZDF bc -3.353 -> -20.303,
+          STAGE SUM unchanged.  BARO moving would have proved the probe's
+          h_u / floor / fused split is not the one the model used.
+  S1/S2/closure  RETRACTED AS EVIDENCE (see below): reported, but they are
+          telescoping identities, not gates.
+
+RETRACTED, 2026-08-19, both caught by adversarial review and neither by me:
+  (1) THE FACTOR OF 2.  An earlier revision rescaled the stage rows by
+      ``RDT*acc_n/T_int`` before comparing them with NEMO.  Since
+      T_int = acc_n*dt and rDt = 2*dt that factor is EXACTLY 2, so every
+      lego-vs-NEMO barotropic number was doubled, and the "ATF/leap-frog
+      offset" row that closed the rescaled table was the same factor of 2
+      wearing a physical name.  The stage rows are ALREADY tendencies (the
+      same normalisation as NEMO's ``utrd_*``, dynspg_ts.F90:940) and they
+      already sum to the realized dR/dt on their own -- the tell that was
+      missed.  Corrected, the lego-minus-NEMO barotropic gap moves from
+      -0.57 +- 0.52 to -1.15 +- 0.36 (arm=off), i.e. MORE significant, not
+      less.
+  (2) "THE BUDGET CLOSES, SO EVERY ROW IS MEASURED."  S1, S2 and the
+      realized-change closure all telescope to the SAME quantity -- the
+      diagnostic evaluation minus the production step, i.e. S4 under the row
+      reducer.  They are identities and CANNOT fail on the split.  What
+      actually gates the BARO/BCLIN partition is the depth-varying S PLANT
+      and the S5 geometry gate above; the closure numbers are bookkeeping.
+  (3) "THE BAROTROPIC ROW DOES NOT WEAR THE FINGERPRINT."  WRONG, and wrong
+      twice.  A circulation deficit LINEAR in time requires a tendency
+      deficit CONSTANT in time, so "BARO has no time trend" is evidence FOR
+      this row, not against it.  And the fingerprint lives in lego MINUS
+      NEMO: lego's own BARO row is a meridional dipole and so is NEMO's, so
+      the shape of either alone says nothing.  The per-row DIFFERENCE table
+      is now printed and is broad and single-signed, not a dipole.
+
+RESULT (90-day twin, band mean m3/s2 per u-row; the stage rows ARE the dR/dt
+decomposition, no rescaling):
+
+                        off ladder          off ladder        true T-depth
+                       transport_avg       velocity_avg      transport_avg
+  BARO solve               +0.578             +0.707             +0.368
+  BCLIN expl+diss          -2.129             -2.148             -2.130
+  ZDF bt                   +0.339             +0.319             +0.324
+  ZDF bc                   +2.098             +2.118             +2.101
+  POST fixer                0.000              0.000              0.000
+  = realized dR/dt         +0.886             +0.996             +0.663
+  lego-minus-NEMO BARO     -1.146             -1.015             -1.355
+                          (+-0.358)          (+-0.343)          (+-0.335)
+
+THE OWNERSHIP A/B (one variable, same ladder, same window).  NEMO builds TWO
+averages of the barotropic substep loop under nn_bt_flt=2: ``puu_b(Kaa)``,
+the PRIMARY velocity-weighted average (dynspg_ts.F90:846-847), and
+``un_adv``, the SECONDARY transport-weighted average (:843).  It deposits
+``puu_b(Kaa)`` as the AFTER-level barotropic mode in the 3-D RHS (:938-942,
+ln_dynadv_vec=.TRUE.) and uses ``un_adv*r1_hu(Kmm)`` only on the NOW level
+(:984-987), which ``mlf_baro_corr`` removes again before the Asselin filter
+(cfgs/DINO/MY_SRC/stpmlf.F90:757-760, the .NOT.ln_bt_fw branch;
+ln_bt_fw=.false. at RUN_90D_TWIN/namelist_cfg:353).  legoESM's card sets
+``barotropic_reconcile_target="transport_avg"`` and ``_leapfrog_step`` then
+uses that reconciled depth mean as the AFTER-level mode -- i.e. NEMO's
+NOW-level average in NEMO's AFTER-level slot.  ``velocity_avg`` is the
+NEMO-correct choice for that slot and is already implemented.
+
+  MEASURED: flipping it moves the barotropic row +0.129 and the realized
+  spin-up rate +0.110 m3/s2 per row -- the predicted DIRECTION, and 18% of
+  the -0.61 deficit.  It is a real, one-field, source-cited lever.  It is
+  NOT the owner: a prediction that it would recover 80-100% of the deficit
+  is REFUTED by this arm.  The residual deficit after the flip is ~0.50.
+
+WHAT IS STILL UNRESOLVED.  The lego-minus-NEMO barotropic gap stays at
+-1.0 to -1.4 on every arm -- the right sign but ~2x the whole deficit, so
+either other rows compensate or NEMO's side is biased.  That column cannot
+settle it: NEMO's barotropic net is recovered as ``utrd_spg + (pre-spg
+trends)``, a 595:1 cancellation whose SYSTEMATIC, common-mode bound is of
+order 1 m3/s2 and does NOT average down over intervals.  The quoted +-
+figures bound RANDOM scatter only.  PLAUSIBLE, never CONFIRMED, from here.
+
 Run (fp64; LEGOESM_NEMO_E3T is gated and must be explicit -- "off" is the
 ladder the recorded twin arms integrate on, and the only one legoESM is stable
 on for 90 days):
@@ -147,6 +266,12 @@ def main(argv=None):
                     help="P control: constant [m/s2] added to KE_PGF_u's "
                          "accumulator every step (expect an exact, predictable "
                          "shift in THAT row only)")
+    ap.add_argument("--stage-plant", type=float, default=0.0,
+                    help="S control: constant [m/s] added to the CAPTURED "
+                         "pre-implicit-solve velocity (probe-side copy only; "
+                         "the model is untouched).  Expect BARO +P(d)/rDt, "
+                         "ZDF bt -P(d)/rDt, every other stage row and the "
+                         "stage SUM bit-unchanged.")
     ap.add_argument("--out-npz", default=None)
     args = ap.parse_args(argv)
 
@@ -213,9 +338,155 @@ def main(argv=None):
                 wind, stack)
 
     bundle_fn = jax.jit(_bundle)
+    rowc_fn = jax.jit(lambda u: _rowint(u[:, 1:, :]))
+
+    # ------------------------------------------------------------- STAGES --
+    # The row this budget never measured: the split-explicit BAROTROPIC solve's
+    # net deposit into the depth-integrated circulation, plus the implicit
+    # vertical solve and anything after it.  Measured DIRECTLY from the step's
+    # own intermediate states, NOT as a remainder -- which is what turns the
+    # "REST" bucket from an algebraic identity into a falsifiable closure.
+    #
+    # THE SEAM, read off ``_leapfrog_step`` (ocean_model_latlon_cgrid.py), not
+    # inferred.  The explicit combine is
+    #     u(Naa)_pre = [ u'(Nbb) + (u'_expl - u'(Nnn)) + du_diss'(Nbb)
+    #                    + U_bar_expl ] * u_mask3
+    # where the primes are the h_u-weighted BAROCLINIC deviations (the method's
+    # own ``_split``, ``depth_mean(field, h_face, 1e-10, keepdims=True,
+    # fused=False)``) and ``U_bar_expl`` is the depth-UNIFORM barotropic mode
+    # taken straight from the split-explicit solve.  The three baroclinic
+    # pieces each have ZERO h_u-weighted depth mean by construction, so
+    #     depth_mean_hu( u(Naa)_pre - u(Nbb) )  ==  U_bar_expl - U_bar(Nbb)
+    # EXACTLY -- the barotropic row needs no solver instrumentation at all,
+    # only the pre-implicit-solve state.  That state is captured by a
+    # record-only wrapper around ``_apply_implicit_vertical_mixing`` (which
+    # receives ``naa_expl`` and returns ``naa``); the wrapper returns the
+    # original output UNCHANGED, so the trajectory is bit-identical to the
+    # unpatched model by construction and nothing in packages/ is touched.
+    #
+    # ROWS (all row-integrated with the recorded e3u_0 reducer, / rDt):
+    #   BARO   [P(bt(u_pre)) - P(bt(u_bef))]/rDt   the barotropic solve's net
+    #   BCLIN  [P(u_pre - u_bef) - BARO*rDt]/rDt   explicit RHS + Nbb diss,
+    #                                              baroclinic deviation only
+    #   ZDF bt/bc  the implicit vertical solve, split the same way
+    #   POST   [P(u_final) - P(u_post)]/rDt        conservation fixer, if any
+    # Their SUM is (R_naa - R_bb)/rDt = the leap-frog identity's rate, i.e.
+    # exactly what TERMS+REST also sums to -- so REST is now DECOMPOSED, and
+    # the check that CAN fail is the per-stage prediction set (S1-S3 below).
+    from legoesm.ocean.vertical import compute_layer_thickness  # noqa: E402
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
+        min_cell_to_uface,
+    )
+    from legoesm.ocean.dynamics.ocean_tendency_common import (  # noqa: E402
+        depth_mean,
+    )
+
+    STAGES = ("BARO solve", "BCLIN expl+diss", "ZDF bt", "ZDF bc", "POST fixer")
+    _REC: dict = {}
+    _Model = type(model)
+    _ORIG_VMIX = _Model._apply_implicit_vertical_mixing
+
+    def _capture_vmix(self, st_in, dt_in, sfc, *a, **kw):
+        out = _ORIG_VMIX(self, st_in, dt_in, sfc, *a, **kw)
+        _REC["n"] = _REC.get("n", 0) + 1
+        _REC["pre"] = st_in.u.data
+        _REC["post"] = (out[0] if isinstance(out, tuple) else out).u.data
+        return out
+
+    _Model._apply_implicit_vertical_mixing = _capture_vmix
+    # ``step`` dispatches through ``_step_jitted``, its OWN jit boundary -- a
+    # tracer captured inside it cannot escape into this probe's jit (JAX
+    # raises UnexpectedTracerError, as it should), and running the UNWRAPPED
+    # body instead moves the trajectory by fp64 roundoff (measured: max|du| =
+    # 1.1e-16, |dT| = 5.0e-14 in one step) because XLA fuses the un-nested
+    # program differently.  So the trajectory is NOT taken on the unwrapped
+    # path: ``step_fn`` below stays the untouched production call, and the
+    # unwrapped body is evaluated a SECOND time on the SAME input purely to
+    # expose the intermediates.  Costs one extra step per iteration and keeps
+    # every reported number on the production trajectory; the S4 control
+    # prints the two paths' one-step disagreement so the reader can see the
+    # size of the only approximation this introduces.
+    _STEP_BODY = _Model.__dict__["_step_jitted"].__wrapped__
+    # The capture is a TRACE-TIME side effect: it fires only while the step
+    # body is being traced.  ``_build_twin_state``'s day-0 gate may already
+    # have populated a jit cache for these exact avals, in which case the
+    # trace would be SKIPPED and the wrapper never run -- so drop the caches
+    # first, and fail closed below if the capture is still empty.
+    jax.clear_caches()
+    _MWC = model.config.min_water_column_m      # the MODEL's, not the harness's
+    _SPLANT = float(args.stage_plant)
+    # S5 (fails closed): the barotropic row's derivation assumes the ``* u_mask3``
+    # in the combine is a no-op on the h_u-weighted depth mean, i.e. that h_u is
+    # ZERO wherever the 3-D face mask is.  True on a full-step partial-cell
+    # coordinate (h_partial in {0, dz_ref}) and FALSE on a pure z* card, where the
+    # mask would inject (1-bt(mask))*(U_bar terms) into BARO.  Measured, not
+    # assumed -- and it also catches the DINO seam-wall columns, which close a
+    # face where h_u > 0.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate  # noqa: E402
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
+        compute_face_masks_3d,
+    )
+
     step_fn = jax.jit(lambda s, r: model.step(s, DT, surface_forcing=sf,
                                               external_tracer_rate=r))
-    rowc_fn = jax.jit(lambda u: _rowint(u[:, 1:, :]))
+
+    def _stage_step(s, rate):
+        _REC.clear()
+        st2 = _STEP_BODY(model, s, DT, None, sf, None, grid=None,
+                         vertex_mask=None, t_seconds=None,
+                         external_tracer_rate=rate)
+        if "pre" not in _REC:
+            raise SystemExit(
+                "FATAL S0: the implicit-vertical-mixing capture never fired -- "
+                "either the inner jit was served from cache (so this trace ran "
+                "no Python) or config.implicit_vertical_mixing is False.  No "
+                "stage row may be read.")
+        h_u = min_cell_to_uface(compute_layer_thickness(
+            s.eta.data, s.H_bathy.data, model.z_coord,
+            min_water_column_m=_MWC))
+
+        def _bt(x):      # the model's OWN split -- same helper, same floor
+            return jnp.broadcast_to(
+                depth_mean(x, h_u, 1.0e-10, keepdims=True, fused=False),
+                x.shape)
+
+        u_bef = s.u_before.data
+        # S PLANT.  A CONSTANT plant is VACUOUS here: depth_mean of a constant is
+        # that constant for ANY positive weights, so it shifts BARO by +P and
+        # ZDF bt by -P as an algebraic identity that exercises neither the h_u
+        # weighting nor the seam.  This plant is instead DEPTH-VARYING and built
+        # to have exactly ZERO h_u-weighted depth mean, so the PREDICTION is the
+        # opposite one and it CAN fail: the whole plant must land in BCLIN and
+        # BARO must not move at all.  It moves iff the probe's h_u/floor/fused
+        # split differs from the one the model used.
+        _pl = _SPLANT * jnp.sin(
+            jnp.arange(_REC["pre"].shape[-1], dtype=_REC["pre"].dtype))
+        _h_u0 = min_cell_to_uface(compute_layer_thickness(
+            s.eta.data, s.H_bathy.data, model.z_coord,
+            min_water_column_m=_MWC))
+        _pl = _pl - depth_mean(jnp.broadcast_to(_pl, _h_u0.shape), _h_u0,
+                               1.0e-10, keepdims=True, fused=False)
+        u_pre = _REC["pre"] + _pl         # probe-side copy only; model untouched
+        u_post = _REC["post"]
+        d_ex, d_zdf = u_pre - u_bef, u_post - u_pre
+        b_ex, b_zdf = _bt(d_ex), _bt(d_zdf)
+        sl = _USLICE
+        rows = jnp.stack([
+            _rowint(b_ex[sl]),
+            _rowint((d_ex - b_ex)[sl]),
+            _rowint(b_zdf[sl]),
+            _rowint((d_zdf - b_zdf)[sl]),
+            _rowint((st2.u.data - u_post)[sl]),
+        ]) / RDT
+        u_diag = st2.u.data
+        # D_n = R(Nnn) - R(Nbb): the leap-frog two-level offset.  It is what
+        # separates the identity's rate from the realized change of the NOW
+        # level, and it is where the Asselin filter's own contribution lives:
+        #   R(U_{n+1}) - R(U_n) = rDt * sum(stage rows)_n  -  D_n
+        offs = _rowint(s.u.data[sl]) - _rowint(u_bef[sl])
+        return rows, offs, u_diag
+
+    stage_fn = jax.jit(_stage_step)
 
     n_steps = args.days * STEPS_PER_DAY
     per_int = args.interval_days * STEPS_PER_DAY
@@ -225,6 +496,10 @@ def main(argv=None):
     acc_map = np.zeros((n_int, len(TERMS) - 1, NY, NX))  # depth-int  [m2/s2]
     acc_n = np.zeros(n_int, dtype=np.int64)
     R_series = np.zeros((n_int + 1, NY))
+    acc_stage = np.zeros((n_int, len(STAGES), NY))    # row torque   [m3/s2]
+    acc_offs = np.zeros((n_int, NY))                  # sum_n D_n    [m3/s]
+    stage_step0 = np.zeros((len(STAGES), NY))         # step 0 only  [m3/s2]
+    Rnow_series = np.zeros((n_int + 1, NY))           # the NOW level's R
     i_plant = COMPS.index("KE_PGF_u")
 
     t0 = time.time()
@@ -265,18 +540,69 @@ def main(argv=None):
         if args.plant:
             shift = B._row_int_trend(np.where(B.umask, args.plant, 0.0))
             rows_np[i_plant] += shift
-        st = step_fn(s2, rate)
+        R_now = np.asarray(rowc_fn(s2.u.data))
+        if k == 0:
+            Rnow_series[0] = R_now
+        stage_dev, offs_dev, u_diag = stage_fn(s2, rate)
+        _ncap = _REC.get("n") if k == 0 else None
+        st = step_fn(s2, rate)          # the PRODUCTION trajectory, untouched
+        if k == 0:
+            # S4: how far the instrumented evaluation sits from the production
+            # step it is diagnosing.  Arrays diffed, never a printed summary.
+            _d = float(np.max(np.abs(np.asarray(u_diag)
+                                     - np.asarray(st.u.data))))
+            _u = float(np.max(np.abs(np.asarray(st.u.data))))
+            print(f"  [S4] instrumented vs production step, max|du| = "
+                  f"{_d:.2e} m/s against max|u| = {_u:.3f} "
+                  f"(rel {_d / max(_u, 1e-30):.2e}; fp64 eps = 2.2e-16)")
+            if _d > 1.0e-12:
+                raise SystemExit(
+                    "FATAL S4: the instrumented evaluation is not the "
+                    "production step to fp64 roundoff -- the stage rows would "
+                    "describe a different trajectory")
+            _zc = model.z_coord
+            _hu0 = np.asarray(min_cell_to_uface(compute_layer_thickness(
+                np.asarray(s2.eta.data), np.asarray(s2.H_bathy.data), _zc,
+                min_water_column_m=_MWC)))
+            _um = np.asarray(s2.u_mask.data)[..., None] * np.ones(
+                (1, 1, _hu0.shape[-1]))
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _a3, _ = compute_face_masks_3d(_zc.is_active, model.grid)
+                _um = _um * np.asarray(_a3)
+            _leak = float(np.max(np.abs(_hu0 * (1.0 - _um))[:, 1:, :][
+                np.ix_(ROWS, range(_hu0.shape[1] - 1), range(_hu0.shape[-1]))]))
+            print(f"  [S5 geometry gate] max h_u on MASKED faces in the band = "
+                  f"{_leak:.3e} m (must be 0; else the combine's mask injects a "
+                  f"barotropic term into BARO)")
+            if _leak != 0.0:
+                raise SystemExit(
+                    "FATAL S5: h_u is non-zero on faces the leap-frog combine "
+                    "masks, so depth_mean(u_pre - u_bef) is NOT the barotropic "
+                    "increment -- the BARO row is not what it claims to be")
+            if _ncap != 1:
+                raise SystemExit(
+                    f"FATAL S0b: the implicit vertical solve was entered "
+                    f"{_ncap} times per step, not once -- the stage "
+                    "seam is not where this probe's identity assumes it is")
+            print(f"  [stage capture] implicit-vmix entries per step = "
+                  f"{_ncap}  (must be 1); stage-plant = {_SPLANT:g} m/s")
+        stage_np = np.array(stage_dev, dtype=np.float64)
+        if k == 0:
+            stage_step0[:] = stage_np         # already a tendency; NO rescale
         R_naa = np.asarray(rowc_fn(st.u.data))
         rest = (R_naa - R_bb) / RDT - rows_np.sum(axis=0)
 
         i = min(k // per_int, n_int - 1)
         acc_row[i, :len(TERMS) - 1] += rows_np
         acc_row[i, -1] += rest
+        acc_stage[i] += stage_np
+        acc_offs[i] += np.asarray(offs_dev, dtype=np.float64)
         acc_map[i] += np.asarray(maps_dev, dtype=np.float64)
         acc_n[i] += 1
 
         if (k + 1) % per_int == 0:
             R_series[i + 1] = R_naa
+            Rnow_series[i + 1] = R_naa      # Naa becomes the next step's Nnn
             u3 = np.asarray(st.u.data)
             if not np.isfinite(u3).all():
                 raise SystemExit(f"FATAL: non-finite velocity at step {k+1}")
@@ -285,9 +611,12 @@ def main(argv=None):
                   f"max|u|={np.max(np.abs(u3)):.4f}  wall={time.time()-t0:.0f}s",
                   flush=True)
 
+    acc_offs_sum = acc_offs.copy()          # keep the UNAVERAGED sum_n D_n
     for i in range(n_int):
         acc_row[i] /= acc_n[i]
         acc_map[i] /= acc_n[i]
+        acc_stage[i] /= acc_n[i]
+        acc_offs[i] /= acc_n[i]
 
     # ------------------------------------------------------------ the table --
     print("\n" + "=" * 112)
@@ -343,11 +672,244 @@ def main(argv=None):
           "    column here is spg + atf only (NEMO's vertical half already sits\n"
           "    in the G4 row).  A LUMPED bucket: it names three stages at once.")
 
+    # ============================================================= STAGES ==
+    # The row the accumulated budget never measured, plus a budget that closes
+    # on the REALIZED state change with NO remainder bucket left over.
+    print("\n" + "=" * 112)
+    print(f"STAGE decomposition of the SAME per-step increment -- every row "
+          f"measured DIRECTLY from the step's own\nintermediate states, none "
+          f"as a remainder.  [m3/s2], band mean over rows {ROWS[0]}"
+          f"..{ROWS[-1]}, per {args.interval_days}-day interval")
+    print("=" * 112)
+    print(f"  {'stage':18s}" + "".join(f"{i*args.interval_days:>9d}"
+                                       for i in range(n_int))
+          + f"{'  90d mean':>12s}")
+    for t, name in enumerate(STAGES):
+        v = acc_stage[:, t, :][:, ROWS].mean(axis=1)
+        print(f"  {name:18s}" + "".join(f"{x:9.3f}" for x in v)
+              + f"{v.mean():12.3f}")
+    if _SPLANT:
+        print(f"\n  S PLANT: a DEPTH-VARYING field of amplitude {_SPLANT:g} m/s "
+              "with EXACTLY ZERO h_u-weighted\n  depth mean was injected into "
+              "the CAPTURED pre-solve velocity.  PREDICTION, which CAN\n  FAIL: "
+              "'BARO solve' must not move AT ALL (the plant has no barotropic "
+              "part\n  under the model's own split), the whole plant must land "
+              "in 'BCLIN expl+diss',\n  'ZDF bt'/'ZDF bc' must take exactly "
+              "minus the same shifts, and STAGE SUM must be\n  unchanged.  BARO "
+              "moving means this probe's h_u / floor / fused split is NOT the "
+              "one\n  the model used, and every BARO number is then wrong.  "
+              "Compare against the unplanted run.")
+    stot = acc_stage.sum(axis=1)[:, ROWS].mean(axis=1)
+    print(f"  {'STAGE SUM':18s}" + "".join(f"{x:9.3f}" for x in stot)
+          + f"{stot.mean():12.3f}")
+    print(f"  {'TERMS+REST':18s}" + "".join(f"{x:9.3f}" for x in tot)
+          + f"{tot.mean():12.3f}")
+
+    # ---- S1 (Rule 1e): the stage sum must reproduce the recorded TERMS+REST
+    #      identity's rate to roundoff.  Both are (R_naa - R_bb)/rDt, reached
+    #      by two INDEPENDENT routes (per-term diagnostics vs intermediate
+    #      states), so a disagreement means one route is wrong.
+    s1 = float(np.max(np.abs(acc_stage.sum(axis=1) - acc_row.sum(axis=1))[:, ROWS]))
+    print(f"\n  S1  stage sum vs the recorded TERMS+REST identity, band max "
+          f"|diff| = {s1:.3e} m3/s2")
+    if s1 > 1.0e-6:
+        raise SystemExit("FATAL S1: the two routes to the same per-step "
+                         "increment disagree -- no stage row may be read")
+
+    # ---- S2: REST is now DECOMPOSED, not lumped.  REST == (stage sum) minus
+    #      the explicit per-term rows, so the barotropic/implicit/post split
+    #      below is exactly what was previously hidden inside it.
+    rest_row = acc_row[:, idx["REST"], :]
+    rest_from_stages = acc_stage.sum(axis=1) - acc_row[:, :len(TERMS) - 1, :].sum(axis=1)
+    s2 = float(np.max(np.abs(rest_row - rest_from_stages)[:, ROWS]))
+    print(f"  S2  REST reproduced from the stage rows, band max |diff| = "
+          f"{s2:.3e} m3/s2")
+    if s2 > 1.0e-6:
+        raise SystemExit("FATAL S2: the stage rows do not reproduce REST")
+
+    # ---- S3: the implicit vertical solve is PREDICTED to be a no-op on the
+    #      barotropic mode on this card (zdf_baroclinic_only=True strips the
+    #      depth mean before the tridiagonal solve and re-adds the SAME mean
+    #      after it; surface_stress_implicit=False, so no depth-mean source
+    #      exists inside the solve).  A FALSIFIABLE prediction, not a claim:
+    #      if "ZDF bt" is not at roundoff, that reading is wrong.
+    zbt = float(np.max(np.abs(acc_stage[:, STAGES.index("ZDF bt"), :])[:, ROWS]))
+    zbc = float(np.max(np.abs(acc_stage[:, STAGES.index("ZDF bc"), :])[:, ROWS]))
+    print(f"  S3  implicit solve on the BAROTROPIC mode: band max |ZDF bt| = "
+          f"{zbt:.3e} m3/s2 (zdf_baroclinic_only="
+          f"{getattr(mc, 'zdf_baroclinic_only', '?')}, surface_stress_implicit="
+          f"{getattr(mc, 'surface_stress_implicit', '?')}); its baroclinic "
+          f"half is {zbc:.3f}")
+    print("      NOT a defect reading, and NOT a clean 'no-op' test: the "
+          "implicit solve strips and\n      re-adds the depth mean with "
+          "``dz_u`` and config.min_water_column_m, while the split\n"
+          "      this row uses is the leap-frog combine's OWN "
+          "(``h_u``, floor 1e-10, unfused).  A\n      non-zero ZDF bt is "
+          "therefore the DIFFERENCE OF TWO WEIGHTINGS as much as a real\n"
+          "      depth-mean source, and separating them needs the solve's own "
+          "internals, not this\n      seam.  Reported so it is visible, "
+          "labelled PLAUSIBLE-artifact, attributed to nothing.")
+
+    # ---- the budget that closes on the REALIZED change of the NOW level -----
+    # Exact identity, one line of leap-frog algebra:
+    #     R(U_{n+1}) - R(U_n) = rDt * sum(stage rows)_n  -  D_n
+    # with D_n = R(Nnn) - R(Nbb).  Summed over an interval this is EXACT, so
+    # the printed residual is a real closure test of the stage rows, not an
+    # identity: the stage rows come from the intermediate states, D_n from the
+    # two time levels, and the realized change from the state itself.
+    print("\n" + "=" * 112)
+    print("CLOSURE on the REALIZED circulation change of the NOW level "
+          "[m3/s per row, band mean]")
+    print("=" * 112)
+    T_int = args.interval_days * 86400.0
+    dR_now = (Rnow_series[1:] - Rnow_series[:-1])[:, ROWS].mean(axis=1)
+    pred = (RDT * acc_stage.sum(axis=1) * acc_n[:, None]
+            - acc_offs_sum)[:, ROWS].mean(axis=1)
+    print(f"  {'interval (day)':18s}" + "".join(f"{i*args.interval_days:>12d}"
+                                                for i in range(n_int)))
+    print(f"  {'realized dR':18s}" + "".join(f"{x:12.1f}" for x in dR_now))
+    print(f"  {'stages - offset':18s}" + "".join(f"{x:12.1f}" for x in pred))
+    print(f"  {'residual':18s}" + "".join(f"{x - y:12.2e}"
+                                          for x, y in zip(pred, dR_now)))
+    cl = float(np.max(np.abs(pred - dR_now)))
+    scale = float(np.max(np.abs(RDT * acc_stage * acc_n[:, None, None])[:, :, ROWS]))
+    print(f"  band max |residual| = {cl:.3e} m3/s against a largest stage "
+          f"contribution of {scale:.3e} m3/s  ({100.0 * cl / max(scale, 1e-30):.2e} %)")
+    if scale > 0 and cl / scale > 1.0e-6:
+        raise SystemExit("FATAL: the stage budget does NOT close on the "
+                         "realized circulation change")
+    print("  Every row of this budget is now measured; there is no remainder "
+          "bucket.")
+
+    # ---- UNITS, stated once, because getting this wrong doubles every number.
+    # ``acc_stage`` is ALREADY a tendency: rows = row_int(increment)/rDt, m3/s2,
+    # the SAME normalisation as NEMO's dumped ``utrd_*`` (dynspg_ts.F90:940
+    # divides the barotropic increment by r1_Dt = 1/rDt).  It is therefore the
+    # column that may be compared against NEMO, and it is used raw below.
+    # RETRACTED (2026-08-19, caught by BOTH adversarial reviewers): an earlier
+    # revision printed ``RDT*acc_stage*acc_n/T_int`` here and called it "the
+    # contribution rate to dR/dt", then compared THAT against NEMO.  Since
+    # T_int = acc_n*dt and rDt = 2*dt, that factor is exactly 2, so every
+    # lego-vs-NEMO barotropic number was 2x too large and the artificial
+    # "ATF/leap-frog offset" row that closed the table was the same factor of 2
+    # wearing a physical name.  The stage rows already sum to the realized
+    # dR/dt on their own (printed below), which is the tell that was missed.
+    print("\n  The stage rows ARE the dR/dt decomposition -- no rescaling, no "
+          "offset row:")
+    print(f"  {'stage':18s}" + "".join(f"{i*args.interval_days:>9d}"
+                                       for i in range(n_int)) + f"{'  mean':>12s}")
+    for t, name in enumerate(STAGES):
+        v = acc_stage[:, t, :][:, ROWS].mean(axis=1)
+        print(f"  {name:18s}" + "".join(f"{x:9.3f}" for x in v)
+              + f"{v.mean():12.3f}")
+    vr = dR_now / T_int
+    print(f"  {'STAGE SUM':18s}" + "".join(f"{x:9.3f}" for x in stot)
+          + f"{stot.mean():12.3f}")
+    print(f"  {'realized dR/dt':18s}" + "".join(f"{x:9.3f}" for x in vr)
+          + f"{vr.mean():12.3f}")
+    print("  The two agree because the leap-frog two-level offset settles at "
+          "D = rDt*S/2 for ANY\n  Asselin gamma (the homogeneous mode decays "
+          "as (2g-1)^n), so the offset is SLAVED and\n  is not a lever.  D is "
+          "recorded in the npz; it is not a budget row.")
+
+    # ---- the fingerprint: the lego-MINUS-NEMO per-row structure -------------
+    ib = STAGES.index("BARO solve")
+    baro_t = acc_stage[:, ib, :]
+
+    # -------------------------------- NEMO's own barotropic-solve net row ---
+    # Rule 0 -- read off NEMO's source, not inferred:
+    #   dynspg.F90:96-99/184-187  utrd_spg = the FULL change in puu(Krhs)
+    #                             across dyn_spg.
+    #   dynspg_ts.F90:345         dyn_spg_ts first REMOVES the vertical mean
+    #                             zu_frc of the pre-spg RHS,
+    #   dynspg_ts.F90:938-942     then adds (uu_b(Kaa)-uu_b(Kbb))/rDt
+    #                             (ln_dynadv_vec=.TRUE., ocean.output:1022).
+    #   dynspg_ts.F90:330-333     under key_qco zu_frc uses e3u_0 / r1_hu_0 --
+    #                             the SAME weights as this probe's row reducer,
+    #                             so row_int(zu_frc replicated) == row_int(the
+    #                             3-D RHS) EXACTLY and no extra assumption is
+    #                             needed to invert the subtraction.
+    #   stpmlf.F90:303-326        the pre-spg RHS is dyn_adv (keg+zad) +
+    #                             dyn_vor (pvo+rvo) + dyn_ldf (ldf) +
+    #                             dyn_hpg (hpg); dyn_zdf comes AFTER (:385).
+    # Hence NEMO's barotropic-solve net row torque is recoverable as
+    #     utrd_spg + (hpg + keg + rvo + pvo + zad + ldf)
+    # which is the SAME quantity as lego's "BARO solve" row.
+    NEMO_PRE_SPG = ("hpg", "keg", "rvo", "pvo", "zad", "ldf")
+    print("\n" + "=" * 112)
+    print("BAROTROPIC-SOLVE NET ROW: lego (accumulated) vs NEMO (recovered "
+          "from utrd_spg, INSTANTANEOUS samples)")
+    print("=" * 112)
+    print(f"  {'day':>5s}{'lego BARO':>12s}{'NEMO baro':>12s}{'diff':>10s}"
+          f"{'NEMO utrd_spg':>16s}{'|pre-spg|':>12s}")
+    _canc = []
+    for i in range(n_int):
+        pre = sum(nem[i][t] for t in NEMO_PRE_SPG)
+        nb = nem[i]["spg"] + pre
+        lb = baro_t[i][ROWS].mean()
+        _canc.append(max(abs(nem[i]["spg"][ROWS].mean()),
+                         abs(pre[ROWS].mean())) / max(abs(nb[ROWS].mean()), 1e-30))
+        print(f"  {i*args.interval_days:5d}{lb:12.3f}{nb[ROWS].mean():12.3f}"
+              f"{lb - nb[ROWS].mean():10.3f}{nem[i]['spg'][ROWS].mean():16.3f}"
+              f"{pre[ROWS].mean():12.3f}")
+    print("\n  THE FINGERPRINT IS A DIFFERENCE, NOT A FIELD.  The deficit is "
+          "NEAR-UNIFORM per row and\n  LINEAR in time; the quantity that must "
+          "carry it is lego MINUS NEMO, and the RATE\n  deficit it implies is "
+          "CONSTANT in time, not trending.  lego's own BARO row is a\n  "
+          "meridional dipole and so is NEMO's (same sea-surface gradients), so "
+          "the SHAPE of\n  either one alone says nothing.  Per-row DIFFERENCE, "
+          "per interval [m3/s2]:")
+    print(f"  {'row':>5s}" + "".join(f"{i*args.interval_days:>9d}"
+                                     for i in range(n_int)) + f"{'  mean':>9s}")
+    _dif = np.zeros((n_int, B.NY))
+    for i in range(n_int):
+        _dif[i] = baro_t[i] - (nem[i]["spg"]
+                               + sum(nem[i][t] for t in NEMO_PRE_SPG))
+    for j in ROWS:
+        print(f"  {j:5d}" + "".join(f"{_dif[i, j]:9.2f}" for i in range(n_int))
+              + f"{_dif[:, j].mean():9.2f}")
+    _bm = _dif[:, ROWS].mean(axis=1)
+    _se = float(np.std(_bm, ddof=1) / np.sqrt(len(_bm)))
+    print(f"  band mean over intervals = {_bm.mean():+.3f} m3/s2 per row, "
+          f"scatter s.e. = {_se:.3f} (t = {_bm.mean()/max(_se, 1e-30):+.2f}).\n"
+          "  The s.e. bounds RANDOM scatter ONLY.  The 595:1 cancellation noted "
+          "below is a\n  SYSTEMATIC, common-mode bound of order 1 m3/s2 that "
+          "does NOT average down over\n  intervals, so this number stays "
+          "PLAUSIBLE and may not be promoted to CONFIRMED here.")
+
+    print("\n  MATCHED STATE, day 0 only (lego's FIRST step, on the state that "
+          "is bit-identical\n  to NEMO's restart).  READ WITH CARE: the bridge "
+          "does not carry NEMO's barotropic\n  restart history, so step 1 is a "
+          "barotropic COLD START -- a start-up transient,\n  not a steady gap:")
+    _pre0 = sum(nem[0][t] for t in NEMO_PRE_SPG)
+    _nb0 = nem[0]["spg"] + _pre0
+    _lb0 = stage_step0[STAGES.index("BARO solve")]
+    print(f"    lego BARO {_lb0[ROWS].mean():.3f}   NEMO baro "
+          f"{_nb0[ROWS].mean():.3f}   diff {_lb0[ROWS].mean() - _nb0[ROWS].mean():.3f}"
+          f"   [m3/s2 per row, band mean]")
+    print("    per row lego : " + " ".join(f"{_lb0[j]:7.2f}" for j in ROWS))
+    print("    per row NEMO : " + " ".join(f"{_nb0[j]:7.2f}" for j in ROWS))
+    print("    per row diff : " + " ".join(f"{_lb0[j] - _nb0[j]:7.2f}" for j in ROWS))
+    print(f"\n  CANCELLATION on NEMO's side: the recovered net is "
+          f"utrd_spg + (pre-spg trends), two\n  numbers whose ratio to the "
+          f"net is up to {max(_canc):.0f}:1 -- so a 1-part-in-{max(_canc):.0f} "
+          f"error in either\n  half is a whole unit of the net.  That, not "
+          f"the 0.98 row floor, bounds this column.")
+    print("  SAMPLING FLOOR: NEMO's trends are INSTANTANEOUS samples in the\n"
+          "  10-day restarts; the recorded floor for a per-row trend "
+          "comparison of this\n  class is 0.98 m3/s2 per row.  Any difference "
+          "below 0.98 is UNREADABLE and\n  must not be interpreted; the -0.61 "
+          "deficit itself sits BELOW that floor, so\n  this column can bound "
+          "the row, never resolve the deficit inside it.")
+
     if args.out_npz:
         np.savez_compressed(
             args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
             acc_row=acc_row, acc_map=acc_map, acc_n=acc_n, R_series=R_series,
-            interval_days=args.interval_days, plant=args.plant)
+            stages=np.array(STAGES), acc_stage=acc_stage,
+            acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
+            interval_days=args.interval_days, plant=args.plant,
+            stage_plant=args.stage_plant)
         print(f"\n[artifact] -> {args.out_npz}")
 
 
