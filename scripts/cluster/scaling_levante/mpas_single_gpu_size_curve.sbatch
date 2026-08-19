@@ -74,6 +74,13 @@ rc=0
 # per-cell penalty at 163,842 cells.
 SCAN_FLAG=""
 [ "${SCAN:-0}" = "1" ] && SCAN_FLAG="--timed-scan"
+# Vertical levels. Sweeping this separates a per-CELL cost -- neighbour
+# lookups over the unstructured connectivity, which do not care how many
+# levels ride on each cell -- from a per-ELEMENT cost in the dense column
+# work. If the penalty at 163,842 cells is the same fraction at every
+# level count it is per-cell; if it moves with the level count it is the
+# array shape and the compiler's tiling of it.
+NLEV="${NLEV:-26}"
 
 run_size () {  # subdivision tag
   local SD=$1 TAG=$2
@@ -83,7 +90,7 @@ run_size () {  # subdivision tag
       --ntasks-per-node=1 --gpus-per-node=1 \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-      --multicontroller --n-devices 1 --subdivision "$SD" --nlev 26 \
+      --multicontroller --n-devices 1 --subdivision "$SD" --nlev "$NLEV" \
       --steps 60 --warmup 5 --lloyd 0 --partition-method sfc \
       --reorder-for 1 $SCAN_FLAG \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
@@ -92,6 +99,7 @@ run_size () {  # subdivision tag
 
 # Discarded warm-up arm, then each size twice, interleaved, so a drift in
 # the node cannot be read as a size effect.
+echo "nlev=$NLEV scan=${SCAN:-0}"
 run_size 7 warmup_discard
 for REP in a b; do
   for SD in 6 7 8 9; do
@@ -131,7 +139,8 @@ for sd in SIZES:
     rows[sd] = (cells, ms, abs(a_ms - b_ms) / ms, 1e6 * ms / cells)
 
 import os as _os
-print(f"mode: {'async scan (no per-step host sync)' if _os.environ.get('SCAN') == '1' else 'per-step host loop'}")
+print(f"mode: {'async scan (no per-step host sync)' if _os.environ.get('SCAN') == '1' else 'per-step host loop'}"
+      f", nlev {_os.environ.get('NLEV', '26')}")
 print(f"{'subdiv':>7} {'cells':>12} {'ms/step':>9} {'ns/cell':>9} {'spread':>8}")
 for sd in SIZES:
     cells, ms, spread, ns = rows[sd]
