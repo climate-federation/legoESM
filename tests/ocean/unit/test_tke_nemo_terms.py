@@ -998,3 +998,167 @@ class TestTridiagMixedPrecision:
         assert x_mix.dtype == jnp.float64
         np.testing.assert_allclose(np.asarray(x_mix), np.asarray(x_ref),
                                    rtol=2e-5)
+
+
+# ---------------------------------------------------------------------------
+# T15b: zdftke's OWN bottom velocity convention -- the wet-only SUM
+# zmsku*(uu(ji)+uu(ji-1)), zmsku = 2 - umask(ji-1)*umask(ji), NO 0.5
+# (zdftke.F90:282-287; contrast zdfgls.F90:196-197 which carries the 0.5).
+# Exercises the PRODUCTION symbol `_tke_bottom_dirichlet` -- the reference is
+# re-derived in plain numpy from the F90 line, independently of the model's
+# own mask helpers, and the whole class FAILS if the wet-only masking or the
+# doubling is reverted to the plain T-point average.
+# ---------------------------------------------------------------------------
+
+
+class TestNemoBottomTkeVelocityConvention:
+
+    @staticmethod
+    def _model_and_state():
+        """Staircase bathymetry (three distinct bottom levels) so zmsku/zmskv
+        are 2 somewhere, with u/v deliberately NON-ZERO below the face
+        seafloor -- legoESM's prognostic u carries only the 2-D column mask
+        and the barotropic correction adds a uniform-in-k increment, so
+        sub-seafloor faces really do hold velocity (unlike NEMO's, which
+        dynzdf.F90:121-150 umasks at every level)."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.vertical import (
+            create_ocean_z_star, create_partial_cell_coordinate,
+        )
+        n_lat, n_lon, n_levels, H_max = 6, 8, 6, 3000.0
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        z0c = create_ocean_z_star(n_levels=n_levels, H_max=H_max)
+        H = np.full((n_lat, n_lon), H_max * 0.95)
+        H[:, 3] = H_max * 0.45          # a zonal step
+        H[2, :] = H_max * 0.65          # a meridional step
+        H_bathy = jnp.asarray(H)
+        z = create_partial_cell_coordinate(z0c, H_bathy)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+            H_bathy_override=H_bathy)
+        rng = np.random.default_rng(7)
+        u = rng.normal(scale=0.2, size=state.u.data.shape)
+        v = rng.normal(scale=0.2, size=state.v.data.shape)
+        state = state._replace(
+            u=state.u.replace(data=jnp.asarray(u)),
+            v=state.v.replace(data=jnp.asarray(v)),
+        )
+        # rn_emin -> ~0 so the MAX() floor does NOT bind and the velocity
+        # convention is actually observable (it is floor-bound in DINO).
+        physics = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="tke",
+                tke=TKEConfig(bottom_tke_bc=True,
+                              tke_background=1.0e-30)),
+            convection=OceanConvectionConfig(scheme="none"),
+            lateral_mixing=type(OceanPhysicsConfig().lateral_mixing)(
+                scheme="none"),
+        )
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_v=1.0e-3, K_v=1.0e-4, bottom_drag_scheme="nemo_quadratic",
+            bottom_drag_cd0=1.0e-3, bottom_drag_cdmax=0.1,
+            bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+            implicit_vertical_mixing=True, enable_runtime_checks=False,
+            physics=physics,
+        )
+        return LatLonCGridOceanModel(grid, z, cfg), state, z
+
+    @staticmethod
+    def _f90_reference(state, z, cfg_tke, r_t):
+        """zdftke.F90:285-288 re-derived in numpy from the T-mask alone."""
+        tm = np.asarray(z.is_active).astype(float)          # tmask (y, x, k)
+        bl = np.maximum(np.asarray(z.bottom_level), 0)
+        ny, nx, _ = tm.shape
+        u_f, v_f = np.asarray(state.u.data), np.asarray(state.v.data)
+        # umask(ji,jj,jk) = tmask(ji)*tmask(ji+1) (dommsk.F90:150); x is
+        # i-periodic, y walled.
+        um = tm * np.roll(tm, 1, axis=1)                    # face j: (j-1, j)
+        um = np.concatenate([um, um[:, :1, :]], axis=1)     # (ny, nx+1, k)
+        vm = np.concatenate(
+            [np.zeros((1, nx, tm.shape[2])), tm[:-1] * tm[1:],
+             np.zeros((1, nx, tm.shape[2]))], axis=0)       # (ny+1, nx, k)
+        j, i = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+        k = bl
+        uw, ue = um[j, i, k], um[j, i + 1, k]
+        vs, vn = vm[j, i, k], vm[j + 1, i, k]
+        zmsku, zmskv = 2.0 - uw * ue, 2.0 - vs * vn
+        u_sum = zmsku * (u_f[j, i, k] * uw + u_f[j, i + 1, k] * ue)
+        v_sum = zmskv * (v_f[j, i, k] * vs + v_f[j + 1, i, k] * vn)
+        zebot = 0.001875 * np.asarray(r_t) * np.hypot(u_sum, v_sum)
+        ssmask = tm[j, i, k]
+        return ssmask * np.maximum(zebot, cfg_tke.tke_background)
+
+    @staticmethod
+    def _drag_rate_and_plain_speed(state, z):
+        """The model's own single-owner drag rate (NOT under test here -- the
+        VELOCITY convention is) plus the plain T-point speed the pre-fix code
+        used, so the two forms can be compared at identical ``r``."""
+        from legoesm import constants
+        from legoesm.ocean.dynamics.ocean_tendency_common import (
+            nemo_effective_bottom_drag_r,
+        )
+        bl = np.maximum(np.asarray(z.bottom_level), 0)
+        u_f, v_f = np.asarray(state.u.data), np.asarray(state.v.data)
+        ny, nx = bl.shape
+        j, i = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+        u_cc = 0.5 * (u_f[:, :-1, :] + u_f[:, 1:, :])
+        v_cc = 0.5 * (v_f[:-1, :, :] + v_f[1:, :, :])
+        u_bot, v_bot = u_cc[j, i, bl], v_cc[j, i, bl]
+        r_t = nemo_effective_bottom_drag_r(
+            jnp.asarray(u_bot), jnp.asarray(v_bot),
+            jnp.asarray(np.asarray(z.h_partial)[j, i, bl]),
+            scheme="nemo_quadratic", cd0=1.0e-3, cd_max=0.1, z0=3.0e-3,
+            ke0=2.5e-3, von_karman=constants.kappa_von_karman)
+        return r_t, np.hypot(u_bot, v_bot)
+
+    def test_matches_f90_line_on_a_staircase(self):
+        model, state, z = self._model_and_state()
+        out = np.asarray(model._tke_bottom_dirichlet(state))
+        r_t, _ = self._drag_rate_and_plain_speed(state, z)
+        ref = self._f90_reference(
+            state, z, model.config.physics.vertical_mixing.tke, r_t)
+        assert np.any(ref > 1e-12), "fixture must not be floor-bound"
+        np.testing.assert_allclose(out, ref, rtol=1e-12, atol=0.0)
+
+    def test_differs_from_the_plain_average_form(self):
+        """Synthetic-violation guard: the pre-fix plain-average form, built at
+        the SAME drag rate, must disagree on most columns -- otherwise the
+        F90 comparison above could pass vacuously."""
+        model, state, z = self._model_and_state()
+        out = np.asarray(model._tke_bottom_dirichlet(state))
+        r_t, speed_plain = self._drag_rate_and_plain_speed(state, z)
+        emin = model.config.physics.vertical_mixing.tke.tke_background
+        pre_fix = np.maximum(0.001875 * np.asarray(r_t) * speed_plain, emin)
+        live = out > 1e-12
+        assert live.sum() > 0
+        rel = np.abs(out[live] - pre_fix[live]) / np.abs(out[live])
+        assert np.median(rel) > 0.4, (
+            "the shipped form is indistinguishable from the plain average "
+            f"(median rel diff {np.median(rel):.3e}) -- expected ~0.5 from "
+            "the universal factor 2, more at step columns")
+        assert rel.max() > 0.7, "no column shows the step-column amplification"
+
+    def test_requires_raw_face_state(self):
+        """Passing an already-collapsed (T-point) state must RAISE, never
+        silently fall back to the plain average."""
+        model, state, _ = self._model_and_state()
+        u_cc = 0.5 * (state.u.data[:, :-1, :] + state.u.data[:, 1:, :])
+        v_cc = 0.5 * (state.v.data[:-1, :, :] + state.v.data[1:, :, :])
+        collapsed = state._replace(
+            u=state.u.replace(data=u_cc), v=state.v.replace(data=v_cc))
+        with pytest.raises(ValueError, match="RAW face-staggered"):
+            model._tke_bottom_dirichlet(collapsed)

@@ -43,15 +43,71 @@ def partial_cell_thickness(H_bathy, dz_ref):
     return np.clip(np.minimum(z_bot, H) - z_top, 0.0, dz_ref)
 
 
+def _is_tripolar(grid) -> bool:
+    """``grids.is_tripolar`` without importing the grids package at module top.
+
+    Kept function-scope-free but lazy: the diagnostics module is imported by
+    lightweight probes that must not pull the grid stack.
+    """
+    try:
+        from legoesm.grids.operators_latlon_cgrid import is_tripolar
+    except Exception:                       # pragma: no cover - defensive
+        return False
+    try:
+        return bool(is_tripolar(grid))
+    except Exception:                       # pragma: no cover - proxy grids
+        return False
+
+
+def _face_rules_fp64(h_partial, is_active_3d, grid):
+    """v-face thickness and per-level face mask from the MODEL's own rules.
+
+    Both come from ``min_cell_to_vface`` / ``compute_face_masks_3d`` rather
+    than a local re-derivation (#1441) — re-deriving the min rule here is
+    exactly the duplication that let the diagnostic drift from the model.
+
+    x64: those helpers are JAX, and with ``jax_enable_x64`` off (the library
+    default) ``jnp.asarray`` DOWNCASTS a float64 thickness to float32, which
+    would silently cost the diagnostic ~7 digits against the float64 arithmetic
+    around it (codex P2). This is a cold offline diagnostic — not traced, not
+    hot — so the flag is flipped for the two calls and restored in ``finally``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+        min_cell_to_vface,
+    )
+
+    want_f64 = np.asarray(h_partial).dtype == np.float64
+    prev = bool(jax.config.jax_enable_x64)
+    if want_f64 and not prev:
+        jax.config.update("jax_enable_x64", True)
+    try:
+        h_v = np.asarray(min_cell_to_vface(jnp.asarray(h_partial), grid))
+        _u_mask3d, v_mask3d = compute_face_masks_3d(
+            jnp.asarray(is_active_3d, dtype=h_v.dtype), grid)
+        # 0/1 in float32 is exact, but keep the mask in the thickness's
+        # dtype so the product below stays a single-precision-free path.
+        v_mask = np.asarray(v_mask3d).astype(h_v.dtype, copy=False)
+    finally:
+        if want_f64 and not prev:
+            jax.config.update("jax_enable_x64", prev)
+    return h_v, v_mask
+
+
 def _v_face_geometry(v, h_partial, mask, grid):
     """Shared v-face geometry for the meridional diagnostics (MOC + MHT).
 
     Returns ``(dx_v, h_v, v_mask, lat_v)`` for v-faces of shape ``(n_lat+1, ...)``:
       * ``dx_v``  : zonal face width [m], shape ``(n_lat+1, n_lon)`` (tripole, from
         ``grid.dx_v``) or ``(n_lat+1, 1)`` (regular ``R·dlon·cos(lat_v)``).
-      * ``h_v``   : centred v-face thickness [m], ``(n_lat+1, n_lon, nlev)`` (pole
-        rows zero — no flux across the cap).
-      * ``v_mask``: ``(n_lat+1, n_lon, 1)`` = ``mask[j-1]·mask[j]`` (poles zero).
+      * ``h_v``   : v-face thickness [m], ``(n_lat+1, n_lon, nlev)``, from the
+        model's MIN rule (``min_cell_to_vface``) — pole rows zero — not an
+        arithmetic mean (#1441).
+      * ``v_mask``: ``(n_lat+1, n_lon, nlev)`` per-LEVEL face mask from
+        ``compute_face_masks_3d``, not a 2-D land product (#1441).
       * ``lat_v`` : v-face latitudes [rad], ``(n_lat+1,)``.
     Factored out so ``moc_streamfunction`` and ``meridional_heat_transport`` share
     one geometry (no duplicated v-face metric code).
@@ -84,13 +140,33 @@ def _v_face_geometry(v, h_partial, mask, grid):
             dlon = 2.0 * np.pi / n_lon
         dx_v = R * dlon * cos_lat_v[:, None]
 
-    h_v = np.zeros_like(v)
-    h_v[1:-1] = 0.5 * (h_partial[:-1] + h_partial[1:])
-
-    v_mask = np.zeros((n_lat_v, n_lon))
-    if n_lat_v >= 2:
-        v_mask[1:-1] = mask[:-1] * mask[1:]
-    v_mask = v_mask[:, :, None]
+    # Face thickness and face mask come from the MODEL'S OWN rules, not from
+    # a local re-derivation (#1441). The arithmetic mean this used to compute,
+    # h_v = 0.5*(h[j-1] + h[j]), is precisely what ocean_model_latlon_cgrid.py
+    # rejects two lines above its own call: "Arithmetic mean overestimates face
+    # depth at topographic steps, creating a barotropic-baroclinic residual
+    # that drives spurious currents." So MOC/MHT were integrating over a
+    # thickness the model never advects with. MEASURED on eORCA1
+    # (nemolev_trp_icemelt70_d90): net transport across full zonal sections
+    # disagreed with the model's min-rule flux by up to 1.9 Sv at a single
+    # section -- the size of the signal itself, with a non-constant sign.
+    #
+    # The mask is the same story: mask[j-1]*mask[j] is a 2-D land product,
+    # while the model uses per-LEVEL face masks, which differ wherever two
+    # columns have different bottom_level (i.e. all realistic bathymetry).
+    # min_cell_to_vface is additionally fold-aware on tripolar grids. NOTE
+    # (codex): that does NOT give the diagnostic a northern fold flux —
+    # compute_face_masks_3d appends a ZERO north row, so v*h_v*v_mask stays
+    # zero there. The fold is still treated as a wall, matching the model's
+    # current mask convention; only the interior rows change.
+    # Cell activity per level: wet where the column is ocean AND the layer has
+    # thickness — the partial-cell / bottom_level condition a 2-D mask cannot
+    # express. (For a normally generated partial coordinate this is exactly the
+    # model's k <= bottom_level, since the coordinate factory zeroes h_partial
+    # outside it; the extra mask term carries the diagnostic's basin selection.)
+    is_active_3d = (np.asarray(mask)[:, :, None] > 0.0) & (
+        np.asarray(h_partial) > 0.0)
+    h_v, v_mask = _face_rules_fp64(np.asarray(h_partial), is_active_3d, grid)
     return dx_v, h_v, v_mask, lat_v
 
 
@@ -204,7 +280,15 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     # Cell-row meridional extent — prefer ``grid.dy`` (1D array,
     # Mercator-safe) but fall back to a uniform ``R * dlat`` if absent
     # (lightweight grid proxies in tests sometimes lack ``dy``).
-    if hasattr(grid, "dy"):
+    # The u-face meridional extent must follow the SAME rule the model's own
+    # zonal-flux operator uses (operators_latlon_cgrid.py:886-892): on a
+    # TRIPOLE the bipolar cap makes dy vary strongly with longitude, so the
+    # 1-D grid.dy (a column-0 extraction, in effect) is wrong there and the
+    # full 2-D grid.dy_u is required. Weighting every u-face of a row by one
+    # scalar was #1441's second finding.
+    if _is_tripolar(grid) and getattr(grid, "dy_u", None) is not None:
+        dy = np.asarray(grid.dy_u)                                # (n_lat, n_lon+1)
+    elif hasattr(grid, "dy"):
         dy = np.asarray(grid.dy) * 0.5                            # (n_lat,)
     else:
         dlat = getattr(grid, "dlat", np.pi / n_lat)
@@ -224,6 +308,7 @@ def barotropic_streamfunction(u, h_partial, mask, grid):
     U_dz = np.sum(u * h_u, axis=-1) * u_mask                     # (n_lat, n_lon+1)
     # Per-row dy weighting before cumsum so non-uniform grids integrate
     # the correct meridional transport.
-    psi_bt = -np.cumsum(U_dz * dy[:, None], axis=0) / 1.0e6      # (n_lat, n_lon+1) [Sv]
+    dy_w = dy if np.ndim(dy) == 2 else np.asarray(dy)[:, None]
+    psi_bt = -np.cumsum(U_dz * dy_w, axis=0) / 1.0e6             # (n_lat, n_lon+1) [Sv]
 
     return psi_bt[:, :-1]

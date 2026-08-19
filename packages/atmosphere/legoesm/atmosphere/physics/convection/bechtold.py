@@ -443,8 +443,18 @@ _IFS_RCUCOV_RH_BASE = 0.8               # non-deep area RH enhancement threshold
 _IFS_RCUCOV_RH_SLOPE = 1.0 / 0.025      # ...(max(0.8,RHm)-0.8)/0.025 (cuflxn.F90:440)
 _IFS_RHEBC_OCEAN = 0.92                 # RHEBC over water (sucumf.F90:179)
 _IFS_RHEBC_OCEAN_DEEP = 0.85            # deep KTYPE=1 over water (cuflxn.F90:226)
-# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) need a land mask the leaf
-# does not receive — documented gap; the ocean values are used everywhere.
+# Land values (0.75 / 0.70 deep, cuflxn.F90:222-223) are applied ONLY on the
+# lane that hands the leaf a ``land_frac``.  The unified physics pipeline does
+# (physics_pipeline.py, gated on ``use_ifs_land_rhebc``); the MPAS convection
+# bridge does NOT (convection/integration.py, the ``conv_fn(...)`` call omits
+# it), so on the AMIP MPAS lane this blend takes the OCEAN branch over land and
+# both land values are inert.  That is a defect, not a design: it means
+# convective rain re-evaporates under ocean settings over the Amazon and the
+# Congo, and it is a live suspect for that lane's tropical land rain deficit.
+# (2026-08-14: an earlier edit here asserted the opposite -- that the land mask
+# always arrives -- which was true of the pipeline lane and false of the MPAS
+# one.  Codex caught it.)  Both values are overridable from ``BechtoldConfig``
+# so they can be fitted once they are reachable.
 _IFS_EVAP_FLUX_TINY = 1.0e-12           # IF(ZRFL > 1.E-12) evap gate (cuflxn.F90:450)
 
 # --- IFS convective snow: rain/snow partition + melt (cuflxn.F90:198-211,374-397) ---
@@ -1178,6 +1188,9 @@ def _ifs_subcloud_rain_evaporation(
     snow_melt: bool = False,
     T: jax.Array | None = None,
     p_full: jax.Array | None = None,
+    evap_scale: float = 1.0,
+    rhebc_land_val: float = _IFS_RHEBC_LAND,
+    rhebc_land_deep_val: float = _IFS_RHEBC_LAND_DEEP,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     r"""IFS Kessler sub-cloud evaporation of convective rain (cuflxn.F90:436-475).
 
@@ -1289,8 +1302,8 @@ def _ifs_subcloud_rain_evaporation(
         # Land RH break (cuflxn.F90:222-223): 0.70 deep / 0.75 non-deep —
         # evaporation stops EARLIER over land; fractional tile blend.
         rhebc_land = (
-            deep_weight * _IFS_RHEBC_LAND_DEEP
-            + (1.0 - deep_weight) * _IFS_RHEBC_LAND
+            deep_weight * rhebc_land_deep_val
+            + (1.0 - deep_weight) * rhebc_land_val
         )
         rhebc = (land_frac * rhebc_land
                  + (1.0 - land_frac) * rhebc_ocean).astype(_dtype)
@@ -1340,7 +1353,7 @@ def _ifs_subcloud_rain_evaporation(
         zrfl = flux_top
         zrfl_safe = jnp.where(zrfl > _IFS_EVAP_FLUX_TINY, zrfl, 1.0)
         zdrfl1 = (
-            _IFS_RCPECONS
+            _IFS_RCPECONS * evap_scale
             * jnp.maximum(qsat_k - q_k, 0.0)
             * area
             * (sqrtp_k / _IFS_RCVRFACTOR * zrfl_safe / area) ** _IFS_EVAP_EXPONENT
@@ -1781,6 +1794,7 @@ def _ifs_capdcycl(
     p_full: jax.Array,
     land_frac: jax.Array,
     gate_w: jax.Array,
+    land_tau_scale: float = 1.0,
 ) -> jax.Array:
     r"""IFS RCAPDCYCL=2 diurnal-cycle CAPE subtraction (cumastrn.F90:780-793).
 
@@ -1818,7 +1832,14 @@ def _ifs_capdcycl(
     zduten = _IFS_CAPDCYCL_DUTEN_BASE + jnp.sqrt(
         0.5 * (u_b**2 + v_b**2 + u_9**2 + v_9**2) + 1e-12)
     ztaupbl = z_pbl / zduten
-    zcap_land = supply_virt_w_m2 * tau_conv
+    # ``land_tau_scale`` multiplies the LAND timescale only.  The IFS value it
+    # scales was set for a ~10 km mesh, where the surface heating this term
+    # subtracts against is resolved; on a coarse mesh that heating is smeared
+    # over a cell hundreds of kilometres wide and the same subtraction can
+    # remove convective energy that never returns.  1.0 reproduces the IFS
+    # exactly, 0.0 removes the land branch while leaving the ocean branch
+    # untouched -- which the on/off flag cannot do, since it disables both.
+    zcap_land = supply_virt_w_m2 * tau_conv * land_tau_scale
     zcap_ocean = supply_virt_w_m2 * ztaupbl
     return gate_w * (land_frac * zcap_land
                      + (1.0 - land_frac) * zcap_ocean)
@@ -2509,6 +2530,17 @@ def bechtold_convection(
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )
+        # The diurnal-cycle land branch wants ZTAU/ZTAURES, and ZTAU is the
+        # CLAMPED turnover time -- the oracle divides the resolution factor
+        # back out of the clamped value, it does not step around the clamp.
+        # Handing it the raw ratio skipped the 720 s floor: measured 197 s on a
+        # heated tropical land column, so the subtraction came out 3.7x too
+        # small before the departure gate shrank it further.  With the floor
+        # the land timescale is at least 720 s, which is what makes the term
+        # able to hold CAPE back through the morning.
+        _tau_capdcycl = jnp.clip(
+            _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
+        ) / _ztaures
     if config.use_ifs_cape_closure:
         # -- Full IFS deep CAPE closure ZMFUB1 = ZCAPE*ZMFUB/(ZHEAT*ZXTAU)
         # (cumastrn.F90:704-833; see _ifs_cape_closure_target).  Supersedes the
@@ -2616,8 +2648,8 @@ def bechtold_convection(
                  - (p_half[:, -1] - p_parcel_source))
                 / _CAPDCYCL_GATE_W_PA)
             _zdcy = _ifs_capdcycl(
-                _supply_virt, _tau_pure, _z_base, u, v, _base_w2, p_full,
-                land_frac, _gate_w,
+                _supply_virt, _tau_capdcycl, _z_base, u, v, _base_w2, p_full,
+                land_frac, _gate_w, config.capdcycl_land_tau_scale,
             )
         _qadv = None
         if (config.use_ifs_cape_qadv and dT_dt_dyn is not None
@@ -3030,6 +3062,9 @@ def bechtold_convection(
                 land_frac=(land_frac if config.use_ifs_land_rhebc else None),
                 snow_melt=config.use_ifs_snow_melt,
                 T=T, p_full=p_full,
+                evap_scale=config.subcloud_evap_scale,
+                rhebc_land_val=config.rhebc_land,
+                rhebc_land_deep_val=config.rhebc_land_deep,
             ))
         dT_dt = dT_dt - (constants.L_v / constants.c_pd) * evap_rate_ifs
         dq_v_dt = dq_v_dt + evap_rate_ifs

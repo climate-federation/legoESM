@@ -1,0 +1,35 @@
+# CLASSICAL, anchored curriculum, retrained under the lnps-filter fix.
+#
+# ONE variable against suite_classical_anchored.yaml (job 26794956): the
+# post-step spectral filter no longer damps lnps
+# (apply_spectral_filter_to_state default filter_lnps=False). Config is
+# otherwise byte-identical; only output_dir differs.
+#
+# WHY. Measured 2026-08-09 on the shared dycore (zero physics, 6 cases,
+# 6 h): the lnps filter turns a 213 Pa fixed direct-p_s offset into
+# 1108 Pa — 99% of the 6 h p_s error variance, physics-independent (the
+# trained column_nn adds only ~40 Pa on top). See
+# suite_curriculum_v2_anchored_lnpsfix.yaml for the full numbers.
+#
+#   CONFIRMS: 6 h mslp fixed-pattern < ~400 Pa and z500 24 h well below the
+#             91.6 m anchored baseline.
+#   REFUTES:  scores unchanged -> the filter attribution does not transfer.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  aimip_surface_bulk_scheme: most
+  aimip_spatial_surface: true
+  aimip_rollout_curriculum:
+    - [12, 3]
+    - [24, 3]
+    - [72, 3]
+    - [120, 2]
+
+variants:
+  - classical
+
+output_dir: results/aimip_classical_anchored_lnpsfix

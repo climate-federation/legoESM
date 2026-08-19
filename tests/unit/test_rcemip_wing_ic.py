@@ -16,7 +16,7 @@ import pytest
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     WING_GAMMA, WING_P_SFC, WING_Q_SFC_DEFAULT, WING_Q_T,
-    WING_T_V0, WING_Z_T, WING_Z_Q1, WING_Z_Q2,
+    WING_T_V0, WING_Z_T, WING_Z_Q1, WING_Z_Q2, wing2018_T_v0,
     _VIRTUAL_T_FACTOR,
     make_wing2018_pressure_ref_fn, make_wing2018_qv_ref_fn,
     make_wing2018_temperature_ref_fn, make_wing2018_theta_ref_fn,
@@ -30,23 +30,48 @@ jax.config.update("jax_enable_x64", True)
 
 
 def test_virtual_T_at_surface_equals_T_v0():
-    """T_v(z=0) = T_v0 = WING_T_V0 (RCEMIP-prescribed FIXED 295 K, Wing 2018
-    Tab 1 — NOT derived from the SST)."""
+    """T_v(z=0) = T_v0 = T0·(1 + 0.608·q0) (Wing 2018 Eq. 3, T0 = case SST)."""
     T_v0 = float(wing2018_virtual_temperature_profile(jnp.asarray(0.0)))
     np.testing.assert_allclose(T_v0, WING_T_V0, rtol=1.0e-12)
+    np.testing.assert_allclose(T_v0, wing2018_T_v0(300.0, WING_Q_SFC_DEFAULT),
+                               rtol=1.0e-12)
+
+
+def test_ic_is_near_80_percent_RH_and_not_supersaturated():
+    """Wing 2018: "q0 ... adjusted so that the relative humidity is near 80 %
+    in the lower atmosphere".
+
+    This is the check that catches a mis-specified T_v0: pinning it at a
+    fixed 295 K (instead of T0·(1+0.608·q0) = 303.4 K at SST 300) cools the
+    initial column ~8 K, which pushes near-surface RH to 139 % — the model
+    then starts supersaturated and condenses the excess in the first steps.
+    """
+    from legoesm.thermo import relative_humidity
+    z = jnp.linspace(0.0, 2_000.0, 21)
+    T = wing2018_temperature_profile(z)
+    p = wing2018_pressure_profile(z)
+    q_v = wing2018_qv_profile(z)
+    rh = np.asarray(relative_humidity(T, p, q_v))
+    assert rh.max() < 1.0, f"IC is supersaturated: max RH = {rh.max():.3f}"
+    assert 0.75 < rh.min() and rh.max() < 0.90, (
+        f"IC lower-atmosphere RH not near 80 %: {rh.min():.3f}-{rh.max():.3f}"
+    )
 
 
 def test_actual_T_at_surface_is_devirtualized_T_v0():
-    """Actual (dry-bulb) T(z=0) = T_v0 / (1 + ε⁻¹·q_sfc) ≈ 291.7 K for RCE300
-    (the SST=300 K is the surface boundary, NOT the initial surface air T)."""
+    """Actual (dry-bulb) T(z=0) = T_v0 / (1 + ε⁻¹·q_sfc) = T0 = 300 K for
+    RCE300 — the analytic IC's surface air temperature equals the SST."""
     T0 = float(wing2018_temperature_profile(jnp.asarray(0.0)))
     expected = WING_T_V0 / (1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT)
     np.testing.assert_allclose(T0, expected, rtol=1.0e-12)
 
 
 def test_T_tropopause_cap_above_z_t():
-    """T_v(z > z_t) = T_v(z_t) = WING_T_V0 - Γ·z_t (isothermal virtual cap ≈
-    194.5 K). Actual T above the tropopause ≈ T_v (q_t = 10⁻¹¹)."""
+    """T_v(z > z_t) = T_v(z_t) = WING_T_V0 - Γ·z_t (isothermal virtual cap).
+
+    gSAM's cold point is 194.4 K at 14.5 km; its stratosphere then WARMS,
+    which this isothermal cap cannot reproduce (use --sounding for that).
+    Actual T above the tropopause ≈ T_v (q_t = 10⁻¹¹)."""
     T_v_top = float(wing2018_virtual_temperature_profile(
         jnp.asarray(20_000.0),
     ))
@@ -147,10 +172,11 @@ def test_wing_theta_ref_fn_integrates_with_stretched_grid():
     # rho INCREASES with index).
     rho = np.asarray(hc.rho_ref)
     assert rho[-1] > rho[0]
-    # θ at surface ≈ T_actual(0)·(p_ref/p_sfc)^κ. RCEMIP T_v0=295 K ⇒
-    # T_actual(0)=T_v0/(1+0.608·q)≈291.7 K, p_ref/p_sfc≈0.985 → θ ≈ 290.5 K.
+    # θ at surface ≈ T_actual(0)·(p_ref/p_sfc)^κ. Wing Eq. (3)
+    # T_v0 = T0·(1+0.608·q0) = 303.4 K ⇒ T_actual(0) = T0 = 300 K,
+    # p_ref/p_sfc ≈ 0.985 → θ ≈ 299 K at the lowest level.
     theta_sfc = float(hc.theta_ref[-1])
-    assert 288.0 < theta_sfc < 293.0, (
+    assert 296.0 < theta_sfc < 301.0, (
         f"Wing IC surface θ unrealistic: {theta_sfc:.2f}"
     )
 

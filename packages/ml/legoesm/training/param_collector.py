@@ -241,6 +241,7 @@ def build_trainable_params(
     tier: str | int = "core",
     include: tuple[str, ...] = (),
     exclude: tuple[str, ...] = (),
+    include_tier0: tuple[str, ...] = (),
     dims: dict[str, int] | None = None,
     dtype=None,
 ) -> TrainablePhysicsParams:
@@ -258,6 +259,19 @@ def build_trainable_params(
     include / exclude
         Qualified names (``"scheme_key.field"``) to force-include (any tier,
         except tier 0 which is fixed) / force-exclude.
+    include_tier0
+        Qualified names of tier-0 parameters to admit anyway.  **For
+        DERIVATIVE-FREE calibration only.**  Tier 0 covers two disjoint kinds of
+        parameter and only one of them is genuinely fixed: numerics floors,
+        smoothing widths and iteration-coupled constants (never tunable), and
+        physically real closure parameters excluded because their AD GRADIENT
+        VANISHES in the regimes a training run visits — the CAPE triggers, whose
+        spec reference says exactly that (``see _CAPE_TRIGGER_AD_NOTE``,
+        #1417).  A gradient-free search does not care that the derivative is
+        zero, so refusing them would leave a "tune every parameter" campaign
+        with the trigger of eight convection schemes untouched.  A name given
+        here must still exist in the registry, and the caller is stating that it
+        will not be used to seed a gradient-based trainer.
     dims
         Map of array dimension keys -> sizes (e.g. ``{"n_pft": 14}``) for
         variable-size parameters.
@@ -280,11 +294,23 @@ def build_trainable_params(
     by_name = {m.qualified_name: m for m in registry}
     unknown_inc = [n for n in include if n not in by_name]
     unknown_exc = [n for n in exclude if n not in by_name]
-    if unknown_inc or unknown_exc:
+    unknown_t0 = [n for n in include_tier0 if n not in by_name]
+    if unknown_inc or unknown_exc or unknown_t0:
         raise ValueError(
             f"include/exclude name unknown parameters: include={unknown_inc}, "
-            f"exclude={unknown_exc}; known={sorted(by_name)}"
+            f"exclude={unknown_exc}, include_tier0={unknown_t0}; "
+            f"known={sorted(by_name)}"
             + (f" (uninstalled spec modules skipped: {skipped})" if skipped else "")
+        )
+    # Naming a NON-tier-0 parameter in include_tier0 is a caller error, not a
+    # harmless no-op: it means the caller believes a parameter is excluded when
+    # it is not, and a silently-accepted list would hide a stale name after a
+    # tier is re-classified.
+    mis_t0 = [n for n in include_tier0 if by_name[n].tunable_tier != 0]
+    if mis_t0:
+        raise ValueError(
+            f"include_tier0 names parameters that are NOT tier 0: {mis_t0}; "
+            "use `include` (or the tier level) for those."
         )
     if active_scheme_keys is not None:
         known_schemes = {m.scheme_key for m in registry}
@@ -301,6 +327,7 @@ def build_trainable_params(
                 f"known={sorted(known_schemes)}{hint}."
             )
     include_set, exclude_set = set(include), set(exclude)
+    tier0_set = set(include_tier0)
 
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []
@@ -310,12 +337,18 @@ def build_trainable_params(
         if meta.qualified_name in exclude_set:
             continue
         selected = (1 <= meta.tunable_tier <= level) or (meta.qualified_name in include_set)
-        if not selected or meta.tunable_tier == 0:
-            # tier 0 is fixed and never trainable, even via include
-            if meta.qualified_name in include_set and meta.tunable_tier == 0:
-                raise ValueError(
-                    f"{meta.qualified_name!r} is tier 0 (fixed) and cannot be included"
-                )
+        if meta.tunable_tier == 0:
+            # tier 0 is fixed for GRADIENT training and cannot be reached via
+            # `include`; only the explicit derivative-free opt-in admits it.
+            if meta.qualified_name not in tier0_set:
+                if meta.qualified_name in include_set:
+                    raise ValueError(
+                        f"{meta.qualified_name!r} is tier 0 (fixed) and cannot "
+                        "be included; pass include_tier0=(...) if this is a "
+                        "derivative-free calibration"
+                    )
+                continue
+        elif not selected:
             continue
         shape = _resolve_shape(meta, dims)
         raw[meta.qualified_name] = _seed_raw(meta, shape, dtype)

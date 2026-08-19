@@ -13,8 +13,10 @@ program fv3_csw_driver
   type(fv_grid_type) :: gs
   type(fv_flags_type) :: fl
   integer :: res, ng, ios, i, j, k, u_in, u_out
+  integer :: ival
+  logical :: sf_bd, sf_sw, sf_se, sf_ne, sf_nw
   real :: val
-  character(len=32) :: name
+  character(len=32) :: name, fname
   character(len=256) :: line
   real, allocatable, dimension(:, :) :: delp, pt, w, u, v
   real, allocatable, dimension(:, :) :: delpc, ptc, wc, uc, vc, ua, va, ut, vt
@@ -92,6 +94,8 @@ program fv3_csw_driver
   delpc = 1.e30; ptc = 1.e30; wc = 1.e30; ua = 1.e30; va = 1.e30
   ut = 1.e30; vt = 1.e30; uc = 1.e30; vc = 1.e30; divg_d = 1.e30
 
+  sf_bd = .false.; sf_sw = .false.; sf_se = .false.
+  sf_ne = .false.; sf_nw = .false.
   open(newunit=u_in, file='csw_input.txt', status='old', action='read')
   do
     read(u_in, '(A)', iostat=ios) line
@@ -104,6 +108,33 @@ program fv3_csw_driver
       read(line, *) name, i, j, k, val
       if (trim(name) == 'SIN_SG') gs%sin_sg(i, j, k) = val
       if (trim(name) == 'COS_SG') gs%cos_sg(i, j, k) = val
+    case ('FLAG')
+      ! lane flags come FROM the serialized input (single source with
+      ! the python generator + the pytest; folded into input_sha256) so
+      ! a flag-only drift between the three sites cannot pass silently.
+      ! Each of the five NAMED flags must appear exactly once with a
+      ! 0/1 value (codex km=1 r2 finding 3: a bare count of five would
+      ! accept five duplicates of one name).
+      read(line, *) name, fname, ival
+      if (ival /= 0 .and. ival /= 1) stop 'bad FLAG value (not 0/1)'
+      select case (trim(fname))
+      case ('BOUNDED_DOMAIN')
+        if (sf_bd) stop 'duplicate FLAG BOUNDED_DOMAIN'
+        sf_bd = .true.; gs%bounded_domain = (ival /= 0)
+      case ('SW_CORNER')
+        if (sf_sw) stop 'duplicate FLAG SW_CORNER'
+        sf_sw = .true.; gs%sw_corner = (ival /= 0)
+      case ('SE_CORNER')
+        if (sf_se) stop 'duplicate FLAG SE_CORNER'
+        sf_se = .true.; gs%se_corner = (ival /= 0)
+      case ('NE_CORNER')
+        if (sf_ne) stop 'duplicate FLAG NE_CORNER'
+        sf_ne = .true.; gs%ne_corner = (ival /= 0)
+      case ('NW_CORNER')
+        if (sf_nw) stop 'duplicate FLAG NW_CORNER'
+        sf_nw = .true.; gs%nw_corner = (ival /= 0)
+      case default; stop 'unknown FLAG record'
+      end select
     case default
       read(line, *) name, i, j, val
       select case (trim(name))
@@ -139,9 +170,15 @@ program fv3_csw_driver
 
   gs%dg%is_initialized = .true.
   gs%grid_type = 0
-  gs%bounded_domain = .false.
-  gs%sw_corner = .true.; gs%se_corner = .true.
-  gs%ne_corner = .true.; gs%nw_corner = .true.
+  ! BOUNDED-conventions lane (km=1 corpus migration, 2026-08-11):
+  ! fv_arrays.F90:1512 `bounded_domain = regional .or. nested .or.
+  ! duogrid` forces bounded under duogrid; fv_grid_utils.F90:224 leaves
+  ! all four corner flags .false. there.  The pre-migration fixture ran
+  ! bounded=.false. + flags .true. (upstream-unreachable pair).  The
+  ! flag VALUES arrive as FLAG records in csw_input.txt (hash-covered);
+  ! a file missing any of the five NAMED flags is refused.
+  if (.not. (sf_bd .and. sf_sw .and. sf_se .and. sf_ne .and. sf_nw)) &
+    stop 'missing FLAG records in csw_input.txt'
 
   call c_sw(delpc, delp, ptc, pt, u, v, w, uc, vc, ua, va, wc, &
             ut, vt, divg_d, 1, 112.5, .true., .true., bd, gs, fl)

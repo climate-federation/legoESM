@@ -23,8 +23,13 @@ Public entries:
   edges via precomputed table; axis-swap edges fall back to
   ``axis_swap_fill`` ('edge' replicates, 'zero' leaves at 0).
 - ``pad_halo_dgrid_vector_4d(u_d, v_d)``
-  (iter-1078) — full 24/24 staggered vector halo with axis-swap
-  component swap (single-device input ``(6, ...)``).
+  (iter-1078; value-level semantics fixed 2026-08-04) — full 24/24
+  staggered vector halo with axis-swap component swap (single-device
+  input ``(6, ...)``).  Node-axis ghosts source the neighbour line one
+  INWARD of the shared seam; the four half-turn seams negate both
+  components.  Certified vs ``analytic_swcore_state`` halos
+  (fv3_recon/transplant2_9311777.log caught the pre-fix seam-line
+  copies and missing half-turn signs).
 - ``pad_halo_dgrid_scalar_pair_4d(u_like, v_like, axis_swap_sign=+1)``
   (2026-07-31) — FV3 SCALAR_PAIR/CGRID_NE staggered METRIC halo:
   dyc↔dxc and sina_v↔sina_u with a common ``+1``, cosa_v↔cosa_u
@@ -84,6 +89,44 @@ def _is_axis_swap(face: int, edge: int) -> bool:
     return not (same_axis_i or same_axis_j)
 
 
+# Same-axis seams whose transverse axis is REVERSED are 180-degree relative
+# rotations of the neighbouring face frame (CONNECTIVITY: exactly
+# (2,S)<->(5,S) and (2,N)<->(4,N), i.e. dest edges (2,S),(2,N),(4,N),(5,S)).
+# There the neighbour's +i/+j basis is the NEGATION of this face's continued
+# basis, so COVARIANT vector components cross the seam with sign -1 on BOTH
+# components (a quarter turn maps (e1,e2)->(e2,-e1); composing two gives
+# (-e1,-e2)).  Scalar metrics (lengths, sina) do NOT flip -- this overlay
+# belongs to the VECTOR exchange only, never to the scalar/metric-pair path.
+# Certified value-level vs analytic_swcore_state halos
+# (fv3_recon/transplant2_9311777.log): F=2 v S got=-2.500000000000004
+# want=+2.500000000000004 (exact negation -- position already right, sign
+# missing, line 260); F=5 u S got=+5.0000 want=-4.9824 (sign PLUS the
+# node-axis source row, line 248).
+_SAME_AXIS_FLIP_SEAMS: tuple[tuple[int, int], ...] = tuple(
+    (face, edge)
+    for face in range(6)
+    for edge in (WEST, EAST, SOUTH, NORTH)
+    if (not _is_axis_swap(face, edge)) and CONNECTIVITY[face][edge][2]
+)
+
+
+def _negate_side_ghost_line(padded: jax.Array, face: int, edge: int) -> jax.Array:
+    """Negate one depth-1 side ghost line (excluding the diagonal cells).
+
+    Covers exactly the cells the same-axis halo table writes (destination
+    positions ``k + 1`` over the strip length, i.e. ``[1:-1]`` of the ghost
+    line) -- the diagonal corner cells are never table-written and stay
+    untouched.
+    """
+    if edge == WEST:
+        return padded.at[face, 0, 1:-1, :].multiply(-1.0)
+    if edge == EAST:
+        return padded.at[face, -1, 1:-1, :].multiply(-1.0)
+    if edge == SOUTH:
+        return padded.at[face, 1:-1, 0, :].multiply(-1.0)
+    return padded.at[face, 1:-1, -1, :].multiply(-1.0)
+
+
 # ---------------------------------------------------------------------
 # Halo table builder for non-square staggered scalar fields
 # ---------------------------------------------------------------------
@@ -127,6 +170,26 @@ def _build_dgrid_scalar_halo_table_h1(
     """
     entries = []  # list of (sf, si, sj, df, di, dj)
 
+    # D-staggered depth-1 SOURCE semantics (2026-08-04 transplant fix).
+    # On a NODE-staggered axis (n+1 lines vs the transverse n) the OUTERMOST
+    # line IS the shared seam -- BOTH faces store that physical line -- so the
+    # depth-1 ghost must carry the neighbour's line one INWARD of the seam.
+    # On a CELL-staggered axis the outermost line is the correct source.
+    # Certified value-level against the phase-4a gridstruct /
+    # analytic_swcore_state halos (fv3_recon/transplant2_9311777.log):
+    # the old seam-line copy read the SHARED-edge value on every node-axis
+    # strip INCLUDING identity seams, e.g. create face 0 u SOUTH ghost
+    # got=+3.5355 (shared edge) where FV3 truth holds +3.2270 (one row
+    # beyond); same class drove the PAIR dyc/dxc failures (uniform
+    # 2.667e-02 rel).  Square input (legacy test path): both flags False,
+    # behaviour unchanged.
+    i_node = n_i == n_j + 1   # i-axis node-staggered (v-like / dxc-like)
+    j_node = n_j == n_i + 1   # j-axis node-staggered (u-like / dyc-like)
+    src_i_lo = 1 if i_node else 0
+    src_i_hi = n_i - 2 if i_node else n_i - 1
+    src_j_lo = 1 if j_node else 0
+    src_j_hi = n_j - 2 if j_node else n_j - 1
+
     for face in range(6):
         for edge in (WEST, EAST, SOUTH, NORTH):
             nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
@@ -156,15 +219,17 @@ def _build_dgrid_scalar_halo_table_h1(
 
                 # Source cell from neighbor's edge.  Neighbor edge
                 # orientation matches destination orientation when
-                # not axis-swap (which we've guaranteed above).
+                # not axis-swap (which we've guaranteed above).  The
+                # normal-axis source index steps one inward of the seam
+                # on a node-staggered axis (see block above).
                 if nbr_edge == WEST:
-                    sf, si, sj = nbr_face, 0, src_k
+                    sf, si, sj = nbr_face, src_i_lo, src_k
                 elif nbr_edge == EAST:
-                    sf, si, sj = nbr_face, n_i - 1, src_k
+                    sf, si, sj = nbr_face, src_i_hi, src_k
                 elif nbr_edge == SOUTH:
-                    sf, si, sj = nbr_face, src_k, 0
+                    sf, si, sj = nbr_face, src_k, src_j_lo
                 else:  # NORTH
-                    sf, si, sj = nbr_face, src_k, n_j - 1
+                    sf, si, sj = nbr_face, src_k, src_j_hi
 
                 # Destination position in padded (n_i+2, n_j+2) array.
                 if edge == WEST:
@@ -238,10 +303,19 @@ def pad_halo_dgrid_scalar_4d(
     Notes
     -----
     iter-1076 (this implementation): same-axis 16/24 directed
-    edges bit-for-bit; axis-swap 8/24 edges use
+    edges via the cross-face table; axis-swap 8/24 edges use
     ``axis_swap_fill``.  iter-1078's ``pad_halo_dgrid_vector_4d``
     handles all 24 edges (calls this function for same-axis +
-    overwrites axis-swap with component swap).
+    overwrites axis-swap with component swap + half-turn signs).
+
+    2026-08-04 depth fix: on a component's NODE-staggered axis the
+    same-axis source is the neighbour's line one INWARD of the shared
+    seam (the outermost node line IS the seam).  The pre-fix seam-line
+    copy was caught value-level by the transplant probe on every
+    node-axis strip including identity seams
+    (fv3_recon/transplant2_9311777.log).  NOTE: same-axis strips are
+    UNSIGNED here — covariant vectors additionally need the half-turn
+    sign, which lives in ``pad_halo_dgrid_vector_4d`` only.
     """
     if data.ndim != 4:
         raise ValueError(
@@ -318,15 +392,33 @@ def _build_axis_swap_tables_h1(n):
     v_dst_f, v_dst_i, v_dst_j = [], [], []
     u_src_f, u_src_i, u_src_j = [], [], []
     v_dst_signs = []
+    # Depth-1 source rows (2026-08-04 transplant fix, same rule as the
+    # same-axis table): the SOURCE component's line along the seam steps one
+    # INWARD when its normal axis is node-staggered, because the outermost
+    # node line is the shared seam both faces already store.
+    #   v source (feeds u ghosts): i-axis NODE (n+1) -> W/E inward;
+    #                              j-axis cell -> S/N outermost.
+    #   u source (feeds v ghosts): j-axis NODE (n+1) -> S/N inward;
+    #                              i-axis cell -> W/E outermost.
+    # Log cross-checks (fv3_recon/transplant2_9311777.log):
+    #   F=1 u S <- (5,E) v: got=+2.5000 (seam node i=n) want=+2.2818
+    #     (i=n-1) -- sign already right, row off by one (line 232);
+    #   F=4 v W <- (3,N) u: got=-3.5355 want=-3.8192 (line 214);
+    #   F=4 u W <- (3,N) v at cell row j=n-1: max_abs=0.0 (line 242) --
+    #     cell-axis rows were already correct and are UNCHANGED here.
+    v_src_w, v_src_e = 1, n_i_v - 2          # node axis: one inward
+    v_src_s, v_src_n = 0, n_j_v - 1          # cell axis: outermost
+    u_src_w, u_src_e = 0, n_i_u - 1          # cell axis: outermost
+    u_src_s, u_src_n = 1, n_j_u - 2          # node axis: one inward
     for (face, edge), (nbr_face, nbr_edge, is_rev, sign_uv, sign_vu) in _AXIS_SWAP_TABLE.items():
         u_strip_len = n_j_u if edge in _I_EDGES else n_i_u
         v_strip_len = n_j_v if edge in _I_EDGES else n_i_v
         for k in range(u_strip_len):
             k_src = (u_strip_len - 1 - k) if is_rev else k
-            if nbr_edge == WEST: sf, si, sj = nbr_face, 0, k_src
-            elif nbr_edge == EAST: sf, si, sj = nbr_face, n_i_v - 1, k_src
-            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, 0
-            else: sf, si, sj = nbr_face, k_src, n_j_v - 1
+            if nbr_edge == WEST: sf, si, sj = nbr_face, v_src_w, k_src
+            elif nbr_edge == EAST: sf, si, sj = nbr_face, v_src_e, k_src
+            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, v_src_s
+            else: sf, si, sj = nbr_face, k_src, v_src_n
             if edge == WEST: df, di, dj = face, 0, k + 1
             elif edge == EAST: df, di, dj = face, n_i_u + 1, k + 1
             elif edge == SOUTH: df, di, dj = face, k + 1, 0
@@ -336,10 +428,10 @@ def _build_axis_swap_tables_h1(n):
             u_dst_signs.append(sign_uv)
         for k in range(v_strip_len):
             k_src = (v_strip_len - 1 - k) if is_rev else k
-            if nbr_edge == WEST: sf, si, sj = nbr_face, 0, k_src
-            elif nbr_edge == EAST: sf, si, sj = nbr_face, n_i_u - 1, k_src
-            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, 0
-            else: sf, si, sj = nbr_face, k_src, n_j_u - 1
+            if nbr_edge == WEST: sf, si, sj = nbr_face, u_src_w, k_src
+            elif nbr_edge == EAST: sf, si, sj = nbr_face, u_src_e, k_src
+            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, u_src_s
+            else: sf, si, sj = nbr_face, k_src, u_src_n
             if edge == WEST: df, di, dj = face, 0, k + 1
             elif edge == EAST: df, di, dj = face, n_i_v + 1, k + 1
             elif edge == SOUTH: df, di, dj = face, k + 1, 0
@@ -379,11 +471,11 @@ def _get_axis_swap_tables_h1(n):
 # Derived against the oracle; the eight quarter-turn rows below agree row-for-row
 # with this package's own CONNECTIVITY table.
 #
-# CAVEAT kept with the code: the supplied FV3 tree carries no FMS mosaic contact
-# table, so the FACE IDs come from our canonical gnomonic CONNECTIVITY.  The
-# permutation and signs are derived, not guessed, but to lock face-ID
-# correspondence independently, dump slots 1:4 right after FV3's special repairs
-# on a stretched C5 run and compare every side ghost against _SG_QUARTER_TURN.
+# CAVEAT (historical) — CLOSED 2026-08-04: the face-ID/slot mapping was
+# certified INDEPENDENTLY of CONNECTIVITY by the transplant probe
+# (fv3_recon/probe_transplant.py) against ``build_fv3_native_gridstruct``'s
+# phase-4a bit-certified sin_sg/cos_sg halos: all 24 seams x 4 slots exact
+# to fp roundoff (TRANSPLANT_SG=PASS, fv3_recon/transplant2_9311777.log).
 
 # dest (W,S,E,N) <- source slots, as an index array: dst k takes src perm[k].
 _SG_PERM_SENW = (1, 2, 3, 0)     # "(S,E,N,W)"
@@ -543,6 +635,87 @@ def _sg_fill_diagonals(sin_p, cos_p, n):
     return sin_p, cos_p
 
 
+# --- FV3 cell-centre metric halo (2026-08-04) --------------------------------
+# ``d2a2c_vect`` computes the A-grid contravariant ua/va over the FULL data
+# domain (Fortran ``is-1-id .. ie+1+id`` = TWO ghost rings, sw_core.F90:3513)
+# from utmp/vtmp and the CELL-CENTRE metrics cosa_s/rsin2, whose ghost values
+# in FV3 come from the gridstruct halo: fv_grid_utils evaluates them locally
+# at ghost positions from the mpp-exchanged grid geometry.  For the same
+# physical cell seen across a seam, the tangent pair relabels as
+# (e_i, e_j) -> (e_j, -e_i) per quarter turn, so cos(angle) picks up a sign
+# while sin-even quantities copy through — the phase-2B rot90 remap law
+# (cos-type odd, sin/rsin even).  Edge-replicating these pads instead (the
+# pre-2026-08-04 behaviour) feeds d2a2c's ghost-ring ua/va with wrong metric
+# values, which ``divergence_corner`` then consumes at panel boundaries.
+
+
+def pad_halo_dgrid_cell_scalar_4d(
+    q: jax.Array,
+    *,
+    cos_type: bool = False,
+    halo: int = 2,
+) -> jax.Array:
+    """Halo a cell-centre scalar metric (``cosa_s``/``rsin2``-like).
+
+    Parameters
+    ----------
+    q : (6, n, n, nlev)
+        Cell-centre metric field.
+    cos_type : bool
+        ``True`` for quantities that transform like ``e_i . e_j``
+        (``cosa_s`` = ``cos_sg[..., 4]``): ghost strips across the eight
+        quarter-turn seams are negated.  ``False`` for even quantities
+        (``rsin2``, ``sin_sg``-center): plain copies everywhere.
+    halo : int
+        Ghost rings per side (default 2, matching Fortran's UA/VA span).
+
+    Returns
+    -------
+    (6, n+2*halo, n+2*halo, nlev) with physical cells at
+    ``[halo:-halo, halo:-halo]``.  The four ``halo x halo`` diagonal corner
+    blocks are POISONED at :data:`SG_BIG_NUMBER`: FV3 fills cell-centre
+    corner regions with its fill_corners AGRID convention, which no
+    consumer of THIS helper reads (divergence_corner's boundary forms mask
+    them out; edge_interpolate4 stencils stay on physical rows), so an
+    obviously wrong number is safer than an unverified convention.
+    """
+    if q.ndim != 4:
+        raise ValueError(
+            f"pad_halo_dgrid_cell_scalar_4d requires (6, n, n, nlev); got "
+            f"{tuple(q.shape)}")
+    if q.shape[0] != 6 or q.shape[1] != q.shape[2]:
+        raise ValueError(
+            f"expected 6 square faces; got {tuple(q.shape)}")
+
+    from legoesm.grids.halo import pad_halo_4d
+    q_pad = pad_halo_4d(q, halo=halo)
+
+    if cos_type:
+        # Sign overlay: pad_halo_4d already places the correct source CELLS
+        # (identity/reversal per seam); only the quarter-turn seams need the
+        # tensorial cos sign.  Half-turn seams keep +1.
+        n = q.shape[1]
+        m = n + 2 * halo
+        sign = np.ones((6, m, m, 1), dtype=np.float64)
+        for (face, edge) in _SG_QUARTER_TURN:
+            if edge == WEST:
+                sign[face, :halo, :, :] = -1.0
+            elif edge == EAST:
+                sign[face, -halo:, :, :] = -1.0
+            elif edge == SOUTH:
+                sign[face, :, :halo, :] = -1.0
+            else:  # NORTH
+                sign[face, :, -halo:, :] = -1.0
+        q_pad = q_pad * jnp.asarray(sign, dtype=q_pad.dtype)
+
+    # Poison the diagonal corner blocks (both metrics classes).
+    q_pad = q_pad.at[:, :halo, :halo, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, -halo:, :halo, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, -halo:, -halo:, :].set(SG_BIG_NUMBER)
+    q_pad = q_pad.at[:, :halo, -halo:, :].set(SG_BIG_NUMBER)
+    return q_pad
+
+
 # --- FV3 SCALAR_PAIR / CGRID_NE staggered-metric halo (2026-07-31) ---
 # Companion to ``pad_halo_dgrid_vector_4d``.  The corner-divergence routine
 # needs the SEAM METRICS (dyc/dxc, sina_v/sina_u, cosa_v/cosa_u) to cross
@@ -675,11 +848,27 @@ def pad_halo_dgrid_scalar_pair_4d(
 
 
 def pad_halo_dgrid_vector_4d(u_d, v_d):
-    """FV3-faithful DGRID_NE staggered vector halo (iter-1078).
+    """FV3 DGRID_NE staggered covariant vector halo (iter-1078).
 
-    Combines iter-1076 same-axis cross-face halo (16/24 edges) with
-    iter-1078 DGRID_NE component swap (8 axis-swap edges).  All 24
-    directed edges are bit-for-bit FV3-faithful.
+    Combines the iter-1076 same-axis cross-face halo (16/24 edges) with the
+    iter-1078 DGRID_NE component swap (8 axis-swap edges) and the half-turn
+    covariant sign (4 same-axis reversed seams, ``_SAME_AXIS_FLIP_SEAMS``).
+
+    VALUE-LEVEL SEMANTICS (2026-08-04, certified against
+    ``analytic_swcore_state`` halos -- fv3_recon/transplant2_9311777.log,
+    which caught two defect classes in the pre-fix version):
+
+    - the SOURCE line on a component's NODE-staggered axis (u: j, v: i) is
+      the neighbour's line one INWARD of the shared seam (the outermost node
+      line IS the seam, already stored by this face); cell axes use the
+      outermost line;
+    - the four half-turn seams (2,S),(2,N),(4,N),(5,S) negate BOTH
+      components (180-degree relative frame rotation of covariant
+      components).
+
+    The pre-fix "bit-for-bit" claim rested on constant-per-face stencil
+    tests, which are blind to both classes (a constant field makes the seam
+    line equal the one-beyond line, and no test probed a half-turn strip).
     """
     if u_d.ndim != 4 or v_d.ndim != 4:
         raise ValueError(f"4D inputs required; got u_d.ndim={u_d.ndim}, v_d.ndim={v_d.ndim}")
@@ -700,6 +889,13 @@ def pad_halo_dgrid_vector_4d(u_d, v_d):
     if v_dst_f.size > 0:
         u_vals = u_d[u_src_f, u_src_i, u_src_j]
         v_padded = v_padded.at[v_dst_f, v_dst_i, v_dst_j].set(u_vals * v_dst_signs.astype(v_d.dtype)[:, None])
+    # Half-turn covariant sign: the four same-axis reversed seams carry the
+    # neighbour's components NEGATED (both u and v).  Applied after the
+    # same-axis seeding (these seams are never axis-swap, so the overlay
+    # negates exactly the table-written strip values).
+    for _face, _edge in _SAME_AXIS_FLIP_SEAMS:
+        u_padded = _negate_side_ghost_line(u_padded, _face, _edge)
+        v_padded = _negate_side_ghost_line(v_padded, _face, _edge)
     return u_padded, v_padded
 
 
@@ -729,15 +925,24 @@ def _build_dgrid_mpi_edges(topology):
 
 
 def _extract_edge_strip_dgrid(data, face_loc, edge, n_i, n_j):
-    """Extract a strip from staggered (n_i, n_j) data at the given edge."""
+    """Extract the depth-1 SOURCE strip from staggered (n_i, n_j) data.
+
+    Same rule as the single-device tables (2026-08-04 transplant fix): on a
+    NODE-staggered axis (n+1 lines) the outermost line IS the shared seam,
+    so the exchanged strip is the line one INWARD; on a CELL axis it is the
+    outermost line.  Keeps the MPI twin bit-for-bit with
+    ``pad_halo_dgrid_vector_4d`` for both same-axis and axis-swap seams.
+    """
+    i_node = n_i == n_j + 1
+    j_node = n_j == n_i + 1
     if edge == WEST:
-        return data[face_loc, 0, :, :]
+        return data[face_loc, 1 if i_node else 0, :, :]
     elif edge == EAST:
-        return data[face_loc, n_i - 1, :, :]
+        return data[face_loc, n_i - 2 if i_node else n_i - 1, :, :]
     elif edge == SOUTH:
-        return data[face_loc, :, 0, :]
+        return data[face_loc, :, 1 if j_node else 0, :]
     else:  # NORTH
-        return data[face_loc, :, n_j - 1, :]
+        return data[face_loc, :, n_j - 2 if j_node else n_j - 1, :]
 
 
 def _place_strip_dgrid(padded, face_loc, edge, strip, n_i, n_j):
@@ -825,6 +1030,11 @@ def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
             u_strip = u_strip[::-1]
             v_strip = v_strip[::-1]
         if kind == "same":
+            if is_reversed:
+                # Half-turn seam (_SAME_AXIS_FLIP_SEAMS): covariant
+                # components cross with sign -1 on BOTH components.
+                u_strip = -u_strip
+                v_strip = -v_strip
             u_padded = _place_strip_dgrid(
                 u_padded, f_loc, edge, u_strip, n, n + 1,
             )
@@ -912,6 +1122,12 @@ def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
 
             f_loc = g2l[face]
             if kind == "same":
+                if is_reversed:
+                    # Half-turn seam: covariant sign -1, both components
+                    # (matches the single-device _SAME_AXIS_FLIP_SEAMS
+                    # overlay bit-for-bit).
+                    u_strip = -u_strip
+                    v_strip = -v_strip
                 u_padded = _place_strip_dgrid(
                     u_padded, f_loc, edge, u_strip, n, n + 1,
                 )

@@ -181,11 +181,17 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
-        # the validator + the psi_m/psi_h else-raise twins (grow-only lock so
-        # a silent-Dyer fallback can't be reintroduced).
+        # the validator + the shared stable-branch dispatch twins (grow-only
+        # lock so a silent-Dyer fallback can't be reintroduced).  2026-08-02:
+        # the else-raise moved from psi_m/psi_h into the factored
+        # _stable_psi_m/_stable_psi_h helpers (now ALSO consumed by
+        # psi_m_coare/psi_h_coare for the selectable coare3 stable branch —
+        # the inert surface_stability_scheme fix); psi_m/psi_h keep their
+        # entry-time validate_stability_scheme guard, behaviourally locked by
+        # tests/unit/test_stable_stability_functions.py unknown-scheme raises.
         ("packages/core/legoesm/core/bulk_flux.py", "validate_stability_scheme"),
-        ("packages/core/legoesm/core/bulk_flux.py", "psi_m"),
-        ("packages/core/legoesm/core/bulk_flux.py", "psi_h"),
+        ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_m"),
+        ("packages/core/legoesm/core/bulk_flux.py", "_stable_psi_h"),
         ("packages/core/legoesm/core/tracers.py", "index"),
         ("packages/core/legoesm/grids/capability.py", "instantiate"),
         ("packages/core/legoesm/grids/capability.py", "validate_runtime"),
@@ -253,10 +259,10 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ml/legoesm/training/aimip_params.py", "make_aimip_classical_spectral_physics"),
         # Unified campaign driver (D1): training-core dispatch (reserved cores
         # raise NotImplementedError, unknown raises ValueError) and the
-        # classical-mode rrtmgp radiation pin (smoke/allow_non_rrtmgp escapes
+        # campaign-wide rrtmgp radiation pin (only --smoke escapes
         # are explicit args, never silent).
         ("packages/ml/legoesm/training/campaign_driver.py", "validate_training_core"),
-        ("packages/ml/legoesm/training/campaign_driver.py", "validate_classical_radiation"),
+        ("packages/ml/legoesm/training/campaign_driver.py", "validate_campaign_radiation"),
         ("packages/ml/legoesm/training/loss_presets.py", "load_loss_preset"),
         ("packages/ocean/legoesm/ocean/biogeochemistry/config.py", "init_biogeo_state"),
         ("packages/ocean/legoesm/ocean/config.py", "to_ocean_config"),
@@ -287,6 +293,11 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
+        # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
+        # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would
+        # silently fall through to _step_impl (the else branch) instead of
+        # raising -- lock the guard so it can't be silently deleted.
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_step_jitted"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_mpas.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_cdgrid.py", "ocean_baroclinic_tendencies_cdgrid"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_ke_and_pressure_gradients"),
@@ -307,6 +318,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # lateral_tracer_mixing, gm_redi_mld_criterion) with fn-entry raises;
         # lock so the gm_redi_mld_criterion N2-integral guard can't be dropped.
         ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_lat_lon_model_config"),
+        # MPAS DINO builder rejects the lat-lon-C-grid-only scheme fields
+        # (gm_kappa_scheme=treguier, convection_evd_n2_time_level=
+        # nemo_now_before). The MPAS vmix bridge threads neither the Nnn/Nbb
+        # tracers nor the Nnn eta the zdfevd trigger arms need, so honouring
+        # the field there would silently run the solver-state trigger (#1317).
+        ("packages/ocean/legoesm/ocean/experiments/dino.py", "dino_mpas_model_config"),
         # make_bottom_drag_physics entry removed 2026-07-19: the dead
         # physics-level bottom-drag factory was deleted on main (c5f88d325);
         # the canonical guard is validate_bottom_drag_scheme above.
@@ -326,6 +343,14 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/bulk_formulas.py", "bulk_formula_surface_forcing"),
         ("packages/ocean/legoesm/ocean/physics/surface_forcing/integration.py", "make_surface_forcing_physics"),
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/integration.py", "make_vertical_mixing_physics"),
+        # K-profile composition + EVD trigger time-level dispatch
+        # (vmix_background_mode: additive | nemo_max_floor;
+        # EnhancedDiffusionConfig.evd_n2_time_level: solver_state |
+        # nemo_now_before, #1317). Both are nested scheme-Config fields that
+        # validate_strict never sees, so this fn-entry raise is the only
+        # defence — a typo would silently pick a different composition or run
+        # the trigger on the post-explicit Kaa state.
+        ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", "compute_vertical_K_profiles"),
         # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
         # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
         # typo would silently run the Veros flux BC, a ~60x different surface

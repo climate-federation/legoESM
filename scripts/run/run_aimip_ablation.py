@@ -173,16 +173,16 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
     )
 
     dt = spec_cfg.dt
-    radiation = str(base_cfg.get("aimip_radiation", "gray"))
+    radiation = str(base_cfg.get("aimip_radiation", "rrtmgp"))
     rad_update_interval = int(base_cfg.get("aimip_rad_update_interval", 6))
-    # Classical-mode radiation pin (campaign_driver, D1): ablations are
-    # classical scheme-swap runs, so they hold radiation at rrtmgp unless
-    # the config carries the explicit escape.
-    from legoesm.training.campaign_driver import validate_classical_radiation
-    validate_classical_radiation(
+    # Radiation pin: ablations are classical scheme-swap runs, so they hold
+    # radiation at rrtmgp. Only --smoke is exempt (the allow_non_rrtmgp escape
+    # was deleted on 2026-08-12).
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
         radiation,
+        campaign="aimip",
         smoke=bool(base_cfg.get("smoke", False)),
-        allow_non_rrtmgp=bool(base_cfg.get("allow_non_rrtmgp", False)),
     )
 
     def _make_physics_fn(p, grid_):
@@ -190,6 +190,11 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
+            # This driver's ``microphysics`` axis includes "none" — dropping a
+            # family IS one of the arms it is comparing. The completeness gate
+            # guards models that claim to be complete, so an ablation sweep
+            # declares the waiver instead of tripping over it.
+            allow_unfilled_families=True,
             **schemes,
         )
 
@@ -230,6 +235,9 @@ def _train_and_eval(schemes: dict, spec_cfg, grid, sigma, base_cfg, cache_dir):
         radiation=radiation,
         rad_update_interval_steps=rad_update_interval,
         **schemes,
+        # Same waiver as the training call above: one arm of this sweep
+        # deliberately runs without microphysics.
+        allow_unfilled_families=True,
     )
 
     per_var_acc = {v: {"rmse": [], "bias": []} for v in ("T", "u", "v", "p_s")}

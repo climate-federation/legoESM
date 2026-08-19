@@ -1,0 +1,85 @@
+# 10-year CRU-JRA-forced BIOPHYSICS-ONLY LMIP at ~2 deg latlon, two-leaf canopy.
+#
+# The reference LMIP production config: mechanistic two-leaf canopy (its own
+# Ball-Berry stomata) + MOST surface flux + multi-layer Richards soil, carbon
+# OFF (biophysics only), prescribed SEASONAL CLM LAI (monthly climatology,
+# repeats annually).  Land physics is AMIP-composable: the same (land_mode,
+# land_config) surface the coupled ModelDriver assembles, so a config here maps
+# to an AMIP land run.  Override anything with `init_experiment.py -o k.p=v`.
+#
+# ⚠️ CALIBRATION (#730): the interactive canopy conductance is UNCALIBRATED on
+# the deep, moist Richards soil and can OVER-TRANSPIRE (amip_sota disabled the
+# analogous SimpleSEB Jarvis path for this reason).  Interpret the first 10-yr
+# climatology accordingly, and tune the exposed knobs (stomatal_model / vc_max25
+# / g1 / gs_max) against ERA5/FLUXNET before treating fluxes as production.
+
+template_name: biophysics/lmip_canopy_10yr
+template_version: 1.0.0
+description: 10-year CRU-JRA biophysics LMIP, 2 deg latlon, hourly, two-leaf canopy + MOST
+
+grid:
+  type: latlon
+  resolution: 90                # 90 x 180 ~ 2 deg
+
+physics:
+  land_mode: multilayer
+  surface_scheme: two_leaf_canopy   # mechanistic canopy (intrinsic stomata)
+  bulk_scheme: most                 # stability-dependent surface exchange (land)
+  # --- composable knobs (defaults shown; all optional) ---
+  stomatal_model: ball_berry        # canopy leaf conductance: ball_berry | medlyn
+  snow_albedo_feedback: true
+  # Snow: the single-node bulk SWE budget (the production-consistent scheme, also
+  # what AMIP + the EC-site harness run).  High-latitude soil carries a known cold
+  # bias + snow tower under it — a documented realism limit, not a crash.
+  # Soil-water freeze/thaw (apparent-heat-capacity zero-curtain).  ON for the
+  # production run: without it, boreal/Arctic winter columns lose their energy
+  # budget once the top soil layer crosses freezing and drift to NaN (~3-8% of
+  # land cells over 10 yr).  Bit-identical to sensible-only heat when disabled.
+  enable_freeze_thaw: true
+  # Stomatal/photosynthesis calibration (null = per-PFT surfdata / land default).
+  # Set these to fight #730 over-transpiration once calibrated:
+  vc_max25: null                    # max carboxylation @25C [umol/m2/s] (~19.8-180)
+  g1: null                          # stomatal slope (ball_berry ~2.97-27, medlyn ~1.3-12)
+  gs_max: null                      # max conductance [mol/m2/s] (~0.099-0.9)
+  # SimpleSEB-only interactive Jarvis stomata (ignored by the canopy scheme):
+  stomata_enabled: false
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_0.5x0.5
+  suffix: ""
+  year_start: 1974
+  year_end: 1978                  # 10 contiguous years (stage all with download_lmip_data.sh)
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+
+time:
+  dt: 3600.0                      # 1 h
+  n_steps: 43800                  # 10 years hourly (10 * 8760)
+  start_doy: 0.0
+
+restart:
+  from: ""                        # cold start; set to a restart_*.npz to chain
+
+land_frac_min: 0.0                # any surfdata land (was 0.5; forcing now finite on all land)
+land_mask_file: ""
+
+output:
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, Rnet, shflx, lhflx, albedo, LAI, GPP, ET, transp, soil_evap, runoff, precip, reverted]
+
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]
+
+    - name: annual
+      freq: annual
+      average: mean
+      vars: [T_sfc, shflx, lhflx, runoff, precip]

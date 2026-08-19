@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import subprocess
 import tempfile
 import warnings
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ import jax
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm.io.git_provenance import git_provenance
 from legoesm.io.state_digest import compute_state_digest
 
 
@@ -54,18 +54,14 @@ def _get_platform_tag() -> str:
 
 
 def _get_git_hash() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
+    """HEAD SHA of the IMPORTED legoesm package's repo — not the CWD.
+
+    Anchored at this module's file so the stamp describes the code that runs
+    (a launcher cd-ed into a pinned worktree must not certify the pin while
+    executing another tree).  Reads ``__file__`` at call time so tests can
+    monkeypatch it.
+    """
+    return git_provenance(Path(__file__)).commit
 
 
 # ---------------------------------------------------------------------------

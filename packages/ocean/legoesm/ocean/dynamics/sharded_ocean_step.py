@@ -90,7 +90,18 @@ _GEOM_STATIC_FIELDS = frozenset(
 # the sharded state as ``v_lower = field[0:n_lat]`` (P("lat")) and reconstructed
 # to the band's nl+1 faces in-body.  All OTHER array state fields are cell/u
 # leading-dim n_lat and shard P("lat") directly.
-_V_STAGGERED_STATE_FIELDS = ("v", "v_mask")
+#
+# ``mass_flux_v`` (#1442 ``store_mass_flux``, codex RED 3) belongs here for the
+# same reason ``v`` does -- it IS a v-face field.  Omitting it gave it the CELL
+# spec, so its n_lat+1 leading dim was neither split by the band slicer nor
+# reconstructed in-body: an immediate divisibility error at best, a silently
+# misaligned flux at worst.  The drop/re-append-zero round-trip is valid for it
+# on the same grounds as ``v``: ``mass_flux_v = h_v_old * v_corrected *
+# v_mask_3d`` and the pole-wall ``v_mask[n_lat] == 0``, so the top row it
+# reconstructs as zero IS zero.  ``mass_flux_u`` is a u-face field (leading dim
+# n_lat, like ``u``) and correctly takes the default cell sharding.
+_V_STAGGERED_STATE_FIELDS = ("v", "v_mask", "mass_flux_v",
+                             "salt_flux_v_int")
 
 
 def _geom_array_field_names(geom):
@@ -807,11 +818,14 @@ def make_sharded_ocean_step(model, mesh):
         # ppermutes of ALL staggered carriers (v + v_mask) into one
         # collective per dtype group — value-identical (a bit-copy
         # exchange; the flag flip re-keys the sharded_step cache below so
-        # a reused step object rebuilds).  Default OFF = the historical
-        # per-field ppermutes, byte-identical.
+        # a reused step object rebuilds).  Default ON -- receipt for THIS
+        # lane: ocean LL2304@128, job 26692291, fused -4.9 % (A/A2 off-arm
+        # drift 0.06 %); see halo_latlon.py for the full contract note.
+        # Set LEGOESM_LATLON_SPMD_FUSED_HALO=0 for the historical
+        # per-field ppermutes (byte-identical, just more collectives).
         import os as _os
         _fused_v = _os.environ.get(
-            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
         present = [name for name in _V_STAGGERED_STATE_FIELDS
                    if getattr(state_local, name) is not None]
         if _fused_v and len(present) > 1:
@@ -890,6 +904,24 @@ def make_sharded_ocean_step(model, mesh):
         _agree_ocean_spmd_call(
             mesh, state, (freshwater, surface_forcing, sponge, t_seconds),
             where="make_sharded_ocean_step.step", aux=aux)
+        # store_mass_flux (#1442, codex RED 3): ``out_specs=in_spec`` is derived
+        # from the INPUT state, so a step that ADDS mass_flux_u/v leaves has no
+        # spec for them.  Seed them here -- BEFORE ``in_spec`` -- through the
+        # model's own shared seeder, which sizes them off state.u/state.v and so
+        # produces the ``v_lower`` (n_lat) shape this carrier already holds.
+        # No-op when the flag is off or the slots are already seeded, so the
+        # cache key and the historical path are unchanged.
+        # Rank-uniform: keyed off the STATIC config bool, not rank-local data,
+        # so every rank seeds identically (no structure divergence across the
+        # collectives below).
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            seed_mass_flux_carry,
+            seed_salt_flux_carry,
+        )
+        state = seed_mass_flux_carry(
+            state, getattr(model.config, "store_mass_flux", False))
+        state = seed_salt_flux_carry(
+            state, getattr(model.config, "store_salt_flux", False))
         forcing = (freshwater, surface_forcing, sponge, t_seconds)
         _validate_forcing_layout((freshwater, surface_forcing, sponge))
         # Cache key = the state's AND forcing's pytree STRUCTURE, plus the
@@ -909,8 +941,11 @@ def make_sharded_ocean_step(model, mesh):
         # (codex, audit item 7).
         import os as _os
 
+        # Default ON (job 26692291, ocean LL2304@128 fused -4.9 %); the
+        # cache key below still carries the resolved value, so flipping the
+        # env var mid-process rebuilds rather than reusing a stale jaxpr.
         _fused_halo = _os.environ.get(
-            "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+            "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
         key = (jax.tree.structure(state), jax.tree.structure(forcing),
                forcing_ndims, _fused_halo)
         fn = _cache.get(key)

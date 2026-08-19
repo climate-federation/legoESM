@@ -478,7 +478,10 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
 
 
 def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
-                                 metric_complete=False):
+                                 metric_complete=False,
+                                 een_q_boundary="neumann_fill",
+                                 een_e3f_scheme="min",
+                                 dz_ref=None):
     """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
 
     NEMO ``dyn_spg_ts::dyn_cor_2D`` applies an ENSTROPHY-conserving EEN
@@ -493,43 +496,61 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
     barotropic Coriolis) applied to the depth-broadcast barotropic velocity
     and depth-integrated with the same ``e3u·e3v`` volume weighting NEMO uses.
 
+    ``een_q_boundary`` / ``een_e3f_scheme`` are the SAME two options the 3-D
+    EEN caller takes (``ocean_pe_latlon_cgrid._bc_pv_flux``), threaded here so
+    a NEMO-faithful card's setting actually reaches the barotropic path:
+    NEMO's ``dyn_cor_2D_init`` builds its ``ffu``/``ffv`` coefficients from
+    ``ff_f(ji,jj)/e3f_vor(ji,jj,jk)`` RAW (``dynspg_ts.F90:1517-1531``) — the
+    same ``e3f_vor`` array ``vor_een`` uses, with no fill and (``DINO
+    ln_dynvor_msk=.false.``) no ``fmask``.  That is ``een_q_boundary=
+    "nemo_live"`` + ``een_e3f_scheme="nemo_avg"`` (``nn_e3f_typ=1``).
+    Defaults keep the legacy ``neumann_fill``/``min`` behaviour bit-identical.
+
+    ``dz_ref`` (``z_coord.dz_ref``) is the SAME per-level reference thickness
+    the 3-D EEN caller forwards (``ocean_pe_latlon_cgrid.py`` ``_bc_pv_flux``
+    call site): under ``een_e3f_scheme="nemo_avg"`` it selects NEMO's
+    ``e3f_0`` fully-dry-vertex fallback instead of the legacy ``BIG_H``
+    sentinel (#1226 item 10).  Passing it here is required by this function's
+    own "must be the SAME operator as the 3-D EEN" rationale — with
+    ``dz_ref=None`` on one path and ``z_coord.dz_ref`` on the other the two
+    build DIFFERENT ``e3f`` at fully-dry vertices.  ``None`` (default) keeps
+    the legacy behaviour bit-identical, and the ``"min"`` branch is
+    ``dz_ref``-independent either way.
+
     Returns a dict of reference (η-independent, like NEMO's frozen arrays)
     3-D face/vertex thicknesses, the vertex Coriolis ``f_vtx``, the vertex and
-    3-D face masks, and the column depths ``hu``/``hv`` — all static geometry.
+    3-D face masks, the column depths ``hu``/``hv``, and the ``q_boundary``
+    string the operator is to be called with — all static geometry/config.
     """
     e3u = min_cell_to_uface(h_k).astype(dtype)      # (nlat, nlon+1, nlev)
     e3v = min_cell_to_vface(h_k, grid).astype(dtype)  # (nlat+1, nlon, nlev)
     hu = jnp.sum(e3u, axis=-1)                       # (nlat, nlon+1)
     hv = jnp.sum(e3v, axis=-1)                       # (nlat+1, nlon)
-    # F-point (vertex) thickness = min over the 4 surrounding cells with a
-    # BIG_H sentinel at dry cells (MITgcm hFacZ / NEMO e3f_vor; same min-rule
-    # the 3-D EEN caller uses in ocean_pe_latlon_cgrid.py:1817).  Any positive
-    # e3f keeps the EEN energy conservation (a property of the triad pairing,
-    # not the e3f value), so the min-corner choice is a tier-3 detail.
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    BIG = 1.0e30
-    ha = jnp.where(h_k > 0.0, h_k, BIG)
-    h_sw = jnp.roll(ha, 1, axis=1)                   # west neighbour
-    hp, hswp = pad_with_pole_bc_lat_multi(
-        (ha, h_sw), halo=1, south_values=(BIG, BIG), north_values=(BIG, BIG))
-    h_vtx = jnp.minimum(jnp.minimum(hp[:-1], hp[1:]),
-                        jnp.minimum(hswp[:-1], hswp[1:]))
-    nmask = north_fold_mask(grid)
-    if fold_is_local(grid) or nmask is not None:
-        fold = grid.fold
-        ha_p = ha[-1:, fold.perm_T, :]
-        hsw_p = h_sw[-1:, fold.perm_T, :]
-        h_vtx_north = jnp.minimum(
-            jnp.minimum(ha[-1:], h_sw[-1:]), jnp.minimum(ha_p, hsw_p))
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
-    h_vtx = jnp.concatenate([h_vtx, h_vtx[:, 0:1, :]], axis=1).astype(dtype)
+    # F-point (vertex) thickness via the SAME production helper the 3-D EEN
+    # caller uses (min-rule = MITgcm hFacZ; "nemo_avg" = NEMO nn_e3f_typ=1
+    # masked average).  Never re-derived here: an inline copy of the
+    # nemo_avg divisor is exactly the duplication that let a mutated guard
+    # pass undetected in #1226 item 10.  Thickness-only call -> Fu/u=None.
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
+    if een_e3f_scheme not in ("min", "nemo_avg"):
+        raise ValueError(
+            f"_build_een_barotropic_inputs: unknown een_e3f_scheme "
+            f"{een_e3f_scheme!r}; expected 'min' or 'nemo_avg'.")
+    if een_q_boundary not in ("neumann_fill", "nemo_live"):
+        raise ValueError(
+            f"_build_een_barotropic_inputs: unknown een_q_boundary "
+            f"{een_q_boundary!r}; expected 'neumann_fill' or 'nemo_live'.")
+    h_vtx, _, _ = een_e3f_h_vtx(h_k, None, None, grid, een_e3f_scheme,
+                                dz_ref=dz_ref)
+    h_vtx = h_vtx.astype(dtype)
     f_vtx = vertex_coriolis(grid).astype(dtype)      # (nlat+1, nlon+1)
     vtx_mask = compute_vertex_mask(mask, grid=grid)
     u_mask_3d = (u_mask[..., None] * (e3u > 0)).astype(dtype)
     v_mask_3d = (v_mask[..., None] * (e3v > 0)).astype(dtype)
     out = dict(e3u=e3u, e3v=e3v, hu=hu, hv=hv, h_vtx=h_vtx, f_vtx=f_vtx,
                vtx_mask=vtx_mask, u_mask_3d=u_mask_3d, v_mask_3d=v_mask_3d,
-               metric_complete=bool(metric_complete))
+               metric_complete=bool(metric_complete),
+               q_boundary=een_q_boundary)
     if metric_complete:
         # NEMO horizontal scale factors (dyn_cor_2D_init, dynspg_ts.F90:1349-
         # 1379): e1u/e1v [zonal widths] and e2u/e2v [meridional widths] at the
@@ -598,7 +619,8 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
     diag_u, diag_v = pv_flux_al81_partial_cell(
         jnp.zeros_like(pre["h_vtx"]), pre["h_vtx"], pre["e3v"], v3,
         pre["e3u"], u3, pre["u_mask_3d"], pre["v_mask_3d"], pre["vtx_mask"],
-        f_vtx=pre["f_vtx"])
+        f_vtx=pre["f_vtx"],
+        q_boundary=pre.get("q_boundary", "neumann_fill"))
     cor_u = jnp.sum(pre["e3u"] * diag_u, axis=-1) / jnp.maximum(pre["hu"], eps)
     cor_v = jnp.sum(pre["e3v"] * diag_v, axis=-1) / jnp.maximum(pre["hv"], eps)
     if pre.get("metric_complete", False):
@@ -611,7 +633,10 @@ def een_barotropic_coriolis(U_bar, V_bar, pre, eps=1.0e-10):
 
 def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      v_mask, min_water_col, dtype,
-                                     metric_complete=False):
+                                     metric_complete=False,
+                                     een_q_boundary="neumann_fill",
+                                     een_e3f_scheme="min",
+                                     dz_ref=None):
     """Pre-step EEN barotropic Coriolis ``(cor_u, cor_v)`` for the live split.
 
     NEMO ``dynspg_ts.F90:296-300`` subtracts ``dyn_cor_2D(puu_b, pvv_b)`` — the
@@ -624,9 +649,17 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
     — so subtracting the result from the slow forcing cancels the substep-0 live
     term exactly (up to float round-off) and leaves ONLY the LIVE, evolving,
     null-mode-restoring EEN barotropic Coriolis inside the window.
+
+    ``dz_ref`` (``z_coord.dz_ref``) is forwarded verbatim — see
+    :func:`_build_een_barotropic_inputs`; it must be the SAME value the
+    substep loop and the 3-D EEN caller pass, or this subtraction uses a
+    different ``e3f`` at fully-dry vertices than the live term it cancels.
     """
     pre = _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
-                                       metric_complete=metric_complete)
+                                       metric_complete=metric_complete,
+                                       een_q_boundary=een_q_boundary,
+                                       een_e3f_scheme=een_e3f_scheme,
+                                       dz_ref=dz_ref)
     U_bar, V_bar = _depth_average_to_faces(
         u_3d, v_3d, h_k, min_water_col, mask, u_mask, v_mask, grid)
     return een_barotropic_coriolis(U_bar, V_bar, pre)
@@ -1071,10 +1104,9 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        w_filter, w_total, w_transport = compute_filter_weights(
+        w_filter, w_total, w_transport, n_loop = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
-        n_loop = n_substeps
     return w_filter, w_total, w_transport, n_loop
 
 
@@ -1211,6 +1243,32 @@ def barotropic_substeps_latlon_cgrid(
     # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
     # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
     # AND a supplied traced model time: disabled / no-time => bit-identical.
+    #
+    # FROZEN TIDE vs THE CENTRED WINDOW (2026-08-12, codex HIGH x3).
+    # The tide is held CONSTANT across the substep loop, so the time it is
+    # sampled at sets the quadrature error. Centring the box/cosine window on
+    # t+dt stretched the loop to t+(2n-1)*dt_s, so a tide frozen at the loop
+    # start now lags by nearly a full step -- for M2 at dt=1800 s, 14.5 deg of
+    # phase, ~25% of the complex forcing amplitude.
+    #
+    # A one-line "sample at t + n_substeps*dt_s instead" was TRIED AND
+    # REVERTED: it is only the window centroid for the forward-frame box and
+    # cosine filters. Under the multiple-leapfrog frame dt_s = dt_mom/n with
+    # dt_mom = 2*dt, so that product is 2*dt -- a full outer step too late --
+    # and the discretely trimmed power_law window's centroid is n + 0.0088*n
+    # substeps, not n, while nemo_ab3am4 does no averaging at all and returns
+    # the final substep. One expression cannot be the centroid for all of
+    # them, and a wrong sample time is worse than a documented one.
+    #
+    # So the sampling STAYS at the loop start, unchanged from before this
+    # work. It is not silently fine: a tide-enabled box/cosine run now carries
+    # roughly twice the forcing-quadrature error it used to. It is left as a
+    # documented limitation rather than "fixed", because the two cheap fixes
+    # are both wrong -- the centroid expression above misfires on MLF and
+    # power_law, and refusing the combination outright breaks the working,
+    # tested tide wiring (test_tidal_forcing.py::test_wire_*). FOLLOW-UP: a
+    # per-substep tide at t+(i+1)*dt_s removes the freezing and the whole
+    # centroid question at once.
     from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
     F_slow_u, F_slow_v = apply_tidal_forcing(
         F_slow_u, F_slow_v, grid, t_seconds,
@@ -1295,9 +1353,19 @@ def barotropic_substeps_latlon_cgrid(
         _h_k_een = (_h_k_corr
                     if (_een_seed == "nemo_kmm" and _seed_override)
                     else h_k)
+        # The EEN q-boundary / e3f rules are the SAME config fields the 3-D
+        # EEN reads; NEMO's dyn_cor_2D_init uses the SAME e3f_vor array and
+        # the SAME raw (unfilled, unmasked) ff_f/e3f as vor_een, so a card
+        # that selects the NEMO-faithful options for the 3-D path must get
+        # them here too (dynspg_ts.F90:1517-1531 vs dynvor.F90::vor_een).
         _een_pre = _build_een_barotropic_inputs(
             _h_k_een, grid, mask, u_mask, v_mask, eta.dtype,
-            metric_complete=(_bt_cor == "een_metric"))
+            metric_complete=(_bt_cor == "een_metric"),
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_e3f_scheme=getattr(config, "een_e3f_scheme", "min"),
+            # SAME dz_ref the 3-D EEN caller forwards (ocean_pe_latlon_cgrid
+            # _bc_pv_flux(dz_ref=z_coord.dz_ref)) — see the helper docstring.
+            dz_ref=getattr(z_coord, "dz_ref", None))
 
     coeffs = _dissipation_coeffs(config, grid, _area, dt_s, eta.dtype, mask)
 
@@ -1678,6 +1746,9 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     # single-owner wrapper does the enabled/t_seconds gate, masking contract and
     # the carry-invariant dtype cast; only the halo-pad context is band-specific.
     with local_halo_pads():
+        # Loop-start sampling, matching the standard path (see the FROZEN
+        # TIDE note there). Both lanes must use the SAME convention or the
+        # wide-halo band runs a different tide phase from the owned rows.
         Fsu_ext, Fsv_ext = apply_tidal_forcing(
             Fsu_ext, Fsv_ext, grid_ext, t_seconds,
             getattr(config, "tidal_forcing", None), g=g)

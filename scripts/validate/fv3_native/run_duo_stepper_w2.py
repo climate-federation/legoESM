@@ -12,14 +12,52 @@ O(dx^2)) -> NEAREST-cell sampling onto the 1-degree grid (C-cell sizes
 Zenodo reference uses fregrid — scores are comparable at the envelope
 level only, stated on output).
 
+EXTERNAL-MODE FILTER (``--d-ext``): the Zenodo duo decks run the
+external-mode del-2 divergence filter OFF.  The RESOLVED namelist echo
+of every duo deck reads ``D_EXT = 0.000000000000000E+000``
+(``C48.sw.case2.alpha0.duo.hord8/rundir/logfile.000000.out:406``, and
+likewise case6, case8 and nh.case-13) -- the deck's ``input.nml`` does
+not mention ``d_ext`` at all, so this is the resolved value, not the
+declared one, and ``fv_arrays.F90`` carries two conflicting
+declarations (``:392`` 0.0 and ``:399`` 0.02) which is exactly why the
+echo has to be the authority.
+
+This runner used to pass no value and inherit the stepper's 0.02, i.e.
+it applied a divergence filter the oracle did not have -- and that
+filter acts on precisely the divergent panel-seam mode the W2 imprint
+metric measures, so it flattered the score.  Its two sibling runners
+were already correct (``run_duo_stepper_w5.py:175`` passes
+``d_ext=0.0``; ``run_duo_stepper_modon.py:192`` sets 0.0 under
+``--preset case8``); W2 was the straggler.  The default is now the
+deck value 0.0.  Expect the measured imprint to get WORSE: removing a
+non-oracle filter is a fidelity gain even when the number moves the
+wrong way, and any earlier W2 duo figure was taken under the filter and
+is not comparable to one taken without it.
+
 Usage: run_duo_stepper_w2.py --n 24 --dt 450 --days 5 --out w2_c24.npz
 """
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 
 import numpy as np
+
+
+def _git_sha() -> str:
+    """Repo SHA, recorded in the npz so a stored score carries its
+    provenance (an artifact without its commit is not comparable to
+    anything)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def geographic_va(ctx, states):
@@ -56,7 +94,15 @@ def geographic_va(ctx, states):
     return v_geo6
 
 
-def build_nearest_map(ctx):
+def build_nearest_map(ctx, lon_deg=None):
+    """Nearest-cube-cell index map for a 181x360 lat-lon canvas.
+
+    ``lon_deg`` (default ``arange(360)`` — the historical W2/modon
+    canvas) selects the canvas longitudes: the Zenodo ``atmos_daily.nc``
+    files store T-CELL CENTRES at 0.5..359.5, so a field-to-field score
+    against them must pass ``0.5 + arange(360)`` (run_duo_stepper_case6
+    does).  Latitudes are always ``linspace(-90, 90, 181)``.
+    """
     n, ng = ctx["n"], ctx["ng"]
     sl = slice(ng, ng + n)
     cx = []
@@ -67,7 +113,9 @@ def build_nearest_map(ctx):
                             np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1))
     centers = np.concatenate(cx)                 # (6n^2, 3)
     lats = np.deg2rad(np.linspace(-90, 90, 181))
-    lons = np.deg2rad(np.arange(360, dtype=float))
+    if lon_deg is None:
+        lon_deg = np.arange(360, dtype=float)
+    lons = np.deg2rad(np.asarray(lon_deg, dtype=float))
     llon, llat = np.meshgrid(lons, lats)
     pts = np.stack([np.cos(llat) * np.cos(llon),
                     np.cos(llat) * np.sin(llon), np.sin(llat)], axis=-1)
@@ -85,6 +133,14 @@ def main():
     ap.add_argument("--dt", type=float, default=450.0)
     ap.add_argument("--days", type=float, default=5.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--d-ext", type=float, default=0.0,
+                    help="external-mode del-2 divergence filter "
+                         "coefficient. Default 0.0 = the value every "
+                         "Zenodo duo deck RESOLVES to (D_EXT = 0.0 in "
+                         "logfile.000000.out). Pass 0.02 to reproduce "
+                         "pre-2026-08-06 runs of this script, which "
+                         "inherited the stepper default and so applied a "
+                         "filter the oracle does not have.")
     ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
                     help="along-ring k2e order: 2 = authoritative live "
                          "default (2026-07-27 root cause), 4 = "
@@ -106,11 +162,17 @@ def main():
                          "faithful re-extrapolation; a2d = keep the "
                          "projected geographic-corner values)")
     ap.add_argument("--oracle-conventions", action="store_true",
+                    default=True,
                     help="BOUNDED-conventions gridstruct (the lane the "
                          "Zenodo duo runs execute: extended-lattice "
                          "metrics, bounded_domain=True guards, corner "
                          "flags off — d_sw4 corner-KE fix and plain "
-                         "corner specials disabled)")
+                         "corner specials disabled).  DEFAULT since the "
+                         "km=1 corpus migration (2026-08-11): c_sw "
+                         "refuses duogrid on unbounded metrics "
+                         "(fv_arrays.F90:1512), so the old plain default "
+                         "could no longer run; flag kept as a no-op for "
+                         "CLI compatibility")
     args = ap.parse_args()
 
     from legoesm.core.fv3_native_duo_stepper import (
@@ -144,7 +206,8 @@ def main():
     total_days = int(round(args.days))
     for day in range(1, total_days + 1):
         for _ in range(steps_per_day):
-            states = full_acoustic_step_sixface(ctx, states, args.dt)
+            states = full_acoustic_step_sixface(ctx, states, args.dt,
+                                                d_ext=args.d_ext)
         times.append(float(day))
         frames.append(sample_v(states))
         vmax = float(np.nanmax(np.abs(frames[-1])))
@@ -169,10 +232,15 @@ def main():
         ext_exclude=np.array(args.ext_exclude),
         ext_metrics=np.array(bool(args.ext_metrics)),
         oracle_conventions=np.array(bool(args.oracle_conventions)),
+        d_ext=np.array(float(args.d_ext)),
+        dt=np.array(float(args.dt)),
+        n=np.array(int(args.n)),
+        git_sha=np.array(_git_sha()),
         protocol=f"duo stepper ({mode}); certified c2l_ord2 D->geographic "
         "(upstream operator family; runs' own output used c2l_ord=4, "
         "ord2 residual O(dx^2)); NEAREST-cell 1deg sampling (pattern-"
-        "level protocol, envelope-comparable to the fregrid reference)")
+        "level protocol, envelope-comparable to the fregrid reference); "
+        f"d_ext={args.d_ext} (Zenodo duo decks resolve D_EXT=0.0)")
     print("saved", args.out, flush=True)
 
 

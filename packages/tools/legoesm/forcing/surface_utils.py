@@ -108,6 +108,68 @@ def blend_surface_property(
     return sic * value_ice + (1.0 - sic) * value_ocean
 
 
+def blended_surface_albedo(
+    sic: jnp.ndarray,
+    f_land: "jnp.ndarray | None",
+    albedo_ice: "float | jnp.ndarray",
+    albedo_ocean: "float | jnp.ndarray",
+    albedo_land: "jnp.ndarray | None" = None,
+) -> jnp.ndarray:
+    """Tile-blended surface shortwave albedo (ocean/ice, then land).
+
+    The single place the ocean/ice/land albedo blend is formed for the
+    surface-albedo boundary condition handed to radiation::
+
+        alpha_sea  = sic * alpha_ice + (1 - sic) * alpha_ocean
+        alpha_sfc  = f_land * alpha_land + (1 - f_land) * alpha_sea
+
+    Both steps are linear area-weighted tile blends, so the result is the
+    area-mean albedo of the cell — the quantity a single-column radiation
+    solver needs to reproduce the cell-mean reflected shortwave.
+
+    ``albedo_land`` is REQUIRED whenever ``f_land`` is not None: falling back
+    to the ocean value over land is the defect this helper exists to prevent
+    (it silently applied ``albedo_ocean = 0.06`` to every land column on the
+    MPAS lane).  A land fraction with no land albedo therefore raises rather
+    than quietly returning an ocean-albedo field.
+
+    Parameters
+    ----------
+    sic : array
+        Sea-ice concentration [0, 1].
+    f_land : array or None
+        Land area fraction [0, 1].  ``None`` ⇒ pure ocean/ice surface.
+    albedo_ice, albedo_ocean : float or array
+        Ice / open-ocean shortwave albedo [0, 1].
+    albedo_land : array or None
+        Land shortwave albedo [0, 1] (snow-brightened by the caller when a
+        snow-albedo feedback is active).  Required when ``f_land`` is given.
+
+    Returns
+    -------
+    albedo : array
+        Area-blended surface shortwave albedo [0, 1].
+
+    Raises
+    ------
+    ValueError
+        If a land fraction is supplied without a land albedo.
+    """
+    albedo = blend_surface_property(sic, albedo_ice, albedo_ocean)
+    if f_land is None:
+        return albedo
+    if albedo_land is None:
+        raise ValueError(
+            "blended_surface_albedo: f_land was supplied without an "
+            "albedo_land field. Refusing to apply the OCEAN albedo over land "
+            "— that silently reflects far too little shortwave from every "
+            "land column. Provide a land albedo map (--albedo-land-file), a "
+            "surfdata-derived albedo, or the latitude-vegetation default "
+            "(legoesm.surface_albedo.land_vegetation_albedo)."
+        )
+    return f_land * albedo_land + (1.0 - f_land) * albedo
+
+
 def surface_temperature_for_lw_boundary(
     radiation: str,
     *,
@@ -197,6 +259,53 @@ def surface_emissivity_for_lw_inversion(
         return static_sfc_emissivity
     # gray / none: idealized black surface (emit with eps = 1.0).
     return 1.0
+
+
+def snow_for_albedo_deblend(
+    snow: "jnp.ndarray | None",
+    ensemble_size: int,
+) -> "jnp.ndarray | None":
+    """The snow field a coupled driver may pass to ``static_surface_albedo``.
+
+    Shortwave twin of the emissivity selector above, and the single place both
+    coupled drivers make this call, so they cannot drift apart.
+
+    The driver's ``_carry_aux["snow"]`` is the raw segment carry.  On an
+    ENSEMBLE run (``ensemble_size > 1``) the driver unpacks
+    ``ensemble_mean(carry)`` for the state and the held fluxes but stashes the
+    snow carry member-shaped — deliberately, since the next segment restarts
+    from the full ensemble.  Handing that member-shaped field to the albedo
+    blend would make ``albedo`` member-shaped too and broadcast the 2-D mean
+    ``sw_net_sfc`` up to 3-D, mis-shaping every downstream surface forcing
+    field.  So ensembles fall back to the bare vegetation albedo, matching the
+    existing gate that disables the multilayer land tile for ensembles.
+
+    Scope of that fallback, stated narrowly: ensembles lose only the SNOW
+    brightening.  They still gain the ocean/ice/land blend itself, which is the
+    first-order fix and the whole point — an ensemble run is NOT byte-identical
+    to the pre-fix behaviour, it is corrected without the snow term.
+
+    ``<= 1`` rather than ``== 1``, matching ``ModelDriver._create_ensemble``,
+    which treats any size at or below one as serial and leaves the carry
+    single-member shaped.
+
+    Parameters
+    ----------
+    snow : array or None
+        Snow water equivalent [kg/m^2] from the driver's carry, or ``None``.
+    ensemble_size : int
+        The atmosphere driver's ``_ensemble_size``.
+
+    Returns
+    -------
+    snow : array or None
+        ``snow`` on a single-member run; ``None`` otherwise.
+    """
+    if snow is None or int(ensemble_size) > 1:
+        return None
+    return snow
+
+
 def snow_fraction(
     T_low: jnp.ndarray,
     T_freeze: float,

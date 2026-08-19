@@ -1,0 +1,33 @@
+# FRESH START under the 2026-08-12 code: rrtmgp radiation (gray is no
+# longer a campaign option), no gray tuning knobs, and every
+# parameterization family filled. Pre-2026-08-12 checkpoints are
+# abandoned by decision — not migrated — so this trains from epoch 0.
+# COLUMN_NN retrained on the ENERGY-CONSERVING dycore. Two knobs vs
+# suite_curriculum_v2_anchored_lnpsfix.yaml (jobs 26820916/26828338):
+# vertical_advection_scheme sb_centered + frictional_heating true —
+# the -0.48 K/day zero-physics T leak fix (commit f2ffaf2a1; drift
+# -2.39 -> -0.275 K/120 h). Config otherwise byte-identical.
+#   CONFIRMS: t850 drift with lead shrinks toward persistence's growth
+#             rate and bias_T falls; mass fields hold their lnpsfix gains.
+#   REFUTES:  t850 unchanged -> the leak was not binding for the trained
+#             arm at these leads.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2_curriculum_sharp
+  loss: {}
+  fix_mass: true
+  anchor_mass_to_initial: true
+  vertical_advection_scheme: sb_centered
+  frictional_heating: true
+  aimip_rollout_curriculum:
+    - [6, 2]
+    - [12, 3]
+    - [24, 2]
+    - [72, 2]
+    - [120, 2]
+
+variants:
+  - column_nn
+
+output_dir: results/aimip_cnn_rrtmgp_v1

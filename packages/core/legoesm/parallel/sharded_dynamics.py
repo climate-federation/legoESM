@@ -70,6 +70,7 @@ References
 from __future__ import annotations
 
 import logging
+import re
 import time
 from functools import partial
 from typing import NamedTuple
@@ -1240,6 +1241,227 @@ def _close_halo_under_cellsOnEdge(
         halo_cells_set.update(new_cells.tolist())
 
 
+#: Halo depth the SPMD Voronoi partition infra is built at.  ONE definition
+#: consumed by both the production step factory and ``spmd_schedule_cost``:
+#: a score computed at a different depth describes a different comm graph, and
+#: two independently hardcoded 3s let production drift unnoticed.
+SPMD_HALO_DEPTH = 3
+
+
+def spmd_schedule_cost(mesh, n_dev, *, method="auto", reorder_target=None,
+                       already_reordered=False, halo_depth=SPMD_HALO_DEPTH,
+                       ppermute_cells_per_device_threshold=2_000,
+                       round_profile_for_device=None):
+    """How much halo communication one ownership choice costs, computed offline.
+
+    Scores a Voronoi ownership (mesh split) by the number of ``ppermute``
+    ROUNDS one halo exchange needs -- the sequential collective launches that
+    dominate MPAS strong scaling above ~64 devices.  Runs on a laptop: no GPU,
+    no MPI, no benchmark job, so a split can be compared before it costs an
+    allocation.
+
+    It calls the SAME builders production calls
+    (:func:`_build_voronoi_partition_infra` then
+    :func:`_build_ppermute_schedule`).  A re-derived lookalike answers a
+    different question: a 1-ring ``cellsOnEdge`` adjacency graph reports 8
+    rounds where the real depth-3-plus-closure graph reports 12-14.
+
+    WHAT THE NUMBER IS NOT
+    ----------------------
+    * ``n_rounds`` is per HALO FILL, not per model step.  A step costs
+      ``n_rounds`` x (tendency evaluations per step), which depends on the
+      configured integrator -- SSP-RK3 evaluates 3 times, but the MPAS default
+      is ``ssp_rk54_scan``.  Multiply with the integrator you actually run.
+    * ``n_rounds`` is NOT proven equal to the comm graph's ``max_degree``.
+      ``_build_ppermute_schedule`` tries a finite set of greedy orders and
+      keeps the best; equality is MEASURED (compare the returned
+      ``max_degree``), never assumed.  Do not claim "the colouring is already
+      optimal so only ownership can help" from this function.
+    * It scores the ppermute strategy.  Production auto-selects ALLGATHER when
+      cells/device is below ``ppermute_cells_per_device_threshold``, in which
+      case there is no ppermute schedule and this number is counterfactual --
+      see the returned ``production_strategy``.
+
+    MESH STATE -- the one thing that silently invalidates the score
+    --------------------------------------------------------------
+    Production does NOT reorder inside ``make_voronoi_sharded_step``; it
+    consumes an already-reordered ``model.mesh``.  The scaling bench reorders
+    ONCE for a ``reorder_target`` device count and then runs at a possibly
+    DIFFERENT device count.  So pass what you actually have:
+
+    * raw mesh, scoring a run at ``n_dev``: defaults are right.
+    * raw mesh, but the run reorders for a different target: pass
+      ``reorder_target=<that target>``; the split is built for the target and
+      scored at ``n_dev``.
+    * already-reordered mesh (what production holds): pass
+      ``already_reordered=True``; ``method`` is then ignored and reported as
+      ``"pre-reordered"``, because the ownership is already baked in.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    n_dev : int
+        Device count the run uses.  Must be >= 1.
+    method : str
+        Ownership for the reorder; ignored when *already_reordered*.
+    reorder_target : int | None
+        Device count the reorder targets, when it differs from *n_dev*.
+    already_reordered : bool
+    halo_depth : int
+        Must match production (3) or the graph is a different graph.
+    ppermute_cells_per_device_threshold : int
+        Mirror of the production auto-select threshold, only used to report
+        ``production_strategy``.
+    round_profile_for_device : int | None
+        When set to a device id, also return ``round_profile``: the per-round
+        payload THAT DEVICE exchanges, in schedule order, restricted to the
+        rounds it actually participates in.
+
+        This exists to make a profiler trace interpretable.  An ``nsys``
+        capture is per RANK, and a rank appears only in the colour classes
+        that touch it -- at s9/np64 rank 0 shows 8 ``SendRecv`` per halo fill
+        while the graph's ``max_degree`` is 11 -- so the k-th observed
+        collective is the k-th round CONTAINING THAT DEVICE, not the k-th
+        round.  Pairing measured durations against all rounds would silently
+        misalign them.
+
+        Each entry gives ``round`` (index in the full schedule), ``partner``
+        and ``halo_cells``/``halo_edges`` -- the schedule's per-round PADDED
+        extents, which are what goes on the wire: the index arrays are
+        ``(n_dev, max_c)`` and ``ppermute`` moves the whole padded buffer, so
+        a pair's own send count does not set its cost.  Sizes are ENTITY
+        COUNTS, not bytes; converting needs the packed cell width from
+        :func:`_pack_cell_state` (``nlev*(1+n_tracers)+2``) for cells and
+        ``nlev`` for edges.
+
+    Returns
+    -------
+    dict
+        ``n_rounds`` (the cost), ``max_degree`` (the lower bound to compare
+        it against), ``n_rounds_greedy``, ``coloring_method``,
+        ``resolved_method`` (concrete, never ``"auto"``),
+        ``production_strategy`` (``"ppermute"`` or ``"allgather"``),
+        ``max_local_cells``, ``max_local_edges``, and the echoed inputs.
+
+    Reference census on the unrelaxed mesh, which any change here must still
+    reproduce: subdiv-8 sfc 12/14 rounds at 64/128 devices, metis 13/19,
+    geometric 16/21; subdiv-9 sfc 11/13, metis 14/18, geometric 14/18.
+    """
+    from legoesm.parallel.voronoi_partition import (
+        reorder_voronoi_for_sharding, resolve_sharding_partition_method,
+    )
+
+    if int(n_dev) != n_dev or int(n_dev) < 1:
+        # int() would silently truncate 3.9 -> 3 and score the wrong split.
+        raise ValueError(
+            f"spmd_schedule_cost: n_dev must be an integer >= 1, got {n_dev!r}")
+    n_dev = int(n_dev)
+
+    if already_reordered:
+        if reorder_target is not None:
+            raise ValueError(
+                "spmd_schedule_cost: reorder_target is meaningless with "
+                "already_reordered=True — the ownership is already baked into "
+                "the mesh.")
+        prepared, resolved = mesh, "pre-reordered"
+    else:
+        target = n_dev if reorder_target is None else int(reorder_target)
+        prepared = reorder_voronoi_for_sharding(mesh, target, method=method)
+        # Report the CONCRETE ownership: "auto" hides which partitioner ran.
+        # Uses the SAME resolver the reorder used, so the label cannot drift
+        # from the policy.
+        resolved = resolve_sharding_partition_method(method)
+
+    # The builder assigns residual entities to the LAST owner but excludes them
+    # from every owned contiguous block, so schedule send indices can exceed a
+    # device's shard length -- a number that looks fine and is not.  Reachable
+    # via reorder_target: a mesh padded for 3 devices is not divisible by 4.
+    # The scaling bench rejects that pairing; so does this.
+    n_cells, n_edges = int(prepared.nCells), int(prepared.nEdges)
+    if n_cells % n_dev or n_edges % n_dev:
+        raise ValueError(
+            f"spmd_schedule_cost: prepared mesh has nCells={n_cells}, "
+            f"nEdges={n_edges}, neither divisible by n_dev={n_dev}. The mesh "
+            f"is padded for its reorder target"
+            f"{'' if already_reordered else f' ({target})'}, so scoring it at "
+            f"a device count that does not divide it silently mis-slices the "
+            f"owned blocks. Score at a device count that divides the prepared "
+            f"mesh.")
+    (
+        _stacked, _gc, _ge, _noc, _noe, max_lc, max_le, partitions, cell_owner,
+    ) = _build_voronoi_partition_infra(prepared, n_dev, halo_depth=halo_depth)
+    cells_per = n_cells // n_dev
+    edges_per = n_edges // n_dev
+    sched = _build_ppermute_schedule(
+        partitions, cell_owner, n_dev, cells_per, edges_per, max_lc, max_le,
+    )
+    return {
+        "method": method,
+        "resolved_method": resolved,
+        "n_dev": n_dev,
+        # Unknown for a pre-reordered mesh: the ownership is baked in and the
+        # target that produced it is not recoverable from the mesh. Reporting
+        # n_dev there would assert something we did not verify.
+        "reorder_target": (None if already_reordered else
+                           (n_dev if reorder_target is None
+                            else int(reorder_target))),
+        "already_reordered": bool(already_reordered),
+        "halo_depth": halo_depth,
+        "n_rounds": int(sched["n_rounds"]),
+        "n_rounds_greedy": int(sched["n_rounds_greedy"]),
+        "max_degree": int(sched.get("max_degree", -1)),
+        "coloring_method": sched["coloring_method"],
+        # Production returns before selecting a strategy at n_dev==1, and a
+        # caller may force halo_strategy; this reports what AUTO would pick.
+        "production_strategy": (
+            None if n_dev == 1 else
+            ("allgather" if cells_per < ppermute_cells_per_device_threshold
+             else "ppermute")),
+        "cells_per_device": cells_per,
+        "max_local_cells": int(max_lc),
+        "max_local_edges": int(max_le),
+        **(
+            {} if round_profile_for_device is None else
+            {"round_profile": _round_profile(sched, round_profile_for_device,
+                                             n_dev)}
+        ),
+    }
+
+
+def _round_profile(sched, device, n_dev):
+    """Per-round payload for ONE device, in the order it observes them.
+
+    See ``spmd_schedule_cost``'s ``round_profile_for_device``.  Only rounds
+    whose colour class touches *device* are returned, because those are the
+    only ones on which it issues a collective.
+    """
+    # Strict, like the n_dev check: int() would coerce 0.9 to 0 and silently
+    # profile a different device than the caller named.
+    if int(device) != device or not 0 <= device < n_dev:
+        raise ValueError(
+            f"round_profile_for_device must be an integer in [0, {n_dev}), "
+            f"got {device!r}")
+    device = int(device)
+    out = []
+    for r, perm in enumerate(sched["ppermute_perms"]):
+        partner = next((dst for src, dst in perm if src == device), None)
+        if partner is None:
+            continue
+        # halo_cells_per_round is the round's PADDED extent, and that is the
+        # right payload measure rather than a per-pair count: the index
+        # arrays are (n_dev, max_c) and ppermute moves the padded buffer, so
+        # every pair in the round puts max_c entities on the wire.  (The
+        # per-pair send maps cannot be recovered from those arrays anyway --
+        # they are zero-padded and 0 is a valid index.)
+        out.append({
+            "round": r,
+            "partner": int(partner),
+            "halo_cells": int(sched["halo_cells_per_round"][r]),
+            "halo_edges": int(sched["halo_edges_per_round"][r]),
+        })
+    return out
+
+
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -1420,15 +1642,24 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         local_vertices = np.concatenate([owned_vertices, halo_vertices])
 
         # ----- Global-to-local maps ----- #
-        cell_g2l = np.full(nCells, -1, dtype=np.int64)
-        for i, g in enumerate(local_cells):
-            cell_g2l[g] = i
-        edge_g2l = np.full(nEdges, -1, dtype=np.int64)
-        for i, g in enumerate(local_edges):
-            edge_g2l[g] = i
-        vertex_g2l = np.full(nVertices, -1, dtype=np.int64)
-        for i, g in enumerate(local_vertices):
-            vertex_g2l[g] = i
+        # int32, not int64: every rank of the setup holds ALL n_dev
+        # partitions, and these three full-global arrays dominate the
+        # setup's HOST memory — at subdiv-10 / 192 devices the int64
+        # version is ~100 GB per rank, and 4 ranks/node OOM-killed a
+        # 512 GB node (job 26996571). int32 halves it. Guarded: a mesh
+        # at or beyond 2^31-1 entities fails loudly, not wraps (the
+        # >= keeps one entity of headroom on purpose; codex/GLM r1).
+        if max(nCells, nEdges, nVertices) >= np.iinfo(np.int32).max:
+            raise ValueError(
+                f"global-to-local maps use int32; mesh has "
+                f"{max(nCells, nEdges, nVertices)} entities >= 2^31-1")
+        cell_g2l = np.full(nCells, -1, dtype=np.int32)
+        cell_g2l[local_cells] = np.arange(len(local_cells), dtype=np.int32)
+        edge_g2l = np.full(nEdges, -1, dtype=np.int32)
+        edge_g2l[local_edges] = np.arange(len(local_edges), dtype=np.int32)
+        vertex_g2l = np.full(nVertices, -1, dtype=np.int32)
+        vertex_g2l[local_vertices] = np.arange(len(local_vertices),
+                                               dtype=np.int32)
 
         part = VoronoiPartition(
             rank=rank,
@@ -1497,7 +1728,7 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     )
 
 
-def _greedy_edge_coloring_ordered(comm_pairs, order):
+def greedy_edge_coloring_ordered(comm_pairs, order):
     """First-fit edge coloring visiting ``order`` (a list of normalized
     ``(min,max)`` pairs). Always a PROPER coloring; the color count depends
     on the visitation order.
@@ -1517,15 +1748,15 @@ def _greedy_edge_coloring_ordered(comm_pairs, order):
     return edge_colors
 
 
-def _greedy_edge_coloring(comm_pairs):
+def greedy_edge_coloring(comm_pairs):
     """Legacy first-fit coloring on sorted pairs (the reference/never-regress
-    baseline for :func:`_multi_ordering_edge_coloring`). Worst case
+    baseline for :func:`multi_ordering_edge_coloring`). Worst case
     ``2*max_degree - 1`` colors — each color is one ppermute ROUND, and the
     route-B MPAS lane is round-latency-bound (#1113), so excess colors are
     pure wall-clock.
     """
     edges = sorted({(min(u, v), max(u, v)) for u, v in comm_pairs})
-    return _greedy_edge_coloring_ordered(comm_pairs, edges)
+    return greedy_edge_coloring_ordered(comm_pairs, edges)
 
 
 def _check_proper_edge_coloring(edge_colors, comm_pairs):
@@ -1551,7 +1782,7 @@ def _check_proper_edge_coloring(edge_colors, comm_pairs):
 _COLORING_SHUFFLE_SEEDS = tuple(range(16))
 
 
-def _multi_ordering_edge_coloring(comm_pairs):
+def multi_ordering_edge_coloring(comm_pairs):
     """Proper edge coloring via multi-start first-fit; returns the coloring
     using the FEWEST colors (= ppermute rounds) across several deterministic
     visitation orders.
@@ -1590,7 +1821,7 @@ def _multi_ordering_edge_coloring(comm_pairs):
     best_colors: dict[tuple[int, int], int] | None = None
     best_rounds = None
     for order in orders:
-        ec = _greedy_edge_coloring_ordered(comm_pairs, order)
+        ec = greedy_edge_coloring_ordered(comm_pairs, order)
         rounds = max(ec.values(), default=-1) + 1
         if best_rounds is None or rounds < best_rounds:
             best_rounds, best_colors = rounds, ec
@@ -1599,8 +1830,119 @@ def _multi_ordering_edge_coloring(comm_pairs):
     return best_colors, max_degree
 
 
+def _build_halo_send_maps(partitions, cell_owner, n_dev, cells_per,
+                          edges_per):
+    """Per-pair halo send/recv maps + the undirected comm-pair graph.
+
+    Shared by :func:`_build_ppermute_schedule` (coloured rounds) and
+    :func:`_build_ragged_halo_schedule` (one grouped collective) so the
+    two strategies exchange EXACTLY the same rows — the schedules differ
+    only in how the transfers are grouped into collectives.
+
+    Returns ``(comm_pairs, cell_send_map, cell_recv_map, edge_send_map,
+    edge_recv_map)`` where ``cell_send_map[(src, dst)]`` lists owned-
+    local indices in ``src`` to send and ``cell_recv_map[(dst, src)]``
+    the matching local positions in ``dst`` (same order), likewise for
+    edges.
+    """
+    from collections import defaultdict
+
+    halo_cells_from: dict[int, dict[int, list[int]]] = defaultdict(
+        lambda: defaultdict(list))
+    halo_edges_from: dict[int, dict[int, list[int]]] = defaultdict(
+        lambda: defaultdict(list))
+
+    for d, part in enumerate(partitions):
+        for h_idx in range(part.n_owned_cells, part.n_local_cells):
+            g = int(part.local_cells[h_idx])
+            owner = int(cell_owner[g])
+            halo_cells_from[d][owner].append(g)
+
+        for h_idx in range(part.n_owned_edges, part.n_local_edges):
+            g = int(part.local_edges[h_idx])
+            owner = min(g // edges_per, n_dev - 1)
+            halo_edges_from[d][owner].append(g)
+
+    comm_pairs: set[tuple[int, int]] = set()
+    for d in range(n_dev):
+        for d_prime in halo_cells_from[d]:
+            if d != d_prime:
+                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
+        for d_prime in halo_edges_from[d]:
+            if d != d_prime:
+                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
+
+    cell_send_map: dict[tuple[int, int], list[int]] = {}
+    cell_recv_map: dict[tuple[int, int], list[int]] = {}
+    edge_send_map: dict[tuple[int, int], list[int]] = {}
+    edge_recv_map: dict[tuple[int, int], list[int]] = {}
+
+    for d in range(n_dev):
+        for d_prime, cells_g in halo_cells_from[d].items():
+            if d_prime == d:
+                continue
+            cell_send_map[(d_prime, d)] = [
+                g - d_prime * cells_per for g in cells_g]
+            cell_recv_map[(d, d_prime)] = [
+                int(partitions[d].cell_g2l[g]) for g in cells_g]
+
+        for d_prime, edges_g in halo_edges_from[d].items():
+            if d_prime == d:
+                continue
+            edge_send_map[(d_prime, d)] = [
+                g - d_prime * edges_per for g in edges_g]
+            edge_recv_map[(d, d_prime)] = [
+                int(partitions[d].edge_g2l[g]) for g in edges_g]
+
+    return comm_pairs, cell_send_map, cell_recv_map, edge_send_map, \
+        edge_recv_map
+
+
+def _resolve_size_coloring(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_SIZE_COLORING: '1'/'' on (DEFAULT), '0' off.
+
+    DEFAULT ON since the s9@64 production A/B/A2 (job 26857404, drift
+    1.7%): ratio 0.803 — 10.2 -> 8.11 ms/step from the padded-byte cut
+    alone, matching the node-NIC-saturation model's prediction. Results
+    are bit-identical to the legacy colouring (transfers/scatters are
+    row-disjoint; only wire grouping changes), so the escape hatch '0'
+    exists for schedule-reproduction runs, not for numerics.
+
+    Size-aware colouring keeps the SAME round count but groups
+    similar-payload pairs into the same round, cutting the padded/actual
+    byte inflation (measured 2.926x at s9@64, job 26855933 — every pair
+    in a round ships the round MAXIMUM because the ppermute index
+    arrays are shape-uniform across devices). Transfers and results are
+    bit-identical (unpack scatters write disjoint rows); only the wire
+    grouping changes. Unknown values raise (dispatch hardening)."""
+    if env_value == "0":
+        return False
+    if env_value in ("1", ""):
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_SIZE_COLORING={env_value!r}: must be '0' or '1' "
+        f"(empty = ON — the receipted default)")
+
+
+def _padded_weight(edge_colors, pair_w):
+    """Total padded wire weight of a colouring: per round, every pair
+    ships the round max (cells and edges tracked with equal weight —
+    their per-entity widths are nlev+2 vs nlev, near-equal)."""
+    from collections import defaultdict
+    rounds_c = defaultdict(int)
+    rounds_e = defaultdict(int)
+    counts = defaultdict(int)
+    for pair, color in edge_colors.items():
+        wc, we = pair_w[pair]
+        rounds_c[color] = max(rounds_c[color], wc)
+        rounds_e[color] = max(rounds_e[color], we)
+        counts[color] += 1
+    return sum(counts[r] * (rounds_c[r] + rounds_e[r]) for r in counts)
+
+
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
-                             edges_per, max_lc, max_le):
+                             edges_per, max_lc, max_le,
+                             cell_width: int = 1, edge_width: int = 1):
     """Build a ppermute-based halo exchange schedule.
 
     Instead of all-gathering the full state (O(N) communication),
@@ -1629,37 +1971,12 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
 
     import numpy as np
 
-    # ------------------------------------------------------------------
-    # 1. For each device pair, find which cells/edges cross the boundary
-    # ------------------------------------------------------------------
-    # halo_cells_from[d][d'] = global indices of d's halo cells owned by d'
-    halo_cells_from: dict[int, dict[int, list[int]]] = defaultdict(
-        lambda: defaultdict(list))
-    halo_edges_from: dict[int, dict[int, list[int]]] = defaultdict(
-        lambda: defaultdict(list))
-
-    for d, part in enumerate(partitions):
-        for h_idx in range(part.n_owned_cells, part.n_local_cells):
-            g = int(part.local_cells[h_idx])
-            owner = int(cell_owner[g])
-            halo_cells_from[d][owner].append(g)
-
-        for h_idx in range(part.n_owned_edges, part.n_local_edges):
-            g = int(part.local_edges[h_idx])
-            owner = min(g // edges_per, n_dev - 1)
-            halo_edges_from[d][owner].append(g)
-
-    # ------------------------------------------------------------------
-    # 2. Build undirected communication graph
-    # ------------------------------------------------------------------
-    comm_pairs: set[tuple[int, int]] = set()
-    for d in range(n_dev):
-        for d_prime in halo_cells_from[d]:
-            if d != d_prime:
-                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
-        for d_prime in halo_edges_from[d]:
-            if d != d_prime:
-                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
+    # Steps 1+2+4 (boundary discovery, comm graph, directed send/recv
+    # maps) live in the shared helper so the ragged schedule moves
+    # EXACTLY the same rows.
+    (comm_pairs, cell_send_map, cell_recv_map, edge_send_map,
+     edge_recv_map) = _build_halo_send_maps(
+        partitions, cell_owner, n_dev, cells_per, edges_per)
 
     if not comm_pairs:
         return {
@@ -1686,9 +2003,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     #    devices). It can never regress: the legacy sorted order is one of
     #    its candidates and it takes the min. Both are verified proper.
     # ------------------------------------------------------------------
-    greedy_colors = _greedy_edge_coloring(comm_pairs)
+    greedy_colors = greedy_edge_coloring(comm_pairs)
     n_rounds_greedy = max(greedy_colors.values()) + 1
-    multi_colors, max_degree = _multi_ordering_edge_coloring(comm_pairs)
+    multi_colors, max_degree = multi_ordering_edge_coloring(comm_pairs)
     n_rounds_multi = max(multi_colors.values()) + 1
     # Adopt the multi-start coloring ONLY when it STRICTLY reduces rounds;
     # on a tie keep the exact legacy sorted-greedy coloring so the produced
@@ -1701,6 +2018,127 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     else:
         edge_colors, n_rounds, coloring_method = (
             greedy_colors, n_rounds_greedy, "greedy")
+
+    # SIZE-AWARE colouring (opt-in): same round count, pairs grouped by
+    # payload size so the per-round max padding shrinks. Candidates =
+    # weight-descending first-fit + a few weight-jittered restarts;
+    # adopted only when the round count DOES NOT regress and the padded
+    # wire weight strictly improves.
+    import os as _os_sc
+    if _resolve_size_coloring(
+            _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "")):
+        import random as _random_sc
+        # Pair weights in TRUE relative units (codex review: an
+        # equal-weight proxy can rate a cell/edge trade as improving
+        # while actual bytes worsen — the packed widths are nlev+2 vs
+        # nlev). The factory threads the real widths; the default 1:1
+        # is the estimator's unit-free score.
+        pair_w = {}
+        for (u, v) in comm_pairs:
+            wc = max(len(cell_send_map.get((u, v), [])),
+                     len(cell_send_map.get((v, u), [])))
+            we = max(len(edge_send_map.get((u, v), [])),
+                     len(edge_send_map.get((v, u), [])))
+            pair_w[(u, v)] = (wc * cell_width, we * edge_width)
+        base_w = _padded_weight(edge_colors, pair_w)
+        # Seed candidates: payload-descending first-fit + jitters. These
+        # often overshoot the round budget on dense graphs (s9@64: every
+        # reorder blew past 11 rounds and the guard rejected them all,
+        # job 26856688) — so ALWAYS follow with a round-PRESERVING local
+        # search that moves pairs between existing rounds.
+        # FULL tie-break key (weight, then the pair itself): every
+        # multicontroller process must derive the IDENTICAL colouring
+        # independently, and a weight-only key leaves equal-weight order
+        # to set-iteration order.
+        edges_by_size = sorted(
+            comm_pairs,
+            key=lambda p: (-(pair_w[p][0] + pair_w[p][1]), p))
+        candidates = [edges_by_size]
+        for seed in (1, 2, 3):
+            jit = edges_by_size[:]
+            rng = _random_sc.Random(seed)
+            for i in range(0, len(jit) - 1, 2):
+                if rng.random() < 0.5:
+                    jit[i], jit[i + 1] = jit[i + 1], jit[i]
+            candidates.append(jit)
+        # +1-ROUND CANDIDATES admitted (2026-08-11): the cross-lane law
+        # (wide-halo 0.970, mixed-pad 0.983) prices an extra sequential
+        # collective at ~15 us marginal while the lane is BYTES-bound —
+        # so a colouring that spends one extra round to cut padded
+        # weight is a good trade. Admission bar at adoption below:
+        # equal rounds need ANY strict weight win; rounds+1 needs
+        # >= 10% below the best equal-rounds weight.
+        seeds = [dict(edge_colors)]
+        for order in candidates:
+            ec = greedy_edge_coloring_ordered(comm_pairs, order)
+            if max(ec.values(), default=-1) + 1 <= n_rounds + 1:
+                seeds.append(ec)
+
+        def _local_search(ec):
+            """Move pairs between existing rounds (endpoint-conflict
+            free) while the padded weight strictly drops."""
+            from collections import defaultdict
+            colors = dict(ec)
+            n_r = max(colors.values()) + 1
+            occupied = defaultdict(set)   # round -> endpoint set
+            members = defaultdict(list)
+            for p, c in colors.items():
+                occupied[c].update(p)
+                members[c].append(p)
+            improved = True
+            while improved:
+                improved = False
+                w_now = _padded_weight(colors, pair_w)
+                for p in sorted(colors, key=lambda q:
+                                (-(pair_w[q][0] + pair_w[q][1]), q)):
+                    c0 = colors[p]
+                    for c1 in range(n_r):
+                        if c1 == c0 or (occupied[c1] & set(p)):
+                            continue
+                        colors[p] = c1
+                        w_try = _padded_weight(colors, pair_w)
+                        if w_try < w_now:
+                            occupied[c0] = set(
+                                x for q in members[c0] if q != p for x in q)
+                            members[c0].remove(p)
+                            members[c1].append(p)
+                            occupied[c1].update(p)
+                            w_now = w_try
+                            improved = True
+                            break
+                        colors[p] = c0
+            return colors
+
+        best_w, best_ec = base_w, None          # equal-rounds champion
+        plus_w, plus_ec = None, None            # rounds+1 champion
+        for seed_ec in seeds:
+            ec = _local_search(seed_ec)
+            if not _check_proper_edge_coloring(ec, comm_pairs):
+                continue
+            r = max(ec.values(), default=-1) + 1
+            if r > n_rounds + 1:
+                continue
+            w = _padded_weight(ec, pair_w)
+            if r <= n_rounds:
+                if w < best_w:
+                    best_w, best_ec = w, ec
+            else:
+                if plus_w is None or w < plus_w:
+                    plus_w, plus_ec = w, ec
+        if plus_ec is not None and plus_w < 0.90 * best_w:
+            best_w, best_ec = plus_w, plus_ec
+        if best_ec is not None:
+            edge_colors = best_ec
+            n_rounds = max(edge_colors.values()) + 1
+            coloring_method = "size_aware"
+            logger.info(
+                "  size-aware colouring adopted: padded weight %d -> %d "
+                "(-%.0f%%), rounds %d", base_w, best_w,
+                100 * (1 - best_w / max(base_w, 1)), n_rounds)
+        else:
+            logger.info(
+                "  size-aware colouring found no improvement "
+                "(padded weight %d)", base_w)
     assert _check_proper_edge_coloring(edge_colors, comm_pairs), (
         "improper ppermute edge coloring — two same-round exchanges "
         "would collide at a device")
@@ -1709,35 +2147,8 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         rounds[color].append((u, v))
 
     # ------------------------------------------------------------------
-    # 4. Build directed send/recv maps for each device pair
-    # ------------------------------------------------------------------
-    # cell_send_map[(src, dst)] = list of owned-local indices in src to send
-    # cell_recv_map[(dst, src)] = list of local positions in dst to place data
-    cell_send_map: dict[tuple[int, int], list[int]] = {}
-    cell_recv_map: dict[tuple[int, int], list[int]] = {}
-    edge_send_map: dict[tuple[int, int], list[int]] = {}
-    edge_recv_map: dict[tuple[int, int], list[int]] = {}
-
-    for d in range(n_dev):
-        for d_prime, cells_g in halo_cells_from[d].items():
-            if d_prime == d:
-                continue
-            # d_prime sends its owned cells that d needs as halo
-            cell_send_map[(d_prime, d)] = [
-                g - d_prime * cells_per for g in cells_g]
-            cell_recv_map[(d, d_prime)] = [
-                int(partitions[d].cell_g2l[g]) for g in cells_g]
-
-        for d_prime, edges_g in halo_edges_from[d].items():
-            if d_prime == d:
-                continue
-            edge_send_map[(d_prime, d)] = [
-                g - d_prime * edges_per for g in edges_g]
-            edge_recv_map[(d, d_prime)] = [
-                int(partitions[d].edge_g2l[g]) for g in edges_g]
-
-    # ------------------------------------------------------------------
     # 5. Assemble per-round ppermute patterns and index arrays
+    #    (the directed send/recv maps come from _build_halo_send_maps)
     # ------------------------------------------------------------------
     ppermute_perms_out: list[list[tuple[int, int]]] = []
     send_cell_idx_out: list[jnp.ndarray] = []
@@ -1925,6 +2336,8 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
     Returns ``(cell_local, u_local)`` of shapes ``(max_lc, W)`` /
     ``(max_le, nlev)``; ghost tail rows stay zero.
     """
+    import os as _os_ballast
+
     cells_per = cell_pack.shape[0]
     edges_per = u_shard.shape[0]
     # +1 garbage slot for padded scatter targets (trimmed at the end):
@@ -1933,18 +2346,446 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
     cell_local = jnp.pad(cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)))
     u_local = jnp.pad(u_shard, ((0, max_le + 1 - edges_per), (0, 0)))
 
+    ballast = _resolve_halo_ballast(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
+    nocomm = _resolve_halo_nocomm(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOCOMM", ""))
+    nostage = _resolve_halo_nostage(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOSTAGE", ""))
+
+    if nostage:
+        # MEASUREMENT ONLY, WRONG ANSWERS: skip the whole per-round loop,
+        # leaving the halo rows at their padded initial values. The
+        # kernel, the local region, the masking and every other line of
+        # the step are unchanged, so (nocomm - nostage) is the cost of
+        # the on-device halo staging -- gather, concatenate, scatter --
+        # measured against the SAME program.
+        #
+        # Why this is needed: the obvious control, the same per-device
+        # load on ONE device, is NOT the same program.
+        # make_voronoi_sharded_step returns the plain serial model.step
+        # at n_devices == 1, so that arm cannot be subtracted from a
+        # sharded one. Found by codex review after exactly that
+        # subtraction had been reported.
+        return cell_local[:max_lc], u_local[:max_le]
+
     for r, (sc, rc, se, re) in enumerate(halo_sl):
         send_c = cell_pack[sc[0]]             # (hc_r, W)
         send_e = u_shard[se[0]]               # (he_r, nlev)
         send_c_flat = send_c.ravel()
         send_packed = jnp.concatenate([send_c_flat, send_e.ravel()])
-        recv_packed = jax.lax.ppermute(
-            send_packed, "device", perm=ppermute_perms[r])
+        if ballast > 1:
+            # MEASUREMENT ONLY: multiply the bytes on the wire by
+            # `ballast` while holding the round count, the schedule and
+            # every arithmetic operation fixed, then discard the copies
+            # on receipt. This is the one-variable experiment for the
+            # bandwidth term of the exchange -- fitting it out of three
+            # A/B receipts leaves it resting on a compute time imported
+            # from an older trace. Result is bit-identical: the kept
+            # slice is the same buffer that would have been sent.
+            send_packed = jnp.concatenate([send_packed] * ballast)
+        if nocomm:
+            # MEASUREMENT ONLY, and it produces WRONG ANSWERS: drop the
+            # collective and let each device scatter its OWN gathered
+            # rows into its halo slots. Everything else -- the gather,
+            # the concatenate, the scatter, the schedule shape, the
+            # kernel count -- is unchanged, so the step's change is the
+            # wire time plus whatever waiting for the slowest peer
+            # costs. Splitting that pair off is the only way to see how
+            # much of the step is on-device halo staging rather than
+            # communication.
+            # optimization_barrier keeps the send-side pack alive.
+            # Without it `recv_packed[:split]` is a slice of the
+            # concatenate, XLA folds it back to the operand, and the arm
+            # silently drops one concatenate and one fusion per round --
+            # measured 21 -> 18 concatenates, 110 -> 107 fusions at 4
+            # devices. That made the arm time a slightly different
+            # program, so its two terms were bounds rather than
+            # estimates.
+            recv_packed = jax.lax.optimization_barrier(send_packed)
+        else:
+            recv_packed = jax.lax.ppermute(
+                send_packed, "device", perm=ppermute_perms[r])
         split_at = send_c_flat.shape[0]       # static
         recv_c = recv_packed[:split_at].reshape(send_c.shape)
-        recv_e = recv_packed[split_at:].reshape(send_e.shape)
+        recv_e = recv_packed[split_at:split_at + send_e.size].reshape(
+            send_e.shape)
         cell_local = cell_local.at[rc[0]].set(recv_c)
         u_local = u_local.at[re[0]].set(recv_e)
+
+    return cell_local[:max_lc], u_local[:max_le]
+
+
+#: Canonical decimal integer, no sign / whitespace / underscores /
+#: leading zeros — the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_halo_nocomm(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_NOCOMM: ``'1'`` replaces every halo
+    ``ppermute`` with the identity; ``''``/``'0'`` off (default).
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- each
+    device scatters its own rows into its halo slots, so the halo is
+    garbage and the run is meaningless as physics. It exists to time
+    the on-device halo staging (gather, concatenate, scatter) and the
+    enlarged local region SEPARATELY from the wire time and the wait
+    for the slowest peer, which is otherwise unsplittable: the profiler
+    on this stack does not record the halo collectives at all.
+
+    Never valid in production. Unknown values raise (dispatch
+    hardening).
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_NOCOMM={env_value!r}: must be '0' or '1' "
+        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
+
+
+def _resolve_halo_nostage(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_NOSTAGE: ``'1'`` skips the entire
+    per-round halo staging loop; ``''``/``'0'`` off (default).
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- the halo
+    rows keep their padded initial values. It exists so the staging cost
+    (gather, concatenate, scatter) can be measured against the SAME
+    program: the kernel, the local region and the masking are unchanged.
+    The obvious alternative, the same per-device load on ONE device,
+    is NOT the same program -- ``make_voronoi_sharded_step`` returns the
+    plain serial ``model.step`` at ``n_devices == 1``.
+
+    Its own resolver rather than sharing LEGOESM_MPAS_HALO_NOCOMM's, so
+    a typo raises an error naming the variable the user actually set.
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_NOSTAGE={env_value!r}: must be '0' or '1' "
+        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
+
+
+def _resolve_halo_ballast(env_value: str) -> int:
+    """Resolve LEGOESM_MPAS_HALO_BALLAST: wire-payload multiplier for
+    the exchange, ``''``/``'1'`` = off (default).
+
+    A MEASUREMENT knob, never a production one. It repeats the packed
+    send buffer N times so the collective moves N x the bytes with the
+    SAME round count, the SAME schedule and the SAME arithmetic, and
+    throws the copies away on receipt. The step's change is then the
+    bandwidth term of the exchange, measured with one variable moved
+    instead of fitted out of three separate A/B receipts against a
+    compute time taken from an older trace.
+
+    Unknown or non-canonical values raise (dispatch hardening): a typo
+    must not silently run a different payload multiple.
+    """
+    if env_value in ("", "1"):
+        return 1
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={env_value!r}: must be a "
+            f"canonical decimal integer >= 1 (empty or '1' = off)")
+    n = int(env_value)
+    if not 1 <= n <= 8:
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={n}: out of range 1..8. It "
+            f"multiplies every halo message, so a large value runs the "
+            f"node out of memory rather than measuring anything.")
+    return n
+
+
+# Device-count ceiling for LEGOESM_MPAS_RAGGED_HALO=auto. Production A/B
+# receipts (drift-controlled): ratio ragged/coloured 0.686 @16 devices
+# (jobs 26822138/26824483), 0.735 @32 (26825520), 1.220 @64 (26824688);
+# the inversion is the unpruned zero-size-slice cost (~12 us/slice,
+# confirmed at fixed degree+payload by job 26825475). Raise only with a
+# new production A/B receipt above the current edge.
+_RAGGED_AUTO_MAX_NDEV = 32
+
+
+def _resolve_ragged_halo(env_value: str, n_dev: int) -> bool:
+    """Resolve LEGOESM_MPAS_RAGGED_HALO: '1' force-on, '0'/'' off,
+    'auto' = on iff ``n_dev <= _RAGGED_AUTO_MAX_NDEV`` (the receipted
+    win band). Unknown values raise (dispatch-hardening: a typo must
+    not silently pick a halo strategy)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    if env_value == "auto":
+        return n_dev <= _RAGGED_AUTO_MAX_NDEV
+    raise ValueError(
+        f"LEGOESM_MPAS_RAGGED_HALO={env_value!r}: must be one of "
+        f"'0', '1', 'auto' (empty = off)")
+
+
+#: Tendency evaluations per step for each ``dispatch_integrator`` name.
+#: Consumed by the wide-halo (communication-avoiding) step: halo depth =
+#: evals x SPMD_HALO_DEPTH, because SSP/RK stage validity shrinks by one
+#: tendency reach per evaluation (Shu-Osher shrinking-region argument).
+#: Grow-only alongside ``timestepping.dispatch._INTEGRATORS``; a name
+#: missing here refuses wide mode rather than guessing a depth.
+_INTEGRATOR_TENDENCY_EVALS = {
+    "ssp_rk3": 3, "ssp3": 3, "rk3": 3,
+    "ssp_rk3_scan": 3, "ssp3_scan": 3, "rk3_scan": 3,
+    "ssp_rk34": 4, "ssp34": 4, "rk34": 4,
+    "ssp_rk54": 5, "ssp54": 5, "ssp45": 5, "rk54": 5,
+    "ssp_rk54_scan": 5, "ssp54_scan": 5, "rk54_scan": 5,
+    "rk4": 4, "runge_kutta_4": 4,
+}
+
+
+#: Sentinel ring distance for local rows that are padding or outside the
+#: wide region — always beyond any mask threshold.
+_WIDE_RING_FAR = np.iinfo(np.int32).max
+
+
+def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
+                           halo_depth):
+    """Per-device ring distances for the wide-halo shrinking masks.
+
+    Returns ``(cell_ring, edge_ring)`` int32 arrays of shape
+    ``(n_dev, max_lc)`` / ``(n_dev, max_le)``:
+
+    * ``cell_ring[d, i]`` — BFS ring of device *d*'s i-th local cell
+      from its owned block (0 = owned), ``_WIDE_RING_FAR`` for padding.
+    * ``edge_ring[d, j]`` — max of the two adjacent cells' rings
+      (an edge is in the depth-``r`` region iff BOTH its cells are —
+      the same AND filter ``_build_voronoi_partition_infra`` applies),
+      ``_WIDE_RING_FAR`` when a cell is absent or the row is padding.
+      Owned edges are overridden inside the kernel (first
+      ``edges_per`` rows), not here.
+
+    The eval-k mask keeps entities with ring <= ``(evals-k) *
+    SPMD_HALO_DEPTH`` (plus all owned rows): outside that region the
+    stage values are frozen (zero tendency) so every primal stays
+    finite — an unmasked wide step lets garbage outer-ring values turn
+    zero cotangents into NaN through the chain rule (0 * NaN), which
+    the fill transpose then scatter-adds into owned gradients.
+    """
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    n_dev = len(partitions)
+    nCells = coc.shape[1]
+    cell_ring = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_ring = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    # cellsOnCell BFS from the owned cell block — the metric the GPU
+    # parity gate certified (job 26846337, s6@4, u atol 1e-6).  A
+    # union-graph metric seeded from owned cells+edges was tried for
+    # codex P1 (closure cells left FAR) and REVERTED: shrinking the
+    # ring distances enlarges every keep-set, and the s6@4 GPU parity
+    # gate FAILED on u at 4e-2 (job 26849483) — the extra kept cells
+    # compute tendencies on locally-incomplete connectivity that the
+    # freeze was protecting against.  Residual (documented, empirically
+    # bounded by the parity gate): cells the partition closure adds
+    # beyond the cellsOnCell k-ring stay FAR and their stage values
+    # frozen; the count is logged per rank below.
+    for d, part in enumerate(partitions):
+        g2l = part.cell_g2l
+        n_owned = part.n_owned_cells
+        n_local = part.n_local_cells
+        ring_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
+        ring_l[:n_owned] = 0
+        frontier = np.asarray(part.local_cells[:n_owned])
+        seen = np.zeros(nCells, dtype=bool)
+        seen[frontier] = True
+        for r in range(1, halo_depth + 1):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~seen[nb]]
+            seen[nb] = True
+            lidx = g2l[nb]
+            nb_local = lidx[lidx >= 0]
+            ring_l[nb_local] = r
+            frontier = nb
+        n_unlabelled = int((ring_l[:n_local] == _WIDE_RING_FAR).sum())
+        if n_unlabelled:
+            logger.info(
+                "wide halo: rank %d keeps %d closure-added local cells "
+                "FROZEN (unlabelled by the cellsOnCell ring BFS); the "
+                "s6@4 GPU parity gate is the guard that this freeze "
+                "does not reach owned results.", d, n_unlabelled)
+        cell_ring[d] = ring_l.astype(np.int32)
+
+        le = np.asarray(part.local_edges)
+        c12 = coe[:, le]                          # (2, n_local_edges)
+        r12 = np.full_like(c12, _WIDE_RING_FAR, dtype=np.int64)
+        for side in range(2):
+            cs = c12[side]
+            valid = cs >= 0
+            lidx = np.full(cs.shape, -1, dtype=np.int64)
+            lidx[valid] = g2l[cs[valid]]
+            present = lidx >= 0
+            r12[side, present] = ring_l[lidx[present]]
+        edge_ring[d, :le.shape[0]] = np.max(
+            r12, axis=0).astype(np.int32)
+
+    return cell_ring, edge_ring
+
+
+def _resolve_wide_halo(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
+
+    Wide halo = communication-avoiding step: ONE halo fill per model
+    step at depth ``evals x SPMD_HALO_DEPTH`` instead of one depth-3
+    fill per tendency evaluation.  Unknown values raise
+    (dispatch-hardening, same contract as LEGOESM_MPAS_RAGGED_HALO)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_WIDE_HALO={env_value!r}: must be '0' or '1' "
+        f"(empty = off)")
+
+
+def _build_ragged_halo_schedule(partitions, cell_owner, n_dev, cells_per,
+                                edges_per, max_lc, max_le):
+    """One-collective halo schedule for ``jax.lax.ragged_all_to_all``.
+
+    Consumes the SAME directed send/recv maps as the coloured ppermute
+    schedule (:func:`_build_halo_send_maps`), so both strategies move
+    identical rows; this one groups every neighbour transfer into ONE
+    ``ragged_all_to_all`` per entity class (cells, edges) instead of
+    ``max_degree`` sequential rounds. Receipt: the microbench
+    (bench_halo_collectives, job 26818265) measured 0.475x the coloured
+    schedule's per-fill time at 16 GPUs, with the advantage growing
+    with device count.
+
+    Layout per device ``d`` (all arrays stacked on a leading device
+    axis so they shard as ``P("device")`` args):
+
+    * send buffer: per-destination blocks, destinations ascending;
+      ``c_send_idx[d]`` gathers owned-local rows into that order
+      (padded with 0 — pad rows are never referenced by the offsets).
+    * ``c_in_off[d, i]`` / ``c_send_sz[d, i]``: slice of MY send buffer
+      going to device ``i`` (zero-size for non-neighbours).
+    * receive staging: per-SOURCE blocks, sources ascending;
+      ``c_out_off[d, i]`` is where MY slice lands on receiver ``i``
+      (ragged_all_to_all's sender-chosen receiver offset), and
+      ``c_recv_sz[d, i]`` the rows I receive from ``i``.
+    * ``c_recv_pos[d]``: staging row -> local halo position, padded
+      with the ``max_lc`` garbage slot (trimmed by the caller), so the
+      staging scatter mirrors the ppermute path's pad-target pattern.
+
+    Offsets/sizes are int32 (the GPU custom call rejects int64) and
+    row counts are padded to the global maxima so the stacked arrays
+    are rectangular.
+    """
+    import numpy as np
+
+    (comm_pairs, cell_send_map, cell_recv_map, edge_send_map,
+     edge_recv_map) = _build_halo_send_maps(
+        partitions, cell_owner, n_dev, cells_per, edges_per)
+
+    def build_entity(send_map, recv_map, garbage_slot):
+        send_counts = np.zeros((n_dev, n_dev), np.int64)
+        for (src, dst), rows in send_map.items():
+            send_counts[src, dst] = len(rows)
+        s_tot = send_counts.sum(axis=1)
+        r_tot = send_counts.sum(axis=0)
+        s_max = max(int(s_tot.max()), 1)
+        r_max = max(int(r_tot.max()), 1)
+
+        send_idx = np.zeros((n_dev, s_max), np.int64)
+        in_off = np.zeros((n_dev, n_dev), np.int32)
+        send_sz = np.zeros((n_dev, n_dev), np.int32)
+        out_off = np.zeros((n_dev, n_dev), np.int32)
+        recv_sz = np.zeros((n_dev, n_dev), np.int32)
+        recv_pos = np.full((n_dev, r_max), garbage_slot, np.int64)
+
+        # Receiver staging offsets: per-source blocks, sources ascending
+        stage_off = np.zeros((n_dev, n_dev), np.int64)
+        for d in range(n_dev):
+            off = 0
+            for src in range(n_dev):
+                if send_counts[src, d]:
+                    stage_off[d, src] = off
+                    off += send_counts[src, d]
+
+        for d in range(n_dev):
+            off = 0
+            for dst in range(n_dev):
+                n = int(send_counts[d, dst])
+                if n == 0:
+                    continue
+                send_idx[d, off:off + n] = send_map[(d, dst)]
+                in_off[d, dst] = off
+                send_sz[d, dst] = n
+                out_off[d, dst] = stage_off[dst, d]
+                off += n
+            for src in range(n_dev):
+                n = int(send_counts[src, d])
+                if n == 0:
+                    continue
+                recv_sz[d, src] = n
+                so = int(stage_off[d, src])
+                recv_pos[d, so:so + n] = recv_map[(d, src)]
+
+        # ragged_all_to_all contract: what I send to i == what i
+        # receives from me.
+        assert (send_sz == recv_sz.T).all(), "ragged size contract broken"
+        return {
+            "send_idx": send_idx, "in_off": in_off, "send_sz": send_sz,
+            "out_off": out_off, "recv_sz": recv_sz, "recv_pos": recv_pos,
+            "s_max": s_max, "r_max": r_max,
+        }
+
+    cells = build_entity(cell_send_map, cell_recv_map, max_lc)
+    edges = build_entity(edge_send_map, edge_recv_map, max_le)
+    return {"cells": cells, "edges": edges,
+            "n_pairs": len(comm_pairs)}
+
+
+def _ragged_halo_fill(cell_pack, u_shard, ragged_sl, max_lc, max_le):
+    """Fill (owned + halo) local buffers via ONE ragged_all_to_all per
+    entity class (cells, edges) — the grouped-P2P replacement for the
+    sequential coloured rounds of :func:`_ppermute_halo_fill`.
+
+    Runs INSIDE ``shard_map``. ``ragged_sl`` is the per-device
+    ``P("device")`` slice (leading axis 1) of the stacked
+    :func:`_build_ragged_halo_schedule` arrays, ordered
+    ``(c_send_idx, c_in_off, c_send_sz, c_out_off, c_recv_sz,
+    c_recv_pos, e_send_idx, e_in_off, e_send_sz, e_out_off, e_recv_sz,
+    e_recv_pos)``. Same garbage-slot contract as the ppermute path:
+    padded staging rows scatter to row ``max_lc`` / ``max_le`` and are
+    trimmed on return.
+    """
+    (c_send_idx, c_in_off, c_send_sz, c_out_off, c_recv_sz, c_recv_pos,
+     e_send_idx, e_in_off, e_send_sz, e_out_off, e_recv_sz,
+     e_recv_pos) = ragged_sl
+
+    cells_per = cell_pack.shape[0]
+    edges_per = u_shard.shape[0]
+    cell_local = jnp.pad(cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)))
+    u_local = jnp.pad(u_shard, ((0, max_le + 1 - edges_per), (0, 0)))
+
+    send_c = cell_pack[c_send_idx[0]]
+    stag_c = jnp.zeros((c_recv_pos.shape[1], cell_pack.shape[1]),
+                       cell_pack.dtype)
+    recv_c = jax.lax.ragged_all_to_all(
+        send_c, stag_c, c_in_off[0], c_send_sz[0], c_out_off[0],
+        c_recv_sz[0], axis_name="device")
+    cell_local = cell_local.at[c_recv_pos[0]].set(recv_c)
+
+    send_e = u_shard[e_send_idx[0]]
+    stag_e = jnp.zeros((e_recv_pos.shape[1], u_shard.shape[1]),
+                       u_shard.dtype)
+    recv_e = jax.lax.ragged_all_to_all(
+        send_e, stag_e, e_in_off[0], e_send_sz[0], e_out_off[0],
+        e_recv_sz[0], axis_name="device")
+    u_local = u_local.at[e_recv_pos[0]].set(recv_e)
 
     return cell_local[:max_lc], u_local[:max_le]
 
@@ -2116,12 +2957,63 @@ def make_voronoi_sharded_step(
             )
 
     # ------------------------------------------------------------------
+    # Wide-halo (communication-avoiding) mode: ONE fill per step at
+    # depth evals x SPMD_HALO_DEPTH, whole RK body inside shard_map.
+    # Opt-in via LEGOESM_MPAS_WIDE_HALO=1; default OFF = every existing
+    # configuration byte-identical.  Motivation (campaign 2026-08-10):
+    # the lane is bound by sequential-collective count x ~155-310 us
+    # latency floor; s9@64 runs 11 coloured rounds x 3 RK3 fills = 33
+    # collectives/step, and the depth-9 comm graph colours to the SAME
+    # 11 rounds (job 26845329) with only +17% local extents — so one
+    # wide fill cuts 33 -> 11 sequential collectives at ~ +17% payload.
+    # ------------------------------------------------------------------
+    import os as _os_wide
+    # Validate the ballast knob HERE, not only where it is consumed: it
+    # is read inside the ppermute fill, so with an allgather or ragged
+    # halo both a typo and a deliberate N>1 would be silently ignored
+    # and the run would quietly measure nothing (codex).
+    import os as _os_bal
+    _bal = _resolve_halo_ballast(
+        _os_bal.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
+    if _bal > 1 and halo_strategy not in ("auto", "ppermute"):
+        raise ValueError(
+            f"LEGOESM_MPAS_HALO_BALLAST={_bal} is only implemented for "
+            f"the coloured ppermute exchange, but halo_strategy="
+            f"{halo_strategy!r} was requested. The run would move the "
+            f"unmodified payload and the measurement would be null.")
+
+    use_wide_halo = _resolve_wide_halo(
+        _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO", "0"))
+    if use_wide_halo:
+        _integ_name = str(cfg.time_integrator).lower()
+        if _integ_name.endswith("_scan"):
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO=1: time_integrator="
+                f"{cfg.time_integrator!r} folds its stages into one "
+                f"lax.scan body, so the per-evaluation shrinking masks "
+                f"cannot be threaded by trace-time call order. Use the "
+                f"unrolled spelling (e.g. 'ssp_rk3') with wide halo.")
+        _wide_evals = _INTEGRATOR_TENDENCY_EVALS.get(_integ_name)
+        if _wide_evals is None:
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO=1: time_integrator="
+                f"{cfg.time_integrator!r} has no entry in "
+                f"_INTEGRATOR_TENDENCY_EVALS, so the required halo depth "
+                f"is unknown. Add the evals count (and its shrinking-"
+                f"region justification) before enabling wide halo.")
+        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_evals
+    else:
+        _wide_evals = None
+        _halo_depth_eff = SPMD_HALO_DEPTH
+
+    # ------------------------------------------------------------------
     # Setup: build per-device local meshes and gather indices
     # ------------------------------------------------------------------
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
-        "(nCells=%d, nEdges=%d, halo_depth=3, strategy=%s) ...",
-        n_dev, nCells, nEdges, halo_strategy,
+        "(nCells=%d, nEdges=%d, halo_depth=%d, strategy=%s%s) ...",
+        n_dev, nCells, nEdges, _halo_depth_eff, halo_strategy,
+        ", WIDE HALO (1 fill/step)" if use_wide_halo else "",
     )
     t0 = time.time()
     (
@@ -2134,7 +3026,8 @@ def make_voronoi_sharded_step(
         max_le,
         partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
         cell_owner_out,   # np.ndarray (nCells,) cell ownership
-    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=3)
+    ) = _build_voronoi_partition_infra(global_mesh, n_dev,
+                                       halo_depth=_halo_depth_eff)
     logger.info(
         "  partition setup done in %.2fs  "
         "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",
@@ -2156,6 +3049,19 @@ def make_voronoi_sharded_step(
         stacked_meshes,
     )
 
+    # Wide-halo shrinking-mask ring distances (P("device")-sharded jit
+    # ARGUMENTS like the meshes/schedules — sharded closure constants
+    # raise under multi-controller).  Empty tuple when off.
+    if use_wide_halo:
+        _cr_np, _er_np = _build_wide_halo_rings(
+            global_mesh, partitions_out, max_lc, max_le, _halo_depth_eff)
+        wide_args = (
+            multiprocess_safe_device_put(_cr_np, dev_sharding),
+            multiprocess_safe_device_put(_er_np, dev_sharding),
+        )
+    else:
+        wide_args = ()
+
     nlev = model.sigma_coord.n_levels
 
     # ------------------------------------------------------------------
@@ -2163,13 +3069,52 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
 
     use_ppermute = halo_strategy == "ppermute"
+    # Grouped-P2P variant of the ppermute strategy: ONE ragged_all_to_all
+    # per entity class instead of max_degree sequential coloured rounds.
+    # SCALE-BANDED (production A/B receipts, campaign doc 2026-08-09):
+    # ratio ragged/coloured 0.686 @16 devices, 0.735 @32, 1.220 @64 —
+    # the ragged collective pays ~12 us per ZERO-SIZE slice (unpruned
+    # no-op sends grow with device count at fixed traffic). Hence
+    # "auto" = ragged only up to _RAGGED_AUTO_MAX_NDEV.
+    # GPU-only: XLA:CPU has no ragged-all-to-all thunk.
+    import os as _os_ragged
+    # VALIDATION IS DELIBERATELY UNCONDITIONAL (breaking contract,
+    # accepted 2026-08-09, env var is one day old): an invalid value
+    # raises even when the resolved strategy is allgather and ragged is
+    # unreachable — a typo must never silently pick a halo strategy on
+    # the NEXT run where ppermute IS selected. (Single-device runs
+    # early-return above and never see this; they have no halo.)
+    use_ragged = _resolve_ragged_halo(
+        _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0"),
+        n_dev) and use_ppermute
 
-    if use_ppermute:
+    if use_ragged:
+        t1 = time.time()
+        rg_sched = _build_ragged_halo_schedule(
+            partitions_out, cell_owner_out, n_dev,
+            cells_per, edges_per, max_lc, max_le,
+        )
+        halo_args = tuple(
+            multiprocess_safe_device_put(rg_sched[ent][key], dev_sharding)
+            for ent in ("cells", "edges")
+            for key in ("send_idx", "in_off", "send_sz", "out_off",
+                        "recv_sz", "recv_pos")
+        )
+        logger.info(
+            "  ragged halo schedule: 2 collectives/fill over %d comm "
+            "pairs (send rows/dev max: cells %d, edges %d) — "
+            "LEGOESM_MPAS_RAGGED_HALO=1",
+            rg_sched["n_pairs"], rg_sched["cells"]["s_max"],
+            rg_sched["edges"]["s_max"])
+        logger.info("  ragged halo schedule built in %.3fs",
+                    time.time() - t1)
+    elif use_ppermute:
         # Build ppermute schedule: neighbor-only halo exchange
         t1 = time.time()
         pp_sched = _build_ppermute_schedule(
             partitions_out, cell_owner_out, n_dev,
             cells_per, edges_per, max_lc, max_le,
+            cell_width=nlev + 2, edge_width=nlev,
         )
         n_rounds = pp_sched['n_rounds']
         ppermute_perms = pp_sched['ppermute_perms']
@@ -2250,7 +3195,11 @@ def make_voronoi_sharded_step(
             cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
                                          q_shard)
 
-            if use_ppermute:
+            if use_ragged:
+                cell_local, u_local = _ragged_halo_fill(
+                    cell_pack, u_shard, halo_sl, max_lc, max_le,
+                )
+            elif use_ppermute:
                 cell_local, u_local = _ppermute_halo_fill(
                     cell_pack, u_shard, halo_sl, ppermute_perms,
                     max_lc, max_le,
@@ -2337,6 +3286,171 @@ def make_voronoi_sharded_step(
         return fn
 
     # ------------------------------------------------------------------
+    # WIDE-HALO kernel: ONE packed fill at depth evals x SPMD_HALO_DEPTH,
+    # then the whole RK body on the local region with no further
+    # exchange.  Validity shrinks by one tendency reach
+    # (SPMD_HALO_DEPTH rings) per evaluation — the Shu-Osher
+    # shrinking-region argument — so after the last of N evaluations the
+    # state is valid exactly on the owned cells this kernel returns.
+    # Outer rings hold progressively stale/garbage values that are
+    # sliced away; they cannot reach an owned cell because one tendency
+    # reads at most SPMD_HALO_DEPTH rings.  The stage arithmetic on
+    # owned cells is the SAME dispatch_integrator arithmetic the
+    # per-fill path runs outside shard_map, on bitwise-identical inputs
+    # (halo copies of the previous step's owner values).
+    # ------------------------------------------------------------------
+
+    def _make_local_wide_step(tkeys: tuple):
+
+        def _local_wide_step(u_shard, T_shard, ps_shard, phis_shard,
+                             q_shard, dt_val, mesh_sl, halo_sl, wide_sl):
+            cell_ring = wide_sl[0][0]     # (max_lc,) int32
+            edge_ring = wide_sl[1][0]     # (max_le,) int32
+            _owned_c = jnp.arange(max_lc) < cells_per
+            _owned_e = jnp.arange(max_le) < edges_per
+            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
+                                         q_shard)
+            if use_ragged:
+                cell_local, u_local = _ragged_halo_fill(
+                    cell_pack, u_shard, halo_sl, max_lc, max_le,
+                )
+            elif use_ppermute:
+                cell_local, u_local = _ppermute_halo_fill(
+                    cell_pack, u_shard, halo_sl, ppermute_perms,
+                    max_lc, max_le,
+                )
+            else:
+                cell_full = jax.lax.all_gather(
+                    cell_pack, "device", axis=0, tiled=True)
+                u_full = jax.lax.all_gather(
+                    u_shard, "device", axis=0, tiled=True)
+                gc, ge = halo_sl
+                cell_local = cell_full[gc[0]]
+                u_local = u_full[ge[0]]
+
+            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                cell_local, nlev)
+            my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
+
+            tracers_local = None
+            if tkeys:
+                tracers_local = {
+                    k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
+                             name=k, dims=("nCells", "nlev"),
+                             units="kg/kg", staggering="cell")
+                    for i, k in enumerate(tkeys)
+                }
+            local_state = MPASHydrostaticState(
+                u=Field(data=u_local, name="u",
+                        dims=("nEdges", "nlev"), units="m/s",
+                        long_name="normal velocity", staggering="edge"),
+                T=Field(data=T_local, name="T",
+                        dims=("nCells", "nlev"), units="K",
+                        long_name="temperature", staggering="cell"),
+                p_s=Field(data=ps_local, name="p_s",
+                          dims=("nCells",), units="Pa",
+                          long_name="surface pressure", staggering="cell"),
+                phis=Field(data=phis_local, name="phis",
+                           dims=("nCells",), units="m^2/s^2",
+                           long_name="surface geopotential",
+                           staggering="cell"),
+                tracers=tracers_local,
+            )
+
+            # Trace-time evaluation counter: the unrolled integrators
+            # call the tendency N times SEQUENTIALLY in Python during
+            # one trace, so the k-th call gets the k-th shrinking mask
+            # (the factory refuses *_scan integrators for exactly this
+            # reason).  Fresh per trace: the dict lives in this
+            # function's scope.
+            _eval_i = {"k": 0}
+
+            def _wide_tendency(s):
+                """Full-local-region tendencies, state-shaped (phis
+                rides a zero tendency; tracer ADVECTION under the same
+                keys) — the local-mesh mirror of ``dyn_tendency_fn``,
+                MASKED to the eval's shrinking valid region: entities
+                outside ring ``(evals - k) * SPMD_HALO_DEPTH`` get a
+                ZERO tendency, freezing their stage values at finite
+                fill values.  Their values are never read by a later
+                evaluation whose result reaches an owned cell (the
+                Shu-Osher shrinking-region argument), and the freeze
+                keeps every primal finite — unmasked garbage rings turn
+                zero cotangents into NaN (0 * NaN) which the fill
+                transpose scatter-adds into owned gradients."""
+                _eval_i["k"] += 1
+                thr = SPMD_HALO_DEPTH * (_wide_evals - _eval_i["k"])
+                keep_c = (_owned_c | (cell_ring <= thr))[:, None]
+                keep_e = (_owned_e | (edge_ring <= thr))[:, None]
+                tend = mpas_hydrostatic_tendencies(
+                    s, my_mesh, sigma, cfg, dt=dt_val,
+                )
+                tr_tend = None
+                if tkeys:
+                    tr_tend = {
+                        k: s.tracers[k].replace(
+                            data=jnp.where(
+                                keep_c,
+                                tend.tracer_tendencies[k].data, 0.0))
+                        for k in tkeys
+                    }
+                return MPASHydrostaticState(
+                    u=s.u.replace(
+                        data=jnp.where(keep_e, tend.du_dt.data, 0.0)),
+                    T=s.T.replace(
+                        data=jnp.where(keep_c, tend.dT_dt.data, 0.0)),
+                    p_s=s.p_s.replace(
+                        data=jnp.where(keep_c[:, 0],
+                                       tend.dp_s_dt.data, 0.0)),
+                    phis=s.phis.replace(
+                        data=jnp.zeros_like(s.phis.data)),
+                    v=s.v,
+                    tracers=tr_tend,
+                )
+
+            final = dispatch_integrator(
+                local_state, _wide_tendency, dt_val, cfg.time_integrator,
+            )
+            if _eval_i["k"] != _wide_evals:
+                raise AssertionError(
+                    f"wide halo: integrator {cfg.time_integrator!r} made "
+                    f"{_eval_i['k']} tendency evaluations, table says "
+                    f"{_wide_evals} — _INTEGRATOR_TENDENCY_EVALS is wrong "
+                    f"and the halo depth/masks with it.")
+
+            if tkeys:
+                q_owned = jnp.concatenate(
+                    [final.tracers[k].data for k in tkeys],
+                    axis=-1)[:cells_per]
+            else:
+                q_owned = jnp.zeros((cells_per, 0), dtype=T_shard.dtype)
+            return (final.u.data[:edges_per],
+                    final.T.data[:cells_per],
+                    final.p_s.data[:cells_per],
+                    q_owned)
+
+        return _local_wide_step
+
+    _shard_wide_cache: dict = {}
+
+    def _get_shard_wide_step(tkeys: tuple):
+        fn = _shard_wide_cache.get(tkeys)
+        if fn is None:
+            fn = shard_map(
+                _make_local_wide_step(tkeys),
+                mesh=jax_mesh,
+                in_specs=(P("device"), P("device"), P("device"),
+                          P("device"), P("device"), P(),
+                          mesh_in_specs, halo_in_specs,
+                          jax.tree.map(lambda _: P("device"), wide_args)),
+                out_specs=(P("device"), P("device"), P("device"),
+                           P("device")),
+                check_vma=False,
+            )
+            _shard_wide_cache[tkeys] = fn
+        return fn
+
+    # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
     if cfg.fix_mass:
@@ -2383,7 +3497,7 @@ def make_voronoi_sharded_step(
 
         @jax.jit
         def _step(state, dt, forcing, phys_state,
-                  mesh_arg, halo_arg, area_arg):
+                  mesh_arg, halo_arg, area_arg, wide_arg):
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
@@ -2443,9 +3557,34 @@ def make_voronoi_sharded_step(
             #        config.time_integrator via the SAME dispatch the
             #        serial step uses (the previous hard-coded SSP-RK3
             #        silently overrode e.g. the ssp_rk54_scan default).
-            state_new = dispatch_integrator(
-                state, dyn_tendency_fn, dt, cfg.time_integrator,
-            )
+            #        Wide-halo mode runs the SAME dispatch INSIDE
+            #        shard_map after one deep fill (see
+            #        _make_local_wide_step); default path unchanged.
+            if use_wide_halo:
+                u_new, T_new, ps_new, q_new = _get_shard_wide_step(tkeys)(
+                    state.u.data, state.T.data, state.p_s.data,
+                    state.phis.data, _pack_tracers(state), dt,
+                    mesh_arg, halo_arg, wide_arg,
+                )
+                tr_new = None
+                if state.tracers is not None:
+                    tr_new = {
+                        k: state.tracers[k].replace(
+                            data=q_new[..., i * nlev:(i + 1) * nlev])
+                        for i, k in enumerate(tkeys)
+                    }
+                state_new = MPASHydrostaticState(
+                    u=state.u.replace(data=u_new),
+                    T=state.T.replace(data=T_new),
+                    p_s=state.p_s.replace(data=ps_new),
+                    phis=state.phis,
+                    v=state.v,
+                    tracers=tr_new,
+                )
+            else:
+                state_new = dispatch_integrator(
+                    state, dyn_tendency_fn, dt, cfg.time_integrator,
+                )
 
             # --- 2. Operator-split physics (mirrors _step_jit): evaluate
             #     ONCE on the post-dynamics state and apply forward over
@@ -2580,7 +3719,7 @@ def make_voronoi_sharded_step(
             _step_cache[key] = fn
         state_new, phys_state_out = fn(
             state, dt, forcing, phys_state,
-            stacked_meshes, halo_args, _area_for_mass,
+            stacked_meshes, halo_args, _area_for_mass, wide_args,
         )
         if return_phys_state:
             return state_new, phys_state_out
@@ -2591,7 +3730,10 @@ def make_voronoi_sharded_step(
     # requested flag (codex M3c-2 MINOR; same pattern as kessler's
     # ``_bound_dt``).  Only multi-device steps carry it — the
     # single-device early return above hands back ``model.step``.
-    _voronoi_step._halo_strategy_effective = halo_strategy
+    _voronoi_step._halo_strategy_effective = (
+        "ppermute_ragged" if use_ragged else halo_strategy)
+    _voronoi_step._wide_halo_effective = use_wide_halo
+    _voronoi_step._halo_depth_effective = _halo_depth_eff
     return _voronoi_step
 
 

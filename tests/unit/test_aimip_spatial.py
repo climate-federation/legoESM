@@ -572,6 +572,11 @@ def test_aimip_nonspatial_rrtmgp_sfc_albedo_is_trainable():
             p, grid, dt=1800.0, radiation="rrtmgp",
             convection_scheme="none", turbulence_scheme="none",
             gwd_scheme="none", microphysics_scheme="none", cloud_scheme="none",
+            # RADIATION-ONLY probe: every other family is off on purpose so the
+            # gradient reaching the surface-albedo leaf can only have come
+            # through radiation. The completeness gate guards MODELS, not
+            # single-term probes, so it is waived explicitly here.
+            allow_unfilled_families=True,
         )
         out = fn(state, grid, sigma)
         return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
@@ -595,12 +600,24 @@ def test_spatial_baselines_from_params_maps_trained_scalars():
     from legoesm.training.aimip_spatial import _FIELD_SPECS
 
     d = AIMIPClassicalParams.from_defaults().as_dict()
-    for rad, prefix in (("rrtmgp", "rrtmgp"), ("gray", "gray")):
+    for rad in ("rrtmgp", "gray"):
         b = spatial_baselines_from_params(d, rad)
         # keys must EXACTLY match the spatial field names evaluate() looks up
         assert set(b) == set(_FIELD_SPECS), (set(b), set(_FIELD_SPECS))
         assert b["Cd_neutral"] is d["surface_Cd_neutral"]
         assert b["Ch_neutral"] is d["surface_Ch_neutral"]
         assert b["z0"] is d["surface_z0"]
-        assert b["sfc_albedo"] is d[f"{prefix}_sfc_albedo"]
-        assert b["sfc_emissivity"] is d[f"{prefix}_sfc_emissivity"]
+
+    # RRTMGP: the surface radiative baselines are the TRAINED scalars.
+    b_rrtmgp = spatial_baselines_from_params(d, "rrtmgp")
+    assert b_rrtmgp["sfc_albedo"] is d["rrtmgp_sfc_albedo"]
+    assert b_rrtmgp["sfc_emissivity"] is d["rrtmgp_sfc_emissivity"]
+
+    # Gray: no trained gray surface scalars exist since 2026-08-11 (gray is not
+    # trained), so the baselines fall back to the scheme's own defaults. The
+    # spatial FIELD on top of them is still learned.
+    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+    b_gray = spatial_baselines_from_params(d, "gray")
+    assert b_gray["sfc_albedo"] == GrayRadiationConfig().sfc_albedo
+    assert b_gray["sfc_emissivity"] == GrayRadiationConfig().sfc_emissivity
+    assert "gray_sfc_albedo" not in d

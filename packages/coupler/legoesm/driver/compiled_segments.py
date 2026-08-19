@@ -44,7 +44,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
@@ -1249,14 +1251,27 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     if statics.energy_consistent_moisture_clip:
         # Issue #323: keep the q_v floor moist-static-energy neutral by
         # removing the latent heat of the clipped (un-removed) vapour sink.
+        # KNOWN EXCEPTION to "conserving form always": this opt-in branch
+        # conserves MSE but CREATES the clipped vapour; a jointly water- and
+        # energy-conserving floor is a separate limiter (codex 2026-08-16).
         q_v_upd, T_upd = energy_consistent_moisture_floor(_qv_raw, T_upd)
     else:
-        q_v_upd = jnp.maximum(_qv_raw, 0.0)
-    q_c_upd = jnp.maximum(moist["q_c"] + statics.dt * phys_out.dq_c_dt, 0.0)
-    q_r_upd = jnp.maximum(moist["q_r"] + statics.dt * phys_out.dq_r_dt, 0.0)
+        # Conserving form always (owner decision 2026-08-16): column borrow,
+        # never the mass-creating plain max(q, 0). Pure-sigma lane: dsigma is
+        # the layer-mass weight up to the per-column p_s factor, which
+        # cancels in the rescale.
+        q_v_upd = conservative_positive_clip(
+            _qv_raw, statics.dsigma, axis=-1)[0]
+    q_c_upd = conservative_positive_clip(
+        moist["q_c"] + statics.dt * phys_out.dq_c_dt, statics.dsigma,
+        axis=-1)[0]
+    q_r_upd = conservative_positive_clip(
+        moist["q_r"] + statics.dt * phys_out.dq_r_dt, statics.dsigma,
+        axis=-1)[0]
     def _dm_upd(fld, tend):
         return (None if fld is None
-                else jnp.maximum(fld + statics.dt * tend, 0.0))
+                else conservative_positive_clip(
+                    fld + statics.dt * tend, statics.dsigma, axis=-1)[0])
     q_i_upd = _dm_upd(moist["q_i"], phys_out.dq_i_dt)
     q_s_upd = _dm_upd(moist["q_s"], phys_out.dq_s_dt)
     q_g_upd = _dm_upd(moist["q_g"], phys_out.dq_g_dt)
@@ -1904,10 +1919,11 @@ def build_segment_fn(
                 q_v_dyn = _adv["q_v"].data
                 q_c_dyn = _adv["q_c"].data
                 q_r_dyn = _adv["q_r"].data
-                # Tracers NOT in the advected set (per-volume N_c/N_r are
-                # intentionally excluded, #772 review) fall back to their carry
-                # value — i.e. they stay column-locked — NOT to None, which
-                # would drop the double-moment number fields on an opt-in run.
+                # Every water species advects since 2026-08-14 (all stored
+                # per mass, registry-driven), so for present fields this
+                # fallback is dead; it remains for OPTIONAL fields that are
+                # None on warm-rain runs — those must stay None, not be
+                # invented.
                 q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
                 q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
                 q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
@@ -2074,22 +2090,28 @@ def build_segment_fn(
                     _qv_owned, _T_owned = energy_consistent_moisture_floor(
                         _qv_raw, _T_owned)
                 else:
-                    _qv_owned = jnp.maximum(_qv_raw, 0.0)
+                    # Conserving form always (owner decision 2026-08-16):
+                    # column borrow on the owned subset (rows are whole
+                    # columns, so the borrow is rank-local and MPI-safe).
+                    _qv_owned = conservative_positive_clip(
+                        _qv_raw, dsigma, axis=-1)[0]
                 T_upd = T_new.at[_ofi].set(_T_owned)
                 q_v_upd = q_v_dyn.at[_ofi].set(_qv_owned)
-                q_c_upd = q_c_dyn.at[_ofi].set(
-                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
-                )
-                q_r_upd = q_r_dyn.at[_ofi].set(
-                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
-                )
+                q_c_upd = q_c_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, dsigma,
+                    axis=-1)[0])
+                q_r_upd = q_r_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, dsigma,
+                    axis=-1)[0])
                 # Double-moment tracers (None unless populated): evolve at owned
-                # indices from the matching microphysics tendencies, clipped
-                # non-negative like q_c/q_r.  Base = the (possibly advected)
-                # _dyn alias so non-owned faces keep dynamics-only values.
+                # indices from the matching microphysics tendencies, floored by
+                # the conserving borrow like q_c/q_r.  Base = the (possibly
+                # advected) _dyn alias so non-owned faces keep dynamics-only
+                # values.
                 def _dm_upd_owned(fld, tend):
                     return (None if fld is None else fld.at[_ofi].set(
-                        jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
+                        conservative_positive_clip(
+                            fld[_ofi] + _dt * tend, dsigma, axis=-1)[0]))
                 q_i_upd = _dm_upd_owned(q_i_dyn, phys_out.dq_i_dt)
                 q_s_upd = _dm_upd_owned(q_s_dyn, phys_out.dq_s_dt)
                 q_g_upd = _dm_upd_owned(q_g_dyn, phys_out.dq_g_dt)
@@ -2232,15 +2254,35 @@ def build_segment_fn(
     )
 
     def _run_subcycled(carry: SegmentCarry, n_steps: int,
-                       forcing: SegmentForcing) -> SegmentCarry:
+                       forcing: SegmentForcing, lead: int) -> SegmentCarry:
         """Issue #316: outer-rad × inner-no-rad nested scan.
 
-        Each outer iteration runs ``rad_update_steps - 1`` cheap
-        held-radiation steps followed by one fresh-radiation step.
-        This matches the legacy ``need_rad = ((idx+1) %
-        rad_update_steps) == 0`` cadence (fresh radiation on the last
-        step of every cycle) while keeping the RRTMGP/gray HLO out of
-        the hot inner body and out of any ``lax.cond``.
+        Reproduces the legacy ``need_rad = ((idx+1) % rad_update_steps) == 0``
+        cadence -- fresh radiation on the last step of every cycle -- while
+        keeping the RRTMGP/gray HLO out of the hot inner body and out of any
+        ``lax.cond``.
+
+        Phase is derived from the ABSOLUTE step index, not assumed.  Radiation
+        fires at absolute ``i`` with ``(i+1) % k == 0``, so an arbitrary segment
+        ``[s, s+n)`` decomposes as::
+
+            lead no-rad | 1 rad | n_outer x (k-1 no-rad, 1 rad) | tail no-rad
+
+        with ``lead = (-(s+1)) % k`` supplied by the caller as a STATIC Python
+        int (:func:`_subcycle_lead`) — it cannot be derived here, since this
+        body runs under ``jax.jit`` where ``carry.step_index`` is a tracer.
+        That handles a segment whose length is
+        NOT a multiple of ``k`` and one that starts mid-cycle, which the two
+        earlier ``_use_subcycle`` restrictions instead punted to ``_run_single``
+        -- and ``_run_single`` hands its ``need_rad`` to the
+        ``static_need_rad=True`` variant, which DELETES it and radiates on EVERY
+        step (physics_pipeline.py:2556).  So the punt was not a conservative
+        fallback: it silently ran a different cadence than requested.  Concrete
+        case that motivated this (codex adversarial review): a 151-step run at
+        ``rad_update_steps=2`` is a 144-step segment plus a 7-STEP TAIL; the
+        tail radiated on all of steps 144-150 where the cadence asks for
+        145/147/149.
+
         """
         body_rad = _make_single_step(forcing, step_fn=step_unified)
         body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
@@ -2248,17 +2290,33 @@ def build_segment_fn(
             body_rad = jax.checkpoint(body_rad, prevent_cse=False)
             body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
 
-        n_outer = n_steps // rad_update_steps
-        n_held = rad_update_steps - 1
+        k = rad_update_steps
+
+        def _scan_no_rad(c, length):
+            if length <= 0:
+                return c
+            c, _ = jax.lax.scan(body_no_rad, c, None, length=length)
+            return c
+
+        # Segment ends before the first radiation step -> all held, no rad.
+        if lead >= n_steps:
+            return _scan_no_rad(carry, n_steps)
+
+        carry = _scan_no_rad(carry, lead)
+        carry, _ = body_rad(carry, None)
+
+        rest = n_steps - lead - 1
+        n_outer, tail = rest // k, rest % k
+        n_held = k - 1
 
         def _outer_step(c: SegmentCarry, _):
-            if n_held > 0:
-                c, _ = jax.lax.scan(body_no_rad, c, None, length=n_held)
+            c = _scan_no_rad(c, n_held)
             c, _ = body_rad(c, None)
             return c, None
 
-        final_carry, _ = jax.lax.scan(_outer_step, carry, None, length=n_outer)
-        return final_carry
+        if n_outer > 0:
+            carry, _ = jax.lax.scan(_outer_step, carry, None, length=n_outer)
+        return _scan_no_rad(carry, tail)
 
     def _run_single(carry: SegmentCarry, n_steps: int,
                     forcing: SegmentForcing) -> SegmentCarry:
@@ -2532,10 +2590,10 @@ def build_segment_fn(
             land_ml=land_ml_new,
         )
 
-    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
+    @partial(jax.jit, static_argnums=(1, 3), donate_argnums=(0,))
     def _run_subcycled_jit(carry: SegmentCarry, n_steps: int,
-                           forcing: SegmentForcing) -> SegmentCarry:
-        return _run_subcycled(carry, n_steps, forcing)
+                           forcing: SegmentForcing, lead: int) -> SegmentCarry:
+        return _run_subcycled(carry, n_steps, forcing, lead)
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def _run_single_jit(carry: SegmentCarry, n_steps: int,
@@ -2560,33 +2618,36 @@ def build_segment_fn(
     def _use_subcycle(carry: SegmentCarry, n_steps: int) -> bool:
         """Decide whether the subcycled scan path is valid for this call.
 
-        Three Python-side conditions must hold (codex iter review #1/2/3):
-        1. The cond-free no-rad variant must be available.
-        2. ``n_steps`` must be a clean multiple of ``rad_update_steps`` so
-           the outer scan length is an integer and the final rad step
-           lands on the last inner index of the segment.
-        3. The *absolute* step index at segment start must also be a
-           multiple of ``rad_update_steps``.  The legacy cond body fires
-           radiation at step indices where ``(step_idx+1) %
-           rad_update_steps == 0`` — i.e., the last inner step of each
-           cycle.  If the segment starts mid-cycle (e.g., a checkpoint
-           restart at a non-aligned step), the subcycled outer body's
-           "k-1 no-rad + 1 rad" pattern would fire rad on the wrong
-           absolute step.  We block subcycling and fall back to the
-           legacy scan in that case so radiation timing is preserved
-           bit-exactly.
+        ONE condition now: the cond-free no-rad variant must exist.
 
-        ``carry.step_index`` is a ``jnp.int32`` scalar; reading it with
-        ``int(...)`` blocks until any prior device work completes, but
-        this happens once per Python segment call (not inside the hot
-        scan) so the perf hit is negligible.
+        This used to also require ``n_steps % rad_update_steps == 0`` and an
+        aligned ``carry.step_index``, because the outer body assumed a segment
+        was a whole number of cycles starting on a cycle boundary.  Both
+        restrictions are gone: ``_run_subcycled`` derives the phase from the
+        absolute step index and emits the leading/trailing held-radiation steps
+        explicitly, so it is exact for any ``(start_step, n_steps)``.
+
+        Removing them is a FIX, not a relaxation.  Falling back to
+        ``_run_single`` was never cadence-preserving: that body computes
+        ``need_rad`` and then passes it to the ``static_need_rad=True``
+        variant, which discards it and radiates every step.  A ragged final
+        segment or a restart at a non-aligned step therefore ran a denser
+        radiation cadence than configured, silently.
         """
-        if not _subcycle_available:
-            return False
-        if n_steps % rad_update_steps != 0:
-            return False
-        start_step = int(carry.step_index)
-        return start_step % rad_update_steps == 0
+        return _subcycle_available
+
+    def _subcycle_lead(carry: SegmentCarry) -> int:
+        """Held-radiation steps before this segment's FIRST radiation step.
+
+        Radiation fires at absolute ``i`` with ``(i+1) % k == 0``, so from a
+        segment starting at ``s`` the first such ``i`` is ``s + (-(s+1)) % k``.
+        Returned as a STATIC Python int for ``_run_subcycled``'s scan lengths:
+        ``carry.step_index`` is a ``jnp.int32`` scalar, and reading it with
+        ``int(...)`` blocks until prior device work completes — fine once per
+        Python segment call (this is the same blocking read ``_use_subcycle``
+        performed before the phase-general rewrite), impossible inside the jit.
+        """
+        return (-(int(carry.step_index) + 1)) % rad_update_steps
 
     # ------------------------------------------------------------------
     # Optional single-process multi-GPU sharding (third replication
@@ -2834,8 +2895,15 @@ def build_segment_fn(
             }
             target = _targets[kind]
             _has_static_nsteps = kind in ("single", "subcycled")
+            # "subcycled" also takes a 4th STATIC arg, the radiation-phase
+            # ``lead`` (``_subcycle_lead``); it sets scan lengths, so it must
+            # be static, and it stays out of the dynamic-arg tree the
+            # ``in_shardings`` 2-tuple below binds against.
+            _static_argnums = ((1, 3) if kind == "subcycled"
+                               else (1,) if _has_static_nsteps else None)
             jit_kwargs: dict = (
-                dict(static_argnums=(1,)) if _has_static_nsteps else {}
+                dict(static_argnums=_static_argnums)
+                if _static_argnums is not None else {}
             )
             if pin:
                 # NOTE: with ``static_argnums`` JAX matches
@@ -2892,11 +2960,14 @@ def build_segment_fn(
             Updated state after n_steps.
         """
         if _use_subcycle(carry, n_steps):
+            # STATIC phase, read once here (never under the jit) — see
+            # ``_subcycle_lead``.
+            lead = _subcycle_lead(carry)
             if _sharding_active:
                 return _get_sharded_jit("subcycled", True, carry, forcing)(
-                    carry, n_steps, forcing,
+                    carry, n_steps, forcing, lead,
                 )
-            return _run_subcycled_jit(carry, n_steps, forcing)
+            return _run_subcycled_jit(carry, n_steps, forcing, lead)
         if _sharding_active:
             return _get_sharded_jit("single", True, carry, forcing)(
                 carry, n_steps, forcing,
@@ -2983,14 +3054,20 @@ def build_segment_fn(
 # q_v/q_c/q_r are always present on moist runs; the double-moment fields
 # are None for warm-rain runs (their None-ness is static pytree structure,
 # so the per-name `is not None` check below is trace-safe).
-# Tracers carried through the resolved-wind advective step (#771).  Mass
-# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
-# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
-# them with the mass-mixing-ratio operator applies the wrong conservation law,
-# so they are intentionally excluded until a density-aware number transport
-# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
+# Tracers carried through the resolved-wind advective step (#771).  ALL of
+# them: every species here is now stored per unit MASS — mixing ratios [kg/kg]
+# and all three numbers [#/kg] — so the mass-mixing-ratio operator is the right
+# conservation law for each, and the ratio q/N that sets particle size is
+# transport-invariant.
+#
+# N_c/N_r used to be excluded because they were stored per VOLUME [#/m^3], for
+# which this operator is wrong.  Excluding them was not a fix: it left the mass
+# advecting while the number stayed put, so the diagnosed particle size was
+# wrong by O(1) once a cloud moved further than its own width — worse than the
+# density-bounded error it avoided.  Storing them per mass is the density-aware
+# transport that exclusion was waiting for (2026-08-14).
 _ADVECTED_TRACER_NAMES = (
-    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
 )
 
 
@@ -3027,9 +3104,11 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
         # driver gates on cubed_sphere+cdgrid); a state type without a
         # ``tracers`` field fails loudly here rather than silently
         # dropping the moisture.
+        _units = {t.name: t.units for t in make_full_moisture_registry().tracers}
         tracers = {
             nm: Field(getattr(carry, nm), name=nm,
-                      dims=("face", "x", "y", "level"), units="kg/kg")
+                      dims=("face", "x", "y", "level"),
+                      units=_units.get(nm, "kg/kg"))
             for nm in _ADVECTED_TRACER_NAMES
             if getattr(carry, nm) is not None
         }

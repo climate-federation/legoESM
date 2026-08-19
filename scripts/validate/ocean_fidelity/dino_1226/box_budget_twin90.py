@@ -46,6 +46,9 @@ from legoesm.ocean.fidelity.box_heat_budget import (  # noqa: E402
     TERM_NAMES,
     BoxHeatBudgetAccumulator,
 )
+from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
+    require_fp64,
+)
 
 DEPTH_BANDS_M = ((0.0, 200.0), (200.0, 1000.0), (1000.0, None))
 # (label, day_lo, day_hi) -- day_hi exclusive; matches the coordinator's
@@ -68,6 +71,20 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
     nsteps = STEPS_PER_DAY * n_days
     dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
 
+    # fp64 gate (#1455, #1226 rule). MANDATORY here, not decorative: the
+    # ``k33`` and ``vertmix`` buckets are realized increments
+    # ``(T_after - T_before)/dt`` -- a catastrophic cancellation of two O(10)
+    # degC temperatures. Under the DEFAULT fp32 storage policy any increment
+    # below ~ULP(T)/dt (~2e-9 degC/s) is unresolvable and reports as exactly
+    # 0.0. box_heat_budget.py measured that failure directly: peak
+    # |dT_k33| = 2.1193e-09 = 1.00 ULP with 95% of cells quantizing to zero,
+    # BIT-IDENTICAL across two eos_depth conventions whose K33 fields differ by
+    # rel-L2 2e-3. So a k33 bucket reading "identically 0.0" from an UNGATED
+    # driver is an instrument artifact, not a physical absence -- which is
+    # exactly the open question this gate closes. JAX_ENABLE_X64=1 alone does
+    # NOT suffice: legoesm.core.precision is an independent axis.
+    require_fp64(br.geometry, br.z_coord,
+                 context="box heat budget (k33/vertmix realized increments)")
     acc = BoxHeatBudgetAccumulator(
         br.geometry, br.z_coord, mc, cfg, forcing, DT, model,
         row_slice=row_slice, depth_bands_m=DEPTH_BANDS_M,

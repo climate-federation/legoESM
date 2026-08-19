@@ -238,12 +238,23 @@ def build_state():
     # bias.  That put a bias into `prd` (ldf_slp's INPUT) and hence into every
     # downstream slope number this script printed.  Mirror the production
     # caller exactly, including the rho0 kwarg that makes "geometric" cancel.
+    # ``mc.constants.*`` (NOT the flat ``mc.g``/``mc.rho_0``): the PRODUCTION
+    # GM/Redi call site is ocean_model_latlon_cgrid.py's
+    # ``rho_0=self.config.constants.rho_0, g=self.config.constants.g``.  When
+    # those were a SECOND, separate surface from the flat scalars, this probe
+    # read the card's g while the model ran on the ConstantsConfig default --
+    # so every ldf_slp number it printed described a configuration the model
+    # never executed (measured: err_norm median 1.165e-11 on the card surface
+    # vs 2.414e-06 on the one production used).  The two surfaces are now one
+    # (LatLonCGridOceanConfig routes the flat kwargs into ``constants``), so
+    # this reads the same number either way -- keep it spelled as the
+    # production call site spells it.
     eos_depth = getattr(mc, "eos_depth", cfg.eos_depth)
-    _eos_mk_kw = {"rho0": mc.rho_0} if eos_depth == "geometric" else {}
+    _eos_mk_kw = {"rho0": mc.constants.rho_0} if eos_depth == "geometric" else {}
     rho, jacobian = gm_redi_density_and_jacobian(
         T, S, eta, H_bathy, br.geometry, z_coord,
         eos=mc.eos, eos_linear=mc.eos_linear, mask=mask,
-        rho_0=mc.rho_0, g=mc.g, eos_depth=eos_depth,
+        rho_0=mc.constants.rho_0, g=mc.constants.g, eos_depth=eos_depth,
     )
     active_3d = _nemo_native_active_3d(mask, z_coord, H_bathy, T.dtype)
 
@@ -273,7 +284,7 @@ def build_state():
     def recall():
         return compute_nemo_native_slopes(
             rho, T, S, mask, u_mask, v_mask, z_coord, br.geometry, gm_cfg,
-            eos_fn, rho_0=mc.rho_0, g=mc.g, active_3d=active_3d,
+            eos_fn, rho_0=mc.constants.rho_0, g=mc.constants.g, active_3d=active_3d,
             jacobian=jacobian,
         )
 
@@ -290,12 +301,12 @@ def build_state():
         card_slope_n2=card_slope_n2, slope_n2_used=slope_n2_used,
         env_override=env_override, eos_depth=eos_depth,
         # section (K): the prd / EOS isolation
-        eos_fn=eos_fn, rho_0=mc.rho_0, T=T, S=S, z_coord=z_coord,
+        eos_fn=eos_fn, rho_0=mc.constants.rho_0, T=T, S=S, z_coord=z_coord,
         eos_name=mc.eos, eos_linear=mc.eos_linear, eos_mk_kw=_eos_mk_kw,
         eta=eta, H_bathy=H_bathy,      # section (L): live-ladder reconstruction
         # section (M): i-vs-j asymmetry + the ldf_eiv aeiu row
         grid=br.geometry, gm_cfg=gm_cfg, rho=rho, jacobian=jacobian,
-        omega=cfg.omega, active_3d=active_3d, g=mc.g,
+        omega=cfg.omega, active_3d=active_3d, g=mc.constants.g,
     )
 
 

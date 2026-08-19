@@ -180,10 +180,17 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
+# geopk / p_grad_c / one_grad_p multilevel port (brick geopk_pgrad): same
+# rule — the dummies keep the dyn_core names (CG, akap, ptop, npx, a2b_ord,
+# d_ext, ...) so every statement cross-references dyn_core.F90 1:1.
+"packages/core/legoesm/core/fv3_native_pgrad.py" = ["N803", "N806", "N801"]
 # FV3-native oracle validators/tests: same verbatim-Fortran UPPER_SNAKE
 # metric locals (SIN/COS/DXC/RC, ...) mirroring the source 1:1.
 "scripts/validate/fv3_native/gen_divduo_oracle.py" = ["N806", "N816"]
+"scripts/validate/fv3_native/gen_geopk_pgrad_oracle.py" = ["N806", "N816"]
 "tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
+"tests/grids/test_fv3_native_geopk_pgrad.py" = ["N806"]
+"tests/grids/test_fv3_native_pgrad.py" = ["N803", "N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
@@ -305,6 +312,7 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "lint: static checks run through pytest because CI is disabled; skip in a fast inner loop with -m 'not lint'",
     # Complexity-tier ladder (docs/validation/TESTING.md). Opt-in selectors: run a rung
     # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
     # (does NOT tier-gate) so untagged tests still run until the suite is tagged.

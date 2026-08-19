@@ -60,11 +60,126 @@ _MESH = "data/grids/eORCA1.2_mesh_mask.nc"
 # NEMO ldf_eiv (nn_aei_ijk_t=21) kappa_GM defaults, defined ONCE and shared by
 # `build_tripole`'s signature and the `--gm-aei0` / `--gm-kappa-min` argparse
 # defaults so the two can never drift.
-# aei0 = rn_Ue*rn_Le; ORCA1 namelist = 0.018 * 100e3.
-_GM_AEI0_DEFAULT = 1800.0
-# Equatorial-taper floor; matches VisbeckConfig.kappa_min, the coefficient the
-# OMIP tripole otherwise runs.
+# NEMO ldftra.F90:290-293 -- for the LAPLACIAN operator (ORCA1:
+# ln_traldf_lap=.true.) the prefactor is zUfac = 1/2 * rn_Ud, so
+#     aei0 = 1/2 * rn_Ue * rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s,
+# which the code's own printout states ("aht0 = 1/2 rn_Ud*rn_Ld",
+# ldftra.F90:331) and NEMO's emitted aeiu_2d confirms: max EXACTLY 900
+# (measured 2026-08-12, RUN_TRD2 rec 1).  The previous 1800 dropped the 1/2
+# and made the "NEMO-faithful" GM cap twice NEMO's.
+_GM_AEI0_DEFAULT = 900.0
+# Equatorial-taper floor.  NOT a NEMO number: raw NEMO is capped-only and lets
+# kappa_GM -> 0 at the equator (the recipe card keeps that, gm_kappa_min=0.0).
+# 200 is a production stability knob for the 1-degree global run; the numeric
+# value coincides with VisbeckConfig.kappa_min, which the OMIP tripole does NOT
+# run (its recipe ships Visbeck disabled -- verified in the run manifest,
+# 2026-08-12).  The divergence from the recipe default is deliberate and
+# asserted at both ends (tests/unit/test_run_omip_core2_gm_treguier.py).
 _GM_KAPPA_MIN_DEFAULT = 200.0
+# Isoneutral-slope operators and GM bolus forms selectable on the tripole.
+# NEMO ORCA1 runs the STANDARD rotated laplacian (namelist_cfg:
+# ln_traldf_lap=.true., ln_traldf_iso=.true., ln_traldf_triad=.false.) with the
+# Method of Stabilizing Correction (ln_traldf_msc=.true.), and adds the eddy-
+# induced transport to the ADVECTING velocity (LDF/ldftra.F90 `ldf_eiv_trp`,
+# PUBLIC "called by traadv.F90") so the bolus rides the monotone FCT limiter.
+# "nemo_iso_lap" is that OPERATOR.  It does NOT by itself turn on the
+# stabilizing correction: `akz` is gated on the SEPARATE GMRediConfig field
+# `msc_stabilize` (default False), so matching ORCA1 needs it too --
+# hence --gm-msc-stabilize.  "through_fct" is the bolus routing.  The OMIP default is "centered" slopes
+# with an unlimited centred bolus flux -- a documented departure, now
+# selectable rather than hard-wired.
+_GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
+_GM_BOLUS_FORMS = ("centred", "through_fct")
+
+
+def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
+                                       sss_restore_normalization,
+                                       sss_restore_channel=None):
+    """Return the refusal message for an incompatible pairing, else None.
+
+    ``--freshwater-closure real_freshwater`` drops the virtual-salt term, so a
+    restoring flux DERIVED as a virtual-salt equivalent (legoESM's historical
+    ``normalization="s_target"``: a fixed ``z1``, divided by ``S_target``)
+    would apply the wrong relaxation strength -- its realized effect under
+    volume-only dilution depends on the LIVE salinity and the ACTUAL top-cell
+    thickness.
+
+    ``normalization="live_s"`` is NEMO ``sbcssr`` nn_sssr=2 (sbcssr.F90:132-134,
+    ``zerp = zsrp*coefice*(sss_m - sss_target)/MAX(sss_m,1e-20)``), a genuine
+    WATER flux -- what ORCA1 runs alongside its variable-volume freshwater
+    budget -- so that pairing is allowed.
+
+    Split out of ``main`` so the rule is unit-testable: ``main`` applies it
+    only after the model is built, which no unit test can cheaply reach.
+    """
+    if freshwater_closure != "real_freshwater" or not sss_restore:
+        return None
+    # EXEMPTION, and the only one: `--sss-restore-channel water_flux` with the
+    # NEMO conversion.  That combination is exactly the precondition this
+    # guard's own message has always named -- the restoring is routed through
+    # `fw.restoring` as a real water flux (driving eta / z-star) with its heat
+    # term, and the post-step tracer edit is SKIPPED, so there is no
+    # virtual-salt-like operation left for `real_freshwater` to contradict.
+    # `live_s` is required alongside it by a separate guard in `main`.
+    if (sss_restore_channel == "water_flux"
+            and sss_restore_normalization == "live_s"):
+        return None
+    # NOTE (2026-08-12, codex 9383572 RED): `--sss-restore-normalization live_s`
+    # does NOT lift this.  A previous revision let it through on the grounds
+    # that live_s makes the restoring "a genuine water flux".  It does not, in
+    # THIS code path: `apply_sss_restoring_step*` consume `dS_dt_top` and edit
+    # the tracer directly -- the flux never reaches FreshwaterForcing, eta, or
+    # the z-star dilution.  And `dS_dt_top` is re-derived as
+    # `-freshwater_flux * S_safe / (rho_0*z1)`, in which `S_safe` CANCELS the
+    # division that produced the flux, so the normalization changes the applied
+    # tendency ONLY where the +/-4 mm/day cap binds.  Restoring is therefore
+    # still a virtual-salt-like operation whatever the denominator, and pairing
+    # it with a closure that assumes no virtual-salt term is still wrong.
+    # Lifting this guard requires ROUTING restoring as a water flux (and
+    # removing the tracer-side edit), not renaming its denominator.
+    return (
+        "--freshwater-closure real_freshwater is not compatible with "
+        "--sss-restore: the restoring is applied as a DIRECT SALINITY "
+        "TENDENCY (apply_sss_restoring_step consumes dS_dt_top; the "
+        "freshwater flux is a diagnostic here and never enters the eta / "
+        "z-star volume channel), which is a virtual-salt-like operation the "
+        "real_freshwater closure assumes is absent. "
+        "--sss-restore-normalization live_s does NOT lift this: S_safe "
+        "cancels in the dS_dt_top re-derivation except where the flux cap "
+        "binds. Drop --sss-restore, or keep the virtual_salt_flux closure, "
+        "until restoring is routed as a real water flux (#1484).")
+
+
+def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):
+    """GM/Redi block for ``--gm-treguier`` on the eORCA1 tripole.
+
+    ONE VARIABLE: this is the tripole NEMO-match recipe's OWN GM/Redi block
+    with `gm_treguier` flipped on, so a `--gm-treguier` arm differs from the
+    control run in the ``treguier`` field and nothing else.
+
+    The base used to be ``run_omip._DEFAULT_BATHY_GM_REDI``, which is the
+    LAT-LON bathymetry default (``kappa_GM=kappa_Redi=800``, Visbeck ON,
+    ``slope_scheme="triads"``) and NOT the tripole recipe's block
+    (``kappa_GM=kappa_Redi=600``, Visbeck OFF, ``slope_scheme="centered"``).
+    Selecting it changed FOUR fields at once, so no ``--gm-treguier`` arm could
+    be attributed to the Treguier coefficient.  Verified against two run
+    manifests (2026-08-12): the arm ran kappa 800/800 + triad slopes against a
+    control at 600/600 + centered slopes.
+
+    The recipe validates the Treguier block while building it
+    (``validate_treguier_cfg``), so a bad ``aei0``/``kappa_min`` fails here
+    rather than inside the first GM tendency.
+    """
+    from legoesm.ocean.fidelity.nemo_match_recipe import (
+        NEMOMatchTripoleRecipeConfig,
+        nemo_match_tripole_model_config,
+    )
+    recipe_cfg = NEMOMatchTripoleRecipeConfig(
+        gm_treguier=True,
+        gm_aei0=float(gm_aei0),
+        gm_kappa_min=float(gm_kappa_min),
+    )
+    return nemo_match_tripole_model_config(recipe_cfg).gm_redi
 
 
 # NEMO eORCA geometry + WOA IC loaders now live in the ocean package so the
@@ -379,9 +494,21 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
     return zc, H_snapped, lm_out
 
 
+# Single source of truth for --tke-mxl-choice, consumed by BOTH argparse
+# (choices=) and orca1_zdftke_config's guard.  Codex 2026-08-07 #4: a finite
+# -2..9 sweep in the test is a nearby-mutation check, NOT set equality -- it
+# still passes if the builder accepts 10 while argparse does not.  Sharing one
+# constant makes divergence impossible by construction instead of policed.
+TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
+
+
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
                         mxl_choice: int | None = None,
-                        prognostic: bool | None = None):
+                        n2_mode: str | None = None,
+                        n2_eos_form: str | None = None,
+                        prognostic: bool | None = None,
+                        kappa_convention: str | None = None,
+                        shear_production: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -400,7 +527,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                           1/ri_cri, ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/9
                           (zdftke.F90:772,399: Pr = clamp(Ri/ri_cri, 1, 10) ==
                           clamp(4.5·Ri, 1, 10) — exactly _prandtl_number's form)
-      nn_mxl   = 2     -> tke_mxl_choice=2 (closest construction; see gaps)
+      nn_mxl   = 2     -> tke_mxl_choice=4 (NOT 2: the choice numbering is
+                          Veros-derived, so choice 2 is Veros Bougeault-
+                          Lacarrere and choice 4 is NEMO nn_mxl=2)
       ln_lc    = T     -> lc=True
       rn_lc    = 0.25  -> lc_coeff       (namelist_cfg override of 0.15)
       nn_etau  = 1     -> etau_mode="below_ml"
@@ -461,7 +590,91 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
         # (ln_mxl0=T).  choice=2 (Veros Bougeault-Lacarrere, no ln_mxl0) was the
         # flagged fidelity gap; =3 closes it.  See the A/B campaign (2026-07-24).
-        tke_mxl_choice=3,
+        # ORCA1's namelist_cfg sets `nn_mxl = 2` (EXP00/namelist_cfg:444), which
+        # is choice 4, NOT 3.  The card carried 3 while its own comment above
+        # said 4 was the ORCA1 value -- flagged by codex 9405117 as a direct
+        # card inconsistency that invalidates one-step parity.  Choices 3 and 4
+        # share l_k = min(lup,ldn) and differ only in the dissipation length
+        # (3: sqrt(lup*ldn), 4: min(lup,ldn)), so 4 dissipates more.
+        tke_mxl_choice=4,
+        # ---- what survived codex 9405307, which REFUTED three of five ------
+        # The cumulative offline test (job 9405195) put all five at 0.854
+        # Antarctic / 0.930 Arctic and I wired them as a new baseline. Codex
+        # refuted three of them and the headline. Reverted, with the reasons
+        # kept here so nobody re-wires them:
+        #
+        # veros_dz_slots=True -- REVERTED. The interior solver does map
+        #   dz_cell<->e3t and dz_half<->e3w, but on --partial-cell the tripole
+        #   caller supplies dz_ref*J while the real bottom thickness is
+        #   h_partial*J, so the partial metric is silently discarded. It is
+        #   not an e3t/e3w mapping at partial bottoms. It also COLLIDES with
+        #   nemo_z0: both overload dz_surface, one as a Veros surface
+        #   half-volume and one as a top-cell face-gradient distance, and on
+        #   the centred grid those differ by 2x.
+        #
+        # n2_mode="nemo_bn2" -- REVERTED, and this one was simply wrong.
+        #   ORCA1 selects TEOS-10 (namelist_cfg:307). legoESM's `nemo_bn2`
+        #   calls nemo_seos_alpha_beta and its own docstring says "exact bn2
+        #   (S-EOS)". That is a DIFFERENT N2, not ORCA1's rn2. Closing this
+        #   properly needs a TEOS-10 rab/bn2, not a config flip.
+        #
+        # tke_surface_bc_level="nemo_z0" -- REVERTED. The placement is right
+        #   but the metric is not: dz_surface = -z_full_ref[0]*J is the top
+        #   cell's MIDPOINT, i.e. half dz_ref[0], while NEMO's jk=2 lower
+        #   coefficient needs the full top-cell e3t(1). That doubles the
+        #   virtual-surface coupling.
+        #
+        # ALSO REVERTED BY THE SAME REVIEW: --grid mpas shares this card and
+        # mpas_integration.py:686 fail-loud rejects BOTH n2_mode != "insitu"
+        # and veros_dz_slots=True, so the five-field card could not run on
+        # MPAS at all. The user's standing ask is three-grid agreement; a card
+        # that only one grid can execute is not a baseline.
+        # ---- the two the review confirmed --------------------------------
+        # Job 9405195, our K_M vs NEMO's own avm after one matched 3600 s step
+        # from NEMO's state and en, Antarctic 491743 interfaces: the card as it
+        # stood was ~2.6x NEMO, the amplitude fix took it to 1.846, alpha_tke=1
+        # OVERSHOT to 0.634, and these five together land it at 0.854
+        # (Arctic 0.930) -- inside the pre-registered 0.85-1.20 band.  They
+        # converge rather than trade: alpha alone undershoots and these lift it
+        # back.  This block is therefore a deliberate NEW BASELINE, not five
+        # independent one-variable edits, and must not be compared term-by-term
+        # against arms that predate it.
+        #
+        # veros_dz_slots: NEMO's zzd = -0.5*rn_Dt*mean(avm)/(e3t*e3w) is
+        #   flux-form -- gradient across the intervening T cell (/e3t),
+        #   divergence into the W control volume (/e3w).  legoESM maps
+        #   dz_cell<->e3t and dz_half<->e3w ONLY in this branch; the legacy
+        #   default uses dz_half for BOTH, so the coefficient was NEMO's while
+        #   the stencil was not (codex 9405117 #2).  Alone: 0.627.
+        # n2_mode: the clipped in-situ N2 carries a compressibility bias
+        #   (+4.3e-5 measured in a prior session -- enough to stop the EVD
+        #   trigger firing in the Arctic at all).  It sets BOTH the buoyancy
+        #   length and the buoyancy sink.  k_profiles threads the gdept /
+        #   interior-gdepw ladders when this mode is selected.  Alone: 0.808.
+        # dissipation_discretization: NEMO linearises the Kolmogoroff sink as a
+        #   NEWTON split -- zfact2 = 1.5*rn_Dt*rn_ediss on the diagonal
+        #   (zdftke.F90:241,414) plus zfact3 = 0.5*rn_ediss added back
+        #   explicitly (:242,:419) -- the correct Jacobian for eps ~ e^{3/2}.
+        #   Plain backward Euler puts 1.0 on the diagonal with no add-back.
+        #   Codex 9405117 predicted the direction before it was run ("retains
+        #   more TKE than plain BE"); alone it lifts 0.634 -> 0.739.
+        dissipation_discretization="nemo_1p5_split",
+        # tke_surface_bc_level: NEMO holds en(1) at the z=0 W-point and SOLVES
+        #   the tridiagonal from jk=2 (zdftke.F90:264,403-410).
+        #   "interior_pinned" pins the Dirichlet value AT the first interior
+        #   interface instead -- one w-level too deep.  Worth only ~4% on its
+        #   own (measured, and it REFUTED a root-cause hypothesis of mine), but
+        #   it is what NEMO does.  Requires the surface Dirichlet value, which
+        #   this card sets, and dz_surface, which k_profiles:811-815 threads
+        #   for exactly this option.
+        # STILL NOT NEMO, and not closable here: tke_shear_production stays
+        # "squared_centered".  NEMO's zdf_sh2 is face-native with a now x
+        # before velocity product and DOUBLES production adjacent to coasts
+        # via (2 - umask*umask) (zdfsh2.F90).  "nemo_face_native" implements
+        # exactly that and needs the raw C-grid face state plus per-level
+        # wumask/wvmask/coast masks, which the offline column probe cannot
+        # supply -- so it is untested and deliberately NOT enabled here.  It is
+        # the last known card gap and needs a tripole run to evaluate.
         # NEMO nn_bc_surf=1: en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0) Dirichlet surface
         # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
         # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.
@@ -475,6 +688,111 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         prognostic=True,
         prandtl_mode="richardson",      # nn_pdl=1
         prandtl_ri_coeff=pr_ri_slope,   # 1/ri_cri = 4.5 (NOT the Veros 6.6)
+        # TKE VERTICAL-DIFFUSION COEFFICIENT.  NEMO diffuses `en` with the
+        # PLAIN viscosity: zzd_up = -0.5*rn_Dt*(avm(k+1)+avm(k))/(e3t*e3w)
+        # (zdftke.F90:407-409) is a face coefficient of mean(avm), i.e. x1.
+        # TKEConfig's default is the Veros/Gaspar 30.0 -- as its own
+        # __param_spec__ reference says outright, "NEMO avm x1 (zdftke);
+        # Veros/Gaspar 30" -- so the card was diffusing TKE THIRTY TIMES too
+        # fast against a NEMO oracle.  MEASURED on NEMO's own state and `en`,
+        # one 3600 s step, Antarctic, 491743 interfaces, scored against NEMO's
+        # avm (EVD-free: nn_evdm=0), job 9405026:
+        #     zero step                          K_M/avm 0.861
+        #     alpha_tke=30 (was the card)  e 3.20x, K_M/avm 1.846
+        #     alpha_tke=1.0 (NEMO)         e 0.95x, K_M/avm 0.634
+        # Arctic 1.666 -> 0.673.  Nothing else in the closure came within an
+        # order of it: Langmuir, nn_etau, the mixing-length choice, the surface
+        # BC placement and the dissipation split are each worth 2-9%.
+        # HONEST CAVEAT: 1.0 overshoots the other way -- over that hour NEMO's
+        # avm rises 5% and ours then FALLS 22%.  1.0 is still the faithful
+        # value (it is what NEMO's discretisation computes); a residual of the
+        # same order as the 0.861 zero-step offset remains, and the dissipation
+        # split moves the wrong way for it.
+        # No CLI flag: alpha_tke carries a __param_spec__ (tier 2, bounds
+        # 1-90), so `--params vertical_mixing.tke.alpha_tke=30` reverts it.
+        alpha_tke=1.0,                  # NEMO zdftke: TKE diffused by avm x1
+        # STRATIFICATION. Precise statement, after GLM-5.2 pushed back and
+        # zdftke.F90:650 settled it: BOTH forms floor N2 inside the length --
+        # NEMO evaluates zrn2 = MAX(rn2, rsmall) and legoESM's choice-3/4
+        # branch takes sqrt(max(N2, 1e-12)). So this is NOT "signed vs
+        # clipped"; the floor is on both sides. What changes is the N2 VALUE.
+        # The in-situ density gradient carries a POSITIVE compressibility bias
+        # (+4.3e-5 measured in a prior session) that keeps N2 comfortably
+        # above the floor even in neutral water, so the buoyancy length stays
+        # SHORT. The adiabatic form reaches the floor where the water really
+        # is neutral, the length runs to the sweep bound, and that is NEMO's
+        # long zmxlm. Same mechanism as described below, correctly named.
+        #
+        # Carried from the same review, not acted on: the stacked MIN sweeps
+        # make the diffusivity non-differentiable at the mixed-layer base, and
+        # in neutral layers the limiter IS effectively the convection
+        # parameterisation (length set by ramp geometry, not closure physics)
+        # -- the documented resolution-sensitivity of convective mixing in
+        # ORCA-type runs. ORCA1 sets no Galperin cap (no rn_clim_galp in the
+        # namelist), so NEMO lives with this too; matching it is the goal here.
+        #
+        # ORIGINAL NOTE: the card computed N2 from the in-situ
+        # density gradient CLIPPED at zero; NEMO's rn2 is SIGNED. In
+        # convectively neutral water the signed form gives N -> 0, the
+        # buoyancy length sqrt(2e)/N blows up, and the lup/ldown sweeps set a
+        # LONG length -- which is what NEMO's zmxlm does there. Clipping
+        # suppresses exactly those, and job 9407791 showed that is the whole
+        # remaining mixing-length deficit: seeding the length with a signed N2
+        # moved our zero-step length ratio against NEMO's own from 0.897 to
+        # 0.997 (Southern Ocean), 0.914 to 0.998 (tropics) and 0.792 to 1.004
+        # (Arctic). The largest correction is the Arctic, the most convective
+        # band -- the mechanism's own prediction.
+        #
+        # This is also the counterpart of alpha_tke: at day 30 the sqrt(2) and
+        # alpha fixes drove the Southern Ocean mixed layer from +1.5 m to
+        # -19.7 m, because removing two large over-mixing errors left the
+        # short-length under-mixing error uncompensated. This is that error.
+        #
+        # n2_eos_form: ORCA1 runs ln_teos10=.true. (namelist_cfg:308), so the
+        # alpha/beta come from the Roquet polynomial with the TEOS-10
+        # coefficient set. A previous revision set n2_mode alone and codex
+        # 9405307 refuted it -- the bn2 helper defaulted to S-EOS, so the
+        # TEOS-10 path was unreachable. Both fields are needed.
+        n2_mode="nemo_bn2",
+        n2_eos_form="teos10",
+        # K-from-TKE AMPLITUDE.  NEMO zdftke tke_avn computes
+        #     zsqen = SQRT(en) ; zav = rn_ediff*zmxlm*zsqen
+        #     p_avm = MAX(zav, avmb)*wmask
+        # -- the sqrt carries `en`, NOT `2*en`; the factor 2 lives in the
+        # LENGTH, zmxlm = SQRT(2*en/rn2) (zdftke.F90:651).  (NEMO's own header
+        # comment at :150/:553 writes the momentum floor as `avtb`; the CODE
+        # uses `avmb` and `avtb` is the TRACER floor -- codex 9400815 #1.
+        # nn_pdl=1 changes only avt, and NOT as pdlr*avm: the tracer floor
+        # avtb is applied AFTER the Prandtl reduction, which
+        # compute_K_from_tke mirrors as K_H = max(kappaH_min, K_M_raw/Pr).)
+        # legoESM's `gaspar_sqrt2e` DEFAULT applies sqrt(2*e) in the amplitude
+        # as well, and the nn_mxl=2/3 branch already builds the length from
+        # sqrt(2)*sqrt(e)/N (tke.py:698-702), so the default DOUBLE-COUNTS the
+        # sqrt(2) on exactly the path this card selects.  MEASURED on NEMO's
+        # own state (Stage A, commit 39ce0701c, Arctic calm columns):
+        #     gaspar_sqrt2e  K_H 4.048e-2 = 4.81x NEMO avt 8.410e-3
+        #     veros_sqrte    K_H 2.730e-2 = 3.25x
+        # SCOPE OF "exact", stated narrowly on purpose (codex 9400815 #2):
+        # `veros_sqrte` is c_k*l_k*sqrt(max(0,e)) and is EXACT against NEMO on
+        # wet rows of this card's normal trajectory, because positivity="floor"
+        # ends every solve at e >= tke_background = 1e-6 = rn_emin, so
+        # sqrt(max(0,e)) == sqrt(e) there.  It is NOT globally identical: NEMO
+        # zeroes dry rows via *wmask while this card leaves tke_dry_wmask=False
+        # and keeps the background there, and the e<=0 branch differs (ours
+        # returns 0, floored back up by kappaM_min/kappaH_min; NEMO floors en
+        # first).  Neither is reachable on the floored path this card runs.
+        # SIGN, also narrowly: at fixed e/l_k/N2/shear the pin divides K by
+        # sqrt(2).  It does NOT follow that the mixed layer shallows by any
+        # particular amount -- the prognostic solve is coupled (lower K_M cuts
+        # shear production and reinforces; lower K_H cuts buoyancy destruction
+        # and offsets), so the integrated response is what the day-90 A/B
+        # measures, not something the algebra gives.
+        # Revert with --tke-kappa-convention -- WHICH REACHES THE TRIPOLE ONLY.
+        # The MPAS branch calls this same card with no overrides, so the pin
+        # changes MPAS too, but `_validate_tke_card_grid` rejects the flag off
+        # the tripole (the standing contract for all four card knobs), so MPAS
+        # cannot be A/B'd from the CLI.  Known asymmetry, not an oversight.
+        kappa_convention="veros_sqrte",
         lc=True,                        # ln_lc
         lc_coeff=0.25,                  # rn_lc (namelist_cfg override)
         etau_mode="below_ml",           # nn_etau=1
@@ -497,6 +815,33 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # K-from-TKE amplitude (``--tke-kappa-convention``).  DEFAULT keeps the
+    # card value (``veros_sqrte`` = NEMO's ``rn_ediff*zmxlm*sqrt(en)``);
+    # ``gaspar_sqrt2e`` restores the legacy sqrt(2)-double-counting amplitude
+    # so the fix can be A/B'd against every arm that predates it.
+    if kappa_convention is not None:
+        if kappa_convention not in ("veros_sqrte", "gaspar_sqrt2e"):
+            raise ValueError(
+                f"orca1_zdftke_config kappa_convention {kappa_convention!r} "
+                "invalid; expected 'veros_sqrte' (NEMO avm = rn_ediff*zmxlm*"
+                "sqrt(en)) or 'gaspar_sqrt2e' (the legacy double-count).")
+        _cfg = _cfg._replace(kappa_convention=kappa_convention)
+    # Shear-production discretisation (``--tke-shear-production``).  DEFAULT
+    # keeps the card value (``squared_centered``).  ``nemo_face_native`` is
+    # NEMO's zdf_sh2: face-native differences, a now x before velocity
+    # product, and production DOUBLED adjacent to coasts via
+    # (2 - umask*umask) (zdfsh2.F90:78-94).  It is the LAST unclosed gap on
+    # this card and the only one the offline column probe cannot evaluate --
+    # it needs the raw C-grid face state, which k_profiles supplies on the
+    # tripole under --partial-cell.
+    if shear_production is not None:
+        if shear_production not in ("squared_centered", "nemo_face_native",
+                                    "nemo_burchard"):
+            raise ValueError(
+                f"orca1_zdftke_config shear_production {shear_production!r} "
+                "invalid; expected 'squared_centered', 'nemo_face_native' "
+                "(NEMO zdf_sh2) or 'nemo_burchard'.")
+        _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -504,15 +849,53 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # choice 2 omits — a larger upper-ocean mixing length -> more mixed-layer
     # mixing -> cooler SST (the tropical-warm fix candidate).  The tripole
     # k_profiles path already threads dz_ref/jacobian/taum so choice 3 is live.
+    # 4 selects NEMO nn_mxl=2 — the value ORCA1's namelist_cfg ACTUALLY sets
+    # (`nn_mxl = 2`, verified in RUN_GATEWAY/namelist_cfg).  Choices 3 and 4
+    # share the lup/ldown sweeps and the same eddy-coefficient LENGTH
+    # l_k = min(lup,ldn); they differ only in the dissipation length
+    # (tke.py:764-785): choice 3 uses l_eps = sqrt(lup*ldn), choice 4 uses
+    # l_eps = l_k = min(lup,ldn).  Since min <= sqrt(product), choice 4
+    # dissipates MORE (eps = c_eps*e^{3/2}/l_eps).
+    # NOTE (codex 2026-08-07 r1+r2, correcting an earlier claim of mine):
+    # do NOT say the diffusivity is identical.  Only the LENGTH l_k is
+    # shared.  A shorter l_eps raises the dissipation coefficient at fixed
+    # positive TKE (tke.py:1007), and K is recomputed from the updated TKE
+    # (tke.py:2153), so choice 4 CAN reduce TKE and alter K.  It need not:
+    # the two lengths can be equal, later trajectories differ in l_k too,
+    # and K can coincide at the floors/ceilings (tke.py:1530).  'Can alter',
+    # never 'must'.  Until 2026-08-06 argparse accepted 4 while this
+    # builder raised on it, so `--tke-mxl-choice 4` crashed the run.
     if mxl_choice is not None:
-        if int(mxl_choice) not in (2, 3, 4):
+        # int(4.9) would silently truncate to 4; argparse blocks that via
+        # type=int but a PROGRAMMATIC caller does not (codex 2026-08-07 #5).
+        # Reject non-integral numerics (int(4.9)->4 would run choice-4 physics
+        # under a nonsense value) and anything outside the SHARED set.  bool is
+        # excluded explicitly: True == 1 would otherwise sneak through int().
+        if (isinstance(mxl_choice, bool)
+                or not isinstance(mxl_choice, (int, np.integer))
+                or int(mxl_choice) not in TKE_MXL_CHOICES):
             raise ValueError(
-                f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; "
-                "expected 2 (Veros Bougeault-Lacarrere), 3 (NEMO nn_mxl=3 + "
-                "ln_mxl0 anchor) or 4 (NEMO nn_mxl=2: the same sweeps but a "
-                "SINGLE length, l_eps = l_k = min(lup,ldn) -- what the ORCA1 "
-                "namelist actually runs).")
+                f"orca1_zdftke_config mxl_choice {mxl_choice!r} invalid; expected "
+                f"an int in {TKE_MXL_CHOICES} (2=Veros Bougeault-Lacarrere, "
+                "3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2 -- the value ORCA1's "
+                "namelist_cfg actually runs).")
         _cfg = _cfg._replace(tke_mxl_choice=int(mxl_choice))
+    if n2_mode is not None:
+        # Scheme Literal -> validate at config-build time on the STATIC value,
+        # never a silent fallback (dispatch hardening).
+        _N2_MODES = ("insitu", "insitu_signed", "adiabatic", "nemo_bn2")
+        if n2_mode not in _N2_MODES:
+            raise ValueError(
+                f"orca1_zdftke_config n2_mode {n2_mode!r} invalid; expected "
+                f"one of {_N2_MODES}")
+        _cfg = _cfg._replace(n2_mode=n2_mode)
+    if n2_eos_form is not None:
+        _EOS_FORMS = ("seos", "teos10")
+        if n2_eos_form not in _EOS_FORMS:
+            raise ValueError(
+                f"orca1_zdftke_config n2_eos_form {n2_eos_form!r} invalid; "
+                f"expected one of {_EOS_FORMS}")
+        _cfg = _cfg._replace(n2_eos_form=n2_eos_form)
     # Prognostic vs diagnostic TKE (``--tke-prognostic``).  DEFAULT keeps the
     # card value (False = the DINO-validated quasi-steady Mode-B diagnostic, 3
     # backward-Euler iters).  True selects NEMO's PROGNOSTIC en integration
@@ -528,7 +911,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
-                              tke_prognostic=None):
+                              tke_n2_mode=None, tke_n2_eos_form=None,
+                              tke_prognostic=None, tke_kappa_convention=None,
+                              tke_shear_production=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -557,7 +942,11 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
-                    ("--tke-prognostic", tke_prognostic)):
+                    ("--tke-n2-mode", tke_n2_mode),
+                    ("--tke-n2-eos-form", tke_n2_eos_form),
+                    ("--tke-prognostic", tke_prognostic),
+                    ("--tke-kappa-convention", tke_kappa_convention),
+                    ("--tke-shear-production", tke_shear_production)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -568,7 +957,11 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
                                    mxl_choice=tke_mxl_choice,
-                                   prognostic=tke_prognostic)
+                                   n2_mode=tke_n2_mode,
+                                   n2_eos_form=tke_n2_eos_form,
+                                   prognostic=tke_prognostic,
+                                   kappa_convention=tke_kappa_convention,
+                                   shear_production=tke_shear_production)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -611,8 +1004,13 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
                   tke_mxl_choice=None, tke_prognostic=None,
+                  tke_n2_mode=None, tke_n2_eos_form=None,
+                  tke_kappa_convention=None, tke_shear_production=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
-                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT):
+                  gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
+                  gm_slope_scheme=None, gm_bolus_advection=None,
+                  gm_msc_stabilize=None,
+                  store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -627,6 +1025,24 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     """
     # Dispatch hardening at the programmatic surface too (argparse `choices`
     # only guards the CLI): ""/None/typos must not silently run as "none".
+    if gm_slope_scheme is not None and gm_slope_scheme not in _GM_SLOPE_SCHEMES:
+        raise ValueError(
+            f"unknown gm_slope_scheme {gm_slope_scheme!r}; expected one of "
+            f"{sorted(_GM_SLOPE_SCHEMES)}.")
+    if (gm_bolus_advection is not None
+            and gm_bolus_advection not in _GM_BOLUS_FORMS):
+        raise ValueError(
+            f"unknown gm_bolus_advection {gm_bolus_advection!r}; expected one "
+            f"of {sorted(_GM_BOLUS_FORMS)}.")
+    # `through_fct` is honored ONLY with slope_scheme="nemo_iso_lap": the model
+    # gates on exactly that pair (ocean_model_latlon_cgrid `_want_bolus`), so
+    # any other slope scheme would silently keep the centred bolus flux while
+    # the run manifest claimed FCT routing.  Fail instead.
+    if gm_bolus_advection == "through_fct" and gm_slope_scheme != "nemo_iso_lap":
+        raise ValueError(
+            "gm_bolus_advection='through_fct' requires "
+            "gm_slope_scheme='nemo_iso_lap' (the model honors the pair, not "
+            f"the flag alone); got gm_slope_scheme={gm_slope_scheme!r}.")
     if tripole_vmix not in ("none", "tke", "kpp"):
         raise ValueError(
             f"unknown tripole_vmix {tripole_vmix!r}; expected 'none', 'tke' "
@@ -701,33 +1117,42 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # NEMO-faithful eddy-induced-velocity coefficient.  NEMO ORCA1 runs
         # &namtra_eiv with ln_ldfeiv=.true. and nn_aei_ijk_t=21 -> aeiu/aeiv =
         # F(growth rate of baroclinic instability), a 2-D time-varying field
-        # capped at aei0 = rn_Ue*rn_Le = 0.018 * 100e3 = 1800 m^2/s
-        # (ldftra.F90:386).  legoESM's TreguierConfig IS that scaling (already
-        # used by the DINO oracle card).  The tripole default
-        # (run_omip._DEFAULT_BATHY_GM_REDI) instead runs the VISBECK adaptive
-        # coefficient (kappa_GM=800, alpha=0.015, kappa in [200,2000]) -- a
-        # different closure.  Visbeck and Treguier are mutually exclusive
-        # (gm_redi_latlon_cgrid raises), so this swaps one for the other and
-        # leaves kappa_Redi / S_max at the proven tripole values.
-        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
-            validate_treguier_cfg as _validate_treguier_cfg,
-        )
-        from legoesm.ocean.physics.lateral_mixing.config import (
-            GMRediConfig as _GMRediConfig, TreguierConfig as _TreguierConfig,
-            VisbeckConfig as _VisbeckConfig,
-        )
-        _base = run_omip._DEFAULT_BATHY_GM_REDI
-        _treg_cfg = _TreguierConfig(enabled=True, aei0=float(gm_aei0),
-                                    kappa_min=float(gm_kappa_min))
-        # Fail here rather than inside the first GM tendency.
-        _validate_treguier_cfg(_treg_cfg)
-        _ovr["gm_redi"] = _base._replace(
-            visbeck=_VisbeckConfig(enabled=False),
-            treguier=_treg_cfg,
-        )
+        # capped at aei0 = 1/2*rn_Ue*rn_Le = 0.5 * 0.018 * 100e3 = 900 m^2/s
+        # (ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud for the laplacian, which
+        # ORCA1 runs; NEMO's emitted aeiu_2d maxes at exactly 900).  legoESM's
+        # TreguierConfig IS that scaling (already used by the DINO oracle card).
+        # Visbeck and Treguier are mutually exclusive (gm_redi_latlon_cgrid
+        # raises); the tripole recipe already ships Visbeck OFF, so this only
+        # turns the Treguier block on.
+        _ovr["gm_redi"] = _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min)
         print(f"[setup] tripole GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
               f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
               f"kappa_min={float(gm_kappa_min):g} m^2/s) — Visbeck OFF")
+    # NEMO-faithful lateral-mixing lane (opt-in).  Composes with whichever
+    # kappa_GM scheme is active above: this touches ONLY the operator fields, so
+    # `--gm-slope-scheme nemo_iso_lap` alone is a one-variable operator swap
+    # against the control, independent of the coefficient.
+    if gm_slope_scheme is not None or gm_bolus_advection is not None:
+        _gm_base = _ovr.get("gm_redi", config.flat_get("gm_redi"))
+        if _gm_base is None:
+            raise ValueError(
+                "--gm-slope-scheme / --gm-bolus-advection need GM/Redi "
+                "enabled; this run has it disabled (--no-gm-redi).")
+        _gm_kw = {}
+        if gm_slope_scheme is not None:
+            _gm_kw["slope_scheme"] = gm_slope_scheme
+        if gm_bolus_advection is not None:
+            _gm_kw["gm_bolus_advection"] = gm_bolus_advection
+        if gm_msc_stabilize is not None:
+            _gm_kw["msc_stabilize"] = bool(gm_msc_stabilize)
+        _ovr["gm_redi"] = _gm_base._replace(**_gm_kw)
+        print(f"[setup] tripole GM/Redi operator: "
+              f"slope_scheme={_ovr['gm_redi'].slope_scheme}, "
+              f"gm_bolus_advection={_ovr['gm_redi'].gm_bolus_advection}, "
+              f"msc_stabilize={_ovr['gm_redi'].msc_stabilize} "
+              f"(NEMO ORCA1 = nemo_iso_lap + through_fct + msc_stabilize; "
+              f"NOTE the bolus then rides THIS run's tracer limiter, which is "
+              f"not necessarily NEMO's FCT)")
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -786,7 +1211,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
-            tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic)
+            tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
+            tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
+            tke_kappa_convention=tke_kappa_convention,
+            tke_shear_production=tke_shear_production)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -855,6 +1283,17 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
               f"IWM={'on' if _use_iwm else 'off'} "
               f"DDM={'on' if _use_ddm else 'off'}")
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.
+        _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue: keep the column-integrated advective SALT flux so the
+        # gateway accumulator integrates the model's own limited fluxes
+        # (exact channel) alongside its upwind estimate.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -992,7 +1431,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
-                  prescribed_flow=None, no_gm_redi=False):
+                  prescribed_flow=None, no_gm_redi=False,
+                  store_mass_flux=False, store_salt_flux=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -1071,6 +1511,19 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     # implicit solve is unconditionally stable -> force it on for the OMIP latlon
     # path (20-level happened to stay under the explicit CFL; 75-level does not).
     _ovr["implicit_vertical_mixing"] = True
+    if store_mass_flux:
+        # #1442: keep the tracer-advecting mass flux on the returned state so
+        # transport diagnostics integrate the flux the model actually used
+        # instead of reconstructing h*u from the post-barotropic velocity.
+        # Pure diagnostic -- the trajectory is unchanged.  Threaded here as
+        # well as in build_tripole because --gateway-transports supports BOTH
+        # app grids (SUPPORTED_APP_GRIDS = ("tripole", "latlon")); wiring only
+        # the tripole left every supported latlon run silently reconstructing
+        # (codex RED 6).
+        _ovr["store_mass_flux"] = True
+    if store_salt_flux:
+        # Salt analogue, threaded in BOTH builders for the same RED-6 reason.
+        _ovr["store_salt_flux"] = True
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -1848,7 +2301,9 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
-                            tke_prognostic=None):
+                            tke_prognostic=None, tke_kappa_convention=None,
+                            tke_shear_production=None,
+                            tke_n2_mode=None, tke_n2_eos_form=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -1869,7 +2324,11 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
-                        ("--tke-prognostic", tke_prognostic)):
+                        ("--tke-n2-mode", tke_n2_mode),
+                        ("--tke-n2-eos-form", tke_n2_eos_form),
+                        ("--tke-prognostic", tke_prognostic),
+                        ("--tke-kappa-convention", tke_kappa_convention),
+                    ("--tke-shear-production", tke_shear_production)):
         if _val is not None and not (grid == "tripole"
                                      and tripole_vmix == "tke"):
             raise SystemExit(
@@ -3244,8 +3703,149 @@ def _gateway_transport_diag(acc, out_dir, io_proc: bool = True):
             for nm, (vol_sv, salt) in rows.items():
                 fh.write(f"gateway_{nm}_vol_Sv {vol_sv:.6f}\n")
                 fh.write(f"gateway_{nm}_salt_psu_m3s {salt:.6e}\n")
+            # EXACT advective salt transport (store_salt_flux), APPENDED
+            # after the legacy block so every pre-existing line stays
+            # byte-identical; absent (legacy accumulator) => no new lines.
+            _se_mean = acc.salt_exact_mean
+            if _se_mean is not None:
+                for i, nm in enumerate(acc.names):
+                    fh.write(f"gateway_{nm}_salt_exact_psu_m3s "
+                             f"{float(_se_mean[i]):.6e}\n")
     except Exception as e:  # a diagnostic must never crash the run
         print(f"[gateway] transport diag skipped: {type(e).__name__}: {e}")
+
+
+GATEWAY_CUMULATIVE_CSV = "gateway_transports.csv"
+
+
+class _GatewayCumulativeCsv:
+    """Writer state for ``gateway_transports.csv``.
+
+    Three fields, each load-bearing:
+
+    ``fh``      the open handle, or ``None`` once the writer has been DISABLED.
+                A write failure disables it permanently instead of leaving a
+                broken handle to be retried at every later cadence (codex
+                round-1 YELLOW 2).
+    ``names``   the gateway order the HEADER was built from.  A row whose
+                accumulator names differ is refused, so a gateway's transport
+                can never land under another gateway's column.
+    ``last_n``  the accumulator count of the last row written.  Dump points can
+                coincide -- the run-end row, the abort row and a cadence row
+                can all land on the same step -- and a duplicated endpoint
+                would make a reader's window silently zero-length.
+    """
+
+    __slots__ = ("fh", "names", "last_n")
+
+    def __init__(self, fh, names):
+        self.fh = fh
+        self.names = tuple(names)
+        self.last_n = None
+
+
+def _gateway_cumulative_open(out_dir, names, io_proc: bool = True):
+    """Open ``gateway_transports.csv`` and write its header.  Returns a handle.
+
+    WHY A SECOND FILE, AND WHY A CSV.  ``transports.txt`` is the run's
+    key-value scalar dump: one ``name value`` line per quantity, written ONCE
+    at run end.  Repeating that block per cadence would give duplicate keys
+    that no existing reader of that file expects, so the whole-run block stays
+    exactly as it is (byte-identical) and the per-cadence series goes to its
+    own file -- the same split the driver already makes between the run-end
+    scalars and ``diag_timeseries.csv``.  The CSV follows that sibling's
+    conventions: opened once with a header, one row appended and FLUSHED per
+    dump (observable mid-run under a pipe-buffered stdout), process-0 only,
+    closed at the end.
+
+    Returns a :class:`_GatewayCumulativeCsv`, or ``None`` when disabled or on
+    any failure.  ``None`` makes every other function here a no-op, so a
+    writer problem degrades the diagnostic and never the run.
+    """
+    if not io_proc:
+        return None
+    # Bound OUTSIDE the try so the except can close a handle that was opened
+    # before the header write failed; returning None with the file still open
+    # leaked it for the rest of the run (codex round-2 YELLOW 2).
+    fh = None
+    try:
+        from legoesm.ocean.diagnostics_sections import gateway_cumulative_columns
+        names = tuple(names)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        fh = open(Path(out_dir) / GATEWAY_CUMULATIVE_CSV, "w")
+        fh.write(",".join(gateway_cumulative_columns(names)) + "\n")
+        fh.flush()
+        return _GatewayCumulativeCsv(fh, names)
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV disabled: {type(e).__name__}: {e}")
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:  # noqa: BLE001 -- already failing; nothing to add
+                pass
+        return None
+
+
+def _gateway_cumulative_row(gw_csv, acc, step, day) -> None:
+    """APPEND one CUMULATIVE-sum row and flush.  No-op when either is ``None``.
+
+    CUMULATIVE, never per-window: nothing is reset, so the run-end whole-run
+    mean is produced by the very same accumulator and a window is recovered by
+    the reader as ``(cumsum_b - cumsum_a) / (n_b - n_a)``.
+
+    A row is SKIPPED (not written) in three cases, each of which would corrupt
+    a reader's arithmetic rather than merely lose a row:
+      * the accumulator's names disagree with the header's -> mis-assigned
+        columns;
+      * ``acc.n`` equals the last row's ``n_steps`` -> a duplicated endpoint,
+        whose window has zero steps;
+      * the writer has already been disabled by an earlier failure.
+    """
+    if gw_csv is None or acc is None or gw_csv.fh is None:
+        return
+    try:
+        from legoesm.ocean.diagnostics_sections import (
+            format_gateway_cumulative_row,
+        )
+        if tuple(acc.names) != gw_csv.names:
+            # Skip the row rather than write one whose columns mean something
+            # other than what the header says.  Loud, because a mis-assigned
+            # gateway column is exactly the kind of defect that survives review.
+            print(f"[gateway] cumulative row SKIPPED at step {step}: "
+                  f"accumulator names {tuple(acc.names)} != header names "
+                  f"{gw_csv.names}; the columns would be mis-assigned.")
+            return
+        n = int(acc.n)
+        if gw_csv.last_n is not None and n == gw_csv.last_n:
+            # Dump points coincide when the run ends exactly on a cadence
+            # boundary, or when the abort fires on a step already dumped.  Two
+            # identical rows give a reader a zero-step window and a 0/0 mean.
+            return
+        gw_csv.fh.write(format_gateway_cumulative_row(acc, step, day) + "\n")
+        gw_csv.fh.flush()
+        gw_csv.last_n = n
+    except Exception as e:  # a diagnostic must never crash the run
+        # DISABLE, do not merely skip: the handle may be broken (full disk,
+        # closed file, dead NFS mount) and retrying it at every later cadence
+        # would spam the log and write nothing (codex round-1 YELLOW 2).
+        print(f"[gateway] cumulative CSV DISABLED at step {step} after "
+              f"{type(e).__name__}: {e}")
+        try:
+            gw_csv.fh.close()
+        except Exception:  # noqa: BLE001 -- already failing; nothing to add
+            pass
+        gw_csv.fh = None
+
+
+def _gateway_cumulative_close(gw_csv) -> None:
+    """Close the cumulative CSV.  No-op when never opened or already disabled."""
+    if gw_csv is None or gw_csv.fh is None:
+        return
+    try:
+        gw_csv.fh.close()
+    except Exception as e:  # a diagnostic must never crash the run
+        print(f"[gateway] cumulative CSV close failed: {type(e).__name__}: {e}")
+    gw_csv.fh = None
 
 
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
@@ -3282,7 +3882,7 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
 
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
-                   io_proc: bool = True, ice_state=None):
+                   io_proc: bool = True, ice_state=None, grid=None):
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -3313,6 +3913,37 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     # MPAS has no separate v field; the scorer reads T/S/land_mask/lat_T/lon_T only.
     if getattr(state, "v", None) is not None:
         save_kw["v"] = np.asarray(state.v.data)
+    # The TRACER-ADVECTING mass flux, when the run captured it
+    # (``store_mass_flux``/``--gateway-transports``).  #1442: ``state.u`` is the
+    # velocity BEFORE the barotropic transport correction
+    # ``delta_U = (Hu_avg - Hu_3d)/H_u_old`` -- that correction reaches the
+    # tracer flux and never reaches ``state.u`` -- so an offline diagnostic that
+    # rebuilds ``h * u`` from a snapshot is missing a depth-uniform mode.
+    # MEASURED on eORCA1 (nemolev_trp_icemelt70_d90): the reconstructed net
+    # meridional transport differed from the convergence implied by the measured
+    # sea-level change by 0.35-1.28 Sv at every latitude -- ~100% of the
+    # apparent signal at 66N.  #1440 made the corrected flux available IN STATE;
+    # persisting it here is what lets an offline reader use it.
+    # EXTRA keys only: old readers ignore them and old snapshots stay loadable.
+    _stored_flux = False
+    for _name in ("mass_flux_u", "mass_flux_v", "mass_flux_w"):
+        _f = getattr(state, _name, None)
+        if _f is not None and getattr(_f, "data", None) is not None:
+            save_kw[_name] = np.asarray(_f.data)
+            _stored_flux = True
+    # The flux is THICKNESS-weighted velocity [m^2/s], so a reader still needs
+    # the face widths to reach m^3/s (codex: the arrays alone are not
+    # self-contained). Those live on the runtime grid, which an offline reader
+    # does not have, so save them alongside — only when a flux was stored, and
+    # only if the grid exposes them (a regular lat-lon grid may not).
+    if _stored_flux and grid is not None:
+        for _m in ("dy_u", "dx_v", "dx_u", "dy_v"):
+            _val = getattr(grid, _m, None)
+            if _val is not None:
+                try:
+                    save_kw[_m] = np.asarray(_val)
+                except Exception:       # pragma: no cover - exotic grid proxy
+                    pass
     # Free surface: carried so an OFFLINE tool can re-seed a state from this
     # snapshot without a barotropic-adjustment shock; the scorer ignores it.
     # NB --restart-from does NOT read snapshots (codex r4 LOW): the restart
@@ -4023,10 +4654,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(VERTICAL spread).")
     p.add_argument("--river-mouth-restoring-gate", action="store_true",
                    help="Disable SSS restoring at river-mouth cells (runoff > "
-                        "threshold), like NEMO sbcssr's (1-2*rnfmsk) damping "
-                        "mask — otherwise the restoring fights the river plume "
-                        "toward the coarse WOA climatology. Requires --runoff "
-                        "+ --sss-restore.")
+                        "threshold) so the restoring does not fight the river "
+                        "plume toward the coarse WOA climatology. NOTE this is "
+                        "a legoESM DEVIATION, not NEMO parity: sbcssr's "
+                        "(1-2*rnfmsk) mask is INACTIVE in the ORCA1 deck "
+                        "(ln_rnf_mouth defaults .false., so rnfmsk==0 and the "
+                        "factor is 1) — NEMO restores FULLY at river mouths "
+                        "there. Requires --runoff + --sss-restore.")
     p.add_argument("--ew-cyclic-overlap", action="store_true",
                    help="TRIPOLE ONLY: reconnect the ORCA east-west cyclic seam "
                         "(lon ~72.5E on eORCA1). The eORCA1 mesh marks the 2 cyclic "
@@ -4112,6 +4746,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
                         "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
                         "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-channel", default=None,
+                   choices=["tracer", "water_flux"],
+                   help="How SSS restoring reaches the ocean (tripole/latlon). "
+                        "Unset = 'tracer' (default, bit-identical to earlier "
+                        "runs): a post-step salinity edit, which is a "
+                        "virtual-salt-like operation that moves no water and "
+                        "carries no heat. 'water_flux' is NEMO nn_sssr=2: the "
+                        "flux enters the freshwater budget (so it drives eta / "
+                        "z-star dilution, NEMO sshwzv.F90:123) and carries "
+                        "qns -= erp*rcp*sst_m (sbcssr.F90:138). The post-step "
+                        "edit is then SKIPPED -- the two channels are "
+                        "exclusive, since running both applies restoring "
+                        "twice. Requires --sss-restore-normalization live_s, "
+                        "NEMO's own conversion for a real water flux.")
+    p.add_argument("--sss-restore-normalization", default=None,
+                   choices=["s_target", "live_s"],
+                   help="Denominator of the SSS-restoring salinity->freshwater "
+                        "conversion. Unset keeps the card value ('s_target', "
+                        "bit-identical to earlier runs). 'live_s' is NEMO "
+                        "sbcssr nn_sssr=2 (sbcssr.F90:132-134), which ORCA1 "
+                        "runs: zerp = zsrp*coefice*(sss_m - sss_target)/"
+                        "MAX(sss_m,1e-20) -- divided by the LIVE surface "
+                        "salinity. Under 'live_s' the restoring is a genuine "
+                        "water flux, which is what makes it compatible with "
+                        "--freshwater-closure real_freshwater.")
     p.add_argument("--sss-restore-bound-mmday", type=float, default=None,
                    help="Bound |restoring FW flux| at this mm/day-equivalent "
                         "(NEMO ln_sssr_bnd: rn_sssr_bnd=4.0 in the ORCA1 "
@@ -4374,8 +5033,54 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-shear-production", type=str, default=None,
+                   choices=["squared_centered", "nemo_face_native",
+                            "nemo_burchard"],
+                   help="TKE shear-production discretisation for "
+                        "--tripole-vmix tke. None (default) keeps the card "
+                        "value ('squared_centered': velocities averaged to "
+                        "cell centres, then differenced). 'nemo_face_native' "
+                        "is NEMO's zdf_sh2 -- face-native differences, a now "
+                        "x before velocity product, and production DOUBLED "
+                        "adjacent to coasts via (2 - umask*umask) "
+                        "(zdfsh2.F90:78-94). Averaging before differencing "
+                        "SMOOTHS, so the default is systematically weaker "
+                        "than NEMO's; this is the last unclosed gap on the "
+                        "ORCA1 card and the only one an offline column probe "
+                        "cannot evaluate, because it needs the raw C-grid "
+                        "face state. Requires --partial-cell (k_profiles "
+                        "builds wumask/wvmask/coast masks from "
+                        "z_coord.is_active) and --tripole-vmix tke.")
+    p.add_argument("--tke-kappa-convention", type=str, default=None,
+                   choices=["veros_sqrte", "gaspar_sqrt2e"],
+                   help="Amplitude of K from TKE for --tripole-vmix tke. "
+                        "None (default) keeps the card value ('veros_sqrte' "
+                        "= NEMO's avm = rn_ediff*zmxlm*sqrt(en), zdftke.F90:"
+                        "150/553). 'gaspar_sqrt2e' restores the legacy "
+                        "c_k*l_k*sqrt(2*e) amplitude, which DOUBLE-COUNTS the "
+                        "sqrt(2) already carried by the nn_mxl=2/3 buoyancy "
+                        "length sqrt(2e)/N and measured 4.81x NEMO's avt "
+                        "against 3.25x for the NEMO form (Stage A, 39ce0701c) "
+                        "-- supply it only to reproduce arms that predate the "
+                        "fix. Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-n2-mode", default=None,
+                   choices=["insitu", "insitu_signed", "adiabatic",
+                            "nemo_bn2"],
+                   help="Override the stratification the ORCA1 zdftke card "
+                        "feeds its closure. The card selects 'nemo_bn2' "
+                        "(NEMO's own eosbn2 assembly, what ORCA1 runs). "
+                        "'insitu' reverts ONLY that, which is the "
+                        "one-variable control: the in-situ density gradient "
+                        "carries a +g^2/c^2 = 4.27e-5 s^-2 compressibility "
+                        "bias the adiabatic form does not. Requires --grid "
+                        "tripole --tripole-vmix tke.")
+    p.add_argument("--tke-n2-eos-form", default=None,
+                   choices=["seos", "teos10"],
+                   help="Which alpha/beta the nemo_bn2 assembly uses. The "
+                        "card selects 'teos10' (ORCA1 runs ln_teos10=.true.). "
+                        "Inert under every other --tke-n2-mode.")
     p.add_argument("--tke-mxl-choice", type=int, default=None,
-                   choices=[2, 3, 4],
+                   choices=list(TKE_MXL_CHOICES),
                    help="TKE mixing-length formulation for --tripole-vmix tke. "
                         "None (default) keeps the card value (3 since #1326 = "
                         "NEMO nn_mxl=3: lup/ldown |dl/dz|<=e3t sweeps WITH the "
@@ -4406,8 +5111,37 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "aeiu/aeiv = F(growth rate of baroclinic instability), "
                         "capped at aei0) INSTEAD of the tripole default's "
                         "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
-                        "(rn_Ue=0.018, rn_Le=100e3 => aei0=1800 m^2/s); the two "
+                        "(rn_Ue=0.018, rn_Le=100e3, laplacian => "
+                        "aei0 = 1/2*rn_Ue*rn_Le = 900 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
+    p.add_argument("--gm-slope-scheme", choices=_GM_SLOPE_SCHEMES, default=None,
+                   help="Isoneutral-slope operator for GM/Redi (tripole only). "
+                        "Unset keeps the recipe's 'centered'. 'nemo_iso_lap' is "
+                        "NEMO's STANDARD rotated laplacian, which is what ORCA1 "
+                        "runs (namelist_cfg: ln_traldf_lap=.true., "
+                        "ln_traldf_iso=.true., ln_traldf_triad=.false.) and "
+                        "which carries the akz stabilization of "
+                        "ln_traldf_msc=.true.; our default has neither. Required "
+                        "for --gm-bolus-advection through_fct.")
+    p.add_argument("--gm-bolus-advection", choices=_GM_BOLUS_FORMS, default=None,
+                   help="GM eddy-induced (bolus) transport form (tripole only). "
+                        "Unset keeps the recipe's 'centred' = a standalone, "
+                        "UNLIMITED centred flux. 'through_fct' adds the bolus to "
+                        "the tracer advecting mass flux so it rides the monotone "
+                        "FCT limiter -- what NEMO does (LDF/ldftra.F90 "
+                        "ldf_eiv_trp, called by traadv.F90). Honored ONLY with "
+                        "--gm-slope-scheme nemo_iso_lap (the model gates on the "
+                        "pair), so passing it alone raises rather than silently "
+                        "keeping the centred flux.")
+    p.add_argument("--gm-msc-stabilize", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="NEMO ln_traldf_msc (Method of Stabilizing Correction) "
+                        "for the isoneutral operator (tripole only). Unset "
+                        "keeps the card value (GMRediConfig.msc_stabilize "
+                        "defaults False). ORCA1 runs ln_traldf_msc=.true., and "
+                        "--gm-slope-scheme nemo_iso_lap does NOT imply it: the "
+                        "akz split is gated on this SEPARATE field, so a NEMO "
+                        "operator match needs both.")
     p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
                         "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
@@ -4421,7 +5155,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "the Hallberg resolution scaling, as Visbeck's is.")
     p.add_argument("--gm-aei0", type=float, default=_GM_AEI0_DEFAULT,
                    help="kappa_GM cap [m^2/s] for --gm-treguier = NEMO "
-                        "rn_Ue*rn_Le (ORCA1: 0.018*100e3 = 1800). Default 1800.")
+                        "1/2*rn_Ue*rn_Le for the laplacian operator (ORCA1: "
+                        "0.5*0.018*100e3 = 900; ldftra.F90:290-293, and NEMO's "
+                        "own aeiu_2d maxes at exactly 900). Default 900.")
+    p.add_argument("--freshwater-closure", type=str, default=None,
+                   choices=["none", "virtual_salt_flux", "real_freshwater"],
+                   help="Ocean freshwater closure. 'virtual_salt_flux' "
+                        "(current default) applies a virtual salt flux "
+                        "-S_ref*F_fw/(rho0*dz0) ON TOP OF the z-star eta "
+                        "channel, which already conserves h*S while the "
+                        "column stretches -- a spurious salt source NEMO "
+                        "does not have under variable volume (measured at "
+                        "+10.109 psu.m of excess Arctic salt over 60 d). "
+                        "'real_freshwater' keeps the eta/volume channel and "
+                        "drops ONLY that virtual-salt term; the genuine "
+                        "sea-ice salt flux pathway is unaffected. See "
+                        "docs/dev-notes/ocean_real_freshwater_design.md.")
     p.add_argument("--freshwater-salinity", type=str, default="s_ref",
                    choices=["s_ref", "local"],
                    help="Salinity multiplying the freshwater flux in the "
@@ -4438,7 +5187,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "through the Arctic gateways (Bering/Pacific, "
                         "Davis/CAA, Atlantic/Nordic, Siberian) on the "
                         "lat>=66N region boundary and append them to "
-                        "transports.txt. Pure diagnostic: reads the state "
+                        "transports.txt (upwind AND, via store_salt_flux, "
+                        "the model's EXACT advective salt transport; their "
+                        "difference is the face-scheme gap plus a one-step "
+                        "salinity time-level offset). ALSO dumps the "
+                        "accumulator's "
+                        "CUMULATIVE sums + step count to "
+                        f"{GATEWAY_CUMULATIVE_CSV} at the "
+                        "--snapshot-every-days cadence (plus one row at run "
+                        "end), so the mean over ANY window is recovered "
+                        "exactly by differencing two rows: "
+                        "(cumsum_b - cumsum_a) / (n_b - n_a). Nothing is "
+                        "reset, so the transports.txt whole-run mean is "
+                        "unchanged. Pure diagnostic: reads the state "
                         "after each step and never writes back, so the "
                         "trajectory is bit-identical with the flag off. "
                         "Sign: POSITIVE = INTO the Arctic. tripole / latlon "
@@ -4795,7 +5556,10 @@ def main() -> int:
     # its "none" default and under the kpp closure.
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
-                            args.tke_prognostic)
+                            args.tke_prognostic, args.tke_kappa_convention,
+                            args.tke_shear_production,
+                            tke_n2_mode=args.tke_n2_mode,
+                            tke_n2_eos_form=args.tke_n2_eos_form)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -4807,6 +5571,65 @@ def main() -> int:
             "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
             "selects the NEMO ldf_eiv kappa_GM scheme, the latter disables "
             "GM/Redi entirely.")
+    # Same guards for the OPERATOR flags: they are read only inside
+    # build_tripole, so on any other grid they would be silently discarded.
+    _gm_op_flags = [n for n, v in (("--gm-slope-scheme", args.gm_slope_scheme),
+                                   ("--gm-bolus-advection",
+                                    args.gm_bolus_advection),
+                                   ("--gm-msc-stabilize",
+                                    args.gm_msc_stabilize)) if v is not None]
+    if _gm_op_flags and args.grid != "tripole":
+        raise SystemExit(
+            f"{' and '.join(_gm_op_flags)} is wired for --grid tripole only "
+            f"(the GM/Redi override lives in build_tripole); got --grid "
+            f"{args.grid!r}.")
+    if _gm_op_flags and args.no_gm_redi:
+        raise SystemExit(
+            f"{' and '.join(_gm_op_flags)} and --no-gm-redi are mutually "
+            "exclusive: the former select the GM/Redi operator, the latter "
+            "disables GM/Redi entirely.")
+    # ORDERED MOST-SPECIFIC-FIRST, and this one is the most specific: a
+    # channel selected for a restoring that is switched off.  The previous
+    # ordering fixed only the closure check, so `water_flux` ALONE still
+    # reported "requires live_s" -- and the test missed it because it supplied
+    # live_s (codex 9387497).
+    if (args.sss_restore_channel == "water_flux"
+            and not getattr(args, "sss_restore", False)):
+        raise SystemExit(
+            "--sss-restore-channel water_flux without --sss-restore selects a "
+            "channel for a restoring that is switched off; drop the flag.")
+    # The water-flux channel needs NEMO's own conversion: `s_target` is the
+    # virtual-salt form, and routing THAT through the freshwater budget would
+    # move water at a rate derived from the wrong denominator.
+    if (args.sss_restore_channel == "water_flux"
+            and args.sss_restore_normalization != "live_s"):
+        raise SystemExit(
+            "--sss-restore-channel water_flux requires "
+            "--sss-restore-normalization live_s: the water flux is NEMO's "
+            "nn_sssr=2 form (divided by the LIVE surface salinity), whereas "
+            "the default 's_target' is the virtual-salt conversion and would "
+            "move water at the wrong rate.")
+    # The default `virtual_salt_flux` closure builds its net INTERNALLY from
+    # the FreshwaterForcing (`virtual_salt_flux(freshwater, ...)`,
+    # ocean_model_latlon_cgrid.py:5044), and that net INCLUDES `restoring`.
+    # So under that closure a populated `fw.restoring` would reach the ocean
+    # TWICE: once as volume through eta / z-star, and again as the closure's
+    # virtual-salt tendency.  (codex 9387241 RED, verified.)
+    if (args.sss_restore_channel == "water_flux"
+            and args.freshwater_closure != "real_freshwater"):
+        raise SystemExit(
+            "--sss-restore-channel water_flux requires --freshwater-closure "
+            "real_freshwater: the default virtual_salt_flux closure derives "
+            "its salt tendency from the NET freshwater, which already "
+            "includes fw.restoring, so routing restoring as water would apply "
+            "it twice (volume AND virtual salt).")
+    if (args.gm_bolus_advection == "through_fct"
+            and args.gm_slope_scheme != "nemo_iso_lap"):
+        raise SystemExit(
+            "--gm-bolus-advection through_fct requires --gm-slope-scheme "
+            "nemo_iso_lap: the model honors the PAIR (ocean_model_latlon_cgrid "
+            "`_want_bolus`), so through_fct alone would silently keep the "
+            "centred bolus flux while the manifest claimed FCT routing.")
     # Symmetric guard: the two Treguier tunables are read ONLY inside the
     # --gm-treguier branch of build_tripole, so a non-default value passed
     # without the scheme flag would evaporate silently.
@@ -4941,10 +5764,21 @@ def main() -> int:
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
             tke_mxl_choice=args.tke_mxl_choice,
+            tke_n2_mode=args.tke_n2_mode,
+            tke_n2_eos_form=args.tke_n2_eos_form,
             tke_prognostic=args.tke_prognostic,
+            tke_kappa_convention=args.tke_kappa_convention,
+            tke_shear_production=args.tke_shear_production,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            gm_slope_scheme=args.gm_slope_scheme,
+            gm_bolus_advection=args.gm_bolus_advection,
+            gm_msc_stabilize=args.gm_msc_stabilize,
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
+            store_salt_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -5076,6 +5910,14 @@ def main() -> int:
             vertical_mixing=_kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv, args.kpp_eice),
             prescribed_flow=args.prescribed_flow,
             no_gm_redi=args.no_gm_redi,
+            # #1442: same --gateway-transports override the tripole branch
+            # passes.  "latlon" IS in SUPPORTED_APP_GRIDS, so leaving it out
+            # made every supported latlon gateway run fall back to the h*u
+            # reconstruction the flag exists to replace (codex RED 6).
+            store_mass_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
+            store_salt_flux=bool(getattr(args, "gateway_transports",
+                                         False)),
         )
         app_grid_type = "latlon"
 
@@ -5125,6 +5967,37 @@ def main() -> int:
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
                     "section and use the CLI flags -- not both.")
+            # Same class of conflict for #1442 (codex round-6 RED 3): this
+            # rebuild happens AFTER the gateway builders set store_mass_flux
+            # from --gateway-transports, so a YAML
+            # ``ocean: {store_mass_flux: false}`` would silently switch the
+            # capture back off and the gateway accumulator would quietly
+            # integrate the h*u reconstruction under a flag that promises the
+            # exact flux.  Fail loud; YAML never wins over the explicit CLI.
+            if ("store_mass_flux" in _ovr
+                    and getattr(args, "gateway_transports", False)
+                    and not _ovr["store_mass_flux"]):
+                raise ValueError(
+                    "--gateway-transports conflicts with --config "
+                    "ocean.store_mass_flux=false: the flag turns the capture ON "
+                    "so the diagnostic integrates the flux the model actually "
+                    "advected with, and the YAML would turn it back off AFTER "
+                    "the builder, silently downgrading the diagnostic to the "
+                    "h*u reconstruction. Drop one of the two.")
+            # Identical conflict class for the EXACT-salt capture: the
+            # builders set store_salt_flux from --gateway-transports and the
+            # per-step gateway call passes require_salt=True, so a YAML
+            # switch-off would turn the promised exact channel into a raise
+            # at step 1 -- fail at setup instead, with the reason.
+            if ("store_salt_flux" in _ovr
+                    and getattr(args, "gateway_transports", False)
+                    and not _ovr["store_salt_flux"]):
+                raise ValueError(
+                    "--gateway-transports conflicts with --config "
+                    "ocean.store_salt_flux=false: the flag turns the "
+                    "exact-salt capture ON (require_salt=True in the gateway "
+                    "accumulator), and the YAML would turn it back off AFTER "
+                    "the builder. Drop one of the two.")
             model = LatLonCGridOceanModel(
                 grid, z_coord, model.config.replace_flat(**_ovr),
                 # Preserve the zdfiwm maps through the YAML rebuild (codex
@@ -5315,6 +6188,11 @@ def main() -> int:
               f"{args.nemo_monthly_init[1].rsplit('/', 1)[-1]}")
 
     sss_restore_cfg = None
+    # Defined unconditionally: the step loop reads it next to a
+    # `sss_restore_cfg is not None` short-circuit, and relying on that
+    # evaluation order for a name to exist is one reorder away from a
+    # NameError deep inside a multi-day run.
+    _sss_water_flux = False
     sss_restore_target = None
     # Monthly (sn_sss climatology) vs static (IC-surface) SSS target, detected
     # grid-agnostically below: monthly carries a leading 12-month axis ON TOP OF
@@ -5335,6 +6213,8 @@ def main() -> int:
         _cfg_kwargs = {}
         if args.sss_ice_gate_nemo:
             _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
+        if args.sss_restore_normalization is not None:
+            _cfg_kwargs["normalization"] = args.sss_restore_normalization
         if args.sss_restore_bound_mmday is not None:
             if not (float(args.sss_restore_bound_mmday) > 0.0):
                 raise ValueError("--sss-restore-bound-mmday must be > 0.")
@@ -5342,6 +6222,9 @@ def main() -> int:
             _cfg_kwargs["max_flux_kg_m2_s"] = (
                 float(args.sss_restore_bound_mmday) * 1.0e-3 / 86400.0
                 * float(constants.rho_water))
+        # Water-flux channel switch, resolved once so the step loop reads a
+        # plain bool (and so an unset flag can never accidentally enable it).
+        _sss_water_flux = (args.sss_restore_channel == "water_flux")
         sss_restore_cfg = SSSRestoringConfig(
             enabled=True,
             tau_restore_days_default=float(args.sss_restore_tau_days),
@@ -5503,6 +6386,25 @@ def main() -> int:
     _fw_cfg_kw = {}
     if args.freshwater_salinity != "s_ref":
         _fw_cfg_kw["freshwater_salinity"] = args.freshwater_salinity
+    if args.freshwater_closure is not None:
+        # Default None means "leave the config default alone", so an
+        # unset flag stays bit-identical to previous runs.
+        _fw_cfg_kw["freshwater_closure"] = args.freshwater_closure
+        # #1484 codex HIGH: SSS restoring is DERIVED as a virtual-salt
+        # equivalent -- sss_restoring inverts a target salt tendency into a
+        # water flux using S_target and a CONFIGURED z1. Under
+        # real_freshwater there is no virtual-salt term at all: the same
+        # number acts through volume-only dilution, whose realized strength
+        # depends on the LIVE salinity and the ACTUAL top-cell thickness, so
+        # the relaxation is the wrong magnitude. Refuse the pairing here --
+        # this is where restoring is switched on -- rather than in the ocean
+        # config, which has no restoring field to key off (the flux arrives
+        # as FreshwaterForcing.restoring, a traced array).
+        _fw_conflict = real_freshwater_restoring_conflict(
+            args.freshwater_closure, getattr(args, "sss_restore", False),
+            args.sss_restore_normalization, args.sss_restore_channel)
+        if _fw_conflict is not None:
+            raise SystemExit(_fw_conflict)
     if args.no_normalize_freshwater:
         # EXPLICIT opt-out of the global-freshwater normalization.  The
         # CORE-II P-E+R integral is a real ~+0.65 Sv imbalance, so turning
@@ -6406,7 +7308,8 @@ def main() -> int:
                 if not d["finite"]:
                     print("[ABORT] non-finite state", flush=True)
                     _save_snapshot(out_dir, f"blowup_step{step}",
-                                   state, lat2d, lon2d, io_proc=_is_io_proc())
+                                   state, lat2d, lon2d, grid=grid,
+                                   io_proc=_is_io_proc())
                     _close_csv()
                     return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
@@ -6417,7 +7320,7 @@ def main() -> int:
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
                 _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
-                               z_coord=z_coord, io_proc=_is_io_proc())
+                               z_coord=z_coord, grid=grid, io_proc=_is_io_proc())
                 print(f"[snapshot] year {yr} saved", flush=True)
         state = jax.block_until_ready(state)
         _io = _is_io_proc()
@@ -6522,40 +7425,67 @@ def main() -> int:
     # --- Arctic gateway transport accumulator (pure diagnostic) ----------
     _gw_acc = None
     _gw_gates = None
+    _gw_geom = None
+    _gw_csv = None
     if getattr(args, "gateway_transports", False):
         if getattr(state, "v", None) is None:
             print("[gateway] needs C-grid v faces; DISABLED for this run.")
         else:
             from legoesm.ocean.diagnostics_sections import (
-                setup_gateway_accumulator,
+                promote_gateway_geometry, setup_gateway_accumulator,
             )
             _gw_lat = (jnp.degrees(jnp.asarray(grid.lat_T))
                        if hasattr(grid, "lat_T") else jnp.asarray(lat2d))
             _gw_lon = (jnp.degrees(jnp.asarray(grid.lon_T))
                        if hasattr(grid, "lon_T") else jnp.asarray(lon2d))
-            _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
-                _gw_lat, _gw_lon, state.land_mask.data)
-            print(f"[gateway] accumulating through {len(_gw_gates.names)} "
-                  f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
-                  f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); + = INTO Arctic")
+            # Setup is inside the same non-fatal boundary as the per-step call
+            # (codex round-4 RED): a diagnostic must never abort the run.
+            try:
+                _gw_acc, _gw_gates, _gw_faces = setup_gateway_accumulator(
+                    _gw_lat, _gw_lon, state.land_mask.data)
+                # Promote ONCE, and prefer the model's own geometry: the ocean
+                # model already ran ensure_geometry(grid, metric_convention=
+                # config.metric_convention) in its constructor, so model.grid
+                # has the RIGHT face metrics.  Promoting inside the per-step
+                # call rebuilt every metric array each step and silently
+                # defaulted the convention to "exact" (codex r3 finding 1).
+                _gw_geom = promote_gateway_geometry(
+                    getattr(model, "grid", grid),
+                    metric_convention=getattr(model.config,
+                                              "metric_convention", "exact"))
+            except Exception as _gw_e:
+                print(f"[gateway] setup FAILED, diagnostic disabled: "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                _gw_acc = _gw_gates = _gw_geom = None
+            if _gw_acc is not None:
+                print(f"[gateway] accumulating through {len(_gw_gates.names)} "
+                      f"gateways ({int(jnp.sum(_gw_faces.u_sel))} u-faces, "
+                      f"{int(jnp.sum(_gw_faces.v_sel))} v-faces); "
+                      "+ = INTO Arctic")
+                # Per-cadence CUMULATIVE dump.  The run-end transports.txt
+                # block is a WHOLE-RUN mean, which cannot separate the
+                # cold-start adjustment from the settled window; differencing
+                # two rows of this file gives the mean over ANY window:
+                #   mean(n_a, n_b] = (cumsum_b - cumsum_a) / (n_b - n_a).
+                _gw_csv = _gateway_cumulative_open(
+                    out_dir, _gw_acc.names, io_proc=_is_io_proc())
+                if _gw_csv is not None:
+                    if snap_every > 0:
+                        print(f"[gateway] cumulative dumps -> "
+                              f"{GATEWAY_CUMULATIVE_CSV} every {snap_every} "
+                              f"steps ({args.snapshot_every_days:g} d) plus "
+                              f"one at run end; difference two rows for a "
+                              f"windowed mean", flush=True)
+                    else:
+                        # Honest, not silent: with no snapshot cadence the file
+                        # gets ONE row (run end) and carries no more
+                        # information than transports.txt already does.
+                        print(f"[gateway] --snapshot-every-days is 0, so "
+                              f"{GATEWAY_CUMULATIVE_CSV} will hold only the "
+                              f"run-end row; pass --snapshot-every-days N to "
+                              f"make windowed means recoverable", flush=True)
 
-    # --restart-from: skip ahead to the LAST viscosity segment already in force
-    # at the resume time, so the first resumed step rebuilds the model at the
-    # correct A_h instead of walking one segment per step (the schedule advances
-    # at most one index per iteration).  No-op for a fresh run (start_step=0).
-    if start_step > 0 and visc_schedule:
-        while (visc_seg_idx + 1 < len(visc_schedule)
-               and visc_schedule[visc_seg_idx + 1][0] * _SEC_PER_DAY
-               <= start_step * dt):
-            visc_seg_idx += 1
-        if visc_seg_idx:
-            print(f"[restart] --visc-schedule fast-forwarded to segment "
-                  f"{visc_seg_idx + 1}/{len(visc_schedule)} "
-                  f"(day {visc_schedule[visc_seg_idx][0]:g})", flush=True)
-
-    # Absolute-target resume: continue from the restart step to n_steps (the
-    # run target is absolute, NOT "n_steps more").  Fresh run => range(1, N+1).
-    for step in range(start_step + 1, n_steps + 1):
+    for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
@@ -6849,17 +7779,161 @@ def main() -> int:
             # the residency-helper classification).  t_seconds threads the
             # equilibrium-tide model time (None when tide off; the SPMD path
             # fail-fasts at setup if the tide is enabled).
+            # SSS-restoring INPUT ASSEMBLY, hoisted above the ocean step.
+            #
+            # VALUE-IDENTICAL to assembling it after the step, which is why the
+            # move is safe: the sea ice is updated earlier in THIS iteration
+            # (step_sea_ice, above), the runoff already fed `fw`, the monthly
+            # target selection is pure, and `_sss_ice` reads only `land_mask`
+            # (static) plus `ice_state`, which `_ocean_step` does not modify.
+            #
+            # WHY IT MOVED: routing restoring as a real water flux (NEMO
+            # nn_sssr=2) needs these inputs BEFORE the step, because the flux
+            # must enter `fw.restoring` / `q_net` instead of being applied as a
+            # post-step tracer edit.  It is also the more faithful ordering in
+            # its own right: NEMO computes `sbcssr` in the surface-forcing
+            # phase from the NOW-level SSS, whereas the post-step call below
+            # sees the already-updated salinity.
+            _sss_ice = None
+            _R_gate = None
+            _sss_tgt_step = None
+            if sss_restore_cfg is not None:
+                # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS
+                # restoring under sea ice).  Feed the SAME prescribed siconc
+                # the albedo uses (``_sic``); with --prognostic-sea-ice the
+                # prescribed NEMO siconc is no longer the truth, so gate on the
+                # LIVE (ocean-masked) prognostic concentration instead.
+                _sss_ice = _sic
+                if ice_resp is not None:
+                    _lc = ice_state.concentration.data
+                    if _lc.ndim > np.asarray(state.land_mask.data).ndim:
+                        _lc = jnp.sum(_lc, axis=-1)
+                    _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
+                # River-mouth gate (legoESM deviation, see sss_restoring.py):
+                # restoring OFF at river mouths so it does not fight the plume
+                # toward coarse WOA.  Gated by flag.
+                _R_gate = _R if args.river_mouth_restoring_gate else None
+                # Monthly (12, ...) NEMO sn_sss target -> this step's month;
+                # static IC-surface target unchanged.
+                _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
+                                 if _sss_monthly
+                                 else sss_restore_target)
+                # WATER-FLUX CHANNEL (NEMO nn_sssr=2).  Default OFF: the
+                # post-step tracer edit below stays the only application, so an
+                # unset flag is bit-identical to before.
+                #
+                # ON: the restoring flux enters `fw.restoring`, so it reaches
+                # the ocean the way NEMO's does -- through the freshwater
+                # budget, which drives eta / the z-star dilution
+                # (`freshwater_eta_tendency = net_freshwater_flux / rho_0`,
+                # the analogue of NEMO `pssh(Kaa) = pssh(Kbb) - rDt*(emp/rho0 +
+                # hdiv)`) -- and it carries NEMO's heat term
+                # (`qns -= erp*rcp*sst_m`, sbcssr.F90:138).  The post-step
+                # applier is then SKIPPED; running both would apply restoring
+                # TWICE, which is the sharpest failure mode of this change and
+                # is asserted against in tests.
+                if _sss_water_flux:
+                    from legoesm.ocean.forcing.sss_restoring import (
+                        compute_sss_restoring_flux as _sss_flux_fn,
+                    )
+                    _S_now = state.S.data[..., 0]
+                    _T_now = state.T.data[..., 0]          # potential temp [degC]
+                    _lm = jnp.asarray(state.land_mask.data, _S_now.dtype)
+                    _sss_out = _sss_flux_fn(
+                        S_model_top=_S_now,
+                        S_target=jnp.asarray(_sss_tgt_step, _S_now.dtype),
+                        lat_deg=jnp.asarray(lat2d, _S_now.dtype),
+                        lon_deg=jnp.asarray(lon2d, _S_now.dtype),
+                        ice_concentration=(jnp.zeros_like(_S_now)
+                                           if _sss_ice is None
+                                           else jnp.asarray(_sss_ice, _S_now.dtype)),
+                        config=sss_restore_cfg,
+                        river_runoff=(None if _R_gate is None
+                                      else jnp.asarray(_R_gate, _S_now.dtype)),
+                        sst_C=_T_now,
+                    )
+                    # Land cells contribute nothing to either budget.
+                    _fw_restore = _sss_out["freshwater_flux"] * _lm
+                    if fw is None:
+                        # `fw` is None when the run has no P-E, runoff or ice
+                        # (e.g. --no-emp on a forcing-free probe), and
+                        # `_replace` on None would crash at the first step
+                        # (codex 9387241).  Under this channel the restoring IS
+                        # physical freshwater, so it needs a carrier: build a
+                        # zero forcing and put it in the restoring slot.
+                        from legoesm.ocean.freshwater import FreshwaterForcing
+                        _z = jnp.zeros_like(_fw_restore)
+                        fw = FreshwaterForcing(precip=_z, evap=_z, runoff=_z,
+                                               ice_fw=_z,
+                                               restoring=_fw_restore)
+                    else:
+                        fw = fw._replace(restoring=_fw_restore)
+                    # NEMO's qns is positive INTO the ocean, matching q_net, so
+                    # this adds with no sign flip (derivation at the term in
+                    # sss_restoring.py).
+                    _q_restore = _sss_out["heat_flux"] * _lm
+                    sf = sf._replace(
+                        q_net=(_q_restore if sf.q_net is None
+                               else sf.q_net + _q_restore))
+                    # KPP surface buoyancy: under this channel the restoring IS
+                    # physical freshwater, so it belongs in the sum that the
+                    # tracer-channel branch above deliberately excludes.
+                    # Set it even when absent: skipping would drop the
+                    # restoring-driven HALINE buoyancy from KPP while volume
+                    # and heat still applied (codex 9387497).
+                    sf = sf._replace(
+                        freshwater=(_fw_restore if sf.freshwater is None
+                                    else sf.freshwater + _fw_restore))
             state = _ensure_sharded_state(state)
             state = _ocean_step(state, sf, fw, _t_sec)
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
+            #
+            # NON-FATAL BOUNDARY (codex round-4 RED): this is a DIAGNOSTIC and
+            # must never abort a production run, exactly like its sibling
+            # _gateway_transport_diag.  gateway_step deliberately raises on a
+            # bad geometry, and that raise sits INSIDE the step loop, so
+            # without this guard a diagnostic could kill a multi-day run.  On
+            # any failure: log once, disable the accumulator, keep integrating.
+            # Note it does NOT fall back to per-step promotion -- that was the
+            # defect the raise exists to prevent.
             from legoesm.ocean.diagnostics_sections import gateway_step
-            _gw_acc = gateway_step(
-                _gw_acc, _gw_gates, state, z_coord, grid,
-                min_water_column_m=getattr(model.config,
-                                           "min_water_column_m", None))
-        if sss_restore_cfg is not None:
+            try:
+                _gw_acc = gateway_step(
+                    _gw_acc, _gw_gates, state, z_coord, _gw_geom,
+                    min_water_column_m=getattr(model.config,
+                                               "min_water_column_m", None),
+                    # "stored", not "auto": both supported grid branches turn
+                    # store_mass_flux ON for this flag, so a state without the
+                    # capture means some config path disabled it -- raise
+                    # rather than silently integrate h*u (#1442, codex r6 RED3).
+                    source="stored",
+                    # Same promise for the EXACT salt channel: the builders
+                    # set store_salt_flux with this flag, so a state without
+                    # the pair means a config path disabled the capture.
+                    require_salt=True)
+            except Exception as _gw_e:
+                print(f"[gateway] DISABLED at step {step} after "
+                      f"{type(_gw_e).__name__}: {_gw_e}")
+                # SALVAGE THE TAIL before discarding the accumulator (codex
+                # round-1 RED).  gateway_step is pure and the assignment above
+                # never happened, so _gw_acc still holds the LAST GOOD state,
+                # with n = step - 1.  Without this dump everything accumulated
+                # since the previous cadence row is lost -- and so is the
+                # whole-run block, because _gateway_transport_diag(None) is a
+                # no-op.  The writer suppresses a duplicate n, so a failure on
+                # the step right after a cadence dump adds no second row.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step - 1,
+                                        (step - 1) * dt / _SEC_PER_DAY)
+                _gw_acc = None
+        if sss_restore_cfg is not None and not _sss_water_flux:
+            # SKIPPED under the water-flux channel: the flux already entered
+            # `fw.restoring` / `q_net` BEFORE the step.  Running this as well
+            # would apply restoring TWICE, and the run would still look
+            # plausible -- which is why this is a hard either/or, never a
+            # blend, and why a test asserts the two channels are exclusive.
+            #
             # NEMO-faithful ice gate (namsbc_ssr nn_sssr_ice=0: no SSS restoring
             # under sea ice).  Feed the SAME prescribed siconc the albedo uses
             # (``_sic``; None only if neither --ice-albedo nor a siconc field is
@@ -6869,23 +7943,11 @@ def main() -> int:
             # ice concentration instead, via the SAME ``ice_concentration=``
             # parameter (codex MED): prescribed and live ice must not disagree in
             # the salt-restoring path.
-            _sss_ice = _sic
-            if ice_resp is not None:
-                _lc = ice_state.concentration.data
-                if _lc.ndim > np.asarray(state.land_mask.data).ndim:
-                    _lc = jnp.sum(_lc, axis=-1)
-                _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
-            # River-mouth gate (NEMO sbcssr (1-2*rnfmsk)): pass the per-cell
-            # runoff so restoring is OFF at river mouths and does not fight
-            # the plume toward coarse WOA (Amazon artifact). Gated by flag.
-            _R_gate = _R if args.river_mouth_restoring_gate else None
-            # Monthly (12, ...) NEMO sn_sss target -> this step's month;
-            # static IC-surface target unchanged.  _sss_monthly is grid-agnostic
-            # (structured 3-D / MPAS 2-D); indexing the 12-axis yields this
-            # month's field at the target grid's spatial rank (2-D or nCells).
-            _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
-                             if _sss_monthly
-                             else sss_restore_target)
+            # `_sss_ice` / `_R_gate` / `_sss_tgt_step` were assembled ABOVE the
+            # ocean step (see the hoist comment there).  They are unchanged by
+            # the step, so this call is value-identical to the previous inline
+            # assembly; the hoist exists so the same inputs can feed the
+            # water-flux routing, which must run pre-step.
             # sss_apply pulls ONE 2-D S-surface slice to host and scatters
             # the updated layer back device-side (slice-before-convert
             # contract, locked by tests/unit/test_sss_apply.py) — counted.
@@ -7062,8 +8124,13 @@ def main() -> int:
                 # global layout (abort boundary — one gather, then exit).
                 state = _ensure_global_state(state)
                 _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d,
-                               io_proc=_is_io_proc(), ice_state=ice_state)
+                               grid=grid, io_proc=_is_io_proc(), ice_state=ice_state)
                 _close_csv()
+                # Dump what the accumulator reached before the abort: the last
+                # cadence row alone would understate the run, and the run-end
+                # writer below is never reached on this path.
+                _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
+                _gateway_cumulative_close(_gw_csv)
                 return 1
         if snap_every > 0 and step % snap_every == 0 and step != n_steps:
             day = step * dt / _SEC_PER_DAY
@@ -7075,6 +8142,11 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
+            # Same cadence as the snapshot, and AFTER this step's
+            # gateway_step, so the row's n_steps matches the snapshot's day.
+            # `step != n_steps` above excludes the final step; the run-end row
+            # below covers it, so each dump point appears exactly once.
+            _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
         if (restart_every > 0 and step % restart_every == 0
                 and step != n_steps):
             # Own cadence, own contract: the state may still be sharded on the
@@ -7086,7 +8158,7 @@ def main() -> int:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d,
-                           z_coord=z_coord, io_proc=_is_io_proc(),
+                           z_coord=z_coord, grid=grid, io_proc=_is_io_proc(),
                            ice_state=ice_state)
             print(f"[snapshot] year {yr} saved", flush=True)
 
@@ -7102,6 +8174,12 @@ def main() -> int:
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
+    # Run-end CUMULATIVE row FIRST, then the whole-run mean.  The last window
+    # (e.g. days 60-90 of a 90-day run) is only recoverable if the final totals
+    # are dumped: the cadence block above skips step == n_steps.
+    _gateway_cumulative_row(_gw_csv, _gw_acc, n_steps,
+                            n_steps * dt / _SEC_PER_DAY)
+    _gateway_cumulative_close(_gw_csv)
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()

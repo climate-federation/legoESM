@@ -480,11 +480,16 @@ def test_mpas_poststep_hook_conserves_and_rate_limits():
 
 
 def test_experiment_flag_threads_and_raises():
+    # NB the negative case is SDM, not Sundqvist: since the guard was made
+    # UNIFORM across every bulk/diagnostic/emulator scheme, Sundqvist carries
+    # the fields. SDM is exempt on purpose (it integrates the droplet growth
+    # law against the saturation ratio, so super-saturation is resolved, not
+    # clipped) -- see config.HARD_SAT_GUARD_EXEMPT.
     from legoesm.atmosphere.physics.microphysics.config import (
         apply_microphysics_experiment_flags,
         MorrisonConfig,
-        SundqvistConfig,
     )
+    from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
     on = apply_microphysics_experiment_flags(
         MorrisonConfig(), "morrison", hard_saturation_adjustment=True)
     assert on.hard_saturation_adjustment is True
@@ -494,7 +499,7 @@ def test_experiment_flag_threads_and_raises():
     assert off == MorrisonConfig()
     with pytest.raises(ValueError, match="hard_saturation_adjustment"):
         apply_microphysics_experiment_flags(
-            SundqvistConfig(), "sundqvist", hard_saturation_adjustment=True)
+            SDMConfig(), "sdm", hard_saturation_adjustment=True)
 
 
 def test_experiment_float_overrides_thread_and_raise():
@@ -504,9 +509,9 @@ def test_experiment_float_overrides_thread_and_raise():
     a scheme without the fields raises (no silently-inert override)."""
     from legoesm.atmosphere.physics.microphysics.config import (
         MorrisonConfig,
-        SundqvistConfig,
         apply_microphysics_experiment_flags,
     )
+    from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
     out = apply_microphysics_experiment_flags(
         MorrisonConfig(), "morrison", hard_saturation_adjustment=True,
         hard_sat_adjust_threshold=1.2, hard_sat_max_heating_K=10.0)
@@ -519,19 +524,23 @@ def test_experiment_float_overrides_thread_and_raise():
     assert kept.hard_sat_max_heating_K == pytest.approx(5.0)
     with pytest.raises(ValueError, match="hard_sat_max_heating_K"):
         apply_microphysics_experiment_flags(
-            SundqvistConfig(), "sundqvist", hard_sat_max_heating_K=10.0)
+            SDMConfig(), "sdm", hard_sat_max_heating_K=10.0)
 
 
-def test_all_warm_rain_configs_carry_the_fields():
+def test_all_guarded_configs_carry_the_fields():
+    """Every scheme in HARD_SAT_GUARD_SCHEMES -- now including the Sundqvist
+    diagnostic scheme and the ML emulator, not just the five bulk warm-rain
+    schemes -- carries the three fields with the SAME defaults."""
     from legoesm.atmosphere.physics.microphysics.config import (
-        KesslerConfig, SeifertBehengConfig, MorrisonConfig, ThompsonConfig,
-        P3Config,
+        HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
-    for cfg in (KesslerConfig(), SeifertBehengConfig(), MorrisonConfig(),
-                ThompsonConfig(), P3Config()):
-        assert cfg.hard_saturation_adjustment is False
-        assert cfg.hard_sat_adjust_threshold == pytest.approx(1.1)
-        assert cfg.hard_sat_max_heating_K == pytest.approx(5.0)
+    top = MicrophysicsConfig()
+    assert len(HARD_SAT_GUARD_SCHEMES) == 7
+    for name in HARD_SAT_GUARD_SCHEMES:
+        cfg = getattr(top, name)
+        assert cfg.hard_saturation_adjustment is False, name
+        assert cfg.hard_sat_adjust_threshold == pytest.approx(1.1), name
+        assert cfg.hard_sat_max_heating_K == pytest.approx(5.0), name
 
 
 def test_kessler_scheme_threads_flag_and_bounds_heating():

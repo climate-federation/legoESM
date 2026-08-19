@@ -182,12 +182,26 @@ class MPASOceanModel:
                 'barotropic substep. Use barotropic_solver="explicit_substep" to '
                 'apply it, or leave the filter at its "cosine" default.',
                 stacklevel=2)
-        _valid_fw = ("none", "virtual_salt_flux")
+        # #1484 codex HIGH: the conservation fixer's volume target is
+        # V_new = V_old, i.e. it ASSUMES no volume source. Under
+        # real_freshwater the entire freshwater signal IS a volume source, so
+        # fix_volume would delete it and leave the full sum(A*F)/rho_0 as
+        # residual. Refuse until the fixer takes a freshwater-aware target.
+        if (self.config.freshwater_closure == "real_freshwater"
+                and getattr(self.config, "use_conservation_fixer", False)
+                and getattr(self.config, "fix_volume", True)):
+            raise ValueError(
+                'freshwater_closure="real_freshwater" is incompatible with '
+                "use_conservation_fixer=True + fix_volume=True: the fixer "
+                "drives V_new to V_old, which DELETES the freshwater volume "
+                "source (residual = sum(A*F)/rho_0). Set fix_volume=False, or "
+                "give the fixer a freshwater-aware volume target (#1484).")
+        _valid_fw = ("none", "virtual_salt_flux", "real_freshwater")
         if self.config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, got "
                 f"{self.config.freshwater_closure!r} (the MPAS path implements "
-                "only virtual_salt_flux; real_freshwater is not available here)"
+                "virtual_salt_flux and real_freshwater)"
             )
         # NEMO ln_rnf_depth_ini per-cell runoff spread-depth map [m]: fail fast
         # on a bad map (mirrors LatLonCGridOceanConfig validation).  A zero/
@@ -759,11 +773,31 @@ class MPASOceanModel:
             # this local sum (single-rank-correct) until owned-mask plumbing
             # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
+                if config.freshwater_closure == "real_freshwater":
+                    # codex RED: the multi-rank refusal for freshwater
+                    # normalization lives inside the virtual-salt block,
+                    # which real_freshwater skips -- but this eta mean is
+                    # still RANK-LOCAL, so guard it here too.
+                    from legoesm.ocean.freshwater import (
+                        refuse_multiprocess_eta_normalization,
+                    )
+                    refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
-                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
+                # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact; SSS restoring is not part of it,
+                # and NEMO never normalizes its `erp`.  Normalizing the full
+                # net would subtract the restoring's own global mean from every
+                # cell -- a spurious uniform water flux AND a globally weakened
+                # restoring, both silent.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                _F_rest = (0.0 if _fw_rest is None
+                           else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
+                _F_phys = F_slow_eta - _F_rest
+                F_mean = jnp.sum(_F_phys * area) / jnp.maximum(
                     ocean_area, 1e-10)
-                F_slow_eta = (F_slow_eta - F_mean * mask)
+                F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 

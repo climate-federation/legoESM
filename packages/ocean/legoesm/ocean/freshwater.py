@@ -855,3 +855,31 @@ def with_sss_restoring(
     # multiple restoring channels stacked).
     prior = fw.restoring if fw.restoring is not None else jnp.zeros_like(out["freshwater_flux"])
     return fw._replace(restoring=prior + out["freshwater_flux"])
+
+
+def refuse_multiprocess_eta_normalization(where: str) -> None:
+    """Refuse rank-local eta normalization under multi-process execution.
+
+    codex RED: the existing multi-rank fail-fast for freshwater normalization
+    lives INSIDE the virtual-salt block, which the ``real_freshwater`` closure
+    skips.  Both cores still normalize the eta/volume forcing with a RANK-LOCAL
+    area mean, so a multi-rank run would silently apply a DIFFERENT correction
+    on each rank -- a wrong number, not an error.  One helper so the two cores
+    cannot drift apart (repo rule: factor shared logic, never copy-paste it).
+
+    Remove this only when the eta normalization uses an owned-cell mask and a
+    global reduction, exactly as the virtual-salt path will.
+    """
+    import jax as _jax
+
+    from legoesm.parallel.reductions import is_multi_process, mpi_world_size
+
+    if (is_multi_process() or mpi_world_size() > 1
+            or _jax.process_count() > 1):
+        raise NotImplementedError(
+            f"{where}: normalize_freshwater with freshwater_closure="
+            "'real_freshwater' uses a RANK-LOCAL area mean for the eta/volume "
+            "forcing, which is incorrect across processes (each rank would "
+            "subtract its own mean). Run single-process, or disable "
+            "normalize_freshwater, until an owned-mask global reduction lands."
+        )

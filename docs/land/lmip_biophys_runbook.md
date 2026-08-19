@@ -1,16 +1,9 @@
 # LMIP biophysics runbook
 
-**Audience:** anyone (you, a teammate, future-you) who wants to run a
-CRU-JRA-forced land biophysics simulation with legoESM — locally or on Derecho —
-without reading source code.
-
-**What this driver is** (and isn't): a global forced land model, biophysics-only
-(no carbon), driven by real CRU-JRA reanalysis or a synthetic fallback.
+**What this driver is** : a global forced land mode configuration, biophysics-only
+(no carbon), driven by real CRU-JRA reanalysis or a synthetic fallback on NSF_NCAR's Derecho.
 Multi-layer soil, Richards hydrology, single-bulk snow, prescribed seasonal LAI
-from surfdata, two-leaf canopy or `simple_seb` surface scheme. **Cold-region
-cells (polar / high-altitude / boreal winter) are known to numerically diverge**
-under this configuration — see "Known limitations" at the end. Physics fixes are
-a separate workstream.
+from surfdata, two-leaf canopy or `simple_seb` surface scheme.
 
 ---
 
@@ -80,6 +73,12 @@ All under `templates/land/biophysics/`:
 | `smoke_test` | 4×8 | simple_seb + constant | synthetic | seconds — hermetic test |
 | `smoke_4deg` | 45×90 (~4°) | simple_seb + constant | CRU-JRA 30-day | minutes on CPU |
 | `spinup_5year` | 90×180 (~2°) | two_leaf_canopy + MOST | CRU-JRA 5-year | ~2–4 h A100 |
+| `lmip_canopy_10yr` | 90×180 (~2°) | two_leaf_canopy + MOST + **single** snow + freeze/thaw | CRU-JRA 10-year | **~8 h A100** — the production block |
+
+`lmip_canopy_10yr` is the **reference production config** and the reusable
+**10-year increment** for the spin-up → validation workflow below: override
+`forcing.year_start`/`year_end` (and `restart.from`) with `-o` per increment. Its
+10-year span keeps `time.n_steps = 87600`, so you never override `n_steps`.
 
 Pick the one closest to your target, override individual fields with `-o`.
 
@@ -99,7 +98,7 @@ Pick one with `--machine <name>`. **The PBS project account (`-A`) is NEVER
 emitted into `run.sh`** — supply it on the qsub line:
 
 ```bash
-qsub -A UYAL0053 run.sh
+qsub -A ACCOUNT run.sh
 ```
 
 Add a new profile by dropping a YAML file into `config/machines/`; the flag
@@ -134,35 +133,11 @@ listed there can be overridden.
 
 ---
 
-## Understanding output
-
-### The tape NetCDFs
-Each `output.tapes` entry produces its own file: `lmip_biophys.<tape_name>.nc`.
-Shipped defaults: `monthly` (time-mean fluxes) + `monthly_state` (instantaneous
-soil snapshot). Layout is `(time, lat, lon)` for latlon grids.
-
-```python
-import xarray as xr
-ds = xr.open_dataset("lmip_biophys.monthly.nc")
-ds["T_sfc"].isel(time=0).plot(robust=True)     # first month
-```
-
-Variables available (defaults; add more via `output.tapes[*].vars` in the YAML):
-
-| Variable | Units | Averaged? |
-|---|---|---|
-| `T_sfc` | K | mean |
-| `shflx`, `lhflx` | W/m² (positive up) | mean |
-| `runoff` | kg/m²/s | mean |
-| `precip` | kg/m²/s | mean |
-| `LAI` | m²/m² | mean |
-| `albedo` | [0, 1] | mean |
-| `T_soil_top`, `theta_soil_top`, `snow_depth` | K, m³/m³, kg/m² | inst |
-
 ### The restart file
-Model-time-stamped: `restart_<YEAR>_d<DDD>h<HH>.npz` — one per run, chronological
-on `ls`. Contains the full `MultiLayerLandState` + INI-blob metadata
-(`land_mode`, `t_end_s`, `n_steps_completed`, config snapshot).
+Model-time-stamped: `restart_<YEAR>_d<DDD>h<HH>.npz` — chronological on `ls`.
+Contains the full `MultiLayerLandState` + INI-blob metadata (`land_mode`,
+`t_end_s`, `n_steps_completed`, config snapshot). A multi-year run writes ONE per
+completed year (a resume trail); a single-year run writes one at the end.
 
 ### `experiment.tag`
 INI-format provenance. The minimum you need for reproducibility months later:
@@ -200,7 +175,7 @@ python scripts/run/init_experiment.py biophysics/spinup_5year \
     --machine derecho_gpu \
     -o forcing.year_end=1920 -o time.n_steps=8760
 
-qsub -A UYAL0053 $SCRATCH/lmip/spinup_1920/run.sh
+qsub -A $ACCOUNT $SCRATCH/lmip/spinup_1920/run.sh
 # … wait for it to finish, then:
 
 ls $SCRATCH/lmip/spinup_1920/restart_*.npz
@@ -213,13 +188,15 @@ python scripts/run/init_experiment.py biophysics/spinup_5year \
     -o forcing.year_start=1921 -o forcing.year_end=1921 -o time.n_steps=8760 \
     -o restart.from=$SCRATCH/lmip/spinup_1920/restart_1921_d000h00.npz
 
-qsub -A UYAL0053 $SCRATCH/lmip/spinup_1921/run.sh
+qsub -A $ACCOUNT $SCRATCH/lmip/spinup_1921/run.sh
 ```
+---
 
-Or drive multiple years in a **single** job — the driver now runs a chunked scan
-(one year at a time internally), so `year_end - year_start > 0` works within one
-PBS submission as long as **one year's forcing fits in device memory** (~16 GB
-float64 at 2° hourly, well within a 40 GB A100).
+**Data prerequisite:** stage CRU-JRA for every year you run (1975-2014 here):
+```bash
+for y in $(seq 1975 2014); do ./scripts/data/download_lmip_data.sh --crujra-only --year $y; done
+```
+A missing year fails fast (`total_steps != n_steps` → `SystemExit`).
 
 ---
 
@@ -238,39 +215,6 @@ machine + env.
 
 ---
 
-## Common errors and fixes
-
-| Error | Cause | Fix |
-|---|---|---|
-| `ERROR: CRU-JRA forcing not staged for the requested years:` | Missing year on disk | Run `./scripts/data/download_lmip_data.sh --year YYYY` for each listed year |
-| `ERROR: per-year forcing pytree (X GiB) exceeds the soft budget (24 GiB).` | Grid × dt combo too big for GPU | Coarser grid (`smoke_4deg`), larger `time.dt`, or CPU with more `mem=…` |
-| `ValueError: physics: simple_seb + MOST is numerically unstable` | Override picked an incompatible pair | Use `two_leaf_canopy` + MOST, or `simple_seb` + `constant` |
-| `RuntimeError: Could not initialize backend 'gpu'` | `jax[cuda12]` not installed in the env | `conda activate legoesm-gpu && pip install --upgrade "jax[cuda12]"` |
-| `FileNotFoundError: 'config.yaml'` on PBS | `run.sh` used `dirname $0` (spool path); needs current version | `git pull` — fixed in `6b2f6458e`; re-init the experiment |
-| `NaN final T_soil_top over land: N -> FAIL` (small N) | Cold-region cells diverge (see limitations below) | Currently accept as a known gap; physics fix is next workstream |
-
----
-
-## Known limitations (current infrastructure phase)
-
-These are physics gaps, not code bugs. The next physics workstream will address
-them.
-
-- **No soil freeze/thaw.** Water is always liquid; sub-freezing soil energy
-  budget can drift. Manifests as Antarctica / boreal-winter cell divergence.
-- **Single-bulk snow, no cap.** Snow depth can grow unrealistically deep in
-  interior Antarctica.
-- **No dedicated glacier tile handling.** Ice-covered cells run as
-  "soil-with-LAI=0" — the two-leaf-canopy Newton doesn't converge cleanly on
-  those.
-
-Typical impact on a real 1-year 2° `spinup_5year` run: ~54 % of land cells stay
-finite through December; ~46 % (dominated by Antarctica + boreal winter) go
-NaN. The physics of the surviving cells looks reasonable (T_sfc 227–311 K,
-seasonal cycle, LAI 0–6).
-
----
-
 ## Where things live in the repo
 
 ```
@@ -286,5 +230,4 @@ packages/land/legoesm/land/
   restart.py                        — .npz state save/load
 docs/land/
   lmip_biophys_runbook.md           — this file
-  lmip_s3_scope.md                  — dev-facing scope + phase history
 ```

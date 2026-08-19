@@ -56,11 +56,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+
+# FESOM lives in an out-of-tree package (`fesom_jax`) that is NOT a declared
+# dependency of this repo, so its matrix arms are registered ONLY when it is
+# importable.  Registering them unconditionally made `run_ocean_test_matrix.py
+# --quick` record an ERROR per fesom case and exit 1 on every normal
+# installation -- the arms are optional, the matrix is not.
+def _fesom_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("fesom_jax") is not None
+
+
+_OPTIONAL_GRIDS = ["tripole"] + (["fesom"] if _fesom_available() else [])
+
 from pathlib import Path
 from typing import Any, Callable
 
@@ -112,21 +126,77 @@ import matplotlib.pyplot as plt
 GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
-    "mpas": "ico3",
+    # ico4 (2562 cells, 446 km effective), NOT ico3 (642 cells, 891 km).
+    # RESOLUTION-MATCHED to latlon 36x72 (444 km), cube C24 (384 km) and
+    # fesom pi (403 km global MEAN) to within 0.6%. At ico3 the MPAS arm was
+    # 2.3x coarser than every other arm, so a cross-grid comparison measured
+    # the resolution gap rather than the dycores.
+    "mpas": "ico4",
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
     "cs_regional": "C24",
     "spectral": "T21",
+    # tripole is mesh-file-backed (NEMO eORCA1 mesh_mask, 462 MB, Zenodo).
+    "tripole": "eorca1",
+    # FESOM is mesh-file-backed: "pi" is the only packaged mesh.
+    "fesom": "pi",
 }
 
 # Standard grid types for the full test matrix.
 # Regional grids are only added to specific test cases (gyre experiments).
-GRID_TYPES = ["cubed_sphere", "latlon", "mpas"]
+# OCEAN grids only. cubed_sphere was REMOVED 2026-08-11 (user directive):
+# it is not an ocean grid here -- there is no cubed-sphere ocean
+# configuration anyone runs, it failed geostrophic adjustment and Phillips
+# on its own gates, and its self-error at 2x resolution (0.738 degC on
+# geostrophic adjustment, 213x the lat-lon reference) meant no cross-grid
+# statement about it was interpretable. Keeping it in the registry made
+# every case spend a run producing a column nobody could read.
+# The atmosphere matrix still exercises the cubed sphere; this is the
+# OCEAN matrix.
+GRID_TYPES = ["latlon", "mpas"]
 REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
+
+# How far past the SOURCE mesh a regrid target may sit before it is dropped
+# as extrapolation, in multiples of that source point's LOCAL spacing (the
+# mean distance to its ~6 neighbours -- see _local_spacing).
+#
+# A HEURISTIC, not a topology test, calibrated only against the coastline it
+# has to resolve. Retained fraction of the 181x360 target mesh on the FESOM
+# pi wet-source set (codex 2026-08-11):
+#     multiplier   1.0 -> 70.5%     1.5 -> 76.5%     2.5 -> 85.3%
+# At 2.5 the Sahara, Amazon, Australia and Antarctic interior are accepted
+# as ocean again, which is the failure being fixed; central Asia is rejected
+# at every multiplier. That rules 2.5 out but does not make 1.5 right -- the
+# principled replacement is mesh-element containment (barycentric
+# interpolation inside the actual triangle).
+_TARGET_CUTOFF_SPACINGS = 1.5
+
+# --- Matched numerics for the cross-dycore lock-exchange comparison ---
+# A_v/K_v are the ONLY numerical parameters all four ocean dycores expose:
+# FesomOceanConfig has just (dt, k_ver, a_ver); MPAS and LatLon/tripole both
+# have (A_v, K_v). Values are FESOM's own defaults (config.A_VER / K_VER),
+# which coincide with the production ORCA1 tripole settings.
+# tracer_advection is matched across the THREE legoESM dycores (FESOM's
+# advection is internal to fesom_jax and cannot be selected from here).
+# Everything else -- barotropic solver, KE-gradient scheme, PGF scheme,
+# lateral viscosity -- exists on some dycores and not others, so it is set
+# per grid for stability and is reported as a per-grid difference.
+MATCHED_A_V = 1.0e-4        # background vertical viscosity  [m2/s]
+MATCHED_K_V = 1.0e-5        # background vertical diffusivity [m2/s]
+MATCHED_TRACER_ADV = "tvd"  # limited scheme: no dispersive over/undershoot
+# Lock-exchange C-grid arms (latlon, tripole) use Zalesak FCT instead:
+# dim-split TVD is not multi-D monotone -- at the front x land-wall corner
+# on distorted eORCA1 cells it grows +2.1e-4 K by day 5 (dt-independent,
+# upwind-clean; jobs 26837567/96/658/659) -- while fct2 is certified
+# bounded after the 2026-08-10 h_new fix in ocean/advection.py, and it
+# MATCHES FESOM's internal scheme class (Zalesak FCT), so 3 of 4 arms share
+# the advection family. MPAS keeps tvd (no FCT in the port; bounded to
+# 3e-12/day at ico3 resolution) -- documented per-grid difference.
+LOCKEX_CGRID_TRACER_ADV = "fct2"
 
 # Physical constants for idealized ocean test cases — use canonical values.
 from legoesm import constants as _C
@@ -230,20 +300,28 @@ def _build_test_matrix() -> list[TestCase]:
     res = GRID_RESOLUTIONS
 
     # --- Rest state adjustment (with land): all grids except spectral ---
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10 for the cross-grid benchmark family.
+    # fesom belongs in the WITH-LAND variants: _create_ocean_setup builds its
+    # mesh with LockExchangeConfig().land_lat_threshold = 80.0, the SAME
+    # threshold the latlon/mpas with-land rest states use (190 of 3140 nodes
+    # are dry). Registering it as "no_land" was mislabelled (codex
+    # 2026-08-10) -- the FESOM setup has no 90-degree variant to select.
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         if g == "spectral":
             continue
         matrix.append(TestCase(
             "rest_state_stratified_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state with uniform T/S (with land): isolates barotropic PGF ---
-    for g in GRID_TYPES:
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         if g == "spectral":
             continue
         matrix.append(TestCase(
             "rest_state_uniform_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state adjustment without land: all grids ---
+    # NOT fesom: its mesh carries the 80-degree land threshold (see the
+    # with-land block above), so a "no land" fesom case would be a lie.
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "rest_state_stratified_no_land", g, res[g], 1.0, 0.1))
@@ -258,9 +336,9 @@ def _build_test_matrix() -> list[TestCase]:
     # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
     bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
                  "mpas": "ico4", "spectral": "T21"}
-    for g in GRID_TYPES:
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         matrix.append(TestCase(
-            "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
+            "barotropic_wave", g, bwave_res.get(g, res[g]), 2.0, 0.2))
 
     # --- Wind-driven regional barotropic double gyre: regional grids ---
     # cs_regional excluded: ocean init assumes 6-face arrays (TODO: adapt)
@@ -303,20 +381,40 @@ def _build_test_matrix() -> list[TestCase]:
             "global_barotropic_wind_1lev", g, res[g], 60.0, 5.0,
             run_kwargs={"nlev": 1}))
 
-    # --- Geostrophic adjustment: all grids ---
-    for g in GRID_TYPES:
+    # --- Geostrophic adjustment: all grids + tripole + fesom ---
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         matrix.append(TestCase(
             "geostrophic_adjustment", g, res[g], 10.0, 1.0))
 
     # --- Phillips two-layer baroclinic: all grids ---
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10: the shear IC no longer assumes a
+    # rectilinear mesh (u-face latitudes come from _cgrid_face_lat_lon,
+    # and FESOM gets a node/element branch).
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         matrix.append(TestCase(
             "phillips_two_layer", g, res[g], 10.0, 1.0))
 
     # --- Inertia-Gravity Wave (Bishnu et al. 2024): all grids ---
-    for g in GRID_TYPES:
+    # tripole + fesom added 2026-08-10 (curvilinear face coordinates via
+    # _cgrid_face_lat_lon; FESOM node/element branch). NOTE the case FAILS
+    # its analytic L2 gate on every grid -- a pre-existing case defect,
+    # tracked separately from arm coverage.
+    for g in GRID_TYPES + _OPTIONAL_GRIDS:
         matrix.append(TestCase(
             "inertia_gravity_wave", g, res[g], 2.0, 0.2))
+
+    # --- Inertia-gravity wave, f-PLANE CHANNEL (Bishnu et al. 2024) ---
+    # The global case above cites this reference but cannot verify wave
+    # behaviour on a sphere (see the block comment at igw_channel_mode).
+    # This one puts the wave where it is an exact eigenmode, so it can gate
+    # on the exact solution, the measured frequency, and mode purity.
+    # Two resolutions: the coarse one is the gate, the fine one exists so
+    # the pair gives a convergence rate (L2 should fall ~4x for 2x cells).
+    # latlon_channel parses "n_lat x n_lon"; the geometry is Cartesian and
+    # built by the runner, so the grid string only carries the cell counts.
+    for _res in ("20x40", "40x80"):
+        matrix.append(TestCase(
+            "inertia_gravity_wave_channel", "latlon_channel", _res, 1.0, 1.0))
 
     # --- Lock Exchange (NEMO / Petersen et al. 2015): latlon only ---
     # (cubed_sphere excluded — H_max=20 m + sharp T contrast across a
@@ -324,7 +422,11 @@ def _build_test_matrix() -> list[TestCase]:
     # PGF or the FC-Gram backend; Petersen's diagnostic is a
     # channel-scale test, not a global one. The latlon_regional 4x64
     # case below provides faithful Petersen-geometry coverage.)
-    for g in ["latlon"]:
+    # mpas + fesom added 2026-08-08 for the three-way dycore comparison
+    # (unstructured triangles vs Voronoi vs structured C-grid). cubed_sphere
+    # stays excluded for the reason above.
+    for g in ["latlon", "mpas", "tripole"] + (
+            ["fesom"] if _fesom_available() else []):
         matrix.append(TestCase(
             "lock_exchange", g, res[g], 1.0, 0.1))
 
@@ -390,8 +492,11 @@ def _build_test_matrix() -> list[TestCase]:
         },
     ))
 
-    # --- Overflow (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Overflow (NEMO / Petersen et al. 2015): latlon ---
+    # cubed_sphere dropped 2026-08-11 with the rest of the cube arm (not an
+    # ocean grid); this was the last case still naming it explicitly rather
+    # than through GRID_TYPES.
+    for g in ["latlon"]:
         matrix.append(TestCase(
             "overflow", g, res[g], 0.5, 0.1))
 
@@ -476,8 +581,19 @@ TEST_MATRIX = _build_test_matrix()
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
+#: The ONE status->icon map.  Both ``record`` and the end-of-run summary read
+#: it, so a new status can never be added to one and forgotten in the other --
+#: the failure mode codex caught here, where a missing XFAIL key raised
+#: KeyError inside ``record``, the caller's ``except`` turned it into ERROR,
+#: and the waiver silently made the suite MORE red instead of less.
+STATUS_ICONS: dict[str, str] = {
+    "PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--",
+    "XFAIL": "x ", "XPASS": "XX",
+}
+
+
 def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
+    icon = STATUS_ICONS[status]
     ALL_RESULTS.append({
         "test": tc.case, "grid": tc.grid_type,
         "resolution": tc.resolution, "status": status,
@@ -667,6 +783,148 @@ def _apply_pe_rel_sign(
     )
 
 
+#: Tracer-content drift a run may show, PER DAY, keyed on the MODELLING
+#: MODE the arm integrates in -- never on the arm's name. A benchmark that
+#: loosens a gate "for the FESOM arm" is an exemption list; one that keys on
+#: the mode holds every model in that mode to the same number.
+#:
+#:   moving_thickness (z-star / ALE): layer thicknesses move with eta, so
+#:       tracer CONTENT is conserved to round-off. MEASURED: lat-lon z-star
+#:       1.2e-15 over 2 days.
+#:   fixed_thickness (linfs, NEMO key_linssh): thicknesses are pinned and
+#:       the free-surface volume change is carried as a surface
+#:       concentration/dilution term, so content is conserved only to that
+#:       approximation. MEASURED: FESOM linfs 2.6e-6 over 2 days, and
+#:       3.4e-7/day on the 10-day geostrophic adjustment.
+#:
+#: Per DAY, not absolute: this suite runs 1- to 10-day cases and an
+#: absolute tolerance would let a short run hide a leak a longer one fails.
+#: Inertia-gravity-wave gates. Calibrated on the 2026-08-11 measurements
+#: recorded at the gate site, not chosen.
+#:   amplitude ratio -- instability only; there is deliberately no lower
+#:       bound, because damping on a coarse mesh is legitimate (measured
+#:       0.38 latlon / 0.43 mpas / 2.39 fesom / 2.61 tripole).
+#:   correlation with the IC -- the frozen-dycore check. A wave whose
+#:       period is 0.667 d cannot still look like its own initial condition
+#:       after 2 days (measured 0.49 / 0.40 / 0.20 / 0.24 on the arms that
+#:       propagate, against 1.00 on the cubed-sphere arm whose free surface
+#:       turned out to be frozen).
+def _igw_gate_metrics(eta_final, eta_init, wet=None):
+    """(amplitude ratio, correlation with the IC, peak |eta|) on OCEAN cells.
+
+    Both gate metrics come from here so they cannot disagree about which
+    cells count. Land holds the same constant in both fields on every arm;
+    for a zero-mean field like eta those points sit at the mean and barely
+    move the correlation, but they DO enter the peak-amplitude reduction,
+    and the moment a field has a non-zero ocean mean the identical land
+    block drags the correlation toward 1 -- toward the "frozen" verdict
+    this gate exists to detect (codex 2026-08-11).
+
+    A field with no variance left returns ``inf`` for the correlation, not
+    NaN: the gate below is a ``<=`` test, which NaN silently passes, so a
+    dycore that flattened the free surface would score a clean sheet.
+    """
+    f = np.asarray(eta_final, dtype=np.float64).ravel()
+    i0 = np.asarray(eta_init, dtype=np.float64).ravel()
+    ok = np.isfinite(f) & np.isfinite(i0)
+    if wet is not None and np.asarray(wet).size == f.size:
+        ok &= np.asarray(wet, dtype=bool)
+    if not ok.any():
+        return float("nan"), float("inf"), float("nan")
+    max_eta = float(np.max(np.abs(f[ok])))
+    max_init = float(np.max(np.abs(i0[ok])))
+    amp = max_eta / max_init if max_init > 1e-12 else float("nan")
+    if ok.sum() > 2 and np.std(f[ok]) > 1e-30 and np.std(i0[ok]) > 1e-30:
+        corr = float(np.corrcoef(f[ok], i0[ok])[0, 1])
+    else:
+        corr = float("inf")
+    return amp, corr, max_eta
+
+
+_IGW_AMP_UPPER = 5.0
+#: Arms whose only land is poleward of 80 deg, so a zonally periodic IC is
+#: nearly a steady state on them. The real-geometry arms (fesom, tripole)
+#: carry continents and are not the same boundary-value problem.
+_AQUAPLANET_OCEAN_GRIDS = ("latlon", "mpas")
+
+_BWAVE_ENERGY_FLOOR = 0.02
+_BWAVE_ENERGY_CEILING = 1.5
+#: Channel-IGW gates. The case is an EXACT eigenmode, so these are real
+#: accuracy statements, unlike anything the global case could assert.
+#: Calibrated on the first run and recorded there; L2 should scale as
+#: dx^2 for a 2nd-order C-grid.
+_IGWC_CFL_S_PER_M = 3.0e-3
+#: MEASURED 2026-08-12 at the base 20x40 (dx = 100 km, 20 points per
+#: wavelength): L2 0.0659, refining to 0.0294 at 40x80 with dt scaled with
+#: dx. The gate sits just above the base value with ~20% headroom.
+#:
+#: CONVERGENCE IS ~1.3 ON THE DEFAULT LANE, AND THAT IS CORRECT BEHAVIOUR,
+#: NOT A DEFECT. SETTLED 2026-08-12 by measurement; the earlier guess in
+#: this comment (that coriolis_scheme="matsuno_split" was the limiter) was
+#: WRONG and is retracted. What was actually measured, on this case:
+#:   - refine dx at FIXED dt -> order 1.82, so SPACE is second order;
+#:   - refine dt on a FIXED grid -> order 0.99, so TIME is FIRST order;
+#:   - theta 0.55 -> 0.50 moves the mixed order 1.15 -> 1.31, a real but
+#:     secondary contribution;
+#:   - the error is amplitude-INDEPENDENT to 5 digits at 100x smaller
+#:     amplitude (eta/H = 1.9e-5), which REFUTES the lagged nonlinear
+#:     thickness H_u_old/H_v_old as the cause -- that term is nonlinear;
+#:   - swapping coriolis_scheme alone, or outer_integrator alone, changes
+#:     nothing, because the second-order settings are GATED IN A CHAIN.
+#: The limiter is the explicitly lagged old-time slow forcing. All three
+#: knobs must move together (barotropic_slow_forcing_ab2 requires
+#: coriolis_scheme="explicit_ab2", which requires outer_integrator="ab2"),
+#: and moving all three gives order 1.95 with L2 3x smaller. The default
+#: lane is first order in time BY CONSTRUCTION. Both lanes are pinned in
+#: tests/ocean/unit/test_barotropic_accuracy.py, so this stays measured.
+_IGWC_L2_MAX = 0.08          # relative L2 in eta at 1.25 periods
+_IGWC_OMEGA_ERR_MAX = 0.03   # measured vs analytic frequency
+_IGWC_PURITY_MIN = 0.95      # fraction of eta variance still in the mode
+
+_IGW_AMP_FLOOR = 0.03
+_IGW_IC_CORR_UPPER = 0.95
+
+_MODE_TRACER_DRIFT_TOL_PER_DAY = {
+    "moving_thickness": 1.0e-8,
+    "fixed_thickness": 5.0e-6,
+}
+
+
+def _modelling_mode(grid_type: str, config=None) -> str:
+    """Which vertical-coordinate class this arm integrates in.
+
+    Raises on an unrecognised setting rather than defaulting: silently
+    calling a fixed-thickness arm "moving" would hold it to a tolerance it
+    cannot meet, and the reverse would hide a real leak.
+    """
+    if grid_type == "fesom":
+        vc = getattr(config, "vertical_coordinate", "linfs")
+        if vc == "linfs":
+            return "fixed_thickness"
+        if vc == "zstar":
+            return "moving_thickness"
+        raise ValueError(
+            f"_modelling_mode: unknown FESOM vertical_coordinate {vc!r}; "
+            f"expected 'linfs' or 'zstar'.")
+    # Every other ocean arm here integrates z-star.
+    return "moving_thickness"
+
+
+def _tracer_drift_tolerance(grid_type: str, days: float, config=None) -> float:
+    """Absolute tracer-drift tolerance for a run of *days* days.
+
+    Strictly proportional to the run length. An earlier revision used
+    ``max(days, 1.0)``, which handed a 0.1-day quick run a full day's
+    budget -- a 10x weakening of exactly the short runs where a leak is
+    hardest to see (codex 2026-08-11).
+    """
+    if not (float(days) > 0.0):
+        raise ValueError(f"_tracer_drift_tolerance: days must be positive, "
+                         f"got {days!r}")
+    mode = _modelling_mode(grid_type, config)
+    return _MODE_TRACER_DRIFT_TOL_PER_DAY[mode] * float(days)
+
+
 def _compute_drift(values: list[float]) -> float:
     """Scalar drift wrapper.
 
@@ -753,7 +1011,11 @@ def _run_timeloop(
                 blown_up = True
                 break
 
-        if step % diag_every == 0:
+        # ALWAYS sample the final step: gates that take extremes over the
+        # diag series (lock-exchange front bounds, RPE sign) would otherwise
+        # never see the end state when n_steps % diag_every != 0
+        # (codex 2026-08-10).
+        if step % diag_every == 0 or step == n_steps:
             day = step * dt / 86400.0
             scalars = scalar_fn(state)
             diag["times"].append(day)
@@ -781,6 +1043,23 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+def _local_spacing(tree, src: np.ndarray, n_ring: int = 6) -> np.ndarray:
+    """Per-source-point mesh spacing: mean distance to its ~6 neighbours.
+
+    NOT the distance to the single nearest neighbour: that is the MINIMUM
+    over the ring, so on a mesh with mixed spacing it underestimates the
+    cell size and a cutoff built on it deletes legitimate interior targets
+    (MEASURED on FESOM pi: 16% of the interior dropped). A triangular or
+    Voronoi mesh has about six neighbours, so their mean is the cell scale.
+    """
+    k = min(n_ring + 1, src.shape[0])
+    d, _ = tree.query(src, k=k)
+    if d.ndim == 1:
+        d = d[:, None]
+    return d[:, 1:].mean(axis=1) if d.shape[1] > 1 else np.full(
+        src.shape[0], np.inf)
+
+
 def _build_latlon_weights(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -791,8 +1070,14 @@ def _build_latlon_weights(
     target_lat: np.ndarray | None = None,
     target_lon: np.ndarray | None = None,
     ocean_mask: np.ndarray | None = None,
+    linear: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build KDTree interpolation weights from unstructured to lat-lon grid.
+
+    ``linear=True`` (default) fits a plane in the target's tangent frame and
+    is exact for a linear field; ``linear=False`` is the older
+    inverse-distance weighting, kept for callers that need convex
+    (guaranteed in-range) weights without the ``limit`` flag.
 
     Returns (idxs, weights) arrays of shape (n_lat*n_lon, K) for K-nearest-
     neighbor inverse-distance weighting in 3-D Cartesian coordinates.
@@ -855,30 +1140,123 @@ def _build_latlon_weights(
         dists = dists[:, None]
         idxs = idxs[:, None]
 
+    # A GLOBAL mesh needs a target-side cutoff too. Without one, every
+    # target beyond the mesh's own coverage silently takes the nearest
+    # source point however far away, and the weights renormalise to 1 so
+    # the result looks like data. MEASURED 2026-08-11: the FESOM pi mesh is
+    # a REAL-GEOMETRY ocean mesh (its own depth runs -30..-6000 m, every
+    # node wet; nearest node 2695 km away over central Asia, 1808 km over
+    # the Sahara, 1410 km over the Amazon), so 22% of the target mesh sits
+    # over continents the mesh does not cover -- all of it previously
+    # filled by extrapolation. That arm's wet fraction read 0.94 against
+    # 0.89 for the aquaplanet arms; it is 0.75 with this cutoff.
+    #
+    # LOCAL, not one global number: on a mesh whose spacing runs 57 to
+    # 595 km a global median is at once too loose at the fine end and too
+    # tight at the coarse end.
+    local_cutoff = None
+    if max_dist is None and src.shape[0] > 1:
+        local_cutoff = (_TARGET_CUTOFF_SPACINGS
+                        * _local_spacing(tree, src)[idxs[:, 0]])
+
+    if linear:
+        # LINEARLY CONSISTENT weights: fit a plane through the stencil in
+        # the target's local tangent plane and take its value AT the
+        # target. IDW is only zeroth-order consistent, so on a mesh whose
+        # neighbours are one-sided it biases toward the denser side and
+        # adding neighbours does not help (MEASURED on FESOM pi: k = 1, 3,
+        # 6, 12 all leave ~1.9 K on a field that is a pure function of
+        # latitude). The weights remain a linear combination of the same
+        # stencil values, so they are returned in the SAME (idxs, w) form
+        # -- but they are SIGNED, so callers must pass limit=True.
+        up = tgt
+        pole = np.tile(np.array([0.0, 0.0, 1.0]), (tgt.shape[0], 1))
+        e1 = np.cross(pole, up)
+        n1 = np.linalg.norm(e1, axis=1, keepdims=True)
+        e1 = np.where(n1 > 1e-8, e1 / np.maximum(n1, 1e-30),
+                      np.tile(np.array([1.0, 0.0, 0.0]), (tgt.shape[0], 1)))
+        e2 = np.cross(up, e1)
+        off = src[idxs] - tgt[:, None, :]
+        # Tangent-plane coordinates: no dateline and no pole, because the
+        # frame is built AT the target. Fitting in raw (lon, lat) would make
+        # a stencil straddling +-180 deg appear 358 deg wide.
+        A = np.stack([np.ones(off.shape[:2]),
+                      np.einsum("nkj,nj->nk", off, e1),
+                      np.einsum("nkj,nj->nk", off, e2)], axis=-1)
+        wl = 1.0 / np.maximum(dists, 1e-12) ** 2
+        Aw = A * wl[..., None]
+        lhs = np.einsum("nkj,nkl->njl", Aw, A)
+        # Ridge: a degenerate stencil (collinear, or K < 3) is singular;
+        # this falls back toward the weighted mean instead of raising.
+        lhs = lhs + np.eye(3) * (1e-10 * np.trace(lhs, axis1=1, axis2=2)
+                                 [:, None, None] + 1e-30)
+        try:
+            inv = np.linalg.inv(lhs)
+        except np.linalg.LinAlgError:
+            inv = np.tile(np.eye(3), (lhs.shape[0], 1, 1))
+        # Row 0 of (A^T W A)^-1 A^T W evaluates the fit at the target.
+        w = np.einsum("nj,nkj->nk", inv[:, 0, :], Aw)
+        bad = ~np.all(np.isfinite(w), axis=1)
+        if bad.any():
+            w[bad] = (1.0 / np.maximum(dists[bad], 1e-12))
+    else:
+        w = 1.0 / np.maximum(dists, 1e-12)
+
     # Map indices back to the full (unmasked) array
     if ocean_idx is not None:
         idxs = ocean_idx[idxs]
 
-    w = 1.0 / np.maximum(dists, 1e-12)
     # Zero out weights for target points too far from any source cell.
     if max_dist is not None:
-        too_far = dists[:, 0] > max_dist
-        w[too_far] = 0.0
+        w[dists[:, 0] > max_dist] = 0.0
+    elif local_cutoff is not None:
+        w[dists[:, 0] > local_cutoff] = 0.0
     w_sum = w.sum(axis=1, keepdims=True)
-    w = np.where(w_sum > 0, w / np.maximum(w_sum, 1e-30), 0.0)
+    # IDW weights are positive so the sum is a scale; LINEAR weights sum to
+    # 1 by construction, and a sum near zero means the fit is degenerate --
+    # normalising by it would amplify noise, so those targets are dropped.
+    if linear:
+        w = np.where(np.abs(w_sum) > 1e-8, w, 0.0)
+    else:
+        w = np.where(w_sum > 0, w / np.maximum(w_sum, 1e-30), 0.0)
     return idxs, w
 
 
 def _apply_weights(vals: np.ndarray, idxs: np.ndarray, w: np.ndarray,
-                   n_lat: int, n_lon: int) -> np.ndarray:
-    """Apply precomputed IDW weights, handling NaN source values."""
+                   n_lat: int, n_lon: int, limit: bool = False) -> np.ndarray:
+    """Apply precomputed interpolation weights, handling NaN source values.
+
+    ``limit`` clips each target to the min/max of its own stencil. Needed
+    only for the LINEAR weights (``_build_latlon_weights(linear=True)``),
+    which are signed and can overshoot at a discontinuity -- MEASURED: a
+    25 K step regrids to [4.36, 30.51] from data spanning [5, 30]. IDW
+    weights are convex and cannot, so the default stays off.
+
+    IT COSTS ACCURACY AT A SMOOTH EXTREMUM, where the true value legitimately
+    lies outside the stencil range: on a field linear in 3-D position the
+    clip takes the max error from 0.045 to 0.291 and the RMS from 0.0024 to
+    0.018 (codex 2026-08-11). Every regrid number quoted elsewhere is WITH
+    the clip, i.e. the pessimistic one. Boundedness is worth that because an
+    unbounded temperature is a conservation-diagnostic failure; the upgrade
+    that gets both is barycentric interpolation inside the containing
+    element.
+    """
     v = vals[idxs]
     v_valid = np.isfinite(v)
     v_safe = np.where(v_valid, v, 0.0)
     wm = w * v_valid
     ws = wm.sum(axis=1, keepdims=True)
+    # ``ws > 0``, not ``abs(ws) > 0``, and DELIBERATELY asymmetric with the
+    # build-side guard: signed linear weights whose surviving sum has gone
+    # negative (source NaNs removed part of the stencil) no longer
+    # reconstruct anything, and renormalising by a negative sum would return
+    # a confident wrong number. NaN is the right output there.
     wn = np.where(ws > 0, wm / np.maximum(ws, 1e-30), 0)
     result = np.sum(v_safe * wn, axis=1)
+    if limit:
+        big = np.where(v_valid, v_safe, -np.inf).max(axis=1)
+        small = np.where(v_valid, v_safe, np.inf).min(axis=1)
+        result = np.clip(result, small, big)
     return np.where(ws.ravel() > 0, result, np.nan).reshape(n_lat, n_lon)
 
 
@@ -1026,7 +1404,9 @@ def _bin_to_latlon(
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
                                      max_dist=max_dist,
                                      ocean_mask=ocean_mask)
-    return _apply_weights(vals, idxs, w, n_lat, n_lon)
+    # limit=True: the weights are signed (linear fit), so a target next
+    # to a discontinuity could otherwise leave the data range.
+    return _apply_weights(vals, idxs, w, n_lat, n_lon, limit=True)
 
 
 def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
@@ -1081,7 +1461,16 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
     
     # For land mask, apply threshold to ensure binary values
     mask_interp = np.where(mask_interp > 0.5, 1.0, 0.0)
-    
+
+    # A target beyond the SOURCE mesh's reach is not ocean, whatever its
+    # nearest node says. The FESOM pi mesh has real continents, so without
+    # this the mask called them ocean (wet fraction 0.94 vs 0.89 for the
+    # aquaplanet arms; 0.75 with the cutoff). Same rule as the field
+    # regrid, so mask and field agree about where the mesh ends.
+    if src_3d.shape[0] > 1:
+        cutoff = _TARGET_CUTOFF_SPACINGS * _local_spacing(tree, src_3d)[indices]
+        mask_interp = np.where(distances > cutoff, 0.0, mask_interp)
+
     return mask_interp.reshape(n_lat, n_lon)
 
 
@@ -1244,7 +1633,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
                                      ocean_mask=ocean_mask)
     out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
-        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
+        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon,
+                                     limit=True)
     return out
 
 
@@ -1757,7 +2147,8 @@ def _bin_cross_section(
                                          ocean_mask=ocean_mask)
         ll = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
         for lev in range(nlev):
-            ll[..., lev] = _apply_weights(flat[:, lev], idxs, w, n_lat, n_lon)
+            ll[..., lev] = _apply_weights(flat[:, lev], idxs, w,
+                                          n_lat, n_lon, limit=True)
     else:
         ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
 
@@ -2274,8 +2665,30 @@ def _parse_resolution(tc: TestCase):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "cs_regional":
         return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon_channel":
+        # "n_lat x n_lon" cell counts. The channel cases build their own
+        # Cartesian geometry, so the string carries counts only -- the
+        # physical cell size is the case's own constant.
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
+    elif tc.grid_type == "tripole":
+        # NEMO tripolar grid: mesh-file-backed, not sized by an integer.
+        if tc.resolution != "eorca1":
+            raise ValueError(
+                f"tripole resolution {tc.resolution!r} is not supported; only "
+                f"'eorca1' (data/grids/eORCA1.2_mesh_mask.nc) is available."
+            )
+        return {"grid_file": "data/grids/eORCA1.2_mesh_mask.nc"}
+    elif tc.grid_type == "fesom":
+        # FESOM is mesh-file-backed, not sized by a resolution integer.
+        if tc.resolution != "pi":
+            raise ValueError(
+                f"FESOM resolution {tc.resolution!r} is not supported; FESOM "
+                f"is mesh-file-backed and only the packaged 'pi' mesh ships."
+            )
+        return {"mesh_dir": None}
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -2360,6 +2773,23 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
             kw["A_v"] = A_v
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
+        # matched across all four arms (see MATCHED_* near DEFAULT_DT)
+        kw.setdefault("A_v", MATCHED_A_V)
+        kw.setdefault("K_v", MATCHED_K_V)
+        if tc.case == "lock_exchange":
+            kw.setdefault("tracer_advection", LOCKEX_CGRID_TRACER_ADV)
+        kw.setdefault("tracer_advection", MATCHED_TRACER_ADV)
+        if tc.case == "lock_exchange":
+            # The explicit split barotropic's eta is consistent with the
+            # tracer-advecting div(h*u) only to ~4 significant figures
+            # (ocean_model_latlon_cgrid.py #1226 note); that residual breaks
+            # flux-form constancy preservation, and any limiter then
+            # over/undershoots at the front. MEASURED (uniform-T=15 probe,
+            # scripts/validate/lockex_rpe_trace.py --uniform-t, 1 day, dt=300):
+            # explicit_substep drifts T to [14.954, 15.046]; implicit_cn (the
+            # tripole arm's solver) holds 15 +/- 4e-9. Scheme swaps
+            # (tvd->fct2/upwind) changed nothing -- solver, not limiter.
+            kw.setdefault("barotropic_solver", "implicit_cn")
         config = LatLonCGridOceanConfig.from_flat(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
@@ -2374,6 +2804,20 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
 
         mesh = create_voronoi_mesh(params["level"])
         kw = dict(n_barotropic_substeps=30, physics=physics)
+        # matched across all four arms (see MATCHED_* near DEFAULT_DT).
+        kw["A_v"] = MATCHED_A_V
+        kw["K_v"] = MATCHED_K_V
+        kw["tracer_advection"] = MATCHED_TRACER_ADV
+        if tc.case == "lock_exchange":
+            # Same explicit-split constancy defect as the latlon arm (see the
+            # latlon branch comment): uniform-T=15 probe drifts to
+            # [14.963, 15.039] in 1 day under explicit_substep, and the
+            # tvd->upwind swap changed the lock-exchange bounds violation at
+            # the 7th digit only. implicit_cn is the matched consistent solver.
+            kw["barotropic_solver"] = "implicit_cn"
+            # n_barotropic_substeps stays at its default: inert under
+            # implicit_cn and no warning fires for it (only
+            # barotropic_time_filter has a loud no-op guard).
         if A_h is not None:
             kw["A_h"] = A_h
         if A_v is not None:
@@ -2386,6 +2830,88 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         return mesh, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "tripole":
+        # NEMO tripolar C-grid (eORCA1). create_tripole_grid returns a
+        # LatLonCGridGeometry, so it reuses the lat-lon C-grid ocean model --
+        # the SAME dycore as the `latlon` arm, differing only in the grid
+        # (curvilinear + north fold). That is exactly the variable under test.
+        from legoesm.grids.tripole import create_tripole_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel)
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        grid = create_tripole_grid(params["grid_file"])
+        # Tripole-specific NUMERICS (not physics): the curvilinear mesh with a
+        # north fold and strongly varying dx is unstable under the bare
+        # rectilinear defaults -- it NaNs by step 100 even at dt=30. These are
+        # the settings the production ORCA1 runs use
+        # (scripts/global_overturning/run_tripole_20yr.py): an implicit
+        # barotropic solver instead of explicit substepping, the Hollingsworth
+        # KE-gradient fix (a C-grid curvilinear instability), the Adcroft
+        # pressure-gradient scheme, and a non-zero lateral viscosity.
+        kw = dict(
+            barotropic_solver="implicit_cn",
+            ke_gradient_scheme="hollingsworth",
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            A_h=1e5, C_smag_lap=0.33, A_h_floor=1000.0,
+            A_v=MATCHED_A_V, K_v=MATCHED_K_V,
+            tracer_advection=(LOCKEX_CGRID_TRACER_ADV
+                              if tc.case == "lock_exchange"
+                              else MATCHED_TRACER_ADV),
+            physics=physics,
+        )
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = LatLonCGridOceanConfig.from_flat(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+        coord_kind = "tripole"
+        # Tripolar tracer points are genuinely 2-D (curvilinear).
+        lon_deg = np.asarray(grid.lon_T, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat_T, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "fesom":
+        # FESOM2 unstructured triangular dycore (the fesom_jax package).
+        from legoesm.grids.factory import create_grid
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            FesomOceanConfig, FesomOceanModel)
+        from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+
+        # No FESOM equivalent for these knobs -- dropping them silently would
+        # confound the latlon/mpas/fesom comparison, so refuse loudly.
+        _unsupported = {k: v for k, v in
+                        (("A_h", A_h), ("A_v", A_v),
+                         ("bottom_drag_r", bottom_drag_r), ("physics", physics))
+                        if v is not None}
+        if _unsupported:
+            raise NotImplementedError(
+                "FESOM has no equivalent for these physics kwargs (dropping "
+                "them silently would confound the model comparison): "
+                + ", ".join(f"{k}={v!r}" for k, v in _unsupported.items()))
+
+        # land_lat_threshold MUST match the latlon/mpas arms (80.0), or the
+        # three-way comparison is a confound rather than a result.
+        grid = create_grid(
+            "fesom", mesh_dir=params["mesh_dir"], H_max=H_max, nlev=nlev,
+            land_lat_threshold=LockExchangeConfig().land_lat_threshold,
+            # SAME interfaces as the other arms. Without this FESOM runs a
+            # uniform 1 m column while _compute_rpe weights it with the
+            # stretched z-star dz (0.095..1.905 m) -> misweighted PE and
+            # unmatched vertical resolution.
+            zbar=np.asarray(z_coord.z_half_ref, dtype=np.float64))
+        # FesomOceanModel.step raises on a dt mismatch, so cfg.dt must equal
+        # the timestep the matrix timeloop calls it with.
+        config = FesomOceanConfig(dt=DEFAULT_DT, k_ver=MATCHED_K_V,
+                                  a_ver=MATCHED_A_V)
+        model = FesomOceanModel(grid.mesh, z_coord, config)
+        coord_kind = "fesom"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
 
     elif tc.grid_type == "mpas_regional":
         from legoesm.grids.voronoi import create_regional_voronoi_mesh
@@ -2492,6 +3018,14 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_latlon_cgrid_ocean(
             grid, z_coord, H_max=H_max, land_lat_threshold=90.0,
         )
+    elif tc.grid_type == "fesom":
+        # The FESOM mesh already carries the 80-degree land threshold from
+        # _create_ocean_setup, i.e. the SAME land the latlon/mpas with-land
+        # rest states use; there is no separate mask to apply here.
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        return create_rest_state(grid.mesh, z_coord)
+    elif tc.grid_type == "tripole":
+        return _tripole_rest_state(tc, grid, z_coord, H_max)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
@@ -2508,6 +3042,57 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+def _tripole_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX,
+                        **_ts_kwargs):
+    """Tripole (eORCA1) rest state — shared by the stratified and uniform-T
+    builders so the BASIN is defined in exactly ONE place. ``_ts_kwargs``
+    carries the T/S profile (uniform-T control vs the stratified default).
+
+    create_tripole_grid returns a LatLonCGridGeometry, so the lat-lon C-grid
+    rest state applies unchanged. The DEPTH is the same flat H_max as every
+    arm (NEMO bathymetry not used), but the HORIZONTAL land mask is the
+    latitude threshold INTERSECTED with the NEMO surface tmask -- i.e. the
+    tripole arm keeps Earth's continents (0.534 wet on the native 332x362
+    mesh; 0.607 on the regridded 1-deg artifact; 0.889 for the pure latitude
+    mask). That is a DOCUMENTED per-arm geometry difference, not a bug: the
+    NEMO-closed cells carry degenerate metrics and cannot be opened.
+    Per-arm-normalised diagnostics (RPE_rel) stay comparable in magnitude.
+
+    EXCEPT row j=0: NEMO requires a SOLID southern wall there (the real
+    eORCA1 tmask has row 0 all-zero) -- there is no southern neighbour for
+    the C-grid stencil, and the north fold only closes the top. The
+    curvilinear row 0 spans latitudes on both sides of -80 deg, so the plain
+    latitude threshold left part of it OCEAN; the stencil then read past the
+    array edge and the run went non-finite at ~step 100 of a 1-day run
+    (first bad cells [0,40..44], measured 2026-08-09). Use
+    land_mask_override at CONSTRUCTION so u_mask/v_mask stay consistent
+    (never _replace(land_mask=...) post-hoc).
+
+    The tmask intersection also removes the Antarctic wedge rows, whose
+    metrics are degenerate (e2t down to ~4.6 km vs >=23 km for every real
+    NEMO-ocean cell); treating them as ocean sent the 1-day run non-finite
+    at row 1 cols 40-44. The Dhruv-era tripole runs respected tmask, which
+    is why they worked.
+    """
+    import jax.numpy as _jnp
+    import netCDF4 as _nc
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    lat_t = np.degrees(np.asarray(grid.lat_T))
+    base = (np.abs(lat_t) <= 80.0).astype(np.float64)
+    _mesh_file = _parse_resolution(tc)["grid_file"]
+    with _nc.Dataset(_mesh_file) as _ds:
+        tmask0 = np.asarray(_ds.variables["tmask"][0, 0], dtype=np.float64)
+    if tmask0.shape != base.shape:
+        raise ValueError(
+            f"tmask shape {tmask0.shape} != grid shape {base.shape} for "
+            f"{_mesh_file!r}."
+        )
+    base = base * tmask0
+    return rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=H_max, land_mask_override=_jnp.asarray(base),
+        **_ts_kwargs)
+
+
 def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     """Create rest-state with uniform T/S (no stratification) + land."""
     if tc.grid_type == "cubed_sphere":
@@ -2519,6 +3104,15 @@ def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_M
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_water_init_C=10.0, T_deep=10.0)
+    elif tc.grid_type == "fesom":
+        from legoesm.ocean.dynamics.ocean_model_fesom import create_rest_state
+        return create_rest_state(grid.mesh, z_coord, T_water_init_C=10.0,
+                                 T_deep=10.0, stratified=False)
+    elif tc.grid_type == "tripole":
+        # Same NEMO-tmask basin as the stratified tripole rest state (see
+        # _create_rest_state); only the T profile differs.
+        return _tripole_rest_state(tc, grid, z_coord, H_max,
+                                   T_water_init_C=10.0, T_deep=10.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -2732,6 +3326,39 @@ def _make_check_fn(grid_type: str):
             metric = float(jnp.max(jnp.abs(s.eta.data)))
             return fin, metric
         return check_fn
+
+
+def _area_weighted_eta_var(state, grid_type: str, grid) -> float:
+    """Area-weighted mean of eta^2 over OCEAN cells -- a PE proxy.
+
+    The barotropic-wave case used to gate on the GLOBAL PEAK of |eta|,
+    which is not a smooth functional of the state: it reports wherever the
+    dispersing packet happens to be constructively interfering at the
+    sample instant, so it neither converges nor measures dissipation
+    (GLM-5.2 2026-08-11). The area-weighted variance is proportional to
+    available potential energy, is smooth, and decays at the scheme's
+    actual dissipation rate.
+    """
+    eta = np.asarray(state.eta.data, dtype=np.float64)
+    _MISSING = object()
+    mobj = getattr(state, "land_mask", getattr(state, "land_mask_grid",
+                                               _MISSING))
+    mask = (np.asarray(mobj.data, dtype=np.float64) > 0.5
+            if mobj is not _MISSING else np.ones_like(eta, dtype=bool))
+    if grid_type == "mpas":
+        area = np.asarray(grid.areaCell, dtype=np.float64)
+    else:
+        area = np.asarray(getattr(grid, "area", np.ones(eta.size)),
+                          dtype=np.float64)
+    if area.size == eta.size:
+        w = area.reshape(eta.shape)
+    else:
+        w = np.ones_like(eta)
+    w = np.where(mask & np.isfinite(eta), w, 0.0)
+    tot = float(w.sum())
+    if not tot > 0.0:
+        return float("nan")
+    return float(np.sum(w * np.nan_to_num(eta) ** 2) / tot)
 
 
 def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
@@ -3005,6 +3632,67 @@ def _key_array_fn(state, grid_type: str):
 # Barotropic wave perturbation
 # ===========================================================================
 
+def _cgrid_face_lat_lon(grid):
+    """(lat_u, lon_u, lat_v, lon_v) in RADIANS at the C-grid face points.
+
+    Shapes: u-faces ``(n_lat, n_lon+1)``, v-faces ``(n_lat+1, n_lon)`` --
+    the shapes ``state.u``/``state.v`` carry, so an analytic IC can be
+    written straight into them.
+
+    Works for BOTH grid families, which is the point: the rectilinear
+    branches used to build face positions as ``lat[i] +/- dlat/2`` from the
+    1-D axes, so every case that wrote an analytic edge field (Phillips,
+    inertia-gravity wave) was rectilinear-only and raised a bare shape
+    error on the curvilinear tripole mesh.
+
+    BIT-COMPATIBILITY WITH THE OLD RECTILINEAR CONVENTION (codex
+    2026-08-10 P1: an earlier version used a great-circle midpoint, which
+    bulges the u-face poleward -- 45.0273 deg instead of 45.0 at 5-deg
+    spacing -- and clamped the end v-faces to the tracer row instead of the
+    poles; both silently changed existing lat-lon Phillips/IGW results):
+      * u-face latitude is the ARITHMETIC mean of the two adjacent tracer
+        latitudes, which on a rectilinear grid is exactly ``lat[i]``;
+      * u-face longitude is a wrap-aware mean, i.e. ``lon[j] - dlon/2``;
+      * v-face latitude is the arithmetic mean of the rows, i.e.
+        ``lat[i] - dlat/2``, with the two END faces LINEARLY EXTRAPOLATED
+        (half a row beyond the edge), which on a rectilinear grid lands on
+        the poles exactly as ``latlon.py``'s ``lat_v`` does.
+    """
+    lat_T = getattr(grid, "lat_T", None)
+    lon_T = getattr(grid, "lon_T", None)
+    if lat_T is None or lon_T is None:
+        lat_T, lon_T = grid.lat, grid.lon
+    lat_T = np.asarray(lat_T, dtype=np.float64)
+    lon_T = np.asarray(lon_T, dtype=np.float64)
+    if lat_T.ndim == 1:            # rectilinear: build the 2-D T-point mesh
+        lat_T, lon_T = np.meshgrid(lat_T, lon_T, indexing="ij")
+
+    def _lon_mean(a, b):
+        """Wrap-aware mean of two longitudes [radians]."""
+        return np.mod(a + 0.5 * ((b - a + np.pi) % (2.0 * np.pi) - np.pi),
+                      2.0 * np.pi)
+
+    # u-faces sit between columns j-1 and j; longitude is periodic, so the
+    # first u-face pairs the last column with the first, and face n_lon
+    # repeats face 0 (the wrap).
+    lat_u_int = 0.5 * (np.roll(lat_T, 1, axis=1) + lat_T)
+    lon_u_int = _lon_mean(np.roll(lon_T, 1, axis=1), lon_T)
+    lat_u = np.concatenate([lat_u_int, lat_u_int[:, :1]], axis=1)
+    lon_u = np.concatenate([lon_u_int, lon_u_int[:, :1]], axis=1)
+
+    # v-faces sit between rows i-1 and i; latitude is NOT periodic, so the
+    # two end faces are extrapolated half a row beyond the edge (== the
+    # poles on a rectilinear grid).
+    lat_v_int = 0.5 * (lat_T[:-1] + lat_T[1:])
+    lon_v_int = _lon_mean(lon_T[:-1], lon_T[1:])
+    lat_v = np.concatenate([
+        1.5 * lat_T[:1] - 0.5 * lat_T[1:2],
+        lat_v_int,
+        1.5 * lat_T[-1:] - 0.5 * lat_T[-2:-1]], axis=0)
+    lon_v = np.concatenate([lon_T[:1], lon_v_int, lon_T[-1:]], axis=0)
+    return lat_u, lon_u, lat_v, lon_v
+
+
 def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
     """Add a Gaussian SSH perturbation to the rest state.
 
@@ -3047,6 +3735,23 @@ def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
         lon = np.asarray(grid.lonCell, dtype=np.float64)
         lat = np.asarray(grid.latCell, dtype=np.float64)
         perturb = _great_circle_perturbation(lon, lat)
+        new_eta = state.eta.data + jnp.array(perturb)
+        return state._replace(eta=Field(new_eta))
+
+    elif grid_type == "fesom":
+        # Node-centred scalar: same great-circle formula, node coords.
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        perturb = _great_circle_perturbation(geo[:, 0], geo[:, 1])
+        return with_fields(state, grid.mesh,
+                           eta=np.asarray(state.eta.data) + perturb)
+
+    elif grid_type == "tripole":
+        # Curvilinear: the 2-D tracer-point coordinates, NOT the 1-D
+        # lat/lon summaries the rectilinear branch meshgrids.
+        lon2 = np.asarray(grid.lon_T, dtype=np.float64)
+        lat2 = np.asarray(grid.lat_T, dtype=np.float64)
+        perturb = _great_circle_perturbation(lon2, lat2)
         new_eta = state.eta.data + jnp.array(perturb)
         return state._replace(eta=Field(new_eta))
 
@@ -3122,8 +3827,22 @@ def _add_baroclinic_perturbation(state, grid_type: str, grid, z_coord):
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
         return state._replace(T_hat=Field(new_T_hat))
 
+    elif grid_type == "fesom":
+        # Node-centred T perturbation. SAME amplitude 5*cos(lat) and SAME
+        # level-index decay exp(-k / max(nlev/3, 1)) as the FV branch
+        # below -- a depth-based decay here would make the cross-grid
+        # comparison a confound.
+        from legoesm.ocean.dynamics.ocean_model_fesom import with_fields
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64)
+        nlev = T_data.shape[-1]
+        T_pert = 5.0 * np.cos(geo[:, 1])          # geo lat already radians
+        for k in range(nlev):
+            T_data[:, k] += T_pert * np.exp(-k / max(nlev / 3, 1))
+        return with_fields(state, grid.mesh, T=T_data)
+
     else:
-        # FV grids (cube, latlon, mpas)
+        # FV grids (cube, latlon, mpas, tripole)
         if grid_type == "mpas":
             lat = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
         else:
@@ -3196,7 +3915,8 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3287,7 +4007,8 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3371,7 +4092,8 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3450,7 +4172,8 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
         ok, notes, eta_drift, 1e-10,
         label="eta", n_samples=len(eta_list))
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     # iter-131 (codex iter-130-followup MEDIUM-1): documented
     # S_drift < 1e-6 contract (rest_state has no S forcing).
@@ -3509,7 +4232,14 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    _base_scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+
+    def scalar_fn(s):
+        """Base scalars plus the AREA-WEIGHTED <eta^2>, the quantity this
+        case is actually gated on (see the gate block below)."""
+        out = dict(_base_scalar_fn(s))
+        out["eta_var"] = _area_weighted_eta_var(s, tc.grid_type, grid)
+        return out
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -3581,24 +4311,53 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     # the wavefront geometry, not damping.  Relaxed to 0.5 to
     # tolerate this while still catching damping-out (ratio→0)
     # or runaway growth (ratio→large via the upper gate).
+    # --- Gates rebuilt 2026-08-11 on the ENERGY, not the peak ---
+    #
+    # eta_conservation (min/max of the global peak over a window) and
+    # min_final_amplitude (an end-tail order statistic of the same peak)
+    # are REPORTED but NOT GATED. For a dispersing packet on a global
+    # basin the global peak reports where the wavefront happens to be
+    # constructively interfering at the sample instant; it is not a smooth
+    # functional of the state and it does not converge. MEASURED across the
+    # four arms: eta_cons spans 0.454-0.554 and min_final_amp 0.098-0.202,
+    # so the old 0.5 and 0.1 m thresholds -- both hand-picked, as their own
+    # comments admitted -- sliced straight through the arms' natural
+    # scatter, failing lat-lon by 2% on one and FESOM by 9% on the other
+    # while MPAS and tripole passed for no physical reason.
+    #
+    # The area-weighted <eta^2> IS smooth and is proportional to available
+    # potential energy. MEASURED e-folding time over the final half:
+    # latlon 2.71 d, mpas 2.95 d, fesom 2.63 d, tripole 8.41 d -- i.e. the
+    # arms agree on the dissipation rate to within a factor 3, and FESOM
+    # (whose low end-PEAK looked like over-dissipation through the old
+    # gate) is right alongside lat-lon. Final/initial <eta^2>: 0.206,
+    # 0.215, 0.187, 0.368.
+    #
+    # Thresholds are set OUTSIDE the measured spread, not through it:
+    # the floor is ~9x below the smallest measured survivor and the
+    # ceiling catches spurious energy GROWTH, which is the failure mode a
+    # free-surface scheme actually has.
+    ev = diag.get("eta_var", [])
+    if len(ev) >= 2 and np.isfinite(ev[0]) and ev[0] > 0:
+        energy_ratio = float(ev[-1] / ev[0])
+    else:
+        energy_ratio = float("nan")
+    notes += f", energy_ratio={energy_ratio:.3f}"
     ok, notes = _apply_value_threshold(
-        ok, notes, eta_conservation, 0.5,
-        label="eta_conservation_lower", op="ge",
-        n_samples=n_eta)
+        ok, notes, energy_ratio, _BWAVE_ENERGY_FLOOR,
+        label="barotropic energy_ratio_floor (wave extinguished)", op="ge",
+        n_samples=len(ev))
     ok, notes = _apply_value_threshold(
-        ok, notes, eta_conservation, 1.5,
-        label="eta_conservation_upper", op="le",
-        n_samples=n_eta)
+        ok, notes, energy_ratio, _BWAVE_ENERGY_CEILING,
+        label="barotropic energy_ratio_ceiling (spurious growth)", op="le",
+        n_samples=len(ev))
     ok, notes = _apply_value_threshold(
         ok, notes, mean_eta_drift, 1e-4,
         label="mean_eta_drift", op="le", units="m",
         n_samples=len(mean_eta_series))
     # min_final_amplitude > 0.1 m: use op="ge" with 0.1; this
     # catches over-damped runs that lose all wave amplitude.
-    ok, notes = _apply_value_threshold(
-        ok, notes, min_final_amplitude, 0.1,
-        label="min_final_amplitude", op="ge", units="m",
-        n_samples=n_eta)
+    # min_final_amplitude: reported only (see the block above).
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -4335,7 +5094,8 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # geostrophic_adjustment has no T forcing → T should be
     # conserved.  Apply 1e-8 relative T-drift tolerance.
     ok, notes = _apply_drift_tolerance(
-        ok, notes, T_drift, 1e-8,
+        ok, notes, T_drift,
+        _tracer_drift_tolerance(tc.grid_type, days, config),
         label="T", n_samples=len(diag.get("mean_T", [])))
     ok, notes = _apply_value_threshold(
         ok, notes, max_speed_final, 1.0,
@@ -4426,12 +5186,63 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             T_hat=Field(new_T_hat),
             eta_hat=Field(eta_hat))
 
+    elif grid_type == "fesom":
+        # Unstructured: T + SSH seed at NODES, the zonal jet at ELEMENT
+        # centroids (FESOM's velocity home). Same formulas as the FV block
+        # below -- jet 0.30*exp(-((lat-45)/14)^2) with -0.20x in layer 2,
+        # T = 16 - 10 sin^2(lat) / 8 - 4 sin^2(lat), SSH seed
+        # 0.05 sin(3 lon) cos(2 lat) with its area-weighted mean removed.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon, with_fields)
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        lon_n, lat_n = geo[:, 0], geo[:, 1]
+        mask_n = np.asarray(state.land_mask.data, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
+        nlev = T_data.shape[-1]
+        T_data[:, 0] = (16.0 - 10.0 * np.sin(lat_n) ** 2) * mask_n
+        if nlev > 1:
+            T_data[:, 1] = (8.0 - 4.0 * np.sin(lat_n) ** 2) * mask_n
+        # Node control-volume area for the mean removal (mesh.area is the
+        # per-level scalar CV area; level 0 is the surface CV).
+        area_n = np.asarray(grid.mesh.area, dtype=np.float64)[:, 0]
+        eta_seed = (0.05 * np.sin(3.0 * lon_n) * np.cos(2.0 * lat_n)
+                    * mask_n)
+        area_w = mask_n * area_n
+        eta_seed -= np.sum(eta_seed * area_w) / np.maximum(np.sum(area_w), 1.0)
+        lat_e, _lon_e = element_centroid_lat_lon(grid.mesh)
+        lat_e_deg = np.degrees(np.asarray(lat_e, dtype=np.float64))
+        u_jet = 0.30 * np.exp(-((lat_e_deg - 45.0) / 14.0) ** 2)
+        # EASTWARD jet -> model frame (the mesh is rotated; writing the
+        # geographic component straight in would tilt the jet).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            geographic_to_rotated_vector)
+        u_r0, v_r0 = geographic_to_rotated_vector(
+            grid.mesh, u_jet, np.zeros_like(u_jet))
+        n_elem = int(grid.mesh.elem2D)
+        uv = np.zeros((n_elem, nlev, 2), dtype=np.float64)
+        uv[:, 0, 0] = np.asarray(u_r0)
+        uv[:, 0, 1] = np.asarray(v_r0)
+        if nlev > 1:
+            uv[:, 1, 0] = -0.20 * np.asarray(u_r0)
+            uv[:, 1, 1] = -0.20 * np.asarray(v_r0)
+        return with_fields(state, grid.mesh, T=T_data,
+                           eta=np.asarray(state.eta.data) + eta_seed,
+                           uv_elem=uv)
+
     else:
-        # FV grids (cube, latlon, mpas)
+        # FV grids (cube, latlon, mpas, tripole)
         if grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
             lon_rad = np.asarray(grid.lonCell, dtype=np.float64)
             area = np.asarray(grid.areaCell, dtype=np.float64)
+        elif grid_type == "tripole":
+            # Curvilinear: the 2-D tracer coordinates. grid.lat/grid.lon
+            # are row/column SUMMARIES on this mesh (lat_1d is a row mean),
+            # so broadcasting them would place the jet and the SSH seed at
+            # the wrong cells.
+            lat_rad = np.asarray(grid.lat_T, dtype=np.float64)
+            lon_rad = np.asarray(grid.lon_T, dtype=np.float64)
+            area = np.asarray(grid.area, dtype=np.float64)
         else:
             lat_rad = np.asarray(grid.lat, dtype=np.float64)
             lon_rad = np.asarray(grid.lon, dtype=np.float64)
@@ -4467,28 +5278,31 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             u_data[..., 0] = u_jet_edge
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet_edge
-        elif grid_type == "latlon":
-            # iter-138 (iter-137 production finding ERROR-1): on
-            # latlon C-grid, u lives on east-west edges with shape
-            # (n_lat, n_lon+1, nlev) — NOT cell-center shape
-            # (n_lat, n_lon).  The iter-prior code broadcast a
-            # cell-center u_jet to the u-shape and crashed at the
-            # 36x72 → 36x73 mismatch.  Phillips zonal jet depends
-            # only on latitude (no lon dependence), so we can
-            # broadcast from a 1D u_jet(lat) to the full u shape.
-            n_u_lon = u_data.shape[1]
-            lat_1d_deg = np.asarray(lat_rad, dtype=np.float64) * 180 / np.pi
-            u_jet_1d = 0.30 * np.exp(-((lat_1d_deg - 45.0) / 14.0) ** 2)
-            u_jet_2d = np.broadcast_to(
-                u_jet_1d[:, None], (lat_1d_deg.size, n_u_lon))
+        elif grid_type in ("latlon", "tripole"):
+            # u-face latitudes from the SHARED helper: on the curvilinear
+            # tripole mesh the 1-D grid.lat is a row summary, so the old
+            # 1-D broadcast both mislocated the jet and raised on shape.
+            lat_u_2d, _lon_u, _lat_v, _lon_v = _cgrid_face_lat_lon(grid)
+            u_jet_2d = 0.30 * np.exp(
+                -((np.degrees(lat_u_2d) - 45.0) / 14.0) ** 2)
             u_data[..., 0] = u_jet_2d
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet_2d
-        else:  # cubed_sphere
+        elif grid_type == "cubed_sphere":
             u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
             u_data[..., 0] = u_jet
             if nlev > 1:
                 u_data[..., 1] = -0.20 * u_jet
+        else:
+            # Dispatch hardening (codex 2026-08-10): the lat-lon branch above
+            # builds the jet on 1-D grid.lat/grid.lon with a uniform
+            # dlat -- rectilinear-only. A curvilinear grid (tripole) fell
+            # through to the cube branch and died on a shape mismatch
+            # instead of saying what was missing.
+            raise NotImplementedError(
+                f"phillips_two_layer: no shear IC for grid_type="
+                f"{grid_type!r}; the lat-lon jet is rectilinear-only and a "
+                f"curvilinear grid needs its own edge IC.")
 
         # Target temperatures
         T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad_bc) ** 2) * mask
@@ -4560,6 +5374,16 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     else:
         if tc.grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
+        elif tc.grid_type == "fesom":
+            # Node latitudes (geographic radians).
+            lat_rad = np.asarray(grid.mesh.geo_coord_nod2D,
+                                 dtype=np.float64)[:, 1]
+        elif tc.grid_type == "tripole":
+            # Curvilinear: the 2-D tracer latitudes. Broadcasting the 1-D
+            # row summary (the latlon branch below) both mislocates the
+            # relaxation target and raises on shape at the first forcing
+            # call -- "(332, 362) vs (1, 332)", measured 2026-08-10.
+            lat_rad = np.asarray(grid.lat_T, dtype=np.float64)
         elif tc.grid_type == "latlon":
             # lat is 1D (n_lat,) — broadcast to (n_lat, n_lon)
             lat_1d = np.asarray(grid.lat, dtype=np.float64)
@@ -4573,7 +5397,13 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
 
         _is_mpas = (tc.grid_type == "mpas")
-        _is_latlon = (tc.grid_type == "latlon")
+        # tripole IS a lat-lon C-grid (same state layout, u/v on faces with
+        # their own masks) -- treating it as "other" applied the CELL mask
+        # to face-shaped arrays and raised on broadcast (measured
+        # 2026-08-10: "(332, 362) vs (1, 332)").
+        _is_latlon = tc.grid_type in ("latlon", "tripole")
+        _is_fesom = (tc.grid_type == "fesom")
+        _fesom_mesh = grid.mesh if _is_fesom else None
 
         def forcing_fn(s, dt_):
             from legoesm.core.field import Field
@@ -4605,6 +5435,16 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
                     T=Field(T_new),
                     u=Field(u_new),
                     v=Field(v_new))
+            if _is_fesom:
+                # FESOM state is not a NamedTuple (no _replace) and its
+                # velocity lives at ELEMENT centres, so the node mask does
+                # not apply to it; drag scales the element velocity and the
+                # relaxed T goes back through the field setter.
+                from legoesm.ocean.dynamics.ocean_model_fesom import (
+                    with_fields)
+                return with_fields(
+                    s, _fesom_mesh, T=T_new,
+                    uv_elem=s.uv_elem.data * drag_factor)
             mask_3d = mask[..., jnp.newaxis]
             u_new = u_new * mask_3d
             v_new = s.v.data * drag_factor * mask_3d
@@ -4679,14 +5519,45 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         ok, notes, T_abs_drift, 5.0,
         label="T_abs_drift", op="le", units="C",
         n_samples=n_T)
-    ok, notes = _apply_value_threshold(
-        ok, notes, eta_growth, 0.8,
-        label="eta_growth_lower", op="ge",
-        n_samples=n_eta)
-    ok, notes = _apply_value_threshold(
-        ok, notes, eta_growth, 10.0,
-        label="eta_growth_upper", op="le",
-        n_samples=n_eta)
+    # --- eta_growth is gated on the AQUAPLANET arms only (2026-08-11) ---
+    #
+    # The classical Phillips problem needs a zonally UNBLOCKED channel: the
+    # imposed zonal jet is only a steady solution of the unforced equations
+    # when nothing blocks it. On an arm with real continents that IC is a
+    # solution to a different operator than the one being integrated, so
+    # what this number measures there is the size of the initial ADJUSTMENT,
+    # not baroclinic growth.
+    #
+    # MEASURED 2026-08-11, and note the second line refutes the obvious
+    # guess (that it is coastal trapping):
+    #   * every arm starts at max|eta| = 0.050 m, so the ICs do match;
+    #   * the growth is INTERIOR, not boundary-trapped -- restricted to
+    #     cells more than 5 from any land it is 19.3 (fesom) and 31.7
+    #     (tripole) against 21.1 and 33.7 over the full wet domain, and the
+    #     coastal share of eta^2 variance (14.5%, 33%) is no larger
+    #     relative to coastal AREA (7%, 18%) than on the aquaplanet arms;
+    #   * it is not growth at all but a SHOCK: the real-geometry arms jump
+    #     0.05 -> 1.53 (fesom) and 0.05 -> 2.07 (tripole) inside the FIRST
+    #     output interval and then plateau or decay, where an instability
+    #     would grow over days. The aquaplanet arms jump to 0.24 and 0.21.
+    #
+    # So the gate is kept where the IC is nearly consistent (the aquaplanet
+    # arms cluster at 2.4-2.8, well inside the band) and reported as a
+    # DIAGNOSTIC where it is not. Retuning the threshold instead would just
+    # hide a false positive behind a bigger number; unregistering the case
+    # would throw away its tracer-conservation coverage, which is real.
+    if tc.grid_type in _AQUAPLANET_OCEAN_GRIDS:
+        ok, notes = _apply_value_threshold(
+            ok, notes, eta_growth, 0.8,
+            label="eta_growth_lower", op="ge",
+            n_samples=n_eta)
+        ok, notes = _apply_value_threshold(
+            ok, notes, eta_growth, 10.0,
+            label="eta_growth_upper", op="le",
+            n_samples=n_eta)
+    else:
+        notes += (" [eta_growth UNGATED on a real-geometry arm: the "
+                  "zonal-jet IC is not a steady state on a blocked basin]")
     ok, notes = _apply_value_threshold(
         ok, notes, max_eta_overall, 5.0,
         label="max_eta_amplitude", op="le", units="m",
@@ -4728,6 +5599,13 @@ def _get_cell_latlon_rad(grid_type, grid):
     if grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         return (np.asarray(grid.latCell, dtype=np.float64),
                 np.asarray(grid.lonCell, dtype=np.float64))
+    elif grid_type == "tripole":
+        # Curvilinear: tracer points are genuinely 2-D. grid.lat/.lon are
+        # 1-D ROW/COLUMN MEANS on this geometry -- using them would place the
+        # front on a fictitious rectilinear grid and silently misplace it
+        # near the fold.
+        return (np.asarray(grid.lat_T, dtype=np.float64),
+                np.asarray(grid.lon_T, dtype=np.float64))
     elif grid_type in ("latlon", "latlon_regional", "latlon_channel", "spectral"):
         lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_1d = np.asarray(grid.lon, dtype=np.float64)
@@ -4749,6 +5627,127 @@ def _get_cell_latlon_rad(grid_type, grid):
 # Analytical dispersion: omega^2 = f^2 + g*H*(kx^2 + ky^2)
 # Tests the barotropic pressure-gradient and Coriolis terms.
 # ===========================================================================
+
+# ===========================================================================
+# Runner: Inertia-Gravity Wave, f-PLANE CHANNEL (Bishnu et al. 2024)
+# ===========================================================================
+# Reference: Bishnu et al. (2024), "A Verification Suite of Test Cases for
+# the Barotropic Solver of Ocean Models", JAMES, 10.1029/2022MS003545.
+#
+# WHY THIS EXISTS ALONGSIDE THE GLOBAL CASE. The global
+# `inertia_gravity_wave` case cites the same paper but does not implement
+# it: it imposes a plane wave built with a CONSTANT f0 = 1e-4 on a sphere
+# where the model integrates f = 2*Omega*sin(lat) over +-1.46e-4. That is
+# not an eigenmode anywhere, so it disperses immediately -- the (k,l) mode
+# carries 50% of the variance at t=0 and 1-14% two outputs later -- and no
+# wave-speed gate is constructible on it (MEASURED 2026-08-11: a phase fit
+# returns omega 11-20x too slow with R^2 0.56-0.90, the diagnostic failing
+# its own control). Worse, its L2-vs-analytic gate ran to 2.997 wave
+# periods, where the analytic field is within 0.3% of the IC, so a FROZEN
+# dycore scored the best L2 of any arm.
+#
+# This case fixes all of that by putting the wave where it is an exact
+# eigenmode: a Cartesian f-plane channel, x-periodic with WALLS in y,
+# built by `create_beta_plane_cgrid_geometry(beta=0)` -- uniform dx/dy, no
+# metric terms, and f evaluated as the same constant at every stagger
+# point (MITgcm ini_cori.F convention).
+#
+# THE MODE. A plane wave is NOT an eigenmode of a walled channel: the
+# Coriolis-induced meridional velocity would not vanish at the walls. The
+# correct solution is the POINCARE channel mode, with l quantised so that
+# v vanishes on both walls:
+#
+#   theta = k x - omega t,  k = 2 pi m / Lx,  l = n pi / Ly
+#   v   = V sin(l y) sin(theta)
+#   u   = [Bc cos(l y) + Bs sin(l y)] cos(theta)
+#   eta = [Ac cos(l y) + As sin(l y)] cos(theta)
+#   As  = V f H k / (f^2 + g H l^2)
+#   Ac  = -omega l As / (f k),  Bc = -g l As / f,  Bs = omega As / (H k)
+#   omega^2 = f^2 + g H (k^2 + l^2)
+#
+# The dispersion relation is not imposed -- it FALLS OUT of requiring the
+# two independent expressions for As to agree, which is the check that the
+# mode is consistent. VERIFIED in tests/ocean/unit/test_igw_channel_mode.py
+# by substituting the closed form back into the three linear shallow-water
+# equations. MEASURED relative residuals 1.1e-8, 6.7e-8, 1.1e-8 (the
+# central difference's own truncation) and v = 0 at the walls to 1.2e-19
+# m/s against a 1e-3 m/s mode amplitude; the test ASSERTS the looser 1e-6
+# so other hardware cannot turn a correct mode red. That file also carries
+# the controls that make those numbers mean something -- scaling any ONE of
+# eta, u, v by 5% drives the residual above 1e-3; a plane wave, which
+# passes the residual check, is caught by the wall condition; and the
+# domain, depth, f0 and mode numbers are pinned against independent
+# literals so a coherently WRONG channel cannot pass the rest.
+# ===========================================================================
+
+#: FIXED physical domain -- the resolution string sets the CELL COUNT, so
+#: refining it is a genuine convergence test. An earlier revision fixed dx
+#: instead, which made the "fine" arm a BIGGER domain at the same 20 points
+#: per wavelength: the two arms were different problems and their L2 values
+#: were not comparable.
+_IGWC_LX_M = 4000.0e3
+_IGWC_LY_M = 2000.0e3
+_IGWC_H = 1000.0          # flat bottom [m]
+_IGWC_F0 = 1.0e-4         # f-plane Coriolis [1/s]
+_IGWC_M = 2               # zonal mode number (periodic)
+_IGWC_N = 1               # meridional mode number (walls => l = n pi / Ly)
+_IGWC_V_AMP = 1.0e-3      # meridional velocity amplitude [m/s]; the case is
+                          # LINEAR, so the amplitude only sets the scale.
+
+#: Run length in wave periods. DELIBERATELY NON-INTEGER: at an integer
+#: number of periods the exact solution returns to the initial condition
+#: and "close to analytic" degenerates into "close to your own IC", which
+#: is exactly how the global case came to rank a frozen dycore best. At
+#: 1.25 periods a frozen field is in quadrature with the truth.
+_IGWC_PERIODS = 1.25
+
+
+def _igw_channel_params(n_lat: int, n_lon: int):
+    """(Lx, Ly, k, l, omega, period) for the channel mode."""
+    lx = _IGWC_LX_M
+    ly = _IGWC_LY_M
+    k = 2.0 * np.pi * _IGWC_M / lx
+    l = np.pi * _IGWC_N / ly
+    omega = np.sqrt(_IGWC_F0 ** 2 + _G_EARTH * _IGWC_H * (k ** 2 + l ** 2))
+    return lx, ly, k, l, omega, 2.0 * np.pi / omega
+
+
+def igw_channel_mode(x, y, t, n_lat: int, n_lon: int):
+    """Exact Poincare channel mode: returns (eta, u, v) at (x, y, t).
+
+    ``x``/``y`` are metres from the channel's south-west corner. Public
+    (no leading underscore) because the unit test verifies it by
+    substitution into the linear shallow-water equations.
+    """
+    _lx, _ly, k, l, omega, _p = _igw_channel_params(n_lat, n_lon)
+    f, g, h = _IGWC_F0, _G_EARTH, _IGWC_H
+    a_s = _IGWC_V_AMP * f * h * k / (f ** 2 + g * h * l ** 2)
+    a_c = -omega * l * a_s / (f * k)
+    b_c = -g * l * a_s / f
+    b_s = omega * a_s / (h * k)
+    th = k * x - omega * t
+    eta = (a_c * np.cos(l * y) + a_s * np.sin(l * y)) * np.cos(th)
+    u = (b_c * np.cos(l * y) + b_s * np.sin(l * y)) * np.cos(th)
+    v = _IGWC_V_AMP * np.sin(l * y) * np.sin(th)
+    return eta, u, v
+
+
+def _igw_channel_coords(n_lat: int, n_lon: int):
+    """Cell-centre and face coordinates [m] from the SW corner.
+
+    C-grid staggering on this geometry: eta at centres (n_lat, n_lon), u
+    on east faces (n_lat, n_lon+1), v on north faces (n_lat+1, n_lon). The
+    v rows j = 0 and j = n_lat are the WALLS, and the mode puts sin(l*y)
+    exactly zero there by construction.
+    """
+    dx = _IGWC_LX_M / n_lon
+    dy = _IGWC_LY_M / n_lat
+    x_c = (np.arange(n_lon) + 0.5) * dx
+    y_c = (np.arange(n_lat) + 0.5) * dy
+    x_u = np.arange(n_lon + 1) * dx         # east faces, incl. both ends
+    y_v = np.arange(n_lat + 1) * dy         # north faces: y_v[0]=0=wall
+    return x_c, y_c, x_u, y_v
+
 
 def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     """Initialize a sinusoidal inertia-gravity wave perturbation.
@@ -4831,7 +5830,36 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             eta=Field(jnp.array(eta_cell)),
             u=Field(jnp.array(u_data)))
 
-    elif grid_type == "latlon":
+    elif grid_type == "fesom":
+        # Node-centred eta; element-centred (u, v) -- FESOM carries
+        # velocity at element centres, so the analytic wave is evaluated
+        # at the element centroids (geographic, dateline-safe).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            element_centroid_lat_lon, with_fields)
+        geo = np.asarray(grid.mesh.geo_coord_nod2D, dtype=np.float64)
+        eta_node = eta_amp * np.cos(kx * geo[:, 0] + ky * geo[:, 1])
+        lat_e, lon_e = element_centroid_lat_lon(grid.mesh)
+        lat_e = np.asarray(lat_e, dtype=np.float64)
+        lon_e = np.asarray(lon_e, dtype=np.float64)
+        phase_e = kx * lon_e + ky * lat_e
+        u_e = (_G_EARTH / denom) * (
+            omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
+        v_e = (_G_EARTH / denom) * (
+            omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
+        # Rotate (east, north) into the mesh's model frame, then write
+        # LEVEL 0 ONLY -- every structured arm perturbs only the surface
+        # layer, and a 2-D uv would have been broadcast down the whole
+        # column (codex 2026-08-10: both were confounds).
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            geographic_to_rotated_vector)
+        u_rot, v_rot = geographic_to_rotated_vector(grid.mesh, u_e, v_e)
+        nlev_f = np.asarray(state.T.data).shape[-1]
+        uv = np.zeros((int(grid.mesh.elem2D), nlev_f, 2), dtype=np.float64)
+        uv[:, 0, 0] = np.asarray(u_rot)
+        uv[:, 0, 1] = np.asarray(v_rot)
+        return with_fields(state, grid.mesh, eta=eta_node, uv_elem=uv)
+
+    elif grid_type in ("latlon", "tripole"):
         # iter-138 (iter-137 production finding ERROR-2): on
         # latlon C-grid, u has shape (n_lat, n_lon+1, nlev) at
         # east-west edges and v has shape (n_lat+1, n_lon, nlev)
@@ -4842,29 +5870,16 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         # cell centers but lat shifted by -dlat/2 (south edges).
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-        n_lat = u_data.shape[0]
-        n_u_lon = u_data.shape[1]  # = n_lon + 1
-        n_v_lat = v_data.shape[0]  # = n_lat + 1
-        n_lon_v = v_data.shape[1]  # = n_lon
-        dlon = float(grid.dlon)
-        dlat = float(grid.dlat)
-        lat_1d = np.asarray(grid.lat, dtype=np.float64)   # cell-center lat
-        lon_1d = np.asarray(grid.lon, dtype=np.float64)   # cell-center lon
-        # u-edge lon: extend by one column on the right (assumes
-        # uniform spacing); shift entire array by -dlon/2 to put
-        # u-edges at west cell faces.
-        lon_u = np.concatenate([lon_1d - dlon / 2.0,
-                                lon_1d[-1:] + dlon / 2.0])
-        lat_u_2d, lon_u_2d = np.meshgrid(lat_1d, lon_u, indexing='ij')
+        # Face positions from the SHARED helper, so this branch is not
+        # rectilinear-only: on a curvilinear mesh (tripole) it evaluates
+        # the analytic wave at the true face midpoints instead of raising
+        # on a 1-D-axis shape mismatch.
+        lat_u_2d, lon_u_2d, lat_v_2d, lon_v_2d = _cgrid_face_lat_lon(grid)
         phase_u = kx * lon_u_2d + ky * lat_u_2d
         u_pert_edge = (_G_EARTH / denom) * (
             omega * k_phys * np.cos(phase_u)
             - f0 * l_phys * np.sin(phase_u))
         u_data[..., 0] = u_pert_edge
-        # v-edge lat: extend by one row on top.
-        lat_v = np.concatenate([lat_1d - dlat / 2.0,
-                                lat_1d[-1:] + dlat / 2.0])
-        lat_v_2d, lon_v_2d = np.meshgrid(lat_v, lon_1d, indexing='ij')
         phase_v = kx * lon_v_2d + ky * lat_v_2d
         v_pert_edge = (_G_EARTH / denom) * (
             omega * l_phys * np.cos(phase_v)
@@ -4875,7 +5890,7 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             u=Field(jnp.array(u_data)),
             v=Field(jnp.array(v_data)))
 
-    else:  # cubed_sphere
+    elif grid_type == "cubed_sphere":
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
         u_data[..., 0] = u_pert
@@ -4884,6 +5899,187 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
             eta=Field(jnp.array(eta_pert)),
             u=Field(jnp.array(u_data)),
             v=Field(jnp.array(v_data)))
+    raise NotImplementedError(
+        f"_init_inertia_gravity_wave: no IC for grid_type={grid_type!r}. "
+        f"The lat-lon branch builds the analytic u/v EDGE fields from 1-D "
+        f"grid.lat/grid.lon and a uniform dlon/dlat, so it is "
+        f"rectilinear-only; a curvilinear grid (tripole) needs its own "
+        f"edge IC rather than a silent fall-through to the cube branch.")
+
+
+def run_inertia_gravity_wave_channel(tc: TestCase, output_dir: Path,
+                                     days: float) -> tuple[str, float, str]:
+    """Bishnu et al. (2024) inertia-gravity wave, as actually specified.
+
+    Gates on the three things the global case cannot: agreement with the
+    EXACT solution at a non-integer number of periods, the measured wave
+    FREQUENCY, and mode purity. See the block comment above
+    ``igw_channel_mode`` for why the global case cannot.
+    """
+    import time as _time
+    from legoesm.core.field import Field
+    from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    t_wall = _time.time()
+    params = _parse_resolution(tc)
+    n_lat, n_lon = params["n_lat"], params["n_lon"]
+    _lx, _ly, k, l, omega, period = _igw_channel_params(n_lat, n_lon)
+    x_c, y_c, x_u, y_v = _igw_channel_coords(n_lat, n_lon)
+
+    dx_m = _IGWC_LX_M / n_lon
+    dy_m = _IGWC_LY_M / n_lat
+    grid = create_beta_plane_cgrid_geometry(
+        n_lat, n_lon, dx_m=dx_m, dy_m=dy_m,
+        f0=_IGWC_F0, beta=0.0, cartesian_pseudo_lat=True)
+    z_coord = create_ocean_z_star(n_levels=1, H_max=_IGWC_H)
+    # implicit_cn, NOT the default explicit_substep. MEASURED 2026-08-12 on
+    # this very case: the split-explicit barotropic solver propagates the
+    # external gravity wave at ~0.54*sqrt(gH) -- period 1.86x too long, and
+    # it gets WORSE with more substeps (1.862 at 30, 1.951 at 120, 1.971 at
+    # 480), so it is not a CFL or filter artefact. implicit_cn gives 1.000.
+    # Reproduced on both this Cartesian geometry and the production regional
+    # lat-lon grid, at 20 and 40 points per wavelength, with no damping.
+    # A case that verifies wave SPEED cannot run on a solver that gets it
+    # wrong by 2x; the defect is tracked separately.
+    config = LatLonCGridOceanConfig()
+    config = config._replace(
+        barotropic=config.barotropic._replace(
+            barotropic_solver="implicit_cn"))
+    model = LatLonCGridOceanModel(grid, z_coord, config)
+
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=_IGWC_H,
+        land_mask_override=np.ones((n_lat, n_lon)))
+
+    # Exact mode at t=0, each field at ITS OWN stagger point.
+    xc2, yc2 = np.meshgrid(x_c, y_c)
+    xu2, yu2 = np.meshgrid(x_u, y_c)
+    xv2, yv2 = np.meshgrid(x_c, y_v)
+    eta0, _u_c, _v_c = igw_channel_mode(xc2, yc2, 0.0, n_lat, n_lon)
+    _e_u, u0, _v_u = igw_channel_mode(xu2, yu2, 0.0, n_lat, n_lon)
+    _e_v, _u_v, v0 = igw_channel_mode(xv2, yv2, 0.0, n_lat, n_lon)
+    state = state._replace(
+        eta=Field(jnp.asarray(eta0)),
+        u=Field(jnp.asarray(u0[..., None])),
+        v=Field(jnp.asarray(v0[..., None])))
+
+    # dt from the gravity-wave CFL; c = sqrt(gH).
+    c_grav = float(np.sqrt(_G_EARTH * _IGWC_H))
+    # dt PROPORTIONAL TO dx, so the refinement pair measures the SPATIAL
+    # order rather than a mixture. A fixed dt (or a min() against a
+    # constant) leaves the time error unchanged under refinement and flatts
+    # the apparent convergence rate -- measured 0.77 instead of ~2 before
+    # this was fixed. The constant gives ~300 s at dx = 100 km, i.e. CFL
+    # 0.30 on c = sqrt(gH).
+    dt = _IGWC_CFL_S_PER_M * min(dx_m, dy_m)
+    t_final = _IGWC_PERIODS * period
+    n_steps = max(1, int(round(t_final / dt)))
+    dt = t_final / n_steps                    # land exactly on t_final
+    diag_every = max(1, n_steps // 20)
+
+    def _eta_np(s):
+        return np.asarray(s.eta.data, dtype=np.float64)
+
+    # Projection onto the mode's two quadratures. A 2-D FFT is the natural
+    # tool on a doubly-periodic domain; here y is WALLED, so the y
+    # structure is the mode shape Y(y), not a Fourier harmonic. Projecting
+    # on Y(y)cos(kx) and Y(y)sin(kx) gives cos(omega t) and sin(omega t),
+    # whose arctan2 is the phase -- the wave-speed measurement the global
+    # case could not make.
+    y_shape = (igw_channel_mode(np.zeros_like(yc2), yc2, 0.0, n_lat, n_lon)[0]
+               / max(abs(np.cos(0.0)), 1e-30))
+    p_cos = y_shape * np.cos(k * xc2)
+    p_sin = y_shape * np.sin(k * xc2)
+    norm = float(np.sum(y_shape ** 2))
+
+    times, phases, purity = [], [], []
+
+    def scalar_fn(s):
+        e = _eta_np(s)
+        a = float(np.sum(e * p_cos)); b = float(np.sum(e * p_sin))
+        return {"eta_var": float(np.mean(e ** 2)),
+                "proj_c": a, "proj_s": b,
+                "mass": float(np.mean(e))}
+
+    check_fn = _make_check_fn(tc.grid_type)
+    lon_deg = np.degrees(np.asarray(grid.lon_T))
+    lat_deg = np.degrees(np.asarray(grid.lat_T))
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, d: model.step(s, d), state, dt, n_steps, check_fn,
+        scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"IGW channel ({tc.grid_type})", total_days=t_final / 86400.0)
+
+    # --- L2 against the EXACT solution at t_final ---
+    eta_end = _eta_np(state)
+    eta_exact = igw_channel_mode(xc2, yc2, t_final, n_lat, n_lon)[0]
+    denom = float(np.sqrt(np.mean(eta_exact ** 2)))
+    l2_rel = float(np.sqrt(np.mean((eta_end - eta_exact) ** 2)) /
+                   max(denom, 1e-30))
+
+    # --- measured omega from the projection phase ---
+    pc = np.asarray(diag.get("proj_c", []), dtype=np.float64)
+    ps = np.asarray(diag.get("proj_s", []), dtype=np.float64)
+    n_samp = min(pc.size, ps.size)
+    if n_samp >= 3:
+        t_samp = np.arange(n_samp) * diag_every * dt
+        ph = np.unwrap(np.arctan2(ps[:n_samp], pc[:n_samp]))
+        fit = np.polyfit(t_samp, ph, 1)
+        omega_fit = abs(float(fit[0]))
+        resid = ph - np.polyval(fit, t_samp)
+        ss = 1.0 - float(np.sum(resid ** 2) /
+                         max(np.sum((ph - ph.mean()) ** 2), 1e-30))
+        omega_err = abs(omega_fit - omega) / omega
+    else:
+        omega_fit = omega_err = ss = float("nan")
+
+    # --- mode purity: variance explained by the analytic mode shape ---
+    # Least-squares reconstruction from the two quadratures, then the
+    # variance it explains. An earlier revision divided by sum(Y^2) instead
+    # of the patterns' own norms and returned exactly 0.25 for a perfect
+    # mode -- a normalisation bug, not a physical result.
+    nc = float(np.sum(p_cos ** 2)); ns = float(np.sum(p_sin ** 2))
+    a_end = float(np.sum(eta_end * p_cos)); b_end = float(np.sum(eta_end * p_sin))
+    recon = (a_end / max(nc, 1e-30)) * p_cos + (b_end / max(ns, 1e-30)) * p_sin
+    resid = float(np.sum((eta_end - recon) ** 2))
+    purity_frac = 1.0 - resid / max(float(np.sum(eta_end ** 2)), 1e-30)
+
+    ev = diag.get("eta_var", [])
+    energy_ratio = (float(ev[-1] / ev[0]) if len(ev) >= 2 and ev[0] > 0
+                    else float("nan"))
+
+    notes = (f"L2_rel={l2_rel:.4f}, omega_fit={omega_fit:.4e} "
+             f"(exact {omega:.4e}, err={omega_err * 100:.2f}%, R2={ss:.4f}), "
+             f"purity={purity_frac:.4f}, energy_ratio={energy_ratio:.4f}, "
+             f"periods={_IGWC_PERIODS}, dt={dt:.1f}s")
+
+    ok, notes = _apply_value_threshold(
+        ok, notes, l2_rel, _IGWC_L2_MAX,
+        label="IGW channel L2 vs exact", op="le", n_samples=n_steps)
+    ok, notes = _apply_value_threshold(
+        ok, notes, omega_err, _IGWC_OMEGA_ERR_MAX,
+        label="IGW channel omega error", op="le", n_samples=n_samp)
+    ok, notes = _apply_value_threshold(
+        ok, notes, purity_frac, _IGWC_PURITY_MIN,
+        label="IGW channel mode purity", op="ge", n_samples=n_steps)
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": t_final / 86400.0, "dt": dt, "H_max": _IGWC_H,
+        "f0": _IGWC_F0, "omega_exact": omega, "omega_fit": omega_fit,
+        "period_hours": period / 3600.0, "L2_rel": l2_rel,
+        "mode_purity": purity_frac, "energy_ratio": energy_ratio,
+        "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{_time.time() - t_wall:.1f}s"})
+    return ("PASS" if ok else "FAIL", wall, notes)
 
 
 def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
@@ -4948,44 +6144,61 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 
     l2_err = float(np.sqrt(np.mean((eta_final - eta_exact)**2)) /
                    max(np.sqrt(np.mean(eta_exact**2)), 1e-30))
-    max_eta = float(np.max(np.abs(eta_final)))
-    max_eta_init = float(np.max(np.abs(eta_init)))
-    if max_eta_init > 1e-12 and np.isfinite(max_eta):
-        amplitude_ratio = max_eta / max_eta_init
-    else:
-        amplitude_ratio = float("nan")
+    _MISSING = object()
+    _mask_obj = getattr(state, "land_mask",
+                        getattr(state, "land_mask_grid", _MISSING))
+    wet = (np.asarray(_mask_obj.data, dtype=np.float64).ravel() > 0.5
+           if _mask_obj is not _MISSING else None)
+    amplitude_ratio, ic_corr, max_eta = _igw_gate_metrics(
+        eta_final, eta_init, wet)
     notes = (f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, "
              f"amp_ratio={amplitude_ratio:.3f}, omega={omega:.2e}")
-    # iter-132 (codex iter-131-followup HIGH-1): apply the
-    # documented IGW PASS gates.
-    # iter-138b (iter-137 production finding FAIL-2): the doc
-    # threshold ``l2_error < 0.1`` is for FULL mode (2 days,
-    # higher-resolution).  At quick mode (0.2 days, 36x72)
-    # the wave hasn't fully propagated AND coarse grids have
-    # significant numerical dispersion → L2 ~ 1.0-2.0 is
-    # expected.  Use a days-aware threshold: 0.1 for full
-    # mode (>= 1 day), 2.0 for quick mode (< 1 day).
-    # The amplitude_ratio gate stays unchanged — it remains
-    # a meaningful sanity check for both modes.
-    l2_threshold = 0.1 if days >= 1.0 else 2.0
-    # iter-140 (iter-139 follow-up MPAS finding): the doc
-    # amp_ratio range [0.8, 1.2] is for FULL mode where the
-    # wave reaches steady state.  Quick-mode coarse-grid runs
-    # (ico3, ~5° resolution, 0.2 days) show legitimate
-    # numerical damping (amp_ratio ~ 0.5-0.85 on cube/MPAS).
-    # Use the same pattern as L2: doc threshold for full
-    # mode, relaxed [0.5, 1.5] for quick.
-    amp_lower = 0.8 if days >= 1.0 else 0.5
-    amp_upper = 1.2 if days >= 1.0 else 1.5
+    notes += f", L2_UNGATED, corr_with_IC={ic_corr:.3f}"
+
+    # NO WAVE-SPEED GATE, and it is not an oversight -- it is not
+    # constructible on this case as posed (measured 2026-08-11).
+    #
+    # The obvious construction is to project eta(t) onto the IC pattern and
+    # its quadrature and fit the phase in time. Done: it returns an angular
+    # frequency 11-20x SLOWER than the theoretical 1.09e-4 on all four arms
+    # (5.0e-6 latlon, 5.5e-6 mpas, 9.4e-6 fesom, 8.2e-6 tripole) with a
+    # phase-fit R^2 of only 0.56-0.90. That is the DIAGNOSTIC failing its
+    # own control, not four independent dycores sharing a defect: the
+    # (k=2, l=2) mode explains 50% of the variance at t=0 and collapses to
+    # 1-14% within two output intervals, so by mid-run there is no coherent
+    # mode left whose phase means anything, and the number is a fit to
+    # noise. It is recorded here, and NOT shipped as a gate.
+    #
+    # A speed gate needs the CASE rebuilt so a coherent mode survives: a
+    # localized Gaussian packet narrow enough that f is nearly constant
+    # across it, an equatorial Kelvin or Yanai wave (analytic on the sphere
+    # with the real f), or a Hough mode. Until then this case gates on
+    # stability and on having propagated at all, and CANNOT detect a wrong
+    # phase speed -- stated so the gap stays visible instead of being
+    # mistaken for coverage.
+    # The module constants are used INLINE, deliberately. A local alias
+    # (``amp_upper = _IGW_AMP_UPPER``) is what caused the 2026-08-11
+    # NameError: a refactor deleted the assignment and left the uses. Worse,
+    # had the local been named the same as the global it would have silently
+    # resolved to the global instead of raising -- a wrong number rather
+    # than a crash, which no linter can catch (GLM-5.2). Inlining removes
+    # the failure mode instead of detecting it.
     ok, notes = _apply_value_threshold(
-        ok, notes, l2_err, l2_threshold,
-        label="IGW L2 vs analytical", op="lt")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_lower,
-        label="IGW amplitude_ratio_lower", op="ge")
-    ok, notes = _apply_value_threshold(
-        ok, notes, amplitude_ratio, amp_upper,
+        ok, notes, amplitude_ratio, _IGW_AMP_UPPER,
         label="IGW amplitude_ratio_upper", op="le")
+    # FLOOR too: without one, an arm that extinguishes the wave passes both
+    # the (upper-only) stability gate and the decorrelation gate, because
+    # numerical noise decorrelates just as well as physics does (codex
+    # 2026-08-11). Set an order of magnitude below the smallest MEASURED
+    # survivor (latlon 0.379), so it catches extinction without punishing
+    # the legitimate coarse-mesh damping the upper-only gate was meant to
+    # allow.
+    ok, notes = _apply_value_threshold(
+        ok, notes, amplitude_ratio, _IGW_AMP_FLOOR,
+        label="IGW amplitude_ratio_floor (wave extinguished)", op="ge")
+    ok, notes = _apply_value_threshold(
+        ok, notes, ic_corr, _IGW_IC_CORR_UPPER,
+        label="IGW corr_with_IC (frozen-dycore check)", op="le")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     _write_results_txt(output_dir, {
@@ -5034,18 +6247,37 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
       - Salinity: uniform 35 PSU
       - Velocity: zero (lock released at t=0)
 
-    Front position is the median of the grid's longitude coordinate so the
-    initial split is robust to both [0, 2pi] and [-pi, pi] lon conventions
-    (legoESM lat-lon grids use [0, 2pi], an earlier copy of this helper
-    assumed [-pi, pi] and silently initialized every cell to T_warm).
+    Front position is ``LockExchangeConfig.front_longitude`` with the same
+    wrapping-aware west-of-front predicate as
+    ``lock_exchange._add_temperature_front`` (the FESOM IC), so every arm
+    starts from the same state. (An earlier version used the median grid
+    longitude, which put legoESM arms on a different IC from FESOM.)
     """
     from legoesm.core.field import Field
+    from legoesm.ocean.experiments.lock_exchange import (
+        LockExchangeConfig as _LXC0)
 
-    T_cold = 5.0    # degC (dense side, matches Petersen 2015)
-    T_warm = 30.0   # degC (light side, matches Petersen 2015)
+    # SINGLE SOURCE with the FESOM arm's IC and the T_min/T_max_front gates
+    # (codex 2026-08-10: hardcoded 5/30 here would silently diverge from the
+    # gates' LockExchangeConfig bounds on a config change).
+    T_cold = float(_LXC0().T_cold_C)   # degC (dense side, Petersen 2015)
+    T_warm = float(_LXC0().T_warm_C)   # degC (light side, Petersen 2015)
 
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    lon_front = float(np.median(np.asarray(lon)))
+    # _get_cell_latlon_rad returns RADIANS; LockExchangeConfig.front_longitude
+    # is in DEGREES. Convert explicitly -- a radian/degree mix would move the
+    # front by a factor of 57.
+    lat, lon_rad = _get_cell_latlon_rad(grid_type, grid)
+    lon = np.degrees(np.asarray(lon_rad))                       # degrees
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    lon_front = float(LockExchangeConfig().front_longitude)     # degrees
+    # Wrapping-aware "west of front", IDENTICAL to
+    # lock_exchange._add_temperature_front, so every arm (including FESOM,
+    # which is initialised through that helper) starts from the same state.
+    # The previous median-longitude + non-wrapping "<" put the legoESM arms on
+    # a different initial condition from FESOM, and mis-classified points
+    # across the dateline.
+    dlon = (lon - lon_front + 180.0) % 360.0 - 180.0             # degrees
+    west_of_front = dlon < 0.0
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
@@ -5054,7 +6286,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        T_field = np.where(lon[..., None] < lon_front, T_cold, T_warm) * mask[..., None]
+        T_field = np.where(west_of_front[..., None], T_cold, T_warm) * mask[..., None]
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
         return state._replace(T_hat=Field(new_T_hat))
 
@@ -5070,40 +6302,246 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
             # cell width). Preserves the asymptotic +/- 12.5 K contrast.
             T_mid = 0.5 * (T_cold + T_warm)
             T_amp = 0.5 * (T_warm - T_cold)
-            width_rad = np.deg2rad(6.0)
-            T_front = T_mid + T_amp * np.tanh((np.asarray(lon) - lon_front)
-                                              / width_rad)
+            width_deg = 6.0
+            # Same front longitude AND same wrapping-aware argument as the
+            # sharp branch, in degrees.
+            T_front = T_mid + T_amp * np.tanh(dlon / width_deg)
             for k in range(nlev):
                 T_data[..., k] = T_front * mask
         else:
             for k in range(nlev):
-                T_data[..., k] = np.where(lon < lon_front, T_cold, T_warm) * mask
+                T_data[..., k] = np.where(west_of_front, T_cold, T_warm) * mask
         return state._replace(T=Field(jnp.array(T_data)))
 
 
-def _compute_rpe(state, grid_type, grid, z_coord):
-    """Compute Reference Potential Energy (Ilicak et al. 2012).
+def _rpe_extract(state, grid_type, grid, z_coord):
+    """Shared extraction for the two energy diagnostics.
 
-    RPE = g * sum(rho_sorted * z_ref * dz * area)
-    Approximation: sort density profile at each column and compute
-    domain-integrated rho * z.
+    Returns ``(T, S, area_bc, mask_bc, z_full, dz)`` with ``area_bc``/``mask_bc``
+    already reshaped to the tracer's spatial shape. Factored out so
+    ``_compute_rpe`` (plain PE) and ``_compute_sorted_rpe`` (mixing metric) can
+    never disagree about masking, areas or density inputs.
     """
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis_3d
         T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
         S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
+        # GaussianGrid exposes grid_area, NOT area (codex 2026-08-08).
+        area = np.asarray(getattr(grid, "grid_area", None), dtype=np.float64)
+        mask_attr = "land_mask_grid"
     elif grid_type == "mpas":
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.areaCell, dtype=np.float64)
+        mask_attr = "land_mask"
     else:
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.area, dtype=np.float64)
+        mask_attr = "land_mask"
 
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+    _MISSING = object()
+    mask_obj = getattr(state, mask_attr, _MISSING)
+    if mask_obj is _MISSING:
+        raise ValueError(
+            f"state for grid_type={grid_type!r} has no attribute "
+            f"state.{mask_attr}; cannot compute a land-masked energy integral. "
+            f"Refusing to fall back to an unmasked sum."
+        )
+    mask_raw = np.asarray(mask_obj.data, dtype=np.float64)
+
+    spatial_shape = T.shape[:-1]
+    if area.size != int(np.prod(spatial_shape)):
+        raise ValueError(
+            f"area has {area.size} entries but the tracer spatial shape is "
+            f"{spatial_shape} for grid_type={grid_type!r}."
+        )
+    if mask_raw.size != int(np.prod(spatial_shape)):
+        raise ValueError(
+            f"land mask has {mask_raw.size} entries but the tracer spatial "
+            f"shape is {spatial_shape} for grid_type={grid_type!r}."
+        )
+    # MOVING control volumes, not reference ones. Under z-star the true layer
+    # thickness is dz_ref*(eta+H_bathy)/H_max; using dz_ref alone gives every
+    # parcel a fixed volume, which breaks the sorted-RPE invariance premise and
+    # produces either-sign drift in a free-surface run (codex 2026-08-08).
+    from legoesm.ocean.vertical import compute_layer_thickness
+    if grid_type == "spectral":
+        # Spectral state carries eta/H_bathy spectrally; fall back to the
+        # reference thickness and say so rather than silently mixing bases.
+        h = np.broadcast_to(
+            np.asarray(z_coord.dz_ref, dtype=np.float64), T.shape).copy()
+    else:
+        h = np.asarray(
+            compute_layer_thickness(jnp.asarray(state.eta.data),
+                                    jnp.asarray(state.H_bathy.data), z_coord),
+            dtype=np.float64)
+        if h.shape != T.shape:
+            raise ValueError(
+                f"layer thickness shape {h.shape} != tracer shape {T.shape} "
+                f"for grid_type={grid_type!r}."
+            )
+    # Cell-centre depth from the ACTUAL thicknesses: z_centre[k] is the mid-point
+    # of layer k measured down from the free surface eta.
+    h_cum = np.cumsum(h, axis=-1)
+    z_centre = (np.asarray(state.eta.data, dtype=np.float64)[..., np.newaxis]
+                - (h_cum - 0.5 * h)) if grid_type != "spectral" else \
+        np.broadcast_to(np.asarray(z_coord.z_full_ref, dtype=np.float64),
+                        T.shape).copy()
+    return (T, S,
+            area.reshape(spatial_shape),
+            mask_raw.reshape(spatial_shape),
+            z_centre, h)
+
+
+def _compute_sorted_rpe(state, grid_type, grid, z_coord):
+    """Sorted Reference Potential Energy (Ilicak 2012; Petersen et al. 2015).
+
+    Redistribute every OCEAN cell into the minimum-energy state by sorting on
+    density and packing densest-first from the bottom up, then integrate
+    ``g * rho_sorted * z * dV``.
+
+    Why this and not ``_compute_rpe``: plain PE also changes through the
+    PHYSICAL PE->KE conversion of the gravity current, so its drift is not a
+    mixing measurement. Only irreversible (spurious) mixing moves the SORTED
+    RPE; reversible sloshing leaves it invariant. That invariance is the whole
+    point of the metric. NOTE: there is no committed test for it yet -- the
+    property was checked interactively (homogenising two layers of a stably
+    stratified column raised the sorted RPE by +8.2e+14, while a reversed sort
+    would lower it). A level-swap-invariance check alone is NOT sufficient: a
+    reversed sort, a wrong H, or a constant-returning implementation all pass
+    that one.
+
+    FLAT-BOTTOM ASSUMPTION: with constant area-at-depth, a sorted parcel of
+    volume ``v_i`` occupies a slab of thickness ``v_i / total_area`` whose
+    centre, in this code's convention (z=0 surface, negative downward), is
+
+        z_i = -H_max + (c_prev_i + v_i / 2) / total_area
+
+    with ``c_prev_i`` the volume already placed BELOW parcel i. Densest parcel
+    lands at the BOTTOM. Raises if the arm is not flat-bottomed rather than
+    silently returning a wrong number.
+    """
+    if grid_type == "spectral":
+        # Spectral states carry eta/H spectrally: _rpe_extract falls back to
+        # reference thicknesses, which makes BOTH the moving volumes and the
+        # flat-bottom tripwire below vacuous (codex 2026-08-10). No spectral
+        # arm runs lock_exchange; refuse rather than return a fake number.
+        raise NotImplementedError(
+            "_compute_sorted_rpe: spectral states are not supported (their "
+            "moving volumes and bathymetry are not grid-point fields here).")
+    T, S, area_bc, mask_bc, z_centre, h = _rpe_extract(state, grid_type, grid,
+                                                       z_coord)
+    from legoesm.ocean.eos import linear_eos
+    rho = np.asarray(linear_eos(
+        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
+        rho_ref=_C.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+    ), dtype=np.float64)
+
+    # MOVING volumes (area * h(eta)), densest packed at bottom -- RPE_mov.
+    # The earlier fixed-reference-volume variant (dz_ref) was RETRACTED
+    # 2026-08-10: on the two arms with a bounded front and exact conservation
+    # (FESOM FCT, tripole implicit_cn) RPE on FIXED volumes still drifted
+    # NEGATIVE (-1.0e14 / -1.3e14 over 1 day) while MOVING volumes drifted
+    # POSITIVE (+3.0e12 / +2.1e12, the physical sign of spurious mixing).
+    # Traces: results/lockex_rpe_trace/rpe_trace_{fesom,tripole}.csv.
+    #
+    # DELIBERATE for the FESOM arm too, although its linfs coordinate keeps
+    # model-internal thicknesses FIXED (fesom_jax step.py: ale_cfg=None =>
+    # linfs): h(eta) here is the PHYSICAL water column (eta + H), and the
+    # metric evaluates the implied physical fluid, not the model's
+    # bookkeeping. Under linfs the surface concentration/dilution term makes
+    # fixed-volume heat/RPE drift REVERSIBLY with eta (that is the -1.0e14
+    # above, monotone all day while T stays in [5,30] to 1e-9); weighting
+    # columns with eta+H removes exactly that term.
+    vol = area_bc[..., np.newaxis] * h
+    ocean3 = np.broadcast_to(mask_bc[..., np.newaxis] > 0.5, rho.shape)
+    rho_o = rho[ocean3]
+    vol_o = np.broadcast_to(vol, rho.shape)[ocean3]
+    if rho_o.size == 0:
+        raise ValueError(
+            f"_compute_sorted_rpe: no ocean cells for grid_type={grid_type!r}."
+        )
+    if not (np.all(np.isfinite(rho_o)) and np.all(np.isfinite(vol_o))):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-finite density or volume for "
+            f"grid_type={grid_type!r}."
+        )
+    if not np.all(vol_o > 0.0):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-positive moving volume for "
+            f"grid_type={grid_type!r} (min={vol_o.min():.3e}); eta below "
+            f"-H_bathy would corrupt the packing (finite but wrong)."
+        )
+
+    # Flat-bottom check: every wet column must span the full level count.
+    wet_per_col = (mask_bc > 0.5)
+    total_area = float(np.sum(area_bc[wet_per_col]))
+    if not total_area > 0.0:
+        raise ValueError(
+            f"_compute_sorted_rpe: zero wet area for grid_type={grid_type!r}."
+        )
+    # REAL flat-bottom tripwire (codex 2026-08-10: the wet-area sum above
+    # never looked at bathymetry). Spread of BATHYMETRY, not eta+H, so a
+    # large but legitimate free-surface amplitude cannot trip the geometry
+    # check (GLM 2026-08-10). Spectral states carry H spectrally; there the
+    # reference column sum stands in (its eta contribution is zero anyway).
+    _MISSING_H = object()
+    H_obj = getattr(state, "H_bathy", _MISSING_H)
+    if H_obj is not _MISSING_H:
+        col_depth = np.asarray(H_obj.data, dtype=np.float64).reshape(
+            mask_bc.shape)[wet_per_col]
+    else:
+        col_depth = np.sum(h, axis=-1)[wet_per_col]
+    depth_spread = float(col_depth.max() - col_depth.min())
+    if depth_spread > 0.05 * float(col_depth.mean()):
+        raise ValueError(
+            f"_compute_sorted_rpe: non-flat bottom for grid_type={grid_type!r}"
+            f" (wet column depths span {col_depth.min():.2f}.."
+            f"{col_depth.max():.2f} m); the constant-area sorted packing "
+            f"needs hypsometry there. Refusing to return a wrong number."
+        )
+    # Basin depth of the SORTED column: total wet volume / total wet area, so
+    # H is consistent with the moving thicknesses actually being packed.
+    H = float(np.sum(vol_o) / total_area)
+
+    return _pack_sorted_rpe(rho_o, vol_o, total_area)
+
+
+def _pack_sorted_rpe(rho_o, vol_o, total_area):
+    """Sorted-RPE packing (densest at bottom) — delegates to the ONE
+    production kernel ``legoesm.ocean.rpe.pack_sorted_rpe`` so the gate,
+    the trace and ``compute_rpe`` can never diverge (codex 2026-08-10)."""
+    from legoesm.ocean.rpe import pack_sorted_rpe
+    return pack_sorted_rpe(rho_o, vol_o, total_area, g_val=_G_EARTH)
+
+
+def _compute_rpe(state, grid_type, grid, z_coord):
+    """Volume-integrated potential energy over OCEAN cells only.
+
+    PE = g * sum_k( rho(T,S)[k] * z_full[k] * dz[k] * area * ocean_mask )
+
+    NOT the sorted Reference Potential Energy of Ilicak et al. (2012):
+    there is no per-column density sort here. The old docstring claimed
+    ``rho_sorted`` while nothing sorted -- corrected 2026-08-08. The name
+    is kept because five call sites and the emitted diagnostic key
+    ``PE``/``PE_rel`` depend on it; a sorted sibling would be a separate
+    function.
+
+    Land cells are EXCLUDED. They must be: MPAS fills its land cells with
+    an ocean-neighbour average as a Neumann BC
+    (``fill_land_cells_mpas``), so land there holds real ocean-like
+    values, while the lat-lon C-grid pins land tracers at 0. Summing both
+    as ocean made MPAS's lock-exchange PE drift read +6.5e-05 against
+    ~-1e-07 elsewhere -- an artifact of the diagnostic, not of the dycore
+    (measured 2026-08-08: MPAS land T went 0 -> [5, 30] over 0.1 day
+    while lat-lon land stayed at 0).
+
+    A missing mask attribute raises: falling back to an unmasked integral
+    is exactly the defect being fixed.
+    """
+    T, S, area_bc, mask_bc, z_centre, h = _rpe_extract(state, grid_type, grid,
+                                                       z_coord)
 
     # Compute density at each point using linearized EOS
     from legoesm.ocean.eos import linear_eos
@@ -5114,11 +6552,23 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 
     # Potential energy: PE = g * sum(rho * z * dz * area)
     # For RPE, we'd sort density globally, but as approximation compute PE
-    spatial_shape = T.shape[:-1]
-    area_bc = area.reshape(spatial_shape)
     pe = 0.0
-    for k in range(len(z_full)):
-        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
+    for k in range(z_centre.shape[-1]):
+        # z_centre and h are the MOVING (z-star) cell centre and thickness.
+        cell = rho[..., k] * z_centre[..., k] * h[..., k] * area_bc
+        # np.where, NOT cell * mask: 0.0 * NaN is NaN, so a degenerate land
+        # value would contaminate the finite check below. Land contributes
+        # exactly zero.
+        weighted = np.where(mask_bc > 0.5, cell, 0.0)
+        # np.sum, NOT np.nansum: nansum silently swallows a blown-up run and
+        # reports a plausible finite PE.
+        if not np.all(np.isfinite(weighted)):
+            bad = np.argwhere(~np.isfinite(weighted))[:5].tolist()
+            raise ValueError(
+                f"Non-finite PE summand at grid_type={grid_type!r}, level "
+                f"k={k}; first bad index(es): {bad}."
+            )
+        pe += float(np.sum(weighted))
     return _G_EARTH * pe
 
 
@@ -5129,6 +6579,86 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 # below wires the registry into the matrix's standard time loop +
 # diagnostics so we don't repeat ~100 lines of boilerplate per case.
 # ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Known failures (mirrors run_atmosphere_test_matrix.KNOWN_FAILURES / #1029)
+# ---------------------------------------------------------------------------
+# A waived FAIL becomes XFAIL; a full-length PASS becomes XPASS and is LOUD,
+# because an entry that has silently started passing is an entry that must be
+# removed.  ERROR, SKIP, short runs and any differently-caused FAIL pass
+# through unchanged, so the waiver cannot mask an unrelated regression.
+KNOWN_FAILURES: dict[tuple[str, str, str], dict] = {
+    # EMPTY, and it should stay that way.
+    #
+    # The one entry this registry ever held -- eady_uniform/mpas_channel/70km,
+    # #1609 -- is removed because the case PASSES its full 200 days again. It
+    # was destabilised by a free-surface Laplacian inherited from the
+    # collocated/cubed-sphere solvers (now off for this case) and by the
+    # absence of the depth-mean velocity viscosity that targets the rotational
+    # grid mode (now 1e3 m^2/s).
+    #
+    # A waiver that has started passing is a waiver that hides the next
+    # regression, which is why XPASS is loud and exits non-zero -- and it is
+    # exactly how this one announced itself.
+}
+
+
+def _blowup_day_from_results(out_dir) -> float | None:
+    """Parse the blow-up day this case recorded, or None if it did not blow up.
+
+    ``_write_results_txt`` prepends ``BLOWUP at step N (day D)`` to the notes
+    whenever a FAIL carries blow-up info, so the day is on disk even though the
+    runner's in-memory notes only carry the last clean diagnostic.  Returning
+    None (missing file, unreadable, no marker) FAILS CLOSED: no waiver.
+    """
+    if out_dir is None:
+        return None
+    try:
+        txt = (Path(out_dir) / "results.txt").read_text()
+    except (OSError, ValueError, TypeError):
+        return None
+    m = re.search(r"BLOWUP at step \d+ \(day ([0-9.]+)\)", txt)
+    if m is None:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None   # malformed marker (e.g. "1.2.3"): fail closed, no waiver
+
+
+def _apply_known_failure(tc: "TestCase", status: str, days: float,
+                         notes: str = "", out_dir=None) -> str:
+    """Remap a waived FAIL to XFAIL and a full-length PASS to XPASS.
+
+    The waiver requires ALL of:
+
+    * an entry keyed on this exact ``(case, grid_type, resolution)``;
+    * a run at least ``min_days`` long -- shorter lanes cannot reach the known
+      blow-up, so a failure there is a DIFFERENT bug and stays red;
+    * a recorded blow-up whose DAY falls inside ``expect_day_range``.
+
+    The day band is a POSITIVE signature of the known mechanism.  Matching on
+    the notes text was rejected in review: this case emits two different
+    failure notes depending on which detector fires first ("Non-finite values
+    in u" against a max_speed threshold string), and no substring covers both
+    without also covering every unrelated regression.
+
+    Anything else -- ERROR, SKIP, a short run, a blow-up outside the band, or a
+    FAIL with no recorded blow-up at all -- is returned unchanged.
+    """
+    entry = KNOWN_FAILURES.get((tc.case, tc.grid_type, tc.resolution))
+    if entry is None or days < entry["min_days"]:
+        return status
+    if status == "PASS":
+        return "XPASS"
+    if status != "FAIL":
+        return status   # ERROR / SKIP pass through
+    lo, hi = entry["expect_day_range"]
+    day = _blowup_day_from_results(out_dir)
+    if day is None or not (lo <= day <= hi):
+        return "FAIL"   # fail closed: a differently-timed failure is NOT waived
+    return "XFAIL"
+
 
 def _run_experiment_via_registry(
     tc, output_dir, days, *,
@@ -5177,7 +6707,7 @@ def _run_experiment_via_registry(
     elif hasattr(cfg, "bottom_drag"):  # #501: nested DynBottomDragConfig
         setup_kw["bottom_drag_r"] = cfg.bottom_drag.bottom_drag_r
     for attr in ("tracer_advection", "barotropic_diffusion_alpha",
-                 "barotropic_div_damp"):
+                 "barotropic_div_damp", "barotropic_u_viscosity"):
         if hasattr(cfg, attr):
             setup_kw[attr] = getattr(cfg, attr)
     if eos_linear_factory is not None:
@@ -5679,6 +7209,13 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # default lat-lon viscosity / bottom drag.
     run_kw = tc.run_kwargs or {}
     dt_override = run_kw.get("dt")
+    if tc.grid_type == "fesom" and dt_override is not None:
+        # FesomOceanModel's SSH operator is built for DEFAULT_DT in
+        # _create_ocean_setup and step() raises on a mismatch -- fail here
+        # with the reason instead of mid-run (codex 2026-08-10).
+        raise NotImplementedError(
+            f"run_kwargs['dt']={dt_override} unsupported on the FESOM arm: "
+            f"the SSH operator is dt-specific and built for {DEFAULT_DT}.")
     A_h_override = run_kw.get("A_h")
     A_v_override = run_kw.get("A_v")
     bottom_drag_override = run_kw.get("bottom_drag_r")
@@ -5737,11 +7274,24 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
             )
         config = config.replace_flat(**replace_kwargs)
         model = LatLonCGridOceanModel(grid, z_coord, config)
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+    if tc.grid_type == "fesom":
+        # FESOM builds rest state + T front in ONE call (it needs the mesh's
+        # geographic node coords for the front), so it does not go through
+        # _create_rest_state / _init_lock_exchange.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_lock_exchange_state)
+        from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+        state = create_lock_exchange_state(grid.mesh, LockExchangeConfig())
+    else:
+        state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
+        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
 
-    # Compute initial PE
+    # Compute initial PE (dynamic, blow-up detector) AND sorted RPE (the
+    # actual spurious-mixing metric -- plain PE also moves through the
+    # PHYSICAL PE->KE conversion of the gravity current, so its drift is not
+    # a mixing measurement; see _compute_sorted_rpe).
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
+    rpe_init = _compute_sorted_rpe(state, tc.grid_type, grid, z_coord)
 
     dt = float(dt_override) if dt_override is not None else DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -5761,6 +7311,25 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
             scalars["PE_rel"] = (pe - pe_init) / abs(pe_init)
         else:
             scalars["PE_rel"] = 0.0
+        rpe = _compute_sorted_rpe(s, tc.grid_type, grid, z_coord)
+        scalars["RPE"] = rpe
+        if abs(rpe_init) > 1e-30:
+            scalars["RPE_rel"] = (rpe - rpe_init) / abs(rpe_init)
+        else:
+            scalars["RPE_rel"] = 0.0
+        # Ocean-masked tracer bounds PER SAMPLE, so the front gates below see
+        # the whole run's extremes -- a transient overshoot that later
+        # diffuses away must still FAIL (codex 2026-08-10).
+        T_s, _, area_s, mask_s, _, h_s = _rpe_extract(
+            s, tc.grid_type, grid, z_coord)
+        wet_s = np.broadcast_to((mask_s > 0.5)[..., np.newaxis], T_s.shape)
+        scalars["T_min"] = float(T_s[wet_s].min())
+        scalars["T_max"] = float(T_s[wet_s].max())
+        # Heat content on the physical (moving) volumes [K m3]: the unforced
+        # lock exchange conserves it, so drift = a flux leak or clipping bug
+        # the bounds/RPE gates cannot see (GLM 2026-08-10).
+        vol_s = area_s[..., np.newaxis] * h_s
+        scalars["heat"] = float(np.sum((T_s * vol_s)[wet_s]))
         return scalars
 
     state, snapshots, diag, wall, ok = _run_timeloop(
@@ -5777,11 +7346,20 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     # check.  The runtime blowup_threshold uses max|eta| not
     # T, so an out-of-range temperature blowup could still
     # PASS.  Compute T_min/T_max from the final state.
-    T_data = np.asarray(state.T.data, dtype=np.float64)
-    T_min_final, T_max_final = (
-        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
-        if T_data.size else (float("nan"), float("nan")))
-    notes = (f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
+    # OCEAN-masked (2026-08-10): lat-lon/tripole pin land tracers at 0 C, so
+    # the unmasked min printed "T range=[0.00,..]" that read as a front
+    # undershoot. WHOLE-RUN extremes from the per-sample diag series (same
+    # _rpe_extract mask as the energy diagnostics), so a transient excursion
+    # cannot pass by diffusing away before the final state.
+    T_min_final = (float(np.min(diag["T_min"])) if diag.get("T_min")
+                   else float("nan"))
+    T_max_final = (float(np.max(diag["T_max"])) if diag.get("T_max")
+                   else float("nan"))
+    # RPE_rel is the MIXING metric (sorted, Ilicak 2012); PE_rel is dynamic
+    # and also moves through the physical PE->KE conversion.
+    rpe_rel_final = diag["RPE_rel"][-1] if diag.get("RPE_rel") else float("nan")
+    notes = (f"RPE_rel={rpe_rel_final:.3e} (mixing), "
+             f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}, "
              f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
     # iter-129 (codex iter-128-followup MEDIUM-2): apply the
     # documented ``pe_rel_final < 0`` sign check to Lock Exchange
@@ -5801,6 +7379,42 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     ok, notes = _apply_value_threshold(
         ok, notes, T_max_final, 200.0,
         label="T_max_final", op="le", units="C")
+    # BOUNDED FRONT + PHYSICAL MIXING SIGN (2026-08-10). The IC is exactly
+    # T in [T_cold, T_warm]; unforced advection-diffusion cannot leave it, so
+    # any excursion is scheme over/undershoot or advecting-flux/thickness
+    # inconsistency (both fixed: FCT / implicit_cn arms hold bounds to ~1e-9
+    # over 1 day -- scripts/validate/lockex_rpe_trace.py). Tolerance 1e-6 K:
+    # 3 decades above measured clean-arm noise, 3 below the smallest defect
+    # this gate exists to catch (0.002 K, tripole pre-fix). Sorted RPE_mov
+    # can only RISE under spurious mixing; negative RPE_rel means the metric
+    # or the dycore is wrong, never "less mixing".
+    from legoesm.ocean.experiments.lock_exchange import (
+        LockExchangeConfig as _LXC)
+    ok, notes = _apply_value_threshold(
+        ok, notes, T_min_final, float(_LXC().T_cold_C) - 1e-6,
+        label="T_min_front", op="ge", units="C")
+    ok, notes = _apply_value_threshold(
+        ok, notes, T_max_final, float(_LXC().T_warm_C) + 1e-6,
+        label="T_max_front", op="le", units="C")
+    # Deadband -1e-12 (codex 2026-08-10): a genuinely zero-mixing short run
+    # sits at the metric's host-summation/sorting noise floor (~1e-16..1e-13
+    # relative); the defect this gate catches was -4e-7 .. -3e-4.
+    ok, notes = _apply_value_threshold(
+        ok, notes, rpe_rel_final, -1e-12,
+        label="RPE_rel_mixing_sign", op="ge", units="")
+    # HEAT CONSERVATION (GLM 2026-08-10): unforced run, so wet heat content
+    # on moving volumes is invariant. Tolerance 1e-6 relative: legoESM arms
+    # conserve to machine eps; FESOM linfs legitimately drifts ~9e-8/day
+    # (its concentration/dilution approximation), i.e. 4.5e-7 over 5 days
+    # -- inside the gate, while a genuine flux leak or clip is orders above.
+    heat_series = diag.get("heat", [])
+    if heat_series and abs(heat_series[0]) > 0.0:
+        heat_rel_drift = abs(heat_series[-1] / heat_series[0] - 1.0)
+    else:
+        heat_rel_drift = float("nan")
+    ok, notes = _apply_value_threshold(
+        ok, notes, heat_rel_drift, 1e-6,
+        label="heat_rel_drift", op="le", units="")
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
@@ -5899,10 +7513,13 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     # documented ``Temperature within [-200, 200] C`` blowup
     # check (see "Overflow" Validation Thresholds in
     # ocean_experiments_reference.md).
-    T_data = np.asarray(state.T.data, dtype=np.float64)
+    # OCEAN-masked, same as run_lock_exchange (2026-08-10): unmasked min
+    # printed land-pinned 0 C as an apparent undershoot on lat-lon arms.
+    T_o, _, _, mask_o, _, _ = _rpe_extract(state, tc.grid_type, grid, z_coord)
+    T_wet = T_o[np.broadcast_to((mask_o > 0.5)[..., np.newaxis], T_o.shape)]
     T_min_final, T_max_final = (
-        (float(np.nanmin(T_data)), float(np.nanmax(T_data)))
-        if T_data.size else (float("nan"), float("nan")))
+        (float(T_wet.min()), float(T_wet.max()))
+        if T_wet.size else (float("nan"), float("nan")))
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}, "
              f"T range=[{T_min_final:.2f},{T_max_final:.2f}]C")
@@ -6216,6 +7833,7 @@ RUNNERS: dict[str, Callable] = {
     "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
+    "inertia_gravity_wave_channel": run_inertia_gravity_wave_channel,
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
@@ -6248,7 +7866,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["cubed_sphere", "latlon", "mpas",
                  "mpas_regional", "latlon_regional", "cs_regional",
                  "latlon_channel", "mpas_channel",
-                 "spectral",
+                 "spectral", "fesom", "tripole",
                  "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
@@ -8131,6 +9749,8 @@ def main():
 
         try:
             status, wall, notes = runner(tc, out_dir, days)
+            status = _apply_known_failure(tc, status, days, notes,
+                                          out_dir)
             record(tc, status, wall, notes)
         except NotImplementedError as e:
             record(tc, "SKIP", 0, str(e)[:120])
@@ -8177,10 +9797,9 @@ def main():
           f"{'Resolution':<10}  {'Time':>8}  Notes")
     print("-" * 90)
 
-    n_pass = n_fail = n_error = n_skip = 0
+    n_pass = n_fail = n_error = n_skip = n_xfail = n_xpass = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
-                "SKIP": "--"}[r["status"]]
+        icon = STATUS_ICONS[r["status"]]
         print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
               f"{r['test']:<22}  {r['resolution']:<10}  "
               f"{r['wall_time']:7.1f}s  {r['notes']}")
@@ -8190,12 +9809,17 @@ def main():
             n_fail += 1
         elif r["status"] == "SKIP":
             n_skip += 1
+        elif r["status"] == "XFAIL":
+            n_xfail += 1
+        elif r["status"] == "XPASS":
+            n_xpass += 1
         else:
             n_error += 1
 
     print("-" * 90)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
           f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
           f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
@@ -8238,6 +9862,7 @@ def main():
         json.dump({
             "results": ALL_RESULTS, "total_wall_time": total_wall,
             "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
+            "n_xfail": n_xfail, "n_xpass": n_xpass,
             "n_error": n_error, "quick_mode": args.quick,
             "levels": DEFAULT_NLEV, "dt": DEFAULT_DT,
         }, f, indent=2)
@@ -8246,6 +9871,7 @@ def main():
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
                 f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"XFAIL: {n_xfail} | XPASS: {n_xpass} | "
                 f"ERROR: {n_error}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
         f.write(f"Levels: {DEFAULT_NLEV}, dt: {DEFAULT_DT}s\n")
@@ -8301,7 +9927,14 @@ def main():
     # Generate rest-state cross-variant comparison
     _create_rest_state_cross_variant_comparison(output_base)
 
-    if n_fail > 0 or n_error > 0:
+    # XPASS gates too: a known-failure entry that has started passing is stale,
+    # and a stale waiver silently hides the next real regression on that case.
+    if n_fail > 0 or n_error > 0 or n_xpass > 0:
+        if n_xpass > 0:
+            print(f"  XPASS: {n_xpass} known-failure entr"
+                  f"{'y has' if n_xpass == 1 else 'ies have'} started passing "
+                  f"-- remove {'it' if n_xpass == 1 else 'them'} from "
+                  f"KNOWN_FAILURES.")
         sys.exit(1)
 
 

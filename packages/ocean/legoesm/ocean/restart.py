@@ -156,6 +156,25 @@ from legoesm.core.field import Field
 
 _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 
+# State slots this archive format deliberately neither writes nor restores:
+# pure DIAGNOSTICS the next step rewrites unconditionally from the prognostic
+# state.  Currently the #1442 ``store_mass_flux`` capture.
+#
+# Two reasons, and the second is a correctness one (codex round-7 YELLOW 2):
+#  * a fresh template leaves these slots ``None``, and the loader's
+#    ``ref_field is None`` branch then rebuilds them as bare
+#    ``Field(data, name)`` -- WITHOUT dims/units.  Field metadata is pytree
+#    AUX data, so such a state has a different treedef from what the step
+#    writes and would abort the next ``lax.scan``;
+#  * they are large (three face/interface-shaped arrays) and carry nothing a
+#    restart needs.
+# Not writing them makes save and load agree by construction.  Mirrors
+# ``run_omip._RESTART_DIAGNOSTIC_SLOTS`` for the other npz lane.
+DIAGNOSTIC_SLOTS: tuple[str, ...] = (
+    "mass_flux_u", "mass_flux_v", "mass_flux_w",
+    "salt_flux_u_int", "salt_flux_v_int")
+
+
 # ---------------------------------------------------------------- run restart
 # METADATA NAMESPACE of the RUN restart archive: every key written by
 # ``save_run_restart`` that is NOT a state array carries a leading underscore
@@ -386,6 +405,8 @@ def save_restart(state, path: str | Path, *,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {}
     for name in _iter_state_fields(state):
+        if name in DIAGNOSTIC_SLOTS:
+            continue
         attr = getattr(state, name)
         if attr is None:
             continue
@@ -411,8 +432,20 @@ def load_restart(path: str | Path, template_state) -> tuple:
     with np.load(in_path, allow_pickle=False) as f:
         loaded = {k: f[k] for k in f.files}
 
-    replace_kw: dict[str, Field] = {}
+    replace_kw: dict[str, Field | None] = {}
     for name in _iter_state_fields(template_state):
+        if name in DIAGNOSTIC_SLOTS:
+            # CLEARED to None, not merely skipped (codex round-8 RED 3).
+            # Skipping leaves a POPULATED template's slot in place, so a
+            # restart would carry a STALE diagnostic next to freshly loaded
+            # prognostics -- and worse, this loader rebuilds the loaded Fields
+            # WITHOUT their staggering, so a retained diagnostic (which kept
+            # its donor's staggering) and a reloaded ``u``/``v`` would no
+            # longer agree, giving the state a treedef the next step's output
+            # does not match.  ``None`` is the unambiguous state: the seeding
+            # helper rebuilds all three canonically before any scan.
+            replace_kw[name] = None
+            continue
         if name not in loaded:
             continue
         ref_field = getattr(template_state, name)
@@ -455,6 +488,12 @@ def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
         # Voronoi cell centres: 1-D (nCells,); the scorer flattens any source.
         return (np.rad2deg(np.asarray(grid.latCell)),
                 np.rad2deg(np.asarray(grid.lonCell)))
+    if grid_type == "fesom":
+        # FESOM2 unstructured triangular mesh: one lat/lon per NODE, 1-D
+        # (nod2D,) -- the same convention as the MPAS branch above (one value
+        # per cell). FesomOceanGrid.lat/.lon are geographic radians.
+        return (np.rad2deg(np.asarray(grid.lat)),
+                np.rad2deg(np.asarray(grid.lon)))
     if grid_type == "tripole":
         # Curvilinear tracer points are genuinely 2-D.
         return (np.rad2deg(np.asarray(grid.lat_T)),
@@ -466,7 +505,7 @@ def grid_lat2d_lon2d_deg(grid, grid_type: str) -> tuple[np.ndarray, np.ndarray]:
         return lat2d, lon2d
     raise ValueError(
         f"grid_lat2d_lon2d_deg: unknown grid_type {grid_type!r} "
-        "(expected one of: latlon, tripole, cubed_sphere, mpas)")
+        "(expected one of: latlon, tripole, cubed_sphere, mpas, fesom)")
 
 
 def save_mld_snapshot(state, path: str | Path, *,

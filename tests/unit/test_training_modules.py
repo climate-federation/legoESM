@@ -476,8 +476,11 @@ class TestTrainableParams:
         from legoesm.training.trainable_params import TrainablePhysicsParams
         p = TrainablePhysicsParams.from_defaults()
         d = p.as_dict()
-        assert "tau_equator" in d
-        assert abs(float(d["tau_equator"]) - 7.2) < 0.01
+        # tau_equator/tau_pole left this set on 2026-08-11: they are gray
+        # optical depths, and gray radiation is not trained.
+        assert "tau_equator" not in d and "tau_pole" not in d
+        assert "sbm_tau_c" in d
+        assert abs(float(d["sbm_tau_c"]) - 7200.0) < 1.0
 
     def test_gradient_flow(self):
         from legoesm.training.trainable_params import TrainablePhysicsParams
@@ -958,7 +961,9 @@ class TestTrainingDriver:
 
         def counting_build(**kw):
             build_count[0] += 1
-            tau = kw["tau_equator"]
+            # Was tau_equator until 2026-08-11; that knob is gone (gray
+            # optical depth, never trained). Any two live trainables do.
+            tau = kw["C_H"]
             c_e = kw["C_E"]
 
             class _Seg:
@@ -974,9 +979,13 @@ class TestTrainingDriver:
         # _training_loop control flow (filter_jit, value_and_grad, optimiser
         # update) without the heavy dycore.
         monkeypatch.setattr(td, "build_segment_fn", counting_build)
+        # ``hours=`` is now passed by the trainer: the supervision horizon must
+        # match the lead the targets were loaded at, so the fake has to accept
+        # it or it hides the very forwarding this file exercises.
         monkeypatch.setattr(
             td, "single_day_rollout",
-            lambda ic, forcing, run_seg_fn, dt: run_seg_fn(ic, 1, forcing),
+            lambda ic, forcing, run_seg_fn, dt, hours=24.0: run_seg_fn(
+                ic, 1, forcing),
         )
         monkeypatch.setattr(
             td, "combined_loss",
@@ -991,11 +1000,17 @@ class TestTrainingDriver:
                 **trainable.to_segment_kwargs(),
             )
 
+        from legoesm.training.losses import LossConfig
+
         params = TrainablePhysicsParams.from_defaults()
         optimizer = optax.adam(1e-3)
+        # A REAL LossConfig, not None: the trainer routes through
+        # ``multi_step_rollout_loss``, which reads ``multi_step_hours`` off it.
+        # ``None`` only worked while the trainer inlined its own single-horizon
+        # rollout and never looked at the config.
         train_step = td._build_train_step(
             make_run_seg, optimizer,
-            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, None,
+            jnp.asarray(_SIGMA.sigma_full), _GRID, 600.0, LossConfig(),
         )
 
         ics = [jnp.asarray(1.0), jnp.asarray(2.0)]
@@ -1120,7 +1135,10 @@ class TestTrainableParamsSchemeAware:
         names = [c.name for c in constraints]
         assert "sbm_tau_c" in names
         assert "sbm_RH_ref" in names
-        assert "tau_equator" in names
+        # tau_equator/tau_pole dropped 2026-08-11 (gray is not trained).
+        # Assert their ABSENCE — deleting the check instead would leave a test
+        # that constrains nothing (Claude review).
+        assert "tau_equator" not in names and "tau_pole" not in names
 
     def test_dca_excludes_sbm_params(self):
         from legoesm.training.trainable_params import trainable_constraints_for_scheme
@@ -1128,14 +1146,20 @@ class TestTrainableParamsSchemeAware:
         names = [c.name for c in constraints]
         assert "sbm_tau_c" not in names
         assert "sbm_RH_ref" not in names
-        assert "tau_equator" in names
+        # tau_equator/tau_pole dropped 2026-08-11 (gray is not trained).
+        # Assert their ABSENCE — deleting the check instead would leave a test
+        # that constrains nothing (Claude review).
+        assert "tau_equator" not in names and "tau_pole" not in names
 
     def test_none_scheme_excludes_sbm_params(self):
         from legoesm.training.trainable_params import trainable_constraints_for_scheme
         constraints = trainable_constraints_for_scheme("none")
         names = [c.name for c in constraints]
         assert "sbm_tau_c" not in names
-        assert "tau_equator" in names
+        # tau_equator/tau_pole dropped 2026-08-11 (gray is not trained).
+        # Assert their ABSENCE — deleting the check instead would leave a test
+        # that constrains nothing (Claude review).
+        assert "tau_equator" not in names and "tau_pole" not in names
 
     def test_from_defaults_with_non_sbm(self):
         from legoesm.training.trainable_params import (
@@ -1145,7 +1169,7 @@ class TestTrainableParamsSchemeAware:
         params = TrainablePhysicsParams.from_defaults(constraints=constraints)
         d = params.as_dict()
         assert "sbm_tau_c" not in d
-        assert "tau_equator" in d
+        assert "tau_equator" not in d   # gray optical depth, never trained
 
     def test_sbm_params_gradient_flow(self):
         from legoesm.training.trainable_params import (
@@ -1162,16 +1186,17 @@ class TestTrainableParamsSchemeAware:
                 f"Non-finite grad for scheme={scheme}"
             )
 
-    def test_gray_radiation_keeps_tau_and_albedo(self):
-        """Gray consumes tau_equator/tau_pole, and (since 2026-06-10)
-        its SW reflection takes the blended albedo, so albedo_* train
-        under gray too."""
+    def test_gray_radiation_trains_albedo_but_no_optical_depth(self):
+        """Gray's OPTICAL knobs are frozen (2026-08-11 directive: gray is never
+        trained), but its SW reflection still takes the blended surface albedo,
+        which is a surface property rather than a radiation-scheme knob — so
+        albedo_* keeps training under gray."""
         from legoesm.training.trainable_params import trainable_constraints_for_scheme
         names = [
             c.name
             for c in trainable_constraints_for_scheme(radiation_scheme="gray")
         ]
-        assert "tau_equator" in names and "tau_pole" in names
+        assert "tau_equator" not in names and "tau_pole" not in names
         assert "albedo_ice" in names and "albedo_ocean" in names
 
     def test_rrtmgp_keeps_albedo_drops_tau(self):

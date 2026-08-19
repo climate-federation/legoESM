@@ -265,3 +265,267 @@ def test_evd_two_level_trigger():
     # None before_tracers => single-level (legacy)
     K_none, _ = _enhanced_diffusion_K(st, r.z_coord, conv, before_tracers=None)
     np.testing.assert_array_equal(np.asarray(K_none), np.asarray(K_now))
+
+
+# ---------------------------------------------------------------------------
+# EnhancedDiffusionConfig.evd_n2_time_level (#1317 S17)
+#
+# NEMO's zdfevd trigger arms (src/OCE/ZDF/zdfevd.F90:93-94 avt, :119-120 avm)
+#   IF( MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12 )
+# are built at cfgs/DINO/MY_SRC/stpmlf.F90:186-187
+#   CALL bn2( ts(:,:,:,:,Nbb), rab_b, rn2b, Nnn )   ! BEFORE T/S, NOW geometry
+#   CALL bn2( ts(:,:,:,:,Nnn), rab_n, rn2 , Nnn )   ! NOW    T/S, NOW geometry
+# i.e. Nnn and Nbb tracers, Nnn geometry for BOTH arms. legoESM's leap-frog
+# hands compute_vertical_K_profiles the POST-EXPLICIT (Kaa) state, so the
+# default "solver_state" arms are (Kaa, Nnn) on Kaa geometry.
+#
+# These tests drive the REAL production entry point
+# (compute_vertical_K_profiles), NOT the private _enhanced_diffusion_K helper
+# and NOT a hand-written time-level selection -- reverting the selection block
+# in k_profiles.py makes test_evd_n2_time_level_selects_nemo_arms fail.
+# ---------------------------------------------------------------------------
+def _evd_tl_fixture(evd_n2_time_level, partial_cells=False):
+    """(state_kaa, z_coord, physics_config, nn, bb, eta_nn) for the arm tests.
+
+    ``state_kaa`` carries a cold spike at [5,5,3] that exists ONLY at the Kaa
+    level; ``bb`` carries a different cold spike at [6,6,3] that exists ONLY at
+    the Nbb level. NEMO's pair must see the second and not the first.
+
+    ``partial_cells=True`` swaps the flat-bottom z* coord for a STEPPED
+    ``OceanPartialCellCoordinate`` (which carries ``is_active``) and rock-fills
+    T=S=0 below the seafloor in BOTH time levels -- the only configuration
+    that reaches the sub-seafloor-extrapolation branch of the NEMO arm.
+    """
+    import numpy as np
+
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        VerticalMixingConfig,
+    )
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+    r = build_nemo_gyre_recipe()
+    phys = r.model_config.physics
+    ed = phys.convection.enhanced_diffusion._replace(
+        evd_n2_time_level=evd_n2_time_level)
+    phys = phys._replace(
+        # scheme="none" isolates the convection branch -- the closure is not
+        # what is under test and would need surface forcing.
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        convection=phys.convection._replace(enhanced_diffusion=ed),
+    )
+    st = r.initial_state
+    z_coord = r.z_coord
+    T_nn, S_nn = st.T.data, st.S.data
+    T_kaa = T_nn.at[5, 5, 3].add(-2.0)      # Kaa-only inversion
+    T_bb = T_nn.at[6, 6, 3].add(-2.0)       # Nbb-only inversion
+    eta_nn = st.eta.data
+    if partial_cells:
+        ny, nx, nz = T_nn.shape
+        dz = np.asarray(z_coord.dz_ref)
+        gdepw = np.concatenate([[0.0], np.cumsum(dz)])
+        # A different bottom level per column so the sub-seafloor row is a
+        # genuine staircase, not one flat slab.
+        kbot = 5 + ((np.arange(ny)[:, None] + np.arange(nx)[None, :])
+                    % (nz - 7))
+        H = jnp.asarray(gdepw[kbot + 1] - 0.4 * dz[kbot])
+        z_coord = create_partial_cell_coordinate(z_coord, H)
+        rock = z_coord.is_active
+        T_nn, S_nn = jnp.where(rock, T_nn, 0.0), jnp.where(rock, S_nn, 0.0)
+        T_kaa, T_bb = jnp.where(rock, T_kaa, 0.0), jnp.where(rock, T_bb, 0.0)
+        st = st._replace(H_bathy=st.H_bathy.replace(data=H))
+    state_kaa = st._replace(
+        T=st.T.replace(data=T_kaa),
+        S=st.S.replace(data=S_nn),
+        # Kaa eta differs from Nnn eta -> Kaa gdept / z* jacobian.
+        eta=st.eta.replace(data=eta_nn + 0.5),
+    )
+    return (state_kaa, z_coord, phys, (T_nn, S_nn), (T_bb, S_nn), eta_nn)
+
+
+def test_evd_n2_time_level_selects_nemo_arms():
+    """"nemo_now_before" fires on the Nbb inversion and NOT on the Kaa one;
+    "solver_state" (default) does the opposite -- proving the option changes
+    WHICH cells fire, through the production call path."""
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    out = {}
+    for tl in ("solver_state", "nemo_now_before"):
+        state, z, phys, nn, bb, eta_nn = _evd_tl_fixture(tl)
+        K, _ = compute_vertical_K_profiles(
+            state, z, None, phys,
+            n2_tracers=nn, n2_tracers_before=bb, eta_now=eta_nn)
+        out[tl] = np.asarray(K)
+
+    fire = 50.0                              # K_conv=100 on the gyre card
+    legacy, nemo = out["solver_state"], out["nemo_now_before"]
+    assert legacy.shape == nemo.shape
+    # The two masks are NOT the same -- the option has teeth.
+    assert not np.array_equal(legacy > fire, nemo > fire)
+    # Kaa-only inversion at [5,5]: fires under solver_state, not under NEMO's.
+    assert (legacy[5, 5] > fire).any(), "Kaa arm should fire the [5,5] spike"
+    assert not (nemo[5, 5] > fire).any(), (
+        "NEMO's arms are Nnn/Nbb -- the Kaa-only spike must NOT fire")
+    # Nbb-only inversion at [6,6]: fires under NEMO's pair, not under legacy
+    # (whose second arm is n2_tracers = the Nnn level).
+    assert (nemo[6, 6] > fire).any(), "Nbb arm should fire the [6,6] spike"
+    assert not (legacy[6, 6] > fire).any(), (
+        "solver_state's arms are Kaa/Nnn -- the Nbb-only spike must NOT fire")
+
+
+def test_evd_n2_time_level_consumes_eta_now():
+    """The NEMO path takes its GEOMETRY (gdept / z* jacobian) from ``eta_now``,
+    not from the solver state's eta: perturbing eta_now moves the answer.
+
+    Run on the SMOOTH branch: with the hard 0/100 flag a small geometric
+    change cannot flip a cell's N² sign, so the hard branch cannot see
+    (and therefore cannot certify) the geometry substitution.
+    """
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before")
+    ed = phys.convection.enhanced_diffusion._replace(smooth_transition=True)
+    phys = phys._replace(
+        convection=phys.convection._replace(enhanced_diffusion=ed))
+
+    def K(eta):
+        out, _ = compute_vertical_K_profiles(
+            state, z, None, phys,
+            n2_tracers=nn, n2_tracers_before=bb, eta_now=eta)
+        return np.asarray(out)
+
+    assert np.array_equal(K(eta_nn), K(eta_nn)), "not deterministic"
+    assert not np.array_equal(K(eta_nn), K(eta_nn + 5.0))
+    # ... and it is eta_now, not the solver state's eta, that is in force:
+    # feeding eta_now = the Kaa eta reproduces the solver-state geometry.
+    np.testing.assert_array_equal(K(state.eta.data),
+                                  K(np.asarray(eta_nn) + 0.5))
+
+
+def test_evd_n2_time_level_default_is_bit_identical():
+    """Omitting the new kwargs entirely reproduces the legacy result exactly."""
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("solver_state")
+    assert phys.convection.enhanced_diffusion.evd_n2_time_level == \
+        "solver_state"
+    K_legacy, A_legacy = compute_vertical_K_profiles(state, z, None, phys,
+                                                     n2_tracers=nn)
+    K_thread, A_thread = compute_vertical_K_profiles(
+        state, z, None, phys,
+        n2_tracers=nn, n2_tracers_before=bb, eta_now=eta_nn)
+    assert np.array_equal(np.asarray(K_legacy), np.asarray(K_thread))
+    assert np.array_equal(np.asarray(A_legacy), np.asarray(A_thread))
+
+
+def test_evd_n2_time_level_dispatch_hardening():
+    """Unknown value raises; the NEMO path raises rather than silently
+    degrading when a required input is missing."""
+    import pytest
+
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        compute_vertical_K_profiles,
+    )
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("typo_level")
+    with pytest.raises(ValueError, match="evd_n2_time_level"):
+        compute_vertical_K_profiles(state, z, None, phys, n2_tracers=nn,
+                                    n2_tracers_before=bb, eta_now=eta_nn)
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before")
+    for kw in ({"n2_tracers": None}, {"n2_tracers_before": None},
+               {"eta_now": None}):
+        call = dict(n2_tracers=nn, n2_tracers_before=bb, eta_now=eta_nn)
+        call.update(kw)
+        with pytest.raises(ValueError, match=list(kw)[0]):
+            compute_vertical_K_profiles(state, z, None, phys, **call)
+
+    # two_level_trigger=False would silently drop the Nbb arm -> raise.
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before")
+    ed = phys.convection.enhanced_diffusion._replace(two_level_trigger=False)
+    phys = phys._replace(
+        convection=phys.convection._replace(enhanced_diffusion=ed))
+    with pytest.raises(ValueError, match="two_level_trigger"):
+        compute_vertical_K_profiles(state, z, None, phys, n2_tracers=nn,
+                                    n2_tracers_before=bb, eta_now=eta_nn)
+
+
+def test_evd_nemo_arms_extrapolate_nbb_below_seafloor(monkeypatch):
+    """On a PARTIAL-CELL coord the Nbb arm's rock fill is extrapolated away
+    before it reaches the trigger (the ``_is_active`` block inside the
+    ``nemo_now_before`` branch of ``compute_vertical_K_profiles``).
+
+    WHY THIS IS A WHITE-BOX TEST, stated so nobody "strengthens" it into a
+    return-value assertion that can only ever pass vacuously: MEASURED on the
+    production DINO topo bridge (fp64, 199x52x36, 30394 sub-seafloor cells,
+    the extrapolation moves 29966 of them by up to 26.39 degC), the guard
+    changes EXACTLY ZERO wet interfaces -- ``max|dA_v| = 0.0`` and fired-mask
+    ``XOR = 0`` after ``_wet_interface_mask``. That is structural, not luck:
+    interior interface ``j`` is wet iff T-cell ``j+1`` is active, so a wet
+    interface's N^2 only ever reads active cells and the rock fill cannot
+    reach it. The branch is defence-in-depth on that masking invariant, so
+    the ONLY non-vacuous observable is the tracer pair the trigger is handed.
+    (A companion "perturb the rock fill, assert K unchanged" test was written
+    and DELETED as structurally vacuous: the guard overwrites every dry cell
+    with the deepest-active value, so the two arms become bit-identical
+    BEFORE the masking invariant is ever exercised.)
+
+    Deleting the ``_is_active`` block in the NEMO arm makes this test fail.
+    """
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing import k_profiles as KP
+    from legoesm.ocean.vertical import extrapolate_below_seafloor
+
+    state, z, phys, nn, bb, eta_nn = _evd_tl_fixture("nemo_now_before",
+                                                     partial_cells=True)
+    assert getattr(z, "is_active", None) is not None, "fixture is not partial"
+    dry = ~np.asarray(z.is_active)
+    assert dry.any(), "fixture has no sub-seafloor cells"
+    assert np.asarray(bb[0])[dry].max() == 0.0, "Nbb is not rock-filled"
+
+    seen = {}
+    real = KP._enhanced_diffusion_K
+
+    def spy(state_, z_, conv, **kw):
+        seen["before"] = kw["before_tracers"]
+        seen["T_arm0"] = np.asarray(state_.T.data)
+        return real(state_, z_, conv, **kw)
+
+    monkeypatch.setattr(KP, "_enhanced_diffusion_K", spy)
+    KP.compute_vertical_K_profiles(state, z, None, phys, n2_tracers=nn,
+                                   n2_tracers_before=bb, eta_now=eta_nn)
+    assert "before" in seen, "the EVD branch never ran"
+
+    T_bb_seen = np.asarray(seen["before"][0])
+    S_bb_seen = np.asarray(seen["before"][1])
+    # (a) the rock fill is gone from the arm the trigger actually sees ...
+    assert not np.array_equal(T_bb_seen[dry], np.asarray(bb[0])[dry]), (
+        "the Nbb arm still carries the raw T=0 rock fill -- the sub-seafloor "
+        "extrapolation in the nemo_now_before branch was removed")
+    # (b) ... and it is exactly the deepest-active fill, not some other value.
+    np.testing.assert_array_equal(
+        T_bb_seen, np.asarray(extrapolate_below_seafloor(bb[0], z)))
+    np.testing.assert_array_equal(
+        S_bb_seen, np.asarray(extrapolate_below_seafloor(bb[1], z)))
+    # (c) both arms of the one MIN() share the convention (the NOW arm gets
+    #     the same treatment at the top of compute_vertical_K_profiles).
+    np.testing.assert_array_equal(
+        np.asarray(seen["T_arm0"]),
+        np.asarray(extrapolate_below_seafloor(nn[0], z)))
+    # (d) active cells are untouched by either extrapolation.
+    act = ~dry
+    np.testing.assert_array_equal(T_bb_seen[act], np.asarray(bb[0])[act])
+

@@ -151,6 +151,47 @@ def gwd_scheme_is_orographic(scheme: str) -> bool:
     return any(p in _GWD_OROGRAPHIC_LAUNCH for p in str(scheme).split("+"))
 
 
+def orographic_scalar_fallback_warning(
+    gwd_scheme: str,
+    subgrid_orography_path: str,
+    has_real_land_sea: bool,
+) -> str | None:
+    """Warning text when orographic GWD will run on the scalar ``h_topo`` fallback.
+
+    Returns ``None`` when the configuration is safe: no orographic member
+    (per :func:`gwd_scheme_is_orographic`), a real per-column SSO file is
+    wired, or the run has no real land/ocean distribution (idealized planets
+    keep the documented legacy scalar fallback deliberately).
+
+    Why loud (issue #1514): with ``subgrid_orography_path`` empty the
+    orographic schemes launch ``tau_0 ∝ h_topo²`` (default ``h_topo = 500 m``)
+    from EVERY column — a fictional 500-m mountain over the open ocean.  On
+    the AMIP production mesh this was measured at −0.29 Pa column-integrated
+    zonal drag over the Southern Ocean once westerlies exist (2× the observed
+    total surface stress, ~4-day barotropic spin-down): it removed the
+    westerly belt within a week of the ERA5 initial condition, and removing it
+    raised storm-track psl variance by ~60% and doubled 850-hPa v'v' in a
+    90-day single-variable restart.  The caller decides how to surface the
+    message (the driver logs a warning); this helper only owns the predicate
+    and the text, so it is directly unit-testable.
+    """
+    if not has_real_land_sea or subgrid_orography_path:
+        return None
+    if not gwd_scheme_is_orographic(gwd_scheme):
+        return None
+    oro = [p for p in str(gwd_scheme).split("+") if p in _GWD_OROGRAPHIC_LAUNCH]
+    return (
+        f"gravity_wave_drag={gwd_scheme!r} has orographic member(s) "
+        f"{'+'.join(oro)} but subgrid_orography_path is empty: the launch "
+        "falls back to the scalar h_topo (default 500 m) on EVERY column — a "
+        "fictional 500-m mountain over the open ocean that removes the "
+        "eddy-driven westerlies (issue #1514: -0.29 Pa spurious Southern-"
+        "Ocean drag; storm tracks suppressed in both hemispheres). Wire a "
+        "real SSO file: scripts/data/prep_subgrid_orography.py, then "
+        "--subgrid-orography-file <file> (config: subgrid_orography_path)."
+    )
+
+
 def _validate_gwd_composite(scheme: str) -> None:
     """Raise ValueError unless ``scheme`` is a well-formed GWD composite.
 

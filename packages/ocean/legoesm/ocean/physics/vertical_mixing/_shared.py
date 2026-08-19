@@ -178,15 +178,38 @@ def vertical_shear_face_native(
 
     * ``avm`` is NOT face-averaged — this function does not carry a
       viscosity at all (mirrors :func:`vertical_shear_squared`'s contract:
-      it returns a bare shear-production-EQUIVALENT quantity that the caller
+      it returns a bare shear-squared-EQUIVALENT [1/s²] that the caller
       multiplies by its own single per-interface ``K_M``, exactly as
-      ``P_s = K_M · shear_sq`` already does downstream). NEMO's own
-      face-averaged-``avm`` complicates unit tracking without changing the
-      dominant effect the #1226 walk isolated (Candidate B: static-vs-live
-      metric was negligible; the avm face-averaging was never isolated as
-      its own candidate because ``_vertical_shear_squared`` already shares
-      the single-``K_M`` simplification with every other scheme on this
-      C-grid).
+      ``P_s = K_M · shear_sq`` already does downstream).
+
+      **Prefactor (corrected 2026-08; the earlier claim that dropping the
+      face-average is "without changing the dominant effect" was FALSE by
+      exactly 2×).** NEMO's ``zsh2u`` carries the avm *SUM*
+      ``avm(ji+1)+avm(ji) = 2·mi(avm)`` (zdfsh2.F90:80), and the T-point
+      combine at :93 applies ``0.25`` to a pair of faces per direction, so
+      the net is ``p_sh2 = mi_u[mi(avm)·S_u] + mi_v[mi(avm)·S_v]`` — the two
+      DIRECTIONS ADD, they are not averaged together (zdfsh2.F90:48-49).
+      Factoring a single ``K_M`` out of that leaves a prefactor of **0.5**,
+      not NEMO's literal 0.25: with 0.25 this function returned exactly HALF
+      of ``(du/dz)² + (dv/dz)²``, i.e. half of what its two siblings in the
+      SAME ``tke_shear_production`` dispatch
+      (:func:`vertical_shear_squared`, :func:`vertical_shear_burchard`)
+      return, and half of NEMO's own ``p_sh2``/``K_M``. That fed BOTH the
+      TKE shear source (``P_s = K_M·shear_sq``) and the ``prandtl_mode=
+      "nemo_ri"`` denominator ``zdiv``. Pinned by
+      ``test_tke_nemo_identity.py::TestFaceNativeShear::
+      test_uniform_shear_normalisation_matches_siblings`` (analytic linear
+      profile ⇒ all three forms must return ``(du/dz)²+(dv/dz)²`` exactly)
+      and by the uniform-``K_M`` identity against
+      :func:`avm_weighted_shear_production`. Corroborated on the oracle:
+      NEMO's dumped ``sh2`` was a FLAT median 2.0114× legoESM's
+      ``kappaM·shear_sq`` at the DINO spy point (#1455).
+
+      The remaining, genuine scope limit is that a single ``K_M`` cannot
+      reproduce a spatially VARYING ``avm`` inside the face sum — for that,
+      select ``tke_shear_avm_weighting="nemo_face"``
+      (:func:`avm_weighted_shear_production`), which is the literal
+      transcription. The two agree exactly in the uniform-``K_M`` limit.
     * The vertical metric ``dz_half`` is the caller's STATIC reference
       spacing (T-point ``dz_half_ref·J``), not NEMO's LIVE
       ``e3uw(Kmm)·e3uw(Kbb)`` QCO-stretched product — Candidate B measured
@@ -271,6 +294,126 @@ def vertical_shear_face_native(
     # T-point combination: T(i) is bracketed by faces i (west) and i+1
     # (east) under legoESM's convention (the mirror of NEMO's (i-1, i)
     # east-face-of-T(i) pairing — see docstring).
+    #
+    # Prefactor 0.5, NOT NEMO's literal 0.25: NEMO's zsh2u already carries
+    # the avm SUM (= 2*mi(avm), zdfsh2.F90:80), which this K_M-free form
+    # factors out.  0.5*(pair-sum) is the MEAN over the two faces bracketing
+    # T(i), so a uniform du/dz gives exactly (du/dz)^2 + (dv/dz)^2 — the same
+    # normalisation as vertical_shear_squared / vertical_shear_burchard.
+    # (Was 0.25 = half of NEMO; see the docstring's "Prefactor" note.)
+    p_sh2 = 0.5 * (
+        (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
+        + (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v
+    )
+    return p_sh2
+
+
+def avm_weighted_shear_production(
+    u_face_now: jnp.ndarray, v_face_now: jnp.ndarray,
+    u_face_before: jnp.ndarray, v_face_before: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    u_mask: jnp.ndarray, v_mask: jnp.ndarray,
+    kappaM_T: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
+    face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
+    (#1455 sh2 chain-walk avm-weighting gap — see the module docstring on
+    :func:`vertical_shear_face_native`, which explicitly scopes OUT this
+    avm face-averaging as "no face-averaging analog"; this function is that
+    analog, using array rolls on legoESM's already-existing 3-D ``K_M``, not
+    new staggered state).
+
+    .. code-block:: fortran
+
+        ! zdfsh2.F90:80-94 (no-Stokes-drift branch)
+        zsh2u(ji,jj) = ( avm(ji+1,jj,jk) + avm(ji,jj,jk) )   &   ! avm INSIDE
+           &         * ( uu(jk-1,Kmm)-uu(jk,Kmm) ) * ( uu(jk-1,Kbb)-uu(jk,Kbb) ) &
+           &         / ( e3uw(jk,Kmm)*e3uw(jk,Kbb) ) * wumask(jk)
+        zsh2v analogous at v-faces
+        p_sh2(ji,jj,jk) = 0.25 * ( (zsh2u(ji-1,jj)+zsh2u(ji,jj))*(2-umask*umask)
+                                  + (zsh2v(ji,jj-1)+zsh2v(ji,jj))*(2-vmask*vmask) )
+
+    Walking the Fortran: NEMO's ``zsh2u`` carries the avm SUM
+    ``p_avm(ji+1)+p_avm(ji) = 2*mi(avm)`` (zdfsh2.F90:80 — this, not the net
+    term, is what the "2 x shear production" comment at :79 names), and the
+    T-point combine at :93 sums TWO faces per direction under a 0.25
+    prefactor, so the net is ``p_sh2 = mi_u[mi(avm)·S_u] + mi_v[mi(avm)·S_v]``
+    exactly as the routine's own header comment at :48-49 states.
+
+    NB (2026-08, supersedes the "2x" NB that stood here): for spatially
+    UNIFORM ``kappaM_T = K0`` this function now returns EXACTLY
+    ``K0 * shear_sq_tpoint``, where ``shear_sq_tpoint`` is the output of
+    :func:`vertical_shear_face_native`.  That helper carried NEMO's literal
+    0.25 while ALSO dropping the avm sum, i.e. it applied the halving twice
+    and returned half of NEMO; its prefactor is now 0.5 and the two forms
+    agree in the uniform-``K_M`` limit (pinned by
+    ``test_tke_nemo_identity.py::TestAvmWeightedShearProduction::
+    test_uniform_kappaM_matches_tpoint_exactly``).  CONFIRMED against the
+    oracle, not inferred: at the DINO production spy point NEMO's dumped
+    ``sh2`` was a FLAT median 2.0114x legoESM's pre-fix
+    ``kappaM*shear_sq``, and selecting this function drove that to 1.0057
+    (#1455).  This function still returns the full ``p_sh2`` PRODUCT rather
+    than a ``shear_sq`` the caller multiplies by a bare ``K_M``, because a
+    single external ``K_M`` cannot reproduce a spatially VARYING avm inside
+    the face sum — that, and only that, is what remains selectable here.
+
+    Parameters
+    ----------
+    u_face_now, v_face_now, u_face_before, v_face_before, dz_half, u_mask,
+    v_mask : as :func:`vertical_shear_face_native`.
+    kappaM_T : ``(n_lat, n_lon, nlev-1)`` — T-point (single per-interface)
+        viscosity — face-summed here via array rolls, matching NEMO's
+        ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
+        NB time level: NEMO computes ``zdf_sh2`` ONCE per step from the
+        previous-step ``p_avm``; legoESM's orchestrator wires the CURRENT
+        sub-iteration ``K_M_curr`` (same convention its pre-existing tpoint
+        path uses) — a documented deviation of the sub-iteration loop
+        structure, not of this function.
+
+    Returns
+    -------
+    p_sh2 : ``(n_lat, n_lon, nlev-1)`` — avm-weighted shear production
+        [m^2/s^3] at T-point interfaces (matches ``tke_dump_sh2.bin``
+        units), SIGNED.
+    """
+    dz_safe = jnp.maximum(dz_half, _EPS)
+    dz_sq = dz_safe * dz_safe
+    wumask = u_mask[..., :-1] * u_mask[..., 1:]
+    wvmask = v_mask[..., :-1] * v_mask[..., 1:]
+
+    def _face_shear_over_dzsq(u_face_n, u_face_b, dz_sq_face):
+        du_now = u_face_n[..., :-1] - u_face_n[..., 1:]
+        du_bef = u_face_b[..., :-1] - u_face_b[..., 1:]
+        return du_now * du_bef / dz_sq_face
+
+    dz_sq_u = jnp.concatenate([dz_sq, dz_sq[:, -1:, :]], axis=1)
+    dz_sq_v = jnp.concatenate([dz_sq, dz_sq[-1:, :, :]], axis=0)
+
+    zsh2u_bare = _face_shear_over_dzsq(u_face_now, u_face_before, dz_sq_u) * wumask
+    zsh2v_bare = _face_shear_over_dzsq(v_face_now, v_face_before, dz_sq_v) * wvmask
+
+    coast_u = 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:]
+    coast_v = 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:]
+
+    # Face-sum kappaM_T (T-point) onto each u-/v-face via array rolls —
+    # NEMO's avm(ji+1,jj,jk)+avm(ji,jj,jk), a SUM not a mean (matches the
+    # "2 x" comment above). Zonal (u-face) boundary pads WRAP periodically:
+    # the seam face between T[-1] and T[0] gets kappa[-1]+kappa[0] — correct
+    # under BOTH seam conventions (a land-column seam masks it via wumask
+    # anyway; the nemo_faithful all-wet seam needs the true wrapped sum;
+    # #1455 review N1). Meridional (v-face) boundaries are walls in every
+    # recipe this option targets — edge-repeat there is never selected
+    # (masked by wvmask/coast_v; same idiom as dz_sq_v above).
+    kM_left_u = jnp.concatenate([kappaM_T[:, -1:, :], kappaM_T], axis=1)
+    kM_right_u = jnp.concatenate([kappaM_T, kappaM_T[:, :1, :]], axis=1)
+    kM_face_u = kM_left_u + kM_right_u          # (n_lat, n_lon+1, nlev-1)
+    kM_left_v = jnp.concatenate([kappaM_T[:1, :, :], kappaM_T], axis=0)
+    kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
+    kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
+
+    zsh2u = kM_face_u * zsh2u_bare
+    zsh2v = kM_face_v * zsh2v_bare
+
     p_sh2 = 0.25 * (
         (zsh2u[:, :-1, :] + zsh2u[:, 1:, :]) * coast_u
         + (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v
@@ -343,6 +486,7 @@ def compute_N2(
     adiabatic_over_dz_half: bool = False,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    n2_eos_form: str = "seos",
 ) -> jnp.ndarray:
     """N^2 at interfaces (shared by the TKE and CATKE closures).
 
@@ -414,9 +558,16 @@ def compute_N2(
         # double-count it).  NB the stretch factor is the LOCAL 1+eta/H_bathy,
         # NOT legoESM's z* Jacobian (eta+H)/H_max -- see the warning in
         # eos.nemo_bn2_live_ladders (#1226).
+        # ``n2_eos_form`` selects WHICH alpha/beta the bn2 assembly uses.
+        # 'seos' is the 3-term simplified fit; 'teos10' is NEMO's Roquet
+        # polynomial with the TEOS-10 coefficient set, which is what ORCA1
+        # runs (ln_teos10=.true.). This forward was MISSING -- the call
+        # omitted eos_form entirely, so n2_mode='nemo_bn2' silently took the
+        # S-EOS branch and the TEOS-10 port was unreachable from production
+        # (codex 9408213 #6).
         from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
         return compute_buoyancy_frequency_nemo_bn2(
-            T_cell, S_cell, t_depth, w_depth, g=g,
+            T_cell, S_cell, t_depth, w_depth, g=g, eos_form=n2_eos_form,
         )
     raise ValueError(
         f"Unknown n2_mode={n2_mode!r}; expected 'insitu', 'insitu_signed', "

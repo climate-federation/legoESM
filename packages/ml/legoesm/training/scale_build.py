@@ -12,7 +12,11 @@ package signatures) and exposes exactly what
 The three modes differ ONLY in the ``make_run_seg`` factory (per
 ``training_driver._build_train_step``): physics feeds
 ``TrainablePhysicsParams.to_segment_kwargs()``; neural_gcm builds a
-``NeuralPhysics`` step; sfno builds an SFNO lat-lon step.
+``NeuralPhysics`` step; sfno builds an SFNO lat-lon step. On the SPECTRAL
+core, ``physics`` is the six-family classical model shared with AIMIP
+(``make_aimip_classical_spectral_physics``), not the old 6-knob
+``TrainablePhysicsParams`` stack — that one survives only on the lat-lon path
+below and in ``train_physics_params_spectral``.
 
 End-to-end validation is the single-GPU smoke (``--mode physics --smoke``) +
 the cluster launch; the data-parallel gradient average is unit-tested separately.
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -154,6 +159,20 @@ def _load_run_amip():
     return mod
 
 
+def _validated_wb_radiation(cfg, yml) -> str:
+    """The WB campaign's radiation backend, pinned to rrtmgp.
+
+    Shared by both training cores so neither can drift; ``--smoke`` keeps the
+    cheap gray path (see campaign_driver.validate_campaign_radiation).
+    """
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+
+    return validate_campaign_radiation(
+        str(yml.get("radiation", "rrtmgp")), campaign="wb",
+        smoke=bool(getattr(cfg, "smoke", False)),
+    )
+
+
 def build_latlon_config(cfg, yml):
     """ExperimentConfig for a lat-lon C-grid PE run, via run_amip's parser."""
     ra = _load_run_amip()
@@ -180,7 +199,10 @@ def build_latlon_config(cfg, yml):
         "--nlev", str(int(yml["nlev"])),
         "--vertical-coord", "sigma",
         "--dt", str(float(yml["dt"])),
-        "--radiation", str(yml.get("radiation", "rrtmgp")),
+        # WB is a campaign: rrtmgp, unless this is a --smoke wiring check. The
+        # lat-lon path forwarded the raw key, so a production WB config could
+        # still run gray while the spectral path was pinned (codex).
+        "--radiation", _validated_wb_radiation(cfg, yml),
         "--convection", str(yml.get("convection", "sbm")),
         "--turbulence", str(_turbulence),
         "--microphysics", str(yml.get("microphysics", "kessler")),
@@ -217,9 +239,22 @@ def _spectral_pe_config(yml):
     blocker 1; the explicit lat-lon core's adjoint grows ~x1.3/step).  Set
     ``spectral: {semi_implicit: false}`` to opt back into the explicit
     integrator (then use an explicit-CFL-safe ``spectral.dt``).
+
+    Conservation knobs are forwarded so the WB lane can run the SAME
+    conserved-quantity constraints as the AMIP/AIMIP lane
+    (``run_aimip._build_spectral_config`` forwards the identical four keys):
+    the dry-mass anchor (``fix_mass`` + ``anchor_mass_to_initial``, both
+    honoured by ``spectral_rollout``, which recomputes the target mass from
+    each rollout's own initial state) and the energy numerics
+    (``vertical_advection_scheme``, ``frictional_heating``).  Defaults are
+    ``SpectralPEConfig``'s own, so every existing WB run is byte-identical:
+    the anchor stays OFF unless a YAML asks for it, and the energy-conserving
+    Simmons-Burridge transport + frictional heating stay ON (the code default
+    since the -0.48 K/day upwind T leak was measured).
     """
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
 
+    _PE_DEFAULTS = SpectralPEConfig()
     spec = dict(yml.get("spectral", {}))
     return SpectralPEConfig(
         hyperdiff_coeff=float(spec.get("hyperdiff_coeff", 2.5e15)),
@@ -233,6 +268,14 @@ def _spectral_pe_config(yml):
         sponge_tau=float(spec.get("sponge_tau", 0.0)),
         spectral_filter_order=int(spec.get("spectral_filter_order", 8)),
         spectral_filter_strength=float(spec.get("spectral_filter_strength", 0.01)),
+        fix_mass=bool(spec.get("fix_mass", _PE_DEFAULTS.fix_mass)),
+        anchor_mass_to_initial=bool(spec.get(
+            "anchor_mass_to_initial", _PE_DEFAULTS.anchor_mass_to_initial)),
+        vertical_advection_scheme=str(spec.get(
+            "vertical_advection_scheme",
+            _PE_DEFAULTS.vertical_advection_scheme)),
+        frictional_heating=bool(spec.get(
+            "frictional_heating", _PE_DEFAULTS.frictional_heating)),
     )
 
 
@@ -256,11 +299,9 @@ def _build_mode_components_spectral(cfg, yml):
     spectral rollout has no model object; only the WB2 pointer hook received
     it).
     """
-    import jax
-    import jax.numpy as jnp
-
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.model_registry import build_variant
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         compute_sponge_factor, compute_spectral_filter,
     )
@@ -298,53 +339,164 @@ def _build_mode_components_spectral(cfg, yml):
 
     # Mode -> (params pytree, physics_fn factory, does the fn take forcing?).
     # The learned fns (column MLP / SFNO) accept the traced ``forcing`` dict
-    # (prescribed-SST pathway); the classical physics-params fn does not (its
-    # gray-radiation/SBM stack matches train_physics_params_spectral).
+    # (prescribed-SST pathway); the classical stack does NOT — its signature is
+    # (state, grid, sigma), same as in the AIMIP trainer, so the WB classical
+    # rollout is unforced exactly as the AIMIP classical one is. The
+    # prescribed-SST AMIP path is a different entry point in both campaigns.
     if cfg.mode == "physics":
-        from legoesm.training.trainable_params import TrainablePhysicsParams
-        params = TrainablePhysicsParams.from_defaults()
+        # WB classical IS AIMIP classical since 2026-08-12: the same
+        # six-family scheme-parameter model, built by the same factory. It used
+        # to be a 6-knob, 2-family, gray-radiation model — a different
+        # experiment wearing the same name, and not a baseline for this one.
+        from legoesm.training.aimip_params import (
+            make_aimip_classical_spectral_physics,
+        )
+        _radiation = _validated_wb_radiation(cfg, yml)
+        _cl = dict(yml.get("classical", {}))
+        params = build_variant(
+            "classical", nlev=nlev,
+            overrides={
+                "spatial_surface": bool(_cl.get("spatial_surface", False)),
+                "spatial_init_std": float(_cl.get("spatial_init_std", 0.0)),
+                "spatial_seed": int(_cl.get("spatial_seed", 0)),
+            })
+        # Every family named explicitly in the YAML: a classical model carries
+        # one of each, and defaulting them silently is how a campaign ends up
+        # comparing models that differ in more than the variable under test.
+        _schemes = dict(
+            convection_scheme=str(_cl.get("convection", "tiedtke")),
+            turbulence_scheme=str(_cl.get("turbulence", "louis")),
+            gwd_scheme=str(_cl.get("gwd", "mcfarlane")),
+            microphysics_scheme=str(_cl.get("microphysics", "sundqvist")),
+            cloud_scheme=str(_cl.get("cloud", "xu_randall")),
+            surface_bulk_scheme=str(_cl.get("surface_bulk", "constant")),
+        )
+        _rad_interval = int(_cl.get("rad_update_interval_steps", 6))
+
+        # Any scheme in any family may be swapped, and the TRAINABLE
+        # PARAMETERS follow the swap: the hand-written knob set only covers
+        # one scheme per family, so an arm that selects e.g. bechtold or clubb
+        # would otherwise run it at fixed defaults with no gradient. This is
+        # the same spec-driven bundle run_aimip exposes as
+        # ``aimip_trainable_schemes``; WB reads it from ``classical.trainable_
+        # schemes`` and defaults to the same tier so the two campaigns train
+        # the same thing for the same selection.
+        _tier = _cl.get("trainable_schemes", "extended")
+        if _tier:
+            from legoesm.training.aimip_params import (
+                AIMIPTrainableBundle,
+                aimip_legacy_owned_fields,
+                aimip_scheme_keys_for,
+            )
+            from legoesm.training.param_collector import build_trainable_params
+
+            _active = aimip_scheme_keys_for(
+                convection=_schemes["convection_scheme"],
+                turbulence=_schemes["turbulence_scheme"],
+                gwd=_schemes["gwd_scheme"],
+                microphysics=_schemes["microphysics_scheme"],
+                radiation=_radiation,
+                cloud=_schemes["cloud_scheme"],
+            )
+            _scheme_params = build_trainable_params(
+                active_scheme_keys=_active,
+                tier=(_tier if isinstance(_tier, str) else "extended"),
+                # Only what the hand-written route cannot reach: the splice
+                # runs after it, so a doubly-covered field would silently zero
+                # the legacy leaf's gradient.
+                exclude=tuple(sorted(aimip_legacy_owned_fields(
+                    cloud_scheme=_schemes["cloud_scheme"]))),
+            )
+            params = AIMIPTrainableBundle(
+                classical=params, schemes=_scheme_params)
+
+        # SPLIT radiation, as the AIMIP arm runs it: RRTMGP once every
+        # `rad_update_interval_steps` scan steps instead of on every RK stage.
+        # Without this the interval key is INERT and the SI SSP-RK3 step calls
+        # RRTMGP three times per step — ~18x the intended rate at interval 6,
+        # and the combined wrapper also freezes radiation's solar time (codex).
+        # CAM trop_cloud_top_press for CLUBB [hPa in the YAML, Pa inside]:
+        # None/absent -> CLUBBConfig's default 0.0 = feature off. The
+        # 32-level arm sets 50 hPa — the diagnostic scheme's measured
+        # stratospheric excursion lives 16-50 hPa there. A non-finite or
+        # non-positive value is a config error, not a silent off-switch.
+        _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
+        if _clubb_top_hpa is None:
+            _clubb_top = None
+        else:
+            _clubb_top = float(_clubb_top_hpa) * 100.0
+            if not math.isfinite(_clubb_top) or _clubb_top <= 0.0:
+                raise ValueError(
+                    "classical.clubb_top_press_hpa must be a finite "
+                    f"positive pressure in hPa, got {_clubb_top_hpa!r}; "
+                    "omit the key to leave the CAM trop-cloud-top taper "
+                    "off.")
 
         def make_physics_fn(p):
-            return make_physics_params_spectral_physics(p, grid, dt)
+            return make_aimip_classical_spectral_physics(
+                p, grid, dt, radiation=_radiation, split_rad=True,
+                rad_update_interval_steps=_rad_interval,
+                clubb_top_press=_clubb_top, **_schemes)
+        # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
+        # kwarg, same as in the AIMIP trainer, where prescribed SST enters
+        # through the surface scheme rather than the physics signature.
         uses_forcing = False
+        split_rad_interval = _rad_interval
 
     elif cfg.mode == "neural_gcm":
-        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
         ov = yml.get("neural_gcm", {})
-        params = NeuralPhysics(
-            nlev=nlev, hidden_dim=int(ov.get("nn_hidden", 256)),
-            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
+        # ``nn_hidden``/``nn_layers`` are this lane's historical key names; the
+        # registry's vocabulary is AIMIP's. The WB-suite adapter retires the
+        # aliases; until then map them here rather than teach the registry two
+        # spellings.
+        _cn = {}
+        if "nn_hidden" in ov:
+            _cn["nn_hidden_dim"] = int(ov["nn_hidden"])
+        if "nn_layers" in ov:
+            _cn["n_layers"] = int(ov["nn_layers"])
+        params = build_variant("column_nn", nlev=nlev, overrides=_cn)
+
+        # #1464: the learned arm has no momentum head, so without this it runs
+        # with NO surface turbulent drag while the `physics` arm it is scored
+        # against inherits TurbulenceConfig.scheme="smagorinsky". Opt-in so no
+        # existing campaign changes silently; `neural_gcm.surface_drag: true`
+        # in the campaign YAML makes the two arms differ in thermodynamics
+        # only. Built ONCE here, not per make_physics_fn call, so the closure
+        # is a compile-time constant.
+        _drag_fn = None
+        if bool(ov.get("surface_drag", False)):
+            from legoesm.training.neural_gcm_spectral import (
+                make_turbulence_only_spectral_physics,
+            )
+            _drag_fn = make_turbulence_only_spectral_physics(
+                dt, turbulence_scheme=str(ov.get("surface_drag_scheme",
+                                                 "smagorinsky")))
 
         def make_physics_fn(p):
-            return make_column_mlp_spectral_physics(p, grid)
+            return make_column_mlp_spectral_physics(
+                p, grid, momentum_physics_fn=_drag_fn)
         uses_forcing = True
+        split_rad_interval = None
 
     elif cfg.mode == "sfno":
-        import equinox as eqx
-        from legoesm.ml.sfno import SFNO, SFNOConfig
-        from legoesm.training.neural_gcm_spectral import N_SFNO_FORCING_CHANNELS
-
+        # Channel count, forcing planes, residual_prediction=False and the
+        # epoch-0 decoder zero-init (so the first rollout is the pure SI
+        # dycore) now live in the registry, shared with AIMIP.
         ov = yml.get("sfno", {})
-        n_ch = 4 * nlev + 2
-        sfno = SFNO(
-            SFNOConfig(
-                in_channels=n_ch + N_SFNO_FORCING_CHANNELS, out_channels=n_ch,
-                embed_dim=int(ov.get("sfno_embed_dim", 256)),
-                n_blocks=int(ov.get("sfno_n_blocks", 8)),
-                residual_prediction=False,
-            ),
-            grid, key=jax.random.PRNGKey(0))
-        # Epoch-0 stability contract (mirrors the lat-lon path): zero-init the
-        # decoder so the first rollout is the pure (SI) dycore.
-        sfno = eqx.tree_at(
-            lambda m: (m.decoder.weight, m.decoder.bias), sfno,
-            (jnp.zeros_like(sfno.decoder.weight),
-             jnp.zeros_like(sfno.decoder.bias)))
-        params = sfno
+        # NOTE this lane's default SFNO size moved 256/8 -> the registry's
+        # 128/4 for a YAML that pins neither; every shipped config under
+        # config/wb/ pins both, so no existing run moves. `sfno_mlp_expansion`
+        # is newly honoured here (it was silently ignored before).
+        _sf = {k: int(ov[k]) for k in
+               ("sfno_embed_dim", "sfno_n_blocks", "sfno_mlp_expansion")
+               if k in ov}
+        params = build_variant("sfno_physics", nlev=nlev, grid=grid,
+                               overrides=_sf)
 
         def make_physics_fn(p):
             return make_sfno_spectral_physics(p, grid)
         uses_forcing = True
+        split_rad_interval = None
 
     else:
         raise ValueError(f"unknown mode {cfg.mode!r}")
@@ -355,16 +507,25 @@ def _build_mode_components_spectral(cfg, yml):
         eqx.filter_value_and_grad (buffer-donation doctrine)."""
 
         def __init__(self, physics_fn):
-            self._physics_fn = physics_fn
+            # The classical factory returns (non_rad_fn, rad_fn) under
+            # split_rad; every other mode returns one callable.
+            if split_rad_interval is not None:
+                self._physics_fn, self._rad_fn = physics_fn
+            else:
+                self._physics_fn, self._rad_fn = physics_fn, None
 
         def raw(self, ic_carry, n_steps, forcing):
             state0 = carry_to_spectral_state(ic_carry, grid)
             forcing_base = forcing if uses_forcing else None
+            gated = ({} if self._rad_fn is None else
+                     {"rad_physics_fn": self._rad_fn,
+                      "rad_update_interval": split_rad_interval})
             final = spectral_rollout(
                 state0, self._physics_fn, grid, sigma, pe_config,
                 dt, int(n_steps),
                 sponge_factor, spectral_filter,
                 forcing_base=forcing_base,
+                **gated,
             )
             return spectral_state_to_carry(final, grid, sigma)
 
@@ -521,6 +682,33 @@ def era5_time_to_forcing_calendar(time_ns, year):
     return doy_1based, sod
 
 
+def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> int:
+    """Refuse a scheme whose species the BUILT carry cannot hold.
+
+    Mirrors the production driver, which counts the leading non-None slots of
+    its live tracer state and validates that count.  Counting instead the
+    registry the scheme itself selected would be tautological — the two can
+    only ever agree, so such a check could never catch the failure it claims to
+    (codex).  Counting the carry catches a seeding path that silently produced
+    fewer slots than the scheme writes, which is exactly how the WeatherBench
+    classical arm trained to a NaN: nine-species microphysics on a
+    three-species state, six tendencies discarded per evaluation.
+
+    Deliberately NOT placed in the shared microphysics bridge: several dycore
+    tests build partial tracer states on purpose and rely on its tolerance, so
+    turning that into a hard error is a separate policy decision.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+    from legoesm.driver.physics_pipeline import validate_microphysics_tracer_slots
+
+    have = 0
+    for name in make_full_moisture_registry().names:
+        if getattr(carry, name, None) is None:
+            break
+        have += 1
+    return validate_microphysics_tracer_slots(microphysics, have, context=context)
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -551,11 +739,34 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
+    # Which water species the state must carry follows the scheme the arm
+    # selects, and the carry builder already knows how to seed them — it was
+    # simply never told which scheme was running here, so every state was built
+    # for the three warm-rain slots.  A nine-species microphysics then had its
+    # ice / snow / graupel / number tendencies silently dropped downstream.
+    # The learned arms run no microphysics or turbulence scheme at all, so they
+    # keep the three-slot carry and are byte-unchanged.
+    #
+    # Microphysics only. A stateful turbulence scheme (CLUBB, MYNN, EDMF) would
+    # also seed a prognostic energy carry, but the spectral rollout threads no
+    # turbulence state between steps and the spectral->carry conversion has
+    # nowhere to put one, so seeding it would make the forecast carry
+    # structurally different from the initial condition it is scored against.
+    # Carrying turbulence energy across steps on this path is separate work.
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
+
+
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
+        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma,
+                                    microphysics=_micro)
+        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma,
+                                        microphysics=_micro)
+        if not samples:
+            validate_carry_holds_scheme(
+                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
         sst_src = load_era5_slice(era5_cfg, i_ic)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)

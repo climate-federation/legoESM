@@ -170,6 +170,13 @@ def main() -> int:
                         "estimated per-device footprint must fit "
                         "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
                         "estimate printed, no gate.")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="jax.profiler trace of ONE steady timed block from "
+                        "ranks 0-3 into <dir>/rank<k>/ (the MPAS-lane "
+                        "attribution instrument, ported; analyze with "
+                        "scripts/bench/analyze_jax_trace_gaps.py). One "
+                        "block only — tracing from step 0 fills the 1M-"
+                        "event cap with compile-phase host events.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
@@ -308,7 +315,20 @@ def main() -> int:
         # in-graph finite SCALAR, then block on the state for honest timing.
         per_block_ms = []
         finite_ok = True
+        _profiling = (args.profile_dir is not None
+                      and jax.process_index() < 4)
+        _prof_on = False
         for i in range(args.steps):
+            if _profiling and i == args.warmup:
+                import pathlib
+                _pd = (pathlib.Path(args.profile_dir)
+                       / f"rank{jax.process_index()}")
+                _pd.mkdir(parents=True, exist_ok=True)
+                jax.profiler.start_trace(str(_pd))
+                _prof_on = True
+            if _profiling and _prof_on and i == args.warmup + 1:
+                jax.profiler.stop_trace()
+                _prof_on = False
             t0 = time.perf_counter()
             c, ok = seg_fn(c, args.dt)
             ok_b = bool(ok)
@@ -326,6 +346,8 @@ def main() -> int:
                       "the record is marked INVALID (finite_ok=false, "
                       "valid=false) and its throughput fields are nulled")
                 break
+        if _profiling and _prof_on:
+            jax.profiler.stop_trace()
         completed_blocks = len(per_block_ms)
         per_step_ms = [b / seg_n for b in per_block_ms]
         if jax.process_count() > 1:
@@ -346,11 +368,15 @@ def main() -> int:
         # (``step_latency_ms``); multi-controller runs record the
         # slowest-process block time + imbalance ratio.
         from metadata import timed_scan_blocks
+        _tdir = None
+        if args.profile_dir is not None and jax.process_index() < 4:
+            _tdir = f"{args.profile_dir}/rank{jax.process_index()}"
         c, timing = timed_scan_blocks(
             lambda st: step(st, args.dt), c,
             block_steps=args.steps, n_blocks=args.blocks,
             probe_steps=args.probe_steps,
-            sync_label="atm_latlon_spmd_bench")
+            sync_label="atm_latlon_spmd_bench",
+            trace_dir=_tdir)
         # Headline = fused per-step time from the SLOWEST process; key name
         # kept for the aggregators.
         med = float(timing["fused_step_ms"])

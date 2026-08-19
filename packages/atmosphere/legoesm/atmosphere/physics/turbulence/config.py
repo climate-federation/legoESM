@@ -114,6 +114,7 @@ __param_spec__ = {
         "excluded": {
             "C4": "NN09 sets C4=0 (drops its shear pressure-covariance term); not read here",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "d25_floor": "numerics: two-sided floor on the level-2.5 denominator D25, which passes through zero at zero resolved shear; a regulariser, not a closure coefficient",
         },
         "params": {
             "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A1", "shape": None},
@@ -274,10 +275,15 @@ class SurfaceLayerConfig(NamedTuple):
     # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
-    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
-    # Threaded together with the coupler ocean tile by run_coupled so the
-    # interface cannot split; unknown -> ValueError at dispatch.
+    # bulk schemes: "dyer1974" (default; historical -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the SENTINEL for the
+    # byte-identical COARE-native stable form on coare3 — which is itself the
+    # BH91 fit with rounded constants, see bulk_flux.psi_m_coare) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".  On
+    # coare3 only the STABLE branch swaps (the Fairall unstable blend is
+    # COARE-defining).  Threaded together with the coupler ocean tile by
+    # run_coupled so the interface cannot split; unknown -> ValueError at
+    # dispatch.
     stability_scheme: str = "dyer1974"
     # Businger-Dyer / Dyer (1974) MOST stability-function coefficients, trainable
     # for the AIMIP classical curriculum. Defaults reproduce the historical
@@ -300,6 +306,32 @@ class SurfaceLayerConfig(NamedTuple):
     # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
     # tree_deserialise_leaves field ordering are unchanged.
     z0h_z0_ratio: float = 0.1
+    # PRESCRIBED surface scalar fluxes [W/m^2, positive UP], overriding whatever
+    # the bulk formula computed. ``None`` (default) = off, byte-identical to a
+    # config without them.
+    #
+    # These exist because a case deck that PRESCRIBES its surface heat and
+    # moisture fluxes (SAM's SFC_FLX_FXD, and every dry analytic ABL case) had
+    # no way to hand them to the closure. The single-column driver zeroed
+    # ``Ch_neutral`` to avoid double-counting and then injected the deck flux as
+    # a separate tendency on the lowest cell AFTER turbulence had run -- so the
+    # closure computed its own surface flux as exactly zero. Local closures
+    # still see the resulting gradient, but every flux-driven nonlocal scheme
+    # loses its defining pathway: YSU derives its convective velocity scale,
+    # PBL depth, entrainment and countergradient from ``shflx`` (ysu.py, the
+    # ``wtheta_sfc = shflx / (rho c_pd)`` line), so a prescribed-flux convective
+    # case ran it with no convection at all.
+    #
+    # Set these INSTEAD of injecting the flux as a forcing tendency, never as
+    # well: the closure applies them as the diffusion's lower boundary
+    # condition, so doing both counts the flux twice. MOMENTUM is untouched --
+    # the decks that fix scalar fluxes leave the stress interactive
+    # (SFC_TAU_FXD = .false.), so tau still comes from Cd.
+    #
+    # Annotated ``float | None`` => not spec-eligible: a prescribed boundary
+    # condition read off a case deck is a measurement, not a tunable closure.
+    prescribed_shflx_w_m2: float | None = None
+    prescribed_lhflx_w_m2: float | None = None
 
 
 class SmagorinskyConfig(NamedTuple):
@@ -466,6 +498,17 @@ class MYNN25Config(NamedTuple):
         (NN09 below eq. A4).
     tke_min : float
         Minimum qke (= 2·TKE) [m²/s²] for numerical safety.
+    d25_floor : float
+        Two-sided floor on |D25|, the level-2.5 stability-function denominator
+        (``phi_2*phi_4 + phi_5*phi_3``), which is 1.0 at ``G_M = G_H = 0`` and
+        PASSES THROUGH ZERO. Numerics only, never trainable. At zero resolved
+        shear ``phi_5 = 0`` and ``phi_4`` has a root at ``G_H = 0.046`` for
+        these constants; the previous one-sided ``max(D25, 1e-30)`` turned that
+        root into a ~1e30 amplification (measured ``SH25 = +5.5e29``, i.e.
+        ``Kh ~ 1e25 m²/s``, which the downstream ``Kh >= 0`` clamp cannot see
+        because it is positive). SM/SH are bit-identical wherever
+        ``|D25| >= d25_floor``, so this bounds the pole without touching any
+        column that was already well posed.
     surface : SurfaceLayerConfig
         Surface-layer (bulk-flux) configuration.
     """
@@ -480,6 +523,7 @@ class MYNN25Config(NamedTuple):
     C5: float = 0.2
     gamma1: float = 0.235
     tke_min: float = 1e-10
+    d25_floor: float = 1e-2
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

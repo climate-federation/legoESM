@@ -111,6 +111,7 @@ absolute numbers come from a different reference state than the original probe.
 """
 from __future__ import annotations
 
+import re as _re
 import sys
 
 # The bar.  Roundoff only -- these are NOT tolerances for physics differences.
@@ -126,6 +127,315 @@ BAR_RATIO_EPS = 1e-6
 # mismatches 10 -> 0, see zdf_mxl_nmln_compare.py).  A term is only AT BAR if
 # its per-element error is ALSO at roundoff.
 BAR_PER_ELEM_EPS = 1e-9
+
+# #1492 item 0.2 (SIGNED OFF 2026-08-05, the sign-off comment IS the spec;
+# follows FESOM2-JAX arXiv:2608.01546 SS2.4): tolerance-BY-ARITHMETIC-CLASS.
+# BAR_PER_ELEM_EPS above stays the single legacy per-element bar (nothing
+# reads it for a NEW purpose); CLASS_BAR below is what classify() actually
+# consults for the per-element axis, keyed off ROW_CLASS.  corr/ratio
+# criteria (BAR_CORR/BAR_RATIO_EPS) are UNCHANGED -- the spec only replaces
+# the per-element bar, and the class bars govern that axis only.
+#
+#   POINTWISE / NEIGHBOUR-STENCIL -- pointwise EOS/coefficient/stencil
+#     evaluations with no cross-cell flux assembly or global reduction.
+#     Rounding alone should reproduce these to fp64 roundoff.
+#   ACCUMULATING -- flux assembly onto control volumes, substep/implicit
+#     accumulation, global or depth sums.  JAX's reduction order does not
+#     match NEMO's Fortran loop order (reassociation), so roundoff alone is
+#     NOT achievable -- 1e-12 is the bar for "no residual beyond
+#     reassociation".
+#   CONDITIONED -- ratios with to-zero denominators or branch flips (near-
+#     zero conditioning tails).  These get NO class bar at all: they are
+#     gated entirely by the pre-existing CEILING_ROWS mechanism-proof
+#     machinery (unchanged by this task), never by a numeric per-element
+#     threshold, because a small perturbation near a singularity is
+#     inherently unbounded in relative terms.
+#
+# Per the sign-off: "class assignment is auditable and shrink-only in
+# permissiveness (a row may be tightened, never loosened, without a
+# recorded decision)"; "rows whose class assignment is not obvious from the
+# operator stay at the strict default (1e-15) until argued otherwise."
+BAR_POINTWISE = 1e-15
+BAR_ACCUMULATING = 1e-12
+
+# term -> (class, justification).  CLOSED dict: every one of the 53
+# MEASUREMENTS rows must appear (enforced by _validate_row_class, mirroring
+# _validate_waivers/_validate_ceiling's closure style).  `class` is one of
+# "POINTWISE", "ACCUMULATING", "CONDITIONED" -- machine-readable, consulted
+# by classify() for the per-element criterion (CONDITIONED rows are NOT
+# subject to a class-bar check at all; they clear via CEILING_ROWS only, or
+# else are DEBT/UNMEASURED like any other row -- see classify()).
+# Justification is a ONE-LINE statement of what the operator actually does
+# (read from each row's own MEASUREMENTS/PER_ELEMENT note -- not guessed),
+# citing the mechanism, not just restating the class name.
+ROW_CLASS: dict[str, tuple[str, str]] = {
+    "sbc (utau/qsr/qns/sfx)": ("POINTWISE",
+        "pointwise bulk-forcing evaluation per surface cell, no flux "
+        "assembly across cells (cancelling_rows_per_element.py note)."),
+    "eos_rab beta": ("POINTWISE",
+        "pointwise EOS coefficient evaluation (eosbn2.F90 rab_3d), one "
+        "cell in, one value out."),
+    "eos_rab alpha": ("POINTWISE",
+        "pointwise EOS coefficient evaluation (eosbn2.F90 rab_3d), same "
+        "family as beta above."),
+    "bn2 (rn2b)": ("POINTWISE",
+        "pointwise buoyancy-frequency finite difference between a cell "
+        "and its own vertical neighbour (eosbn2.F90 bn2_t), a 2-point "
+        "stencil, no cross-column assembly."),
+    "zdf_mxl (nmln)": ("POINTWISE",
+        "per-column level-selection against a local N^2 criterion "
+        "(zdfmxl.F90), no cross-cell flux assembly -- an integer argmax "
+        "over one column's own levels."),
+    "ldf_slp wslpi": ("POINTWISE",
+        "neighbour-stencil isoneutral slope (ldfslp.F90 zaj/zbj/zck), "
+        "local T/u/w-point differences, no global reduction."),
+    "ldf_slp wslpj": ("POINTWISE",
+        "same neighbour-stencil slope family as wslpi (j-component)."),
+    "ldf_slp uslp": ("CONDITIONED",
+        "the SAME slope stencil as wslpi/wslpj, but its own MEASUREMENTS "
+        "note documents a near-zero-divisor conditioning tail "
+        "(zau/(zbu-zeps)) as the row's mechanism, and Dhruv's 2026-08-04 "
+        "Decision 1 CEILING decision note (CEILING_ROWS) already governs "
+        "its terminal status -- not a class-bar per-element threshold."),
+    "ldf_slp vslp": ("CONDITIONED",
+        "same conditioning-tail mechanism as uslp (v-component), same "
+        "2026-08-04 Decision 1 CEILING decision note."),
+    "ldf_eiv kappa (aeiu)": ("CONDITIONED",
+        "pointwise GM coefficient FORMULA (ldftra.F90 zaeiw/aeiu, local "
+        "Rossby-radius taper per cell), but its own MEASUREMENTS note and "
+        "Dhruv 2026-08-04 Decision 1 CEILING entry document an inherited "
+        "near-zero-divisor conditioning tail (same family as uslp/vslp's "
+        "zbj->0 tail) as the mechanism behind its residual -- "
+        "CEILING_ROWS-gated, so classed CONDITIONED despite the "
+        "underlying formula being local."),
+    "ldftra ahtu (Redi, nn_aht_ijk_t=20)": ("POINTWISE",
+        "pointwise Redi coefficient K_h*cos(lat) evaluation, no flux "
+        "assembly."),
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": ("POINTWISE",
+        "pointwise v-face Redi coefficient evaluation, same family as "
+        "ahtu."),
+    "eiv transport u": ("ACCUMULATING",
+        "bolus transport is a depth-integrated/face-summed quantity "
+        "(nemo_eiv_bolus_transport) built from slopes across multiple "
+        "levels -- an accumulation, not a single-cell evaluation."),
+    "eiv transport v": ("ACCUMULATING",
+        "same accumulating transport formula as the u-component."),
+    "traadv_fct fluxes": ("ACCUMULATING",
+        "FCT/Zalesak flux assembly across cell faces with limiter "
+        "clipping decisions that depend on neighbouring-cell fluxes -- "
+        "a control-volume flux assembly, the canonical ACCUMULATING case."),
+    "traadv_fct tendency (T)": ("ACCUMULATING",
+        "full horizontal+vertical FCT tendency, i.e. the flux-divergence "
+        "assembly onto the T control volume."),
+    "traadv_fct horizontal tend": ("ACCUMULATING",
+        "horizontal-only FCT flux-divergence assembly (vertical flux "
+        "zeroed), still a multi-face flux sum."),
+    "traadv_fct vertical upstream flux": ("ACCUMULATING",
+        "vertical FCT flux assembly with Zalesak limiting across "
+        "vertically-neighbouring faces."),
+    "dyn_hpg (du)": ("ACCUMULATING",
+        "hydrostatic pressure gradient is a vertical integral of density "
+        "from the surface (eos_geometric_depth_1d + cumulative sum), a "
+        "depth accumulation, not a pointwise evaluation."),
+    "dyn_vor EEN u": ("POINTWISE",
+        "EEN vorticity flux is a fixed 9-point (triad) stencil per "
+        "vertex/face, evaluated locally with no depth or global "
+        "reduction (pv_flux_al81_partial_cell)."),
+    "dyn_vor EEN v": ("POINTWISE",
+        "same fixed local triad stencil as EEN u (v-component)."),
+    "dyn_adv KEG": ("POINTWISE",
+        "kinetic-energy-gradient term is a local finite difference of "
+        "u^2+v^2 between neighbouring cells, no accumulation (measured "
+        "byte-exact)."),
+    "dyn_adv ZAD": ("ACCUMULATING",
+        "vertical advection of momentum sums flux contributions from "
+        "both bracketing T-neighbours at the interface, folded into a "
+        "z*-volume-form tendency across the column (dynzad.F90) -- an "
+        "accumulation, not a single-point stencil."),
+    "zdftke pdlr": ("ACCUMULATING",
+        "Prandtl number consumes the full vertical shear/TKE/N2 profile "
+        "produced by the TKE closure's implicit tridiagonal integration "
+        "across the column -- an accumulated upstream quantity, not a "
+        "local evaluation (row's own note traces it to upstream "
+        "sh2/rn2b/avm_in inputs)."),
+    "zdftke composite avt/avm": ("ACCUMULATING",
+        "closure-exit avt/avm are the accumulated output of the TKE "
+        "column's implicit vertical integration (zdftke.F90), same "
+        "accumulation class as pdlr."),
+    "STABILITY on NEMO true grid (e3t_0)": ("ACCUMULATING",
+        "a multi-year prognostic stability/climate run, the extreme end "
+        "of accumulation (thousands of accumulated timesteps) -- not a "
+        "per-element residual row at all, but classed ACCUMULATING per "
+        "the strict-default rule since it is not a single-step pointwise "
+        "comparison either."),
+    "dyn_hpg (dv)": ("ACCUMULATING",
+        "same vertical density-integral PGF formula as dyn_hpg (du)."),
+    "dyn_spg_ts pssh": ("ACCUMULATING",
+        "barotropic free-surface height accumulated over the substep "
+        "loop (dynspg_ts.F90 sub-cycling), a temporal accumulation, not "
+        "a single evaluation."),
+    "dyn_spg_ts puu_b": ("ACCUMULATING",
+        "barotropic velocity accumulated over the same substep loop as "
+        "pssh."),
+    "dyn_spg_ts un_adv": ("ACCUMULATING",
+        "substep-accumulated barotropic advective correction, same "
+        "sub-cycling loop as pssh/puu_b."),
+    "ATF filter u": ("POINTWISE",
+        "Robert-Asselin filter is a fixed 3-point (before/now/after) "
+        "recurrence per point, no cross-cell flux assembly."),
+    "ATF filter v": ("POINTWISE",
+        "same 3-point Asselin recurrence as ATF filter u."),
+    "ATF filter T/S/ssh": ("POINTWISE",
+        "same 3-point Asselin recurrence, tracer/ssh variant."),
+    "dyn_ldf (dynldf_lev_lap) u": ("POINTWISE",
+        "Laplacian lateral-friction operator is a fixed local "
+        "div-of-grad stencil over immediate neighbours "
+        "(dynldf_lev_rot_scheme.h90), no global reduction."),
+    "dyn_ldf (dynldf_lev_lap) v": ("POINTWISE",
+        "same local Laplacian stencil as the u-component."),
+    "ssh_nxt / div_hor": ("CONDITIONED",
+        "already governed by Dhruv's 2026-08-04 Decision 1 CEILING "
+        "decision note (CEILING_ROWS): the row's own note traces its "
+        "residual to a metric-convention BAND (isotropic vs exact grid "
+        "metric), a systematic bias rather than a clean pointwise or "
+        "accumulating residual, and its CEILING-PROOF explicitly "
+        "concerns whether the residual sits at/above NEMO's own "
+        "arithmetic-noise floor -- the CONDITIONED category is the "
+        "closest fit for a row whose bar-clearance question is already "
+        "answered by mechanism-proof, not a numeric per-element bar."),
+    "dom_qco_r3c r3t": ("POINTWISE",
+        "r3t = eta/H0 is a pointwise per-column ratio (domqco.F90), "
+        "structurally confirmed (this row's own note) to have no "
+        "horizontal-metric or cross-cell term at all."),
+    "dom_qco_r3c r3u/r3v": ("POINTWISE",
+        "r3u/r3v are face-AVERAGES of r3t across exactly 2 neighbouring "
+        "T-columns -- a neighbour-stencil, not a global accumulation."),
+    "mlf_baro_corr": ("POINTWISE",
+        "algebra-only barotropic correction applied pointwise per face "
+        "(row's own note: 'algebra only; needs _step_impl hook') -- "
+        "unmeasured, so the strict default stands pending an actual "
+        "per-element measurement."),
+    "lbc_lnk sign": ("POINTWISE",
+        "halo/periodic-seam COPY identity, an exact pointwise "
+        "index-alignment check (max|halo_col - periodic_image_col|), "
+        "no arithmetic accumulation at all."),
+    "zdf_mxl_turb": ("POINTWISE",
+        "WAIVED (missing term, out of scope) -- classed at the strict "
+        "default since it was never measured and WAIVED_ROWS already "
+        "governs its terminal status regardless of class."),
+    "zdf_drg_nonlin T-point rate": ("POINTWISE",
+        "pointwise nonlinear bottom-drag rate evaluation from local "
+        "bottom u/v, no cross-cell assembly."),
+    "dyn_drg_init RHS increment": ("POINTWISE",
+        "pointwise drag-rate x |U| increment per bottom face "
+        "(nemo_bottom_drag_rate_faces), local formula, no accumulation."),
+    "dyn_cor_2d (69x/step)": ("ACCUMULATING",
+        "barotropic Coriolis term accumulated over the SAME 69-substep "
+        "barotropic sub-cycling loop as dyn_spg_ts (row's own name "
+        "states the substep count) -- an explicit accumulation, not a "
+        "single evaluation."),
+    "traadv_fct (SALINITY)": ("ACCUMULATING",
+        "same FCT/Zalesak flux-assembly family as the other traadv_fct "
+        "rows, salinity tracer."),
+    "wzv (vertical velocity)": ("ACCUMULATING",
+        "diagnosed w is a cumulative vertical integral of the horizontal "
+        "mass-flux divergence from the surface down through the column "
+        "(diagnose_w_from_flux_div) -- a depth accumulation."),
+    "tra_zdf (tracer implicit vertical solve)": ("ACCUMULATING",
+        "implicit tridiagonal vertical solve over the full column "
+        "(trazdf.F90 zwt/zwi/zwd/zws), an accumulated multi-level solve, "
+        "not a pointwise evaluation -- unmeasured, so still gated at "
+        "this class's 1e-12 bar once a number exists."),
+    "dyn_zdf (momentum implicit vertical solve)": ("ACCUMULATING",
+        "same implicit tridiagonal column solve family as tra_zdf, "
+        "momentum variant (dynzdf.F90)."),
+    "traldf_iso_lap tendency": ("POINTWISE",
+        "unmeasured; strict default per the sign-off's burden-of-proof "
+        "rule -- no dumped bracket exists yet to argue otherwise, and "
+        "the operator IS a local isoneutral-Laplacian stencil (same "
+        "family as dyn_ldf) once ported, not an accumulation."),
+    "ldf_dyn coefficient": ("POINTWISE",
+        "pointwise viscosity-coefficient evaluation (ahmt/ahmf, "
+        "dynldf.F90), local metric formula per T-/F-point."),
+    "tra_qsr (shortwave penetration)": ("POINTWISE",
+        "Beer-Lambert two-band exponential evaluated pointwise per cell "
+        "at its own depth (traqsr.F90 qsr_2BD), no cross-cell flux "
+        "assembly (each level's absorption depends only on its own "
+        "depth, not on neighbouring cells)."),
+    "ssh_atf": ("CONDITIONED",
+        "already governed by its own Dhruv 2026-08-04 Decision 1 CEILING "
+        "decision note (CEILING_ROWS): the row's own note derives its "
+        "residual as a LINEAR 1:1 inheritance (factor gamma=0.1) of the "
+        "upstream 'ssh_nxt / div_hor' row's own CONDITIONED/CEILING "
+        "residual, not an independent pointwise or accumulating defect "
+        "-- classed the same as its inherited-from row."),
+    "tra_sbc": ("POINTWISE",
+        "pointwise surface-flux divisor and tau_T application per "
+        "surface cell (trasbc.F90), no cross-cell assembly -- measured "
+        "at literal roundoff (1.936e-16), consistent with this class."),
+}
+
+
+# Permissiveness ranking, STRICTEST first -- shrink-only per the sign-off ("a
+# row may be tightened freely; loosening requires a recorded decision
+# string"). CONDITIONED is the loosest rank: it carries NO numeric per-element
+# bar at all (class_bar_for returns +inf), so landing a row there is the
+# maximal possible loosening -- the one case this file can check mechanically
+# without a separate frozen-baseline file (there is no historical "previous
+# class" to diff against for a from-scratch classification; see the
+# 0.2 test suite for why a full baseline-ratchet file would be over-built for
+# a single closed 53-row dict). Any row classified CONDITIONED must therefore
+# cite a decision in its own justification -- mirrors WAIVED_ROWS/CEILING_ROWS
+# requiring a decision-provenance string for their own human judgment calls.
+_CLASS_RANK = {"POINTWISE": 0, "ACCUMULATING": 1, "CONDITIONED": 2}
+
+
+def _validate_row_class() -> None:
+    """Fail LOUDLY, at import time, if ROW_CLASS drifts from MEASUREMENTS
+    (every row must be classified, no more/no less -- mirrors
+    _validate_waivers/_validate_ceiling's closure enforcement), if any entry
+    uses an unknown class name, carries an empty justification, or lands in
+    the loosest (CONDITIONED) rank without a recorded decision citation in
+    its justification."""
+    for term, (cls, justification) in ROW_CLASS.items():
+        if cls not in _CLASS_RANK:
+            raise ValueError(f"ROW_CLASS[{term!r}] has unknown class {cls!r} "
+                              f"-- must be one of {sorted(_CLASS_RANK)}")
+        if not justification.strip():
+            raise ValueError(f"ROW_CLASS[{term!r}] has an empty "
+                              "justification string")
+        if cls == "CONDITIONED" and not _re.search(r"[Dd]ecision\s+\d",
+                                                   justification):
+            # Requires a NUMBERED decision citation ("Decision 1"), not just
+            # the word "decision" anywhere -- "no decision was made" must NOT
+            # pass (adversarial-review finding, 2026-08-06).
+            raise ValueError(
+                f"ROW_CLASS[{term!r}] is classified CONDITIONED (the "
+                "loosest rank -- no numeric class bar at all) but its "
+                "justification cites no numbered decision (e.g. 'Decision "
+                "1') -- a loosening requires a recorded decision string, "
+                "per the #1492 item 0.2 sign-off")
+        if cls == "CONDITIONED" and term not in CEILING_ROWS:
+            # Without this, a CONDITIONED row NOT in CEILING_ROWS would fall
+            # through classify() with class_bar=+inf and could clear AT BAR
+            # on cancelling corr/ratio statistics alone -- exactly the bn2
+            # regression the per-element bar exists to prevent (see
+            # BAR_PER_ELEM_EPS's comment), reopened for one class
+            # (adversarial-review finding, 2026-08-06). Every CONDITIONED
+            # row MUST be mechanism-proof-gated via CEILING_ROWS.
+            raise ValueError(
+                f"ROW_CLASS[{term!r}] is CONDITIONED (no numeric class bar) "
+                "but is not in CEILING_ROWS -- a CONDITIONED row must be "
+                "mechanism-proof-gated, else it clears on cancelling "
+                "statistics")
+    missing = set(MEASUREMENTS.keys()) - set(ROW_CLASS.keys())
+    if missing:
+        raise ValueError(f"ROW_CLASS is missing entries for: {sorted(missing)}")
+    extra = set(ROW_CLASS.keys()) - set(MEASUREMENTS.keys())
+    if extra:
+        raise ValueError(f"ROW_CLASS has entries for rows not in "
+                          f"MEASUREMENTS: {sorted(extra)}")
+
 
 # term -> measured per-element error (median or max |rel|, whichever the
 # measuring probe reports -- record the LARGER when both are known).  Absent =
@@ -1316,7 +1626,69 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "nemo_pdlr arrays verbatim) was run over {-2..+2}: sharp "
                                                               "offset=0 peak (corr 0.998124 vs runner-up 0.891260 at "
                                                               "+1). corr/ratio UNCHANGED."),
-    "zdftke composite avt/avm":      (0.9666277701, 1.0708326784, "RE-POINTED post-e0fac585e: this row's reference "
+    "zdftke composite avt/avm":      (0.9979120000, 0.9965000000, "RE-POINTED + RE-MEASURED 2026-08-07 "
+                                                              "(feat/nemo-dino-topo-bridge, TKEConfig.tke_dry_wmask). "
+                                                              "STILL DEBT -- 0.997912/0.9965 is NOT 1.0/1.0 (1-corr="
+                                                              "2.09e-03, |ratio-1|=3.5e-03, both far outside BAR_CORR/"
+                                                              "BAR_RATIO_EPS); this row is re-pointed, not cleared. "
+                                                              "WHICH REDUCTION (stated plainly, per Rule 1e -- this is "
+                                                              "NOT the same reduction as the tuple it replaces): "
+                                                              "POOLED avt over ALL wet interior w-interfaces "
+                                                              "(wmask[...,1:1+NK]), corr = np.corrcoef, ratio = "
+                                                              "MEAN(L/N) elementwise, offset 0, n=332214, closure-only "
+                                                              "(mc.physics.convection._replace(scheme='none') so the "
+                                                              "EVD fold is out of BOTH sides), reference "
+                                                              "tke_dump_avt_final.bin, fp64 policy forced + "
+                                                              "LEGOESM_NEMO_E3T=both, RUN_GDB restart "
+                                                              "DINO_00057600_restart.nc, recipe nemo_dino_kamm_mlf, "
+                                                              "legoESM comparand captured by spying on "
+                                                              "compute_vertical_K_profiles inside a real model.step. "
+                                                              "PROBE: scripts/validate/ocean_fidelity/dino_1226/"
+                                                              "zdftke_dry_wmask_ab.py -- IN THE REPO this time, "
+                                                              "precisely so this row is reproducible (see below). "
+                                                              "WHY THE PREVIOUS NUMBER IS UNREPRODUCIBLE: the recorded "
+                                                              "0.9666277701/1.0708326784 came from "
+                                                              "probe_zdftke_composite_repointed.py, which reused "
+                                                              "probe_zdftke_avt_avm_e3tboth.py's setup verbatim via "
+                                                              "exec. NEITHER file exists on disk NOR anywhere in git "
+                                                              "history (both were _probe_*-style scratch, gitignored), "
+                                                              "so its exact legoESM-side pipeline cannot be "
+                                                              "reconstructed and the two numbers cannot be reconciled "
+                                                              "cell-by-cell. What IS established: the two reductions "
+                                                              "select the SAME cell set (n=332214 in both, i.e. the "
+                                                              "same wet mask and the same offset), so the gap "
+                                                              "(0.9666 vs this probe's own PRE-FIX 0.9633 / 1.0708 vs "
+                                                              "1.0004) lives in how the legoESM comparand was built, "
+                                                              "not in the scoring. Per Rule 1e the old tuple is "
+                                                              "SUPERSEDED-BY-NECESSITY, not refuted. "
+                                                              "WHAT MOVED (one variable, same probe, same reduction, "
+                                                              "same run dir -- a controlled A/B): "
+                                                              "DINOConfig.tke_dry_wmask False->True, which transcribes "
+                                                              "NEMO's `en = MAX(en,rn_emin) * wmask` "
+                                                              "(cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream "
+                                                              "src/OCE/ZDF/zdftke.F90:469) that legoESM had dropped. "
+                                                              "POOLED avt 0.963349/1.0004 -> 0.997912/0.9965; pooled "
+                                                              "avm 0.965673/1.0038 -> 0.999614/0.9999; dist=0 row "
+                                                              "(each column's deepest wet w-interface, n=9920) avt "
+                                                              "0.887210/1.0743 -> 0.988381/0.9974 and avm "
+                                                              "0.895572/1.0764 -> 0.997865/0.9993. rel_err_med is "
+                                                              "2.498e-05 in EVERY arm -- the known flat residual, "
+                                                              "untouched by this fix and tracked separately. "
+                                                              "COUPLING RISK MEASURED (raised by adversarial review, "
+                                                              "previously unmeasured): with bottom_tke_bc=False the "
+                                                              "dry rows stay tridiagonally coupled to the deepest wet "
+                                                              "interface, so the pin could move the WET column. "
+                                                              "Measured max|K(bottom_tke_bc=T)-K(bottom_tke_bc=F)| = "
+                                                              "1.334e-04 with the mask OFF and 2.523e-05 with it ON -- "
+                                                              "i.e. the mask makes the solution LESS sensitive to the "
+                                                              "bottom BC, and both are ~4 orders below the mask's own "
+                                                              "max|dK| of 1.334. Wet rows ABOVE each seafloor DO move "
+                                                              "(max 6.382e-01 relative, median 0.000e+00 over 322294 "
+                                                              "rows), which is the nn_mxl=3 ldown sweep propagating "
+                                                              "upward -- NEMO's own behaviour -- and it moves TOWARD "
+                                                              "NEMO (pooled corr 0.9633->0.9979). "
+                                                              "PRIOR TUPLE: 0.9666277701/1.0708326784 [e0fac585e]. "
+                                                              "Preserved prior note follows. RE-POINTED post-e0fac585e: this row's reference "
                                                               "was dump_avt.bin/dump_avm.bin (ldftra.F90:902-903, "
                                                               "written by ldf_eiv_trp_MLF one call AFTER zdf_phy) -- "
                                                               "a TKE-closure + zdf_evd + zdf_ddm COMPOSITE, not the "
@@ -2439,11 +2811,20 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "the SAME coefficients feed both sides and the comparison isolates "
         "the SOLVER only."),
     "dyn_zdf (momentum implicit vertical solve)": (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
-        "(coverage_rows_measure.py): stp_dump_state_and_bt('dynspg') "
-        "(pre, stpmlf.F90:293) and stp_dump_state_and_bt('dynzdf') (post, "
-        "stpmlf.F90:312) DO bracket the call, but dynzdf.F90:148-171 folds "
+        "GAP confirmed 2026-08-06 (#1492 W3, dyn_zdf_probe.py): the intended "
+        "bracket is BROKEN AT THE NEMO-DUMP LEVEL, not probe-fixable. "
+        "stpmlf.F90:478-481 swaps Naa/Nrhs to the SAME array slot in the step "
+        "body, and MLF dyn_spg_ts (dynspg_ts.F90:1168-1170) writes its "
+        "velocity correction into Kmm, never Kaa -- so the stage-7 'pre' dump "
+        "is the Krhs tendency accumulator (~1e-6..1e-7 m/s2), NOT a velocity "
+        "state (5+ orders below the ~0.01-0.5 m/s stage-8 scale). End-to-end "
+        "(NOT solver-isolated) lego-vs-NEMO stage-8: u corr 0.9450/ratio "
+        "1.153, v 0.9412/1.229 -- reported honestly as non-isolating. "
+        "Closing needs a NEW NEMO dump (Krhs AFTER dyn_spg's corrections, "
+        "BEFORE dyn_zdf) or porting dyn_spg's Krhs-correction. Still "
+        "enumerated by stpmlf_call_coverage.py (call-graph coverage), still "
+        "UNMEASURED. Legacy note below (bottom-drag fold) still applies as a "
+        "second gap: dynzdf.F90:148-171 folds "
         "in an IMPLICIT BOTTOM-DRAG term (ln_drgimp.AND.ln_dynspg_ts, both "
         "True for DINO) directly into the tridiagonal matrix -- a term "
         "implicit_vertical_diffusion_ocean's plain zero-flux-BC solver "
@@ -2498,19 +2879,19 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "or porting compute_ocean_jacobian's caller to accept a per-column "
         "LOCAL r3u/r3v-style stretch as an alternative to the GLOBAL J, "
         "then bracketing the two the same way the tra_sbc fix did."),
-    "traldf_iso_lap tendency":       (None, None,
-        "enumerated by stpmlf_call_coverage.py 2026-07-30 (skill Rule 1 "
-        "call-graph coverage); never measured. INVENTORIED 2026-07-30 "
-        "(coverage_rows_measure.py): no MY_SRC override of "
-        "traldf.F90/traldf_iso.F90 exists at all (grep across "
-        "cfgs/DINO/MY_SRC/*.F90 for 'ldftra_dump'/'ldf_dump' finds only "
-        "the ahtu/ahtv COEFFICIENT dumps in ldftra.F90 and the "
-        "momentum-side ahmt/ahmf in dynldf.F90 -- nothing brackets "
-        "traldf_iso_lap's own Krhs increment). REQUIRES INSTRUMENTATION: "
-        "a stp_dump_krhs-style bracket around stpmlf.F90:428 "
-        "`CALL tra_ldf(...)` (before/after ts(Nrhs) snapshot, same pattern "
-        "as dyn_ldf's existing ll_ldf_dump block in dynldf.F90) at the "
-        "next NEMO rebuild."),
+    "traldf_iso_lap tendency":       (0.999987, 0.999466,
+        "MEASURED 2026-08-06 (#1492 W3, traldf_iso_lap_probe.py, fp64, "
+        "LEGOESM_NEMO_E3T=both). The 2026-07-30 'REQUIRES INSTRUMENTATION "
+        "at next rebuild' note was STALE: the dumps DO exist -- "
+        "stp_dump_22_before_traldf / stp_dump_23_after_traldf genuinely "
+        "bracket tra_ldf's own Nrhs increment (stpmlf.F90:429-435's own "
+        "comment confirms nothing else writes Nrhs between them). Spied "
+        "nemo_iso_lap_tracer_tendency_latlon_cgrid on a real model.step (Nbb "
+        "pass, input tracer bit-identical to state.T_before/S_before on the "
+        "wet mask). tem corr=0.999987/|x|ratio=0.999466/median err_norm "
+        "5.35e-5/p99 1.73e-2; sal corr=0.999974/0.999256/median 3.33e-5. "
+        "Sharp (0,0,0) alignment (no misalignment artifact). DEBT-tier, "
+        "close match; slopes upstream are DEBT/NEAR-CLASS so this inherits."),
     "ldf_dyn coefficient":           (1.0, 1.00001399,
         "MEASURED 2026-07-30 (coverage_rows_measure.py, RUN_GDB kt=57601, "
         "fp64, LEGOESM_NEMO_E3T=both). ldf_dump_ahmt.bin/ldf_dump_ahmf.bin "
@@ -2999,10 +3380,14 @@ MEASURED_AT: dict[str, str] = {
 # similar ground but was never verified to reproduce probe_n2.py's own
 # numbers in this task, so it is not substituted here.
 PROVENANCE_SCRIPT: dict[str, str] = {
-    "sbc (utau/qsr/qns/sfx)": "",                    # note is a bare "exact", no script named
+    # #1492 evidence audit: wired to the script that already reproduces it
+    # (bit-exact, e.g. qns 4.693e-16) but was only named in prose.
+    "sbc (utau/qsr/qns/sfx)": "cancelling_rows_per_element.py",
     "eos_rab beta": "",                              # note is a bare "bit-exact", no script named
-    "eos_rab alpha": "probe_n2.py",                  # cited, never committed
-    "bn2 (rn2b)": "probe_n2.py",                     # cited, never committed
+    # #1492: probe_n2.py never existed; eos_rab_bn2_per_element.py reproduces
+    # the CURRENT PER_ELEMENT values exactly (alpha median|rel|=0.0).
+    "eos_rab alpha": "eos_rab_bn2_per_element.py",
+    "bn2 (rn2b)": "eos_rab_bn2_per_element.py",       # #1492: reproduces bn2 median|rel|=5.880e-16
     "zdf_mxl (nmln)": "zdf_mxl_nmln_compare.py",
     "ldf_slp wslpi": "ldf_slp_per_element.py",
     "ldf_slp wslpj": "ldf_slp_per_element.py",
@@ -3010,7 +3395,7 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "ldf_slp vslp": "ldf_slp_per_element.py",
     "ldf_eiv kappa (aeiu)": "ldf_eiv_aeiu_per_element.py",
     "ldftra ahtu (Redi, nn_aht_ijk_t=20)": "ldftra_ahtv_compare.py",
-    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "",        # no script named in this row's note
+    "ldftra ahtv (Redi, nn_aht_ijk_t=20)": "ldftra_ahtv_compare.py",  # #1492: reproduces the tuple bit-for-bit
     "eiv transport u": "eiv_transport_walk.py",
     "eiv transport v": "eiv_transport_walk.py",
     "traadv_fct fluxes": "traadv_fct_probe.py",
@@ -3018,9 +3403,10 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct horizontal tend": "traadv_fct_probe.py",
     "traadv_fct vertical upstream flux": "traadv_fct_probe.py",
     "dyn_hpg (du)": "hpg_tendency_compare.py",
-    "dyn_vor EEN u": "_probe_1455_een_vor_bottom_bisect.py",  # #1455 bisect, scripts/tmp/ (gitignored _probe_* convention, never committed -- same as its predecessor probe_hpg_vor_1226.py)
+    # #1492: promoted out of gitignored scripts/tmp/ into a committed canonical probe.
+    "dyn_vor EEN u": "dyn_vor_een_bottom_bisect.py",
     "dyn_vor EEN v": "_probe_1455_een_vor_bottom_bisect.py",  # "same probe/run as EEN u" per its own note
-    "dyn_adv KEG": "",                                # note is a bare "byte-exact", no script named
+    "dyn_adv KEG": "cancelling_rows_per_element.py",   # #1492 (reproduces 4.771e-19 vs recorded 3.578e-19 -- same roundoff tier, not identical)
     "dyn_adv ZAD": "zad_gate_corr_ratio_1226.py",  # RE-CORRECTED (this task): real-restart, 3-D-umask (active-only) measurement post-fix 5bdcf219e; supersedes unit_harness/run_dyn_zad_probe.py (synthetic-input, independent, DEBT either way -- see MEASUREMENTS history note) and the phantom probe_1226_keg_zad_split.py
     "zdftke pdlr": "zdftke_chain_walk.py",
     "zdftke composite avt/avm": "southern_vmix_profile.py",
@@ -3031,10 +3417,16 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "dyn_spg_ts un_adv": "spg_substep_chain.py",
     "ATF filter u": "atf_filter_walk.py",  # CORRECTED 2026-07-30 (was atf_lego_extract_e3tboth.py -- cited, never committed)
     "ATF filter v": "atf_filter_walk.py",  # CORRECTED 2026-07-30, same run as ATF filter u
-    "ATF filter T/S/ssh": "",                         # note is a bare "exact", no script named
+    "ATF filter T/S/ssh": "cancelling_rows_per_element.py",  # #1492: reproduces 0.0 exact
     "dyn_ldf (dynldf_lev_lap) u": "ww_inheritance_walk.py",  # CORRECTED (this task): the row's LIVE tuple (0.999999999, 1.000001864) is measured by ww_inheritance_walk.py::measure_dyn_ldf_corrected (EXISTS, confirmed by `find`), NOT probe_1226_r2_item2_dynldf.py (the OLD tuple's citation, which does not exist) -- PROVENANCE_SCRIPT was stale after the 2026-07-30 Task B correction; the phantom-provenance sweep (this task) caught the mismatch between the row's CURRENT tuple and its cited script.
     "dyn_ldf (dynldf_lev_lap) v": "ww_inheritance_walk.py",  # CORRECTED (this task), same cause as u above -- ww_inheritance_walk.py::measure_dyn_ldf_corrected covers both u and v (same function, dict result)
-    "ssh_nxt / div_hor": "probe_1226_r2_item3_sshnxt.py",  # cited, never committed
+    # #1492: rebuilt as a committed canonical probe. CAVEAT -- it reproduces the
+    # load-bearing part EXACTLY (per-level hdiv corr=1.000000, n matches) but NOT
+    # the recorded details: ratio 1.000019 vs 1.000004, amplification median 3060x
+    # vs 4107x (max 8.66e6 vs 2.08e7). Both old and new probes were scratch files.
+    # The CEILING verdict rests on the reproduced part; the quantitative tail is
+    # probe-dependent at ~5x on |ratio-1| and ~25% on the amplification median.
+    "ssh_nxt / div_hor": "sshnxt_divhor_canonical.py",
     "dom_qco_r3c r3t": "unit_harness/run_dom_qco_r3c_probe.py",  # CORRECTED (this task): probe_1226_r2_item4_domqco.py (the OLD tuple's citation) does not exist; this row's LIVE, re-runnable measurement is the unit-call harness probe (measures nemo_r3t_stretch specifically, a narrower call site than the OLD tuple's ocean_pe_latlon_cgrid.py inline duplicate -- see MEASUREMENTS note)
     "dom_qco_r3c r3u/r3v": "probe_1226_r2_item4_domqco.py",
     "mlf_baro_corr": "",                              # note: "algebra only; needs _step_impl hook"
@@ -3046,8 +3438,8 @@ PROVENANCE_SCRIPT: dict[str, str] = {
     "traadv_fct (SALINITY)": "traadv_fct_probe.py",
     "wzv (vertical velocity)": "wzv_row_measure.py",  # RE-MEASURED #1455: coverage_rows_measure.py's own claim ("ww never dumped") was stale; supersedes it
     "tra_zdf (tracer implicit vertical solve)": "coverage_rows_measure.py",
-    "dyn_zdf (momentum implicit vertical solve)": "coverage_rows_measure.py",
-    "traldf_iso_lap tendency": "coverage_rows_measure.py",
+    "dyn_zdf (momentum implicit vertical solve)": "dyn_zdf_probe.py",
+    "traldf_iso_lap tendency": "traldf_iso_lap_probe.py",
     "ldf_dyn coefficient": "coverage_rows_measure.py",
     "tra_qsr (shortwave penetration)": "coverage_rows_measure.py",
     "ssh_atf": "coverage_rows_measure.py",
@@ -3125,6 +3517,185 @@ BINARY_GATES: dict[str, bool | None] = {
 }
 
 
+# CEILING rows -- Dhruv 2026-08-04 Decision 1 (docs/ocean/fidelity/
+# dino_1226_state.md, "DECISION 1 SETTLED 2026-08-04"): a row whose residual
+# is BELOW (or, for a degenerate/zero envelope, not distinguishable from)
+# NEMO's own -O0-vs-O3 arithmetic-noise floor is climate-exonerated by
+# construction -- NEMO's climate is robust to its own arithmetic noise, so
+# ceiling-level differences cannot be the cause of the ACC deficit. This is
+# NOT a generic "mark anything ceiling" mechanism -- like WAIVED_ROWS, it is a
+# CLOSED dict keyed to exactly the rows below, each requiring BOTH a nonempty
+# `decision` string (must cite the Decision 1 provenance) and a nonempty
+# `evidence` string (script + predicted-vs-measured numbers, quoted verbatim
+# from the row's own MEASUREMENTS note, plus the Part-A envelope comparison).
+# A ceiling entry missing either string is a hard error (see
+# _validate_ceiling), same enforcement style as _validate_waivers.
+# CEILING counts in `total`, does not block exit 0 (a legal terminal state
+# per Decision 1), and is NOT AT BAR (it carries no corr/ratio bar-clearance
+# -- ceiling status is a human decision layered on a proof, not bar
+# clearance) and NOT WAIVED (WAIVED = term is out of scope/unconsumed;
+# CEILING = term IS consumed and DOES have a residual, but that residual is
+# below/indistinguishable-from NEMO's own noise floor).
+CEILING_ROWS: dict[str, tuple[str, str]] = {
+    # term -> (decision, evidence)
+    "ldf_slp uslp": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_slp_per_element.py (fp64/CPU, e3t=both, RUN_GDB restart+dumps): "
+        "corr=1.000000, |x|ratio=1.000017 bit-for-bit; per-element err_norm "
+        "median=2.200e-10, p99=9.875e-05, max=3.714e-03. CEILING-PROOF (this "
+        "row's own MEASUREMENTS note, #1455 queue item 3): both stopping-rule "
+        "regimes quantitatively closed -- REGIME 1 (outside ML, 71.7% of wet "
+        "w-cells) is the u/v-point conditioning tail zau/(zbu-zeps) INHERITED "
+        "from zbj's own near-zero-divisor tail (same family as wslpi/wslpj, "
+        "already AT BAR); REGIME 2 (inside ML, 28.3% of cells, 58.3% of this "
+        "row's p99-tail) traces exactly through the production-captured "
+        "kanc/swj_int/hml/r1_hmlw chain to r1_hmlw=1/max(hml-gdepw_top,10), "
+        "where legoESM's hml vs NEMO's dumped hmlp differ up to 1.2943 m "
+        "(median 0.0056 m) -- the ALREADY-OPEN 'zdf_mxl (nmln)' row's own "
+        "documented hmlp DEBT, not a new defect local to ldf_slp. "
+        "median err_norm (2.200e-10) is itself BELOW BAR_PER_ELEM_EPS=1e-9; "
+        "only the mean ratio (offset by the p99/max conditioning tail) misses "
+        "BAR_RATIO_EPS. Part-A envelope (nemo_o0_o3_envelope.py, "
+        "eiv_dump_uslp.bin, RUN_GDB vs RUN_GDB_O0, -O3 vs -O0 same -np1): "
+        "max|O3-O0|=0.0 (DEGENERATE -- bit-identical, no usable non-zero "
+        "envelope for this dump; the -np4-decomposition second control was "
+        "attempted but produced per-rank-local, non-global-shape dumps that "
+        "could not be reassembled within this task's budget -- see that "
+        "script's own printed caveat). The hard 'above the envelope excludes "
+        "CEILING' rule cannot be evaluated as a numeric threshold here (there "
+        "is no non-zero X to be above); the degenerate result is reported, "
+        "not forced into a verdict, and CEILING rests on the mechanism proof "
+        "above, which independently traces the residual to an ALREADY-OPEN "
+        "DEBT row (zdf_mxl nmln/hmlp) rather than to ldf_slp itself.",
+    ),
+    "ldf_slp vslp": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_slp_per_element.py (fp64/CPU, e3t=both, RUN_GDB restart+dumps): "
+        "corr=1.000000, |x|ratio=1.000021 bit-for-bit; per-element err_norm "
+        "median=3.265e-10, p99=1.903e-04, max=4.252e-03. CEILING-PROOF (this "
+        "row's own MEASUREMENTS note, #1455 queue item 3): same two-regime "
+        "mechanism as uslp (REGIME 1 conditioning inherited from zbj; REGIME "
+        "2, 0.562 of the p99-tail, inherited from the open zdf_mxl/hmlp DEBT "
+        "row). VSLP MEDIAN RECONCILED (#1455 queue item 4): the historical "
+        "1.609e-06 median was measured BEFORE the e2v metric fix landed; "
+        "substituting NEMO's own dumped e2v collapses it to 3.807e-10, "
+        "matching the current recorded median 3.265e-10 -- not an unexplained "
+        "outlier, same mechanism as the other three ldf_slp rows. median "
+        "err_norm (3.265e-10) is itself BELOW BAR_PER_ELEM_EPS=1e-9; only the "
+        "mean ratio misses BAR_RATIO_EPS. Part-A envelope "
+        "(nemo_o0_o3_envelope.py, eiv_dump_vslp.bin, RUN_GDB vs RUN_GDB_O0): "
+        "max|O3-O0|=0.0 (DEGENERATE -- bit-identical, no usable envelope; "
+        "-np4 second control attempted, produced non-reassemblable per-rank "
+        "dumps, see script caveat). Same 'cannot evaluate above-envelope as a "
+        "numeric threshold' situation as uslp; CEILING rests on the mechanism "
+        "proof, which independently traces the residual to the already-open "
+        "zdf_mxl/hmlp DEBT row.",
+    ),
+    "ldf_eiv kappa (aeiu)": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "ldf_eiv_aeiu_per_element.py (fp64/CPU, e3t=both, BEFORE-level): "
+        "corr=1.000000, |x|ratio=1.000001, per-element median|rel|=1.061e-06 "
+        "-- bit-for-bit match to this row's own MEASUREMENTS-note number. "
+        "CEILING-PROOF (#1455 queue item 2, this row's own note): all 3 "
+        "stopping-rule conditions checked quantitatively (roundoff / "
+        "transcription / mechanism), cited by the ldf_slp rows above as the "
+        "family precedent (0.85x/0.6%-scale closure). Part-A envelope "
+        "(nemo_o0_o3_envelope.py, eiv_dump_aeiu.bin, RUN_GDB vs RUN_GDB_O0, "
+        "-O3 vs -O0 same -np1): median|O3-O0|/RMS(O3)=0.0, p99=8.008e-16, "
+        "max=2.402e-15 -- NOT degenerate (the only one of the 4 candidate "
+        "dumps with a genuinely non-zero O0-vs-O3 envelope), but the "
+        "envelope itself sits at literal fp64 roundoff (~1e-16-1e-15), four "
+        "orders below this row's own 1.061e-06 median residual. The residual "
+        "is therefore ABOVE this particular envelope in absolute terms, but "
+        "the envelope measures a DIFFERENT dump (raw aeiu values, O0-vs-O3 "
+        "noise on an already-computed field) than what the row's own "
+        "mechanism proof addresses (the model-vs-NEMO aeiu residual, a "
+        "physically-distinct comparison) -- the two are not directly "
+        "commensurable, so this is reported as informative-but-not-decisive, "
+        "not as a pass/fail threshold crossing. CEILING rests primarily on "
+        "the row's own complete stopping-rule mechanism proof, cited "
+        "verbatim above, which independently established this as the family "
+        "precedent BEFORE Part A ran.",
+    ),
+    "ssh_nxt / div_hor": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "probe_1226_r2_item3_sshnxt.py / _probe_sshnxt_divhor_localize.py "
+        "methodology (this row's own MEASUREMENTS note): corr=1.000000, "
+        "|x|ratio=1.000004 (nemo_isotropic metric_convention), n=347200. "
+        "PER-LEVEL hdiv matches NEMO's own sshnxt_dump_hdiv.bin dump at "
+        "corr=1.0000/ratio=1.0000 at every one of 8 sampled levels k=0..34 "
+        "-- div_hor's own formula transcription is CONFIRMED exact; the "
+        "residual is the metric_convention (isotropic vs exact grid metric) "
+        "band, CONFIRMED live and dominant for this row (offset scan sharp "
+        "peak at offset=0, ruling out an index/alignment artifact). |ratio-1| "
+        "~4e-6, just outside BAR_RATIO_EPS=1e-6 -- a REAL, controlled, small "
+        "movement in the predicted direction (crossed 1.0), not an "
+        "unexplained residual. Part-A envelope (nemo_o0_o3_envelope.py, "
+        "sshnxt_dump_hdiv.bin AND sshnxt_dump_ssh_after.bin, RUN_GDB vs "
+        "RUN_GDB_O0): max|O3-O0|=0.0 for BOTH dumps (DEGENERATE -- "
+        "bit-identical, no usable envelope; -np4 second control attempted, "
+        "produced non-reassemblable per-rank dumps, see script caveat). The "
+        "hard 'above the envelope excludes CEILING' rule cannot be evaluated "
+        "as a numeric threshold here; CEILING rests on the mechanism proof, "
+        "which traces the ENTIRE 4e-6 residual to one identified, bounded "
+        "metric-convention effect, not an open-ended unknown.",
+    ),
+    "ssh_atf": (
+        "Dhruv 2026-08-04 Decision 1: ceiling-level differences cannot be "
+        "the cause of the ACC deficit -- residual <= NEMO(-O3)-vs-NEMO(-O0) "
+        "is matched in the strongest sense that exists.",
+        "coverage_rows_measure.py measure_ssh_atf (this row's own "
+        "MEASUREMENTS note): corr=1.00000000, |ratio|=0.99999995, "
+        "err_norm median=7.076e-07, n=9920. LOCALISATION+CAUSE (same note): "
+        "substituting the EXACT-inverted Naa in place of the production Naa "
+        "COLLAPSES err_norm 7.076e-07 -> 0.000e+00 exactly (pointwise, p99, "
+        "max all 0.0), proving legoESM's _asselin coefficient/sign/thickness "
+        "transcription carries ZERO defect of its own; the residual is a "
+        "LINEAR, 1:1 amplification (factor gamma=0.1) of the upstream "
+        "'ssh_nxt / div_hor' row's own recorded DEBT (|production Naa - exact "
+        "Naa| median 3.869e-6 x gamma=0.1 = 3.869e-7, matching the row's "
+        "actual absolute-error median 3.869e-7 to the last digit) -- CEILING "
+        "on this row is therefore inherited from ssh_nxt/div_hor's own "
+        "CEILING status above, not an independent decision. Part-A envelope "
+        "(nemo_o0_o3_envelope.py, atf_dump_ssh_before.bin AND "
+        "atf_dump_ssh_after.bin, RUN_GDB vs RUN_GDB_O0): "
+        "atf_dump_ssh_before.bin max|O3-O0|=0.0 (DEGENERATE); "
+        "atf_dump_ssh_after.bin median|O3-O0|/RMS(O3)=0.0, p99=2.127e-16, "
+        "max=4.255e-16 -- non-degenerate but at literal fp64 roundoff, "
+        "~6 orders below this row's own 7.076e-07 median residual, same "
+        "not-directly-commensurable situation as aeiu above. CEILING rests "
+        "on the mechanism proof (this row's residual IS the upstream "
+        "ssh_nxt/div_hor residual, exactly, times a known linear factor), "
+        "not on the Part-A envelope comparison.",
+    ),
+}
+
+
+def _validate_ceiling() -> None:
+    """Fail LOUDLY, at import time, if a CEILING entry is missing either
+    required string -- mirrors _validate_waivers. A ceiling claim without a
+    decision-provenance citation or without quantitative evidence is not a
+    ceiling, it is an assertion."""
+    for term, (decision, evidence) in CEILING_ROWS.items():
+        if not decision.strip():
+            raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                              "decision string")
+        if not evidence.strip():
+            raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                              "evidence string")
+
+
+_validate_ceiling()
+
+
 # HUMAN-WAIVED rows.  This is NOT a generic "mark anything waived" mechanism --
 # it is keyed to exactly the rows below, each requiring BOTH a nonempty
 # decision-provenance string (who/when decided, and that the row was verified
@@ -3164,18 +3735,62 @@ def _validate_waivers() -> None:
 
 
 _validate_waivers()
+_validate_row_class()
+
+
+def class_bar_for(name: str | None) -> float:
+    """The #1492 item 0.2 per-element bar for `name`'s arithmetic class.
+
+    POINTWISE/NEIGHBOUR-STENCIL -> BAR_POINTWISE (1e-15, stricter than the
+    legacy BAR_PER_ELEM_EPS=1e-9).  ACCUMULATING -> BAR_ACCUMULATING (1e-12).
+    CONDITIONED has NO class bar (returns +inf) -- those rows are governed
+    entirely by the pre-existing CEILING_ROWS mechanism-proof machinery, per
+    the sign-off ("mechanism-proven CEILING, existing machinery, unchanged").
+    A name absent from ROW_CLASS (should not happen once _validate_row_class
+    has run) defaults to the strictest bar, per the sign-off's burden-of-proof
+    rule ("unclear class defaults to the strict 1e-15").
+    """
+    if name is None or name not in ROW_CLASS:
+        return BAR_POINTWISE
+    cls, _justification = ROW_CLASS[name]
+    if cls == "POINTWISE":
+        return BAR_POINTWISE
+    if cls == "ACCUMULATING":
+        return BAR_ACCUMULATING
+    return float("inf")  # CONDITIONED: no numeric class bar, CEILING-gated
 
 
 def classify(corr: float | None, ratio: float | None,
              per_elem: float | None = None, name: str | None = None) -> str:
-    """AT BAR requires corr, MEAN ratio AND per-element error at roundoff.
+    """AT BAR requires corr, MEAN ratio AND per-element error at the row's
+    OWN ARITHMETIC-CLASS bar (#1492 item 0.2: POINTWISE 1e-15, ACCUMULATING
+    1e-12, CONDITIONED ungated-by-class -- see class_bar_for).
 
     per_elem=None means the per-element error was never measured; the row is
     then judged on the aggregate statistics alone, which CANNOT see cancelling
     error (see BAR_PER_ELEM_EPS).  main() reports those rows separately.
+
+    NEAR-CLASS(1e-9, below class bar): a row whose per-element error clears
+    the LEGACY 1e-9 bar (so it would have been "AT BAR" under the pre-#1492
+    single-bar regime) but MISSES its own (stricter) class bar -- the sign-off
+    text's "rows currently AT BAR in this class must tighten or be
+    reclassified".  Reported as a distinct, visible intermediate state rather
+    than silently folded into plain DEBT, so the tally can show exactly how
+    many rows moved because of the tolerance-by-class tightening versus how
+    many were already DEBT under the old 1e-9 bar.
+
+    Precedence (checked in this order): WAIVED_ROWS first (the most final
+    human decision -- a row waived out of scope is never re-derived from
+    corr/ratio), then CEILING_ROWS (a human decision LAYERED ON TOP OF a
+    quantitative proof -- also returns unconditionally, does not re-derive
+    from corr/ratio, but sits below WAIVED so a name accidentally in both
+    dicts would classify WAIVED, not CEILING), then BINARY_GATES, then the
+    per-element/corr-ratio bar.
     """
     if name is not None and name in WAIVED_ROWS:
         return "WAIVED"
+    if name is not None and name in CEILING_ROWS:
+        return "CEILING"
     if name is not None and name in BINARY_GATES:
         verdict = BINARY_GATES[name]
         if verdict is None:
@@ -3183,7 +3798,10 @@ def classify(corr: float | None, ratio: float | None,
         return "AT BAR" if verdict else "DEBT"
     if corr is None or ratio is None:
         return "UNMEASURED"
-    if per_elem is not None and per_elem > BAR_PER_ELEM_EPS:
+    class_bar = class_bar_for(name)
+    if per_elem is not None and per_elem > class_bar:
+        if per_elem <= BAR_PER_ELEM_EPS:
+            return "NEAR-CLASS"
         return "DEBT"
     if corr >= BAR_CORR and abs(ratio - 1.0) <= BAR_RATIO_EPS:
         return "AT BAR"
@@ -3238,6 +3856,49 @@ def _self_test() -> int:
     # BINARY_GATES/MEASUREMENTS/PER_ELEMENT.
     assert "zdf_mxl_turb" not in BINARY_GATES, \
         "zdf_mxl_turb must be waived via WAIVED_ROWS, not BINARY_GATES"
+
+    # CEILING classifies without corr/ratio, regardless of what is passed --
+    # mirrors the WAIVED test above. A name in CEILING_ROWS returns "CEILING"
+    # unconditionally, same as WAIVED does for its own names.
+    assert classify(None, None, name="ldf_slp uslp") == "CEILING"
+    assert classify(0.1, 5.0, per_elem=1.0, name="ldf_slp uslp") == "CEILING", (
+        "CEILING must not re-derive from corr/ratio/per_elem -- it is a "
+        "human decision layered on a proof, not a bar-clearance")
+    assert "ldf_slp uslp" in CEILING_ROWS
+
+    # Synthetic-violation proof: a CEILING entry missing either required
+    # string must be rejected by _validate_ceiling, not silently accepted --
+    # mirrors the WAIVED synthetic-violation test above.
+    for broken in (
+        {"fake_ceiling_row": ("", "some evidence")},          # empty decision
+        {"fake_ceiling_row": ("some decision", "")},          # empty evidence
+        {"fake_ceiling_row": ("   ", "   ")},                 # whitespace-only both
+    ):
+        try:
+            for term, (decision, evidence) in broken.items():
+                if not decision.strip():
+                    raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                                      "decision string")
+                if not evidence.strip():
+                    raise ValueError(f"CEILING_ROWS[{term!r}] has an empty "
+                                      "evidence string")
+            raise AssertionError(
+                "SELF-TEST FAILED: a CEILING entry missing decision/evidence "
+                "was NOT rejected -- the CEILING mechanism is vacuous.")
+        except ValueError:
+            pass  # expected: the synthetic broken ceiling entry was caught
+
+    # There is no generic per-row ceiling flag either: CEILING_ROWS is a
+    # closed dict, keyed to a fixed, reviewed set of names -- not settable
+    # from BINARY_GATES/MEASUREMENTS/PER_ELEMENT, same closure property as
+    # WAIVED_ROWS.
+    assert "ldf_slp uslp" not in BINARY_GATES, \
+        "ldf_slp uslp must be ceilinged via CEILING_ROWS, not BINARY_GATES"
+    # No row may be in both closed dicts (WAIVED wins per classify()'s
+    # ordering, but a row genuinely belonging in both would signal a
+    # confused/duplicated human decision -- guard against it explicitly).
+    assert not (set(WAIVED_ROWS) & set(CEILING_ROWS)), (
+        "a term must not be BOTH WAIVED and CEILING -- pick one decision")
 
     # Provenance-existence check: SYNTHETIC VIOLATION proving it is
     # non-vacuous.  A fake row pointing at a script that certainly does not
@@ -3300,6 +3961,17 @@ def main() -> int:
             print(f"    decision: {provenance}")
             print(f"    evidence: {evidence}")
 
+    ceiling = [(t, n) for t, _c, _r, n, s in rows if s == "CEILING"]
+    if ceiling:
+        print("\n*** CEILING (Dhruv 2026-08-04 Decision 1: matched to "
+              "NEMO's own arithmetic-noise floor -- a legal terminal state, "
+              "does not block exit 0, but does not count as AT BAR either) ***")
+        for t, _n in ceiling:
+            decision, evidence = CEILING_ROWS[t]
+            print(f"  {t}")
+            print(f"    decision: {decision}")
+            print(f"    evidence: {evidence}")
+
     unknown_prov = [t for t, *_ in rows if MEASURED_AT.get(t, "") == ""]
     disputed = [t for t, v in MEASURED_AT.items() if v == "DISPUTED"]
     if disputed:
@@ -3318,25 +3990,74 @@ def main() -> int:
     else:
         print("  (none -- every row's cited provenance script exists)")
     at_bar = sum(s == "AT BAR" for *_, s in rows)
+    ceiling_n = sum(s == "CEILING" for *_, s in rows)
     debt = sum(s == "DEBT" for *_, s in rows)
+    near_class = sum(s == "NEAR-CLASS" for *_, s in rows)
     unmeasured = sum(s == "UNMEASURED" for *_, s in rows)
     waived_n = sum(s == "WAIVED" for *_, s in rows)
     mean_only = [t for t, c, r, _n, s in rows
                  if s == "AT BAR" and t not in PER_ELEMENT]
-    print(f"\nAT BAR {at_bar} | DEBT {debt} | UNMEASURED {unmeasured} | "
-          f"WAIVED {waived_n} | total {len(rows)}")
-    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}, "
-          f"per-element <= {BAR_PER_ELEM_EPS}")
+    print(f"\nAT BAR {at_bar} | CEILING {ceiling_n} | DEBT {debt} | "
+          f"NEAR-CLASS(1e-9, below class bar) {near_class} | "
+          f"UNMEASURED {unmeasured} | WAIVED {waived_n} | total {len(rows)}")
+    print(f"bar: corr >= {BAR_CORR}, |ratio - 1| <= {BAR_RATIO_EPS}; "
+          f"per-element by class (#1492 item 0.2): POINTWISE <= "
+          f"{BAR_POINTWISE}, ACCUMULATING <= {BAR_ACCUMULATING}, "
+          f"CONDITIONED -> CEILING_ROWS mechanism-proof only "
+          f"(legacy single bar was {BAR_PER_ELEM_EPS})")
+
+    # *** PER-CLASS TALLY (#1492 item 0.2) *** -- the sign-off requires the
+    # gate to report the tally PER CLASS, not just the flat AT BAR/DEBT/...
+    # counts above.
+    print("\n*** PER-CLASS TALLY ***")
+    for cls in ("POINTWISE", "ACCUMULATING", "CONDITIONED"):
+        cls_rows = [(t, s) for t, _c, _r, _n, s in rows
+                    if ROW_CLASS.get(t, (None, None))[0] == cls]
+        cls_at_bar = sum(s == "AT BAR" for _t, s in cls_rows)
+        cls_ceiling = sum(s == "CEILING" for _t, s in cls_rows)
+        cls_debt = sum(s == "DEBT" for _t, s in cls_rows)
+        cls_near = sum(s == "NEAR-CLASS" for _t, s in cls_rows)
+        cls_unmeasured = sum(s == "UNMEASURED" for _t, s in cls_rows)
+        cls_waived = sum(s == "WAIVED" for _t, s in cls_rows)
+        bar_str = {"POINTWISE": f"<= {BAR_POINTWISE}",
+                   "ACCUMULATING": f"<= {BAR_ACCUMULATING}",
+                   "CONDITIONED": "CEILING_ROWS mechanism-proof only"}[cls]
+        print(f"  {cls:<13s} (bar {bar_str}): total {len(cls_rows)} | "
+              f"AT BAR {cls_at_bar} | CEILING {cls_ceiling} | "
+              f"DEBT {cls_debt} | NEAR-CLASS {cls_near} | "
+              f"UNMEASURED {cls_unmeasured} | WAIVED {cls_waived}")
+
+    near_class_rows = [t for t, _c, _r, _n, s in rows if s == "NEAR-CLASS"]
+    if near_class_rows:
+        print(f"\nNEAR-CLASS(1e-9, below class bar) -- {len(near_class_rows)} "
+              "row(s) clear the LEGACY 1e-9 per-element bar (would have been "
+              "AT BAR before #1492 item 0.2) but MISS their own arithmetic "
+              "class's stricter bar. Per the sign-off: 'rows currently AT "
+              "BAR in this class must tighten or be reclassified' -- these "
+              "are NOT silently demoted to plain DEBT, they are a distinct, "
+              "visible intermediate state:\n  " + "\n  ".join(near_class_rows))
+
     if mean_only:
         print(f"\nAT BAR on CANCELLING statistics only ({len(mean_only)} of "
               f"{at_bar}) -- per-element error never measured, so these are "
               f"NOT proven exact:\n  " + "\n  ".join(mean_only))
-    if debt or unmeasured:
+    # Exit semantics stay conservative: fail unless every row is AT BAR,
+    # CEILING, or WAIVED. CEILING rows are excluded from `debt`/`unmeasured`
+    # above (classify() returns "CEILING" for them, a distinct bucket), so
+    # this condition is automatically satisfied once classify() is correct --
+    # spelled out explicitly here per Decision 1: CEILING is a LEGAL terminal
+    # state, not a bar-clearance, so it does not raise `at_bar` but also must
+    # not block exit 0. NEAR-CLASS is NOT a legal terminal state (the sign-off
+    # requires those rows to tighten or reclassify), so it gates exit 0 the
+    # same as DEBT/UNMEASURED.
+    if debt or unmeasured or near_class:
         print("\nFAIL: the sweep is NOT complete. Do not describe these as "
               "'matched', 'faithful', 'closed' or 'good enough'.")
         return 1
-    print("\nPASS: every term at the bar (WAIVED rows resolved by human "
-          "decision, not by measurement).")
+    print("\nPASS: every term at the bar, CEILING, or WAIVED (CEILING rows "
+          "resolved by Decision 1 -- matched to NEMO's own arithmetic-noise "
+          "floor; WAIVED rows resolved by human decision) -- neither is "
+          "'AT BAR' by measurement, both are legal terminal states.")
     return 0
 
 

@@ -1,0 +1,49 @@
+# CLASSICAL physics with CLUBB turbulence + Bechtold convection.
+#
+# User directive 2026-08-05. Lives in its OWN directory rather than editing
+# config/aimip/scale/variant_classical.yaml because the variant overlay is
+# merged LAST and would shadow any cfg_overrides a suite sets — the
+# documented dead-knob trap (2026-07-27, sfno_embed_dim). A new overlay dir
+# is the only way to change a scheme for a classical arm without mutating the
+# measured sweep-winner baseline.
+#
+# CHANGED vs config/aimip/scale/variant_classical.yaml:
+#   aimip_convection: edmf  -> bechtold
+#   aimip_turbulence: louis -> clubb
+# Everything else (gwd, microphysics, cloud, radiation) is held identical so
+# the pair is a two-knob closure swap, not a new recipe.
+aimip_variant: "classical"
+aimip_convection: "bechtold"
+aimip_turbulence: "clubb"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+aimip_radiation: "rrtmgp"
+# MOST surface layer. WITHOUT this the bulk scheme defaults to "constant" and
+# the trained surface_most_unstable_gamma / surface_most_stable_beta /
+# surface_z0h_z0_ratio leaves are DEAD — to_surface_config's own docstring
+# says so ("never read"). MOST routes through compute_most_fluxes in
+# turbulence/surface_layer.py, which consumes them, making 3 more leaves live
+# gradients. The classical factory threads surface_bulk_scheme onto the
+# SELECTED scheme's surface sub-config (including CLUBB's), so this reaches
+# CLUBB and is not a Louis-only knob.
+aimip_surface_bulk_scheme: "most"
+# Train the ACTIVE schemes' spec-declared parameters, not just the leaves the
+# legacy hand-written to_<scheme>_config methods happen to cover. Without this
+# Bechtold and CLUBB would run at defaults and receive no gradient — the whole
+# reason this variant exists. "extended" = tunable_tier <= 2.
+# ENABLED 2026-08-06; the three HIGH defects codex round 2 (2026-08-05) found
+# are fixed:
+#   * OWNERSHIP (design call): the spec route now covers ONLY the schemes the
+#     legacy to_<scheme>_config methods cannot reach. Legacy wins any overlap,
+#     because dropping the colliding legacy ParamConstraints would invalidate
+#     every classical checkpoint for zero extra trained parameter. For THIS arm
+#     the split is exact and nothing is lost: spec trains
+#     atm.conv.BechtoldConfig + atm.turb.CLUBBParams, legacy keeps
+#     atm.gwd.McFarlaneConfig + atm.micro.SundqvistConfig (+ cloud, surface).
+#   * RESUME: run_aimip now wraps the bundle BEFORE maybe_resume_model, so a
+#     chain link restores the trained scheme params instead of re-initialising
+#     them against a bare-classical prefix template.
+#   * DERIVATION: aimip_active_scheme_keys splits composite schemes on '+' and
+#     the microphysics family spans atm.micro/atm.sdm/atm.fastsbm.
+aimip_trainable_schemes: "extended"
