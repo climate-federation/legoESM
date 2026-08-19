@@ -82,10 +82,41 @@ def _get(lp, name: str, fallback):
     either ``LandSurfaceParams`` (for SimpleSEB; full field set) or
     ``CanopyLandParams`` (for TwoLeafCanopy; disjoint field set).  Missing
     fields fall back to the caller-supplied default rather than raising.
+
+    A field that EXISTS but is ``None`` is also treated as absent: optional
+    per-column params (``root_depth``/``theta_wp``/``theta_fc``) are declared on
+    ``CanopyLandParams`` with a ``None`` default, so a params object that does
+    not carry them must still fall back to the scalar config value rather than
+    propagating ``None`` into the arithmetic.
     """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    v = getattr(lp, name, fallback)
+    return fallback if v is None else v
+
+
+def resolve_plant_wilting_point(land_params, config):
+    """The PLANT wilting point that drives root-zone transpiration and GPP.
+
+    It is deliberately separate from the SOIL wilting point (deep-rooted
+    vegetation extracts water below the soil-evaporation cutoff), and it is
+    resolved in one place because the two callers -- the multilayer land step
+    and the coupler's land-tile beta -- disagreed: the step fell straight back
+    to the SCALAR ``config.theta_wp`` and so ignored a per-column
+    ``theta_wp``.  Any calibration that varies the wilting point by plant
+    functional type therefore reached soil evaporation and was silently inert
+    in transpiration and GPP -- the two arms of the same column disagreeing
+    about how dry the soil is.
+
+    Order, most specific first: a per-column ``theta_wp_plant``, then a
+    per-column ``theta_wp``, then ``config.theta_wp_plant``, then the scalar
+    ``config.theta_wp``.  With none of them set this reproduces the
+    single-wilting-point behaviour exactly.
+    """
+    scalar = (config.theta_wp_plant if config.theta_wp_plant is not None
+              else config.theta_wp)
+    return _get(land_params, "theta_wp_plant",
+                _get(land_params, "theta_wp", scalar))
 
 
 def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
@@ -147,10 +178,7 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     root_depth = _get(land_params, "root_depth", config.root_depth)
     # Plant wilting point (transpiration extraction) drives this root-zone
     # availability; falls back to the soil wilting point when unset.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp   = _get(land_params, "theta_wp_plant",
-                      _get(land_params, "theta_wp", _wp_plant_cfg))
+    theta_wp   = resolve_plant_wilting_point(land_params, config)
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
         theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
@@ -407,9 +435,7 @@ def _step_multilayer_land_impl(
     # water below the soil-evaporation cutoff.  Falls back to ``theta_wp`` (per-
     # column params first, then config) so an unset plant wp reproduces the
     # single-wilting-point behaviour exactly.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp_plant = _get(lp, "theta_wp_plant", _wp_plant_cfg)
+    theta_wp_plant = resolve_plant_wilting_point(lp, config)
 
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]

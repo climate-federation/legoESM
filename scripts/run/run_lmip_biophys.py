@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -46,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
+from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
@@ -134,6 +136,15 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        albedo=cfg.physics.get("albedo") or {},
+        glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
+        glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
+        root_depth_per_pft=cfg.physics.get("root_depth_per_pft", None),
+        theta_wp_per_pft=cfg.physics.get("theta_wp_per_pft", None),
+        theta_fc_per_pft=cfg.physics.get("theta_fc_per_pft", None),
+        soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
+        soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
+        soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -383,15 +394,61 @@ def run(args) -> int:
     if args.g1 is not None:
         _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
     stomata = StomataConfig(**_stom)
+
+    # --- Surface albedo + root-zone parameters, straight from the config ------
+    # Generic values under generic names: ``physics.albedo`` carries
+    # LandAlbedoConfig field values (absent field = the existing default, so an
+    # empty block is bit-identical to every pre-existing LMIP run);
+    # ``physics.glacier_albedo_vis``/``_nir`` set the ice-sheet base albedo pair
+    # (absent = the uncalibrated module default); the three ``*_per_pft`` lists
+    # (length-17, CLM5 PFT order) set per-column root-zone water uptake at the
+    # dominant PFT (absent = the scalar MultiLayerLandConfig values).  All
+    # values were validated by lmip_config.validate_config.
+    _land_albedo = LandAlbedoConfig()._replace(
+        **{k: float(v) for k, v in (args.albedo or {}).items()})
+    if args.albedo and isinstance(surf, CanopyConfig):
+        # The two-leaf canopy computes the sunlight it ABSORBS from the CLM
+        # soil-colour albedo pair (a moisture-dependent visible/near-infrared
+        # pair per column), not from this block: nothing here reaches the
+        # canopy radiative transfer, so a brighter snow albedo set here does
+        # not brighten the surface the radiation sees, and does not slow
+        # snowmelt.  It still sets the albedo the run REPORTS below 1 W/m2 of
+        # sunlight and the value handed to a coupled atmosphere.  The ice-sheet
+        # pair (``glacier_albedo_vis``/``_nir``) DOES reach the canopy.  Say so
+        # out loud rather than let a calibration look applied when it is not.
+        warnings.warn(
+            "physics.albedo is set and the surface scheme is the two-leaf "
+            "canopy: these values change the REPORTED albedo only. The canopy "
+            "takes its absorbed sunlight from the soil-colour albedo pair, so "
+            "the snow and dry-soil calibration here does not alter absorbed "
+            "shortwave or snowmelt on this lane.", RuntimeWarning, stacklevel=2)
+    _glacier_alb = None
+    if args.glacier_albedo_vis is not None:
+        _glacier_alb = (float(args.glacier_albedo_vis),
+                        float(args.glacier_albedo_nir))
+    _pft_root = None
+    if args.root_depth_per_pft is not None:
+        _pft_root = {
+            "root_depth": np.asarray(args.root_depth_per_pft, dtype=np.float64),
+            "theta_wp": np.asarray(args.theta_wp_per_pft, dtype=np.float64),
+            "theta_fc": np.asarray(args.theta_fc_per_pft, dtype=np.float64),
+        }
+
     if args.land_mode == "multilayer":
-        # NOTE: the soil-layer count is set by the surfdata loader's remap grid
-        # (init_land_surface_data -> gsd), so the model SoilGrid must match it;
-        # we use the loader default (8-layer Richards).  Exact AMIP parity
-        # (10-layer/3 m via clm_multilayer_setup) is a documented follow-up.
+        # Vertical soil grid.  ``init_land_surface_data`` now remaps the surfdata
+        # soil profile onto THIS grid (it forwards it to the loader), so a
+        # non-default discretisation can no longer desync from the (ncol, n_layer)
+        # Cosby hydraulics.  Defaults reproduce SoilGridConfig(); AMIP parity is
+        # 10 layers / 3.0 m.
+        _soil_grid_cfg = SoilGridConfig(
+            n_layers=int(args.soil_n_layers),
+            growth_factor=float(args.soil_growth_factor),
+            total_depth=float(args.soil_depth_m))
         base_cfg = MultiLayerLandConfig(
-            surface_scheme=surf, soil_grid=SoilGridConfig(),
+            surface_scheme=surf, soil_grid=_soil_grid_cfg,
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
             stomata=stomata,
+            land_albedo=_land_albedo,
             # Soil-water latent zero-curtain: off is bit-identical sensible-only
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
@@ -411,7 +468,8 @@ def run(args) -> int:
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
-        args.surfdata, grid, base_cfg, args.start_doy)
+        args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb,
+        pft_root_params=_pft_root)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
     # Year range: --year-end defaults to --year (single-year, backward-compat).
@@ -523,7 +581,8 @@ def run(args) -> int:
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
-                expected_n_layers=config.soil_grid.n_layers)
+                expected_n_layers=config.soil_grid.n_layers,
+                expected_soil_grid=config.soil_grid)
             # A restart round-trips only the prognostic fields, leaving the
             # optional structural ones (surface_water, snow/ice bands,
             # canopy_state) as None — but step_multilayer_land returns them as
@@ -539,7 +598,9 @@ def run(args) -> int:
             state = init_multilayer_land_state(ncol, config, T_init=288.0)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
-    update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
+    update_land_params = make_step_land_params_updater(
+        gsd, config.surface_scheme, glacier_alb=_glacier_alb,
+        pft_root_params=_pft_root)
 
     # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
     if getattr(args, "_cfg_output_tapes", None) is not None:
@@ -782,7 +843,8 @@ def run(args) -> int:
             rp = save_land_restart(
                 out_dir / restart_name, cur_state,
                 land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=n_completed, metadata=restart_meta)
+                n_steps_completed=n_completed, metadata=restart_meta,
+                soil_grid=config.soil_grid)
             print(f"wrote {rp}")
         except Exception as e:  # noqa: BLE001
             print(f"(restart write skipped: {e})")
