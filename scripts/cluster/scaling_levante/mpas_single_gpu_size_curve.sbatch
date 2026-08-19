@@ -67,9 +67,17 @@ export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_jit_cache_j${SLURM_JOB_ID}"
 mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
+# SCAN=1 times the steady window with NO per-step host round-trip: the
+# steps are dispatched back to back with one sync at the end. Against the
+# default per-step loop it separates GPU work from host dispatch and
+# per-step synchronisation, which is the remaining candidate for the
+# per-cell penalty at 163,842 cells.
+SCAN_FLAG=""
+[ "${SCAN:-0}" = "1" ] && SCAN_FLAG="--timed-scan"
+
 run_size () {  # subdivision tag
   local SD=$1 TAG=$2
-  echo "=== single GPU, subdivision $SD [$TAG] $(date +%T) ==="
+  echo "=== single GPU, subdivision $SD scan=${SCAN:-0} [$TAG] $(date +%T) ==="
   JAX_ENABLE_X64=0 \
     timeout 2400 srun --export=ALL --nodes=1 --ntasks=1 \
       --ntasks-per-node=1 --gpus-per-node=1 \
@@ -77,7 +85,7 @@ run_size () {  # subdivision tag
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
       --multicontroller --n-devices 1 --subdivision "$SD" --nlev 26 \
       --steps 60 --warmup 5 --lloyd 0 --partition-method sfc \
-      --reorder-for 1 \
+      --reorder-for 1 $SCAN_FLAG \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
   sleep 10
 }
@@ -122,6 +130,8 @@ for sd in SIZES:
     ms = (a_ms + b_ms) / 2
     rows[sd] = (cells, ms, abs(a_ms - b_ms) / ms, 1e6 * ms / cells)
 
+import os as _os
+print(f"mode: {'async scan (no per-step host sync)' if _os.environ.get('SCAN') == '1' else 'per-step host loop'}")
 print(f"{'subdiv':>7} {'cells':>12} {'ms/step':>9} {'ns/cell':>9} {'spread':>8}")
 for sd in SIZES:
     cells, ms, spread, ns = rows[sd]
