@@ -32,10 +32,24 @@ LEGO_DAYS = (0, 30, 60, 90)
 
 def nemo_acc(day):
     kt = G.KT_RESTART + day * G.STEPS_PER_DAY
-    files = glob.glob(f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart_*.nc")
-    if not files: return None
-    un = np.moveaxis(rebuild(f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart_*.nc", ["un"])["un"], 0, -1)
-    return A.acc_full(un, A.umask)
+    # The day-0 restart (the bridge source) is a SINGLE stitched file
+    # DINO_00005760_restart.nc; days 10..90 are 16 per-rank tiles
+    # DINO_*_restart_NNNN.nc. The first version of this probe used only the
+    # tiled pattern, so its day-0 control could not find the file and printed
+    # FAIL -- a control that cannot run is not a control (caught by the
+    # acc_driver_decomp lane; the 1.5e-7 quoted at eaaa920a9 came from a
+    # separate hand-run check, not from this probe).
+    tiled = f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart_*.nc"
+    single = f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart.nc"
+    if glob.glob(tiled):
+        un = rebuild(tiled, ["un"])["un"]
+    elif os.path.exists(single):
+        import netCDF4 as nc
+        with nc.Dataset(single) as ds:
+            un = np.asarray(ds["un"][0], dtype=np.float64)   # (lev,y,x)
+    else:
+        return None
+    return A.acc_full(np.moveaxis(un, 0, -1), A.umask)
 
 def lego_acc(npz, day):
     try:    return A.acc_full(G.load_candidate(npz, day)["u"], A.umask)
