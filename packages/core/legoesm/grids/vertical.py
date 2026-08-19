@@ -33,6 +33,7 @@ References
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable, NamedTuple
 
 import jax
@@ -186,19 +187,31 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
     row_bytes = itemsize * n_levels
     if row_bytes % _LEVEL_ROW_ALIGN_BYTES == 0:
         return
-    step = max(1, _LEVEL_ROW_ALIGN_BYTES // itemsize)
+    # Levels per aligned width. With a 3-byte dtype, 16 // itemsize would say
+    # 5 and 5*3 is still unaligned; the true step is 16 / gcd(16, itemsize).
+    step = _LEVEL_ROW_ALIGN_BYTES // math.gcd(_LEVEL_ROW_ALIGN_BYTES, itemsize)
     padded = ((n_levels + step - 1) // step) * step
+    # How often a column DOES start on a vector boundary. At 26 float32
+    # levels the stride is 104 bytes and every second column is aligned; at
+    # 13 it is 52 bytes and only every fourth is. "Every other" is true for
+    # one case and wrong for the rest, so compute it.
+    period = _LEVEL_ROW_ALIGN_BYTES // math.gcd(row_bytes,
+                                                _LEVEL_ROW_ALIGN_BYTES)
     warnings.warn(
         f"{where}: {n_levels} levels of {np.dtype(dtype).name} gives a "
         f"{row_bytes}-byte column stride, which is not a multiple of "
-        f"{_LEVEL_ROW_ALIGN_BYTES} — the width of one vectorized load. The "
-        f"vertical dimension then falls back to scalar accesses and costs up "
-        f"to 3x per level on GPU (measured 20.2 ms/step at 26 levels against "
-        f"8.5 ms at 32 on the same mesh, and 2.55 against 1.55 per cell per "
-        f"level at the largest mesh tested). KEEP your {n_levels} levels: the "
-        f"fix is to store the level dimension padded to {padded} and mask the "
-        f"padding, which changes no physics. Changing the level count itself "
-        f"changes the model and is only sensible if {n_levels} was arbitrary.",
+        f"{_LEVEL_ROW_ALIGN_BYTES} — the width of one vectorized load. Only "
+        f"one column in {period} then starts on a vector boundary and the "
+        f"rest fall back to scalar accesses, costing up to 3x per level on "
+        f"GPU (measured 20.2 ms/step at 26 levels against 8.5 ms at 32 on "
+        f"the same mesh, and 2.55 against 1.55 per cell per level at the "
+        f"largest mesh tested). KEEP your {n_levels} levels: the fix is to "
+        f"store the level dimension padded to {padded} and mask the padding, "
+        f"which changes no physics. Changing the level count itself changes "
+        f"the model and is only sensible if {n_levels} was arbitrary. Note "
+        f"this aligns the full-level arrays; the interface arrays carry one "
+        f"more level and stay unaligned, which the measurements say does not "
+        f"matter for this model.",
         stacklevel=3,
     )
 

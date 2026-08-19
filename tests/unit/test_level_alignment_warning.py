@@ -61,6 +61,27 @@ def test_message_tells_the_user_to_pad_storage_not_to_change_the_model():
     # The mechanism must be named as a vectorized load, not a cache line:
     # a reader who cargo-cults 128-byte alignment learns the wrong rule.
     assert "vectorized load" in text, text
+    # 104 bytes: every SECOND column is aligned.
+    assert "one column in 2" in text, text
+
+
+@pytest.mark.parametrize("n_levels,period", [(26, 2), (13, 4), (25, 4),
+                                             (27, 4), (22, 2)])
+def test_alignment_period_is_computed_not_assumed(n_levels, period):
+    """The first version said "only every other column" for every count. That
+    is true at 26 levels and wrong at 13, 25, 27 and 22, where the stride has
+    a smaller common factor with the vector width."""
+    with pytest.warns(UserWarning) as rec:
+        warn_if_unaligned_levels(n_levels, np.float32, where="test")
+    assert f"one column in {period}" in str(rec[0].message), str(rec[0].message)
+
+
+def test_padding_step_uses_the_gcd_not_a_division():
+    """A 3-byte dtype has no level count that divides 16 evenly, so the step
+    is 16, not 16 // 3 == 5 -- five 3-byte levels are still unaligned."""
+    with pytest.warns(UserWarning) as rec:
+        warn_if_unaligned_levels(5, np.dtype("V3"), where="test")
+    assert "padded to 16" in str(rec[0].message), str(rec[0].message)
 
 
 def test_rule_uses_the_state_dtype_not_the_coordinate_dtype():
