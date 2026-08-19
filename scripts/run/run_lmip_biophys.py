@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -405,6 +406,22 @@ def run(args) -> int:
     # values were validated by lmip_config.validate_config.
     _land_albedo = LandAlbedoConfig()._replace(
         **{k: float(v) for k, v in (args.albedo or {}).items()})
+    if args.albedo and isinstance(surf, CanopyConfig):
+        # The two-leaf canopy computes the sunlight it ABSORBS from the CLM
+        # soil-colour albedo pair (a moisture-dependent visible/near-infrared
+        # pair per column), not from this block: nothing here reaches the
+        # canopy radiative transfer, so a brighter snow albedo set here does
+        # not brighten the surface the radiation sees, and does not slow
+        # snowmelt.  It still sets the albedo the run REPORTS below 1 W/m2 of
+        # sunlight and the value handed to a coupled atmosphere.  The ice-sheet
+        # pair (``glacier_albedo_vis``/``_nir``) DOES reach the canopy.  Say so
+        # out loud rather than let a calibration look applied when it is not.
+        warnings.warn(
+            "physics.albedo is set and the surface scheme is the two-leaf "
+            "canopy: these values change the REPORTED albedo only. The canopy "
+            "takes its absorbed sunlight from the soil-colour albedo pair, so "
+            "the snow and dry-soil calibration here does not alter absorbed "
+            "shortwave or snowmelt on this lane.", RuntimeWarning, stacklevel=2)
     _glacier_alb = None
     if args.glacier_albedo_vis is not None:
         _glacier_alb = (float(args.glacier_albedo_vis),
@@ -564,7 +581,8 @@ def run(args) -> int:
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
-                expected_n_layers=config.soil_grid.n_layers)
+                expected_n_layers=config.soil_grid.n_layers,
+                expected_soil_grid=config.soil_grid)
             # A restart round-trips only the prognostic fields, leaving the
             # optional structural ones (surface_water, snow/ice bands,
             # canopy_state) as None — but step_multilayer_land returns them as
@@ -825,7 +843,8 @@ def run(args) -> int:
             rp = save_land_restart(
                 out_dir / restart_name, cur_state,
                 land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=n_completed, metadata=restart_meta)
+                n_steps_completed=n_completed, metadata=restart_meta,
+                soil_grid=config.soil_grid)
             print(f"wrote {rp}")
         except Exception as e:  # noqa: BLE001
             print(f"(restart write skipped: {e})")
