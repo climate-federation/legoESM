@@ -143,3 +143,27 @@ def test_edge_scatter_is_device_owned_and_rim_predicated(rim_setup):
         got = np.sort(es)
         np.testing.assert_array_equal(got, want, err_msg=(
             f"device {d}: edge_scatter != rim-predicated owned rows"))
+
+
+def test_stack_rim_plans_shapes_and_sentinels(rim_setup):
+    """Stacked plans: uniform shapes, -1 pad sentinels only in padded
+    lanes, true rows preserved verbatim."""
+    import numpy as np
+    from legoesm.parallel.sharded_dynamics import _stack_rim_plans
+
+    mesh, partitions, plans = rim_setup
+    st = _stack_rim_plans(plans)
+    n_dev = len(plans)
+    assert st["cell_gather"].shape[0] == n_dev
+    for d, plan in enumerate(plans):
+        ncg = len(plan["cell_gather"])
+        np.testing.assert_array_equal(
+            st["cell_gather"][d, :ncg], plan["cell_gather"])
+        assert (st["cell_gather"][d, ncg:] == -1).all()
+        nsc = len(plan["cell_scatter"])
+        np.testing.assert_array_equal(
+            st["cell_scatter"][d, :nsc], plan["cell_scatter"])
+        assert (st["cell_scatter"][d, nsc:] == -1).all()
+        assert st["n_rim_cells"][d] == plan["n_rim_cells"]
+    # stacked submesh leading dim = device axis, uniform trailing shapes
+    assert st["sub_mesh"].cellsOnEdge.shape[0] == n_dev

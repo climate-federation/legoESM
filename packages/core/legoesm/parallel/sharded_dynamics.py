@@ -2889,6 +2889,61 @@ def _build_rim_plan(global_mesh, partitions, cell_rim, edge_rim,
     return plans
 
 
+def _stack_rim_plans(plans):
+    """Stack per-device rim plans into shard_map-able arrays.
+
+    Uses the SAME padding machinery as the device meshes
+    (:func:`_pad_local_mesh_to`): every submesh is padded to the
+    across-device maxima and stacked on a leading device axis;
+    gather/scatter index vectors are padded with a trailing GARBAGE
+    slot index (the padded buffers carry one sacrificial row, mirroring
+    the halo fill's ``max_lc + 1`` convention) so padded lanes read and
+    write only garbage. Returns a dict of stacked arrays plus the
+    per-device true sizes (int32 vectors) the kernel masks with.
+    Setup-time only.
+    """
+    n_dev = len(plans)
+    max_rc = max(p["sub_mesh"].nCells for p in plans)
+    max_re = max(p["sub_mesh"].nEdges for p in plans)
+    max_rv = max(p["sub_mesh"].nVertices for p in plans)
+
+    padded = [_pad_local_mesh_to(p["sub_mesh"], max_rc, max_re, max_rv)
+              for p in plans]
+    stacked_sub = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves, axis=0), *padded)
+
+    def pad_idx(vecs, width, garbage):
+        out = np.full((n_dev, width), garbage, dtype=np.int64)
+        for d, v in enumerate(vecs):
+            out[d, :len(v)] = v
+        return out
+
+    # gather indices point into the device-local (owned+halo+garbage)
+    # buffers; scatter indices point into owned+garbage tendency rows.
+    # The garbage slot index is the buffer's LAST row, appended by the
+    # consumer before the gather/scatter (max_lc / cells_per etc. + 0).
+    cg = pad_idx([p["cell_gather"] for p in plans], max_rc, -1)
+    eg = pad_idx([p["edge_gather"] for p in plans], max_re, -1)
+    max_sc = max(len(p["cell_scatter"]) for p in plans)
+    max_se = max(len(p["edge_scatter"]) for p in plans)
+    cs = pad_idx([p["cell_scatter"] for p in plans], max_sc, -1)
+    es = pad_idx([p["edge_scatter"] for p in plans], max_se, -1)
+
+    return {
+        "sub_mesh": stacked_sub,
+        "cell_gather": cg, "edge_gather": eg,
+        "cell_scatter": cs, "edge_scatter": es,
+        "n_rim_cells": np.array([p["n_rim_cells"] for p in plans],
+                                dtype=np.int32),
+        "n_rim_edges": np.array([p["n_rim_edges"] for p in plans],
+                                dtype=np.int32),
+        "n_sub_cells": np.array([p["sub_mesh"].nCells for p in plans],
+                                dtype=np.int32),
+        "n_sub_edges": np.array([p["sub_mesh"].nEdges for p in plans],
+                                dtype=np.int32),
+    }
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 
