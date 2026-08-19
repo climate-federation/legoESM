@@ -1477,15 +1477,48 @@ def barotropic_substeps_latlon_cgrid(
     if config.barotropic.barotropic_local_subcycle_clamp:
         eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
+    # 3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6,
+    # dynspg_ts.F90:1170-1172).  The subtracted mean ``U_bar_corr`` is the
+    # NOW-thickness depth-mean of the 3-D velocity (== NEMO ``puu_b(Kmm)``);
+    # below we replace it with a depth-UNIFORM target.
+    #   "velocity_avg" (default): ``U_bar_avg`` — the primary/velocity boxcar
+    #       mean (bit-identical legacy path).
+    #   "transport_avg": ``Hu_avg/H_u`` — NEMO's ``un_adv*r1_hu(Kmm)``.  ``H_u``
+    #       is the NOW u-face column depth, the SAME thickness ``U_bar_corr``
+    #       (= puu_b) is built from, so the reconciled depth-mean is exactly
+    #       ``Hu_avg/H_u``.
+    # Static Python gate on the config string (dispatch hardening).
+    _recon = getattr(config.barotropic, "barotropic_reconcile_target",
+                     "velocity_avg")
+    if _recon not in ("velocity_avg", "transport_avg"):
+        raise ValueError(
+            "unknown barotropic_reconcile_target "
+            f"{_recon!r}: must be one of ('velocity_avg', 'transport_avg').")
+    if _recon == "transport_avg":
+        # NOW u/v-face column depth = <min_cell_to_uface(h_k_now)>, matching the
+        # thickness that produced U_bar_corr (= NEMO hu(Kmm)); guard the divide
+        # with the wet-column floor (a wet column always exceeds it, so this is
+        # the land-mask guard, not a physics clip).
+        _h_k_now = _h_k_corr if _seed_override else h_k
+        _H_u_now = jnp.maximum(
+            jnp.sum(min_cell_to_uface(_h_k_now), axis=-1), min_water_col)
+        _H_v_now = jnp.maximum(
+            jnp.sum(min_cell_to_vface(_h_k_now, grid), axis=-1), min_water_col)
+        recon_u = (Hu_avg / _H_u_now).astype(_dt)
+        recon_v = (Hv_avg / _H_v_now).astype(_dt)
+    else:
+        recon_u = U_bar_avg
+        recon_v = V_bar_avg
+
     # Correct 3D velocities: preserve baroclinic structure.
-    # Use time-averaged barotropic velocity for the 3D correction to ensure
+    # Use the reconciliation target for the 3D correction to ensure
     # consistency with eta_avg (the time-averaged eta used for layer thicknesses).
     u_baro_old = U_bar_corr[..., jnp.newaxis]
     v_baro_old = V_bar_corr[..., jnp.newaxis]
     u_prime = u_corr - u_baro_old
     v_prime = v_corr - v_baro_old
-    u_new = (u_prime + U_bar_avg[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new = (v_prime + V_bar_avg[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    u_new = (u_prime + recon_u[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
+    v_new = (v_prime + recon_v[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
     state_new = state._replace(
         eta=state.eta.replace(data=eta_avg),

@@ -254,6 +254,7 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         apply_dino_lat_lon_surface_forcing,
         dino_lat_lon_model_config,
         dino_lat_lon_surface_forcing_arrays,
+        dino_step_surface_forcing,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
 
@@ -261,8 +262,41 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         surface_tendency_placement=surface_tendency_placement,
         run_traj=run_traj, run_twin_step1=run_twin_step1)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+
+    # Opt-in outer_integrator override for the nemo_mlf step-transcription A/B
+    # (rung (b) of nemo_mlf_step_transcription_spec.md). Same pattern as
+    # dino_year_screen_fullframe.py / kamm_twin_90d.py -- unset/"leapfrog"
+    # leaves the recipe default untouched. nemo_mlf HARD-REQUIRES the NEMO
+    # e3w(Kmm) divisor at construction, so force it here too.
+    _oi = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+    if _oi:
+        if _oi not in ("leapfrog", "nemo_mlf"):
+            raise SystemExit(
+                f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
+                "'leapfrog' or 'nemo_mlf'")
+        mc = mc._replace(
+            outer_integrator=_oi,
+            implicit_vmix_e3t_now_divisor=(
+                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+
+    # #1455 retraction fix: the card routes the WIND MOMENTUM through
+    # model.step(surface_forcing=sf), NOT through the analytic
+    # apply_dino_lat_lon_surface_forcing applicator (which carries only
+    # heat/salt/SW). Passing surface_forcing=None (the retracted bug) drops
+    # the wind entirely -> a fabricated per-step residual. Mirror production
+    # (run_dino.py:665-670,763-767) exactly: build sf iff wind_through_step.
+    _wind = bool(getattr(cfg, "wind_through_step", False))
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
+    _tau_lo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    _tau_hi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    print(f"FORCING: wind_through_step={_wind} "
+          f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
+          f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]", flush=True)
 
     tmask3 = np.asarray(g.tmask) > 0.5
     umask3 = np.asarray(g.umask) > 0.5
@@ -289,7 +323,7 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         else:
             st = apply_dino_lat_lon_surface_forcing(
                 st, forcing, br.z_coord, cfg, dt, t_seconds=k * dt)
-        st = model.step(st, dt, surface_forcing=None, external_tracer_rate=ext_rate)
+        st = model.step(st, dt, surface_forcing=sf_step, external_tracer_rate=ext_rate)
 
         # --- path 1: now-level state vs NEMO's restart at the SAME step ---
         ns = nemo_now_state_at(kt, run_twin_step1=run_twin_step1)
