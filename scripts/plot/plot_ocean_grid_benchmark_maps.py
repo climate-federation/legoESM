@@ -118,8 +118,14 @@ def _provenance(root: Path) -> str:
     A missing panel is now obvious (hatched, labelled). A panel from a
     PREVIOUS run is not: it is present, plausible, and silently wrong, so a
     figure mixing two runs looks perfectly fine. The plotter reads whatever is
-    on disk, so the defence is to stamp what it read -- the commit, and the
-    oldest and newest artifact it drew from. A wide span means mixed runs.
+    on disk, so the defence is to stamp what it read -- the oldest and newest
+    artifact it drew from. A wide span means mixed runs.
+
+    The commit is the PLOTTING checkout's, and is labelled as such: nothing on
+    disk records which commit produced the arms, so a stamp reading "commit X"
+    beside the run times would assert a provenance this script cannot know --
+    check out another branch and replot, and the figures would claim the arms
+    came from it.
     """
     import subprocess
     try:
@@ -131,13 +137,13 @@ def _provenance(root: Path) -> str:
     stamps = sorted(p.stat().st_mtime
                     for p in root.rglob("snapshots_latlon.npz"))
     if not stamps:
-        return f"commit {sha} — no run artifacts found"
+        return f"plotted at commit {sha} — no run artifacts found"
     import datetime as _dt
     fmt = lambda t: _dt.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
     span_h = (stamps[-1] - stamps[0]) / 3600.0
     warn = ("  ** artifacts span %.1f h — check this is ONE run **" % span_h
             if span_h > 6.0 else "")
-    return (f"commit {sha} — {len(stamps)} arms, written "
+    return (f"plotted at commit {sha} — {len(stamps)} arms, written "
             f"{fmt(stamps[0])} to {fmt(stamps[-1])}{warn}")
 
 

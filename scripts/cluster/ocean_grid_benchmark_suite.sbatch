@@ -50,12 +50,17 @@ export PYTHONPATH
 # string being right does not mean the import obeys it -- an editable install
 # that used a meta-path finder would beat PYTHONPATH silently.
 python_bin="${PYTHON_BIN:-$REPO/.venv/bin/python}"
+export PYTHON_BIN="$python_bin"   # the cases below run this SAME interpreter
 "$python_bin" - <<'PYCHK' || exit 2
 import sys, legoesm.ocean.dynamics.barotropic_mpas as m
 import os
-want = os.environ["REPO"]
-print(f"[provenance] legoesm.ocean resolves to {m.__file__}", flush=True)
-if not m.__file__.startswith(want):
+# Containment, not a prefix: "/work/run/1622" is a string-prefix of
+# "/work/run/1622-old", so startswith() would bless a DIFFERENT checkout whose
+# path merely begins with ours -- the exact failure this guard exists to catch.
+want = os.path.realpath(os.environ["REPO"])
+got = os.path.realpath(m.__file__)
+print(f"[provenance] legoesm.ocean resolves to {got}", flush=True)
+if os.path.commonpath([want, got]) != want:
     sys.exit(f"FATAL: library came from OUTSIDE {want}; the PYTHONPATH pin "
              f"did not win. Refusing to run against another checkout.")
 PYCHK
@@ -73,7 +78,10 @@ export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 echo "=== ocean benchmark suite | $CASE | $(date -Is) ==="
-srun .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
+# The SAME interpreter the provenance preflight validated. Running
+# .venv/bin/python here instead would benchmark an interpreter that
+# was never checked -- a green preflight covering a different import.
+srun "$python_bin" scripts/matrix/run_ocean_test_matrix.py \
     --only "=$CASE" "${GRID_ARG[@]}" \
     --output "results/ocean_grid_benchmark/$CASE"
 echo "=== COMPLETED $CASE rc=$? $(date -Is) ==="

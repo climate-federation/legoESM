@@ -214,3 +214,45 @@ def test_the_preflight_runs_with_nothing_inherited_from_the_submitting_shell():
     assert "[provenance]" in out.stdout, (
         "the preflight ran but never reported where the library resolved "
         f"from: {out.stdout[-400:]!r}")
+
+
+# ---------------------------------------------------------------------------
+# Codex adversarial pass: the guard above checked the RIGHT thing about the
+# WRONG interpreter, and accepted a neighbouring checkout by string prefix.
+# ---------------------------------------------------------------------------
+
+def test_the_cases_run_the_interpreter_the_preflight_validated(driver):
+    """A green preflight must cover the interpreter that runs the model.
+
+    ``PYTHON_BIN`` is a documented override, so the preflight can validate one
+    interpreter while the case launch hardcodes another -- and the import the
+    preflight proved is then not the import the benchmark uses."""
+    launch = [l for l in driver.splitlines()
+              if "run_ocean_test_matrix.py" in l and l.strip().startswith("srun")]
+    assert launch, "no srun line launching the matrix runner"
+    assert all("python_bin" in l for l in launch), (
+        "the case launch hardcodes an interpreter instead of the one the "
+        f"provenance preflight validated: {launch}")
+
+
+def test_the_provenance_guard_uses_containment_not_a_string_prefix(driver):
+    """``/work/run/1622`` is a string-prefix of ``/work/run/1622-old``.
+
+    With ``startswith`` the guard blesses that neighbouring checkout, which is
+    precisely the incident it was written to prevent."""
+    assert "commonpath" in driver, (
+        "the import-provenance guard compares paths by string prefix, so a "
+        "different checkout whose path merely starts with REPO passes it")
+    assert "m.__file__.startswith(" not in driver
+
+
+def test_the_figure_stamp_does_not_claim_the_run_s_commit():
+    """Nothing on disk records which commit produced the arms.
+
+    Stamping a bare ``commit X`` next to the run times asserts a provenance
+    the plotter cannot know: replot from another branch and the figures claim
+    the arms came from it."""
+    src = _PLOTTER.read_text()
+    assert "plotted at commit" in src, (
+        "the provenance stamp presents the PLOTTING checkout's commit as the "
+        "run's own")
