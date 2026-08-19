@@ -999,9 +999,18 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
         # old residual was the edge_profile scan-FMA defect, CONFIRMED
         # by its removal. Bound = measured x 10. What remains localises
         # wholly inside riem_solver3 (stage-split localiser, job
-        # 9424741, ~5.8e-10 absolute per face) and at ~200 eps is in
-        # the jit-parity class; PLAUSIBLY riem's own lax.scan, not
-        # measured, not claimed.
+        # 9424741, ~5.8e-10 absolute per face). MEASURED, scan
+        # hypothesis REFUTED (fv3_riem_solver3_scan_localiser.py, jobs
+        # 9433880/9435602): running all eight of riem's lax.scan sites
+        # as eager python loops over the production bodies left the
+        # residual unchanged (zh 5.82e-10 on the worst face), while
+        # eager jnp.exp differs from np.exp by ~1 ulp on identical
+        # operand values (3.55e-15 on pk; the sim1-style composite
+        # exp(gama*log(y)) reproduces 4.66e-10). The floor is the XLA
+        # CPU exp vs libm exp implementation gap -- NOT fixable by
+        # unrolling, so this tolerance is a hard floor for the eager
+        # twins (log measured bitwise; exp is the one divergent
+        # primitive).
         # [class: accumulating -- the Riemann solve is a recurrence]
         cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 4.6e-13)
 
