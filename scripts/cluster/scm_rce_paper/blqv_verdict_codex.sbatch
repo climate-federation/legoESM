@@ -92,5 +92,10 @@ BREAKS-THE-CLAIM / WEAKENS / SURVIVES. End with one line: does the cold-pool
 conclusion stand?
 PROMPT
 )" 2>&1
-echo "CODEX_RC=$?"
+RC=$?
+echo "CODEX_RC=$RC"
 echo ALLDONE
+# Exit with the reviewer's own status. Printing it and exiting 0 makes an
+# expired login or an API error look like a completed review to anything that
+# reads the job state instead of the log.
+exit $RC

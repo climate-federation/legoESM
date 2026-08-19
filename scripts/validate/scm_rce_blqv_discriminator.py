@@ -159,14 +159,21 @@ def main(argv: list[str] | None = None) -> int:
         # nonlinear regulator of a 93%-RH surface layer that had no arm.
         "nosatadj": (camp.apply_subsidence_solve_override(
             camp.make_physics_config(
-                radiation="rrtmgp", convection="mass_flux",
+                # args.scheme, NOT a hardcoded one: the control runs whatever
+                # --scheme selects, so hardcoding here changes the convection
+                # scheme AND the saturation adjustment, and any difference
+                # would be read as a saturation-adjustment effect.
+                radiation="rrtmgp", convection=args.scheme,
                 turbulence="louis", microphysics="morrison",
                 hard_saturation_adjustment=False),
             "implicit_flux", category="convection")[0], {}),
         # subs: large-scale subsidence ships OFF ("none"); the CRM-derived
         # clear-sky subsidence is the one-variable alternative.
         "subs": (base, {"large_scale_forcing": "crm_clear_sky_subsidence"}),
-        # f0_coare3: the corrected-protocol candidate. f0 alone fixed the
+        # f0_coare3: the corrected-protocol CANDIDATE CONFIGURATION -- two
+        # variables at once (nonrotating AND a different flux law), so it is
+        # not a one-variable arm and cannot on its own attribute anything to
+        # the boundary condition. f0 alone did that. f0 alone fixed the
         # surface state (dqv +6.20 -> +1.37) but the wind spins down and E
         # collapses to 0.70 vs the CRM's 2.73 - SAM carries its fluxes on
         # convective gusts. COARE3's w* gustiness supplies exactly that flux
