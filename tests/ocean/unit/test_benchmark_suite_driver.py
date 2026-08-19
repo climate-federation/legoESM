@@ -47,9 +47,24 @@ def test_pythonpath_is_pinned(driver):
     assert "export PYTHONPATH" in driver, (
         "PYTHONPATH is not pinned, so the editable install decides which "
         "library code runs -- not the checkout being tested")
-    assert "$REPO" in driver.split("export PYTHONPATH")[0].rsplit(
-        "PYTHONPATH=", 1)[-1] or "REPO" in driver, (
-        "PYTHONPATH does not reference the resolved REPO")
+    pinned = driver.split("export PYTHONPATH")[0].rsplit("PYTHONPATH=", 1)[-1]
+    assert "$REPO" in pinned, (
+        "the PYTHONPATH assignment does not reference the resolved REPO, so "
+        f"the job would import from somewhere else: {pinned.strip()!r}")
+
+
+def test_each_array_task_selects_exactly_its_own_case(driver):
+    """Substring selection runs a neighbour's case as well.
+
+    ``inertia_gravity_wave`` is a prefix of ``inertia_gravity_wave_channel``,
+    so a plain ``--only <case>`` makes one array task run both, and the
+    channel case then also runs in its own task -- two arms of the reported
+    suite come from a task that was not accounted for, and either can set the
+    task's exit status.  The matrix runner's ``=`` prefix means exact match.
+    """
+    assert '--only "=$CASE"' in driver, (
+        "the array task selects its case by substring, so it also runs every "
+        "case whose name starts with the same text")
 
 
 def test_the_missing_mesh_dependency_is_documented(driver):
@@ -152,3 +167,50 @@ def test_figures_carry_provenance():
     assert "span" in src, (
         "the stamp does not flag artifacts spanning a long window, which is "
         "the signature of a figure built from two different runs")
+
+
+def test_the_preflight_runs_with_nothing_inherited_from_the_submitting_shell():
+    """Run the driver's own preflight, not a reconstruction of it.
+
+    ``sbatch script.sbatch`` starts the job with whatever the submitting shell
+    exported and nothing else.  The preflight block therefore has to stand on
+    its own: it shipped once reading ``REPO`` from the environment while the
+    script only ever set it as a shell variable, so every submitted job died
+    at the guard before running a single case, and every string assertion in
+    this file stayed green.  Executing the block is what catches that.
+    """
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    body = _SBATCH.read_text().splitlines(keepends=True)
+    start = next(i for i, l in enumerate(body) if l.startswith("set -euo"))
+    end = next(i for i, l in enumerate(body) if l.rstrip() == "PYCHK")
+    preflight = "".join(body[start:end + 1])
+    # The real script resolves REPO from BASH_SOURCE; a temp copy cannot, so
+    # hand it the checkout the way an explicit override would -- everything
+    # else (export or not, the guard, the import provenance check) is the
+    # script's own text.
+    preflight = preflight.replace('${BASH_SOURCE[0]}', str(_SBATCH))
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(preflight)
+        script = fh.name
+    try:
+        # PYTHON_BIN is the script's own override: this checkout may be a
+        # worktree with no .venv of its own, and the interpreter is not what
+        # is under test here -- the environment plumbing is.
+        clean = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                 "HOME": os.environ.get("HOME", "/tmp"),
+                 "PYTHON_BIN": sys.executable}
+        out = subprocess.run(["bash", script], env=clean, cwd=str(_REPO),
+                             capture_output=True, text=True, timeout=600)
+    finally:
+        os.unlink(script)
+    assert out.returncode == 0, (
+        "the driver's preflight fails when the submitting shell exported "
+        f"nothing, i.e. on the documented `sbatch` invocation:\n"
+        f"{out.stdout[-600:]}\n{out.stderr[-800:]}")
+    assert "[provenance]" in out.stdout, (
+        "the preflight ran but never reported where the library resolved "
+        f"from: {out.stdout[-400:]!r}")

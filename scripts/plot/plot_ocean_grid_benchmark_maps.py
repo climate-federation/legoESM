@@ -230,6 +230,8 @@ def build_contact_sheet(root: Path, out: Path,
                 # A bare dash reads as a broken run. Say which it is, and
                 # hatch the panel so it cannot be mistaken for data.
                 ax.set_facecolor("0.94")
+                ax.patch.set_edgecolor("0.75")
+                ax.patch.set_hatch("///")
                 ax.text(0.5, 0.5, f"{g}\nnot run\nfor this case",
                         ha="center", va="center", fontsize=6, color="0.45",
                         linespacing=1.4)

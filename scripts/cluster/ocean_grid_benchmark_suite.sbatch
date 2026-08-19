@@ -32,6 +32,7 @@ set -euo pipefail
 # The checkout this script belongs to, so a worktree runs ITS OWN code.
 # Override with REPO=... only when you mean to.
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+export REPO   # the preflight below reads it from the environment
 cd "$REPO"; mkdir -p logs
 # Pin the library to the same checkout; see the note at the top.
 PYTHONPATH="$(printf '%s:' "$REPO"/packages/*/ )$REPO/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -42,7 +43,7 @@ export PYTHONPATH
 # would sit in PYTHONPATH, Python would ignore it in silence, and the job would
 # quietly run the editable install's copy again -- i.e. the exact incident this
 # guard exists to prevent, reappearing with no symptom.
-[[ -d "$REPO/packages" && -n "$(echo "$REPO"/packages/*/)" ]] || {
+[[ -d "$REPO/packages" ]] || {
     echo "FATAL: REPO=$REPO has no packages/ (BASH_SOURCE=${BASH_SOURCE[0]})" >&2
     exit 2; }
 # And PROVE the pin won: print where the library actually resolved from. The
@@ -73,6 +74,6 @@ export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 echo "=== ocean benchmark suite | $CASE | $(date -Is) ==="
 srun .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
-    --only "$CASE" "${GRID_ARG[@]}" \
+    --only "=$CASE" "${GRID_ARG[@]}" \
     --output "results/ocean_grid_benchmark/$CASE"
 echo "=== COMPLETED $CASE rc=$? $(date -Is) ==="
