@@ -151,3 +151,35 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
     assert era5, "ERA5 loader call not found — did main() get restructured?"
     assert min(c.lineno for c in warm) < min(era5), (
         "the warm-up must run BEFORE the ERA5 load, not after it")
+
+
+def _confounded_yaml(**extra):
+    neural = {"surface_drag_confounded": "core_does_not_read_the_key"}
+    neural.update(extra)
+    return {"neural_gcm": neural, "classical": {"turbulence": "louis"}}
+
+
+def test_the_spectral_core_refuses_a_config_that_declares_the_key_unread():
+    """#1464: that declaration is a property of the CORE, not of the file.
+
+    The lat-lon core never reads ``neural_gcm.surface_drag``; the spectral one
+    does. Running a config that declares the key unread on the spectral core
+    would hand the learned arm no surface stress while the classical arm it is
+    scored against carries Louis -- the confound, wearing the label that says
+    it is not there."""
+    with pytest.raises(SystemExit) as e:
+        mod.check_surface_drag_confound(_confounded_yaml(), "neural_gcm",
+                                        "spectral")
+    assert "surface_drag" in str(e.value)
+
+
+def test_the_latlon_core_accepts_the_same_config():
+    """On the core the declaration is about, it is simply true."""
+    mod.check_surface_drag_confound(_confounded_yaml(), "neural_gcm", "latlon")
+
+
+def test_asking_for_the_drag_clears_the_refusal():
+    """A config that enables the drag is equalised, whatever it declares."""
+    mod.check_surface_drag_confound(
+        _confounded_yaml(surface_drag=True, surface_drag_scheme="louis"),
+        "neural_gcm", "spectral")

@@ -281,8 +281,13 @@ def test_the_campaign_builder_passes_the_scheme_into_the_builder():
     assert calls, (
         "scale_build no longer calls make_turbulence_only_spectral_physics — "
         "the learned arm is back to running with no surface drag")
+    # A literal argument (``turbulence_scheme="louis"``) mentions the key
+    # without reading it, and proves nothing; the value has to come FROM the
+    # campaign mapping, so a bare constant does not count.
     wired = [c for c in calls
-             if "surface_drag_scheme" in ast.dump(c)]
+             if any(not isinstance(kw.value, ast.Constant)
+                    and "surface_drag_scheme" in ast.dump(kw.value)
+                    for kw in c.keywords)]
     assert wired, (
         "scale_build calls the drag factory but never passes the campaign's "
         "surface_drag_scheme into it, so every campaign silently gets the "
@@ -304,8 +309,11 @@ def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
     3. A campaign whose classical arm runs a scheme the builder REFUSES — the
        prognostic family, whose carry this wrapper cannot thread — cannot be
        equalised at all. It must leave the drag off AND say so with
-       ``surface_drag_confounded: true``, so the confound is enumerable rather
-       than a comment somebody has to notice.
+       ``surface_drag_confounded: builder_refuses_classical_scheme``, so the
+       confound is enumerable rather than a comment somebody has to notice.
+       The reason must be one of the two this test can check: a bare ``true``
+       is refused, because a self-certified bypass would let any campaign
+       delete its drag and wave the flag.
     """
     import pathlib
     import yaml
@@ -366,12 +374,15 @@ def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
                     "drag builder cannot reproduce, so no choice of "
                     f"surface_drag_scheme equalises the arms (named "
                     f"{drag_scheme!r})")
-            elif neural.get("surface_drag_confounded") is not True:
+            else:
+                # Reaching here means nothing was declared: every declared
+                # config continues out of the branch above.
                 problems.append(
                     f"{rel}: classical runs {classical_scheme!r} and the drag "
-                    "is off, so the learned arm has no surface stress; mark "
-                    "it `surface_drag_confounded: true` or stop scoring the "
-                    "two arms against each other")
+                    "is off, so the learned arm has no surface stress; declare "
+                    "`surface_drag_confounded: "
+                    "builder_refuses_classical_scheme` or stop scoring the two "
+                    "arms against each other")
             continue
 
         if not drag_on:
