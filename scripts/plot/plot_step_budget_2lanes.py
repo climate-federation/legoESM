@@ -61,9 +61,12 @@ def main() -> None:
         x = np.arange(len(rows))
         local = np.array([r[2] for r in rows])
         # A measured communication term can come out very slightly negative
-        # when it is zero to within the arm spread; clamp for drawing only
-        # and say so in the annotation.
-        comm = np.array([max(0.0, r[1] - r[2]) for r in rows])
+        # when it is zero to within the arm spread. The BAR is clamped
+        # because a negative segment cannot be stacked, but the annotation
+        # always shows the signed measurement and marks the row, so a
+        # clamped row can never be read as a real zero.
+        comm_signed = np.array([r[1] - r[2] for r in rows])
+        comm = np.clip(comm_signed, 0.0, None)
         ideal = np.array([r[3] for r in rows])
 
         ax.bar(x, local, color=C_LOCAL, label="local work")
@@ -71,8 +74,11 @@ def main() -> None:
         ax.plot(x, ideal, "k_", ms=26, mew=2.0, label="perfect scaling")
 
         for i, r in enumerate(rows):
-            pct = 100.0 * comm[i] / r[1]
-            ax.annotate(f"{pct:.0f}% comm", (i, r[1]), ha="center",
+            pct = 100.0 * comm_signed[i] / r[1]
+            label = f"{pct:.0f}% comm"
+            if comm_signed[i] < 0.0:
+                label = f"{pct:.0f}% comm (below noise)"
+            ax.annotate(label, (i, r[1]), ha="center",
                         va="bottom", fontsize=8.5,
                         xytext=(0, 3), textcoords="offset points")
 

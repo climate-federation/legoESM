@@ -148,6 +148,13 @@ for ND in $DEVS; do
   if [ "$BALLAST_ARMS" = "1" ]; then
     run_arm "$ND" 0 "b2_${ND}_a" 2
     run_arm "$ND" 0 "b2_${ND}_b" 2
+    # Packing-only control: the doubled payload is BUILT and then not sent.
+    # Without it the payload delta contains the device-side concatenate the
+    # multiplier adds, and that is not a small term -- the raw delta came
+    # out larger than the entire communication term, which can only happen
+    # if packing is being counted as wire time.
+    run_arm "$ND" 1 "b2nc_${ND}_a" 2
+    run_arm "$ND" 1 "b2nc_${ND}_b" 2
   fi
 done
 
@@ -178,7 +185,8 @@ def med(tag):
 rows = {}
 missing = []
 for nd in DEVS:
-    for kind in (("full", "nc", "b2") if BALLAST else ("full", "nc")):
+    for kind in (("full", "nc", "b2", "b2nc") if BALLAST
+                 else ("full", "nc")):
         for rep in ("a", "b"):
             tag = f"{kind}_{nd}_{rep}"
             try:
@@ -210,11 +218,20 @@ for nd in DEVS:
               f"arm spread")
     if BALLAST:
         b2 = (rows[f"b2_{nd}_a"] + rows[f"b2_{nd}_b"]) / 2
-        payload = b2 - full
-        per_op = comm - payload
-        print(f"      ndev={nd}: doubling the payload costs {payload:+.3f} ms"
-              f"  =>  of {comm:.3f} ms of communication, {payload:.3f} is "
-              f"payload and {per_op:.3f} is per-operation cost")
+        b2nc = (rows[f"b2nc_{nd}_a"] + rows[f"b2nc_{nd}_b"]) / 2
+        raw = b2 - full          # payload AND the packing it adds
+        packing = b2nc - nc      # the packing alone, no wire
+        wire = raw - packing     # what the extra bytes cost on the wire
+        per_op = comm - wire
+        print(f"      ndev={nd}: doubling the payload costs {raw:+.3f} ms, of "
+              f"which {packing:+.3f} is device-side packing, so the extra "
+              f"bytes cost {wire:+.3f} on the wire")
+        print(f"      ndev={nd}: of {comm:.3f} ms of communication, "
+              f"{wire:.3f} is payload and {per_op:.3f} is per-operation")
+        if packing > 0.25 * raw:
+            print(f"      ndev={nd}: packing is {100*packing/raw:.0f}% of the "
+                  f"raw delta — an uncontrolled payload arm would have "
+                  f"overstated the payload term by that much")
     if nd == 128:
         verdict_row = (comm, excess, spread, full)
 

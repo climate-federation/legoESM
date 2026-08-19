@@ -128,18 +128,36 @@ def _halo_ppermute(x, axis_name, perm):
     """
     import os
 
-    if _resolve_halo_nocomm(os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", "")):
-        return jax.lax.optimization_barrier(x)
+    nocomm = _resolve_halo_nocomm(
+        os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", ""))
     ballast = _resolve_halo_ballast(
         os.environ.get("LEGOESM_LATLON_HALO_BALLAST", ""))
+
+    # The payload multiple is built BEFORE the no-comm branch on purpose, so
+    # the two knobs COMPOSE: running both gives an arm that pays the extra
+    # concatenate and slice with no wire at all. Without that arm the
+    # payload delta is confounded -- it contains the device-side packing the
+    # multiplier itself adds, and the packing cost is not small (the raw
+    # delta came out LARGER than the whole communication term, which is only
+    # possible if the packing is being counted as payload).
+    rows = x.shape[0]
+    send = jnp.concatenate([x] * ballast, axis=0) if ballast > 1 else x
+
+    if nocomm:
+        recv = jax.lax.optimization_barrier(send)
+    else:
+        recv = jax.lax.ppermute(send, axis_name, perm)
     if ballast > 1:
-        rows = x.shape[0]
-        recv = jax.lax.ppermute(
-            jnp.concatenate([x] * ballast, axis=0), axis_name, perm)
+        # The barrier keeps the enlarged send buffer alive: without it XLA
+        # may rewrite slice(ppermute(concat(x, x))) back to ppermute(x),
+        # which preserves every value while shipping the ORIGINAL bytes --
+        # an arm that measures nothing and looks fine. Asserted by an HLO
+        # census in tests/parallel/test_latlon_halo_nocomm.py, not argued.
+        recv = jax.lax.optimization_barrier(recv)
         # The kept slice is the same buffer that would have been sent, so
         # the answer is unchanged; only the bytes on the wire scale.
         return recv[:rows]
-    return jax.lax.ppermute(x, axis_name, perm)
+    return recv
 
 
 def latlon_band_perms(n_dev: int):

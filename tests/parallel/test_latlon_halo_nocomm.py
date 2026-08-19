@@ -155,3 +155,81 @@ def test_ballast_resolver_and_bit_identity(monkeypatch):
     monkeypatch.setenv("LEGOESM_LATLON_HALO_BALLAST", "3")
     on = _pad(field, mesh)
     np.testing.assert_allclose(on, off, rtol=0, atol=0)
+
+
+def _collective_bytes(mesh, field, specs):
+    """Bytes moved by collective-permutes in the LOWERED packed body.
+
+    A value-only test cannot see whether the payload multiplier actually
+    reached the wire: XLA may rewrite slice(ppermute(concat(x, x))) back to
+    ppermute(x), keeping every value identical while shipping the original
+    bytes. Count the operand bytes instead.
+    """
+    import re
+    from jax.sharding import PartitionSpec as P
+
+    body = make_latlon_band_packed_pad_body(mesh, specs)
+    spec = P("lat", None)
+
+    @partial(shard_map, mesh=mesh, in_specs=spec, out_specs=spec,
+             check_vma=False)
+    def _ex(x):
+        return body(x)[0]
+
+    text = jax.jit(_ex).lower(field).compile().as_text()
+    dt_bytes = {"f32": 4, "f64": 8, "s32": 4, "bf16": 2, "pred": 1}
+    shape_re = re.compile(r"(f32|f64|s32|bf16|pred)\[([0-9,]*)\]")
+    total = 0
+    for line in text.splitlines():
+        if "collective-permute" not in line or "=" not in line:
+            continue
+        m = shape_re.match(line.split("=", 1)[1].strip())
+        if not m:
+            continue
+        elems = 1
+        for tok in m.group(2).split(","):
+            if tok.strip():
+                elems *= int(tok)
+        total += elems * dt_bytes[m.group(1)]
+    return total
+
+
+def test_ballast_actually_doubles_the_bytes_on_the_wire():
+    mesh = _mesh()
+    rng = np.random.default_rng(31337)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)), dtype=jnp.float32)
+    specs = (("fold", HALO, False),)
+
+    os.environ.pop("LEGOESM_LATLON_HALO_BALLAST", None)
+    one = _collective_bytes(mesh, field, specs)
+    os.environ["LEGOESM_LATLON_HALO_BALLAST"] = "2"
+    try:
+        two = _collective_bytes(mesh, field, specs)
+    finally:
+        os.environ.pop("LEGOESM_LATLON_HALO_BALLAST", None)
+
+    assert one > 0, "no collective-permute found in the lowered body"
+    assert two == 2 * one, (
+        f"payload multiplier did not reach the wire: {one} bytes at 1x, "
+        f"{two} at 2x (expected {2 * one}). The compiler folded the extra "
+        f"copy away, so every payload measurement taken with it is void")
+
+
+def test_ballast_and_nocomm_compose_into_a_packing_only_arm():
+    """Both knobs together must give an arm with the extra packing and NO
+    collective -- the control that separates packing cost from wire time."""
+    mesh = _mesh()
+    rng = np.random.default_rng(4242)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)), dtype=jnp.float32)
+    specs = (("fold", HALO, False),)
+
+    os.environ["LEGOESM_LATLON_HALO_BALLAST"] = "2"
+    os.environ["LEGOESM_LATLON_HALO_NOCOMM"] = "1"
+    try:
+        both = _collective_bytes(mesh, field, specs)
+    finally:
+        os.environ.pop("LEGOESM_LATLON_HALO_BALLAST", None)
+        os.environ.pop("LEGOESM_LATLON_HALO_NOCOMM", None)
+    assert both == 0, (
+        f"the packing-only control still moves {both} bytes; it cannot "
+        f"isolate packing cost")
