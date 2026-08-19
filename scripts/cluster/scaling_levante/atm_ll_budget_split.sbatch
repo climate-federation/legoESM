@@ -216,5 +216,12 @@ else:
     print("VERDICT: intermediate — both terms matter; rank by size, do not "
           "assume the comm lever wins")
 EOF
+gate_rc=$?
+# The gate's own exit code carried the abort and refute signals and was
+# being thrown away, so a job whose gate said ABORT still exited 0.
+if [ "$gate_rc" -ne 0 ]; then
+  echo "RECEIPT GATE exited $gate_rc"
+  rc=$gate_rc
+fi
 echo "DONE rc=$rc"
 exit $rc

@@ -21,10 +21,14 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from functools import partial
+
 from legoesm.parallel.latlon_spmd import (
     _resolve_halo_nocomm,
+    make_latlon_band_packed_pad_body,
     pad_halo_latlon_band_spmd,
 )
+from legoesm.parallel.shard_map_compat import shard_map
 
 N_DEV = 4
 N_LAT = 16
@@ -86,3 +90,41 @@ def test_nocomm_changes_the_interior_cut_ghost_rows(monkeypatch):
 
 def test_default_environment_leaves_the_knob_off():
     assert os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", "") in ("", "0")
+
+
+def test_nocomm_reaches_the_packed_body_the_measurement_actually_runs():
+    """The budget job runs the PACKED stage-entry exchange, not the basic
+    band pad.  A knob that only reached the basic path would leave the
+    measured path armed and the receipt meaningless, so assert the packed
+    body responds too.
+    """
+    mesh = _mesh()
+    from jax.sharding import PartitionSpec as P
+
+    rng = np.random.default_rng(77)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)))
+    specs = (("fold", HALO, False),)
+
+    def run():
+        body = make_latlon_band_packed_pad_body(mesh, specs)
+        spec = P("lat", None)
+
+        @partial(shard_map, mesh=mesh, in_specs=spec, out_specs=spec,
+                 check_vma=False)
+        def _ex(x):
+            return body(x)[0]
+
+        return np.asarray(_ex(field))
+
+    os.environ.pop("LEGOESM_LATLON_HALO_NOCOMM", None)
+    off = run()
+    os.environ["LEGOESM_LATLON_HALO_NOCOMM"] = "1"
+    try:
+        on = run()
+    finally:
+        os.environ.pop("LEGOESM_LATLON_HALO_NOCOMM", None)
+
+    assert off.shape == on.shape
+    assert not np.allclose(off, on), (
+        "the packed exchange is unaffected by the no-comm knob, so the "
+        "budget receipt measured a path the knob never touched")
