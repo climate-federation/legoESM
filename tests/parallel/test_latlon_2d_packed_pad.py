@@ -86,6 +86,7 @@ def test_packed_matches_per_field_bit_for_bit(p_lat, p_lon):
     ref = _run_per_field(mesh, specs, fields)
     for i, (a, b) in enumerate(zip(ref, got)):
         assert a.shape == b.shape, f"field {i}: {b.shape} != {a.shape}"
+        assert a.dtype == b.dtype, f"field {i}: {b.dtype} != {a.dtype}"
         np.testing.assert_array_equal(
             np.asarray(jax.device_get(a)), np.asarray(jax.device_get(b)),
             err_msg=f"field {i}: packed differs from per-field")
@@ -109,10 +110,16 @@ def test_packed_collapses_the_message_count():
     per_field = _count_collectives(
         lambda *fs: _run_per_field(mesh, specs, fs), *fields)
 
+    # The claim is that the count is INDEPENDENT of the field count, so
+    # compare against one field packed. A "3x fewer" bar would pass a
+    # regression to two packed batches.
+    one = _count_collectives(
+        lambda f: _run_packed(mesh, specs[:1], (f,)), fields[0])
     assert packed > 0, "no collectives lowered — the test proves nothing"
-    assert packed * 3 <= per_field, (
-        f"packed body issues {packed} messages against {per_field} for six "
-        f"fields; it was supposed to be independent of the field count")
+    assert packed == one, (
+        f"packed body issues {packed} messages for six fields against "
+        f"{one} for one; it was supposed to be independent of the field "
+        f"count (per-field path: {per_field})")
 
 
 def test_refuses_what_it_cannot_pack():
@@ -125,3 +132,16 @@ def test_refuses_what_it_cannot_pack():
     with pytest.raises(ValueError, match="needs a 2-D"):
         band = Mesh(np.array(jax.devices()[:2]), axis_names=("lat",))
         make_latlon_2d_packed_pad_body(band, (("fold", 1, False),))
+
+
+def test_refuses_mixed_dtypes_rather_than_promoting_them():
+    """A packed buffer promotes bfloat16 with float32 to float32 and nothing
+    casts back, so a mixed group would silently change field dtypes. The
+    per-field path preserves them, so this must raise rather than differ."""
+    mesh = _mesh(2, 2)
+    rng = np.random.default_rng(5)
+    a = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 3)), dtype=jnp.float32)
+    b = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 3)), dtype=jnp.bfloat16)
+    specs = (("fold", HALO, False), ("fold", HALO, False))
+    with pytest.raises(ValueError, match="share one dtype"):
+        _run_packed(mesh, specs, [a, b])

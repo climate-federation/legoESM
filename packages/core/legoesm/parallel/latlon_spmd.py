@@ -709,6 +709,15 @@ def _chan_pack(slabs):
     what lets the packed buffer go through the SAME lon ring, row flip and
     column take the per-field path uses -- a ravel would destroy them.
     """
+    dtypes = {x.dtype for x in slabs}
+    if len(dtypes) != 1:
+        # Concatenating promotes (bfloat16 with float32 gives float32) and
+        # nothing casts back, so a mixed group would silently change field
+        # dtypes. The per-field path preserves them.
+        raise ValueError(
+            f"_chan_pack: all slabs must share one dtype to ride in one "
+            f"buffer; got {sorted(str(d) for d in dtypes)}. Group by dtype "
+            f"before packing.")
     views = [x.reshape(x.shape[0], x.shape[1], -1) for x in slabs]
     widths = [int(v.shape[2]) for v in views]
     return jnp.concatenate(views, axis=2), widths
@@ -744,9 +753,14 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
     the byte cut survives without the message count.
 
     Message count per call, independent of the number of fields: two for
-    the latitude cut, two for the longitude ring, and three for the pole
-    fold (its own ring pair plus the antipodal exchange). The per-field
-    path costs that many PER FIELD.
+    the latitude cut, two for the longitude ring, and six for the pole fold
+    — three per pole edge, its own ring pair plus the antipodal exchange,
+    run for the south edge and the north edge. Ten in total, which is the
+    measured figure. The per-field path costs that many PER FIELD.
+
+    All fields must share one dtype: a packed buffer promotes mixed widths
+    and nothing casts back, so a mixed group would silently change field
+    dtypes. Group by dtype and call once per group.
 
     ``specs`` — STATIC tuple, one ``("fold", halo, negate)`` entry per field,
     the same fold family :func:`make_latlon_2d_pad_body` handles. All fields
@@ -860,11 +874,14 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
             s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
         else:
             w_tile = fields[0].shape[1]
-            if w_tile < 4 * halo:
+            if w_tile < 2 * halo:
+                # The per-field partner fold accepts w >= 2h; matching it
+                # exactly, so this body is not narrower than the one it
+                # claims parity with.
                 raise ValueError(
                     f"make_latlon_2d_packed_pad_body: tile lon width "
-                    f"{w_tile} is under 4x the halo {halo}; the antipodal "
-                    f"fold needs a 2h ring extension on each side.")
+                    f"{w_tile} is under 2x the halo {halo}, which the "
+                    f"antipodal fold cannot serve.")
             c = jax.lax.axis_index("lon")
             W = w_tile * p_lon
             perm_anti = [(src, (src + p_lon // 2) % p_lon)
