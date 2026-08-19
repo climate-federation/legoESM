@@ -42,7 +42,12 @@ for BK in numpy jax; do
   echo "########## ARM=$ARM BACKEND=$BK"
   timeout 10800 $PY scripts/validate/fv3_native/full_step_oracle_parity.py \
     --backend "$BK" $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
-  echo "rc=$?"
+  RC=$?
+  echo "rc=$RC"
+  # A backend that DIED is not a backend that agreed. Without this the loop
+  # ran on, the comparison below found no shared metrics, and the job still
+  # reported success.
+  [ "$RC" -eq 0 ] || { echo "FAIL: backend $BK exited $RC"; exit "$RC"; }
   # The decisive lines only: the residual table and the port's own
   # tendency, which is what separates "wrong in detail" from "wrong
   # step". The full log stays in $OUT for either.
@@ -57,7 +62,7 @@ try:
     a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
 except Exception as e:            # a missing json means an arm died
     print(f"cannot compare: {e}")
-    raise SystemExit(0)
+    raise SystemExit(4)               # NOT success: nothing was compared
 
 def flat(d, p=""):
     for k, v in (d or {}).items():
@@ -70,7 +75,7 @@ fa, fb = dict(flat(a)), dict(flat(b))
 keys = [k for k in fa if k in fb]
 if not keys:
     print("no shared numeric keys between the two runs")
-    raise SystemExit(0)
+    raise SystemExit(4)               # NOT success: nothing was compared
 print(f"{'metric':50s} {'numpy':>12s} {'jax':>12s} {'rel':>10s}")
 worst = (0.0, None)
 for k in sorted(keys):
@@ -81,5 +86,20 @@ for k in sorted(keys):
         worst = (rel, k)
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST BACKEND-TO-BACKEND rel = {worst[0]:.3e} at {worst[1]}")
+
+# THE EXIT CRITERION, enforced. This job is the evidence for the claim that
+# the two backends agree; printing a number and exiting zero made it a job
+# that could not fail, so a 1e-2 wind error would have been reported as a
+# passing parity run. The bound defaults to EXACT because that is what the
+# claim says: bit-identical between backends.
+import os
+bound = float(os.environ.get("MAX_REL", "0.0"))
+if worst[0] > bound:
+    print(f"FAIL: backend-to-backend {worst[0]:.3e} exceeds MAX_REL={bound:g} "
+          f"at {worst[1]}")
+    raise SystemExit(1)
+print(f"PASS: backend-to-backend within MAX_REL={bound:g}")
 EOF
-echo BKPARITY_DONE
+BKRC=$?
+echo "BKPARITY_DONE rc=$BKRC"
+exit $BKRC

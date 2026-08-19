@@ -576,3 +576,39 @@ def test_wall_allowlist_paths_are_live():
     paths = {p for p, _ in _wall_surface()}
     dead = _FV3_DUO_ALLOWED_NONDEFAULT - paths
     assert not dead, f"allow-listed paths not in the config surface: {dead}"
+
+
+def test_the_driver_can_only_build_the_certified_split_counts():
+    """The remap orders are refused at construction if they leave the deck;
+    the acoustic split counts are not, so a reviewer read them as an escape.
+
+    They are not one, because nothing plumbs them: the factory builds the
+    solver's configuration itself and passes only the level count and the
+    hydrostatic switch, so a launch cannot ask for a different number of
+    acoustic substeps per remap. This test is that closure, pinned — it goes
+    red the day someone threads a split count through the experiment
+    configuration without also certifying it (codex).
+    """
+    import ast
+    import inspect
+
+    from legoesm.driver import component_factory
+
+    src = inspect.getsource(component_factory.create_atmosphere_dycore)
+    tree = ast.parse(src.lstrip() if src[0] not in " \t" else
+                     __import__("textwrap").dedent(src))
+    built = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "FV3DuoConfig"]
+    assert built, "the duo lane no longer builds its own FV3DuoConfig here"
+    for call in built:
+        passed = {kw.arg for kw in call.keywords}
+        assert not ({"k_split", "n_split"} & passed), (
+            f"the factory now passes {sorted({'k_split', 'n_split'} & passed)} "
+            "into the duo solver, so a launch can select an acoustic split "
+            "count the oracle parity never measured; refuse non-certified "
+            "values at construction the way the remap orders are refused")
+
+    # And the defaults it therefore gets are the ones the parity was run at.
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
+    assert (FV3DuoConfig().k_split, FV3DuoConfig().n_split) == (1, 8)
