@@ -166,6 +166,18 @@ def main(argv: list[str] | None = None) -> int:
         # subs: large-scale subsidence ships OFF ("none"); the CRM-derived
         # clear-sky subsidence is the one-variable alternative.
         "subs": (base, {"large_scale_forcing": "crm_clear_sky_subsidence"}),
+        # f0_coare3: the corrected-protocol candidate. f0 alone fixed the
+        # surface state (dqv +6.20 -> +1.37) but the wind spins down and E
+        # collapses to 0.70 vs the CRM's 2.73 - SAM carries its fluxes on
+        # convective gusts. COARE3's w* gustiness supplies exactly that flux
+        # wind independent of the mean wind. PRE-REGISTERED: if E recovers
+        # substantially while the surface stays near the f0 state, the pair
+        # (f=0, coare3 gustiness) is the defensible SCM-RCEMIP configuration
+        # and the campaign should be re-run on it; if E stays collapsed, the
+        # gust source must come from convection itself (cold pools) and no
+        # bulk-scheme fix suffices.
+        "f0_coare3": (_with_louis_override(base, bulk_scheme="coare3"),
+                      {"coriolis_s_inv": 0.0}),
     }
 
     results = {}
