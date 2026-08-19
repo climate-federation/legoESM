@@ -553,11 +553,26 @@ CONFIRMED properties: w-only; 100% boundary-ring, corner-adjacent,
 argmax k=0, decaying downward by 4 orders; face classes {1,2,4,5} and
 {3,6} carry bit-close values — deterministic geometry, not noise; a
 STANDING floor (1.300e-07 at N = 1, 3, 10 steps — the relative number
-FALLS as the tendency grows); w_limiter is a proven no-op (True/False
-twin bitwise); constants and every deck parameter match the oracle
-echo (GFS both sides); coherent boundary-METRIC perturbation at 1e-12
-and 1e-10 moves it NOT AT ALL — the shared-floor hypothesis is
-REFUTED at the metric level.
+FALLS as the tendency grows); w_limiter measured a 0.0 twin difference
+(True/False bitwise; ASSERTED in the probe now, not just printed);
+constants and every deck parameter match the oracle echo (GFS both
+sides); coherent MULTIPLICATIVE boundary-metric perturbation at 1e-12
+and 1e-10 moves it not at all. GLM 2026-08-19 downgrade, accepted:
+that scaling probe samples ONE RAY of the metric-difference space and
+cannot excite a DISCRETE representation difference, so the metric
+family is "unsupported by a scaling probe", NOT refuted — the decisive
+cheaper test is a bitwise metric TRANSPLANT (oracle metric values
+imported into the lane), which also covers the vertical metric the
+perturbation never touched.
+
+Two constraints recorded, not yet exploited: the face-class pattern
+({1,2,4,5} vs {3,6}, bit-close within class) is ASYMMETRIC in a way
+both named candidates — a per-column top BC and a per-column remap
+edge — should not produce, pointing at seam/orientation-dependent
+boundary structure; and since Riem_Solver3 OVERWRITES w each substep,
+a standing floor implies a persistent difference in the solver's
+INPUTS, not in w's history. An N=0 bitwise check of w at the IC is
+the missing cheap control.
 
 Localised to the acoustic-tail w path: Riem_Solver3 writes essentially
 all of w every substep, and the kord_wz remap's own increment at the

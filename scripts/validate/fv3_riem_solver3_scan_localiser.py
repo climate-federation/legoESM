@@ -50,13 +50,19 @@ accumulation BITWISE while pk differs at 3.55e-15 with only an
 exact-rounded mul and ``exp`` between them, and run E confirms at the
 primitive: eager ``jnp.exp`` vs ``np.exp`` on identical values differs
 by ~1 ulp (log is bitwise); ``exp(gama*log(y))`` reproduces 4.66e-10.
-The residual is the XLA-CPU-vs-libm ``exp`` implementation gap, not
-scan compilation.  Run D: the router-free call is exactly repeatable
-(0.0 twice, all faces).  OPEN, does not carry the verdict: run A's
-router-all-XLA call differs DETERMINISTICALLY from the router-free
-call by 5.24e-10 on faces 2-6 (0.0 on face 1), reproduced bit-identical
-across both jobs; runs B/D/E are router-free or fully eager, so the
-verdict rests only on those.
+The scans are EXONERATED (run B, all-eager, residual unchanged), and
+the XLA-vs-libm ``exp`` gap is the CANDIDATE mechanism CONSISTENT with
+the residual -- ~1 ulp on 73/576 sampled operands, composite magnitude
+matches -- but NOT a proven propagation (codex+GLM 2026-08-19: run E
+fed both exponentials the same pre-rounded product and sampled
+constructed operands, so it measures the primitive gap, not the
+production path; the closing experiment is a libm substitution at the
+production exp sites, not yet run). Run D: the router-free call is
+exactly repeatable (0.0 twice, all faces). The formerly "open" run-A
+anomaly was THIS PROBE'S BUG: the router counter was global, so faces
+2-6 ran all-eager inside the "all-XLA" arm (see Router.reset) -- the
+5.24e-10/faces-2-6/0.0-on-face-1 pattern is exactly that, and the
+verdict never rested on run A.
 
 usage:  python scripts/validate/fv3_riem_solver3_scan_localiser.py
 """
@@ -123,6 +129,14 @@ class ScanRouter:
 
     def __init__(self, xla_sites):
         self.xla_sites = frozenset(xla_sites)
+        self.calls = 0
+
+    def reset(self):
+        """Per-face reset (codex 2026-08-19 MAJOR: the counter ran
+        globally, so with xla_sites={0..7} only FACE 1 ever routed to
+        XLA and faces 2-6 silently ran all-eager -- which is exactly
+        the 'anomaly' the header used to record as open. A router bug,
+        not an XLA effect.)"""
         self.calls = 0
 
     def scan(self, f, init, xs, **kw):
@@ -269,8 +283,11 @@ def main() -> int:
     print("   router itself may change nothing), then vs NumPy:")
     plain = [_jax_riem(t, *shared[t]) for t in range(6)]
     jnh.lax = ScanRouter(all_sites)
-    routed = [_jax_riem(t, *shared[t]) for t in range(6)]
-    n_scan_calls = jnh.lax.calls // 6
+    routed = []
+    for _t in range(6):
+        jnh.lax.reset()          # per-face: sites are call indices WITHIN one face
+        routed.append(_jax_riem(_t, *shared[_t]))
+    n_scan_calls = jnh.lax.calls  # per-face now (reset each face)
     for t in range(6):
         worst = max(_cmp(nm, plain[t][nm], routed[t][nm])[0]
                     for nm in fields)

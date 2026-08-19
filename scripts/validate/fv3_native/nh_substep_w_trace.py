@@ -315,6 +315,12 @@ def main() -> int:
     print(f"WORST w rel: {worst_w:.4e}  (gate's standing number: "
           f"6.6116e-04 -- a probe that does not reproduce it traced a "
           f"different step)")
+    # ASSERTED (codex MINOR): the sentence above was advisory; a probe
+    # tracing the wrong step could still print DONE.
+    assert 5.0e-04 < worst_w < 8.0e-04, (
+        f"instrument control: worst w rel {worst_w:.4e} does not "
+        f"reproduce the standing 6.6116e-04 -- this probe traced a "
+        f"different step; every localisation downstream is void.")
 
     # ---- instrument control 2: bit-identity vs the real driver -------
     state2, press2, q2 = fresh()
