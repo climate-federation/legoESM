@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -414,10 +415,28 @@ def _build_mode_components_spectral(cfg, yml):
         # Without this the interval key is INERT and the SI SSP-RK3 step calls
         # RRTMGP three times per step — ~18x the intended rate at interval 6,
         # and the combined wrapper also freezes radiation's solar time (codex).
+        # CAM trop_cloud_top_press for CLUBB [hPa in the YAML, Pa inside]:
+        # None/absent -> CLUBBConfig's default 0.0 = feature off. The
+        # 32-level arm sets 50 hPa — the diagnostic scheme's measured
+        # stratospheric excursion lives 16-50 hPa there. A non-finite or
+        # non-positive value is a config error, not a silent off-switch.
+        _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
+        if _clubb_top_hpa is None:
+            _clubb_top = None
+        else:
+            _clubb_top = float(_clubb_top_hpa) * 100.0
+            if not math.isfinite(_clubb_top) or _clubb_top <= 0.0:
+                raise ValueError(
+                    "classical.clubb_top_press_hpa must be a finite "
+                    f"positive pressure in hPa, got {_clubb_top_hpa!r}; "
+                    "omit the key to leave the CAM trop-cloud-top taper "
+                    "off.")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
-                rad_update_interval_steps=_rad_interval, **_schemes)
+                rad_update_interval_steps=_rad_interval,
+                clubb_top_press=_clubb_top, **_schemes)
         # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
         # kwarg, same as in the AIMIP trainer, where prescribed SST enters
         # through the surface scheme rather than the physics signature.
@@ -663,6 +682,33 @@ def era5_time_to_forcing_calendar(time_ns, year):
     return doy_1based, sod
 
 
+def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> int:
+    """Refuse a scheme whose species the BUILT carry cannot hold.
+
+    Mirrors the production driver, which counts the leading non-None slots of
+    its live tracer state and validates that count.  Counting instead the
+    registry the scheme itself selected would be tautological — the two can
+    only ever agree, so such a check could never catch the failure it claims to
+    (codex).  Counting the carry catches a seeding path that silently produced
+    fewer slots than the scheme writes, which is exactly how the WeatherBench
+    classical arm trained to a NaN: nine-species microphysics on a
+    three-species state, six tendencies discarded per evaluation.
+
+    Deliberately NOT placed in the shared microphysics bridge: several dycore
+    tests build partial tracer states on purpose and rely on its tolerance, so
+    turning that into a hard error is a separate policy decision.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+    from legoesm.driver.physics_pipeline import validate_microphysics_tracer_slots
+
+    have = 0
+    for name in make_full_moisture_registry().names:
+        if getattr(carry, name, None) is None:
+            break
+        have += 1
+    return validate_microphysics_tracer_slots(microphysics, have, context=context)
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -693,11 +739,34 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
 
+    # Which water species the state must carry follows the scheme the arm
+    # selects, and the carry builder already knows how to seed them — it was
+    # simply never told which scheme was running here, so every state was built
+    # for the three warm-rain slots.  A nine-species microphysics then had its
+    # ice / snow / graupel / number tendencies silently dropped downstream.
+    # The learned arms run no microphysics or turbulence scheme at all, so they
+    # keep the three-slot carry and are byte-unchanged.
+    #
+    # Microphysics only. A stateful turbulence scheme (CLUBB, MYNN, EDMF) would
+    # also seed a prognostic energy carry, but the spectral rollout threads no
+    # turbulence state between steps and the spectral->carry conversion has
+    # nowhere to put one, so seeding it would make the forecast carry
+    # structurally different from the initial condition it is scored against.
+    # Carrying turbulence energy across steps on this path is separate work.
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
+
+
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
+        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma,
+                                    microphysics=_micro)
+        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma,
+                                        microphysics=_micro)
+        if not samples:
+            validate_carry_holds_scheme(
+                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
         sst_src = load_era5_slice(era5_cfg, i_ic)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)

@@ -89,3 +89,37 @@ def test_mpi_train_step_synced_across_ranks():
     from mpi4py import MPI
     allp = MPI.COMM_WORLD.allgather(np.asarray(params).tolist())
     assert np.allclose(allp[0], allp[1]), allp
+
+
+def test_one_poisoned_rank_skips_update_on_both_ranks():
+    """Non-finite guard under real MPI: rank 0's sample produces a NaN
+    gradient, rank 1's is finite. BOTH ranks must agree to skip (allreduce
+    MIN on the flag), leave params AND optimizer state untouched, and
+    return the NaN marker — a divergent decision would desync the replicas
+    forever."""
+    rank, nproc = _nranks()
+    if nproc != 2:
+        pytest.skip("needs mpirun -np 2")
+    import jax
+    import optax
+
+    w = jnp.array([1.0, 2.0])
+    optimizer = optax.adam(0.1)
+    opt_state = optimizer.init(w)
+
+    def loss(p, x):
+        # x[0] == 0 -> sqrt(0) -> finite loss, NaN gradient.
+        return jnp.sum((p * x) ** 2) + jnp.sqrt(jnp.sum(p ** 2) * x[0])
+
+    x = jnp.array([0.0, 0.0]) if rank == 0 else jnp.array([1.0, 0.5])
+    p2, o2, l2 = mpi_data_parallel_train_step(
+        build_dp_value_and_grad(loss), w, opt_state, optimizer, x, nproc)
+    # Marker + untouched state on EVERY rank, including the healthy one.
+    assert float(l2) != float(l2), (rank, float(l2))
+    np.testing.assert_array_equal(np.asarray(p2), np.asarray(w))
+    for a, b in zip(jax.tree.leaves(o2), jax.tree.leaves(opt_state)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    # Cross-rank agreement on the decision (both skipped -> both markers).
+    from mpi4py import MPI
+    flags = MPI.COMM_WORLD.allgather(float(l2) != float(l2))
+    assert flags == [True, True]

@@ -1421,7 +1421,9 @@ def _vordiv_pinv_operators(grid: GaussianGrid):
     key = (n_max, n_lat, a, _h.hexdigest())
     ops = _VORDIV_PINV_CACHE.get(key)
     if ops is not None:
-        return ops
+        _bp, _lp, _si, _nsh, _np_ = ops
+        return (jnp.asarray(_bp), jnp.asarray(_lp), jnp.asarray(_si),
+                _nsh, _np_)
 
     # Guard against silent OOM at very high truncation: the padded operator is
     # ``64·(n_max+1)²·n_lat`` bytes (complex128).  ~117 MiB at T106, ~460 MiB
@@ -1463,15 +1465,24 @@ def _vordiv_pinv_operators(grid: GaussianGrid):
         lap_pad[m, :k] = lap[idx]
         sh_index[m, :k] = idx
 
-    ops = (
+    # Cache the HOST numpy arrays, and convert at every call. Caching the
+    # ``jnp.asarray`` results instead means: whichever caller reaches this
+    # first INSIDE a jit/grad trace poisons the cache with that trace's
+    # constants (DynamicJaxprTracer on JAX 0.10), and every later trace or
+    # eager call in the process dies with UnexpectedTracerError at the einsum
+    # that consumes them (2026-08-16, WB sample-17 NaN hunt — it killed the
+    # jax_debug_nans re-trace). The per-call ``jnp.asarray`` on a concrete
+    # numpy array is a cheap constant embed (eager: device transfer once per
+    # call; traced: baked into the program), and the numpy bytes are identical
+    # either way so every program computes with the same operator.
+    _VORDIV_PINV_CACHE[key] = (BP, lap_pad, sh_index, n_sh, n_pad)
+    return (
         jnp.asarray(BP),
         jnp.asarray(lap_pad),
         jnp.asarray(sh_index),
         n_sh,
         n_pad,
     )
-    _VORDIV_PINV_CACHE[key] = ops
-    return ops
 
 
 def vordiv_from_uv_exact_3d(

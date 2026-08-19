@@ -43,6 +43,8 @@ import math
 import os
 import sys
 import time
+import dataclasses
+import importlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -99,16 +101,17 @@ TURBULENCE_SCHEMES: tuple[str, ...] = (
 
 # Cases whose LES applies a radiative forcing the SCM cannot reproduce. Scoring
 # these would compare two different problems; see the module docstring.
-_RADIATION_MISMATCH = {
-    "dycoms": (
-        "the DYCOMS LES applies a parameterized Stevens (2005) longwave "
-        "cooling (run_dycoms_les.py make_stevens_lw) that the SCM has no "
-        "equivalent for. Without cloud-top radiative cooling the SCM "
-        "stratocumulus is a different problem and any score would be a "
-        "radiation confound, not a turbulence result. Port that forcing to "
-        "the SCM side before tuning this case."
-    ),
-}
+# RESOLVED for the stratocumulus cases: the Stevens (2005) longwave the LES
+# applies is now a shared kernel the SCM selects with
+# RadiationConfig(scheme="simple_lw"), so DYCOMS and ASTEX are matched rather
+# than confounded. The dict is kept because the NEXT case whose LES applies a
+# forcing the SCM cannot reproduce must be refused the same way, not scored.
+_RADIATION_MISMATCH: dict[str, str] = {}
+
+# Cases whose LES is driven by the gSAM `doradsimple` longwave. The SCM arm
+# selects the SAME kernel, so cloud-top radiative cooling is present on both
+# sides. Both decks set `dolongwave = .true., doradsimple = .true.`.
+_SIMPLE_LW_CASES = frozenset({"dycoms", "astex"})
 
 ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
     sorted(ANALYTIC_SCM_CASES))
@@ -193,7 +196,67 @@ _ATM_TURB_NAMESPACE = "atm.turb."
 # configuration: identical across arms except turbulence
 # --------------------------------------------------------------------------
 
-def build_surface_config(case, *, bulk_scheme: str = "constant"):
+def surface_flux_varies_in_time(case) -> bool:
+    """Does this case's PRESCRIBED surface flux change during the run?
+
+    One predicate for two decisions that must never disagree: whether the
+    run-constant ``SurfaceLayerConfig`` scalar can carry the flux at all
+    (:func:`deck_surface_scalar_fluxes`), and which of the two handover routes
+    the arm takes. When these were separate expressions the second silently
+    fell through to "no handover" and the closure saw a surface heat flux of
+    zero on a case that prescribes one.
+    """
+    if case.forcing.prescribe != "fluxes":
+        return False
+    spec = getattr(case, "spec", None)
+    return getattr(spec, "surface_theta_flux_fn", None) is not None
+
+
+def deck_surface_scalar_fluxes(case) -> tuple[float, float] | None:
+    """The deck's PRESCRIBED surface (sensible, latent) heat flux [W/m^2, up].
+
+    ``None`` when the case does not prescribe its surface fluxes.
+
+    SAM decks carry SHF/LHF in W/m^2 directly. The dry analytic cases carry a
+    kinematic ABSOLUTE-temperature flux ``sfc_theta_flux_K_m_s``, which the SCM
+    adds to dT/dt with no Exner factor -- so it inverts exactly through
+    ``shf = w_T * rho_sfc * c_pd``, the same relation
+    ``sam_case_scm.surface_kinematic_temperature_flux`` applies forwards. They
+    are dry, so their latent flux is zero.
+    """
+    if case.forcing.prescribe != "fluxes":
+        return None
+    if surface_flux_varies_in_time(case):
+        # A TIME-VARYING flux cannot go through THIS route: SurfaceLayerConfig
+        # carries one scalar for the whole run, so writing it here freezes the
+        # cycle at one instant. Wangara Day 33 measured 113.4 W/m^2 held for
+        # 8 h against a cycle peaking at 13:00, and every closure scored ~9x
+        # the LES profile's own spread there -- scheme-independent, i.e. the
+        # arm, not the closures.
+        #
+        # It is no longer the end of the story: such a case now takes the
+        # PER-STEP route instead (``SCMForcing.flux_to_closure`` ->
+        # ``PhysicsState.surface_wth_override``), which carries the whole
+        # cycle. Declining here selects that route rather than disabling the
+        # handover -- see ``build_arms``.
+        return None
+    rho_sfc = float(case.rho_sfc)
+    surf = getattr(case, "surface", None)
+    if isinstance(surf, dict) and "shf" in surf and "lhf" in surf:
+        return float(surf["shf"]), float(surf["lhf"])
+    spec = getattr(case, "spec", None)
+    w_T = getattr(spec, "sfc_theta_flux_K_m_s", None)
+    if w_T is None:
+        raise ValueError(
+            f"case {case.name!r} prescribes surface fluxes but exposes neither "
+            "a SAM surface dict nor sfc_theta_flux_K_m_s, so the flux cannot "
+            "be handed to the closure."
+        )
+    return float(w_T) * rho_sfc * constants.c_pd, 0.0
+
+
+def build_surface_config(case, *, bulk_scheme: str = "constant",
+                         flux_to_closure: bool = False):
     """The ONE surface-layer config every arm uses, derived from case physics.
 
     The SCM default is a fixed ``Cd_neutral = 1.5e-3``, while every one of
@@ -257,26 +320,94 @@ def build_surface_config(case, *, bulk_scheme: str = "constant"):
             "scaling and ignores Ch_neutral, so the prescribed flux would be "
             "counted twice."
         )
+    shf = lhf = None
+    if flux_to_closure:
+        deck = deck_surface_scalar_fluxes(case)
+        if deck is not None:
+            shf, lhf = deck
     return SurfaceLayerConfig(
         z0=z0, z_ref=z_ref,
         Cd_neutral=cd_neutral, Ch_neutral=ch_neutral,
         bulk_scheme=bulk_scheme,
+        prescribed_shflx_w_m2=shf, prescribed_lhflx_w_m2=lhf,
     )
 
 
-# CLUBBParams entries with NO consumer anywhere in clubb.py, on either the
-# diagnostic or the prognostic path. They are registry entries without an
-# implementation, so they can never be tuned and their gradient is structurally
-# zero: the six C_invrs_tau_* belong to the Guo (2021) invrs_tau reformulation
-# that is not ported (compute_tau_family implements only the CAM-default
-# simple form), and the rest have no call site at all.
-CLUBB_UNIMPLEMENTED_PARAMS: tuple[str, ...] = (
-    "C10", "c_K10h", "Lscale_mu_coef", "mult_coef",
-    "coef_spread_DG_means_rt", "coef_spread_DG_means_thl",
-    "slope_coef_spread_DG_means_w",
-    "C_invrs_tau_bkgnd", "C_invrs_tau_sfc", "C_invrs_tau_shear",
-    "C_invrs_tau_N2", "C_invrs_tau_N2_wp2", "C_invrs_tau_N2_xp2",
-)
+def _dead_params_for(scheme: str) -> frozenset[str]:
+    """Config fields with no consumer, for whichever module owns ``scheme``.
+
+    CLUBB is the one that matters today (29 of its 102 coefficients are
+    registry entries with no implementation) but nothing here is CLUBB-specific,
+    so every closure gets the same check rather than only the one that was
+    caught.
+    """
+    from legoesm.atmosphere.physics.turbulence import config as turb_config
+    if scheme == "clubb":
+        from legoesm.atmosphere.physics.turbulence import clubb as mod
+        return unimplemented_params(mod, mod.CLUBBParams)
+    cls_name = {
+        "smagorinsky": "SmagorinskyConfig", "louis": "LouisConfig",
+        "tke": "TKEConfig", "mynn25": "MYNN25Config",
+        "clubb_lite": "CLUBBLiteConfig", "ysu": "YSUConfig",
+        "holtslag_boville": "HoltslagBovilleConfig",
+        "edmf": "TurbulentEDMFConfig",
+    }.get(scheme)
+    if cls_name is None:
+        raise ValueError(
+            f"no config class registered for turbulence scheme {scheme!r}; "
+            "add it here rather than silently skipping the dead-parameter "
+            "check for a new closure.")
+    # The scheme MODULE, not config.py: the config module only declares the
+    # fields, so every one of them would read as dead.
+    mod = importlib.import_module(
+        f"legoesm.atmosphere.physics.turbulence.{scheme}")
+    return unimplemented_params(mod, getattr(turb_config, cls_name))
+
+
+def unimplemented_params(module, config_cls) -> frozenset[str]:
+    """Fields of ``config_cls`` with NO consumer anywhere in ``module``.
+
+    A registry entry without an implementation can never be tuned -- its
+    gradient is structurally zero -- but the optimizer is handed it anyway and
+    reports it as "trained", which is how a fit can claim 33 trained parameters
+    while a third of them are wired to nothing.
+
+    DERIVED, not listed. The hardcoded tuple this replaces named 13 of CLUBB's
+    29 dead tunables; the other 16 (C13, C7_Lscale0, the two remaining
+    C_invrs_tau_*, Lscale_pert_coef, a_const, alpha_corr, omicron,
+    pdf_component_stdev_factor_w, thlp2_rad_coef, up2_sfc_coef,
+    upsilon_precip_frac_rat, wpxp_Ri_exp, xp3_coef_base, xp3_coef_slope,
+    z_displace) went to the optimizer as live parameters. A list goes stale the
+    first time the port grows a consumer or the config grows a field; reading
+    the source cannot.
+
+    The test is deliberately CRUDE -- the field name appearing anywhere in the
+    module outside its own declaration counts as a consumer. It therefore
+    UNDER-reports (a name mentioned only in a comment reads as live), which is
+    the safe direction: a live parameter wrongly frozen would silently shrink
+    the search space, while a dead one wrongly kept is caught by the existing
+    zero-gradient gate.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(module)
+    # Strip BOTH the field declaration and the __param_spec__ registry before
+    # looking for consumers. Stripping only the declaration returned an EMPTY
+    # dead set for CLUBB -- the spec dict names all 102 parameters in the same
+    # file, so every one of them read as live and this check was inert. The
+    # per-scheme "n trained" counts that looked like it working were the
+    # zero-gradient gate doing the work.
+    for pattern in (
+        rf'class {config_cls.__name__}\(NamedTuple\):.*?(?=\n\S|\Z)',
+        r'^__param_spec__\s*=\s*\{.*?^\}',
+    ):
+        m = re.search(pattern, src, re.S | re.M)
+        if m:
+            src = src.replace(m.group(0), '')
+    return frozenset(
+        f for f in config_cls._fields
+        if not re.search(rf'\b{re.escape(f)}\b', src))
 
 
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
@@ -284,7 +415,8 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          bulk_ch: float | None = None,
                          bulk_ce: float | None = None,
                          surface=None,
-                         clubb_prognostic: bool = True) -> PhysicsConfig:
+                         clubb_prognostic: bool = True,
+                         simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
@@ -326,7 +458,12 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
     base = PhysicsConfig()
     return PhysicsConfig(
         turbulence=turb,
-        radiation=_scheme_none(base.radiation),
+        # The stratocumulus decks run the gSAM doradsimple longwave, so the
+        # SCM runs the SAME kernel; every other case has radiation off on
+        # both sides. It is IDENTICAL across arms either way, so the
+        # across-scheme comparison stays controlled.
+        radiation=(base.radiation._replace(scheme="simple_lw")
+                   if simple_lw else _scheme_none(base.radiation)),
         convection=_scheme_none(base.convection),
         # Held identical across arms either way. "none" means the SCM has no
         # condensation, so the cloud layer carries supersaturated vapour where
@@ -697,12 +834,23 @@ class SchemeResult:
     nonfinite_cases: list[str] | None = None
     per_case_default: dict[str, float] | None = None
     per_case_tuned: dict[str, float] | None = None
+    # mean of s_i(tuned)/s_i(default); 1.0 = no net change. None when
+    # the scheme was never tuned.
+    score_relative_tuned: float | None = None
+    # Analysis-window mean profiles at the TUNED parameters, one dict per arm
+    # in `arms` order. None until the scheme has actually been tuned.
+    profiles_tuned: list[dict[str, np.ndarray]] | None = None
+    # How many times the line search found the optimizer's direction pointing
+    # UPHILL and the momentum buffer had to be dropped to continue. A fit with
+    # several of these converged despite the optimizer, not because of it.
+    n_momentum_restarts: int = 0
 
 
 def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
     return build_physics_config(
         scheme, prescribed_fluxes=arm.prescribed_fluxes,
         microphysics=args.microphysics,
+        simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
     )
@@ -734,13 +882,28 @@ def _arm_score(scheme: str, arm: "CaseArm", args, params=None,
     return means, drift, components, combined, bad
 
 
-def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
+def joint_score(scheme: str, arms: list, args, params=None, cfgs=None,
+                case_norm: dict[str, float] | None = None):
     """Aggregate across cases.
 
-    Each arm's score is already normalised by that case's OWN reference spread,
-    so the arms are commensurable and a plain mean weights every regime
-    equally. That is the point of the multi-case fit: a parameter set that wins
-    on trade cumulus by wrecking the stable boundary layer must not score well.
+    Each arm's score is normalised by that case's OWN reference spread, which
+    makes the arms dimensionless. It does NOT make them the same size, and the
+    difference decides what the optimizer actually fits.
+
+    ``case_norm=None`` is the plain mean of those scores. It weights every
+    regime's ABSOLUTE normalized error equally, so a case every scheme fits
+    badly contributes proportionally more gradient than a case every scheme
+    already fits. Measured on the five-case run, that put 43% of the joint
+    loss on ekman (70% for tke) against 3.1% on bomex -- i.e. the "joint" fit
+    was largely an ekman fit, which is not what a generalization fit means.
+
+    ``case_norm`` supplies each case's score at DEFAULT parameters, making the
+    loss the mean of ``s_i(p)/s_i(p_default)`` -- the fraction of each
+    regime's own default error that remains. Every regime then enters with
+    equal improvement HEADROOM regardless of how hard it is in absolute terms.
+    The normalisers are constants captured before tuning; recomputing them
+    from the traced parameters would make the loss scale-invariant and
+    meaningless.
     """
     per_case, per_components, drifts, means_out = {}, {}, {}, []
     nonfinite = set()
@@ -750,6 +913,8 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
         _m, _drift, comp, combined, bad = _arm_score(
             scheme, arm, args, params=params, base_cfg=cfg)
         means_out.append(_m)
+        # per_case reports the RAW score in every mode, so the per-case table
+        # means the same thing whichever aggregation produced the fit.
         per_case[arm.name] = combined
         per_components[arm.name] = comp
         if _drift is not None:
@@ -759,7 +924,16 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
         # the only path that reports a non-finite arm anyway.
         if params is None and bool(bad):
             nonfinite.add(arm.name)
-        total = combined if total is None else total + combined
+        contribution = combined
+        if case_norm is not None:
+            # Floor the divisor: a case already fitted to well inside the
+            # reference's own spread has no headroom left, and dividing by it
+            # would turn its remaining noise into the dominant gradient --
+            # the exact pathology this aggregation exists to remove, merely
+            # moved to the other end.
+            contribution = combined / max(
+                float(case_norm[arm.name]), args.relative_norm_floor)
+        total = contribution if total is None else total + contribution
     joint = total / float(len(arms))
     joint_score.last_ps_drift_pa = drifts
     joint_score.last_nonfinite = nonfinite
@@ -767,8 +941,68 @@ def joint_score(scheme: str, arms: list, args, params=None, cfgs=None):
     return joint, per_case, per_components
 
 
-def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
-    """Tune ONE parameter set per scheme against ALL cases at once."""
+def relative_joint(per_case: dict[str, float],
+                   case_norm: dict[str, float] | None,
+                   floor: float) -> float | None:
+    """Mean of ``s_i / s_i^0`` -- the fraction of each regime's DEFAULT error
+    that survives tuning.
+
+    1.0 is "no net change", below 1.0 is "improved on average headroom". It is
+    reported for every run, including runs fitted with the plain mean, because
+    it is the number that says whether one parameter set helped every regime
+    or bought one regime at another's expense. Costs no extra rollouts: the
+    per-case scores are already raw.
+    """
+    if not case_norm:
+        return None
+    return float(np.mean([
+        per_case[c] / max(float(case_norm[c]), floor) for c in per_case
+    ]))
+
+
+def line_search_verdict(*, accepted: bool, restarted: bool,
+                        dir_deriv: float) -> str:
+    """What to do after one pass of the line search: accept / restart / stop.
+
+    ``dir_deriv`` is ``sum(grad . update)``. optax returns updates to be
+    ADDED, so ``dir_deriv < 0`` is a descent direction and every scale in
+    ``_LINE_SEARCH_SCALES`` shrinks the same direction: if a descent direction
+    was rejected at all nine scales the fit really has stalled. A REJECTED
+    direction with ``dir_deriv > 0`` points uphill, and no positive scale of it
+    can ever reduce the loss -- that is Adam's momentum buffer disagreeing with
+    the current gradient, not a step that is too long. Dropping the buffer
+    turns it back into a descent direction, so it is worth exactly one retry
+    per step; ``restarted`` is what bounds it to one and keeps a genuinely
+    converged fit from looping.
+
+    MEASURED (job 9417294, 7 cases): the uphill branch did NOT fire on either
+    scheme that stalls. mynn25 reported ``dL = -5.25`` at its stall and
+    smagorinsky ``dL = -2.08e17`` -- both descent directions rejected at every
+    scale down to 1e-4 of the step. So stale momentum is NOT why these fits
+    stop, and this branch is a bounded guard for a case not yet observed, not
+    the explanation. The measured cause is a locally NON-SMOOTH objective
+    (smagorinsky's ``sqrt(max(0, 1 - Ri/Pr_t))`` cutoff has an unbounded
+    derivative; mynn25 runs against its D25 denominator floor on cbl), where a
+    correct gradient predicts a decrease the finite step does not deliver.
+    Do not read this helper as the fix for a stalled fit.
+    """
+    if accepted:
+        return "accept"
+    if restarted or dir_deriv <= 0.0:
+        return "stop"
+    return "restart"
+
+
+def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
+                          case_norm: dict[str, float] | None = None,
+                          default_per_case: dict[str, float] | None = None,
+                          ) -> SchemeResult:
+    """Tune ONE parameter set per scheme against ALL cases at once.
+
+    ``case_norm`` selects the aggregation: ``None`` is the plain mean of
+    the per-case scores, a dict of per-case DEFAULT scores makes the loss
+    the mean of ``s_i/s_i^0``. See :func:`joint_score`.
+    """
     result = SchemeResult(scheme=scheme, status="tuned")
     t0 = time.time()
 
@@ -780,7 +1014,7 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
 
     def loss_fn(params: TrainablePhysicsParams):
         joint, _pc, _comp = joint_score(scheme, arms, args, params=params,
-                                        cfgs=cfgs)
+                                        cfgs=cfgs, case_norm=case_norm)
         return joint
 
     preflight_loss, preflight_grads = eqx.filter_value_and_grad(loss_fn)(
@@ -791,18 +1025,49 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
         result.wall_s = time.time() - t0
         return result
     stats = _grad_stats(preflight_grads, args.grad_nonzero_tol)
+    # The gradient SPECTRUM, not just its zero/non-zero flag. A loss of order 1
+    # whose gradient is 1e15 is not a physical sensitivity -- it is a near-
+    # singular denominator or a clip boundary, and it is why no line-search
+    # scale can find a reducing step (measured: clubb dL = -9.95e14,
+    # smagorinsky -1.82e17, both descent directions rejected at every scale).
+    # Printed unconditionally so a stalled fit names its own worst parameter
+    # instead of needing a second job to find it.
+    _ranked = sorted(stats.items(), key=lambda kv: -kv[1]["abs_max"])
+    _top = "  ".join(f"{n.rsplit('.', 1)[-1]}={s['abs_max']:.3g}"
+                     for n, s in _ranked[:8])
+    print(f"    [{scheme}] preflight loss={float(preflight_loss):.6g} "
+          f"|grad| max-to-min {_ranked[0][1]['abs_max']:.3g} .. "
+          f"{_ranked[-1][1]['abs_max']:.3g}\n"
+          f"    [{scheme}] largest: {_top}", flush=True)
+
+    dead = _dead_params_for(scheme)
 
     def _reason(name, stat):
         if not stat["finite"]:
             return "non-finite gradient"
-        field = name.rsplit(".", 1)[-1]
-        if scheme == "clubb" and field in CLUBB_UNIMPLEMENTED_PARAMS:
-            return ("UNIMPLEMENTED: no consumer anywhere in clubb.py on "
-                    "either path")
+        if name.rsplit(".", 1)[-1] in dead:
+            return "UNIMPLEMENTED: no consumer anywhere in the scheme module"
         return f"|grad| <= {args.grad_nonzero_tol:g} in preflight"
 
     frozen = {n: _reason(n, st) for n, st in stats.items() if not st["nonzero"]}
     keep = {n for n, st in stats.items() if st["nonzero"]}
+    # A parameter with no consumer must NEVER reach the optimizer, whatever its
+    # measured gradient. Relying on the zero-gradient gate alone let 16 of
+    # CLUBB's 29 dead tunables through as "trained": the gate tests |grad| >
+    # 1e-14, and a dead leaf in a long rollout can pick up round-off noise
+    # above that floor. Excluding them structurally is what makes n_trained
+    # mean what it says.
+    dead_but_live = {n for n in keep if n.rsplit(".", 1)[-1] in dead}
+    if dead_but_live:
+        for n in sorted(dead_but_live):
+            frozen[n] = ("UNIMPLEMENTED: no consumer anywhere in the scheme "
+                         f"module, yet |grad| = {stats[n]['abs_max']:.3g} "
+                         "> tol -- round-off on a disconnected leaf")
+        keep -= dead_but_live
+        print(f"    [{scheme}] {len(dead_but_live)} parameter(s) with no "
+              f"consumer had a NON-zero gradient and were excluded anyway: "
+              f"{', '.join(sorted(n.rsplit('.', 1)[-1] for n in dead_but_live))}",
+              flush=True)
     result.frozen = frozen
     if not keep:
         result.status = "no_active_gradient"
@@ -830,33 +1095,81 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
             result.error = f"gradient gate failed at step {step}: {bad}"
             result.status = "failed"
             break
-        updates, opt_next = optimizer.update(
-            eqx.filter(grads, eqx.is_array), opt_state,
-            eqx.filter(params, eqx.is_array))
-        accepted = False
-        for scale in _LINE_SEARCH_SCALES:
-            cand = eqx.apply_updates(
-                params, jax.tree_util.tree_map(lambda x: x * scale, updates))
-            _assert_strict_bounds(cand)
-            cand_loss = float(loss_fn(cand))
-            # A candidate at or above the penalty contains a NON-FINITE case:
-            # score_against_les maps any non-finite rollout to exactly
-            # NONFINITE_PENALTY. Testing only `cand_loss < loss_val` accepted
-            # such a candidate whenever the CURRENT loss was legitimately
-            # larger -- a near-uniform reference divided by the spread floor
-            # produces a finite score above 1000 -- so a blown-up parameter set
-            # was adopted as an "improvement". A blow-up is never an
-            # improvement, whatever the current loss is.
-            if cand_loss >= NONFINITE_PENALTY:
-                continue
-            if np.isfinite(cand_loss) and cand_loss < loss_val:
-                params, opt_state = cand, opt_next
-                loss_history.append(cand_loss)
-                accepted = True
+        accepted, note, restarted = False, "", False
+        while True:
+            updates, opt_next = optimizer.update(
+                eqx.filter(grads, eqx.is_array), opt_state,
+                eqx.filter(params, eqx.is_array))
+            # Directional derivative of the loss along the update optax
+            # actually proposes. optax returns updates to be ADDED, so a
+            # descent direction is dL = sum(g . u) < 0, and NO line-search
+            # scale can rescue a direction with dL > 0. Measuring it separates
+            # two unrelated causes that "no reducing step" used to report with
+            # one message: "the step is too big" (dL < 0, every scale still
+            # rejected, so the reduction fell under the comparison's
+            # resolution) from "the direction is uphill" (dL > 0, which is
+            # stale momentum -- Adam's m is an average over past steps and can
+            # point against the current gradient -- and is not a step-size
+            # problem at all).
+            dir_deriv = float(sum(
+                jnp.sum(g * u) for g, u in zip(
+                    jax.tree_util.tree_leaves(
+                        eqx.filter(grads, eqx.is_array)),
+                    jax.tree_util.tree_leaves(
+                        eqx.filter(updates, eqx.is_array)))))
+            best_rejected = None
+            for scale in _LINE_SEARCH_SCALES:
+                cand = eqx.apply_updates(
+                    params,
+                    jax.tree_util.tree_map(lambda x: x * scale, updates))
+                _assert_strict_bounds(cand)
+                # Score the candidate PER CASE, not just as the aggregate. A
+                # non-finite rollout is mapped to exactly NONFINITE_PENALTY in
+                # the case that blew up, but the objective is a MEAN over
+                # cases, so one blown case among five contributes only ~200 --
+                # far under the penalty. Testing the aggregate therefore did
+                # not reliably reject a blown-up candidate, and could not
+                # reject one at all under an aggregation that divides each
+                # case by a normalizer above 1.
+                cand_joint, cand_per_case, _ = joint_score(
+                    scheme, arms, args, params=cand, cfgs=cfgs,
+                    case_norm=case_norm)
+                cand_loss = float(cand_joint)
+                if any(float(v) >= NONFINITE_PENALTY
+                       for v in cand_per_case.values()):
+                    continue
+                if np.isfinite(cand_loss) and cand_loss < loss_val:
+                    params, opt_state = cand, opt_next
+                    loss_history.append(cand_loss)
+                    accepted = True
+                    break
+                if np.isfinite(cand_loss) and (
+                        best_rejected is None or cand_loss < best_rejected[1]):
+                    best_rejected = (scale, cand_loss)
+            verdict = line_search_verdict(
+                accepted=accepted, restarted=restarted, dir_deriv=dir_deriv)
+            if verdict != "restart":
+                if not accepted and best_rejected is not None:
+                    note = (f" dL={dir_deriv:.3g} best rejected "
+                            f"{best_rejected[1]:.10g} at scale "
+                            f"{best_rejected[0]:g}")
+                elif not accepted:
+                    note = f" dL={dir_deriv:.3g} every scale non-finite"
                 break
+            # Uphill direction: the momentum buffer, not the step size, is what
+            # blocks progress, so scaling it down cannot help. Drop the buffer
+            # and retry this step once from the raw gradient, which IS a
+            # descent direction. Re-init also restarts the cosine learning-rate
+            # schedule at its peak -- a warm restart, deliberate: a stalled fit
+            # has nothing to lose from a larger step it must still pass the
+            # line search to take.
+            restarted = True
+            opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
+            result.n_momentum_restarts += 1
         print(f"    [{scheme}] step {step}/{args.steps} joint={loss_val:.6g} "
-              f"{'accepted' if accepted else 'no reducing step -> stop'}",
-              flush=True)
+              f"{'accepted' if accepted else 'no reducing step -> stop'}"
+              f"{' (after momentum restart)' if restarted and accepted else ''}"
+              f"{note}", flush=True)
         if not accepted:
             if step == 1:
                 result.status = "no_reducing_step"
@@ -865,9 +1178,33 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs) -> SchemeResult:
     result.loss_history = loss_history
     tuned_cfgs = [_materialize_static(_apply_trainable_params(c, params))
                   for c in cfgs]
+    # Scored with case_norm=None on purpose: score_tuned must be the SAME
+    # metric as score_default whichever aggregation drove the fit, or the
+    # headline default-vs-tuned comparison silently changes units. The
+    # aggregation actually minimised is reported alongside it.
     joint, per_case, per_comp = joint_score(scheme, arms, args, params=None,
                                             cfgs=tuned_cfgs)
     result.score_tuned = float(joint)
+    # The TUNED profiles cost NOTHING extra: the call above already rolled
+    # every arm out at the tuned parameters to produce score_tuned, and
+    # `last_means` holds exactly those rollouts. Capturing them here is what
+    # lets the per-case figure draw the fit instead of only its starting
+    # point -- previously the npz held DEFAULT profiles alone, so a figure
+    # captioned with a tuned ranking showed untuned curves.
+    result.profiles_tuned = [
+        {"theta": np.asarray(_theta_from_T(mm["T"], a.case.p_full)),
+         "qv": np.asarray(mm["qv"]), "u": np.asarray(mm["u"]),
+         "v": np.asarray(mm["v"])}
+        for a, mm in zip(arms, joint_score.last_means)
+    ]
+    # Normalised by the DEFAULT scores, not by case_norm: the headroom
+    # number is reported in BOTH aggregations, and case_norm is None in
+    # 'mean' mode. Reporting it only when it happened to drive the fit is
+    # what made the --joint-aggregation help text ('both are reported')
+    # false.
+    result.score_relative_tuned = relative_joint(
+        {k: float(v) for k, v in per_case.items()}, default_per_case,
+        args.relative_norm_floor)
     result.per_case_tuned = {k: float(v) for k, v in per_case.items()}
     result.components_tuned = {
         k: {kk: float(vv) for kk, vv in c.items()}
@@ -972,6 +1309,36 @@ def parse_args(argv=None):
                         "'none' means the SCM cannot condense, so its cloud "
                         "layer is supersaturated vapour where the LES "
                         "condenses.")
+    p.add_argument("--surface-flux-to-closure",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Hand a case deck's PRESCRIBED surface heat/moisture "
+                        "flux to the turbulence closure as its lower boundary "
+                        "condition, instead of zeroing the exchange "
+                        "coefficient and injecting the flux as a separate "
+                        "column tendency afterwards. The old path left every "
+                        "closure computing a surface flux of exactly ZERO, "
+                        "which disables the defining pathway of every "
+                        "flux-driven nonlocal scheme (YSU's convective "
+                        "velocity scale, PBL depth, entrainment and "
+                        "countergradient all come from shflx). Default False "
+                        "reproduces the historical runs bit for bit.")
+    p.add_argument("--joint-aggregation", default="mean",
+                   choices=["mean", "default_relative"],
+                   help="How the per-case scores become ONE number for the "
+                        "optimizer. 'mean' is the plain mean of the "
+                        "spread-normalized scores; it weights every regime's "
+                        "ABSOLUTE error equally, which on the five-case run "
+                        "put 43%% of the loss on ekman and 3%% on bomex. "
+                        "'default_relative' minimizes the mean of "
+                        "s_i/s_i(default), so every regime enters with equal "
+                        "improvement HEADROOM. Both numbers are reported "
+                        "whichever is chosen.")
+    p.add_argument("--relative-norm-floor", type=float, default=0.05,
+                   help="Floor on the per-case divisor under "
+                        "--joint-aggregation default_relative. A case already "
+                        "fitted well inside the LES reference's own spread has "
+                        "no headroom left, and dividing by it would promote "
+                        "its residual noise to the dominant gradient.")
     p.add_argument("--skip-tuning", action="store_true")
     p.add_argument("--allow-radiation-mismatch", action="store_true",
                    help="run a case whose LES radiation the SCM cannot match; "
@@ -1060,12 +1427,59 @@ def _build_arms(args, case_names: list[str], les_dirs: dict[str, Path]):
         les_end = nsteps * dt / 3600.0
         span = (nsteps - n_start) * dt / 3600.0
         surface = build_surface_config(
-            case, bulk_scheme=args.surface_bulk_scheme)
+            case, bulk_scheme=args.surface_bulk_scheme,
+            flux_to_closure=args.surface_flux_to_closure)
+        prescribed = case.forcing.prescribe == "fluxes"
+        # Two routes to the SAME destination -- the closure's lower boundary
+        # condition -- chosen by whether the flux is constant over the run.
+        #   STEADY: the value goes into SurfaceLayerConfig and the SCMForcing
+        #     surface channel is switched OFF.
+        #   TIME-VARYING: the channel STAYS ON but is redirected, per step,
+        #     into PhysicsState instead of into a column tendency.
+        # Both apply the flux exactly once. Everything else about the arm is
+        # identical, so a case does not change category by being tuned.
+        steady_handover = (args.surface_flux_to_closure and prescribed
+                           and surface.prescribed_shflx_w_m2 is not None)
+        varying_handover = (args.surface_flux_to_closure
+                            and surface_flux_varies_in_time(case))
+        if steady_handover:
+            # The closure now applies the deck flux as its lower boundary
+            # condition, so the forcing channel MUST be switched off: leaving
+            # both on would add the same flux to the column twice.
+            # SAMSCMCase / AnalyticSCMCase are frozen DATACLASSES, so they
+            # have no _replace; SCMForcing is a NamedTuple and does.
+            case = dataclasses.replace(case, forcing=case.forcing._replace(
+                prescribe="none", w_th_s=None, w_qv_s=None))
+            print(f"  {name}: surface flux -> closure "
+                  f"(SHF={surface.prescribed_shflx_w_m2:.4g} "
+                  f"LHF={surface.prescribed_lhflx_w_m2:.4g} W/m^2); "
+                  "the SCMForcing surface channel is OFF so it is not "
+                  "counted twice.")
+        elif varying_handover:
+            # prescribe STAYS "fluxes" and w_th_s stays live: the flag only
+            # moves WHERE the flux is applied. compute_forcing_tendencies
+            # skips its column injection under the same flag, so it is still
+            # applied exactly once -- now as the closure's boundary condition,
+            # which is the input every flux-driven nonlocal scheme is built on.
+            case = dataclasses.replace(
+                case, forcing=case.forcing._replace(flux_to_closure=True))
+            w0 = float(case.forcing.w_th_s(0.0))
+            print(f"  {name}: TIME-VARYING surface flux -> closure per step "
+                  f"(w'T' = {w0:.4g} K m/s at t=0, ~"
+                  f"{w0 * float(case.rho_sfc) * constants.c_pd:.4g} W/m^2); "
+                  "the SCMForcing column injection is OFF so it is not "
+                  "counted twice.")
+        elif args.surface_flux_to_closure and prescribed:
+            raise SystemExit(
+                f"{name}: prescribes a surface flux but took neither handover "
+                "route. A steady flux goes through SurfaceLayerConfig and a "
+                "time-varying one through PhysicsState; falling through means "
+                "the closure would silently see a surface heat flux of zero.")
         arms.append(CaseArm(
             name=name, case=case, reference=ref, scored=scored,
             hours=les_end, analysis_hours=span, dt=dt,
             chunk_steps=args.chunk_steps, surface=surface,
-            prescribed_fluxes=(case.forcing.prescribe == "fluxes"),
+            prescribed_fluxes=prescribed,
             les_dir=str(les_dirs[name]),
         ))
     return arms
@@ -1140,6 +1554,11 @@ def main(argv=None) -> int:
             f"unknown scheme(s) {unknown}; choose from {list(TURBULENCE_SCHEMES)}"
         )
 
+    # Recorded so the report can say how much of the campaign it holds; the
+    # per-scheme flush means a killed run still writes a full-looking one.
+    args.resolved_schemes = list(schemes)
+    args.run_complete = False
+
     outdir = args.outdir or (DEFAULT_OUTDIR / ("+".join(case_names)
                                                 if len(case_names) > 1
                                                 else case_names[0]))
@@ -1193,6 +1612,7 @@ def main(argv=None) -> int:
             print(f"    FAILED {res.error}", flush=True)
         res.wall_s = time.time() - t0
         results.append(res)
+        _flush_outputs(outdir, args, arms, results, profiles)
         jax.clear_caches()
 
     if configs:
@@ -1210,32 +1630,54 @@ def main(argv=None) -> int:
                 continue
             print(f"\n[tune] {res.scheme}", flush=True)
             try:
+                # The normalizers are this scheme's own per-case scores
+                # at DEFAULT parameters, captured before any step is
+                # taken. Recomputing them from traced parameters would
+                # make the loss scale-invariant.
+                case_norm = (dict(res.per_case_default or {})
+                             if args.joint_aggregation == "default_relative"
+                             else None)
                 tuned = tune_scheme_multicase(
                     res.scheme, arms=arms, args=args,
-                    cfgs=configs[res.scheme])
+                    cfgs=configs[res.scheme], case_norm=case_norm,
+                    default_per_case=dict(res.per_case_default or {}))
             except Exception as exc:                  # noqa: BLE001
                 res.status = "tune_failed"
                 res.error = f"{type(exc).__name__}: {exc}"
                 print(f"    FAILED {res.error}", flush=True)
+                # Flush before the continue: this branch CHANGES the report
+                # (status + error), and a job killed after it would otherwise
+                # leave a stale "ok" on disk for an arm that died.
+                _flush_outputs(outdir, args, arms, results, profiles)
                 continue
             for f in ("status", "score_tuned", "components_tuned", "n_trained",
                       "frozen", "parameters", "loss_history",
-                      "per_case_tuned"):
+                      "per_case_tuned", "score_relative_tuned",
+                      "profiles_tuned"):
                 setattr(res, f, getattr(tuned, f))
+            # UNION, and NOT part of the loop above. `tune_scheme_multicase`
+            # computes the TUNED evaluation's non-finite flag on its own fresh
+            # SchemeResult, so a plain copy would overwrite the DEFAULT flag
+            # this arm already carries, and omitting it entirely -- which is
+            # what happened -- threw the tuned flag away and let an arm whose
+            # tuned parameters blow up stay rankable, possibly first. An arm is
+            # penalised if EITHER evaluation went non-finite. (codex)
+            res.nonfinite_cases = sorted(
+                set(res.nonfinite_cases or []) | set(tuned.nonfinite_cases or []))
             if tuned.error:
                 res.error = tuned.error
             if res.score_tuned is not None:
+                rel = ("" if res.score_relative_tuned is None else
+                       f"  rel={res.score_relative_tuned:.4f}")
                 print(f"    joint {res.score_default:.6g} -> "
-                      f"{res.score_tuned:.6g} ({res.n_trained} trained)   "
+                      f"{res.score_tuned:.6g} ({res.n_trained} trained)"
+                      f"{rel}   "
                       + "  ".join(f"{k}={v:.4g}"
                                   for k, v in (res.per_case_tuned or {}).items()))
+            _flush_outputs(outdir, args, arms, results, profiles)
             jax.clear_caches()
 
-    _write_outputs(outdir, args, arms, results)
-    for i, a in enumerate(arms):
-        _write_case_profiles(outdir, a, {s_: p_[i]
-                                         for s_, p_ in profiles.items()
-                                         if p_[i] is not None})
+    _flush_outputs(outdir, args, arms, results, profiles, complete=True)
     print(f"\nwrote {outdir}")
 
     # Per-arm exceptions are caught so one bad scheme cannot destroy the whole
@@ -1259,9 +1701,17 @@ def _half_pressures(case) -> np.ndarray:
     return np.asarray(sigma.sigma_half, dtype=np.float64) * case.p_s
 
 
-def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
+def _write_case_profiles(outdir: Path, arm, per_scheme: dict,
+                         per_scheme_tuned: dict | None = None) -> None:
     """One profiles npz PER CASE, so the plot keeps working and a successful
-    run does not silently lose its profile-level audit trail."""
+    run does not silently lose its profile-level audit trail.
+
+    Two families of SCM keys are written per scheme: ``scm_<scheme>_<var>`` at
+    the DEFAULT parameters and ``scm_<scheme>_tuned_<var>`` at the fitted ones.
+    A scheme that was never tuned (excluded, failed, nothing spec'd) contributes
+    only the first family, so the plotter must treat the tuned key as optional
+    rather than assume the pair exists.
+    """
     payload = {
         "z_scm": np.asarray(arm.case.z_full),
         "p_full": np.asarray(arm.case.p_full),
@@ -1278,9 +1728,41 @@ def _write_case_profiles(outdir: Path, arm, per_scheme: dict) -> None:
     for scheme, prof in per_scheme.items():
         for name, values in prof.items():
             payload[f"scm_{scheme}_{name}"] = np.asarray(values)
+    for scheme, prof in (per_scheme_tuned or {}).items():
+        for name, values in prof.items():
+            payload[f"scm_{scheme}_tuned_{name}"] = np.asarray(values)
     out = outdir / (f"profiles_{arm.name}.npz" if outdir.name != arm.name
                     else "profiles.npz")
     np.savez(out, **payload)
+
+
+def _flush_outputs(outdir: Path, args, arms, results, profiles,
+                   complete: bool = False) -> None:
+    """Write every artifact from whatever is finished so far.
+
+    Called after EACH scheme, not once at the end. The eight-case campaign is
+    tens of hours of XLA compilation and `_write_outputs` used to run a single
+    time after the last arm, so a walltime kill, an OOM or one fatal arm threw
+    away every completed scheme with it. Each writer is a full rewrite of its
+    own file from `results`, so a partial call is a partial report rather than
+    a corrupt one, and the penalty relabelling inside `_write_outputs` is
+    idempotent (an arm it demotes leaves `_RANKABLE`, so a later call skips it).
+
+    ``complete`` is False for every intermediate call and True only for the one
+    after the last scheme. Without it a campaign killed after scheme one left a
+    normal-looking rank-1 report whose own prose described a finished
+    comparison; now the report says how many of the requested schemes it
+    actually holds. (codex)
+    """
+    args.run_complete = bool(complete)
+    _write_outputs(outdir, args, arms, results)
+    for i, a in enumerate(arms):
+        _write_case_profiles(
+            outdir, a,
+            {s_: p_[i] for s_, p_ in profiles.items() if p_[i] is not None},
+            {r.scheme: r.profiles_tuned[i] for r in results
+             if r.profiles_tuned is not None},
+        )
 
 
 def _write_outputs(outdir: Path, args, arms, results) -> None:
@@ -1316,17 +1798,39 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         excluded, key=lambda r: r.scheme)
     with (outdir / "ranking.csv").open("w", newline="") as fh:
         w = csv.writer(fh)
+        # n_accepted_steps, not just n_trained: a scheme whose FIRST line
+        # search found no reducing step is still reported as "tuned" with a
+        # non-zero n_trained and a score_tuned equal to its default, which
+        # reads as a successful fit. The count of accepted updates is the
+        # number that says how much optimisation actually happened.
         w.writerow(["rank", "scheme", "status", "score_default",
-                    "score_tuned", "n_trained", "n_frozen", "wall_s", "error"])
+                    "score_tuned", "score_relative_tuned", "n_trained",
+                    "n_accepted_steps", "n_momentum_restarts", "n_frozen",
+                    "wall_s", "error"])
         for i, r in enumerate(ranked):
             rankable = r.status in _RANKABLE and r.score_default is not None
+            n_acc = max(0, len(r.loss_history or []) - 1)
             w.writerow([(i + 1) if rankable else "EXCLUDED",
                         r.scheme, r.status, r.score_default, r.score_tuned,
-                        r.n_trained, len(r.frozen or {}),
+                        r.score_relative_tuned,
+                        r.n_trained, n_acc, r.n_momentum_restarts,
+                        len(r.frozen or {}),
                         f"{r.wall_s:.1f}", r.error or ""])
+
+    # COMPLETENESS, recorded rather than implied. The report is rewritten after
+    # every scheme so a killed campaign still yields what finished; without
+    # these fields that partial report is indistinguishable from a full one.
+    requested = list(getattr(args, "resolved_schemes", None)
+                     or [r.scheme for r in results])
+    complete = bool(getattr(args, "run_complete", False))
+    missing = [s for s in requested if s not in {r.scheme for r in results}]
 
     payload = {
         "case": args.case,
+        "run_complete": complete,
+        "schemes_requested": requested,
+        "schemes_present": [r.scheme for r in ranked],
+        "schemes_missing": missing,
         # Present and non-null ONLY when --allow-radiation-mismatch was used.
         # Without this the JSON claimed a controlled comparison while ranking a
         # case whose LES radiation the SCM cannot reproduce.
@@ -1337,6 +1841,12 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             "cases": [a.name for a in arms],
             "tier": args.tier, "optimizer": args.optimizer, "lr": args.lr,
             "steps": args.steps,
+            # WHICH number the optimizer minimized. 'mean' weights every
+            # regime's absolute normalized error equally and is therefore
+            # dominated by whichever regime every scheme fits worst;
+            # 'default_relative' gives every regime equal improvement headroom.
+            "joint_aggregation": args.joint_aggregation,
+            "relative_norm_floor": args.relative_norm_floor,
                         "radiation": "none", "convection": "none",
             "microphysics": args.microphysics,
             "scored_variables_per_case": {a.name: list(a.scored) for a in arms},
@@ -1410,7 +1920,9 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                 "components_tuned": r.components_tuned,
                 "per_case_default": r.per_case_default,
                 "per_case_tuned": r.per_case_tuned,
+                "score_relative_tuned": r.score_relative_tuned,
                 "n_trained": r.n_trained, "frozen": r.frozen,
+                "n_momentum_restarts": r.n_momentum_restarts,
                 "parameters": r.parameters, "loss_history": r.loss_history,
                 "surface_pressure_drift_pa": r.ps_drift_pa,
                 "error": r.error, "wall_s": r.wall_s,
@@ -1422,9 +1934,20 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n"
     )
 
+    # args.case is None whenever --cases drove the run, which titled every
+    # multi-case report "vs LES — None". Name the regimes that were actually
+    # fitted instead.
     lines = [
-        f"# SCM turbulence closures vs LES — {args.case}", "",
+        f"# SCM turbulence closures vs LES — "
+        f"{args.case or ' + '.join(a.name for a in arms)}", "",
     ]
+    if not complete:
+        lines += [
+            "> **PARTIAL — THIS CAMPAIGN DID NOT FINISH.** The report is "
+            f"rewritten after every scheme, and it currently holds "
+            f"{len(results)} of {len(requested)} requested "
+            f"({', '.join(missing)} still to run). The ranking below is a "
+            "ranking of what completed, not of every closure.", ""]
     if args.radiation_confound:
         lines += ["> **THIS IS NOT A TURBULENCE RANKING.** "
                   "`--allow-radiation-mismatch` was used:", ""]
@@ -1454,6 +1977,44 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         pos = str(i + 1) if rankable else "excl."
         lines.append(f"| {pos} | {r.scheme} | {r.status} | {d} | {t} | "
                      f"{r.n_trained} | {len(r.frozen or {})} |")
+    # The scores say a fit helped; only the parameter values say WHAT it did,
+    # and they were reachable solely by reading tuned_parameters.json. Trained
+    # parameters only: a scheme like full CLUBB carries 48 spec'd leaves of
+    # which 15 have no gradient, and listing all of them buries the ones that
+    # moved. The frozen ones are counted, and named with their reason in the
+    # JSON.
+    lines += ["", "## Parameters, prior and tuned", ""]
+    for r in ranked:
+        moved = [p for p in (r.parameters or []) if p.get("trained")]
+        n_frozen = len(r.frozen or {})
+        if not moved:
+            lines += [f"### {r.scheme}", "",
+                      f"no trained parameters ({r.status}; {n_frozen} frozen)",
+                      ""]
+            continue
+        lines += [
+            f"### {r.scheme}", "",
+            f"{len(moved)} trained, {n_frozen} frozen (zero preflight "
+            "gradient or unimplemented; see `tuned_parameters.json`)", "",
+            "| parameter | units | prior | tuned | change | bounds |",
+            "|---|---|---|---|---|---|",
+        ]
+        for p in sorted(moved, key=lambda q: q["name"]):
+            prior, tuned = p.get("default"), p.get("tuned")
+            if prior is None or tuned is None:
+                change = "—"
+            elif abs(prior) > 0.0:
+                change = f"{100.0 * (tuned - prior) / abs(prior):+.1f}%"
+            else:
+                # A prior of exactly zero has no percentage; say the absolute
+                # move rather than printing a division by zero as "inf%".
+                change = f"{tuned - prior:+.4g} (prior 0)"
+            lines.append(
+                f"| `{p['name'].rsplit('.', 1)[-1]}` | {p.get('units') or '—'} "
+                f"| {prior:.6g} | {tuned:.6g} | {change} "
+                f"| [{p['lower']:.4g}, {p['upper']:.4g}] |")
+        lines.append("")
+
     failures = [r for r in ranked if r.error]
     if failures:
         lines += ["", "## Failures", ""]

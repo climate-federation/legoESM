@@ -351,13 +351,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "[1/s] — #930 2Δσ vertical-checkerboard cure "
                              "(0 disables)")
     parser.add_argument("--mpas-conservative-tracer-clamp",
-                        action="store_true", default=False,
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="MPAS floors: borrow the clipped negative tracer "
                              "deficit back from the positive cells in the same "
                              "column instead of the mass-CREATING plain "
                              "max(q,0).  The naive clamp invents ~+30 kg/m2/yr "
-                             "of water on a century AMIP run (measured); this "
-                             "cuts that 10.4x.  Off = bit-identical to before.")
+                             "of water on a century AMIP run (measured); the "
+                             "borrow cuts that 10.4x.  ON by default (owner "
+                             "decision 2026-08-16: conserving form always); "
+                             "--no-mpas-conservative-tracer-clamp restores the "
+                             "legacy clamp for bit-comparison runs.")
     parser.add_argument("--mpas-vert-advection-scheme",
                         choices=("upwind", "van_leer"),
                         default=_DYCORE_DEFAULTS.mpas_vert_advection_scheme,
@@ -395,6 +398,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Output
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--checkpoint-days", type=int, default=0)
+    parser.add_argument("--cmip-resolution-deg", type=float,
+                        default=_OUTPUT_DEFAULTS.cmip_resolution_deg,
+                        help="Lat-lon spacing [deg] of the CMOR output grid. "
+                             "Must track the MESH: at --resolution 4 the native "
+                             "spacing is 379 km and 5 deg output is matched, but "
+                             "a finer mesh written at 5 deg throws the "
+                             "refinement away, and the tropical rain band -- one "
+                             "to two cells wide -- becomes unscorable. "
+                             f"Default {_OUTPUT_DEFAULTS.cmip_resolution_deg}.")
     parser.add_argument("--aimip-classical-checkpoint", type=str, default=None,
                         help="Path to an AIMIP-classical trained params .eqx "
                              "(e.g. results/aimip_001/classical/epoch_0019.eqx). "
@@ -1804,6 +1816,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         output_dir=args.output or "",
         diag_days=args.diag_days,
         checkpoint_days=args.checkpoint_days,
+        cmip_resolution_deg=args.cmip_resolution_deg,
         max_wallclock_seconds=args.max_wallclock_seconds,
         monthly_means=args.monthly_means,
         cmip_output=args.cmip_output,
@@ -2242,19 +2255,24 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
                      "--no-use-multilayer-land to override a --config YAML "
                      "that enables it.")
     # MPAS port (tasks/mpas_land_port.md): the multilayer tile is stepped in
-    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']), but
-    # the CANOPY schemes need the coupled pipeline's clm_ml grid threading —
-    # only simple_seb is wired on MPAS.
+    # the MPAS driver loop (explicit flux coupling via forcing['T_sfc']).
+    # clm_ml still needs the coupled pipeline's per-column canopy grid
+    # threading, which this lane does not have.  simple_seb and two_leaf are
+    # both dispatched by the MPAS land step, so only clm_ml is refused here.
     if (args.use_multilayer_land
-            and args.land_surface_scheme in ("two_leaf", "clm_ml")
+            and args.land_surface_scheme == "clm_ml"
             and (args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
                                     "mpas")
                  or args.discretization == "mpas")):
         parser.error(
-            f"--land-surface-scheme {args.land_surface_scheme} is not wired "
-            "on the MPAS lane (coupled-pipeline canopy threading); use "
-            "--land-surface-scheme simple_seb with --use-multilayer-land "
-            "on MPAS.")
+            "--land-surface-scheme clm_ml is not wired on the MPAS lane "
+            "(it needs the coupled pipeline's per-column canopy grid "
+            "threading); use two_leaf or simple_seb with "
+            "--use-multilayer-land on MPAS.")
+    # two_leaf IS wired on MPAS: the land step dispatches to it, and its
+    # solved canopy-air humidity now reaches the turbulence through the traced
+    # beta channel (the guard here used to refuse it alongside clm_ml, which
+    # made a resistance-based land surface unreachable on this lane).
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade

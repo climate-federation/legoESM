@@ -55,7 +55,11 @@ def test_orca1_zdftke_namelist_mapping():
     assert cfg.c_eps == 0.7                     # rn_ediss (ref default)
     assert cfg.tke_background == 1.0e-6         # rn_emin
     assert cfg.tke_surface_min == 1.0e-4        # rn_emin0
-    assert cfg.tke_mxl_choice == 3              # nn_mxl=3 (lup/ldown + ln_mxl0)
+    # ORCA1's namelist_cfg sets `nn_mxl = 2`, which is legoESM choice 4 (one
+    # bounded length for BOTH viscosity and dissipation, zdftke.F90:680). The
+    # card carried 3 until 2026-08-13 while its own comment named 4 as the
+    # ORCA1 value; codex 9405307 confirmed the mapping.
+    assert cfg.tke_mxl_choice == 4              # nn_mxl=2 (l_eps = l_k)
     # nn_pdl=1: Pr = clamp(Ri/ri_cri, 1, 10), ri_cri = 2/(2+ediss/ediff) = 2/9
     assert cfg.prandtl_mode == "richardson"
     assert cfg.prandtl_ri_coeff == pytest.approx(4.5)
@@ -84,7 +88,13 @@ def test_orca1_zdftke_namelist_mapping():
     assert tke_mod._NEMO_TKE_EBB == 67.83
     # NEMO integrates en prognostically -> the ORCA1 card default (2026-07-24).
     assert cfg.prognostic is True
-    assert cfg.n2_mode == "insitu"
+    # 2026-08-14: the card stopped CLIPPING. NEMO's rn2 is signed, and the
+    # clipped in-situ form was the whole remaining mixing-length deficit
+    # (job 9407791: seeding the length with a signed N2 moved our zero-step
+    # ratio against NEMO's own length from 0.897 to 0.997 in the Southern
+    # Ocean, 0.792 to 1.004 in the Arctic).
+    assert cfg.n2_mode == "nemo_bn2"
+    assert cfg.n2_eos_form == "teos10"      # ORCA1 ln_teos10=.true.
     # prognostic carry uses the vertical TKE solve only (no horizontal en
     # advection): advection_scheme stays "none" (Veros vs.dtke path off).
     assert cfg.advection_scheme == "none"
@@ -208,17 +218,24 @@ def test_build_tripole_keyword_surface_bc_defaults_none():
 
 
 def test_orca1_zdftke_mxl_choice_override():
-    """--tke-mxl-choice: None keeps the card value (now 3 = NEMO nn_mxl=3,
-    lup/ldown sweeps + ln_mxl0 anchor); 2 reverts to Veros; unknown raises."""
+    """--tke-mxl-choice: None keeps the card value (now 4 = NEMO nn_mxl=2,
+    which is what ORCA1's namelist_cfg sets); 2 reverts to Veros; bad raises."""
     r = _runner()
-    # 2026-07-24: card DEFAULT is now nn_mxl=3 (ln_mxl0 anchor); =2 reverts.
-    assert r.orca1_zdftke_config().tke_mxl_choice == 3                # default
-    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 3
+    # 2026-08-13: card DEFAULT is choice 4 = NEMO nn_mxl=2; =2 reverts to Veros.
+    assert r.orca1_zdftke_config().tke_mxl_choice == 4                # default
+    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 4
     c2 = r.orca1_zdftke_config(mxl_choice=2)
     assert c2.tke_mxl_choice == 2
     # ONLY the mixing-length choice changes; every other leaf byte-identical.
-    assert c2._replace(tke_mxl_choice=3) == r.orca1_zdftke_config()
-    for bad in (1, 4, 0):
+    assert c2._replace(tke_mxl_choice=4) == r.orca1_zdftke_config()
+    # 4 = NEMO nn_mxl=2, the value ORCA1's namelist_cfg actually sets. Until
+    # 2026-08-06 this raised while argparse advertised it, so --tke-mxl-choice 4
+    # crashed the run; this loop USED to assert 4 was invalid, i.e. the test
+    # encoded the bug.
+    c4 = r.orca1_zdftke_config(mxl_choice=4)
+    assert c4.tke_mxl_choice == 4
+    assert c4 == r.orca1_zdftke_config()   # choice 4 IS the card now
+    for bad in (1, 0, 5):
         with pytest.raises(ValueError, match="mxl_choice"):
             r.orca1_zdftke_config(mxl_choice=bad)
     # composes with surface_bc (both overrides apply, independent)
@@ -226,14 +243,55 @@ def test_orca1_zdftke_mxl_choice_override():
     assert both.tke_mxl_choice == 2 and both.surface_bc == "veros_flux"
 
 
+def test_tke_mxl_choice_argparse_and_builder_agree():
+    """Every value ``--tke-mxl-choice`` ADVERTISES must be one the config
+    builder ACCEPTS.
+
+    The 2026-08-06 defect: argparse carried ``choices=[2, 3, 4]`` with help text
+    saying "4 = NEMO nn_mxl=2, which is what the ORCA1 namelist actually runs",
+    while ``orca1_zdftke_config`` raised ValueError on 4.  So the oracle-correct
+    setting passed CLI validation and then crashed inside the builder, leaving
+    ORCA1's own ``nn_mxl = 2`` unreachable from the OMIP driver.
+
+    Non-vacuity: this fails if EITHER layer changes without the other -- drop 4
+    from argparse and the advertised set shrinks below what the builder takes;
+    re-narrow the builder and the raises-check below trips.
+    """
+    r = _runner()
+    # NOT a hasattr()/skip guard: a renamed factory must FAIL this test, not
+    # silently skip it (the same silent-degradation trap as a hasattr fallback).
+    parser = r._build_arg_parser()
+    action = next(a for a in parser._actions
+                  if "--tke-mxl-choice" in getattr(a, "option_strings", ()))
+    advertised = set(action.choices)
+    assert 4 in advertised, "argparse must still advertise the ORCA1 value"
+    for v in sorted(advertised):
+        cfg = r.orca1_zdftke_config(mxl_choice=v)         # must not raise
+        assert cfg.tke_mxl_choice == v
+    # NOT a finite sweep (codex 2026-08-07 #4: -2..9 is a nearby-mutation test,
+    # not set equality -- it passes if the builder also accepts 10). Both layers
+    # now read ONE shared constant, so assert on THAT: divergence is impossible
+    # by construction rather than policed by sampling.
+    assert advertised == set(r.TKE_MXL_CHOICES), (
+        "argparse choices must come from the shared TKE_MXL_CHOICES constant")
+    for v in sorted(r.TKE_MXL_CHOICES):
+        assert r.orca1_zdftke_config(mxl_choice=v).tke_mxl_choice == v
+    # and the guard must reject the categories codex enumerated (#5):
+    #   non-integral floats, float-valued ints, bool (True == 1), and strings.
+    for bad in (4.9, 4.0, 2.0, True, False, "4", 10, -1):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
+
+
 def test_builder_tke_mxl_choice_threads():
     """build_tripole_vmix_config threads --tke-mxl-choice onto the closure.
-    Uses the NON-default 2 so a broken forward would be caught (default is 3)."""
+    Uses the NON-default 2 so a broken forward would be caught (default is 4
+    since 2026-08-13: ORCA1's namelist_cfg sets nn_mxl = 2 = legoESM 4)."""
     r = _runner()
     vm = r.build_tripole_vmix_config("tke", tke_mxl_choice=2)
     assert vm.tke.tke_mxl_choice == 2
     assert vm.tke == r.orca1_zdftke_config(mxl_choice=2)
-    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 3  # default
+    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 4  # default
     # off-tke closure rejects (dispatch hardening), like the other knobs
     for vmix in ("none", "kpp"):
         with pytest.raises(ValueError, match="tke-mxl-choice"):
