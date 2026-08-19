@@ -205,7 +205,14 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
     if dp1 is None:
         pt[ia:ia + n, ia:ia + n, :] /= pkz
     else:
-        pt[ia:ia + n, ia:ia + n, :] *= (1.0 + dp1) / pkz
+        # ASSOCIATION IS THE ORACLE'S, not convenience: Fortran evaluates
+        # `pt*(1.+dp1)/pkz` (:402) left to right as (pt*(1+dp1))/pkz.
+        # `pt *= (1.0 + dp1) / pkz` instead forms the quotient FIRST and
+        # multiplies -- a different rounding, and the moist arm had never
+        # been exercised to catch it (the adiabatic lane takes the branch
+        # above). Found by test_moist_arm_matches_the_oracle_expression.
+        win = pt[ia:ia + n, ia:ia + n, :]
+        pt[ia:ia + n, ia:ia + n, :] = win * (1.0 + dp1) / pkz
 
 
 def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
@@ -283,13 +290,50 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     require_uniform_damping_lane(n_sponge=n_sponge, tau=tau, npz=km)
 
     if zvir != 0.0:
-        raise NotImplementedError(
-            "zvir != 0 makes the tracers stop being passengers: dp1 = "
-            "zvir*q(sphum) enters the pt->theta_v conversion "
-            "(fv_dynamics.F90:291, :402) and the closing pt/(1+r_vir*q) "
-            "(fv_mapz.F90:975), and fv_tracer2d -- which would have advected "
-            "that q across the step -- is NOT ported. The pinned deck is "
-            "adiabatic, so zvir = 0.")
+        # HYDROSTATIC moist coupling is enabled; consv_te stays refused
+        # (separate phase). dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291;
+        # USE_COND is NOT defined in this build, so no q_con term) feeds
+        # pt = pt*(1.+dp1)/pkz (:402, ported as pt_to_theta_v) and the
+        # closing pt/(1+r_vir*q) (fv_mapz.F90:975, already ported in
+        # lagrangian_to_eulerian).  Validate, never default: a guessed
+        # tracer index would silently couple an arbitrary species.
+        if q is None:
+            raise ValueError(
+                "zvir != 0 requires tracer arrays, but q is None: "
+                "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
+                "humidity to read.")
+        if (sphum_index is None or isinstance(sphum_index, bool)
+                or not isinstance(sphum_index, int)):
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an int indexing the "
+                f"specific-humidity tracer in each face's q list; got "
+                f"{sphum_index!r}. A guessed index would silently couple "
+                f"the wrong species into theta_v.")
+        for _t, _qf in enumerate(q):
+            if len(_qf) <= 0:
+                raise ValueError(
+                    f"zvir != 0 requires nq > 0, but face {_t} carries no "
+                    f"tracers (fv_dynamics.F90:291 needs sphum).")
+            if not 0 <= sphum_index < len(_qf):
+                raise ValueError(
+                    f"sphum_index={sphum_index} out of range "
+                    f"[0, {len(_qf)}) for face {_t}; a negative index would "
+                    f"silently select another tracer by Python wrap-around.")
+        if not hydrostatic:
+            # fv_dynamics.F90:307-309: under moist_phys the NH pkz is
+            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)), but
+            # p_var_nonhydrostatic computes the DRY form. Running it dry
+            # would apply a pkz missing the virtual-temperature factor on
+            # every NH step -- refuse until dp1 is threaded through it.
+            # (When phasing that in: multiply INSIDE the log argument in
+            # the Fortran's association, not by pre-scaling pt at the call
+            # site, which reassociates the product and can differ by an ulp.)
+            raise NotImplementedError(
+                "zvir != 0 with non-hydrostatic dynamics is not enabled: "
+                "the moist NH pkz multiplies the log argument by (1+dp1) "
+                "(fv_dynamics.F90:307-309) and p_var_nonhydrostatic "
+                "computes the dry form. Hydrostatic zvir coupling IS "
+                "enabled.")
     if consv_te != 0.0:
         raise NotImplementedError(
             "consv_te != 0 activates the total-energy fixer "
@@ -349,7 +393,21 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
 
     # :396-408  T -> theta_v, once per fv_dynamics call, on every face.
     for t in range(6):
-        pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
+        if zvir != 0.0:
+            # dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291), formed once
+            # per face BEFORE the k_split loop -- from the step-initial q,
+            # exactly as :281-294 precedes :451. Sliced to the COMPUTE
+            # WINDOW because pkz is (n, n, km) and pt_to_theta_v expects
+            # dp1 already matching it.
+            dp1 = zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
+            pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng,
+                          dp1=dp1)
+        else:
+            # The adiabatic lane MUST stay bit-identical to the certified
+            # 1.1866e-09 parity: dp1=None takes `pt /= pkz`, while a zeros
+            # array would take `pt *= (1.+dp1)/pkz` -- a reciprocal then a
+            # multiply, which rounds twice.
+            pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
 
     remapped = km > REMAP_MIN_NPZ
     for n_map in range(1, k_split + 1):
