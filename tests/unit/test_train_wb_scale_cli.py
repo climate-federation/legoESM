@@ -247,3 +247,4 @@ def test_the_scorecard_records_the_confound_beside_the_numbers():
         "the scorecard meta block does not record whether the learned arm "
         "carried a surface stress, so a confounded table is indistinguishable "
         "from an equalised one once the log scrolls away")
+
