@@ -1666,6 +1666,37 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
 # File writers
 # ---------------------------------------------------------------------------
 
+def _arm_provenance() -> dict[str, str]:
+    """What produced THIS arm: the commit, whether that tree was dirty, and
+    the interpreter.
+
+    Written per arm because nothing else records it.  Comparing file
+    modification times across arms was the previous stand-in, and it is not
+    one: rerunning a single case hours later against different code leaves the
+    spread narrow, while copying with timestamps preserved, clock skew between
+    nodes and archive extraction each defeat it from the other side.  A
+    commit that is compared arm to arm cannot be defeated that way.
+
+    ``--dirty`` is part of it deliberately: pinning the import path to this
+    checkout does not make this checkout CLEAN, and uncommitted edits in the
+    pinned copy reproduce the very incident the pin exists to prevent -- with
+    the pin now lending it credibility.
+    """
+    import subprocess
+    import sys
+
+    here = str(Path(__file__).resolve().parent)
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "describe", "--always", "--dirty", "--abbrev=12"],
+            capture_output=True, text=True, timeout=30)
+        commit = out.stdout.strip() if out.returncode == 0 else "unknown"
+    except Exception:                       # noqa: BLE001 — provenance only
+        commit = "unknown"
+    return {"provenance_commit": commit or "unknown",
+            "provenance_python": sys.executable}
+
+
 def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                        *, diag: dict | None = None,
                        blowup_info: dict | None = None):
@@ -1695,6 +1726,7 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                     "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
             rows = {**rows, "notes": blowup_str}
+    rows = {**rows, **_arm_provenance()}
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
