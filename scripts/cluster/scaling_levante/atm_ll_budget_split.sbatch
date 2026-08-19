@@ -82,20 +82,40 @@ export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
 rc=0
 
 NLAT="${NLAT:-2048}"; NLON=$((2 * NLAT)); GPN=4
+# The ideal line and every gate threshold below are the LL2048 single-device
+# receipt. Another resolution needs its own baseline, so refuse rather than
+# score a different problem against this one.
+if [ "$NLAT" -ne 2048 ]; then
+  echo "NLAT=$NLAT: this job's ideal baseline and gate thresholds are the"
+  echo "LL2048 single-device receipt (201.48 ms, job 27051113). Supply a"
+  echo "matching baseline before running another resolution."
+  exit 6
+fi
 # Device counts to split, largest first. Overridable so the ladder can be
 # cut into smaller allocations that clear the queue sooner (a 32-node job
 # waits behind everything; two 8/16-node jobs do not).
 DEVS="${DEVS:-128 64 32}"
 FIRST_DEV="${DEVS%% *}"
 
+# Deterministic node subset per device count: an arm that lands on a
+# different set of nodes than its pair puts a hardware change inside the
+# difference being measured. The first N hosts of the allocation, always.
+ALLOC_HOSTS=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | sort)
+pin_hosts () {  # nodes -> comma-separated first N allocation hosts
+  echo "$ALLOC_HOSTS" | head -n "$1" | paste -sd,
+}
+
 run_arm () {  # ndev nocomm tag
   local NDEV=$1 NC=$2 TAG=$3
   local NODES=$(( (NDEV + GPN - 1) / GPN ))
   local NTPN=$(( NDEV < GPN ? NDEV : GPN ))
-  echo "=== LL${NLAT}@${NDEV} nocomm=$NC [$TAG] $(date +%T) ==="
+  local HOSTS
+  HOSTS=$(pin_hosts "$NODES")
+  echo "=== LL${NLAT}@${NDEV} nocomm=$NC [$TAG] $(date +%T) hosts=$HOSTS ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
-    timeout 1500 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
+    timeout 1500 srun --export=ALL --nodelist="$HOSTS" \
+      --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$NTPN" --gpus-per-node="$NTPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
@@ -117,6 +137,12 @@ for ND in $DEVS; do
 done
 
 echo "=== RECEIPTS ==="
+# An arm that failed leaves a stale or missing receipt; scoring on top of
+# that reports a number from a run that did not happen.
+if [ "$rc" -ne 0 ]; then
+  echo "ABORT: an arm failed (rc=$rc); no verdict"
+  exit "$rc"
+fi
 "$PY" - "$OUTDIR" "$DEVS" <<'EOF'
 import json, os, sys
 
@@ -166,18 +192,24 @@ for nd in DEVS:
     if abs(comm) < 0.5 * spread * full:
         print(f"      ndev={nd}: INCONCLUSIVE — comm term is inside the "
               f"arm spread")
-    if nd == max(DEVS):
-        verdict_row = (comm, excess, nd)
+    if nd == 128:
+        verdict_row = (comm, excess, spread, full)
 
-comm, excess, nd_v = verdict_row
-if nd_v != 128:
-    print(f"NOTE: gate thresholds were written for 128 devices; the largest "
-          f"row here is {nd_v}, so the verdict below is indicative only")
+if verdict_row is None:
+    print("NO VERDICT: the gate thresholds below were written for the "
+          "128-device row, which this run did not measure. The table above "
+          "stands on its own; do not read a verdict into it.")
+    sys.exit(0)
+comm, excess, spread, full = verdict_row
+if abs(comm) < 0.5 * spread * full:
+    print("NO VERDICT: the 128-device communication term is inside its own "
+          "arm spread")
+    sys.exit(3)
 if comm >= 1.2:
-    print("VERDICT: CONFIRMS comm-bound at the top row — communication is at least "
+    print("VERDICT: CONFIRMS comm-bound at 128 devices — communication is at least "
           "half the excess over ideal; comm levers are the right target")
 elif comm <= 0.4:
-    print("VERDICT: REFUTES comm-bound at the top row — the excess is local work "
+    print("VERDICT: REFUTES comm-bound at 128 devices — the excess is local work "
           "that stopped shrinking; comm levers aim at the wrong term")
     sys.exit(6)
 else:
