@@ -198,29 +198,23 @@ def apply_gustiness(u: jax.Array, v: jax.Array, gustiness: float) -> jax.Array:
 
 
 # --- Precipitation-driven (cold-pool) gustiness -----------------------------
-# Reference precipitation rate for the gust scaling [kg/m^2/s].  1 mm/day
-# expressed in the model's flux units, so the coefficient below is "the gust
-# wind at 1 mm/day" and reads in m/s.  A pure unit conversion, not a tunable.
-_GUST_PRECIP_REF_KG_M2_S = 1.0 / 86_400.0
-# Exponent of the precipitation scaling.  1/3 follows the convective velocity
-# scale w_* = (g/theta * B * h)^(1/3) when the downdraft buoyancy production B
-# is taken proportional to the rain-evaporation rate, i.e. to the precipitation
-# flux.  Exposed as a config field so the exponent is a measured choice rather
-# than a buried constant.
-_GUST_PRECIP_EXPONENT = 1.0 / 3.0
-# Below this precipitation ratio the gust is exactly zero and its gradient is
-# taken as zero.  A bare ratio**(1/3) has an INFINITE derivative at 0, so some
-# choice must be made; the alternative of an additive offset inside the power
-# was measured to leave a spurious coefficient-scaled gust (0.02 m/s at
-# coeff=2) in a completely DRY column, which is worse than a subgradient.
-_GUST_RATIO_FLOOR = 1e-12
+# Exponent of the gust scaling.  1/3 is the published choice and follows from
+# the energy argument below: u_c^3 ~ L_v*P/rho.
+_GUST_EXPONENT = 1.0 / 3.0
+# Below this energy-flux argument [m^3/s^3] the gust is exactly zero and its
+# gradient is taken as zero.  A bare x**(1/3) has an INFINITE derivative at 0,
+# so some choice must be made; the alternative of an additive offset inside the
+# power was measured to leave a spurious coefficient-scaled gust (0.02 m/s) in
+# a completely DRY column, which is worse than a subgradient.
+_GUST_ARG_FLOOR = 1e-12
 
 
 def convective_gust_wind(
     precip: jax.Array,
     coeff: float,
+    rho: jax.Array,
     *,
-    exponent: float = _GUST_PRECIP_EXPONENT,
+    exponent: float = _GUST_EXPONENT,
     cap: float = 0.0,
 ) -> jax.Array:
     """Cold-pool gust wind ``u_gust`` [m/s] from the surface precipitation rate.
@@ -236,7 +230,15 @@ def convective_gust_wind(
     collapses in exactly the warm, moist, near-neutral state this term exists
     to break; the precipitation rate is the observable that stays large.
 
-    ``u_gust = coeff * (P / P_ref)**exponent``, optionally capped.
+    ``u_gust = (coeff * L_v * P / rho)**(1/3)``, optionally capped — the
+    Redelsperger, Guichard & Mondon (2000) reduced form as implemented in
+    MESO-NH/SURFEX, LMDZ and the IFS.  ``L_v * P`` is the energy flux the
+    falling rain represents [W/m^2]; dividing by the air density gives
+    [m^3/s^3], whose cube root is a velocity.  ``coeff`` is therefore
+    DIMENSIONLESS and of order 0.5-1 across published implementations, which is
+    what makes it comparable to the literature — an earlier version of this
+    function used ``coeff * (P/1 mm-day)**(1/3)``, where the coefficient
+    absorbed the units and could not be compared with anything.
 
     Sign/units convention: ``precip`` is a surface precipitation MASS FLUX
     [kg/m^2/s], positive DOWNWARD (falling), the sense of
@@ -253,7 +255,10 @@ def convective_gust_wind(
     precip : array
         Surface precipitation rate [kg/m^2/s] (= mm/s of liquid water).
     coeff : float
-        Gust wind at the reference rate of 1 mm/day [m/s].  ``0.0`` disables.
+        Dimensionless efficiency of the conversion from rain energy flux to
+        gust kinetic energy; O(0.5-1) in the literature.  ``0.0`` disables.
+    rho : array
+        Near-surface air density [kg/m^3].
     exponent : float, optional
         Power of the precipitation ratio.
     cap : float, optional
@@ -270,9 +275,12 @@ def convective_gust_wind(
 
     References
     ----------
-    - Redelsperger, Guichard & Mondon (2000), J. Climate 13, 402-421 —
-      mesoscale (cold-pool) enhancement of surface fluxes parameterized from
-      the convective precipitation rate.
+    - Redelsperger, Guichard & Mondon (2000), J. Climate 13, 402-421 — the
+      TOGA-COARE convective-gustiness parameterization this implements:
+      ``u_c = (c L_v P / rho)^(1/3)`` combined in quadrature with the mean
+      wind.  The coefficient is left at 0 (off) here rather than pinned to a
+      published value, because the sources consulted disagree at the factor-of-
+      two level (c ~ 0.5-1) and the SCM arm measures it directly.
     - Jabouille, Redelsperger & Lafore (1996), MWR 124, 816-837 — TOGA-COARE
       gustiness from convective activity.
     - Beljaars (1995), QJRMS 121, 255-270 — the quadrature combination used by
@@ -284,7 +292,8 @@ def convective_gust_wind(
         # existing run stays byte-identical.  NOT jnp.where, which would trace
         # the fractional power and can emit NaN gradients at precip = 0.
         return jnp.zeros_like(precip)
-    ratio = jnp.maximum(precip, 0.0) / _GUST_PRECIP_REF_KG_M2_S
+    # L_v*P/rho: the rain's energy flux per unit air mass [m^3/s^3].
+    arg = coeff * constants.L_v * jnp.maximum(precip, 0.0) / rho
     # Double-``where``: the canonical JAX pattern for a function whose
     # derivative blows up at a boundary.  The inner ``where`` keeps the value
     # fed to the fractional power away from 0 so the BACKWARD pass never
@@ -292,10 +301,9 @@ def convective_gust_wind(
     # gradient); the outer one restores an EXACT zero gust — and hence an exact
     # zero subgradient — in a dry column.  A single ``where`` is not enough:
     # reverse-mode AD evaluates both branches.
-    wet = ratio > _GUST_RATIO_FLOOR
-    safe_ratio = jnp.where(wet, ratio, jnp.ones_like(ratio))
-    gust = jnp.where(wet, coeff * safe_ratio ** exponent,
-                     jnp.zeros_like(ratio))
+    wet = arg > _GUST_ARG_FLOOR
+    safe_arg = jnp.where(wet, arg, jnp.ones_like(arg))
+    gust = jnp.where(wet, safe_arg ** exponent, jnp.zeros_like(arg))
     if cap > 0.0:
         gust = jnp.minimum(gust, cap)
     return gust

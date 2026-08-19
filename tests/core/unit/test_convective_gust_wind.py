@@ -18,10 +18,15 @@ import pytest
 from legoesm.core.bulk_flux import apply_gustiness, convective_gust_wind
 
 _MM_DAY = 1.0 / 86_400.0  # kg/m^2/s per mm/day
+_RHO = 1.2  # kg/m^3, near-surface air
 
 
 def _rates(mm_day):
     return jnp.asarray([m * _MM_DAY for m in mm_day], dtype=jnp.float64)
+
+
+def _rho_like(p):
+    return jnp.full_like(p, _RHO)
 
 
 def test_disabled_by_default_coefficient_is_exactly_zero():
@@ -32,21 +37,34 @@ def test_disabled_by_default_coefficient_is_exactly_zero():
     shipped run unchanged when the feature is off.
     """
     p = _rates([0.0, 1.0, 2.7, 50.0])
-    g = convective_gust_wind(p, 0.0)
+    g = convective_gust_wind(p, 0.0, _rho_like(p))
     assert jnp.array_equal(g, jnp.zeros_like(p))
 
 
-def test_reference_rate_reproduces_the_coefficient():
-    """At P = 1 mm/day the gust IS the coefficient — that is what makes the
-    config field readable as 'gust wind at 1 mm/day [m/s]'."""
-    g = float(convective_gust_wind(_rates([1.0]), 2.0)[0])
-    assert g == pytest.approx(2.0, rel=1e-12), (
-        "with no offset inside the power this identity is EXACT")
+def test_matches_the_published_magnitude_at_rce_rain_rates():
+    """u_c = (c L_v P / rho)^(1/3) must land where the literature says.
+
+    At the RCE reference rate of 2.7 mm/day with c = 1 the published estimate
+    is ~4 m/s (L_v*P ~ 78 W/m^2, /rho ~ 65 m^3/s^3, cube root ~ 4.0); with
+    c = 0.5, ~3.2.  This is the check that the dimensional form is assembled
+    correctly — an arbitrary reference-rate version cannot be compared with
+    anything.
+    """
+    from legoesm import constants
+
+    p = _rates([2.7])
+    rho = jnp.full((1,), _RHO)
+    g1 = float(convective_gust_wind(p, 1.0, rho)[0])
+    expected = float((constants.L_v * float(p[0]) / _RHO) ** (1.0 / 3.0))
+    assert g1 == pytest.approx(expected, rel=1e-10)
+    assert 3.5 < g1 < 4.5, f"off the published ~4 m/s at 2.7 mm/day: {g1}"
+    g_half = float(convective_gust_wind(p, 0.5, rho)[0])
+    assert 2.8 < g_half < 3.6, f"off the published ~3.2 m/s at c=0.5: {g_half}"
 
 
 def test_monotone_and_cube_root_scaling():
     p = _rates([1.0, 8.0])
-    g = convective_gust_wind(p, 1.0)
+    g = convective_gust_wind(p, 1.0, _rho_like(p))
     assert float(g[1]) > float(g[0])
     # 8x the rain is 2x the gust for the 1/3 exponent.
     assert float(g[1]) / float(g[0]) == pytest.approx(2.0, rel=1e-3)
@@ -61,7 +79,7 @@ def test_gradient_is_finite_at_zero_precipitation():
     (coefficient-scaled) in a column with no rain at all.
     """
     p = _rates([0.0, 0.5, 2.7])
-    g = jax.grad(lambda x: convective_gust_wind(x, 2.0).sum())(p)
+    g = jax.grad(lambda x: convective_gust_wind(x, 2.0, _rho_like(x)).sum())(p)
     assert bool(jnp.all(jnp.isfinite(g))), f"non-finite gradient: {g}"
     assert float(g[0]) == 0.0, "dry column must have an exactly zero subgradient"
     assert float(g[2]) > 0.0, "a raining column must still respond to precip"
@@ -70,27 +88,27 @@ def test_gradient_is_finite_at_zero_precipitation():
 def test_negative_precipitation_is_clamped_not_propagated():
     """An upstream sign error must not become a NaN gradient here."""
     p = jnp.asarray([-1.0 * _MM_DAY, 0.0], dtype=jnp.float64)
-    g = convective_gust_wind(p, 2.0)
+    g = convective_gust_wind(p, 2.0, _rho_like(p))
     # EXACT zero, not "small": a dry or sign-flipped column must not acquire a
     # coefficient-scaled gust out of the regularisation.
     assert float(g[0]) == 0.0
     assert float(g[1]) == 0.0
     assert bool(jnp.isfinite(jax.grad(
-        lambda x: convective_gust_wind(x, 2.0).sum())(p)[0]))
+        lambda x: convective_gust_wind(x, 2.0, _rho_like(x)).sum())(p)[0]))
 
 
 def test_cap_bounds_the_feedback_loop():
     huge = _rates([10_000.0])
-    assert float(convective_gust_wind(huge, 2.0, cap=5.0)[0]) == pytest.approx(
+    assert float(convective_gust_wind(huge, 2.0, _rho_like(huge), cap=5.0)[0]) == pytest.approx(
         5.0, rel=1e-6)
     # cap=0 means UNCAPPED, not "capped at zero" — the opposite reading would
     # silently disable the term.
-    assert float(convective_gust_wind(huge, 2.0, cap=0.0)[0]) > 5.0
+    assert float(convective_gust_wind(huge, 2.0, _rho_like(huge), cap=0.0)[0]) > 5.0
 
 
 def test_jit_parity():
     p = _rates([0.0, 2.7, 20.0])
-    eager = convective_gust_wind(p, 2.0, cap=6.0)
+    eager = convective_gust_wind(p, 2.0, _rho_like(p), cap=6.0)
     jitted = jax.jit(lambda x: convective_gust_wind(x, 2.0, cap=6.0))(p)
     np.testing.assert_allclose(np.asarray(eager), np.asarray(jitted), rtol=1e-12)
 
@@ -98,7 +116,8 @@ def test_jit_parity():
 def test_combines_in_quadrature_never_linearly():
     """The gust joins the resolved wind through apply_gustiness, so a 0.5 m/s
     mean wind with a 3 m/s gust gives sqrt(0.25+9), NOT 3.5."""
-    gust = float(convective_gust_wind(_rates([2.7]), 2.0)[0])
+    gust = float(convective_gust_wind(
+        _rates([2.7]), 1.0, jnp.full((1,), _RHO))[0])
     eff = float(apply_gustiness(jnp.asarray(0.5), jnp.asarray(0.0), gust))
     assert eff == pytest.approx(float(np.sqrt(0.25 + gust ** 2)), rel=1e-6)
     assert eff < 0.5 + gust
@@ -189,3 +208,15 @@ def test_physics_state_carries_the_precip_slot():
     assert hasattr(ps, "sfc_precip"), "PhysicsState lost the hand-off slot"
     assert ps.sfc_precip.shape == (6,)
     assert float(jnp.max(jnp.abs(ps.sfc_precip))) == 0.0
+
+
+def test_density_enters_the_scaling():
+    """u_c ~ rho^(-1/3): the same rain in denser air makes a weaker gust.
+
+    Pins that rho is genuinely in the formula rather than carried along
+    unused — the failure mode when a dimensional argument is added late.
+    """
+    p = _rates([2.7, 2.7])
+    rho = jnp.asarray([1.0, 8.0])
+    g = convective_gust_wind(p, 1.0, rho)
+    assert float(g[0]) / float(g[1]) == pytest.approx(2.0, rel=1e-6)

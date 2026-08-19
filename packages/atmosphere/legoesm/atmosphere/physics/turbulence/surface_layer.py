@@ -138,7 +138,7 @@ def compute_surface_fluxes(
         from legoesm.core.bulk_flux import convective_gust_wind
 
         u_gust = convective_gust_wind(
-            sfc_precip, config.convective_gustiness_coeff,
+            sfc_precip, config.convective_gustiness_coeff, rho,
             cap=config.convective_gustiness_cap,
         )
         speed = jnp.sqrt(u ** 2 + v ** 2 + _WIND_SPEED_FLOOR_M2_S2)
