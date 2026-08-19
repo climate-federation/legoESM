@@ -3,7 +3,7 @@
 # that case supports (latlon / mpas / fesom / tripole and the legacy
 # cubed_sphere / spectral where registered).
 #
-# Submit:  sbatch --array=0-8 scripts/cluster/ocean_grid_benchmark_suite.sbatch
+# Submit:  sbatch --array=0-9 scripts/cluster/ocean_grid_benchmark_suite.sbatch
 #
 # Then:    .venv/bin/python scripts/plot/plot_ocean_grid_benchmark_maps.py
 #          -> results/ocean_grid_benchmark/maps/{maps_<case>,maps_all_cases}.{png,pdf}
@@ -67,7 +67,7 @@ PYCHK
 CASES=(rest_state_stratified_with_land rest_state_uniform_with_land \
        rest_state_stratified_no_land rest_state_uniform_no_land \
        geostrophic_adjustment phillips_two_layer inertia_gravity_wave \
-       barotropic_wave lock_exchange)
+       barotropic_wave lock_exchange inertia_gravity_wave_channel)
 CASE=${CASES[${SLURM_ARRAY_TASK_ID:-0}]}
 # Optional single-arm rerun: GRID=<name> reruns just that grid for the case,
 # leaving the other arms' artifacts in place. Used when a fix touches one

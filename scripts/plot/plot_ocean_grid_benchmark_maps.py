@@ -36,6 +36,18 @@ PUB = {"title": 10, "label": 10, "tick": 9, "suptitle": 12, "dpi": 300}
 # Ocean grids only; cubed_sphere removed 2026-08-11 (not an ocean grid).
 GRIDS = ["latlon", "mpas", "fesom", "tripole"]
 
+#: Cases that live on their OWN grid family rather than the four global
+#: arms. The f-plane channel IGW is a Cartesian box, so drawing it in the
+#: global columns would leave the row empty and read as "this case did not
+#: run" -- which is how the case went unplotted entirely (2026-08-13).
+CASE_GRIDS = {
+    "inertia_gravity_wave_channel": ["latlon_channel"],
+}
+
+
+def _grids_for(case: str) -> list[str]:
+    return CASE_GRIDS.get(case, GRIDS)
+
 # Per case: (field, colormap, label). Sequential map for a magnitude-like
 # tracer, diverging for a signed anomaly around zero.
 CASES = {
@@ -48,6 +60,9 @@ CASES = {
     "phillips_two_layer": ("eta", "RdBu_r", "SSH [m]"),
     "inertia_gravity_wave": ("eta", "RdBu_r", "SSH [m]"),
     "lock_exchange": ("SST", "viridis", "SST [degC]"),
+    # The one case with an EXACT solution to be scored against; its axes
+    # are Cartesian channel coordinates carried as pseudo-degrees.
+    "inertia_gravity_wave_channel": ("eta", "RdBu_r", "SSH [m]"),
 }
 
 
@@ -168,16 +183,17 @@ def _provenance(root: Path) -> str:
 
 def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:
     field, cmap, label = CASES[case]
-    found = {g: _find(root, case, g) for g in GRIDS}
+    grids = _grids_for(case)
+    found = {g: _find(root, case, g) for g in grids}
     if not any(found.values()):
         return None
     loaded = {g: _load_field(p, field) for g, p in found.items() if p}
     kw, degenerate, (lo, hi) = _shared_scale(
         [v[2] for v in loaded.values()], cmap)
-    fig, axes = plt.subplots(1, len(GRIDS), figsize=(4.0 * len(GRIDS), 3.2),
+    fig, axes = plt.subplots(1, len(grids), figsize=(4.0 * len(grids), 3.2),
                              constrained_layout=True)
     im = None
-    for ax, g in zip(np.atleast_1d(axes), GRIDS):
+    for ax, g in zip(np.atleast_1d(axes), grids):
         if g not in loaded:
             ax.text(0.5, 0.5, f"{g}\n(not registered)", ha="center",
                     va="center", fontsize=9, color="0.4")
@@ -234,8 +250,14 @@ def build_contact_sheet(root: Path, out: Path,
     mentally undo the encoding, which is caption-level honesty doing
     figure-level work (GLM-5.2). So: the shared sheet for amplitude, the
     per-panel sheet for structure, each saying which it is.
+
+    The sheet keeps the four global columns; a case that runs on its own grid
+    family gets its per-case figure and is listed as such rather than drawn
+    as four blanks.
     """
-    cases = [c for c in CASES if any(_find(root, c, g) for g in GRIDS)]
+    cases = [c for c in CASES
+             if _grids_for(c) is GRIDS and any(_find(root, c, g)
+                                               for g in GRIDS)]
     fig, axes = plt.subplots(len(cases), len(GRIDS),
                              figsize=(2.6 * len(GRIDS), 1.9 * len(cases)),
                              constrained_layout=True)
@@ -326,13 +348,25 @@ def main() -> None:
     if not a.runs_root.is_dir():
         raise SystemExit(f"no suite output under {a.runs_root}; run the "
                          f"benchmark suite first (see module docstring).")
-    made = [p for p in (build_case_figure(a.runs_root, c, a.out_dir)
-                        for c in CASES) if p]
+    made, missing = [], []
+    for c in CASES:
+        out = build_case_figure(a.runs_root, c, a.out_dir)
+        (made if out else missing).append(c)
     sheet = build_contact_sheet(a.runs_root, a.out_dir / "maps_all_cases.png")
     build_contact_sheet(a.runs_root,
                         a.out_dir / "maps_all_cases_per_panel_scale.png",
                         per_panel=True)
     print(f"COMPLETED: {len(made)} case figures + {sheet}")
+    # A case that produces nothing is NAMED. Silently returning 9 of 10
+    # figures reads as "the tenth case did not run" when in fact it ran and
+    # writes its snapshots in a different form (2026-08-13: the f-plane
+    # channel IGW writes field_snapshots.png per arm and no regridded
+    # snapshots_latlon.npz, so it can never appear on this map).
+    for c in missing:
+        where = a.runs_root / c
+        print(f"  NO MAP for {c}: no regridded snapshot under {where} "
+              f"(the case may write its own figures there instead -- look "
+              f"for field_snapshots.png)")
 
 
 if __name__ == "__main__":
