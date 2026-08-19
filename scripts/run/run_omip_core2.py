@@ -6013,6 +6013,10 @@ def main() -> int:
     # the UNSMOOTHED WOA surface salinity BEFORE --woa-smoothing-passes damps the
     # IC fronts (restoring must target the true climatology, not the smoothed IC).
     visc_schedule = None
+    # Index of the NEXT schedule segment to apply. Fast-forwarded below when
+    # resuming: left at zero, a restart at day 60 would first re-apply the
+    # day-0 viscosity to a day-60 state and integrate with the wrong lateral
+    # mixing until the schedule caught up.
     visc_seg_idx = 0
     if args.visc_schedule:
         if app_grid_type not in ("tripole", "latlon"):
@@ -6822,6 +6826,16 @@ def main() -> int:
                   "must be recombined offline (weighted by leg length).",
                   flush=True)
     start_day = start_step * dt / _SEC_PER_DAY
+    if visc_schedule and start_step:
+        # Skip every segment whose start day the checkpoint is already past,
+        # so the resumed leg begins on the viscosity the schedule says applies
+        # at this time rather than replaying the ramp from the cold start.
+        while (visc_seg_idx + 1 < len(visc_schedule)
+               and visc_schedule[visc_seg_idx + 1][0] <= start_day):
+            visc_seg_idx += 1
+        print(f"[restart] viscosity schedule fast-forwarded to segment "
+              f"{visc_seg_idx + 1}/{len(visc_schedule)} "
+              f"(day {visc_schedule[visc_seg_idx][0]:g})", flush=True)
 
     print(f"[run] {total_days:.0f} days = {n_steps} steps "
           f"(diag every {diag_every} steps"
@@ -7485,7 +7499,12 @@ def main() -> int:
                               f"run-end row; pass --snapshot-every-days N to "
                               f"make windowed means recoverable", flush=True)
 
-    for step in range(1, n_steps + 1):
+    # RESUME AT THE RESTART'S ABSOLUTE STEP. Starting at 1 replays the whole
+    # run against an already-advanced state: a step-4 checkpoint with an
+    # 8-step target applied the forcing for steps 1..8 to that state, advanced
+    # twelve physical steps, and then labelled the result step 8. The scan
+    # lane already continued the counter; this one did not.
+    for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0

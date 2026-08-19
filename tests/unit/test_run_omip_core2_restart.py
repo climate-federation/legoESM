@@ -863,3 +863,60 @@ def test_dropping_the_tke_carry_breaks_continuity(_legs):
     with pytest.raises(AssertionError):
         _assert_states_match(got, _legs["cont_state"], got_ice,
                              _legs["cont_ice"])
+
+
+# ---------------------------------------------------------------------------
+# The tests above exercise the restart FORMAT. These two are about the DRIVER
+# LOOP that consumes it, where codex found the resume was not wired at all on
+# one of the two stepping lanes.
+# ---------------------------------------------------------------------------
+
+def _driver_main_ast():
+    import ast
+    from pathlib import Path as _P
+
+    root = _P(__file__).resolve().parents[2]
+    src = (root / "scripts" / "run" / "run_omip_core2.py").read_text()
+    tree = ast.parse(src)
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+
+def test_the_host_loop_starts_at_the_restarts_step():
+    """It started at 1 regardless, i.e. it replayed the whole run.
+
+    Resuming a step-4 checkpoint with an eight-step target applied the forcing
+    for steps 1 to 8 to a state already at step 4, advanced twelve physical
+    steps, and labelled the result step 8. The other stepping lane continued
+    the counter correctly, so the two lanes disagreed about what a resume is.
+    """
+    import ast
+
+    main = _driver_main_ast()
+    loops = [n for n in ast.walk(main)
+             if isinstance(n, ast.For) and isinstance(n.target, ast.Name)
+             and n.target.id == "step"
+             and isinstance(n.iter, ast.Call)
+             and getattr(n.iter.func, "id", None) == "range"]
+    assert loops, "no `for step in range(...)` stepping loop found in main()"
+    for loop in loops:
+        names = {n.id for n in ast.walk(loop.iter) if isinstance(n, ast.Name)}
+        assert "start_step" in names, (
+            f"the stepping loop at line {loop.lineno} ignores start_step, so a "
+            "resumed run replays from the beginning against an already "
+            "advanced state")
+
+
+def test_a_resumed_viscosity_schedule_is_fast_forwarded():
+    """Left at segment zero, a restart at day 60 re-applies the day-0
+    viscosity to a day-60 state and integrates with the wrong lateral mixing
+    until the schedule catches up."""
+    import ast
+
+    main = _driver_main_ast()
+    # the fast-forward must be guarded on having actually resumed
+    src = ast.unparse(main)
+    assert "visc_seg_idx + 1 < len(visc_schedule)" in src, (
+        "nothing advances the viscosity-schedule index on resume")
+    assert "start_day" in src.split("visc_seg_idx + 1 < len(visc_schedule)")[0][-400:], (
+        "the fast-forward does not compare against the restart's day")
