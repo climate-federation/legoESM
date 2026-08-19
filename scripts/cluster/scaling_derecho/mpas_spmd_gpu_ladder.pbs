@@ -4,7 +4,7 @@
 #PBS -q main
 #PBS -l job_priority=regular
 #PBS -l select=4:ncpus=64:mpiprocs=4:ngpus=4:gpu_type=a100:mem=400GB
-#PBS -l walltime=03:00:00
+#PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -k eod
 # ===========================================================================
@@ -21,10 +21,12 @@
 # Mesh: lloyd-0 labelled synthetic scaling mesh (scaling receipts only,
 # never physics). Levels <= 8 build routinely — rungs run N=1 FIRST so a
 # single process builds and caches each mesh before the multi-rank rungs
-# load it. Level 9+ requires the prewarm
-# (scripts/data/prewarm_voronoi_mesh.py --level 9 --lloyd 0, same cache dir,
-# and note the cache is precision-keyed: an X64=1 ladder needs its own
-# prewarm run with JAX_ENABLE_X64=1).
+# load it. Level 9 (in the default list) REQUIRES the prewarm
+# (scripts/data/prewarm_voronoi_mesh.py --level 9 --lloyd 0, same cache dir);
+# a cache miss at level 9 refuses to build and the rung fails. The cache is
+# precision-keyed: an X64=1 ladder needs its own prewarm with
+# JAX_ENABLE_X64=1. The level-9 N=1 rung may also exceed a 40 GB A100 —
+# if it OOMs, the s9 curve simply starts at its smallest fitting rung.
 #
 # --reorder-for is pinned to the ladder's LARGEST rung so every rung times
 # the identical reordered mesh (the bench's own guidance for curves).
@@ -34,7 +36,7 @@
 #        scripts/cluster/scaling_derecho/mpas_spmd_gpu_ladder.pbs
 # Knobs via qsub -v (quote the whole -v arg if a value contains spaces;
 # values must never contain commas — qsub -v splits on them):
-#   SUBDIV="6 7 8"           subdivision levels (10*4^L+2 cells)
+#   SUBDIV="7 8 9"           subdivision levels (10*4^L+2 cells)
 #   GPU_RANKS="1 2 4 8 16"   ladder; rungs above the granted GPUs are skipped
 #   NLEV=26  STEPS=65  WARMUP=5
 #   X64=0                    0 = float32 (default here), 1 = float64
@@ -52,7 +54,7 @@ export LEGOESM_CONDA_ENV="${LEGOESM_CONDA_ENV:-legoesm-gpu}"
 source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"
 cd "$REPO"
 
-SUBDIV="${SUBDIV:-6 7 8}"
+SUBDIV="${SUBDIV:-7 8 9}"
 GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
 NLEV="${NLEV:-26}"
 STEPS="${STEPS:-65}"; WARMUP="${WARMUP:-5}"
