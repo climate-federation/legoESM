@@ -26,7 +26,7 @@ matrix smoke tests do not require ~50 GB of JRA55-do data.
 from __future__ import annotations
 
 from .jra55_do import OceanForcing, load_jra55_do, synthetic_ocean_forcing
-from .core2 import load_core2_nyf
+from .core2 import core2_nyf_path, load_core2_nyf
 from .woa import load_woa_sst, synthetic_woa_sst
 from .woa_sss import load_woa_sss, synthetic_woa_sss
 from .dai_trenberth import (
@@ -48,6 +48,7 @@ __all__ = [
     "OceanForcing",
     "load_jra55_do",
     "load_core2_nyf",
+    "core2_nyf_path",
     "load_woa_sst",
     "load_woa_sss",
     "synthetic_ocean_forcing",

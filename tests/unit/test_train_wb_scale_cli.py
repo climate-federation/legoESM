@@ -111,3 +111,140 @@ def test_rollout_hours_matches_first_lead():
     cfg = cfg._replace(multi_step_hours=())
     assert rollout_hours(cfg, {"loss": {"multi_step_hours": [12, 24]}}) == 12.0
     assert rollout_hours(cfg, {}) == 6.0
+
+
+def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
+    """The classical arm builds RRTMGP inside ``make_run_seg``, and ``loss_fn``
+    calls that under ``eqx.filter_value_and_grad``.  With a cold optics cache
+    the NetCDF gas-optics load then runs against Equinox tracers and the job
+    dies with TracerArrayConversionError (job 26905933, six minutes of ERA5
+    loading wasted first).  ``main`` must therefore build the segment once with
+    CONCRETE params, before the training loop.
+    """
+    import ast
+
+    tree = ast.parse(_ENTRY.read_text())
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    # It must be a bare statement in main's OWN body: a call nested in an inner
+    # def is the traced one this guards against, and one wrapped in ``if
+    # cfg.mode == ...`` or a swallowing ``try`` leaves the classical arm exactly
+    # as broken as before (codex).
+    warm = [stmt.value for stmt in main.body
+            if isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "make_run_seg"]
+    assert warm, ("main() must call make_run_seg(...) as an unconditional "
+                  "top-level statement — it warms the RRTMGP optics-table "
+                  "cache outside the trace")
+    assert any(isinstance(a, ast.Name) and a.id == "params"
+               for call in warm for a in call.args), (
+        "the warm-up must pass the concrete params pytree, not a placeholder")
+
+    # ... and before the ERA5 load, so a broken physics config fails in seconds
+    # rather than after minutes of data loading.
+    era5 = [n.lineno for n in ast.walk(main)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "load_era5_samples"]
+    assert era5, "ERA5 loader call not found — did main() get restructured?"
+    assert min(c.lineno for c in warm) < min(era5), (
+        "the warm-up must run BEFORE the ERA5 load, not after it")
+
+
+def _guard():
+    """The #1464 surface-stress guard, from the module it now lives in.
+
+    It moved out of this driver into ``legoesm.training.scale_build`` because
+    guarding one driver left the EVALUATION driver free to build the same
+    unequalised arm and write a scorecard from it: both go through
+    ``build_mode_components``, so that is where the check belongs.
+    """
+    from legoesm.training.scale_build import check_surface_drag_confound
+    return check_surface_drag_confound
+
+
+def _confounded_yaml(**extra):
+    neural = {"surface_drag_confounded": "core_does_not_read_the_key"}
+    neural.update(extra)
+    return {"neural_gcm": neural, "classical": {"turbulence": "louis"}}
+
+
+def test_the_spectral_core_refuses_a_config_that_declares_the_key_unread():
+    """#1464: that declaration is a property of the CORE, not of the file.
+
+    The lat-lon core never reads ``neural_gcm.surface_drag``; the spectral one
+    does. Running a config that declares the key unread on the spectral core
+    would hand the learned arm no surface stress while the classical arm it is
+    scored against carries Louis -- the confound, wearing the label that says
+    it is not there."""
+    with pytest.raises(SystemExit) as e:
+        _guard()(_confounded_yaml(), "neural_gcm", "spectral")
+    assert "surface_drag" in str(e.value)
+
+
+def test_the_latlon_core_accepts_the_same_config():
+    """On the core the declaration is about, it is simply true."""
+    assert _guard()(_confounded_yaml(), "neural_gcm", "latlon") is None
+
+
+def test_asking_for_the_drag_clears_the_refusal():
+    """A config that enables the drag is equalised, whatever it declares."""
+    assert _guard()(
+        _confounded_yaml(surface_drag=True, surface_drag_scheme="louis"),
+        "neural_gcm", "spectral") is None
+
+
+def test_the_guard_is_reached_through_the_builder_not_just_the_trainer():
+    """The trainer is not the only door.
+
+    ``run_weatherbench_eval`` builds the same components and writes a
+    scorecard; a guard installed in the training entry point alone is walked
+    straight past by it.  Both call ``build_mode_components``, so assert the
+    check happens THERE."""
+    import ast
+    import inspect
+
+    from legoesm.training import scale_build
+
+    src = inspect.getsource(scale_build.build_mode_components)
+    called = {n.func.id for n in ast.walk(ast.parse(src.lstrip()))
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "check_surface_drag_confound" in called, (
+        "build_mode_components does not run the surface-stress guard, so any "
+        "entry point that is not the trainer builds an unequalised learned "
+        "arm without a word (#1464)")
+
+
+def test_a_campaign_the_builder_cannot_equalise_is_named_not_waved_through():
+    """The second declaration had no runtime consequence at all.
+
+    ``builder_refuses_classical_scheme`` is legitimate -- the drag builder
+    genuinely cannot reproduce a prognostic scheme -- but the run still
+    produces a table whose arms differ by a momentum sink.  Silence there
+    reads as an equalised comparison."""
+    yml = {"neural_gcm": {
+               "surface_drag_confounded": "builder_refuses_classical_scheme"},
+           "classical": {"turbulence": "clubb"}}
+    note = _guard()(yml, "neural_gcm", "spectral")
+    assert note and "clubb" in note and "surface stress" in note, note
+    # and it is silent once the arms ARE equalised
+    yml["neural_gcm"]["surface_drag"] = True
+    assert _guard()(yml, "neural_gcm", "spectral") is None
+
+
+def test_the_scorecard_records_the_confound_beside_the_numbers():
+    """A log line is not a record; the file the plots read has to carry it."""
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2] / "scripts" /
+           "validate" / "run_weatherbench_eval.py").read_text()
+    keys = {n.value for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "surface_drag_confound" in keys, (
+        "the scorecard meta block does not record whether the learned arm "
+        "carried a surface stress, so a confounded table is indistinguishable "
+        "from an equalised one once the log scrolls away")
+

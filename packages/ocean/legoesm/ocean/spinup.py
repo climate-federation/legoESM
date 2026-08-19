@@ -189,16 +189,22 @@ def compute_amoc_from_state(
     profile = psi_Sv[j, :]
     if not np.any(np.isfinite(profile)):
         return float("nan")
-    # ``moc_streamfunction`` uses ``psi = -cumsum(V_zonal)`` so for the
-    # canonical Atlantic overturning cell — northward upper transport,
-    # NADW return flow below — ψ has its EXTREMUM as a NEGATIVE peak
-    # at the interface between the two branches (typically 1000–2000 m
-    # for Atlantic AMOC).  The RAPID convention reports AMOC as a
-    # positive number, so we negate the minimum.  An anomalous run
-    # with REVERSED circulation (collapsed AMOC, southward at surface)
-    # would yield a negative reported value, which is the desired
-    # signed-strength behaviour for spin-up monitoring.
-    return float(-np.nanmin(profile))
+    # SIGN-AGNOSTIC peak, matching the validated NEMO-side instrument
+    # (``nemo_transports.amoc_core``): reference ψ to the surface (removes
+    # any barotropic throughflow offset) and report the magnitude of the
+    # largest excursion.  The previous ``-nanmin(profile)`` assumed the
+    # overturning cell always appears as a NEGATIVE ψ peak; on the tripole
+    # eORCA state the peak is POSITIVE, so ``-min`` picked a near-zero
+    # ripple and reported an AMOC of -0.13 Sv on a state whose amoc_core
+    # value is 9.8 Sv (measured 2026-08-11,
+    # scripts/validate/ocean_fidelity/amoc_from_snapshot.py vs the in-run
+    # transports.txt of nemolev_trp_gwcorr_d90).  Sign conventions differ
+    # per grid orientation; magnitude does not.
+    prof0 = profile - profile[0]
+    if not np.any(np.isfinite(prof0)):
+        return float("nan")
+    kmax = int(np.nanargmax(np.abs(prof0)))
+    return float(abs(prof0[kmax]))
 
 
 def compute_acc_from_state(
@@ -501,14 +507,16 @@ def compute_amoc_from_state_mpas(
         return float("nan")
 
     # Cumulative depth integral (surface → bottom).  Matching the
-    # lat-lon ``moc_streamfunction`` convention: ``ψ = -cumsum``.
-    # A genuinely-zero band (e.g. Atlantic-filter excludes all
-    # transport at this latitude) produces a flat zero ψ; the
-    # ``-nanmin`` then returns 0.0 which is the physically correct
-    # answer (no overturning).
+    # lat-lon ``moc_streamfunction`` convention: ``ψ = -cumsum``; the
+    # surface interface is implicitly ψ = 0, so the profile is already
+    # surface-referenced.  SIGN-AGNOSTIC peak (same 2026-08-11 fix as the
+    # lat-lon variant: ``-nanmin`` assumed a negative-peaked cell and
+    # reported ~0 on positive-peaked orientations); a genuinely-zero band
+    # still returns 0.0.
     psi_m3s = -np.cumsum(F_band)
     psi_Sv = psi_m3s / 1.0e6
-    return float(-np.nanmin(psi_Sv))
+    kmax = int(np.nanargmax(np.abs(psi_Sv)))
+    return float(abs(psi_Sv[kmax]))
 
 
 def compute_acc_from_state_mpas(

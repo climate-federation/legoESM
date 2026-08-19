@@ -418,3 +418,38 @@ def test_two_leaf_canopy_most_runs(tmp_path):
     assert np.isfinite(T).any()
     finite = T[np.isfinite(T)]
     assert finite.min() > 200.0 and finite.max() < 360.0     # physical surface T
+
+
+def test_the_albedo_block_says_so_when_it_cannot_reach_absorbed_sunlight(tmp_path):
+    """The two-leaf canopy does not read this calibration.
+
+    It takes the sunlight it ABSORBS from the CLM soil-colour visible/NIR pair,
+    so a brighter snow albedo configured here changes the albedo the run
+    REPORTS and nothing the model integrates -- not absorbed shortwave, not
+    snowmelt.  Found by codex on this PR: the calibration looked applied and
+    was not.  The gap is older than this change and fixing it is a physics
+    change of its own; what must not happen is a run that looks calibrated
+    while the canopy ignores it.  The ice-sheet pair DOES reach the canopy and
+    must stay silent.
+    """
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.surface_scheme=two_leaf_canopy",
+        "physics.albedo.alpha_snow_max=0.95"])
+    with pytest.warns(RuntimeWarning, match="REPORTED albedo only"):
+        _run_config(mod, cfg_path, tmp_path / "out")
+
+
+def test_the_same_calibration_is_silent_on_the_scheme_that_reads_it(tmp_path):
+    """SimpleSEB takes its albedo from exactly this block, so warning there
+    would be noise -- and a warning that fires everywhere gets filtered."""
+    import warnings as _w
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.albedo.alpha_snow_max=0.95"])   # smoke template = simple_seb
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        _run_config(mod, cfg_path, tmp_path / "out")
+    assert not [c for c in caught if "REPORTED albedo only" in str(c.message)]

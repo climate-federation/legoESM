@@ -784,9 +784,20 @@ class MPASOceanModel:
                     refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
-                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
+                # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact; SSS restoring is not part of it,
+                # and NEMO never normalizes its `erp`.  Normalizing the full
+                # net would subtract the restoring's own global mean from every
+                # cell -- a spurious uniform water flux AND a globally weakened
+                # restoring, both silent.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                _F_rest = (0.0 if _fw_rest is None
+                           else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
+                _F_phys = F_slow_eta - _F_rest
+                F_mean = jnp.sum(_F_phys * area) / jnp.maximum(
                     ocean_area, 1e-10)
-                F_slow_eta = (F_slow_eta - F_mean * mask)
+                F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 

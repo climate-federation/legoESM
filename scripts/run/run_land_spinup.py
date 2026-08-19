@@ -221,7 +221,8 @@ def main(argv=None) -> int:
     if args.restart_from:
         loaded, meta = load_land_restart(
             args.restart_from, expected_land_mode="multilayer",
-            expected_ncol=ncol, expected_n_layers=n_layers)
+            expected_ncol=ncol, expected_n_layers=n_layers,
+            expected_soil_grid=config.soil_grid)
         # Graft the restart's prognostic columns onto a canonical cold-start
         # template so the loaded state has the full structure the inner
         # lax.scan (step_multilayer_land output) requires — the restart only
@@ -275,7 +276,8 @@ def main(argv=None) -> int:
                 t_end_s=float(y + 1) * sec_per_year,
                 n_steps_completed=(y + 1) * steps_per_year,
                 metadata={"grid_type": args.grid_type,
-                          "resolution": args.resolution, "dt": dt})
+                          "resolution": args.resolution, "dt": dt},
+                soil_grid=config.soil_grid)
 
     restart_out = Path(args.restart_out) if args.restart_out else out_dir / "land_ic.npz"
     save_land_restart(
@@ -284,7 +286,8 @@ def main(argv=None) -> int:
         n_steps_completed=(year0 + args.years) * steps_per_year,
         metadata={"grid_type": args.grid_type, "resolution": args.resolution,
                   "dt": dt, "years": year0 + args.years,
-                  "surface_scheme": args.surface_scheme})
+                  "surface_scheme": args.surface_scheme},
+        soil_grid=config.soil_grid)
 
     # Verdict for #746 item 1: is the land converging (spin-up) or pinned
     # (structural)?  The LAST year's |drift| vs the tolerance decides.

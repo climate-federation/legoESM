@@ -326,6 +326,32 @@ class _CornerLagrange:
         w = _lagrange_w(col[jt - glo], xs)
         return w, src_f
 
+    def weights(self, i_t: int, j_t: int, direction: str) -> tuple:
+        """Public accessor: ``(weights, source Fortran index list)`` for
+        ONE directional fill at ``(i_t, j_t)``.
+
+        Same dispatch as :meth:`_apply_dir` (and raises on an unknown
+        direction rather than defaulting, per the dispatch-hardening
+        rule).  Exists so the JAX lane's table builder
+        (``fv3_duo_halos.build_jax_duo_halo_tables``) can READ these
+        Lagrange coefficients instead of re-deriving
+        ``compute_lagrange_coeff`` (fv_duogrid.F90:2159-2272) — a
+        re-derivation would be a mathematical port, not a mechanical
+        one.  No numerics here; the weights come from ``_w_x``/``_w_y``
+        unchanged.
+        """
+        if direction == "X+":
+            return self._w_x(i_t, j_t, True)
+        if direction == "X-":
+            return self._w_x(i_t, j_t, False)
+        if direction == "Y+":
+            return self._w_y(i_t, j_t, True)
+        if direction == "Y-":
+            return self._w_y(i_t, j_t, False)
+        raise ValueError(
+            f"_CornerLagrange.weights: direction {direction!r} "
+            f"(expected 'X+', 'X-', 'Y+' or 'Y-')")
+
     def _apply_dir(self, f: np.ndarray, i_t: int, j_t: int, direction: str):
         lo = self.flo
         if direction == "X+":

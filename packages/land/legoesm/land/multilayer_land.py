@@ -82,10 +82,41 @@ def _get(lp, name: str, fallback):
     either ``LandSurfaceParams`` (for SimpleSEB; full field set) or
     ``CanopyLandParams`` (for TwoLeafCanopy; disjoint field set).  Missing
     fields fall back to the caller-supplied default rather than raising.
+
+    A field that EXISTS but is ``None`` is also treated as absent: optional
+    per-column params (``root_depth``/``theta_wp``/``theta_fc``) are declared on
+    ``CanopyLandParams`` with a ``None`` default, so a params object that does
+    not carry them must still fall back to the scalar config value rather than
+    propagating ``None`` into the arithmetic.
     """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    v = getattr(lp, name, fallback)
+    return fallback if v is None else v
+
+
+def resolve_plant_wilting_point(land_params, config):
+    """The PLANT wilting point that drives root-zone transpiration and GPP.
+
+    It is deliberately separate from the SOIL wilting point (deep-rooted
+    vegetation extracts water below the soil-evaporation cutoff), and it is
+    resolved in one place because the two callers -- the multilayer land step
+    and the coupler's land-tile beta -- disagreed: the step fell straight back
+    to the SCALAR ``config.theta_wp`` and so ignored a per-column
+    ``theta_wp``.  Any calibration that varies the wilting point by plant
+    functional type therefore reached soil evaporation and was silently inert
+    in transpiration and GPP -- the two arms of the same column disagreeing
+    about how dry the soil is.
+
+    Order, most specific first: a per-column ``theta_wp_plant``, then a
+    per-column ``theta_wp``, then ``config.theta_wp_plant``, then the scalar
+    ``config.theta_wp``.  With none of them set this reproduces the
+    single-wilting-point behaviour exactly.
+    """
+    scalar = (config.theta_wp_plant if config.theta_wp_plant is not None
+              else config.theta_wp)
+    return _get(land_params, "theta_wp_plant",
+                _get(land_params, "theta_wp", scalar))
 
 
 def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
@@ -147,10 +178,7 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     root_depth = _get(land_params, "root_depth", config.root_depth)
     # Plant wilting point (transpiration extraction) drives this root-zone
     # availability; falls back to the soil wilting point when unset.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp   = _get(land_params, "theta_wp_plant",
-                      _get(land_params, "theta_wp", _wp_plant_cfg))
+    theta_wp   = resolve_plant_wilting_point(land_params, config)
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
         theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
@@ -407,9 +435,7 @@ def _step_multilayer_land_impl(
     # water below the soil-evaporation cutoff.  Falls back to ``theta_wp`` (per-
     # column params first, then config) so an unset plant wp reproduces the
     # single-wilting-point behaviour exactly.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp_plant = _get(lp, "theta_wp_plant", _wp_plant_cfg)
+    theta_wp_plant = resolve_plant_wilting_point(lp, config)
 
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]
@@ -1148,18 +1174,34 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
-        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
-        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
-        # Use it directly so the coupler sees the same humidity as CLM-ML used
-        # for soil evaporation.  Override with q_sat_ice over snow (physically
-        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+    # Snow that was present when the scheme computed its humidity but melted
+    # away during the step leaves that humidity stale on the ICE curve; the
+    # end-state reconstruction below is the honest value for that transition.
+    _snow_melted_out = (snow > 1e-6) & ~has_snow_new
+    if surface_out.q_surface is not None:
+        # The surface scheme SOLVED for its own boundary humidity -- CLM-ML's
+        # Philip soil relative humidity, the two-leaf canopy's canopy-air
+        # humidity q_c (solved through the stomatal + soil + aerodynamic
+        # resistance network), or SimpleSEB's bounded gradient form.  Use it.
+        # This branch used to be CLM-ML only, and the else-branch OVERWROTE the
+        # two-leaf canopy's solved q_c with the product form beta*q_sat -- the
+        # resistance physics ran and was then discarded at the boundary (the
+        # slab wrapper preserved it; this wrapper did not).  Snow still
+        # overrides to the ice-saturation surface.
         q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+        q_sfc_new = jnp.where(
+            _snow_melted_out,
+            forcing.q_lowest
+            + jnp.where(has_snow_new, 1.0, beta_new)
+            * (q_sat_sfc_new - forcing.q_lowest),
+            q_sfc_new)
     else:
-        # SimpleSEB / TwoLeafCanopy: beta·qsat with the updated moisture state
-        # (``beta_new`` computed unconditionally above).
+        # Scheme returned no humidity: reconstruct the bounded GRADIENT form
+        # (never the product form -- beta is a flux efficiency, and beta*q_sat
+        # manufactures condensation over dry soil; see simple_seb.py).
         beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-        q_sfc_new = beta_effective_new * q_sat_sfc_new
+        q_sfc_new = (forcing.q_lowest
+                     + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":

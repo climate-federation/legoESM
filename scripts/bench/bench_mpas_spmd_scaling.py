@@ -97,7 +97,7 @@ MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
-                          moist=False, lloyd_iterations=50):
+                          moist=False, lloyd_iterations=50, fix_mass=True):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
@@ -131,7 +131,7 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
     # energy-conserving PV flux, SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=True,
+        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -237,6 +237,12 @@ def main() -> int:
                         "loop both pays a host round-trip per step and "
                         "forbids cross-step pipelining. Warmup steps still "
                         "run the Python loop (compile + steady check).")
+    p.add_argument("--no-fix-mass", action="store_true",
+                   help="Disable the global mass fixer. TIMING ONLY on a "
+                        "scaling arm: it removes the ONE global allreduce "
+                        "the step performs, so the arm prices that "
+                        "reduction. Mass is then not pinned, and the "
+                        "conservation gate must not be used with it.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -339,7 +345,8 @@ def main() -> int:
             f"partition target.")
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
-        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd)
+        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
+        fix_mass=not args.no_fix_mass)
 
     if args.multicontroller:
         # Every process computed the reorder independently — assert the
@@ -482,8 +489,27 @@ def main() -> int:
     if _profiling and _prof_on:
         jax.profiler.stop_trace()
 
+    # Per-rank timing spread (skew attribution). Every process measured
+    # the SAME steps with its own wall clock; the cross-rank spread of
+    # the steady medians is the cheapest honest skew signal available on
+    # this stack (nsys records no halo collectives, and wall/max
+    # bucketing was shown to smear arrival variance into whichever term
+    # an arm was measuring). NOTE the floor: each per-step time already
+    # includes a device sync (_block), so what this sees is the spread
+    # of ARRIVALS at the end-of-step sync, not per-collective skew.
+    per_rank_median_ms = None
+    per_rank_spread_ms = None
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
+        _steady = per_step_ms[args.warmup:] or per_step_ms
+        _my_med = float(np.median(np.asarray(_steady)))
+        _all = multihost_utils.process_allgather(
+            np.asarray([_my_med], dtype=np.float32))
+        per_rank_median_ms = [round(float(x), 4)
+                              for x in np.asarray(_all).ravel()]
+        per_rank_spread_ms = round(
+            float(np.max(per_rank_median_ms)
+                  - np.min(per_rank_median_ms)), 4)
         multihost_utils.sync_global_devices("mpas_spmd_bench_end")
 
     # HLO collective-permute census (#1113 ask 2): a STATIC compile property of
@@ -640,6 +666,22 @@ def main() -> int:
             "steps": args.steps,
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": int(mesh.nCells) // nd * args.nlev,
+            # Which arm actually ran. Without this the receipts of a
+            # measurement arm and of the baseline are distinguishable
+            # only by their FILENAME, and a knob that failed to take
+            # effect is indistinguishable from one that did.
+            "fix_mass": not args.no_fix_mass,
+            "per_rank_median_ms": per_rank_median_ms,
+            "per_rank_spread_ms": per_rank_spread_ms,
+            "halo_knobs": {
+                k: os.environ.get(k, "")
+                for k in ("LEGOESM_MPAS_WIDE_HALO",
+                          "LEGOESM_MPAS_WIDE_HALO_STRIDE",
+                          "LEGOESM_MPAS_RAGGED_HALO",
+                          "LEGOESM_MPAS_HALO_BALLAST",
+                          "LEGOESM_MPAS_HALO_NOCOMM",
+                          "LEGOESM_MPAS_HALO_NOSTAGE")
+            },
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns

@@ -356,7 +356,106 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
         "zv_trd at jn=1; v twin of cor2d_dump_zu_trd_substep1.bin, same "
         "dyn_cor_2D call at :783 and same governing before-level input "
         "(pvv_b(:,:,Kbb))."),
+    # --- #1455 sec-D JOB 1: the barotropic time-mean advective transport
+    # un_adv/vn_adv (dynspg_ts.F90).  Accumulated OVER the substep window
+    # (:736 ``un_adv += za2*zhU*r1_e2u``, wgtbtp2 boxcar weights) and
+    # normalised at :999 (``/r1_wgt2s``).  It is a SUBSTEP TIME MEAN, not a
+    # bare leapfrog level; NEMO reconciles the 3-D momentum depth-mean ONTO it
+    # at Kmm=NOW (dynspg_ts.F90:1172, ``un_adv*r1_hu(Kmm)``), so it is
+    # registered "now" -- the level of the reconcile that consumes it (the same
+    # transport_avg target the DINO card selects, dino.py:1487).  Written as a
+    # SINGLETON (first-step-only, ll_spg_dump=kt==nit000) at :1046 WRITE(8862).
+    # Units: [m^2/s] transport per unit width = <SUM_k e3u*u>_substep (map to
+    # full transport [m^3/s] via *e2u).
+    "spg_dump_un_adv_final.bin": ("now", "dynspg_ts.F90:1046 WRITE(8862) un_adv; "
+        "substep time-mean advective transport (:736 accumulate, :999 /r1_wgt2s) "
+        "reconciled at Kmm=NOW (:1172 un_adv*r1_hu(Kmm))."),
+    "spg_dump_vn_adv_final.bin": ("now", "dynspg_ts.F90:1047 WRITE(8863) vn_adv; "
+        "v twin of spg_dump_un_adv_final.bin, same substep-mean accumulation "
+        "(:737) and Kmm=NOW reconcile."),
+    # --- #1455 sec-D PHASE 2: the FULL per-barotropic-substep trajectory
+    # substep_dump.bin (dynspg_ts.F90:926-940, guarded "IF(kt==nit000)", one
+    # record per jn=1..icycle).  Each record holds sshn_e/ssha_e/zsshp2_e/un_e/
+    # vn_e/ua_e/va_e at that substep -- the barotropic-mode fast fields, which
+    # have NO leapfrog time level of their own (un_e etc. are the split-explicit
+    # sub-cycle state, seeded at jn=1 from puu_b(:,:,Kbb) via the ln_bt_fw=F
+    # CENTRED branch, dynspg_ts.F90:570; proven by un_e[jn=1] == un_e_init to
+    # 0.0e0).  Registered "before" for the SAME reason as
+    # cor2d_dump_ua_e_in_substep1.bin above (the sub-cycle seed is the Kbb
+    # barotropic transport); this dump is a superset (all icycle substeps, not
+    # just jn=1).  jpi x jpj = 56 x 203, per-substep records, fp64.
+    "substep_dump.bin": ("before", "dynspg_ts.F90:926-940 WRITE(799) per-jn "
+        "barotropic sub-cycle fields (sshn_e/ssha_e/zsshp2_e/un_e/vn_e/ua_e/"
+        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:570, ln_bt_fw=F "
+        "CENTRED seed), same Kbb sub-cycle seed as cor2d_dump_ua_e_in_substep1.bin"),
+    # --- #1226 SEQDUMP intra-step seam walk (RUN_SEQDUMP_Y20_1R, y20 kt=
+    # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
+    # ebeb8a5), each proved by reading the CALL that produces the dumped
+    # field one line above the WRITE (Rule 1d cite = the producing CALL, not
+    # the WRITE). These localise WHERE the barotropic/longitude-uniform
+    # eta(Naa) injection first appears un-inherited.
+    #
+    # ssh/r3 CHAIN (r3t = ssh/H_0 ratio; ssh = H_0*r3t, so the r3 chain IS the
+    # ssh commit chain). Naa (after) time level throughout -- these are the
+    # SAME leap-frog after-ssh at three successive commit points:
+    "seq_dump_rhd_bbb": ("before", "stpmlf.F90:212 CALL eos(ts,Nbb,rhd) "
+        "-> WRITE(8930) :222; before in-situ density feeding ldf_slp."),
+    "seq_dump_rhd_nnn": ("now", "stpmlf.F90:271 CALL eos(ts,Nnn,rhd,rhop) "
+        "-> WRITE(8931) :280; now in-situ density feeding dyn_hpg."),
+    "seq_dump_hdiv_nnn": ("now", "stpmlf.F90:340 CALL div_hor(kstp,Nbb,Nnn) "
+        "2nd (time-split) call -> WRITE(8932) :362; hdiv(Nnn). NOTE outermost "
+        "1-cell ring is zero-filled, valid after the standard 2-cell strip."),
+    # r3(Naa) AFTER the SECOND dom_qco_r3c (stpmlf.F90:367), i.e. built from
+    # the POST-barotropic (dyn_spg-replaced) ssh(Naa). This is the ssh the
+    # step COMMITS pre-filter. Naa.
+    "seq_dump_r3t_aaa": ("after", "stpmlf.F90:367 CALL dom_qco_r3c(ssh(Naa),"
+        "r3t(Naa),...) 2nd call, post dyn_spg -> WRITE(8933) :377; r3t(Naa) "
+        "= ssh(Naa)/H_0 from the barotropic-replaced ssh."),
+    "seq_dump_r3u_aaa": ("after", "stpmlf.F90:367 dom_qco_r3c -> WRITE(8934) "
+        ":378; r3u(Naa) u-point twin of seq_dump_r3t_aaa."),
+    "seq_dump_r3v_aaa": ("after", "stpmlf.F90:367 dom_qco_r3c -> WRITE(8935) "
+        ":379; r3v(Naa) v-point twin of seq_dump_r3t_aaa."),
+    "seq_dump_r3f": ("after", "stpmlf.F90:367 dom_qco_r3c (the ONLY call "
+        "producing r3f) -> WRITE(8936) :380; r3f(Naa) f-point ratio."),
+    # r3_f from the ASSELIN-FILTERED now ssh (stpmlf.F90:442). This is what
+    # the NEXT step carries as its geometry -- registered by traatf/ssh_atf's
+    # own after-filter level exactly as atf_dump_ssh_after is "after".
+    "seq_dump_r3t_f": ("after", "stpmlf.F90:442 CALL dom_qco_r3c(ssh(Nnn),"
+        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937) :450; r3t_f."),
+    "seq_dump_r3u_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
+        "WRITE(8938) :451; r3u_f u-point twin of seq_dump_r3t_f."),
+    "seq_dump_r3v_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
+        "WRITE(8939) :452; r3v_f v-point twin of seq_dump_r3t_f."),
+    # post-finalize_lbc Naa state (stpmlf.F90:562 CALL finalize_lbc; dumps at
+    # :576-579). u/v/T/S at Naa BEFORE the Asselin swap.
+    "seq_dump_postlbc_u_aaa": ("after", "stpmlf.F90:562 CALL finalize_lbc -> "
+        "WRITE(8940) :576; uu(Naa) post-lbc."),
+    "seq_dump_postlbc_v_aaa": ("after", "stpmlf.F90:562 finalize_lbc -> "
+        "WRITE(8941) :577; vv(Naa) post-lbc."),
+    "seq_dump_postlbc_tem_aaa": ("after", "stpmlf.F90:562 finalize_lbc -> "
+        "WRITE(8942) :578; ts(jp_tem,Naa) post-lbc."),
+    "seq_dump_postlbc_sal_aaa": ("after", "stpmlf.F90:562 finalize_lbc -> "
+        "WRITE(8943) :579; ts(jp_sal,Naa) post-lbc."),
+    # r3c_dump_r3t: r3t(Naa) after the FIRST dom_qco_r3c (stpmlf.F90:244),
+    # built from ssh_nxt's FIRST-GUESS ssh(Naa) (pre dyn_spg). Paired with
+    # seq_dump_r3t_aaa this brackets the barotropic ssh replacement.
+    "r3c_dump_r3t": ("after", "stpmlf.F90:244 CALL dom_qco_r3c(ssh(Naa),"
+        "r3t(Naa),...) 1st call, from ssh_nxt first-guess ssh -> WRITE :256; "
+        "r3t(Naa) pre-barotropic."),
+    "r3c_dump_r3u": ("after", "stpmlf.F90:244 dom_qco_r3c 1st -> :257; r3u(Naa) "
+        "pre-barotropic."),
+    "r3c_dump_r3v": ("after", "stpmlf.F90:244 dom_qco_r3c 1st -> :258; r3v(Naa) "
+        "pre-barotropic."),
 }
+# SEQDUMP families carry a _ktNNNNNNNN suffix (per step). Register the exact
+# per-step filenames (fail-closed lookup does not strip the suffix), y20
+# window kt=230401..230404.
+_SEQDUMP_BASES = {k: v for k, v in _DUMP_TIME_LEVEL.items()
+                  if k.startswith(("seq_dump_", "r3c_dump_"))}
+for _b, _lv in _SEQDUMP_BASES.items():
+    for _kt in range(230401, 230405):
+        _DUMP_TIME_LEVEL[f"{_b}_kt{_kt:08d}.bin"] = _lv
+del _SEQDUMP_BASES, _b, _lv, _kt
 _EIVDIAG_SOURCE_AEIU = _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_AEIV = _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_WSLPI = _DUMP_TIME_LEVEL["eivdiag_wslpi_yNN_rankRR.bin"][1]

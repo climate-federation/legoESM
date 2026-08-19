@@ -707,8 +707,15 @@ class MoistureBudgetTracker:
             # is residual ≈ +1.4 mm/day.
             residual_mm_day = mean_E - mean_P - dW_dt * 86400.0
         else:
-            dW_dt = 0.0
-            residual_mm_day = 0.0
+            # No previous sample, so there is no tendency and therefore no
+            # closure -- at the first call, and again after every restart,
+            # because these two fields live in memory and no checkpoint carries
+            # them.  NaN, not zero: a zero here reads as "the budget closes",
+            # which is a fabricated pass at exactly the moment nothing has been
+            # measured.  A chained run that restarts often would otherwise
+            # publish a clean-looking zero at the start of every segment.
+            dW_dt = float("nan")
+            residual_mm_day = float("nan")
 
         self._prev_water = mean_W
         self._prev_time = elapsed_seconds

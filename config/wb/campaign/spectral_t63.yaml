@@ -150,10 +150,34 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  # #1464: the learned column has NO momentum head, so without this it runs
+  # with no physical surface stress at all, while the classical arm it is
+  # scored against carries `classical.turbulence` below. The scheme here MUST
+  # equal that one — giving the learned arm a *different* momentum scheme
+  # swaps one confound for another. Both arms already share hyperdiffusion and
+  # the spectral filter; the asymmetry this removes is the surface stress
+  # specifically. Intended to remove the confound, not yet shown to move the
+  # 12/16 table: the closing artifact is the re-scored comparison.
+  # NOTE only reached on the spectral training core; on the lat-lon core the
+  # learned arm is built elsewhere and this key is not read.
+  surface_drag: true
+  surface_drag_scheme: "louis"
   nn_hidden: 256
   nn_layers: 4
 sfno:
-  sfno_embed_dim: 256
+  # The spectral-convolution weights are two float64 (n_sh, embed, embed)
+  # arrays per block, so they grow as embed^2 * n_blocks. Measured at T63
+  # (n_sh = 2080) by building the module under jax.eval_shape:
+  #   embed 256, 8 blocks -> 16.28 GiB of weights, 65.1 GiB once AdamW holds
+  #                          gradients and two moments  => cannot train on an
+  #                          80 GB card. Job 26901612 died asking for a single
+  #                          17.10 GiB buffer.
+  #   embed 128, 8 blocks ->  4.07 GiB of weights, 16.3 GiB with AdamW.
+  # 128/8 is the owner's choice (2026-08-13): the widest that fits, keeping
+  # the depth. Note this is deeper than the AIMIP SFNO arm (128/4, the model
+  # registry default), so WB-vs-AIMIP differs in SFNO depth as well as in the
+  # campaign — state that when comparing the two.
+  sfno_embed_dim: 128
   sfno_n_blocks: 8
 
 # --- classical: the six-family physics stack (owner rule: a classical model

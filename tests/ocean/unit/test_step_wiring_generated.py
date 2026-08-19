@@ -285,9 +285,23 @@ def test_reported_line_is_the_line_of_the_call_token(oracle):
         src = lines[c.line - 1]
         assert re.search(rf"\bCALL\s+{re.escape(c.name)}\b", src, re.I), (
             f"{c.name} reported at line {c.line}, but that line is {src!r}")
-    # The specific continuation sites that were off by one.
-    assert any(c.name == "wzv" and c.line == 315 for c in calls)
-    assert any(c.name == "tra_asm_inc" and c.line == 386 for c in calls)
+    # NON-VACUITY: the loop above only bites if the parse actually CONTAINS
+    # continuation-guard sites, so assert the two known ones are still parsed
+    # AND still sit on a continuation line.  The line NUMBERS are read from the
+    # oracle rather than hard-coded: they were 315/386 when this regression was
+    # written and are 395/480 after the #1455 SEQ-DUMP instrumentation shifted
+    # the file, and a number pinned here just re-breaks on the next oracle edit
+    # while proving nothing extra.
+    for name in ("wzv", "tra_asm_inc"):
+        hits = [c for c in calls if c.name == name]
+        assert hits, f"{name} vanished from the parse"
+        # at least one occurrence must sit on the continuation of its guard
+        on_continuation = [c for c in hits
+                           if lines[c.line - 2].rstrip().endswith("&")]
+        assert on_continuation, (
+            f"{name} is parsed at line(s) {[c.line for c in hits]}, none of "
+            "which is a continuation-guard site; this test no longer covers "
+            "the off-by-one it was written for")
 
 
 def test_parse_is_non_trivial(oracle):

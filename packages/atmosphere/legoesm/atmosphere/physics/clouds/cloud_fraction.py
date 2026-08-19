@@ -1049,7 +1049,12 @@ def compute_cloud_properties(
         n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
         _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
         q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)
-        rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
+        # MOIST density, same basis as the bridges that produced ``n_cloud``
+        # from the per-mass tracer: a dry rho here un-does that conversion
+        # with a different density and biases nc_permass — hence LAMC and
+        # r_eff — by ~(1+0.61 q_v)^(1/3) systematically (codex P2).
+        from legoesm.atmosphere.physics._shared import compute_rho
+        rho_air = compute_rho(jnp.maximum(T, 1.0), p_full, q_v)
         nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
         pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
         pgam = jnp.clip(

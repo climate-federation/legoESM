@@ -308,6 +308,8 @@ __param_spec__ = {
             "rt_tol": "numerics: total-water mixing-ratio tolerance [kg/kg]",
             "thl_tol": "numerics: liquid-water potential-temperature tolerance [K]",
             "tke_min": "numerics: carried-TKE/wp2 state floor [m^2/s^2]",
+            "trop_cloud_top_press": "domain definition [Pa]: CAM ref_pres trop_cloud_top_press — where the scheme runs, not a closure coefficient",
+            "trop_cloud_taper_lnp_width": "numerics: smooth log-pressure taper width replacing CAM's hard top_lev slice",
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
         },
@@ -587,6 +589,28 @@ class CLUBBConfig(NamedTuple):
         in (default ``False``) so existing ``scheme="clubb"`` runs are unchanged.
         Read only at setup/dispatch time (a static Python branch), never in
         traced code, so it stays a valid plain pytree-leaf field.
+    trop_cloud_top_press : float
+        Pressure [Pa] above which the scheme's mixing is tapered to zero —
+        CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
+        physics will be done only below the top defined by this pressure"),
+        which ``clubb_intr.F90`` applies to CLUBB by slicing every column at
+        ``top_lev = trop_cloud_top_lev``. Default 0.0 = OFF (CAM's own code
+        default, ``protected :: trop_cloud_top_press = 0._r8``; CAM's
+        build-namelist supplies 1 hPa, which is above every current lid here
+        and would be inert anyway) — a static Python feature gate, so
+        existing runs are byte-identical. A 32-level WeatherBench arm
+        measured a stratospheric state excursion from the diagnostic phase-1
+        scheme (2026-08-17); setting this to ~5000 Pa confines the scheme to
+        below 50 hPa there. Unlike CAM's hard subcolumn slice, the taper is
+        SMOOTH in log-pressure (see ``trop_cloud_taper_lnp_width``): a hard
+        per-column level cutoff is a compile-sensitive branch of exactly the
+        class that forked the two XLA programs on that arm.
+    trop_cloud_taper_lnp_width : float
+        Width [ln Pa] of the smooth taper around ``trop_cloud_top_press``
+        (sigmoid in log-pressure). 0.15 puts ~90% of the transition within a
+        factor ~1.6 in pressure (e.g. 40-70 hPa for a 50 hPa cutoff), well
+        clear of upper-troposphere cirrus levels. A numerics smoothing
+        width, not a tunable closure coefficient.
     """
 
     params: CLUBBParams = CLUBBParams()
@@ -599,6 +623,8 @@ class CLUBBConfig(NamedTuple):
     tke_min: float = 1.0e-6
     T0: float = 300.0
     prognostic: bool = False
+    trop_cloud_top_press: float = 0.0
+    trop_cloud_taper_lnp_width: float = 0.15
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -3547,9 +3573,30 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
 
     # CAM l_min_xp2_from_corr_wx = True (fixed): variance floors from the
     # maximum-correlation bound.
+    #
+    # The denominator is floored at w_tol^2, which is what the reference gets
+    # for free from its CALL ORDER: advance_wp2_wp3 floors wp2 at w_tol^2 and
+    # runs BEFORE this solve in the Fortran, so the Fortran never divides by a
+    # smaller wp2. This port runs the scalar-variance solve first, so on the
+    # very first step it saw the seeded wp2 = tke_min = 1e-6 -- 400x below the
+    # floor -- and turned a perfectly ordinary surface flux into an absurd
+    # variance that nothing afterwards lowered.
+    #
+    # It stayed invisible for as long as the surface flux was zero, because the
+    # numerator is wpthlp^2: 0/1e-6 is 0. The moment a prescribed-flux case
+    # actually delivered its surface flux to the closure, the dry convective
+    # column got thr_thlp2 = 0.0601^2 / (1e-6 * 0.99^2) = 3685 K^2 -- a 61 K RMS
+    # temperature fluctuation -- which drove a CONSTANT spurious tendency and a
+    # LINEAR temperature drift of 4.5 K per step. See #1508.
+    #
+    # The same ratio is already floored this way in nrmlzd_corr_wx (the
+    # skewness helper), so this makes the two treatments agree. Note the
+    # numerator is SQUARED, so the sign of the surface flux is irrelevant: a
+    # stable, cooling case is hit exactly as hard as a convective one.
     max_corr2 = _MAX_MAG_CORRELATION_FLUX ** 2
-    thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / (wp2 * max_corr2))
-    thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / (wp2 * max_corr2))
+    wp2_denom = jnp.maximum(wp2, w_tol_sqd) * max_corr2
+    thr_thlp2 = jnp.maximum(thl_thr, wpthlp ** 2 / wp2_denom)
+    thr_rtp2 = jnp.maximum(rt_thr, wprtp ** 2 / wp2_denom)
     thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
     rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
 
@@ -5429,16 +5476,24 @@ def init_clubb_moments(ncol: int, nlev: int, config, dtype=jnp.float64) -> CLUBB
     velocity variances start at ``tke_min``, scalar variances at their
     tolerance-squared floors, all fluxes and ``wp3`` zero.
 
-    .. warning::
+    .. note::
 
-       ``tke_min`` (1e-6) is NOT the floor the prognostic core itself enforces:
-       ``advance_wp2_wp3`` floors ``wp2`` at ``w_tol**2`` (4e-4), 400x higher,
-       from its first advance.  The scalar variance solve runs BEFORE that
-       advance, so on step 1 the maximum-correlation floor
-       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divides by 1e-6 and writes an
-       unphysical surface ``thlp2`` (929 K^2 — a 30 K RMS fluctuation — on the
-       production column), which nothing subsequently lowers.  See #1508; this
-       docstring previously described the mismatch as intentional.
+       ``wp2`` is seeded at ``tke_min`` (1e-6), which is 400x below the floor
+       the prognostic core itself enforces (``advance_wp2_wp3`` floors ``wp2``
+       at ``w_tol**2`` = 4e-4 from its first advance), and the scalar variance
+       solve runs BEFORE that advance.  That let the maximum-correlation floor
+       ``thlp2 >= wpthlp**2 / (wp2 * 0.99**2)`` divide by 1e-6 on step 1 and
+       write an unphysical surface ``thlp2`` that nothing subsequently
+       lowered: with a prescribed surface flux actually delivered to the
+       closure, the dry convective column got ``thlp2 = 3685 K^2`` (a 61 K RMS
+       fluctuation) and drifted linearly by 4.5 K per step (#1508).
+
+       The repair is at the DIVIDE, in :func:`advance_xp2_xpyp`, which floors
+       the denominator at ``w_tol**2``.  The seed is deliberately left alone:
+       raising it here changes the initial state of every prognostic CLUBB run
+       and was measured to break four CLUBB regression tests, one of them by
+       turning a finite column into NaN.  Flooring the denominator is
+       sufficient, because it makes the seed's value irrelevant to that ratio.
     ``nlev`` thermo (zt) levels → ``nzm = nlev + 1`` momentum levels.
     """
     nzm = nlev + 1
@@ -5573,8 +5628,32 @@ def clubb_turbulence(
     Lscale = flip_vertical(Lscale_a)                          # back to top-down (ncol, nlev)
     Lscale = jnp.clip(Lscale, 1.0, None)
 
+    # ---- Troposphere-cloud-physics top (CAM ``trop_cloud_top_press``) ----
+    # CAM's clubb_intr slices every column at ``top_lev`` so CLUBB never runs
+    # above that reference pressure; this port tapers the diffusivities and
+    # the wp2 production SMOOTHLY in log-pressure instead — a hard per-column
+    # level cutoff is a compile-sensitive branch (the program-fork class the
+    # 2026-08-17 L32 hunt measured). Static Python feature gate on the config
+    # value (CLAUDE.md feature-gating exception; the field is spec-excluded
+    # so it is never traced): the OFF branch keeps the pre-existing
+    # expressions verbatim — no inert multiplies left in the graph (codex).
+    _trop_on = config.trop_cloud_top_press > 0.0
+    if _trop_on:
+        _ln_cut = jnp.log(config.trop_cloud_top_press)
+        _inv_w = 1.0 / config.trop_cloud_taper_lnp_width
+        trop_taper = jax.nn.sigmoid(
+            (jnp.log(jnp.clip(p_full, 1.0, None)) - _ln_cut) * _inv_w)
+        # Interface taper at the INTERFACE pressure: averaging tapered
+        # full-level K leaves ~half the neighbour's K at the interface (the
+        # 16-47 hPa interface kept 20% of uncapped mixing — codex P1); the
+        # interior interfaces are p_half[:, 1:-1].
+        trop_taper_half = jax.nn.sigmoid(
+            (jnp.log(jnp.clip(p_half[:, 1:-1], 1.0, None)) - _ln_cut)
+            * _inv_w)
+
     # ---- Eddy diffusivities from the CLUBB length scale ----
-    Km_full = params.c_K * Lscale * sqrt_wp2                  # (ncol, nlev)
+    _Km_raw = params.c_K * Lscale * sqrt_wp2                  # (ncol, nlev)
+    Km_full = _Km_raw * trop_taper if _trop_on else _Km_raw
     Kh_full = Km_full / _PR_T
 
     # ---- ADG1 double-Gaussian PDF: cloud fraction + moist buoyancy flux ----
@@ -5586,12 +5665,31 @@ def clubb_turbulence(
     cloud_frac_a, rcm_a, wpthvp_a = diagnose_cloud_and_buoyancy(
         thlm, rtm, wp2_a, exner_a, p_a, thv_ds, Kh_a, Lscale_a, gr, config)
     buoy_prod = flip_vertical(buoyancy_coefficient(jnp.clip(thvm, 1.0, None)) * wpthvp_a)
+    # TOP-DOWN cloud fraction for the host. The ascending array used to be
+    # handed out unchanged, and the radiation-side consumer reshapes it into
+    # the top-down column layout — a hydrostatic run with
+    # ``use_clubb_cloud_fraction`` received boundary-layer cloud at the model
+    # top and vice versa (codex 2026-08-17 P1; consumer read confirmed at
+    # radiation/integration.py `_cf_ovr.reshape(T_col.shape)`).
+    cloud_fraction_td = flip_vertical(cloud_frac_a)
+    # Troposphere-top taper on the PDF cloud fraction too: CAM's slice means
+    # CLUBB emits NOTHING above top_lev, so an arm consuming this output must
+    # not receive stratospheric PDF cloud from a region the mixing no longer
+    # maintains (GLM 2026-08-17: "zombie moments").
+    if _trop_on:
+        cloud_fraction_td = cloud_fraction_td * trop_taper
 
     # ---- Geometry + shear (top-down) ----
     dz_half = jnp.clip(jnp.abs(z_full[:, :-1] - z_full[:, 1:]), 1.0, None)
     dz_layer = jnp.clip(jnp.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
-    Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])
-    Kh_half = 0.5 * (Kh_full[:, :-1] + Kh_full[:, 1:])
+    # Interfaces from the RAW averages, tapered at the interface pressure
+    # (see the taper note above); off branch = the pre-existing expressions.
+    if _trop_on:
+        Km_half = 0.5 * (_Km_raw[:, :-1] + _Km_raw[:, 1:]) * trop_taper_half
+        Kh_half = Km_half / _PR_T
+    else:
+        Km_half = 0.5 * (Km_full[:, :-1] + Km_full[:, 1:])
+        Kh_half = 0.5 * (Kh_full[:, :-1] + Kh_full[:, 1:])
 
     du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
     dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
@@ -5604,13 +5702,20 @@ def clubb_turbulence(
     S2 = _half_to_full(S2_half)
 
     # ---- wp2 budget (production - dissipation + diffusion); tau = Lscale/sqrt(wp2) ----
+    # Production carries the troposphere-top taper (Km_full already does, and
+    # buoy_prod is tapered explicitly); dissipation does not, so above the
+    # cutoff wp2 relaxes to its floor instead of being produced — the smooth
+    # analogue of CAM never running CLUBB there. Off branch: the
+    # pre-existing expression verbatim.
     shear_prod = Km_full * S2
     diss_wp2 = sqrt_wp2 / Lscale                              # 1/tau
     wp2_diffused = implicit_vertical_diffusion(
         wp2, Km_half, rho, dz_layer, dz_half, dt,
         surface_flux=jnp.zeros(ncol, dtype=wp2.dtype),
     )
-    wp2_new = (wp2_diffused + dt * (shear_prod + buoy_prod)) / (1.0 + dt * diss_wp2)
+    _wp2_prod = (shear_prod + buoy_prod * trop_taper if _trop_on
+                 else shear_prod + buoy_prod)
+    wp2_new = (wp2_diffused + dt * _wp2_prod) / (1.0 + dt * diss_wp2)
     wp2_new = jnp.clip(wp2_new, config.tke_min, config.wp2_max)
 
     # ---- Surface fluxes ----
@@ -5649,7 +5754,9 @@ def clubb_turbulence(
         h_pbl=h_pbl,
         # Expose the CLUBB ADG1-PDF liquid cloud fraction so radiation can use
         # it (cloud_scheme="clubb") instead of the RH-diagnosed grid-scale one.
-        cloud_fraction=cloud_frac_a,
+        # TOP-DOWN, matching every other field the host consumes (the raw
+        # ascending array used to be handed out here — codex 2026-08-17 P1).
+        cloud_fraction=cloud_fraction_td,
     )
     return output, wp2_new
 

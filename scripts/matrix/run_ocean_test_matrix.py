@@ -1743,6 +1743,37 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
 # File writers
 # ---------------------------------------------------------------------------
 
+def _arm_provenance() -> dict[str, str]:
+    """What produced THIS arm: the commit, whether that tree was dirty, and
+    the interpreter.
+
+    Written per arm because nothing else records it.  Comparing file
+    modification times across arms was the previous stand-in, and it is not
+    one: rerunning a single case hours later against different code leaves the
+    spread narrow, while copying with timestamps preserved, clock skew between
+    nodes and archive extraction each defeat it from the other side.  A
+    commit that is compared arm to arm cannot be defeated that way.
+
+    ``--dirty`` is part of it deliberately: pinning the import path to this
+    checkout does not make this checkout CLEAN, and uncommitted edits in the
+    pinned copy reproduce the very incident the pin exists to prevent -- with
+    the pin now lending it credibility.
+    """
+    import subprocess
+    import sys
+
+    here = str(Path(__file__).resolve().parent)
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "describe", "--always", "--dirty", "--abbrev=12"],
+            capture_output=True, text=True, timeout=30)
+        commit = out.stdout.strip() if out.returncode == 0 else "unknown"
+    except Exception:                       # noqa: BLE001 — provenance only
+        commit = "unknown"
+    return {"provenance_commit": commit or "unknown",
+            "provenance_python": sys.executable}
+
+
 def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                        *, diag: dict | None = None,
                        blowup_info: dict | None = None):
@@ -1772,6 +1803,7 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                     "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
             rows = {**rows, "notes": blowup_str}
+    rows = {**rows, **_arm_provenance()}
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
@@ -6752,39 +6784,18 @@ def _compute_rpe(state, grid_type, grid, z_coord):
 # removed.  ERROR, SKIP, short runs and any differently-caused FAIL pass
 # through unchanged, so the waiver cannot mask an unrelated regression.
 KNOWN_FAILURES: dict[tuple[str, str, str], dict] = {
-    # Centring the barotropic averaging window on t+dt (#1609) restored the
-    # barotropic mode to FULL forcing: the old half window applied only ~53%
-    # of the slow baroclinic forcing, advanced eta by ~53% of a step, and
-    # returned ~53% of the transport.  This case was stable only because of
-    # that under-forcing, and the correction crosses a genuine stability
-    # boundary of the mode split.
+    # EMPTY, and it should stay that way.
     #
-    # CONFIRMED one variable at a time (see
-    # scripts/validate/ocean_fidelity/eady_channel_onset_structure.py):
-    # running the SAME 2n-1 substep loop with the OLD weights zero-padded
-    # past j = n -- identical trajectory, substep count, window duration,
-    # diffusion and divergence damping -- PASSES and reproduces the untouched
-    # baseline to five digits (2.6820 m/s, 3.70e-12 against 3.71e-12).  Only
-    # the weight centroid differs.
+    # The one entry this registry ever held -- eady_uniform/mpas_channel/70km,
+    # #1609 -- is removed because the case PASSES its full 200 days again. It
+    # was destabilised by a free-surface Laplacian inherited from the
+    # collocated/cubed-sphere solvers (now off for this case) and by the
+    # absence of the depth-mean velocity viscosity that targets the rotational
+    # grid mode (now 1e3 m^2/s).
     #
-    # REFUTED as remedies, each by its own arm: shrinking the baroclinic step
-    # (halving dt buys 11% more physical time, 67.4 -> 74.7 days); changing
-    # the substep count (onset sits at step 19400 for 30, 60 and 120); and
-    # the divergence damping, which is load-bearing the OTHER way (0.05 fails
-    # at 19400, 0.025 and 0.0 both go non-finite).
-    #
-    # The owed fix is loop closure, NOT a revert: make the depth-mean of the
-    # corrected 3-D velocity equal the filtered barotropic transport by
-    # construction (SM2005 / MOM6).  The earlier velocity-only substitution
-    # merely DELAYED blow-up (19400 -> 23500), the signature of a partially
-    # closed loop -- it corrected the velocity while leaving eta and the
-    # forcing at half speed.  Remove this entry when that lands.
-    # min_days 68.0 deliberately EXCEEDS the 67.36-day onset, so the 60-day
-    # --quick lane is NOT waived: it stops before the blow-up and must keep
-    # PASSING on the Eady growth rate.  A quick-lane failure is by
-    # construction a DIFFERENT bug and stays red (GLM-5.2 review).
-    ("eady_uniform", "mpas_channel", "70km"): {
-        "issue": "#1609", "min_days": 68.0, "expect_day_range": (60.0, 75.0)},
+    # A waiver that has started passing is a waiver that hides the next
+    # regression, which is why XPASS is loud and exits non-zero -- and it is
+    # exactly how this one announced itself.
 }
 
 
@@ -6892,7 +6903,7 @@ def _run_experiment_via_registry(
     elif hasattr(cfg, "bottom_drag"):  # #501: nested DynBottomDragConfig
         setup_kw["bottom_drag_r"] = cfg.bottom_drag.bottom_drag_r
     for attr in ("tracer_advection", "barotropic_diffusion_alpha",
-                 "barotropic_div_damp"):
+                 "barotropic_div_damp", "barotropic_u_viscosity"):
         if hasattr(cfg, attr):
             setup_kw[attr] = getattr(cfg, attr)
     if eos_linear_factory is not None:

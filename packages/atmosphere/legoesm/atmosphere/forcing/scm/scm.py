@@ -71,6 +71,7 @@ from legoesm.atmosphere.forcing.scm.scm_forcing import (
     compute_forcing_tendencies,
     default_forcing,
     inject_prescribed_T_sfc_into_phys_state,
+    inject_prescribed_surface_fluxes_into_phys_state,
     validate_forcing,
     validate_forcing_against_state,
 )
@@ -337,6 +338,30 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
             if callable(rad_hook):
                 rad_hook(phys_state.surface_T_sfc_override)
                 hook_armed = True
+
+        # For ``prescribe="fluxes"`` with ``flux_to_closure``: hand THIS
+        # stage's surface flux to the turbulence closure as its lower boundary
+        # condition instead of injecting it as a column tendency.  Evaluated at
+        # the stage time ``t``, so an RK stage and a diurnal cycle stay
+        # consistent; ``compute_forcing_tendencies`` skips its own injection
+        # under the same flag, so the flux is applied exactly once.
+        if (forcing is not None and forcing.prescribe == "fluxes"
+                and forcing.flux_to_closure):
+            # PhysicsState is the ONLY carrier for this flux and the column
+            # injection is switched off, so a None carry would drop it
+            # silently -- the injector's own None-tolerance is for composing
+            # with configurations that have no prescribed flux at all.
+            if phys_state is None:
+                raise ValueError(
+                    "SCMForcing.flux_to_closure=True needs a PhysicsState to "
+                    "carry the per-step surface flux, but phys_state is None; "
+                    "the flux would be applied nowhere."
+                )
+            phys_state = inject_prescribed_surface_fluxes_into_phys_state(
+                phys_state,
+                wth=None if forcing.w_th_s is None else forcing.w_th_s(t),
+                wqv=None if forcing.w_qv_s is None else forcing.w_qv_s(t),
+            )
 
         try:
             tend, phys_out = physics_fn(
@@ -622,6 +647,22 @@ class SingleColumnModel:
             return
         turb = physics_config.turbulence
         if turb.scheme == "none":
+            # No closure, so nothing can double-count the column injection --
+            # UNLESS the flux was routed to the closure, in which case there
+            # is no consumer at all and the prescribed flux is applied ZERO
+            # times.  ``make_turbulence_physics`` returns zero tendencies
+            # before it ever reads the surface config, so this fails silently
+            # rather than loudly: the column simply never feels its surface.
+            if forcing.flux_to_closure:
+                raise ValueError(
+                    "SCMForcing.flux_to_closure=True hands the prescribed "
+                    "surface flux to the turbulence closure, but "
+                    "turbulence.scheme='none' -- there is no closure to "
+                    "receive it and the column-tendency injection is switched "
+                    "off, so the flux would be applied NOWHERE.  Select a "
+                    "turbulence scheme, or leave flux_to_closure=False to "
+                    "keep the flux on the column-tendency channel."
+                )
             return
         scheme_sub = getattr(turb, turb.scheme, None)
         if scheme_sub is None:

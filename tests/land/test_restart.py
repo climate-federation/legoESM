@@ -140,3 +140,51 @@ def test_merge_land_restart_shape_skew_raises():
     )
     with pytest.raises(ValueError, match="soil-layer skew"):
         merge_land_restart_into_template(loaded, template)
+
+
+# ---------------------------------------------------------------------------
+# The layer COUNT does not identify a soil column. Ten layers over 3 m and ten
+# over 6.4 m have the same array shapes, so a warm start across them loaded
+# without complaint and read the profile at the wrong depths. Found by codex
+# on the calibrated-LMIP PR, which is what made the column configurable.
+# ---------------------------------------------------------------------------
+
+def _grid(n_layers=_NLAY, total_depth=3.0):
+    from legoesm.land.soil_grid import SoilGridConfig
+    return SoilGridConfig(n_layers=n_layers, total_depth=total_depth)
+
+
+def _write(tmp_path, state, soil_grid):
+    return save_land_restart(
+        tmp_path / "r.npz", state, land_mode="multilayer", t_end_s=1.0,
+        n_steps_completed=1, soil_grid=soil_grid)
+
+
+def test_a_deeper_column_with_the_same_layer_count_is_refused(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=6.375))
+
+
+def test_the_same_column_loads(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    loaded, _ = load_land_restart(
+        tmp_path / "r.npz", expected_land_mode="multilayer", expected_ncol=_NCOL,
+        expected_n_layers=_NLAY, expected_soil_grid=_grid(total_depth=3.0))
+    assert loaded.T_soil.shape == (_NCOL, _NLAY)
+
+
+def test_a_file_without_the_geometry_warns_rather_than_pretending(tmp_path):
+    """The published initial states predate the stamp, so this cannot raise --
+    but it must not read as a verified match either."""
+    st = _fake_state(seed=7)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)   # no soil_grid
+    with pytest.warns(RuntimeWarning, match="cannot be checked"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))
