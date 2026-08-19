@@ -3633,6 +3633,45 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
         cfg_hyb.validate_strict()
 
 
+def test_fv3_duo_discretization_flows_to_config():
+    """--discretization fv3_duo round-trips into DycoreConfig and passes
+    validate_strict (slice 1: dry, physics-off, fp64, nlev in {5, 10}).
+
+    The dry-stack flags mirror what the fv3_duo component-factory branch
+    requires; the branch's own refusals (physics on, fp32, bad nlev) are
+    covered by tests/atmosphere/hydrostatic/unit/test_fv3_duo_dynamics.py.
+    """
+    parser = build_arg_parser()
+    argv = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+            "--discretization", "fv3_duo", "--resolution", "12",
+            "--nlev", "5", "--precision", "fp64",
+            "--radiation", "none", "--convection", "none",
+            "--microphysics", "none", "--turbulence", "none",
+            "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+    args = _postprocess_args(parser.parse_args(argv), parser)
+    # the disabled-physics gate accepts the stack with the explicit opt-in
+    _require_full_physics_for_amip(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "fv3_duo"
+    assert cfg.grid.grid_type == "cubed_sphere"
+    assert cfg.grid.nlev == 5
+    assert cfg.precision == "fp64"
+    cfg.validate_strict()
+
+    # The factory's DEFAULT-DENY wall must accept a stock CLI-built duo
+    # config — an argparse default drifting off the ExperimentConfig
+    # default would otherwise refuse EVERY run_amip fv3_duo launch.
+    from legoesm.driver.component_factory import (
+        _refuse_fv3_duo_non_default,
+    )
+    _refuse_fv3_duo_non_default(cfg)
+
+    # argparse rejects a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--discretization", "fv3duo"])
+
+
 def test_cmip_resolution_deg_round_trips():
     """--cmip-resolution-deg reaches OutputConfig; default unchanged.
 

@@ -249,3 +249,79 @@ def dcmip16_bc_sphum(ak, bk, agrid_lat, km: int) -> np.ndarray:
         else:
             out[..., k] = QT_BC
     return out
+
+
+def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
+                              hydrostatic: bool = True,
+                              do_pert: bool = True,
+                              constants: DCMIP16Constants | None = None,
+                              with_sphum: bool = True):
+    """The test_case = -13/-12 IC on ALL SIX duo faces, state_3d layout.
+
+    Committed home of the assembly that
+    ``scripts/validate/fv3_native/full_step_oracle_parity.py::build_port_ic``
+    (and ``build_port_tracer_ic``) established against the oracle: window
+    IC only (``is:ie``), halos left at zero exactly as the oracle leaves
+    them to the in-step exchanges; NH adds ``make_nh``'s state
+    (``init_hydro.F90:147-158``): ``w = 0`` and
+    ``delz = -(rdgas/grav) * pt * dpeln`` from the IC's own hydrostatic
+    column (``zvir = 0`` on the adiabatic deck).
+
+    ``ctx`` is a ``build_six_face_duo_context`` dict (the NumPy lane's);
+    ``constants=None`` selects ``GFS_CONSTANTS`` — the FMS set the pinned
+    oracle binary links (parity runner asserts it from the run's own
+    log), NOT ``legoesm.constants``; the two differ at ~1e-4 and mixing
+    them was the IC-parity confound of 2026-08-07.
+
+    Returns ``(state, sphum)``: ``state`` is ``build_state_3d``'s list of
+    six per-face dicts and ``sphum`` a list of six padded
+    ``(m_a, m_a, km)`` tracer arrays (zero halos, per :6728-6735), or
+    ``None`` when ``with_sphum=False``.
+    """
+    from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
+    from legoesm.core.fv3_native_state_3d import build_state_3d, field_shape
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+    from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
+
+    if constants is None:
+        constants = GFS_CONSTANTS
+
+    def gcdr(p1, p2, r):
+        # the oracle's 3-arg form: unit-sphere angle times radius
+        return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
+
+    n, ng = int(ctx["n"]), int(ctx["ng"])
+    ak = np.asarray(ak, dtype=np.float64)
+    bk = np.asarray(bk, dtype=np.float64)
+    st = build_state_3d(n, ng, km, remap_follows=True,
+                        hydrostatic=hydrostatic)
+    sphum = [] if with_sphum else None
+    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        co = np.stack([np.asarray(gs["grid_lon"])[cc, cc],
+                       np.asarray(gs["grid_lat"])[cc, cc]], -1)
+        ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
+                       np.asarray(gs["agrid_lat"])[cs, cs]], -1)
+        o = dcmip16_bc_face(co, ce, ak, bk, km, do_pert=do_pert,
+                            constants=constants, great_circle_dist=gcdr)
+        st[t]["delp"][cs, cs, :] = o["delp"]
+        st[t]["pt"][cs, cs, :] = o["pt"]
+        st[t]["u"][cs, cc, :] = o["u"]
+        st[t]["v"][cc, cs, :] = o["v"]
+        if not hydrostatic:
+            # make_nh (init_hydro.F90:147-158): w = 0 (build_state_3d's
+            # fill) and delz from the IC's own hydrostatic column
+            pe = np.full((n, n), float(ak[0]))
+            for k in range(km):
+                dp = st[t]["delp"][cs, cs, k]
+                dpeln = np.log(pe + dp) - np.log(pe)
+                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
+                                          * st[t]["pt"][cs, cs, k] * dpeln)
+                pe = pe + dp
+        if with_sphum:
+            q = np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
+            q[cs, cs, :] = dcmip16_bc_sphum(
+                ak, bk, np.asarray(gs["agrid_lat"])[cs, cs], km)
+            sphum.append(q)
+    return st, sphum
