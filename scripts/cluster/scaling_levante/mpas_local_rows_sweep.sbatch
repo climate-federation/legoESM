@@ -49,6 +49,7 @@ cd "$SUBMIT_DIR" || exit 2
 # WORKTREE-IMPORT TRAP: the venv's editable install resolves legoesm.* to
 # the MAIN checkout, so without this PYTHONPATH the job audits code this
 # worktree does not have.
+export SWEEP_METHOD="${SWEEP_METHOD:-sfc}"
 export PYTHONPATH="$SUBMIT_DIR/src:$(ls -d "$SUBMIT_DIR"/packages/* | tr '\n' ':' | sed 's/:$//'):${PYTHONPATH:-}"
 
 "$PY" - <<'EOF'
@@ -60,6 +61,13 @@ from legoesm.parallel.sharded_dynamics import (
     _build_halo_send_maps, _build_ppermute_schedule,
 )
 
+import os
+
+# Partitioner under test. The graph partitioner beat the space-filling
+# curve by 19.3% at 8 GPUs in a run where communication measures ZERO, so
+# whatever it changed is LOCAL work -- most plausibly a more compact
+# domain with a smaller ghost ring. This sweep is how that is checked.
+METHOD = os.environ.get("SWEEP_METHOD", "sfc")
 SUBDIV = 9
 NLEV = 26
 # The wide step evaluates the RHS three times behind one fill, so its halo
@@ -70,8 +78,8 @@ DEVICES = (8, 16, 32, 64, 128)
 cell_w = (NLEV + 2) * 4
 edge_w = NLEV * 4
 
-print(f"subdivision {SUBDIV}, narrow depth {SPMD_HALO_DEPTH}, "
-      f"wide depth {WIDE_DEPTH}")
+print(f"subdivision {SUBDIV}, partitioner {METHOD}, "
+      f"narrow depth {SPMD_HALO_DEPTH}, wide depth {WIDE_DEPTH}")
 print(f"{'ndev':>5} {'depth':>6} {'owned':>10} {'local':>10} {'ratio':>7} "
       f"{'rounds':>7} {'actualMB':>9} {'paddedMB':>9} {'infl':>6}")
 
@@ -81,7 +89,7 @@ for n_dev in DEVICES:
     # ladder passed for every point. Rebuild the mesh each time: the
     # reorder permutes it in place-equivalent fashion.
     mesh = create_voronoi_mesh(subdivision_level=SUBDIV, lloyd_iterations=0)
-    mesh = reorder_voronoi_for_sharding(mesh, n_dev)
+    mesh = reorder_voronoi_for_sharding(mesh, n_dev, method=METHOD)
     nC, nE = int(mesh.nCells), int(mesh.nEdges)
     cells_per, edges_per = nC // n_dev, nE // n_dev
     for depth in (SPMD_HALO_DEPTH, WIDE_DEPTH):
