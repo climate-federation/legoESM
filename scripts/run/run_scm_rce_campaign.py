@@ -60,6 +60,7 @@ from legoesm.atmosphere.physics._shared import (
     compute_rho as _compute_rho,
 )
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.physics_state import update_physics_state
 from legoesm.atmosphere.physics.microphysics.integration import (
     get_microphysics_fn,
     min_tracer_slots,
@@ -1658,6 +1659,27 @@ def run_scm_rce(
         )
         return new_state, jnp.sum(precip_rates)
 
+    def _publish_sfc_precip(phys_state, micro_precip, convective_precip, like):
+        """Hand this step's surface precipitation to the NEXT step's turbulence.
+
+        The turbulence surface-flux call reads it for the cold-pool gustiness
+        term.  This campaign composes its own step out of SPLIT microphysics
+        and convection calls, so neither the library's combined-physics
+        accumulator nor the SCM's substepped stepper is on this path and the
+        hand-off has to happen here -- without it the carry stays zero and the
+        term is silently dead (measured: four coefficients spanning an 8x range
+        produced byte-identical 100-day equilibria, twice).
+
+        Both inputs are [mm/day] and the carry is a mass flux [kg/m^2/s];
+        1 kg/m^2 == 1 mm of liquid water, so the conversion is a single factor.
+        """
+        rate = (micro_precip + convective_precip) / 86_400.0
+        return update_physics_state(
+            phys_state,
+            {"sfc_precip": jnp.reshape(
+                jnp.asarray(rate, dtype=like.T.data.dtype), (-1,))},
+        )
+
     def body(carry, k):
         state, phys_state = carry
         t = k.astype(jnp.float64) * dt_arr
@@ -1668,6 +1690,8 @@ def run_scm_rce(
         new_state, new_phys, convective_precip = apply_convection_substeps(
             new_state, new_phys,
         )
+        new_phys = _publish_sfc_precip(
+            new_phys, micro_precip, convective_precip, state)
         new_state = apply_surface_sst_anchor(new_state)
         qv = new_state.tracers["q_v"].data[0, 0, 0]
         qcond = _qcond_from_tracers(
@@ -1727,6 +1751,8 @@ def run_scm_rce(
         new_state, new_phys, convective_precip = apply_convection_substeps(
             new_state, new_phys,
         )
+        new_phys = _publish_sfc_precip(
+            new_phys, micro_precip, convective_precip, state)
         new_state = apply_surface_sst_anchor(new_state)
         qv = new_state.tracers["q_v"].data[0, 0, 0]
         qcond = _qcond_from_tracers(
