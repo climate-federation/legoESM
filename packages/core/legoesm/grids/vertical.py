@@ -102,52 +102,59 @@ class SigmaCoordinate(NamedTuple):
         return self.dsigma * p_s[..., None]
 
 
-#: Level counts measured SLOW on this model, in float32, on one A100
-#: (2026-08-19, subdivision 7 = 163,842 cells, 60 timed steps per arm, all
-#: nine level counts inside ONE allocation so node state is held fixed).
-#: Cost per cell per level, picoseconds:
-#:
-#:     22  4915      24  4147      25  4224      26  4761
-#:     27  3861      28  4058      30  4592
-#:     32  1626      40  1657      52  1621      20  1544
-#:
-#: Everything from 22 to 30 costs about 4000; 32 and above costs about
-#: 1600. The step at 30 levels is 22.6 ms and at 32 it is 8.5 ms -- MORE
-#: work, a third of the time.
-_LEVELS_MEASURED_SLOW = range(21, 32)
+#: Cost per cell per level, picoseconds, MEASURED on one A100 in float32 with
+#: the icosahedral dynamical core at 163,842 cells, 60 timed steps per arm,
+#: two replicates each, spreads at or under 1% apart from one 4.8% outlier
+#: (2026-08-19, jobs 27070658 / 27073083 / 27073084 / 27074125 / 27074126 /
+#: 27074455 / 27076677).  Level counts NOT listed here were not measured.
+_LEVEL_COST_PS = {
+    13: 3520, 16: 1547, 18: 2318, 20: 1524, 21: 2578, 22: 4910, 24: 4147,
+    25: 4224, 26: 4755, 27: 3861, 28: 4058, 30: 4591, 31: 3741, 32: 1629,
+    34: 2949, 36: 1706, 40: 1664, 52: 1621,
+}
+#: Anything at or below this is "as cheap as the cheapest counts measured".
+_LEVEL_COST_FAST_PS = 1800
+#: The counts that came in at or under that bar, cheapest first by count.
+_LEVELS_MEASURED_FAST = tuple(
+    n for n in sorted(_LEVEL_COST_PS) if _LEVEL_COST_PS[n] <= _LEVEL_COST_FAST_PS
+)
 
 
 def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
-    """Warn when the level count sits in a range measured to be slow.
+    """Warn when the level count was MEASURED to be an expensive one.
 
-    MEASURED, one A100, float32, icosahedral dynamical core, 163,842 cells,
-    60 timed steps, arm spreads under 1%, every level count in a single
-    allocation. Level counts from 22 to 30 cost about 2.5 times as much per
-    level as 32 and above. Production runs 26.
+    On this model, in float32, on one A100, the cost per cell per level
+    varies by a factor of three between level counts, and NOT in any pattern
+    that a rule can express.  Measured, picoseconds per cell per level:
 
-    It is not confined to cache-resident problems: at 2,621,442 cells, about
-    273 MB per field against this GPU's 40 MB last-level cache, 26 levels
-    still costs 2.55 per cell per level against 1.55 at 32.
+        16  1547     18  2318     20  1524     21  2578     22  4910
+        24  4147     25  4224     26  4755     27  3861     28  4058
+        30  4591     31  3741     32  1629     34  2949     36  1706
+        40  1664     52  1621
 
-    THE MECHANISM IS NOT ESTABLISHED. An earlier version of this guard
-    asserted it was byte alignment of a cell's column -- 4 bytes times the
-    level count being a multiple of 16, the width of one vectorized load --
-    because the first five level counts measured fitted that rule exactly.
-    The finer scan REFUTED it: 24 and 28 levels have aligned strides of 96
-    and 112 bytes and are as slow as their unaligned neighbours, while 20
-    and 52 are fast with strides of 80 and 208. Cache straddle does not fit
-    either, since 40 and 52 levels hold a LARGER live set than 30 and run
-    fast. So this warning reports a measured range and does not name a
+    Sixteen, twenty, thirty-two, thirty-six, forty and fifty-two are cheap.
+    Everything from twenty-two to thirty-one is about three times more
+    expensive per level, and so are eighteen, twenty-one and thirty-four.
+    The step at thirty levels is 22.6 ms and at thirty-two it is 8.5 ms --
+    more work, a third of the time.  Production runs twenty-six.
+
+    TWO EXPLANATIONS WERE TESTED AND BOTH FAILED.  Byte alignment of a
+    cell's column: twenty-four and twenty-eight levels give 96- and
+    112-byte strides, both multiples of the 16-byte vector width, and both
+    are slow.  Cache capacity: fifty-two levels holds the largest live set
+    of any count measured and is the cheapest.  The sharp irregular
+    transitions -- thirty slow, thirty-two fast, thirty-four slow,
+    thirty-six fast -- look like the compiler choosing different code per
+    shape, but that is not established either, so this warning names no
     cause.
 
-    Consequences of not knowing the cause, stated because they bound what
-    the advice is worth: the range is specific to this model, this GPU, this
-    compiler version and float32, and it may move under any of them. A
-    level count outside the range is not certified fast, only unmeasured.
+    What that costs the reader: the table is specific to this model, this
+    GPU, this compiler version and float32, and may move under any of them.
+    A level count absent from the table is UNMEASURED, not fast.
 
     ``dtype`` is the dtype the STATE arrays are stored in, resolved from the
-    active precision policy when omitted; the measurement is float32 and the
-    warning is suppressed for other widths rather than extrapolated.
+    active precision policy when omitted; the measurement is float32 and
+    other widths are left alone rather than extrapolated.
 
     ``where`` names the coordinate being built so the message points at the
     call the user can change.
@@ -167,27 +174,25 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
         # construction; skip the advisory rather than raise from it.
         return
     n_levels = int(n_levels)
-    if n_levels <= 0:
+    if n_levels <= 0 or itemsize != 4:
         return
-    # The measurement is float32. Extrapolating a range whose CAUSE is
-    # unknown to another width would be inventing data.
-    if itemsize != 4:
+    cost = _LEVEL_COST_PS.get(n_levels)
+    if cost is None or cost <= _LEVEL_COST_FAST_PS:
         return
-    if n_levels not in _LEVELS_MEASURED_SLOW:
-        return
+    best = min(_LEVEL_COST_PS[n] for n in _LEVELS_MEASURED_FAST)
     warnings.warn(
-        f"{where}: {n_levels} vertical levels sits in a range measured SLOW "
-        f"on this model — level counts from {_LEVELS_MEASURED_SLOW.start} to "
-        f"{_LEVELS_MEASURED_SLOW.stop - 1} cost about 2.5x as much per level "
-        f"as 32 and above. On one A100 with 163,842 cells the step is 20.3 "
-        f"ms at 26 levels and 8.5 ms at 32 — more work, less than half the "
-        f"time — and the same ratio holds at a mesh 16x larger. The cause is "
-        f"NOT established: byte alignment of the column stride was tested "
-        f"and refuted, and so was cache capacity. So treat this as a "
-        f"measured range, not a rule: if this level count is a physics "
-        f"requirement, keep it and expect the cost; if it is arbitrary, 32 "
-        f"or more was measured much cheaper. Re-measure before trusting "
-        f"either on different hardware or a different compiler.",
+        f"{where}: {n_levels} vertical levels was MEASURED expensive on this "
+        f"model — {cost} picoseconds per cell per level against {best} for "
+        f"the cheapest counts measured, a factor of {cost / best:.1f}. At "
+        f"163,842 cells the step is 22.6 ms at 30 levels and 8.5 ms at 32: "
+        f"more work, a third of the time. Level counts measured cheap: "
+        f"{', '.join(str(n) for n in _LEVELS_MEASURED_FAST)}. The cause is "
+        f"NOT established — byte alignment of the column stride and cache "
+        f"capacity were both tested and both refuted — so this is a table of "
+        f"measurements, not a rule, and counts absent from it are unmeasured "
+        f"rather than cheap. If {n_levels} is a physics requirement, keep it "
+        f"and expect the cost. Re-measure on different hardware or a "
+        f"different compiler before trusting any of it.",
         stacklevel=3,
     )
 

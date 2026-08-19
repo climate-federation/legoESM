@@ -19,33 +19,50 @@ import numpy as np
 import pytest
 
 from legoesm.grids.vertical import (
-    _LEVELS_MEASURED_SLOW,
+    _LEVELS_MEASURED_FAST,
+    _LEVEL_COST_PS,
     create_sigma_coordinate,
     warn_if_unaligned_levels,
 )
 
 
-@pytest.mark.parametrize("n_levels", [22, 24, 25, 26, 27, 28, 30, 31])
-def test_warns_inside_the_measured_slow_range(n_levels):
-    with pytest.warns(UserWarning, match="measured SLOW"):
+@pytest.mark.parametrize("n_levels", [13, 18, 21, 22, 24, 25, 26, 27, 28,
+                                     30, 31, 34])
+def test_warns_on_every_level_count_measured_expensive(n_levels):
+    with pytest.warns(UserWarning, match="MEASURED expensive"):
         warn_if_unaligned_levels(n_levels, np.float32, where="test")
 
 
-@pytest.mark.parametrize("n_levels", [8, 13, 16, 20, 32, 40, 52, 64])
-def test_silent_outside_it(n_levels):
+@pytest.mark.parametrize("n_levels", [16, 20, 32, 36, 40, 52])
+def test_silent_on_every_level_count_measured_cheap(n_levels):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         warn_if_unaligned_levels(n_levels, np.float32, where="test")
 
 
-def test_the_range_matches_what_was_measured():
-    """24 and 28 are INSIDE the range. They are byte-aligned, and an
-    alignment rule would have let them pass; the measurement says they are
-    as slow as their neighbours."""
-    assert 24 in _LEVELS_MEASURED_SLOW
-    assert 28 in _LEVELS_MEASURED_SLOW
-    assert 20 not in _LEVELS_MEASURED_SLOW
-    assert 32 not in _LEVELS_MEASURED_SLOW
+@pytest.mark.parametrize("n_levels", [5, 8, 23, 29, 33, 64, 128])
+def test_unmeasured_counts_do_not_warn(n_levels):
+    """A count absent from the table is unmeasured. Warning about it would
+    be inventing data; the message says so instead."""
+    assert n_levels not in _LEVEL_COST_PS
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        warn_if_unaligned_levels(n_levels, np.float32, where="test")
+
+
+def test_the_table_contradicts_both_refuted_rules():
+    """24 and 28 are byte-aligned yet expensive, which is what killed the
+    alignment rule; 52 holds the largest live set yet is the cheapest, which
+    is what killed the cache-capacity rule. If either fact is ever edited
+    out of the table, the disclaimers above it stop being true."""
+    assert _LEVEL_COST_PS[24] > 3000 and _LEVEL_COST_PS[28] > 3000
+    # 52 holds the largest live set of any count measured and is among the
+    # cheapest -- within 7% of the cheapest, and less than half the cost of
+    # counts holding much less. A capacity explanation predicts the reverse.
+    assert 52 in _LEVELS_MEASURED_FAST
+    assert _LEVEL_COST_PS[52] < _LEVEL_COST_PS[30] / 2
+    assert 24 not in _LEVELS_MEASURED_FAST
+    assert 32 in _LEVELS_MEASURED_FAST
 
 
 def test_message_disclaims_a_mechanism_and_scopes_the_result():
@@ -55,6 +72,7 @@ def test_message_disclaims_a_mechanism_and_scopes_the_result():
     assert "NOT established" in text, text
     assert "refuted" in text, text
     assert "Re-measure" in text, text
+    assert "unmeasured" in text, text
     # It must not tell the user to change the model as the first resort.
     assert "physics requirement, keep it" in text, text
 
