@@ -7,9 +7,16 @@ made it worse, not better (arm 9436519: -0.018) — so the closure is refuted
 and the remaining candidates are the fluxes themselves.  This probe compares
 the term the closure consumes, on matched simulated days:
 
-  NEMO   : ``empmr`` from the 5-day SBC file (kg/m2/s, water flux INTO the
-           sea; already the sum of open-ocean E-P, over-ice E-P, runoff and
-           the ice thermodynamic exchange, with NEMO's own sign convention).
+  NEMO   : ``empmr`` and ``emp_oce`` from the 5-day SBC file. SIGN, MEASURED
+           NOT ASSUMED (control below): NEMO stores E-P, POSITIVE = water
+           LEAVING the ocean -- the ``water_flux_into_sea_water`` long_name on
+           ``empmr`` is misleading. The probe therefore negates both. Control
+           that proves it: the subtropics (23-35S) must be evaporative, and
+           emp_oce there is +6.66e-6 (positive = evaporation dominant); the
+           probe re-runs this check every time and REFUSES to report if the
+           sign flips. ``emp_oce`` is open-ocean E-P only -- the LIKE-FOR-LIKE
+           partner of our P-E -- while ``empmr`` additionally carries runoff
+           and the ice exchange, so (empmr - emp_oce) isolates those.
   ours   : ``precip - evap + runoff + ice_fw`` rebuilt through the SAME
            production path the run used (compute_omip2_freshwater_forcing +
            the runoff map), i.e. the flux the model applied, not a re-derived
@@ -81,23 +88,48 @@ def main() -> int:
 
     ds = nc.Dataset(a.nemo_sbc)
     try:
-        emp = np.ma.filled(np.ma.masked_invalid(
-            ds.variables["empmr"][:]), np.nan).astype(np.float64)
+        def rd(name):
+            return np.ma.filled(np.ma.masked_invalid(
+                ds.variables[name][:]), np.nan).astype(np.float64)
+        emp_raw, empoce_raw = rd("empmr"), rd("emp_oce")
         lat_n = np.asarray(ds.variables["nav_lat"][:], dtype=np.float64)
     finally:
         ds.close()
     lo, hi = (int(x) for x in a.nemo_recs.split(":"))
-    emp = emp[lo:hi]
-    if emp.shape[0] == 0:
+    if emp_raw[lo:hi].shape[0] == 0:
         raise SystemExit(f"--nemo-recs {a.nemo_recs} selects no records")
-    emp = np.nanmean(emp, axis=0)
+    emp = np.nanmean(emp_raw[lo:hi], axis=0)
+    empoce = np.nanmean(empoce_raw[lo:hi], axis=0)
     wgt_n = np.cos(np.deg2rad(lat_n)) * np.isfinite(emp)
-    nemo = _band_means(emp, lat_n, wgt_n, "NEMO")
 
-    print(f"NEMO empmr (water flux INTO ocean), recs {a.nemo_recs}, "
-          "1e-6 kg/m2/s:")
-    for bn, v in nemo.items():
-        print(f"  {bn:22s} {1e6 * v:+9.2f}")
+    # SIGN CONTROL, run every time: the subtropics must be evaporative in
+    # NEMO's own storage convention (E-P > 0). If this ever fails the file's
+    # convention changed and every number below would silently invert.
+    sub = ((lat_n >= -35.0) & (lat_n < -23.0) & np.isfinite(empoce)
+           & (wgt_n > 0))
+    sub_mean = float((empoce[sub] * wgt_n[sub]).sum() / wgt_n[sub].sum())
+    if not (sub_mean > 0):
+        raise SystemExit(
+            f"SIGN CONTROL FAILED: NEMO emp_oce over 23-35S is {sub_mean:+.3e}"
+            " but the subtropics must be EVAPORATIVE (E-P > 0) in NEMO's "
+            "storage convention. Refusing to report a budget whose sign "
+            "cannot be established.")
+    print(f"[sign control] NEMO emp_oce 23-35S = {1e6 * sub_mean:+.2f}e-6 > 0"
+          " => stored as E-P (+ = water OUT); negating for this report.")
+
+    # Everything below is POSITIVE = freshwater INTO the ocean.
+    nemo = {k: -v for k, v in
+            _band_means(emp, lat_n, wgt_n, "NEMO").items()}
+    nemo_oce = {k: -v for k, v in
+                _band_means(empoce, lat_n, wgt_n, "NEMO_oce").items()}
+
+    print(f"\nNEMO, recs {a.nemo_recs}, 1e-6 kg/m2/s, + = freshwater INTO "
+          "ocean:")
+    print(f"  {'band':22s}{'total(empmr)':>14s}{'openoce(E-P)':>14s}"
+          f"{'runoff+ice':>13s}")
+    for bn in BANDS:
+        print(f"  {bn:22s}{1e6 * nemo[bn]:14.2f}{1e6 * nemo_oce[bn]:14.2f}"
+              f"{1e6 * (nemo[bn] - nemo_oce[bn]):13.2f}")
 
     if a.snapshot is None:
         return 0
@@ -153,14 +185,19 @@ def main() -> int:
             line += f"{1e6 * rows[k][bn]:13.2f}"
         print(line)
 
-    print("\nP-E vs NEMO empmr (NEMO includes runoff + ice exchange, ours "
-          "here does NOT -- a P-E deficit is attributable, a P-E MATCH means "
-          "the gap is in runoff/ice):")
+    print("\nLIKE-FOR-LIKE: our P-E vs NEMO's OPEN-OCEAN E-P (emp_oce). Both "
+          "exclude runoff and the ice exchange, so this line alone tests the "
+          "bulk/precip channel:")
     for bn in BANDS:
-        o = rows["P-E"][bn]
-        n = nemo[bn]
+        o, n = rows["P-E"][bn], nemo_oce[bn]
         print(f"  {bn:22s} ours {1e6 * o:+9.2f}  NEMO {1e6 * n:+9.2f}  "
               f"diff {1e6 * (o - n):+9.2f}")
+    print("\nWHAT THE OTHER CHANNELS OWE: NEMO's runoff+ice contribution is "
+          "the residual above; ours is NOT measured here (it is applied "
+          "in-model via FreshwaterForcing.runoff/ice_fw), so this is the "
+          "budget our runoff + ice melt must supply to match:")
+    for bn in BANDS:
+        print(f"  {bn:22s} {1e6 * (nemo[bn] - nemo_oce[bn]):+9.2f}")
     return 0
 
 
