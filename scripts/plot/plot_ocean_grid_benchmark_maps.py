@@ -134,17 +134,36 @@ def _provenance(root: Path) -> str:
             capture_output=True, text=True, timeout=30).stdout.strip() or "?"
     except Exception:
         sha = "?"
+    # WHAT PRODUCED EACH ARM, read from the arms themselves. Every arm records
+    # the commit it ran at (and whether that tree was dirty); differing commits
+    # mean the figure mixes runs, which is the thing the time span was standing
+    # in for and could not actually detect -- rerun one case hours later
+    # against different code and the span stays narrow.
+    commits = set()
+    for res in root.rglob("results.txt"):
+        for line in res.read_text(errors="replace").splitlines():
+            if line.startswith("provenance_commit:"):
+                commits.add(line.split(":", 1)[1].strip())
+    if len(commits) > 1:
+        mixed = "  ** MIXED RUNS: arms came from " + ", ".join(sorted(commits))
+    elif commits and any("dirty" in c for c in commits):
+        mixed = "  ** the tree was DIRTY when these arms ran **"
+    elif commits:
+        mixed = f"  arms ran at {commits.pop()}"
+    else:
+        mixed = "  ** arms record no commit — rerun to stamp them **"
+
     stamps = sorted(p.stat().st_mtime
                     for p in root.rglob("snapshots_latlon.npz"))
     if not stamps:
-        return f"plotted at commit {sha} — no run artifacts found"
+        return f"plotted at commit {sha} — no run artifacts found{mixed}"
     import datetime as _dt
     fmt = lambda t: _dt.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
     span_h = (stamps[-1] - stamps[0]) / 3600.0
     warn = ("  ** artifacts span %.1f h — check this is ONE run **" % span_h
             if span_h > 6.0 else "")
     return (f"plotted at commit {sha} — {len(stamps)} arms, written "
-            f"{fmt(stamps[0])} to {fmt(stamps[-1])}{warn}")
+            f"{fmt(stamps[0])} to {fmt(stamps[-1])}{warn}{mixed}")
 
 
 def build_case_figure(root: Path, case: str, out_dir: Path) -> Path | None:

@@ -256,3 +256,83 @@ def test_the_figure_stamp_does_not_claim_the_run_s_commit():
     assert "plotted at commit" in src, (
         "the provenance stamp presents the PLOTTING checkout's commit as the "
         "run's own")
+
+
+# ---------------------------------------------------------------------------
+# GLM-5.2: the time span was standing in for a fact nothing recorded. Rerun one
+# case hours later against different code and the span stays narrow; copying
+# with timestamps preserved, clock skew and archive extraction defeat it from
+# the other side. Each arm now records what produced it.
+# ---------------------------------------------------------------------------
+
+def test_each_arm_records_the_commit_that_produced_it(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+
+    sys.path.insert(0, str(_REPO / "scripts" / "matrix"))
+    import run_ocean_test_matrix as m
+
+    out = tmp_path / "arm"
+    out.mkdir()
+    m._write_results_txt(out, {"status": "PASS"})
+    body = (out / "results.txt").read_text()
+    assert "provenance_commit:" in body, (
+        "an arm records nothing about what produced it, so a figure built "
+        "from two runs is indistinguishable from one built from one")
+    assert "provenance_python:" in body
+    commit = [l for l in body.splitlines()
+              if l.startswith("provenance_commit:")][0].split(":", 1)[1].strip()
+    assert commit and commit != "unknown", (
+        f"the commit stamp resolved to {commit!r} inside a git checkout")
+
+
+def test_the_figure_says_so_when_the_arms_came_from_different_runs(tmp_path):
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "plot_ocean_grid_benchmark_maps", _PLOTTER)
+    plot = importlib.util.module_from_spec(spec)
+    sys.modules["plot_ocean_grid_benchmark_maps"] = plot
+    spec.loader.exec_module(plot)
+
+    def _arm(name, commit):
+        d = tmp_path / name / "latlon" / "res"
+        d.mkdir(parents=True)
+        (d / "results.txt").write_text(
+            f"status: PASS\nprovenance_commit: {commit}\n")
+        import numpy as np
+        np.savez(d / "snapshots_latlon.npz", T=np.zeros((2, 2)))
+
+    _arm("case_a", "abc123def456")
+    _arm("case_b", "abc123def456")
+    line = plot._provenance(tmp_path)
+    assert "MIXED RUNS" not in line, line
+    assert "abc123def456" in line
+
+    _arm("case_c", "999999999999")
+    line = plot._provenance(tmp_path)
+    assert "MIXED RUNS" in line and "999999999999" in line, line
+
+
+def test_a_dirty_tree_is_named_on_the_figure(tmp_path):
+    """Pinning the import path to this checkout does not make it clean, and an
+    uncommitted edit in the pinned copy reproduces the incident the pin exists
+    to prevent -- now with the pin lending it credibility."""
+    import importlib.util
+    import sys
+
+    import numpy as np
+
+    spec = importlib.util.spec_from_file_location(
+        "plot_ocean_grid_benchmark_maps", _PLOTTER)
+    plot = importlib.util.module_from_spec(spec)
+    sys.modules["plot_ocean_grid_benchmark_maps"] = plot
+    spec.loader.exec_module(plot)
+
+    d = tmp_path / "case" / "latlon" / "res"
+    d.mkdir(parents=True)
+    (d / "results.txt").write_text(
+        "status: PASS\nprovenance_commit: abc123def456-dirty\n")
+    np.savez(d / "snapshots_latlon.npz", T=np.zeros((2, 2)))
+    assert "DIRTY" in plot._provenance(tmp_path)
