@@ -46,12 +46,40 @@ def test_rule_follows_the_dtype_not_a_hardcoded_level_count():
         warn_if_unaligned_levels(25, np.float64, where="test")
 
 
-def test_message_names_a_usable_alternative():
+def test_message_tells_the_user_to_pad_storage_not_to_change_the_model():
+    """The first version told users to run 28 levels instead of 26. That is
+    a change to the model's vertical grid to satisfy a performance lint --
+    the review's sharpest objection. The advice must be to keep the level
+    count and pad the storage."""
     with pytest.warns(UserWarning) as rec:
         warn_if_unaligned_levels(26, np.float32, where="test")
     text = str(rec[0].message)
-    assert "24 or 28" in text, text
     assert "104-byte" in text, text
+    assert "KEEP your 26 levels" in text, text
+    assert "padded to 28" in text, text
+    assert "changes no physics" in text, text
+    # The mechanism must be named as a vectorized load, not a cache line:
+    # a reader who cargo-cults 128-byte alignment learns the wrong rule.
+    assert "vectorized load" in text, text
+
+
+def test_rule_uses_the_state_dtype_not_the_coordinate_dtype():
+    """A mixed-precision run can build a float64 coordinate over float32
+    state. The stride that matters is the state's, so leaving the dtype
+    unset must resolve it from the precision policy rather than silently
+    passing because the coordinate happens to be wider."""
+    from legoesm.core.precision import get_policy
+
+    storage = np.dtype(get_policy().storage)
+    n_levels = 26
+    unaligned = (storage.itemsize * n_levels) % 16 != 0
+    if unaligned:
+        with pytest.warns(UserWarning, match="column stride"):
+            warn_if_unaligned_levels(n_levels, where="test")
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            warn_if_unaligned_levels(n_levels, where="test")
 
 
 def test_the_real_factory_warns_at_26_levels():
