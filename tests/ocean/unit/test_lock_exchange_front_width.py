@@ -165,3 +165,4 @@ def test_every_grid_starts_from_the_same_front():
     assert "lock_exchange_warm_fraction" in called, (
         "the unstructured arm builds its own front, so a case asking for a "
         "softened one gets a step here and a ramp everywhere else")
+

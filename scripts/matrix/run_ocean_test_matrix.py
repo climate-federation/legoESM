@@ -6406,6 +6406,26 @@ def _init_lock_exchange(state, grid_type, grid, z_coord, lx_config=None):
     warm_frac = lock_exchange_warm_fraction(lon, lx)
     T_profile = T_cold + (T_warm - T_cold) * warm_frac
 
+    # A lock exchange with no lock is not a lock exchange. This case ran for
+    # months with its front on the western wall of a regional channel: one wet
+    # column of sixty-six was cold, so the bounded-advection gate could not
+    # undershoot and the mixing metric had nothing to mix. Both water masses
+    # must be present in the WET domain, or the case measures nothing and must
+    # say so at construction rather than reporting a pass.
+    _wet = (np.asarray(state.land_mask_grid.data
+                       if grid_type == "spectral" else state.land_mask.data)
+            > 0.5)
+    _wf = np.broadcast_to(warm_frac, _wet.shape)[_wet]
+    if _wf.size:
+        _warm_share = float((_wf > 0.5).mean())
+        if not (0.05 <= _warm_share <= 0.95):
+            raise ValueError(
+                f"lock_exchange on {grid_type}: {100 * _warm_share:.1f}% of "
+                f"wet cells are warm, so the domain holds only one water "
+                f"mass and there is no lock to release. The front is at "
+                f"{lon_front} degrees; check it lies inside this case's "
+                f"longitude range.")
+
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
         T_hat = state.T_hat.data
