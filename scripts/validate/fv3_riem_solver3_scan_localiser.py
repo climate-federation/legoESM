@@ -368,6 +368,123 @@ def main() -> int:
               f"({n_log}/{pem_v.size})   exp(gama*log(y)) {d_cmp2:.3e} "
               f"({n_cmp2}/{y.size})")
 
+    # --- run F: libm substitution at the PRODUCTION exp sites -------
+    # The codex+GLM-prescribed closer (2026-08-19): run E measured the
+    # exp PRIMITIVE gap on constructed operands, which is NOT a proven
+    # propagation.  Here np.exp (libm) is swapped in at the production
+    # call sites themselves, via jax.pure_callback (signature read from
+    # the installed jax 0.9.1 _src/callback.py:258 -- positional
+    # ``callback, result_shape_dtypes, *args``), by substituting a
+    # proxy for the module-global ``jnp`` in fv3_nh_core (same
+    # call-time-resolution mechanism the ScanRouter uses for ``lax``).
+    # exp call sites on the riem_solver3/sim1 path, execution order:
+    #   0   riem_solver3 pk3_exp             fv3_nh_core.py:529
+    #   1   sim1_solver  pe_body             fv3_nh_core.py:219
+    #   2   sim1_solver  dz_bot              fv3_nh_core.py:317
+    #   3.. sim1_solver  _dz_bwd body (km-1) fv3_nh_core.py:324
+    # log sites: _pem_step body :520 + inside the composites at
+    # :219/:318/:325 (run E measured eager jnp.log bitwise vs np.log).
+    # PRE-REGISTERED (dual review): with all scans EAGER and libm exp
+    # at every production site, zh collapses to <= 1e-12 (ideally
+    # bitwise) => the exp-propagation chain is CLOSED; unchanged =>
+    # exp is not the (whole) cause.
+
+    def _libm(fn, x):
+        x = jnp.asarray(x)
+        return jax.pure_callback(
+            lambda a, _fn=fn: _fn(np.asarray(a, dtype=np.float64)),
+            jax.ShapeDtypeStruct(x.shape, x.dtype), x)
+
+    class JnpProxy:
+        """Stands in for ``jnp`` inside fv3_nh_core.
+
+        ``exp`` call number i (execution order within one riem call)
+        routes through libm np.exp when selected by ``spec``
+        (None = never, "all", "tail" = sites >= 1, frozenset of
+        indices); ``log`` routes through libm when ``libm_log``.
+        Everything else forwards to the real jnp untouched.
+        """
+
+        def __init__(self, spec, libm_log):
+            self.spec = spec
+            self.libm_log = libm_log
+            self.exp_calls = 0
+
+        def reset(self):
+            self.exp_calls = 0
+
+        def _selected(self, i):
+            s = self.spec
+            if s is None:
+                return False
+            if s == "all":
+                return True
+            if s == "tail":
+                return i >= 1
+            return i in s
+
+        def exp(self, x):
+            i = self.exp_calls
+            self.exp_calls += 1
+            if self._selected(i):
+                return _libm(np.exp, x)
+            return jnp.exp(x)
+
+        def log(self, x):
+            if self.libm_log:
+                return _libm(np.log, x)
+            return jnp.log(x)
+
+        def __getattr__(self, name):
+            return getattr(jnp, name)
+
+    # instrument control: the pure_callback wrapper IS np.exp bitwise
+    rngf = np.random.default_rng(3)
+    xctl = rngf.uniform(-3.0, 12.0, size=257)
+    d_ctl = float(np.abs(np.asarray(_libm(np.exp, jnp.asarray(xctl)))
+                         - np.exp(xctl)).max())
+    print(f"\nF. libm substitution at the production exp sites (all "
+          f"scans EAGER).\n   control |pure_callback(np.exp) - np.exp| "
+          f"= {d_ctl:.3e} (must be 0.0)")
+    if d_ctl != 0.0:
+        raise SystemExit("REFUSING: the libm callback wrapper is not "
+                         "np.exp bitwise -- swap arm invalid")
+
+    exp_per_face = 3 + (KM - 1)     # pk3 + pe_body + dz_bot + _dz_bwd
+    arms = (("F0 proxy no-swap (must equal run B)", None, False),
+            ("F1 libm exp ALL sites", "all", False),
+            ("F2 libm exp+log ALL sites", "all", True),
+            ("F3 libm exp pk3 site (:529) only", frozenset({0}), False),
+            ("F4 libm exp sim1 sites (:219,:317,:324)", "tail", False))
+    for label, spec, ll in arms:
+        proxy = JnpProxy(spec, ll)
+        jnh.jnp = proxy
+        jnh.lax = ScanRouter(frozenset())        # every scan EAGER
+        print(f"   {label}:")
+        counts = set()
+        for t in range(6):
+            jnh.lax.reset()
+            proxy.reset()
+            got = _jax_riem(t, *shared[t])
+            counts.add(proxy.exp_calls)
+            line = f"      face {t + 1}:"
+            for nm in fields:
+                d, nb = _cmp(nm, got[nm], ref[t][nm])
+                if d != 0.0 or nb:
+                    line += f"  {nm} {d:.2e}/{nb}"
+            if line.endswith(":"):
+                line += "  all fields bitwise"
+            print(line)
+        if counts != {exp_per_face}:
+            raise SystemExit(
+                f"REFUSING: exp calls per face {sorted(counts)} != "
+                f"{exp_per_face} -- the exp site map is stale.")
+    print(f"   exp calls per riem_solver3: {exp_per_face} "
+          f"(0=pk3 :529, 1=pe_body :219, 2=dz_bot :317, "
+          f"3..{exp_per_face - 1}=_dz_bwd :324)")
+    jnh.jnp = jnp
+    jnh.lax = real_lax
+
     print("\nRIEM3_SCAN_LOCALISER_DONE")
     return 0
 

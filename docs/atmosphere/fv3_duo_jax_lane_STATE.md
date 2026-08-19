@@ -565,7 +565,29 @@ cheaper test is a bitwise metric TRANSPLANT (oracle metric values
 imported into the lane), which also covers the vertical metric the
 perturbation never touched.
 
-Two constraints recorded, not yet exploited: the face-class pattern
+UPDATE 2026-08-19, the prescribed experiments ran (jobs 9435749/50/78):
+the METRIC TRANSPLANT — bitwise oracle metrics, all 34 families incl.
+sin_sg/cos_sg, 674,081 cells changed, per-family post-check 0.0 — left
+the w floor UNCHANGED to seven digits (6.611558e-04 -> 6.611559e-04,
+same argmax cells, same face classes). The metric family is CLOSED,
+horizontal and vertical (ak/bk proved bitwise vs the oracle restart).
+The exp chain in riem_solver3 is separately CONFIRMED by libm
+substitution (see the gate comment in test_fv3_dsw_tail_3d.py).
+
+TWO NEW FINGERPRINTS from the same runs:
+* **delz at the IC is NOT bitwise** — 2.7e-11 abs (~1.9e-14 rel),
+  ~6600 of 11520 cells per face, present at N=0 before any dynamics.
+  A solver-INPUT seed, exactly what the standing-floor-under-overwrite
+  inference predicted. NEXT DISCRIMINATOR (cheap): transplant the
+  oracle's IC delz bitwise and see whether the 1.3e-07 w floor
+  collapses.
+* **the face classes are the POLAR SPLIT**: {3,6} are the two polar
+  faces (all four seams polar-equatorial, fv3_native_halos.py:98-103),
+  {1,2,4,5} the equatorial belt (mapped under transpose-type ops in
+  the frozen bijection). The w floor's two bit-close classes coincide
+  with this split exactly.
+
+Two constraints recorded earlier, one now sharpened by the above: the face-class pattern
 ({1,2,4,5} vs {3,6}, bit-close within class) is ASYMMETRIC in a way
 both named candidates — a per-column top BC and a per-column remap
 edge — should not produce, pointing at seam/orientation-dependent

@@ -1005,18 +1005,20 @@ def test_nh_tail_parity(ctx, jctx, state_np_nh, nh_bundle,
         # as eager python loops over the production bodies left the
         # residual unchanged (zh 5.82e-10 on the worst face), while
         # eager jnp.exp differs from np.exp by ~1 ulp on identical
-        # operand values (3.55e-15 on pk; a sim1-style composite
-        # exp(gama*log(y)) on SAMPLED operands reproduces the 4.66e-10
-        # magnitude). The XLA-CPU-exp-vs-libm-exp gap is the CANDIDATE
-        # mechanism CONSISTENT with the residual -- not a proven
-        # propagation (codex+GLM 2026-08-19: the primitive check fed
-        # both exps the same pre-rounded product on constructed
-        # operands; the closing experiment is a libm substitution at
-        # the production exp sites, not yet run). What IS established:
-        # unrolling cannot remove it, log is bitwise, exp is the one
-        # divergent primitive found, and the bound is measured.
-        # [class: transcendental-implementation candidate; the old
-        #  "accumulating" tag was the retracted scan story]
+        # operand values. CONFIRMED BY SUBSTITUTION (job 9435749, run
+        # F of the scan localiser, the experiment the codex+GLM review
+        # prescribed): routing libm np.exp via pure_callback at the
+        # FIVE production exp sites makes ALL EIGHT outputs BITWISE
+        # against the NumPy lane on all six faces, with per-site
+        # attribution -- the pk3 site (:529) carries only the 3.55e-15
+        # pk difference, the three sim1 sites (:219/:317/:324) carry
+        # the whole zh/delz/w/ppe residual, and their composition
+        # accounts for the once-unexplained 4.66-vs-5.82e-10 gap. The
+        # floor IS the XLA-CPU-exp-vs-libm-exp implementation gap;
+        # unfixable by restructuring (only by replacing the
+        # transcendental, at a cost no production path wants); this
+        # measured bound absorbs exactly that and nothing else.
+        # [class: transcendental-implementation floor, proven]
         cmp_fields(got["nh"][nm], want, f"nh carry {nm}", 4.6e-13)
 
     if remap_step:
