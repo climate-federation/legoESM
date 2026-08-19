@@ -40,7 +40,8 @@ def test_reference_rate_reproduces_the_coefficient():
     """At P = 1 mm/day the gust IS the coefficient — that is what makes the
     config field readable as 'gust wind at 1 mm/day [m/s]'."""
     g = float(convective_gust_wind(_rates([1.0]), 2.0)[0])
-    assert g == pytest.approx(2.0, rel=1e-3)
+    assert g == pytest.approx(2.0, rel=1e-12), (
+        "with no offset inside the power this identity is EXACT")
 
 
 def test_monotone_and_cube_root_scaling():
@@ -52,18 +53,28 @@ def test_monotone_and_cube_root_scaling():
 
 
 def test_gradient_is_finite_at_zero_precipitation():
-    """A bare ratio**(1/3) has an INFINITE derivative at 0; the additive floor
-    is the only reason this term is safe inside a differentiable column."""
+    """A bare ratio**(1/3) has an INFINITE derivative at 0.
+
+    The double-``where`` makes the gradient finite AND the value exactly zero
+    there.  A first version used an additive offset inside the power instead;
+    this test's dry-column sibling caught that it left a spurious 0.02 m/s gust
+    (coefficient-scaled) in a column with no rain at all.
+    """
     p = _rates([0.0, 0.5, 2.7])
     g = jax.grad(lambda x: convective_gust_wind(x, 2.0).sum())(p)
     assert bool(jnp.all(jnp.isfinite(g))), f"non-finite gradient: {g}"
+    assert float(g[0]) == 0.0, "dry column must have an exactly zero subgradient"
+    assert float(g[2]) > 0.0, "a raining column must still respond to precip"
 
 
 def test_negative_precipitation_is_clamped_not_propagated():
     """An upstream sign error must not become a NaN gradient here."""
-    p = jnp.asarray([-1.0 * _MM_DAY], dtype=jnp.float64)
+    p = jnp.asarray([-1.0 * _MM_DAY, 0.0], dtype=jnp.float64)
     g = convective_gust_wind(p, 2.0)
-    assert float(g[0]) == pytest.approx(0.0, abs=1e-3)
+    # EXACT zero, not "small": a dry or sign-flipped column must not acquire a
+    # coefficient-scaled gust out of the regularisation.
+    assert float(g[0]) == 0.0
+    assert float(g[1]) == 0.0
     assert bool(jnp.isfinite(jax.grad(
         lambda x: convective_gust_wind(x, 2.0).sum())(p)[0]))
 

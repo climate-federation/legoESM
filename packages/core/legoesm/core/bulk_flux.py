@@ -208,10 +208,12 @@ _GUST_PRECIP_REF_KG_M2_S = 1.0 / 86_400.0
 # flux.  Exposed as a config field so the exponent is a measured choice rather
 # than a buried constant.
 _GUST_PRECIP_EXPONENT = 1.0 / 3.0
-# Additive floor inside the fractional power (see convective_gust_wind): keeps
-# the gradient finite at zero precipitation, where a bare x**(1/3) has an
-# infinite derivative.  Shifts u_gust by <0.5 % at 1 mm/day.
-_GUST_RATIO_FLOOR = 1e-6
+# Below this precipitation ratio the gust is exactly zero and its gradient is
+# taken as zero.  A bare ratio**(1/3) has an INFINITE derivative at 0, so some
+# choice must be made; the alternative of an additive offset inside the power
+# was measured to leave a spurious coefficient-scaled gust (0.02 m/s at
+# coeff=2) in a completely DRY column, which is worse than a subgradient.
+_GUST_RATIO_FLOOR = 1e-12
 
 
 def convective_gust_wind(
@@ -262,7 +264,9 @@ def convective_gust_wind(
     Returns
     -------
     array
-        Gust wind [m/s], non-negative and finite at ``precip = 0``.
+        Gust wind [m/s], non-negative, EXACTLY zero in a dry column, with a
+        finite (zero) gradient there — the documented subgradient choice, since
+        the true derivative of the cube root at zero is infinite.
 
     References
     ----------
@@ -281,10 +285,17 @@ def convective_gust_wind(
         # the fractional power and can emit NaN gradients at precip = 0.
         return jnp.zeros_like(precip)
     ratio = jnp.maximum(precip, 0.0) / _GUST_PRECIP_REF_KG_M2_S
-    # Offset inside the power keeps d(u_gust)/d(precip) finite at precip = 0,
-    # where a bare ratio**(1/3) has an infinite derivative — the AD hazard that
-    # a fractional power always carries.
-    gust = coeff * (ratio + _GUST_RATIO_FLOOR) ** exponent
+    # Double-``where``: the canonical JAX pattern for a function whose
+    # derivative blows up at a boundary.  The inner ``where`` keeps the value
+    # fed to the fractional power away from 0 so the BACKWARD pass never
+    # evaluates d/dx x**(1/3) at 0 (which is inf and would poison the whole
+    # gradient); the outer one restores an EXACT zero gust — and hence an exact
+    # zero subgradient — in a dry column.  A single ``where`` is not enough:
+    # reverse-mode AD evaluates both branches.
+    wet = ratio > _GUST_RATIO_FLOOR
+    safe_ratio = jnp.where(wet, ratio, jnp.ones_like(ratio))
+    gust = jnp.where(wet, coeff * safe_ratio ** exponent,
+                     jnp.zeros_like(ratio))
     if cap > 0.0:
         gust = jnp.minimum(gust, cap)
     return gust
