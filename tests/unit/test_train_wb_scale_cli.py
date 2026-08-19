@@ -153,6 +153,18 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
         "the warm-up must run BEFORE the ERA5 load, not after it")
 
 
+def _guard():
+    """The #1464 surface-stress guard, from the module it now lives in.
+
+    It moved out of this driver into ``legoesm.training.scale_build`` because
+    guarding one driver left the EVALUATION driver free to build the same
+    unequalised arm and write a scorecard from it: both go through
+    ``build_mode_components``, so that is where the check belongs.
+    """
+    from legoesm.training.scale_build import check_surface_drag_confound
+    return check_surface_drag_confound
+
+
 def _confounded_yaml(**extra):
     neural = {"surface_drag_confounded": "core_does_not_read_the_key"}
     neural.update(extra)
@@ -168,18 +180,70 @@ def test_the_spectral_core_refuses_a_config_that_declares_the_key_unread():
     scored against carries Louis -- the confound, wearing the label that says
     it is not there."""
     with pytest.raises(SystemExit) as e:
-        mod.check_surface_drag_confound(_confounded_yaml(), "neural_gcm",
-                                        "spectral")
+        _guard()(_confounded_yaml(), "neural_gcm", "spectral")
     assert "surface_drag" in str(e.value)
 
 
 def test_the_latlon_core_accepts_the_same_config():
     """On the core the declaration is about, it is simply true."""
-    mod.check_surface_drag_confound(_confounded_yaml(), "neural_gcm", "latlon")
+    assert _guard()(_confounded_yaml(), "neural_gcm", "latlon") is None
 
 
 def test_asking_for_the_drag_clears_the_refusal():
     """A config that enables the drag is equalised, whatever it declares."""
-    mod.check_surface_drag_confound(
+    assert _guard()(
         _confounded_yaml(surface_drag=True, surface_drag_scheme="louis"),
-        "neural_gcm", "spectral")
+        "neural_gcm", "spectral") is None
+
+
+def test_the_guard_is_reached_through_the_builder_not_just_the_trainer():
+    """The trainer is not the only door.
+
+    ``run_weatherbench_eval`` builds the same components and writes a
+    scorecard; a guard installed in the training entry point alone is walked
+    straight past by it.  Both call ``build_mode_components``, so assert the
+    check happens THERE."""
+    import ast
+    import inspect
+
+    from legoesm.training import scale_build
+
+    src = inspect.getsource(scale_build.build_mode_components)
+    called = {n.func.id for n in ast.walk(ast.parse(src.lstrip()))
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "check_surface_drag_confound" in called, (
+        "build_mode_components does not run the surface-stress guard, so any "
+        "entry point that is not the trainer builds an unequalised learned "
+        "arm without a word (#1464)")
+
+
+def test_a_campaign_the_builder_cannot_equalise_is_named_not_waved_through():
+    """The second declaration had no runtime consequence at all.
+
+    ``builder_refuses_classical_scheme`` is legitimate -- the drag builder
+    genuinely cannot reproduce a prognostic scheme -- but the run still
+    produces a table whose arms differ by a momentum sink.  Silence there
+    reads as an equalised comparison."""
+    yml = {"neural_gcm": {
+               "surface_drag_confounded": "builder_refuses_classical_scheme"},
+           "classical": {"turbulence": "clubb"}}
+    note = _guard()(yml, "neural_gcm", "spectral")
+    assert note and "clubb" in note and "surface stress" in note, note
+    # and it is silent once the arms ARE equalised
+    yml["neural_gcm"]["surface_drag"] = True
+    assert _guard()(yml, "neural_gcm", "spectral") is None
+
+
+def test_the_scorecard_records_the_confound_beside_the_numbers():
+    """A log line is not a record; the file the plots read has to carry it."""
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2] / "scripts" /
+           "validate" / "run_weatherbench_eval.py").read_text()
+    keys = {n.value for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "surface_drag_confound" in keys, (
+        "the scorecard meta block does not record whether the learned arm "
+        "carried a surface stress, so a confounded table is indistinguishable "
+        "from an equalised one once the log scrolls away")

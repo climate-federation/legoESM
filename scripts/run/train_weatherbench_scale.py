@@ -173,34 +173,6 @@ def _mpi_rank_size():
 
 
 
-def check_surface_drag_confound(yml, mode, training_core):
-    """Refuse a run whose learned arm silently loses its surface stress.
-
-    A campaign may declare ``neural_gcm.surface_drag_confounded:
-    core_does_not_read_the_key`` — meaning its learned column cannot be given
-    the classical arm's surface stress, because the core it runs never reads
-    the key. That is true of the lat-lon core and FALSE of the spectral one,
-    which does read it. Selecting the spectral core with such a config would
-    score a learned arm carrying no surface stress against a classical arm
-    that has one: the #1464 confound, back with a label on it.
-    """
-    neural = yml.get("neural_gcm") or {}
-    if not isinstance(neural, dict):
-        return
-    declared = neural.get("surface_drag_confounded")
-    if (mode == "neural_gcm" and training_core == "spectral"
-            and declared == "core_does_not_read_the_key"
-            and neural.get("surface_drag") is not True):
-        raise SystemExit(
-            "this config declares surface_drag_confounded: "
-            "'core_does_not_read_the_key', which is only true on the lat-lon "
-            "core -- the spectral core DOES read neural_gcm.surface_drag, so "
-            "this run would give the learned arm no surface stress while the "
-            "classical arm it is compared against has one (#1464). Either run "
-            "--training-core latlon, or set neural_gcm.surface_drag: true with "
-            "surface_drag_scheme equal to classical.turbulence.")
-
-
 def main(argv=None):
     cfg = build_scale_config_from_args(argv)
 
@@ -222,7 +194,6 @@ def main(argv=None):
     log = logging.getLogger("wb_scale")
 
     yml = yaml.safe_load(open(cfg.config_path))
-    check_surface_drag_confound(yml, cfg.mode, cfg.training_core)
     if cfg.smoke:  # tiny, gray-radiation single-GPU wiring check (see helper)
         cfg = _apply_smoke_overrides(cfg, yml)
     # Resolution comes FROM the YAML grid; an explicit mismatched --resolution
