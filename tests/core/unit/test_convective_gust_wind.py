@@ -109,7 +109,8 @@ def test_cap_bounds_the_feedback_loop():
 def test_jit_parity():
     p = _rates([0.0, 2.7, 20.0])
     eager = convective_gust_wind(p, 2.0, _rho_like(p), cap=6.0)
-    jitted = jax.jit(lambda x: convective_gust_wind(x, 2.0, cap=6.0))(p)
+    jitted = jax.jit(lambda x, r: convective_gust_wind(x, 2.0, r, cap=6.0))(
+        p, _rho_like(p))
     np.testing.assert_allclose(np.asarray(eager), np.asarray(jitted), rtol=1e-12)
 
 
