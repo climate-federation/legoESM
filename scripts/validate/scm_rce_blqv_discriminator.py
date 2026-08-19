@@ -67,9 +67,13 @@ from scripts.run import run_scm_rce_campaign as camp  # noqa: E402
 REPORT_Z_KM = (0.5, 1.0, 2.0)
 
 
+_SURFACE_FIELDS = ("bulk_scheme", "convective_gustiness_coeff",
+                   "convective_gustiness_cap")
+
+
 def _with_louis_override(cfg, **kw):
     louis = cfg.turbulence.louis
-    surface_kw = {k: v for k, v in kw.items() if k in ("bulk_scheme",)}
+    surface_kw = {k: v for k, v in kw.items() if k in _SURFACE_FIELDS}
     louis_kw = {k: v for k, v in kw.items() if k not in surface_kw}
     if surface_kw:
         louis = louis._replace(surface=louis.surface._replace(**surface_kw))
@@ -179,6 +183,20 @@ def main(argv: list[str] | None = None) -> int:
         "f0_coare3": (_with_louis_override(base, bulk_scheme="coare3"),
                       {"coriolis_s_inv": 0.0}),
     }
+    # Cold-pool gustiness calibration arms, all on the corrected (nonrotating)
+    # protocol: u_c = (c*L_v*P/rho)^(1/3) with c the dimensionless Redelsperger
+    # efficiency.  PRE-REGISTERED: f0 alone gives E 0.70 vs the CRM's 2.73 with
+    # dqv_sfc +1.37.  If E rises toward 2.7 while dqv_sfc stays near +1.4 and
+    # SST-Ta near 2.5-3.0, the term is doing what cold pools do and the winning
+    # c is the campaign's setting.  If E rises only by re-moistening the
+    # surface (dqv_sfc climbing back toward +3), the gust is feeding the
+    # lock-in instead of breaking it -- the same failure the f0_coare3 arm
+    # showed -- and the term is not the answer.
+    for _c in (0.25, 0.5, 1.0, 2.0):
+        arm_cfgs[f"gust{_c}"] = (
+            _with_louis_override(base, convective_gustiness_coeff=_c),
+            {"coriolis_s_inv": 0.0},
+        )
 
     results = {}
     cache: dict = {}
