@@ -486,3 +486,138 @@ for this panel's measured point.
 7. Ragged slice-pruning fix → few-collective exchange → overlap A/B
    (§c2) — the only path on this stack where the wire term can be
    HIDDEN rather than shrunk.
+
+---
+
+# Supersedes sections a and c — measured 2026-08-19
+
+Everything below is a receipted arm from one day of measurement. Where it
+contradicts sections a or c above, this section is the record; the older
+text is kept for provenance, not for citation.
+
+## The two atmosphere lanes are limited by opposite things
+
+Paired arms, every halo collective deleted and the otherwise identical
+program re-timed, which is the only way to split the step on this stack —
+the profiler does not record these collectives, and a capture attempted
+on 2026-08-19 returned identical row counts for two runs three times
+apart in length, i.e. truncated and unusable (job 27072274, discarded).
+
+lat-lon 2048x4096 L26, one allocation, arms pinned to the same nodes
+(job 27071069):
+
+| devices | step | local | communication | share | perfect |
+|---|---|---|---|---|---|
+| 32 | 6.972 | 6.308 | 0.664 | 9.5% | 6.296 |
+| 64 | 4.728 | 3.368 | 1.360 | 28.8% | 3.148 |
+| 128 | 3.950 | 2.285 | 1.665 | 42.2% | 1.574 |
+
+icosahedral subdivision 9, deep + ragged halo (jobs 27068830/32/33):
+
+| devices | step | local | communication | share |
+|---|---|---|---|---|
+| 8 | 23.135 | 23.055 | 0.080 | 0.3% |
+| 16 | 19.230 | 19.120 | 0.110 | 0.6% |
+| 32 | 7.230 | 7.190 | 0.040 | 0.6% |
+
+## a. lat-lon — bandwidth, and the boundary that never shrinks
+
+CONFIRMED. The halo moves 18.515 MB per device per step in 13 messages,
+counted from the compiled program at production resolution. Against the
+measured communication that is about 11 GB/s per device at 128 devices on
+a node link of roughly 25 GB/s shared by four devices — within about a
+factor of two of the fabric.
+
+CONFIRMED, with the packing control the first attempt lacked (job
+27073582, 64 devices): doubling the payload costs +1.554 ms, of which
++0.105 is the device-side packing the multiplier itself adds, so the extra
+bytes cost +1.450 on the wire. Of 1.464 ms of communication, 1.450 is
+payload and 0.014 is per-operation — about one microsecond per message.
+
+RETRACTED then RESTORED. The first payload arm had no packing control and
+its raw delta exceeded the whole communication term, which cannot license
+"per-operation cost is zero"; it licenses only "packing exceeds the
+per-operation term". The controlled arm above restores the conclusion.
+
+The structural cause: a device owns a latitude BAND spanning the full
+longitude circle, so its halo is two rows of 4,096 columns at any device
+count. Adding devices shrinks the work and leaves the boundary alone.
+
+CONFIRMED by compiled-program census, 16 devices, 4096 longitudes, 26
+levels: latitude bands move 18.515 MB in 13 collectives; a 2x8 tiling
+moves 3.483 MB in 108. The byte cut is 5.3x, the geometric prediction, and
+there is NO all-gather in the tiled program — the mechanism review's
+objection that the tiled pole fold would gather the whole circle on every
+tile is refuted by the artifact. Six of the 108 touch a full longitude
+extent.
+
+At one microsecond per message, 108 messages cost about 0.1 ms against a
+payload cut of 1.450 to 0.27, so the tiled lane is predicted at roughly
+3.75 ms against 4.841 at 64 devices. That A/B is the open item.
+
+Also CONFIRMED and unresolved: at 128 devices the LOCAL work is 2.285 ms
+against 1.574 perfect, 45% above, while at 32 devices it is 0.2% above.
+Tiling does not address that term — per-device cell count is unchanged —
+and the mechanism review attributes it to a fixed per-step kernel-count
+floor plus reductions whose latency grows with rank count.
+
+## c. icosahedral — not communication, and not the mesh either
+
+CONFIRMED: communication is 0.04–0.11 ms of the step at 8, 16 and 32
+devices, and doubling the wire payload costs nothing measurable. Below 64
+devices this lane does not communicate.
+
+REFUTED, each with its own receipt:
+- ghost-ring size and exchange round count as the cause of the 8-to-16
+  stall — both on trend at every device count, offline census job 27068906
+  (space-filling curve) and 27070623 (graph partitioner);
+- partition quality — the graph partitioner wins 19.3% at 8 devices and
+  only 5.5% at 16, and with it the step is 18.10 ms at 8 devices and
+  18.47 at 16, so doubling the devices buys nothing at all (jobs
+  27070258/59);
+- host dispatch — removing every per-step synchronisation changes the
+  stalled size by 1% (job 27072488);
+- the deep halo's own trade — it still wins 15.5% at 8 devices and 6.1%
+  at 16 where communication measures zero, so its gain is compilation and
+  fusion across the step body, not messages avoided (jobs 27069554/55).
+
+CONFIRMED cause, single GPU, no devices and no collectives involved:
+
+| cells | 13 levels | 26 levels | 52 levels |
+|---|---|---|---|
+| 40,962 | 1.630 | 2.000 | 2.830 |
+| 163,842 | 7.500 | 20.245 | 13.820 |
+| 655,362 | 33.250 | 50.170 | 51.640 |
+| 2,621,442 | 121.425 | 173.750 | 214.530 |
+
+At 163,842 cells, 52 levels runs 32% FASTER than 26 despite twice the
+work; everywhere else more levels cost more. As per-cell excess over
+neighbouring mesh sizes: 1.15x at 13 levels, 2.53x at 26, 1.22x at 52.
+Production runs 26 levels, and at 16 devices each device holds 163,841
+cells — the exact cell of that table. That is the stall.
+
+The graph partitioner's win is separable and real: 4–7% fewer cells to
+compute, and 18% cheaper per cell at 8 devices, which is memory locality
+on a step that runs about six times off a bandwidth roofline. It is a
+configuration flip. It does NOT survive into the trapped shape, where the
+graph arm is 2% worse per cell.
+
+Open: whether the trap is a cache straddle (the live set at 26 levels is
+about 33 MB against a 40 MB last-level cache — broad hump predicted) or
+stride alignment and address aliasing (104-byte rows at 26 levels are not
+16-byte aligned; 208 at 52 are — sharp spike predicted). The level scan
+that separates them by response shape is running. The fix follows from the
+shape and must be verified as a band of good paddings, never a single
+lucky value.
+
+## What NOT to do, updated
+
+- Do not cite "collective COUNT is the wall" for lat-lon. Per-operation
+  cost is about one microsecond per message; the wall is bytes.
+- Do not tune the icosahedral lane's communication below 64 devices. It
+  does not have any.
+- Do not tune the icosahedral partition to fix the 16-device stall. Two
+  partitioners and an offline census say it is not the partition.
+- Do not quote the padded-byte verdict string in the partition A/B
+  harness. It was written for a bytes hypothesis, and at 8 devices there
+  are no bytes to save.
