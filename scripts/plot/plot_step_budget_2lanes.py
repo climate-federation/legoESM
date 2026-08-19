@@ -26,9 +26,14 @@ import numpy as np
 
 # (devices, full ms, no-comm ms, ideal ms, job id)
 # ideal = single-device step / devices, same build and flags.
+# All three rows from ONE allocation with every arm pinned to the same
+# nodes, so the device-count trend is not a node-set trend. An earlier
+# 16-node job gave 6.980 / 4.851 for the first two rows; the ~2% offset
+# between jobs is why the trend is read within a job, never across.
 LATLON = [
-    (32, 6.980, 6.304, 201.4807 / 32, "27069398"),
-    (64, 4.851, 3.368, 201.4807 / 64, "27069398"),
+    (32, 6.972, 6.308, 201.4807 / 32, "27071069"),
+    (64, 4.728, 3.368, 201.4807 / 64, "27071069"),
+    (128, 3.950, 2.285, 201.4807 / 128, "27071069"),
 ]
 MPAS = [
     (8, 23.135, 23.055, 173.84 / 8, "27068830"),
