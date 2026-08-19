@@ -728,6 +728,26 @@ def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> in
     return validate_microphysics_tracer_slots(microphysics, have, context=context)
 
 
+def _era5_config(cfg, yml):
+    """The ERA5 store config for a training run.
+
+    ``era5_cloud_condensate: true`` in the campaign YAML pulls cloud liquid and
+    cloud ice into the initial condition from ``era5_cloud_zarr`` (ARCO-ERA5 by
+    default).  It is OFF unless asked for: the WeatherBench2 store carries no
+    condensate at all, so every sample would otherwise start cloud-free and the
+    microphysics parameters could not influence a six-hour forecast.
+    """
+    from legoesm.training.era5_to_state import TrainingERA5Config
+
+    c = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))
+    c = c._replace(zarr_store=yml["era5_zarr"],
+                   load_cloud_condensate=bool(yml.get("era5_cloud_condensate",
+                                                      False)))
+    if yml.get("era5_cloud_zarr"):
+        c = c._replace(cloud_zarr=str(yml["era5_cloud_zarr"]))
+    return c
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -746,17 +766,26 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
-        TrainingERA5Config, open_era5_zarr, load_era5_slice,
-        era5_to_spectral_carry, regrid_2d_to_gaussian,
+        era5_to_spectral_carry,
+        load_era5_slice,
+        open_era5_zarr,
+        regrid_2d_to_gaussian,
     )
 
-    era5_cfg = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))._replace(
-        zarr_store=yml["era5_zarr"])
+    era5_cfg = _era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
+    # The condensate store is opened ONCE and threaded through every slice --
+    # re-opening a remote zarr per sample would dominate the load.
+    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
+                if era5_cfg.load_cloud_condensate else None)
+    # The surface-temperature reload below wants 2-D fields only; asking it for
+    # condensate would re-read the cloud store once per sample for data it
+    # throws away.
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)
 
     # Which water species the state must carry follows the scheme the arm
     # selects, and the carry builder already knows how to seed them — it was
@@ -779,14 +808,16 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma,
-                                    microphysics=_micro)
-        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma,
-                                        microphysics=_micro)
+        ic = era5_to_spectral_carry(
+            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        target = era5_to_spectral_carry(
+            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
         if not samples:
             validate_carry_holds_scheme(
                 ic, _micro, context=f"WB {cfg.mode} arm initial condition")
-        sst_src = load_era5_slice(era5_cfg, i_ic)
+        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
         doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
@@ -813,8 +844,10 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
-        TrainingERA5Config, open_era5_zarr, load_era5_slice,
-        era5_to_latlon_carry, regrid_2d_to_gaussian,
+        era5_to_latlon_carry,
+        load_era5_slice,
+        open_era5_zarr,
+        regrid_2d_to_gaussian,
     )
     from legoesm.driver.compiled_segments import pack_forcing
 
@@ -823,13 +856,20 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
 
-    era5_cfg = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))._replace(
-        zarr_store=yml["era5_zarr"])
+    era5_cfg = _era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
+
+    # Opened once, like the state store — a per-sample remote zarr open would
+    # dominate the load (see the spectral loader).
+    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
+                if era5_cfg.load_cloud_condensate else None)
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)   # 2-D only
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
 
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
@@ -838,9 +878,13 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
-        sst_src = load_era5_slice(era5_cfg, i_ic)
+        ic = era5_to_latlon_carry(
+            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        target = era5_to_latlon_carry(
+            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
                     / np.timedelta64(1, "D"))
