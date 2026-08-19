@@ -125,6 +125,20 @@ def warn_if_unaligned_levels(n_levels: int, dtype, *, where: str) -> None:
     is 20.2 ms at 26 levels and 8.5 ms at 32 -- MORE work, less time -- and
     on the largest mesh tested 32 levels beat 26 by 25%.
 
+    Two objections the measured set already answers.
+
+    Why 16 bytes and not 32 or 128: among the level counts measured, the
+    fast strides are 80, 128 and 208 bytes.  80 and 208 are NOT multiples
+    of 32 or of 128, so a rule with either period would predict them slow
+    and be wrong.  16 is the only period consistent with every sample.
+
+    Why the staggered array does not change the advice: the interface-level
+    arrays carry ``n_levels + 1``, so their stride is unaligned in EVERY
+    case measured -- 84, 108, 132 and 212 bytes at 20, 26, 32 and 52 levels
+    alike -- yet three of those four are fast.  Alignment of the
+    ``n_levels`` arrays is what separates fast from slow; the staggered
+    partner does not.  Aligning it instead would be the wrong target.
+
     A warning rather than an error: an unaligned level count is a
     performance cliff, not a wrong answer, and a deliberate choice (matching
     another model's grid, a published configuration) has to stay possible.
