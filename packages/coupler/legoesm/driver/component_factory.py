@@ -288,9 +288,10 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # The five scheme selectors are pinned to 'none' by the specific guard.
     "radiation", "convection", "microphysics", "turbulence",
     "gravity_wave_drag",
-    # Output cadence + destination -- the only OutputConfig fields the
-    # lane's snapshot writer reads.
-    "output.output_dir", "output.diag_days",
+    # Output cadence + destination -- the OutputConfig fields the lane's
+    # snapshot + checkpoint writers read (checkpoint_days: slice-2
+    # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
+    "output.output_dir", "output.diag_days", "output.checkpoint_days",
     # CLI-default drift that CANNOT affect the duo dynamics (measured on a
     # stock ``run_amip --discretization fv3_duo`` config, job 9433540):
     # ``--clouds`` defaults to 'xu_randall' at the argparse layer. The duo

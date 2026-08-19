@@ -13,6 +13,9 @@ Covers the four NEW seams, cheapest-first:
    run + snapshot files).  This IS the slice-1 driver smoke (a full
    ``run_amip`` invocation adds only argparse on top — covered by the CLI
    round-trip in ``tests/unit/test_run_amip_cli.py``).
+5. Restart (slice 2) — ``fv3duo_ckpt_v1`` schema/deck-mismatch refusals,
+   checkpoint atomicity, and the PRE-REGISTERED bitwise A/B round-trip
+   (straight run vs checkpoint-and-resume) on both the hydro and NH arms.
 
 Cost control: ONE module-scoped grid bundle at N=12/km=5 (the smallest
 duo cube the gate files exercise), n_split=2 for the wrapper step (deck
@@ -274,6 +277,7 @@ def _fv3_duo_config(**over):
         turbulence="none", gravity_wave_drag="none",
         precision="fp64",
         output=OutputConfig(diag_days=1,
+                            checkpoint_days=over.pop("checkpoint_days", 0),
                             output_dir=over.pop("output_dir", "")),
     )
     base.update(over)
@@ -362,6 +366,8 @@ class TestFV3DuoDefaultDenyWall:
             _refuse_fv3_duo_non_default,
         )
         _refuse_fv3_duo_non_default(_fv3_duo_config())  # must not raise
+        # slice-2 restart: the shared checkpoint cadence is allow-listed
+        _refuse_fv3_duo_non_default(_fv3_duo_config(checkpoint_days=1))
 
     @pytest.mark.parametrize("field, value", SMUGGLERS)
     def test_each_smuggler_refused_with_path_named(self, field, value):
@@ -387,8 +393,9 @@ class TestFV3DuoDefaultDenyWall:
             _refuse_fv3_duo_non_default,
         )
         cfg0 = _fv3_duo_config()
-        cfg = cfg0._replace(output=cfg0.output._replace(checkpoint_days=5))
-        with pytest.raises(ValueError, match="output.checkpoint_days"):
+        cfg = cfg0._replace(
+            output=cfg0.output._replace(checkpoint_format="zarr"))
+        with pytest.raises(ValueError, match="output.checkpoint_format"):
             _refuse_fv3_duo_non_default(cfg)
 
     def test_wall_is_wired_into_the_factory_branch(self):
@@ -400,12 +407,24 @@ class TestFV3DuoDefaultDenyWall:
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
 
-    def test_matrix_note_declares_nh_support(self):
+    def test_matrix_declares_both_dynamics_axes(self):
+        """NH support is STRUCTURAL, not a note (codex 2026-08-18).
+
+        The first version of this asserted a free-text ``note`` said
+        "nonhydrostatic" -- but the matrix's only production consumer
+        ignores notes, so a caller filtering on ``dynamics`` still
+        concluded NH was unsupported. There is now one ROW per axis
+        (uniqueness re-keyed to the (canonical_name, dynamics) pair),
+        and this asserts what a consumer can actually read.
+        """
         from legoesm.supported_matrix import ATMOSPHERE_MATRIX
         entries = [e for e in ATMOSPHERE_MATRIX
                    if e.canonical_name == "fv3_duo_primitive_equations"]
-        assert len(entries) == 1
-        assert "nonhydrostatic" in entries[0].note
+        assert {e.dynamics for e in entries} == {"hydrostatic",
+                                                 "nonhydrostatic"}, \
+            [e.dynamics for e in entries]
+        assert len({e.class_name for e in entries}) == 1, (
+            "both axes must resolve to the ONE certified class")
 
 
 # ---------------------------------------------------------------------
@@ -497,23 +516,169 @@ class TestModelDriverLane:
         marker = (tmp_path / "fv3duo_status.txt").read_text().strip()
         assert marker == status
 
-    def test_restart_refused_before_any_decode(self, tmp_path):
-        """run_amip calls load_checkpoint BEFORE the lane's own check —
-        the refusal must fire before any decode or existence check
-        (a nonexistent path must hit the refusal, not FileNotFoundError)."""
-        from legoesm.driver.model_driver import ModelDriver
-        cfg = _fv3_duo_config(output_dir=str(tmp_path))
-        driver = ModelDriver(cfg, output_dir=tmp_path)
-        with pytest.raises(NotImplementedError, match="decode"):
-            driver.load_checkpoint(tmp_path / "no_such_checkpoint.npz")
 
-    def test_restart_refused(self, tmp_path):
+# ---------------------------------------------------------------------
+# 6. Restart (slice 2): fv3duo_ckpt_v1 refusals + the bitwise A/B gate
+# ---------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def restart_driver(tmp_path_factory):
+    """ONE set-up duo driver shared by the (cheap, no-stepping) refusal
+    tests — setup builds the grid + model but compiles nothing."""
+    from legoesm.driver.model_driver import ModelDriver
+    d = tmp_path_factory.mktemp("fv3duo_restart_refusals")
+    cfg = _fv3_duo_config(output_dir=str(d))
+    drv = ModelDriver(cfg, output_dir=d)
+    drv.setup()
+    return drv, d
+
+
+def _write_duo_ckpt(path, drv, **over):
+    """Hand-built npz whose metadata is VALID for *drv*; each refusal
+    test overrides ONE field (the metadata gates fire before any array
+    decode, so refusal tests need no arrays)."""
+    meta = {
+        "_schema": "fv3duo_ckpt_v1",
+        "_step": np.int64(3),
+        "_day": np.float64(0.25),
+        "_dt": np.float64(drv.config.dycore.dt),
+        "_hydrostatic": np.bool_(drv.model.config.hydrostatic),
+        "_km": np.int64(drv.model.config.km),
+        "_resolution": np.int64(drv.model.grid.n),
+        "_git_sha": "test",
+    }
+    meta.update(over)
+    with open(path, "wb") as fh:
+        np.savez(fh, **meta)
+    return path
+
+
+class TestFV3DuoRestart:
+
+    def test_load_before_setup_refused(self, tmp_path):
+        """The loader validates km/resolution/hydrostatic against the
+        CONSTRUCTED model, so a pre-setup load must refuse loudly."""
         from legoesm.driver.model_driver import ModelDriver
         cfg = _fv3_duo_config(output_dir=str(tmp_path))
         driver = ModelDriver(cfg, output_dir=tmp_path)
-        driver.setup()
-        with pytest.raises(NotImplementedError, match="restart"):
-            driver._run_fv3_duo(start_step=7)
+        with pytest.raises(RuntimeError, match="setup"):
+            driver.load_checkpoint(tmp_path / "x.npz")
+
+    def test_missing_file_refused(self, restart_driver):
+        drv, d = restart_driver
+        with pytest.raises(FileNotFoundError, match="not found"):
+            drv.load_checkpoint(d / "no_such_checkpoint.npz")
+
+    def test_foreign_schema_refused_before_any_decode(self, restart_driver):
+        """A cube-style npz (no _schema) is refused by NAME of the duo
+        schema — never half-decoded into a shape error."""
+        drv, d = restart_driver
+        p = d / "foreign.npz"
+        np.savez(p, u=np.zeros(3), step=np.int64(1))
+        with pytest.raises(ValueError, match="fv3duo_ckpt_v1"):
+            drv.load_checkpoint(p)
+
+    @pytest.mark.parametrize("field, value, frag", [
+        ("_km", 10, "km mismatch"),
+        ("_resolution", 24, "resolution mismatch"),
+        ("_hydrostatic", False, "hydrostatic mismatch"),
+        ("_dt", 7.0, "dt mismatch"),
+    ])
+    def test_deck_mismatch_refused(self, restart_driver, field, value,
+                                   frag):
+        drv, d = restart_driver
+        p = _write_duo_ckpt(d / f"mm{field}.npz", drv, **{field: value})
+        with pytest.raises(ValueError, match=frag):
+            drv.load_checkpoint(p)
+
+    def test_truncated_checkpoint_refused(self, restart_driver):
+        """Valid metadata but no arrays -> named truncation refusal."""
+        drv, d = restart_driver
+        p = _write_duo_ckpt(d / "truncated.npz", drv)
+        with pytest.raises(ValueError, match="truncated"):
+            drv.load_checkpoint(p)
+
+    def test_lossy_leaf_refused(self, restart_driver):
+        """An f32 array under the fp64 schema is a leaf that lost bits
+        — refused by name, never silently promoted."""
+        drv, d = restart_driver
+        p = d / "lossy.npz"
+        meta = {
+            "_schema": "fv3duo_ckpt_v1", "_step": np.int64(3),
+            "_day": np.float64(0.25),
+            "_dt": np.float64(drv.config.dycore.dt),
+            "_hydrostatic": np.bool_(True), "_km": np.int64(KM),
+            "_resolution": np.int64(N), "_git_sha": "test",
+        }
+        with open(p, "wb") as fh:
+            np.savez(fh, state_u=np.zeros(2, dtype=np.float32), **meta)
+        with pytest.raises(ValueError, match="float64"):
+            drv.load_checkpoint(p)
+
+    def test_bare_start_step_refused(self, restart_driver):
+        """A start_step without a load_checkpoint-staged bundle has no
+        state to resume from — refused, pointing at load_checkpoint."""
+        drv, _d = restart_driver
+        with pytest.raises(ValueError, match="load_checkpoint"):
+            drv._run_fv3_duo(start_step=7)
+
+    @pytest.mark.parametrize("model_type", ["hydrostatic",
+                                            "nonhydrostatic"])
+    def test_restart_roundtrip_bitwise(self, tmp_path, model_type):
+        """PRE-REGISTERED acceptance (non-negotiable): run A = 2 days
+        straight; run B = fresh driver loading A's day-1 checkpoint,
+        then the remaining day.  Final bundles must be BITWISE identical
+        on EVERY array (same jitted program; fp64 npz round-trip is
+        exact).  A tolerance here would hide state loss — if this
+        fails, that is a FINDING, not a bound to relax."""
+        from legoesm.driver.model_driver import ModelDriver
+        dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+        dir_a.mkdir(), dir_b.mkdir()
+        mk = dict(days=2, checkpoint_days=1, model_type=model_type)
+        cfg_a = _fv3_duo_config(output_dir=str(dir_a), **mk)
+        drv_a = ModelDriver(cfg_a, output_dir=dir_a)
+        drv_a.setup()
+        assert drv_a.run() == "COMPLETED"
+        dt = drv_a.config.dycore.dt  # post-CFL-clamp effective dt
+        n_total = int(2 * 86400.0 / dt)
+        n_mid = max(1, int(1 * 86400.0 / dt))
+        mid = dir_a / f"fv3duo_ckpt_step_{n_mid:09d}.npz"
+        final_a = dir_a / f"fv3duo_ckpt_step_{n_total:09d}.npz"
+        assert mid.is_file() and final_a.is_file()
+        # atomicity: a successful run never leaves the tmp sibling
+        assert not list(dir_a.glob("*.tmp")), "atomic write leaked .tmp"
+
+        cfg_b = _fv3_duo_config(output_dir=str(dir_b), **mk)
+        drv_b = ModelDriver(cfg_b, output_dir=dir_b)
+        drv_b.setup()
+        step, day = drv_b.load_checkpoint(mid)
+        assert step == n_mid
+        assert day == pytest.approx(n_mid * dt / 86400.0)
+        assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+        assert not list(dir_b.glob("*.tmp"))
+
+        fa = drv_a._fv3_duo_flatten_bundle(drv_a.state)
+        fb = drv_b._fv3_duo_flatten_bundle(drv_b.state)
+        assert set(fa) == set(fb)
+        if model_type == "nonhydrostatic":
+            assert any(nm.startswith("nh_") for nm in fa), \
+                "NH arm persisted no nh carry"
+        diffs = [nm for nm in sorted(fa)
+                 if fa[nm].shape != fb[nm].shape
+                 or fa[nm].tobytes() != fb[nm].tobytes()]
+        assert not diffs, (
+            f"restart is NOT bitwise; differing arrays: {diffs}")
+
+        if model_type == "hydrostatic":
+            # total-days contract: restarting from the FINAL checkpoint
+            # with the same --days is at/past target -> loud refusal.
+            cfg_c = _fv3_duo_config(output_dir=str(dir_b), **mk)
+            drv_c = ModelDriver(cfg_c, output_dir=dir_b)
+            drv_c.setup()
+            step_c, day_c = drv_c.load_checkpoint(final_a)
+            assert step_c == n_total
+            with pytest.raises(ValueError, match="nothing to run"):
+                drv_c.run(start_step=step_c, start_day=day_c)
 
 
 # =====================================================================
