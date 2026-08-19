@@ -851,12 +851,26 @@ class TestBarotropicReconcileTarget:
             use_conservation_fixer=False,
             barotropic_reconcile_target="transport_avg",
             barotropic_face_depth="nemo_ssh_avg",
+            # The card sets this too, and it selects a DIFFERENT branch for
+            # the loop-entry seed. Leaving it at the default certified the
+            # min-rule-seed path while the card runs the other one.
+            barotropic_seed_face_depth="nemo_ssh_avg",
             **self._KAMM_MLF_BARO,
         )
         n = 23
+        # The card runs multi-level time stepping, so the substep is entered
+        # with BEFORE-level fields. That is what turns on the seed override,
+        # and with it the branch that rebuilds the subtracted depth-mean from
+        # the NOW state. Calling without them exercised the other branch
+        # entirely, so this test's claim to pin "the card's composition" was
+        # about a composition the card never runs (codex).
+        eta_before = state.eta.data * 0.5
+        u_before = state.u.data * 0.9
+        v_before = state.v.data * 0.9
         state_new, (Hu_avg, _) = barotropic_substeps_latlon_cgrid(
             state, 600.0 / n, n, grid, partial_coord, cfg,
             add_barotropic_coriolis=True,
+            eta_init=eta_before, u_init=u_before, v_init=v_before,
         )
         h_k_old = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, partial_coord,
@@ -902,6 +916,43 @@ class TestBarotropicReconcileTarget:
             f"F1 divisor gap {rel_max:.3e} exceeds the documented ~1.3e-4 "
             "scale by >3x -- re-measure and update the "
             "BarotropicConfig docstring")
+
+
+    def test_the_before_state_inputs_are_not_ignored(self, grid, z_coord):
+        """Non-vacuity for the test above.
+
+        That test only certifies the card's path if handing the substep
+        BEFORE-level fields actually selects a different branch. If they were
+        ignored, it would be the old test wearing new arguments.
+        """
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        cfg = LatLonCGridOceanConfig.from_flat(
+            K_h=0.0, K_bih=0.0, K_v=0.0, A_h=0.0, B_h=0.0, A_v=0.0,
+            C_smag=0.0, bottom_drag_r=0.0, physics=None,
+            use_conservation_fixer=False,
+            barotropic_reconcile_target="transport_avg",
+            barotropic_face_depth="nemo_ssh_avg",
+            barotropic_seed_face_depth="nemo_ssh_avg",
+            **self._KAMM_MLF_BARO,
+        )
+        n = 3
+        plain, _ = barotropic_substeps_latlon_cgrid(
+            state, 60.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True)
+        seeded, _ = barotropic_substeps_latlon_cgrid(
+            state, 60.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True,
+            eta_init=state.eta.data * 0.5,
+            u_init=state.u.data * 0.9, v_init=state.v.data * 0.9)
+        assert not np.allclose(np.asarray(plain.u.data),
+                               np.asarray(seeded.u.data), rtol=0, atol=1e-14), (
+            "the before-level fields changed nothing, so the test above is "
+            "still exercising the branch the card does not run")
 
 
 class TestBarotropicReconcileTargetCard:
