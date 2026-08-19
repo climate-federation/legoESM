@@ -75,7 +75,7 @@ mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 rc=0
 
 SUBDIV="${SUBDIV:-7}"
-LEVELS="${LEVELS:-22 24 25 26 27 28 30 32 40}"
+LEVELS="${LEVELS:-16 18 20 21 22 26 30 31 32 34 36 40}"
 
 run_lev () {  # nlev tag
   local NL=$1 TAG=$2

@@ -1,14 +1,15 @@
-"""A level count that makes columns unaligned must say so.
+"""A level count measured slow must say so — and must not claim a cause.
 
-Measured on one A100 with the icosahedral core in float32: at 163,842 cells
-the step takes 20.2 ms at 26 levels and 8.5 ms at 32 -- more work, less
-time -- because a column of 26 float32 values is 104 bytes, which is not a
-multiple of 16, so only every other column starts on a vector boundary.
-Every level count divisible by four measured about three times cheaper per
-level than the two that were not.
+MEASURED on one A100, float32, icosahedral core, 163,842 cells, 60 timed
+steps per arm, every level count inside ONE allocation: counts from 22 to 30
+cost about 2.5x as much per level as 32 and above. The step is 20.3 ms at 26
+levels and 8.5 ms at 32 — more work, less than half the time.
 
-It stays a warning rather than an error: the answer is right either way, and
-matching another model's grid has to remain possible.
+An earlier version of this guard asserted the cause was byte alignment of a
+cell's column. The finer scan refuted it: 24 and 28 levels are aligned and
+slow, 20 and 52 are unaligned-or-aligned and fast. These tests therefore pin
+that the guard reports a RANGE and explicitly disclaims a mechanism, because
+the tempting failure is to re-introduce a tidy rule the data does not carry.
 """
 from __future__ import annotations
 
@@ -18,98 +19,60 @@ import numpy as np
 import pytest
 
 from legoesm.grids.vertical import (
+    _LEVELS_MEASURED_SLOW,
     create_sigma_coordinate,
     warn_if_unaligned_levels,
 )
 
 
-@pytest.mark.parametrize("n_levels", [13, 22, 25, 26, 27, 30])
-def test_warns_on_unaligned_float32_level_counts(n_levels):
-    with pytest.warns(UserWarning, match="column stride"):
+@pytest.mark.parametrize("n_levels", [22, 24, 25, 26, 27, 28, 30, 31])
+def test_warns_inside_the_measured_slow_range(n_levels):
+    with pytest.warns(UserWarning, match="measured SLOW"):
         warn_if_unaligned_levels(n_levels, np.float32, where="test")
 
 
-@pytest.mark.parametrize("n_levels", [4, 20, 24, 28, 32, 40, 52])
-def test_silent_on_aligned_float32_level_counts(n_levels):
+@pytest.mark.parametrize("n_levels", [8, 13, 16, 20, 32, 40, 52, 64])
+def test_silent_outside_it(n_levels):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         warn_if_unaligned_levels(n_levels, np.float32, where="test")
 
 
-def test_rule_follows_the_dtype_not_a_hardcoded_level_count():
-    """float64 columns are 8 bytes per level, so 26 levels IS aligned there;
-    a rule written as 'levels must divide by four' would be wrong."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        warn_if_unaligned_levels(26, np.float64, where="test")
-    with pytest.warns(UserWarning, match="column stride"):
-        warn_if_unaligned_levels(25, np.float64, where="test")
+def test_the_range_matches_what_was_measured():
+    """24 and 28 are INSIDE the range. They are byte-aligned, and an
+    alignment rule would have let them pass; the measurement says they are
+    as slow as their neighbours."""
+    assert 24 in _LEVELS_MEASURED_SLOW
+    assert 28 in _LEVELS_MEASURED_SLOW
+    assert 20 not in _LEVELS_MEASURED_SLOW
+    assert 32 not in _LEVELS_MEASURED_SLOW
 
 
-def test_message_tells_the_user_to_pad_storage_not_to_change_the_model():
-    """The first version told users to run 28 levels instead of 26. That is
-    a change to the model's vertical grid to satisfy a performance lint --
-    the review's sharpest objection. The advice must be to keep the level
-    count and pad the storage."""
+def test_message_disclaims_a_mechanism_and_scopes_the_result():
     with pytest.warns(UserWarning) as rec:
         warn_if_unaligned_levels(26, np.float32, where="test")
     text = str(rec[0].message)
-    assert "104-byte" in text, text
-    assert "KEEP your 26 levels" in text, text
-    assert "padded to 28" in text, text
-    assert "changes no physics" in text, text
-    # The mechanism must be named as a vectorized load, not a cache line:
-    # a reader who cargo-cults 128-byte alignment learns the wrong rule.
-    assert "vectorized load" in text, text
-    # 104 bytes: every SECOND column is aligned.
-    assert "one column in 2" in text, text
+    assert "NOT established" in text, text
+    assert "refuted" in text, text
+    assert "Re-measure" in text, text
+    # It must not tell the user to change the model as the first resort.
+    assert "physics requirement, keep it" in text, text
 
 
-@pytest.mark.parametrize("n_levels,period", [(26, 2), (13, 4), (25, 4),
-                                             (27, 4), (22, 2)])
-def test_alignment_period_is_computed_not_assumed(n_levels, period):
-    """The first version said "only every other column" for every count. That
-    is true at 26 levels and wrong at 13, 25, 27 and 22, where the stride has
-    a smaller common factor with the vector width."""
-    with pytest.warns(UserWarning) as rec:
-        warn_if_unaligned_levels(n_levels, np.float32, where="test")
-    assert f"one column in {period}" in str(rec[0].message), str(rec[0].message)
-
-
-def test_padding_step_uses_the_gcd_not_a_division():
-    """A 3-byte dtype has no level count that divides 16 evenly, so the step
-    is 16, not 16 // 3 == 5 -- five 3-byte levels are still unaligned."""
-    with pytest.warns(UserWarning) as rec:
-        warn_if_unaligned_levels(5, np.dtype("V3"), where="test")
-    assert "padded to 16" in str(rec[0].message), str(rec[0].message)
-
-
-def test_rule_uses_the_state_dtype_not_the_coordinate_dtype():
-    """A mixed-precision run can build a float64 coordinate over float32
-    state. The stride that matters is the state's, so leaving the dtype
-    unset must resolve it from the precision policy rather than silently
-    passing because the coordinate happens to be wider."""
-    from legoesm.core.precision import get_policy
-
-    storage = np.dtype(get_policy().storage)
-    n_levels = 26
-    unaligned = (storage.itemsize * n_levels) % 16 != 0
-    if unaligned:
-        with pytest.warns(UserWarning, match="column stride"):
-            warn_if_unaligned_levels(n_levels, where="test")
-    else:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            warn_if_unaligned_levels(n_levels, where="test")
+def test_not_extrapolated_to_other_precisions():
+    """The measurement is float32. A range whose cause is unknown cannot be
+    rescaled to another width without inventing data."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        warn_if_unaligned_levels(26, np.float64, where="test")
 
 
 def test_the_real_factory_warns_at_26_levels():
-    """The advisory has to fire from the call users actually make."""
     with pytest.warns(UserWarning, match="create_sigma_coordinate"):
         create_sigma_coordinate(26, dtype=np.float32)
 
 
-def test_the_real_factory_is_silent_at_28_levels():
+def test_the_real_factory_is_silent_at_32_levels():
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        create_sigma_coordinate(28, dtype=np.float32)
+        create_sigma_coordinate(32, dtype=np.float32)

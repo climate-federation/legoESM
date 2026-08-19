@@ -102,67 +102,52 @@ class SigmaCoordinate(NamedTuple):
         return self.dsigma * p_s[..., None]
 
 
-#: A column of state is contiguous in the vertical, so one cell's column is
-#: ``itemsize * n_levels`` bytes.  The GPU memory path wants that stride to be
-#: a multiple of 16 bytes, which is what lets the level dimension be read and
-#: written as 128-bit vector accesses; when it is not, only every other column
-#: starts on a vector boundary and the rest fall back.
-_LEVEL_ROW_ALIGN_BYTES = 16
+#: Level counts measured SLOW on this model, in float32, on one A100
+#: (2026-08-19, subdivision 7 = 163,842 cells, 60 timed steps per arm, all
+#: nine level counts inside ONE allocation so node state is held fixed).
+#: Cost per cell per level, picoseconds:
+#:
+#:     22  4915      24  4147      25  4224      26  4761
+#:     27  3861      28  4058      30  4592
+#:     32  1626      40  1657      52  1621      20  1544
+#:
+#: Everything from 22 to 30 costs about 4000; 32 and above costs about
+#: 1600. The step at 30 levels is 22.6 ms and at 32 it is 8.5 ms -- MORE
+#: work, a third of the time.
+_LEVELS_MEASURED_SLOW = range(21, 32)
 
 
 def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
-    """Warn when the level count makes each column's byte stride unaligned.
+    """Warn when the level count sits in a range measured to be slow.
 
-    MEASURED on one A100, icosahedral dynamical core, float32, 163,842 cells,
-    60 timed steps with arm spreads under 1% (2026-08-19).  Cost per cell per
-    level against the byte stride of one column:
+    MEASURED, one A100, float32, icosahedral dynamical core, 163,842 cells,
+    60 timed steps, arm spreads under 1%, every level count in a single
+    allocation. Level counts from 22 to 30 cost about 2.5 times as much per
+    level as 32 and above. Production runs 26.
 
-        levels 13 (52 B)  3.52     levels 20 ( 80 B)  1.54
-        levels 26 (104 B) 4.75     levels 32 (128 B)  1.62
-                                   levels 52 (208 B)  1.62
+    It is not confined to cache-resident problems: at 2,621,442 cells, about
+    273 MB per field against this GPU's 40 MB last-level cache, 26 levels
+    still costs 2.55 per cell per level against 1.55 at 32.
 
-    Every level count whose stride is a multiple of 16 bytes runs at about
-    1.6; the two that are not run at 3.5 and 4.8.  At 163,842 cells the step
-    is 20.2 ms at 26 levels and 8.5 ms at 32 -- MORE work, less time -- and
-    on the largest mesh tested 32 levels beat 26 by 25%.
+    THE MECHANISM IS NOT ESTABLISHED. An earlier version of this guard
+    asserted it was byte alignment of a cell's column -- 4 bytes times the
+    level count being a multiple of 16, the width of one vectorized load --
+    because the first five level counts measured fitted that rule exactly.
+    The finer scan REFUTED it: 24 and 28 levels have aligned strides of 96
+    and 112 bytes and are as slow as their unaligned neighbours, while 20
+    and 52 are fast with strides of 80 and 208. Cache straddle does not fit
+    either, since 40 and 52 levels hold a LARGER live set than 30 and run
+    fast. So this warning reports a measured range and does not name a
+    cause.
 
-    Two objections the measured set already answers.
+    Consequences of not knowing the cause, stated because they bound what
+    the advice is worth: the range is specific to this model, this GPU, this
+    compiler version and float32, and it may move under any of them. A
+    level count outside the range is not certified fast, only unmeasured.
 
-    Why 16 bytes and not 32 or 128: among the level counts measured, the
-    fast strides are 80, 128 and 208 bytes.  80 and 208 are NOT multiples
-    of 32 or of 128, so a rule with either period would predict them slow
-    and be wrong.  16 is the only period consistent with every sample.
-
-    Why the staggered array does not change the advice: the interface-level
-    arrays carry ``n_levels + 1``, so their stride is unaligned in EVERY
-    case measured -- 84, 108, 132 and 212 bytes at 20, 26, 32 and 52 levels
-    alike -- yet three of those four are fast.  Alignment of the
-    ``n_levels`` arrays is what separates fast from slow; the staggered
-    partner does not.  Aligning it instead would be the wrong target.
-
-    A warning rather than an error: an unaligned level count is a
-    performance cliff, not a wrong answer, and a deliberate choice (matching
-    another model's grid, a published configuration) has to stay possible.
-
-    Scope of the measurement: one A100, one XLA version, float32.  It is a
-    code-generation property, not a hardware constant, so it wants
-    revalidating on a compiler or architecture change.  It is NOT confined
-    to cache-resident problems: at the largest mesh tested, 2,621,442 cells
-    (about 273 MB per field, far past this GPU's 40 MB last-level cache),
-    26 levels still costs 2.55 per cell per level against 1.55 at 32.
-
-    What this CANNOT see: interface-level arrays carry ``n_levels + 1``, so
-    aligning the full-level arrays necessarily leaves them unaligned.  The
-    measurements say that does not matter for this model -- the interface
-    stride is unaligned in every case measured and three of the four are
-    fast -- but a model whose traffic is dominated by interface fields would
-    need the opposite advice, established by measurement rather than by
-    this rule.
-
-    ``dtype`` is the dtype the STATE arrays are stored in, which is what the
-    stride is made of -- not necessarily the coordinate's own dtype, which
-    may be higher precision in a mixed-precision run.  Left as ``None`` it
-    is resolved from the active precision policy.
+    ``dtype`` is the dtype the STATE arrays are stored in, resolved from the
+    active precision policy when omitted; the measurement is float32 and the
+    warning is suppressed for other widths rather than extrapolated.
 
     ``where`` names the coordinate being built so the message points at the
     call the user can change.
@@ -182,36 +167,27 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
         # construction; skip the advisory rather than raise from it.
         return
     n_levels = int(n_levels)
-    if itemsize <= 0 or n_levels <= 0:
+    if n_levels <= 0:
         return
-    row_bytes = itemsize * n_levels
-    if row_bytes % _LEVEL_ROW_ALIGN_BYTES == 0:
+    # The measurement is float32. Extrapolating a range whose CAUSE is
+    # unknown to another width would be inventing data.
+    if itemsize != 4:
         return
-    # Levels per aligned width. With a 3-byte dtype, 16 // itemsize would say
-    # 5 and 5*3 is still unaligned; the true step is 16 / gcd(16, itemsize).
-    step = _LEVEL_ROW_ALIGN_BYTES // math.gcd(_LEVEL_ROW_ALIGN_BYTES, itemsize)
-    padded = ((n_levels + step - 1) // step) * step
-    # How often a column DOES start on a vector boundary. At 26 float32
-    # levels the stride is 104 bytes and every second column is aligned; at
-    # 13 it is 52 bytes and only every fourth is. "Every other" is true for
-    # one case and wrong for the rest, so compute it.
-    period = _LEVEL_ROW_ALIGN_BYTES // math.gcd(row_bytes,
-                                                _LEVEL_ROW_ALIGN_BYTES)
+    if n_levels not in _LEVELS_MEASURED_SLOW:
+        return
     warnings.warn(
-        f"{where}: {n_levels} levels of {np.dtype(dtype).name} gives a "
-        f"{row_bytes}-byte column stride, which is not a multiple of "
-        f"{_LEVEL_ROW_ALIGN_BYTES} — the width of one vectorized load. Only "
-        f"one column in {period} then starts on a vector boundary and the "
-        f"rest fall back to scalar accesses, costing up to 3x per level on "
-        f"GPU (measured 20.2 ms/step at 26 levels against 8.5 ms at 32 on "
-        f"the same mesh, and 2.55 against 1.55 per cell per level at the "
-        f"largest mesh tested). KEEP your {n_levels} levels: the fix is to "
-        f"store the level dimension padded to {padded} and mask the padding, "
-        f"which changes no physics. Changing the level count itself changes "
-        f"the model and is only sensible if {n_levels} was arbitrary. Note "
-        f"this aligns the full-level arrays; the interface arrays carry one "
-        f"more level and stay unaligned, which the measurements say does not "
-        f"matter for this model.",
+        f"{where}: {n_levels} vertical levels sits in a range measured SLOW "
+        f"on this model — level counts from {_LEVELS_MEASURED_SLOW.start} to "
+        f"{_LEVELS_MEASURED_SLOW.stop - 1} cost about 2.5x as much per level "
+        f"as 32 and above. On one A100 with 163,842 cells the step is 20.3 "
+        f"ms at 26 levels and 8.5 ms at 32 — more work, less than half the "
+        f"time — and the same ratio holds at a mesh 16x larger. The cause is "
+        f"NOT established: byte alignment of the column stride was tested "
+        f"and refuted, and so was cache capacity. So treat this as a "
+        f"measured range, not a rule: if this level count is a physics "
+        f"requirement, keep it and expect the cost; if it is arbitrary, 32 "
+        f"or more was measured much cheaper. Re-measure before trusting "
+        f"either on different hardware or a different compiler.",
         stacklevel=3,
     )
 
