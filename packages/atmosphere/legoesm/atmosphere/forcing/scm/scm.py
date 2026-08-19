@@ -64,6 +64,7 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
     init_physics_state,
+    update_physics_state,
 )
 from legoesm.atmosphere.forcing.scm.scm_forcing import (
     SCMForcing,
@@ -283,17 +284,32 @@ def _microphysics_substepped_forward_euler(
         sigma_coord = get_sigma_coord()
 
         def substep(carry, _i):
-            sub_state, base_tend = carry
+            sub_state, base_tend, precip_sum = carry
             micro_tend = microphysics_fn(sub_state, grid, sigma_coord)
             tend = add_tendencies(base_tend, micro_tend)
             sub_state = _apply_tendencies(sub_state, tend, sub_dt)
-            return (sub_state, base_tend), None
+            # Surface precipitation is produced HERE, inside the substep scan,
+            # and the outer combined-physics accumulator never sees it on this
+            # lane -- it excludes microphysics by construction.  Without this
+            # the PhysicsState.sfc_precip carry stays zero forever and any
+            # consumer of it (the cold-pool gustiness term) is silently dead.
+            _p = getattr(micro_tend, "precip", None)
+            if _p is not None:
+                precip_sum = precip_sum + jnp.reshape(_p.data, (-1,))
+            return (sub_state, base_tend, precip_sum), None
 
-        (new_state, _), _ = jax.lax.scan(
+        ncol_flat = jnp.reshape(state.p_s.data, (-1,)).shape[0]
+        (new_state, _, precip_sum), _ = jax.lax.scan(
             substep,
-            (state, nonmicro_tend),
+            (state, nonmicro_tend,
+             jnp.zeros((ncol_flat,), dtype=state.p_s.data.dtype)),
             jnp.arange(n_substeps, dtype=jnp.int32),
         )
+        # Step-MEAN rate [kg/m^2/s]: each substep reports a rate, so the mean
+        # over substeps is the rate for the step -- not the sum, which would
+        # scale the carry by the substep count.
+        phys_out = update_physics_state(
+            phys_out, {"sfc_precip": precip_sum / n_substeps})
         return new_state, phys_out
 
     return step

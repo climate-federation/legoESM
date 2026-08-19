@@ -313,3 +313,25 @@ def test_existing_direct_constructors_still_work():
         col_index=jnp.arange(n, dtype=jnp.int32),
     )
     assert ps.sfc_precip is None
+
+
+def test_scm_substepped_microphysics_publishes_its_precipitation():
+    """The SCM runs microphysics inside its own substep scan, OUTSIDE the
+    combined-physics accumulator — so the precipitation has to be captured
+    there or the carry stays zero and the gust is silently dead.
+
+    This is the defect the calibration arms exposed: four values of the
+    coefficient spanning 8x gave byte-identical equilibria, which is only
+    possible if the term never fires.
+    """
+    import inspect
+
+    from legoesm.atmosphere.forcing.scm import scm as scm_mod
+
+    src = inspect.getsource(scm_mod._microphysics_substepped_forward_euler)
+    assert 'precip_sum + jnp.reshape' in src, (
+        "the substep scan no longer accumulates microphysics precipitation; "
+        "PhysicsState.sfc_precip would stay zero on the SCM lane")
+    assert '"sfc_precip": precip_sum / n_substeps' in src, (
+        "the carry is no longer the step-MEAN rate; summing over substeps "
+        "would scale it by the substep count")
