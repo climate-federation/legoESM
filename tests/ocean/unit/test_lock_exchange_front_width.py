@@ -66,3 +66,102 @@ def test_a_wider_front_is_never_sharper():
     grad = [np.max(np.abs(np.gradient(_profile(d, w), d))) for w in
             (1.0, 2.0, 4.0)]
     assert grad[0] > grad[1] > grad[2]
+
+
+# ---------------------------------------------------------------------------
+# The tests above exercise a MIRROR of the expression. These exercise the
+# shipped function, and the case that runs it. Each comes from a codex finding
+# on this PR.
+# ---------------------------------------------------------------------------
+
+from legoesm.ocean.experiments.lock_exchange import (          # noqa: E402
+    lock_exchange_warm_fraction)
+
+
+def test_the_shipped_function_reproduces_the_step_at_zero_width():
+    lon = np.linspace(-10.0, 10.0, 401)
+    f = lock_exchange_warm_fraction(lon, LockExchangeConfig())
+    assert np.array_equal(f, np.where(lon < 0.0, 0.0, 1.0))
+
+
+def test_the_petersen_channel_actually_contains_cold_water():
+    """The case that this PR reports as fixed.
+
+    Its domain runs 0 to 0.576 degrees east and the default front sits on the
+    prime meridian -- i.e. on the channel's WESTERN WALL. Measured: one column
+    of sixty-six was cold and the rest warm, so the arm was a uniform 30 degC
+    box. Every bound and mixing number it reported was about a gravity current
+    that did not exist.
+    """
+    from legoesm.grids.latlon import create_regional_latlon_grid
+
+    grid, _ = create_regional_latlon_grid(
+        n_lat=4, n_lon=64, lat_south=-0.018, lat_north=+0.018,
+        lon_west=0.0, lon_east=0.576)
+    lon = np.asarray(grid.lon) * 180.0 / np.pi
+
+    cfg = _matrix_case_config()
+    f = lock_exchange_warm_fraction(lon, cfg)
+    cold = int((f < 0.5).sum())
+    assert 0.3 * f.size < cold < 0.7 * f.size, (
+        f"the channel initialises with {cold} cold columns of {f.size}: the "
+        "front is not inside the domain, so this is not a lock exchange")
+
+
+def _matrix_case_config():
+    """The LockExchangeConfig the matrix builds for the Petersen channel."""
+    import sys
+    from pathlib import Path as _P
+
+    root = _P(__file__).resolve().parents[3]
+    sys.path.insert(0, str(root / "scripts" / "matrix"))
+    import run_ocean_test_matrix as mod
+
+    cases = [c for c in mod._build_test_matrix()
+             if c.case == "lock_exchange" and c.grid_type == "latlon_regional"]
+    assert cases, "the Petersen channel case is not in the matrix"
+    return mod._lock_exchange_config(cases[0])
+
+
+def test_the_case_config_carries_the_cases_own_front():
+    """A fresh default here is how the front ended up on the wall."""
+    cfg = _matrix_case_config()
+    assert cfg.front_longitude != LockExchangeConfig().front_longitude, (
+        "the matrix hands the initialiser a default config, so a case cannot "
+        "place the front inside its own domain")
+
+
+def test_both_interfaces_are_smoothed_on_a_full_longitude_circle():
+    """Cold on half a circle and warm on the other half has TWO joins.
+
+    Smoothing only the named one leaves the antipode at full contrast, so the
+    limiter still meets a 25 degC step and the option does not do what it
+    says.
+    """
+    lon = np.linspace(-180.0, 180.0, 721)
+    soft = lock_exchange_warm_fraction(
+        lon, LockExchangeConfig(front_width_deg=2.0))
+    hard = lock_exchange_warm_fraction(
+        lon, LockExchangeConfig(front_width_deg=0.0))
+    assert np.abs(np.diff(hard)).max() == pytest.approx(1.0)
+    assert np.abs(np.diff(soft)).max() < 0.35, (
+        "a full-contrast jump survives somewhere on the circle")
+
+
+def test_every_grid_starts_from_the_same_front():
+    """Three implementations of one profile is how they came to disagree."""
+    import ast
+    import inspect
+    import textwrap
+
+    from legoesm.ocean.dynamics import ocean_model_fesom
+
+    src = textwrap.dedent(
+        inspect.getsource(ocean_model_fesom.create_lock_exchange_state))
+    # The CALL, not the import: an import left behind while the body builds
+    # its own front would satisfy a substring check and prove nothing.
+    called = {n.func.id for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "lock_exchange_warm_fraction" in called, (
+        "the unstructured arm builds its own front, so a case asking for a "
+        "softened one gets a step here and a ramp everywhere else")

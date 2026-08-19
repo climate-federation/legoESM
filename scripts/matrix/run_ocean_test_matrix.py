@@ -452,6 +452,13 @@ def _build_test_matrix() -> list[TestCase]:
             "lat_north": +0.018,
             "lon_west": 0.0,
             "lon_east": 0.576,
+            # The lock is released at the CHANNEL MIDPOINT. The default front
+            # sits on the prime meridian, which on this domain is the western
+            # wall: measured, exactly ONE of the 66 columns (the wall column
+            # at -0.0045) was cold and the other 65 warm, so the arm was a
+            # uniform 30 degC box and the bounds and mixing gates certified a
+            # gravity current that never existed.
+            "front_longitude": 0.288,
             # Petersen geometry has dx ~ 1 km, sqrt(g*H) ~ 14 m/s, so the
             # default 300 s timestep violates CFL by ~4x and silently
             # damps the gravity current. Use 30 s to match Veros peer.
@@ -6334,7 +6341,25 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 # parcel height in a minimum-energy sorted state.
 # ===========================================================================
 
-def _init_lock_exchange(state, grid_type, grid, z_coord):
+def _lock_exchange_config(tc):
+    """The case's own ``LockExchangeConfig``, not a fresh default.
+
+    Front position and width are case geometry: the Petersen channel case
+    spans 0 to 0.576 degrees east, so the default front on the prime meridian
+    sits on its WESTERN WALL and the whole channel initialises warm -- no cold
+    water, no gravity current, and a bounded-advection gate that certifies a
+    uniform box.  Reading them from ``run_kwargs`` is what lets a case put the
+    front where its own domain needs it.
+    """
+    import dataclasses
+
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    names = {f.name for f in dataclasses.fields(LockExchangeConfig)}
+    kw = {k: v for k, v in (tc.run_kwargs or {}).items() if k in names}
+    return LockExchangeConfig(**kw)
+
+
+def _init_lock_exchange(state, grid_type, grid, z_coord, lx_config=None):
     """Initialize lock-exchange: cold dense west / warm light east.
 
     Following Petersen et al. (2015) Fig. 5:
@@ -6352,20 +6377,20 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
     from legoesm.core.field import Field
     from legoesm.ocean.experiments.lock_exchange import (
         LockExchangeConfig as _LXC0)
+    lx = _LXC0() if lx_config is None else lx_config
 
     # SINGLE SOURCE with the FESOM arm's IC and the T_min/T_max_front gates
     # (codex 2026-08-10: hardcoded 5/30 here would silently diverge from the
     # gates' LockExchangeConfig bounds on a config change).
-    T_cold = float(_LXC0().T_cold_C)   # degC (dense side, Petersen 2015)
-    T_warm = float(_LXC0().T_warm_C)   # degC (light side, Petersen 2015)
+    T_cold = float(lx.T_cold_C)        # degC (dense side, Petersen 2015)
+    T_warm = float(lx.T_warm_C)        # degC (light side, Petersen 2015)
 
     # _get_cell_latlon_rad returns RADIANS; LockExchangeConfig.front_longitude
     # is in DEGREES. Convert explicitly -- a radian/degree mix would move the
     # front by a factor of 57.
     lat, lon_rad = _get_cell_latlon_rad(grid_type, grid)
     lon = np.degrees(np.asarray(lon_rad))                       # degrees
-    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
-    lon_front = float(LockExchangeConfig().front_longitude)     # degrees
+    lon_front = float(lx.front_longitude)                       # degrees
     # Wrapping-aware "west of front", IDENTICAL to
     # lock_exchange._add_temperature_front, so every arm (including FESOM,
     # which is initialised through that helper) starts from the same state.
@@ -6373,7 +6398,13 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
     # a different initial condition from FESOM, and mis-classified points
     # across the dateline.
     dlon = (lon - lon_front + 180.0) % 360.0 - 180.0             # degrees
-    west_of_front = dlon < 0.0
+    # ONE profile for every arm, ramp included: this branch used its own hard
+    # step, so a case asking for a softened front got one on the FESOM arm and
+    # a full-contrast jump here.
+    from legoesm.ocean.experiments.lock_exchange import (
+        lock_exchange_warm_fraction)
+    warm_frac = lock_exchange_warm_fraction(lon, lx)
+    T_profile = T_cold + (T_warm - T_cold) * warm_frac
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
@@ -6382,7 +6413,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        T_field = np.where(west_of_front[..., None], T_cold, T_warm) * mask[..., None]
+        T_field = T_profile[..., None] * mask[..., None]
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
         return state._replace(T_hat=Field(new_T_hat))
 
@@ -6406,7 +6437,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
                 T_data[..., k] = T_front * mask
         else:
             for k in range(nlev):
-                T_data[..., k] = np.where(west_of_front, T_cold, T_warm) * mask
+                T_data[..., k] = T_profile * mask
         return state._replace(T=Field(jnp.array(T_data)))
 
 
@@ -7415,10 +7446,11 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         from legoesm.ocean.dynamics.ocean_model_fesom import (
             create_lock_exchange_state)
         from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
-        state = create_lock_exchange_state(grid.mesh, LockExchangeConfig())
+        state = create_lock_exchange_state(grid.mesh, _lock_exchange_config(tc))
     else:
         state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord,
+                                    lx_config=_lock_exchange_config(tc))
 
     # Compute initial PE (dynamic, blow-up detector) AND sorted RPE (the
     # actual spurious-mixing metric -- plain PE also moves through the
