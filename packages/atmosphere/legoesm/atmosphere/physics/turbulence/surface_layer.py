@@ -64,6 +64,12 @@ __physics_contract__ = {
 }
 
 
+# Numerical floor inside the wind-speed sqrt [m^2/s^2]; the same 1e-4 the two
+# bulk branches below already use, named so the gustiness scale factor and the
+# branches cannot drift apart.
+_WIND_SPEED_FLOOR_M2_S2 = 1e-4
+
+
 def compute_surface_fluxes(
     u: jax.Array,
     v: jax.Array,
@@ -73,6 +79,7 @@ def compute_surface_fluxes(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    sfc_precip: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
@@ -99,6 +106,12 @@ def compute_surface_fluxes(
     config : SurfaceLayerConfig
         Surface layer parameters.
 
+    sfc_precip : jax.Array or None
+        Surface precipitation rate [kg/m^2/s], shape (ncol,), for the cold-pool
+        gustiness term.  ``None`` (or a zero
+        ``config.convective_gustiness_coeff``) leaves the effective wind
+        untouched, so every existing caller is byte-identical.
+
     Returns
     -------
     tau_x : jax.Array
@@ -113,6 +126,28 @@ def compute_surface_fluxes(
         Friction velocity [m/s], shape (ncol,).
     """
     validate_bulk_scheme(config.bulk_scheme)
+    # --- Cold-pool gustiness ------------------------------------------------
+    # Static Python gate on a compile-time config value (feature gating, not
+    # data-dependent selection), so the term costs nothing and changes nothing
+    # when off.  The gust inflates the wind SPEED that drives the exchange, and
+    # is applied by scaling (u, v) so that the stress DIRECTION is unchanged
+    # while |U| carries the gust -- the same treatment the coupler's
+    # apply_gustiness call gives it.  Applied here, before the branch, so the
+    # constant-coefficient and MOST paths cannot diverge.
+    if config.convective_gustiness_coeff != 0.0 and sfc_precip is not None:
+        from legoesm.core.bulk_flux import convective_gust_wind
+
+        u_gust = convective_gust_wind(
+            sfc_precip, config.convective_gustiness_coeff,
+            cap=config.convective_gustiness_cap,
+        )
+        speed = jnp.sqrt(u ** 2 + v ** 2 + _WIND_SPEED_FLOOR_M2_S2)
+        # sqrt(|U|^2 + u_gust^2) / |U| -- the quadrature combination of
+        # apply_gustiness, re-expressed as a scale factor so the two wind
+        # COMPONENTS (and hence the stress direction) stay consistent.
+        scale = jnp.sqrt(speed ** 2 + u_gust ** 2) / speed
+        u = u * scale
+        v = v * scale
     # Route every stability-dependent bulk scheme — the fixed-roughness
     # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
     # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
@@ -279,6 +314,10 @@ def _single_tile_flux(
     routines (no re-derived flux numerics).
     """
     validate_bulk_scheme(config.bulk_scheme)
+    # NOTE: the cold-pool gustiness term in ``compute_surface_fluxes`` is NOT
+    # applied on the tiled path -- it would need the surface precipitation
+    # threaded through ``compute_tiled_surface_fluxes``, which is a separate
+    # consumer (land/ocean tiling) and a separate change.
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         return compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,

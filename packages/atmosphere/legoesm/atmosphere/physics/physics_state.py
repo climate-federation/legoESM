@@ -118,6 +118,14 @@ class PhysicsState(NamedTuple):
         (like :attr:`gwd_spectrum`).  Distinct from :attr:`tke` so the diagnostic
         phase-1 CLUBB (``tke``) and the prognostic CLUBB (``clubb_moments``)
         cannot cross-feed on a restart scheme switch.
+    sfc_precip : jax.Array, shape (ncol,)
+        Surface precipitation rate [kg/m^2/s] from the PREVIOUS step's
+        microphysics, read by the turbulence surface-flux call for the
+        cold-pool gustiness term.  Zero until the first microphysics step; the
+        one-step lag is deliberate (process-split physics hands turbulence the
+        state at the START of the step, so a same-step precip is not
+        available) and is physically the right sense anyway -- cold pools
+        outlive the rain that made them.
     rad_heating : jax.Array, shape (ncol, nlev)
         Cached radiative heating tendency ``dT/dt`` [K/s] from the most
         recent full radiation solve.  Used by the radiation sub-cycle: on
@@ -153,6 +161,7 @@ class PhysicsState(NamedTuple):
     qke: jnp.ndarray
     clubb_moments: jnp.ndarray
     rad_heating: jnp.ndarray
+    sfc_precip: jnp.ndarray
     # GLOBAL column ids, shape (ncol,) int32 — the decomposition-invariant
     # identity for per-column stochastic draws (Bechtold AR1 folds the
     # per-step sub-key with each column's GLOBAL id).  Sharding-aware by
@@ -340,6 +349,11 @@ def init_physics_state(
     # always a radiation step) before any held step reads it.
     rad_heating = jnp.zeros((ncol, nlev), dtype=dtype)
 
+    # --- Surface precipitation hand-off (microphysics -> turbulence) ---
+    # Zeros before the first microphysics step; the cold-pool gustiness term
+    # reads it, and is itself off by default.
+    sfc_precip = jnp.zeros((ncol,), dtype=dtype)
+
     # --- Prognostic aerosol number (opt-in tracer) ---
     # Always materialised as zeros so the pytree is uniform and existing runs
     # are byte-identical; only evolved when the prognostic-aerosol option is on.
@@ -360,6 +374,7 @@ def init_physics_state(
         qke=qke,
         clubb_moments=clubb_moments,
         rad_heating=rad_heating,
+        sfc_precip=sfc_precip,
         col_index=jnp.arange(ncol, dtype=jnp.int32),
         aerosol_number=aerosol_number,
         cloud_fraction=cloud_fraction,
@@ -413,6 +428,7 @@ def update_physics_state(phys_state, updates):
         qke=updates.get("qke", phys_state.qke),
         clubb_moments=updates.get("clubb_moments", phys_state.clubb_moments),
         rad_heating=updates.get("rad_heating", phys_state.rad_heating),
+        sfc_precip=updates.get("sfc_precip", phys_state.sfc_precip),
         col_index=phys_state.col_index,   # constant identity, never updated
         aerosol_number=updates.get(
             "aerosol_number", phys_state.aerosol_number

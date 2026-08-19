@@ -152,6 +152,8 @@ __param_spec__ = {
             "most_stable_beta": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Dyer (1974) MOST stable-branch linear stability-function coefficient beta (psi=-beta*zeta); only used by the dyer1974 stability_scheme of a stability-dependent bulk_scheme", "shape": None},
             "z0h_z0_ratio": {"units": "1", "bounds": (0.01, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "roughness", "reference": "Garratt (1992) thermal/momentum roughness ratio z0h/z0", "shape": None},
             "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
+            "convective_gustiness_coeff": {"units": "m s-1", "bounds": (0.0, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "cold-pool gust wind at 1 mm/day of surface precipitation; Redelsperger, Guichard & Mondon (2000) mesoscale enhancement of surface fluxes. Default 0.0 = off (on the bound), so it is a closure knob that must be enabled before it is tuned", "shape": None},
+            "convective_gustiness_cap": {"units": "m s-1", "bounds": (0.0, 15.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "upper bound breaking the gust-flux-convection feedback; a stability guard, not a physical parameter", "shape": None},
         },
     },
     "TKEConfig": {
@@ -268,6 +270,21 @@ class SurfaceLayerConfig(NamedTuple):
     # Explicit 0.0 disables; explicit value overrides for any MOST scheme.
     # Annotated ``float | None`` => not spec-eligible (see __param_spec__ above).
     gustiness_w_zi: float | None = None
+    # --- Cold-pool (precipitation-driven) gustiness -------------------------
+    # u_gust = coeff * (P/1 mm-day)^(1/3), combined in quadrature with the
+    # resolved wind (core.bulk_flux.convective_gust_wind).  Represents the
+    # evaporatively-cooled downdraft outflow that carries the air-sea flux in a
+    # light-wind convective regime, which the COARE w* term above CANNOT: w*
+    # scales with the surface buoyancy flux, and that collapses in exactly the
+    # warm, moist, near-neutral state the term exists to break (measured, SCM
+    # RCE: E 0.87 with COARE gustiness vs 2.73 in a CRM with no mean wind).
+    # 0.0 (default) = OFF and byte-identical to every shipped run; unlike
+    # gustiness_w_zi this applies to the CONSTANT-coefficient bulk path too,
+    # since it does not need MOST.
+    convective_gustiness_coeff: float = 0.0
+    # Upper bound on the cold-pool gust [m/s]; 0.0 = uncapped.  Breaks the
+    # gust -> flux -> convection -> precipitation -> gust loop.
+    convective_gustiness_cap: float = 0.0
     # Thermodynamic constants set converting the MOST scales into fluxes
     # (compute_most_fluxes, #762): "legoesm" (default) = constant L_v / dry
     # c_pd; "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent

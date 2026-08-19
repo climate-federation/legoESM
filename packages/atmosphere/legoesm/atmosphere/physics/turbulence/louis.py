@@ -183,6 +183,7 @@ def louis_turbulence(
     config: LouisConfig,
     surface_flux: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
     | None = None,
+    sfc_precip: jax.Array | None = None,
 ) -> TurbulenceOutput:
     """Compute turbulence tendencies using Louis (1979) stability functions.
 
@@ -346,6 +347,7 @@ def louis_turbulence(
         tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho[:, -1], config.surface,
+            sfc_precip=sfc_precip,
         )
 
     sflx_u = tau_x

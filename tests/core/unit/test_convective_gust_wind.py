@@ -102,3 +102,90 @@ def test_combines_in_quadrature_never_linearly():
     eff = float(apply_gustiness(jnp.asarray(0.5), jnp.asarray(0.0), gust))
     assert eff == pytest.approx(float(np.sqrt(0.25 + gust ** 2)), rel=1e-6)
     assert eff < 0.5 + gust
+
+
+# --- Wiring: the term must be invisible until it is switched on -------------
+
+def test_surface_fluxes_unchanged_when_the_term_is_off():
+    """Default config + a precipitating column must be BYTE-IDENTICAL.
+
+    This is the claim that lets the feature ship dark: every existing run keeps
+    its numbers because the gate is a static Python branch on coeff == 0.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    n = 4
+    u = jnp.full((n,), 0.5); v = jnp.zeros((n,))
+    T = jnp.full((n,), 298.0); q = jnp.full((n,), 0.016)
+    T_s = jnp.full((n,), 300.0); q_s = jnp.full((n,), 0.02)
+    rho = jnp.full((n,), 1.15)
+    rain = _rates([0.0, 1.0, 5.0, 20.0])
+    cfg = SurfaceLayerConfig()
+    assert cfg.convective_gustiness_coeff == 0.0, "must ship OFF"
+
+    base = compute_surface_fluxes(u, v, T, q, T_s, q_s, rho, cfg)
+    with_p = compute_surface_fluxes(u, v, T, q, T_s, q_s, rho, cfg,
+                                    sfc_precip=rain)
+    for a, b in zip(base, with_p):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_enabling_the_term_raises_the_latent_flux_with_rain():
+    """The whole point: rain must strengthen evaporation, monotonically."""
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    n = 3
+    u = jnp.full((n,), 0.5); v = jnp.zeros((n,))
+    T = jnp.full((n,), 298.0); q = jnp.full((n,), 0.016)
+    T_s = jnp.full((n,), 300.0); q_s = jnp.full((n,), 0.02)
+    rho = jnp.full((n,), 1.15)
+    rain = _rates([0.0, 2.7, 20.0])
+    cfg = SurfaceLayerConfig(convective_gustiness_coeff=2.0)
+
+    _tx, _ty, _sh, lh, _us = compute_surface_fluxes(
+        u, v, T, q, T_s, q_s, rho, cfg, sfc_precip=rain)
+    lh = np.asarray(lh)
+    assert lh[0] < lh[1] < lh[2], f"latent flux not monotone in rain: {lh}"
+    # The dry column must equal the no-gust answer exactly.
+    dry = compute_surface_fluxes(u, v, T, q, T_s, q_s, rho,
+                                 SurfaceLayerConfig())[3]
+    assert lh[0] == pytest.approx(float(np.asarray(dry)[0]), rel=1e-12)
+
+
+def test_the_cap_is_honoured_through_the_flux_path():
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    n = 1
+    args = (jnp.full((n,), 0.5), jnp.zeros((n,)), jnp.full((n,), 298.0),
+            jnp.full((n,), 0.016), jnp.full((n,), 300.0), jnp.full((n,), 0.02),
+            jnp.full((n,), 1.15))
+    torrential = _rates([5_000.0])
+    uncapped = compute_surface_fluxes(
+        *args, SurfaceLayerConfig(convective_gustiness_coeff=2.0),
+        sfc_precip=torrential)[3]
+    capped = compute_surface_fluxes(
+        *args, SurfaceLayerConfig(convective_gustiness_coeff=2.0,
+                                  convective_gustiness_cap=5.0),
+        sfc_precip=torrential)[3]
+    assert float(np.asarray(capped)[0]) < float(np.asarray(uncapped)[0])
+
+
+def test_physics_state_carries_the_precip_slot():
+    """The hand-off slot must exist and start at zero, or the gust silently
+    reads nothing for the whole run."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+
+    ps = init_physics_state(ncol=6, nlev=10, physics_config=PhysicsConfig())
+    assert hasattr(ps, "sfc_precip"), "PhysicsState lost the hand-off slot"
+    assert ps.sfc_precip.shape == (6,)
+    assert float(jnp.max(jnp.abs(ps.sfc_precip))) == 0.0

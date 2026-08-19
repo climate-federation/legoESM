@@ -665,6 +665,21 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             tracer_tendencies=tracer_tends_out,
         )
 
+    def _store_sfc_precip(phys_updates, precip_accum):
+        """Hand this step's surface precipitation to the NEXT step's turbulence.
+
+        The cold-pool gustiness term (SurfaceLayerConfig.
+        convective_gustiness_coeff, off by default) reads it from PhysicsState.
+        Flattened to the canonical column shape (ncol,) for the same reason
+        rad_heating is: the native horizontal shape differs between models and
+        would flip the lax.scan carry type after step 0.  A step with no
+        precipitating module leaves the carry untouched rather than zeroing it,
+        so a radiation-only sub-step does not erase the cold pools.
+        """
+        if precip_accum is None:
+            return
+        phys_updates["sfc_precip"] = jnp.reshape(precip_accum, (-1,))
+
     def _attach_sfc_precip(combined, first, precip_accum):
         """Carry surface precip [kg/m^2/s] on the combined tendency (dropped by
         _build_combined) so the lean MPAS loop can export it. No-op / byte-
@@ -782,6 +797,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
         if _led is not None:
             combined = combined._replace(ledger_rows=_led)
+        _store_sfc_precip(phys_updates, precip_accum)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 

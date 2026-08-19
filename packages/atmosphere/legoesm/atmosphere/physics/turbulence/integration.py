@@ -219,6 +219,25 @@ def turbulence_carry_field(scheme_name: str, scheme_config) -> str:
     return "tke"
 
 
+def _read_sfc_precip(phys_state, scheme_name, scheme_config, ncol, dtype):
+    """Surface precipitation for the cold-pool gustiness term, or ``None``.
+
+    Returns ``None`` unless the active scheme actually consumes it AND the term
+    is enabled, so a scheme without the ``sfc_precip`` keyword is never handed
+    one and every existing run keeps its exact call signature.
+    """
+    if scheme_name != "louis":
+        return None
+    surface = getattr(scheme_config, "surface", None)
+    if surface is None or getattr(
+            surface, "convective_gustiness_coeff", 0.0) == 0.0:
+        return None
+    stored = getattr(phys_state, "sfc_precip", None) if phys_state else None
+    if stored is None:
+        return jnp.zeros((ncol,), dtype=dtype)
+    return jnp.reshape(stored, (-1,))[:ncol].astype(dtype)
+
+
 def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     """Read (or freshly seed) the turbulence carry from ``phys_state``.
 
@@ -496,10 +515,14 @@ def _make_hydrostatic_turbulence(
             # No land-flux hand-over on this lane: the structured-grid driver
             # has no forcing channel carrying the surface scheme's own
             # turbulent fluxes, so the scheme computes its own from T_sfc/q_sfc.
+            _gust_precip = _read_sfc_precip(
+                phys_state, scheme_name, scheme_config, ncol, _state_dtype)
+            _gust_kw = ({} if _gust_precip is None
+                        else {"sfc_precip": _gust_precip})
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
+                T_sfc, q_sfc, rho, dt, scheme_config, **_gust_kw,
             )
 
         du_dt = turb_out.du_dt.reshape(shape_3d)
