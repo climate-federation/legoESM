@@ -27,7 +27,18 @@ def driver() -> str:
 
 def test_driver_exists_and_is_a_batch_script(driver):
     assert driver.startswith("#!/bin/bash")
-    assert "--array=0-8" in driver, "the submit line names the case count"
+    # The documented array bound must match the case list. A literal here went
+    # stale the moment a tenth case was added, and a bound that is short by one
+    # silently never runs the last case -- the array task simply does not
+    # exist, so nothing reports a gap.
+    import re
+
+    cases = re.search(r"^CASES=\((.*?)\)$", driver, re.S | re.M)
+    assert cases, "no CASES array in the driver"
+    n = len([c for c in cases.group(1).replace("\\\n", " ").split() if c])
+    assert f"--array=0-{n - 1}" in driver, (
+        f"the submit line does not cover all {n} cases; an array bound short "
+        f"of the list means the last case never runs and nothing says so")
 
 
 def test_repo_is_derived_from_the_script_location(driver):
