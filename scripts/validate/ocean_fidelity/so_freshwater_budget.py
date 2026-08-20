@@ -72,6 +72,32 @@ def _mesh_area(mesh_path):
     return area, lat
 
 
+def align_output_to_mesh(lat_mesh, lat_out):
+    """Index offset mapping a NEMO OUTPUT grid onto the mesh-mask grid.
+
+    Returns ``(slice_j, slice_i)`` such that ``mesh_field[slice_j, slice_i]``
+    lines up with an output-grid field. XIOS drops the halo, so an eORCA1
+    output is (331, 360) where the mesh is (332, 362); ``nav_lat`` carries -1
+    fill in fully-masked rows, so the match is solved on VALID cells only and
+    must be EXACT -- a near miss is refused rather than silently mis-weighted.
+
+    Shared by every probe that compares a model field against a NEMO output
+    (the freshwater budget and the viscosity-masking probe), so the two cannot
+    disagree about the alignment.
+    """
+    ny, nx = lat_out.shape
+    valid = np.isfinite(lat_out) & (lat_out != -1.0)
+    for j0 in range(lat_mesh.shape[0] - ny + 1):
+        for i0 in range(lat_mesh.shape[1] - nx + 1):
+            sub = lat_mesh[j0:j0 + ny, i0:i0 + nx]
+            if np.abs(sub - lat_out)[valid].max() == 0.0:
+                return slice(j0, j0 + ny), slice(i0, i0 + nx)
+    raise SystemExit(
+        f"cannot align NEMO output grid {lat_out.shape} to mesh "
+        f"{lat_mesh.shape}: no offset reproduces the output latitudes "
+        "exactly. Refusing to compare with a guessed alignment.")
+
+
 def _nemo_cell_area(mesh_path, lat_n):
     """Cell area on NEMO's OUTPUT grid, aligned by matching latitudes.
 
@@ -83,16 +109,8 @@ def _nemo_cell_area(mesh_path, lat_n):
     silently mis-weighted.
     """
     area, lat_m = _mesh_area(mesh_path)
-    ny, nx = lat_n.shape
-    valid = np.isfinite(lat_n) & (lat_n != -1.0)
-    for j0 in range(lat_m.shape[0] - ny + 1):
-        for i0 in range(lat_m.shape[1] - nx + 1):
-            if np.abs(lat_m[j0:j0 + ny, i0:i0 + nx] - lat_n)[valid].max() == 0.0:
-                return area[j0:j0 + ny, i0:i0 + nx]
-    raise SystemExit(
-        f"cannot align NEMO output grid {lat_n.shape} to mesh {lat_m.shape}: "
-        "no offset reproduces the output latitudes exactly. Refusing to "
-        "area-weight with a guessed alignment.")
+    sj, si = align_output_to_mesh(lat_m, lat_n)
+    return area[sj, si]
 
 
 def _band_means(field, lat, wgt, label, scale=1.0):

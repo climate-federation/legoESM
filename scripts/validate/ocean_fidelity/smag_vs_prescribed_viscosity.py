@@ -105,11 +105,30 @@ def main() -> int:
     else:
         raise SystemExit("pass --visc-file or --A-h-uniform")
 
-    if pres.shape != A_smag.shape:
-        raise SystemExit(f"prescribed field {pres.shape} != model grid "
-                         f"{A_smag.shape}; refusing to compare")
-
     area = e1 * e2
+    if pres.shape != A_smag.shape:
+        # NEMO's prescribed field is on the OUTPUT grid (halo dropped), the
+        # model is on the mesh grid. Reuse the ONE shared aligner so this
+        # probe and the freshwater budget cannot disagree about the offset.
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "so_freshwater_budget",
+            Path(__file__).resolve().parent / "so_freshwater_budget.py")
+        _m = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_m)
+        dv = nc.Dataset(a.visc_file)
+        try:
+            lat_out = np.asarray(dv["nav_lat"][:], dtype=np.float64)
+        finally:
+            dv.close()
+        sj, si = _m.align_output_to_mesh(lat, lat_out)
+        print(f"[align] NEMO field {pres.shape} -> mesh slice "
+              f"[{sj.start}:{sj.stop}, {si.start}:{si.stop}] (exact latitude "
+              "match on valid cells)")
+        A_smag = A_smag[sj, si]
+        lat = lat[sj, si]
+        land = land[sj, si]
+        area = area[sj, si]
     wet = (land > 0.5) & np.isfinite(A_smag) & np.isfinite(pres) & (pres > 0)
     print(f"A_smag from the model operator (C_smag={a.C_smag}), level "
           f"{a.level}, vs prescribed {label}\n")
