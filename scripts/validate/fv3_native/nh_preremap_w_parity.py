@@ -172,6 +172,25 @@ def main(argv=None):
             "comparison below would be the full-step one wearing a "
             "different name.")
 
+    # CONTROL 4: IS THE NEW BINARY THE CERTIFIED PROGRAM? Nothing
+    # compared the instrumented run's OWN restart to the certified
+    # restart, so a build/flag/deck drift would have been invisible and
+    # the ratio would be dividing readings from two different oracle
+    # programs (codex MAJOR / GLM MAJOR-1, jobs 9448127 and 9448128).
+    instr_1 = load_oracle(args.wdump, nh=True)
+    worst_auth = 0.0
+    for t in range(6):
+        worst_auth = max(worst_auth, rel(instr_1[t]["w"], orc_1[t]["w"]))
+    print(f"\ninstrumented-vs-certified restart (same tile, no map): "
+          f"worst w rel {worst_auth:.4e}")
+    if worst_auth > 1.0e-12:
+        raise SystemExit(
+            f"INSTRUMENT CONTROL FAILED: the instrumented binary's own "
+            f"restart differs from the certified one at {worst_auth:.4e}. "
+            f"It is not running the certified program, so its pre-remap "
+            f"dump cannot be compared against numbers measured with the "
+            f"certified binary.")
+
     # THE MEASUREMENT.
     print("\nPORT vs ORACLE, w BEFORE the remap:")
     worst_pre, worst_face = 0.0, None
@@ -190,14 +209,49 @@ def main(argv=None):
         if r > worst_pre:
             worst_pre, worst_face = r, f"face{pf + 1}->tile{ot + 1}"
         print(f"  face {pf + 1} -> tile {ot + 1}:  rel={r:.4e}")
-    print(f"\nWORST pre-remap w rel: {worst_pre:.4e} at {worst_face}")
-    print(f"full-step  w rel:      {worst_step:.4e}")
-    if worst_step > 0:
-        print(f"ratio pre/full:        {worst_pre / worst_step:.3f}")
-    print("\nVERDICT: " + (
-        "the gap is ALREADY THERE before the remap -> ACOUSTIC LOOP"
-        if worst_pre > 0.5 * worst_step else
+    # THE COMPARISON THAT CARRIES THE CLAIM: same k level, same
+    # denominator. rel() defaults its scale to max(peaks) PER CALL, so
+    # a pre-remap number taken on level 0 alone and a full-step number
+    # taken over all k have DIFFERENT denominators -- and if the column
+    # peak is ~1.42x the top-level peak, identical absolute errors
+    # produce exactly the ratio the first version reported as a physical
+    # result (GLM MAJOR-A, job 9448128). Absolute differences and scales
+    # are printed too, so the reader can see which is which.
+    print("\nSAME DOMAIN (level 0 only), SAME SCALE:")
+    worst_pre0 = worst_post0 = 0.0
+    for pf in range(6):
+        ot = perm[pf]
+        transposed, nm, _su, _sv = meta[pf][ot]
+        d = read_dump(args.wdump, 1, "w", ot + 1)
+        off = (d.shape[1] - N) // 2
+        ow_pre = oracle_ij(d[:, off:off + N, off:off + N], transposed)
+        pw_pre = DIHEDRAL[nm](pre[pf]["w"][cs, cs, :1])
+        pairs, _ws = apply_map(p_1[pf], orc_1[ot], meta[pf][ot])
+        pw_post, ow_post = (x[:, :, :1] for x in pairs["w"])
+        # ONE scale for all four fields, so the two rels are comparable
+        sc = max(float(np.abs(x).max())
+                 for x in (pw_pre, ow_pre, pw_post, ow_post))
+        r_pre = float(np.abs(pw_pre - ow_pre).max()) / sc
+        r_post = float(np.abs(pw_post - ow_post).max()) / sc
+        worst_pre0 = max(worst_pre0, r_pre)
+        worst_post0 = max(worst_post0, r_post)
+        print(f"  face {pf + 1} -> tile {ot + 1}:  pre={r_pre:.4e}  "
+              f"post={r_post:.4e}  |d|pre={np.abs(pw_pre - ow_pre).max():.4e}"
+              f"  |d|post={np.abs(pw_post - ow_post).max():.4e}  "
+              f"scale={sc:.4e}")
+
+    print(f"\nlevel-0 pre-remap  w rel: {worst_pre0:.4e}")
+    print(f"level-0 full-step  w rel: {worst_post0:.4e}")
+    print(f"(mixed-domain numbers, NOT comparable: pre {worst_pre:.4e} "
+          f"over level 0, full {worst_step:.4e} over all k)")
+    print("\nVERDICT (level 0, one scale): " + (
+        "the gap is ALREADY THERE when dyn_core returns"
+        if worst_pre0 > 0.5 * worst_post0 else
         "the gap is NOT there before the remap -> THE REMAP (kord_wz)"))
+    print("SCOPE, stated: this is the WORST error's level (k=0) only. It "
+          "does NOT exonerate the remap -- the remap may contribute at "
+          "other levels, or cancel against the acoustic error here -- "
+          "and it does not say where in the column the damage is born.")
     return 0
 
 

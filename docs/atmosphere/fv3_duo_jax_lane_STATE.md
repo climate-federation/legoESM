@@ -541,7 +541,45 @@ claims BITWISE parity with a sequential NumPy loop — unroll over the
 static trip count there. Under jit everything is compiled anyway and
 only the ~1e-14 parity contract holds.
 
-## ★ THE NH GAP IS IN THE ACOUSTIC LOOP, NOT THE REMAP (2026-08-20)
+## ★ THE NH GAP IS ALREADY PRESENT PRE-REMAP (2026-08-20)
+
+### RETRACTED, same day: "the remap is exonerated"
+
+Both reviewers (jobs 9448127, 9448128) rejected three of the four
+claims I published, and they were right. What SURVIVES is the
+direction: the worst error exists before the remap. What does NOT:
+
+* **"the remap is exonerated"** -- unsupported. The remap may
+  contribute at levels the dump does not cover, or add an error of
+  OPPOSITE sign at the same cells, in which case it is a second defect
+  partially masking the first rather than innocent.
+* **"the remap slightly reduces it"** -- the 1.418 ratio has at least
+  four readings and none were excluded. The decisive one: `rel()`
+  defaults its scale to `max(peaks)` PER CALL, and the pre-remap number
+  was taken on level 0 while the full-step number was taken over all k.
+  If the column peak is ~1.42x the top-level peak, IDENTICAL ABSOLUTE
+  ERRORS produce exactly the ratio I reported as physics. Different
+  domains, different denominators.
+* **field-wide scope** -- one level licences a statement about the
+  WORST error's level, not about the field.
+
+GLM also bounded the margin: control 3 permits an instrumented-vs-
+certified drift of ~5-6e-4 relative, against a measured 9.4e-4 signal
+and a 3.3e-4 threshold, so the worst-case margin was ~15%, not the
+comfortable 1.42x the output implied.
+
+THE PROBE IS FIXED rather than the claim merely softened: it now
+compares level 0 against level 0 with ONE shared scale, prints the
+absolute differences and the scale beside every ratio, and adds a
+FOURTH control -- the instrumented binary's own restart against the
+certified restart -- because nothing previously authenticated the new
+build as the certified program, so the ratio was dividing readings from
+two different oracle binaries.
+
+Re-run pending; the numbers below are from the SUPERSEDED mixed-domain
+comparison and are kept only to show what was retracted.
+
+## ★ (SUPERSEDED) the first, mixed-domain reading (2026-08-20)
 
 Open since 2026-08-19 and now answered. The named discriminator ran
 (`scripts/validate/fv3_native/nh_preremap_w_parity.py`, job 9448074,
