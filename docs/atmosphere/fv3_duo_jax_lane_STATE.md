@@ -805,6 +805,35 @@ in the namelist). Both were shown to FIRE -- the dry deck is refused by
 name. `do_strat_HS_forcing` is deliberately NOT in the switch list, for
 the reason above; re-check `fv_phys.F90:533/:539` before changing that.
 
+### OPEN: one gate XLA will not compile (2026-08-20)
+
+``test_nh_moist_pkz_is_recomputed_not_trusted[2]`` -- the k_split = 2
+arm of the pkz-substitution gate -- dies in XLA with ``LLVM compilation
+error: Cannot allocate memory`` after a 3m27s ``jit_scan`` compile
+inside ``sim1_solver``. It is SKIPPED with that reason, not deleted.
+
+BOTH easy explanations were tested and REFUTED, so do not re-run them:
+
+* job 9443826 -- the same case ALONE at ``--mem=600G``: same failure.
+  Not the job's memory limit. (I had called it one before testing it;
+  the test refuted me.)
+* job 9443895 -- ``[2]`` alone in a FRESH process at 400G: same
+  failure. Not code memory accumulated across the module's other
+  compiled graphs, and not the ``[1]`` parametrization running first.
+
+THE MODEL CONFIGURATION IS NOT IN DOUBT. Moist NH at k_split = 2 runs
+and is asserted by ``test_moist_parity_against_the_spec[False-2]``,
+which PASSES in the same suite (job 9442759: 309 passed, this one
+failure). The blowup is in eagerly-executed ``lax.scan`` compilation,
+in a path the moist work does not touch.
+
+What is actually lost is narrow and worth stating: GLM's k_split > 1
+question for THIS gate -- whether any consumer of the CALLER's pkz sits
+on a non-last-step path. The parity gate cannot answer it, because both
+lanes would consume a stale pkz alike. Closing it needs either a
+cheaper NH probe than a full second step, or the scan compile
+understood.
+
 ### What is still NOT certified
 
 The NON-hydrostatic moist arm. There is no NH moist deck in the pinned
