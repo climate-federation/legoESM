@@ -451,26 +451,49 @@ def energy_fixer_zsum0_hydrostatic(pkz, delp, pk, *, ptop: float,
 
 
 def energy_fixer_dtmp(te0_faces, te_faces, zsum0_faces, area_faces,
-                      *, consv: float, n: int, ng: int) -> float:
+                      *, consv: float, n: int, ng: int,
+                      returns_kappa: bool = False):
     """``dtmp`` (:708-714), the one number the fixer reduces to.
 
     ``g_sum(..., mode=0, reproduce=.true.)`` is an AREA-WEIGHTED SUM
     (fv_grid_utils.F90:2946-2996; mode 1 would divide by the global
     area, and mode 0 does not), so the global-area normalisation cancels
-    in this ratio and only the weighting matters.  The oracle's
-    BITWISE_EFP_SUM is a fixed-point accumulation for cross-decomposition
-    reproducibility; a float64 sum differs from it at ~1e-16 relative,
-    which reaches ``pt`` as ``dtmp/cp*pkz`` on a correction that is
-    itself ~4e-6 K -- far under the 1.1866e-09 relative gate.
+    in this ratio and only the weighting matters.
+
+    THE NUMERATOR CANCELS, AND THE FIRST VERSION OF THIS DOCSTRING GOT
+    THE ERROR ANALYSIS WRONG (GLM MAJOR, job 9446300). It said a float64
+    sum differs from the oracle's BITWISE_EFP_SUM "at ~1e-16 relative".
+    That bound is relative to ``sum |te0-te|*a``, NOT to the cancelling
+    ``|sum (te0-te)*a|`` that actually divides into ``dtmp`` -- the
+    cancellation amplifies it by the condition number
+
+        kappa = sum |te0-te|*a / |sum (te0-te)*a|
+
+    so the honest statement is ``~1e-16 * kappa``, and kappa is a
+    property of the state, not a constant. ``returns_kappa=True``
+    reports it alongside dtmp so the claim is measured rather than
+    asserted; ``scripts/validate/fv3_native/consv_te_conditioning.py``
+    is the committed probe that prints it and re-does both sums with
+    ``math.fsum`` for comparison.
+
+    What IS established: on the certified deck the gate passes at
+    1.1866e-09 with the response at 1.347e-08. That is a measurement on
+    one state, not a bound for every state.
     """
     ia = ng
-    num = den = 0.0
+    num = den = absnum = 0.0
     for te0, te, z0, ar in zip(te0_faces, te_faces, zsum0_faces,
                                area_faces):
         a = ar[ia:ia + n, ia:ia + n]
-        num += float(np.sum((te0 - te) * a))     # :690, te0_2d - te_2d
+        d = (te0 - te) * a                       # :690, te0_2d - te_2d
+        num += float(np.sum(d))
+        absnum += float(np.sum(np.abs(d)))
         den += float(np.sum(z0 * a))
-    return consv * num / den
+    dtmp = consv * num / den
+    if returns_kappa:
+        kappa = absnum / abs(num) if num != 0.0 else float("inf")
+        return dtmp, kappa
+    return dtmp
 
 
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,
@@ -576,7 +599,11 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 "zvir != 0 with non-hydrostatic dynamics needs delz on "
                 "every face: the moist NH pkz is recomputed here from "
                 "delp/pt/delz (fv_dynamics.F90:299-322).")
-    if consv_te != 0.0:
+    if abs(consv_te) > CONSV_MIN:
+        # Fortran's DEAD BAND (fv_mapz.F90:630): 0 < |consv| <= consv_min
+        # is ACCEPTED and leaves dtmp exactly 0, so it is fixer-OFF here
+        # rather than an error (codex MINOR, job 9446299). Raising on it
+        # was stricter than the oracle.
         # The energy fixer IS ported now. What it needs that the dry
         # lane does not: the per-face grid (area/rsin2/cosa_s for the
         # two column integrals) and a surface geopotential.
@@ -588,12 +615,36 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 "and :659-687), which integrate phiz from delz and carry "
                 "the w**2 term. Only the hydrostatic pair is ported, and "
                 "the generated oracle deck is hydrostatic.")
-        if abs(consv_te) <= CONSV_MIN:
-            raise ValueError(
-                f"consv_te={consv_te} is non-zero but within CONSV_MIN="
-                f"{CONSV_MIN}: fv_mapz.F90:630 would leave dtmp exactly 0 "
-                f"and the fixer would not run, so this asks for a lane "
-                f"that looks enabled and is not.")
+        if consv_te < 0.0:
+            # NEGATIVE consv IS A DIFFERENT PROGRAM, not a sign choice
+            # (codex MAJOR, job 9446299). fv_mapz.F90:738-741 treats it
+            # as a PRESCRIBED energy flux --
+            # dtmp = consv*(grav*pdt*4*pi*radius**2)/g_sum(zsum0) -- and
+            # never forms te0_2d - te_2d at all. Accepting it here would
+            # run the positive branch's physics under the negative
+            # branch's flag.
+            raise NotImplementedError(
+                f"consv_te={consv_te} < 0: fv_mapz.F90:738-741 is the "
+                f"PRESCRIBED-FLUX branch, which needs pdt, grav and the "
+                f"planetary radius and does not use te0_2d - te_2d. Only "
+                f"the positive branch (:630-715) is ported.")
+        if zvir != 0.0:
+            # MOIST x CONSV IS UNSCORED (GLM MAJOR, job 9446300). The
+            # harness refuses the combination, but a refusal that lives
+            # only in the harness is not a refusal: the qc path of
+            # total_energy_2d_hydrostatic (forms tv itself, integrates
+            # DOWN) and the no-virtual path of
+            # fixer_energy_2d_hydrostatic (takes T_v, integrates UP) are
+            # exactly the distinction this port advertises, and under
+            # every existing gate they are dead code. Build a moist
+            # consv deck before enabling this.
+            raise NotImplementedError(
+                "zvir != 0 with consv_te != 0 has no oracle deck, so the "
+                "two energy integrals' virtual-temperature conventions "
+                "are unscored -- the one thing about this port most "
+                "likely to be wrong. Build a moist consv_te deck "
+                "(build_consv_te_oracle.sbatch on the moist deck) "
+                "first.")
         if ctx.get("gs6") is None:
             raise ValueError(
                 "consv_te != 0 needs ctx['gs6']: the energy integrals "
@@ -655,7 +706,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     # compute_total_energy is called at :359 while pt is still
     # TEMPERATURE and forms its own tv = pt*(1+dp1).
     te0_2d = None
-    if consv_te != 0.0:
+    if abs(consv_te) > CONSV_MIN:
         te0_2d = []
         for t in range(6):
             gs = ctx["gs6"][t]
@@ -782,7 +833,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
         # The fixer runs only at last_step (fv_mapz.F90:628), so only
         # that iteration defers its closing conversion. Every other
         # n_map keeps the certified path byte for byte.
-        _defer = bool(last_step) and consv_te != 0.0
+        _defer = bool(last_step) and abs(consv_te) > CONSV_MIN
         for t in range(6):
             g = press_out[t]
             ia = ng

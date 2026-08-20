@@ -431,7 +431,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "zvir != 0 with non-hydrostatic dynamics needs state["
                 "'delz']: the moist NH pkz is recomputed here from "
                 "delp/pt/delz (fv_dynamics.F90:299-322).")
-    if consv_te != 0.0:
+    if abs(consv_te) > _CONSV_MIN:
+        # Fortran's DEAD BAND (fv_mapz.F90:630): 0 < |consv| <= consv_min
+        # is ACCEPTED and leaves dtmp exactly 0, so it is fixer-OFF here
+        # rather than an error (codex MINOR, job 9446299). Raising on it
+        # was stricter than the oracle.
         if not hydrostatic:
             raise NotImplementedError(
                 "consv_te != 0 with non-hydrostatic dynamics is not "
@@ -439,12 +443,36 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "their NON-hydrostatic branches (fv_mapz.F90:1155-1190 "
                 "and :659-687), which integrate phiz from delz and carry "
                 "the w**2 term. Only the hydrostatic pair is ported.")
-        if abs(consv_te) <= _CONSV_MIN:
-            raise ValueError(
-                f"consv_te={consv_te} is non-zero but within CONSV_MIN="
-                f"{_CONSV_MIN}: fv_mapz.F90:630 would leave dtmp exactly "
-                f"0 and the fixer would not run, so this asks for a lane "
-                f"that looks enabled and is not.")
+        if consv_te < 0.0:
+            # NEGATIVE consv IS A DIFFERENT PROGRAM, not a sign choice
+            # (codex MAJOR, job 9446299). fv_mapz.F90:738-741 treats it
+            # as a PRESCRIBED energy flux --
+            # dtmp = consv*(grav*pdt*4*pi*radius**2)/g_sum(zsum0) -- and
+            # never forms te0_2d - te_2d at all. Accepting it here would
+            # run the positive branch's physics under the negative
+            # branch's flag.
+            raise NotImplementedError(
+                f"consv_te={consv_te} < 0: fv_mapz.F90:738-741 is the "
+                f"PRESCRIBED-FLUX branch, which needs pdt, grav and the "
+                f"planetary radius and does not use te0_2d - te_2d. Only "
+                f"the positive branch (:630-715) is ported.")
+        if zvir != 0.0:
+            # MOIST x CONSV IS UNSCORED (GLM MAJOR, job 9446300). The
+            # harness refuses the combination, but a refusal that lives
+            # only in the harness is not a refusal: the qc path of
+            # total_energy_2d_hydrostatic (forms tv itself, integrates
+            # DOWN) and the no-virtual path of
+            # fixer_energy_2d_hydrostatic (takes T_v, integrates UP) are
+            # exactly the distinction this port advertises, and under
+            # every existing gate they are dead code. Build a moist
+            # consv deck before enabling this.
+            raise NotImplementedError(
+                "zvir != 0 with consv_te != 0 has no oracle deck, so the "
+                "two energy integrals' virtual-temperature conventions "
+                "are unscored -- the one thing about this port most "
+                "likely to be wrong. Build a moist consv_te deck "
+                "(build_consv_te_oracle.sbatch on the moist deck) "
+                "first.")
         if getattr(ctx, "gs6", None) is None:
             raise ValueError(
                 "consv_te != 0 needs ctx.gs6: the energy integrals are "
@@ -536,7 +564,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     # and a second implementation of numerics this repo already has is
     # exactly what the no-duplicate-numerics rule forbids.
     te0_2d = None
-    if consv_te != 0.0:
+    if abs(consv_te) > _CONSV_MIN:
         from legoesm.core.fv3_native_dynamics import (
             total_energy_2d_hydrostatic as _te0,
         )
@@ -712,7 +740,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 grav=(None if hydrostatic else _FV3_GRAV),
                 fill=False, do_sat_adj=False, do_inline_mp=False,
                 do_adiabatic_init=False,
-                defer_close=(bool(last_step) and consv_te != 0.0)))
+                defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
         # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
         # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
         # from scratch DROPS a hydrostatic run's `w` -- which the state
@@ -748,7 +776,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                                              *[o.q for o in fs]))
         om = jnp.stack([o.omga for o in fs])
 
-        if last_step and consv_te != 0.0:
+        if last_step and abs(consv_te) > _CONSV_MIN:
             # THE REDUCTION, and the reason the remap was split. fv_mapz
             # does te_2d -> g_sum -> apply inside ONE call because its
             # "domain" is every tile; a call here is one face, so the six

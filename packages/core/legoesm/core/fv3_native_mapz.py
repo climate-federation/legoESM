@@ -870,6 +870,17 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             "deck has nr=2 and the oracle makes two passes through "
             "fv_mapz.F90:330-342.")
     nq = len(q)
+    if defer_close and not last_step:
+        # SILENTLY IGNORED BEFORE (GLM MINOR, job 9446300): the
+        # non-last_step arm does `pt /= pkz` (theta_v back-conversion)
+        # regardless, so a caller believing pt was deferred T_v would
+        # then hand theta_v to close_out_pt and get
+        # (theta_v + dtmp/cp*pkz)/... -- garbage, with no error.
+        raise ValueError(
+            "defer_close=True with last_step=False: the fixer lives "
+            "inside `if (last_step)` (fv_mapz.F90:628), so there is "
+            "nothing to defer here, and the non-last_step arm converts "
+            "pt back to theta_v -- which close_out_pt must never see.")
     _refuse_unported_lane(hydrostatic=hydrostatic, adiabatic=adiabatic,
                           consv=consv, fill=fill, kord_tm=kord_tm,
                           do_sat_adj=do_sat_adj, do_inline_mp=do_inline_mp,
