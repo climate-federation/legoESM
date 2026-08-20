@@ -73,6 +73,8 @@ Usage
       --arm armA=/tmp/dino_gate90/armA_transport.npz \
       --fig /path/to/sigma_gap.png
   JAX_ENABLE_X64=1 .venv/bin/python sigma_mean_gap_decompose.py --self-test
+
+SECOND-REVIEW CORRECTIONS (aeaf42, 2026-08-20): a compensating cold layer DOES exist at 900-1200 m, 13% of the warm anomaly (column net +3.61e4 K.m, heat gained -- headline survives); 'saturating' is an extrapolation from 4 points -- 'sub-linear' is what is earned; the day-0 3.4e-8 row is near-tautological (bit-for-bit fp32 cast of NEMO's field) and has no power over vertical-grid/ssh/velocity bridge defects. Physical-range check PASSED: implied d(sigma)/dT -0.12675 vs S-EOS -0.12678 kg/m3/K at the window's own mean T.
 """
 import argparse
 import glob

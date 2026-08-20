@@ -595,8 +595,42 @@ def _smoke_check_vmix_scheme_override():
           f"({base.surface_tendency_placement} -> {_other})")
 
 
+def _provenance_gate() -> None:
+    """Stamp source provenance and REFUSE to run from a dirty tracked tree.
+
+    Added after the 2026-08-19/20 reconciliation (#1455, a009c6812): two runs
+    of this harness at byte-identical committed source differed by 2.5 Sv in
+    day-90 ACC, and the second review's log forensics left "an uncommitted
+    working-tree edit" as the sole surviving candidate -- the difference is
+    unrecoverable because nothing stamped the tree state. Every future run
+    prints the HEAD sha and the tracked-file dirt count; a dirty tree aborts
+    unless LEGOESM_ALLOW_DIRTY=1 is set explicitly (and then the dirt list is
+    printed so the log carries what the tree carried).
+    """
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    dirt = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.strip()
+    print(f"PROVENANCE: HEAD={sha} dirty_tracked_files={len(dirt.splitlines())}")
+    if dirt:
+        print("PROVENANCE: dirty tracked files:")
+        for line in dirt.splitlines():
+            print(f"  {line}")
+        if os.environ.get("LEGOESM_ALLOW_DIRTY") != "1":
+            raise SystemExit(
+                "REFUSING to run from a dirty tracked tree (see #1455 "
+                "a009c6812: an uncommitted edit produced an unattributable "
+                "2.5 Sv shift). Commit or stash, or set LEGOESM_ALLOW_DIRTY=1 "
+                "to run anyway with the dirt list stamped in the log.")
+
+
 def main(argv=None):
     args = _parse_args(argv)
+    _provenance_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return
