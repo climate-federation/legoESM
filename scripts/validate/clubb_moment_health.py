@@ -96,39 +96,48 @@ def main(argv=None) -> int:
           f"{'max|wp3|':>11} {'max|Skw|':>11} {'thl_bot':>9} {'min thl':>9}")
 
     step_fn, tend_fn = scm._step_fn, scm._tend_fn
-    state, phys = scm.state, scm.phys_state
-    # NOT jitted and NOT scanned: this is a per-step host-side inspection, and
-    # the point is to see the step the trajectory leaves physical bounds. The
-    # cost is one dispatch per step, which for a few thousand steps is minutes.
-    worst = (0.0, -1)
-    for k in range(nsteps):
-        t = k * case.dt
-        state, phys = step_fn(state, phys, tend_fn, case.dt, t)
-        if k % args.every and k != nsteps - 1:
-            continue
-        m = unpack_clubb_moments(phys.clubb_moments)
-        wp2 = np.asarray(m.wp2)
-        wp3 = np.asarray(m.wp3)
-        # Skw on the zt levels wp3 lives on; wp2 sits on zm, so use the
-        # overlapping first nlev entries -- this is a HEALTH indicator, not the
-        # scheme's own Skw, which interpolates. An order-of-magnitude readout
-        # does not need the interpolation and inventing one would be a second
-        # thing to get wrong.
-        n = wp3.shape[1]
-        skw = wp3 / np.maximum(wp2[:, :n], 1e-12) ** 1.5
-        s_max = float(np.nanmax(np.abs(skw)))
-        if s_max > worst[0]:
-            worst = (s_max, k)
-        wth = float(case.forcing.w_th_s(t)) if case.forcing.w_th_s else 0.0
-        print(f"{k:6d} {t/3600.0:6.2f} {wth:10.5f} "
-              f"{float(np.nanmin(wp2)):11.3e} {float(np.nanmax(np.abs(wp3))):11.3e} "
-              f"{s_max:11.3e} "
-              f"{float(np.asarray(m.thlm)[0, 0]):9.2f} "
-              f"{float(np.nanmin(np.asarray(m.thlm))):9.2f}")
-        if not np.isfinite(s_max):
-            print(f"  NON-FINITE at step {k}; stopping")
-            break
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        unpack_clubb_moments as _unpack,
+    )
 
+    # ONE compiled scan, diagnostics emitted as scan outputs. The obvious
+    # version -- a Python loop calling scm._step_fn -- RE-TRACES the whole
+    # CLUBB step on every call, because that closure is not jitted. At 2880
+    # steps that never printed a single row in six hours of walltime.
+    def _diag_step(carry, k):
+        state, phys = carry
+        t = k.astype(jnp.float64) * case.dt
+        state, phys = step_fn(state, phys, tend_fn, case.dt, t)
+        m = _unpack(phys.clubb_moments)
+        wp2, wp3 = m.wp2, m.wp3
+        n = wp3.shape[1]
+        skw = wp3 / jnp.maximum(wp2[:, :n], 1e-12) ** 1.5
+        out = (jnp.min(wp2), jnp.max(jnp.abs(wp3)), jnp.max(jnp.abs(skw)),
+               m.thlm[0, 0], jnp.min(m.thlm), jnp.max(m.thlm))
+        return (state, phys), out
+
+    _final, hist = jax.lax.scan(
+        _diag_step, (scm.state, scm.phys_state), jnp.arange(nsteps))
+    wp2_min, wp3_max, skw_max, thl_bot, thl_min, thl_max = (
+        np.asarray(h) for h in hist)
+
+    for k in range(0, nsteps, max(1, args.every)):
+        t = k * case.dt
+        wth = float(case.forcing.w_th_s(t)) if case.forcing.w_th_s else 0.0
+        print(f"{k:6d} {t/3600.0:6.2f} {wth:10.5f} {wp2_min[k]:11.3e} "
+              f"{wp3_max[k]:11.3e} {skw_max[k]:11.3e} {thl_bot[k]:9.2f} "
+              f"{thl_min[k]:9.2f}", flush=True)
+    j = int(np.nanargmax(np.abs(skw_max)))
+    worst = (float(skw_max[j]), j)
+    jb = int(np.nanargmin(thl_bot))
+    print(f"\ncoldest bottom-level thlm = {thl_bot[jb]:.2f} K at step {jb} "
+          f"({jb * case.dt / 3600.0:.2f} h); it starts at {thl_bot[0]:.2f} K")
+    bad = np.where(thl_bot < thl_bot[0] - 5.0)[0]
+    if bad.size:
+        print(f"bottom level first drops >5 K below its start at step "
+              f"{int(bad[0])} ({bad[0] * case.dt / 3600.0:.2f} h)")
+    else:
+        print("bottom level never drops >5 K below its start")
     print(f"\nworst |Skw| = {worst[0]:.3e} at step {worst[1]} "
           f"({worst[1] * case.dt / 3600.0:.2f} h)")
     print("READ IT AS: real CLUBB holds |Skw| in single digits. Tens or more, "
