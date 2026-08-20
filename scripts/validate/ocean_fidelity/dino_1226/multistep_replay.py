@@ -117,6 +117,36 @@ STEPS_PER_DAY = 32  # RUN_TWIN_STEP1 covers exactly nit000+1 .. nit000+32 (one d
 RECIPE = "nemo_dino_kamm_mlf"
 
 
+def provenance(tag: str = "") -> str:
+    """Print (and return) the git SHA + the effective flags a probe's number
+    depends on.
+
+    A recorded probe number is not citable without these: ``LEGOESM_NEMO_E3T``
+    selects the thickness convention, ``DINO_NEMO_RUN_*`` select the oracle
+    dump set, and the SHA pins the model code that produced it.  ``+dirty``
+    means the working tree carried uncommitted edits at run time.
+    """
+    import subprocess
+    _here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_here, capture_output=True,
+            text=True, timeout=30).stdout.strip() or "<no-sha>"
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain"], cwd=_here, capture_output=True,
+            text=True, timeout=60).stdout.strip())
+    except Exception as exc:                      # never let provenance abort a probe
+        sha, dirty = f"<unavailable: {exc}>", False
+    line = (f"[provenance{(' ' + tag) if tag else ''}] "
+            f"git={sha}{'+dirty' if dirty else ''}  "
+            f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')!r}  "
+            f"JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')!r}  "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}  "
+            f"IC_STEP={IC_STEP}  RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
+    print(line, flush=True)
+    return line
+
+
 def have_step1_artifacts() -> bool:
     """True iff both the RUN_TRAJ mesh donor and RUN_TWIN_STEP1 per-rank
     restart tiles for the IC step are present on this machine."""
