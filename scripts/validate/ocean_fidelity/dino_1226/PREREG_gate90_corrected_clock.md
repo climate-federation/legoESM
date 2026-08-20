@@ -101,3 +101,115 @@ descriptive and carries no pre-registered band.
   cosines together (`280bba6a8` item 1). "The clock is the owner" is CONFIRMED;
   "T* rather than Qsr" remains PLAUSIBLE and untested.
 - The noise floors are an n=3 micro-ensemble estimate (#1492 2.1).
+
+---
+
+# RESULT — the density metrics COLLAPSE to their floors; ACC does not
+
+Committed separately from the pre-registration above, which is unedited (git
+history proves the order).
+
+## The run
+
+SHA `8e56daafa`, tracked tree clean (the harness's provenance gate printed
+`dirty_tracked_files=0`), `STABLE=True`, 2880 steps, 206 s wall — against 213 s
+and 217 s for the two recorded antiphase arms, i.e. the same cost.
+
+    [run_fp64] control dtype = <class 'jax.numpy.float64'>
+    seasonal clock: t_seconds = 15552000s + (k+1)*2700s  [source: restart adatrj]
+        (restart is day 180.00 of the 360-day year; NEMO logs nday_year = 181)
+    tau_x[Pa] min/max = -0.200/0.100
+    DAY-0 VERIFY: max|dT| = max|d_eta| = max|du| = max|dv| = 0.000e+00
+        max|u0| = 0.7516  max|v0| = 0.8595
+
+Prediction 3 CONFIRMED: the day-0 gate is exact and the day-0 southern sigma
+MEAN gap is **+3.368e-08 kg/m3** — the recorded value to every printed digit,
+3.5e-04 of the floor. The bridge is untouched; everything below is accumulated.
+
+Gate self-checks passed before every table (NEMO y10 ACC 121.07 vs recorded
+121.07; band volume 2.694775e16, rel 5.0e-08), and `--self-test` passed: an
+identical pair PASSes at 1x and the synthetic violation FAILs all five metrics
+by >10x their thresholds. The instrument is non-vacuous.
+
+## THE NEW BASELINE — day 90, level 5x
+
+| metric | legoESM | NEMO d90 | signed gap | floor | gap/floor | 5x |
+|---|---|---|---|---|---|---|
+| ACC [Sv] | 67.241540 | 65.369204 | **+1.872335** | 9.1e-02 | **+20.6** | FAIL |
+| upper contrast <1400 m | -0.287782 | -0.288182 | +3.997e-04 | 1.1e-04 | +3.6 | PASS |
+| deep contrast >1400 m | -0.011197 | -0.011258 | +6.124e-05 | 4.5e-05 | +1.4 | PASS |
+| S-band surface sigma MAX | 0.908979 | 0.909343 | -3.636e-04 | 9.5e-05 | -3.8 | PASS |
+| S-band surface sigma MEAN | 0.802625 | 0.802915 | -2.900e-04 | 9.5e-05 | -3.1 | PASS |
+
+**GATE 90D-TWIN: PASS 4 | FAIL 1 | level 5x.** At 1x: PASS 0 | FAIL 5, but
+every density metric is now within 3.8x its floor instead of 17-242x.
+
+## Against the antiphase baseline it replaces
+
+One variable — the clock. Same SHA family, same recipe, same restart, same
+ladder, same gate.
+
+| metric | antiphase gap | corrected gap | cut |
+|---|---|---|---|
+| sigma MEAN | -2.303e-02 | -2.900e-04 | **98.7 %** |
+| sigma MAX | -2.928e-03 | -3.636e-04 | 87.6 % |
+| upper contrast | +1.903e-03 | +3.997e-04 | 79.0 % |
+| deep contrast | +2.688e-04 | +6.124e-05 | 77.2 % |
+| ACC [Sv] | +7.297e-01 | +1.872e+00 | **grew 2.6x** |
+
+**Prediction 1 CONFIRMED**, on the pre-registered band: the sigma MEAN gap fell
+to 2.900e-04, well inside the <=3.0e-03 CONFIRM threshold, a 98.7 % cut. The
+day-30 collapse does survive to day 90, and all four density metrics move the
+same way and the same direction. They do NOT reach the 1x floor — the residual
+is 1.4-3.8x — so the density bias is reduced to a few noise floors, not closed.
+
+**Prediction 2: ACC was correctly left unpredicted.** The gap is
+**+1.872 Sv (legoESM ABOVE NEMO), 20.6x the 0.091 Sv floor.** No band was
+pre-registered and none is invented now.
+
+## The time evolution — free, no extra runs
+
+Days 30/60 use the twin's existing `--save-3d` snapshots and NEMO's existing
+10-day dumps (kt 6720, 7680), scored by the SAME unmodified gate metrics and
+floors via `gate90_time_series.py`.
+
+| metric (signed gap, gap/floor) | day 30 | day 60 | day 90 |
+|---|---|---|---|
+| ACC [Sv] | +1.734 (19.1x) | +1.654 (18.2x) | +1.872 (20.6x) |
+| upper contrast | +2.750e-04 (2.5x) | +4.447e-04 (4.0x) | +3.997e-04 (3.6x) |
+| deep contrast | +3.138e-05 (0.7x) | +4.868e-05 (1.1x) | +6.124e-05 (1.4x) |
+| sigma MAX | -5.883e-05 (-0.6x) | -1.728e-04 (-1.8x) | -3.636e-04 (-3.8x) |
+| sigma MEAN | -1.246e-04 (-1.3x) | -1.999e-04 (-2.1x) | -2.900e-04 (-3.1x) |
+| gate tally (5x) | PASS 4 / FAIL 1 | PASS 4 / FAIL 1 | PASS 4 / FAIL 1 |
+
+Two things this shows, both new:
+
+1. **The ACC excess is not a drift — it is already there at day 30 and stays
+   flat.** +1.73 -> +1.65 -> +1.87 Sv, a spread smaller than the range itself.
+   Under the antiphase clock the same metric read +0.73 Sv at day 90 and was
+   described as growing. On the corrected clock the ACC gap looks like an
+   OFFSET established inside the first 30 days, not something accumulating over
+   the window. PLAUSIBLE, single run, no ensemble: 0.091 Sv is a 3-member
+   small-sample floor and the day-to-day spread here is ~0.2 Sv, so the
+   flatness is a shape statement, not a precise rate.
+2. **The density gaps grow roughly linearly and monotonically** (sigma MEAN
+   -1.2e-04 -> -2.0e-04 -> -2.9e-04), crossing their floors between days 30 and
+   60. They are a slow drift, in contrast to ACC.
+
+## What is now retracted or superseded
+
+- The "+0.73 Sv ACC excess" (`c38e8a3ea`) is superseded, not merely refined:
+  measured across the antiphase it is not a baseline. The corrected number is
+  +1.872 Sv at day 90.
+- Any arm ranked on the five 90-day gate metrics before this commit was scored
+  across the antiphase and needs re-measuring on this baseline.
+- The four candidate owners of the southern surface density bias ranked in
+  `a5183778c` stay un-implicated: 98.7 % of that gap was the clock.
+
+## Standing caveats, unchanged
+
+`LEGOESM_NEMO_E3T=off` (the 1-D thickness ladder, not NEMO's true `e3t_0`).
+T* vs Qsr within the clock remains PLAUSIBLE and untested — the clock moves both
+cosines together. Floors are an n=3 estimate. Single run, no ensemble.
+
+Artifacts (runtime, gitignored): `/tmp/dino_clock_baseline/twin90_corrected.{npz,log}`.

@@ -454,7 +454,12 @@ def test_run_twin_threads_the_absolute_clock_into_the_forcing(instruments):
     branch.
     """
     import inspect
+    import re
     kamm_twin_90d = instruments.kamm_twin_90d
     src = inspect.getsource(kamm_twin_90d.run_twin)
-    assert src.count("t_seconds=t0_sec + (k + 1) * DT") == 2
+    # The regression is the RELATIVE form reappearing; assert its absence
+    # rather than an exact spelling of the fixed form, so an innocuous
+    # reformat (or hoisting the expression into a local) does not go red.
+    assert not re.search(r"t_seconds\s*=\s*\(\s*k\s*\+\s*1\s*\)\s*\*\s*DT", src)
     assert "seasonal_t0_seconds(" in src
+    assert src.count("t0_sec") >= 3

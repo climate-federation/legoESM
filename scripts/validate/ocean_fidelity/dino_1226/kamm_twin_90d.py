@@ -293,8 +293,9 @@ def seasonal_t0_seconds(restart_path: str) -> float:
         print("!" * 78 + "\n", flush=True)
     print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
           f"[source: {source}]  "
-          f"(restart is day {t0_sec / 86400.0:.2f} of the 360-day year; "
-          f"NEMO logs nday_year = {int(t0_sec // 86400.0) + 1} at its next step)",
+          f"(restart is day {(t0_sec / 86400.0) % 360.0:.2f} of the 360-day "
+          f"year, {t0_sec / 86400.0:.2f} d elapsed in total; NEMO logs "
+          f"nday_year = {int(t0_sec // 86400.0) % 360 + 1} at its next step)",
           flush=True)
     return t0_sec
 
