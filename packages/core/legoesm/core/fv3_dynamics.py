@@ -201,8 +201,12 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     all (:281-294 is the moist branch), NOT because a zeros array
     would round differently -- since the association was corrected
     to ``(pt*(1+dp1))/pkz`` a zeros array is bit-identical
-    (``win*1.0`` is exact). Gated by
-    ``test_dry_branch_is_not_a_multiply_by_one``.
+    (``win*1.0`` is exact; codex confirmed this holds for every finite
+    input including subnormals and both signed zeros, job 9442717).
+    Gated in THIS lane by
+    ``tests/grids/test_fv3_dynamics.py::test_dry_branch_is_not_a_multiply_by_one``
+    and in the NumPy lane by
+    ``test_fv3_moist_dynamics.py::test_dry_lane_is_bitwise_under_the_moist_patch``.
     """
     pt = jnp.asarray(pt)
     pkz = jnp.asarray(pkz)
@@ -259,14 +263,35 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
     ia = ng
     dpw = delp[:, ia:ia + n, ia:ia + n, :]
     ptw = pt[:, ia:ia + n, ia:ia + n, :]
-    if dp1 is None:  # static None-ness: stays a Python if
-        arg = rdg * dpw * ptw / delz
-    else:
+    if dp1 is not None:
         dp1 = jnp.asarray(dp1)
         require_f64_jax("p_var_nonhydrostatic", {"dp1": dp1})
-        arg = rdg * dpw * ptw * (1.0 + dp1) / delz
-    out["pkz"] = jnp.exp(akap * jnp.log(arg))
+    out["pkz"] = jnp.exp(akap * jnp.log(
+        nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1)))
     return out
+
+
+def nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1=None):
+    """The NH ``pkz`` log argument: ``rdg*delp*pt*(1.+dp1)/delz``.
+
+    FACTORED OUT SO THE ASSOCIATION CAN BE GATED BITWISE.  ``pkz``
+    itself ends in ``exp(kappa*log(...))``, and XLA's ``exp`` differs
+    from libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz``
+    is not available -- and a tolerance loose enough to survive that
+    also admits the very mistake the association is guarding against:
+    pre-scaling ``pt`` at the CALL SITE (``rdg*delp*(pt*(1+dp1))/delz``)
+    is algebraically identical and differs only by multiplication
+    rounding, well inside any exp/log-sized window (codex MAJOR, job
+    9442717).  Below the transcendentals the two trees differ by real
+    bits, so the gate can be exact.
+
+    Association is the Fortran's, left to right
+    (``fv_dynamics.F90:314-315``): ``((rdg*delp)*pt)*(1+dp1)/delz`` on
+    the moist arm, ``((rdg*delp)*pt)/delz`` on the dry one.
+    """
+    if dp1 is None:  # static None-ness: stays a Python if
+        return rdg * dpw * ptw / delz
+    return rdg * dpw * ptw * (1.0 + dp1) / delz
 
 
 def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,

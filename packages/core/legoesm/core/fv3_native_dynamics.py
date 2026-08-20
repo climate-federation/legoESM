@@ -291,12 +291,32 @@ def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
     ia = ng
     dpw = delp[ia:ia + n, ia:ia + n, :]
     ptw = pt[ia:ia + n, ia:ia + n, :]
-    if dp1 is None:
-        arg = rdg * dpw * ptw / delz
-    else:
-        arg = rdg * dpw * ptw * (1.0 + dp1) / delz
-    out["pkz"][:] = np.exp(akap * np.log(arg))
+    out["pkz"][:] = np.exp(akap * np.log(
+        nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1)))
     return out
+
+
+def nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1=None):
+    """The NH ``pkz`` log argument: ``rdg*delp*pt*(1.+dp1)/delz``.
+
+    FACTORED OUT SO THE ASSOCIATION CAN BE GATED BITWISE.  ``pkz``
+    itself ends in ``exp(kappa*log(...))``, and XLA's ``exp`` differs
+    from libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz``
+    is not available -- and a tolerance loose enough to survive that
+    also admits the very mistake the association is guarding against:
+    pre-scaling ``pt`` at the CALL SITE (``rdg*delp*(pt*(1+dp1))/delz``)
+    is algebraically identical and differs only by multiplication
+    rounding, well inside any exp/log-sized window (codex MAJOR, job
+    9442717).  Below the transcendentals the two trees differ by real
+    bits, so the gate can be exact.
+
+    Association is the Fortran's, left to right
+    (``fv_dynamics.F90:314-315``): ``((rdg*delp)*pt)*(1+dp1)/delz`` on
+    the moist arm, ``((rdg*delp)*pt)/delz`` on the dry one.
+    """
+    if dp1 is None:
+        return rdg * dpw * ptw / delz
+    return rdg * dpw * ptw * (1.0 + dp1) / delz
 
 
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,

@@ -258,23 +258,57 @@ def _nml_text(run_dir: str) -> str:
         return fh.read()
 
 
-def _nml_logical(text: str, key: str):
-    """The LAST assignment wins, matching Fortran namelist semantics.
+def _nml_value(text: str, key: str, pattern: str):
+    """The LAST assignment wins, comments stripped first.
 
-    These decks routinely carry a commented-out alternative and then the
-    live value (``duogrid``, ``do_schmidt``, ``dnats`` all appear twice),
-    so taking the first match would read the wrong one. Commented lines
-    are dropped first: `!` starts a comment in a namelist.
+    ONE parser for logicals, integers and reals. The first version had
+    ``_nml_logical`` doing this correctly and then let ``fv_sg_adj`` and
+    ``consv_te`` bypass it with a raw ``re.search`` -- which is
+    FIRST-match-wins and comment-blind, so ``fv_sg_adj = -1`` followed
+    by ``fv_sg_adj = 1``, or a commented-out ``consv_te = 0.`` above a
+    live non-zero one, would have been read as the safe value and the
+    harness would have scored dynamics against dynamics-plus-physics
+    (codex MAJOR, job 9442717). These decks routinely carry a commented
+    alternative and then the live value -- ``duogrid``, ``do_schmidt``
+    and ``dnats`` all appear twice in the pinned ones -- so this is the
+    shape the input actually has, not a hypothetical.
+
+    KNOWN LIMIT, stated rather than fixed: the search is whole-file and
+    GROUP-BLIND, so a key set in a different ``&group`` with a different
+    value would be read here where Fortran would not apply it.  The keys
+    checked (adiabatic, fv_sg_adj, consv_te, the physics switches) are
+    unique across groups in every pinned deck; a deck that reused one
+    would need a group-aware parser.  Likewise a ``!`` inside a quoted
+    string truncates the line.
+
+    Returns the last match's captured group, or None.
     """
     val = None
     for raw in text.splitlines():
-        line = raw.split("!", 1)[0]
-        m = re.search(rf"\b{key}\s*=\s*(\.?[A-Za-z]+\.?)", line,
-                      re.IGNORECASE)
+        line = raw.split("!", 1)[0]          # `!` starts a comment
+        m = re.search(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
         if m:
-            tok = m.group(1).strip().lower().strip(".")
-            val = tok in ("t", "true")
+            val = m.group(1)
     return val
+
+
+def _nml_logical(text: str, key: str):
+    tok = _nml_value(text, key, r"\.?[A-Za-z]+\.?")
+    if tok is None:
+        return None
+    return tok.strip().lower().strip(".") in ("t", "true")
+
+
+def _nml_int(text: str, key: str):
+    tok = _nml_value(text, key, r"[-+]?\d+")
+    return None if tok is None else int(tok)
+
+
+def _nml_real(text: str, key: str):
+    tok = _nml_value(text, key, r"[-+]?[0-9.]+(?:[eEdD][-+]?[0-9]+)?")
+    if tok is None:
+        return None
+    return float(tok.replace("d", "e").replace("D", "e"))
 
 
 def check_physics_is_inert(run_dir: str) -> None:
@@ -287,14 +321,14 @@ def check_physics_is_inert(run_dir: str) -> None:
             f"deck's RESTART is one dynamics step PLUS a forcing "
             f"tendency, and the port has no physics -- the residual "
             f"would be unattributable. Use a deck with them off.")
-    sg = re.search(r"fv_sg_adj\s*=\s*(-?\d+)", text)
+    sg = _nml_int(text, "fv_sg_adj")
     if sg is None:
         raise SystemExit(f"{run_dir}: input.nml does not set fv_sg_adj; "
                          f"fv_phys.F90:303 clears no_tendency when it is "
                          f"> 0, so it must be pinned, not defaulted.")
-    if int(sg.group(1)) > 0:
+    if sg > 0:
         raise SystemExit(
-            f"{run_dir}: fv_sg_adj = {sg.group(1)} > 0 runs fv_subgrid_z "
+            f"{run_dir}: fv_sg_adj = {sg} > 0 runs fv_subgrid_z "
             f"(fv_phys.F90:305) and clears no_tendency. Not ported.")
 
 
@@ -316,12 +350,12 @@ def check_moist_deck(run_dir: str) -> None:
             f".false. -- atmosphere.F90:157-161 then leaves zvir = 0 and "
             f"the oracle ran DRY. Scoring the moist port against it "
             f"would measure the coupling itself as the error.")
-    m = re.search(r"consv_te\s*=\s*([0-9.eEdD+-]+)", text)
-    if m is None or float(m.group(1).replace("d", "e").replace("D", "e")):
+    consv = _nml_real(text, "consv_te")
+    if consv is None or consv != 0.0:
         raise SystemExit(
             f"{run_dir}: consv_te must be pinned to 0 (found "
-            f"{m.group(1) if m else 'nothing'}); the total-energy fixer "
-            f"(fv_mapz.F90:628-747) is not ported.")
+            f"{consv if consv is not None else 'nothing'}); the "
+            f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
 
 
 def build_port_tracer_ic(sphum6) -> list:
@@ -338,6 +372,11 @@ def build_port_tracer_ic(sphum6) -> list:
     terminator-tracer branch (cl/cl2), absent on this deck; tracer_2d
     fills its own halos via ext_scalar.
     """
+    if sphum6 is None:
+        raise ValueError(
+            "build_port_tracer_ic got sphum6=None -- build_port_ic was "
+            "called with with_sphum=False, so there is no humidity to "
+            "advect and none to have divided pt on the moist arm.")
     return [[q, np.zeros_like(q)] for q in sphum6]
 
 def tracer_window(q6, ctx) -> list:

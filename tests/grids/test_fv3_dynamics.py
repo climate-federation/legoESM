@@ -72,6 +72,11 @@ from legoesm.core.fv3_native_state_3d import (  # noqa: E402
     build_state_3d,
 )
 
+from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
+    FV3_GRAV as _FV3_GRAV,
+    FV3_RDGAS as _FV3_RDGAS,
+)
+
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
     assert_real,
     cmp_fields,
@@ -328,7 +333,8 @@ def test_moist_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
                tol=3.5e-13)
 
 
-def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index):
+def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index,
+                   k_split=1):
     """One moist step on a CALLER-SUPPLIED pressure bundle."""
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
@@ -337,11 +343,12 @@ def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index):
          for iq in range(NQ)]
     return _out_state(jdyn.fv_dynamics_step(
         jctx, jst, press, q=q,
-        **_common(ptop, ak, bk, hydrostatic, 1, 2),
+        **_common(ptop, ak, bk, hydrostatic, k_split, 2),
         **_moist(zvir, sphum_index)))
 
 
-def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
+@pytest.mark.parametrize("k_split", [1, 2])
+def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta, k_split):
     """fv_dynamics.F90:299-322 OVERWRITES pkz on every NH call.
 
     A caller's pkz is dry -- ``p_var_nonhydrostatic`` builds it dry, and
@@ -361,7 +368,12 @@ def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
     here, because the answer still stops depending on the caller's pkz.
     Moistness is pinned by
     :func:`test_nh_moist_pkz_matches_the_oracle_expression`'s
-    anti-vacuity assert and by the parity gate above.
+    anti-vacuity assert.  NOT by the parity gate: that one is
+    wet-port-vs-wet-spec and cannot see a SYMMETRIC drop in both lanes,
+    and unlike the hydrostatic arm the NH arm has no oracle deck to
+    catch it either (GLM MINOR, job 9442724).  ``k_split`` is
+    parametrized because a consumer of the caller's pkz on a
+    non-last-step path would escape a single-iteration run.
     """
     ak, bk, ptop = eta
     for hydrostatic in (False, True):
@@ -381,9 +393,9 @@ def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
         assert (np.asarray(press_a["pkz"]).tobytes()
                 != np.asarray(press_b["pkz"]).tobytes())
         a = _run_jax_press(jctx, eta, press_a, hydrostatic=hydrostatic,
-                           zvir=ZVIR, sphum_index=0)
+                           zvir=ZVIR, sphum_index=0, k_split=k_split)
         b = _run_jax_press(jctx, eta, press_b, hydrostatic=hydrostatic,
-                           zvir=ZVIR, sphum_index=0)
+                           zvir=ZVIR, sphum_index=0, k_split=k_split)
         # EVERY returned field, not just pt: a consumer of the caller's
         # pkz sitting in the w or delz path would escape a pt-only
         # comparison and be caught only later, indirectly, at tolerance
@@ -403,52 +415,176 @@ def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
 
 
 def test_nh_moist_pkz_matches_the_oracle_expression(eta):
-    """``exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz))`` -- factor INSIDE
-    the log, in the Fortran's left-to-right association.
+    """The association is gated BELOW the transcendentals.
 
-    NOT GATED BITWISE, and the reason is measured here rather than
-    assumed. A bitwise assert on this failed at one ulp (index 48, job
-    9442478); this expression ends in ``exp(kappa*log(...))``, and
-    XLA's ``exp`` differs from libm's by ~1 ulp -- the same mechanism
-    already CONFIRMED by substitution for riem_solver3. So the test
-    measures the DRY arm too and requires the moist arm to be no worse:
-    if the moist factor were misplaced the moist residual would leave
-    the dry one behind, and if the residual were really about ``dp1``
-    the dry arm would be bitwise.
+    ``pkz = exp(kappa*log(arg))``, and XLA's ``exp`` differs from
+    libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz`` is not
+    available.  The previous version of this test therefore compared
+    ``pkz`` under a 10x-of-the-dry-residual window -- and codex showed
+    that window ADMITS the exact mistake the docstring claimed to
+    reject (job 9442717): pre-scaling ``pt`` at the call site,
+    ``rdg*delp*(pt*(1+dp1))/delz``, is algebraically identical and
+    differs only by multiplication rounding, comfortably inside any
+    exp/log-sized tolerance.  The comment claiming a misassociation
+    "would blow up" was false.
+
+    ``nh_pkz_log_arg`` exists so this gate can be exact: below the
+    transcendentals the trees differ by real bits.
     """
-    jst = state_3d_to_jax(_state(False))
     faces = _state(False)
-    dp1 = jnp.asarray(0.0077 * np.ones((6, N, N, KM)))
-    kw = dict(ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM)
-    got_wet = np.asarray(jdyn.p_var_nonhydrostatic(
-        jst["delp"], jst["delz"], jst["pt"], dp1=dp1, **kw)["pkz"])
-    got_dry = np.asarray(jdyn.p_var_nonhydrostatic(
-        jst["delp"], jst["delz"], jst["pt"], **kw)["pkz"])
+    jst = state_3d_to_jax(_state(False))
+    rdg = -_FV3_RDGAS / _FV3_GRAV
+    dp1 = 0.0077 * np.ones((6, N, N, KM))
+    cs = slice(NG, NG + N)
 
-    worst_wet = worst_dry = 0.0
     for t in range(6):                       # ALL SIX FACES
-        args = (faces[t]["delp"], faces[t]["delz"], faces[t]["pt"])
-        want_wet = npdyn.p_var_nonhydrostatic(
-            *args, dp1=np.asarray(dp1)[t], **kw)["pkz"]
-        want_dry = npdyn.p_var_nonhydrostatic(*args, **kw)["pkz"]
-        worst_wet = max(worst_wet, float(
-            np.max(np.abs(got_wet[t] - want_wet) / np.abs(want_wet))))
-        worst_dry = max(worst_dry, float(
-            np.max(np.abs(got_dry[t] - want_dry) / np.abs(want_dry))))
+        dpw = faces[t]["delp"][cs, cs, :]
+        ptw = faces[t]["pt"][cs, cs, :]
+        dz = faces[t]["delz"]
+        want = npdyn.nh_pkz_log_arg(rdg, dpw, ptw, dz, dp1[t])
+        got = np.asarray(jdyn.nh_pkz_log_arg(
+            rdg, jnp.asarray(dpw), jnp.asarray(ptw), jnp.asarray(dz),
+            jnp.asarray(dp1[t])))
+        assert got.tobytes() == want.tobytes(), \
+            f"face {t}: port and spec disagree on the log argument"
 
-    # A few ulps of fp64. TOL-PENDING(nh-moist-pkz)
-    assert worst_wet <= 1e-14, f"moist pkz port-vs-spec {worst_wet:.3e}"
-    # THE DISCRIMINATOR: the moist factor adds nothing. If it were
-    # misassociated or misplaced this ratio would blow up; if the
-    # residual were about dp1 at all, the dry arm would be bitwise.
-    assert worst_wet <= max(10.0 * worst_dry, 1e-16), (
-        f"moist residual {worst_wet:.3e} is not explained by the dry "
-        f"arm's own {worst_dry:.3e} -- the (1+dp1) factor is adding "
-        f"error, not just riding the exp/log chain")
+        # THE MUTATION THIS GATE EXISTS FOR: the call-site formulation.
+        call_site = rdg * dpw * (ptw * (1.0 + dp1[t])) / dz
+        assert call_site.tobytes() != want.tobytes(), \
+            (f"face {t}: the two multiplication trees agree bitwise on "
+             f"this fixture, so the gate above cannot see the mistake "
+             f"it exists to catch")
+        # and the factor OUTSIDE the log, the other named mistake
+        outside = rdg * dpw * ptw / dz * (1.0 + dp1[t])
+        assert outside.tobytes() != want.tobytes()
 
-    # ANTI-VACUITY: dp1 must change pkz, or the comparisons above would
-    # pass with the moist branch deleted.
-    assert got_wet.tobytes() != got_dry.tobytes()
+        # ANTI-VACUITY: dp1 must change the argument at all.
+        assert want.tobytes() != npdyn.nh_pkz_log_arg(
+            rdg, dpw, ptw, dz).tobytes()
+
+    # and the composed pkz still agrees across lanes at the exp/log
+    # floor -- the association gate above says nothing about the
+    # transcendental chain, so both layers are asserted.
+    kw = dict(ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM)
+    got_pkz = np.asarray(jdyn.p_var_nonhydrostatic(
+        jst["delp"], jst["delz"], jst["pt"],
+        dp1=jnp.asarray(dp1), **kw)["pkz"])
+    for t in range(6):
+        want_pkz = npdyn.p_var_nonhydrostatic(
+            faces[t]["delp"], faces[t]["delz"], faces[t]["pt"],
+            dp1=dp1[t], **kw)["pkz"]
+        # MEASURED: 1 ulp of fp64 on an exp/log chain.
+        # TOL-PENDING(nh-moist-pkz)
+        assert np.max(np.abs(got_pkz[t] - want_pkz)
+                      / np.abs(want_pkz)) <= 1e-14
+
+
+def test_the_moist_arm_actually_changed_the_answer(ctx, jctx, eta):
+    """Anti-vacuity: without this, a zvir that was silently dropped on
+    the port side would pass the parity gate above by matching a spec
+    lane that had dropped it too.  Both lanes must MOVE, and move by
+    the same amount, relative to their own dry run.
+
+    dp1 ~ zvir*q ~ 6e-3 here, so pt moves in the third digit -- far
+    above any parity residual, which is why a plain magnitude assert is
+    enough and no tolerance is needed.
+    """
+    dry = _out_state(_run_jax(jctx, eta, hydrostatic=True, q_scale=Q_SCALE))
+    wet = _out_state(_run_jax(jctx, eta, hydrostatic=True, zvir=ZVIR,
+                              sphum_index=0, q_scale=Q_SCALE))
+    resp_port = np.asarray(wet["pt"]) - np.asarray(dry["pt"])
+    assert np.max(np.abs(resp_port)) > 1.0e-3, \
+        f"zvir moved pt by only {np.max(np.abs(resp_port)):.3e} K"
+
+    dry_np, _, _ = _run_np(ctx, eta, hydrostatic=True, q_scale=Q_SCALE)
+    wet_np, _, _ = _run_np(ctx, eta, hydrostatic=True, zvir=ZVIR,
+                           sphum_index=0, q_scale=Q_SCALE)
+    resp_spec = (np.stack([wet_np[t]["pt"] for t in range(6)])
+                 - np.stack([dry_np[t]["pt"] for t in range(6)]))
+    # THE WHOLE RESPONSE FIELD, not its maximum. Two different fields
+    # can share a max magnitude, so a port that coupled the wrong cell,
+    # face, axis or tracer would pass a scalar comparison (codex MAJOR,
+    # job 9442422). The response is a DIFFERENCE of two ~300 K fields,
+    # so its own scale is ~1 K and the parity tolerance applies to it
+    # directly.
+    assert_real(resp_spec, "spec moist response")
+    # TOL-PENDING(moist-response)
+    cmp_fields(resp_port, resp_spec, "moist pt response (wet - dry)",
+               tol=3.2e-10)
+
+
+def test_dry_branch_is_not_a_multiply_by_one(jctx, eta):
+    """The dry branch exists for the ORACLE's structure, not for rounding.
+
+    THIS TEST USED TO ASSERT THE OPPOSITE AND WAS WRONG (job 9442478).
+    Both lanes' comments said a zeros array "rounds twice" because
+    ``(1.0+dp1)/pkz`` forms a reciprocal first -- true of the OLD
+    association ``pt *= (1.0+dp1)/pkz``, and FALSE since the association
+    was corrected to the oracle's ``(pt*(1+dp1))/pkz``: ``1.0+0.0`` is
+    exactly 1.0 and ``win*1.0`` is exact in IEEE, so the zeros array is
+    now bit-identical to the dry branch.  (Codex confirmed the
+    retraction holds for every finite input including subnormals and
+    both signed zeros, job 9442717.)
+
+    What the branch is actually for, and what is asserted here: the
+    oracle forms no ``dp1`` AT ALL when ``zvir = 0``
+    (fv_dynamics.F90:281-294 is the moist branch), so ``dp1=None`` is
+    the faithful shape, and it avoids materialising and multiplying a
+    whole zeros field.  Equality is the CONTRACT -- if these two ever
+    diverge, the dry lane's certified 1.1866e-09 has silently moved.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    ref = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG)
+    wet0 = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                              dp1=jnp.zeros_like(pkz))
+    assert np.asarray(ref).tobytes() == np.asarray(wet0).tobytes(), \
+        ("dp1=zeros is no longer bit-identical to dp1=None; the moist "
+         "association changed and the dry certification has moved")
+
+    # ANTI-VACUITY: a NON-zero dp1 must move it, or the equality above
+    # would be satisfied by a lane that ignored dp1 entirely.
+    wet = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                             dp1=jnp.full_like(pkz, 0.0077))
+    assert np.asarray(ref).tobytes() != np.asarray(wet).tobytes()
+
+
+@pytest.mark.skipif(jax.default_backend() != "cpu",
+                    reason="a BITWISE association claim is a compiler "
+                           "contract, and this lane's is the fp64 CPU "
+                           "backend; XLA on GPU/TPU may contract the "
+                           "multiply-add or reassociate (codex MAJOR, "
+                           "job 9442422)")
+def test_moist_association_matches_the_spec_bitwise(eta):
+    """``pt*(1.+dp1)/pkz`` (:402) associates left to right.
+
+    The claim under test is NOT "Fortran guarantees two roundings" --
+    that is the compiler's business.  It is the one this port is
+    actually held to: the JAX lane must agree with the NumPy SPEC,
+    which is the authority, and numpy evaluates the same source
+    expression without reassociating.  Comparing the port against the
+    SPEC rather than against a locally re-typed expression is also what
+    makes this a cross-lane check instead of a self-comparison.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    dp1 = 0.0077 * np.ones(np.asarray(pkz).shape)
+
+    got = np.asarray(jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                                        dp1=jnp.asarray(dp1)))
+    ref = np.stack([f["pt"] for f in _state(True)])
+    for t in range(6):
+        npdyn.pt_to_theta_v(ref[t], np.asarray(pkz)[t], n=N, ng=NG,
+                            dp1=dp1[t])
+    assert got.tobytes() == ref.tobytes(), \
+        "port and spec disagree bitwise on the moist conversion"
+
+    # ANTI-VACUITY: the wrong association must actually differ on this
+    # data, or the assert above would pass with either spelling.
+    win = np.asarray(jst["pt"])[:, NG:NG + N, NG:NG + N, :]
+    pkzn = np.asarray(pkz)
+    bad = win * ((1.0 + dp1) / pkzn)
+    assert bad.tobytes() != ref[:, NG:NG + N, NG:NG + N, :].tobytes()
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
