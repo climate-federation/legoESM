@@ -364,3 +364,76 @@ def test_wp2_max_matches_upstreams_value():
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
     assert CLUBBConfig().wp2_max == pytest.approx(1000.0)
+
+
+# ---------------------------------------------------------------------------
+# #1508: the surface variance boundary condition
+# ---------------------------------------------------------------------------
+
+def _sfc_varnce_inputs(ncol=2, nzm=8):
+    zeros = jnp.zeros((ncol, nzm))
+    return dict(wp2=zeros + 1.0, up2=zeros + 1.0, vp2=zeros + 1.0,
+                thlp2=zeros + 1.0, rtp2=zeros + 1e-6, rtpthlp=zeros)
+
+
+def test_sfc_varnce_matches_the_oracle_formulas():
+    """Hand-evaluated against sfc_varnce_module.F90's l_andre_1978=.false.
+    branch, which is the only live one (it is a compile-time PARAMETER)."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    a, coef = cfg.params.a_const, cfg.params.up2_sfc_coef
+    upwp = jnp.asarray([-0.05]); vpwp = jnp.asarray([0.0])
+    wpthlp = jnp.asarray([0.0]); wprtp = jnp.asarray([0.0])   # no buoyancy
+    out = calc_sfc_varnce(upwp, vpwp, wpthlp, wprtp,
+                          **_sfc_varnce_inputs(ncol=1), config=cfg)
+    wp2, up2, vp2 = (np.asarray(o)[:, 0] for o in out[:3])
+    # wstar = 0, so uf = sqrt(|tau|/rho) = sqrt(0.05)
+    uf = float(np.sqrt(0.05))
+    assert wp2[0] == pytest.approx(a * uf ** 2, rel=1e-12)
+    assert up2[0] == pytest.approx(coef * a * uf ** 2, rel=1e-12)
+    assert vp2[0] == pytest.approx(coef * a * uf ** 2, rel=1e-12)
+
+
+def test_sfc_varnce_only_touches_the_surface_level():
+    """Every level above must be returned byte-identical."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    args = _sfc_varnce_inputs()
+    z = jnp.asarray([0.0, 0.0])
+    out = calc_sfc_varnce(z - 0.05, z, z + 0.05, z + 1e-5,
+                          **args, config=CLUBBConfig(prognostic=True))
+    for got, name in zip(out, ("wp2", "up2", "vp2", "thlp2", "rtp2",
+                               "rtpthlp")):
+        ref = np.asarray(args[name])
+        assert np.array_equal(np.asarray(got)[:, 1:], ref[:, 1:]), name
+
+
+def test_sfc_varnce_ustar_floor_bites_in_dead_calm():
+    """ufmin = 0.01 m/s keeps wp2 finite with no wind and no heat flux, where
+    every formula would otherwise divide by zero."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    z = jnp.zeros((1,))
+    out = calc_sfc_varnce(z, z, z, z, **_sfc_varnce_inputs(ncol=1), config=cfg)
+    for o in out:
+        assert np.all(np.isfinite(np.asarray(o)))
+    assert np.asarray(out[0])[0, 0] == pytest.approx(
+        cfg.params.a_const * 0.01 ** 2, rel=1e-12)
+
+
+def test_sfc_varnce_is_called_by_the_prognostic_core():
+    """NON-VACUOUS: naming the function that RUNS. Upstream calls it every step
+    and says it must precede advance_xp2_xpyp and advance_wp2_wp3."""
+    import inspect
+
+    from legoesm.atmosphere.physics.turbulence import clubb
+
+    src = inspect.getsource(clubb.advance_clubb_core)
+    assert "calc_sfc_varnce(" in src
+    assert src.index("calc_sfc_varnce(") < src.index("advance_xp2_xpyp(")
+    assert src.index("calc_sfc_varnce(") < src.index("advance_wp2_wp3(")

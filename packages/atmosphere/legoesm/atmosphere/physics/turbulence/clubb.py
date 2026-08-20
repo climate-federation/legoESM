@@ -4208,6 +4208,89 @@ def wp23_solve(lhs, rhs):
     return solution[:, 0::2], solution[:, 1::2]
 
 
+# --- surface-variance boundary condition (sfc_varnce_module.F90) ---
+# Fixed constants of that module, NOT tunables (its two tunable coefficients,
+# a_const and up2_sfc_coef, are CLUBBParams fields).
+_SFC_VARNCE_Z_CONST = 1.0     # "Defined height of 1 meter" [m] (module line 90)
+_SFC_VARNCE_UFMIN = 0.01      # min allowable u* [m/s]        (module line 93)
+# constants_clubb.F90:347, "Special for wprtp and wpthlp".
+_MAX_MAG_CORRELATION_FLUX = 0.99
+
+
+def calc_sfc_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc,
+                    wp2, up2, vp2, thlp2, rtp2, rtpthlp, config):
+    """Diagnose the SURFACE (lowest zm level) second moments (#1508).
+
+    Port of ``sfc_varnce_module.F90:calc_sfc_varnce``, the
+    ``l_andre_1978 = .false.`` branch (a compile-time PARAMETER upstream, so
+    the Andre-1978 branch is dead code there and is not ported) with
+    ``l_vary_convect_depth = .false.`` (model_flags.F90:616).
+
+    Upstream calls this EVERY step from ``advance_clubb_core`` and says where:
+    "Surface variances should be set here, before the call to either
+    advance_xp2_xpyp or advance_wp2_wp3." Omitting it was issue #1508 -- the
+    lower solver row simply carried the previous value, so the surface
+    variances were whatever the interior produced. Measured consequence:
+    surface thlp2 of 9.3e2 K^2 (a 30 K RMS theta_l fluctuation) from the FIRST
+    step, a production column non-finite in 92 steps, and in the LES-vs-SCM
+    campaign a lowest-level theta draining 277 -> 216 K on Wangara.
+
+    Level 0 is the surface on the ascending CLUBB zm grid. Every returned
+    array is the input with ONLY that level replaced.
+
+    Note ``ustar2`` is upstream's name for ``sqrt(upwp^2 + vpwp^2)``, which is
+    |tau|/rho and therefore u*^2 -- the name says squared and the expression is
+    a square root, which is correct because the stress is already quadratic.
+    """
+    a_const = config.params.a_const
+    up2_coef = config.params.up2_sfc_coef
+    ustar2 = jnp.sqrt(upwp_sfc ** 2 + vpwp_sfc ** 2)
+    # w* from Andre et al. (1976); zero under a non-positive surface heat flux,
+    # where the cube root of a negative argument is not wanted.
+    wstar = jnp.where(
+        wpthlp_sfc > 0.0,
+        jnp.cbrt(jnp.maximum(wpthlp_sfc, 0.0)
+                 * (constants.g / config.T0) * _SFC_VARNCE_Z_CONST),
+        0.0)
+    uf = jnp.maximum(_SFC_VARNCE_UFMIN,
+                     jnp.sqrt(ustar2 + 0.3 * wstar * wstar))
+
+    wp2_sfc = a_const * uf ** 2
+    up2_sfc = up2_coef * a_const * uf ** 2          # Andre et al. (1978)
+    vp2_sfc = up2_coef * a_const * uf ** 2
+    # With a = 1.8 the surface correlations of (w,rt) and (w,thl) are ~0.878
+    # and that of (rt,thl) is 0.5 (Griffin, 2 Feb 2008).
+    thlp2_sfc = 0.4 * a_const * (wpthlp_sfc / uf) ** 2
+    rtp2_sfc = 0.4 * a_const * (wprtp_sfc / uf) ** 2
+    rtpthlp_sfc = 0.2 * a_const * (wpthlp_sfc / uf) * (wprtp_sfc / uf)
+    thlp2_sfc = jnp.maximum(config.thl_tol ** 2, thlp2_sfc)
+    rtp2_sfc = jnp.maximum(config.rt_tol ** 2, rtp2_sfc)
+
+    # wp2 must not push the (w,thl) or (w,rt) correlation outside (-1, 1).
+    min_wp2_sfc = jnp.maximum(
+        config.w_tol ** 2,
+        jnp.maximum(
+            wprtp_sfc ** 2 / (rtp2_sfc * _MAX_MAG_CORRELATION_FLUX ** 2),
+            wpthlp_sfc ** 2 / (thlp2_sfc * _MAX_MAG_CORRELATION_FLUX ** 2)))
+    # Upstream's splat branch, with C_wp2_splat = 0 on the CAM tree so
+    # lhs_splat_wp2 == 0: the ELSE arm's correction is then identically zero and
+    # the IF arm's is (min_wp2_sfc - wp2). Horizontal gustiness takes back half
+    # of whatever vertical compression the floor added, hence the up2/vp2 term
+    # -- dropping it would leave the horizontal variances too large exactly
+    # when the floor bites.
+    correction = jnp.where(wp2_sfc < min_wp2_sfc, min_wp2_sfc - wp2_sfc, 0.0)
+    wp2_sfc = wp2_sfc + correction
+    up2_sfc = up2_sfc - 0.5 * correction
+    vp2_sfc = vp2_sfc - 0.5 * correction
+
+    def _set0(arr, val):
+        return arr.at[:, 0].set(val)
+
+    return (_set0(wp2, wp2_sfc), _set0(up2, up2_sfc), _set0(vp2, vp2_sfc),
+            _set0(thlp2, thlp2_sfc), _set0(rtp2, rtp2_sfc),
+            _set0(rtpthlp, rtpthlp_sfc))
+
+
 def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
                     wpup2, wpvp2, wp2up2, wp2vp2, wp4, wpthvp, wp2thvp,
                     um, vm, upwp, vpwp, wm_zm, wm_zt, Kh_zm, Kh_zt,
@@ -5258,6 +5341,24 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     # advance_xp2_xpyp itself, read from config — CAM uses 3 distinct values.)
     nu2 = jnp.full((ng,), p.nu2)
     nu9 = jnp.full((ng,), p.nu9)
+
+    # ---- (0) SURFACE VARIANCE BC (#1508) ----
+    # Upstream: "Surface variances should be set here, before the call to
+    # either advance_xp2_xpyp or advance_wp2_wp3"
+    # (advance_clubb_core_module.F90:1058-1067). It runs BEFORE the diagnostics
+    # too, so the closure sees the corrected surface values rather than
+    # whatever the previous step's interior solve left at level 0.
+    # The four surface FLUX BCs are already in the state at level 0 -- the
+    # bridge writes them there before calling this -- which is also how the
+    # oracle reads its own (`wpthlp(i,gr%k_lb_zm)`).
+    _wp2_0, _up2_0, _vp2_0, _thlp2_0, _rtp2_0, _rtpthlp_0 = calc_sfc_varnce(
+        state.upwp[:, 0], state.vpwp[:, 0],
+        state.wpthlp[:, 0], state.wprtp[:, 0],
+        state.wp2, state.up2, state.vp2, state.thlp2, state.rtp2,
+        state.rtpthlp, config)
+    state = state._replace(
+        wp2=_wp2_0, up2=_up2_0, vp2=_vp2_0,
+        thlp2=_thlp2_0, rtp2=_rtp2_0, rtpthlp=_rtpthlp_0)
 
     # ---- (1) closure diagnostics on the start-of-step state ----
     diag = compute_clubb_diagnostics(

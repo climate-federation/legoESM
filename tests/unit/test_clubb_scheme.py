@@ -2215,7 +2215,6 @@ def test_clubb_prognostic_rejects_surface_flux_and_explicit_sfc_together():
 # Reproducer: scripts/validate/clubb_prognostic_stability.py --mode production
 
 
-@pytest.mark.xfail(strict=True, reason="#1508: CLUBB sfc_varnce not ported")
 def test_prognostic_surface_theta_l_variance_is_physical():
     """theta_l variance at the surface must be a plausible atmospheric value.
 
