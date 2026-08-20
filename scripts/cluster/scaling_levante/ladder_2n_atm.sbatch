@@ -35,6 +35,14 @@ SUBDIV="${SUBDIV:-9}"; NLAT="${NLAT:-2048}"; NLON=$((2 * NLAT))
 # runs the ragged one — so its points cannot be mixed into this curve and
 # the ladder has to be re-run to show the gain honestly.
 PARTITION="${PARTITION:-sfc}"
+# Vertical level count. Default 26 is production; the single-GPU level scan
+# (job 27076677) measured 22-31 levels costing 2.4-3x per level compared
+# with 16, 20, 32, 36 and 40, so the ladder has to be runnable at another
+# count to say whether that penalty is what limits the icosahedral lane.
+# Receipts for a non-default count get their own filename so the 26-level
+# curve is never overwritten by a different physics configuration.
+NLEV="${NLEV:-26}"
+LSUF=""; [ "$NLEV" = 26 ] || LSUF="_l${NLEV}"
 GPN=4; NODES=$(( (NDEV + GPN - 1) / GPN ))
 NTPN=$(( NDEV < GPN ? NDEV : GPN ))
 echo "=== ladder $LANE ndev=$NDEV nodes=$NODES $(date +%T) git=$(git rev-parse --short HEAD) ==="
@@ -50,10 +58,10 @@ if [ "$LANE" = "mpas" ]; then
       --ntasks-per-node="$NTPN" --gpus-per-node="$NTPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-      --multicontroller --n-devices "$NDEV" --subdivision "$SUBDIV" --nlev 26 \
+      --multicontroller --n-devices "$NDEV" --subdivision "$SUBDIV" --nlev "$NLEV" \
       --steps 60 --warmup 5 --lloyd 0 --partition-method "$PARTITION" \
       --halo-strategy ppermute --reorder-for "$NDEV" \
-      --out "$OUTDIR/mpas_s${SUBDIV}_${PARTITION}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
+      --out "$OUTDIR/mpas_s${SUBDIV}_${PARTITION}${LSUF}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
 else
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   JAX_ENABLE_X64=0 \
@@ -62,11 +70,11 @@ else
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
       --multicontroller --n-devices "$NDEV" --mode strong \
-      --n-lat "$NLAT" --n-lon "$NLON" --nlev 26 \
+      --n-lat "$NLAT" --n-lon "$NLON" --nlev "$NLEV" \
       --steps 60 --warmup 10 \
-      --out "$OUTDIR/latlon_${NLAT}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
+      --out "$OUTDIR/latlon_${NLAT}${LSUF}_n${NDEV}.jsonl" || { echo "ARM FAILED"; rc=1; }
 fi
-if [ "$LANE" = "mpas" ]; then F="$OUTDIR/mpas_s${SUBDIV}_${PARTITION}_n${NDEV}.jsonl"; else F="$OUTDIR/latlon_${NLAT}_n${NDEV}.jsonl"; fi
+if [ "$LANE" = "mpas" ]; then F="$OUTDIR/mpas_s${SUBDIV}_${PARTITION}${LSUF}_n${NDEV}.jsonl"; else F="$OUTDIR/latlon_${NLAT}${LSUF}_n${NDEV}.jsonl"; fi
 "$PY" -c "
 import json, math, sys
 rows = [json.loads(l) for l in open('$F')]
