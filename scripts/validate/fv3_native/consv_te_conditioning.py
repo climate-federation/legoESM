@@ -80,7 +80,7 @@ def main(argv=None):
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      oracle_conventions=True)
-    ak, bk, ptop = set_eta_analytic(KM)
+    ak, bk, ptop, _ks = set_eta_analytic(KM)
     state = build_port_ic(ctx, ak, bk, nh=False, zvir=0.0)[0]
     press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
                                n=N, ng=NG, km=KM) for f in state]

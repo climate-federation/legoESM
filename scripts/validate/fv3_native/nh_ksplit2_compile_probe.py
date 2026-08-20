@@ -110,7 +110,7 @@ def main(argv=None):
     ctx["hs6"] = [np.zeros((N + 2 * NG, N + 2 * NG), dtype=np.float64)
                   for _ in range(6)]
     jctx = build_jax_duo_stepper_context(ctx)
-    ak, bk, ptop = set_eta_analytic(KM)
+    ak, bk, ptop, _ks = set_eta_analytic(KM)
 
     for i in range(args.n):
         t0 = time.time()
