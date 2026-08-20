@@ -67,7 +67,15 @@ def constants_equal(a, b) -> bool | None:
     """
     try:
         return bool(a == b)
-    except TypeError:                       # TracerBoolConversionError et al.
+    except (TypeError, ValueError):
+        # TypeError: TracerBoolConversionError et al. (a JAX tracer).
+        # ValueError: "truth value of an array with more than one element is
+        # ambiguous" -- a numpy/JAX ARRAY operand with >1 element makes
+        # ``a == b`` an elementwise array, and ``bool()`` on that raises
+        # ValueError, not TypeError. Before this widening that ValueError
+        # escaped uncaught, breaking the "undecidable never discards a value
+        # the caller supplied" contract documented above for any array-valued
+        # constant.
         return None
 
 

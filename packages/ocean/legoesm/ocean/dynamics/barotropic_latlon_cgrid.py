@@ -1487,9 +1487,13 @@ def barotropic_substeps_latlon_cgrid(
     #       is the NOW u-face column depth, the SAME thickness ``U_bar_corr``
     #       (= puu_b) is built from, so the reconciled depth-mean is exactly
     #       ``Hu_avg/H_u``.
-    # Static Python gate on the config string (dispatch hardening).
-    _recon = getattr(config.barotropic, "barotropic_reconcile_target",
-                     "velocity_avg")
+    # Static Python gate on the config string (dispatch hardening). The
+    # field always exists on BarotropicConfig (default "velocity_avg",
+    # state.py) -- a getattr literal-fallback here is the banned pattern
+    # (CLAUDE.md: "`getattr(..., 'X', <literal>)` fallbacks count as
+    # hardcoded"); read it directly so a future rename/removal of the field
+    # raises AttributeError instead of silently reverting to the fallback.
+    _recon = config.barotropic.barotropic_reconcile_target
     if _recon not in ("velocity_avg", "transport_avg"):
         raise ValueError(
             "unknown barotropic_reconcile_target "

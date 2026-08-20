@@ -65,6 +65,7 @@ import sys
 import pytest
 
 from tests.ocean._nemo_shared_state_baseline import (
+    CHAIN_FILES_BASELINE,
     DISPOSITIONS,
     EXCLUDED_MODULES,
     IN_STATE,
@@ -364,15 +365,64 @@ def build_enumeration(gen) -> Enumeration:
         entries = buckets.get(call.name, [])
         # Selection order is the generator's, deliberately: the fan-out case
         # is tested FIRST, or `zdf_phy` would take only its first child.
-        if (len(entries) > 1 and n_sites[call.name] == 1
-                and all("->" in e.routine for e in entries)):
+        is_fanout_shape = len(entries) > 1 and all("->" in e.routine for e in entries)
+        if is_fanout_shape and n_sites[call.name] == 1:
             # One call site coverage resolved into SEVERAL concrete routines
             # (`zdf_phy` -> zdf_tke/zdf_evd/zdf_drg/...): every child runs.
             chosen = entries
+        elif is_fanout_shape:
+            # A fan-out coverage shape (every entry contains "->") joined
+            # against a wrapper with MORE THAN ONE live call site: the
+            # per-site ordinal-select branch below would take only
+            # entries[ordinal] -- ONE of the fanned-out children -- and
+            # silently drop the rest (the class this test file's own
+            # docstring names: "a second oracle call site for zdf_phy or
+            # tra_adv silently drops zdf_evd/zdf_mxl_turb/zdf_tke"). Whether
+            # every call site should get every fanned-out child, or coverage
+            # needs a per-site bucket, needs a human decision -- refuse to
+            # guess.
+            raise AssertionError(
+                f"fan-out/multi-site ambiguity for wrapper {call.name!r}: "
+                f"coverage resolved {len(entries)} fanned-out routines "
+                "(every entry's routine field contains '->'), but there are "
+                f"{n_sites[call.name]} LIVE call sites for {call.name!r} "
+                "(not 1) -- the join cannot tell whether every fanned-out "
+                "child belongs to every call site or coverage needs a "
+                "per-site bucket. Resolve by hand in "
+                "stpmlf_call_coverage.py / gen_step_wiring.py; do not let "
+                "the join silently pick one child."
+            )
         elif ordinal < len(entries):
             chosen = [entries[ordinal]]
         else:
-            chosen = []
+            # More LIVE occurrences of this wrapper than coverage rows: the
+            # ordinal-select branch above ran out of entries. Silently
+            # returning chosen=[] used to enumerate NOTHING for this call
+            # site with no record it happened at all.
+            #
+            # KNOWN CONSEQUENCE (verified against the live NEMO checkout at
+            # /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 as of this
+            # writing): this currently DOES raise, on 8 real occurrences --
+            # iom_setkt (ordinal 4), trddump_acc_baro (0), trddump_acc_plant
+            # (0), trddump_acc_state (0,1,2), stp_dump_ts_krhs (4,5) -- i.e.
+            # stpmlf_call_coverage.py has fewer rows for these wrappers than
+            # there are LIVE call sites in stp_MLF. That breaks every test
+            # depending on the `enum` fixture until each is resolved (add
+            # the missing coverage row(s), or document why dropping that
+            # occurrence's descent is safe). This is INTENTIONAL: the
+            # previous silent chosen=[] hid these 8 gaps with no record they
+            # existed. Fixing gen_step_wiring.py's coverage data is a
+            # separate, oracle-investigation task, not covered by this raise.
+            raise AssertionError(
+                f"ordinal overflow for wrapper {call.name!r}: LIVE call-site "
+                f"occurrence #{ordinal} (0-based, counting all occurrences "
+                f"of {call.name!r} in stp_MLF) has no matching "
+                f"stpmlf_call_coverage.py entry (only {len(entries)} "
+                "coverage row(s) resolved for this wrapper) -- either "
+                "coverage is missing a row for this occurrence, or the LIVE "
+                "call count for this wrapper is wrong. Do not let the join "
+                "silently enumerate zero routines for a live call site."
+            )
         for entry in chosen:
             tail = entry.routine.split("->")[-1]
             live_names |= set(re.findall(r"[A-Za-z_]\w*", tail))
@@ -492,7 +542,6 @@ def dispose(key: tuple[str, str], enum: Enumeration):
 # below is a floor a broken parser falls through, not a pinned exact count.
 # ---------------------------------------------------------------------------
 _MIN_SYMBOLS = 300
-_MIN_CHAIN_FILES = 20
 _MIN_REFERENCED = 150
 
 
@@ -501,7 +550,20 @@ def test_enumeration_is_non_trivial(enum):
         f"only {len(enum.symbols)} shared symbols enumerated (expected >= "
         f"{_MIN_SYMBOLS}) -- the Fortran parse is broken and every check "
         "below would be vacuous")
-    assert len(enum.chain_files) >= _MIN_CHAIN_FILES, len(enum.chain_files)
+    # A bare min-count floor is too loose to catch a rot that drops several
+    # files while gaining a few others by coincidence (see
+    # ``build_enumeration``'s docstring for the #1455 incident that would
+    # still have cleared a floor of 20). Pin the exact set instead: any
+    # pinned file missing from the live chain is a hard failure, caught at
+    # 1 file lost.
+    missing_chain_files = sorted(CHAIN_FILES_BASELINE - enum.chain_files)
+    assert not missing_chain_files, (
+        f"{len(missing_chain_files)} pinned live-chain file(s) vanished from "
+        "the enumeration -- either the Fortran parse / dispatch join broke, "
+        "or these files genuinely no longer belong in the live chain (in "
+        "which case remove them from CHAIN_FILES_BASELINE in "
+        "tests/ocean/_nemo_shared_state_baseline.py WITH A STATED REASON, "
+        f"never silently): {missing_chain_files}")
     assert len(enum.referenced) >= _MIN_REFERENCED, len(enum.referenced)
     # The motivating declaration itself must be in the enumeration, reached
     # through the bare `USE sbc_oce` in sbcmod.F90 (no ONLY clause).
@@ -711,6 +773,24 @@ def test_gate_catches_a_symbol_dropped_from_the_enumeration(enum):
     with pytest.raises(AssertionError, match="stale entries"):
         test_baseline_only_shrinks(shrunk)
     test_baseline_only_shrinks(enum)   # restored
+
+
+def test_gate_catches_a_pinned_chain_file_dropping_out(enum):
+    """The class ``CHAIN_FILES_BASELINE`` replaced the ``_MIN_CHAIN_FILES``
+    floor to catch: if the live chain stops producing a PINNED file, the
+    non-vacuity check must go red immediately (at 1 file lost), not silently
+    pass because the total count still clears an arbitrary floor -- the
+    #1455 rot dropped 12 files while gaining 6 unrelated ones and would still
+    have cleared a floor of 20."""
+    victim = "zdftke.F90"
+    assert victim in CHAIN_FILES_BASELINE, "setup: victim must be pinned"
+    assert victim in enum.chain_files, "setup: victim must currently reproduce"
+
+    shrunk = Enumeration(
+        enum.symbols, enum.chain_files - {victim}, enum.referenced, enum.routines)
+    with pytest.raises(AssertionError, match="vanished from"):
+        test_enumeration_is_non_trivial(shrunk)
+    test_enumeration_is_non_trivial(enum)   # restored
 
 
 def test_gate_catches_a_false_inert_claim(oracle, enum):

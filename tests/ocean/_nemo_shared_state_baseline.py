@@ -52,6 +52,35 @@ UNREFERENCED_REASON = (
 
 
 # ---------------------------------------------------------------------------
+# PINNED live-chain file set.  Replaces a bare ``len(chain_files) >= 20``
+# floor: the floor was too loose to catch its own motivating incident -- the
+# #1455 line-join rot (see ``build_enumeration``'s docstring) dropped 12
+# files (zdftke, dynspg_ts, traadv_fct, traldf_iso, zdfdrg, zdfevd, zdfmxl,
+# dynkeg, dynldf_lev, dynzad, ldftra, diadct) while gaining 6 unrelated ones
+# by line coincidence, and the resulting count would STILL have cleared 20.
+# This pins the exact set discovered on the CURRENT (name-and-ordinal) join
+# so any file dropping out of the live chain is caught at 1 file lost, not
+# after losing more than half of it.  SHRINK-ONLY: a pinned file that stops
+# reproducing is a HARD FAILURE (``test_enumeration_is_non_trivial``) -- fix
+# the enumeration, or remove the entry here with a stated reason if the file
+# genuinely no longer belongs in the live chain (never a silent drop). Gaining
+# a NEW file beyond this set is not itself a failure (the live chain growing
+# is expected as the oracle/coverage doc gains resolution); only a file
+# missing from this pinned set is.
+CHAIN_FILES_BASELINE: frozenset[str] = frozenset({
+    "diaar5.F90", "diadct.F90", "diawri.F90", "divhor.F90", "domqco.F90",
+    "dynadv.F90", "dynatf_qco.F90", "dynhpg.F90", "dynkeg.F90", "dynldf.F90",
+    "dynldf_lev.F90", "dynspg.F90", "dynspg_ts.F90", "dynvor.F90",
+    "dynzad.F90", "dynzdf.F90", "eosbn2.F90", "iom.F90", "ldftra.F90",
+    "sbcmod.F90", "sshwzv.F90", "storng.F90", "stpctl.F90", "stpmlf.F90",
+    "traadv.F90", "traadv_fct.F90", "traatf_qco.F90", "traldf.F90",
+    "traldf_iso.F90", "traqsr.F90", "trasbc.F90", "trazdf.F90",
+    "trddump.F90", "zdfdrg.F90", "zdfevd.F90", "zdfmxl.F90", "zdfphy.F90",
+    "zdftke.F90",
+})
+
+
+# ---------------------------------------------------------------------------
 # SCOPE CARVE-OUT.  Stated, not silent (oracle-fidelity Rule 1: an honest
 # "N excluded, here is what covers them" beats a clean table with guesses).
 # Each name must be a module the enumeration WOULD otherwise produce
@@ -392,6 +421,267 @@ SYMBOL_DISPOSITION: dict[tuple[str, str], tuple] = {
     # =====================================================================
     # zdftke -- the TKE closure's own module state
     # =====================================================================
+    ("trddump", "ll_plant_read"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "nacc_steps"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "nacc_trd"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "racc_r1dt"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "rhd_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "rn2_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "rn_acc_plant"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "sn_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "strd_store"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "tn_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "ttrd_store"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "uacc_bb"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "uacc_fin"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "uacc_zdf"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "ubt_acc"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "uslp_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "utrd_acc"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "utrd_store"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "uu_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vacc_bb"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vacc_fin"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vacc_zdf"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vbt_acc"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vslp_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vtrd_acc"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vtrd_store"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "vv_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "wslpi_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
+    ("trddump", "wslpj_stg"): (
+        WAIVED,
+        "OUR OWN #1455 instrumentation state (MY_SRC/trddump.F90, oracle "
+        "d1ae0ef): dump/accumulator storage written and read only inside "
+        "trddump itself; no NEMO physics routine consumes it, and the "
+        "instrumented binary is bit-identical on model state (the two "
+        "physics-unchanged controls recorded in oracle 0a1a0cf). Not a "
+        "NEMO shared-state symbol legoESM must carry.",
+    ),
     ("zdftke", "dissl"): (
         IN_STATE,
         "MISSING: the dissipative mixing length. zdf_tke calls tke_tke THEN "
