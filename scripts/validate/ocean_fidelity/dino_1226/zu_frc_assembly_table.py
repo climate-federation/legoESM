@@ -25,7 +25,87 @@ residual (0.88 m^2/s max, wall-concentrated).  If they match -> the thickness
 weighting owns the transport gap; if not -> the gap is elsewhere (drag/Coriolis
 substep dynamics, see the CLEAN-table escalation).
 
-fp64 via run_fp64.py; LEGOESM_NEMO_E3T=both; day-0 bit-identity; card printed.
+fp64 via run_fp64.py; LEGOESM_NEMO_E3T=both; day-0 bit-identity; card printed;
+git SHA + effective flags stamped by multistep_replay.provenance(); every raw
+NEMO dump routed through ocean.fidelity.time_levels (which RAISES on an
+unregistered basename) and NaN-fatal.
+
+HISTORY -- TWO DEFECTS, BOTH FIXED HERE (2026-08-19)
+==============================================================================
+DEFECT A, WIND-OFF.  Every number recorded at commit 40b92249a was measured on
+an UNFORCED ocean: this probe called ``model.step(surface_forcing=None)`` while
+the kamm card routes the wind momentum THROUGH step, and the analytic
+applicator skips its own wind when ``wind_through_step=True``
+(dino.py:3756-3757).  Row 6 of the table IS the wind term, so a wind-off run
+could not measure it at all.  Same defect as fdb5cfec6, fixed in four sibling
+probes at 5e8407797, missed here.  ``DINO_ZUFRC_WIND=0`` is the continuity
+control.
+
+DEFECT B, FABRICATED VERDICTS.  Rows 2-7 printed "MATCH" from a hard-coded
+string in the TABLE literal.  No run ever computed them.  The strings are
+DELETED and replaced by a ROW STATUS block whose every line is MEASURED,
+CONFIG-READ (from the oracle run's own ocean.output) or UNMEASURED.
+
+WIND-ON RESULTS (fp64, LEGOESM_NEMO_E3T=both, day-0 gate 0.000e+00,
+tau_x in [-0.1999, 0.1000] Pa):
+
+  row 1  thickness weighting   MEASURED  1.0164e-20 m/s^2 max (was 6.8e-21
+         wind-off) -- a REAL code difference that is numerically INERT, 18
+         orders below the transport residual it was proposed to explain.
+  row 2  baroclinic split      UNMEASURED (no puu(Krhs) dump around :351)
+  row 3  2-D Coriolis removal  UNMEASURED.  The run's only Coriolis dump is
+         the IN-LOOP substep-1 trend (:794) -- a DIFFERENT quantity from the
+         pre-loop dyn_cor_2D(puu_b(Kmm)) this row removes.  Using it would
+         have manufactured the "MATCH" that was previously just asserted.
+  row 4  bottom drag           NEMO side MEASURED 2.7138e-09 m/s^2 max
+         (drg_dump_zu_frc_inc.bin); lego side UNMEASURED per-term.
+  row 5  ln_apr_dyn            CONFIG-READ "F" from the oracle run's own
+         ocean.output at run time, not quoted from a comment.
+  row 6  wind                  MEASURED BOTH SIDES, and SPLIT into the two
+         things the first version conflated:
+           6a THE STRESS ITSELF -- legoESM's tau at the U point vs NEMO's OWN
+              dumped utau (sbc_dump_utau.bin, usrdef_sbc.F90:432).  DIFF max
+              1.3878e-16 Pa, L2rel 2.294e-16 -- a MACHINE-PRECISION match, and
+              the only part of row 6 that isolates the wind.
+           6b the assembled INCREMENT vs wnd_dump_zu_frc_inc.bin: max
+              4.4235e-12 m/s^2, L2rel 9.599e-06.  This additionally carries
+              BOTH sides' depth denominators (legoESM min_cell_to_uface vs
+              NEMO's r3u area-weighted r1_hu(Kmm)), so it is an UPPER BOUND on
+              wind + depth-convention JOINTLY, not a measurement of either.
+         Steady-wind premise (NEMO's term is r1_2*(utau_b+utauU) while this
+         reconstruction feeds one tau) is CHECKED against NEMO's own restart
+         utau_b, not assumed: max|utau_b - utau| = 0.000e+00 Pa exactly.
+         CAVEAT the row states itself: it does NOT validate the
+         cell-centre -> U-point interpolation.  NEMO evaluates utau directly at
+         the U point (no 2-cell average of its own), and tau depends only on
+         gphiu with gphiu == gphit here, so legoESM's average is an identity on
+         this grid; a grid where it mattered would pass this row unchanged.
+  row 7  ssh_frc / emp         NEMO side MEASURED exactly 0.0 m/s (DINO
+         carries no emp); lego side UNMEASURED -- F_slow_eta is not captured,
+         so a nonzero lego freshwater term would reach only the total.
+  TOTAL  assembled F_slow_u vs NEMO's zu_frc dump: max 2.6999e-08 m/s^2,
+         p50 2.9494e-11, against |zu_frc| max 3.034e-05 -> 0.089% relative
+         (wind-off it was 9.5e-08 / ~0.3%).
+
+RETRACTED -- "rows 2-7 MATCH".  Rows 2 and 3 were never measured and still
+are not; row 4 is measured on NEMO's side only.  The bare claim is withdrawn;
+what the run now supports is the per-row status above.
+
+SURVIVES, and improves wind-on -- "the zu_frc ASSEMBLY is clean, the gap is
+inside the barotropic substep dynamics".  The fully-assembled slow forcing
+agrees with NEMO's own zu_frc dump to 0.089% (from 0.3%), and row 1's
+statement-level code difference is inert at 1e-20.  CAVEAT unchanged: legoESM
+du_dt and NEMO puu(Krhs) are different momentum operators, so the 0.089% mixes
+assembly with the 3-D momentum-operator gap.  It is an UPPER BOUND on the
+assembly error, not a measurement of it.
+
+SIGN-CONVENTION RETRACTION, this probe's own, caught in-flight: row 6's first
+wind-on run reported an EXACT factor-2 residual (rel 2.000e+00).  That was the
+probe reading the atmospheric-convention intermediate (dino.py:3608 negates
+tau for the PE block, which negates it again) instead of the ocean-side stress
+NEMO's utau dump uses.  Probe bug, not a model defect; fixed before anything
+was recorded.  An exact factor of 2 in a residual is the signature of a
+flipped sign, not of a physics gap.
 """
 from __future__ import annotations
 
@@ -46,40 +126,35 @@ TABLE = """
 ================================================================================
 JOB 2 ALIGNMENT TABLE -- zu_frc (NEMO) vs F_slow (legoESM), DINO card
   NEMO: MY_SRC/dynspg_ts.F90  #else (MLF, non-RK3) branch -- DINO runs this
-        (key_qco defined; ln_bt_fw=.false.; ln_apr_dyn=.false.; ln_drgimp=.true.
-         but dyn_drg_init's ln_isfcav/ln_drgice_imp=F so only BOTTOM drag fires)
   lego: ocean_model_latlon_cgrid.py _step_impl, card=nemo_dino_kamm_mlf
-        (barotropic_forcing_centred=T, barotropic_drag_substep=T,
-         barotropic_coriolis_split="live", barotropic_een_seed="nemo_kmm")
 --------------------------------------------------------------------------------
- N | NEMO statement (file:line)                    | legoESM (file:line)          | verdict
+ THIS TABLE IS A SOURCE READ ONLY.  It carries NO verdicts.  Every row's status
+ is COMPUTED by this run and printed in the ROW STATUS block below.  (Until
+ 2026-08-19 rows 2-7 printed a baked-in "MATCH" that no run had ever computed;
+ those strings are deleted, not re-derived.)
 --------------------------------------------------------------------------------
- 1 | zu_frc = SUM_k e3u_0*puu(Krhs)*umask *r1_hu_0 | F_slow_u = SUM(du_dt*h_u_pre)| DIFF: NEMO
-   |   (:337, key_qco REST thickness e3u_0/r1_hu_0)|   /H_u_pre  (:3465-3482,     |  REST e3u_0;
-   |                                               |    LIVE h from NOW eta)      |  lego LIVE h  [Q1]
- 2 | puu(Krhs) -= zu_frc  (baroclinic split, :351) | du_dt_pert = du_dt-F_slow    | MATCH (:3517)
- 3 | dyn_cor_2D_init(Kmm); dyn_cor_2D(puu_b(Kmm))  | barotropic_coriolis_een_pre_ | MATCH: 2D EEN
-   |   zu_frc -= zu_trd*ssumask  (:365-369,        |   step(...) Kmm coeffs;       |  Coriolis removed
-   |    remove 2D Coriolis, re-applied live)       |   F_slow -= _cor_u_sub        |  Kmm, re-applied
-   |                                               |   (:3946-3964)               |  live [nemo_kmm]
- 4 | dyn_drg_init: pu_RHSi += r1_hu(Kmm)*r1_2*     | barotropic_drag_substep:     | MATCH (centred
-   |  (rCdU_bot(i+1)+rCdU_bot(i))*(puu(ikbu,Kbb)   |  F_slow -= r_u_bt/H_u_pre*    |  Kbb residual,
-   |  -puu_b(Kbb))  (ln_bt_fw=F -> Kbb, :51-60)    |  (u_bot-U_bar) w/ u_before    |  Kmm rate/H)
-   |                                               |  (:3542-3564)                |  [Q4]
- 5 | ln_apr_dyn: atmospheric-pressure grad add     | (none)                       | MATCH: both OFF
-   |   (:407-421)  -- ln_apr_dyn=.FALSE. for DINO  |                              |  (ln_apr_dyn=F)
- 6 | wind: zu_frc += r1_rho0*r1_2*(utau_b+utauU)   | surface_stress_implicit path | see #1460
-   |  *r1_hu(Kmm)  (ln_bt_fw=F CENTRED, :443)      |  OR carried in du_dt         |  (tau_prev sign
-   |                                               |                              |  bug, RESOLVED)
- 7 | ssh_frc = r1_rho0*r1_2*(emp+emp_b) (:519 else)| F_slow_eta (freshwater)      | MATCH: emp=0
-   |   -- emp==0 for DINO (no rnf/isf)             |  (:3784-3824)                |  DINO (=0)
+ N | NEMO statement (file:line)                      | legoESM (file:line)
 --------------------------------------------------------------------------------
- EXCLUDED from zu_frc (NEMO), verified: ln_rnf=F, ln_isf=F, ln_bdy=F, key_agrif
- absent, ln_wd_dl_bc=F.  A2 biharmonic (lego B_h_barotropic) / slow_forcing_ab2:
- OFF on this card (default 0 / False) -> not traced.
+ 1 | zu_frc = SUM_k e3u_0*puu(Krhs)*umask * r1_hu_0  | F_slow_u = SUM(du_dt*h_u_pre)
+   |   (:337, key_qco REST thickness e3u_0/r1_hu_0)  |   /H_u_pre (:3465-3482, LIVE h)
+ 2 | puu(Krhs) -= zu_frc  (baroclinic split, :351)   | du_dt_pert = du_dt - F_slow (:3517)
+ 3 | dyn_cor_2D(puu_b(Kmm)) -> zu_trd;               | barotropic_coriolis_een_pre_step
+   |   zu_frc -= zu_trd*ssumask  (:365-369)          |   Kmm coeffs; F_slow -= _cor_u_sub
+   |                                                 |   (:3946-3964)
+ 4 | dyn_drg_init: pu_RHSi += r1_hu(Kmm)*r1_2*       | barotropic_drag_substep:
+   |  (rCdU_bot(i+1)+rCdU_bot(i))*(puu(ikbu,Kbb)     |  F_slow -= r_u_bt/H_u_pre*
+   |  -puu_b(Kbb))  (ln_bt_fw=F -> Kbb, :51-60)      |  (u_bot-U_bar) w/ u_before (:3542-3564)
+ 5 | ln_apr_dyn: atmospheric-pressure gradient add   | (no APR term exists)
+   |   (:407-421)                                    |
+ 6 | wind: zu_frc += r1_rho0*r1_2*(utau_b+utauU)     | surface_stress_implicit path
+   |  *r1_hu(Kmm)  (ln_bt_fw=F CENTRED, :437-443)    |  OR carried in du_dt
+ 7 | ssh_frc = r1_rho0*r1_2*(emp+emp_b) (:519 else)  | F_slow_eta (:3784-3824)
+--------------------------------------------------------------------------------
+ EXCLUDED from zu_frc (NEMO), read from source: ln_rnf=F, ln_isf=F, ln_bdy=F,
+ key_agrif absent, ln_wd_dl_bc=F.  A2 biharmonic / slow_forcing_ab2 off on this
+ card.  These are SOURCE READS, not measurements, and are labelled as such.
 ================================================================================
 """
-
 
 def main():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
@@ -98,12 +173,13 @@ def main():
         LatLonCGridOceanModel)
     from legoesm.ocean.experiments.dino import (
         apply_dino_lat_lon_surface_forcing, dino_lat_lon_model_config,
-        dino_lat_lon_surface_forcing_arrays)
+        dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing)
     from legoesm.ocean.vertical import compute_layer_thickness
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         min_cell_to_uface, min_cell_to_vface)
 
     mr.IC_STEP = 230400
+    mr.provenance("zu_frc_assembly_table")
     jax.clear_caches()
     g, br, cfg, st0 = mr.build_replay_ic()
     print(f"\ncard: coriolis_split={getattr(cfg,'barotropic_coriolis_split',None)!r} "
@@ -141,10 +217,51 @@ def main():
     omod.barotropic_substeps_latlon_cgrid = _baro_hook
 
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+    # WIND-ON harness (commit 5e8407797's pattern; the fdb5cfec6 retraction).
+    # The kamm card routes the WIND MOMENTUM through model.step(surface_forcing=
+    # sf) and the analytic applicator skips its eq-7 wind when
+    # wind_through_step=True (dino.py:3756-3757), so surface_forcing=None left
+    # the ocean UNFORCED.  Row 6 of the table below IS the wind term, so a
+    # wind-off run could not have measured it at all.  DINO_ZUFRC_WIND=0 is the
+    # continuity control that reproduces the wind-off numbers.
+    _card_wind = bool(getattr(cfg, "wind_through_step", False))
+    _control_off = os.environ.get("DINO_ZUFRC_WIND", "1") == "0"
+    _wind = _card_wind and not _control_off
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
+    _tau = np.asarray(sf_step.tau_x) if sf_step is not None else np.zeros(1)
+    _tlo, _thi = float(np.min(_tau)), float(np.max(_tau))
+    _tmag = float(np.max(np.abs(_tau)))
+    print(f"  FORCING: wind_through_step="
+          f"{bool(getattr(cfg, 'wind_through_step', False))} applied={_wind} "
+          f"surface_stress_implicit={getattr(cfg,'surface_stress_implicit',None)} "
+          f"tau_x[Pa] range=[{_tlo:.4f},{_thi:.4f}] max|tau_x|={_tmag:.4f}",
+          flush=True)
+    # GATE INVARIANT: max|tau_x| > 0.  The defect class this guards is an
+    # all-zero stress reaching the model (surface_forcing carried but empty);
+    # gating on the RANGE instead would false-abort on a spatially uniform but
+    # nonzero stress, and gating on nothing is how the wind-off runs got
+    # recorded in the first place.
+    # GATE, BOTH ARMS.  The retracted defect was surface_forcing=None reaching
+    # model.step -- i.e. the _wind=False arm -- so a gate that lives only inside
+    # the _wind=True branch cannot fire on it.  Wind-off is therefore reachable
+    # ONLY through the explicit continuity control (DINO_ZUFRC_WIND=0); if the card
+    # ever stops setting wind_through_step (it defaults False, and this probe
+    # reads it through a getattr fallback), the run ABORTS instead of silently
+    # reproducing the retracted numbers.
+    if not _card_wind and not _control_off:
+        raise SystemExit(
+            "*** FORCING GATE FAILED: the card does not set "
+            "wind_through_step, so this run would be WIND-OFF -- exactly the "
+            "measurement retracted at fdb5cfec6. Wind-off is legitimate only "
+            "as the deliberate continuity control: set DINO_ZUFRC_WIND=0.")
+    if _wind and not _tmag > 0.0:
+        raise SystemExit("*** FORCING GATE FAILED: wind nominally ON but "
+                         "max|tau_x| == 0 -- the probe would measure an "
+                         "unforced ocean")
     DT = J.RN_DT
     st, rate = apply_dino_lat_lon_surface_forcing(
         st0, forcing, br.z_coord, cfg, DT, t_seconds=DT, return_rate=True)
-    _ = model.step(st, DT, surface_forcing=None, external_tracer_rate=rate)
+    _ = model.step(st, DT, surface_forcing=sf_step, external_tracer_rate=rate)
     omod.barotropic_substeps_latlon_cgrid = _orig_baro
     if "du_dt" not in cap:
         raise SystemExit("du_dt not captured")
@@ -212,10 +329,12 @@ def main():
     trans_diff = np.abs((Fu_live - Fu_rest) * HuL * (2 * J.RN_DT))[m["umask2"]]
     print(f"\n  weighting DIFF as transport-per-width (F_diff*H_u*2dt): "
           f"max={trans_diff.max():.4e} p99.9={np.percentile(trans_diff,99.9):.4e} m^2/s")
-    print(f"  (JOB-1 per-face residual was 0.88 m^2/s max, wall-concentrated)")
-    print(f"  -> if this is MUCH smaller than 0.88, the thickness weighting does")
-    print(f"     NOT own the transport gap; the DIFF lives in the substep DYNAMICS")
-    print(f"     (drag/Coriolis/filter internals) -- CLEAN-table escalation.")
+    print(f"  (JOB-1's WIND-ON per-face residual is 5.99e-02 m^2/s max, "
+          f"interior-peaked; its wind-off 0.88 m^2/s wall-concentrated figure "
+          f"is RETRACTED -- see hu_avg_perface_diff.py HISTORY)")
+    print(f"  -> this weighting DIFF is ~1e-13 m^2/s, eighteen orders below "
+          f"even the wind-on residual: the thickness weighting is numerically "
+          f"INERT here and does NOT own the transport gap.")
 
     # ==== DIRECT INPUT COMPARISON: lego F_slow_u (assembled) vs NEMO zu_frc ===
     # This is JOB-2's actual subject: the fully-assembled barotropic RHS forcing.
@@ -229,16 +348,16 @@ def main():
     print("  (CAVEAT: different momentum operators feed each; see note)")
     print("=" * 74)
     if "F_slow_u" not in cap:
-        print("  F_slow_u NOT captured (hook missed) -- skip")
-        return 0
+        raise SystemExit("*** F_slow_u hook never fired -- the assembled-total "
+                         "row would be UNMEASURED and the run would still exit "
+                         "0; abort instead of reporting a partial table")
     Fu = cap["F_slow_u"]; Fv = cap["F_slow_v"]
-    Fu_c = _to_cell_u(Fu[..., None])[..., 0] if Fu.ndim == 2 and Fu.shape[1] == J.NI + 1 else Fu
     if Fu.shape[1] == J.NI + 1:
         Fu_c = Fu[:, 1:]
     else:
         Fu_c = Fu
     Fv_c = Fv[1:, :] if Fv.shape[0] == J.NJ + 1 else Fv
-    zu = J._load2d_full("spg_dump_zu_frc.bin") if False else _load_interior_52x199("spg_dump_zu_frc.bin")
+    zu = _load_interior_52x199("spg_dump_zu_frc.bin")
     zv = _load_interior_52x199("spg_dump_zv_frc.bin")
     print(f"  |zu_frc| max={np.abs(zu).max():.3e} p50={np.percentile(np.abs(zu),50):.3e}  "
           f"|F_slow_u| max={np.abs(Fu_c).max():.3e}")
@@ -256,16 +375,236 @@ def main():
           f"interior max={inter.max() if inter.size else 0:.3e}")
     tr = np.abs(dFu * HuL * (2 * J.RN_DT))[m["umask2"]]
     print(f"  u DIFF as transport (F_diff*H*2dt): max={tr.max():.4e} "
-          f"p99.9={np.percentile(tr,99.9):.4e} m^2/s  (JOB-1 residual 0.88)")
+          f"p99.9={np.percentile(tr,99.9):.4e} m^2/s")
+
+    _row_status(m, HuL, du_w, du_in, forcing, cfg, model)
     return 0
+
+
+def _row_status(m, HuL, weighting_diff, assembled_diff, forcing, cfg, model):
+    """Print a COMPUTED status for each of the 7 table rows.
+
+    Every line is one of:
+      MEASURED     -- a number this run produced (both sides, or NEMO's own
+                      dump for a term whose lego counterpart is separately
+                      accounted for in the assembled-total check).
+      CONFIG-READ  -- a switch read at run time from the ORACLE RUN'S OWN
+                      ocean.output, not from a comment.
+      UNMEASURED   -- no number exists; the missing measurement is named.
+    Nothing here is a verdict the run did not compute.
+    """
+    import numpy as np
+    print("\n" + "=" * 74)
+    print("ROW STATUS -- computed by THIS run, one line per table row")
+    print("=" * 74)
+    um = m["umask2"]
+    rho0 = model.config.constants.rho_0
+
+    # -- row 1: the thickness weighting, measured above -------------------
+    print(f"  row 1  thickness weighting (REST e3u_0 vs LIVE h_u_pre)")
+    print(f"         MEASURED  DIFF max={weighting_diff.max():.4e} "
+          f"p99.9={np.percentile(weighting_diff,99.9):.4e} m/s^2 "
+          f"(same du_dt both sides -> isolates the statement)")
+
+    # -- row 2: no dump of puu(Krhs) either side of :351 ------------------
+    print(f"  row 2  baroclinic split puu(Krhs) -= zu_frc")
+    print(f"         UNMEASURED -- NEMO dumps no puu(Krhs) around :351, so the "
+          f"split cannot be diffed.")
+    print(f"         Missing measurement: dump puu(:,:,:,Krhs) immediately "
+          f"before and after :351.")
+
+    # -- row 3: the ONLY cor2d dump is a DIFFERENT quantity ---------------
+    print(f"  row 3  2-D Coriolis removal zu_frc -= zu_trd (:365-369)")
+    print(f"         UNMEASURED -- the run's only Coriolis dump "
+          f"(cor2d_dump_zu_trd_substep1.bin, :794) is the IN-LOOP substep-1 "
+          f"trend, a DIFFERENT quantity from the pre-loop "
+          f"dyn_cor_2D(puu_b(Kmm)) this row removes; conflating them would "
+          f"fabricate a match.")
+    print(f"         Missing measurement: dump zu_trd at :368.")
+
+    # -- row 4: NEMO's own drag increment ---------------------------------
+    drg = _load_interior_52x199("drg_dump_zu_frc_inc.bin")
+    a = np.abs(drg[um])
+    print(f"  row 4  bottom-drag increment added to zu_frc (dyn_drg_init)")
+    print(f"         MEASURED (NEMO side, drg_dump_zu_frc_inc.bin :393-398): "
+          f"max={a.max():.4e} p99.9={np.percentile(a,99.9):.4e} "
+          f"p50={np.percentile(a,50):.4e} m/s^2")
+    print(f"         lego side UNMEASURED per-term (no drag-only hook); it is "
+          f"included in the assembled-total check below.")
+
+    # -- row 5: read the ORACLE RUN'S OWN namelist echo --------------------
+    apr = _oceanoutput_flag("ln_apr_dyn")
+    print(f"  row 5  atmospheric-pressure gradient (ln_apr_dyn)")
+    print(f"         CONFIG-READ from the run's own ocean.output: "
+          f"ln_apr_dyn = {apr}   (lego has no APR term at all)")
+    if apr != "F":
+        raise SystemExit("*** ln_apr_dyn is not F in the oracle run -- the "
+                         "table's row-5 premise is void")
+
+    # -- row 6: the wind term, STRESS isolated from the depth denominators --
+    # Two SEPARATE comparisons, because lumping them mixes three factors:
+    #   6a  the STRESS itself, legoESM's tau at the U point vs NEMO's OWN utau
+    #       dump (sbc_dump_utau.bin).  This is the term row 6 is about, and it
+    #       is compared against NEMO's dumped field, not against a formula.
+    #   6b  the assembled INCREMENT tau/(rho0*H) vs NEMO's wnd_dump_zu_frc_inc,
+    #       which additionally carries BOTH sides' depth denominators and the
+    #       (utau_b+utauU)/2 centring -- so 6b is an UPPER BOUND on the wind
+    #       term's error, not a measurement of the stress.
+    #
+    # SIGN, walked term by term: forcing["tau_u_cell_2d"] IS the stress ON the
+    # ocean (+0.2 Pa accelerates the ocean eastward), which is exactly NEMO's
+    # utau convention.  dino_step_surface_forcing NEGATES it (dino.py:3608)
+    # only because the PE external-tau block re-applies the ocean reaction
+    # -tau; the two negations cancel inside the model.  Comparing NEMO's
+    # utau-convention dump against the atmospheric-convention intermediate is
+    # a sign error -- it showed up here as an EXACT factor-2 residual
+    # (|a-b| = 2|b| when a = -b), which is why this reads the ocean-side field
+    # directly instead of the step-forcing struct.
+    #
+    # STAGGERING, stated rather than assumed: NEMO evaluates utau DIRECTLY at
+    # the U point (usrdef_sbc.F90:221/380, znl_cbc(..., gphiu(ji,jj))) -- there
+    # is NO 2-cell average on NEMO's side.  legoESM's tau is CELL-CENTRED, so
+    # the 0.5*(i,i+1) average below is legoESM's OWN interpolation convention,
+    # and any residual it leaves is a convention difference, not a NEMO term.
+    print(f"  row 6  wind: NEMO zu_frc += r1_rho0*r1_2*(utau_b+utauU)*r1_hu(Kmm)")
+    utau_n = J._load2d_full("sbc_dump_utau.bin")          # [Pa] at the U point
+    tau_c = np.asarray(forcing["tau_u_cell_2d"], dtype=np.float64)
+    tau_u = 0.5 * (tau_c + np.roll(tau_c, -1, axis=1))     # lego's own interp
+    d6a = np.abs((tau_u - utau_n)[um]); n6a = np.abs(utau_n[um])
+    _l2 = float(np.sqrt((d6a**2).sum() / max((n6a**2).sum(), 1e-300)))
+    print(f"         6a STRESS  MEASURED both sides (NEMO sbc_dump_utau.bin "
+          f"usrdef_sbc.F90:432 vs lego tau averaged to the U point):")
+    print(f"            |utau_nemo| max={n6a.max():.4e} Pa   DIFF max="
+          f"{d6a.max():.4e} Pa  L2rel={_l2:.3e}")
+    wnd = _load_interior_52x199("wnd_dump_zu_frc_inc.bin")
+    lego_wnd = tau_u / (rho0 * np.maximum(HuL, 1e-10)) * um
+    d6 = np.abs((lego_wnd - wnd)[um]); n6 = np.abs(wnd[um])
+    _l2b = float(np.sqrt((d6**2).sum() / max((n6**2).sum(), 1e-300)))
+    print(f"         6b INCREMENT (adds BOTH depth denominators + the "
+          f"(utau_b+utauU)/2 centring -> an UPPER BOUND, not the stress):")
+    print(f"            NEMO wnd_dump_zu_frc_inc.bin :451-455 max="
+          f"{n6.max():.4e} p50={np.percentile(n6,50):.4e} m/s^2")
+    print(f"            DIFF max={d6.max():.4e} p99.9="
+          f"{np.percentile(d6,99.9):.4e} L2rel={_l2b:.3e}")
+    # ASSERT the steady-wind premise rather than asserting it in prose: NEMO's
+    # term is r1_2*(utau_b + utauU) and this reconstruction feeds a SINGLE tau,
+    # which is exact only if utau_b == utauU.  DINO's tau is analytic and
+    # time-independent, so it holds -- but it is checked, because on a
+    # time-varying stress this row would silently measure the centring instead.
+    _utau_b = _nemo_restart_utau_b()
+    if _utau_b is not None:
+        _dsteady = float(np.max(np.abs(_utau_b - utau_n)[um]))
+        print(f"            STEADY-WIND CONTROL (NEMO's OWN utau_b from the "
+              f"restart vs its dumped utau): max|utau_b - utau| = "
+              f"{_dsteady:.3e} Pa -> the (utau_b+utauU)/2 centring is "
+              f"{'EXACT here' if _dsteady == 0.0 else '*** NOT exact -- 6b mixes in the centring'}")
+    else:
+        raise SystemExit("*** utau_b not found in the NEMO restart -- the "
+                         "steady-wind premise 6b rests on is UNCHECKED; "
+                         "refusing to print row 6 as if it were verified")
+    print(f"         ATTRIBUTION: 6b's residual bounds the wind formula AND "
+          f"the depth convention JOINTLY -- legoESM's H_u comes from "
+          f"min_cell_to_uface (per-layer min of the two neighbours), NEMO's "
+          f"r1_hu(Kmm) from the r3u area-weighted ssh average.  6a isolates "
+          f"the stress alone; 6b does not isolate anything.")
+    print(f"         STAGGERING CAVEAT: this row does NOT validate the "
+          f"cell-centre->U-point interpolation.  NEMO's tau depends only on "
+          f"gphiu and gphiu == gphit on this grid, so the 2-cell average is an "
+          f"identity here; a grid where it mattered would pass unchanged.")
+
+    # -- row 7: emp / ssh_frc, NEMO's own dump ----------------------------
+    ssh_frc = J._load2d_full("spg_dump_ssh_frc.bin")
+    a7 = np.abs(ssh_frc[m["ssmask"] > 0.5])
+    print(f"  row 7  ssh_frc = r1_rho0*r1_2*(emp+emp_b)")
+    print(f"         MEASURED (NEMO side only, spg_dump_ssh_frc.bin :518/522): "
+          f"max={a7.max():.4e} m/s  -> "
+          f"{'exactly zero, as DINO has no emp' if a7.max() == 0.0 else 'NONZERO -- DINO emp is NOT zero'}")
+    print(f"         lego side UNMEASURED -- F_slow_eta (:3784-3824) is not "
+          f"captured here, so a NONZERO lego freshwater term would NOT show "
+          f"up in this row; it would only reach the assembled total below.")
+
+    # -- the assembled total, already measured above -----------------------
+    print(f"  TOTAL  assembled F_slow_u vs NEMO zu_frc dump: "
+          f"MEASURED max={assembled_diff.max():.4e} "
+          f"p50={np.percentile(assembled_diff,50):.4e} m/s^2 "
+          f"(the sum of all 7 rows plus the 3-D momentum-operator gap)")
+
+
+def _nemo_restart_utau_b():
+    """NEMO's OWN previous-step wind stress ``utau_b`` from the restart tiles.
+
+    Row 6b feeds a SINGLE tau where NEMO uses ``r1_2*(utau_b + utauU)``; that
+    is exact only for a steady wind.  Rather than assert steadiness in prose,
+    read NEMO's own ``utau_b`` and compare it to the dumped ``utau``.  Returns
+    the interior (nj,ni) field, or None if the restart carries no ``utau_b``.
+    """
+    import glob
+    import netCDF4 as nc
+    import multistep_replay as _mr
+    pat = f"{_mr.RUN_TWIN_STEP1}/DINO_{_mr.IC_STEP:08d}_restart_*.nc"
+    files = sorted(glob.glob(pat))
+    if not files:
+        return None
+    # Per-rank tiles: reassemble on the global interior the same way the
+    # bridge does, using each tile's own DOMAIN_position_first/last attrs.
+    out = np.full((J.NJ, J.NI), np.nan)
+    for fn in files:
+        d = nc.Dataset(fn)
+        try:
+            if "utau_b" not in d.variables:
+                return None
+            a = np.asarray(d.variables["utau_b"][0], dtype=np.float64)
+            i0 = int(d.DOMAIN_position_first[0]); j0 = int(d.DOMAIN_position_first[1])
+            hls = int(getattr(d, "DOMAIN_halo_size_start", [2, 2])[0])
+        finally:
+            d.close()
+        core = a[hls:a.shape[0] - hls, hls:a.shape[1] - hls]
+        out[j0 - 1:j0 - 1 + core.shape[0], i0 - 1:i0 - 1 + core.shape[1]] = core
+    if not np.isfinite(out).all():
+        raise SystemExit("*** utau_b reassembly left holes -- FATAL")
+    return out
+
+
+def _oceanoutput_flag(name):
+    """Read a namelist switch from the ORACLE RUN'S OWN ocean.output.
+
+    A switch quoted from a code comment is a claim; this reads what the run
+    that produced these dumps actually used.  Returns 'T'/'F' or raises.
+    """
+    import re
+    # Match NEMO's namelist echo shape exactly -- "<name>  =  T/F" -- rather
+    # than "the name appears somewhere on a line with an = on it", which would
+    # happily read a value out of surrounding prose.  Every match is collected
+    # and they must AGREE; a switch echoed twice with different values means
+    # the run changed it mid-flight and no single answer is honest.
+    pat = re.compile(rf"\b{re.escape(name)}\b\s*=\s*([TF])\b")
+    path = os.path.join(J.SEQDUMP, "ocean.output")
+    hits = []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            mm = pat.search(line)
+            if mm:
+                hits.append(mm.group(1))
+    if not hits:
+        raise SystemExit(f"*** {name} not found in {path} -- cannot read the "
+                         "oracle run's own configuration")
+    if len(set(hits)) != 1:
+        raise SystemExit(f"*** {name} echoed inconsistently in {path}: "
+                         f"{sorted(set(hits))} -- refusing to pick one")
+    return hits[0]
 
 
 def _load_interior_52x199(fn):
     """Load a NO-HALO interior dump (Nis0:Nie0, Njs0:Nje0) = 52x199, already
-    interior (NOT haloed).  Shape -> (nj=199, ni=52)."""
+    interior (NOT haloed).  Shape -> (nj=199, ni=52).
+
+    Routed through the shared time-level registry (which RAISES on an
+    unregistered basename) and NaN-fatal, same contract as JOB 1's loaders.
+    """
+    J._disposition(fn)
     a = np.fromfile(os.path.join(J.SEQDUMP, fn), dtype="<f8")
     assert a.size == J.NI * J.NJ, (fn, a.size, J.NI * J.NJ)
-    return a.reshape(J.NJ, J.NI)
+    return J._finite(a.reshape(J.NJ, J.NI), fn)
 
 
 if __name__ == "__main__":

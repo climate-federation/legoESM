@@ -250,6 +250,88 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "Interior 52x199, 2-D."),
     "wnd_dump_zv_frc_inc.bin": ("now", "v twin of wnd_dump_zu_frc_inc.bin (same "
                                         "bracket, vtau_b+vtauV, r1_hv(:,:,Kmm))."),
+    # --- #1455 sec-D JOB 2: the zu_frc forcing-assembly brackets.  Each entry
+    # is levelled INDIVIDUALLY by its own governing input -- they do NOT share
+    # one justification (an earlier version of this block claimed all of them
+    # were Kmm=Nnn rates from puu(Krhs); that is true only of spg_dump_z?_frc).
+    # Every write site read in MY_SRC before registering (#1455 audit).
+    #
+    # BEFORE, not "now": under DINO's ln_bt_fw=.false. the drag increment is
+    # built from the BEFORE-level bottom baroclinic residual
+    # ``puu(ji,jj,ikbu,Kbb) - puu_b(ji,jj,Kbb)`` (dynspg_ts.F90:1819-1822, the
+    # CENTRED branch of dyn_drg_init), with only the r1_hu depth at Kmm.  Same
+    # switch, same branch and same governing level as
+    # cor2d_dump_zu_trd_substep1.bin above, which this file already registers
+    # "before" -- so registering these "now" would contradict the module's own
+    # rule (level by governing input, geometry noted separately).
+    "drg_dump_zu_frc_inc.bin": ("before", "zu_frc bottom-drag-only increment: "
+                                       "snapshot zu_frc_predrg at MY_SRC "
+                                       "dynspg_ts.F90:379, dump of (zu_frc - "
+                                       "zu_frc_predrg) at :398 immediately "
+                                       "after CALL dyn_drg_init(Kbb,Kmm,...) "
+                                       "at :382-383 -- brackets ONLY the drag "
+                                       "add.  GOVERNING INPUT is the BEFORE "
+                                       "residual puu(ikbu,Kbb)-puu_b(Kbb) "
+                                       "(:1819-1822, ln_bt_fw=F CENTRED "
+                                       "branch); GEOMETRY is r1_hu(Kmm) "
+                                       "(:1828).  Interior 52x199, 2-D, "
+                                       "[m/s^2]."),
+    "drg_dump_zv_frc_inc.bin": ("before", "v twin of drg_dump_zu_frc_inc.bin "
+                                       "(MY_SRC dynspg_ts.F90:399 WRITE(8972); "
+                                       "same CENTRED branch, governing input "
+                                       "pvv(ikbv,Kbb)-pvv_b(Kbb) at :1821)."),
+    "drg_dump_rCdU_bot.bin": ("now", "rCdU_bot = -Cd*|U| [m/s], SIGN NEGATIVE "
+                                     "(zdfdrg.F90:76 declares it '(<0) "
+                                     "[m/s]'), the T-point drag "
+                                     "coefficient*speed from zdf_drg_nonlin "
+                                     "(zdfdrg.F90:172-189), which reads "
+                                     "uu(:,:,:,Kmm) -- hence \"now\", unlike "
+                                     "the drag INCREMENT above whose residual "
+                                     "is Kbb.  Dumped at MY_SRC "
+                                     "dynspg_ts.F90:397 WRITE(8970) in the "
+                                     "same bracket.  NOT a rate.  FULL haloed "
+                                     "jpi x jpj (ji=1,jpi / jj=1,jpj), NOT the "
+                                     "interior slice its zu_frc_inc siblings "
+                                     "use."),
+    "spg_dump_zu_frc.bin": ("now", "FULLY-ASSEMBLED barotropic slow forcing "
+                                   "zu_frc at MY_SRC dynspg_ts.F90:514/520 "
+                                   "WRITE(8850) -- snapshot after the LAST "
+                                   "write to zu_frc (the wind add, :437-443) "
+                                   "and before the jn=1..icycle substep loop's "
+                                   "own per-substep updates.  Governing input "
+                                   "is this step's puu(:,:,:,Krhs) -> \"now\". "
+                                   "NOTE the depth weighting at :337 is the "
+                                   "REST metric e3u_0/r1_hu_0 (key_qco), NOT "
+                                   "the live Kmm metric -- that difference is "
+                                   "row 1 of the JOB-2 table.  Interior 52x199 "
+                                   "(A2D(0), see the :511 comment), [m/s^2]."),
+    "spg_dump_zv_frc.bin": ("now", "v twin of spg_dump_zu_frc.bin (MY_SRC "
+                                   "dynspg_ts.F90:516/521 WRITE(8851))."),
+    "spg_dump_ssh_frc.bin": ("now", "ssh_frc = r1_rho0*r1_2*(emp_b+emp), "
+                                    "assembled at MY_SRC dynspg_ts.F90:470 "
+                                    "(ln_bt_fw) / :477 (CENTRED, the DINO "
+                                    "branch) and dumped at :518/522 "
+                                    "WRITE(8852), the same snapshot point as "
+                                    "spg_dump_zu_frc.bin.  Governing input is "
+                                    "emp/emp_b at this step -> \"now\".  Units "
+                                    "[m/s] (r1_rho0 already applied), NOT a "
+                                    "momentum rate.  Written FULL haloed jpi x "
+                                    "jpj (ji=1,jpi / jj=1,jpj), unlike its "
+                                    "zu_frc/zv_frc siblings in the same WRITE "
+                                    "block."),
+    # NEMO's own wind stress at the U POINT, the isolating reference for the
+    # JOB-2 row-6 wind term.  usrdef_sbc.F90:221/380 computes
+    # utau(ji,jj) = znl_cbc(..., gphiu(ji,jj)) DIRECTLY at the U point -- there
+    # is no 2-cell average in NEMO, so comparing legoESM's cell-centred tau
+    # against this requires legoESM's own interpolation and that choice must be
+    # stated wherever it is used.  Dumped at :432 WRITE(8810), FULL haloed.
+    "sbc_dump_utau.bin": ("now", "utau at the U point, MY_SRC "
+                                 "usrdef_sbc.F90:432 WRITE(8810); computed at "
+                                 ":221/:380 as znl_cbc(znds_wnd_phi, "
+                                 "znds_wnd_val, gphiu(ji,jj)) for THIS step's "
+                                 "sbc call -> \"now\" (utau_b is the previous "
+                                 "step's copy).  Stress ON the ocean [Pa], "
+                                 "positive eastward.  FULL haloed jpi x jpj."),
 
     # --- FACE10 task (2026-08-01): w1400 face-flux + EIV bolus 10-day
     # measurement. Additive WRITE-only per-day dumps (kt = nit000 + 32*iday,
@@ -379,20 +461,35 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # vn_e/ua_e/va_e at that substep -- the barotropic-mode fast fields, which
     # have NO leapfrog time level of their own (un_e etc. are the split-explicit
     # sub-cycle state, seeded at jn=1 from puu_b(:,:,Kbb) via the ln_bt_fw=F
-    # CENTRED branch, dynspg_ts.F90:570; proven by un_e[jn=1] == un_e_init to
+    # CENTRED branch, dynspg_ts.F90:573; proven by un_e[jn=1] == un_e_init to
     # 0.0e0).  Registered "before" for the SAME reason as
     # cor2d_dump_ua_e_in_substep1.bin above (the sub-cycle seed is the Kbb
     # barotropic transport); this dump is a superset (all icycle substeps, not
     # just jn=1).  jpi x jpj = 56 x 203, per-substep records, fp64.
     "substep_dump.bin": ("before", "dynspg_ts.F90:926-940 WRITE(799) per-jn "
         "barotropic sub-cycle fields (sshn_e/ssha_e/zsshp2_e/un_e/vn_e/ua_e/"
-        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:570, ln_bt_fw=F "
+        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:573, ln_bt_fw=F "
         "CENTRED seed), same Kbb sub-cycle seed as cor2d_dump_ua_e_in_substep1.bin"),
     # --- #1226 SEQDUMP intra-step seam walk (RUN_SEQDUMP_Y20_1R, y20 kt=
     # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
     # ebeb8a5), each proved by reading the CALL that produces the dumped
     # field one line above the WRITE (Rule 1d cite = the producing CALL, not
-    # the WRITE). These localise WHERE the barotropic/longitude-uniform
+    # the WRITE).
+    # The three r3?_f entries below cite their WRITE by UNIT NUMBER ONLY --
+    # no line number. Those units are unique in the file, so the citation
+    # survives drift; a line number here does not, and cannot currently be
+    # checked. The pinned revision ebeb8a5 is not an object in the NEMO
+    # repository and no copy on disk matches the cited layout, so the only
+    # readable file is the working copy, which has moved. It moved by
+    # DIFFERENT amounts in different blocks -- the post-lbc CALL below
+    # shifted +17 (562 -> 579) while its own WRITE shifted +28 (576 -> 604)
+    # -- so an offset measured at one anchor cannot be carried across a
+    # block boundary to date a WRITE nine lines away. A previous edit did
+    # exactly that and moved these three from :450/:451/:452 to
+    # :451/:452/:453; that derivation is RETRACTED as circular (it assumed
+    # the very block alignment in question) and neither trio is established.
+    # Recover the pinned source from whatever archive produced the dump
+    # binaries if a line number is ever needed again. These localise WHERE the barotropic/longitude-uniform
     # eta(Naa) injection first appears un-inherited.
     #
     # ssh/r3 CHAIN (r3t = ssh/H_0 ratio; ssh = H_0*r3t, so the r3 chain IS the
@@ -421,11 +518,11 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # the NEXT step carries as its geometry -- registered by traatf/ssh_atf's
     # own after-filter level exactly as atf_dump_ssh_after is "after".
     "seq_dump_r3t_f": ("after", "stpmlf.F90:442 CALL dom_qco_r3c(ssh(Nnn),"
-        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937) :450; r3t_f."),
+        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937); r3t_f."),
     "seq_dump_r3u_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8938) :451; r3u_f u-point twin of seq_dump_r3t_f."),
+        "WRITE(8938); r3u_f u-point twin of seq_dump_r3t_f."),
     "seq_dump_r3v_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8939) :452; r3v_f v-point twin of seq_dump_r3t_f."),
+        "WRITE(8939); r3v_f v-point twin of seq_dump_r3t_f."),
     # post-finalize_lbc Naa state (stpmlf.F90:562 CALL finalize_lbc; dumps at
     # :576-579). u/v/T/S at Naa BEFORE the Asselin swap.
     "seq_dump_postlbc_u_aaa": ("after", "stpmlf.F90:562 CALL finalize_lbc -> "

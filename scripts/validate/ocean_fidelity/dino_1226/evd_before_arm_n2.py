@@ -81,7 +81,8 @@ DOMAIN-WIDE (same run, all 322294 wet interior interfaces):
                   median|rel| = 6.661e-16  (3 x fp64 eps -- the index map
                   "lego interface j <-> NEMO 0-based w-level j+1" is proved,
                   not assumed, and the transcription is exact everywhere).
-  trigger census  MIN(now,before) <= -1e-12 population
+  trigger census  MIN(now,before) <= -1e-12 population, over this probe's
+                  window (legoESM interfaces 1..34 == NEMO w-levels 2..35)
                   NEMO                       60845
                   legoESM n2_mode=nemo_bn2   60845   missed 0, spurious 0
                   legoESM n2_mode=adiabatic  60797   missed 48, spurious 0
@@ -89,6 +90,26 @@ DOMAIN-WIDE (same run, all 322294 wet interior interfaces):
                   population BIT-EXACTLY; the shipped adiabatic trigger
                   misses 48 interfaces (0.0149%), always one-directional,
                   and one of those 48 is this spike.
+                  The FULL window (interfaces 0..34) and the five-decade
+                  threshold sweep are RUN by the sibling probe
+                  evd_n2_mode_fix_measure.py -- 70389/70389 at -1e-12 and
+                  0 missed / 0 spurious at every threshold.  Do not quote
+                  those figures from here; this probe measures one window
+                  at one threshold.
+
+EOS DEPTH (2026-08-19 audit).  The card sets eos_depth="geometric"
+(dino.py:1045), but that field reaches the PGF and GM/Redi paths only: the EVD
+trigger's density comes from k_profiles._enhanced_diffusion_K, which calls
+_compute_rho with NO eos_depth, i.e. the "insitu" default.  So this bracket's
+original bare call was FAITHFUL to the path it brackets, and feeding the card's
+value would have made it diverge.  The effective convention is now asserted
+from the live source (the run aborts if that call ever starts passing the
+kwarg) and passed EXPLICITLY.  MEASURED sensitivity: switching the offline
+bracket to "geometric" changes the before-arm N^2 field by at most 5.8868e-12
+s^-2 and moves the spike interface from +5.988313e-09 to +5.988314e-09 -- no
+sign change, no trigger change, no headline number moved.  Under the shipped
+n2_mode="nemo_bn2" it cannot matter at all: bn2 reads T/S and the geometric
+gdept/gdepw ladders and consults no density helper.
 
 THE STATEMENT-LEVEL DIFF
 ------------------------
@@ -144,8 +165,13 @@ mechanism/physics reviewer).  BOTH: the finding SURVIVES.
   mechanism reviewer -- the sign disagreement is physically coherent and the
   card comment's reasoning is unsound.  Its arithmetic: with the DINO S-EOS
   beta is depth- and T-independent (b0/rho0 = 7.461e-4 /psu), so the sign of
-  alpha*dT - beta*dS flips exactly where beta/alpha crosses dS/dT = 3.593; at
+  alpha*dT - beta*dS flips exactly where dT/dS crosses beta/alpha = 3.593; at
   this interface beta/alpha is 3.55-3.64, i.e. WITHIN 1-2% OF THE KNIFE EDGE.
+  (RATIO LABEL CORRECTED 2026-08-19: this line read "beta/alpha crosses
+  dS/dT", which inverts the crossing condition -- dS/dT is the reciprocal,
+  0.2785.  The NUMBER was always right.  Independent review reproduced the
+  column from the raw restart and measured dT/dS = 3.588 against the knife
+  edge beta/alpha = 3.5906, agreeing to four digits.)
   A thermohaline-compensated front (warmer AND saltier below) is precisely
   where a percent-level change in alpha flips the static-stability sign.
   It also confirmed that the two paths' DIVISORS differ -- NEMO divides by the
@@ -164,6 +190,28 @@ mechanism/physics reviewer).  BOTH: the finding SURVIVES.
   is open.  Discriminating measurement, if it is ever wanted: re-evaluate the
   adiabatic path with each parcel at its OWN cell depth and see whether that
   alone recovers NEMO's sign.
+  PARTIAL ANSWER ALREADY IN HAND (independent review 2026-08-19, reproducing
+  this column from the raw restart to 0.15%): evaluating alpha at the LOWER
+  cell's depth gives -1.576e-08 -- NEMO's SIGN but 3.9x its magnitude.  So
+  "each parcel at its own depth" will NOT by itself recover NEMO's value; only
+  bn2's zrw weight, which lands alpha at gdepw EXACTLY, does.  Recorded so
+  nobody spends a run rediscovering it.
+
+KNOWN PRE-EXISTING FAILURE, blocks (A) and (C) only (recorded 2026-08-19; NOT
+introduced by the eos_depth work, verified by re-running with that change
+stashed -- identical exit 1 and identical message).  Since commit 5a9be32ba
+flipped the card default to ``convection_n2_mode="nemo_bn2"``, the live trigger
+no longer calls ``compute_buoyancy_frequency_adiabatic`` at all, so block (A)'s
+N^2 hook fires ZERO times and its call-parity arm selection aborts with::
+
+    *** hook count is not the expected one now/before pair: flag=2 n2=0
+
+Blocks (B) and the domain-wide census/alignment scan run to completion and are
+unaffected -- every number in the RESULT block above comes from those and is
+reproduced on the current build.  Block (A)'s recorded numbers were taken when
+the card still selected "adiabatic"; to re-run them, pass that arm explicitly
+rather than relying on the card default.  Fixing (A)'s arm selection for a
+bn2 card is a separate change and is NOT attempted here.
 
 Run:
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
@@ -269,6 +317,7 @@ def main() -> int:
     if not mr.have_step1_artifacts():
         print("SKIP: oracle artifacts not present")
         return 0
+    mr.provenance("evd_before_arm_n2")
     print(f"PRECISION control dtype = {get_policy().control}")
     print(f"LEGOESM_NEMO_E3T = {os.environ.get('LEGOESM_NEMO_E3T')!r}")
     print(f"MODE = {'INJECT NEMO rn2b into the BEFORE arm' if inject else 'baseline'}")
@@ -333,22 +382,92 @@ def main() -> int:
 
     # Re-use the model's own helper rather than re-deriving the rho/p chain.
     from legoesm.ocean.physics.vertical_mixing.k_profiles import (
-        _compute_rho,                                  # probe-only private
+        _compute_rho, _enhanced_diffusion_K,            # probe-only private
     )
 
-    def adiabatic_n2(Ta, Sa):
+    # ---- EOS DEPTH: realized, PROVED from source, never assumed (Rule 10) --
+    # The card sets eos_depth (dino.py:1045) but that field reaches the PGF and
+    # GM/Redi paths ONLY.  The EVD trigger's density comes from
+    # _enhanced_diffusion_K, which calls _compute_rho(...) with NO eos_depth
+    # kwarg -- the "insitu" default -- so passing the card's value here would
+    # make this offline bracket DIVERGE from the path it is bracketing.  The
+    # effective value is asserted from the live source and then passed
+    # EXPLICITLY, so the convention is visible instead of inherited silently.
+    # TWO guards (the first guard is never the only guard): the CALLER could
+    # start passing the kwarg, or the CALLEE's default could change under it.
+    import inspect
+    from legoesm.ocean.eos import compute_ocean_rho as _cor
+    if "eos_depth" in inspect.getsource(_enhanced_diffusion_K):
+        raise SystemExit(
+            "*** _enhanced_diffusion_K now mentions eos_depth -- this offline "
+            "bracket is stale; re-derive the depth convention from the source")
+    _EVD_EOS_DEPTH = inspect.signature(_cor).parameters["eos_depth"].default
+    if _EVD_EOS_DEPTH not in ("insitu", "geometric"):
+        raise SystemExit(f"*** unexpected compute_ocean_rho eos_depth default "
+                         f"{_EVD_EOS_DEPTH!r}")
+    print(f"  [eos depth] card cfg.eos_depth="
+          f"{getattr(cfg, 'eos_depth', '<absent>')!r}  model mc.eos_depth="
+          f"{getattr(mc, 'eos_depth', '<absent>')!r}  BUT the EVD trigger's "
+          f"density path passes none -> effective {_EVD_EOS_DEPTH!r} "
+          f"(READ from compute_ocean_rho's signature default; the caller "
+          f"is separately asserted not to override it)")
+
+    def adiabatic_n2(Ta, Sa, eos_depth=_EVD_EOS_DEPTH):
+        """Parcel-displacement N^2.  ``eos_depth`` defaults to the convention
+        the MODEL's EVD path actually uses; any other value is a labelled
+        SENSITIVITY arm and is NOT what the model runs."""
+        efn = eos_fn
+        if eos_depth == "geometric":
+            # make_eos_fn's rho0 feeds ONLY the "nemo_eos80" branch; this card
+            # runs "nemo_seos", whose depth recovery uses the rho0 baked into
+            # NemoSEOSConfig.  So p = rho0*g*gdept cancels because both are
+            # 1026.0, NOT because the kwarg was threaded -- asserted below.
+            efn = make_eos_fn(eos=mc.eos, eos_linear=mc.eos_linear,
+                              rho0=cc.rho_0)
         stx = st0._replace(T=st0.T.replace(data=Ta), S=st0.S.replace(data=Sa))
-        rho = _compute_rho(stx, br.z_coord, Jz, eos_fn=eos_fn)
+        rho = _compute_rho(stx, br.z_coord, Jz, eos_fn=efn,
+                           eos_depth=eos_depth,
+                           rho0=(cc.rho_0 if eos_depth == "geometric" else None))
         p_cell = compute_hydrostatic_pressure(
             rho, eta_nn, br.z_coord.dz_ref, Jz, cc.rho_0,
             h_actual=maybe_partial_h_actual(stx, br.z_coord))
         return np.asarray(compute_buoyancy_frequency_adiabatic(
             Ta, Sa, p_cell, br.z_coord.dz_ref,
             np.where(np.asarray(Jz) <= 0.0, 1.0, np.asarray(Jz)),
-            eos_fn=eos_fn, rho_ref=cc.rho_0, g=cc.g))
+            eos_fn=efn, rho_ref=cc.rho_0, g=cc.g))
 
     n2_ad_bb = adiabatic_n2(T_bb, S_bb)
     n2_ad_nn = adiabatic_n2(T_nn, S_nn)
+    # SENSITIVITY arm, labelled: what the card's own eos_depth WOULD give at
+    # the spike interface if the EVD path honoured it.  Non-vacuity checked --
+    # an arm that changes nothing is not evidence that the choice is harmless.
+    from legoesm.ocean.eos import NemoSEOSConfig as _NSC
+    if mc.eos == "nemo_seos":
+        _seos_rho0 = float(getattr(mc.eos_nemo_seos, "rho0", None)
+                           if getattr(mc, "eos_nemo_seos", None) is not None
+                           else _NSC().rho0)
+        if abs(_seos_rho0 - float(cc.rho_0)) > 1e-9:
+            raise SystemExit(
+                f"*** eos_depth='geometric' arm is INVALID: NemoSEOSConfig.rho0"
+                f"={_seos_rho0} != constants rho_0={cc.rho_0}, so the "
+                f"p=rho0*g*gdept factor does NOT cancel and this arm would "
+                f"measure a depth stretch, not the depth convention")
+    _n2_geo_bb = adiabatic_n2(T_bb, S_bb, eos_depth="geometric")
+    _fin = np.isfinite(n2_ad_bb) & np.isfinite(_n2_geo_bb)
+    _dm = float(np.abs(n2_ad_bb - _n2_geo_bb)[_fin].max())
+    _sc = float(np.abs(n2_ad_bb)[_fin].max())
+    # RELATIVE bar: a 1-ULP move would pass "> 0" while proving nothing.
+    if not _dm > 1e-12 * _sc:
+        raise SystemExit(
+            f"*** the eos_depth='geometric' sensitivity arm moved the field by "
+            f"only {_dm:.3e} (scale {_sc:.3e}) -- at or below roundoff, so it "
+            f"did not meaningfully take and its agreement is vacuous")
+    print(f"  [eos depth] SENSITIVITY adiabatic insitu vs geometric: field DIFF "
+          f"max={_dm:.4e} s^-2; at the spike interface "
+          f"({J},{I},{IFACE}) {n2_ad_bb[J,I,IFACE]: .6e} -> "
+          f"{_n2_geo_bb[J,I,IFACE]: .6e}  "
+          f"(fires={bool(_n2_geo_bb[J,I,IFACE] <= EVD_THR)}, "
+          f"insitu fires={bool(n2_ad_bb[J,I,IFACE] <= EVD_THR)})")
     print("\n   lego_if | NEMO rn2b     | lego bn2(bb)  | lego adia(bb) ||"
           " NEMO rn2      | lego bn2(nn)  | lego adia(nn)")
     for k in range(KLO, KHI + 1):

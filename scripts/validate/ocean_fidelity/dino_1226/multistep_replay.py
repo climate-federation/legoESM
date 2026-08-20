@@ -117,6 +117,47 @@ STEPS_PER_DAY = 32  # RUN_TWIN_STEP1 covers exactly nit000+1 .. nit000+32 (one d
 RECIPE = "nemo_dino_kamm_mlf"
 
 
+def provenance(tag: str = "") -> str:
+    """Print (and return) the git SHA + the effective flags a probe's number
+    depends on.
+
+    A recorded probe number is not citable without these: ``LEGOESM_NEMO_E3T``
+    selects the thickness convention, ``DINO_NEMO_RUN_*`` select the oracle
+    dump set, and the SHA pins the model code that produced it.  ``+dirty``
+    means the working tree carried uncommitted edits at run time.
+    """
+    import subprocess
+    _here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_here, capture_output=True,
+            text=True, timeout=30).stdout.strip() or "<no-sha>"
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain"], cwd=_here, capture_output=True,
+            text=True, timeout=60).stdout.strip())
+    except Exception as exc:                      # never let provenance abort a probe
+        sha, dirty = f"<unavailable: {exc}>", False
+    # EVERY knob that can change the answer, including the wind-control env
+    # vars: a wind-on and a wind-off run must NOT stamp identically, since the
+    # #1455 retraction turns on exactly that variable.  SEQDUMP is stamped too
+    # -- nothing otherwise ties the oracle's ocean.output (read for namelist
+    # switches) to the dump set the numbers came from.
+    _knobs = " ".join(
+        f"{k}={os.environ.get(k)!r}" for k in (
+            "LEGOESM_NEMO_E3T", "JAX_ENABLE_X64", "CUDA_VISIBLE_DEVICES",
+            "DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+            "DINO_RECONCILE",
+            "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
+            "DINO_NEMO_RUN_TWIN_STEP1",
+        ))
+    line = (f"[provenance{(' ' + tag) if tag else ''}] "
+            f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "
+            f"IC_STEP={IC_STEP}  RUN_TRAJ={RUN_TRAJ!r}  "
+            f"RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
+    print(line, flush=True)
+    return line
+
+
 def have_step1_artifacts() -> bool:
     """True iff both the RUN_TRAJ mesh donor and RUN_TWIN_STEP1 per-rank
     restart tiles for the IC step are present on this machine."""
