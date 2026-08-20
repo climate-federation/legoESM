@@ -1,0 +1,56 @@
+#!/bin/bash -l
+#PBS -N legoesm_prewarm_mesh
+#PBS -A P08010000
+#PBS -q develop
+#PBS -l select=1:ncpus=8:mem=64GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -k eod
+# ===========================================================================
+# Batch mesh-cache prewarm for the big icosahedral levels (detached qsub —
+# no open terminal needed, unlike qcmd; and no shell-quoting hazards).
+#
+# One process builds each requested mesh into LEGOESM_MESH_CACHE_DIR so the
+# parallel jobs (which must export the SAME path) only load. The develop
+# queue caps walltime at 6 h — level 9 at lloyd=50 alone is ~5 h, so split
+# submissions rather than batching every level into one job.
+#
+# SUBMIT (from anywhere; repo path comes from _env.sh):
+#   qsub -v "LEVELS=7 8"          scripts/cluster/scaling_derecho/prewarm_mesh.pbs
+#   qsub -v LEVELS=9              scripts/cluster/scaling_derecho/prewarm_mesh.pbs
+#   qsub -v LEVELS=10,LLOYD=0     scripts/cluster/scaling_derecho/prewarm_mesh.pbs
+# Knobs (qsub -v; no commas inside values — qsub splits on them):
+#   LEVELS="9"    subdivision level(s), space-separated (quote the -v arg)
+#   LLOYD=50      50 = production SCVT (CPU sweep); 0 = synthetic scaling
+#                 mesh (the GPU NCCL ladders)
+#   LEGOESM_MESH_CACHE_DIR  cache dir; default /glade/work/$USER/legoesm_mesh_cache
+# NOTE the cache key includes the x64 flag: this job builds with 64-bit OFF
+# (x640), matching the float32/float64-off sweep and ladder jobs.
+# ===========================================================================
+set -uo pipefail
+SUBMIT_DIR="${PBS_O_WORKDIR:-$(pwd)}"
+if [ -f "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh" ]; then
+    source "${SUBMIT_DIR}/scripts/cluster/scaling_derecho/_env.sh"
+else
+    source "/glade/work/$USER/legoESM/scripts/cluster/scaling_derecho/_env.sh"
+fi
+cd "$REPO"
+
+LEVELS="${LEVELS:-9}"
+LLOYD="${LLOYD:-50}"
+export JAX_PLATFORMS=cpu
+export LEGOESM_MESH_CACHE_DIR="${LEGOESM_MESH_CACHE_DIR:-/glade/work/$USER/legoesm_mesh_cache}"
+mkdir -p "$LEGOESM_MESH_CACHE_DIR"
+
+echo "prewarm: levels=[$LEVELS] lloyd=$LLOYD cache=$LEGOESM_MESH_CACHE_DIR"
+date
+rc=0
+for L in $LEVELS; do
+    echo "=== level $L (lloyd=$LLOYD) ==="
+    "$PY" scripts/data/prewarm_voronoi_mesh.py --level "$L" --lloyd "$LLOYD" \
+        || { echo "level $L FAILED"; rc=1; break; }
+done
+echo "=== cache contents ==="
+ls -lh "$LEGOESM_MESH_CACHE_DIR"/scvt_v1_lvl*.npz 2>/dev/null || true
+ls "$LEGOESM_MESH_CACHE_DIR"/*.lock 2>/dev/null && { echo "WARNING: stale lock left behind"; rc=1; }
+date; echo "DONE rc=$rc"; exit $rc
