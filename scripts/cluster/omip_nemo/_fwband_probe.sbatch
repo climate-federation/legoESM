@@ -43,7 +43,6 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   
-  
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --years 0.003 --snapshot-every-days 1 --diag-every-days 5 \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
