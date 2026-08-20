@@ -760,6 +760,53 @@ retracted claim in this campaign.
 
 ---
 
+## ★ ALL FOUR ARMS ORACLE-CERTIFIED, AND THE MOIST COUPLING SEPARATELY (2026-08-20)
+
+TWO NUMBERS PER MOIST ARM, and the second is the one that matters.
+
+The RESIDUAL (port vs oracle one-step state) certifies the step:
+
+| arm | deck | NumPy | JAX |
+|---|---|---|---|
+| hydro dry | run_hydro_1step_gfs | 1.1866e-09 | 1.1866e-09 |
+| hydro moist | run_hydro_1step_moist_gfs | 1.1866e-09 | 1.1866e-09 |
+| NH dry | run_nh_1step_gfs | 6.6116e-04 | 6.6116e-04 |
+| NH moist | run_nh_1step_moist_gfs | 6.6116e-04 | 6.6116e-04 |
+
+All four are GATES now (`--max-rel` per arm in the runner); they used to
+print and exit 0 whatever they said.
+
+The RESPONSE (port(moist)-port(dry) vs oracle(moist)-oracle(dry))
+certifies the COUPLING, and it had to be added because the residual
+cannot do that job on the NH arm:
+
+    hydro moist   3.170e-11 / 3.177e-11   (numpy / jax)
+    NH moist      3.212e-11 / 3.210e-11
+    over 6 scored field/face pairs, limit 2e-01, jobs 9444695/96
+
+WHY THE RESIDUAL IS NOT ENOUGH (GLM M1, job 9444414, and it forced a
+retraction). The moist signal is ~1e-6 of the pt peak; the NH gate floor
+is 6.6e-4, ~660x LARGER. So a port whose moist coupling is dead in an
+NH-only path -- an `r_vir` dropped at the remap, say -- scores 6.6116e-04
+either way, and "NH moist certified" would have been an empty statement.
+The hydrostatic arm is the opposite case: its 1.19e-9 floor sits ~1000x
+BELOW the signal, so there the residual does certify the coupling.
+
+The response gate's own rows are the evidence, and they are worth
+keeping because they say what one step can and cannot see::
+
+    pt   port response  3.248  3.248  1.603  3.248  3.248  1.603
+         oracle         3.248  3.248  1.603  3.248  3.248  1.603
+
+Four digits on every face, polar faces included, and 3.2 K is the
+expected size of `zvir*q*T`. `u`/`v` (~3e-13) and `delp` (~3e-11) carry
+NO moist signal at one step -- so the gate scores a field/face only
+where the oracle's own response clears that field's residual by a
+decade, marks the rest '.', and refuses if nothing clears it. Its first
+version scored everything and failed at exactly `rel = 2.000e+00` on
+delp: `rel()` on two uncorrelated noise fields of equal size returns 2
+by construction. It was comparing two zeros.
+
 ## ★ ALL FOUR ARMS ARE ORACLE-CERTIFIED (2026-08-20)
 
 | arm | oracle deck | NumPy (SPEC) | JAX (PORT) |
