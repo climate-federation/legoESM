@@ -45,9 +45,15 @@ def _patch_land_loaders(monkeypatch):
     monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
     monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
     # Half-land everywhere so every column exercises the land tile blend.
+    # Half-land everywhere so every column exercises the land tile blend.  The
+    # Voronoi mesh names its cell coordinate ``latCell``, the structured grids
+    # ``lat``; take whichever the grid has so both lanes can be driven here.
     monkeypatch.setattr(
         topo, "load_land_fraction",
-        lambda grid, path, *a, **k: jnp.full(grid.lat.shape, 0.5))
+        lambda grid, path, *a, **k: jnp.full(
+            jnp.asarray(getattr(grid, "lat", None)
+                        if getattr(grid, "lat", None) is not None
+                        else grid.latCell).shape, 0.5))
 
 
 def _small_cfg():
@@ -702,3 +708,131 @@ def test_clm_ml_use_surfdata_pft_derives_mixed_pft_columns(monkeypatch, tmp_path
     sigs = {(int(g.ncan), int(g.ntop), int(g.nbot), int(g.pft)) for g in gi}
     assert len(sigs) >= 2, (
         f"mixed PFT must yield >=2 structure groups (group-by-structure engages), got {sigs}")
+
+
+def test_calibrated_physics_deploys_the_model_the_tables_were_fitted_to(
+        monkeypatch, tmp_path):
+    """The coupled tile must run the land model the baked tables were fitted to.
+
+    Three things had to be true at once and none of them was: the stomatal switch
+    on, the carbon scheme set, and a leaf-carbon state present.  With any one
+    missing the flux code takes a different branch — no stomata at all, or the
+    Jarvis model — and the baked canopy conductance (Vc_max25/g1/LCMA) never runs.
+    The soil column has to match too, and it did not (3 m fitted, 6.375 m
+    deployed, same layer count so nothing complained).
+    """
+    from legoesm.land.config import calibrated_multilayer_setup
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    cal = calibrated_multilayer_setup()
+
+    # The MESH (Voronoi/MPAS) lane: the only one that hands the land tile's
+    # solved fluxes to the atmosphere, and therefore the only one the calibrated
+    # switch is allowed on.
+    cfg = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        mpas_land_beta_soil=True,
+        # The flux handoff rides the turbulence surface flux, so it needs a
+        # turbulence scheme to ride (validation says so).
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=True,
+        land_surface_scheme="simple_seb",
+        # The land setup forces the snow-albedo feedback on, so the gate makes
+        # the config state it rather than have it silently reversed.
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    cfg.validate_strict()
+    driver = ModelDriver(cfg, output_dir=tmp_path)
+    driver.setup()
+
+    land_cfg = driver.physics.land_ml_cfg
+    assert land_cfg.stomata.enabled is True
+    assert land_cfg.carbon.scheme == "differland"
+    assert land_cfg.bulk_scheme == cal["bulk_scheme"]
+    assert land_cfg.soil_grid == cal["soil_grid"]
+    # The leaf-carbon state is the third condition; without it the SAME config
+    # runs Jarvis instead, which is a different stomatal model with different
+    # parameters, and the failure is completely silent.
+    assert driver.physics.land_ml_carbon is not None
+    ncol = int(jnp.asarray(driver.grid.latCell).size)   # mesh lane: per-cell
+    assert driver.physics.land_ml_carbon.C_fol.shape == (ncol,)
+
+    # And the branch really is taken: compute the effective moisture factor the
+    # tile will use and check it differs from the bare soil factor, i.e. the
+    # canopy conductance is doing something rather than being inert.
+    from legoesm.land.stomata_utils import compute_effective_beta
+    from legoesm.core.coupling_fields import AtmToSurface
+    o = jnp.ones(ncol)
+    forcing = AtmToSurface(
+        sw_down=600.0 * o, lw_down=350.0 * o, precip_total=0.0 * o,
+        precip_snow=0.0 * o, T_lowest=295.0 * o, q_lowest=0.008 * o,
+        u_lowest=3.0 * o, v_lowest=0.0 * o, p_lowest=0.99e5 * o,
+        p_surface=1.0e5 * o, rho_lowest=1.2 * o, cos_zenith=0.8 * o,
+        co2_ppmv=412.0 * o, has_radiation=o, has_precipitation=o)
+    beta_soil = 0.8 * o
+    beta, gpp, _ = compute_effective_beta(
+        295.0 * o, forcing, beta_soil, land_cfg,
+        driver.physics.land_ml_carbon, dt=1800.0,
+        land_params=driver.physics.land_ml_params)
+    assert gpp is not None, "the Farquhar branch was not taken"
+    assert np.all(np.isfinite(np.asarray(beta)))
+    assert not np.allclose(np.asarray(beta), np.asarray(beta_soil)), (
+        "the canopy conductance left the moisture factor untouched — the baked "
+        "Vc_max25/g1/LCMA are still inert"
+    )
+
+
+def test_without_the_flag_the_tile_is_unchanged(monkeypatch, tmp_path):
+    """Default runs must be untouched: no stomata, no carbon state."""
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(_small_cfg(), output_dir=tmp_path)
+    driver.setup()
+    assert driver.physics.land_ml_cfg.stomata.enabled is False
+    assert driver.physics.land_ml_cfg.carbon.scheme == "none"
+    assert driver.physics.land_ml_carbon is None
+
+
+def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_path):
+    """A soil state from another column must be refused by the RUN, not just by
+    the loader in isolation.
+
+    Both columns here have the same number of layers, which is exactly why the
+    existing shape check let a state spun up over 6.375 m into a run using 3 m,
+    where every soil temperature and moisture value would be read at the wrong
+    depth and nothing anywhere would complain.
+    """
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    n_layers = src.physics.land_ml_cfg.soil_grid.n_layers
+
+    # Written as if spun up on a column with the SAME layer count and a
+    # different depth.
+    other = make_soil_grid(SoilGridConfig(n_layers=n_layers, total_depth=6.375,
+                                          growth_factor=2.0)).dz
+    ic = tmp_path / "wrong_column.npz"
+    save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=1, metadata={},
+                      soil_dz=other)
+
+    cfg = _small_cfg()._replace(land_ic_path=str(ic))
+    with pytest.raises(ValueError, match="soil column"):
+        ModelDriver(cfg, output_dir=tmp_path / "dst").setup()
+
+    # The run's OWN column loads fine — so the guard is discriminating, not just
+    # rejecting everything.
+    ok = tmp_path / "right_column.npz"
+    save_land_restart(ok, src._land_ml_state, land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=1, metadata={},
+                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz)
+    dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ok)),
+                      output_dir=tmp_path / "dst_ok")
+    dst.setup()
+    assert dst._land_ml_state.T_soil.shape[1] == n_layers

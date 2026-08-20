@@ -140,3 +140,57 @@ def test_merge_land_restart_shape_skew_raises():
     )
     with pytest.raises(ValueError, match="soil-layer skew"):
         merge_land_restart_into_template(loaded, template)
+
+
+def test_soil_column_mismatch_is_refused(tmp_path):
+    """Same layer COUNT, different layer DEPTHS must be refused, not loaded.
+
+    Eight layers over 3 m at growth factor 1.5 and eight over 6.375 m at growth
+    factor 2 both pass the ncol / n_layers checks, and every soil temperature and
+    moisture value would then be read at the wrong depth with no error anywhere.
+    That is exactly how a land state spun up under one soil column reached a run
+    using another.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+
+    spinup_dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=6.375,
+                                              growth_factor=2.0)).dz
+    run_dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=3.0,
+                                           growth_factor=1.5)).dz
+    assert len(spinup_dz) == len(run_dz) == _NLAY, "shape check alone cannot separate these"
+
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=3), land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0, soil_dz=spinup_dz)
+
+    # Matching column: loads.
+    load_land_restart(path, expected_land_mode="multilayer",
+                      expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                      expected_soil_dz=spinup_dz)
+    # Different column, same layer count: refused.
+    with pytest.raises(ValueError, match="soil column"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_dz=run_dz)
+
+
+def test_restart_without_recorded_column_warns_rather_than_pretending(tmp_path, caplog):
+    """A restart written before columns were recorded cannot be verified.
+
+    It must say so out loud: silently accepting it is how the wrong soil profile
+    gets used, and silently rejecting it would break every existing spun-up state.
+    """
+    import logging
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+
+    path = tmp_path / "old.npz"
+    save_land_restart(path, _fake_state(seed=4), land_mode="multilayer",
+                      t_end_s=0.0, n_steps_completed=0)   # no soil_dz: legacy file
+    dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=3.0,
+                                       growth_factor=1.5)).dz
+    with caplog.at_level(logging.WARNING, logger="legoesm.land.restart"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_dz=dz)
+    assert any("CANNOT be verified" in r.message or "CANNOT be verified" in r.getMessage()
+               for r in caplog.records), "a legacy restart loaded with no warning"

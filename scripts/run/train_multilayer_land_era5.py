@@ -75,7 +75,7 @@ import optax
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.config import MultiLayerLandConfig, calibrated_multilayer_setup
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
@@ -97,9 +97,15 @@ _DAYS = 12           # representative days per month (keeps the AD scan tractabl
 _DT = (24 / _NH) * 3600.0   # 6 h
 _SPM = _DAYS * _NH   # steps per month
 _EQ_STEPS = 600      # ~150 days of annual-mean spin -> deep-soil equilibrium
-_N_LAYERS = 8
-_SOIL_DEPTH_M = 3.0
-_SOIL_GROWTH = 1.5
+# Soil column + surface-exchange + stomata mode come from the ONE shared
+# definition of the calibrated land model (legoesm.land.config).  The coupled
+# driver builds its tile from the same function, so what is fitted here and what
+# is deployed in AMIP cannot drift apart; the CLI flags below still override the
+# mode for exploratory fits (a fit that overrides them is NOT the baked model).
+_CALIBRATED = calibrated_multilayer_setup()
+_N_LAYERS = _CALIBRATED["soil_grid"].n_layers
+_SOIL_DEPTH_M = _CALIBRATED["soil_grid"].total_depth
+_SOIL_GROWTH = _CALIBRATED["soil_grid"].growth_factor
 _FREEZE_FROM = 0     # pin ALL soil-moisture layers at the Stage-A annual equilibrium.
                      # The under-resolved offline forcing desiccates the top layer
                      # (bare-soil evaporation) -> ET collapse -> runaway when moisture
@@ -111,14 +117,14 @@ _PI = S._PI
 _TBL = np.asarray(S._TABLE)              # (17,12) CLM5 init values per column
 # Surface-exchange / photosynthesis mode (set by the CLI).  MOST surface exchange
 # (matches the coupled DIURNAL default -> z0 trainable, RMSE ~3.1 vs constant-Ch 3.3).
-_BULK_SCHEME = "most"
+_BULK_SCHEME = _CALIBRATED["bulk_scheme"]
 # Farquhar stomata ON by default (user directive 2026-08-17): with the ERA5
 # latent-heat target in the loss the canopy conductance chain (Vc_max25/g1/LCMA
 # -> stomatal resistance -> transpiration) is directly constrained, so the
 # photosynthesis params are UNFROZEN.  --no-stomata restores the legacy
 # energy-only mode (which would leave them inert — and the inert-parameter gate
 # then requires them out of the trainable set, handled by _inactive_keys).
-_STOMATA_ON = True
+_STOMATA_ON = _CALIBRATED["stomata"].enabled
 # Sub-grid elevation-band snow (legoesm.land.snow_bands): banded precip phase /
 # melt / permanent snow from the CLM STD_ELEV map.  Off by default (legacy
 # cell-mean snowpack); enable with --elev-bands.
@@ -373,10 +379,16 @@ def _ml_land_params(cp, data):
 
 def build_multilayer_cfg(cp, data):
     """Assemble (config, land_params, hydraulics, carbon_state) for the multilayer
-    forward from the constrained extended params + the per-cell CLM soil map.  Surface
-    exchange + stomata follow the module mode (_BULK_SCHEME / _STOMATA_ON): the default
-    is a constant per-PFT Ch with soil-only beta; --bulk most / --stomata switch on the
-    MOST (z0) and Farquhar (Vc_max25/g1/LCMA) paths.  Soil thermal inertia is per-PFT."""
+    forward from the constrained extended params + the per-cell CLM soil map.
+
+    The DEFAULT is the calibrated land model (legoesm.land.config.
+    calibrated_multilayer_setup): MOST surface exchange with the per-cell CLM z0,
+    the big-leaf surface energy balance, and Farquhar stomata on a prescribed leaf
+    carbon, so Vc_max25 / g1 / LCMA are active and trainable.  The CLI can override
+    the mode for an exploratory fit (--bulk constant returns to a constant per-PFT
+    Ch, --no-stomata to soil-only beta); a fit run that way is NOT a bake candidate,
+    because the coupled driver deploys the shared definition, not the override.
+    Soil thermal inertia is per-PFT."""
     col = lambda k: data["vg_" + k].reshape(-1, 1)
     # Per-PFT POROSITY scale on the texture theta_sat (trainable via the soil-moisture
     # target).  Clamp theta_sat above BOTH theta_r and the PLANT field capacity (wp+gap):
@@ -399,14 +411,25 @@ def build_multilayer_cfg(cp, data):
         cp["pft_kscale"], cp["pft_cscale"], cp["th_glacier_cboost"])
     thermal = SoilThermalConfig(k_solid=k_eff.reshape(-1, 1), C_soil=c_eff.reshape(-1, 1))
     ch = data["pft"] @ cp["pft_ch"]              # per-PFT bulk exchange coefficient
-    cfg = MultiLayerLandConfig(
+    # START from the shared definition of the calibrated land model, then apply
+    # the per-cell maps and any exploratory CLI override.  Starting here (rather
+    # than restating the same choices) is what makes "the fit and the coupled run
+    # use one land model" true rather than a comment: surface scheme and the snow
+    # feedback come from it, and the mode fields below are the CLI-switchable
+    # ones seeded from it in the module constants above.
+    cfg = MultiLayerLandConfig(**_CALIBRATED)._replace(
         soil_grid=SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
                                  growth_factor=_SOIL_GROWTH),
         hydraulics=hyd, thermal=thermal,
         bulk_scheme=_BULK_SCHEME, Ch_land=ch, Cd_land=ch,  # MOST uses z0; constant uses ch
-        stomata=StomataConfig(enabled=_STOMATA_ON),  # Farquhar -> Vc_max25/g1/LCMA active
-        carbon=CarbonConfig(scheme="differland" if _STOMATA_ON else "none"),
-        snow_albedo_feedback=True,
+        # Derived from the SHARED definition rather than rebuilt from class
+        # defaults, so a future non-default field in the calibrated stomatal or
+        # carbon config reaches the fit as well as the deployment instead of
+        # silently differing between them (codex).  Only the mode itself is
+        # overridden, and only by the CLI.
+        stomata=_CALIBRATED["stomata"]._replace(enabled=_STOMATA_ON),
+        carbon=_CALIBRATED["carbon"]._replace(
+            scheme=_CALIBRATED["carbon"].scheme if _STOMATA_ON else "none"),
         # Sub-grid elevation-band snow: banded precip phase / melt gating /
         # permanent snow from the CLM STD_ELEV sub-grid topography (module toggle).
         elev_bands=(ElevationSnowBandConfig(
@@ -480,14 +503,17 @@ def forward_ml(cp, data):
         return s2, None
     st, _ = jax.lax.scan(eq_body, st0, None, length=_EQ_STEPS)
 
-    # PARTIAL moisture freeze: pin the DEEP soil layers (the slow supply reservoir) at
-    # their Stage-A annual equilibrium, let only the shallow ROOT-ZONE layers evolve.
-    # Fully-evolving moisture under the under-resolved offline forcing drains the thin
-    # sandy tropical cells to wilting -> ET collapse -> +50 C runaway (untrainable);
-    # fully-frozen moisture is stable but kills the SEASONAL water-stress signal.  The
-    # split keeps the deep root supply wet (energy-limited tropics stay supplied) while
-    # the shallow layers dry down and recharge seasonally -> a real, trainable btran
-    # cycle (a dry season warms the surface).
+    # Moisture freeze.  ``_FREEZE_FROM`` is the first pinned layer, and it is 0, so
+    # EVERY layer is pinned at its Stage-A annual equilibrium — not the partial,
+    # deep-only freeze this comment used to describe (codex, 2026-08-19: the prose
+    # said the root zone still evolved; the slice says otherwise, and the slice is
+    # what runs).  Fully-evolving moisture under the under-resolved offline forcing
+    # drains the thin sandy tropical cells to wilting -> ET collapse -> +50 C
+    # runaway.  The cost is that the seasonal water-stress signal is absent from
+    # the fit while the coupled run evolves moisture prognostically: that is a real
+    # calibration/deployment difference no configuration switch can remove, and it
+    # is recorded as such in the runbook.  Restoring a partial freeze means setting
+    # ``_FREEZE_FROM`` to the first deep layer AND rewriting this comment.
     deep = st.theta_soil[:, _FREEZE_FROM:]
     deep_psi = st.psi_soil[:, _FREEZE_FROM:]
     # Root-zone (0-28cm = ERA5 swvl1+2) soil moisture from the Stage-A EQUILIBRIUM,

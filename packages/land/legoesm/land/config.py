@@ -200,3 +200,67 @@ def resolve_land_config(land_mode: str, land_config=None):
     if land_mode == "none":
         return LandConfig()
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
+
+
+# ===========================================================================
+# The land model the baked _TUNED_*_MULTILAYER tables were calibrated under
+# ===========================================================================
+# ``scripts/run/train_multilayer_land_era5.py`` fits EVERY baked multilayer table
+# (albedo, emissivity, snow, soil thermal/hydraulic scales, and the canopy
+# conductance Vc_max25/g1/LCMA) inside this exact configuration.  Both the
+# calibrator and the coupled driver build their tile through this one function,
+# so a run can no longer deploy the tables under different land physics.
+#
+# WHY IT EXISTS (2026-08-19): the coupled AMIP tile ran with ``stomata.enabled``
+# False and no carbon state, so ``compute_effective_beta`` took its third branch
+# (beta = beta_soil) and the baked canopy conductance was INERT — parameters
+# fitted against a stomatal resistance the coupled run did not have.  Flipping
+# ``land_stomatal_beta`` alone was not enough either: without the differland
+# carbon scheme AND a prescribed carbon state the same dispatch falls to Jarvis,
+# a different stomatal model from the Farquhar one the tables were fitted under.
+_CALIB_ML_N_LAYERS = 8
+_CALIB_ML_SOIL_DEPTH_M = 3.0      # total soil-column depth [m]
+_CALIB_ML_SOIL_GROWTH = 1.5       # geometric layer-thickness growth factor [-]
+
+
+def calibrated_multilayer_setup() -> dict:
+    """Mode settings of the multilayer land model the baked tables were fit under.
+
+    Returns a FRESH dict of :class:`MultiLayerLandConfig` field values (never a
+    shared mutable singleton) covering only the non-spatial *mode* choices:
+    surface-exchange law, stomatal/photosynthesis path, soil-column geometry and
+    surface scheme.  The per-cell hydraulics / thermal / albedo maps are NOT here
+    — those already come from the one shared ``clm_multilayer_setup`` bake, which
+    preserves every field returned by this function.
+
+    ``carbon.scheme == "differland"`` selects the Farquhar branch of
+    ``stomata_utils.compute_effective_beta``, but that branch ALSO needs a
+    non-None ``carbon_state`` at the call site; a consumer that applies this
+    setup must seed one (see ``init_carbon_state``), exactly as the calibrator
+    and ``train_coupled_land_era5.py`` do.
+    """
+    return dict(
+        soil_grid=SoilGridConfig(n_layers=_CALIB_ML_N_LAYERS,
+                                 total_depth=_CALIB_ML_SOIL_DEPTH_M,
+                                 growth_factor=_CALIB_ML_SOIL_GROWTH),
+        bulk_scheme="most",
+        stomata=StomataConfig(enabled=True),
+        carbon=CarbonConfig(scheme="differland"),
+        snow_albedo_feedback=True,
+        surface_scheme=SimpleSEBConfig(),
+    )
+
+
+def apply_calibrated_multilayer(config: MultiLayerLandConfig) -> MultiLayerLandConfig:
+    """Return ``config`` with the calibration land model applied.
+
+    Every other field (per-cell hydraulics, thermal, albedo, Richards, runoff,
+    interception, ...) is carried through untouched.
+    """
+    if not isinstance(config, MultiLayerLandConfig):
+        raise TypeError(
+            "apply_calibrated_multilayer expects a MultiLayerLandConfig, got "
+            f"{type(config).__name__}; the calibrated tables are a MULTILAYER "
+            "bake and have no slab equivalent."
+        )
+    return config._replace(**calibrated_multilayer_setup())

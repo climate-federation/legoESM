@@ -222,6 +222,59 @@ def validate_config(data: dict) -> LMIPConfig:
     if "tapes" not in output or not output["tapes"]:
         raise ValueError("output.tapes: at least one tape must be declared")
 
+    # Run the multilayer land under the PHYSICS the baked per-PFT tables were
+    # calibrated under (legoesm.land.config.calibrated_multilayer_setup): MOST
+    # exchange, big-leaf SEB, Farquhar stomata on a prescribed leaf carbon, and
+    # the calibration soil column.  A land INITIAL CONDITION is only meaningful
+    # for the model it was equilibrated under, so a spin-up feeding a calibrated
+    # coupled run has to be on this too.  Off (default) = unchanged.
+    #
+    # NAMED "_physics" DELIBERATELY, and it is the whole promise: this driver
+    # builds its per-plant-type PARAMETERS from its own surface dataset, NOT
+    # from the tuned tables the coupled run uses, so the schemes and the soil
+    # column match while the parameter values do not.  Closing that gap means
+    # changing which surface dataset this driver reads — a separate decision.
+    physics.setdefault("calibrated_land_physics", False)
+    if not isinstance(physics["calibrated_land_physics"], bool):
+        raise ValueError(
+            f"physics.calibrated_land_physics must be a bool "
+            f"(got {physics['calibrated_land_physics']!r})")
+    if physics["calibrated_land_physics"]:
+        if physics["land_mode"] != "multilayer":
+            raise ValueError(
+                "physics.calibrated_land_physics=true requires physics.land_mode="
+                "'multilayer' — the calibrated tables are a multilayer bake with "
+                "no slab equivalent."
+            )
+        # EVERY field the calibrated setup replaces, plus freeze/thaw, which
+        # this driver applies AFTER the setup and would otherwise survive into
+        # the run.  Checked, never silently overridden, so a config can never
+        # read as one land model while running another.
+        from legoesm.land.config import calibrated_multilayer_setup
+        _cal = calibrated_multilayer_setup()
+        for _key, _exp in (
+                ("surface_scheme", "simple_seb"),
+                ("bulk_scheme", _cal["bulk_scheme"]),
+                ("stomata_enabled", _cal["stomata"].enabled),
+                ("stomatal_model", _cal["stomata"].stomata_model),
+                ("snow_albedo_feedback", _cal["snow_albedo_feedback"]),
+                ("enable_freeze_thaw", False),
+        ):
+            if physics[_key] != _exp:
+                raise ValueError(
+                    f"physics.calibrated_land_physics=true requires "
+                    f"physics.{_key}={_exp!r} (the value the baked tables were "
+                    f"fitted under); got {physics[_key]!r}. Set it or drop "
+                    "calibrated_land_physics — these are not silently overridden."
+                )
+        for _stom_key in ("gs_max", "vc_max25", "g1"):
+            if physics.get(_stom_key) is not None:
+                raise ValueError(
+                    f"physics.calibrated_land_physics=true cannot be combined "
+                    f"with physics.{_stom_key}: the calibrated setup replaces the "
+                    "whole stomatal configuration, so the value would vanish "
+                    "without a word. Drop one of the two.")
+
     return LMIPConfig(
         grid=grid,
         physics=physics,
@@ -234,7 +287,6 @@ def validate_config(data: dict) -> LMIPConfig:
         land_mask_file=str(data.get("land_mask_file", "")),
         raw=data,
     )
-
 
 def apply_overrides(base: dict, overrides: Iterable[str]) -> dict:
     """Apply ``-o dot.notation=value`` overrides in place on a deep-copied

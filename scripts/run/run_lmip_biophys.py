@@ -8,10 +8,20 @@ from 6-hourly to the model timestep and streamed through ``lax.scan`` as an
 explicit per-step input (SegmentForcing doctrine).  ``run_lmip_smoke.py`` is kept
 untouched as the synthetic-forcing smoke test.
 
-Configuration matches ``run_lmip_smoke`` exactly: ``MultiLayerLandConfig`` with
-prescribed seasonal LAI (CLM5 monthly climatology, one-year cycle) and
-**carbon disabled** (``carbon="none"``) — energy + water + snow + soil
-temperature only.  No NBP; the carbon cycle is a later workstream.
+By default the configuration matches ``run_lmip_smoke`` exactly:
+``MultiLayerLandConfig`` with prescribed seasonal LAI (CLM5 monthly climatology,
+one-year cycle) and **carbon disabled** (``carbon="none"``) — energy + water +
+snow + soil temperature only.  No NBP; the carbon cycle is a later workstream.
+
+``physics.calibrated_land_physics`` REPLACES that default with the land model
+the baked per-plant-type tables were fitted under: MOST exchange, big-leaf
+surface energy balance, Farquhar stomata on a PRESCRIBED (time-constant) leaf
+carbon rather than the seasonal LAI climatology, and the calibration soil column
+(8 layers over 3 m, growth 1.5).  The carbon pools are still not spun up — they
+are re-derived and discarded every step, exactly as the offline calibrator does,
+so the fitted conductance acts on the leaf area it was fitted with.  Use it when
+the resulting soil state will initialise a coupled run on that same land model;
+see ``docs/land/land_dual_target_calibration_runbook.md``.
 
 Default timestep is **1 h** (``--dt 3600``); pass ``--dt 1800`` for 30-min steps.
 Default grid is **latlon ~2°** (``--grid-type latlon --resolution 90`` -> 90x180).
@@ -129,6 +139,8 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         # canopy).  See lmip_config.validate_config for bounds/validation.
         stomatal_model=cfg.physics.get("stomatal_model", "ball_berry"),
         stomata_enabled=bool(cfg.physics.get("stomata_enabled", False)),
+        calibrated_land_physics=bool(
+            cfg.physics.get("calibrated_land_physics", False)),
         vc_max25=cfg.physics.get("vc_max25", None),
         g1=cfg.physics.get("g1", None),
         gs_max=cfg.physics.get("gs_max", None),
@@ -388,6 +400,10 @@ def run(args) -> int:
         # (init_land_surface_data -> gsd), so the model SoilGrid must match it;
         # we use the loader default (8-layer Richards).  Exact AMIP parity
         # (10-layer/3 m via clm_multilayer_setup) is a documented follow-up.
+        # UNDER ``calibrated_land_physics`` the block below is REPLACED further
+        # down: the soil grid becomes the calibration column (8 layers, 3 m,
+        # growth 1.5 — same layer COUNT, so the loader still matches) and the
+        # carbon scheme becomes ``differland`` rather than staying off.
         base_cfg = MultiLayerLandConfig(
             surface_scheme=surf, soil_grid=SoilGridConfig(),
             bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
@@ -396,6 +412,14 @@ def run(args) -> int:
             # heat; on stabilises freezing boreal/Arctic columns.  Preserved
             # through init_land_surface_data (which only _replace()s hydraulics).
             thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
+        # A land initial condition is only meaningful for the model it was
+        # equilibrated under, so a spin-up feeding a calibrated coupled run has to
+        # use the same one — including its soil column, which this driver
+        # otherwise leaves at the loader default.  ONE shared definition, so the
+        # calibration, the spin-up and the coupled run cannot drift apart.
+        if getattr(args, "calibrated_land_physics", False):
+            from legoesm.land.config import apply_calibrated_multilayer
+            base_cfg = apply_calibrated_multilayer(base_cfg)
         # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
@@ -519,11 +543,23 @@ def run(args) -> int:
         if args.restart_from:
             # Warm start from a prior end-state — bypass the cold-init T_soil
             # broadcast so the loaded profile survives verbatim.
+            # Layer thicknesses, not just the count: 8 layers can span 3 m or
+            # 6.375 m, and only the thicknesses tell a restart's soil profile
+            # apart from one placed at different depths.
+            from legoesm.land.soil_grid import make_soil_grid as _make_soil_grid
             loaded, restart_meta = load_land_restart(
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
-                expected_n_layers=config.soil_grid.n_layers)
+                expected_n_layers=config.soil_grid.n_layers,
+                expected_soil_dz=_make_soil_grid(config.soil_grid).dz,
+                # The calibration column is not this driver's historical
+                # default, so an older restart carrying no thicknesses is
+                # almost certainly on the wrong one: refuse rather than warn,
+                # otherwise the chain re-saves that profile under the new
+                # column's label.
+                require_soil_dz=bool(getattr(
+                    args, "calibrated_land_physics", False)))
             # A restart round-trips only the prognostic fields, leaving the
             # optional structural ones (surface_water, snow/ice bands,
             # canopy_state) as None — but step_multilayer_land returns them as
@@ -562,6 +598,19 @@ def run(args) -> int:
 
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
 
+    # PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI = C_fol/LCMA).  The
+    # Farquhar branch of compute_effective_beta needs BOTH the differland scheme
+    # and a non-None carbon state; with the scheme set and the state missing the
+    # same dispatch silently runs JARVIS instead, a different stomatal model from
+    # the one the baked conductance was fitted under.  The evolved pools are
+    # discarded each step, exactly as the offline calibrator does, so no carbon
+    # spin-up is needed.  None whenever the scheme is not differland, which keeps
+    # every existing run byte-identical.
+    _carbon_state = None
+    if is_multilayer and config.stomata.enabled and config.carbon.scheme == "differland":
+        from legoesm.land.carbon.carbon_cycle import init_carbon_state
+        _carbon_state = init_carbon_state((ncol,), config.carbon)
+
     # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
         state, accums, revert_count = carry
@@ -573,7 +622,8 @@ def run(args) -> int:
         if is_multilayer:
             new_state, resp, _, surf_out = step_fn(
                 state, forcing_t, config, U_MIN, dt,
-                lat=lat_rad, land_params=land_params_t, doy=doy_t)
+                lat=lat_rad, land_params=land_params_t, doy=doy_t,
+                carbon_state=_carbon_state)
         else:
             new_state, resp, _ = step_fn(
                 state, forcing_t, config, U_MIN, dt,
@@ -779,10 +829,12 @@ def run(args) -> int:
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),
                 "year_final": year_final, "doy_final": doy_int, "hour_final": hour_of_day,
             }
+            from legoesm.land.soil_grid import make_soil_grid as _msg
             rp = save_land_restart(
                 out_dir / restart_name, cur_state,
                 land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=n_completed, metadata=restart_meta)
+                n_steps_completed=n_completed, metadata=restart_meta,
+                soil_dz=_msg(config.soil_grid).dz)
             print(f"wrote {rp}")
         except Exception as e:  # noqa: BLE001
             print(f"(restart write skipped: {e})")
