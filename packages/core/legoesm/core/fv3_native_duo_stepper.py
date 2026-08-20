@@ -24,13 +24,35 @@ Williamson-2 duo-target gate is the arbiter.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     analytic_swcore_state,
     build_fv3_native_gridstruct,
     exchange_bgrid_scalar_halos,
     exchange_cgrid_vector_halos,
+    fort,
 )
+
+# Vertex-instability diagnostic mode (codex vertex-kill C3), frozen at
+# import — no per-call env reads, no mid-run env mutation (codex
+# screens-r1 F6).  Default OFF = faithful.
+_PG_BVERTEX_MEAN2 = os.environ.get("LEGOESM_DUO_PG_BVERTEX", "") == "mean2"
+
+# Entry A-scalar exchange gating (marginal-stability probe).  Upstream
+# runs the ENTRY ext_scalar(delp,pt) only on the first acoustic step of
+# each dt_atmos block (dyn_core.F90:432-439 `if (it==1)`), while the
+# TAIL refresh (:1336-1337) runs every step; our stepper has no n_split
+# structure and so runs BOTH every step -- two A-scalar wedge
+# applications per step where upstream averages ~1.3.  The exchange is
+# idempotent on an unchanged field, so this should be a no-op; with a
+# faithful ~300x corner-wedge amplifier sitting in a near-cancellation
+# against del-6 (measured per-step excess gain only ~1.0033), "should
+# be" is worth measuring.  "off" drops the entry refresh, keeping the
+# tail one.
+_ENTRY_ASCALAR_OFF = (
+    os.environ.get("LEGOESM_DUO_ENTRY_ASCALAR", "") == "off")
 
 
 def build_six_face_duo_context(n: int, ng: int = 3,
@@ -38,8 +60,21 @@ def build_six_face_duo_context(n: int, ng: int = 3,
                                vector_corner: str = "lagrange",
                                ext_exclude: tuple = (),
                                use_ext_metrics: bool = False,
-                               oracle_conventions: bool = False) -> dict:
+                               oracle_conventions: bool = False,
+                               omega: float | None = None,
+                               k2e_nord: int = 2,
+                               topo_fn=None,
+                               rotation_alpha: float = 0.0) -> dict:
     """Gridstructs + Bounds for all six faces (certified builders).
+
+    ``rotation_alpha`` is the Zenodo ``test_case_nml`` ``alpha``, passed
+    RAW to the gridstruct builders exactly as the pinned Fortran uses it
+    (``test_cases.F90:783-790`` feeds the namelist value straight into
+    ``sin``/``cos`` — the deck's ``alpha = 45`` is 45 RADIANS; the
+    historical ``alpha*pi`` conversion in ``fv_control.F90:1105`` is
+    commented out).  It rotates the Coriolis fields ``f0``/``fC`` only;
+    the rotated IC winds/height take the same value through their own
+    builders (``w2_six_face_state(alpha=...)``).
 
     ``oracle_conventions=True`` = the BOUNDED-conventions lane the
     Zenodo duo runs actually execute (proven by the C48 fms.out
@@ -66,18 +101,47 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         build_fv3_native_gridstruct_bounded,
     )
 
+    # Validated for EVERY context, not just bundle ones: ext_exclude is
+    # now also how a NON-bundle caller declares that it accepts the
+    # interim post-p_grad_c exchange (exchange_post_pgrad_sixface refuses
+    # to substitute it silently). A typo there would otherwise re-arm the
+    # very silent fallback the opt-in exists to make explicit.
+    bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
+    if bad:
+        raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
+    if (rotation_alpha != 0.0 and use_ext_metrics
+            and "metrics" not in ext_exclude):
+        # extend_gridstruct rebuilds ext-halo f0/fC as the UNROTATED
+        # 2*Om*sin(lat) (fv3_native_gridstruct extend_gridstruct
+        # Coriolis block) — mixing a rotated interior with unrotated
+        # halos is a silent Coriolis seam defect, so this diagnostic
+        # lane refuses rotated decks until that builder learns
+        # rotation_alpha.
+        raise ValueError(
+            "use_ext_metrics=True is not supported with "
+            "rotation_alpha != 0 unless 'metrics' is in ext_exclude "
+            "(extend_gridstruct halo f0/fC are unrotated; the "
+            "exclusion keeps that builder unreached)")
+
     # radius/omega: the W2 balanced state, the duo-target gate and the
     # Zenodo reference all use the FMS constants printed by the duo run
     # log ("Radius is 6371200.0, omega is 7.2921e-5") — the builder's
     # constants.R_earth/Omega defaults put a broad scale error on every
     # metric and Coriolis term (codex vertex-diff P2).
+    # omega override: the colliding-modon case runs a NON-ROTATING
+    # planet (FV3 case 8; omega=0); default = the FMS value
+    if omega is None:
+        omega = FV3_OMEGA
     if oracle_conventions:
-        gs6 = [build_fv3_native_gridstruct_bounded(n, ng, tile=t)
+        gs6 = [build_fv3_native_gridstruct_bounded(
+                   n, ng, tile=t, omega=omega,
+                   rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
     else:
         gs6 = [build_fv3_native_gridstruct(n, ng, tile=t,
                                            radius=FV3_RADIUS_M,
-                                           omega=FV3_OMEGA)
+                                           omega=omega,
+                                           rotation_alpha=rotation_alpha)
                for t in range(1, 7)]
 
     # DUO angle override: the plain-mpp gridstruct poisons the panel-edge
@@ -120,7 +184,7 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     # on area (real side values; the true wedge areas arrive with the
     # ext-machinery swap) + rarea recomputed there.
     from legoesm.grids.fv3_native_gridstruct import (
-        _fill_corners_agrid_x,
+        fill_corners_agrid_x as _fill_corners_agrid_x,
     )
     from legoesm.grids.fv3_native_gridstruct import (
         fort as _fort,
@@ -143,7 +207,14 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         create_fv3_native_duogrid_data,
     )
 
-    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3), k2e_nord=4)
+    # k2e_nord=2 = the AUTHORITATIVE live default (fv_arrays.F90:150 +
+    # global_grid_data.F90:57, no nml override; the dg/gg FATAL only
+    # enforces equality of the two 2-defaults).  The historic 4 came
+    # from the luanfs mirror monolith and is the vertex amplifier
+    # (4-pt corner-adjacent ring Lagrange has oscillating extrapolation
+    # lobes; measured differential gain 1.56x/block, gamma=0.054/blk).
+    dg = create_fv3_native_duogrid_data(n, ng=min(ng, 3),
+                                        k2e_nord=k2e_nord)
 
     for gs in gs6:
         # bounded lane: guards see bounded_domain=True + corner flags
@@ -167,11 +238,9 @@ def build_six_face_duo_context(n: int, ng: int = 3,
         from legoesm.grids.fv3_native_ext_vector import build_ext_context
         from legoesm.grids.fv3_native_gridstruct import extend_gridstruct
 
-        bad = set(ext_exclude) - {"divgd", "cvec", "metrics", "dvec", "ascalar"}
-        if bad:
-            raise ValueError(f"ext_exclude: unknown families {sorted(bad)}")
         ectx = build_ext_context(n, ng, gs6,
-                                 vector_corner=vector_corner)
+                                 vector_corner=vector_corner,
+                                 k2e_nord=k2e_nord)
         # ORACLE-FAITHFUL DEFAULT (Zenodo grep): upstream duo d_sw
         # consumes the model gridstruct metrics — the model tree never
         # reads the dg ext metrics; extend_gridstruct was OUR coherence
@@ -194,11 +263,70 @@ def build_six_face_duo_context(n: int, ng: int = 3,
     ee6 = [build_extended_corner_lonlat(n, ng, tile=t)
            for t in range(1, 7)]
 
+    # surface geopotential (phis, m^2/s^2) per face on the data domain:
+    # topo_fn(lon, lat) -> phis; geopk consumes it as gz(km+1) exactly
+    # like upstream (test_cases case-5 phis feeds geopk's hs argument).
+    # Upstream applies ONE static ext_scalar(phis) before stepping
+    # (test_cases.F90:1567-1582) so the halo/wedge slots carry the k2e
+    # values, not the raw analytic evaluation (codex r8 P1).
+    hs6 = None
+    if topo_fn is not None:
+        hs6 = [np.asarray(topo_fn(np.asarray(gs["agrid_lon"]),
+                                  np.asarray(gs["agrid_lat"])))
+               for gs in gs6]
+        if use_ext_bundle:
+            from legoesm.grids.fv3_native_ext_vector import (
+                ext_scalar_sixface,
+            )
+
+            ext_scalar_sixface(hs6, "A", ectx)
+
+    # f0 (Coriolis at cell centres) gets the SAME treatment as phis, and it
+    # was the one static field that never got it. test_cases.F90:787-801
+    # evaluates f0 analytically over the FULL data domain (isd..ied,
+    # jsd..jed) and then OVERWRITES the halo:
+    #
+    #     if (.not. gridstruct%dg%is_initialized) then
+    #        call mpp_update_domains( f0, domain )
+    #     else
+    #        call ext_scalar(f0, gridstruct%dg, bd, domain, 0, 0)
+    #     endif
+    #     if (cubed_sphere) call fill_corners(f0, npx, npy, YDir)
+    #
+    # so on the duo lane the halo carries the k2e-remapped value, not the
+    # raw analytic one. d_sw5 reads f0 full-domain as `vort = wk + f0`
+    # (sw_core.F90:1837-1862), so those halo slots are consumed, not
+    # decorative.
+    #
+    # THE :800 fill_corners(f0, npx, npy, YDir) IS A NO-OP IN THE ORACLE.
+    # fill_corners_2d_r8 (fv_mp_mod.F90:1032-1105) guards its ENTIRE body
+    # with `if (present(BGRID)) ... elseif (present(AGRID))`, and the f0
+    # call passes NEITHER optional -- the routine falls through and writes
+    # nothing, so the oracle's f0 corner-diagonal regions keep
+    # ext_scalar's Lagrange corner-region fill.  An earlier port round
+    # implemented the fill the source APPEARS to perform
+    # (fill_corners_agrid_y after the exchange), which overwrote the
+    # correct corner values by 7-14% relative; d_sw5's fv_tp_2d
+    # (vort = wk + f0) consumes exactly those slots at corner cells, and
+    # the ORACLE STAGE-STATE instrument measured the result as u/v
+    # corner-wedge residuals of ~1.6e-6 per substep on every face --
+    # the dominant term of the one-step 9.79e-06 panel-boundary floor
+    # (stage table: fv3_duo_gaps/dynstage, jobs 9369492/9369507/9369527).
+    if use_ext_bundle and "f0" not in ext_exclude:
+        from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
+
+        f0_6 = [np.array(gs["f0"], dtype=np.float64, copy=True)
+                for gs in gs6]
+        ext_scalar_sixface(f0_6, "A", ectx)
+        for t in range(6):
+            gs6[t] = {**gs6[t], "f0": f0_6[t]}
+
     return {"n": n, "ng": ng, "gs6": gs6, "dg": dg,
             "use_ext_bundle": use_ext_bundle, "ectx": ectx,
             "ext_exclude": tuple(ext_exclude),
             "oracle_conventions": bool(oracle_conventions),
-            "kk6": kk6, "ee6": ee6,
+            "rotation_alpha": float(rotation_alpha),
+            "kk6": kk6, "ee6": ee6, "hs6": hs6,
             "bd": Bounds.single_tile(n, ng)}
 
 
@@ -264,6 +392,34 @@ def duo_pad_scalars(f6: list, ctx: dict) -> None:
         f6[t][:, :] = padded[t]
 
 
+def _geopk_sw_adapter(delp2d: np.ndarray, hs: np.ndarray, bd,
+                      pt: np.ndarray | None, *, cg: bool) -> tuple:
+    """Shared body of the two km=1 SW geopk adapters.
+
+    Folds the ``-DSW_DYNAMICS`` convention (akap=1, ptop=0, pt defaults
+    to 1, NO cp_air, no peln/pkz) and the 2-D<->3-D staging onto the ONE
+    km-general kernel in :mod:`legoesm.core.fv3_native_pgrad`.  Carries
+    no numerics of its own.
+
+    ``unwritten_fill=0.0`` (not the oracle's 1e30 sentinel) keeps the
+    returned halos byte-identical to the pre-refactor km=1 code, which
+    allocated ``np.zeros`` and wrote only the compute box — see
+    UNCERTAIN U10.  ``cp_air=1.0`` is inert: the SW branch (:2770) drops
+    the factor entirely.
+    """
+    from legoesm.core.fv3_native_pgrad import geopk as _geopk_km
+
+    delp3 = np.asarray(delp2d, dtype=np.float64)[:, :, None]
+    pt3 = (np.ones_like(delp3) if pt is None
+           else np.asarray(pt, dtype=np.float64)[:, :, None])
+    out = _geopk_km(delp3, pt3, hs, bd, km=1, ptop=0.0, akap=1.0,
+                    cp_air=1.0, cg=cg, duogrid=True, computehalo=False,
+                    npx=bd.ie + 1, npy=bd.je + 1, a2b_ord=4,
+                    bounded_domain=False, sw_dynamics=True,
+                    unwritten_fill=0.0)
+    return out["pk"], out["gz"]
+
+
 def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
                   pt: np.ndarray | None = None) -> tuple:
     """dyn_core.F90 geopk (2660-2790), SW_DYNAMICS branch, km=1, CG=T.
@@ -273,20 +429,10 @@ def geopk_sw_1lev(delpc: np.ndarray, hs: np.ndarray, bd,
     (the SW_DYNAMICS increment, NO cp_air).  CG=.true. ranges:
     ifirst=is-1..ie+1 (c_sw's delpc compute ring covers exactly this).
     Returns (pkc, gz) with a trailing 2-level axis on the data domain.
+
+    ADAPTER over ``fv3_native_pgrad.geopk`` — no duplicated numerics.
     """
-    is_, ie = bd.is_, bd.ie
-    m = delpc.shape[0]
-    pkc = np.zeros((m, m, 2))
-    gz = np.zeros((m, m, 2))
-    lo = 1 - bd.ng
-    sl = slice(is_ - 1 - lo, ie + 1 - lo + 1)
-    pkc[sl, sl, 0] = 0.0
-    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delpc[sl, sl]))
-    gz[sl, sl, 1] = hs[sl, sl]
-    ptv = 1.0 if pt is None else pt[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
-                                           - pkc[sl, sl, 0])
-    return pkc, gz
+    return _geopk_sw_adapter(delpc, hs, bd, pt, cg=True)
 
 
 def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
@@ -296,54 +442,176 @@ def p_grad_c_1lev(dt2: float, delpc, pkc, gz, uc, vc, gs: dict, bd):
     uc over (is:ie+1, js:je) and vc over (is:ie, js:je+1).  Mutates
     uc/vc (numpy data-domain arrays) in place; delpc unused on the
     hydrostatic branch (kept for signature fidelity).
+
+    ADAPTER over ``fv3_native_pgrad.p_grad_c`` — the 2-D uc/vc are
+    passed as ``[:, :, None]`` VIEWS so the in-place update writes
+    through to the caller's arrays.
     """
-    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    lo = 1 - bd.ng
-    rdxc = gs["rdxc"]
-    rdyc = gs["rdyc"]
-    wk = pkc[:, :, 1] - pkc[:, :, 0]
+    from legoesm.core.fv3_native_pgrad import p_grad_c as _p_grad_c_km
 
-    def wk_at(i, j):
-        return wk[i - lo, j - lo]
+    _p_grad_c_km(dt2, np.asarray(delpc, dtype=np.float64)[:, :, None],
+                 pkc, gz, uc[:, :, np.newaxis], vc[:, :, np.newaxis],
+                 gs, bd, npz=1, hydrostatic=True)
 
-    def gz_at(i, j, k):
-        return gz[i - lo, j - lo, k - 1]
 
-    def pk_at(i, j, k):
-        return pkc[i - lo, j - lo, k - 1]
+def exchange_post_pgrad_sixface(ctx: dict, divgd6: list, uc6: list,
+                                vc6: list, *, nord: int) -> None:
+    """The post-``p_grad_c`` duo exchanges, shared by every lane.
 
-    for j in range(js, je + 1):
-        for i in range(is_, ie + 1 + 1):
-            uc[i - lo, j - lo] += dt2 * rdxc[i - lo, j - lo] / (
-                wk_at(i - 1, j) + wk_at(i, j)) * (
-                (gz_at(i - 1, j, 2) - gz_at(i, j, 1))
-                * (pk_at(i, j, 2) - pk_at(i - 1, j, 1))
-                + (gz_at(i - 1, j, 1) - gz_at(i, j, 2))
-                * (pk_at(i - 1, j, 2) - pk_at(i, j, 1)))
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1):
-            vc[i - lo, j - lo] += dt2 * rdyc[i - lo, j - lo] / (
-                wk_at(i, j - 1) + wk_at(i, j)) * (
-                (gz_at(i, j - 1, 2) - gz_at(i, j, 1))
-                * (pk_at(i, j, 2) - pk_at(i, j - 1, 1))
-                + (gz_at(i, j - 1, 1) - gz_at(i, j, 2))
-                * (pk_at(i, j - 1, 2) - pk_at(i, j, 1)))
+    ``dyn_core.F90:652``  ``if (duogrid .and. nord > 0) ext_scalar(divgd, dg, bd, domain, 1,1)``
+    ``dyn_core.F90:655``  ``if (duogrid) ext_vector(uc, vc, dg, bd, domain,
+                          gridstruct, flagstruct, 1,0,0,1)``
+
+    (``:653`` is BLANK and ``:654`` is the ``.not. duogrid`` group-halo
+    completion; the vector call is ``:655``. ``:706``/``:709`` are the
+    ``flagstruct%regional`` branch -- ``regional_boundary_update`` -- and
+    are NOT on the duo lane at all, though they were cited as the anchor
+    for months.)
+
+    THE GATE IS ``nord``, the DIVERGENCE-damping order that ``d_sw5``
+    runs, not ``nord_v``, the vorticity-damping order. Upstream seeds
+    ``nord_k = flagstruct%nord`` (``dyn_core.F90:749``) and only later
+    derives the per-level ``nord_v(k) = min(2, flagstruct%nord)``
+    (``:757``); the exchange is gated on the GLOBAL flag, so a sponge
+    level driving ``nord_k`` to zero must not retract it. The shipped
+    decks set both to 2, so gating on the wrong one is invisible there.
+
+    WHY THIS IS ONE FUNCTION. The interim index-copy helpers
+    (``exchange_bgrid_scalar_halos`` / ``exchange_cgrid_vector_halos``)
+    fill the four edge STRIPS and leave the CORNER-DIAGONAL halo at
+    whatever ``c_sw`` left there; upstream ``ext_scalar``/``ext_vector``
+    are the k2e Lagrange fills that cover those regions
+    (``fv_duogrid.F90:523-566``: ``mpp_update_domains(NORTH+EAST)`` on the
+    ``k2e_*_b`` B tables, then ``cube_rmp`` ->
+    ``fill_corners_domain_decomp`` -> ``fill_corner_region``). ``d_sw5``'s
+    divergence-damping n-loop reads ``divg_d(i+1,j)`` over
+    ``i = is-1-nt .. ie+1+nt`` (``sw_core.F90:1748-1750``) and
+    ``divg_d(i,j+1)`` over ``j = js-1-nt .. je+1+nt`` (``:1756-1758``), so
+    at ``nord=2`` (first iteration ``nt=1``) the operand reach is
+    ``is-2 .. ie+3`` / ``js-2 .. je+3`` -- well inside the corner
+    diagonal -- and the damping weight
+    ``dd8 = (da_min_c*d4_bg)**(nord+1)`` is ~1e32. The difference between
+    the two paths is not cosmetic, it is 16 orders of magnitude.
+
+    FAILS CLOSED. Upstream has NO fallback: on the duo lane it always
+    calls ``ext_scalar``. A context without the ext bundle therefore
+    cannot run ``nord > 0`` faithfully, and silently returning interim
+    numbers there is exactly the wrong-number path that produced a 1e11 D
+    wind. Taking the interim divgd path now requires saying so via
+    ``ext_exclude=("divgd", ...)``, which is already the documented
+    non-faithful measurement opt-in.
+
+    SCOPE -- this is the POST-``p_grad_c`` site only. It is NOT "the one
+    exchange entry point": ``csw_step_sixface(exchange=True)`` still calls
+    the interim helpers directly, unguarded by ``use_ext_bundle`` or
+    ``ext_exclude``. That is deliberately not routed here, because it is a
+    different point in the cadence -- and upstream has no duo exchange
+    there at all (after ``c_sw`` at ``dyn_core.F90:489`` it only STARTS a
+    non-duo group update at ``:501``; the duo exchanges are these two,
+    after ``p_grad_c`` at ``:629``). So that call site is a separate open
+    question about whether it should exist, not a second caller of this
+    helper. Do not describe the two as unified until that is settled.
+
+    All three arrays are mutated in place.
+    """
+    if len(divgd6) != 6 or len(uc6) != 6 or len(vc6) != 6:
+        raise ValueError(
+            "exchange_post_pgrad_sixface expects six faces per array, got "
+            f"{len(divgd6)}/{len(uc6)}/{len(vc6)} -- a short list would "
+            "silently exchange a subset of the cube")
+    # nord is a damping ORDER: integral by construction. The deck dicts mix
+    # ints and floats, so a caller reads out as float and int() would round
+    # 2.7 to 2 without a word -- reject instead. (mypy flagged the float;
+    # the silent-truncation hazard is the reason not to just cast.)
+    if nord != int(nord):
+        raise ValueError(
+            f"nord must be an integral damping order, got {nord!r}")
+    nord = int(nord)
+    n, ng = ctx["n"], ctx["ng"]
+    exclude = tuple(ctx.get("ext_exclude", ()))
+
+    def _interim_divgd():
+        for t in range(1, 7):
+            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
+
+    def _interim_cvec():
+        for t in range(1, 7):
+            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+
+    if not ctx.get("use_ext_bundle"):
+        if nord > 0 and "divgd" not in exclude:
+            raise ValueError(
+                f"post-p_grad_c divgd exchange with nord={nord} needs the "
+                "ext bundle: dyn_core.F90:652 calls ext_scalar(divgd,1,1), "
+                "whose k2e Lagrange fill covers the corner-diagonal halo, "
+                "and d_sw5's n-loop reads that region (sw_core.F90:1748-"
+                "1758, reach is-2..ie+3 at nord=2) before scaling it by "
+                "dd8=(da_min_c*d4_bg)**(nord+1) ~ 1e32. The interim "
+                "index-copy helper leaves those cells at whatever c_sw "
+                "wrote, which is how face-1 u reached 1.17534e+11. Build "
+                "the context with use_ext_bundle=True, or state the "
+                "non-faithful choice with ext_exclude=('divgd',).")
+        # The C-vector exchange fails closed too. dyn_core.F90:655 is
+        # NOT gated on nord, so `nord == 0` does not excuse it, and an
+        # interim uc/vc exchange is no more faithful than an interim
+        # divgd one -- it was simply less catastrophic, because
+        # exchange_cgrid_vector_halos does fill its corner diagonals
+        # (with the plain-mpp vector fill, not the duo k2e Lagrange one).
+        # Gating only divgd here would have left exactly one silent
+        # substitution behind, which is the defect this guard exists for.
+        if "cvec" not in exclude:
+            raise ValueError(
+                "post-p_grad_c uc/vc exchange needs the ext bundle: "
+                "dyn_core.F90:655 calls ext_vector(uc,vc,...,1,0,0,1) "
+                "unconditionally on the duo lane (the enclosing "
+                "`test_case > 1` at :649 is inside #ifdef SW_DYNAMICS and "
+                "is not compiled for the 3-D build). The interim helper "
+                "substitutes the plain-mpp vector corner fill for the duo "
+                "k2e Lagrange one. Build the context with "
+                "use_ext_bundle=True, or state the non-faithful choice "
+                "with ext_exclude=('cvec',).")
+        if nord > 0:
+            _interim_divgd()
+        _interim_cvec()
+        return
+
+    from legoesm.grids.fv3_native_ext_vector import (
+        ext_scalar_sixface,
+        ext_vector_cgrid_sixface,
+    )
+
+    if nord > 0:
+        if "divgd" in exclude:
+            _interim_divgd()
+        else:
+            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
+    if "cvec" in exclude:
+        _interim_cvec()
+    else:
+        ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
 
 
 def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
-                       dt: float) -> list:
+                       dt: float, sw_cfg: dict | None = None) -> list:
     """SB2: geopk(SW,1-lev) + p_grad_c per face, the post-PG duo
     exchanges, d_sw1 per face, the C-ring inter-panel flux averaging
     (dyn_core.F90:853-900 — the first excluded mpp site, now live),
     then d_sw2 per face on the AVERAGED slots.
 
+    ``sw_cfg`` overrides the W2-tuned damping/reconstruction defaults
+    (``_SW_CFG_DEFAULT``) — e.g. the Zenodo case-8 configuration turns
+    vorticity damping OFF and runs hord=8 everywhere.
+
     Workspace choice: d_sw1's ut/vt workspaces enter as ZEROS
     (workspace_sentinel=0.0) — the defined analog of upstream's
     uninitialized stack (benign via near-zero panel-edge cosa).
-    INTERIM (documented): the post-PG uc/vc + divgd exchanges use the
-    mpp-analog index-copy helpers; the authoritative duo lane uses the
-    ext_scalar/ext_vector k2e machinery (dyn_core 652-655) — swap
-    staged with SB3 before the W2 gate.
+    The post-PG uc/vc + divgd exchanges go through
+    ``exchange_post_pgrad_sixface``: the ext_scalar/ext_vector k2e
+    machinery (dyn_core.F90:652 and :655) when the context carries the ext
+    bundle, the mpp-analog index-copy helpers otherwise or per
+    ``ext_exclude``.  (This docstring previously said the interim helpers
+    were the only path; that had not been true since the ext bundle
+    landed.)
 
     Returns per-face dicts: d_sw1 outputs + averaged allflux + the
     d_sw2-updated delp/pt.
@@ -353,6 +621,18 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
         average_allflux_shared_edges,
     )
 
+    # Lane guard (codex km=1 r2 finding 1): this assembler runs ONLY duo
+    # kernels (d_sw1_duo/d_sw2_duo) and is publicly callable with
+    # fabricated csw_outs, i.e. WITHOUT passing through c_sw's guard —
+    # the same upstream implication applies (fv_arrays.F90:1512:
+    # duogrid forces bounded_domain=.true.).
+    for _gs in ctx["gs6"]:
+        if not _gs.get("bounded_domain", False):
+            raise ValueError(
+                "dsw12_step_sixface: duo kernels require "
+                "bounded_domain=True on every face (fv_arrays.F90:1512); "
+                "build the context with oracle_conventions=True")
+
     n, ng = ctx["n"], ctx["ng"]
     bd = ctx["bd"]
     npx = n + 1
@@ -360,36 +640,29 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
 
     uc6 = [np.array(o["uc"], copy=True) for o in csw_outs]
     vc6 = [np.array(o["vc"], copy=True) for o in csw_outs]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(states[t - 1]["delp"])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(states[t - 1]["delp"]))
         pkc, gz = geopk_sw_1lev(csw_outs[t - 1]["delpc"], hs, bd,
                                 pt=csw_outs[t - 1]["ptc"])
         p_grad_c_1lev(0.5 * dt, csw_outs[t - 1]["delpc"], pkc, gz,
                       uc6[t - 1], vc6[t - 1], gs, bd)
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(203, t, "uc", uc6[t])
+            sd(203, t, "vc", vc6[t])
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     divgd6 = [o["divg_d"] for o in csw_outs]
-    if ctx.get("use_ext_bundle"):
-        # authoritative post-p_grad_c duo exchanges (dyn_core.F90:652-655):
-        # ext_scalar(divgd, 1,1) + ext_vector(uc, vc, 1,0,0,1)
-        from legoesm.grids.fv3_native_ext_vector import (
-            ext_scalar_sixface,
-            ext_vector_cgrid_sixface,
-        )
-
-        if "divgd" in ctx.get("ext_exclude", ()):
-            for t in range(1, 7):
-                exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-        else:
-            ext_scalar_sixface(divgd6, "B", ctx["ectx"])
-        if "cvec" in ctx.get("ext_exclude", ()):
-            for t in range(1, 7):
-                exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
-        else:
-            ext_vector_cgrid_sixface(uc6, vc6, ctx["ectx"])
-    else:
-        for t in range(1, 7):
-            exchange_bgrid_scalar_halos(divgd6, t, n, ng)
-            exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    exchange_post_pgrad_sixface(ctx, divgd6, uc6, vc6, nord=int(cfg["nord"]))
+    if sd:
+        for t in range(6):
+            sd(204, t, "uc", uc6[t])
+            sd(204, t, "vc", vc6[t])
+            sd(204, t, "divgd", divgd6[t])
 
     s1 = []
     for t in range(1, 7):
@@ -400,8 +673,10 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
             np.zeros((npx, n)), np.zeros((n, npx)),
             np.zeros((npx, m_a)), np.zeros((m_a, npx)),
             ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
-            hord_tr=8, hord_vt=6, hord_tm=6, hord_dp=6,
-            nord_v=1, nord_t=0, damp_v=0.2, damp_t=0.0,
+            hord_tr=cfg["hord_tr"], hord_vt=cfg["hord_vt"],
+            hord_tm=cfg["hord_tm"], hord_dp=cfg["hord_dp"],
+            nord_v=cfg["nord_v"], nord_t=0,
+            damp_v=cfg["damp_v"], damp_t=0.0,
             workspace_sentinel=0.0))
 
     afx6 = [o["allflux_x"] for o in s1]
@@ -421,7 +696,37 @@ def dsw12_step_sixface(ctx: dict, states: list, csw_outs: list,
     return outs
 
 
-def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
+# W2-tuned stage configuration (the historical hardcoded values —
+# byte-identical default).  The Zenodo case-8 run uses: hords all 8,
+# damp_v=0 (do_vort_damp=.false.), dddmp=0, d2_bg=0, d4_bg=0.12 with
+# nord=2 (del-6 — ported and certified bit-exact 6/6, job 9108229;
+# SW_CFG_CASE8 below carries it).
+_SW_CFG_DEFAULT = {
+    "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
+    "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
+    "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 1,
+}
+
+SW_CFG_CASE8 = {
+    # Zenodo C48.sw.case8 fms.out damping block + fv_core_nml:
+    # del-6 (nord=2) bg 0.12, vort damping OFF, dddmp 0, hords all 8.
+    # nord_v: the oracle DERIVES it, dyn_core.F90:757
+    # ``nord_v(k) = min(2, flagstruct%nord)`` -> 2 for the deck's
+    # NORD=2 (was 1 here; codex c6 r1 #9).  Numerically DORMANT while
+    # damp_v == 0: both consumers are gated on the coefficient
+    # (fv3_native_duo_sw_core.py:1041 ``damp_v > 1.0e-5`` before
+    # del6_vt_flux; fv_tp_2d.py:1180 ``damp_c > 1e-4`` before
+    # _deln_flux), so this corrects the recorded configuration, not
+    # any number the case-8/case-6 decks produce.
+    "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
+    "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
+    "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
+}
+
+
+def acoustic_step_sixface(ctx: dict, states: list, dt: float,
+                          sw_cfg: dict | None = None,
+                          entry_ascalar: bool = True) -> list:
     """SB3: ONE full duo acoustic step on all six faces —
     c_sw -> geopk/PG-C -> d_sw1 -> C-ring averaging -> d_sw2 -> d_sw3
     -> BGRID averaging of (ubb, vbbtemp) (dyn_core.F90:968-1020, the
@@ -467,12 +772,18 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
         # The ext swap must be the FULL consistency bundle (all fields
         # + extended halo metrics together); until then the coherent
         # index-copy interim stays.
-        duo_pad_scalars(delp6, ctx)
-        duo_pad_scalars(pt6, ctx)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            duo_pad_scalars(delp6, ctx)
+            duo_pad_scalars(pt6, ctx)
     elif not ctx.get("use_ext_bundle"):
-        for t in range(1, 7):
-            exchange_agrid_scalar_halos(delp6, t, n, ng)
-            exchange_agrid_scalar_halos(pt6, t, n, ng)
+        # same it==1 cadence gate as the ext lane (codex r1 P2-8: the
+        # interim/measurement lanes must not run the entry A-scalar
+        # exchange every inner step when the caller supplies the
+        # upstream n_split schedule)
+        if entry_ascalar and not _ENTRY_ASCALAR_OFF:
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(delp6, t, n, ng)
+                exchange_agrid_scalar_halos(pt6, t, n, ng)
     if ctx.get("use_ext_bundle"):
         # authoritative duo entry exchanges (dyn_core.F90:437-471):
         # ext_scalar(delp/pt, 0,0) + ext_vector(u, v, 0,1,1,0)
@@ -481,7 +792,9 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
             ext_vector_dgrid_sixface,
         )
 
-        if "ascalar" in ctx.get("ext_exclude", ()):
+        if _ENTRY_ASCALAR_OFF or not entry_ascalar:
+            pass          # upstream gates the entry exchange on it==1
+        elif "ascalar" in ctx.get("ext_exclude", ()):
             for t in range(1, 7):
                 exchange_agrid_scalar_halos(delp6, t, n, ng)
                 exchange_agrid_scalar_halos(pt6, t, n, ng)
@@ -499,12 +812,39 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
     states = [{**states[t], "delp": delp6[t], "pt": pt6[t],
                "u": u6[t], "v": v6[t]} for t in range(6)]
 
+    # optional step-1 stage twin hook: callable(block, tile0, name, arr)
+    # at the same dyn_core points as the instrumented oracle (201 =
+    # post-entry exchanges, 202 = post-c_sw, 203/204 in dsw12, 205 =
+    # post-d_sw2).  None (default) = byte-identical behavior.
+    sd = ctx.get("step_dump")
+    if sd:
+        for t in range(6):
+            sd(201, t, "u", states[t]["u"])
+            sd(201, t, "v", states[t]["v"])
+            sd(201, t, "delp", states[t]["delp"])
+            sd(201, t, "pt", states[t]["pt"])
+
+    cfg = dict(_SW_CFG_DEFAULT)
+    cfg.update(sw_cfg or {})
     csw = csw_step_sixface(ctx, states, dt2=0.5 * dt)
-    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt)
+    if sd:
+        for t in range(6):
+            sd(202, t, "uc", csw[t]["uc"])
+            sd(202, t, "vc", csw[t]["vc"])
+            sd(202, t, "delpc", csw[t]["delpc"])
+            sd(202, t, "ua", csw[t]["ua"])
+            sd(202, t, "va", csw[t]["va"])
+            sd(202, t, "divgd", csw[t]["divg_d"])
+    s12 = dsw12_step_sixface(ctx, states, csw, dt=dt, sw_cfg=sw_cfg)
+    if sd:
+        for t in range(6):
+            sd(205, t, "delp", s12[t]["delp"])
+            sd(205, t, "pt", s12[t]["pt"])
 
     s3 = [d_sw3_duo(states[t - 1]["u"], states[t - 1]["v"],
                     s12[t - 1]["uc"], s12[t - 1]["vc"],
-                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt, hord_mt=6)
+                    ctx["gs6"][t - 1], bd, npx, npx, dt=dt,
+                    hord_mt=cfg["hord_mt"])
           for t in range(1, 7)]
 
     ubb6 = [np.array(o["ubb"], copy=True) for o in s3]
@@ -528,13 +868,16 @@ def acoustic_step_sixface(ctx: dict, states: list, dt: float) -> list:
                        s12[t - 1]["xfx_adv"], s12[t - 1]["yfx_adv"],
                        s12[t - 1]["ra_x"], s12[t - 1]["ra_y"],
                        s4["ke"], ctx["gs6"][t - 1], bd, npx, npx,
-                       dt=dt, hord_vt=6, nord=1, dddmp=0.2,
-                       d2_bg=0.0, d4_bg=0.12, d_con=0.0)
+                       dt=dt, hord_vt=cfg["hord_vt"], nord=cfg["nord"],
+                       dddmp=cfg["dddmp"],
+                       d2_bg=cfg["d2_bg"], d4_bg=cfg["d4_bg"],
+                       d_con=0.0)
         s6 = d_sw6_duo(states[t - 1]["u"], states[t - 1]["v"],
                        s5["ut"], s5["vt"], s5["ke"], s5["wk"],
                        s5["vortfluxx"], s5["vortfluxy"],
                        ctx["gs6"][t - 1], bd, npx, npx,
-                       nord_v=1, damp_v=0.2, d_con=0.0)
+                       nord_v=cfg["nord_v"], damp_v=cfg["damp_v"],
+                       d_con=0.0)
         outs.append({"delp": s12[t - 1]["delp"], "pt": s12[t - 1]["pt"],
                      "u": s6["u"], "v": s6["v"],
                      "ke": s5["ke"], "wk": s5["wk"],
@@ -547,19 +890,22 @@ def geopk_sw_1lev_d(delp: np.ndarray, hs: np.ndarray, bd,
     """geopk D-grid call (CG=.false., a2b_ord=4, duo): ranges widen to
     is-2..ie+2 (dyn_core geopk range guard).  Same SW km=1 formulas as
     the C version; delp halos must be freshly exchanged (dyn_core does
-    ext_scalar(delp/pt) right before this call)."""
-    is_, ie = bd.is_, bd.ie
-    m = delp.shape[0]
-    pkc = np.zeros((m, m, 2))
-    gz = np.zeros((m, m, 2))
-    lo = 1 - bd.ng
-    sl = slice(is_ - 2 - lo, ie + 2 - lo + 1)
-    pkc[sl, sl, 1] = np.exp(1.0 * np.log(delp[sl, sl]))
-    gz[sl, sl, 1] = hs[sl, sl]
-    ptv = 1.0 if pt is None else pt[sl, sl]
-    gz[sl, sl, 0] = gz[sl, sl, 1] + ptv * (pkc[sl, sl, 1]
-                                           - pkc[sl, sl, 0])
-    return pkc, gz
+    ext_scalar(delp/pt) right before this call).
+
+    ADAPTER over ``fv3_native_pgrad.geopk`` — no duplicated numerics.
+
+    OPEN ITEM (pre-existing, NOT introduced by the adapter refactor):
+    dyn_core.F90:1402 passes ``computehalo=.true.`` at this site, which
+    on the duo lane extends the write box to the FULL data domain
+    (isd..ied, jsd..jed) whenever ``is==1`` and ``ie==npx-1``.  This
+    km=1 path has always used the un-extended is-2..ie+2 box and is kept
+    that way here so the six-face stepper does not move; it is benign
+    for the stepper (a2b needs only is-2..ie+2 and the halos are
+    exchange-filled) but it IS a divergence from upstream.  The
+    ``computehalo`` extension itself is certified by the km>1 oracle
+    (``PKC_D``/``GZ_D`` carry no sentinel), not by this adapter.
+    """
+    return _geopk_sw_adapter(delp, hs, bd, pt, cg=False)
 
 
 def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
@@ -570,89 +916,40 @@ def one_grad_p_1lev(u, v, pkc, gz, divg2, gs: dict, bd, npx: int,
     D-grid PG update converts the circulation-form d_sw6 winds back to
     covariant: u = rdx*(wk2 + u + dt/(wk+wk(i+1))*(cross-terms)).
     Mutates u/v in place (data-domain numpy arrays).
+
+    ADAPTER over ``fv3_native_pgrad.one_grad_p`` — no duplicated
+    numerics.  ``u``/``v`` are passed as ``[:, :, None]`` VIEWS so the
+    in-place update writes through.
+
+    ALIASING CONTRACT (codex r21 blocker A — a REGRESSION this adapter
+    briefly shipped).  The pre-refactor km=1 body worked on COPIES of the
+    pkc/gz planes, so the caller's ``pkc``/``gz`` survived the a2b
+    ``replace=True``.  The shared kernel is faithful to dyn_core and
+    mutates them IN PLACE; passing the caller's arrays straight through
+    silently mutated 169 ``pkc`` words and 338 ``gz`` words where the
+    legacy body mutated ZERO.  The earlier justification ("both call
+    sites discard them") was wrong on principle: the frozen legacy
+    reference is the contract and the burden is on the port, not on
+    every present and future caller.  This adapter therefore restores
+    COPY-ON-ENTRY.  ``test_sw_adapter_mutation_footprints`` asserts the
+    full footprint — which arrays change and by how many words — for all
+    four adapters, not just the returned/updated winds.
     """
-    from legoesm.core.fv3_native_d_sw import a2b_ord4, fort
+    from legoesm.core.fv3_native_pgrad import one_grad_p as _one_grad_p_km
 
-    is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    isd, jsd = bd.isd, bd.jsd
-    ng = bd.ng
-    lo = 1 - ng
-
-    gsf = {
-        "grid_lon": fort(gs["grid_lon"], isd, jsd),
-        "grid_lat": fort(gs["grid_lat"], isd, jsd),
-        "agrid_lon": fort(gs["agrid_lon"], isd, jsd),
-        "agrid_lat": fort(gs["agrid_lat"], isd, jsd),
-        "dxa": fort(gs["dxa"], isd, jsd),
-        "dya": fort(gs["dya"], isd, jsd),
-        "edge_w": gs["edge_w"], "edge_e": gs["edge_e"],
-        "edge_s": gs["edge_s"], "edge_n": gs["edge_n"],
-        "bounded_domain": bool(gs.get("bounded_domain", False)),
-        "grid_type": 0,
-        "sw_corner": bool(gs.get("sw_corner", True)),
-        "se_corner": bool(gs.get("se_corner", True)),
-        "nw_corner": bool(gs.get("nw_corner", True)),
-        "ne_corner": bool(gs.get("ne_corner", True)),
-    }
-
-    pk1 = np.array(pkc[:, :, 0], copy=True)
-    pk2 = np.array(pkc[:, :, 1], copy=True)
-    gz1 = np.array(gz[:, :, 0], copy=True)
-    gz2 = np.array(gz[:, :, 1], copy=True)
-    # pk(:,:,1) = top_value (ptk = ptop**akap = 0) on the B ring
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1 + 1):
-            pk1[i - lo, j - lo] = 0.0
-    wkb = np.zeros_like(pk2)
-    for arr in (pk2, gz1, gz2):
-        fq = fort(arr, isd, jsd)
-        fwk = fort(wkb, isd, jsd)
-        a2b_ord4(fq, fwk, gsf, npx, npy, is_, ie, js, je, ng,
-                 replace=True, duogrid=True)
-
-    if d_ext > 0.0:
-        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
-        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
-        for j in range(js, je + 1 + 1):
-            for i in range(is_, ie + 1):
-                wk2[i - 1, j - 1] = (divg2[i - 1, j - 1]
-                                     - divg2[i + 1 - 1, j - 1])
-        for j in range(js, je + 1):
-            for i in range(is_, ie + 1 + 1):
-                wk1[i - 1, j - 1] = (divg2[i - 1, j - 1]
-                                     - divg2[i - 1, j + 1 - 1])
-    else:
-        wk2 = np.zeros((ie - is_ + 1, je + 1 - js + 1))
-        wk1 = np.zeros((ie + 1 - is_ + 1, je - js + 1))
-
-    def at(a, i, j):
-        return a[i - lo, j - lo]
-
-    wk = pk2 - pk1
-    rdx = gs["rdx"]
-    rdy = gs["rdy"]
-    for j in range(js, je + 1 + 1):
-        for i in range(is_, ie + 1):
-            u[i - lo, j - lo] = rdx[i - lo, j - lo] * (
-                wk2[i - 1, j - 1] + u[i - lo, j - lo]
-                + dt / (at(wk, i, j) + at(wk, i + 1, j)) * (
-                    (at(gz2, i, j) - at(gz1, i + 1, j))
-                    * (at(pk2, i + 1, j) - at(pk1, i, j))
-                    + (at(gz1, i, j) - at(gz2, i + 1, j))
-                    * (at(pk2, i, j) - at(pk1, i + 1, j))))
-    for j in range(js, je + 1):
-        for i in range(is_, ie + 1 + 1):
-            v[i - lo, j - lo] = rdy[i - lo, j - lo] * (
-                wk1[i - 1, j - 1] + v[i - lo, j - lo]
-                + dt / (at(wk, i, j) + at(wk, i, j + 1)) * (
-                    (at(gz2, i, j) - at(gz1, i, j + 1))
-                    * (at(pk2, i, j + 1) - at(pk1, i, j))
-                    + (at(gz1, i, j) - at(gz2, i, j + 1))
-                    * (at(pk2, i, j) - at(pk1, i, j + 1))))
+    pk_work = np.array(pkc, dtype=np.float64, copy=True)
+    gz_work = np.array(gz, dtype=np.float64, copy=True)
+    _one_grad_p_km(u[:, :, np.newaxis], v[:, :, np.newaxis], pk_work,
+                   gz_work, divg2, None, gs, bd, npx=npx, npy=npy, npz=1,
+                   dt=dt, ptop=0.0, akap=1.0, hydrostatic=True,
+                   a2b_ord=4, d_ext=d_ext, ng=bd.ng, duogrid=True,
+                   bvertex_mean2=_PG_BVERTEX_MEAN2)
 
 
 def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
-                               d_ext: float = 0.02) -> list:
+                               d_ext: float = 0.02,
+                               sw_cfg: dict | None = None,
+                               entry_ascalar: bool = True) -> list:
     """SB4: complete acoustic step INCLUDING the D-grid tail — the
     stage chain (acoustic_step_sixface), delp/pt halo refresh, the
     D geopk, the external-mode divg2 filter (d_ext*da_min_c*saved
@@ -672,7 +969,8 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
     bd = ctx["bd"]
     npx = n + 1
 
-    stage = acoustic_step_sixface(ctx, states, dt)
+    stage = acoustic_step_sixface(ctx, states, dt, sw_cfg=sw_cfg,
+                                  entry_ascalar=entry_ascalar)
 
     delp6 = [np.array(o["delp"], copy=True) for o in stage]
     pt6 = [np.array(o["pt"], copy=True) for o in stage]
@@ -698,9 +996,11 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
 
     u6 = [np.array(o["u"], copy=True) for o in stage]
     v6 = [np.array(o["v"], copy=True) for o in stage]
+    hs6 = ctx.get("hs6")
     for t in range(1, 7):
         gs = ctx["gs6"][t - 1]
-        hs = np.zeros_like(delp6[t - 1])
+        hs = (np.asarray(hs6[t - 1]) if hs6 is not None
+              else np.zeros_like(delp6[t - 1]))
         pkc, gz = geopk_sw_1lev_d(delp6[t - 1], hs, bd,
                                   pt=pt6[t - 1])
         # divg2 = d_ext*da_min_c*saved divergence (km=1; dyn_core
@@ -726,14 +1026,38 @@ def full_acoustic_step_sixface(ctx: dict, states: list, dt: float,
             for t in range(6)]
 
 
+def advance_duo_outer_step(ctx: dict, states: list, dt_atmos: float,
+                           n_split: int, d_ext: float = 0.02,
+                           sw_cfg: dict | None = None) -> list:
+    """One dt_atmos block = ``n_split`` acoustic steps at
+    dt = dt_atmos/n_split with the UPSTREAM exchange schedule: the
+    entry A-scalar ext_scalar(delp, pt) fires only on the FIRST inner
+    step of the block (dyn_core.F90:432-439 gates it on ``it == 1``),
+    while the D-vector entry (:468-472), the post-PG B/C exchanges
+    (:651-655) and the tail A-scalar refresh (:1335-1337) fire every
+    inner step.  Per 1200 s at n_split=7 this is the oracle's 8
+    A-scalar applications per field (1 entry + 7 tail); the flat
+    back-to-back stepper (entry every step) applies 14.
+    """
+    if n_split < 1:
+        raise ValueError(f"n_split must be >= 1, got {n_split}")
+    dt = dt_atmos / n_split
+    for it in range(n_split):
+        states = full_acoustic_step_sixface(ctx, states, dt,
+                                            d_ext=d_ext, sw_cfg=sw_cfg,
+                                            entry_ascalar=(it == 0))
+    return states
+
+
 def w2_six_face_state(ctx: dict, alpha: float = 0.0,
                       u0: float | None = None,
                       gh0: float = 2.94e4) -> list:
     """Williamson case-2 BALANCED six-face state on the SW-via-
-    production convention (pt≡1, delp = g·h):
+    production convention (pt≡1, delp IS g·h, stored directly):
 
-        h = (gh0 - (a·Omega·u0 + u0^2/2) · S^2) / g,
+        delp = gh0 - (a·Omega·u0 + u0^2/2) · S^2      (oracle tree,
         S = -cos(lon)·cos(lat)·sin(alpha) + sin(lat)·cos(alpha)
+        test_cases.F90:1033-1036 — no gravity constant enters)
 
     Winds are the analytic solid-body projection (reuses
     analytic_swcore_state's certified D/C construction with ddelp=0),
@@ -741,16 +1065,19 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
     kinked-lattice cell centres (halos included; corner-diagonals are
     handled by the step-entry exchanges).
     """
-    from legoesm import constants
     from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA, FV3_RADIUS_M
 
     a_r = FV3_RADIUS_M
     omega = FV3_OMEGA
-    g = constants.g                     # cancels: delp = g*h = gh0 - coef*S^2
     if u0 is None:
         # upstream test_cases case 2: Ubar = 2*pi*radius / (12 days)
         u0 = 2.0 * np.pi * a_r / (12.0 * 86400.0)
-    coef = (a_r * omega * u0 + 0.5 * u0 * u0)
+    # the oracle's operation tree, test_cases.F90:1033-1036:
+    # (Ubar*Ubar)/2. and S ** 2, assigned DIRECTLY to delp — no /g*g
+    # round trip (codex a45 r2 #4: the previous 0.5*u0*u0 / s*s / g*h
+    # form was ULP-off the oracle tree and off the shared
+    # solid_body_geopotential, breaking bit-comparability)
+    coef = (a_r * omega * u0 + (u0 * u0) / 2.0)
 
     states = []
     for gs in ctx["gs6"]:
@@ -759,9 +1086,143 @@ def w2_six_face_state(ctx: dict, alpha: float = 0.0,
         lat = gs["agrid_lat"]
         s = (-np.cos(lon) * np.cos(lat) * np.sin(alpha)
              + np.sin(lat) * np.cos(alpha))
-        h = (gh0 - coef * s * s) / g
         st = dict(st)
-        st["delp"] = g * h
+        st["delp"] = gh0 - coef * s ** 2
+        st["pt"] = np.ones_like(st["delp"])
+        st["w"] = np.zeros_like(st["delp"])
+        states.append(st)
+    return states
+
+
+def case6_six_face_state(ctx: dict) -> list:
+    """Williamson case-6 (Rossby-Haurwitz wave 4) six-face SW state,
+    ported literally from the pinned oracle's ``tools/test_cases.F90``
+    ``case(6)`` block, :1213-1270.
+
+    Height (:1222-1231), with ``phis = 0`` at :1219 so the ``- phis``
+    at :1231 is an exact no-op::
+
+        A = 0.5 w (2 Om + w) cos^2 p
+          + 0.25 K^2 cos^{2R} p [ (R+1) cos^2 p + (2R^2-R-2)
+                                  - 2 R^2 cos^{-2} p ]
+        B = 2 (Om + w) K / ((R+1)(R+2)) cos^R p
+                                [ (R^2+2R+2) - ((R+1) cos p)^2 ]
+        C = 0.25 K^2 cos^{2R} p [ (R+1) cos^2 p - (R+2) ]
+        gh = gh0 + a^2 (A + B cos(R L) + C cos(2 R L))
+
+    Winds at the D-grid edge midpoints (:1241-1243 for ``v``,
+    :1254-1256 for ``u`` -- the SAME two expressions, evaluated on the
+    two different edge midpoints)::
+
+        u_east  = a w cos p + a K cos^{R-1} p (R sin^2 p - cos^2 p) cos(R L)
+        v_north = -a K R sin p sin(R L) cos^{R-1} p
+
+    and projected onto the covariant edge tangents by the same certified
+    ``analytic_swcore_state`` construction the case-2 builder uses --
+    ``mid_pt_sphere`` + ``get_unit_vect2`` + ``get_latlon_vector`` +
+    ``inner_prod``, i.e. :1237-1240 / :1250-1253 verbatim.
+
+    The two analytic fields themselves are NOT written here: they live in
+    :mod:`legoesm.core.williamson_sw_analytic`, shared with the lat-lon,
+    MPAS and spectral W6 test cases (which previously each carried their
+    own copy, all three with ``cos^(R-1)`` in ``B`` where the oracle and
+    Williamson Eq. 145 both have ``cos^R``).  This function supplies the
+    oracle's GFS constants and the D-grid projection; it owns no numerics.
+
+    SW convention here is the production one (``pt == 1``,
+    ``delp == g h``), so ``delp`` IS the ``gh`` above -- upstream stores
+    the same quantity in ``delp(i,j,1)``.
+
+    ``gh0 = 8.e3 * Grav`` (:1215) uses the oracle's GFS ``Grav``
+    (``FV3_GRAV``), NOT ``legoesm.constants.g``: unlike case 2 -- where
+    ``delp = g h`` and ``h = (gh0 - c S^2)/g`` cancel the constant
+    exactly -- here ``gh0`` enters ``delp`` directly, so the flavour of
+    the gravity constant is observable at 5e-5 relative.
+
+    THE COMPUTE-WINDOW DIFFERENCE, stated rather than hidden: upstream
+    fills ``delp``/``u``/``v`` over the COMPUTE domain only (``do j=js,je``
+    at :1220/:1233/:1246) and then obtains the wind halos from
+    ``ext_vector`` + ``dtoa``/``atoc`` (:1264-1269) and the scalar halos
+    from ``ext_scalar`` (:1577).  This builder evaluates the same
+    analytic fields directly on the kinked halo lattice, exactly as
+    ``w2_six_face_state`` does -- the same physical locations, so the
+    values agree with what the exchange delivers only up to the
+    exchange's own remap order (measured ~1e4 m^2/s^2 at C12 corner
+    diagonals, codex r1 #4).
+
+    SCOPE OF THE MITIGATION (codex r2 #1, verified EXPERIMENTALLY by the
+    reviewer: poisoned corner halos gave bit-identical full-step
+    outputs): the entry exchanges that make this deviation harmless run
+    inside ``acoustic_step_sixface`` / ``full_acoustic_step_sixface``.
+    Calling the STAGE functions directly (``csw_step_sixface``,
+    ``dsw12_step_sixface``) BYPASSES them -- ``d_sw1_duo``'s
+    ``fv_tp_2d(delp)`` then reads whatever halos this builder wrote.
+    PRECONDITION, stated not enforced: a caller entering at stage level
+    on an ext-bundle context owns the entry exchange itself.
+
+    NUMERICAL NOTE: ``A`` is evaluated in the oracle's literal factored
+    form ``cos^{2R} * cos^{-2}`` (not the equal ``cos^{2R-2}``) so the
+    rounding matches.  Both forms are finite everywhere including the
+    representable pole -- see the retraction in
+    ``williamson_sw_analytic.rossby_haurwitz_4_geopotential``; an
+    earlier version of this docstring claimed a NaN there, which is
+    false in float64.
+    """
+    from legoesm.core.williamson_sw_analytic import (
+        RH4_MEAN_DEPTH_M,
+        rossby_haurwitz_4_geopotential,
+        rossby_haurwitz_4_winds,
+    )
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_GRAV,
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+    )
+
+    a_r = FV3_RADIUS_M
+    gh0 = RH4_MEAN_DEPTH_M * FV3_GRAV        # :1215  gh0 = 8.E3*Grav
+
+    def wind_fn(ll):
+        return rossby_haurwitz_4_winds(ll[..., 0], ll[..., 1], radius=a_r)
+
+    def scalars_fn(ll):
+        delp = rossby_haurwitz_4_geopotential(ll[..., 0], ll[..., 1],
+                                              radius=a_r, omega=FV3_OMEGA,
+                                              gh0=gh0)
+        return delp, np.ones_like(delp)
+
+    states = []
+    for gs in ctx["gs6"]:
+        st = dict(analytic_swcore_state(gs, wind_fn=wind_fn,
+                                        scalars_fn=scalars_fn))
+        # delp/pt are re-evaluated on the FULL lattice, corner diagonals
+        # included, exactly as w2_six_face_state does.  analytic_swcore_state
+        # masks scalars with cell_ok and leaves BIG_NUMBER (1.0e8) in the four
+        # corner-diagonal blocks; MEASURED against the PRE-FIX constructor
+        # (job 9341394, scripts/tmp/_probe_case6_mass.py, two arms differing
+        # only in this): leaving them costs 3.105e-03 of the total mass in a
+        # single d_sw1/d_sw2 pair, while refilling conserves it EXACTLY
+        # (0.000e+00, same as case 2).  The committed regression for this is
+        # test_fv3_native_case6_state.test_state_advances_one_step_conserving_
+        # mass, which fails at 3.1e-3 if this refill is removed.  The d_sw PPM
+        # halo-row stencils reach those blocks, so a 1e8 sentinel is not inert
+        # there -- the sentinel convention is right for the D winds, which the
+        # d2a2c corner fixes overwrite before any consumed read, and wrong for
+        # the A-grid scalars, which nothing overwrites before d_sw1.
+        #
+        # KNOWN DEVIATION from the oracle IC path (codex r1 #4): upstream
+        # fills the compute window only and obtains halos from ext_scalar
+        # (delp, test_cases.F90:1577) / ext_vector (winds, :1264).  The
+        # analytic halo values here differ from exchange-delivered ones by up
+        # to ~1.1e4 m^2/s^2 in the corner-diagonal region at C12
+        # (w2_six_face_state shares this).  On ext-bundle contexts the entry
+        # exchanges of the FIRST acoustic step overwrite the delp/pt and wind
+        # halos before any stage consumes them (dyn_core.F90:432-439,
+        # :468-472), so the deviation is confined to interim-exchange
+        # contexts and to diagnostics that read halos before stepping.
+        st["delp"] = rossby_haurwitz_4_geopotential(
+            gs["agrid_lon"], gs["agrid_lat"], radius=a_r, omega=FV3_OMEGA,
+            gh0=gh0)
         st["pt"] = np.ones_like(st["delp"])
         st["w"] = np.zeros_like(st["delp"])
         states.append(st)

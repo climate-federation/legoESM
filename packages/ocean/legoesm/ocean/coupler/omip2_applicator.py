@@ -136,12 +136,32 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
 _REGRID_WEIGHTS_CACHE: dict = {}
 
+# Real forcing stops short of the pole (CORE-II NYF's inferred outer edge is
+# +-89.486 deg, a 0.514 deg gap), so the polar destination row is partly covered --
+# or, once the target is finer than the gap, not covered at all.  Under the default
+# 'dstarea' normalisation that returns coverage x field: measured outer-row coverage
+# for CORE-II is 0.736 at the production 1 deg (a 250 K air temperature arriving as
+# 184 K) and exactly 0 at 0.5 deg and finer.  Every channel on this path is
+# INTENSIVE -- T_air, q_air, slp, winds, and the radiative/precip flux DENSITIES --
+# and the shortfall is a DATA GAP, not a region of zero flux, so the correct
+# treatment is the field's own value, not a diluted one:
+#   * 'fracarea' renormalises a partly covered row to the area-weighted mean of the
+#     source that does overlap;
+#   * polar_fill gives a row beyond the source's band its outermost row, zonally
+#     resolved (a zeroth-order poleward extrapolation).
+# Together they make every destination cell sum to 1, so the coverage check is back
+# to the strict invariant and a real seam/ghost deficit still raises.  Both
+# deliberately trade strict global conservation for correct magnitude; that trade is
+# right here and WRONG for flux coupling, which is why coupler/grid_remap.py keeps
+# 'dstarea'.  See regrid_polar_coverage_2026-07-24.md.
+_FORCING_NORMALIZATION = "fracarea"
 
-def _edges_from_centers_deg(centers_deg, *, periodic: bool = False):
+
+def _edges_from_centers_deg(centers_deg):
     """Derive uniform-spaced cell edges (radians) from cell centres.
 
-    Assumes the centres are uniformly spaced. ``periodic`` only changes
-    the conventional first / last edge offsets.
+    Assumes the centres are uniformly spaced.  The 0/360 seam is closed by the
+    ghost columns in :func:`_conservative_regrid_to_latlon`, not here.
     """
     c = np.asarray(centers_deg, dtype=np.float64)
     if c.size < 2:
@@ -163,7 +183,7 @@ def _conservative_regrid_to_latlon(
     (src_shape, dst_shape) pair; subsequent calls are a sparse matmul.
     """
     from legoesm.grids.conservative_regrid import (
-        compute_overlap_weights, apply_conservative_regrid,
+        check_axis_span, compute_overlap_weights, apply_conservative_regrid,
     )
     import jax.numpy as jnp_local
     key = (
@@ -184,23 +204,55 @@ def _conservative_regrid_to_latlon(
         # back HALVED, and the 10-m pressure iteration then NaN'd on the
         # resulting garbage air temperature).
         src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+        n_src_lon = src_lon.size
+        # PRECONDITION the wrap-pad relies on, checked BEFORE padding: the RAW
+        # source must tile the full 360 deg.  The +-360 ghosts below would turn a
+        # partial-longitude source into one enormous cell spanning the whole
+        # missing sector, which then reports COMPLETE longitude coverage to the
+        # weight builder -- so this is the only point where the difference is
+        # still visible.
+        check_axis_span(_edges_from_centers_deg(src_lon), 2.0 * np.pi,
+                        name="omip2 forcing source longitude")
+        ds = abs(float(src_lon[1] - src_lon[0]))
+        dd = abs(float(np.asarray(dst_lon_deg)[1] - np.asarray(dst_lon_deg)[0]))
+        n_ghost = max(1, int(np.ceil(dd / ds)))
+        n_ghost = min(n_ghost, n_src_lon)
         src_lon_padded = np.concatenate(
-            [[src_lon[-1] - 360.0], src_lon, [src_lon[0] + 360.0]])
+            [src_lon[-n_ghost:] - 360.0, src_lon, src_lon[:n_ghost] + 360.0])
         src_lat_edges = _edges_from_centers_deg(src_lat_deg)
-        src_lon_edges = _edges_from_centers_deg(src_lon_padded, periodic=True)
+        src_lon_edges = _edges_from_centers_deg(src_lon_padded)
         dst_lat_edges = _edges_from_centers_deg(dst_lat_deg)
-        dst_lon_edges = _edges_from_centers_deg(dst_lon_deg, periodic=True)
+        dst_lon_edges = _edges_from_centers_deg(dst_lon_deg)
         # Clamp lat edges into [-pi/2, pi/2] in case the inferred edge
         # spills over the pole due to rounding.
         src_lat_edges = np.clip(src_lat_edges, -np.pi / 2, np.pi / 2)
         dst_lat_edges = np.clip(dst_lat_edges, -np.pi / 2, np.pi / 2)
+        # fracarea + polar_fill treat the physical polar gap (see the constant's
+        # rationale above), after which every destination cell sums to 1 and
+        # require_full_coverage is the STRICT invariant again -- so a longitude
+        # seam/ghost deficit still raises.  That is the defect worth guarding: a
+        # single ghost once left the seam column HALVED and the 10-m pressure
+        # iteration NaN'd on it.  See regrid_polar_coverage_2026-07-24.md
         _REGRID_WEIGHTS_CACHE[key] = compute_overlap_weights(
             src_lat_edges, src_lon_edges,
             dst_lat_edges, dst_lon_edges,
+            require_full_coverage=True,
+            normalization=_FORCING_NORMALIZATION,
+            polar_fill=True,
         )
     weights = _REGRID_WEIGHTS_CACHE[key]
+    # Ghost-column count matches the weight build below (width ratio, NOT
+    # count ratio: this caller's dst may be a sub-global regional grid where
+    # count ratio over-estimates). Clamp so slicing can't over-wrap the src.
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+    n_src_lon = src_lon.size
+    ds = abs(float(src_lon[1] - src_lon[0]))
+    dd = abs(float(np.asarray(dst_lon_deg)[1] - np.asarray(dst_lon_deg)[0]))
+    n_ghost = max(1, int(np.ceil(dd / ds)))
+    n_ghost = min(n_ghost, n_src_lon)
     f = jnp_local.asarray(field_2d)
-    f_padded = jnp_local.concatenate([f[:, -1:], f, f[:, :1]], axis=1)
+    f_padded = jnp_local.concatenate(
+        [f[:, -n_ghost:], f, f[:, :n_ghost]], axis=1)
     return np.asarray(apply_conservative_regrid(f_padded, weights))
 
 
@@ -1182,6 +1234,26 @@ def build_omip2_scan_block_fn(
                 st = model._apply_freeze_floor(st)
             return (st, step + 1), None
 
+        # store_mass_flux (#1442, codex round-6 RED 2): ``_step_impl`` turns
+        # the mass_flux_* slots from None into Fields when the flag is on, so
+        # an unseeded carry aborts this scan on iteration 1 with a carry
+        # structure mismatch.  Seed at the scan boundary.  STATIC gate on a
+        # config bool (never a traced value), and a no-op for every model whose
+        # config lacks the field -- so the historical path is untouched.
+        #
+        # This also fixes the RETURNED structure: without it block_fn would
+        # return a state whose slots are Fields while its input's were None,
+        # retracing this jit on the host loop's second block.
+        if getattr(model.config, "store_mass_flux", False):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                seed_mass_flux_carry,
+            )
+            state = seed_mass_flux_carry(state, True)
+        if getattr(model.config, "store_salt_flux", False):
+            from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+                seed_salt_flux_carry,
+            )
+            state = seed_salt_flux_carry(state, True)
         (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
         return state
 

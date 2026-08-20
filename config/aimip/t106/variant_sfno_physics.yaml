@@ -20,7 +20,10 @@ turbulence: "none"
 gravity_wave_drag: "none"
 cloud_scheme: "none"
 microphysics: "none"
-radiation: "gray"
+# radiation: removed 2026-08-12 — WB/AIMIP always use rrtmgp, set once in the
+# base config (aimip_radiation). The deleted key was an informational tag that
+# named a backend the run did not use; keeping "gray" in a campaign overlay
+# only invited someone to wire it up.
 physics_parameterization: "none"
 
 sfno_embed_dim: 32

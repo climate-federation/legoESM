@@ -125,6 +125,95 @@ class HydrostaticTendencies(NamedTuple):
     # this is the SURFACE precip (micro sedimentation), NOT the column vapour
     # sink (which is P-E and would double-count the separately-applied evap).
     precip: Field | None = None
+    # TOA radiative fluxes (CMOR sign conventions: *_up positive UPWARD /
+    # outgoing, sw_down_toa positive DOWNWARD / incoming) [W/m^2], carried on
+    # the radiation tendency so the lean MPAS loop can feed the CMOR
+    # rlut/rsut/rsdt accumulators (PhysicsOutput carries the equivalent on the
+    # compiled path). None on non-radiation tendencies / radiation off.
+    sw_up_toa: Field | None = None
+    lw_up_toa: Field | None = None
+    sw_down_toa: Field | None = None
+    # Surface turbulent fluxes [W/m^2, positive UPWARD out of the surface —
+    # the CMOR hfss/hfls convention, matching the surface-layer helpers'
+    # shflx/lhflx sign], carried on the turbulence tendency for the same CMOR
+    # feed (evspsbl is derived downstream as lhflx / L_v). None when
+    # turbulence is off or a scheme computes no surface fluxes.
+    shflx_sfc: Field | None = None
+    lhflx_sfc: Field | None = None
+    # Surface DOWNWELLING radiative fluxes [W/m^2, +down], carried on the
+    # radiation tendency for the lean MPAS/spectral loops: an interactive land
+    # tile (multilayer Richards on MPAS) needs sw_down/lw_down forcing, and the
+    # NET fluxes above cannot be inverted for them without assuming the
+    # radiation code's surface albedo/emissivity at the consumer.  None on
+    # non-radiation tendencies; appended at the end with None defaults so every
+    # existing (incl. positional) constructor is unaffected.
+    sw_down_sfc: Field | None = None
+    lw_down_sfc: Field | None = None
+    # PER-COLUMN process ledger, shape (ncol, N_LEDGER, 2) — the last axis is
+    # [water kg/m^2/s, dry-enthalpy W/m^2] and the middle axis indexes
+    # ``diagnostics.process_ledger.LEDGER_PROCESSES``.  Carried on the COMBINED
+    # tendency so the lean MPAS loop can attribute a column's heating/moistening
+    # to a NAMED scheme (#1311: --budget-ledger is an FV compiled-segment
+    # diagnostic and refuses on this lane, so MPAS had no per-process
+    # attribution at all).  Only the PHYSICS rows are filled here; the
+    # dynamics/clips rows are stage deltas the dycore step fills.
+    #
+    # Deliberately a raw array, not a Field: it is not a model variable and has
+    # no grid dims.  It is a per-step DIAGNOSTIC and is never checkpointed —
+    # unlike PhysicsState, whose save loop np.asarray()s every field and whose
+    # restart completeness-validates the overlay, so a new carry field there
+    # would risk rejecting existing checkpoints.
+    # None (default) = ledger off, byte-identical; appended at the end so every
+    # existing (incl. positional) constructor is unaffected.
+    ledger_rows: object | None = None
+    # CLEAR-SKY TOA up-fluxes [W/m^2, positive UP/outgoing — same CMOR sign as
+    # sw_up_toa/lw_up_toa], from the second clouds-off radiation pass
+    # (``RadiationConfig.clear_sky_diag``, #843 lean-lane port) for the CMOR
+    # rsutcs/rlutcs feed.  None whenever the diagnostic is off (the default) —
+    # appended AFTER ``ledger_rows`` (which main added in the meantime) with
+    # None defaults, so every existing (incl. positional) constructor of either
+    # field set is unaffected.
+    sw_up_toa_clr: Field | None = None
+    lw_up_toa_clr: Field | None = None
+
+
+# Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
+# producers — the serial ``MPASPrimitiveEquationModel._step_jit`` and the MPI
+# ``parallel.voronoi_mpi._step`` — and by the consumer
+# ``ModelDriver._feed_mpas_cmip_accumulators`` / ``_marshal_land_forcing``.
+# The tuple is ``(sw_net_sfc, lw_net_sfc, precip) + extras``, so extras key *i*
+# is tuple slot *i + 3*: 3 rlut, 4 rsut, 5 rsdt, 6 hfss, 7 hfls, 8/9 the surface
+# DOWNWELLING pair the interactive land needs, 10/11 the clear-sky TOA pair for
+# CMOR rsutcs/rlutcs.
+#
+# It lives HERE, imported by both producers, because the two hand-maintained
+# copies DID drift: the MPI producer stopped at slot 7 while the consumer read
+# slots 10/11, so a ONE-rank Voronoi MPI run — which
+# ``_mpas_cmip_feed_enabled`` explicitly enables the CMOR feed for — accepted
+# ``--clear-sky-diag`` and silently published no rsutcs/rlutcs.  A shared
+# constant makes that class of drift impossible instead of merely tested-for.
+MPAS_SFC_DIAG_EXTRA_KEYS = (
+    "lw_up_toa", "sw_up_toa", "sw_down_toa",
+    "shflx_sfc", "lhflx_sfc",
+    "sw_down_sfc", "lw_down_sfc",
+    "sw_up_toa_clr", "lw_up_toa_clr",
+)
+
+# Extras the MPI producer deliberately leaves EMPTY (published as None at their
+# contract slot, so every other slot keeps its index).
+#
+# EMPTY since #1321.  This used to hold the surface downwelling pair
+# ("sw_down_sfc", "lw_down_sfc"), which drives the interactive multilayer land
+# tile: the MPI lane published them as None, ``_marshal_land_forcing`` requires
+# both, so it returned None every step and the Richards soil silently never
+# advanced — no skin temperature, no beta_land.  Filling them was deferred out
+# of the CMOR-diagnostic port as "a behaviour change that belongs in its own
+# change"; #1321 IS that change, so the pair is now published.
+#
+# The machinery stays: a future extra that one producer cannot fill belongs
+# here rather than being dropped from the tuple, because a SHORTER tuple is
+# what misindexes every slot after it.
+MPAS_SFC_DIAG_MPI_UNPUBLISHED: tuple[str, ...] = ()
 
 
 class FV3HydrostaticState(NamedTuple):
@@ -570,6 +659,15 @@ class MPASOceanState(NamedTuple):
     H_bathy: Field
     land_mask: Field
     rho_ref_z: Field | None = None
+    # Prognostic TKE [m^2/s^2] at the interior interfaces, Field
+    # (nCells, nlev-1) — carried across model steps when the prognostic
+    # TKE vertical-mixing closure is active (vertical_mixing.tke.prognostic
+    # =True), mirroring LatLonCGridOceanState.tke: each step runs ONE
+    # backward-Euler TKE solve seeded from this field and stores the update
+    # back.  Default None -> inert (the diagnostic quasi-steady Mode-B
+    # chain): zero behaviour change for every existing MPAS run/restart.
+    # APPENDED LAST so positional/tuple consumers keep their field order.
+    tke: Field | None = None
 
 
 class MPASOceanTendencies(NamedTuple):

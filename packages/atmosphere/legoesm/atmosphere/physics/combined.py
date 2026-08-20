@@ -121,6 +121,9 @@ def make_physics(
     sfc_albedo_override=None,
     sfc_emissivity_override=None,
     need_rad: bool = True,
+    f_land=None,
+    land_beta: float = 1.0,
+    budget_ledger: bool = False,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -171,6 +174,15 @@ def make_physics(
     # a trained value never touches RRTMGPConfig.sfc_* (RRTMGP's solver-cache
     # key). Only the spectral_pe combined path threads them today; reject loudly
     # elsewhere rather than silently dropping a trained surface field.
+    # MPAS land surface boundary knobs (f_land + land_beta): consumed by the
+    # MPAS turbulence factory only.  Reject loudly elsewhere — the FV/spectral
+    # pipelines have their own land tile, so accepting the args there would be
+    # a silently-inert configuration (the 2026-07-23 --slab-land-active lesson).
+    if model_type != "mpas" and (f_land is not None or land_beta != 1.0):
+        raise ValueError(
+            "f_land/land_beta are MPAS-only land surface boundary knobs "
+            f"(model_type={model_type!r} would silently ignore them)."
+        )
     if (sfc_albedo_override is not None or sfc_emissivity_override is not None) \
             and model_type != "spectral_pe":
         raise ValueError(
@@ -192,7 +204,8 @@ def make_physics(
         # MPAS (Voronoi mesh) uses the unified hydrostatic combined path.
         fn = _make_hydrostatic_combined(
             config, dt, model_type="mpas", column_mesh=column_mesh,
-            need_rad=need_rad)
+            need_rad=need_rad, f_land=f_land, land_beta=land_beta,
+            budget_ledger=budget_ledger)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -313,7 +326,10 @@ def _attach_lifecycle_hooks(physics_fn, tagged_fns):
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                model_type: str = "hydrostatic",
                                column_mesh=None,
-                               need_rad: bool = True) -> Callable:
+                               need_rad: bool = True,
+                               f_land=None,
+                               land_beta: float = 1.0,
+                               budget_ledger: bool = False) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
@@ -323,6 +339,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     Issue #273 follow-up: when ``column_mesh`` is supplied, the
     per-column radiation kernel runs sharded across the mesh.
     """
+    # Static Python gate (a closure constant, never a traced value): False
+    # keeps every ledger branch out of the graph entirely, so the default path
+    # is byte-identical.  This is the documented feature-gating exception --
+    # jnp.where would trace BOTH branches.
+    _budget_ledger = bool(budget_ledger)
     tagged_fns = []
     # Aerosol-CCN specified-Nc coupling: the microphysics factory self-
     # detects the switch from its own sub-config, but the radiation factory
@@ -381,7 +402,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _turb_sn, _, _turb_sc = get_turbulence_fn(config.turbulence)
         _turb_field = turbulence_carry_field(_turb_sn, _turb_sc)
         tagged_fns.append((
-            make_turbulence_physics(config.turbulence, model_type, dt),
+            make_turbulence_physics(config.turbulence, model_type, dt,
+                                    f_land=f_land, land_beta=land_beta),
             True,
             _turb_field,
         ))
@@ -398,6 +420,64 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # ``_non_rad_fns`` is the module list with radiation removed.
     _has_rad = config.radiation.scheme != "none"
     _non_rad_fns = tagged_fns[1:] if _has_rad else tagged_fns
+
+    # --- Per-process budget-ledger row map (#1311 MPAS attribution) --------
+    # A list PARALLEL to ``tagged_fns`` giving each module's ledger row.  Kept
+    # parallel rather than widening the (fn, accepts_ps, field_name) tuple:
+    # that tuple is unpacked in three lifecycle-hook loops and in two OTHER
+    # model-type factories, none of which need the row.
+    # GWD maps to ``other_physics``, matching the FV pipeline, where GWD is
+    # part of the other_physics residual.
+    _ledger_row_of = []
+    if _budget_ledger:
+        from legoesm.diagnostics.process_ledger import (
+            ROW_CONVECTION, ROW_MICROPHYSICS, ROW_OTHER, ROW_RADIATION,
+            ROW_TURBULENCE,
+        )
+        if config.radiation.scheme != "none":
+            _ledger_row_of.append(ROW_RADIATION)
+        if config.convection.scheme != "none":
+            _ledger_row_of.append(ROW_CONVECTION)
+        if config.turbulence.scheme != "none":
+            _ledger_row_of.append(ROW_TURBULENCE)
+        if config.microphysics.scheme != "none":
+            _ledger_row_of.append(ROW_MICROPHYSICS)
+        if config.gravity_wave_drag.scheme != "none":
+            _ledger_row_of.append(ROW_OTHER)
+        # Drift guard: the row list is built by REPEATING the append order
+        # above, so a module added to tagged_fns without a matching row here
+        # would silently mis-attribute every later module's tendencies.
+        if len(_ledger_row_of) != len(tagged_fns):
+            raise AssertionError(
+                f"budget-ledger row map has {len(_ledger_row_of)} entries for "
+                f"{len(tagged_fns)} physics modules — the two append sequences "
+                f"have drifted; every module needs exactly one ledger row."
+            )
+    _non_rad_rows = _ledger_row_of[1:] if _has_rad else _ledger_row_of
+
+    # Water MASS species only — the canonical shared tuple (number
+    # concentrations deliberately excluded; see its docstring).
+    from legoesm.diagnostics.process_ledger import LEDGER_WATER_SPECIES
+    _LEDGER_WATER = LEDGER_WATER_SPECIES
+
+    def _module_ledger_row(t, p_s, dsigma):
+        """One module's per-column ``[water, energy]`` from its OWN tendency.
+
+        Simpler than the FV capture, which must reach into intermediate
+        variables because its rain bypasses the column store.  Here every
+        module returns its complete tendency, so the module's column-store
+        contribution IS the mass integral of its water-species and dT
+        tendencies — no per-scheme special-casing, and the module rows sum to
+        the combined total by construction (pinned by a test).
+        """
+        from legoesm.diagnostics.process_ledger import ledger_entry_column
+        dq = None
+        tt = t.tracer_tendencies
+        if tt is not None:
+            for _k in _LEDGER_WATER:
+                if _k in tt:
+                    dq = tt[_k].data if dq is None else dq + tt[_k].data
+        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma)
 
     def _zero_tendencies(state, has_v):
         dims_T = state.T.dims
@@ -420,7 +500,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             dv_dt=dv_dt_zero,
         )
 
-    def _accumulate(fns, state, grid, sigma_coord, phys_state, forcing):
+    def _accumulate(fns, state, grid, sigma_coord, phys_state, forcing,
+                    ledger_rows=None):
         """Sum the tendencies of every module in ``fns`` (non-empty list).
 
         Returns ``(du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
@@ -466,6 +547,38 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # diagnostic (not a tendency) so the lean MPAS loop can export it.
         precip_accum = (first.precip.data
                         if getattr(first, "precip", None) is not None else None)
+        # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
+        # feed: each comes from exactly ONE module (TOA trio + clear-sky TOA
+        # pair from radiation, shflx/lhflx from turbulence), so
+        # first-non-None across modules is the correct combine (no summing).
+        # The ``*_clr`` pair is None unless RadiationConfig.clear_sky_diag is
+        # on (#843 lean-lane port) — a None extra is never attached.
+        _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
+                        "shflx_sfc", "lhflx_sfc",
+                        "sw_up_toa_clr", "lw_up_toa_clr")
+        sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
+
+        # Per-process ledger: capture each module's row from its OWN complete
+        # tendency, before the sum below fuses them.  ``ledger_rows`` is the
+        # parallel row-index list; None (default) keeps this out of the graph.
+        _led = None
+        if _budget_ledger and ledger_rows is not None:
+            from legoesm.diagnostics.process_ledger import zero_ledger_column
+            _bl_dsigma = sigma_coord.dsigma
+            _bl_ps = state.p_s.data
+            # Budget accumulator in the WIDEST available float (f64 under
+            # x64, f32 otherwise — canonicalize_dtype respects the setting):
+            # per-module rows arrive in MIXED precision (f32 radiation, f64
+            # Louis), and seeding from any single row scatters the wider rows
+            # into a narrower ledger — a silent downcast, and a JAX
+            # FutureWarning slated to become an error.  Every add casts
+            # explicitly.
+            from jax.dtypes import canonicalize_dtype
+            _led_dtype = canonicalize_dtype(jnp.float64)
+            _led = zero_ledger_column(_bl_ps.shape[0], dtype=_led_dtype)
+            _led = _led.at[:, ledger_rows[0], :].add(
+                _module_ledger_row(first, _bl_ps, _bl_dsigma)
+                .astype(_led_dtype))
 
         # Accumulate tracer tendencies from all physics modules
         combined_tracer_tends = {}
@@ -473,7 +586,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             for k, v in first.tracer_tendencies.items():
                 combined_tracer_tends[k] = v.data
 
-        for fn, accepts_ps, field_name in fns[1:]:
+        for _i_mod, (fn, accepts_ps, field_name) in enumerate(fns[1:], start=1):
             if accepts_ps:
                 if getattr(fn, "_wants_forcing", False):
                     t, field_val = fn(state, grid, sigma_coord,
@@ -497,6 +610,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 if getattr(fn, "_wants_phys_state_ro", False):
                     _kw["phys_state"] = phys_state
                 t = fn(state, grid, sigma_coord, **_kw)
+            if _led is not None:
+                # ``.add`` not ``.set``: two modules can legitimately map to
+                # the same row (e.g. GWD and any future module on
+                # other_physics), and a set would silently discard the first.
+                _led = _led.at[:, ledger_rows[_i_mod], :].add(
+                    _module_ledger_row(t, _bl_ps, _bl_dsigma)
+                    .astype(_led.dtype))
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
                 dv_dt = dv_dt + t.dv_dt.data
@@ -515,8 +635,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 precip_accum = (t.precip.data if precip_accum is None
                                 else precip_accum + t.precip.data)
 
+            for _k in _DIAG_FIELDS:
+                if sfc_diag_extras[_k] is None:
+                    sfc_diag_extras[_k] = getattr(t, _k, None)
+
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
-                combined_tracer_tends, phys_updates, first, precip_accum)
+                combined_tracer_tends, phys_updates, first, precip_accum,
+                sfc_diag_extras, _led)
 
     def _build_combined(first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                         combined_tracer_tends):
@@ -550,6 +675,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             data=precip_accum, name="precip",
             dims=first.dp_s_dt.dims, units="kg/m^2/s"))
 
+    def _attach_sfc_diag_extras(combined, extras):
+        """Carry the per-module surface/TOA diagnostic Fields (TOA trio from
+        radiation, shflx/lhflx from turbulence) on the combined tendency —
+        _build_combined constructs a fresh tendency that drops them. No-op /
+        byte-identical when every extra is None (radiation+turbulence off)."""
+        _set = {k: v for k, v in extras.items() if v is not None}
+        return combined._replace(**_set) if _set else combined
+
     def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
@@ -573,17 +706,38 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 return zt._replace(dT_dt=zt.dT_dt.replace(data=dT)), phys_state
             (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
              combined_tracer_tends, phys_updates, first,
-             precip_accum) = _accumulate(
-                _non_rad_fns, state, grid, sigma_coord, phys_state, forcing)
+             precip_accum, sfc_diag_extras, _led) = _accumulate(
+                _non_rad_fns, state, grid, sigma_coord, phys_state, forcing,
+                ledger_rows=(_non_rad_rows if _budget_ledger else None))
             if cached_rad is not None:
                 # cached_rad is column-shaped (ncol, nlev); restore native layout.
                 dT_dt = dT_dt + cached_rad.reshape(dT_dt.shape)
+                if _led is not None:
+                    # The held sub-step adds the CACHED radiative heating here,
+                    # after _accumulate (radiation is not in _non_rad_fns), so
+                    # without this the radiation row would read zero on every
+                    # held step and the ledger would not sum to the applied
+                    # total.  Pinned by a held-step closure test.
+                    from legoesm.diagnostics.process_ledger import (
+                        ROW_RADIATION, ledger_entry_column,
+                    )
+                    _led = _led.at[:, ROW_RADIATION, :].add(
+                        ledger_entry_column(
+                            None, cached_rad.reshape(dT_dt.shape),
+                            state.p_s.data, sigma_coord.dsigma)
+                        .astype(_led.dtype))
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends)
             # Held-radiation sub-step: no fresh sw/lw solve, but precip (from
-            # microphysics, which runs every step) is still exported.
+            # microphysics, which runs every step) is still exported — same
+            # for the turbulence shflx/lhflx extras (radiation's TOA extras
+            # are None here; the consumer keeps the last radiation-step
+            # value slot-wise, exactly like sw/lw net).
             combined = _attach_sfc_precip(combined, first, precip_accum)
+            combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
+            if _led is not None:
+                combined = combined._replace(ledger_rows=_led)
             # rad_heating is carried UNCHANGED (not in phys_updates).
             phys_state_out = update_physics_state(phys_state, phys_updates)
             return combined, phys_state_out
@@ -593,8 +747,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             return _zero_tendencies(state, has_v), None
         (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
          combined_tracer_tends, phys_updates, first,
-         precip_accum) = _accumulate(
-            tagged_fns, state, grid, sigma_coord, phys_state, forcing)
+         precip_accum, sfc_diag_extras, _led) = _accumulate(
+            tagged_fns, state, grid, sigma_coord, phys_state, forcing,
+            ledger_rows=(_ledger_row_of if _budget_ledger else None))
         # Cache the radiative heating contribution for the held sub-cycle
         # steps.  Radiation is tagged_fns[0], so ``first.dT_dt`` is exactly
         # its contribution before any other module is summed.
@@ -619,9 +774,14 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             # coupled loop can export sw/lw net to the coupler (_build_combined
             # constructs a fresh tendency that drops these diagnostic fields).
             combined = combined._replace(
-                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc)
-        # Same for surface precip (from microphysics; _build_combined drops it).
+                sw_net_sfc=first.sw_net_sfc, lw_net_sfc=first.lw_net_sfc,
+                sw_down_sfc=first.sw_down_sfc, lw_down_sfc=first.lw_down_sfc)
+        # Same for surface precip (from microphysics; _build_combined drops it)
+        # and the TOA/turbulent-flux diagnostic extras.
         combined = _attach_sfc_precip(combined, first, precip_accum)
+        combined = _attach_sfc_diag_extras(combined, sfc_diag_extras)
+        if _led is not None:
+            combined = combined._replace(ledger_rows=_led)
         phys_state_out = update_physics_state(phys_state, phys_updates)
         return combined, phys_state_out
 

@@ -125,17 +125,23 @@ class TestConvectionAudit:
     def test_kain_fritsch_cape_consumption_time(self):
         from legoesm.atmosphere.physics.convection.kain_fritsch import kain_fritsch_convection
         from legoesm.atmosphere.physics.convection.config import KainFritschConfig
-        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass
-        # flux ``M_b = rho_BL * CAPE / (g * TIMEC)``.  In a very high-CAPE
-        # column ``M_b`` saturates at the literature cap ``M_b_max`` (clip),
-        # which makes the *applied* mass flux — and hence ``dT_dt`` —
-        # TIMEC-independent (gradient exactly zero).  The default ``_column``
-        # is past that cap, so audit reachability on a moderate-CAPE column
-        # (stabilised + slightly dried) where the closure is below the cap
-        # and TIMEC genuinely flows into the tendency.
+        # ``cape_consumption_time`` (TIMEC) sets the closure cloud-base mass flux
+        # ``M_b = rho_BL * CAPE / (g * TIMEC)``, clipped at the literature
+        # stability cap ``M_b_max``.  A SHORT TIMEC gives a LARGE M_b; the
+        # default ``_column``
+        # (and even the stabilised/dried one below at TIMEC=1800 s) is deep
+        # enough that M_b saturates at ``M_b_max`` there, which makes the applied
+        # mass flux — and ``dT_dt`` — TIMEC-independent (grad zero) in the CAP
+        # regime (a documented trainability limitation, NOT dead AD plumbing).
+        # This is the M_b_max CAP, not the timec clamp: the operative timec is
+        # ``clip(cape_consumption_time, 1800, 3600)`` whose subgradient at the
+        # 1800 s boundary is 0.5 (nonzero), so the clamp does NOT zero it — the
+        # sibling tier-4 sub-cap test even audits TIMEC=1800 s successfully.
+        # Probe a LONGER, sub-cap TIMEC (2400 s) where M_b is below the cap and
+        # TIMEC genuinely flows into the tendency.
         T, q_v, p_full, p_half = _column()
         T = T.at[:, -1].add(-2.0)   # gentler boundary-layer instability
-        q_v = q_v * 0.85            # below the M_b_max saturation regime
+        q_v = q_v * 0.85            # nearer the sub-cap regime
         A = _aux()
 
         def loss(x):
@@ -143,7 +149,7 @@ class TestConvectionAudit:
             out = kain_fritsch_convection(T, q_v, p_full, p_half, A["w"],
                 A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)
-        assert_grad_ok(loss, 1800.0, "kain_fritsch.cape_consumption_time")
+        assert_grad_ok(loss, 2400.0, "kain_fritsch.cape_consumption_time")
 
     def test_tiedtke_epsilon_deep(self):
         from legoesm.atmosphere.physics.convection.tiedtke import tiedtke_convection
@@ -234,13 +240,13 @@ class TestAIMIPDefaultsInteriorization:
         from legoesm.training.aimip_params import AIMIPClassicalParams
         params = AIMIPClassicalParams.from_defaults()
         vals = params.as_dict()
-        # gray_sfc_emissivity: canonical 1.0 in [0.5, 1.0] -> margin 0.025 -> 0.975
-        assert abs(float(vals["gray_sfc_emissivity"]) - 0.975) < 1e-5
-        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975
+        # rrtmgp_sfc_emissivity: canonical 0.98 within margin of 1.0 -> 0.975.
+        # (The gray twin of this assertion went away on 2026-08-11 with the
+        # gray knobs themselves; RRTMGP now carries the edge-knob case.)
         assert abs(float(vals["rrtmgp_sfc_emissivity"]) - 0.975) < 1e-5
         # raw is far from saturation -> non-trivial inverse-sigmoid gradient.
         # logit(0.95) ~= 2.94; a saturated edge default would give ~6.9.
-        raw = float(params.raw_values["gray_sfc_emissivity"])
+        raw = float(params.raw_values["rrtmgp_sfc_emissivity"])
         assert abs(raw) < 4.0
 
     def test_midrange_knob_exact_canonical(self):
@@ -248,10 +254,23 @@ class TestAIMIPDefaultsInteriorization:
             AIMIPClassicalParams, _canonical_scheme_defaults)
         defaults = _canonical_scheme_defaults()
         vals = AIMIPClassicalParams.from_defaults().as_dict()
-        # tiedtke_cape_threshold canonical 70 in [10, 500] is mid-range:
-        # the clamp is a no-op and init must equal the canonical default.
-        name = "tiedtke_cape_threshold"
+        # A knob whose canonical default sits WELL INSIDE its bounds: the
+        # sigmoid clamp is then a no-op and init must reproduce the canonical
+        # value exactly.
+        #
+        # This used to pin tiedtke_cape_threshold (70 in [10, 500]). That
+        # parameter was removed from the AIMIP trainables in #1417 -- its
+        # trigger sigmoid saturates, so its gradient is exactly zero in both
+        # the convecting and the stable regime -- and the test was left
+        # KeyError-ing on main. Moved to cloud_p_xr (0.25 in [0.1, 1.0]),
+        # which preserves the property under test.
+        name = "cloud_p_xr"
+        assert name in vals, f"{name} is no longer a trainable; pick another"
+        assert name in defaults, f"{name} has no canonical default"
         assert abs(float(vals[name]) - defaults[name]) < 1e-4 * defaults[name]
+        # Non-vacuity: the value must genuinely be interior, or a clamped
+        # parameter would pass this by coincidence.
+        assert 0.1 < defaults[name] < 1.0
 
     def test_to_rrtmgp_config_freezes_all_cache_key_fields(self):
         """EVERY RRTMGPConfig field that ``_instance_cache_key`` /

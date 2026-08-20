@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--gwd-scheme",          default="mcfarlane")
     parser.add_argument("--convection-scheme",   default="tiedtke")
     parser.add_argument("--turbulence-scheme",   default="louis")
+    parser.add_argument("--surface-bulk-scheme", default="constant")
     parser.add_argument("--microphysics-scheme", default="none")
     parser.add_argument("--cloud-scheme",        default="xu_randall")
     parser.add_argument("--suite", type=Path,
@@ -156,9 +157,14 @@ def main():
     schemes = {
         "convection_scheme":   args.convection_scheme,
         "turbulence_scheme":   args.turbulence_scheme,
+        "surface_bulk_scheme": args.surface_bulk_scheme,
         "gwd_scheme":          args.gwd_scheme,
         "microphysics_scheme": args.microphysics_scheme,
         "cloud_scheme":        args.cloud_scheme,
+        # One arm of a scheme ablation may drop a family on purpose (the CLI
+        # accepts --microphysics-scheme none); declare it rather than trip the
+        # completeness gate, which guards models that claim to be complete.
+        "allow_unfilled_families": True,
     }
     logger.info(f"[{args.label}] schemes = {schemes}")
 
@@ -172,7 +178,7 @@ def main():
             host_resident=True,   # non-chunked full-dataset load (#1155)
         )
         dt = spec_cfg.dt
-        radiation = str(base.get("aimip_radiation", "gray"))
+        radiation = str(base.get("aimip_radiation", "rrtmgp"))
         rad_update_interval = int(base.get("aimip_rad_update_interval", 6))
 
         def _make_physics_fn(p, grid_):

@@ -1237,7 +1237,7 @@ class TestMassFlux:
             T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
         )
         out_split = mass_flux_convection_from_closure(
-            T, q_v, p_full, p_half, closure, config=config,
+            T, q_v, p_full, p_half, closure, dt=300.0, config=config,
         )
 
         assert jnp.allclose(closure.M_c_new, M_c_new_full)

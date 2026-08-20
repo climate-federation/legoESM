@@ -52,8 +52,11 @@ jobs:
       # dev extra (not bare ruff): lint-imports/grimp must be able to import the
       # installed legoesm namespace to walk the dependency graph.
       - run: pip install -e ".[dev]"
+      # Scope is the WHOLE tree, not just src/legoesm: the federation carve left
+      # only 6 modules under src/legoesm, so the old scope linted ~0.6% of the
+      # code and never saw the F821s that lived in packages/ and scripts/.
       - name: Ruff check (errors only)
-        run: ruff check src/legoesm --select E9,F63,F7,F82 --statistics
+        run: ruff check src packages scripts tests --select E9,F63,F7,F82 --statistics
       - name: Import-boundary contracts (import-linter)
         run: lint-imports
 
@@ -66,10 +69,20 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
+      # The federation carve moved these four out of src/legoesm/; the stale
+      # paths meant mypy exited "file not found" and `|| true` swallowed it, so
+      # this job typechecked NOTHING. mypy itself stays advisory (the tree is
+      # not clean yet), but a missing target is now a hard failure so the next
+      # move cannot silently blank the job again.
       - name: mypy on core modules
         run: |
-          mypy src/legoesm/core/ src/legoesm/driver/ src/legoesm/io/ \
-               src/legoesm/parallel/ --ignore-missing-imports || true
+          set -eu
+          dirs="packages/core/legoesm/core packages/core/legoesm/io \
+                packages/core/legoesm/parallel packages/coupler/legoesm/driver"
+          for d in $dirs; do
+            test -d "$d" || { echo "ERROR: mypy target '$d' does not exist (moved?)"; exit 1; }
+          done
+          mypy $dirs --ignore-missing-imports || true
 
   test-collect:
     name: Test Collection
@@ -152,8 +165,22 @@ jobs:
           fi
           echo "Running ${#files[@]} top-level test files:"
           printf '  %s\n' "${files[@]}"
-          python -m pytest "${files[@]}" -x --timeout=300 \
-            --tb=short -q
+          # No -x: these files are the AST ratchets (constants, param specs,
+          # dispatch hardening, scripts layout, ...). Stopping at the first
+          # failure reports one violation per run and hides the rest, which is
+          # how ~30 of them accumulated unnoticed.
+          #
+          # -n 4 --dist loadfile: spread the files over four WORKER PROCESSES.
+          # Run as one process, this set reliably dies partway through with
+          # "Fatal Python error: Segmentation fault" inside XLA compilation of a
+          # reverse-mode HLO (see docs/dev-notes/xla-compile-crash.md).  Every
+          # subset passes on its own, so breaking the sequence up avoids it —
+          # and it is ~4x faster.  NOTE this is a mitigation, not a guarantee:
+          # loadfile keeps a worker alive across the files it is handed, so
+          # process state still accumulates within a worker.  If the crash
+          # returns, the deterministic fallback is one pytest process per file.
+          python -m pytest "${files[@]}" --timeout=300 \
+            --tb=short -q -n 4 --dist loadfile
         shell: bash
         timeout-minutes: 30
       - name: FV3-native grid fidelity tests (phase 1)

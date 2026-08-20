@@ -100,6 +100,10 @@ def make_mpas_ocean_physics(
             "is no explicit-tendency TKE path on the edge-normal C-grid). Set "
             "implicit_vertical_mixing=True, or use scheme='kpp'."
         )
+    # NOTE: the prognostic TKE carry (tke.prognostic=True) IS wired on MPAS:
+    # MPASOceanModel carries MPASOceanState.tke (seeded via model.seed_tke)
+    # and make_tke_profiles_mpas runs the Mode-A one-step en integration —
+    # no factory reject here (mirrors the lat-lon path).
 
     # Bail loudly on a vertical_mixing scheme whose K-PROFILE the MPAS factory
     # does not wire in and would SILENTLY DROP (finding #4).  Supported here:
@@ -437,10 +441,12 @@ def make_mpas_ocean_physics(
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     p_cell=p_cell, eos_fn=eos_fn,
+                    eta=state.eta.data, H_bathy=state.H_bathy.data,
                 )
             else:
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
+                    eta=state.eta.data, H_bathy=state.H_bathy.data,
                 )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]

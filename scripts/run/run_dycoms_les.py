@@ -1,5 +1,13 @@
-"""DYCOMS-II RF01 nocturnal stratocumulus on the spectral TRUE-LES core +
-swappable microphysics (Morrison/M2005 default; non-drizzling RF01).
+"""Marine stratocumulus on the spectral TRUE-LES core + swappable microphysics
+(Morrison/M2005 default; non-drizzling RF01).
+
+Two decks, selected with ``--case``: DYCOMS-II RF01 (default, described below)
+and ASTEX flight 209. Both set ``dolongwave = .true., doradsimple = .true.``,
+so both are driven by the SAME Stevens (2005) simple longwave with the same
+constants -- gSAM's rad_simple hardcodes them and applies them to every deck
+that selects it. They differ in Coriolis (ASTEX has none), subsidence
+divergence, domain depth and droplet concentration; see
+``_STRATOCUMULUS_CASES``.
 
 DYCOMS-II RF01 (Stevens et al. 2005, MWR 133; gSAM ``CASES/DYCOMS_RF01``):
 
@@ -51,6 +59,10 @@ from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
+from legoesm.atmosphere.physics.radiation.simple_lw import (  # noqa: E402
+    SimpleLWConfig,
+    simple_lw_temperature_tendency,
+)
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
@@ -82,20 +94,62 @@ def _record_theta_l(st, ref):
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
 # resolve_sam_case_dir.
 _DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
-_FCOR = 0.376e-4
-# Stevens et al. 2005 RF01 radiation + subsidence parameters.
-_KAPPA_RAD = 85.0          # LW absorption [m²/kg]
-_F0 = 70.0                 # cloud-top jump [W/m²]
-_F1 = 22.0                 # cloud-base jump [W/m²]
-_DIV = 3.75e-6             # large-scale divergence D [1/s]
-_A_RAD = 1.0               # the 'a' coefficient of the 3rd term [m^-4/3]
-_QT_INV = 8.0e-3           # z_i: q_t isoline [kg/kg] (RF01 spec)
-_NC_RF01 = 140.0e6         # droplet concentration [1/m³]
+# The two marine-stratocumulus decks this driver can run. Both set
+# `dolongwave = .true., doradsimple = .true.` in their prm, i.e. both are
+# driven by the SAME Stevens (2005) simple longwave with the SAME constants --
+# gSAM's rad_simple hardcodes them and applies them to every deck that selects
+# it, so ASTEX legitimately runs the RF01 numbers.
+#
+# What DOES differ is per case, and each entry is read off that deck rather
+# than inherited from DYCOMS:
+#   f_cor        ASTEX209 sets `docoriolis = .false.`, so its LES has none.
+#   subsidence_divergence_s   DYCOMS subsides as w = -D z with D = 3.75e-6.
+#                ASTEX's lsf gives w = -0.010 m/s at 2000 m, i.e. D = 5.0e-6.
+#                This is NOT the longwave's D: gSAM's rad_simple hardcodes
+#                f0 = 3.75e-6 in its clear-sky term for every deck, and the
+#                subsidence comes from the lsf file. The two coincide for
+#                DYCOMS and differ for ASTEX, so they are separate here --
+#                reusing one for the other is a silent wrong forcing.
+#   lz_m         ASTEX's inversion sits near 637 m but its sounding runs to
+#                1637 m, so the domain has to clear it.
+# The DYCOMS entry reproduces the historical hardcoded values exactly.
+_STRATOCUMULUS_CASES = {
+    "dycoms": {
+        "gsam_dir": "DYCOMS_RF01",
+        "f_cor": 0.376e-4,   # the RF01 driver's own value
+        "subsidence_divergence_s": 3.75e-6,
+        "lz_m": 1500.0,
+        "n_c_m3": 140.0e6,
+        "note": "Stevens et al. 2005 RF01 nocturnal stratocumulus.",
+    },
+    "astex": {
+        "gsam_dir": "ASTEX209",
+        "f_cor": 0.0,                 # prm: docoriolis = .false.
+        "subsidence_divergence_s": 5.0e-6,   # lsf: w=-0.010 m/s at 2000 m
+        "lz_m": 2500.0,
+        "n_c_m3": 100.0e6,            # ASTEX intercomparison N_c
+        "note": "ASTEX flight 209 stratocumulus (Sc-to-Cu transition deck).",
+    },
+}
+# The longwave fit lives in legoesm.atmosphere.physics.radiation.simple_lw,
+# which the single-column model calls too. Its constants -- including its own
+# divergence -- are hardcoded in gSAM's rad_simple for EVERY deck that selects
+# it, so this one instance serves both cases. The SUBSIDENCE divergence is per
+# case and comes from _STRATOCUMULUS_CASES; do not substitute one for the other.
+_SIMPLE_LW = SimpleLWConfig()
+_QT_INV = _SIMPLE_LW.qt_inversion_kg_kg   # z_i: q_t isoline [kg/kg]
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--case-dir", default=_DEFAULT_CASE)
+    p.add_argument("--case", choices=sorted(_STRATOCUMULUS_CASES),
+                   default="dycoms",
+                   help="which marine-stratocumulus deck to run. Both are "
+                        "driven by the same Stevens (2005) simple longwave; "
+                        "they differ in Coriolis, subsidence divergence, "
+                        "domain depth and droplet concentration.")
+    p.add_argument("--case-dir", default=None,
+                   help="override the deck directory --case resolves to.")
     p.add_argument("--nx", type=int, default=96)
     p.add_argument("--ny", type=int, default=96)
     p.add_argument("--nz", type=int, default=192,
@@ -103,7 +157,8 @@ def parse_args():
                         "beyond the projection's nz≲200 compile cliff).")
     p.add_argument("--Lx", type=float, default=3360.0)
     p.add_argument("--Ly", type=float, default=3360.0)
-    p.add_argument("--Lz", type=float, default=1500.0)
+    p.add_argument("--Lz", type=float, default=None,
+                   help="domain depth [m]; defaults to the case's own.")
     p.add_argument("--z0", type=float, default=1.0e-4)
     p.add_argument("--hours", type=float, default=4.0)
     p.add_argument("--dt", type=float, default=0.5)
@@ -136,13 +191,42 @@ def parse_args():
                    help="Stevens-LW recompute cadence [steps].")
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=8)
-    p.add_argument("--case-label", type=str, default="dycoms_rf01_sc")
+    p.add_argument("--case-label", type=str, default=None,
+                   help="Label stamped into every recorded frame, which "
+                        "`legoesm.training.les_reference` checks against the "
+                        "case it is asked to build. DEFAULTS TO --case; pass "
+                        "it only to override. It used to default to the "
+                        "literal 'dycoms' for BOTH decks, so `--case astex` "
+                        "without this flag stamped a genuine 6 h ASTEX run "
+                        "(domain top 1995 m against DYCOMS's 1496 m) as "
+                        "'dycoms', and the reference loader refused it.")
     p.add_argument("--output", type=Path, default=Path("results/les_dycoms"))
     p.add_argument("--emit-suite-artifact", type=Path, default=None,
                    help="after the run, assemble a moist LESReferenceArtifact (the SCM "
                         "tuner's input) from the recorded prof series + RF01 radiative "
                         "forcing and write it to this path")
-    return p.parse_args()
+    args = p.parse_args()
+    # The frame label follows the case unless it was given explicitly. The old
+    # literal default meant the ONE field that identifies a reference was wrong
+    # precisely when it mattered: `--case astex` produced 6 h of genuine ASTEX
+    # stamped "dycoms", which the reference loader then refused (and should --
+    # accepting the alias would let a real DYCOMS directory become the ASTEX
+    # reference). Both deck names ARE the reference registry's names here, so
+    # unlike run_spectral_cbl.py no mapping is needed.
+    args.case_label = args.case_label or args.case
+    # Resolve the case's own defaults, letting an explicit flag win. argparse
+    # cannot tell "given" from "equal to the default", so the overridable
+    # fields default to None and are filled in here.
+    spec = _STRATOCUMULUS_CASES[args.case]
+    args.case_spec = spec
+    if args.case_dir is None:
+        args.case_dir = resolve_sam_case_dir(spec["gsam_dir"])
+    if args.Lz is None:
+        args.Lz = spec["lz_m"]
+    args.f_cor = spec["f_cor"]
+    args.subsidence_divergence_s = spec["subsidence_divergence_s"]
+    args.n_c_m3 = spec["n_c_m3"]
+    return args
 
 
 def saturation_adjust(theta_l, q_t, exner, p, n_iter=40):
@@ -223,8 +307,18 @@ def build(args, dtype):
     tr = jnp.zeros((ny, nx, nz, args.n_tracers), dtype)
     tr = tr.at[..., 0].set(qv_col[None, None, :])
     tr = tr.at[..., 1].set(qc_col[None, None, :])
-    tr = tr.at[..., 6].set(jnp.where(qc_col > 0.0, _NC_RF01, 0.0)
-                           [None, None, :])
+    # Droplet number is STORED per MASS [1/kg]; the case value is a
+    # concentration [1/m^3], so divide by the reference density of the layer it
+    # is seeded into.  ``Nc_0`` below stays per volume — that is a scheme
+    # parameter, not a transported tracer.
+    #
+    # MERGE NOTE: main fixed the unit against a hardcoded RF01 constant; this
+    # branch had added ASTEX, whose N_c is 100e6 against DYCOMS' 140e6. Keeping
+    # main's conversion with the PER-CASE value -- the constant would silently
+    # seed ASTEX with RF01's droplet number.
+    _nc_per_mass = jnp.where(
+        qc_col > 0.0, args.n_c_m3 / jnp.asarray(ref.rho_c, dtype), 0.0)
+    tr = tr.at[..., 6].set(_nc_per_mass[None, None, :])
     st = sl.SpectralLESState(
         u=u3, v=v3, w=w3, rhs_u_prev=jnp.zeros_like(u3),
         rhs_v_prev=jnp.zeros_like(v3), rhs_w_prev=jnp.zeros_like(w3),
@@ -240,42 +334,34 @@ def build(args, dtype):
 
 
 def make_stevens_lw(g, ref, dtype):
-    """Stevens et al. (2005) RF01 parameterized LW: per-column F(z) on faces →
-    θ tendency. All on the LES (bottom-up) grid; jitted with the step."""
+    """Stevens et al. (2005) RF01 parameterized LW as a θ tendency.
+
+    The flux fit itself is shared with the SCM
+    (:mod:`legoesm.atmosphere.physics.radiation.simple_lw`) so the two sides
+    of an SCM-vs-LES comparison cannot drift apart. What stays here is the
+    LES-specific part: the tracer-slot layout, and the conversion of the
+    kernel's TEMPERATURE tendency to the θ tendency this dycore prognoses,
+    which is a division by the reference Exner function.
+
+    ``g.z_c`` is passed explicitly rather than re-derived from ``g.z_f``: the
+    two agree mathematically on this uniform grid but need not agree in the
+    last bit, and the difference would reach the clear-sky term.
+    """
     rho = jnp.asarray(ref.rho_c, dtype)            # (nz,)
     exner = jnp.asarray(ref.exner_c, dtype)
     z_c = g.z_c; z_f = g.z_f; dz = g.dz
-    cp = constants.c_pd
+    cp = _SIMPLE_LW.cp_j_kg_k
 
     def lw_theta_tendency(tracers):
         # CLOUD liquid only — Stevens/gSAM rad_simple excludes rain from the
-        # LW optical depth (codex (c); RF01 is non-drizzling anyway).
+        # LW optical depth (codex (c); RF01 is non-drizzling anyway). Slot 0
+        # is q_v, so q_t is the sum.
         q_l = tracers[..., 1]
-        # Q(z1,z2) = κ ∫ ρ q_l dz — cumulative from bottom on faces.
-        dq = _KAPPA_RAD * rho * q_l * dz           # per-layer increment
-        Q_from_bot = jnp.cumsum(dq, axis=-1)       # at TOP face of each layer
-        Q_bot_f = jnp.pad(Q_from_bot, ((0, 0), (0, 0), (1, 0)))   # (.., nz+1)
-        Q_tot = Q_bot_f[..., -1:]
-        Q_from_top_f = Q_tot - Q_bot_f
-        # z_i: the FACE above the highest cell with q_t ≥ 8 g/kg (gSAM
-        # rad_simple convention, codex (c,f)); all-dry column ⇒ z_i = 0 (term3
-        # then applies its weak clear-sky divergence from the surface).
         q_t = tracers[..., 0] + q_l
-        below = q_t >= _QT_INV
-        k_top = jnp.max(jnp.where(
-            below, jnp.arange(below.shape[-1])[None, None, :], -1), axis=-1)
-        z_i = z_f[k_top + 1][..., None]            # face above; k_top=-1 ⇒ z_f[0]=0
-        rho_i = jnp.interp(z_i[..., 0], z_c, rho)[..., None]
-        # F on faces (nz+1):
-        zf3 = z_f[None, None, :]
-        dz_i = jnp.clip(zf3 - z_i, 0.0, None)
-        term3 = (_A_RAD * rho_i * cp * _DIV
-                 * (0.25 * dz_i ** (4.0 / 3.0)
-                    + z_i * dz_i ** (1.0 / 3.0)))
-        F = (_F0 * jnp.exp(-Q_from_top_f) + _F1 * jnp.exp(-Q_bot_f) + term3)
-        # dT/dt = −(1/ρ c_p) ∂F/∂z (centres) → θ via reference Exner.
-        dF = (F[..., 1:] - F[..., :-1]) / dz
-        return -dF / (rho * cp * exner)[None, None, :]
+        dT_dt = simple_lw_temperature_tendency(
+            q_l, q_t, rho, dz, z_f, _SIMPLE_LW, z_full=z_c)
+        # θ = T/Exner, and the reference Exner is time-invariant here.
+        return dT_dt / exner[None, None, :]
 
     return lw_theta_tendency
 
@@ -290,7 +376,7 @@ def main():
     # alone would be ignored (codex (h)). Nc_0 = 140 cm⁻³ per the RF01 spec.
     micro_cfg = (MicrophysicsConfig(
         scheme="morrison",
-        morrison=MorrisonConfig(morrison_flavor="sam", Nc_0=_NC_RF01))
+        morrison=MorrisonConfig(morrison_flavor="sam", Nc_0=args.n_c_m3))
         if args.microphysics == "morrison"
         else MicrophysicsConfig(scheme=args.microphysics))
     dt0 = float(args.dt)
@@ -299,7 +385,9 @@ def main():
     lw_tend = make_stevens_lw(g, ref, dtype)
 
     # Subsidence w_ls = −D·z on θ and q_t (slots 0 + 1); upwind in z.
-    w_ls = (-_DIV * g.z_c).astype(dtype)
+    # The case's SUBSIDENCE divergence, which is not the longwave's -- see
+    # _STRATOCUMULUS_CASES.
+    w_ls = (-args.subsidence_divergence_s * g.z_c).astype(dtype)
     dz = g.dz
 
     def ddz_up(f):
@@ -316,7 +404,7 @@ def main():
     @partial(jax.jit, static_argnames=("first", "do_micro", "do_rad"))
     def step(state, dt, first=False, do_micro=True, do_rad=True):
         state, us = sl.step(state, g=g, dt=dt,
-                            u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
+                            u_geo=(forc["ug"], forc["vg"]), f_cor=args.f_cor,
                             first=first, force=(0.0, 0.0),
                             sfc_theta_flux=forc["th_flux"],
                             sfc_qv_flux=forc["qv_flux"])
@@ -362,6 +450,7 @@ def main():
     if rec:
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
         frame = 0
+        _last_rec_h = [None]
 
         def _save(t_hours):
             nonlocal frame
@@ -369,11 +458,13 @@ def main():
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
                 _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 qv3=np.asarray(st.tracers[..., 0]),
                 qr3=np.asarray(st.tracers[..., 2]),
                 rho_z=np.asarray(ref.rho_c))
             frame += 1
+            _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
     if rec:
@@ -420,7 +511,13 @@ def main():
             _save(t / 3600.0); next_rec += T / args.record_frames
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
-    if rec and frame < args.record_frames:
+    # ALWAYS record the terminal state. The initial-state frame consumes one
+    # slot of --record-frames, so the in-loop cadence stops one step short of
+    # t = T and the old `frame < record_frames` guard was already exhausted
+    # here -- every reference silently ended one cadence step early (measured:
+    # --record-frames 3 over 0.25 h gave t = 0, 0.083, 0.167 h, never 0.25).
+    # Guarded on the time, not the count, so it cannot emit a duplicate frame.
+    if rec and (_last_rec_h[0] is None or t / 3600.0 > _last_rec_h[0] + 1.0e-9):
         _save(t / 3600.0)
     d = _diag(st, g, ref)
     cc_avg = cc_sum / n_cavg if n_cavg else float(d["cloud_cover"])

@@ -134,11 +134,29 @@ def _mock_step_unified(
     return phys_out, held_new, kwargs.get("T_land")
 
 
+def _mock_step_unified_rad_counting(*args, **kwargs):
+    """``_mock_step_unified`` that MARKS each radiation call.
+
+    Increments ``held_sw_net_sfc`` by 1 and returns the rest of the held tuple
+    unchanged, so after a run that field equals the number of steps that took
+    the radiation branch.  Paired with the plain (held-preserving)
+    ``_mock_step_unified`` as the no-rad variant, this makes the radiation
+    cadence directly countable -- the plain mock alone cannot observe radiation
+    at all, since it returns every held field untouched.
+    """
+    phys_out, held_new, T_land = _mock_step_unified(*args, **kwargs)
+    dT_rad, sw_net, lw_net, sw_up_toa, lw_up_toa, sw_down_toa = held_new
+    return (phys_out,
+            (dT_rad, sw_net + 1.0, lw_net, sw_up_toa, lw_up_toa, sw_down_toa),
+            T_land)
+
+
 # Optional carry fields that are None in the legacy warm-rain/diagnostic
 # carries — skipped by the field-by-field equivalence comparisons below.
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
     "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
+    "budget_ledger_accum",
 )
 
 
@@ -1403,38 +1421,97 @@ class TestRadiationSubcycle:
                 err_msg=f"Subcycled vs legacy mismatch in {field_name}",
             )
 
-    def test_subcycle_falls_back_when_n_not_multiple_of_rad(self):
-        """``n_steps % rad_update_steps != 0`` → legacy scan path.
+    @pytest.mark.parametrize("start_step,n_steps,rad_update_steps", [
+        (0, 12, 4),    # aligned start, exact multiple — the original case
+        (0, 7, 4),     # RAGGED length: 1 rad step (i=3), not 7
+        (144, 7, 2),   # the real regression: 144-step segment + 7-step tail
+        (2, 5, 4),     # NON-ALIGNED start (restart mid-cycle)
+        (0, 2, 4),     # segment ends before the first rad step: zero rad
+        (0, 9, 3),
+        # Boundary cases (codex review named these as gaps):
+        (3, 5, 4),     # lead == 0: the FIRST step radiates
+        (0, 3, 4),     # lead == n_steps exactly: still zero rad
+        (2, 12, 4),    # non-aligned start WITH full cycles (n_outer > 0)
+    ])
+    def test_subcycle_radiates_on_exactly_the_cadence_steps(
+            self, start_step, n_steps, rad_update_steps):
+        """Radiation must fire on exactly the absolute steps ``i`` with
+        ``(i+1) % rad_update_steps == 0`` -- for ANY segment length and ANY
+        starting phase.
 
-        With ``step_unified_no_rad`` provided AND rad>1 AND n%rad==0,
-        :func:`build_segment_fn` uses the subcycled scan.  When
-        n%rad!=0, it must fall back to the legacy cond body so the
-        radiation cadence within the segment stays correct.  We test
-        by running 7 steps with rad=4: 7 is not a multiple of 4, so
-        the subcycled-aware build still routes through the legacy
-        body and produces the same result as the legacy build alone.
+        This replaces a test that asserted the OPPOSITE: that a segment whose
+        length is not a multiple of the cadence "falls back to the legacy cond
+        body so the radiation cadence stays correct".  It does not stay correct.
+        The fallback body computes ``need_rad`` and hands it to the
+        ``static_need_rad=True`` variant, which DELETES it and radiates every
+        step -- so the old test passed only because BOTH arms it compared were
+        every-step, and because ``_mock_step_unified`` returns ``held_*``
+        unchanged and therefore cannot observe radiation at all (codex
+        adversarial review).
+
+        Counting is done with a rad variant that INCREMENTS ``held_sw_net_sfc``
+        and a no-rad variant that leaves it alone, so the final field value IS
+        the number of radiation steps -- a direct count, not a proxy.
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = rad_update_steps
+        args["step_unified"] = _mock_step_unified_rad_counting
+        run = build_segment_fn(**args, step_unified_no_rad=_mock_step_unified)
+
+        carry = self._make_init_carry()._replace(
+            step_index=jnp.asarray(start_step, dtype=jnp.int32))
+        out = run(carry, n_steps, _FORCING)
+
+        expected = sum(1 for i in range(start_step, start_step + n_steps)
+                       if (i + 1) % rad_update_steps == 0)
+        counted = float(np.asarray(out.held_sw_net_sfc).max())
+        assert counted == pytest.approx(expected), (
+            f"radiation fired {counted:g} times over steps "
+            f"[{start_step}, {start_step + n_steps}) at "
+            f"rad_update_steps={rad_update_steps}; the cadence "
+            f"(i+1)%{rad_update_steps}==0 asks for {expected}. "
+            f"{'Every-step radiation (the discarded-predicate bug).' if counted == n_steps else ''}")
+
+    def test_cadence_is_continuous_across_a_ragged_segment_boundary(self):
+        """Phase must CARRY across segments, not restart at each one.
+
+        The per-segment test above pins one call in isolation; this pins the
+        thing a run actually does -- chaining segments, where a ragged first
+        segment leaves the carry mid-cycle and the second must pick the cadence
+        up where the first left off.  Driving 7 then 5 steps at cadence 4 must
+        radiate on exactly the same absolute steps as one 12-step call, because
+        `_subcycle_lead` re-derives the phase from `carry.step_index` each time.
+        A phase reset per segment would show up here and nowhere else.
         """
         args = _make_segment_fn_args()
         args["rad_update_steps"] = 4
+        args["step_unified"] = _mock_step_unified_rad_counting
+        run = build_segment_fn(**args, step_unified_no_rad=_mock_step_unified)
 
-        run_legacy = build_segment_fn(**args)
-        run_subcycle = build_segment_fn(
-            **args, step_unified_no_rad=_mock_step_unified,
-        )
+        split = run(run(self._make_init_carry(), 7, _FORCING), 5, _FORCING)
+        whole = run(self._make_init_carry(), 12, _FORCING)
 
-        carry_init = self._make_init_carry()
-        legacy_out = run_legacy(_copy_carry(carry_init), 7, _FORCING)
-        subcycle_out = run_subcycle(_copy_carry(carry_init), 7, _FORCING)
+        n_split = float(np.asarray(split.held_sw_net_sfc).max())
+        n_whole = float(np.asarray(whole.held_sw_net_sfc).max())
+        assert n_split == pytest.approx(n_whole) == pytest.approx(3.0), (
+            f"7+5 steps radiated {n_split:g} times, one 12-step call "
+            f"{n_whole:g}; the cadence (i+1)%4==0 asks for 3 over [0,12). "
+            f"A mismatch means the phase resets at the segment boundary "
+            f"instead of being carried on carry.step_index.")
+        assert int(np.asarray(split.step_index)) == int(
+            np.asarray(whole.step_index)) == 12
 
-        for field_name in SegmentCarry._fields:
-            if field_name in _OPTIONAL_CARRY_FIELDS:
-                continue  # optional stateful/DM fields: None in legacy carries
-            np.testing.assert_allclose(
-                np.asarray(getattr(legacy_out, field_name)),
-                np.asarray(getattr(subcycle_out, field_name)),
-                atol=1e-6, rtol=1e-6,
-                err_msg=f"Fallback mismatch in {field_name}",
-            )
+    def test_ragged_segment_is_not_every_step_radiation(self):
+        """Non-vacuity guard for the parametrised test above: the ragged case
+        must be DISTINGUISHABLE from every-step radiation, or counting proves
+        nothing.  7 steps at cadence 4 asks for exactly 1 refresh; the bug this
+        fixes produced 7."""
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 4
+        args["step_unified"] = _mock_step_unified_rad_counting
+        run = build_segment_fn(**args, step_unified_no_rad=_mock_step_unified)
+        out = run(self._make_init_carry(), 7, _FORCING)
+        assert float(np.asarray(out.held_sw_net_sfc).max()) == pytest.approx(1.0)
 
     def test_subcycle_step_index_matches_legacy(self):
         """``step_index`` increments by ``n_steps`` regardless of path."""

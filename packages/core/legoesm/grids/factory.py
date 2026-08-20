@@ -35,11 +35,12 @@ Expects a **canonical** ``grid_type`` (legacy aliases like ``voronoi`` /
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 #: Global grids ocean and atmosphere share, instantiable via :func:`create_grid`.
 GLOBAL_GRID_TYPES: tuple[str, ...] = (
     "cubed_sphere",
+    "fesom",
     "gaussian",
     "latlon",
     "mpas",
@@ -92,12 +93,113 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
 
         return create_tripole_grid(grid_file, **kwargs)
 
+    if grid_type == "fesom":
+        # FESOM2 unstructured triangular mesh (the fesom_jax dycore).  Like
+        # tripole it is mesh-file-backed, so it is NOT in _RESOLUTION_GRIDS.
+        if resolution is not None:
+            raise ValueError(
+                "fesom is a mesh-file-backed ocean grid: pass "
+                "mesh_dir=<FESOM mesh directory>, not a resolution."
+            )
+        mesh_dir = kwargs.pop("mesh_dir", None)  # None => packaged pi mesh
+        H_max = kwargs.pop("H_max", None)
+        nlev = kwargs.pop("nlev", None)
+        land_lat_threshold = kwargs.pop("land_lat_threshold", 90.0)
+        # Explicit interface depths, so FESOM can be built on the SAME vertical
+        # grid as the other dycores. Silently dropping this (the pre-2026-08-08
+        # behaviour) left FESOM on uniform 1 m layers while the caller's
+        # diagnostic weighted it with a stretched z-star dz.
+        zbar = kwargs.pop("zbar", None)
+        if H_max is None or nlev is None:
+            raise ValueError(
+                "fesom requires H_max and nlev (a FESOM mesh without a "
+                "vertical specification is meaningless here)."
+            )
+        # Function-scope imports: the core grids package must not import the
+        # ocean package or fesom_jax at module scope.
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            FesomOceanGrid,
+            _require_fesom_jax,
+            build_flat_bottom_mesh,
+        )
+
+        # Raise a clear ImportError naming the package + install command
+        # rather than a raw ModuleNotFoundError from the line below.
+        _require_fesom_jax()
+        from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
+
+        mesh = load_mesh(DEFAULT_PI_MESH_DIR if mesh_dir is None else mesh_dir)
+        mesh = build_flat_bottom_mesh(
+            mesh,
+            H_max=H_max,
+            nlev=nlev,
+            land_lat_threshold=land_lat_threshold,
+            zbar=zbar,
+        )
+        if kwargs:
+            raise ValueError(
+                f"create_grid('fesom', ...) got unexpected keyword(s) "
+                f"{sorted(kwargs)}. Refusing to silently drop them."
+            )
+        return FesomOceanGrid(mesh)
+
     raise ValueError(
         f"Unknown grid_type {grid_type!r}. Available global grids: "
         f"{', '.join(GLOBAL_GRID_TYPES)} (for a regional grid use "
         f"create_regional_grid; for a doubly-periodic box/SCM use "
         f"legoesm.grids.plane.create_plane_grid)."
     )
+
+
+class FV3DuoGridBundle(NamedTuple):
+    """The FV3 six-face duo-cube grid pair the ``fv3_duo`` dycore steps on.
+
+    Deliberately NOT a ``GLOBAL_GRID_TYPES`` entry: the driver keeps its
+    standard ``cubed_sphere`` grid for metadata (lat/lon accessors,
+    topography), and the ``fv3_duo`` DISCRETIZATION selects this bundle
+    through the component factory — discretization-keyed wiring, no new
+    driver grid dispatch (L1).
+
+    ``ctx_np`` is the NumPy ``build_six_face_duo_context`` dict (IC
+    assembly, gridstruct metadata); ``ctx_jax`` the frozen
+    ``DuoStepperContext`` the jitted ``fv_dynamics`` step consumes.  Both
+    describe the SAME grid; build once per resolution and reuse (the jax
+    context hashes by identity, so a rebuilt bundle recompiles).
+    """
+    ctx_np: dict
+    ctx_jax: Any
+    n: int
+    ng: int
+
+
+def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
+    """Build the certified six-face duo-cube context pair for C``resolution``.
+
+    Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
+    conventions, the ONLY lane the JAX stepper implements — its context
+    builder fails closed on anything else) and
+    ``build_jax_duo_stepper_context``.  Slice 1 is flat-orography: the
+    jax context's ``hs6`` defaults to zeros, which is what the NH carry's
+    ``zs = phis/grav`` seed reads.
+    """
+    if resolution < 4:
+        raise ValueError(
+            f"create_fv3_duo_grid: resolution={resolution} is below the "
+            f"smallest exercised duo cube (the gate files run C12; the "
+            f"halo tables need n >= ng + 1 = {ng + 1}).")
+    # Function-scope imports, matching this module's style (grid builders
+    # are heavy; nothing here should load at factory import time).
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+    )
+
+    ctx_np = build_six_face_duo_context(resolution, ng,
+                                        use_ext_bundle=True,
+                                        oracle_conventions=True)
+    ctx_jax = build_jax_duo_stepper_context(ctx_np)
+    return FV3DuoGridBundle(ctx_np=ctx_np, ctx_jax=ctx_jax,
+                            n=int(ctx_np["n"]), ng=int(ctx_np["ng"]))
 
 
 #: Regional / limited-area grids instantiable via :func:`create_regional_grid`.

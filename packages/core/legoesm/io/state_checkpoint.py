@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import subprocess
 import tempfile
 import warnings
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ import jax
 import numpy as np
 
 from legoesm.core.field import Field
+from legoesm.io.git_provenance import git_provenance
 from legoesm.io.state_digest import compute_state_digest
 
 
@@ -54,18 +54,14 @@ def _get_platform_tag() -> str:
 
 
 def _get_git_hash() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
+    """HEAD SHA of the IMPORTED legoesm package's repo — not the CWD.
+
+    Anchored at this module's file so the stamp describes the code that runs
+    (a launcher cd-ed into a pinned worktree must not certify the pin while
+    executing another tree).  Reads ``__file__`` at call time so tests can
+    monkeypatch it.
+    """
+    return git_provenance(Path(__file__)).commit
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +343,24 @@ def load_state_checkpoint(
                     staggering=fm.get("staggering", template_val.staggering),
                 )
             elif template_val is None:
-                # Field was None in template but exists in checkpoint
-                kwargs[name] = arr
+                # Slot was None in the template but exists in the checkpoint.
+                # If the checkpoint's field_meta says it was a Field (e.g. the
+                # prognostic tke carry), reconstruct the Field — grafting the
+                # raw array would break every ``.data`` consumer downstream
+                # (codex MED 2026-07-27). No field_meta => it was a raw-array
+                # slot; keep the raw array (old behaviour).
+                fm = field_meta.get(name)
+                if fm and fm.get("is_field") is True:
+                    kwargs[name] = Field(
+                        data=arr,
+                        name=fm.get("name", name),
+                        dims=tuple(fm.get("dims", ())),
+                        units=fm.get("units", ""),
+                        long_name=fm.get("long_name", ""),
+                        staggering=fm.get("staggering", "cell"),
+                    )
+                else:
+                    kwargs[name] = arr
             else:
                 kwargs[name] = arr
 

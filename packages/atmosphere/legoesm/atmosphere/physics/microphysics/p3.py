@@ -79,6 +79,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -216,6 +217,9 @@ def p3_microphysics(
 
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, dt, config.saturation_sharpness, q_c=q_c,
+        hard_adjust=config.hard_saturation_adjustment,
+        hard_threshold=config.hard_sat_adjust_threshold,
+        hard_max_heating_K=config.hard_sat_max_heating_K,
     )
     dq_c_au, dN_r_au, x_c = autoconversion_sb(
         q_c, N_c_eff, rho, config.k_au, config.x_star,
@@ -257,8 +261,20 @@ def p3_microphysics(
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
     # Ice supersaturation (used by the nucleation gate and deposition below).
+    # PLAIN ice saturation — the nucleation gate must NOT see the
+    # homogeneous-freezing allowance: the oracle gate (supi >= 0.05 on plain
+    # q_sat_i) is what decides whether crystals appear at all, and raising its
+    # denominator by rh_homo suppressed nucleation outright (the gSAM Cooper-cap
+    # test collapsed from 6667 to 9e-24 /kg/s).
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
+
+    # DEPOSITION target only: IFS/SAM homogeneous-freezing allowance lets
+    # pristine air below 235 K hold ice supersaturation up to rh_homo (gSAM
+    # cloud.f90); withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor).
+    q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
+        T, q_i, enabled=config.homogeneous_ice_supersaturation,
+    )
 
     # 1. Ice nucleation (Cooper 1986, gSAM P3 scheme-1 semantics, smoothed).
     #
@@ -284,6 +300,22 @@ def p3_microphysics(
     # exponential overflows fp32 at the very cold tropopause / sponge
     # temperatures of an RCEMIP column (→ N_i = inf → NaN in tracer slot 8).
     # ``jnp.minimum`` clamps even an inf exponential to the finite cap.
+    #
+    # GRADIENT NOTE (2026-08-16 audit).  Both ``N_i0`` and ``cooper_a`` audit as
+    # `blocked`: read by the code, finite-difference effect 153, gradient
+    # exactly 0.  The severing clamp is the OUTER ``N_i_nuc_max`` one, not
+    # ``_COOPER_EXP_CAP`` — that inner cap needs ``T_freeze - T > 263 K``
+    # (T < 10 K) and never binds in an atmosphere, and ``N_i0`` multiplies
+    # OUTSIDE the exponential so only the outer cap can sever both.  At a
+    # realistic 50 K supercooling the Cooper expression gives ~2e7 against a
+    # 1e5 cap.
+    #
+    # The zero gradient is therefore CORRECT, not a defect: while nucleation is
+    # cap-limited neither parameter changes the answer, exactly as with
+    # Morrison's mass-limited ``melt_rate``.  Do NOT paper over it with a
+    # straight-through estimator — that treatment belongs to gates whose
+    # saturation is a smoothing artefact (see ``_triggers.cape_trigger``), not
+    # to a physical cap taken from the oracle.
     N_i_target = jnp.minimum(
         config.N_i0
         * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)),
@@ -301,9 +333,13 @@ def p3_microphysics(
     # sublimation is a separate pathway not yet included, consistent with
     # Morrison which also omits explicit sublimation).
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
+    # Deposition is driven by the excess over the ALLOWED target: in pristine
+    # air below 235 K that is rh_homo*q_sat_i, so vapour accumulates to the
+    # homogeneous-freezing threshold instead of depositing immediately.
+    S_i_dep = q_v / jnp.clip(q_sat_i_dep, 1e-10) - 1.0
     dq_i_dep = (
         config.dep_coeff
-        * jnp.maximum(S_i, 0.0)
+        * jnp.maximum(S_i_dep, 0.0)
         * q_i_eff
         * safe_pow(N_i, 1.0 / 3.0)
         * f_ice

@@ -206,17 +206,20 @@ class TestSupportedMatrix:
 
     def test_all_canonical_names_unique(self):
         from legoesm.supported_matrix import SUPPORTED_MATRIX
-        names = [e.canonical_name for e in SUPPORTED_MATRIX]
+        # (name, dynamics) pairs: a multi-axis solver (fv3_duo) has one
+        # row per axis, same canonical name (codex 2026-08-18 — a note
+        # field is not machine-readable coverage).
+        names = [(e.canonical_name, e.dynamics) for e in SUPPORTED_MATRIX]
         assert len(names) == len(set(names)), (
-            f"Duplicate canonical names: "
+            f"Duplicate (canonical_name, dynamics) pairs: "
             f"{[n for n in names if names.count(n) > 1]}"
         )
 
     def test_all_class_names_unique(self):
         from legoesm.supported_matrix import SUPPORTED_MATRIX
-        names = [e.class_name for e in SUPPORTED_MATRIX]
+        names = [(e.class_name, e.dynamics) for e in SUPPORTED_MATRIX]
         assert len(names) == len(set(names)), (
-            f"Duplicate class names: "
+            f"Duplicate (class_name, dynamics) pairs: "
             f"{[n for n in names if names.count(n) > 1]}"
         )
 
@@ -255,9 +258,12 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 17 atmosphere + 5 ocean = 22 genuinely distinct implementations
-        # (atmosphere grew by tracer_transport_mpas + tracer_transport_latlon)
-        assert len(ATMOSPHERE_MATRIX) == 17
+        # 19 atmosphere + 5 ocean = 24 genuinely distinct implementations.
+        # NOTE: pre-existing drift absorbed here — HEAD carried 18 entries
+        # (tracer_transport_spectral landed without bumping this count, CI
+        # dark) while this assertion still said 17; fv3_duo_primitive_
+        # equations (the certified duo-cube lane) makes it 19.
+        assert len(ATMOSPHERE_MATRIX) == 20
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):

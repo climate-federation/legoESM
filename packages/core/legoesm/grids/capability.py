@@ -71,6 +71,12 @@ _OPERATOR_FAMILY: dict[str, str | None] = {
     "tripole": "grid_operators",       # curvilinear lat-lon C-grid (ocean)
     "mercator": "grid_operators",      # regional lat-lon C-grid family
     "mpas": "edge_operators",          # edge-normal TRiSK (icosahedral Voronoi)
+    # FESOM2: mixed FV/FE on TRIANGLES — tracers at nodes (P1, Voronoi dual
+    # control volumes), velocity at element centres, edge-based fluxes, and
+    # per-element P1 basis gradients (``gradient_sca``).  Neither the
+    # component-(u, v) C-grid family nor MPAS's edge-normal TRiSK on a Voronoi
+    # dual, so it gets its own family rather than a misleading label.
+    "fesom": "fesom_operators",
     "plane": "plane_operators",        # Cartesian doubly-periodic operators
     "gaussian": None,                  # spectral transforms — no grid-local ops
 }
@@ -255,6 +261,20 @@ def _build_operators(grid_type: str, grid: Any) -> Any:
             f"it is a spectral grid whose dynamics run through global transforms, "
             f"not divergence/gradient/vorticity stencils.  Do not request "
             f"operators=True for it."
+        )
+    if family == "fesom_operators":
+        # FESOM's differential operators live INSIDE fesom_jax and are only
+        # reachable through its own dycore (``step.step_jit``).  legoESM has no
+        # standalone FESOM operator adapter and will not fake one -- a faked
+        # adapter would silently produce wrong numbers.  Raise a SPECIFIC
+        # NotImplementedError naming the right entry point instead of the
+        # generic "no operator adapter wired" ValueError at the fall-through.
+        raise NotImplementedError(
+            f"grid {grid_type!r} ({g}): FESOM's differential operators are "
+            f"internal to fesom_jax and are not exposed as a standalone "
+            f"legoESM operator adapter.  Use the FESOM dycore via "
+            f"legoesm.ocean.dynamics.ocean_model_fesom.FesomOceanModel "
+            f"instead of requesting operators=True."
         )
     if family == "grid_operators" and g in ("latlon", "mercator", "tripole"):
         from legoesm.grids.operator_adapters import latlon_cgrid_operators

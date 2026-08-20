@@ -59,6 +59,37 @@ RUN_NCCL="${RUN_NCCL:-1}"
 RUN_LATLON="${RUN_LATLON:-1}"
 RUN_OCEAN="${RUN_OCEAN:-1}"
 RUN_MPAS="${RUN_MPAS:-1}"
+# Lat-band lanes C/D task count (8 = 2 nodes; 16 = sbatch --nodes=4).
+NP_LL="${NP_LL:-8}"
+# Lane E device count; >6 pads the mesh via --reorder-for (even split).
+NP_MPAS="${NP_MPAS:-6}"
+# Slurm job STEPS do not inherit the job's GPU allocation on all Slurm
+# versions/configs — without an explicit step gres some tasks see zero
+# devices (jax: "no supported devices found for platform CUDA"). Make every
+# GPU visible to every task; the PIN block below does the per-task pinning.
+STEP_GPU_OPTS="${STEP_GPU_OPTS:---gpus-per-node=4 --gpu-bind=none}"
+
+# The NP knobs must fit the allocation (codex: NP_LL=16 on the default
+# 2-node header would just fail in srun) — validate up front, loudly.
+NODES_HAVE="${SLURM_JOB_NUM_NODES:-1}"
+need=0
+[ "$RUN_NCCL" = "1" ] && [ 2 -gt "$need" ] && need=2
+if [ "$RUN_LATLON" = "1" ] || [ "$RUN_OCEAN" = "1" ]; then
+    n=$(( (NP_LL + 3) / 4 )); [ "$n" -gt "$need" ] && need=$n
+fi
+# Lane T is hard-coded to np=8 (atm/ocean) + np=6 cube — a fixed 2-node
+# requirement independent of NP_LL (codex round-2 finding 3).
+if [ "${RUN_TUNE:-0}" = "1" ] && [ 2 -gt "$need" ]; then need=2; fi
+if [ "$RUN_MPAS" = "1" ]; then
+    tpn=3; [ $((NP_MPAS % 4)) -eq 0 ] && tpn=4
+    n=$(( (NP_MPAS + tpn - 1) / tpn )); [ "$n" -gt "$need" ] && need=$n
+fi
+if [ "$NODES_HAVE" -lt "$need" ]; then
+    echo "ERROR: enabled lanes need $need nodes (NP_LL=$NP_LL NP_MPAS=$NP_MPAS" \
+         "cube=$RUN_NCCL) but the job has $NODES_HAVE — resubmit with" \
+         "sbatch --nodes=$need." >&2
+    exit 2
+fi
 MODE="${MODE:-strong}"
 PRECISION="${PRECISION:-float32}"
 CS_RES="${CS_RES:-96}"
@@ -73,7 +104,7 @@ N_TIMING="${N_TIMING:-30}"
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"   # first run: check for NET/IB
 
 STAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_multinode_${STAMP}}"
+OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/gpu_multinode_${STAMP}_j${SLURM_JOB_ID:-local}}"
 mkdir -p "$OUTDIR"
 
 echo "=== HOSTS ==="; scontrol show hostnames "$SLURM_JOB_NODELIST"; date
@@ -81,27 +112,39 @@ echo "=== CONFIG ==="
 echo "lanes: cube=$RUN_NCCL latlon=$RUN_LATLON ocean=$RUN_OCEAN mpas=$RUN_MPAS | mode=$MODE prec=$PRECISION C$CS_RES LL$LL_RES OC$OC_RES ICO-L$ICO_LEVEL"
 echo "outdir=$OUTDIR"
 
-# One GPU per task: SLURM exports SLURM_LOCALID per task; jax's SLURM
-# auto-detection also derives local_device_ids from it, but pinning
-# CUDA_VISIBLE_DEVICES keeps the contract explicit and matches the Derecho
-# twin (each controller must own exactly ONE device so jax.process_count()
-# federates N single-GPU programs).
-# Pin by INDEXING into the already-visible GPU list, not by raw local-rank
-# ordinal: if SLURM/cgroups pre-bound GPUs per task the list is short (often
-# a single device) and ordinal ${SLURM_LOCALID} would name a non-visible
-# device; if the whole node is visible the index picks the LOCALID-th GPU
-# (codex finding).
-PIN='
-    IFS=, read -ra _gpus <<< "${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-    export CUDA_VISIBLE_DEVICES=${_gpus[$(( SLURM_LOCALID % ${#_gpus[@]} ))]}
-    exec "$@"
-'
+# One GPU per task — DO NOT pre-pin CUDA_VISIBLE_DEVICES here. Under SLURM
+# the benches call bare jax.distributed.initialize(), whose SLURM detection
+# derives local_device_ids=[SLURM_LOCALID]; pinning CVD to one device
+# renumbers it to index 0, so every localid!=0 task asks for a device index
+# it cannot see -> "no supported devices found for platform CUDA"
+# (observed job 26445837/26447612: preflight nvidia-smi fine, jax dead on
+# all nonzero localids). The Slurm-native contract is: all node GPUs
+# visible (STEP_GPU_OPTS --gpu-bind=none) + jax picks the LOCALID-th
+# device per process. The Derecho twin pins CVD instead because its PALS
+# path initializes with local_device_ids=[0] (the #693 shim convention) —
+# the two conventions must not be mixed.
+PIN='exec "$@"'
 
 rc_all=0
 
+# Per-task GPU-visibility preflight, step-capped at 2 min (diagnoses
+# step-gres/binding failures in-log instead of burning lanes on "no
+# supported devices found"; nvidia-smi visibility — not a JAX device
+# check — because THAT was the observed failure mode).
+echo "=== PREFLIGHT: per-task GPU visibility (STEP_GPU_OPTS='$STEP_GPU_OPTS') ==="
+# Size the preflight to the ALLOCATION (all local IDs on every allocated
+# node), not to NP_LL — a lane-E-only run would otherwise test too few or
+# too many tasks (codex round-3 finding 5).
+PRE_NP=$((NODES_HAVE * 4))
+# shellcheck disable=SC2086
+srun --ntasks="$PRE_NP" --ntasks-per-node=4 --time=2 $STEP_GPU_OPTS bash -c "$PIN" _ \
+    bash -c 'echo "task=$SLURM_PROCID host=$(hostname -s) CVD=${CUDA_VISIBLE_DEVICES:-UNSET} ngpu=$(nvidia-smi -L 2>/dev/null | wc -l)"' \
+    | sort || echo "PREFLIGHT srun failed rc=$?"
+
 if [ "$RUN_NCCL" = "1" ]; then
     echo "=== LANE A: cube cs-spmd np=6 (2 nodes x 3 GPUs) ==="
-    srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+    # shellcheck disable=SC2086
+    srun --ntasks=6 --ntasks-per-node=3 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/run_cpu_mpi_scaling.py \
         --grid cubed-sphere --cs-spmd --device gpu \
         --physics "$PHYSICS" \
@@ -116,10 +159,11 @@ fi
 # Gap-#0 lane: native ppermute band halos over NCCL replace the route-A
 # mpi4jax >=2-node ceiling. Gate: tests/parallel/test_atm_latlon_spmd_multicontroller_selfspawn.py.
 if [ "$RUN_LATLON" = "1" ]; then
-    echo "=== LANE C: atm latlon multihost np=8 (LL$LL_RES) ==="
-    srun --ntasks=8 --ntasks-per-node=4 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+    echo "=== LANE C: atm latlon multihost np=$NP_LL (LL$LL_RES) ==="
+    # shellcheck disable=SC2086
+    srun --ntasks="$NP_LL" --ntasks-per-node=4 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-        --multicontroller --n-devices 8 \
+        --multicontroller --n-devices "$NP_LL" \
         --mode "$MODE" --n-lat "$LL_RES" --n-lon $((2 * LL_RES)) \
         --nlev "$NLEV" \
         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
@@ -130,12 +174,16 @@ fi
 
 # Gate: tests/parallel/test_latlon_ocean_spmd_multicontroller_selfspawn.py.
 if [ "$RUN_OCEAN" = "1" ]; then
-    echo "=== LANE D: ocean latlon multihost np=8 (LL$OC_RES) ==="
-    srun --ntasks=8 --ntasks-per-node=4 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+    echo "=== LANE D: ocean latlon multihost np=$NP_LL (LL$OC_RES) $OC_EXTRA ==="
+    # OC_EXTRA: extra bench flags for improved-config ladders (e.g.
+    # "--baro-solver explicit_substep --wide-halo"); default = production
+    # implicit_cn. Env like LEGOESM_VMIX_F32_SOLVE propagates via --export.
+    # shellcheck disable=SC2086
+    srun --ntasks="$NP_LL" --ntasks-per-node=4 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/bench_ocean_latlon_spmd_scaling.py \
-        --multicontroller --n-devices 8 \
+        --multicontroller --n-devices "$NP_LL" \
         --mode "$MODE" --n-lat "$OC_RES" --n-lon $((2 * OC_RES)) \
-        --nlev "$OC_NLEV" \
+        --nlev "$OC_NLEV" ${OC_EXTRA:-} \
         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
         --out "$OUTDIR/ocean_multicontroller/ocean_spmd_scaling.jsonl"
     rc=$?
@@ -148,20 +196,26 @@ fi
 # every level. Smoke gate (parity+conservation) first, then the timed case.
 # Gate: tests/parallel/test_mpas_spmd_multicontroller_selfspawn.py.
 if [ "$RUN_MPAS" = "1" ]; then
-    echo "=== LANE E: icosahedral MPAS multicontroller np=6 (L$ICO_LEVEL) ==="
-    srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+    echo "=== LANE E: icosahedral MPAS multicontroller np=$NP_MPAS (L$ICO_LEVEL) ==="
+    # >6 devices: 10*4^L+2 = 2*odd has no even split beyond 6 — pad the mesh
+    # to the target count via --reorder-for (identical padded mesh per ladder).
+    E_TPN=3; [ $((NP_MPAS % 4)) -eq 0 ] && E_TPN=4
+    E_REORDER=""
+    [ "$NP_MPAS" -gt 6 ] && E_REORDER="--reorder-for $NP_MPAS"
+    # shellcheck disable=SC2086
+    srun --ntasks="$NP_MPAS" --ntasks-per-node="$E_TPN" $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-        --multicontroller --n-devices 6 \
+        --multicontroller --n-devices "$NP_MPAS" \
         --subdivision 4 --nlev 8 --steps 4 --warmup 1 \
-        --partition-method sfc \
+        --partition-method sfc $E_REORDER \
         --parity-gate --check-conservation \
         --out "$OUTDIR/mpas_multicontroller/smoke.jsonl" \
-    && srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+    && srun --ntasks="$NP_MPAS" --ntasks-per-node="$E_TPN" $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
         "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-        --multicontroller --n-devices 6 \
+        --multicontroller --n-devices "$NP_MPAS" \
         --subdivision "$ICO_LEVEL" --nlev "$NLEV" \
         --steps $((N_WARMUP + N_TIMING)) --warmup "$N_WARMUP" \
-        --partition-method sfc \
+        --partition-method sfc $E_REORDER \
         --out "$OUTDIR/mpas_multicontroller/mpas_spmd_scaling.jsonl"
     rc=$?
     [ "$rc" -ne 0 ] && { echo "LANE E FAILED rc=$rc"; rc_all=$rc; }
@@ -188,7 +242,7 @@ if [ "$RUN_TUNE" = "1" ]; then
               xla)   export XLA_FLAGS="${XLA_FLAGS:-} ${_XLA_COMM_FLAGS}" ;;
               pgle)  export JAX_ENABLE_PGLE=true JAX_PGLE_PROFILING_RUNS=3 ;;
             esac
-            srun --ntasks=8 --ntasks-per-node=4 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+            srun --ntasks=8 --ntasks-per-node=4 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
                 "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
                 --multicontroller --n-devices 8 \
                 --mode strong --n-lat "$LL_RES" --n-lon $((2 * LL_RES)) \
@@ -203,7 +257,7 @@ if [ "$RUN_TUNE" = "1" ]; then
         echo "--- lane T arm=$ARM: ocean latlon LL$OC_RES np=8 ---"
         (
             [ "$ARM" = fused ] && export LEGOESM_LATLON_SPMD_FUSED_HALO=1
-            srun --ntasks=8 --ntasks-per-node=4 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+            srun --ntasks=8 --ntasks-per-node=4 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
                 "$PY" scripts/bench/bench_ocean_latlon_spmd_scaling.py \
                 --multicontroller --n-devices 8 \
                 --mode strong --n-lat "$OC_RES" --n-lon $((2 * OC_RES)) \
@@ -219,7 +273,7 @@ if [ "$RUN_TUNE" = "1" ]; then
         echo "--- lane T arm=$ARM: cube cs-spmd C$CS_RES np=6 ---"
         (
             [ "$ARM" = xla ] && export XLA_FLAGS="${XLA_FLAGS:-} ${_XLA_COMM_FLAGS}"
-            srun --ntasks=6 --ntasks-per-node=3 --kill-on-bad-exit=1 bash -c "$PIN" _ \
+            srun --ntasks=6 --ntasks-per-node=3 $STEP_GPU_OPTS --kill-on-bad-exit=1 bash -c "$PIN" _ \
                 "$PY" scripts/bench/run_cpu_mpi_scaling.py \
                 --grid cubed-sphere --cs-spmd --device gpu \
                 --physics "$PHYSICS" \

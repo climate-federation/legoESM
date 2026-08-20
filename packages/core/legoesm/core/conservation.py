@@ -86,6 +86,178 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     return q_v_out, T_out
 
 
+#: Tracers eligible for the column-conserving borrow: PER-MASS fields whose
+#: dsigma-weighted column integral is what mass-weighted transport conserves —
+#: the water mixing ratios [kg/kg] and ALL the numbers, which are stored
+#: per MASS [#/kg] since 2026-08-14 (``N_c``/``N_r`` were per-volume before;
+#: the exclusion that this list used to encode was the density-aware repair
+#: they were waiting for).  The microphysics still works in per-volume
+#: internally; the conversion lives at the physics bridge.
+#:
+#: Lives here, next to the clip it gates, rather than in the MPAS PE dycore:
+#: the serial (atmosphere) and MPI (parallel) lanes both need it, and the
+#: parallel one importing an atmosphere module broke the "legoesm-core member
+#: imports nothing above it" contract.
+BORROW_ELIGIBLE_TRACERS = frozenset(
+    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
+     "N_c", "N_r", "N_i", "N_s", "N_g"})
+
+
+def is_borrow_eligible_tracer(name: str) -> bool:
+    """True for a per-mass tracer, tolerating a ``trc_`` prefix."""
+    return str(name).removeprefix("trc_") in BORROW_ELIGIBLE_TRACERS
+
+
+def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
+    """Clip ``q`` to zero WITHOUT creating mass: borrow the deficit back.
+
+    A plain ``max(q, 0)`` on a tracer left negative by non-monotone transport
+    deletes the negative values and thereby ADDS their magnitude as spurious
+    mass — a continuous, compounding source.  This clips, then rescales the
+    remaining POSITIVE values so the weighted integral along ``axis`` is
+    unchanged (hole-filling / borrowing; standard for positive-definite-but-
+    non-monotone scalar transport)::
+
+        integral(q_out) == integral(q_in)      (to roundoff)
+
+    Measured motivation (2026-07-26, MPAS AMIP century): the MPAS floors stage
+    clamped every water tracer with a plain ``maximum(f, 0.0)`` while
+    ``tracer_transport_mpas`` carries no limiter.  Horizontal advection alone
+    created **+0.0822 kg/m2/day (+30 kg/m2/yr)** of water, 96% of it from the
+    spiky condensate fields ``q_i``/``q_c``.  That drove column water 23->42
+    kg/m2, collapsed OLR 199->109 W/m2 and warmed the atmosphere +10 K/yr.
+    The LES lane already had this fixer
+    (``spectral_les_moist.conserving_positive``); this is the shared form so
+    the numerics are not re-derived per dycore.
+
+    Borrowing is LOCAL to ``axis`` (per column when ``axis`` is the vertical),
+    so no global reduction is needed and the result is identical serial,
+    sharded and under MPI.  Pure ``jnp``; differentiable.
+
+    Parameters
+    ----------
+    q : jax.Array
+        Tracer field, may contain negatives.
+    weight : jax.Array
+        Per-element integration weight broadcast against ``q`` along ``axis``
+        (e.g. ``dsigma``).  Factors common to the whole column (``p_s/g``)
+        cancel in the ratio and may be omitted.
+    axis : int
+        Axis to conserve along (the vertical for a column fixer).
+    eps : float
+        Positive-mass floor below which a column is DEGENERATE: no rescale is
+        attempted (nothing meaningful to borrow from).  The effective
+        threshold is ``max(eps, sqrt(finfo(q.dtype).tiny))`` so that
+        ``after**2`` in the quotient VJP can never underflow — with the raw
+        1e-30 a float32 column just above threshold squares to ~1e-60 -> 0 and
+        the backward pass emits Inf (codex 2026-07-26 finding 3).
+
+    Contract
+    --------
+    * Inputs are assumed FINITE; NaN/Inf propagate (the floors stage runs
+      before the driver's bounds guards, which are the NaN tripwire).
+    * ``weight`` must be positive (true for every MPAS ``dsigma``, pure-sigma
+      and hybrid).  With mixed-sign weights ``before > after`` is possible and
+      the factor clip would silently under-restore — out of scope.
+    * Conservation is exact (to roundoff) for columns with
+      ``after > eps_eff``.  Degenerate columns: a net-POSITIVE one keeps its
+      plain-clipped values (error bounded by ``eps_eff`` per column — for
+      float32 ~1e-19 kg/kg, ~1e-14 kg/m2 column water, 15 orders below the
+      +30 kg/m2/yr defect this fixes); a net-negative one is zeroed (the
+      minimum-creation choice).
+
+    Returns
+    -------
+    (q_out, created) : tuple
+        ``q_out`` clipped and rescaled; ``created`` is the weighted mass the
+        NAIVE clip WOULD have invented — a monotonicity diagnostic that is
+        zero for a monotone scheme.
+    """
+    # Trailing axis only: the weight broadcast ``q * w`` aligns on the LAST
+    # dimension, so a non-trailing ``axis`` would pair weights with the wrong
+    # dimension and silently mis-conserve (codex 2026-07-26 finding 1).
+    if axis != -1 and axis != q.ndim - 1:
+        raise ValueError(
+            f"conservative_positive_clip conserves along the TRAILING axis "
+            f"only (weight broadcasts on the last dim); got axis={axis} for "
+            f"ndim={q.ndim}. Move the conserved dim last.")
+    w = jnp.asarray(weight, dtype=q.dtype)
+    # Host-side math: dtype is static under jit, so eps_eff is a trace-time
+    # Python float (jnp.sqrt here would make it a tracer and break jit).
+    eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
+    # float16's narrow exponent range makes sqrt(tiny) = 7.8e-3 — a LARGE
+    # mixing ratio, so the degenerate keep-the-clip branch could invent up to
+    # ~10 kg/m2 of column water per column (codex 2026-07-26 round 2).  bf16
+    # shares float32's exponent range and is fine; refuse anything coarser.
+    if eps_eff > 1e-6:
+        raise ValueError(
+            f"conservative_positive_clip: dtype {q.dtype} has "
+            f"sqrt(finfo.tiny) = {eps_eff:.2e}, too coarse for mixing-ratio "
+            "conservation (degenerate columns could create O(g/kg) mass). "
+            "Use float32/bfloat16 or wider.")
+    q_clip = jnp.maximum(q, 0.0)
+    before = jnp.sum(q * w, axis=axis, keepdims=True)
+    after = jnp.sum(q_clip * w, axis=axis, keepdims=True)
+    created = jnp.sum(jnp.maximum(-q, 0.0) * w)
+    # factor <= 1 removes the borrowed mass from the positives.  Degenerate
+    # columns (after <= eps_eff): keep the plain clip when the integral is
+    # positive (a tiny-but-real column must NOT be zeroed — conservation error
+    # bounded by eps_eff), zero when it is not (nothing to borrow from; the
+    # minimum-creation choice).  The inner ``where`` keeps the disabled
+    # branch's denominator at 1.0 so reverse-mode never sees 0/0, and eps_eff
+    # keeps ``after**2`` in the quotient VJP above the underflow floor.
+    live = after > eps_eff
+    safe_after = jnp.where(live, after, 1.0)
+    factor = jnp.where(live, before / safe_after,
+                       jnp.where(before > 0.0, 1.0, 0.0))
+    return q_clip * jnp.clip(factor, 0.0, 1.0), created
+
+
+def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
+                                      sum_fn=None):
+    """Column-local borrow PLUS global residual redistribution.
+
+    :func:`conservative_positive_clip` zeroes a net-negative column (nothing
+    to borrow from locally) — the minimum-creation choice PER COLUMN, but
+    still creation.  On smooth water mixing ratios that case is rare and
+    tiny; on spiky per-mass NUMBER fields it is not: at century4 day 90 one
+    advection step left 868/10242 columns net-negative in ``N_i``, and the
+    zeroing alone re-created **x2.74/day** exponential field growth (the
+    residual engine behind the day-803 N_i=1e193 overflow, measured
+    2026-07-28).  This wrapper removes the invented residual proportionally
+    from every positive cell so the ``sum_fn``-total is conserved exactly::
+
+        sum(q_out * w) == sum(q_in * w)     whenever sum(q_in * w) >= 0
+
+    (a globally net-negative field still floors at zero — nothing exists to
+    borrow anywhere).  ``sum_fn`` defaults to ``jnp.sum`` (serial); the MPI
+    lane passes an allreduce-SUM-based reduction so the redistribution
+    factor is identical on every rank (decomposition-independent, and
+    allreduce-SUM is the one AD-safe collective).  AD: one extra guarded
+    quotient, same double-``where`` pattern as the column fixer.
+    """
+    q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
+    w = jnp.asarray(weight, dtype=q.dtype)
+    s = sum_fn if sum_fn is not None else jnp.sum
+    eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
+    # ONE reduction per quantity (two total): pos_total reused for the
+    # residual so the two nominally-identical q_col sums cannot differ by
+    # reduction roundoff, and the MPI closure issues exactly two allreduces
+    # per tracer (codex 2026-07-28 global-residual review).
+    pos_total = s(q_col * w)
+    resid = jnp.maximum(pos_total - s(q * w), 0.0)
+    live = pos_total > eps_eff
+    safe_total = jnp.where(live, pos_total, 1.0)
+    # Degenerate-but-positive global total: KEEP the column result (error
+    # bounded by eps_eff, mirroring the column fixer's tiny-positive branch)
+    # — zeroing a tiny trace field violated the conservation contract
+    # (codex: float32 q=[[5e-20]] came back [[0.]]).  Zero only when the
+    # global total is non-positive (nothing exists to borrow anywhere).
+    factor = jnp.where(live, 1.0 - resid / safe_total,
+                       jnp.where(pos_total > 0.0, 1.0, 0.0))
+    return q_col * jnp.clip(factor, 0.0, 1.0), created
+
+
 def _accumulation_dtype():
     """Return the dtype for accumulation in conservation fixers.
 
@@ -450,6 +622,13 @@ def _broadcast_allreduce_sum_bwd(_res, g):
 
 _broadcast_allreduce_sum.defvjp(
     _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
+
+#: Public name for the broadcast-correct allreduce(SUM) (VJP also allreduces
+#: the cotangent) — the ``sum_fn`` to pass to
+#: :func:`conservative_positive_clip_global` under MPI, where the summed
+#: scalar is broadcast into every rank's rescale factor.  Cross-module
+#: imports must use this name (no-private-cross-imports ratchet).
+broadcast_allreduce_sum = _broadcast_allreduce_sum
 
 
 def global_face_sum_if_scattered(

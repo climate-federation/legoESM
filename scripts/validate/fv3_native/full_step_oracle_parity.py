@@ -1,0 +1,1495 @@
+#!/usr/bin/env python
+"""One FULL FV3 time step, port vs the Fortran oracle, C48/npz=5.
+
+This is the terminal gate of the 3-D duo port: everything below it
+(gridstruct, c_sw, the pressure chain, d_sw1-6, the exchanges, fv_mapz)
+has a per-stage certificate, and this is the only test that runs them in
+the oracle's own order against the oracle's own answer.
+
+REFERENCE
+---------
+``fv3_oracle_pinned/run_hydro_1step_gfs`` -- test_case = -13
+(DCMIP16 J&W baroclinic wave, perturbed), C48, npz=5, hydrostatic,
+adiabatic, duogrid, k_split=1, n_split=8, nord=2, vtdm4=0.12,
+hord_*=6, kord_mt=9, kord_tm=-9, dt_atmos=1920 s, run for
+``minutes = 32`` = EXACTLY one dt_atmos, so ``RESTART/`` is the state
+after one ``fv_dynamics`` call.
+
+``run_hydro_zerostep`` is the SAME deck at zero steps, i.e. the oracle's
+own initial condition as a field.  It is used here as the instrument
+control, not as decoration -- see below.
+
+THE FACE MAP IS SEARCHED, NOT ASSUMED
+-------------------------------------
+The port's cube is FV3's cube RELABELLED: a permutation of the six faces
+composed with a dihedral transform, a sign, and -- on four of the six --
+a TRANSPOSE that sends u <-> v.  ``ic_face_map_parity.py`` established
+that map at ~1e-14 on the initial condition.
+
+This script re-derives it here from the INITIAL CONDITION on every run
+and then applies the derived map to the one-step fields.  Two reasons,
+both learned the hard way on this port:
+
+1. A hard-coded map cannot fail, so it cannot certify anything.  Deriving
+   it from the IC and REQUIRING a bijection means a grid change that
+   silently relabels a face turns this script red instead of quietly
+   comparing the wrong pair.
+2. The IC agreement is the instrument control.  If the derived IC
+   residual is not at the ~1e-14 quad-geometry floor, the harness is
+   broken and NO number it prints about the one-step state means
+   anything.  The script refuses to report the step comparison in that
+   case rather than printing both and letting a reader pick.
+
+WHY ~1e-14 IS THE FLOOR AND BIT-EXACTNESS IS NOT AVAILABLE
+----------------------------------------------------------
+``fv_grid_utils.F90:43-49`` sets ``f_p = selected_real_kind(20)`` (QUAD)
+unless ``NO_QUAD_PRECISION`` is defined, and neither oracle build defines
+it.  ``mid_pt3_cart``, ``normalize_vect``, ``inner_prod`` and
+``latlon2xyz`` therefore run in quad and round to f64 on return.  A
+float64 port cannot reproduce that exactly.  Everything else is f64
+(``-fdefault-real-8`` + ``libfms_r8.a``), so f64 is the right precision
+for the port; the quad is confined to the geometry helpers.
+
+WHAT A "MATCH" MEANS AFTER ONE STEP, AND WHAT IT DOES NOT
+---------------------------------------------------------
+One step is 8 acoustic sub-steps and one remap.  Each stage amplifies the
+IC's ~1e-14 seed, so the one-step residual is EXPECTED to be larger than
+the IC's -- growth of one or two orders is the arithmetic, not a defect.
+What would be a defect is a residual near the SIGNAL: the script prints
+``|oracle_1step - oracle_IC|`` beside every number so the reader can see
+how much the step actually moved the field.  A residual that is a
+noticeable fraction of that tendency means the port and the oracle
+disagree about the physics, not about the last bits.
+
+CONSTANTS ARE A COMPILE-TIME PROPERTY OF THE ORACLE BINARY.  This deck is
+linked against the FMS **GFS** set, whose kappa is ``FV3_RDGAS /
+FV3_CP_AIR`` and is NOT the idealised 2/7.  The script asserts the
+flavour from the run's OWN log rather than trusting the build
+directory's name.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+import numpy as np
+
+ORACLE_ROOT = "/burg-archive/glab/users/pg2328/fv3_oracle_pinned"
+N, NG, KM = 48, 3, 5
+DT_ATMOS = 1920.0
+K_SPLIT, N_SPLIT = 1, 8
+KORD_MT, KORD_TM, KORD_TR = 9, -9, 9
+NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
+# fv_tracer.res variable order == field_table order; the first nr are
+# advected+remapped, the dnats tail (rainwat) is INERT -- fv_dynamics.F90
+# :191 `nq = nq_tot - flagstruct%dnats`.
+ADVECTED_TRACERS = ("sphum", "liq_wat")
+INERT_TRACERS = ("rainwat",)
+
+# The IC control must land at the quad-geometry floor. 1e-12 is two
+# orders of slack on the 2.2e-14 the IC parity measured, which is enough
+# for a different BLAS or a different numpy without being enough to hide
+# a real geometry change.
+IC_CONTROL_MAX_REL = 1.0e-12
+
+
+# ----------------------------------------------------------------------
+# oracle side
+# ----------------------------------------------------------------------
+
+def require_gfs_constants(run_dir: str) -> None:
+    """Refuse a GFDL-linked reference.
+
+    FMS defaults to GFDL when neither flavour is defined
+    (``fmsconstants.F90:67-68``), and GFDL's radius differs from GFS's by
+    3.1e-5 RELATIVE -- ten orders above the parity floor.  Comparing
+    against the wrong link reads as a dynamics defect.  Read the run's own
+    log, never the build directory's name.
+    """
+    from legoesm.grids.fv3_native_gridstruct import FV3_RADIUS_M
+    log = os.path.join(run_dir, "logfile.000000.out")
+    txt = open(log, errors="replace").read() if os.path.exists(log) else ""
+    if "FMSConstants: GFS" not in txt:
+        raise SystemExit(
+            f"{run_dir}: logfile does not say 'FMSConstants: GFS'. The port "
+            f"pins the GFS set; a GFDL-linked oracle differs by 3.1e-5 "
+            f"relative in radius alone and would look like a physics defect.")
+    out = os.path.join(run_dir, "run_out.txt")
+    if os.path.exists(out):
+        s = open(out, errors="replace").read()
+        if f"{FV3_RADIUS_M:.1f}" not in s:
+            raise SystemExit(
+                f"{run_dir}: run_out.txt does not report the pinned radius "
+                f"{FV3_RADIUS_M:.1f}")
+
+
+def load_oracle(run_dir: str, nh: bool = False) -> list:
+    """Six per-tile dicts, arrays AS STORED (j, i) with the time axis gone."""
+    import netCDF4 as nc
+    require_gfs_constants(run_dir)
+    tiles = []
+    for t in range(1, 7):
+        p = os.path.join(run_dir, "RESTART", f"fv_core.res.tile{t}.nc")
+        if not os.path.exists(p):
+            raise SystemExit(f"missing oracle restart {p}")
+        d = nc.Dataset(p)
+        rec = {"u": np.array(d["u"][:])[0],        # (km, n+1, n)
+               "v": np.array(d["v"][:])[0],        # (km, n,   n+1)
+               "pt": np.array(d["T"][:])[0],       # (km, n,   n)
+               "delp": np.array(d["delp"][:])[0],  # (km, n,   n)
+               "phis": np.array(d["phis"][:])[0]}  # (n, n)
+        if nh:
+            for k, v in (("w", "W"), ("delz", "DZ")):
+                if v not in d.variables:
+                    raise SystemExit(
+                        f"{p}: no {v} variable -- is this an NH restart? "
+                        f"The hydrostatic decks do not write it.")
+                rec[k] = np.array(d[v][:])[0]      # (km, n, n)
+        for k, v in rec.items():
+            if not np.all(np.isfinite(v)):
+                raise SystemExit(f"{p}: {k} has non-finite values")
+        tiles.append(rec)
+        d.close()
+    return tiles
+
+
+def load_tracer_oracle(run_dir: str) -> list:
+    """Six per-tile dicts of fv_tracer.res fields, (km, j, i) as stored."""
+    import netCDF4 as nc
+    names = ADVECTED_TRACERS + INERT_TRACERS
+    tiles = []
+    for t in range(1, 7):
+        p = os.path.join(run_dir, "RESTART", f"fv_tracer.res.tile{t}.nc")
+        if not os.path.exists(p):
+            raise SystemExit(f"missing oracle tracer restart {p}")
+        d = nc.Dataset(p)
+        rec = {}
+        for nm in names:
+            if nm not in d.variables:
+                raise SystemExit(
+                    f"{p}: no {nm!r} variable; found "
+                    f"{sorted(d.variables)} -- the field table changed?")
+            a = np.array(d[nm][:])[0]              # (km, n, n)
+            if not np.all(np.isfinite(a)):
+                raise SystemExit(f"{p}: {nm} has non-finite values")
+            rec[nm] = a
+        tiles.append(rec)
+        d.close()
+    return tiles
+
+
+def require_flat_orography(tiles: list) -> None:
+    """``mountain = .F.`` and the J&W BC wave has no orography.
+
+    The port's context carries ``hs = 0``; if the oracle's ``phis`` were
+    non-zero, ``geopk``'s ``gz(:,:,km+1) = hs`` would differ and the whole
+    pressure chain with it.  Check rather than assume -- this is one
+    namelist edit away from being false.
+    """
+    worst = max(float(np.abs(t["phis"]).max()) for t in tiles)
+    if worst != 0.0:
+        raise SystemExit(
+            f"oracle phis is not identically zero (max |phis| = {worst:g}); "
+            f"the port runs hs = 0 and would disagree through geopk's "
+            f"gz(:,:,km+1) = hs seed")
+
+
+# ----------------------------------------------------------------------
+# port side
+# ----------------------------------------------------------------------
+
+def build_port_ic(ctx, ak, bk, nh: bool = False):
+    """The test_case = -13 IC on all six faces, in state_3d layout.
+
+    ``nh=True`` adds ``make_nh``'s initial state (``init_hydro.F90:
+    147-158``): ``w = 0`` and ``delz = -(rdgas/grav) * T * dpeln`` from
+    the IC's own hydrostatic column -- the exact arithmetic the oracle's
+    ``delz computed from hydrostatic state`` message announces (zvir = 0
+    on the adiabatic deck).
+    """
+    from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
+    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_face
+    from legoesm.core.fv3_native_state_3d import build_state_3d
+    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
+    from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
+
+    def gcdr(p1, p2, r):
+        return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
+
+    n, ng = ctx["n"], ctx["ng"]
+    st = build_state_3d(n, ng, KM, remap_follows=True,
+                        hydrostatic=not nh)
+    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        co = np.stack([np.asarray(gs["grid_lon"])[cc, cc],
+                       np.asarray(gs["grid_lat"])[cc, cc]], -1)
+        ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
+                       np.asarray(gs["agrid_lat"])[cs, cs]], -1)
+        o = dcmip16_bc_face(co, ce, ak, bk, KM, do_pert=True,
+                            constants=GFS_CONSTANTS, great_circle_dist=gcdr)
+        st[t]["delp"][cs, cs, :] = o["delp"]
+        st[t]["pt"][cs, cs, :] = o["pt"]
+        st[t]["u"][cs, cc, :] = o["u"]
+        st[t]["v"][cc, cs, :] = o["v"]
+        if nh:
+            pe = np.full((n, n), float(ak[0]))
+            for k in range(KM):
+                dp = st[t]["delp"][cs, cs, k]
+                dpeln = np.log(pe + dp) - np.log(pe)
+                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
+                                          * st[t]["pt"][cs, cs, k] * dpeln)
+                pe = pe + dp
+    return st
+
+
+def build_port_tracer_ic(ctx, ak, bk) -> list:
+    """[face][iq] padded tracer arrays for the resolved deck.
+
+    ``sphum`` is the analytic DCMIP16_BC moisture (test_cases.F90:
+    6737-6744); ``liq_wat`` is identically zero (:6728-6735 zeroes all
+    tracers and only sphum is filled -- CONFIRMED against the zerostep
+    fv_tracer.res: liq_wat/rainwat are 0.0 everywhere).  Halos stay
+    zero: the init-time ``mpp_update_domains(q)`` is inside the
+    terminator-tracer branch (cl/cl2), absent on this deck; tracer_2d
+    fills its own halos via ext_scalar.
+    """
+    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_sphum
+    from legoesm.core.fv3_native_state_3d import field_shape
+
+    n, ng = ctx["n"], ctx["ng"]
+    cs = slice(ng, ng + n)
+    q6 = []
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        lat_c = np.asarray(gs["agrid_lat"])[cs, cs]
+        sphum = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
+        sphum[cs, cs, :] = dcmip16_bc_sphum(ak, bk, lat_c, KM)
+        liq = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
+        q6.append([sphum, liq])
+    return q6
+
+
+def tracer_window(q6, ctx) -> list:
+    """Compute-window copies of the advected tracers, (i, j, k)."""
+    n, ng = ctx["n"], ctx["ng"]
+    cs = slice(ng, ng + n)
+    return [{nm: np.array(q6[t][iq][cs, cs, :])
+             for iq, nm in enumerate(ADVECTED_TRACERS)}
+            for t in range(6)]
+
+
+def map_scalar_pair(port_arr, orc_arr, meta_entry) -> tuple:
+    """One cell-centred scalar under the derived face map (factor +1)."""
+    transposed, nm, _su, _sv = meta_entry
+    return DIHEDRAL[nm](port_arr), oracle_ij(orc_arr, transposed)
+
+
+def port_window(state, ctx) -> list:
+    """Compute-window copies, port orientation (i, j, k)."""
+    n, ng = ctx["n"], ctx["ng"]
+    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
+    out = []
+    for f in state:
+        rec = {"u": np.array(f["u"][cs, cc, :]),
+               "v": np.array(f["v"][cc, cs, :]),
+               "pt": np.array(f["pt"][cs, cs, :]),
+               "delp": np.array(f["delp"][cs, cs, :])}
+        if "delz" in f:
+            rec["w"] = np.array(f["w"][cs, cs, :])
+            rec["delz"] = np.array(f["delz"])
+        out.append(rec)
+    return out
+
+
+# ----------------------------------------------------------------------
+# the face map
+# ----------------------------------------------------------------------
+
+DIHEDRAL = {"id": lambda a: a,
+            "fi": lambda a: a[::-1, ...],
+            "fj": lambda a: a[:, ::-1, ...],
+            "r180": lambda a: a[::-1, ::-1, ...]}
+
+# THE WIND SIGNS ARE DERIVED, NOT SEARCHED. `u` is the D-grid component
+# along i and `v` the one along j, so a reflection negates the component
+# ALONG the reversed axis and leaves the other alone. That is a property
+# of the dihedral, not a free parameter:
+DIHEDRAL_SIGNS = {"id": (1.0, 1.0), "fi": (-1.0, 1.0),
+                  "fj": (1.0, -1.0), "r180": (-1.0, -1.0)}
+# Searching the two signs independently -- which this script did until the
+# residuals below forced the question -- lets the search pick a signed
+# permutation that is not a rigid relabelling at all (an identity map that
+# flips only u), and it WILL pick one whenever a component is numerically
+# zero on that face and its sign is therefore unconstrained. Measured: on
+# the J&W IC, port faces 2, 4 and 5 each have one wind component at ~1e-13,
+# the free search chose arbitrarily on all three, and those are EXACTLY the
+# three faces whose one-step residual came out at 2-4e-3 while the other
+# three sat at 1e-6..1e-8. Face 2's v residual was 0.0851 against an oracle
+# tendency of 0.0385 -- twice the signal, the signature of a flipped sign.
+# The derived rule reproduces the search's answer on every face where the
+# signs ARE constrained (face 1 transpose fj -> (+,-), face 3 direct r180
+# -> (-,-), face 6 direct id -> (+,+)), which is the evidence that the rule
+# is right rather than merely tidier.
+
+
+def oracle_ij(arr, transposed: bool):
+    """Oracle array (k, j, i) -> port orientation (i, j, k).
+
+    NOT transposed: the port's i is the oracle's i, so swap the stored
+    (j, i) into (i, j).  Transposed: the port's i IS the oracle's j, so
+    the stored order is already the port's.
+    """
+    a = np.moveaxis(arr, 0, -1)              # (j, i, k)
+    return a.transpose(1, 0, 2) if not transposed else a
+
+
+def rel(a, b, scale: float | None = None) -> float:
+    """Max abs difference over a scale that is a PHYSICAL magnitude.
+
+    ``scale=None`` falls back to the larger of the two peaks, which is
+    right for a field that carries signal.  It is WRONG for a component
+    that is identically zero on this face, and that is not hypothetical:
+    on the J&W IC, port face 1 has ``v`` bounded by 8.3e-14 while oracle
+    tile 4 has ``u`` bounded by 5.3e-13 -- both are numerical zero, but
+    ``|a-b| / max(peaks)`` is then 6e-13/5.3e-13 ~ 1.0 and the correct
+    face pairing scores as a total mismatch.  Measured: that single
+    artifact made the whole IC control fail at 9.7e-01 while the two
+    faces whose winds happen to carry signal in both components matched
+    at 2.3e-14.
+
+    So the caller passes the scale of the QUANTITY CLASS -- for the D
+    winds, the face's largest wind component over both components and
+    both sides.  A zero component is then judged against the wind speed
+    that is actually present, which is what "these agree" has to mean.
+    """
+    # A NaN anywhere must be INFINITE, not NaN: `max(0.0, nan)` is 0.0 in
+    # Python, so a single NaN in an otherwise exact step would sail through
+    # a `worst > threshold` gate. Return inf so it can only ever fail.
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return float("inf")
+    if scale is None:
+        scale = max(float(np.abs(a).max()), float(np.abs(b).max()))
+    if scale == 0.0:
+        return 0.0
+    return float(np.abs(a - b).max() / scale)
+
+
+def wind_scale(port, orc) -> float:
+    """Largest wind magnitude on this face/tile pair, both components.
+
+    One number for u and v together: they are two components of the same
+    vector field, so normalising them separately is what created the
+    zero-component artifact above.
+    """
+    return max(float(np.abs(port["u"]).max()), float(np.abs(port["v"]).max()),
+               float(np.abs(orc["u"]).max()), float(np.abs(orc["v"]).max()))
+
+
+def score_pair(port, orc) -> tuple:
+    """Best (rel, transposed, dihedral, s_u, s_v) mapping one port face
+    onto one oracle tile, scored on ALL FOUR prognostic fields jointly.
+
+    TWO INDEPENDENT SIGNS, NOT ONE.  ``u`` is the D-grid wind along x and
+    ``v`` the one along y, so a reflection negates the component ALONG
+    the reversed axis and leaves the other alone: ``fi`` sends
+    (u, v) -> (-u, +v), ``fj`` sends it to (+u, -v), and ``r180`` negates
+    both.  A single shared sign therefore cannot express four of the six
+    face maps, and forcing one is not a conservative simplification -- it
+    makes the correct map score ~1.0 and hands the bijection to a wrong
+    pairing.  Measured: with one shared sign this search put port face 1
+    on tile 1 at rel 9.7e-01; with independent signs it recovers the
+    established 1e-14 map.
+
+    Scalars carry no sign: ``pt`` and ``delp`` must match the SAME
+    dihedral with a factor of exactly +1.  That is the constraint that
+    makes this a real test.  ``ic_face_map_parity.py`` took the MINIMUM
+    over the four component pairings, i.e. it accepted a tile if ANY ONE
+    of u/v matched -- which cannot detect a transform that is right for
+    one component and wrong for the other.  Requiring u, v, pt and delp
+    to agree under ONE transform is strictly stronger.
+    """
+    best = (np.inf, None, None, None, None, None)
+    ws = wind_scale(port, orc)
+    for transposed in (False, True):
+        ou = oracle_ij(orc["u"], transposed)
+        ov = oracle_ij(orc["v"], transposed)
+        opt = oracle_ij(orc["pt"], transposed)
+        odp = oracle_ij(orc["delp"], transposed)
+        # A transposed face sends u <-> v; an untransposed one does not.
+        pu_o, pv_o = (ov, ou) if transposed else (ou, ov)
+        if port["u"].shape != pu_o.shape or port["v"].shape != pv_o.shape:
+            continue
+        for nm, f in DIHEDRAL.items():
+            fu, fv = f(port["u"]), f(port["v"])
+            # The scalar constraint does not depend on the signs, so
+            # evaluate it once and let it floor the score.
+            r_pt = rel(f(port["pt"]), opt)
+            r_dp = rel(f(port["delp"]), odp)
+            su, sv = DIHEDRAL_SIGNS[nm]
+            r_u = rel(su * fu, pu_o, ws)
+            r_v = rel(sv * fv, pv_o, ws)
+            r = max(r_u, r_v, r_pt, r_dp)
+            if r < best[0]:
+                best = (r, transposed, nm, su, sv,
+                        {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp})
+    return best
+
+
+def score_pair_winds_only(port, orc) -> tuple:
+    """The WEAKER criterion ``ic_face_map_parity.py`` used, kept as a
+    diagnostic ONLY.
+
+    It requires the winds to agree and ignores pt and delp.  It is not a
+    fallback: if the joint search fails while this one succeeds, the two
+    numbers together name the field that disagrees, which is the thing a
+    reader needs.  Never gate on this.
+    """
+    best = (np.inf, None, None, None, None)
+    ws = wind_scale(port, orc)
+    for transposed in (False, True):
+        ou = oracle_ij(orc["u"], transposed)
+        ov = oracle_ij(orc["v"], transposed)
+        pu_o, pv_o = (ov, ou) if transposed else (ou, ov)
+        if port["u"].shape != pu_o.shape or port["v"].shape != pv_o.shape:
+            continue
+        for nm, f in DIHEDRAL.items():
+            fu, fv = f(port["u"]), f(port["v"])
+            su, sv = DIHEDRAL_SIGNS[nm]
+            r = max(rel(su * fu, pu_o, ws), rel(sv * fv, pv_o, ws))
+            if r < best[0]:
+                best = (r, transposed, nm, su, sv)
+    return best
+
+
+def derive_face_map(port, orc) -> tuple:
+    """Full 6x6 cost matrix, then the best BIJECTION over it.
+
+    Greedy per-face argmin is what produced a non-injective map last
+    time.  The base state is zonally symmetric, so several tiles carry
+    identical fields and a greedy pick can hand two faces the same tile.
+    6! = 720 permutations, so the exact assignment is free.
+    """
+    import itertools
+    cost = np.full((6, 6), np.inf)
+    meta = [[None] * 6 for _ in range(6)]
+    per_field = [[None] * 6 for _ in range(6)]
+    wind_only = np.full((6, 6), np.inf)
+    for pf in range(6):
+        for ot in range(6):
+            r, tr, nm, su, sv, pf_r = score_pair(port[pf], orc[ot])
+            cost[pf, ot] = r
+            meta[pf][ot] = (tr, nm, su, sv)
+            per_field[pf][ot] = pf_r
+            wind_only[pf, ot] = score_pair_winds_only(port[pf], orc[ot])[0]
+    best_perm, best_worst = None, np.inf
+    for perm in itertools.permutations(range(6)):
+        w = max(cost[pf, perm[pf]] for pf in range(6))
+        if w < best_worst:
+            best_worst, best_perm = w, perm
+    return cost, meta, best_perm, best_worst, per_field, wind_only
+
+
+def apply_map(port_face, orc_tile, meta_entry) -> dict:
+    """Port face and oracle tile, both in the port's orientation.
+
+    Scalars beyond pt/delp (NH: ``w``, ``delz``) ride the same dihedral
+    with factor +1 -- a transposed face swaps axes but a cell-centred
+    scalar carries no component to exchange.
+    """
+    transposed, nm, su, sv = meta_entry
+    f = DIHEDRAL[nm]
+    ou = oracle_ij(orc_tile["u"], transposed)
+    ov = oracle_ij(orc_tile["v"], transposed)
+    pu, pv = f(port_face["u"]) * su, f(port_face["v"]) * sv
+    if transposed:
+        pairs = {"u": (pu, ov), "v": (pv, ou)}
+    else:
+        pairs = {"u": (pu, ou), "v": (pv, ov)}
+    pairs["pt"] = (f(port_face["pt"]), oracle_ij(orc_tile["pt"], transposed))
+    pairs["delp"] = (f(port_face["delp"]),
+                     oracle_ij(orc_tile["delp"], transposed))
+    for extra in ("w", "delz"):
+        if extra in port_face and extra in orc_tile:
+            pairs[extra] = (f(port_face[extra]),
+                            oracle_ij(orc_tile[extra], transposed))
+    return pairs, wind_scale(port_face, orc_tile)
+
+
+# ----------------------------------------------------------------------
+# Coherent boundary-metric perturbation (codex retro-review findings
+# 2+3).  The old in-place perturbation (a) skipped directly consumed
+# derived families (rdx/rdy/rdxa/rdya/rdxc/rdyc feed p_grad_c and the
+# d_sw KE ranges, rarea_c the CD-vorticity, B-grid cosa/sina/rsina the
+# duo contravariant solves), (b) perturbed area AND rarea by the SAME
+# factor so area*rarea became fac^2 (invariant violated -- the response
+# then mixes the intended geometry mode with an unphysical one), and
+# (c) never refreshed the prebuilt ectx metric snapshots (dx6/dy6),
+# so the c2l path consumed UNPERTURBED lengths.  Here: perturb the
+# PRIMITIVES only, then recompute every derived reciprocal/composite
+# where the builder invariant held (sentinel/override slots preserved
+# bit-exactly), and refresh the ectx snapshots with the same factors.
+
+# primitive -> multiplicative class; angles get a coherent ROTATION
+# theta -> theta + eps*pat instead (multiplying cosa by (1+eps*pat)
+# perturbs a near-zero cosa by ~nothing -- the perturb-a-zero trap --
+# while a rotation moves cos and sin by O(eps) everywhere and keeps
+# cos^2+sin^2 = 1 exactly).
+_PERT_LENGTHS = ("dx", "dy", "dxa", "dya", "dxc", "dyc",
+                 "area", "area_c")
+_PERT_ANGLE_PAIRS = (("cosa_u", "sina_u"), ("cosa_v", "sina_v"),
+                     ("cosa", "sina"))
+_SENT_GUARD = 1.0e29     # never touch big_number convention slots
+_TRIG_GUARD = 1.0e6      # trig sentinel class (poisoned vertices)
+
+
+def _pert_pattern(shape2, ng, eps):
+    """eps*cos(3i+7j) on boundary cells (halo rings + outermost
+    compute ring), exactly 0 on the strict interior."""
+    mi, mj = shape2
+    pat = np.cos(3.0 * np.arange(mi)[:, None]
+                 + 7.0 * np.arange(mj)[None, :])
+    di = np.minimum(np.arange(mi), mi - 1 - np.arange(mi))
+    dj = np.minimum(np.arange(mj), mj - 1 - np.arange(mj))
+    strict = (di[:, None] > ng) & (dj[None, :] > ng)
+    return np.where(strict, 0.0, eps * pat)
+
+
+def _replace_where_held(gs, key, cand_old, cand_new, stats):
+    """Refresh derived field gs[key] ONLY where the builder invariant
+    held pre-perturbation (rtol 1e-12) AND the recomputed value
+    actually moved (cand_new != cand_old).  The second condition keeps
+    every untouched cell BIT-EXACT: without it, cells whose formula
+    output did not change were still overwritten by the recomputation,
+    re-rounding sentinel-derived values (1e30*1e30/1e30 != 1e30
+    bitwise) and any cell the builder computed through a different
+    expression path -- a fake "moved" count and an unintended
+    interior-noise perturbation (caught by
+    test_zero_cell_perturbation_is_refused)."""
+    old = np.asarray(gs[key], dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        held = np.isclose(old, cand_old, rtol=1.0e-12, atol=0.0)
+    changed = held & (cand_new != cand_old)
+    gs[key] = np.where(changed, cand_new, old)
+    stats[key] = stats.get(key, 0) + int(changed.sum())
+
+
+def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
+    """Perturb primitive metrics at boundary cells, recompute derived
+    families, refresh ectx snapshots. Prints a per-class receipt."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        TINY_NUMBER,
+        rsin_border_override,
+    )
+
+    stats = {}
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        old = {}     # pre-perturbation primitives (fp64 copies)
+        for k in _PERT_LENGTHS + tuple(
+                x for pr in _PERT_ANGLE_PAIRS for x in pr) + (
+                "sin_sg", "cos_sg"):
+            old[k] = np.asarray(gs[k], dtype=np.float64).copy()
+        # snapshot derived-formula inputs BEFORE any write
+        for k in ("rdx", "rdy", "rdxa", "rdya", "rdxc", "rdyc",
+                  "rarea", "rarea_c", "rsina", "rsin_u", "rsin_v",
+                  "rsin2", "divg_u", "divg_v", "del6_u", "del6_v"):
+            old[k] = np.asarray(gs[k], dtype=np.float64).copy()
+
+        # 1) lengths/areas: multiplicative on non-sentinel boundary cells
+        for k in _PERT_LENGTHS:
+            a = old[k]
+            fac = 1.0 + _pert_pattern(a.shape, ng, eps)
+            gs[k] = np.where(np.abs(a) < _SENT_GUARD, a * fac, a)
+            stats[k] = stats.get(k, 0) + int(
+                ((np.abs(a) < _SENT_GUARD) & (fac != 1.0)).sum())
+        # 2) angle pairs: coherent ROTATION-MATRIX perturbation on
+        # real-trig boundary cells: (c,s) -> (c cos(dth) - s sin(dth),
+        # s cos(dth) + c sin(dth)).  This moves both members by O(eps)
+        # everywhere (no perturb-a-zero hole at cosa ~ 0) and scales
+        # the pair's norm by exactly (1 + dth^2) ~ 1 + 1e-24 -- it
+        # PRESERVES whatever c^2+s^2 the builder produced.  The earlier
+        # cos/sin(arctan2(s,c)+dth) form silently NORMALIZED the pair,
+        # which at panel-edge B nodes -- where upstream's edge
+        # averaging leaves c^2+s^2-1 ~ 1e-8 -- injected a 1e-8 kick,
+        # four orders above eps (caught by the invariants test).
+        # The write is gated on dth != 0 so untouched cells stay
+        # bit-exact (codex instr r1 H1).
+        for ck, sk in _PERT_ANGLE_PAIRS:
+            c, s = old[ck], old[sk]
+            real = (np.abs(c) < _TRIG_GUARD) & (np.abs(s) < _TRIG_GUARD)
+            dth = _pert_pattern(c.shape, ng, eps)
+            rot = real & (dth != 0.0)
+            gs[ck] = np.where(rot, c * np.cos(dth) - s * np.sin(dth), c)
+            gs[sk] = np.where(rot, s * np.cos(dth) + c * np.sin(dth), s)
+            stats[ck] = stats.get(ck, 0) + int(rot.sum())
+        # 3) sg families: the same slot-wise pair rotation, gated to
+        # genuine unit-norm angle slots only -- ghost/transport-patch
+        # convention slots (tiny 1e-8 floors, corner patches) violate
+        # the unit norm and stay bit-exact
+        ssg, csg = old["sin_sg"], old["cos_sg"]
+        real = np.abs(ssg * ssg + csg * csg - 1.0) < 1.0e-12
+        dth = _pert_pattern(ssg.shape[:2], ng, eps)[:, :, None]
+        rot = real & (dth != 0.0)
+        gs["sin_sg"] = np.where(rot, ssg * np.cos(dth) + csg * np.sin(dth),
+                                ssg)
+        gs["cos_sg"] = np.where(rot, csg * np.cos(dth) - ssg * np.sin(dth),
+                                csg)
+        stats["sin_sg"] = stats.get("sin_sg", 0) + int(rot.sum())
+
+        # 4) recompute EVERY derived family where its builder formula
+        # held (invariants restored: area*rarea == 1 again, etc.)
+        recips = (("rdx", "dx"), ("rdy", "dy"), ("rdxa", "dxa"),
+                  ("rdya", "dya"), ("rdxc", "dxc"), ("rdyc", "dyc"),
+                  ("rarea", "area"), ("rarea_c", "area_c"))
+        for dk, pk in recips:
+            _replace_where_held(gs, dk, 1.0 / old[pk],
+                                1.0 / np.asarray(gs[pk]), stats)
+        for dk, pk in (("rsina", "sina"), ("rsin_u", "sina_u"),
+                       ("rsin_v", "sina_v")):
+            so, sn = old[pk], np.asarray(gs[pk])
+            pristine = old[dk]
+            if pristine.shape != so.shape:
+                # rsina is COMPUTE-B in some lanes; skip on mismatch
+                continue
+            # two builder flavours: the plain 1/max(tiny, s^2) and the
+            # panel-border override 1/SIGN(max(tiny,|s|), s); each cell
+            # is refreshed by the flavour whose invariant it held.
+            c1o = 1.0 / np.maximum(TINY_NUMBER, so * so)
+            c1n = 1.0 / np.maximum(TINY_NUMBER, sn * sn)
+            c2o = rsin_border_override(so)
+            c2n = rsin_border_override(sn)
+            h1 = (np.isclose(pristine, c1o, rtol=1.0e-12, atol=0.0)
+                  & (c1n != c1o))
+            h2 = (np.isclose(pristine, c2o, rtol=1.0e-12, atol=0.0)
+                  & (c2n != c2o) & ~h1)
+            gs[dk] = np.where(h1, c1n, np.where(h2, c2n, pristine))
+            stats[dk] = stats.get(dk, 0) + int((h1 | h2).sum())
+        _replace_where_held(
+            gs, "rsin2",
+            1.0 / np.maximum(TINY_NUMBER, old["sin_sg"][..., 4] ** 2),
+            1.0 / np.maximum(TINY_NUMBER,
+                             np.asarray(gs["sin_sg"])[..., 4] ** 2),
+            stats)
+        _replace_where_held(gs, "cosa_s", old["cos_sg"][..., 4],
+                            np.asarray(gs["cos_sg"])[..., 4], stats)
+        for dk, f in (
+                ("divg_u", lambda o: o[0] * o[1] / o[2]),
+                ("del6_u", lambda o: o[0] * o[2] / o[1])):
+            _replace_where_held(
+                gs, dk,
+                f((old["sina_v"], old["dyc"], old["dx"])),
+                f((np.asarray(gs["sina_v"]), np.asarray(gs["dyc"]),
+                   np.asarray(gs["dx"]))), stats)
+        for dk, f in (
+                ("divg_v", lambda o: o[0] * o[1] / o[2]),
+                ("del6_v", lambda o: o[0] * o[2] / o[1])):
+            _replace_where_held(
+                gs, dk,
+                f((old["sina_u"], old["dxc"], old["dy"])),
+                f((np.asarray(gs["sina_u"]), np.asarray(gs["dxc"]),
+                   np.asarray(gs["dy"]))), stats)
+
+        # 3b) f0 (codex instr r2 H1): a consumed coordinate-derived
+        # static (d_sw5 vort = wk + f0, full domain incl the corner
+        # wedges that carried the pre-#1585 defect).  ADDITIVE
+        # eps*2*Omega*pat at boundary cells -- multiplicative would be
+        # a no-op exactly on the equator line where f0 = 0 (the
+        # perturb-a-zero trap).  f0 has no derived fields and no ectx
+        # snapshot.
+        from legoesm.grids.fv3_native_gridstruct import FV3_OMEGA
+        f0a = np.asarray(gs["f0"], dtype=np.float64).copy()
+        d_f0 = _pert_pattern(f0a.shape, ng, eps) * (2.0 * FV3_OMEGA)
+        okf = (np.abs(f0a) < _TRIG_GUARD) & (d_f0 != 0.0)
+        gs["f0"] = np.where(okf, f0a + d_f0, f0a)
+        stats["f0"] = stats.get("f0", 0) + int(okf.sum())
+
+        # 4b) consumed metric SUMMARIES (codex instr r1 H2): d_sw and
+        # the duo sw core read the scalars da_min/da_min_c, computed by
+        # the builder as min/max over the compute range (bounded lane:
+        # area[ng:ng+n, ng:ng+n], and area_c over the SAME range -- the
+        # upstream global_mx_c call range, NOT ie+1).  The perturbation
+        # covers the outermost compute ring, so the extremum can move
+        # while the stored scalar goes stale.  Where-held analog for
+        # scalars: refresh only if the stored value matches the formula
+        # on the pre-perturbation arrays.
+        sl = slice(ng, ng + n)
+        for sk2, pk2, red in (("da_min", "area", np.min),
+                              ("da_max", "area", np.max),
+                              ("da_min_c", "area_c", np.min),
+                              ("da_max_c", "area_c", np.max)):
+            if sk2 not in gs:
+                continue
+            cand_old = float(red(old[pk2][sl, sl]))
+            if np.isclose(float(gs[sk2]), cand_old,
+                          rtol=1.0e-12, atol=0.0):
+                cand_new = float(red(np.asarray(gs[pk2])[sl, sl]))
+                if cand_new != cand_old:
+                    gs[sk2] = cand_new
+                    stats[sk2] = stats.get(sk2, 0) + 1
+
+        # 5) refresh the prebuilt ectx metric snapshots: c2l reads
+        # ectx["dx6"]/["dy6"], captured BEFORE this perturbation --
+        # apply the SAME factors so the consumed values actually move.
+        # (amat6 is built from grid_lon/grid_lat coordinates only --
+        # unaffected by a metric perturbation, no rebuild needed.)
+        if ctx.get("ectx") is not None:
+            for ek, pk in (("dx6", "dx"), ("dy6", "dy")):
+                a = np.asarray(ctx["ectx"][ek][t], dtype=np.float64)
+                fac = 1.0 + _pert_pattern(a.shape, ng, eps)
+                ctx["ectx"][ek][t] = np.where(
+                    np.abs(a) < _SENT_GUARD, a * fac, a)
+
+    total = sum(stats.values())
+    if total == 0:
+        raise SystemExit(
+            "PERTURBATION CONTROL FAILED: zero cells moved -- the "
+            "probe would be a no-op control (perturb-a-zero class)")
+    print(f"BOUNDARY METRICS PERTURBED COHERENTLY eps={eps:g}: "
+          f"primitives multiplicative (lengths/areas) + angle "
+          f"rotations; ALL derived reciprocals/composites recomputed; "
+          f"ectx dx6/dy6 snapshots refreshed")
+    print("  perturbed/refreshed cells per family: "
+          + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
+
+
+def _make_jax_step(ctx, jit=False):
+    """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
+
+    The scoring below is ~400 lines that read six per-face NumPy dicts
+    and mutate ``state``/``press``/``q`` in place, exactly as the Fortran
+    dummies are.  The JAX lane is face-STACKED and FUNCTIONAL (C1/C4), so
+    this adapter stacks on the way in and writes back on the way out --
+    and NOTHING ELSE about the run changes.  That is deliberate: the IC,
+    the oracle files, the derived face map, the tendency scales and every
+    tolerance stay byte-identical to the NumPy invocation, so the two
+    backends' scores differ only by the lane under test.  A separate
+    JAX-flavoured harness would have made any difference unattributable,
+    which is the confound this campaign has paid for more than once.
+
+    The write-back is the only subtle part: the caller keeps references
+    to the per-face arrays, so the values are copied INTO the existing
+    arrays rather than rebound, or the mutation the scoring relies on
+    would be invisible.
+    """
+    import jax.numpy as _jnp
+    import numpy as _np
+
+    from legoesm.core import fv3_dynamics as _jdyn
+    from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_jax
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+
+    jctx = build_jax_duo_stepper_context(ctx)
+    _cache: dict = {}
+
+    def _stack(per_face, key=None):
+        # jnp, not np: the module indexes these with `.at[...]`, which a
+        # numpy array does not have. Stacking with numpy and handing the
+        # result straight over got as far as the remap's pk update
+        # before failing.
+        return _jnp.asarray(_np.stack([_np.asarray(f[key] if key else f)
+                                       for f in per_face]))
+
+    def _step(_ctx, state, press, **kw):
+        jstate = state_3d_to_jax(state)
+        jpress = {nm: _stack(press, nm)
+                  for nm in ("ps", "pe", "peln", "pk", "pkz")}
+        q_in = kw.pop("q")
+        # TRACER-MAJOR: fv_dynamics_step takes nq face-stacked arrays,
+        # not one (6, nq, ...) stack. The spec's q is [face][iq], so the
+        # transpose is here, in the adapter, where every other layout
+        # difference between the lanes already lives.
+        _nq = len(q_in[0])
+        jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
+                                      for t in range(6)]))
+              for iq in range(_nq)]
+        if jit:
+            # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
+            # through the COMPILED builder, and compilation is not neutral
+            # here -- fused multiply-adds and reassociation can flip an
+            # upwind selector bit, which is the class of difference this
+            # port already had to unroll a scan to remove. Scoring the eager
+            # function therefore scored a lane nobody deploys.
+            _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
+            if "fn" not in _cache:
+                _static = dict(kw)
+                _cache["fn"] = _jdyn.make_fv_dynamics_step_jit(
+                    jctx, _static.pop("km"), **_static)
+            out = _cache["fn"](jstate, jpress, jq, **_dyn)
+        else:
+            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+
+        # Write back IN PLACE -- see the docstring.
+        st = out["state"] if "state" in out else out
+        for t in range(6):
+            for nm, arr in state[t].items():
+                if nm in st:
+                    arr[...] = _np.asarray(st[nm])[t]
+            for nm in ("ps", "pe", "peln", "pk", "pkz"):
+                if nm in out["press"]:
+                    press[t][nm][...] = _np.asarray(out["press"][nm])[t]
+            for iq, arr in enumerate(q_in[t]):
+                arr[...] = _np.asarray(out["q"][iq])[t]
+        return out
+
+    return _step
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_hydro_zerostep")
+    ap.add_argument("--step-run", default=f"{ORACLE_ROOT}/run_hydro_1step_gfs")
+    ap.add_argument("--n-split", type=int, default=N_SPLIT)
+    ap.add_argument("--k-split", type=int, default=K_SPLIT)
+    ap.add_argument("--dt", type=float, default=DT_ATMOS)
+    ap.add_argument("--json", default=None)
+    ap.add_argument("--trace-substeps", action="store_true",
+                    help="DIAGNOSTIC: run the acoustic loop one sub-step at "
+                         "a time and print max|field - IC| after each, then "
+                         "stop. Localises a wrong tendency in time.")
+    ap.add_argument("--max-rel", type=float, default=None,
+                    help="gate: exit 1 if any field's one-step rel exceeds "
+                         "this")
+    ap.add_argument("--tracers", action="store_true",
+                    help="score tracer advection (fv_tracer2d port): "
+                         "initialise sphum/liq_wat from the analytic "
+                         "test_case=-13 IC, advect them through "
+                         "tracer_2d_1L + the remap, and score against "
+                         "the deck's own fv_tracer.res restarts on "
+                         "each tracer's OWN scale. liq_wat/rainwat are "
+                         "identically 0 in the oracle IC (checked at "
+                         "runtime), so their agreement is VACUOUS as a "
+                         "transport test and is labelled so -- sphum "
+                         "carries the signal.")
+    ap.add_argument("--ext-metrics", action="store_true",
+                    help="build the six-face context with "
+                         "use_ext_metrics=True: halo/corner-wedge cells "
+                         "carry EXTENDED-lattice metrics instead of the "
+                         "kinked builder's. fv_grid_tools.F90:749-835 "
+                         "shows the duo oracle builds its model grid "
+                         "FROM dg%%b_pt with every mpp/fill_corners/"
+                         "get_symmetry step skipped -- so the extended "
+                         "lattice is the FAITHFUL halo geometry and the "
+                         "kinked one is the port's residual suspect. "
+                         "This flag is the mechanism-scaling probe.")
+    ap.add_argument("--perturb-boundary-metrics", type=float, default=0.0,
+                    metavar="EPS",
+                    help="seed discriminator, COHERENT protocol (codex "
+                         "retro 2026-08-11): perturb PRIMITIVE metrics "
+                         "at BOUNDARY cells (halo rings + outermost "
+                         "compute ring) -- lengths/areas by "
+                         "(1 + EPS*cos(3i+7j)), intersection angles by "
+                         "a rotation theta+EPS*pat -- then RECOMPUTE "
+                         "every derived reciprocal/composite "
+                         "(rdx=1/dx, rarea=1/area, rsina, divg/del6) "
+                         "so builder invariants hold, perturb f0 "
+                         "(additive eps*2*Omega), and refresh the "
+                         "prebuilt ectx dx6/dy6 snapshots. The "
+                         "production metrics match the oracle at "
+                         "~1e-14; if the one-step residual scales with "
+                         "EPS (pre-registered: 1e-12 and 1e-10), the "
+                         "9.8e-06 floor is amplified geometry seed; if "
+                         "it stays pinned, the floor is a composition/"
+                         "formulation difference.")
+    ap.add_argument("--n-steps", type=int, default=1,
+                    help="outer fv_dynamics calls to integrate before "
+                         "comparing (the step reference must be an oracle "
+                         "run of n_steps*dt_atmos -- pass --step-run "
+                         "accordingly). A LINEAR-vs-EXPONENTIAL residual "
+                         "growth read across an N sweep (1, 3, 10) is the "
+                         "point: a compounding coefficient bug grows "
+                         "linearly-or-worse in N while chaos amplifies the "
+                         "1e-14 geometry seed exponentially but from far "
+                         "below the certified 1-step floor (GLM review "
+                         "2026-08-11: judge growth against the N=1 floor, "
+                         "never against state tendency).")
+    ap.add_argument("--nh", action="store_true",
+                    help="non-hydrostatic gate: defaults the runs to "
+                         "run_nh_{zerostep,1step}_gfs, adds delz/w to the "
+                         "state (make_nh IC), drives fv_dynamics with "
+                         "hydrostatic=False (a_imp=1, p_fac=0.05, "
+                         "kord_wz=9, w_limiter per the deck), and scores "
+                         "W and DZ on their OWN scales (W is 0 at t=0 and "
+                         "~2e-4 m/s after one step -- judging it against "
+                         "the 20 m/s winds would be the delp-agreement "
+                         "trap again)")
+    ap.add_argument("--backend", choices=("numpy", "jax"), default="numpy",
+                    help="which lane takes the step. 'numpy' is the "
+                         "SPECIFICATION and the established score; 'jax' "
+                         "runs the ported lane through the SAME scoring "
+                         "code, IC, oracle files, face map and tolerances, "
+                         "so the two numbers are comparable by "
+                         "construction. Only the stepping call differs -- "
+                         "everything upstream and downstream of it is "
+                         "byte-identical between the two backends, which "
+                         "is the whole point (a JAX-specific harness would "
+                         "make any difference unattributable).")
+    ap.add_argument("--jit", action="store_true",
+                    help="run the COMPILED step, which is the one the model "
+                         "deploys. Off by default so the established score "
+                         "keeps its meaning; a parity claim about the "
+                         "shipped solver has to be measured with this ON, "
+                         "because compilation can reassociate arithmetic and "
+                         "flip a limiter branch. Ignored unless "
+                         "--backend jax.")
+    args = ap.parse_args(argv)
+    if args.jit and args.backend != "jax":
+        raise SystemExit("--jit applies to --backend jax only")
+    if args.n_steps < 1:
+        raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
+    if args.n_steps != 1 and args.step_run in (
+            f"{ORACLE_ROOT}/run_hydro_1step_gfs", None):
+        # codex nstep review #3: comparing N port steps against the
+        # 1-step reference is a silent protocol mismatch that returns
+        # normally without --max-rel.  The N-step reference must be
+        # chosen EXPLICITLY.
+        raise SystemExit(
+            f"--n-steps {args.n_steps} requires an explicit --step-run "
+            f"pointing at an oracle run of exactly "
+            f"{args.n_steps} * dt_atmos (e.g. run_hydro_"
+            f"{args.n_steps * 32}min_gfs); the default is the 1-step "
+            f"reference.")
+    if args.nh:
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
+
+    from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    from legoesm.core.fv3_native_dynamics import (
+        fv_dynamics_step, p_var_hydrostatic,
+    )
+    from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
+    from legoesm.core.fv3_native_eta import set_eta_analytic
+    from legoesm.core.fv3_native_state_3d import field_shape
+    from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+
+    print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
+    print(f"                (2/7 = {2/7!r}; rel diff "
+          f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
+
+    ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     use_ext_metrics=args.ext_metrics,
+                                     oracle_conventions=True)
+    if args.perturb_boundary_metrics:
+        perturb_boundary_metrics_coherent(
+            ctx, float(args.perturb_boundary_metrics), N, NG)
+    n, ng = ctx["n"], ctx["ng"]
+    ak, bk, ptop, ks = set_eta_analytic(KM)
+    ptop = float(ptop)
+    print(f"grid n={n} ng={ng} km={KM} ptop={ptop} ks={ks}")
+
+    orc_ic = load_oracle(args.ic_run, nh=args.nh)
+    orc_1 = load_oracle(args.step_run, nh=args.nh)
+    require_flat_orography(orc_ic)
+    require_flat_orography(orc_1)
+    orc_tr_ic = orc_tr_1 = None
+    if args.tracers:
+        orc_tr_ic = load_tracer_oracle(args.ic_run)
+        orc_tr_1 = load_tracer_oracle(args.step_run)
+        # THE DELP-AGREEMENT TRAP, CHECKED, NOT ASSUMED: a spatially
+        # constant tracer is reproduced by ANY mass-consistent
+        # transport, so its match certifies nothing about advection.
+        # Print each tracer's IC range and label the constant ones.
+        print("\noracle tracer IC ranges (per tile min..max; a constant "
+              "tracer's score is VACUOUS as a transport test):")
+        for nm in ADVECTED_TRACERS + INERT_TRACERS:
+            lo = min(float(orc_tr_ic[t][nm].min()) for t in range(6))
+            hi = max(float(orc_tr_ic[t][nm].max()) for t in range(6))
+            tag = "VACUOUS (constant)" if lo == hi else "carries signal"
+            print(f"  {nm:8s} [{lo:.6g}, {hi:.6g}]  -> {tag}")
+        # dnats=1: rainwat must be UNTOUCHED by the step. If this fails
+        # the dnats reading is wrong and the advected set is wrong too.
+        for t in range(6):
+            if not np.array_equal(orc_tr_ic[t][INERT_TRACERS[0]],
+                                  orc_tr_1[t][INERT_TRACERS[0]]):
+                raise SystemExit(
+                    f"tile {t + 1}: rainwat changed across the step, but "
+                    f"dnats=1 says it is inert -- the advected tracer "
+                    f"set is misread; refusing to score.")
+        print("  rainwat: bit-identical across the step on all 6 tiles "
+              "(dnats=1 inertness CONFIRMED; not carried by the port)")
+
+    fields = ("u", "v", "pt", "delp") + (("w", "delz") if args.nh else ())
+
+    # How much did ONE step actually move the oracle? Without this the
+    # residuals below have no scale and "small" means nothing.
+    print("\noracle tendency over one step (max |1step - IC|, per tile):")
+    tend = {}
+    for f in fields:
+        per = [float(np.abs(orc_1[t][f] - orc_ic[t][f]).max())
+               for t in range(6)]
+        tend[f] = per
+        print(f"  {f:5s} " + "  ".join(f"{x:10.4g}" for x in per))
+    if max(max(v) for v in tend.values()) == 0.0:
+        raise SystemExit(
+            "the oracle's one-step state is IDENTICAL to its IC -- the "
+            "reference run did not integrate, so any 'match' below is "
+            "vacuous. Check that minutes=32 == dt_atmos in the deck.")
+
+    tr_tend = {}
+    if args.tracers:
+        print("oracle TRACER tendency over one step (max |1step - IC|, "
+              "per tile):")
+        for nm in ADVECTED_TRACERS:
+            per = [float(np.abs(orc_tr_1[t][nm] - orc_tr_ic[t][nm]).max())
+                   for t in range(6)]
+            tr_tend[nm] = per
+            print(f"  {nm:8s} " + "  ".join(f"{x:10.4g}" for x in per))
+        if max(tr_tend["sphum"]) == 0.0:
+            raise SystemExit(
+                "the oracle's sphum did not move over the step -- the "
+                "tracer comparison would be vacuous everywhere. Wrong "
+                "runs?")
+
+    # ---------------- instrument control: the IC ----------------
+    state = build_port_ic(ctx, ak, bk, nh=args.nh)
+    p_ic = port_window(state, ctx)
+    (cost, meta, perm, worst,
+     per_field, wind_only) = derive_face_map(p_ic, orc_ic)
+
+    print("\nIC cost matrix rel(port face -> oracle tile):")
+    for pf in range(6):
+        print(f"  face {pf+1}: " +
+              "  ".join(f"{cost[pf, ot]:9.2e}" for ot in range(6)))
+    print(f"\nbest bijection (worst-face rel = {worst:.3e}):")
+    for pf in range(6):
+        tr, nm, su, sv = meta[pf][perm[pf]]
+        print(f"  port face {pf+1} -> oracle tile {perm[pf]+1}  "
+              f"rel={cost[pf, perm[pf]]:.4e}  "
+              f"[{'transpose' if tr else 'direct':9s} {nm:4s} "
+              f"s_u{su:+.0f} s_v{sv:+.0f}]")
+
+    if worst > IC_CONTROL_MAX_REL:
+        # Localise the disagreement before giving up: print the WIND-ONLY
+        # cost matrix (the weaker criterion the earlier map was derived
+        # under) and the per-field breakdown of the joint best. If the
+        # wind-only matrix has a 1e-14 entry where the joint one does not,
+        # the blocking field is named right here instead of guessed at.
+        print("\nWIND-ONLY cost matrix (diagnostic; NEVER a gate):")
+        for pf in range(6):
+            print(f"  face {pf+1}: " +
+                  "  ".join(f"{wind_only[pf, ot]:9.2e}" for ot in range(6)))
+        print("\nper-field rel at each pair's joint-best transform:")
+        for pf in range(6):
+            for ot in range(6):
+                d = per_field[pf][ot]
+                if min(cost[pf, ot], wind_only[pf, ot]) > 1e-6:
+                    continue
+                print(f"  face {pf+1} -> tile {ot+1}: " +
+                      "  ".join(f"{k}={d[k]:9.2e}" for k in
+                               ("u", "v", "pt", "delp")))
+        print("\nport IC field ranges (compute window):")
+        for f in ("u", "v", "pt", "delp"):
+            print(f"  {f:5s} " + "  ".join(
+                f"[{p_ic[t][f].min():.6g},{p_ic[t][f].max():.6g}]"
+                for t in range(6)))
+        print("oracle IC field ranges:")
+        for f in ("u", "v", "pt", "delp"):
+            print(f"  {f:5s} " + "  ".join(
+                f"[{orc_ic[t][f].min():.6g},{orc_ic[t][f].max():.6g}]"
+                for t in range(6)))
+        raise SystemExit(
+            f"\nINSTRUMENT CONTROL FAILED: the IC face map's worst residual "
+            f"is {worst:.3e}, above the {IC_CONTROL_MAX_REL:.0e} floor. The "
+            f"port's initial condition no longer reproduces the oracle's, so "
+            f"nothing this script could say about the one-step state would "
+            f"mean anything. Refusing to print it.")
+    # FROZEN-MAP ASSERT (GLM-5.2 strategy review, 2026-08-10): the
+    # bijection requirement alone cannot catch a SELF-CONSISTENT
+    # relabelling drift -- a grid change that permutes two faces and an
+    # IC builder that permutes them back would still derive a valid map.
+    # The established map (ic_face_map_parity.py, 2026-08-07) is
+    # therefore frozen here and every run's derived map must match it.
+    # Faces 4/5 <-> tiles 1/2 stay a SET: those two oracle tiles are
+    # unperturbed and zonally symmetric, so they carry identical fields
+    # and either assignment is intrinsically valid (documented in
+    # STATE.md; asserting one of them would be inventing information).
+    _FROZEN_MAP = {0: {3}, 1: {4}, 2: {2}, 3: {0, 1}, 4: {0, 1}, 5: {5}}
+    drift = [(pf + 1, perm[pf] + 1) for pf in range(6)
+             if perm[pf] not in _FROZEN_MAP[pf]]
+    if drift:
+        raise SystemExit(
+            f"FACE-MAP DRIFT: derived assignment(s) {drift} (port face, "
+            f"oracle tile) differ from the frozen 2026-08-07 map. Either "
+            f"the grid/IC labelling changed -- find out which -- or the "
+            f"frozen map is stale; do not proceed on a silently different "
+            f"relabelling.")
+
+    print(f"\nINSTRUMENT CONTROL PASSED (worst IC rel {worst:.3e} <= "
+          f"{IC_CONTROL_MAX_REL:.0e}; map matches the frozen 2026-08-07 "
+          f"bijection). The map below is the one applied to the step.")
+
+    q = None
+    p_tr_ic = None
+    if args.tracers:
+        # TRACER instrument control, under the SAME derived map: the
+        # port's analytic sphum against the zerostep fv_tracer.res.
+        # sphum is analytic in (lat, ak, bk) with no quad step beyond
+        # the agrid latitudes, so the quad-geometry floor applies.
+        q = build_port_tracer_ic(ctx, ak, bk)
+        p_tr_ic = tracer_window(q, ctx)
+        worst_tr_ic = 0.0
+        for pf in range(6):
+            ot = perm[pf]
+            for nm in ADVECTED_TRACERS:
+                a, b = map_scalar_pair(p_tr_ic[pf][nm], orc_tr_ic[ot][nm],
+                                       meta[pf][ot])
+                worst_tr_ic = max(worst_tr_ic, rel(a, b))
+        print(f"TRACER IC control: worst rel {worst_tr_ic:.3e} over "
+              f"{ADVECTED_TRACERS} (sphum analytic vs zerostep restart; "
+              f"liq_wat 0 == 0, vacuous).")
+        if worst_tr_ic > IC_CONTROL_MAX_REL:
+            raise SystemExit(
+                f"TRACER INSTRUMENT CONTROL FAILED: IC rel "
+                f"{worst_tr_ic:.3e} exceeds {IC_CONTROL_MAX_REL:.0e}; the "
+                f"port's tracer IC does not reproduce the oracle's, so "
+                f"the one-step tracer comparison would start from a "
+                f"different field. Refusing to print it.")
+
+    if args.nh:
+        # SECOND instrument control, NH fields under the SAME map: the
+        # port's make_nh delz against the oracle's DZ (a real field,
+        # ~1e3 m), and W == 0 EXACTLY on both sides at t=0.
+        worst_dz = 0.0
+        for pf in range(6):
+            ot = perm[pf]
+            pairs, _ = apply_map(p_ic[pf], orc_ic[ot], meta[pf][ot])
+            worst_dz = max(worst_dz, rel(*pairs["delz"]))
+            w_p, w_o = pairs["w"]
+            if float(np.abs(w_o).max()) != 0.0:
+                raise SystemExit(
+                    f"oracle IC W is not identically zero on tile {ot+1} "
+                    f"(max {np.abs(w_o).max():g}) -- not a t=0 restart?")
+            if float(np.abs(w_p).max()) != 0.0:
+                raise SystemExit(f"port IC w is not zero on face {pf+1}")
+        print(f"NH IC control: worst delz rel {worst_dz:.3e}; W == 0 "
+              f"exactly on both sides.")
+        if worst_dz > IC_CONTROL_MAX_REL:
+            raise SystemExit(
+                f"NH INSTRUMENT CONTROL FAILED: delz IC rel {worst_dz:.3e} "
+                f"exceeds {IC_CONTROL_MAX_REL:.0e}; the make_nh replication "
+                f"does not reproduce the oracle's delz, so the step "
+                f"comparison would start from a different state.")
+
+    # ---------------- the step ----------------
+    # p_var is the ONLY producer of the pkz that fv_dynamics.F90:402
+    # divides by, so it must exist before either lane below.  The LANE
+    # MATTERS: init_hydro.F90's NH branch (:178-184) computes pkz from
+    # the ideal gas law on delp/pt/delz, NOT the hydrostatic kappa-mean.
+    # Feeding the hydro pkz into the NH theta conversion put a uniform
+    # 0.408 m delz error on every column in the first NH parity run.
+    if args.nh:
+        from legoesm.core.fv3_native_dynamics import p_var_nonhydrostatic
+        press = [p_var_nonhydrostatic(f["delp"], f["delz"], f["pt"],
+                                      ptop=ptop, akap=FV3_KAPPA,
+                                      n=n, ng=ng, km=KM) for f in state]
+    else:
+        press = [p_var_hydrostatic(f["delp"], ptop=ptop, akap=FV3_KAPPA,
+                                   n=n, ng=ng, km=KM) for f in state]
+    if q is None:
+        # No --tracers: keep the historical all-zero passengers, which
+        # exercise the same nr remap passes (and now the same nr
+        # tracer_2d passes -- 0 is preserved exactly) without changing
+        # this script's default output.
+        q = [[np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
+              for _ in range(NR_TRACERS)] for _ in range(6)]
+
+    if args.trace_substeps and args.nh:
+        raise SystemExit(
+            "--trace-substeps is wired for the hydrostatic lane only "
+            "(its remap block reads the hydro pressure bundle); an NH "
+            "trace needs the NH carry threaded through -- extend it "
+            "rather than letting it KeyError mid-run.")
+    if args.trace_substeps:
+        # LOCALISE a wrong tendency in TIME before hunting it in space.
+        # dyn_core.F90:337 is `do it=1,n_split`; running the loop one
+        # sub-step at a time and printing max|field - IC| after each says
+        # whether a spurious tendency appears at sub-step 1 (a stage is
+        # wrong) or accumulates (a coefficient is wrong), and whether the
+        # remap adds to it. Without this the only number available is the
+        # sum of eight sub-steps and one remap.
+        #
+        # THE CONVERSION IS NOT OPTIONAL HERE. An earlier version of this
+        # block drove the acoustic loop with pt still in KELVIN, i.e. the
+        # theta_v the oracle passes to dyn_core times pkz ~ 30. geopk's
+        # gz = gz + cp*pt*(pk(k+1)-pk(k)) then carried a 30x geopotential,
+        # the pressure gradient blew up, and the trace reported 88 m/s at
+        # sub-step 1 and a negative delpc by sub-step 3 -- an artefact of
+        # the instrument, not a property of the port. Mirror
+        # fv_dynamics_step exactly.
+        from legoesm.core.fv3_native_acoustic_3d import acoustic_substep_3d
+        from legoesm.core.fv3_native_dynamics import pt_to_theta_v
+        for t in range(6):
+            pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
+        base = port_window(state, ctx)
+        dt_sub = args.dt / float(args.k_split) / float(args.n_split)
+        print(f"\nSUB-STEP TRACE (dt_sub = {dt_sub} s), "
+              f"max |field - post-conversion IC| over faces. pt is theta_v "
+              f"throughout, so its numbers are theta_v, not K.")
+        press_out: list = []
+        for it in range(1, args.n_split + 1):
+            acoustic_substep_3d(ctx, state, dt_sub, KM,
+                                first_substep=(it == 1), ptop=ptop,
+                                akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+                                remap_step=(it == args.n_split),
+                                remap_follows=True,
+                                press_out=(press_out
+                                           if it == args.n_split else None))
+            cur = port_window(state, ctx)
+            line = "  ".join(
+                f"{f}={max(float(np.abs(cur[t][f] - base[t][f]).max()) for t in range(6)):9.4g}"
+                for f in ("u", "v", "pt", "delp"))
+            print(f"  after it={it}/{args.n_split}: {line}", flush=True)
+            if it == 1:
+                # WHERE, not just how big. A localised max at a panel edge
+                # or corner is a halo/corner defect; a spread-out one is a
+                # discrete-balance error in the interior. Those need
+                # different fixes, and "3.34 m/s" alone cannot tell them
+                # apart. Report the argmax and how concentrated the excess
+                # is (cells above 10% of the peak, split by distance to the
+                # panel boundary).
+                print("  LOCATION of the sub-step-1 increment:")
+                for f in ("u", "v", "delp"):
+                    for t in range(6):
+                        d = np.abs(cur[t][f] - base[t][f])
+                        pk_ = float(d.max())
+                        if pk_ == 0.0:
+                            continue
+                        idx = np.unravel_index(int(np.argmax(d)), d.shape)
+                        big = d > 0.1 * pk_
+                        ni, nj = d.shape[0], d.shape[1]
+                        ii, jj = np.nonzero(big.any(axis=2))
+                        edge = int(np.count_nonzero(
+                            (ii < 3) | (ii >= ni - 3) |
+                            (jj < 3) | (jj >= nj - 3)))
+                        print(f"    {f:5s} face {t+1}: peak={pk_:10.4g} at "
+                              f"(i,j,k)={idx}  cells>10%: {len(ii)} of "
+                              f"{ni*nj} columns, {edge} within 3 of a panel "
+                              f"boundary")
+
+        # And now the remap ALONE, so the acoustic and remap contributions
+        # are separable rather than summed into one number.
+        pre = port_window(state, ctx)
+        for t in range(6):
+            g = press_out[t]
+            press[t]["pe"][:] = g["pe"]
+            press[t]["peln"][:] = g["peln"]
+            press[t]["pkz"][:] = g["pkz"]
+            press[t]["pk"][ng:ng + n, ng:ng + n, :] = \
+                g["pk_remap"][ng:ng + n, ng:ng + n, :]
+            lagrangian_to_eulerian(
+                pe=press[t]["pe"], peln=press[t]["peln"], pk=press[t]["pk"],
+                pkz=press[t]["pkz"], delp=state[t]["delp"], pt=state[t]["pt"],
+                u=state[t]["u"], v=state[t]["v"], ps=press[t]["ps"],
+                ak=ak, bk=bk, ptop=ptop, akap=FV3_KAPPA, cp=FV3_CP_AIR,
+                r_vir=0.0, km=KM, n=n, ng=ng, kord_mt=KORD_MT,
+                kord_tm=KORD_TM, kord_tr=KORD_TR, q=q[t],
+                omga=np.zeros(field_shape("delp", n, ng, KM),
+                              dtype=np.float64),
+                last_step=True, hydrostatic=True, adiabatic=True, consv=0.0,
+                fill=False, do_sat_adj=False, do_inline_mp=False,
+                do_adiabatic_init=False)
+        post = port_window(state, ctx)
+        line = "  ".join(
+            f"{f}={max(float(np.abs(post[t][f] - pre[t][f]).max()) for t in range(6)):9.4g}"
+            for f in ("u", "v", "delp"))
+        print(f"  REMAP alone changed: {line}")
+        print("  (pt is excluded: the remap converts it theta_v -> K, so a "
+              "raw difference there is the conversion, not a tendency)")
+        return 0
+
+    print(f"\nintegrating {args.n_steps} step(s): bdt={args.dt} "
+          f"k_split={args.k_split} n_split={args.n_split} nh={args.nh} ...",
+          flush=True)
+    if args.nh:
+        # phis == 0 (asserted above); the NH carry derives zs from it.
+        m_a = n + 2 * ng
+        ctx["hs6"] = [np.zeros((m_a, m_a), dtype=np.float64)
+                      for _ in range(6)]
+    # Each outer call owns one bdt exactly as the Fortran main loop calls
+    # fv_dynamics once per dt_atmos: state and press carry between calls
+    # (pt round-trips K -> theta_v -> K inside each call).
+    step_fn = fv_dynamics_step
+    if args.backend == "jax":
+        step_fn = _make_jax_step(ctx, jit=args.jit)
+    for _step in range(args.n_steps):
+        out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
+                      k_split=args.k_split, n_split=args.n_split,
+                      ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
+                      cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
+                      kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
+                      hydrostatic=not args.nh,
+                      # deck: a_imp=1., p_fac=0.05, kord_wz=9,
+                      # use_logp=F, w_limiter=T (resolved namelist)
+                      w_limiter=args.nh)
+        if out["pt_units"] != "K":
+            raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
+    p_1 = port_window(state, ctx)
+
+    # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
+    # different causes and one number separates them: if the PORT's own
+    # tendency is comparable to the oracle's, the step is roughly right
+    # and the disagreement is in detail; if the port's tendency is orders
+    # larger, the port's step itself is wrong and no amount of staring at
+    # the face map will help. Print it before the residuals so it is read
+    # first.
+    print("\nPORT's own one-step tendency (max |port_1step - port_IC|), "
+          "against the ORACLE's on the mapped tile:")
+    for f in fields:
+        row_p, row_o = [], []
+        for pf in range(6):
+            row_p.append(float(np.abs(p_1[pf][f] - p_ic[pf][f]).max()))
+            row_o.append(tend[f][perm[pf]])
+        print(f"  {f:5s} port   " + "  ".join(f"{x:10.4g}" for x in row_p))
+        print(f"  {'':5s} oracle " + "  ".join(f"{x:10.4g}" for x in row_o))
+
+    print("\none-step residual, port vs oracle (rel = max|d| / max peak), "
+          "with the oracle's own one-step tendency for scale:")
+    res = {}
+    worst_step = 0.0
+    for pf in range(6):
+        ot = perm[pf]
+        pairs, ws = apply_map(p_1[pf], orc_1[ot], meta[pf][ot])
+        row = {}
+        for f, (a, b) in pairs.items():
+            r = rel(a, b, ws if f in ("u", "v") else None)
+            absd = float(np.abs(a - b).max())
+            row[f] = {"rel": r, "max_abs_diff": absd,
+                      "oracle_tendency": tend[f][ot],
+                      "frac_of_tendency": (absd / tend[f][ot]
+                                           if tend[f][ot] else float("nan"))}
+            worst_step = max(worst_step, r)
+        # WHERE the residual lives, on the same terms as the sub-step
+        # trace: a panel-boundary-concentrated remainder is a halo/edge
+        # defect, a spread one is a discrete-balance difference. Reporting
+        # only the peak cannot tell them apart.
+        for f in fields:
+            a_, b_ = pairs[f]
+            d = np.abs(a_ - b_)
+            pk_ = float(d.max())
+            if pk_ == 0.0:
+                continue
+            big = d > 0.1 * pk_
+            ni, nj = d.shape[0], d.shape[1]
+            ii, jj = np.nonzero(big.any(axis=2))
+            nedge = int(np.count_nonzero((ii < 3) | (ii >= ni - 3) |
+                                         (jj < 3) | (jj >= nj - 3)))
+            row[f]["cells_over_10pct"] = int(len(ii))
+            row[f]["of_which_within_3_of_boundary"] = nedge
+            row[f]["argmax_ijk"] = [int(x) for x in
+                                    np.unravel_index(int(np.argmax(d)),
+                                                     d.shape)]
+        res[f"face{pf+1}->tile{ot+1}"] = row
+        print(f"  face {pf+1} -> tile {ot+1}:")
+        for f in fields:
+            d = row[f]
+            print(f"      {f:5s} rel={d['rel']:9.3e}  "
+                  f"|d|max={d['max_abs_diff']:11.5g}  "
+                  f"tendency={d['oracle_tendency']:11.5g}  "
+                  f"|d|/tend={d['frac_of_tendency']:9.3e}  "
+                  f"at={d.get('argmax_ijk')}  "
+                  f"cells>10%={d.get('cells_over_10pct')} "
+                  f"({d.get('of_which_within_3_of_boundary')} at a "
+                  f"boundary)")
+
+    if args.tracers:
+        p_tr_1 = tracer_window(q, ctx)
+        print("\nPORT's own one-step TRACER tendency vs the ORACLE's on "
+              "the mapped tile:")
+        for nm in ADVECTED_TRACERS:
+            row_p = [float(np.abs(p_tr_1[pf][nm] - p_tr_ic[pf][nm]).max())
+                     for pf in range(6)]
+            row_o = [tr_tend[nm][perm[pf]] for pf in range(6)]
+            print(f"  {nm:8s} port   "
+                  + "  ".join(f"{x:10.4g}" for x in row_p))
+            print(f"  {'':8s} oracle "
+                  + "  ".join(f"{x:10.4g}" for x in row_o))
+
+        print("\none-step TRACER residual, port vs oracle, each tracer "
+              "on its OWN scale:")
+        for pf in range(6):
+            ot = perm[pf]
+            row = res[f"face{pf+1}->tile{ot+1}"]
+            for nm in ADVECTED_TRACERS:
+                a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
+                                       meta[pf][ot])
+                r = rel(a, b)
+                absd = float(np.abs(a - b).max())
+                tnd = tr_tend[nm][ot]
+                vac = (min(float(orc_tr_ic[t][nm].min()) for t in range(6))
+                       == max(float(orc_tr_ic[t][nm].max())
+                              for t in range(6)))
+                row[nm] = {"rel": r, "max_abs_diff": absd,
+                           "oracle_tendency": tnd,
+                           "frac_of_tendency": (absd / tnd if tnd
+                                                else float("nan")),
+                           "vacuous_constant_ic": bool(vac)}
+                worst_step = max(worst_step, r)
+                print(f"  face {pf+1} -> tile {ot+1}  {nm:8s} "
+                      f"rel={r:9.3e}  |d|max={absd:11.5g}  "
+                      f"tendency={tnd:11.5g}  "
+                      f"|d|/tend={row[nm]['frac_of_tendency']:9.3e}"
+                      + ("  [VACUOUS: constant IC]" if vac else ""))
+
+    print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
+    print(f"IC control (same harness, same map): {worst:.4e}")
+    print(f"amplification over one step: "
+          f"{worst_step / max(worst, 1e-300):.3g}x")
+    if args.perturb_boundary_metrics:
+        # pre-registered decision rule (printed with the number so the
+        # log is self-contained): a coherent boundary seed that
+        # AMPLIFIES to the floor predicts the residual MOVES with eps
+        # (>=2x at eps=1e-10 vs 1e-12); a residual pinned at the
+        # unperturbed floor across both eps refutes seed amplification
+        # FOR THE PERTURBED INPUTS.
+        print(f"PERTURB DECISION RULE: eps={args.perturb_boundary_metrics:g} "
+              f"WORST={worst_step:.4e}; PINNED if within ~10% of the "
+              f"unperturbed floor at BOTH eps=1e-12 and 1e-10, MOVED "
+              f"otherwise")
+        # SCOPE (codex instr r2 H1 -- do not overreach): PINNED here
+        # refutes amplification of seeds in the perturbed set only:
+        # every gridstruct metric family (primitives + recomputed
+        # deriveds + da_min scalars), f0, and the ectx dx6/dy6
+        # snapshots.  NOT perturbed: ectx amat6 and the ext-vector
+        # bases/corner operators (vlon4/vlat4/ew4/es4) -- those are
+        # COORDINATE-derived; their equality to the oracle is
+        # certified DIRECTLY (face-map coordinate control ~1e-16 here;
+        # extchain oracle battery certificates), which bounds the seed
+        # but not a hypothetical amplification of it.  A verdict of
+        # 'composition/formulation difference' additionally rests on
+        # those direct certificates.
+        print("PERTURB SCOPE: metrics+deriveds+da_min+f0+ectx(dx6,dy6) "
+              "perturbed; amat6/ext-vector bases coordinate-derived, "
+              "certified directly, NOT perturbed")
+
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
+                       "n_steps": args.n_steps,
+                       "step_run": args.step_run,
+                       "face_map": [{"port_face": pf + 1,
+                                     "oracle_tile": perm[pf] + 1,
+                                     "transposed": bool(meta[pf][perm[pf]][0]),
+                                     "dihedral": meta[pf][perm[pf]][1],
+                                     "sign_u": meta[pf][perm[pf]][2],
+                                     "sign_v": meta[pf][perm[pf]][3]}
+                                    for pf in range(6)],
+                       "residuals": res}, fh, indent=2)
+        print(f"wrote {args.json}")
+
+    if args.max_rel is not None:
+        if not np.isfinite(args.max_rel):
+            raise SystemExit("--max-rel must be finite; a NaN threshold makes "
+                             "`r > thr` always False and the gate vacuous")
+        if worst_step > args.max_rel:
+            print(f"GATE FAILED: {worst_step:.4e} > {args.max_rel:.4e}")
+            return 1
+        print(f"GATE PASSED: {worst_step:.4e} <= {args.max_rel:.4e}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

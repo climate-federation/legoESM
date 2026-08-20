@@ -581,3 +581,176 @@ def test_validate_run_manifest_rejects_hash_config_mismatch() -> None:
     with pytest.raises(ValueError, match="does not match"):
         validate_run_manifest(m)
 
+
+
+def test_validate_run_manifest_accepts_schema_growth() -> None:
+    """A manifest written BEFORE new ExperimentConfig fields existed must still
+    validate: rebuild fills the new fields with defaults, and the restricted
+    hash over the manifest's own keys matches.  Reproduces the 2026-07-27
+    chain-killer (every added morrison_* field bricked older run dirs)."""
+    import hashlib
+    import json
+
+    from legoesm.driver.restart import validate_run_manifest
+
+    m = build_run_manifest(_sample_config())
+    resolved = m["config"]["resolved_config"]
+    # Simulate the OLD writer: drop recently-added fields from the stored
+    # dict and store the hash a pre-change writer would have recorded.
+    for k in ("morrison_flavor", "morrison_fall_a_i",
+              "morrison_ice_snow_d_auto", "morrison_hom_ice_nuc_N"):
+        assert k in resolved, f"test premise broken: {k} not serialized"
+        del resolved[k]
+    m["config"]["config_hash"] = hashlib.sha256(json.dumps(
+        resolved, sort_keys=True).encode("utf-8")).hexdigest()
+    validate_run_manifest(m)  # must not raise
+
+
+def test_schema_growth_refuses_non_default_new_field() -> None:
+    """The growth tolerance must NOT excuse a NEW field at a NON-default
+    value: that is a real config difference, not schema growth."""
+    import hashlib
+    import json
+
+    from legoesm.driver.restart import config_hash_matches
+
+    # Morrison baseline so the ONLY delta below is the NEW field itself
+    # (codex round 2: a microphysics+flavor double change confounded the
+    # negative case — the stored microphysics hash alone would refuse it).
+    old = _sample_config()._replace(microphysics="morrison")
+    m = build_run_manifest(old)
+    resolved = dict(m["config"]["resolved_config"])
+    del resolved["morrison_flavor"]
+    stored_hash = hashlib.sha256(json.dumps(
+        resolved, sort_keys=True).encode("utf-8")).hexdigest()
+    same_but_grown = old  # defaults -> accepted
+    assert config_hash_matches(stored_hash, resolved, same_but_grown)
+    different = old._replace(morrison_flavor="sam")
+    assert not config_hash_matches(stored_hash, resolved, different)
+
+
+def test_schema_growth_still_detects_tamper() -> None:
+    """Restricted-hash acceptance must not weaken tamper detection on keys
+    the manifest DOES store."""
+    import hashlib
+    import json
+
+    from legoesm.driver.restart import config_hash_matches
+
+    old = _sample_config()
+    m = build_run_manifest(old)
+    resolved = dict(m["config"]["resolved_config"])
+    del resolved["morrison_flavor"]
+    stored_hash = hashlib.sha256(json.dumps(
+        resolved, sort_keys=True).encode("utf-8")).hexdigest()
+    tampered = old._replace(days=999)
+    assert not config_hash_matches(stored_hash, resolved, tampered)
+
+
+def test_schema_growth_fails_closed_when_defaults_unavailable() -> None:
+    """A config type that cannot default-construct (ocean records: required
+    constructor args) gets NO growth tolerance — strict False, never an
+    exception (codex 2026-07-27 round 2: ocean fallback semantics)."""
+    import hashlib
+    import json
+    import typing
+
+    from legoesm.driver.restart import config_hash_matches
+
+    class _NoDefaults(typing.NamedTuple):
+        a: float
+        b: float = 1.0
+
+    cfg = _NoDefaults(a=2.0)
+    stored = {"a": 2.0}  # pre-growth manifest lacking 'b'
+    stored_hash = hashlib.sha256(json.dumps(
+        stored, sort_keys=True).encode("utf-8")).hexdigest()
+    assert config_hash_matches(stored_hash, stored, cfg,
+                               kind="atmosphere") is False
+
+
+# ---------------------------------------------------------------------------
+# Provenance stamps the IMPORTED package, not the CWD (2026-08-10 incident:
+# a run launched cd-ed into a pinned worktree recorded the pin's commit while
+# executing the editable install's code).
+# ---------------------------------------------------------------------------
+
+def _make_git_repo(path: Path, *, legoesm_like: bool = False,
+                   marker: str = "a") -> str:
+    """One-commit throwaway git repo; returns HEAD SHA."""
+    import subprocess
+
+    def git(*args: str) -> str:
+        r = subprocess.run(
+            ["git", "-C", str(path), "-c", "user.email=t@t",
+             "-c", "user.name=t", *args],
+            capture_output=True, text=True, check=True,
+        )
+        return r.stdout.strip()
+
+    path.mkdir(parents=True, exist_ok=True)
+    git("init", "-q")
+    (path / f"{marker}.txt").write_text(marker)
+    if legoesm_like:
+        (path / "src" / "legoesm").mkdir(parents=True)
+        (path / "src" / "legoesm" / "constants.py").write_text("# marker\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", marker)
+    return git("rev-parse", "HEAD")
+
+
+def test_manifest_stamps_imported_package_not_cwd(tmp_path: Path,
+                                                  monkeypatch) -> None:
+    """The manifest's commit/dirty must come from the repo containing the
+    imported stamping module, not from os.getcwd() — the load-bearing claim
+    of the provenance fix.  Fails against the CWD-derived implementation."""
+    import legoesm.driver.restart as restart_mod
+
+    head_import = _make_git_repo(tmp_path / "imp", marker="i")
+    head_cwd = _make_git_repo(tmp_path / "launch", marker="l")  # NON-legoesm
+    assert head_import != head_cwd
+
+    # Point the stamping module's anchor at the synthetic "imported" repo and
+    # launch from a different (unrelated) repo, made dirty on purpose.
+    monkeypatch.setattr(restart_mod, "__file__",
+                        str(tmp_path / "imp" / "i.txt"))
+    (tmp_path / "launch" / "uncommitted.txt").write_text("dirty cwd")
+    monkeypatch.chdir(tmp_path / "launch")
+
+    m = build_run_manifest(_sample_config())
+    assert m["legoESM"]["commit"] == head_import
+    assert m["legoESM"]["commit"] != head_cwd
+    # The resolved module file that provenance was derived from is recorded.
+    assert m["legoESM"]["package_path"] == str(
+        (tmp_path / "imp" / "i.txt").resolve())
+    # Dirty flag is the IMPORTED repo's (clean), not the CWD's (dirty).
+    assert m["reproducibility"]["git_dirty"] is False
+
+
+def test_manifest_aborts_on_pinned_worktree_mismatch(tmp_path: Path,
+                                                     monkeypatch) -> None:
+    """CWD = legoesm checkout pinned at another HEAD => loud abort; with the
+    explicit override the mismatch is recorded in the manifest instead."""
+    import pytest
+
+    import legoesm.driver.restart as restart_mod
+    from legoesm.io.git_provenance import ALLOW_MISMATCH_ENV
+
+    head_import = _make_git_repo(tmp_path / "imp", legoesm_like=True,
+                                 marker="i")
+    head_pin = _make_git_repo(tmp_path / "pin", legoesm_like=True,
+                              marker="p")
+    monkeypatch.setattr(restart_mod, "__file__",
+                        str(tmp_path / "imp" / "i.txt"))
+    monkeypatch.chdir(tmp_path / "pin")
+    monkeypatch.delenv(ALLOW_MISMATCH_ENV, raising=False)
+
+    with pytest.raises(RuntimeError) as exc:
+        build_run_manifest(_sample_config())
+    assert head_import in str(exc.value) and head_pin in str(exc.value)
+
+    monkeypatch.setenv(ALLOW_MISMATCH_ENV, "1")
+    m = build_run_manifest(_sample_config())
+    assert m["legoESM"]["commit"] == head_import
+    assert m["legoESM"]["cwd_repo"]["commit"] == head_pin
+    assert m["legoESM"]["cwd_repo"]["import_mismatch_allowed"] is True

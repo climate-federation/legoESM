@@ -55,6 +55,11 @@ class EarthSystemDriver:
         # the same make_coupler ocean tile, so it needs the same guard (codex).
         validate_air_sea_consistency(config, coupler_config)
         self._atm = ModelDriver(config, output_dir=output_dir)
+        # Same contract as CoupledESMDriver: this driver's _build_atm_forcing
+        # reads held_sw_net_sfc / held_lw_net_sfc / seg_precip out of the
+        # atmosphere's _carry_aux (see below), so a lane that never writes
+        # them must refuse rather than force the surface with zeros.
+        self._atm._requires_surface_flux_export = True
         self._coupler_config = coupler_config
         self._land_config = land_config
         self._ice_config = ice_config
@@ -131,8 +136,23 @@ class EarthSystemDriver:
         T_v_low = T_low * (1.0 + (1.0 / constants.epsilon - 1.0) * q_low)
         rho_low = p_low / (constants.R_d * T_v_low)
 
-        # Extract real radiation and precipitation from last atmosphere physics
+        # Extract real radiation and precipitation from last atmosphere
+        # physics.  STRICT, via the SAME shared checker CoupledESMDriver uses:
+        # a lane that advanced a segment with an active radiation /
+        # precipitation source must have stashed these, or the surface is
+        # silently forced with sw_down=0 / precip=0.
+        from legoesm.core.coupling_fields import require_surface_radiation_aux
         aux = getattr(self._atm, '_carry_aux', {})
+        _acfg = self.config
+        require_surface_radiation_aux(
+            aux,
+            radiation_active=(
+                getattr(_acfg, "radiation", "none") not in (None, "none")),
+            precip_active=(
+                getattr(_acfg, "microphysics", "none") not in (None, "none")
+                or getattr(_acfg, "convection", "none") not in (None, "none")),
+            lane=type(self._atm).__name__,
+        )
         sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
         lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
         seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))
@@ -151,7 +171,7 @@ class EarthSystemDriver:
         cfg = self.config
         sst, sic = self._atm.get_sst_sic(day)
         from legoesm.forcing.surface_utils import (
-            blend_surface_property,
+            snow_for_albedo_deblend,
             surface_emissivity_for_lw_inversion,
             surface_temperature_for_lw_boundary,
         )
@@ -167,17 +187,30 @@ class EarthSystemDriver:
         # emitted with — NOT the aerodynamic/sensible-heat T_sfc (the canopy
         # air-space temp Tc over vegetated cells).
         _radiation = getattr(self.config, "radiation", "gray")
+        _phys = self._atm.physics
         if _dyn_sfc:
             albedo_eff = _resp.albedo
             T_sfc = surface_temperature_for_lw_boundary(
                 _radiation, T_rad=getattr(_resp, "T_rad", _resp.T_sfc),
                 lw_up=_resp.lw_up)
         else:
-            albedo_eff = blend_surface_property(
-                sic,
-                cfg.albedo_ice,
-                cfg.albedo_ocean,
-            )
+            # The pipeline's own ocean/ice/land blend — the same
+            # single-source-of-truth argument as the emissivity inversion
+            # below.  An ocean/ice-only blend carries NO land fraction, so over
+            # land this inverted with alpha ~ 0.06 instead of ~0.20 and handed
+            # the surface ~36 W/m^2 too little shortwave, silently (#1556).
+            # static_surface_albedo names the two terms it still cannot see
+            # (zenith ocean albedo, multilayer albedo_veg).
+            # lat + the SNOW carry, not defaults: with snow_albedo_feedback on
+            # radiation brightens the land albedo by snow cover, and a deblend
+            # falling back to the bare vegetation albedo would re-open this
+            # same gap over every snow-covered column.
+            albedo_eff = _phys.static_surface_albedo(
+                sic, land_active=_phys.f_land is not None,
+                lat=self._atm._grid_lat,
+                snow=snow_for_albedo_deblend(
+                    aux.get("snow"),
+                    getattr(self._atm, "_ensemble_size", 1)))
             T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
         # Emissivity matching the emission: RRTMGP/RRTMG + feedback -> the
@@ -185,7 +218,6 @@ class EarthSystemDriver:
         # emissivity blend the radiation pipeline emitted with (configured
         # emissivity_* values, not a constant ocean/ice approximation); gray/none
         # -> an idealized black surface (eps = 1.0).
-        _phys = self._atm.physics
         eps_sfc = surface_emissivity_for_lw_inversion(
             _radiation,
             dynamic_emissivity=(
@@ -280,6 +312,18 @@ class EarthSystemDriver:
 
         Runs the coupler and feeds surface temperature back to the
         atmosphere for the next segment.
+
+        NOTE (issue F4): unlike ``CoupledESMDriver._segment_hook`` this hook
+        does NOT sub-cycle -- ``_step_coupler`` integrates the land/ice/lake
+        surface with a SINGLE forward-Euler step of the full ``dt_segment``.
+        That is acceptable only for the small idealized configs this
+        REFERENCE/TEST-ONLY driver is exercised with (it is instantiated
+        nowhere in packages/, src/ or scripts/ -- only in tests).  A real
+        coupled run MUST use ``CoupledESMDriver``, which sub-cycles the
+        surface + ocean + carbon at ``coupling_dt``; do NOT wire this driver
+        into a production entry point without first adding the same
+        n_sub/sub_dt loop, or a large ``dt_segment`` (now correctly reported
+        per segment) becomes an unstable forward-Euler surface step.
         """
         if self._step_surface is None:
             return

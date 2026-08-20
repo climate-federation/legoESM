@@ -56,9 +56,13 @@ aimip_weight_decay: 1.0e-5
 aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"
 
-# Gray two-stream radiation (Frierson) -- cheap, differentiable in
-# tau_equator / tau_pole; matches the smoke baseline for this run.
-aimip_radiation: "gray"
+# Gray two-stream radiation (Frierson) -- cheap, and NOT trained since
+# 2026-08-11 (its tau_equator / tau_pole left the trainable set); matches the
+# smoke baseline for this run, which now trains only the other families.
+aimip_radiation: "rrtmgp"   # WB/AIMIP always rrtmgp (2026-08-12)
+# Historical config predating the classical-mode rrtmgp pin
+# (campaign_driver.validate_classical_radiation); explicit escape keeps the
+# original experiment reproducible.
 aimip_rad_update_interval: 6
 
 # Disable spatial-surface fields (T21 + gray rad is the smoke profile;

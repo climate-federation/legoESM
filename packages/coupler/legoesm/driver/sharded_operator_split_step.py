@@ -45,6 +45,10 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P
 
+from legoesm.parallel.geometry_consistency import (
+    FLAG_ABSENT, assert_flags_agree, assert_schema_agrees, broadcast_checked,
+    coerce_bool, coerce_count, config_digest48, name_digest48,
+    tree_schema_digest48)
 from legoesm.parallel.latlon_spmd import (
     cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
 from legoesm.parallel.shard_map_compat import shard_map
@@ -125,9 +129,47 @@ def _forcing_specs(forcing: SegmentForcing, n_dev) -> SegmentForcing:
     })
 
 
+# Ordered flag names for the operator-split MESH+TREE gate (scatter bridges and
+# the returned callable). STATIC tuple: fixed width, never rank-local.
+_OPSPLIT_MESH_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "has_tree", "tree_schema", "has_tree2", "tree2_schema",
+)
+
+
+def _agree_opsplit_mesh_entry(mesh, tree=None, tree2=None, *,
+                              where: str) -> None:
+    """Agree the mesh AND pytree LEAF SCHEMAS before a scatter / a sharded call.
+
+    #1362 round 4, blockers 6-7.  These entries ``device_put`` full global
+    arrays onto a cross-process ``NamedSharding`` — serviced by an ALL-GATHER
+    (documented on ``latlon_spmd.shard_leaf``) — one per NON-``None`` leaf, and
+    they return early on ``mesh is None``.  So both the mesh and the leaf
+    schedule are rank-local inputs to a collective, and the returned
+    ``sharded_split_step`` additionally derives its shard_map specs from the
+    carry/forcing structure.
+    """
+    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    assert_flags_agree(_OPSPLIT_MESH_ENTRY_FLAGS, (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        float(tree is not None),
+        tree_schema_digest48(tree) if tree is not None else FLAG_ABSENT,
+        float(tree2 is not None),
+        tree_schema_digest48(tree2) if tree2 is not None else FLAG_ABSENT,
+    ), context=where)
+
+
 def shard_operator_split_carry(carry: SegmentCarry, mesh) -> SegmentCarry:
     """Commit a SegmentCarry to the lat-band layout (grid-shaped + flattened
     leaves P("lat"); scalars / land_ml replicated). ``mesh=None`` -> unchanged."""
+    # FIRST statement: the `mesh is None` return SKIPS every per-leaf put,
+    # and each put is an all-gather under multi-process (#1362 r4, blocker 6).
+    _agree_opsplit_mesh_entry(mesh, carry,
+                              where="shard_operator_split_carry")
     if mesh is None:
         return carry
     n_dev = mesh.devices.size
@@ -141,6 +183,11 @@ def shard_operator_split_carry(carry: SegmentCarry, mesh) -> SegmentCarry:
 
 
 def shard_operator_split_forcing(forcing: SegmentForcing, mesh) -> SegmentForcing:
+    """Commit a SegmentForcing to the lat-band layout. ``mesh=None`` -> unchanged."""
+    # FIRST statement: same rank-local early return + per-leaf all-gather as
+    # the carry twin (#1362 round 4, blocker 6).
+    _agree_opsplit_mesh_entry(mesh, forcing,
+                              where="shard_operator_split_forcing")
     if mesh is None:
         return forcing
     n_dev = mesh.devices.size
@@ -162,6 +209,122 @@ def _need_rad_and_time(step_index, start_day, dt, rad_update_steps):
     abs_day = start_day + (step_index + 1) * dt / 86400.0
     doy, sod = day_to_calendar(abs_day)
     return need_rad, doy, sod
+
+
+# Ordered flag names for the operator-split SPMD entry gate. STATIC tuple: the
+# payload width is fixed by this literal, never by rank-local data.
+_OPSPLIT_SPMD_ENTRY_FLAGS = (
+    "has_mesh", "n_dev", "n_axes", "axis_names", "axis_sizes",
+    "grid_n_lat", "grid_n_lon", "geom_schema", "fold_active",
+    "has_polar_mask", "has_polar_mask_v",
+    "model_config_digest", "statics_digest", "statics_schema",
+    "fix_mass", "rad_update_steps", "n_ghg_keys", "ghg_keys",
+)
+
+
+def _opsplit_mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists; never raises."""
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
+
+
+def _agree_opsplit_spmd_entry(model, mesh, statics, *, fix_mass,
+                              rad_update_steps, ghg_keys, where: str) -> None:
+    """Agree every rank-local input, as the FIRST statement of this factory.
+
+    #1362 round 4.  This is the THIRD lat-band SPMD lane (after
+    ``sharded_atm_latlon_step`` and ``sharded_ocean_step``) and it had the
+    SAME two defects, unfixed: it recomputes the band geometry per process
+    from ``build_band_grids_atm`` and hands it to a REPLICATED
+    ``device_put`` (whose bit-identity assert is what #1362 trips), and it
+    performs a rank-local ``mesh is None`` return plus a north-fold
+    ``raise`` before reaching any collective.  Rounds 1-3 fixed the two
+    lanes where the defect was REPORTED; per legoESM's "fix the class, not
+    the instance" rule this lane gets the identical treatment.
+
+    ``has_polar_mask`` is the sharpest entry: ``model._polar_mask`` decides
+    whether the ``__polar_mask``/``__polar_mask_v`` fields EXIST in the
+    stacked geometry dict, so a per-process difference changes the field
+    LIST and would desynchronise the per-field gathers instead of failing
+    cleanly.  ``fix_mass`` / ``rad_update_steps`` / the GHG key ORDER select
+    different compiled programs (Python-level feature gating on static
+    values), so processes disagreeing there run different graphs.
+    """
+    # Defensive attribute reads: nothing in the payload build may raise before
+    # the collective (see the atm twin for the full rule).
+    grid = getattr(model, "grid", None)
+    fold = getattr(grid, "fold", None)
+    names, sizes = _opsplit_mesh_axis_terms(mesh)
+    problems = []
+
+    def _count(value, label, absent=FLAG_ABSENT):
+        payload, problem = coerce_count(value, absent=absent)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    def _flag(value, label):
+        payload, problem = coerce_bool(value, absent=FLAG_ABSENT)
+        if problem is not None:
+            problems.append((label, problem))
+        return payload
+
+    # `ghg_keys or ()` would evaluate the truthiness of an ARRAY and raise
+    # before the collective (codex round-4, blocker 2); test for None instead.
+    try:
+        keys = () if ghg_keys is None else tuple(
+            str(k) for k in ghg_keys)
+    except Exception:                       # pragma: no cover - defensive
+        keys = ("<unreadable ghg_keys>",)
+        problems.append(("ghg_keys", "is not an iterable of species names"))
+    flags = (
+        float(mesh is not None),
+        float(mesh.devices.size if mesh is not None else 0),
+        float(len(names)),
+        name_digest48(names),
+        name_digest48(sizes),
+        _count(getattr(grid, "n_lat", None), "grid.n_lat", absent=0.0),
+        _count(getattr(grid, "n_lon", None), "grid.n_lon", absent=0.0),
+        tree_schema_digest48(grid),
+        float(bool(fold is not None and getattr(fold, "is_active", False))),
+        float(getattr(model, "_polar_mask", None) is not None),
+        # The body conditions on `_polar_mask` and then slices
+        # `_polar_mask_v` unconditionally (codex round-4, blocker 4).
+        float(getattr(model, "_polar_mask_v", None) is not None),
+        config_digest48(getattr(model, "config", None)),
+        # `statics` was not agreed AT ALL: `statics.fix_moisture` controls a
+        # global-area reduction, `qv_smooth_coeff` / `owned_mask` gate loud
+        # rank-local refusals, and `dt` sets the trajectory (codex round-4,
+        # blocker 3). Digest its static scalars AND its leaf schema.
+        config_digest48(statics),
+        tree_schema_digest48(statics),
+        _flag(fix_mass, "fix_mass"),
+        _count(rad_update_steps, "rad_update_steps", absent=0.0),
+        float(len(keys)),
+        name_digest48(keys),
+    )
+    assert_flags_agree(_OPSPLIT_SPMD_ENTRY_FLAGS, flags, context=where)
+    # AFTER the collective only, so the refusal is symmetric on every rank
+    # (see the atm twin's rationale: a raise while assembling the payload
+    # kills one process while its peers block in process_allgather).
+    for label, problem in problems:
+        raise ValueError(f"{where}: {label} {problem}")
+    if (getattr(model, "_polar_mask", None) is not None
+            and getattr(model, "_polar_mask_v", None) is None):
+        raise ValueError(
+            f"{where}: model._polar_mask is set but model._polar_mask_v is "
+            f"None; the band geometry build slices BOTH, so this would fail "
+            f"mid-build instead of here.")
 
 
 def make_sharded_operator_split_step(
@@ -198,6 +361,13 @@ def make_sharded_operator_split_step(
     shape-agnostic column-local mock, sidestepping this — the real-physics
     end-to-end gate is the driver subprocess parity.)
     """
+    # FIRST statement: agree every rank-local input before ANY rank-local
+    # check can raise or return (#1362 round 4 -- this lane was the third,
+    # unfixed instance of the class).
+    _agree_opsplit_spmd_entry(model, mesh, statics, fix_mass=fix_mass,
+                              rad_update_steps=rad_update_steps,
+                              ghg_keys=ghg_keys,
+                              where="make_sharded_operator_split_step")
     dt = statics.dt
     sigma_coord = model.sigma_coord
 
@@ -279,10 +449,8 @@ def make_sharded_operator_split_step(
     template = band_grids[0]
     afn = atm_grid_array_field_names(template)
     rep = NamedSharding(mesh, P())
-    stacks = {
-        name: jax.device_put(
-            jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids], 0),
-            rep)
+    raw = {
+        name: jnp.stack([jnp.asarray(getattr(g, name)) for g in band_grids], 0)
         for name in afn
     }
     # Per-band polar-filter masks (only when the filter is on): slice the global
@@ -291,15 +459,39 @@ def make_sharded_operator_split_step(
     # passes None -> _step_cgrid_impl resolves self._polar_mask (also None).
     nl = int(grid.n_lat) // n_dev
     if model._polar_mask is not None:
-        stacks["__polar_mask"] = jax.device_put(jnp.stack(
-            [model._polar_mask[r * nl:(r + 1) * nl] for r in range(n_dev)],
-            0), rep)
-        stacks["__polar_mask_v"] = jax.device_put(jnp.stack(
+        raw["__polar_mask"] = jnp.stack(
+            [model._polar_mask[r * nl:(r + 1) * nl] for r in range(n_dev)], 0)
+        raw["__polar_mask_v"] = jnp.stack(
             [model._polar_mask_v[r * nl:r * nl + nl + 1] for r in range(n_dev)],
-            0), rep)
+            0)
+    # #1362 (round 4): the band geometry above is RECOMPUTED per process from
+    # the same config, and per-process XLA autotuning on device-derived grid
+    # fields makes the last ULPs differ at larger sizes -- which trips the
+    # bit-identical assert inside the REPLICATED ``device_put`` below.  This
+    # is the SAME defect fixed in the atm and ocean lanes; this lane reuses
+    # ``build_band_grids_atm`` so it inherits the hazard verbatim.  Verify
+    # cross-process agreement, then broadcast process 0's bytes -- GUARDED,
+    # so a REAL divergence (different polar masks = different filtering =
+    # different physics) RAISES instead of being papered over by process 0.
+    # Single-process: both helpers short-circuit, so this is a no-op.
+    _ordered = list(raw)
+    assert_schema_agrees(_ordered, n_dev,
+                         context="make_sharded_operator_split_step",
+                         arrays=[raw[n] for n in _ordered])
+    stacks = {
+        name: jax.device_put(
+            jnp.asarray(broadcast_checked(
+                raw[name], name,
+                context="make_sharded_operator_split_step")),
+            rep)
+        for name in _ordered
+    }
     _cache = {}
 
     def sharded_split_step(carry, forcing):
+        _agree_opsplit_mesh_entry(
+            mesh, carry, forcing,
+            where="make_sharded_operator_split_step.step")
         # Cache key = pytree STRUCTURE (None<->array flips) PLUS every leaf's
         # shape/dtype: the in/out_specs derive from arr.ndim + arr.shape[0], so a
         # shape/rank change under an unchanged structure would otherwise reuse a

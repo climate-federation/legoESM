@@ -88,6 +88,12 @@ def discover_py_files() -> list[pathlib.Path]:
                 continue
             if "tmp" in parts and "scripts" in parts:
                 continue
+            # Vendored 3rd-party backend (BSD-3 CLM-ML-JAX, not written to legoESM's
+            # constant/coefficient/style conventions) — audited upstream, not here.
+            # Scoped to the exact vendored path (not any dir merely named
+            # clm_ml_backend).
+            if "/canopy/clm_ml_backend/" in rp.as_posix():
+                continue
             out.append(rp)
     return out
 

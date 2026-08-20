@@ -72,6 +72,14 @@ from legoesm.ml.loss import latitude_weighted_bias, latitude_weighted_rmse
 # Run-time variants (drop the empty string which means "not AIMIP").
 _VALID_VARIANTS = tuple(v for v in _AIMIP_VARIANTS_FULL if v)
 
+# Above this training-window size the post-training TRAIN-period eval is
+# skipped by default: it re-loads every training snapshot (measured 1.6 s
+# each, so ~4.2 h at the 2,160-day tier) to report metrics the per-epoch loss
+# already tracks, and it runs BEFORE params.eqx is written. 288 days (the
+# all-years tier, ~1,150 snapshots, ~30 min) still evaluates; the 2,160-day
+# maxdata tier does not. Override per suite with ``aimip_eval_train``.
+AIMIP_EVAL_TRAIN_MAX_DAYS = 300
+
 
 # ----------------------------------------------------------------------
 # YAML loading + overlay merge
@@ -105,6 +113,10 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         # add ~10x compile cost and aren't useful for smoke-level
         # end-to-end verification.
         aimip_radiation="gray",
+        # Mark the merged cfg as a smoke run so downstream gates (the
+        # classical-mode rrtmgp pin in campaign_driver) apply their smoke
+        # exemption — gray here is exactly the debug case the pin allows.
+        smoke=True,
         aimip_spatial_surface=False,
         aimip_rollout_days=1,
         # Drop any window list from the base (the all-years scale base
@@ -144,6 +156,22 @@ def _surface_forcing_cfg(cfg: dict[str, Any]) -> tuple[str | None, str | None]:
     return path, cache
 
 
+def _as_bool(value) -> bool:
+    """YAML flag -> bool. Thin alias for the shared parser (one answer for the
+    same key across the four drivers that read it)."""
+    from legoesm.training.campaign_driver import parse_bool_flag
+    return parse_bool_flag(value)
+
+
+def _classical_default_schemes() -> dict[str, str]:
+    """The one default-scheme table (``legoesm.training.aimip_params``).
+
+    Deferred import so this module's arg-parse layer stays JAX-free.
+    """
+    from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES
+    return CLASSICAL_DEFAULT_SCHEMES
+
+
 def _build_spectral_config(cfg: dict[str, Any]):
     """Translate AIMIP YAML dict into NeuralGCMSpectralConfig."""
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
@@ -151,22 +179,44 @@ def _build_spectral_config(cfg: dict[str, Any]):
     from legoesm.training.losses import LossConfig
 
     loss_kwargs = cfg.get("loss", {}) or {}
+    # Named loss preset (D5): numbers live once in
+    # config/wb/loss_presets/<name>.yaml; the suite's own loss: block wins
+    # key-by-key.
+    _preset = cfg.get("loss_preset")
+    if _preset:
+        from legoesm.training.loss_presets import (
+            load_loss_preset,
+            merge_loss_preset,
+        )
+        loss_kwargs = merge_loss_preset(load_loss_preset(str(_preset)), loss_kwargs)
+    _unknown = set(loss_kwargs) - set(LossConfig._fields)
+    if _unknown:
+        raise ValueError(
+            f"Unknown loss config keys {sorted(_unknown)} (typo?); valid "
+            f"keys are the LossConfig fields in training/losses.py."
+        )
     # YAML lists -> tuples for fields LossConfig declares as tuples.
     # Keeps the NamedTuple hashable for ``filter_jit`` static-arg
     # comparisons and matches the tuple-typed default.
     _tuple_fields = {"multi_step_hours", "multi_step_weights"}
     loss_config = LossConfig(**{
         k: (tuple(v) if k in _tuple_fields and v is not None else v)
-        for k, v in loss_kwargs.items() if k in LossConfig._fields
+        for k, v in loss_kwargs.items()
     })
 
     # Rollout curriculum (aimip_rollout_curriculum: [[lead_hours, epochs],
     # ...]): the loader must build a target at EVERY curriculum lead, so
     # loss.multi_step_hours is forced to the sorted unique leads (equal
     # weights; the curriculum path scores one lead per phase anyway).
+    # parse_curriculum accepts both the legacy [[hours, epochs], ...] form
+    # and the extended dict-stage form ({"stages": [...]}); lr_scale /
+    # pushforward metadata is carried by the stages (schedule wiring is the
+    # documented open item), while the (hours, epochs) pairs drive the
+    # epoch plan exactly as before.
+    from legoesm.training.curriculum import parse_curriculum
+    _stages = parse_curriculum(cfg.get("aimip_rollout_curriculum"))
     curriculum = tuple(
-        (int(h), int(ep))
-        for h, ep in (cfg.get("aimip_rollout_curriculum") or ())
+        (int(s.rollout_hours), int(s.n_epochs)) for s in _stages
     ) or None
     if curriculum:
         _leads = tuple(sorted({h for h, _ in curriculum}))
@@ -178,6 +228,42 @@ def _build_spectral_config(cfg: dict[str, Any]):
     sfno_embed = int(cfg.get("sfno_embed_dim", 128))
     sfno_n_blocks = int(cfg.get("sfno_n_blocks", 4))
     sfno_mlp_expansion = int(cfg.get("sfno_mlp_expansion", 4))
+    sfno_dropout = float(cfg.get("sfno_dropout", 0.0))
+    # U-Cast stage 2. Both MUST be forwarded: a suite that sets
+    # crps_finetune_epochs while the builder drops it would run pure stage 1
+    # and log nothing — the dead-knob failure mode this campaign has already
+    # hit twice (sfno_embed_dim shadowed by the variant overlay, 2026-07-27).
+    crps_ft_epochs = int(cfg.get("crps_finetune_epochs", 0))
+    crps_ensemble_size = int(cfg.get("crps_ensemble_size", 2))
+    # Stage 2 is implemented ONLY in the sfno_full trainer
+    # (_train_sfno_full_loop). classical / column_nn / sfno_physics dispatch to
+    # _train_spectral_loop, which never reads these fields — an active setting
+    # there would run pure stage 1 and log nothing (codex review 2026-08-02).
+    _variant = cfg.get("aimip_variant")
+    if crps_ft_epochs > 0 and _variant not in (None, "sfno_full"):
+        raise SystemExit(
+            f"crps_finetune_epochs={crps_ft_epochs} is set but variant "
+            f"{_variant!r} trains through the dycore-mode loop, which does "
+            "not implement the U-Cast stage-2 CRPS fine-tune. Use "
+            "aimip_variant=sfno_full or remove the knob."
+        )
+
+    # ``aimip_grid`` was a DEAD KEY: every AIMIP config declares it, nothing
+    # read it, and the grid is hardcoded ``create_gaussian_grid`` at two sites
+    # below. A suite asking for "mpas" or "latlon" silently got a Gaussian
+    # spectral grid — the same silent-wrong-config trap that had `fix_mass`
+    # reaching a code path the forecast never executes. Refuse instead of
+    # advertising a choice that does not exist. (The lat-lon and MPAS AIMIP
+    # lanes live in run_aimip_latlon.py, which builds its own grid.)
+    _grid = str(cfg.get("aimip_grid", "gaussian"))
+    if _grid != "gaussian":
+        raise SystemExit(
+            f"aimip_grid={_grid!r} is not supported by run_aimip.py, which "
+            "builds a Gaussian spectral grid unconditionally. This key was "
+            "silently ignored before, so a suite could ask for another grid "
+            "and get Gaussian anyway. Use scripts/run/run_aimip_latlon.py for "
+            "the lat-lon C-grid lane, or set aimip_grid: gaussian."
+        )
 
     return NeuralGCMSpectralConfig(
         n_max=int(cfg["n_max"]),
@@ -191,12 +277,43 @@ def _build_spectral_config(cfg: dict[str, Any]):
             hyperdiff_coeff=2.5e15,
             hyperdiff_order=2,
             time_integrator="ssp_rk3",
-            spectral_filter_strength=0.01,
-            spectral_filter_order=8,
+            # Suite-configurable: an sfno_full arm needs to tune the post-step
+            # damping, and hardcoding these made a suite-supplied value
+            # SILENTLY IGNORED (codex review 2026-07-28). Defaults unchanged.
+            spectral_filter_strength=float(
+                cfg.get("spectral_filter_strength", 0.01)),
+            spectral_filter_order=int(cfg.get("spectral_filter_order", 8)),
+            # Dry-mass anchor, OFF by default (SpectralPEConfig's own default),
+            # so every existing arm is byte-identical. Reachable from a suite
+            # because the dycore arms drift: the 8-init 2017 scorecards give an
+            # area-weighted mslp bias of -202 Pa at 24 h growing to -1.64e3 Pa
+            # at 240 h for BOTH classical and column_nn, while sfno_full — no
+            # dycore, and its SFNO physics projects the global mean out of
+            # dlnps/dt — sits at -56 / -84 Pa. 65% of classical's day-10 z500
+            # MSE is that bias. The anchor is the dycore's existing answer to
+            # exactly this drift and had no way to be switched on from AIMIP.
+            fix_mass=bool(cfg.get("fix_mass", False)),
+            anchor_mass_to_initial=bool(
+                cfg.get("anchor_mass_to_initial", False)),
+            # Energy-conserving numerics (defaults ON — see SpectralPEConfig;
+            # the legacy upwind form leaked -0.48 K/day of global-mean T).
+            vertical_advection_scheme=str(
+                cfg.get("vertical_advection_scheme", "sb_centered")),
+            frictional_heating=bool(cfg.get("frictional_heating", True)),
         ),
         sfno_embed_dim=sfno_embed,
         sfno_n_blocks=sfno_n_blocks,
         sfno_mlp_expansion=sfno_mlp_expansion,
+        sfno_dropout=sfno_dropout,
+        sfno_history_steps=int(cfg.get("sfno_history_steps", 0)),
+        crps_finetune_epochs=crps_ft_epochs,
+        crps_ensemble_size=crps_ensemble_size,
+        muon_lr_scale=float(cfg.get("muon_lr_scale", 1.0)),
+        adamw_lr_scale=float(cfg.get("adamw_lr_scale", 1.0)),
+        muon_weight_decay_scale=float(
+            cfg.get("muon_weight_decay_scale", 0.0)),
+        adamw_weight_decay_scale=float(
+            cfg.get("adamw_weight_decay_scale", 1.0)),
         n_epochs=int(cfg["aimip_n_epochs"]),
         lr=float(cfg["aimip_lr"]),
         weight_decay=float(cfg["aimip_weight_decay"]),
@@ -217,6 +334,7 @@ def _build_spectral_config(cfg: dict[str, Any]):
         chunk_windows=int(cfg.get("aimip_chunk_windows", 0)),
         chunk_prefetch=bool(cfg.get("aimip_chunk_prefetch", False)),
         data_parallel=bool(cfg.get("aimip_data_parallel", False)),
+        ema_decay=float(cfg.get("aimip_ema_decay", 0.0)),
         spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
         rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
@@ -243,6 +361,17 @@ def _train_variant(
 
     resume_from_dir = (
         Path(cfg["output_dir"]) / cfg["aimip_variant"] if resume else None
+    )
+
+    # Radiation pin, EVERY variant (not just classical, which is where this
+    # check used to live): an AIMIP run uses rrtmgp. Scheme comparisons must
+    # not be confounded by the radiation backend, and gray carries no trainable
+    # knob. --smoke may still use gray for a wiring check.
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
+        str(cfg.get("aimip_radiation", "rrtmgp")),
+        campaign="aimip",
+        smoke=bool(cfg.get("smoke", False)),
     )
 
     if variant == "classical":
@@ -347,8 +476,6 @@ def _train_aimip_classical(
         )
     )
 
-    params, start_epoch = maybe_resume_model(params, resume_from_dir)
-
     # Host-resident dataset (#1155): classical loads ALL pairs up front (no
     # chunking) — at T106 all-years the eager device build is ~130 GB, an
     # unconditional GPU OOM (job 6758505 died at snapshot ~1200/4032 during
@@ -414,19 +541,108 @@ def _train_aimip_classical(
     # single-callable path runs.
     split_rad = rad_update_interval > 1
 
-    # Physics scheme dispatch from YAML.  Defaults reproduce the legacy
-    # AIMIP classical recipe (tiedtke + louis + mcfarlane + none).
+    # Physics scheme dispatch from YAML. Defaults come from
+    # CLASSICAL_DEFAULT_SCHEMES and fill every family — microphysics used to
+    # default to "none", which produced an incomplete classical model.
     # Used by the combinatorial physics sweep
     # (scripts/run/run_aimip_classical_sweep_stage1.py).
-    conv_scheme = str(cfg.get("aimip_convection", "tiedtke"))
-    turb_scheme = str(cfg.get("aimip_turbulence", "louis"))
-    gwd_scheme = str(cfg.get("aimip_gwd", "mcfarlane"))
-    micro_scheme = str(cfg.get("aimip_microphysics", "none"))
-    cloud_scheme = str(cfg.get("aimip_cloud", "xu_randall"))
+    from legoesm.training.aimip_params import CLASSICAL_DEFAULT_SCHEMES as _DS
+    conv_scheme = str(cfg.get("aimip_convection", _DS["convection"]))
+    turb_scheme = str(cfg.get("aimip_turbulence", _DS["turbulence"]))
+    gwd_scheme = str(cfg.get("aimip_gwd", _DS["gwd"]))
+    # Was "none", which produced classical runs missing a whole family.
+    micro_scheme = str(cfg.get("aimip_microphysics", _DS["microphysics"]))
+    cloud_scheme = str(cfg.get("aimip_cloud", _DS["cloud"]))
+    rad_scheme_for_gate = str(cfg.get("aimip_radiation", _DS["radiation"]))
+    # bool("false") is True — a quoted YAML flag would have silently WAIVED the
+    # completeness gate (codex). Parse the string spellings explicitly.
+    _allow_unfilled = _as_bool(cfg.get("aimip_allow_unfilled_families", False))
+    # A classical model carries one parameterization of EVERY family; an
+    # unfilled family is a different model, and it invalidates any scheme-swap
+    # comparison against runs that have it (user directive 2026-08-11).
+    from legoesm.training.aimip_params import validate_classical_scheme_set
+    validate_classical_scheme_set(
+        convection=conv_scheme, turbulence=turb_scheme, cloud=cloud_scheme,
+        microphysics=micro_scheme, radiation=rad_scheme_for_gate,
+        gwd=gwd_scheme,
+        # Scheme-ablation suites (config/aimip/sweep/stage1/combo_*_none) drop
+        # one family ON PURPOSE. They must declare it; the resulting model is
+        # not comparable to a complete one.
+        allow_unfilled=_allow_unfilled,
+    )
+    # Surface bulk-flux scheme (constant | most | coare3 | large_yeager).
+    # Default "constant" reproduces the legacy AIMIP surface path; "most"
+    # activates the Monin-Obukhov stability functions + log-law local z0 so
+    # the trained surface_most_* / z0h_z0_ratio leaves become live gradients.
+    surface_bulk_scheme = str(cfg.get("aimip_surface_bulk_scheme", "constant"))
+    # OPT-IN: train the ACTIVE schemes' spec-declared parameters too.
+    #
+    # AIMIPClassicalParams maps its leaves through hand-written to_<scheme>_
+    # config methods, so a scheme without one (Bechtold, CLUBB, Thompson, ...)
+    # ran at defaults with NO gradient. ``aimip_trainable_schemes`` wraps the
+    # trained model in an AIMIPTrainableBundle that ALSO carries a spec-driven
+    # TrainablePhysicsParams for whatever schemes this arm actually runs, so
+    # eqx.filter_value_and_grad differentiates both. Measured at tier
+    # "extended": edmf+louis exposes 46 trainable leaves, bechtold+clubb 102.
+    #
+    # Default OFF: the trained model stays a bare AIMIPClassicalParams and
+    # every existing checkpoint keeps its pytree layout.
+    #
+    # OWNERSHIP: the spec route covers only the schemes the legacy route
+    # CANNOT. ``_splice_scheme_overrides`` runs AFTER the ``to_<x>_config``
+    # methods, so a class both routes cover would be overwritten by the spec
+    # value and the legacy leaf's gradient would silently go to zero — see
+    # ``aimip_legacy_owned_scheme_keys``.
+    _scheme_tier = cfg.get("aimip_trainable_schemes")
+    if _scheme_tier:
+        from legoesm.training.aimip_params import (
+            AIMIPTrainableBundle,
+            aimip_legacy_owned_fields,
+            aimip_scheme_keys_for,
+        )
+        from legoesm.training.param_collector import build_trainable_params
+
+        _active = aimip_scheme_keys_for(
+            convection=conv_scheme, turbulence=turb_scheme, gwd=gwd_scheme,
+            microphysics=micro_scheme, radiation=radiation,
+            cloud=cloud_scheme,
+        )
+        # FIELD-level ownership (was class-level, which suppressed spec-only
+        # fields of legacy-touched classes — Sundqvist qc_crit, McFarlane
+        # fcrit2, most of CloudConfig — so they trained nowhere): exclude only
+        # the fields the legacy to_*_config methods actually write, since
+        # _splice_scheme_overrides would overwrite exactly those.
+        _owned = aimip_legacy_owned_fields(cloud_scheme=cloud_scheme)
+        _scheme_params = build_trainable_params(
+            active_scheme_keys=_active,
+            tier=(_scheme_tier if isinstance(_scheme_tier, str) else "extended"),
+            exclude=tuple(sorted(_owned)),
+        )
+        _n_scheme = sum(len(v) for v in _scheme_params.to_overrides().values())
+        if _n_scheme == 0:
+            raise SystemExit(
+                f"aimip_trainable_schemes={_scheme_tier!r} but no active "
+                f"scheme (conv={conv_scheme} turb={turb_scheme} "
+                f"gwd={gwd_scheme} micro={micro_scheme} rad={radiation} "
+                f"cloud={cloud_scheme}) adds a spec-declared parameter beyond "
+                "the legacy-owned fields — the knob would train nothing new."
+            )
+        params = AIMIPTrainableBundle(classical=params, schemes=_scheme_params)
+        logger.info(
+            "AIMIP classical: %d spec-driven scheme parameter(s) trainable "
+            "(tier=%s) across %s; %d legacy-owned field(s) excluded",
+            _n_scheme, _scheme_tier, sorted(_active), len(_owned))
+
+    # Resume AFTER the bundle wrap: Equinox accepts a PREFIX template, so
+    # deserialising a bundle checkpoint into a bare AIMIPClassicalParams
+    # restores only the classical half and silently re-initialises every
+    # trained scheme parameter on each chain link.
+    params, start_epoch = maybe_resume_model(params, resume_from_dir)
+
     logger.info(
         f"AIMIP classical physics: conv={conv_scheme} turb={turb_scheme} "
         f"gwd={gwd_scheme} micro={micro_scheme} cloud={cloud_scheme} "
-        f"rad={radiation}"
+        f"surface_bulk={surface_bulk_scheme} rad={radiation}"
     )
 
     # Training-period-mean GHG for the classical RRTMGP (CO2 matters for the
@@ -453,9 +669,13 @@ def _train_aimip_classical(
             rad_update_interval_steps=rad_update_interval,
             convection_scheme=conv_scheme,
             turbulence_scheme=turb_scheme,
+            surface_bulk_scheme=surface_bulk_scheme,
             gwd_scheme=gwd_scheme,
             microphysics_scheme=micro_scheme,
             cloud_scheme=cloud_scheme,
+            # Forwarded, or the factory's own gate re-raises for exactly the
+            # ablation suites the runner just cleared (codex round 3).
+            allow_unfilled_families=_allow_unfilled,
             land_mask=land_mask,
             split_rad=split_rad,
             rrtmgp_gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
@@ -491,6 +711,7 @@ def _train_aimip_classical(
         grid, sigma, ic_states, target_carries, spec_cfg,
         start_epoch=start_epoch,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        resume_from_dir=resume_from_dir,   # EMA resume needs the dir too
     )
 
 
@@ -641,9 +862,18 @@ def _evaluate_variant(
             rad_update_interval_steps=eval_rad_interval,
             convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
             turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
+            surface_bulk_scheme=str(cfg.get("aimip_surface_bulk_scheme", "constant")),
             gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
-            microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
-            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
+            # Same default as training above (one source): these used to
+            # disagree, so an omitted key trained WITH microphysics and
+            # evaluated WITHOUT it.
+            microphysics_scheme=str(cfg.get(
+                "aimip_microphysics",
+                _classical_default_schemes()["microphysics"])),
+            cloud_scheme=str(cfg.get(
+                "aimip_cloud", _classical_default_schemes()["cloud"])),
+            allow_unfilled_families=_as_bool(
+                cfg.get("aimip_allow_unfilled_families", False)),
             land_mask=eval_land_mask,
             split_rad=eval_split_rad,
         )
@@ -689,6 +919,11 @@ def _evaluate_variant(
                 n_blocks=spec_cfg.sfno_n_blocks,
                 mlp_expansion=spec_cfg.sfno_mlp_expansion,
                 residual_prediction=False,
+                # Must match the TRAINED architecture, or the wrapper's
+                # config-equality guard raises. Dropout is inert here (eval
+                # passes no key), so this is the deterministic mean forecast
+                # of a dropout-trained network, which is what we score.
+                dropout=spec_cfg.sfno_dropout,
             ),
             mode="state_update",
             dt_sfno=eval_dt_sfno,
@@ -696,7 +931,20 @@ def _evaluate_variant(
             # Not yet wired in the SFNO PE bridge (spectral moisture tracer
             # needs synthesis/clip/re-analysis); previously silently ignored.
             correct_moisture_budget=False,
-            clip_q=False,
+            # PRE-EXISTING TRAIN/EVAL MISMATCH, fixed here (found by codex
+            # review 2026-08-01, unrelated to the U-Cast work above): this
+            # in-run evaluation rolled the emulator with clip_q=False and NO
+            # post-step spectral filter, while _train_sfno_full_loop trains
+            # with clip_q=True and the suite's filter. Without the filter the
+            # vor/div cascade that spectral differentiation of the network's
+            # u,v feeds each macro step is undamped — the measured signature is
+            # 969 m/s winds by macro step 4 and NaN at step 12. The standalone
+            # WB2 evaluator already read these off pe_config; this lane was
+            # missed, so it scored a different model from the one trained.
+            clip_q=True,
+            spectral_filter_strength=(
+                spec_cfg.pe_config.spectral_filter_strength),
+            spectral_filter_order=spec_cfg.pe_config.spectral_filter_order,
             use_normalization=True,
         )
         eval_full_wrapper = SFNOPrimitiveEquationModel(
@@ -951,17 +1199,98 @@ def main():
             # the held-out test windows (default 2017).  Both reports use
             # an identical loss / rollout horizon so they are directly
             # comparable in absolute K.
+            # Evaluate-the-EMA doctrine (D3): when EMA is enabled, score and
+            # publish the EMA weights (params_ema.eqx) alongside the raw
+            # params.eqx; the scorecard records which weights were scored.
+            eval_model = model
+            eval_weights = "raw"
+            ema_ckpt_path = None
+            if float(cfg.get("aimip_ema_decay", 0.0)) > 0.0:
+                import equinox as eqx
+                # The returned ``model`` matches the newest RAW checkpoint.
+                # Standalone EMA files are the per-epoch epoch_NNNN_ema.eqx
+                # (the chunked path folds the EMA into the atomic
+                # chunk_latest.eqx instead — not a file readable here). Eval
+                # the newest epoch EMA only when it is at least as new as the
+                # newest raw checkpoint (incl. chunk_latest.eqx); otherwise
+                # the model is ahead of any standalone EMA (a torn epoch pair
+                # or a chunk-ahead eval-only resume), so fall back to raw
+                # rather than publish a stale EMA.
+                from legoesm.training.neural_gcm_spectral import (
+                    MIDEPOCH_CHECKPOINT_NAME,
+                )
+                _vdir = output_dir / variant
+                _raws = [
+                    p for p in _vdir.glob("epoch_*.eqx")
+                    if not p.stem.endswith("_ema")
+                ] + list(_vdir.glob(MIDEPOCH_CHECKPOINT_NAME))
+                _emas = list(_vdir.glob("epoch_*_ema.eqx"))
+                _newest_raw_mt = (
+                    max(p.stat().st_mtime for p in _raws) if _raws else None
+                )
+                _newest_ema = (
+                    max(_emas, key=lambda p: p.stat().st_mtime)
+                    if _emas else None
+                )
+                if (
+                    _newest_ema is not None
+                    and _newest_raw_mt is not None
+                    and _newest_ema.stat().st_mtime >= _newest_raw_mt
+                ):
+                    from legoesm.ml.checkpoint_io import (
+                        load_checkpoint_or_fail,
+                    )
+                    eval_model = load_checkpoint_or_fail(
+                        _newest_ema, model, what="the EMA weights")
+                    eval_weights = "ema"
+                    logger.info(
+                        f"{variant}: evaluating EMA weights "
+                        f"({_newest_ema.name})"
+                    )
+                else:
+                    logger.warning(
+                        f"{variant}: aimip_ema_decay set but no EMA newer "
+                        "than the latest raw checkpoint (torn/absent) — "
+                        "evaluating raw weights."
+                    )
             eval_metrics_test = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="test",
+                variant, eval_model, cfg, cache_dir, period="test",
             )
-            eval_metrics_train = _evaluate_variant(
-                variant, model, cfg, cache_dir, period="train",
+            # TRAIN-PERIOD eval re-loads the ENTIRE training window set —
+            # 9,504 ERA5 snapshots (~4.2 h) for the 2,160-day maxdata tier —
+            # to report metrics the per-epoch loss curve already tracks. On
+            # 2026-08-02 it consumed the remaining walltime of all three
+            # U-Cast arms AND the maxdata run: the link drained mid-load, so
+            # params.eqx (written AFTER this call) never appeared, the chain
+            # saw "not complete" and resubmitted, and each new link paid the
+            # same cost again. ~36 GPU-h for a diagnostic nobody had asked
+            # for. Default OFF above a threshold; set aimip_eval_train: true
+            # to force it, false to skip it outright.
+            _n_train_days = int(cfg.get("n_train_days", 0) or 0)
+            _eval_train_cfg = cfg.get("aimip_eval_train")
+            if _eval_train_cfg is None:
+                _do_eval_train = _n_train_days <= AIMIP_EVAL_TRAIN_MAX_DAYS
+                if not _do_eval_train:
+                    logger.info(
+                        "%s: SKIPPING the train-period eval (n_train_days=%d "
+                        "> %d): it would re-load the whole training set. Set "
+                        "aimip_eval_train: true to force it.",
+                        variant, _n_train_days, AIMIP_EVAL_TRAIN_MAX_DAYS)
+            else:
+                _do_eval_train = bool(_eval_train_cfg)
+            eval_metrics_train = (
+                _evaluate_variant(
+                    variant, eval_model, cfg, cache_dir, period="train")
+                if _do_eval_train else {}
             )
             ckpt_path = output_dir / variant / "params.eqx"
             ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
             from legoesm.ml.training import save_checkpoint
             save_checkpoint(model, ckpt_path)
+            if eval_weights == "ema":
+                ema_ckpt_path = output_dir / variant / "params_ema.eqx"
+                save_checkpoint(eval_model, ema_ckpt_path)
 
             results["variants"][variant] = {
                 "train_loss_history": [float(x) for x in loss_history],
@@ -969,18 +1298,33 @@ def main():
                 "eval_metrics": eval_metrics_test,
                 "eval_metrics_train_period": eval_metrics_train,
                 "checkpoint": str(ckpt_path),
+                "eval_weights": eval_weights,
+                **(
+                    {"checkpoint_ema": str(ema_ckpt_path)}
+                    if ema_ckpt_path is not None else {}
+                ),
             }
             # ``loss_history`` is empty on an eval-only resume (all epochs already
             # done, start_epoch == n_epochs -> zero training iterations); guard the
             # [-1] so the scorecard write below still runs (e.g. scorecard regen).
             last_train_loss = loss_history[-1] if loss_history else float("nan")
+            # ``eval_metrics_train`` is {} when the train-period eval is gated
+            # off (see AIMIP_EVAL_TRAIN_MAX_DAYS): indexing it unconditionally
+            # raised KeyError HERE, after params.eqx was saved but before the
+            # scorecard write and the MPI barrier — i.e. it would have killed
+            # every large-tier run at the finish line (codex review
+            # 2026-08-03).
+            _train_rmse_msg = (
+                f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
+                f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K"
+                if eval_metrics_train else "train RMSE skipped"
+            )
             logger.info(
                 f"{variant}: train_loss[-1]={last_train_loss:.6f}, "
                 f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
                 f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
                 f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
-                f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
-                f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
+                f"{_train_rmse_msg}, "
                 f"train_time={train_elapsed:.1f}s"
             )
 

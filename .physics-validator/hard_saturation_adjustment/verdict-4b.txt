@@ -1,0 +1,13 @@
+Round 4:
+
+- (a) **false-positive** for finite positive `dt` and `q_v ≥ 0`: the positive *blended* rate is capped after blending, so \(\Delta q_v\le\min(hc_p/L_v,q_v)\) and \(\Delta T\le h\), including the smooth-leak path. [_warm_rain.py:384–409](/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:384) All five backends thread the field.
+
+- (b) **confirmed-bug**: warm large pools do not always converge monotonically from above. Reproduced x64 CPU: \(T=320\) K, \(p=65400\) Pa, \(q_v=0.2\), \(dt=100\) s. After the capped first step, the next state is RH=1.212984; the uncapped blended step gives RH=0.999151 (hard root alone gives 1.0), then evaporates \(3.09\times10^{-6}\) kg/kg next step. The finite smooth contribution can exceed `cond_hard`, while the absolute 5-K cap is inactive. [_warm_rain.py:384–409](/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:384)
+
+- (c) **confirmed-bug, roundoff-only**: the mass cap is mathematically sufficient, and the `q_c` clamp cannot worsen a positive vapour sink. [_warm_rain.py:404–417](/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/packages/atmosphere/legoesm/atmosphere/physics/microphysics/_warm_rain.py:404) But strict `q_v_new >= 0` is false due to `q_v/dt * dt` rounding: at 150 K, 65400 Pa, \(q_v=5.5889406098\times10^{-8}\), \(dt=30\) s, direct x64 evaluation yields \(-6.62\times10^{-24}\) kg/kg. This is sub-ULP and not physically substantive, but contradicts “always non-negative.”
+
+- (d) **false-positive**: no live-gradient loss. Below a cap, `minimum` passes the original blend; at the heating cap the local T/q/p sensitivity is correctly zero; at the vapour cap, sensitivity to `q_v` remains \(1/dt\). Kinks at the limiter surfaces are expected.
+
+- (e) **confirmed test gap**: the multi-step test covers only 230 K and its RH tolerance permits undersaturation down to 0.998. [test_hard_saturation_adjustment.py:182–205](/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/tests/unit/test_hard_saturation_adjustment.py:182) Add the warm counterexample and assert nonnegative condensation/RH≥1 without a loose undersaturation tolerance.
+
+OVERALL VERDICT: findings remain: the warm-pool final blended step can overshoot saturation and re-evaporate; strict mass positivity also has a negligible floating-point breach.

@@ -768,11 +768,24 @@ def pad_with_pole_bc_lat_multi(
 
     # SPMD leg of the message-aggregation lever (audit item 7): ONE
     # ppermute pair per direction per dtype group instead of one per
-    # field.  OPT-IN (default off — flip per deck only with a measured
-    # GPU A/B receipt, per the audit item's contract).  Value-identical
-    # to the per-field pads (the exchange is a bit-copy).
+    # field.  Value-identical to the per-field pads (the exchange is a
+    # bit-copy), so this is a pure collective-COUNT reduction: census
+    # 41 -> 29 collective-permutes/step at IDENTICAL bytes.
+    #
+    # DEFAULT ON since the audit item's contract -- "flip per deck only
+    # with a measured GPU A/B receipt" -- is satisfied on both lanes:
+    #   atm  LL2048, jobs 26681636/26681858:  -5.4 % @64, -4.5 % @128
+    #        (fused alone; A/A2 off-arms bracket at 6.590/6.650 @64)
+    #   ocean LL2304@128, job 26692291:       -4.9 % (A/A2 drift 0.06 %)
+    # Both are the fused-alone arm, i.e. exactly this flag; the larger
+    # atm -20.3 %/-15.0 % numbers stack XLA overlap, which is a separate
+    # job-level env knob (LEGOESM_XLA_OVERLAP, _env.sh) and is NOT
+    # implied here -- it showed no ocean benefit.
+    #
+    # Set LEGOESM_LATLON_SPMD_FUSED_HALO=0 to restore the per-field
+    # ppermutes (byte-identical, just more collectives).
     _spmd_fused = os.environ.get(
-        "LEGOESM_LATLON_SPMD_FUSED_HALO", "0") != "0"
+        "LEGOESM_LATLON_SPMD_FUSED_HALO", "1") != "0"
     if _spmd_fused:
         mesh = _spmd_lat_mesh()
         if mesh is not None:
@@ -976,7 +989,7 @@ def widen_cgrid_geometry_band(geom, halo: int):
     if getattr(geom, "seam_wall_rows", None) is not None:
         cell_names = cell_names + ("seam_wall_rows",)
     vface_names = ("dx_v", "dy_v", "area_q", "f_v", "cos_alpha_v",
-                   "sin_alpha_v")
+                   "sin_alpha_v", "cos_lat_v")
     cell_wide = widen_band_cell_fields(
         tuple(getattr(geom, n) for n in cell_names), halo, clamp_poles=True)
     vface_wide = widen_band_vface_fields(

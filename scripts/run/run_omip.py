@@ -28,7 +28,12 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:  # annotation-only; the runtime import stays function-scoped
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -446,6 +451,16 @@ def parse_args(argv: list[str] | None = None):
                         "models use ~60-75 levels (NEMO ORCA1 L75, MOM6, POP2); "
                         "40 is the climate-usable minimum. Pass --nlev 20 for a "
                         "faster dev/matrix run.")
+    p.add_argument("--dz-ref-file", type=str, default=None,
+                   help=(
+                       "Path to a 1-D list of layer thicknesses [m] "
+                       "(whitespace/newline separated text, or .npy) that "
+                       "REPLACES the tanh-stretched z* profile with an EXACT "
+                       "external vertical grid — e.g. FESOM's CORE2 47 levels "
+                       "or NEMO's e3t_1d. Its length must equal --nlev. "
+                       "Without it the level COUNT can be matched but not the "
+                       "level PLACEMENT."
+                   ))
     p.add_argument("--H-max", type=float, default=5500.0)
     p.add_argument("--dt", type=float, default=None,
                    help="Timestep [s] (default: grid-specific)")
@@ -494,7 +509,18 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--r-factor-max", type=float, default=0.2,
                    help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
     p.add_argument("--north-cap-lat", type=float, default=90.0,
-                   help="Latitude [°N] above which all cells become land (default 80).")
+                   help=(
+                       "Latitude [°N] above which all cells become land. "
+                       "DEFAULT 90 = NO CAP: the North Pole stays open. On a "
+                       "global regular lat-lon grid the meridians converge "
+                       "there (dx = R·dlon·cos(lat) ≈ 970 m at 89.5°N), so an "
+                       "uncapped pole is a CFL trap — a rest-state OMIP run at "
+                       "dt=2400 s reached |u| = 19 m/s and advective CFL 47 at "
+                       "89.5°N within 3 steps. Capping at 80 removed it "
+                       "(|u|max 0.014 m/s). Cap unless you know the polar "
+                       "dynamics are handled. (The help here previously "
+                       "claimed 'default 80', which was wrong.)"
+                   ))
     p.add_argument("--south-cap-lat", type=float, default=-80.0,
                    help=(
                        "Latitude [°S] below which all cells become land. "
@@ -746,6 +772,64 @@ def parse_args(argv: list[str] | None = None):
                        "Path to JRA55-do Zarr cache. Required when "
                        "--forcing-mode=jra55_do_tropical."
                    ))
+    # River-runoff routing.  Default "none" reproduces the historical
+    # behaviour bit-for-bit: runoff is delivered where the product puts it and
+    # the model's dry-cell masking DISCARDS whatever landed on land — ~71 % of
+    # the JRA55-do global total at 0.5625 deg.  FESOM2's counterpart is
+    # use_runoff_mapper / runoff_radius (500 km).
+    p.add_argument("--runoff-routing", type=str, default="none",
+                   choices=["none", "nearest", "spread"],
+                   help=(
+                       "Route river runoff off dry cells onto wet ones, "
+                       "conserving total discharge. 'none' (default) = "
+                       "historical behaviour, land-cell runoff is lost. "
+                       "'nearest' = each dry cell's discharge goes to its "
+                       "closest wet cell within --runoff-radius-km. "
+                       "'spread' = divided over every wet cell in range "
+                       "(area-weighted), closer to FESOM's mapper and avoids "
+                       "a salinity crater under a big river."
+                   ))
+    p.add_argument("--runoff-radius-km", type=float, default=500.0,
+                   help=("Search radius [km] for --runoff-routing "
+                         "(default 500, matching FESOM2's runoff_radius)."))
+    # Sea-ice rheology for the --jra55-sea-ice tile.  Before these existed the
+    # lane hard-coded SeaIceConfig(), i.e. dynamics="none" / n_categories=1 --
+    # a thermodynamic slab with diagnostic free drift and NO rheology, while
+    # every OMIP-2 reference model (FESOM2: EVP, 120 subcycles, P*=30000)
+    # runs one.  Defaults below reproduce the old slab bit-for-bit.
+    p.add_argument("--ice-dynamics", type=str, default="none",
+                   choices=["none", "free_drift", "evp", "mevp"],
+                   help=(
+                       "Sea-ice momentum solver for --jra55-sea-ice. "
+                       "'none' (default) = thermodynamic slab with diagnostic "
+                       "free drift, the historical behaviour. 'evp' = "
+                       "Hunke-Dukowicz 1997 (FESOM2's whichEVP=0), 'mevp' = "
+                       "Bouillon 2013 / Kimmritz 2015."
+                   ))
+    p.add_argument("--ice-categories", type=int, default=1,
+                   help=(
+                       "Sea-ice thickness categories for --jra55-sea-ice "
+                       "(default 1). CICE-standard bounds exist for 1/3/5/7."
+                   ))
+    p.add_argument("--ice-n-evp", type=int, default=None,
+                   help="EVP subcycles per ice step (SeaIceConfig.N_evp, "
+                        "default 120; FESOM2 evp_rheol_steps = 120).")
+    p.add_argument("--ice-p-star", type=float, default=None,
+                   help="Ice strength parameter P* [N/m^2] "
+                        "(default 2.75e4; FESOM2 Pstar = 3.0e4).")
+    p.add_argument("--ice-e-yield", type=float, default=None,
+                   help="Yield-curve eccentricity (default 2.0).")
+    p.add_argument("--ice-c-strength", type=float, default=None,
+                   help="Strength decay constant C (default 20.0).")
+    p.add_argument("--ice-delta-min", type=float, default=None,
+                   help="Minimum deformation rate [1/s] (default 2.0e-9; "
+                        "FESOM2 delta_min = 1.0e-11).")
+    p.add_argument("--ice-alpha-mevp", type=float, default=None,
+                   help="mEVP stress relaxation alpha (default 500; "
+                        "FESOM2 alpha_evp = 250).")
+    p.add_argument("--ice-beta-mevp", type=float, default=None,
+                   help="mEVP velocity relaxation beta (default 500; "
+                        "FESOM2 beta_evp = 250).")
     p.add_argument("--jra55-co2-ppmv", type=float, default=400.0,
                    help=(
                        "Static atmospheric CO2 [ppmv] for JRA55-do mode "
@@ -941,6 +1025,201 @@ def _build_physics_config(
 # ===========================================================================
 # Grid + model creation
 # ===========================================================================
+
+def _build_runoff_map_for_run(args, grid, grid_type, ocean_mask):
+    """Assemble the static river-runoff routing plan, or ``None``.
+
+    Runoff products place discharge at river mouths resolved on THEIR grid; a
+    coarser ocean calls many of those cells land and its dry-cell masking then
+    discards the water instead of delivering it (measured at ~71 % of the
+    JRA55-do global total).  FESOM2 solves this with ``use_runoff_mapper`` /
+    ``runoff_radius``; this is the legoESM counterpart.
+
+    Returns ``None`` for ``--runoff-routing none`` (the default), which keeps
+    the historical behaviour bit-identical.
+    """
+    scheme = getattr(args, "runoff_routing", "none")
+    if scheme == "none":
+        return None
+
+    from legoesm.ocean.forcing.runoff_mapper import build_runoff_map
+
+    mask = np.asarray(ocean_mask)
+    if grid_type == "latlon":
+        # The grid's OWN metric, not a re-derived one, so the routing budget
+        # uses the same areas every other diagnostic does.
+        area = np.asarray(grid.area)
+        lat_c = np.asarray(grid.lat2d)
+        lon_c = np.asarray(grid.lon2d)
+    elif grid_type == "mpas":
+        # The MPAS lane regrids friver with k=4 inverse-distance weighting
+        # (compute_latlon_to_voronoi_weights), which does NOT conserve
+        # sum(F*A) for a flux density.  Routing on top of that would conserve
+        # an already-wrong discharge and hand back a budget that looks closed.
+        # Refuse until friver gets a conservative lat-lon -> MPAS remap.
+        raise SystemExit(
+            "--runoff-routing is not available on --grid mpas: friver reaches "
+            "the MPAS grid through a k=4 IDW scalar interpolation, which does "
+            "not conserve total discharge, so routing would conserve the "
+            "wrong number. Needs a conservative remap for friver first "
+            "(conservative_regrid_unstructured). Use --runoff-routing none, "
+            "or --grid latlon."
+        )
+    else:
+        raise SystemExit(
+            f"--runoff-routing {scheme!r} is not wired for --grid "
+            f"{grid_type!r} (needs cell areas + centres); use latlon or mpas, "
+            "or --runoff-routing none."
+        )
+    if area.shape != mask.shape:
+        raise SystemExit(
+            f"--runoff-routing: cell-area shape {area.shape} does not match "
+            f"the ocean mask {mask.shape}."
+        )
+
+    # Build with a REAL record so ``unrouted_fraction`` is the discharge this
+    # run actually fails to place, not the 0.0 a missing reference returns.
+    ref = _mean_runoff_record(args)
+    rmap = build_runoff_map(
+        mask, area, lat_c, lon_c,
+        radius_m=float(args.runoff_radius_km) * 1.0e3,
+        scheme=scheme, reference_runoff=ref,
+    )
+    n_moved = int(np.asarray(rmap.src_idx).size)
+    print(f"  Runoff routing: scheme={scheme}, "
+          f"radius={args.runoff_radius_km:g} km, {n_moved} donor-recipient "
+          f"pairs over {int((~mask).sum())} dry cells")
+    if ref is not None:
+        total = float(np.sum(ref * area))
+        if total > 0.0:
+            on_land = float(np.sum(ref[~mask] * area[~mask]))
+            print(f"  Runoff budget (cache time-mean): {total:.4e} kg/s "
+                  f"total, {100.0 * on_land / total:.2f} % on dry cells "
+                  f"before routing, {100.0 * rmap.unrouted_fraction:.2f} % "
+                  f"still unrouted after (no wet cell within "
+                  f"{args.runoff_radius_km:g} km)")
+        else:
+            print("  Runoff budget: cache time-mean discharge is zero; "
+                  "nothing to route.")
+    return rmap
+
+
+def _mean_runoff_record(args):
+    """TIME-MEAN ``friver`` over the whole JRA55-do cache, or ``None``.
+
+    Used only to report how much discharge the routing radius fails to place;
+    never fed to the model.  The mean rather than a single record because the
+    loss is seasonal -- 1 January 1958 integrates to 9.35e8 kg/s against an
+    annual mean of 1.35e9, so a January reference understates the run's loss
+    by a third.  Streamed in chunks so a multi-decade cache does not have to
+    fit in memory.
+
+    A cache that exists but cannot be read is a hard error: silently skipping
+    the diagnostic is how a malformed cache reaches the integration unnoticed.
+    """
+    cache = getattr(args, "jra55_cache", None)
+    if cache is None or not Path(cache).exists():
+        return None
+    import xarray as xr
+    ds = xr.open_zarr(str(cache), decode_times=False)
+    try:
+        n_rec = int(ds.sizes["time"])
+        acc = np.zeros(
+            np.asarray(ds["friver"].isel(time=0).values).shape,
+            dtype=np.float64)
+        chunk = 200
+        for i0 in range(0, n_rec, chunk):
+            acc += np.asarray(
+                ds["friver"].isel(time=slice(i0, min(i0 + chunk, n_rec)
+                                             )).values,
+                dtype=np.float64).sum(axis=0)
+    finally:
+        ds.close()
+    return acc / n_rec
+
+
+def _route_runoff_stack(runoff_stack, rmap):
+    """Apply the routing plan to a stacked runoff field, or pass it through.
+
+    Routing is LINEAR in the runoff field and the plan is static, so routing
+    the RECORDS once here is identical to routing every interpolated step
+    inside the scan — and far cheaper.
+    """
+    if rmap is None:
+        return runoff_stack
+    from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
+    return jax.vmap(lambda r: apply_runoff_map(r, rmap))(runoff_stack)
+
+
+def load_dz_ref_file(path: str | None):
+    """Load a 1-D layer-thickness profile [m] for ``--dz-ref-file``.
+
+    Accepts a ``.npy`` array or any whitespace/newline-separated text file
+    (``#`` comments allowed).  Returns ``None`` for ``path is None`` so the
+    caller keeps the tanh-stretched default.
+
+    Validated here rather than deep in ``_create_setup`` so a bad file fails
+    before any device work: thicknesses must be finite and strictly positive,
+    or the z* coordinate they build is not monotonic and every depth-indexed
+    diagnostic downstream is quietly wrong.
+    """
+    if path is None:
+        return None
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--dz-ref-file not found: {p}")
+    if p.suffix == ".npy":
+        dz = np.load(p)
+    else:
+        dz = np.loadtxt(p, comments="#")
+    dz = np.asarray(dz, dtype=np.float64)
+    if dz.ndim != 1:
+        raise SystemExit(
+            f"--dz-ref-file {p} must hold a 1-D list of thicknesses; got "
+            f"shape {dz.shape}. Ravelling a 2-D file would silently invent a "
+            "vertical grid from whatever order it happened to be stored in."
+        )
+    if dz.size == 0:
+        raise SystemExit(f"--dz-ref-file {p} is empty.")
+    if not np.all(np.isfinite(dz)):
+        raise SystemExit(f"--dz-ref-file {p} has non-finite thicknesses.")
+    if not np.all(dz > 0.0):
+        raise SystemExit(
+            f"--dz-ref-file {p} has non-positive thicknesses "
+            f"(min {dz.min():.6g}); layer thicknesses must be > 0."
+        )
+    return dz
+
+
+def _validate_dz_ref_against_setup(dz, nlev: int, H_max: float) -> None:
+    """Refuse an external vertical grid that disagrees with ``--nlev`` /
+    ``--H-max``.
+
+    ``create_z_star_from_thicknesses`` makes the column exactly ``sum(dz)``
+    deep, but the BATHYMETRY and rest state are still built from
+    ``args.H_max``.  If the two disagree, every full-depth column is silently
+    rescaled and the grid is no longer the "exact" external one that was
+    asked for -- a 6000 m level list against the 5500 m default would look
+    fine and be wrong.  Checking here costs nothing and the failure is
+    otherwise invisible.
+    """
+    if dz is None:
+        return
+    if dz.size != nlev:
+        raise SystemExit(
+            f"--dz-ref-file has {dz.size} levels but --nlev is {nlev}; "
+            f"pass --nlev {dz.size}."
+        )
+    total = float(dz.sum())
+    if abs(total - float(H_max)) > 1e-6 * max(1.0, abs(float(H_max))):
+        raise SystemExit(
+            f"--dz-ref-file sums to {total:.6f} m but --H-max is "
+            f"{float(H_max):.6f} m. The bathymetry and rest state are built "
+            f"from --H-max while the vertical coordinate is built from the "
+            f"file, so a mismatch silently rescales every full-depth column. "
+            f"Pass --H-max {total:.6f}."
+        )
+
 
 def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   physics_preset: str, water_type: str,
@@ -1658,15 +1937,26 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
         lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
 
-    # Coupler config: LY09 bulk flux at 10 m winds, 2 m T/q (the JRA55-do
-    # convention). The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate
-    # reference heights) are wired through CouplerConfig.
+    # Coupler config: LY09 bulk flux with ALL THREE reference heights at 10 m
+    # -- the JRA55-do convention.  ``tas``, ``huss`` and ``uas`` in the
+    # JRA55-do v1.4.0 distribution each carry an explicit ``height = 10.0 m``
+    # coordinate (the CF ``comment`` string "usually, 2 meter" is boilerplate
+    # from the CMOR table and contradicts the file's own coordinate), and
+    # FESOM2 forces the same dataset with
+    # ``ncar_bulk_z_wind = ncar_bulk_z_tair = ncar_bulk_z_shum = 10.0``.
+    # This previously read 2.0 m for T and q, which tells the MOST solver the
+    # 10 m state sits at 2 m and inflates the air-sea gradients: measured on
+    # one day of 1958 JRA55-do over PHC ocean points, with everything else
+    # held fixed, +2.13 W/m^2 sensible (+7.8%) and +11.53 W/m^2 latent
+    # (+10.9%).  See docs/ocean/fidelity/fesom2_gap_analysis.md.
+    # The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate reference
+    # heights) are wired through CouplerConfig.
     from legoesm.coupler.config import CouplerConfig
     coupler_cfg = CouplerConfig(
         bulk_scheme="large_yeager",
         z_ref=10.0,
-        z_t_atm=2.0,
-        z_q_atm=2.0,
+        z_t_atm=10.0,
+        z_q_atm=10.0,
         stability_scheme=args.surface_stability_scheme,
     )
 
@@ -1757,10 +2047,45 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         from legoesm.ice.state import SeaIceState
         state["enable_sea_ice"] = True
         state["enable_freeze_cap"] = False
-        # Slab ice: dynamics="none", n_cat=1.  stability_scheme only takes
-        # effect if bulk_scheme is switched to a MOST-family scheme.
-        state["ice_config"] = SeaIceConfig(
-            stability_scheme=args.surface_stability_scheme)
+        # Rheology + ITD are CLI-selectable (--ice-dynamics / --ice-categories
+        # and the --ice-* parameter overrides).  The defaults reproduce the
+        # historical slab (dynamics="none", n_categories=1) bit-for-bit, so an
+        # existing command line is unaffected; a run that wants FESOM-like ice
+        # asks for it explicitly.  stability_scheme only takes effect if
+        # bulk_scheme is switched to a MOST-family scheme.
+        _ice_dynamics = str(args.ice_dynamics)
+        _ice_ncat = int(args.ice_categories)
+        if _ice_ncat < 1:
+            raise SystemExit(
+                f"--ice-categories must be >= 1; got {_ice_ncat}.")
+        # Rheology needs grid metrics for the strain rates.  ``rheology.py``
+        # implements them for lat-lon and Voronoi (and the cubed sphere, which
+        # this lane does not reach); the tripole geometry has no strain-rate
+        # branch, so refuse rather than silently return zero deformation.
+        if _ice_dynamics != "none" and grid_type not in ("latlon", "mpas"):
+            raise SystemExit(
+                f"--ice-dynamics {_ice_dynamics!r} is not supported on "
+                f"--grid {grid_type!r} (rheology.strain_rates has no branch "
+                "for it); use --grid latlon or mpas, or --ice-dynamics none."
+            )
+        _ice_kw = dict(
+            stability_scheme=args.surface_stability_scheme,
+            dynamics=_ice_dynamics,
+            n_categories=_ice_ncat,
+        )
+        for _flag, _field in (
+            ("ice_n_evp", "N_evp"),
+            ("ice_p_star", "P_star"),
+            ("ice_e_yield", "e_yield"),
+            ("ice_c_strength", "C_strength"),
+            ("ice_delta_min", "Delta_min"),
+            ("ice_alpha_mevp", "alpha_mevp"),
+            ("ice_beta_mevp", "beta_mevp"),
+        ):
+            _v = getattr(args, _flag, None)
+            if _v is not None:
+                _ice_kw[_field] = int(_v) if _field == "N_evp" else float(_v)
+        state["ice_config"] = SeaIceConfig(**_ice_kw)
         # Ice state lives on the full ocean-surface 2-D grid: lat_2d/lon_2d are
         # broadcast factors ((n_lat,1) x (1,n_lon) for lat-lon; (nCells,) for
         # MPAS), so the surface shape is their broadcast — matching SST
@@ -1771,13 +2096,37 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         ))
         _ice_dims = tuple(f"dim{i}" for i in range(len(_ice_shape)))
         _zeros = jnp.zeros(_ice_shape)
-        state["ice_state_init"] = SeaIceState(
-            h_ice=Field(_zeros, name="h_ice", dims=_ice_dims, units="m"),
-            T_ice=Field(jnp.full(_ice_shape, float(_consts.T_freeze_ocean)),
-                        name="T_ice", dims=_ice_dims, units="K"),
-            concentration=Field(_zeros, name="concentration",
-                                 dims=_ice_dims, units="1"),
-        )
+        if _ice_dynamics == "none" and _ice_ncat == 1:
+            # Historical slab: a 3-field SeaIceState.  Kept byte-identical so
+            # an existing --jra55-sea-ice command line is unaffected.
+            state["ice_state_init"] = SeaIceState(
+                h_ice=Field(_zeros, name="h_ice", dims=_ice_dims, units="m"),
+                T_ice=Field(jnp.full(_ice_shape,
+                                     float(_consts.T_freeze_ocean)),
+                            name="T_ice", dims=_ice_dims, units="K"),
+                concentration=Field(_zeros, name="concentration",
+                                    dims=_ice_dims, units="1"),
+            )
+        else:
+            # Rheology and/or ITD need the 12-field DynamicSeaIceState
+            # (velocity + stress components, and a trailing category axis when
+            # n_categories > 1).  ``init_dynamic_ice_state`` owns the shape and
+            # dim-name contract per grid rank, so build through it rather than
+            # assembling Fields here.
+            from legoesm.ice.state import init_dynamic_ice_state
+            _dyn_shape = (_ice_shape + (_ice_ncat,) if _ice_ncat > 1
+                          else _ice_shape)
+            state["ice_state_init"] = init_dynamic_ice_state(
+                _dyn_shape, n_categories=_ice_ncat,
+                T_ice_init=float(_consts.T_freeze_ocean),
+            )
+        # The grid is needed by ANY DynamicSeaIceState path, not just a
+        # rheology: step_sea_ice validates the state's spatial rank against
+        # the grid, and with grid=None it assumes the cubed sphere and fails
+        # on the first step for a lat-lon/MPAS multi-category state.  So the
+        # condition must match the one that chose the dynamic state above.
+        state["ice_grid"] = (
+            grid if (_ice_dynamics != "none" or _ice_ncat > 1) else None)
     else:
         state["enable_sea_ice"] = False
 
@@ -2042,7 +2391,11 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
         runoffs.append(slc.friver)
 
     atm_stack = {f: jnp.stack(accum[f]) for f in fields}
-    runoff_stack = jnp.stack(runoffs)
+    # Route runoff off dry cells ONCE on the record stack: the routing
+    # is linear in the field and its plan is static, so this is
+    # identical to routing every interpolated step inside the scan.
+    runoff_stack = _route_runoff_stack(
+        jnp.stack(runoffs), jra55_state.get("runoff_map"))
     return atm_stack, runoff_stack
 
 
@@ -2207,7 +2560,8 @@ def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
             start_step_idx, n_steps, dt, n_cache_records, cycle))
 
     raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
-    runoff_stack = raw_stack["friver"]
+    runoff_stack = _route_runoff_stack(
+        raw_stack["friver"], jra55_state.get("runoff_map"))
 
     record_meta = {
         "record_days": record_days,
@@ -2285,7 +2639,8 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
                 for i in range(raw_stack[var].shape[0])
             ])
 
-    runoff_stack = raw_stack["friver"]
+    runoff_stack = _route_runoff_stack(
+        raw_stack["friver"], jra55_state.get("runoff_map"))
 
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
@@ -2298,6 +2653,36 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     }
 
     return raw_stack, runoff_stack, record_meta
+
+
+def _seed_mass_flux_for_scan(model, state):
+    """Seed ``store_mass_flux``'s state slots before a ``lax.scan`` (#1442).
+
+    The block scans below carry the ocean state as a ``lax.scan`` CARRY, and
+    ``_step_impl`` turns ``mass_flux_u``/``_v``/``_w`` from ``None`` into
+    ``Field``s when the flag is on -- a carry-structure mismatch that aborts
+    the scan on the first iteration (codex round-6 RED 1).  Seeding here, at
+    the scan-driver boundary, is the fix; seeding inside the SPMD step is too
+    late because this scan wraps it.
+
+    Grid-agnostic: keyed off ``getattr(model.config, "store_mass_flux", False)``
+    so an MPAS / cube model (whose config has no such field, and whose state
+    has no such slots) returns unchanged, and so does any lat-lon run with the
+    flag off.  Called for its structure, never for its values.
+    """
+    _mass = getattr(model.config, "store_mass_flux", False)
+    _salt = getattr(model.config, "store_salt_flux", False)
+    if not (_mass or _salt):
+        return state
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        seed_mass_flux_carry,
+        seed_salt_flux_carry,
+    )
+    if _mass:
+        state = seed_mass_flux_carry(state, True)
+    if _salt:
+        state = seed_salt_flux_carry(state, True)
+    return state
 
 
 def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
@@ -2327,6 +2712,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     # forces enable_freeze_cap=False when ice is on (no double-capping).
     enable_sea_ice = bool(jra55_state.get("enable_sea_ice", False))
     ice_cfg = jra55_state.get("ice_config")
+    # None unless --ice-dynamics selects a rheology; the strain
+    # rates need grid metrics, the slab path does not.
+    ice_grid = jra55_state.get("ice_grid")
 
     sponge = _build_sponge_forcing(jra55_state) if enable_sponge else None
 
@@ -2367,12 +2755,21 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
             "--enable-latlon-spmd).")
-    _dyn_step = (spmd_step if spmd_step is not None
-                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
+    # aux threading (codex r18 P1): the SPMD step's sharded geometry
+    # stacks must cross THIS jit boundary as an ARGUMENT — captured in the
+    # closure they become outer-trace constants whose value jax cannot
+    # fetch for non-addressable arrays on multicontroller (see
+    # make_sharded_ocean_step's aux note).
+    if spmd_step is not None:
+        def _dyn_step(st, d, aux=None, **kw):
+            return spmd_step(st, d, aux=aux, **kw)
+    else:
+        def _dyn_step(st, d, aux=None, **kw):
+            return model._step_impl(st, d, **kw)
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step,
-                 ice_state=None):
+                 ice_state=None, aux=None):
         def step_body(carry, idx):
             if enable_sea_ice:
                 state_in, ice_in = carry
@@ -2433,11 +2830,14 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # Prognostic slab sea ice: advance the ice tile and partition the
             # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
             # tile's basal heat / melt-freeze freshwater / brine salt / stress).
+            # ocean_mask: land cells receive no ice->ocean forcing (mask-aware
+            # blend contract; land_mask is scan-carry state, traced-safe).
             if enable_sea_ice:
                 new_ice, fw, sf = omip_sea_ice_surface_forcing(
                     ice_state=ice_in, ice_config=ice_cfg, atm=atm,
                     ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
-                    dt=dt, grid=None,
+                    dt=dt, grid=ice_grid,
+                    ocean_mask=state_in.land_mask.data,
                 )
             # Ramp sponge strength alongside wind stress.
             if enable_ramp and enable_sponge:
@@ -2446,7 +2846,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 sponge_step = sponge
 
             new_state = _dyn_step(
-                state_in, dt,
+                state_in, dt, aux=aux,
                 freshwater=fw, surface_forcing=sf, sponge=sponge_step,
             )
 
@@ -2491,6 +2891,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             return new_state, None
 
         n = atm_stack["sw_down"].shape[0]
+        state = _seed_mass_flux_for_scan(model, state)
         init = (state, ice_state) if enable_sea_ice else state
         final, _ = jax.lax.scan(
             step_body, init, jnp.arange(n, dtype=jnp.int32),
@@ -2554,6 +2955,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     # Prognostic slab sea ice (opt-in) — see _build_jra55_block_fn.
     enable_sea_ice = bool(jra55_state.get("enable_sea_ice", False))
     ice_cfg = jra55_state.get("ice_config")
+    # None unless --ice-dynamics selects a rheology; the strain
+    # rates need grid metrics, the slab path does not.
+    ice_grid = jra55_state.get("ice_grid")
 
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
@@ -2564,8 +2968,12 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
             "--enable-latlon-spmd).")
-    _dyn_step = (spmd_step if spmd_step is not None
-                 else lambda st, d, **kw: model._step_impl(st, d, **kw))
+    if spmd_step is not None:
+        def _dyn_step(st, d, aux=None, **kw):
+            return spmd_step(st, d, aux=aux, **kw)
+    else:
+        def _dyn_step(st, d, aux=None, **kw):
+            return model._step_impl(st, d, **kw)
 
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
@@ -2579,7 +2987,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
                      block_start_day, block_start_day_forcing,
-                     ice_state=None):
+                     ice_state=None, aux=None):
             dt_days = dt / 86400.0
 
             def step_body(carry, idx):
@@ -2702,18 +3110,21 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                 )
 
                 # Prognostic slab sea ice: partition surface forcing between
-                # open ocean (f_ocean=1-A) and the ice tile.
+                # open ocean (f_ocean=1-A) and the ice tile.  ocean_mask: land
+                # cells receive no ice->ocean forcing (mask-aware blend
+                # contract; land_mask is scan-carry state, traced-safe).
                 if enable_sea_ice:
                     new_ice, fw, sf = omip_sea_ice_surface_forcing(
                         ice_state=ice_in, ice_config=ice_cfg, atm=atm,
                         ocean_sst_K=sst_K, open_ocean_sf=sf, open_ocean_fw=fw,
-                        dt=dt, grid=None,
+                        dt=dt, grid=ice_grid,
+                        ocean_mask=state_in.land_mask.data,
                     )
 
                 sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
                             if enable_sponge else None)
                 new_state = _dyn_step(
-                    state_in, dt, freshwater=fw,
+                    state_in, dt, aux=aux, freshwater=fw,
                     surface_forcing=sf, sponge=sponge_k,
                 )
 
@@ -2748,6 +3159,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     return (new_state, new_ice), None
                 return new_state, None
 
+            state = _seed_mass_flux_for_scan(model, state)
             init = (state, ice_state) if enable_sea_ice else state
             final, _ = jax.lax.scan(
                 step_body, init,
@@ -2946,6 +3358,24 @@ def _join_restart_writer():
             "exists)") from err
 
 
+# State slots this restart format deliberately does NOT persist: pure
+# DIAGNOSTICS the next step rewrites unconditionally from the prognostic state.
+#
+# ``_load_restart`` reconstructs from a FRESH template whose optional slots are
+# ``None``, and it skips any slot the template leaves ``None`` -- so a slot
+# written on save is SILENTLY DROPPED on load.  For a diagnostic that asymmetry
+# is harmless in the trajectory but it (a) wastes checkpoint bytes (the #1442
+# pair is ~145 MB uncompressed at eORCA1 L75) and (b) reads, to anyone
+# inspecting the npz, as a persisted quantity that is in fact ignored.  Not
+# writing them makes save and load agree by construction (codex YELLOW 10).
+#
+# Same classification the run_omip_core2 restart applies through its explicit
+# ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
+# this is the older npz lane, which has no such policy table.
+_RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
+                             "salt_flux_u_int", "salt_flux_v_int")
+
+
 def _save_restart(state, day, step, output_dir, ice_state=None,
                   grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
@@ -3005,6 +3435,8 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         "grid_type": grid_type,
     }
     for f in state._fields:
+        if f in _RESTART_DIAGNOSTIC_SLOTS:
+            continue
         obj = getattr(state, f)
         if obj is None or not hasattr(obj, "data"):
             continue
@@ -3378,6 +3810,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # (ocean_state, ice_state); thread the ice state across blocks.
         _ice_on = bool(jra55_state.get("enable_sea_ice", False))
         ice_state = jra55_state.get("ice_state_init") if _ice_on else None
+        # SPMD aux (codex r18 P1): pass the step's sharded geometry stacks
+        # into every block_fn call as an ARGUMENT (see the builders' note).
+        _spmd_aux = getattr(spmd_step, "aux", None)
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt, spmd_step=spmd_step)
@@ -3439,7 +3874,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        ice_state,
+                        ice_state, aux=_spmd_aux,
                     )
                 else:
                     state = bfn(
@@ -3447,17 +3882,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
+                        aux=_spmd_aux,
                     )
             else:
                 if _ice_on:
                     state, ice_state = block_fn(
                         state, atm_stack, runoff_stack,
-                        jnp.int32(block_start), ice_state,
+                        jnp.int32(block_start), ice_state, aux=_spmd_aux,
                     )
                 else:
                     state = block_fn(
                         state, atm_stack, runoff_stack,
-                        jnp.int32(block_start),
+                        jnp.int32(block_start), aux=_spmd_aux,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
@@ -4017,6 +4453,8 @@ def run_omip_single(grid_type: str, args) -> dict:
 
     # Create grid + model (all grids use identical config-based diffusion
     # for cross-grid consistency; physics pipeline disabled).
+    _dz_ref = load_dz_ref_file(args.dz_ref_file)
+    _validate_dz_ref_against_setup(_dz_ref, args.nlev, args.H_max)
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
@@ -4040,6 +4478,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         vertical_mixing=run_config.vertical_mixing,
         forcing_mode=getattr(args, "forcing_mode", "restoring"),
         use_conservation_fixer=not args.no_conservation_fixer,
+        dz_ref_override=_dz_ref,
     )
     # NEMO zdfdrg drag-law + zdfiwm forcing-map overrides (no-op when the
     # flags are at their legacy defaults; rebuilds the model so the jitted
@@ -4088,10 +4527,23 @@ def run_omip_single(grid_type: str, args) -> dict:
         land_mask_init = jnp.asarray(land_mask_init, dtype=jnp.float64)
         n_ocean = int(np.sum(np.asarray(land_mask_init) > 0.5))
         n_total = int(np.prod(np.asarray(land_mask_init).shape))
+        _ncap = float(getattr(args, "north_cap_lat", 90.0))
+        _cap_str = (f"N-cap={_ncap:g}°N" if _ncap < 90.0
+                    else "N-cap=NONE (pole open)")
         print(f"  Bathymetry: {Path(args.bathymetry).name} "
               f"({n_ocean}/{n_total} ocean cells, "
               f"H_min={args.H_min}m, {args.smoothing_passes} smoothing passes, "
-              f"r_max={args.r_factor_max})")
+              f"r_max={args.r_factor_max}, {_cap_str})")
+        # An uncapped pole on a GLOBAL regular lat-lon grid is a CFL trap:
+        # dx = R*dlon*cos(lat) collapses to ~970 m at 89.5 N, so a modest
+        # velocity there is wildly supercritical (measured: |u| = 19 m/s ->
+        # advective CFL 47 within 3 steps of a rest state at dt = 2400 s;
+        # capping at 80 N left |u|max = 0.014 m/s).  The tripole path already
+        # reported its cap; this lane did not, so an open pole was SILENT.
+        if _ncap >= 90.0 and grid_type == "latlon":
+            print("  WARNING: North Pole is UNCAPPED on a regular lat-lon "
+                  "grid — dx ~ 970 m at 89.5°N. Pass --north-cap-lat (e.g. 80) "
+                  "unless the polar dynamics are known to be handled.")
 
         # Equatorial-only extra smoothing.
         # The 30-day spinup diagnosed a barotropic standing-mode
@@ -4579,6 +5031,12 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
+        # River-runoff routing needs the model's OWN land mask, which only
+        # exists once the state is built, so the map is assembled here rather
+        # than in _setup_jra55_forcing_state.
+        jra55_state["runoff_map"] = _build_runoff_map_for_run(
+            args, grid, grid_type, jra55_state["_ocean_mask_2d"],
+        )
         # GPU-interp path (default): interpolation inside the lax.scan
         # block for all grids (MPAS regridding is handled in
         # _preload_jra55_raw_records).  --no-gpu-interp routes to the

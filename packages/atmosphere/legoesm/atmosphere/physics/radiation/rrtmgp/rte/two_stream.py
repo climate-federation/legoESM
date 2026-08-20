@@ -605,8 +605,8 @@ def compute_sw_optical_props_gpt(
     cloud_path_ice: Array | None,
     cloud_fraction: Array | None,
     aerosol_optical_depth: Array | None,
-    aerosol_single_scattering_albedo: float,
-    aerosol_asymmetry_factor: float,
+    aerosol_single_scattering_albedo: float | Array,
+    aerosol_asymmetry_factor: float | Array,
 ) -> dict[str, Array]:
   """Per-g-point shortwave optical properties (optical_depth / ssa / asymmetry).
 
@@ -628,12 +628,27 @@ def compute_sw_optical_props_gpt(
       cloud_fraction=cloud_fraction,
   )
   if aerosol_optical_depth is not None:
+    # Per-band aerosol optics: ``aerosol_single_scattering_albedo`` /
+    # ``aerosol_asymmetry_factor`` may be a SCALAR (grey aerosol, historical
+    # default -> byte-identical) OR a ``(n_bnd_sw,)`` array of per-shortwave-band
+    # values (real aerosols absorb/scatter very differently in the UV/visible vs
+    # the near-IR).  When per-band, select this g-point's band value via the
+    # SAME g-point->band map the LW diffusivity path uses (g_point_to_bnd);
+    # a 0-D input broadcasts unchanged.
+    ssa_aer = jnp.asarray(aerosol_single_scattering_albedo)
+    g_aer = jnp.asarray(aerosol_asymmetry_factor)
+    if ssa_aer.ndim >= 1 or g_aer.ndim >= 1:
+      band_idx = optics_lib.gas_optics_sw.g_point_to_bnd[igpt]
+      if ssa_aer.ndim >= 1:
+        ssa_aer = ssa_aer[band_idx]
+      if g_aer.ndim >= 1:
+        g_aer = g_aer[band_idx]
     tau_bg = jnp.maximum(sw_optical_props['optical_depth'], 1.0e-12)
     tau_aer = jnp.maximum(aerosol_optical_depth, 0.0)
     tau_tot = tau_bg + tau_aer
     w_bg = sw_optical_props['ssa']
     g_bg = sw_optical_props['asymmetry_factor']
-    w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
+    w_num = tau_bg * w_bg + tau_aer * ssa_aer
     # AD-safe SW optical-property mixing (restored from commit 59407953
     # after AIMIP-#312 merge reverted it).  ``a / jnp.maximum(b, eps)``
     # has a ``-a/b**2`` VJP that overflows when ``b`` is at the floor —
@@ -650,7 +665,7 @@ def compute_sw_optical_props_gpt(
     )
     g_num = (
         tau_bg * w_bg * g_bg
-        + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
+        + tau_aer * ssa_aer * g_aer
     )
     g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
     g_tot = jnp.clip(
@@ -693,8 +708,8 @@ def compute_sw_optical_field(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_optical_depth: Array | None = None,
-    aerosol_single_scattering_albedo: float = _AEROSOL_SSA_DEFAULT,
-    aerosol_asymmetry_factor: float = _AEROSOL_ASYM_DEFAULT,
+    aerosol_single_scattering_albedo: float | Array = _AEROSOL_SSA_DEFAULT,
+    aerosol_asymmetry_factor: float | Array = _AEROSOL_ASYM_DEFAULT,
 ) -> dict[str, Array]:
   """Stack per-g-point shortwave optical fields for the 3D MC ray tracer.
 
@@ -804,8 +819,8 @@ def solve_sw(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_optical_depth: Array | None = None,
-    aerosol_single_scattering_albedo: float = _AEROSOL_SSA_DEFAULT,
-    aerosol_asymmetry_factor: float = _AEROSOL_ASYM_DEFAULT,
+    aerosol_single_scattering_albedo: float | Array = _AEROSOL_SSA_DEFAULT,
+    aerosol_asymmetry_factor: float | Array = _AEROSOL_ASYM_DEFAULT,
     solar_fraction_by_gpt: Array | None = None,
     use_scan: bool | None = None,
     gpoint_batch_size: int = 0,

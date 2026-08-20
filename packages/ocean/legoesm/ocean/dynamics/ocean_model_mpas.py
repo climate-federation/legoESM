@@ -182,12 +182,26 @@ class MPASOceanModel:
                 'barotropic substep. Use barotropic_solver="explicit_substep" to '
                 'apply it, or leave the filter at its "cosine" default.',
                 stacklevel=2)
-        _valid_fw = ("none", "virtual_salt_flux")
+        # #1484 codex HIGH: the conservation fixer's volume target is
+        # V_new = V_old, i.e. it ASSUMES no volume source. Under
+        # real_freshwater the entire freshwater signal IS a volume source, so
+        # fix_volume would delete it and leave the full sum(A*F)/rho_0 as
+        # residual. Refuse until the fixer takes a freshwater-aware target.
+        if (self.config.freshwater_closure == "real_freshwater"
+                and getattr(self.config, "use_conservation_fixer", False)
+                and getattr(self.config, "fix_volume", True)):
+            raise ValueError(
+                'freshwater_closure="real_freshwater" is incompatible with '
+                "use_conservation_fixer=True + fix_volume=True: the fixer "
+                "drives V_new to V_old, which DELETES the freshwater volume "
+                "source (residual = sum(A*F)/rho_0). Set fix_volume=False, or "
+                "give the fixer a freshwater-aware volume target (#1484).")
+        _valid_fw = ("none", "virtual_salt_flux", "real_freshwater")
         if self.config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, got "
                 f"{self.config.freshwater_closure!r} (the MPAS path implements "
-                "only virtual_salt_flux; real_freshwater is not available here)"
+                "virtual_salt_flux and real_freshwater)"
             )
         # NEMO ln_rnf_depth_ini per-cell runoff spread-depth map [m]: fail fast
         # on a bad map (mirrors LatLonCGridOceanConfig validation).  A zero/
@@ -273,10 +287,13 @@ class MPASOceanModel:
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
         # backward-Euler implicit solver; UNLIKE KPP it has no explicit-
         # tendency path on MPAS (implicit-only — enforced in
-        # make_mpas_ocean_physics).  Diagnostic quasi-steady Gaspar/Burchard
-        # closure: no prognostic tke field is carried on MPASOceanState (the
-        # lat-lon prognostic carry is not wired on MPAS yet).
+        # make_mpas_ocean_physics).  Two modes (static on tke.prognostic):
+        # diagnostic quasi-steady Mode-B (no carried field), or the NEMO
+        # prognostic Mode-A carrying MPASOceanState.tke — one backward-Euler
+        # en step per model step, seeded from the carry (mirrors the lat-lon
+        # prognostic path).
         self._tke_profiles_fn = None
+        self._tke_prognostic = False
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _vm_cfg_tke = getattr(self.config.physics, "vertical_mixing", None)
             if _vm_cfg_tke is not None and _vm_cfg_tke.scheme == "tke":
@@ -285,6 +302,8 @@ class MPASOceanModel:
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
                     _vm_cfg_tke, eos_fn=self._eos_fn)
+                self._tke_prognostic = bool(
+                    getattr(_vm_cfg_tke.tke, "prognostic", False))
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
@@ -406,6 +425,13 @@ class MPASOceanModel:
         -------
         MPASOceanState
         """
+        # Capture the INCOMING carry dtype before the compute cast: the
+        # Mode-A tke store below must pin the carry back to the caller's
+        # (storage) dtype, and after this line state.tke is already compute
+        # dtype (codex r3 RED — pinning post-cast froze the carry at f64
+        # under an f32-storage/f64-compute policy).
+        _tke_in_dtype = (state.tke.data.dtype
+                         if getattr(state, "tke", None) is not None else None)
         state = cast_pytree(state, None, "compute")
 
         config = self.config
@@ -505,9 +531,26 @@ class MPASOceanModel:
             # interpolates it to edges the same way for both.  A_v = K_M (TKE
             # momentum viscosity), K_v_tke = K_H (tracer diffusivity).
             if self._tke_profiles_fn is not None:
-                A_v_kpp_cells, K_v_tke_cells = self._tke_profiles_fn(
-                    state, mesh, z_coord, surface_forcing,
-                )
+                if self._tke_prognostic:
+                    # Mode A: the carry MUST be seeded before the first step
+                    # (state.tke=None -> Field mid-run would change the scan
+                    # carry pytree structure). Structural check — jit-safe.
+                    if state.tke is None:
+                        raise ValueError(
+                            "prognostic TKE on MPAS requires a seeded "
+                            "MPASOceanState.tke before the first step "
+                            "(pytree-stable scan carry): call "
+                            "model.seed_tke(state) on the initial state.")
+                    A_v_kpp_cells, K_v_tke_cells, _tke_new = (
+                        self._tke_profiles_fn(
+                            state, mesh, z_coord, surface_forcing,
+                            dt_tke=dt,
+                        ))
+                else:
+                    A_v_kpp_cells, K_v_tke_cells = self._tke_profiles_fn(
+                        state, mesh, z_coord, surface_forcing,
+                    )
+                    _tke_new = None
                 K_v_cell = K_v_cell + K_v_tke_cells
 
             # --- Convective-adjustment K profile (where N²<0) ---
@@ -730,11 +773,31 @@ class MPASOceanModel:
             # this local sum (single-rank-correct) until owned-mask plumbing
             # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
+                if config.freshwater_closure == "real_freshwater":
+                    # codex RED: the multi-rank refusal for freshwater
+                    # normalization lives inside the virtual-salt block,
+                    # which real_freshwater skips -- but this eta mean is
+                    # still RANK-LOCAL, so guard it here too.
+                    from legoesm.ocean.freshwater import (
+                        refuse_multiprocess_eta_normalization,
+                    )
+                    refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
-                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
+                # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact; SSS restoring is not part of it,
+                # and NEMO never normalizes its `erp`.  Normalizing the full
+                # net would subtract the restoring's own global mean from every
+                # cell -- a spurious uniform water flux AND a globally weakened
+                # restoring, both silent.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                _F_rest = (0.0 if _fw_rest is None
+                           else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
+                _F_phys = F_slow_eta - _F_rest
+                F_mean = jnp.sum(_F_phys * area) / jnp.maximum(
                     ocean_area, 1e-10)
-                F_slow_eta = (F_slow_eta - F_mean * mask)
+                F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 
@@ -961,6 +1024,12 @@ class MPASOceanModel:
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
             rho_ref_z=state.rho_ref_z,
+            # Carry the prognostic TKE through unchanged (codex MED: omitting
+            # it here silently defaulted a seeded Field back to None inside
+            # jit — a pytree-structure change). The Mode-A store below
+            # overwrites the DATA; this preserves the STRUCTURE on every
+            # intermediate state (conservation fixer, freeze floor).
+            tke=state.tke,
         )
 
         # 10. Conservation fixers (#166: pass expected forcing so fixer
@@ -1055,7 +1124,48 @@ class MPASOceanModel:
             T_floored = T.at[..., 0].set(jnp.maximum(T[..., 0], floor_c))
             state_new = state_new._replace(T=state_new.T.replace(data=T_floored))
 
+        if self._tke_profiles_fn is not None and self._tke_prognostic:
+            # Store the prognostic TKE carry (Mode A): profiles ran on the
+            # OLD state's tke; the update advances one backward-Euler en step
+            # (mirrors the lat-lon model step's tke_new store).  Reuse the
+            # incoming Field wrapper so pytree structure is unchanged, and
+            # PIN the carry dtype to the PRE-compute-cast dtype captured at
+            # entry (codex r3: state.tke here is already compute dtype, so
+            # pinning to it froze the carry at f64 under an f32-storage/
+            # f64-compute policy — the scan-carry leaf must return in the
+            # caller's dtype).
+            state_new = state_new._replace(
+                tke=state.tke.replace(
+                    data=_tke_new.astype(_tke_in_dtype)))
+
         return cast_pytree(state_new, None, "storage")
+
+    def seed_tke(self, state: MPASOceanState) -> MPASOceanState:
+        """Seed the prognostic TKE carry (``MPASOceanState.tke``) if needed.
+
+        Call ONCE on the initial state before stepping when the prognostic
+        TKE closure is active — the scan/step carry must be pytree-stable, so
+        the None->Field promotion cannot happen inside the step (mirrors the
+        lat-lon model's pre-scan seeding). No-op when the carry is already
+        seeded (e.g. loaded from a restart) or the closure is not prognostic
+        TKE. Seeds ``tke_background`` on wet columns, 0 on land, at the
+        interior interfaces (nCells, nlev-1).
+        """
+        if not (self._tke_profiles_fn is not None and self._tke_prognostic):
+            return state
+        if state.tke is not None:
+            return state
+        from legoesm.core.field import Field
+        tke_cfg = self.config.physics.vertical_mixing.tke
+        lm = state.land_mask.data
+        nlev = state.T.data.shape[-1]
+        dtype = state.T.data.dtype
+        tke0 = jnp.where(
+            lm[:, jnp.newaxis] > 0.5, tke_cfg.tke_background, 0.0,
+        ).astype(dtype) * jnp.ones((1, nlev - 1), dtype=dtype)
+        return state._replace(
+            tke=Field(data=tke0, name="tke", dims=("nCells", "level"),
+                      units="m^2/s^2"))
 
     @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def step(

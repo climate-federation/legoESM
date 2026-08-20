@@ -24,11 +24,21 @@ when we enable DALEC in a later push.
 from __future__ import annotations
 
 import json
+import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Relative tolerance for comparing a restart's soil layer thicknesses against the
+# consuming run's.  Loose on purpose: both sides are the SAME geometric series
+# recomputed, possibly one in single and one in double precision, while any real
+# column difference is a fraction of the depth rather than a rounding difference.
+_SOIL_DZ_RTOL = 1e-5
 
 # Restart format version — bump when the payload schema changes so old
 # checkpoints refuse to load rather than silently corrupt a run.
@@ -55,6 +65,9 @@ _MULTILAYER_FIELDS = (
 # restart and the template carry it.
 _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     "surface_water", "snow_bands", "snow_age_bands", "ice_bands",
+    # Intercepted canopy-water store (present iff interception is enabled); real
+    # mass, so it must round-trip or the warm start leaks it.
+    "W_canopy",
 )
 
 
@@ -66,6 +79,7 @@ def save_land_restart(
     t_end_s: float,
     n_steps_completed: int,
     metadata: dict[str, Any] | None = None,
+    soil_grid=None,
 ) -> Path:
     """Write ``state`` and its bookkeeping to a compressed ``.npz`` restart file.
 
@@ -87,6 +101,13 @@ def save_land_restart(
     metadata : dict, optional
         Informational only (git SHA, grid_type, resolution, dt, CLI args, …);
         serialised as JSON alongside the arrays.  Not consumed on load.
+    soil_grid : SoilGridConfig, optional
+        The vertical soil grid this state lives on.  Its layer INTERFACES are
+        written so a continuation run can refuse a grid the profile does not
+        belong to.  The layer COUNT alone does not identify a grid: ten layers
+        over 3 m and ten over 6.4 m have identical array shapes, so without
+        this a warm start silently reinterprets the temperature and moisture
+        profile at the wrong depths.
 
     Returns
     -------
@@ -103,6 +124,10 @@ def save_land_restart(
         "n_steps_completed": np.array(int(n_steps_completed), dtype=np.int64),
         "metadata_json": np.array(json.dumps(metadata or {}), dtype="U65536"),
     }
+    if soil_grid is not None:
+        from legoesm.land.soil_grid import make_soil_grid
+        payload["soil_z_interface"] = np.asarray(
+            make_soil_grid(soil_grid).z_interface, dtype=np.float64)
     # The CLM-ML canopy carries a nested mlcanopy pytree, not a plain array; it
     # has no serialiser yet, so refuse loudly rather than silently drop it.
     if getattr(state, "canopy_state", None) is not None:
@@ -129,12 +154,46 @@ def save_land_restart(
     return out
 
 
+def soil_dz_matches(got, want) -> bool:
+    """Do two soil columns describe the same layer thicknesses [m]?
+
+    THE single comparison, so a caller checking a restart before the run and the
+    loader checking it during the run can never disagree about what "the same
+    column" means (codex).  See ``_SOIL_DZ_RTOL`` for why the tolerance is loose.
+    """
+    a = np.asarray(got, dtype=np.float64).reshape(-1)
+    b = np.asarray(want, dtype=np.float64).reshape(-1)
+    return a.shape == b.shape and bool(
+        np.allclose(a, b, rtol=_SOIL_DZ_RTOL, atol=0.0))
+
+
+def load_land_restart_soil_dz(path):
+    """Return a restart's recorded soil layer thicknesses [m], or ``None``.
+
+    Reads only that one array, so a caller can check a restart belongs to its
+    soil column WITHOUT loading the state — which matters under MPI, where the
+    state is loaded only by ranks that own land while this check must give the
+    same answer everywhere.  ``None`` means the file predates the recording.
+    """
+    data = np.load(str(path), allow_pickle=False)
+    if "soil_z_interface" not in data.files:
+        return None
+    # ONE stamp on disk, read two ways: the archive records layer INTERFACES,
+    # and the thicknesses are their differences. Two records of one fact can
+    # disagree; this reader kept its own key after the writer moved to
+    # interfaces, which made it return "no stamp" for every file and silently
+    # switched this check off.
+    return np.diff(np.asarray(data["soil_z_interface"], dtype=np.float64).reshape(-1))
+
+
 def load_land_restart(
     path,
     *,
     expected_land_mode: str,
     expected_ncol: int,
     expected_n_layers: int | None = None,
+    expected_soil_grid=None,
+    require_soil_grid: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Load a ``.npz`` restart and return ``(state, meta)``.
 
@@ -148,7 +207,17 @@ def load_land_restart(
     ValueError
         If the version is unknown, land_mode mismatches, or ncol / n_layers
         don't match the current grid (silent shape mismatch would corrupt the
-        continuation run).
+        continuation run).  Also when ``expected_soil_grid`` is given and the
+        file records DIFFERENT layer interfaces: ten layers over 3 m and ten
+        over 6.4 m have the same array shapes, so the layer count alone cannot
+        tell them apart and the profile would be reinterpreted at the wrong
+        depths.  A file written before the interfaces were recorded cannot be
+        checked; that warns rather than raising, because the published
+        initial states predate the stamp — unless ``require_soil_grid`` is
+        set, which turns the unstamped case into a hard error.  Pass it when
+        the run is on a column that is NOT the historical default: an old file
+        carrying no interfaces is then almost certainly on the other one, and
+        warning about the file most people will load is not a check.
     """
     # Import here so importing this module doesn't drag the full land state class
     # (avoids a circular-import risk with land/__init__).
@@ -178,6 +247,45 @@ def load_land_restart(
             f"restart n_layers={T.shape[1]} != current config n_layers="
             f"{expected_n_layers}"
         )
+
+    if expected_soil_grid is not None:
+        from legoesm.land.soil_grid import make_soil_grid
+        want = np.asarray(make_soil_grid(expected_soil_grid).z_interface,
+                          dtype=np.float64)
+        if "soil_z_interface" not in data.files:
+            _unstamped = (
+                f"{path} records no soil-layer interfaces, so its vertical "
+                f"grid cannot be checked against this run's "
+                f"({want[-1]:.4g} m over {len(want) - 1} layers).")
+            if require_soil_grid:
+                raise ValueError(
+                    _unstamped + " This run is on a column that is not the "
+                    "historical default, so an unstamped file is almost "
+                    "certainly on a different one; refusing rather than "
+                    "warning. Re-save the restart from a run that stamps it, "
+                    "or drop require_soil_grid if you know the column matches.")
+            warnings.warn(
+                f"{path} records no soil-layer interfaces, so its vertical "
+                f"grid cannot be checked against this run's "
+                f"({want[-1]:.4g} m over {len(want) - 1} layers). Written "
+                f"before the geometry was stamped; if it came from a "
+                f"different soil column its profile is being reinterpreted "
+                f"at the wrong depths.", RuntimeWarning, stacklevel=2)
+        else:
+            got = np.asarray(data["soil_z_interface"], dtype=np.float64)
+            # Loose on purpose (``_SOIL_DZ_RTOL``): both sides are the SAME
+            # geometric series recomputed, possibly one in single and one in
+            # double precision, while any real column difference is a fraction
+            # of the depth rather than a rounding difference.
+            if got.shape != want.shape or not np.allclose(
+                    got, want, rtol=_SOIL_DZ_RTOL, atol=0.0):
+                raise ValueError(
+                    f"restart {path} was written on a soil column of "
+                    f"{got[-1]:.6g} m in {len(got) - 1} layers, but this run "
+                    f"uses {want[-1]:.6g} m in {len(want) - 1}. The layer "
+                    f"count matches, so the arrays would load without "
+                    f"complaint and the temperature and moisture profile "
+                    f"would be read at the wrong depths.")
 
     optional = {
         field: jnp.asarray(data[field])

@@ -125,7 +125,29 @@ NVIDIA_GPU_XLA_FLAGS = {
     # eliminates the ~5-10μs per-launch overhead that dominates
     # small-grain step kernels.  Requires CUDA ≥ 12.3 (XLA falls back
     # silently on older runtimes, so always-on is safe).
-    "xla_gpu_enable_command_buffer": "FUSION,CUSTOM_CALL,COLLECTIVES",
+    #
+    # COLLECTIVES is deliberately NOT in the list.  Capturing NCCL
+    # collectives into command buffers freezes the thunk schedule and
+    # discards the dynamic compute/comm overlap the latency-hiding
+    # scheduler provides: measured on the MPAS shard_map lane
+    # (Levante, 2 nodes x 2 A100, s6@4, job 26873637) the full
+    # FUSION,CUSTOM_CALL,CUBLAS,CUDNN,COLLECTIVES set was +25% step
+    # time (2.81 -> 3.52 ms) versus XLA defaults; the non-collective
+    # tokens measured noise-neutral in the 2026-06-15 np1 audits
+    # (jobs 8488104/8490224), attributing the loss to COLLECTIVES.
+    # The old FUSION,CUSTOM_CALL,COLLECTIVES default was never A/B'd
+    # at multi-rank (np1 has no collectives).  Re-enable per-run for allreduce-heavy
+    # data-parallel workloads with no interleaved compute (the one
+    # regime where capture can win) via
+    # LEGOESM_XLA_CMDBUF_COLLECTIVES=1 — set BEFORE the first
+    # ``legoesm.runtime`` import: the value freezes when this module
+    # loads (XLA_FLAGS must be set before JAX initialises anyway, so
+    # later mutation could never take effect).
+    "xla_gpu_enable_command_buffer": (
+        "FUSION,CUSTOM_CALL,COLLECTIVES"
+        if os.environ.get("LEGOESM_XLA_CMDBUF_COLLECTIVES") == "1"
+        else "FUSION,CUSTOM_CALL"
+    ),
 }
 
 AMD_GPU_XLA_FLAGS: dict[str, str] = {
@@ -413,7 +435,7 @@ def configure_backend(backend: str | None = None) -> str:
 
     elif backend == "mps":
         # MLX manages its own device; no XLA flags or persistent JIT cache.
-        pass
+        _apply_mps_rev_workaround()
 
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:
@@ -452,6 +474,95 @@ def configure_backend(backend: str | None = None) -> str:
 
     logger.info("Configured XLA for %s backend", backend)
     return backend
+
+
+def _mps_rev_is_broken() -> bool:
+    """Probe the jax-mps negative-stride-reverse mis-fusion (2026-07-21).
+
+    On jax-mps <= 0.10.7 a 1-D ``lax.rev`` fused into an elementwise or
+    scatter consumer is silently DROPPED (``u[::-1] * 2`` returns ``u * 2``;
+    ``x.at[i].set(u[::-1])`` writes the un-reversed strip).  Cube-sphere
+    grid construction builds its corner-metric matrices through exactly
+    that pattern, so every cubed-sphere run produces garbage momentum
+    tendencies.  Returns True when the platform exhibits the bug.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    u = jnp.arange(8.0, dtype=jnp.float32)
+    got = np.asarray(jax.jit(lambda t: t[::-1] * 2.0)(u))
+    want = np.arange(8.0, dtype=np.float32)[::-1] * 2.0
+    return bool(np.abs(got - want).max() > 0)
+
+
+def _apply_mps_rev_workaround() -> None:
+    """Re-route ``lax.rev`` through gather on the mps platform when broken.
+
+    Centralized fix for the fusion bug probed by :func:`_mps_rev_is_broken`:
+    register a platform-specific lowering for ``rev_p`` that emits
+    iota+gather (``jnp.take`` with a descending index vector) instead of the
+    native reverse.  Gather-based reversal is unaffected by the fusion bug,
+    so every ``[::-1]`` / ``jnp.flip`` in the codebase becomes safe without
+    touching call sites.  No-op when the plugin lowers ``rev`` correctly
+    (future jax-mps releases), so upgrading removes the cost automatically.
+    """
+    # Probe OUTSIDE the registration try (codex r2): a probe/import/JAX-init
+    # failure must NOT masquerade as "rev is broken" and fail the run closed.
+    # If the probe itself cannot run, we cannot claim the platform is broken —
+    # let it through (any real breakage still surfaces downstream), and only
+    # fail closed when the probe POSITIVELY reports broken rev but the fix
+    # cannot be installed.
+    try:
+        broken = _mps_rev_is_broken()
+    except Exception as exc:  # pragma: no cover - probe is a 2-op jit
+        logger.warning(
+            "jax-mps: could not probe the lax.rev fusion bug (%r); "
+            "assuming the platform is healthy. If cubed-sphere runs blow up "
+            "on mps, set JAX_PLATFORMS=cpu.", exc,
+        )
+        return
+    if not broken:
+        return
+
+    try:
+        from jax._src import dispatch as _dispatch  # noqa: F401 (force init)
+        from jax._src.interpreters import mlir as _mlir
+        from jax import lax as _lax
+        import jax.numpy as jnp
+
+        def _rev_via_gather(operand, *, dimensions):
+            out = operand
+            for d in dimensions:
+                n = operand.shape[d]
+                # descending iota, NOT [::-1] — that would re-enter rev_p
+                idx = n - 1 - _lax.iota(jnp.int32, n)
+                out = jnp.take(out, idx, axis=d)
+            return out
+
+        _mlir.register_lowering(
+            _lax.rev_p,
+            _mlir.lower_fun(_rev_via_gather, multiple_results=False),
+            platform="mps",
+        )
+        logger.warning(
+            "jax-mps: native lax.rev mis-fuses with its consumer "
+            "(reversed operand silently un-reversed); re-routed rev "
+            "through gather on the mps platform. Upgrade jax-mps and "
+            "this workaround deactivates itself."
+        )
+    except Exception as exc:
+        # Fail CLOSED: the probe POSITIVELY proved the platform mis-fuses rev,
+        # and the fix could not be installed — continuing would produce the
+        # exact garbage-momentum blowup the workaround exists to prevent.
+        raise RuntimeError(
+            "jax-mps native lax.rev is broken on this platform (reversed "
+            "operands are silently un-reversed when fused) and the gather-"
+            "lowering workaround could not be registered "
+            f"({exc!r}; likely a jax private-API change). Refusing to run "
+            "with known-corrupt cubed-sphere metrics — set JAX_PLATFORMS=cpu "
+            "or upgrade jax-mps."
+        ) from exc
 
 
 def _configure_persistent_jit_cache() -> None:

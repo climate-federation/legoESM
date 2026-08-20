@@ -835,6 +835,8 @@ def fct_tracer_advection(
     dt: float,
     high_order: str = "ppm",
     tracer_before: jnp.ndarray | None = None,
+    active_mask: jnp.ndarray | None = None,
+    fixed_thickness: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -877,6 +879,30 @@ def fct_tracer_advection(
         ``0.5·pU·(pt(Kmm)+pt(Kmm))``.  ``None`` (forward-Euler / AB2 path)
         ⇒ base == ``tracer`` (Kbb == Kmm) ⇒ byte-identical to the FE-certified
         scheme.
+    active_mask : (n_lat, n_lon, nlev) or None
+        Per-cell wet mask (``is_active`` / ``active_3d``), truthy where
+        wet.  NEMO's ``nonosc`` masks the per-point bound to
+        ``MERGE(max(pbef,paft), -zbig, tmask==1)`` / ``MERGE(min(...),
+        +zbig, tmask==1)`` (traadv_fct.F90:911-915) BEFORE the 7-point
+        neighbourhood max/min, so a dry cell's ``q_td`` (an unconstrained
+        ``h_k→0`` division that legoESM does not bother to make sane,
+        since it is masked out of the tracer update anyway) never widens
+        a WET neighbour's box.  ``None`` (default) skips the mask — the
+        historical behaviour, which lets a dry cell's ``q_td`` blow-up
+        (``0/eps``) leak into the neighbourhood stencil and, downstream,
+        into that neighbour's ``R_in``/``R_out`` — the root cause of
+        legoESM's w-face clip count running ~1.9x NEMO's on the DINO
+        oracle (#1226 item 8: the flux values already matched NEMO at
+        corr > 0.9999 pre-fix; only the boundedness of the LIMITER inputs
+        at dry cells was unfaithful).  Passing the mask is a strict
+        no-op away from dry/wet boundaries.
+    fixed_thickness : bool
+        Static Python bool.  True under key_linssh (fixed layer
+        thicknesses; the caller adds the surface concentration/dilution
+        flux separately after limiting): the limiter certifies against
+        ``h_k`` itself.  False (z-star default): the AFTER thickness
+        ``h_new = h_k - dt*div(mf)`` is derived in the body and the
+        Zalesak box is certified against it -- see the h_new block.
 
     Returns
     -------
@@ -963,42 +989,112 @@ def fct_tracer_advection(
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
 
-    # Total low-order tendency for the Zalesak bounds
-    dq_low = grad_safe_ratio(
-        -(div_h_low + vert_div_low),
-        jnp.maximum(h_k, eps),
-        h_k > ratio_grad_floor(tracer.dtype),
-    )
-
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
     ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
     ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
 
+    # AFTER thickness from the SAME advecting fluxes: under z-star the
+    # caller's flux-form update divides by h_new = h_k - dt*div(mf), so the
+    # provisional low-order update and the Zalesak budgets MUST be
+    # normalised by h_new -- NEMO traadv_fct's ``zwi = (e3t(Kbb)*pt(Kbb) -
+    # p2dt*ztra) / e3t(Kaa)``.  Certifying the box against h_OLD (the
+    # pre-2026-08-10 behaviour) left the ACTUAL update outside the box by
+    # exactly T*dt*div(mf)/h under divergent flow: measured overshoot
+    # 1.18365e-3 == 30 * 3.945e-5 (= T*max|dt*div/h|) on the repro, and
+    # +0.12/-0.03 K per day at the lock-exchange front (eta and the front
+    # are correlated, so the mis-sizing is systematic, not noise).
+    # Solenoidal flow: h_new == h_k, bit-identical to the old behaviour.
+    #
+    # ``fixed_thickness`` (key_linssh, static Python bool): the coordinate
+    # keeps thicknesses FIXED and the caller adds the surface
+    # concentration/dilution flux separately AFTER limiting, so the
+    # after-thickness the update divides by IS h_k -- deriving h_new from
+    # the interior fluxes there would mis-certify (codex 2026-08-10).
+    #
+    # LEAPFROG CAVEAT: under the outer leapfrog (tracer_before set,
+    # dt = 2*rdt), the caller passes the NOW-eta thickness as h_k while
+    # NEMO's zwi uses e3t(Kbb) -> e3t(Kaa); the certification there is
+    # approximate (same class as the pre-fix behaviour on ALL paths).
+    # Exact leapfrog certification needs the BEFORE thickness threaded --
+    # flagged, not fixed here.  Only the EULER consumer is exactly
+    # certified; inner AB2 extrapolates this limited divergence with a
+    # history term before the thickness division, which no single-step
+    # certificate covers (the pre-existing AB2 limitation).
+    if fixed_thickness:
+        h_new = h_k
+    else:
+        div_mf_h = divergence_cgrid(mass_flux_u, mass_flux_v, grid)
+        w_full = jnp.pad(w_int, (*pad_axes_v, (1, 1)))
+        vert_div_mf = w_full[..., :-1] - w_full[..., 1:]
+        h_new = h_k - dt * (div_mf_h + vert_div_mf)
+    t_grad_h = ratio_grad_floor(tracer.dtype)
+
+    # Provisional low-order (upwind) update in AFTER-thickness form.
+    q_td = grad_safe_ratio(
+        h_k * base - dt * (div_h_low + vert_div_low),
+        jnp.maximum(h_new, eps),
+        h_new > t_grad_h,
+    )
+
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
     # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
-    # Stencil bounds from the BEFORE (Kbb) base level (NEMO nonosc pbef=Kbb).
-    tr_west = jnp.roll(base, 1, axis=1)
-    tr_east = jnp.roll(base, -1, axis=1)
-    tr_south = jnp.concatenate([base[:1, :, :], base[:-1, :, :]], axis=0)
-    tr_north = jnp.concatenate([base[1:, :, :], base[-1:, :, :]], axis=0)
-    tr_above = jnp.concatenate([base[..., :1], base[..., :-1]], axis=-1)
-    tr_below = jnp.concatenate([base[..., 1:], base[..., -1:]], axis=-1)
-    q_min = jnp.minimum(
-        jnp.minimum(jnp.minimum(base, tr_west), jnp.minimum(tr_east, tr_south)),
-        jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
-    )
+    #
+    # NEMO nonosc (traadv_fct.F90:876-880, 912-920): the PER-POINT bound at
+    # each stencil cell is ``bnd_up = max(pbef, paft)`` / ``bnd_do =
+    # min(pbef, paft)`` where ``paft`` is ``zta_up1`` — the upstream
+    # provisional guess, i.e. exactly this function's ``q_td`` — NOT ``pbef``
+    # (Kbb/``base``) alone.  The 7-point neighbourhood max/min is then taken
+    # over that per-point ``bnd_up``/``bnd_do`` field.  Building the
+    # neighbourhood from ``base`` alone (the prior legoESM behaviour) drops
+    # the ``q_td`` contribution to the bound at every one of the 7 stencil
+    # points — under #1226 item 8's stage-by-stage oracle comparison this
+    # under/over-tightens the box at ~40-45% of wet cells (median diff tiny
+    # at nit000 since q_td ~ base after one step, but non-negligible: max
+    # 0.039 degC on the DINO Y5 restart) and is the first stage at which the
+    # legoESM limiter deviates from a faithful nonosc transcription.
+    bnd_up = jnp.maximum(base, q_td)
+    bnd_do = jnp.minimum(base, q_td)
+    if active_mask is not None:
+        # #1226 item 8: faithful dry-cell mask (traadv_fct.F90:911-915
+        # ``MERGE(..., -zbig/+zbig, tmask==1)``) BEFORE the neighbourhood
+        # max/min — a dry cell's ``q_td`` is an unconstrained ``h_k→0``
+        # division (legoESM never bothered to make it sane there since the
+        # tracer update masks the cell out anyway) and must not widen a
+        # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
+        # max (not ``inf``) so float32 callers stay finite under AD.
+        wet = active_mask > 0.5
+        zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
+        bnd_up = jnp.where(wet, bnd_up, -zbig)
+        bnd_do = jnp.where(wet, bnd_do, zbig)
+    tr_west = jnp.roll(bnd_up, 1, axis=1)
+    tr_east = jnp.roll(bnd_up, -1, axis=1)
+    tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
+    tr_north = jnp.concatenate([bnd_up[1:, :, :], bnd_up[-1:, :, :]], axis=0)
+    tr_above = jnp.concatenate([bnd_up[..., :1], bnd_up[..., :-1]], axis=-1)
+    tr_below = jnp.concatenate([bnd_up[..., 1:], bnd_up[..., -1:]], axis=-1)
     q_max = jnp.maximum(
-        jnp.maximum(jnp.maximum(base, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(bnd_up, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
-    q_td = base + dq_low * dt  # provisional low-order update (from Kbb)
+    tr_west_do = jnp.roll(bnd_do, 1, axis=1)
+    tr_east_do = jnp.roll(bnd_do, -1, axis=1)
+    tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
+    tr_north_do = jnp.concatenate([bnd_do[1:, :, :], bnd_do[-1:, :, :]], axis=0)
+    tr_above_do = jnp.concatenate([bnd_do[..., :1], bnd_do[..., :-1]], axis=-1)
+    tr_below_do = jnp.concatenate([bnd_do[..., 1:], bnd_do[..., -1:]], axis=-1)
+    q_min = jnp.minimum(
+        jnp.minimum(jnp.minimum(bnd_do, tr_west_do), jnp.minimum(tr_east_do, tr_south_do)),
+        jnp.minimum(jnp.minimum(tr_north_do, tr_above_do), tr_below_do),
+    )
 
+    # h_new, not h_k: the budgets Q/P are increments of the AFTER field,
+    # which the caller normalises by the AFTER thickness (see h_new above).
     alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
         ad_flux_u, ad_flux_v, ad_vert_int,
-        q_td, q_min, q_max, h_k, dt, grid, eps,
+        q_td, q_min, q_max, h_new, dt, grid, eps,
     )
 
     # --- Step 4: limited face fluxes (conservative by construction) ---
@@ -1320,7 +1416,10 @@ def _zalesak_signsplit_face_alphas(
         vertical interface flux (positive = upward).
     q_td : array (n_lat, n_lon, nlev) — provisional low-order update.
     q_min, q_max : array (n_lat, n_lon, nlev) — local stencil bounds.
-    h_k : array (n_lat, n_lon, nlev) — layer thickness.
+    h_k : array (n_lat, n_lon, nlev) — the thickness the caller's update
+        normalises by (the AFTER thickness ``h_new`` under z-star; equal to
+        the old thickness only for non-divergent flow — see the h_new block
+        in ``fct_tracer_advection``).
     dt : float — baroclinic time step.
     grid : LatLonGrid.
     eps : float — divide-by-zero guard for empty P+/P-.
@@ -1432,6 +1531,28 @@ def _zalesak_signsplit_face_alphas(
         Q_up, jnp.maximum(inc_in, eps), inc_in > t_grad))
     R_out = jnp.minimum(1.0, grad_safe_ratio(
         Q_dn, jnp.maximum(inc_out, eps), inc_out > t_grad))
+
+    # #1226 item 8: dry-cell (h_k ~ 0) ratios are NOT a real Zalesak
+    # constraint — NEMO's own ``nonosc`` gives a dry point zbetup=zbetdo=
+    # zbig there (traadv_fct.F90: zpos/zneg are exactly 0 once the
+    # antidiffusive fluxes are wmask'ed, so the ``zpos/=0.`` guard falls
+    # through to the "no local extremum" branch, zcoef=1, no clip).
+    # legoESM's ad_vert_int/ad_flux_u/ad_flux_v are likewise ~0 at a dry
+    # cell (the advecting mass flux is masked upstream), but Q_up/Q_dn and
+    # inc_in/inc_out are each an O(1e-19)/O(h_k) ratio of that same
+    # float-noise residual over an h_k that floors to eps=1e-30 -- the
+    # *ratio* of two independent noise floors is unconstrained garbage
+    # (observed up to ~1e17 on the DINO oracle), NOT a small number, so it
+    # does not cancel in R_in/R_out and instead saturates one of them to 0.
+    # A near-zero R at a dry cell then forces alpha=0 (full clip) on the
+    # WET neighbour's face sharing that dry cell as sender/receiver --
+    # i.e. every subsurface-topography w-face over-clips, inflating
+    # legoESM's w-face clip count ~1.9x vs NEMO (662) purely from this
+    # noise, with no signal in the antidiffusive flux itself (the clipped
+    # face fluxes already matched NEMO at corr>0.9999 pre-fix). Force the
+    # faithful zbig-equivalent (unclipped, R=1) at dry cells.
+    R_in = jnp.where(h_ok, R_in, 1.0)
+    R_out = jnp.where(h_ok, R_out, 1.0)
 
     # ---- Per-face alpha selection ----
     # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).
@@ -1735,7 +1856,7 @@ def adv_flux_superbee_wgrid_latlon_cgrid(
     # Veros uCFL_y = |v·cosu(face)|*dt/(cost(south)*dyt(south)) — the face/
     # centre cosine ratio is kept for faithfulness (advection.py:44-47).
     # Face latitudes from grid.lat (same construction divergence_cgrid uses;
-    # LatLonCGridGeometry does not carry cos_lat_v).
+    # LatLonCGridGeometry now carries cos_lat_v; this path predates it).
     dy_cell = (0.5 * grid.dy)                            # (n_lat,) cell heights
     cos_face = jnp.cos(0.5 * (grid.lat[:-1] + grid.lat[1:]))
     cos_ratio = cos_face / grid.cos_lat[:-1]

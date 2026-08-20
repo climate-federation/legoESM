@@ -90,6 +90,18 @@ to an environment variable (machine-portable; no personal paths):
 | `run_sfno_campaign.py` | SFNO subseasonal-to-seasonal inference campaign runner. |
 | `sfno_slab.py` | Thin CLI wrapper for SFNO slab-ocean workflow. |
 
+## Data assimilation
+
+| Script | Purpose |
+|--------|---------|
+| `data/generate_mpas_nmc.py` | Generate same-verification-time full-state MPAS NMC forecast pairs from ERA5 initial conditions. |
+| `data/fit_mpas_gen_be.py` | Fit, tune, and variance-normalize MPAS GEN_BE parameters from NMC samples. |
+| `run/mpas_3dvar_single/run_assimilation.py` | Run the configured T800 temperature single-observation 3DVar experiment. |
+| `run/mpas_4dvar_single/run_assimilation.py` | Run the configured single-point T500 3DVar and strong-constraint 4DVar experiment. |
+| `run/mpas_4dvar_single/run_tlm.py` | Propagate the 4DVar initial increment with the tangent-linear MPAS model. |
+| `plot/plot_mpas_temperature_single_obs_3dvar.py` | Regenerate the three-level temperature-observation response figure. |
+| `plot/plot_mpas_single_point_t500.py` | Regenerate the three-row T500 response figure. |
+
 ## Cross-grid comparison wrappers
 
 Each wrapper invokes the per-domain runner once per grid type

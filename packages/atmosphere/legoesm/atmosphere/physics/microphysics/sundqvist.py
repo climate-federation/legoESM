@@ -35,6 +35,15 @@ DEPARTURES / SURROGATES (documented; NOT the SBK89 closed forms):
     fraction ``b`` is diagnosed SEPARATELY in
     ``clouds.cloud_fraction.sundqvist_cloud_fraction`` and is not this
     microphysics tendency's concern.
+  * OPT-IN ONLY (``SundqvistConfig.hard_saturation_adjustment``, default
+    False): the shared hard (iterated) saturation-adjustment guard
+    (``_warm_rain.hard_saturation_blend``) overlays the condensation rate so it
+    lands on the ENTHALPY-CONSISTENT equilibrium
+    ``q_eq = q_sat(T + L_v/c_pd·(q_v−q_eq))`` with a per-step latent-heating
+    cap, instead of the one-step removal toward ``q_sat(T_old)`` above (which
+    overshoots into a sub-saturated state and can release ~20 K in one step at
+    RH 1.4). This is NOT an SBK89 form; with the default False the code path,
+    and hence the answer, is byte-identical to the smooth formulation above.
   * Sub-cloud evaporation is a simplified ``evap_coeff·(RH<RH_crit gate)·P``
     proxy, not SBK89's full evaporation-rate expression.
   * F1's argument is the RAW precip flux ``√P_above`` (no SBK89 reference-flux
@@ -64,7 +73,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.atmosphere.physics.microphysics._warm_rain import safe_pow
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    hard_saturation_blend,
+    safe_pow,
+)
 from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
@@ -122,6 +134,32 @@ def diagnose_sundqvist_process_rates(
     condensation = (
         f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
+
+    # 1b. OPT-IN hard (iterated) saturation-adjustment guard — the SAME guard,
+    # the SAME shared implementation and the SAME defaults the five bulk
+    # warm-rain schemes get, applied to Sundqvist's own smooth rate above.
+    #
+    # Sign convention (this whole block): ``condensation`` is a rate [kg/kg/s]
+    # POSITIVE = vapour -> cloud water.  The blend returns a convex combination
+    # of two NON-NEGATIVE rates (the smooth rate above is >= 0 by the
+    # ``maximum(..., 0)``; the on-curve drain is >= 0 by construction) capped
+    # from above by the on-curve drain and rate-limited only on its positive
+    # branch, so the result stays >= 0: the overlay can never turn condensation
+    # into spurious evaporation.  The caller pairs it with
+    # ``dq_v_dt = -condensation``, ``dq_c_dt = +condensation`` and
+    # ``dT_dt = +L_v*condensation/c_pd``, so c_pd*T + L_v*q_v is conserved and
+    # water is moved, not created (see ``sundqvist_microphysics``).
+    #
+    # STATIC Python ``if`` on a compile-time bool (CLAUDE.md feature-gating
+    # exception — ``jnp.where`` would trace BOTH branches).  Default False =>
+    # this line never executes and the scheme is byte-identical to the
+    # published SBK89 smooth path.
+    if config.hard_saturation_adjustment:
+        condensation = hard_saturation_blend(
+            condensation, T, q_v, p_full, dt, q_sat,
+            config.hard_sat_adjust_threshold,
+            config.hard_sat_max_heating_K,
+        )
 
     # 2. Autoconversion (computed level-by-level INSIDE the downward scan
     # below, because the SBK89 coalescence enhancement F1 depends on the

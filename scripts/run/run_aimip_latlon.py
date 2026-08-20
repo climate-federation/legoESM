@@ -10,7 +10,8 @@ not).
 
 Families (this driver — Phase 1):
   * ``classical``  — tune the physics-pipeline scheme parameters
-    (tau_eq/tau_pole, C_H/C_E, albedos, SBM ...) via ``train_physics_params``.
+    (C_H/C_E, albedos, SBM ... — the gray optical depths left the trainable
+    set on 2026-08-11) via ``train_physics_params``.
     The *scheme combination* itself (convection/turbulence/...) is selected
     by CLI flags; sweeping combinations = many invocations of this driver.
   * ``column_nn``  — neural column physics (Rasp-style MLP) via
@@ -81,9 +82,44 @@ def _load_run_amip():
 def build_latlon_config(args):
     """Build an ExperimentConfig for a lat-lon C-grid AMIP run."""
     ra = _load_run_amip()
+    # MPAS reuses this whole driver: the trainers (train_physics_params /
+    # train_neural_gcm) take ``model`` and ``grid`` as ARGUMENTS and never
+    # construct either, so the grid is a two-value swap here plus the carry
+    # converter below. A third near-duplicate driver would be copy-paste.
+    if args.grid == "mpas":
+        # REFUSED, with the blockers named. An earlier version of this flag
+        # claimed MPAS "just worked" because the trainers take model+grid as
+        # arguments; that was wrong and was never actually run. What breaks,
+        # verified in the source:
+        #   1. --resolution means LATITUDE COUNT here and SCVT SUBDIVISION
+        #      LEVEL for MPAS (the builder caps it at 10), so --n-lat 72 does
+        #      not even construct a mesh;
+        #   2. era5_to_mpas_carry returns an MPASCarry, which is NOT a
+        #      SegmentCarry and has none of the held_* flux fields this
+        #      driver's loss and eval read;
+        #   3. the SST regrid, build_training_segment and the eval accumulators
+        #      all index grid.lat / grid.lon / cos_lat and a cell-centred v,
+        #      none of which an SCVT mesh provides.
+        # Refusing microphysics/turbulence (the previous guard) addressed none
+        # of these. MPAS needs its own carry/forcing/eval path; until then a
+        # loud refusal beats a flag that looks supported.
+        raise SystemExit(
+            "--grid mpas is NOT supported by this driver yet.\n"
+            "  * --resolution is a latitude count here but an SCVT subdivision "
+            "level for MPAS (max 10), so no mesh is built;\n"
+            "  * era5_to_mpas_carry returns MPASCarry, not the SegmentCarry "
+            "(with held_* radiative fluxes) this driver trains and scores on;\n"
+            "  * the SST regrid, segment builder and eval all assume "
+            "grid.lat/grid.lon/cos_lat and a cell-centred v.\n"
+            "Use --grid latlon. An MPAS AIMIP lane needs an MPAS-specific "
+            "carry + forcing + eval path first."
+        )
+    _grid_type, _disc = {
+        "latlon": ("latlon", "latlon_cgrid"),
+    }[args.grid]
     argv = [
-        "--grid-type", "latlon",
-        "--discretization", "latlon_cgrid",
+        "--grid-type", _grid_type,
+        "--discretization", _disc,
         "--resolution", str(args.n_lat),
         "--nlev", str(args.n_lev),
         "--vertical-coord", "sigma",
@@ -160,7 +196,7 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=()):
+                      multi_step_hours=(), grid_kind="latlon"):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
@@ -178,8 +214,40 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     from legoesm.driver.compiled_segments import pack_forcing
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, open_era5_zarr, load_era5_slice,
-        era5_to_latlon_carry, regrid_2d_to_gaussian,
+        era5_to_latlon_carry, era5_to_mpas_carry, regrid_2d_to_gaussian,
     )
+
+    def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
+        """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
+
+        The two converters do NOT take the same arguments.
+        ``era5_to_latlon_carry`` accepts ``microphysics`` / ``turbulence``,
+        which size the tracer slots the physics pipeline expects;
+        ``era5_to_mpas_carry`` has no such parameters (it builds the
+        edge-normal wind state and the scalar cell fields only). Passing them
+        anyway would be a TypeError; silently DROPPING them on the MPAS path
+        without saying so would be worse — a run configured with microphysics
+        would start from a carry that has nowhere to put the condensate. So the
+        MPAS path refuses the combination instead of guessing.
+        """
+        if grid_kind == "mpas":  # unreachable: build_latlon_config refuses first
+            if microphysics_ not in (None, "none") or \
+                    turbulence_ not in (None, "none"):
+                raise NotImplementedError(
+                    "era5_to_mpas_carry() takes no microphysics/turbulence "
+                    f"arguments, but this run asks for microphysics="
+                    f"{microphysics_!r} turbulence={turbulence_!r}. Those size "
+                    "the tracer slots on the lat-lon path; the MPAS converter "
+                    "does not build them, so the run would start from a carry "
+                    "with nowhere to put condensate/TKE. Extend "
+                    "era5_to_mpas_carry first, or run --grid mpas with "
+                    "--microphysics none --turbulence none."
+                )
+            return era5_to_mpas_carry(era5, grid_or_mesh, sigma_)
+        return era5_to_latlon_carry(
+            era5, grid_or_mesh, sigma_,
+            microphysics=microphysics_, turbulence=turbulence_,
+        )
 
     era5_cfg = TrainingERA5Config(dt_hours=6, load_radiation_fluxes=True)
     if era5_zarr:
@@ -233,13 +301,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
         for s in range(n_ics + max_stride):
             tidx = start + s
             era5 = load_era5_slice(era5_cfg, tidx, ds=ds, flux_ds=flux_ds)
-            block[s] = (
-                era5_to_latlon_carry(
-                    era5, grid, sigma,
-                    microphysics=microphysics, turbulence=turbulence,
-                ),
-                era5, tidx,
-            )
+            block[s] = (_to_carry(era5, grid, sigma, microphysics, turbulence),
+                        era5, tidx)
         for d in range(n_ics):
             ic_carry, ic_era5, ic_tidx = block[d]
             # Single-horizon -> one target carry; multi-step -> a tuple of
@@ -515,6 +578,10 @@ def build_parser():
     p.add_argument("--microphysics", default="kessler")
     p.add_argument("--clouds", default="xu_randall")
     p.add_argument("--gravity-wave-drag", default="hines")
+    p.add_argument("--allow-unfilled-families", action="store_true",
+                   help="Permit a classical run with a family set to 'none'. "
+                        "For ablations only: the result is NOT comparable to "
+                        "a complete classical model.")
     # Radiation sub-cycling for the TRAINING rollout: run rrtmgp every N
     # dynamics steps, NOT every step (radiation varies slowly; GCMs update it
     # ~hourly).  rrtmgp is the dominant cost of the classical variant, so the
@@ -564,6 +631,14 @@ def build_parser():
     p.add_argument("--w-flux-sfc-lw", type=float, default=0.5)
     p.add_argument("--w-bias-flux-olr", type=float, default=10.0)
     p.add_argument("--w-bias-flux-rsut", type=float, default=2.0)
+    p.add_argument(
+        "--grid", choices=("latlon", "mpas"), default="latlon",
+        help="Horizontal grid. 'latlon' = the lat-lon C-grid PE (default, "
+             "unchanged). 'mpas' = the SCVT Voronoi mesh + TRiSK PE, which "
+             "reuses this entire driver because the carry-based trainers take "
+             "model and grid as arguments. MPAS currently requires "
+             "--microphysics none --turbulence none (era5_to_mpas_carry builds "
+             "no tracer slots); it refuses loudly rather than dropping them.")
     p.add_argument("--era5-zarr", default=None)
     p.add_argument("--output-dir", default="results/aimip_latlon")
     p.add_argument("--smoke", action="store_true",
@@ -595,6 +670,33 @@ def main(argv=None):
             f"unsupported variant(s) {_bad}; supported: "
             f"{list(_SUPPORTED_VARIANTS)}. The SFNO path moved to the WB scale "
             "trainer: run_amip.py --variants sfno_full."
+        )
+
+    # Radiation pin, EVERY variant: an AIMIP run uses rrtmgp. This used to
+    # guard `classical` only, so a column_nn invocation could pass
+    # --radiation gray (Claude review). Only --smoke is exempt.
+    from legoesm.training.campaign_driver import validate_campaign_radiation
+    validate_campaign_radiation(
+        str(args.radiation), campaign="aimip", smoke=bool(args.smoke),
+    )
+
+    if "classical" in _sel_variants:
+        # ... and the same one-parameterization-per-family rule the spectral
+        # lane enforces. This lane builds its physics through physics_pipeline
+        # rather than make_aimip_classical_spectral_physics, so the factory
+        # gate never sees it (codex round 7) — hence the explicit call.
+        from legoesm.training.aimip_params import (
+            validate_classical_scheme_set,
+        )
+        validate_classical_scheme_set(
+            convection=str(args.convection),
+            turbulence=str(args.turbulence),
+            cloud=str(args.clouds),
+            microphysics=str(args.microphysics),
+            radiation=str(args.radiation),
+            gwd=str(args.gravity_wave_drag),
+            allow_unfilled=bool(
+                getattr(args, "allow_unfilled_families", False)),
         )
 
     # Microphysics is now threaded through build_training_segment (the carry
@@ -671,6 +773,7 @@ def main(argv=None):
     # forecast and _accum expects a single target carry).
     ics, targets, forcings = load_window_pairs(
         grid, sigma, train_windows,
+        grid_kind=args.grid,
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
@@ -679,6 +782,7 @@ def main(argv=None):
     logger.info("Loading eval data ...")
     eval_data = load_window_pairs(
         grid, sigma, eval_windows,
+        grid_kind=args.grid,
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
@@ -703,6 +807,18 @@ def main(argv=None):
         out_json.write_text(json.dumps(scorecard, indent=2))
 
     logger.info("Wrote scorecard -> %s", out_json)
+
+    # EXIT CODE MUST REFLECT THE OUTCOME. This returned 0 while BOTH variants
+    # died on a TypeError, so a batch job reported success and left a scorecard
+    # whose every entry was an "error" string (2026-08-08). A per-variant
+    # try/except is right — one arm's crash must not discard the other's
+    # results — but swallowing it into the exit status is not.
+    failed = sorted(v for v, r in scorecard.items() if "error" in r)
+    if failed:
+        logger.error(
+            "%d/%d variant(s) FAILED: %s (see the per-variant 'error' field in "
+            "%s)", len(failed), len(scorecard), ", ".join(failed), out_json)
+        return 1
     return 0
 
 

@@ -32,11 +32,14 @@ References
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -102,8 +105,11 @@ def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
     dtype=None,
+    tropopause_refine: float = 1.0,
+    sigma_refine: float = 0.12,
+    refine_width: float = 0.45,
 ) -> SigmaCoordinate:
-    """Create a uniformly spaced sigma coordinate.
+    """Create a sigma coordinate (uniform by default).
 
     Parameters
     ----------
@@ -117,6 +123,14 @@ def create_sigma_coordinate(
         Dtype for coordinate arrays. If None, uses the precision
         policy's compute dtype (defaults to float32 when no policy
         is active). Explicit dtype overrides the policy.
+    tropopause_refine : float
+        Peak density ratio for the tropopause refinement (see
+        :func:`tropopause_refined_sigma_half`).  ``1.0`` (default) is the
+        UNIFORM grid, bit-identical to the pre-refinement behaviour.
+        Values > 1 redistribute layers toward ``sigma_refine`` at the SAME
+        level count — the fix for the unresolved tropical cold point.
+    sigma_refine, refine_width : float
+        Centre (in sigma) and log-sigma half-width of the refinement.
 
     Returns
     -------
@@ -133,7 +147,16 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    if tropopause_refine == 1.0:
+        # Uniform (default) — kept as the literal linspace so the untouched
+        # path stays bit-identical to the pre-refinement code.
+        sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
+    else:
+        sigma_half = jnp.asarray(
+            tropopause_refined_sigma_half(
+                n_levels, sigma_top=sigma_top, sigma_refine=sigma_refine,
+                refine=tropopause_refine, width=refine_width),
+            dtype=dtype)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
     dsigma = sigma_half[1:] - sigma_half[:-1]
 
@@ -161,6 +184,117 @@ def create_sigma_coordinate(
         fractional_sigma=fractional_sigma,
         dsigma_full=dsigma_full,
     )
+
+
+def tropopause_refined_sigma_half(
+    n_levels: int,
+    sigma_top: float = 0.01,
+    sigma_refine: float = 0.12,
+    refine: float = 3.0,
+    width: float = 0.45,
+) -> np.ndarray:
+    """Half-level sigma with layers REDISTRIBUTED toward the tropopause.
+
+    The uniform-in-sigma default (:func:`create_sigma_coordinate`) spaces
+    every layer by the same ``dp = dsigma * p_s`` — about 33 hPa at 30
+    levels — so the tropical tropopause layer, whose structure is a
+    10-20 hPa affair, is spanned by ~3 levels and the model forms no cold
+    point (its coldest tropical level lands at the ~26 hPa top instead of
+    ~100 hPa; measured 2026-07-25).  Adding levels does NOT fix this: at
+    40 levels the TTL still gets 4 levels, and that L40 run (uniform σ,
+    24.4 hPa in EVERY layer) blew up at day 46 with dt=60.  The L40 failure
+    mode is NOT attributed here — it appeared across levels 0-11 (10-302 hPa)
+    and no mechanism has been instrumented; "thin layers destabilise" is an
+    untested hypothesis, so it is not used as a design argument below.
+
+    So redistribute at FIXED count instead.  Levels are placed by the
+    standard equidistribution principle: they are the quantiles of a
+    density ``d(sigma)`` in SIGMA space, so a flat density reproduces the
+    uniform default exactly and the refinement only steals layers from the
+    (over-resolved) mid-troposphere::
+
+        d(sigma) = 1 + (refine - 1) * exp(-0.5 * ((ln sigma - ln sigma_refine) / width)^2)
+
+    The bump is Gaussian in LOG sigma because atmospheric structure scales
+    with log-pressure; ``width`` is therefore in log-sigma units (0.45 ~ a
+    factor e^0.45 = 1.6 in pressure either side of the centre).  Working in
+    sigma (not log-sigma) for the equidistribution is deliberate: a pure
+    log-sigma grid would put 166 hPa between the lowest levels at 30
+    levels and destroy the boundary layer.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of layers (returns ``n_levels + 1`` half levels).
+    sigma_top : float
+        Sigma of the model top (same meaning as in
+        :func:`create_sigma_coordinate`).
+    sigma_refine : float
+        Centre of the refinement, in sigma (0.12 ~ 120 hPa at p_s = 1000
+        hPa — the tropical cold point).
+    refine : float
+        Peak density ratio.  ``refine = 1`` reproduces the uniform grid
+        EXACTLY (the identity case, pinned by a test).
+    width : float
+        Gaussian half-width of the bump in log-sigma units.
+
+    Returns
+    -------
+    numpy.ndarray, shape ``(n_levels + 1,)``
+        Monotone increasing half-level sigma from ``sigma_top`` to 1.
+    """
+    if not (refine >= 1.0 and width > 0.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need refine >= 1 and width > 0; "
+            f"got refine={refine!r}, width={width!r}")
+    if not (0.0 < sigma_top < sigma_refine < 1.0):
+        raise ValueError(
+            f"tropopause_refined_sigma_half: need 0 < sigma_top < "
+            f"sigma_refine < 1; got sigma_top={sigma_top!r}, "
+            f"sigma_refine={sigma_refine!r}")
+    # Fine auxiliary QUADRATURE grid; the quantile inversion below is a 1-D
+    # interp, so resolution here only sets the placement accuracy (not a
+    # runtime cost: this runs once at setup, on the host, in float64).
+    # LOG-spaced, matching the density's own log-σ structure: a σ-uniform mesh
+    # has constant Δσ ≈ 5e-5 and therefore CANNOT resolve a narrow bump placed
+    # near the lid (``width`` 0.02 at ``sigma_refine`` ≈ ``sigma_top`` = 1e-5
+    # spans Δσ ~ 2e-7, i.e. zero mesh points), giving a worst-case placement
+    # error of 3.1e-5 in σ over the allowed parameter box.  The log mesh
+    # resolves every allowed bump uniformly: worst case 2.0e-7 (155x better),
+    # and it moves the DEFAULT grid by only 7.8e-9 in σ (8e-6 hPa) — toward
+    # the exact answer, not away.  ``refine == 1`` stays exact either way
+    # (a constant integrand is exact under the trapezoid on any mesh).
+    s = np.geomspace(sigma_top, 1.0, 20001, dtype=np.float64)
+    _ln = np.log(s)
+    dens = 1.0 + (refine - 1.0) * np.exp(
+        -0.5 * ((_ln - np.log(sigma_refine)) / width) ** 2)
+    # DELIBERATELY single-bump.  A matching surface bump was tried and
+    # rejected (measured 2026-07-25, 30 levels, refine=3): it does protect
+    # the lowest layer (42 -> 23 hPa) but it is very WIDE in sigma (it spans
+    # sigma ~ 0.6-1.0), so it starves the tropopause back to 5 levels from 8
+    # and thickens the TOP layer to 57 hPa.  At 30 levels the grid cannot
+    # refine both ends; the tropopause is the identified defect, so it wins.
+    # ACCEPTED COSTS, both measured at nlev=30 / refine=3, both real:
+    #   (a) the lowest layer coarsens ~30% (33 -> 42 hPa);
+    #   (b) the thinnest layer is 14.2 hPa at ~113 hPa — 42% THINNER than
+    #       anything the L40 run that blew up ever had, and inside the same
+    #       10-302 hPa band where that failure appeared.  The top layer k=0
+    #       does thicken (33 -> 40 hPa), but that covers ONE level of a
+    #       twelve-level failure, so it is NOT a safety argument.
+    #   (c) the max adjacent-layer thickness ratio rises 1.00 -> 1.62,
+    #       vs <= 1.07 on every grid this model has run successfully.
+    # Equidistribution: place levels at equal increments of the cumulative
+    # density, so spacing ~ 1/d — fine where d is large.
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (dens[1:] + dens[:-1])
+                                           * np.diff(s))])
+    cum /= cum[-1]
+    targets = np.linspace(0.0, 1.0, n_levels + 1)
+    half = np.interp(targets, cum, s)
+    # Pin the ends exactly (interp round-off would otherwise move the lid
+    # and the surface by ~1e-16, which the hydrostatic integration and the
+    # p_s = sigma=1 identity both assume).
+    half[0], half[-1] = sigma_top, 1.0
+    return half
 
 
 def pressure_from_sigma(
@@ -374,37 +508,17 @@ def compute_sigma_dot_and_total(
     return sigma_dot, D_total
 
 
-def vertical_advection(
+def _vertical_advection_upwind_sigma(
     field: jax.Array,
     sigma_dot: jax.Array,
     sigma_coord: SigmaCoordinate,
 ) -> jax.Array:
-    """Compute vertical advection using the advective form with upwind.
+    """First-order upwind (donor-cell) ``-σ̇·∂f/∂σ`` — the DEFAULT path.
 
-    Computes: -σ̇ · ∂f/∂σ
-
-    This is the **advective form**, appropriate for non-mass-weighted
-    variables (u, v, T). The flux form -∂(σ̇·f)/∂σ would add a spurious
-    term -f·∂σ̇/∂σ that causes exponential instability.
-
-    σ̇ is interpolated from half-levels to full levels, and the vertical
-    gradient uses upwind differencing:
-    - σ̇ > 0 (downward): ∂f/∂σ ≈ (f_k - f_{k-1}) / Δσ  (backward)
-    - σ̇ < 0 (upward):   ∂f/∂σ ≈ (f_{k+1} - f_k) / Δσ  (forward)
-
-    Parameters
-    ----------
-    field : jax.Array
-        Field to advect, shape (6, n, n, nlev).
-    sigma_dot : jax.Array
-        Sigma-dot at interfaces, shape (6, n, n, nlev+1).
-    sigma_coord : SigmaCoordinate
-        Vertical coordinate (provides sigma_full and dsigma).
-
-    Returns
-    -------
-    jax.Array
-        Vertical advection tendency, shape (6, n, n, nlev).
+    Factored verbatim out of :func:`vertical_advection` so the van-Leer variant
+    can reuse it at the two boundary levels without a second copy of the
+    stencil.  Byte-identical to the pre-factoring code (pinned by
+    ``test_default_is_bit_identical_to_legacy_upwind``).
     """
     # Interpolate σ̇ from half-levels to full levels
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])  # (6,n,n,nlev)
@@ -429,11 +543,299 @@ def vertical_advection(
     return -sigma_dot_full * grad
 
 
+VERTICAL_ADVECTION_SCHEMES = ("upwind", "van_leer")
+
+
+def van_leer_face_values_sigma(
+    field: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array]:
+    """Slope-limited interface values for the sigma grid, ``(q_pos, q_neg)``.
+
+    ``q_pos`` is the reconstruction from the cell ABOVE interface ``j`` (used
+    when σ̇ > 0, descent); ``q_neg`` from the cell BELOW.  Both have shape
+    ``(..., nlev+1)``.
+
+    Public so the boundedness property can be tested on THIS reconstruction —
+    including its stretched-grid weights and its clip — rather than on the
+    uniform-grid :func:`legoesm.core.flux_limiters.van_leer_face_values` it
+    reduces to (codex round 1, P2).  See
+    :func:`_vertical_advection_van_leer_sigma` for the derivation, the
+    boundary treatment and the monotonicity scope.
+    """
+    from legoesm.core.flux_limiters import (
+        grad_safe_ratio, ratio_grad_floor, van_leer_limiter,
+    )
+
+    nlev = field.shape[-1]
+    if nlev < 4:
+        raise ValueError(
+            f"the van-Leer sigma reconstruction needs at least 4 vertical "
+            f"levels for its 4-cell stencil; got nlev={nlev}."
+        )
+    # Linear-extrapolation ghosts: f_{-1} = 2f_0 - f_1 places the ghost one
+    # CENTRE spacing beyond the edge, consistent with the edge-padded spacings
+    # below, so a linear profile keeps r = 1 at face 1.
+    f0, f1 = field[..., 0:1], field[..., 1:2]
+    fm1, fm2 = field[..., -1:], field[..., -2:-1]
+    fp = jnp.concatenate(
+        [3.0 * f0 - 2.0 * f1, 2.0 * f0 - f1, field,
+         2.0 * fm1 - fm2, 3.0 * fm1 - 2.0 * fm2], axis=-1)  # (..., nlev+4)
+    # Interface j (0..nlev) separates cell j-1 (above) from cell j (below);
+    # the 4-cell stencil is [j-2, j-1, j, j+1].
+    f_jm2 = fp[..., 0:nlev + 1]
+    f_jm1 = fp[..., 1:nlev + 2]
+    f_j = fp[..., 2:nlev + 3]
+    f_jp1 = fp[..., 3:nlev + 4]
+    # Centre-to-centre spacings, edge-padded: dc_up/dc_loc/dc_dn at face j are
+    # sigma_full[j-1]-sigma_full[j-2], [j]-[j-1], [j+1]-[j].
+    dcp = jnp.pad(sigma_coord.dsigma_full, (2, 2), mode="edge")  # (nlev+3,)
+    dc_up, dc_loc, dc_dn = dcp[0:nlev + 1], dcp[1:nlev + 2], dcp[2:nlev + 3]
+    # MUSCL face weights: donor half-thickness / centre-to-centre distance.
+    # Exactly 0.5 each on a uniform grid.
+    dsp = jnp.pad(sigma_coord.dsigma, (1, 1), mode="edge")  # (nlev+2,)
+    d_above, d_below = dsp[:-1], dsp[1:]                    # (nlev+1,)
+    d_sum = d_above + d_below
+
+    eps = 1e-30
+    t_grad = ratio_grad_floor(jnp.result_type(field))
+    delta = f_j - f_jm1
+    s_loc = delta / dc_loc
+    ok = jnp.abs(s_loc) > t_grad
+    den = jnp.where(jnp.abs(s_loc) > eps, s_loc, eps)
+    r_pos = grad_safe_ratio((f_jm1 - f_jm2) / dc_up, den, ok)
+    r_neg = grad_safe_ratio((f_jp1 - f_j) / dc_dn, den, ok)
+    q_pos = f_jm1 + (d_above / d_sum) * van_leer_limiter(r_pos) * delta
+    q_neg = f_j - (d_below / d_sum) * van_leer_limiter(r_neg) * delta
+    # Monotone bound (non-binding on a uniform grid; see the kernel docstring).
+    lo, hi = jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j)
+    return jnp.clip(q_pos, lo, hi), jnp.clip(q_neg, lo, hi)
+
+
+def _vertical_advection_van_leer_sigma(
+    field: jax.Array,
+    sigma_dot: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """Monotone (van-Leer TVD) sigma vertical advection ``-σ̇·∂f/∂σ``.
+
+    Sigma-coordinate counterpart of ``compressible_euler.
+    _theta_vert_advection_van_leer_kernel`` (height coordinate, iter-200) and of
+    the plane CRM's ``vertical_advection_van_leer_plane``.
+
+    RELATION TO THE SHARED LIMITER, stated precisely (codex round 2): this is a
+    METRIC-AWARE sigma-specific reconstruction
+    (:func:`van_leer_face_values_sigma`), NOT a call into
+    :func:`legoesm.core.flux_limiters.van_leer_face_values`.  It uses that
+    module's ``van_leer_limiter`` and ``grad_safe_ratio`` — the limiter shape
+    and the AD-safe ratio guard, which are the parts that carry numerics — but
+    forms its own SLOPE ratios and Δσ-weighted face positions, because the
+    shared helper assumes uniform spacing and cannot express them (with raw
+    difference ratios the scheme was measurably WORSE than upwind on a
+    stretched grid).  On a uniform grid the two are equal, and
+    ``test_uniform_grid_matches_the_shared_van_leer_face_values`` asserts
+    BOTH returned arrays element-by-element against the shared helper (not a
+    tendency inversion, which would only pin successive differences — codex
+    round 3) — so the HD-1 smoothness-ratio SIGN convention is pinned to the
+    shared implementation by test, not by call graph.
+
+    ADVECTIVE form, like the first-order sibling — the flux form
+    ``-∂(σ̇f)/∂σ`` would add the spurious ``-f·∂σ̇/∂σ``.  Written as the
+    *difference of face-minus-cell* increments::
+
+        -σ̇·∂f/∂σ|_k = -[ σ̇_{k+1}(q_{k+1} - f_k) - σ̇_k(q_k - f_k) ] / Δσ_k
+
+    which is algebraically the flux divergence minus ``f_k·∂σ̇/∂σ`` but forms
+    no large cancelling pair, and is exactly invariant to a constant offset in
+    ``f`` at every level including the boundaries.
+
+    ``q_j`` is the slope-limited face value at interface ``j`` (σ increases
+    DOWNWARD with index, so σ̇ > 0 = descent ⇒ the donor cell is ``j-1``,
+    above).  The two GHOST cells at each end are LINEAR EXTRAPOLATIONS, not an
+    ``edge`` (zero-gradient) pad: an edge pad zeroes the upwind slope seen by
+    faces 1 and ``nlev-1``, collapsing the limiter to donor cell there and
+    re-introducing first-order diffusion two levels deep into the interior —
+    measured on a linear profile (exact for this scheme) as a 50% tendency
+    error at level 1, i.e. right at the 40-100 hPa levels this exists to fix.
+
+    BOUNDARY LEVELS ``k=0`` and ``k=nlev-1`` KEEP THE FIRST-ORDER TENDENCY, and
+    that is a stability requirement, not a shortcut.  σ̇ vanishes at the lid and
+    the surface, so the boundary layer has only ONE interior face; for descent
+    at the top (σ̇ > 0) that face is DOWNWIND of the cell, and a downwind
+    difference is unconditionally unstable — the update becomes
+    ``f_0 <- (1+νθ)f_0 - νθ f_1``, an extrapolation whose coefficient on the
+    neighbour is negative.  Measured: 500 forward-Euler steps grew a random
+    column from 300 K to 360 K before this fallback was added.  The first-order
+    path's zero-gradient BC (gradient = 0 when the upstream cell is outside the
+    domain) is the stable choice, so the two boundary levels are byte-identical
+    to today under BOTH schemes.  The published diagnosis already excludes k=0
+    as a boundary-stencil artifact, and k=0 here is 26 hPa — six levels above
+    the 91.4 hPa maximum this option targets.
+
+    MONOTONICITY — what is and is NOT guaranteed (codex rounds 1-3, P1).  Two
+    separate statements; do not conflate them.
+
+    (a) The INTERIOR RECONSTRUCTION is bounded UNCONDITIONALLY: for faces
+    ``1..nlev-1`` ``q`` is clipped to the two adjacent REAL cell values, so a
+    face value never leaves the local range, on any grid, for any input.
+    Faces ``0`` and ``nlev`` are bounded against a GHOST and a real cell, but
+    they never enter a tendency — both boundary levels take the first-order
+    result (below).
+
+    (b) The UPDATE is monotone only under a Courant condition, and the
+    DERIVATION below holds for a UNIFORM grid.  One forward-Euler step of the
+    advective form with ``q_j = f_{j-1} + θ_j (f_j - f_{j-1})``,
+    ``θ_j in [0, 1]``, gives::
+
+        f_k^{n+1} = f_k + C⁻(f_{k-1} - f_k),
+        C⁻ = ν_k (1 - θ_k) + ν_{k+1} θ_{k+1} / r_{k+1},   ν = σ̇ dt / Δσ_k
+
+    and van Leer's ``phi(r)/r <= 2`` with the uniform weight ``w = 1/2``
+    bounds ``C⁻ <= ν_k + ν_{k+1}``, i.e. TVD while ``ν_k + ν_{k+1} <= 1``.
+
+    SCOPE of (b), stated because codex round 3 caught the over-reach: on a
+    STRETCHED grid the ``θ_{k+1}/r_{k+1}`` factor carries the neighbouring
+    layer's width ratio rather than this face's weight, so the constant in the
+    bound changes and ``ν_k + ν_{k+1} <= 1`` is NOT derived there; and with a
+    VARYING σ̇ the advective (non-conservative) form is not automatically TVD
+    at all — the anti-diffusive face term is uncompensated at the cell edge.
+    On both of those there is NO guarantee: what exists is REGRESSION
+    EVIDENCE from a small number of cases —
+    ``test_tracer_blob_stays_positive_and_bounded_under_varying_sigma_dot``
+    (two profiles, sign-changing σ̇, ~2.1x the production raw-face Courant) and
+    ``test_stretched_grid_stays_exact_on_linear_and_monotone`` (one random
+    column on ``refine=3``).  Examples, not a proof; a refined-grid production
+    arm should re-measure.
+
+    And it is genuinely NOT monotone above the bound: codex produced an
+    overshoot to ``-0.017 / 0.991`` from a ``[0, 1]`` Gaussian in one Euler
+    step at per-face Courant 0.75 (a top-hat does NOT trigger it; the first
+    overshoot appears near 0.6).  First-order upwind, by contrast, is monotone
+    for ``ν <= 1`` on any grid, so this scheme trades stability margin for
+    order.
+
+    MEASURED on the run this targets (``s9_courant.py``), in the RAW INTERFACE
+    velocities the update actually multiplies — NOT the half->full average the
+    first-order path uses, which cancels opposite-signed adjacent interfaces
+    (codex round 2): the global max of ``ν_k + ν_{k+1}`` over all cells, levels
+    and the 37 year-1 checkpoints is **0.0642** at dt = 75 s (per-checkpoint
+    mean 0.0537, median 0.0543; largest single raw face 0.0322), i.e. **15.6x**
+    inside the bound.  SCOPE: those are 10-day checkpoint SNAPSHOTS, so they
+    bound the sampled phase, not every RK stage of every step — treat the
+    margin as strong evidence, not a proof.  Do NOT read the "monotone" label
+    as unconditional.
+
+    Order and dissipation: for a smooth profile the van-Leer limiter tends to
+    ``phi = 1`` and ``q`` becomes the linear interpolant, i.e. the CENTRED
+    2nd-order operator — the ``K_σ = |σ̇|Δσ/2`` implicit diffusion of the
+    first-order upwind gradient is removed, not merely reduced.  At an extremum
+    ``phi -> 0`` and the scheme falls back to donor cell, which is what
+    suppresses a dispersive overshoot at a sharp tropopause (worse than the
+    diffusion it cures) — under the Courant condition of (b) above, not
+    unconditionally.  Note the model advects θ, not T: θ is monotone in a stably
+    stratified column, so the tropical cold point is NOT a θ extremum and the
+    limiter does not clip there.
+
+    NON-UNIFORM σ: the reconstruction uses true SLOPES (divided by the
+    centre-to-centre spacing) and a face weight
+    ``w = Δσ_donor / (Δσ_donor + Δσ_other)``, so the smooth limit is the exact
+    linear interpolant on ANY spacing.  Both reduce to the uniform-grid
+    ``0.5 * phi * Δf`` form when the spacing is constant, and
+    ``test_uniform_grid_matches_the_shared_van_leer_face_values`` asserts
+    equality with :func:`legoesm.core.flux_limiters.van_leer_face_values` there
+    — so the HD-1 smoothness-ratio sign convention is still pinned to the one
+    shared implementation.  Without this, a ``tropopause_refine > 1`` grid made
+    the scheme WORSE than upwind on a linear profile (9.2e-07 vs 1.3e-17),
+    because upwind's divided difference is exact on a linear field at any
+    spacing while a raw-difference ratio gives ``phi != 1``.  The extra
+    ``clip`` to the two adjacent cell values is what keeps the RETURNED face
+    value in range when ``w > 1/2`` — note it bounds ``q``, NOT the product
+    ``w * phi``, which is formed before the clip and can reach ``1.5`` at
+    ``w = 0.75, phi = 2`` (codex round 4).  The clip is provably non-binding on
+    a uniform grid, where ``w * phi <= 1`` already.
+    """
+    if field.shape[-1] < 4:
+        # FAIL LOUD rather than run inert: the 4-cell stencil is undefined and
+        # a silent fall-back to upwind is exactly the "selected but does
+        # nothing" failure this repo forbids (codex round 1, P2).
+        raise ValueError(
+            f"scheme='van_leer' needs at least 4 vertical levels for its "
+            f"4-cell stencil; got nlev={field.shape[-1]}. Use scheme='upwind'."
+        )
+    up = _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
+    q_pos, q_neg = van_leer_face_values_sigma(field, sigma_coord)
+    # σ̇ > 0 (descent) ⇒ donor is the cell ABOVE ⇒ the left-biased value.
+    q_face = jnp.where(sigma_dot > 0, q_pos, q_neg)  # (..., nlev+1)
+    inc_top = sigma_dot[..., :-1] * (q_face[..., :-1] - field)
+    inc_bot = sigma_dot[..., 1:] * (q_face[..., 1:] - field)
+    tend = -(inc_bot - inc_top) / sigma_coord.dsigma
+    # Boundary levels keep the first-order (stable, zero-gradient-BC) tendency.
+    return tend.at[..., 0].set(up[..., 0]).at[..., -1].set(up[..., -1])
+
+
+def vertical_advection(
+    field: jax.Array,
+    sigma_dot: jax.Array,
+    sigma_coord: SigmaCoordinate,
+    scheme: str = "upwind",
+) -> jax.Array:
+    """Compute vertical advection using the advective form with upwind.
+
+    Computes: -σ̇ · ∂f/∂σ
+
+    This is the **advective form**, appropriate for non-mass-weighted
+    variables (u, v, T). The flux form -∂(σ̇·f)/∂σ would add a spurious
+    term -f·∂σ̇/∂σ that causes exponential instability.
+
+    σ̇ is interpolated from half-levels to full levels, and the vertical
+    gradient uses upwind differencing:
+    - σ̇ > 0 (downward): ∂f/∂σ ≈ (f_k - f_{k-1}) / Δσ  (backward)
+    - σ̇ < 0 (upward):   ∂f/∂σ ≈ (f_{k+1} - f_k) / Δσ  (forward)
+
+    Parameters
+    ----------
+    field : jax.Array
+        Field to advect, shape (6, n, n, nlev).
+    sigma_dot : jax.Array
+        Sigma-dot at interfaces, shape (6, n, n, nlev+1).
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate (provides sigma_full and dsigma).
+    scheme : str
+        ``"upwind"`` (default) = the first-order donor-cell gradient
+        described above, whose leading truncation error is a diffusion
+        ``K_σ = |σ̇|·Δσ/2``.  ``"van_leer"`` = the 2nd-order TVD reconstruction
+        (:func:`_vertical_advection_van_leer_sigma`), which removes that
+        implicit diffusion where the profile is smooth; its face values are
+        unconditionally bounded and its update is monotone under a Courant
+        condition (see that docstring — NOT unconditionally).  Requires
+        ``nlev >= 4`` and raises below it.  Static Python string: the branch is
+        resolved at trace time, only one branch is traced, and the default path
+        is untouched (bit-identical).  Both branches are differentiable ALMOST
+        EVERYWHERE — the upwind ``where(σ̇>0, ...)``, the van-Leer ``abs`` kink
+        at ``r=0`` and the reconstruction ``clip`` are each non-smooth on a
+        measure-zero set, as in every limiter in this repo.
+
+    Returns
+    -------
+    jax.Array
+        Vertical advection tendency, shape (6, n, n, nlev).
+    """
+    if scheme == "van_leer":
+        return _vertical_advection_van_leer_sigma(field, sigma_dot, sigma_coord)
+    if scheme != "upwind":
+        raise ValueError(
+            f"unknown vertical advection scheme {scheme!r}; expected one of "
+            f"{VERTICAL_ADVECTION_SCHEMES}"
+        )
+    return _vertical_advection_upwind_sigma(field, sigma_dot, sigma_coord)
+
+
 def vertical_advection_theta(
     T: jax.Array,
     sigma_dot: jax.Array,
     p_s: jax.Array,
     sigma_coord: SigmaCoordinate,
+    scheme: str = "upwind",
 ) -> jax.Array:
     """Combined vertical advection + adiabatic σ̇ term for temperature.
 
@@ -456,6 +858,9 @@ def vertical_advection_theta(
         Surface pressure, shape (...).
     sigma_coord : SigmaCoordinate
         Vertical coordinate.
+    scheme : str
+        Vertical advection scheme for the θ transport, forwarded verbatim to
+        :func:`vertical_advection` (``"upwind"`` default = bit-identical).
 
     Returns
     -------
@@ -472,8 +877,8 @@ def vertical_advection_theta(
     # Potential temperature: θ = T · (p₀/p)^κ
     theta = T * (P_0 / jnp.maximum(p_full, 1.0)) ** kappa
 
-    # Advect θ: -σ̇ · ∂θ/∂σ  (using same upwind scheme)
-    adv_theta = vertical_advection(theta, sigma_dot, sigma_coord)
+    # Advect θ: -σ̇ · ∂θ/∂σ  (using the selected scheme)
+    adv_theta = vertical_advection(theta, sigma_dot, sigma_coord, scheme=scheme)
 
     # Convert back: tendency_T = (p/p₀)^κ · adv_θ
     exner = (p_full / P_0) ** kappa  # (p/p₀)^κ
@@ -727,12 +1132,63 @@ def create_hybrid_coordinate(
     )
 
 
+def hybrid_min_valid_surface_pressure(
+    A_half, B_half, p_ref: float = constants.p_ref,
+) -> float:
+    """Lowest surface pressure [Pa] at which every layer still has ``dp > 0``.
+
+    ``dp_k = dA_k p_ref + dB_k p_s`` is LINEAR in ``p_s``, so a layer with
+    ``dA_k < 0`` (which the near-surface layers of a hybrid grid always have,
+    since ``A`` must return to 0 at the ground) collapses and then INVERTS once
+    ``p_s`` drops below ``-dA_k p_ref / dB_k``.  The binding layer is the one
+    with the largest such ratio.
+
+    Below the returned pressure the coordinate hands the dycore NEGATIVE layer
+    mass -- not a diagnostic nuisance: ``dp_from_hybrid`` feeds
+    ``primitive_eq_latlon_cgrid``, ``primitive_eq_cdgrid``, ``spectral_pe`` and
+    ``primitive_eq_mpas``.
+
+    Returns 0.0 when no layer can invert (e.g. ``dA >= 0`` everywhere).
+
+    Raises
+    ------
+    ValueError
+        If a layer is invalid at EVERY surface pressure rather than below some
+        threshold: ``dB < 0`` (non-monotone B), or ``dA <= 0`` with ``dB == 0``
+        (``dp = dA p_ref <= 0`` regardless of ``p_s``).  Returning a finite
+        "safe" pressure for those would be a false all-clear.
+    """
+    import numpy as np
+
+    dA = np.diff(np.asarray(A_half, dtype=np.float64))
+    dB = np.diff(np.asarray(B_half, dtype=np.float64))
+
+    if np.any(dB < 0.0):
+        raise ValueError(
+            f"hybrid B_half must be non-decreasing; got {int((dB < 0).sum())} "
+            "layer(s) with dB < 0 (dp would depend on p_s with the wrong sign)"
+        )
+    degenerate = (dB == 0.0) & (dA <= 0.0)
+    if np.any(degenerate):
+        raise ValueError(
+            f"{int(degenerate.sum())} hybrid layer(s) have dB == 0 and "
+            "dA <= 0, so dp = dA*p_ref <= 0 at EVERY surface pressure -- the "
+            "grid is invalid, not merely limited to high p_s"
+        )
+
+    bad = (dA < 0.0) & (dB > 0.0)
+    if not bad.any():
+        return 0.0
+    return float(np.max(-dA[bad] * p_ref / dB[bad]))
+
+
 def make_hybrid_levels(
     n_levels: int,
     p_top_Pa: float = 200.0,
     p_ref: float = constants.p_ref,
     transition_exponent: int = 3,
     stretching: float = 0.0,
+    p_s_min_Pa: float | None = None,
 ) -> HybridSigmaPressureCoordinate:
     """Generate hybrid coordinate with smooth sigma-to-pressure transition.
 
@@ -761,6 +1217,26 @@ def make_hybrid_levels(
         2-3 = enhanced boundary layer resolution. The stretching maps
         eta -> sinh(s*eta)/sinh(s), concentrating levels near eta=1
         (the surface).
+    p_s_min_Pa : float, optional
+        Lowest surface pressure this grid must remain valid at.  When given,
+        a coordinate that would produce NEGATIVE layer mass at that pressure
+        is a hard error instead of silent garbage.  Pass the minimum ``p_s``
+        the orography actually produces.
+
+    Raises
+    ------
+    ValueError
+        If ``p_s_min_Pa`` is given and the generated levels invert above it.
+
+    Notes
+    -----
+    With the default ``B = eta**3`` the near-surface ``dB/deta -> 3``, so
+    ``dp > 0`` needs ``p_s > (2 p_ref + p_top)/3 ~= 667 hPa``.  Real orography
+    goes well below that: a 2.5-degree AMIP run reaches ``p_s = 543 hPa`` over
+    the Tibetan Plateau, with 0.91% of global area under the threshold.  A
+    warning naming the threshold is emitted whenever it exceeds 600 hPa, which
+    the default configuration does -- see
+    :func:`hybrid_min_valid_surface_pressure`.
 
     Returns
     -------
@@ -774,6 +1250,25 @@ def make_hybrid_levels(
         eta = 1.0 - np.sinh(stretching * (1.0 - eta)) / np.sinh(stretching)
     B_half = eta ** transition_exponent
     A_half = eta - B_half + (p_top_Pa / p_ref) * (1.0 - eta)
+
+    # Validity gate: below this surface pressure the near-surface layers carry
+    # NEGATIVE mass, and dp_from_hybrid feeds the dycore, not just diagnostics.
+    p_s_min_valid = hybrid_min_valid_surface_pressure(A_half, B_half, p_ref)
+    if p_s_min_Pa is not None and p_s_min_valid >= p_s_min_Pa:
+        raise ValueError(
+            f"hybrid levels invert (dp <= 0) below p_s = "
+            f"{p_s_min_valid / 100.0:.1f} hPa, but p_s_min_Pa requires validity "
+            f"down to {p_s_min_Pa / 100.0:.1f} hPa. Lower transition_exponent "
+            f"(currently {transition_exponent}) or raise p_s_min_Pa."
+        )
+    if p_s_min_valid > 6.0e4:
+        logger.warning(
+            "hybrid levels (n=%d, exponent=%d, stretching=%.1f) carry NEGATIVE "
+            "layer mass for p_s < %.1f hPa; real orography reaches ~543 hPa "
+            "over Tibet (~0.9%% of global area). Pass p_s_min_Pa to make this "
+            "a hard error, or use vertical_coord='sigma'.",
+            n_levels, transition_exponent, stretching, p_s_min_valid / 100.0,
+        )
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
 
@@ -2256,6 +2751,39 @@ def vertical_advection_hybrid(
     return -F_full * grad
 
 
+def vertical_advection_hybrid_sb(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Simmons-Burridge centered vertical advection, hybrid coordinates.
+
+        -eta_dot dp/deta * df/dp |_k
+            = -(1/(2*dp_k)) * [ mdot_{k+1/2} * (f_{k+1} - f_k)
+                              + mdot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with ``mdot`` the interface mass flux from
+    :func:`compute_mass_flux_hybrid` (zero at top and surface) and ``dp_k``
+    the LAYER thickness (half-level differences) — the conservation weight.
+    Identical structure to the pure-sigma ``_vertical_advection_sigma_sb``:
+    ``adv_k - f_k * (mdot_{k+1/2} - mdot_{k-1/2})/dp_k`` is a flux-form
+    divergence whose dp-weighted column sum telescopes to the (zero)
+    boundary fluxes, so ``sum(dp * f)`` is conserved in pairing with
+    continuity — the property the upwind advective form
+    (:func:`vertical_advection_hybrid`) lacks (measured -0.32..-0.47 K/day
+    mass-weighted T sink on the sigma path at T63L8).
+    """
+    dp = dp_from_hybrid(coord, p_s)                # (..., nlev), layer thickness
+    df = jnp.diff(field, axis=-1)                  # (..., nlev-1)
+    md_int = mass_flux[..., 1:-1]                  # interior interfaces
+    contrib = md_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # mdot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # mdot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * jnp.clip(dp, 1e-10, None))
+
+
 def vertical_advection_theta_hybrid(
     T: jax.Array,
     mass_flux: jax.Array,
@@ -2308,6 +2836,104 @@ def vertical_advection_theta_hybrid(
 
     # Advect θ with the SAME upwind operator, then convert back: -exner·F·∂θ/∂p
     return exner * vertical_advection_hybrid(theta, mass_flux, p_s, coord)
+
+
+def sb81_omega_over_p_dyn(
+    cumsum_mass_div: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array | None = None,
+) -> jax.Array:
+    """SB81 α-weighted DYNAMIC part of the energy conversion ``(ω/p)_k``.
+
+    Simmons & Burridge (1981) / IFS discretization of the non-advective part
+    of the thermodynamic conversion term (#1029 ω-side)::
+
+        (ω/p)_k^dyn = -(1/Δp_k) [ L_k · (Σ_{j<k} C_j - B_top·dp_s/dt)
+                                   + α_k · C_k ]
+
+    with ``C_j = ∇·(v_j Δp_j)`` the flux-form layer mass divergence,
+    ``L_k = ln(p_{k+1/2}/p_{k-1/2})`` and ``α_k`` the exact SB81 alpha from
+    :func:`sb81_halflevel_construction` — the SAME half-level construction
+    the geopotential integration and the momentum/thermo ``ln p`` gradients
+    use (the arithmetic ``ω_full / p_full`` form this replaces was a third,
+    independent discretization of the same continuous operator).  ``Δp_k``
+    is differenced INTERNALLY from the same clipped half-level pressures as
+    ``L_k``/``α_k`` — passing an externally-built ``dA + dB·p_s`` thickness
+    would differ by rounding (and by the clip in a zero-p-top layer),
+    breaking the discrete identities below.
+
+    The caller adds the advective part ``v_k · ∇(ln p_k^SB)`` separately
+    (the shared SB81 full-level field of :func:`sb81_full_level_ln_p`);
+    together they discretize the full ``ω/p``.  The ``∂p/∂t`` and
+    ``η̇ ∂p/∂η`` contributions are CONTAINED in the cumulative-divergence
+    expression (continuity + the ``F = 0`` top closure fold them in) —
+    EXCEPT the top-boundary term when the coordinate's top interface itself
+    moves in pressure (``B_top != 0``, e.g. a sigma-like coordinate with
+    ``p_top = sigma_top·p_s``): there ``(∂p/∂t + η̇ ∂p/∂η)(p̂) =
+    B_top·dp_s/dt - cumsum(p̂)`` and the constant layer-averages against
+    ``dp/p`` to ``+ B_top·dp_s/dt·L_k/Δp_k``.  Pass ``dp_s_dt`` (the RAW
+    continuity diagnosis ``-D_total/B_range``, NOT a globally corrected
+    variant — a zero-mean fixer applied to the prognostic ``dp_s/dt``
+    breaks the continuity identity this derivation rests on) to include
+    it; the term is multiplied by ``coord.B_half[0]`` traced (no Python
+    branch), so ``B_top = 0`` coordinates const-fold it away and the
+    function stays jit/AD-safe for traced coordinates.
+
+    Discrete column identity (unit-tested to fp64 roundoff, not bit
+    exactness — separate ``log``/multiply/reduce roundings)::
+
+        Σ_k Δp_k (ω/p)_k^dyn = -Σ_j C_j (ln p_s - ln p_j^SB)
+                               + B_top·dp_s/dt · ln(p_s / p_top_safe)
+
+    i.e. the column-integrated conversion telescopes onto the SAME discrete
+    ``ln p^SB`` field whose gradient does the momentum PGF work.  This is a
+    VERTICAL-discretization consistency statement only: on the C-grid the
+    horizontal pairing (face-flux ``C`` vs the centre-averaged
+    ``v·∇ln p^SB`` product) is not exact summation-by-parts, so no exact
+    global energy-conservation claim follows (#1029 tracks the residual
+    via the forced ``held_suarez_topo`` A/B, not an algebraic proof).
+
+    Top-layer convention at an exactly-zero-pressure top: the clipped
+    construction gives ``α_0 → 1`` (documented in
+    :func:`sb81_full_level_ln_p`), NOT the IFS ``α_1 = ln 2`` special case
+    — chosen so the conversion, the geopotential and the ``ln p^SB``
+    gradients keep ONE α field; adopting the IFS convention would have to
+    change all three together.
+
+    Parameters
+    ----------
+    cumsum_mass_div : jax.Array
+        ``cumsum(div(dp·v), axis=-1)`` — INCLUSIVE cumulative flux-form mass
+        divergence, shape (..., nlev) [Pa/s].
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,) [Pa].
+    dp_s_dt : jax.Array or None
+        RAW surface-pressure tendency ``-D_total/B_range``, shape (...,)
+        [Pa/s].  Only consumed through ``B_top`` (moving-top coordinates);
+        ``None`` omits the term.
+
+    Returns
+    -------
+    jax.Array
+        ``(ω/p)_k^dyn``, shape (..., nlev) [1/s].
+    """
+    p_half_safe, ln_ratio, alpha = sb81_halflevel_construction(coord, p_s)
+    # Internal Δp from the SAME clipped half-level pressures as L/α.
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    # C_k from the inclusive cumsum (C_0 = cumsum_0): one Pad HLO, no concat.
+    pad_axes = ((0, 0),) * (cumsum_mass_div.ndim - 1) + ((1, 0),)
+    cumsum_excl = jnp.pad(cumsum_mass_div[..., :-1], pad_axes)  # Σ_{j<k} C_j
+    C = cumsum_mass_div - cumsum_excl                           # C_k
+    if dp_s_dt is not None:
+        # Moving-top term: traced multiply by B_half[0] (jit/AD-safe; a
+        # static B_top = 0 const-folds to the fixed-top expression).
+        cumsum_excl = cumsum_excl - coord.B_half[0] * dp_s_dt[..., jnp.newaxis]
+    num = ln_ratio * cumsum_excl + alpha * C
+    # 1e-10 Pa: division-safety floor only (real layer thicknesses are far
+    # above it; matches the module's other dp floors).
+    return -num / jnp.maximum(dp, 1e-10)
 
 
 def compute_omega_hybrid(

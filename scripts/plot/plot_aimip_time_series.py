@@ -78,6 +78,7 @@ def _build_spectral_config(base_cfg: dict):
         ),
         sfno_embed_dim=int(base_cfg.get("sfno_embed_dim", 128)),
         sfno_n_blocks=int(base_cfg.get("sfno_n_blocks", 4)),
+        sfno_dropout=float(base_cfg.get("sfno_dropout", 0.0)),
         sfno_mlp_expansion=int(base_cfg.get("sfno_mlp_expansion", 4)),
         n_epochs=1,
         lr=float(base_cfg.get("aimip_lr", 3.0e-4)),
@@ -141,6 +142,9 @@ def _load_sfno(ckpt_path: Path, spec_cfg, grid, variant="sfno_physics"):
             embed_dim=spec_cfg.sfno_embed_dim,
             n_blocks=spec_cfg.sfno_n_blocks,
             mlp_expansion=spec_cfg.sfno_mlp_expansion,
+            # Must match the trained arch or the PE wrapper's
+            # config-equality guard raises. Inert here (no key passed).
+            dropout=spec_cfg.sfno_dropout,
             residual_prediction=False,
         ),
         grid,
@@ -161,10 +165,12 @@ def _physics_fn_for(variant: str, model, grid, spec_cfg, base_cfg):
     if variant == "classical":
         return make_aimip_classical_spectral_physics(
             model, grid, spec_cfg.dt,
-            radiation=str(base_cfg.get("aimip_radiation", "gray")),
+            radiation=str(base_cfg.get("aimip_radiation", "rrtmgp")),
             rad_update_interval_steps=int(
                 base_cfg.get("aimip_rad_update_interval", 6),
             ),
+            surface_bulk_scheme=str(
+                base_cfg.get("aimip_surface_bulk_scheme", "constant")),
         )
     if variant == "column_nn":
         return make_column_mlp_spectral_physics(model, grid)

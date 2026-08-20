@@ -179,7 +179,9 @@ def dcmip25_tc2_init(
     p = {**TC2_PARAMS, **(params or {})}
 
     # Apply small-Earth scaling
-    small_grid = apply_small_earth_scaling(grid, p["small_earth_factor"])
+    small_grid = apply_small_earth_scaling(
+        grid, p["small_earth_factor"],
+        rotating=p.get("rotating", True))
 
     # Isothermal reference state
     theta_fn = isothermal_theta_ref(T0=p["T0"])

@@ -76,6 +76,68 @@ def test_gm_redi_disable_branch():
     assert tri.gm_redi is None
 
 
+def test_gm_treguier_branch_defaults_off_and_is_byte_identical():
+    """The recipe default keeps the CONSTANT kappa_GM; the Treguier block is
+    present but disabled, so existing cards are unaffected."""
+    mc = nemo_match_tripole_model_config(NEMOMatchTripoleRecipeConfig())
+    assert mc.gm_redi.treguier.enabled is False
+    assert mc.gm_redi.visbeck.enabled is False
+    assert mc.gm_redi.kappa_GM == pytest.approx(600.0)
+
+
+def test_gm_treguier_threads_the_kappa_min_floor():
+    """REGRESSION: the recipe built ``TreguierConfig(enabled=True, aei0=...)``
+    with NO kappa_min field at all, so the floor was UNREACHABLE from the
+    recipe and silently 0.0 while ``run_omip_core2.py --gm-kappa-min``
+    defaulted to 200 -- one scheme, two defaults, nobody aware.
+
+    The floor is now threaded. The recipe default stays 0.0 because this is a
+    NEMO-MATCH card and raw NEMO is capped-only; the run script's 200.0 is a
+    production stability knob. That divergence is DELIBERATE and asserted at
+    both ends (see tests/unit/test_run_omip_core2_gm_treguier.py)."""
+    cfg = NEMOMatchTripoleRecipeConfig(gm_treguier=True)
+    assert cfg.gm_kappa_min == 0.0          # oracle default = raw NEMO
+    mc = nemo_match_tripole_model_config(cfg)
+    assert mc.gm_redi.treguier.enabled is True
+    # 900 = 1/2*rn_Ue*rn_Le (laplacian prefactor, ldftra.F90:290-293); NEMO's
+    # emitted aeiu_2d maxes at exactly 900 on eORCA1.  The old 1800 here
+    # encoded the bilaplacian prefactor, which NEMO rejects for EIV.
+    assert mc.gm_redi.treguier.aei0 == pytest.approx(900.0)
+    assert mc.gm_redi.treguier.kappa_min == 0.0
+    # Visbeck stays off (mutually exclusive), Redi/S_max untouched
+    assert mc.gm_redi.visbeck.enabled is False
+    assert mc.gm_redi.kappa_Redi == pytest.approx(600.0)
+    assert mc.gm_redi.S_max == pytest.approx(0.005)
+    # the floor is now REACHABLE from the recipe (the actual bug fixed here)
+    floored = nemo_match_tripole_model_config(
+        NEMOMatchTripoleRecipeConfig(gm_treguier=True, gm_kappa_min=200.0))
+    assert floored.gm_redi.treguier.kappa_min == pytest.approx(200.0)
+
+
+def test_gm_treguier_requires_gm_redi():
+    """gm_redi=False returns None early, which would silently discard both the
+    selected scheme and its floor."""
+    with pytest.raises(ValueError, match="cannot apply when GM/Redi is"):
+        nemo_match_tripole_model_config(
+            NEMOMatchTripoleRecipeConfig(gm_redi=False, gm_treguier=True))
+
+
+def test_mpas_recipe_rejects_gm_treguier_at_config_build():
+    """gm_redi_mpas raises NotImplementedError for the Treguier block, but only
+    inside the first GM tendency -- after a full model build. The recipe must
+    reject the unsupported flag up front."""
+    with pytest.raises(NotImplementedError, match="lat-lon C-grid GM/Redi"):
+        nemo_match_mpas_model_config(
+            NEMOMatchMPASRecipeConfig(gm_treguier=True))
+
+
+def test_gm_treguier_rejects_floor_above_cap():
+    with pytest.raises(ValueError, match="exceeds the NEMO cap"):
+        nemo_match_tripole_model_config(
+            NEMOMatchTripoleRecipeConfig(gm_treguier=True, gm_aei0=1800.0,
+                                         gm_kappa_min=5000.0))
+
+
 def test_physics_passthrough_is_setup():
     """A caller-supplied physics is used verbatim (SETUP), and the default
     standalone physics is built when none is given (recipe-only use)."""

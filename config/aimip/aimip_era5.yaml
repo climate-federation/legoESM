@@ -103,8 +103,9 @@ aimip_grad_clip: 1.0
 aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
 
 # Radiation backend for the classical variant:
-#   gray   — Frierson two-stream analytic (default, tractable);
-#            differentiates tau_equator, tau_pole only.  ~30s/sample
+#   gray   — Frierson-style two-stream analytic (cheap); carries NO trainable
+#            knob since 2026-08-11 — it runs at its documented defaults, so a
+#            gray run trains only the non-radiative schemes.  ~30s/sample
 #            at T21 L8 on a single GPU after compile.
 #   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
 #            coupling driven by the trainable Xu-Randall config.
@@ -136,6 +137,21 @@ aimip_rad_update_interval: 36   # v12: 1 RRTMGP call per 6 sim hours
                                 # IC time-of-day (00/06/12/18 UTC).
                                 # Across pairs the optimizer sees all
                                 # four diurnal phases.
+
+# ----- Surface bulk-flux scheme ------------------------------------
+# constant | most | coare3 | large_yeager.  Selects the surface
+# turbulent-flux closure in ``turbulence/surface_layer.py``.
+#   * constant (default): constant-Cd/Ch bulk aerodynamics (legacy
+#     AIMIP path).  The trainable surface_most_unstable_gamma /
+#     surface_most_stable_beta / surface_z0h_z0_ratio leaves are DEAD
+#     here (never read) -> zero gradient.
+#   * most: log-law local z0 + Monin-Obukhov (Businger-Dyer) stability
+#     functions.  Activates the MOST stability + z0h/z0 leaves as live,
+#     trainable gradients.  Pair with aimip_spatial_surface: true to
+#     also train the spatial local-z0 field.
+# Validated at builder entry via legoesm.core.bulk_flux.validate_bulk_scheme
+# (an unknown value raises rather than silently falling back to constant).
+aimip_surface_bulk_scheme: "constant"
 
 # ----- Spatial surface parameters (over land) ----------------------
 # When true, the AIMIP classical variant exposes seven surface and

@@ -493,6 +493,29 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
     # hardcoded False was inert on the duo path but a latent mismatch);
     # plain callers carry bounded_domain=False in gs
     bounded_domain = bool(gs.get("bounded_domain", False))
+    # PERMANENT lane guard (km=1 corpus debt closure): upstream
+    # fv_arrays.F90:1512 `bounded_domain = regional .or. nested .or.
+    # duogrid` forces bounded_domain=.true. whenever duogrid is on, so
+    # duogrid=True on unbounded (plain-conventions) metrics is a
+    # combination no upstream run can reach.  The implication is
+    # ONE-WAY: bounded WITHOUT duogrid is the legitimate
+    # regional/nested category — refused separately as unported (the
+    # `(bounded_domain or grid_type >= 3) and not duogrid`
+    # NotImplementedError at the KE branch below, and d2a2c_vect's own
+    # bounded NotImplementedError).  COVERAGE, stated precisely (codex
+    # km=1 r2 finding 1): this guard covers c_sw; the assembled duo
+    # D-stage (dsw12_step_sixface) carries its own equivalent guard.
+    # The d_sw*_duo / d2a2c_vect_duo KERNELS remain directly callable
+    # by their per-stage certificate tests, whose Fortran fixtures were
+    # generated with bounded=.false. on BOTH sides (internally
+    # consistent stage certificates on the plain lane) — migrating
+    # those fixtures is tracked km=1-corpus follow-up debt.
+    if duogrid and not bounded_domain:
+        raise ValueError(
+            "c_sw: duogrid=True requires bounded_domain=True "
+            "(fv_arrays.F90:1512: bounded_domain = regional .or. nested "
+            ".or. duogrid); duogrid on unbounded metrics is an "
+            "upstream-impossible combination")
 
     delp = np.array(delp, dtype=np.float64, copy=True)
     pt = np.array(pt, dtype=np.float64, copy=True)
@@ -818,3 +841,10 @@ def c_sw(delp: np.ndarray, pt: np.ndarray, w: np.ndarray,
         "uc": UC.a, "vc": VC.a, "ua": UA.a, "va": VA.a,
         "ut": UT.a, "vt": VT.a, "divg_d": divg_a,
     }
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+fa_flux = _fa

@@ -90,13 +90,13 @@ def test_init_creates_expected_files(tmp_path):
 def test_init_rejects_bad_override(tmp_path):
     sd = _write_smoke_surfdata(tmp_path)
     out = tmp_path / "expt"
-    with pytest.raises(ValueError, match="simple_seb"):    # config validator catches it
+    with pytest.raises(ValueError, match="stomatal_model"):   # config validator catches it
         _run_init([
             "biophysics/smoke_test",
             "--name", "bad",
             "--output-dir", str(out),
             "-o", f"surfdata.path={sd}",
-            "-o", "physics.bulk_scheme=most",              # simple_seb + MOST = illegal
+            "-o", "physics.stomatal_model=jarvis",            # not a canopy leaf model
         ])
     assert not out.exists() or not (out / "config.yaml").exists()
 
@@ -213,8 +213,8 @@ def test_unknown_machine_reports_available(tmp_path):
 
 
 def test_smoke_4deg_template_validates_and_inits(tmp_path):
-    """The 4° smoke template loads, validates, and init produces a config
-    with the expected simple_seb + constant + resolution=45 combination."""
+    """The 4° smoke template loads, validates, and init produces a config with
+    the production physics (canopy + MOST) at resolution 45."""
     import yaml
     out = tmp_path / "expt"
     _run_init([
@@ -227,8 +227,8 @@ def test_smoke_4deg_template_validates_and_inits(tmp_path):
     ])
     cfg = yaml.safe_load((out / "config.yaml").read_text())
     assert cfg["grid"]["resolution"] == 45                     # 4° x 4°
-    assert cfg["physics"]["surface_scheme"] == "simple_seb"
-    assert cfg["physics"]["bulk_scheme"] == "constant"         # required paired
+    assert cfg["physics"]["surface_scheme"] == "two_leaf_canopy"
+    assert cfg["physics"]["bulk_scheme"] == "most"
     assert cfg["time"]["n_steps"] == 720                        # 30 days at 1 h
     # Monthly tape shape survives — same schema as production template.
     tape_names = [t["name"] for t in cfg["output"]["tapes"]]

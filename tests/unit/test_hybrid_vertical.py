@@ -775,3 +775,250 @@ class TestSB81FullLevelLnP:
         # artifact confined to the top layer, physically nil.
         resid = lnp - np.log(np.asarray(p_s))[..., None]
         assert np.abs(resid - resid[0]).max() < 1e-11
+
+
+class TestSB81OmegaOverPDyn:
+    """#1029 ω-side: SB81 α-weighted dynamic energy-conversion term."""
+
+    @pytest.fixture(autouse=True)
+    def _fp64(self):
+        # The identity checks below (1e-12 relative) require fp64; make the
+        # class self-contained rather than depending on the runner's
+        # JAX_ENABLE_X64 environment (codex #1029 r1 g4).
+        from legoesm.core.precision import (
+            set_policy, get_policy, PrecisionPolicy)
+        prev = get_policy()
+        prev_x64 = jax.config.jax_enable_x64
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            yield
+        finally:
+            set_policy(prev)
+            # set_policy restores the PrecisionPolicy object but NOT the
+            # global jax_enable_x64 flag it flipped on — that would leak x64
+            # into later-imported test modules in a shared session (same
+            # pattern as tests/ocean/unit/test_freezing_point.py, codex #956;
+            # re-flagged here codex #1029 r2 g).
+            jax.config.update("jax_enable_x64", prev_x64)
+
+    def _C(self, nlev, mean=2.0e-4):
+        """Synthetic flux-form layer mass divergence C_k [Pa/s]: smooth,
+        sign-changing, and with a NONZERO column sum (mean != 0) so
+        D_total and dp_s_dt are far from roundoff — a zero-sum profile
+        makes every moving-top assertion vacuous (codex #1029 r1 g1)."""
+        k = jnp.arange(nlev, dtype=jnp.float64)
+        return (1.0e-3 * jnp.sin(2.0 * jnp.pi * k / nlev) + mean) * (
+            1.0 + 0.1 * jnp.arange(3.0)[:, None])  # (3, nlev)
+
+    def _setup(self, nlev=20):
+        from legoesm.grids.vertical import standard_hybrid_levels
+        coord = standard_hybrid_levels(nlev)
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        return coord, p_s, self._C(nlev)
+
+    @staticmethod
+    def _dp_internal(coord, p_s):
+        """The Δp the helper divides by: differenced from the SAME clipped
+        half-level pressures as L/α (NOT the dA + dB·p_s entry build)."""
+        from legoesm.grids.vertical import sb81_halflevel_construction
+        p_half_safe, _, _ = sb81_halflevel_construction(coord, p_s)
+        return p_half_safe[..., 1:] - p_half_safe[..., :-1]
+
+    def test_zero_divergence_gives_zero(self):
+        from legoesm.grids.vertical import sb81_omega_over_p_dyn
+        coord, p_s, C = self._setup()
+        out = sb81_omega_over_p_dyn(jnp.zeros_like(C), coord, p_s)
+        np.testing.assert_allclose(np.asarray(out), 0.0)
+
+    def test_shape_finite_and_jittable_with_moving_top(self):
+        """jit covers the dp_s_dt branch (traced B_half multiply — no
+        Python concretization of the coordinate; codex #1029 r1 f)."""
+        from legoesm.grids.vertical import sb81_omega_over_p_dyn
+        coord, p_s, C = self._setup()
+        cumsum = jnp.cumsum(C, axis=-1)
+        dp_s_dt = -cumsum[..., -1] / coord.B_range
+        out = jax.jit(sb81_omega_over_p_dyn)(cumsum, coord, p_s,
+                                             dp_s_dt=dp_s_dt)
+        assert out.shape == C.shape
+        assert np.all(np.isfinite(np.asarray(out)))
+
+    def test_column_identity_pairs_with_sb81_ln_p(self):
+        """Discrete column identity (energy consistency, #1029):
+
+            Σ_k Δp_k (ω/p)_k^dyn = -Σ_j C_j (ln p_s - ln p_j^SB)
+
+        (fixed-top form, dp_s_dt omitted).  The column-integrated
+        conversion telescopes onto the SAME SB81 full-level ln p whose
+        gradient does the momentum PGF work.  Verified to fp64 roundoff
+        (separate log/multiply/reduce roundings — not bit exactness)."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, sb81_full_level_ln_p)
+        coord, p_s, C = self._setup()
+        cumsum = jnp.cumsum(C, axis=-1)
+        conv = sb81_omega_over_p_dyn(cumsum, coord, p_s)
+        dp = self._dp_internal(coord, p_s)
+        lhs = np.asarray(jnp.sum(dp * conv, axis=-1))
+        lnp_sb = sb81_full_level_ln_p(coord, p_s)
+        rhs = np.asarray(
+            -jnp.sum(C * (jnp.log(p_s)[..., None] - lnp_sb), axis=-1))
+        scale = np.abs(rhs).max()
+        np.testing.assert_allclose(lhs, rhs, atol=1e-12 * max(scale, 1.0),
+                                   rtol=1e-11)
+
+    def test_column_identity_moving_top(self):
+        """Extended identity with the moving-top term (B_top != 0):
+
+            Σ_k Δp_k (ω/p)_k = -Σ_j C_j (ln p_s - ln p_j^SB)
+                               + B_top·dp_s/dt · ln(p_s/p_top)
+
+        on a pure-sigma coordinate (A=0, B_top = sigma_top > 0, no top
+        clip active)."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, sb81_full_level_ln_p,
+            sb81_halflevel_construction, create_sigma_coordinate,
+            hybrid_from_sigma)
+        nlev = 20
+        sig = create_sigma_coordinate(nlev, sigma_top=0.05,
+                                      dtype=jnp.float64)
+        coord = hybrid_from_sigma(sig)
+        B_top = float(coord.B_half[0])
+        assert B_top > 0.0
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        C = self._C(nlev)
+        cumsum = jnp.cumsum(C, axis=-1)
+        dp_s_dt = -cumsum[..., -1] / coord.B_range
+        conv = sb81_omega_over_p_dyn(cumsum, coord, p_s, dp_s_dt=dp_s_dt)
+        p_half_safe, _, _ = sb81_halflevel_construction(coord, p_s)
+        dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+        lhs = np.asarray(jnp.sum(dp * conv, axis=-1))
+        lnp_sb = sb81_full_level_ln_p(coord, p_s)
+        rhs = np.asarray(
+            -jnp.sum(C * (jnp.log(p_s)[..., None] - lnp_sb), axis=-1)
+            + B_top * dp_s_dt * jnp.log(p_s / p_half_safe[..., 0]))
+        scale = np.abs(rhs).max()
+        np.testing.assert_allclose(lhs, rhs, atol=1e-12 * max(scale, 1.0),
+                                   rtol=1e-11)
+
+    def _arith_form(self, coord, p_s, C):
+        """The arithmetic form the SB81 conversion replaces:
+        (B·dp_s/dt + F̄)/p_full."""
+        from legoesm.grids.vertical import (
+            compute_mass_flux_from_cumsum, compute_omega_hybrid)
+        cumsum = jnp.cumsum(C, axis=-1)
+        D_total = cumsum[..., -1:]
+        dp_s_dt = -D_total[..., 0] / coord.B_range
+        mass_flux = compute_mass_flux_from_cumsum(cumsum, D_total, coord)
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, coord)
+        p_full = pressure_from_hybrid(coord, p_s, full=True)
+        return omega / p_full, dp_s_dt, cumsum
+
+    def test_smooth_limit_matches_arithmetic_form(self):
+        """Interior-level agreement with the arithmetic form (same
+        continuous operator, different discretization) AND refinement:
+        the disagreement must SHRINK with nlev (coarse 5%-of-peak smoke
+        plus a monotone-refinement check — codex #1029 r1 g2).
+
+        CONTROLLED refinement: make_hybrid_levels with a FIXED
+        p_top_Pa=200 at both resolutions — standard_hybrid_levels would
+        also move the model top (200 Pa at 40 levels, 10 Pa at 80),
+        confounding the resolution variable (codex #1029 r2 g)."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, make_hybrid_levels)
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        errs = {}
+        for nlev in (40, 80):
+            coord = make_hybrid_levels(nlev, p_top_Pa=200.0)
+            C = self._C(nlev)
+            conv_arith, _, cumsum = self._arith_form(coord, p_s, C)
+            conv_sb = sb81_omega_over_p_dyn(cumsum, coord, p_s)
+            sl = np.s_[..., nlev // 4: (9 * nlev) // 10]
+            a = np.asarray(conv_sb)[sl]
+            b = np.asarray(conv_arith)[sl]
+            ref = np.abs(b).max()
+            assert ref > 0
+            errs[nlev] = np.abs(a - b).max() / ref
+        assert errs[40] < 0.05
+        assert errs[80] < errs[40], (
+            f"no refinement: err80={errs[80]:.3e} err40={errs[40]:.3e}")
+
+    def test_moving_top_term_matches_arithmetic_form(self):
+        """B_top != 0 (sigma-like top, p_top = sigma_top·p_s moves with
+        p_s): the dp_s_dt moving-top term restores interior agreement with
+        the arithmetic form (which carries B_full·dp_s/dt correctly);
+        omitting dp_s_dt leaves a uniform O(B_top·dp_s_dt/p) bias.  The
+        nonzero-mean C makes dp_s_dt genuinely nonzero."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, create_sigma_coordinate,
+            hybrid_from_sigma)
+        nlev = 40
+        sig = create_sigma_coordinate(nlev, sigma_top=0.05,
+                                      dtype=jnp.float64)
+        coord = hybrid_from_sigma(sig)
+        assert float(coord.B_half[0]) > 0.0
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        C = self._C(nlev)
+        conv_arith, dp_s_dt, cumsum = self._arith_form(coord, p_s, C)
+        assert float(jnp.min(jnp.abs(dp_s_dt))) > 1.0e-6, (
+            "dp_s_dt ~ 0 — moving-top term untested (vacuous fixture)")
+        conv_fixed = sb81_omega_over_p_dyn(cumsum, coord, p_s,
+                                           dp_s_dt=dp_s_dt)
+        conv_bare = sb81_omega_over_p_dyn(cumsum, coord, p_s)
+        sl = np.s_[..., 10:36]
+        ref = np.abs(np.asarray(conv_arith)[sl]).max()
+        err_fixed = np.abs(np.asarray(conv_fixed)[sl]
+                           - np.asarray(conv_arith)[sl]).max()
+        err_bare = np.abs(np.asarray(conv_bare)[sl]
+                          - np.asarray(conv_arith)[sl]).max()
+        assert err_fixed < 0.05 * ref
+        assert err_fixed < err_bare, (
+            "moving-top term did not improve agreement — check B_top wiring")
+
+    def test_differentiable_including_moving_top(self):
+        """AD through the helper on a coordinate whose moving-top term is
+        numerically ACTIVE (B_top > 0, nonzero dp_s_dt — a fixed-top coord
+        exercises only the branch, not the term; codex #1029 r2 gap)."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, create_sigma_coordinate,
+            hybrid_from_sigma)
+        sig = create_sigma_coordinate(20, sigma_top=0.05,
+                                      dtype=jnp.float64)
+        coord = hybrid_from_sigma(sig)
+        assert float(coord.B_half[0]) > 0.0
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        cumsum = jnp.cumsum(self._C(20), axis=-1)
+
+        def scalar(c, ps):
+            dpsdt = -c[..., -1] / coord.B_range
+            return jnp.sum(
+                sb81_omega_over_p_dyn(c, coord, ps, dp_s_dt=dpsdt) ** 2)
+
+        g_c, g_ps = jax.grad(scalar, argnums=(0, 1))(cumsum, p_s)
+        assert np.all(np.isfinite(np.asarray(g_c)))
+        assert np.all(np.isfinite(np.asarray(g_ps)))
+
+    def test_column_identity_holds_at_clipped_zero_top(self):
+        """Exactly-zero top interface (A_top = B_top = 0): the 1e-10 clip
+        activates in the top layer; the fixed-top identity must STILL hold
+        because helper Δp, L, α and ln p^SB all difference the SAME clipped
+        p_half_safe (codex #1029 r2 gap)."""
+        from legoesm.grids.vertical import (
+            sb81_omega_over_p_dyn, sb81_full_level_ln_p,
+            create_hybrid_coordinate, standard_hybrid_levels)
+        nlev = 20
+        std = standard_hybrid_levels(nlev)
+        A = std.A_half.at[0].set(0.0)
+        B = std.B_half.at[0].set(0.0)
+        coord = create_hybrid_coordinate(nlev, A, B)
+        p_s = jnp.asarray([9.0e4, 1.0e5, 1.05e5], dtype=jnp.float64)
+        assert float(pressure_from_hybrid(coord, p_s, full=False)[0, 0]) == 0.0
+        C = self._C(nlev)
+        cumsum = jnp.cumsum(C, axis=-1)
+        conv = sb81_omega_over_p_dyn(cumsum, coord, p_s)
+        dp = self._dp_internal(coord, p_s)
+        lhs = np.asarray(jnp.sum(dp * conv, axis=-1))
+        lnp_sb = sb81_full_level_ln_p(coord, p_s)
+        rhs = np.asarray(
+            -jnp.sum(C * (jnp.log(p_s)[..., None] - lnp_sb), axis=-1))
+        scale = np.abs(rhs).max()
+        np.testing.assert_allclose(lhs, rhs, atol=1e-12 * max(scale, 1.0),
+                                   rtol=1e-11)

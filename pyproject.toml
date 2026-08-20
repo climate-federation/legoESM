@@ -57,7 +57,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.26",
     "netCDF4>=1.6",
-    "dataclasses-json>=0.6",
     "scipy>=1.10",
     "pandas>=2.0",
 ]
@@ -161,6 +160,9 @@ legoesm-tools = { workspace = true }
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored 3rd-party CLM-ML-JAX backend (BSD-3) — not written to legoESM's lint
+# conventions; audited upstream, excluded from ruff/audits here.
+extend-exclude = ["packages/land/legoesm/land/canopy/clm_ml_backend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
@@ -178,10 +180,17 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "packages/core/legoesm/core/fv3_native_d_sw.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/core/fv3_native_duo_sw_core.py" = ["N803", "N806", "N801"]
 "packages/core/legoesm/grids/fv3_native_gridstruct.py" = ["N801", "N803", "N806"]
+# geopk / p_grad_c / one_grad_p multilevel port (brick geopk_pgrad): same
+# rule — the dummies keep the dyn_core names (CG, akap, ptop, npx, a2b_ord,
+# d_ext, ...) so every statement cross-references dyn_core.F90 1:1.
+"packages/core/legoesm/core/fv3_native_pgrad.py" = ["N803", "N806", "N801"]
 # FV3-native oracle validators/tests: same verbatim-Fortran UPPER_SNAKE
 # metric locals (SIN/COS/DXC/RC, ...) mirroring the source 1:1.
 "scripts/validate/fv3_native/gen_divduo_oracle.py" = ["N806", "N816"]
+"scripts/validate/fv3_native/gen_geopk_pgrad_oracle.py" = ["N806", "N816"]
 "tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
+"tests/grids/test_fv3_native_geopk_pgrad.py" = ["N806"]
+"tests/grids/test_fv3_native_pgrad.py" = ["N803", "N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
@@ -316,6 +325,10 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # dycore (fp64 replicated-vs-scattered bit-equivalence), so imports follow.
 "tests/parallel/test_cube_face_scatter.py" = ["E402"]
 "tests/distributed/test_cube_face_scatter_mpi.py" = ["E402"]
+# #1226 DINO heat discriminator: matplotlib.use("Agg") must run before
+# `import matplotlib.pyplot` (headless-backend idiom), splitting the import
+# block (E402/I001).
+"scripts/validate/ocean_fidelity/dino_1226/heat_discriminator.py" = ["E402", "I001"]
 # MPAS native-SPMD parity gates use the MPAS canonical symbol names (nCells,
 # nEdges, W) plus the mandated T_sfc / dT unit-suffixed physics names; same
 # rationale as the column-extractor tests above.
@@ -331,12 +344,16 @@ python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
+# Vendored 3rd-party CLM-ML-JAX backend (BSD-3) — not type-annotated to legoESM's
+# standard; excluded from type-checking here (audited upstream).
+exclude = ['packages/land/legoesm/land/canopy/clm_ml_backend/']
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "lint: static checks run through pytest because CI is disabled; skip in a fast inner loop with -m 'not lint'",
     # Complexity-tier ladder (docs/validation/TESTING.md). Opt-in selectors: run a rung
     # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
     # (does NOT tier-gate) so untagged tests still run until the suite is tagged.
@@ -474,17 +491,20 @@ ignore_imports = [
     # parameterization. Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml]
     # extras (top-level imports; the base component does not pull these modules —
     # both sfno_pe and ucast_pe are lazily re-exported by dynamics/__init__).
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.sfno",
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.sfno",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.conservation",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.ucast",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.normalization",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.channel_packing",
-    "legoesm.atmosphere.dynamics.ucast_pe -> legoesm.ml.conservation",
+    # Paths carry the ``neural`` bucket introduced by a16e1493a (dynamics/ reorg
+    # into gcm/les/crm/shared/neural) — the pre-reorg flat paths matched nothing
+    # and, with unmatched_ignore_imports_alerting = "error", broke lint-imports.
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.sfno_sw -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.sfno_pe -> legoesm.ml.conservation",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.ucast",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.neural.ucast_pe -> legoesm.ml.conservation",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.normalization",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.io",
     "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.model",
@@ -494,6 +514,10 @@ ignore_imports = [
     # OPTIONAL FEATURE: ocean Stommel-gyre tracer experiment drift diagnostic.
     # Declared by the legoesm-ocean[tools] extra (deferred/function-scope import).
     "legoesm.ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics",
+    # OPTIONAL FEATURE: q-flux climatology reuses the AMIP monthly regrid +
+    # cyclic mid-month interpolation. legoesm-ocean[tools] extra; deferred to
+    # function scope so a bare legoesm-ocean can still import the module.
+    "legoesm.ocean.forcing.qflux -> legoesm.forcing.amip",
 ]
 
 [[tool.importlinter.contracts]]

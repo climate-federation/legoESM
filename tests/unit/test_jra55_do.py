@@ -760,3 +760,127 @@ def test_glue_jit_compiles():
 
     out = go(slc, jnp.full((4, 8), 100.0))
     assert jnp.isfinite(out)
+
+
+def test_cache_polar_coverage_after_lat_clamp(tmp_path):
+    """A constant source whose uniform-inferred lat edge does NOT land on
+    the pole (outer centre 86 deg -> inferred outer edge ~98 deg, whose
+    sin caps at ~0.9897 < 1) leaves the polar destination cell only ~96.5%
+    covered: without the lat clamp the polar rows regrid the constant to
+    LESS than its value. RED before the clamp (polar tas ~279.8 K != 290);
+    GREEN after np.clip(src/target lat edges, +/- pi/2) restores full
+    coverage.  Pins the CLAMP only; the polar gap itself is handled in the WEIGHTS
+    (fracarea + polar_fill), see regrid_polar_coverage_2026-07-24.md."""
+    pytest.importorskip("dask")
+    src_path = tmp_path / "gaussianish_jra55.zarr"
+    n_lat, n_lon = 8, 16
+    n_t = 8
+    time = np.arange(n_t, dtype=np.float64) * (3.0 / 24.0)
+    # Outer centre 86 deg; uniform edge inference overshoots the pole so the
+    # outermost source cell has sin(edge) < 1 -> a genuine polar gap.
+    lat = np.linspace(86.0, -86.0, n_lat)
+    half_lon = 180.0 / n_lon
+    lon = np.linspace(half_lon, 360.0 - half_lon, n_lon)
+    const_values = {
+        "uas": 5.0, "vas": -3.0, "tas": 290.0, "huss": 0.01,
+        "psl": 1.013e5, "rsds": 250.0, "rlds": 350.0,
+        "prra": 1e-5, "prsn": 0.0, "friver": 0.0,
+    }
+    data_vars = {
+        var: (("time", "lat", "lon"), np.full((n_t, n_lat, n_lon), val))
+        for var, val in const_values.items()
+    }
+    ds = xr.Dataset(
+        data_vars=data_vars, coords={"time": time, "lat": lat, "lon": lon},
+    )
+    ds["time"].attrs["units"] = "days since 1958-01-01 00:00:00"
+    ds.to_zarr(str(src_path), mode="w", consolidated=True)
+    cfg = JRA55DoConfig(
+        source_path=str(src_path),
+        years=(1958, 1958),
+        target_lat_edges=np.deg2rad(np.linspace(-90.0, 90.0, 5)),
+        target_lon_edges=np.deg2rad(np.linspace(0.0, 360.0, 9)),
+        cache_dir=tmp_path / "cache_gauss",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    # Constant source must regrid to the same constant on EVERY row,
+    # including the two polar rows, once the lat clamp closes the pole gap.
+    slc = load_jra55_slice(cache_path, day=0.0)
+    np.testing.assert_allclose(
+        np.asarray(slc.tas), 290.0, atol=1e-6,
+        err_msg="polar tas reduced by uncovered pole cell",
+    )
+
+
+def test_cache_polar_gap_is_treated_not_diluted(tmp_path):
+    """Pins ``normalization='fracarea'`` AT THIS CALLER, which nothing else does.
+
+    Every other jra55 fixture builds a latitude axis that tiles [-90, 90] exactly,
+    so its inferred edges land on the poles, latitude coverage is 1 everywhere, and
+    BOTH polar treatments are no-ops -- deleting ``normalization=`` from
+    ``build_jra55_cache`` leaves those green.  Here the source's inferred edges stop
+    at +-89.5 deg: a REAL polar gap of the size JRA55-do actually has (0.151 deg;
+    CORE-II's is 0.514), inside the 2 deg extrapolation budget, and the lat clamp is
+    a no-op so this is not a restatement of ``test_cache_polar_coverage_after_lat_clamp``.
+
+    Onto 1 deg target rows the polar row is 0.75 covered -- partial, never empty --
+    so ``fracarea`` alone must carry it and ``polar_fill`` plays no part.  Untreated
+    that row returns 0.75 x 290 = 217.5 K, which is the dilution the treatment
+    removes; the anti-vacuity leg below computes exactly that.
+    """
+    pytest.importorskip("dask")
+    src_path = tmp_path / "polar_gap_jra55.zarr"
+    n_lat, n_lon, n_t = 8, 16, 8
+    # Outer centre 78.3125 deg -> uniform edge inference gives exactly +-89.5.
+    lat = np.linspace(78.3125, -78.3125, n_lat)
+    half_lon = 180.0 / n_lon
+    lon = np.linspace(half_lon, 360.0 - half_lon, n_lon)
+    const_values = {
+        "uas": 5.0, "vas": -3.0, "tas": 290.0, "huss": 0.01,
+        "psl": 1.013e5, "rsds": 250.0, "rlds": 350.0,
+        "prra": 1e-5, "prsn": 0.0, "friver": 0.0,
+    }
+    ds = xr.Dataset(
+        data_vars={
+            var: (("time", "lat", "lon"), np.full((n_t, n_lat, n_lon), val))
+            for var, val in const_values.items()
+        },
+        coords={
+            "time": np.arange(n_t, dtype=np.float64) * (3.0 / 24.0),
+            "lat": lat, "lon": lon,
+        },
+    )
+    ds["time"].attrs["units"] = "days since 1958-01-01 00:00:00"
+    ds.to_zarr(str(src_path), mode="w", consolidated=True)
+
+    target_lat_edges = np.deg2rad(np.linspace(-90.0, 90.0, 181))   # 1 deg rows
+    target_lon_edges = np.deg2rad(np.linspace(0.0, 360.0, 9))
+    cfg = JRA55DoConfig(
+        source_path=str(src_path),
+        years=(1958, 1958),
+        target_lat_edges=target_lat_edges,
+        target_lon_edges=target_lon_edges,
+        cache_dir=tmp_path / "cache_polar_gap",
+    )
+    cache_path = build_jra55_cache(cfg, overwrite=True, progress=False)
+    slc = load_jra55_slice(cache_path, day=0.0)
+    # The constant survives on EVERY row, polar rows included.
+    np.testing.assert_allclose(
+        np.asarray(slc.tas), 290.0, atol=1e-6,
+        err_msg="polar tas diluted -- is normalization='fracarea' still passed?",
+    )
+
+    # Anti-vacuity: the same geometry with the DEFAULT normalisation returns the
+    # polar row reduced to ~217.5 K, so this fixture genuinely exercises fracarea.
+    from legoesm.grids.conservative_regrid import (
+        apply_conservative_regrid, compute_overlap_weights,
+    )
+    src_lat_e = np.deg2rad(np.linspace(-89.5, 89.5, n_lat + 1))
+    src_lon_e = np.deg2rad(np.linspace(0.0, 360.0, n_lon + 1))
+    untreated = np.asarray(apply_conservative_regrid(
+        np.full((n_lat, n_lon), 290.0),
+        compute_overlap_weights(src_lat_e, src_lon_e,
+                                target_lat_edges, target_lon_edges),
+    ))
+    np.testing.assert_allclose(untreated[1:-1, :], 290.0, atol=1e-9)
+    np.testing.assert_allclose(untreated[[0, -1], :], 290.0 * 0.749995, rtol=1e-4)

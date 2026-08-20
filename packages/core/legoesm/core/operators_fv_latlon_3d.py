@@ -14,7 +14,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+from legoesm.core.operators_fv import (ppm_edge_values,
+                                       ppm_edge_values_axis0,
+                                       ppm_limit)
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
     pad_halo_vector_latlon_3d,
@@ -72,10 +74,10 @@ def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
     # Strip longitude halo, keep latitude halo
     q = q_pad_h2[:, 2:-2, :]  # (n_lat+4, n_lon, nlev)
 
-    # Move lat axis (0) to axis -2 (1) so ppm_edge_values operates on it
-    q_moved = jnp.moveaxis(q, 0, 1)  # (n_lon, n_lat+4, nlev)
-    q_hat_moved = ppm_edge_values(q_moved)  # (n_lon, n_lat+3, nlev)
-    q_hat = jnp.moveaxis(q_hat_moved, 1, 0)  # (n_lat+3, n_lon, nlev)
+    # Native axis-0 sweep — the moveaxis round-trip here was the
+    # LL2048@64 trace's largest compute-kernel family
+    # (input_transpose_fusion, 370 us/step; codex consult 2026-08-11).
+    q_hat = ppm_edge_values_axis0(q)  # (n_lat+3, n_lon, nlev)
 
     a_L = q_hat[:-1, :, :]   # (n_lat+2, n_lon, nlev)
     a_R = q_hat[1:, :, :]
@@ -193,6 +195,7 @@ def cgrid_fv_flux_divergence_latlon_3d(
     v_face_3d: jax.Array,
     grid: LatLonGrid,
     limiter: bool = True,
+    q_pad: jax.Array | None = None,
 ) -> jax.Array:
     """Conservative PPM flux divergence using C-grid face velocities (3D).
 
@@ -219,8 +222,13 @@ def cgrid_fv_flux_divergence_latlon_3d(
     R = grid.radius
     dlon = grid.dlon
 
-    # Pad scalar with halo=2 for PPM reconstruction (all levels at once)
-    q_pad = pad_halo_latlon_3d(q_3d, halo=2)
+    # Pad scalar with halo=2 for PPM reconstruction (all levels at once).
+    # ``q_pad`` lets the caller supply a pre-padded field so several
+    # PPM-advected scalars ride ONE grouped halo exchange (the lat-lon
+    # packing work, 2026-08-04): shape must be the halo=2 fold-family
+    # pad of ``q_3d`` — i.e. exactly ``pad_halo_latlon_3d(q_3d, halo=2)``.
+    if q_pad is None:
+        q_pad = pad_halo_latlon_3d(q_3d, halo=2)
 
     # --- Longitude flux ---
     q_L_lon, q_R_lon = _ppm_reconstruct_lon_3d(q_pad, limiter)  # (n_lat, n_lon+1, nlev)
@@ -279,6 +287,7 @@ def cgrid_fv_scalar_advection_latlon_3d(
     v_face_3d: jax.Array,
     grid: LatLonGrid,
     limiter: bool = True,
+    q_pad: jax.Array | None = None,
 ) -> jax.Array:
     """PPM advection of scalar by C-grid face velocities (3D, advective form).
 
@@ -298,7 +307,7 @@ def cgrid_fv_scalar_advection_latlon_3d(
     jax.Array, shape (n_lat, n_lon, nlev)
     """
     flux_form = cgrid_fv_flux_divergence_latlon_3d(
-        q_3d, u_face_3d, v_face_3d, grid, limiter,
+        q_3d, u_face_3d, v_face_3d, grid, limiter, q_pad=q_pad,
     )
     div_v = _cgrid_velocity_divergence_3d(u_face_3d, v_face_3d, grid)
     return flux_form + q_3d * div_v

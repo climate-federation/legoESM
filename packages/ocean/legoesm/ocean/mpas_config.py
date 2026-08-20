@@ -82,10 +82,19 @@ class MPASOceanConfig(NamedTuple):
     S_ref : float
         Reference salinity [PSU] for virtual salt flux.
     tracer_advection : str
-        Tracer advection scheme: "upwind" or "tvd".
+        Tracer advection scheme: "upwind", "tvd" or "superbee". An unknown
+        value raises.
         "upwind" uses first-order donor-cell reconstruction.
-        "tvd" uses second-order Van Leer limiter (less diffusive,
-        monotone) for both horizontal and vertical advection.
+        "tvd" uses the second-order Van Leer limiter for both horizontal
+        and vertical advection; "superbee" uses the more compressive Sweby
+        limiter. Both are 1-D TVD limiters applied direction by direction,
+        so neither is multi-dimensionally monotone: MEASURED on the
+        resolved Petersen lock exchange (on the STRUCTURED arm, where the
+        same schemes are available) they undershoot an initial [5, 30] degC
+        range to -0.40 and -2.99 degC. There is NO flux-corrected (FCT)
+        scheme in this port, which is what that case needs -- so a
+        cross-grid lock exchange at resolving resolution cannot share an
+        advection family with the lat-lon arm today.
     """
     g: float = constants.g
     rho_0: float = constants.rho_ocean
@@ -128,6 +137,15 @@ class MPASOceanConfig(NamedTuple):
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
+    # eta-floor clamp redistribution refinements PER CALL (2 calls per
+    # barotropic substep; each iteration costs one batched global
+    # reduction, so the substep scan pays 2*n_substeps*iters messages
+    # per step — the measured ocean-CPU rank-count-term driver class).
+    # 3 = the historical exact-redistribution default; 1 = scaling
+    # experiment knob (positivity unaffected — the clamp's final
+    # maximum() holds regardless; the un-refined mass residual is
+    # absorbed by the step-level conservation fixer).
+    eta_floor_clamp_iters: int = 3
     # Default to enstrophy-conserving PV flux — avoids the ζ-checkerboard
     # null mode of the energy-conserving scheme (Ringler et al. 2010).
     # Use "energy" if total-KE conservation is required and the ζ null

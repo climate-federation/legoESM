@@ -97,6 +97,7 @@ __param_spec__ = {
         "scheme_key": "atm.turb.LouisConfig",
         "excluded": {
             "blend_ri_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "cloudtop_entrainment_efficiency": "opt-in marine-Sc cloud-top entrainment lever, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             "Ri_crit": {"units": "1", "bounds": (0.1, 0.75), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_richardson", "reference": "Louis (1979) bulk-Ri PBL-height criterion", "shape": None},
@@ -105,7 +106,7 @@ __param_spec__ = {
             "c_louis": {"units": "1", "bounds": (5.0, 49.8), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) unstable-branch coefficient c (Holtslag & De Bruin 1988)", "shape": None},
             "d_louis": {"units": "1", "bounds": (1.5, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "stability_function", "reference": "Louis (1979) stable-branch sqrt coefficient d", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
-            "cloudtop_entrainment_efficiency": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "entrainment", "reference": "marine-Sc cloud-top entrainment efficiency A (flux-matched K_ent = A·W_REF·dz·(drying·inverted·cloudy_below), W_REF=0.02 m/s); 0 = off", "shape": None},
+            # (cloudtop_entrainment_efficiency: excluded — default 0.0 (off) on the bound.)
         },
     },
     "MYNN25Config": {
@@ -113,6 +114,7 @@ __param_spec__ = {
         "excluded": {
             "C4": "NN09 sets C4=0 (drops its shear pressure-covariance term); not read here",
             "tke_min": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "d25_floor": "numerics: two-sided floor on the level-2.5 denominator D25, which passes through zero at zero resolved shear; a regulariser, not a closure coefficient",
         },
         "params": {
             "A1": {"units": "1", "bounds": (0.6, 2.4), "tunable_tier": 1, "transform": "sigmoid", "category": "return_to_isotropy", "reference": "Nakanishi & Niino (2009) MYNN return-to-isotropy (Rotta) constant A1", "shape": None},
@@ -147,6 +149,9 @@ __param_spec__ = {
             "Cd_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral drag coefficient (Large & Yeager 2004 range)", "shape": None},
             "Ch_neutral": {"units": "1", "bounds": (5e-04, 5e-03), "tunable_tier": 1, "transform": "sigmoid", "category": "surface_exchange", "reference": "bulk-aerodynamic neutral heat-transfer coefficient (Large & Yeager 2004 range)", "shape": None},
             "z0": {"units": "m", "bounds": (1e-05, 1e-03), "tunable_tier": 2, "transform": "sigmoid", "category": "surface_exchange", "reference": "surface-layer aerodynamic roughness length", "shape": None},  # 2-decade range (default 1e-4); wider spans lose float32 sigmoid precision near the floor
+            "most_unstable_gamma": {"units": "1", "bounds": (8.0, 28.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Businger-Dyer (1971) / Dyer (1974) MOST unstable-branch stability-function coefficient gamma (phi=(1-gamma*zeta)^-1/4); only used by a stability-dependent bulk_scheme", "shape": None},
+            "most_stable_beta": {"units": "1", "bounds": (2.0, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "monin_obukhov", "reference": "Dyer (1974) MOST stable-branch linear stability-function coefficient beta (psi=-beta*zeta); only used by the dyer1974 stability_scheme of a stability-dependent bulk_scheme", "shape": None},
+            "z0h_z0_ratio": {"units": "1", "bounds": (0.01, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "roughness", "reference": "Garratt (1992) thermal/momentum roughness ratio z0h/z0", "shape": None},
             "z_ref": {"units": "m", "bounds": (2.0, 30.0), "tunable_tier": 0, "transform": "none", "category": "numerics", "reference": "MOST reference (anemometer) height convention (10 m)", "shape": None},
         },
     },
@@ -228,6 +233,29 @@ class SurfaceLayerConfig(NamedTuple):
         Reference height for MOST bulk formulas [m] (default 10.0).
     bulk_n_iter : int
         Number of MOST iterations (default 5).
+    most_unstable_gamma : float
+        Businger-Dyer / Dyer (1974) UNSTABLE-branch MOST stability-function
+        coefficient gamma (phi_m = (1 - gamma*zeta)^{-1/4}); default 16.  ONLY
+        consumed on the stability-dependent MOST path (``compute_surface_fluxes``
+        with ``bulk_scheme`` in {``coare3``, ``large_yeager``}, or the tiled
+        ``_single_tile_flux`` land ``most`` path) AND when
+        ``stability_scheme="dyer1974"``; the constant-coefficient default path,
+        the non-linear stable schemes, and COARE 3.0's own unstable form ignore
+        it.  A larger gamma => stronger unstable fluxes.
+    most_stable_beta : float
+        Dyer (1974) STABLE-branch linear MOST coefficient beta
+        (psi = -beta*zeta); default 5.  ONLY consumed on the stability-dependent
+        MOST path AND when ``stability_scheme="dyer1974"``.  A larger beta =>
+        weaker fluxes under stable stratification.
+    z0h_z0_ratio : float
+        Thermal/momentum roughness ratio z0h/z0 (default 0.1).  On the
+        fixed-roughness MOST path the scalar roughness is z0_t = z0_q =
+        z0 * z0h_z0_ratio.  ONLY consumed on the stability-dependent
+        ``compute_most_fluxes`` paths, and of those only the constant/most
+        fixed-roughness branch reads it (COARE 3.0 / large_yeager compute their
+        own scalar roughness).  A LARGER ratio => larger z0_t => smaller
+        ln(z_t/z0_t) => larger heat exchange coefficient => STRONGER sensible/
+        latent flux (Garratt 1992; Zilitinkevich kB^-1 range).
     """
     z0: float = 1e-4
     Cd_neutral: float = 1.5e-3
@@ -247,11 +275,63 @@ class SurfaceLayerConfig(NamedTuple):
     # L_vap(T_sfc), moist cp_air(q_atm)).  Str selector — not spec-eligible.
     thermo_convention: str = "legoesm"
     # Stable-regime (zeta>0) MOST similarity functions for the MOST-family
-    # bulk schemes: "dyer1974" (default, historical -5*zeta) |
-    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".
-    # Threaded together with the coupler ocean tile by run_coupled so the
-    # interface cannot split; unknown -> ValueError at dispatch.
+    # bulk schemes: "dyer1974" (default; historical -5*zeta on the
+    # constant/most/large_yeager Businger-Dyer path, and the SENTINEL for the
+    # byte-identical COARE-native stable form on coare3 — which is itself the
+    # BH91 fit with rounded constants, see bulk_flux.psi_m_coare) |
+    # "beljaars_holtslag1991" | "grachev2007_sheba" | "gryanik2020".  On
+    # coare3 only the STABLE branch swaps (the Fairall unstable blend is
+    # COARE-defining).  Threaded together with the coupler ocean tile by
+    # run_coupled so the interface cannot split; unknown -> ValueError at
+    # dispatch.
     stability_scheme: str = "dyer1974"
+    # Businger-Dyer / Dyer (1974) MOST stability-function coefficients, trainable
+    # for the AIMIP classical curriculum. Defaults reproduce the historical
+    # values (gamma=16 unstable, beta=5 dyer1974 stable) so a config with these
+    # omitted is byte-identical. Only read on a stability-dependent bulk_scheme
+    # AND (for beta / the unstable gamma) stability_scheme="dyer1974"; the
+    # constant path and the non-linear stable schemes never touch them.
+    # APPENDED LAST so existing positional SurfaceLayerConfig(...) calls and
+    # tree_deserialise_leaves field ordering are unchanged.
+    most_unstable_gamma: float = 16.0
+    most_stable_beta: float = 5.0
+    # Thermal/momentum roughness ratio z0h/z0 (Garratt 1992; Zilitinkevich
+    # kB^-1 = ln(z0/z0h) family) for the FIXED-roughness MOST path: z0_t = z0_q
+    # = z0 * z0h_z0_ratio.  Default 0.1 reproduces the historical hardcoded
+    # ``z0 * 0.1`` byte-for-byte.  Consumed ONLY on the stability-dependent
+    # ``compute_most_fluxes`` paths (bulk_scheme in {most, coare3,
+    # large_yeager}) — and, of those, ONLY the fixed-roughness constant/most
+    # branch actually uses it (COARE 3.0 / large_yeager compute their own
+    # scalar roughness).  A larger ratio => larger z0_t => stronger heat/
+    # moisture flux.  APPENDED LAST so positional SurfaceLayerConfig(...) and
+    # tree_deserialise_leaves field ordering are unchanged.
+    z0h_z0_ratio: float = 0.1
+    # PRESCRIBED surface scalar fluxes [W/m^2, positive UP], overriding whatever
+    # the bulk formula computed. ``None`` (default) = off, byte-identical to a
+    # config without them.
+    #
+    # These exist because a case deck that PRESCRIBES its surface heat and
+    # moisture fluxes (SAM's SFC_FLX_FXD, and every dry analytic ABL case) had
+    # no way to hand them to the closure. The single-column driver zeroed
+    # ``Ch_neutral`` to avoid double-counting and then injected the deck flux as
+    # a separate tendency on the lowest cell AFTER turbulence had run -- so the
+    # closure computed its own surface flux as exactly zero. Local closures
+    # still see the resulting gradient, but every flux-driven nonlocal scheme
+    # loses its defining pathway: YSU derives its convective velocity scale,
+    # PBL depth, entrainment and countergradient from ``shflx`` (ysu.py, the
+    # ``wtheta_sfc = shflx / (rho c_pd)`` line), so a prescribed-flux convective
+    # case ran it with no convection at all.
+    #
+    # Set these INSTEAD of injecting the flux as a forcing tendency, never as
+    # well: the closure applies them as the diffusion's lower boundary
+    # condition, so doing both counts the flux twice. MOMENTUM is untouched --
+    # the decks that fix scalar fluxes leave the stress interactive
+    # (SFC_TAU_FXD = .false.), so tau still comes from Cd.
+    #
+    # Annotated ``float | None`` => not spec-eligible: a prescribed boundary
+    # condition read off a case deck is a measurement, not a tunable closure.
+    prescribed_shflx_w_m2: float | None = None
+    prescribed_lhflx_w_m2: float | None = None
 
 
 class SmagorinskyConfig(NamedTuple):
@@ -418,6 +498,17 @@ class MYNN25Config(NamedTuple):
         (NN09 below eq. A4).
     tke_min : float
         Minimum qke (= 2·TKE) [m²/s²] for numerical safety.
+    d25_floor : float
+        Two-sided floor on |D25|, the level-2.5 stability-function denominator
+        (``phi_2*phi_4 + phi_5*phi_3``), which is 1.0 at ``G_M = G_H = 0`` and
+        PASSES THROUGH ZERO. Numerics only, never trainable. At zero resolved
+        shear ``phi_5 = 0`` and ``phi_4`` has a root at ``G_H = 0.046`` for
+        these constants; the previous one-sided ``max(D25, 1e-30)`` turned that
+        root into a ~1e30 amplification (measured ``SH25 = +5.5e29``, i.e.
+        ``Kh ~ 1e25 m²/s``, which the downstream ``Kh >= 0`` clamp cannot see
+        because it is positive). SM/SH are bit-identical wherever
+        ``|D25| >= d25_floor``, so this bounds the pole without touching any
+        column that was already well posed.
     surface : SurfaceLayerConfig
         Surface-layer (bulk-flux) configuration.
     """
@@ -432,6 +523,7 @@ class MYNN25Config(NamedTuple):
     C5: float = 0.2
     gamma1: float = 0.235
     tke_min: float = 1e-10
+    d25_floor: float = 1e-2
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

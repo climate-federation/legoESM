@@ -97,8 +97,67 @@ class EadyUniformConfig:
     sponge_width_deg: float = 2.0
     sponge_timescale_days: float = 1.0
 
-    barotropic_diffusion_alpha: float = 0.05
+    # Free-surface Laplacian: OFF. This channel runs the Voronoi C-grid, and
+    # the filter is a collocated-grid device -- it exists to damp that grid's
+    # checkerboard mode in sea surface height, and the value 0.05 is the
+    # cubed-sphere default raised for a face-boundary feedback. This case
+    # inherited it. The C-grid has no such null mode (it was introduced to
+    # remove it), and the grid-scale mode that does go unstable here is the
+    # rotational one, which carries near-zero surface-height gradient -- so
+    # the filter is structurally blind to it.
+    #
+    # It was not harmless. At 0.05 on 70 km cells the implied diffusivity is
+    # 3.5e6 m^2/s (ocean lateral diffusivity is 1e2-1e3), it moved 42.7x more
+    # water than the actual flow, and it was the dominant destabiliser of this
+    # case -- measured monotone: alpha 0.10 fails day 61.5, 0.05 day 67.4,
+    # 0.025 day 82.3, 0.00 day 122.9. Turning it off also removes a mass
+    # inconsistency: the filter's flux is not carried in the time-averaged
+    # transport that advects thickness and tracers, so with it on, that
+    # transport missed ~97% of the free-surface mass movement.
+    #
+    # Precedent: the NEMO-matching recipe, the DINO cards and
+    # silvestri_baroclinic_jet all run this at 0, the last through an 80-day
+    # turbulent transient with no dissipation backstop.
+    #
+    # NOT a cure. The case still fails at day 122.9 of 200; the residual is a
+    # separate instability. Divergence damping below is KEPT -- it targets the
+    # divergent grid mode directly and measurement shows it doing real work
+    # (0.05 fails day 67, 0.025 and 0.0 both go non-finite sooner).
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_div_damp: float = 0.05
+    # Depth-mean velocity viscosity: ON, and this is what makes the case run
+    # its full 200 days. It damps the ROTATIONAL grid mode, which carries
+    # near-zero surface-height gradient and is therefore invisible to the
+    # free-surface Laplacian above -- the reason that filter could never fix
+    # this and only destabilised it.
+    #
+    # Measured, with the filter already off:
+    #     0        fails day 122.9
+    #     1e3      PASSES 200 days, max_speed 1.894 m/s
+    #     1e4      PASSES 200 days, max_speed 0.883 m/s
+    #     1e5      fails day 191.7
+    #
+    # A WINDOW, with a real upper edge: doubling the barotropic substeps at
+    # 1e5 leaves the failure at the IDENTICAL step 55200, so that edge is not
+    # an artefact of stacking explicit dampers inside the fast loop. What sets
+    # it is NOT established -- an isolated forward-Euler Laplacian on this grid
+    # would allow 2.4e8, three orders higher, so that bound explains nothing
+    # here and is quoted only to show the value is not near it.
+    #
+    # THE VALUE IS DERIVED, not fitted. Match the grid-scale viscous decay rate
+    # to the growth rate of the mode this case measures:
+    #
+    #     nu = sigma_Eady * dx^2 / pi^2,   sigma_Eady = 0.31*f0*Lambda/N
+    #
+    # which is 1.15e3 m^2/s at 70 km for this case's own parameters (its
+    # 5.0-day Eady e-folding). 1e3 is that value to one significant figure, and
+    # the form generalises as dx^2 rather than being a constant tuned here.
+    #
+    # RETRACTED: an earlier revision justified 1e3 by "keeps 71% of the
+    # reference eddy speed". That comparison was against a run 67 days into an
+    # exploding mode, so the reference was noise-inflated and the ratio
+    # measured nothing (GLM-5.2).
+    barotropic_u_viscosity: float = 1.0e3
     tracer_advection: str = "tvd"     # "upwind", "tvd", "dst3", "dst3_multidim", "som"
 
     @property

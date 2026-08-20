@@ -78,6 +78,26 @@ class LockExchangeConfig:
 
     # Front location (longitude threshold)
     front_longitude: float = 0.0   # Prime meridian [degrees]
+    #: Half-width of the temperature transition [degrees longitude]. ZERO
+    #: is a hard step and is the shipped default, so this field changes no
+    #: existing result.
+    #:
+    #: WHY IT EXISTS. A step front is not multi-dimensionally monotone
+    #: under a 1-D flux LIMITER applied direction by direction: MEASURED on
+    #: the resolved Petersen channel, tvd undershoots the initial [5, 30]
+    #: degC range to -0.40 and superbee to -2.99, while the flux-CORRECTED
+    #: schemes stay bounded. The MPAS tracer port has no FCT, so a
+    #: cross-grid lock exchange at resolving resolution cannot share an
+    #: advection family with the lat-lon arm while the front is a step.
+    #: Softening it over a few CELL widths lets both arms run the same
+    #: limited scheme on a front they can each resolve, which is the
+    #: comparison the case is for (GLM-5.2, 2026-08-13).
+    #:
+    #: It is a different experiment, not a bug fix: less available
+    #: potential energy, so smaller absolute mixing, and it probes baseline
+    #: implicit diffusion rather than limiter behaviour at a discontinuity.
+    #: Do not compare its RPE against a step-front number.
+    front_width_deg: float = 0.0
 
     # Physical parameters for RPE calculation
     alpha_T: float = 2.0e-4         # Thermal expansion coefficient [1/K]
@@ -166,11 +186,62 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             land_lat_threshold=config.spectral_land_lat_threshold
         )
 
+    elif grid_type == "fesom":
+        from legoesm.ocean.dynamics.ocean_model_fesom import (
+            create_lock_exchange_state)
+        # The FESOM IC applies the front itself (it needs the mesh's geographic
+        # node coordinates), so return DIRECTLY -- falling through to
+        # _add_temperature_front would apply the front a second time.
+        return create_lock_exchange_state(grid.mesh, config)
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
 
     # Add temperature front
     return _add_temperature_front(state, grid_type, grid, z_coord, config)
+
+
+def lock_exchange_warm_fraction(lon_deg, config, xp=np):
+    """Fraction of the WARM water at each longitude: 0 cold, 1 warm.
+
+    One implementation for every grid, because there were three and they
+    disagreed: the structured grids ramped across the front while the
+    unstructured one stepped, so the same case started from a different state
+    depending on which dycore ran it.
+
+    ``lon_deg`` is geographic longitude in degrees, any convention.  Cold lies
+    west of ``config.front_longitude`` and warm east of it.
+
+    ``config.front_width_deg`` of zero reproduces the hard step exactly, so
+    every existing case is unchanged bit for bit.  A positive width applies a
+    half-sine over plus-or-minus that width, which meets the flat regions with
+    zero slope at both ends -- a straight ramp would leave a kink for the
+    advection limiter to catch on, which is the thing being smoothed away.
+
+    A longitude circle carries TWO interfaces, not one: putting cold on half
+    of it and warm on the other half necessarily leaves a second jump at the
+    antipode.  Smoothing only the named front leaves that one at its full
+    contrast, so the limiter still meets a step and the option does not do
+    what it says.  Both are smoothed.  On a regional domain the second
+    interface lies outside it and this costs nothing.
+
+    ``xp`` selects the array module so the same routine serves the numpy
+    initialisers and the JAX one.
+    """
+    front = float(config.front_longitude)
+    w = float(config.front_width_deg)
+    d_lon = (lon_deg - front + 180.0) % 360.0 - 180.0
+    if w <= 0.0:
+        return xp.where(d_lon < 0.0, 0.0, 1.0)
+
+    def _step(d):
+        # 0 well west of d=0, 1 well east, half-sine across +-w.
+        return 0.5 * (1.0 + xp.sin(0.5 * xp.pi * xp.clip(d / w, -1.0, 1.0)))
+
+    # Distance to the antipodal interface, signed so that going EAST across it
+    # returns to cold.  Each point is governed by whichever interface is nearer.
+    d_anti = d_lon - 180.0 * xp.sign(d_lon)
+    return xp.where(xp.abs(d_lon) <= 90.0, _step(d_lon), _step(-d_anti))
 
 
 def _add_temperature_front(state, grid_type: str, grid, z_coord,
@@ -191,10 +262,11 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
 
     T_cold = config.T_cold_C
     T_warm = config.T_warm_C
-    front_lon = config.front_longitude
 
-    # Wrapping-aware "west of front" test: works for any lon convention
-    west_of_front = ((lon - front_lon + 180.0) % 360.0 - 180.0) < 0.0
+    warm_frac = lock_exchange_warm_fraction(lon, config)
+
+    def _front_profile(cold, warm):
+        return cold + (warm - cold) * warm_frac
 
     if grid_type == "spectral":
         # Spectral grid
@@ -205,7 +277,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
 
         # Create temperature front at front_longitude
-        T_field = np.where(west_of_front, T_cold, T_warm)
+        T_field = _front_profile(T_cold, T_warm)
 
         # Apply to all levels with land mask
         nlev = T_grid.shape[-1]
@@ -226,7 +298,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         nlev = T_data.shape[-1]
 
         # Apply temperature front to all levels
-        T_front = np.where(west_of_front, T_cold, T_warm)
+        T_front = _front_profile(T_cold, T_warm)
         for k in range(nlev):
             T_data[..., k] = T_front * mask
 

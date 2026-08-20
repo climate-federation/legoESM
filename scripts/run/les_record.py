@@ -36,14 +36,15 @@ def select_heights(z, Lz):
     return out, z[out]
 
 
-def _profiles(z, u3, v3, wc3, theta3, z0, case, qt3=None):
+def _profiles(z, u3, v3, wc3, theta3, z0, case, scalars=None):
     """Planar-mean profiles + resolved second moments (matches the layout of
     ``run_les_plane._resolved_profiles``).
 
-    Always includes the resolved kinematic heat flux ``wtheta`` = ⟨w'θ'⟩ (for moist runs
-    ``theta3`` is θ_l, so this is ⟨w'θ_l'⟩). When ``qt3`` (total-water mixing ratio, same
-    (ny,nx,nz) shape) is given, also the total-water profile ``qt`` and its resolved flux
-    ``wqt`` = ⟨w'q_t'⟩ — the fields a moist ``LESReferenceArtifact`` needs beyond the dry set.
+    Flux sign convention: z is positive UP, so every ``⟨w'x'⟩`` here is positive
+    for UPWARD transport of x (same convention as the ``uw``/``vw`` momentum
+    fluxes below and as ``run_spectral_cbl.diagnose``). ``wth`` is the RESOLVED
+    kinematic heat flux [K m/s]; the SGS part is not included (for a moist run the
+    caller passes θ_l as ``theta3``, so ``wth`` is then ⟨w'θ_l'⟩).
     """
     um = u3.mean((0, 1)); vm = v3.mean((0, 1)); wm = wc3.mean((0, 1))
     up, vp, wp = u3 - um, v3 - vm, wc3 - wm
@@ -51,16 +52,19 @@ def _profiles(z, u3, v3, wc3, theta3, z0, case, qt3=None):
     uu = (up * up).mean((0, 1)); vv = (vp * vp).mean((0, 1)); ww = (wp * wp).mean((0, 1))
     tke = 0.5 * (uu + vv + ww)
     theta = theta3.mean((0, 1))
-    wtheta = (wp * (theta3 - theta)).mean((0, 1))          # ⟨w'θ'⟩ (θ_l for moist)
+    wth = (wp * (theta3 - theta)).mean((0, 1))   # resolved ⟨w'θ'⟩ [K m/s]
     spd = np.sqrt(um ** 2 + vm ** 2)
     u_star = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)
     out = dict(z=z, theta=theta, u=um, v=vm, spd=spd, wvar=ww,
-               uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw, wtheta=wtheta,
+               uu=uu, vv=vv, ww=ww, tke=tke, uw=uw, vw=vw, wth=wth,
                u_star=u_star, z0=z0, case=case)
-    if qt3 is not None:
-        qt = qt3.mean((0, 1))
-        out["qt"] = qt
-        out["wqt"] = (wp * (qt3 - qt)).mean((0, 1))        # ⟨w'q_t'⟩
+    # Optional extra scalars (moist runs): planar mean + resolved kinematic
+    # flux ⟨w'x'⟩, same positive-up convention as wth. Kept here so the
+    # perturbation maths lives in exactly one place.
+    for name, arr in (scalars or {}).items():
+        mean = arr.mean((0, 1))
+        out[name] = mean
+        out[f"w{name}"] = (wp * (arr - mean)).mean((0, 1))
     return out
 
 
@@ -75,23 +79,28 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
     density): the snapshot then also stores the q_c cross-sections + the
     liquid-water-path map [g/m²], and the profile gains q_c/cloud-fraction.
     Lagrangian SDM runs may also pass ``qr3`` and cumulative
-    ``surface_precip`` [kg/m²].
+    ``surface_precip`` [kg/m²]. Moist runs SHOULD also pass ``qv3`` (water
+    vapour mixing ratio): the profile then gains ``qv`` and the resolved
+    moisture flux ``wqv`` [kg/kg m/s], which is what an SCM turbulence closure
+    is tuned against.
     """
     out_dir = Path(out_dir)
     snap_dir = out_dir / "snapshots"; snap_dir.mkdir(parents=True, exist_ok=True)
     prof_dir = out_dir / "profiles"; prof_dir.mkdir(parents=True, exist_ok=True)
     nx = u3.shape[1]
-    extra, prof_extra = {}, {}
+    extra, prof_extra, scalars = {}, {}, {}
+    if qv3 is not None:
+        scalars["qv"] = qv3
     if qc3 is not None:
         extra["qc"] = np.stack([qc3[:, :, k] for k in h_idx])
         if rho_z is not None:
             dz = float(abs(z[1] - z[0]))     # spectral grid: uniform dz
             extra["lwp"] = (qc3 * rho_z[None, None, :]).sum(-1) * dz * 1e3
-        prof_extra["qc"] = qc3.mean((0, 1))
+        scalars["qc"] = qc3
         prof_extra["cloud_frac"] = (qc3 > 1.0e-5).mean(axis=(0, 1))
     if qr3 is not None:
         extra["qr"] = np.stack([qr3[:, :, k] for k in h_idx])
-        prof_extra["qr"] = qr3.mean((0, 1))
+        scalars["qr"] = qr3
     if surface_precip is not None:
         extra["surface_precip"] = np.asarray(surface_precip)
         prof_extra["surface_precip_mean"] = float(np.asarray(surface_precip).mean())
@@ -104,15 +113,6 @@ def record_frame(out_dir, frame, t_hours, case, z, u3, v3, wc3, theta3,
         v=np.stack([v3[:, :, k] for k in h_idx]),
         **extra,
     )
-    # Total water q_t = q_v + q_c + q_r for the moist profile flux (⟨w'q_t'⟩); only when the
-    # moist caller supplies q_v (dry runs pass none → the dry profile set is unchanged).
-    qt3 = None
-    if qv3 is not None:
-        qt3 = np.asarray(qv3)
-        if qc3 is not None:
-            qt3 = qt3 + np.asarray(qc3)
-        if qr3 is not None:
-            qt3 = qt3 + np.asarray(qr3)
-    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case, qt3=qt3)
+    prof = _profiles(np.asarray(z), u3, v3, wc3, theta3, z0, case, scalars=scalars)
     np.savez(prof_dir / f"prof_{frame:03d}.npz", t_hours=t_hours,
              **prof, **prof_extra)

@@ -2729,7 +2729,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         import jax.numpy as jnp
         import numpy as np
         from legoesm.core.fv3_sw_core import (
-            _vorticity_flux, _sina_u_v_from_sin_sg)
+            _vorticity_flux, sina_u_v_from_sin_sg)
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
@@ -2745,7 +2745,7 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         vort_abs = jnp.asarray(
             rng.standard_normal((6, n + 1, n + 1)) * 0.001)
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
         cosa_u = np.asarray(cdgrid.cosa_u)
         cosa_v = np.asarray(cdgrid.cosa_v)
         sina_u_np = np.asarray(sina_u)

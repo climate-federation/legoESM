@@ -11,6 +11,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, NamedTuple
 
 import jax
@@ -32,6 +33,42 @@ from legoesm.grids.vertical import (
     compute_sigma_dot_and_total,
     compute_pressure_velocity,
 )
+
+logger = logging.getLogger("legoesm.atmosphere.convection")
+
+
+def land_fraction_for_columns(grid, ncol, scheme_config=None):
+    """The per-column land fraction a convection leaf needs, or None.
+
+    ONE helper for every bridge in this module.  The land-dependent parts of a
+    convection scheme -- the sub-cloud rain evaporation humidity break and the
+    diurnal-cycle CAPE subtraction -- go silently inert when this is missing,
+    and that is exactly what happened on the MPAS lane: rain over tropical land
+    re-evaporated under the ocean setting for the whole campaign because one
+    bridge did not pass an argument the other one did.  A single helper is
+    harder to omit from a new bridge than a block of inline code.
+
+    Only ``VoronoiMesh`` carries the field today, so a structured grid returns
+    None and the leaf keeps its previous ocean branch unchanged.
+    """
+    lf = getattr(grid, "land_frac", None)
+    if lf is not None:
+        lf = jnp.asarray(lf).reshape(-1)
+        if lf.shape[0] != ncol:
+            raise ValueError(
+                f"grid.land_frac carries {lf.shape[0]} values but this "
+                f"convection call has {ncol} columns; a mismatched mask would "
+                "silently mislabel which columns are land")
+        return lf
+    if scheme_config is not None and getattr(
+            scheme_config, "use_ifs_land_rhebc", False):
+        logger.warning(
+            "convection: use_ifs_land_rhebc is set but the grid carries no "
+            "land_frac, so the land/ocean split in the sub-cloud rain "
+            "evaporation is INERT and the ocean humidity break is applied "
+            "everywhere, land included")
+    return None
+
 from legoesm import constants
 
 from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -342,6 +379,7 @@ def _make_hydrostatic_convection(
         grid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
+        forcing=None,
     ):
         T = state.T.data          # cubed: (6,n,n,nlev) | latlon: (n_lat,n_lon,nlev) | mpas: (nCells,nlev)
         p_s = state.p_s.data      # cubed: (6,n,n)      | latlon: (n_lat,n_lon)      | mpas: (nCells,)
@@ -541,6 +579,40 @@ def _make_hydrostatic_convection(
                 # so guard at TRACE time on the STATIC config value (mirrors
                 # the coupler pipeline's guard; ``use_ifs_cape_qadv`` is a
                 # Python bool on scheme_config, not a traced array).
+                # Land fraction for the leaf's land/ocean split.  Read off the
+                # GRID.  Only ``VoronoiMesh`` carries it today -- the driver
+                # attaches it there and nowhere else -- so on a structured grid
+                # this stays None and the leaf keeps its ocean branch, exactly
+                # as before.  This is how the gravity-wave
+                # leaf reaches it on this same bridge.  Until this existed the
+                # MPAS lane called the leaf with NO land fraction, so the
+                # sub-cloud rain evaporation used the OCEAN relative-humidity
+                # break over the Amazon and the Congo -- convective rain
+                # re-evaporating on the way down under the wrong setting, in a
+                # configuration whose tropical LAND rain is 26 % short while its
+                # land evaporation sits at observed levels.
+                # Surface heat fluxes for the diurnal-cycle CAPE subtraction.
+                # They are the PREVIOUS step's: on this lane turbulence produces
+                # them AFTER convection runs, so this step's do not exist yet.
+                # One step is 75 s against a daily cycle, so the lag is
+                # immaterial -- and without them the mechanism that delays land
+                # storms to the afternoon does not run at all, which is the
+                # state this repairs.
+                _shf = _lhf = None
+                if forcing is not None:
+                    _shf = forcing.get("shflx_sfc")
+                    _lhf = forcing.get("lhflx_sfc")
+                    if _shf is not None:
+                        _shf = jnp.asarray(_shf).reshape(-1)
+                    if _lhf is not None:
+                        _lhf = jnp.asarray(_lhf).reshape(-1)
+                if (getattr(scheme_config, "use_ifs_capdcycl", False)
+                        and (_shf is None or _lhf is None)):
+                    logger.warning(
+                        "convection: use_ifs_capdcycl is set but no surface "
+                        "heat fluxes reached this call, so the diurnal CAPE "
+                        "subtraction is INERT and land convection will not be "
+                        "delayed to the afternoon")
                 _dyn_T = (getattr(phys_state, "dyn_tendency_T", None)
                           if phys_state is not None else None)
                 _dyn_qv = (getattr(phys_state, "dyn_tendency_qv", None)
@@ -567,6 +639,7 @@ def _make_hydrostatic_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -578,6 +651,9 @@ def _make_hydrostatic_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
+                    shf_w_m2=_shf,
+                    lhf_w_m2=_lhf,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -712,6 +788,34 @@ def _make_hydrostatic_convection(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 )
+            # Convective-activity diagnostic for the Slingo (1987) cumulus
+            # cloud fraction on this standalone path: the column-integrated
+            # in-updraft RAIN PRODUCTION rate [kg/m^2/s],
+            #     P_conv = (1/g) * sum_k max(dq_r_conv, 0) * dp_k,
+            # published into the ``PhysicsState.conv_precip`` lag carry
+            # (radiation runs before convection in the module chain and
+            # reads the previous step's value — the FV pipeline's lagged
+            # ``conv_precip`` convention).  DIAGNOSTIC ONLY: the rain MASS
+            # still rides the ``q_r`` tracer route above (microphysics
+            # sediments it), so total surface precip (``pr``) is NOT
+            # double-counted.  Schemes with no rain split (``_dq_r_conv is
+            # None``) publish nothing and the carry stays zero — their
+            # convective cloud fraction is honestly zero here.
+            # SIGN/UNITS: dq_r_conv >= 0 is a condensate source [kg/kg/s];
+            # dp = p_half[k+1] - p_half[k] > 0 (p increases downward).
+            if _dq_r_conv is not None:
+                _dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+                _p_conv_diag = jnp.sum(
+                    jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
+                    * _dp_col, axis=-1) / constants.g
+                if isinstance(conv_prog_out, dict):
+                    conv_prog_out = {**conv_prog_out,
+                                     "conv_precip": _p_conv_diag}
+                elif conv_prog_out is not None:
+                    conv_prog_out = {"conv_prog_profile": conv_prog_out,
+                                     "conv_precip": _p_conv_diag}
+                else:
+                    conv_prog_out = {"conv_precip": _p_conv_diag}
 
         # Convective momentum transport (CMT): use the scheme's optional
         # ``du_dt_conv``/``dv_dt_conv`` when present (Zhang-McFarlane,
@@ -777,6 +881,9 @@ def _make_hydrostatic_convection(
         pass
 
     physics_fn.reset_state = reset_state
+    # combined.py routes ``forcing`` only to modules that ask for it.
+    physics_fn._wants_forcing = True
+
     return physics_fn
 
 
@@ -1009,6 +1116,7 @@ def _make_nonhydrostatic_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1020,6 +1128,7 @@ def _make_nonhydrostatic_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.
@@ -1408,6 +1517,7 @@ def _make_spectral_pe_convection(
                               else _dyn_T.reshape(ncol, nlev))
                 _dyn_qv_col = (None if _dyn_qv is None
                                else _dyn_qv.reshape(ncol, nlev))
+                _land_frac = land_fraction_for_columns(grid, ncol, scheme_config)
                 conv_out, prog_new_profile, stoch_new = conv_fn(
                     T=T_col, q_v=q_v_col,
                     p_full=p_full_col, p_half=p_half_col,
@@ -1419,6 +1529,7 @@ def _make_spectral_pe_convection(
                     moisture_convergence=mc_col,
                     dT_dt_dyn=_dyn_T_col,
                     dq_dt_dyn=_dyn_qv_col,
+                    land_frac=_land_frac,
                     # GLOBAL column ids for the decomposition-invariant
                     # per-column draw (a lat-band SPMD shard's carry chunk
                     # holds its own global ids); None => leaf arange.

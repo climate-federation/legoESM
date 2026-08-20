@@ -3735,3 +3735,10 @@ def run_oracle_case(fixture_dir: str) -> dict:
     print(f"[run_oracle_case] v compute min={np.min(v_c):.8e} "
           f"max={np.max(v_c):.8e}")
     return out
+
+
+# Public promotions (CLAUDE.md cross-module private-import ratchet):
+# these symbols are imported by sibling modules; expose a public alias
+# so importers use the sanctioned public name (definitions keep the
+# original underscore name for in-module callers).
+fl_limiter = _fl

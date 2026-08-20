@@ -57,6 +57,42 @@ from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
 
 
+def corner_div_damp_active(config) -> bool:
+    """True when the B-grid corner divergence damping executes at all.
+
+    FV3's d_sw has NO master switch on ``d2_bg`` — sw_core.F90:1641
+    branches only on ``nord`` and ``d2_bg`` enters solely as the
+    background floor ``max(d2_bg, min(0.20, dddmp*|delpc*dt|))``.
+    Gating the whole block on ``d2_bg > 0`` silently disabled the
+    del-4 corner damping under the standard FV3 configuration
+    (d2_bg=0, nord>=1, d4_bg=0.16) — the NH DCMIP TC2/TC3 cube
+    vertex blow-up (2026-07-29).
+
+    legoESM ENABLE SELECTORS (deliberate deviation from FV3's
+    always-on d_sw, so that legacy all-zero configs stay inert):
+    activation requires ``d2_bg > 0`` OR the del-4 pair
+    (``d4_bg > 0`` AND ``nord > 0``).  ``dddmp`` and the top-sponge
+    boosts (``d2_bg_k1``/``d2_bg_k2``) are MODIFIERS only — nonzero
+    values (dddmp defaults to 0.20) never activate the block by
+    themselves.  Duck-typed over the CE/PE CD-grid config
+    NamedTuples (both carry the ``corner_div_damp_*`` fields)."""
+    return (config.corner_div_damp_d2_bg > 0.0
+            or (config.corner_div_damp_d4_bg > 0.0
+                and config.corner_div_damp_nord > 0))
+
+
+def corner_div_damp_higher_order_active(config) -> bool:
+    """True when the FV3 ``nord>0`` higher-order branch executes
+    (sw_core.F90:1727 ``else`` of ``if (nord==0)``).
+
+    Faithful to FV3, the branch keys on ``nord`` alone once the block
+    is active — NOT on ``d4_bg``: with ``d4_bg=0`` the higher-order
+    formula still applies (Smagorinsky ``smag_vort`` cap) and the
+    del-4 term drops out naturally through
+    ``dd8 = (da_min_c*d4_bg)**(nord+1) = 0`` (codex r1 P1)."""
+    return corner_div_damp_active(config) and config.corner_div_damp_nord > 0
+
+
 def _to_fv3_normal_dgrid_2d(
     u_corner: jnp.ndarray, v_corner: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -111,6 +147,8 @@ def fv3_divergence_corner_2d(
     u_corner: jnp.ndarray,
     v_corner: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
+    *,
+    dgrid_ne_halo: bool = True,
 ) -> jnp.ndarray:
     """Faithful port of FV3 ``sw_core.F90:divergence_corner`` (2D or 4D).
 
@@ -167,6 +205,162 @@ def fv3_divergence_corner_2d(
     n = cdgrid.n
     _is_4d = u_corner.ndim == 4
 
+    if dgrid_ne_halo:
+        from legoesm.core.fv3_sw_core import (
+            d2a2c_ua_va_halo_4d,
+            sina_u_v_from_sin_sg,
+        )
+        from legoesm.grids.dgrid_halo import (
+            pad_halo_dgrid_scalar_pair_4d,
+            pad_halo_dgrid_sg_slots_4d,
+            pad_halo_dgrid_vector_4d,
+        )
+        from legoesm.grids.halo import get_halo_backend
+
+        def _dgrid_ne_halo(u_d, v_d):
+            if get_halo_backend() == "mpi":
+                from legoesm.grids.dgrid_halo import (
+                    pad_halo_dgrid_vector_4d_replicated_mpi,
+                )
+                from legoesm.grids.halo import get_mpi_topology
+                return pad_halo_dgrid_vector_4d_replicated_mpi(
+                    u_d, v_d, get_mpi_topology(),
+                )
+            return pad_halo_dgrid_vector_4d(u_d, v_d)
+
+        # COVARIANT D-point lift (2026-08-04, replaces the mixed-convention
+        # 4-corner u_at_v construct).  Depth-binned probe measured the old
+        # lift O(1)-wrong exactly on the seam line: it pushed the
+        # ORTHONORMAL V.e_i through the COVARIANT-convention DGRID
+        # exchange (u_at_v d0 = 0.75, x cosa_seam 0.49 = the 0.36 v_cov4
+        # seam error), while its interior converged O(dx^2).  The faithful
+        # lift needs NO halo at all: both corner endpoints of every edge
+        # are on-face.  corners -> geographic (exact inverse of
+        # rotate_winds_geo_to_grid) -> 2-point average along the edge ->
+        # project onto the EXACT stagger bases (angle_edge_x/y), with
+        # covariant v = cosa*(V.e_i) + sina*(V.e_i_perp) at the v points.
+        sina_u, _ = sina_u_v_from_sin_sg(cdgrid)
+
+        def _bcast(m):
+            return m[..., None] if _is_4d else m
+
+        ca_c = _bcast(jnp.cos(cdgrid.angle_corner))
+        sa_c = _bcast(jnp.sin(cdgrid.angle_corner))
+        u_e_c = ca_c * u_corner - sa_c * v_corner
+        v_n_c = sa_c * u_corner + ca_c * v_corner
+        # u D-points: x-edge midpoints (6, n, n+1) — average along i.
+        u_e_ex = 0.5 * (u_e_c[:, :-1, :] + u_e_c[:, 1:, :])
+        v_n_ex = 0.5 * (v_n_c[:, :-1, :] + v_n_c[:, 1:, :])
+        ca_ex = _bcast(jnp.cos(cdgrid.angle_edge_x))
+        sa_ex = _bcast(jnp.sin(cdgrid.angle_edge_x))
+        u_cov = ca_ex * u_e_ex + sa_ex * v_n_ex
+        # v D-points: y-edge midpoints (6, n+1, n) — average along j.
+        u_e_ey = 0.5 * (u_e_c[:, :, :-1] + u_e_c[:, :, 1:])
+        v_n_ey = 0.5 * (v_n_c[:, :, :-1] + v_n_c[:, :, 1:])
+        ca_ey = _bcast(jnp.cos(cdgrid.angle_edge_y))
+        sa_ey = _bcast(jnp.sin(cdgrid.angle_edge_y))
+        vei_ey = ca_ey * u_e_ey + sa_ey * v_n_ey
+        veip_ey = -sa_ey * u_e_ey + ca_ey * v_n_ey
+        v_cov = (_bcast(cdgrid.cosa_u) * vei_ey
+                 + _bcast(sina_u) * veip_ey)
+
+        u4 = u_cov if _is_4d else u_cov[..., None]
+        v_cov4 = v_cov if _is_4d else v_cov[..., None]
+
+        # DGRID_NE exchange first: the padded winds feed BOTH the uf/vf
+        # stencil below and the s3 local-ghost D->A (no second exchange).
+        u_full, v_full = _dgrid_ne_halo(u4, v_cov4)
+
+        # real_metric_ghosts: Fortran's ghost-ring ua/va (sw_core.F90:3513)
+        # are evaluated with REAL gridstruct halo cosa_s/rsin2, not
+        # edge-replicated pads.  The ring cells this lane reads at panel
+        # boundaries (va(0,j), ua(i,0), ...) were the last edge-replicated
+        # input feeding the O(1/dx) solid-body boundary residual.
+        # local_ghost_d2a (s3, 2026-08-04): the ring utmp/vtmp themselves
+        # come from Fortran's LOCAL D->A over the DGRID_NE-haloed covariant
+        # winds (sw_core.F90:3474-3517), not from the geographic A-halo of
+        # physical values — the last structural mismatch feeding the W/E
+        # seam-line B-node residual (argmax at (F, i in {0,n}, j=1) after
+        # the DGRID_NE fix).  Always the 4D entry: u4/v_cov4 carry a level
+        # axis in both the 2D and 4D callers.
+        ua_h1, va_h1 = d2a2c_ua_va_halo_4d(
+            u4, v_cov4, cdgrid, real_metric_ghosts=True,
+            covariant_halo=True, local_ghost_d2a=True,
+            u_d_pad=u_full, v_d_pad=v_full)
+
+        u_pad = u_full[:, :, 1:-1, :]
+        v_pad = v_full[:, 1:-1, :, :]
+
+        dyc_h, dxc_h = pad_halo_dgrid_scalar_pair_4d(
+            cdgrid.dyc[..., None], cdgrid.dxc[..., None],
+            axis_swap_sign=+1.0,
+        )
+        dyc_pad = dyc_h[:, :, 1:-1, :]
+        dxc_pad = dxc_h[:, 1:-1, :, :]
+
+        sin_sg_h, cos_sg_h = pad_halo_dgrid_sg_slots_4d(
+            cdgrid.sin_sg[..., :4], cdgrid.cos_sg[..., :4],
+        )
+        sin_uf = 0.5 * (
+            sin_sg_h[:, :, :-1, 3] + sin_sg_h[:, :, 1:, 1]
+        )
+        cos_uf = 0.5 * (
+            cos_sg_h[:, :, :-1, 3] + cos_sg_h[:, :, 1:, 1]
+        )
+        sin_vf = 0.5 * (
+            sin_sg_h[:, :-1, :, 2] + sin_sg_h[:, 1:, :, 0]
+        )
+        cos_vf = 0.5 * (
+            cos_sg_h[:, :-1, :, 2] + cos_sg_h[:, 1:, :, 0]
+        )
+
+        va_at_jface = 0.5 * (
+            va_h1[:, :, :-1, :] + va_h1[:, :, 1:, :]
+        )
+        ua_at_iface = 0.5 * (
+            ua_h1[:, :-1, :, :] + ua_h1[:, 1:, :, :]
+        )
+
+        # ORACLE NOTE (2026-08-04): the boundary uf/vf forms below are the
+        # AVERAGED slot pairs — u*dyc*0.5*(sin_sg(i,j-1,4)+sin_sg(i,j,2)) at
+        # j==1|npy and the vf mirror at i==1|npx.  BOTH reference trees agree:
+        # Zenodo symmetryclean sw_core.F90:2190/:2205-2206 AND plain FV3
+        # 6f658bd0 divergence_corner.  A codex round-14 review prescribed
+        # replacing these with d2a2c_vect's DIRECTIONAL upwind selection
+        # (sw_core.F90:3589-3593 etc.) — that selection belongs to the C-wind
+        # edge branches of d2a2c_vect, not to divergence_corner, which never
+        # consumes uc/vc.  Rejected against both sources; do not "fix" this
+        # to directional.
+        j_face = jnp.arange(n + 1)
+        is_uf_boundary = ((j_face == 0) | (j_face == n))[None, None, :, None]
+        uf_boundary = u_pad * dyc_pad * sin_uf[..., None]
+        uf_interior = (
+            (u_pad - va_at_jface * cos_uf[..., None])
+            * dyc_pad * sin_uf[..., None]
+        )
+        uf = jnp.where(is_uf_boundary, uf_boundary, uf_interior)
+
+        i_face = jnp.arange(n + 1)
+        is_vf_boundary = ((i_face == 0) | (i_face == n))[None, :, None, None]
+        vf_boundary = v_pad * dxc_pad * sin_vf[..., None]
+        vf_interior = (
+            (v_pad - ua_at_iface * cos_vf[..., None])
+            * dxc_pad * sin_vf[..., None]
+        )
+        vf = jnp.where(is_vf_boundary, vf_boundary, vf_interior)
+
+        divg_d = (
+            vf[:, :, :-1, :] - vf[:, :, 1:, :]
+            + uf[:, :-1, :, :] - uf[:, 1:, :, :]
+        )
+        divg_d = divg_d.at[:, 0, 0, :].add(-vf[:, 0, 0, :])
+        divg_d = divg_d.at[:, n, 0, :].add(-vf[:, n, 0, :])
+        divg_d = divg_d.at[:, n, n, :].add(vf[:, n, n + 1, :])
+        divg_d = divg_d.at[:, 0, n, :].add(vf[:, 0, n + 1, :])
+        divg_d = divg_d * cdgrid.rarea_c[..., None]
+        return divg_d if _is_4d else divg_d[..., 0]
+
+
     # Step 2: pad ua, va with halo=1 so the cosa cross-correction at
     # j-1 / i-1 reads neighbour-panel cells (cross-face values).
     # FV3_3D iter-1044: dispatch pad_halo vs pad_halo_4d by ndim so
@@ -179,23 +373,66 @@ def fv3_divergence_corner_2d(
         ua_pad = pad_halo(ua)
         va_pad = pad_halo(va)
 
-    # Step 3: pad u_fv3, v_fv3 with halo=1 in the cell-axis via
-    # mode='edge'.  For 4D input, leave the trailing nlev axis with
-    # zero pad widths.
-    if _is_4d:
-        u_fv3_pad = jnp.pad(
-            u_fv3, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
-        )
-        v_fv3_pad = jnp.pad(
-            v_fv3, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
-        )
+    # Step 3: halo the normal D-grid pair with a REAL cross-panel
+    # DGRID_NE exchange (FV3 dyn_core.F90:376 / :501 -- the vector halo
+    # completed before ``c_sw``), NOT edge replication.
+    #
+    # Why this matters (2026-07-31): FV3's SW-vertex value, after the
+    # one-extra-flux removal at sw_core.F90:2209/:2215, is
+    #
+    #     divg_d(1,1) = -vf(1,1) + uf(0,1) - uf(1,1)
+    #
+    # so the cross-panel WEST u GHOST ``uf(0,1)`` must survive.  Edge
+    # replication sets uf(0,1) == uf(1,1), erasing that difference and
+    # leaving ~ -vf(1,1)/area_corner -- an O(v/dx) residual at the 4 face
+    # vertices, which grows with resolution.  Across the eight
+    # axis-swapping seams u and v exchange WITH SIGNS (face 4's east u
+    # halo is -v from face 1); only the vector helper does that.
+    # ``pad_halo_dgrid_scalar_4d`` deliberately falls back to edge
+    # replication on exactly those seams (dgrid_halo.py:189-228) and is
+    # the wrong tool here.
+    if not dgrid_ne_halo:
+        # DEFAULT (bit-identical to the pre-2026-07-31 behaviour).  The
+        # DGRID_NE halo below is the CORRECT velocity exchange and is proven
+        # by the exact +8/+5 seam/vertex assertions, but ON ITS OWN it makes
+        # the operator INCONSISTENT: real cross-panel neighbour winds get
+        # multiplied by still-edge-replicated seam metrics (dyc/sina/cosa at
+        # :400,:455, raw sin_sg at :263) and combined with ua/va from a
+        # 4-corner average rather than FV3's d2a2c_vect.  Measured
+        # consequence: DCMIP TC1 on the cube goes PASS -> BLOWUP (step 3950,
+        # max|u| 1004) with the velocity halo alone.  Enable only together
+        # with the companion metric halo + d2a2c_vect work; flip the default
+        # when the solid-body convergence oracle XPASSes.
+        if _is_4d:
+            u_fv3_pad = jnp.pad(
+                u_fv3, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge")
+            v_fv3_pad = jnp.pad(
+                v_fv3, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge")
+        else:
+            u_fv3_pad = jnp.pad(u_fv3, [(0, 0), (1, 1), (0, 0)], mode="edge")
+            v_fv3_pad = jnp.pad(v_fv3, [(0, 0), (0, 0), (1, 1)], mode="edge")
     else:
-        u_fv3_pad = jnp.pad(
-            u_fv3, [(0, 0), (1, 1), (0, 0)], mode="edge",
-        )
-        v_fv3_pad = jnp.pad(
-            v_fv3, [(0, 0), (0, 0), (1, 1)], mode="edge",
-        )
+        _u4 = u_fv3 if _is_4d else u_fv3[..., None]
+        _v4 = v_fv3 if _is_4d else v_fv3[..., None]
+        from legoesm.grids.halo import get_halo_backend as _ghb_dc
+        if _ghb_dc() == "mpi":
+            from legoesm.grids.dgrid_halo import (
+                pad_halo_dgrid_vector_4d_replicated_mpi,
+            )
+            from legoesm.grids.halo import get_mpi_topology
+            _u_full, _v_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                _u4, _v4, get_mpi_topology(),
+            )
+        else:
+            from legoesm.grids.dgrid_halo import pad_halo_dgrid_vector_4d
+            _u_full, _v_full = pad_halo_dgrid_vector_4d(_u4, _v4)
+        # The helper halos BOTH axes; this routine differences u only along
+        # the cell axis and v only along its own, so trim the other back.
+        u_fv3_pad = _u_full[:, :, 1:-1, :]      # (6, n+2, n+1, nlev)
+        v_fv3_pad = _v_full[:, 1:-1, :, :]      # (6, n+1, n+2, nlev)
+        if not _is_4d:
+            u_fv3_pad = u_fv3_pad[..., 0]
+            v_fv3_pad = v_fv3_pad[..., 0]
 
     # Step 4: extract sin_sg / cos_sg at the 4 sub-grid positions used.
     # FV3 indexing convention (0-based here): sg[0]=west, sg[1]=south,
@@ -483,6 +720,8 @@ def fv3_divergence_corner_3d(
     u_corner_3d: jnp.ndarray,
     v_corner_3d: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
+    *,
+    dgrid_ne_halo: bool = True,
 ) -> jnp.ndarray:
     """3D wrapper around the now-4D-native :func:`fv3_divergence_corner_2d`.
 
@@ -509,7 +748,8 @@ def fv3_divergence_corner_3d(
             f"shape={tuple(u_corner_3d.shape)}.  Use "
             f"fv3_divergence_corner_2d for 3D input."
         )
-    return fv3_divergence_corner_2d(u_corner_3d, v_corner_3d, cdgrid)
+    return fv3_divergence_corner_2d(
+        u_corner_3d, v_corner_3d, cdgrid, dgrid_ne_halo=dgrid_ne_halo)
 
 
 def fv3_corner_laplacian_iteration(

@@ -175,7 +175,10 @@ def main(argv=None, ds=None):
         carry_to_spectral_state,
         spectral_state_to_carry,
     )
-    from legoesm.training.scale_build import build_mode_components
+    from legoesm.training.scale_build import (
+        build_mode_components,
+        check_surface_drag_confound,
+    )
 
     from evaluations.wb_era5_cases import (
         build_forecast_cases,
@@ -207,7 +210,9 @@ def main(argv=None, ds=None):
 
     if not os.path.exists(cfg.checkpoint):
         raise SystemExit(f"--checkpoint not found: {cfg.checkpoint}")
-    trained = eqx.tree_deserialise_leaves(cfg.checkpoint, params)
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    trained = load_checkpoint_or_fail(
+        cfg.checkpoint, params, what=f"WB mode {cfg.mode}")
     run_seg = make_run_seg(trained)   # built ONCE (no closure churn in the loop)
 
     def rollout_fn(state, physics_fn, grid_, sigma_, pe_config_, dt_, n_steps,
@@ -258,6 +263,15 @@ def main(argv=None, ds=None):
         "era5_cadence_hours": cadence,
         "resolution_deg": cfg.resolution_deg,
         "dt_seconds": dt,
+        # A confounded comparison must say so IN THE FILE, not only in a log
+        # line nobody reads back. `None` = the learned arm carries the same
+        # surface stress as the classical one it is scored against (#1464).
+        # A POSITIVE status, never a bare null: downstream a null is
+        # indistinguishable from a key that was never written, i.e. from an
+        # older scorecard that was never checked at all.
+        "surface_drag_confound": (
+            check_surface_drag_confound(yml, cfg.mode, cfg.training_core)
+            or "arms carry the same surface stress"),
         "climatology_note": (
             "v1 climatology = eval-window sample mean over verification "
             "snapshots. Self-consistent for ranking checkpoints under identical "

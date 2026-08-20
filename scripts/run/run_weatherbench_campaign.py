@@ -74,6 +74,7 @@ class CampaignConfig(NamedTuple):
     sota_csv: str | None
     metric: str
     smoke: bool
+    resume: bool = False
 
 
 def _parse_csv_ints(s, name):
@@ -154,6 +155,11 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
                    help="Scorecard metric to plot.")
     p.add_argument("--smoke", action="store_true",
                    help="Tiny wiring check: forwards --smoke to the trainer.")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue each family from its last completed epoch "
+                        "(parameters, optimizer state and trainable set). The "
+                        "self-chaining SLURM wrapper passes this on every link "
+                        "after the first.")
     p.add_argument("--allow-missing-artifacts", action="store_true",
                    dest="allow_missing_artifacts",
                    help="Do not fail the campaign when a requested eval finds no "
@@ -202,6 +208,7 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
         sota_csv=(a.sota_csv or None),
         metric=a.metric,
         smoke=a.smoke,
+        resume=a.resume,
     )
 
 
@@ -221,11 +228,13 @@ def build_train_argv(cfg: CampaignConfig, mode: str) -> list:
         "--mode", mode,
         "--training-core", cfg.training_core,
         "--out", mode_out_dir(cfg.out_root, mode),
-        # NOTE: no --resume. train_weatherbench_scale parses the flag but never
-        # acts on it (no checkpoint restore), so passing it advertised a
-        # restart-chaining contract the trainer does not honor. Omit until the
-        # trainer implements resume; a restart currently retrains from scratch.
     ]
+    # The trainer now honours --resume: it restores the parameters, the
+    # optimizer state and the frozen-leaf list from the last completed epoch.
+    # Without it a chained link restarts at epoch 0, which is what made a
+    # multi-link run silently repeat its first epochs forever.
+    if cfg.resume:
+        argv += ["--resume"]
     if cfg.n_epochs is not None:
         argv += ["--epochs", str(cfg.n_epochs)]
     if cfg.smoke:
@@ -267,138 +276,82 @@ def build_plot_argv(cfg: CampaignConfig, family_scorecards: dict, out_png: str) 
 
 
 def latest_checkpoint(out_dir):
-    """Newest ``epoch_NNNN.eqx`` in ``out_dir`` (highest epoch), or None."""
-    d = Path(out_dir)
-    if not d.is_dir():
-        return None
-    ckpts = sorted(d.glob("epoch_*.eqx"),
-                   key=lambda p: int(p.stem.split("_")[1]))
-    return str(ckpts[-1]) if ckpts else None
-
-
-def _nonempty(path) -> bool:
-    """A delegate's output counts only if it exists AND is non-empty — a
-    zero-byte file is a failed/interrupted write, not a real artifact."""
-    return os.path.exists(path) and os.path.getsize(path) > 0
+    """Newest ``epoch_NNNN.eqx`` in ``out_dir`` — delegates to the shared
+    campaign driver (kept as a name here for existing callers/tests)."""
+    from legoesm.training.campaign_driver import latest_checkpoint as _lc
+    return _lc(out_dir)
 
 
 def _barrier(nproc):
-    """Collective barrier when running under MPI; no-op single-process.
-
-    Ensures every rank has finished the TRAIN stage (and flushed checkpoints)
-    before rank 0 begins the single-process EVAL/PLOT stages.
-    """
-    if nproc <= 1:
-        return
-    # Under multi-rank, the barrier is load-bearing: rank 0 must NOT start eval
-    # until every rank has flushed its checkpoints. Let an import/barrier failure
-    # RAISE — swallowing it would let rank 0 evaluate incomplete checkpoints and
-    # still exit successfully.
-    from mpi4py import MPI
-    MPI.COMM_WORLD.Barrier()
+    """MPI barrier — delegates to the shared campaign driver (name kept for
+    existing callers/tests)."""
+    from legoesm.training.campaign_driver import mpi_barrier
+    mpi_barrier(nproc)
 
 
 def run_campaign(cfg: CampaignConfig):
-    """Execute the requested stages. Returns the assembled scorecard-path map."""
+    """Execute the requested stages. Returns the assembled scorecard-path map.
+
+    Thin adapter over the shared staged executor
+    (``legoesm.training.campaign_driver.run_staged_campaign``): this script
+    keeps only the WB-specific argv builders; stage sequencing, MPI
+    barrier, checkpoint resolution (EMA-preferring, D3) and artifact
+    accounting are the shared implementation used by run_aimip too.
+    """
     import logging
 
-    from legoesm.training.data_parallel import mpi_rank_size
+    from legoesm.training.campaign_driver import (
+        nonempty,
+        run_staged_campaign,
+        validate_training_core,
+    )
 
-    rank, nproc = mpi_rank_size()
-    logging.basicConfig(level=logging.INFO if rank == 0 else logging.WARNING)
+    validate_training_core(cfg.training_core)
+
     log = logging.getLogger("wb_campaign")
 
-    import train_weatherbench_scale as trainer
     import run_weatherbench_eval as evaler
+    import train_weatherbench_scale as trainer
 
-    if rank == 0:
-        os.makedirs(cfg.out_root, exist_ok=True)
-        log.info("WB campaign: modes=%s stages=%s core=%s ranks=%d out=%s",
-                 list(cfg.modes), list(cfg.stages), cfg.training_core, nproc,
-                 cfg.out_root)
+    def _train(mode):
+        trainer.main(build_train_argv(cfg, mode))
 
-    # --- TRAIN (all ranks; the data-parallel loop is collective) ---
-    if "train" in cfg.stages:
-        for mode in cfg.modes:
-            if rank == 0:
-                log.info("=== TRAIN %s ===", mode)
-            trainer.main(build_train_argv(cfg, mode))
+    def _eval(mode, ckpt):
+        evaler.main(build_eval_argv(cfg, mode, ckpt))
 
-    _barrier(nproc)
+    def _plot(family_scorecards):
+        # Drop a missing SOTA CSV to a families-only plot rather than
+        # letting load_sota_headline raise FileNotFoundError — the CSV is
+        # produced by a separate fetch job (scripts/data/fetch_wb2_sota.py)
+        # that may not have run yet.
+        plot_cfg = cfg
+        if cfg.sota_csv and not os.path.exists(cfg.sota_csv):
+            log.warning("SOTA CSV %s not found — plotting families + floors "
+                        "only (run scripts/data/fetch_wb2_sota.py to add "
+                        "the published-model overlay).", cfg.sota_csv)
+            plot_cfg = cfg._replace(sota_csv=None)
+        import plot_wb_scorecard as plotter
+        out_png = os.path.join(cfg.out_root, "wb_scorecard.png")
+        log.info("=== PLOT %d families -> %s ===",
+                 len(family_scorecards), out_png)
+        plotter.main(build_plot_argv(plot_cfg, family_scorecards, out_png))
+        if not nonempty(out_png):
+            return out_png  # executor flags the missing figure
+        return out_png
 
-    # --- EVAL + PLOT (rank 0 only; single-process) ---
-    family_scorecards: dict = {}
-    missing: list = []
-    if rank == 0:
-        if "eval" in cfg.stages:
-            for mode in cfg.modes:
-                ckpt = latest_checkpoint(mode_out_dir(cfg.out_root, mode))
-                if ckpt is None:
-                    log.warning("=== EVAL %s SKIPPED: no checkpoint in %s "
-                                "(train it first) ===",
-                                mode, mode_out_dir(cfg.out_root, mode))
-                    missing.append(f"eval:{mode} (no checkpoint)")
-                    continue
-                log.info("=== EVAL %s (ckpt=%s) ===", mode, ckpt)
-                evaler.main(build_eval_argv(cfg, mode, ckpt))
-                sc = scorecard_path(cfg.out_root, mode)
-                if _nonempty(sc):
-                    family_scorecards[mode] = sc
-                else:
-                    log.warning("=== EVAL %s produced no scorecard at %s ===", mode, sc)
-                    missing.append(f"eval:{mode} (no scorecard written)")
-        else:
-            # no eval: pick up any scorecards already on disk (for plot)
-            for mode in cfg.modes:
-                sc = scorecard_path(cfg.out_root, mode)
-                if _nonempty(sc):
-                    family_scorecards[mode] = sc
-
-        # Verify training flushed a checkpoint. When eval also ran, the eval
-        # loop's `ckpt is None` already flags a missing checkpoint, so only
-        # check here for a train-without-eval run (e.g. `--stages train`),
-        # which would otherwise exit 0 after a diverged/OOM run.
-        if "train" in cfg.stages and "eval" not in cfg.stages:
-            for mode in cfg.modes:
-                if latest_checkpoint(mode_out_dir(cfg.out_root, mode)) is None:
-                    missing.append(f"train:{mode} (no checkpoint written)")
-
-        if "plot" in cfg.stages:
-            if not family_scorecards:
-                log.warning("=== PLOT SKIPPED: no family scorecards found under %s ===",
-                            cfg.out_root)
-                missing.append("plot (no family scorecards)")
-            else:
-                # Drop a missing SOTA CSV to a families-only plot rather than
-                # letting load_sota_headline raise FileNotFoundError — the CSV is
-                # produced by a separate fetch job (scripts/data/fetch_wb2_sota.py)
-                # that may not have run yet.
-                plot_cfg = cfg
-                if cfg.sota_csv and not os.path.exists(cfg.sota_csv):
-                    log.warning("SOTA CSV %s not found — plotting families + floors "
-                                "only (run scripts/data/fetch_wb2_sota.py to add "
-                                "the published-model overlay).", cfg.sota_csv)
-                    plot_cfg = cfg._replace(sota_csv=None)
-                import plot_wb_scorecard as plotter
-                out_png = os.path.join(cfg.out_root, "wb_scorecard.png")
-                log.info("=== PLOT %d families -> %s ===",
-                         len(family_scorecards), out_png)
-                plotter.main(build_plot_argv(plot_cfg, family_scorecards, out_png))
-                if not _nonempty(out_png):
-                    log.warning("=== PLOT produced no figure at %s ===", out_png)
-                    missing.append("plot (no figure written)")
-
-        # A requested stage that produced nothing is a FAILURE, not a success:
-        # otherwise a diverged/OOM training run (no checkpoint) or a missing
-        # scorecard would exit 0 and read as "campaign done".
-        if missing and not cfg.allow_missing_artifacts:
-            raise SystemExit(
-                "WB campaign: requested artifacts missing: "
-                + "; ".join(missing)
-                + " (pass --allow-missing-artifacts to downgrade to a warning)."
-            )
-
-    return family_scorecards
+    return run_staged_campaign(
+        modes=cfg.modes,
+        stages=cfg.stages,
+        out_root=cfg.out_root,
+        train_fn=_train,
+        eval_fn=_eval,
+        plot_fn=_plot,
+        mode_out_dir_fn=lambda m: mode_out_dir(cfg.out_root, m),
+        scorecard_path_fn=lambda m: scorecard_path(cfg.out_root, m),
+        allow_missing_artifacts=cfg.allow_missing_artifacts,
+        prefer_ema=True,
+        log=None,
+    )
 
 
 def main(argv=None):

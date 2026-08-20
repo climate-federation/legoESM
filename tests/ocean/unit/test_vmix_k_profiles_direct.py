@@ -118,6 +118,128 @@ class TestConstantScheme:
         assert jnp.allclose(A1 - A0, 5e-4)
 
 
+class TestBackgroundCompositionMode:
+    """T23 (Phase-2 #1317): VerticalMixingConfig.vmix_background_mode.
+
+    NEMO's own backgrounds compose by MAX (zdftke avm=max(...,avm0);
+    zdfevd REPLACES where unstable) — never ADDED on top of another
+    background. Default "additive" reproduces the prior (pre-T23)
+    behaviour exactly; "nemo_max_floor" is the fix."""
+
+    def test_default_is_additive_byte_identical(self, grid_z_state):
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(A_v=1e-3, K_v=1e-4),
+            ),
+            **_base())
+        K_default, A_default = compute_vertical_K_profiles(
+            state, z, None, cfg, A_v_background=5e-4, K_v_background=2e-4)
+        cfg_explicit = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(A_v=1e-3, K_v=1e-4),
+                vmix_background_mode="additive",
+            ),
+            **_base())
+        K_explicit, A_explicit = compute_vertical_K_profiles(
+            state, z, None, cfg_explicit,
+            A_v_background=5e-4, K_v_background=2e-4)
+        assert jnp.array_equal(K_default, K_explicit)
+        assert jnp.array_equal(A_default, A_explicit)
+
+    def test_nemo_max_floor_never_adds(self, grid_z_state):
+        """MAX-floor composition: with the closure's own K_v (1e-4) BELOW
+        the model-level floor (2e-4), the total is the floor ALONE (not
+        1e-4+2e-4=3e-4 as the additive default would give)."""
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(A_v=1e-3, K_v=1e-4),
+                vmix_background_mode="nemo_max_floor",
+            ),
+            **_base())
+        K, A = compute_vertical_K_profiles(
+            state, z, None, cfg, A_v_background=2e-4, K_v_background=2e-4)
+        assert jnp.allclose(K, 2e-4)     # max(2e-4, 1e-4), NOT 3e-4
+        assert jnp.allclose(A, 1e-3)     # max(2e-4, 1e-3), NOT 1.2e-3
+
+    def test_nemo_max_floor_never_lowers_below_nemo_floor(self, grid_z_state):
+        """SELF-REVIEW sign check: the MAX composition must never produce a
+        total BELOW either input floor (a genuine floor, not a leak)."""
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(A_v=5e-4, K_v=3e-4),
+                vmix_background_mode="nemo_max_floor",
+            ),
+            **_base())
+        K, A = compute_vertical_K_profiles(
+            state, z, None, cfg, A_v_background=1e-4, K_v_background=1e-4)
+        assert bool(jnp.all(K >= 3e-4 - 1e-15))
+        assert bool(jnp.all(K >= 1e-4 - 1e-15))
+        assert bool(jnp.all(A >= 5e-4 - 1e-15))
+        assert bool(jnp.all(A >= 1e-4 - 1e-15))
+
+    def test_unknown_background_mode_raises(self, grid_z_state):
+        _, z, state = grid_z_state
+        cfg = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant", vmix_background_mode="bogus",
+            ),
+            **_base())
+        with pytest.raises(ValueError, match="vmix_background_mode"):
+            compute_vertical_K_profiles(state, z, None, cfg)
+
+    def test_nemo_max_floor_composes_with_convection_stable_branch(
+        self, grid_z_state,
+    ):
+        """The EVD "stable branch" background (K_bg, the non-firing zdfevd
+        value everywhere N2>=threshold — this rest state is stably
+        stratified) must fold into the SAME max as the model-level floor
+        under nemo_max_floor, NOT add a second time on top."""
+        from legoesm.ocean.physics.convection.config import (
+            EnhancedDiffusionConfig,
+        )
+        _, z, state = grid_z_state
+        base_kwargs = dict(
+            vertical_mixing=VerticalMixingConfig(
+                scheme="constant",
+                constant=ConstantVerticalMixingConfig(A_v=1e-3, K_v=1e-4),
+            ),
+            lateral_mixing=type(OceanPhysicsConfig().lateral_mixing)(
+                scheme="none"),
+            surface_forcing=type(OceanPhysicsConfig().surface_forcing)(
+                scheme="none"),
+            shortwave_penetration=None,
+        )
+        conv = OceanConvectionConfig(
+            scheme="enhanced_diffusion",
+            enhanced_diffusion=EnhancedDiffusionConfig(K_bg=2e-4, K_conv=1.0),
+        )
+        cfg_add = OceanPhysicsConfig(convection=conv, **base_kwargs)
+        cfg_max = OceanPhysicsConfig(
+            convection=conv,
+            vertical_mixing=base_kwargs["vertical_mixing"]._replace(
+                vmix_background_mode="nemo_max_floor"),
+            **{k: v for k, v in base_kwargs.items()
+               if k != "vertical_mixing"},
+        )
+        K_add, _ = compute_vertical_K_profiles(
+            state, z, None, cfg_add, K_v_background=2e-4)
+        K_max, _ = compute_vertical_K_profiles(
+            state, z, None, cfg_max, K_v_background=2e-4)
+        # additive: closure K_v (1e-4) + model floor (2e-4) + EVD stable
+        # background (2e-4) = 5e-4 (stably stratified rest state -> EVD
+        # never fires the K_conv branch).
+        assert jnp.allclose(K_add, 5e-4)
+        # nemo_max_floor: max(1e-4, 2e-4, 2e-4) = 2e-4 — nothing added.
+        assert jnp.allclose(K_max, 2e-4)
+
+
 class TestUnknownSchemeRaises:
     """Finding #3: an unknown vertical_mixing scheme must RAISE, not silently
     fall through to a zero K_v/A_v ('be defensive') return that disables vertical

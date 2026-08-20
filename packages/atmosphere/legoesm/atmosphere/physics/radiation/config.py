@@ -21,6 +21,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from legoesm import constants
 from legoesm.atmosphere.physics.radiation.mc3d.config import MC3DRadiationConfig
+from legoesm.atmosphere.physics.radiation.simple_lw import (
+    SimpleLWConfig,
+)
 
 if TYPE_CHECKING:
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
@@ -30,9 +33,10 @@ if TYPE_CHECKING:
 # Machine-readable tunable/fixed split for the radiation scheme configs.
 # Reviewed 2026-06-13 (placeholders replaced with physically-correct
 # classifications):
-#   * gray tau_equator/tau_pole are PRIMARY trained knobs (the legacy-8 set
-#     in training/trainable_params.py DEFAULT_TRAINABLE) -> tier 1 with their
-#     flat build_segment_fn aliases preserved as legacy_name;
+#   * gray tau_equator/tau_pole were PRIMARY trained knobs until 2026-08-11;
+#     gray radiation is no longer trained at all, so every gray param is now
+#     tier 0 (never selected) with its bounds retained for the LES feedback
+#     loop's per-column promotion clamp;
 #   * surface albedo (the AIMIP-trained blended-surface knob that reaches the
 #     heating through both solvers) -> tier 1;
 #   * other closure knobs (LW/SW optical-depth shape, ozone profile,
@@ -47,15 +51,23 @@ __param_spec__ = {
             "sfc_emissivity": "physics: surface boundary emissivity is a domain boundary condition, not a sigmoid-tunable closure (fix via config)",
         },
         "params": {
-            "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
-            "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 1, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
-            "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
-            "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
-            "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
-            "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
-            "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
-            "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 1, "transform": "sigmoid", "category": "albedo", "reference": "gray radiation scheme default", "shape": None},
-            "obliquity": {"units": "degree", "bounds": (0.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "solar", "reference": "gray radiation scheme default", "shape": None},
+        # Gray radiation is NOT trainable: every knob below sits at
+        # tunable_tier 0, which build_trainable_params never selects (it takes
+        # 1 <= tier <= level). The classical model trains RRTMGP instead —
+        # there, only the surface albedo and emissivity are tunable. Bounds are
+        # retained deliberately: promotable_params.py promotes gray_tau_equator
+        # / gray_tau_pole to per-column fields in the LES feedback loop, and
+        # feedback.param_field_bounds clamps that diagnosis to these ranges.
+        # User directive 2026-08-11.
+        "tau_equator": {"units": "1", "bounds": (2.0, 15.0), "tunable_tier": 0, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_equator"},
+        "tau_pole": {"units": "1", "bounds": (0.5, 5.0), "tunable_tier": 0, "transform": "sigmoid", "category": "optical_depth", "reference": "Frierson et al. (2006)", "shape": None, "legacy_name": "tau_pole"},
+        "linear_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "O'Gorman & Schneider (2008)", "shape": None},
+        "tau_moist_coeff": {"units": "m2/kg", "bounds": (0.0, 0.05), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "Frierson et al. (2006)", "shape": None},
+        "lw_diff_factor": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 0, "transform": "sigmoid", "category": "longwave", "reference": "Fu & Liou (1992) diffusivity factor", "shape": None},
+        "sw_tau_0": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "shortwave", "reference": "Frierson et al. (2006)", "shape": None},
+        "sw_exponent": {"units": "1", "bounds": (0.5, 6.0), "tunable_tier": 0, "transform": "sigmoid", "category": "shortwave", "reference": "gray radiation scheme default", "shape": None},
+        "sfc_albedo": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0, "transform": "sigmoid", "category": "albedo", "reference": "gray radiation scheme default", "shape": None},
+        "obliquity": {"units": "degree", "bounds": (0.0, 90.0), "tunable_tier": 0, "transform": "sigmoid", "category": "solar", "reference": "gray radiation scheme default", "shape": None},
         },
     },
     "OzoneProfileConfig": {
@@ -191,6 +203,17 @@ class RRTMGPConfig(NamedTuple):
     aerosol_g : float
         Bulk aerosol asymmetry factor used when aerosol optical depth is
         externally prescribed (default 0.70).
+    aerosol_ssa_bands : tuple[float, ...] | None
+        Optional PER-SHORTWAVE-BAND aerosol single-scattering albedo, length =
+        the SW gas-optics band count (14 for the shipped RRTMGP-SW table). When
+        set, the two-stream solver uses the value of the band each g-point
+        belongs to instead of the scalar ``aerosol_ssa`` — real aerosols scatter
+        very differently in the UV/visible vs the near-IR. ``None`` (default) =>
+        grey aerosol at the scalar ``aerosol_ssa`` (byte-identical).
+    aerosol_g_bands : tuple[float, ...] | None
+        Optional PER-SHORTWAVE-BAND aerosol asymmetry factor (same length /
+        semantics as ``aerosol_ssa_bands``). ``None`` (default) => grey aerosol
+        at the scalar ``aerosol_g``.
     use_scan : bool | None
         Column recurrence implementation inside the two-stream solver.
 
@@ -283,6 +306,13 @@ class RRTMGPConfig(NamedTuple):
     #         Must divide ncol.  A pure compile-time NUMERICS knob — NOT a
     #         tunable/trainable parameter (levels stay coupled, never chunked).
     column_chunk_size: int = 0
+    # Optional PER-SHORTWAVE-BAND aerosol optics (length = SW band count, 14 for
+    # the shipped table).  None => grey aerosol at the scalar aerosol_ssa/g
+    # (byte-identical).  Tuples so the value stays a hashable solver-cache key.
+    # APPENDED at the end of the field list (not next to aerosol_ssa/g) so no
+    # existing positional RRTMGPConfig(...) argument binding shifts.
+    aerosol_ssa_bands: tuple[float, ...] | None = None
+    aerosol_g_bands: tuple[float, ...] | None = None
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -348,7 +378,7 @@ class RadiationConfig(NamedTuple):
     Fields
     ------
     scheme : str
-        Active radiation scheme: "gray" or "rrtmgp".
+        Active radiation scheme: "gray", "rrtmgp", "mc3d" or "simple_lw".
     gray : GrayRadiationConfig
         Configuration for gray radiation.
     rrtmgp : RRTMGPConfig
@@ -379,6 +409,10 @@ class RadiationConfig(NamedTuple):
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
+    # Stevens (2005) DYCOMS-II simple longwave -- the cloud-top radiative
+    # cooling the marine-stratocumulus decks (DYCOMS_RF01, ASTEX209) are
+    # driven by. Longwave only; see radiation/simple_lw.py.
+    simple_lw: SimpleLWConfig = SimpleLWConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
     # "mc3d": 3D Monte-Carlo ray-traced shortwave (plane LES/CRM only) + gray
     # longwave. See docs/specs/mc3d_raytracer.md. mc3d holds MC numerics.
@@ -415,3 +449,16 @@ class RadiationConfig(NamedTuple):
     # for hydrostatic only).  ``False`` (default) keeps the RH grid-scale cloud
     # fraction (byte-identical).
     use_clubb_cloud_fraction: bool = False
+    # Clear-sky TOA diagnostic (#843, lean-lane port): run a SECOND clouds-off
+    # radiation pass per radiation step and attach ``sw_up_toa_clr`` /
+    # ``lw_up_toa_clr`` to the tendency bundle for the CMOR rsutcs/rlutcs feed
+    # (SW_CRE = rsut - rsutcs, LW_CRE = rlutcs - rlut).  Aerosols/ozone/GHG are
+    # KEPT, only the cloud optics are dropped (CMIP "assuming clear sky").
+    # Consumed by the LEAN hydrostatic/MPAS radiation factory
+    # (``_make_hydrostatic_radiation``); the compiled cube/lat-lon lane keeps
+    # its own gate (``PhysicsPipeline._clear_sky_diag``).  Drivers set it from
+    # ``OutputConfig.clear_sky_diag`` (the ``--clear-sky-diag`` CLI flag);
+    # ``make_radiation_physics`` raises on model types without the second-pass
+    # wiring rather than silently ignoring it.  Static Python bool (never
+    # traced); ``False`` (default) adds no ops — byte-identical.
+    clear_sky_diag: bool = False

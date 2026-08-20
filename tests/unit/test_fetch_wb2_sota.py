@@ -32,7 +32,8 @@ load_sota_headline = _baselines.load_sota_headline
 def test_argparse_defaults():
     cfg = mod.build_fetch_config_from_args([])
     assert cfg.source == mod.WB2_RESULTS_BUCKET
-    assert cfg.resolution_dir == mod.WB2_RESOLUTION_DIR
+    assert cfg.resolution == mod.WB2_RESOLUTION
+    assert cfg.year == mod.WB2_YEAR
     assert cfg.models == mod.DEFAULT_MODELS
     assert cfg.leads_hours == mod.DEFAULT_LEADS_HOURS
     assert cfg.out == "config/wb/sota/wb2_headline_rmse.csv"
@@ -40,12 +41,13 @@ def test_argparse_defaults():
 
 def test_argparse_overrides():
     cfg = mod.build_fetch_config_from_args(
-        ["--source", "gs://my/results/", "--resolution-dir", "64x32",
-         "--models", "IFS-HRES,GraphCast", "--leads", "24,120",
+        ["--source", "gs://my/benchmark_results", "--resolution", "64x32",
+         "--year", "2018", "--models", "hres,graphcast", "--leads", "24,120",
          "--out", "out/wb2.csv"])
-    assert cfg.source == "gs://my/results/"
-    assert cfg.resolution_dir == "64x32"
-    assert cfg.models == ("IFS-HRES", "GraphCast")
+    assert cfg.source == "gs://my/benchmark_results"
+    assert cfg.resolution == "64x32"
+    assert cfg.year == 2018
+    assert cfg.models == ("hres", "graphcast")
     assert cfg.leads_hours == (24, 120)
     assert cfg.out == "out/wb2.csv"
 
@@ -58,7 +60,18 @@ def test_local_source_override_accepted():
 def test_unknown_model_hard_errors():
     """A typo'd/unknown reference model is a hard SystemExit, not a silent skip."""
     with pytest.raises(SystemExit, match="unknown reference model"):
-        mod.build_fetch_config_from_args(["--models", "GraphCast,BogusNet"])
+        mod.build_fetch_config_from_args(["--models", "graphcast,BogusNet"])
+
+
+# -------------------------------------------------------- filename template ---
+def test_result_filename_template():
+    """The bucket filename is {model}_vs_era5_{resolution}_{year}.nc (flat)."""
+    assert mod.result_filename("graphcast", "240x121", 2020) == (
+        "graphcast_vs_era5_240x121_2020.nc")
+    assert mod.result_filename("neuralgcm_hres", "240x121", 2020) == (
+        "neuralgcm_hres_vs_era5_240x121_2020.nc")
+    assert mod.result_filename("climatology", "64x32", 2018) == (
+        "climatology_vs_era5_64x32_2018.nc")
 
 
 def test_bad_leads_rejected():
@@ -69,15 +82,18 @@ def test_bad_leads_rejected():
 
 
 # ------------------------------------------------------------- CSV writer -----
+# Synthetic records use the REAL emitted schema: 'variable' holds the WB2 LONG
+# name and 'level' the hPa int (that is what load_sota_headline + the plotter's
+# FIELD_KEY_TO_SOTA key on), and 'model' the display name.
 def _records():
     return [
-        {"model": "IFS-HRES", "variable": "z500", "level": 500,
+        {"model": "IFS-HRES", "variable": "geopotential", "level": 500,
          "lead_hours": 24, "rmse": 152.3},
-        {"model": "IFS-HRES", "variable": "t850", "level": 850,
+        {"model": "IFS-HRES", "variable": "temperature", "level": 850,
          "lead_hours": 72, "rmse": 1.35},
-        {"model": "GraphCast", "variable": "t2m", "level": 0,
-         "lead_hours": 24, "rmse": 0.71},
-        {"model": "GraphCast", "variable": "wind_speed_10m", "level": 0,
+        {"model": "GraphCast", "variable": "specific_humidity", "level": 700,
+         "lead_hours": 24, "rmse": 0.00071},
+        {"model": "GraphCast", "variable": "u_component_of_wind", "level": 850,
          "lead_hours": 120, "rmse": 2.4},
     ]
 
@@ -94,10 +110,10 @@ def test_write_csv_roundtrips_through_baselines(tmp_path):
 
     loaded = load_sota_headline(out)          # the REAL consumer
     assert set(loaded) == {"IFS-HRES", "GraphCast"}
-    assert loaded["IFS-HRES"][("z500", 500, 24)] == pytest.approx(152.3)
-    assert loaded["IFS-HRES"][("t850", 850, 72)] == pytest.approx(1.35)
-    assert loaded["GraphCast"][("t2m", 0, 24)] == pytest.approx(0.71)
-    assert loaded["GraphCast"][("wind_speed_10m", 0, 120)] == pytest.approx(2.4)
+    assert loaded["IFS-HRES"][("geopotential", 500, 24)] == pytest.approx(152.3)
+    assert loaded["IFS-HRES"][("temperature", 850, 72)] == pytest.approx(1.35)
+    assert loaded["GraphCast"][("specific_humidity", 700, 24)] == pytest.approx(0.00071)
+    assert loaded["GraphCast"][("u_component_of_wind", 850, 120)] == pytest.approx(2.4)
 
 
 def test_write_csv_duplicate_key_raises(tmp_path):
@@ -131,27 +147,42 @@ def test_write_csv_empty_raises(tmp_path):
 
 
 # --------------------------------------------------- mapping self-consistency -
-# evaluations.wb_forecast imports jax at module top, so it cannot be imported on
-# a login node. Its HEADLINE_FIELD_KEYS is a stable public contract; mirror the
-# relevant subset here (this literal is the thing under test, and a drift check
-# against the source lives in the full-suite run, not this login-safe test).
-_EXPECTED_HEADLINE_KEYS = frozenset({
-    "z500", "t850", "q700",
-    "u850", "v850", "u700", "v700", "u500", "v500", "u250", "v250",
-    "mslp", "t2m", "u10", "v10", "wind_speed_10m",
-})
+# The CRUX of the overlay lining up: each emitted (csv_variable, csv_level) must
+# match a value in plot_wb_scorecard.FIELD_KEY_TO_SOTA (which the plotter uses to
+# select SOTA rows for a scorecard field_key). The plotter is import-light + JAX-
+# free, so we load it by file path (like the fetch script) to read the real map.
+_plotter = _load_by_path("plot_wb_scorecard", "scripts/plot/plot_wb_scorecard.py")
 
 
-def test_headline_var_keys_are_real_scorecard_keys():
-    """Every CSV variable maps to a legoESM WB2 headline scorecard key.
+def test_emitted_var_level_pairs_match_plotter_mapping():
+    """Every (csv_variable, csv_level) we emit overlays a real scorecard field.
 
-    Uses a mirrored literal of ``wb_forecast.HEADLINE_FIELD_KEYS`` to stay
-    JAX-free (login-safe); the source module is not imported here.
+    The plotter maps field_key -> (wb2_variable, level) in FIELD_KEY_TO_SOTA and
+    matches SOTA rows by that pair. If a row we write is not a value in that map,
+    the overlay would silently drop it. (t500 is intentionally exempt: it is not a
+    scorecard headline field, just a harmless extra upper-air row.)
     """
+    valid_pairs = set(_plotter.FIELD_KEY_TO_SOTA.values())
     for hv in mod.HEADLINE_VARS:
-        assert hv.csv_variable in _EXPECTED_HEADLINE_KEYS, hv.csv_variable
+        pair = (hv.csv_variable, hv.csv_level)
+        if hv.scorecard_field_key == "t500":
+            assert pair not in valid_pairs   # sanity: t500 truly is not mapped
+            continue
+        assert pair in valid_pairs, (hv.scorecard_field_key, pair)
+        # and the declared scorecard_field_key resolves to exactly this pair
+        assert _plotter.FIELD_KEY_TO_SOTA[hv.scorecard_field_key] == pair
 
 
-def test_model_prefixes_cover_default_models():
+def test_headline_vars_are_upper_air_only():
+    """Surface fields (t2m/mslp/10m wind) are dropped — none present in HEADLINE_VARS."""
+    surface = {"2m_temperature", "mean_sea_level_pressure",
+               "10m_wind_speed", "10m_u_component_of_wind",
+               "10m_v_component_of_wind"}
+    for hv in mod.HEADLINE_VARS:
+        assert hv.wb2_var not in surface, hv.wb2_var
+        assert hv.csv_level != 0, hv          # no surface (level-0) rows
+
+
+def test_display_names_cover_default_models():
     for m in mod.DEFAULT_MODELS:
-        assert m in mod.MODEL_PREFIXES
+        assert m in mod.MODEL_DISPLAY_NAMES

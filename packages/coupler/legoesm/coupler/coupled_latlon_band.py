@@ -41,6 +41,33 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Machine-checked parameter spec (see tests/test_param_specs.py).  The two heat
+# This is a SCALING-LANE INFRA module (the minimal coupled MPI step for the
+# C10 bench), NOT a production coupler config: the production driver is
+# CoupledESMDriver, and run_coupled's --params bundle never routes THIS config,
+# so its fields are not reachable calibration targets (the ice/coupler
+# reachability audit requires every tunable coupler.* param be settable via
+# run_coupled --params).  They are therefore FIXED (tier 0, excluded) at the
+# infra defaults rather than exposed as unreachable "tunables": the two heat
+# capacities are structural (c_pd*dp/g, rho*c*h_mix) and k_exchange is the
+# bench's bulk sensible-heat coefficient; the freezing floor is a physical
+# constant.  (A production slab-coupling closure lives in the real coupler
+# config, which IS reachable.)
+__param_spec__ = {
+    "CoupledSlabConfig": {
+        "scheme_key": "coupler.slab_band",
+        "excluded": {
+            "t_freeze_ocean_K": "ocean freezing point is a physical constant "
+                                "(constants.T_freeze_ocean), a measurement "
+                                "convention, not a tunable closure",
+            "k_exchange": "scaling-lane bench coefficient; coupled_latlon_band is infra not routed by run_coupled --params, so not a reachable calibration target",
+            "c_atm_area": "structural atm surface-layer heat capacity (c_pd*dp/g); scaling-lane infra, not a reachable calibration target",
+            "c_ocean_area": "structural slab mixed-layer heat capacity (rho*c*h_mix); scaling-lane infra, not a reachable calibration target",
+        },
+        "params": {},
+    },
+}
+
 
 class CoupledSlabConfig(NamedTuple):
     """Sensible-heat coupling + slab mixed-layer parameters.

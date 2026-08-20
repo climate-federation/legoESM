@@ -27,6 +27,7 @@ program fv3_dsw5_duo_driver
   integer :: res, nhalo
   real :: dt
   real :: dddmp_in, d4bg_in, dampv_in
+  integer :: nord_in, hordvt_in
   integer :: ios, i, j, k, u_in, u_out
   character(len=32) :: name
   character(len=256) :: line
@@ -53,6 +54,7 @@ program fv3_dsw5_duo_driver
   ! damping knobs default to the oracle configuration; optional header
   ! overrides support config bisection without touching the extraction
   dddmp_in = 0.2; d4bg_in = 0.12; dampv_in = 0.2
+  nord_in = 1; hordvt_in = 6
   do
     read(u_in, '(A)', iostat=ios) line
     if (ios /= 0) exit
@@ -62,6 +64,8 @@ program fv3_dsw5_duo_driver
     if (index(line, '# dt ') == 1) read(line(6:), *) dt
     if (index(line, '# dddmp ') == 1) read(line(9:), *) dddmp_in
     if (index(line, '# d4_bg ') == 1) read(line(9:), *) d4bg_in
+    if (index(line, '# nord ') == 1) read(line(8:), *) nord_in
+    if (index(line, '# hordvt ') == 1) read(line(10:), *) hordvt_in
     if (index(line, '# damp_v ') == 1) read(line(10:), *) dampv_in
   end do
   close(u_in)
@@ -208,7 +212,7 @@ program fv3_dsw5_duo_driver
   dw = 0.
   call d_sw5(delpc, delp, ptc, u, v, w, uc, vc, ua, va, divg_d,       &
              crx_adv, cry_adv, xfx_adv, yfx_adv, q_con, z_rat,        &
-             dt, 6, 1, dddmp_in, 0.0, d4bg_in, 0.0,                   &
+             dt, hordvt_in, nord_in, dddmp_in, 0.0, d4bg_in, 0.0,       &
              0.0, .true., gs, fl, bd,                                 &
              dw, ra_x, ra_y, ut, vt, ub, vb, ke, wk,                  &
              vortfluxx, vortfluxy)

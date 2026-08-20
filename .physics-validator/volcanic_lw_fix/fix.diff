@@ -1,0 +1,1059 @@
+diff --git a/packages/coupler/legoesm/driver/model_driver.py b/packages/coupler/legoesm/driver/model_driver.py
+index 84f6f6d4d..b2b3974a7 100644
+--- a/packages/coupler/legoesm/driver/model_driver.py
++++ b/packages/coupler/legoesm/driver/model_driver.py
+@@ -45,6 +45,29 @@ from legoesm.driver.restart import save_restart, load_restart
+ logger = logging.getLogger("legoesm.driver")
+ 
+ 
++def _external_forcing_active(
++    radiation_ok: bool,
++    ozone_active: bool,
++    aerosol_active: bool,
++    aerosol_lw_active: bool,
++    ghg_active: bool,
++    experiment_active: bool,
++) -> bool:
++    """Whether the per-step external-forcing dict (o3/aerosol/ghg) must be built.
++
++    Single source of truth for the ``_ext_forcing`` gate used on both the
++    hydrostatic and spectral full-physics AMIP paths.  ``radiation_ok`` is the
++    per-path scheme test (both paths need a gas-radiation scheme, but the
++    spectral path is rrtmgp-only).  ``aerosol_lw_active`` MUST be included:
++    volcanic stratospheric LW aerosol supplied alone (no ozone / SW aerosol /
++    GHG / experiment) still has to reach RRTMGP's LW absorption slot.
++    """
++    return radiation_ok and (
++        ozone_active or aerosol_active or aerosol_lw_active
++        or ghg_active or experiment_active
++    )
++
++
+ def _scatter_flat_columns(flat_arr, layout, n_tile):
+     """Scatter a FLATTENED-column array ``(6*n*n, ...)`` to this rank's owned
+     faces, returning ``(n_local*n*n, ...)`` in the identical face-major
+@@ -2340,7 +2363,10 @@ class ModelDriver:
+             get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
+             get_ghg_at_time, ghg_concentrations_to_vmr,
+         )
+-        from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
++        from legoesm.forcing.surface_utils import (
++            distribute_column_aod_to_layers,
++            place_stratospheric_aod_profile_to_layers,
++        )
+ 
+         nlev = self.sigma.sigma_full.shape[0]
+         shape_2d = p_s.shape
+@@ -2406,19 +2432,24 @@ class ModelDriver:
+         # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+         # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+         # and a run without volcanic LW aerosol is byte-identical (zeros LW
+-        # od is a RRTMGP no-op).  Distributed to layers by the SAME
+-        # pressure-thickness helper used for the SW aerosol.  Stored as an
+-        # instance attribute (NOT added to the 3-tuple return) so the five
+-        # existing unpack call sites keep their arity.
++        # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
++        # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
++        # weighted gray band collapse) plus its pressure edges; the profile
++        # is placed at its true stratospheric pressure by a conservative
++        # overlap remap -- NOT spread by full-column pressure mass, which
++        # dumped ~90% of a stratospheric aerosol into the troposphere.
++        # Stored as an instance attribute (NOT added to the 3-tuple return)
++        # so the five existing unpack call sites keep their arity.
+         aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
+         if self._aerosol_lw_active:
+-            aerosol_lw_col = get_aerosol_lw_at_time(
++            aerosol_lw_prof = get_aerosol_lw_at_time(
+                 self._aerosol_config, day, lat_grid=lat_col,
+             )
+-            if aerosol_lw_col is not None:
+-                aerosol_lw_od = distribute_column_aod_to_layers(
+-                    jnp.asarray(aerosol_lw_col), p_half_col,
+-                )
++            if aerosol_lw_prof is not None:
++                prof_col, p_edges = aerosol_lw_prof
++                aerosol_lw_od = place_stratospheric_aod_profile_to_layers(
++                    jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
++                ).astype(p_s.dtype)
+         self._aerosol_lw_od = aerosol_lw_od
+ 
+         # GHG VMR override (None for gray radiation / constant forcing)
+@@ -5808,7 +5839,12 @@ class ModelDriver:
+                 # ``forcing["o3_vmr"]`` (precedence over this source).
+                 ozone=OzoneProfileConfig(source=cfg.ozone_source),
+             ),
+-            convection=convection_config_for(cfg),
++            # grid_dx_m: SCVT sqrt(mean cell area) [m] — auto-fills Bechtold's
++            # IFS ZTAURES resolution factor (codex 2026-07-23 finding A;
++            # areaCell is physical, sums to 4*pi*R^2).
++            convection=convection_config_for(
++                cfg,
++                grid_dx_m=float(np.sqrt(np.mean(np.asarray(self.grid.areaCell))))),
+             turbulence=turbulence_config_for(cfg),
+             microphysics=_micro_cfg,
+             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
+@@ -6154,10 +6190,10 @@ class ModelDriver:
+         # value change stays a traced-value change (no retrace); the
+         # dict KEY STRUCTURE is decided once here and never changes
+         # mid-run (pytree stability for the JIT'd step).
+-        _ext_forcing = (
+-            cfg.radiation in ("rrtmg", "rrtmgp")
+-            and (self._ozone_ext_active or self._aerosol_active
+-                 or self._ghg_active or bool(self._experiment))
++        _ext_forcing = _external_forcing_active(
++            cfg.radiation in ("rrtmg", "rrtmgp"),
++            self._ozone_ext_active, self._aerosol_active,
++            self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
+         )
+         # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
+         # MICROPHYSICS step regardless of the radiation scheme (the second
+@@ -7109,10 +7145,11 @@ class ModelDriver:
+                     "each step).")
+             else:
+                 _phys_fn_loop = _amip_physics_fn
+-            _ext_forcing = (
+-                _rad_scheme == "rrtmgp"
+-                and (self._ozone_ext_active or self._aerosol_active
+-                     or self._ghg_active or bool(self._experiment))
++            _ext_forcing = _external_forcing_active(
++                _rad_scheme == "rrtmgp",
++                self._ozone_ext_active, self._aerosol_active,
++                self._aerosol_lw_active, self._ghg_active,
++                bool(self._experiment),
+             )
+             logger.info(
+                 "  Spectral full-physics AMIP pipeline: "
+diff --git a/packages/tools/legoesm/forcing/__init__.py b/packages/tools/legoesm/forcing/__init__.py
+index 4a12d6c5e..8f07c3776 100644
+--- a/packages/tools/legoesm/forcing/__init__.py
++++ b/packages/tools/legoesm/forcing/__init__.py
+@@ -41,6 +41,7 @@ from legoesm.forcing.surface_utils import (
+     blend_surface_temperature,
+     blend_surface_property,
+     distribute_column_aod_to_layers,
++    place_stratospheric_aod_profile_to_layers,
+ )
+ 
+ __all__ = [
+@@ -76,4 +77,5 @@ __all__ = [
+     "blend_surface_temperature",
+     "blend_surface_property",
+     "distribute_column_aod_to_layers",
++    "place_stratospheric_aod_profile_to_layers",
+ ]
+diff --git a/packages/tools/legoesm/forcing/external.py b/packages/tools/legoesm/forcing/external.py
+index 3e5ab9ba1..76bdeb23f 100644
+--- a/packages/tools/legoesm/forcing/external.py
++++ b/packages/tools/legoesm/forcing/external.py
+@@ -46,6 +46,115 @@ _BY_DATE_MAPPED_CALENDARS = frozenset(
+ )
+ 
+ 
++# --- Volcanic stratospheric LW aerosol placement / band collapse ---------------
++# The CMIP6 ``bc_aeropt_cmip6_volc_lw_b16_sw_b14`` file is HEIGHT-RESOLVED
++# (altitude 5-40 km) and carries per-band single-scattering albedo, so the LW
++# volcanic aerosol is fed to RRTMGP as an ABSORPTION optical depth
++# (ext*(1-omega)) placed at its true stratospheric pressure.
++#
++# US Standard Atmosphere 1976 base-layer table (NOAA-S/T 76-1562): geopotential
++# base altitude [m], base temperature [K], lapse rate [K/m].  Used ONLY to map
++# the file's GEOMETRIC altitude axis to pressure for placement.  The file
++# altitude is geometric; ``_ussa1976_pressure`` converts to geopotential first
++# (the height difference is ~0.5 % at 30 km but the PRESSURE effect is ~2 % at
++# 30 km / ~3 % at 40 km, so the conversion IS applied).  The 5-40 km band the
++# volcanic file occupies lies in the 11-47 km stratospheric layers.
++_USSA1976_LAYERS = (
++    (0.0, 288.15, -0.0065),
++    (11000.0, 216.65, 0.0),
++    (20000.0, 216.65, 0.001),
++    (32000.0, 228.65, 0.0028),
++    (47000.0, 270.65, 0.0),
++)
++# US Std Atm 1976 sea-level reference pressure [Pa] (definition of the profile).
++_USSA1976_P_SEALEVEL_PA = 101325.0
++# Representative lower-stratosphere temperature [K] for the Planck-emission-
++# weighted gray collapse of the 16 terrestrial bands (B3).  Volcanic sulfate
++# sits at ~16-30 km where US Std Atm 1976 T ~ 217-227 K.  This is a documented
++# approximation, NOT the exact gray equivalent (which would fold in the full
++# spectral radiative kernel): on the real 1979 file a +/-10 K change moves the
++# Planck-weighted gray column OD by ~+/-4.7 % via the band-varying OD (Codex
++# review iter-1).
++_VOLC_LW_PLANCK_TEMP_K = 220.0
++# Sub-samples per band for the Planck-weight quadrature (numerics only).
++_PLANCK_QUAD_NSUB = 16
++
++
++def _ussa1976_pressure(z_m: np.ndarray) -> np.ndarray:
++    """US Standard Atmosphere 1976 pressure [Pa] at GEOMETRIC altitude ``z_m`` [m].
++
++    Piecewise-analytic hydrostatic integral of :data:`_USSA1976_LAYERS`
++    (constant-lapse power law / isothermal exponential), anchored at
++    :data:`_USSA1976_P_SEALEVEL_PA`.  Monotone decreasing in height.  Used only
++    to map the CMIP6 volcanic file's altitude axis onto pressure for
++    stratospheric aerosol placement.
++
++    The CMIP6 file altitude is GEOMETRIC, but the USSA base heights are
++    GEOPOTENTIAL; the input is converted ``h = R_e z / (R_e + z)`` before the
++    table lookup.  Skipping this leaves the mapped pressure low by ~1 % at
++    20 km and ~3 % at 40 km (Codex review iter-1).
++    """
++    z = np.asarray(z_m, dtype=np.float64)
++    r_e = float(constants.R_earth)
++    z = r_e * z / (r_e + z)          # geometric -> geopotential height [m]
++    g = float(constants.g)
++    r_d = float(constants.R_d)
++
++    def _layer_p(p_b, z_b, t_b, lapse, z_eval):
++        # Hydrostatic pressure within one constant-lapse layer.
++        if lapse == 0.0:
++            return p_b * np.exp(-g * (z_eval - z_b) / (r_d * t_b))
++        return p_b * (t_b / (t_b + lapse * (z_eval - z_b))) ** (g / (r_d * lapse))
++
++    # Base pressures at each layer boundary (integrate upward from sea level).
++    p_base = [_USSA1976_P_SEALEVEL_PA]
++    for (z_b, t_b, lapse), (z_t, _, _) in zip(
++        _USSA1976_LAYERS, _USSA1976_LAYERS[1:]
++    ):
++        p_base.append(_layer_p(p_base[-1], z_b, t_b, lapse, z_t))
++
++    n = len(_USSA1976_LAYERS)
++    p = np.full_like(z, np.nan)
++    for i, (z_b, t_b, lapse) in enumerate(_USSA1976_LAYERS):
++        z_t = _USSA1976_LAYERS[i + 1][0] if i + 1 < n else np.inf
++        z_lo = -np.inf if i == 0 else z_b  # first layer also covers z < 0
++        in_layer = (z >= z_lo) & (z < z_t)
++        p = np.where(in_layer, _layer_p(p_base[i], z_b, t_b, lapse, z), p)
++    return p
++
++
++def _planck_band_weights(
++    wl1_um: np.ndarray, wl2_um: np.ndarray, temp_k: float,
++) -> np.ndarray:
++    """Un-normalised Planck-emission weight per spectral band at ``temp_k``.
++
++    Integrates the Planck function ``B_nu(T)`` over each band's wavenumber
++    interval (band bounds given as wavelengths [um]).  The emission-weighted
++    mean ``sum_b W_b*tau_b / sum_b W_b`` is a physically-motivated HEURISTIC
++    gray value (better-motivated than a flat band mean, which overweights the
++    ~zero-flux near-IR bands) when a per-band optical depth is collapsed to one
++    value applied to every g-point (B3) -- NOT the exact gray equivalent, which
++    would fold in the full spectral radiative kernel.  Only relative weights
++    matter, so the result is un-normalised.
++    """
++    h = float(constants.h_planck)
++    c = float(constants.c_light)
++    k_b = float(constants.k_B)
++    t = float(temp_k)
++    w1 = np.asarray(wl1_um, dtype=np.float64) * 1.0e-6  # -> m
++    w2 = np.asarray(wl2_um, dtype=np.float64) * 1.0e-6
++    nu_lo = 1.0 / np.maximum(w1, w2)  # smaller wavenumber [1/m]
++    nu_hi = 1.0 / np.minimum(w1, w2)  # larger wavenumber [1/m]
++    _trapz = getattr(np, "trapezoid", None) or np.trapz
++    weights = np.empty(nu_lo.shape[0], dtype=np.float64)
++    for b in range(nu_lo.shape[0]):
++        nu = np.linspace(nu_lo[b], nu_hi[b], _PLANCK_QUAD_NSUB)
++        x = h * c * nu / (k_b * t)
++        b_nu = 2.0 * h * c**2 * nu**3 / np.expm1(x)
++        weights[b] = _trapz(b_nu, nu)
++    return weights
++
++
+ # ==============================================================================
+ # Data loading helpers (Zarr-first, NetCDF fallback via xarray)
+ # ==============================================================================
+@@ -597,15 +706,142 @@ def _load_volcanic_cmip6_anchored(
+     return _load_volcanic_extinction_anchored(path, "ext_sun", "SW")
+ 
+ 
+-def _load_volcanic_lw_cmip6_anchored(
++@lru_cache(maxsize=8)
++def _load_volcanic_lw_absorption_profile(
+     path: str,
+-) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
+-    """LONGWAVE volcanic extinction (``ext_earth``, gap #9); see
+-    :func:`_load_volcanic_extinction_anchored`.  Raises ``ValueError`` if
+-    the file has no ``ext_earth`` band; the caller
+-    (``get_aerosol_lw_at_time``) treats that as "no LW source" and returns
+-    zeros so the run stays byte-identical."""
+-    return _load_volcanic_extinction_anchored(path, "ext_earth", "LW")
++) -> tuple[np.ndarray, object, np.ndarray, np.ndarray, np.ndarray]:
++    """CMIP6 volcanic LW aerosol as a PRESSURE-RESOLVED absorption-OD profile.
++
++    Fixes three defects in feeding ``bc_aeropt_cmip6_volc_lw_b16`` to the
++    RRTMGP longwave ABSORPTION optical-depth slot:
++
++    * **B1 extinction -> absorption.**  ``ext_earth`` is EXTINCTION; the LW slot
++      wants ABSORPTION (single-scattering albedo 0).  Scaled per band by the
++      co-located ``omega_earth``: ``abs = ext*(1-omega)``.  ``omega_earth``
++      reaches ~0.4 in the window bands, so feeding raw extinction overstates
++      the absorption OD by up to that factor.  If the file lacks
++      ``omega_earth`` the sulfate LW ``omega ~ 0`` approximation is used
++      (``abs == ext``) and documented.
++    * **B2 stratospheric placement.**  The file is HEIGHT-RESOLVED (altitude
++      5-40 km).  The per-layer profile is retained and each file layer tagged
++      with a US-Std-Atm-1976 pressure edge, so the driver places the aerosol
++      at its true stratospheric pressure instead of spreading a column AOD by
++      tropospheric pressure mass (which lands ~90 % of it below the
++      tropopause).
++    * **B3 spectral collapse.**  The 16 terrestrial bands ARE collapsed to one
++      gray value (the LW slot is applied to every g-point), but via a
++      Planck-emission-weighted mean at :data:`_VOLC_LW_PLANCK_TEMP_K` rather
++      than a flat band mean.  This is better-motivated than a flat mean (which
++      overweights the near-IR bands that carry ~no LW flux at stratospheric
++      temperature) but is a HEURISTIC, not the exact gray equivalent -- the
++      exact single-tau response would fold in the full spectral radiative
++      kernel (surface/gas/cloud transmission + local emission), not Planck
++      emission alone.  Residual per-band spread is a documented approximation;
++      threading true per-band tau through the g-point loop is deferred as
++      disproportionate for this background-magnitude forcing.
++
++    Returns ``(mid_days, first_date, lat, aod_profile, p_edges)``:
++
++    * ``aod_profile`` ``(ntime, nlat, nlayer)`` per-layer absorption OD [-];
++    * ``p_edges`` ``(nlayer+1,)`` [Pa] layer pressure edges, ASCENDING (index 0
++      = top / lowest pressure), aligned so ``aod_profile[..., j]`` occupies
++      ``[p_edges[j], p_edges[j+1]]``.
++
++    Raises ``ValueError`` if the file lacks ``ext_earth`` (caller treats as no
++    LW source and stays byte-identical to no volcanic LW aerosol).
++    """
++    ds = _open_forcing_dataset(path)
++    if "ext_earth" not in ds.data_vars:
++        ds.close()
++        raise ValueError(
++            f"No CMIP6 volcanic LW extinction 'ext_earth' in {path!r}.",
++        )
++    var = ds["ext_earth"]
++    ext = np.asarray(var.values, dtype=np.float64)  # [1/km]
++    dims = list(var.dims)
++
++    # B1: single-scattering albedo -> absorption fraction (1-omega) per band.
++    if "omega_earth" in ds.data_vars:
++        omega = np.clip(
++            np.asarray(ds["omega_earth"].values, dtype=np.float64), 0.0, 1.0,
++        )
++    else:
++        omega = np.zeros_like(ext)  # sulfate LW omega ~ 0 approximation
++    abs_ext = ext * (1.0 - omega)  # absorption extinction [1/km]
++
++    alt_name = next(
++        (v for v in ("altitude", "alt", "height", "lev") if v in ds), None,
++    )
++    if alt_name is None:
++        ds.close()
++        raise ValueError(f"No altitude coordinate in volcanic file {path!r}")
++    alt_km = np.asarray(ds[alt_name].values, dtype=np.float64)
++
++    if "lat" in ds:
++        lat = np.asarray(ds["lat"].values, dtype=np.float64)
++        lat_name = "lat"
++    elif "latitude" in ds:
++        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
++        lat_name = "latitude"
++    else:
++        ds.close()
++        raise ValueError(f"No 'lat'/'latitude' in volcanic file {path!r}")
++
++    if "time" in dims:
++        time_name = "time"
++        mid_days, first_date = _read_time_axis(ds)
++    elif "month" in dims:
++        time_name = "month"
++        nm = ext.shape[dims.index("month")]
++        mid_days = np.array([15.5 + 30.4375 * m for m in range(nm)])
++        first_date = None
++    else:
++        ds.close()
++        raise ValueError(f"No time/month dimension in volcanic file {path!r}")
++
++    # B3: Planck-emission-weighted collapse of the terrestrial-band axis.
++    band_name = next(
++        (d for d in dims
++         if d not in (time_name, lat_name, alt_name)),
++        None,
++    )
++    if band_name is not None:
++        band_axis = dims.index(band_name)
++        if "wl1_earth" in ds and "wl2_earth" in ds:
++            weights = _planck_band_weights(
++                np.asarray(ds["wl1_earth"].values),
++                np.asarray(ds["wl2_earth"].values),
++                _VOLC_LW_PLANCK_TEMP_K,
++            )
++        else:
++            weights = np.ones(abs_ext.shape[band_axis], dtype=np.float64)
++        # Weighted mean over bands (band axis -> gray).
++        abs_ext = np.tensordot(
++            weights, np.moveaxis(abs_ext, band_axis, 0), axes=(0, 0),
++        ) / weights.sum()
++        dims = [d for d in dims if d != band_name]
++    ds.close()
++
++    # Canonical (time, lat, altitude) order.
++    order = [dims.index(time_name), dims.index(lat_name), dims.index(alt_name)]
++    prof = np.transpose(abs_ext, order)  # (ntime, nlat, nalt) [1/km]
++
++    # Altitude layer edges (midpoints, outer half-steps) and thickness [km].
++    edges_km = np.empty(alt_km.size + 1, dtype=np.float64)
++    edges_km[1:-1] = 0.5 * (alt_km[:-1] + alt_km[1:])
++    edges_km[0] = alt_km[0] - 0.5 * (alt_km[1] - alt_km[0])
++    edges_km[-1] = alt_km[-1] + 0.5 * (alt_km[-1] - alt_km[-2])
++    dz_km = np.abs(np.diff(edges_km))  # (nalt,)
++
++    # Per-layer AOD [-] = absorption extinction [1/km] * dz [km].
++    aod_profile = prof * dz_km[None, None, :]
++    p_edges = _ussa1976_pressure(edges_km * 1000.0)  # [Pa]
++
++    # Return ASCENDING pressure (top first): altitude ascending -> pressure
++    # descending, so flip the layer axis and the edges together.
++    aod_profile = aod_profile[..., ::-1]
++    p_edges = p_edges[::-1]
++    return mid_days, first_date, lat, aod_profile, p_edges
+ 
+ 
+ @lru_cache(maxsize=16)
+@@ -1842,15 +2078,17 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
+ 
+ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
+                            lat_grid: jnp.ndarray | None = None):
+-    """Return the LONGWAVE volcanic aerosol optical depth at a sim day (gap #9).
++    """Return the LONGWAVE volcanic aerosol as a pressure-resolved profile.
+ 
+     Mirrors :func:`get_aerosol_at_time` but returns the volcanic
+-    stratospheric LW (terrestrial-IR) column absorption optical depth,
++    stratospheric LW (terrestrial-IR) ABSORPTION optical-depth profile,
+     loaded from the ``ext_earth`` band of the CMIP6
+-    ``bc_aeropt_cmip6_volc_*`` file.  There is no background LW aerosol
+-    climatology (only the volcanic stratospheric LW matters for the
+-    longwave budget), so the baseline is zero and the result is the
+-    volcanic LW AOD alone.
++    ``bc_aeropt_cmip6_volc_*`` file via
++    :func:`_load_volcanic_lw_absorption_profile` (extinction -> absorption via
++    ``1-omega``, Planck-weighted gray band collapse, and the file's native
++    altitude axis mapped to pressure).  There is no background LW aerosol
++    climatology, so the baseline is zero and the result is the volcanic LW
++    absorption alone.
+ 
+     Parameters
+     ----------
+@@ -1858,21 +2096,22 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
+     day : float
+         Day of year (fractional).
+     lat_grid : jax array or None
+-        If provided, interpolates LW AOD to model grid latitudes and
+-        returns a jax array of that shape.  Otherwise returns a dict with
+-        "lat"/"aod".
++        If provided, interpolates the profile to model grid latitudes.
+ 
+     Returns
+     -------
+     None
+-        If LW aerosol is disabled (``volcanic_lw_enabled`` False), or
+-        enabled with no ``volcanic_path``, or the file carries no
+-        ``ext_earth`` LW band.  Callers default a None to zeros, so the
+-        run stays byte-identical to no volcanic LW aerosol.
+-    jax array
+-        If ``lat_grid`` provided: per-latitude column LW AOD (>= 0).
++        If LW aerosol is disabled (``volcanic_lw_enabled`` False), or enabled
++        with no ``volcanic_path``, or the file carries no ``ext_earth`` LW
++        band.  Callers default a None to zeros, so the run stays
++        byte-identical to no volcanic LW aerosol.
++    tuple ``(aod_profile, p_edges)``
++        If ``lat_grid`` provided: ``aod_profile`` ``(ncol, nlayer)`` per-file-
++        layer absorption OD (>= 0) and ``p_edges`` ``(nlayer+1,)`` [Pa]
++        ascending layer pressure edges, ready for
++        :func:`legoesm.forcing.surface_utils.place_stratospheric_aod_profile_to_layers`.
+     dict
+-        Otherwise ``{"lat": ..., "aod": ...}``.
++        Otherwise ``{"lat": ..., "aod_profile": ..., "p_edges": ...}``.
+     """
+     # Default OFF: only the explicit LW switch + a real volcanic file with
+     # an ``ext_earth`` band produces nonzero LW aerosol.  Anything else
+@@ -1881,43 +2120,40 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
+         return None
+ 
+     try:
+-        mid_days_v, first_date_v, lat_v, data_v = (
+-            _load_volcanic_lw_cmip6_anchored(config.volcanic_path)
++        mid_days_v, first_date_v, lat_v, prof_v, p_edges = (
++            _load_volcanic_lw_absorption_profile(config.volcanic_path)
+         )
+     except ValueError:
+         # File has no LW (``ext_earth``) band — treat as "no LW source".
+         return None
+ 
++    # Interpolate the (ntime, nlat, nlayer) profile in time -> (nlat, nlayer).
+     if len(mid_days_v) > 12:
+-        file_day_v = _simday_to_file_day(
+-            day, config.start_year, first_date_v,
+-        )
+-        aod_v = (
+-            _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
+-            * config.volcanic_scale
+-        )
++        file_day_v = _simday_to_file_day(day, config.start_year, first_date_v)
++        prof_t = _interp_monthly_noncyclic(mid_days_v, prof_v, file_day_v)
+     else:
+-        mid_anchored_v, data_anchored_v = _cyclic_phase_anchor(
+-            mid_days_v, data_v, first_date_v,
+-        )
+-        aod_v = (
+-            _interp_monthly_cyclic(mid_anchored_v, data_anchored_v, day)
+-            * config.volcanic_scale
++        mid_anchored_v, prof_anchored_v = _cyclic_phase_anchor(
++            mid_days_v, prof_v, first_date_v,
+         )
++        prof_t = _interp_monthly_cyclic(mid_anchored_v, prof_anchored_v, day)
++    prof_t = prof_t * config.volcanic_scale  # (nlat, nlayer)
+ 
+     if lat_grid is not None:
+-        volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
+-        # Sum any trailing dims for multi-dimensional volcanic files,
+-        # mirroring the SW path (the band axis is already collapsed in
+-        # the loader, but guard defensively).
+-        while volc.ndim > lat_grid.ndim:
+-            volc = jnp.sum(volc, axis=-1)
+-        return jnp.clip(volc, 0.0, None)
+-
+-    aod_v_flat = aod_v
+-    while aod_v_flat.ndim > 1:
+-        aod_v_flat = np.sum(aod_v_flat, axis=-1)
+-    return {"lat": lat_v, "aod": np.clip(aod_v_flat, 0.0, None)}
++        # (nlat, nlayer) -> (*lat_grid.shape, nlayer); the driver hands a
++        # raveled column-latitude grid, so flatten leading dims to
++        # (ncol, nlayer).  The nlayer axis is the vertical PROFILE and is
++        # intentionally NOT summed away (unlike the gray SW/column path).
++        prof_col = _interp_zonal_to_grid(lat_v, prof_t, lat_grid)
++        prof_col = jnp.reshape(
++            jnp.clip(prof_col, 0.0, None), (-1, prof_t.shape[-1]),
++        )
++        return prof_col, jnp.asarray(p_edges)
++
++    return {
++        "lat": lat_v,
++        "aod_profile": np.clip(prof_t, 0.0, None),
++        "p_edges": np.asarray(p_edges),
++    }
+ 
+ 
+ # ==============================================================================
+diff --git a/packages/tools/legoesm/forcing/surface_utils.py b/packages/tools/legoesm/forcing/surface_utils.py
+index fa37c5766..bec6fb0ff 100644
+--- a/packages/tools/legoesm/forcing/surface_utils.py
++++ b/packages/tools/legoesm/forcing/surface_utils.py
+@@ -255,3 +255,82 @@ def distribute_column_aod_to_layers(
+     dp = jnp.clip(p_half_col[:, 1:] - p_half_col[:, :-1], 1.0e-12, None)
+     w = dp / jnp.sum(dp, axis=1, keepdims=True)
+     return jnp.clip(aod_col, 0.0, None)[:, None] * w
++
++
++def place_stratospheric_aod_profile_to_layers(
++    aod_profile: jnp.ndarray,
++    p_edges: jnp.ndarray,
++    p_half_col: jnp.ndarray,
++) -> jnp.ndarray:
++    """Conservatively remap a fixed-pressure-edge AOD profile onto model layers.
++
++    Volcanic stratospheric aerosol is supplied as a per-layer absorption
++    optical depth on the forcing file's OWN (altitude -> pressure) grid.  This
++    bins it onto the model's pressure layers by fractional pressure overlap,
++    so the aerosol lands at its true stratospheric pressure -- unlike
++    :func:`distribute_column_aod_to_layers`, which spreads a single column AOD
++    by full-column pressure mass and thus dumps ~90 % of a stratospheric layer
++    into the troposphere.
++
++    Method: the cumulative-OD curve is sampled at each model half level and the
++    per-layer OD is the difference of the cumulative at the layer's two edges.
++    The cumulative is interpolated in LOG-pressure, because the source OD is
++    ``ext*dz`` -- uniform in geometric height (~ log-pressure) within a source
++    layer, NOT uniform in pressure; a linear-pressure CDF would misallocate ~1 %
++    of a 0.5 km source layer's OD across a cutting model interface (Codex review
++    iter-1).  The remap is exact at source-layer edges and conserves the total
++    column OD that falls within the model's pressure range (OD above the model
++    top or below the surface edge is dropped -- it cannot be represented).
++
++    The op set (searchsorted / gather / clip / min / max) is piecewise-linear:
++    a.e.-differentiable in both ``aod_profile`` and ``p_half_col`` with
++    well-defined one-sided gradients (kinks at source/model edges), and
++    JIT/vmap-safe.
++
++    Sign/units: optical depth is >= 0 and additive; pressure [Pa].
++
++    Parameters
++    ----------
++    aod_profile : array, shape (ncol, nsrc)
++        Per-source-layer absorption optical depth [-] (>= 0).
++    p_edges : array, shape (nsrc+1,)
++        Source-layer pressure edges [Pa], ASCENDING (index 0 = top / lowest
++        pressure), aligned so ``aod_profile[:, j]`` occupies
++        ``[p_edges[j], p_edges[j+1]]``.
++    p_half_col : array, shape (ncol, nlev+1)
++        Model half-level pressures [Pa] (index 0 = top).
++
++    Returns
++    -------
++    aod_layers : array, shape (ncol, nlev)
++        Layer absorption optical depth [-].
++    """
++    pe = jnp.asarray(p_edges)                                   # (nsrc+1,)
++    aod = jnp.clip(jnp.asarray(aod_profile), 0.0, None)         # (ncol, nsrc)
++    # Cumulative OD from the top: cum[:, k] = OD in source layers 0..k-1, so
++    # cum aligns to the nsrc+1 source edges ``pe``.
++    cum = jnp.concatenate(
++        [jnp.zeros((aod.shape[0], 1), aod.dtype), jnp.cumsum(aod, axis=1)],
++        axis=1,
++    )                                                          # (ncol, nsrc+1)
++    # Interpolate the CDF in log-pressure (source OD is uniform in geometric
++    # height ~ log-pressure within a layer).
++    l_edges = jnp.log(jnp.clip(pe, 1.0e-12, None))             # (nsrc+1,)
++
++    ph = jnp.asarray(p_half_col)
++    p_lo = jnp.minimum(ph[:, :-1], ph[:, 1:])                  # (ncol, nlev)
++    p_hi = jnp.maximum(ph[:, :-1], ph[:, 1:])
++
++    def _cdf_at(p):
++        # Per-column log-pressure interp of the shared-edge cumulative at
++        # pressures ``p``; clamps to [0, total] outside [pe[0], pe[-1]].
++        lp = jnp.log(jnp.clip(p, 1.0e-12, None))
++        idx = jnp.clip(jnp.searchsorted(l_edges, lp) - 1, 0, pe.shape[0] - 2)
++        l0 = l_edges[idx]
++        l1 = l_edges[idx + 1]
++        frac = jnp.clip((lp - l0) / jnp.clip(l1 - l0, 1.0e-12, None), 0.0, 1.0)
++        c0 = jnp.take_along_axis(cum, idx, axis=1)
++        c1 = jnp.take_along_axis(cum, idx + 1, axis=1)
++        return c0 + frac * (c1 - c0)
++
++    return jnp.clip(_cdf_at(p_hi) - _cdf_at(p_lo), 0.0, None)
+diff --git a/tests/unit/test_volcanic_lw_aerosol.py b/tests/unit/test_volcanic_lw_aerosol.py
+index d04ffa108..aae83a589 100644
+--- a/tests/unit/test_volcanic_lw_aerosol.py
++++ b/tests/unit/test_volcanic_lw_aerosol.py
+@@ -1,11 +1,20 @@
+-"""Volcanic stratospheric LONGWAVE aerosol (#9): the new optional per-layer
+-``aerosol_lw_od`` is OFF by default (byte-identical no-op) and, when supplied,
+-materialises as a JIT-stable field and reaches the radiation backend.
+-
+-End-to-end "LW aerosol changes RRTMGP heating" is covered indirectly: the full
+-radiation-chain regression (test_physics_radiation / test_radiation_number_coupling
+-/ test_compiled_segments) passes with the new param threaded, and the backend-spy
+-test here pins that a supplied ``aerosol_lw_od`` is delivered to the solver call.
++"""Volcanic stratospheric LONGWAVE aerosol (#9) + the B1/B2/B3 correctness fix.
++
++The optional per-layer ``aerosol_lw_od`` is OFF by default (byte-identical
++no-op) and, when supplied, materialises as a JIT-stable (ncol, nlev) field.
++
++Fix coverage (Codex-reviewed):
++- ``TestUSStdAtmPressure`` / ``TestPlanckBandWeights`` -- the z->p (geopotential-
++  corrected) and Planck-weighted gray-collapse helpers.
++- ``TestLoaderAbsorptionScaling`` -- B1: loader feeds ext*(1-omega), not raw
++  extinction (synthetic-violation guard).
++- ``TestStratosphericPlacement`` -- B2: conservative log-pressure overlap remap
++  puts >80% of OD above 100 hPa vs <15% for the old pressure-mass helper.
++- ``TestPlacementDifferentiability`` -- grad matches FD, jit/vmap match eager.
++- ``TestExternalForcingGate`` -- the ``_ext_forcing`` gate includes LW aerosol.
++- ``TestLwAerosolOlrSign`` -- solve_columns: a stratospheric LW absorption bump
++  lowers OLR (correct warming sign) by a small amount.
++- ``TestRealFileEndToEnd`` -- the real 1979 file lands in the stratosphere.
+ """
+ 
+ import sys
+@@ -67,5 +76,399 @@ class TestPackForcingLwField(unittest.TestCase):
+         self.assertTrue(jnp.allclose(f.aerosol_lw_od, 0.1))
+ 
+ 
++# ---------------------------------------------------------------------------
++# Fix B1/B2/B3: extinction->absorption, stratospheric placement, band collapse
++# ---------------------------------------------------------------------------
++
++_REAL_VOLC_LW = Path(
++    "/pool/data/ICON/grids/public/mpim/common/aerosol_volcanic_cmip6/"
++    "bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979.nc"
++)
++
++
++def _make_synth_volc_lw(path, omega=0.3, ext_val=1.0e-3, nband=16,
++                        nlat=4, nalt=6, nmonth=12, alt_lo=15.0, alt_hi=25.0):
++    """Write a minimal CMIP6-shaped volcanic LW file for loader tests."""
++    import xarray as xr
++    alt = np.linspace(alt_lo, alt_hi, nalt)          # km, stratospheric
++    lat = np.linspace(-60.0, 60.0, nlat)
++    month = np.arange(1, nmonth + 1)
++    ev = np.asarray(ext_val, dtype=np.float64)
++    if ev.ndim == 0:                                 # scalar -> band-uniform
++        ext = np.full((nband, nlat, nalt, nmonth), float(ev))
++    else:                                            # per-band profile
++        ext = np.broadcast_to(
++            ev[:, None, None, None], (nband, nlat, nalt, nmonth)).copy()
++    om = np.full_like(ext, omega)
++    wl2 = np.linspace(250.0, 4.0, nband)             # upper wavelength [um]
++    wl1 = wl2 * 0.8
++    ds = xr.Dataset(
++        {
++            "ext_earth": (("terrestrial_bands", "latitude", "altitude",
++                           "month"), ext, {"units": "1/km"}),
++            "omega_earth": (("terrestrial_bands", "latitude", "altitude",
++                             "month"), om),
++            "wl1_earth": (("terrestrial_bands",), wl1),
++            "wl2_earth": (("terrestrial_bands",), wl2),
++        },
++        coords={"terrestrial_bands": np.arange(nband), "latitude": lat,
++                "altitude": alt, "month": month},
++    )
++    ds["altitude"].attrs["units"] = "km"
++    ds.to_netcdf(path)
++
++
++import functools
++
++
++@functools.lru_cache(maxsize=1)
++def _lw_solver():
++    """RRTMGP solver with default optics tables (built once for the OLR tests)."""
++    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
++    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
++    return RRTMGP.from_legoesm_config(RRTMGPConfig())
++
++
++@functools.lru_cache(maxsize=1)
++def _tropical_column(nlev=40, p_sfc=101300.0, sfc_T=300.0):
++    """Solve-columns kwargs for a single standard tropical column."""
++    sig = np.linspace(0.0, 1.0, nlev + 1) ** 1.1
++    p_half = 100.0 + (p_sfc - 100.0) * sig
++    p_full = 0.5 * (p_half[:-1] + p_half[1:])
++    z = -7000.0 * np.log(p_full / p_sfc)
++    t_iso = sfc_T - 6.5e-3 * (-7000.0 * np.log(1.0e4 / p_sfc))
++    temp = np.clip(np.where(p_full > 1.0e4, sfc_T - 6.5e-3 * z, t_iso),
++                   195.0, 305.0)
++    q = np.clip(0.018 * (p_full / p_sfc) ** 3, 1e-6, None)
++    return dict(
++        T=jnp.asarray(temp[None, :]), p_full=jnp.asarray(p_full[None, :]),
++        p_half=jnp.asarray(p_half[None, :]),
++        sfc_temperature=jnp.asarray([sfc_T]),
++        q_v=jnp.asarray(q[None, :]), cos_zenith=jnp.asarray([0.5]),
++    ), p_full
++
++
++def _olr(solver, kw, aer_lw=None):
++    out = solver.solve_columns(aerosol_absorption_optical_depth_lw=aer_lw, **kw)
++    return float(np.asarray(out.lw_flux_up)[0, 0])   # TOA upward LW [W/m^2]
++
++
++class TestUSStdAtmPressure(unittest.TestCase):
++    """US Std Atm 1976 z->p is monotone and matches published base pressures.
++
++    The helper takes GEOMETRIC altitude and converts to geopotential internally,
++    so the published GEOPOTENTIAL base pressures are recovered by passing the
++    geometric heights that map to the geopotential bases.
++    """
++
++    def test_known_values_and_monotonic(self):
++        from legoesm import constants
++        from legoesm.forcing.external import _ussa1976_pressure
++        r_e = constants.R_earth
++        h_bases = np.array([0.0, 11000.0, 20000.0, 32000.0])   # geopotential [m]
++        z_geom = r_e * h_bases / (r_e - h_bases)               # -> geometric [m]
++        p = _ussa1976_pressure(z_geom)
++        # Published US Std Atm 1976 base pressures [Pa].
++        for got, want in zip(p, (101325.0, 22632.0, 5474.9, 868.0)):
++            self.assertAlmostEqual(got, want, delta=0.01 * want)
++        zc = np.linspace(0.0, 40000.0, 50)
++        self.assertTrue(np.all(np.diff(_ussa1976_pressure(zc)) < 0.0))
++        # The geopotential correction is applied: at geometric 32 km the mapped
++        # pressure exceeds the uncorrected power-law value by ~2%.
++        self.assertGreater(float(_ussa1976_pressure(np.array([32000.0]))[0]),
++                           880.0)
++
++
++class TestPlanckBandWeights(unittest.TestCase):
++    """B3: the gray collapse weights emission-bearing LW bands, not a flat mean."""
++
++    def test_far_ir_dominates_near_ir_at_strat_temp(self):
++        from legoesm.forcing.external import _planck_band_weights
++        # Two bands: far-IR (15-50 um) and near-IR (3-4 um) at 220 K.
++        w = _planck_band_weights(np.array([15.0, 3.0]),
++                                 np.array([50.0, 4.0]), 220.0)
++        self.assertGreater(w[0], 100.0 * w[1])   # near-IR ~ 0 at 220 K
++        # A flat mean would give equal weights; Planck must not.
++        self.assertNotAlmostEqual(w[0] / w.sum(), 0.5, places=2)
++
++
++class TestLoaderAbsorptionScaling(unittest.TestCase):
++    """B1: the loader feeds ABSORPTION = ext*(1-omega), never raw extinction."""
++
++    def test_one_minus_omega_applied(self):
++        import tempfile
++        from legoesm.forcing.external import _load_volcanic_lw_absorption_profile
++        with tempfile.TemporaryDirectory() as d:
++            p0 = str(Path(d) / "omega0.nc")
++            p3 = str(Path(d) / "omega03.nc")
++            _make_synth_volc_lw(p0, omega=0.0)
++            _make_synth_volc_lw(p3, omega=0.3)
++            _, _, _, prof0, _ = _load_volcanic_lw_absorption_profile(p0)
++            _, _, _, prof3, _ = _load_volcanic_lw_absorption_profile(p3)
++            col0 = prof0.sum(axis=-1)          # extinction column (omega=0)
++            col3 = prof3.sum(axis=-1)          # absorption column (omega=0.3)
++            # Synthetic-violation guard: feeding raw extinction (dropping the
++            # (1-omega) scale) would make col3 == col0.  It must be 0.7*col0.
++            self.assertTrue(np.allclose(col3, 0.7 * col0, rtol=1e-6))
++            self.assertTrue(np.all(col3 < col0 - 1e-12))
++
++    def test_loader_uses_planck_not_flat_band_mean(self):
++        """B3 regression: with band-VARYING extinction the loader's gray column
++        must equal the Planck-weighted collapse, not the flat band mean.  Swaps
++        would be caught (band-uniform fixtures cannot distinguish them)."""
++        import tempfile
++        from legoesm.forcing.external import (
++            _load_volcanic_lw_absorption_profile, _planck_band_weights,
++            _VOLC_LW_PLANCK_TEMP_K,
++        )
++        nband = 16
++        ext = np.zeros(nband)
++        ext[0] = 2.0e-3                       # only far-IR band 0 carries OD
++        with tempfile.TemporaryDirectory() as d:
++            p = str(Path(d) / "bandvary.nc")
++            # nalt=6 over 15-25 km => 2 km spacing => 12 km total thickness.
++            _make_synth_volc_lw(p, omega=0.0, ext_val=ext, nband=nband,
++                                nalt=6, alt_lo=15.0, alt_hi=25.0)
++            _, _, _, prof, _ = _load_volcanic_lw_absorption_profile(p)
++        wl2 = np.linspace(250.0, 4.0, nband)  # must match the builder
++        wl1 = wl2 * 0.8
++        w = _planck_band_weights(wl1, wl2, _VOLC_LW_PLANCK_TEMP_K)
++        thickness_km = 12.0
++        col_planck = w[0] * 2.0e-3 / w.sum() * thickness_km
++        col_flat = (2.0e-3 / nband) * thickness_km
++        col = float(prof.sum(-1)[0, 0])       # (time0, lat0) column OD
++        self.assertAlmostEqual(col, col_planck, delta=1e-4 * col_planck)
++        self.assertGreater(abs(col - col_flat), 0.2 * col_flat)  # clearly != flat
++
++    def test_p_edges_ascending_and_aligned(self):
++        import tempfile
++        from legoesm.forcing.external import _load_volcanic_lw_absorption_profile
++        with tempfile.TemporaryDirectory() as d:
++            p = str(Path(d) / "v.nc")
++            _make_synth_volc_lw(p, omega=0.1, nalt=6)
++            _, _, _, prof, p_edges = _load_volcanic_lw_absorption_profile(p)
++            self.assertEqual(p_edges.shape[0], prof.shape[-1] + 1)
++            self.assertTrue(np.all(np.diff(p_edges) > 0.0))   # ascending Pa
++
++
++class TestStratosphericPlacement(unittest.TestCase):
++    """B2: profile is placed at its true pressure, conserving column OD."""
++
++    @staticmethod
++    def _standard_column(ncol=3, nlev=30, p_top=100.0, p_sfc=101325.0):
++        sig = np.linspace(0.0, 1.0, nlev + 1) ** 1.2
++        p_half = p_top + (p_sfc - p_top) * sig      # (nlev+1,), ascending
++        return jnp.tile(jnp.asarray(p_half)[None, :], (ncol, 1))
++
++    def test_mass_above_100hpa_and_conserved(self):
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        # Aerosol between 10 hPa (1000 Pa) and 90 hPa (9000 Pa): entirely
++        # stratospheric (above 100 hPa).
++        p_edges = jnp.asarray(np.linspace(1000.0, 9000.0, 7))
++        total = 0.01
++        aod_profile = jnp.full((3, 6), total / 6.0)
++        p_half = self._standard_column()
++        placed = place_stratospheric_aod_profile_to_layers(
++            aod_profile, p_edges, p_half,
++        )
++        # Conservation: the column spans the aerosol range fully.
++        self.assertTrue(np.allclose(np.asarray(placed.sum(axis=1)), total,
++                                    rtol=1e-6))
++        # >80% of OD mass sits above 100 hPa (p < 1e4 Pa).
++        p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
++        frac_strat = np.asarray(
++            (placed * (p_mid < 1.0e4)).sum(axis=1) / placed.sum(axis=1)
++        )
++        self.assertTrue(np.all(frac_strat > 0.80))
++
++    def test_log_pressure_within_layer_split(self):
++        """A model interface cutting a source layer at its LOG-pressure midpoint
++        splits the OD 50/50 (source OD uniform in geometric height ~ log-p).
++        A reverted LINEAR-pressure CDF would give [0.4142, 0.5858] and fail."""
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        p_edges = jnp.asarray([1000.0, 2000.0])          # one source layer
++        aod = jnp.asarray([[1.0]])
++        p_cut = float(np.sqrt(1000.0 * 2000.0))          # log-p midpoint
++        p_half = jnp.asarray([[1000.0, p_cut, 2000.0]])  # two model layers
++        placed = np.asarray(
++            place_stratospheric_aod_profile_to_layers(aod, p_edges, p_half)
++        )
++        self.assertTrue(np.allclose(placed[0], [0.5, 0.5], atol=1e-6),
++                        f"log-p split expected [0.5,0.5], got {placed[0]}")
++
++    def test_versus_pressure_mass_spreading(self):
++        """The OLD helper dumps the same column AOD mostly in the troposphere."""
++        from legoesm.forcing.surface_utils import (
++            distribute_column_aod_to_layers,
++        )
++        p_half = self._standard_column()
++        placed_old = distribute_column_aod_to_layers(
++            jnp.full((3,), 0.01), p_half,
++        )
++        p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
++        frac_strat_old = np.asarray(
++            (placed_old * (p_mid < 1.0e4)).sum(axis=1) / placed_old.sum(axis=1)
++        )
++        # Confirms the defect the new helper fixes: <15% stays stratospheric.
++        self.assertTrue(np.all(frac_strat_old < 0.15))
++
++
++class TestPlacementDifferentiability(unittest.TestCase):
++    """Placement is differentiable and JIT/vmap-consistent (LegoESM AD goal)."""
++
++    def _setup(self):
++        p_edges = jnp.asarray(np.linspace(1000.0, 9000.0, 7))
++        aod = jnp.asarray(np.linspace(0.001, 0.003, 6))[None, :]
++        p_half = TestStratosphericPlacement._standard_column(ncol=1, nlev=24)
++        return p_edges, aod, p_half
++
++    def test_grad_matches_finite_difference(self):
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        p_edges, aod, p_half = self._setup()
++
++        def scalar(ph):
++            placed = place_stratospheric_aod_profile_to_layers(aod, p_edges, ph)
++            # weight by layer index so gradient w.r.t. edges is non-trivial
++            wts = jnp.arange(placed.shape[1], dtype=placed.dtype)
++            return jnp.sum(placed * wts)
++
++        g = jax.grad(scalar)(p_half)
++        self.assertFalse(bool(jnp.any(jnp.isnan(g))))
++        # Centered FD on a mid interface (perturb one half-level).
++        eps = 1.0
++        k = 12
++        ph_p = p_half.at[0, k].add(eps)
++        ph_m = p_half.at[0, k].add(-eps)
++        fd = (scalar(ph_p) - scalar(ph_m)) / (2 * eps)
++        self.assertAlmostEqual(float(g[0, k]), float(fd), delta=1e-4)
++
++    def test_jit_and_vmap_match(self):
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        p_edges, aod, p_half = self._setup()
++        eager = place_stratospheric_aod_profile_to_layers(aod, p_edges, p_half)
++        jitted = jax.jit(place_stratospheric_aod_profile_to_layers)(
++            aod, p_edges, p_half,
++        )
++        self.assertTrue(np.allclose(np.asarray(eager), np.asarray(jitted)))
++        # vmap over an ensemble axis on the two per-column args.
++        aod_e = jnp.stack([aod, 2.0 * aod])
++        ph_e = jnp.stack([p_half, p_half])
++        vm = jax.vmap(
++            lambda a, ph: place_stratospheric_aod_profile_to_layers(
++                a, p_edges, ph),
++        )(aod_e, ph_e)
++        self.assertTrue(np.allclose(np.asarray(vm[0]), np.asarray(eager)))
++        self.assertTrue(np.allclose(np.asarray(vm[1]), 2.0 * np.asarray(eager)))
++
++
++@unittest.skipUnless(_REAL_VOLC_LW.exists(), "CMIP6 volcanic LW file absent")
++class TestRealFileEndToEnd(unittest.TestCase):
++    """End-to-end on the real 1979 file: the LW aerosol lands in the
++    stratosphere.  On a deep-TROPICAL column (100 hPa ~ tropopause) >80% of
++    the OD is above 100 hPa; at every latitude the OD-weighted centroid is
++    stratospheric (the extratropical aerosol tracks the lower tropopause, so a
++    fixed 100 hPa line -- a tropical proxy -- correctly lets some 30N OD sit
++    between 100-180 hPa, still above the local tropopause)."""
++
++    def _load(self, lats_deg):
++        from legoesm.forcing.external import (
++            AerosolConfig, get_aerosol_lw_at_time,
++        )
++        cfg = AerosolConfig(
++            volcanic_lw_enabled=True, volcanic_path=str(_REAL_VOLC_LW),
++            volcanic_scale=1.0,
++        )
++        out = get_aerosol_lw_at_time(
++            cfg, day=196.0, lat_grid=jnp.asarray(np.radians(lats_deg)),
++        )
++        self.assertIsNotNone(out)
++        return out
++
++    def test_tropical_column_above_100hpa(self):
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        prof_col, p_edges = self._load([0.0, 5.0, -5.0])
++        self.assertGreater(float(prof_col.sum()), 0.0)
++        p_half = TestStratosphericPlacement._standard_column(ncol=3, nlev=40)
++        placed = place_stratospheric_aod_profile_to_layers(
++            prof_col, p_edges, p_half,
++        )
++        p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
++        frac = np.asarray(
++            (placed * (p_mid < 1.0e4)).sum(axis=1) / placed.sum(axis=1)
++        )
++        self.assertTrue(np.all(frac > 0.80), f"tropical frac>100hPa={frac}")
++
++    def test_all_latitude_centroid_is_stratospheric(self):
++        prof_col, p_edges = self._load(np.linspace(-80.0, 80.0, 9))
++        pe = np.asarray(p_edges)
++        p_mid = 0.5 * (pe[:-1] + pe[1:])
++        prof = np.asarray(prof_col)
++        centroid = (prof * p_mid[None, :]).sum(1) / prof.sum(1)   # [Pa]
++        # Stratospheric centroid at every latitude (< 150 hPa).
++        self.assertTrue(np.all(centroid < 1.5e4), f"centroid[Pa]={centroid}")
++
++    def test_loader_to_solver_lowers_olr(self):
++        """Full chain: file -> get_aerosol_lw_at_time -> remap -> solve_columns.
++        The correctly-placed 1979 absorption lowers TOA OLR (warming) by a
++        small but non-zero amount (background year)."""
++        from legoesm.forcing.surface_utils import (
++            place_stratospheric_aod_profile_to_layers,
++        )
++        prof_col, p_edges = self._load([0.0])          # equatorial column
++        solver = _lw_solver()
++        kw, _ = _tropical_column()
++        placed = place_stratospheric_aod_profile_to_layers(
++            prof_col, p_edges, kw["p_half"],
++        ).astype(kw["T"].dtype)
++        olr_base = _olr(solver, kw)
++        olr_pert = _olr(solver, kw, placed)
++        self.assertLess(olr_pert, olr_base)            # correct warming sign
++        self.assertGreater(olr_base - olr_pert, 0.005)  # small but resolved
++
++
++class TestExternalForcingGate(unittest.TestCase):
++    """Regression: the _ext_forcing gate opens for a volcanic-LW-only run."""
++
++    def test_lw_only_activates_and_scheme_gated(self):
++        from legoesm.driver.model_driver import _external_forcing_active
++        # Only LW aerosol active (no ozone / SW aerosol / GHG / experiment).
++        self.assertTrue(
++            _external_forcing_active(True, False, False, True, False, False))
++        # No gas-radiation scheme => no forcing dict regardless.
++        self.assertFalse(
++            _external_forcing_active(False, False, False, True, False, False))
++        # Nothing active => off.
++        self.assertFalse(
++            _external_forcing_active(True, False, False, False, False, False))
++
++
++class TestLwAerosolOlrSign(unittest.TestCase):
++    """solve_columns: a stratospheric LW ABSORPTION bump lowers OLR (warming).
++
++    Pins the absorption-slot sign convention end-to-end -- the physics the B1
++    (ext->abs) fix relies on: an LW absorber aloft re-emits at a colder
++    temperature than it intercepts, so TOA OLR drops."""
++
++    def test_stratospheric_absorption_lowers_olr(self):
++        solver = _lw_solver()
++        kw, p_full = _tropical_column()
++        aer = np.where(p_full < 1.0e4, 0.02, 0.0)[None, :]
++        aer = jnp.asarray(aer).astype(kw["T"].dtype)
++        olr_base = _olr(solver, kw)
++        olr_pert = _olr(solver, kw, aer)
++        self.assertLess(olr_pert, olr_base)          # absorber aloft -> warming
++        self.assertGreater(olr_base - olr_pert, 0.1)  # non-trivial at OD 0.02
++
++
+ if __name__ == "__main__":
+     unittest.main()

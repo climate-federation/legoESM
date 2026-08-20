@@ -68,8 +68,12 @@ class TestCMORTables(unittest.TestCase):
         from legoesm.io.cmor_output import CMOR_TABLES
 
         aday = CMOR_TABLES["Aday"]
-        expected = {"tas", "pr", "psl", "rsut", "rlut"}
+        # ``rsut`` is deliberately absent: it is not a CMIP6 ``day``
+        # variable, it lives in ``CFday``.
+        expected = {"tas", "pr", "psl", "rlut"}
         self.assertTrue(expected.issubset(set(aday.keys())))
+        self.assertNotIn("rsut", aday)
+        self.assertIn("rsut", CMOR_TABLES["CFday"])
 
     def test_clearsky_variables_in_amon(self):
         """Amon table contains clear-sky radiation variables."""
@@ -184,7 +188,9 @@ class TestCFWriter(unittest.TestCase):
             self.assertEqual(ds["tas"].attrs["standard_name"], "air_temperature")
             self.assertEqual(ds["tas"].attrs["units"], "K")
             self.assertIn("Conventions", ds.attrs)
-            self.assertEqual(ds.attrs["Conventions"], "CF-1.8")
+            # CF-1.8 fails the CMIP6 CV Conventions regex; the value is
+            # now read from the vendored official table Header.
+            self.assertEqual(ds.attrs["Conventions"], "CF-1.7 CMIP-6.2")
             ds.close()
 
     def test_write_3d_field(self):
@@ -400,6 +406,8 @@ class TestDiagnosticCollector(unittest.TestCase):
             _run_wallclock_start=0.0,       # epoch → budget long exhausted
             _last_checkpoint_step=0,
             diagnostics=_Diag(),
+            _save_cmor_accumulator_sidecar=(
+                lambda day: calls.append("sidecar")),
             _output_dir="/tmp/ignore_fx_test",
             config=types.SimpleNamespace(
                 output=types.SimpleNamespace(
@@ -967,9 +975,15 @@ class TestTuningParameters(unittest.TestCase):
         from legoesm.tuning import TUNING_PARAMETERS
 
         categories = {p.category for p in TUNING_PARAMETERS.values()}
+        # "clouds" left this set 2026-07-26: its only two catalog entries
+        # (cloud_rh_ice_crit/sat) advertised a CloudConfig RH_i cirrus ramp
+        # that was never implemented (flag-reachability audit cause 3) and
+        # were deleted with their ExperimentConfig fields.  The REAL cloud
+        # tunables (cloud_rh_crit, ...) are wired via --config/--params, not
+        # this catalog.
         expected = {
             "dynamics", "radiation", "convection", "diffusion", "surface",
-            "turbulence", "gwd", "clouds",
+            "turbulence", "gwd",
         }
         self.assertEqual(expected, categories)
 
@@ -1138,12 +1152,12 @@ class TestCMIP6Compliance(unittest.TestCase):
         self.assertGreaterEqual(float(da.values.min()), -90.0)
         self.assertLessEqual(float(da.values.max()), 90.0)
 
-    def test_realm_for_table(self):
-        from legoesm.io.cmor_output import _realm_for_table
-        self.assertEqual(_realm_for_table("Amon"), "atmos")
-        self.assertEqual(_realm_for_table("Lmon"), "land")
-        self.assertEqual(_realm_for_table("Omon"), "ocean")
-        self.assertEqual(_realm_for_table("Aday"), "atmos")
+    def test_table_realm(self):
+        from legoesm.io.cmor_output import table_realm
+        self.assertEqual(table_realm("Amon"), "atmos")
+        self.assertEqual(table_realm("Lmon"), "land")
+        self.assertEqual(table_realm("Omon"), "ocean")
+        self.assertEqual(table_realm("Aday"), "atmos")
 
     def test_written_file_has_cmip6_required_globals(self):
         try:

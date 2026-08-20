@@ -1,0 +1,46 @@
+# sfno_full at the T63 ACE2-loss tier, with ACE2's OPTIMIZATION recipe.
+#
+# Why this file: the WB2 A/B bench scores classical (ace2/suite_curriculum_
+# most_long) and column_nn (ace2/suite_curriculum_v2) at the T63
+# aimip_era5.yaml base, but there was no sfno_full arm at that base — only
+# scale/suite_sfno_full.yaml, which sits on the T106 all-years base (a
+# GPU-week, and a different grid/data protocol, so its scorecard would be a
+# CONFOUND next to the other two). This suite puts sfno_full on the SAME T63
+# base so the three arms land on one comparable scorecard.
+#
+# Variant overlay is reused from this directory (scale/variant_sfno_full.yaml:
+# dt_sfno=21600 s, no dycore, no physics, curriculum neutralized) rather than
+# duplicated under ace2/.
+#
+# ACE2 optimization hyperparameters (Watt-Meyer et al. 2024, arXiv:2411.11268
+# Table 7) replace the AIMIP defaults, since ACE2 is the target this arm is
+# chasing:
+#   AdamW, weight decay 0.01, initial LR 1e-4, EMA decay 0.999.
+# Not matched (and why):
+#   * LR schedule "None" (constant): create_optimizer only offers
+#     warmup->cosine. Left as-is — over ~12 epochs the cosine tail is a much
+#     smaller effect than the data gap below.
+#   * embed_dim 384 / num_layers 8 (450M params): the overlay's 64/4 (~70M)
+#     is what fits an A100 at T63 alongside the spectral state; raising it is
+#     the next capacity step once the data tier moves.
+#   * Data: ACE2 trains on ERA5 1940-1995 + 2011-2019 + 2021-2022 (~24,000
+#     days, ~6,000 iterations/epoch x 120 epochs). This base has 20 train
+#     days. That ~1000x sample gap, not the optimizer, is the dominant
+#     reason this arm will not reach ACE2 skill; see
+#     config/aimip/scale/base_t106_allyears.yaml for the scaled tier.
+base: config/aimip/aimip_era5.yaml
+
+cfg_overrides:
+  loss_preset: ace2
+  loss: {}                  # REPLACE the base loss block wholesale
+  aimip_optimizer: adamw
+  aimip_lr: 1.0e-4
+  aimip_weight_decay: 0.01
+  aimip_ema_decay: 0.999
+  aimip_n_epochs: 120
+  aimip_patience: 20
+
+variants:
+  - sfno_full
+
+output_dir: results/aimip_ace2_sfno_full_t63

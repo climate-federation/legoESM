@@ -36,9 +36,12 @@ class ParamConstraint(NamedTuple):
 
 # Default trainable parameters (the ones already traced through build_segment_fn)
 # Bounds must match tuning.py validated ranges.
+# Gray radiation is NOT trained (user directive 2026-08-11): tau_equator /
+# tau_pole are gray optical depths and were dropped from this set on the same
+# day they were dropped from AIMIPClassicalParams. Gray still RUNS, at its
+# documented defaults. The radiative knobs a classical model trains are
+# RRTMGP's surface albedo + emissivity (see AIMIPClassicalParams).
 DEFAULT_TRAINABLE = [
-    ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
-    ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
     ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
     ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
@@ -51,10 +54,8 @@ DEFAULT_TRAINABLE = [
 # tau_equator/tau_pole only into the gray solver; the RRTMGP branch
 # explicitly discards them (physics_pipeline.py `del tau_equator,
 # tau_pole`), so under rrtmgp they would be dead degrees of freedom.
-_GRAY_RADIATION_TRAINABLE = [
-    ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
-    ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
-]
+# Emptied 2026-08-11 with DEFAULT_TRAINABLE above: gray is never trained.
+_GRAY_RADIATION_TRAINABLE: list = []
 
 # Surface-albedo parameters.  The blended (ice/ocean/land) albedo
 # reaches the radiative heating through BOTH solvers: RRTMGP consumes
@@ -238,7 +239,8 @@ class TrainablePhysicsParams(eqx.Module):
         Emits ``{legacy_flat_name: value}``. A spec-collected parameter that has
         no flat ``build_segment_fn`` alias (``scheme_key`` set, no legacy name)
         cannot be injected this way — use :meth:`to_overrides` +
-        ``param_collector.apply_param_overrides`` instead. Such a parameter raises
+        ``legoesm.core.param_overrides.apply_param_overrides`` instead. Such a
+        parameter raises
         ``ValueError`` here rather than being silently dropped."""
         values = self.as_dict()
         scheme_qualified = [c.name for c in self.constraints if c.scheme_key]
@@ -246,7 +248,8 @@ class TrainablePhysicsParams(eqx.Module):
             raise ValueError(
                 "to_segment_kwargs() cannot inject scheme-qualified parameters "
                 f"{scheme_qualified}; use to_overrides() with "
-                "param_collector.apply_param_overrides(). Only legacy flat "
+                "legoesm.core.param_overrides.apply_param_overrides(). Only legacy "
+                "flat "
                 "parameters (no scheme_key) are routable as segment kwargs."
             )
         return values
@@ -254,7 +257,8 @@ class TrainablePhysicsParams(eqx.Module):
     def to_overrides(self) -> dict[str, dict[str, jax.Array]]:
         """Return ``{scheme_key: {config_field: constrained_value}}`` for the
         spec-collected parameters, ready for
-        ``param_collector.apply_param_overrides(physics_config, overrides)`` to
+        ``legoesm.core.param_overrides.apply_param_overrides(physics_config,
+        overrides)`` to
         splice into the owning ``*Config`` NamedTuples inside the loss. Legacy
         flat parameters (no ``scheme_key``) are skipped (they use
         :meth:`to_segment_kwargs`)."""

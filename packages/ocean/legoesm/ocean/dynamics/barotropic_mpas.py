@@ -242,7 +242,11 @@ def barotropic_substeps_mpas(
     # weight ``tail_j/(n·w_total)`` (NOT a flat 1/n) so the discrete continuity
     # invariant ``div(Hu_avg) == (eta_old - eta_avg)/dt`` holds for both box and
     # cosine (the flat 1/n broke it — worst for cosine).
-    w_filter, w_total, w_transport = compute_filter_weights(
+    # ``n_loop`` (== 2*n_substeps - 1) is the length of the averaging window,
+    # which extends past t+dt so that the window is CENTRED on t+dt; the
+    # transport weights still close continuity over the physical
+    # dt = n_substeps*dt_s.  See compute_filter_weights.
+    w_filter, w_total, w_transport, n_loop = compute_filter_weights(
         n_substeps, eta.dtype, use_cosine=use_cosine_filter,
     )
 
@@ -295,6 +299,7 @@ def barotropic_substeps_mpas(
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
         eta_next = _clamp_redistribute(
             eta_next, eta_floor, mask, _area_cell,
+            n_iter=config.eta_floor_clamp_iters,
             owned_weight=_clamp_ow, force_global=_clamp_fg,
         )
 
@@ -394,6 +399,7 @@ def barotropic_substeps_mpas(
             ) * mask
             eta_next = _clamp_redistribute(
             eta_next, eta_floor, mask, _area_cell,
+            n_iter=config.eta_floor_clamp_iters,
             owned_weight=_clamp_ow, force_global=_clamp_fg,
         )
 
@@ -408,7 +414,7 @@ def barotropic_substeps_mpas(
 
     (eta_new, u_bar_new, Hu_sum_f, eta_sum_f, ubar_sum_f), _ = jax.lax.scan(
         _substep, (eta, u_bar, Hu_sum, eta_sum, ubar_sum),
-        (w_filter, w_transport), length=n_substeps,
+        (w_filter, w_transport), length=n_loop,
     )
 
     # Time-averaged barotropic fields.  ``w_transport`` already carries the full

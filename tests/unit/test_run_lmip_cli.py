@@ -7,6 +7,56 @@ import pytest
 from scripts.run.run_lmip import _parse_args, build_config_from_args, _get_pft_row
 
 
+def test_land_surface_scheme_dispatch():
+    """--land-surface-scheme selects the right surface_scheme config TYPE."""
+    from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+    # Default is SimpleSEB (byte-identical to no flag).
+    default = build_config_from_args(_parse_args(["--lat", "45.0"])).land
+    assert isinstance(default.surface_scheme, SimpleSEBConfig)
+
+    two = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--land-surface-scheme", "two_leaf"])).land
+    assert isinstance(two.surface_scheme, TwoLeafCanopyConfig)
+
+    clm = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--land-surface-scheme", "clm_ml"])).land
+    assert isinstance(clm.surface_scheme, CLMMLCanopyConfig)
+
+
+def test_clm_ml_subflags_flow_to_config():
+    """The CLM-ML sub-flags override the scheme config defaults."""
+    from legoesm.land.canopy.config import CLMMLCanopyConfig
+    base = CLMMLCanopyConfig()
+
+    cfg = build_config_from_args(_parse_args([
+        "--lat", "45.0", "--land-surface-scheme", "clm_ml",
+        "--clm-ml-pft", "13",
+        "--clm-ml-turbulence-scheme", "most",
+        "--clm-ml-dtime-target", "150.0",
+    ])).land.surface_scheme
+    assert cfg.pft_clm == 13
+    assert cfg.turbulence_scheme == "most"
+    assert cfg.dtime_ml_target_s == 150.0
+
+    # Sub-flags left off keep the scheme defaults.
+    unset = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--land-surface-scheme", "clm_ml"])
+    ).land.surface_scheme
+    assert unset.pft_clm == base.pft_clm
+    assert unset.turbulence_scheme == base.turbulence_scheme
+    assert unset.dtime_ml_target_s == base.dtime_ml_target_s
+
+
+def test_clm_ml_subflags_ignored_without_clm_ml():
+    """CLM-ML sub-flags on a non-clm_ml scheme don't change the (SEB) config."""
+    from legoesm.land.surface_scheme import SimpleSEBConfig
+    cfg = build_config_from_args(_parse_args([
+        "--lat", "45.0", "--clm-ml-pft", "13"])).land
+    assert isinstance(cfg.surface_scheme, SimpleSEBConfig)
+
+
 def test_pft_params_calibrated_is_default_and_matches_bake():
     """LMIP defaults to the ERA5-calibrated MULTILAYER land params shared with AMIP/CMIP
     (per-PFT + snow albedo); --pft-params raw reproduces the untuned CLM5 table."""
@@ -209,3 +259,22 @@ def test_example_params_file_loads_and_applies():
     cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
     out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_lmip")
     assert out.land.Cd_land == 3.0e-3
+
+
+def test_carbon_ic_flag_round_trips():
+    """--carbon-ic reaches args; it defaults to "" (off, byte-identical)."""
+    assert _parse_args(["--lat", "0.0"]).carbon_ic == ""
+    args = _parse_args(["--lat", "0.0", "--carbon-ic", "/tmp/global_carbon_ic.npz"])
+    assert args.carbon_ic == "/tmp/global_carbon_ic.npz"
+
+
+def test_carbon_ic_config_yaml_round_trips_to_args():
+    """The committed config/lmip/lmip_carbon_ic.yaml is a valid LMIP config and
+    carries the seed keys (a config file whose keys are not argparse dests would
+    raise at load)."""
+    p = _lmip_example_config().parent / "lmip_carbon_ic.yaml"
+    args = _parse_args(["--config", str(p)])
+    assert args.carbon_scheme == "differland"
+    assert args.carbon_ic.endswith("global_carbon_ic.npz")
+    # A seeded config must still build a usable land config.
+    assert build_config_from_args(args).land is not None

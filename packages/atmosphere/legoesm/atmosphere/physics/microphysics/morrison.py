@@ -47,6 +47,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -235,6 +236,9 @@ def morrison_microphysics(
     # subsaturated clear air.  See _warm_rain.saturation_adjustment.
     condensation, q_sat = saturation_adjustment(
         T, q_v, p_full, dt, sharpness, q_c=q_c,
+        hard_adjust=config.hard_saturation_adjustment,
+        hard_threshold=config.hard_sat_adjust_threshold,
+        hard_max_heating_K=config.hard_sat_max_heating_K,
     )
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
@@ -335,6 +339,14 @@ def morrison_microphysics(
     # Target number kc2 = min(N_i0·exp(cooper_a·(T_f−T)), N_i_nuc_max)/ρ
     # (canonical Cooper 0.005 L⁻¹ = N_i0=5 m⁻³ base; cap 500 L⁻¹).
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    # DEPOSITION target only. IFS/SAM homogeneous-freezing allowance: pristine
+    # air below 235 K may hold ice supersaturation up to rh_homo (gSAM
+    # cloud.f90), withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor). The NUCLEATION gates below
+    # (rh_ice, s_hom) keep using plain q_sat_i -- raising their denominator
+    # would suppress the crystal formation the allowance is about.
+    q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
+        T, q_i, enabled=config.homogeneous_ice_supersaturation,
+    )
     N_i_target = jnp.minimum(
         config.N_i0 * jnp.exp(
             jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)
@@ -409,8 +421,19 @@ def morrison_microphysics(
                 config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
         )
         n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, _RHO_FLOOR)  # per-mass
+        # Top up to n_hom_target counting the COOPER crystals nucleated in this
+        # SAME step (dN_i_nuc*dt), not just the pre-existing N_i.  Cooper's
+        # ``gate_ice`` opens at RH_ice >= 1.08, which is ALWAYS satisfied when the
+        # homogeneous gate (RH_ice >= S_hom ~ 1.47) is open, so both sources fire
+        # together: subtracting only N_i summed the two targets and landed N_i at
+        # ~1.5x hom_ice_nuc_N (measured 4.419e6 = 2.948e6 + 1.474e6 /kg at
+        # 228 K/222 hPa).  Same "count what is already there" logic as Cooper's
+        # own N_frozen subtraction at :372-376.
         dN_i_hom = (
-            jnp.clip(n_hom_target - jnp.clip(N_i, 0.0), 0.0)
+            jnp.clip(
+                n_hom_target - jnp.clip(N_i, 0.0) - dN_i_nuc * jnp.clip(dt, 1.0),
+                0.0,
+            )
             / jnp.clip(dt, 1.0) * hom_gate
         )
         dq_i_hom = dN_i_hom * mi0
@@ -467,6 +490,11 @@ def morrison_microphysics(
         # (q_v − q_sat_i) < 0 ⇒ SUBLIMATION (negative). Tuned by the
         # dimensionless ``ice_deposition_efficiency``.
         dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXPONENT) / jnp.clip(p_full, 1.0)
+        # Clausius-Clapeyron on the PLAIN ice curve: ABI is the psychrometric
+        # correction for latent heating during deposition, a property of the
+        # saturation curve itself. The rh_homo allowance shifts the TARGET the
+        # vapour relaxes toward, not dq_sat/dT, and gSAM's M2005 likewise builds
+        # ABI from the unscaled qvi (module_mp_graupel.f90).
         dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
         abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
         epsi = (
@@ -477,7 +505,7 @@ def morrison_microphysics(
         )
         dep_raw = (
             config.ice_deposition_efficiency * epsi
-            * (q_v - q_sat_i) / abi
+            * (q_v - q_sat_i_dep) / abi
         )
         # DEPOSITION (positive) + SUBLIMATION (negative) are BOTH governed
         # by ice supersaturation + existing ice, NOT Cooper activation
@@ -504,6 +532,21 @@ def morrison_microphysics(
             jnp.minimum(dep_raw, 0.0),
             -jnp.clip(q_i, 0.0) / jnp.clip(dt, 1.0),
         )
+        if config.homogeneous_ice_nucleation:
+            # SYMMETRIC partner of the dep_pos cap above (ON-path only => OFF
+            # graph unchanged).  Sublimation physically halts at ice saturation
+            # just as deposition does, so it cannot exceed the available vapour
+            # DEFICIT (q_sat_i - q_v)/dt.  Without this the cap is one-sided and
+            # the boosted-EPSI stiff regime becomes a 2-step limit cycle:
+            # deposit the whole excess -> strongly ice-subsaturated -> sublimate
+            # the fresh ice straight back (measured RH_ice 2.88 -> 0.27 -> 2.22
+            # -> 0.61 ... at 228 K, dt=240 s), a spurious +/-1 K/step latent-
+            # heating sawtooth.  The q_i donor clamp above bounds the OTHER side
+            # (cannot sublimate more ice than exists); both bounds are needed.
+            subl_neg = jnp.maximum(
+                subl_neg,
+                -jnp.maximum(q_sat_i - q_v, 0.0) / jnp.clip(dt, 1.0),
+            )
         dq_i_dep = dep_pos + subl_neg
         # PRCI: ice→snow autoconversion — depositional growth of the cloud-ice
         # PSD across the snow-size threshold DCS (module_mp_graupel.f90:
@@ -874,10 +917,25 @@ def morrison_microphysics(
         homo_target_N = jnp.minimum(
             jnp.clip(N_c_eff, 0.0), config.N_i_nuc_max
         ) / jnp.clip(rho, _RHO_FLOOR)
+        # Count the crystals nucleated THIS step against the same ceiling.  In
+        # cold cloudy air (T < homogeneous_freeze_T = 233 K with q_c > 0, so
+        # RH_liq ~ 1 => RH_ice ~ 1.54 > S_hom(228 K) = 1.47) droplet freezing
+        # and cirrus nucleation BOTH fire, and both relaxed toward their target
+        # from the OLD N_i, stacking to ~1.5x the intended ice-number ceiling
+        # (same double-count class as the Cooper/homogeneous one fixed at :414).
+        # ``dN_i_nuc`` here already carries Cooper + homogeneous (folded at
+        # :587).  ON-path only so the default graph is byte-identical; the same
+        # correction is warranted for Cooper alone on the default path but that
+        # is a compatibility-sensitive change for in-flight runs, deferred.
+        if config.homogeneous_ice_nucleation:
+            _homo_deficit = jnp.clip(
+                homo_target_N - jnp.clip(N_i, 0.0)
+                - dN_i_nuc * jnp.clip(dt, 1.0), 0.0)
+        else:
+            _homo_deficit = jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
         homo_freeze_N = jnp.where(
             jnp.clip(q_c, 0.0) > 1.0e-14,
-            homo_frac * jnp.clip(homo_target_N - jnp.clip(N_i, 0.0), 0.0)
-            / jnp.maximum(dt, 1.0e-10),
+            homo_frac * _homo_deficit / jnp.maximum(dt, 1.0e-10),
             0.0,
         )
     else:
@@ -956,6 +1014,36 @@ def morrison_microphysics(
             q_v, q_g, q_sat_i, T, p_full, rho, config, dt=dt, N_g=N_g_arg)
     else:
         prdg = jnp.zeros_like(jnp.clip(q_g, 0.0))
+    if config.homogeneous_ice_nucleation:
+        # === JOINT ICE-PHASE DEPOSITION BOUND === (ON-path only => the OFF
+        # operation graph is unchanged.)
+        # Cloud-ice deposition, snow PRDS and graupel PRDG all deposit vapour
+        # onto ICE and all relax toward the SAME equilibrium q_sat_i, so their
+        # SUM cannot exceed the available ice supersaturation in one explicit
+        # step.  The per-branch cap at :502 bounds only cloud ice; with
+        # pre-existing snow/graupel the parallel sinks push the total past it
+        # (measured 228 K/222 hPa, dt=240 s, q_g = 1 g/kg: one step took
+        # RH_ice 2.88 -> 0.52, a 48 % undershoot below ice saturation that the
+        # next step partly sublimated back).  Liquid ``condensation`` is
+        # deliberately EXCLUDED: it targets the LIQUID curve q_sat_l > q_sat_i,
+        # so it is a physically distinct equilibrium, not part of this budget.
+        # This is the ice-phase analogue of the q_c / q_i / q_v donor clamps and
+        # uses the same AD-safe helper.
+        # SCOPE (do not overstate): this is a FIXED-TEMPERATURE limiter on those
+        # THREE deposition terms, NOT a guarantee that the step ends at
+        # RH_ice >= 1.  The MI0 nucleation seed mass is a separate sink, liquid
+        # condensation relaxes to a DIFFERENT curve, and the L_s release moves
+        # q_sat_i itself (+1.24 K / +15.7 % q_sat_i in the q_g = 1 g/kg case).
+        _ice_dep_total = (jnp.maximum(dq_i_dep, 0.0) + jnp.maximum(prds, 0.0)
+                          + jnp.maximum(prdg, 0.0))
+        _ice_dep_scale = donor_clamp_scale(
+            jnp.maximum(q_v - q_sat_i, 0.0), _ice_dep_total, dt)
+        # Scale ONLY the positive (deposition) branches; the negative
+        # (sublimation) branches are condensate-limited, not vapour-limited,
+        # and cloud-ice sublimation already carries its own symmetric bound.
+        dq_i_dep = jnp.where(dq_i_dep > 0.0, dq_i_dep * _ice_dep_scale, dq_i_dep)
+        prds = jnp.where(prds > 0.0, prds * _ice_dep_scale, prds)
+        prdg = jnp.where(prdg > 0.0, prdg * _ice_dep_scale, prdg)
     cond_pos = jnp.maximum(condensation, 0.0)
     # Nucleation mass source dq_i_nuc also consumes vapor (deposition onto
     # new crystals), so include it among the positive vapor sinks.
@@ -1164,8 +1252,33 @@ def morrison_microphysics(
     rho_eff = jnp.maximum(rho, _RHO_FLOOR)
     sed_N_r = rho_eff * sedimentation_tendency(
         jnp.clip(N_r, 0.0) / rho_eff, rho_eff, V_n_r, dz, dt=dt)
+    # Ice-NUMBER sinks sharing this step with number sedimentation — melt,
+    # sublimation (both mass-proportional; melt_ice / dq_i_dep are FINAL
+    # donor-clamped values here) and the ice->snow autoconversion number
+    # transfer.  Computed BEFORE the sedimentation call so their sum is
+    # RESERVED via extra_sink: without the joint reservation, sedimentation
+    # could remove all N_i on top of these sinks, the non-negativity floor
+    # would clamp, and the post-step LAMI lower bound would then RECREATE
+    # number to match surviving q_i — an artificial ice-number source with
+    # no phase-transfer counterpart (codex 2026-07-28 round 2).
+    _qi_floor = jnp.clip(q_i, 1.0e-15)
+    _ni_pos = jnp.clip(N_i, 0.0)
+    dN_i_melt = melt_ice * _ni_pos / _qi_floor
+    dN_i_subl = jnp.maximum(-dq_i_dep, 0.0) * _ni_pos / _qi_floor
+    if config.ice_to_snow_scheme in ("m2005_autoconv", "mg_ferrier"):
+        _cons22 = (
+            jnp.pi * config.rho_cloud_ice
+            * config.ice_snow_d_auto ** 3 / 6.0
+        )
+        dN_i_autoconv = jnp.minimum(
+            aggregation / _cons22,
+            _ni_pos / jnp.clip(dt, 1.0),
+        )
+    else:
+        dN_i_autoconv = aggregation * _ni_pos / _qi_floor
     sed_N_i = sedimentation_tendency(
-        jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt)
+        jnp.clip(N_i, 0.0), rho, V_n_i, dz, dt=dt,
+        extra_sink=dN_i_melt + dN_i_subl + dN_i_autoconv)
     if snow_double_moment:
         # N_s is per-mass ⇒ same flux form as q (UNS number-weighted speed).
         sed_N_s = sedimentation_tendency(
@@ -1281,6 +1394,11 @@ def morrison_microphysics(
     # simply vanished: rain in melting layers under-counted drops -> too-large
     # mean size -> too-fast fallout / too-little evaporation.
     melt_N_to_rain = jnp.zeros_like(q_r)
+    # NMLTR from cloud ice: melted crystals become rain drops (the Morrison
+    # reference transfers this number; snow/graupel below already did — the
+    # cloud-ice channel was missing, codex 2026-07-28).  dN_i_melt is
+    # per-mass; *rho converts to the per-volume rain number.
+    melt_N_to_rain = melt_N_to_rain + dN_i_melt * rho
     if snow_double_moment:
         dN_s_melt = melt_snow * jnp.clip(N_s, 0.0) / jnp.clip(q_s, 1e-15)
         melt_N_to_rain = melt_N_to_rain + dN_s_melt * rho
@@ -1295,25 +1413,17 @@ def morrison_microphysics(
     # π·ρ_ci·DCS³/6), clamped to N_i/dt (codex iter-20 B) — NOT the mean-mass
     # rate, which would over-remove number. The heuristic scheme keeps the
     # legacy mean-mass form (clip(q_i,1e-15) floor preserves the AD path).
-    if config.ice_to_snow_scheme in ("m2005_autoconv", "mg_ferrier"):
-        # DCS-sized number removal. For SAM PRCI this is exact; for the MG
-        # Ferrier prci the converted-tail mean mass → m_DCS in the small-ice
-        # (LAMI·DCS ≫ 1) limit, so cons22 is the faithful per-crystal mass.
-        cons22 = (
-            jnp.pi * config.rho_cloud_ice
-            * config.ice_snow_d_auto ** 3 / 6.0
-        )
-        dN_i_autoconv = jnp.minimum(
-            aggregation / cons22,
-            jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0),
-        )
-    else:
-        dN_i_autoconv = (
-            aggregation * jnp.clip(N_i, 0.0) / jnp.clip(q_i, 1e-15)
-        )
     # +homo_freeze_N: cloud droplets that homogeneously freeze become ice
     # crystals (SAM NI3D += NC3D).
-    dN_i_dt = dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+    #
+    # Number leaves WITH the mass (SAM: melting/sublimation deplete NI3D
+    # alongside QI3D).  Without these sinks, sedimented crystals melt or
+    # sublimate their MASS away while their NUMBER accumulates forever —
+    # measured as century5's residual Ni^max growth engine (argmax at
+    # 277 K, surface level: +4 C "ice number" with no melting sink,
+    # 2026-07-28; the same surface pile ended century3 at N_i=1e193).
+    dN_i_dt = (dN_i_nuc - dN_i_autoconv + homo_freeze_N + sed_N_i
+               - dN_i_melt - dN_i_subl)
 
     # === Non-negativity floor on the cloud/rain/ice NUMBER tendencies ===
     # Each individual number sink above is bounded (evap/riming ∝ N/dt,
@@ -1329,6 +1439,124 @@ def morrison_microphysics(
     dN_c_dt = jnp.maximum(dN_c_dt, -jnp.clip(N_c, 0.0) / jnp.clip(dt, 1.0))
     dN_r_dt = jnp.maximum(dN_r_dt, -jnp.clip(N_r, 0.0) / jnp.clip(dt, 1.0))
     dN_i_dt = jnp.maximum(dN_i_dt, -jnp.clip(N_i, 0.0) / jnp.clip(dt, 1.0))
+
+    # SAM-style N_r consistency CEILING (the LAMMAXR side of module_mp_graupel
+    # .f90's in-place "adjust var check" — the rain analog of the N_i/N_s/N_g
+    # limiters below; rain was the ONE two-moment species missing a prognostic
+    # number repair): cap the POST-STEP rain number so LAMR cannot exceed
+    # lamr_max w.r.t. the POST-STEP mass, and CLEAR orphan number below
+    # QSMALL.  N_r is per-VOLUME [1/m^3] (HydrometeorState conventions), so
+    # the PSD bound carries the rho*q_r factor of the LAMR slope used by the
+    # fall-speed/evaporation/Bigg kernels above
+    # (lamr = (pi*rho_w*N_r/(rho*q_r))^(1/3)):
+    #   N_r_hi = lamr_max^3 * rho * q_r_new / (pi*rho_w).
+    # Forensics (2026-08-04, cldF_fsd cell 9576, diagnosis_cell9576.md):
+    # without this ceiling the transport-side naive positivity clip inflated
+    # N_r to 1e15-1e25 /m^3 (2000+ cells above 1e8 by day 465), pinning LAMR
+    # at lamr_max => sub-drizzle V_t_r (~0.4 m/s) => rain could not
+    # precipitate; ~55 kg/m^2 of water pooled in one lowest-layer cell and
+    # locked into a period-2 graupel<->rain melt/freeze flip-flop
+    # (+-115 K/step) whose Bigg freeze removes mass 4.2e6x faster
+    # (fractionally) than number (the orphan-number ratchet), ending in the
+    # day-540 NaN.
+    # DELIBERATELY CEILING-ONLY: the SAM check also RAISES N_r to the
+    # lamr_min (big-drop) floor, but on the failing campaign state 66% of
+    # cell-levels sit BELOW the window (measured, _probe_cell9576_i_healthy),
+    # so the floor would broadly perturb warm-rain number dynamics
+    # (self-collection, NSUBR) far outside this defect — it needs its own
+    # validated change.  The ceiling alone removes the death mechanism.
+    # The jnp.where keeps the ORIGINAL dN_r_dt BITWISE wherever the ceiling
+    # and the orphan clearing are no-ops, so a cell at-or-below the window
+    # with q_r above QSMALL is exactly unchanged — EXCEPT within the fp
+    # margin band described below: a post-step number within
+    # 4*eps*max(N_r, ceiling) of the ceiling is now clipped (and its rate
+    # recomputed) where it previously passed through.
+    q_r_new = jnp.maximum(jnp.clip(q_r, 0.0) + dq_r_dt * dt, 0.0)
+    _cr_psd = jnp.pi * constants.rho_water
+    n_r_hi = config.lamr_max ** 3 * rho * q_r_new / _cr_psd
+    n_r_post = jnp.clip(N_r, 0.0) + dN_r_dt * dt
+    # AIM 4*eps BELOW THE CEILING, RELATIVE TO max(N_r, ceiling) (codex
+    # adversarial review, 2026-08-04).  "4*eps of the SCALE", not "4 ulp":
+    # eps*S is 1-2 ulp(S) depending on where S sits in its binade, so this is
+    # 4-8 ulp of the scale, and MORE than that in units of ulp(ceiling)
+    # whenever N_r exceeds the ceiling — which is exactly the case it exists
+    # to cover.
+    # The cap is applied here to a NUMBER, but it leaves this routine as a
+    # RATE and every caller reconstructs N_r + dt*dN_r_dt then floors at 0
+    # (compiled_segments.py:1259 and :2097, model_driver.py:948).  Collapsing
+    # N_r ~ 1e23 to ~7e7 in ONE step is a catastrophic cancellation:
+    # fl(dN_r_dt*dt) carries an absolute error of ~ulp(N_r), so a target
+    # placed exactly AT the ceiling reconstructs ABOVE it (measured without
+    # this margin: 1.0036x at N_r=1e22, 1.18x at 1e23, 1.89x at 1e24).
+    # This is NOT cosmetic: N_r is consumed UNCLIPPED by number-linear
+    # kernels on the NEXT call — SB2001 self-collection (_warm_rain.py:1064)
+    # and Bigg freezing number/mass (_warm_rain.py:1111-1112) — so a residual
+    # overshoot scales those rates directly and is NOT absorbed by the
+    # jnp.clip(lamr, lamr_min, lamr_max) that protects the fall speed.
+    # 4 ulp is the right size and is dt-INDEPENDENT: every error term in the
+    # round-trip scales as eps*S where S = max(N_r, ceiling) — fl of the
+    # quotient contributes eps*|target-N_r|/dt, which the caller's *dt turns
+    # back into eps*S — so dt cancels and ~3 eps*S is the bound.  (An FMA in
+    # the caller rounds once instead of twice, so it can only help.)
+    # THE RESIDUAL LIMIT IS A LATTICE LIMIT, NOT A MARGIN FAILURE: once
+    # ulp(N_r) exceeds the ceiling itself, NO target is representable and the
+    # reconstruction cannot land below it.  That crossover is
+    # N_r > ceiling/eps, so it moves with the ceiling (i.e. with q_r and rho),
+    # it is not a fixed N_r.  MEASURED (60 random mantissas per binade,
+    # scripts/tmp/_probe_mantissa.py, and a dt sweep in _probe_dt.py): with
+    # q_r = 1 g/kg the caller-stored N_r is at or below the ceiling for every
+    # mantissa up to 2^78 ~ 4.6e23 at dt = 75/150 s and to well beyond at the
+    # production dt = 240 s (worst ratio 0.39); at dt = 30 s the smaller
+    # ceiling pulls the crossover down and 2^78 already shows 1.21.  Above
+    # the crossover the residual doubles per binade.  Fixing THAT needs a
+    # post-update cap applied by the state updaters (a caller-side change),
+    # deliberately not in this PR — and it is unreachable in a run where this
+    # ceiling has been active from the start, since it takes the ratchet this
+    # very code removes to reach N_r ~ 1e23 (campaign's observed max 2.25e23).
+    # Cost to healthy cells: a cell is newly clipped only if its post-step
+    # number lies within 4*eps*max(N_r, ceiling) of the ceiling.  That is
+    # 4*eps ~ 8.9e-16 RELATIVE to the ceiling while N_r <= ceiling — i.e. for
+    # every healthy cell.  For N_r >> ceiling the band widens in proportion
+    # to N_r/ceiling and can swallow the ceiling entirely (the target then
+    # floors at 0), but that is precisely the pathological state the ceiling
+    # exists to collapse, not a cell whose number was already consistent.
+    # Locked by test_ceiling_holds_across_dynamic_range.
+    _n_scale = jnp.maximum(jnp.clip(N_r, 0.0), n_r_hi)
+    _n_margin = 4.0 * jnp.finfo(jnp.result_type(n_r_post)).eps * _n_scale
+    # jnp.where keeps an INFINITE ceiling (q_r already +inf) a PASS-THROUGH:
+    # inf - inf would be NaN, so subtracting the margin unguarded would turn
+    # a state the un-margined code merely declines to touch into a fresh NaN.
+    # Scope, precisely: this covers +inf ONLY.  A NaN ceiling still
+    # propagates NaN — but so did the un-margined jnp.minimum(n_r_post, NaN),
+    # so that is pre-existing behaviour and not a regression this margin
+    # introduces.  DEFENSIVE and deliberately untested: q_r = inf has already
+    # destroyed the column through every other term, so a unit test driving
+    # it would assert on NaNs from unrelated kernels, and a test that instead
+    # re-implemented this arithmetic would pass with the guard deleted and
+    # prove nothing.
+    _n_cap = jnp.maximum(
+        n_r_hi - jnp.where(jnp.isfinite(n_r_hi), _n_margin, 0.0), 0.0)
+    n_r_new = jnp.minimum(n_r_post, _n_cap)
+    n_r_new = jnp.where(q_r_new > 1.0e-14, n_r_new, 0.0)
+    dN_r_dt = jnp.where(
+        n_r_new == n_r_post, dN_r_dt,
+        (n_r_new - jnp.clip(N_r, 0.0)) / jnp.maximum(dt, 1.0e-10))
+
+    # SAM N_i consistency limiter (mirrors the N_s pattern below): bound the
+    # POST-STEP number so LAMI stays in [lami_min, lami_max] w.r.t. the
+    # POST-STEP mass, and CLEAR the number entirely below QSMALL — orphan
+    # number (q_i ~ 0, N_i > 0) is what accumulated into the century3/5
+    # surface pile (N_i = 1e193 by day 803).  Applied AFTER every physical
+    # number tendency (in-place SAM reset semantics: adjusting the OLD state
+    # alternated 0 <-> lami_min across steps, and a q_i floor in the lower
+    # bound created number in CLEAR AIR — both codex 2026-07-28 round 1).
+    q_i_new = jnp.maximum(jnp.clip(q_i, 0.0) + dq_i_dt * dt, 0.0)
+    _ci_psd = jnp.pi * config.rho_cloud_ice
+    n_i_hi = config.lami_max ** 3 * q_i_new / _ci_psd
+    n_i_lo = config.lami_min ** 3 * q_i_new / _ci_psd
+    n_i_new = jnp.clip(jnp.clip(N_i, 0.0) + dN_i_dt * dt, n_i_lo, n_i_hi)
+    n_i_new = jnp.where(q_i_new > 1.0e-14, n_i_new, 0.0)
+    dN_i_dt = (n_i_new - jnp.clip(N_i, 0.0)) / jnp.maximum(dt, 1.0e-10)
 
     # Snow NUMBER budget (double-moment snow). Number is CONSERVED across the
     # phase changes: the ice→snow autoconversion that removes dN_i_autoconv

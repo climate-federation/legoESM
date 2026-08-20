@@ -456,9 +456,15 @@ def test_unknown_literal_raises():
 
 
 def test_explicit_ab2_requires_ab2_outer():
+    # "nemo_mlf" joined the stable-rotation set (P2, nemo_mlf_step_
+    # transcription_spec.md §4): it is the SAME leap-frog-family composition
+    # as "leapfrog" (neutral |G|=1, computational mode damped by the same
+    # Robert-Asselin filter). forward_euler is STILL rejected -- only the
+    # message's allowed-set listing grew.
     with pytest.raises(
             ValueError,
-            match=r'requires outer_integrator in \("ab2","leapfrog"\)'):
+            match=r'requires outer_integrator in '
+                  r'\("ab2","leapfrog","nemo_mlf"\)'):
         _construct("explicit_ab2", outer_integrator="forward_euler")
 
 

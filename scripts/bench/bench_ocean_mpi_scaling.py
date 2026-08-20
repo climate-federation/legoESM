@@ -422,7 +422,14 @@ def _build_global_problem(
             BathymetryConfig,
             load_bathymetry_latlon_cgrid,
         )
-        _bcfg = BathymetryConfig(source="file", path=bathymetry_file)
+        # fill_isolated_basins: interpolating the 1-degree mask to finer
+        # grids leaves disconnected wet pools (inland seas, single-cell
+        # coastal ponds); with no outlet the rest-state perturbation has
+        # nowhere to go and the run goes non-finite (LL576 jobs
+        # 26479904/26480203). The A/B only needs the land DISTRIBUTION,
+        # so filling pools is strictly cleaner for the benchmark problem.
+        _bcfg = BathymetryConfig(source="file", path=bathymetry_file,
+                                 fill_isolated_basins=True)
         _, mask_override = load_bathymetry_latlon_cgrid(grid, _bcfg)
     elif land_mask != "none":
         raise SystemExit(
@@ -1657,6 +1664,7 @@ def _make_gm_redi_spec(model, dt: float) -> "PhaseSpec":
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
+            omega=config.omega,  # #1226: config.omega, not config.constants.Omega
         )
         T_new = state.T.data + dt_static * dT_gm * mask_3d
         S_new = state.S.data + dt_static * dS_gm * mask_3d
@@ -2169,7 +2177,7 @@ def build_parser() -> argparse.ArgumentParser:
              "identical boundaries from the identical global mask. "
              "MEASURED (np=4 CPU, LL96 etopo, 2026-07-08): the DENSE step "
              "computes land cells too, so cost scales with ROWS — wet "
-             "bands cut wet imbalance 1.23->1.01 but ran ~3% SLOWER "
+             "bands cut wet imbalance 1.23->1.01 but ran ~3%% SLOWER "
              "(13.7 vs 13.3 ms/step). This flag is groundwork for "
              "active/wet-cell COMPACTION (audit item 4); do not flip it "
              "on the dense step expecting a win.",

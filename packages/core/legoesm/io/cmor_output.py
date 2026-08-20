@@ -1,7 +1,10 @@
 """CF/CMOR-compliant NetCDF output pipeline for legoESM.
 
-Writes model output as CF-1.8 / CMOR 3.x compliant NetCDF4 files,
-suitable for submission to CMIP6-class model intercomparisons.  Each
+Writes model output as CF-1.7 / CMIP-6.2 / CMOR 3.x compliant NetCDF4
+files, suitable for submission to CMIP6-class model intercomparisons.
+The ``Conventions`` value is READ from the vendored table Header, not
+hard-coded -- the "CF-1.8" this module used to advertise is rejected by
+the CMIP6 CV regex ``^CF-1.7 CMIP-6.[0-2]( UGRID-1.0){0,}$``.  Each
 variable is stored in its own file following the CMIP6 DRS:
 
     <var>_<table>_<model>_<experiment>_<variant>_<grid>_<time-range>.nc
@@ -58,13 +61,42 @@ References
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import jax
+import warnings
+
 import numpy as np
+
+from legoesm.io.cmor_table_loader import (
+    build_all_tables,
+    conventions_string,
+    coordinate_axis,
+    experiment_title,
+    table_header,
+)
+
+logger = logging.getLogger(__name__)
+
+# CMIP6 fill / missing sentinel.  Every official table Header declares
+# ``"missing_value": "1e20"``; the writer used to leave xarray's NaN
+# default in place, which PrePARE rejects.
+CMIP6_MISSING_VALUE: float = 1.0e20
+
+# CMIP6 ``type`` -> NumPy on-disk dtype.  Every atmosphere/ocean table
+# entry legoESM writes declares ``real``, i.e. float32 on disk; the
+# writer used to emit float64 because it followed the model's internal
+# precision policy.  This affects OUTPUT ONLY -- computation precision is
+# untouched.
+_CMOR_TYPE_DTYPE: Dict[str, np.dtype] = {
+    "real": np.dtype(np.float32),
+    "double": np.dtype(np.float64),
+    "integer": np.dtype(np.int32),
+}
 
 
 # Standard CMIP6 license text (Creative Commons Attribution 4.0 International)
@@ -89,6 +121,18 @@ _TABLE_REALM: Dict[str, str] = {
     "SImon": "seaIce",
     "SIyr": "seaIce",
     "fx": "atmos",
+}
+
+# Cell-measure variables each realm's files refer to.  They are written as
+# separate fx/Ofx files alongside the variable files in the DRS, so a data
+# file names them in ``external_variables``.  A file that CONTAINS one of
+# these must not also name it (CF-1.7 2.6.3); ``_global_attrs`` filters the
+# variable being written out of this list.
+_REALM_EXTERNAL_VARIABLES: Dict[str, Tuple[str, ...]] = {
+    "atmos": ("areacella",),
+    "land": ("areacella", "sftlf"),
+    "ocean": ("areacello",),
+    "seaIce": ("areacello",),
 }
 
 # CMIP6 surface-field reference heights [m].  These variables are defined
@@ -169,739 +213,128 @@ def _resolve_output_dtype(explicit_dtype: str | None) -> np.dtype:
         return np.dtype(np.float32)
 
 
+def _dtype_for_entry(entry: Dict[str, Any]) -> np.dtype:
+    """Resolve the on-disk dtype from the CMOR table entry's ``type``.
+
+    CMIP6 declares ``type: real`` for every variable legoESM writes, so
+    files must be float32 on disk regardless of the model's internal
+    precision (which stays float64 under ``JAX_ENABLE_X64``).  This is a
+    STORAGE decision only -- no computation is downcast.
+
+    An unknown ``type`` raises rather than defaulting: silently writing
+    the wrong width is precisely the kind of drift this module now
+    guards against.
+    """
+    cmor_type = entry.get("type", "real")
+    try:
+        return _CMOR_TYPE_DTYPE[cmor_type]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown CMOR type {cmor_type!r}; expected one of "
+            f"{sorted(_CMOR_TYPE_DTYPE)}"
+        ) from exc
+
+
+def _variable_attrs(entry: Dict[str, Any]) -> Dict[str, str]:
+    """Build the CF/CMIP6 variable attributes from a CMOR table entry.
+
+    Single source for every write path (``write_field``,
+    ``write_monthly``, ``write_fixed``) so the three cannot drift.
+    ``positive`` and ``cell_measures`` are emitted only when the table
+    declares them -- an empty string in the table means "this variable
+    has none", and writing ``positive=""`` is itself invalid.
+    """
+    attrs: Dict[str, str] = {
+        "standard_name": entry["standard_name"],
+        "long_name": entry["long_name"],
+        "units": entry["units"],
+        "cell_methods": entry["cell_methods"],
+    }
+    positive = entry.get("positive", "")
+    if positive:
+        # Sign convention comes from the TABLE, never from a guess:
+        # CMIP6 defines tauu/tauv as ``surface_downward_eastward_stress``
+        # (positive="down", i.e. with the wind), so a negative tropical
+        # zonal-mean tauu is correct for the trades and must not be
+        # "corrected".
+        attrs["positive"] = positive
+    measures = entry.get("cell_measures", "")
+    if measures:
+        attrs["cell_measures"] = measures
+    # CMIP6 requires ``missing_value`` alongside ``_FillValue`` and
+    # requires them equal and of the variable's own type.  ``_FillValue``
+    # is set through the encoding (xarray owns that key); this is the
+    # companion attribute, which was missing from every file we wrote.
+    attrs["missing_value"] = _dtype_for_entry(entry).type(CMIP6_MISSING_VALUE)
+    return attrs
+
+
+def merged_variable_attrs(
+    entry: Dict[str, Any],
+    extra_attrs: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Table attributes with a producer's overrides merged in.
+
+    Producers legitimately override ``cell_methods`` to be HONEST about
+    sampling -- a monthly value built from once-daily instantaneous samples
+    is not a continuous time mean, so the MPAS lean path relabels it (see
+    ``DiagnosticsCollector.cmip_snapshot_vars``).  What a producer knows is
+    the TIME clause; the AREA clause belongs to the variable and must keep
+    matching the table.
+
+    CMIP6 spells an area-aggregated field ``"area: mean time: <op>"``
+    (with ``"area: time: mean"`` as the shorthand when both are means),
+    while plev fields such as ``ua``/``va`` carry a bare ``"time: <op>"``
+    and must NOT gain an ``area:`` clause.  So a producer cannot hard-code
+    one string for a mixed set of variables, and every one that tried wrote
+    a bare ``"time: point"`` onto ``tas``/``psl`` -- reintroducing, on
+    exactly the snapshot-fed files, the missing-``area:`` defect the
+    table-driven metadata otherwise fixed.
+
+    This is the one place that knows both the override and the table entry,
+    so the area clause is restored here rather than in each producer.
+    """
+    attrs = _variable_attrs(entry)
+    if not extra_attrs:
+        return attrs
+    attrs.update(extra_attrs)
+    override = extra_attrs.get("cell_methods")
+    if override and str(entry["cell_methods"]).startswith("area:"):
+        if not str(override).startswith("area:"):
+            attrs["cell_methods"] = f"area: mean {override}"
+    return attrs
+
+
 # =========================================================================
 # CMOR Variable Tables
 # =========================================================================
 
-# Each entry: {standard_name, long_name, units, cell_methods, dimensions}
-# ``dimensions`` is a tuple of coordinate names that follow
-# (time, ..., lat, lon).  "plev" marks 3-D pressure-interpolated fields.
+# The CMOR variable metadata is READ FROM THE OFFICIAL CMIP6 TABLES
+# vendored under ``cmor_tables/`` -- it is NOT retyped here.  The
+# hand-maintained dicts this replaced had drifted from the tables in 88
+# places (wrong ``cell_methods`` on 29 of 35 ``Amon`` variables, wrong
+# ``cli``/``clw`` units, no ``positive``, no ``cell_measures``), which is
+# exactly the failure mode a table-driven writer cannot have.
+#
+# Refresh the vendored copy with
+# ``scripts/data/build_cmor_table_subset.py``; adding an output variable
+# means adding it to that script's WANTED map, never editing JSON or
+# adding a dict here.
+CMOR_TABLES: Dict[str, Dict[str, Dict[str, Any]]] = build_all_tables()
 
-_AMON_VARIABLES: Dict[str, Dict[str, str]] = {
-    # --- Near-surface / surface scalars ---
-    "tas": {
-        "standard_name": "air_temperature",
-        "long_name": "Near-Surface Air Temperature",
-        "units": "K",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "ps": {
-        "standard_name": "surface_air_pressure",
-        "long_name": "Surface Air Pressure",
-        "units": "Pa",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "psl": {
-        "standard_name": "air_pressure_at_mean_sea_level",
-        "long_name": "Sea Level Pressure",
-        "units": "Pa",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "pr": {
-        "standard_name": "precipitation_flux",
-        "long_name": "Precipitation",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "prw": {
-        "standard_name": "atmosphere_mass_content_of_water_vapor",
-        "long_name": "Water Vapor Path",
-        "units": "kg m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "clt": {
-        "standard_name": "cloud_area_fraction",
-        "long_name": "Total Cloud Cover Percentage",
-        "units": "%",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "clwvi": {
-        "standard_name": "atmosphere_mass_content_of_cloud_condensed_water",
-        "long_name": "Condensed Water Path",
-        "units": "kg m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "clivi": {
-        "standard_name": "atmosphere_mass_content_of_cloud_ice",
-        "long_name": "Ice Water Path",
-        "units": "kg m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # --- TOA radiation ---
-    "rsdt": {
-        "standard_name": "toa_incoming_shortwave_flux",
-        "long_name": "TOA Incident Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rsut": {
-        "standard_name": "toa_outgoing_shortwave_flux",
-        "long_name": "TOA Outgoing Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlut": {
-        "standard_name": "toa_outgoing_longwave_flux",
-        "long_name": "TOA Outgoing Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rsutcs": {
-        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
-        "long_name": "TOA Outgoing Clear-Sky Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlutcs": {
-        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
-        "long_name": "TOA Outgoing Clear-Sky Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # --- Surface radiation ---
-    "rsds": {
-        "standard_name": "surface_downwelling_shortwave_flux_in_air",
-        "long_name": "Surface Downwelling Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlds": {
-        "standard_name": "surface_downwelling_longwave_flux_in_air",
-        "long_name": "Surface Downwelling Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rsus": {
-        "standard_name": "surface_upwelling_shortwave_flux_in_air",
-        "long_name": "Surface Upwelling Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlus": {
-        "standard_name": "surface_upwelling_longwave_flux_in_air",
-        "long_name": "Surface Upwelling Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # --- Surface fluxes ---
-    "hfss": {
-        "standard_name": "surface_upward_sensible_heat_flux",
-        "long_name": "Surface Upward Sensible Heat Flux",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "hfls": {
-        "standard_name": "surface_upward_latent_heat_flux",
-        "long_name": "Surface Upward Latent Heat Flux",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tauu": {
-        "standard_name": "surface_downward_eastward_stress",
-        "long_name": "Surface Downward Eastward Wind Stress",
-        "units": "Pa",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tauv": {
-        "standard_name": "surface_downward_northward_stress",
-        "long_name": "Surface Downward Northward Wind Stress",
-        "units": "Pa",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # --- 3-D atmosphere fields (pressure levels) ---
-    "ta": {
-        "standard_name": "air_temperature",
-        "long_name": "Air Temperature",
-        "units": "K",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "ua": {
-        "standard_name": "eastward_wind",
-        "long_name": "Eastward Wind",
-        "units": "m s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "va": {
-        "standard_name": "northward_wind",
-        "long_name": "Northward Wind",
-        "units": "m s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "hus": {
-        "standard_name": "specific_humidity",
-        "long_name": "Specific Humidity",
-        "units": "1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    # --- Additional Amon variables for CMIP submission ---
-    "ts": {
-        "standard_name": "surface_temperature",
-        "long_name": "Surface Temperature",
-        "units": "K",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "zg": {
-        "standard_name": "geopotential_height",
-        "long_name": "Geopotential Height",
-        "units": "m",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "wap": {
-        "standard_name": "lagrangian_tendency_of_air_pressure",
-        "long_name": "Omega (=dp/dt)",
-        "units": "Pa s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "hur": {
-        "standard_name": "relative_humidity",
-        "long_name": "Relative Humidity",
-        "units": "%",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "hurs": {
-        "standard_name": "relative_humidity",
-        "long_name": "Near-Surface Relative Humidity",
-        "units": "%",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "clw": {
-        "standard_name": "mass_fraction_of_cloud_liquid_water_in_air",
-        "long_name": "Mass Fraction of Cloud Liquid Water",
-        "units": "1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "cli": {
-        "standard_name": "mass_fraction_of_cloud_ice_in_air",
-        "long_name": "Mass Fraction of Cloud Ice",
-        "units": "1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "plev", "lat", "lon"),
-    },
-    "rsdscs": {
-        "standard_name": "surface_downwelling_shortwave_flux_in_air_assuming_clear_sky",
-        "long_name": "Surface Downwelling Clear-Sky Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rldscs": {
-        "standard_name": "surface_downwelling_longwave_flux_in_air_assuming_clear_sky",
-        "long_name": "Surface Downwelling Clear-Sky Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "evspsbl": {
-        "standard_name": "water_evapotranspiration_flux",
-        "long_name": "Evaporation Including Sublimation and Transpiration",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-}
-
-_LMON_VARIABLES: Dict[str, Dict[str, str]] = {
-    "gpp": {
-        "standard_name": "gross_primary_productivity_of_biomass_"
-                         "expressed_as_carbon",
-        "long_name": "Gross Primary Production of Biomass "
-                     "Expressed as Carbon",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "nee": {
-        "standard_name": "surface_net_downward_mass_flux_of_carbon_"
-                         "dioxide_expressed_as_carbon_due_to_all_"
-                         "land_processes_excluding_anthropogenic_"
-                         "land_use_change",
-        "long_name": "Net Ecosystem Exchange of CO2",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "lai": {
-        "standard_name": "leaf_area_index",
-        "long_name": "Leaf Area Index",
-        "units": "1",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "mrso": {
-        "standard_name": "mass_content_of_water_in_soil",
-        "long_name": "Total Soil Moisture Content",
-        "units": "kg m-2",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "mrsos": {
-        "standard_name": "mass_content_of_water_in_soil_layer",
-        "long_name": "Moisture in Upper Portion of Soil Column",
-        "units": "kg m-2",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tsl": {
-        "standard_name": "soil_temperature",
-        "long_name": "Temperature of Soil",
-        "units": "K",
-        "cell_methods": "time: mean area: mean where land",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-}
-
-_OMON_VARIABLES: Dict[str, Dict[str, str]] = {
-    # --- 2-D surface ocean (OMIP-2 core, CMIP6 Omon table) ---
-    "tos": {
-        "standard_name": "sea_surface_temperature",
-        "long_name": "Sea Surface Temperature",
-        "units": "K",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "sos": {
-        "standard_name": "sea_surface_salinity",
-        "long_name": "Sea Surface Salinity",
-        "units": "0.001",  # CMIP6 dimensionless salinity
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "zos": {
-        "standard_name": "sea_surface_height_above_geoid",
-        "long_name": "Sea Surface Height Above Geoid",
-        "units": "m",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "mlotst": {
-        "standard_name": "ocean_mixed_layer_thickness_defined_by_sigma_t",
-        "long_name": "Ocean Mixed Layer Thickness Defined by Sigma T",
-        "units": "m",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "hfds": {
-        "standard_name": "surface_downward_heat_flux_in_sea_water",
-        "long_name": "Downward Heat Flux at Sea Water Surface",
-        "units": "W m-2",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "wfo": {
-        "standard_name": "water_flux_into_sea_water",
-        "long_name": "Water Flux Into Sea Water",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tauuo": {
-        "standard_name": "surface_downward_x_stress",
-        "long_name": "Surface Downward X Stress",
-        "units": "N m-2",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tauvo": {
-        "standard_name": "surface_downward_y_stress",
-        "long_name": "Surface Downward Y Stress",
-        "units": "N m-2",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # --- 3-D ocean (OMIP-2 core).  ``depth`` carries ocean depth
-    # (positive down).  The writer attaches OMIP-2 attrs when
-    # ``table_id == "Omon"``.
-    "thetao": {
-        # CMIP6 Omon spec: thetao is reported in degC (NOT Kelvin).
-        # Callers writing this variable must convert model temperature
-        # (typically held in Kelvin internally) to Celsius before
-        # passing it to CFWriter.write_field.
-        "standard_name": "sea_water_potential_temperature",
-        "long_name": "Sea Water Potential Temperature",
-        "units": "degC",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    "so": {
-        "standard_name": "sea_water_salinity",
-        "long_name": "Sea Water Salinity",
-        "units": "0.001",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    "uo": {
-        "standard_name": "sea_water_x_velocity",
-        "long_name": "Sea Water X Velocity",
-        "units": "m s-1",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    "vo": {
-        "standard_name": "sea_water_y_velocity",
-        "long_name": "Sea Water Y Velocity",
-        "units": "m s-1",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    # --- Meridional overturning streamfunction (CMIP6 Omon).
-    # ``basin`` is a CMIP6 named-coordinate dimension with three values
-    # (global, atlantic_arctic, indian_pacific); writer expands it as
-    # an integer index axis with attached string coordinate variable.
-    "msftmz": {
-        "standard_name": "ocean_meridional_overturning_mass_streamfunction",
-        "long_name": "Ocean Meridional Overturning Mass Streamfunction",
-        "units": "kg s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "basin", "depth", "lat"),
-    },
-    "msftyz": {
-        # Mass-stream-function on geometric depth coordinate.
-        "standard_name": "ocean_y_overturning_mass_streamfunction",
-        "long_name": "Ocean Y Overturning Mass Streamfunction",
-        "units": "kg s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "basin", "depth", "lat"),
-    },
-    # --- Global mean scalars (single-point per timestep).  ``dimensions
-    # = ("time",)`` triggers the CMOR ``zg=0`` integer-axis placeholder
-    # in CFWriter so the field carries the correct CMIP6 metadata.
-    "tosga": {
-        "standard_name": "sea_surface_temperature",
-        "long_name": "Global Average Sea Surface Temperature",
-        "units": "K",
-        "cell_methods": "area: mean where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "sosga": {
-        "standard_name": "sea_surface_salinity",
-        "long_name": "Global Average Sea Surface Salinity",
-        "units": "0.001",
-        "cell_methods": "area: mean where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "thetaoga": {
-        "standard_name": "sea_water_potential_temperature",
-        "long_name": "Global Average Sea Water Potential Temperature",
-        "units": "degC",
-        "cell_methods": "area: mean volume: mean where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "soga": {
-        "standard_name": "sea_water_salinity",
-        "long_name": "Global Mean Sea Water Salinity",
-        "units": "0.001",
-        "cell_methods": "area: mean volume: mean where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "masso": {
-        "standard_name": "sea_water_mass",
-        "long_name": "Sea Water Mass",
-        "units": "kg",
-        "cell_methods": "area: sum where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "volo": {
-        "standard_name": "sea_water_volume",
-        "long_name": "Sea Water Volume",
-        "units": "m3",
-        "cell_methods": "area: sum where sea time: mean",
-        "dimensions": ("time",),
-    },
-    "wo": {
-        # Sign convention: ``standard_name = upward_sea_water_velocity``
-        # — values are POSITIVE UPWARD.  Ocean models that carry
-        # vertical velocity positive-downward on a depth-positive-down
-        # vertical coordinate (e.g. legoESM's z* core) MUST negate the
-        # field before passing it to CFWriter.write_field.
-        "standard_name": "upward_sea_water_velocity",
-        "long_name": "Upward Sea Water Velocity",
-        "units": "m s-1",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    "rhopoto": {
-        "standard_name": "sea_water_potential_density",
-        "long_name": "Sea Water Potential Density",
-        "units": "kg m-3",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "depth", "lat", "lon"),
-    },
-    # --- Sea ice (kept under Omon for backward-compat; CMIP6 places
-    # ``siconc``/``sithick``/``siu``/``siv`` in SImon — see
-    # ``_SIMON_VARIABLES`` below).
-    "sic": {
-        "standard_name": "sea_ice_area_fraction",
-        "long_name": "Sea-Ice Area Percentage (Ocean Grid)",
-        "units": "%",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-}
-
-
-# --- CMIP6 SImon (sea-ice monthly) — the OMIP-2 protocol points here
-# for the sea-ice prognostic variables produced by the ocean / coupled
-# experiments.  All fields live on the ocean grid.
-_SIMON_VARIABLES: Dict[str, Dict[str, str]] = {
-    "siconc": {
-        "standard_name": "sea_ice_area_fraction",
-        "long_name": "Sea-Ice Area Fraction",
-        "units": "%",
-        "cell_methods": "time: mean area: mean where sea",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "sithick": {
-        # CMIP6 SImon cell_methods string is the canonical CF form
-        # ``time: mean area: mean where sea_ice``; do not append
-        # mask references in parentheses (CMOR/CF validators reject
-        # those).  The mask is conveyed by the CMIP6 ``ancillary``
-        # mechanism, not by cell_methods.
-        "standard_name": "sea_ice_thickness",
-        "long_name": "Sea Ice Thickness",
-        "units": "m",
-        "cell_methods": "time: mean area: mean where sea_ice",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    # Sea-ice velocity components.  CMIP6 SImon expects
-    # eastward/northward components on the **lat-lon** output grid —
-    # native curvilinear (cubed-sphere, MPAS, tripole) vectors MUST be
-    # rotated to the geographic east/north basis before writing.
-    "siu": {
-        "standard_name": "sea_ice_x_velocity",
-        "long_name": "X-Component of Sea-Ice Velocity",
-        "units": "m s-1",
-        "cell_methods": "time: mean area: mean where sea_ice",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "siv": {
-        "standard_name": "sea_ice_y_velocity",
-        "long_name": "Y-Component of Sea-Ice Velocity",
-        "units": "m s-1",
-        "cell_methods": "time: mean area: mean where sea_ice",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "sitemptop": {
-        "standard_name": "sea_ice_surface_temperature",
-        "long_name": "Surface Temperature of Sea Ice",
-        "units": "K",
-        "cell_methods": "time: mean area: mean where sea_ice",
-        "dimensions": ("time", "lat", "lon"),
-    },
-}
-
-_DAY_VARIABLES: Dict[str, Dict[str, str]] = {
-    "tas": {
-        "standard_name": "air_temperature",
-        "long_name": "Near-Surface Air Temperature",
-        "units": "K",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tasmin": {
-        "standard_name": "air_temperature",
-        "long_name": "Daily Minimum Near-Surface Air Temperature",
-        "units": "K",
-        "cell_methods": "time: minimum",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "tasmax": {
-        "standard_name": "air_temperature",
-        "long_name": "Daily Maximum Near-Surface Air Temperature",
-        "units": "K",
-        "cell_methods": "time: maximum",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "pr": {
-        "standard_name": "precipitation_flux",
-        "long_name": "Precipitation",
-        "units": "kg m-2 s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "psl": {
-        "standard_name": "air_pressure_at_mean_sea_level",
-        "long_name": "Sea Level Pressure",
-        "units": "Pa",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rsut": {
-        "standard_name": "toa_outgoing_shortwave_flux",
-        "long_name": "TOA Outgoing Shortwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "rlut": {
-        "standard_name": "toa_outgoing_longwave_flux",
-        "long_name": "TOA Outgoing Longwave Radiation",
-        "units": "W m-2",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "ua850": {
-        "standard_name": "eastward_wind",
-        "long_name": "Eastward Wind at 850 hPa",
-        "units": "m s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-    "va850": {
-        "standard_name": "northward_wind",
-        "long_name": "Northward Wind at 850 hPa",
-        "units": "m s-1",
-        "cell_methods": "time: mean",
-        "dimensions": ("time", "lat", "lon"),
-    },
-}
-
-# ``fx`` table — time-invariant fields. CF ``cell_methods`` and ``time``
-# dimension are intentionally absent; these files are written once per run.
-_FX_VARIABLES: Dict[str, Dict[str, str]] = {
-    "orog": {
-        "standard_name": "surface_altitude",
-        "long_name": "Surface Altitude",
-        "units": "m",
-        "cell_methods": "area: mean",
-        "dimensions": ("lat", "lon"),
-    },
-    "areacella": {
-        "standard_name": "cell_area",
-        "long_name": "Grid-Cell Area for Atmospheric Grid Variables",
-        "units": "m2",
-        "cell_methods": "area: sum",
-        "dimensions": ("lat", "lon"),
-    },
-    "sftlf": {
-        "standard_name": "land_area_fraction",
-        "long_name": "Land Area Fraction",
-        "units": "%",
-        "cell_methods": "area: mean",
-        "dimensions": ("lat", "lon"),
-    },
-}
-
-# --- CMIP6 ``Oyr`` (annual ocean) — same variables as ``Omon`` but
-# accumulated to annual means.  Production OMIP-2 + CMIP6 archive
-# expects long centennial integrations to ship ``Oyr`` rather than
-# ``Omon`` for the deep / global-mean diagnostics.  Reuses the
-# ``Omon`` variable specs verbatim — only the table_id differs (which
-# the writer uses to build the filename + DRS path).
-_OYR_VARIABLES: Dict[str, Dict[str, str]] = dict(_OMON_VARIABLES)
-
-
-# --- CMIP6 ``SIyr`` (annual sea ice) — annual means of ``SImon``.
-_SIYR_VARIABLES: Dict[str, Dict[str, str]] = dict(_SIMON_VARIABLES)
-
-
-# --- CMIP6 ``Ofx`` (time-invariant ocean fields).  Bathymetry, cell
-# area, sea-area fraction, and per-layer mass / volume of the
-# reference state.  Written once per run.
-_OFX_VARIABLES: Dict[str, Dict[str, str]] = {
-    "areacello": {
-        "standard_name": "cell_area",
-        "long_name": "Grid-Cell Area for Ocean Variables",
-        "units": "m2",
-        "cell_methods": "area: sum",
-        "dimensions": ("lat", "lon"),
-    },
-    "deptho": {
-        "standard_name": "sea_floor_depth_below_geoid",
-        "long_name": "Sea Floor Depth Below Geoid",
-        "units": "m",
-        "cell_methods": "area: mean where sea",
-        "dimensions": ("lat", "lon"),
-    },
-    "sftof": {
-        "standard_name": "sea_area_fraction",
-        "long_name": "Sea Area Fraction",
-        "units": "%",
-        "cell_methods": "area: mean",
-        "dimensions": ("lat", "lon"),
-    },
-    "masscello": {
-        "standard_name": "sea_water_mass_per_unit_area",
-        "long_name": "Sea Water Mass Per Unit Area",
-        "units": "kg m-2",
-        "cell_methods": "area: mean where sea time: mean",
-        "dimensions": ("depth", "lat", "lon"),
-    },
-    "volcello": {
-        "standard_name": "ocean_volume",
-        "long_name": "Ocean Grid-Cell Volume",
-        "units": "m3",
-        "cell_methods": "area: sum where sea time: mean",
-        "dimensions": ("depth", "lat", "lon"),
-    },
-    "thkcello": {
-        "standard_name": "cell_thickness",
-        "long_name": "Ocean Model Cell Thickness",
-        "units": "m",
-        "cell_methods": "area: mean where sea time: mean",
-        "dimensions": ("depth", "lat", "lon"),
-    },
-}
-
-
-# Combined lookup for convenience. ``Aday`` is a legacy alias for
-# ``day`` (the CMIP6 CV value); keep both so pre-existing tests and
-# callers continue to work.
-CMOR_TABLES: Dict[str, Dict[str, Dict[str, str]]] = {
-    "Amon": _AMON_VARIABLES,
-    "Lmon": _LMON_VARIABLES,
-    "Omon": _OMON_VARIABLES,
-    "Oyr": _OYR_VARIABLES,
-    "Ofx": _OFX_VARIABLES,
-    "SImon": _SIMON_VARIABLES,
-    "SIyr": _SIYR_VARIABLES,
-    "day": _DAY_VARIABLES,
-    "Aday": _DAY_VARIABLES,
-    "fx": _FX_VARIABLES,
-}
-
-# Standard CMIP6 pressure levels [Pa] (19 levels, top-to-bottom)
-CMIP6_PLEV19 = np.array([
-    100_000.0, 92_500.0, 85_000.0, 70_000.0, 60_000.0,
-    50_000.0, 40_000.0, 30_000.0, 25_000.0, 20_000.0,
-    15_000.0, 10_000.0, 7_000.0, 5_000.0, 3_000.0,
-    2_000.0, 1_000.0, 500.0, 100.0,
-])
+# Standard CMIP6 pressure levels [Pa], read from the official
+# ``plev19`` coordinate axis rather than retyped.
+CMIP6_PLEV19 = np.array(
+    [float(p) for p in coordinate_axis("plev19")["requested"]]
+)
 
 
 # =========================================================================
 # Helper: look up CMOR metadata for a variable name
 # =========================================================================
+
+# Names already reported by the bulk writers (#1501): warn once, not per step.
+_WARNED_UNKNOWN_CMOR_VARS: set = set()
 
 def lookup_cmor_entry(
     var_name: str,
@@ -1216,9 +649,129 @@ def _generate_tracking_id() -> str:
     return f"hdl:21.14100/{uuid.uuid4()}"
 
 
-def _realm_for_table(table_id: str) -> str:
-    """Return CMIP6 realm CV value for a CMOR table."""
+class _DailyRemap(NamedTuple):
+    """Where an accumulator's daily field really belongs in CMIP6."""
+
+    out_name: str
+    table: str
+    plev_pa: Optional[float] = None
+
+
+# The daily accumulator's internal names are not all CMIP6 variables.
+# Verified against ALL 48 official CMIP6 tables at the pinned ref:
+#   * ``rsut`` exists in ``Amon`` and ``CFday`` -- but NOT in ``day``.
+#   * ``ua850`` / ``va850`` exist in NO CMIP6 table whatsoever; the
+#     CMIP6 form is ``ua``/``va`` on the ``plev8`` coordinate in ``day``.
+# The DATA is unchanged -- this only puts it under the name and table
+# CMIP6 defines for it.
+#
+# CAVEAT (publication blocker, reported not hidden): ``day/ua`` and
+# ``day/va`` are declared on ``plev8`` (8 levels: 1000, 850, 700, 500,
+# 250, 100, 50, 10 hPa).  legoESM's daily accumulator carries only the
+# 850 hPa level, so the emitted files hold a 1-element pressure axis.
+# Filling the other seven with missing data would fabricate coverage;
+# producing them for real needs a change to the daily accumulator, which
+# is a DATA change and out of scope for this metadata fix.
+_DAILY_VARIABLE_REMAP: Dict[str, _DailyRemap] = {
+    "rsut": _DailyRemap("rsut", "CFday"),
+    "ua850": _DailyRemap("ua", "day", plev_pa=85_000.0),
+    "va850": _DailyRemap("va", "day", plev_pa=85_000.0),
+}
+
+
+def _format_drs_time_range(
+    t_start: float,
+    t_end: float,
+    ref_date: str,
+    calendar: str,
+    freq: str,
+) -> str:
+    """Format the CMIP6 DRS filename time range for a data span.
+
+    Parameters
+    ----------
+    t_start, t_end : float
+        The span's time-bounds endpoints, in ``days since ref_date``.
+        ``t_end`` is EXCLUSIVE (a January monthly mean has bounds
+        ``[0, 31)``), so the end label is taken just inside it -- using
+        ``t_end`` directly would label a January-only file "197901-197902".
+    freq : str
+        ``"mon"`` -> ``YYYYMM-YYYYMM``; anything sub-monthly (``day``,
+        ``6hr``, ...) -> ``YYYYMMDD-YYYYMMDD``.
+
+    Notes
+    -----
+    Uses the model's own calendar, so a ``noleap`` run is dated on the
+    365-day calendar it actually integrated -- not a proleptic Gregorian
+    approximation that would drift a day per leap year.
+    """
+    import cftime
+
+    units = f"days since {ref_date}"
+    # Step just inside the exclusive upper bound.  1e-3 day = 86.4 s,
+    # far below the shortest CMIP6 output interval and far above float64
+    # round-off at century-scale day counts.
+    d0 = cftime.num2date(float(t_start), units, calendar=calendar)
+    d1 = cftime.num2date(max(float(t_end) - 1.0e-3, float(t_start)), units,
+                         calendar=calendar)
+    if freq == "mon":
+        return f"{d0.year:04d}{d0.month:02d}-{d1.year:04d}{d1.month:02d}"
+    return (
+        f"{d0.year:04d}{d0.month:02d}{d0.day:02d}-"
+        f"{d1.year:04d}{d1.month:02d}{d1.day:02d}"
+    )
+
+
+def table_realm(table_id: str) -> str:
+    """Return the CMIP6 ``realm`` CV value for a CMOR table.
+
+    Public accessor for ``_TABLE_REALM`` so callers (and tests) do not
+    import the private mapping across modules.
+    """
     return _TABLE_REALM.get(table_id, "atmos")
+
+
+# ``institution_id`` and ``source_id`` are CONTROLLED vocabularies: a
+# value is only valid once PCMDI has merged a registration PR into
+# WCRP-CMIP/CMIP6_CVs.  legoESM's defaults below are NOT registered --
+# "CU" is not a CMIP6 institution_id and "legoESM-1-0" is not a CMIP6
+# source_id -- so files carrying them will be rejected at publication no
+# matter how correct the rest of the metadata is.  We cannot register
+# them from here and we will not pretend they are valid: both are
+# constructor parameters, this check warns once per process, and the
+# blocker is stated in the module docstring.
+_DEFAULT_UNREGISTERED_INSTITUTION_ID = "CU"
+_DEFAULT_UNREGISTERED_SOURCE_ID = "legoESM-1-0"
+_CV_REGISTRATION_WARNED: set = set()
+
+
+def check_cv_registration(institution_id: str, source_id: str) -> List[str]:
+    """Return (and warn about) identifiers not registered in the CMIP6 CV.
+
+    Returns the list of unregistered attribute names, empty when both
+    have been changed away from legoESM's placeholder defaults.  This is
+    a REMINDER, not a validator: it cannot confirm that a non-default
+    value *is* registered, only that the known-unregistered defaults are
+    still in place.
+    """
+    unregistered: List[str] = []
+    if institution_id == _DEFAULT_UNREGISTERED_INSTITUTION_ID:
+        unregistered.append("institution_id")
+    if source_id == _DEFAULT_UNREGISTERED_SOURCE_ID:
+        unregistered.append("source_id")
+    key = (institution_id, source_id)
+    if unregistered and key not in _CV_REGISTRATION_WARNED:
+        _CV_REGISTRATION_WARNED.add(key)
+        logger.warning(
+            "CMIP6 CV: %s (institution_id=%r, source_id=%r) are legoESM "
+            "placeholders and are NOT in the CMIP6 controlled vocabulary. "
+            "Output is CF-valid but WILL be rejected at ESGF publication "
+            "until both are registered via a PR to WCRP-CMIP/CMIP6_CVs. "
+            "Pass registered values to CFWriter(institution_id=..., "
+            "model_id=...) once that lands.",
+            ", ".join(unregistered), institution_id, source_id,
+        )
+    return unregistered
 
 
 # =========================================================================
@@ -1244,6 +797,8 @@ def _global_attrs(
     further_info_url: str = "",
     nominal_resolution: str = "unknown",
     tracking_id: str = "",
+    table_id: str = "Amon",
+    grid: str = "",
 ) -> Dict[str, str]:
     """Return standard CF/CMIP6 global attributes.
 
@@ -1265,10 +820,23 @@ def _global_attrs(
     except ValueError:
         r_idx = i_idx = p_idx = f_idx = 1
     return {
-        "Conventions": "CF-1.8",
+        # From the vendored tables, validated against the CV regex
+        # ``^CF-1.7 CMIP-6.[0-2]( UGRID-1.0){0,}$``.  The writer used to
+        # hard-code "CF-1.8", which that regex rejects outright.
+        "Conventions": conventions_string(),
+        # REQUIRED by the CV and previously missing entirely.  Taken from
+        # the CMOR table Header so it always describes the tables the
+        # metadata actually came from.
+        "data_specs_version": table_header(table_id)["data_specs_version"],
         "mip_era": "CMIP6",
         "activity_id": "CMIP",
         "experiment_id": experiment_id,
+        # REQUIRED by the CV and previously missing: the CV's long title
+        # for ``experiment_id`` (e.g. amip -> "AMIP").
+        "experiment": experiment_title(experiment_id),
+        # REQUIRED by the CV and previously missing: free-text
+        # description of the grid the data is ON.
+        "grid": grid,
         "sub_experiment": "none",
         "sub_experiment_id": sub_experiment_id,
         "institution": institution,
@@ -1288,7 +856,19 @@ def _global_attrs(
         "creation_date": now,
         "tracking_id": tracking_id,
         "license": license_text,
-        "further_info_url": further_info_url,
+        # REQUIRED by the CV, which fixes its form as
+        #   https://furtherinfo.es-doc.org/
+        #     <mip_era>.<institution_id>.<source_id>.<experiment_id>
+        #     .<sub_experiment_id>.<variant_label>
+        # The writer used to emit "" (empty), which fails validation.
+        # Derived here rather than invented; the URL only RESOLVES once
+        # the ES-DOC documentation is registered (see
+        # ``check_cv_registration``).
+        "further_info_url": further_info_url or (
+            "https://furtherinfo.es-doc.org/CMIP6."
+            f"{institution_id}.{model_id}.{experiment_id}"
+            f".{sub_experiment_id}.{variant_label}"
+        ),
         "parent_experiment_id": parent_experiment_id,
         "parent_source_id": parent_source_id,
         "parent_variant_label": parent_variant_label,
@@ -1358,6 +938,8 @@ class CFWriter:
         license_text: str = CMIP6_LICENSE,
         further_info_url: str = "",
         compress_level: int = 4,
+        grid: str = "native regular latitude-longitude grid",
+        drs_tree: bool = False,
     ) -> None:
         # Validate variant_label up front — malformed labels would
         # otherwise silently fall back to (1,1,1,1) for the index
@@ -1384,6 +966,25 @@ class CFWriter:
         self.license_text = license_text
         self.further_info_url = further_info_url
         self.compress_level = compress_level
+        self.grid = grid
+        self.drs_tree = drs_tree
+        # DRS dataset version directory (only used when drs_tree=True).
+        self._drs_version = "v" + datetime.datetime.now(
+            datetime.timezone.utc
+        ).strftime("%Y%m%d")
+
+        # Warn once if the CMIP6 CV identifiers are still legoESM's
+        # unregistered placeholders (see check_cv_registration).
+        check_cv_registration(institution_id, model_id)
+
+        # (table_id, var_name) -> path currently on disk, and the
+        # [min t_start, max t_end] the file spans.  ``write_field``
+        # appends across a whole run, so the DRS time range is only known
+        # incrementally: the file is renamed after every append rather
+        # than at close(), so a crashed run still leaves a correctly
+        # named file describing exactly the data it contains.
+        self._series_path: Dict[Tuple[str, str], Path] = {}
+        self._series_span: Dict[Tuple[str, str], List[float]] = {}
 
         # Track open datasets for appending
         self._open_datasets: Dict[str, Any] = {}  # var_name -> xr.Dataset
@@ -1425,23 +1026,33 @@ class CFWriter:
             further_info_url=self.further_info_url,
             nominal_resolution=nominal_resolution,
             tracking_id=_generate_tracking_id(),
+            table_id=table_id,
+            grid=self.grid,
         )
-        attrs["realm"] = _realm_for_table(table_id)
-        attrs["frequency"] = self.freq
+        attrs["realm"] = table_realm(table_id)
+        # ``frequency`` comes from the TABLE ENTRY, not from the writer's
+        # own ``freq``.  One CFWriter serves several tables (the AMIP
+        # driver constructs it with freq="mon" and then writes the ``day``
+        # table through it), so using self.freq stamped frequency="mon"
+        # on every daily file -- confirmed on all 9 shipped ``day`` files.
+        attrs["frequency"] = self._frequency_for(table_id, var_name)
         attrs["table_id"] = table_id
         attrs["variable_id"] = var_name
         # external_variables: areacella for atmos, areacella/sftlf for land,
         # areacello for ocean.  These cell-area files live alongside the
         # variable files in the DRS and are referenced by name.
+        #
+        # CF-1.7 2.6.3 forbids naming a variable that IS in this file:
+        # "the variables named by external_variables ... must not be present
+        # in the file".  The measure files themselves (fx/areacella,
+        # Ofx/areacello, Lmon-realm sftlf) are exactly that collision, so the
+        # variable being written is filtered out -- confirmed by cfchecks
+        # 4.1.0, which reported it as a hard ERROR on areacella_fx.
         realm = attrs["realm"]
-        if realm == "atmos":
-            attrs["external_variables"] = "areacella"
-        elif realm == "land":
-            attrs["external_variables"] = "areacella sftlf"
-        elif realm == "ocean":
-            attrs["external_variables"] = "areacello"
-        elif realm == "seaIce":
-            attrs["external_variables"] = "areacello"
+        externals = _REALM_EXTERNAL_VARIABLES.get(realm, ())
+        externals = tuple(name for name in externals if name != var_name)
+        if externals:
+            attrs["external_variables"] = " ".join(externals)
         return attrs
 
     def _output_path(
@@ -1452,11 +1063,29 @@ class CFWriter:
     ) -> Path:
         """Build the DRS-compliant output file path.
 
-        Pattern:
-            <output_dir>/<table_id>/
-                <var>_<table>_<model>_<expt>_<variant>_<grid>[_<trange>].nc
+        Filename pattern (CMIP6 DRS):
+            <var>_<table>_<source>_<expt>_<variant>_<grid>[_<trange>].nc
+
+        Directory layout: ``<output_dir>/<table_id>/`` by default.  The
+        full ESGF DRS tree
+        ``<mip_era>/<activity>/<institution>/<source>/<experiment>/
+        <variant>/<table>/<var>/<grid_label>/<version>/`` is available via
+        ``CFWriter(drs_tree=True)`` but is NOT the default: every
+        downstream legoESM consumer (``scripts/validate/
+        run_amip_climateeval.py`` and the analysis notebooks) globs
+        ``cmor/<table>/*.nc``, so flipping the default would break them
+        for a layout that only matters at the moment of ESGF submission.
+        The filenames -- which are what validators actually check -- are
+        DRS-correct either way.
         """
-        table_dir = self.output_dir / table_id
+        if self.drs_tree:
+            table_dir = (
+                self.output_dir / "CMIP6" / "CMIP" / self.institution_id
+                / self.model_id / self.experiment_id / self.variant_label
+                / table_id / var_name / self.grid_label / self._drs_version
+            )
+        else:
+            table_dir = self.output_dir / table_id
         table_dir.mkdir(parents=True, exist_ok=True)
 
         parts = [
@@ -1472,15 +1101,171 @@ class CFWriter:
         filename = "_".join(parts) + ".nc"
         return table_dir / filename
 
-    def _encoding_for(self, var_name: str) -> Dict[str, Any]:
-        """Return NetCDF encoding dict for a variable."""
-        output_dtype = _resolve_output_dtype(None)
+    def _encoding_for(
+        self,
+        var_name: str,
+        entry: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return the NetCDF encoding dict for a data variable.
+
+        The dtype comes from the CMOR table's ``type`` (CMIP6 declares
+        ``real`` everywhere legoESM writes, i.e. float32 on disk), and
+        the fill/missing sentinel is the tables' ``1e20`` rather than
+        xarray's NaN default.  CMIP6 requires BOTH ``_FillValue`` and
+        ``missing_value`` and requires them equal.
+        """
+        output_dtype = (
+            _dtype_for_entry(entry) if entry is not None
+            else _resolve_output_dtype(None)
+        )
         enc: Dict[str, Any] = {
             "dtype": output_dtype.str,
+            "_FillValue": output_dtype.type(CMIP6_MISSING_VALUE),
         }
         if self.compress_level > 0:
             enc["zlib"] = True
             enc["complevel"] = self.compress_level
+        return enc
+
+    def _frequency_for(self, table_id: str, var_name: str) -> str:
+        """Return the CMIP6 ``frequency`` for one variable, from the table.
+
+        Falls back to the writer's own ``freq`` only for variables that
+        predate the vendored tables (the explicitly non-CMIP6 legacy
+        entries), which carry no ``frequency`` field.
+        """
+        entry = CMOR_TABLES.get(table_id, {}).get(var_name, {})
+        return entry.get("frequency") or self.freq
+
+    def _resolve_series_path(
+        self,
+        series_key: Tuple[str, str],
+        var_name: str,
+        table_id: str,
+    ) -> Path:
+        """Return the path ``write_field`` should write/append to.
+
+        Order of preference:
+          1. the ranged file this process already wrote for this
+             (table, variable) and is still extending;
+          2. a legacy un-ranged file left by an earlier run (so a
+             restart chained onto pre-fix output keeps appending to it
+             instead of silently starting a second series);
+          3. a fresh un-ranged path, renamed immediately after the write.
+        """
+        tracked = self._series_path.get(series_key)
+        if tracked is not None and tracked.exists():
+            return tracked
+
+        base = self._output_path(var_name, table_id)
+        if base.exists():
+            return base
+
+        # A RESTART builds a fresh CFWriter with an empty track, so the
+        # in-memory map cannot find the file the previous leg wrote --
+        # and that file now has a time-range suffix, so the un-ranged
+        # base name misses it too.  Recover by globbing the stem; without
+        # this a chained run starts a SECOND series and the days end up
+        # split across two files.
+        stem = base.stem
+        matches = sorted(
+            p for p in base.parent.glob(f"{stem}_*.nc")
+            if re.fullmatch(rf"{re.escape(stem)}_\d{{6,8}}-\d{{6,8}}", p.stem)
+        )
+        if not matches:
+            return base
+        if len(matches) > 1:
+            logger.warning(
+                "CMOR %s/%s: %d existing time-ranged files match %s; appending "
+                "to the earliest (%s). Concatenate or clean up the extras "
+                "before publication.",
+                table_id, var_name, len(matches), stem, matches[0].name,
+            )
+        found = matches[0]
+        # Seed the span from the file's own bounds so the rename after
+        # this append describes the FULL range, not just the new leg.
+        self._series_span.setdefault(
+            series_key, self._span_from_file(found),
+        )
+        self._series_path[series_key] = found
+        return found
+
+    @staticmethod
+    def _span_from_file(path: Path) -> List[float]:
+        """Return ``[t_start_min, t_end_max]`` from a file's time bounds."""
+        nc4 = _import_netcdf4()
+        if nc4 is None:  # pragma: no cover - netCDF4 is a hard dependency
+            raise RuntimeError("netCDF4 is required to resume a CMOR series")
+        with nc4.Dataset(str(path)) as ds:
+            if "time_bnds" in ds.variables:
+                bnds = np.asarray(ds.variables["time_bnds"][:], dtype=np.float64)
+                return [float(bnds.min()), float(bnds.max())]
+            t = np.asarray(ds.variables["time"][:], dtype=np.float64)
+            return [float(t.min()), float(t.max())]
+
+    def _finalize_series_path(
+        self,
+        series_key: Tuple[str, str],
+        out_path: Path,
+        var_name: str,
+        table_id: str,
+        time_bounds: Tuple[float, float],
+    ) -> Path:
+        """Rename *out_path* so its name carries the span it now covers.
+
+        Renaming after EVERY append (rather than once at ``close()``)
+        means a run killed mid-flight still leaves a correctly named file
+        describing exactly the data inside it -- and node failures do
+        happen.  The rename is intra-directory, so it is a metadata-only
+        operation on any POSIX filesystem.
+        """
+        span = self._series_span.get(series_key)
+        if span is None:
+            span = [float(time_bounds[0]), float(time_bounds[1])]
+        else:
+            span = [min(span[0], float(time_bounds[0])),
+                    max(span[1], float(time_bounds[1]))]
+        self._series_span[series_key] = span
+
+        time_range = _format_drs_time_range(
+            span[0], span[1], self.ref_date, self.calendar,
+            self._frequency_for(table_id, var_name),
+        )
+        target = self._output_path(var_name, table_id, time_range)
+        if target != out_path:
+            if target.exists() and target != out_path:
+                # A prior run already produced this exact range; the
+                # freshly written file supersedes it.
+                target.unlink()
+            out_path.rename(target)
+        self._series_path[series_key] = target
+        return target
+
+    @staticmethod
+    def _coord_encoding(ds: Any) -> Dict[str, Dict[str, Any]]:
+        """Encoding that keeps ``_FillValue`` OFF coordinate variables.
+
+        xarray adds ``_FillValue = NaN`` to every float variable it
+        writes, including coordinates and bounds.  CF forbids it on
+        coordinate variables, and every real file we shipped had it on
+        ``time``/``lat``/``lon``.  Coordinates and bounds also stay
+        float64 -- the CMOR ``plev``/``height`` axes declare
+        ``type: double``, and a float32 time axis loses sub-second
+        resolution at century-scale day counts.
+        """
+        enc: Dict[str, Dict[str, Any]] = {}
+        for name in (
+            "lat", "lon", "plev", "depth", "height",
+            "lat_bnds", "lon_bnds",
+        ):
+            if name in ds.variables:
+                enc[name] = {"_FillValue": None, "dtype": "float64"}
+        # ``time``/``time_bnds`` dtype is governed by xarray's CF time
+        # encoding; forcing it here would fight the units/calendar logic.
+        for name in ("time", "time_bnds"):
+            enc.pop(name, None)
+            if name in ds.variables:
+                enc[name] = {"_FillValue": None}
         return enc
 
     # -----------------------------------------------------------------
@@ -1544,7 +1329,7 @@ class CFWriter:
         """
         xr = _import_xarray()
         table_id, entry = lookup_cmor_entry(var_name, table=table)
-        output_dtype = _resolve_output_dtype(None)
+        output_dtype = _dtype_for_entry(entry)
         data_np = _to_numpy(data).astype(output_dtype)
 
         # --- Build coordinates ---
@@ -1619,14 +1404,7 @@ class CFWriter:
         data_np = np.expand_dims(data_np, axis=0)  # (1, ...)
 
         # --- Build DataArray ---
-        var_attrs = {
-            "standard_name": entry["standard_name"],
-            "long_name": entry["long_name"],
-            "units": entry["units"],
-            "cell_methods": entry["cell_methods"],
-        }
-        if extra_attrs:
-            var_attrs.update(extra_attrs)
+        var_attrs = merged_variable_attrs(entry, extra_attrs)
 
         da = xr.DataArray(
             data_np,
@@ -1660,18 +1438,70 @@ class CFWriter:
         )
 
         # --- Write to disk ---
-        out_path = self._output_path(var_name, table_id)
+        # ``write_field`` APPENDS across a whole run, so the DRS time
+        # range is only known incrementally.  Resolve the file we are
+        # already extending (if any), append, then rename to the range
+        # the file now spans -- see ``_finalize_series_path``.  The
+        # writer previously never passed a time_range at all, so every
+        # file the MPAS lane produced was missing the DRS time suffix
+        # that ``write_monthly_series`` already emitted correctly.
+        series_key = (table_id, var_name)
+        out_path = self._resolve_series_path(series_key, var_name, table_id)
         encoding = {
-            var_name: self._encoding_for(var_name),
+            var_name: self._encoding_for(var_name, entry),
         }
+        encoding.update(self._coord_encoding(ds))
         if out_path.exists():
             # Append by extending the time dimension in place.
             # This avoids reading + concatenating + rewriting the
             # entire file, which is O(n²) over a multi-year run.
+            # Guard BOTH write paths (netCDF4 append and the xarray-concat
+            # fallback): a chained restart can re-flush a window it already
+            # wrote, and neither path checked for it.
+            _xr_guard = _import_xarray()
+            _existing_t = None
+            if _xr_guard is not None:
+                _chk = _xr_guard.open_dataset(out_path, decode_times=False)
+                _existing_t = np.asarray(_chk["time"].values, dtype=np.float64)
+                _chk.close()
+            if _existing_t is not None and _existing_t.size:
+                _t = float(time)
+                # Tolerance: far below any real output spacing (1 day for
+                # `day`, ~30 for `mon`) and far above float64 round-trip error
+                # at century times. Times are stored float64 (verified in a
+                # real Amon file), so this is an equality test, not a bin.
+                if np.any(np.abs(_existing_t - _t) < 1.0e-3):
+                    logger.warning(
+                        "CMOR %s/%s: time %.4f is ALREADY on disk — skipping "
+                        "the duplicate write (a chained restart re-flushed a "
+                        "window it had already written). The FIRST value is "
+                        "kept: the re-flush is a PARTIAL re-accumulation of "
+                        "the window, verified on a real century arm where the "
+                        "repeat's rsdt fell between the true month and the "
+                        "next one.",
+                        table_id, var_name, _t,
+                    )
+                    return out_path
+                if _t < float(_existing_t.max()):
+                    raise ValueError(
+                        f"CMOR {table_id}/{var_name}: refusing to append time "
+                        f"{_t} before the last written time "
+                        f"{float(_existing_t.max())} — the time axis must be "
+                        "monotonically increasing"
+                    )
             nc4 = _import_netcdf4()
             if nc4 is not None:
                 with nc4.Dataset(str(out_path), "a") as ncf:
                     t_idx = len(ncf.dimensions["time"])
+                    # A CHAINED run re-flushes a window it already wrote when a
+                    # link restarts inside that window, and a blind append then
+                    # writes a SECOND row for the same time.  Observed in a real
+                    # century arm: two t=105 rows with different rsut, which
+                    # made a matched-window comparison ambiguous (-6.8% vs
+                    # -5.7% depending on which row was picked).  Skip the
+                    # repeat and say so LOUDLY -- overwriting would risk
+                    # replacing a COMPLETE month with a partial re-accumulation
+                    # after a mid-window restart.
                     ncf.variables["time"][t_idx] = float(time)
                     ncf.variables["time_bnds"][t_idx, :] = [
                         time_bounds[0], time_bounds[1],
@@ -1692,7 +1522,9 @@ class CFWriter:
                 encoding=encoding, unlimited_dims=["time"],
             )
 
-        return out_path
+        return self._finalize_series_path(
+            series_key, out_path, var_name, table_id, time_bounds,
+        )
 
     def write_monthly(
         self,
@@ -1756,7 +1588,6 @@ class CFWriter:
         nlat = lat_np.shape[0]
         nlon = lon_np.shape[0]
         n_months = len(months)
-        output_dtype = _resolve_output_dtype(None)
 
         # Days in each month (noleap / 365_day calendar)
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -1821,10 +1652,25 @@ class CFWriter:
             try:
                 table_id, entry = lookup_cmor_entry(var_name)
             except KeyError:
-                # Not a standard CMOR variable — skip silently
+                # Not a standard CMOR variable. Skipping is right -- this is a
+                # bulk writer fed whatever the run produced -- but doing it
+                # SILENTLY means a variable can vanish from the archive with no
+                # signal, and the writer that raises (write_field) is the one a
+                # user is least likely to call (codex, #1501). Warn once per
+                # name so the omission is visible without spamming per step.
+                if var_name not in _WARNED_UNKNOWN_CMOR_VARS:
+                    _WARNED_UNKNOWN_CMOR_VARS.add(var_name)
+                    warnings.warn(
+                        f"CMOR bulk write: {var_name!r} is not in the vendored "
+                        f"CMIP6 tables, so it is NOT being written. If it "
+                        f"should be archived, add it to the table subset "
+                        f"(scripts/data/build_cmor_table_subset.py); if not, "
+                        f"this is expected.",
+                        stacklevel=2)
                 continue
 
             declared_dims = entry["dimensions"]
+            output_dtype = _dtype_for_entry(entry)
 
             # Build the field array in the correct shape
             if key.startswith("zonal_"):
@@ -1938,12 +1784,7 @@ class CFWriter:
             if ref_height_m is not None:
                 coords["height"] = _make_height_da(ref_height_m)
 
-            var_attrs = {
-                "standard_name": entry["standard_name"],
-                "long_name": entry["long_name"],
-                "units": entry["units"],
-                "cell_methods": entry["cell_methods"],
-            }
+            var_attrs = _variable_attrs(entry)
 
             da = xr.DataArray(
                 field,
@@ -1988,7 +1829,8 @@ class CFWriter:
             )
 
             out_path = self._output_path(var_name, table_id, time_range)
-            encoding = {var_name: self._encoding_for(var_name)}
+            encoding = {var_name: self._encoding_for(var_name, entry)}
+            encoding.update(self._coord_encoding(ds))
 
             ds.to_netcdf(
                 out_path,
@@ -2006,6 +1848,7 @@ class CFWriter:
         daily_data: Dict[str, Any],
         lat: Any,
         lon: Any,
+        extra_attrs_by_var: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> List[Path]:
         """Write daily-mean data from a ``SpatialDailyAccumulator`` to NetCDF.
 
@@ -2025,6 +1868,10 @@ class CFWriter:
             Output of ``SpatialDailyAccumulator.finalize()``.
         lat, lon : array-like
             1-D latitude / longitude of the output grid.
+        extra_attrs_by_var : dict, optional
+            Per-variable attribute overrides, ``{var_name: {attr: value}}``
+            (e.g. an honest ``cell_methods`` for snapshot-sampled fields —
+            issue #1353).  Variables not in the dict keep table defaults.
 
         Returns
         -------
@@ -2052,9 +1899,15 @@ class CFWriter:
         written: List[Path] = []
         seen: set = set()
         for key, var_name in key_to_var.items():
-            # Skip variables not defined in the day table.
+            # Map the accumulator's name onto a REAL CMIP6 daily
+            # variable (see _DAILY_VARIABLE_REMAP) and skip anything the
+            # target table does not define.
+            remap = _DAILY_VARIABLE_REMAP.get(var_name)
+            out_var = remap.out_name if remap else var_name
+            out_table = remap.table if remap else "day"
+            out_plev = remap.plev_pa if remap else None
             try:
-                lookup_cmor_entry(var_name, table="day")
+                lookup_cmor_entry(out_var, table=out_table)
             except KeyError:
                 continue
 
@@ -2068,14 +1921,24 @@ class CFWriter:
                 # Buckets store year relative to that, so simply:
                 #   day-offset = yr * 365 + (doy - 1)   (noleap)
                 d0 = float(yr * 365 + (doy - 1))
+                # A remapped single-level field arrives as (nlat, nlon)
+                # and must be written on a length-1 vertical axis.
+                slab = field[i]
+                if out_plev is not None:
+                    slab = slab[np.newaxis, ...]
                 out_path = self.write_field(
-                    var_name=var_name,
-                    data=field[i],
+                    var_name=out_var,
+                    data=slab,
                     time=d0 + 0.5,
                     time_bounds=(d0, d0 + 1.0),
                     lat=lat,
                     lon=lon,
-                    table="day",
+                    plev=(
+                        np.array([out_plev], dtype=np.float64)
+                        if out_plev is not None else None
+                    ),
+                    table=out_table,
+                    extra_attrs=(extra_attrs_by_var or {}).get(var_name),
                 )
             if out_path is not None and out_path not in seen:
                 written.append(out_path)
@@ -2115,7 +1978,7 @@ class CFWriter:
         """
         xr = _import_xarray()
         table_id, entry = lookup_cmor_entry(var_name, table="fx")
-        output_dtype = _resolve_output_dtype(None)
+        output_dtype = _dtype_for_entry(entry)
 
         lat_np = _to_numpy(lat)
         lon_np = _to_numpy(lon)
@@ -2126,14 +1989,7 @@ class CFWriter:
                 f"{lon_np.shape[0]}), got {data_np.shape}"
             )
 
-        var_attrs = {
-            "standard_name": entry["standard_name"],
-            "long_name": entry["long_name"],
-            "units": entry["units"],
-            "cell_methods": entry["cell_methods"],
-        }
-        if extra_attrs:
-            var_attrs.update(extra_attrs)
+        var_attrs = merged_variable_attrs(entry, extra_attrs)
 
         da = xr.DataArray(
             data_np,
@@ -2161,7 +2017,8 @@ class CFWriter:
         ds.attrs["frequency"] = "fx"
 
         out_path = self._output_path(var_name, table_id)
-        encoding = {var_name: self._encoding_for(var_name)}
+        encoding = {var_name: self._encoding_for(var_name, entry)}
+        encoding.update(self._coord_encoding(ds))
         ds.to_netcdf(out_path, format="NETCDF4", encoding=encoding)
         return out_path
 

@@ -1,17 +1,27 @@
 #!/usr/bin/env python
 """Global **biophysics-only** land driver forced by CRU-JRA reanalysis (LMIP).
 
-This is the M3 driver of the LMIP forcing workplan (``docs/land/lmip_s3_scope.md``).
+Operational runbook: ``docs/land/lmip_biophys_runbook.md``.
 It is a copy of the ``run_lmip_smoke.py`` template with the *idealised* per-step
 forcing replaced by **real CRU-JRA reanalysis** (CLM datm format), disaggregated
 from 6-hourly to the model timestep and streamed through ``lax.scan`` as an
 explicit per-step input (SegmentForcing doctrine).  ``run_lmip_smoke.py`` is kept
 untouched as the synthetic-forcing smoke test.
 
-Configuration matches ``run_lmip_smoke`` exactly: ``MultiLayerLandConfig`` with
-prescribed seasonal LAI (CLM5 monthly climatology, one-year cycle) and
-**carbon disabled** (``carbon="none"``) — energy + water + snow + soil
-temperature only.  No NBP; the carbon cycle is a later workstream.
+By default the configuration matches ``run_lmip_smoke`` exactly:
+``MultiLayerLandConfig`` with prescribed seasonal LAI (CLM5 monthly climatology,
+one-year cycle) and **carbon disabled** (``carbon="none"``) — energy + water +
+snow + soil temperature only.  No NBP; the carbon cycle is a later workstream.
+
+``physics.calibrated_land_physics`` REPLACES that default with the land model
+the baked per-plant-type tables were fitted under: MOST exchange, big-leaf
+surface energy balance, Farquhar stomata on a PRESCRIBED (time-constant) leaf
+carbon rather than the seasonal LAI climatology, and the calibration soil column
+(8 layers over 3 m, growth 1.5).  The carbon pools are still not spun up — they
+are re-derived and discarded every step, exactly as the offline calibrator does,
+so the fitted conductance acts on the leaf area it was fitted with.  Use it when
+the resulting soil state will initialise a coupled run on that same land model;
+see ``docs/land/land_dual_target_calibration_runbook.md``.
 
 Default timestep is **1 h** (``--dt 3600``); pass ``--dt 1800`` for 30-min steps.
 Default grid is **latlon ~2°** (``--grid-type latlon --resolution 90`` -> 90x180).
@@ -33,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -46,10 +57,18 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.land.config import MultiLayerLandConfig, LandConfig, resolve_land_config
+from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_grid import SoilGridConfig
+from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.canopy import CanopyConfig
 from legoesm.land.surface_scheme import SimpleSEBConfig
-from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
+from legoesm.land.stomata import StomataConfig
+from legoesm import constants
+from legoesm.land.multilayer_land import (
+    step_multilayer_land,
+    step_multilayer_land_with_diagnostics,
+    init_multilayer_land_state,
+)
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
 from legoesm.land.forcing import stage_forcing, stage_forcing_years
@@ -57,7 +76,9 @@ from legoesm.land.output_tapes import (
     accumulate_tape_step, build_slot_indices, finalize_tape,
     init_tape_accumulator, load_output_config,
 )
-from legoesm.land.restart import load_land_restart, save_land_restart
+from legoesm.land.restart import (
+    load_land_restart, merge_land_restart_into_template, save_land_restart,
+)
 
 U_MIN = 1.0
 _SEC_PER_DAY = 86400.0
@@ -116,6 +137,26 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         land_mode=cfg.physics["land_mode"],
         surface_scheme=cfg.physics["surface_scheme"],
         bulk=cfg.physics["bulk_scheme"],
+        # Composable physics knobs (defaults = the AMIP-consistent multilayer
+        # canopy).  See lmip_config.validate_config for bounds/validation.
+        stomatal_model=cfg.physics.get("stomatal_model", "ball_berry"),
+        stomata_enabled=bool(cfg.physics.get("stomata_enabled", False)),
+        calibrated_land_physics=bool(
+            cfg.physics.get("calibrated_land_physics", False)),
+        vc_max25=cfg.physics.get("vc_max25", None),
+        g1=cfg.physics.get("g1", None),
+        gs_max=cfg.physics.get("gs_max", None),
+        snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
+        enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        albedo=cfg.physics.get("albedo") or {},
+        glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
+        glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
+        root_depth_per_pft=cfg.physics.get("root_depth_per_pft", None),
+        theta_wp_per_pft=cfg.physics.get("theta_wp_per_pft", None),
+        theta_fc_per_pft=cfg.physics.get("theta_fc_per_pft", None),
+        soil_n_layers=int(cfg.physics.get("soil_n_layers", 8)),
+        soil_depth_m=float(cfg.physics.get("soil_depth_m", 0.0)),
+        soil_growth_factor=float(cfg.physics.get("soil_growth_factor", 2.0)),
         surfdata=cfg.surfdata["path"],
         forcing_dir=cfg.forcing.get("data_dir", ""),
         prefix=cfg.forcing.get("prefix", ""),
@@ -136,6 +177,130 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         _cfg_land_cover_dataset=cfg.surfdata.get("land_cover_dataset", "clm5"),
     )
     return ns
+
+
+# CF-style metadata for every output variable (long_name, UDUNITS ``units``, and a
+# CF ``standard_name`` where one exists).  Single source of truth for the tape and
+# revert-map writers; sign / positive direction is stated in the long_name.
+_VAR_META = {
+    "T_sfc":          {"long_name": "surface skin temperature", "units": "K",
+                       "standard_name": "surface_temperature"},
+    "T_soil_top":     {"long_name": "top soil-layer temperature", "units": "K",
+                       "standard_name": "soil_temperature"},
+    "theta_soil_top": {"long_name": "top soil-layer volumetric water content",
+                       "units": "m3 m-3",
+                       "standard_name": "volume_fraction_of_condensed_water_in_soil"},
+    "snow_depth":     {"long_name": "snow water equivalent", "units": "kg m-2",
+                       "standard_name": "surface_snow_amount"},
+    "albedo":         {"long_name": "surface broadband shortwave albedo", "units": "1",
+                       "standard_name": "surface_albedo"},
+    "shflx":          {"long_name": "surface sensible heat flux (positive up, into atmosphere)",
+                       "units": "W m-2", "standard_name": "surface_upward_sensible_heat_flux"},
+    "lhflx":          {"long_name": "surface latent heat flux (positive up, into atmosphere)",
+                       "units": "W m-2", "standard_name": "surface_upward_latent_heat_flux"},
+    "Rnet":           {"long_name": "net radiation into the surface (SW absorbed + net LW)",
+                       "units": "W m-2", "standard_name": "surface_net_downward_radiative_flux"},
+    "runoff":         {"long_name": "total runoff (surface + subsurface freshwater flux)",
+                       "units": "kg m-2 s-1", "standard_name": "runoff_flux"},
+    "precip":         {"long_name": "total precipitation rate", "units": "kg m-2 s-1",
+                       "standard_name": "precipitation_flux"},
+    "LAI":            {"long_name": "leaf area index", "units": "m2 m-2",
+                       "standard_name": "leaf_area_index"},
+    "GPP":            {"long_name": "gross primary production (carbon uptake)",
+                       "units": "gC m-2 day-1",
+                       "standard_name": "gross_primary_productivity_of_biomass_expressed_as_carbon"},
+    "ET":             {"long_name": "evapotranspiration (latent-heat-equivalent, lhflx / L_v)",
+                       "units": "mm day-1", "standard_name": "water_evapotranspiration_flux"},
+    "transp":         {"long_name": "canopy transpiration (LE_canopy / L_v)", "units": "mm day-1",
+                       "standard_name": "transpiration_flux"},
+    "soil_evap":      {"long_name": "soil / ground evaporation (LE_soil / L_v)", "units": "mm day-1",
+                       "standard_name": "water_evaporation_flux_from_soil"},
+    "reverted":       {"long_name": "NaN-revert guard rate (fraction of steps reverted; "
+                                    ">0 = numerically diverging cell)", "units": "1"},
+    "land_fraction":  {"long_name": "surfdata land fraction (land + lake + glacier)", "units": "1",
+                       "standard_name": "land_area_fraction"},
+    "revert_count":   {"long_name": "count of steps the NaN-revert guard fired for this cell",
+                       "units": "1"},
+}
+
+
+def _apply_cf_metadata(ds):
+    """Attach per-variable long_name/units/standard_name + coordinate units +
+    the CF Conventions flag to an output ``xarray.Dataset`` (in place)."""
+    for v in ds.data_vars:
+        ds[v].attrs.update(_VAR_META.get(v, {}))
+    if "lat" in ds.coords or "lat" in ds:
+        ds["lat"].attrs.update({"long_name": "latitude", "units": "degrees_north",
+                                "standard_name": "latitude"})
+    if "lon" in ds.coords or "lon" in ds:
+        ds["lon"].attrs.update({"long_name": "longitude", "units": "degrees_east",
+                                "standard_name": "longitude"})
+    if "time" in ds.coords or "time" in ds:
+        # NB: use a plain UDUNITS duration ("days"), NOT "days since ...year_start",
+        # which xarray would try to CF-decode into a datetime and fail (year_start
+        # is not a real reference date).  The reference is stated in long_name.
+        ds["time"].attrs.update({
+            "long_name": "time (days since Jan 1 of the run's first year, noleap calendar)",
+            "units": "days"})
+    ds.attrs.setdefault("Conventions", "CF-1.8")
+    return ds
+
+
+def _nonfinite_per_col(tree, ncol: int):
+    """Per-column bool ``(ncol,)``: True where ANY state leaf is non-finite in
+    that column.  Columns are independent in the offline land model, so this
+    lets the driver revert only the failing columns (not the whole grid).
+    Assumes every per-column leaf has axis 0 = the column axis; non-column
+    leaves (wrong leading dim / scalars) are skipped.
+    """
+    flags = []
+    for leaf in jax.tree_util.tree_leaves(tree):
+        if getattr(leaf, "ndim", 0) < 1 or leaf.shape[0] != ncol:
+            continue
+        nf = ~jnp.isfinite(leaf)
+        if leaf.ndim > 1:
+            nf = jnp.any(nf, axis=tuple(range(1, leaf.ndim)))
+        flags.append(nf)
+    if not flags:
+        return jnp.zeros(ncol, dtype=bool)
+    return jnp.any(jnp.stack(flags, axis=0), axis=0)
+
+
+def resolve_lulcc(land_cover_dataset: str, n_cover_years: int, cover_years) -> str:
+    """Validate the declared land-cover dataset against the loaded surfdata and
+    return a one-line transient-cover status for the run banner.
+
+    ``land_cover_dataset`` (from ``surfdata.land_cover_dataset``) is the config's
+    declared cover source: ``clm5`` = the static single-year base; any of
+    ``luh2|luh3|hyde|pongratz|kk10`` = a transient anthropogenic reconstruction.
+
+    The transient-cover engine (``make_step_land_params_updater`` +
+    per-step ``year`` threading) keys off the surfdata's NUMBER OF COVER YEARS,
+    not off this field — so a run that *declares* a reconstruction but is handed a
+    single-year surfdata would SILENTLY apply no land-use change.  That is the
+    "no silent no-op" failure the codebase forbids, so raise instead: the
+    reconstruction must first be baked into a transient surfdata
+    (``scripts/data/build_anthropogenic_surfdata.py --dataset <name>`` for
+    HYDE/Pongratz/KK10, or ``build_luh2_transient_surfdata`` for LUH2/3) and
+    ``surfdata.path`` pointed at it.  ``clm5`` + a multi-year surfdata is allowed
+    (transient cover still applies) but the banner flags the provenance mismatch.
+    """
+    from legoesm.land.surface_data.datasets import validate_land_cover_dataset
+    validate_land_cover_dataset(land_cover_dataset)          # known-name guard (raises)
+    transient = n_cover_years > 1
+    if land_cover_dataset != "clm5" and not transient:
+        raise SystemExit(
+            f"land_cover_dataset={land_cover_dataset!r} declares a transient LULCC "
+            f"reconstruction, but the surfdata carries a single cover year — no "
+            f"land-use change would be applied (silent no-op).  Build a transient "
+            f"surfdata first (scripts/data/build_anthropogenic_surfdata.py "
+            f"--dataset {land_cover_dataset}) and set surfdata.path to it, or use "
+            f"land_cover_dataset=clm5 for a static-cover run.")
+    if transient:
+        y0, y1 = int(cover_years[0]), int(cover_years[-1])
+        prov = "" if land_cover_dataset != "clm5" else " [dataset=clm5 but surfdata is transient]"
+        return f"transient LULCC ON ({land_cover_dataset}, {n_cover_years} cover years {y0}-{y1}){prov}"
+    return f"static cover ({land_cover_dataset})"
 
 
 def _report_eluc(args, gsd) -> None:
@@ -219,18 +384,104 @@ def run(args) -> int:
     # this is the defense that catches a NEW scheme wired in without touching
     # the driver).
     if args.surface_scheme == "two_leaf_canopy":
-        surf = CanopyConfig(max_iters=50, tol=1e-2)
+        # The two-leaf canopy carries its OWN mechanistic Ball-Berry/Medlyn
+        # stomata (selected by CanopyConfig.stomatal_model); per-column Vcmax25
+        # comes from the surfdata PFT map.
+        surf = CanopyConfig(max_iters=50, tol=1e-2, stomatal_model=args.stomatal_model)
     elif args.surface_scheme == "simple_seb":
         surf = SimpleSEBConfig()
     else:
         raise ValueError(
             f"unknown surface_scheme {args.surface_scheme!r} "
             "(expected 'two_leaf_canopy' or 'simple_seb')")
+    # StomataConfig governs the SimpleSEB interactive-stomata path (the Jarvis
+    # beta amip_sota disabled for over-transpiration, #730); the two-leaf canopy
+    # ignores it (it has its own leaf conductance).  Only override a scalar the
+    # user actually set (None -> land default / per-PFT surfdata value).
+    _stom = {"enabled": bool(args.stomata_enabled), "stomata_model": args.stomatal_model}
+    if args.vc_max25 is not None:
+        _stom["Vc_max25"] = float(args.vc_max25)
+    if args.gs_max is not None:
+        _stom["gs_max"] = float(args.gs_max)
+    if args.g1 is not None:
+        _stom["g1_bb" if args.stomatal_model == "ball_berry" else "g1_med"] = float(args.g1)
+    stomata = StomataConfig(**_stom)
+
+    # --- Surface albedo + root-zone parameters, straight from the config ------
+    # Generic values under generic names: ``physics.albedo`` carries
+    # LandAlbedoConfig field values (absent field = the existing default, so an
+    # empty block is bit-identical to every pre-existing LMIP run);
+    # ``physics.glacier_albedo_vis``/``_nir`` set the ice-sheet base albedo pair
+    # (absent = the uncalibrated module default); the three ``*_per_pft`` lists
+    # (length-17, CLM5 PFT order) set per-column root-zone water uptake at the
+    # dominant PFT (absent = the scalar MultiLayerLandConfig values).  All
+    # values were validated by lmip_config.validate_config.
+    _land_albedo = LandAlbedoConfig()._replace(
+        **{k: float(v) for k, v in (args.albedo or {}).items()})
+    if args.albedo and isinstance(surf, CanopyConfig):
+        # The two-leaf canopy computes the sunlight it ABSORBS from the CLM
+        # soil-colour albedo pair (a moisture-dependent visible/near-infrared
+        # pair per column), not from this block: nothing here reaches the
+        # canopy radiative transfer, so a brighter snow albedo set here does
+        # not brighten the surface the radiation sees, and does not slow
+        # snowmelt.  It still sets the albedo the run REPORTS below 1 W/m2 of
+        # sunlight and the value handed to a coupled atmosphere.  The ice-sheet
+        # pair (``glacier_albedo_vis``/``_nir``) DOES reach the canopy.  Say so
+        # out loud rather than let a calibration look applied when it is not.
+        warnings.warn(
+            "physics.albedo is set and the surface scheme is the two-leaf "
+            "canopy: these values change the REPORTED albedo only. The canopy "
+            "takes its absorbed sunlight from the soil-colour albedo pair, so "
+            "the snow and dry-soil calibration here does not alter absorbed "
+            "shortwave or snowmelt on this lane.", RuntimeWarning, stacklevel=2)
+    _glacier_alb = None
+    if args.glacier_albedo_vis is not None:
+        _glacier_alb = (float(args.glacier_albedo_vis),
+                        float(args.glacier_albedo_nir))
+    _pft_root = None
+    if args.root_depth_per_pft is not None:
+        _pft_root = {
+            "root_depth": np.asarray(args.root_depth_per_pft, dtype=np.float64),
+            "theta_wp": np.asarray(args.theta_wp_per_pft, dtype=np.float64),
+            "theta_fc": np.asarray(args.theta_fc_per_pft, dtype=np.float64),
+        }
+
     if args.land_mode == "multilayer":
+        # Vertical soil grid.  ``init_land_surface_data`` now remaps the surfdata
+        # soil profile onto THIS grid (it forwards it to the loader), so a
+        # non-default discretisation can no longer desync from the (ncol, n_layer)
+        # Cosby hydraulics.  Defaults reproduce SoilGridConfig(); AMIP parity is
+        # 10 layers / 3.0 m.
+        # UNDER ``calibrated_land_physics`` this is REPLACED further down: the
+        # soil grid becomes the calibration column (8 layers, 3 m, growth 1.5 —
+        # same layer COUNT, so the loader still matches) and the carbon scheme
+        # becomes ``differland`` rather than staying off.
+        _soil_grid_cfg = SoilGridConfig(
+            n_layers=int(args.soil_n_layers),
+            growth_factor=float(args.soil_growth_factor),
+            total_depth=float(args.soil_depth_m))
         base_cfg = MultiLayerLandConfig(
-            surface_scheme=surf, soil_grid=SoilGridConfig(),
-            bulk_scheme=args.bulk, snow_albedo_feedback=True)
-        step_fn = step_multilayer_land
+            surface_scheme=surf, soil_grid=_soil_grid_cfg,
+            bulk_scheme=args.bulk, snow_albedo_feedback=bool(args.snow_albedo),
+            stomata=stomata,
+            land_albedo=_land_albedo,
+            # Soil-water latent zero-curtain: off is bit-identical sensible-only
+            # heat; on stabilises freezing boreal/Arctic columns.  Preserved
+            # through init_land_surface_data (which only _replace()s hydraulics).
+            thermal=SoilThermalConfig(enable_freeze_thaw=bool(args.enable_freeze_thaw)))
+        # A land initial condition is only meaningful for the model it was
+        # equilibrated under, so a spin-up feeding a calibrated coupled run has to
+        # use the same one — including its soil column, which this driver
+        # otherwise leaves at the loader default.  ONE shared definition, so the
+        # calibration, the spin-up and the coupled run cannot drift apart.
+        if getattr(args, "calibrated_land_physics", False):
+            from legoesm.land.config import apply_calibrated_multilayer
+            base_cfg = apply_calibrated_multilayer(base_cfg)
+        # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
+        # is dropped from the TileResponse when carbon is off).  Same _impl as
+        # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
+        # computed, so this adds no cost.
+        step_fn = step_multilayer_land_with_diagnostics
     elif args.land_mode == "slab":
         base_cfg = LandConfig(surface_scheme=surf)
         step_fn = step_land
@@ -241,7 +492,8 @@ def run(args) -> int:
     is_multilayer = (args.land_mode == "multilayer")
 
     config, _params_nominal, gsd = init_land_surface_data(
-        args.surfdata, grid, base_cfg, args.start_doy)
+        args.surfdata, grid, base_cfg, args.start_doy, glacier_alb=_glacier_alb,
+        pft_root_params=_pft_root)
 
     # --- CRU-JRA forcing: load -> regrid -> disaggregate to the model steps. ---
     # Year range: --year-end defaults to --year (single-year, backward-compat).
@@ -285,9 +537,25 @@ def run(args) -> int:
     forcing_desc = ("synthetic" if synthetic
                     else f"CRU-JRA {year_start}"
                     + (f"-{year_end}" if multi_year else ""))
+    _ft = bool(getattr(getattr(config, "thermal", None), "enable_freeze_thaw", False))
+    # --- LULCC option: validate the declared land-cover dataset against the loaded
+    # surfdata (fail fast on a declared-reconstruction / static-surfdata mismatch),
+    # and validate the E_LUC bookkeeping config UP FRONT so a bad knob fails before
+    # the run instead of in the post-run _report_eluc. ---
+    _lc_dataset = getattr(args, "_cfg_land_cover_dataset", "clm5")
+    _n_cover_years = int(np.asarray(gsd.pft_frac).shape[0])
+    _lulcc_status = resolve_lulcc(_lc_dataset, _n_cover_years, np.asarray(gsd.years))
+    _luc_block = getattr(args, "_cfg_luc", None) or {}
+    _eluc_on = _luc_block.get("scheme", "none") == "bookkeeping"
+    if _eluc_on:
+        from legoesm.land.land_use_change import LandUseChangeConfig, validate_luc_config
+        _fields = LandUseChangeConfig._fields
+        validate_luc_config(
+            LandUseChangeConfig(**{k: v for k, v in _luc_block.items() if k in _fields}))
     print(f"grid={args.grid_type} | {ncol} columns | surface={args.surface_scheme} | "
-          f"carbon={config.carbon.scheme} | dt={dt:.0f}s | n_steps={args.n_steps} | "
-          f"forcing={forcing_desc}")
+          f"carbon={config.carbon.scheme} | freeze_thaw={'on' if _ft else 'off'} | "
+          f"cover={_lulcc_status} | E_LUC={'on' if _eluc_on else 'off'} | "
+          f"dt={dt:.0f}s | n_steps={args.n_steps} | forcing={forcing_desc}")
 
     # Precompute per-year masks over model_times_s.  We stage forcing +
     # scan ONE YEAR AT A TIME in a Python loop below, so peak device memory
@@ -333,11 +601,31 @@ def run(args) -> int:
         if args.restart_from:
             # Warm start from a prior end-state — bypass the cold-init T_soil
             # broadcast so the loaded profile survives verbatim.
-            state, restart_meta = load_land_restart(
+            # Layer thicknesses, not just the count: 8 layers can span 3 m or
+            # 6.375 m, and only the thicknesses tell a restart's soil profile
+            # apart from one placed at different depths.
+            from legoesm.land.soil_grid import make_soil_grid as _make_soil_grid
+            loaded, restart_meta = load_land_restart(
                 args.restart_from,
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
-                expected_n_layers=config.soil_grid.n_layers)
+                expected_n_layers=config.soil_grid.n_layers,
+                expected_soil_grid=config.soil_grid,
+                # The calibration column is not this driver's historical
+                # default, so an older restart carrying no interfaces is
+                # almost certainly on the wrong one: refuse rather than warn,
+                # otherwise the chain re-saves that profile under the new
+                # column's label.
+                require_soil_grid=bool(getattr(
+                    args, "calibrated_land_physics", False)))
+            # A restart round-trips only the prognostic fields, leaving the
+            # optional structural ones (surface_water, snow/ice bands,
+            # canopy_state) as None — but step_multilayer_land returns them as
+            # arrays, so feeding the bare loaded state into the lax.scan below
+            # raises a carry pytree-structure mismatch.  Graft onto a canonical
+            # cold-start template, as model_driver and run_land_spinup do.
+            state = merge_land_restart_into_template(
+                loaded, init_multilayer_land_state(ncol, config, T_init=288.0))
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
@@ -345,7 +633,9 @@ def run(args) -> int:
             state = init_multilayer_land_state(ncol, config, T_init=288.0)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
-    update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
+    update_land_params = make_step_land_params_updater(
+        gsd, config.surface_scheme, glacier_alb=_glacier_alb,
+        pft_root_params=_pft_root)
 
     # ----- output tapes (CLM-style history streams; see output_tapes.py) -----
     if getattr(args, "_cfg_output_tapes", None) is not None:
@@ -368,14 +658,62 @@ def run(args) -> int:
 
     _ZEROS = jnp.zeros(ncol)                       # slab-mode placeholder for multilayer-only vars
 
-    # ----- scan body: (state, tape_accums) -> next; no per-step output returned.
+    # PRESCRIBED carbon state (fixed leaf carbon -> fixed LAI = C_fol/LCMA).  The
+    # Farquhar branch of compute_effective_beta needs BOTH the differland scheme
+    # and a non-None carbon state; with the scheme set and the state missing the
+    # same dispatch silently runs JARVIS instead, a different stomatal model from
+    # the one the baked conductance was fitted under.  The evolved pools are
+    # discarded each step, exactly as the offline calibrator does, so no carbon
+    # spin-up is needed.  None whenever the scheme is not differland, which keeps
+    # every existing run byte-identical.
+    _carbon_state = None
+    if is_multilayer and config.stomata.enabled and config.carbon.scheme == "differland":
+        from legoesm.land.carbon.carbon_cycle import init_carbon_state
+        _carbon_state = init_carbon_state((ncol,), config.carbon)
+
+    # ----- scan body: (state, tape_accums, revert_count) -> next. -----
     def _step_body(carry, xs):
-        state, accums = carry
+        state, accums, revert_count = carry
         forcing_t, doy_t, year_t, per_tape_slot = xs
         theta_top_t = (state.theta_soil[:, 0] if is_multilayer else jnp.full(ncol, 0.2))
         land_params_t, lai_diag = update_land_params(theta_top_t, doy_t, year_t)
-        new_state, resp, _ = step_fn(state, forcing_t, config, U_MIN, dt,
-                                     lat=lat_rad, land_params=land_params_t, doy=doy_t)
+        # Multilayer uses the diagnostics variant (4-tuple) so surface_out.gpp is
+        # reachable; slab keeps the 3-tuple.  ``is_multilayer`` is static.
+        if is_multilayer:
+            new_state, resp, _, surf_out = step_fn(
+                state, forcing_t, config, U_MIN, dt,
+                lat=lat_rad, land_params=land_params_t, doy=doy_t,
+                carbon_state=_carbon_state)
+        else:
+            new_state, resp, _ = step_fn(
+                state, forcing_t, config, U_MIN, dt,
+                lat=lat_rad, land_params=land_params_t, doy=doy_t)
+            surf_out = None
+        # GPP [gC/m2/day]: the canopy's gross primary production (surface_out.gpp,
+        # gC/m2/s).  None for schemes that don't produce it (simple_seb biophysics)
+        # -> reported as 0.  ET [mm/day]: latent-heat-equivalent evapotranspiration
+        # lhflx / L_v (positive = surface -> atmosphere; over snow this is the
+        # sublimation-equivalent water flux).
+        if surf_out is not None and surf_out.gpp is not None:
+            gpp_day = surf_out.gpp * _SEC_PER_DAY
+        else:
+            gpp_day = _ZEROS
+        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
+        # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
+        # evaporation), converted to a water flux.  None for simple_seb (single skin,
+        # no canopy/soil partition) -> 0.  transp + soil_evap ~ ET (modulo snow
+        # sublimation).  Net radiation [W/m2], positive INTO the surface = absorbed
+        # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
+        # reported albedo/lw_up already reflect the canopy RT).
+        if surf_out is not None and surf_out.LE_canopy is not None:
+            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+        else:
+            transp = _ZEROS
+            soil_evap = _ZEROS
+        rnet = (forcing_t.sw_down * (1.0 - resp.albedo)
+                + forcing_t.lw_down - resp.lw_up)
         # Available variables per step -> selected by each tape's spec.
         values = {
             "T_sfc": resp.T_sfc, "albedo": resp.albedo,
@@ -383,6 +721,11 @@ def run(args) -> int:
             "runoff": resp.freshwater_flux,
             "precip": forcing_t.precip_total,
             "LAI": lai_diag,
+            "GPP": gpp_day,
+            "ET": et_mmday,
+            "transp": transp,
+            "soil_evap": soil_evap,
+            "Rnet": rnet,
         }
         if is_multilayer:
             values["T_soil_top"] = new_state.T_soil[:, 0]
@@ -392,12 +735,30 @@ def run(args) -> int:
             values["T_soil_top"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
+        # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
+        # Columns are independent, so if a column's state update goes non-finite,
+        # revert THAT column to its previous state (jnp.where): a diverging boreal
+        # cell can no longer poison its own future steps (it holds a finite state
+        # and may recover from a transient), and it never corrupts the run-level
+        # PASS/FAIL.  The reverted step's diagnostics are untrustworthy, so mask
+        # them to NaN; ``reverted`` (0/1) is tape-able as a per-cell failure-rate
+        # map and ``revert_count`` accumulates a per-cell total for the summary.
+        reverted = _nonfinite_per_col(new_state, ncol)          # (ncol,) bool
+        def _revert(n, o):
+            if getattr(n, "ndim", 0) < 1 or n.shape[0] != ncol:
+                return n
+            m = reverted.reshape((ncol,) + (1,) * (n.ndim - 1))
+            return jnp.where(m, o, n)
+        new_state = jax.tree_util.tree_map(_revert, new_state, state)
+        revert_count = revert_count + reverted.astype(revert_count.dtype)
+        values = {k: jnp.where(reverted, jnp.nan, v) for k, v in values.items()}
+        values["reverted"] = reverted.astype(jnp.float64)
         new_accums = {}
         for tape in tape_specs:                    # unrolled at trace time
             new_accums[tape.name] = accumulate_tape_step(
                 accums[tape.name], tape, per_tape_slot[tape.name],
                 {v: values[v] for v in tape.vars})
-        return (new_state, new_accums), None
+        return (new_state, new_accums, revert_count), None
 
     # ----- CHUNKED SCAN: stage forcing + lax.scan one year at a time.  --------
     # Tape accumulators are sized for the WHOLE run and threaded across chunks;
@@ -424,6 +785,122 @@ def run(args) -> int:
     print(f"stepping {total_steps} timestep(s) across {len(year_masks)} year chunk(s) "
           f"(lax.scan per year) ...")
 
+    # ---- output setup + per-year flush helpers ----
+    # A multi-year run flushes each COMPLETED year to its own annual NetCDF
+    # (lmip_biophys.<tape>.<year>.nc) + a resumable restart right after that
+    # year's scan, so a wall-clock timeout keeps every finished year instead of
+    # losing the whole run.  The final combined file (lmip_biophys.<tape>.nc) is
+    # still written at the end for a run that finishes.
+    lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
+    is_latlon = args.grid_type == "latlon"
+    if is_latlon:
+        nlat, nlon = args.resolution, 2 * args.resolution
+        assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
+        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
+        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
+
+    def _cover1d(a):
+        a = np.asarray(a)
+        return a[0] if a.ndim == 2 else a
+    if args.land_mask_file:
+        from legoesm.grids.topography import load_land_fraction
+        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
+    else:
+        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
+                         + _cover1d(gsd.f_glacier))
+    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
+    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
+    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
+    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
+    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
+    # threshold is needed to dodge unforced coastal cells.)
+    land = land_fraction > args.land_frac_min
+
+    def _flush_tapes(accums, slot_ids_by_tape, label):
+        """Write each tape's selected slots to ``lmip_biophys.<tape>[.<label>].nc``.
+        ``label`` empty -> the combined whole-run file; a year string -> that
+        year's annual file.  Latlon uses the (time, lat, lon) rectangular layout;
+        other grids fall back to (time, ncol)."""
+        import xarray as xr
+        masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
+        dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
+        for tape in tape_specs:
+            ids = np.asarray(slot_ids_by_tape[tape.name])
+            if ids.size == 0:
+                continue
+            finalized = finalize_tape(accums[tape.name], tape)   # var -> (n_slots, ncol)
+            _, _, slot_times = tape_slots[tape.name]
+            st = np.asarray(slot_times)[ids]
+
+            def pack(arr):
+                arr2 = np.stack([masked(arr[i]) for i in ids])
+                return arr2.reshape(ids.size, nlat, nlon) if is_latlon else arr2
+
+            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
+            # Emit the per-cell land fraction so analysis can area-weight / mask
+            # without relying on a hard threshold at run time.
+            _lf = np.asarray(land_fraction, np.float64)
+            data_vars["land_fraction"] = (
+                (("lat", "lon"), _lf.reshape(nlat, nlon)) if is_latlon
+                else (("ncol",), _lf))
+            coords = {"time": (("time",), st / _SEC_PER_DAY)}
+            if is_latlon:
+                coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
+            else:
+                coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+            attrs = {
+                "forcing": "synthetic" if synthetic else f"CRU-JRA {year_start}"
+                           + (f"-{year_end}" if year_end > year_start else ""),
+                "dt": dt, "start_doy": args.start_doy,
+                "grid_type": args.grid_type, "surface_scheme": args.surface_scheme,
+                "carbon": config.carbon.scheme,
+                "tape_name": tape.name, "tape_freq": tape.freq, "tape_average": tape.average,
+                "time_units": "days since year_start Jan 1 (noleap)",
+                "year_label": label or "all",
+            }
+            ds = _apply_cf_metadata(xr.Dataset(data_vars, coords=coords, attrs=attrs))
+            suffix = f".{label}" if label else ""
+            nc = out_dir / f"lmip_biophys.{tape.name}{suffix}.nc"
+            ds.to_netcdf(nc)
+            print(f"wrote {nc} ({ids.size} {tape.freq} slots, "
+                  f"layout={'lat,lon' if is_latlon else 'ncol'})")
+
+    def _save_restart(cur_state, t_end_s, n_completed):
+        """Save a chained-run seed named by the model time it represents
+        (restart_<YEAR>_d<DDD>h<HH>.npz, noleap).  Multilayer only."""
+        if not is_multilayer:
+            return
+        try:
+            days_since_start = t_end_s / _SEC_PER_DAY
+            year_offset = int(days_since_start // 365)
+            year_final = year_start + year_offset
+            doy_float = days_since_start - year_offset * 365.0
+            doy_int = int(doy_float)
+            hour_of_day = int(round((doy_float - doy_int) * 24.0)) % 24
+            restart_name = f"restart_{year_final:04d}_d{doy_int:03d}h{hour_of_day:02d}.npz"
+            restart_meta = {
+                "grid_type": args.grid_type, "resolution": args.resolution,
+                "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
+                # Sourced from the CONSTRUCTED config (not args) so provenance
+                # reflects the physics actually run.
+                "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "year": year_start, "year_end": year_end, "dt": dt,
+                "n_steps": args.n_steps, "start_doy": args.start_doy,
+                "forcing": ("synthetic" if synthetic else "CRU-JRA"),
+                "year_final": year_final, "doy_final": doy_int, "hour_final": hour_of_day,
+            }
+            from legoesm.land.soil_grid import make_soil_grid as _msg
+            rp = save_land_restart(
+                out_dir / restart_name, cur_state,
+                land_mode="multilayer", t_end_s=t_end_s,
+                n_steps_completed=n_completed, metadata=restart_meta,
+                soil_grid=config.soil_grid)
+            print(f"wrote {rp}")
+        except Exception as e:  # noqa: BLE001
+            print(f"(restart write skipped: {e})")
+
+    steps_done = 0
+    revert_count = jnp.zeros(ncol)                  # per-cell NaN-revert tally
     for k, (year, mask) in enumerate(year_masks):
         # Year-local model times: the year's forcing clock resets to 0 at Jan 1.
         tq_year = tq[mask]
@@ -443,27 +920,29 @@ def run(args) -> int:
         # Slice each tape's GLOBAL slot indices to just this year's steps.
         slot_year_xs = {name: idx[mask] for name, idx in slot_idx_global.items()}
         print(f"  year {year} ({n_step_year} steps) ...")
-        (state, tape_accums), _ = jax.lax.scan(
-            _step_body, (state, tape_accums),
+        (state, tape_accums, revert_count), _ = jax.lax.scan(
+            _step_body, (state, tape_accums, revert_count),
             (forcing_year, doy_year, year_xs, slot_year_xs))
         del forcing_year, doy_year, year_xs, slot_year_xs      # free before next year
+        steps_done += n_step_year
+        # Flush THIS year's completed tape slots + a resumable restart, so a
+        # wall-clock timeout keeps every finished year (annual output).  Only for
+        # multi-year runs; a single-year run gets the combined file below.
+        if multi_year:
+            try:
+                year_ids = {
+                    t.name: np.unique(np.asarray(slot_idx_global[t.name])[np.asarray(mask)])
+                    for t in tape_specs}
+                _flush_tapes(tape_accums, year_ids, f"{year:04d}")
+                _save_restart(state, float(tq_year[-1] + dt), steps_done)
+            except Exception as e:  # noqa: BLE001
+                print(f"(year {year} annual flush skipped: {e})")
 
     # --- E_LUC land-use-change bookkeeping (post-run annual diagnostic). ---
     _report_eluc(args, gsd)
 
-    # --- land mask + NaN-over-land validation (the smoke PASS/FAIL). ---
-    def cover1d(a):
-        a = np.asarray(a)
-        return a[0] if a.ndim == 2 else a
-    if args.land_mask_file:
-        from legoesm.grids.topography import load_land_fraction
-        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
-    else:
-        land_fraction = (cover1d(gsd.f_land) + cover1d(gsd.f_lake)
-                         + cover1d(gsd.f_glacier))
-    land = land_fraction >= args.land_frac_min
-
-    # --- PASS/FAIL: final soil top-layer T must be finite over land. ---
+    # --- PASS/FAIL: final soil top-layer T must be finite over land (uses the
+    #     ``land`` mask computed before the year loop). ---
     # Multilayer T_soil is a raw (ncol, n_layers) array; slab T_soil is a 1-D
     # Field (.data holds the (ncol,) array).  Validate the REAL slab state, not a
     # zeros placeholder — otherwise a slab NaN blow-up would silently PASS.
@@ -480,88 +959,46 @@ def run(args) -> int:
               f"theta_top {rng(np.asarray(state.theta_soil[:, 0]))} | "
               f"snow_depth {rng(np.asarray(state.snow_depth))} kg/m2")
 
-    # --- per-tape NetCDF writers ---
-    #
-    # Latlon output uses the standard (time, lat, lon) rectangular layout, so
-    # tools like ``xr.plot`` / ncview / panoply just work.  Non-rectangular
-    # grids (cubed-sphere, MPAS Voronoi, gaussian) can't be reshape'd cleanly,
-    # so they fall back to (time, ncol) with lat/lon as coord vars on ncol.
-    lat_deg = np.rad2deg(np.asarray(lat_rad)); lon_deg = np.rad2deg(np.asarray(lon_rad))
-    is_latlon = args.grid_type == "latlon"
-    if is_latlon:
-        nlat, nlon = args.resolution, 2 * args.resolution
-        assert nlat * nlon == ncol, f"latlon reshape mismatch: {nlat}*{nlon} != {ncol}"
-        lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
-        lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
-
+    # --- NaN-revert diagnostics: how many land cells needed the atomic revert
+    #     guard, and where.  A non-zero count = the physics diverged on those cells
+    #     (boreal/Arctic; see docs/land/boreal_nan_diagnosis_plan.md).  The run
+    #     still finishes with a finite state instead of NaN-poisoning. ---
+    rc = np.asarray(revert_count)
+    n_reverted_cells = int((rc[land] > 0).sum())
+    if n_reverted_cells:
+        print(f"NaN-revert guard: {n_reverted_cells}/{int(land.sum())} land cells "
+              f"reverted >=1 step | {int(rc[land].sum())} total cell-steps | "
+              f"worst cell {int(rc[land].max())} steps (fluxes masked; tape var "
+              f"'reverted' = per-cell revert fraction).")
+    else:
+        print("NaN-revert guard: no land cell required a revert (fully finite).")
     try:
         import xarray as xr
-        masked = lambda a: np.where(land, np.asarray(a, np.float64), np.nan)
-        for tape in tape_specs:
-            finalized = finalize_tape(tape_accums[tape.name], tape)   # var -> (n_slots, ncol)
-            _, n_slots, slot_times = tape_slots[tape.name]
-            dims = ("time", "lat", "lon") if is_latlon else ("time", "ncol")
+        rc_map = np.where(land, rc, np.nan)
+        if is_latlon:
+            rc_da = xr.DataArray(rc_map.reshape(nlat, nlon), dims=("lat", "lon"),
+                                 coords={"lat": lat_1d, "lon": lon_1d})
+        else:
+            rc_da = xr.DataArray(rc_map, dims=("ncol",), coords={
+                "lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
+        _apply_cf_metadata(xr.Dataset(
+            {"revert_count": rc_da},
+            attrs={"desc": "per-cell count of NaN-revert-guard steps (0 = fully finite)"}),
+        ).to_netcdf(out_dir / "lmip_biophys.reverts.nc")
+        print(f"wrote {out_dir / 'lmip_biophys.reverts.nc'}")
+    except Exception as e:  # noqa: BLE001
+        print(f"(revert-map write skipped: {e})")
 
-            def pack(arr):
-                arr2 = np.stack([masked(arr[i]) for i in range(n_slots)])
-                return arr2.reshape(n_slots, nlat, nlon) if is_latlon else arr2
-
-            data_vars = {v: (dims, pack(finalized[v])) for v in tape.vars}
-            coords = {"time": (("time",), slot_times / _SEC_PER_DAY)}   # doy since year_start
-            if is_latlon:
-                coords.update({"lat": (("lat",), lat_1d), "lon": (("lon",), lon_1d)})
-            else:
-                coords.update({"lat": (("ncol",), lat_deg), "lon": (("ncol",), lon_deg)})
-            attrs = {
-                "forcing": "synthetic" if synthetic else f"CRU-JRA {year_start}"
-                           + (f"-{year_end}" if year_end > year_start else ""),
-                "dt": dt, "start_doy": args.start_doy,
-                "grid_type": args.grid_type, "surface_scheme": args.surface_scheme,
-                "carbon": config.carbon.scheme,
-                "tape_name": tape.name, "tape_freq": tape.freq, "tape_average": tape.average,
-                "time_units": "days since year_start Jan 1 (noleap)",
-            }
-            ds = xr.Dataset(data_vars, coords=coords, attrs=attrs)
-            nc = out_dir / f"lmip_biophys.{tape.name}.nc"
-            ds.to_netcdf(nc)
-            print(f"wrote {nc} ({n_slots} {tape.freq} slots, "
-                  f"layout={'lat,lon' if is_latlon else 'ncol'})")
+    # --- final COMBINED whole-run NetCDF (lmip_biophys.<tape>.nc) + end-of-run
+    #     restart.  A multi-year run already flushed per-year annual files +
+    #     restarts inside the loop; this combined file is the convenience output
+    #     for a finished run (and the sole output for a single-year run). ---
+    try:
+        all_ids = {t.name: np.arange(tape_slots[t.name][1]) for t in tape_specs}
+        _flush_tapes(tape_accums, all_ids, "")
     except Exception as e:  # noqa: BLE001
         print(f"(netcdf write skipped: {e})")
-
-    # --- auto-save the end-of-run state as a chained-run seed (Phase C). ---
-    #
-    # Filename embeds the model time the state represents so a directory of
-    # end-states is an audit trail (chronological on `ls`).  Format:
-    #   restart_<YEAR>_d<DDD>h<HH>.npz   (noleap 365-day calendar)
-    # where YEAR = year_start + full_365-day-years elapsed, DDD is day-of-year
-    # in that year (0-364), HH is hour-of-day (0-23).
-    if is_multilayer:
-        try:
-            t_end_s = float(model_times_s[-1] + dt)
-            days_since_start = t_end_s / _SEC_PER_DAY
-            year_offset = int(days_since_start // 365)
-            year_final = year_start + year_offset
-            doy_float = days_since_start - year_offset * 365.0
-            doy_int = int(doy_float)
-            hour_of_day = int(round((doy_float - doy_int) * 24.0)) % 24
-            restart_name = f"restart_{year_final:04d}_d{doy_int:03d}h{hour_of_day:02d}.npz"
-            restart_meta = {
-                "grid_type": args.grid_type, "resolution": args.resolution,
-                "surface_scheme": args.surface_scheme, "bulk_scheme": args.bulk,
-                "year": year_start, "year_end": year_end, "dt": dt,
-                "n_steps": args.n_steps, "start_doy": args.start_doy,
-                "forcing": ("synthetic" if synthetic else "CRU-JRA"),
-                "year_final": year_final, "doy_final": doy_int,
-                "hour_final": hour_of_day,
-            }
-            rp = save_land_restart(
-                out_dir / restart_name, state,
-                land_mode="multilayer", t_end_s=t_end_s,
-                n_steps_completed=args.n_steps, metadata=restart_meta)
-            print(f"wrote {rp}")
-        except Exception as e:  # noqa: BLE001
-            print(f"(restart write skipped: {e})")
+    _save_restart(state, float(model_times_s[-1] + dt), args.n_steps)
 
     return 0 if status == "PASS" else 1
 

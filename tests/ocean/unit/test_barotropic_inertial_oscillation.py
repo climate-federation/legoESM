@@ -103,6 +103,30 @@ def _build(flat=False):
     state = rest_state_latlon_cgrid_ocean(
         grid, z, land_mask_override=wall, H_bathy_override=Hb,
         T_water_init_C=10.0, T_deep=10.0)
+    # The AB2 slow-forcing carry must be SEEDED before the first step: the
+    # model stores a Field each step, and a step-1 None->Field transition
+    # breaks the lax.scan carry, so the model now refuses an unseeded state.
+    # These tests predate that guard, which is why they read as failures rather
+    # than as a config error (#1388). Same idiom as
+    # build_silvestri_baroclinic_jet_setup.
+    #
+    # SEEDING ZEROS IS A CHOICE, and it changes the initial-value problem:
+    # with prev=0 the first step is (3/2+eps)~1.6x the current slow forcing,
+    # i.e. these now cover the PRODUCTION cold start (the same convention the
+    # Silvestri recipe uses), not an unperturbed analytic oscillator. The
+    # assertions here are qualitative (u -> 0 over a quarter period, |v| spins
+    # up, bounded over a full period) and survive that transient; a test that
+    # wanted the clean analytic startup would seed F_slow_*_prev from the
+    # initial slow tendency instead (codex, #1388).
+    if getattr(cfg.barotropic, "barotropic_slow_forcing_ab2", False):
+        from legoesm.core.field import Field as _F
+        state = state._replace(
+            F_slow_u_prev=_F(data=jnp.zeros_like(state.u.data[:, :, 0]),
+                             name="F_slow_u_prev", dims=("lat", "lon_u"),
+                             units="m/s^2"),
+            F_slow_v_prev=_F(data=jnp.zeros_like(state.v.data[:, :, 0]),
+                             name="F_slow_v_prev", dims=("lat_v", "lon"),
+                             units="m/s^2"))
     model = LatLonCGridOceanModel(grid, z, cfg)
     return grid, z, state, model
 

@@ -30,6 +30,9 @@ _METRIC_KEYS = ("cosa_s", "rsin2", "rarea", "dxa", "dya", "cosa_u", "sina_u",
                 "rsin_u", "dy", "dxc", "rdxc", "cosa_v", "sina_v", "rsin_v",
                 "dx", "dyc", "rdyc", "rarea_c", "fC", "sin_sg", "cos_sg")
 _ALL_INPUTS = ("delp", "pt", "w", "u", "v") + _METRIC_KEYS
+# order matters: [0] is bounded_domain, [1:] the four corner flags
+_FLAG_KEYS = ("bounded_domain", "sw_corner", "se_corner", "ne_corner",
+              "nw_corner")
 
 
 def _load_generator():
@@ -49,9 +52,12 @@ def oracle():
 def test_fixture_input_hash_enforced(oracle):
     gen = _load_generator()
     fields = {k: np.asarray(oracle[k]) for k in _ALL_INPUTS}
+    # recompute over the STORED flags (flag_* keys) — the hash binds
+    # metrics AND lane flags (km=1 migration, GLM r1 finding 4)
+    flags = tuple((k, bool(oracle[f"flag_{k}"])) for k in _FLAG_KEYS)
     recomputed = hashlib.sha256(
         gen.serialize_csw_inputs(fields, int(oracle["res"]),
-                                 int(oracle["ng"]))).hexdigest()
+                                 int(oracle["ng"]), flags=flags)).hexdigest()
     stored = str(oracle["input_sha256"])
     assert len(stored) == 64 and all(c in "0123456789abcdef" for c in stored)
     assert recomputed == stored
@@ -60,8 +66,17 @@ def test_fixture_input_hash_enforced(oracle):
         t[k].flat[0] = np.nextafter(t[k].flat[0], np.inf)
         bad = hashlib.sha256(
             gen.serialize_csw_inputs(t, int(oracle["res"]),
-                                     int(oracle["ng"]))).hexdigest()
+                                     int(oracle["ng"]),
+                                     flags=flags)).hexdigest()
         assert bad != stored, k
+    # flag-flip sensitivity: every lane flag is load-bearing in the hash
+    for i, (fk, fv) in enumerate(flags):
+        flipped = flags[:i] + ((fk, not fv),) + flags[i + 1:]
+        bad = hashlib.sha256(
+            gen.serialize_csw_inputs(fields, int(oracle["res"]),
+                                     int(oracle["ng"]),
+                                     flags=flipped)).hexdigest()
+        assert bad != stored, fk
 
 
 def test_extract_block_sha_pinned():
@@ -108,6 +123,16 @@ def test_duo_c_sw_bit_exact(oracle):
     from legoesm.core.fv3_native_sw_core import Bounds, c_sw
     bd = Bounds.single_tile(RES, NG)
     gs = {k: np.asarray(oracle[k]) for k in _METRIC_KEYS}
+    # BOUNDED lane flags (km=1 corpus migration, 2026-08-11), loaded
+    # FROM the fixture (flag_* keys, hash-covered, and the same FLAG
+    # records the Fortran driver consumed) — the port runs the exact
+    # flags the oracle ran, no third hardcoding site.  The assert pins
+    # them to the only pair upstream duo runs can reach
+    # (fv_arrays.F90:1512 / fv_grid_utils.F90:224).
+    for k in _FLAG_KEYS:
+        gs[k] = bool(oracle[f"flag_{k}"])
+    assert gs["bounded_domain"] is True
+    assert not any(gs[k] for k in _FLAG_KEYS[1:])
     out = c_sw(delp=np.asarray(oracle["delp"]), pt=np.asarray(oracle["pt"]),
                w=np.asarray(oracle["w"]), u=np.asarray(oracle["u"]),
                v=np.asarray(oracle["v"]), gs=gs, bd=bd, npx=RES + 1,
@@ -132,3 +157,30 @@ def test_fixture_input_provenance(oracle):
     sha = str(oracle["input_sha256"])
     assert len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)
     assert "duogrid" in str(oracle["input_lineage"])
+    # soft label only — the REAL plain-metrics refusal is
+    # test_fixture_metrics_are_the_bounded_gridstruct below
+    assert "BOUNDED" in str(oracle["input_lineage"])
+
+
+def test_fixture_metrics_are_the_bounded_gridstruct(oracle):
+    """Genuine metric provenance (codex km=1 r2 finding 2): a lineage
+    string is mutable metadata, so refusing a stale plain-metrics
+    fixture on it alone is not provenance.  Rebuild the bounded C12
+    gridstruct with the generator's own builder and require every
+    serialized metric field to match the fixture EXACTLY (the
+    generator stores the builder's float64 arrays unmodified, so
+    bitwise equality is the correct bar) — a fixture carrying plain
+    metrics under a relabelled lineage fails here on every angle/area
+    field."""
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_OMEGA,
+        FV3_RADIUS_M,
+        build_fv3_native_gridstruct_bounded,
+    )
+
+    gs = build_fv3_native_gridstruct_bounded(RES, NG, radius=FV3_RADIUS_M,
+                                             omega=FV3_OMEGA)
+    for k in _METRIC_KEYS:
+        np.testing.assert_array_equal(
+            np.asarray(oracle[k]), np.asarray(gs[k]),
+            err_msg=f"{k}: fixture metric is not the bounded builder's")

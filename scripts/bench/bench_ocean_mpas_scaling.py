@@ -169,7 +169,11 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
 
 
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
-                         barotropic_solver: str = "explicit_substep"):
+                         barotropic_solver: str = "explicit_substep",
+                         pcg_variant: str = "standard",
+                         n_barotropic_substeps: int = 10,
+                         conservation_fixer: bool = True,
+                         eta_floor_clamp_iters: int = 3):
     """Global mesh + z-coordinate + config + perturbed global IC.
 
     Deterministic and mesh-cache-backed, so every rank derives the
@@ -187,18 +191,28 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
         n_levels=nlev, H_max=4000.0, dz_surface=20.0, dz_deep=400.0)
     config = MPASOceanConfig(
         A_h=1e3, K_h=1e2, A_v=1e-3, K_v=1e-4,
-        n_barotropic_substeps=10,
+        n_barotropic_substeps=n_barotropic_substeps,
+        eta_floor_clamp_iters=eta_floor_clamp_iters,
         # implicit_cn at n_ranks > 1 dispatches to the DISTRIBUTED fixed-M
         # PCG (halo-composed A_op + owned-masked dots) when the layout is
         # armed — the OMIP production barotropic path.  The model ctor
         # validates the literal (raises on unknown).
         barotropic_solver=barotropic_solver,
+        # Reduction strategy inside the distributed fixed-M PCG.  At M=60
+        # (the config default) "standard" costs 1 + 2*M batched allreduces
+        # per implicit solve and "single_reduce" (Chronopoulos-Gear) costs
+        # 1 + M -- 121 vs 61 latency-serialized global reductions, which is
+        # what actually binds as the communicator reaches 256-512 ranks.
+        # Not the default: it is a different (equivalent-in-exact-arithmetic)
+        # recurrence, so it is opt-in and parity-gated, per the audit.
+        barotropic_implicit_pcg_variant=pcg_variant,
         # Production-like conservation fixers: without them the explicit
         # subcycle's raw volume drift (~1e-4 over a smoke window) would
         # trip the gate — and their global reductions are exactly the
         # collective cost a scaling row should include.
-        use_conservation_fixer=True,
-        fix_volume=True, fix_heat=True, fix_salt=True,
+        use_conservation_fixer=conservation_fixer,
+        fix_volume=conservation_fixer, fix_heat=conservation_fixer,
+        fix_salt=conservation_fixer,
     )
     state = rest_state_mpas_ocean(
         mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
@@ -319,6 +333,48 @@ def main() -> int:
     p.add_argument("--partition-method",
                    choices=["auto", "geometric", "metis", "sfc"],
                    default="auto")
+    p.add_argument("--pcg-variant",
+                   choices=["standard", "single_reduce"],
+                   default="standard",
+                   help="reduction strategy inside the distributed fixed-M "
+                        "PCG (implicit_cn only). 'standard' costs 1+2M "
+                        "batched allreduces per solve, 'single_reduce' "
+                        "(Chronopoulos-Gear) costs 1+M -- at the M=60 "
+                        "default that is 121 vs 61 latency-serialized "
+                        "global reductions, the term that binds at "
+                        "256-512 ranks. NOT a 2x step speedup: it also adds "
+                        "one extra A_op (hence one extra halo exchange) in "
+                        "the initialization, and only the reduction term is "
+                        "removed. Requires n_ranks>1, implicit_cn and f64; "
+                        "refused otherwise rather than silently ignored.")
+    p.add_argument("--eta-floor-iters", type=int, default=3,
+                   help="eta-floor clamp refinement iterations per call "
+                        "(config eta_floor_clamp_iters). 2 calls x "
+                        "n_substeps x iters batched allreduces per step: "
+                        "the sync-count knob for the rank-count term. "
+                        "1 keeps positivity (final maximum) but leaves "
+                        "the redistribution un-refined (absorbed by the "
+                        "step fixer). Scaling instrument only.")
+    p.add_argument("--conservation-fixer", choices=["on", "off"],
+                   default="on",
+                   help="off removes ALL non-scan global reductions (3 "
+                        "fixer reductions + the 2 fixer-gated unbatched "
+                        "dHeat/dSalt sums, ocean_model_mpas.py:1026) — "
+                        "the rank-count-term attribution knob for the "
+                        "non-barotropic 60-70%% of the 32->128 delta. "
+                        "Scaling instrument only; conservation gates "
+                        "obviously void when off.")
+    p.add_argument("--n-substeps", type=int, default=10,
+                   help="Barotropic explicit_substep subcycle count "
+                        "(config n_barotropic_substeps). The 10-substep "
+                        "scan holds 30 of the step's 35 halo epochs and "
+                        "60 of its 65 global reductions (2026-08-09 "
+                        "census), so this is the rank-count-term "
+                        "discriminator knob: halving it should halve the "
+                        "32->128-rank cost delta IF the term is "
+                        "barotropic-comm-bound. Physics validity of the "
+                        "subcycle is NOT asserted off 10 — scaling "
+                        "instrument only.")
     p.add_argument("--barotropic-solver",
                    choices=["explicit_substep", "implicit_cn"],
                    default="explicit_substep",
@@ -458,8 +514,49 @@ def main() -> int:
 
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 
+    # --pcg-variant reaches the solver ONLY on the distributed implicit path
+    # (ocean_model_mpas dispatches to barotropic_implicit_mpas for
+    # implicit_cn, and that hands config.barotropic_implicit_pcg_variant to
+    # solve_helmholtz_implicit only when a partition layout is armed;
+    # single-rank takes the stock-CG branch instead).  Refuse the two
+    # combinations where the flag would be silently inert rather than emit a
+    # row whose solver label is not what ran (codex review).
+    if args.pcg_variant != "standard":
+        if args.barotropic_solver != "implicit_cn":
+            raise SystemExit(
+                f"--pcg-variant {args.pcg_variant} only affects the implicit "
+                "barotropic solve, but --barotropic-solver is "
+                f"{args.barotropic_solver!r}. Pass --barotropic-solver "
+                "implicit_cn, or drop --pcg-variant (a silently ignored "
+                "performance flag would make a scaling row unattributable).")
+        # Precision before rank count, deliberately: precision is a static
+        # property of the invocation, so this branch stays reachable (and
+        # testable) on a login node at np=1, whereas an n_ranks-first order
+        # would hide it behind an MPI-only path.
+        if args.precision != "float64":
+            raise SystemExit(
+                f"--pcg-variant {args.pcg_variant} is refused at "
+                f"--precision {args.precision}: Chronopoulos-Gear replaces "
+                "the two independent dots with a reconstructed recurrence, "
+                "which is less forgiving in floating point, and this repo "
+                "has no f32 single_reduce validation gate. Run f64, or use "
+                "--pcg-variant standard.")
+        if n_ranks == 1:
+            raise SystemExit(
+                f"--pcg-variant {args.pcg_variant} needs n_ranks > 1: "
+                "single-rank implicit_cn runs stock jax.scipy CG, not the "
+                "distributed fixed-M PCG, so the variant would do nothing "
+                "while the row claimed it. This flag is a >=256-rank lever; "
+                "run it under mpirun/srun.")
+    if args.check_conservation and args.conservation_fixer == "off":
+        raise SystemExit("--check-conservation with --conservation-fixer off "
+                         "cannot pass (the fixer IS the closure); refusing")
     mesh, z_coord, config, state_global = build_global_problem(
-        subdivision, args.nlev, barotropic_solver=args.barotropic_solver)
+        subdivision, args.nlev, barotropic_solver=args.barotropic_solver,
+        pcg_variant=args.pcg_variant,
+        n_barotropic_substeps=args.n_substeps,
+        conservation_fixer=(args.conservation_fixer == "on"),
+        eta_floor_clamp_iters=args.eta_floor_iters)
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
@@ -785,7 +882,24 @@ def main() -> int:
         # mpi4jax halo fabric (codex).
         transport=("mpi4jax" if n_ranks > 1 else None),
         n_gpus=(n_ranks if args.device == "gpu" else 0),
-        solver_variant=f"mpas_ocean_{args.barotropic_solver}",
+        # The PCG variant changes the per-solve allreduce COUNT, so two rows
+        # that differ only in it are not comparable -- it belongs in the
+        # solver identity, not buried in extra{} (the plot's own receipts
+        # already lost the solver setting for the historic s7 row, which is
+        # why its PCG attribution is only conditional).
+        #
+        # Suffix ONLY when the variant actually reached the solver: that is
+        # the distributed implicit path.  Single-rank implicit_cn runs stock
+        # CG, so labelling it with a PCG variant would be a false attribution
+        # (codex review).  This also keeps the unsuffixed identity for every
+        # pre-existing row, so historic receipts stay comparable.
+        solver_variant=(
+            f"mpas_ocean_{args.barotropic_solver}"
+            + (f"_{args.pcg_variant}"
+               if (args.barotropic_solver == "implicit_cn"
+                   and n_ranks > 1
+                   and args.pcg_variant != "standard")
+               else "")),
         cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
         scaling_kind=args.mode,
         partition_metrics=(dict(part_metrics) if part_metrics else None),
@@ -797,6 +911,10 @@ def main() -> int:
             "check_conservation": bool(args.check_conservation),
             "halo_refresh": halo_refresh,
             "barotropic_solver": args.barotropic_solver,
+            "pcg_variant": args.pcg_variant,
+            "n_barotropic_substeps": args.n_substeps,
+            "conservation_fixer": args.conservation_fixer,
+            "eta_floor_clamp_iters": args.eta_floor_iters,
             "block_steps": args.block_steps,
             "blocks": args.blocks,
             "probe_steps": args.probe_steps,

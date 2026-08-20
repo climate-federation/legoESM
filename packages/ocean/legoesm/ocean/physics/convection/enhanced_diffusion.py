@@ -8,11 +8,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.eos import (
     compute_buoyancy_frequency,
     compute_buoyancy_frequency_adiabatic,
     compute_buoyancy_frequency_nemo_bn2,
-    rho_0,
+    rho_0 as _RHO_0_DEFAULT,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
 from legoesm.ocean.physics.vertical_mixing._shared import vmap_vertical_diffusion
@@ -74,6 +75,8 @@ def convective_K_A_flag(
     eos_fn=None,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    g: float = constants.g,
+    rho_ref: float = _RHO_0_DEFAULT,
 ):
     """Convective tracer diffusivity, momentum viscosity, and flag.
 
@@ -118,6 +121,17 @@ def convective_K_A_flag(
             f"{cfg.n2_mode!r}; expected 'insitu', 'insitu_signed', "
             "'adiabatic' or 'nemo_bn2'."
         )
+    # Same gate for the alpha/beta selector the nemo_bn2 branch forwards
+    # (mirrors ``eos.compute_buoyancy_frequency_nemo_bn2``'s own allowed set;
+    # validated HERE too so a typo raises even under an n2_mode that never
+    # reaches the kernel).
+    if cfg.n2_eos_form not in ("seos", "teos10"):
+        raise ValueError(
+            "Unknown EnhancedDiffusionConfig.n2_eos_form="
+            f"{cfg.n2_eos_form!r}; expected 'seos' (NEMO's 3-term simplified "
+            "EOS) or 'teos10' (NEMO's Roquet polynomial with the TEOS-10 "
+            "coefficient set, which is what ORCA1 runs: ln_teos10=.true.)."
+        )
 
     dz_actual = dz_ref * jacobian[..., jnp.newaxis]               # (..., nlev)
     dry_iface = (dz_actual[..., :-1] <= 0.0) | (dz_actual[..., 1:] <= 0.0)
@@ -139,6 +153,7 @@ def convective_K_A_flag(
             )
         N2 = compute_buoyancy_frequency_adiabatic(
             T, S, p_cell, dz_ref, jacobian_safe, eos_fn=eos_fn,
+            rho_ref=rho_ref, g=g,
         )
     elif cfg.n2_mode == "nemo_bn2":
         # NEMO eosbn2 bn2 (S-EOS): local alpha,beta at each cell's gdept
@@ -154,12 +169,19 @@ def convective_K_A_flag(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
-        N2 = compute_buoyancy_frequency_nemo_bn2(T, S, t_depth, w_depth)
+        # ``eos_form`` selects WHICH alpha/beta the bn2 assembly uses; this
+        # forward was MISSING, so the EVD trigger always took the S-EOS
+        # branch even on a TEOS-10 card whose TKE sibling
+        # (``TKEConfig.n2_eos_form``, threaded at
+        # vertical_mixing/_shared.py) used the Roquet polynomial.
+        N2 = compute_buoyancy_frequency_nemo_bn2(
+            T, S, t_depth, w_depth, g=g, eos_form=cfg.n2_eos_form)
     else:
         # In-situ density N² (SIGNED); reference density on dry columns keeps
         # the numerator finite too (BIT-IDENTICAL legacy path).
-        rho_safe = jnp.where(dry_col[..., jnp.newaxis], rho_0, rho)
-        N2 = compute_buoyancy_frequency(rho_safe, dz_ref, jacobian_safe)
+        rho_safe = jnp.where(dry_col[..., jnp.newaxis], rho_ref, rho)
+        N2 = compute_buoyancy_frequency(rho_safe, dz_ref, jacobian_safe,
+                                        rho_ref=rho_ref, g=g)
 
     if cfg.smooth_transition:
         sig = jax.nn.sigmoid(-N2 * cfg.sigmoid_sharpness)
@@ -194,6 +216,10 @@ def enhanced_diffusion_convection(
     v: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
     eos_fn=None,
+    eta: jnp.ndarray | None = None,
+    H_bathy: jnp.ndarray | None = None,
+    g: float = constants.g,
+    rho_ref: float = _RHO_0_DEFAULT,
 ) -> OceanConvectionOutput:
     """Apply enhanced diffusion where the water column is unstable.
 
@@ -233,6 +259,10 @@ def enhanced_diffusion_convection(
     eos_fn : callable or None
         EOS ``fn(T, S, p) -> rho`` for the adiabatic parcel displacement
         (``None`` -> Wright 1997).  Ignored on the in-situ path.
+    eta, H_bathy : array ``(...)`` or None
+        Sea-surface height [m] and local column depth [m].  REQUIRED when
+        ``cfg.n2_mode == "nemo_bn2"`` (they build NEMO's live
+        ``gdept(Kmm) = gdept_0*(1 + eta/H_bathy)`` ladder); ignored otherwise.
 
     Returns
     -------
@@ -245,14 +275,24 @@ def enhanced_diffusion_convection(
     # NEMO bn2 trigger needs the geometric depth ladders (gdept / interior
     # gdepw); cheap to extract, ignored by every other n2_mode.
     if cfg.n2_mode == "nemo_bn2":
-        from legoesm.ocean.eos import nemo_bn2_depth_ladders
-        _t_depth, _w_depth = nemo_bn2_depth_ladders(z_coord)
+        # NEMO evaluates alpha/beta/bn2 at the LIVE gdept(Kmm) =
+        # gdept_0*(1 + eta/ht_0) -- see eos.nemo_bn2_live_ladders for the
+        # macro expansion and why this is NOT the z* Jacobian ``jacobian``
+        # above ((eta + H)/H_max, normalised by the GLOBAL maximum depth).
+        if eta is None or H_bathy is None:
+            raise ValueError(
+                'EnhancedDiffusionConfig.n2_mode="nemo_bn2" needs eta and '
+                "H_bathy to build NEMO's live gdept(Kmm) ladder; "
+                "enhanced_diffusion_convection was called without them.")
+        from legoesm.ocean.eos import nemo_bn2_live_ladders
+        _t_depth, _w_depth = nemo_bn2_live_ladders(z_coord, eta, H_bathy)
     else:
         _t_depth = _w_depth = None
     K, A, flag = convective_K_A_flag(
         rho, z_coord.dz_ref, jacobian, cfg,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
         t_depth=_t_depth, w_depth=_w_depth,
+        g=g, rho_ref=rho_ref,
     )
 
     # CFL safety cap on the EXPLICIT branch.  Backward-Euler (implicit)

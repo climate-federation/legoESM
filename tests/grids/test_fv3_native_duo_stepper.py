@@ -31,7 +31,18 @@ NPX = N + 1
 
 @pytest.fixture(scope="module")
 def ctx():
-    return build_six_face_duo_context(N, NG)
+    # These km=1 stepper certificates were established on the interim
+    # index-copy exchange, so they keep it -- but they now SAY so.
+    # exchange_post_pgrad_sixface refuses to substitute the interim divgd
+    # exchange for dyn_core.F90:652's ext_scalar at nord > 0 unless the
+    # non-faithful choice is named, because doing it silently is what
+    # produced a 1e11 D wind in the 3-D lane.
+    # oracle_conventions=True (km=1 corpus migration, 2026-08-11): the
+    # original certificates ran duogrid=True on PLAIN unbounded metrics,
+    # a pair fv_arrays.F90:1512 makes unreachable upstream; c_sw now
+    # refuses it.  Bounded conventions follow the 3-D units (70f822c58).
+    return build_six_face_duo_context(N, NG, ext_exclude=("divgd", "cvec"),
+                                      oracle_conventions=True)
 
 
 @pytest.fixture(scope="module")
@@ -181,8 +192,9 @@ def test_sb4_two_full_steps_stable(ctx):
 
 def test_sb5_w2_steadiness(ctx):
     """SB5a characterization gate: balanced Williamson-2 at C12,
-    dt=600 s.  Measured behavior this gate pins (2026-07-17 baseline):
-    interior wind departure stays SMALL (0.6 m/s at 2 h), the edge
+    dt=600 s.  Measured behavior this gate pins (bounded-lane baseline
+    2026-08-11, job 9369371; original plain-lane baseline 2026-07-17):
+    interior wind departure stays SMALL (0.44 m/s at 2 h), the edge
     departure saturates (decelerating growth — adjustment + the
     documented interim-exchange edge inconsistency, NOT an
     instability), and mass is exact.  The duo-target cleanliness at
@@ -209,20 +221,37 @@ def test_sb5_w2_steadiness(ctx):
     dui12 = max(float(np.abs((s12[t]["u"] - states0[t]["u"])
                              [NG + 2:NG + N - 2, NG + 2:NG + N - 1]).max())
                 for t in range(6))
-    assert du12 < 10.0, du12          # measured 7.8
-    assert dui12 < 1.0, dui12         # measured 0.62
+    # Expected values re-established on the BOUNDED lane (km=1 corpus
+    # migration, 2026-08-11; measurement job 9369371): plain-lane
+    # baseline (2026-07-17) was du12 7.8 / dui12 0.62; bounded-lane
+    # measured du12 9.0523 / dui12 0.4436 — edge departure grows (the
+    # d_sw4 corner-KE masking is gone), interior improves.  Bounds are
+    # UNCHANGED (10.0 / 1.0); du12 headroom is now ~10% (and du48/du12
+    # sits at 1.82 of 2.0).  The margins are deliberately tight: the
+    # computation is deterministic fp64 from an analytic IC (no RNG, no
+    # reductions across varying layouts), so a trip is a real
+    # regression signal, not node-to-node noise.  Values printed on
+    # every run so the calibration stays auditable.
+    print(f"sb5a bounded-lane measured: du12={du12:.4f} dui12={dui12:.4f}")
+    assert du12 < 10.0, du12          # bounded 9.0523; plain was 7.8
+    assert dui12 < 1.0, dui12         # bounded 0.4436; plain was 0.62
     s48 = run_duo_sw(ctx, s12, dt=600.0, nsteps=36)
     du48 = max(float(np.abs(s48[t]["u"][slu]
                             - states0[t]["u"][slu]).max())
                for t in range(6))
+    print(f"sb5a bounded-lane measured: du48={du48:.4f}")
     assert np.isfinite(du48)
+    # bounded-lane du48 16.4651, ratio 1.82 (job 9369371); still
+    # decelerating, same saturation criterion as the plain lane
     assert du48 < 2.0 * du12, (du12, du48)   # saturating, not secular
 
 
 def test_duo_rsina_is_inverse_sina_squared(ctx):
     """codex stepper-r1 P0 pin: the duo B-node override must satisfy
     rsina*max(tiny, sina**2) == 1 on every finite nonvertex node
-    (fv_grid_utils.F90:540); the four cube vertices stay poisoned."""
+    (fv_grid_utils.F90:540).  On the bounded ctx (km=1 migration) the
+    four cube vertices are REAL (rsina=4/3), not poisoned; they stay
+    excluded here so the pin is lane-independent."""
     for t in range(6):
         gs = ctx["gs6"][t]
         blk = (slice(NG, NG + N + 1), slice(NG, NG + N + 1))
@@ -260,3 +289,109 @@ def test_geopk_threads_pt(ctx):
         assert np.allclose(gz[sl, sl, 0], want, rtol=0, atol=0), fn.__name__
         pkc1, gz1 = fn(delp, hs, bd, pt=np.ones((m, m)))
         assert not np.array_equal(gz[sl, sl, 0], gz1[sl, sl, 0])
+
+
+def test_outer_step_schedule_matches_dyn_core(monkeypatch):
+    """advance_duo_outer_step must reproduce the upstream exchange
+    cadence (dyn_core.F90:432-439): entry A-scalar only on it==1 of
+    each dt_atmos block, i.e. entry_ascalar flags [1,0,0,0,0,0,0] at
+    n_split=7, every inner step at dt = dt_atmos/n_split, state
+    threaded through the chain."""
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states + ["step"]
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    out = ds.advance_duo_outer_step({}, [], 1200.0, 7, d_ext=0.0,
+                                    sw_cfg={"nord": 2})
+    assert [e for _, e in calls] == [True] + [False] * 6
+    assert all(abs(dt - 1200.0 / 7.0) < 1e-12 for dt, _ in calls)
+    assert out == ["step"] * 7          # state threaded, not restarted
+
+
+def test_outer_step_nsplit_one_and_invalid(monkeypatch):
+    import legoesm.core.fv3_native_duo_stepper as ds
+
+    calls = []
+
+    def spy(ctx, states, dt, d_ext=0.02, sw_cfg=None,
+            entry_ascalar=True):
+        calls.append((dt, entry_ascalar))
+        return states
+
+    monkeypatch.setattr(ds, "full_acoustic_step_sixface", spy)
+    ds.advance_duo_outer_step({}, [], 300.0, 1)
+    assert calls == [(300.0, True)]
+    with pytest.raises(ValueError):
+        ds.advance_duo_outer_step({}, [], 300.0, 0)
+
+
+def test_topo_fn_threads_hs_and_step_runs():
+    """W5 follow-up: ctx topo_fn -> hs6 (surface geopotential) consumed
+    by both geopk sites; a mountain state must step FINITE and differ
+    from the flat-hs step (non-vacuous)."""
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+        full_acoustic_step_sixface,
+        w2_six_face_state,
+    )
+
+    def phis(lon, lat):
+        r2 = np.minimum((np.pi / 9) ** 2,
+                        (lon - np.pi / 2) ** 2 + (lat - np.pi / 6) ** 2)
+        return 2000.0 * 9.80665 * (1.0 - np.sqrt(r2) / (np.pi / 9))
+
+    ctx_t = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True,
+                                       topo_fn=phis)
+    ctx_0 = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                       oracle_conventions=True)
+    assert ctx_t["hs6"] is not None and len(ctx_t["hs6"]) == 6
+    assert ctx_0["hs6"] is None
+    assert float(max(h.max() for h in ctx_t["hs6"])) > 1e4  # peak ~2e4
+    st_t = w2_six_face_state(ctx_t)
+    st_0 = w2_six_face_state(ctx_0)
+    out_t = full_acoustic_step_sixface(ctx_t, st_t, 300.0, d_ext=0.0)
+    out_0 = full_acoustic_step_sixface(ctx_0, st_0, 300.0, d_ext=0.0)
+    for t in range(6):
+        assert np.all(np.isfinite(out_t[t]["u"]))
+        assert np.all(np.isfinite(out_t[t]["delp"]))
+    # hs must change the dynamics ON THE MOUNTAIN FACE (codex r8: the
+    # first version compared face 1, where hs ~ 0 and identity is
+    # CORRECT after one step — a vacuous assertion)
+    t_mt = int(np.argmax([float(np.max(h)) for h in ctx_t["hs6"]]))
+    assert not np.allclose(out_t[t_mt]["u"], out_0[t_mt]["u"])
+    assert not np.allclose(out_t[t_mt]["delp"], out_0[t_mt]["delp"])
+    # deterministic threading pin (step-identity clauses kept tripping
+    # on legitimate cross-face flux-averaging propagation): SPY on both
+    # geopk sites — each must receive the ctx hs, nonzero on the
+    # mountain face, all-zero when topo_fn is None
+    import legoesm.core.fv3_native_duo_stepper as ds
+    seen = {"cg": [], "d": []}
+    orig_cg, orig_d = ds.geopk_sw_1lev, ds.geopk_sw_1lev_d
+
+    def spy_cg(delpc, hs, bd, pt=None):
+        seen["cg"].append(float(np.max(np.abs(hs))))
+        return orig_cg(delpc, hs, bd, pt=pt)
+
+    def spy_d(delp, hs, bd, pt=None):
+        seen["d"].append(float(np.max(np.abs(hs))))
+        return orig_d(delp, hs, bd, pt=pt)
+
+    ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = spy_cg, spy_d
+    try:
+        full_acoustic_step_sixface(ctx_t, w2_six_face_state(ctx_t),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) > 1e4 and max(seen["d"]) > 1e4
+        seen["cg"].clear()
+        seen["d"].clear()
+        full_acoustic_step_sixface(ctx_0, w2_six_face_state(ctx_0),
+                                   300.0, d_ext=0.0)
+        assert max(seen["cg"]) == 0.0 and max(seen["d"]) == 0.0
+    finally:
+        ds.geopk_sw_1lev, ds.geopk_sw_1lev_d = orig_cg, orig_d

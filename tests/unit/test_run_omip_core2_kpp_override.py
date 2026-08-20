@@ -73,6 +73,10 @@ def test_guard_raises_on_non_kpp_grid_when_flag_set():
             _validate_kpp_grid(grid, kpp_ri_crit=0.5, kpp_cv=None)
         with pytest.raises(SystemExit):
             _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=2.5)
+    # The rejection must point tripole users at the actionable alternative
+    # (--tripole-vmix selects that lane's opt-in closure).
+    with pytest.raises(SystemExit, match="--tripole-vmix"):
+        _validate_kpp_grid("tripole", kpp_ri_crit=0.5, kpp_cv=None)
 
 
 def test_guard_noop_on_kpp_grids_or_no_flags():
@@ -133,3 +137,75 @@ def test_build_latlon_bathy_threads_override_to_create_setup(monkeypatch):
                                  vertical_mixing=vm)
     assert captured["vm"] is vm
     assert captured["vm"].kpp.Ri_crit == 0.2
+
+
+@pytest.mark.parametrize("knob", [
+    dict(kpp_ri_crit=0.5), dict(kpp_cv=2.5), dict(kpp_eice=3),
+])
+def test_guard_rejects_each_kpp_knob_under_mpas_tke(knob):
+    """--mpas-vmix tke deselects KPP, so EVERY --kpp-* knob must fail loud on
+    MPAS under it (parametrized per knob: a guard that checks only one of the
+    three would pass a single combined test; codex MED 2026-07-27)."""
+    kwargs = dict(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None)
+    kwargs.update(knob)
+    with pytest.raises(SystemExit, match="mpas-vmix"):
+        _validate_kpp_grid("mpas", mpas_vmix="tke", **kwargs)
+    if "kpp_eice" in knob:
+        # --kpp-eice is rejected on MPAS even under KPP (the MPAS KPP bridge
+        # receives no ice concentration), just with the eice-specific message
+        # rather than the closure-mismatch one.
+        with pytest.raises(SystemExit, match="kpp-eice"):
+            _validate_kpp_grid("mpas", mpas_vmix="kpp", **kwargs)
+    else:
+        # ri_crit/cv stay accepted under the default KPP closure.
+        _validate_kpp_grid("mpas", mpas_vmix="kpp", **kwargs)
+
+
+def test_mpas_tke_callsite_runs_full_card_with_seed():
+    """The main() MPAS call-site runs the FULL #1326 ORCA1 card (prognostic
+    Mode-A included, now that MPASOceanState.tke is wired) and the host loop
+    seeds the carry via model.seed_tke BEFORE the first step (pytree-stable
+    scan carry). Source tripwires + card behavior — a dropped seed call or a
+    re-pinned diagnostic would either crash step 1 or silently degrade the
+    closure."""
+    import inspect
+    import re
+
+    import scripts.run.run_omip_core2 as core2
+
+    src = inspect.getsource(core2)
+    m = re.search(
+        r'build_tripole_vmix_config\("tke",\s*iwm=None\)\s*\n\s*'
+        r'if args\.mpas_vmix == "tke"', src)
+    assert m, "--mpas-vmix tke call-site no longer runs the full ORCA1 card"
+    assert "state = model.seed_tke(state)" in src, (
+        "the MPAS host loop no longer seeds the prognostic TKE carry")
+    # The card carries prognostic Mode-A + Dirichlet surface BC + nn_eice=3,
+    # and since 2026-08-13 tke_mxl_choice=4 -- ORCA1's namelist_cfg sets
+    # `nn_mxl = 2`, which is legoESM choice 4, not 3. The card had carried 3
+    # while its own comment said 4 was the ORCA1 value; codex 9405307
+    # confirmed 4 against NEMO's SELECT CASE (zdftke.F90:680, one bounded
+    # length used for BOTH viscosity and dissipation).
+    vm = core2.build_tripole_vmix_config("tke", iwm=None)
+    assert vm.scheme == "tke"
+    assert vm.tke.prognostic is True
+    assert vm.tke.tke_mxl_choice == 4
+    assert vm.tke.surface_bc == "nemo_dirichlet"
+    assert vm.tke.eice == 3
+
+
+def test_ice_ocean_heat_coeff_flag_roundtrip():
+    """--ice-ocean-heat-coeff parses, requires --prognostic-sea-ice (silent
+    no-op guard), and reaches SeaIceConfig.ocean_heat_transfer_coeff via
+    _replace (the Antarctic under-melt lever, 2026-07-28)."""
+    import scripts.run.run_omip_core2 as core2
+
+    p = core2._build_arg_parser()
+    a = p.parse_args(["--grid", "tripole", "--prognostic-sea-ice",
+                      "--ice-ocean-heat-coeff", "70"])
+    assert a.ice_ocean_heat_coeff == 70.0
+    b = p.parse_args(["--grid", "tripole"])
+    assert b.ice_ocean_heat_coeff is None
+    from legoesm.ice.config import SeaIceConfig
+    cfg = SeaIceConfig()._replace(ocean_heat_transfer_coeff=70.0)
+    assert cfg.ocean_heat_transfer_coeff == 70.0

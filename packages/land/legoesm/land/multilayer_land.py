@@ -46,6 +46,10 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
+from legoesm.land.canopy.interception import (
+    intercept_rain,
+    wetted_fraction as interception_wetted_fraction,
+)
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
     TwoLeafCanopyConfig,
@@ -78,10 +82,41 @@ def _get(lp, name: str, fallback):
     either ``LandSurfaceParams`` (for SimpleSEB; full field set) or
     ``CanopyLandParams`` (for TwoLeafCanopy; disjoint field set).  Missing
     fields fall back to the caller-supplied default rather than raising.
+
+    A field that EXISTS but is ``None`` is also treated as absent: optional
+    per-column params (``root_depth``/``theta_wp``/``theta_fc``) are declared on
+    ``CanopyLandParams`` with a ``None`` default, so a params object that does
+    not carry them must still fall back to the scalar config value rather than
+    propagating ``None`` into the arithmetic.
     """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    v = getattr(lp, name, fallback)
+    return fallback if v is None else v
+
+
+def resolve_plant_wilting_point(land_params, config):
+    """The PLANT wilting point that drives root-zone transpiration and GPP.
+
+    It is deliberately separate from the SOIL wilting point (deep-rooted
+    vegetation extracts water below the soil-evaporation cutoff), and it is
+    resolved in one place because the two callers -- the multilayer land step
+    and the coupler's land-tile beta -- disagreed: the step fell straight back
+    to the SCALAR ``config.theta_wp`` and so ignored a per-column
+    ``theta_wp``.  Any calibration that varies the wilting point by plant
+    functional type therefore reached soil evaporation and was silently inert
+    in transpiration and GPP -- the two arms of the same column disagreeing
+    about how dry the soil is.
+
+    Order, most specific first: a per-column ``theta_wp_plant``, then a
+    per-column ``theta_wp``, then ``config.theta_wp_plant``, then the scalar
+    ``config.theta_wp``.  With none of them set this reproduces the
+    single-wilting-point behaviour exactly.
+    """
+    scalar = (config.theta_wp_plant if config.theta_wp_plant is not None
+              else config.theta_wp)
+    return _get(land_params, "theta_wp_plant",
+                _get(land_params, "theta_wp", scalar))
 
 
 def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
@@ -141,7 +176,9 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     """
     grid = make_soil_grid(config.soil_grid)
     root_depth = _get(land_params, "root_depth", config.root_depth)
-    theta_wp   = _get(land_params, "theta_wp", config.theta_wp)
+    # Plant wilting point (transpiration extraction) drives this root-zone
+    # availability; falls back to the soil wilting point when unset.
+    theta_wp   = resolve_plant_wilting_point(land_params, config)
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
         theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
@@ -160,6 +197,7 @@ def step_multilayer_land_with_diagnostics(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -177,6 +215,7 @@ def step_multilayer_land_with_diagnostics(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
         clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         soil_frozen_fraction=soil_frozen_fraction)
@@ -251,6 +290,7 @@ def step_multilayer_land(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -275,6 +315,7 @@ def step_multilayer_land(
         state, forcing, config, U_min, dt,
         lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params,
         clm_ml_grid_info=clm_ml_grid_info,
+        clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         soil_frozen_fraction=soil_frozen_fraction)
@@ -339,6 +380,7 @@ def _step_multilayer_land_impl(
     doy: float = 0.0,
     land_params=None,
     clm_ml_grid_info=None,
+    clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
@@ -386,8 +428,14 @@ def _step_multilayer_land_impl(
 
     # Spatially-varying root zone params.
     root_depth = _get(lp, "root_depth", config.root_depth)
-    theta_wp = _get(lp, "theta_wp", config.theta_wp)
+    theta_wp = _get(lp, "theta_wp", config.theta_wp)          # SOIL wilting point
     theta_fc = _get(lp, "theta_fc", config.theta_fc)
+    # PLANT wilting point drives the ROOT-ZONE transpiration / GPP stress and is
+    # kept SEPARATE from the soil wilting point: deep-rooted vegetation extracts
+    # water below the soil-evaporation cutoff.  Falls back to ``theta_wp`` (per-
+    # column params first, then config) so an unset plant wp reproduces the
+    # single-wilting-point behaviour exactly.
+    theta_wp_plant = resolve_plant_wilting_point(lp, config)
 
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]
@@ -448,7 +496,9 @@ def _step_multilayer_land_impl(
         return arr
 
     root_depth_c = _to_ncol(root_depth)
-    theta_wp_c   = _to_ncol(theta_wp)
+    # Root-zone stress uses the PLANT wilting point (transpiration extraction
+    # limit); the soil wilting point ``theta_wp`` is the soil-column reference.
+    theta_wp_c   = _to_ncol(theta_wp_plant)
     theta_fc_c   = _to_ncol(theta_fc)
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
@@ -528,6 +578,21 @@ def _step_multilayer_land_impl(
             theta / jnp.maximum(config.hydraulics.theta_sat, 1e-6),
             1e-6, 1.0)[:, 0].astype(theta.dtype)
 
+        # Wetted leaf fraction from the START-of-step canopy-water store, driving
+        # the wet-leaf evaporation INSIDE the canopy energy balance (interception
+        # loss: a wet leaf evaporates at the boundary-layer limit, so LE rises).
+        # ``None`` when interception is off — the canopy then runs the pure-
+        # stomatal balance unchanged.
+        _fwet_pre = None
+        if config.interception is not None and state.W_canopy is not None:
+            _lai_i = jnp.broadcast_to(
+                _get(lp, "LAI", jnp.zeros_like(T_surface)), T_surface.shape)
+            _sai_i = _get(lp, "SAI", None)
+            _pai_i = _lai_i + (0.0 if _sai_i is None
+                               else jnp.broadcast_to(_sai_i, T_surface.shape))
+            _fwet_pre = interception_wetted_fraction(
+                state.W_canopy, _pai_i, config.interception)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -542,6 +607,7 @@ def _step_multilayer_land_impl(
             dt=dt,
             TgC_override=TgC_override,
             LAI_override=LAI_override,
+            fwet=_fwet_pre,
             # Bare-soil evaporation efficiency = TWO complementary top-layer
             # limiters, applied as a beta conductance efficiency in the canopy
             # soil energy balance (both tie evaporation to the fast-drying
@@ -596,9 +662,26 @@ def _step_multilayer_land_impl(
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 
+        # Wind-speed floor PARITY with the two-leaf arm: the CLM-ML backend takes
+        # uref = sqrt(u^2 + v^2) with NO floor, so in calm/stable (night) air it
+        # sees wind -> 0, collapsing u*/aerodynamic conductance and under-predicting
+        # H.  Scale (u, v) direction-preserving so their magnitude equals the same
+        # sqrt(u^2 + v^2 + U_min^2) floor the two-leaf arm applies above.
+        _wsp_floored = jnp.sqrt(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2)
+        _wsp_raw = jnp.sqrt(forcing.u_lowest ** 2 + forcing.v_lowest ** 2)
+        _calm = _wsp_raw > 1e-6
+        # Direction-preserving rescale to the floored magnitude; at (near-)calm the
+        # direction is undefined, so fall back to (U_min, 0) — a nonzero magnitude
+        # (=U_min) with an arbitrary but definite direction, so CLM-ML's
+        # sqrt(u^2+v^2) never collapses to 0 the way the raw wind would.
+        _sc = jnp.where(_calm, _wsp_floored / jnp.maximum(_wsp_raw, 1e-6), 0.0)
+        clmml_forcing = forcing._replace(
+            u_lowest=jnp.where(_calm, forcing.u_lowest * _sc, U_min),
+            v_lowest=jnp.where(_calm, forcing.v_lowest * _sc, 0.0))
         surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
             T_soil_top=T_surface,
-            forcing=forcing,
+            forcing=clmml_forcing,
             canopy_config=config.surface_scheme,
             land_config=config,
             land_params=lp,
@@ -611,6 +694,7 @@ def _step_multilayer_land_impl(
             doy=doy,
             lai_override=LAI_override,
             grid_info=clm_ml_grid_info,
+            pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
         )
@@ -657,7 +741,12 @@ def _step_multilayer_land_impl(
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
     # from the surface scheme.  ``band_rad.Rn_bands`` drives per-band melt below.
     if bands is not None:
-        _cover_fn = lambda s: snow_cover_fraction(s, config.land_albedo)
+        # per-band cover with the canopy snow mask applied and clipped PER BAND
+        # (post-aggregate scaling is wrong on saturated bands — see land_albedo)
+        _scl = (1.0 if config.land_albedo.snow_cover_scale is None
+                else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None])
+        _cover_fn = lambda s: jnp.clip(
+            snow_cover_fraction(s, config.land_albedo) * _scl, 0.0, 1.0)
         # gap 3: solar-zenith snow brightening (cos_zenith per cell -> broadcast over
         # the band axis).  Inactive where cos_zenith is a constant placeholder.
         _cz = forcing.cos_zenith[:, None]
@@ -808,6 +897,40 @@ def _step_multilayer_land_impl(
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
+
+    # --- Canopy interception, phase 1: intercept rain into the store ----------
+    # Only the THROUGHFALL (direct + drip) infiltrates, so the water-availability
+    # limiter below and the Richards top flux both see ``infil_rain`` (not raw
+    # precip).  The wet-leaf evaporation (phase 2) runs after the transpiration
+    # partition so it can be capped by the transpiration demand (closure).  Two-
+    # leaf path only (CLM-ML has its own internal store; SimpleSEB has no canopy
+    # latent stream).  See land/canopy/interception.py.
+    # Gated ALSO on ``state.W_canopy is not None`` so the step never changes the
+    # carry pytree structure (``None`` -> array would break a ``lax.scan``) and
+    # never intercepts water it cannot store (which would leak): the store is
+    # allocated at init / restored from restart when interception is configured,
+    # so a genuine run always carries it (codex).
+    _do_intercept = (config.interception is not None
+                     and isinstance(config.surface_scheme, TwoLeafCanopyConfig)
+                     and state.W_canopy is not None)
+    infil_rain = precip_rain
+    _W_int = None
+    _pai = None
+    if _do_intercept:
+        _lai = jnp.broadcast_to(_get(lp, "LAI", jnp.zeros_like(precip_rain)),
+                                precip_rain.shape)
+        _sai = _get(lp, "SAI", None)
+        _pai = _lai + (0.0 if _sai is None
+                       else jnp.broadcast_to(_sai, precip_rain.shape))
+        _W_int, _throughfall = intercept_rain(
+            state.W_canopy, jnp.maximum(precip_rain, 0.0), _pai, dt,
+            config.interception)
+        # ``_throughfall`` already carries the canopy DRIP (which is nonzero even
+        # at zero rain when the plant area — hence storage capacity — shrinks, so
+        # it must NOT be discarded, else that water leaks; codex).  Add back any
+        # negative "rain" (numerical / refreeze deficit) so the column budget is
+        # unchanged in that edge case.
+        infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
     # --- Soil / plant-water evaporation (L_v), water-limited ---
     soil_evap_demand = soil_latent / constants.L_v
     # Bare-soil evaporation resistance (#671, Sellers 1992 / Lee & Pielke 1992):
@@ -838,8 +961,10 @@ def _step_multilayer_land_impl(
             soil_evap_demand.dtype)
         soil_evap_demand = jnp.where(
             soil_evap_demand > 0.0, soil_evap_demand * _beta_surf, soil_evap_demand)
+    # Water available to bare-soil evaporation uses the THROUGHFALL (infil_rain),
+    # not raw precip, since interception removed the intercepted part upstream.
     max_soil_evap = jnp.maximum(
-        extractable_water / dt + precip_rain + melt_rate, 0.0)
+        extractable_water / dt + infil_rain + melt_rate, 0.0)
     soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
     # --- Combine the two phase streams ---
@@ -874,7 +999,33 @@ def _step_multilayer_land_impl(
     evap_bare, evap_transp = _partition_latent_root_top(
         soil_evap, has_snow, f_veg,
         surface_out.LE_canopy, surface_out.LE_soil)
-    flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
+
+    # --- Canopy interception, phase 2: deplete the store by the wet-leaf flux --
+    # The canopy energy balance already computed the wet-leaf evaporation
+    # (``surface_out.LE_wet_canopy``, the fwet share of the boosted LE — a real
+    # interception-loss latent flux, NOT re-labelled transpiration).  That water
+    # is drawn from the store; the REST of the canopy latent stays transpiration
+    # from the root zone.  Cap the draw by the store (fwet is bounded, so this
+    # rarely bites); any store shortfall reverts that flux to the soil sink, so
+    # the total soil+canopy water budget closes against precip - ET - runoff and
+    # the reported LE is unchanged.
+    W_canopy_new = state.W_canopy
+    if _do_intercept:
+        _wet_evap_demand = jnp.maximum(
+            surface_out.LE_wet_canopy, 0.0) / constants.L_v   # kg m-2 s-1
+        # Cap by BOTH the store (can't evaporate water it doesn't hold) AND the
+        # transpiration the caller is about to draw (the wet-leaf flux re-sources
+        # transpiration; drawing more than that from the store would remove more
+        # surface water than the reported atmospheric latent flux — codex).
+        _wet_evap = jnp.minimum(
+            jnp.minimum(_wet_evap_demand, _W_int / dt),
+            jnp.maximum(evap_transp, 0.0))
+        W_canopy_new = jnp.maximum(_W_int - _wet_evap * dt, 0.0)
+        # Wet-leaf water came from the store, so remove it from the root-zone
+        # transpiration sink; wet_evap <= evap_transp keeps this >= 0.
+        evap_transp = evap_transp - _wet_evap
+
+    flux_top = (infil_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
     weight = root_frac * beta_root  # both are (ncol, n_layers)
@@ -951,6 +1102,13 @@ def _step_multilayer_land_impl(
         # CLM-ML canopy carry is a NamedTuple pytree (not a dtype-castable leaf),
         # so it bypasses ``_match``; ``None`` for the non-canopy schemes.
         canopy_state=canopy_state_new,
+        # Intercepted-water store: structure-preserving — an array in, an array
+        # out (updated on the two-leaf interception path, else carried), a
+        # ``None`` in stays ``None``.  ``_do_intercept`` already requires the
+        # store to exist, so an active interception step never introduces the
+        # store (no ``None`` -> array carry-structure change under a scan).
+        W_canopy=(_match(W_canopy_new, state.W_canopy)
+                  if state.W_canopy is not None else None),
     )
 
     # --- Post-step surface state for coupler ---
@@ -970,7 +1128,11 @@ def _step_multilayer_land_impl(
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
-                lambda s: snow_cover_fraction(s, config.land_albedo),
+                lambda s: jnp.clip(
+                    snow_cover_fraction(s, config.land_albedo)
+                    * (1.0 if config.land_albedo.snow_cover_scale is None
+                       else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None]),
+                    0.0, 1.0),
                 lambda a: snow_albedo(a, config.land_albedo, cos_zenith=_cz_new),
                 ice_bands=ice_bands_new, cfg=bands)
         else:
@@ -1021,18 +1183,34 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
-        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
-        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
-        # Use it directly so the coupler sees the same humidity as CLM-ML used
-        # for soil evaporation.  Override with q_sat_ice over snow (physically
-        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+    # Snow that was present when the scheme computed its humidity but melted
+    # away during the step leaves that humidity stale on the ICE curve; the
+    # end-state reconstruction below is the honest value for that transition.
+    _snow_melted_out = (snow > 1e-6) & ~has_snow_new
+    if surface_out.q_surface is not None:
+        # The surface scheme SOLVED for its own boundary humidity -- CLM-ML's
+        # Philip soil relative humidity, the two-leaf canopy's canopy-air
+        # humidity q_c (solved through the stomatal + soil + aerodynamic
+        # resistance network), or SimpleSEB's bounded gradient form.  Use it.
+        # This branch used to be CLM-ML only, and the else-branch OVERWROTE the
+        # two-leaf canopy's solved q_c with the product form beta*q_sat -- the
+        # resistance physics ran and was then discarded at the boundary (the
+        # slab wrapper preserved it; this wrapper did not).  Snow still
+        # overrides to the ice-saturation surface.
         q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+        q_sfc_new = jnp.where(
+            _snow_melted_out,
+            forcing.q_lowest
+            + jnp.where(has_snow_new, 1.0, beta_new)
+            * (q_sat_sfc_new - forcing.q_lowest),
+            q_sfc_new)
     else:
-        # SimpleSEB / TwoLeafCanopy: beta·qsat with the updated moisture state
-        # (``beta_new`` computed unconditionally above).
+        # Scheme returned no humidity: reconstruct the bounded GRADIENT form
+        # (never the product form -- beta is a flux efficiency, and beta*q_sat
+        # manufactures condensation over dry soil; see simple_seb.py).
         beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-        q_sfc_new = beta_effective_new * q_sat_sfc_new
+        q_sfc_new = (forcing.q_lowest
+                     + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -1213,6 +1391,8 @@ def init_multilayer_land_state(
         snow_age_bands=snow_age_bands,
         ice_bands=ice_bands,
         canopy_state=canopy_state,
+        # Dry canopy at start; carried only when interception is configured.
+        W_canopy=(jnp.zeros(ncol) if config.interception is not None else None),
     )
 
 

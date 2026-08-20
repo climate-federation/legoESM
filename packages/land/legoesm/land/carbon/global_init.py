@@ -73,6 +73,12 @@ _DRIFT_FLOOR = 1e-9                # divide-safety floor for the drift fraction
 _DEG_PER_CIRCLE = 360.0            # full longitude circle [deg]
 _DEG_HALF_CIRCLE = 180.0           # half circle [deg] (longitude wrap pivot)
 _COORD_MATCH_ATOL_DEG = 1e-3       # grid-match lat/lon tolerance [deg]
+# Single-point seeding: how far the nearest finidat land cell may be from the
+# requested site before the match is refused.  3 deg is just over one cell of the
+# 1.9x2.5 build grid's diagonal, so a legitimate coastal/island request still
+# matches while an ocean-only or regional finidat cannot silently supply a cell
+# from a different climate.
+_POINT_MATCH_MAX_DEG = 3.0
 
 # --- archetype spin-up carbon seeds [gC/m2] ---
 # Conservative, BELOW-equilibrium initial pools that GROW IN.  The semi-analytic
@@ -326,7 +332,7 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     carbon_overrides : dict[str, jax.Array] | None
         Optional ``{CarbonConfig field name -> traced scalar}`` map applied to
         EACH group's ``CarbonConfig`` via
-        :func:`legoesm.training.param_collector.apply_param_overrides` BEFORE the
+        :func:`legoesm.core.param_overrides.apply_param_overrides` BEFORE the
         step / spin-up is built.  ``None`` (default) is the static Stage-A/-B
         path -- the config keeps Python-float leaves and no ``legoesm.training``
         import happens.  A dict makes the named SOM fields (``tor_som_active`` /
@@ -423,13 +429,14 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
             C_root_init=_C_ROOT_SEED, C_wood_init=_C_WOOD_SEED,
             C_lit_init=_C_LIT_SEED, C_som_init=_C_SOM_SEED)
         if carbon_overrides:
-            # Deferred (function-scope) import: only the differentiable
-            # calibration path pulls in ``legoesm.training``; the static path
-            # stays land-only (no land->training top-level dependency).  Splice
-            # the TRACED SOM leaves into this group's config so they flow through
-            # the coupled spin-up (SegmentForcing/SCM-RCE override doctrine);
-            # apply_param_overrides raises on any unknown CarbonConfig field.
-            from legoesm.training.param_collector import apply_param_overrides
+            # Splice the TRACED SOM leaves into this group's config so they flow
+            # through the coupled spin-up (SegmentForcing/SCM-RCE override
+            # doctrine); apply_param_overrides raises on any unknown
+            # CarbonConfig field.  The helper lives in legoesm.core, NOT
+            # legoesm.training: importing it from the training layer dragged
+            # land -> training -> tuning -> driver.config -> atmosphere and
+            # broke the component-independence contract.
+            from legoesm.core.param_overrides import apply_param_overrides
             carbon_cfg = apply_param_overrides(carbon_cfg, carbon_overrides)
         config = MultiLayerLandConfig(
             bulk_scheme="most",
@@ -1152,6 +1159,190 @@ def map_to_grid_frozen_fraction(table, cell_archetype_id, cell_archetype_weight,
     phi_cell = np.where(
         wsum > 0.0, (gathered * w).sum(axis=1) / np.maximum(wsum, 1e-30), 0.0)
     return jnp.asarray(phi_cell)
+
+
+class PointCarbonMatch(NamedTuple):
+    """Which finidat cell a single-column run was seeded from."""
+
+    index: int                 # flat cell index into the finidat
+    lat_deg: float             # the matched cell's latitude
+    lon_deg: float             # the matched cell's longitude (as stored)
+    distance_deg: float        # great-circle separation from the request [deg]
+    is_land: bool              # whether the matched cell is flagged land
+    # The soil column the pools were spun up on, so a caller can check its own
+    # grid against it (None on a finidat that does not record them).  The pools
+    # carry no vertical dimension, so a difference does not break the load -- it
+    # means the equilibrium was reached under a different soil column.
+    n_layers: int | None
+    soil_depth_m: float | None
+    # The cell's dominant cover and its cover fraction.  A finidat cell is a PFT
+    # MIXTURE; a single-point run picks one veg_type.  Surfaced so that mismatch
+    # is visible instead of hidden behind the word "equilibrium".
+    dominant_pft: str | None
+    dominant_pft_weight: float | None
+
+
+def load_finidat_carbon_ic_at_point(path, lat_deg, lon_deg, *,
+                                    max_distance_deg=_POINT_MATCH_MAX_DEG,
+                                    require_land=True):
+    """Initialise a SINGLE-COLUMN run from the nearest cell of a global finidat.
+
+    ``load_finidat_carbon_ic`` is deliberately strict: a run's column count and
+    per-column coordinates must match the finidat exactly, because the pools are
+    per-area stocks pinned to the finidat's own cells.  A single-point LMIP run
+    (``scripts/run/run_lmip.py``) has ONE column at an arbitrary ``(lat, lon)``,
+    so it can never satisfy that -- but it can still be INITIALISED from the
+    nearest cell, because the pools are per-area densities [gC/m2]: no area
+    weighting or regridding is involved, we simply read the column that the
+    spin-up equilibrated at the nearest place on Earth.
+
+    This mirrors :func:`legoesm.land.boundary_data.point.surface_params_at_point`,
+    which already picks the nearest surfdata gridcell for the same driver -- so a
+    single-point run takes its cover, soil and carbon from the same neighbourhood.
+
+    **This is a nearest-cell initialisation, NOT an equilibrium guarantee for the
+    site.**  The pools equilibrated under the finidat CELL's grid-mean climate,
+    its cover-weighted PFT MIXTURE and the build's soil class; a point run
+    chooses a single ``veg_type`` and ``soil_texture`` at coordinates that need
+    not resemble any of those.  The returned :class:`PointCarbonMatch` therefore
+    reports the cell's soil column and dominant cover so the caller can see the
+    mismatch, and the pools should be expected to drift toward the point
+    configuration's own equilibrium -- much less far than from a cold start, but
+    not to zero.
+
+    Fail-loud, never a silent seed:
+
+    * a file that is not a carbon finidat (any of the eight pools missing) raises
+      -- unlike the auto-detecting strict loader, the caller asked for this file
+      by name;
+    * the nearest candidate must lie within ``max_distance_deg`` of the request,
+      else raises (an ocean-only or regional finidat must not silently supply a
+      cell from the far side of the planet);
+    * with ``require_land`` (the default) only cells flagged land are candidates,
+      so a coastal request cannot be seeded from an all-zero ocean column.
+
+    Distance is the great-circle angle (haversine on the unit sphere), NOT a
+    lat/lon Euclidean distance -- the latter mis-ranks candidates at high
+    latitude, which is exactly where the carbon gradients are sharpest.
+
+    Parameters
+    ----------
+    path : str | pathlib.Path
+        The finidat ``global_carbon_ic.npz``.
+    lat_deg, lon_deg : float
+        The single column's coordinates.  Longitude is matched modulo 360, so a
+        0..360 finidat and a -180..180 request describe the same place.
+    max_distance_deg : float
+        Reject a match farther than this great-circle angle [deg].
+    require_land : bool
+        Restrict candidates to cells whose ``land_mask`` is true (when the
+        finidat carries one).
+
+    Returns
+    -------
+    (CarbonState (1,), jnp.ndarray (1,) | None, PointCarbonMatch)
+        The seeded pools [gC/m2] shaped for a one-column run, the matching
+        permafrost ``phi`` (``None`` for a legacy finidat without it), and the
+        provenance of the match.
+    """
+    import jax.numpy as jnp
+
+    with np.load(path, allow_pickle=True) as z:
+        keys = set(z.files)
+        if "lat" not in keys or "lon" not in keys:
+            raise ValueError(
+                f"{path!r} has no 'lat'/'lon' fields; a carbon finidat must carry "
+                "per-cell coordinates to be matched to a point.")
+        lat_fin = np.asarray(z["lat"], float).reshape(-1)
+        lon_fin = np.asarray(z["lon"], float).reshape(-1)
+        land = (np.asarray(z["land_mask"]).reshape(-1).astype(bool)
+                if "land_mask" in keys else None)
+        n_lay = int(z["n_layers"]) if "n_layers" in keys else None
+        depth = float(z["soil_depth"]) if "soil_depth" in keys else None
+        dom_pft = (np.asarray(z["dominant_pft"]).reshape(-1)
+                   if "dominant_pft" in keys else None)
+        pft_names = ([str(s) for s in np.asarray(z["pft_names"]).reshape(-1)]
+                     if "pft_names" in keys else None)
+        pft_w = (np.asarray(z["pft_weights"], float)
+                 if "pft_weights" in keys else None)
+
+    # Load the pools FIRST (the strict loader owns pool presence / per-cell shape
+    # / phi validation), so the selection arrays below can be checked against the
+    # authoritative cell count before anything is indexed with them.  Selecting
+    # from a misaligned 'lat' would otherwise index a different pool column.
+    carbon, phi = load_finidat_carbon_ic(path)
+    if carbon is None:
+        from legoesm.land.carbon.config import CarbonState
+        raise ValueError(
+            f"{path!r} is not a carbon finidat: it is missing one or more of the "
+            f"eight pools {CarbonState._fields}.")
+    ncell = int(np.asarray(getattr(carbon, carbon._fields[0])).shape[0])
+    for name, arr in (("lat", lat_fin), ("lon", lon_fin), ("land_mask", land),
+                      ("dominant_pft", dom_pft)):
+        if arr is not None and arr.shape != (ncell,):
+            raise ValueError(
+                f"finidat {name!r} has shape {arr.shape} but the pools have "
+                f"({ncell},); the selection arrays and the pools describe "
+                "different cells, so a nearest-cell pick would be meaningless.")
+    if pft_w is not None and pft_w.shape[0] != ncell:
+        raise ValueError(
+            f"finidat 'pft_weights' has shape {pft_w.shape} but the pools have "
+            f"({ncell},) cells.")
+
+    # Great-circle angle on the unit sphere (haversine): correct at the poles and
+    # across the 0/360 seam, where a lat/lon Euclidean metric is not.
+    phi1 = np.deg2rad(lat_fin)
+    phi2 = np.deg2rad(float(lat_deg))
+    dphi = phi1 - phi2
+    dlam = np.deg2rad(((lon_fin - float(lon_deg) + 180.0) % 360.0) - 180.0)
+    hav = (np.sin(dphi / 2.0) ** 2
+           + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2.0) ** 2)
+    dist_deg = np.rad2deg(2.0 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0))))
+
+    candidates = dist_deg
+    if require_land:
+        if land is None:
+            raise ValueError(
+                f"{path!r} has no 'land_mask'; pass require_land=False to seed "
+                "from the nearest cell regardless of surface type.")
+        if not bool(land.any()):
+            raise ValueError(f"{path!r} has no land cells to seed from.")
+        candidates = np.where(land, dist_deg, np.inf)
+
+    # Ties (an exact midpoint, or duplicated pole rows) go to the LOWEST flat
+    # index, i.e. the finidat's own storage order.  Deterministic for a given
+    # file, but it is file order and not a physical criterion -- documented
+    # rather than silently relied upon.
+    idx = int(np.argmin(candidates))
+    d = float(candidates[idx])
+    if not np.isfinite(d) or d > float(max_distance_deg):
+        raise ValueError(
+            f"nearest {'land ' if require_land else ''}cell of {path!r} is "
+            f"{d:.3g} deg from ({lat_deg}, {lon_deg}), beyond "
+            f"max_distance_deg={max_distance_deg}; refusing to seed a column from "
+            "a distant climate.")
+
+    carbon_pt = type(carbon)(
+        **{f: jnp.asarray(getattr(carbon, f)[idx]).reshape(1)
+           for f in carbon._fields})
+    phi_pt = None if phi is None else jnp.asarray(phi[idx]).reshape(1)
+    # The cell's dominant cover, so a caller can see WHAT vegetation the seeded
+    # pools actually equilibrated under (a grid cell is a PFT mixture; a
+    # single-point run picks one veg_type, and the two need not agree).
+    dom_name = None
+    dom_weight = None
+    if dom_pft is not None:
+        d_id = int(dom_pft[idx])
+        if pft_names is not None and 0 <= d_id < len(pft_names):
+            dom_name = pft_names[d_id]
+        if pft_w is not None and 0 <= d_id < pft_w.shape[1]:
+            dom_weight = float(pft_w[idx, d_id])
+    match = PointCarbonMatch(
+        index=idx, lat_deg=float(lat_fin[idx]), lon_deg=float(lon_fin[idx]),
+        distance_deg=d, is_land=True if land is None else bool(land[idx]),
+        n_layers=n_lay, soil_depth_m=depth,
+        dominant_pft=dom_name, dominant_pft_weight=dom_weight)
+    return carbon_pt, phi_pt, match
 
 
 def load_finidat_carbon_ic(path, *, expect_ncol=None, target_lat_deg=None,

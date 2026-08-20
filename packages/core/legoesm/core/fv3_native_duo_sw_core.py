@@ -38,7 +38,7 @@ views, ``Bounds``).
 from __future__ import annotations
 
 import numpy as np
-from legoesm.core.fv3_native_sw_core import Bounds, _fa
+from legoesm.core.fv3_native_sw_core import Bounds, fa_flux as _fa
 from legoesm.grids.fv3_native_gridstruct import fort
 
 # --- d2a2c 4th-order interpolation coefficients (sw_core.F90:53-54) ---
@@ -244,26 +244,28 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     duo-gated tp_core chain (copy_corners early-return, xppm/yppm edge
     reconstructions skipped).  VERBATIM notes: the pt transport uses
     ``nord=nord_v, damp_c=damp_v`` (auth 959-961 — the plain monolithic
-    d_sw used nord_t/damp_t there); hydrostatic skips the w transport;
+    d_sw used nord_t/damp_t there); ``hydrostatic=False`` adds the NH w
+    transport (auth 923-939): ``fv_tp_2d(w, ..., hord_vt, mfx, mfy)``
+    into allflux slot 2, BEFORE the pt transport (gx/gy reuse);
     USE_COND / SW_DYNAMICS undefined, matching the phase-4b extraction
     convention.
 
     Returns a dict with crx_adv/cry_adv/xfx_adv/yfx_adv, ra_x/ra_y,
-    ut/vt, allflux_x/allflux_y (k=1 slab, 4+nq=5 slots; slots 2/3/5
-    untouched NaN on the hydrostatic no-tracer lane), the (corner-ghost
+    ut/vt, allflux_x/allflux_y (k=1 slab, 4+nq=5 slots; slot 2 written
+    only on the NH lane, slots 3/5 untouched NaN), the (corner-ghost
     mutated on plain; untouched on duo) delp/pt/w, and the accumulated
     cx/cy/xflux/yflux.
     """
-    from legoesm.core.fv3_native_d_sw import _fl, fv_tp_2d
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, fv_tp_2d
 
     if not duogrid:
         raise NotImplementedError(
             "d_sw1_duo is the DUO-stage port; the plain path is the "
             "certified monolithic d_sw (phase-4b)")
-    if not hydrostatic or inline_q:
+    if inline_q:
         raise NotImplementedError(
-            "d_sw1_duo: hydrostatic, inline_q=False lane only (matches "
-            "the oracle driver; w/q_con/tracer transports not exercised)")
+            "d_sw1_duo: inline_q=False lane only (matches the oracle "
+            "driver; q_con/tracer transports not exercised)")
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
@@ -552,6 +554,21 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
         for i in range(is_, ie + 1):
             yflux[i, j] = yflux[i, j] + fy[i, j]
 
+    # ---- NH w fluxes (auth 923-939): fv_tp_2d(w) -> allflux slot 2 ----
+    # BEFORE the pt transport, exactly as upstream -- gx/gy are then
+    # REUSED for pt, so the order is load-bearing.  No nord/damp on the
+    # w transport (the w del-6 damping lives in d_sw2 via dw).
+    if not hydrostatic:
+        fv_tp_2d(w, crx_adv, cry_adv, npx, npy, hord_vt, gx, gy,
+                 xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
+                 mfx=fx, mfy=fy, duogrid=duogrid)
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1 + 1):
+                allflux_x[i - is_, j - js, 2 - 1] = gx[i, j]
+        for j in range(js, je + 1 + 1):
+            for i in range(is_, ie + 1):
+                allflux_y[i - is_, j - js, 2 - 1] = gy[i, j]
+
     # ---- pt fluxes (auth 959-961: nord=nord_v, damp_c=damp_v) ----
     fv_tp_2d(pt, crx_adv, cry_adv, npx, npy, hord_tm, gx, gy,
              xfx_adv, yfx_adv, gsf, bd, ra_x, ra_y, lim_fac,
@@ -573,37 +590,54 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
 
 
 def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict, bd: Bounds, *,
+              w=None, npx: int | None = None, npy: int | None = None,
+              dt: float = 0.0, kgb: float = 0.0, nord_w: int = 2,
+              damp_w: float = 0.0,
               hydrostatic: bool = True, inline_q: bool = False,
               workspace_sentinel: float = 1.0e30) -> dict:
     """sw_core.F90 d_sw2 (symmetryclean 1000-1199) — the post-averaging
-    delp/pt UPDATE stage, on the oracle lane (hydrostatic, inline_q=F,
-    no SW_DYNAMICS/USE_COND): heat_source zeroed over the compute
-    domain, then the else-arm update from allflux slots 1 (delp fx/fy)
-    and 4 (pt gx/gy), auth 1181-1196:
+    delp/pt UPDATE stage, on the oracle lane (inline_q=F, no
+    SW_DYNAMICS/USE_COND): heat_source zeroed over the compute domain,
+    the NH w block, then the else-arm update from allflux slots 1
+    (delp fx/fy) and 4 (pt gx/gy), auth 1181-1196:
 
         pt   = pt*delp + (gx(i,j)-gx(i+1,j)+gy(i,j)-gy(i,j+1))*rarea
         delp = delp    + (fx(i,j)-fx(i+1,j)+fy(i,j)-fy(i,j+1))*rarea
         pt   = pt / delp
 
+    NH (auth 1077-1109, BEFORE the delp update so the mass weighting
+    uses the OLD delp):
+
+        damp_w > 1e-5: dd8 = kgb*|dt|;  damp4 = (damp_w*da_min_c)**(nord_w+1)
+                       del6_vt_flux(nord_w, ..., damp4, w, ...) -> fx2/fy2
+                       dw = (fx2-fx2(i+1)+fy2-fy2(j+1))*rarea
+                       heat_source = dd8 - dw*(w+0.5*dw)     [verbatim]
+        w = delp*w + (gx2-gx2(i+1)+gy2-gy2(j+1))*rarea       [slot 2]
+
     d_sw2 has NO duo/edge branches — a pure cell update given the
-    fluxes.  ptc and dw (upstream intent(OUT); shimmed to inout in the
-    extract so the sentinel round-trip is standard-defined — see the
-    extract header) are never written on this lane; the port returns
-    them filled with ``workspace_sentinel`` mirroring the oracle
-    driver's 1e30 init (documented scratch semantics, bit-comparable).
+    fluxes.  ptc (upstream intent(OUT); shimmed to inout in the extract
+    so the sentinel round-trip is standard-defined) is never written on
+    this lane; ``dw`` is written only under ``damp_w > 1e-5`` — both
+    return ``workspace_sentinel`` fills when unwritten, mirroring the
+    oracle driver's 1e30 init (documented scratch semantics).
 
     ``allflux_x``/``allflux_y`` are the d_sw1_duo output stacks
     ((res+1, res, 5) / (res, res+1, 5), slot axis last).  ``delp``/
-    ``pt`` are data-domain arrays (d_sw1 duo leaves them unmutated).
-    Returns dict(delp, pt, heat_source, ptc, dw).
+    ``pt``/``w`` are data-domain arrays (d_sw1 duo leaves them
+    unmutated).  Returns dict(delp, pt, w, heat_source, ptc, dw).
     """
-    if not hydrostatic or inline_q:
+    from legoesm.core.fv3_native_d_sw import del6_vt_flux, fl_limiter as _fl
+
+    if inline_q:
         raise NotImplementedError(
-            "d_sw2_duo: hydrostatic, inline_q=False lane only (matches "
-            "the oracle driver; w/q_con/tracer updates not exercised)")
+            "d_sw2_duo: inline_q=False lane only (matches the oracle "
+            "driver; q_con/tracer updates not exercised)")
+    if not hydrostatic and (w is None or npx is None or npy is None):
+        raise ValueError(
+            "d_sw2_duo: the NH arm needs w, npx and npy (auth 1077-1109)")
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
-    isd, jsd = bd.isd, bd.jsd
+    isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
 
     delp = fort(np.array(delp, dtype=np.float64, copy=True), isd, jsd)
     pt = fort(np.array(pt, dtype=np.float64, copy=True), isd, jsd)
@@ -618,6 +652,49 @@ def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict, bd: Bounds, *,
 
     # heat_source zeroing (auth 1074-1078, #ifndef SW_DYNAMICS)
     heat_source = np.zeros((ie - is_ + 1, je - js + 1))
+    hsf = fort(heat_source, is_, js)
+
+    # ---- NH w block (auth 1077-1109) -- BEFORE the delp update ----
+    w_out = None
+    dw = np.full((ie - is_ + 1, je - js + 1), workspace_sentinel)
+    if not hydrostatic:
+        wf = fort(np.array(w, dtype=np.float64, copy=True), isd, jsd)
+        if damp_w > 1.0e-5:
+            dd8 = kgb * abs(dt)
+            damp4 = (damp_w * float(gs["da_min_c"])) ** (nord_w + 1)
+            gsf = {
+                "rarea": RAREA,
+                "del6_v": fort(gs["del6_v"], isd, jsd),
+                "del6_u": fort(gs["del6_u"], isd, jsd),
+                "bounded_domain": bool(gs.get("bounded_domain", False)),
+                "sw_corner": bool(gs.get("sw_corner", True)),
+                "se_corner": bool(gs.get("se_corner", True)),
+                "nw_corner": bool(gs.get("nw_corner", True)),
+                "ne_corner": bool(gs.get("ne_corner", True)),
+            }
+            wk = _fl(isd, ied, jsd, jed)
+            fx2 = _fl(isd, ied + 1, jsd, jed)
+            fy2 = _fl(isd, ied, jsd, jed + 1)
+            del6_vt_flux(nord_w, npx, npy, damp4, wf, wk, fx2, fy2,
+                         gsf, bd, duogrid=True)
+            dwf = fort(dw, is_, js)
+            for j in range(js, je + 1):
+                for i in range(is_, ie + 1):
+                    dwf[i, j] = (fx2[i, j] - fx2[i + 1, j]
+                                 + fy2[i, j] - fy2[i, j + 1]) * RAREA[i, j]
+                    # verbatim auth 1087 (the commented-out -d_con form
+                    # sits directly above it in the oracle): dd8 term
+                    # included even though ke_bg=0 on the pinned deck.
+                    hsf[i, j] = dd8 - dwf[i, j] * (wf[i, j]
+                                                   + 0.5 * dwf[i, j])
+        gx2 = fort(np.array(allflux_x[:, :, 1], dtype=np.float64), is_, js)
+        gy2 = fort(np.array(allflux_y[:, :, 1], dtype=np.float64), is_, js)
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1):
+                wf[i, j] = delp[i, j] * wf[i, j] + (
+                    gx2[i, j] - gx2[i + 1, j] + gy2[i, j] - gy2[i, j + 1]
+                ) * RAREA[i, j]
+        w_out = wf.a
 
     # else-arm update (auth 1181-1196; inline_q=F)
     for j in range(js, je + 1):
@@ -631,9 +708,8 @@ def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict, bd: Bounds, *,
             pt[i, j] = pt[i, j] / delp[i, j]
 
     ptc = np.full_like(delp.a, workspace_sentinel)
-    dw = np.full((ie - is_ + 1, je - js + 1), workspace_sentinel)
-    return {"delp": delp.a, "pt": pt.a, "heat_source": heat_source,
-            "ptc": ptc, "dw": dw}
+    return {"delp": delp.a, "pt": pt.a, "w": w_out,
+            "heat_source": heat_source, "ptc": ptc, "dw": dw}
 
 
 def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
@@ -661,7 +737,7 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, bd: Bounds, npx: int, npy: int, *,
     lane only.  Returns dict(ubbtemp, vbbtemp, ubb, vbb) on the B-grid
     compute ring (is:ie+1, js:je+1).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, xtp_u, ytp_v
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, xtp_u, ytp_v
 
     if not duogrid:
         raise NotImplementedError(
@@ -800,6 +876,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
               nord: int = 1, dddmp: float = 0.2, d2_bg: float = 0.0,
               d4_bg: float = 0.12, d_con: float = 0.0,
               hydrostatic: bool = True, lim_fac: float = 1.0,
+              w=None, dw=None, damp_w: float = 0.0, do_f3d: bool = False,
               workspace_sentinel: float = 1.0e30) -> dict:
     """sw_core.F90 d_sw5 (symmetryclean 1474-1869), DUO branch, on the
     oracle lane (nord=1, hydrostatic, d_con=0, grid_type=0, not
@@ -819,14 +896,28 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
     them to inout; see the extract header).  ptc is unwritten on the
     nord>0 branch and ub/vb are untouched at d_con=0 — all three
     returned as ``workspace_sentinel`` fills mirroring the driver.
+    ``hydrostatic=False`` adds the NH w finalisation (auth 1600-1627):
+    the d_sw2 mass-weighted w divided by the UPDATED delp, plus the
+    ``dw`` damping increment when ``damp_w > 1e-5`` (returned key
+    ``w``; None on the hydro lane).
     Returns dict(delpc, divg_d, wk, ke, vortfluxx, vortfluxy, uc, vc,
-    ptc, ub, vb).
+    ptc, ub, vb, w).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, a2b_ord4, fv_tp_2d
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, a2b_ord4, fv_tp_2d
 
-    if not hydrostatic or d_con > 1.0e-5 or nord != 1:
+    if d_con > 1.0e-5 or nord not in (1, 2):
         raise NotImplementedError(
-            "d_sw5_duo: oracle lane only (hydrostatic, d_con=0, nord=1)")
+            "d_sw5_duo: oracle lane only (d_con=0, nord in {1, 2}; "
+            "nord <= ng-1)")
+    if not hydrostatic and do_f3d:
+        raise NotImplementedError(
+            "d_sw5_duo: do_f3d needs the ROT3 build define, which the "
+            "pinned oracle build does not set (sw_core.F90:1601-1611)")
+    if not hydrostatic and w is None:
+        raise ValueError("d_sw5_duo: the NH arm needs w (auth 1600-1627)")
+    if not hydrostatic and damp_w > 1.0e-5 and dw is None:
+        raise ValueError(
+            "d_sw5_duo: damp_w > 1e-5 needs the d_sw2 dw increment")
 
     is_, ie, js, je = bd.is_, bd.ie, bd.js, bd.je
     isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
@@ -838,7 +929,9 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
     vc = fort(np.array(vc, dtype=np.float64, copy=True), isd, jsd)
     ua = fort(np.array(ua, dtype=np.float64, copy=True), isd, jsd)
     va = fort(np.array(va, dtype=np.float64, copy=True), isd, jsd)
-    del delp, ua, va  # read only on the nord=0 / non-hydro branches
+    delpf = (fort(np.array(delp, dtype=np.float64, copy=True), isd, jsd)
+             if not hydrostatic else None)
+    del delp, ua, va  # ua/va read only on other branches; delp via delpf
     divg_d = fort(np.array(divg_d, dtype=np.float64, copy=True), isd, jsd)
     ke = fort(np.array(ke, dtype=np.float64, copy=True), isd, jsd)
     crx = fort(np.array(crx_adv, dtype=np.float64), is_, jsd)
@@ -896,6 +989,23 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
             wk[i, j] = RAREA[i, j] * (vt[i, j] - vt[i, j + 1]
                                       - ut[i, j] + ut[i + 1, j])
 
+    # ---- NH w finalisation (auth 1600-1627): w back to velocity ----
+    # d_sw2 left w MASS-WEIGHTED (delp*w + fluxdiv); divide by the
+    # UPDATED delp, then add the d_sw2 del6 damping increment.  do_f3d
+    # is the ROT3 build arm (dead on the pinned build).
+    w_out = None
+    if not hydrostatic:
+        wf = fort(np.array(w, dtype=np.float64, copy=True), isd, jsd)
+        for j in range(js, je + 1):
+            for i in range(is_, ie + 1):
+                wf[i, j] = wf[i, j] / delpf[i, j]
+        if damp_w > 1.0e-5:
+            dwf = fort(np.array(dw, dtype=np.float64), is_, js)
+            for j in range(js, je + 1):
+                for i in range(is_, ie + 1):
+                    wf[i, j] = wf[i, j] + dwf[i, j]
+        w_out = wf.a
+
     # ---- nord=1 higher-order divergence damping (auth 1731-1824) ----
     delpc = _fl(isd, ied, jsd, jed)
     delpc.a.fill(workspace_sentinel)  # only the B compute ring written
@@ -903,20 +1013,28 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         for i in range(is_, ie + 1 + 1):
             delpc[i, j] = divg_d[i, j]
 
-    nt = 0  # n-loop: n=1..nord with nord=1; fill_c false (duo-excluded)
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - 1 - nt, ie + 1 + nt + 1):
-            vc[i, j] = (divg_d[i + 1, j] - divg_d[i, j]) * DIVG_U[i, j]
-    for j in range(js - 1 - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            uc[i, j] = (divg_d[i, j + 1] - divg_d[i, j]) * DIVG_V[i, j]
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            divg_d[i, j] = uc[i, j - 1] - uc[i, j] + vc[i - 1, j] - vc[i, j]
-    # duo: corner-term removal SKIPPED (auth 1771 guard .not.duogrid)
-    for j in range(js - nt, je + 1 + nt + 1):
-        for i in range(is_ - nt, ie + 1 + nt + 1):
-            divg_d[i, j] = divg_d[i, j] * RAREA_C[i, j]
+    # n-loop (auth 1738-1788): n = 1..nord, nt = nord-n; fill_c is
+    # FALSE on the duo lane (guard `.not.(bounded .or. duogrid)`), the
+    # corner-term removal is duo-SKIPPED (auth 1771), and the rarea_c
+    # scaling runs unconditionally (not stretched).  nt=nord-1 ranges
+    # reach ng deep — nord <= ng-1 (=2 at ng=3), same as upstream.
+    for n_it in range(1, nord + 1):
+        nt = nord - n_it
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - 1 - nt, ie + 1 + nt + 1):
+                vc[i, j] = ((divg_d[i + 1, j] - divg_d[i, j])
+                            * DIVG_U[i, j])
+        for j in range(js - 1 - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                uc[i, j] = ((divg_d[i, j + 1] - divg_d[i, j])
+                            * DIVG_V[i, j])
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                divg_d[i, j] = (uc[i, j - 1] - uc[i, j]
+                                + vc[i - 1, j] - vc[i, j])
+        for j in range(js - nt, je + 1 + nt + 1):
+            for i in range(is_ - nt, ie + 1 + nt + 1):
+                divg_d[i, j] = divg_d[i, j] * RAREA_C[i, j]
 
     # ---- Smagorinsky vort (auth 1790-1806; dddmp >= 1e-5) ----
     vort = _fl(isd, ied, jsd, jed)
@@ -955,7 +1073,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
     return {"delpc": delpc.a, "divg_d": divg_d.a, "wk": wk.a, "ke": ke.a,
             "vortfluxx": vortfluxx.a, "vortfluxy": vortfluxy.a,
             "uc": uc.a, "vc": vc.a, "ut": ut.a, "vt": vt.a,
-            "ptc": ptc, "ub": ub, "vb": vb}
+            "ptc": ptc, "ub": ub, "vb": vb, "w": w_out}
 
 
 def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
@@ -985,7 +1103,7 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
     (halo strips keep the inputs — dumped and compared full-domain).
     Returns dict(u, v, ut, vt, ub, vb, heat_source).
     """
-    from legoesm.core.fv3_native_d_sw import _fl, del6_vt_flux
+    from legoesm.core.fv3_native_d_sw import fl_limiter as _fl, del6_vt_flux
 
     if d_con > 1.0e-5:
         raise NotImplementedError("d_sw6_duo: d_con=0 oracle lane only")

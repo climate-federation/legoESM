@@ -1,10 +1,163 @@
 """Shared test fixtures for legoESM."""
 
+import os
+import resource
 from pathlib import Path
 
-import pytest
-import jax
-import jax.numpy as jnp
+#: Cap the CPU affinity mask BEFORE JAX is imported (below).  XLA sizes its
+#: Eigen thread pool from the affinity mask, so on a many-core login node a
+#: single JAX process opens far more threads than ``ulimit -u`` allows once a
+#: few run at once, and the pool constructor aborts the interpreter:
+#:
+#:   F env.cc:93] Check failed: ret == 0 (11 vs. 0) Thread tf_XLAPjRtCpuClient
+#:   creation via pthread_create() failed.
+#:     @ Eigen::ThreadPoolTempl<>::ThreadPoolTempl()
+#:
+#: (11 = EAGAIN.)  It surfaces as "Fatal Python error: Aborted" mid-run, which
+#: reads like a test failure but is the process running out of thread slots.
+#:
+#: Measured on a 256-core Levante login node (``ulimit -u`` = 2048), threads
+#: opened by one client for a trivial jitted matmul:
+#:
+#:     CPUs    4     8    16    32    64   256
+#:     threads 29    45    77   141   237   621
+#:
+#: Uncapped that is 621 threads each, so FOUR concurrent clients (2484) are the
+#: first count over the 2048 ceiling; five were observed to fail 5/5.  At 32
+#: CPUs a client takes ~141, so ~14 fit.  Capping costs nothing measurable --
+#: these tests are XLA-compile-bound, not intra-op-parallelism-bound
+#: (tests/test_corner_div_damp_nh.py: 166.9 s on 256 CPUs, 166.3 s on 8,
+#: 152.7 s on 32).
+#:
+#: Set ``LEGOESM_TEST_CPU_CAP`` to a positive integer to force a cap, or to 0
+#: (or any value <= 0) to disable and inherit the machine's full affinity mask.
+_DEFAULT_TEST_CPU_CAP = 32
+
+#: Threads one XLA CPU client opens ~= _THREADS_PER_CPU * ncpu + _THREADS_BASE,
+#: fitted to the table above (slope (621-29)/(256-4) = 2.35).  Used to size the
+#: cap against the ACTUAL thread ceiling rather than trusting a fixed 32, which
+#: is only evidenced safe for ulimit -u = 2048.
+_THREADS_PER_CPU = 2.4
+_THREADS_BASE = 20.0
+#: Fraction of the thread ceiling the test session may claim, leaving room for
+#: the user's other processes (a login node already carries ~50 threads).
+_RLIMIT_SHARE = 0.5
+
+#: Env vars every common launcher sets in a rank's environment.  Under MPI the
+#: launcher (or the batch scheduler) owns placement: each rank already gets its
+#: own binding, and clamping every rank to the SAME low-numbered CPUs here would
+#: pile all of them onto one core set and serialise the run.  So the cap is
+#: skipped for MPI ranks -- they are separate processes with a launcher-assigned
+#: mask, which is exactly the placement this function would otherwise destroy.
+#: MPI does not standardise a rank env var, so detection is BEST-EFFORT: this
+#: covers the launchers in use here.  For an unlisted launcher, disable the cap
+#: explicitly with ``LEGOESM_TEST_CPU_CAP=0``.
+_MPI_RANK_ENV = (
+    "OMPI_COMM_WORLD_RANK",     # Open MPI
+    "PMI_RANK",                 # MPICH / Intel MPI
+    "PMIX_RANK",                # PMIx
+    "SLURM_PROCID",             # srun-launched
+    "MV2_COMM_WORLD_RANK",      # MVAPICH2
+    "MPI_RANKID",               # IBM Platform MPI
+    "LAMRANK",                  # legacy LAM/MPI
+)
+
+
+def _is_mpi_rank() -> bool:
+    """True when this interpreter was launched as a rank of an MPI job."""
+    return any(v in os.environ for v in _MPI_RANK_ENV)
+
+
+def _requested_cap() -> int | None:
+    """The user's explicit ``LEGOESM_TEST_CPU_CAP``, or None when unset/garbage.
+
+    A value <= 0 disables capping entirely and is returned as 0.
+    """
+    raw = os.environ.get("LEGOESM_TEST_CPU_CAP")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return max(0, value)
+
+
+def _xdist_worker_count() -> int:
+    """How many pytest-xdist workers share this machine (1 when not under xdist)."""
+    try:
+        return max(1, int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")))
+    except ValueError:
+        return 1
+
+
+def _effective_cap(n_cpus: int, soft_rlimit: int) -> int:
+    """CPUs this process may use so every worker's XLA pool fits the ceiling.
+
+    Budgets ``_RLIMIT_SHARE`` of the thread ceiling across the concurrent xdist
+    workers and inverts the measured threads-per-CPU fit.  An explicit
+    ``LEGOESM_TEST_CPU_CAP`` wins outright -- if a user names a number, honour
+    it rather than second-guessing their machine.
+    """
+    requested = _requested_cap()
+    if requested is not None:
+        return requested
+    budget = (soft_rlimit * _RLIMIT_SHARE) / _xdist_worker_count()
+    allowed = int((budget - _THREADS_BASE) / _THREADS_PER_CPU)
+    # Never below 4 (XLA needs a workable pool) nor above the documented default.
+    return max(4, min(_DEFAULT_TEST_CPU_CAP, allowed))
+
+
+def _worker_slice(cpus: list[int], cap: int) -> set[int]:
+    """Pick this xdist worker's DISJOINT slice of *cpus*.
+
+    Without this every worker inherits the controller's identical low-numbered
+    mask and four XLA clients pile onto the same cores.  ``PYTEST_XDIST_WORKER``
+    is ``gw0``, ``gw1``, ...; the slice wraps if the mask is too narrow to give
+    everyone a private one.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    index = 0
+    if worker.startswith("gw") and worker[2:].isdigit():
+        index = int(worker[2:])
+    start = (index * cap) % len(cpus)
+    picked = [cpus[(start + i) % len(cpus)] for i in range(cap)]
+    return set(picked)
+
+
+def _cap_cpu_affinity_for_thread_rlimit() -> None:
+    """Shrink this process's CPU affinity so XLA's thread pool fits ``ulimit -u``.
+
+    No-op when the platform has no affinity API (macOS), when running as an MPI
+    rank (the launcher owns placement), when the thread rlimit is unlimited,
+    when the mask is already small enough, or when the cap is disabled via
+    ``LEGOESM_TEST_CPU_CAP=0``.
+    """
+    if not (hasattr(os, "sched_getaffinity") and hasattr(os, "sched_setaffinity")):
+        return  # macOS / non-Linux: no affinity mask to shrink
+    if _is_mpi_rank():
+        return  # never fight the MPI launcher's binding
+    try:
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    except (ValueError, OSError):  # pragma: no cover - platform dependent
+        return
+    if soft == resource.RLIM_INFINITY:
+        return  # no thread ceiling to run into
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+        cap = _effective_cap(len(cpus), soft)
+        if cap <= 0 or len(cpus) <= cap:
+            return
+        os.sched_setaffinity(0, _worker_slice(cpus, cap))
+    except OSError:  # pragma: no cover - affinity syscalls can be denied
+        return  # a container/cpuset that forbids this is not our problem to fix
+
+
+_cap_cpu_affinity_for_thread_rlimit()
+
+import pytest  # noqa: E402  - must follow the affinity cap
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere, CubedSphereGrid
 from legoesm.core.field import Field

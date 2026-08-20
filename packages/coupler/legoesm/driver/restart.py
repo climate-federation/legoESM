@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import platform
-import subprocess
 import sys
 import warnings
 from datetime import datetime, timezone
@@ -27,6 +26,10 @@ from legoesm.forcing.amip_config import save_checkpoint
 # so io.state_checkpoint can share them without importing this driver-level
 # module (federation carve, Step 3).  Re-exported here for back-compat callers
 # of ``legoesm.driver.restart.{compute_state_digest,pytree_state_digest}``.
+from legoesm.io.git_provenance import (
+    check_cwd_import_consistency,
+    git_provenance,
+)
 from legoesm.io.state_digest import compute_state_digest, pytree_state_digest
 
 # Lazy imports to avoid circular dependency:
@@ -158,6 +161,46 @@ def compute_config_hash(config, kind: str | None = None) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
+                        kind: str | None = None) -> bool:
+    """True when *config* is provenance-identical to a stored manifest entry.
+
+    Exact hash match, or the SCHEMA-GROWTH case: a field added to the config
+    schema AFTER the manifest was written (top-level key absent from
+    ``stored_resolved``) is ignored PROVIDED it holds its default in *config*.
+    Without this, every added ExperimentConfig field bricked every older run
+    directory at the next chain link ("manifest written for a DIFFERENT
+    config") even though the run is semantically identical — reproduced by
+    codex on the 2026-07-27 morrison-field additions.  A NEW field at a
+    NON-default value is a real config difference and still refuses, so
+    provenance mixing stays impossible; tampering with any key the manifest
+    DOES store still changes the restricted hash.
+    """
+    kind = kind or detect_config_kind(config)
+    if compute_config_hash(config, kind) == stored_hash:
+        return True
+    # Growth tolerance is TOP-LEVEL and ATMOSPHERE-shaped: ocean records
+    # (required constructor args, nested growth) cannot prove their new
+    # fields are defaults, so the except below returns False for them —
+    # i.e. ocean keeps the pre-change STRICT behaviour, never an exception
+    # (codex 2026-07-27 round 2).
+    try:
+        current = _serialize_config(config, kind)
+        stored_keys = set(stored_resolved)
+        new_keys = set(current) - stored_keys
+        if not new_keys:
+            return False
+        defaults = _serialize_config(type(config)(), kind)
+        if any(k not in defaults or current[k] != defaults[k]
+               for k in new_keys):
+            return False
+        restricted = {k: v for k, v in current.items() if k in stored_keys}
+        text = json.dumps(restricted, sort_keys=True)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+    except Exception:
+        return False  # cannot prove schema growth: fail closed (strict)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -182,52 +225,31 @@ def _get_platform_tag() -> str:
     return f"{platform.system().lower()}-{platform.machine()}"
 
 
+def _package_anchor() -> Path:
+    """File of the IMPORTED module doing the stamping (this one).
+
+    Provenance is derived from the repository containing this file — the code
+    that actually runs — never from the CWD (2026-08-10: a run launched from a
+    pinned worktree stamped the pin while executing the editable install).
+    Reads the module global ``__file__`` at call time so tests can monkeypatch
+    it to point provenance at a synthetic repository.
+    """
+    return Path(__file__)
+
+
 def _get_git_hash() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
+    """HEAD SHA of the imported legoesm package's repo ("" if not a repo)."""
+    return git_provenance(_package_anchor()).commit
 
 
 def _get_git_ref() -> str:
-    """Current branch/ref name (empty string if detached or not a git repo)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            ref = result.stdout.strip()
-            return "" if ref == "HEAD" else ref  # "HEAD" => detached
-    except Exception:
-        pass
-    return ""
+    """Branch name of the imported package's repo ("" if detached / no repo)."""
+    return git_provenance(_package_anchor()).ref
 
 
 def _get_git_dirty() -> bool:
-    """True if the working tree has uncommitted changes (False if unknown)."""
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return bool(result.stdout.strip())
-    except Exception:
-        pass
-    return False
+    """True if the imported package's repo has uncommitted changes."""
+    return git_provenance(_package_anchor()).dirty
 
 
 def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
@@ -422,8 +444,14 @@ def build_run_manifest(
     model_weights_provenance=None,
     state_digest: str | None = None,
     config_kind: str | None = None,
+    params_applied: dict | None = None,
 ) -> dict:
-    """Assemble the run-manifest dict (pure; does no I/O).
+    """Assemble the run-manifest dict (no file I/O; reads git provenance).
+
+    Raises ``RuntimeError`` when the CWD is a legoesm checkout whose HEAD
+    differs from the imported package's repository (see
+    :mod:`legoesm.io.git_provenance`), unless ``LEGOESM_ALLOW_IMPORT_MISMATCH``
+    is set — then the mismatch is recorded under ``[legoESM].cwd_repo``.
 
     Parameters
     ----------
@@ -444,12 +472,33 @@ def build_run_manifest(
 
     kind = config_kind or detect_config_kind(config)
 
+    # Provenance of the IMPORTED package — the code that runs — not the CWD.
+    # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into
+    # a pinned worktree while importing another tree), this RAISES unless
+    # LEGOESM_ALLOW_IMPORT_MISMATCH=1, in which case the mismatch is recorded.
+    anchor = _package_anchor()
+    cwd_mismatch = check_cwd_import_consistency(anchor)
+    prov = git_provenance(anchor)
+    legoesm_section = {
+        "ref": prov.ref,
+        "commit": prov.commit,
+        # Resolved file the provenance was derived from, so a reader can see
+        # WHICH tree actually ran (legoesm is a namespace package; its
+        # __file__ is None, so the stamping module's file is recorded).
+        "package_path": prov.anchor,
+    }
+    if cwd_mismatch is not None:
+        # Explicitly-allowed mismatch: record the launch directory's repo too,
+        # so the manifest tells the whole story instead of certifying a lie.
+        legoesm_section["cwd_repo"] = {
+            "root": cwd_mismatch["cwd_root"],
+            "commit": cwd_mismatch["cwd_commit"],
+            "import_mismatch_allowed": True,
+        }
+
     raw = {
         "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
-        "legoESM": {
-            "ref": _get_git_ref(),
-            "commit": _get_git_hash(),
-        },
+        "legoESM": legoesm_section,
         "reproducibility": {
             "runner_tag": runner_tag,
             "python_version": platform.python_version(),
@@ -458,13 +507,19 @@ def build_run_manifest(
             "numpy_version": np.__version__,
             "legoesm_version": __version__,
             "platform": _get_platform_tag(),
-            "git_dirty": _get_git_dirty(),
+            "git_dirty": prov.dirty,  # imported package's repo, not the CWD
             "patches": list(patches) if patches else [],
         },
         "config": {
             "config_kind": kind,
             "resolved_config": _serialize_config(config, kind),
             "config_hash": compute_config_hash(config, kind),
+            # #1509: --params values routed by the CLASS ROUTER land on nested
+            # scheme configs that resolved_config does not reach, so without
+            # this a reader could not tell which parameter values produced the
+            # run -- only which FILE was passed, whose contents may since have
+            # changed. Empty dict when no --params were given.
+            "params_applied": dict(params_applied) if params_applied else {},
         },
         "result": {
             "state_digest": state_digest,
@@ -581,7 +636,7 @@ def validate_run_manifest(manifest: dict) -> None:
     # still validate (back-compat).
     kind = config.get("config_kind", "atmosphere")
     rebuilt = _deserialize_config(resolved, kind)
-    if compute_config_hash(rebuilt, kind) != config_hash:
+    if not config_hash_matches(config_hash, resolved, rebuilt, kind):
         raise ValueError(
             "run manifest config_hash does not match its resolved_config "
             "(corrupt or tampered provenance)"

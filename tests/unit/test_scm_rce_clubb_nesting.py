@@ -17,7 +17,7 @@ from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
     rewrap_tunable_subconfig,
     tunable_subconfig,
 )
-from legoesm.training.param_collector import apply_param_overrides
+from legoesm.core.param_overrides import apply_param_overrides
 
 import scripts.run.run_scm_rce_campaign as campaign
 

@@ -421,7 +421,7 @@ class SAMGrid(NamedTuple):
     z_half: np.ndarray             # (nlev+1,) interfaces TOP-TO-BOTTOM (z_half[0]=top)
 
 
-def read_sam_grd(path) -> SAMGrid:
+def read_sam_grd(path, n_levels: int | None = None) -> SAMGrid:
     """Parse a SAM ``grd`` vertical-grid file (the EXACT SAM levels).
 
     Format: each line ``z[m]  level_index  spacing[m]``, bottom-to-top, where
@@ -429,6 +429,13 @@ def read_sam_grd(path) -> SAMGrid:
     the boundary layer, ~100 m uniform through the deep-convection layer
     (5-17 km), then stretched to ~30 km (266 levels) — a profile NO geometric
     stretch matches.
+
+    A ``grd`` may also carry a SINGLE column of heights and FEWER rows than the
+    run's ``nzm`` — RCEMIP1's has 25 rows for a 74-level run. SAM then extends
+    it with the last spacing (``setgrid.f90``: ``z(k)=z(k-1)+(z(k-1)-z(k-2))``),
+    which for RCEMIP1 means 13 stretched levels (37 m first) then uniform 500 m
+    to 33 km. Pass ``n_levels`` to apply that extension; without it the file is
+    taken as-is.
 
     Interfaces follow SAM's convention ``zi(k)=½(z(k-1)+z(k))`` (the MIDPOINTS
     of the scalar levels), ``zi(0)=0`` (surface), top extrapolated — so the
@@ -440,15 +447,27 @@ def read_sam_grd(path) -> SAMGrid:
     z_rows = []
     for line in Path(path).read_text().splitlines():
         toks = line.split()
-        if len(toks) < 3:
+        if not toks:
             continue
         try:
             z_rows.append(float(toks[0]))
         except ValueError:
             continue
     if len(z_rows) < 2:
-        raise ValueError(f"read_sam_grd: <2 valid 'z idx spacing' rows in {path}")
+        raise ValueError(f"read_sam_grd: <2 valid 'z ...' rows in {path}")
     z_full_bu = np.asarray(z_rows, dtype=np.float64)   # cell centres, bottom→top
+    if n_levels is not None:
+        if n_levels < z_full_bu.shape[0]:
+            raise ValueError(
+                f"read_sam_grd: n_levels={n_levels} is FEWER than the "
+                f"{z_full_bu.shape[0]} levels in {path}; SAM only extends a "
+                "grd, it never truncates one.")
+        if n_levels > z_full_bu.shape[0]:
+            # setgrid.f90 old-style extension: keep adding the last spacing.
+            dz_last = z_full_bu[-1] - z_full_bu[-2]
+            extra = z_full_bu[-1] + dz_last * np.arange(
+                1, n_levels - z_full_bu.shape[0] + 1, dtype=np.float64)
+            z_full_bu = np.concatenate([z_full_bu, extra])
     if np.any(np.diff(z_full_bu) <= 0.0) or z_full_bu[0] <= 0.0:
         raise ValueError("read_sam_grd: scalar levels must be strictly "
                          "increasing and positive.")

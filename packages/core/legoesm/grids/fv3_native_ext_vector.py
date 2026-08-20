@@ -45,6 +45,8 @@ The internal geographic lattice uses ``_NG_P1 = 4`` rings exactly like
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from legoesm.grids.fv3_native_gridstruct import (
     exchange_agrid_scalar_halos,
@@ -53,6 +55,12 @@ from legoesm.grids.fv3_native_gridstruct import (
     exchange_dgrid_vector_halos,
     k2e_remap_halo_rings,
 )
+
+# Vertex-instability diagnostic mode (codex vertex-kill C2), frozen at
+# import: the hot _CornerLagrange.fill must not re-read the environment
+# per call, and a mid-run env change must not alter a running
+# experiment (codex screens-r1 F6).  Default OFF = faithful.
+_CORNER_NEAREST = os.environ.get("LEGOESM_DUO_CORNER_MODE", "") == "nearest"
 
 # upstream constants (fv_duogrid.F90)
 _NG_P1 = 4          # set_bd_ext_duo: dg%bd%ng = 4        (line 146)
@@ -203,7 +211,7 @@ def ext_parity_lonlat_ref(n: int, ng: int, parity: str):
     parity "A": (2i, 2j) nodes, (6, n+2ng, n+2ng);
     parity "B": (2i-1, 2j-1) nodes, (6, n+2ng+1, n+2ng+1).
     """
-    from legoesm.grids.fv3_native_halos import _ED_CARTS, _ed_line
+    from legoesm.grids.fv3_native_halos import ED_CARTS as _ED_CARTS, ed_line as _ed_line
 
     line = _ed_line(n, 2 * (ng + 2))
     if parity == "A":
@@ -243,7 +251,7 @@ def _row_arc_coords(lon_row, lat_row):
 
 
 def _lagrange_w(xt: float, xs: np.ndarray) -> np.ndarray:
-    from legoesm.grids.fv3_native_halos import _lagrange_coef
+    from legoesm.grids.fv3_native_halos import lagrange_coef as _lagrange_coef
 
     return _lagrange_coef(xt, xs)
 
@@ -318,6 +326,32 @@ class _CornerLagrange:
         w = _lagrange_w(col[jt - glo], xs)
         return w, src_f
 
+    def weights(self, i_t: int, j_t: int, direction: str) -> tuple:
+        """Public accessor: ``(weights, source Fortran index list)`` for
+        ONE directional fill at ``(i_t, j_t)``.
+
+        Same dispatch as :meth:`_apply_dir` (and raises on an unknown
+        direction rather than defaulting, per the dispatch-hardening
+        rule).  Exists so the JAX lane's table builder
+        (``fv3_duo_halos.build_jax_duo_halo_tables``) can READ these
+        Lagrange coefficients instead of re-deriving
+        ``compute_lagrange_coeff`` (fv_duogrid.F90:2159-2272) — a
+        re-derivation would be a mathematical port, not a mechanical
+        one.  No numerics here; the weights come from ``_w_x``/``_w_y``
+        unchanged.
+        """
+        if direction == "X+":
+            return self._w_x(i_t, j_t, True)
+        if direction == "X-":
+            return self._w_x(i_t, j_t, False)
+        if direction == "Y+":
+            return self._w_y(i_t, j_t, True)
+        if direction == "Y-":
+            return self._w_y(i_t, j_t, False)
+        raise ValueError(
+            f"_CornerLagrange.weights: direction {direction!r} "
+            f"(expected 'X+', 'X-', 'Y+' or 'Y-')")
+
     def _apply_dir(self, f: np.ndarray, i_t: int, j_t: int, direction: str):
         lo = self.flo
         if direction == "X+":
@@ -336,11 +370,15 @@ class _CornerLagrange:
 
     def fill(self, f: np.ndarray):
         """The nine-slot per-corner sequence [fv_duogrid.F90:1743-1901]."""
+        import os
+
         n = self.n
         lo = self.flo
         ie = n + self.istag                       # last compute slot
         je = n + self.jstag
         is_, js_ = 1, 1
+
+        corner_nearest = _CORNER_NEAREST
 
         def diag(i_t, j_t, d1, d2):
             fa, fb = f.copy(), f.copy()
@@ -382,14 +420,42 @@ class _CornerLagrange:
         diag(is_ - 3, js_ - 3, "X-", "Y-")
         diag(is_ - 2, js_ - 2, "X-", "Y-")
 
+        if corner_nearest:
+            # DIAGNOSTIC (codex vertex-kill C2 screen, NON-FAITHFUL):
+            # after the standard sequence, overwrite ONLY the 3x3
+            # diagonal wedges with the nearest compute-corner value
+            # (upstream fv_duogrid.F90:1715 warns Lagrange
+            # extrapolation is "not highly recommended"; weights reach
+            # ~35 -> overshoot on sharp fields).  Directional strips
+            # keep their standard fills.
+            for (ci, cj, si, sj) in ((ie + 1, je + 1, ie, je),
+                                     (is_ - 1, je + 1, is_, je),
+                                     (ie + 1, js_ - 1, ie, js_),
+                                     (is_ - 1, js_ - 1, is_, js_)):
+                di = 1 if ci > ie else -1
+                dj = 1 if cj > je else -1
+                for a in range(3):
+                    for b in range(3):
+                        f[ci + di * a - lo, cj + dj * b - lo] = \
+                            f[si - lo, sj - lo]
+
 
 # ---------------------------------------------------------------------------
 # context: per-resolution precomputed tables/bases
 # ---------------------------------------------------------------------------
 
 def build_ext_context(n: int, ng: int, gs6: list, *,
-                      vector_corner: str = "lagrange") -> dict:
+                      vector_corner: str = "lagrange",
+                      k2e_nord: int = 2) -> dict:
     """Precompute everything the ext exchanges need at resolution n.
+
+    ``k2e_nord`` defaults to 2 — the AUTHORITATIVE resolved runtime value
+    (the pinned tree's own ``duogrid_init`` manifest; confirmed by the
+    extchain oracle certificate, whose 4-vs-2 mutation control scores
+    0.6–93.7).  An earlier default of 4 here meant every caller that
+    omitted the kwarg exercised a non-deck interpolation order while the
+    production stepper explicitly passed 2 — a silent test/production
+    split.
 
     ``gs6`` MUST be the KINKED (pre-``extend_gridstruct``) mpp-state
     gridstructs — c2l and the a-matrices read the model's kinked
@@ -403,7 +469,7 @@ def build_ext_context(n: int, ng: int, gs6: list, *,
     - per-stagger corner Lagrange operators on the stepper lattice.
     """
     from legoesm.grids.fv3_native_halos import (
-        _compute_ext_vectors_native,
+        compute_ext_vectors_native as _compute_ext_vectors_native,
     )
 
     amat6 = [center_a_matrix(gs) for gs in gs6]
@@ -440,7 +506,7 @@ def build_ext_context(n: int, ng: int, gs6: list, *,
         "n": n, "ng": ng, "amat6": amat6, "dx6": dx6, "dy6": dy6,
         "vlon4": vlon4, "vlat4": vlat4, "ew4": ew4, "es4": es4,
         "corner_a4": corner_a4, "corner_a3": corner_a3,
-        "corner_b3": corner_b3,
+        "corner_b3": corner_b3, "k2e_nord": k2e_nord,
         "corner_du3": corner_du3, "corner_dv3": corner_dv3,
         "vector_corner": vector_corner,
     }
@@ -457,13 +523,15 @@ def ext_scalar_sixface(f6: list, stag: str, ectx: dict):
     if stag == "A":
         for t in range(1, 7):
             exchange_agrid_scalar_halos(f6, t, n, ng)
-        k2e_remap_halo_rings(f6, "A", n, ng)
+        k2e_remap_halo_rings(f6, "A", n, ng,
+                             k2e_nord=ectx.get("k2e_nord", 4))
         for t in range(6):
             ectx["corner_a3"][t].fill(f6[t])
     elif stag == "B":
         for t in range(1, 7):
             exchange_bgrid_scalar_halos(f6, t, n, ng)
-        k2e_remap_halo_rings(f6, "B", n, ng)
+        k2e_remap_halo_rings(f6, "B", n, ng,
+                             k2e_nord=ectx.get("k2e_nord", 4))
         for t in range(6):
             ectx["corner_b3"][t].fill(f6[t])
     else:
@@ -476,7 +544,8 @@ def ext_scalar_sixface(f6: list, stag: str, ectx: dict):
 # geographic A-lattice halo treatment on the ng=4 lattice
 # ---------------------------------------------------------------------------
 
-def _geo_lattice_exchange(g6: list, ectx: dict):
+def _geo_lattice_exchange(g6: list, ectx: dict, dump=None,
+                          names: tuple = ("S4_ullp1", "S5_ullp1")):
     """Steps 3-4 of the vector flow on the _NG_P1 lattice: neighbour
     exchange, k2e ring remap (rings 1..4), Lagrange corner regions.
 
@@ -495,9 +564,18 @@ def _geo_lattice_exchange(g6: list, ectx: dict):
     ngp = _NG_P1
     for t in range(1, 7):
         exchange_agrid_scalar_halos(g6, t, n, ngp)
-    k2e_remap_halo_rings(g6, "A", n, ngp)
+    k2e_remap_halo_rings(g6, "A", n, ngp,
+                         k2e_nord=ectx.get("k2e_nord", 4))
+    if dump:
+        st, nm = names[0].split("_")     # post-k2e, pre-corner (cube_rmp)
+        for t in range(6):
+            dump(st, t, nm, g6[t])
     for t in range(6):
         ectx["corner_a4"][t].fill(g6[t])
+    if dump:
+        st, nm = names[1].split("_")     # post corner Lagrange (in-a2d fill)
+        for t in range(6):
+            dump(st, t, nm, g6[t])
 
 
 def _pack_p1(ua: np.ndarray, n: int, ng: int) -> np.ndarray:
@@ -597,23 +675,54 @@ def ext_vector_dgrid_sixface(u6: list, v6: list, ectx: dict):
     vertex-attribution A/B).
     """
     n, ng = ectx["n"], ectx["ng"]
+    # optional oracle stage-dump hook: callable(stage, tile0, name, arr)
+    # invoked at the same pipeline points instrumented in the Zenodo
+    # model's ext_vector (fv3_recon ext_vector operand-diff harness);
+    # None (default) = byte-identical production behavior.
+    dump = ectx.get("stage_dump")
     for t in range(1, 7):
         exchange_dgrid_vector_halos(u6, v6, t, n, ng)
+    if dump:
+        for t in range(6):
+            dump("S1", t, "uin", u6[t])
+            dump("S1", t, "vin", v6[t])
     ug6, vg6 = [], []
     for t in range(6):
         ua, va = c2l_ord2_face(u6[t], v6[t], ectx["dx6"][t],
                                ectx["dy6"][t], ectx["amat6"][t],
                                n, ng)
+        if dump:
+            dump("S2", t, "ull", ua)
+            dump("S2", t, "vll", va)
         ug6.append(_pack_p1(ua, n, ng))
         vg6.append(_pack_p1(va, n, ng))
-    _geo_lattice_exchange(ug6, ectx)
-    _geo_lattice_exchange(vg6, ectx)
+    if dump:
+        ngp = _NG_P1
+        for g6, nm in ((ug6, "ullp1"), (vg6, "vllp1")):
+            g6x = [np.array(g, copy=True) for g in g6]
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(g6x, t, n, ngp)
+            for t in range(6):
+                dump("S3", t, nm, g6x[t])
+    _geo_lattice_exchange(ug6, ectx, dump=dump)
+    _geo_lattice_exchange(vg6, ectx, dump=dump,
+                          names=("S4_vllp1", "S5_vllp1"))
     for t in range(6):
         ud4, vd4 = _a2d_project(ug6[t], vg6[t], t, ectx)
+        if dump:
+            dump("S5", t, "up1", ud4)
+            dump("S5", t, "vp1", vd4)
         _write_d_strips(u6[t], v6[t], ud4, vd4, n, ng)
+        if dump:
+            dump("S6pre", t, "uin", u6[t])
+            dump("S6pre", t, "vin", v6[t])
         if ectx.get("vector_corner", "lagrange") == "lagrange":
             ectx["corner_du3"][t].fill(u6[t])
             ectx["corner_dv3"][t].fill(v6[t])
+    if dump:
+        for t in range(6):
+            dump("S6", t, "uin", u6[t])
+            dump("S6", t, "vin", v6[t])
 
 
 def _write_c_strips(uc: np.ndarray, vc: np.ndarray, uc4: np.ndarray,
@@ -644,22 +753,54 @@ def _write_c_strips(uc: np.ndarray, vc: np.ndarray, uc4: np.ndarray,
 
 
 def ext_vector_cgrid_sixface(uc6: list, vc6: list, ectx: dict):
-    """ext_vector(uc, vc, …, 1,0,0,1): C-grid covariant winds."""
+    """ext_vector(uc, vc, …, 1,0,0,1): C-grid covariant winds.
+
+    Supports the same optional ``ectx["stage_dump"]`` hook as the D-grid
+    variant (extchain oracle harness); ``None`` (default) is
+    byte-identical production behavior.
+    """
     n, ng = ectx["n"], ectx["ng"]
+    dump = ectx.get("stage_dump")
     for t in range(1, 7):
         exchange_cgrid_vector_halos(uc6, vc6, t, n, ng)
+    if dump:
+        for t in range(6):
+            dump("S1", t, "uin", uc6[t])
+            dump("S1", t, "vin", vc6[t])
     ug6, vg6 = [], []
     for t in range(6):
         ua, va = c2l_ord2_cgrid_face(uc6[t], vc6[t], ectx["dx6"][t],
                                      ectx["dy6"][t], ectx["amat6"][t],
                                      n, ng)
+        if dump:
+            dump("S2", t, "ull", ua)
+            dump("S2", t, "vll", va)
         ug6.append(_pack_p1(ua, n, ng))
         vg6.append(_pack_p1(va, n, ng))
-    _geo_lattice_exchange(ug6, ectx)
-    _geo_lattice_exchange(vg6, ectx)
+    if dump:
+        ngp = _NG_P1
+        for g6, nm in ((ug6, "ullp1"), (vg6, "vllp1")):
+            g6x = [np.array(g, copy=True) for g in g6]
+            for t in range(1, 7):
+                exchange_agrid_scalar_halos(g6x, t, n, ngp)
+            for t in range(6):
+                dump("S3", t, nm, g6x[t])
+    _geo_lattice_exchange(ug6, ectx, dump=dump)
+    _geo_lattice_exchange(vg6, ectx, dump=dump,
+                          names=("S4_vllp1", "S5_vllp1"))
     for t in range(6):
         uc4, vc4 = _a2c_project(ug6[t], vg6[t], t, ectx)
+        if dump:
+            dump("S5", t, "up1", uc4)
+            dump("S5", t, "vp1", vc4)
         _write_c_strips(uc6[t], vc6[t], uc4, vc4, n, ng)
+        if dump:
+            dump("S6pre", t, "uin", uc6[t])
+            dump("S6pre", t, "vin", vc6[t])
         if ectx.get("vector_corner", "lagrange") == "lagrange":
             ectx["corner_dv3"][t].fill(uc6[t])     # C-u stagger = (1,0)
             ectx["corner_du3"][t].fill(vc6[t])     # C-v stagger = (0,1)
+    if dump:
+        for t in range(6):
+            dump("S6", t, "uin", uc6[t])
+            dump("S6", t, "vin", vc6[t])

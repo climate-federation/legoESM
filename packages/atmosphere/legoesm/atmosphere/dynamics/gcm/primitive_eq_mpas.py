@@ -28,10 +28,19 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.conservation import (
+    conservative_positive_clip,
+    conservative_positive_clip_global,
+    is_borrow_eligible_tracer,
+)
 from legoesm.core.precision import cast_pytree
 
 from legoesm.core.field import Field
-from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
+from legoesm.core.state import (
+    MPAS_SFC_DIAG_EXTRA_KEYS,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
 from legoesm.core.operators_voronoi import (
     # 2D operators used for surface-pressure-only fields (ln_ps, p_s).
     divergence_cell,
@@ -58,6 +67,7 @@ from legoesm.grids.vertical import (
     compute_geopotential_hybrid,
     compute_sigma_dot_from_cumsum,
     compute_mass_flux_from_cumsum,
+    VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
     vertical_advection_theta,
@@ -84,6 +94,13 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
+    # Column-conserving tracer positivity clamp (borrow the clipped deficit
+    # from the positives) instead of the mass-CREATING plain max(q, 0).  See
+    # the "--- 3. Floors ---" note: the naive clamp invents ~+30 kg/m2/yr of
+    # water on the AMIP century.  Default TRUE since 2026-08-16 (owner
+    # decision: "conserving form always"); False restores the legacy clamp
+    # for bit-comparison against older runs.
+    conservative_tracer_clamp: bool = True
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -137,15 +154,40 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
     # ``nu_del4`` "off by default, set in production" convention); the
-    # coupled/AMIP path sets a small value.  Last field to preserve positional ABI.
+    # coupled/AMIP path sets a small value.
     nu_vert4_T: float = 0.0
+    # Vertical advection scheme for the SIGMA lane (``vertical_coord="sigma"``),
+    # applied to the θ thermodynamic transport, the tracers and the edge winds
+    # — one selector for the one shared operator they all call.
+    # "upwind" (default) is first-order donor cell; its leading truncation
+    # error is a diffusion K_σ = |σ̇|·Δσ/2, measured at +0.822 K/day at the
+    # tropical UTLS maximum (15S-15N, 91.4 hPa, cldF_fsd N=37 checkpoints) —
+    # larger than the entire production temperature tendency there.
+    # "van_leer" is the 2nd-order TVD reconstruction, which removes that term
+    # where the profile is smooth.  Its face values are unconditionally bounded
+    # by the two adjacent cells; the UPDATE is monotone only under a Courant
+    # condition.  That condition (~ nu_k + nu_{k+1} <= 1) is DERIVED for a
+    # uniform grid only; on a stretched grid or with a varying sigma_dot there
+    # is regression evidence, not a guarantee (see the kernel docstring).
+    # Measured global max of that pair on the target run (raw interface
+    # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
+    # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
+    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
+    # there RAISES rather than running silently inert.
+    # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
+    # existing callers, not full tuple ABI (exact unpacking / len() / _make
+    # with a short tuple still break; no such caller exists in-repo).
+    vert_advection_scheme: str = "upwind"
 
 
 # ============================================================================
 # Tendency computation
 # ============================================================================
 
-def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
+def vertical_del4_T_tendency(
+    T_3d: jax.Array, nu_vert4_T: float, layer_mass: jax.Array | None = None,
+) -> jax.Array:
     """Scale-selective vertical biharmonic damping of the grid-scale T mode.
 
     Returns the tendency ``-nu · ∂⁴T/∂σ⁴`` (a discrete fourth-difference on the
@@ -159,9 +201,22 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
     the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
     ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
     worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
-    (zero-gradient) padded (a no-flux boundary → the column-integrated tendency
-    is ZERO to machine precision for ANY profile, so the filter dissipates
-    grid-scale variance WITHOUT spurious column heating/cooling).  Discrete 2Δσ
+    (zero-gradient) padded (a no-flux boundary → the INDEX-space sum
+    ``Σ_k tendency_k`` is ZERO to machine precision for ANY profile).
+    That is NOT the same as column conservation: the conserved quantity is the
+    MASS-weighted ``Σ_k tendency_k · Δσ_k``, and the two coincide only when
+    ``Δσ`` is constant.  On a stretched grid the unweighted-zero operator is a
+    spurious column source/sink — measured on the tropopause-refined σ grid
+    (``grids.vertical.tropopause_refined_sigma_half``, refine=3, nlev=30) at
+    -7.86 W/m² of column enthalpy and -0.135 mm/day of column water for a
+    ±5 K / ±1 g/kg 2Δσ checkerboard, and -0.99 W/m² on the shipped stretched
+    HYBRID L40 grid.  Pass ``dsigma`` to remove it: the mass-weighted mean of
+    the tendency is subtracted, which is the minimum-norm conservative
+    projection (it leaves every vertical DIFFERENCE — hence the filter's
+    variance damping — untouched and only cancels the spurious column mean).
+    On a uniform grid the correction is identically zero to round-off
+    (measured ≤1.4e-20 K/s, far below the float32 ULP of the tendency), so the
+    uniform and ``dsigma=None`` paths stay bit-identical.  Discrete 2Δσ
     ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
     (½ the interior rate — a boundary no-flux constraint of any conservative
     biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
@@ -173,6 +228,16 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
         Temperature, shape ``(..., nlev)``.
     nu_vert4_T : float
         Biharmonic filter rate [1/s].  ``0.0`` ⇒ exact zero tendency.
+    layer_mass : jax.Array or None
+        Per-layer mass weight, either ``(nlev,)`` or per-column
+        ``(..., nlev)``.  Any positive multiple of the true layer mass works
+        (it is normalised): in σ pass ``Δσ`` — ``dp_k = p_s·Δσ_k`` and p_s
+        cancels — but in HYBRID pass the actual ``dp = dA·p_ref + dB·p_s``,
+        NOT ``dA + dB``, which is the thickness only at ``p_s = p_ref``.
+        When given, the mass-weighted column mean is removed so
+        ``Σ_k tendency_k · dp_k == 0`` to machine precision on ANY grid.
+        ``None`` keeps the legacy index-space-only behaviour (correct only for
+        a uniform grid).
 
     Returns
     -------
@@ -189,7 +254,25 @@ def vertical_del4_T_tendency(T_3d: jax.Array, nu_vert4_T: float) -> jax.Array:
     # exactly (flux form), so the filter conserves column-integrated T.
     lap_p = jnp.pad(lap, (*pad_axes, (1, 1)), mode="edge")
     bih = lap_p[..., :-2] - 2.0 * lap_p[..., 1:-1] + lap_p[..., 2:]  # ∂⁴/∂σ⁴ (>0 at 2Δσ)
-    return -nu_vert4_T * bih
+    tend = -nu_vert4_T * bih
+    if layer_mass is None:
+        return tend
+    # Conservative projection onto the mass-weighted zero-mean subspace.
+    # Sign convention: ``tend`` is a source term added to dX/dt, so removing
+    # its mass-weighted mean makes the filter a pure REDISTRIBUTOR of X within
+    # the column — no net column source or sink, either sign.
+    # ``keepdims`` on BOTH reductions so a per-column weight (..., nlev) and a
+    # coordinate-constant weight (nlev,) both normalise by their OWN column
+    # sum; a scalar ``.sum()`` would silently sum over cells for the former.
+    # PRECISION: the weight is cast DOWN to the tendency dtype, so the closure
+    # is exact only to that dtype's reduction round-off — measured residual
+    # 4e-14 W/m² in fp64 and 3.6e-5 W/m² in fp32, against the 7.9 W/m² leak
+    # this replaces.  fp32 is therefore 2e5x better than the status quo and
+    # 4 orders below the <1 W/m² TOA-imbalance target, not an exact fp64
+    # guarantee (codex round 3).
+    _w = layer_mass.astype(tend.dtype)
+    return tend - ((tend * _w).sum(axis=-1, keepdims=True)
+                   / _w.sum(axis=-1, keepdims=True))
 
 
 def mpas_hydrostatic_tendencies(
@@ -217,6 +300,26 @@ def mpas_hydrostatic_tendencies(
     MPASHydrostaticTendencies
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Fail-early dispatch guard on the STATIC config value (never on a tracer):
+    # an unknown scheme must raise, and a scheme the hybrid lane cannot honour
+    # must raise rather than run silently inert (cf. the ``conservative_tracer_
+    # clamp`` MPI regression).  ``vertical_advection`` raises on unknown too —
+    # this catches it before any tracing work, and catches the hybrid gap that
+    # the shared operator cannot see.
+    _vert_scheme = config.vert_advection_scheme
+    if _vert_scheme not in VERTICAL_ADVECTION_SCHEMES:
+        raise ValueError(
+            f"unknown vert_advection_scheme {_vert_scheme!r}; expected one of "
+            f"{VERTICAL_ADVECTION_SCHEMES}"
+        )
+    if _hybrid and _vert_scheme != "upwind":
+        raise ValueError(
+            f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
+            "sigma vertical coordinate only; the hybrid lane advects with "
+            "vertical_advection_hybrid, where it would be silently inert. "
+            "Use vertical_coord='sigma' or leave the scheme at 'upwind'."
+        )
 
     u_3d = state.u.data        # (nEdges, nlev)
     T_3d = state.T.data        # (nCells, nlev)
@@ -489,7 +592,7 @@ def mpas_hydrostatic_tendencies(
         # BEFORE discretization.  σ-convention (index 0 top, σ̇>0 downward)
         # is inherited verbatim from the reused ``vertical_advection``.
         vert_thermo_T = vertical_advection_theta(
-            T_3d, sigma_dot, p_s, sigma_coord)
+            T_3d, sigma_dot, p_s, sigma_coord, scheme=_vert_scheme)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = σ·dp_s/dt + p_s·σ̇  ⇒  ω_ps = σ·dp_s/dt.  The σ̇ part
         # κ·T·σ̇/σ is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -505,7 +608,9 @@ def mpas_hydrostatic_tendencies(
     if _hybrid:
         vert_adv_u = _vertical_advection_edge(u_3d, mass_flux, sigma_coord, mesh, hybrid=True, p_s=p_s)
     else:
-        vert_adv_u = _vertical_advection_edge(u_3d, sigma_dot, sigma_coord, mesh, hybrid=False)
+        vert_adv_u = _vertical_advection_edge(
+            u_3d, sigma_dot, sigma_coord, mesh, hybrid=False,
+            scheme=_vert_scheme)
 
     du_dt_3d = du_dt_3d + vert_adv_u
 
@@ -539,8 +644,18 @@ def mpas_hydrostatic_tendencies(
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
     # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
     # vertical operator in this dycore opposes.  Zero when nu_vert4_T == 0.
+    # Mass weight for the filter's conservative projection.  Must be the TRUE
+    # layer mass dp_k, not a coordinate proxy: in σ, dp_k = p_s·Δσ_k and p_s
+    # cancels between numerator and denominator, so Δσ is EXACT and cheaper;
+    # in hybrid, dp_k = dA_k·p_ref + dB_k·p_s varies by column and
+    # ``sigma_coord.dsigma`` (= dA + dB) is the thickness only at p_s = p_ref
+    # — using it would leave the filter conservative only to the p_s/p_ref
+    # departure (~50% of the dB share at p_s = 500 hPa).  ``dp`` is already
+    # built above in the hybrid branch, so this is free.
+    _filter_weight = dp if _hybrid else sigma_coord.dsigma
     if config.nu_vert4_T > 0.0 and T_3d.shape[-1] > 2:
-        dT_dt_3d = dT_dt_3d + vertical_del4_T_tendency(T_3d, config.nu_vert4_T)
+        dT_dt_3d = dT_dt_3d + vertical_del4_T_tendency(
+            T_3d, config.nu_vert4_T, _filter_weight)
 
     # --- 6. Add physics tendencies ---
     if physics_tendency is not None:
@@ -569,7 +684,25 @@ def mpas_hydrostatic_tendencies(
                 in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
+                lambda qk: vertical_advection(
+                    qk, sigma_dot, sigma_coord, scheme=_vert_scheme),
+                in_axes=-1, out_axes=-1)(q)
+        # #930 vertical checkerboard damper on TRACERS (same operator + rate
+        # as the T filter above).  The 2026-07-23 moist-AMIP blowup forensics
+        # (Tibetan-plateau cell, ±140 K 2Δσ T zigzag with 66 g/kg q_v pooling
+        # at the hot levels) show the moist checkerboard's primary oscillator
+        # is the TRACER field: tracer vertical transport reuses the
+        # checkerboard-prone ``vertical_advection`` form (only T got the #962
+        # θ-form rewrite), so damping T alone cannot stabilize the coupled
+        # q↔latent-heating mode.  ``dsigma`` is passed so the MASS-weighted
+        # column integral (not merely the index-space sum) is zero to machine
+        # precision → conserves column moisture on the stretched hybrid and
+        # tropopause-refined σ grids too, not just on a uniform grid.
+        # Zero when nu_vert4_T == 0 (bit-identical).
+        if config.nu_vert4_T > 0.0 and q.shape[-2] > 2:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_del4_T_tendency(
+                    qk, config.nu_vert4_T, _filter_weight),
                 in_axes=-1, out_axes=-1)(q)
         _phys_tt = (physics_tendency.tracer_tendencies
                     if physics_tendency is not None else None)
@@ -597,6 +730,7 @@ def mpas_hydrostatic_tendencies(
 
 def _vertical_advection_edge(
     u_3d, vert_vel, sigma_coord, mesh, hybrid=False, p_s=None,
+    scheme="upwind",
 ):
     """Vertical advection of edge-based velocity.
 
@@ -614,7 +748,8 @@ def _vertical_advection_edge(
     else:
         # sigma_dot is (nCells, nlev+1), average to edges
         sigma_dot_edge = 0.5 * (vert_vel[c1] + vert_vel[c2])
-        return vertical_advection(u_3d, sigma_dot_edge, sigma_coord)
+        return vertical_advection(
+            u_3d, sigma_dot_edge, sigma_coord, scheme=scheme)
 
 
 # ============================================================================
@@ -649,6 +784,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
         self.config = config or MPASPrimitiveEquationConfig()
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must announce itself. Static Python at build
+        # time (never in traced code).
+        if not self.config.conservative_tracer_clamp:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MPAS floors: NON-CONSERVING plain max(q, 0) tracer clamp "
+                "selected (conservative_tracer_clamp=False). This clamp "
+                "CREATES mass at every transport undershoot (+30 kg/m2/yr "
+                "of water measured on the AMIP century) — legacy "
+                "bit-comparison mode only.")
         # Pre-compute the global total area once at construction time so
         # the per-step mass fixer does not include this constant in its
         # cross-device reduction payload (drops 3-element allreduce → 2).
@@ -724,11 +870,17 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # (UnexpectedTracerError; gh-417, same class as the
             # primitive_eq_cdgrid A1-gate bug).  Thread the per-call
             # pre-step mass instead (telescoping fixer semantics).
-        state_new, phys_out, sfc_diag = self._step_jit(
+        state_new, phys_out, sfc_diag, led_step = self._step_jit(
             state, dt, physics_fn, target_mass, forcing, phys_state)
         if not any(isinstance(leaf, jax.core.Tracer)
                    for leaf in jax.tree_util.tree_leaves(phys_out)):
             self._phys_state = phys_out
+        # Per-step per-column budget ledger (#1311), (nCells, N_LEDGER, 2) or
+        # None (ledger off).  Same eager-only side-channel + tracer guard as
+        # _phys_state (gh-417: a stashed tracer leaks into the next trace);
+        # traced callers read the 4th _step_jit return directly.
+        if led_step is None or not isinstance(led_step, jax.core.Tracer):
+            self._step_ledger = led_step
         # Stash the surface net radiative fluxes (sw/lw net [W/m^2, +into
         # surface]) so the coupled MPAS loop can export them to the coupler.
         # Eager-only (same tracer guard as _phys_state — a stashed tracer leaks
@@ -741,7 +893,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # a full-radiation step, precip every step, so a wholesale overwrite
             # on a held-radiation step (sw/lw None) would DROP the last radiation
             # fluxes. Keep the last non-None value per slot (sw, lw, precip).
-            _prev = getattr(self, "_sfc_diag", None) or (None, None, None)
+            _prev = getattr(self, "_sfc_diag", None) or ()
+            # Pad the shorter of (prev, new) so a session that grows the
+            # tuple contract (3-slot legacy -> 8-slot with TOA/turb-flux
+            # extras) merges slot-wise instead of truncating.
+            _n = max(len(sfc_diag), len(_prev))
+            _prev = _prev + (None,) * (_n - len(_prev))
+            sfc_diag = sfc_diag + (None,) * (_n - len(sfc_diag))
             self._sfc_diag = tuple(
                 new if new is not None else old
                 for new, old in zip(sfc_diag, _prev))
@@ -830,6 +988,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         #        convention). ---
         phys_state_out = phys_state
         sfc_diag = None
+        # Budget-ledger stage references (#1311).  Cheap: these bind names to
+        # existing immutable pytrees; the snapshots themselves are computed at
+        # the end ONLY when the physics carried ledger rows (a trace-time
+        # structural check, so the default path adds nothing to the graph).
+        _state_postdyn = state_new
+        _led_phys_rows = None
         if physics_fn is not None:
             _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
                              phys_state=phys_state, forcing=forcing)
@@ -845,13 +1009,26 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             _sw_sfc = getattr(_pt, "sw_net_sfc", None)
             _lw_sfc = getattr(_pt, "lw_net_sfc", None)
             _pr_sfc = getattr(_pt, "precip", None)   # surface precip [kg/m^2/s]
+            # CMOR-feed diagnostic extras: TOA fluxes (radiation steps only)
+            # + surface turbulent fluxes (every step).  Slot ORDER comes from
+            # the SHARED ``MPAS_SFC_DIAG_EXTRA_KEYS`` contract in core.state,
+            # which the MPI producer (parallel/voronoi_mpi._step) and the
+            # driver consumer read too — see that constant for the slot map
+            # and for why it is shared rather than hand-copied.  A key the
+            # tendency does not carry (clear-sky pair with
+            # RadiationConfig.clear_sky_diag off; TOA trio on a
+            # held-radiation sub-step) is None and never reaches the
+            # accumulator.
+            _extras = tuple(getattr(_pt, _k, None)
+                            for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
             # Publish when ANY surface diagnostic is fresh — precip (microphysics)
             # advances every step even on a held-radiation sub-step or a
             # radiation=none run where sw/lw are None, so gating on sw/lw would
             # stash stale precip. Each element is None-guarded by the consumer.
             if (_sw_sfc is not None or _lw_sfc is not None
-                    or _pr_sfc is not None):
-                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc)
+                    or _pr_sfc is not None
+                    or any(_e is not None for _e in _extras)):
+                sfc_diag = (_sw_sfc, _lw_sfc, _pr_sfc) + _extras
             state_new = MPASHydrostaticState(
                 u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
                 T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
@@ -869,6 +1046,30 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                         if k in _pt.tracer_tendencies else state_new.tracers[k])
                     for k in state_new.tracers
                 })
+            # Per-process ledger rows from the combined physics (per-column,
+            # (nCells, N_LEDGER, 2)).  Structural (trace-time) check: None
+            # unless the physics was built with budget_ledger=True.
+            _led_phys_rows = getattr(_pt, "ledger_rows", None)
+
+        _state_postphys = state_new       # ledger: after physics application
+
+        # --- 3a. Dry-mass fix BEFORE the floors (codex 2026-07-26 round 2,
+        # finding 5).  The fixer touches ONLY p_s and the floors touch ONLY
+        # T/tracers, so the two stages commute and this order is bit-identical
+        # for p_s and T.  What changes is the water bookkeeping: diagnosed
+        # column water is sum(q*p_s*dsigma)/g, so a p_s correction AFTER the
+        # conserving tracer clamp shifted water by c*B/g (uncapped — a cold
+        # start or large transport error makes c large).  With p_s finalised
+        # FIRST, the clamp preserves B against the final p_s and end-of-step
+        # column water is conserved exactly, no empirical bound needed.
+        _state_prefix = state_new         # ledger: after filter, before fixer
+        if self.config.fix_mass:
+            state_new = _fix_mass_mpas_hydro(
+                state_new, state, self.mesh,
+                total_area=self._total_area,
+                target_mass=target_mass,
+            )
+        _state_postfix = state_new        # ledger: after the dry-mass fixer
 
         # --- 3. Floors ---
         # Last-resort NaN-safety guard, now BEHIND the #930 cure (``nu_vert4_T``
@@ -883,24 +1084,132 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     data=jnp.maximum(state_new.T.data, self.config.T_min)))
         # Tracer non-negativity: advection is not positive-definite and
         # microphysics can leave tiny undershoots; clamp before they feed
-        # saturation calculations.  (Negligible mass impact vs the donor
-        # clamps inside the schemes.)
+        # saturation calculations.
+        #
+        # The plain ``maximum(f, 0.0)`` below is NOT mass-neutral, contrary to
+        # the "negligible mass impact" this comment used to claim.  MEASURED
+        # 2026-07-26 on the AMIP century (checkpoint day 520, dt=75 s):
+        # horizontal advection ALONE leaves enough undershoot that the clamp
+        # invents **7.13e-5 kg/m2/step = +0.0822 kg/m2/day = +30 kg/m2/yr** of
+        # water — 96% of it from the spiky ``q_i`` (42773 cells) and ``q_c``
+        # (26214 cells) fields, vs only 23 cells of ``q_v``.  That is 2.2x the
+        # +0.0367 kg/m2/day total-water residual measured from the checkpoints,
+        # and it compounded into column water 23->42 kg/m2, OLR 199->109 W/m2
+        # and +10 K/yr of warming.
+        #
+        # ``conservative_tracer_clamp`` swaps the naive clamp for the
+        # column-conserving borrow (shared with the LES lane).  Default TRUE
+        # since 2026-08-16 (owner decision: conserving form always); False
+        # restores the legacy mass-creating clamp for bit-comparison runs.
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
-                k: f.replace(data=jnp.maximum(f.data, 0.0))
-                for k, f in state_new.tracers.items()
-            })
+            if self.config.conservative_tracer_clamp:
+                # PER-MASS tracers get the conserving borrow — the mixing
+                # ratios AND the per-mass numbers N_i/N_s/N_g.  The former
+                # blanket number exclusion conflated PROCESS-level number
+                # non-conservation (microphysics may create/destroy number
+                # freely) with TRANSPORT-level conservation: advection
+                # conserves every mass-weighted per-mass field, and the naive
+                # clip INVENTS it at each undershoot.  MEASURED (checkpoint
+                # day 40, 2026-07-28): 28k cells/step undershoot, invention
+                # 6.8e-4 of the N_i field PER STEP = x2.2/day compound
+                # growth; N_i reached 1e193 and overflowed into NaN at day
+                # 803 of century3.  N_c/N_r are per-VOLUME [#/m^3] (see
+                # HydrometeorState), so a dsigma-weighted borrow has no
+                # conservation meaning for them (codex 2026-07-28) — they
+                # keep the plain clip pending a density-aware repair
+                # (follow-up; N_r inflation is ~e15 slower than N_i's and
+                # overflows only at ~year 36 at the measured rate).
+                # Borrow weight = TRUE layer mass dp (post-mass-fix p_s —
+                # the dry-mass fixer runs before the floors).  On pure sigma
+                # dp = dsigma*p_s and the per-column p_s factor cancels in
+                # the rescale, so results are unchanged there; on HYBRID
+                # grids dsigma is NOT the layer mass (documented above) and
+                # would mis-conserve the physical dp-integral by O(0.1%)
+                # (codex 2026-07-28 round 2).  Non-positive dp (a broken
+                # hybrid layer) is zero-weighted rather than borrowed from.
+                _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                # GLOBAL variant: the column-local fixer zeroes net-negative
+                # columns, and on spiky number fields that zeroing alone
+                # re-created x2.74/day growth (868/10242 columns per step at
+                # century4 d90) — the global residual redistribution closes
+                # the budget exactly (serial jnp.sum here; the MPI lane
+                # passes an allreduce-SUM reduction).
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=(
+                        conservative_positive_clip_global(
+                            f.data, _dp, axis=-1)[0]
+                        if is_borrow_eligible_tracer(k)
+                        else jnp.maximum(f.data, 0.0)))
+                    for k, f in state_new.tracers.items()
+                })
+            else:
+                state_new = state_new._replace(tracers={
+                    k: f.replace(data=jnp.maximum(f.data, 0.0))
+                    for k, f in state_new.tracers.items()
+                })
 
-        if self.config.fix_mass:
-            state_new = _fix_mass_mpas_hydro(
-                state_new, state, self.mesh,
-                total_area=self._total_area,
-                target_mass=target_mass,
+        # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
+        # there; running it after the tracer clamp shifted diagnosed column
+        # water by c*B/g, codex round-2 finding 5.)
+
+        # --- 4. Budget-ledger stage rows (#1311 MPAS attribution port) -----
+        # Fill the dynamics/clips rows from stage-boundary column-store
+        # snapshots so the full ledger closes per column:
+        #   sum(rows) == (snapshot(final) − snapshot(pre-step)) / dt.
+        # Row conventions, matching the FV reference where the stage order
+        # allows and DOCUMENTED where it does not:
+        #   dynamics = the dycore delta PLUS the dry-mass fixer's p_s
+        #     adjustment (FV books the fixer under dynamics; on this lane the
+        #     fixer runs post-physics, so its delta is added here explicitly).
+        #   clips = the positivity floors / conserving borrow PLUS the vert4
+        #     2Δσ T filter (the FV "operator-split tail" row).
+        # Gate is the trace-time structural check on _led_phys_rows — the
+        # default (ledger off) path computes NONE of this.
+        _led_step = None
+        if _led_phys_rows is not None:
+            from legoesm.diagnostics.process_ledger import (
+                LEDGER_WATER_SPECIES, ROW_CLIPS, ROW_DYNAMICS, ROW_OTHER,
+                column_store_snapshot_column,
             )
 
-        return cast_pytree(state_new, None, "storage"), phys_state_out, sfc_diag
+            def _snap(s):
+                water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
+                         if s.tracers is not None and k in s.tracers]
+                return column_store_snapshot_column(
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+
+            _s_pre = _snap(state)
+            _s_dyn = _snap(_state_postdyn)
+            _s_phy = _snap(_state_postphys)
+            _s_fix0 = _snap(_state_prefix)
+            _s_fix1 = _snap(_state_postfix)
+            _s_end = _snap(state_new)
+            _led_step = _led_phys_rows.astype(_s_pre.dtype)
+            _led_step = _led_step.at[:, ROW_DYNAMICS, :].add(
+                ((_s_dyn - _s_pre) + (_s_fix1 - _s_fix0)) / dt)
+            _led_step = _led_step.at[:, ROW_CLIPS, :].add(
+                ((_s_fix0 - _s_phy) + (_s_end - _s_fix1)) / dt)
+            # Closure residual -> other_physics (the FV residual philosophy):
+            # the physics rows are tendency integrals at the PRE-application
+            # p_s, while the store snapshots see the applied state — a
+            # physics dp_s_dt and the dt² cross-term (dt·dT_dt vs the p_s
+            # change) land nowhere otherwise.  Booking the discrepancy here
+            # makes sum(rows) == (snap(end) − snap(pre))/dt EXACT by
+            # construction, which is the property the closure test pins.
+            _led_step = _led_step.at[:, ROW_OTHER, :].add(
+                (_s_phy - _s_dyn) / dt
+                - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
+
+        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+                sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
+
+
+
+
+
 
 
 def _fix_mass_mpas_hydro(

@@ -266,6 +266,44 @@ def normalize_freshwater_net(
     return F_fw - F_mean * mask
 
 
+_DEN_FLOOR = 1.0e-10   # empty-domain denominator floor [shared by both means]
+_THIN_CELL_M = 1.0e-3  # top-cell thickness below which the closure is inert [m]
+
+
+def _global_weighted_sums(num_field, den_field, w, owned_mask=None):
+    """``(Σ num_field*w, Σ den_field*w)`` reduced correctly on EVERY backend.
+
+    Extracted from :func:`normalize_freshwater_net` so the freshwater mean and
+    the salinity-weighted salt correction share ONE reduction.  Re-deriving it
+    is exactly how the salt correction silently lost the lat-SPMD ``psum`` and
+    would have applied a different lambda per latitude band.
+
+    ``owned_mask=None`` keeps the legacy serial/lat-SPMD arm (bit-identical);
+    passing it takes the MPI owned-cell arm via ``global_sum_if_distributed``
+    (allreduce SUM, full VJP -> AD-safe).
+    """
+    if owned_mask is None:
+        num_local = jnp.sum(num_field * w)
+        den_local = jnp.sum(den_field * w)
+        # Lat-band shard_map body: the sums are per-band PARTIALS, so psum them
+        # to the true global value; a band-local mean would give every band a
+        # different correction and break global conservation.  Inert on
+        # serial / MPI / cube-spmd.
+        from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+        if get_halo_backend() == "spmd":
+            _mesh = get_spmd_mesh()
+            if _mesh is not None and "lat" in tuple(_mesh.axis_names):
+                import jax
+                num_local, den_local = jax.lax.psum(
+                    jnp.stack([num_local, den_local]), "lat")
+        return num_local, den_local
+    from legoesm.parallel.reductions import global_sum_if_distributed
+    w_owned = w * owned_mask.astype(w.dtype)
+    num_local = jnp.sum(num_field * w_owned)
+    den_local = jnp.sum(den_field * w_owned)
+    return global_sum_if_distributed(jnp.stack([num_local, den_local]))
+
+
 def normalized_virtual_salt_flux(
     freshwater,
     S_ref: float | jnp.ndarray,
@@ -307,6 +345,132 @@ def normalized_virtual_salt_flux(
     restoring = getattr(freshwater, "restoring", None)
     F_fw = F_phys if restoring is None else (F_phys + restoring)
     return virtual_salt_flux_from_net(F_fw, S_ref, h_top, rho_0)
+
+
+def joint_volume_salt_virtual_salt_flux(
+    freshwater,
+    S_local: jnp.ndarray,
+    h_top: jnp.ndarray,
+    rho_0: float,
+    area: jnp.ndarray,
+    mask: jnp.ndarray,
+    owned_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Top-layer virtual-salt tendency [PSU/s] with the LOCAL salinity closure
+    AND both global budgets closed FOR THE PHYSICAL CHANNEL (restoring is
+    deliberately excepted; see SCOPE below) -- the "joint volume+salt correction" that
+    :func:`normalized_virtual_salt_flux` names as the missing piece.
+
+    WHY THIS EXISTS.  The fixed-``S_ref`` closure removes salt at the S_ref rate
+    no matter how little is present, so at a river mouth where ``S_local -> 0``
+    nothing bounds it: the eORCA1 d90 state carries 111 cells with S < 0 (min
+    -22.31 PSU), all in the top 6.6 m, all within 3 cells of land, the worst at
+    the Amazon mouth.  NEMO's own convention (``tra_sbc``: ``sfx = emp*sss``)
+    uses the LOCAL surface salinity, which decays toward zero and cannot cross
+    it.  That convention was previously unusable here because ``local`` +
+    ``normalize_freshwater=True`` is rejected: a zero-mean FRESHWATER flux does
+    not give a zero-mean SALT flux once the multiplier varies in space.
+
+    TWO CONSTRAINTS NEED TWO CORRECTIONS:
+
+    * VOLUME -- ``F' = F - <F>_A`` (:func:`normalize_freshwater_net`) so
+      ``∮F' dA = 0`` and the free-surface/volume budget is untouched.  This
+      is exactly what the S_ref path already does, and is kept bit-identical.
+    * SALT -- the salt-mass tendency per unit area is ``-S_local * F'`` (the
+      top-layer thickness cancels), whose integral ``∮S_local F' dA`` is the
+      nonzero covariance.  Remove ITS area mean as well, so
+      ``∮(S_local F')' dA = 0`` exactly.
+
+    Both means are removed with the SAME area-weighted, owned-cell reduction
+    helper, so the MPI/SPMD correctness and AD-safety of the existing path carry
+    over unchanged (``global_sum_mpi``, full VJP).
+
+    THE CORRECTION IS SALINITY-WEIGHTED, NOT UNIFORM.  Subtracting a uniform
+    offset ``<S F'>`` would close the budget but REINTRODUCE the very defect
+    this fixes: at a cell with ``S_local = 0`` the salt flux would be
+    ``-<S F'>``, which for a negative global mean drives that cell below zero.
+    Instead the correction is distributed in proportion to the local salinity,
+
+        b = max(S_local, 0)
+        G = b*(F' - lambda),   lambda = ∮b F' dA / ∮b dA
+
+    which gives ``∮G dA = 0`` EXACTLY, and ``G = 0`` exactly wherever ``S <= 0``.
+
+    The basis ``b`` is NONNEGATIVE and is used in BOTH the numerator and the
+    correction.  Two reasons, both load-bearing:
+
+    * Using signed ``S`` in the denominator is unsafe precisely in the state
+      this function repairs: with negative cells present ``∮S dA`` can pass
+      through zero while ``∮S F' dA`` does not, which would silently drop the
+      correction.
+    * Using signed ``S`` in the numerator against a ``max(S,0)`` correction is a
+      SUPPORT MISMATCH -- a cell with ``S < 0`` would get the flux ``S*F'`` and
+      no correction, so it would be neither inert nor conservative.  Matching
+      the support makes nonpositive cells fully inert, which is also the right
+      physics: there is no salt there to remove.
+
+    SCOPE OF THE TWO CLAIMS (narrowed after adversarial review):
+
+    * The zero-global-salt property covers the PHYSICAL freshwater channel
+      only.  ``restoring`` is a local relaxation that is deliberately NOT
+      redistributed (same choice as the S_ref path), so a nonzero restoring
+      channel does change total salt -- by design, not by accident.
+    * ``G = 0`` at ``S = 0`` is a CONTINUOUS-TIME statement about the tendency.
+      It removes the unbounded S_ref-rate extraction that drove cells to
+      -22 PSU, but it is not by itself a positivity-preserving time
+      integrator: an explicit step with a large enough ``dt`` can still
+      undershoot from a small positive ``S``.  A positivity-preserving update
+      or a dt bound remains the caller's responsibility.
+    It is also the more physical choice: the redistribution acts where there is
+    salt to move.  This is a REDISTRIBUTIVE correction in the Griffies sense --
+    it changes no global salt, only where the salt sits -- and it is the same
+    class of approximation the freshwater normalization already makes for
+    volume.  It is opt-in, never silent.
+
+    ``restoring`` is a LOCAL relaxation and must not be globally redistributed,
+    so (as in the S_ref path) it is excluded from BOTH normalizations and added
+    back afterwards, multiplied by the same local salinity.
+    """
+    F_phys = (freshwater.precip - freshwater.evap
+              + freshwater.runoff + freshwater.ice_fw)
+    wet = mask * (h_top > _THIN_CELL_M).astype(mask.dtype)
+    # 1. volume: zero-area-mean freshwater (identical to the S_ref path)
+    F_phys = normalize_freshwater_net(F_phys, area, wet, owned_mask=owned_mask)
+    # 2. salt: remove ∮S F' dA, distributed in proportion to a NONNEGATIVE
+    #    basis b = max(S_local, 0) so the correction vanishes exactly where the
+    #    salinity does (a uniform offset would push zero-salinity cells
+    #    negative) AND the denominator cannot cancel.  Using S itself as the
+    #    basis is unsafe precisely in the situation this function exists to
+    #    fix: with negative cells present, ∮S dA can pass through zero while
+    #    ∮S F' dA does not, silently dropping the correction.
+    #        lambda = ∮S F' dA / ∮b dA,   G = S*F' - lambda*b
+    #    ∮G dA = ∮S F' dA - lambda*∮b dA = 0 exactly, and G = 0 wherever S <= 0.
+    #    The reduction is the SHARED one (`_global_weighted_sums`) so lambda
+    #    cannot drift from the freshwater mean's owned-cell / lat-SPMD handling.
+    # The basis appears in BOTH the numerator and the correction.  Using signed
+    # S in the numerator with a max(S,0) correction is a SUPPORT MISMATCH: a
+    # cell with S < 0 would then receive the flux S*F' but no correction, so it
+    # is neither inert nor conservative, and the "G = 0 where S <= 0" claim
+    # would be false there (codex round-2 #2).
+    basis = jnp.maximum(S_local, 0.0)
+    num, den = _global_weighted_sums(basis * F_phys, basis, area * wet,
+                                     owned_mask=owned_mask)
+    # Empty/all-fresh domain: nothing to redistribute.  The nested `where`
+    # keeps the reverse-mode VJP finite (the false branch divides by 1.0, not
+    # by the vanishing denominator).
+    _ok = den > _DEN_FLOOR
+    lam = jnp.where(_ok, num / jnp.where(_ok, den, 1.0), 0.0)
+    G_phys = (basis * (F_phys - lam)) * wet
+    restoring = getattr(freshwater, "restoring", None)
+    # `restoring` is masked by `wet` too: without it a dry cell that happens to
+    # carry h_top > 1 mm would receive a salinity tendency (the `is_wet` gate
+    # below tests thickness, NOT the land mask).
+    G = G_phys if restoring is None else (G_phys + basis * restoring * wet)
+    # dS/dt = -G / (rho_0 * dz_0), with the same thin-cell guard as
+    # virtual_salt_flux_from_net (dz_0 can be O(cm) on partial cells).
+    is_wet = h_top > _THIN_CELL_M
+    dz_safe = jnp.maximum(h_top, _THIN_CELL_M)
+    return jnp.where(is_wet, -G / (rho_0 * dz_safe), 0.0)
 
 
 def resolve_runoff_spread_arg(config):
@@ -691,3 +855,31 @@ def with_sss_restoring(
     # multiple restoring channels stacked).
     prior = fw.restoring if fw.restoring is not None else jnp.zeros_like(out["freshwater_flux"])
     return fw._replace(restoring=prior + out["freshwater_flux"])
+
+
+def refuse_multiprocess_eta_normalization(where: str) -> None:
+    """Refuse rank-local eta normalization under multi-process execution.
+
+    codex RED: the existing multi-rank fail-fast for freshwater normalization
+    lives INSIDE the virtual-salt block, which the ``real_freshwater`` closure
+    skips.  Both cores still normalize the eta/volume forcing with a RANK-LOCAL
+    area mean, so a multi-rank run would silently apply a DIFFERENT correction
+    on each rank -- a wrong number, not an error.  One helper so the two cores
+    cannot drift apart (repo rule: factor shared logic, never copy-paste it).
+
+    Remove this only when the eta normalization uses an owned-cell mask and a
+    global reduction, exactly as the virtual-salt path will.
+    """
+    import jax as _jax
+
+    from legoesm.parallel.reductions import is_multi_process, mpi_world_size
+
+    if (is_multi_process() or mpi_world_size() > 1
+            or _jax.process_count() > 1):
+        raise NotImplementedError(
+            f"{where}: normalize_freshwater with freshwater_closure="
+            "'real_freshwater' uses a RANK-LOCAL area mean for the eta/volume "
+            "forcing, which is incorrect across processes (each rank would "
+            "subtract its own mean). Run single-process, or disable "
+            "normalize_freshwater, until an owned-mask global reduction lands."
+        )

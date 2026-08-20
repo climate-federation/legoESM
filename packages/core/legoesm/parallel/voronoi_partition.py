@@ -865,6 +865,13 @@ def build_local_mesh(
         edgeSignOnCell=mesh.edgeSignOnCell[:, lc],
         edgeSignOnVertex=mesh.edgeSignOnVertex[:, lv],
         meshDensity=mesh.meshDensity[lc],
+        # Optional per-cell surface fields: slice like any cell field so
+        # the LOCAL mesh keeps the SSO/land-fraction the global mesh
+        # carries (None stays None — legacy meshes unchanged).
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else mesh.subgrid_topo_stddev[lc]),
+        land_frac=(None if mesh.land_frac is None
+                   else mesh.land_frac[lc]),
     )
 
 
@@ -991,12 +998,31 @@ def _pad_voronoi_for_sharding(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
         edgeSignOnCell=pad_2d_col(mesh.edgeSignOnCell, pad_cells, fill=0.0),
         edgeSignOnVertex=mesh.edgeSignOnVertex,  # vertex-indexed
         meshDensity=pad_1d(mesh.meshDensity, pad_cells, fill=0.0),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else pad_1d(mesh.subgrid_topo_stddev,
+                                         pad_cells, fill=0.0)),
+        land_frac=(None if mesh.land_frac is None
+                   else pad_1d(mesh.land_frac, pad_cells, fill=0.0)),
     )
 
 
 # ============================================================================
 # Mesh reordering for JAX SPMD sharding
 # ============================================================================
+
+def resolve_sharding_partition_method(method: str) -> str:
+    """Concrete ownership for the SPMD/ppermute path (``auto`` -> ``sfc``).
+
+    Separate from :func:`resolve_partition_method`, whose ``auto`` prefers
+    METIS: METIS minimizes edge CUT, while this path is bound by the number of
+    sequential halo exchanges, and measured they move oppositely (subdiv-8 at
+    128 devices: sfc 14 rounds, metis 19).  ONE definition, so a scorer that
+    reports which ownership ran cannot drift from what the reorder does.
+    """
+    if method == "auto":
+        return "sfc"
+    return resolve_partition_method(method)
+
 
 def reorder_voronoi_for_sharding(
     mesh: VoronoiMesh,
@@ -1019,17 +1045,44 @@ def reorder_voronoi_for_sharding(
     n_devices : int
         Number of devices (partitions).
     method : str
-        ``"auto"`` (default: METIS if ``pymetis`` available, else RCB),
-        ``"geometric"`` (RCB), ``"metis"``, or ``"sfc"`` (Hilbert
-        space-filling-curve contiguous chunks).
+        ``"auto"`` -> ``"sfc"`` on THIS path (see below), ``"geometric"``
+        (RCB), ``"metis"``, or ``"sfc"`` (Hilbert space-filling-curve
+        contiguous chunks).
 
     Returns
     -------
     VoronoiMesh
         Mesh with reordered entities and remapped connectivity.
     """
+    # ``auto`` resolves to SFC HERE, not to the global METIS-if-available
+    # policy.  This is the SPMD/ppermute path, where the cost that binds at
+    # high device counts is the number of collective-permute ROUNDS -- equal
+    # to the max degree of the post-reorder depth-3-plus-closure comm graph,
+    # since the edge coloring already reaches that lower bound.  METIS
+    # minimizes its ``cellsOnCell`` EDGE CUT, which is a different objective,
+    # and measured on the real halo-aware layout the two move OPPOSITELY:
+    #
+    #   rounds (= max_degree)      64 dev   128 dev
+    #     subdiv-8  geometric        16       21
+    #     subdiv-8  sfc              12       14
+    #     subdiv-8  metis            13       19
+    #     subdiv-9  geometric        14       18
+    #     subdiv-9  sfc              11       13
+    #     subdiv-9  metis            14       18
+    #
+    # SFC wins at every mesh and device count; at SSP-RK3's 3 halo fills per
+    # step, auto->metis would cost +15 collective-permutes/step at 128 on
+    # both meshes.  This became live rather than theoretical when pymetis
+    # became importable in the venvs, which silently flipped auto to the
+    # worst choice for this path.  The high-count launchers pin ``sfc``
+    # explicitly, so their receipts are unaffected either way.
+    #
+    # SCOPE: only this function.  ``initialize_voronoi_mpi`` (route-A MPI)
+    # and ``partition_voronoi_mesh`` keep the global policy -- their halo
+    # exchange is not this ppermute schedule and no census was run for them.
     # Validate at entry (CLAUDE.md: fail early) BEFORE the single-device shortcut,
     # so an unknown method raises even when no partitioning happens.
+    method = resolve_sharding_partition_method(method)
     method = resolve_partition_method(method)
     if method not in ("geometric", "metis", "sfc"):
         raise ValueError(f"Unknown partitioning method: {method!r}")
@@ -1148,6 +1201,11 @@ def reorder_voronoi_for_sharding(
         edgeSignOnCell=reorder_col(mesh.edgeSignOnCell, cell_perm),
         edgeSignOnVertex=reorder_col(mesh.edgeSignOnVertex, vert_perm),
         meshDensity=reorder_1d(mesh.meshDensity, cell_perm),
+        subgrid_topo_stddev=(None if mesh.subgrid_topo_stddev is None
+                             else reorder_1d(mesh.subgrid_topo_stddev,
+                                             cell_perm)),
+        land_frac=(None if mesh.land_frac is None
+                   else reorder_1d(mesh.land_frac, cell_perm)),
     )
 
     # --- Pad so that nCells and nEdges are divisible by n_devices ---

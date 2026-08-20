@@ -54,12 +54,13 @@ def test_build_reference_roundtrips_wing_profiles_through_campaign_reader(tmp_pa
     outdir = tmp_path / "ref"
     diag = builder.build_reference(outdir, n_levels=48, n_volumes=3)
 
-    # Wing cold point is T_v0 - Gamma*z_t = 295 - 0.0067*15000 = 194.5 K.
-    assert 193.0 < diag["cold_point_T_K"] < 196.0
+    # Wing ANALYTIC cold point is T_v0 - Gamma*z_t with T_v0 = T0*(1+0.608*q0)
+    # = 303.4 K (Eq. 3), i.e. 202.9 K at 15 km. That is the IC, NOT the 100-day
+    # equilibrium cold point (~194-198 K) the resolved runs settle to.
+    assert 201.0 < diag["cold_point_T_K"] < 205.0
     assert 13.0 < diag["cold_point_z_km"] < 17.0
-    # Lowest-level Wing air temperature ~291.7 K (T_v0=295 K virtual /
-    # (1+eps^-1 q_sfc)); this is the surface AIR temp, not the 300 K SST.
-    assert 289.0 < diag["sfc_T_K"] < 293.0
+    # Lowest-level Wing air temperature = T_v0/(1+eps^-1 q_sfc) = T0 = 300 K.
+    assert 298.0 < diag["sfc_T_K"] < 302.0
     assert diag["precip_mm_day"] == builder.RCEMIP1_SMALL_PRECIP_MM_DAY
 
     # Bundle is readable by the campaign loader and recovers the Wing profiles.

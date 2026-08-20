@@ -348,3 +348,604 @@ def test_al81_enstrophy_conservation_partial_cells_diagnostic():
         f"step/flat amplification = {amplification:.2e}× "
         f"(baseline 1.30×, threshold 10×)."
     )
+
+
+# ----------------------------------------------------------------------
+# q_boundary coverage: "neumann_fill" (default) vs "nemo_live"
+# ----------------------------------------------------------------------
+#
+# NEMO dynvor.F90:769-779 (``vor_een``, ``ln_dynvor_msk=.false.``) computes
+# ``zwz`` (absolute PV) from the MASKED velocities directly, with NO fill at
+# land-adjacent vertices — the coast wall-shear vorticity (``-u/e2f`` etc.)
+# rides the same 12-point triad as the interior.  ``q_boundary="neumann_fill"``
+# is the legacy legoESM default: it smooths land-adjacent q from wet
+# neighbours, erasing that coast shear-vorticity signal from the PV flux.
+# ``q_boundary="nemo_live"`` reproduces the NEMO behaviour: q is left live at
+# masked vertices (only the fully-dry BIG_H sentinel makes q→0 there).
+
+
+def _coastal_vertex_probe_state(q_boundary="neumann_fill"):
+    """Tiny hand-built C-grid state with ONE land-adjacent vertex carrying a
+    real velocity-shear vorticity signal, so the two ``q_boundary`` branches
+    are forced apart at that vertex.
+
+    Layout: a 4×4 flat-bottom grid (nlev=1) with cell (row=1, col=1) LAND;
+    every other cell wet.  Vertex (j=1, i=1) — the SW corner of the land
+    cell — has 3 wet neighbour cells + 1 dry neighbour, so
+    ``vtx_mask[1, 1] = 0`` (compute_vertex_mask convention: wet only if ALL
+    4 surrounding cells are wet) while ``h_vtx`` there is finite (min over
+    the *active* surrounding cells, BIG_H convention) — the "land-adjacent
+    but not fully-dry" case the two q_boundary modes disagree on.
+
+    A uniform shear ``u`` field (independent of the land cell) gives that
+    vertex a nonzero relative vorticity from the wet cells around it.
+    """
+    n_lat, n_lon, nlev = 4, 4, 1
+    land_row, land_col = 1, 1
+
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[land_row, land_col] = 0.0
+
+    H_flat = 4000.0
+    h_T = jnp.asarray((land_mask * H_flat)[:, :, None])
+
+    # u-face / v-face thicknesses: min over the two adjacent cells (wet-wet
+    # min is H_flat; any face touching the land cell is 0 by min-rule).
+    h_T_np = np.asarray(h_T[:, :, 0])
+    h_W = np.roll(h_T_np, 1, axis=1)
+    h_u_int = np.minimum(h_T_np, h_W)
+    h_u = jnp.asarray(np.concatenate([h_u_int, h_u_int[:, :1]], axis=1)[:, :, None])
+
+    h_S = np.concatenate([np.zeros((1, n_lon)), h_T_np[:-1]], axis=0)
+    h_v_int = np.minimum(
+        h_T_np, np.concatenate([h_T_np[1:], np.zeros((1, n_lon))], axis=0)
+    )
+    h_v_full = np.zeros((n_lat + 1, n_lon))
+    h_v_full[:-1] = np.minimum(h_T_np, h_S)
+    h_v_full[1:-1] = np.minimum(h_T_np[:-1], h_T_np[1:])
+    h_v_full[0] = 0.0
+    h_v_full[-1] = 0.0
+    h_v = jnp.asarray(h_v_full[:, :, None])
+
+    # h_vtx: min over the 4 surrounding cells, BIG_H sentinel for LAND cells
+    # (matching the production convention documented in
+    # pv_flux_al81_partial_cell's docstring / _build_test_state above).
+    BIG_H = 1.0e30
+    h_T_active = np.where(land_mask > 0.0, H_flat, BIG_H)
+    h_W_active = np.roll(h_T_active, 1, axis=1)
+    h_vtx_int = np.minimum(
+        np.minimum(h_T_active[:-1], h_T_active[1:]),
+        np.minimum(h_W_active[:-1], h_W_active[1:]),
+    )
+    h_vtx_full = np.full((n_lat + 1, n_lon), BIG_H)
+    h_vtx_full[1:-1] = h_vtx_int
+    h_vtx = jnp.asarray(np.concatenate([h_vtx_full, h_vtx_full[:, :1]], axis=1)[:, :, None])
+
+    # vtx_mask: wet (1) only if ALL 4 surrounding cells are wet.
+    land_active = (land_mask > 0.0).astype(np.float64)
+    land_W = np.roll(land_active, 1, axis=1)
+    vtx_int = np.minimum(
+        np.minimum(land_active[:-1], land_active[1:]),
+        np.minimum(land_W[:-1], land_W[1:]),
+    )
+    vtx_full = np.zeros((n_lat + 1, n_lon))
+    vtx_full[1:-1] = vtx_int
+    vtx_mask = jnp.asarray(np.concatenate([vtx_full, vtx_full[:, :1]], axis=1))
+
+    # Face masks: wet only if both adjacent cells wet.
+    u_mask_3d = (h_u > 0.0).astype(jnp.float64)
+    v_mask_3d = (h_v > 0.0).astype(jnp.float64)
+
+    # A deterministic shear varying in BOTH row and column (u increases with
+    # row index, v increases with column index) gives every vertex a real,
+    # distinct relative vorticity — including a genuine east-west variation
+    # along the land-adjacent row, so the Neumann-fill average of wet
+    # neighbours actually differs from the vertex's own live value (a
+    # spatially-uniform field would make fill == live by symmetry and hide
+    # the boundary-treatment difference this test targets). Scaled by 1e6
+    # purely so the resulting curl (divided by a ~R² spherical vertex area)
+    # sits well above float64 round-off, not for any physical reason.
+    u_np = np.zeros((n_lat, n_lon + 1, nlev))
+    u_np[:, :, 0] = np.arange(n_lat)[:, None] * 1.0e6
+    v_np = np.zeros((n_lat + 1, n_lon, nlev))
+    v_np[:, :, 0] = np.arange(n_lon)[None, :] * 1.0e6
+    u = jnp.asarray(u_np)
+    v = jnp.asarray(v_np).at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+    zeta = curl_vertex_cgrid(u, v, create_latlon_grid(n_lat, n_lon))
+
+    assert float(vtx_mask[land_row, land_col]) == 0.0, "probe vertex must be land-adjacent"
+    assert float(zeta[land_row, land_col, 0]) != 0.0, "probe vertex must carry real shear vorticity"
+
+    return dict(
+        zeta=zeta, h_vtx=h_vtx, h_v=h_v, v=v, h_u=h_u, u=u,
+        u_mask_3d=u_mask_3d, v_mask_3d=v_mask_3d, vtx_mask=vtx_mask,
+        land_row=land_row, land_col=land_col,
+    )
+
+
+def test_q_boundary_nemo_live_keeps_coastal_vertex_vorticity_nonzero():
+    """At the land-adjacent vertex, ``nemo_live`` leaves q computed from the
+    live (masked-but-unfilled) velocities — nonzero because the surrounding
+    wet-cell shear vorticity is real (NEMO dynvor.F90:769-779,
+    ``ln_dynvor_msk=.false.``: zwz built from masked velocities, no fill).
+    ``neumann_fill`` instead overwrites q at that vertex with the average of
+    wet neighbours, and the two mass fluxes multiplying q_live vs q_filled
+    at that vertex's 4 adjacent faces genuinely differ, so the resulting
+    du/dv contributions touching that vertex must differ between modes."""
+    s = _coastal_vertex_probe_state()
+
+    F_u_fill, F_v_fill = pv_flux_al81_partial_cell(
+        s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+        s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+        q_boundary="neumann_fill",
+    )
+    F_u_live, F_v_live = pv_flux_al81_partial_cell(
+        s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+        s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+        q_boundary="nemo_live",
+    )
+
+    # The land-adjacent vertex q differs between the two modes (nonzero
+    # live q vs a filled q) — a direct probe of the boundary treatment
+    # itself, independent of which face ends up carrying it.
+    eps_h = 1.0e-10
+    q_live = s["zeta"] / jnp.maximum(s["h_vtx"], eps_h)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import neumann_fill_vertex
+    q_fill = neumann_fill_vertex(q_live, s["vtx_mask"])
+    jr, jc = s["land_row"], s["land_col"]
+    assert float(q_live[jr, jc, 0]) != 0.0, "nemo_live must keep a nonzero coastal q"
+    assert not np.isclose(
+        float(q_live[jr, jc, 0]), float(q_fill[jr, jc, 0]), rtol=1e-6, atol=0.0,
+    ), "neumann_fill must actually change q at the land-adjacent vertex"
+
+    # And the operator outputs genuinely differ between the two modes (not
+    # merely at that one vertex in isolation, but in the assembled du/dv —
+    # proving the "nemo_live" branch is wired all the way through, not a
+    # dead no-op alias of "neumann_fill").
+    assert not np.allclose(np.asarray(F_u_fill), np.asarray(F_u_live), atol=1e-12)
+    assert not np.allclose(np.asarray(F_v_fill), np.asarray(F_v_live), atol=1e-12)
+
+
+def test_q_boundary_rest_state_zero_tendency_both_modes():
+    """u = v = 0 (rest): mass fluxes F_u = F_v = 0 everywhere, so q·F = 0 at
+    every face regardless of what q is at land-adjacent vertices — both
+    q_boundary modes must give EXACTLY zero tendency."""
+    s = _coastal_vertex_probe_state()
+    zeros_u = jnp.zeros_like(s["u"])
+    zeros_v = jnp.zeros_like(s["v"])
+
+    for mode in ("neumann_fill", "nemo_live"):
+        F_u, F_v = pv_flux_al81_partial_cell(
+            s["zeta"], s["h_vtx"], s["h_v"], zeros_v, s["h_u"], zeros_u,
+            s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+            q_boundary=mode,
+        )
+        assert np.all(np.asarray(F_u) == 0.0), f"{mode}: rest u must give exactly zero F_u"
+        assert np.all(np.asarray(F_v) == 0.0), f"{mode}: rest v must give exactly zero F_v"
+
+
+def test_q_boundary_unknown_value_raises():
+    """Dispatch hardening: an unknown q_boundary raises at operator entry
+    (registered in tests/test_dispatch_hardening.py::BASELINE_DISPATCHERS)."""
+    s = _coastal_vertex_probe_state()
+    with pytest.raises(ValueError, match="unknown q_boundary variant"):
+        pv_flux_al81_partial_cell(
+            s["zeta"], s["h_vtx"], s["h_v"], s["v"], s["h_u"], s["u"],
+            s["u_mask_3d"], s["v_mask_3d"], s["vtx_mask"],
+            q_boundary="bogus",
+        )
+
+
+# ----------------------------------------------------------------------
+# een_e3f_scheme coverage: "min" (MITgcm hFacZ, legacy default) vs
+# "nemo_avg" (NEMO nn_e3f_typ=1, dynvor.F90::vor_een:733-745).
+#
+# Unlike q_boundary (an argument of pv_flux_al81_partial_cell itself), the
+# e3f/h_vtx construction lives ONE LEVEL UP in the caller, ``_bc_pv_flux``
+# (ocean_pe_latlon_cgrid.py) — pv_flux_al81_partial_cell only ever receives
+# the already-built h_vtx.  So these tests exercise ``_bc_pv_flux`` directly.
+# ----------------------------------------------------------------------
+
+def _apply_bc_pv_flux(state, een_e3f_scheme="min"):
+    """Call ``_bc_pv_flux`` (the h_vtx-building caller) on a
+    ``_build_test_state``-style dict, al81 (default vorticity_scheme),
+    ``vertex_mask`` passed explicitly so ``mask`` is never touched."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    zeros_u = jnp.zeros_like(state["u"])
+    zeros_v = jnp.zeros_like(state["v"])
+    du_dt, dv_dt, diag_u, diag_v = _bc_pv_flux(
+        zeros_u, zeros_v, state["u"], state["v"],
+        state["h_u"], state["h_v"], state["h_T"],
+        state["u_mask_3d"], state["v_mask_3d"],
+        None, state["grid"], "vector_invariant",
+        vertex_mask=state["vtx_mask"],
+        een_e3f_scheme=een_e3f_scheme,
+    )
+    return diag_u, diag_v
+
+
+def test_een_e3f_scheme_min_vs_nemo_avg_differ_on_stepped_bathymetry():
+    """The two e3f rules coincide only where all 4 surrounding cells share
+    the same depth.  On the ``partial_cells=True`` step fixture (2000 m south
+    / 4000 m north, single step row) the vertices straddling the step have a
+    mix of 2000 m and 4000 m neighbours — min gives 2000 m, nemo_avg gives
+    the mean (3000 m, all 4 wet) — so the assembled PV-flux tendencies must
+    differ (non-vacuous "differ" direction)."""
+    state = _build_test_state(n_lat=12, n_lon=24, partial_cells=True, seed=5)
+    du_min, dv_min = _apply_bc_pv_flux(state, "min")
+    du_avg, dv_avg = _apply_bc_pv_flux(state, "nemo_avg")
+    assert not np.allclose(np.asarray(du_min), np.asarray(du_avg), atol=1e-12)
+    assert not np.allclose(np.asarray(dv_min), np.asarray(dv_avg), atol=1e-12)
+
+
+def test_een_e3f_scheme_min_and_nemo_avg_identical_on_uniform_depth():
+    """On a flat-bottom, fully-wet grid every vertex's 4 surrounding cells
+    share the same e3t, so min(h,h,h,h) == mean(h,h,h,h) == h exactly — the
+    two rules must give BIT-IDENTICAL tendencies (non-vacuous "identical"
+    direction; together with the stepped-bathymetry test above this proves
+    the two rules are wired to genuinely different code paths, not aliases
+    that happen to differ everywhere)."""
+    state = _build_test_state(n_lat=12, n_lon=24, partial_cells=False, seed=5)
+    du_min, dv_min = _apply_bc_pv_flux(state, "min")
+    du_avg, dv_avg = _apply_bc_pv_flux(state, "nemo_avg")
+    np.testing.assert_array_equal(np.asarray(du_min), np.asarray(du_avg))
+    np.testing.assert_array_equal(np.asarray(dv_min), np.asarray(dv_avg))
+
+
+def _nemo_vor_een_e3f_loop_port(e3t, tmask, j, i):
+    """Independent literal loop-port of NEMO ``dynvor.F90::vor_een``,
+    ``nn_e3f_typ=1`` (src/OCE/DYN/dynvor.F90:733-745), transcribed directly
+    from the Fortran source (NOT derived from the legoESM implementation
+    under test) as ground truth for ONE F-point::
+
+        CASE ( 1 )     ! new formulation (masked averaging of e3t divided
+                        !                  by the sum of mask)
+           DO_2D( 1, 1, 1, 1 )
+              ze3f = (  ( e3t(ji  ,jj+1,jk)*tmask(ji  ,jj+1,jk)     &
+                 &    +   e3t(ji+1,jj+1,jk)*tmask(ji+1,jj+1,jk) )   &
+                 &    + ( e3t(ji  ,jj  ,jk)*tmask(ji  ,jj  ,jk)     &
+                 &    +   e3t(ji+1,jj  ,jk)*tmask(ji+1,jj  ,jk) )  )
+              zmsk = ( tmask(ji,jj+1,jk) + tmask(ji+1,jj+1,jk)      &
+                 &   + tmask(ji,jj  ,jk) + tmask(ji+1,jj  ,jk)  )
+              IF( ze3f /= 0._wp ) THEN ; z1_e3f(ji,jj) = zmsk / ze3f
+              ELSE                     ; z1_e3f(ji,jj) = 0._wp
+              ENDIF
+           END_2D
+
+    F-point ``(ji=i, jj=j)`` sums T-cells ``(j,i)``, ``(j,i+1)``,
+    ``(j+1,i)``, ``(j+1,i+1)`` (0-based). Returns ``e3f = 1/z1_e3f``
+    (``+inf`` sentinel where ``z1_e3f == 0``, i.e. ``zmsk == 0``, matching
+    the legoESM ``BIG_H`` convention).  ``e3t``, ``tmask``: 2-D numpy arrays.
+    """
+    ze3f = (
+        (e3t[j + 1, i] * tmask[j + 1, i] + e3t[j + 1, i + 1] * tmask[j + 1, i + 1])
+        + (e3t[j, i] * tmask[j, i] + e3t[j, i + 1] * tmask[j, i + 1])
+    )
+    zmsk = (
+        tmask[j + 1, i] + tmask[j + 1, i + 1] + tmask[j, i] + tmask[j, i + 1]
+    )
+    z1_e3f = zmsk / ze3f if ze3f != 0.0 else 0.0
+    return 1.0 / z1_e3f if z1_e3f != 0.0 else np.inf
+
+
+def test_een_e3f_scheme_nemo_avg_matches_loop_port_ground_truth():
+    """The production ``nemo_avg`` branch of ``_bc_pv_flux`` matches the
+    independent hand loop-port of NEMO dynvor.F90:733-745 above (transcribed
+    from the Fortran source, not derived from the JAX code under test) on a
+    small stepped fixture with an actual dry cell — the case that stresses
+    the ``zmsk`` wet-count guard, not just the uniform-depth averaging.
+
+    legoESM vertex ``(j, i)`` is the SW corner of cell ``(j, i)``, built from
+    ``h_k`` (cell ``(j,i)``, ``(j+1,i)``) and ``h_sw = roll(h_k, 1, axis=1)``
+    (cell ``(j,i-1)``, ``(j+1,i-1)``) — i.e. the four neighbours of vertex
+    ``(j, i)`` are T-cells ``(j,i-1)``, ``(j,i)``, ``(j+1,i-1)``,
+    ``(j+1,i)``.  That is exactly the NEMO F-point neighbourhood with
+    ``ji = i - 1``, ``jj = j``.  Compare the interior (non-dry-adjacent)
+    vertices only, where both sides see a full, in-bounds 2x2 neighbourhood.
+    """
+    n_lat, n_lon = 4, 4
+    land_row, land_col = 1, 1
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[land_row, land_col] = 0.0
+    H_flat = 4000.0
+    h_T_2d = land_mask * H_flat  # (n_lat, n_lon); zero on the land cell
+
+    h_T = jnp.asarray(h_T_2d[:, :, None])
+    # Call the SAME helper production uses (``een_e3f_h_vtx``, factored out
+    # of ``_bc_pv_flux``) directly — no formula re-derived in the test.  This
+    # is what makes the comparison below non-vacuous: a mutation of the
+    # helper's divisor guard (#1226 adversarial-review finding) now shows up
+    # here, since the test reads the actual production output, not a copy.
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
+    zeros = jnp.zeros((n_lat, n_lon + 1, 1))
+    h_vtx, _, _ = een_e3f_h_vtx(
+        h_T, zeros, zeros, create_latlon_grid(n_lat, n_lon), "nemo_avg",
+    )
+    h_vtx = np.asarray(h_vtx)[:, :, 0]  # (n_lat+1, n_lon+1)
+
+    n_checked = 0
+    # j in [1, n_lat-2]: skip the pole rows (no physical vertex neighbour)
+    # AND the last row (jj+1 = n_lat would run off the loop-port's plain
+    # in-bounds T-grid — legoESM instead pads with a BIG_H/zero pole value
+    # there, a boundary-handling difference outside this formula's scope).
+    for j in range(1, n_lat - 1):
+        for i in range(1, n_lon):    # skip i=0 (periodic wrap, not exercised
+                                      # by the loop-port's plain array indexing)
+            ji, jj = i - 1, j
+            gt = _nemo_vor_een_e3f_loop_port(h_T_2d, land_mask, jj, ji)
+            lego = h_vtx[j, i]
+            if not np.isfinite(gt) and lego >= 1.0e29:
+                n_checked += 1
+                continue  # both sides agree it's the fully-dry sentinel
+            assert np.isfinite(gt) and lego < 1.0e29, (j, i, lego, gt)
+            assert np.isclose(lego, gt, rtol=1e-12), (j, i, lego, gt)
+            n_checked += 1
+    assert n_checked == (n_lat - 2) * (n_lon - 1), "loop-port comparison ran vacuously"
+
+
+def test_een_e3f_scheme_nemo_avg_dry_vertex_uses_dz_ref_not_big_h():
+    """#1226 item 10 final piece: at a FULLY-DRY vertex (all 4 surrounding
+    T-cells dry, ``wet_count == 0``), NEMO's compiled path (``key_qco`` +
+    ``key_vco_3d``, the DINO build) does NOT leave ``e3f_0vor`` at zero —
+    ``dyn_vor_init`` (dynvor.F90:986)::
+
+        WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_0(:,:,:)
+
+    overwrites it with the reference thickness ``e3f_0``, which is
+    per-level-uniform in DINO (verified against mesh_mask.nc: k=33 ->
+    462.65859311661916 m everywhere) and equals legoESM's
+    ``z_coord.dz_ref`` for the full-step-z bridge. ``een_e3f_h_vtx`` must
+    therefore use ``dz_ref[k]`` at a dry vertex when it is supplied, NOT
+    the plain ``BIG_H`` sentinel (which is the CORRECT convention for the
+    ``"min"`` rule / the legacy ``dz_ref=None`` default, but WRONG for
+    NEMO's compiled ``nemo_avg`` dry-vertex path).
+
+    Non-vacuous: asserts the NEW ``dz_ref``-supplied behaviour differs from
+    the OLD ``BIG_H``-only behaviour (``dz_ref=None``) at the dry vertex —
+    proving this test would have failed against the pre-fix code.
+    """
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import een_e3f_h_vtx
+
+    n_lat, n_lon, nlev = 4, 4, 3
+    # A 2x2 dry block at T-cells (1,1),(1,2),(2,1),(2,2) makes the vertex at
+    # (j=2, i=2) -- whose 4 neighbours are T-cells (1,1),(1,2),(2,1),(2,2)
+    # per the SW-corner convention documented above -- fully dry.
+    land_mask = np.ones((n_lat, n_lon), dtype=np.float64)
+    land_mask[1:3, 1:3] = 0.0
+    dz_ref = np.array([10.0, 50.0, 462.65859311661916])  # per-level, DINO-like
+    h_T_2d = land_mask[:, :, None] * dz_ref[None, None, :]
+    h_T = jnp.asarray(h_T_2d)
+    zeros = jnp.zeros((n_lat, n_lon + 1, nlev))
+    grid = create_latlon_grid(n_lat, n_lon)
+
+    h_vtx_old, _, _ = een_e3f_h_vtx(h_T, zeros, zeros, grid, "nemo_avg")
+    h_vtx_new, _, _ = een_e3f_h_vtx(
+        h_T, zeros, zeros, grid, "nemo_avg", dz_ref=jnp.asarray(dz_ref),
+    )
+
+    dry_j, dry_i = 2, 2
+    old_dry = np.asarray(h_vtx_old)[dry_j, dry_i, :]
+    new_dry = np.asarray(h_vtx_new)[dry_j, dry_i, :]
+
+    # Old (legacy / dz_ref=None) behaviour: BIG_H sentinel at the dry vertex.
+    np.testing.assert_array_equal(old_dry, np.full(nlev, 1.0e30))
+    # New (dz_ref-supplied) behaviour: the per-level reference thickness,
+    # matching NEMO's e3f_0 overwrite exactly.
+    np.testing.assert_allclose(new_dry, dz_ref, rtol=1e-12)
+    # Non-vacuous: the fix actually changes the dry-vertex value.
+    assert not np.allclose(old_dry, new_dry)
+
+    # A WET vertex must be UNCHANGED by adding dz_ref (only the wet_count==0
+    # branch reads it) -- e.g. vertex (0, 0), all 4 neighbours wet.
+    wet_j, wet_i = 0, 0
+    np.testing.assert_array_equal(
+        np.asarray(h_vtx_old)[wet_j, wet_i, :], np.asarray(h_vtx_new)[wet_j, wet_i, :],
+    )
+
+
+def test_een_e3f_scheme_unknown_value_raises():
+    """Dispatch hardening: an unknown een_e3f_scheme raises at ``_bc_pv_flux``
+    entry, before any array use (registered in
+    tests/test_dispatch_hardening.py::BASELINE_DISPATCHERS — the whole
+    ``_bc_pv_flux`` function is already pinned there)."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    with pytest.raises(ValueError, match="unknown een_e3f_scheme"):
+        _bc_pv_flux(
+            None, None, None, None, None, None, None, None, None, None, None, None,
+            een_e3f_scheme="bogus",
+        )
+
+
+# ----------------------------------------------------------------------
+# Triad <-> mass-flux PAIRING (NEMO vor_een / dyn_cor_2D_init)
+# ----------------------------------------------------------------------
+#
+# NEMO pairs the NORTH v-flux with the NORTH-side triad
+# (dynvor.F90:838-844):
+#
+#     ztne(ji,jj) = zwz(ji-1,jj) + zwz(ji,jj) + zwz(ji,jj-1)
+#     zua = r1_12*r1_e1u*( ztne(ji  ,jj)*zwy(ji  ,jj  )
+#                        + ztnw(ji+1,jj)*zwy(ji+1,jj  )
+#                        + ztse(ji  ,jj)*zwy(ji  ,jj-1)
+#                        + ztsw(ji+1,jj)*zwy(ji+1,jj-1) )
+#     zva = -r1_12*r1_e2v*( ztsw(ji,jj+1)*zwx(ji-1,jj+1)
+#                         + ztse(ji,jj+1)*zwx(ji  ,jj+1)
+#                         + ztnw(ji,jj  )*zwx(ji-1,jj  )
+#                         + ztne(ji,jj  )*zwx(ji  ,jj  ) )
+#
+# and its BAROTROPIC twin dyn_cor_2D_init reproduces the same pairing
+# independently (dynspg_ts.F90:1517-1531: zpvo_nw = ff_f(ji-1,jj) +
+# ff_f(ji,jj) + ff_f(ji,jj-1) is the coefficient of pvnb(ji,jj)).
+#
+# Until 2026-08 legoESM paired the north v-flux with the SOUTH-side triad
+# (and, on the v-side, the west u-flux with the east-side triad).  That is
+# not a convention: it breaks the AL81 antisymmetry, so the operator does
+# spurious work (measured 4.566e-02 relative on the random state below --
+# see the test docstring for how that number was re-measured).
+
+def _pairing_probe_inputs(n_lat=9, n_lon=12, nlev=3, seed=7):
+    """Fully-wet, doubly-periodic-in-lon random state for the pairing tests.
+
+    Everything is an INPUT to ``pv_flux_al81_partial_cell`` (no grid, no
+    metrics), so these tests probe the operator's index algebra alone.
+    """
+    rng = np.random.default_rng(seed)
+
+    def _wrap(a):                       # col n_lon duplicates col 0
+        return a.at[:, -1, ...].set(a[:, 0, ...])
+
+    h_vtx = _wrap(jnp.asarray(rng.uniform(50.0, 500.0, (n_lat + 1, n_lon + 1, nlev))))
+    zeta = _wrap(jnp.asarray(rng.normal(size=(n_lat + 1, n_lon + 1, nlev)) * 1e-5))
+    f_vtx = _wrap(jnp.asarray(rng.normal(size=(n_lat + 1, n_lon + 1)) * 1e-4))
+    h_v = jnp.asarray(rng.uniform(50.0, 500.0, (n_lat + 1, n_lon, nlev)))
+    v = jnp.asarray(rng.normal(size=(n_lat + 1, n_lon, nlev)))
+    h_u = _wrap(jnp.asarray(rng.uniform(50.0, 500.0, (n_lat, n_lon + 1, nlev))))
+    u = _wrap(jnp.asarray(rng.normal(size=(n_lat, n_lon + 1, nlev))))
+    return dict(
+        zeta=zeta, h_vtx=h_vtx, f_vtx=f_vtx, h_v=h_v, v=v, h_u=h_u, u=u,
+        u_mask_3d=jnp.ones((n_lat, n_lon + 1, nlev)),
+        v_mask_3d=jnp.ones((n_lat + 1, n_lon, nlev)),
+        vtx_mask=jnp.ones((n_lat + 1, n_lon + 1)),
+        n_lat=n_lat, n_lon=n_lon, nlev=nlev,
+    )
+
+
+def _apply_pairing_probe(p):
+    du, dv = pv_flux_al81_partial_cell(
+        p["zeta"], p["h_vtx"], p["h_v"], p["v"], p["h_u"], p["u"],
+        p["u_mask_3d"], p["v_mask_3d"], p["vtx_mask"],
+        f_vtx=p["f_vtx"], q_boundary="nemo_live")
+    F_u = p["h_u"] * p["u"] * p["u_mask_3d"]
+    F_v = p["h_v"] * p["v"] * p["v_mask_3d"]
+    return du, dv, F_u, F_v
+
+
+def test_al81_triad_flux_pairing_is_energy_antisymmetric():
+    """WEIGHTING-FREE gate on the triad<->flux pairing (Rule 6).
+
+    The AL81/EEN vorticity operator does ZERO net work by construction:
+    every ``(u-face, v-face)`` pair contributes ``+T·F_u·F_v`` to the u
+    equation and ``−T'·F_v·F_u`` to the v equation, so
+
+        Σ F_u·diag_u + Σ F_v·diag_v = Σ F_u F_v (T − T')
+
+    vanishes IFF the two coefficients are the SAME triad, i.e. iff the
+    pairing is NEMO's.  No areas, no thicknesses, no masks enter the
+    identity — it cannot be satisfied by a compensating weight.
+
+    Sum excludes the duplicated periodic u column ``n_lon`` (same physical
+    face as column 0).
+
+    NON-VACUOUS: with the pre-2026-08 pairing (north v-flux × SOUTH-side
+    triad) this same expression measures 4.566e-02 (work +2.520578e-01,
+    scale 5.519951e+00), i.e. the assert below fails by fifteen orders of
+    magnitude.  Post-fix it measures 1.507e-17 (work +8.33e-17, scale
+    5.526833e+00).
+
+    PROVENANCE of that 4.566e-02 (a first draft of this docstring recorded
+    5.252e-02, which is NOT reproducible and is hereby RETRACTED): measured
+    2026-08 on THIS ``_pairing_probe_inputs()`` state, fp64
+    (``JAX_PLATFORMS=cpu``, ``JAX_ENABLE_X64=1``, ``PrecisionPolicy.fp64()``),
+    by restoring the pre-fix ``pv_flux_al81_partial_cell`` verbatim
+    (``git show HEAD:...latlon_cgrid_operators.py``), running, and restoring
+    the file (md5-verified).  Identical under both ``q_boundary`` values,
+    since the probe is fully wet.
+    """
+    p = _pairing_probe_inputs()
+    du, dv, F_u, F_v = _apply_pairing_probe(p)
+    assert du.dtype == jnp.float64 and dv.dtype == jnp.float64, (
+        f"pairing probe must run fp64, got {du.dtype}/{dv.dtype}")
+    work = float((F_u[:, :-1] * du[:, :-1]).sum() + (F_v * dv).sum())
+    scale = float(jnp.abs(F_u[:, :-1] * du[:, :-1]).sum()
+                  + jnp.abs(F_v * dv).sum())
+    rel = abs(work) / scale
+    print(f"\n  AL81 pairing work residual: {work:+.4e} / {scale:.4e} "
+          f"= {rel:.3e}")
+    assert rel < 1e-12, (
+        f"AL81 triad<->flux pairing is not energy-antisymmetric "
+        f"(rel work = {rel:.3e}); the north v-flux must carry the "
+        f"north-side triad (NEMO dynvor.F90:840)")
+
+
+def test_al81_pairing_matches_nemo_vor_een_loop_port():
+    """Index-for-index port of NEMO ``vor_een``'s trend loop
+    (``dynvor.F90:833-846``), run in NEMO's OWN ``(ji,jj)`` indices and
+    mapped back, must reproduce the operator exactly.
+
+    Index map (lego cell ``(j,i)`` == NEMO ``T(ji=i, jj=j)``; NEMO's
+    F-point ``(ji,jj)`` is the NE corner of ``T(ji,jj)``)::
+
+        zwz(ji,jj) = q   [jj+1, ji+1 mod n_lon]     (vertex PV: NEMO's
+                                                     F-point (ji,jj) is the
+                                                     NE corner of T(ji,jj))
+        zwy(ji,jj) = F_v [jj+1, ji  mod n_lon]      (v mass flux)
+        zwx(ji,jj) = F_u [jj  , ji+1 mod n_lon]     (u mass flux)
+        zua(ji,jj) = diag_u[jj  , ji+1]   (x e1u == 1 here)
+        zva(ji,jj) = diag_v[jj+1, ji  ]
+
+    NEMO's ``r1_12`` is already inside lego's ``t_*``; ``r1_e1u``/``r1_e2v``
+    are metric factors this per-unit-width operator does not carry, so the
+    comparison is metric-free.
+
+    The v rows 0 and ``n_lat`` and the u wrap column are excluded: those are
+    where lego applies its pole-wall pad, which has no NEMO counterpart in
+    this bare-operator setting.
+    """
+    p = _pairing_probe_inputs()
+    n_lat, n_lon = p["n_lat"], p["n_lon"]
+    du, dv, F_u, F_v = _apply_pairing_probe(p)
+
+    q = np.asarray(p["zeta"] + p["f_vtx"][..., None]) / np.asarray(p["h_vtx"])
+    FV = np.asarray(F_v)
+    FU = np.asarray(F_u)[:, :n_lon, :]      # drop the duplicated wrap column
+
+    def zwz(ji, jj):
+        return q[jj + 1, (ji + 1) % n_lon, :]
+
+    def zwy(ji, jj):
+        return FV[jj + 1, ji % n_lon, :]
+
+    def zwx(ji, jj):
+        return FU[jj, (ji + 1) % n_lon, :]
+
+    r1_12 = 1.0 / 12.0
+
+    def ztne(ji, jj):
+        return zwz(ji - 1, jj) + zwz(ji, jj) + zwz(ji, jj - 1)
+
+    def ztnw(ji, jj):
+        return zwz(ji - 1, jj - 1) + zwz(ji - 1, jj) + zwz(ji, jj)
+
+    def ztse(ji, jj):
+        return zwz(ji, jj) + zwz(ji, jj - 1) + zwz(ji - 1, jj - 1)
+
+    def ztsw(ji, jj):
+        return zwz(ji, jj - 1) + zwz(ji - 1, jj - 1) + zwz(ji - 1, jj)
+
+    du_np = np.asarray(du)
+    dv_np = np.asarray(dv)
+    n_u = n_v = 0
+    for j in range(n_lat):                       # every u row is pad-free
+        for i in range(1, n_lon):                # skip the wrap column
+            ji, jj = i - 1, j
+            zua = r1_12 * (
+                (ztne(ji, jj) * zwy(ji, jj) + ztnw(ji + 1, jj) * zwy(ji + 1, jj))
+                + (ztse(ji, jj) * zwy(ji, jj - 1)
+                   + ztsw(ji + 1, jj) * zwy(ji + 1, jj - 1))
+            )
+            np.testing.assert_allclose(du_np[j, i, :], zua, rtol=1e-13, atol=0)
+            n_u += 1
+    for j in range(1, n_lat):                    # rows 0/n_lat use the pole pad
+        for i in range(n_lon):
+            ji, jj = i, j - 1
+            zva = -r1_12 * (
+                (ztsw(ji, jj + 1) * zwx(ji - 1, jj + 1)
+                 + ztse(ji, jj + 1) * zwx(ji, jj + 1))
+                + (ztnw(ji, jj) * zwx(ji - 1, jj)
+                   + ztne(ji, jj) * zwx(ji, jj))
+            )
+            np.testing.assert_allclose(dv_np[j, i, :], zva, rtol=1e-13, atol=0)
+            n_v += 1
+    # Non-vacuous: real faces compared, and the trend is not identically 0.
+    assert n_u == n_lat * (n_lon - 1) and n_v == (n_lat - 1) * n_lon
+    assert float(np.abs(du_np).max()) > 0.0 and float(np.abs(dv_np).max()) > 0.0

@@ -10,9 +10,11 @@ from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
 __param_spec__ = {
     "TreguierConfig": {
         "scheme_key": "ocean.lat.treguier",
-        "excluded": {},
+        "excluded": {
+            "kappa_min": "numerics: stability floor on the equatorial taper, NOT a NEMO namelist parameter; default 0 = inactive (enable via config, not training)",
+        },
         "params": {
-            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0=rn_Ue*rn_Le", "shape": None},
+            "aei0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO ldftra nn_aei_ijk_t=21 (Treguier 1997); aei0 = 1/2*rn_Ue*rn_Le (NEMO REJECTS bilaplacian EIV, so the laplacian prefactor is the only case) -- NOT plain rn_Ue*rn_Le; ORCA1 = 900", "shape": None},
         },
     },
     "HarmonicConfig": {
@@ -174,14 +176,46 @@ class TreguierConfig(NamedTuple):
     ``T⁻¹ = √(Σ N²(S_x²+S_y²)dz / (5 m + Σ dz))`` built from the isopycnal
     slopes.  The fixed factors (0.4, 2/40 km, 20°, +5 m) are hard-coded in the
     NEMO source (module constants in ``_gm_redi_common``); the ONE namelist
-    tunable is the cap ``aei0 = rn_Ue·rn_Le`` (DINO: 0.03·100 km = 3000 m²/s;
+    tunable is the cap ``aei0`` (DINO default below: 3000 m²/s;
     ORCA1: 0.018·100 km = 1800 m²/s).
 
     Mutually exclusive with ``VisbeckConfig.enabled`` (both are adaptive-κ
     diagnostics; the GM/Redi dispatch raises if both are on).
     """
     enabled: bool = False
-    aei0: float = 3000.0     # κ cap [m²/s] = rn_Ue·rn_Le (DINO namelist value)
+    # κ cap [m²/s].  NEMO's cap is 1/2*rn_Ue*rn_Le -- the 1/2 is the
+    # LAPLACIAN prefactor (ldftra.F90:290-293) and NEMO REJECTS bilaplacian
+    # EIV, so that is the only case; plain rn_Ue*rn_Le is wrong.  ORCA1 =
+    # 0.5*0.018*100e3 = 900, confirmed by NEMO's emitted aeiu_2d (max exactly
+    # 900, measured 2026-08-12), which is why run_omip_core2's --gm-aei0
+    # default was corrected 1800 -> 900.
+    # THIS 3000 IS A LEGACY GENERIC DEFAULT, NOT "the DINO value": DINO passes
+    # its own DINOConfig.treguier_aei0 = 1500 (dino.py:578, wired at :2893),
+    # so no DINO run inherits this number (codex, 2026-08-12).
+    aei0: float = 3000.0
+    # Optional FLOOR on the returned κ_GM [m²/s], applied to WET columns only
+    # (dry columns stay exactly 0).  The tropical taper ``min(1, |f/f_20|)``
+    # drives κ → 0 AT THE EQUATOR — measured on the eORCA1 tripole state, the
+    # taper reaches 0.0000 and 2.17% of wet cells fall below 0.05 — and an
+    # unfloored zero-GM equatorial band destabilised a 1° global run (non-finite
+    # before day 5).  ``VisbeckConfig`` (the coefficient the OMIP tripole
+    # otherwise uses) carries its own ``kappa_min`` (200 m²/s) for the same
+    # reason.
+    #
+    # NOT NEMO.  NEMO's ldf_eiv is capped-only and genuinely yields κ → 0 at
+    # f = 0; a NONZERO kappa_min is a DELIBERATE closure change that keeps a
+    # finite eddy-induced velocity (and therefore a bolus transport) in the
+    # equatorial band.  Any oracle/fidelity comparison must run kappa_min=0.0.
+    # Default 0.0 = NO floor = byte-identical to the pre-existing behaviour and
+    # to NEMO, so the DINO oracle card is unaffected.
+    #
+    # ORDERING: the floor is applied to the Treguier coefficient BEFORE the
+    # optional Hallberg ``resolution_function`` scaling (which multiplies
+    # whatever the closure produced — override / Treguier / Visbeck /
+    # constant).  With ``resolution_function=True`` the EFFECTIVE κ can
+    # therefore fall below ``kappa_min``; this matches how
+    # ``VisbeckConfig.kappa_min`` already behaves.
+    kappa_min: float = 0.0
 
 
 class GMRediConfig(NamedTuple):
@@ -253,6 +287,13 @@ class GMRediConfig(NamedTuple):
     # velocity). Tracer advection only (never momentum/continuity/eta). Only read
     # by slope_scheme="nemo_iso_lap"; the lat-lon C-grid model honors it.
     gm_bolus_advection: str = "centred"
+    # NEMO ldf_eiv averages kappa onto EACH face before building the bolus
+    # streamfunction (ldftra.F90:716-718): zaeiu = 0.5*(zaeiw(i)+zaeiw(i+1)).
+    # False (default, bit-identical legacy) reuses the cell-centred kappa for
+    # both faces -- exact only for a CONSTANT kappa; the Treguier kappa is
+    # spatially 2-D, leaving a half-cell offset (#1226: eiv-transport rel err
+    # median 3.4% -> 0.16% with the NEMO averaging).  Oracle cards set True.
+    gm_bolus_kappa_face_average: bool = False
     slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
     # NEMO ln_traldf_msc (Method of Stabilizing Correction): when True the
     # nemo_iso_lap operator adds the akz-stabilized EXPLICIT K33 vertical
@@ -330,6 +371,16 @@ class GMRediConfig(NamedTuple):
     # nemo_dino_kamm card; all other recipes keep "rho_c".  Dispatch raises on
     # an unknown value (gm_redi_latlon_cgrid._nemo_mld).
     mld_criterion: str = "rho_c"
+    # N^2 fed to the NEMO-native isopycnal slopes (ldf_slp).  NEMO's ldfslp
+    # consumes ``rn2b`` -- the LINEARISED alpha/beta bn2 of eosbn2.F90 -- not a
+    # parcel-displacement N^2.  The two diverge with pressure, so the adiabatic
+    # form biases the slopes progressively at depth (#1226: on the DINO twin
+    # |wslpi| runs 1.2% high in aggregate, essentially all of it below level 18,
+    # with the bottom 8 levels carrying ~60% of the excess).  "nemo_bn2" is
+    # S-EOS-specific; "adiabatic" (default) leaves every non-oracle recipe
+    # bit-identical.  Dispatch raises on an unknown value
+    # (gm_redi_latlon_cgrid._nemo_wpoint_e3w_wmask_n2).
+    slope_n2: str = "adiabatic"
     # NEMO ldfslp horizontal (1-2-1)⊗(1-2-1)/16 Shapiro smoother on the final
     # interface slopes (ldfslp.F90:304-315).  legoESM omitted it, leaving the
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops

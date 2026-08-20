@@ -187,13 +187,48 @@ class PhysicsState(NamedTuple):
     # unaffected.
     dyn_tendency_T: jnp.ndarray = None
     dyn_tendency_qv: jnp.ndarray = None
+    # CONVECTIVE surface precipitation [kg/m^2/s], shape (ncol,), written by
+    # the convection module each step (the combined-physics accumulator
+    # captures the convection slot's ``precip`` tendency field).  Consumed
+    # one step LAGGED by the radiation module's cloud-fraction call
+    # (Slingo-1987 ``convective_cloud``) on the standalone (MPAS) path —
+    # the same lagged-carry convention the FV pipeline uses for its
+    # ``conv_precip`` threading.  Always materialised as zeros (uniform
+    # pytree; byte-identical for runs that never read it).  Appended LAST
+    # with a default so existing direct constructors are unaffected.
+    conv_precip: jnp.ndarray = None
+    # OPTIONAL per-step PRESCRIBED surface KINEMATIC fluxes, shape (ncol,), in
+    # the same units and sign convention as ``SCMForcing.w_th_s`` / ``w_qv_s``:
+    # ``surface_wth_override`` [K m/s] and ``surface_wqv_override``
+    # [(kg/kg) m/s], both POSITIVE UPWARD (out of the surface).  They are the
+    # TIME-VARYING sibling of ``SurfaceLayerConfig.prescribed_shflx_w_m2``: that
+    # config field is one scalar for the whole run, so a case whose surface flux
+    # follows a diurnal cycle (Wangara Day 33) could only hand the closure one
+    # instant of it.  The turbulence integration converts these to W/m^2 with
+    # the SAME ``rho`` it passes to the closure — so a nonlocal scheme that
+    # divides straight back out (``ysu.py``: ``wtheta_sfc = shflx / (rho[:, -1]
+    # * c_pd)``) recovers exactly the value written here, with no second density
+    # convention in the round trip.
+    #
+    # ``None`` (default) leaves the path inert and every existing run
+    # byte-identical.  When set they take PRECEDENCE over the config scalar,
+    # because they are the per-step value and it is the run-constant one.  A
+    # caller that sets these MUST also stop injecting the same flux as a column
+    # tendency (``SCMForcing.flux_to_closure``), or the flux is counted twice.
+    # Appended LAST with a default so existing direct constructors are
+    # unaffected.
+    surface_wth_override: jnp.ndarray = None
+    surface_wqv_override: jnp.ndarray = None
 
 
 # Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
 # every convection call) — NOT evolving physics memory, so they are neither
 # persisted in a restart checkpoint nor subject to the carry-completeness gate.
 # A checkpoint legitimately lacks them; the fresh seed's ``None`` is correct.
-PHYSSTATE_INPUT_FIELDS = frozenset({"dyn_tendency_T", "dyn_tendency_qv"})
+PHYSSTATE_INPUT_FIELDS = frozenset({
+    "dyn_tendency_T", "dyn_tendency_qv",
+    "surface_wth_override", "surface_wqv_override",
+})
 
 
 def init_physics_state(
@@ -358,6 +393,9 @@ def init_physics_state(
         # docstrings).
         dyn_tendency_T=None,
         dyn_tendency_qv=None,
+        # Lagged convective surface precip for the standalone-path Slingo
+        # cumulus cloud fraction; zeros before the first convection step.
+        conv_precip=jnp.zeros((ncol,), dtype=dtype),
     )
 
 
@@ -415,4 +453,14 @@ def update_physics_state(phys_state, updates):
         # r2).  A driver re-populates them before every convection call.
         dyn_tendency_T=updates.get("dyn_tendency_T", None),
         dyn_tendency_qv=updates.get("dyn_tendency_qv", None),
+        # Same contract for the prescribed-surface-flux inputs: the SCM writes
+        # them from ``SCMForcing.w_th_s(t)`` before EVERY tendency evaluation,
+        # so carrying the previous step's value forward would silently freeze a
+        # diurnal cycle at whatever instant the driver last refreshed.
+        surface_wth_override=updates.get("surface_wth_override", None),
+        surface_wqv_override=updates.get("surface_wqv_override", None),
+        # Evolving lag carry (convection writes, radiation reads next step):
+        # carried forward unchanged when the step's convection published
+        # nothing (schemes without a rain split).
+        conv_precip=updates.get("conv_precip", phys_state.conv_precip),
     )

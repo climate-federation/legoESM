@@ -64,9 +64,23 @@ import time
 import sys
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
 import numpy as np
+
+# #1361 / PR #1376 codex High: JAX must NOT be imported at module load — the
+# preflight has to be able to reject a config before anything touches the
+# driver or queries devices. `jax`/`jnp` are bound by `_import_jax()`, which
+# every function that uses them calls first (idempotent).
+jax = None  # type: ignore[assignment]
+jnp = None  # type: ignore[assignment]
+
+
+def _import_jax():
+    """Bind the module-level ``jax``/``jnp`` names. Idempotent."""
+    global jax, jnp
+    if jax is None:
+        import jax as _jax
+        import jax.numpy as _jnp
+        jax, jnp = _jax, _jnp
 
 # Bench dir for the shared metadata module (sibling-script import pattern —
 # needed when this file is loaded by path from tests, not run as a script).
@@ -86,6 +100,7 @@ from metadata import (  # noqa: E402
 
 
 def _build_model(n_lat, n_lon, nlev):
+    _import_jax()
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationConfig, CGridLatLonPrimitiveEquationModel)
@@ -102,6 +117,7 @@ def _build_model(n_lat, n_lon, nlev):
 
 
 def _build(n_lat, n_lon, nlev):
+    _import_jax()
     # nd=1 lane + tests: global (unsharded) IC build, unchanged protocol.
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -114,6 +130,7 @@ def _build(n_lat, n_lon, nlev):
 
 
 def _block(state):
+    _import_jax()
     jax.block_until_ready(jax.tree.leaves(state))
 
 
@@ -146,6 +163,20 @@ def main() -> int:
                         "steps (built once, reused; band-sharded geometry) "
                         "and times BLOCKS of segment calls instead of "
                         "per-step host dispatch. 0 = default fused lane.")
+    p.add_argument("--device-hbm", type=str,
+                   default=os.environ.get("LEGOESM_DEVICE_HBM"),
+
+                   help="#1361 memory preflight: target device whose HBM the "
+                        "estimated per-device footprint must fit "
+                        "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
+                        "estimate printed, no gate.")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="jax.profiler trace of ONE steady timed block from "
+                        "ranks 0-3 into <dir>/rank<k>/ (the MPAS-lane "
+                        "attribution instrument, ported; analyze with "
+                        "scripts/bench/analyze_jax_trace_gaps.py). One "
+                        "block only — tracing from step 0 fills the 1M-"
+                        "event cap with compile-phase host events.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
@@ -180,6 +211,29 @@ def main() -> int:
     # the expensive build (the ocean twin's guard).
     if args.steps < 1:
         raise SystemExit(f"--steps must be >= 1, got {args.steps}")
+
+    # #1361 preflight: decidable from the ARGUMENTS ALONE, so it runs before
+    # any jax import / device query / model build. Job 26497323 ran a whole
+    # 16-GPU arm before dying on `n_lat 720 not divisible by n_devices 64` --
+    # the later in-loop guard below is kept as a belt-and-braces check for the
+    # weak-mode derived n_lat, but the fatal case is caught here at submit time.
+    from legoesm.scaling_preflight import (
+        preflight_or_exit, validate_divisibility, validate_memory,
+    )
+    if args.mode == "strong":
+        preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
+                          axis="n_lat")
+    _n_lat_est = (args.n_lat if args.mode == "strong"
+                  else args.nlat_per_dev * args.n_devices)
+    _est = preflight_or_exit(
+        validate_memory, n_columns=_n_lat_est * args.n_lon, nlev=args.nlev,
+        n_devices=args.n_devices, device=args.device_hbm)
+    print(f"[preflight] ok: n_lat={_n_lat_est} n_lon={args.n_lon} "
+          f"nlev={args.nlev} n_devices={args.n_devices} "
+          f"est={_est / 1024**3:.1f} GB/device", flush=True)
+
+    # Preflight has passed -> JAX may now be imported (deferred for #1361).
+    _import_jax()
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
@@ -261,7 +315,20 @@ def main() -> int:
         # in-graph finite SCALAR, then block on the state for honest timing.
         per_block_ms = []
         finite_ok = True
+        _profiling = (args.profile_dir is not None
+                      and jax.process_index() < 4)
+        _prof_on = False
         for i in range(args.steps):
+            if _profiling and i == args.warmup:
+                import pathlib
+                _pd = (pathlib.Path(args.profile_dir)
+                       / f"rank{jax.process_index()}")
+                _pd.mkdir(parents=True, exist_ok=True)
+                jax.profiler.start_trace(str(_pd))
+                _prof_on = True
+            if _profiling and _prof_on and i == args.warmup + 1:
+                jax.profiler.stop_trace()
+                _prof_on = False
             t0 = time.perf_counter()
             c, ok = seg_fn(c, args.dt)
             ok_b = bool(ok)
@@ -279,6 +346,8 @@ def main() -> int:
                       "the record is marked INVALID (finite_ok=false, "
                       "valid=false) and its throughput fields are nulled")
                 break
+        if _profiling and _prof_on:
+            jax.profiler.stop_trace()
         completed_blocks = len(per_block_ms)
         per_step_ms = [b / seg_n for b in per_block_ms]
         if jax.process_count() > 1:
@@ -299,11 +368,15 @@ def main() -> int:
         # (``step_latency_ms``); multi-controller runs record the
         # slowest-process block time + imbalance ratio.
         from metadata import timed_scan_blocks
+        _tdir = None
+        if args.profile_dir is not None and jax.process_index() < 4:
+            _tdir = f"{args.profile_dir}/rank{jax.process_index()}"
         c, timing = timed_scan_blocks(
             lambda st: step(st, args.dt), c,
             block_steps=args.steps, n_blocks=args.blocks,
             probe_steps=args.probe_steps,
-            sync_label="atm_latlon_spmd_bench")
+            sync_label="atm_latlon_spmd_bench",
+            trace_dir=_tdir)
         # Headline = fused per-step time from the SLOWEST process; key name
         # kept for the aggregators.
         med = float(timing["fused_step_ms"])

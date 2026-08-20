@@ -2133,7 +2133,12 @@ def scatter_state_latlon_cgrid_ocean(state, layout: LatLonBandLayout):
       neighbouring ranks duplicate the boundary v-face row (same
       convention as :func:`scatter_state_latlon`);
     * optional moment / AB2 fields (T_som, S_som, T_flux_div_prev,
-      S_flux_div_prev) sliced like cell-centre scalars when present.
+      S_flux_div_prev) sliced like cell-centre scalars when present;
+    * the optional ``store_mass_flux`` capture (#1442): ``mass_flux_u``
+      like ``u`` (u-face, rows ``[s, e)``) and ``mass_flux_v`` like ``v``
+      (v-face, rows ``[s, e+1)``).  Omitting them left a POPULATED global
+      state un-sliced -- every rank would carry the full-domain flux while
+      every other field was band-local (codex RED 4).
 
     Masks are sliced from the GLOBAL pre-computed masks (NOT recomputed
     locally): ``v_mask`` depends on lat-adjacent cells, so a local
@@ -2156,6 +2161,22 @@ def scatter_state_latlon_cgrid_ocean(state, layout: LatLonBandLayout):
         S_som=_maybe_field_slice_lat(state.S_som, s, e),
         T_flux_div_prev=_maybe_field_slice_lat(state.T_flux_div_prev, s, e),
         S_flux_div_prev=_maybe_field_slice_lat(state.S_flux_div_prev, s, e),
+        # #1442 store_mass_flux: u-face like ``u``, v-face like ``v``, and the
+        # vertical partner cell-centred like ``w`` (it is (n_lat, n_lon,
+        # nlev+1) -- staggered in the VERTICAL only, which the lat-band
+        # decomposition never splits).
+        mass_flux_u=_maybe_field_slice_lat(
+            getattr(state, "mass_flux_u", None), s, e),
+        mass_flux_v=_maybe_field_slice_lat(
+            getattr(state, "mass_flux_v", None), s, e + 1),
+        mass_flux_w=_maybe_field_slice_lat(
+            getattr(state, "mass_flux_w", None), s, e),
+        # store_salt_flux: 2-D column-integrated pair; u-face lat-sliced like
+        # ``u``, v-face staggered like ``v`` (n_lat+1 rows -> s, e+1).
+        salt_flux_u_int=_maybe_field_slice_lat(
+            getattr(state, "salt_flux_u_int", None), s, e),
+        salt_flux_v_int=_maybe_field_slice_lat(
+            getattr(state, "salt_flux_v_int", None), s, e + 1),
     )
 
 
@@ -2175,9 +2196,16 @@ def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
     """Gather rank-local ocean bands onto rank 0; ``None`` elsewhere.
 
     Inverse of :func:`scatter_state_latlon_cgrid_ocean`.  v-face fields
-    (v, v_mask) pass ``is_v_face=True`` so every rank except the
-    northernmost trims its duplicated boundary row before the gather
-    (global v shape ``(n_lat_global+1, n_lon, nlev)``).
+    (v, v_mask, and #1442's ``mass_flux_v``) pass ``is_v_face=True`` so
+    every rank except the northernmost trims its duplicated boundary row
+    before the gather (global v shape ``(n_lat_global+1, n_lon, nlev)``).
+
+    Every slot present on the local state MUST be gathered.  A slot left out
+    of the ``_replace`` below keeps rank 0's BAND-LOCAL array in a state
+    otherwise assembled to global shape -- shape-inconsistent, and silently
+    wrong for any diagnostic that reads it (codex RED 4 on the ``mass_flux_*``
+    pair).  ``_gather_field_ocean`` passes ``None`` through, so an unpopulated
+    optional slot stays ``None``.
     """
     u_g = _gather_field_ocean(local_state.u, layout)
     v_g = _gather_field_ocean(local_state.v, layout, is_v_face=True)
@@ -2193,12 +2221,27 @@ def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
     ssom_g = _gather_field_ocean(local_state.S_som, layout)
     tfd_g = _gather_field_ocean(local_state.T_flux_div_prev, layout)
     sfd_g = _gather_field_ocean(local_state.S_flux_div_prev, layout)
+    # #1442 store_mass_flux: u-face like ``u``, v-face like ``v``.  Gathered
+    # UNCONDITIONALLY (before the rank-0 branch) like every slot above, so all
+    # ranks run the same number of collectives.
+    mfu_g = _gather_field_ocean(getattr(local_state, "mass_flux_u", None),
+                                layout)
+    mfv_g = _gather_field_ocean(getattr(local_state, "mass_flux_v", None),
+                                layout, is_v_face=True)
+    mfw_g = _gather_field_ocean(getattr(local_state, "mass_flux_w", None),
+                                layout)
+    sfu_g = _gather_field_ocean(getattr(local_state, "salt_flux_u_int", None),
+                                layout)
+    sfv_g = _gather_field_ocean(getattr(local_state, "salt_flux_v_int", None),
+                                layout, is_v_face=True)
     if layout.rank == 0:
         return local_state._replace(
             u=u_g, v=v_g, T=T_g, S=S_g, eta=eta_g, H_bathy=H_g,
             land_mask=lm_g, u_mask=um_g, v_mask=vm_g, w=w_g,
             T_som=tsom_g, S_som=ssom_g,
             T_flux_div_prev=tfd_g, S_flux_div_prev=sfd_g,
+            mass_flux_u=mfu_g, mass_flux_v=mfv_g, mass_flux_w=mfw_g,
+            salt_flux_u_int=sfu_g, salt_flux_v_int=sfv_g,
         )
     return None
 
@@ -2266,6 +2309,8 @@ def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
         cos_alpha_u=t(geom.cos_alpha_u), sin_alpha_u=t(geom.sin_alpha_u),
         cos_alpha_v=vface(geom.cos_alpha_v), sin_alpha_v=vface(geom.sin_alpha_v),
         cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
+        # cos_lat_v is a v-FACE (n_lat+1,) field -> vface(), not t().
+        cos_lat_v=vface(geom.cos_lat_v),
         lat=t(geom.lat),
         fold=band_fold,
         # Partial-periodic seam wall is a per-lat-row (n_lat,) profile —

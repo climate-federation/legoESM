@@ -54,6 +54,10 @@ import numpy as np
 # ===========================================================================
 
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.canopy.config import CLMMLCanopyConfig
+# Importing the interface does NOT import clm-ml-jax: the backend is imported
+# lazily inside the call, so run_lmip still runs without it installed.
+from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -143,6 +147,36 @@ def _get_pft_row(veg_type: str, calibrated: bool = True) -> dict:
     return row
 
 
+def _build_surface_scheme(args: argparse.Namespace):
+    """Resolve ``--land-surface-scheme`` to the scheme config NamedTuple.
+
+    ``step_multilayer_land`` dispatches on the TYPE of ``surface_scheme``, so the
+    CLI string maps to one of the three scheme configs.  Unknown values raise
+    (dispatch-hardening) rather than silently falling back to SimpleSEB —
+    argparse ``choices`` already rejects them, this is the second line.
+    """
+    from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
+    name = getattr(args, "land_surface_scheme", "simple_seb")
+    if name == "simple_seb":
+        return SimpleSEBConfig()
+    if name == "two_leaf":
+        return TwoLeafCanopyConfig()
+    if name == "clm_ml":
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        cfg = CLMMLCanopyConfig()
+        overrides = {}
+        if getattr(args, "clm_ml_pft", None) is not None:
+            overrides["pft_clm"] = int(args.clm_ml_pft)
+        if getattr(args, "clm_ml_turbulence_scheme", None) is not None:
+            overrides["turbulence_scheme"] = args.clm_ml_turbulence_scheme
+        if getattr(args, "clm_ml_dtime_target", None) is not None:
+            overrides["dtime_ml_target_s"] = float(args.clm_ml_dtime_target)
+        return cfg._replace(**overrides) if overrides else cfg
+    raise ValueError(
+        f"Unknown --land-surface-scheme {name!r}; "
+        "expected one of 'simple_seb', 'two_leaf', 'clm_ml'.")
+
+
 def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
     """Resolve LMIP CLI arguments into the land config and run controls."""
     texture_kwargs = _SOIL_TEXTURE_PRESETS[args.soil_texture]
@@ -164,6 +198,7 @@ def build_config_from_args(args: argparse.Namespace) -> LMIPRunConfig:
         from legoesm.surface_albedo import LandAlbedoConfig
         _land_albedo = LandAlbedoConfig()
     land = MultiLayerLandConfig(
+        surface_scheme=_build_surface_scheme(args),
         albedo_land=pft_row["albedo_veg"],
         emissivity_land=pft_row["emissivity"],
         land_albedo=_land_albedo,
@@ -376,8 +411,16 @@ def _save_restart(
     day: float,
     state,
     carbon_state=None,
+    soil_frozen_fraction=None,
 ) -> None:
-    """Save a restart checkpoint as .npz."""
+    """Save a restart checkpoint as .npz.
+
+    ``soil_frozen_fraction`` (the permafrost phi that came with a ``--carbon-ic``
+    seed) round-trips too: it is not part of the land state, so without it a
+    restart would silently resume UNPROTECTED and the seeded high-latitude SOM
+    would decay away — the seed would hold for the first leg of a run and quietly
+    stop holding after the first restart.
+    """
     payload = {
         "step": np.array(step, dtype=np.int64),
         "day": np.array(day, dtype=np.float64),
@@ -402,6 +445,8 @@ def _save_restart(
             payload[f"carbon_{field}"] = np.asarray(
                 getattr(carbon_state, field)
             )
+    if soil_frozen_fraction is not None:
+        payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
     np.savez_compressed(str(restart_path), **payload)
 
 
@@ -460,7 +505,12 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
             carbon_state = init_carbon_state(
                 tuple(state.T_soil.shape[:-1]), config.carbon
             )
-    return state, carbon_state, start_step, start_day
+    # The permafrost phi of a --carbon-ic seed, if this restart carries one.
+    # None (a restart written before this field existed, or an unseeded run) =
+    # unprotected, i.e. exactly the previous behaviour.
+    soil_frozen_fraction = (jnp.asarray(data["soil_frozen_fraction"])
+                            if "soil_frozen_fraction" in data else None)
+    return state, carbon_state, start_step, start_day, soil_frozen_fraction
 
 
 # ===========================================================================
@@ -468,7 +518,9 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
 # ===========================================================================
 
 def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
-                                lat_jnp, dt, start_doy, precip_rate):
+                                lat_jnp, dt, start_doy, precip_rate,
+                                clm_ml_grid_info=None,
+                                soil_frozen_fraction=None):
     """Finish a land-carbon spin-up with the semi-analytic soil-C equilibrium.
 
     A single soil-C pool (~68-270-yr turnover) needs millennia to equilibrate
@@ -494,17 +546,34 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
     steps_per_year = int(round(_SECS_PER_DAY * 365.0 / dt))
     dt_days = dt / _SECS_PER_DAY
 
-    @jax.jit
-    def _diag_step(state, carbon, doy, hour):
+    def _diag_body(grid_info, state, carbon, doy, hour):
         forcing = make_synthetic_lmip_forcing(
             lat_rad, lon_rad, doy, hour, precip_rate=precip_rate)
         new_state, _resp, carbon_new = step_multilayer_land(
             state, forcing, config, U_MIN, dt,
-            lat=lat_jnp, carbon_state=carbon, doy=doy)
+            lat=lat_jnp, carbon_state=carbon, doy=doy,
+            clm_ml_grid_info=grid_info,
+            soil_frozen_fraction=soil_frozen_fraction)
+        # The analytic SOM reset is built from THESE diagnostics, so the
+        # protection must be applied on both sides or the reset would target an
+        # unprotected equilibrium and undo the seed.
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, config.theta_wp,
-            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
+            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False,
+            soil_frozen_fraction=soil_frozen_fraction)
         return new_state, carbon_new, diag
+
+    # CLM-ML needs a concrete GridInfo threaded into the jit (same warm-start
+    # doctrine as the transient loop).  Normally the caller passes the one it
+    # extracted from the transient, but a spin-up requested after ZERO transient
+    # steps (e.g. --days 0) arrives with a cold canopy and grid_info=None: build
+    # it here from one EAGER step (concrete doy/hour) so the jitted body below
+    # never has to trace the non-traceable cold path.  Non-CLM-ML schemes just
+    # jit straight away with grid_info=None.
+    _needs_warm = (isinstance(config.surface_scheme, CLMMLCanopyConfig)
+                   and clm_ml_grid_info is None)
+    _jit_diag = None if _needs_warm else jax.jit(
+        lambda st, cb, d, h: _diag_body(clm_ml_grid_info, st, cb, d, h))
 
     # Accumulate per-column (works for any ncol) annual fluxes [gC/m2/yr].  The
     # three ``som_*_loss`` fields are each SOM pool's total decomposition D_X,
@@ -514,9 +583,19 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
                               "som_active_loss", "som_slow_loss",
                               "som_passive_loss")}
     for s in range(steps_per_year):
-        doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
-        hour = jnp.asarray((s * dt / 3600.0) % 24.0)
-        state, carbon_state, diag = _diag_step(state, carbon_state, doy, hour)
+        if _jit_diag is None:
+            # First CLM-ML step: eager cold start with CONCRETE doy/hour, then
+            # jit the rest closing over the extracted GridInfo.
+            doy = float((start_doy + s * dt_days) % 365.0)
+            hour = float((s * dt / 3600.0) % 24.0)
+            state, carbon_state, diag = _diag_body(
+                None, state, carbon_state, doy, hour)
+            _gi = extract_clm_ml_grid_info(state.canopy_state)
+            _jit_diag = jax.jit(lambda st, cb, d, h: _diag_body(_gi, st, cb, d, h))
+        else:
+            doy = jnp.asarray((start_doy + s * dt_days) % 365.0)
+            hour = jnp.asarray((s * dt / 3600.0) % 24.0)
+            state, carbon_state, diag = _jit_diag(state, carbon_state, doy, hour)
         for k in acc:
             acc[k] = acc[k] + getattr(diag, k) * dt_days
 
@@ -587,6 +666,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
+    p.add_argument("--land-surface-scheme", default="simple_seb",
+                   choices=["simple_seb", "two_leaf", "clm_ml"],
+                   dest="land_surface_scheme",
+                   help="Surface energy-balance scheme. 'simple_seb' (default) = "
+                        "bulk SEB with the beta_soil moisture path; 'two_leaf' = "
+                        "DifferBESS two-leaf canopy; 'clm_ml' = the CLM-ML-JAX "
+                        "multilayer canopy (needs the clm-ml-jax backend). "
+                        "Matches run_amip's --land-surface-scheme.")
+    p.add_argument("--clm-ml-pft", type=int, default=None,
+                   dest="clm_ml_pft",
+                   help="CLM PFT index (1-based, 0=bare) for --land-surface-scheme "
+                        "clm_ml; controls Vcmax25, plant hydraulics and the PAD "
+                        "shape. Default = CLMMLCanopyConfig.pft_clm (7, BDT).")
+    p.add_argument("--clm-ml-turbulence-scheme", default=None,
+                   choices=["rsl_bonan", "most"],
+                   dest="clm_ml_turbulence_scheme",
+                   help="Canopy-airspace turbulence for --land-surface-scheme "
+                        "clm_ml. Default = CLMMLCanopyConfig.turbulence_scheme.")
+    p.add_argument("--clm-ml-dtime-target", type=float, default=None,
+                   dest="clm_ml_dtime_target",
+                   help="Target CLM-ML canopy sub-step [s] (default 300 s, the "
+                        "upstream design value). num_ml_steps is derived from it, "
+                        "so the canopy air budget stays at its design sub-step "
+                        "whatever host --dt is used.")
     p.add_argument("--output", default="lmip_output",
                    help="Output directory")
     p.add_argument("--checkpoint-days", type=int, default=100,
@@ -616,6 +719,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--carbon-scheme", default="none",
                    choices=_VALID_CARBON_SCHEMES,
                    help="Land carbon cycle scheme")
+    p.add_argument("--carbon-ic", dest="carbon_ic", type=str, default="",
+                   help="Initialise the carbon pools from a GLOBAL carbon "
+                        "finidat (global_carbon_ic.npz from "
+                        "scripts/data/build_global_carbon_ic.py, or the prebuilt "
+                        "land-carbon-ic-v1 release) instead of cold-starting "
+                        "them, so the run starts near a spun-up state rather "
+                        "than centuries away from one.  The nearest LAND cell to "
+                        "--lat/--lon is used: the pools are per-area densities "
+                        "[gC/m2], so no regridding is involved.  This is a "
+                        "nearest-cell initialisation, NOT an equilibrium of this "
+                        "site -- the cell is a PFT mixture under its own "
+                        "grid-mean climate, so expect some drift (mismatches are "
+                        "warned about at startup).  Requires --carbon-scheme "
+                        "differland; ignored when resuming from a --restart-from "
+                        "that already carries carbon pools.  See "
+                        "docs/land/global_carbon_ic_spinup.md.")
     p.add_argument("--carbon-woody",
                    action=argparse.BooleanOptionalAction,
                    default=CarbonConfig().woody,
@@ -743,12 +862,29 @@ def main() -> None:
         n_total_steps = steps_per_day * args.days
 
     # --- Initialise state ---
+    # Per-cell permafrost/anaerobic SOM protection.  None = unprotected (the
+    # historical behaviour, bit-identical); a --carbon-ic seed sets it below to
+    # the SAME phi the spin-up used, so the seeded high-latitude SOC is held by
+    # the same protection that produced it instead of decaying away.
+    carbon_phi = None
     if args.restart_from is not None:
         print(f"Loading restart from {args.restart_from}")
-        state, carbon_state, start_step, start_day_abs = _load_restart(
+        state, carbon_state, start_step, start_day_abs, carbon_phi = _load_restart(
             Path(args.restart_from), config
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
+        # The LMIP restart format persists only soil/snow/carbon, not the CLM-ML
+        # canopy's prognostic sub-state (leaf/air temperatures, the 10-day t_a10
+        # running mean).  Resuming clm_ml therefore COLD-starts the canopy: the
+        # run continues correctly (the first resumed step rebuilds the vertical
+        # structure) but the canopy's minutes-to-days memory is lost, so the
+        # first ~10 days after a restart differ from an uninterrupted run.  Warn
+        # rather than silently diverge.  (Full canopy_state serialization is a
+        # separate task — the transient soil spin-up is unaffected beyond ~10 d.)
+        if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+            print("  WARNING: clm_ml canopy sub-state (leaf/air T, t_a10) is not "
+                  "in the restart; the canopy cold-starts and the first ~10 days "
+                  "differ from an uninterrupted run.", file=sys.stderr)
     else:
         state = init_multilayer_land_state(1, config, T_init=args.t_init)
         carbon_state = (
@@ -756,18 +892,97 @@ def main() -> None:
             if config.carbon.scheme == "differland"
             else None
         )
+        # --- optional: start AT the spun-up equilibrium instead of cold ---------
+        # Only on a cold start; a --restart-from that carries carbon pools has
+        # already set carbon_state above and must not be overwritten.
+        carbon_ic = getattr(args, "carbon_ic", "")
+        if carbon_ic:
+            if config.carbon.scheme != "differland":
+                raise SystemExit(
+                    f"--carbon-ic {carbon_ic!r} needs --carbon-scheme differland "
+                    f"(got {config.carbon.scheme!r}); there are no carbon pools "
+                    "to seed otherwise.")
+            from legoesm.land.carbon.global_init import (
+                load_finidat_carbon_ic_at_point)
+            carbon_state, carbon_phi, _match = load_finidat_carbon_ic_at_point(
+                carbon_ic, args.lat, args.lon)
+            print(f"  carbon IC: seeded from {carbon_ic} cell {_match.index} "
+                  f"({_match.lat_deg:.3f}, {_match.lon_deg:.3f}), "
+                  f"{_match.distance_deg:.3f} deg from the site"
+                  + ("" if carbon_phi is None
+                     else f", permafrost phi={float(carbon_phi[0]):.3f}"))
+            # This is a nearest-cell INITIALISATION, not an equilibrium of this
+            # site: report every way the seed's provenance differs from the run
+            # so the mismatch is visible rather than implied away.
+            if ((_match.n_layers is not None and _match.n_layers != args.n_layers)
+                    or (_match.soil_depth_m is not None
+                        and abs(_match.soil_depth_m - args.soil_depth) > 1e-6)):
+                print(
+                    f"  WARNING: the carbon IC was spun up on "
+                    f"{_match.n_layers} layers / {_match.soil_depth_m} m but this "
+                    f"run uses {args.n_layers} / {args.soil_depth} m; the pools "
+                    "load (they are per-area stocks) but they equilibrated under "
+                    "a different soil column.", file=sys.stderr)
+            # A finidat cell is a cover-weighted PFT MIXTURE; this run is one
+            # veg_type.  Even when they agree by name the seed carries the
+            # mixture's equilibrium, so print the cover fraction either way.
+            if _match.dominant_pft is not None:
+                if _match.dominant_pft != args.veg_type:
+                    print(
+                        f"  WARNING: the seeded cell's dominant cover is "
+                        f"{_match.dominant_pft!r}"
+                        + ("" if _match.dominant_pft_weight is None
+                           else f" ({_match.dominant_pft_weight:.0%} of the cell)")
+                        + f" but this run is {args.veg_type!r}; the pools "
+                        "equilibrated under different vegetation and will drift "
+                        "toward this site's own equilibrium.", file=sys.stderr)
+                elif _match.dominant_pft_weight is not None:
+                    print(f"  cell cover: {_match.dominant_pft} "
+                          f"{_match.dominant_pft_weight:.0%} (the rest of the "
+                          "cell is other PFTs, whose equilibria are mixed into "
+                          "the seed)")
         start_step = 0
         start_day_abs = 0.0
 
     # --- JIT-compile step function ---
     # Config, lat, dt captured in closure (compile-time constants per CLAUDE.md).
     # doy is a traced argument (changes every step → prevents recompile).
-    @jax.jit
+    def _make_step(grid_info):
+        @jax.jit
+        def _s(state, carbon_state, forcing, doy):
+            return step_multilayer_land(
+                state, forcing, config, U_MIN, dt,
+                lat=lat_jnp, carbon_state=carbon_state, doy=doy,
+                clm_ml_grid_info=grid_info,
+                soil_frozen_fraction=carbon_phi,
+            )
+        return _s
+
+    # The CLM-ML multilayer canopy cannot trace its FIRST (cold) step: that step
+    # builds the canopy vertical structure host-side (ncan/ntop/nbot) and the
+    # traceable path needs those as concrete ints.  So run one EAGER step, read
+    # the structure out of the resulting canopy_state, then jit with that
+    # GridInfo CLOSED OVER — passing it as a jit ARG would trace the ints away.
+    # Every other scheme jits straight away.  A restart whose canopy_state is
+    # cold takes the same one-off eager step.
+    _needs_warm_start = isinstance(config.surface_scheme, CLMMLCanopyConfig) and (
+        state.canopy_state is None or state.canopy_state.mlcanopy is None)
+    _jitted = {"fn": None if _needs_warm_start else _make_step(None),
+               "grid_info": None}
+
     def _step(state, carbon_state, forcing, doy):
-        return step_multilayer_land(
-            state, forcing, config, U_MIN, dt,
-            lat=lat_jnp, carbon_state=carbon_state, doy=doy,
-        )
+        if _jitted["fn"] is None:
+            # CLM-ML cold start: eager, and with a CONCRETE doy (the non-traceable
+            # path writes the CLM time manager from round(doy * 86400 / dt)).
+            out = step_multilayer_land(
+                state, forcing, config, U_MIN, dt,
+                lat=lat_jnp, carbon_state=carbon_state, doy=float(doy),
+                soil_frozen_fraction=carbon_phi,
+            )
+            _jitted["grid_info"] = extract_clm_ml_grid_info(out[0].canopy_state)
+            _jitted["fn"] = _make_step(_jitted["grid_info"])
+            return out
+        return _jitted["fn"](state, carbon_state, forcing, doy)
 
     # --- Diagnostic accumulators (daily means) ---
     T_soil_acc = np.zeros(args.n_layers, dtype=np.float64)
@@ -899,7 +1114,7 @@ def main() -> None:
                     restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
                     _save_restart(
                         restart_path, global_step + 1, abs_day, state,
-                        carbon_state,
+                        carbon_state, soil_frozen_fraction=carbon_phi,
                     )
                     elapsed = time.time() - t_wall_start
                     print(
@@ -920,7 +1135,7 @@ def main() -> None:
                     restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
                     _save_restart(
                         restart_path, global_step + 1, abs_day, state,
-                        carbon_state,
+                        carbon_state, soil_frozen_fraction=carbon_phi,
                     )
                     print(
                         f"  Wallclock budget "
@@ -966,7 +1181,9 @@ def main() -> None:
         _final_doy = (args.start_day + args.days) % 365.0
         state, carbon_state = semi_analytic_carbon_spinup(
             state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
-            _final_doy, args.precip_rate)
+            _final_doy, args.precip_rate,
+            clm_ml_grid_info=_jitted["grid_info"],
+            soil_frozen_fraction=carbon_phi)
         c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
         c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
@@ -976,7 +1193,8 @@ def main() -> None:
     # --- Save final restart ---
     final_restart = out_dir / "restart_final.npz"
     _save_restart(final_restart, start_step + n_total_steps,
-                  start_day_abs + args.days, state, carbon_state)
+                  start_day_abs + args.days, state, carbon_state,
+                  soil_frozen_fraction=carbon_phi)
 
     # --- Summary JSON ---
     wall_time = time.time() - t_wall_start
@@ -995,6 +1213,9 @@ def main() -> None:
         "n_layers": args.n_layers,
         "soil_depth_m": args.soil_depth,
         "bulk_scheme": args.bulk_scheme,
+        # Record the surface scheme next to every number: a flux from clm_ml is
+        # not comparable to one from two_leaf without it.
+        "land_surface_scheme": args.land_surface_scheme,
         "seed": run_config.seed,
         "Cd_land": config.Cd_land,
         "Ch_land": config.Ch_land,

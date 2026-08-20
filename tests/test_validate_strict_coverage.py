@@ -51,6 +51,9 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "radiation",
         "cloud_scheme",
         "cloud_diagnostic_condensate_scheme",
+        # Cloud-fraction RH saturation curve ("liquid" | "mixed_phase"), the
+        # #1521 ice-saturation fix; membership-checked in validate_strict.
+        "cloud_saturation_scheme",
         "microphysics",
         "convection",
         "turbulence",
@@ -65,6 +68,21 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "aimip_variant",
         "model_type",  # nested dycore.model_type
         "discretization",  # nested dycore.discretization
+        "bechtold_subsidence_solve",  # Bechtold vertical solve (day-65 bisect)
+        # nested dycore.mpas_vert_advection_scheme — sigma-lane vertical
+        # advection ("upwind" | "van_leer"); membership + silently-inert refusal.
+        "mpas_vert_advection_scheme",
+        # External-forcing source selectors (2026-07-21 AMIP/CMIP audit):
+        # the driver gates each channel with an equality test, so a typo
+        # silently deactivated the channel before these membership checks.
+        "aerosol_forcing",
+        "ghg_forcing",
+        "ozone_forcing",
+        "ozone_source",
+        "solar_source",
+        "solar_spectral_band_order",
+        "dataset",
+        "experiment",
     }
 )
 # Validated by equality-rejection rather than a set membership: ``carbon_cycle``
@@ -78,13 +96,9 @@ EQUALITY_VALIDATED: frozenset[str] = frozenset({"carbon_cycle"})
 # move the field to EXPECTED_VALIDATED.
 KNOWN_UNVALIDATED: frozenset[str] = frozenset(
     {
-        # ExperimentConfig forcing-source selectors (validated at their loaders)
-        "aerosol_forcing",
-        "ghg_forcing",
-        "ozone_forcing",
-        "ozone_source",
-        "solar_source",
-        "solar_spectral_band_order",  # validated in forcing/external.py
+        # (2026-07-21 AMIP/CMIP audit: the forcing-source selectors moved to
+        # EXPECTED_VALIDATED — the driver's equality-gate activation made a
+        # typo a silent channel-off, not a loud loader error.)
         "topography",
         # nested GridConfig / DycoreConfig selectors (validated at factory)
         "grid_type",        # grids.factory.create_grid (C3)
@@ -253,7 +267,8 @@ def test_default_config_is_valid() -> None:
     "field",
     sorted(
         EXPECTED_VALIDATED
-        - {"model_type", "discretization"}  # nested; tested separately
+        # nested DycoreConfig fields; tested separately below
+        - {"model_type", "discretization", "mpas_vert_advection_scheme"}
         | EQUALITY_VALIDATED
     ),
 )
@@ -268,6 +283,7 @@ def test_validate_strict_rejects_bogus_nested_dycore() -> None:
 
     assert _bogus_raises(dycore=DycoreConfig(model_type=_BOGUS))
     assert _bogus_raises(dycore=DycoreConfig(discretization=_BOGUS))
+    assert _bogus_raises(dycore=DycoreConfig(mpas_vert_advection_scheme=_BOGUS))
 
 
 # ---------------------------------------------------------------------------

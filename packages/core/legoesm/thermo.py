@@ -199,6 +199,12 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
 _FLATAU_MIN_T_C = -85.0       # liquid polynomial valid range floor [deg C]
 _FLATAU_ICE_MIN_T_C = -90.0   # ice polynomial valid range floor [deg C]
 
+# IFS homogeneous-freezing RH-over-ice ramp, as adopted by gSAM 1.8.7
+# MICRO_SAM1MOM/cloud.f90: ``rh_homo = 2.583 - tabs/207.8`` below 235 K.
+_IFS_RH_HOMO_A = 2.583        # ramp intercept [-]
+_IFS_RH_HOMO_B = 207.8        # ramp temperature scale [K]
+_IFS_RH_HOMO_T_MAX = 235.0    # allowance applies only below this [K]
+
 # Flatau ice polynomial coefficients (Table 4), x100 as in saturation.F90.
 _FLATAU_ICE_A = (
     100.0 * 6.09868993,
@@ -349,6 +355,68 @@ def saturation_mixing_ratio_ice(
     denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
     q_sat_i = constants.epsilon * e_sat_i / denom
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
+
+
+def homogeneous_freezing_rh_factor(
+    T: jax.Array,
+    q_ice: jax.Array | None = None,
+    *,
+    enabled: bool = True,
+    q_ice_threshold: float = 1.0e-8,
+) -> jax.Array:
+    """IFS homogeneous-freezing ice-supersaturation allowance (SAM ``rh_homo``).
+
+    gSAM 1.8.7 ``MICRO_SAM1MOM/cloud.f90`` (Khairoutdinov 2023, "Modeled after
+    IFS model") scales the ICE saturation target so that pristine, very cold
+    air may stay ice-supersaturated up to the homogeneous-freezing threshold::
+
+        rh_homo = 2.583 - T / 207.8      for T < 235 K with no pre-existing ice
+        rh_homo = 1                      otherwise
+
+    i.e. ~1.45 at 235 K rising to ~1.67 at 190 K.  The gate is physical: with
+    no ice surface present there is nothing for the vapour to deposit onto, so
+    it accumulates until homogeneous freezing of solution droplets fires.  Where
+    ice is already present the allowance is withdrawn — cloud.f90: "if ice
+    already exists - do as usual, that is no supersaturation over ice".
+
+    SCOPE, precisely: ``q_ice`` is the CLOUD-ICE mass the caller passes at scheme
+    ENTRY, matching cloud.f90's ``qci`` gate.  Ice nucleated later in the same
+    microphysics call does not withdraw the allowance until the next step, and
+    precipitating ice (snow/graupel) is not counted — gSAM gates on ``qci``
+    alone, so counting those surfaces here would depart from the oracle.
+
+    Multiply an ice saturation mixing ratio by this factor to get the target a
+    deposition/adjustment step should relax toward.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    q_ice : jax.Array or None
+        Pre-existing cloud-ice mixing ratio [kg/kg].  ``None`` treats the air
+        as ice-free (the pristine branch) everywhere.
+    enabled : bool, default True
+        ``False`` returns 1.0 — the no-allowance behaviour, i.e. deposition
+        targets plain ice saturation.  This is the OFF switch component
+        configs thread through; it is a static Python bool, so the disabled
+        path compiles to the original expression.
+    q_ice_threshold : float, default 1e-8
+        The ``qci < 1e-8`` ice-presence gate from cloud.f90 [kg/kg].
+
+    Returns
+    -------
+    jax.Array
+        Multiplicative factor >= 1 applied to the ice saturation target.
+    """
+    if not enabled:
+        return jnp.ones_like(T)
+    rh_homo = jnp.maximum(
+        _IFS_RH_HOMO_A - T / _IFS_RH_HOMO_B, 1.0,
+    )
+    cold = T < _IFS_RH_HOMO_T_MAX
+    if q_ice is not None:
+        cold = cold & (q_ice < q_ice_threshold)
+    return jnp.where(cold, rh_homo, 1.0)
 
 
 def saturation_mixing_ratio_blend(
@@ -555,6 +623,40 @@ def specific_humidity_to_mixing_ratio(
     q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
     denom = jnp.maximum(1.0 - q, denominator_floor)
     return q / denom
+
+
+def specific_condensate_to_mixing_ratio(
+    specific_condensate: jax.Array,
+    specific_humidity: jax.Array,
+    *,
+    denominator_floor: float = 1.0e-12,
+) -> jax.Array:
+    """Convert a specific CONDENSATE content to a dry-air mixing ratio.
+
+    Reanalyses report cloud liquid and cloud ice the way they report humidity —
+    as a mass fraction of MOIST air (ERA5 ``specific_cloud_liquid_water_content``
+    / ``specific_cloud_ice_water_content``, both kg/kg).  The physics consumes
+    mixing ratios, mass per unit DRY air, so the conversion divides by the dry
+    fraction rather than by ``1 - c``::
+
+        r_c = c / (1 - q_v - c_liquid - c_ice - ...)
+
+    The dry fraction here uses the VAPOUR content alone, matching
+    :func:`specific_humidity_to_mixing_ratio`, which is the convention the rest
+    of the initialisation path already applies to ``q``.  Omitting the
+    condensate from the denominator understates ``r_c`` by about ``c`` in
+    relative terms: with a heavy cloud load of 1 g/kg that is one part in a
+    thousand, far below the uncertainty of the analysis itself.  It is NOT the
+    same as ``c / (1 - c)``, which would divide by the wrong quantity
+    entirely.
+
+    Negative input (an interpolation undershoot at a cloud edge) is clipped to
+    zero: a negative condensate mass has no meaning and every microphysics
+    scheme downstream would have to guard it.
+    """
+    c = jnp.maximum(jnp.asarray(specific_condensate), 0.0)
+    q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
+    return c / jnp.maximum(1.0 - q, denominator_floor)
 
 
 def specific_humidity_tendency_to_mixing_ratio_tendency(

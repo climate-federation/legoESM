@@ -37,7 +37,7 @@ from legoesm.land.boundary_data._internals import (
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
     pft_lookup_arrays,
 )
-from legoesm.land.boundary_data.builders import glacier_mask
+from legoesm.land.boundary_data.builders import dominant_pft_index, glacier_mask
 from legoesm.land.boundary_data.gap_fill import (
     surfdata_covered,
     bare_canopy_params, bare_land_surface_params,
@@ -67,9 +67,24 @@ def _cover_fracs_at_year(pft_years, years_jnp, year):
     return fracs / jnp.maximum(jnp.sum(fracs, axis=-1, keepdims=True), 1e-10)
 
 
-def make_step_land_params_updater(gsd, surface_scheme):
+def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
+                                  pft_root_params=None):
     """Build a JAX-pure ``(theta_top, doy, year) -> (land_params, lai_col)``
     closure for use inside a ``lax.scan`` time loop.
+
+    ``glacier_alb`` is an optional ``(vis, nir)`` ice-surface albedo pair
+    overriding the uncalibrated :data:`GLACIER_ALB_VIS`/:data:`GLACIER_ALB_NIR`;
+    it MUST match whatever was passed to
+    :func:`~legoesm.land.boundary_data.init_land_surface_data`, since this
+    updater rebuilds the params every step and would otherwise silently revert
+    the initial override.  ``None`` = the uncalibrated default (bit-identical to
+    the pre-override behaviour).
+
+    ``pft_root_params`` (optional dict of per-PFT length-17 tables, keys
+    ``root_depth`` [m] / ``theta_wp`` / ``theta_fc`` [m3/m3]) fills the optional
+    per-column root-zone fields at the (traced) dominant PFT.  Like
+    ``glacier_alb`` it MUST match what was passed to ``init_land_surface_data``,
+    since this updater rebuilds the params every step.
 
     Splits :func:`~legoesm.land.boundary_data.surface_data_to_land_params` +
     :func:`~legoesm.land.boundary_data.fill_land_param_gaps` into a static
@@ -100,6 +115,15 @@ def make_step_land_params_updater(gsd, surface_scheme):
     from legoesm.land.canopy import CanopyConfig
     is_canopy = isinstance(surface_scheme, CanopyConfig)
 
+    # Ice-surface albedo pair: the calibrated override when supplied, else the
+    # uncalibrated module default.  Resolved ONCE here (static Python floats, so
+    # they constant-fold into the traced updater — no retrace, no extra leaf).
+    _glac_vis = GLACIER_ALB_VIS if glacier_alb is None else float(glacier_alb[0])
+    _glac_nir = GLACIER_ALB_NIR if glacier_alb is None else float(glacier_alb[1])
+    # SEB path consumes the BROADBAND integral of that pair (0.5/0.5 weights).
+    _glac_bb = (GLACIER_ALBEDO_DEFAULT if glacier_alb is None
+                else 0.5 * (_glac_vis + _glac_nir))
+
     # Inputs that don't change across steps (cast once to JAX).
     lai_monthly = jnp.asarray(gsd.lai_monthly)
     htop_monthly = jnp.asarray(gsd.htop_monthly)
@@ -120,9 +144,17 @@ def make_step_land_params_updater(gsd, surface_scheme):
         lut_vc3 = jnp.asarray(lut["vc3"])
         lut_vc4 = jnp.asarray(lut["vc4"])
         lut_rz0m = jnp.asarray(lut["rz0m"])
+        # Optional per-PFT root-zone params, gathered by the traced dominant PFT.
+        _rt = pft_root_params
+        _rta = (None if _rt is None
+                else {k: jnp.asarray(np.asarray(v, dtype=np.float64))
+                      for k, v in _rt.items()})
+        lut_root_depth = None if _rta is None else _rta["root_depth"]
+        lut_theta_wp = None if _rta is None else _rta["theta_wp"]
+        lut_theta_fc = None if _rta is None else _rta["theta_fc"]
         lut_rd = jnp.asarray(lut["rd"])
         lut_isveg = jnp.asarray(lut["is_veg"])
-        bare_fb = bare_canopy_params(ncol)
+        bare_fb = bare_canopy_params(ncol, pft_root_params=pft_root_params)
         full = lambda v: jnp.full(ncol, v)
 
         def _update_canopy(theta_top: jnp.ndarray, doy: jnp.ndarray, year: jnp.ndarray):
@@ -152,8 +184,8 @@ def make_step_land_params_updater(gsd, surface_scheme):
             ice = glacier_col > 0.0
             is_veg = jnp.where(ice, 0.0, is_veg_col)
             LAI = jnp.where(ice, 0.0, LAI)
-            av = jnp.where(ice, GLACIER_ALB_VIS, av)
-            an = jnp.where(ice, GLACIER_ALB_NIR, an)
+            av = jnp.where(ice, _glac_vis, av)
+            an = jnp.where(ice, _glac_nir, an)
             lp = CanopyLandParams(
                 LAI=LAI, hc=hc, fC4=fC4, FNonVeg=1.0 - is_veg,
                 CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
@@ -163,6 +195,14 @@ def make_step_land_params_updater(gsd, surface_scheme):
                 alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
                 ALB_VIS=av, ALB_NIR=an,
                 emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
+                # None when not selected -> multilayer_land._get falls back to the
+                # scalar MultiLayerLandConfig values (behaviour-preserving).
+                root_depth=(None if lut_root_depth is None
+                            else lut_root_depth[dom_idx]),
+                theta_wp=(None if lut_theta_wp is None
+                          else lut_theta_wp[dom_idx]),
+                theta_fc=(None if lut_theta_fc is None
+                          else lut_theta_fc[dom_idx]),
             )
             lp_filled = gap_fill_tree(lp, bare_fb, covered_jnp)
             return lp_filled, lp_filled.LAI
@@ -196,7 +236,7 @@ def make_step_land_params_updater(gsd, surface_scheme):
         soil_bg = soil_albedo_broadband(soil_color, theta_top)
         f_veg = 1.0 - jnp.exp(-0.5 * lai_col)
         alb = base_lp.albedo_veg * f_veg + soil_bg * (1.0 - f_veg)
-        alb = jnp.where(glacier_col > 0.0, GLACIER_ALBEDO_DEFAULT, alb)
+        alb = jnp.where(glacier_col > 0.0, _glac_bb, alb)
         lp = base_lp._replace(albedo_veg=alb)
         return gap_fill_tree(lp, bare_fb, covered_jnp), lai_col
 

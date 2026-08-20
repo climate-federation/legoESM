@@ -258,7 +258,7 @@ def run_cubed_sphere(days, nlev, vertical_coord):
                         diag_every, label="Cubed-Sphere C36 RRTMGP")
 
 
-def run_latlon(days, nlev, vertical_coord):
+def run_latlon(days, nlev, vertical_coord, sb81_omega_conversion=False):
     """Run Held-Suarez + RRTMGP on lat-lon 72x144."""
     import math as _m
     from legoesm.grids.latlon import create_latlon_grid
@@ -280,7 +280,9 @@ def run_latlon(days, nlev, vertical_coord):
 
     config = CGridLatLonPrimitiveEquationConfig(
         A_h=A_h,
-        fix_mass=True)
+        fix_mass=True,
+        # #1029 omega-side SB81 conversion (hybrid lane only; default OFF).
+        sb81_omega_conversion=sb81_omega_conversion)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
 
     # Convert to native C-grid state once; step natively to avoid
@@ -534,6 +536,11 @@ def main():
     parser.add_argument("--grids", type=str, nargs="+",
                         default=["cubed_sphere", "latlon", "icosahedral", "spectral"],
                         help="Which grids to run")
+    parser.add_argument("--sb81-omega-conversion", action="store_true",
+                        default=False,
+                        help="SB81 alpha-weighted kT*omega/p energy conversion "
+                             "on the hybrid lat-lon lane (#1029; latlon+hybrid "
+                             "only, default OFF).")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
@@ -541,7 +548,8 @@ def main():
 
     grid_runners = {
         "cubed_sphere": lambda: run_cubed_sphere(args.days, args.nlev, args.vertical_coord),
-        "latlon": lambda: run_latlon(args.days, args.nlev, args.vertical_coord),
+        "latlon": lambda: run_latlon(args.days, args.nlev, args.vertical_coord,
+                             sb81_omega_conversion=args.sb81_omega_conversion),
         "icosahedral": lambda: run_icosahedral(args.days, args.nlev),
         "spectral": lambda: run_spectral(args.days, args.nlev, args.vertical_coord),
     }

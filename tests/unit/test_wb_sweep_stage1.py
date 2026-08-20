@@ -13,9 +13,13 @@ _spec.loader.exec_module(gen)
 
 
 def test_combo_name():
-    assert gen._combo_name("aimip_convection", "bechtold") == "combo_conv_bechtold"
-    assert gen._combo_name("aimip_cloud", "sundqvist") == "combo_cloud_sundqvist"
-    assert gen._combo_name("aimip_microphysics", "thompson") == "combo_micro_thompson"
+    # naming now lives in the shared planner (D6); the script imports it
+    from legoesm.training.sweep_planner import combo_name
+    assert combo_name("aimip_convection", "bechtold") == "combo_conv_bechtold"
+    assert combo_name("aimip_cloud", "sundqvist") == "combo_cloud_sundqvist"
+    assert combo_name("aimip_microphysics", "thompson") == "combo_micro_thompson"
+    with pytest.raises(ValueError, match="Unknown sweep dimension"):
+        combo_name("aimip_convectoin", "bechtold")  # typo'd dim must raise
 
 
 def test_generator_writes_expected_combos(tmp_path, monkeypatch):

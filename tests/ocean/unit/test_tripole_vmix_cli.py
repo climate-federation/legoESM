@@ -55,7 +55,11 @@ def test_orca1_zdftke_namelist_mapping():
     assert cfg.c_eps == 0.7                     # rn_ediss (ref default)
     assert cfg.tke_background == 1.0e-6         # rn_emin
     assert cfg.tke_surface_min == 1.0e-4        # rn_emin0
-    assert cfg.tke_mxl_choice == 2              # nn_mxl = 2 (closest)
+    # ORCA1's namelist_cfg sets `nn_mxl = 2`, which is legoESM choice 4 (one
+    # bounded length for BOTH viscosity and dissipation, zdftke.F90:680). The
+    # card carried 3 until 2026-08-13 while its own comment named 4 as the
+    # ORCA1 value; codex 9405307 confirmed the mapping.
+    assert cfg.tke_mxl_choice == 4              # nn_mxl=2 (l_eps = l_k)
     # nn_pdl=1: Pr = clamp(Ri/ri_cri, 1, 10), ri_cri = 2/(2+ediss/ediff) = 2/9
     assert cfg.prandtl_mode == "richardson"
     assert cfg.prandtl_ri_coeff == pytest.approx(4.5)
@@ -82,9 +86,17 @@ def test_orca1_zdftke_namelist_mapping():
     # rn_ebb=67.83 has no config field: it is tke.py's module constant.
     from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
     assert tke_mod._NEMO_TKE_EBB == 67.83
-    # Structural conventions follow the validated DINO recipe (defaults).
-    assert cfg.prognostic is False
-    assert cfg.n2_mode == "insitu"
+    # NEMO integrates en prognostically -> the ORCA1 card default (2026-07-24).
+    assert cfg.prognostic is True
+    # 2026-08-14: the card stopped CLIPPING. NEMO's rn2 is signed, and the
+    # clipped in-situ form was the whole remaining mixing-length deficit
+    # (job 9407791: seeding the length with a signed N2 moved our zero-step
+    # ratio against NEMO's own length from 0.897 to 0.997 in the Southern
+    # Ocean, 0.792 to 1.004 in the Arctic).
+    assert cfg.n2_mode == "nemo_bn2"
+    assert cfg.n2_eos_form == "teos10"      # ORCA1 ln_teos10=.true.
+    # prognostic carry uses the vertical TKE solve only (no horizontal en
+    # advection): advection_scheme stays "none" (Veros vs.dtke path off).
     assert cfg.advection_scheme == "none"
 
 
@@ -147,6 +159,231 @@ def test_builder_iwm_composes_with_closure():
     vm1 = r.build_tripole_vmix_config("tke", iwm=IWMConfig(enabled=False))
     assert vm1.iwm.enabled is False
     assert vm1.tke == r.orca1_zdftke_config(iwm_enabled=False)
+
+
+def test_orca1_zdftke_surface_bc_override():
+    """--tke-surface-bc: None keeps the TKEConfig default (veros_flux, the
+    flagged gap); 'nemo_dirichlet' selects NEMO's en(1)=rn_ebb|tau|/rho0
+    Dirichlet BC; an unknown value raises (not a silent fallthrough)."""
+    r = _runner()
+    # 2026-07-24: the ORCA1 card DEFAULT is now the NEMO Dirichlet BC (the
+    # flagged veros_flux gap is closed); --tke-surface-bc veros_flux reverts.
+    assert r.orca1_zdftke_config().surface_bc == "nemo_dirichlet"       # default
+    assert r.orca1_zdftke_config(surface_bc=None).surface_bc == "nemo_dirichlet"
+    vf = r.orca1_zdftke_config(surface_bc="veros_flux")
+    assert vf.surface_bc == "veros_flux"
+    # ONLY the surface BC changes — every other leaf is byte-identical.
+    assert vf._replace(surface_bc="nemo_dirichlet") == r.orca1_zdftke_config()
+    with pytest.raises(ValueError, match="surface_bc"):
+        r.orca1_zdftke_config(surface_bc="dirichlet")     # typo must raise
+
+
+def test_builder_tke_surface_bc_threads():
+    """build_tripole_vmix_config threads --tke-surface-bc onto the closure and
+    it composes additively with --iwm (the surface BC rides the same config)."""
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+        IWMConfig,
+    )
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_surface_bc="nemo_dirichlet")
+    assert vm.scheme == "tke"
+    assert vm.tke.surface_bc == "nemo_dirichlet"
+    assert vm.tke == r.orca1_zdftke_config(surface_bc="nemo_dirichlet")
+    # default (None) leaves the closure byte-identical to the plain mapping
+    assert r.build_tripole_vmix_config("tke").tke == r.orca1_zdftke_config()
+    # composes with iwm (floors flip to molecular, surface BC still applied)
+    vmi = r.build_tripole_vmix_config(
+        "tke", iwm=IWMConfig(enabled=True), tke_surface_bc="nemo_dirichlet")
+    assert vmi.tke == r.orca1_zdftke_config(
+        iwm_enabled=True, surface_bc="nemo_dirichlet")
+
+
+def test_tke_surface_bc_requires_tke_closure():
+    """--tke-surface-bc with a non-TKE closure raises (dispatch hardening):
+    the surface-TKE BC does not exist for 'none'/'kpp', so silently ignoring
+    it would run a different config than the flag implies."""
+    r = _runner()
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="requires --tripole-vmix tke"):
+            r.build_tripole_vmix_config(vmix, tke_surface_bc="nemo_dirichlet")
+
+
+def test_build_tripole_keyword_surface_bc_defaults_none():
+    """The build_tripole pass-through exists and defaults to None (unset =
+    no behaviour change for existing runs)."""
+    r = _runner()
+    params = inspect.signature(r.build_tripole).parameters
+    assert "tke_surface_bc" in params
+    assert params["tke_surface_bc"].default is None
+
+
+def test_orca1_zdftke_mxl_choice_override():
+    """--tke-mxl-choice: None keeps the card value (now 4 = NEMO nn_mxl=2,
+    which is what ORCA1's namelist_cfg sets); 2 reverts to Veros; bad raises."""
+    r = _runner()
+    # 2026-08-13: card DEFAULT is choice 4 = NEMO nn_mxl=2; =2 reverts to Veros.
+    assert r.orca1_zdftke_config().tke_mxl_choice == 4                # default
+    assert r.orca1_zdftke_config(mxl_choice=None).tke_mxl_choice == 4
+    c2 = r.orca1_zdftke_config(mxl_choice=2)
+    assert c2.tke_mxl_choice == 2
+    # ONLY the mixing-length choice changes; every other leaf byte-identical.
+    assert c2._replace(tke_mxl_choice=4) == r.orca1_zdftke_config()
+    # 4 = NEMO nn_mxl=2, the value ORCA1's namelist_cfg actually sets. Until
+    # 2026-08-06 this raised while argparse advertised it, so --tke-mxl-choice 4
+    # crashed the run; this loop USED to assert 4 was invalid, i.e. the test
+    # encoded the bug.
+    c4 = r.orca1_zdftke_config(mxl_choice=4)
+    assert c4.tke_mxl_choice == 4
+    assert c4 == r.orca1_zdftke_config()   # choice 4 IS the card now
+    for bad in (1, 0, 5):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
+    # composes with surface_bc (both overrides apply, independent)
+    both = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2)
+    assert both.tke_mxl_choice == 2 and both.surface_bc == "veros_flux"
+
+
+def test_tke_mxl_choice_argparse_and_builder_agree():
+    """Every value ``--tke-mxl-choice`` ADVERTISES must be one the config
+    builder ACCEPTS.
+
+    The 2026-08-06 defect: argparse carried ``choices=[2, 3, 4]`` with help text
+    saying "4 = NEMO nn_mxl=2, which is what the ORCA1 namelist actually runs",
+    while ``orca1_zdftke_config`` raised ValueError on 4.  So the oracle-correct
+    setting passed CLI validation and then crashed inside the builder, leaving
+    ORCA1's own ``nn_mxl = 2`` unreachable from the OMIP driver.
+
+    Non-vacuity: this fails if EITHER layer changes without the other -- drop 4
+    from argparse and the advertised set shrinks below what the builder takes;
+    re-narrow the builder and the raises-check below trips.
+    """
+    r = _runner()
+    # NOT a hasattr()/skip guard: a renamed factory must FAIL this test, not
+    # silently skip it (the same silent-degradation trap as a hasattr fallback).
+    parser = r._build_arg_parser()
+    action = next(a for a in parser._actions
+                  if "--tke-mxl-choice" in getattr(a, "option_strings", ()))
+    advertised = set(action.choices)
+    assert 4 in advertised, "argparse must still advertise the ORCA1 value"
+    for v in sorted(advertised):
+        cfg = r.orca1_zdftke_config(mxl_choice=v)         # must not raise
+        assert cfg.tke_mxl_choice == v
+    # NOT a finite sweep (codex 2026-08-07 #4: -2..9 is a nearby-mutation test,
+    # not set equality -- it passes if the builder also accepts 10). Both layers
+    # now read ONE shared constant, so assert on THAT: divergence is impossible
+    # by construction rather than policed by sampling.
+    assert advertised == set(r.TKE_MXL_CHOICES), (
+        "argparse choices must come from the shared TKE_MXL_CHOICES constant")
+    for v in sorted(r.TKE_MXL_CHOICES):
+        assert r.orca1_zdftke_config(mxl_choice=v).tke_mxl_choice == v
+    # and the guard must reject the categories codex enumerated (#5):
+    #   non-integral floats, float-valued ints, bool (True == 1), and strings.
+    for bad in (4.9, 4.0, 2.0, True, False, "4", 10, -1):
+        with pytest.raises(ValueError, match="mxl_choice"):
+            r.orca1_zdftke_config(mxl_choice=bad)
+
+
+def test_builder_tke_mxl_choice_threads():
+    """build_tripole_vmix_config threads --tke-mxl-choice onto the closure.
+    Uses the NON-default 2 so a broken forward would be caught (default is 4
+    since 2026-08-13: ORCA1's namelist_cfg sets nn_mxl = 2 = legoESM 4)."""
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_mxl_choice=2)
+    assert vm.tke.tke_mxl_choice == 2
+    assert vm.tke == r.orca1_zdftke_config(mxl_choice=2)
+    assert r.build_tripole_vmix_config("tke").tke.tke_mxl_choice == 4  # default
+    # off-tke closure rejects (dispatch hardening), like the other knobs
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tke-mxl-choice"):
+            r.build_tripole_vmix_config(vmix, tke_mxl_choice=3)
+
+
+def test_orca1_zdftke_prognostic_override():
+    """--tke-prognostic: None keeps the card value (now True = NEMO prognostic
+    Mode-A en); False reverts to diagnostic Mode-B. Composes with other knobs."""
+    r = _runner()
+    # 2026-07-24: card DEFAULT is now prognostic=True (NEMO Mode-A); False reverts.
+    assert r.orca1_zdftke_config().prognostic is True                # default
+    assert r.orca1_zdftke_config(prognostic=None).prognostic is True
+    cd = r.orca1_zdftke_config(prognostic=False)
+    assert cd.prognostic is False
+    # ONLY prognostic changes; every other leaf byte-identical.
+    assert cd._replace(prognostic=True) == r.orca1_zdftke_config()
+    # composes with surface_bc + mxl_choice (all three independent overrides)
+    allc = r.orca1_zdftke_config(surface_bc="veros_flux", mxl_choice=2,
+                                 prognostic=False)
+    assert (allc.prognostic is False and allc.tke_mxl_choice == 2
+            and allc.surface_bc == "veros_flux")
+
+
+def test_builder_tke_prognostic_threads():
+    """build_tripole_vmix_config threads --tke-prognostic onto the closure.
+    Uses the NON-default False so a broken forward is caught (default is True)."""
+    r = _runner()
+    vm = r.build_tripole_vmix_config("tke", tke_prognostic=False)
+    assert vm.tke.prognostic is False
+    assert vm.tke == r.orca1_zdftke_config(prognostic=False)
+    assert r.build_tripole_vmix_config("tke").tke.prognostic is True  # default
+    for vmix in ("none", "kpp"):
+        with pytest.raises(ValueError, match="tke-prognostic"):
+            r.build_tripole_vmix_config(vmix, tke_prognostic=True)
+
+
+def test_tke_card_knobs_require_tripole_tke():
+    """--tke-eice / --tke-surface-bc are applied ONLY in the tke branch of
+    build_tripole_vmix_config; they are silently discarded on every other
+    (grid, tripole_vmix) context.  The guard must raise on ALL THREE discard
+    paths and NOT fire when the full tripole+tke context holds or the knobs
+    are unset (no false positive)."""
+    r = _runner()
+    # the ONLY valid context: tripole + tke closure -> no raise
+    r._validate_tke_card_grid("tripole", "tke", tke_eice=3,
+                              tke_surface_bc="nemo_dirichlet")
+    # unset knobs: allowed on any (grid, vmix) -> no regression
+    r._validate_tke_card_grid("mpas", "none")
+    r._validate_tke_card_grid("tripole", "none")
+    r._validate_tke_card_grid("latlon_bathy", "kpp")
+    # discard path 1: wrong grid (build_tripole never runs)
+    for grid in ("mpas", "latlon_bathy", "cubed_sphere"):
+        with pytest.raises(SystemExit, match="tke-surface-bc"):
+            r._validate_tke_card_grid(grid, "tke", tke_surface_bc="nemo_dirichlet")
+        with pytest.raises(SystemExit, match="tke-eice"):
+            r._validate_tke_card_grid(grid, "tke", tke_eice=1)
+    # discard path 2: tripole but vmix none (attach block skipped) — codex HIGH
+    with pytest.raises(SystemExit, match="tke-surface-bc"):
+        r._validate_tke_card_grid("tripole", "none",
+                                  tke_surface_bc="nemo_dirichlet")
+    # discard path 3: tripole but vmix kpp (knob not applied in kpp branch)
+    with pytest.raises(SystemExit, match="tke-eice"):
+        r._validate_tke_card_grid("tripole", "kpp", tke_eice=1)
+    # --tke-mxl-choice + --tke-prognostic are guarded the same way (all paths)
+    r._validate_tke_card_grid("tripole", "tke", tke_mxl_choice=3,
+                              tke_prognostic=True)                   # allowed
+    for grid, vmix in (("mpas", "tke"), ("latlon_bathy", "tke"),
+                       ("tripole", "none"), ("tripole", "kpp")):
+        with pytest.raises(SystemExit, match="tke-mxl-choice"):
+            r._validate_tke_card_grid(grid, vmix, tke_mxl_choice=3)
+        with pytest.raises(SystemExit, match="tke-prognostic"):
+            r._validate_tke_card_grid(grid, vmix, tke_prognostic=True)
+
+
+def test_main_wires_tke_card_guard_before_builders(monkeypatch):
+    """main() must CALL the guard, and BEFORE the grid builders run — proving
+    the wiring + ordering the helper test alone cannot (codex MED).  A tripwire
+    on build_mpas_ocean fires only if the guard were removed/misordered."""
+    import sys
+    r = _runner()
+
+    def _boom(*a, **k):                    # must never be reached
+        raise AssertionError("build_mpas_ocean ran before the guard rejected")
+
+    monkeypatch.setattr(r, "build_mpas_ocean", _boom, raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_omip_core2.py", "--grid", "mpas", "--mesh", "/nonexistent.nc",
+         "--tke-surface-bc", "nemo_dirichlet"])
+    with pytest.raises(SystemExit, match="tke-surface-bc"):
+        r.main()
 
 
 def test_build_tripole_rejects_unknown_vmix_at_entry():

@@ -275,6 +275,32 @@ class GaussianGrid(NamedTuple):
         )
 
     @property
+    def lat_v(self) -> jax.Array:
+        """Latitude cell EDGES [rad], shape ``(n_lat+1,)``, pole-clamped to
+        ``[-pi/2, +pi/2]``, S->N — the v-faces a conservative lat-lon overlap
+        remap needs (``coupler.grid_remap.make_latlon_remapper``, which keys the
+        regular-lat-lon branch off ``hasattr(grid, 'lat_v')``).
+
+        Derived from the Gaussian quadrature weights so the cell areas are
+        EXACTLY the grid's own ``grid_area`` (a Gauss weight integrates
+        ``mu = sin(lat)`` over its cell, and ``sum(weights) == 2`` spans
+        ``mu in [-1, 1]``): the edges in ``mu`` are the cumulative weights from
+        the south pole, ``mu_edge = -1 + cumsum(weights)``, so
+        ``sin(lat_v[j+1]) - sin(lat_v[j]) == weights[j]``.  This makes the
+        atm<->ocean flux remap conservative AND self-consistent with the
+        spectral quadrature (verified: max cell-area error vs ``grid_area`` is
+        ~1e-14).  The interior edges come from ``arcsin`` of the cumulative
+        weights; the two POLE edges are pinned to exactly ``-+pi/2`` (a global
+        grid spans the full sphere by definition — and ``arcsin`` is
+        ill-conditioned near ``mu=+-1``, where the ~1e-15 round-off in
+        ``cumsum(weights)`` would otherwise smear the pole latitude by ~1e-8).
+        """
+        half_pi = jnp.asarray(jnp.pi / 2.0, dtype=self.weights.dtype)
+        mu_interior = -1.0 + jnp.cumsum(self.weights)[:-1]   # (n_lat-1,) edges
+        lat_interior = jnp.arcsin(jnp.clip(mu_interior, -1.0, 1.0))
+        return jnp.concatenate([-half_pi[None], lat_interior, half_pi[None]])
+
+    @property
     def grid_total_area(self):
         return jnp.sum(self.grid_area)
 
@@ -1395,7 +1421,9 @@ def _vordiv_pinv_operators(grid: GaussianGrid):
     key = (n_max, n_lat, a, _h.hexdigest())
     ops = _VORDIV_PINV_CACHE.get(key)
     if ops is not None:
-        return ops
+        _bp, _lp, _si, _nsh, _np_ = ops
+        return (jnp.asarray(_bp), jnp.asarray(_lp), jnp.asarray(_si),
+                _nsh, _np_)
 
     # Guard against silent OOM at very high truncation: the padded operator is
     # ``64·(n_max+1)²·n_lat`` bytes (complex128).  ~117 MiB at T106, ~460 MiB
@@ -1437,15 +1465,24 @@ def _vordiv_pinv_operators(grid: GaussianGrid):
         lap_pad[m, :k] = lap[idx]
         sh_index[m, :k] = idx
 
-    ops = (
+    # Cache the HOST numpy arrays, and convert at every call. Caching the
+    # ``jnp.asarray`` results instead means: whichever caller reaches this
+    # first INSIDE a jit/grad trace poisons the cache with that trace's
+    # constants (DynamicJaxprTracer on JAX 0.10), and every later trace or
+    # eager call in the process dies with UnexpectedTracerError at the einsum
+    # that consumes them (2026-08-16, WB sample-17 NaN hunt — it killed the
+    # jax_debug_nans re-trace). The per-call ``jnp.asarray`` on a concrete
+    # numpy array is a cheap constant embed (eager: device transfer once per
+    # call; traced: baked into the program), and the numpy bytes are identical
+    # either way so every program computes with the same operator.
+    _VORDIV_PINV_CACHE[key] = (BP, lap_pad, sh_index, n_sh, n_pad)
+    return (
         jnp.asarray(BP),
         jnp.asarray(lap_pad),
         jnp.asarray(sh_index),
         n_sh,
         n_pad,
     )
-    _VORDIV_PINV_CACHE[key] = ops
-    return ops
 
 
 def vordiv_from_uv_exact_3d(

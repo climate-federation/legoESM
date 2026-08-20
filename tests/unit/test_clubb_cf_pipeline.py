@@ -24,9 +24,13 @@ def test_physics_output_has_cloud_fraction_field_default_none():
     via the NamedTuple metadata rather than a bare construction."""
     assert "cloud_fraction" in PhysicsOutput._fields
     assert PhysicsOutput._field_defaults.get("cloud_fraction", "MISSING") is None
-    # cloud_fraction is the LAST field (appended), so a positional build that
-    # omits it still works — the default None applies.
-    assert PhysicsOutput._fields[-1] == "cloud_fraction"
+    # cloud_fraction sits in the DEFAULTED (appended) tail, so a positional
+    # build that omits it still works — the default None applies.  (It was
+    # the last field until budget_ledger was appended after it, 2026-07-22;
+    # what matters for ABI is that every field from cloud_fraction onward
+    # has a default.)
+    _tail = PhysicsOutput._fields[PhysicsOutput._fields.index("cloud_fraction"):]
+    assert all(f in PhysicsOutput._field_defaults for f in _tail)
 
 
 def test_compute_radiation_core_accepts_cloud_fraction():

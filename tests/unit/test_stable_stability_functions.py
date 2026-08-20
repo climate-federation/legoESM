@@ -37,10 +37,18 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    compute_surface_fluxes,
+)
 from legoesm.core.bulk_flux import (
+    _DYER_STABLE_BETA,
+    _DYER_UNSTABLE_GAMMA,
     compute_most_fluxes,
     psi_h,
+    psi_h_coare,
     psi_m,
+    psi_m_coare,
     validate_stability_scheme,
 )
 
@@ -346,3 +354,653 @@ def test_sea_ice_stability_scheme_threads_to_fluxes():
     assert np.all(np.isfinite(dyer)) and np.all(np.isfinite(gryanik))
     assert not np.allclose(dyer, gryanik), (
         "stability_scheme did not reach the sea-ice MOST fluxes")
+
+
+# ===========================================================================
+# 7. Trainable Businger-Dyer coefficients (unstable_gamma / stable_beta):
+#    neutral limit, threading direction, byte-compat, differentiability, and
+#    the AIMIP param round-trip.  (feat/trainable-most-coeffs)
+# ===========================================================================
+
+# The module constants must stay at their historical values (the whole
+# byte-compat contract rests on these defaults).
+def test_module_coefficient_defaults_unchanged():
+    assert _DYER_UNSTABLE_GAMMA == 16.0
+    assert _DYER_STABLE_BETA == 5.0
+
+
+# ---------------------------------------------------------------------------
+# 7a. Neutral limit is scheme- AND coefficient-independent: psi(0)=0 for ANY
+#     unstable_gamma / stable_beta.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("gamma", (8.0, 16.0, 28.0))
+@pytest.mark.parametrize("beta", (2.0, 5.0, 10.0))
+def test_neutral_limit_coefficient_independent(gamma, beta):
+    z0 = jnp.asarray(0.0)
+    for fn in (psi_m, psi_h):
+        assert abs(float(fn(z0, "dyer1974",
+                            unstable_gamma=gamma, stable_beta=beta))) < 1e-6
+    # And near-neutral on both sides shrinks toward 0 regardless of coeffs.
+    for z in (jnp.asarray(-1e-8), jnp.asarray(1e-8)):
+        for fn in (psi_m, psi_h):
+            assert abs(float(fn(z, "dyer1974",
+                                unstable_gamma=gamma, stable_beta=beta))) < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# 7b. stable_beta scales the dyer1974 STABLE branch linearly: psi = -beta*zeta.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("beta", (2.0, 3.5, 5.0, 8.0, 10.0))
+def test_stable_beta_scales_linearly(beta):
+    zetas = jnp.asarray([0.01, 0.1, 0.5, 1.0, 2.0, 5.0, 9.0])
+    expected = -beta * zetas
+    for fn in (psi_m, psi_h):
+        got = np.asarray(fn(zetas, "dyer1974", stable_beta=beta))
+        np.testing.assert_allclose(got, np.asarray(expected), rtol=0, atol=0)
+
+
+def test_stable_beta_larger_is_more_negative():
+    # Sign/physics: a LARGER stable_beta => more negative psi (stronger stable
+    # suppression => weaker fluxes).  Monotone in beta at fixed stable zeta.
+    z = jnp.asarray(1.5)
+    vals = [float(psi_m(z, "dyer1974", stable_beta=b)) for b in (2.0, 5.0, 10.0)]
+    assert vals[0] > vals[1] > vals[2]  # increasing beta -> decreasing (more neg)
+
+
+# ---------------------------------------------------------------------------
+# 7c. unstable_gamma changes the UNSTABLE branch in the expected direction:
+#     larger gamma => larger x/y => more POSITIVE psi (enhanced fluxes).
+# ---------------------------------------------------------------------------
+def test_unstable_gamma_larger_is_more_positive():
+    z = jnp.asarray(-1.5)  # unstable
+    pm = [float(psi_m(z, "dyer1974", unstable_gamma=g)) for g in (8.0, 16.0, 28.0)]
+    ph = [float(psi_h(z, "dyer1974", unstable_gamma=g)) for g in (8.0, 16.0, 28.0)]
+    assert pm[0] < pm[1] < pm[2], f"psi_m not increasing in gamma: {pm}"
+    assert ph[0] < ph[1] < ph[2], f"psi_h not increasing in gamma: {ph}"
+
+
+def test_unstable_gamma_only_touches_unstable_branch():
+    # On the STABLE branch, unstable_gamma has NO effect (dyer1974 stable is
+    # -beta*zeta, independent of gamma).
+    z = jnp.asarray(1.2)
+    a = float(psi_m(z, "dyer1974", unstable_gamma=8.0))
+    b = float(psi_m(z, "dyer1974", unstable_gamma=28.0))
+    assert a == b
+    # And stable_beta has NO effect on the UNSTABLE branch.
+    zn = jnp.asarray(-1.2)
+    c = float(psi_h(zn, "dyer1974", stable_beta=2.0))
+    d = float(psi_h(zn, "dyer1974", stable_beta=10.0))
+    assert c == d
+
+
+# ---------------------------------------------------------------------------
+# 7d. Non-default coeffs do NOT leak into the non-linear stable schemes (they
+#     carry their own published fits).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("scheme", NONLINEAR)
+def test_stable_beta_ignored_by_nonlinear_schemes(scheme):
+    z = jnp.asarray(2.0)
+    base = float(psi_m(z, scheme))
+    perturbed = float(psi_m(z, scheme, stable_beta=9.0))
+    assert base == perturbed, f"{scheme} stable branch leaked stable_beta"
+
+
+@pytest.mark.parametrize("scheme", NONLINEAR)
+def test_unstable_gamma_ignored_by_nonlinear_schemes(scheme):
+    # The non-linear stable schemes keep the HISTORICAL gamma=16 unstable branch:
+    # a tuned unstable_gamma must NOT perturb their zeta<0 side (codex R1).
+    zn = jnp.asarray(-2.0)
+    for fn in (psi_m, psi_h):
+        base = float(fn(zn, scheme))
+        perturbed = float(fn(zn, scheme, unstable_gamma=26.0))
+        assert base == perturbed, (
+            f"{scheme} unstable branch leaked unstable_gamma ({fn.__name__})")
+        # ...and it still equals the byte-identical historical (gamma=16) value.
+        hist = float(fn(zn, scheme, unstable_gamma=16.0))
+        assert base == hist
+
+
+def test_coare_ignores_trainable_coefficients():
+    # COARE uses psi_m_coare / psi_h_coare (its own Fairall coefficients); the
+    # MOST-solver coare3 path must be byte-identical regardless of the Dyer
+    # coeffs (codex R1 / coverage).
+    args = (
+        jnp.asarray(6.0), jnp.asarray(1.0),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(284.0), jnp.asarray(0.010), jnp.asarray(1.2),
+    )
+    kw = dict(z_ref=10.0, z0_init=1e-4, scheme="coare3", n_iter=6)
+    base = compute_most_fluxes(*args, **kw)
+    perturbed = compute_most_fluxes(
+        *args, **kw, unstable_gamma=26.0, stable_beta=9.0)
+    for b, p in zip(base, perturbed):
+        np.testing.assert_array_equal(np.asarray(b), np.asarray(p))
+
+
+# ---------------------------------------------------------------------------
+# 7e. Backward compatibility: omitting the new kwargs is byte-identical to the
+#     literal 16 / 5 forms, for psi_m/psi_h AND compute_most_fluxes.
+# ---------------------------------------------------------------------------
+def test_psi_default_kwargs_byte_identical():
+    zetas = jnp.asarray([-8.0, -2.0, -0.1, 0.0, 0.1, 2.0, 9.0])
+    for fn in (psi_m, psi_h):
+        default = np.asarray(fn(zetas, "dyer1974"))
+        explicit = np.asarray(fn(zetas, "dyer1974",
+                                 unstable_gamma=16.0, stable_beta=5.0))
+        np.testing.assert_array_equal(default, explicit)
+
+
+@pytest.mark.parametrize("flux_scheme", ("most", "large_yeager", "coare3"))
+@pytest.mark.parametrize("T_sfc0", (283.0, 296.0))
+def test_compute_most_fluxes_default_coeffs_byte_identical(flux_scheme, T_sfc0):
+    args = (
+        jnp.asarray(6.0), jnp.asarray(1.0),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(T_sfc0), jnp.asarray(0.010), jnp.asarray(1.2),
+    )
+    kw = dict(z_ref=10.0, z0_init=1e-4, scheme=flux_scheme, n_iter=6)
+    base = compute_most_fluxes(*args, **kw)
+    explicit = compute_most_fluxes(
+        *args, **kw, unstable_gamma=16.0, stable_beta=5.0)
+    for b, e in zip(base, explicit):
+        np.testing.assert_array_equal(np.asarray(b), np.asarray(e))
+
+
+def test_compute_most_fluxes_coeffs_change_fluxes():
+    # A non-default coeff must actually move the MOST fluxes on the Businger-Dyer
+    # (non-COARE) path.  Stable column (cold SST) -> stable_beta matters.
+    args_stable = (
+        jnp.asarray(4.0), jnp.asarray(0.5),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(283.0), jnp.asarray(0.010), jnp.asarray(1.2),
+    )
+    kw = dict(z_ref=10.0, z0_init=1e-4, scheme="large_yeager", n_iter=8)
+    base = compute_most_fluxes(*args_stable, **kw)
+    strong = compute_most_fluxes(*args_stable, **kw, stable_beta=9.0)
+    # Larger beta => stronger stable suppression => |shflx| smaller (weaker flux).
+    assert not np.allclose(np.asarray(base[2]), np.asarray(strong[2]))
+    assert abs(float(strong[2])) < abs(float(base[2])), (
+        "larger stable_beta should weaken the stable sensible-heat flux")
+    # Unstable column (warm SST) -> unstable_gamma matters.
+    args_unstable = (
+        jnp.asarray(4.0), jnp.asarray(0.5),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(298.0), jnp.asarray(0.012), jnp.asarray(1.2),
+    )
+    base_u = compute_most_fluxes(*args_unstable, **kw)
+    strong_u = compute_most_fluxes(*args_unstable, **kw, unstable_gamma=26.0)
+    assert not np.allclose(np.asarray(base_u[2]), np.asarray(strong_u[2]))
+
+
+def test_compute_most_fluxes_positional_return_convergence_still_works():
+    # ``return_convergence`` kept its historical POSITIONAL slot (the new coeffs
+    # are keyword-only AFTER it), so a full-positional caller passing
+    # return_convergence positionally is unbroken (codex R4).
+    args = (
+        jnp.asarray(6.0), jnp.asarray(1.0),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(285.0), jnp.asarray(0.010), jnp.asarray(1.2),
+    )
+    # positional order after (u,v,T,q,T_sfc,q_sfc,rho): z_ref, z_t, z_q, z0_init,
+    # scheme, n_iter, charnock, L_latent, thermo_convention, gustiness_w_zi,
+    # gustiness_beta, return_2m, z_diag, max_exchange_coeff, stability_scheme,
+    # return_convergence
+    out = compute_most_fluxes(
+        *args,
+        10.0, None, None, 1e-4, "large_yeager", 6, 0.011, None, "legoesm",
+        None, 1.25, False, 2.0, None, "dyer1974", True,  # return_convergence=True
+    )
+    assert len(out) == 6  # tau_x, tau_y, sh, lh, ustar, most_residual
+    assert np.all(np.isfinite(np.asarray(out[-1])))
+
+
+def test_return_2m_uses_trained_coefficients():
+    # return_2m recomputes psi_h for the 2 m diagnostic; it must use the SAME
+    # (possibly non-default) coefficients as the converged profile (codex R2).
+    #
+    # This is an END-TO-END check: it confirms the returned T_2m responds to
+    # stable_beta at all (a diagnostic hard-wired to default coeffs would still
+    # move via the converged scales, so this alone does not ISOLATE the
+    # diagnostic psi_h — see test_return_2m_diagnostic_psih_is_beta_sensitive
+    # below for the isolated proof of the R2 fix).
+    args = (
+        jnp.asarray(6.0), jnp.asarray(1.0),
+        jnp.asarray(290.0), jnp.asarray(0.008),
+        jnp.asarray(283.0), jnp.asarray(0.010), jnp.asarray(1.2),  # stable
+    )
+    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+              scheme="large_yeager", n_iter=8, return_2m=True)
+    base = compute_most_fluxes(*args, **kw)
+    strong = compute_most_fluxes(*args, **kw, stable_beta=9.0)
+    T2m_base = float(base[5])
+    T2m_strong = float(strong[5])
+    assert np.isfinite(T2m_base) and np.isfinite(T2m_strong)
+    assert T2m_base != T2m_strong, (
+        "return_2m diagnostic ignored the trained stable_beta")
+
+
+def test_return_2m_diagnostic_psih_is_beta_sensitive():
+    """ISOLATED R2 proof: the 2 m diagnostic evaluates psi_h at the diagnostic
+    height with the SAME stable_beta as the solve.
+
+    The diagnostic is ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) -
+    psi_h(z_diag/L))`` (bulk_flux.py return_2m block).  We isolate the psi_h
+    dependence from the converged scales by driving the converged solve to be
+    (near-)beta-INDEPENDENT — a near-neutral column with n_iter high — so the
+    total T_2m response is dominated by the diagnostic psi_h term.  Here the
+    surface (289 K) is COLDER than the air (290 K) [stable], so theta* < 0 and
+    ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) - psi_h(z_diag/L))`` with
+    ``psi_h(zeta, dyer1974, beta) = -beta*zeta`` (beta>0, zeta>0).  A LARGER beta
+    => more negative psi_h => larger ``(ln - psi_h)`` => (theta*<0) T_2m is
+    pulled UP toward the (warmer) air, i.e. T_2m strictly INCREASES with beta.
+    A diagnostic hard-wired to default beta would NOT show this monotone-in-beta
+    ordering once the converged scales are held ~fixed.  (Direction verified
+    numerically: T_2m(2,5,9) ~= 289.5923, 289.5926, 289.5930.)
+    """
+    # Weakly stable column (small T_sfc-T_atm gap) so the converged u*/theta*
+    # barely move with beta, but zeta>0 so the diagnostic psi_h is active.
+    args = (
+        jnp.asarray(8.0), jnp.asarray(0.0),   # strong wind -> well-converged u*
+        jnp.asarray(290.0), jnp.asarray(0.009),
+        jnp.asarray(289.0), jnp.asarray(0.010), jnp.asarray(1.2),  # gap = 1 K
+    )
+    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+              scheme="large_yeager", n_iter=20, return_2m=True)
+    T2m = [float(compute_most_fluxes(*args, **kw, stable_beta=b)[5])
+           for b in (2.0, 5.0, 9.0)]
+    assert all(np.isfinite(T2m))
+    # Strictly increasing in beta (see docstring derivation).
+    assert T2m[0] < T2m[1] < T2m[2], (
+        f"2 m diagnostic psi_h not monotone in stable_beta: {T2m}")
+
+
+# ---------------------------------------------------------------------------
+# 7f. Differentiability: jax.grad of a MOST flux w.r.t. unstable_gamma AND
+#     stable_beta is finite and NON-ZERO under a stability-dependent scheme.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("flux_scheme", ("most", "large_yeager"))
+def test_grad_wrt_coefficients_finite_nonzero(flux_scheme):
+    # Use a column with BOTH stable and unstable content by taking two columns.
+    u = jnp.asarray([5.0, 5.0])
+    v = jnp.asarray([1.0, 1.0])
+    T_atm = jnp.asarray([290.0, 290.0])
+    q_atm = jnp.asarray([0.008, 0.008])
+    T_sfc = jnp.asarray([283.0, 298.0])  # col0 stable, col1 unstable
+    q_sfc = jnp.asarray([0.010, 0.013])
+    rho = jnp.asarray([1.2, 1.2])
+
+    def loss(gamma, beta):
+        out = compute_most_fluxes(
+            u, v, T_atm, q_atm, T_sfc, q_sfc, rho,
+            z_ref=10.0, z0_init=1e-4, scheme=flux_scheme, n_iter=8,
+            unstable_gamma=gamma, stable_beta=beta,
+        )
+        # sum over stress + sensible + latent
+        return jnp.sum(out[0] ** 2 + out[2] ** 2 + out[3] ** 2)
+
+    g_gamma = jax.grad(loss, argnums=0)(jnp.asarray(16.0), jnp.asarray(5.0))
+    g_beta = jax.grad(loss, argnums=1)(jnp.asarray(16.0), jnp.asarray(5.0))
+    assert jnp.isfinite(g_gamma) and jnp.isfinite(g_beta)
+    assert abs(float(g_gamma)) > 0.0, "d(flux)/d(unstable_gamma) is exactly zero"
+    assert abs(float(g_beta)) > 0.0, "d(flux)/d(stable_beta) is exactly zero"
+
+
+# ---------------------------------------------------------------------------
+# 7g. Config threading: SurfaceLayerConfig.most_* reach compute_surface_fluxes.
+# ---------------------------------------------------------------------------
+def test_surface_layer_config_threads_coefficients():
+    pytest.importorskip("legoesm.atmosphere.physics.turbulence.surface_layer")
+    from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        compute_surface_fluxes,
+    )
+
+    n = 4
+    u = jnp.full((n,), 4.0)
+    v = jnp.full((n,), 0.5)
+    T = jnp.full((n,), 290.0)
+    q_v = jnp.full((n,), 0.008)
+    T_sfc = jnp.full((n,), 283.0)  # stable
+    q_sfc = jnp.full((n,), 0.010)
+    rho = jnp.full((n,), 1.2)
+
+    def sh(beta):
+        cfg = SurfaceLayerConfig(
+            bulk_scheme="large_yeager", bulk_n_iter=8, most_stable_beta=beta,
+        )
+        return np.asarray(
+            compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, cfg)[2])
+
+    base = sh(5.0)
+    strong = sh(9.0)
+    assert np.all(np.isfinite(base)) and np.all(np.isfinite(strong))
+    assert not np.allclose(base, strong), (
+        "SurfaceLayerConfig.most_stable_beta did not reach compute_most_fluxes")
+
+    # Default config (constant scheme) is UNAFFECTED by the coefficients (the
+    # constant path never touches MOST) -> confirm no accidental coupling.
+    def sh_constant(beta):
+        cfg = SurfaceLayerConfig(bulk_scheme="constant", most_stable_beta=beta)
+        return np.asarray(
+            compute_surface_fluxes(u, v, T, q_v, T_sfc, q_sfc, rho, cfg)[2])
+
+    np.testing.assert_array_equal(sh_constant(2.0), sh_constant(10.0))
+
+
+# ---------------------------------------------------------------------------
+# 7h. AIMIP param round-trip: surface_most_* flow through AIMIPClassicalParams
+#     -> to_surface_config -> SurfaceLayerConfig, within their bounds.
+# ---------------------------------------------------------------------------
+def test_aimip_param_roundtrip_most_coeffs():
+    pytest.importorskip("legoesm.training.aimip_params")
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    params = AIMIPClassicalParams.from_defaults()
+    d = params.as_dict()
+    assert "surface_most_unstable_gamma" in d
+    assert "surface_most_stable_beta" in d
+
+    cfg = params.to_surface_config()
+    # The trained (constrained) values land on the config fields.
+    assert float(cfg.most_unstable_gamma) == pytest.approx(
+        float(d["surface_most_unstable_gamma"]), rel=1e-6)
+    assert float(cfg.most_stable_beta) == pytest.approx(
+        float(d["surface_most_stable_beta"]), rel=1e-6)
+    # And they sit inside the declared bounds.
+    assert 8.0 <= float(cfg.most_unstable_gamma) <= 28.0
+    assert 2.0 <= float(cfg.most_stable_beta) <= 10.0
+
+    # A perturbed raw leaf moves the config value (genuinely trainable, not a
+    # frozen default).
+    import jax.numpy as _jnp
+    raw2 = dict(params.raw_values)
+    raw2["surface_most_stable_beta"] = raw2["surface_most_stable_beta"] + 1.0
+    params2 = AIMIPClassicalParams(
+        raw_values=raw2, constraints=params.constraints,
+        spatial_surface=params.spatial_surface,
+    )
+    assert float(params2.to_surface_config().most_stable_beta) != float(
+        cfg.most_stable_beta)
+
+
+def test_aimip_param_roundtrip_z0h_z0_ratio():
+    """surface_z0h_z0_ratio flows AIMIPClassicalParams -> to_surface_config ->
+    SurfaceLayerConfig.z0h_z0_ratio, within its (0.01, 1.0) bounds, and is
+    genuinely trainable (a perturbed raw leaf moves the config value)."""
+    pytest.importorskip("legoesm.training.aimip_params")
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    params = AIMIPClassicalParams.from_defaults()
+    d = params.as_dict()
+    assert "surface_z0h_z0_ratio" in d
+
+    cfg = params.to_surface_config()
+    assert float(cfg.z0h_z0_ratio) == pytest.approx(
+        float(d["surface_z0h_z0_ratio"]), rel=1e-6)
+    assert 0.01 <= float(cfg.z0h_z0_ratio) <= 1.0
+
+    raw2 = dict(params.raw_values)
+    raw2["surface_z0h_z0_ratio"] = raw2["surface_z0h_z0_ratio"] + 1.0
+    params2 = AIMIPClassicalParams(
+        raw_values=raw2, constraints=params.constraints,
+        spatial_surface=params.spatial_surface,
+    )
+    assert float(params2.to_surface_config().z0h_z0_ratio) != float(
+        cfg.z0h_z0_ratio)
+
+
+# ---------------------------------------------------------------------------
+# 8. coare3 lane: the STABLE branch is selectable (the inert-knob fix).
+#
+# The 2026-08 latlon AMIP A/B (surface_stability_scheme dyer1974 vs
+# beljaars_holtslag1991, surface_bulk_scheme=coare3, turbulence=
+# holtslag_boville) was BIT-IDENTICAL after 10 days: the injected
+# ``SurfaceLayerConfig.stability_scheme`` reached ``compute_most_fluxes`` but
+# the coare3 branch used ``psi_m_coare``/``psi_h_coare`` unconditionally, so
+# the knob was consumed by no executed psi call.  These tests exercise the
+# LANE-LEVEL surface-flux entry — ``compute_surface_fluxes`` in
+# ``surface_layer.py``, the exact symbol ``holtslag_boville_turbulence``
+# calls (holtslag_boville.py:263) on the latlon compiled lane — with the same
+# coare3 + gustiness_zi=300 config the run resolved.
+#
+# NOTE on magnitudes: COARE 3.0's NATIVE stable form IS the Beljaars &
+# Holtslag (1991) fit with rounded constants (Fairall et al. 2003 adopted
+# BH91; measured max |Δψ| ≈ 4.5e-3 over ζ ∈ (0, 10]), so on coare3 the
+# dyer-default vs BH91 difference is real but rounding-level, and NO
+# magnitude ordering is asserted for that pair.  The "long tail" magnitude
+# claim (|SH_BH| > |SH_dyer|) is asserted on the most/large_yeager schemes,
+# whose default stable branch really is the collapsing linear -5ζ.  The
+# genuinely different coare3 tails are grachev2007_sheba / gryanik2020.
+# ---------------------------------------------------------------------------
+def _stable_column():
+    """Strongly stable synthetic column: 10 m/s wind, +80 K surface inversion."""
+    return dict(
+        u=jnp.asarray([10.0, 10.0]), v=jnp.asarray([0.0, 0.0]),
+        T=jnp.asarray([300.0, 300.0]), q_v=jnp.asarray([0.002, 0.002]),
+        T_sfc=jnp.asarray([220.0, 220.0]), q_sfc=jnp.asarray([3e-4, 3e-4]),
+        rho=jnp.asarray([1.4, 1.4]),
+    )
+
+
+def _lane_cfg(bulk_scheme, stability_scheme):
+    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B)."""
+    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=300.0,
+                              stability_scheme=stability_scheme)
+
+
+def _lane_fluxes(bulk_scheme, stability_scheme, col=None):
+    col = col or _stable_column()
+    return compute_surface_fluxes(
+        col["u"], col["v"], col["T"], col["q_v"], col["T_sfc"], col["q_sfc"],
+        col["rho"], _lane_cfg(bulk_scheme, stability_scheme))
+
+
+def test_coare3_lane_stable_branch_now_selectable():
+    """(i) On the executed coare3 lane entry the knob is LIVE: dyer(default)
+    vs beljaars_holtslag1991 differ (pre-fix they were array-equal — the
+    bit-identical A/B reproduced at unit level), and grachev2007_sheba gives
+    a substantially different strong-stability tail."""
+    sh_dyer = np.asarray(_lane_fluxes("coare3", "dyer1974")[2])
+    sh_bh = np.asarray(_lane_fluxes("coare3", "beljaars_holtslag1991")[2])
+    sh_gr = np.asarray(_lane_fluxes("coare3", "grachev2007_sheba")[2])
+
+    # Live knob: BH swaps the stable branch to canonical BH91 constants — a
+    # small (rounding-level, ~3e-4 relative) but strictly nonzero change.
+    assert np.all(sh_dyer != sh_bh), (
+        "coare3 sensible flux is invariant to stability_scheme — the knob "
+        "is still inert on the coare3 branch (pre-fix behaviour)")
+    # Genuinely different SHEBA tail: > 5% shift in the stable sensible flux.
+    assert np.all(np.abs(sh_gr - sh_dyer) > 0.05 * np.abs(sh_dyer))
+
+
+@pytest.mark.parametrize("bulk_scheme", ("most", "large_yeager"))
+def test_bh_long_tail_larger_flux_on_dyer_baseline_schemes(bulk_scheme):
+    """(i, magnitude) Where the default stable branch really is the linear
+    -5ζ (most / large_yeager), BH91 keeps the SBL long tail: the stable
+    sensible flux magnitude is LARGER than collapsed Dyer (measured ~4.8x on
+    this column)."""
+    sh_dyer = np.asarray(_lane_fluxes(bulk_scheme, "dyer1974")[2])
+    sh_bh = np.asarray(_lane_fluxes(bulk_scheme, "beljaars_holtslag1991")[2])
+    assert np.all(sh_dyer < 0.0) and np.all(sh_bh < 0.0)  # downward (stable)
+    assert np.all(np.abs(sh_bh) > np.abs(sh_dyer)), (
+        f"{bulk_scheme}: BH91 stable flux should be larger in magnitude than "
+        "the collapsing dyer1974 -5*zeta form")
+
+
+# Verbatim PRE-CHANGE psi_m_coare/psi_h_coare (HEAD a8c6ad91a, before the
+# selectable stable branch), same pattern as _old_psi_m/_old_psi_h above:
+# the STRICT byte-identity guard for the default path, independent of dtype,
+# platform, and pinned-constant tolerance.
+def _old_psi_m_coare(zeta):
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    x = jnp.power(1.0 - 15.0 * zeta_neg, 0.25)
+    psi_k = (
+        2.0 * jnp.log((1.0 + x) / 2.0)
+        + jnp.log((1.0 + x ** 2) / 2.0)
+        - 2.0 * jnp.arctan(x)
+        + jnp.pi / 2.0
+    )
+    y = jnp.power(1.0 - 10.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        (1.0 + zeta_pos)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+def _old_psi_h_coare(zeta):
+    zeta_c = jnp.clip(zeta, -10.0, 10.0)
+    zeta_neg = jnp.minimum(zeta_c, -1e-10)
+    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    x = jnp.sqrt(1.0 - 15.0 * zeta_neg)
+    psi_k = 2.0 * jnp.log((1.0 + x) / 2.0)
+    y = jnp.power(1.0 - 34.15 * zeta_neg, 1.0 / 3.0)
+    sqrt3 = jnp.sqrt(3.0)
+    psi_c = (
+        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
+        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
+        + jnp.pi / sqrt3
+    )
+    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
+    unstable = (1.0 - f) * psi_k + f * psi_c
+    c = jnp.minimum(50.0, 0.35 * zeta_pos)
+    stable = -(
+        jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
+        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
+        + 8.525
+    )
+    return jnp.where(zeta_c < 0.0, unstable, stable)
+
+
+def test_coare3_default_byte_identical_pinned():
+    """(ii) Default stability_scheme keeps coare3 byte-identical: the default
+    and explicit-"dyer1974" calls reproduce the VERBATIM pre-change psi
+    functions EXACTLY (array-equal over both regimes — the strict guard), and
+    the lane fluxes match the pre-change pinned values (captured at HEAD
+    a8c6ad91a, fp64, this exact column/config) as a cross-machine anchor."""
+    z = jnp.linspace(-10.0, 10.0, 401)
+    for new_fn, old_fn in ((psi_m_coare, _old_psi_m_coare),
+                           (psi_h_coare, _old_psi_h_coare)):
+        np.testing.assert_array_equal(
+            np.asarray(new_fn(z)), np.asarray(old_fn(z)))
+        np.testing.assert_array_equal(
+            np.asarray(new_fn(z, "dyer1974")), np.asarray(old_fn(z)))
+
+    tau_x, tau_y, shflx, lhflx, ustar = _lane_fluxes("coare3", "dyer1974")
+    # fp64 pins; loose enough for a float32 default run, tight enough that
+    # any stable-branch drift (BH swap is ~3e-4 relative) trips it.
+    rtol = 1e-12 if shflx.dtype == jnp.float64 else 2e-5
+    np.testing.assert_allclose(float(shflx[0]), -2.024613552826373e+02, rtol=rtol)
+    np.testing.assert_allclose(float(lhflx[0]), -1.071036570631257e+01, rtol=rtol)
+    np.testing.assert_allclose(float(tau_x[0]), -2.848185923255397e-02, rtol=rtol)
+    np.testing.assert_allclose(float(ustar[0]), 1.426330793967515e-01, rtol=rtol)
+
+
+def test_dyer_baseline_schemes_full_path_pinned():
+    """Full-path baselines for the Businger-Dyer schemes through the SAME
+    lane entry (codex R1: the psi_m/psi_h stable-dispatch factoring must be
+    pure code motion on most/large_yeager too).  Pre-change pinned values,
+    HEAD a8c6ad91a, fp64, stable column + gustiness_zi=300."""
+    pins = {
+        ("most", "dyer1974"): -4.586232399544879e+01,
+        ("most", "beljaars_holtslag1991"): -2.228467342408366e+02,
+        ("large_yeager", "dyer1974"): -4.196968866111251e+01,
+        ("large_yeager", "beljaars_holtslag1991"): -1.981186252362987e+02,
+    }
+    for (bs, stab), expected in pins.items():
+        shflx = _lane_fluxes(bs, stab)[2]
+        rtol = 1e-12 if shflx.dtype == jnp.float64 else 2e-5
+        np.testing.assert_allclose(float(shflx[0]), expected, rtol=rtol,
+                                   err_msg=f"{bs}/{stab}")
+
+
+def test_coare3_return_2m_scheme_sensitive():
+    """The 2 m diagnostic follows the selected stable branch on coare3 (the
+    scheme-matched ``psi_h_coare(zeta_d, stability_scheme)`` call): on the
+    stable column T_2m moves by ~18 K between the default and the SHEBA
+    tail, and stays inside the physical [T_sfc, T_atm] bracket (unclipped
+    interior values at z_diag = 2 m < z_t).
+
+    The PINNED grachev value also locks the DIAGNOSTIC psi call in
+    isolation: reverting only ``psi_h_coare(zeta_d, stability_scheme)`` to
+    the unthreaded ``psi_h_coare(zeta_d)`` (keeping the main-loop threading)
+    was measured to shift T_2m from 277.078 K to 296.031 K on this column —
+    an interior, unclipped 19 K move — so the pin fails loudly on it
+    (codex R2 non-vacuity check, verified empirically 2026-08-02).
+    """
+    col = _stable_column()
+    kw = dict(z_ref=10.0, z0_init=1e-4, scheme="coare3", n_iter=5,
+              gustiness_w_zi=300.0, return_2m=True)
+    out_d = compute_most_fluxes(col["u"], col["v"], col["T"], col["q_v"],
+                                col["T_sfc"], col["q_sfc"], col["rho"],
+                                stability_scheme="dyer1974", **kw)
+    out_g = compute_most_fluxes(col["u"], col["v"], col["T"], col["q_v"],
+                                col["T_sfc"], col["q_sfc"], col["rho"],
+                                stability_scheme="grachev2007_sheba", **kw)
+    t2m_d, t2m_g = np.asarray(out_d[5]), np.asarray(out_g[5])
+    assert np.all(np.abs(t2m_g - t2m_d) > 1.0), (t2m_d, t2m_g)
+    for t2m in (t2m_d, t2m_g):
+        assert np.all(t2m > 220.0) and np.all(t2m < 300.0)
+    # Pinned pre-captured fp64 values (HEAD a8c6ad91a + fix, this column).
+    rtol = 1e-12 if out_d[5].dtype == jnp.float64 else 2e-5
+    np.testing.assert_allclose(float(t2m_d[0]), 258.915887220388, rtol=rtol)
+    np.testing.assert_allclose(float(t2m_g[0]), 277.077916797258, rtol=rtol)
+
+    # psi-level lock of the scheme-matched contract (stable side only).
+    z_pos = jnp.linspace(1e-3, 10.0, 200)
+    for scheme in NONLINEAR:
+        np.testing.assert_array_equal(
+            np.asarray(psi_h_coare(z_pos, scheme)),
+            np.asarray(psi_h(z_pos, scheme)))
+        np.testing.assert_array_equal(
+            np.asarray(psi_m_coare(z_pos, scheme)),
+            np.asarray(psi_m(z_pos, scheme)))
+
+
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_psi_coare_gradients_finite_all_schemes(scheme):
+    """AD safety of the selectable coare stable swap: d(psi)/d(zeta) is
+    finite (no NaN) at exact neutral zeta = 0, at the +-1e-10 branch floors,
+    and in both regimes, for every selectable scheme (codex R2: the existing
+    gradient coverage only exercised psi_m/psi_h, not psi_*_coare)."""
+    for fn in (psi_m_coare, psi_h_coare):
+        g = jax.grad(lambda z, _fn=fn: jnp.sum(_fn(z, scheme)))
+        for z0 in (-2.0, -1e-10, 0.0, 1e-10, 0.5, 2.0, 9.5):
+            val = g(jnp.asarray(z0))
+            assert np.all(np.isfinite(np.asarray(val))), (
+                f"{fn.__name__}/{scheme}: non-finite gradient at zeta={z0}")
+
+
+def test_coare3_unstable_side_invariant_across_schemes():
+    """(iii) The unstable branch is COARE's Fairall blend for EVERY
+    stability_scheme: warm-surface (unstable) fluxes are array-equal across
+    all schemes."""
+    col = _stable_column()
+    col["T_sfc"] = jnp.asarray([310.0, 310.0])   # +10 K warm surface
+    col["q_sfc"] = jnp.asarray([0.03, 0.03])
+    base = _lane_fluxes("coare3", "dyer1974", col)
+    for scheme in NONLINEAR:
+        out = _lane_fluxes("coare3", scheme, col)
+        for b, o in zip(base, out):
+            np.testing.assert_array_equal(np.asarray(b), np.asarray(o))
+
+
+def test_psi_coare_unknown_scheme_raises():
+    """Dispatch hardening: a typo'd stability_scheme on the coare psi
+    functions fails loudly (via the shared _stable_psi_* dispatch)."""
+    z = jnp.asarray(2.0)
+    for fn in (psi_m_coare, psi_h_coare):
+        with pytest.raises(ValueError, match="stability_scheme"):
+            fn(z, "beljaars_holtslag91")

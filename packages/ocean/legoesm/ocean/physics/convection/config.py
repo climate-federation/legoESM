@@ -99,6 +99,26 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   ``enhanced_diffusion_convection``; both integration factory and the
     #   implicit k_profiles path supply them when this is selected.
     n2_mode: str = "insitu"
+    # Which alpha/beta the ``n2_mode="nemo_bn2"`` assembly uses. ``"seos"``
+    # (default, BIT-IDENTICAL legacy) is NEMO's 3-term simplified EOS;
+    # ``"teos10"`` is NEMO's Roquet polynomial with the TEOS-10 coefficient
+    # set -- what ORCA1 runs (``ln_teos10 = .true.``). Same axis, same name
+    # and same default as ``TKEConfig.n2_eos_form``: the EVD trigger's N²
+    # was hard-wired to the simplified EOS while its TKE sibling was already
+    # configurable.
+    # SCOPE, measured (dual review 2026-08-19): NO shipped card is changed
+    # or fixed by this field today. ORCA1 leaves the EVD ``n2_mode`` at its
+    # ``"insitu"`` default, so the bn2 kernel is never reached from the
+    # trigger and this selector is inert there; the only cards selecting
+    # ``"nemo_bn2"`` are the DINO Kamm ones, whose NEMO namelist selects the
+    # simplified EOS, so ``"seos"`` is already the right answer for them.
+    # The field exists so a future TEOS-10 card that also selects
+    # ``"nemo_bn2"`` cannot silently take the simplified fit. Note ORCA1 has
+    # a LARGER and still-open split this does not address: its EVD trigger
+    # runs on the in-situ density difference while its TKE closure runs
+    # NEMO bn2 with TEOS-10 -- two genuinely different static stabilities in
+    # one column. Ignored by every other ``n2_mode``.
+    n2_eos_form: str = "seos"
     # Static-instability trigger threshold on N² [1/s²]: EVD fires where
     # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd
     # (ln_zdfevd) fires where MIN(rn2, rn2b) <= -1e-12 — a small NEGATIVE
@@ -117,6 +137,26 @@ class EnhancedDiffusionConfig(NamedTuple):
     # Requires the before-advection tracers (n2_tracers) to be threaded (the
     # TKE n2_before_advection machinery); silently single-level when absent.
     two_level_trigger: bool = False
+    # ----- Time levels the two EVD trigger arms are evaluated at -----
+    # NEMO zdfevd fires on MIN(rn2, rn2b) (src/OCE/ZDF/zdfevd.F90:93-94 for
+    # avt, :119-120 for avm), and the DINO driver builds that pair at
+    # cfgs/DINO/MY_SRC/stpmlf.F90:186-187:
+    #   CALL bn2( ts(:,:,:,:,Nbb), rab_b, rn2b, Nnn )  ! BEFORE T/S, NOW geom
+    #   CALL bn2( ts(:,:,:,:,Nnn), rab_n, rn2 , Nnn )  ! NOW    T/S, NOW geom
+    # -- note the geometry index is Nnn for BOTH arms.
+    #
+    # "solver_state" (default, BIT-IDENTICAL legacy): both arms are built from
+    #   whatever state the caller hands to the mixing coefficients. Under the
+    #   leap-frog implicit solve that state is the POST-EXPLICIT (Kaa) one, so
+    #   arm A is N²(Kaa) and the geometry (eta -> gdept / z* jacobian) is Kaa
+    #   for BOTH arms.
+    # "nemo_now_before": NEMO's own pair — arm A on the NOW (Nnn) tracers, arm
+    #   B on the BEFORE (Nbb) tracers, BOTH on NOW (Nnn) geometry. Requires
+    #   ``two_level_trigger=True`` (the name promises both arms) and a caller
+    #   that threads the Nnn tracers, the Nbb tracers AND the Nnn eta;
+    #   k_profiles.compute_vertical_K_profiles raises if any is missing rather
+    #   than silently falling back to the solver state.
+    evd_n2_time_level: str = "solver_state"
 
 
 class PlumeConfig(NamedTuple):

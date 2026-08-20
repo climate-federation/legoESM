@@ -35,8 +35,12 @@ Launch:
     #PBS -l select=6:ncpus=64:mpiprocs=4:ngpus=4
     mpiexec -n 24 python scripts/bench/bench_cube_tiled_step_scaling.py \
         --kt 2 --resolution 192 --nlev 60 --steps 12 --multicontroller
-  Levante (SLURM, 24 GPUs = 6 nodes x 4):
-    srun -N6 --ntasks-per-node=4 --gpus-per-task=1 \
+  Levante (SLURM, 24 GPUs = 6 nodes x 4) — leave ALL node GPUs visible
+  (--gpu-bind=none); bare jax.distributed.initialize() under SLURM binds
+  the SLURM_LOCALID-th device per task. Do NOT pin one GPU per task
+  (--gpus-per-task=1 / CUDA_VISIBLE_DEVICES shims): the pinned device
+  renumbers to ordinal 0 while jax asks for ordinal LOCALID (job 26446699):
+    srun -N6 --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none \
         python scripts/bench/bench_cube_tiled_step_scaling.py \
         --kt 2 --resolution 192 --nlev 60 --steps 12 --multicontroller
 """
@@ -54,8 +58,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from metadata import (  # noqa: E402
-    annotate_incomplete, count_collective_permutes, scaling_metadata,
-    tidy_throughput_fields)
+    annotate_incomplete, count_collective_permutes, count_collectives,
+    scaling_metadata, tidy_throughput_fields)
 
 #: Parity tolerances vs the serial untiled step — the adapter gate's
 #: f32-honest bounds (exact f32 ulps of the field scales; a real stage
@@ -81,6 +85,13 @@ def main() -> int:
     p.add_argument("--resolution", type=int, default=48,
                    help="Cells per cube edge N (must divide by kt).")
     p.add_argument("--nlev", type=int, default=30)
+    p.add_argument("--device-hbm", type=str,
+                   default=os.environ.get("LEGOESM_DEVICE_HBM"),
+
+                   help="#1361 memory preflight: target device whose HBM the "
+                        "estimated per-device footprint must fit "
+                        "(a100-80, a100-40, h100, v100, rtx8000). Omitted = "
+                        "estimate printed, no gate.")
     p.add_argument("--steps", type=int, default=6,
                    help="Timing samples — repeated single-shot steps on the "
                         "pristine input (the tiled adapter is one-shot, not a "
@@ -88,6 +99,13 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=2,
                    help="Leading samples discarded before the steady median.")
     p.add_argument("--dt", type=float, default=60.0)
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="jax.profiler trace of steps [warmup, warmup+4) "
+                        "from ranks 0-3 into <dir>/rank<k>/ (the shared "
+                        "attribution instrument; analyze with "
+                        "analyze_jax_trace_gaps.py). Steady steps only — "
+                        "the 1M-event cap fills with compile-phase host "
+                        "events otherwise.")
     p.add_argument("--parity-gate", action="store_true",
                    help="Gate vs the serial untiled step (single-process "
                         "smoke windows only).")
@@ -115,6 +133,26 @@ def main() -> int:
         raise SystemExit(
             f"--resolution {args.resolution} must divide by --kt {args.kt} "
             f"(tile-local edge = N/kt).")
+
+    # #1361 preflight, BEFORE distributed init / jax import / any allocation.
+    # The C1152 L60 kt=3 arm needed 105.7 GB/device against 80 GB HBM and only
+    # found out during compile, two arms into the job.
+    from legoesm.scaling_preflight import (
+        preflight_or_exit, validate_device_count, validate_memory,
+    )
+    _n_devices = 6 * args.kt * args.kt
+    preflight_or_exit(validate_device_count, "tiled", _n_devices)
+    # sharded=False: per #1370 the cube lanes still allocate GLOBAL-sized
+    # buffers per device, which is why the C1152 arm measured 105.7 GB/device.
+    # Dividing by n_devices here would under-estimate by 54x and wave that very
+    # configuration through. Flip to True when #1370 lands.
+    _est = preflight_or_exit(
+        validate_memory,
+        n_columns=6 * args.resolution * args.resolution, nlev=args.nlev,
+        n_devices=_n_devices, device=args.device_hbm, sharded=False)
+    print(f"[preflight] ok: C{args.resolution} L{args.nlev} kt={args.kt} "
+          f"n_devices={_n_devices} est={_est / 1024**3:.1f} GB/device",
+          flush=True)
 
     if args.multicontroller:
         from legoesm.parallel.early_init import (
@@ -217,6 +255,10 @@ def main() -> int:
     compile_ms = (time.perf_counter() - _t_compile0) * 1e3
     hlo = compiled.as_text()
     n_ppermute = _count_collective_permutes(hlo)
+    # Full per-family census (superset of the CP count): surfaces the
+    # conservation all-reduce and any operator-introduced resharding on the
+    # SAME audited executable — the message-count = latency-bound lever.
+    hlo_census = count_collectives(hlo)
     allgathers = find_fullcube_allgathers(hlo, n=args.resolution)
     if n_ppermute == 0:
         raise SystemExit(
@@ -281,11 +323,27 @@ def main() -> int:
     #     feedback loop would require.
     per_step_ms = []
     s = _lower_arg
-    for _ in range(args.steps):
+    _profiling = (args.profile_dir is not None
+                  and jax.process_index() < 4)
+    _prof_on = False
+    for _i in range(args.steps):
+        if _profiling and _i == args.warmup:
+            import pathlib
+            _pd = (pathlib.Path(args.profile_dir)
+                   / f"rank{jax.process_index()}")
+            _pd.mkdir(parents=True, exist_ok=True)
+            jax.profiler.start_trace(str(_pd))
+            _prof_on = True
+        if (_profiling and _prof_on
+                and _i == min(args.warmup + 4, args.steps - 1)):
+            jax.profiler.stop_trace()
+            _prof_on = False
         t0 = time.perf_counter()
         s = compiled(s) if args.closed_loop else compiled(_lower_arg)
         jax.block_until_ready(jax.tree.leaves(s))
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+    if _profiling and _prof_on:
+        jax.profiler.stop_trace()
 
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
@@ -295,8 +353,14 @@ def main() -> int:
     if args.closed_loop:
         # A feedback trajectory can blow up where pristine-input samples
         # cannot — never record a timing row for a non-finite integration.
-        _finite = all(bool(np.all(np.isfinite(np.asarray(x))))
-                      for x in jax.tree.leaves(s))
+        # Reduce ON DEVICE: under multicontroller the state shards span
+        # non-addressable devices, so np.asarray(x) raises (job 26450318);
+        # a jitted global all-reduce yields a fully-replicated scalar every
+        # process may fetch.
+        import jax.numpy as jnp
+
+        _isfinite_all = jax.jit(lambda t: jnp.all(jnp.isfinite(t)))
+        _finite = all(bool(_isfinite_all(x)) for x in jax.tree.leaves(s))
         if not _finite:
             print("ERROR: closed-loop state went non-finite during the "
                   "timed window — refusing to record the row.", flush=True)
@@ -366,6 +430,7 @@ def main() -> int:
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": total_cells // n_devices,
             "hlo_collective_permutes": n_ppermute,
+            "hlo_collectives": hlo_census,
             "closed_loop": bool(args.closed_loop),
             "envelope": (
                 "blocked closed loop + in-stage telescoping mass fixer "

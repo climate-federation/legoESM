@@ -277,3 +277,77 @@ def test_check_stability_flags_nonfinite_v(collector):
     )
     reason = collector.check_stability(st, 5.0)
     assert reason is not None and "wind" in reason
+
+
+class TestCmipLonAlignment:
+    """CMOR regrid output must match the [0, 360) lon labels.
+
+    The cube/Voronoi regridders emit columns on lon [-180, 180) while
+    ``_cmip_target_latlon`` labels the file [0, 360); the missing
+    half-turn roll shifted every cubed-sphere CMOR map by 180 deg
+    (tuned-year clt vs coastlines, 2026-07-21).  Analytic tripwire:
+    regrid sin(lon_cell) off a real cube grid and require it to land
+    under the matching sin(lon_label) columns — plus the synthetic
+    violation (un-rolling it back) must fail loudly.
+    """
+
+    def _cube_collector_and_field(self):
+        import jax.numpy as jnp
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+        nlev = 3
+        coll = DiagnosticCollector(
+            nlev=nlev,
+            sigma_full=jnp.linspace(0.1, 0.9, nlev),
+            dsigma=jnp.diff(jnp.linspace(0, 1, nlev + 1)),
+            monthly_means=True,
+            cmip_output=True,
+            n_days=30,
+            cmip_resolution_deg=5.0,  # 36 x 72 target
+        )
+        grid = create_cubed_sphere(24)
+        coll.set_cmip_grid_info("cubed_sphere", grid=grid, start_year=1979)
+        field = np.sin(np.asarray(grid.lon))  # (6, n, n), lon in rad
+        return coll, field
+
+    def test_cube_regrid_matches_lon_labels(self):
+        coll, field = self._cube_collector_and_field()
+        out = coll._regrid_to_latlon_2d(field)
+        assert out is not None and out.shape == (36, 72)
+        _, lon_lab = coll._cmip_target_latlon()
+        expect = np.broadcast_to(
+            np.sin(np.deg2rad(lon_lab))[None, :], out.shape)
+        # Away from the poles bilinear-off-C24 is accurate to a few %.
+        band = slice(4, 32)
+        err_fixed = np.max(np.abs(out[band] - expect[band]))
+        assert err_fixed < 0.1, f"regridded sin(lon) misaligned: {err_fixed}"
+        # Synthetic violation: undo the roll -> half-turn shift -> sign flip.
+        shifted = np.roll(out, -out.shape[1] // 2, axis=1)
+        err_shifted = np.max(np.abs(shifted[band] - expect[band]))
+        assert err_shifted > 1.5, "tripwire vacuous: shifted field also fits"
+
+    def test_cube_regrid_3d_matches_lon_labels(self):
+        coll, field = self._cube_collector_and_field()
+        f3 = np.repeat(field[..., None], 3, axis=-1)
+        out = coll._regrid_to_latlon_3d(f3)
+        assert out is not None and out.shape == (36, 72, 3)
+        _, lon_lab = coll._cmip_target_latlon()
+        expect = np.sin(np.deg2rad(lon_lab))[None, :, None]
+        err = np.max(np.abs(out[4:32] - np.broadcast_to(
+            expect, out.shape)[4:32]))
+        assert err < 0.1
+
+    def test_odd_nlon_raises(self):
+        import jax.numpy as jnp
+        coll = DiagnosticCollector(
+            nlev=3,
+            sigma_full=jnp.linspace(0.1, 0.9, 3),
+            dsigma=jnp.diff(jnp.linspace(0, 1, 4)),
+            monthly_means=True,
+            cmip_output=True,
+            n_days=30,
+            cmip_resolution_deg=5.0,
+        )
+        coll._cmip_nlon = 71  # force odd
+        with pytest.raises(ValueError, match="even"):
+            coll._roll_to_cmip_lon(np.zeros((36, 71)))

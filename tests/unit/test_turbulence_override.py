@@ -61,6 +61,41 @@ def test_override_none_is_default_byte_identical():
     assert a == b
 
 
+def test_louis_scalars_reach_the_kernel_config():
+    """The 2026-08-01 calibration-campaign finding: louis_l_mix_max /
+    louis_c_louis (& friends) were documented in driver/config.py as targeting
+    LouisConfig, threaded between config objects, and injected by the ML
+    tuning path — but turbulence_config_for, the single source every dycore's
+    production kernel consumes, silently dropped them. The two scalars ranked
+    2nd and 5th in the C48 sensitivity sweep tuned NOTHING. Each documented
+    scalar must reach its LouisConfig leaf."""
+    cfg = _config(turbulence="louis")._replace(
+        louis_l_mix_max=250.0, louis_Ri_crit=0.4, louis_b_louis=4.0,
+        louis_c_louis=12.0, louis_d_louis=6.0)
+    tc = turbulence_config_for(cfg)
+    assert tc.scheme == "louis"
+    assert float(tc.louis.l_mix_max) == 250.0
+    assert float(tc.louis.Ri_crit) == 0.4
+    assert float(tc.louis.b_louis) == 4.0
+    assert float(tc.louis.c_louis) == 12.0
+    assert float(tc.louis.d_louis) == 6.0
+
+
+def test_louis_defaults_stay_byte_identical():
+    """All-default louis scalars ⇒ no _replace: the identity contract that
+    every pre-fix run is bit-reproducible must survive the threading."""
+    a = turbulence_config_for(_config(turbulence="louis"))
+    assert a == TurbulenceConfig(scheme="louis")
+
+
+def test_louis_scalars_do_not_touch_other_schemes():
+    """A non-louis scheme with (inapplicable) louis scalars set is unchanged —
+    the threading is scoped to the active scheme, not sprayed."""
+    cfg = _config(turbulence="clubb_lite")._replace(louis_l_mix_max=250.0)
+    a = turbulence_config_for(cfg)
+    assert a == TurbulenceConfig(scheme="clubb_lite")
+
+
 def test_override_reaches_built_fv_pipeline():
     """The override's C_K reaches the REAL FV physics pipeline's turbulence
     config (the kernel that clubb_lite_turbulence reads C_K from)."""
@@ -254,3 +289,208 @@ def test_per_column_ck_array_runs_real_forward_step():
     t = np.asarray(driver.state.T.data)
     assert t.shape == (8, 16, 5)
     assert np.all(np.isfinite(t))
+
+
+# ---------------------------------------------------------------------------
+# surface_stability_scheme: plumbing AND flux CONSUMPTION on the latlon+HB lane.
+#
+# The plumbing-only coverage above (turbulence_config_for returns the right
+# CONFIG object) did not catch the 2026-08 inert-knob bug: the injected
+# ``SurfaceLayerConfig.stability_scheme`` reached ``compute_most_fluxes`` but
+# the coare3 branch selected ``psi_m_coare``/``psi_h_coare`` unconditionally
+# (bulk_flux.py), so two AMIP runs differing only in
+# ``surface_stability_scheme`` were BIT-IDENTICAL.  This test closes the gap
+# at the CONSUMPTION level: the resolver the driver uses
+# (``turbulence_config_for``) -> the kernel the latlon compiled lane runs
+# (``holtslag_boville_turbulence``, dispatched by ``get_turbulence_fn`` and
+# called with ``config=self.turbulence_config`` in
+# ``PhysicsPipeline.physics_step_no_rad``) -> different surface fluxes.
+# ---------------------------------------------------------------------------
+def _hb_lane_config(stability_scheme):
+    return ExperimentConfig(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+                            discretization="finite_volume"),
+        radiation="gray", turbulence="holtslag_boville",
+        surface_bulk_scheme="coare3", surface_gustiness_zi=300.0,
+        surface_stability_scheme=stability_scheme,
+    )
+
+
+def _hb_shflx(stability_scheme):
+    """Sensible flux from the EXACT lane chain: resolver -> dispatched HB
+    kernel -> its internal compute_surface_fluxes, on a strongly stable
+    synthetic column (+80 K surface inversion, 10 m/s wind)."""
+    from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
+        holtslag_boville_turbulence,
+    )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        get_turbulence_fn,
+    )
+
+    tc = turbulence_config_for(_hb_lane_config(stability_scheme))
+    name, turb_fn, sub = get_turbulence_fn(tc)
+    # Name the symbol that runs (not a delegating wrapper): the latlon lane's
+    # turbulence kernel IS holtslag_boville_turbulence.
+    assert name == "holtslag_boville"
+    assert turb_fn is holtslag_boville_turbulence
+    # Plumbing (the pre-existing guarantee): the injection reached the
+    # sub-config the kernel will read.
+    assert sub.surface.bulk_scheme == "coare3"
+    assert sub.surface.stability_scheme == stability_scheme
+    assert float(sub.surface.gustiness_w_zi) == 300.0
+
+    ncol, nlev = 2, 4
+    ones = jnp.ones((ncol, nlev))
+    z_full = jnp.broadcast_to(jnp.asarray([3000.0, 2000.0, 1000.0, 100.0]),
+                              (ncol, nlev))
+    z_half = jnp.broadcast_to(
+        jnp.asarray([3500.0, 2500.0, 1500.0, 500.0, 0.0]), (ncol, nlev + 1))
+    T = jnp.broadcast_to(jnp.asarray([270.0, 280.0, 290.0, 300.0]),  # noqa: N806 — canonical temperature symbol
+                         (ncol, nlev))
+    p_full = jnp.broadcast_to(
+        jnp.asarray([70000.0, 80000.0, 90000.0, 99000.0]), (ncol, nlev))
+    p_half = jnp.broadcast_to(
+        jnp.asarray([65000.0, 75000.0, 85000.0, 95000.0, 100000.0]),
+        (ncol, nlev + 1))
+    from legoesm import constants
+    rho = p_full / (constants.R_d * T)
+    out = turb_fn(
+        u=10.0 * ones, v=0.0 * ones, T=T, q_v=0.002 * ones,
+        p_full=p_full, p_half=p_half, z_full=z_full, z_half=z_half,
+        T_sfc=jnp.full((ncol,), 220.0), q_sfc=jnp.full((ncol,), 3e-4),
+        rho=rho, dt=600.0, config=sub,
+    )
+    return np.asarray(out.shflx)
+
+
+def test_surface_stability_scheme_reaches_hb_flux_consumption():
+    """The knob changes the FLUX the lane kernel produces — not just the
+    config object.  grachev2007_sheba (a genuinely different SBL tail on
+    coare3) must move the stable sensible flux by > 5%; BH91 must be a
+    nonzero change (COARE's native stable branch is BH91 with rounded
+    constants, so that pair is rounding-level by physics)."""
+    sh_dyer = _hb_shflx("dyer1974")
+    sh_gr = _hb_shflx("grachev2007_sheba")
+    sh_bh = _hb_shflx("beljaars_holtslag1991")
+    assert np.all(np.isfinite(sh_dyer)) and np.all(np.isfinite(sh_gr))
+    assert np.all(sh_dyer != sh_bh), (
+        "surface_stability_scheme is inert through the HB lane kernel "
+        "(the 2026-08 bit-identical A/B bug)")
+    assert np.all(np.abs(sh_gr - sh_dyer) > 0.05 * np.abs(sh_dyer))
+
+
+class TestHbKvfMinOverride:
+    """ExperimentConfig.hb_kvf_min -> HoltslagBovilleConfig.kvf_min threading
+    (the polar stable-transport causality-probe knob)."""
+
+    def _cfg(self, **kw):
+        from legoesm.driver.config import ExperimentConfig
+        return ExperimentConfig(turbulence="holtslag_boville", **kw)
+
+    def test_default_none_keeps_scheme_default(self):
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        from legoesm.atmosphere.physics.turbulence.config import (
+            HoltslagBovilleConfig,
+        )
+        tc = turbulence_config_for(self._cfg())
+        assert tc.holtslag_boville.kvf_min == HoltslagBovilleConfig().kvf_min
+
+    def test_override_reaches_nested_config(self):
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        tc = turbulence_config_for(self._cfg(hb_kvf_min=0.2))
+        assert tc.holtslag_boville.kvf_min == 0.2
+
+    def test_non_hb_scheme_unaffected(self):
+        from legoesm.driver.config import ExperimentConfig
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        tc = turbulence_config_for(
+            ExperimentConfig(turbulence="louis", hb_kvf_min=0.2))
+        assert "kvf_min" not in tc.louis._fields
+
+    def test_non_hb_scheme_rejected_by_validate_strict(self):
+        """The resolver above is a silent no-op on a scheme without kvf_min,
+        so validate_strict must refuse the combination rather than let a run
+        proceed with an inert knob (codex review P2)."""
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="silently inert"):
+            ExperimentConfig(turbulence="louis", hb_kvf_min=0.2).validate_strict()
+
+    def test_hb_scheme_with_kvf_min_accepted(self):
+        """Guard non-vacuity: the SAME knob on holtslag_boville must pass."""
+        self._cfg(hb_kvf_min=0.2).validate_strict()
+
+    def test_explicit_turbulence_override_stays_authoritative(self):
+        from legoesm.atmosphere.physics.turbulence.config import (
+            HoltslagBovilleConfig, TurbulenceConfig,
+        )
+        from legoesm.driver.physics_pipeline import turbulence_config_for
+        ov = TurbulenceConfig(scheme="holtslag_boville",
+                              holtslag_boville=HoltslagBovilleConfig(
+                                  kvf_min=0.05))
+        tc = turbulence_config_for(
+            self._cfg(hb_kvf_min=0.2, turbulence_override=ov))
+        assert tc.holtslag_boville.kvf_min == 0.05
+
+    def test_validate_strict_bounds(self):
+        import math
+        import pytest
+        for bad in (-1.0, 0.0, 11.0, math.nan, "0.2"):
+            with pytest.raises(ValueError):
+                self._cfg(hb_kvf_min=bad).validate_strict()
+
+
+class TestSurfaceStabilityRequiresAStabilityDependentLaw:
+    """surface_stability_scheme must not be accepted where it moves only the
+    2 m diagnostic and not the surface fluxes (codex review P2)."""
+
+    def test_constant_bulk_scheme_untiled_is_rejected(self):
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="surface_stability_scheme"):
+            ExperimentConfig(
+                turbulence="louis",
+                surface_bulk_scheme="constant",     # ignores the stable branch
+                surface_stability_scheme="gryanik2020",
+            ).validate_strict()
+
+    def test_stability_dependent_bulk_scheme_is_accepted(self):
+        """Non-vacuity: the same scheme with coare3 must pass."""
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(
+            turbulence="louis",
+            surface_bulk_scheme="coare3",
+            surface_stability_scheme="gryanik2020",
+        ).validate_strict()
+
+    def test_surface_tiled_with_real_land_is_exempt(self):
+        """The tiled land tile is ocean_cfg._replace(bulk_scheme='most'), so
+        it INHERITS the stability scheme and moves real land fluxes even with
+        a 'constant' top-level scheme — this combination must NOT be rejected
+        (codex R3 P2: the first form of the guard was too broad)."""
+        from legoesm.driver.config import ExperimentConfig
+        ExperimentConfig(
+            turbulence="louis",                 # a tiled-capable kernel
+            surface_tiled=True,
+            slab_land_active=True,              # tiled needs an active land tile
+            topography="realistic",             # ...with f_land > 0
+            surface_bulk_scheme="constant",
+            surface_stability_scheme="gryanik2020",
+        ).validate_strict()
+
+    def test_surface_tiled_without_real_land_is_still_rejected(self):
+        """Exemption scope: topography='flat' derives f_land == 0 everywhere,
+        so the tiled path never engages and the scheme is diagnostic-only
+        again (codex R4 P2 — the exemption was itself too broad)."""
+        import pytest
+        from legoesm.driver.config import ExperimentConfig
+        with pytest.raises(ValueError, match="surface_stability_scheme"):
+            ExperimentConfig(
+                turbulence="louis",
+                surface_tiled=True,
+                slab_land_active=True,
+                topography="flat",              # ...but no actual land
+                surface_bulk_scheme="constant",
+                surface_stability_scheme="gryanik2020",
+            ).validate_strict()

@@ -76,8 +76,34 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  # #1464: the learned arm here has NO surface stress and cannot be given one.
+  # This config runs the lat-lon training core, where the learned arm is built
+  # on a different path that does not read surface_drag at all — setting the
+  # flag would be a no-op that still perturbs the stored seconds-per-step
+  # baselines. Marked rather than silently left: any neural-versus-classical
+  # number from this config is confounded by the missing momentum sink.
+  surface_drag_confounded: "core_does_not_read_the_key"
   nn_hidden: 256
   nn_layers: 4
 sfno:
   sfno_embed_dim: 256
   sfno_n_blocks: 8
+
+# --- classical: the six-family physics stack (owner rule: a classical model
+# carries one parameterization of EVERY family, and radiation is always
+# RRTMGP). Named explicitly rather than defaulted, so a campaign comparison
+# cannot silently differ in more than the variable under test. Matches the
+# AIMIP classical arm in MODEL CLASS and in the five scheme choices below.
+# It is NOT identical to config/aimip/ace2/suite_classical_v3.yaml, which also
+# sets surface_bulk: most and a trainable spatial surface field — so a
+# WB-vs-AIMIP number differs by those two knobs plus the campaign itself
+# (forcing, ICs, grid). State that when comparing; do not call it "same run".
+classical:
+  convection: "tiedtke"
+  turbulence: "louis"
+  cloud: "xu_randall"
+  microphysics: "sundqvist"
+  gwd: "mcfarlane"
+  surface_bulk: "constant"
+  rad_update_interval_steps: 6
+  spatial_surface: false

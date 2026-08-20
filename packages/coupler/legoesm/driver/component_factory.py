@@ -75,6 +75,13 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "mpas",           "mpas"):        "mpas_primitive_equations",
     ("nonhydrostatic","mpas",           "mpas"):        "mpas_compressible_euler",
 
+    # --- FV3 six-face duo cube (certified fv_dynamics JAX lane) ---
+    # ONE solver serves both arms: the certified lane is a single program
+    # with a static ``hydrostatic`` switch.  Slice 1: dry, physics-off,
+    # fp64 only — the branch below refuses everything else loudly.
+    ("hydrostatic",   "fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
+    ("nonhydrostatic","fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
+
     # --- Doubly-periodic plane (CRM rollout, PR2c) ---
     # Plane only supports the non-hydrostatic compressible Euler dycore.
     # All other (model_type, plane) combinations fall through to
@@ -116,6 +123,12 @@ class DiffusionCoeffs(NamedTuple):
     A_h: float         # Laplacian viscosity [m^2/s]
     hyperdiff: float   # Biharmonic hyperdiffusion [m^4/s]
     div_damp: float    # Divergence damping [m^2/s]
+    # Horizontal THERMAL diffusivity [m^2/s].  Historically locked to A_h;
+    # k_h_scale=None keeps that (byte-identical).  A separate scale decouples
+    # the momentum-viscosity circulation lever (a_h_scale) from the thermal
+    # smoothing that stabilizes vertical computational modes (the cldG abs-145
+    # tropical sawtooth died with BOTH scaled 0.25).
+    K_h_A: float = None
 
 
 def _grid_min_dx(grid) -> float:
@@ -179,7 +192,10 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     c_grav = 300.0
     div_damp = dc.div_damp_scale * c_grav * dx_min / (2.0 * 3.14159)
 
-    return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp)
+    _khs = getattr(dc, "k_h_scale", None)
+    K_h_A = A_h if _khs is None else _khs * 3.0e-3 * dx_min ** 2 / DT
+    return DiffusionCoeffs(A_h=A_h, hyperdiff=hyperdiff, div_damp=div_damp,
+                           K_h_A=K_h_A)
 
 
 # Solvers that apply the EXPLICIT biharmonic hyperdiff / divergence damping
@@ -245,6 +261,92 @@ def warn_if_diffusion_unstable(solver_name: str, diff: DiffusionCoeffs,
 # =========================================================================
 # Atmosphere factory
 # =========================================================================
+
+# =========================================================================
+# fv3_duo slice-1 DEFAULT-DENY wall
+# =========================================================================
+#
+# The certified duo lane consumes ONLY the fields allow-listed below (read
+# from ``_run_fv3_duo`` + this factory branch); every OTHER ExperimentConfig
+# field is inert on this lane, so a non-default value is a request the run
+# would silently ignore -- the "successful wrong experiment" failure mode
+# (codex 2026-08-18: moisture flags, land/surface schemes, forcing decks and
+# IC selectors all sailed past the enumerated deny-list).  The specific
+# contract-citing refusals in the branch below stay as the fast path; this
+# wall is the backstop that makes the deny-list exhaustive by construction.
+
+_FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
+    # Grid selection (nlev is additionally pinned to {5, 10} in-branch).
+    "grid.grid_type", "grid.resolution", "grid.nlev",
+    # Lane selection + timestep (dt is the only dynamic deck quantity).
+    "dycore.model_type", "dycore.discretization", "dycore.dt",
+    # Integration span + reproducibility bookkeeping (manifest-recorded).
+    "days", "start_day", "seed",
+    # Pinned to 'fp64' by the specific guard (the ExperimentConfig default
+    # is 'fp32', so every valid duo config differs here).
+    "precision",
+    # The five scheme selectors are pinned to 'none' by the specific guard.
+    "radiation", "convection", "microphysics", "turbulence",
+    "gravity_wave_drag",
+    # Output cadence + destination -- the only OutputConfig fields the
+    # lane's snapshot writer reads.
+    "output.output_dir", "output.diag_days",
+    # CLI-default drift that CANNOT affect the duo dynamics (measured on a
+    # stock ``run_amip --discretization fv3_duo`` config, job 9433540):
+    # ``--clouds`` defaults to 'xu_randall' at the argparse layer. The duo
+    # EXECUTION LOOP never evaluates physics or cloud diagnostics (the one
+    # other consumer, _create_diagnostics' clt at model_driver.py:3146, is
+    # not collected by this lane — codex 2026-08-18 corrected the earlier
+    # "only radiation optics" claim); ``--use-polar-filter`` (BooleanOptionalAction, default None =
+    # "no choice") gates a lat-lon-C-grid-only Fourier filter this
+    # cubed-sphere lane never builds.  Refusing either would refuse every
+    # stock CLI launch.
+    "cloud_scheme", "dycore.use_polar_filter",
+})
+
+
+def _flatten_config_fields(cfg, prefix: str = ""):
+    """Yield ``("a.b.c", value)`` fields of a nested NamedTuple config.
+
+    Recurses ONLY into NamedTuples; sequences/mappings are ATOMIC values
+    compared whole (a changed tuple is still refused as one field). A
+    frozen-surface test pins both this shape and the defaults it is
+    diffed against.
+    """
+    for name in cfg._fields:
+        val = getattr(cfg, name)
+        if hasattr(val, "_fields"):  # nested NamedTuple sub-config
+            yield from _flatten_config_fields(val, f"{prefix}{name}.")
+        else:
+            yield f"{prefix}{name}", val
+
+
+def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
+    """Refuse EVERY non-default, non-allow-listed field, all at once.
+
+    Diffs the incoming config field-by-field against a freshly
+    constructed default instance and raises ONE error naming every
+    offending path and value, so a mis-built launch script is fixed in
+    one round-trip instead of field-by-field.
+    """
+    defaults = dict(_flatten_config_fields(type(config)()))
+    offending = [
+        (path, val)
+        for path, val in _flatten_config_fields(config)
+        if path not in _FV3_DUO_ALLOWED_NONDEFAULT
+        and not (val == defaults[path])
+    ]
+    if offending:
+        listing = ", ".join(f"{p}={v!r}" for p, v in offending)
+        raise ValueError(
+            f"fv3_duo (slice 1) runs ONLY the certified dry-dynamics deck; "
+            f"the driver lane consumes no other configuration, so each field "
+            f"below would be SILENTLY inert -- a successful wrong experiment. "
+            f"Non-default unsupported fields ({len(offending)}): {listing}. "
+            f"Allowed non-default fields: "
+            f"{sorted(_FV3_DUO_ALLOWED_NONDEFAULT)}. Reset the offenders or "
+            f"choose a lane that supports them.")
+
 
 def create_atmosphere_dycore(
     config: ExperimentConfig,
@@ -543,7 +645,7 @@ def create_atmosphere_dycore(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
-            K_h=diff.A_h,
+            K_h=diff.K_h_A,
             # conservation_fixer=False overrides fix_mass=True (lat-lon
             # contract; codex 2026-07-12 round 2 — this branch predates
             # the audit but had the same gap).
@@ -551,6 +653,10 @@ def create_atmosphere_dycore(
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
+            # Mass-conserving tracer positivity clamp (see DycoreConfig).
+            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
+            # Sigma-lane vertical advection scheme (see DycoreConfig).
+            vert_advection_scheme=dc.mpas_vert_advection_scheme,
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
@@ -578,11 +684,76 @@ def create_atmosphere_dycore(
         nh_cfg = MPASCompressibleEulerConfig(
             nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
-            K_h=diff.A_h,
+            K_h=diff.K_h_A,
             fix_mass=dc.fix_mass and dc.conservation_fixer,
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
         )
         return MPASCompressibleEulerModel(grid, height_coord, terrain_metric, nh_cfg)
+
+    # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
+    if solver_name == "fv3_duo_primitive_equations":
+        # Slice 1 contract, enforced LOUDLY (the certified core REFUSES
+        # moist coupling: zvir != 0 / consv_te != 0 raise at
+        # fv3_dynamics.py:301-311, and require_f64_jax gates every leaf).
+        # This lane never routes physics tendencies, so any active scheme
+        # would be SILENTLY inert — the exact failure mode dispatch
+        # hardening exists to prevent.
+        _physics_on = {
+            name: getattr(config, name)
+            for name in ("radiation", "convection", "microphysics",
+                         "turbulence", "gravity_wave_drag")
+            if getattr(config, name) != "none"
+        }
+        if _physics_on:
+            raise ValueError(
+                f"fv3_duo (slice 1) is DRY and physics-off: the certified "
+                f"fv_dynamics lane refuses moist coupling "
+                f"(fv3_dynamics.py:301-311) and the driver lane routes no "
+                f"physics tendencies, so these active schemes would be "
+                f"silently inert: {_physics_on}. Set them all to 'none' "
+                f"(with --allow-disabled-physics in run_amip).")
+        if config.held_suarez_forcing:
+            raise ValueError(
+                "fv3_duo (slice 1) does not apply Held-Suarez forcing — "
+                "the lane steps pure adiabatic dynamics; the flag would be "
+                "silently inert. Drop --held-suarez-forcing.")
+        if config.precision != "fp64":
+            raise ValueError(
+                f"fv3_duo requires precision='fp64' (require_f64_jax gates "
+                f"every state leaf in the certified lane; an f32 IC is a "
+                f"run that lost bits before step 1), got "
+                f"config.precision={config.precision!r}.")
+        if config.distributed:
+            raise ValueError(
+                "fv3_duo (slice 1) is single-process only: the duo halo "
+                "exchange runs on the full six-face stack in one program; "
+                "no MPI/SPMD decomposition is wired.")
+        # DEFAULT-DENY backstop: anything else non-default is refused,
+        # all offenders listed at once (see _refuse_fv3_duo_non_default).
+        _refuse_fv3_duo_non_default(config)
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.grids.factory import create_fv3_duo_grid
+
+        km = gc.nlev
+        if km not in (5, 10):
+            raise ValueError(
+                f"fv3_duo runs the analytic set_eta branch only "
+                f"(fv_eta.F90:334-344, km in {{5, 10}}); got grid.nlev="
+                f"{km}. The other km are hand-tabulated in the oracle and "
+                f"are not ported.")
+        # The duo lane steps its own six-face bundle, not the driver's
+        # standard cubed-sphere grid (which stays for lat/lon metadata /
+        # topography accessors) — discretization-keyed wiring, no driver
+        # grid dispatch (L1).
+        bundle = create_fv3_duo_grid(gc.resolution)
+        cfg = FV3DuoConfig(
+            km=km,
+            hydrostatic=(model_type == "hydrostatic"),
+        )
+        return FV3DuoDynamicsModel(bundle, cfg)
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":
@@ -764,6 +935,9 @@ def create_atmosphere_dycore(
             sponge_width_m=dc.sponge_width_m,
             sponge_shape=dc.sponge_shape,
             sponge_scale_height_m=dc.sponge_scale_height_m,
+            # #1029 ω-side SB81 conversion (opt-in, default OFF —
+            # bit-identical legacy arithmetic form when False).
+            sb81_omega_conversion=dc.sb81_omega_conversion,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
             # "auto" -> this dycore's own default; explicit names verbatim.
@@ -784,8 +958,22 @@ def create_atmosphere_dycore(
 
     if solver_name == "sfno_primitive_equations":
         _reject_unselectable_time_integrator("SFNO primitive equations")
-        from legoesm.atmosphere.dynamics.neural.sfno_pe import SFNOPrimitiveEquationModel
-        return SFNOPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.neural.sfno_pe import (
+            SFNOPrimitiveEquationConfig,
+            SFNOPrimitiveEquationModel,
+        )
+        # Do NOT take the bare config default here: it leaves
+        # spectral_filter_strength at 0.0, and an undamped state_update rollout
+        # is known-divergent (|u850| 33 -> 969 m/s by macro step 4, NaN by step
+        # 12 on a trained T63 checkpoint; measured 2026-07-28). A user picking
+        # this solver from a config must not get the divergent variant by
+        # default. 0.01 / order 8 are the dycore's own filter settings, verified
+        # to hold a 240 h rollout physical.
+        return SFNOPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma,
+            config=SFNOPrimitiveEquationConfig(
+                spectral_filter_strength=0.01, spectral_filter_order=8),
+        )
 
     # ----- U-Cast data-driven (convolutional U-Net emulator) -----
     if solver_name == "ucast_primitive_equations":

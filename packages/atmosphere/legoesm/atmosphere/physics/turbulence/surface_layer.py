@@ -113,7 +113,13 @@ def compute_surface_fluxes(
         Friction velocity [m/s], shape (ncol,).
     """
     validate_bulk_scheme(config.bulk_scheme)
-    if config.bulk_scheme in ("coare3", "large_yeager"):
+    # Route every stability-dependent bulk scheme — the fixed-roughness
+    # Monin-Obukhov land scheme ("most") as well as the ocean air-sea schemes
+    # ("coare3"/"large_yeager") — through the iterative MOST solver.  "most"
+    # uses the local roughness ``config.z0`` via the neutral log law and the
+    # selectable ``stability_scheme`` stable branch; without this it would fall
+    # through to the constant-Cd path and silently ignore z0 and stability.
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
             z_ref=config.z_ref,
@@ -123,8 +129,17 @@ def compute_surface_fluxes(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_gamma=config.most_unstable_gamma,
+            stable_beta=config.most_stable_beta,
+            z0h_z0_ratio=config.z0h_z0_ratio,
         )
-        return tau_x, tau_y, shflx, lhflx, ustar
+        # The prescribed-flux override applies on THIS branch too. Returning
+        # early without it would let a config that sets both a MOST scheme and
+        # a prescribed flux silently ignore the prescription -- the closure
+        # would run on MOST-derived fluxes while the caller believed it had
+        # pinned them to the deck.
+        return _apply_prescribed_scalar_fluxes(
+            config, tau_x, tau_y, shflx, lhflx, ustar)
 
     # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
@@ -146,7 +161,80 @@ def compute_surface_fluxes(
         u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed, Cd, Ch,
     )
 
+    return _apply_prescribed_scalar_fluxes(
+        config, tau_x, tau_y, shflx, lhflx, ustar)
+
+
+def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar):
+    """Override the computed surface SCALAR fluxes with the deck's, if set.
+
+    A case deck that prescribes its surface heat and moisture fluxes needs the
+    closure to receive them as the diffusion's lower boundary condition. The
+    caller must then NOT also inject them as a separate column tendency, or the
+    flux is counted twice.
+
+    Momentum is untouched by design: the decks that fix scalar fluxes leave the
+    stress interactive (SAM's ``SFC_TAU_FXD = .false.``).
+
+    Static Python ``if`` on a config value that is either ``None`` or a float --
+    the feature-gating pattern, not a traced selection.
+    """
+    if config.prescribed_shflx_w_m2 is not None:
+        shflx = jnp.full_like(shflx, config.prescribed_shflx_w_m2)
+    if config.prescribed_lhflx_w_m2 is not None:
+        lhflx = jnp.full_like(lhflx, config.prescribed_lhflx_w_m2)
     return tau_x, tau_y, shflx, lhflx, ustar
+
+
+def beta_limited_surface_humidity(
+    q_sat_sfc: jax.Array,
+    q_air: jax.Array,
+    f_land: jax.Array,
+    beta_land: float | jax.Array,
+) -> jax.Array:
+    """Soil-moisture-limited effective surface humidity for a BLENDED surface.
+
+    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
+    from the interactive multilayer land, #1312 phase 2b) — the formula below
+    is elementwise either way.
+
+    On a non-tiled surface the bulk latent flux is
+    ``LH ∝ (q_sfc - q_air)``.  Using the saturated ``q_sat_sfc`` everywhere
+    makes every land cell an infinite swamp (beta = 1).  This throttles the
+    LAND fraction's humidity gradient by ``beta_land`` while leaving the
+    ocean/ice fraction saturated::
+
+        q_sfc = q_air + (1 - f_land * (1 - beta_land)) * (q_sat_sfc - q_air)
+
+    so the land-fraction latent flux is ``beta_land`` times its wet-surface
+    potential — a first-order analogue of the tiled pipeline's per-tile
+    alpha method (``physics_pipeline._tiled_surface_flux``).  The
+    decomposition is exact only for a fixed shared transfer coefficient; a
+    stability-dependent MOST/COARE bulk scheme recomputes ``C_E`` from the
+    throttled ``q_sfc``, so this is approximate, not a true mosaic.
+    ``beta_land = 1``
+    returns ``q_sat_sfc`` exactly (byte-identical wet surface);
+    ``beta_land = 0`` zeroes the land-fraction humidity gradient in both
+    directions (no land evaporation and no land dew — a closed surface).
+
+    Parameters
+    ----------
+    q_sat_sfc : array
+        Saturation mixing ratio at the surface anchor [kg/kg], shape (ncol,).
+    q_air : array
+        Lowest-level vapor mixing ratio [kg/kg], shape (ncol,).
+    f_land : array
+        Land fraction in [0, 1], shape (ncol,).
+    beta_land : float
+        Land evaporation efficiency in [0, 1].
+
+    Returns
+    -------
+    q_sfc : array
+        Effective surface humidity for the bulk latent flux [kg/kg].
+    """
+    return q_air + (1.0 - f_land * (1.0 - beta_land)) * (q_sat_sfc - q_air)
 
 
 class SurfaceTileSpec(NamedTuple):
@@ -229,6 +317,9 @@ def _single_tile_flux(
             gustiness_w_zi=getattr(config, "gustiness_w_zi", None),
             thermo_convention=getattr(config, "thermo_convention", "legoesm"),
             stability_scheme=getattr(config, "stability_scheme", "dyer1974"),
+            unstable_gamma=config.most_unstable_gamma,
+            stable_beta=config.most_stable_beta,
+            z0h_z0_ratio=config.z0h_z0_ratio,
         )
 
     # Constant neutral coefficients.

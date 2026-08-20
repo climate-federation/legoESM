@@ -975,6 +975,91 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         "_deln_flux fy differs from baseline when corner "
                         "blocks poisoned — corner ghosts used somewhere")
 
+    def test_deln_flux_mass_branch_matches_fortran_half_average(self):
+        """#1255: the mass-weighted del-n increment is ``damp * mass_avg *
+        fx2`` — the Fortran carries a SINGLE ``0.5`` that IS the mass average
+        (``damp*0.5*(mass(i-1,j)+mass(i,j))*fx2``, tp_core.F90:1339-1363).
+        Our ``mass_u``/``mass_v`` already ARE that ``0.5`` average, so the
+        coefficient must be ``damp`` (not ``0.5*damp``).  Oracle-derived
+        invariants that pin it without a Fortran capture:
+
+          * mass == 1 everywhere  =>  mass_avg == 1  =>  the mass branch is
+            BIT-IDENTICAL to the ``mass=None`` branch (``fx += damp*fx2``);
+          * mass == M (const)     =>  increment scales EXACTLY by M.
+
+        The pre-fix double-``0.5`` gave half these values, so this catches a
+        revert on both the coefficient and the average.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Sharp, non-uniform q so fx2 (the del-n diffusive flux) is nonzero.
+        q = (10.0 + jnp.sin(jnp.linspace(0.0, 6.0, n))[None, None, :]
+             + jnp.cos(jnp.linspace(0.0, 4.0, n))[None, :, None]
+             * jnp.ones((6, n, n)))
+        fx0 = jnp.zeros((6, n + 1, n))
+        fy0 = jnp.zeros((6, n, n + 1))
+        nord, damp = 1, 0.01   # del-4, the live FB-chain damping order
+
+        # The diffusive increment only (fx/fy start at 0), no-mass branch.
+        fx_none, fy_none = fv_tp_2d_mod._deln_flux(
+            nord, damp, q, fx0, fy0, cdgrid, mass=None)
+        # There IS a nonzero increment to test against.
+        self.assertGreater(float(jnp.max(jnp.abs(fx_none))), 0.0)
+
+        # mass == 1 must reproduce the no-mass branch bit-for-bit.
+        mass1 = jnp.ones((6, n, n))
+        fx_m1, fy_m1 = fv_tp_2d_mod._deln_flux(
+            nord, damp, q, fx0, fy0, cdgrid, mass=mass1)
+        self.assertTrue(
+            bool(jnp.allclose(fx_m1, fx_none, rtol=0, atol=0)),
+            "mass==1 del-n increment != mass=None branch (double-0.5 #1255)")
+        self.assertTrue(
+            bool(jnp.allclose(fy_m1, fy_none, rtol=0, atol=0)),
+            "mass==1 del-n increment != mass=None branch (double-0.5 #1255)")
+
+        # mass == M (const) scales the increment EXACTLY by M.
+        M = 3.0
+        fx_mM, fy_mM = fv_tp_2d_mod._deln_flux(
+            nord, damp, q, fx0, fy0, cdgrid, mass=jnp.full((6, n, n), M))
+        self.assertTrue(
+            bool(jnp.allclose(fx_mM, M * fx_none, rtol=1e-12, atol=1e-30)),
+            "const-mass del-n increment does not scale by M (coeff wrong)")
+        self.assertTrue(
+            bool(jnp.allclose(fy_mM, M * fy_none, rtol=1e-12, atol=1e-30)))
+
+        # NON-CONSTANT (ramped) mass pins the STENCIL PAIRING that a constant
+        # mass masks (codex #1255 hardening): the recovered per-face weight
+        # fx_mass/fx_none must equal the analytic face average
+        # 0.5*(m[f-1,j]+m[f,j]) — an off-by-one in mass_u would shift the
+        # ramp and fail.  Recover only where the no-mass increment is well
+        # above round-off (division-stable).
+        ramp = jnp.arange(n, dtype=jnp.float64)[None, :, None] + 1.0  # m[i]=i+1
+        mass_ramp = jnp.broadcast_to(ramp, (6, n, n))
+        fx_r, fy_r = fv_tp_2d_mod._deln_flux(
+            nord, damp, q, fx0, fy0, cdgrid, mass=mass_ramp)
+        # Analytic u-face average of the ramp over interior faces f=1..n-1:
+        # 0.5*((f-1+1)+(f+1)) = f + 0.5.  Compare to the recovered weight.
+        w_expect_x = (jnp.arange(n + 1, dtype=jnp.float64)[None, :, None]
+                      + 0.5)  # (1, n+1, 1); boundary faces use halo, skip below
+        big_x = jnp.abs(fx_none) > 1e-8 * float(jnp.abs(fx_none).max())
+        interior_x = jnp.zeros((6, n + 1, n), dtype=bool).at[
+            :, 1:n, :].set(True)
+        sel_x = big_x & interior_x
+        w_rec_x = jnp.where(sel_x, fx_r / jnp.where(sel_x, fx_none, 1.0), 0.0)
+        w_exp_x = jnp.where(sel_x, jnp.broadcast_to(w_expect_x, sel_x.shape),
+                            0.0)
+        self.assertGreater(int(jnp.sum(sel_x)), 0)
+        self.assertTrue(
+            bool(jnp.allclose(w_rec_x, w_exp_x, rtol=1e-10, atol=1e-10)),
+            "ramped-mass u-face weight != 0.5*(m[f-1]+m[f]) — stencil "
+            "off-by-one in mass_u (#1255)")
+
     def test_del6_vt_flux_routes_halo_through_duogrid_when_active(self):
         """Iter-78: `_del6_vt_flux` accepted a `use_duogrid` parameter
         but never used it — its halo was pinned to `interp_offsets`.
@@ -2793,13 +2878,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 16
         # Duogrid mode → rsin_u = 1/sin² everywhere (including panel edges)
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        sina_u_helper, sina_v_helper = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_helper, sina_v_helper = sina_u_v_from_sin_sg(cdgrid)
 
         # Reconstruct sina_u from stored rsin_u.  Under duogrid,
         # rsin_u = 1/sina_u² uniformly, so sina_u = 1/sqrt(rsin_u).
@@ -2815,7 +2900,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         f"sina_v helper diverges from cdgrid.rsin_v: {max_v_diff}")
 
     def test_sina_u_v_from_sin_sg_matches_fortran_convention(self):
-        """Iter-87: `_sina_u_v_from_sin_sg` constructs sina_u/sina_v from
+        """Iter-87: `sina_u_v_from_sin_sg` constructs sina_u/sina_v from
         the sin_sg sub-grid per fv_grid_utils.F90:505-518.  Verify:
         1. interior: sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
         2. panel edges: single-side sin_sg
@@ -2823,13 +2908,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 16
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
 
         # Shape
         self.assertEqual(sina_u.shape, (6, n + 1, n))
@@ -7209,7 +7294,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
         from legoesm.core.fv3_sw_core import (
-            _vorticity_flux, _sina_u_v_from_sin_sg)
+            _vorticity_flux, sina_u_v_from_sin_sg)
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
@@ -7221,7 +7306,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc),
             jnp.asarray(vort_abs), cdgrid, use_duogrid=False)
 
-        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_j, sina_v_j = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         sina_v = np.asarray(sina_v_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
@@ -7262,7 +7347,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
         from legoesm.core.fv3_sw_core import (
-            _vorticity_flux, _sina_u_v_from_sin_sg)
+            _vorticity_flux, sina_u_v_from_sin_sg)
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
@@ -7274,7 +7359,7 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc),
             jnp.asarray(vort_abs), cdgrid, use_duogrid=True)
 
-        sina_u_j, sina_v_j = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u_j, sina_v_j = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         sina_v = np.asarray(sina_v_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
@@ -7363,8 +7448,8 @@ class TestVorticityFluxFortranFormula(unittest.TestCase):
         # sentinel — difference is linear in v_d delta).
         # Simpler lock: fy1_pois[:,0,:] must equal the formula value
         # using v_d_poison (not the sentinel directly).
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
-        sina_u_j, _ = _sina_u_v_from_sin_sg(cdgrid)
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
+        sina_u_j, _ = sina_u_v_from_sin_sg(cdgrid)
         sina_u = np.asarray(sina_u_j)
         cosa_u = np.asarray(cdgrid.cosa_u)
         eps = float(jnp.finfo(jnp.float32).eps)
@@ -7912,7 +7997,7 @@ class TestPpmFluxFortranFormula(unittest.TestCase):
 
 
 class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
-    """Iter-641: Fortran-formula lock for `_sina_u_v_from_sin_sg` in
+    """Iter-641: Fortran-formula lock for `sina_u_v_from_sin_sg` in
     ``src/legoesm/core/fv3_sw_core.py`` (lines 685-718) against
     ``fv_grid_utils.F90:505-518``.
 
@@ -7971,25 +8056,25 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 8
         cdgrid = create_cubed_sphere_cdgrid(
             create_cubed_sphere(n=n, use_duogrid=False))
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+        sina_u, sina_v = sina_u_v_from_sin_sg(cdgrid)
         sin_sg_np = np.asarray(cdgrid.sin_sg)
         sina_u_ref, sina_v_ref = self._ref_sina_u_v(sin_sg_np, n)
 
         np.testing.assert_allclose(
             np.asarray(sina_u), sina_u_ref, atol=1e-14,
-            err_msg=("_sina_u_v_from_sin_sg sina_u diverges from "
+            err_msg=("sina_u_v_from_sin_sg sina_u diverges from "
                      "fv_grid_utils.F90:505-518 reference — check the "
                      "interior sin_E[i-1] + sin_W[i] averaging AND the "
                      "panel-edge single-side boundaries at i=0, i=n."))
         np.testing.assert_allclose(
             np.asarray(sina_v), sina_v_ref, atol=1e-14,
-            err_msg=("_sina_u_v_from_sin_sg sina_v diverges from "
+            err_msg=("sina_u_v_from_sin_sg sina_v diverges from "
                      "fv_grid_utils.F90:505-518 reference — check "
                      "sin_N[j-1] + sin_S[j] averaging AND panel-edge "
                      "boundaries at j=0, j=n."))
@@ -8009,7 +8094,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
-        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+        from legoesm.core.fv3_sw_core import sina_u_v_from_sin_sg
 
         n = 6
         cdgrid = create_cubed_sphere_cdgrid(
@@ -8022,7 +8107,7 @@ class TestSinaUVFromSinSgFortranFormula(unittest.TestCase):
         sin_sg_rand = 0.5 + 0.3 * rng.standard_normal((6, n, n, 9))
         poisoned = cdgrid._replace(sin_sg=jnp.asarray(sin_sg_rand))
 
-        sina_u, sina_v = _sina_u_v_from_sin_sg(poisoned)
+        sina_u, sina_v = sina_u_v_from_sin_sg(poisoned)
         sina_u = np.asarray(sina_u); sina_v = np.asarray(sina_v)
         sin_W = sin_sg_rand[..., 0]
         sin_S = sin_sg_rand[..., 1]

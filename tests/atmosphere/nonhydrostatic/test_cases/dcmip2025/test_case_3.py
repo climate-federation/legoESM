@@ -77,7 +77,9 @@ def dcmip25_tc3_init(
     p = {**TC3_PARAMS, **(params or {})}
 
     # Small-Earth scaling
-    small_grid = apply_small_earth_scaling(grid, p["small_earth_factor"])
+    small_grid = apply_small_earth_scaling(
+        grid, p["small_earth_factor"],
+        rotating=p.get("rotating", True))
 
     # Vertical coordinate with squall line sounding
     theta_fn = _squall_line_theta_fn(p)
