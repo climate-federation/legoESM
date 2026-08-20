@@ -313,6 +313,15 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     spec's ``validate`` renamed (C5); it raises on a tracer, so run it
     eagerly outside jit.
 
+    THE RETURNED ``press["pkz"]`` IS DRY, ALWAYS.  The remap writes it
+    from the post-remap state with no ``(1+dp1)`` (``fv_mapz.F90:
+    479-481``), and on the moist NH arm the NEXT call overwrites it at
+    ``fv_dynamics.F90:299-322``.  That is exactly what the oracle
+    exposes between calls, so it is not a divergence -- but a consumer
+    that stops BETWEEN steps and assumes "moist run implies moist pkz"
+    would be wrong, which is why it is stated here rather than only in
+    a test (GLM MINOR, job 9442483).
+
     pt enters as TEMPERATURE and leaves as TEMPERATURE (theta_v in
     between: :396-408 in, fv_mapz.F90:209-217 out); a caller stopping in
     between gets theta_v.  omga is returned but meaningless (use_old_omega
@@ -461,7 +470,12 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         # pkz is (6, n, n, km) and pt_to_theta_v expects dp1 matching it.
         dp1_theta = zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
         if not hydrostatic:
-            # :299-322 is INSIDE fv_dynamics and runs on EVERY call: on
+            # :299-322 is INSIDE fv_dynamics and runs on every call on
+            # BOTH NH arms -- but only the MOIST one is recomputed here.
+            # The dry NH arm still trusts the caller's pkz, which is
+            # covered by the certified dry parity and is deliberately
+            # left alone; do not read this comment as licence to
+            # recompute there (GLM, job 9442483). On the moist arm:
             # the NH moist arm it OVERWRITES pkz with
             # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
             # step-entry state, while pt is still TEMPERATURE. The

@@ -122,6 +122,24 @@ def test_sphum_index_is_validated_not_guessed(bad, match):
         fv_dynamics_step(**_minimal_step_kwargs(sphum_index=bad))
 
 
+def test_sphum_index_accepts_a_numpy_integer():
+    """``np.int64`` is what a config-driven caller carries.
+
+    The guard was widened from ``isinstance(int)`` to
+    ``operator.index``; rejecting a numpy integer would be a spurious
+    raise, and nothing else exercises the dynamics-lane guard's ACCEPT
+    path (GLM MINOR, job 9442483).  Reaching past the guard is enough:
+    the minimal fixture cannot run a step, so any later failure is not
+    a ValueError about sphum_index.
+    """
+    from legoesm.core.fv3_native_dynamics import fv_dynamics_step
+    with pytest.raises(Exception) as ei:
+        fv_dynamics_step(**_minimal_step_kwargs(sphum_index=np.int64(0)))
+    assert not (isinstance(ei.value, ValueError)
+                and "sphum_index" in str(ei.value)), \
+        f"numpy integer was rejected by the index guard: {ei.value}"
+
+
 def test_no_tracers_with_zvir_is_refused():
     from legoesm.core.fv3_native_dynamics import fv_dynamics_step
     with pytest.raises(ValueError, match="no tracers|nq > 0"):

@@ -81,7 +81,12 @@ anything you are inferring rather than reading.
 ================ THE COMMITS ================
 HDR
 git log --oneline -8
-git show ${REVIEW_RANGE:-HEAD~1..HEAD}
+# Resolve by SUBJECT, never by HEAD~N: the review runner itself gets
+# committed on top, so a positional default reviews the wrong commit
+# the moment anything lands after it (GLM MINOR, job 9442483).
+RANGE=${REVIEW_RANGE:-$(git log --format=%H --grep="non-hydrostatic moist arm" -1)}
+echo "REVIEWING: $RANGE"
+git show $RANGE
 echo "================ JAX PORT: fv3_dynamics.py (changed regions) ================"
 sed -n '215,270p;300,375p;415,480p' packages/core/legoesm/core/fv3_dynamics.py
 echo "================ NUMPY SPEC: fv3_native_dynamics.py (changed regions) ================"

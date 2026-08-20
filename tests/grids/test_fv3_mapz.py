@@ -1572,30 +1572,45 @@ def test_moist_nonhydrostatic_refuses_the_adiabatic_flag():
           sphum_index=1, adiabatic=True)
 
 
+@pytest.mark.parametrize("lane", ["jax", "numpy"])
 @pytest.mark.parametrize("bad", [True, 1.5, "1", None])
-def test_moist_sphum_index_is_not_coerced(bad):
+def test_moist_sphum_index_is_not_coerced(lane, bad):
     """``int()`` accepts ``True``, ``1.5`` and ``"1"`` -- all of which
-    would silently select tracer 1 (GLM MINOR, job 9442423)."""
+    would silently select tracer 1 (GLM MINOR, job 9442423).
+
+    BOTH lanes: the NumPy lane is the specification, so a guard present
+    only in the port is itself a lane divergence (GLM MINOR, job
+    9442483).
+    """
     f = _face()[0]
     f["r_vir"] = 1.0
-    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
-          for k, v in f.items()}
     with pytest.raises(ValueError, match="sphum_index"):
-        l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
-              sphum_index=bad)
+        if lane == "jax":
+            kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+                  for k, v in f.items()}
+            l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
+                  sphum_index=bad)
+        else:
+            l2e_n(**f, q=_tracers(f), sphum_index=bad)
 
 
-def test_moist_sphum_index_accepts_a_numpy_integer():
+@pytest.mark.parametrize("lane", ["jax", "numpy"])
+def test_moist_sphum_index_accepts_a_numpy_integer(lane):
     """A config-driven caller carries ``np.int64``; rejecting it would
     be a spurious raise, and this pins that the widened guard did not
     also widen to bools (covered above)."""
     f = _face()[0]
     f["r_vir"] = 1.0
-    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
-          for k, v in f.items()}
-    out = l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
-                sphum_index=np.int64(1))
-    assert np.all(np.isfinite(np.asarray(out.pt)))
+    if lane == "jax":
+        kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+              for k, v in f.items()}
+        out = l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
+                    sphum_index=np.int64(1))
+        pt = np.asarray(out.pt)
+    else:
+        l2e_n(**f, q=_tracers(f), sphum_index=np.int64(1))
+        pt = f["pt"]
+    assert np.all(np.isfinite(pt))
 
 # ------------------------------------------------------------- gate 2
 def test_driver_jax_jit_matches_eager():

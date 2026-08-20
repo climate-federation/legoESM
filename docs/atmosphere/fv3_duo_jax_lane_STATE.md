@@ -760,27 +760,70 @@ retracted claim in this campaign.
 
 ---
 
-## The moist arms: what certifies them, and what does NOT (2026-08-20)
+## ★ THE MOIST HYDROSTATIC ARM IS ORACLE-CERTIFIED (2026-08-20)
 
-Moist (virtual-temperature) coupling is enabled on BOTH arms now, in
-both lanes.  It is anchored on the Fortran SOURCE plus port-vs-spec
-parity -- **not** on an oracle run, and the reason is worth recording
-because there is a moist deck sitting in the pinned tree that looks
-like it should serve.
+`full_step_oracle_parity.py --moist --tracers`, job 9442518, pin
+`55547c559`, against `run_hydro_{zerostep,1step}_moist_gfs`:
 
-`fv3_oracle_pinned/run_hydro_1step_moist_gfs` (and its
-`run_hydro_zerostep_moist_gfs` IC) is a real 1-step C48/npz=5 duo run
-with `adiabatic = .false.` and a live sphum.  It is NOT usable as a
-moist-dynamics oracle: `driver/solo/atmosphere.F90:474` calls `fv_phys`
-whenever `npz /= 1 .and. .not. adiabatic`, the deck carries no
-`sim_phys_nml` block, and `do_strat_HS_forcing` DEFAULTS to `.true.`
-(`fv_phys.F90:91`).  Its RESTART is therefore one dynamics step PLUS
-modified Held-Suarez forcing, and this lane has no physics.  Certifying
-the moist arms against Fortran needs a new deck with
-`&sim_phys_nml do_strat_HS_forcing = .F. /` -- everything else in that
-deck is already right.
+    IC instrument control   3.685e-14   (the dry deck's own floor)
+    tracer IC control       1.425e-15
+    WORST one-step rel      1.1866e-09
 
-What the same reading DID settle, and settles the whole design:
+Same figure as the dry hydrostatic arm, which is the expected result and
+not a suspicious one: that floor is set by the quad-precision geometry
+seed in the IC, not by the physics.
+
+ANTI-VACUITY, because "identical to the dry number" has to be shown not
+to BE the dry run. The two decks' own one-step `pt` tendencies differ in
+the third digit on every face -- dry 0.05829 / 0.002624 / 0.04613 vs
+moist 0.05797 / 0.002658 / 0.04600 -- a ~1 % difference matching
+`zvir*q ~ 0.013`, and on BOTH decks the port's tendency row equals the
+oracle's. The port reproduces each deck's own physics.
+
+### RETRACTED: "the moist deck is not usable" (same day)
+
+An earlier version of this section said `run_hydro_1step_moist_gfs`
+could not serve as an oracle because `atmosphere.F90:474` calls
+`fv_phys` whenever `.not. adiabatic` and `do_strat_HS_forcing` defaults
+`.true.` (`fv_phys.F90:91`). That was WRONG, and GLM caught the
+contradiction at document scale: the commit that added `--moist`
+shipped this paragraph arguing the opposite of its own code.
+
+`do_strat_HS_forcing` is only an ARGUMENT to `Held_Suarez_Tend`
+(`fv_phys.F90:539`), which is inside `if (do_Held_Suarez)` at `:533`.
+`do_Held_Suarez` lives in `&fv_core_nml`, defaults `.false.`
+(`fv_arrays.F90:511`), and the deck does not set it. Every other scheme
+defaults `.false.` and the deck pins `fv_sg_adj = -1`, so `no_tendency`
+(`fv_phys.F90:227`) is never cleared and `fv_update_phys` (`:590`)
+never runs. `fv_phys` is entered and does nothing.
+
+That reading is no longer a claim: `--moist` runs
+`check_physics_is_inert` (refuses any deck whose switches could clear
+`no_tendency`) and `check_moist_deck` (refuses a deck not resolving
+`adiabatic = .false.`, since `zvir` is derived from it and is nowhere
+in the namelist). Both were shown to FIRE -- the dry deck is refused by
+name. `do_strat_HS_forcing` is deliberately NOT in the switch list, for
+the reason above; re-check `fv_phys.F90:533/:539` before changing that.
+
+### What is still NOT certified
+
+The NON-hydrostatic moist arm. There is no NH moist deck in the pinned
+tree, and `--moist --nh` refuses rather than scoring it against a
+hydrostatic reference. Building one means the hydrostatic moist deck
+with `hydrostatic = .F.`; everything else in it is already right. Until
+then the NH moist arm is source-anchored plus port-vs-spec parity only,
+and the twin-port's inherent limit applies: a SYMMETRIC edit to both
+lanes keeps every parity gate green, so the Fortran source and the dry
+certification are the only asymmetric anchors.
+
+`consv_te` remains refused and is not planned: ~119 lines
+(`fv_mapz.F90:628-747`) plus an area-weighted `g_sum(..., reproduce =
+.true.)` across all six faces, with no deck that resolves it non-zero
+and therefore no oracle. Porting it would trade a loud refusal for
+never-executed numerics -- this campaign's most expensive defect class.
+
+## What the oracle's own flags settle
+
 `atmosphere.F90:156-161` is
 
     zvir = 0.
@@ -788,12 +831,18 @@ What the same reading DID settle, and settles the whole design:
     else ; zvir = rvgas/rdgas - 1. ; moist_phys = .true. ; endif
 
 so in the oracle `adiabatic = .false.` <=> `zvir /= 0` <=> `moist_phys
-= .true.` -- one switch, not three.  That is why the moist NH arm
-passes `adiabatic=False` to the remap and why the combination
-(non-hydrostatic AND moist AND `adiabatic=True`) is REFUSED in both
-lanes: it is unreachable in the oracle, and running it would take the
-port through `fv_mapz.F90:987` while the flag names `:985`'s empty
-branch.
+= .true.` -- one switch, not three. That is why the moist NH arm passes
+`adiabatic=False` to the remap and why (non-hydrostatic AND moist AND
+`adiabatic=True`) is REFUSED in both lanes: it is unreachable in the
+oracle, and running it would take the port through `fv_mapz.F90:987`
+while the flag names `:985`'s empty branch.
+
+The moist IC is DRY temperature: `test_cases.F90:6760-6768` runs
+`pt = pt/(1. + zvir*q(sphum))` when the deck is not adiabatic, AFTER
+`delz` is built from the still-virtual `pt` at `:6721` and after `sphum`
+is filled at `:6737`. Omitting it left the IC ~3.8 K warm and the
+harness refused the comparison at 1.058e-02 rather than reporting a
+false step residual.
 
 Three cpp defines were confirmed from the BUILD RECIPE of the binary
 the PARITY RUNS use -- `scripts/cluster/fv3_native/build_oracle_hydro_serialnc.sbatch`,
@@ -802,16 +851,17 @@ line in `dyncore_stage_oracle.sbatch` and `extchain_oracle.sbatch`) --
 not inferred: `USE_COND`, `MOIST_CAPPA` and `FILL2D` are all UNDEFINED,
 so the `q_con` moist_cp/moist_cv arms, the per-cell `cappa` NH pkz, and
 the `moist_phys`-gated condensate fill at `fv_dynamics.F90:546` are
-structurally absent.  The ported arms are the `#else` branches.
+structurally absent. The ported arms are the `#else` branches.
 
-CITE THE RIGHT BUILD.  `fv3_recon/duo_model_build.sbatch` -- the
+CITE THE RIGHT BUILD. `fv3_recon/duo_model_build.sbatch` -- the
 instrumented tree with `dyncore_dump2d` -- compiles with
 `-DSW_DYNAMICS`, under which `fv_dynamics.F90:267-269` sets `akap = 1.`
 and the ENTIRE `dp1`/`pkz` block (`:271-343`) and the `pt -> theta_v`
 conversion (`:396-408`) are excluded by the `#else` / `#ifndef`. Nothing
-about `fv_dynamics` may be read off that binary. `build_oracle_hydro_serialnc.sbatch`
-drops the define on purpose (its own comment says so) and is what the
-one-step and stage oracles are built from.
+about `fv_dynamics` may be read off that binary.
+`build_oracle_hydro_serialnc.sbatch` drops the define on purpose (its
+own comment says so) and is what the one-step and stage oracles are
+built from.
 
 `dtmp` is initialised to `0.` at `fv_mapz.F90:627` and assigned only
 inside `consv > consv_min` (`:708`) and `consv < -consv_min`

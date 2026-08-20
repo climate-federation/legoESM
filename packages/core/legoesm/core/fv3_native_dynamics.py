@@ -84,7 +84,20 @@ species (liq_wat/rainwat/ice_wat/snowwat/graupel), each guarded on
 ``adiabatic`` likewise reaches exactly ONE branch, ``fv_mapz.F90:985``
 (``flagstruct%adiabatic`` is passed at ``:627`` and used nowhere else),
 which is why threading it honestly on the moist NH arm changes nothing
-else.
+else -- and why the moist HYDROSTATIC arm can keep passing
+``adiabatic=True`` where the oracle deck resolves ``.false.``: ``:975``
+is ungated, which the mapz gate's hydrostatic control checks.
+
+THAT SINGLE-BRANCH CLAIM IS ENFORCED BY NOTHING, so re-run the grep
+before adding any ``adiabatic``-keyed branch to either lane, or before
+reading a new one out of the oracle::
+
+    grep -n adiabatic <oracle>/model/fv_mapz.F90   # :985 only, besides
+                                                   # the declarations
+    grep -rn adiabatic packages/core/legoesm/core/fv3*mapz.py
+
+A second gated branch would make ``adiabatic_flag = hydrostatic or
+zvir == 0.0`` silently wrong on the moist hydrostatic arm.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------
@@ -307,6 +320,15 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     ``pkz`` as :func:`p_var_hydrostatic` builds them.  BOTH are mutated
     in place, exactly as the Fortran's ``intent(inout)`` dummies are.
 
+    THE RETURNED ``press["pkz"]`` IS DRY, ALWAYS.  The remap writes it
+    from the post-remap state with no ``(1+dp1)`` (``fv_mapz.F90:
+    479-481``), and on the moist NH arm the NEXT call overwrites it at
+    ``fv_dynamics.F90:299-322``.  That is exactly what the oracle
+    exposes between calls, so it is not a divergence -- but a consumer
+    that stops BETWEEN steps and assumes "moist run implies moist pkz"
+    would be wrong, which is why it is stated here rather than only in
+    a test (GLM MINOR, job 9442483).
+
     ``pt`` enters as TEMPERATURE and leaves as TEMPERATURE: this routine
     owns the round trip (``:396-408`` in, ``fv_mapz.F90:209-217`` out).
     A caller that stops between the two gets ``theta_v``.
@@ -442,7 +464,12 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             # dp1 already matching it.
             dp1 = zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
             if not hydrostatic:
-                # :299-322 is INSIDE fv_dynamics and runs on EVERY call:
+                # :299-322 is INSIDE fv_dynamics and runs on every call
+                # on BOTH NH arms -- but only the MOIST one is recomputed
+                # here. The dry NH arm still trusts the caller's pkz,
+                # which is covered by the certified dry parity and is
+                # deliberately left alone; do not read this comment as
+                # licence to recompute there (GLM, job 9442483). Moist:
                 # on the NH moist arm it OVERWRITES pkz with
                 # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
                 # step-entry state, while pt is still TEMPERATURE. The

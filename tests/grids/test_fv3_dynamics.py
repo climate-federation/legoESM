@@ -355,6 +355,13 @@ def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
     oracle's hydrostatic branch (:281-294) only forms dp1 -- so there
     the same substitution MUST move the answer.  Without that half this
     gate could pass on a lane that ignored pkz everywhere.
+
+    WHAT THIS TEST DOES NOT PIN: that the recompute is MOIST.  A lane
+    that recomputed with ``dp1=None`` -- the dry form -- stays green
+    here, because the answer still stops depending on the caller's pkz.
+    Moistness is pinned by
+    :func:`test_nh_moist_pkz_matches_the_oracle_expression`'s
+    anti-vacuity assert and by the parity gate above.
     """
     ak, bk, ptop = eta
     for hydrostatic in (False, True):
@@ -371,8 +378,14 @@ def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
                            zvir=ZVIR, sphum_index=0)
         b = _run_jax_press(jctx, eta, press_nh, hydrostatic=hydrostatic,
                            zvir=ZVIR, sphum_index=0)
-        same = (np.asarray(a["pt"]).tobytes()
-                == np.asarray(b["pt"]).tobytes())
+        # EVERY returned field, not just pt: a consumer of the caller's
+        # pkz sitting in the w or delz path would escape a pt-only
+        # comparison and be caught only later, indirectly, at tolerance
+        # level (GLM MINOR, job 9442483).
+        names = ["delp", "pt", "u", "v"] + ([] if hydrostatic
+                                            else ["w", "delz"])
+        same = all(np.asarray(a[nm]).tobytes()
+                   == np.asarray(b[nm]).tobytes() for nm in names)
         if hydrostatic:
             assert not same, ("the hydrostatic arm must CONSUME the "
                               "caller's pkz; if it does not, the NH half "
@@ -396,13 +409,17 @@ def test_nh_moist_pkz_matches_the_oracle_expression(eta):
     got = jdyn.p_var_nonhydrostatic(
         jst["delp"], jst["delz"], jst["pt"], ptop=eta[2], akap=AKAP,
         n=N, ng=NG, km=KM, dp1=dp1)["pkz"]
-    ref = np.stack([f["pt"] for f in _state(False)])
-    want = npdyn.p_var_nonhydrostatic(
-        np.stack([f["delp"] for f in _state(False)])[0],
-        np.stack([f["delz"] for f in _state(False)])[0], ref[0],
-        ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM,
-        dp1=np.asarray(dp1)[0])["pkz"]
-    assert np.asarray(got)[0].tobytes() == want.tobytes()
+    # ALL SIX FACES: a face-axis transposition in the stacked call is
+    # bitwise-identical on face 0 alone and would be caught only at
+    # 3.2e-10 elsewhere (GLM MINOR, job 9442483).
+    faces = _state(False)
+    for t in range(6):
+        want = npdyn.p_var_nonhydrostatic(
+            faces[t]["delp"], faces[t]["delz"], faces[t]["pt"],
+            ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM,
+            dp1=np.asarray(dp1)[t])["pkz"]
+        assert np.asarray(got)[t].tobytes() == want.tobytes(), \
+            f"face {t} disagrees with the spec bitwise"
 
     dry = jdyn.p_var_nonhydrostatic(
         jst["delp"], jst["delz"], jst["pt"], ptop=eta[2], akap=AKAP,
@@ -618,7 +635,12 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
     # need for delz (the fixture here is a HYDROSTATIC state, which
     # carries none, so hydrostatic=False must be caught rather than
     # indexed into).
-    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False}, ValueError),
+    # match= is REQUIRED here: deleting the delz guard would otherwise
+    # leave this green via the NH hs6/w_limiter ValueErrors, and the
+    # "caught rather than indexed into" claim would silently change
+    # referent (GLM MINOR, job 9442483).
+    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False},
+     (ValueError, "delz")),
     ({"zvir": 0.61}, ValueError),                       # sphum_index None
     ({"zvir": 0.61, "sphum_index": -1}, ValueError),    # wrap-around
     ({"zvir": 0.61, "sphum_index": NQ}, ValueError),    # out of range
@@ -650,7 +672,11 @@ def test_unported_arms_raise_instead_of_running_something_adjacent(
     press = _press_jax(jst, ptop)
     args = _common(ptop, ak, bk, True, 1, 2)
     args.update(kw)
-    with pytest.raises(exc):
+    if isinstance(exc, tuple) and len(exc) == 2 and isinstance(exc[1], str):
+        exc, match = exc
+    else:
+        match = None
+    with pytest.raises(exc, match=match):
         jdyn.fv_dynamics_step(jctx, jst, press, q=q, **args)
 
 
