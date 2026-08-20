@@ -5368,24 +5368,6 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     nu2 = jnp.full((ng,), p.nu2)
     nu9 = jnp.full((ng,), p.nu9)
 
-    # ---- (0) SURFACE VARIANCE BC (#1508) ----
-    # Upstream: "Surface variances should be set here, before the call to
-    # either advance_xp2_xpyp or advance_wp2_wp3"
-    # (advance_clubb_core_module.F90:1058-1067). It runs BEFORE the diagnostics
-    # too, so the closure sees the corrected surface values rather than
-    # whatever the previous step's interior solve left at level 0.
-    # The four surface FLUX BCs are already in the state at level 0 -- the
-    # bridge writes them there before calling this -- which is also how the
-    # oracle reads its own (`wpthlp(i,gr%k_lb_zm)`).
-    _wp2_0, _up2_0, _vp2_0, _thlp2_0, _rtp2_0, _rtpthlp_0 = calc_sfc_varnce(
-        state.upwp[:, 0], state.vpwp[:, 0],
-        state.wpthlp[:, 0], state.wprtp[:, 0],
-        state.wp2, state.up2, state.vp2, state.thlp2, state.rtp2,
-        state.rtpthlp, config)
-    state = state._replace(
-        wp2=_wp2_0, up2=_up2_0, vp2=_vp2_0,
-        thlp2=_thlp2_0, rtp2=_rtp2_0, rtpthlp=_rtpthlp_0)
-
     # ---- (1) closure diagnostics on the start-of-step state ----
     diag = compute_clubb_diagnostics(
         state.wp2, state.wp3, state.up2, state.vp2, state.thlp2, state.rtp2,
@@ -5397,6 +5379,30 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         state.up2, state.vp2, state.wprtp, state.wpthlp, state.upwp, state.vpwp,
         wm_zt, state.rtm, state.thlm, state.um, state.vm, exner_zt, p_in_Pa_zt,
         thv_ds_zt, gr, config)
+
+    # ---- (2b) SURFACE VARIANCE BC (#1508) ----
+    # Upstream: "Surface variances should be set here, before the call to
+    # either advance_xp2_xpyp or advance_wp2_wp3"
+    # (advance_clubb_core_module.F90:1058-1067).
+    #
+    # ORDER MATTERS and I had it wrong. The oracle runs
+    # compute_sigma_sqd_w (791) and pdf_closure_driver (814) and
+    # calc_stability_correction (1008) FIRST, and only then calls
+    # calc_sfc_varnce (1067), with the advances following at 1134+. So its
+    # pre-advance PDF closure and diagnostics see the PRE-BC moments. Placing
+    # this at the top of the step instead fed BC'd surface values into the PDF
+    # closure -- a behavioural change, not a port. Caught by review.
+    # The four surface FLUX BCs are already in the state at level 0 -- the
+    # bridge writes them there before calling this -- which is also how the
+    # oracle reads its own (`wpthlp(i,gr%k_lb_zm)`).
+    _wp2_0, _up2_0, _vp2_0, _thlp2_0, _rtp2_0, _rtpthlp_0 = calc_sfc_varnce(
+        state.upwp[:, 0], state.vpwp[:, 0],
+        state.wpthlp[:, 0], state.wprtp[:, 0],
+        state.wp2, state.up2, state.vp2, state.thlp2, state.rtp2,
+        state.rtpthlp, config)
+    state = state._replace(
+        wp2=_wp2_0, up2=_up2_0, vp2=_vp2_0,
+        thlp2=_thlp2_0, rtp2=_rtp2_0, rtpthlp=_rtpthlp_0)
 
     # ---- (3) advance_xm_wpxp: rtm/wprtp + thlm/wpthlp ----
     wprtp, rtm, wpthlp, thlm = advance_xm_wpxp(
