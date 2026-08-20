@@ -50,6 +50,11 @@ def main() -> int:
     ap.add_argument("--level", type=int, default=0, help="model level to report.")
     ap.add_argument("--nlev", type=int, default=75)
     ap.add_argument("--H-max", type=float, default=5902.06)
+    ap.add_argument("--dt", type=float, default=150.0,
+                    help="the run's timestep; the Smagorinsky CFL cap scales "
+                         "as 1/dt so this must match the arm.")
+    ap.add_argument("--smag-cfl-safety", type=float, default=0.125,
+                    help="the run's --smag-cfl-safety.")
     a = ap.parse_args()
 
     import netCDF4 as nc
@@ -85,9 +90,27 @@ def main() -> int:
 
     u = jnp.asarray(np.asarray(z["u"], dtype=np.float64))
     v = jnp.asarray(np.asarray(z["v"], dtype=np.float64))
-    A_smag = np.asarray(smagorinsky_viscosity_cgrid(u, v, grid, a.C_smag))
+    A_smag_raw = np.asarray(smagorinsky_viscosity_cgrid(u, v, grid, a.C_smag))
+
+    # THE MODEL CAPS IT. ocean_pe_latlon_cgrid applies laplacian_smag_cfl_cap
+    # (safety * area * cos^2(lat) / dt) before the viscous tendency, so the raw
+    # coefficient is NOT what the momentum equation sees. Reporting the
+    # uncapped value would overstate the ratio wherever the cap binds.
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        laplacian_smag_cfl_cap,
+    )
+    cap_h, _cap_q = laplacian_smag_cfl_cap(grid, a.dt, a.smag_cfl_safety)
+    cap_h = np.asarray(cap_h)
+    A_smag = np.minimum(
+        A_smag_raw,
+        cap_h[..., None] if A_smag_raw.ndim == 3 else cap_h)
     if A_smag.ndim == 3:
         A_smag = A_smag[..., a.level]
+        A_smag_raw = A_smag_raw[..., a.level]
+    _bind = float(np.mean(A_smag < A_smag_raw - 1e-9) * 100.0)
+    print(f"[cap] laplacian_smag_cfl_cap(safety={a.smag_cfl_safety}, "
+          f"dt={a.dt}) binds on {_bind:.2f}% of cells at level {a.level}; "
+          "the capped value is what the momentum equation uses.")
 
     if a.visc_file is not None:
         dv = nc.Dataset(a.visc_file)
