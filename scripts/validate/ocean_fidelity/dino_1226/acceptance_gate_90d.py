@@ -123,6 +123,29 @@ def metrics(st, wet):
 def load_candidate(path, day=90):
     """{"T","S","u","land_mask"} (fp64) from a kamm_twin_90d --save-3d npz."""
     d = np.load(path)
+    # #1455 season-bug guard (extend-only): a candidate produced on the LEGACY
+    # relative clock is forced exactly antiphase to NEMO's seasonal forcing
+    # (usrdef_sbc.F90:536 runs on absolute kt; the day-180 restart carries
+    # adatrj=180.0), so scoring it here is a cross-season confound, not a
+    # fidelity measurement. The harness stamps seasonal_t0_seconds into every
+    # artifact (kamm_twin_90d.py); refuse artifacts that lack the stamp
+    # (pre-fix) or carry t0=0 (legacy clock), unless explicitly overridden
+    # for historical reproduction.
+    import os as _os
+    if _os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK") != "1":
+        if "seasonal_t0_seconds" not in d.files:
+            raise SystemExit(
+                f"{path} carries no seasonal_t0_seconds stamp -- it predates "
+                "the season-bug fix (#1455, 8e56daafa) and was forced "
+                "antiphase to NEMO. Re-run the twin, or set "
+                "DINO_GATE_ALLOW_LEGACY_CLOCK=1 to score it anyway (the "
+                "result is then NOT a NEMO comparison).")
+        if float(d["seasonal_t0_seconds"]) == 0.0:
+            raise SystemExit(
+                f"{path} was produced on the LEGACY relative clock "
+                "(seasonal_t0_seconds=0) -- antiphase to NEMO's forcing. "
+                "Set DINO_GATE_ALLOW_LEGACY_CLOCK=1 only for historical "
+                "reproduction; the score is then NOT a NEMO comparison.")
     key = f"u3d_day{day}"
     if key not in d:
         raise SystemExit(f"{path} has no {key} -- run kamm_twin_90d.py with "
