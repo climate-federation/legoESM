@@ -773,6 +773,19 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
     every per-field semantic -- the pole fold's sign flip and its window
     column map -- is applied AFTER the split, never on the packed buffer.
 
+    The assembly touches each field's data TWICE, and that is load-bearing.
+    Cutting the message count did not make this body fast: a byte census of the
+    compiled program found it moving 194 MB of local data to exchange 0.81 MB
+    over the wire, because it built the lat-extended block, then the
+    lat-and-lon-extended block, then sliced the interior back out and stacked
+    the ghost rows on again -- four passes over every field. The longitude
+    exchange does need lat-extended COLUMNS to fill the corners, but those are
+    only ``halo`` wide and are built directly from the edge slices and the rows
+    that just arrived, so the full block is never materialised. What remains is
+    one pass to widen the interior rows and one to stack the ghost rows, and
+    the same census now reports 68.7 MB. Anything added here that copies a
+    whole field again gives that back.
+
     Even ``p_lon`` with ``w >= 4h`` only, which is the tiling the campaign
     runs. Odd ``p_lon`` needs the all_gather fold, whose packed form is a
     follow-up; it raises rather than silently falling back to the per-field
@@ -836,25 +849,33 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
                 _halo_ppermute(sbuf, "lat", perm_north), sw, south_edges)
             south_recv = _chan_unpack(
                 _halo_ppermute(nbuf, "lat", perm_south), nw, north_edges)
-        exts = [jnp.concatenate([s, f, n], axis=0)
-                for s, f, n in zip(south_recv, fields, north_recv)]
 
-        # 2. ONE longitude message per direction, all fields, on the
-        #    lat-extended blocks — which is what fills the corners.
+        # 2. The longitude exchange has to carry LAT-EXTENDED columns, because
+        #    that is what fills the corners. It does NOT need the whole
+        #    lat-extended block to get them: the columns are only `halo` wide,
+        #    so they are built directly from the edge slices and the rows that
+        #    just arrived. Materialising the full lat-extended block here, and
+        #    then again after the longitude exchange, is what made this body
+        #    copy every field four times over.
+        west_cols = [jnp.concatenate([s[:, :halo], f[:, :halo], n[:, :halo]],
+                                     axis=0)
+                     for s, f, n in zip(south_recv, fields, north_recv)]
+        east_cols = [jnp.concatenate([s[:, -halo:], f[:, -halo:], n[:, -halo:]],
+                                     axis=0)
+                     for s, f, n in zip(south_recv, fields, north_recv)]
         if p_lon == 1:
-            exts = [lon_ring_ghosts_spmd(e, mesh, halo=halo) for e in exts]
+            # The wrap: with one tile spanning the whole ring, my east ghost is
+            # my own west columns. Same values jnp.pad(mode="wrap") gives, with
+            # no full-block pad to produce them.
+            east_ghost, west_ghost = west_cols, east_cols
         else:
             perm_to_west, perm_to_east = latlon_lon_ring_perms(p_lon)
-            west_edges = [e[:, :halo] for e in exts]
-            east_edges = [e[:, -halo:] for e in exts]
-            wbuf, ww = _chan_pack(west_edges)
-            ebuf, ew = _chan_pack(east_edges)
+            wbuf, ww = _chan_pack(west_cols)
+            ebuf, ew = _chan_pack(east_cols)
             east_ghost = _chan_unpack(
-                _halo_ppermute(wbuf, "lon", perm_to_west), ww, west_edges)
+                _halo_ppermute(wbuf, "lon", perm_to_west), ww, west_cols)
             west_ghost = _chan_unpack(
-                _halo_ppermute(ebuf, "lon", perm_to_east), ew, east_edges)
-            exts = [jnp.concatenate([w, e, ea], axis=1)
-                    for w, e, ea in zip(west_ghost, exts, east_ghost)]
+                _halo_ppermute(ebuf, "lon", perm_to_east), ew, east_cols)
 
         # 3. Pole fold. The two collectives it needs — the 2h ring extension
         #    and the antipodal exchange — run ONCE on a packed buffer; the
@@ -902,13 +923,23 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
 
             s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
 
+        # 4. Assemble each padded field in TWO passes over its data instead of
+        #    four: one to widen the interior rows, one to stack the ghost rows
+        #    on top and below. Every other piece here is `halo` rows or `halo`
+        #    columns, so it costs nothing next to the field itself.
         out = []
-        for e, sf, nf in zip(exts, s_fold, n_fold):
-            south_ghost = jnp.where(b == 0, sf, e[:halo])
-            north_ghost = jnp.where(b == p_lat - 1, nf, e[-halo:])
-            out.append(jnp.concatenate(
-                [south_ghost, e[halo:e.shape[0] - halo], north_ghost],
-                axis=0))
+        for f, s_mid, n_mid, wg, eg, sf, nf in zip(
+                fields, south_recv, north_recv, west_ghost, east_ghost,
+                s_fold, n_fold):
+            mid = jnp.concatenate(
+                [wg[halo:wg.shape[0] - halo], f,
+                 eg[halo:eg.shape[0] - halo]], axis=1)
+            south_row = jnp.concatenate([wg[:halo], s_mid, eg[:halo]], axis=1)
+            north_row = jnp.concatenate([wg[-halo:], n_mid, eg[-halo:]],
+                                        axis=1)
+            south_row = jnp.where(b == 0, sf, south_row)
+            north_row = jnp.where(b == p_lat - 1, nf, north_row)
+            out.append(jnp.concatenate([south_row, mid, north_row], axis=0))
         return tuple(out)
 
     return body
