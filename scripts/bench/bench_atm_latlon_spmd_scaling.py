@@ -99,7 +99,7 @@ from metadata import (  # noqa: E402
 )
 
 
-def _build_model(n_lat, n_lon, nlev):
+def _build_model(n_lat, n_lon, nlev, fix_mass=True):
     _import_jax()
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -110,20 +110,26 @@ def _build_model(n_lat, n_lon, nlev):
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth,
                               omega=constants.Omega)
     sigma = create_sigma_coordinate(n_levels=nlev)
+    # The mass fixer is a GLOBAL area-weighted sum, which under lat-band
+    # sharding is an all-reduce over EVERY device on EVERY step. The halo
+    # no-communication arm does not remove it -- that arm only replaces the
+    # halo exchanges -- so its cost is reported by this benchmark as local
+    # work. Being able to switch it off is what makes the two separable.
+    # MEASUREMENT ONLY: a run with it off does not conserve mass.
     cfg = CGridLatLonPrimitiveEquationConfig(
-        fix_mass=True, use_polar_filter=False, use_ppm_transport=True,
+        fix_mass=fix_mass, use_polar_filter=False, use_ppm_transport=True,
         time_integrator="ssp_rk3")
     return CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
 
 
-def _build(n_lat, n_lon, nlev):
+def _build(n_lat, n_lon, nlev, fix_mass=True):
     _import_jax()
     # nd=1 lane + tests: global (unsharded) IC build, unchanged protocol.
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
 
-    model = _build_model(n_lat, n_lon, nlev)
+    model = _build_model(n_lat, n_lon, nlev, fix_mass)
     hs0 = held_suarez_init_latlon(model.grid, model.sigma_coord)
     c0 = hydrostatic_to_cgrid(hs0, model.grid)
     return model, c0
@@ -205,6 +211,12 @@ def main() -> int:
                    help="MEASURED link bandwidth [GB/s] of THIS machine's "
                         "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
                         "placeholder in metadata.py -> bound_calibrated=false.")
+    p.add_argument("--no-fix-mass", action="store_true",
+                   help="Switch off the global mass fixer. It is an all-reduce "
+                        "over every device on every step, and the halo "
+                        "no-communication arm does not remove it, so its cost "
+                        "is reported as local work. MEASUREMENT ONLY: a run "
+                        "with this set does not conserve mass.")
     p.add_argument("--out", type=str, default="results/a1/spmd_scaling.jsonl")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
@@ -362,7 +374,8 @@ def main() -> int:
             raise SystemExit("--p-lon > 1 needs more than one device")
 
     if nd == 1:
-        model, c0 = _build(n_lat, args.n_lon, args.nlev)
+        model, c0 = _build(n_lat, args.n_lon, args.nlev,
+                           fix_mass=not args.no_fix_mass)
         mesh = None
         c = c0
     else:
@@ -373,7 +386,8 @@ def main() -> int:
         # assert_equal all-gather). This is what lets full-node-packed CPU
         # rungs (128 procs/node) survive at large n_lat.
         _stage("building model geometry (host)")
-        model = _build_model(n_lat, args.n_lon, args.nlev)
+        model = _build_model(n_lat, args.n_lon, args.nlev,
+                             fix_mass=not args.no_fix_mass)
         _stage("geometry built; creating mesh + band-local IC")
         if p_lon > 1:
             mesh = jax.sharding.Mesh(
@@ -554,6 +568,7 @@ def main() -> int:
     rec = dict(
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
         nlev=args.nlev, physics=args.physics, steps=args.steps,
+        fix_mass=not args.no_fix_mass,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
