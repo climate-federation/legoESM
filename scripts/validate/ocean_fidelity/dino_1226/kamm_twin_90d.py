@@ -404,6 +404,40 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     else:
         dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
 
+    # #1455 SEASONAL-CLOCK OFFSET (opt-in measurement knob, default UNCHANGED).
+    # DINO's analytic surface forcing is a function of the DAY OF YEAR
+    # (usrdef_sbc.F90:536-547: ztime = REAL(kt)*rn_Dt, the ABSOLUTE step
+    # index).  This loop passes t_seconds = (k+1)*DT, i.e. it restarts the
+    # seasonal year at zero even though the bridged state is NEMO's step
+    # KT0 = 5760 (RUN_90D_TWIN/ocean.output:711 -- kt 5761 is 0001/07/01,
+    # nday_year 181), so T* and Qsr run half a year out of phase with the
+    # NEMO run this twin is compared against.
+    #   unset / "0"  -> t = (k+1)*DT               (BIT-IDENTICAL to every
+    #                                               previously recorded run)
+    #   "restart"    -> t = (KT0 + k+1)*DT, KT0 parsed from the restart name
+    #   <integer>    -> t = (<integer> + k+1)*DT
+    _kt0_env = os.environ.get("DINO_TWIN_SEASONAL_KT0", "0")
+    if _kt0_env == "restart":
+        _digits = "".join(c for c in RESTART_FILE if c.isdigit())
+        if not _digits:
+            raise SystemExit(
+                f"DINO_TWIN_SEASONAL_KT0=restart but RESTART_FILE={RESTART_FILE!r} "
+                "carries no step number to parse")
+        kt0 = int(_digits)
+    else:
+        try:
+            kt0 = int(_kt0_env)
+        except ValueError:
+            raise SystemExit(
+                f"Unknown DINO_TWIN_SEASONAL_KT0={_kt0_env!r}: expected "
+                "'restart' or an integer step index") from None
+        if kt0 < 0:
+            raise SystemExit(
+                f"DINO_TWIN_SEASONAL_KT0={kt0} is negative; expected >= 0")
+    print(f"seasonal clock: t_seconds = ({kt0} + k+1)*{DT:.0f}s  "
+          f"(day-of-year at step 1 = {((kt0 + 1) * DT / 86400.0) % 360.0 + 1:.2f})",
+          flush=True)
+
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
 
@@ -431,12 +465,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     for k in range(nsteps):
         if _sf_placement == "leapfrog_rhs":
             st, _ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT,
+                st, forcing, br.z_coord, cfg, DT, t_seconds=(kt0 + k + 1) * DT,
                 return_rate=True)
             st = dyn(st, _ext_rate)
         else:
             st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                     t_seconds=(k + 1) * DT)
+                                                     t_seconds=(kt0 + k + 1) * DT)
             st = dyn(st)
 
         if (k + 1) % STEPS_PER_DAY == 0:
