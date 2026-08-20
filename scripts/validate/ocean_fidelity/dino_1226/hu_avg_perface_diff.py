@@ -112,6 +112,35 @@ slot.  If ``eta`` and ``Hu_avg`` emerge from different substep filters the
 identity CANNOT hold.  The switchable field already exists; flipping it is a
 single-variable, one-run test.
 
+M1 PRE-REGISTRATION (#1455 decisive measurement, written BEFORE the run)
+==============================================================================
+THE A/B.  ONE variable: the barotropic substep-averaging convention, selected
+by ``DINO_RECONCILE`` (config-level override of the card's own resolved value,
+no production edit).  Everything else held: fp64, LEGOESM_NEMO_E3T=both, wind
+ON, the same bridged IC at kt=230400, the same single step.
+
+NUMBER PRODUCED, per arm: the PER-CELL identity residual
+``|closure - (d_eta_lego - d_ssh_nemo)|``, max [m] and L2rel.  The recorded
+card-default value is 4.4641e-04 m / L2rel 5.83e-01 (231% of the wind-on eta
+increment's own max).
+
+CONFIRMS the convention owns the invariant violation: ONE arm's residual
+collapses to near roundoff (max <= 1e-12 m, i.e. >= 1e8x down) while the other
+stays at ~4.5e-04 m.
+
+REFUTES it: both arms return the same residual to within 1%.
+
+PREDICTION, recorded before the run and read off the call graph, not guessed:
+REFUTED, and BIT-IDENTICALLY so.  ``_reconcile_targets``
+(barotropic_latlon_cgrid.py:1113-1154) is called at :1529, AFTER the substep
+loop has returned; it reads ``U_bar_avg``/``Hu_avg`` and returns ONLY the
+depth-uniform target that the 3-D VELOCITY is rebuilt on.  ``eta_avg`` (:1511)
+and ``Hu_avg`` (:1498) are both already fixed at that point and neither is a
+function of the flag, and ``state.eta`` is set from ``eta_avg`` alone (:1546).
+Within ONE step from a fixed IC the flag therefore cannot move either side of
+the identity by a single bit.  If the two arms differ AT ALL, this reading of
+the call graph is wrong, and THAT is the finding.
+
 WITHDRAWN, this probe's own over-claims, both raised in review:
   * "the remainder is WIND-INDEPENDENT" was presented as suggestive.  It is
     not evidence: the wind changes |Hu_avg| by at most ~0.3% (0.88 of 272
@@ -295,15 +324,41 @@ def _run_one_step_capture():
         apply_dino_lat_lon_surface_forcing, dino_lat_lon_model_config,
         dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing)
 
+    import dataclasses
+
     mr.IC_STEP = 230400
     jax.clear_caches()
     g, br, cfg, st0 = mr.build_replay_ic()   # asserts day-0 bit-identity
+    # -- M1 A/B: the barotropic substep-averaging convention, ONE variable ----
+    # ``DINO_RECONCILE`` overrides the CARD's own resolved value at the config
+    # level only (no production edit).  Unset => the card decides; the resolved
+    # value on the model config is printed either way, since the card default
+    # is the thing under test and a probe that echoed my label instead of the
+    # resolved field would be worthless as an A/B.
+    _card_recon = getattr(cfg, "barotropic_reconcile_target", None)
+    _recon_env = os.environ.get("DINO_RECONCILE", "")
+    if _recon_env:
+        if _recon_env not in ("velocity_avg", "transport_avg"):
+            raise SystemExit(
+                f"DINO_RECONCILE={_recon_env!r}: must be one of "
+                "('velocity_avg', 'transport_avg')")
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_recon_env)
     print(f"  card surface_tendency_placement="
-          f"{getattr(cfg,'surface_tendency_placement',None)!r} "
-          f"transport_avg={getattr(cfg,'barotropic_reconcile_target',None)!r}")
+          f"{getattr(cfg,'surface_tendency_placement',None)!r}")
+    print(f"  RECONCILE: card default={_card_recon!r} "
+          f"env override={_recon_env or None!r} "
+          f"cfg now={getattr(cfg,'barotropic_reconcile_target',None)!r}")
     print(f"  leapfrog outer={getattr(cfg,'outer_integrator',None)!r}  "
           f"eta dtype={st0.eta.data.dtype} u={st0.u.data.dtype}")
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+    # RESOLVED value on the object the solver actually reads (state.py
+    # BarotropicConfig), not the DINOConfig the card was built from -- the two
+    # are wired together at dino.py:3131 and this print is what makes the A/B
+    # checkable rather than label-dependent.
+    print(f"  RESOLVED barotropic.barotropic_reconcile_target="
+          f"{mc.barotropic.barotropic_reconcile_target!r}  "
+          f"time_filter={mc.barotropic.barotropic_time_filter!r}",
+          flush=True)
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
     # WIND-ON harness (commit 5e8407797's pattern, and its retraction fdb5cfec6):

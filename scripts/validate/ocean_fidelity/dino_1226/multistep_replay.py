@@ -146,6 +146,7 @@ def provenance(tag: str = "") -> str:
         f"{k}={os.environ.get(k)!r}" for k in (
             "LEGOESM_NEMO_E3T", "JAX_ENABLE_X64", "CUDA_VISIBLE_DEVICES",
             "DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+            "DINO_RECONCILE",
             "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
             "DINO_NEMO_RUN_TWIN_STEP1",
         ))
