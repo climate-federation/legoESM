@@ -112,6 +112,44 @@ def test_serial_wide_matches_standard(setup, flat):
     _assert_close(hv_w, hv_s, atol, "Hv_avg")
 
 
+def test_wide_halo_honours_reconcile_target(setup):
+    """The wide-halo path must READ ``barotropic_reconcile_target``, not
+    silently reconcile onto the velocity mean.
+
+    Two claims, both needed for non-vacuity:
+
+    1. the option is LIVE on this state (the two targets give genuinely
+       different 3-D velocities on the wide path), and
+    2. the wide path's ``transport_avg`` result matches the standard path's
+       ``transport_avg`` result to re-association tolerance.
+
+    Before the fix the wide path ignored the option entirely, so (2) failed
+    at O(1) (it reproduced the standard path's velocity_avg arm instead).
+    """
+    grid, z_coord, state = setup
+    n_sub = 12
+    cfg_v = _cfg(barotropic_reconcile_target="velocity_avg")
+    cfg_t = _cfg(barotropic_reconcile_target="transport_avg")
+
+    s_wide_v, _ = barotropic_substeps_wide_halo_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_v)
+    s_wide_t, _ = barotropic_substeps_wide_halo_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_t)
+    s_std_t, _ = barotropic_substeps_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_t)
+
+    # (1) the two kernels do not coincide on this state.
+    spread = float(np.max(np.abs(
+        np.asarray(s_wide_t.u.data) - np.asarray(s_wide_v.u.data))))
+    assert spread > 1e-9, (
+        f"velocity_avg and transport_avg give the SAME wide-halo velocity "
+        f"(max diff {spread:.2e}) — the test cannot detect an ignored option")
+
+    # (2) wide == standard for the non-default target.
+    _assert_close(s_wide_t.u.data, s_std_t.u.data, 1e-12, "u (transport_avg)")
+    _assert_close(s_wide_t.v.data, s_std_t.v.data, 1e-12, "v (transport_avg)")
+
+
 def test_wide_volume_drift_matches_standard(setup):
     """The wide path introduces NO conservation change: its area-weighted
     eta drift over the subcycle equals the standard path's to round-off.

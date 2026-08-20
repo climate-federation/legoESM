@@ -1110,6 +1110,50 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
     return w_filter, w_total, w_transport, n_loop
 
 
+def _reconcile_targets(config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
+                       h_k_now, grid, min_water_col, dtype):
+    """3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6,
+    dynspg_ts.F90:1170-1172).
+
+    The caller subtracts the NOW-thickness depth-mean of the 3-D velocity
+    (== NEMO ``puu_b(Kmm)``) and adds back the depth-UNIFORM target returned
+    here:
+
+    * ``"velocity_avg"`` (default): ``U_bar_avg`` — the primary/velocity
+      boxcar mean (bit-identical legacy path).
+    * ``"transport_avg"``: ``Hu_avg/H_u`` — NEMO's ``un_adv*r1_hu(Kmm)``.
+      ``H_u`` is the NOW u-face column depth built from ``h_k_now``, the SAME
+      thickness the subtracted mean is built from, so the reconciled
+      depth-mean is exactly ``Hu_avg/H_u``.
+
+    Shared by BOTH barotropic entry points (standard-halo and wide-halo) so
+    the dispatch — and the raise on an unknown value — exists once.
+
+    Static Python gate on the config string (dispatch hardening). The field
+    always exists on ``BarotropicConfig`` (default ``"velocity_avg"``,
+    ``state.py``) -- a getattr literal-fallback here is the banned pattern
+    (CLAUDE.md: "`getattr(..., 'X', <literal>)` fallbacks count as
+    hardcoded"); read it directly so a future rename/removal of the field
+    raises AttributeError instead of silently reverting to the fallback.
+    """
+    _recon = config.barotropic.barotropic_reconcile_target
+    if _recon not in ("velocity_avg", "transport_avg"):
+        raise ValueError(
+            "unknown barotropic_reconcile_target "
+            f"{_recon!r}: must be one of ('velocity_avg', 'transport_avg').")
+    if _recon != "transport_avg":
+        return U_bar_avg, V_bar_avg
+    # NOW u/v-face column depth = <min_cell_to_uface(h_k_now)>, matching the
+    # thickness that produced the subtracted mean (= NEMO hu(Kmm)); guard the
+    # divide with the wet-column floor (a wet column always exceeds it, so
+    # this is the land-mask guard, not a physics clip).
+    _H_u_now = jnp.maximum(
+        jnp.sum(min_cell_to_uface(h_k_now), axis=-1), min_water_col)
+    _H_v_now = jnp.maximum(
+        jnp.sum(min_cell_to_vface(h_k_now, grid), axis=-1), min_water_col)
+    return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)
+
+
 def barotropic_substeps_latlon_cgrid(
     state: LatLonCGridOceanState,
     dt_s: float,
@@ -1477,42 +1521,14 @@ def barotropic_substeps_latlon_cgrid(
     if config.barotropic.barotropic_local_subcycle_clamp:
         eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
-    # 3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6,
-    # dynspg_ts.F90:1170-1172).  The subtracted mean ``U_bar_corr`` is the
-    # NOW-thickness depth-mean of the 3-D velocity (== NEMO ``puu_b(Kmm)``);
-    # below we replace it with a depth-UNIFORM target.
-    #   "velocity_avg" (default): ``U_bar_avg`` — the primary/velocity boxcar
-    #       mean (bit-identical legacy path).
-    #   "transport_avg": ``Hu_avg/H_u`` — NEMO's ``un_adv*r1_hu(Kmm)``.  ``H_u``
-    #       is the NOW u-face column depth, the SAME thickness ``U_bar_corr``
-    #       (= puu_b) is built from, so the reconciled depth-mean is exactly
-    #       ``Hu_avg/H_u``.
-    # Static Python gate on the config string (dispatch hardening). The
-    # field always exists on BarotropicConfig (default "velocity_avg",
-    # state.py) -- a getattr literal-fallback here is the banned pattern
-    # (CLAUDE.md: "`getattr(..., 'X', <literal>)` fallbacks count as
-    # hardcoded"); read it directly so a future rename/removal of the field
-    # raises AttributeError instead of silently reverting to the fallback.
-    _recon = config.barotropic.barotropic_reconcile_target
-    if _recon not in ("velocity_avg", "transport_avg"):
-        raise ValueError(
-            "unknown barotropic_reconcile_target "
-            f"{_recon!r}: must be one of ('velocity_avg', 'transport_avg').")
-    if _recon == "transport_avg":
-        # NOW u/v-face column depth = <min_cell_to_uface(h_k_now)>, matching the
-        # thickness that produced U_bar_corr (= NEMO hu(Kmm)); guard the divide
-        # with the wet-column floor (a wet column always exceeds it, so this is
-        # the land-mask guard, not a physics clip).
-        _h_k_now = _h_k_corr if _seed_override else h_k
-        _H_u_now = jnp.maximum(
-            jnp.sum(min_cell_to_uface(_h_k_now), axis=-1), min_water_col)
-        _H_v_now = jnp.maximum(
-            jnp.sum(min_cell_to_vface(_h_k_now, grid), axis=-1), min_water_col)
-        recon_u = (Hu_avg / _H_u_now).astype(_dt)
-        recon_v = (Hv_avg / _H_v_now).astype(_dt)
-    else:
-        recon_u = U_bar_avg
-        recon_v = V_bar_avg
+    # 3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6);
+    # ``U_bar_corr`` is the NOW-thickness depth-mean of the 3-D velocity
+    # (== NEMO ``puu_b(Kmm)``) the caller subtracts below.  Dispatch +
+    # divisor convention live in the shared helper (same call on the
+    # wide-halo path).
+    recon_u, recon_v = _reconcile_targets(
+        config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
+        _h_k_corr if _seed_override else h_k, grid, min_water_col, _dt)
 
     # Correct 3D velocities: preserve baroclinic structure.
     # Use the reconciliation target for the 3D correction to ensure
@@ -1853,12 +1869,20 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
     # Correct 3D velocities: preserve baroclinic structure (owned rows only).
+    # Same N6 reconciliation dispatch as the standard-halo path (shared
+    # helper).  ``h_k`` / ``grid`` are the OWNED-band NOW thickness and
+    # geometry, matching the ``U_bar`` subtracted just below; this path has
+    # no before-level seed override, so there is no ``_h_k_corr`` variant.
+    recon_u, recon_v = _reconcile_targets(
+        config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
+        h_k, grid, min_water_col, _dt)
+
     u_baro_old = U_bar[..., jnp.newaxis]
     v_baro_old = V_bar[..., jnp.newaxis]
     u_prime = u - u_baro_old
     v_prime = v - v_baro_old
-    u_new = (u_prime + U_bar_avg[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new = (v_prime + V_bar_avg[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    u_new = (u_prime + recon_u[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
+    v_new = (v_prime + recon_v[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
     state_new = state._replace(
         eta=state.eta.replace(data=eta_avg),
