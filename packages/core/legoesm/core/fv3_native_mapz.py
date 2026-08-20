@@ -770,6 +770,34 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
             f"NOT ported. The reference deck has nr=2 (ncnst=3, dnats=1).")
 
 
+def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
+                 n: int, ng: int) -> None:
+    """``fv_mapz.F90:975``, in place -- the deferred half of the remap.
+
+    ``pt = (pt + dtmp/cp*pkz) / (1. + r_vir*q(sphum))``, EXACTLY as
+    written, on the HYDROSTATIC arm where :975 is ungated by
+    ``adiabatic``.  Split out of :func:`lagrangian_to_eulerian` because
+    ``dtmp`` is a GLOBAL reduction over all six faces and that function
+    runs one face at a time; see the ``defer_close`` comment there.
+
+    ``dtmp = 0`` and ``r_vir = 0`` make this the identity, and the
+    zero-``dtmp`` branches are kept separate so the certified
+    ``consv_te = 0`` lane keeps its exact expression rather than
+    acquiring an add of a zero.
+    """
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n), slice(None))
+    if dtmp == 0.0:
+        if r_vir != 0.0:
+            pt[win] /= (1.0 + r_vir * q[int(sphum_index)][win])
+        return
+    add = pt[win] + dtmp / cp * pkz
+    if r_vir != 0.0:
+        pt[win] = add / (1.0 + r_vir * q[int(sphum_index)][win])
+    else:
+        pt[win] = add
+
+
 def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            ak, bk, ptop, akap, cp, r_vir,
                            km, n, ng,
@@ -780,7 +808,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            w=None, delz=None, ws=None, kord_wz=9,
                            w_limiter=False, rdgas=None, grav=None,
                            fill=False, do_sat_adj=False, do_inline_mp=False,
-                           do_adiabatic_init=False):
+                           do_adiabatic_init=False, defer_close=False):
     """``Lagrangian_to_Eulerian`` for ONE face, in place (fv_mapz.F90:62).
 
     Arrays follow ``fv3_native_state_3d``'s layout contract, 0-based
@@ -1175,7 +1203,15 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
     # fv_mapz.F90:627/630) and r_vir is 0 on the adiabatic deck, so the
     # last_step arm is an identity there -- implemented as written so a
     # moist lane is not silently wrong.
-    if last_step:
+    if last_step and defer_close:
+        # THE ENERGY FIXER NEEDS A GLOBAL SUM AND THIS LANE IS PER FACE.
+        # fv_mapz.F90 computes te_2d, reduces it across the domain and
+        # applies dtmp at :975 all inside one call, because there a
+        # "domain" is every tile at once. Here each face is a separate
+        # call, so dtmp cannot be known yet. Leave pt as T_v and let the
+        # caller reduce over the six faces and call close_out_pt.
+        pass
+    elif last_step:
         if r_vir != 0.0:                          # :975, with dtmp == 0
             sphum = q[int(sphum_index)]
             pt[ia:ia + n, ia:ia + n, :] /= (

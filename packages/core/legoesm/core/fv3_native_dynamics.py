@@ -117,7 +117,11 @@ import operator as _operator
 import numpy as np
 
 from legoesm.core.fv3_native_acoustic_3d import acoustic_loop_3d
-from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
+from legoesm.core.fv3_native_mapz import (
+    CONSV_MIN,
+    close_out_pt,
+    lagrangian_to_eulerian,
+)
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.grids.fv3_native_gridstruct import (
     FV3_GRAV as _FV3_GRAV,
@@ -319,6 +323,156 @@ def nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1=None):
     return rdg * dpw * ptw * (1.0 + dp1) / delz
 
 
+def _hs_face(ctx, t: int, n: int, ng: int) -> np.ndarray:
+    """Surface geopotential for face ``t``, or zeros.
+
+    Every duo deck this lane runs resolves ``mountain = .F.`` and the
+    parity harness ASSERTS the oracle's phis is identically zero, so
+    ``hs`` is zeros here -- but the energy integrals reference it at
+    two places each (``phiz(km+1) = hs`` and ``pe(km+1)*hs``), and
+    writing them against a real array rather than dropping the term
+    keeps them readable against the Fortran and correct if a
+    non-zero-orography deck ever appears.
+    """
+    hs6 = ctx.get("hs6")
+    if hs6 is None:
+        return np.zeros((n + 2 * ng, n + 2 * ng), dtype=np.float64)
+    return np.asarray(hs6[t], dtype=np.float64)
+
+
+# --------------------------------------------------------------------
+# The consv_te energy fixer (fv_mapz.F90:628-747 + compute_total_energy)
+# --------------------------------------------------------------------
+# TWO DIFFERENT COLUMN INTEGRALS, and they are NOT the same expression --
+# porting one and reusing it for the other would be wrong in the last
+# bits and wrong in kind:
+#
+#   te0_2d  compute_total_energy (:1128-1151), called from
+#           fv_dynamics.F90:359 BEFORE the theta conversion, so its pt is
+#           TEMPERATURE and it forms tv = pt*(1+qc) itself. Its phiz
+#           accumulates DOWNWARD from the surface (k = km..1).
+#   te_2d   the fixer (:638-658), on the POST-remap state where pt is
+#           already T_v, so it uses cp*pt with no virtual factor. Its gz
+#           accumulates UPWARD from hs (k = 1..km).
+#
+# Both telescope to the same quantity with hs = 0, but not to the same
+# rounding, and the fixer's te_2d is subtracted from te0_2d -- a
+# difference of two ~1e9 numbers whose result drives a ~4e-6 K
+# correction. Each is written in its own direction on purpose.
+
+
+def total_energy_2d_hydrostatic(pt, delp, u, v, pe, peln, hs, rsin2,
+                                cosa_s, *, qc=None, cp: float, rg: float,
+                                n: int, ng: int, km: int) -> np.ndarray:
+    """``te0_2d``: compute_total_energy's hydrostatic branch (:1128-1151).
+
+    ``pt`` is TEMPERATURE here and ``qc`` is ``dp1 = zvir*q(sphum)``
+    (``fv_dynamics.F90:291``), so ``tv`` is the virtual temperature the
+    routine forms itself.  ``qc=None`` is the dry lane, where the
+    oracle's ``pt*(1.+0)`` is exactly ``pt``.
+    """
+    # LAYOUTS (field_shape, verified not assumed): pe is
+    # (n+2, km+1, n+2) with a ONE-cell halo, peln is (n, km+1, n)
+    # compute-only -- BOTH are (i, k, j), so peln[:, k, :] is already
+    # (i, j) and needs no transpose. pt/delp/hs/rsin2/cosa_s are padded
+    # (m_a, ...) and take [ng:ng+n].
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n))
+    ptw = pt[ia:ia + n, ia:ia + n, :]
+    tv = ptw if qc is None else ptw * (1.0 + qc)
+    # phiz DOWNWARD from the surface: k = km..1  (:1133-1138)
+    phiz = np.empty((n, n, km + 1), dtype=np.float64)
+    phiz[:, :, km] = hs[win]
+    for k in range(km - 1, -1, -1):
+        phiz[:, :, k] = phiz[:, :, k + 1] + rg * tv[:, :, k] * (
+            peln[:, k + 1, :] - peln[:, k, :])
+    pe_w = pe[1:n + 1, :, 1:n + 1]          # pe carries a ONE-cell halo
+    te = pe_w[:, km, :] * phiz[:, :, km] - pe_w[:, 0, :] * phiz[:, :, 0]
+    te = te + _ke_column(delp[ia:ia + n, ia:ia + n, :], u, v, rsin2,
+                         cosa_s, cp_times=cp * tv, n=n, ng=ng, km=km)
+    return te
+
+
+def fixer_energy_2d_hydrostatic(pt, delp, u, v, pe, peln, hs, rsin2,
+                                cosa_s, *, cp: float, rg: float,
+                                n: int, ng: int, km: int) -> np.ndarray:
+    """``te_2d``: the fixer's own integral (:638-658).
+
+    ``pt`` is POST-remap ``T_v`` -- the theta_v -> T_v conversion at
+    :209-217 has already run and the closing :975 divide has NOT -- so
+    this uses ``cp*pt`` with no virtual factor, unlike te0_2d above.
+    ``gz`` accumulates UPWARD from ``hs`` (k = 1..km), also unlike it.
+    """
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n))
+    ptw = pt[ia:ia + n, ia:ia + n, :]
+    gz = np.array(hs[win], dtype=np.float64, copy=True)
+    for k in range(km):                                     # :641-645
+        gz = gz + rg * ptw[:, :, k] * (peln[:, k + 1, :]
+                                       - peln[:, k, :])
+    pe_w = pe[1:n + 1, :, 1:n + 1]          # pe carries a ONE-cell halo
+    te = pe_w[:, km, :] * hs[win] - pe_w[:, 0, :] * gz       # :646-648
+    te = te + _ke_column(delp[ia:ia + n, ia:ia + n, :], u, v, rsin2,
+                         cosa_s, cp_times=cp * ptw, n=n, ng=ng, km=km)
+    return te
+
+
+def _ke_column(delpw, u, v, rsin2, cosa_s, *, cp_times, n: int, ng: int,
+               km: int) -> np.ndarray:
+    """``sum_k delp*(<cp term> + 0.25*rsin2*KE)`` -- identical in both
+    integrals (:650-656 and :1145-1150), so it is shared rather than
+    written twice.
+
+    The KE form is the oracle's D-grid one: the two u faces of the cell
+    and the two v faces, with a ``cosa_s`` cross term for the
+    non-orthogonality.  ``u`` is (m_a, m_a+1) and ``v`` is (m_a+1, m_a),
+    so the j+1 / i+1 neighbours are slices along DIFFERENT axes.
+    """
+    ia = ng
+    r = rsin2[ia:ia + n, ia:ia + n][:, :, None]
+    c = cosa_s[ia:ia + n, ia:ia + n][:, :, None]
+    u0 = u[ia:ia + n, ia:ia + n, :]          # u(i, j)
+    u1 = u[ia:ia + n, ia + 1:ia + 1 + n, :]  # u(i, j+1)
+    v0 = v[ia:ia + n, ia:ia + n, :]          # v(i, j)
+    v1 = v[ia + 1:ia + 1 + n, ia:ia + n, :]  # v(i+1, j)
+    ke = 0.25 * r * (u0 ** 2 + u1 ** 2 + v0 ** 2 + v1 ** 2
+                     - (u0 + u1) * (v0 + v1) * c)
+    return np.sum(delpw * (cp_times + ke), axis=2)
+
+
+def energy_fixer_zsum0_hydrostatic(pkz, delp, pk, *, ptop: float,
+                                   n: int, ng: int, km: int):
+    """``zsum0`` (:692-703): the column's pkz-weighted mass, plus the
+    ptop term the hydrostatic arm adds."""
+    ia = ng
+    zsum1 = np.sum(pkz * delp[ia:ia + n, ia:ia + n, :], axis=2)
+    return ptop * (pk[ia:ia + n, ia:ia + n, 0]
+                   - pk[ia:ia + n, ia:ia + n, km]) + zsum1
+
+
+def energy_fixer_dtmp(te0_faces, te_faces, zsum0_faces, area_faces,
+                      *, consv: float, n: int, ng: int) -> float:
+    """``dtmp`` (:708-714), the one number the fixer reduces to.
+
+    ``g_sum(..., mode=0, reproduce=.true.)`` is an AREA-WEIGHTED SUM
+    (fv_grid_utils.F90:2946-2996; mode 1 would divide by the global
+    area, and mode 0 does not), so the global-area normalisation cancels
+    in this ratio and only the weighting matters.  The oracle's
+    BITWISE_EFP_SUM is a fixed-point accumulation for cross-decomposition
+    reproducibility; a float64 sum differs from it at ~1e-16 relative,
+    which reaches ``pt`` as ``dtmp/cp*pkz`` on a correction that is
+    itself ~4e-6 K -- far under the 1.1866e-09 relative gate.
+    """
+    ia = ng
+    num = den = 0.0
+    for te0, te, z0, ar in zip(te0_faces, te_faces, zsum0_faces,
+                               area_faces):
+        a = ar[ia:ia + n, ia:ia + n]
+        num += float(np.sum((te0 - te) * a))     # :690, te0_2d - te_2d
+        den += float(np.sum(z0 * a))
+    return consv * num / den
+
+
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      bdt: float, km: int, k_split: int, n_split: int,
                      ptop: float, ak, bk, akap: float, cp_air: float,
@@ -423,10 +577,28 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 "every face: the moist NH pkz is recomputed here from "
                 "delp/pt/delz (fv_dynamics.F90:299-322).")
     if consv_te != 0.0:
-        raise NotImplementedError(
-            "consv_te != 0 activates the total-energy fixer "
-            "(fv_mapz.F90:628-747), which is not ported. The pinned deck has "
-            "consv_te = 0.")
+        # The energy fixer IS ported now. What it needs that the dry
+        # lane does not: the per-face grid (area/rsin2/cosa_s for the
+        # two column integrals) and a surface geopotential.
+        if not hydrostatic:
+            raise NotImplementedError(
+                "consv_te != 0 with non-hydrostatic dynamics is not "
+                "enabled: compute_total_energy and the fixer both take "
+                "their NON-hydrostatic branches (fv_mapz.F90:1155-1190 "
+                "and :659-687), which integrate phiz from delz and carry "
+                "the w**2 term. Only the hydrostatic pair is ported, and "
+                "the generated oracle deck is hydrostatic.")
+        if abs(consv_te) <= CONSV_MIN:
+            raise ValueError(
+                f"consv_te={consv_te} is non-zero but within CONSV_MIN="
+                f"{CONSV_MIN}: fv_mapz.F90:630 would leave dtmp exactly 0 "
+                f"and the fixer would not run, so this asks for a lane "
+                f"that looks enabled and is not.")
+        if ctx.get("gs6") is None:
+            raise ValueError(
+                "consv_te != 0 needs ctx['gs6']: the energy integrals "
+                "are area-weighted and use rsin2/cosa_s "
+                "(fv_mapz.F90:650-656).")
 
     n, ng = ctx["n"], ctx["ng"]
     nq = len(q[0])
@@ -478,6 +650,22 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
 
     # :413  mdt = bdt / k_split
     mdt = bdt / float(k_split)
+
+    # :355-365  te0_2d, BEFORE the theta conversion below, because
+    # compute_total_energy is called at :359 while pt is still
+    # TEMPERATURE and forms its own tv = pt*(1+dp1).
+    te0_2d = None
+    if consv_te != 0.0:
+        te0_2d = []
+        for t in range(6):
+            gs = ctx["gs6"][t]
+            qc = (zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
+                  if zvir != 0.0 else None)
+            te0_2d.append(total_energy_2d_hydrostatic(
+                state[t]["pt"], state[t]["delp"], state[t]["u"],
+                state[t]["v"], press[t]["pe"], press[t]["peln"],
+                _hs_face(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
+                qc=qc, cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
 
     # :396-408  T -> theta_v, once per fv_dynamics call, on every face.
     for t in range(6):
@@ -591,6 +779,10 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                     press[t]["pk"][ng:ng + n, ng:ng + n, :] = g["pk"]
             continue
 
+        # The fixer runs only at last_step (fv_mapz.F90:628), so only
+        # that iteration defers its closing conversion. Every other
+        # n_map keeps the certified path byte for byte.
+        _defer = bool(last_step) and consv_te != 0.0
         for t in range(6):
             g = press_out[t]
             ia = ng
@@ -638,7 +830,36 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 grav=(None if hydrostatic else _FV3_GRAV),
                 adiabatic=adiabatic_flag,
                 consv=consv_te, fill=False, do_sat_adj=False,
-                do_inline_mp=False, do_adiabatic_init=False)
+                do_inline_mp=False, do_adiabatic_init=False,
+                defer_close=_defer)
+
+        if _defer:
+            # THE REDUCTION, and the reason the remap had to be split.
+            # fv_mapz does te_2d -> g_sum -> apply inside ONE call
+            # because its "domain" is every tile at once; here a call is
+            # one face, so the six te_2d/zsum0 are collected first, the
+            # area-weighted sums taken over all of them, and only then
+            # is :975 applied. pt is T_v at this point on every face --
+            # defer_close skipped exactly that conversion.
+            te_2d, zsum0 = [], []
+            for t in range(6):
+                gs = ctx["gs6"][t]
+                te_2d.append(fixer_energy_2d_hydrostatic(
+                    state[t]["pt"], state[t]["delp"], state[t]["u"],
+                    state[t]["v"], press[t]["pe"], press[t]["peln"],
+                    _hs_face(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
+                    cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
+                zsum0.append(energy_fixer_zsum0_hydrostatic(
+                    press[t]["pkz"], state[t]["delp"], press[t]["pk"],
+                    ptop=ptop, n=n, ng=ng, km=km))
+            dtmp = energy_fixer_dtmp(
+                te0_2d, te_2d, zsum0,
+                [ctx["gs6"][t]["area"] for t in range(6)],
+                consv=consv_te, n=n, ng=ng)
+            for t in range(6):
+                close_out_pt(state[t]["pt"], press[t]["pkz"], q[t],
+                             sphum_index=sphum_index, r_vir=zvir,
+                             dtmp=dtmp, cp=cp_air, n=n, ng=ng)
 
     return {"state": state, "press": press, "q": q,
             "omga": omga, "omga_is_meaningless": True,

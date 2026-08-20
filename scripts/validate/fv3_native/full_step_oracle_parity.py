@@ -324,7 +324,7 @@ def _nml_real(text: str, key: str):
 
 
 def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
-                               moist: bool) -> None:
+                               moist: bool, consv: float = 0.0) -> None:
     """The deck must BE the arm the flags say it is.
 
     The redirects fire only on exact default-path equality, so explicit
@@ -358,12 +358,14 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
                 f"{run_dir}: resolves {key} = {got!r} but the flags say "
                 f"nh = {nh}. A hydrostatic port loading NH files simply "
                 f"ignores W/DZ and prints a number.")
-    consv = _nml_real(text, "consv_te")
-    if consv is None or consv != 0.0:
+    got = _nml_real(text, "consv_te")
+    if got is None or got != consv:
         raise SystemExit(
-            f"{run_dir}: consv_te must be pinned to 0 (found "
-            f"{consv if consv is not None else 'nothing'}); the "
-            f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
+            f"{run_dir}: resolves consv_te = "
+            f"{got if got is not None else 'nothing'}, but this arm "
+            f"expects {consv}. The fixer is last_step-only and moves pt "
+            f"by ~4e-6 K, so a mismatched deck reads as a defect rather "
+            f"than a configuration error.")
 
 
 def check_physics_is_inert(run_dir: str) -> None:
@@ -1067,6 +1069,16 @@ def main(argv=None):
                          "~2e-4 m/s after one step -- judging it against "
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
+    ap.add_argument("--consv", type=float, default=0.0,
+                    help="ENERGY-FIXER gate: score against "
+                         "run_hydro_{zerostep,1step}_consv_gfs, the "
+                         "certified hydrostatic deck with consv_te set to "
+                         "this value (build_consv_te_oracle.sbatch). The "
+                         "fixer is last_step-only and touches pt alone, "
+                         "so its signal is ~4.2e-06 K -- only ~12x this "
+                         "arm's 1.1866e-09 floor, which is thin. The "
+                         "RESPONSE gate is what certifies it, exactly as "
+                         "on the moist arms.")
     ap.add_argument("--moist", action="store_true",
                     help="MOIST gate: defaults the runs to "
                          "run_hydro_{zerostep,1step}_moist_gfs, which are "
@@ -1113,6 +1125,23 @@ def main(argv=None):
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
     args.dry_twin_run = None
+    if args.consv:
+        if args.moist or args.nh:
+            raise SystemExit(
+                "--consv is hydrostatic-and-dry only: the generated deck "
+                "is hydrostatic, and both energy integrals take their "
+                "NON-hydrostatic branches under --nh, which are not "
+                "ported.")
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_consv_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_hydro_1step_consv_gfs"
+        args.dry_twin_run = f"{ORACLE_ROOT}/run_hydro_1step_gfs"
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                raise SystemExit(
+                    f"missing consv oracle run {_r}; build it with "
+                    f"scripts/cluster/fv3_native/build_consv_te_oracle.sbatch")
     if args.moist:
         if not args.tracers:
             raise SystemExit(
@@ -1148,7 +1177,8 @@ def main(argv=None):
     # direction-blind check_moist_deck, and load_oracle already asserts
     # FMSConstants: GFS per deck via require_gfs_constants.
     for _r in (args.ic_run, args.step_run):
-        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist)
+        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist,
+                                   consv=args.consv)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -1541,12 +1571,13 @@ def main(argv=None):
                       # ADVECTED_TRACERS, matching build_port_tracer_ic.
                       **({"zvir": FV3_RVGAS / FV3_RDGAS - 1.0,
                           "sphum_index": ADVECTED_TRACERS.index("sphum")}
-                         if args.moist else {}))
+                         if args.moist else {}),
+                      **({"consv_te": args.consv} if args.consv else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)
 
-    if args.moist:
+    if args.moist or args.consv:
         # ---- THE MOIST-SIGNAL GATE (GLM M1, job 9444414) ------------
         # The headline residual is NOT evidence that the moist coupling
         # is live, and on the NH arm it is structurally blind to the

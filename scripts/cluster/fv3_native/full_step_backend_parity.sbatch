@@ -53,7 +53,10 @@ case "$ARM" in
   # the NH moist arm: --nh redirects to the NH decks, --moist then
   # redirects those to their moist twins.
   nhmoist) EXTRA="--nh --moist --tracers --max-rel 1e-3" ;;
-  *) echo "unknown ARM=$ARM (hydro|nh|moist|nhmoist)"; exit 4 ;;
+  # the energy fixer: hydrostatic + dry, scored against the deck
+  # with consv_te = 1.0. Same ceiling as the other hydro arms.
+  consv) EXTRA="--consv 1.0 --max-rel 2e-9" ;;
+  *) echo "unknown ARM=$ARM (hydro|nh|moist|nhmoist|consv)"; exit 4 ;;
 esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/bkparity_${ARM}_${SLURM_JOB_ID:-0}
 mkdir -p "$OUT"
