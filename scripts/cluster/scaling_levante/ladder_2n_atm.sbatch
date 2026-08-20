@@ -41,8 +41,10 @@ PARTITION="${PARTITION:-sfc}"
 # count to say whether that penalty is what limits the icosahedral lane.
 # Receipts for a non-default count get their own filename so the 26-level
 # curve is never overwritten by a different physics configuration.
-NLEV="${NLEV:-26}"
-LSUF=""; [ "$NLEV" = 26 ] || LSUF="_l${NLEV}"
+# Canonicalised before use: a string compare would let "026" or a stray space
+# write a receipt under a name the validation step below then fails to find.
+NLEV=$(( 10#${NLEV:-26} ))
+LSUF=""; [ "$NLEV" -eq 26 ] || LSUF="_l${NLEV}"
 GPN=4; NODES=$(( (NDEV + GPN - 1) / GPN ))
 NTPN=$(( NDEV < GPN ? NDEV : GPN ))
 echo "=== ladder $LANE ndev=$NDEV nodes=$NODES $(date +%T) git=$(git rev-parse --short HEAD) ==="

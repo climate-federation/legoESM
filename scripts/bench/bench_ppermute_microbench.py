@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 
@@ -51,14 +52,20 @@ AXIS = "dev"
 def _ring(n, stride=1):
     """Ring where each device sends to the one ``stride`` places along.
 
-    ``stride`` is a bijection for any value, so the pattern is always a legal
-    permutation.  It exists to vary WHERE the partner sits without moving a
-    single process: with four GPUs per node, stride 1 keeps three of every four
-    links inside a node on NVLink, stride 4 puts every link on the network
-    between adjacent nodes, and stride n/2 puts every link on the network
-    between the two halves of the allocation.  That is the only way to ask
-    whether a slowdown belongs to the fabric or to the number of ranks without
-    changing the allocation underneath the measurement.
+    Every stride is a bijection, so the pattern is always a legal permutation;
+    the identity is rejected anyway because a device sending to itself times
+    nothing.  The point of the knob is to vary WHERE the partner sits without
+    moving a single process: with four GPUs per node, stride 1 keeps three of
+    every four links inside a node on NVLink, and any stride of 4 or more puts
+    every link on the network, at a distance of ``stride`` ranks.
+
+    Two cautions for anyone reading a stride sweep.  The permutation decomposes
+    into ``gcd(n, stride)`` cycles of length ``n / gcd(n, stride)``, and that
+    structure -- not just the distance -- can change what the collective library
+    does; comparing strides that share a gcd with ``n`` compares two things at
+    once.  Strides coprime with ``n`` all give a single cycle and are the safe
+    family to sweep.  And stride 1 differs from the rest in KIND, not only in
+    distance, because most of its links never leave the node.
     """
     if stride % n == 0:
         raise ValueError(
@@ -90,6 +97,41 @@ def _build(mesh, n_dev, n_reps, stride=1):
         return sm(x)
 
     return run
+
+
+def verify_ring(mesh, n_dev, stride):
+    """Check the pattern actually delivers, before anything is timed.
+
+    Timing an exchange of zeros cannot distinguish a working permutation from
+    one that silently moved nothing, and "the partner did not change" is one of
+    the readings a stride sweep has to be able to rule out. So each device
+    sends its own index and must receive its source's index.
+
+    Returns the largest disagreement over all devices; zero means every device
+    got exactly what the permutation promised.
+    """
+    perm = _ring(n_dev, stride)
+
+    @jax.jit
+    def run(x):
+        def body(xl):
+            me = jax.lax.axis_index(AXIS)
+            sent = jnp.full_like(xl, me)
+            got = jax.lax.ppermute(sent, axis_name=AXIS, perm=perm)
+            want = jnp.mod(me - stride, n_dev)
+            return jax.lax.pmax(jnp.max(jnp.abs(got - want)), AXIS)[None]
+
+        try:
+            sm = shard_map(body, mesh=mesh, in_specs=P(AXIS), out_specs=P(AXIS),
+                           check_vma=False)
+        except TypeError:  # pragma: no cover - JAX < 0.9 spelling
+            sm = shard_map(body, mesh=mesh, in_specs=P(AXIS), out_specs=P(AXIS),
+                           check_rep=False)
+        return sm(x)
+
+    out = run(jnp.zeros((n_dev,), dtype=jnp.int32))
+    return int(max(abs(int(v)) for sh in out.addressable_shards
+                   for v in np.asarray(sh.data).ravel()))
 
 
 def _median_us(run, x, n_warmup, n_iters):
@@ -181,6 +223,18 @@ def main() -> int:
     dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
     itemsize = jnp.dtype(dtype).itemsize
 
+    # The pattern has to be shown to deliver before any of its timings mean
+    # anything: a silently degraded permutation still times cleanly.
+    mismatch = verify_ring(mesh, n_dev, args.ring_stride)
+    if mismatch != 0:
+        raise SystemExit(
+            f"ring stride {args.ring_stride} on {n_dev} devices did not "
+            f"deliver: worst device received an index {mismatch} away from "
+            f"its source. Timings from this pattern would be meaningless.")
+    if jax.process_index() == 0:
+        print(f"ring stride {args.ring_stride} verified on {n_dev} devices",
+              flush=True)
+
     # Sweep from a latency-dominated message to a bandwidth-dominated one.
     elems = [1 << k for k in range(6, 23)]      # 64 .. 4M elements/device
     rows = []
@@ -219,7 +273,11 @@ def main() -> int:
         "latency_us": round(lat_us, 3),
         "bandwidth_gbs": round(bw_gbs, 2),
         "n_reps": args.n_reps,
+        "n_iters": args.n_iters,
+        "n_warmup": args.n_warmup,
         "ring_stride": args.ring_stride,
+        "ring_verified": True,
+        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "dispatch_us_median": round(float(np.median(dispatch_us)), 2),
         "dispatch_subtracted": True,
         "sweep": [{"bytes": b, "median_us": round(t, 3)} for b, t in rows],
@@ -237,7 +295,6 @@ def main() -> int:
         print(f"\n==> --comm-latency-us {rec['latency_us']} "
               f"--comm-bandwidth-gbs {rec['bandwidth_gbs']}")
         if args.out:
-            import os
             os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
             with open(args.out, "a") as f:
                 f.write(json.dumps(rec) + "\n")
