@@ -43,7 +43,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
-  --years 0.003 --snapshot-every-days 1 --diag-every-days 5 \
+  --years 0.0164 --snapshot-every-days 1 --diag-every-days 5 \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
@@ -58,7 +58,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 \
-  --output $OUT 2>&1 | grep -E "fwbudget|\[setup\]|\[diag\]|Error|error" | head -60
+  --output $OUT 2>&1 | grep -E "fwbudget|\[setup\]|\[diag\]|Error|error" | head -120
 run_rc=$?
 echo "=== run rc=$run_rc"
 # codex 9430935 MAJOR-4: never score a failed or snapshot-less arm -- a stale
