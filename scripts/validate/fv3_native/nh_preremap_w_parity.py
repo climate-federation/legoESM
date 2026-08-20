@@ -240,6 +240,24 @@ def main(argv=None):
               f"  |d|post={np.abs(pw_post - ow_post).max():.4e}  "
               f"scale={sc:.4e}")
 
+    # FREE EVIDENCE, and it answers the next question: is the acoustic
+    # damage w-SPECIFIC, or is pt/delp already off when dyn_core
+    # returns? The dump carries them and nothing was scoring them (GLM,
+    # job 9448128).
+    print("\nOTHER PRE-REMAP FIELDS (level 0, same treatment):")
+    for name in ("pt", "delp"):
+        worst_f = 0.0
+        for pf in range(6):
+            ot = perm[pf]
+            transposed, nm, _su, _sv = meta[pf][ot]
+            d = read_dump(args.wdump, 1, name, ot + 1)
+            off = (d.shape[1] - N) // 2
+            ow = oracle_ij(d[:, off:off + N, off:off + N], transposed)
+            pw = DIHEDRAL[nm](pre[pf][name][cs, cs, :1])
+            sc = max(float(np.abs(pw).max()), float(np.abs(ow).max()))
+            worst_f = max(worst_f, float(np.abs(pw - ow).max()) / sc)
+        print(f"  {name:5s} worst level-0 rel: {worst_f:.4e}")
+
     print(f"\nlevel-0 pre-remap  w rel: {worst_pre0:.4e}")
     print(f"level-0 full-step  w rel: {worst_post0:.4e}")
     print(f"(mixed-domain numbers, NOT comparable: pre {worst_pre:.4e} "
