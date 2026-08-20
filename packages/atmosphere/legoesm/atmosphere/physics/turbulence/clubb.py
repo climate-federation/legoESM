@@ -4249,7 +4249,12 @@ def calc_sfc_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc,
     """
     a_const = config.params.a_const
     up2_coef = config.params.up2_sfc_coef
-    ustar2 = jnp.sqrt(upwp_sfc ** 2 + vpwp_sfc ** 2)
+    # THIRD sqrt(0) singularity in this routine, and the one that actually
+    # bites: with no surface stress d/d(upwp) sqrt(upwp^2 + vpwp^2) is 0/0 at
+    # the origin. Unlike the other two there is no where() masking it, so the
+    # NaN reaches the tuned coefficients directly -- it broke the pipeline
+    # differentiability gate. The epsilon is far below ufmin^2 = 1e-4.
+    ustar2 = jnp.sqrt(upwp_sfc ** 2 + vpwp_sfc ** 2 + _SFC_VARNCE_UF_EPS)
     # w* from Andre et al. (1976); zero under a non-positive surface heat flux,
     # where the cube root of a negative argument is not wanted.
     # The floor inside cbrt is POSITIVE, not zero, and that is an AD

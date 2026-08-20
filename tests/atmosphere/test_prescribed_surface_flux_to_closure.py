@@ -422,8 +422,14 @@ def test_sfc_varnce_ustar_floor_bites_in_dead_calm():
     out = calc_sfc_varnce(z, z, z, z, **_sfc_varnce_inputs(ncol=1), config=cfg)
     for o in out:
         assert np.all(np.isfinite(np.asarray(o)))
+    # NOT a_const*ufmin^2 = 1.8e-4: the wp2 correlation floor is
+    # max(w_tol^2, ...) = 4e-4 here and it is the larger of the two, so the
+    # floor is what the surface value ends up at. (My first expectation was
+    # a_const*ufmin^2 and the code was right, not the test.)
     assert np.asarray(out[0])[0, 0] == pytest.approx(
-        cfg.params.a_const * 0.01 ** 2, rel=1e-12)
+        cfg.w_tol ** 2, rel=1e-12)
+    assert cfg.w_tol ** 2 > cfg.params.a_const * 0.01 ** 2, (
+        "this test only means something while the floor is the binding one")
 
 
 def test_sfc_varnce_is_called_by_the_prognostic_core():
