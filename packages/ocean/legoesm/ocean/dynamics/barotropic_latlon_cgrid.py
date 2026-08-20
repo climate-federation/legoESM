@@ -1110,7 +1110,7 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
     return w_filter, w_total, w_transport, n_loop
 
 
-def _reconcile_targets(config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
+def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
                        h_k_now, grid, min_water_col, dtype):
     """3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6,
     dynspg_ts.F90:1170-1172).
@@ -1122,9 +1122,19 @@ def _reconcile_targets(config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     * ``"velocity_avg"`` (default): ``U_bar_avg`` — the primary/velocity
       boxcar mean (bit-identical legacy path).
     * ``"transport_avg"``: ``Hu_avg/H_u`` — NEMO's ``un_adv*r1_hu(Kmm)``.
-      ``H_u`` is the NOW u-face column depth built from ``h_k_now``, the SAME
+      ``H_u`` is the MIN-RULE NOW u-face column depth built from ``h_k_now``.
+      Under ``barotropic_seed_face_depth="min_rule"`` that is the SAME
       thickness the subtracted mean is built from, so the reconciled
-      depth-mean is exactly ``Hu_avg/H_u``.
+      depth-mean is exactly ``Hu_avg/H_u`` (measured residual 3.6e-12).
+      Under ``"nemo_ssh_avg"`` it is NOT: that seed rescales the min-rule
+      face thickness by the NEMO/min-rule column ratio while this divisor
+      does not, leaving a residual wherever the wet-column floor binds
+      asymmetrically (measured 5.5e-3 against |Hu_avg| ~ 4.2e2 on a forced
+      0.30 m shelf; away from the floor the per-column ratio cancels in the
+      weighted mean). Both barotropic paths share the discrepancy exactly,
+      so it is a fidelity gap in the divisor convention, not a path
+      difference -- see the F1 note on
+      ``BarotropicConfig.barotropic_reconcile_target``.
 
     Shared by BOTH barotropic entry points (standard-halo and wide-halo) so
     the dispatch — and the raise on an unknown value — exists once.
@@ -1139,7 +1149,7 @@ def _reconcile_targets(config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     _recon = config.barotropic.barotropic_reconcile_target
     if _recon not in ("velocity_avg", "transport_avg"):
         raise ValueError(
-            "unknown barotropic_reconcile_target "
+            "unknown barotropic_reconcile_target scheme "
             f"{_recon!r}: must be one of ('velocity_avg', 'transport_avg').")
     if _recon != "transport_avg":
         return U_bar_avg, V_bar_avg
@@ -1527,8 +1537,10 @@ def barotropic_substeps_latlon_cgrid(
     # divisor convention live in the shared helper (same call on the
     # wide-halo path).
     recon_u, recon_v = _reconcile_targets(
-        config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
-        _h_k_corr if _seed_override else h_k, grid, min_water_col, _dt)
+        config, U_bar_avg=U_bar_avg, V_bar_avg=V_bar_avg,
+        Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+        h_k_now=_h_k_corr if _seed_override else h_k, grid=grid,
+        min_water_col=min_water_col, dtype=_dt)
 
     # Correct 3D velocities: preserve baroclinic structure.
     # Use the reconciliation target for the 3D correction to ensure
@@ -1668,6 +1680,28 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
             "barotropic path (the drag-rate faces would need widening to the "
             "extended band); use the standard split-explicit path or disable "
             "barotropic_wide_halo.")
+    # The AB3 time filters need the predictor coefficient arrays, the
+    # cross-window bt_hist carry and the final-substep state selection that
+    # the standard entry point builds at its _ab3 block; this path builds
+    # NONE of them and passes no ab3_* argument to _run_substep_loop, so
+    # running them here is not an approximation but a wrong answer:
+    # 'nemo_ab3am4' zeroes the filter weights while leaving w_total = 1, so
+    # the wide path divides a zero accumulator and returns sea surface
+    # height IDENTICALLY ZERO (measured, 12 substeps, fp64: standard
+    # max|eta| = 4.377e-01 m, wide = 0.000e+00); 'nemo_boxcar_ab3' -- DINO's
+    # own filter (nn_bt_flt=2) -- runs the boxcar weights without the
+    # predictor and diverges at 2.445e-03 m, nine orders above the 1e-12
+    # parity gate. Refuse both, matching this function's precedent for the
+    # EEN Coriolis and substep-drag options above.
+    if config.barotropic.barotropic_time_filter in (
+            "nemo_ab3am4", "nemo_boxcar_ab3"):
+        raise NotImplementedError(
+            "barotropic_time_filter="
+            f"{config.barotropic.barotropic_time_filter!r} is not wired into "
+            "the wide-halo barotropic path (the AB3 predictor coefficients, "
+            "the cross-window bt_hist carry and the final-substep state "
+            "selection are built only by the standard entry point); use the "
+            "standard split-explicit path or disable barotropic_wide_halo.")
 
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data
@@ -1874,8 +1908,9 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     # geometry, matching the ``U_bar`` subtracted just below; this path has
     # no before-level seed override, so there is no ``_h_k_corr`` variant.
     recon_u, recon_v = _reconcile_targets(
-        config, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
-        h_k, grid, min_water_col, _dt)
+        config, U_bar_avg=U_bar_avg, V_bar_avg=V_bar_avg,
+        Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+        h_k_now=h_k, grid=grid, min_water_col=min_water_col, dtype=_dt)
 
     u_baro_old = U_bar[..., jnp.newaxis]
     v_baro_old = V_bar[..., jnp.newaxis]

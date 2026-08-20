@@ -112,6 +112,29 @@ def test_serial_wide_matches_standard(setup, flat):
     _assert_close(hv_w, hv_s, atol, "Hv_avg")
 
 
+@pytest.mark.parametrize("filt", ["nemo_ab3am4", "nemo_boxcar_ab3"])
+def test_wide_halo_refuses_ab3_time_filters(setup, filt):
+    """The AB3 filters must be REFUSED, not silently mis-run.
+
+    The wide entry point builds none of the AB3 machinery (predictor
+    coefficients, cross-window bt_hist carry, final-substep state selection)
+    and passes no ``ab3_*`` argument to the shared substep loop.  Before the
+    refusal, running them gave a wrong answer with no error: measured at 12
+    substeps in fp64, ``nemo_ab3am4`` returned sea surface height IDENTICALLY
+    ZERO (standard max|eta| = 4.377e-01 m) because it zeroes the filter
+    weights while leaving the normaliser at 1, and ``nemo_boxcar_ab3`` --
+    DINO's own filter -- diverged from the standard path by 2.445e-03 m,
+    nine orders above this suite's 1e-12 parity gate.
+    """
+    grid, z_coord, state = setup
+    cfg = _cfg(barotropic_time_filter=filt)
+    # The standard path still runs it -- the refusal is specific to the twin.
+    barotropic_substeps_latlon_cgrid(state, 30.0, 12, grid, z_coord, cfg)
+    with pytest.raises(NotImplementedError, match="barotropic_time_filter"):
+        barotropic_substeps_wide_halo_latlon_cgrid(
+            state, 30.0, 12, grid, z_coord, cfg)
+
+
 def test_wide_halo_honours_reconcile_target(setup):
     """The wide-halo path must READ ``barotropic_reconcile_target``, not
     silently reconcile onto the velocity mean.

@@ -105,8 +105,19 @@ class EnhancedDiffusionConfig(NamedTuple):
     # set -- what ORCA1 runs (``ln_teos10 = .true.``). Same axis, same name
     # and same default as ``TKEConfig.n2_eos_form``: the EVD trigger's N²
     # was hard-wired to the simplified EOS while its TKE sibling was already
-    # configurable, so a TEOS-10 card silently ran two different N² kernels.
-    # Ignored by every other ``n2_mode``.
+    # configurable.
+    # SCOPE, measured (dual review 2026-08-19): NO shipped card is changed
+    # or fixed by this field today. ORCA1 leaves the EVD ``n2_mode`` at its
+    # ``"insitu"`` default, so the bn2 kernel is never reached from the
+    # trigger and this selector is inert there; the only cards selecting
+    # ``"nemo_bn2"`` are the DINO Kamm ones, whose NEMO namelist selects the
+    # simplified EOS, so ``"seos"`` is already the right answer for them.
+    # The field exists so a future TEOS-10 card that also selects
+    # ``"nemo_bn2"`` cannot silently take the simplified fit. Note ORCA1 has
+    # a LARGER and still-open split this does not address: its EVD trigger
+    # runs on the in-situ density difference while its TKE closure runs
+    # NEMO bn2 with TEOS-10 -- two genuinely different static stabilities in
+    # one column. Ignored by every other ``n2_mode``.
     n2_eos_form: str = "seos"
     # Static-instability trigger threshold on N² [1/s²]: EVD fires where
     # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd

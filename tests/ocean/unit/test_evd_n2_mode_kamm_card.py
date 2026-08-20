@@ -24,9 +24,14 @@ convective diffusivities*.  Test (b) is the non-vacuous one: it fails if the
 two N² formulas are ever made equivalent, and it fails if the trigger stops
 reading the mode.
 """
-import os
+import jax
 
-os.environ.setdefault("JAX_ENABLE_X64", "1")
+# fp64 for the knife-edge N2 comparisons.  NOT the env var: tests/conftest.py
+# imports jax before any test module loads, so an os.environ.setdefault here
+# never reaches jax's config and the file ran in float32 under a bare pytest
+# invocation (3 pre-existing failures).  jax.config.update is honoured
+# whenever it runs -- same pattern as test_barotropic_wide_halo.py.
+jax.config.update("jax_enable_x64", True)
 
 import numpy as np
 import jax.numpy as jnp
@@ -269,7 +274,7 @@ def test_evd_n2_eos_form_reaches_the_bn2_kernel():
     n2_teos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
         Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
         g=constants.g, eos_form="teos10"))[0, 0]
-    assert not np.allclose(n2_seos, n2_teos, rtol=0, atol=1e-18), (
+    assert not np.allclose(n2_seos, n2_teos, rtol=1e-3, atol=0), (
         "the two alpha/beta sets agree on this column -- the test below "
         "cannot detect a dropped forward")
 

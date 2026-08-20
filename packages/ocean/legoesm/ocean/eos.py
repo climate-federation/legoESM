@@ -567,7 +567,8 @@ def compute_buoyancy_frequency_nemo_bn2(
     (``ln_teos10 = .true.``). The bn2 ASSEMBLY is identical either way; NEMO
     shares ``bn2_t`` across EOS branches and only ``pab`` differs.
 
-    Transcribes NEMO ``eosbn2.F90`` ``bn2_t`` (lines 1453-1462)::
+    Transcribes NEMO ``eosbn2.F90`` ``bn2_t`` (lines 1459-1467; the last line
+    is the ``/ e3w(...,Kmm) * wmask`` continuation)::
 
         zrw = (gdepw_k − gdept_k) / (gdept_{k-1} − gdept_k)
         alpha_w = alpha_k (1 − zrw) + alpha_{k-1} zrw

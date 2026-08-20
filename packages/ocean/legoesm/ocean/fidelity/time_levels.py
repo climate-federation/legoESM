@@ -474,7 +474,22 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
     # ebeb8a5), each proved by reading the CALL that produces the dumped
     # field one line above the WRITE (Rule 1d cite = the producing CALL, not
-    # the WRITE). These localise WHERE the barotropic/longitude-uniform
+    # the WRITE).
+    # The three r3?_f entries below cite their WRITE by UNIT NUMBER ONLY --
+    # no line number. Those units are unique in the file, so the citation
+    # survives drift; a line number here does not, and cannot currently be
+    # checked. The pinned revision ebeb8a5 is not an object in the NEMO
+    # repository and no copy on disk matches the cited layout, so the only
+    # readable file is the working copy, which has moved. It moved by
+    # DIFFERENT amounts in different blocks -- the post-lbc CALL below
+    # shifted +17 (562 -> 579) while its own WRITE shifted +28 (576 -> 604)
+    # -- so an offset measured at one anchor cannot be carried across a
+    # block boundary to date a WRITE nine lines away. A previous edit did
+    # exactly that and moved these three from :450/:451/:452 to
+    # :451/:452/:453; that derivation is RETRACTED as circular (it assumed
+    # the very block alignment in question) and neither trio is established.
+    # Recover the pinned source from whatever archive produced the dump
+    # binaries if a line number is ever needed again. These localise WHERE the barotropic/longitude-uniform
     # eta(Naa) injection first appears un-inherited.
     #
     # ssh/r3 CHAIN (r3t = ssh/H_0 ratio; ssh = H_0*r3t, so the r3 chain IS the
@@ -503,11 +518,11 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # the NEXT step carries as its geometry -- registered by traatf/ssh_atf's
     # own after-filter level exactly as atf_dump_ssh_after is "after".
     "seq_dump_r3t_f": ("after", "stpmlf.F90:442 CALL dom_qco_r3c(ssh(Nnn),"
-        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937) :451; r3t_f."),
+        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937); r3t_f."),
     "seq_dump_r3u_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8938) :452; r3u_f u-point twin of seq_dump_r3t_f."),
+        "WRITE(8938); r3u_f u-point twin of seq_dump_r3t_f."),
     "seq_dump_r3v_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8939) :453; r3v_f v-point twin of seq_dump_r3t_f."),
+        "WRITE(8939); r3v_f v-point twin of seq_dump_r3t_f."),
     # post-finalize_lbc Naa state (stpmlf.F90:562 CALL finalize_lbc; dumps at
     # :576-579). u/v/T/S at Naa BEFORE the Asselin swap.
     "seq_dump_postlbc_u_aaa": ("after", "stpmlf.F90:562 CALL finalize_lbc -> "
