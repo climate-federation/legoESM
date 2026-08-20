@@ -71,6 +71,13 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
 )
 
 
+def _is_default_soil_column(dz) -> bool:
+    """Is this the historical default soil column the published states use?"""
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+    ref = np.asarray(make_soil_grid(SoilGridConfig()).dz, dtype=np.float64)
+    return soil_dz_matches(np.asarray(dz, dtype=np.float64).reshape(-1), ref)
+
+
 def _soil_dz_from(soil_grid=None, soil_dz=None, *, what: str):
     """The column as layer THICKNESSES [m], from either spelling, or ``None``.
 
@@ -125,11 +132,17 @@ def _recorded_soil_dz(data, path="<archive>"):
         # running from the surface downwards. A stamp that is not that is not
         # a column this reader can interpret, and guessing at one is worse
         # than saying so.
-        if z.size < 2 or not np.all(np.diff(z) > 0.0) or z[0] < 0.0:
+        # The SURFACE interface must be zero, not merely non-negative: the
+        # thicknesses are the differences, so a column translated bodily
+        # downwards ([1.0, 1.003, ..., 4.0] for a 3 m column) differences to
+        # exactly the right thicknesses and would be accepted -- putting every
+        # state value 1 m from where it belongs (codex).
+        if (z.size < 2 or not np.all(np.diff(z) > 0.0)
+                or abs(float(z[0])) > _SOIL_DZ_RTOL * float(z[-1] - z[0])):
             raise ValueError(
                 f"{path}: soil_z_interface is not a set of increasing layer "
-                f"interface depths starting at or below the surface (got "
-                f"{z.tolist()}). The soil column cannot be read from it.")
+                f"interface depths starting AT the surface (got {z.tolist()}). "
+                f"The soil column cannot be read from it.")
         iz = np.diff(z)
     if dz is not None and iz is not None and not soil_dz_matches(dz, iz):
         raise ValueError(
@@ -345,6 +358,19 @@ def load_land_restart(
     _want_dz = _soil_dz_from(expected_soil_grid, expected_soil_dz,
                              what="load_land_restart")
     if _want_dz is not None:
+        # WHOSE column decides, and it is not a calibration flag. Three callers
+        # asked for the strict behaviour by passing a preset's name, which left
+        # every OTHER non-default column -- any run that sets its own layer
+        # count or depth -- accepting an unstamped file and reading its profile
+        # at the wrong depths. Both reviewers found this independently. The
+        # predicate is a property of the column itself: a run on the historical
+        # default may load an unstamped file, because the published initial
+        # states are on that column and predate the stamp; a run on any other
+        # column may not, because an unstamped file is then almost certainly on
+        # the default one. The explicit flags remain, to force refusal on the
+        # default column too.
+        if not _is_default_soil_column(_want_dz):
+            require_soil_grid = True
         _total = float(_want_dz.sum())
         _got_dz = _recorded_soil_dz(data, path)
         if _got_dz is None:

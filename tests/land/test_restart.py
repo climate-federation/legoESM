@@ -180,14 +180,21 @@ def test_the_same_column_loads(tmp_path):
 
 def test_a_file_without_the_geometry_warns_rather_than_pretending(tmp_path):
     """The published initial states predate the stamp, so this cannot raise --
-    but it must not read as a verified match either."""
+    but it must not read as a verified match either.
+
+    Only on the HISTORICAL DEFAULT column: that is the one the published
+    states are on, so it is the only one where an unstamped file is a
+    reasonable thing to be handed. Every other column refuses.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig
+
     st = _fake_state(seed=7)
     save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
                       t_end_s=1.0, n_steps_completed=1)   # no soil_grid
     with pytest.warns(RuntimeWarning, match="cannot be checked"):
         load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
-                          expected_soil_grid=_grid(total_depth=3.0))
+                          expected_soil_grid=SoilGridConfig())
 
 
 def test_an_unstamped_file_can_be_refused_outright(tmp_path):
@@ -360,3 +367,51 @@ def test_reconstructing_a_column_from_its_interfaces_is_well_conditioned():
         f"recovering thicknesses from single-precision interfaces now costs "
         f"{worst:.2e} relative, within a factor of ten of the {_SOIL_DZ_RTOL:g} "
         f"tolerance; the comparison needs an absolute floor after all")
+
+
+def test_a_translated_column_is_not_mistaken_for_the_right_one():
+    """Thicknesses are the DIFFERENCES of the interfaces, so a column shifted
+    bodily downwards differences to exactly the right thicknesses. Accepting
+    it puts every state value a metre from where it belongs (codex)."""
+    from legoesm.land.restart import _recorded_soil_dz
+    from legoesm.land.soil_grid import make_soil_grid
+
+    class _Npz(dict):
+        @property
+        def files(self):
+            return list(self)
+
+    grid = _grid(total_depth=3.0)
+    zi = np.asarray(make_soil_grid(grid).z_interface, dtype=np.float64)
+    np.testing.assert_allclose(
+        _recorded_soil_dz(_Npz(soil_z_interface=zi)), np.diff(zi))
+    with pytest.raises(ValueError, match="AT the surface"):
+        _recorded_soil_dz(_Npz(soil_z_interface=zi + 1.0), "shifted.npz")
+
+
+def test_any_non_default_column_requires_a_stamp(tmp_path):
+    """The predicate is the COLUMN, not a preset's name.
+
+    Three callers asked for the strict behaviour by passing a calibration
+    flag, which left every other non-default column -- any run that sets its
+    own layer count or depth -- accepting an unstamped file and reading its
+    profile at the wrong depths. Both reviewers found this independently.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    path = tmp_path / "legacy.npz"
+    save_land_restart(path, _fake_state(seed=31), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)      # unstamped
+
+    # The historical default may still load one: the published states are on
+    # that column and predate the stamp.
+    with pytest.warns(RuntimeWarning, match="cannot be checked"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=SoilGridConfig())
+
+    # Any other column may not, with no flag passed anywhere.
+    with pytest.raises(ValueError, match="not the historical default"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))

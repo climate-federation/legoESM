@@ -94,12 +94,27 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
 
 def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
     """land_surface_scheme dispatches the right surface scheme onto the
-    multilayer land config (issue #730): default -> SimpleSEB, 'two_leaf' ->
-    the DifferBESS two-leaf canopy (Kelvin h_r bare-soil + stomatal transp.)."""
+    multilayer land config: each selection must arrive, and the DEFAULT must be
+    the two-leaf canopy (the simplified scheme is academic-only since
+    2026-08-20 — its evaporation runs at potential with stomata off and its
+    humidity gradient self-extinguishes with them on)."""
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     _patch_land_loaders(monkeypatch)
 
-    driver_seb = ModelDriver(_small_cfg(), output_dir=tmp_path / "seb")
+    # The DEFAULT, asserted as a default rather than assumed.
+    driver_default = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme=type(_small_cfg())
+                              ._field_defaults["land_surface_scheme"]),
+        output_dir=tmp_path / "default")
+    driver_default.setup()
+    assert isinstance(
+        driver_default.physics.land_ml_cfg.surface_scheme, TwoLeafCanopyConfig)
+
+    # And the simplified scheme still arrives when EXPLICITLY selected, so its
+    # coverage is not lost with the default change.
+    driver_seb = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="simple_seb"),
+        output_dir=tmp_path / "seb")
     driver_seb.setup()
     assert isinstance(
         driver_seb.physics.land_ml_cfg.surface_scheme, SimpleSEBConfig)
@@ -413,9 +428,13 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
         theta_soil=jnp.asarray(np.asarray(seed.theta_soil) * 0.6),
     )
     ic = tmp_path / "land_ic.npz"
+    # Stamped with the column it was spun up on, as any real producer now is:
+    # this run's column is not the historical default, and an unstamped file
+    # is refused on those rather than warned about.
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=20 * 365 * 86400.0,
-                      n_steps_completed=1, metadata={})
+                      n_steps_completed=1, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid)
 
     # 2) A fresh driver with land_ic_path set must load THAT column, not the
     #    cold start.
@@ -455,7 +474,8 @@ def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
     src.setup()
     ic = tmp_path / "land_ic_6lay.npz"
     save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
-                      t_end_s=0.0, n_steps_completed=0, metadata={})
+                      t_end_s=0.0, n_steps_completed=0, metadata={},
+                      soil_grid=src.physics.land_ml_cfg.soil_grid)
 
     # Run config asks for 10 layers; the restart has 6 -> mismatch -> raise
     # (separate output dir so this is the SHAPE guard, not the manifest guard).
