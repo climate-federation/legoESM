@@ -41,6 +41,14 @@ a card that reads them every step from step 0). ``--bridge-tke`` (TKE closure
 memory) is a SEPARATE, independent caveat/flag -- still cold-start by
 default.
 
+SEASONAL CLOCK (#1455): the analytic DINO surface forcing follows the DAY OF
+YEAR, so a twin bridged from a mid-year NEMO restart must continue NEMO's own
+seasonal clock, not restart the year at zero. This harness reads the offset
+from the restart's ``adatrj`` BY DEFAULT. Setting ``DINO_TWIN_SEASONAL_KT0=0``
+selects the old relative clock (which forces the day-180 twin exactly antiphase
+to NEMO) and prints a loud banner; it exists only to reproduce numbers recorded
+before 2026-08-20, none of which are comparable to NEMO.
+
 Usage
 -----
     python kamm_twin_90d.py <recipe> <out.npz> [--days 90] [--save-3d]
@@ -229,6 +237,66 @@ def _restart_elapsed_seconds(path: str) -> float:
             f"with kt={kt:.0f} x DT={DT:.0f} s ({t_from_kt:.0f} s) -- the "
             "restart was written at a different timestep than this harness runs")
     return t_from_days
+
+
+def seasonal_t0_seconds(restart_path: str) -> float:
+    """Absolute seasonal-clock offset [s] for a twin bridged from ``restart_path``.
+
+    #1455.  DINO's analytic surface forcing is a function of the DAY OF YEAR
+    through the ABSOLUTE step index (``usrdef_sbc.F90:536-547``:
+    ``ztime = REAL(kt)*rn_Dt``), so a twin that restarts its own seasonal year
+    at zero forces legoESM out of phase with the NEMO run it is compared
+    against.  For the canonical ``DINO_00005760_restart.nc`` (day 180 of a
+    360-day year) that offset is EXACTLY antiphase, and it was measured to own
+    99.1% of the day-30 southern surface-density gap (commits 1c03f8311,
+    076217667, afd8e06b6).
+
+    DEFAULT (env unset) is therefore the NEMO clock, read from the restart
+    ITSELF (``adatrj``, cross-checked against ``kt*DT``) -- never hardcoded and
+    never scraped from a filename.  ``DINO_TWIN_SEASONAL_KT0`` (the same knob
+    the clock A/B lane used) remains available to override it:
+
+      unset / "restart"  -> t0 from the restart's own ``adatrj``   [DEFAULT]
+      "0"                -> t0 = 0, the LEGACY relative clock; reproduces
+                            historical (antiphase) numbers ONLY
+      <integer>          -> t0 = <integer> * DT, explicit step offset
+
+    Any non-default selection prints a loud banner, so a log can never be read
+    without knowing which clock produced it.
+    """
+    env = os.environ.get("DINO_TWIN_SEASONAL_KT0")
+    if env is None or env == "restart":
+        t0_sec = _restart_elapsed_seconds(restart_path)
+        source = "restart adatrj" + ("" if env is None else " (explicit)")
+    else:
+        try:
+            kt0 = int(env)
+        except ValueError:
+            raise SystemExit(
+                f"Unknown DINO_TWIN_SEASONAL_KT0={env!r}: expected 'restart' "
+                "(lowercase) or an integer step index") from None
+        if kt0 < 0:
+            raise SystemExit(
+                f"DINO_TWIN_SEASONAL_KT0={kt0} is negative; expected >= 0")
+        t0_sec = kt0 * DT
+        banner = ("LEGACY RELATIVE CLOCK" if kt0 == 0
+                  else f"MANUAL STEP OFFSET kt0={kt0}")
+        source = f"OVERRIDE {banner}"
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! {banner}: DINO_TWIN_SEASONAL_KT0={env}", flush=True)
+        print("!! The seasonal forcing does NOT follow the restart's own "
+              "day-of-year.", flush=True)
+        print("!! This is a HISTORICAL-REPRODUCTION mode (#1455). Numbers "
+              "produced here are", flush=True)
+        print("!! NOT comparable to the NEMO run this twin scores against.",
+              flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
+          f"[source: {source}]  "
+          f"(restart is day {t0_sec / 86400.0:.2f} of the 360-day year; "
+          f"NEMO logs nday_year = {int(t0_sec // 86400.0) + 1} at its next step)",
+          flush=True)
+    return t0_sec
 
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
@@ -432,38 +500,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     else:
         dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
 
-    # #1455 SEASONAL-CLOCK OFFSET (opt-in measurement knob, default UNCHANGED).
-    # DINO's analytic surface forcing is a function of the DAY OF YEAR
-    # (usrdef_sbc.F90:536-547: ztime = REAL(kt)*rn_Dt, the ABSOLUTE step
-    # index).  This loop passes t_seconds = (k+1)*DT, i.e. it restarts the
-    # seasonal year at zero even though the bridged state is NEMO's step 5760,
-    # so T* and Qsr run half a year out of phase with the NEMO run this twin
-    # is compared against.
-    #   unset / "0"  -> t = (k+1)*DT               (BIT-IDENTICAL to every
-    #                                               previously recorded run)
-    #   "restart"    -> t = t0 + (k+1)*DT, with t0 read from the restart file
-    #                   ITSELF (`adatrj` days elapsed, cross-checked against
-    #                   `kt`*DT) -- NOT scraped out of the filename, and
-    #                   independent of DT
-    #   <integer>    -> t = (<integer> + k+1)*DT   (explicit step offset)
-    _kt0_env = os.environ.get("DINO_TWIN_SEASONAL_KT0", "0")
-    if _kt0_env == "restart":
-        t0_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
-    else:
-        try:
-            _kt0 = int(_kt0_env)
-        except ValueError:
-            raise SystemExit(
-                f"Unknown DINO_TWIN_SEASONAL_KT0={_kt0_env!r}: expected "
-                "'restart' (lowercase) or an integer step index") from None
-        if _kt0 < 0:
-            raise SystemExit(
-                f"DINO_TWIN_SEASONAL_KT0={_kt0} is negative; expected >= 0")
-        t0_sec = _kt0 * DT
-    print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
-          f"(restart is day {t0_sec / 86400.0:.2f} of the 360-day year; "
-          f"NEMO logs nday_year = {int(t0_sec // 86400.0) + 1} at its next step)",
-          flush=True)
+    # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
+    # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
+    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon

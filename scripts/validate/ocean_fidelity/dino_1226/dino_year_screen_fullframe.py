@@ -43,8 +43,18 @@ RUN = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
 # initial state -- which makes lego's 1-year ACC growth directly comparable
 # to NEMO's own growth over the same year from the same state.
 INIT_RESTART = os.environ.get("DINO_INIT_RESTART")
+INIT_RESTART_PATH = INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc"
 g = read_nemo_mesh_mask(f"{RUN}/mesh_mask.nc", nn_hls=0)
-s = read_nemo_restart(INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc", nn_hls=0)
+s = read_nemo_restart(INIT_RESTART_PATH, nn_hls=0)
+# #1455 SEASONAL CLOCK: DINO's analytic forcing follows the DAY OF YEAR, so a
+# screen started from a NEMO restart must continue that restart's own seasonal
+# clock instead of restarting the year at zero. Read from the restart's
+# ``adatrj`` (shared helper, same knob/override as the twin harness). The
+# default restart is kt=320 (day 10); DINO_INIT_RESTART can be far larger, and
+# the matched-state growth test is only matched if this offset is applied.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kamm_twin_90d import seasonal_t0_seconds  # noqa: E402
+T0_SEC = seasonal_t0_seconds(INIT_RESTART_PATH)
 br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
@@ -181,12 +191,12 @@ for year in range(1, YEARS + 1):
         kglob += 1
         if USE_RHS:
             st, ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=kglob * DT,
+                st, forcing, br.z_coord, cfg, DT, t_seconds=T0_SEC + kglob * DT,
                 return_rate=True)
             st = dyn(st, ext_rate)
         else:
             st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                    t_seconds=kglob * DT)
+                                                    t_seconds=T0_SEC + kglob * DT)
             st = dyn(st)
         if k >= ACC0:
             for f in acc: acc[f] = acc[f] + getattr(st, f).data
