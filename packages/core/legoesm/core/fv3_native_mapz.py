@@ -724,7 +724,8 @@ W_MIN_MAPZ = -60.0
 def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
                           fill: bool, kord_tm: int, do_sat_adj: bool,
                           do_inline_mp: bool, do_adiabatic_init: bool,
-                          nq: int, last_step: bool) -> None:
+                          nq: int, last_step: bool,
+                          defer_close: bool = False) -> None:
     """Reject every configuration whose ``fv_mapz`` branch is not ported.
 
     Each of these is a REAL oracle branch that this port does not carry.
@@ -739,12 +740,24 @@ def _refuse_unported_lane(*, hydrostatic: bool, adiabatic: bool, consv: float,
     # The energy fixer is inside `if (last_step .and. ...)` at :628, so a
     # non-last_step call never reaches it whatever consv says. Refusing it
     # there would be stricter than the oracle, not safer.
-    if last_step and (consv > CONSV_MIN or consv < -CONSV_MIN):
+    if (last_step and (consv > CONSV_MIN or consv < -CONSV_MIN)
+            and not defer_close):
+        # THE FIXER IS PORTED, BUT NOT AS A ONE-CALL OPERATION. Its
+        # dtmp is a global reduction over all six faces and this
+        # function sees one face, so it can only be run through the
+        # two-phase protocol: defer_close=True here, then the caller
+        # reduces and calls close_out_pt. A caller that passes consv
+        # WITHOUT deferring would get the un-fixed answer and no error,
+        # which is the failure this guard now exists to prevent -- it no
+        # longer means "not ported", it means "not like that".
         raise NotImplementedError(
-            f"consv={consv} at last_step: the total-energy fixer "
-            f"(fv_mapz.F90:628-747) is NOT ported. The reference deck pins "
-            f"consv_te=0.0, which leaves dtmp exactly 0. |consv| must be "
-            f"<= {CONSV_MIN}.")
+            f"consv={consv} at last_step without defer_close: the "
+            f"total-energy fixer needs a GLOBAL sum over all six faces "
+            f"(fv_mapz.F90:708, g_sum) and this call sees one. Use "
+            f"defer_close=True, reduce with "
+            f"fv3_native_dynamics.energy_fixer_dtmp, then apply "
+            f"close_out_pt -- which is what fv_dynamics_step does. "
+            f"|consv| <= {CONSV_MIN} keeps the fixer off entirely.")
     # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
     # opened at :330 -- with no tracers it is unreachable.
     if fill and nq > 0:
@@ -861,7 +874,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                           consv=consv, fill=fill, kord_tm=kord_tm,
                           do_sat_adj=do_sat_adj, do_inline_mp=do_inline_mp,
                           do_adiabatic_init=do_adiabatic_init, nq=nq,
-                          last_step=last_step)
+                          last_step=last_step, defer_close=defer_close)
     ppm_profile_is_unported(kord_mt)
     ppm_profile_is_unported(abs(int(kord_tm)))
     kords_tr = ([int(kord_tr)] * nq if np.isscalar(kord_tr)
