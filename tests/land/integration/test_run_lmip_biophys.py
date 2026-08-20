@@ -453,3 +453,66 @@ def test_the_same_calibration_is_silent_on_the_scheme_that_reads_it(tmp_path):
         _w.simplefilter("always")
         _run_config(mod, cfg_path, tmp_path / "out")
     assert not [c for c in caught if "REPORTED albedo only" in str(c.message)]
+
+
+def test_calibrated_land_spinup_runs_and_takes_the_farquhar_branch(tmp_path):
+    """The spin-up must actually RUN under the calibrated land model.
+
+    A land initial condition is only meaningful for the model it equilibrated
+    under, so the spin-up gained the same switch the coupled run has.  This is
+    the end-to-end proof that the switch produces a running configuration —
+    changing the soil column from the loader's default to the calibration one,
+    and reaching the coupled photosynthesis-stomata solver rather than the
+    simpler model that the missing leaf-carbon state used to silently select.
+    """
+    from legoesm.land.config import calibrated_multilayer_setup
+
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "out"
+    cfg_path = _write_smoke_config(tmp_path, sd, extra_overrides=[
+        "physics.calibrated_land_physics=true",
+        "physics.surface_scheme=simple_seb",
+        "physics.bulk_scheme=most",
+        "physics.stomata_enabled=true",
+        "physics.enable_freeze_thaw=false",
+    ])
+    assert _run_config(mod, cfg_path, out) == 0          # no NaN over land
+
+    import xarray as xr
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
+    assert np.all(np.isfinite(ds["T_sfc"].values))
+    assert 200.0 < float(ds["T_sfc"].min()) and float(ds["T_sfc"].max()) < 360.0
+    # The soil column really is the calibration one, not the loader default.
+    cal_grid = calibrated_multilayer_setup()["soil_grid"]
+    assert abs(cal_grid.total_depth - 3.0) < 1e-9
+    assert abs(cal_grid.growth_factor - 1.5) < 1e-9
+
+
+def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
+    """Claiming the calibrated land model while one setting disagrees must fail.
+
+    Silently overriding the disagreeing setting is how a run ends up reading as
+    one land model and running another.
+    """
+    import copy
+    import yaml
+    from legoesm.land.lmip_config import apply_overrides, validate_config
+
+    with open(_SMOKE_TEMPLATE) as f:
+        base = yaml.safe_load(f)
+    good = apply_overrides(base, [
+        "physics.calibrated_land_physics=true", "physics.surface_scheme=simple_seb",
+        "physics.bulk_scheme=most", "physics.stomata_enabled=true",
+        "physics.enable_freeze_thaw=false"])
+    validate_config(copy.deepcopy(good))                  # consistent: accepted
+
+    for key, bad in (("surface_scheme", "two_leaf_canopy"),
+                     ("bulk_scheme", "constant"),
+                     ("stomata_enabled", False),
+                     ("snow_albedo_feedback", False),
+                     ("enable_freeze_thaw", True)):
+        broken = copy.deepcopy(good)
+        broken["physics"][key] = bad
+        with pytest.raises(ValueError, match="calibrated_land_physics"):
+            validate_config(broken)

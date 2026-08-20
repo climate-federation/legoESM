@@ -23,6 +23,7 @@ from scripts.run.train_weatherbench_scale import (
     ScaleConfig,
     _apply_smoke_overrides,
     _clamped_warmup,
+    _uses_reachability_freeze,
     build_scale_config_from_args,
 )
 
@@ -139,3 +140,21 @@ def test_build_latlon_config_rad_update_steps_is_int():
 
     ec2 = build_latlon_config(cfg, dict(base, rad_update_steps=6))
     assert ec2.rad_update_steps == 6
+
+
+@pytest.mark.parametrize("mode", ["neural_gcm", "sfno"])
+def test_a_neural_model_is_never_frozen_on_a_zero_gradient(mode):
+    """sfno's decoder is zero-initialized by registry policy, so at step 0
+    every upstream weight has an exactly-zero gradient by the chain rule;
+    freezing on that evidence would leave the decoder as the only trainable
+    thing in the network.  neural_gcm is not zeroed but is filtered out for
+    the same reason in kind: a neural weight's zero gradient is a property of
+    the current weights, not of the configuration."""
+    assert _uses_reachability_freeze(mode) is False
+
+
+def test_the_scheme_parameter_mode_is_frozen_on_a_zero_gradient():
+    """There a zero gradient over the whole shard is evidence the selected
+    schemes never read the knob — a configuration property, not a transient
+    state of the weights."""
+    assert _uses_reachability_freeze("physics") is True

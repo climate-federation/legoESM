@@ -2650,6 +2650,123 @@ def _resolve_wide_halo(env_value: str) -> bool:
         f"(empty = off)")
 
 
+#: Canonical decimal integer, no sign / whitespace / underscores /
+#: leading zeros — the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_wide_halo_stride(env_value: str, evals: int) -> int:
+    """Resolve LEGOESM_MPAS_WIDE_HALO_STRIDE = refresh cadence ``k``.
+
+    ``k`` = number of tendency evaluations between halo refreshes, so
+    the fetched depth is ``k * SPMD_HALO_DEPTH`` and the step does
+    ``ceil(evals / k)`` fills.  ``''``/``'0'`` (default) = ``evals`` =
+    today's full-wide ONE fill per step, byte-identical to the
+    pre-stride code path.  ``k = 1`` is the narrow cadence (one fill
+    per evaluation) run inside ``shard_map``; ``1 < k < evals`` is the
+    intermediate: less redundant compute and payload than full wide,
+    fewer sequential collectives than narrow.
+
+    A SEPARATE env var rather than an integer spelling of
+    LEGOESM_MPAS_WIDE_HALO because ``'1'`` there already means "full
+    wide"; an integer there would have to mean ``k=1`` (narrow) at the
+    same spelling.  Unknown / out-of-range values raise
+    (dispatch-hardening: a typo must not silently pick a cadence), and
+    only CANONICAL decimal spellings are accepted — ``int()`` alone
+    would take ``'0_1'`` (= 1) and ``'+2'``/``' 2 '``/``'02'``, i.e. a
+    typo could silently select a different cadence.
+
+    NOT every ``k`` is sound: see :func:`wide_halo_stride_supported`.
+    """
+    if env_value in ("", "0"):
+        return evals
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={env_value!r}: must be a "
+            f"canonical decimal integer in 1..{evals} (empty or '0' = "
+            f"full wide = {evals})")
+    k = int(env_value)
+    if not 1 <= k <= evals:
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={k}: out of range for a "
+            f"time_integrator with {evals} tendency evaluations; must "
+            f"be in 1..{evals} (empty or '0' = full wide)")
+    if not wide_halo_stride_supported(evals, k):
+        raise ValueError(
+            f"LEGOESM_MPAS_WIDE_HALO_STRIDE={k} is NOT sound for a "
+            f"time_integrator with {evals} tendency evaluations "
+            f"(refreshes before evaluations "
+            f"{wide_halo_refresh_evals(evals, k)}). The halo refresh "
+            f"is applied to the state the TENDENCY reads; the stage "
+            f"array the integrator then builds still carries the "
+            f"pre-refresh (stale) halo rows, so any evaluation AFTER "
+            f"a mid-step refresh reads stale ghosts through its "
+            f"stencil and corrupts owned rows. Supported: "
+            f"{sorted(k for k in range(1, evals + 1) if wide_halo_stride_supported(evals, k))}"
+            f" (1 = refresh every evaluation, {evals - 1} = one "
+            f"refresh before the LAST evaluation, {evals} = full "
+            f"wide, no refresh).")
+    return k
+
+
+def wide_halo_refresh_evals(evals: int, stride: int) -> list[int]:
+    """1-based evaluation indices at which the wide halo is re-filled."""
+    return [j for j in range(2, evals + 1) if (j - 1) % stride == 0]
+
+
+def wide_halo_stride_supported(evals: int, stride: int) -> bool:
+    """Is refresh-every-``stride`` sound for an ``evals``-stage step?
+
+    The refresh replaces the state the TENDENCY reads, not the stage
+    array the integrator combines (a stage-aware integrator hook would
+    be needed for that, and ``dispatch_integrator`` has none).  So a
+    stage built at or after a mid-step refresh still carries stale halo
+    rows, and any LATER evaluation reads them through its
+    ``SPMD_HALO_DEPTH``-ring stencil — corrupting owned rows.  Sound
+    exactly when:
+
+    * ``stride == evals`` — no refresh at all (full wide), or
+    * ``stride == 1`` — every evaluation is preceded by a refill, so
+      its stencil inputs are fresh (the tendency DOES read halo rows;
+      the bound of 0 only means the kept tendencies are the owned
+      ones), or
+    * the ONLY refresh lands on the LAST evaluation (``stride ==
+      evals - 1``), whose stage output is the step result and is read
+      by nothing.
+
+    ponytail: this rules out e.g. ssp_rk34 k=2 and ssp_rk54 k in
+    {2,3}.  Lifting it needs a post-stage refresh hook in
+    ``dispatch_integrator`` (replace the stage array itself), which is
+    a cross-cutting change to the shared timestepping package — do it
+    only if a receipt shows those cadences are worth it.
+    """
+    if stride == 1:
+        return True
+    refreshes = wide_halo_refresh_evals(evals, stride)
+    return refreshes in ([], [evals])
+
+
+def _wide_mask_ring_bound(eval_index: int, stride: int) -> tuple[int, bool]:
+    """Shrinking-mask ring bound for the ``eval_index``-th (1-based)
+    tendency evaluation at refresh stride ``stride``.
+
+    Returns ``(ring_bound, refresh_first)``: entities with ring
+    ``<= ring_bound`` (plus all owned rows) keep their tendency, and
+    ``refresh_first`` says whether this evaluation opens a new block
+    and must re-fill the halo before reading the state.
+
+    Derivation.  Let ``D = SPMD_HALO_DEPTH`` (one tendency's reach) and
+    ``m = (eval_index - 1) mod stride`` = evaluations since the last
+    refresh.  A refresh restores validity over the full fetched depth
+    ``stride * D``; each evaluation consumes one reach, so the state
+    entering evaluation ``m`` is valid to ``(stride - m) * D`` and its
+    output to ``(stride - m - 1) * D``.  At ``stride = evals`` this is
+    the pre-stride full-wide bound ``(evals - eval_index) * D``.
+    """
+    m = (eval_index - 1) % stride
+    return SPMD_HALO_DEPTH * (stride - 1 - m), (m == 0 and eval_index > 1)
+
+
 def _build_ragged_halo_schedule(partitions, cell_owner, n_dev, cells_per,
                                 edges_per, max_lc, max_le):
     """One-collective halo schedule for ``jax.lax.ragged_all_to_all``.
@@ -3001,9 +3118,26 @@ def make_voronoi_sharded_step(
                 f"_INTEGRATOR_TENDENCY_EVALS, so the required halo depth "
                 f"is unknown. Add the evals count (and its shrinking-"
                 f"region justification) before enabling wide halo.")
-        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_evals
+        _wide_k = _resolve_wide_halo_stride(
+            _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO_STRIDE", ""),
+            _wide_evals)
+        _halo_depth_eff = SPMD_HALO_DEPTH * _wide_k
+        _wide_fills = -(-_wide_evals // _wide_k)   # ceil
     else:
+        # The stride is only read inside the wide branch, so a stride
+        # set with wide halo OFF would be silently ignored (codex M1-2):
+        # refuse it instead of running a cadence the user did not get.
+        _stride_env = _os_wide.environ.get("LEGOESM_MPAS_WIDE_HALO_STRIDE",
+                                           "")
+        if _stride_env not in ("", "0"):
+            raise ValueError(
+                f"LEGOESM_MPAS_WIDE_HALO_STRIDE={_stride_env!r} is set "
+                f"but LEGOESM_MPAS_WIDE_HALO is off, so the stride "
+                f"would be ignored. Set LEGOESM_MPAS_WIDE_HALO=1 or "
+                f"unset the stride.")
         _wide_evals = None
+        _wide_k = None
+        _wide_fills = None
         _halo_depth_eff = SPMD_HALO_DEPTH
 
     # ------------------------------------------------------------------
@@ -3013,7 +3147,8 @@ def make_voronoi_sharded_step(
         "Building halo-partitioned infrastructure for %d device(s) "
         "(nCells=%d, nEdges=%d, halo_depth=%d, strategy=%s%s) ...",
         n_dev, nCells, nEdges, _halo_depth_eff, halo_strategy,
-        ", WIDE HALO (1 fill/step)" if use_wide_halo else "",
+        (f", WIDE HALO ({_wide_fills} fill(s)/step, refresh every "
+         f"k={_wide_k} of {_wide_evals} evals)") if use_wide_halo else "",
     )
     t0 = time.time()
     (
@@ -3288,7 +3423,11 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # WIDE-HALO kernel: ONE packed fill at depth evals x SPMD_HALO_DEPTH,
     # then the whole RK body on the local region with no further
-    # exchange.  Validity shrinks by one tendency reach
+    # exchange (stride k = evals, the default).  With k < evals the
+    # fetched depth is k x SPMD_HALO_DEPTH and the halo is re-filled
+    # every k evaluations: ceil(evals/k) fills per step, trading
+    # redundant compute + payload against sequential collectives.
+    # Validity shrinks by one tendency reach
     # (SPMD_HALO_DEPTH rings) per evaluation — the Shu-Osher
     # shrinking-region argument — so after the last of N evaluations the
     # state is valid exactly on the owned cells this kernel returns.
@@ -3308,54 +3447,78 @@ def make_voronoi_sharded_step(
             edge_ring = wide_sl[1][0]     # (max_le,) int32
             _owned_c = jnp.arange(max_lc) < cells_per
             _owned_e = jnp.arange(max_le) < edges_per
-            cell_pack = _pack_cell_state(T_shard, ps_shard, phis_shard,
-                                         q_shard)
-            if use_ragged:
-                cell_local, u_local = _ragged_halo_fill(
-                    cell_pack, u_shard, halo_sl, max_lc, max_le,
-                )
-            elif use_ppermute:
-                cell_local, u_local = _ppermute_halo_fill(
-                    cell_pack, u_shard, halo_sl, ppermute_perms,
-                    max_lc, max_le,
-                )
-            else:
-                cell_full = jax.lax.all_gather(
-                    cell_pack, "device", axis=0, tiled=True)
-                u_full = jax.lax.all_gather(
-                    u_shard, "device", axis=0, tiled=True)
-                gc, ge = halo_sl
-                cell_local = cell_full[gc[0]]
-                u_local = u_full[ge[0]]
-
-            T_local, ps_local, phis_local, q_local = _unpack_cell_state(
-                cell_local, nlev)
             my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
 
-            tracers_local = None
-            if tkeys:
-                tracers_local = {
-                    k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
-                             name=k, dims=("nCells", "nlev"),
-                             units="kg/kg", staggering="cell")
-                    for i, k in enumerate(tkeys)
-                }
-            local_state = MPASHydrostaticState(
-                u=Field(data=u_local, name="u",
-                        dims=("nEdges", "nlev"), units="m/s",
-                        long_name="normal velocity", staggering="edge"),
-                T=Field(data=T_local, name="T",
-                        dims=("nCells", "nlev"), units="K",
-                        long_name="temperature", staggering="cell"),
-                p_s=Field(data=ps_local, name="p_s",
-                          dims=("nCells",), units="Pa",
-                          long_name="surface pressure", staggering="cell"),
-                phis=Field(data=phis_local, name="phis",
-                           dims=("nCells",), units="m^2/s^2",
-                           long_name="surface geopotential",
-                           staggering="cell"),
-                tracers=tracers_local,
-            )
+            def _fill_local_state(u_owned, T_owned, ps_owned, phis_owned,
+                                  q_owned):
+                """ONE packed halo fill from OWNED rows -> full local
+                state.  Called at step entry and again at every
+                refresh (stride k < evals); owned rows are correct at
+                every stage, so a refresh restores validity over the
+                whole fetched depth ``k * SPMD_HALO_DEPTH``."""
+                cell_pack = _pack_cell_state(T_owned, ps_owned, phis_owned,
+                                             q_owned)
+                if use_ragged:
+                    cell_local, u_local = _ragged_halo_fill(
+                        cell_pack, u_owned, halo_sl, max_lc, max_le,
+                    )
+                elif use_ppermute:
+                    cell_local, u_local = _ppermute_halo_fill(
+                        cell_pack, u_owned, halo_sl, ppermute_perms,
+                        max_lc, max_le,
+                    )
+                else:
+                    cell_full = jax.lax.all_gather(
+                        cell_pack, "device", axis=0, tiled=True)
+                    u_full = jax.lax.all_gather(
+                        u_owned, "device", axis=0, tiled=True)
+                    gc, ge = halo_sl
+                    cell_local = cell_full[gc[0]]
+                    u_local = u_full[ge[0]]
+
+                T_local, ps_local, phis_local, q_local = _unpack_cell_state(
+                    cell_local, nlev)
+                tracers_local = None
+                if tkeys:
+                    tracers_local = {
+                        k: Field(data=q_local[:, i * nlev:(i + 1) * nlev],
+                                 name=k, dims=("nCells", "nlev"),
+                                 units="kg/kg", staggering="cell")
+                        for i, k in enumerate(tkeys)
+                    }
+                return MPASHydrostaticState(
+                    u=Field(data=u_local, name="u",
+                            dims=("nEdges", "nlev"), units="m/s",
+                            long_name="normal velocity", staggering="edge"),
+                    T=Field(data=T_local, name="T",
+                            dims=("nCells", "nlev"), units="K",
+                            long_name="temperature", staggering="cell"),
+                    p_s=Field(data=ps_local, name="p_s",
+                              dims=("nCells",), units="Pa",
+                              long_name="surface pressure",
+                              staggering="cell"),
+                    phis=Field(data=phis_local, name="phis",
+                               dims=("nCells",), units="m^2/s^2",
+                               long_name="surface geopotential",
+                               staggering="cell"),
+                    tracers=tracers_local,
+                )
+
+            def _refill(s):
+                """Re-fill ``s``'s halo from its own OWNED rows."""
+                if tkeys:
+                    q_owned = jnp.concatenate(
+                        [s.tracers[k].data for k in tkeys],
+                        axis=-1)[:cells_per]
+                else:
+                    q_owned = jnp.zeros((cells_per, 0), dtype=T_shard.dtype)
+                return _fill_local_state(
+                    s.u.data[:edges_per], s.T.data[:cells_per],
+                    s.p_s.data[:cells_per], s.phis.data[:cells_per],
+                    q_owned)._replace(v=s.v)
+
+            local_state = _fill_local_state(u_shard, T_shard, ps_shard,
+                                            phis_shard, q_shard)
 
             # Trace-time evaluation counter: the unrolled integrators
             # call the tendency N times SEQUENTIALLY in Python during
@@ -3370,16 +3533,38 @@ def make_voronoi_sharded_step(
                 rides a zero tendency; tracer ADVECTION under the same
                 keys) — the local-mesh mirror of ``dyn_tendency_fn``,
                 MASKED to the eval's shrinking valid region: entities
-                outside ring ``(evals - k) * SPMD_HALO_DEPTH`` get a
-                ZERO tendency, freezing their stage values at finite
-                fill values.  Their values are never read by a later
-                evaluation whose result reaches an owned cell (the
-                Shu-Osher shrinking-region argument), and the freeze
-                keeps every primal finite — unmasked garbage rings turn
-                zero cotangents into NaN (0 * NaN) which the fill
-                transpose scatter-adds into owned gradients."""
+                outside ring ``(k - 1 - m) * SPMD_HALO_DEPTH`` (``m`` =
+                evaluations since the last halo refresh, ``k`` = the
+                refresh stride) get a ZERO tendency, freezing their
+                stage values at finite fill values.  Their values are
+                never read by a later evaluation whose result reaches
+                an owned cell (the Shu-Osher shrinking-region
+                argument), and the freeze keeps every primal finite —
+                unmasked garbage rings turn zero cotangents into NaN
+                (0 * NaN) which the fill transpose scatter-adds into
+                owned gradients.
+
+                With ``k = evals`` (full wide, the default) ``m = j-1``
+                and the bound collapses to the pre-stride
+                ``(evals - j) * SPMD_HALO_DEPTH``.  With ``k < evals``
+                the halo is re-filled from OWNED rows at the start of
+                every block of ``k`` evaluations, which resets the
+                valid region to the full fetched depth ``k *
+                SPMD_HALO_DEPTH``.
+
+                The refill replaces the state the tendency READS, NOT
+                the stage array the integrator goes on to combine, so
+                that stage keeps its PRE-refresh halo rows — which a
+                later evaluation would read through its stencil.
+                :func:`wide_halo_stride_supported` is the guard: the
+                resolver refuses every ``(evals, k)`` where a refresh
+                is followed by another evaluation that could read a
+                stale stage (e.g. ssp_rk34 k=2)."""
                 _eval_i["k"] += 1
-                thr = SPMD_HALO_DEPTH * (_wide_evals - _eval_i["k"])
+                thr, _do_refresh = _wide_mask_ring_bound(
+                    _eval_i["k"], _wide_k)
+                if _do_refresh:
+                    s = _refill(s)
                 keep_c = (_owned_c | (cell_ring <= thr))[:, None]
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
@@ -3734,6 +3919,10 @@ def make_voronoi_sharded_step(
         "ppermute_ragged" if use_ragged else halo_strategy)
     _voronoi_step._wide_halo_effective = use_wide_halo
     _voronoi_step._halo_depth_effective = _halo_depth_eff
+    # Refresh cadence actually in force (None when wide halo is off):
+    # k evaluations per halo fill, ceil(evals/k) fills per step.
+    _voronoi_step._wide_halo_stride_effective = _wide_k
+    _voronoi_step._wide_halo_fills_effective = _wide_fills
     return _voronoi_step
 
 

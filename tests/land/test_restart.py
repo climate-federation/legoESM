@@ -188,3 +188,22 @@ def test_a_file_without_the_geometry_warns_rather_than_pretending(tmp_path):
         load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
                           expected_soil_grid=_grid(total_depth=3.0))
+
+
+def test_an_unstamped_file_can_be_refused_outright(tmp_path):
+    """Warning is not a check for the file most people load.
+
+    The published initial states predate the interface stamp, so an unstamped
+    file cannot be refused by default. But a run on a column that is NOT the
+    historical default has no business accepting one: an old file is then
+    almost certainly on the other column, and a warning it scrolls past is how
+    the wrong soil profile gets used anyway.
+    """
+    st = _fake_state(seed=9)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)     # no soil_grid
+    with pytest.raises(ValueError, match="not the historical default"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0),
+                          require_soil_grid=True)

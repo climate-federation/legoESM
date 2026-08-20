@@ -741,7 +741,12 @@ def _step_multilayer_land_impl(
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
     # from the surface scheme.  ``band_rad.Rn_bands`` drives per-band melt below.
     if bands is not None:
-        _cover_fn = lambda s: snow_cover_fraction(s, config.land_albedo)
+        # per-band cover with the canopy snow mask applied and clipped PER BAND
+        # (post-aggregate scaling is wrong on saturated bands — see land_albedo)
+        _scl = (1.0 if config.land_albedo.snow_cover_scale is None
+                else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None])
+        _cover_fn = lambda s: jnp.clip(
+            snow_cover_fraction(s, config.land_albedo) * _scl, 0.0, 1.0)
         # gap 3: solar-zenith snow brightening (cos_zenith per cell -> broadcast over
         # the band axis).  Inactive where cos_zenith is a constant placeholder.
         _cz = forcing.cos_zenith[:, None]
@@ -1123,7 +1128,11 @@ def _step_multilayer_land_impl(
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
-                lambda s: snow_cover_fraction(s, config.land_albedo),
+                lambda s: jnp.clip(
+                    snow_cover_fraction(s, config.land_albedo)
+                    * (1.0 if config.land_albedo.snow_cover_scale is None
+                       else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None]),
+                    0.0, 1.0),
                 lambda a: snow_albedo(a, config.land_albedo, cos_zenith=_cz_new),
                 ice_bands=ice_bands_new, cfg=bands)
         else:

@@ -67,6 +67,12 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
     rank 0 blocked in the allreduce until walltime (~11 h). Aborting on any rank
     converts that hang into an immediate, clean job death.
 
+    A CLEAN ``SystemExit`` is exempt: ``--help`` and ``sys.exit(0)`` are not a
+    dead rank, and aborting on them would turn printing the usage text into an
+    MPI_Abort. The test matches the interpreter's own exit status rather than
+    truthiness -- clean only for ``None`` and an integer zero, so
+    ``sys.exit("usage error")`` (which exits 1) still aborts.
+
     Single-rank / no ``mpi4py`` -> transparent passthrough (the exception just
     propagates), so serial training and unit tests are unaffected. Usable bare
     (``@mpi_abort_on_uncaught``) or parameterised (``@mpi_abort_on_uncaught(comm=c)``).
@@ -78,6 +84,18 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
         def _wrapped(*args, **kwargs):
             try:
                 return f(*args, **kwargs)
+            except SystemExit as exc:
+                # A CLEAN exit is not a dead rank. ``--help`` and any
+                # ``sys.exit(0)`` raise SystemExit(0) through this wrapper, and
+                # aborting on it would turn "print the usage text" into
+                # MPI_Abort. Anything else IS a failure and still aborts --
+                # matching the interpreter, which exits 0 only for None and an
+                # integer 0, and exits 1 for a string or any other object
+                # (``sys.exit("")`` is a FAILING exit despite being falsy).
+                if not (exc.code is None
+                        or (isinstance(exc.code, int) and exc.code == 0)):
+                    _abort_multirank_job(comm, code=code)
+                raise
             except BaseException:
                 _abort_multirank_job(comm, code=code)
                 raise
@@ -377,7 +395,7 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
-                                    comm=None, on_epoch=None):
+                                    comm=None, on_epoch=None, start_epoch=0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -387,7 +405,16 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     ``loss_fn(params, sample) -> scalar`` is jitted ONCE here, before the loops
     (:func:`build_dp_value_and_grad`); every sample then reuses that single
     traced forward+adjoint. Building it inside either loop reintroduces #1364.
+
+    ``start_epoch`` resumes a run: epochs before it are not re-run, and the
+    epoch INDEX passed to ``on_epoch`` keeps counting from where the previous
+    job stopped, so its checkpoints do not overwrite that job's.  The learning
+    -rate schedule is NOT re-derived from it — the schedule position lives in
+    the optimizer state, which a resuming caller restores.
     """
+    if not 0 <= start_epoch <= n_epochs:
+        raise ValueError(
+            f"start_epoch={start_epoch} outside [0, n_epochs={n_epochs}]")
     import jax
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
@@ -398,7 +425,7 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     n_steps_done = 0
 
     history = []
-    for epoch in range(n_epochs):
+    for epoch in range(start_epoch, n_epochs):
         losses = []
         n_skipped = 0
         for sample in local_samples:

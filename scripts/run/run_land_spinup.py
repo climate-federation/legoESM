@@ -202,6 +202,11 @@ def main(argv=None) -> int:
         args.surfdata, grid, base_cfg, 1.0)   # day_of_year (positional)
     update_land_params = make_step_land_params_updater(gsd, config.surface_scheme)
     n_layers = int(config.soil_grid.n_layers)
+    # Layer thicknesses identify the column that a consumer must match: the layer
+    # COUNT alone does not (8 layers can span 3 m or 6.375 m).  Recorded on every
+    # restart this driver writes, and checked on every one it reads.
+    from legoesm.land.soil_grid import make_soil_grid as _make_soil_grid
+    soil_dz = _make_soil_grid(config.soil_grid).dz
 
     # Land mask for the equilibrium diagnostics (ocean columns are inert but
     # would dilute the land-mean drift).
@@ -275,6 +280,7 @@ def main(argv=None) -> int:
                 ck, state, land_mode="multilayer",
                 t_end_s=float(y + 1) * sec_per_year,
                 n_steps_completed=(y + 1) * steps_per_year,
+                soil_dz=soil_dz,
                 metadata={"grid_type": args.grid_type,
                           "resolution": args.resolution, "dt": dt},
                 soil_grid=config.soil_grid)
@@ -284,6 +290,7 @@ def main(argv=None) -> int:
         restart_out, state, land_mode="multilayer",
         t_end_s=float(year0 + args.years) * sec_per_year,
         n_steps_completed=(year0 + args.years) * steps_per_year,
+        soil_dz=soil_dz,
         metadata={"grid_type": args.grid_type, "resolution": args.resolution,
                   "dt": dt, "years": year0 + args.years,
                   "surface_scheme": args.surface_scheme},
