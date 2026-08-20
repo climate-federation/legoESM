@@ -101,7 +101,14 @@ def main(argv=None):
     hydro = args.hydrostatic
     print(f"n={args.n} k_split={args.k_split} clear={args.clear} "
           f"hydrostatic={hydro}", flush=True)
-    ctx = build_six_face_duo_context(N, NG)
+    # use_ext_bundle/oracle_conventions and hs6 are the GATE's own
+    # construction (tests/grids/test_fv3_dynamics.py::ctx); the JAX
+    # stepper refuses anything else, and it refused this probe's first
+    # version rather than letting it produce a number.
+    ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     oracle_conventions=True)
+    ctx["hs6"] = [np.zeros((N + 2 * NG, N + 2 * NG), dtype=np.float64)
+                  for _ in range(6)]
     jctx = build_jax_duo_stepper_context(ctx)
     ak, bk, ptop = set_eta_analytic(KM)
 
