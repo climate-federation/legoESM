@@ -39,6 +39,16 @@ CONTROLS (skill Rule 1c/1d/2/3):
   * PLANT: shift the NEMO trajectory by one substep -> the per-substep diff MUST
     blow up (the metric is not substep-shift-invariant).
   * card state printed.
+
+RETRACTION POINTER (2026-08-19).  This file's premise cites the "~0.88 m^2/s
+wall-concentrated transport bias" and the "~4.2e-3 m/step eta injection".  BOTH
+WERE WIND-OFF ARTIFACTS and are RETRACTED: the probe that produced them ran with
+surface_forcing=None on a card that threads the wind THROUGH model.step.  Wind-on
+the transport residual is 5.99e-02 m^2/s and INTERIOR-peaked, and the eta
+increment is 1.95e-04 m.  The associated claim that the transport diff "closes
+the injection to 3 sig figs" is also retracted -- it compared against the wrong
+reference.  See the HISTORY block in hu_avg_perface_diff.py before using any
+number below.
 """
 from __future__ import annotations
 

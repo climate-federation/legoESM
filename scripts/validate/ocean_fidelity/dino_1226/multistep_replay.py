@@ -137,12 +137,22 @@ def provenance(tag: str = "") -> str:
             text=True, timeout=60).stdout.strip())
     except Exception as exc:                      # never let provenance abort a probe
         sha, dirty = f"<unavailable: {exc}>", False
+    # EVERY knob that can change the answer, including the wind-control env
+    # vars: a wind-on and a wind-off run must NOT stamp identically, since the
+    # #1455 retraction turns on exactly that variable.  SEQDUMP is stamped too
+    # -- nothing otherwise ties the oracle's ocean.output (read for namelist
+    # switches) to the dump set the numbers came from.
+    _knobs = " ".join(
+        f"{k}={os.environ.get(k)!r}" for k in (
+            "LEGOESM_NEMO_E3T", "JAX_ENABLE_X64", "CUDA_VISIBLE_DEVICES",
+            "DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+            "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
+            "DINO_NEMO_RUN_TWIN_STEP1",
+        ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
-            f"git={sha}{'+dirty' if dirty else ''}  "
-            f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')!r}  "
-            f"JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')!r}  "
-            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}  "
-            f"IC_STEP={IC_STEP}  RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
+            f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "
+            f"IC_STEP={IC_STEP}  RUN_TRAJ={RUN_TRAJ!r}  "
+            f"RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
     print(line, flush=True)
     return line
 

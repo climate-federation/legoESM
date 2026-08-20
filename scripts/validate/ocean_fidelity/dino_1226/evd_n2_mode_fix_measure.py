@@ -54,6 +54,20 @@ windows, while genuinely changing the N^2 field -- see the non-vacuity line.
 Under the shipped ``n2_mode="nemo_bn2"`` it cannot matter at all: ``bn2`` reads
 T/S and the geometric gdept/gdepw ladders and consults no density helper.
 
+REUSING A REFERENCE PATH MEANS DECLARING WHAT WAS DROPPED.  This offline block
+reproduces ``_enhanced_diffusion_K``'s density/N^2 chain, and two steps of that
+path are deliberately NOT carried here:
+  * ``extrapolate_below_seafloor`` on both trigger arms (k_profiles.py:377-396).
+    KEPT OUT because the model's own comment records it as moving zero wet
+    interfaces, and the census masks to wet interior interfaces anyway.
+  * the threaded ``n2_tracers`` / ``n2_tracers_before`` -- this block uses the
+    raw ``st0.T/S`` and ``st0.T_before/S_before``.  Under this card
+    (``evd_n2_time_level="nemo_now_before"``) those ARE the step-entry Nnn/Nbb
+    tracers, which is why the census reproduces the live-hook numbers; a card
+    selecting a different time level would break that equivalence.
+Neither is a free pass: both are stated so the next reader can check them
+rather than rediscover them.
+
 CENSUS WINDOW (2026-08-19 audit).  This probe previously ran ONE window
 (interfaces 1..34) at ONE threshold and carried the FULL-window / five-decade
 figures in a comment marked "verified by review".  It now RUNS both windows and
@@ -286,14 +300,23 @@ def main() -> int:
     # so this probe reproduces the path the model ACTUALLY RUNS instead of the
     # path the card's top-level field would suggest.  Feeding "geometric" here
     # would make the probe DIVERGE from the model it is measuring.
+    # TWO guards, because the first guard is never the only guard: the CALLER
+    # could start passing the kwarg, OR the CALLEE's default could change under
+    # it.  Both would silently move the model's convention out from under this
+    # offline reproduction, so the effective value is READ from the callee's
+    # signature rather than hard-coded, and the caller is checked separately.
     import inspect
+    from legoesm.ocean.eos import compute_ocean_rho as _cor
     _kp_src = inspect.getsource(_enhanced_diffusion_K_source())
-    _EVD_EOS_DEPTH = "insitu"
     if "eos_depth" in _kp_src:
         raise SystemExit(
-            "*** _enhanced_diffusion_K now passes eos_depth -- this probe's "
-            "offline reproduction is stale; re-derive _EVD_EOS_DEPTH from the "
-            "source before trusting any number below")
+            "*** _enhanced_diffusion_K now mentions eos_depth -- this probe's "
+            "offline reproduction is stale; re-derive the effective depth "
+            "convention from the source before trusting any number below")
+    _EVD_EOS_DEPTH = inspect.signature(_cor).parameters["eos_depth"].default
+    if _EVD_EOS_DEPTH not in ("insitu", "geometric"):
+        raise SystemExit(f"*** unexpected compute_ocean_rho eos_depth default "
+                         f"{_EVD_EOS_DEPTH!r}")
     print(f"  [eos depth] card cfg.eos_depth = "
           f"{getattr(cfg0, 'eos_depth', '<absent>')!r}   "
           f"model mc.eos_depth = {getattr(mc0, 'eos_depth', '<absent>')!r}")
@@ -307,10 +330,30 @@ def main() -> int:
           f"'adiabatic' comparison arm, whose sensitivity is measured below.")
 
     eos_fn = make_eos_fn(eos=mc0.eos, eos_linear=mc0.eos_linear)
-    # geometric needs the EOS built with the SAME rho0 so p = rho0*g*gdept
-    # cancels exactly (eos.py:2643-2645) -- the sensitivity arm, not the model.
+    # WHY THIS ARM NEEDS rho0, AND WHY THE OBVIOUS REASON IS WRONG.
+    # make_eos_fn's rho0 is consumed ONLY by the "nemo_eos80" branch (its own
+    # docstring: zh = (p/(rho0*g))*r1_Z0 in the nemo_eos80 polynomial).  This
+    # card runs "nemo_seos", which recovers depth as zh = p/(cfg.rho0*g) with
+    # cfg.rho0 FIXED inside NemoSEOSConfig.  So the p = rho0*g*gdept factor
+    # cancels here NOT because the kwarg was threaded, but because
+    # constants.rho_0 and NemoSEOSConfig.rho0 both happen to be 1026.0.
+    # Asserted, because if they ever diverge the arm silently measures the
+    # rho0 mismatch (a 0.1% depth stretch, ~3x the in-situ-vs-geometric
+    # difference it exists to measure) instead of the depth convention.
     eos_fn_geo = make_eos_fn(eos=mc0.eos, eos_linear=mc0.eos_linear,
                              rho0=cc.rho_0)
+    from legoesm.ocean.eos import NemoSEOSConfig as _NSC
+    if mc0.eos == "nemo_seos":
+        _seos_rho0 = float(getattr(mc0.eos_nemo_seos, "rho0", None)
+                           if getattr(mc0, "eos_nemo_seos", None) is not None
+                           else _NSC().rho0)
+        if abs(_seos_rho0 - float(cc.rho_0)) > 1e-9:
+            raise SystemExit(
+                f"*** eos_depth='geometric' arm is INVALID: NemoSEOSConfig.rho0"
+                f"={_seos_rho0} != constants rho_0={cc.rho_0}, so the "
+                f"p=rho0*g*gdept factor does NOT cancel and this arm would "
+                f"measure a depth stretch, not the depth convention")
+
     T_nn = np.asarray(st0.T.data); S_nn = np.asarray(st0.S.data)
     T_bb = np.asarray(st0.T_before.data); S_bb = np.asarray(st0.S_before.data)
     eta_nn = st0.eta.data
@@ -371,10 +414,15 @@ def main() -> int:
     print(f"\n  [non-vacuity] adiabatic N^2 insitu-vs-geometric field DIFF: "
           f"max={_dmax:.4e} s^-2  (|N^2| max={_scale:.4e}, "
           f"rel={_dmax/max(_scale,1e-300):.3e})")
-    if not _dmax > 0.0:
-        raise SystemExit("*** the eos_depth=geometric arm changed NOTHING -- "
-                         "it did not take, so its identical census below is "
-                         "vacuous, not a null result")
+    # A 1-ULP difference would pass a bare "> 0" while proving nothing, so the
+    # bar is RELATIVE: the arm must move the field by more than fp64 roundoff
+    # on the field's own scale.
+    if not _dmax > 1e-12 * _scale:
+        raise SystemExit(
+            f"*** the eos_depth=geometric arm moved the N^2 field by only "
+            f"{_dmax:.3e} (scale {_scale:.3e}) -- at or below roundoff, so it "
+            f"did not meaningfully take and its identical census below is "
+            f"vacuous, not a null result")
 
     for wlab, lv, nlv in WINDOWS:
         Wm = wif[..., lv]

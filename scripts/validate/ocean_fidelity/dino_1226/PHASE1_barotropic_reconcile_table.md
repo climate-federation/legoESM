@@ -1,5 +1,26 @@
 # PHASE 1 — barotropic transport-pathway alignment table (dyn_spg_ts)
 
+> **RETRACTION (2026-08-19).** Everything below that rests on the
+> **0.88 m²/s wall transport bias** or the **4.2e-3 m/step eta injection** —
+> including the "Arithmetic projection onto the 0.88/4.2e-3/ACC chain" section —
+> is built on **WIND-OFF** measurements and is **RETRACTED**. The probe that
+> produced them called `model.step(surface_forcing=None)` on a card that threads
+> the wind *through* `step`, so the ocean carried no wind at all.
+>
+> Wind-on, on the same state and with everything else held fixed:
+> the transport residual is **5.99e-02 m²/s** (14.7× smaller) and its structure
+> is **interior-peaked, not wall-concentrated** (west-wall column 1.25e-02); the
+> eta increment is **1.95e-04 m** (21.5× smaller). The claim that the transport
+> diff closes the eta injection "to 3 s.f." is separately retracted — it compared
+> against legoESM's total eta increment rather than the eta *error*, and wind-on
+> the transport diff accounts for roughly **42%** of that error, with a
+> wind-independent ~4.42e-04 m remainder whose cause is **unknown**.
+>
+> Do not re-use the linear chain in this document without re-deriving it wind-on.
+> See the HISTORY block in `hu_avg_perface_diff.py`.
+
+
+
 Oracle: `cfgs/DINO/MY_SRC/dynspg_ts.F90` (DINO runs **MLF**, `#else` branch —
 `cpp_DINO.fcm` has `key_qco key_vco_3d`, NO `key_RK3`; DINO ships `MY_SRC/stpmlf.F90`).
 Namelist (RUN_GDB/ocean.output): `ln_dynspg_ts=T`, `nn_bt_flt=2` (boxcar width `2*nn_e`),

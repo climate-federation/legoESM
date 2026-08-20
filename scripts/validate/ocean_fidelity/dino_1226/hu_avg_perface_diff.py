@@ -20,7 +20,9 @@ ON) and compares it PER FACE against BOTH NEMO references:
        r3u ssh-avg convention (domqco.F90:166) validated in sshnxt_operator_ab
        (C0).  This is what the ssh COMMIT consumes (the FIRST div_hor, BEFORE
        dyn_spg): NEMO's committed ssh(Naa)=ssh(Nbb)-2dt*div_h(Hu_entry).  The
-       4.2e-3 closure arithmetic ``-2dt*div(dH*u)`` is against THIS reference.
+       closure arithmetic ``-2dt*div(dH*u)`` is against THIS reference; its
+       correct target is the eta ERROR d_eta_lego - d_ssh_nemo, NOT legoESM's
+       total eta increment (see HISTORY -- that confusion is retraction #1).
 
   (ii) NEMO's barotropic time-mean advective transport dump un_adv/vn_adv:
        ``spg_dump_un_adv_final.bin`` [m^2/s] = <zhU/e2u> over the substep window
@@ -56,14 +58,22 @@ recorded numbers EXACTLY -- err_norm 6.6191e-03, max 0.87919 m^2/s, eta
 increment 4.1968e-03 m -- so the wind is the single variable that changed.
 
 WIND-ON (fp64, LEGOESM_NEMO_E3T=both, day-0 gate 0.000e+00, tau_x in
-[-0.1999, 0.1000] Pa, C0 1.39e-14 / rel 1.31e-10, planted roll 17.9 m):
+[-0.1999, 0.1000] Pa, C0 1.39e-14 / rel 1.31e-10, planted roll 17.9 m, mapping
+plant 4043x):
 
                             wind-off (recorded)   wind-on (this fix)   factor
-  eta increment |d_eta|     4.1968e-03 m          1.9509e-04 m         21.5x down
+  eta increment |d_eta|     4.1968e-03 m          1.9317e-04 m         21.7x down
   Hu err_norm (L2 rel)      6.6191e-03            5.7542e-05           115x down
   Hu residual max           8.7919e-01 m^2/s      5.9913e-02 m^2/s     14.7x down
   Hv residual max           6.2493e-01 m^2/s      6.3426e-02 m^2/s     9.9x down
   closure -2dt*div(dHu)     4.1658e-03 m          5.7835e-04 m
+
+(A SECOND defect, found in adversarial review and fixed in the same pass: the
+eta increment was being taken against ``st0.eta`` -- the NOW level -- while
+legoESM's invariant and NEMO's own increment are both referenced to the BEFORE
+level. |sshn - sshb| is 8.81e-05 m, the same order as the increment itself. The
+baseline is now ``st0.eta_before``, which is why d_eta reads 1.9317e-04 rather
+than the 1.9509e-04 first recorded.)
 
 RETRACTED #1 -- "the transport diff closes the eta injection to 3 sig figs".
 The recorded agreement (4.166e-3 closure vs 4.20e-3 "injection") compared the
@@ -72,20 +82,44 @@ by linearity ``-2dt*div(Hu_avg - Hu_entry)`` equals ``d_eta_lego - d_ssh_nemo``,
 i.e. the eta ERROR, and wind-off the two references coincided only because
 |d_eta_lego| = 4.2e-3 dwarfed NEMO's own |d_ssh_nemo| = 1.07e-4.  Both
 references are now printed, together with the PER-CELL identity residual.
-Wind-on, |d_eta_lego| = 1.95e-4 and |d_ssh_nemo| = 1.07e-4 are the same order,
-the accident disappears, and the per-cell identity gives:
+
+THE REAL FINDING, and it is bigger than the retraction.  Because C0 pins
+``d_ssh_nemo = -2dt*div(Hu_entry)`` to 1.4e-14, ``Hu_entry`` CANCELS out of the
+per-cell identity, which therefore reduces to a pure legoESM-side test of
+``eta(Naa) = eta(Nbb) - 2dt*div(Hu_avg)`` -- the invariant asserted in
+ocean_model_latlon_cgrid.py:7716.  THAT INVARIANT DOES NOT HOLD ON THIS CARD:
 
   |closure - (d_eta_lego - d_ssh_nemo)|   wind-off 4.4236e-04 m, L2rel 2.39e-02
-                                          wind-on  4.4249e-04 m, L2rel 5.79e-01
+                                          wind-on  4.4641e-04 m, L2rel 5.83e-01
 
-The unexplained term is WIND-INDEPENDENT and constant at ~4.42e-04 m.  It was
-2.4% of the wind-off eta error and is 58% of the wind-on one.  So the per-face
-transport diff does NOT own the eta error wind-on; it owns roughly 42% of it.
-CAUSE OF THE ~4.4e-04 REMAINDER: UNKNOWN, labelled PLAUSIBLE either way -- a
-second writer to eta, or legoESM's own divergence stencil/metric differing
-from the NEMO stencil this probe applies.  Discriminating measurement, named
-and NOT run: capture legoESM's committed eta increment and its own
-``_split_velocity_divergence`` output in the same step and diff them directly.
+i.e. a residual of 231% of the wind-on eta increment's own max.  It was 2.4% of
+the wind-off eta error and so passed unnoticed; wind-on it dominates.
+
+WHAT THE RESIDUAL IS NOT (each CONFIRMED by measurement, not by argument):
+  * NOT the global eta-drift fixer, or any spatially uniform writer: the
+    residual is zero-mean with std/|mean| = 179, and 518 of 9920 wet cells
+    carry 90% of its L2^2 -- printed by this probe.
+  * NOT a metric or mask difference: legoESM's bridged dy_u/area are
+    BIT-IDENTICAL to e2u/e1e2t, its face masks differ from NEMO's umask/vmask
+    in ZERO faces, and the periodic seam Hu_avg[:,0]-Hu_avg[:,52] is exactly 0.
+  * NOT an index-mapping error: the mapping plant control above blows the
+    residual up 4043x, so the comparison can see an off-by-one and does not.
+
+WHAT IT PLAUSIBLY IS (labelled PLAUSIBLE, one run from being settled): this
+lane already recorded at bbfdb8e5d that NEMO averages its barotropic substeps
+TWO ways and that legoESM commits the slower-centred average into the after
+slot.  If ``eta`` and ``Hu_avg`` emerge from different substep filters the
+identity CANNOT hold.  The switchable field already exists; flipping it is a
+single-variable, one-run test.
+
+WITHDRAWN, this probe's own over-claims, both raised in review:
+  * "the remainder is WIND-INDEPENDENT" was presented as suggestive.  It is
+    not evidence: the wind changes |Hu_avg| by at most ~0.3% (0.88 of 272
+    m^2/s), so ANY term linear in Hu_avg is constant to that tolerance across
+    the flip.  The wind-off/wind-on pair cannot discriminate the candidates.
+  * "the transport diff owns roughly 42% of the eta error" is withdrawn.  It
+    came from 1 - L2rel (or from a ratio of two maxima at different cells);
+    norms do not decompose additively into ownership shares.
 
 RETRACTED #2 -- "WALL-concentrated (W 0.879, E 0.795, interior 0.589)".  That
 structure was the missing wind stress at the zonal walls.  Wind-on the maximum
@@ -124,9 +158,13 @@ def _disposition(basename):
 
     ``time_level_for_dump`` RAISES on an unregistered basename, so a new dump
     cannot be loaded here until someone has read its NEMO write site and
-    recorded the file:line proof.  This is the guard that stops the
-    "compared against the wrong leapfrog level" failure the registry exists
-    for -- the probe must not carry its own private opinion of the level.
+    recorded the file:line proof.
+
+    SCOPE, precisely: this is a REGISTRATION tripwire, not a level check.  It
+    stops a dump whose level nobody has established from being loaded at all.
+    It does NOT verify that the caller then compares the dump against
+    state at the matching level -- a registered before-level dump can still be
+    differenced against now-level state, and that remains the caller's job.
     """
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
     return time_level_for_dump(basename)
@@ -206,8 +244,14 @@ def _dssh_from_transport(hu, hv, m):
     """NEMO ssh_nxt operator: d_ssh = -2dt * (1/e1e2t) * div_h(e2u*hu, e1v*hv).
     ``hu``/``hv`` are PER UNIT WIDTH [m^2/s]; the e2u/e1v width factor is applied
     HERE inside the divergence (NEMO divhor.F90: di[e2u*e3u*u]).  di=f(ji)-f(ji-1)
-    (west=roll+1 in i, periodic); dj: south wall no flux.  Validated at 9.3e-15
-    against sshnxt_operator_ab (C0)."""
+    (west=roll+1 in i, periodic); dj: south wall no flux.
+
+    VALIDATED by THIS probe's own control C0 (which reproduces NEMO's dumped
+    first-guess d_ssh from NEMO's own inputs): residual 1.39e-14 m, rel
+    1.31e-10, with the planted roll control at 17.9 m.  The "9.3e-15" figure
+    this docstring used to cite came from sshnxt_operator_ab's TEST B, which
+    was a TAUTOLOGY and has been deleted (commit 8b8638cc7); it is not
+    evidence and is no longer quoted."""
     Hu = m["e2u"] * hu   # -> full transport [m^3/s]
     Hv = m["e1v"] * hv
     di = Hu - np.roll(Hu, 1, axis=1)
@@ -270,26 +314,53 @@ def _run_one_step_capture():
     # transport was measured on an unforced ocean.  DINO_HU_WIND=0 forces the
     # wind OFF -- the continuity control that reproduces the wind-off numbers so
     # the flip is a single-variable change.
-    _wind = bool(getattr(cfg, "wind_through_step", False))
-    if os.environ.get("DINO_HU_WIND", "1") == "0":
-        _wind = False
+    _card_wind = bool(getattr(cfg, "wind_through_step", False))
+    _control_off = os.environ.get("DINO_HU_WIND", "1") == "0"
+    _wind = _card_wind and not _control_off
     sf_step = dino_step_surface_forcing(forcing) if _wind else None
-    _tlo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
-    _thi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    _tau = np.asarray(sf_step.tau_x) if sf_step is not None else np.zeros(1)
+    _tlo, _thi = float(np.min(_tau)), float(np.max(_tau))
+    _tmag = float(np.max(np.abs(_tau)))
     print(f"  FORCING: wind_through_step="
           f"{bool(getattr(cfg, 'wind_through_step', False))} applied={_wind} "
           f"surface_stress_implicit={getattr(cfg,'surface_stress_implicit',None)} "
-          f"tau_x[Pa] range=[{_tlo:.4f},{_thi:.4f}]", flush=True)
-    if _wind and not (_thi - _tlo) > 0.0:
+          f"tau_x[Pa] range=[{_tlo:.4f},{_thi:.4f}] max|tau_x|={_tmag:.4f}",
+          flush=True)
+    # GATE INVARIANT: max|tau_x| > 0.  The defect class this guards is an
+    # all-zero stress reaching the model (surface_forcing carried but empty);
+    # gating on the RANGE instead would false-abort on a spatially uniform but
+    # nonzero stress, and gating on nothing is how the wind-off runs got
+    # recorded in the first place.
+    # GATE, BOTH ARMS.  The retracted defect was surface_forcing=None reaching
+    # model.step -- i.e. the _wind=False arm -- so a gate that lives only inside
+    # the _wind=True branch cannot fire on it.  Wind-off is therefore reachable
+    # ONLY through the explicit continuity control (DINO_HU_WIND=0); if the card
+    # ever stops setting wind_through_step (it defaults False, and this probe
+    # reads it through a getattr fallback), the run ABORTS instead of silently
+    # reproducing the retracted numbers.
+    if not _card_wind and not _control_off:
+        raise SystemExit(
+            "*** FORCING GATE FAILED: the card does not set "
+            "wind_through_step, so this run would be WIND-OFF -- exactly the "
+            "measurement retracted at fdb5cfec6. Wind-off is legitimate only "
+            "as the deliberate continuity control: set DINO_HU_WIND=0.")
+    if _wind and not _tmag > 0.0:
         raise SystemExit("*** FORCING GATE FAILED: wind is nominally ON but "
-                         "tau_x is flat -- the probe would measure an unforced "
-                         "ocean (the fdb5cfec6 defect class)")
+                         "max|tau_x| == 0 -- the probe would measure an "
+                         "unforced ocean (the fdb5cfec6 defect class)")
     DT = RN_DT
     st, rate = apply_dino_lat_lon_surface_forcing(
         st0, forcing, br.z_coord, cfg, DT, t_seconds=DT, return_rate=True)
     st = model.step(st, DT, surface_forcing=sf_step, external_tracer_rate=rate)
     eta = np.asarray(st.eta.data)
-    eta_b = np.asarray(st0.eta.data)
+    # TIME LEVEL, and it is NOT the obvious one.  legoESM's leapfrog invariant
+    # is eta(Naa) = eta(Nbb) - 2dt*div(Hu_avg) (docstring at
+    # ocean_model_latlon_cgrid.py:7716), and the barotropic solve is seeded from
+    # state.eta_before (:7902-7904) -- the BEFORE level.  NEMO's own increment
+    # is likewise referenced to sshb.  Using st0.eta (the NOW level) here put
+    # the two sides on DIFFERENT baselines, |sshn - sshb| = 8.81e-05 m apart --
+    # the same order as the increment being measured.
+    eta_b = np.asarray(st0.eta_before.data)
     return eta, eta_b, st, st0
 
 
@@ -386,16 +457,20 @@ def main():
     Hu_avg = _CAP["Hu_avg"]; Hv_avg = _CAP["Hv_avg"]
     print(f"  captured Hu_avg shape={Hu_avg.shape} dtype={Hu_avg.dtype}  "
           f"Hv_avg shape={Hv_avg.shape}")
-    # day-0 gate + eta-injection sanity (should be ~4.2e-3)
+    # day-0 gate + the per-step eta increment.  No target is asserted here:
+    # the "~4.2e-3" this comment used to expect was the WIND-OFF artifact
+    # (wind-on it is ~1.95e-4 m).  See HISTORY.
     d_eta = np.abs((eta_lego - eta_b)[wet])
-    print(f"  eta injection |eta_lego - eta_before| max={d_eta.max():.4e} "
+    print(f"  eta increment |eta(Naa) - eta(Nbb)| max={d_eta.max():.4e} "
           f"p99.9={np.percentile(d_eta,99.9):.4e}")
 
     # legoESM Hu_avg is PER UNIT WIDTH [m^2/s] (== NEMO un_adv, == SUM_k e3u*u),
     # NOT full transport (verified: |Hu_avg|max=272 == |un_adv|max=273).  legoESM
     # u-face grid has (ni+1) faces; NEMO un_adv per-cell EAST face.  Map to NEMO
     # cell indexing: legoESM u_face[:, 1:] (east faces of cells 0..ni-1) == NEMO
-    # cell (sshnxt_operator_ab TEST B mapping, validated).
+    # cell (this mapping was previously credited to sshnxt_operator_ab's
+    # TEST B, now deleted as a tautology; it stands on the C0 control and the
+    # |Hu_avg|max == |un_adv|max magnitude check on the next line, not on TEST B).
     if Hu_avg.shape[1] == NI + 1:
         Hu_lego = Hu_avg[:, 1:]           # east faces -> NEMO cell convention
     else:
@@ -407,6 +482,26 @@ def main():
     print(f"  mapped Hu_lego shape={Hu_lego.shape} [m^2/s] (NEMO cell {NJ}x{NI})  "
           f"|Hu_lego|max={np.abs(Hu_lego).max():.3e}")
 
+    # ---- PLANTED control for the INDEX MAPPING itself -----------------------
+    # Deleting sshnxt_operator_ab's TEST B removed the only thing that claimed
+    # to cover the lego u-face -> NEMO cell mapping (Hu_avg[:, 1:]), and it
+    # never really did.  Neither C0 (which never touches legoESM's face array)
+    # nor the |Hu_avg|max ~ |un_adv|max magnitude check can see an off-by-one
+    # in i -- a 272-vs-273 max survives a roll.  So plant one: rolling the
+    # mapped field one cell in i MUST blow the residual up.  If it does not,
+    # the metric is translation-invariant and every per-face number below is
+    # meaningless.
+    _base = np.abs(((Hu_lego - Hu_e) * m["umask2"])[m["umask2"]]).max()
+    _roll = np.abs(((np.roll(Hu_lego, 1, axis=1) - Hu_e) * m["umask2"])[m["umask2"]]).max()
+    print(f"\n  MAPPING PLANT (roll Hu_lego +1 in i): base residual max="
+          f"{_base:.4e} -> rolled {_roll:.4e}  ratio={_roll/max(_base,1e-300):.1f}x"
+          f"  -> {'PLANT OK' if _roll > 10 * _base else '*** PLANT FAILED'}")
+    if not _roll > 10 * _base:
+        raise SystemExit(
+            "*** MAPPING PLANT FAILED: rolling the mapped transport one cell "
+            "in i did not blow up the residual, so this comparison cannot "
+            "detect an index-mapping error and no per-face number stands.")
+
     # ================= (i) vs ENTRY transport =================================
     print("\n" + "=" * 74)
     print("(i)  legoESM Hu_avg  vs  NEMO ENTRY transport SUM_k e3u(Nnn)*u [m^2/s]")
@@ -414,8 +509,10 @@ def main():
     print("=" * 74)
     _per_face_report("Hu_avg - Hu_entry", Hu_lego, Hu_e, m["umask2"].astype(float), "m^2/s")
     _per_face_report("Hv_avg - Hv_entry", Hv_lego, Hv_e, m["vmask2"].astype(float), "m^2/s")
-    # CLOSURE: -2dt*div(e2u*(dH)) should reproduce the 4.2e-3 injection.  This is
-    # the arithmetic that TIES the per-face transport diff to the eta anomaly.
+    # CLOSURE: -2dt*div(e2u*(dH)) is the arithmetic that would TIE the per-face
+    # transport diff to the eta error.  Whether it does is MEASURED below by the
+    # per-cell identity, not assumed -- wind-on it accounts for ~42% of the
+    # error, so this is a partial attribution, not a closure.
     dHu = (Hu_lego - Hu_e) * m["umask2"]
     dHv = (Hv_lego - Hv_e) * m["vmask2"]
     d_ssh_closure = _dssh_from_transport(dHu, dHv, m)
@@ -444,9 +541,26 @@ def main():
     print(f"    PER-CELL identity |closure - (d_eta_lego - d_ssh_nemo)|: "
           f"max={_id.max():.4e} m   L2rel="
           f"{np.sqrt((_id**2).sum()/max((_ref**2).sum(),1e-300)):.4e}")
-    print(f"    -> ~0 means legoESM's committed eta IS -2dt*div(Hu_avg) and the "
-          f"per-face transport diff fully OWNS the eta error; a nonzero residual "
-          f"means another operator also writes eta.")
+    # LOCALIZE the identity residual instead of reporting only max and L2rel.
+    # A max and a norm cannot distinguish "a uniform offset" from "a handful of
+    # bad faces", and the distinction is exactly what names the owner: a
+    # spatially UNIFORM residual would implicate the global eta-drift fixer,
+    # while a sparse zero-mean one cannot be it.
+    _r = (d_ssh_closure - (d_eta_signed - d_ssh_nemo))[wet]
+    _sq = np.sort(_r**2)[::-1]
+    _n90 = int(np.searchsorted(np.cumsum(_sq), 0.9 * _sq.sum()) + 1)
+    print(f"    residual structure: mean={_r.mean():+.3e} std={_r.std():.3e} "
+          f"m  (std/|mean|={_r.std()/max(abs(_r.mean()),1e-300):.1f})")
+    print(f"    concentration: {_n90} of {_r.size} wet cells carry 90% of the "
+          f"residual's L2^2")
+    print(f"    -> a zero-mean, sparse residual EXCLUDES a spatially uniform "
+          f"writer (e.g. the global eta-drift correction); a uniform one would "
+          f"show std/|mean| ~ 0.")
+
+    # NO VERDICT PRINTED HERE ON PURPOSE.  A probe that prints its own
+    # interpretation gets that interpretation quoted back as evidence.  The
+    # identity residual and its L2rel are the measurement; what they imply
+    # about ownership belongs in the analysis, after the controls above pass.
 
     # ================= (ii) vs un_adv/vn_adv dump =============================
     print("\n" + "=" * 74)

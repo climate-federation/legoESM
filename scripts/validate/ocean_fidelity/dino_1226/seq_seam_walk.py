@@ -36,6 +36,16 @@ CONTROLS
   * HALO/land convention: postlbc_tem land cells (tmask==0) must be 0/fill.
 
 fp64 via run_fp64.py wrapper; LEGOESM_NEMO_E3T=both. dtypes printed.
+
+RETRACTION POINTER (2026-08-19).  This file's premise cites the "~0.88 m^2/s
+wall-concentrated transport bias" and the "~4.2e-3 m/step eta injection".  BOTH
+WERE WIND-OFF ARTIFACTS and are RETRACTED: the probe that produced them ran with
+surface_forcing=None on a card that threads the wind THROUGH model.step.  Wind-on
+the transport residual is 5.99e-02 m^2/s and INTERIOR-peaked, and the eta
+increment is 1.95e-04 m.  The associated claim that the transport diff "closes
+the injection to 3 sig figs" is also retracted -- it compared against the wrong
+reference.  See the HISTORY block in hu_avg_perface_diff.py before using any
+number below.
 """
 from __future__ import annotations
 
