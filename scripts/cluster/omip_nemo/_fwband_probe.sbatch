@@ -58,7 +58,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
   --gateway-transports --mle --mle-ce 0.06 \
-  --output $OUT 2>&1 | grep --line-buffered -E "fwbudget|\[setup\]|\[diag\]|Error|error" | head -120
+  --output $OUT 2>&1 | grep --line-buffered -E "fwbudget|\[setup\]|\[diag\]|Error|error" | cat
 run_rc=$?
 echo "=== run rc=$run_rc"
 # codex 9430935 MAJOR-4: never score a failed or snapshot-less arm -- a stale
