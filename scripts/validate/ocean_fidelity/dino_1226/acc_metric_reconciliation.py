@@ -69,6 +69,8 @@ Usage
                                      replaces the built-in registry when given)
   ...                              --split-old arm3_bn2 --split-new armA_new
   ...                              --self-test
+
+SECOND-REVIEW CORRECTIONS (aeaf42, 2026-08-20): the 'no reduction/weight/window moves either era's sign' claim is limited to the THREE variants tested (largest new-era variant +0.8220); '85.6% barotropic' does NOT license 'not a buoyancy change' -- the two eras' full-3D density differs rms 1.3e-3, max 5.9e-2 kg/m3 (dT up to 0.41 K locally); and the irreproducibility verdict is STRONGER than 'unresolved': run logs eliminate every harness env knob (no ABLATION banner, 90 integer day labels pin DINO_DT), leaving an uncommitted working-tree edit as the sole surviving candidate.
 """
 import argparse
 import glob
@@ -382,9 +384,10 @@ def self_test():
     du = 1e-3
     sec = np.einsum("jik,k,j->i", np.where(A.umask, du, 0.0), A.e3t1d,
                     A.e2u_col) / 1e6
-    # The expectation is a PINNED LITERAL, not a recomputation from the same
-    # A.* globals -- recomputing cancels any corruption of e3t_1d/e2u/umask and
-    # passes regardless (demonstrated by scaling e3t_1d by 7).
+    # NOTE (2nd review): this `expect` IS a recomputation from the same A.*
+    # globals and passes even with e3t_1d scaled by 7 (measured 1.14e-13).
+    # The check that actually carries the self-test is the PINNED LITERAL
+    # asserted below; this line only feeds the printout.
     expect = float(np.mean(sec[2:-2]))
     got = mean_acc(u + du) - mean_acc(u)
     assert abs(got - expect) < 1e-6, (
