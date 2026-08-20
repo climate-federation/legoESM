@@ -201,49 +201,27 @@ def require_flat_orography(tiles: list) -> None:
 # port side
 # ----------------------------------------------------------------------
 
-def build_port_ic(ctx, ak, bk, nh: bool = False):
+def build_port_ic(ctx, ak, bk, nh: bool = False, zvir: float = 0.0):
     """The test_case = -13 IC on all six faces, in state_3d layout.
 
+    DELEGATES to the committed home,
+    ``fv3_native_dcmip16_ic.dcmip16_bc_six_face_state`` -- this function
+    is where that assembly was originally established, and the two were
+    line-for-line copies. They must not stay copies now that the moist
+    arm couples ``pt`` to ``q``: ``test_cases.F90:6760`` divides pt by
+    ``(1 + zvir*q(sphum))``, so pt and the tracer IC have to come out of
+    ONE construction or a second implementation decides half of it.
+
     ``nh=True`` adds ``make_nh``'s initial state (``init_hydro.F90:
-    147-158``): ``w = 0`` and ``delz = -(rdgas/grav) * T * dpeln`` from
-    the IC's own hydrostatic column -- the exact arithmetic the oracle's
-    ``delz computed from hydrostatic state`` message announces (zvir = 0
-    on the adiabatic deck).
+    147-158``); ``zvir != 0`` selects the moist (non-adiabatic) IC.
+    Returns ``(state, sphum)`` -- sphum is the SAME array the pt
+    division used.
     """
-    from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
-    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_face
-    from legoesm.core.fv3_native_state_3d import build_state_3d
-    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
-    from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
-
-    def gcdr(p1, p2, r):
-        return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
-
-    n, ng = ctx["n"], ctx["ng"]
-    st = build_state_3d(n, ng, KM, remap_follows=True,
-                        hydrostatic=not nh)
-    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        co = np.stack([np.asarray(gs["grid_lon"])[cc, cc],
-                       np.asarray(gs["grid_lat"])[cc, cc]], -1)
-        ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
-                       np.asarray(gs["agrid_lat"])[cs, cs]], -1)
-        o = dcmip16_bc_face(co, ce, ak, bk, KM, do_pert=True,
-                            constants=GFS_CONSTANTS, great_circle_dist=gcdr)
-        st[t]["delp"][cs, cs, :] = o["delp"]
-        st[t]["pt"][cs, cs, :] = o["pt"]
-        st[t]["u"][cs, cc, :] = o["u"]
-        st[t]["v"][cc, cs, :] = o["v"]
-        if nh:
-            pe = np.full((n, n), float(ak[0]))
-            for k in range(KM):
-                dp = st[t]["delp"][cs, cs, k]
-                dpeln = np.log(pe + dp) - np.log(pe)
-                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
-                                          * st[t]["pt"][cs, cs, k] * dpeln)
-                pe = pe + dp
-    return st
+    from legoesm.core.fv3_native_dcmip16_ic import (
+        dcmip16_bc_six_face_state,
+    )
+    return dcmip16_bc_six_face_state(
+        ctx, ak, bk, KM, hydrostatic=not nh, do_pert=True, zvir=zvir)
 
 
 # --------------------------------------------------------------------
@@ -346,32 +324,21 @@ def check_moist_deck(run_dir: str) -> None:
             f"(fv_mapz.F90:628-747) is not ported.")
 
 
-def build_port_tracer_ic(ctx, ak, bk) -> list:
+def build_port_tracer_ic(sphum6) -> list:
     """[face][iq] padded tracer arrays for the resolved deck.
 
-    ``sphum`` is the analytic DCMIP16_BC moisture (test_cases.F90:
-    6737-6744); ``liq_wat`` is identically zero (:6728-6735 zeroes all
-    tracers and only sphum is filled -- CONFIRMED against the zerostep
-    fv_tracer.res: liq_wat/rainwat are 0.0 everywhere).  Halos stay
-    zero: the init-time ``mpp_update_domains(q)`` is inside the
+    ``sphum`` comes from :func:`build_port_ic`, NOT from a second call:
+    on the moist arm the IC's ``pt`` was divided by ``(1 + zvir*q)``
+    using that exact array (``test_cases.F90:6760``), so rebuilding q
+    here would make the two halves of one IC come from two
+    constructions. ``liq_wat`` is identically zero (:6728-6735 zeroes
+    all tracers and only sphum is filled -- CONFIRMED against the
+    zerostep fv_tracer.res: liq_wat/rainwat are 0.0 everywhere). Halos
+    stay zero: the init-time ``mpp_update_domains(q)`` is inside the
     terminator-tracer branch (cl/cl2), absent on this deck; tracer_2d
     fills its own halos via ext_scalar.
     """
-    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_sphum
-    from legoesm.core.fv3_native_state_3d import field_shape
-
-    n, ng = ctx["n"], ctx["ng"]
-    cs = slice(ng, ng + n)
-    q6 = []
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        lat_c = np.asarray(gs["agrid_lat"])[cs, cs]
-        sphum = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
-        sphum[cs, cs, :] = dcmip16_bc_sphum(ak, bk, lat_c, KM)
-        liq = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
-        q6.append([sphum, liq])
-    return q6
-
+    return [[q, np.zeros_like(q)] for q in sphum6]
 
 def tracer_window(q6, ctx) -> list:
     """Compute-window copies of the advected tracers, (i, j, k)."""
@@ -1159,7 +1126,9 @@ def main(argv=None):
                 "runs?")
 
     # ---------------- instrument control: the IC ----------------
-    state = build_port_ic(ctx, ak, bk, nh=args.nh)
+    state, sphum6 = build_port_ic(
+        ctx, ak, bk, nh=args.nh,
+        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0)
     p_ic = port_window(state, ctx)
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
@@ -1243,7 +1212,7 @@ def main(argv=None):
         # port's analytic sphum against the zerostep fv_tracer.res.
         # sphum is analytic in (lat, ak, bk) with no quad step beyond
         # the agrid latitudes, so the quad-geometry floor applies.
-        q = build_port_tracer_ic(ctx, ak, bk)
+        q = build_port_tracer_ic(sphum6)
         p_tr_ic = tracer_window(q, ctx)
         worst_tr_ic = 0.0
         for pf in range(6):

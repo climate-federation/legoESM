@@ -112,6 +112,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import operator as _operator
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -1411,14 +1413,23 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
         # a string and divide by tracer 1 (GLM MINOR, job 9442423).
         # __index__ accepts int and numpy integers and rejects the rest;
         # bool has one, so it is excluded by name.
-        if (isinstance(sphum_index, bool)
-                or not hasattr(sphum_index, "__index__")
-                or not 0 <= sphum_index.__index__() < nq):
+        # operator.index NORMALISES; the bounds test must then run on
+        # the normalised value, not the original object (codex MINOR,
+        # job 9442482). bool has __index__ too and is excluded by name.
+        _si_in = sphum_index          # keep for the message
+        if isinstance(sphum_index, bool):
+            sphum_index = None
+        else:
+            try:
+                sphum_index = _operator.index(sphum_index)
+            except TypeError:
+                sphum_index = None
+        if sphum_index is None or not 0 <= sphum_index < nq:
             raise ValueError(
                 f"r_vir != 0 needs sphum_index an int in [0, {nq}) -- "
                 f"fv_mapz.F90:975 uses the explicit sphum argument, and "
                 f"assuming tracer 0 divides by the wrong species. Got "
-                f"{sphum_index!r}.")
+                f"{_si_in!r}.")
         if not hydrostatic and adiabatic:
             # fv_mapz.F90:985 -- on the NON-hydrostatic arm the closing
             # T_v -> T conversion sits inside `if (.not. adiabatic)`, so

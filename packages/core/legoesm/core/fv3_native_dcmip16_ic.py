@@ -255,7 +255,8 @@ def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
                               hydrostatic: bool = True,
                               do_pert: bool = True,
                               constants: DCMIP16Constants | None = None,
-                              with_sphum: bool = True):
+                              with_sphum: bool = True,
+                              zvir: float = 0.0):
     """The test_case = -13/-12 IC on ALL SIX duo faces, state_3d layout.
 
     Committed home of the assembly that
@@ -266,6 +267,22 @@ def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
     (``init_hydro.F90:147-158``): ``w = 0`` and
     ``delz = -(rdgas/grav) * pt * dpeln`` from the IC's own hydrostatic
     column (``zvir = 0`` on the adiabatic deck).
+
+    ``zvir != 0`` selects the MOIST IC.  ``test_cases.F90:6760-6768``
+    runs ``pt = pt/(1. + zvir*q(sphum))`` -- labelled "Convert pt to
+    non-virtual temperature" -- whenever the deck is NOT adiabatic, and
+    in the solo driver ``adiabatic = .false.`` is exactly what sets
+    ``zvir = rvgas/rdgas - 1`` (``atmosphere.F90:156-161``), so the one
+    flag decides both.  A moist deck's restart therefore holds DRY
+    temperature: omitting this leaves the IC ~3.8 K warm where
+    ``zvir*q`` peaks at 0.0128, which is the 1.06e-02 relative the
+    parity harness's instrument control refused on 2026-08-20.
+
+    THE ORDER IS THE ORACLE'S, and it matters on the NH arm: ``delz``
+    is built at ``:6721`` from the VIRTUAL ``pt``, ``sphum`` is filled
+    at ``:6737``, and only then is ``pt`` divided at ``:6760``.  The
+    division is therefore LAST in the per-face body, after ``delz``.
+    ``zvir != 0`` requires ``with_sphum`` for the obvious reason.
 
     ``ctx`` is a ``build_six_face_duo_context`` dict (the NumPy lane's);
     ``constants=None`` selects ``GFS_CONSTANTS`` — the FMS set the pinned
@@ -285,6 +302,11 @@ def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
 
     if constants is None:
         constants = GFS_CONSTANTS
+    if zvir != 0.0 and not with_sphum:
+        raise ValueError(
+            "zvir != 0 needs with_sphum=True: the moist IC divides pt by "
+            "(1 + zvir*q(sphum)) (test_cases.F90:6762) and there is no "
+            "sphum to divide by.")
 
     def gcdr(p1, p2, r):
         # the oracle's 3-arg form: unit-sphere angle times radius
@@ -324,4 +346,10 @@ def dcmip16_bc_six_face_state(ctx: dict, ak, bk, km: int, *,
             q[cs, cs, :] = dcmip16_bc_sphum(
                 ak, bk, np.asarray(gs["agrid_lat"])[cs, cs], km)
             sphum.append(q)
+            if zvir != 0.0:
+                # :6760-6768, LAST -- after delz above, which the oracle
+                # builds from the still-virtual pt at :6721.
+                st[t]["pt"][cs, cs, :] = (
+                    st[t]["pt"][cs, cs, :]
+                    / (1.0 + zvir * q[cs, cs, :]))
     return st, sphum

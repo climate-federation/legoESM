@@ -43,7 +43,7 @@ pt_to_theta_v, ported literally with the oracle's operation order); the
 barrier and exchange extents are the halo module's; d_con = 0.0 throughout
 and is NOT a parameter of this module -- the KE-to-heat pathway and its
 heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
-inactive on the shipped duo decks; the moist path is HYDROSTATIC-only
+inactive on the shipped duo decks; the moist path is supported on BOTH arms
 (zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap, and
 on the NH arm also into the pkz this module recomputes at :299-322;
 consv_te != 0 is refused); pfull is computed-and-unused on this lane and is
@@ -51,6 +51,8 @@ not ported; omga is an output-only passenger whose values are meaningless;
 and dyn_core's use_old_omega fill is not ported (no u/v/pt/delp parity).
 """
 from __future__ import annotations
+
+import operator as _operator
 
 import jax
 import jax.numpy as jnp
@@ -336,13 +338,24 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "zvir != 0 requires tracer arrays, but q is None: "
                 "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
                 "humidity to read.")
-        if (isinstance(sphum_index, bool)
-                or not hasattr(sphum_index, "__index__")):
+        # operator.index NORMALISES; hasattr alone does not. A object
+        # that implements only __index__ passed the old check and then
+        # died on the bounds COMPARISON with an incidental TypeError
+        # (codex MINOR, job 9442482). bool is excluded by name because
+        # it has __index__ too, and True would select tracer 1.
+        if isinstance(sphum_index, bool):
             raise ValueError(
-                f"zvir != 0 requires sphum_index to be an int indexing the "
-                f"specific-humidity tracer in q; got {sphum_index!r}. A "
-                f"guessed index would silently couple the wrong species "
-                f"into theta_v.")
+                f"zvir != 0 requires sphum_index to be an integer index "
+                f"into q; got the bool {sphum_index!r}, which would "
+                f"silently select tracer {int(sphum_index)}.")
+        try:
+            sphum_index = _operator.index(sphum_index)
+        except TypeError:
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer "
+                f"indexing the specific-humidity tracer in q; got "
+                f"{sphum_index!r}. A guessed index would silently couple "
+                f"the wrong species into theta_v.") from None
         if len(q) <= 0:
             raise ValueError(
                 "zvir != 0 requires nq > 0, but q carries no tracers "

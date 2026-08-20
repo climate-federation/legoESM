@@ -99,6 +99,8 @@ returned so a caller can see it, but its values are meaningless and
 """
 from __future__ import annotations
 
+import operator as _operator
+
 import numpy as np
 
 from legoesm.core.fv3_native_acoustic_3d import acoustic_loop_3d
@@ -340,13 +342,24 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 "zvir != 0 requires tracer arrays, but q is None: "
                 "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
                 "humidity to read.")
-        if (isinstance(sphum_index, bool)
-                or not hasattr(sphum_index, "__index__")):
+        # operator.index NORMALISES; hasattr alone does not. A object
+        # that implements only __index__ passed the old check and then
+        # died on the bounds COMPARISON with an incidental TypeError
+        # (codex MINOR, job 9442482). bool is excluded by name because
+        # it has __index__ too, and True would select tracer 1.
+        if isinstance(sphum_index, bool):
             raise ValueError(
-                f"zvir != 0 requires sphum_index to be an int indexing the "
-                f"specific-humidity tracer in each face's q list; got "
+                f"zvir != 0 requires sphum_index to be an integer index "
+                f"into q; got the bool {sphum_index!r}, which would "
+                f"silently select tracer {int(sphum_index)}.")
+        try:
+            sphum_index = _operator.index(sphum_index)
+        except TypeError:
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer "
+                f"indexing the specific-humidity tracer in q; got "
                 f"{sphum_index!r}. A guessed index would silently couple "
-                f"the wrong species into theta_v.")
+                f"the wrong species into theta_v.") from None
         for _t, _qf in enumerate(q):
             if len(_qf) <= 0:
                 raise ValueError(
