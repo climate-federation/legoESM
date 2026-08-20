@@ -1326,7 +1326,7 @@ def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
 
 
 def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
-                 n: int, ng: int):
+                 n: int, ng: int, fixer_on: bool = False):
     """``fv_mapz.F90:975`` -- the deferred half of the remap, FUNCTIONAL.
 
     Returns the converted ``pt``; the NumPy twin mutates in place (C4).
@@ -1334,14 +1334,19 @@ def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
     while :func:`lagrangian_to_eulerian` runs one face at a time -- see
     the ``defer_close`` comment there.
 
-    ``dtmp == 0`` keeps the certified expression exactly, rather than
-    acquiring an add of a zero.
+    ``fixer_on=False`` keeps the certified expression exactly, rather
+    than acquiring an add of a zero -- and is a STATIC choice, so the
+    compiled program differs rather than branching on a traced value.
     """
     pt = jnp.asarray(pt)
     _require_f64_jax("close_out_pt", {"pt": pt, "pkz": pkz})
     ia = ng
     win = pt[ia:ia + n, ia:ia + n, :]
-    if dtmp == 0.0:                      # static: a Python if
+    # BRANCH ON THE STATIC FLAG, NOT ON dtmp'S VALUE. dtmp is a TRACED
+    # scalar under jit (it is a global reduction of traced fields), so
+    # `if dtmp == 0.0` would raise a ConcretizationTypeError there.
+    # `fixer_on` comes from consv_te, which is a static deck constant.
+    if not fixer_on:
         if r_vir == 0.0:
             return pt
         new = win / (1.0 + r_vir * q[int(sphum_index)][ia:ia + n,

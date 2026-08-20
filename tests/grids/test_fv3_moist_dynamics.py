@@ -168,7 +168,11 @@ def test_unported_moist_arms_still_refuse():
     indexed into.
     """
     from legoesm.core.fv3_native_dynamics import fv_dynamics_step
+    # POSITIVE consv_te runs now; the negative prescribed-flux branch
+    # does not, and neither does moist x consv (no oracle deck).
     with pytest.raises(NotImplementedError, match="consv_te"):
-        fv_dynamics_step(**_minimal_step_kwargs(zvir=0.0, consv_te=1.0))
+        fv_dynamics_step(**_minimal_step_kwargs(zvir=0.0, consv_te=-1.0))
+    with pytest.raises(NotImplementedError, match="no oracle deck"):
+        fv_dynamics_step(**_minimal_step_kwargs(consv_te=1.0))
     with pytest.raises(ValueError, match="delz"):
         fv_dynamics_step(**_minimal_step_kwargs(hydrostatic=False))

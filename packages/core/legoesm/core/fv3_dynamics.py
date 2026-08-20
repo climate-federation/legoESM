@@ -46,7 +46,9 @@ heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
 inactive on the shipped duo decks; the moist path is supported on BOTH arms
 (zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap, and
 on the NH arm also into the pkz this module recomputes at :299-322;
-consv_te != 0 is refused); pfull is computed-and-unused on this lane and is
+consv_te > CONSV_MIN runs the total-energy fixer through the
+two-phase defer/reduce/apply protocol, while NEGATIVE consv_te and
+moist x consv are refused); pfull is computed-and-unused on this lane and is
 not ported; omga is an output-only passenger whose values are meaningless;
 and dyn_core's use_old_omega fill is not ported (no u/v/pt/delp parity).
 """
@@ -193,6 +195,106 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
            / (akap * (peln[:, :, 1:, :] - peln[:, :, :-1, :]))
            .transpose(0, 1, 3, 2))
     return {"ps": ps, "pe": pe, "peln": peln, "pk": pk, "pkz": pkz}
+
+
+# --------------------------------------------------------------------
+# The consv_te energy integrals -- JAX twins of the spec lane's
+# --------------------------------------------------------------------
+# WRITTEN IN jnp, NOT REUSED FROM THE SPEC VIA np.asarray. The first
+# version did that on the argument that these run "outside any traced
+# loop"; codex showed the argument is false for the public jit entry
+# point (BLOCKER, job 9446299): make_fv_dynamics_step_jit wraps the
+# WHOLE step, so the peeled final n_map iteration is still inside
+# jax.jit and np.asarray(tracer) raises TracerArrayConversionError.
+# jax.grad, vmap or any enclosing scan have the same problem.
+#
+# So these are twins in the repo's established two-lane pattern, and
+# they are FACE-STACKED where the spec's are per-face -- the six faces
+# reduce together anyway.
+
+
+def _ke_column_jax(delpw, u, v, rsin2, cosa_s, *, cp_times, n, ng):
+    """``sum_k delp*(<cp term> + 0.25*rsin2*KE)``, the term both
+    integrals share (fv_mapz.F90:650-656 and :1145-1150).
+
+    ``u`` is (6, m_a, m_a+1) and ``v`` is (6, m_a+1, m_a), so the j+1
+    and i+1 neighbours slice DIFFERENT axes.
+    """
+    ia = ng
+    r = rsin2[:, ia:ia + n, ia:ia + n][:, :, :, None]
+    c = cosa_s[:, ia:ia + n, ia:ia + n][:, :, :, None]
+    u0 = u[:, ia:ia + n, ia:ia + n, :]
+    u1 = u[:, ia:ia + n, ia + 1:ia + 1 + n, :]
+    v0 = v[:, ia:ia + n, ia:ia + n, :]
+    v1 = v[:, ia + 1:ia + 1 + n, ia:ia + n, :]
+    ke = 0.25 * r * (u0 ** 2 + u1 ** 2 + v0 ** 2 + v1 ** 2
+                     - (u0 + u1) * (v0 + v1) * c)
+    return jnp.sum(delpw * (cp_times + ke), axis=3)
+
+
+def total_energy_2d_hydrostatic_jax(pt, delp, u, v, pe, peln, hs, rsin2,
+                                    cosa_s, *, qc=None, cp, rg, n, ng, km):
+    """``te0_2d`` (compute_total_energy, :1128-1151), face-stacked.
+
+    ``pt`` is TEMPERATURE and ``qc = zvir*q(sphum)``, so ``tv`` is the
+    virtual temperature this routine forms itself. ``phiz`` accumulates
+    DOWNWARD, k = km..1 -- the OTHER integral goes upward, and they are
+    deliberately not shared.
+    """
+    ia = ng
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    tv = ptw if qc is None else ptw * (1.0 + qc)
+    dpe = peln[:, :, 1:, :] - peln[:, :, :-1, :]      # (6, n, km, n)
+    dpe = jnp.transpose(dpe, (0, 1, 3, 2))            # -> (6, n, n, km)
+    lay = rg * tv * dpe
+    # phiz[k] = hs + sum_{k' >= k} lay[k'] : a reverse cumulative sum,
+    # which IS the k = km..1 recurrence, without a Python loop.
+    rev = jnp.cumsum(lay[:, :, :, ::-1], axis=3)[:, :, :, ::-1]
+    hs_w = hs[:, ia:ia + n, ia:ia + n]
+    phiz_top = hs_w + rev[:, :, :, 0]
+    pe_w = pe[:, 1:n + 1, :, 1:n + 1]
+    te = (pe_w[:, :, km, :] * hs_w) - (pe_w[:, :, 0, :] * phiz_top)
+    return te + _ke_column_jax(delp[:, ia:ia + n, ia:ia + n, :], u, v,
+                               rsin2, cosa_s, cp_times=cp * tv, n=n, ng=ng)
+
+
+def fixer_energy_2d_hydrostatic_jax(pt, delp, u, v, pe, peln, hs, rsin2,
+                                    cosa_s, *, cp, rg, n, ng, km):
+    """``te_2d`` (the fixer, :638-658), face-stacked.
+
+    ``pt`` is POST-remap ``T_v`` so this uses ``cp*pt`` with NO virtual
+    factor, and ``gz`` accumulates UPWARD from ``hs``.
+    """
+    ia = ng
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    dpe = peln[:, :, 1:, :] - peln[:, :, :-1, :]
+    dpe = jnp.transpose(dpe, (0, 1, 3, 2))
+    hs_w = hs[:, ia:ia + n, ia:ia + n]
+    gz = hs_w + jnp.sum(rg * ptw * dpe, axis=3)       # k = 1..km, upward
+    pe_w = pe[:, 1:n + 1, :, 1:n + 1]
+    te = (pe_w[:, :, km, :] * hs_w) - (pe_w[:, :, 0, :] * gz)
+    return te + _ke_column_jax(delp[:, ia:ia + n, ia:ia + n, :], u, v,
+                               rsin2, cosa_s, cp_times=cp * ptw, n=n, ng=ng)
+
+
+def energy_fixer_zsum0_hydrostatic_jax(pkz, delp, pk, *, ptop, n, ng, km):
+    """``zsum0`` (:692-703), face-stacked."""
+    ia = ng
+    zsum1 = jnp.sum(pkz * delp[:, ia:ia + n, ia:ia + n, :], axis=3)
+    return ptop * (pk[:, ia:ia + n, ia:ia + n, 0]
+                   - pk[:, ia:ia + n, ia:ia + n, km]) + zsum1
+
+
+def energy_fixer_dtmp_jax(te0, te, zsum0, area, *, consv, n, ng):
+    """``dtmp`` (:708-714) -- a TRACED scalar, not a Python float.
+
+    See the spec twin's docstring for why the numerator's cancellation
+    means the summation choice is a measured question rather than an
+    obvious one.
+    """
+    ia = ng
+    a = area[:, ia:ia + n, ia:ia + n]
+    return consv * jnp.sum((te0 - te) * a) / jnp.sum(zsum0 * a)
 
 
 def _hs_face_jax(ctx, t: int, n: int, ng: int):
@@ -565,21 +667,19 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     # exactly what the no-duplicate-numerics rule forbids.
     te0_2d = None
     if abs(consv_te) > _CONSV_MIN:
-        from legoesm.core.fv3_native_dynamics import (
-            total_energy_2d_hydrostatic as _te0,
-        )
-        te0_2d = []
-        for t in range(6):
-            gs = ctx.gs6[t]
-            qc = (np.asarray(zvir * q[sphum_index][t, ia:ia + n,
-                                                   ia:ia + n, :])
-                  if zvir != 0.0 else None)
-            te0_2d.append(_te0(
-                np.asarray(state["pt"][t]), np.asarray(state["delp"][t]),
-                np.asarray(state["u"][t]), np.asarray(state["v"][t]),
-                np.asarray(press["pe"][t]), np.asarray(press["peln"][t]),
-                _hs_face_jax(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
-                qc=qc, cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
+        _gs = ctx.gs6
+        _stack = lambda k: jnp.asarray(  # noqa: E731
+            np.stack([np.asarray(_gs[t][k]) for t in range(6)]))
+        _rsin2, _cosa_s = _stack("rsin2"), _stack("cosa_s")
+        _area = _stack("area")
+        _hs = jnp.asarray(np.stack([_hs_face_jax(ctx, t, n, ng)
+                                    for t in range(6)]))
+        qc = (zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
+              if zvir != 0.0 else None)
+        te0_2d = total_energy_2d_hydrostatic_jax(
+            state["pt"], state["delp"], state["u"], state["v"],
+            press["pe"], press["peln"], _hs, _rsin2, _cosa_s,
+            qc=qc, cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km)
     if zvir != 0.0:
         # dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291), formed ONCE
         # from the step-initial q before the k_split loop, exactly as
@@ -779,40 +879,31 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         if last_step and abs(consv_te) > _CONSV_MIN:
             # THE REDUCTION, and the reason the remap was split. fv_mapz
             # does te_2d -> g_sum -> apply inside ONE call because its
-            # "domain" is every tile; a call here is one face, so the six
-            # te_2d/zsum0 are collected first, summed with area weights
-            # over all of them, and only then is :975 applied. pt is T_v
-            # on every face at this point -- defer_close skipped exactly
-            # that conversion. The spec lane's integrals are REUSED (see
-            # the te0_2d comment above): same numerics, once per step,
-            # outside any traced loop.
-            from legoesm.core.fv3_native_dynamics import (
-                energy_fixer_dtmp as _dtmp_of,
-                energy_fixer_zsum0_hydrostatic as _zsum0,
-                fixer_energy_2d_hydrostatic as _te,
-            )
-            te_2d, zsum0 = [], []
-            for t in range(6):
-                gs = ctx.gs6[t]
-                te_2d.append(_te(
-                    np.asarray(st["pt"][t]), np.asarray(st["delp"][t]),
-                    np.asarray(st["u"][t]), np.asarray(st["v"][t]),
-                    np.asarray(pr["pe"][t]), np.asarray(pr["peln"][t]),
-                    _hs_face_jax(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
-                    cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
-                zsum0.append(_zsum0(
-                    np.asarray(pr["pkz"][t]), np.asarray(st["delp"][t]),
-                    np.asarray(pr["pk"][t]), ptop=float(ptop), n=n, ng=ng,
-                    km=km))
-            dtmp = _dtmp_of(te0_2d, te_2d, zsum0,
-                            [ctx.gs6[t]["area"] for t in range(6)],
-                            consv=consv_te, n=n, ng=ng)
+            # "domain" is every tile; a call here is one face, so all
+            # six are collected, summed with area weights, and only then
+            # is :975 applied. pt is T_v on every face at this point --
+            # defer_close skipped exactly that conversion.
+            #
+            # pr["pe"]/["peln"]/["pkz"] here are the POST-remap bundle
+            # rebuilt from `fs` a few lines above, not the caller's --
+            # GLM asked for that in writing, because a stale pe would
+            # move dtmp at O(1) relative and pt by ~1e-8, over the gate.
+            te_2d = fixer_energy_2d_hydrostatic_jax(
+                st["pt"], st["delp"], st["u"], st["v"],
+                pr["pe"], pr["peln"], _hs, _rsin2, _cosa_s,
+                cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km)
+            zsum0 = energy_fixer_zsum0_hydrostatic_jax(
+                pr["pkz"], st["delp"], pr["pk"], ptop=ptop, n=n, ng=ng,
+                km=km)
+            dtmp = energy_fixer_dtmp_jax(te0_2d, te_2d, zsum0, _area,
+                                         consv=consv_te, n=n, ng=ng)
             st = dict(st)
             st["pt"] = jnp.stack([
                 close_out_pt(st["pt"][t], pr["pkz"][t],
                              [qq[i][t] for i in range(nq)],
                              sphum_index=sphum_index, r_vir=zvir,
-                             dtmp=dtmp, cp=cp_air, n=n, ng=ng)
+                             dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                             fixer_on=True)
                 for t in range(6)])
 
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]

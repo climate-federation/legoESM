@@ -27,7 +27,8 @@ kernel below it is certified in its own gate file; what is new here is:
   (``zvir != 0``) IS enabled on BOTH arms and gated below; on the NH
   arm ``pkz`` is RECOMPUTED here with the ``(1+dp1)`` factor inside its
   log (``fv_dynamics.F90:299-322``) rather than taken from the caller.
-  What stays refused is ``consv_te != 0`` (the energy fixer does not
+  What stays refused is NEGATIVE ``consv_te`` (a different Fortran
+  branch entirely) and moist x consv (no oracle deck), not the fixer
   exist here).  Per C5 those raise rather
   than run something adjacent, and the raise is gated -- an unported
   arm that silently proceeds is the defect class this campaign ranks
@@ -722,7 +723,8 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 # --------------------------------------------------------------------
 
 @pytest.mark.parametrize("kw,exc", [
-    # zvir is ENABLED on BOTH arms now; what stays refused is consv_te,
+    # zvir is ENABLED on BOTH arms and so is the energy fixer; what
+    # stays refused is NEGATIVE consv_te and moist x consv,
     # and what stays VALIDATED is the sphum index and the NH arm's
     # need for delz (the fixture here is a HYDROSTATIC state, which
     # carries none, so hydrostatic=False must be caught rather than
@@ -737,7 +739,11 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
     ({"zvir": 0.61, "sphum_index": -1}, ValueError),    # wrap-around
     ({"zvir": 0.61, "sphum_index": NQ}, ValueError),    # out of range
     ({"zvir": 0.61, "sphum_index": True}, ValueError),  # bool is not int
-    ({"consv_te": 1.0}, NotImplementedError),
+    # positive consv_te RUNS now; these are the arms that do not.
+    ({"consv_te": -1.0}, NotImplementedError),   # prescribed-flux branch
+    ({"consv_te": 1.0, "zvir": 0.61, "sphum_index": 0},
+     NotImplementedError),                       # moist x consv, unscored
+    ({"consv_te": 1.0, "hydrostatic": False}, NotImplementedError),
     ({"k_split": 0}, ValueError),
     ({"n_split": 0}, ValueError),
     ({"n_sponge": 2}, (ValueError, NotImplementedError)),
@@ -747,7 +753,8 @@ def test_unported_arms_raise_instead_of_running_something_adjacent(
         jctx, eta, kw, exc):
     """Each of these is either unported or invalid input.
 
-    ``consv_te != 0`` calls an energy fixer that does not exist here;
+    a NEGATIVE ``consv_te`` selects a prescribed-flux branch that is
+    not ported, and moist x consv has no oracle deck;
     the sponge arguments select non-uniform damping; and a bad
     ``sphum_index`` would couple an arbitrary tracer into theta_v.
     Running the default instead would return numbers, which is the

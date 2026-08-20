@@ -212,8 +212,10 @@ def test_moist_validation_and_the_energy_fixer_refusal(ctx, eta):
     # no sphum_index -> a guessed index would couple the wrong species
     with pytest.raises(ValueError, match="sphum_index"):
         fv_dynamics_step(ctx, st, pr, zvir=0.61, **common)
+    # POSITIVE consv_te runs now (the fixer is ported and certified);
+    # what raises is the prescribed-flux branch at a negative value.
     with pytest.raises(NotImplementedError, match="consv_te"):
-        fv_dynamics_step(ctx, st, pr, consv_te=1.0, **common)
+        fv_dynamics_step(ctx, st, pr, consv_te=-1.0, **common)
 
 
 def test_face_count_is_checked(ctx, eta):
