@@ -32,15 +32,43 @@ TEST STRUCTURE (skill: control before comparison):
     understanding is wrong and no A/B claim can stand.
   PLANTED control C0': same reconstruction with u,v shifted one grid cell
     (roll) MUST blow up C0's residual (metric is not translation-invariant).
-  TEST B (operator): feed the SAME NEMO transports (Hu,Hv) through legoESM's
-    divergence primitive (_split_velocity_divergence-style e1e2t div) and
-    compare its d_ssh against NEMO's.  Clean => operator agrees.
   TEST A: run ONE legoESM step from the bridged state, capture its committed
-    eta increment, compare vs NEMO's first-guess.  (Deferred to phase B of
-    seq_seam_walk which already does the lego-step; here we localize whether
-    the lego DIVERGENCE OPERATOR reproduces NEMO given identical transport.)
+    eta increment, compare vs NEMO's first-guess.  Done in phase B of
+    seq_seam_walk.py, which does the lego step.
+
+  TEST B: REMOVED 2026-08-19.  IT WAS A TAUTOLOGY.  See below.
 
 fp64 via run_fp64.py; dtypes printed.
+
+WHAT THIS PROBE ACTUALLY SUPPORTS (2026-08-19 audit)
+==============================================================================
+ONLY control C0 -- which is sound.  C0 reconstructs NEMO's ssh_nxt first-guess
+d_ssh from NEMO's OWN restart velocities and mesh and requires it to reproduce
+NEMO's OWN dumped first-guess (r3c_dump_r3t*ht_0 - sshb).  That is a real
+comparison against an independent artifact, it passes at rel ~1e-10, and its
+planted control (roll u,v one cell) blows it up as it must.  Everything this
+probe may be cited for rests on C0.
+
+REMOVED -- "TEST B (operator): 9.3e-15, the ssh DIVERGENCE OPERATOR is
+EXONERATED".  Test B claimed to push NEMO's transports through legoESM's
+divergence primitive.  It did not.  It rebuilt Hu_face/Hv_face with the SAME
+five lines C0 uses (identical r3u/r3v ssh-average, identical e3u_0*(1+r3) live
+thickness, identical SUM_k e2u*e3u*u) and then applied a stencil its own
+comment describes as "IDENTICAL" to NEMO's, using NEMO's own metrics.  It
+therefore recomputed C0's arithmetic and compared it against C0's reference.
+Its 9.3e-15 residual measured floating-point associativity and nothing else --
+it could not have failed, whatever legoESM's divergence operator does, because
+no legoESM code was ever called.  A test that cannot fail proves nothing, so
+the exoneration it produced is WITHDRAWN.
+
+The ssh divergence operator is now UNTESTED by this probe.  The measurement
+that would actually test it, NAMED and NOT RUN: call legoESM's own
+``_split_velocity_divergence`` (ocean_pe_latlon_cgrid.py) on NEMO's transport
+with legoESM's OWN bridged metric arrays and compare THAT to NEMO's d_ssh --
+i.e. execute the operator instead of transcribing what one believes it does.
+Until that runs, "the ssh divergence operator is exonerated" may not be cited,
+and downstream probes that cited it (hu_avg_perface_diff.py) have been
+corrected.
 """
 from __future__ import annotations
 
@@ -67,10 +95,21 @@ RDT = 2.0 * RN_DT   # MLF leap-frog
 
 
 def _load2d_interior(base, kt):
+    """Haloed per-kt 2-D dump -> (nj,ni) interior.
+
+    The NEMO time level is resolved through the shared registry, which RAISES
+    on an unregistered basename, and a non-finite value is FATAL rather than
+    something a downstream nan-reduction could quietly absorb.
+    """
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+    time_level_for_dump(base)
     fn = f"{base}_kt{kt:08d}.bin"
     a = np.fromfile(os.path.join(SEQDUMP, fn), dtype="<f8")
     assert a.size == JPI * JPJ, (fn, a.size)
-    return a.reshape(JPJ, JPI)[HLS:-HLS, HLS:-HLS]   # (nj,ni)
+    out = a.reshape(JPJ, JPI)[HLS:-HLS, HLS:-HLS]   # (nj,ni)
+    if not np.isfinite(out).all():
+        raise SystemExit(f"*** {fn}: non-finite values -- FATAL")
+    return out
 
 
 def _mesh():
@@ -152,6 +191,7 @@ def main():
     from legoesm.core.precision import PrecisionPolicy, set_policy, get_policy
     set_policy(PrecisionPolicy.fp64())
     import multistep_replay as mr
+    mr.provenance("sshnxt_operator_ab")
 
     kt = 230401
     m = _mesh()
@@ -182,7 +222,9 @@ def main():
     scale = np.abs(d_ssh_nemo[wet])
     print(f"\n=== C0: NEMO-input reconstruction vs NEMO first-guess d_ssh ===")
     print(f"  |d_ssh_nemo| max={scale.max():.4e} p99.9={np.percentile(scale,99.9):.4e} "
-          f"p50={np.percentile(scale,50):.4e} m  (target injection ~4.2e-3)")
+          f"p50={np.percentile(scale,50):.4e} m  (NEMO's OWN per-step eta "
+          f"increment; the '~4.2e-3 injection' it used to be compared against "
+          f"was a WIND-OFF artifact, retracted -- see hu_avg_perface_diff.py)")
     print(f"  RESIDUAL |rec-nemo| max={err.max():.4e} p99.9={np.percentile(err,99.9):.4e} "
           f"p50={np.percentile(err,50):.4e} m")
     rel = err.max() / max(scale.max(), 1e-30)
@@ -195,75 +237,18 @@ def main():
     print(f"  residual max = {errp:.4e} m  (must be >> C0's {err.max():.2e})  "
           f"-> {'PLANT OK' if errp > 10 * err.max() else 'PLANT FAILED'}")
 
-    # ---- TEST B: feed NEMO's OWN transport through legoESM's DIVERGENCE -----
-    # legoESM's eta d_ssh = -2dt*div(Hu_avg) where div is
-    # _split_velocity_divergence-style: net_zonal=(u[:,1:]-u[:,:-1])*face_dy,
-    # net_merid=(v[1:]*fd[1:]-v[:-1]*fd[:-1]), /area.  NEMO's transport per
-    # U-FACE is Hu=SUM_k e2u*e3u*u (units m^3/s).  legoESM's div expects a
-    # per-face transport too; to test the OPERATOR alone, hand legoESM the
-    # SAME depth-integrated NEMO face transports (Hu,Hv) and its own metrics,
-    # and ask whether it reproduces NEMO's d_ssh.  We DON'T route through the
-    # jitted model (that would re-derive Hu from its OWN velocity); we apply
-    # legoESM's divergence STENCIL to NEMO's transport with legoESM's metrics.
-    _test_b(u, v, sshn, m, d_ssh_nemo, wet)
+    # TEST B was removed here (2026-08-19): it rebuilt C0's own transports with
+    # C0's own five lines and applied a stencil it had transcribed by hand from
+    # legoESM's source, never calling legoESM.  Its 9.3e-15 residual was
+    # floating-point associativity between two copies of the same arithmetic --
+    # a test that could not fail.  See the module docstring for the withdrawal
+    # and for the measurement that would actually exercise the operator.
+    print("\n=== TEST B: REMOVED (tautology) ===")
+    print("  It re-derived its own reference; see the module docstring.  The")
+    print("  ssh divergence OPERATOR is UNTESTED by this probe -- only C0")
+    print("  (against NEMO's own dumps) supports anything here.")
 
     return 0 if err.max() / max(scale.max(), 1e-30) < 1e-3 else 1
-
-
-def _test_b(u, v, sshn, m, d_ssh_nemo, wet):
-    """Apply legoESM's OWN divergence convention/metrics to NEMO's transport.
-
-    legoESM _split_velocity_divergence (ocean_pe_latlon_cgrid.py:917) on a
-    (n_lat, n_lon) interior with (n_lon+1) u-faces / (n_lat+1) v-faces:
-      net_zonal[j,i] = u_face[j,i+1]*dy_e - u_face[j,i]*dy_w        (east-west)
-      net_merid[j,i] = v_face[j+1,i]*fd[j+1] - v_face[j,i]*fd[j]    (n-s)
-      div = (net_zonal + net_merid) / area
-    NEMO's convention: face(ji) is the EAST face of cell ji, di=f(ji)-f(ji-1).
-    Mapping: legoESM u_face[:, i] (west face of cell i) == NEMO Hu at cell i-1.
-    Rather than re-derive legoESM's metric arrays (which the bridge builds to
-    MATCH NEMO's e1/e2), the operator-equivalence question reduces to: does
-    legoESM's STENCIL (index offsets, wall/periodic BC, area denominator)
-    produce the SAME divergence as NEMO's when both use the shared bridged
-    metric?  legoESM's bridged area == e1e2t, dy_e/dy_w == e2u, fd == e1v
-    (the bridge is a metric-faithful copy).  So build NEMO's transport and
-    apply legoESM's index convention; compare to NEMO's committed d_ssh.
-    """
-    nj, ni, jpk = u.shape
-    # live e3 (same as C0)
-    r3t = np.where(m["ht0"] > 0, sshn / np.maximum(m["ht0"], 1e-30), 0.0)
-    e1e2t = m["e1e2t"]
-    sshu = 0.5 * (e1e2t * sshn + np.roll(e1e2t, -1, 1) * np.roll(sshn, -1, 1))
-    r3u = np.where(m["hu0"] > 0, sshu / (m["e1u"] * m["e2u"] * np.maximum(m["hu0"], 1e-30)), 0.0)
-    sshv = 0.5 * (e1e2t * sshn + np.roll(e1e2t, -1, 0) * np.roll(sshn, -1, 0))
-    r3v = np.where(m["hv0"] > 0, sshv / (m["e1v"] * m["e2v"] * np.maximum(m["hv0"], 1e-30)), 0.0)
-    e3u = m["e3u0"] * (1.0 + r3u[None]) * m["umask"]
-    e3v = m["e3v0"] * (1.0 + r3v[None]) * m["vmask"]
-    up = np.moveaxis(u, -1, 0) * m["umask"]
-    vp = np.moveaxis(v, -1, 0) * m["vmask"]
-    Hu_face = (m["e2u"][None] * e3u * up).sum(0)   # (nj,ni) NEMO east-face transport
-    Hv_face = (m["e1v"][None] * e3v * vp).sum(0)
-
-    # legoESM stencil: n_lon=ni interior cells, u_face has ni+1 entries where
-    # u_face[:, i] = west face of cell i.  NEMO Hu_face[:, i] = EAST face of
-    # cell i = west face of cell i+1.  So legoESM u_face[:, 1:] (east faces,
-    # cells 0..ni-1) == NEMO Hu_face[:, 0:ni]; legoESM u_face[:, :-1] (west) ==
-    # NEMO Hu_face rolled +1 in i (periodic).  net_zonal_lego[j,i] =
-    # Hu_face[j,i] - Hu_face_roll1[j,i] == NEMO di[Hu].  IDENTICAL stencil.
-    di_lego = Hu_face - np.roll(Hu_face, 1, axis=1)
-    # meridional: legoESM v_face[j] = south face of cell j, v_face[j+1]=north.
-    # NEMO Hv_face[:, j] = NORTH face of cell j.  net_merid_lego[j] =
-    # Hv_face[j] - Hv_face[j-1]; south wall (j=0) no south face.
-    dj_lego = Hv_face.copy()
-    dj_lego[1:, :] = Hv_face[1:, :] - Hv_face[:-1, :]
-    dj_lego[0, :] = Hv_face[0, :]
-    div_lego = (di_lego + dj_lego) / e1e2t
-    d_ssh_lego_op = -RDT * div_lego * m["ssmask"]
-    err = np.abs((d_ssh_lego_op - d_ssh_nemo)[wet])
-    print(f"\n=== TEST B: legoESM divergence STENCIL on NEMO transport vs NEMO d_ssh ===")
-    print(f"  RESIDUAL max={err.max():.4e} p99.9={np.percentile(err,99.9):.4e} m")
-    rel = err.max() / max(np.abs(d_ssh_nemo[wet]).max(), 1e-30)
-    print(f"  rel max = {rel:.3e}  -> "
-          f"{'B CLEAN: operator identical, gap is (A) TRANSPORT' if rel < 1e-3 else 'B DIRTY: operator differs'}")
 
 
 if __name__ == "__main__":
