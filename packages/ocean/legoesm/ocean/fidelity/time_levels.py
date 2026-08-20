@@ -461,14 +461,14 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # vn_e/ua_e/va_e at that substep -- the barotropic-mode fast fields, which
     # have NO leapfrog time level of their own (un_e etc. are the split-explicit
     # sub-cycle state, seeded at jn=1 from puu_b(:,:,Kbb) via the ln_bt_fw=F
-    # CENTRED branch, dynspg_ts.F90:570; proven by un_e[jn=1] == un_e_init to
+    # CENTRED branch, dynspg_ts.F90:573; proven by un_e[jn=1] == un_e_init to
     # 0.0e0).  Registered "before" for the SAME reason as
     # cor2d_dump_ua_e_in_substep1.bin above (the sub-cycle seed is the Kbb
     # barotropic transport); this dump is a superset (all icycle substeps, not
     # just jn=1).  jpi x jpj = 56 x 203, per-substep records, fp64.
     "substep_dump.bin": ("before", "dynspg_ts.F90:926-940 WRITE(799) per-jn "
         "barotropic sub-cycle fields (sshn_e/ssha_e/zsshp2_e/un_e/vn_e/ua_e/"
-        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:570, ln_bt_fw=F "
+        "va_e); un_e[jn=1] == puu_b(:,:,Kbb) (dynspg_ts.F90:573, ln_bt_fw=F "
         "CENTRED seed), same Kbb sub-cycle seed as cor2d_dump_ua_e_in_substep1.bin"),
     # --- #1226 SEQDUMP intra-step seam walk (RUN_SEQDUMP_Y20_1R, y20 kt=
     # 230401..230404). WRITE sites in MY_SRC/stpmlf.F90 (oracle commit
@@ -503,11 +503,11 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # the NEXT step carries as its geometry -- registered by traatf/ssh_atf's
     # own after-filter level exactly as atf_dump_ssh_after is "after".
     "seq_dump_r3t_f": ("after", "stpmlf.F90:442 CALL dom_qco_r3c(ssh(Nnn),"
-        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937) :450; r3t_f."),
+        "r3t_f,...) from ssh_atf-filtered ssh -> WRITE(8937) :451; r3t_f."),
     "seq_dump_r3u_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8938) :451; r3u_f u-point twin of seq_dump_r3t_f."),
+        "WRITE(8938) :452; r3u_f u-point twin of seq_dump_r3t_f."),
     "seq_dump_r3v_f": ("after", "stpmlf.F90:442 dom_qco_r3c filtered -> "
-        "WRITE(8939) :452; r3v_f v-point twin of seq_dump_r3t_f."),
+        "WRITE(8939) :453; r3v_f v-point twin of seq_dump_r3t_f."),
     # post-finalize_lbc Naa state (stpmlf.F90:562 CALL finalize_lbc; dumps at
     # :576-579). u/v/T/S at Naa BEFORE the Asselin swap.
     "seq_dump_postlbc_u_aaa": ("after", "stpmlf.F90:562 CALL finalize_lbc -> "

@@ -416,7 +416,7 @@ class DINOConfig:
     # which LEAKS ~O(K_conv) mixing into weakly-STABLE water (N^2~+1e-6 s^-2) that
     # NEMO never mixes — over-eroding the thermocline (62-day matched-grid check:
     # basin-mean T@262m 8.78 vs NEMO 9.50; the hard step restores 9.55-9.57).
-    # NEMO's rn2 is eosbn2 ``bn2`` (eosbn2.F90:1459-1466), which legoESM
+    # NEMO's rn2 is eosbn2 ``bn2`` (eosbn2.F90:1459-1467), which legoESM
     # transcribes EXACTLY as n2_mode="nemo_bn2" -- that is what the
     # nemo_dino_kamm cards select. n2_mode="adiabatic" is the parcel-
     # displacement static stability (Veros form); it is CLOSE to bn2 in
@@ -1119,7 +1119,7 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
         # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
-        # 1459-1466): LOCAL alpha/beta evaluated at each cell's own gdept,
+        # 1459-1467): LOCAL alpha/beta evaluated at each cell's own gdept,
         # interpolated to the w-point by the geometric zrw weight, differenced
         # LINEARLY in T and S. Both arms are built on the Nnn geometry
         # (MY_SRC/stpmlf.F90:200-201) and consumed at zdfevd.F90:93 and :119.
@@ -1147,8 +1147,8 @@ DINO_RECIPES: dict[str, dict] = {
         # 67454, 70389, 70473, 70475 — nemo_bn2 identical at each; the parcel
         # form is not), i.e. the two fields agree in their ORDERING near zero,
         # not just on one cut. Directionality is state-dependent: at the
-        # measured state 48 missed / 0 spurious; across the five following
-        # trajectory states (kt 230401..230405, bn2 as reference) 32-43 missed
+        # measured state 48 missed / 0 spurious; across the four following
+        # trajectory states (kt 230401..230404, bn2 as reference) 32-43 missed
         # and 0-2 spurious. WHY they differ (settled by review, adversarial
         # decomposition at the spike): bn2's zrw weight puts alpha at
         # z = gdept_lo*(1-zrw) + gdept_up*zrw = gdepw, EXACTLY the interface;
@@ -1536,8 +1536,10 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # substep mean (== legoESM Hu_avg, the same quantity already routed to
     # tracer advection) -- instead of the primary/velocity boxcar mean. The two
     # kernels sample the substep profile at different phases (DINO nn_e=23:
-    # centroid 22.0 vs 14.67), so only this reaches the ACC velocity as NEMO
-    # does. MLF-only (the N6 reconciliation is where the leap-frog barotropic
+    # centroid 22.0 vs 14.67), so this directionally matches NEMO's placement;
+    # the averaging window itself is NOT NEMO's (measured phase separation
+    # between our two kernels 7.33 of 45 substeps = 16%, against NEMO's 20.67
+    # of 68 = 30%). MLF-only (the N6 reconciliation is where the leap-frog barotropic
     # mode lands on the 3-D velocity), so it lands on THIS card only.
     "barotropic_reconcile_target": "transport_avg",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
