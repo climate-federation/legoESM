@@ -206,6 +206,8 @@ def main() -> int:
 
     natural = np.arange(args.n_devices, dtype=np.int64)
     grouped = group_devices_by_traffic(W, args.gpus_per_node)
+    share_natural = on_node_share(W, natural, args.gpus_per_node)
+    share_grouped = on_node_share(W, grouped, args.gpus_per_node)
     rec = {
         "component": "halo_node_locality",
         "subdivision": args.subdivision,
@@ -219,8 +221,15 @@ def main() -> int:
         "halo_cells_per_device_mean": float(W.sum(axis=1).mean()),
         "halo_cells_per_device_max": int(W.sum(axis=1).max()),
         "partner_devices_per_device_mean": float((W > 0).sum(axis=1).mean()),
-        "on_node_share_natural": on_node_share(W, natural, args.gpus_per_node),
-        "on_node_share_grouped": on_node_share(W, grouped, args.gpus_per_node),
+        "on_node_share_natural": share_natural,
+        "on_node_share_grouped": share_grouped,
+        # The regrouping is a HEURISTIC, not a bound: the balance repair after
+        # the graph cut can leave a placement worse than the one it started
+        # from, and at 128 devices it does. A caller would keep whichever is
+        # better, so that is what is reported as the achievable share -- and
+        # both raw numbers stay visible so a losing heuristic cannot hide.
+        "on_node_share_best": max(share_natural, share_grouped),
+        "grouping_helped": share_grouped > share_natural,
         "placement_grouped": grouped.tolist(),
         "setup_s": round(t_setup, 1),
         "traffic_walk_s": round(t_walk, 1),
