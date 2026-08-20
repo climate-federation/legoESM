@@ -48,13 +48,28 @@ from legoesm.parallel.shard_map_compat import shard_map
 AXIS = "dev"
 
 
-def _ring(n):
-    return [(i, (i + 1) % n) for i in range(n)]
+def _ring(n, stride=1):
+    """Ring where each device sends to the one ``stride`` places along.
+
+    ``stride`` is a bijection for any value, so the pattern is always a legal
+    permutation.  It exists to vary WHERE the partner sits without moving a
+    single process: with four GPUs per node, stride 1 keeps three of every four
+    links inside a node on NVLink, stride 4 puts every link on the network
+    between adjacent nodes, and stride n/2 puts every link on the network
+    between the two halves of the allocation.  That is the only way to ask
+    whether a slowdown belongs to the fabric or to the number of ranks without
+    changing the allocation underneath the measurement.
+    """
+    if stride % n == 0:
+        raise ValueError(
+            f"--ring-stride {stride} is a multiple of the device count {n}: "
+            "every device would send to itself, which measures nothing.")
+    return [(i, (i + stride) % n) for i in range(n)]
 
 
-def _build(mesh, n_dev, n_reps):
+def _build(mesh, n_dev, n_reps, stride=1):
     """jit'd program doing n_reps back-to-back ring ppermutes on device."""
-    perm = _ring(n_dev)
+    perm = _ring(n_dev, stride)
 
     @jax.jit
     def run(x):
@@ -90,7 +105,8 @@ def _median_us(run, x, n_warmup, n_iters):
     return statistics.median(times)
 
 
-def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64):
+def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64,
+             stride=1):
     """Per-ppermute time with HOST DISPATCH SUBTRACTED.
 
     A single jit call per exchange measures dispatch + launch + wire, and on
@@ -105,8 +121,8 @@ def time_one(mesh, n_dev, n_elem, dtype, n_warmup, n_iters, n_reps=64):
     stays visible alongside the corrected one.
     """
     x = jnp.zeros((n_dev * n_elem,), dtype=dtype)
-    t1 = _median_us(_build(mesh, n_dev, 1), x, n_warmup, n_iters)
-    tn = _median_us(_build(mesh, n_dev, n_reps), x, n_warmup, n_iters)
+    t1 = _median_us(_build(mesh, n_dev, 1, stride), x, n_warmup, n_iters)
+    tn = _median_us(_build(mesh, n_dev, n_reps, stride), x, n_warmup, n_iters)
     per = (tn - t1) / (n_reps - 1)
     return per, t1
 
@@ -138,6 +154,13 @@ def main() -> int:
                    help="Back-to-back ppermutes inside ONE jit call; the "
                         "1-rep vs n-rep difference cancels host dispatch, "
                         "which otherwise dominates the intercept.")
+    p.add_argument("--ring-stride", type=int, default=1,
+                   help="Each device sends to the one this many places along "
+                        "the ring. With four GPUs per node, 1 keeps three of "
+                        "every four links on NVLink, 4 puts every link on the "
+                        "network, and half the device count puts every link "
+                        "across the whole allocation. Changes WHERE the "
+                        "partner is without moving any process.")
     p.add_argument("--out", default=None, help="Append one JSON line here.")
     args = p.parse_args()
 
@@ -164,7 +187,8 @@ def main() -> int:
     dispatch_us = []
     for n_elem in elems:
         t_us, t_single = time_one(mesh, n_dev, n_elem, dtype,
-                                  args.n_warmup, args.n_iters, args.n_reps)
+                                  args.n_warmup, args.n_iters, args.n_reps,
+                                  args.ring_stride)
         rows.append((n_elem * itemsize, t_us))
         dispatch_us.append(t_single)
         if jax.process_index() == 0:
@@ -195,6 +219,7 @@ def main() -> int:
         "latency_us": round(lat_us, 3),
         "bandwidth_gbs": round(bw_gbs, 2),
         "n_reps": args.n_reps,
+        "ring_stride": args.ring_stride,
         "dispatch_us_median": round(float(np.median(dispatch_us)), 2),
         "dispatch_subtracted": True,
         "sweep": [{"bytes": b, "median_us": round(t, 3)} for b, t in rows],
