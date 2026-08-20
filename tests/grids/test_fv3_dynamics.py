@@ -23,15 +23,22 @@ kernel below it is certified in its own gate file; what is new here is:
   advected nothing still returns a perfectly good dynamical state, so
   ``q`` is asserted to have MOVED as well as to match.
 
-* **THE LANE REFUSALS ARE PART OF THE PORT.**  ``zvir != 0`` and
-  ``consv_te != 0`` reach unported code (the tracers stop being
-  passengers; the energy fixer does not exist here).  Per C5 those raise
-  rather than run something adjacent, and the raise is gated -- an
-  unported arm that silently proceeds is the defect class this campaign
-  ranks worst, because it returns numbers.
+* **THE LANE REFUSALS ARE PART OF THE PORT.**  Moist coupling
+  (``zvir != 0``) IS enabled on BOTH arms and gated below; on the NH
+  arm ``pkz`` is RECOMPUTED here with the ``(1+dp1)`` factor inside its
+  log (``fv_dynamics.F90:299-322``) rather than taken from the caller.
+  What stays refused is ``consv_te != 0`` (the energy fixer does not
+  exist here).  Per C5 those raise rather
+  than run something adjacent, and the raise is gated -- an unported
+  arm that silently proceeds is the defect class this campaign ranks
+  worst, because it returns numbers.  ``sphum_index`` is VALIDATED, not
+  defaulted: a guessed index couples the wrong species and still
+  returns numbers.
 
 TOLERANCE POLICY.  Every numeric bound in this file is MEASURED (job
-9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10.
+9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10,
+EXCEPT any bound still carrying a ``TOL-PENDING`` marker -- those are
+provisional and are not certification limits.
 The worst composed-chain figure is w at 3.126e-11 relative (NH
 k_split=2); pressure diagnostics sit at 1e-16..5e-15.  The contract and
 movement gates carry no tolerance and are final.
@@ -286,8 +293,10 @@ ZVIR = 0.6077338443  # rvgas/rdgas - 1, the pinned deck's constant
 Q_SCALE = 0.01  # physical specific humidity; see _tracers
 
 
+@pytest.mark.parametrize("hydrostatic", [True, False])
 @pytest.mark.parametrize("k_split", [1, 2])
-def test_moist_hydrostatic_parity_against_the_spec(ctx, jctx, eta, k_split):
+def test_moist_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
+                                       k_split):
     """The zvir arm, port against spec, over the same composition axis.
 
     ``zvir != 0`` makes the tracers stop being passengers twice over:
@@ -297,23 +306,110 @@ def test_moist_hydrostatic_parity_against_the_spec(ctx, jctx, eta, k_split):
     on this path; a lane that wired only one would still return numbers.
     """
     ref_state, _ref_press, ref_q = _run_np(
-        ctx, eta, hydrostatic=True, k_split=k_split, zvir=ZVIR,
+        ctx, eta, hydrostatic=hydrostatic, k_split=k_split, zvir=ZVIR,
         sphum_index=0, q_scale=Q_SCALE)
-    got = _run_jax(jctx, eta, hydrostatic=True, k_split=k_split, zvir=ZVIR,
-                   sphum_index=0, q_scale=Q_SCALE)
+    got = _run_jax(jctx, eta, hydrostatic=hydrostatic, k_split=k_split,
+                   zvir=ZVIR, sphum_index=0, q_scale=Q_SCALE)
     state = _out_state(got)
-    for nm in ("delp", "pt", "u", "v"):
+    tag = f"hydro={hydrostatic}, k_split={k_split}"
+    names = ["delp", "pt", "u", "v"] + ([] if hydrostatic
+                                        else ["w", "delz"])
+    for nm in names:
         want = np.stack([np.asarray(ref_state[t][nm]) for t in range(6)])
-        assert_real(want, f"numpy moist {nm} (k={k_split})")
+        assert_real(want, f"numpy moist {nm} ({tag})")
         # TOL-PENDING(moist-parity)
-        cmp_fields(np.asarray(state[nm]), want,
-                   f"moist {nm} (k_split={k_split})", tol=3.2e-10)
+        cmp_fields(np.asarray(state[nm]), want, f"moist {nm} ({tag})",
+                   tol=3.2e-10)
     want_q = np.stack([np.stack([ref_q[t][iq] for t in range(6)])
                        for iq in range(NQ)])
     assert_real(want_q, "numpy moist q")
     # TOL-PENDING(moist-parity-q)
-    cmp_fields(np.asarray(got["q"]), want_q, f"moist q (k_split={k_split})",
+    cmp_fields(np.asarray(got["q"]), want_q, f"moist q ({tag})",
                tol=3.5e-13)
+
+
+def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index):
+    """One moist step on a CALLER-SUPPLIED pressure bundle."""
+    ak, bk, ptop = eta
+    jst = state_3d_to_jax(_state(hydrostatic))
+    _t = _tracers(scale=Q_SCALE)
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
+    return _out_state(jdyn.fv_dynamics_step(
+        jctx, jst, press, q=q,
+        **_common(ptop, ak, bk, hydrostatic, 1, 2),
+        **_moist(zvir, sphum_index)))
+
+
+def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta):
+    """fv_dynamics.F90:299-322 OVERWRITES pkz on every NH call.
+
+    A caller's pkz is dry -- ``p_var_nonhydrostatic`` builds it dry, and
+    a previous step's remap returns it dry (fv_mapz.F90:479-481 carries
+    no ``(1+dp1)``).  A lane that trusted it would run the whole moist
+    NH step against a pkz missing the virtual factor and still return
+    numbers.  So: hand the SAME moist NH step two DIFFERENT pkz values
+    and require the answer not to move.
+
+    The hydrostatic arm is the control.  It does NOT recompute -- the
+    oracle's hydrostatic branch (:281-294) only forms dp1 -- so there
+    the same substitution MUST move the answer.  Without that half this
+    gate could pass on a lane that ignored pkz everywhere.
+    """
+    ak, bk, ptop = eta
+    for hydrostatic in (False, True):
+        jst = state_3d_to_jax(_state(hydrostatic))
+        press_h = _press_jax(jst, ptop)
+        press_nh = jdyn.p_var_nonhydrostatic(
+            jst["delp"], jst["delz"], jst["pt"], ptop=ptop, akap=AKAP,
+            n=N, ng=NG, km=KM)
+        # anti-vacuity: the two bundles must actually differ in pkz, or
+        # "the answer did not move" is trivially true.
+        assert (np.asarray(press_h["pkz"]).tobytes()
+                != np.asarray(press_nh["pkz"]).tobytes())
+        a = _run_jax_press(jctx, eta, press_h, hydrostatic=hydrostatic,
+                           zvir=ZVIR, sphum_index=0)
+        b = _run_jax_press(jctx, eta, press_nh, hydrostatic=hydrostatic,
+                           zvir=ZVIR, sphum_index=0)
+        same = (np.asarray(a["pt"]).tobytes()
+                == np.asarray(b["pt"]).tobytes())
+        if hydrostatic:
+            assert not same, ("the hydrostatic arm must CONSUME the "
+                              "caller's pkz; if it does not, the NH half "
+                              "of this gate proves nothing")
+        else:
+            assert same, ("the NH moist arm must RECOMPUTE pkz "
+                          "(fv_dynamics.F90:299-322), not consume the "
+                          "caller's dry one")
+
+
+def test_nh_moist_pkz_matches_the_oracle_expression(eta):
+    """``exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz))`` -- factor INSIDE
+    the log, in the Fortran's left-to-right association.
+
+    Pre-scaling ``pt`` at the call site would reassociate the product,
+    which is the mistake the comment at the call site warns about; the
+    anti-vacuity assert below is what makes that warning testable.
+    """
+    jst = state_3d_to_jax(_state(False))
+    dp1 = jnp.asarray(0.0077 * np.ones((6, N, N, KM)))
+    got = jdyn.p_var_nonhydrostatic(
+        jst["delp"], jst["delz"], jst["pt"], ptop=eta[2], akap=AKAP,
+        n=N, ng=NG, km=KM, dp1=dp1)["pkz"]
+    ref = np.stack([f["pt"] for f in _state(False)])
+    want = npdyn.p_var_nonhydrostatic(
+        np.stack([f["delp"] for f in _state(False)])[0],
+        np.stack([f["delz"] for f in _state(False)])[0], ref[0],
+        ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM,
+        dp1=np.asarray(dp1)[0])["pkz"]
+    assert np.asarray(got)[0].tobytes() == want.tobytes()
+
+    dry = jdyn.p_var_nonhydrostatic(
+        jst["delp"], jst["delz"], jst["pt"], ptop=eta[2], akap=AKAP,
+        n=N, ng=NG, km=KM)["pkz"]
+    # anti-vacuity: dp1 must change pkz, or the comparison above would
+    # pass with the moist branch deleted.
+    assert np.asarray(got).tobytes() != np.asarray(dry).tobytes()
 
 
 def test_the_moist_arm_actually_changed_the_answer(ctx, jctx, eta):
@@ -329,21 +425,25 @@ def test_the_moist_arm_actually_changed_the_answer(ctx, jctx, eta):
     dry = _out_state(_run_jax(jctx, eta, hydrostatic=True, q_scale=Q_SCALE))
     wet = _out_state(_run_jax(jctx, eta, hydrostatic=True, zvir=ZVIR,
                               sphum_index=0, q_scale=Q_SCALE))
-    d_port = float(np.max(np.abs(np.asarray(wet["pt"])
-                                 - np.asarray(dry["pt"]))))
-    assert d_port > 1.0e-3, f"zvir moved pt by only {d_port:.3e} K"
+    resp_port = np.asarray(wet["pt"]) - np.asarray(dry["pt"])
+    assert np.max(np.abs(resp_port)) > 1.0e-3, \
+        f"zvir moved pt by only {np.max(np.abs(resp_port)):.3e} K"
 
     dry_np, _, _ = _run_np(ctx, eta, hydrostatic=True, q_scale=Q_SCALE)
     wet_np, _, _ = _run_np(ctx, eta, hydrostatic=True, zvir=ZVIR,
                            sphum_index=0, q_scale=Q_SCALE)
-    d_spec = float(np.max(np.abs(
-        np.stack([dry_np[t]["pt"] for t in range(6)])
-        - np.stack([wet_np[t]["pt"] for t in range(6)]))))
-    # The two lanes must be moved by the SAME physics, not merely both
-    # moved: a port coupling the wrong tracer would also clear the
-    # magnitude assert above.
-    assert abs(d_port - d_spec) <= 1.0e-9 * max(d_spec, 1.0), \
-        f"port moved pt by {d_port:.6e}, spec by {d_spec:.6e}"
+    resp_spec = (np.stack([wet_np[t]["pt"] for t in range(6)])
+                 - np.stack([dry_np[t]["pt"] for t in range(6)]))
+    # THE WHOLE RESPONSE FIELD, not its maximum. Two different fields
+    # can share a max magnitude, so a port that coupled the wrong cell,
+    # face, axis or tracer would pass a scalar comparison (codex MAJOR,
+    # job 9442422). The response is a DIFFERENCE of two ~300 K fields,
+    # so its own scale is ~1 K and the parity tolerance applies to it
+    # directly.
+    assert_real(resp_spec, "spec moist response")
+    # TOL-PENDING(moist-response)
+    cmp_fields(resp_port, resp_spec, "moist pt response (wet - dry)",
+               tol=3.2e-10)
 
 
 def test_dry_branch_is_not_a_multiply_by_one(jctx, eta):
@@ -361,20 +461,43 @@ def test_dry_branch_is_not_a_multiply_by_one(jctx, eta):
                              dp1=jnp.zeros_like(pkz))
     assert np.asarray(ref).tobytes() != np.asarray(wet).tobytes()
 
-    # And the moist branch must carry the ORACLE's association:
-    # (pt*(1+dp1))/pkz, not pt*((1+dp1)/pkz).  Those differ in the last
-    # ulp on generic data, and the port had the wrong one.
-    dp1 = jnp.asarray(0.0077 * np.ones_like(np.asarray(pkz)))
-    win = jst["pt"][:, NG:NG + N, NG:NG + N, :]
-    want = np.asarray(win * (1.0 + dp1) / pkz)
-    bad = np.asarray(win * ((1.0 + dp1) / pkz))
+
+@pytest.mark.skipif(jax.default_backend() != "cpu",
+                    reason="a BITWISE association claim is a compiler "
+                           "contract, and this lane's is the fp64 CPU "
+                           "backend; XLA on GPU/TPU may contract the "
+                           "multiply-add or reassociate (codex MAJOR, "
+                           "job 9442422)")
+def test_moist_association_matches_the_spec_bitwise(eta):
+    """``pt*(1.+dp1)/pkz`` (:402) associates left to right.
+
+    The claim under test is NOT "Fortran guarantees two roundings" --
+    that is the compiler's business.  It is the one this port is
+    actually held to: the JAX lane must agree with the NumPy SPEC,
+    which is the authority, and numpy evaluates the same source
+    expression without reassociating.  Comparing the port against the
+    SPEC rather than against a locally re-typed expression is also what
+    makes this a cross-lane check instead of a self-comparison.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    dp1 = 0.0077 * np.ones(np.asarray(pkz).shape)
+
     got = np.asarray(jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
-                                        dp1=dp1))[:, NG:NG + N,
-                                                  NG:NG + N, :]
-    assert got.tobytes() == want.tobytes()
-    # anti-vacuity: the two associations must actually differ on this
-    # data, or the assert above proves nothing about association.
-    assert want.tobytes() != bad.tobytes()
+                                        dp1=jnp.asarray(dp1)))
+    ref = np.stack([f["pt"] for f in _state(True)])
+    for t in range(6):
+        npdyn.pt_to_theta_v(ref[t], np.asarray(pkz)[t], n=N, ng=NG,
+                            dp1=dp1[t])
+    assert got.tobytes() == ref.tobytes(), \
+        "port and spec disagree bitwise on the moist conversion"
+
+    # ANTI-VACUITY: the wrong association must actually differ on this
+    # data, or the assert above would pass with either spelling.
+    win = np.asarray(jst["pt"])[:, NG:NG + N, NG:NG + N, :]
+    pkzn = np.asarray(pkz)
+    bad = win * ((1.0 + dp1) / pkzn)
+    assert bad.tobytes() != ref[:, NG:NG + N, NG:NG + N, :].tobytes()
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -490,11 +613,12 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 # --------------------------------------------------------------------
 
 @pytest.mark.parametrize("kw,exc", [
-    # zvir is now ENABLED on the hydrostatic arm; what stays refused is
-    # the NH moist pkz (fv_dynamics.F90:307-309), and what stays
-    # VALIDATED is the sphum index.
-    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False},
-     NotImplementedError),
+    # zvir is ENABLED on BOTH arms now; what stays refused is consv_te,
+    # and what stays VALIDATED is the sphum index and the NH arm's
+    # need for delz (the fixture here is a HYDROSTATIC state, which
+    # carries none, so hydrostatic=False must be caught rather than
+    # indexed into).
+    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False}, ValueError),
     ({"zvir": 0.61}, ValueError),                       # sphum_index None
     ({"zvir": 0.61, "sphum_index": -1}, ValueError),    # wrap-around
     ({"zvir": 0.61, "sphum_index": NQ}, ValueError),    # out of range
@@ -507,12 +631,14 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 ])
 def test_unported_arms_raise_instead_of_running_something_adjacent(
         jctx, eta, kw, exc):
-    """Each of these reaches code that is not in this port.
+    """Each of these is either unported or invalid input.
 
-    ``zvir != 0`` makes the tracers stop being passengers; ``consv_te !=
-    0`` calls an energy fixer that does not exist here; the sponge
-    arguments select non-uniform damping.  Running the default instead
-    would return numbers, which is the worst available outcome.
+    ``consv_te != 0`` calls an energy fixer that does not exist here;
+    the sponge arguments select non-uniform damping; and a bad
+    ``sphum_index`` would couple an arbitrary tracer into theta_v.
+    Running the default instead would return numbers, which is the
+    worst available outcome.  (Hydrostatic ``zvir != 0`` is NOT here --
+    it is supported, and its gates are above.)
     """
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(True))

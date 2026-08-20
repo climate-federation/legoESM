@@ -44,8 +44,9 @@ barrier and exchange extents are the halo module's; d_con = 0.0 throughout
 and is NOT a parameter of this module -- the KE-to-heat pathway and its
 heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
 inactive on the shipped duo decks; the moist path is HYDROSTATIC-only
-(zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap;
-moist NH pkz and consv_te != 0 are refused); pfull is computed-and-unused on this lane and is
+(zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap, and
+on the NH arm also into the pkz this module recomputes at :299-322;
+consv_te != 0 is refused); pfull is computed-and-unused on this lane and is
 not ported; omga is an output-only passenger whose values are meaningless;
 and dyn_core's use_old_omega fill is not ported (no u/v/pt/delp parity).
 """
@@ -216,7 +217,8 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
 
 
 def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
-                         km: int, check_args: bool = False) -> dict:
+                         km: int, check_args: bool = False,
+                         dp1=None) -> dict:
     """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
 
     init_hydro.F90:178-184 (dry): ``pkz = exp(cappa*log(rdg*delp*pt/delz))``
@@ -226,6 +228,17 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
     ``delz`` broadcasts to the compute window exactly as in the spec's own
     expression.  pkz's layout IS the compute window, so the whole array is
     replaced.
+
+    ``dp1`` is the MOIST arm (``fv_dynamics.F90:307-309``, the
+    ``moist_phys`` branch), where the log argument carries an extra
+    ``(1.+dp1)``.  It is a separate branch rather than a multiply by a
+    ones array so the certified dry NH lane keeps its exact expression;
+    the factor sits INSIDE the log in the Fortran's own left-to-right
+    association, not applied to ``pt`` at the call site, which would
+    reassociate the product.  The oracle's ``moist_phys = .false.`` arm
+    (``:335``) forces ``dp1 = 0`` and computes the DRY form, so it is
+    reached here by passing ``dp1=None`` -- i.e. it is exactly the
+    ``zvir = 0`` lane and needs no flag of its own.
     """
     delp = jnp.asarray(delp)
     delz = jnp.asarray(delz)
@@ -236,9 +249,15 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
                             check_args=check_args)
     rdg = -_FV3_RDGAS / _FV3_GRAV
     ia = ng
-    out["pkz"] = jnp.exp(akap * jnp.log(
-        rdg * delp[:, ia:ia + n, ia:ia + n, :]
-        * pt[:, ia:ia + n, ia:ia + n, :] / delz))
+    dpw = delp[:, ia:ia + n, ia:ia + n, :]
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    if dp1 is None:  # static None-ness: stays a Python if
+        arg = rdg * dpw * ptw / delz
+    else:
+        dp1 = jnp.asarray(dp1)
+        require_f64_jax("p_var_nonhydrostatic", {"dp1": dp1})
+        arg = rdg * dpw * ptw * (1.0 + dp1) / delz
+    out["pkz"] = jnp.exp(akap * jnp.log(arg))
     return out
 
 
@@ -317,8 +336,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 "zvir != 0 requires tracer arrays, but q is None: "
                 "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
                 "humidity to read.")
-        if (sphum_index is None or isinstance(sphum_index, bool)
-                or not isinstance(sphum_index, int)):
+        if (isinstance(sphum_index, bool)
+                or not hasattr(sphum_index, "__index__")):
             raise ValueError(
                 f"zvir != 0 requires sphum_index to be an int indexing the "
                 f"specific-humidity tracer in q; got {sphum_index!r}. A "
@@ -333,21 +352,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 f"sphum_index={sphum_index} out of range [0, {len(q)}); a "
                 f"negative index would silently select another tracer by "
                 f"Python wrap-around.")
-        if not hydrostatic:
-            # fv_dynamics.F90:307-309: under moist_phys the NH pkz is
-            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)), but
-            # p_var_nonhydrostatic computes the DRY form. Running it dry
-            # would apply a pkz missing the virtual-temperature factor on
-            # every NH step -- refuse until dp1 is threaded through it.
-            # (When phasing that in: multiply INSIDE the log argument in
-            # the Fortran's association, not by pre-scaling pt at the
-            # call site, which reassociates the product.)
-            raise NotImplementedError(
-                "zvir != 0 with non-hydrostatic dynamics is not enabled: "
-                "the moist NH pkz multiplies the log argument by (1+dp1) "
-                "(fv_dynamics.F90:307-309) and p_var_nonhydrostatic "
-                "computes the dry form. Hydrostatic zvir coupling IS "
-                "enabled.")
+        if not hydrostatic and "delz" not in state:
+            raise ValueError(
+                "zvir != 0 with non-hydrostatic dynamics needs state["
+                "'delz']: the moist NH pkz is recomputed here from "
+                "delp/pt/delz (fv_dynamics.F90:299-322).")
     if consv_te != 0.0:
         raise NotImplementedError(
             "consv_te != 0 activates the total-energy fixer "
@@ -419,6 +428,15 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     mdt = bdt / float(k_split)
     ia = ng
     remapped = km > REMAP_MIN_NPZ  # :568, static
+    # fv_mapz.F90:985: on the NH arm the closing T_v -> T conversion is
+    # inside `if (.not. adiabatic)`.  The certified deck is adiabatic AND
+    # dry, so True was unconditionally right; with moist NH it is not --
+    # adiabatic=True there would make the oracle skip the conversion and
+    # leave pt virtual.  With consv = 0, dtmp is identically 0 and the
+    # oracle's :987 expression is exactly the one this lane computes, so
+    # False is the faithful flag for the moist NH arm.  The remap refuses
+    # the other combination rather than trusting this line.
+    adiabatic_flag = hydrostatic or zvir == 0.0
 
     # :396-408  T -> theta_v once per call; the six per-face compute
     # windows are disjoint, so the spec's face loop is one stacked call
@@ -429,6 +447,20 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         # :281-294 precedes :451. Sliced to the COMPUTE WINDOW because
         # pkz is (6, n, n, km) and pt_to_theta_v expects dp1 matching it.
         dp1_theta = zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
+        if not hydrostatic:
+            # :299-322 is INSIDE fv_dynamics and runs on EVERY call: on
+            # the NH moist arm it OVERWRITES pkz with
+            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
+            # step-entry state, while pt is still TEMPERATURE. The
+            # caller's pkz -- built dry by p_var_nonhydrostatic, or
+            # carried over from the previous step's remap -- is missing
+            # the virtual factor, so it is recomputed here rather than
+            # trusted. The dry NH lane never enters this branch and
+            # keeps its certified expression untouched.
+            press = dict(press)
+            press["pkz"] = p_var_nonhydrostatic(
+                state["delp"], state["delz"], state["pt"], ptop=ptop,
+                akap=akap, n=n, ng=ng, km=km, dp1=dp1_theta)["pkz"]
         state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng,
                                     dp1=dp1_theta)
     else:
@@ -441,8 +473,11 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     def _n_map(carry, last_step: bool):
         st, pr, qq, om, nhc, nspl, nexc = carry
         # :472-478 dp1 = delp, full padded box, BEFORE dyn_core; arrays are
-        # immutable here so the spec's anti-alias copy is a plain binding
-        dp1 = st["delp"]
+        # immutable here so the spec's anti-alias copy is a plain binding.
+        # NAMED dp1_delp, not dp1: the Fortran reuses the name `dp1` for
+        # two unrelated things (the moist zvir*q above and this delp
+        # snapshot), and one of them is now live on this lane.
+        dp1_delp = st["delp"]
         # dyn_core.F90:313-316 sits INSIDE dyn_core: one zeroing per n_map
         # call (never per acoustic sub-step); k_split=1 makes it once per
         # fv_dynamics_step.  This module owns the zeroing (D3).
@@ -469,7 +504,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
-            _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1, ac["flux_cap"],
+            _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
@@ -547,7 +582,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 q=[qq[i][t] for i in range(nq)],
                 omga=om[t], sphum_index=sphum_index,
                 last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=True, consv=consv_te,
+                adiabatic=adiabatic_flag, consv=consv_te,
                 w=(None if hydrostatic else st["w"][t]),
                 delz=(None if hydrostatic else st["delz"][t]),
                 ws=(None if hydrostatic else g["ws"][t]),
@@ -598,7 +633,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     carry0 = (state, press, q, omga, nh,
               jnp.ones((km,), dtype=jnp.int32), jnp.asarray(False))
     # D1: with the NH carry prebuilt at entry, iterations 1..k_split-1 are
-    # ONE program (dp1 and the capacitors are re-derived identically each
+    # ONE program (dp1_delp and the capacitors are re-derived identically each
     # time); only the LAST differs -- last_step=True reaches the remap
     # (:482) -- so the middle scans and the last is peeled.  k_split == 1
     # is first AND last.  Middle iterations' stage payloads are dropped,

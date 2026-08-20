@@ -1,9 +1,10 @@
 """The moist (zvir) coupling in the NumPy SPECIFICATION lane.
 
-Phase 1: hydrostatic virtual-temperature coupling only. ``consv_te``
-(the energy fixer, fv_mapz.F90:628-747) and the NH moist ``pkz``
-(fv_dynamics.F90:307-309) stay refused, and the refusals are gated
-here so an unported arm cannot run silently.
+Phase 1 was hydrostatic virtual-temperature coupling; the NH arm
+followed (fv_dynamics.F90:299-322 recomputes ``pkz`` with the
+``(1+dp1)`` factor inside its log).  ``consv_te`` (the energy fixer,
+fv_mapz.F90:628-747) stays refused, and the refusal is gated here so an
+unported arm cannot run silently.
 
 THE REGRESSION GATE THAT MATTERS MOST: enabling this path must leave
 the ADIABATIC lane BIT-IDENTICAL. That lane carries a certified
@@ -128,9 +129,17 @@ def test_no_tracers_with_zvir_is_refused():
 
 
 def test_unported_moist_arms_still_refuse():
-    """consv_te and the NH moist pkz must RAISE, not be greppable."""
+    """consv_te must RAISE, not be greppable.
+
+    The NH moist arm USED to be here; it is enabled now (the pkz is
+    recomputed with the (1+dp1) factor inside its log,
+    fv_dynamics.F90:299-322).  What it leaves behind is a requirement,
+    not a refusal: the NH arm needs ``delz`` on every face, and the
+    minimal fixture carries none, so it must be caught rather than
+    indexed into.
+    """
     from legoesm.core.fv3_native_dynamics import fv_dynamics_step
     with pytest.raises(NotImplementedError, match="consv_te"):
         fv_dynamics_step(**_minimal_step_kwargs(zvir=0.0, consv_te=1.0))
-    with pytest.raises(NotImplementedError, match="307-309|non-hydrostatic"):
+    with pytest.raises(ValueError, match="delz"):
         fv_dynamics_step(**_minimal_step_kwargs(hydrostatic=False))

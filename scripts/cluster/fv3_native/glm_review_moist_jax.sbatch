@@ -82,7 +82,8 @@ finding. Flag anything you are inferring rather than reading.
 
 ================ THE COMMIT ================
 HDR
-git show HEAD~1
+git log --oneline -8
+git show ${REVIEW_RANGE:-HEAD}
 echo "================ THE JAX PORT: fv3_dynamics.py (moist region) ================"
 sed -n '185,230p;300,470p' packages/core/legoesm/core/fv3_dynamics.py
 echo "================ THE NUMPY SPEC: fv3_native_dynamics.py (moist region) ================"

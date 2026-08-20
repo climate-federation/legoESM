@@ -1406,12 +1406,41 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 "r_vir != 0 needs the tracers for the closing T_v -> T "
                 "conversion (fv_mapz.F90:975). The reference deck is "
                 "adiabatic (driver/solo/atmosphere.F90:156-158, zvir = 0).")
-        if sphum_index is None or not (0 <= int(sphum_index) < nq):
+        # int() would COERCE: True -> 1, 1.5 -> 1, "1" -> 1, so the
+        # "never guess the species" guard would admit a bool, a float or
+        # a string and divide by tracer 1 (GLM MINOR, job 9442423).
+        # __index__ accepts int and numpy integers and rejects the rest;
+        # bool has one, so it is excluded by name.
+        if (isinstance(sphum_index, bool)
+                or not hasattr(sphum_index, "__index__")
+                or not 0 <= sphum_index.__index__() < nq):
             raise ValueError(
-                f"r_vir != 0 needs sphum_index in [0, {nq}) -- "
+                f"r_vir != 0 needs sphum_index an int in [0, {nq}) -- "
                 f"fv_mapz.F90:975 uses the explicit sphum argument, and "
                 f"assuming tracer 0 divides by the wrong species. Got "
                 f"{sphum_index!r}.")
+        if not hydrostatic and adiabatic:
+            # fv_mapz.F90:985 -- on the NON-hydrostatic arm the closing
+            # T_v -> T conversion sits inside `if (.not. adiabatic)`, so
+            # with adiabatic=.true. the oracle does NOT convert at all
+            # and pt stays virtual.  This lane always divides, which is
+            # the `.not. adiabatic` branch (:987).  dtmp is initialised
+            # to 0. at :627 and assigned ONLY inside `consv > consv_min`
+            # (:629/:708) and `consv < -consv_min` (:738-741), both of
+            # which this lane refuses, so dtmp is identically 0 and
+            # `(pt + dtmp/cv_air*pkz)/(1+r_vir*q)` reduces EXACTLY to
+            # what is computed here -- cv_air vs cp cannot matter on a
+            # term that is zero.  Refuse the
+            # combination rather than silently running a different branch
+            # of the oracle than the flag names.  (The HYDROSTATIC :975
+            # divide is ungated by adiabatic, which is why this is
+            # NH-only.)
+            raise NotImplementedError(
+                "r_vir != 0 with hydrostatic=False and adiabatic=True: "
+                "the oracle SKIPS the closing T_v -> T conversion there "
+                "(fv_mapz.F90:985) while this lane always divides. Pass "
+                "adiabatic=False -- with consv = 0 the oracle's :987 "
+                "expression is exactly this lane's.")
     if not hydrostatic:
         missing = [nm for nm, a in (("w", w), ("delz", delz), ("ws", ws),
                                     ("rdgas", rdgas), ("grav", grav))

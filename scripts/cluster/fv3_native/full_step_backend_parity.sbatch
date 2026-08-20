@@ -21,6 +21,7 @@
 #
 # ARM selects hydro (default) or nh:
 #   sbatch --export=ALL,ARM=nh full_step_backend_parity.sbatch
+#   sbatch --export=ALL,ARM=moist full_step_backend_parity.sbatch
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
 [ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
@@ -33,8 +34,14 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 ARM="${ARM:-hydro}"
-EXTRA=""
-[ "$ARM" = "nh" ] && EXTRA="--nh"
+case "$ARM" in
+  hydro) EXTRA="" ;;
+  nh)    EXTRA="--nh" ;;
+  # The moist arm needs --tracers: dp1 = zvir*q(sphum) has nothing to
+  # read without them, and the runner refuses the combination anyway.
+  moist) EXTRA="--moist --tracers" ;;
+  *) echo "unknown ARM=$ARM (hydro|nh|moist)"; exit 4 ;;
+esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/bkparity_${ARM}_${SLURM_JOB_ID:-0}
 mkdir -p "$OUT"
 

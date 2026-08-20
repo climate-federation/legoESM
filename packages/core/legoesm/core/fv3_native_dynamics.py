@@ -57,17 +57,34 @@ is the pre-dyn_core ``delp`` (``:472-478``), copied per ``n_map``.
 The remap then makes its ``nr`` tracer passes through
 ``fv_mapz.F90:330-342`` as before.
 
-MOIST FEEDBACK IS NOW ENABLED ON THE HYDROSTATIC ARM (2026-08-19).
-``zvir != 0`` forms ``dp1 = zvir*q(sphum)`` (``:291``) once before the
-k_split loop and couples it into ``pt*(1+dp1)/pkz`` (``:402``), with
-the closing ``pt/(1 + r_vir*q)`` at ``fv_mapz.F90:975`` consuming the
-POST-transport humidity.  On the PINNED (adiabatic) deck zvir is 0 and
-the tracers remain passengers, which is why the certified 1.1866e-09
-parity is unaffected.  Still refused, and gated by behavioural tests:
-``consv_te != 0`` (the total-energy fixer, ``fv_mapz.F90:628-747``) and
-moist NON-hydrostatic, whose ``pkz`` multiplies the log argument by
-``(1+dp1)`` at ``:307-309`` while ``p_var_nonhydrostatic`` computes the
-dry form.
+MOIST FEEDBACK IS ENABLED ON BOTH ARMS (hydrostatic 2026-08-19,
+non-hydrostatic 2026-08-20).  ``zvir != 0`` forms
+``dp1 = zvir*q(sphum)`` (``:291``) once before the k_split loop and
+couples it into ``pt*(1+dp1)/pkz`` (``:402``), with the closing
+``pt/(1 + r_vir*q)`` at ``fv_mapz.F90:975`` consuming the POST-transport
+humidity.  On the NON-hydrostatic arm it ALSO enters the ``pkz`` this
+module recomputes at ``:299-322`` --
+``exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz))``, the factor INSIDE the log
+-- which is why that pkz is recomputed from the step-entry state rather
+than taken from the caller.  On the PINNED (adiabatic) deck zvir is 0
+and the tracers remain passengers, which is why the certified 1.1866e-09
+parity is unaffected.  Still refused, and gated by a behavioural test:
+``consv_te != 0`` (the total-energy fixer, ``fv_mapz.F90:628-747``).
+
+The oracle's ``moist_phys = .false.`` NH arm (``:335``) forces
+``dp1 = 0`` and takes the DRY pkz, so it is not a third lane: it is
+exactly the ``zvir = 0`` lane, and needs no flag here.  ``moist_phys``
+reaches nothing else this lane models -- its only other uses are the
+refused ``consv_te`` energy path (``:364``), a ``fv_mapz`` argument the
+oracle itself marks ``not used`` (``fv_mapz.F90:129``), and the
+``#ifdef FILL2D`` block at ``:546``, which touches only the condensate
+species (liq_wat/rainwat/ice_wat/snowwat/graupel), each guarded on
+``> 0`` and all absent from this sphum-only lane.
+
+``adiabatic`` likewise reaches exactly ONE branch, ``fv_mapz.F90:985``
+(``flagstruct%adiabatic`` is passed at ``:627`` and used nowhere else),
+which is why threading it honestly on the moist NH arm changes nothing
+else.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------
@@ -223,7 +240,8 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
 
 def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
                          pt: np.ndarray, *, ptop: float, akap: float,
-                         n: int, ng: int, km: int) -> dict:
+                         n: int, ng: int, km: int,
+                         dp1: np.ndarray | None = None) -> dict:
     """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
 
     ``init_hydro.F90:95-133`` builds ps/pe/peln/pk identically on both
@@ -237,13 +255,27 @@ def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
     ~kappa(1-kappa)/24 * dlnp^2 error on theta (largest in the thickest
     log-layer), which surfaced in the first NH parity as a 0.408 m delz
     residual on every column of every face.
+
+    ``dp1`` selects the MOIST arm (``fv_dynamics.F90:307-309``, the
+    ``moist_phys`` branch), where the log argument carries an extra
+    ``(1.+dp1)`` -- INSIDE the log, in the Fortran's own left-to-right
+    association.  Pre-scaling ``pt`` at the call site instead would
+    reassociate the product.  A separate branch, not a multiply by ones,
+    so the certified dry NH lane keeps its exact expression.  The
+    oracle's ``moist_phys = .false.`` arm (``:335``) forces ``dp1 = 0``
+    and takes the dry form, so it IS the ``dp1=None`` branch here and
+    needs no flag of its own.
     """
     out = p_var_hydrostatic(delp, ptop=ptop, akap=akap, n=n, ng=ng, km=km)
     rdg = -_FV3_RDGAS / _FV3_GRAV
     ia = ng
-    out["pkz"][:] = np.exp(akap * np.log(
-        rdg * delp[ia:ia + n, ia:ia + n, :]
-        * pt[ia:ia + n, ia:ia + n, :] / delz))
+    dpw = delp[ia:ia + n, ia:ia + n, :]
+    ptw = pt[ia:ia + n, ia:ia + n, :]
+    if dp1 is None:
+        arg = rdg * dpw * ptw / delz
+    else:
+        arg = rdg * dpw * ptw * (1.0 + dp1) / delz
+    out["pkz"][:] = np.exp(akap * np.log(arg))
     return out
 
 
@@ -308,8 +340,8 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 "zvir != 0 requires tracer arrays, but q is None: "
                 "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
                 "humidity to read.")
-        if (sphum_index is None or isinstance(sphum_index, bool)
-                or not isinstance(sphum_index, int)):
+        if (isinstance(sphum_index, bool)
+                or not hasattr(sphum_index, "__index__")):
             raise ValueError(
                 f"zvir != 0 requires sphum_index to be an int indexing the "
                 f"specific-humidity tracer in each face's q list; got "
@@ -325,21 +357,11 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                     f"sphum_index={sphum_index} out of range "
                     f"[0, {len(_qf)}) for face {_t}; a negative index would "
                     f"silently select another tracer by Python wrap-around.")
-        if not hydrostatic:
-            # fv_dynamics.F90:307-309: under moist_phys the NH pkz is
-            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)), but
-            # p_var_nonhydrostatic computes the DRY form. Running it dry
-            # would apply a pkz missing the virtual-temperature factor on
-            # every NH step -- refuse until dp1 is threaded through it.
-            # (When phasing that in: multiply INSIDE the log argument in
-            # the Fortran's association, not by pre-scaling pt at the call
-            # site, which reassociates the product and can differ by an ulp.)
-            raise NotImplementedError(
-                "zvir != 0 with non-hydrostatic dynamics is not enabled: "
-                "the moist NH pkz multiplies the log argument by (1+dp1) "
-                "(fv_dynamics.F90:307-309) and p_var_nonhydrostatic "
-                "computes the dry form. Hydrostatic zvir coupling IS "
-                "enabled.")
+        if not hydrostatic and any("delz" not in f for f in state):
+            raise ValueError(
+                "zvir != 0 with non-hydrostatic dynamics needs delz on "
+                "every face: the moist NH pkz is recomputed here from "
+                "delp/pt/delz (fv_dynamics.F90:299-322).")
     if consv_te != 0.0:
         raise NotImplementedError(
             "consv_te != 0 activates the total-energy fixer "
@@ -406,6 +428,20 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             # WINDOW because pkz is (n, n, km) and pt_to_theta_v expects
             # dp1 already matching it.
             dp1 = zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
+            if not hydrostatic:
+                # :299-322 is INSIDE fv_dynamics and runs on EVERY call:
+                # on the NH moist arm it OVERWRITES pkz with
+                # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
+                # step-entry state, while pt is still TEMPERATURE. The
+                # caller's pkz -- built dry by p_var_nonhydrostatic, or
+                # carried over from the previous step's remap -- is
+                # missing the virtual factor, so it is recomputed here
+                # rather than trusted. The dry NH lane never enters this
+                # branch and keeps its certified expression untouched.
+                press[t]["pkz"][:] = p_var_nonhydrostatic(
+                    state[t]["delp"], state[t]["delz"], state[t]["pt"],
+                    ptop=ptop, akap=akap, n=n, ng=ng, km=km,
+                    dp1=dp1)["pkz"]
             pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng,
                           dp1=dp1)
         else:
@@ -416,6 +452,15 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
 
     remapped = km > REMAP_MIN_NPZ
+    # fv_mapz.F90:985: on the NH arm the closing T_v -> T conversion is
+    # inside `if (.not. adiabatic)`.  The certified deck is adiabatic AND
+    # dry, so True was unconditionally right; with moist NH it is not --
+    # adiabatic=True there would make the oracle skip the conversion and
+    # leave pt virtual.  With consv = 0, dtmp is identically 0 and the
+    # oracle's :987 expression is exactly the one this lane computes, so
+    # False is the faithful flag for the moist NH arm.  The remap refuses
+    # the other combination rather than trusting this line.
+    adiabatic_flag = hydrostatic or zvir == 0.0
     for n_map in range(1, k_split + 1):
         last_step = (n_map == k_split)
 
@@ -515,13 +560,13 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
                 q=q[t], omga=omga[t], sphum_index=sphum_index,
                 last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=True,
                 w=(None if hydrostatic else state[t]["w"]),
                 delz=(None if hydrostatic else state[t]["delz"]),
                 ws=(None if hydrostatic else g["ws"]),
                 kord_wz=kord_wz, w_limiter=w_limiter,
                 rdgas=(None if hydrostatic else _FV3_RDGAS),
                 grav=(None if hydrostatic else _FV3_GRAV),
+                adiabatic=adiabatic_flag,
                 consv=consv_te, fill=False, do_sat_adj=False,
                 do_inline_mp=False, do_adiabatic_init=False)
 

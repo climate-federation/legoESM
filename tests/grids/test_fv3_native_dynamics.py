@@ -196,14 +196,21 @@ def test_rayleigh_deck_is_refused():
         require_uniform_damping_lane(n_sponge=-1, tau=10.0, npz=KM)
 
 
-def test_moist_and_energy_fixing_lanes_are_refused(ctx, eta):
+def test_moist_validation_and_the_energy_fixer_refusal(ctx, eta):
+    """zvir is SUPPORTED now; what this pins is that it is VALIDATED.
+
+    This test asserted ``NotImplementedError`` on ``zvir != 0`` and was
+    left stale by the commit that enabled moist coupling in this lane --
+    the refusal it named had already become a validation error.
+    """
     ak, bk, ptop, _ = eta
     st = _state(ak, bk, ptop)
     pr = _press(st, ptop)
     common = dict(bdt=60.0, km=KM, k_split=1, n_split=1, ptop=ptop,
                   ak=ak, bk=bk, akap=AKAP, cp_air=CP,
                   kord_mt=9, kord_tm=-9, kord_tr=9, q=_tracers())
-    with pytest.raises(NotImplementedError, match="zvir"):
+    # no sphum_index -> a guessed index would couple the wrong species
+    with pytest.raises(ValueError, match="sphum_index"):
         fv_dynamics_step(ctx, st, pr, zvir=0.61, **common)
     with pytest.raises(NotImplementedError, match="consv_te"):
         fv_dynamics_step(ctx, st, pr, consv_te=1.0, **common)

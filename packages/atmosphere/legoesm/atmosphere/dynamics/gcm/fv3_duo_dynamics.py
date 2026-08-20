@@ -6,8 +6,11 @@ DCMIP16 baroclinic wave only.  Every restriction is the certified lane's
 own contract, enforced loudly here and at the component factory rather
 than assumed:
 
-* moist coupling is REFUSED by the core (``zvir != 0`` / ``consv_te != 0``
-  raise, fv3_dynamics.py:301-311) — this wrapper never passes either;
+* moist coupling is not routed by THIS wrapper: it passes neither
+  ``zvir`` nor a humidity index, so ``dp1`` is never formed.  The core
+  itself now SUPPORTS ``zvir != 0`` on both arms; ``consv_te != 0`` is
+  still refused there.  Slice 1 is dry by construction here, not by the
+  core's refusal, and the config wall below is what enforces it;
 * f64 is REQUIRED (``require_f64_jax`` gates every leaf);
 * the vertical coordinate is ``set_eta_analytic``'s ``km in {5, 10}``
   branch (fv_eta.F90:334-344) — any other km raises there;

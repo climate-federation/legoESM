@@ -20,8 +20,10 @@ echo "dirty: $(git status --porcelain | wc -l)"
 
 codex exec --sandbox read-only -C $WT "$(cat <<'PROMPT'
 ADVERSARIAL REVIEW of ONE commit on the FV3 duo-grid JAX port: the HEAD
-commit "feat(fv3): moist zvir coupling in the JAX lane". Read it with
-`git show HEAD`. Two files change:
+commit whose subject starts "feat(fv3): moist zvir coupling in the JAX
+lane". FIND IT: `git log --oneline -8`, then `git show <that sha>` --
+do NOT assume it is HEAD, the review runner itself is committed on top
+of it and reviewing the wrong commit has already happened once. Two files change:
 packages/core/legoesm/core/fv3_dynamics.py (the JAX PORT) and
 tests/grids/test_fv3_dynamics.py (its gate).
 

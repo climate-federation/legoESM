@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -243,6 +244,106 @@ def build_port_ic(ctx, ak, bk, nh: bool = False):
                                           * st[t]["pt"][cs, cs, k] * dpeln)
                 pe = pe + dp
     return st
+
+
+# --------------------------------------------------------------------
+# The moist deck's preconditions, ASSERTED from its own input.nml
+# --------------------------------------------------------------------
+# Reading the Fortran established that fv_phys is a no-op for this deck;
+# these two functions make that a CHECKED precondition of every moist
+# run instead of a claim in a docstring. The chain is:
+#   atmosphere.F90:474  calls fv_phys whenever npz /= 1 .and. .not.
+#                       adiabatic -- and the moist deck IS .not.
+#                       adiabatic, so fv_phys DOES get called;
+#   fv_phys.F90:590     applies nothing unless `no_tendency` was cleared;
+#   no_tendency is cleared ONLY by fv_sg_adj > 0 (:303), do_LS_cond
+#   (:306), K_sedi_transport under do_K_warm_rain (:412),
+#   do_GFDL_sim_phys (:456), do_reed_sim_phys (:530), and the
+#   do_Held_Suarez / do_surf_drag pair (:533/:541, which also writes pt
+#   in place at :559-563).
+# do_Held_Suarez lives in &fv_core_nml and defaults .false.
+# (fv_arrays.F90:511); the rest live in the sim_phys namelists and all
+# default .false. (fv_phys.F90:88-142) EXCEPT do_strat_HS_forcing, which
+# is .true. by default but is only an ARGUMENT to Held_Suarez_Tend and
+# is therefore unreachable while do_Held_Suarez is false.
+_PHYSICS_SWITCHES = (
+    "do_held_suarez", "do_surf_drag", "do_ls_cond", "do_k_warm_rain",
+    "do_gfdl_sim_phys", "do_reed_sim_phys", "do_terminator",
+)
+
+
+def _nml_text(run_dir: str) -> str:
+    path = os.path.join(run_dir, "input.nml")
+    if not os.path.exists(path):
+        raise SystemExit(f"missing {path}: cannot verify the deck")
+    with open(path) as fh:
+        return fh.read()
+
+
+def _nml_logical(text: str, key: str):
+    """The LAST assignment wins, matching Fortran namelist semantics.
+
+    These decks routinely carry a commented-out alternative and then the
+    live value (``duogrid``, ``do_schmidt``, ``dnats`` all appear twice),
+    so taking the first match would read the wrong one. Commented lines
+    are dropped first: `!` starts a comment in a namelist.
+    """
+    val = None
+    for raw in text.splitlines():
+        line = raw.split("!", 1)[0]
+        m = re.search(rf"\b{key}\s*=\s*(\.?[A-Za-z]+\.?)", line,
+                      re.IGNORECASE)
+        if m:
+            tok = m.group(1).strip().lower().strip(".")
+            val = tok in ("t", "true")
+    return val
+
+
+def check_physics_is_inert(run_dir: str) -> None:
+    """Refuse a deck whose fv_phys could touch the state."""
+    text = _nml_text(run_dir)
+    on = [k for k in _PHYSICS_SWITCHES if _nml_logical(text, k) is True]
+    if on:
+        raise SystemExit(
+            f"{run_dir}: physics switches {on} are ON in input.nml. This "
+            f"deck's RESTART is one dynamics step PLUS a forcing "
+            f"tendency, and the port has no physics -- the residual "
+            f"would be unattributable. Use a deck with them off.")
+    sg = re.search(r"fv_sg_adj\s*=\s*(-?\d+)", text)
+    if sg is None:
+        raise SystemExit(f"{run_dir}: input.nml does not set fv_sg_adj; "
+                         f"fv_phys.F90:303 clears no_tendency when it is "
+                         f"> 0, so it must be pinned, not defaulted.")
+    if int(sg.group(1)) > 0:
+        raise SystemExit(
+            f"{run_dir}: fv_sg_adj = {sg.group(1)} > 0 runs fv_subgrid_z "
+            f"(fv_phys.F90:305) and clears no_tendency. Not ported.")
+
+
+def check_moist_deck(run_dir: str) -> None:
+    """The moist coupling is a DERIVED flag; assert what derives it.
+
+    ``zvir`` is nowhere in the namelist. atmosphere.F90:156-161 sets it
+    to ``rvgas/rdgas - 1`` exactly when ``adiabatic = .false.``, and
+    sets ``moist_phys = .true.`` in the same branch. So the deck must
+    say ``adiabatic = .false.`` or the run this is scored against was
+    DRY and the comparison is a category error, not a tolerance
+    question. ``consv_te`` must also be 0: the energy fixer is refused.
+    """
+    text = _nml_text(run_dir)
+    adiab = _nml_logical(text, "adiabatic")
+    if adiab is not False:
+        raise SystemExit(
+            f"{run_dir}: input.nml resolves adiabatic = {adiab!r}, not "
+            f".false. -- atmosphere.F90:157-161 then leaves zvir = 0 and "
+            f"the oracle ran DRY. Scoring the moist port against it "
+            f"would measure the coupling itself as the error.")
+    m = re.search(r"consv_te\s*=\s*([0-9.eEdD+-]+)", text)
+    if m is None or float(m.group(1).replace("d", "e").replace("D", "e")):
+        raise SystemExit(
+            f"{run_dir}: consv_te must be pinned to 0 (found "
+            f"{m.group(1) if m else 'nothing'}); the total-energy fixer "
+            f"(fv_mapz.F90:628-747) is not ported.")
 
 
 def build_port_tracer_ic(ctx, ak, bk) -> list:
@@ -900,6 +1001,20 @@ def main(argv=None):
                          "~2e-4 m/s after one step -- judging it against "
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
+    ap.add_argument("--moist", action="store_true",
+                    help="MOIST gate: defaults the runs to "
+                         "run_hydro_{zerostep,1step}_moist_gfs, which are "
+                         "the same test_case=-13 deck with "
+                         "adiabatic=.false. -- and in the solo driver "
+                         "(atmosphere.F90:156-161) that ONE flag is what "
+                         "sets zvir = rvgas/rdgas - 1 and moist_phys=T. "
+                         "Requires --tracers, because dp1 = zvir*q(sphum) "
+                         "has nothing to read otherwise. The deck's "
+                         "physics switches are ASSERTED inert from its own "
+                         "input.nml (see check_physics_is_inert); a deck "
+                         "that ran Held-Suarez or Kessler would score the "
+                         "port against dynamics PLUS forcing and the "
+                         "residual would be unattributable.")
     ap.add_argument("--backend", choices=("numpy", "jax"), default="numpy",
                     help="which lane takes the step. 'numpy' is the "
                          "SPECIFICATION and the established score; 'jax' "
@@ -931,6 +1046,28 @@ def main(argv=None):
             args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
+    if args.moist:
+        if args.nh:
+            # No NH moist deck exists in the pinned tree. Refuse rather
+            # than silently scoring the NH moist port against a
+            # hydrostatic reference.
+            raise SystemExit(
+                "--moist --nh: there is no non-hydrostatic moist oracle "
+                "run in the pinned tree. Build one (the hydrostatic moist "
+                "deck with hydrostatic=.F.) before gating that arm.")
+        if not args.tracers:
+            raise SystemExit(
+                "--moist requires --tracers: dp1 = zvir*q(sphum) "
+                "(fv_dynamics.F90:291) has no specific humidity to read "
+                "without the tracer IC, and a zvir with q=None is refused "
+                "by the lane anyway.")
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_moist_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_hydro_1step_moist_gfs"
+        for _run in (args.ic_run, args.step_run):
+            check_physics_is_inert(_run)
+            check_moist_deck(_run)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -939,7 +1076,9 @@ def main(argv=None):
     from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
     from legoesm.core.fv3_native_eta import set_eta_analytic
     from legoesm.core.fv3_native_state_3d import field_shape
-    from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_CP_AIR, FV3_KAPPA, FV3_RDGAS, FV3_RVGAS,
+    )
 
     print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
     print(f"                (2/7 = {2/7!r}; rel diff "
@@ -1299,7 +1438,14 @@ def main(argv=None):
                       hydrostatic=not args.nh,
                       # deck: a_imp=1., p_fac=0.05, kord_wz=9,
                       # use_logp=F, w_limiter=T (resolved namelist)
-                      w_limiter=args.nh)
+                      w_limiter=args.nh,
+                      # zvir is NOT a namelist entry: atmosphere.F90:
+                      # 156-161 derives it from `adiabatic`, which
+                      # check_moist_deck asserts. sphum is index 0 of
+                      # ADVECTED_TRACERS, matching build_port_tracer_ic.
+                      **({"zvir": FV3_RVGAS / FV3_RDGAS - 1.0,
+                          "sphum_index": ADVECTED_TRACERS.index("sphum")}
+                         if args.moist else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)

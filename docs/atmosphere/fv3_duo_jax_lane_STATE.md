@@ -760,6 +760,65 @@ retracted claim in this campaign.
 
 ---
 
+## The moist arms: what certifies them, and what does NOT (2026-08-20)
+
+Moist (virtual-temperature) coupling is enabled on BOTH arms now, in
+both lanes.  It is anchored on the Fortran SOURCE plus port-vs-spec
+parity -- **not** on an oracle run, and the reason is worth recording
+because there is a moist deck sitting in the pinned tree that looks
+like it should serve.
+
+`fv3_oracle_pinned/run_hydro_1step_moist_gfs` (and its
+`run_hydro_zerostep_moist_gfs` IC) is a real 1-step C48/npz=5 duo run
+with `adiabatic = .false.` and a live sphum.  It is NOT usable as a
+moist-dynamics oracle: `driver/solo/atmosphere.F90:474` calls `fv_phys`
+whenever `npz /= 1 .and. .not. adiabatic`, the deck carries no
+`sim_phys_nml` block, and `do_strat_HS_forcing` DEFAULTS to `.true.`
+(`fv_phys.F90:91`).  Its RESTART is therefore one dynamics step PLUS
+modified Held-Suarez forcing, and this lane has no physics.  Certifying
+the moist arms against Fortran needs a new deck with
+`&sim_phys_nml do_strat_HS_forcing = .F. /` -- everything else in that
+deck is already right.
+
+What the same reading DID settle, and settles the whole design:
+`atmosphere.F90:156-161` is
+
+    zvir = 0.
+    if ( adiabatic ) then ; moist_phys = .false.
+    else ; zvir = rvgas/rdgas - 1. ; moist_phys = .true. ; endif
+
+so in the oracle `adiabatic = .false.` <=> `zvir /= 0` <=> `moist_phys
+= .true.` -- one switch, not three.  That is why the moist NH arm
+passes `adiabatic=False` to the remap and why the combination
+(non-hydrostatic AND moist AND `adiabatic=True`) is REFUSED in both
+lanes: it is unreachable in the oracle, and running it would take the
+port through `fv_mapz.F90:987` while the flag names `:985`'s empty
+branch.
+
+Three cpp defines were confirmed from the BUILD RECIPE of the binary
+the PARITY RUNS use -- `scripts/cluster/fv3_native/build_oracle_hydro_serialnc.sbatch`,
+`DEFS="-DSPMD -Duse_libMPI -Duse_netCDF -DINTERNAL_FILE_NML"` (the same
+line in `dyncore_stage_oracle.sbatch` and `extchain_oracle.sbatch`) --
+not inferred: `USE_COND`, `MOIST_CAPPA` and `FILL2D` are all UNDEFINED,
+so the `q_con` moist_cp/moist_cv arms, the per-cell `cappa` NH pkz, and
+the `moist_phys`-gated condensate fill at `fv_dynamics.F90:546` are
+structurally absent.  The ported arms are the `#else` branches.
+
+CITE THE RIGHT BUILD.  `fv3_recon/duo_model_build.sbatch` -- the
+instrumented tree with `dyncore_dump2d` -- compiles with
+`-DSW_DYNAMICS`, under which `fv_dynamics.F90:267-269` sets `akap = 1.`
+and the ENTIRE `dp1`/`pkz` block (`:271-343`) and the `pt -> theta_v`
+conversion (`:396-408`) are excluded by the `#else` / `#ifndef`. Nothing
+about `fv_dynamics` may be read off that binary. `build_oracle_hydro_serialnc.sbatch`
+drops the define on purpose (its own comment says so) and is what the
+one-step and stage oracles are built from.
+
+`dtmp` is initialised to `0.` at `fv_mapz.F90:627` and assigned only
+inside `consv > consv_min` (`:708`) and `consv < -consv_min`
+(`:738-741`), both refused here, so it is identically zero and
+`:987`'s `(pt + dtmp/cv_air*pkz)/(1+r_vir*q)` reduces EXACTLY to this
+lane's `pt/(1+r_vir*q)`.  `cv_air` vs `cp` cannot matter on a zero term.
+
 ## Lessons file (append, never prune)
 
 Each entry cost something. New sessions read this before touching the port.

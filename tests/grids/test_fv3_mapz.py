@@ -1526,6 +1526,77 @@ def test_driver_jax_matches_numpy_lane_moist_closing_conversion():
     assert np.abs(np.asarray(other.pt) - np.asarray(out.pt)).max() > 1e-9
 
 
+
+
+def test_moist_nonhydrostatic_refuses_the_adiabatic_flag():
+    """``fv_mapz.F90:985`` puts the NH closing T_v -> T divide inside
+    ``if (.not. adiabatic)``.
+
+    With ``adiabatic=.true.`` the oracle does not convert at all and pt
+    stays virtual; this lane always divides, i.e. it computes the
+    ``.not. adiabatic`` branch (with ``consv = 0``, ``dtmp`` is
+    identically 0, so :987 reduces exactly to it).  Running the ported
+    expression under the flag that names the OTHER branch is the silent
+    failure this repo ranks worst, so the combination raises.
+
+    The HYDROSTATIC divide at :975 carries no such guard, and the
+    second half asserts that -- without it this test would pass on a
+    lane that refused moist coupling everywhere.
+    """
+    def _mk(hydro):
+        f = (_face()[0] if hydro else _nh_face(w_const=0.0))
+        f["r_vir"] = 1.0
+        return f
+
+    f = _mk(False)
+    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+          for k, v in f.items()}
+    q = [jnp.asarray(x) for x in _tracers(f)]
+    with pytest.raises(NotImplementedError, match="985|adiabatic=False"):
+        l2e_j(**kw, q=q, sphum_index=1, adiabatic=True)
+    # BOTH lanes carry the guard; the NumPy lane is the specification,
+    # so a guard present only in the port is a lane divergence.
+    fn = _mk(False)
+    with pytest.raises(NotImplementedError, match="985|adiabatic=False"):
+        l2e_n(**fn, q=_tracers(fn), sphum_index=1, adiabatic=True)
+    # the SAME call with the faithful flag runs
+    out = l2e_j(**kw, q=q, sphum_index=1, adiabatic=False)
+    assert np.all(np.isfinite(np.asarray(out.pt)))
+
+    # CONTROL: hydrostatic + adiabatic=True must NOT raise (:975 is
+    # ungated), so the guard is NH-scoped rather than a blanket refusal.
+    fh = _mk(True)
+    kwh = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+           for k, v in fh.items()}
+    l2e_j(**kwh, q=[jnp.asarray(x) for x in _tracers(fh)],
+          sphum_index=1, adiabatic=True)
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1", None])
+def test_moist_sphum_index_is_not_coerced(bad):
+    """``int()`` accepts ``True``, ``1.5`` and ``"1"`` -- all of which
+    would silently select tracer 1 (GLM MINOR, job 9442423)."""
+    f = _face()[0]
+    f["r_vir"] = 1.0
+    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+          for k, v in f.items()}
+    with pytest.raises(ValueError, match="sphum_index"):
+        l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
+              sphum_index=bad)
+
+
+def test_moist_sphum_index_accepts_a_numpy_integer():
+    """A config-driven caller carries ``np.int64``; rejecting it would
+    be a spurious raise, and this pins that the widened guard did not
+    also widen to bools (covered above)."""
+    f = _face()[0]
+    f["r_vir"] = 1.0
+    kw = {k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+          for k, v in f.items()}
+    out = l2e_j(**kw, q=[jnp.asarray(x) for x in _tracers(f)],
+                sphum_index=np.int64(1))
+    assert np.all(np.isfinite(np.asarray(out.pt)))
+
 # ------------------------------------------------------------- gate 2
 def test_driver_jax_jit_matches_eager():
     face = _face()[0]
