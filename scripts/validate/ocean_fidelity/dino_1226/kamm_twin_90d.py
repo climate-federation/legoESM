@@ -204,6 +204,33 @@ def _print_before_bridge_verify(st, before, grid) -> None:
           f"max|d_vb|={d_vb:.3e}", flush=True)
 
 
+def _restart_elapsed_seconds(path: str) -> float:
+    """Model seconds elapsed at the restart, read from the restart ITSELF.
+
+    NEMO writes both ``adatrj`` (elapsed days) and ``kt`` (step index) into the
+    restart, and ``usrdef_sbc.F90:536`` makes the seasonal phase a function of
+    ``REAL(kt)*rn_Dt``.  Reading ``adatrj`` makes the offset independent of the
+    run's timestep; cross-checking it against ``kt*DT`` catches a restart whose
+    timestep differs from this harness's ``DT``.
+    """
+    import netCDF4 as nc
+    with nc.Dataset(path) as d:
+        for name in ("adatrj", "kt"):
+            if name not in d.variables:
+                raise SystemExit(f"{path}: restart has no '{name}' variable")
+        adatrj = float(np.asarray(d.variables["adatrj"][:]).ravel()[0])
+        kt = float(np.asarray(d.variables["kt"][:]).ravel()[0])
+    t_from_days, t_from_kt = adatrj * 86400.0, kt * DT
+    if not np.isfinite([t_from_days, t_from_kt]).all():
+        raise SystemExit(f"{path}: non-finite adatrj/kt ({adatrj}, {kt})")
+    if abs(t_from_days - t_from_kt) > 0.5 * DT:
+        raise SystemExit(
+            f"{path}: restart adatrj={adatrj} d ({t_from_days:.0f} s) disagrees "
+            f"with kt={kt:.0f} x DT={DT:.0f} s ({t_from_kt:.0f} s) -- the "
+            "restart was written at a different timestep than this harness runs")
+    return t_from_days
+
+
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = False,
                        vmix_scheme: str | None = None,
@@ -361,6 +388,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
@@ -377,7 +405,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
-        use_gm_redi=use_gm_redi,
+        use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement)
 
     if perturb_seed is not None:
@@ -408,34 +436,33 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # DINO's analytic surface forcing is a function of the DAY OF YEAR
     # (usrdef_sbc.F90:536-547: ztime = REAL(kt)*rn_Dt, the ABSOLUTE step
     # index).  This loop passes t_seconds = (k+1)*DT, i.e. it restarts the
-    # seasonal year at zero even though the bridged state is NEMO's step
-    # KT0 = 5760 (RUN_90D_TWIN/ocean.output:711 -- kt 5761 is 0001/07/01,
-    # nday_year 181), so T* and Qsr run half a year out of phase with the
-    # NEMO run this twin is compared against.
+    # seasonal year at zero even though the bridged state is NEMO's step 5760,
+    # so T* and Qsr run half a year out of phase with the NEMO run this twin
+    # is compared against.
     #   unset / "0"  -> t = (k+1)*DT               (BIT-IDENTICAL to every
     #                                               previously recorded run)
-    #   "restart"    -> t = (KT0 + k+1)*DT, KT0 parsed from the restart name
-    #   <integer>    -> t = (<integer> + k+1)*DT
+    #   "restart"    -> t = t0 + (k+1)*DT, with t0 read from the restart file
+    #                   ITSELF (`adatrj` days elapsed, cross-checked against
+    #                   `kt`*DT) -- NOT scraped out of the filename, and
+    #                   independent of DT
+    #   <integer>    -> t = (<integer> + k+1)*DT   (explicit step offset)
     _kt0_env = os.environ.get("DINO_TWIN_SEASONAL_KT0", "0")
     if _kt0_env == "restart":
-        _digits = "".join(c for c in RESTART_FILE if c.isdigit())
-        if not _digits:
-            raise SystemExit(
-                f"DINO_TWIN_SEASONAL_KT0=restart but RESTART_FILE={RESTART_FILE!r} "
-                "carries no step number to parse")
-        kt0 = int(_digits)
+        t0_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
     else:
         try:
-            kt0 = int(_kt0_env)
+            _kt0 = int(_kt0_env)
         except ValueError:
             raise SystemExit(
                 f"Unknown DINO_TWIN_SEASONAL_KT0={_kt0_env!r}: expected "
-                "'restart' or an integer step index") from None
-        if kt0 < 0:
+                "'restart' (lowercase) or an integer step index") from None
+        if _kt0 < 0:
             raise SystemExit(
-                f"DINO_TWIN_SEASONAL_KT0={kt0} is negative; expected >= 0")
-    print(f"seasonal clock: t_seconds = ({kt0} + k+1)*{DT:.0f}s  "
-          f"(day-of-year at step 1 = {((kt0 + 1) * DT / 86400.0) % 360.0 + 1:.2f})",
+                f"DINO_TWIN_SEASONAL_KT0={_kt0} is negative; expected >= 0")
+        t0_sec = _kt0 * DT
+    print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
+          f"(restart is day {t0_sec / 86400.0:.2f} of the 360-day year; "
+          f"NEMO logs nday_year = {int(t0_sec // 86400.0) + 1} at its next step)",
           flush=True)
 
     land_mask = np.asarray(st.land_mask.data)
@@ -465,12 +492,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     for k in range(nsteps):
         if _sf_placement == "leapfrog_rhs":
             st, _ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=(kt0 + k + 1) * DT,
-                return_rate=True)
+                st, forcing, br.z_coord, cfg, DT,
+                t_seconds=t0_sec + (k + 1) * DT, return_rate=True)
             st = dyn(st, _ext_rate)
         else:
-            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                     t_seconds=(kt0 + k + 1) * DT)
+            st = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
 
         if (k + 1) % STEPS_PER_DAY == 0:
@@ -524,6 +551,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         day=np.arange(1, n_days + 1, dtype=np.int32),
         blew_up_at_step=(blew_up_at if blew_up_at is not None else -1),
         stable=stable,
+        # #1455: stamp the seasonal-clock offset INTO the artifact so a scorer
+        # can read the one variable under test instead of trusting a filename.
+        seasonal_t0_seconds=np.float64(t0_sec),
     )
     for d in snap_days:
         if d in t3d:

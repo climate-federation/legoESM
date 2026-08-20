@@ -55,6 +55,9 @@ PUBLISHED_DAY30_GAP = -0.0132      # kg/m3, commit a5183778c
 REPRO_TOL = 0.20                   # armA must reproduce it to +-20%
 CONFIRM_FRAC = 0.30
 REFUTE_FRAC = 0.85
+# The one variable under test, read from the ARTIFACT (kamm_twin_90d.py stamps
+# ``seasonal_t0_seconds``) rather than trusted from the filename label.
+EXPECTED_T0_SEC = {"armA": 0.0, "armB": 180.0 * 86400.0}
 
 
 def main(argv=None) -> int:
@@ -70,20 +73,49 @@ def main(argv=None) -> int:
     print(f"repo HEAD = {R.head_sha()}   fp64 = {np.zeros(1).dtype}")
     G.instrument_self_checks(A.tmask)
 
-    gaps = {}
+    gaps, day0 = {}, {}
     for spec in argv:
         label, path = spec.split("=", 1)
         print(f"\n=== PROVENANCE ===\n  {label:<10}{R.stamp(path)}")
+        z = np.load(path)
+        # The arm is identified by what it RAN, not by what it is called.
+        if "stable" not in z or not bool(z["stable"]):
+            raise SystemExit(
+                f"{label}: twin is not marked stable (blew_up_at_step="
+                f"{z['blew_up_at_step'] if 'blew_up_at_step' in z else '?'}) "
+                "-- a blown-up arm must not be scored")
+        if "seasonal_t0_seconds" not in z:
+            raise SystemExit(
+                f"{label}: {path} predates the seasonal_t0_seconds stamp, so the "
+                "variable under test cannot be read from the artifact; re-run the "
+                "arm with the current kamm_twin_90d.py")
+        t0 = float(z["seasonal_t0_seconds"])
+        want = EXPECTED_T0_SEC.get(label)
+        if want is None:
+            raise SystemExit(f"unknown arm label {label!r}; expected armA or armB")
+        if abs(t0 - want) > 0.5:
+            raise SystemExit(
+                f"{label}: seasonal_t0_seconds={t0:.0f} but this label requires "
+                f"{want:.0f} -- the arms are mislabelled or the wrong npz was passed")
         series = D.time_series(path, label)
         if DAY not in series:
             raise SystemExit(f"{label}: no day-{DAY} pair in {path}")
         lmean, nmean, _, _ = series[DAY]
         gaps[label] = lmean - nmean
+        day0[label] = (series[0][0] - series[0][1]) if 0 in series else np.nan
 
     if set(gaps) != {"armA", "armB"}:
         raise SystemExit(f"expected labels armA and armB, got {sorted(gaps)}")
     if not all(np.isfinite(v) for v in gaps.values()):
         raise SystemExit(f"non-finite gap: {gaps}")
+    # Both arms must start from the SAME bridged state, or they differ in more
+    # than the one variable.
+    if not np.isfinite(list(day0.values())).all():
+        raise SystemExit(f"missing day-0 pair: {day0}")
+    if abs(day0["armA"] - day0["armB"]) > 1e-12:
+        raise SystemExit(
+            f"day-0 gaps differ ({day0['armA']:.3e} vs {day0['armB']:.3e}) -- the "
+            "arms did not start from the same bridged state")
 
     ga, gb = gaps["armA"], gaps["armB"]
     repro = abs(ga - PUBLISHED_DAY30_GAP) / abs(PUBLISHED_DAY30_GAP)
@@ -94,9 +126,19 @@ def main(argv=None) -> int:
     print(f"  armB  (NEMO clock,    seasonal day 180.03..210) gap {gb:+.6f} kg/m3")
     print(f"  gate floor {G.FLOORS['smean']:g}   armA {abs(ga)/G.FLOORS['smean']:.0f}x  "
           f"armB {abs(gb)/G.FLOORS['smean']:.0f}x")
+    print(f"  day-0 gap (both arms, must be identical) {day0['armA']:+.3e} kg/m3")
     print(f"  reproduction check: armA vs published {PUBLISHED_DAY30_GAP:+.4f} "
           f"-> {100*repro:.1f}% off (pre-registered tolerance {100*REPRO_TOL:.0f}%)"
           f"  [{'ok' if repro <= REPRO_TOL else 'OUT OF TOLERANCE'}]")
+    if repro > REPRO_TOL:
+        # The pre-registration says NEITHER number is readable in this case, so
+        # the band is not computed at all -- a failure branch with no effect is
+        # a gate that cannot fail.
+        raise SystemExit(
+            f"armA is {100*repro:.1f}% off the published day-{DAY} gap "
+            f"({PUBLISHED_DAY30_GAP:+.4f}), outside the pre-registered "
+            f"{100*REPRO_TOL:.0f}% tolerance: these arms are not the recorded "
+            "configuration and the A/B readout is not interpretable")
     band = ("CONFIRM" if frac <= CONFIRM_FRAC
             else "REFUTE" if frac >= REFUTE_FRAC else "PARTIAL")
     print(f"  |gap_B|/|gap_A| = {frac:.3f}   pre-registered bands: "

@@ -91,10 +91,20 @@ RN_ABS, RN_SI0, RN_SI1 = 0.58, 0.35, 23.0
 RHO0, CP = 1026.0, 3991.86   # DINOConfig.rho_0 / .c_p (= NEMO rho0 / rcp)
 H_ML = 74.0            # depth over which the measured anomaly is flat (+-1.5%)
 
-# Gate window (acceptance_gate_90d southern-band metric, rows 14..31).
-SOUTH_ROWS = slice(14, 32)
-# A northern mirror band, same |lat| span, for the meridional-dipole column.
-NORTH_ROWS = slice(199 - 32, 199 - 14)
+NLAT = 199                     # asserted against the mesh actually read
+
+
+def gate_rows() -> slice:
+    """The gate's OWN southern-band rows, imported rather than copied.
+
+    ``sigma_mean_gap_decompose`` reduces over T-rows ``A.J0 .. (A.J0+A.J1)//2``.
+    Hardcoding 14..31 is correct today and drifts silently if the band moves.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    import acc_thermal_wind as A
+    return slice(A.J0, (A.J0 + A.J1) // 2 + 1)
 
 # Published measured values this probe is read against (commit a5183778c).
 # thermal part of the day-N sigma gap, converted there to a temperature:
@@ -127,7 +137,7 @@ def nemo_qsr(lat_deg: np.ndarray, c1: np.ndarray) -> np.ndarray:
     return np.maximum(QSR_AMP * np.cos(np.pi * (lat_deg - DECL_AMP * c1) / 180.0), 0.0)
 
 
-def qsr_fraction_below(depth_m: float) -> float:
+def qsr_transmission(depth_m: float) -> float:
     """NEMO 2-band transmission at ``depth_m`` (traqsr.F90:665-712 zatt)."""
     return RN_ABS * np.exp(-depth_m / RN_SI0) + (1.0 - RN_ABS) * np.exp(-depth_m / RN_SI1)
 
@@ -137,19 +147,29 @@ def read_gphit() -> np.ndarray:
     return _read_mesh()[0]
 
 
-def _read_mesh() -> tuple[np.ndarray, np.ndarray]:
-    """(1-D T-point latitude, surface-level tmask) from the oracle mesh_mask."""
+SOUTH_ROWS: slice = slice(0, 0)   # bound in main() from the gate's own band
+NORTH_ROWS: slice = slice(0, 0)
+
+
+def _read_mesh() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(1-D T-point latitude, surface tmask, zonal-mean level-0 e3t_0) from
+    the oracle mesh_mask."""
     import netCDF4 as nc
     with nc.Dataset(MESH_MASK) as d:
         g = np.asarray(d.variables["gphit"][:], dtype=np.float64).squeeze()
         tm = np.asarray(d.variables["tmask"][:], dtype=np.float64).squeeze()[0] > 0.5
+        e3 = np.asarray(d.variables["e3t_0"][:], dtype=np.float64).squeeze()[0]
     if not np.isfinite(g).all():
         raise SystemExit("mesh_mask gphit carries non-finite values")
     if float(np.max(np.abs(g - g[:, :1]))) != 0.0:
         raise SystemExit("gphit is not zonally constant; the 1-D reduction is invalid")
-    if tm.shape != g.shape:
-        raise SystemExit(f"tmask surface level {tm.shape} != gphit {g.shape}")
-    return g[:, 0], tm
+    if tm.shape != g.shape or e3.shape != g.shape:
+        raise SystemExit(
+            f"mesh field shapes disagree: gphit {g.shape} tmask {tm.shape} "
+            f"e3t_0 {e3.shape}")
+    if g.shape[0] != NLAT:
+        raise SystemExit(f"mesh has {g.shape[0]} T-rows, this probe assumes {NLAT}")
+    return g[:, 0], tm, e3.mean(axis=1)
 
 
 def stitch_1y_qsr() -> np.ndarray:
@@ -234,8 +254,8 @@ def selftest() -> None:
     kt = np.arange(1, 100, dtype=np.float64)
     c1a, c2a = nemo_seasonal_cosines(kt)
     c1b, c2b = nemo_seasonal_cosines(kt + 180.0 * 32.0)
-    assert np.max(np.abs(c1a + c1b)) < 1e-12, "180 d is not antiphase for cos1"
-    assert np.max(np.abs(c2a + c2b)) < 1e-12, "180 d is not antiphase for cos2"
+    if max(np.max(np.abs(c1a + c1b)), np.max(np.abs(c2a + c2b))) >= 1e-12:
+        raise SystemExit("180 d is not antiphase for the seasonal cosines")
 
     # The legoESM production formula must equal this transcription at the SAME
     # absolute time -- if it does not, the mis-alignment below is not the only
@@ -256,30 +276,46 @@ def selftest() -> None:
         d_q = float(np.max(np.abs(
             np.asarray(dino_Q_sr_seasonal(jnp.asarray(lat), t, cfg))
             - nemo_qsr(lat, c1[0]))))
-        assert d_t < 1e-10, f"T* transcription mismatch at kt={k}: {d_t:.3e}"
-        assert d_q < 1e-10, f"Qsr transcription mismatch at kt={k}: {d_q:.3e}"
+        if d_t >= 1e-10:
+            raise SystemExit(f"T* transcription mismatch at kt={k}: {d_t:.3e}")
+        if d_q >= 1e-10:
+            raise SystemExit(f"Qsr transcription mismatch at kt={k}: {d_q:.3e}")
 
-    # Non-vacuity: with a ZERO restart offset the two clocks coincide and every
-    # difference this probe reports must be exactly 0.
+    # Non-vacuity, exercised through the SAME expression main() reports
+    # (dts = ts_rel - ts_abs), not through f(x) == f(x): a zero offset must give
+    # an all-zero difference and a full-year offset must too (the forcing is
+    # 360-day periodic), while the real 5760-step offset must give a large one.
     lat1 = _read_mesh()[0][None, :]
     ks = np.arange(1, 33, dtype=np.float64)[:, None]
-    _, c2r = nemo_seasonal_cosines(ks)
-    _, c2a0 = nemo_seasonal_cosines(ks + 0.0)
-    assert float(np.max(np.abs(nemo_t_star(lat1, c2r) - nemo_t_star(lat1, c2a0)))) == 0.0
-    _, c2a5 = nemo_seasonal_cosines(ks + KT0)
-    assert float(np.max(np.abs(nemo_t_star(lat1, c2r) - nemo_t_star(lat1, c2a5)))) > 0.1, (
-        "the KT0 offset produced no T* difference -- the probe cannot detect one")
+
+    def _dts(offset):
+        _, c2r = nemo_seasonal_cosines(ks)
+        _, c2a = nemo_seasonal_cosines(ks + offset)
+        return float(np.max(np.abs(nemo_t_star(lat1, c2r) - nemo_t_star(lat1, c2a))))
+
+    for null_offset in (0, STEPS_PER_YEAR):
+        if _dts(null_offset) > 1e-12:
+            raise SystemExit(
+                f"offset {null_offset} steps should be a null for a 360-day "
+                f"periodic forcing but moved T* by {_dts(null_offset):.3e} K")
+    if _dts(KT0) <= 0.1:
+        raise SystemExit(
+            f"the {KT0}-step offset moved T* by only {_dts(KT0):.3e} K -- the "
+            "probe cannot detect the difference it exists to measure")
     print("[SELF-CHECKS] antiphase identity, legoESM-vs-transcription agreement "
           "(4 steps, max err < 1e-10), and zero-offset non-vacuity: all PASS")
 
 
 def main() -> None:
-    if "--selftest" in sys.argv:
+    if "--selftest" in sys.argv or "--self-test" in sys.argv:
         selftest()
         return
     selftest()
 
-    lat, tmask = _read_mesh()               # (199,), (199,52)
+    lat, tmask, e3t0 = _read_mesh()         # (199,), (199,52), (199,)
+    global SOUTH_ROWS, NORTH_ROWS
+    SOUTH_ROWS = gate_rows()
+    NORTH_ROWS = slice(NLAT - SOUTH_ROWS.stop, NLAT - SOUTH_ROWS.start)
     lat1 = lat[None, :]
     k = np.arange(1, N_STEPS + 1, dtype=np.float64)[:, None]
 
@@ -306,7 +342,7 @@ def main() -> None:
           "   (this is the ONLY term that changes the column's net heat input)")
     print(f"  {'band':22s} {'lat span':>18s} {'dT* d0':>9s} {'dT* d90':>9s} "
           f"{'dT* mean':>9s} {'A*dT* [W/m2]':>13s}")
-    for name, rows in (("gate south 14..31", SOUTH_ROWS),
+    for name, rows in (("gate south", SOUTH_ROWS),
                        ("north mirror", NORTH_ROWS)):
         span = f"{lat[rows][0]:+.2f}..{lat[rows][-1]:+.2f}"
         d0 = float(np.mean(dts[0, rows]))
@@ -324,24 +360,50 @@ def main() -> None:
     for day, meas in sorted(MEASURED_DT_K.items()):
         pred = float(resp[day * 32 - 1])
         print(f"  {day:5d} {pred:20.4f} {meas:19.4f} {pred/meas:7.2f}")
+    print("  The flatness of that ratio is a ONE-PARAMETER result -- h is the only "
+          "free number and the")
+    print("  ratio is flat only near the value taken from the measured anomaly's "
+          "vertical extent:")
+    print(f"  {'h [m]':>7s} {'tau [d]':>8s} {'r30':>7s} {'r60':>7s} {'r90':>7s} "
+          f"{'spread':>8s}")
+    for h in (20.0, 40.0, H_ML, 120.0, 200.0, 400.0):
+        r = [float(one_box_response(dts_south, h)[d * 32 - 1]) / MEASURED_DT_K[d]
+             for d in (30, 60, 90)]
+        spread = (max(r) - min(r)) / np.mean(r)
+        print(f"  {h:7.0f} {RHO0*CP*h/A_THETA/86400:8.1f} {r[0]:7.3f} {r[1]:7.3f} "
+              f"{r[2]:7.3f} {100*spread:7.2f}%")
 
-    frac_below = qsr_fraction_below(H_ML)
+    frac_below_ml = qsr_transmission(H_ML)
+    dz0 = float(np.mean(e3t0[SOUTH_ROWS]))
+    frac_in_lev0 = 1.0 - qsr_transmission(dz0)
     print()
-    print("[Q-SR]   dQsr = harness-clock Qsr minus NEMO-clock Qsr  [W/m2]."
-          "  Qsr is INSIDE qtot, so only the")
-    print(f"         part absorbed BELOW the {H_ML:.0f} m mixed layer "
-          f"({100*frac_below:.2f}% by the NEMO 2-band profile) leaves it.")
+    print("[Q-SR]   dQsr = harness-clock Qsr minus NEMO-clock Qsr  [W/m2].  TWO "
+          "different control volumes, because")
+    print("         the COLUMN and the GATE METRIC are not the same thing:")
+    print(f"         (a) COLUMN HEAT: Qsr sits inside qtot (qns = qtot - Qsr), so "
+          f"only the {100*frac_below_ml:.2f}% that")
+    print(f"             penetrates past the {H_ML:.0f} m mixed layer leaves it.")
+    print(f"         (b) LEVEL-0 FORCING, which is what the gate metric reads: qns "
+          f"lands ENTIRELY in level 0")
+    print(f"             (e3t_0 = {dz0:.3f} m here) while only {100*frac_in_lev0:.1f}% "
+          f"of Qsr is reabsorbed there, so a")
+    print(f"             dQsr leaves a level-0 residual of -(1 - {frac_in_lev0:.3f})*dQsr "
+          f"BEFORE vertical mixing acts.")
     print(f"  {'band':22s} {'dQsr d0':>9s} {'dQsr d90':>9s} {'dQsr mean':>10s} "
-          f"{'below-ML [W/m2]':>16s} {'90 d dSST_eq [K]':>17s}")
-    for name, rows in (("gate south 14..31", SOUTH_ROWS),
-                       ("north mirror", NORTH_ROWS)):
+          f"{'(a) below-ML':>13s} {'(b) level-0':>12s}")
+    for name, rows in (("gate south", SOUTH_ROWS), ("north mirror", NORTH_ROWS)):
         d0 = float(np.mean(dqs[0, rows]))
         d90 = float(np.mean(dqs[-1, rows]))
         dm = band_mean(dqs, rows)
-        below = dm * frac_below
-        # heat exported below the ML over 90 d, expressed as an ML temperature
-        dsst = -below * (N_STEPS * DT) / (RHO0 * CP * H_ML)
-        print(f"  {name:22s} {d0:+9.1f} {d90:+9.1f} {dm:+10.1f} {below:+16.2f} {dsst:+17.4f}")
+        print(f"  {name:22s} {d0:+9.1f} {d90:+9.1f} {dm:+10.1f} "
+              f"{dm*frac_below_ml:+13.2f} {-(1.0 - frac_in_lev0)*dm:+12.1f}")
+    print("  For scale, the T* term in the same band is "
+          f"{A_THETA*band_mean(dts, SOUTH_ROWS):+.1f} W/m2.  (b) is the SAME ORDER "
+          "and the")
+    print("  OPPOSITE sign, so this arithmetic does NOT establish that T* rather "
+          "than Qsr drives the")
+    print("  top-level metric; how much of (b) survives depends on vertical mixing, "
+          "which is not computed here.")
 
     # ---- control: the transcription against the oracle's OWN annual-mean qsr
     obs = stitch_1y_qsr()
@@ -354,11 +416,20 @@ def main() -> None:
     ok = np.isfinite(obs_zonal)
     err = np.abs(pred_year[ok] - obs_zonal[ok])
     print()
-    print("[CONTROL] transcription vs the oracle's OWN RUN_1Y annual-mean "
-          "soshfldo (=qsr), zonal mean over wet cells:")
-    print(f"          rows compared {int(ok.sum())}  max|err| {float(err.max()):.4f} W/m2  "
-          f"mean|err| {float(err.mean()):.4f} W/m2  "
-          f"peak observed {float(np.nanmax(obs_zonal)):.2f} W/m2")
+    print("[CONTROL] Qsr AMPLITUDE/SHAPE vs the oracle's OWN RUN_1Y annual-mean "
+          "soshfldo (=qsr), zonal mean")
+    print("          over mesh_mask wet cells.  This control is PHASE-BLIND BY "
+          "CONSTRUCTION: the average runs")
+    print("          over exactly one 360-day period, so shifting the clock by any "
+          "amount leaves it unchanged.")
+    print("          It constrains Q0, the declination amplitude and the meridional "
+          "shape, NOT the phase; the")
+    print("          phase rests on usrdef_sbc.F90:536-547 plus the calendar control "
+          "below.  No sub-annual NEMO")
+    print("          output exists in this build to close it numerically.")
+    print(f"          rows compared {int(ok.sum())}  max|err| {float(err.max()):.3e} W/m2  "
+          f"mean|err| {float(err.mean()):.3e} W/m2  "
+          f"peak observed {float(obs_zonal[ok].max()):.2f} W/m2")
     if not np.isfinite(err).all():
         raise SystemExit("non-finite error in the RUN_1Y control")
 
