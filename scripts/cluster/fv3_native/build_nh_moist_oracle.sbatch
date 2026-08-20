@@ -45,42 +45,80 @@ if ldd "$EXE" | grep -q "not found"; then
 fi
 echo "host: $(hostname)"; echo "exe: $EXE"
 
+# A GENERATED ORACLE IS PUBLISHED ATOMICALLY OR NOT AT ALL.
+# The first version ran under `set -uo pipefail` with no `-e`, so a
+# failed mkdir/cp/edit fell through into mpirun and could publish a DRY
+# deck under a moist name; it validated one tile of six; and its final
+# greps printed evidence rather than asserting it (codex BLOCKER, job
+# 9444413). Now: stage under a temp name, assert everything from the
+# run's OWN logfile and restarts, and only then rename into place.
+REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
+FLIP=$REPO/scripts/validate/fv3_native/flip_adiabatic_flag.py
+[ -f "$FLIP" ] || { echo "PREFLIGHT FAILED: no $FLIP"; exit 5; }
+
 for ARM in zerostep 1step; do
   SRC=$PIN/run_nh_${ARM}_gfs
   W=$PIN/run_nh_${ARM}_moist_gfs
+  STAGE=${W}.staging.$$
   [ -d "$SRC" ] || { echo "PREFLIGHT FAILED: missing $SRC"; exit 5; }
-  rm -rf $W && mkdir -p $W/RESTART
-  cp -r $SRC/INPUT $W/
-  for f in input.nml diag_table field_table; do /bin/cp -f $SRC/$f $W/; done
-  cd $W
-  python3 - <<'PY'
-import re
-s = open('input.nml').read()
-# The ONE edit. Assert it is the one line and that it was actually
-# .true. before -- a silent no-op here would produce a DRY deck with a
-# moist name, which is the worst available outcome.
-hits = re.findall(r'^\s*adiabatic\s*=\s*\.(\w+)\.', s, re.M)
-assert hits == ['true'], f"expected exactly one adiabatic=.true., got {hits}"
-s = re.sub(r'(^\s*adiabatic\s*=\s*)\.true\.', r'\1.false.', s, flags=re.M)
-assert re.findall(r'^\s*adiabatic\s*=\s*\.(\w+)\.', s, re.M) == ['false']
-open('input.nml','w').write(s)
-print("adiabatic -> .false.")
-PY
+  if [ -e "$W/PROVENANCE" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "REFUSING to overwrite $W: it carries PROVENANCE, i.e. bits a"
+    echo "published number was measured against. FORCE=1 to override."
+    exit 9
+  fi
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE/RESTART" || exit 8
+  cp -r "$SRC/INPUT" "$STAGE/" || { rm -rf "$STAGE"; exit 8; }
+  for f in input.nml diag_table field_table; do
+    /bin/cp -f "$SRC/$f" "$STAGE/" || { rm -rf "$STAGE"; exit 8; }
+  done
+  cd "$STAGE" || { rm -rf "$STAGE"; exit 8; }
+  # THE ONE EDIT, in a tested module. Its exit status is CHECKED: an
+  # assertion firing here used to be ignored, and the UNEDITED dry deck
+  # was run instead.
+  python3 "$FLIP" input.nml || { echo "EDIT FAILED"; cd /; rm -rf "$STAGE"; exit 8; }
+
   echo "=== RUN $ARM (np=6) ==="
   mpirun -np 6 $EXE > run_out.txt 2>&1
   RC=$?
   echo "run rc=$RC"
-  if [ "$RC" -ne 0 ] || [ ! -s RESTART/fv_core.res.tile1.nc ]; then
-    echo "RUN FAILED for $ARM -- refusing to leave a named deck with no"
-    echo "output, which a later run would read as a valid oracle:"
-    head -5 run_out.txt
-    cd /; rm -rf $W
-    exit 7
+  FAIL=""
+  [ "$RC" -eq 0 ] || FAIL="mpirun rc=$RC"
+  for t in 1 2 3 4 5 6; do
+    [ -s "RESTART/fv_core.res.tile${t}.nc" ] || FAIL="$FAIL; missing core tile$t"
+  done
+  if [ -s logfile.000000.out ]; then
+    # ASSERT what the run RESOLVED, from its own log, not what we set.
+    grep -q "FMSConstants: GFS" logfile.000000.out || FAIL="$FAIL; not GFS constants"
+    grep -qiE "^ *ADIABATIC *= *F" logfile.000000.out || FAIL="$FAIL; adiabatic not F"
+    grep -qiE "^ *HYDROSTATIC *= *F" logfile.000000.out || FAIL="$FAIL; hydrostatic not F"
+    grep -qiE "^ *PHYS_HYDROSTATIC *= *F" logfile.000000.out || FAIL="$FAIL; phys_hydrostatic not F"
+  else
+    FAIL="$FAIL; no logfile"
   fi
-  grep -iE "FATAL|SIGABRT|MPI_ERR" run_out.txt | head -3
-  grep -i "FMSConstants" logfile.000000.out | head -1
-  grep -iE "^ *(HYDROSTATIC|ADIABATIC|NPZ|K_SPLIT|N_SPLIT|DUOGRID) " logfile.000000.out | head -8
-  echo "--- restarts ---"; ls RESTART/ | head -14
-  echo "--- state ---"; grep -E "PS\*|U  max|V  max|T  max|sphum" run_out.txt | tail -6
+  if [ -n "$FAIL" ]; then
+    echo "RUN FAILED for $ARM ($FAIL) -- refusing to publish a deck a"
+    echo "later job would read as a valid oracle:"
+    head -5 run_out.txt
+    cd /; rm -rf "$STAGE"; exit 7
+  fi
+  # PROVENANCE: which bits a number was measured against, and enough to
+  # detect the twins silently diverging from their source deck later.
+  {
+    echo "generated_by  scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch"
+    echo "slurm_job     ${SLURM_JOB_ID:-none}"
+    echo "source_deck   $SRC"
+    echo "patch         adiabatic .true. -> .false. (sole edit, asserted)"
+    echo "exe           $EXE"
+    echo "exe_sha256    $(sha256sum $EXE | cut -d' ' -f1)"
+    for f in input.nml field_table diag_table; do
+      echo "src_${f}_sha256 $(sha256sum $SRC/$f | cut -d' ' -f1)"
+    done
+    grep -i "FMSConstants" logfile.000000.out | head -1
+    grep -iE "^ *(HYDROSTATIC|ADIABATIC|PHYS_HYDROSTATIC|NPZ|K_SPLIT|N_SPLIT|DUOGRID|CONSV_TE|FV_SG_ADJ) " logfile.000000.out | head -12
+  } > PROVENANCE
+  cd "$PIN"
+  rm -rf "$W" && mv "$STAGE" "$W"
+  echo "--- published $W ---"; cat "$W/PROVENANCE"
 done
 echo NH_MOIST_ORACLE_DONE

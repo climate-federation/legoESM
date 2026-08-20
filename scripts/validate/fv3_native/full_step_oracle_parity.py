@@ -88,11 +88,13 @@ NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
 # :191 `nq = nq_tot - flagstruct%dnats`.
 ADVECTED_TRACERS = ("sphum", "liq_wat")
 # The moist RESPONSE (moist deck minus dry deck) is a first-order
-# quantity, not a residual, so port and oracle should agree on it to
-# well within a factor. 3x is loose enough that the ~1e-9..1e-4 parity
-# noise riding on each side cannot trip it, and tight enough that a
-# dropped or halved coupling cannot pass.
-MOIST_RESPONSE_MAX_RATIO = 3.0
+# quantity, not a residual, so port and oracle should agree on it as a
+# FIELD. The bound is loose because each side carries its own parity
+# noise (1e-9 hydro, 6.6e-4 NH) riding on a difference that is itself
+# ~1e-2 of the state, and TOL-PENDING until measured on both arms; it
+# is still four orders tighter than "did anything move", and a dropped,
+# halved or mis-signed coupling cannot pass it.
+MOIST_RESPONSE_MAX_REL = 0.2
 INERT_TRACERS = ("rainwat",)
 
 # The IC control must land at the quad-geometry floor. 1e-12 is two
@@ -1606,40 +1608,51 @@ def main(argv=None):
                 q=q_d, hydrostatic=not args.nh, w_limiter=args.nh)
         p_dry_1 = port_window(st_d, ctx)
 
-        worst_ratio, worst_f, any_signal = 0.0, None, False
+        # FIELD-LEVEL, not max-vs-max. Two different fields share a
+        # maximum routinely, and the maxima need not even sit at the
+        # same cell -- the same weakness codex flagged in an earlier
+        # anti-vacuity gate. So build the response as a STATE and push
+        # it through the SAME derived face map the residuals use, then
+        # score it the same way.
+        resp_p = [{f: p_1[pf][f] - p_dry_1[pf][f] for f in fields}
+                  for pf in range(6)]
+        resp_o = [{f: orc_1[t][f] - orc_dry_1[t][f] for f in fields}
+                  for t in range(6)]
+        worst_rel, worst_f, any_signal = 0.0, None, False
         for f in fields:
+            row_p, row_o = [], []
             for pf in range(6):
                 ot = perm[pf]
-                d_o = float(np.abs(orc_1[ot][f] - orc_dry_1[ot][f]).max())
-                d_p = float(np.abs(p_1[pf][f] - p_dry_1[pf][f]).max())
-                if d_o == 0.0 and d_p == 0.0:
-                    continue
-                any_signal = any_signal or d_p > 0.0
-                r = (max(d_p, d_o) / min(d_p, d_o)) if min(d_p, d_o) > 0 \
-                    else float("inf")
-                if r > worst_ratio:
-                    worst_ratio, worst_f = r, f"{f} face{pf + 1}"
+                a, b = map_scalar_pair(resp_p[pf][f], resp_o[ot][f],
+                                       meta[pf][ot])
+                pk_p, pk_o = float(np.abs(a).max()), float(np.abs(b).max())
+                row_p.append(pk_p)
+                row_o.append(pk_o)
+                if pk_p == 0.0 and pk_o == 0.0:
+                    continue          # a component that is identically 0
+                any_signal = any_signal or pk_p > 0.0
+                r = rel(a, b)
+                if r > worst_rel:
+                    worst_rel, worst_f = r, f"{f} face{pf + 1}"
             print(f"  {f:5s} port response "
-                  + "  ".join(f"{float(np.abs(p_1[pf][f] - p_dry_1[pf][f]).max()):9.4g}"
-                              for pf in range(6)))
+                  + "  ".join(f"{x:9.4g}" for x in row_p))
             print(f"        oracle       "
-                  + "  ".join(f"{float(np.abs(orc_1[perm[pf]][f] - orc_dry_1[perm[pf]][f]).max()):9.4g}"
-                              for pf in range(6)))
+                  + "  ".join(f"{x:9.4g}" for x in row_o))
         if not any_signal:
             raise SystemExit(
                 "MOIST-SIGNAL GATE FAILED: the port's moist and dry runs "
                 "are IDENTICAL, so zvir reaches nothing in the step. The "
                 "headline residual cannot see this on the NH arm.")
-        if worst_ratio > MOIST_RESPONSE_MAX_RATIO:
+        if worst_rel > MOIST_RESPONSE_MAX_REL:
             raise SystemExit(
                 f"MOIST-SIGNAL GATE FAILED: the port's moist response "
-                f"disagrees with the oracle's by {worst_ratio:.2f}x at "
-                f"{worst_f} (limit {MOIST_RESPONSE_MAX_RATIO}x). The port "
-                f"moves under zvir, but not by the amount the oracle "
+                f"differs from the oracle's by {worst_rel:.3e} at "
+                f"{worst_f} (limit {MOIST_RESPONSE_MAX_REL:.0e}). The "
+                f"port moves under zvir, but not the way the oracle "
                 f"does.")
         print(f"MOIST-SIGNAL GATE PASSED: worst port-vs-oracle response "
-              f"ratio {worst_ratio:.2f}x at {worst_f} "
-              f"(limit {MOIST_RESPONSE_MAX_RATIO}x).")
+              f"rel {worst_rel:.3e} at {worst_f} "
+              f"(limit {MOIST_RESPONSE_MAX_REL:.0e}).")
 
     # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
     # different causes and one number separates them: if the PORT's own
