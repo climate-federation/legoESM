@@ -554,6 +554,63 @@ def _build_mode_components_spectral(cfg, yml):
     return None, grid, sigma, params, make_run_seg, loss_config, dt
 
 
+def check_surface_drag_confound(yml, mode, training_core):
+    """Refuse — or name — a run whose learned arm has no surface stress.
+
+    Returns ``None`` when the two arms are equalised, or a one-line note when
+    the campaign has DECLARED that they cannot be, so a caller can record the
+    confound beside the numbers it produced.  Raises ``SystemExit`` for the one
+    declaration that is simply false on the selected core.
+
+    Two declarations exist, and they are not the same kind of thing:
+
+    ``core_does_not_read_the_key``
+        The learned column cannot be given the classical arm's surface stress
+        because the core it runs never reads the key.  True of the lat-lon
+        core, FALSE of the spectral one.  Selecting the spectral core with such
+        a config scores a learned arm carrying no surface stress against a
+        classical arm that has one -- the #1464 confound, back with a label on
+        it.  Refused.
+
+    ``builder_refuses_classical_scheme``
+        The classical arm runs a PROGNOSTIC turbulence scheme that the drag
+        builder cannot reproduce, so no choice of ``surface_drag_scheme``
+        equalises the arms.  The declaration is checked against the builder's
+        real refusal set by ``tests/unit/test_neural_momentum_sink.py``.  This
+        one is legitimate, but the run still produces a table whose two arms
+        differ by a momentum sink, so it is NAMED rather than refused.
+
+    Lives here, not in a driver, because this is the module every entry point
+    that builds a learned spectral arm already goes through -- guarding one
+    driver left the evaluation driver free to write a confounded scorecard.
+    """
+    neural = yml.get("neural_gcm") or {}
+    if not isinstance(neural, dict):
+        return None
+    if mode != "neural_gcm" or neural.get("surface_drag") is True:
+        return None
+    declared = neural.get("surface_drag_confounded")
+    if declared == "core_does_not_read_the_key" and training_core == "spectral":
+        raise SystemExit(
+            "this config declares surface_drag_confounded: "
+            "'core_does_not_read_the_key', which is only true on the lat-lon "
+            "core -- the spectral core DOES read neural_gcm.surface_drag, so "
+            "this run would give the learned arm no surface stress while the "
+            "classical arm it is compared against has one (#1464). Either run "
+            "--training-core latlon, or set neural_gcm.surface_drag: true with "
+            "surface_drag_scheme equal to classical.turbulence.")
+    if declared == "builder_refuses_classical_scheme":
+        classical = yml.get("classical")
+        scheme = classical.get("turbulence") if isinstance(classical, dict) else None
+        return (
+            f"learned arm has NO surface stress: the classical arm runs "
+            f"{scheme!r}, a prognostic scheme the drag builder cannot "
+            f"reproduce (declared surface_drag_confounded="
+            f"'builder_refuses_classical_scheme'). The two arms differ by a "
+            f"momentum sink as well as by the model -- this is not an "
+            f"equalised comparison (#1464).")
+    return None
+
 def build_mode_components(cfg, yml):
     """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
     import jax
@@ -563,6 +620,13 @@ def build_mode_components(cfg, yml):
     from legoesm.training.training_driver import build_training_segment
 
     core = getattr(cfg, "training_core", "latlon")
+    # Every entry point that builds a learned arm comes through here -- train
+    # and eval alike -- so the #1464 surface-stress guard belongs here and not
+    # in one driver, where the other one simply walked past it.
+    note = check_surface_drag_confound(yml, getattr(cfg, "mode", None), core)
+    if note:
+        import logging
+        logging.getLogger("scale_build").warning("CONFOUNDED RUN: %s", note)
     if core == "spectral":
         return _build_mode_components_spectral(cfg, yml)
     if core != "latlon":

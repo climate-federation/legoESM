@@ -112,6 +112,67 @@ def test_serial_wide_matches_standard(setup, flat):
     _assert_close(hv_w, hv_s, atol, "Hv_avg")
 
 
+@pytest.mark.parametrize("filt", ["nemo_ab3am4", "nemo_boxcar_ab3"])
+def test_wide_halo_refuses_ab3_time_filters(setup, filt):
+    """The AB3 filters must be REFUSED, not silently mis-run.
+
+    The wide entry point builds none of the AB3 machinery (predictor
+    coefficients, cross-window bt_hist carry, final-substep state selection)
+    and passes no ``ab3_*`` argument to the shared substep loop.  Before the
+    refusal, running them gave a wrong answer with no error: measured at 12
+    substeps in fp64, ``nemo_ab3am4`` returned sea surface height IDENTICALLY
+    ZERO (standard max|eta| = 4.377e-01 m) because it zeroes the filter
+    weights while leaving the normaliser at 1, and ``nemo_boxcar_ab3`` --
+    DINO's own filter -- diverged from the standard path by 2.445e-03 m,
+    nine orders above this suite's 1e-12 parity gate.
+    """
+    grid, z_coord, state = setup
+    cfg = _cfg(barotropic_time_filter=filt)
+    # The standard path still runs it -- the refusal is specific to the twin.
+    barotropic_substeps_latlon_cgrid(state, 30.0, 12, grid, z_coord, cfg)
+    with pytest.raises(NotImplementedError, match="barotropic_time_filter"):
+        barotropic_substeps_wide_halo_latlon_cgrid(
+            state, 30.0, 12, grid, z_coord, cfg)
+
+
+def test_wide_halo_honours_reconcile_target(setup):
+    """The wide-halo path must READ ``barotropic_reconcile_target``, not
+    silently reconcile onto the velocity mean.
+
+    Two claims, both needed for non-vacuity:
+
+    1. the option is LIVE on this state (the two targets give genuinely
+       different 3-D velocities on the wide path), and
+    2. the wide path's ``transport_avg`` result matches the standard path's
+       ``transport_avg`` result to re-association tolerance.
+
+    Before the fix the wide path ignored the option entirely, so (2) failed
+    at O(1) (it reproduced the standard path's velocity_avg arm instead).
+    """
+    grid, z_coord, state = setup
+    n_sub = 12
+    cfg_v = _cfg(barotropic_reconcile_target="velocity_avg")
+    cfg_t = _cfg(barotropic_reconcile_target="transport_avg")
+
+    s_wide_v, _ = barotropic_substeps_wide_halo_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_v)
+    s_wide_t, _ = barotropic_substeps_wide_halo_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_t)
+    s_std_t, _ = barotropic_substeps_latlon_cgrid(
+        state, 30.0, n_sub, grid, z_coord, cfg_t)
+
+    # (1) the two kernels do not coincide on this state.
+    spread = float(np.max(np.abs(
+        np.asarray(s_wide_t.u.data) - np.asarray(s_wide_v.u.data))))
+    assert spread > 1e-9, (
+        f"velocity_avg and transport_avg give the SAME wide-halo velocity "
+        f"(max diff {spread:.2e}) — the test cannot detect an ignored option")
+
+    # (2) wide == standard for the non-default target.
+    _assert_close(s_wide_t.u.data, s_std_t.u.data, 1e-12, "u (transport_avg)")
+    _assert_close(s_wide_t.v.data, s_std_t.v.data, 1e-12, "v (transport_avg)")
+
+
 def test_wide_volume_drift_matches_standard(setup):
     """The wide path introduces NO conservation change: its area-weighted
     eta drift over the subcycle equals the standard path's to round-off.

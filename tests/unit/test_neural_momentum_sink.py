@@ -15,6 +15,8 @@ bit-identical; and the network still owns the thermodynamics.
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -199,3 +201,204 @@ def test_campaign_builder_wires_the_drag_when_asked():
         "is back to running with no surface drag (#1464)")
     assert "surface_drag" in src, (
         "the opt-in flag is gone; the campaign cannot request the drag")
+
+
+def _all_turbulence_schemes():
+    """Every scheme name the turbulence factory dispatches on.
+
+    Read out of the factory itself. A hand-kept list goes stale the moment a
+    scheme is added, and the new one would then be treated as equalisable by
+    the guard below and die at the campaign's first step instead.
+    """
+    import re
+
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+
+    src = inspect.getsource(ti.get_turbulence_fn)
+    names = set(re.findall(r'config\.scheme\s*==\s*["\']([a-z0-9_]+)["\']', src))
+    names.discard("none")
+    assert len(names) >= 5, f"only found {sorted(names)} — the dispatch changed shape"
+    return names
+
+
+def _schemes_the_drag_builder_refuses():
+    """Derived by ASKING the builder, not by copying its list."""
+    from legoesm.training.neural_gcm_spectral import (
+        make_turbulence_only_spectral_physics,
+    )
+    refused = set()
+    for name in _all_turbulence_schemes():
+        try:
+            make_turbulence_only_spectral_physics(600.0, name)
+        except ValueError:
+            refused.add(name)
+    assert refused, "the builder refuses nothing — the guard below is vacuous"
+    return refused
+
+
+def test_the_scheme_name_is_not_cosmetic():
+    """Before pinning WHICH scheme, prove the choice changes the answer.
+
+    If louis and smagorinsky gave the same momentum tendency, matching them
+    would be bookkeeping and the config guard below would pin nothing.
+    """
+    grid, _model, state, sigma = _setup(seed=11)
+    sheared = _sheared(state, seed=2)
+    out_l = make_turbulence_only_spectral_physics(1200.0, "louis")(
+        sheared, grid, sigma)
+    out_s = make_turbulence_only_spectral_physics(1200.0, "smagorinsky")(
+        sheared, grid, sigma)
+    d_l = np.asarray(out_l.vor_hat.data)
+    d_s = np.asarray(out_s.vor_hat.data)
+    peak = float(np.max(np.abs(d_l)))
+    assert peak > 0.0, "louis produced no vorticity tendency"
+    # Scale-aware on purpose: these tendencies are O(1e-10), so the default
+    # absolute tolerance of allclose would call any two of them identical.
+    gap = float(np.max(np.abs(d_l - d_s)))
+    assert gap > 0.1 * peak, (
+        f"louis and smagorinsky differ by only {gap:.3g} against a louis peak "
+        f"of {peak:.3g}, so matching the scheme names would pin nothing")
+
+
+def test_the_campaign_builder_passes_the_scheme_into_the_builder():
+    """The seam that was dead once already, checked structurally.
+
+    A substring search for the key would stay green if the builder read it
+    into a log line and still called the drag factory with its own default —
+    the decoupled seam this fix already hit once. So find the CALL to the drag
+    factory in the abstract syntax tree and require that one of its arguments
+    is derived from the campaign's scheme key.
+    """
+    import ast
+
+    from legoesm.training import scale_build as sb
+
+    tree = ast.parse(inspect.getsource(sb))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", None))
+             == "make_turbulence_only_spectral_physics"]
+    assert calls, (
+        "scale_build no longer calls make_turbulence_only_spectral_physics — "
+        "the learned arm is back to running with no surface drag")
+    # A literal argument (``turbulence_scheme="louis"``) mentions the key
+    # without reading it, and proves nothing; the value has to come FROM the
+    # campaign mapping, so a bare constant does not count.
+    wired = [c for c in calls
+             if any(not isinstance(kw.value, ast.Constant)
+                    and "surface_drag_scheme" in ast.dump(kw.value)
+                    for kw in c.keywords)]
+    assert wired, (
+        "scale_build calls the drag factory but never passes the campaign's "
+        "surface_drag_scheme into it, so every campaign silently gets the "
+        "factory default instead of its classical arm's scheme")
+
+
+def test_the_learned_arm_gets_the_SAME_momentum_scheme_as_the_classical_arm():
+    """Every campaign that scores the two arms must equalise their momentum.
+
+    Three rules, and all three are needed:
+
+    1. A campaign whose classical arm runs a scheme the drag builder accepts
+       MUST enable the drag. This is the original defect: the learned column
+       has no momentum head, so with the drag off it runs with no physical
+       surface stress at all while the classical arm has one.
+    2. It must NAME the scheme, and that name must equal the classical arm's.
+       Handing the learned arm a different scheme is the same confound wearing
+       a new label; leaving it unnamed silently takes the builder's default.
+    3. A campaign whose classical arm runs a scheme the builder REFUSES — the
+       prognostic family, whose carry this wrapper cannot thread — cannot be
+       equalised at all. It must leave the drag off AND say so with
+       ``surface_drag_confounded: builder_refuses_classical_scheme``, so the
+       confound is enumerable rather than a comment somebody has to notice.
+       The reason must be one of the two this test can check: a bare ``true``
+       is refused, because a self-certified bypass would let any campaign
+       delete its drag and wave the flag.
+    """
+    import pathlib
+    import yaml
+
+    refused = _schemes_the_drag_builder_refuses()
+    root = pathlib.Path(__file__).resolve().parents[2]
+    problems, checked = [], 0
+    for path in sorted((root / "config").rglob("*.y*ml")):
+        try:
+            doc = yaml.safe_load(path.read_text(errors="replace"))
+        except yaml.YAMLError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        neural, classical = doc.get("neural_gcm"), doc.get("classical")
+        if not isinstance(neural, dict) or not isinstance(classical, dict):
+            continue
+        checked += 1
+        rel = str(path.relative_to(root))
+        classical_scheme = classical.get("turbulence")
+        drag_on = neural.get("surface_drag") is True
+        drag_scheme = neural.get("surface_drag_scheme")
+
+        # A declaration that this campaign's two arms cannot be equalised.
+        # It must give a REASON, and the reason must be one this test can
+        # check — otherwise the key is a self-certified bypass and any
+        # campaign could delete its drag and wave the flag.
+        declared = neural.get("surface_drag_confounded")
+        if declared is not None:
+            scored_campaign = "wb/campaign/" in rel.replace("\\", "/")
+            if drag_on:
+                problems.append(
+                    f"{rel}: declares itself confounded and also enables the "
+                    "drag; pick one")
+            elif declared == "builder_refuses_classical_scheme":
+                if classical_scheme not in refused:
+                    problems.append(
+                        f"{rel}: declares the builder refuses "
+                        f"{classical_scheme!r}, but it does not — this "
+                        "campaign can and must be equalised")
+            elif declared == "core_does_not_read_the_key":
+                if scored_campaign:
+                    problems.append(
+                        f"{rel}: is a scored campaign, so it runs on the core "
+                        "that DOES read the key; that reason does not apply")
+            else:
+                problems.append(
+                    f"{rel}: surface_drag_confounded={declared!r} is not a "
+                    "reason this test can check; use "
+                    "'builder_refuses_classical_scheme' or "
+                    "'core_does_not_read_the_key'")
+            continue
+
+        if classical_scheme in refused:
+            if drag_on:
+                problems.append(
+                    f"{rel}: classical runs {classical_scheme!r}, which the "
+                    "drag builder cannot reproduce, so no choice of "
+                    f"surface_drag_scheme equalises the arms (named "
+                    f"{drag_scheme!r})")
+            else:
+                # Reaching here means nothing was declared: every declared
+                # config continues out of the branch above.
+                problems.append(
+                    f"{rel}: classical runs {classical_scheme!r} and the drag "
+                    "is off, so the learned arm has no surface stress; declare "
+                    "`surface_drag_confounded: "
+                    "builder_refuses_classical_scheme` or stop scoring the two "
+                    "arms against each other")
+            continue
+
+        if not drag_on:
+            problems.append(
+                f"{rel}: classical runs {classical_scheme!r} but the learned "
+                "arm has no surface stress at all — the original confound")
+        elif drag_scheme is None:
+            problems.append(
+                f"{rel}: enables the drag without naming a scheme, so it "
+                f"takes the builder's default instead of {classical_scheme!r}")
+        elif drag_scheme != classical_scheme:
+            problems.append(
+                f"{rel}: learned arm gets {drag_scheme!r}, classical arm runs "
+                f"{classical_scheme!r}")
+
+    assert checked, "no config pairs a neural_gcm block with a classical block"
+    assert not problems, (
+        "these campaigns would score two arms whose momentum differs:\n  "
+        + "\n  ".join(problems))

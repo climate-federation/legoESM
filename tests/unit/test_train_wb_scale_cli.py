@@ -156,6 +156,102 @@ def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
         "the warm-up must run BEFORE the ERA5 load, not after it")
 
 
+def _guard():
+    """The #1464 surface-stress guard, from the module it now lives in.
+
+    It moved out of this driver into ``legoesm.training.scale_build`` because
+    guarding one driver left the EVALUATION driver free to build the same
+    unequalised arm and write a scorecard from it: both go through
+    ``build_mode_components``, so that is where the check belongs.
+    """
+    from legoesm.training.scale_build import check_surface_drag_confound
+    return check_surface_drag_confound
+
+
+def _confounded_yaml(**extra):
+    neural = {"surface_drag_confounded": "core_does_not_read_the_key"}
+    neural.update(extra)
+    return {"neural_gcm": neural, "classical": {"turbulence": "louis"}}
+
+
+def test_the_spectral_core_refuses_a_config_that_declares_the_key_unread():
+    """#1464: that declaration is a property of the CORE, not of the file.
+
+    The lat-lon core never reads ``neural_gcm.surface_drag``; the spectral one
+    does. Running a config that declares the key unread on the spectral core
+    would hand the learned arm no surface stress while the classical arm it is
+    scored against carries Louis -- the confound, wearing the label that says
+    it is not there."""
+    with pytest.raises(SystemExit) as e:
+        _guard()(_confounded_yaml(), "neural_gcm", "spectral")
+    assert "surface_drag" in str(e.value)
+
+
+def test_the_latlon_core_accepts_the_same_config():
+    """On the core the declaration is about, it is simply true."""
+    assert _guard()(_confounded_yaml(), "neural_gcm", "latlon") is None
+
+
+def test_asking_for_the_drag_clears_the_refusal():
+    """A config that enables the drag is equalised, whatever it declares."""
+    assert _guard()(
+        _confounded_yaml(surface_drag=True, surface_drag_scheme="louis"),
+        "neural_gcm", "spectral") is None
+
+
+def test_the_guard_is_reached_through_the_builder_not_just_the_trainer():
+    """The trainer is not the only door.
+
+    ``run_weatherbench_eval`` builds the same components and writes a
+    scorecard; a guard installed in the training entry point alone is walked
+    straight past by it.  Both call ``build_mode_components``, so assert the
+    check happens THERE."""
+    import ast
+    import inspect
+
+    from legoesm.training import scale_build
+
+    src = inspect.getsource(scale_build.build_mode_components)
+    called = {n.func.id for n in ast.walk(ast.parse(src.lstrip()))
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "check_surface_drag_confound" in called, (
+        "build_mode_components does not run the surface-stress guard, so any "
+        "entry point that is not the trainer builds an unequalised learned "
+        "arm without a word (#1464)")
+
+
+def test_a_campaign_the_builder_cannot_equalise_is_named_not_waved_through():
+    """The second declaration had no runtime consequence at all.
+
+    ``builder_refuses_classical_scheme`` is legitimate -- the drag builder
+    genuinely cannot reproduce a prognostic scheme -- but the run still
+    produces a table whose arms differ by a momentum sink.  Silence there
+    reads as an equalised comparison."""
+    yml = {"neural_gcm": {
+               "surface_drag_confounded": "builder_refuses_classical_scheme"},
+           "classical": {"turbulence": "clubb"}}
+    note = _guard()(yml, "neural_gcm", "spectral")
+    assert note and "clubb" in note and "surface stress" in note, note
+    # and it is silent once the arms ARE equalised
+    yml["neural_gcm"]["surface_drag"] = True
+    assert _guard()(yml, "neural_gcm", "spectral") is None
+
+
+def test_the_scorecard_records_the_confound_beside_the_numbers():
+    """A log line is not a record; the file the plots read has to carry it."""
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2] / "scripts" /
+           "validate" / "run_weatherbench_eval.py").read_text()
+    keys = {n.value for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "surface_drag_confound" in keys, (
+        "the scorecard meta block does not record whether the learned arm "
+        "carried a surface stress, so a confounded table is indistinguishable "
+        "from an equalised one once the log scrolls away")
+
+
 def _entry_ast():
     import ast
     return ast.parse(_ENTRY.read_text())
@@ -226,18 +322,18 @@ def test_the_epoch_checkpoint_carries_the_frozen_parameters():
               and isinstance(n.func, ast.Attribute)
               and n.func.attr == "tree_serialise_leaves"]
     assert writes, "_main() must write an epoch checkpoint"
-    for w in writes:
-        # Both halves are named: the CURRENT trainable leaves the loop handed
-        # back (serialising the stale outer `arr` would write epoch-0 values)
-        # and the frozen half.
-        combines = [c for a in w.args for c in ast.walk(a)
-                    if isinstance(c, ast.Call)
-                    and isinstance(c.func, ast.Attribute)
-                    and c.func.attr == "combine"
-                    and [x.id for x in c.args
-                         if isinstance(x, ast.Name)] == ["cur_arr", "static"]]
-        assert combines, ("the checkpoint must serialise "
-                          "eqx.combine(cur_arr, static)")
+    # Both halves must be named: the CURRENT trainable leaves the loop handed
+    # back (serialising the stale outer `arr` would write epoch-0 values) and
+    # the frozen half. The call sits inside the atomic-write lambda, so look
+    # through the whole write expression rather than at its direct arguments.
+    combines = [c for w in writes for c in ast.walk(w)
+                if isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "combine"
+                and [x.id for x in c.args
+                     if isinstance(x, ast.Name)] == ["cur_arr", "static"]]
+    assert combines, ("the checkpoint must serialise "
+                      "eqx.combine(cur_arr, static)")
 
 
 def test_the_frozen_parameters_are_re_measured_after_training():
@@ -258,3 +354,45 @@ def test_the_frozen_parameters_are_re_measured_after_training():
     assert max(remeasure) > max(loop), (
         "the re-measurement must run AFTER the training loop -- on the trained "
         "parameters, not the initial ones")
+
+
+def test_resume_restores_the_optimizer_state_not_just_the_parameters():
+    """AdamW's moments and the warmup-cosine step live in the optimizer state.
+    Restoring parameters alone is a cold restart wearing a resumed run's name,
+    and nothing in the log would say so."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    reads = [n for n in ast.walk(main)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "tree_deserialise_leaves"]
+    assert len(reads) >= 2, (
+        "resume must deserialise BOTH the parameters and the optimizer state; "
+        f"found {len(reads)} deserialise call(s)")
+    # One of them must be fed the optimizer-state path (index 1 of the triple).
+    opt = [r for r in reads
+           if any(isinstance(sub, ast.Subscript)
+                  and isinstance(sub.slice, ast.Constant) and sub.slice.value == 1
+                  for a in r.args for sub in ast.walk(a))]
+    assert opt, "no deserialise call reads the .opt.eqx path"
+
+
+def test_every_epoch_writes_all_three_checkpoint_files():
+    """Parameters, optimizer state and the frozen-leaf list. Any one missing
+    makes the other two unresumable, and the resume path refuses rather than
+    silently restarting cold."""
+    import ast
+
+    tree = _entry_ast()
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_main")
+    on_epoch = next(n for n in ast.walk(main)
+                    if isinstance(n, ast.FunctionDef) and n.name == "on_epoch")
+    writes = [n for n in ast.walk(on_epoch)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+              and n.func.id == "_atomic_write"]
+    assert len(writes) == 3, (
+        f"on_epoch must write parameters, optimizer state and the frozen list "
+        f"atomically; found {len(writes)} atomic write(s)")

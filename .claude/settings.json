@@ -12,10 +12,6 @@
       "Write(/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/**)"
     ]
   },
-  "enabledPlugins": {
-    "codex@openai-codex": true,
-    "ralph-loop@claude-plugins-official": false
-  },
   "hooks": {
     "PreToolUse": [
       {
@@ -39,5 +35,11 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "codex@openai-codex": true,
+    "ponytail@ponytail": true,
+    "ralph-loop@claude-plugins-official": false,
+    "superpowers@claude-plugins-official": true
   }
 }

@@ -1009,19 +1009,18 @@ def create_lock_exchange_state(mesh: "Mesh", config: Any) -> FesomOceanState:
 
     state = State.rest(mesh, T0=config.T_reference_C, S0=config.S_uniform)
 
+    # SAME front profile as every other grid (including any optional ramp) --
+    # this branch used to carry its own hard step, so a case asking for a
+    # softened front got one on the structured grids and a full-contrast jump
+    # here, i.e. a different initial condition per dycore.
+    from legoesm.ocean.experiments.lock_exchange import (
+        lock_exchange_warm_fraction)
+
     geo_lon_deg = jnp.degrees(mesh.geo_coord_nod2D[:, 0])
-    front_lon_deg = float(config.front_longitude)
-
-    west_of_front = (
-        (geo_lon_deg - front_lon_deg + 180.0) % 360.0 - 180.0
-    ) < 0.0
-    is_warm = ~west_of_front
-
-    T_node = jnp.where(
-        is_warm,
-        jnp.asarray(config.T_warm_C, dtype=jnp.float64),
-        jnp.asarray(config.T_cold_C, dtype=jnp.float64),
-    )
+    warm_frac = lock_exchange_warm_fraction(geo_lon_deg, config, xp=jnp)
+    T_node = (jnp.asarray(config.T_cold_C, dtype=jnp.float64)
+              + (jnp.asarray(config.T_warm_C, dtype=jnp.float64)
+                 - jnp.asarray(config.T_cold_C, dtype=jnp.float64)) * warm_frac)
     T_field = jnp.broadcast_to(T_node[:, None], state.T.shape)
 
     inner = dataclasses.replace(state, T=T_field, T_old=T_field)

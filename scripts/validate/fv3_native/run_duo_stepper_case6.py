@@ -225,6 +225,16 @@ def main():
                     help="del-6 divergence-damping bg; default = the deck "
                          "echo (case 6: 0.0, case 2: 0.12); any other "
                          "value is diagnostic, NON-FAITHFUL to the deck")
+    ap.add_argument("--backend", default="numpy", choices=("numpy", "jax"),
+                    help="which lane runs the HOT loop. 'numpy' = the "
+                         "certified fp64 stepper (default, unchanged); "
+                         "'jax' = the jit-compiled twin "
+                         "(legoesm.core.fv3_duo_stepper). EVERYTHING "
+                         "ELSE STAYS NUMPY: the context builder, the IC, "
+                         "the c2l_ord2 lens, the nearest-cell map and "
+                         "this npz. Recorded in the npz -- a run whose "
+                         "backend is not recorded is not comparable to "
+                         "anything.")
     ap.add_argument("--k2e-nord", type=int, default=2, choices=(2, 4),
                     help="along-ring k2e order (2 = authoritative live "
                          "default)")
@@ -294,9 +304,63 @@ def main():
     lat_deg, lon_deg = reference_canvas()
     nmap = build_nearest_map(ctx, lon_deg=lon_deg)
 
+    # THE SWAP POINT.  Only `advance_duo_outer_step` changes lanes;
+    # `advance` hides the container difference (the JAX lane carries
+    # face-STACKED arrays and keeps them on device across the run) and
+    # `snapshot` hands `sample_fields` the NumPy list-of-dicts it takes.
+    if args.backend == "jax":
+        import jax
+
+        # x64 is a STARTUP precondition: with it off, jnp.asarray(f64)
+        # truncates at ARRAY CREATION and no later check recovers it.
+        jax.config.update("jax_enable_x64", True)
+        from legoesm.core.fv3_duo_stepper import (
+            SWConfig,
+            build_jax_duo_stepper_context,
+            make_full_acoustic_step_sixface_jit,
+            states_to_jax,
+            states_to_numpy,
+        )
+        from legoesm.core.fv3_duo_stepper import (
+            advance_duo_outer_step as jax_outer_step,
+        )
+
+        jctx = build_jax_duo_stepper_context(ctx)     # ONCE, not per block
+        jcfg = SWConfig.from_mapping(sw_cfg)
+        # The compiled unit is ONE acoustic step, not the whole block:
+        # jitting the block would unroll n_split (=7 here) steps into a
+        # single program, i.e. a seven-times-larger graph to compile for
+        # no gain.  `step_fn` is the module's seam for exactly this, so
+        # the `it == 1` entry-exchange cadence still lives in one place.
+        jstep = make_full_acoustic_step_sixface_jit()
+        hot = states_to_jax(states)
+
+        def advance(nblocks):
+            nonlocal hot
+            for _ in range(nblocks):
+                hot = jax_outer_step(jctx, hot, args.dt_atmos,
+                                     args.n_split, d_ext=args.d_ext,
+                                     sw_cfg=jcfg, step_fn=jstep)
+
+        def snapshot():
+            return states_to_numpy(hot)
+    else:
+        hot = states
+
+        def advance(nblocks):
+            nonlocal hot
+            for _ in range(nblocks):
+                hot = advance_duo_outer_step(ctx, hot, args.dt_atmos,
+                                             args.n_split,
+                                             d_ext=args.d_ext,
+                                             sw_cfg=sw_cfg)
+
+        def snapshot():
+            return hot
+
     gh_band = deck["gh_band"]
     times = [0.0]
-    gh0f, u0f, v0f = sample_fields(ctx, states, nmap)
+    gh0f, u0f, v0f = sample_fields(ctx, snapshot(), nmap)
     ghf, uf, vf = [gh0f], [u0f], [v0f]
     bad = frames_plausible(gh0f, u0f, v0f, gh_band)
     if bad:
@@ -330,9 +394,11 @@ def main():
             ext_exclude=np.array(args.ext_exclude),
             oracle_conventions=np.array(bool(oc)),
             diag_env=np.array(diag_env_record()),
+            backend=np.array(args.backend),
             git_sha=np.array(_git_sha()),
             protocol=(
-                f"six-face duo stepper, {ic_desc}; resolved Zenodo "
+                f"six-face duo stepper (backend={args.backend}), "
+                f"{ic_desc}; resolved Zenodo "
                 f"case-{args.case} deck config (SW_CFG_CASE8 with d4_bg="
                 f"{args.d4_bg}, d_ext={args.d_ext}, dt_atmos="
                 f"{args.dt_atmos}, n_split={args.n_split}); c2l_ord2 lens "
@@ -343,11 +409,8 @@ def main():
 
     _save()
     for day in range(1, total_days + 1):
-        for _ in range(blocks_per_day):
-            states = advance_duo_outer_step(ctx, states, args.dt_atmos,
-                                            args.n_split, d_ext=args.d_ext,
-                                            sw_cfg=sw_cfg)
-        gh_d, u_d, v_d = sample_fields(ctx, states, nmap)
+        advance(blocks_per_day)
+        gh_d, u_d, v_d = sample_fields(ctx, snapshot(), nmap)
         bad = frames_plausible(gh_d, u_d, v_d, gh_band)
         if bad:
             print(f"day {day}: {bad} — aborting (partial npz kept)",

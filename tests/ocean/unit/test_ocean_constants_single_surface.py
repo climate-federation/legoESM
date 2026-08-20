@@ -55,7 +55,7 @@ from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
 from legoesm.ocean.physics.convection.enhanced_diffusion import (
     convective_K_A_flag,
 )
-from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig, constants_equal
 from legoesm.ocean.vertical import create_ocean_z_star
 
 
@@ -699,3 +699,35 @@ def test_convection_factory_threads_the_recipe_constants():
     K = [fn(state, None, z).K_v for fn in fns]
     assert K[0] is not None and K[1] is not None
     assert float(jnp.max(jnp.abs(K[0] - K[1]))) > 1e-6
+
+
+def test_constants_equal_undecidable_on_multi_element_array_operand() -> None:
+    """A multi-element numpy/JAX array operand makes ``a == b`` an
+    ELEMENTWISE array, and ``bool()`` on that raises ``ValueError`` ("truth
+    value of an array with more than one element is ambiguous") -- not
+    ``TypeError``, which is the only exception ``constants_equal`` used to
+    catch.  Before widening the except clause, this ``ValueError`` escaped
+    uncaught instead of resolving to the documented ``None`` (undecidable)
+    contract -- a caller relying on ``constants_equal(...) is False`` /
+    ``is True`` to decide whether to raise a conflict or adopt a value would
+    have crashed instead of correctly treating an array-valued constant as
+    undecidable.
+
+    SYNTHETIC VIOLATION: narrow the ``except`` clause in ``constants_equal``
+    back to ``except TypeError:`` and this test raises ``ValueError`` instead
+    of asserting ``None``."""
+    import numpy as np
+
+    a = np.array([1.0, 2.0, 3.0])
+    b = np.array([1.0, 2.0, 4.0])
+    assert constants_equal(a, b) is None
+    # Same-shape EQUAL arrays hit the identical ambiguous-truth-value path
+    # (numpy does not short-circuit on equal arrays) -- still undecidable,
+    # never silently discarded as "proven equal".
+    c = np.array([1.0, 2.0, 3.0])
+    assert constants_equal(a, c) is None
+    # A single-element array is NOT ambiguous (`bool(np.array([1.0]))`
+    # succeeds) -- this must still resolve to a real True/False, not None,
+    # confirming the widened except does not swallow the decidable case.
+    assert constants_equal(np.array([1.0]), np.array([1.0])) is True
+    assert constants_equal(np.array([1.0]), np.array([2.0])) is False

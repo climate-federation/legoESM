@@ -142,55 +142,68 @@ def test_merge_land_restart_shape_skew_raises():
         merge_land_restart_into_template(loaded, template)
 
 
-def test_soil_column_mismatch_is_refused(tmp_path):
-    """Same layer COUNT, different layer DEPTHS must be refused, not loaded.
+# ---------------------------------------------------------------------------
+# The layer COUNT does not identify a soil column. Ten layers over 3 m and ten
+# over 6.4 m have the same array shapes, so a warm start across them loaded
+# without complaint and read the profile at the wrong depths. Found by codex
+# on the calibrated-LMIP PR, which is what made the column configurable.
+# ---------------------------------------------------------------------------
 
-    Eight layers over 3 m at growth factor 1.5 and eight over 6.375 m at growth
-    factor 2 both pass the ncol / n_layers checks, and every soil temperature and
-    moisture value would then be read at the wrong depth with no error anywhere.
-    That is exactly how a land state spun up under one soil column reached a run
-    using another.
-    """
-    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+def _grid(n_layers=_NLAY, total_depth=3.0):
+    from legoesm.land.soil_grid import SoilGridConfig
+    return SoilGridConfig(n_layers=n_layers, total_depth=total_depth)
 
-    spinup_dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=6.375,
-                                              growth_factor=2.0)).dz
-    run_dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=3.0,
-                                           growth_factor=1.5)).dz
-    assert len(spinup_dz) == len(run_dz) == _NLAY, "shape check alone cannot separate these"
 
-    path = tmp_path / "r.npz"
-    save_land_restart(path, _fake_state(seed=3), land_mode="multilayer",
-                      t_end_s=0.0, n_steps_completed=0, soil_dz=spinup_dz)
+def _write(tmp_path, state, soil_grid):
+    return save_land_restart(
+        tmp_path / "r.npz", state, land_mode="multilayer", t_end_s=1.0,
+        n_steps_completed=1, soil_grid=soil_grid)
 
-    # Matching column: loads.
-    load_land_restart(path, expected_land_mode="multilayer",
-                      expected_ncol=_NCOL, expected_n_layers=_NLAY,
-                      expected_soil_dz=spinup_dz)
-    # Different column, same layer count: refused.
-    with pytest.raises(ValueError, match="soil column"):
-        load_land_restart(path, expected_land_mode="multilayer",
+
+def test_a_deeper_column_with_the_same_layer_count_is_refused(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
-                          expected_soil_dz=run_dz)
+                          expected_soil_grid=_grid(total_depth=6.375))
 
 
-def test_restart_without_recorded_column_warns_rather_than_pretending(tmp_path, caplog):
-    """A restart written before columns were recorded cannot be verified.
+def test_the_same_column_loads(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    loaded, _ = load_land_restart(
+        tmp_path / "r.npz", expected_land_mode="multilayer", expected_ncol=_NCOL,
+        expected_n_layers=_NLAY, expected_soil_grid=_grid(total_depth=3.0))
+    assert loaded.T_soil.shape == (_NCOL, _NLAY)
 
-    It must say so out loud: silently accepting it is how the wrong soil profile
-    gets used, and silently rejecting it would break every existing spun-up state.
-    """
-    import logging
-    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 
-    path = tmp_path / "old.npz"
-    save_land_restart(path, _fake_state(seed=4), land_mode="multilayer",
-                      t_end_s=0.0, n_steps_completed=0)   # no soil_dz: legacy file
-    dz = make_soil_grid(SoilGridConfig(n_layers=_NLAY, total_depth=3.0,
-                                       growth_factor=1.5)).dz
-    with caplog.at_level(logging.WARNING, logger="legoesm.land.restart"):
-        load_land_restart(path, expected_land_mode="multilayer",
+def test_a_file_without_the_geometry_warns_rather_than_pretending(tmp_path):
+    """The published initial states predate the stamp, so this cannot raise --
+    but it must not read as a verified match either."""
+    st = _fake_state(seed=7)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)   # no soil_grid
+    with pytest.warns(RuntimeWarning, match="cannot be checked"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
-                          expected_soil_dz=dz)
-    assert any("CANNOT be verified" in r.message or "CANNOT be verified" in r.getMessage()
-               for r in caplog.records), "a legacy restart loaded with no warning"
+                          expected_soil_grid=_grid(total_depth=3.0))
+
+
+def test_an_unstamped_file_can_be_refused_outright(tmp_path):
+    """Warning is not a check for the file most people load.
+
+    The published initial states predate the interface stamp, so an unstamped
+    file cannot be refused by default. But a run on a column that is NOT the
+    historical default has no business accepting one: an old file is then
+    almost certainly on the other column, and a warning it scrolls past is how
+    the wrong soil profile gets used anyway.
+    """
+    st = _fake_state(seed=9)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)     # no soil_grid
+    with pytest.raises(ValueError, match="not the historical default"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0),
+                          require_soil_grid=True)

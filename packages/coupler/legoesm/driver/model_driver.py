@@ -46,6 +46,11 @@ from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
 
+# Keeps a seeded soil moisture strictly inside the van-Genuchten retention
+# range: psi_from_theta is singular at saturation and at the residual.
+_THETA_EDGE_GUARD = 1.0e-3
+
+
 
 def _external_forcing_active(
     radiation_ok: bool,
@@ -1862,7 +1867,11 @@ class ModelDriver:
         if dt_safe < dc.dt:
             logger.warning(
                 f"  CFL: reducing dt from {dc.dt:.0f}s to {dt_safe:.0f}s "
-                f"for {gc.grid_type} C{gc.resolution}"
+                f"for {gc.grid_type} C{gc.resolution} — the GENERIC "
+                f"advective+acoustic heuristic (assumed 50+340 m/s, "
+                f"cfl_check_and_adjust), NOT a scheme-certified stability "
+                f"envelope (in particular not the fv3_duo deck's "
+                f"k_split/n_split envelope)"
             )
             self.config = self.config._replace(
                 dycore=dc._replace(dt=dt_safe),
@@ -2946,7 +2955,29 @@ class ModelDriver:
         # when the IC carries no q_v tracer (the aridity map needs RH).
         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
-        if _qv is not None:
+        _soil_init = getattr(self.config, "land_soil_init", "aridity")
+        if _soil_init == "saturation_fraction":
+            # Seed as a fraction of POROSITY, so the soil can start above field
+            # capacity — the way to keep a run out of the dry-soil attractor
+            # (low soil water -> weak evaporation -> dry boundary layer -> weaker
+            # evaporation).  The aridity seed below cannot do this: it caps at
+            # field capacity by construction.
+            #
+            # Held just below saturation because the van-Genuchten retention is
+            # singular AT saturation — psi_from_theta needs theta < theta_sat —
+            # and just above the residual for the same reason at the dry end.
+            # Same guard the offline calibrator uses on its own seed.
+            _th_sat = jnp.asarray(cfg.hydraulics.theta_sat)
+            _th_res = jnp.asarray(cfg.hydraulics.theta_r)
+            theta_init = jnp.clip(
+                self.config.land_soil_moisture_init_frac * _th_sat,
+                _th_res + _THETA_EDGE_GUARD, _th_sat - _THETA_EDGE_GUARD)
+            logger.info(
+                "  Land tile: soil seeded at %.2f x porosity (saturation_fraction) "
+                "— NOT the aridity map; a wet start trades the desert runaway the "
+                "aridity seed prevents for staying out of the dry-soil attractor.",
+                self.config.land_soil_moisture_init_frac)
+        elif _qv is not None:
             q_v_low = _flat_cols(
                 getattr(_qv, "data", _qv)[..., -1]).astype(storage_dtype)
             p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
@@ -2986,11 +3017,11 @@ class ModelDriver:
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
                 expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
-                expected_soil_dz=make_soil_grid(cfg.soil_grid).dz,
+                expected_soil_grid=cfg.soil_grid,
                 # The calibrated column is not the historical default, so an
-                # older restart carrying no thicknesses is almost certainly on
+                # older restart carrying no interfaces is almost certainly on
                 # the wrong one: refuse it rather than warn.
-                require_soil_dz=bool(getattr(
+                require_soil_grid=bool(getattr(
                     self.config, "land_calibrated_physics", False)))
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
@@ -5847,7 +5878,19 @@ class ModelDriver:
 
         Returns (step, day).  Detects distributed checkpoint directories
         and loads per-rank data when running under MPI.
+
+        fv3_duo refuses HERE, before any decode: run_amip calls
+        ``load_checkpoint`` before ``_run_fv3_duo``'s own no-restart
+        check, so without this early refusal a restart-configured duo
+        run would first try to decode a foreign-schema (cube) checkpoint
+        and die on an unrelated shape error (codex 2026-08-18 MAJOR).
         """
+        if self.config.dycore.discretization == "fv3_duo":
+            raise NotImplementedError(
+                "fv3_duo (slice 1) has no restart: the duo bundle is not "
+                "in the checkpoint schema, so there is no checkpoint this "
+                "lane could decode. Refusing BEFORE any decode is "
+                "attempted. Run from step 0 (drop --restart-from).")
         path = Path(path)
 
         # MPAS path: mirror of the dedicated MPAS branch in
@@ -6534,7 +6577,12 @@ class ModelDriver:
         try:
             # MPAS and spectral states use different pytree layouts;
             # use dedicated simple run loops.
-            if self.config.grid.grid_type == "mpas":
+            # fv3_duo steps its own six-face bundled pytree — keyed on the
+            # DISCRETIZATION (its grid_type is the shared "cubed_sphere"),
+            # so it must dispatch before every grid-keyed branch below.
+            if self.config.dycore.discretization == "fv3_duo":
+                status = self._run_fv3_duo(start_step, start_day)
+            elif self.config.grid.grid_type == "mpas":
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
                 status = self._run_spectral(start_step, start_day)
@@ -7452,6 +7500,156 @@ class ModelDriver:
         byte-identical to ``day_to_calendar(day)``.
         """
         return day_to_calendar(self._insolation_day(day))
+
+    # ------------------------------------------------------------------
+    # FV3 six-face duo-cube lane (slice 1: dry, physics-off, fp64)
+    # ------------------------------------------------------------------
+
+    # Wind-speed blowup envelope for the duo lane's snapshot guard [m/s].
+    # The DCMIP16 baroclinic-wave jet peaks near ~40 m/s; a state past this
+    # bound is a diverged integration, not a strong storm.  Numerics guard,
+    # not a tunable (same role as the acoustic lane's own envelope).
+    _FV3_DUO_BLOWUP_UMAX_MS = 400.0
+
+    def _run_fv3_duo(self, start_step: int = 0,
+                     start_day: float | None = None) -> str:
+        """Dedicated lean lane for the certified FV3 duo-cube step (slice 1).
+
+        Dry adiabatic DCMIP16 baroclinic wave ONLY: the lane builds its
+        own IC (the placeholder ``self.state`` from ``_init_state`` is a
+        CD-grid scaffold this lane never reads; it is REPLACED by the
+        final six-face bundle so the run-manifest digest reflects the
+        actual final state).  Steps the bundled pytree
+        ``{"state","press","q","omga","nh"}`` with the wrapper's jitted
+        step and writes a minimal fp64 ``.npz`` snapshot at the
+        ``diag_days`` cadence (own schema — ``fv3duo_snapshot_step_*.npz``
+        with the face-stacked duo fields; NOT the cube/lat-lon
+        checkpoint schema, which the duo layout does not fit).
+
+        Slice-1 refusals (each loud, none silent): no restart, no MPI /
+        SPMD, no ensemble.  Physics/forcing are already refused at model
+        construction (component factory).  ``cfg.days`` is TOTAL days
+        (the cube/lat-lon convention) — with restart refused the two
+        conventions coincide.
+        """
+        cfg = self.config
+        if start_step != 0 or self._loaded_checkpoint_step_day is not None:
+            raise NotImplementedError(
+                "fv3_duo (slice 1) has no restart: the duo bundle is not "
+                "in the checkpoint schema. Run from step 0.")
+        if cfg.distributed or (self._mpi_world_size or 1) > 1:
+            raise NotImplementedError(
+                "fv3_duo (slice 1) is single-process only: the duo halo "
+                "exchange runs the full six-face stack in one program.")
+        if self._ensemble_size != 1:
+            raise NotImplementedError(
+                f"fv3_duo (slice 1) does not thread an ensemble axis; got "
+                f"ensemble_size={self._ensemble_size}.")
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        if not isinstance(self.model, FV3DuoDynamicsModel):
+            raise TypeError(
+                f"discretization='fv3_duo' but the constructed dycore is "
+                f"{type(self.model).__name__} — the component factory and "
+                f"this lane disagree; refusing to step the wrong model.")
+
+        DT = cfg.dycore.dt
+        n_steps_total = int(cfg.days * 86400.0 / DT)
+        if n_steps_total < 1:
+            raise ValueError(
+                f"fv3_duo: days={cfg.days} at dt={DT}s yields "
+                f"{n_steps_total} steps; nothing to run.")
+        diag_interval = (int(cfg.output.diag_days * 86400.0 / DT)
+                         if cfg.output.diag_days > 0 else n_steps_total)
+        diag_interval = max(1, diag_interval)
+        if start_day is None:
+            start_day = cfg.start_day
+
+        logger.info(
+            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f days), "
+            "snapshots every %d steps",
+            cfg.grid.resolution, self.model.config.km,
+            "hydrostatic" if self.model.config.hydrostatic
+            else "nonhydrostatic",
+            DT, n_steps_total, cfg.days, diag_interval)
+
+        # Overwrite any marker from a prior run in this directory FIRST:
+        # setup permits a same-config retry, and a stale COMPLETED/BLOWUP
+        # surviving an interrupted retry would misclassify it (codex
+        # 2026-08-18 MAJOR). RUNNING is the nonterminal state.
+        self._fv3_duo_write_status("RUNNING")
+        bundle = self.model.dcmip16_initial_state(do_pert=True)
+        t0 = time.time()
+        for step in range(1, n_steps_total + 1):
+            bundle = self.model.step(bundle, DT)
+            if step % diag_interval == 0 or step == n_steps_total:
+                day = start_day + step * DT / 86400.0
+                blowup = self._fv3_duo_snapshot(bundle, step, day)
+                if blowup is not None:
+                    self._fv3_duo_write_status(blowup)
+                    return blowup
+        # Final-state digest (run manifest) hashes self.state — hand it
+        # the ACTUAL final bundle, not the unused CD-grid scaffold.
+        self.state = bundle
+        logger.info("FV3 duo lane COMPLETED: %d steps in %.1fs",
+                    n_steps_total, time.time() - t0)
+        self._fv3_duo_write_status("COMPLETED")
+        return "COMPLETED"
+
+    def _fv3_duo_write_status(self, status: str) -> None:
+        """Persist the lane's terminal status as an EXPLICIT marker.
+
+        ``fv3duo_status.txt`` next to the snapshots: RUNNING is written
+        before the first step (overwriting any stale marker from a prior
+        run in the same directory), then the terminal state — COMPLETED
+        or BLOWUP with day/step. An interrupted run therefore reads
+        RUNNING. SCOPE (codex 2026-08-18): the marker certifies the
+        STEP LOOP's outcome only; the run manifest's ``state_digest`` is
+        written afterwards by ``run()`` and can still fail
+        independently — consult the manifest for provenance, the marker
+        for loop outcome.
+        """
+        (self._output_dir / "fv3duo_status.txt").write_text(status + "\n")
+
+    def _fv3_duo_snapshot(self, bundle: dict, step: int, day: float):
+        """Write one minimal duo snapshot; return a BLOWUP status or None.
+
+        Own schema (face-stacked duo layout): the prognostics from
+        ``bundle["state"]`` plus ``ps`` and the sphum passenger, with
+        ``_step`` / ``_day`` stamps.  The finite + wind-envelope guard
+        runs on the SAME host copies the write uses, so a diverged state
+        is both persisted (for autopsy) and reported.
+        """
+        fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
+        fields["ps"] = np.asarray(bundle["press"]["ps"])
+        for iq, qt in enumerate(bundle["q"]):
+            fields[f"q{iq}"] = np.asarray(qt)
+        path = self._output_dir / f"fv3duo_snapshot_step_{step:06d}.npz"
+        np.savez(path, _step=np.int64(step), _day=np.float64(day), **fields)
+
+        bad = sorted(nm for nm, a in fields.items()
+                     if not np.isfinite(a).all())
+        umax = max(float(np.abs(fields["u"]).max()),
+                   float(np.abs(fields["v"]).max()))
+        if bad or umax > self._FV3_DUO_BLOWUP_UMAX_MS:
+            logger.error(
+                "FV3 duo BLOWUP at step %d (day %.3f): non-finite=%s, "
+                "max|wind|=%.3g m/s (envelope %.0f); state saved to %s",
+                step, day, bad or "none", umax,
+                self._FV3_DUO_BLOWUP_UMAX_MS, path)
+            return f"BLOWUP at day {day:.3f} (step {step})"
+        # ps stats over the COMPUTE window only — the padded halo rows are
+        # zero by construction and would print as a fake 0 hPa minimum.
+        _n, _ng = self.model.grid.n, self.model.grid.ng
+        ps_win = fields["ps"][:, _ng:_ng + _n, _ng:_ng + _n]
+        logger.info(
+            "  fv3_duo step %d day %.3f: max|wind|=%.2f m/s, "
+            "ps=[%.1f, %.1f] hPa -> %s",
+            step, day, umax,
+            float(ps_win.min()) / 100.0,
+            float(ps_win.max()) / 100.0, path.name)
+        return None
 
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
