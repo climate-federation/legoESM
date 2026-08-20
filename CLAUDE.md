@@ -26,10 +26,11 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **Irreversible / outward-facing actions need explicit permission EVERY time**: rewriting published history (`push --force*`), amending/squashing pushed commits, deleting or overwriting files the user created, `git reset --hard`, closing/merging PRs, installing or upgrading system packages, reboots. Approval for one such action does NOT carry to the next. Propose, then wait.
 - Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
 - Minimal diffs. No unrelated refactor in bug fix.
-- **DUAL adversarial review MANDATORY — TWO independent reviewers, never one**
-  (user directive 2026-08-12, restated as a STRICT rule 2026-08-13). The author
-  NEVER reviews its own code. Route by who WROTE the code — the two reviewers
-  are always the other two:
+- **DUAL adversarial review is the DEFAULT for EVERY substantive change — TWO
+  independent reviewers, never one** (user directive 2026-08-12, restated
+  STRICT 2026-08-13, and again 2026-08-20 as "make this the default
+  behaviour"). The author NEVER reviews its own code. Route by who WROTE the
+  code — the two reviewers are always the other two:
   **Claude-authored → codex + GLM-5.2** (`mcp__zai__ask_glm`);
   **GLM-authored → codex + Claude**;
   **codex-authored → Claude + GLM-5.2**.
@@ -44,6 +45,18 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
   retracted its own top-ranked lever once measurement contradicted it).
   Reviewer disagreement is SIGNAL, not noise: name the disputed point and the
   measurement that discriminates, run it if cheap, never average the two.
+  A REVIEWER'S FINDING IS A HYPOTHESIS, NOT AN INSTRUCTION: measure it before
+  fixing it. 2026-08-20, GLM predicted a rounding error of 1.4e-5 that would
+  refuse valid restart files; measured over every column the model builds it
+  was 7.9e-8, so the guard added for it was DELETED and the measurement pinned
+  instead — an unmeasured finding buys a knob that never binds.
+  **"Substantive" includes a MERGE CONFLICT RESOLUTION**, and rebases,
+  cherry-picks, back-ports, probes and test fixtures. A conflict resolution is
+  the highest-risk case in the list: someone chose between two versions of the
+  same code and the diff does not record what was discarded. FAILURE
+  2026-08-20: merged a 17-day-old branch, hand-resolved 14 conflicts across 7
+  files including two independent fixes for one defect, and shipped it
+  unreviewed until asked.
 - **Codex adversarial review MANDATORY after any major code implementation/change.** Trigger: new module/feature, dycore/physics/parallel/ocean/land/ice/coupler/training edit, >~50 LOC, multi-file, or anything touching numerics/AD/JIT/pytree/conservation. Run the **iterate-with-codex agent** loop below (`/codex:adversarial-review --wait` → fix flagged → `/codex:review --wait` → repeat until clean or 30 iter) BEFORE declaring done; report that review ran + verdict.
   **If the review SUBAGENT dies (spend limit, API error), that is NOT a review
   waiver — the codex CLI is a separate binary with separate credentials and is

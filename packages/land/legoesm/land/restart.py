@@ -100,18 +100,49 @@ def _soil_dz_from(soil_grid=None, soil_dz=None, *, what: str):
     return from_grid if from_grid is not None else from_dz
 
 
-def _recorded_soil_dz(data):
+def _recorded_soil_dz(data, path="<archive>"):
     """A restart archive's column as thicknesses [m], or ``None`` if unstamped.
 
     Reads either stamp, because files written by either lane are in the wild:
     ``soil_dz`` directly, or the differences of ``soil_z_interface``.
+
+    A file carrying BOTH must have them AGREE.  The writer here derives both
+    from one column at one moment so they cannot drift, but a file is not
+    always written by this writer: an archive can be rewritten by a
+    post-processing tool that updates one key and not the other, and a column
+    built from interfaces rather than from thicknesses does not round-trip
+    bitwise.  Two records of one fact that disagree are a corrupt file, so this
+    refuses rather than picking a winner -- picking one is how the wrong soil
+    profile gets used with no error, which is the defect this stamp exists to
+    prevent (GLM-5.2).
     """
+    dz = iz = None
     if "soil_dz" in data.files:
-        return np.asarray(data["soil_dz"], dtype=np.float64).reshape(-1)
+        dz = np.asarray(data["soil_dz"], dtype=np.float64).reshape(-1)
     if "soil_z_interface" in data.files:
         z = np.asarray(data["soil_z_interface"], dtype=np.float64).reshape(-1)
-        return np.diff(z)
-    return None
+        # The relation is ENFORCED, not assumed: interfaces are n+1 depths
+        # running from the surface downwards. A stamp that is not that is not
+        # a column this reader can interpret, and guessing at one is worse
+        # than saying so.
+        if z.size < 2 or not np.all(np.diff(z) > 0.0) or z[0] < 0.0:
+            raise ValueError(
+                f"{path}: soil_z_interface is not a set of increasing layer "
+                f"interface depths starting at or below the surface (got "
+                f"{z.tolist()}). The soil column cannot be read from it.")
+        iz = np.diff(z)
+    if dz is not None and iz is not None and not soil_dz_matches(dz, iz):
+        raise ValueError(
+            f"{path} carries TWO soil-column stamps that disagree: layer "
+            f"thicknesses {dz.tolist()} m versus interfaces implying "
+            f"{iz.tolist()} m. One of them has been rewritten independently "
+            f"of the other, so neither can be trusted to say which column "
+            f"this state belongs to.")
+    if dz is not None and (dz.size == 0 or not np.all(dz > 0.0)):
+        raise ValueError(
+            f"{path}: soil_dz is not a set of positive layer thicknesses "
+            f"(got {dz.tolist()}).")
+    return dz if dz is not None else iz
 
 
 def save_land_restart(
@@ -214,8 +245,20 @@ def soil_dz_matches(got, want) -> bool:
     """
     a = np.asarray(got, dtype=np.float64).reshape(-1)
     b = np.asarray(want, dtype=np.float64).reshape(-1)
-    return a.shape == b.shape and bool(
-        np.allclose(a, b, rtol=_SOIL_DZ_RTOL, atol=0.0))
+    if a.shape != b.shape:
+        return False
+    # Relative only, no absolute floor. A reviewer argued one was needed:
+    # recovering thicknesses by differencing interfaces was said to carry an
+    # error of order eps x TOTAL depth, which on a 3 m column would be 1.4e-5
+    # relative on a 2.6 cm top layer and would REFUSE a valid file. MEASURED
+    # instead, over three columns including the thinnest top layer this model
+    # builds: the worst relative error is 7.9e-8, a hundredfold inside the
+    # tolerance. The argument assumed the surface interface carries the whole
+    # column's rounding; it does not -- the shallow interfaces are themselves
+    # small, so differencing near the surface subtracts small numbers and the
+    # error scales with the LOCAL depth, not the total. A floor would have been
+    # a knob that never binds.
+    return bool(np.allclose(a, b, rtol=_SOIL_DZ_RTOL, atol=0.0))
 
 
 def load_land_restart_soil_dz(path):
@@ -226,7 +269,7 @@ def load_land_restart_soil_dz(path):
     state is loaded only by ranks that own land while this check must give the
     same answer everywhere.  ``None`` means the file predates the recording.
     """
-    return _recorded_soil_dz(np.load(str(path), allow_pickle=False))
+    return _recorded_soil_dz(np.load(str(path), allow_pickle=False), path)
 
 
 def load_land_restart(
@@ -303,7 +346,7 @@ def load_land_restart(
                              what="load_land_restart")
     if _want_dz is not None:
         _total = float(_want_dz.sum())
-        _got_dz = _recorded_soil_dz(data)
+        _got_dz = _recorded_soil_dz(data, path)
         if _got_dz is None:
             _unstamped = (
                 f"{path} records no soil column, so its layer depths cannot "

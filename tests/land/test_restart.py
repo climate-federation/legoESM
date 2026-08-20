@@ -278,3 +278,85 @@ def test_the_pre_load_check_reads_the_stamp_the_writer_wrote(tmp_path):
     assert got is not None, "the pre-load check cannot see a stamp it wrote"
     np.testing.assert_allclose(np.asarray(got),
                                np.asarray(make_soil_grid(grid).dz))
+
+
+# ---------------------------------------------------------------------------
+# Second reviewer, on the merge: the edges of carrying two stamps for one fact.
+# ---------------------------------------------------------------------------
+
+def test_two_stamps_that_disagree_are_refused(tmp_path):
+    """The writer derives both from one column, but a file is not always
+    written by this writer: a post-processing tool can rewrite one key and not
+    the other. Picking a winner is how the wrong profile gets used in silence
+    (GLM-5.2)."""
+    from legoesm.land.soil_grid import make_soil_grid
+
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=21), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1,
+                      soil_grid=_grid(total_depth=3.0))
+    d = dict(np.load(path, allow_pickle=False))
+    # Rewrite ONE stamp, as an external tool would.
+    d["soil_dz"] = np.asarray(make_soil_grid(_grid(total_depth=6.375)).dz,
+                              dtype=np.float64)
+    np.savez_compressed(path, **d)
+    with pytest.raises(ValueError, match="TWO soil-column stamps that disagree"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))
+    # ...and it is refused even when the run's column happens to match the
+    # stamp that was NOT rewritten -- otherwise the file passes on the strength
+    # of one of two records that are known to contradict each other.
+    with pytest.raises(ValueError, match="TWO soil-column stamps that disagree"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=6.375))
+
+
+def test_a_stamp_that_is_not_a_column_is_refused(tmp_path):
+    """The n versus n+1 relation is enforced, not inferred: guessing at a
+    malformed stamp is worse than saying it cannot be read."""
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=22), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1,
+                      soil_grid=_grid(total_depth=3.0))
+    d = dict(np.load(path, allow_pickle=False))
+    d.pop("soil_dz")
+    d["soil_z_interface"] = np.array([0.0, 1.0, 0.5, 2.0])   # not increasing
+    np.savez_compressed(path, **d)
+    with pytest.raises(ValueError, match="increasing layer"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))
+
+
+def test_reconstructing_a_column_from_its_interfaces_is_well_conditioned():
+    """The measurement that decided against an absolute tolerance floor.
+
+    A reviewer argued one was needed: differencing interfaces to recover
+    thicknesses was said to carry an error of order eps x TOTAL depth, which
+    on a 3 m column would be 1.4e-5 relative on a 2.6 cm top layer -- past the
+    relative tolerance, refusing valid files. Measured, it is not: the shallow
+    interfaces are themselves small, so differencing near the surface
+    subtracts small numbers and the error scales with the LOCAL depth.
+
+    This pins the real number over the thinnest column this model builds, so
+    the tolerance stays justified by a measurement rather than by an argument.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+    from legoesm.land.restart import _SOIL_DZ_RTOL
+
+    worst = 0.0
+    for n_layers, depth, growth in ((8, 3.0, 2.0), (10, 3.0, 1.5),
+                                    (8, 6.375, 2.0)):
+        g = make_soil_grid(SoilGridConfig(n_layers=n_layers, total_depth=depth,
+                                          growth_factor=growth))
+        dz = np.asarray(g.dz, dtype=np.float64)
+        zi = np.asarray(g.z_interface, dtype=np.float64)
+        # the same column stored at single precision, then differenced
+        recovered = np.diff(zi.astype(np.float32).astype(np.float64))
+        worst = max(worst, float(np.max(np.abs(recovered - dz) / dz)))
+    assert worst < 0.1 * _SOIL_DZ_RTOL, (
+        f"recovering thicknesses from single-precision interfaces now costs "
+        f"{worst:.2e} relative, within a factor of ten of the {_SOIL_DZ_RTOL:g} "
+        f"tolerance; the comparison needs an absolute floor after all")
