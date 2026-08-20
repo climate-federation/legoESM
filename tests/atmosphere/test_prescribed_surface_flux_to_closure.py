@@ -437,3 +437,58 @@ def test_sfc_varnce_is_called_by_the_prognostic_core():
     assert "calc_sfc_varnce(" in src
     assert src.index("calc_sfc_varnce(") < src.index("advance_xp2_xpyp(")
     assert src.index("calc_sfc_varnce(") < src.index("advance_wp2_wp3(")
+
+
+def test_sfc_varnce_gradient_is_finite_under_a_stable_surface():
+    """THE test that would have caught the AD bug this port shipped with.
+
+    A negative surface heat flux takes the `wstar = 0` arm of the where. jax
+    still differentiates the DISCARDED arm, and with a zero floor that arm is
+    cbrt(0), whose derivative is infinite -- 0 * inf = NaN through the mask.
+    The forward value is perfectly finite, so only a gradient check sees it,
+    and GABLS1 is stable for its entire run.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    args = _sfc_varnce_inputs(ncol=1)
+
+    def loss(wpthlp_sfc):
+        out = calc_sfc_varnce(
+            jnp.asarray([-0.05]), jnp.asarray([0.01]), wpthlp_sfc,
+            jnp.asarray([1.0e-6]), **args, config=cfg)
+        return sum(jnp.sum(o) for o in out)
+
+    for wth in (-0.05, -1e-12, 0.0, 1e-12, 0.06):
+        g = float(jax.grad(loss)(jnp.asarray([wth]))[0])
+        assert np.isfinite(g), f"non-finite d/d(wpthlp_sfc) at wpthlp={wth}"
+
+
+def test_sfc_varnce_gradient_is_finite_in_a_dead_calm():
+    """The sibling singularity: zero stress AND zero buoyancy flux makes the
+    sqrt argument exactly 0, whose derivative the maximum() then masks."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    args = _sfc_varnce_inputs(ncol=1)
+
+    def loss(upwp):
+        out = calc_sfc_varnce(
+            upwp, jnp.zeros((1,)), jnp.zeros((1,)), jnp.zeros((1,)),
+            **args, config=cfg)
+        return sum(jnp.sum(o) for o in out)
+
+    g = float(jax.grad(loss)(jnp.zeros((1,)))[0])
+    assert np.isfinite(g), "non-finite gradient in a quiescent column"
+
+
+def test_sfc_varnce_tolerances_are_unsquared_in_the_config():
+    """`w_tol` must be the tolerance, not its square: the port writes
+    `config.w_tol ** 2`, so a pre-squared field would floor at tol^4."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+    cfg = CLUBBConfig()
+    assert cfg.w_tol == pytest.approx(2.0e-2)
+    assert cfg.thl_tol > 0.0 and cfg.rt_tol > 0.0

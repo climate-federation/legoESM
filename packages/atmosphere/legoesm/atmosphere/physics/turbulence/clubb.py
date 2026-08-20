@@ -4213,8 +4213,13 @@ def wp23_solve(lhs, rhs):
 # a_const and up2_sfc_coef, are CLUBBParams fields).
 _SFC_VARNCE_Z_CONST = 1.0     # "Defined height of 1 meter" [m] (module line 90)
 _SFC_VARNCE_UFMIN = 0.01      # min allowable u* [m/s]        (module line 93)
-# constants_clubb.F90:347, "Special for wprtp and wpthlp".
-_MAX_MAG_CORRELATION_FLUX = 0.99
+# (_MAX_MAG_CORRELATION_FLUX is already defined above, from the same
+# constants_clubb.F90:347 -- do not redefine it here.)
+# AD floors, NOT physics. Both guard a derivative singularity in a branch that
+# is DISCARDED forward but still differentiated (jax evaluates both arms of a
+# where): cbrt'(0) and sqrt'(0) are infinite, and 0 * inf = NaN.
+_SFC_VARNCE_WTH_FLOOR = 1.0e-10   # [K m/s], inside cbrt
+_SFC_VARNCE_UF_EPS = 1.0e-16      # [m^2/s^2], inside sqrt
 
 
 def calc_sfc_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc,
@@ -4247,13 +4252,27 @@ def calc_sfc_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc,
     ustar2 = jnp.sqrt(upwp_sfc ** 2 + vpwp_sfc ** 2)
     # w* from Andre et al. (1976); zero under a non-positive surface heat flux,
     # where the cube root of a negative argument is not wanted.
+    # The floor inside cbrt is POSITIVE, not zero, and that is an AD
+    # requirement rather than a numerical nicety: jax evaluates BOTH arms of a
+    # where, so with a zero floor the discarded arm computes cbrt(0), whose
+    # derivative is infinite, and the where's VJP multiplies it by a zero mask
+    # -- 0 * inf = NaN -- poisoning the gradient of every tuned coefficient on
+    # EVERY column with a non-positive surface heat flux. That is half the case
+    # set (GABLS1 is stable throughout). Same class as the MYNN-2.5
+    # L_S_stable_mid double-where. Forward cost is confined to
+    # 0 < wpthlp < 1e-10, where wstar moves by <= ~7e-4 m/s, i.e. ~1e-7 in
+    # uf^2 against ufmin^2 = 1e-4.
     wstar = jnp.where(
         wpthlp_sfc > 0.0,
-        jnp.cbrt(jnp.maximum(wpthlp_sfc, 0.0)
+        jnp.cbrt(jnp.maximum(wpthlp_sfc, _SFC_VARNCE_WTH_FLOOR)
                  * (constants.g / config.T0) * _SFC_VARNCE_Z_CONST),
         0.0)
-    uf = jnp.maximum(_SFC_VARNCE_UFMIN,
-                     jnp.sqrt(ustar2 + 0.3 * wstar * wstar))
+    # Likewise the sqrt: a quiescent column (no stress, no buoyancy flux) gives
+    # sqrt(0), derivative infinite, masked away by the maximum. ufmin dominates
+    # there, so the epsilon changes nothing forward.
+    uf = jnp.maximum(
+        _SFC_VARNCE_UFMIN,
+        jnp.sqrt(ustar2 + 0.3 * wstar * wstar + _SFC_VARNCE_UF_EPS))
 
     wp2_sfc = a_const * uf ** 2
     up2_sfc = up2_coef * a_const * uf ** 2          # Andre et al. (1978)
@@ -4279,7 +4298,9 @@ def calc_sfc_varnce(upwp_sfc, vpwp_sfc, wpthlp_sfc, wprtp_sfc,
     # -- dropping it would leave the horizontal variances too large exactly
     # when the floor bites.
     correction = jnp.where(wp2_sfc < min_wp2_sfc, min_wp2_sfc - wp2_sfc, 0.0)
-    wp2_sfc = wp2_sfc + correction
+    # Assign the floor rather than adding the correction back: algebraically
+    # the same, but `wp2 + (min - wp2)` lands an ULP or two off `min`.
+    wp2_sfc = jnp.where(wp2_sfc < min_wp2_sfc, min_wp2_sfc, wp2_sfc)
     up2_sfc = up2_sfc - 0.5 * correction
     vp2_sfc = vp2_sfc - 0.5 * correction
 
