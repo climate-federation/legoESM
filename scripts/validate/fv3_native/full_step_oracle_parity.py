@@ -1053,24 +1053,30 @@ def main(argv=None):
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
     if args.moist:
-        if args.nh:
-            # No NH moist deck exists in the pinned tree. Refuse rather
-            # than silently scoring the NH moist port against a
-            # hydrostatic reference.
-            raise SystemExit(
-                "--moist --nh: there is no non-hydrostatic moist oracle "
-                "run in the pinned tree. Build one (the hydrostatic moist "
-                "deck with hydrostatic=.F.) before gating that arm.")
         if not args.tracers:
             raise SystemExit(
                 "--moist requires --tracers: dp1 = zvir*q(sphum) "
                 "(fv_dynamics.F90:291) has no specific humidity to read "
                 "without the tracer IC, and a zvir with q=None is refused "
                 "by the lane anyway.")
-        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
-            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_moist_gfs"
-        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
-            args.step_run = f"{ORACLE_ROOT}/run_hydro_1step_moist_gfs"
+        # --nh has already redirected these to the NH decks above, so
+        # the moist redirect keys off whichever pair is in play. Both
+        # arms then go through the same two deck checkers.
+        _arm = "nh" if args.nh else "hydro"
+        _dry_ic = (f"{ORACLE_ROOT}/run_nh_zerostep_gfs" if args.nh
+                   else f"{ORACLE_ROOT}/run_hydro_zerostep")
+        _dry_step = (f"{ORACLE_ROOT}/run_nh_1step_gfs" if args.nh
+                     else f"{ORACLE_ROOT}/run_hydro_1step_gfs")
+        if args.ic_run == _dry_ic:
+            args.ic_run = f"{ORACLE_ROOT}/run_{_arm}_zerostep_moist_gfs"
+        if args.step_run == _dry_step:
+            args.step_run = f"{ORACLE_ROOT}/run_{_arm}_1step_moist_gfs"
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                raise SystemExit(
+                    f"missing moist oracle run {_r}. The NH pair is built "
+                    f"by scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch "
+                    f"(the NH deck with adiabatic=.false., one flag).")
         for _run in (args.ic_run, args.step_run):
             check_physics_is_inert(_run)
             check_moist_deck(_run)

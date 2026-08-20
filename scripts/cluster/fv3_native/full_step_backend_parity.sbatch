@@ -45,7 +45,10 @@ case "$ARM" in
   # The moist arm needs --tracers: dp1 = zvir*q(sphum) has nothing to
   # read without them, and the runner refuses the combination anyway.
   moist) EXTRA="--moist --tracers" ;;
-  *) echo "unknown ARM=$ARM (hydro|nh|moist)"; exit 4 ;;
+  # the NH moist arm: --nh redirects to the NH decks, --moist then
+  # redirects those to their moist twins.
+  nhmoist) EXTRA="--nh --moist --tracers" ;;
+  *) echo "unknown ARM=$ARM (hydro|nh|moist|nhmoist)"; exit 4 ;;
 esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/bkparity_${ARM}_${SLURM_JOB_ID:-0}
 mkdir -p "$OUT"
