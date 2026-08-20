@@ -38,7 +38,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
 from full_step_oracle_parity import (          # noqa: E402
+    DIHEDRAL,
     IC_CONTROL_MAX_REL,
+    apply_map,
     KM,
     N,
     NG,
@@ -75,7 +77,12 @@ def read_dump(run_dir: str, blk: int, name: str, tile: int) -> np.ndarray:
         raise SystemExit(f"{path}: {int(np.isnan(out).sum())} cells never "
                          f"written -- a truncated dump would read as a "
                          f"difference")
-    return out
+    # STORE IT THE WAY load_oracle DOES, (k, j, i) with k of length 1,
+    # so oracle_ij can be reused verbatim rather than its logic being
+    # re-derived here for a 2-D array. The first version compared
+    # without the face map's dihedral at all and control 2 caught it
+    # (full-step w read 1.0071e+00 against an established 6.6116e-04).
+    return out.T[None, :, :]
 
 
 def main(argv=None):
@@ -133,24 +140,30 @@ def main(argv=None):
     worst_step = 0.0
     for pf in range(6):
         ot = perm[pf]
-        transposed = meta[pf][ot][0]
-        a = p_1[pf]["w"]
-        b = oracle_ij(orc_1[ot]["w"], transposed)
-        worst_step = max(worst_step, rel(a, b))
+        pairs, _ws = apply_map(p_1[pf], orc_1[ot], meta[pf][ot])
+        worst_step = max(worst_step, rel(*pairs["w"]))
     print(f"full-step w residual (this script): {worst_step:.4e}   "
           f"[established 6.6116e-04]")
+    if not 3.0e-04 <= worst_step <= 1.5e-03:
+        raise SystemExit(
+            f"INSTRUMENT CONTROL FAILED: this script scores the full "
+            f"step at {worst_step:.4e}, not the established 6.6116e-04, "
+            f"so it is NOT running the configuration whose gap is under "
+            f"investigation. Refusing to report a pre-remap number from "
+            f"it. (The first version read 1.0071e+00 -- it had dropped "
+            f"the face map's dihedral.)")
 
     # CONTROL 3: the dump must not secretly be the post-remap state.
     print("\noracle: how far the REMAP moves w (pre-remap dump vs "
           "restart), per tile:")
     row = []
     for t in range(1, 7):
-        d = read_dump(args.wdump, 1, "w", t)
-        # the dump carries the full padded box; the restart is compute
-        ni = orc_1[t - 1]["w"].shape[0]
-        off = (d.shape[0] - ni) // 2
-        dw = d[off:off + ni, off:off + ni]
-        row.append(float(np.abs(dw.T - orc_1[t - 1]["w"]).max()))
+        d = read_dump(args.wdump, 1, "w", t)          # (1, j, i) padded
+        rst = orc_1[t - 1]["w"]                        # (k, j, i) compute
+        nj = rst.shape[1]
+        off = (d.shape[1] - nj) // 2
+        dw = d[0, off:off + nj, off:off + nj]
+        row.append(float(np.abs(dw - rst[0]).max()))
     print("  " + "  ".join(f"{x:10.4g}" for x in row))
     if max(row) == 0.0:
         raise SystemExit(
@@ -162,17 +175,18 @@ def main(argv=None):
     # THE MEASUREMENT.
     print("\nPORT vs ORACLE, w BEFORE the remap:")
     worst_pre, worst_face = 0.0, None
+    cs = slice(NG, NG + N)
     for pf in range(6):
         ot = perm[pf]
-        transposed = meta[pf][ot][0]
-        d = read_dump(args.wdump, 1, "w", ot + 1)
-        ni = pre[pf]["w"].shape[0]
-        off = (d.shape[0] - ni) // 2
-        ow = oracle_ij(d[off:off + ni, off:off + ni].T, transposed)
-        pw = pre[pf]["w"]
-        cs = slice(NG, NG + N)
-        r = rel(pw[cs, cs, 0] if pw.ndim == 3 else pw[cs, cs],
-                ow[cs, cs])
+        transposed, nm, _su, _sv = meta[pf][ot]
+        d = read_dump(args.wdump, 1, "w", ot + 1)      # (1, j, i) padded
+        nj = N
+        off = (d.shape[1] - nj) // 2
+        ow = oracle_ij(d[:, off:off + nj, off:off + nj], transposed)
+        # the PORT side carries the dihedral too -- w is cell-centred,
+        # so factor +1, exactly as apply_map treats pt/delp.
+        pw = DIHEDRAL[nm](pre[pf]["w"][cs, cs, :1])
+        r = rel(pw, ow)
         if r > worst_pre:
             worst_pre, worst_face = r, f"face{pf + 1}->tile{ot + 1}"
         print(f"  face {pf + 1} -> tile {ot + 1}:  rel={r:.4e}")
