@@ -7270,7 +7270,14 @@ def main() -> int:
                 from legoesm.ocean.freshwater import net_freshwater_flux
                 sf = sf._replace(
                     freshwater=net_freshwater_flux(fw._replace(restoring=None)))
-            if step == 1 and fw is not None:                 # [fwbudget] DIAG (temp)
+            # Print at step 1 AND on a daily stride: a step-1-only budget
+            # cannot tell INITIALISATION SHOCK from a persistent bias, and
+            # the step-1 numbers (Antarctic ice 44.8e-6 vs NEMO's entire
+            # runoff+ice 16.7; Arctic ice MELTING +23.6 in January where NEMO
+            # freezes at -17.2) are exactly the kind that need a trajectory
+            # before they are believed.
+            _fwb_stride = max(1, int(round(86400.0 / float(dt))))
+            if fw is not None and (step == 1 or step % _fwb_stride == 0):
                 _Ab = np.asarray(grid.areaCell if hasattr(grid, "areaCell")
                                  else grid.area)
                 _wb = np.asarray(state.land_mask.data) > 0.5
@@ -7278,7 +7285,8 @@ def main() -> int:
                                   if _x is not None else 0.0)   # noqa: E731
                 _P, _E, _Rn, _Ic = (_ig(fw.precip), _ig(fw.evap),
                                      _ig(fw.runoff), _ig(fw.ice_fw))
-                print(f"[fwbudget] {app_grid_type}: P={_P:+.4f} E={_E:+.4f} "
+                print(f"[fwbudget] step={step} day={step * dt / 86400.0:.2f} "
+                      f"{app_grid_type}: P={_P:+.4f} E={_E:+.4f} "
                       f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
                       f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
                       f"area-wtd over wet)", flush=True)
@@ -7294,8 +7302,9 @@ def main() -> int:
                                               is not None else grid.lat))
                 if _latb.shape == _wb.shape:
                     _wgt = np.cos(np.deg2rad(_latb)) * _wb
-                    print("[fwbudget-bands] 1e-6 kg/m2/s, + = into ocean "
-                          "(evap column is +up):", flush=True)
+                    print(f"[fwbudget-bands] day={step * dt / 86400.0:.2f} "
+                          "1e-6 kg/m2/s, + = into ocean (evap +up):",
+                          flush=True)
                     for _bn, (_lo, _hi) in (("antarctic_S_of_45S", (-90, -45)),
                                             ("SH_midlat_45S_23S", (-45, -23)),
                                             ("arctic_N_of_45N", (45, 90))):
