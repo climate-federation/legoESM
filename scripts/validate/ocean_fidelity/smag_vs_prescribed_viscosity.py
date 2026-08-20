@@ -120,8 +120,16 @@ def main() -> int:
         finally:
             dv.close()
         if pres.ndim == 3:
-            pres = pres[0]
-        label = f"{a.visc_file.name}:{key}"
+            # Index the SAME level as A_smag. Taking pres[0] regardless of
+            # --level compared a depth-varying model field against the
+            # surface prescribed field -- the tell was a prescribed value
+            # identical at every depth (5079 at levels 0, 17, 23 and 27).
+            if a.level >= pres.shape[0]:
+                raise SystemExit(
+                    f"--level {a.level} exceeds the prescribed field's "
+                    f"{pres.shape[0]} levels")
+            pres = pres[a.level]
+        label = f"{a.visc_file.name}:{key} lev {a.level}"
     elif a.A_h_uniform is not None:
         pres = np.full_like(A_smag, a.A_h_uniform)
         label = f"uniform {a.A_h_uniform:g}"
