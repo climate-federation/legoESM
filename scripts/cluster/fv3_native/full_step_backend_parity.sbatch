@@ -23,7 +23,12 @@
 #   sbatch --export=ALL,ARM=nh full_step_backend_parity.sbatch
 #   sbatch --export=ALL,ARM=moist full_step_backend_parity.sbatch
 set -uo pipefail
-REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
+# REPO is overridable so a run can be pinned to a worktree
+# (scripts/cluster/fv3_native/pin_worktree.sh) instead of reading the
+# live checkout. A job that reads the tree being edited produces numbers
+# attributable to no SHA -- that happened on 2026-08-20 and the job was
+# cancelled rather than reported.
+REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
 [ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
 DIRTY=$(git -C "$REPO" status --porcelain | wc -l)
 [ "$DIRTY" -eq 0 ] || { echo "PREFLIGHT FAILED: dirty ($DIRTY)"; exit 3; }
