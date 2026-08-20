@@ -1536,10 +1536,14 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # substep mean (== legoESM Hu_avg, the same quantity already routed to
     # tracer advection) -- instead of the primary/velocity boxcar mean. The two
     # kernels sample the substep profile at different phases (DINO nn_e=23:
-    # centroid 22.0 vs 14.67), so this directionally matches NEMO's placement;
-    # the averaging window itself is NOT NEMO's (measured phase separation
-    # between our two kernels 7.33 of 45 substeps = 16%, against NEMO's 20.67
-    # of 68 = 30%). MLF-only (the N6 reconciliation is where the leap-frog barotropic
+    # centroid 22.0 vs 14.67), matching NEMO's placement. CORRECTION
+    # (#1455 M2 lane, e31c9e99b): an earlier softening here claimed the
+    # window "is NOT NEMO's" from a 16%-vs-30% phase-separation measurement;
+    # that measured the FORWARD-EULER weight kernel, which this card does not
+    # run. On the leapfrog kernel this card runs, the window IS NEMO's
+    # bit-identically (primary weights diff 0.0, secondary 7e-18) and the
+    # phase separation IS NEMO's 30%.
+    # MLF-only (the N6 reconciliation is where the leap-frog barotropic
     # mode lands on the 3-D velocity), so it lands on THIS card only.
     "barotropic_reconcile_target": "transport_avg",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
