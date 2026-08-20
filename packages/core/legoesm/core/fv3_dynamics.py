@@ -43,8 +43,9 @@ pt_to_theta_v, ported literally with the oracle's operation order); the
 barrier and exchange extents are the halo module's; d_con = 0.0 throughout
 and is NOT a parameter of this module -- the KE-to-heat pathway and its
 heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
-inactive on the shipped duo decks; the moist path is dead (zvir != 0 and
-consv_te != 0 are refused); pfull is computed-and-unused on this lane and is
+inactive on the shipped duo decks; the moist path is HYDROSTATIC-only
+(zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap;
+moist NH pkz and consv_te != 0 are refused); pfull is computed-and-unused on this lane and is
 not ported; omga is an output-only passenger whose values are meaningless;
 and dyn_core's use_old_omega fill is not ported (no u/v/pt/delp parity).
 """
@@ -204,7 +205,11 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     if dp1 is None:  # static None-ness: stays a Python if
         new = win / pkz
     else:
-        new = win * ((1.0 + dp1) / pkz)
+        # ASSOCIATION IS THE ORACLE'S. Fortran evaluates `pt*(1.+dp1)/pkz`
+        # (:402) left to right as (pt*(1+dp1))/pkz. Forming the quotient
+        # first and multiplying rounds differently; the spec lane carries
+        # the same comment for the same reason.
+        new = win * (1.0 + dp1) / pkz
     # the six per-face compute windows are disjoint; no face reads
     # another's write, so the spec's face loop is one stacked slice
     return pt.at[:, ia:ia + n, ia:ia + n, :].set(new)
@@ -299,11 +304,50 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         raise ValueError(f"n_split must be >= 1, got {n_split}")
     require_uniform_damping_lane(n_sponge=n_sponge, tau=tau, npz=km)
     if zvir != 0.0:  # static deck constant, stays a Python if
-        raise NotImplementedError(
-            "zvir != 0 makes the tracers stop being passengers: dp1 = "
-            "zvir*q(sphum) enters the pt->theta_v conversion "
-            "(fv_dynamics.F90:291, :402) and the closing pt/(1+r_vir*q) "
-            "(fv_mapz.F90:975). The pinned deck is adiabatic, zvir = 0.")
+        # HYDROSTATIC moist coupling is enabled, mirroring the spec lane
+        # (fv3_native_dynamics.py). dp1 = zvir*q(sphum)
+        # (fv_dynamics.F90:291; USE_COND is not defined in the pinned
+        # build, so no q_con term) feeds pt = pt*(1.+dp1)/pkz (:402) and
+        # the closing pt/(1+r_vir*q) (fv_mapz.F90:975), which
+        # lagrangian_to_eulerian already carries via r_vir=zvir below.
+        # Validate, never default: a guessed tracer index would silently
+        # couple an arbitrary species into theta_v.
+        if q is None:
+            raise ValueError(
+                "zvir != 0 requires tracer arrays, but q is None: "
+                "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
+                "humidity to read.")
+        if (sphum_index is None or isinstance(sphum_index, bool)
+                or not isinstance(sphum_index, int)):
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an int indexing the "
+                f"specific-humidity tracer in q; got {sphum_index!r}. A "
+                f"guessed index would silently couple the wrong species "
+                f"into theta_v.")
+        if len(q) <= 0:
+            raise ValueError(
+                "zvir != 0 requires nq > 0, but q carries no tracers "
+                "(fv_dynamics.F90:291 needs sphum).")
+        if not 0 <= sphum_index < len(q):
+            raise ValueError(
+                f"sphum_index={sphum_index} out of range [0, {len(q)}); a "
+                f"negative index would silently select another tracer by "
+                f"Python wrap-around.")
+        if not hydrostatic:
+            # fv_dynamics.F90:307-309: under moist_phys the NH pkz is
+            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)), but
+            # p_var_nonhydrostatic computes the DRY form. Running it dry
+            # would apply a pkz missing the virtual-temperature factor on
+            # every NH step -- refuse until dp1 is threaded through it.
+            # (When phasing that in: multiply INSIDE the log argument in
+            # the Fortran's association, not by pre-scaling pt at the
+            # call site, which reassociates the product.)
+            raise NotImplementedError(
+                "zvir != 0 with non-hydrostatic dynamics is not enabled: "
+                "the moist NH pkz multiplies the log argument by (1+dp1) "
+                "(fv_dynamics.F90:307-309) and p_var_nonhydrostatic "
+                "computes the dry form. Hydrostatic zvir coupling IS "
+                "enabled.")
     if consv_te != 0.0:
         raise NotImplementedError(
             "consv_te != 0 activates the total-energy fixer "
@@ -379,7 +423,20 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     # :396-408  T -> theta_v once per call; the six per-face compute
     # windows are disjoint, so the spec's face loop is one stacked call
     state = dict(state)
-    state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
+    if zvir != 0.0:
+        # dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291), formed ONCE
+        # from the step-initial q before the k_split loop, exactly as
+        # :281-294 precedes :451. Sliced to the COMPUTE WINDOW because
+        # pkz is (6, n, n, km) and pt_to_theta_v expects dp1 matching it.
+        dp1_theta = zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
+        state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng,
+                                    dp1=dp1_theta)
+    else:
+        # The adiabatic lane MUST stay bit-identical to the certified
+        # 1.1866e-09 parity: dp1=None takes `pt / pkz`, while a zeros
+        # array would take `pt*(1.+dp1)/pkz` -- an extra multiply, which
+        # rounds twice where the dry lane rounds once.
+        state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
 
     def _n_map(carry, last_step: bool):
         st, pr, qq, om, nhc, nspl, nexc = carry

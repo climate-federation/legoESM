@@ -162,10 +162,19 @@ def _state(hydrostatic, seed=21):
     return st
 
 
-def _tracers(seed=22):
+def _tracers(seed=22, scale=1.0):
+    """``scale`` exists for the MOIST arm only.
+
+    The default tracers sit at O(1), which is fine while they are
+    passengers; once ``zvir != 0`` they enter ``pt*(1+zvir*q)`` and an
+    O(1) q would double the temperature.  The moist gates pass
+    ``scale=0.01`` so dp1 lands at a physical few per mil.  Both lanes
+    call this with the same seed and scale, so q is identical by
+    construction rather than by copying.
+    """
     rng = np.random.default_rng(seed)
-    return [[1.0 + 0.3 * t + 0.7 * iq
-             + 0.2 * rng.standard_normal((MA, MA, KM))
+    return [[scale * (1.0 + 0.3 * t + 0.7 * iq
+                      + 0.2 * rng.standard_normal((MA, MA, KM)))
              for iq in range(NQ)] for t in range(6)]
 
 
@@ -189,29 +198,37 @@ def _common(ptop, ak, bk, hydrostatic, k_split, n_split):
                 w_limiter=not hydrostatic)
 
 
-def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2):
+def _moist(zvir, sphum_index):
+    return {} if zvir == 0.0 else dict(zvir=zvir, sphum_index=sphum_index)
+
+
+def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
+            sphum_index=None, q_scale=1.0):
     ak, bk, ptop = eta
     st = _state(hydrostatic)
-    q = _tracers()
+    q = _tracers(scale=q_scale)
     press = _press_np(st, ptop)
     npdyn.fv_dynamics_step(ctx, st, press,
                            q=q, **_common(ptop, ak, bk, hydrostatic,
-                                          k_split, n_split))
+                                          k_split, n_split),
+                           **_moist(zvir, sphum_index))
     return st, press, q
 
 
-def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2):
+def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
+             sphum_index=None, q_scale=1.0):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
     # Tracer-major, matching this module's contract (nq entries, each
     # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
-    _t = _tracers()
+    _t = _tracers(scale=q_scale)
     q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
          for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q,
                                  **_common(ptop, ak, bk, hydrostatic,
-                                           k_split, n_split))
+                                           k_split, n_split),
+                                 **_moist(zvir, sphum_index))
 
 
 def _out_state(got):
@@ -262,6 +279,102 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
     # measured x 10.
     cmp_fields(np.asarray(got["q"]), want_q,
                f"q (hydro={hydrostatic}, k_split={k_split})", tol=3.5e-13)
+
+
+ZVIR = 0.6077338443  # rvgas/rdgas - 1, the pinned deck's constant
+
+Q_SCALE = 0.01  # physical specific humidity; see _tracers
+
+
+@pytest.mark.parametrize("k_split", [1, 2])
+def test_moist_hydrostatic_parity_against_the_spec(ctx, jctx, eta, k_split):
+    """The zvir arm, port against spec, over the same composition axis.
+
+    ``zvir != 0`` makes the tracers stop being passengers twice over:
+    dp1 = zvir*q(sphum) enters ``pt = pt*(1.+dp1)/pkz``
+    (fv_dynamics.F90:291/:402) at entry, and ``r_vir`` enters the
+    closing ``pt/(1+r_vir*q)`` (fv_mapz.F90:975) at exit.  Both hops are
+    on this path; a lane that wired only one would still return numbers.
+    """
+    ref_state, _ref_press, ref_q = _run_np(
+        ctx, eta, hydrostatic=True, k_split=k_split, zvir=ZVIR,
+        sphum_index=0, q_scale=Q_SCALE)
+    got = _run_jax(jctx, eta, hydrostatic=True, k_split=k_split, zvir=ZVIR,
+                   sphum_index=0, q_scale=Q_SCALE)
+    state = _out_state(got)
+    for nm in ("delp", "pt", "u", "v"):
+        want = np.stack([np.asarray(ref_state[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy moist {nm} (k={k_split})")
+        # TOL-PENDING(moist-parity)
+        cmp_fields(np.asarray(state[nm]), want,
+                   f"moist {nm} (k_split={k_split})", tol=3.2e-10)
+    want_q = np.stack([np.stack([ref_q[t][iq] for t in range(6)])
+                       for iq in range(NQ)])
+    assert_real(want_q, "numpy moist q")
+    # TOL-PENDING(moist-parity-q)
+    cmp_fields(np.asarray(got["q"]), want_q, f"moist q (k_split={k_split})",
+               tol=3.5e-13)
+
+
+def test_the_moist_arm_actually_changed_the_answer(ctx, jctx, eta):
+    """Anti-vacuity: without this, a zvir that was silently dropped on
+    the port side would pass the parity gate above by matching a spec
+    lane that had dropped it too.  Both lanes must MOVE, and move by
+    the same amount, relative to their own dry run.
+
+    dp1 ~ zvir*q ~ 6e-3 here, so pt moves in the third digit -- far
+    above any parity residual, which is why a plain magnitude assert is
+    enough and no tolerance is needed.
+    """
+    dry = _out_state(_run_jax(jctx, eta, hydrostatic=True, q_scale=Q_SCALE))
+    wet = _out_state(_run_jax(jctx, eta, hydrostatic=True, zvir=ZVIR,
+                              sphum_index=0, q_scale=Q_SCALE))
+    d_port = float(np.max(np.abs(np.asarray(wet["pt"])
+                                 - np.asarray(dry["pt"]))))
+    assert d_port > 1.0e-3, f"zvir moved pt by only {d_port:.3e} K"
+
+    dry_np, _, _ = _run_np(ctx, eta, hydrostatic=True, q_scale=Q_SCALE)
+    wet_np, _, _ = _run_np(ctx, eta, hydrostatic=True, zvir=ZVIR,
+                           sphum_index=0, q_scale=Q_SCALE)
+    d_spec = float(np.max(np.abs(
+        np.stack([dry_np[t]["pt"] for t in range(6)])
+        - np.stack([wet_np[t]["pt"] for t in range(6)]))))
+    # The two lanes must be moved by the SAME physics, not merely both
+    # moved: a port coupling the wrong tracer would also clear the
+    # magnitude assert above.
+    assert abs(d_port - d_spec) <= 1.0e-9 * max(d_spec, 1.0), \
+        f"port moved pt by {d_port:.6e}, spec by {d_spec:.6e}"
+
+
+def test_dry_branch_is_not_a_multiply_by_one(jctx, eta):
+    """``dp1=None`` must stay a DIFFERENT program from ``dp1=zeros``.
+
+    The certified 1.1866e-09 lane takes ``pt / pkz``; a zeros-array
+    "equivalent" takes ``pt*(1.+0)/pkz``, which rounds twice.  If these
+    two ever compare bitwise-equal the branch has stopped mattering and
+    the dry certification is being carried by luck.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    ref = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG)
+    wet = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                             dp1=jnp.zeros_like(pkz))
+    assert np.asarray(ref).tobytes() != np.asarray(wet).tobytes()
+
+    # And the moist branch must carry the ORACLE's association:
+    # (pt*(1+dp1))/pkz, not pt*((1+dp1)/pkz).  Those differ in the last
+    # ulp on generic data, and the port had the wrong one.
+    dp1 = jnp.asarray(0.0077 * np.ones_like(np.asarray(pkz)))
+    win = jst["pt"][:, NG:NG + N, NG:NG + N, :]
+    want = np.asarray(win * (1.0 + dp1) / pkz)
+    bad = np.asarray(win * ((1.0 + dp1) / pkz))
+    got = np.asarray(jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                                        dp1=dp1))[:, NG:NG + N,
+                                                  NG:NG + N, :]
+    assert got.tobytes() == want.tobytes()
+    # anti-vacuity: the two associations must actually differ on this
+    # data, or the assert above proves nothing about association.
+    assert want.tobytes() != bad.tobytes()
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -377,7 +490,15 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 # --------------------------------------------------------------------
 
 @pytest.mark.parametrize("kw,exc", [
-    ({"zvir": 0.61}, NotImplementedError),
+    # zvir is now ENABLED on the hydrostatic arm; what stays refused is
+    # the NH moist pkz (fv_dynamics.F90:307-309), and what stays
+    # VALIDATED is the sphum index.
+    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False},
+     NotImplementedError),
+    ({"zvir": 0.61}, ValueError),                       # sphum_index None
+    ({"zvir": 0.61, "sphum_index": -1}, ValueError),    # wrap-around
+    ({"zvir": 0.61, "sphum_index": NQ}, ValueError),    # out of range
+    ({"zvir": 0.61, "sphum_index": True}, ValueError),  # bool is not int
     ({"consv_te": 1.0}, NotImplementedError),
     ({"k_split": 0}, ValueError),
     ({"n_split": 0}, ValueError),
