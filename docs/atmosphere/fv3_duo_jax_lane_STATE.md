@@ -880,34 +880,49 @@ in the namelist). Both were shown to FIRE -- the dry deck is refused by
 name. `do_strat_HS_forcing` is deliberately NOT in the switch list, for
 the reason above; re-check `fv_phys.F90:533/:539` before changing that.
 
-### OPEN: one gate XLA will not compile (2026-08-20)
+### CLOSED: the gate XLA would not compile (2026-08-20)
 
-``test_nh_moist_pkz_is_recomputed_not_trusted[2]`` -- the k_split = 2
-arm of the pkz-substitution gate -- dies in XLA with ``LLVM compilation
-error: Cannot allocate memory`` after a 3m27s ``jit_scan`` compile
-inside ``sim1_solver``. It is SKIPPED with that reason, not deleted.
+``test_nh_moist_pkz_is_recomputed_not_trusted[2]`` died with ``LLVM
+compilation error: Cannot allocate memory`` after a ~11 min
+``jit_scan`` compile. MECHANISM NOW MEASURED, not guessed
+(`scripts/validate/fv3_native/nh_ksplit2_compile_probe.py`, job
+9447330):
 
-BOTH easy explanations were tested and REFUTED, so do not re-run them:
+    4 steps, k_split=2             -> step 1 ok (661 s), step 2 FAILS
+    4 steps, k_split=2, --clear    -> all 4 compile
+    4 steps, k_split=1             -> all 4 compile (~80 s each)
 
-* job 9443826 -- the same case ALONE at ``--mem=600G``: same failure.
-  Not the job's memory limit. (I had called it one before testing it;
-  the test refuted me.)
-* job 9443895 -- ``[2]`` alone in a FRESH process at 400G: same
-  failure. Not code memory accumulated across the module's other
-  compiled graphs, and not the ``[1]`` parametrization running first.
+It is compiled-CODE accumulation across eager ``fv_dynamics_step``
+calls, and ``jax.clear_caches()`` between them releases enough of it.
+The test makes FOUR step calls inside one test, which is why it hit the
+wall while the single-call parity gate never did. Un-skipped, with the
+clear between calls.
 
-THE MODEL CONFIGURATION IS NOT IN DOUBT. Moist NH at k_split = 2 runs
-and is asserted by ``test_moist_parity_against_the_spec[False-2]``,
-which PASSES in the same suite (job 9442759: 309 passed, this one
-failure). The blowup is in eagerly-executed ``lax.scan`` compilation,
-in a path the moist work does not touch.
+TWO EXPLANATIONS WERE TESTED AND REFUTED FIRST, so do not re-run them:
+the job's memory limit (9443826, the case alone at 600G: same failure)
+and accumulation across the module's other graphs (9443895, alone in a
+fresh process: same failure). I had called it a resource limit before
+testing it, and the test refuted me.
 
-What is actually lost is narrow and worth stating: GLM's k_split > 1
-question for THIS gate -- whether any consumer of the CALLER's pkz sits
-on a non-last-step path. The parity gate cannot answer it, because both
-lanes would consume a stale pkz alike. Closing it needs either a
-cheaper NH probe than a full second step, or the scan compile
-understood.
+### The energy fixer's conditioning is MEASURED (2026-08-20)
+
+GLM's MAJOR was that my float64-vs-fixed-point bound was relative to
+``sum |te0-te|*a`` rather than to the CANCELLING
+``|sum (te0-te)*a|`` that actually divides into ``dtmp``, amplified by
+a condition number nobody had measured.
+`scripts/validate/fv3_native/consv_te_conditioning.py` (job 9447329):
+
+    te0 column scale    1.171411e+10
+    kappa               1.757e+02      (cancellation amplification)
+    dtmp   np.sum       2.27705931723455220e-05
+    dtmp   math.fsum    2.27705931723455424e-05
+    |d dtmp| / dtmp     8.928e-16      -> >= 15 real digits
+
+So the honest bound is ``~1e-16 * kappa`` = ~2e-14, still far under the
+gate, and the summation choice is immaterial ON THIS STATE. The
+criticism was right in principle and the measurement clears it -- which
+is the difference between "measuring is not explaining" and having done
+both.
 
 ### What is still NOT certified
 
