@@ -112,6 +112,14 @@ RUN_TWIN_STEP1 = os.environ.get(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TWIN_STEP1",
 )
 IC_STEP = 230400  # y20 continuation day-0 (DINO_00230400_restart_*.nc per-rank tiles)
+# #1455 NOTE, so the next probe does not inherit a silent bug: 230400 steps x
+# 2700 s = 7200 d = EXACTLY 20 x the 360-day year, so at this IC a relative
+# seasonal clock happens to be in phase with the absolute one and the seasonal
+# forcing is bit-identical either way. That is a COINCIDENCE of this restart,
+# not a property of the harness -- every sibling probe that imports IC_STEP and
+# passes a bare `t_seconds=DT` is accidentally, not structurally, correct. The
+# loop below uses the absolute `kt` so a future non-year-boundary IC stays
+# right.
 STEPS_PER_DAY = 32  # RUN_TWIN_STEP1 covers exactly nit000+1 .. nit000+32 (one day)
 
 RECIPE = "nemo_dino_kamm_mlf"

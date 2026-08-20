@@ -211,10 +211,14 @@ def run_lego(recipe: str, out_path: str, n_days: int,
     # time_series_term_J/time_series_t already carry this at NO extra
     # compute cost (recorded every .sample() call above); saving them lets
     # any window (quarter, custom range) be sliced post-hoc without
-    # re-running the model. time_series_t[0]=0 is the day-0 baseline (no
+    # re-running the model. #1455: these times are ABSOLUTE model seconds --
+    # time_series_t[0] is the restart's own elapsed time (stamped below as
+    # seasonal_t0_seconds), NOT 0 -- and it is the day-0 baseline (no
     # preceding interval -> not in time_series_term_J, whose length is
     # n_samples-1); time_series_t[1:] are the interval-closing times the
     # J entries at the SAME index belong to.
+    # #1455: which seasonal clock / time origin produced these series.
+    save_kwargs["seasonal_t0_seconds"] = np.float64(t0_sec)
     for box_name, acc in accs.items():
         save_kwargs[f"{box_name}_ts_t"] = np.asarray(acc.time_series_t)
         for bi in range(len(DEPTH_BANDS_M)):
