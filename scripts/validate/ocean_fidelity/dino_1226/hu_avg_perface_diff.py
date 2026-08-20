@@ -416,6 +416,23 @@ def _run_one_step_capture():
     # the two sides on DIFFERENT baselines, |sshn - sshb| = 8.81e-05 m apart --
     # the same order as the increment being measured.
     eta_b = np.asarray(st0.eta_before.data)
+    # -- M1 LIVE-FLIP CONTROL (a control that perturbs a zero is not a control)
+    # "the two arms are bit-identical" is worthless unless the flag is shown to
+    # change SOMETHING in the same run: an inert flag and an exonerated one give
+    # the identical null.  ``barotropic_reconcile_target`` selects the
+    # depth-uniform target the 3-D VELOCITY is rebuilt on
+    # (barotropic_latlon_cgrid.py:1529-1544), so ``st.u`` MUST move across the
+    # arms while ``st.eta`` MUST NOT.  Both reductions are printed and dumped so
+    # the pair can be differenced between arms without re-running.
+    _u = np.asarray(st.u.data); _v = np.asarray(st.v.data)
+    print(f"  LIVE-FLIP CONTROL (diff these ACROSS arms): "
+          f"sum|u|={np.abs(_u).sum():.17e} sum|v|={np.abs(_v).sum():.17e} "
+          f"sum|eta|={np.abs(eta).sum():.17e}", flush=True)
+    _out = os.environ.get("DINO_M1_OUT", "")
+    if _out:
+        np.savez_compressed(_out, u=_u, v=_v, eta=eta, eta_before=eta_b,
+                            reconcile=np.array(_recon_env or (_card_recon or "")))
+        print(f"  [artifact] -> {_out}", flush=True)
     return eta, eta_b, st, st0
 
 
