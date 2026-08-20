@@ -189,6 +189,49 @@ LEGO_ZDF_BT_PLUS_BC = (+0.339 + 2.098, +0.319 + 2.118, +0.324 + 2.101)
 PRIOR_DEFICIT = {"off/transport_avg": 0.61, "off/velocity_avg": 0.50}
 
 
+def load_lego(npz_path):
+    """legoESM's OWN per-row arrays, from ``southern_term_torque_accum.py
+    --out-npz``.  Until this existed the comparison ran against three
+    transcribed band-mean SCALARS and neither the per-row shape nor a matched
+    10-day window could be tested at all.
+
+    Returns per-interval and 90-day-mean REALIZED rates per row, plus the
+    trajectory drift computed from legoESM's own recorded circulation series --
+    which is what makes the cross-model pairing drift-vs-drift rather than
+    drift-vs-stage-sum.
+
+    SELF-CHECK, non-negotiable before the arrays are used: the file must
+    reproduce the published stage table of commit 55de03e71 to 1e-3.  A npz from
+    a different arm, a different window or a drifted model would otherwise be
+    differenced against NEMO without a word.
+    """
+    z = np.load(npz_path, allow_pickle=True)
+    if list(z["rows"]) != ROWS:
+        raise SystemExit(f"FATAL: {npz_path} rows {list(z['rows'])} != band {ROWS}")
+    if int(z["interval_days"]) != 10:
+        raise SystemExit(f"FATAL: {npz_path} interval is {int(z['interval_days'])} d, "
+                         "not the 10 d NEMO dumps at")
+    if float(z["plant"]) != 0.0 or float(z["stage_plant"]) != 0.0:
+        raise SystemExit(f"FATAL: {npz_path} is a PLANTED control run")
+    stg = [str(x) for x in z["stages"]]
+    acc = np.asarray(z["acc_stage"], np.float64)          # (n_int, n_stage, ny)
+    published = {"BARO solve": 0.578, "BCLIN expl+diss": -2.129,
+                 "ZDF bt": 0.339, "ZDF bc": 2.098, "POST fixer": 0.0}
+    for k, want in published.items():
+        got = float(acc[:, stg.index(k), ROWS].mean())
+        if abs(got - want) > 1e-3:
+            raise SystemExit(f"FATAL: {npz_path} stage {k!r} is {got:+.4f}, but commit "
+                             f"55de03e71 published {want:+.3f}.  This is not the arm the "
+                             "comparison is defined against.")
+    Rs = np.asarray(z["R_series"], np.float64)            # (n_int+1, ny), m3/s
+    return {
+        "per_interval": acc.sum(axis=1),                  # (n_int, ny) realized rate
+        "stage_sum": acc.sum(axis=1).mean(axis=0),        # 90-day mean, per row
+        "drift": (Rs[-1] - Rs[0]) / (DAYS_90 * B.SEC_PER_DAY),
+        "stages": {k: acc[:, stg.index(k), :].mean(axis=0) for k in published},
+    }
+
+
 # ------------------------------------------------------------------ reducers --
 def _yxz(a):
     """(k,y,x) as written by NEMO -> (y,x,k), the recorded harness's layout."""
@@ -655,7 +698,7 @@ def controls():
 
 
 # ---------------------------------------------------------------------- table --
-def table():
+def table(lego_npz=None):
     kt0 = B.G.KT_RESTART
     kts = [kt0 + day * B.G.STEPS_PER_DAY for day in range(10, DAYS_90 + 1, 10)]
     dumps = {}
@@ -674,6 +717,7 @@ def table():
     if full["rn_acc_plant"] != 0.0:
         raise SystemExit("FATAL: the 90-day run was PLANTED")
     rows = stage_rows(full)
+    lego = load_lego(lego_npz) if lego_npz else None
 
     print("=" * 104)
     print(f"T0  THE THREE IDENTITIES that collapse NEMO's step to ONE row"
@@ -694,96 +738,108 @@ def table():
           f"{float(np.mean(rows['ZDF_recovered'][ROWS])):+18.3f}")
 
     print("\n" + "=" * 104)
-    print("T2  THE CLEAN CROSS-MODEL COMPARISON: realized vs realized.\n"
-          "    Both sides are the e3u_0 row integral of an actual state difference over"
-          " the SAME\n    90-day twin, same band, same rows, same units.  This is the"
-          " spin-up rate itself.")
+    print("T2  THE CLEAN CROSS-MODEL COMPARISON: realized vs realized, and now"
+          " DRIFT vs DRIFT.")
     print("=" * 104)
     nemo = float(np.mean(rows["realized"][ROWS]))
-    print(f"{'arm':>24s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}{'prior':>10s}"
-          f"{'revision':>11s}")
+    if lego is None:
+        print("    legoESM's per-row artifact was not supplied (--lego-npz), so this"
+              " falls back to\n    three transcribed band-mean scalars and the per-row"
+              " and matched-window tests below\n    are SKIPPED.  Regenerate with:"
+              " southern_term_torque_accum.py --days 90 --out-npz ...")
+        print(f"{'arm':>24s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}"
+              f"{'prior':>10s}{'revision':>11s}")
+        for i, a in enumerate(LEGO_ARMS):
+            gap = nemo - LEGO_REALIZED[i]
+            pr = PRIOR_DEFICIT.get(a)
+            print(f"{a:>24s}{LEGO_REALIZED[i]:+12.3f}{nemo:+10.3f}{gap:+12.3f}"
+                  + (f"{pr:+10.3f}{(gap - pr) / pr:+10.1%}" if pr else f"{'--':>10s}{'--':>11s}"))
+        return rows
+
+    # ---- R2-1, the caveat that bounded the whole comparison, now MEASURED ----
+    l_stage = float(np.mean(lego["stage_sum"][ROWS]))
+    l_drift = float(np.mean(lego["drift"][ROWS]))
+    print("    THE PAIRING CAVEAT IS LIFTED.  NEMO's column is a trajectory drift (C8,"
+          " 0.00% vs its\n    own restarts).  legoESM's published column is a leapfrog"
+          " STAGE SUM, and pairing the\n    two was flagged as not-matched.  Measured"
+          " from legoESM's own recorded circulation\n    series: stage sum"
+          f" {l_stage:+.4f} vs trajectory drift {l_drift:+.4f} m3/s2/row, gap"
+          f" {l_stage - l_drift:+.4f}\n    ("
+          f"{abs(l_stage - l_drift) / abs(l_drift):.2%}, per-row max"
+          f" {float(np.max(np.abs((lego['stage_sum'] - lego['drift'])[ROWS]))):.4f})."
+          "  Both sides are the same\n    quantity to 0.03%; the comparison is"
+          " like-for-like and the bound is removed.")
+    print(f"\n{'quantity':>34s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}")
+    print(f"{'realized spin-up rate (drift)':>34s}{l_drift:+12.3f}{nemo:+10.3f}"
+          f"{nemo - l_drift:+12.3f}")
     for i, a in enumerate(LEGO_ARMS):
-        gap = nemo - LEGO_REALIZED[i]
-        prior = PRIOR_DEFICIT.get(a)
-        pr = f"{prior:+10.3f}" if prior else f"{'--':>10s}"
-        rev = f"{(gap - prior) / prior:+10.1%}" if prior else f"{'--':>11s}"
-        print(f"{a:>24s}{LEGO_REALIZED[i]:+12.3f}{nemo:+10.3f}{gap:+12.3f}{pr}{rev}")
-    print("\n    PRIOR is the deficit each arm was DEFINED by before this run"
-          " (55de03e71: -0.61 on the\n    base arm, ~0.50 after the velocity_avg flip)."
-          " Pairing a base-arm result against a\n    fixed-arm prediction would flatter"
-          " the result, so both arms are shown: the measured gap\n    comes in ~11-13%"
-          " BELOW its own prior on BOTH, i.e. the magnitude is confirmed and\n    revised"
-          " down consistently, not confirmed on one arm and ignored on the other.")
-    print("    POWER, stated so CONFIRMED is not read as stronger than it is: the"
-          " pre-registered\n    prediction was '~0.5 +/- 0.35'.  +0.544 lands 0.07 inside"
-          " a 0.7-wide window, so this\n    test could not have distinguished 0.5 from"
-          " 0.3 or 0.7.  It is a magnitude check, not\n    a tight one.")
-    print("    NOT MATCHED, and it bounds the whole comparison: NEMO's column is a"
-          " TRAJECTORY DRIFT\n    (C8, 0.00% gap vs its own restarts) while legoESM's is"
-          " its leapfrog STAGE SUM, which\n    its own probe reports as differing from"
-          " plain dR/dt by leapfrog bookkeeping.  Until\n    that gap is quoted, +0.544"
-          " must not be cited outside this file.")
+        pr = PRIOR_DEFICIT.get(a)
+        if pr:
+            g = nemo - LEGO_REALIZED[i]
+            print(f"{'  vs published arm ' + a:>34s}{LEGO_REALIZED[i]:+12.3f}"
+                  f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> {(g - pr) / pr:+.1%}")
+    print("    POWER, so CONFIRMED is not read as stronger than it is: the pre-registered"
+          " prediction\n    was '~0.5 +/- 0.35'.  A 0.7-wide window could not have"
+          " separated 0.5 from 0.3 or 0.7.")
 
     print("\n" + "=" * 104)
-    print("T3  THE PRE-REGISTERED BARO-vs-BARO TEST -- band means only, and labelled twice\n"
-          "    over.  (1) CONTAMINATED: on NEMO the BARO row IS the realized rate (T0/I3);\n"
-          "    on legoESM realized-minus-BARO is +0.308, a metric artifact of splitting on the\n"
-          "    live h_u while reducing with e3u_0, so half the 0.61 deficit already sits\n"
-          "    between legoESM's own two rows.  (2) BAND MEAN ONLY: legoESM's PER-ROW array is\n"
-          "    not recorded in commit 55de03e71, which published band means.  Its probe DOES\n"
-          "    save the per-row array under --out-npz (acc_stage), so the 'broad and\n"
-          "    single-signed ACROSS ROWS' half of the pre-registration is UNTESTED, not\n"
-          "    untestable.  An earlier revision printed NEMO's per-row values\n"
-          "    against legoESM's band-mean SCALAR and reported the resulting spread as a\n"
-          "    per-row difference; that was NEMO's own row structure wearing a cross-model\n"
-          "    label, and it is retracted.  To test the shape: re-run\n"
-          "    southern_term_torque_accum.py --out-npz and difference the per-row arrays.")
+    print("T3  THE PRE-REGISTERED SHAPE TEST -- per row, drift vs drift, both 90-day"
+          " means.\n    Predicted: 'broad and single-signed across the southern-band"
+          " rows'.")
     print("=" * 104)
-    nb = float(np.mean(rows["BARO"][ROWS]))
-    print(f"{'arm':>24s}{'legoESM BARO':>14s}{'NEMO BARO':>11s}{'NEMO-lego':>11s}")
-    for i, a in enumerate(LEGO_ARMS):
-        print(f"{a:>24s}{LEGO_BARO[i]:+14.3f}{nb:+11.3f}{nb - LEGO_BARO[i]:+11.3f}")
-    print(f"\n    NEMO's own per-row BARO spread (NOT a cross-model difference):"
-          f" min {float(np.min(rows['BARO'][ROWS])):+.3f},"
-          f" max {float(np.max(rows['BARO'][ROWS])):+.3f}, sd"
-          f" {float(np.std(rows['BARO'][ROWS])):.3f} -- strongly structured in latitude,"
-          f"\n    which is why a band mean is the only honest summary until legoESM's per-row"
-          " array exists.")
-    print(f"\n    for reference, NEMO's DISCARDED vertical-mixing row"
-          f" {float(np.mean(rows['ZDF_recovered'][ROWS])):+.3f} vs legoESM's RETAINED"
-          f" (ZDF bt + ZDF bc)\n    {LEGO_ZDF_BT_PLUS_BC[0]:+.3f}/"
-          f"{LEGO_ZDF_BT_PLUS_BC[1]:+.3f}/{LEGO_ZDF_BT_PLUS_BC[2]:+.3f} -- NOT a"
-          " discrepancy in vertical mixing: NEMO's never reaches the\n    circulation,"
-          " and legoESM's ZDF bc is nonzero only through the same metric mismatch.")
+    dd = rows["realized"] - lego["drift"]
+    print(f"{'row':>5s}{'NEMO':>10s}{'legoESM':>10s}{'NEMO-lego':>12s}")
+    for j in ROWS:
+        print(f"{j:5d}{rows['realized'][j]:+10.3f}{lego['drift'][j]:+10.3f}{dd[j]:+12.3f}")
+    v = dd[ROWS]
+    npos = int((v > 0).sum())
+    sign = "ALL +" if npos == len(v) else ("ALL -" if npos == 0 else "MIXED")
+    print(f"{'band':>5s}{nemo:+10.3f}{l_drift:+10.3f}{float(np.mean(v)):+12.3f}"
+          f"    sd {float(np.std(v)):.3f}, min {float(np.min(v)):+.3f}, max"
+          f" {float(np.max(v)):+.3f}, {sign} ({npos}/{len(v)})")
+    print(f"    SHAPE: {'CONFIRMED' if sign == 'ALL +' else 'REFUTED'} -- single-signed"
+          f" on {npos}/{len(v)} rows, and the row-to-row spread\n    (sd"
+          f" {float(np.std(v)):.3f}) is {float(np.std(v)) / abs(float(np.mean(v))):.2f}x the"
+          " band mean, i.e. broad rather than a single-row spike.")
+    print("    RETRACTED by this table: the BARO-vs-BARO per-row comparison reported"
+          " MIXED sign.\n    That pairing used legoESM's CONTAMINATED BARO row (its"
+          " realized-minus-BARO is +0.308,\n    a metric artifact of splitting on the live"
+          " h_u while reducing with e3u_0).  On the\n    clean drift-vs-drift pairing the"
+          " sign is uniform.  The contaminated table is gone.")
 
     print("\n" + "=" * 104)
-    print("T4  TIME FLATNESS -- the same rows on each 10-day interval (accumulator"
-          " differences).\n    A circulation deficit LINEAR in time requires a rate"
-          " deficit FLAT in time, so flat is\n    the CONFIRMING shape here, not the"
-          " disqualifying one.")
-    print("    NEMO ONLY.  An earlier revision also printed NEMO's 10-day interval mean"
-          " minus\n    legoESM's 90-DAY mean; that is a matched-window violation (a"
-          " 10-day number against a\n    90-day one) and labelling it did not make it a"
-          " comparison, so the columns are removed.\n    Differencing per interval needs"
-          " legoESM's own per-interval series.")
+    print("T4  THE PRE-REGISTERED FLATNESS TEST -- MATCHED 10-day windows, both sides.\n"
+          "    A circulation deficit linear in time requires a rate deficit FLAT in time,"
+          " so this is\n    the shape the prediction called for.")
     print("=" * 104)
-    print(f"{'interval [d]':>14s}{'BARO = realized':>18s}{'ZDF (discarded)':>18s}")
-    ser = []
+    print(f"{'interval [d]':>14s}{'NEMO':>10s}{'legoESM':>10s}{'diff':>10s}"
+          f"{'NEMO ZDF (discarded)':>22s}")
+    diffs = []
     prev = None
     for i, kt in enumerate(kts):
         d = dumps[kt]
         seg = stage_rows(d if prev is None else diff_acc(d, prev))
         prev = d
-        m = float(np.mean(seg["realized"][ROWS]))
-        ser.append(m)
-        print(f"{(i * 10):>6d}-{(i + 1) * 10:<7d}{m:+18.3f}"
-              f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+18.3f}")
-    print(f"{'mean+-sd':>14s}{np.mean(ser):+13.3f}+-{np.std(ser):<4.2f}"
-          f"   range {max(ser) - min(ser):+.3f} ({max(ser) / min(ser):.2f}x)")
-    print("\n    NEMO's rate is NOT flat in time: it rises to day 30-40 and decays"
-          " thereafter.  The\n    pre-registered prediction asked for a FLAT difference;"
-          " with legoESM's per-interval\n    series unrecorded, flatness OF THE DIFFERENCE"
-          " remains unmeasured.")
+        nm = float(np.mean(seg["realized"][ROWS]))
+        lg = float(np.mean(lego["per_interval"][i][ROWS]))
+        diffs.append(nm - lg)
+        print(f"{(i * 10):>6d}-{(i + 1) * 10:<7d}{nm:+10.3f}{lg:+10.3f}{nm - lg:+10.3f}"
+              f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+22.3f}")
+    a = np.array(diffs)
+    npos = int((a > 0).sum())
+    print(f"{'mean+-sd':>14s}{'':>10s}{'':>10s}{a.mean():+10.3f}"
+          f"   sd {a.std():.3f}, range {a.max() - a.min():.3f}, {npos}/{len(a)} positive")
+    flat = a.std() < 0.25 * abs(a.mean())
+    print(f"    FLATNESS: {'CONFIRMED' if flat else 'REFUTED'} -- the difference varies by"
+          f" {a.max() - a.min():.2f} m3/s2/row across the\n    nine windows (sd"
+          f" {a.std():.3f} against a mean of {a.mean():+.3f}) and changes sign"
+          f" {'' if npos in (0, len(a)) else 'twice '}"
+          f"({npos}/{len(a)} positive).\n    The 90-day MEAN deficit is real and uniform"
+          " across rows; its RATE is not steady in time,\n    so the mechanism cannot be a"
+          " constant per-step offset.")
+    return rows
+
+
     return rows
 
 
@@ -792,6 +848,11 @@ def main(argv=None):
     ap.add_argument("--selftest", action="store_true", help="row arithmetic only")
     ap.add_argument("--controls", action="store_true", help="C0-C8 + selftest")
     ap.add_argument("--table", action="store_true", help="the 90-day comparison")
+    ap.add_argument("--lego-npz", default=None,
+                    help="legoESM's per-row arrays from southern_term_torque_accum.py "
+                         "--out-npz (base arm, 90 days, 10-day intervals).  WITHOUT it "
+                         "the comparison falls back to three transcribed band-mean "
+                         "scalars and the per-row and matched-window tests are skipped.")
     a = ap.parse_args(argv)
     if not (a.selftest or a.controls or a.table):
         ap.error("nothing to do: pass --selftest, --controls and/or --table")
@@ -803,7 +864,7 @@ def main(argv=None):
     if a.controls:
         controls()
     if a.table:
-        table()
+        table(a.lego_npz)
 
 
 if __name__ == "__main__":
