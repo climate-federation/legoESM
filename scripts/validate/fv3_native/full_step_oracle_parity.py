@@ -95,6 +95,10 @@ ADVECTED_TRACERS = ("sphum", "liq_wat")
 # is still four orders tighter than "did anything move", and a dropped,
 # halved or mis-signed coupling cannot pass it.
 MOIST_RESPONSE_MAX_REL = 0.2
+# A response only carries information where it clears the parity floor.
+# At one step that is pt alone: u/v/delp move at rounding scale on both
+# sides, and comparing two noise fields returns ~2.0 by construction.
+MOIST_RESPONSE_SNR = 10.0
 INERT_TRACERS = ("rainwat",)
 
 # The IC control must land at the quad-geometry floor. 1e-12 is two
@@ -1605,25 +1609,47 @@ def main(argv=None):
         # that scale for u/v, so this scores on identical terms.
         mapped = [apply_map(resp_p[pf], resp_o[perm[pf]], meta[pf][perm[pf]])
                   for pf in range(6)]
-        worst_rel, worst_f, any_signal = 0.0, None, False
+        # A RESPONSE BELOW THE PARITY FLOOR IS NOT A RESPONSE. At one
+        # step the moist signal lives in pt (~3.2 K); u, v and delp move
+        # only at rounding scale (~3e-13, ~3e-11) on BOTH sides, and
+        # rel() on two uncorrelated noise fields of equal magnitude
+        # returns exactly 2.0 -- which is what the first version of this
+        # gate reported as a failure. That was comparing two zeros. So a
+        # field/face is SCORED only where the oracle's own response
+        # clears its own port-vs-oracle residual by a decade; everything
+        # else is reported as carrying no resolvable signal.
+        state_map = [apply_map(p_1[pf], orc_1[perm[pf]], meta[pf][perm[pf]])
+                     for pf in range(6)]
+        worst_rel, worst_f, any_signal, n_scored = 0.0, None, False, 0
         for f in fields:
-            row_p, row_o = [], []
+            row_p, row_o, marks = [], [], []
             for pf in range(6):
                 pairs_r, ws_r = mapped[pf]
                 a, b = pairs_r[f]
+                sa, sb = state_map[pf][0][f]
+                resid = float(np.abs(sa - sb).max())
                 pk_p, pk_o = float(np.abs(a).max()), float(np.abs(b).max())
                 row_p.append(pk_p)
                 row_o.append(pk_o)
-                if pk_p == 0.0 and pk_o == 0.0:
-                    continue          # a component that is identically 0
+                if pk_o <= MOIST_RESPONSE_SNR * resid:
+                    marks.append(".")     # below the floor: not scored
+                    continue
+                marks.append("*")
                 any_signal = any_signal or pk_p > 0.0
+                n_scored += 1
                 r = rel(a, b, ws_r if f in ("u", "v") else None)
                 if r > worst_rel:
                     worst_rel, worst_f = r, f"{f} face{pf + 1}"
             print(f"  {f:5s} port response "
-                  + "  ".join(f"{x:9.4g}" for x in row_p))
+                  + "  ".join(f"{x:9.4g}" for x in row_p)
+                  + "   scored: " + "".join(marks))
             print(f"        oracle       "
                   + "  ".join(f"{x:9.4g}" for x in row_o))
+        if n_scored == 0:
+            raise SystemExit(
+                "MOIST-SIGNAL GATE FAILED: NO field/face has a moist "
+                "response that clears its own parity residual, so this "
+                "run cannot say whether the coupling is live at all.")
         if not any_signal:
             raise SystemExit(
                 "MOIST-SIGNAL GATE FAILED: the port's moist and dry runs "
@@ -1637,8 +1663,10 @@ def main(argv=None):
                 f"port moves under zvir, but not the way the oracle "
                 f"does.")
         print(f"MOIST-SIGNAL GATE PASSED: worst port-vs-oracle response "
-              f"rel {worst_rel:.3e} at {worst_f} "
-              f"(limit {MOIST_RESPONSE_MAX_REL:.0e}).")
+              f"rel {worst_rel:.3e} at {worst_f} over {n_scored} scored "
+              f"field/face pairs (limit {MOIST_RESPONSE_MAX_REL:.0e}; "
+              f"pairs whose response sits under {MOIST_RESPONSE_SNR}x "
+              f"their own residual are marked '.' above and not scored).")
 
     # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
     # different causes and one number separates them: if the PORT's own
