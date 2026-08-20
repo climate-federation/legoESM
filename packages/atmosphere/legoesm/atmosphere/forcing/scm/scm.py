@@ -900,9 +900,19 @@ class SingleColumnModel:
         # consistent tracer registry rather than relying on the
         # auto-materialisation path in _apply_tendencies.
         if state.tracers is not None and physics_config.microphysics.scheme != "none":
-            extra_keys = ("q_c", "q_r", "q_i", "q_s")
-            if microphysics_substeps > 1:
-                extra_keys = extra_keys + ("q_g",)
+            # q_g is in this list UNCONDITIONALLY. It used to be added only
+            # when microphysics_substeps > 1, but the SPECIES a scheme emits is
+            # decided by the scheme, not by the substep count: measured, both
+            # kessler and morrison return a q_g tendency on their first call at
+            # substeps == 1, so the tracer dict GREW by one key after step 1.
+            # A carry whose pytree changes between steps cannot go through
+            # lax.scan/lax.cond, which is why every attempt to run the
+            # LES-vs-SCM tuner with condensation switched on died in the
+            # rollout with "cond branch outputs must have the same pytree
+            # structure ... symmetric difference of key sets: {'q_g'}".
+            # Pre-allocating a zero field changes no physics; it only makes the
+            # species appear at t=0 instead of after the first step.
+            extra_keys = ("q_c", "q_r", "q_i", "q_s", "q_g")
             new_tracers = dict(state.tracers)
             for k in extra_keys:
                 if k not in new_tracers:

@@ -123,6 +123,13 @@ class SAMSCMCaseSpec:
     # column still spans the full domain.
     les_sponge_frac: float
     note: str
+    # Cloud-droplet concentration the case's LES prescribes [1/m^3], for the
+    # cases whose driver sets one. None means the microphysics default stands,
+    # which is what the LES uses too. Carried for the same reason as les_f_c
+    # and the bulk coefficients: with condensation now ON in the single-column
+    # arm, a droplet number that differs from the LES's is a different drizzle
+    # rate and therefore a different liquid water path on the two sides.
+    les_n_c_m3: float | None = None
 
 
 # Only cases with a legoESM LES driver are registered: the whole point of this
@@ -157,6 +164,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         note="ASTEX flight 209 stratocumulus; prescribed surface fluxes "
              "(SHF 10, LHF 25 W/m^2), same Stevens (2005) simple longwave as "
              "DYCOMS via doradsimple.",
+        les_n_c_m3=100.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
     ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
@@ -165,6 +173,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         les_f_c=0.376e-4, les_sponge_frac=0.85,
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
+        les_n_c_m3=140.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
     ),
     "rf02": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF02", latitude_deg=31.5, les_domain_top_m=1500.0,
@@ -182,6 +191,7 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
              "prescribed surface fluxes (SHF 16, LHF 93 W/m^2), same Stevens "
              "(2005) simple longwave as RF01 via doradsimple, and the deck's "
              "SHEARED geostrophic wind.",
+        les_n_c_m3=55.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
     ),
 }
 
