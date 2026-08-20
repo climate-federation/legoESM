@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=glab
-#SBATCH --partition=short
+#SBATCH --partition=glab1
 #SBATCH --job-name=iceab30
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
