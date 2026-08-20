@@ -4,7 +4,7 @@
 #SBATCH --job-name=blqv_disc
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --time=04:00:00
+#SBATCH --time=11:30:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/logs/blqv_disc_%j.out
 set +e
 WT=${WT:?}; PIN=${PIN:?}
