@@ -229,19 +229,27 @@ PUBLISHED_ARMS = {
     # The three arms of commit 55de03e71's stage table, band means [m3/s2 per
     # u-row].  ``transport_avg`` is the CARD's own resolved default; the gate
     # used to hard-code it alone, which made the second arm unloadable and so
-    # made the M2 shape test unrunnable.  Every entry here is the published
-    # number, and each is reproduced by its npz to <=1e-3 (measured before this
-    # table was written -- an allow-list reason string is a claim).
-    "transport_avg": {"BARO solve": 0.578, "BCLIN expl+diss": -2.129,
-                      "ZDF bt": 0.339, "ZDF bc": 2.098, "POST fixer": 0.0},
-    "velocity_avg": {"BARO solve": 0.707, "BCLIN expl+diss": -2.148,
-                     "ZDF bt": 0.319, "ZDF bc": 2.118, "POST fixer": 0.0},
-    "true_T_depth": {"BARO solve": 0.368, "BCLIN expl+diss": -2.130,
-                     "ZDF bt": 0.324, "ZDF bc": 2.101, "POST fixer": 0.0},
+    # made the M2 shape test unrunnable.  PROVENANCE of the <=1e-3 reproduction
+    # claim (an allow-list reason string is a claim, so it gets a command):
+    # measured 2026-08-19 from the recorded arms /tmp/dino_stage/v2_off_transport
+    # .npz, v2_off_velocity.npz, v2_gdept.npz -- for each, np.load then
+    # acc_stage[:, stages.index(k), rows].mean().  Max deviation over all 15
+    # entries was 3e-4.  Those npz live outside the repo and are NOT tracked;
+    # regenerate with southern_term_torque_accum.py --days 90 --out-npz.
+    # KEYS ARE ``LEGO_ARMS``' OWN NAMES, not bare reconcile-target values: the
+    # third arm ALSO runs transport_avg (it differs in the T-depth ladder), so a
+    # key of "transport_avg" would imply a 1:1 map to the config field that does
+    # not exist.
+    "off/transport_avg": {"BARO solve": 0.578, "BCLIN expl+diss": -2.129,
+                          "ZDF bt": 0.339, "ZDF bc": 2.098, "POST fixer": 0.0},
+    "off/velocity_avg": {"BARO solve": 0.707, "BCLIN expl+diss": -2.148,
+                         "ZDF bt": 0.319, "ZDF bc": 2.118, "POST fixer": 0.0},
+    "trueT/transport_avg": {"BARO solve": 0.368, "BCLIN expl+diss": -2.130,
+                            "ZDF bt": 0.324, "ZDF bc": 2.101, "POST fixer": 0.0},
 }
 
 
-def load_lego(npz_path, arm="transport_avg"):
+def load_lego(npz_path, arm="off/transport_avg"):
     """legoESM's OWN per-row arrays, from ``southern_term_torque_accum.py
     --out-npz``.  Until this existed the comparison ran against three
     transcribed band-mean SCALARS and neither the per-row shape nor a matched
@@ -752,7 +760,7 @@ def controls():
 
 
 # ---------------------------------------------------------------------- table --
-def table(lego_npz=None, arm="transport_avg", out_npz=None):
+def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
     kt0 = B.G.KT_RESTART
     kts = [kt0 + day * B.G.STEPS_PER_DAY for day in range(10, DAYS_90 + 1, 10)]
     dumps = {}
@@ -829,8 +837,13 @@ def table(lego_npz=None, arm="transport_avg", out_npz=None):
     print(f"{'realized spin-up rate (drift)':>34s}{l_drift:+12.3f}{nemo:+10.3f}"
           f"{nemo - l_drift:+12.3f}")
     for i, a in enumerate(LEGO_ARMS):
+        # ARM-MATCHED ONLY.  The old hard-coded gate structurally prevented
+        # pairing a base-arm prediction with a different arm's result; once
+        # --lego-arm existed this loop became arm-blind and would print
+        # "vs published arm off/transport_avg ... prior +0.61" directly under a
+        # velocity_avg drift.  Restore the guard the gate used to provide.
         pr = PRIOR_DEFICIT.get(a)
-        if pr:
+        if pr and a == arm:
             g = nemo - LEGO_REALIZED[i]
             print(f"{'  vs published arm ' + a:>34s}{LEGO_REALIZED[i]:+12.3f}"
                   f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> {(g - pr) / pr:+.1%}")
@@ -885,16 +898,6 @@ def table(lego_npz=None, arm="transport_avg", out_npz=None):
         print(f"{(i * 10):>6d}-{(i + 1) * 10:<7d}{nm:+10.3f}{lg:+10.3f}{nm - lg:+10.3f}"
               f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+22.3f}")
     a = np.array(diffs)
-    if out_npz:
-        # M2 needs the two curves as ARRAYS: the per-window comparison is made
-        # BETWEEN arms, and a printed table cannot be differenced.  Sign
-        # convention is stamped in the file so it cannot be mis-read later.
-        np.savez_compressed(
-            out_npz, nemo_per_window=np.array(nemo_w), lego_per_window=np.array(lego_w),
-            diff_nemo_minus_lego=a, interval_days=10, arm=np.array(arm),
-            nemo_band_mean=nemo, lego_band_mean=l_drift,
-            sign=np.array("diff = NEMO - legoESM"))
-        print(f"    [artifact] -> {out_npz}")
     npos = int((a > 0).sum())
     print(f"{'mean+-sd':>14s}{'':>10s}{'':>10s}{a.mean():+10.3f}"
           f"   sd {a.std():.3f}, range {a.max() - a.min():.3f}, {npos}/{len(a)} positive")
@@ -906,6 +909,28 @@ def table(lego_npz=None, arm="transport_avg", out_npz=None):
           f"({npos}/{len(a)} positive).\n    The 90-day MEAN deficit is real and uniform"
           " across rows; its RATE is not steady in time,\n    so the mechanism cannot be a"
           " constant per-step offset.")
+
+    # M2 needs the two curves as ARRAYS: the per-window comparison is made
+    # BETWEEN arms and a printed table cannot be differenced.  Written LAST so
+    # an abort anywhere above never leaves a half-meaningful artifact on disk,
+    # and stamped with the git SHA -- an unstamped curve cannot be tied to the
+    # code that made it.
+    if out_npz:
+        import subprocess
+        try:
+            _sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(
+                os.path.abspath(__file__)), capture_output=True, text=True,
+                timeout=30).stdout.strip() or "<no-sha>"
+        except Exception as exc:
+            _sha = f"<unavailable: {exc}>"
+        np.savez_compressed(
+            out_npz, nemo_per_window=np.array(nemo_w),
+            lego_per_window=np.array(lego_w), diff_nemo_minus_lego=a,
+            interval_days=10, arm=np.array(arm), nemo_band_mean=nemo,
+            lego_band_mean=l_drift, git=np.array(_sha),
+            lego_npz=np.array(str(lego_npz)),
+            sign=np.array("diff = NEMO - legoESM"))
+        print(f"    [artifact] -> {out_npz}  (git={_sha})")
     return rows
 
 
@@ -922,18 +947,28 @@ def main(argv=None):
                          "--out-npz (base arm, 90 days, 10-day intervals).  WITHOUT it "
                          "the comparison falls back to three transcribed band-mean "
                          "scalars and the per-row and matched-window tests are skipped.")
-    ap.add_argument("--lego-arm", default="transport_avg",
+    ap.add_argument("--lego-arm", default="off/transport_avg",
                     choices=sorted(PUBLISHED_ARMS),
                     help="which arm of commit 55de03e71's stage table --lego-npz is "
                          "expected to be; the self-check gates against that arm's "
-                         "published band means.  Default transport_avg = the CARD's "
-                         "own resolved barotropic_reconcile_target.")
+                         "published band means.  Default off/transport_avg = the "
+                         "CARD's own resolved barotropic_reconcile_target on the "
+                         "off-ladder.")
     ap.add_argument("--out-npz", default=None,
                     help="save the matched-window NEMO and legoESM curves + their "
                          "difference (sign stamped in the file) for cross-arm analysis.")
     a = ap.parse_args(argv)
     if not (a.selftest or a.controls or a.table):
         ap.error("nothing to do: pass --selftest, --controls and/or --table")
+    # Both of these are inert without the legoESM artifact -- table() returns
+    # early when lego is None, so --out-npz would promise an artifact and write
+    # nothing.  Refuse rather than no-op.
+    if a.lego_npz is None:
+        if a.out_npz:
+            ap.error("--out-npz needs --lego-npz: without it the matched-window "
+                     "comparison is skipped and there is no curve to save")
+        if "--lego-arm" in (argv if argv is not None else sys.argv[1:]):
+            ap.error("--lego-arm needs --lego-npz: there is no artifact to gate")
     print(f"[protocol] band = T-rows {ROWS[0]}..{ROWS[-1]} (row 0 dry), reducer ="
           " southern_circulation_budget.row_int_trend, units m3/s2 per u-row, fp64")
     print(f"[protocol] oracle runs under {DINO}")
