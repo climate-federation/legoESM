@@ -26,6 +26,30 @@
 #   coeff 20 still >> 16.67                    => the coefficient is NOT the
 #                                                 lever; look at SW under ice
 #                                                 or the ice thermo albedo
+#
+# 2026-08-20 RESULT, and a correction to the units above. Both sides of that
+# comparison were weighted by cos(lat) on a curvilinear mesh, and our side
+# converted ice with 1000 kg/m3 instead of rho_ice=917. On true area, with
+# the right density (commit 036832cdb):
+#   NEMO runoff+ice residual S of 45S : 11.85e-6   (not 16.67)
+#   coeff 70, days 3-5                : 33.7e-6    (2.8x NEMO)
+#   coeff 20, days 3-5                : 21.7e-6    (1.8x NEMO)
+# So NEITHER preregistered branch fired cleanly: a 3.5x cut in the
+# coefficient buys 36% less ice loss -- a real but SUB-LINEAR lever that
+# does not reach NEMO. Linear extrapolation (0.236e-6 per unit coefficient)
+# says even coeff=0 leaves ~19e-6, still 1.6x NEMO, which would mean a heat
+# source OTHER than the basal turbulent exchange dominates our melt.
+#
+# That extrapolation across a nonlinear closure is PLAUSIBLE, not measured,
+# so coeff=0 is run to settle it. PRE-REGISTERED, days 3-5 mean:
+#   >= 15e-6  => CONFIRMED: the exchange coefficient cannot close the gap;
+#                the dominant term is elsewhere (SW under ice, ice albedo,
+#                or a too-warm mixed layer). Stop tuning the coefficient.
+#   <= 12e-6  => REFUTED: the extrapolation was wrong, the coefficient IS
+#                the whole story, and the card's 70 is simply too large.
+#   12-15e-6  => inconclusive; the lever is real but partial, and the
+#                remaining gap is inside the instrument's known caveats
+#                (inventory tendency includes export, excludes snow).
 # ============================================================================
 set -uo pipefail
 ARM=rfw
@@ -38,7 +62,11 @@ echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
-OUT=$ROOT/results/omip_nemo/nemolev_trp_icecoef_probe
+# Codex 9442707 MAJOR: every coefficient arm wrote the SAME directory, so a
+# second arm silently overwrote the first one's snapshots and the comparison
+# would have been scored against whichever ran last. Key the output on the
+# coefficient under test.
+OUT=$ROOT/results/omip_nemo/nemolev_trp_icecoef${2:?coeff}_probe
 
 echo "=== gate: unit tests for the reduction semantics + CLI wiring ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_polar_cap_boost.py \
