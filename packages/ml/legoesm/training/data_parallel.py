@@ -395,7 +395,7 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
-                                    comm=None, on_epoch=None):
+                                    comm=None, on_epoch=None, start_epoch=0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -405,7 +405,16 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     ``loss_fn(params, sample) -> scalar`` is jitted ONCE here, before the loops
     (:func:`build_dp_value_and_grad`); every sample then reuses that single
     traced forward+adjoint. Building it inside either loop reintroduces #1364.
+
+    ``start_epoch`` resumes a run: epochs before it are not re-run, and the
+    epoch INDEX passed to ``on_epoch`` keeps counting from where the previous
+    job stopped, so its checkpoints do not overwrite that job's.  The learning
+    -rate schedule is NOT re-derived from it — the schedule position lives in
+    the optimizer state, which a resuming caller restores.
     """
+    if not 0 <= start_epoch <= n_epochs:
+        raise ValueError(
+            f"start_epoch={start_epoch} outside [0, n_epochs={n_epochs}]")
     import jax
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
@@ -416,7 +425,7 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     n_steps_done = 0
 
     history = []
-    for epoch in range(n_epochs):
+    for epoch in range(start_epoch, n_epochs):
         losses = []
         n_skipped = 0
         for sample in local_samples:
