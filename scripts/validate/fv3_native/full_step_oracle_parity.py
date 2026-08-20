@@ -87,6 +87,12 @@ NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
 # advected+remapped, the dnats tail (rainwat) is INERT -- fv_dynamics.F90
 # :191 `nq = nq_tot - flagstruct%dnats`.
 ADVECTED_TRACERS = ("sphum", "liq_wat")
+# The moist RESPONSE (moist deck minus dry deck) is a first-order
+# quantity, not a residual, so port and oracle should agree on it to
+# well within a factor. 3x is loose enough that the ~1e-9..1e-4 parity
+# noise riding on each side cannot trip it, and tight enough that a
+# dropped or halved coupling cannot pass.
+MOIST_RESPONSE_MAX_RATIO = 3.0
 INERT_TRACERS = ("rainwat",)
 
 # The IC control must land at the quad-geometry floor. 1e-12 is two
@@ -309,6 +315,74 @@ def _nml_real(text: str, key: str):
     if tok is None:
         return None
     return float(tok.replace("d", "e").replace("D", "e"))
+
+
+def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
+                               moist: bool) -> None:
+    """The deck must BE the arm the flags say it is.
+
+    The redirects fire only on exact default-path equality, so explicit
+    ``--ic-run``/``--step-run`` bypassed every content check -- and
+    ``--moist --ic-run <nh deck>`` without ``--nh`` would run the
+    HYDROSTATIC port against NH files, ignore W/DZ, and print a
+    meaningless score without raising (codex MAJOR / GLM M2, jobs
+    9444413 and 9444414). Worse, if the DRY step deck were ever
+    regenerated moist, the dry arm would score a zvir=0 port against a
+    moist reference at ~1e-6 rel -- comfortably under its own gate.
+
+    So every arm, not just ``--moist``, asserts the deck's own resolved
+    namelist against the flags: ``adiabatic`` is ``.false.`` IFF moist,
+    ``hydrostatic``/``phys_hydrostatic`` track ``nh``, ``consv_te`` is
+    0, and the physics cannot have touched the state.
+    """
+    check_physics_is_inert(run_dir)
+    text = _nml_text(run_dir)
+    want_adiab = not moist
+    got_adiab = _nml_logical(text, "adiabatic")
+    if got_adiab is not want_adiab:
+        raise SystemExit(
+            f"{run_dir}: resolves adiabatic = {got_adiab!r} but the "
+            f"flags say moist = {moist}. In the solo driver that one "
+            f"flag IS the moisture switch (atmosphere.F90:156-161), so "
+            f"this pairing scores the port against the wrong physics.")
+    for key in ("hydrostatic", "phys_hydrostatic"):
+        got = _nml_logical(text, key)
+        if got is not (not nh):
+            raise SystemExit(
+                f"{run_dir}: resolves {key} = {got!r} but the flags say "
+                f"nh = {nh}. A hydrostatic port loading NH files simply "
+                f"ignores W/DZ and prints a number.")
+    consv = _nml_real(text, "consv_te")
+    if consv is None or consv != 0.0:
+        raise SystemExit(
+            f"{run_dir}: consv_te must be pinned to 0 (found "
+            f"{consv if consv is not None else 'nothing'}); the "
+            f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
+
+
+def check_constants_flavour(run_dir: str) -> None:
+    """``FMSConstants: GFS``, asserted from the run's OWN logfile.
+
+    The build comments CLAIMED the harness did this and it did not
+    (GLM M4, job 9444414) -- the build script only ``grep``-printed it.
+    It matters most exactly where the gate is least sensitive: a
+    GFDL-constants binary shifts ``rvgas/rdgas``, so ``zvir`` moves by
+    O(0.1-1 %), which perturbs the scored residual at ~1e-6 -- under
+    the NH arm's own floor. A mis-linked oracle would not show up as a
+    failure, only as a quietly different reference.
+    """
+    log = os.path.join(run_dir, "logfile.000000.out")
+    if not os.path.exists(log):
+        raise SystemExit(
+            f"{run_dir}: no logfile.000000.out, so the constants "
+            f"flavour cannot be read from the run itself.")
+    with open(log, errors="replace") as fh:
+        txt = fh.read()
+    if "FMSConstants: GFS" not in txt:
+        raise SystemExit(
+            f"{run_dir}: logfile does not say 'FMSConstants: GFS'. The "
+            f"port pins the GFS set; a GFDL-linked oracle shifts zvir "
+            f"and the difference hides under the gate.")
 
 
 def check_physics_is_inert(run_dir: str) -> None:
@@ -1052,6 +1126,7 @@ def main(argv=None):
             args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
+    args.dry_twin_run = None
     if args.moist:
         if not args.tracers:
             raise SystemExit(
@@ -1067,16 +1142,25 @@ def main(argv=None):
                    else f"{ORACLE_ROOT}/run_hydro_zerostep")
         _dry_step = (f"{ORACLE_ROOT}/run_nh_1step_gfs" if args.nh
                      else f"{ORACLE_ROOT}/run_hydro_1step_gfs")
+        args.dry_twin_run = _dry_step
         if args.ic_run == _dry_ic:
             args.ic_run = f"{ORACLE_ROOT}/run_{_arm}_zerostep_moist_gfs"
         if args.step_run == _dry_step:
             args.step_run = f"{ORACLE_ROOT}/run_{_arm}_1step_moist_gfs"
         for _r in (args.ic_run, args.step_run):
             if not os.path.isdir(_r):
+                _how = ("scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch"
+                        if args.nh else "the shipped hydrostatic moist pair")
                 raise SystemExit(
-                    f"missing moist oracle run {_r}. The NH pair is built "
-                    f"by scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch "
-                    f"(the NH deck with adiabatic=.false., one flag).")
+                    f"missing moist oracle run {_r}. The {_arm} pair "
+                    f"comes from {_how}.")
+
+    # EVERY ARM, not just --moist: the redirects fire only on exact
+    # default-path equality, so an explicit --ic-run/--step-run used to
+    # bypass all content checking.
+    for _r in (args.ic_run, args.step_run):
+        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist)
+        check_constants_flavour(_r)
         for _run in (args.ic_run, args.step_run):
             check_physics_is_inert(_run)
             check_moist_deck(_run)
@@ -1413,11 +1497,24 @@ def main(argv=None):
                 pkz=press[t]["pkz"], delp=state[t]["delp"], pt=state[t]["pt"],
                 u=state[t]["u"], v=state[t]["v"], ps=press[t]["ps"],
                 ak=ak, bk=bk, ptop=ptop, akap=FV3_KAPPA, cp=FV3_CP_AIR,
-                r_vir=0.0, km=KM, n=n, ng=ng, kord_mt=KORD_MT,
+                # NOT hardcoded dry: under --moist this localisation
+                # tool used to run a DRY remap while the deck and the
+                # scored step were moist, i.e. it was wrong in exactly
+                # the regime it exists for (GLM MINOR, job 9444414).
+                r_vir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0,
+                sphum_index=(ADVECTED_TRACERS.index("sphum")
+                             if args.moist else None),
+                km=KM, n=n, ng=ng, kord_mt=KORD_MT,
                 kord_tm=KORD_TM, kord_tr=KORD_TR, q=q[t],
                 omga=np.zeros(field_shape("delp", n, ng, KM),
                               dtype=np.float64),
-                last_step=True, hydrostatic=True, adiabatic=True, consv=0.0,
+                # NOT hardcoded dry any more: under --moist this
+                # localisation tool used to run a DRY remap while the
+                # deck and the scored step were moist, i.e. it was wrong
+                # in exactly the regime it exists for (GLM MINOR, job
+                # 9444414).
+                last_step=True, hydrostatic=not args.nh,
+                adiabatic=(not args.moist) or (not args.nh), consv=0.0,
                 fill=False, do_sat_adj=False, do_inline_mp=False,
                 do_adiabatic_init=False)
         post = port_window(state, ctx)
@@ -1463,6 +1560,86 @@ def main(argv=None):
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)
+
+    if args.moist:
+        # ---- THE MOIST-SIGNAL GATE (GLM M1, job 9444414) ------------
+        # The headline residual is NOT evidence that the moist coupling
+        # is live, and on the NH arm it is structurally blind to the
+        # question. Arithmetic: the two decks' one-step pt tendencies
+        # differ by ~3.3e-4 K, about 1e-6 of the pt peak, while the NH
+        # gate floor is 6.6e-4 -- roughly 660x larger. A port whose
+        # moist coupling is dead in an NH-only path (an r_vir dropped at
+        # the remap, say) scores IDENTICALLY whether it runs moist or
+        # dry. The hydrostatic arm is the opposite case: its 1.19e-9
+        # floor sits ~1000x BELOW that signal, so there the headline
+        # number does certify the moist path.
+        #
+        # So measure the moist RESPONSE and compare it to the oracle's
+        # own, on a matched experiment: port(moist deck) - port(dry
+        # deck) against oracle(moist deck) - oracle(dry deck). Both
+        # sides are the same pair of decks, differing in the one flag.
+        print("\n=== MOIST-SIGNAL GATE: the response, not the residual ===")
+        if args.dry_twin_run is None or not os.path.isdir(args.dry_twin_run):
+            raise SystemExit(
+                "--moist needs the DRY twin of the step deck to measure "
+                "the moist response, and an explicit --step-run gives no "
+                "way to identify it. Re-run with the default decks, or "
+                "extend this to take the twin explicitly.")
+        from legoesm.core.fv3_native_dynamics import (
+            p_var_nonhydrostatic as _p_var_nh,
+        )
+        orc_dry_1 = load_oracle(args.dry_twin_run, nh=args.nh)
+        st_d = build_port_ic(ctx, ak, bk, nh=args.nh, zvir=0.0)[0]
+        if args.nh:
+            press_d = [_p_var_nh(f["delp"], f["delz"], f["pt"],
+                                 ptop=ptop, akap=FV3_KAPPA,
+                                 n=n, ng=ng, km=KM) for f in st_d]
+        else:
+            press_d = [p_var_hydrostatic(f["delp"], ptop=ptop,
+                                         akap=FV3_KAPPA, n=n, ng=ng,
+                                         km=KM) for f in st_d]
+        q_d = [[np.zeros_like(a) for a in face] for face in q]
+        step_fn(ctx, st_d, press_d, bdt=args.dt, km=KM,
+                k_split=args.k_split, n_split=args.n_split, ptop=ptop,
+                ak=ak, bk=bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+                kord_mt=KORD_MT, kord_tm=KORD_TM, kord_tr=KORD_TR,
+                q=q_d, hydrostatic=not args.nh, w_limiter=args.nh)
+        p_dry_1 = port_window(st_d, ctx)
+
+        worst_ratio, worst_f, any_signal = 0.0, None, False
+        for f in fields:
+            for pf in range(6):
+                ot = perm[pf]
+                d_o = float(np.abs(orc_1[ot][f] - orc_dry_1[ot][f]).max())
+                d_p = float(np.abs(p_1[pf][f] - p_dry_1[pf][f]).max())
+                if d_o == 0.0 and d_p == 0.0:
+                    continue
+                any_signal = any_signal or d_p > 0.0
+                r = (max(d_p, d_o) / min(d_p, d_o)) if min(d_p, d_o) > 0 \
+                    else float("inf")
+                if r > worst_ratio:
+                    worst_ratio, worst_f = r, f"{f} face{pf + 1}"
+            print(f"  {f:5s} port response "
+                  + "  ".join(f"{float(np.abs(p_1[pf][f] - p_dry_1[pf][f]).max()):9.4g}"
+                              for pf in range(6)))
+            print(f"        oracle       "
+                  + "  ".join(f"{float(np.abs(orc_1[perm[pf]][f] - orc_dry_1[perm[pf]][f]).max()):9.4g}"
+                              for pf in range(6)))
+        if not any_signal:
+            raise SystemExit(
+                "MOIST-SIGNAL GATE FAILED: the port's moist and dry runs "
+                "are IDENTICAL, so zvir reaches nothing in the step. The "
+                "headline residual cannot see this on the NH arm.")
+        if worst_ratio > MOIST_RESPONSE_MAX_RATIO:
+            raise SystemExit(
+                f"MOIST-SIGNAL GATE FAILED: the port's moist response "
+                f"disagrees with the oracle's by {worst_ratio:.2f}x at "
+                f"{worst_f} (limit {MOIST_RESPONSE_MAX_RATIO}x). The port "
+                f"moves under zvir, but not by the amount the oracle "
+                f"does.")
+        print(f"MOIST-SIGNAL GATE PASSED: worst port-vs-oracle response "
+              f"ratio {worst_ratio:.2f}x at {worst_f} "
+              f"(limit {MOIST_RESPONSE_MAX_RATIO}x).")
 
     # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
     # different causes and one number separates them: if the PORT's own

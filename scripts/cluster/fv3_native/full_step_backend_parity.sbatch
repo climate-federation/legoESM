@@ -39,15 +39,20 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 ARM="${ARM:-hydro}"
+# --max-rel makes each arm a GATE rather than a report. Without it the
+# runner printed WORST and exited 0 whatever it said, so a regression was
+# visible only to a human reading the log (GLM MINOR, job 9444414). The
+# ceilings are the certified figures with a small margin: hydro and
+# hydro-moist certify at 1.1866e-09, the two NH arms at 6.6116e-04.
 case "$ARM" in
-  hydro) EXTRA="" ;;
-  nh)    EXTRA="--nh" ;;
+  hydro) EXTRA="--max-rel 2e-9" ;;
+  nh)    EXTRA="--nh --max-rel 1e-3" ;;
   # The moist arm needs --tracers: dp1 = zvir*q(sphum) has nothing to
   # read without them, and the runner refuses the combination anyway.
-  moist) EXTRA="--moist --tracers" ;;
+  moist) EXTRA="--moist --tracers --max-rel 2e-9" ;;
   # the NH moist arm: --nh redirects to the NH decks, --moist then
   # redirects those to their moist twins.
-  nhmoist) EXTRA="--nh --moist --tracers" ;;
+  nhmoist) EXTRA="--nh --moist --tracers --max-rel 1e-3" ;;
   *) echo "unknown ARM=$ARM (hydro|nh|moist|nhmoist)"; exit 4 ;;
 esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/bkparity_${ARM}_${SLURM_JOB_ID:-0}
