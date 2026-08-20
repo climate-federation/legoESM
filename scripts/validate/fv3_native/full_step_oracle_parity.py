@@ -1601,20 +1601,23 @@ def main(argv=None):
         # ((48,49) vs (49,48)) and a transposed face exchanges them.
         # map_scalar_pair is cell-centred only and raised a broadcast
         # error on the first run -- the staggering trap, again.
+        # apply_map returns (pairs, wind_scale); the residual path uses
+        # that scale for u/v, so this scores on identical terms.
         mapped = [apply_map(resp_p[pf], resp_o[perm[pf]], meta[pf][perm[pf]])
                   for pf in range(6)]
         worst_rel, worst_f, any_signal = 0.0, None, False
         for f in fields:
             row_p, row_o = [], []
             for pf in range(6):
-                a, b = mapped[pf][f]
+                pairs_r, ws_r = mapped[pf]
+                a, b = pairs_r[f]
                 pk_p, pk_o = float(np.abs(a).max()), float(np.abs(b).max())
                 row_p.append(pk_p)
                 row_o.append(pk_o)
                 if pk_p == 0.0 and pk_o == 0.0:
                     continue          # a component that is identically 0
                 any_signal = any_signal or pk_p > 0.0
-                r = rel(a, b)
+                r = rel(a, b, ws_r if f in ("u", "v") else None)
                 if r > worst_rel:
                     worst_rel, worst_f = r, f"{f} face{pf + 1}"
             print(f"  {f:5s} port response "
