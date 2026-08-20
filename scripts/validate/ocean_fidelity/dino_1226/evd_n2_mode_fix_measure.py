@@ -31,10 +31,56 @@ REPORTS
         trigger change.  (``tke_dump_av*_final.bin`` are the zdftke-internal
         pre-EVD arrays and are NOT used here.)
 
-CONTROLS: fp64 policy printed; ``LEGOESM_NEMO_E3T`` printed; day-0 gate inside
-``build_replay_ic``; realized card printed per arm (Rule 10); wind forcing
-printed; ``jax.clear_caches()`` between arms; the K-profile hook must fire in
-both arms or the run aborts; NaN anywhere in a NEMO dump is FATAL.
+CONTROLS: fp64 policy printed; ``LEGOESM_NEMO_E3T`` printed; git SHA +
+effective flags stamped; day-0 gate inside ``build_replay_ic``; realized card
+printed per arm (Rule 10); wind forcing printed and the run ABORTS if the wind
+is off; ``jax.clear_caches()`` between arms; the K-profile hook must fire in
+both arms or the run aborts; NaN anywhere in a NEMO dump is FATAL; the
+``eos_depth`` sensitivity arm must measurably change the N^2 field or the run
+aborts (a sensitivity arm that perturbs nothing is not a control).
+
+EOS DEPTH (2026-08-19 audit).  The kamm card sets ``eos_depth="geometric"``
+(dino.py:1045) but that field reaches the PGF and GM/Redi paths only.  The EVD
+trigger's density comes from ``k_profiles._enhanced_diffusion_K``, which calls
+``_compute_rho(state, z_coord, J, eos_fn=eos_fn)`` with NO ``eos_depth`` -- the
+``"insitu"`` DEFAULT -- and the model builds that ``eos_fn`` with no ``rho0``
+either.  So this probe's offline reproduction passing nothing was FAITHFUL to
+the model as run, and passing ``"geometric"`` would have made it DIVERGE from
+the path it measures.  The effective value is now asserted from the live source
+(the run aborts if ``_enhanced_diffusion_K`` ever starts passing the kwarg) and
+``"geometric"`` is carried as a labelled SENSITIVITY arm, not as the model.
+MEASURED: the choice moves the census by ZERO at every threshold and in both
+windows, while genuinely changing the N^2 field -- see the non-vacuity line.
+Under the shipped ``n2_mode="nemo_bn2"`` it cannot matter at all: ``bn2`` reads
+T/S and the geometric gdept/gdepw ladders and consults no density helper.
+
+CENSUS WINDOW (2026-08-19 audit).  This probe previously ran ONE window
+(interfaces 1..34) at ONE threshold and carried the FULL-window / five-decade
+figures in a comment marked "verified by review".  It now RUNS both windows and
+all five thresholds, so the recorded headline is backed by committed code.
+
+RESULT (2026-08-19, fp64, LEGOESM_NEMO_E3T=both, wind ON, day-0 gate
+0.000e+00, K-profile hook fired in both arms).  The census the card comment and
+commit 5a9be32ba record is REPRODUCED BY THIS COMMITTED PROBE, both windows,
+all five thresholds.  n2_mode="nemo_bn2" is EXACT (0 missed, 0 spurious)
+everywhere:
+
+  window 0..34 FULL -- 332214 wet interior interfaces
+    threshold     NEMO   nemo_bn2            adiabatic
+      -1e-14     70475   70475  0/0 EXACT    70454   21 missed,  0 spurious
+      -1e-13     70473   70473  0/0 EXACT    70449   25 missed,  1 spurious
+      -1e-12     70389   70389  0/0 EXACT    70341   48 missed,  0 spurious
+      -1e-11     67454   67454  0/0 EXACT    67418   36 missed,  0 spurious
+      -1e-10     41874   41874  0/0 EXACT    41742  133 missed,  1 spurious
+
+  window 1..34 (this probe's former single window) -- 322294 interfaces
+      -1e-12     60845   60845  0/0 EXACT    60797   48 missed,  0 spurious
+      (full table printed by the run)
+
+So the recorded headline "70389/70389, 0 missed / 0 spurious, at every
+threshold" STANDS, and the five NEMO counts in the dino.py card comment
+(41874 / 67454 / 70389 / 70473 / 70475) match exactly.  eos_depth moves none
+of it -- see the EOS DEPTH note above.
 
 Run:
 CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
@@ -64,6 +110,18 @@ EVD_THR = -1.0e-12                 # zdfevd.F90:93 literal
 ARMS = ("adiabatic", "nemo_bn2")
 
 
+def _enhanced_diffusion_K_source():
+    """The function whose density call this probe reproduces offline.
+
+    Named explicitly (not a wrapper) so ``inspect.getsource`` asserts against
+    the symbol that actually computes the EVD trigger's density.
+    """
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        _enhanced_diffusion_K,
+    )
+    return _enhanced_diffusion_K
+
+
 def main() -> int:
     import jax
     import multistep_replay as mr
@@ -86,6 +144,7 @@ def main() -> int:
     if not mr.have_step1_artifacts():
         print("SKIP: oracle artifacts not present")
         return 0
+    mr.provenance("evd_n2_mode_fix_measure")
     print(f"PRECISION control dtype = {get_policy().control}")
     print(f"LEGOESM_NEMO_E3T = {os.environ.get('LEGOESM_NEMO_E3T')!r}")
     print(f"SEQDUMP = {SEQDUMP}")
@@ -215,7 +274,43 @@ def main() -> int:
     from legoesm.ocean.vertical import compute_ocean_jacobian
     mc0, _ = dino_lat_lon_model_config(br.geometry, cfg0)
     cc = mc0.physics.constants
+
+    # ---- EOS DEPTH, realized and PROVED, not assumed (Rule 10) -------------
+    # The CARD sets eos_depth (dino.py:1045) and the model config carries it,
+    # but that field reaches the PGF and GM/Redi paths ONLY.  The EVD trigger's
+    # density comes from _enhanced_diffusion_K (k_profiles.py), which calls
+    # _compute_rho(state, z_coord, J, eos_fn=eos_fn) with NO eos_depth kwarg,
+    # i.e. the "insitu" DEFAULT -- and the model builds that eos_fn with no
+    # rho0 either (ocean_model_latlon_cgrid.py, _vmix_eos_fn = _make_eos_fn(
+    # eos=..., eos_linear=...)).  Both are asserted below from the live source,
+    # so this probe reproduces the path the model ACTUALLY RUNS instead of the
+    # path the card's top-level field would suggest.  Feeding "geometric" here
+    # would make the probe DIVERGE from the model it is measuring.
+    import inspect
+    _kp_src = inspect.getsource(_enhanced_diffusion_K_source())
+    _EVD_EOS_DEPTH = "insitu"
+    if "eos_depth" in _kp_src:
+        raise SystemExit(
+            "*** _enhanced_diffusion_K now passes eos_depth -- this probe's "
+            "offline reproduction is stale; re-derive _EVD_EOS_DEPTH from the "
+            "source before trusting any number below")
+    print(f"  [eos depth] card cfg.eos_depth = "
+          f"{getattr(cfg0, 'eos_depth', '<absent>')!r}   "
+          f"model mc.eos_depth = {getattr(mc0, 'eos_depth', '<absent>')!r}")
+    print(f"  [eos depth] the EVD trigger's density path "
+          f"(k_profiles._enhanced_diffusion_K) passes NO eos_depth -> "
+          f"effective {_EVD_EOS_DEPTH!r} (asserted from source above).")
+    print(f"  [eos depth] and n2_mode={mc0.physics.convection.enhanced_diffusion.n2_mode!r} "
+          f"on this card, whose bn2 form uses T/S + the geometric gdept/gdepw "
+          f"ladders directly and consults NO density helper at all -- so "
+          f"eos_depth cannot reach the SHIPPED trigger. It reaches only the "
+          f"'adiabatic' comparison arm, whose sensitivity is measured below.")
+
     eos_fn = make_eos_fn(eos=mc0.eos, eos_linear=mc0.eos_linear)
+    # geometric needs the EOS built with the SAME rho0 so p = rho0*g*gdept
+    # cancels exactly (eos.py:2643-2645) -- the sensitivity arm, not the model.
+    eos_fn_geo = make_eos_fn(eos=mc0.eos, eos_linear=mc0.eos_linear,
+                             rho0=cc.rho_0)
     T_nn = np.asarray(st0.T.data); S_nn = np.asarray(st0.S.data)
     T_bb = np.asarray(st0.T_before.data); S_bb = np.asarray(st0.S_before.data)
     eta_nn = st0.eta.data
@@ -226,31 +321,78 @@ def main() -> int:
         return np.asarray(compute_buoyancy_frequency_nemo_bn2(
             T, S, tdep, wdep, g=cc.g))
 
-    def _adia(T, S):
+    def _adia(T, S, eos_depth=None):
+        """Parcel-displacement N^2.  ``eos_depth=None`` -> the depth convention
+        the MODEL's EVD path actually uses (``_EVD_EOS_DEPTH``); any other
+        value is a deliberate SENSITIVITY arm and is NOT what the model runs.
+        """
+        depth = _EVD_EOS_DEPTH if eos_depth is None else eos_depth
+        efn = eos_fn_geo if depth == "geometric" else eos_fn
         stx = st0._replace(T=st0.T.replace(data=T), S=st0.S.replace(data=S))
-        rho = _compute_rho(stx, br.z_coord, Jz, eos_fn=eos_fn)
+        rho = _compute_rho(stx, br.z_coord, Jz, eos_fn=efn, eos_depth=depth,
+                           rho0=(cc.rho_0 if depth == "geometric" else None))
         p = compute_hydrostatic_pressure(
             rho, eta_nn, br.z_coord.dz_ref, Jz, cc.rho_0,
             h_actual=maybe_partial_h_actual(stx, br.z_coord))
         return np.asarray(compute_buoyancy_frequency_adiabatic(
             T, S, p, br.z_coord.dz_ref,
             np.where(np.asarray(Jz) <= 0.0, 1.0, np.asarray(Jz)),
-            eos_fn=eos_fn, rho_ref=cc.rho_0, g=cc.g))
+            eos_fn=efn, rho_ref=cc.rho_0, g=cc.g))
 
-    # Interfaces 1..34 = NEMO w-levels 2..35 (the recorded 60845 window). The
-    # FULL window slice(0, 35) gives 70389/70389/0/0 — verified by review;
-    # kept at the recorded window so the headline reproduces.
-    lv = slice(1, 35)
-    Wm = wif[..., lv]
-    nemo_fire = (np.minimum(rn2[..., 2:36], rn2b[..., 2:36]) <= EVD_THR) & Wm
-    print(f"  wet interior interfaces = {int(Wm.sum())}   "
-          f"NEMO fires = {int(nemo_fire.sum())}")
-    for mode, fn in (("adiabatic", _adia), ("nemo_bn2", _bn2)):
-        f = (np.minimum(fn(T_nn, S_nn)[..., lv], fn(T_bb, S_bb)[..., lv])
-             <= EVD_THR) & Wm
-        miss = int((nemo_fire & ~f).sum()); extra = int((f & ~nemo_fire).sum())
-        print(f"  {mode:11s} fires={int(f.sum()):6d}  missed={miss:5d}  "
-              f"spurious={extra:5d}")
+    # ---- the census: BOTH windows x FIVE thresholds ------------------------
+    # The recorded headline "70389/70389, 0 missed / 0 spurious, at every
+    # threshold" (5a9be32ba, and the dino.py card comment) was NOT produced by
+    # this committed probe: it ran ONE window (interfaces 1..34 -> 60845) at
+    # ONE threshold, and the 70389 / five-decade figures existed only in a
+    # comment marked "verified by review".  Both windows and the full sweep are
+    # RUN here so the claim is backed by committed code or corrected.
+    #   window "1..34"  lego interfaces 1..34 == NEMO 0-based w-levels 2..35
+    #   window "0..34"  lego interfaces 0..34 == NEMO 0-based w-levels 1..35
+    #                   (the FULL window; adds the topmost interface)
+    THRESHOLDS = (-1e-14, -1e-13, -1e-12, -1e-11, -1e-10)
+    WINDOWS = (("0..34 FULL", slice(0, 35), slice(1, 36)),
+               ("1..34 (recorded)", slice(1, 35), slice(2, 36)))
+    n2 = {
+        "nemo_bn2": (_bn2(T_nn, S_nn), _bn2(T_bb, S_bb)),
+        "adiabatic": (_adia(T_nn, S_nn), _adia(T_bb, S_bb)),
+        "adiabatic[eos_depth=geometric]": (_adia(T_nn, S_nn, "geometric"),
+                                           _adia(T_bb, S_bb, "geometric")),
+    }
+    # NON-VACUITY of the eos_depth sensitivity arm.  The two adiabatic rows
+    # below come out with IDENTICAL counts; that is only meaningful if the two
+    # N^2 FIELDS actually differ.  A sensitivity arm that perturbs nothing is
+    # not a control (a control that perturbs a zero proves nothing), so the
+    # field difference is measured and a null one is FATAL.
+    _ai = n2["adiabatic"][0]
+    _ag = n2["adiabatic[eos_depth=geometric]"][0]
+    _fin = np.isfinite(_ai) & np.isfinite(_ag)
+    _dmax = float(np.abs(_ai - _ag)[_fin].max())
+    _scale = float(np.abs(_ai)[_fin].max())
+    print(f"\n  [non-vacuity] adiabatic N^2 insitu-vs-geometric field DIFF: "
+          f"max={_dmax:.4e} s^-2  (|N^2| max={_scale:.4e}, "
+          f"rel={_dmax/max(_scale,1e-300):.3e})")
+    if not _dmax > 0.0:
+        raise SystemExit("*** the eos_depth=geometric arm changed NOTHING -- "
+                         "it did not take, so its identical census below is "
+                         "vacuous, not a null result")
+
+    for wlab, lv, nlv in WINDOWS:
+        Wm = wif[..., lv]
+        nemo_min = np.minimum(rn2[..., nlv], rn2b[..., nlv])
+        print(f"\n  window {wlab}: wet interior interfaces = {int(Wm.sum())}")
+        print(f"    {'threshold':>10s} {'NEMO':>7s} | "
+              + " | ".join(f"{k:>34s}" for k in n2))
+        for thr in THRESHOLDS:
+            nemo_fire = (nemo_min <= thr) & Wm
+            cells = []
+            for k, (a, b) in n2.items():
+                f = (np.minimum(a[..., lv], b[..., lv]) <= thr) & Wm
+                miss = int((nemo_fire & ~f).sum())
+                extra = int((f & ~nemo_fire).sum())
+                cells.append(f"{int(f.sum()):7d} m={miss:<5d} s={extra:<5d}"
+                             f"{'  EXACT' if (miss == 0 and extra == 0) else '       '}")
+            print(f"    {thr:10.0e} {int(nemo_fire.sum()):7d} | "
+                  + " | ".join(cells))
 
     # ================= (iii) avt / avm vs the POST-EVD dumps ================
     print("\n--- (iii) diffusivity/viscosity vs NEMO POST-EVD dumps -------")
