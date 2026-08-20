@@ -2882,6 +2882,112 @@ class ModelDriver:
 
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
+        # A CANOPY SCHEME GETS CANOPY PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity for a bulk surface.  A canopy scheme
+        # reads different quantities (canopy height, clumping, band albedos,
+        # roughness RATIO, per-PFT Vcmax25) and, given soil parameters, silently
+        # falls back to generic constants, leaving the tuned values inert.
+        #
+        # Those canopy parameters already exist and are already per-PFT:
+        # ``surface_data_to_land_params`` dispatches on the surface scheme and
+        # builds ``CanopyLandParams`` from the harmonized surfdata — the same
+        # route the offline LMIP simulations use, which is why THEY reproduce
+        # observed latent heat and photosynthesis.  The coupled driver simply
+        # never called it; it read the CLM provider, whose only variants are
+        # "slab" and "multilayer".  This is that missing call, not new physics.
+        #
+        # Soil hydraulics / thermal / albedo stay with the CLM map: only the
+        # SURFACE parameters come from the canopy builder.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+            _sd_path = getattr(self.config, "surfdata_path", "")
+            if not _sd_path:
+                raise ValueError(
+                    f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
+                    "which needs per-PFT CANOPY parameters (canopy height, band "
+                    "albedos, roughness ratio, Vcmax25). Those are built from the "
+                    "harmonized surfdata, so --surfdata is required. Without it the "
+                    "canopy would run on generic constants and every tuned per-PFT "
+                    "value would be inert — refusing rather than doing that quietly.")
+            from legoesm.land.boundary_data import init_land_surface_data
+            _clm_params = params
+            _, params, _ = init_land_surface_data(
+                _sd_path, self.grid, cfg, float(self.config.start_day),
+                year=(None if getattr(self.config, "start_year", None) is None
+                      else float(self.config.start_year)))
+            # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
+            # Replacing the parameter object wholesale also dropped the CLM
+            # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
+            # canopy parameter object leaves unset — so the land step silently
+            # fell back to one scalar value per field for the whole globe, and
+            # every column's root-zone moisture stress changed. Those are soil
+            # properties, not surface ones; carry them across (found by both
+            # reviewers).
+            _root_fields = {
+                f: getattr(_clm_params, f)
+                for f in ("root_depth", "theta_wp", "theta_fc")
+                if getattr(params, f, None) is None
+                and getattr(_clm_params, f, None) is not None}
+            if _root_fields:
+                params = params._replace(**_root_fields)
+                logger.info(
+                    "  Land tile: kept the CLM per-column %s with the canopy "
+                    "parameters (they are soil properties, not surface ones).",
+                    ", ".join(sorted(_root_fields)))
+            # TWO PROVIDERS, ONE COLUMN INDEX.  The canopy parameters come from
+            # one dataset and the soil beneath them from another, each regridded
+            # independently.  A differing column COUNT or ORDER would attach every
+            # canopy property to the wrong column and the run would still look
+            # entirely healthy — so check the count structurally, at t=0, rather
+            # than hope (GLM).
+            _n_canopy = int(jnp.asarray(params.hc).shape[0])
+            _n_soil = int(jnp.asarray(lat_rad).size)
+            if _n_canopy != _n_soil:
+                raise ValueError(
+                    f"canopy parameters have {_n_canopy} columns but the soil map "
+                    f"has {_n_soil}: the two surface datasets did not regrid onto "
+                    "the same columns, so every canopy property would sit on the "
+                    "wrong one. Check --surfdata and --clm-surfdata-path cover "
+                    "this grid.")
+            logger.info(
+                "  Land tile: %s on per-PFT CANOPY parameters from %s "
+                "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
+                "emissivity is a single constant in this builder and the canopy "
+                "computes its own radiation from soil colour + leaf optics, so "
+                "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
+                "to it — those are re-fit items, not wiring.",
+                type(cfg.surface_scheme).__name__, _sd_path,
+                float(jnp.min(params.hc)), float(jnp.max(params.hc)),
+                float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+
+        # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity.  The two-leaf and CLM-ML canopies
+        # read CANOPY properties (canopy height, band albedos, roughness ratio)
+        # and, finding none, fall back to generic constants: the tuned per-PFT
+        # values are then INERT, which a gradient test caught as exactly zero
+        # sensitivity to the trained roughness.  Inert trained parameters are a
+        # defect here, not a nuisance, and a comment in a document is not a
+        # control (GLM).  Say it at startup, every run, so nobody reports a
+        # canopy run as validating tuned land parameters it never used.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+            _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
+                              if getattr(params, f, None) is not None]
+            if not _canopy_fields:
+                logger.warning(
+                    "  Land tile: %s is running on SOIL parameters — it reads "
+                    "canopy height, band albedos and roughness ratio, none of "
+                    "which are present, so it is using GENERIC canopy constants "
+                    "and the tuned per-PFT roughness / albedo / emissivity are "
+                    "INERT. Do not report this run as validating tuned land "
+                    "parameters. Use --land-surface-scheme simple_seb to run the "
+                    "scheme those parameters belong to.",
+                    type(cfg.surface_scheme).__name__)
+
         self.physics.land_ml_cfg = cfg
         self.physics.land_ml_params = params
         # The Farquhar branch needs a non-None carbon state at the call site as
@@ -2983,8 +3089,17 @@ class ModelDriver:
             p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
             rh_low = q_v_low / jnp.maximum(
                 saturation_mixing_ratio(T_init, p_s), 1e-12)
-            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
-            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            # ``getattr(x, k, default)`` returns the ATTRIBUTE when it exists and
+            # is None, which is not what is wanted here: the canopy parameter
+            # struct declares these fields and leaves them unset unless per-PFT
+            # root parameters were supplied, so the default has to cover None as
+            # well as absent.
+            def _or_cfg(name, fallback):
+                v = getattr(params, name, None)
+                return jnp.asarray(fallback if v is None else v)
+
+            theta_wp = _or_cfg("theta_wp", cfg.theta_wp)
+            theta_fc = _or_cfg("theta_fc", cfg.theta_fc)
             theta_init = aridity_theta_init(
                 rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
         else:
@@ -3159,8 +3274,15 @@ class ModelDriver:
             init_land_surface_data, fill_land_param_gaps,
         )
 
-        # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
-        land_cfg = LandConfig()
+        # PINNED to the bulk scheme, not the library default.  This adapter wants
+        # ONE number per column — the blended soil/vegetation albedo the radiation
+        # uses — and reads it as ``albedo_veg``.  The default is now the two-leaf
+        # canopy, whose parameter struct has no such field (it carries BAND
+        # albedos and does its own radiative transfer), so inheriting the default
+        # crashed here.  A canopy run gets its albedo from the canopy itself; this
+        # path is the static-map fallback and is bulk by construction.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        land_cfg = LandConfig(surface_scheme=SimpleSEBConfig())
         # Sample transient cover at the run start year; a config without start_year
         # (or a static single-year surfdata) falls back to the legacy year-mean.
         _start_year = getattr(self.config, "start_year", None)
@@ -7563,9 +7685,9 @@ class ModelDriver:
             raise ValueError(
                 f"fv3_duo: days={cfg.days} at dt={DT}s yields "
                 f"{n_steps_total} steps; nothing to run.")
-        diag_interval = (int(cfg.output.diag_days * 86400.0 / DT)
-                         if cfg.output.diag_days > 0 else n_steps_total)
-        diag_interval = max(1, diag_interval)
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         if start_day is None:
             start_day = cfg.start_day
 
@@ -7709,7 +7831,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # Phase of the diagnostic cadence.  A real periodic cadence
         # (diag_days > 0) is phased on the ABSOLUTE step so a restart chain
         # keeps ONE global diagnostic clock (#1353: a restored partial flux
@@ -9977,7 +10105,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
         # 4: the spectral loop historically wrote NO checkpoints, so a
         # --spectral AMIP run silently ignored --checkpoint-days and
@@ -11301,6 +11435,16 @@ class ModelDriver:
         import math as _math
 
         day_steps = max(1, int(86400.0 / DT))
+        # NOT routed through ``diagnostic_interval_steps``: this lane REFUSES a
+        # sub-step cadence (below) instead of flooring it, because its segment
+        # length is the gcd of the cadences — flooring to one step here would
+        # silently run the whole lane one step per segment.  It still borrows
+        # that helper's finiteness check, because ``NaN > 0`` is False and a
+        # NaN cadence would otherwise slip past as "no cadence" (review).
+        if not _math.isfinite(cfg.output.diag_days):
+            raise ValueError(
+                f"tiled cube SPMD: diag_days must be a finite number of days; "
+                f"got {cfg.output.diag_days!r}.")
         diag_steps = (int(cfg.output.diag_days * 86400.0 / DT)
                       if cfg.output.diag_days > 0 else 0)
         ckpt_steps = (int(cfg.output.checkpoint_days * 86400.0 / DT)
@@ -11906,7 +12050,9 @@ class ModelDriver:
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
-        diag_interval = int(cfg.output.diag_days * 86400 / DT)
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, 0)
         checkpoint_interval = (
             int(cfg.output.checkpoint_days * 86400 / DT)
             if cfg.output.checkpoint_days > 0 else 0
@@ -13279,7 +13425,9 @@ class ModelDriver:
                     if getattr(self.physics, "land_ml_dt", None) is not None:
                         self.physics.land_ml_dt = DT
                     n_steps_total = int(cfg.days * 86400 / DT)
-                    diag_interval = int(cfg.output.diag_days * 86400 / DT)
+                    from legoesm.driver.diagnostics import diagnostic_interval_steps
+                    diag_interval = diagnostic_interval_steps(
+                        cfg.output.diag_days, DT, 0)
                     checkpoint_interval = (
                         int(cfg.output.checkpoint_days * 86400 / DT)
                         if cfg.output.checkpoint_days > 0 else 0

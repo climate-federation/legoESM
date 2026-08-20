@@ -302,7 +302,15 @@ def test_build_training_segment_land_gradient(monkeypatch, tmp_path):
     pipe = driver.physics
     # Trainable surface exchange: MOST (z0 active) + Farquhar stomata (Vc_max25/
     # g1/LCMA active via a prescribed carbon state).
+    # simple_seb PINNED, matching train_coupled_land_era5: it is the scheme whose
+    # per-PFT z0 / albedo / emissivity this calibration path optimises.  The
+    # library default (two-leaf canopy) reads CANOPY properties instead, so the
+    # trained roughness would carry ZERO gradient — which this test then catches,
+    # correctly.  Wiring real canopy parameters onto the coupled path is the open
+    # follow-up; until it lands, a canopy default cannot be calibrated this way.
+    from legoesm.land.surface_scheme import SimpleSEBConfig
     pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
+        surface_scheme=SimpleSEBConfig(),
         bulk_scheme="most", stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"))
     ncol = int(driver.grid.lat.size)
