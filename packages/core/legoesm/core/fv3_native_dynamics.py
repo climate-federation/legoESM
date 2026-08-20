@@ -513,7 +513,8 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      hord_tr: int = 6, tracer_q_split: int = 0,
                      nord_tr: int = 0, trdm2: float = 0.0,
                      lim_fac: float = 1.0, z_tracer: bool = True,
-                     inline_q: bool = False) -> dict:
+                     inline_q: bool = False,
+                     return_pre_remap: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -705,6 +706,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     # :355-365  te0_2d, BEFORE the theta conversion below, because
     # compute_total_energy is called at :359 while pt is still
     # TEMPERATURE and forms its own tv = pt*(1+dp1).
+    pre_remap = None
     te0_2d = None
     if abs(consv_te) > CONSV_MIN:
         te0_2d = []
@@ -830,6 +832,17 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                     press[t]["pk"][ng:ng + n, ng:ng + n, :] = g["pk"]
             continue
 
+        if return_pre_remap and last_step:
+            # BY RETURN, never a callback (C6), and never a probe that
+            # re-runs the acoustic chain itself -- that would be a
+            # second implementation of the thing under test, i.e. how
+            # you measure a different program and report it as this
+            # one's. Only the LAST n_map is captured, because that is
+            # the state the oracle's own dump sees: its dump sits
+            # between dyn_core and Lagrangian_to_Eulerian.
+            pre_remap = [{k: np.array(v, copy=True)
+                          for k, v in state[t].items()} for t in range(6)]
+
         # The fixer runs only at last_step (fv_mapz.F90:628), so only
         # that iteration defers its closing conversion. Every other
         # n_map keeps the certified path byte for byte.
@@ -912,6 +925,9 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                              sphum_index=sphum_index, r_vir=zvir,
                              dtmp=dtmp, cp=cp_air, n=n, ng=ng)
 
-    return {"state": state, "press": press, "q": q,
-            "omga": omga, "omga_is_meaningless": True,
-            "pt_units": "K" if remapped else "theta_v"}
+    out = {"state": state, "press": press, "q": q,
+           "omga": omga, "omga_is_meaningless": True,
+           "pt_units": "K" if remapped else "theta_v"}
+    if return_pre_remap:
+        out["pre_remap"] = pre_remap
+    return out
