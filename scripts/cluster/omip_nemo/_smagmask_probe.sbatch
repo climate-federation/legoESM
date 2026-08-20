@@ -22,7 +22,7 @@ VISC=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orc
 echo "=== ARM (ramp + Smag 3.0), d30, vs the prescribed NEMO field it was given ==="
 JAX_ENABLE_X64=1 $PY -u scripts/validate/ocean_fidelity/smag_vs_prescribed_viscosity.py \
   --snapshot $ROOT/results/omip_nemo/nemolev_trp_ahpsmag_d90/snapshot_day0030.npz \
-  --visc-file "$VISC" --C-smag 3.0 2>&1 | tail -30
+  --visc-file "$VISC" --A-h-base 20000 --C-smag 3.0 2>&1 | tail -30
 echo "=== arm rc=$?"
 
 echo "=== CONTROL (uniform background + Smag 3.0), d30 ==="
@@ -30,3 +30,14 @@ JAX_ENABLE_X64=1 $PY -u scripts/validate/ocean_fidelity/smag_vs_prescribed_visco
   --snapshot $ROOT/results/omip_nemo/nemolev_trp_signedn2_d30/snapshot_day0030.npz \
   --A-h-uniform 100000 --C-smag 3.0 2>&1 | tail -30
 echo "=== ctl rc=$?"
+
+# DEPTH CHECK (codex attack #3, and my own): the ratio above is at level 0,
+# but the Equatorial Undercurrent core sits at 50-150 m. A surface-only ratio
+# cannot justify a claim about the undercurrent, so re-measure at the levels
+# that actually carry it (17 = 47 m, 23 = 97 m, 27 = 147 m).
+for LEV in 17 23 27; do
+  echo "=== ARM at level $LEV ==="
+  JAX_ENABLE_X64=1 $PY -u scripts/validate/ocean_fidelity/smag_vs_prescribed_viscosity.py \
+    --snapshot $ROOT/results/omip_nemo/nemolev_trp_ahpsmag_d90/snapshot_day0030.npz \
+    --visc-file "$VISC" --A-h-base 20000 --C-smag 3.0 --level $LEV 2>&1 | grep -E "cap\]|band |eq \||midlat"
+done

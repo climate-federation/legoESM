@@ -55,6 +55,12 @@ def main() -> int:
                          "as 1/dt so this must match the arm.")
     ap.add_argument("--smag-cfl-safety", type=float, default=0.125,
                     help="the run's --smag-cfl-safety.")
+    ap.add_argument("--A-h-base", type=float, default=None,
+                    help="the run's --A-h. With --visc-file this reconstructs "
+                         "the INSTALLED latitude profile through the driver's "
+                         "own ah_profile_from_file, which is what the model "
+                         "actually applies; without it the raw file field is "
+                         "scored, which is NOT the installed coefficient.")
     a = ap.parse_args()
 
     import netCDF4 as nc
@@ -112,7 +118,30 @@ def main() -> int:
           f"dt={a.dt}) binds on {_bind:.2f}% of cells at level {a.level}; "
           "the capped value is what the momentum equation uses.")
 
-    if a.visc_file is not None:
+    if a.visc_file is not None and a.A_h_base is not None:
+        # THE INSTALLED COEFFICIENT, not the raw file. The driver does NOT hand
+        # the 3-D field to the model: ah_profile_from_file reads SURFACE
+        # ahmf_3d, takes a ZONAL MEDIAN, and installs a depth-invariant
+        # latitude profile as a ratio to A_h_base. Scoring the raw 2-D ahmt_3d
+        # field instead gave 5079 at the equator (an area mean over a field
+        # with strong zonal structure) where the installed value is 1000 -- so
+        # the ratio was understated by 5x. Rebuild it through the driver's own
+        # function so the probe cannot disagree with the run.
+        from scripts.run.run_omip_core2 import ah_profile_from_file
+        prof = np.asarray(ah_profile_from_file(grid, str(a.visc_file),
+                                               a.A_h_base), dtype=np.float64)
+        lat1d = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+        pres_1d = prof * a.A_h_base
+        # profile is per-latitude-row; broadcast across longitude
+        pres = np.repeat(pres_1d[:, None], lat.shape[1], axis=1)
+        if pres.shape != lat.shape:
+            raise SystemExit(
+                f"installed profile {pres.shape} != model grid {lat.shape}")
+        label = (f"INSTALLED profile from {a.visc_file.name} "
+                 f"(surface ahmf_3d zonal median x A_h_base {a.A_h_base:g}, "
+                 "depth-invariant)")
+        del lat1d
+    elif a.visc_file is not None:
         dv = nc.Dataset(a.visc_file)
         try:
             key = "ahmt_3d" if "ahmt_3d" in dv.variables else "ahmf_3d"

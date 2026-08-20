@@ -925,7 +925,7 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     return _cfg
 
 
-def _ah_profile_from_file(grid, path, A_h_base: float):
+def ah_profile_from_file(grid, path, A_h_base: float):
     """Latitudinal A_h profile from ORCA1's eddy_viscosity_3D.nc.
 
     Zonal MEDIAN of the surface-level ahmf per source row, interpolated onto
@@ -1358,7 +1358,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # #501/#661: _ovr carries FLAT names (A_h/C_smag_lap/barotropic_solver/
         # bottom_drag_r/...) now nested in sub-configs; replace_flat routes them.
         if A_h_profile_file:
-            _ovr["A_h_lat_profile"] = _ah_profile_from_file(
+            _ovr["A_h_lat_profile"] = ah_profile_from_file(
                 grid, A_h_profile_file,
                 _ovr.get("A_h", config.lateral_viscosity.A_h))
         config = config.replace_flat(**_ovr)
