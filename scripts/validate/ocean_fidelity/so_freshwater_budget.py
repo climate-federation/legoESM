@@ -87,15 +87,24 @@ def align_output_to_mesh(lat_mesh, lat_out):
     """
     ny, nx = lat_out.shape
     valid = np.isfinite(lat_out) & (lat_out != -1.0)
+    # Tolerance, not exact zero: a latitude field round-tripped through a
+    # snapshot differs from the mesh by ~1e-14 degrees, and demanding 0.0
+    # rejected a correct alignment. 1e-6 deg is ~0.1 m, while a WRONG offset
+    # is out by a whole grid row (~1 degree), so this is 1e6 times too tight
+    # to admit a bad match -- the guard keeps its meaning.
+    best = (np.inf, None)
     for j0 in range(lat_mesh.shape[0] - ny + 1):
         for i0 in range(lat_mesh.shape[1] - nx + 1):
             sub = lat_mesh[j0:j0 + ny, i0:i0 + nx]
-            if np.abs(sub - lat_out)[valid].max() == 0.0:
+            err = float(np.abs(sub - lat_out)[valid].max())
+            if err < best[0]:
+                best = (err, (j0, i0))
+            if err <= 1e-6:
                 return slice(j0, j0 + ny), slice(i0, i0 + nx)
     raise SystemExit(
         f"cannot align NEMO output grid {lat_out.shape} to mesh "
-        f"{lat_mesh.shape}: no offset reproduces the output latitudes "
-        "exactly. Refusing to compare with a guessed alignment.")
+        f"{lat_mesh.shape}: the best offset {best[1]} still differs by "
+        f"{best[0]:.3e} deg. Refusing to compare with a guessed alignment.")
 
 
 def _nemo_cell_area(mesh_path, lat_n):

@@ -121,7 +121,15 @@ def main() -> int:
             lat_out = np.asarray(dv["nav_lat"][:], dtype=np.float64)
         finally:
             dv.close()
-        sj, si = _m.align_output_to_mesh(lat, lat_out)
+        # Align against the MESH latitudes, not the snapshot's: the snapshot
+        # round-trip perturbs them by ~1e-14 deg, and the mesh is the grid the
+        # model fields are indexed on anyway.
+        _d = nc.Dataset(a.mesh)
+        try:
+            lat_mesh = np.squeeze(_d["gphit"][:]).astype(np.float64)
+        finally:
+            _d.close()
+        sj, si = _m.align_output_to_mesh(lat_mesh, lat_out)
         print(f"[align] NEMO field {pres.shape} -> mesh slice "
               f"[{sj.start}:{sj.stop}, {si.start}:{si.stop}] (exact latitude "
               "match on valid cells)")
