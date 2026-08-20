@@ -41,6 +41,12 @@ SERIES = [
     # curves are comparable.
     ("MPAS L9, graph partition", ("mpas_s9_metis_n*.jsonl",),
      "#009E73", "v"),
+    # Same mesh, same partitioner, same exchange as the curve above; only the
+    # vertical level count differs. 26 levels sits inside a measured slow band
+    # (22-31) that costs 2.4-3x per level, so this curve is the test of whether
+    # that band is what limits the lane.
+    ("MPAS L9, graph partition, 32 lev",
+     ("mpas_s9_metis_l32_n*.jsonl",), "#CC79A7", "P"),
     ("MPAS L10", ("mpas_s10_n*.jsonl",), "#56B4E9", "s"),
     ("lat-lon", ("latlon_n*.jsonl",), "#D55E00", "^"),
     ("lat-lon", ("latlon_4096_n*.jsonl",), "#E69F00", "D"),
