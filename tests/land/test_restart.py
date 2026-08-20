@@ -207,3 +207,74 @@ def test_an_unstamped_file_can_be_refused_outright(tmp_path):
                           expected_ncol=_NCOL, expected_n_layers=_NLAY,
                           expected_soil_grid=_grid(total_depth=3.0),
                           require_soil_grid=True)
+
+
+def test_the_two_spellings_of_a_soil_column_are_one_column():
+    """Two independent fixes for one defect met at a merge.
+
+    One identifies a soil column by its layer INTERFACES, the other by its
+    layer THICKNESSES. They are the same fact -- the interfaces are the
+    running sum -- so both spellings are accepted and reduced to one form
+    before anything is compared. If they ever stop agreeing, every guard built
+    on them is comparing different things.
+    """
+    from legoesm.land.restart import _soil_dz_from
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    dz = make_soil_grid(grid).dz
+    np.testing.assert_allclose(
+        np.asarray(_soil_dz_from(grid, None, what="t")),
+        np.asarray(_soil_dz_from(None, dz, what="t")))
+    # Both together are allowed when they agree, and refused when they do not.
+    _soil_dz_from(grid, dz, what="t")
+    with pytest.raises(ValueError, match="DIFFERENT columns"):
+        _soil_dz_from(grid, np.asarray(dz) * 2.0, what="t")
+
+
+def test_a_file_stamped_one_way_is_checkable_the_other_way(tmp_path):
+    """Files written by either lane are in the wild, so either loads."""
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    dz = np.asarray(make_soil_grid(grid).dz)
+    other = _grid(total_depth=6.375)
+
+    # written from the grid, checked against thicknesses
+    a = tmp_path / "a.npz"
+    save_land_restart(a, _fake_state(seed=11), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_grid=grid)
+    load_land_restart(a, expected_land_mode="multilayer", expected_ncol=_NCOL,
+                      expected_n_layers=_NLAY, expected_soil_dz=dz)
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(a, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_dz=make_soil_grid(other).dz)
+
+    # written from thicknesses, checked against the grid
+    b = tmp_path / "b.npz"
+    save_land_restart(b, _fake_state(seed=12), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_dz=dz)
+    load_land_restart(b, expected_land_mode="multilayer", expected_ncol=_NCOL,
+                      expected_n_layers=_NLAY, expected_soil_grid=grid)
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(b, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=other)
+
+
+def test_the_pre_load_check_reads_the_stamp_the_writer_wrote(tmp_path):
+    """A reader that keeps its own key after the writer moves returns 'no
+    stamp' for every file and switches the check off in silence -- which is
+    exactly what happened once here."""
+    from legoesm.land.restart import load_land_restart_soil_dz
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=13), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_grid=grid)
+    got = load_land_restart_soil_dz(path)
+    assert got is not None, "the pre-load check cannot see a stamp it wrote"
+    np.testing.assert_allclose(np.asarray(got),
+                               np.asarray(make_soil_grid(grid).dz))

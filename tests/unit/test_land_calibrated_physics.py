@@ -432,11 +432,11 @@ def test_a_wrong_column_land_ic_is_caught_before_any_land_work(tmp_path):
         theta_soil=jnp.full((n_col, n_lay), 0.3),
         runoff_surface=jnp.zeros(n_col), runoff_subsurface=jnp.zeros(n_col),
         snow_depth=jnp.zeros(n_col), snow_age=jnp.zeros(n_col), TgC=None)
-    other = SoilGridConfig(n_layers=n_lay, total_depth=6.375,
-                           growth_factor=2.0)
+    other = make_soil_grid(SoilGridConfig(n_layers=n_lay, total_depth=6.375,
+                                          growth_factor=2.0)).dz
     ic = tmp_path / "wrong_column.npz"
     save_land_restart(ic, state, land_mode="multilayer", t_end_s=0.0,
-                      n_steps_completed=0, soil_grid=other)
+                      n_steps_completed=0, soil_dz=other)
     assert load_land_restart_soil_dz(ic) is not None, "the stamp was not written"
 
     cal = calibrated_multilayer_setup()
@@ -465,7 +465,7 @@ def test_a_wrong_column_land_ic_is_caught_before_any_land_work(tmp_path):
     ok = tmp_path / "right_column.npz"
     save_land_restart(ok, state, land_mode="multilayer", t_end_s=0.0,
                       n_steps_completed=0,
-                      soil_grid=cal["soil_grid"])
+                      soil_dz=make_soil_grid(cal["soil_grid"]).dz)
     ModelDriver(cfg._replace(land_ic_path=str(ok)),
                 output_dir=tmp_path / "out3")._preflight_land_inputs()
 
@@ -559,3 +559,44 @@ def test_a_near_saturated_seed_stays_inside_the_retention_range():
     assert np.all(seeded > theta_r), "seeded at or below the residual"
     # And it really is NEAR saturation, not quietly pulled back to mid-range.
     assert np.all(seeded > 0.95 * theta_sat)
+
+
+def test_the_default_land_surface_is_the_two_leaf_canopy():
+    """The production default must be the canopy, not the simplified scheme.
+
+    Measured on a well-watered column, one day, realistic forcing: the simplified
+    scheme evaporates at potential with stomata off (405 W/m2 over forest) and
+    throttles BARE GROUND to 2 W/m2 with them on, because its conductance has no
+    leaf-area dependence.  It is for academic tests; the canopy is the default.
+    """
+    from scripts.run.run_amip import (
+        build_arg_parser, build_config_from_args, _postprocess_args,
+    )
+    from legoesm.land.config import LandConfig, MultiLayerLandConfig
+    from legoesm.land.surface_scheme import SimpleSEBConfig
+
+    for cfg in (LandConfig(), MultiLayerLandConfig()):
+        assert not isinstance(cfg.surface_scheme, SimpleSEBConfig), (
+            f"{type(cfg).__name__} defaults to the simplified surface scheme")
+        assert cfg.bulk_scheme == "most", (
+            f"{type(cfg).__name__} does not default to Monin-Obukhov exchange")
+
+    parser = build_arg_parser()
+    multi = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-mask-file", "l.nc",
+         "--use-multilayer-land"]), parser, []))
+    assert multi.land_surface_scheme == "two_leaf"
+
+    # A slab-only run must still START: the canopy runs inside the multilayer
+    # tile, so a default it cannot honour falls back rather than refusing a run
+    # that never asked for a canopy.
+    slab = _postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser, [])
+    assert slab.land_surface_scheme == "simple_seb"
+
+    # But asking for it explicitly without the tile is still refused.
+    with pytest.raises(SystemExit):
+        _postprocess_args(
+            parser.parse_args(["--dataset", "analytical",
+                               "--land-surface-scheme", "two_leaf"]),
+            parser, ["--land-surface-scheme", "two_leaf"])

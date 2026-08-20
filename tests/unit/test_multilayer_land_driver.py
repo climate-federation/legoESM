@@ -806,7 +806,7 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
     depth and nothing anywhere would complain.
     """
     from legoesm.land.restart import save_land_restart
-    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 
     _patch_land_loaders(monkeypatch)
     src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
@@ -815,12 +815,12 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
 
     # Written as if spun up on a column with the SAME layer count and a
     # different depth.
-    other = SoilGridConfig(n_layers=n_layers, total_depth=6.375,
-                           growth_factor=2.0)
+    other = make_soil_grid(SoilGridConfig(n_layers=n_layers, total_depth=6.375,
+                                          growth_factor=2.0)).dz
     ic = tmp_path / "wrong_column.npz"
     save_land_restart(ic, src._land_ml_state, land_mode="multilayer",
                       t_end_s=0.0, n_steps_completed=1, metadata={},
-                      soil_grid=other)
+                      soil_dz=other)
 
     cfg = _small_cfg()._replace(land_ic_path=str(ic))
     with pytest.raises(ValueError, match="soil column"):
@@ -831,7 +831,7 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
     ok = tmp_path / "right_column.npz"
     save_land_restart(ok, src._land_ml_state, land_mode="multilayer",
                       t_end_s=0.0, n_steps_completed=1, metadata={},
-                      soil_grid=src.physics.land_ml_cfg.soil_grid)
+                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz)
     dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ok)),
                       output_dir=tmp_path / "dst_ok")
     dst.setup()

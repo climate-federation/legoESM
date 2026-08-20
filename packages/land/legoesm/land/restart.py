@@ -71,6 +71,49 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
 )
 
 
+def _soil_dz_from(soil_grid=None, soil_dz=None, *, what: str):
+    """The column as layer THICKNESSES [m], from either spelling, or ``None``.
+
+    Two independent fixes for the same defect landed either side of a merge:
+    one identifies a soil column by its layer INTERFACES, the other by its
+    layer THICKNESSES. They are the same fact -- the interfaces are the running
+    sum of the thicknesses, exactly -- so both spellings are accepted
+    everywhere and reduced HERE to one form before anything is compared.
+    Giving both is allowed only when they agree; disagreeing is a caller bug,
+    not something to silently prefer one of.
+    """
+    if soil_grid is None and soil_dz is None:
+        return None
+    from_grid = None
+    if soil_grid is not None:
+        from legoesm.land.soil_grid import make_soil_grid
+        from_grid = np.asarray(make_soil_grid(soil_grid).dz,
+                               dtype=np.float64).reshape(-1)
+    from_dz = (None if soil_dz is None
+               else np.asarray(soil_dz, dtype=np.float64).reshape(-1))
+    if from_grid is not None and from_dz is not None:
+        if not soil_dz_matches(from_grid, from_dz):
+            raise ValueError(
+                f"{what}: the soil grid and the layer thicknesses describe "
+                f"DIFFERENT columns ({from_grid.tolist()} m vs "
+                f"{from_dz.tolist()} m). Pass one, or pass two that agree.")
+    return from_grid if from_grid is not None else from_dz
+
+
+def _recorded_soil_dz(data):
+    """A restart archive's column as thicknesses [m], or ``None`` if unstamped.
+
+    Reads either stamp, because files written by either lane are in the wild:
+    ``soil_dz`` directly, or the differences of ``soil_z_interface``.
+    """
+    if "soil_dz" in data.files:
+        return np.asarray(data["soil_dz"], dtype=np.float64).reshape(-1)
+    if "soil_z_interface" in data.files:
+        z = np.asarray(data["soil_z_interface"], dtype=np.float64).reshape(-1)
+        return np.diff(z)
+    return None
+
+
 def save_land_restart(
     path,
     state,
@@ -80,6 +123,7 @@ def save_land_restart(
     n_steps_completed: int,
     metadata: dict[str, Any] | None = None,
     soil_grid=None,
+    soil_dz=None,
 ) -> Path:
     """Write ``state`` and its bookkeeping to a compressed ``.npz`` restart file.
 
@@ -102,12 +146,16 @@ def save_land_restart(
         Informational only (git SHA, grid_type, resolution, dt, CLI args, …);
         serialised as JSON alongside the arrays.  Not consumed on load.
     soil_grid : SoilGridConfig, optional
-        The vertical soil grid this state lives on.  Its layer INTERFACES are
-        written so a continuation run can refuse a grid the profile does not
-        belong to.  The layer COUNT alone does not identify a grid: ten layers
-        over 3 m and ten over 6.4 m have identical array shapes, so without
-        this a warm start silently reinterprets the temperature and moisture
-        profile at the wrong depths.
+    soil_dz : array-like, optional
+        The vertical soil column this state lives on, in either spelling: the
+        grid itself, or its layer thicknesses [m].  Recorded so a continuation
+        run can refuse a column the profile does not belong to.  The layer
+        COUNT alone does not identify one: ten layers over 3 m and ten over
+        6.4 m have identical array shapes, so without this a warm start
+        silently reinterprets the temperature and moisture profile at the
+        wrong depths.  BOTH stamps are written, from the one column given, so
+        a reader that knows either spelling can check the file and the two can
+        never disagree.
 
     Returns
     -------
@@ -124,10 +172,13 @@ def save_land_restart(
         "n_steps_completed": np.array(int(n_steps_completed), dtype=np.int64),
         "metadata_json": np.array(json.dumps(metadata or {}), dtype="U65536"),
     }
-    if soil_grid is not None:
-        from legoesm.land.soil_grid import make_soil_grid
-        payload["soil_z_interface"] = np.asarray(
-            make_soil_grid(soil_grid).z_interface, dtype=np.float64)
+    _dz = _soil_dz_from(soil_grid, soil_dz, what="save_land_restart")
+    if _dz is not None:
+        payload["soil_dz"] = _dz
+        # The interfaces are the running sum, so the two stamps are one fact
+        # written twice rather than two facts that can drift.
+        payload["soil_z_interface"] = np.concatenate(
+            [np.zeros(1, dtype=np.float64), np.cumsum(_dz)])
     # The CLM-ML canopy carries a nested mlcanopy pytree, not a plain array; it
     # has no serialiser yet, so refuse loudly rather than silently drop it.
     if getattr(state, "canopy_state", None) is not None:
@@ -175,15 +226,7 @@ def load_land_restart_soil_dz(path):
     state is loaded only by ranks that own land while this check must give the
     same answer everywhere.  ``None`` means the file predates the recording.
     """
-    data = np.load(str(path), allow_pickle=False)
-    if "soil_z_interface" not in data.files:
-        return None
-    # ONE stamp on disk, read two ways: the archive records layer INTERFACES,
-    # and the thicknesses are their differences. Two records of one fact can
-    # disagree; this reader kept its own key after the writer moved to
-    # interfaces, which made it return "no stamp" for every file and silently
-    # switched this check off.
-    return np.diff(np.asarray(data["soil_z_interface"], dtype=np.float64).reshape(-1))
+    return _recorded_soil_dz(np.load(str(path), allow_pickle=False))
 
 
 def load_land_restart(
@@ -193,7 +236,9 @@ def load_land_restart(
     expected_ncol: int,
     expected_n_layers: int | None = None,
     expected_soil_grid=None,
+    expected_soil_dz=None,
     require_soil_grid: bool = False,
+    require_soil_dz: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Load a ``.npz`` restart and return ``(state, meta)``.
 
@@ -213,11 +258,17 @@ def load_land_restart(
         tell them apart and the profile would be reinterpreted at the wrong
         depths.  A file written before the interfaces were recorded cannot be
         checked; that warns rather than raising, because the published
-        initial states predate the stamp — unless ``require_soil_grid`` is
-        set, which turns the unstamped case into a hard error.  Pass it when
-        the run is on a column that is NOT the historical default: an old file
-        carrying no interfaces is then almost certainly on the other one, and
-        warning about the file most people will load is not a check.
+        initial states predate the stamp — unless ``require_soil_grid`` (or
+        its ``require_soil_dz`` spelling) is set, which turns the unstamped
+        case into a hard error.  Pass it when the run is on a column that is
+        NOT the historical default: an old file carrying no stamp is then
+        almost certainly on the other one, and warning about the file most
+        people will load is not a check.
+
+    The column may be given either as the grid (``expected_soil_grid``) or as
+    its layer thicknesses (``expected_soil_dz``); both are reduced to
+    thicknesses and compared once, so the two spellings cannot disagree about
+    what "the same column" means.
     """
     # Import here so importing this module doesn't drag the full land state class
     # (avoids a circular-import risk with land/__init__).
@@ -248,44 +299,37 @@ def load_land_restart(
             f"{expected_n_layers}"
         )
 
-    if expected_soil_grid is not None:
-        from legoesm.land.soil_grid import make_soil_grid
-        want = np.asarray(make_soil_grid(expected_soil_grid).z_interface,
-                          dtype=np.float64)
-        if "soil_z_interface" not in data.files:
+    _want_dz = _soil_dz_from(expected_soil_grid, expected_soil_dz,
+                             what="load_land_restart")
+    if _want_dz is not None:
+        _total = float(_want_dz.sum())
+        _got_dz = _recorded_soil_dz(data)
+        if _got_dz is None:
             _unstamped = (
-                f"{path} records no soil-layer interfaces, so its vertical "
-                f"grid cannot be checked against this run's "
-                f"({want[-1]:.4g} m over {len(want) - 1} layers).")
-            if require_soil_grid:
+                f"{path} records no soil column, so its layer depths cannot "
+                f"be checked against this run's ({_want_dz.tolist()} m, total "
+                f"{_total:.4g} m over {len(_want_dz)} layers).")
+            if require_soil_grid or require_soil_dz:
                 raise ValueError(
-                    _unstamped + " This run is on a column that is not the "
-                    "historical default, so an unstamped file is almost "
-                    "certainly on a different one; refusing rather than "
-                    "warning. Re-save the restart from a run that stamps it, "
-                    "or drop require_soil_grid if you know the column matches.")
+                    _unstamped + " This run's column is not the historical "
+                    "default, so an unstamped file is almost certainly on a "
+                    "different one and its soil profile would be read at the "
+                    "wrong depths. Re-run the land spin-up on this run's "
+                    "column, or drop the require flag if you know it matches.")
             warnings.warn(
-                f"{path} records no soil-layer interfaces, so its vertical "
-                f"grid cannot be checked against this run's "
-                f"({want[-1]:.4g} m over {len(want) - 1} layers). Written "
-                f"before the geometry was stamped; if it came from a "
-                f"different soil column its profile is being reinterpreted "
-                f"at the wrong depths.", RuntimeWarning, stacklevel=2)
-        else:
-            got = np.asarray(data["soil_z_interface"], dtype=np.float64)
-            # Loose on purpose (``_SOIL_DZ_RTOL``): both sides are the SAME
-            # geometric series recomputed, possibly one in single and one in
-            # double precision, while any real column difference is a fraction
-            # of the depth rather than a rounding difference.
-            if got.shape != want.shape or not np.allclose(
-                    got, want, rtol=_SOIL_DZ_RTOL, atol=0.0):
-                raise ValueError(
-                    f"restart {path} was written on a soil column of "
-                    f"{got[-1]:.6g} m in {len(got) - 1} layers, but this run "
-                    f"uses {want[-1]:.6g} m in {len(want) - 1}. The layer "
-                    f"count matches, so the arrays would load without "
-                    f"complaint and the temperature and moisture profile "
-                    f"would be read at the wrong depths.")
+                _unstamped + " Written before the column was stamped; if it "
+                "came from a different one its profile is being reinterpreted "
+                "at the wrong depths.", RuntimeWarning, stacklevel=2)
+        elif not soil_dz_matches(_got_dz, _want_dz):
+            raise ValueError(
+                f"restart {path} was written on a soil column of "
+                f"{_got_dz.tolist()} m (total {float(_got_dz.sum()):.6g} m in "
+                f"{len(_got_dz)} layers), but this run uses "
+                f"{_want_dz.tolist()} m (total {_total:.6g} m in "
+                f"{len(_want_dz)}). The layer count alone cannot tell those "
+                f"apart, so the arrays would load without complaint and the "
+                f"temperature and moisture profile would be read at the wrong "
+                f"depths.")
 
     optional = {
         field: jnp.asarray(data[field])

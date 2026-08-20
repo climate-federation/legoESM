@@ -610,13 +610,13 @@ def run(args) -> int:
                 expected_land_mode="multilayer",
                 expected_ncol=ncol,
                 expected_n_layers=config.soil_grid.n_layers,
-                expected_soil_grid=config.soil_grid,
+                expected_soil_dz=_make_soil_grid(config.soil_grid).dz,
                 # The calibration column is not this driver's historical
-                # default, so an older restart carrying no interfaces is
-                # almost certainly on the wrong one: refuse rather than warn,
+                # default, so an older restart carrying no stamp is almost
+                # certainly on the wrong one: refuse rather than warn,
                 # otherwise the chain re-saves that profile under the new
                 # column's label.
-                require_soil_grid=bool(getattr(
+                require_soil_dz=bool(getattr(
                     args, "calibrated_land_physics", False)))
             # A restart round-trips only the prognostic fields, leaving the
             # optional structural ones (surface_water, snow/ice bands,

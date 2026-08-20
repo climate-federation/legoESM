@@ -3017,11 +3017,14 @@ class ModelDriver:
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
                 expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
-                expected_soil_grid=cfg.soil_grid,
+                # Same quantity this driver's PRE-LOAD check already carries
+                # (``load_land_restart_soil_dz`` returns thicknesses), so the
+                # column travels one form through both checks.
+                expected_soil_dz=make_soil_grid(cfg.soil_grid).dz,
                 # The calibrated column is not the historical default, so an
-                # older restart carrying no interfaces is almost certainly on
-                # the wrong one: refuse it rather than warn.
-                require_soil_grid=bool(getattr(
+                # older restart carrying no stamp is almost certainly on the
+                # wrong one: refuse it rather than warn.
+                require_soil_dz=bool(getattr(
                     self.config, "land_calibrated_physics", False)))
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
