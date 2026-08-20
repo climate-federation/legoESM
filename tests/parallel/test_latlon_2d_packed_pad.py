@@ -74,13 +74,22 @@ def _run_per_field(mesh, specs, fields):
     return outs
 
 
-@pytest.mark.parametrize("p_lat,p_lon", [(2, 2), (1, 2), (2, 4)])
-def test_packed_matches_per_field_bit_for_bit(p_lat, p_lon):
+# (1, 1) and (4, 1) exercise the single-lon-tile WRAP, where a tile's east
+# ghost is its own west columns rather than a message. It has its own branch
+# in the packed body and the direction is easy to get backwards, so it is
+# covered rather than assumed. (1, 2) is a single latitude band, where both
+# pole folds land on the same tile.
+@pytest.mark.parametrize("p_lat,p_lon",
+                         [(2, 2), (1, 2), (2, 4), (1, 1), (4, 1), (2, 1)])
+@pytest.mark.parametrize("halo", [1, 2])
+def test_packed_matches_per_field_bit_for_bit(p_lat, p_lon, halo):
     mesh = _mesh(p_lat, p_lon)
-    rng = np.random.default_rng(11 + p_lat * 10 + p_lon)
+    if N_LON // p_lon < 4 * halo:
+        pytest.skip(f"tile width {N_LON // p_lon} under 4x halo {halo}")
+    rng = np.random.default_rng(11 + p_lat * 10 + p_lon + 100 * halo)
     fields = _fields(rng, [None, 3, 5])
-    specs = (("fold", HALO, False), ("fold", HALO, True),
-             ("fold", HALO, False))
+    specs = (("fold", halo, False), ("fold", halo, True),
+             ("fold", halo, False))
 
     got = _run_packed(mesh, specs, fields)
     ref = _run_per_field(mesh, specs, fields)

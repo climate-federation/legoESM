@@ -758,6 +758,12 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
     run for the south edge and the north edge. Ten in total, which is the
     measured figure. The per-field path costs that many PER FIELD.
 
+    Ten is the count when BOTH axes are genuinely split. The degenerate meshes
+    emit fewer, because their exchanges become local: ``p_lat == 1`` drops the
+    two latitude messages (a single band has no neighbour band), and
+    ``p_lon == 1`` drops the two longitude messages AND all six of the fold's,
+    since a tile spanning the whole ring wraps onto itself.
+
     All fields must share one dtype: a packed buffer promotes mixed widths
     and nothing casts back, so a mixed group would silently change field
     dtypes. Group by dtype and call once per group.
@@ -785,6 +791,12 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
     one pass to widen the interior rows and one to stack the ghost rows, and
     the same census now reports 68.7 MB. Anything added here that copies a
     whole field again gives that back.
+
+    That two-pass count assumes a tile wide against its halo, which is what the
+    campaign runs (``w >= 4h``). At the narrowest width this body accepts,
+    ``w == 2h``, the two edge column strips are the entire field and the
+    assembly costs three passes rather than two -- still fewer than four, but
+    a smaller saving than the census above suggests.
 
     Even ``p_lon`` with ``w >= 4h`` only, which is the tiling the campaign
     runs. Odd ``p_lon`` needs the all_gather fold, whose packed form is a
@@ -926,7 +938,10 @@ def make_latlon_2d_packed_pad_body(mesh, specs):
         # 4. Assemble each padded field in TWO passes over its data instead of
         #    four: one to widen the interior rows, one to stack the ghost rows
         #    on top and below. Every other piece here is `halo` rows or `halo`
-        #    columns, so it costs nothing next to the field itself.
+        #    columns, which is negligible against the field at the tile widths
+        #    the campaign runs (w >= 4h) but NOT at the narrowest width this
+        #    body accepts: at w == 2h the two edge column strips together are
+        #    the whole field, and the assembly is three passes, not two.
         out = []
         for f, s_mid, n_mid, wg, eg, sf, nf in zip(
                 fields, south_recv, north_recv, west_ghost, east_ghost,

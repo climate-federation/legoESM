@@ -70,23 +70,44 @@ def _median_ms(fn, args, reps, warmup):
 
 
 def _time_one_body(make_fn, groups, reps, warmup):
-    """Per-application cost of a body, with host dispatch subtracted.
+    """Marginal cost of ONE more application of a body.
 
-    ``make_fn(n)`` returns a jitted function applying the body to the first
-    ``n`` field groups. One call to it costs ``dispatch + n * body``, so the
-    difference between ``n`` groups and one group divided by ``n - 1`` is the
-    body alone. Without this the measurement is a dispatch measurement: on four
-    devices from one process, dispatch is milliseconds and the body is not.
+    ``make_fn(n)`` returns a jitted function that applies the body to the first
+    ``n`` of the field groups it is handed. EVERY arm is called with ALL the
+    groups, so the number of buffers the host marshals is identical and only
+    the device work differs; ``gs[:n]`` drops the rest at trace time. Calling
+    the one-group arm with one group instead would leave a per-buffer host cost
+    growing with ``n`` inside the slope -- both reviews of this benchmark
+    flagged exactly that, and it is the same class of contamination the first
+    version of this file died of.
 
-    Returns ``(per_group_ms, single_call_ms, spread_ms)`` so the contaminated
-    number and the run-to-run spread stay visible next to the corrected one.
+    What this returns is a MARGINAL cost, not an isolated one. Groups inside a
+    single executable can overlap on the device, so the slope is a throughput
+    figure; the midpoint is measured too, and a slope that differs between the
+    midpoint and the full count means the applications are overlapping and the
+    number should not be read as one body's latency. Comparing two bodies at
+    identical shapes through identical arms is what it is for.
+
+    Returns a dict with the marginal cost at the midpoint and at the full
+    count, the single-application call time (which still carries dispatch), and
+    the worst run-to-run spread seen.
     """
     n = len(groups)
-    if n < 2:
-        raise ValueError("need >= 2 field groups to subtract dispatch")
-    t1, lo1, hi1 = _median_ms(make_fn(1), groups[:1], reps, warmup)
+    if n < 4:
+        raise ValueError("need >= 4 field groups: a midpoint arm is what "
+                         "shows whether the applications overlap")
+    mid = n // 2
+    t1, lo1, hi1 = _median_ms(make_fn(1), groups, reps, warmup)
+    tm, lom, him = _median_ms(make_fn(mid), groups, reps, warmup)
     tn, lon, hin = _median_ms(make_fn(n), groups, reps, warmup)
-    return (tn - t1) / (n - 1), t1, max(hi1 - lo1, hin - lon)
+    return {
+        "marginal_ms": round((tn - t1) / (n - 1), 4),
+        "marginal_ms_midpoint": round((tm - t1) / (mid - 1), 4),
+        "single_call_ms": round(t1, 4),
+        "spread_ms": round(max(hi1 - lo1, him - lom, hin - lon), 4),
+        "n_groups": n,
+        "midpoint_groups": mid,
+    }
 
 
 def main() -> None:
@@ -108,9 +129,9 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="Append one JSON line here.")
     args = ap.parse_args()
 
-    if args.groups < 2:
-        raise SystemExit("--groups must be >= 2: with one group there is "
-                         "nothing to subtract and the number is dispatch")
+    if args.groups < 4:
+        raise SystemExit("--groups must be >= 4: the midpoint arm is what "
+                         "shows whether the applications overlap on device")
     need = args.p_lat * args.p_lon
     if len(jax.devices()) < need:
         raise SystemExit(f"need {need} devices, have {len(jax.devices())}")
@@ -153,15 +174,23 @@ def main() -> None:
     rows = {}
     for name, one in (("per-field", per_field_once), ("packed", packed_once)):
         maker = make(one)
-        n_coll = _count(maker(1).lower(*groups[:1]).compile().as_text())
-        per, single, spread = _time_one_body(maker, groups, args.reps,
-                                             args.warmup)
-        rows[name] = {"collectives": n_coll, "per_group_ms": round(per, 4),
-                      "single_call_ms": round(single, 4),
-                      "spread_ms": round(spread, 4)}
-        print(f"  {name:>9}: {n_coll:3d} collectives   {per:8.4f} ms/group "
-              f"(single call {single:7.3f} ms incl. dispatch, "
-              f"spread {spread:6.3f} ms)")
+        n_coll = _count(maker(1).lower(*groups).compile().as_text())
+        # If the compiler merged the groups' collectives, the many-group
+        # program would not carry N times the messages and the slope would not
+        # be N applications of the body. Recorded rather than assumed.
+        n_coll_all = _count(maker(args.groups).lower(*groups).compile().as_text())
+        r = _time_one_body(maker, groups, args.reps, args.warmup)
+        r["collectives"] = n_coll
+        r["collectives_all_groups"] = n_coll_all
+        r["collectives_scale"] = (round(n_coll_all / n_coll, 3)
+                                  if n_coll else None)
+        rows[name] = r
+        print(f"  {name:>9}: {n_coll:3d} collectives "
+              f"({n_coll_all} for {args.groups} groups)   "
+              f"{r['marginal_ms']:8.4f} ms/application "
+              f"(midpoint {r['marginal_ms_midpoint']:.4f}, "
+              f"single call {r['single_call_ms']:7.3f} incl. dispatch, "
+              f"spread {r['spread_ms']:6.3f})")
 
     rec = {
         "component": "latlon_tile_halo_micro",
@@ -170,7 +199,13 @@ def main() -> None:
         "fields": args.fields, "halo": args.halo, "groups": args.groups,
         "reps": args.reps, "warmup": args.warmup,
         "backend": jax.default_backend(),
-        "dispatch_subtracted": True,
+        # Not "dispatch subtracted": the arms are called with the same
+        # number of buffers so the HOST marshalling cancels, but the output
+        # allocation still scales with the number of applications, and the
+        # applications may overlap on the device. This is a marginal cost for
+        # comparing two bodies at identical shapes, not one body's latency.
+        "estimator": "marginal cost per application, same buffer count in "
+                     "every arm; see _time_one_body",
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "git_sha": os.environ.get("LEGOESM_GIT_SHA"),
         "arms": rows,
