@@ -7,7 +7,9 @@ the same 30 days, the same metric.  They differ only in the ``t_seconds``
 handed to the DINO analytic surface forcing:
 
   armA  ``DINO_TWIN_SEASONAL_KT0=0``        t = (k+1)*dt        -- the harness
-        as every recorded result was produced (seasonal day 0.03 .. 30)
+        as every result recorded BEFORE 2026-08-20 was produced (seasonal day
+        0.03 .. 30). This is no longer the harness default: armB's clock is,
+        so armA now REQUIRES the env var to be set explicitly.
   armB  ``DINO_TWIN_SEASONAL_KT0=restart``  t = (5760+k+1)*dt   -- NEMO's own
         clock (usrdef_sbc.F90:536, ztime = REAL(kt)*rn_Dt; seasonal day
         180.03 .. 210), matching the NEMO run the metric compares against
