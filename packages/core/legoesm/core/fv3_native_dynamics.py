@@ -236,8 +236,12 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
 
     ``pt = pt*(1 + dp1)/pkz`` with ``dp1 = zvir*q(sphum)``.  ``dp1=None``
     means the adiabatic ``zvir = 0`` lane, where the factor is exactly
-    ``1`` -- written as a separate branch rather than multiplying by a
-    zeros array so the adiabatic lane is bit-identical to ``pt/pkz``.
+    ``1``.  It is a separate branch because the ORACLE forms no ``dp1``
+    at all when ``zvir = 0`` (``:281-294`` is the moist branch), not
+    because a zeros array would round differently: since the
+    association was corrected to ``(pt*(1+dp1))/pkz`` a zeros array is
+    bit-identical (``win*1.0`` is exact).  Gated by
+    ``test_dry_lane_is_bitwise_under_the_moist_patch``.
     """
     ia = ng
     if dp1 is None:
@@ -275,8 +279,9 @@ def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
     ``moist_phys`` branch), where the log argument carries an extra
     ``(1.+dp1)`` -- INSIDE the log, in the Fortran's own left-to-right
     association.  Pre-scaling ``pt`` at the call site instead would
-    reassociate the product.  A separate branch, not a multiply by ones,
-    so the certified dry NH lane keeps its exact expression.  The
+    reassociate the product.  A separate branch, matching the oracle's
+    own ``moist_phys`` split, so the certified dry NH lane keeps its
+    exact expression.  The
     oracle's ``moist_phys = .false.`` arm (``:335``) forces ``dp1 = 0``
     and takes the dry form, so it IS the ``dp1=None`` branch here and
     needs no flag of its own.
@@ -485,10 +490,15 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng,
                           dp1=dp1)
         else:
-            # The adiabatic lane MUST stay bit-identical to the certified
-            # 1.1866e-09 parity: dp1=None takes `pt /= pkz`, while a zeros
-            # array would take `pt *= (1.+dp1)/pkz` -- a reciprocal then a
-            # multiply, which rounds twice.
+            # dp1=None is the ORACLE's shape: fv_dynamics.F90:281-294
+            # forms no dp1 at all when zvir = 0, so there is nothing to
+            # multiply by. NOT a rounding argument -- an earlier version
+            # of this comment claimed a zeros array 'rounds twice', which
+            # was true of the OLD association `(1.+dp1)/pkz` and became
+            # FALSE when it was corrected: 1.0+0.0 is exactly 1.0 and
+            # win*1.0 is exact, so zeros is now bit-identical. Measured,
+            # job 9442478. The branch stays because it is the oracle's
+            # structure and skips a whole-field multiply.
             pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
 
     remapped = km > REMAP_MIN_NPZ

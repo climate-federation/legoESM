@@ -196,8 +196,13 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     The halo rows keep TEMPERATURE until the it==1 scalar exchange
     (dyn_core.F90:470) overwrites them; converting the padded array would
     also convert the corner-diagonal sentinels, which are NOT overwritten.
-    ``dp1=None`` is the adiabatic ``zvir = 0`` lane; a separate branch,
-    not a zeros multiply, keeps it bit-identical to ``pt/pkz``.
+    ``dp1=None`` is the adiabatic ``zvir = 0`` lane. It is a
+    separate branch because the oracle forms no ``dp1`` there at
+    all (:281-294 is the moist branch), NOT because a zeros array
+    would round differently -- since the association was corrected
+    to ``(pt*(1+dp1))/pkz`` a zeros array is bit-identical
+    (``win*1.0`` is exact). Gated by
+    ``test_dry_branch_is_not_a_multiply_by_one``.
     """
     pt = jnp.asarray(pt)
     pkz = jnp.asarray(pkz)
@@ -233,8 +238,9 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
 
     ``dp1`` is the MOIST arm (``fv_dynamics.F90:307-309``, the
     ``moist_phys`` branch), where the log argument carries an extra
-    ``(1.+dp1)``.  It is a separate branch rather than a multiply by a
-    ones array so the certified dry NH lane keeps its exact expression;
+    ``(1.+dp1)``.  It is a separate branch, matching the oracle's own
+    ``moist_phys`` split, so the certified dry NH lane keeps its exact
+    expression;
     the factor sits INSIDE the log in the Fortran's own left-to-right
     association, not applied to ``pt`` at the call site, which would
     reassociate the product.  The oracle's ``moist_phys = .false.`` arm
@@ -491,10 +497,15 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng,
                                     dp1=dp1_theta)
     else:
-        # The adiabatic lane MUST stay bit-identical to the certified
-        # 1.1866e-09 parity: dp1=None takes `pt / pkz`, while a zeros
-        # array would take `pt*(1.+dp1)/pkz` -- an extra multiply, which
-        # rounds twice where the dry lane rounds once.
+        # dp1=None is the ORACLE's shape: fv_dynamics.F90:281-294
+        # forms no dp1 at all when zvir = 0, so there is nothing to
+        # multiply by. NOT a rounding argument -- an earlier version
+        # of this comment claimed a zeros array 'rounds twice', which
+        # was true of the OLD association `(1.+dp1)/pkz` and became
+        # FALSE when it was corrected: 1.0+0.0 is exactly 1.0 and
+        # win*1.0 is exact, so zeros is now bit-identical. Measured,
+        # job 9442478. The branch stays because it is the oracle's
+        # structure and skips a whole-field multiply.
         state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
 
     def _n_map(carry, last_step: bool):

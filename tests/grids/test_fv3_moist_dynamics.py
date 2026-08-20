@@ -31,30 +31,41 @@ def _pt_pkz(seed=3):
 
 
 def test_dry_lane_is_bitwise_under_the_moist_patch():
-    """dp1=None must remain a single division, not a multiply by 1.
+    """The dry lane must still be EXACTLY ``pt/pkz``.
 
-    The whole point of the separate branch: `(1.0 + 0.0)/pkz` computes a
-    reciprocal and then multiplies -- two roundings where the dry lane
-    has one -- so a zeros-array "equivalent" is NOT bit-identical.
+    THE OLD DOCSTRING HERE WAS FALSE (job 9442478). It said a
+    zeros-array equivalent "computes a reciprocal and then multiplies --
+    two roundings where the dry lane has one -- so it is NOT
+    bit-identical". That described the OLD association
+    ``pt *= (1.0+dp1)/pkz``; once it was corrected to the oracle's
+    ``(pt*(1+dp1))/pkz``, ``1.0+0.0`` is exactly 1.0 and ``win*1.0`` is
+    exact, so the zeros array IS bit-identical. Both facts are asserted
+    below instead of described.
     """
-    pt_a, pkz = _pt_pkz()
-    pt_b = pt_a.copy()
-    pt_to_theta_v(pt_a, pkz, n=N, ng=NG)                       # dry arm
-    pt_to_theta_v(pt_b, pkz, n=N, ng=NG,
-                  dp1=np.zeros((N, N, KM)))                    # moist arm, 0
     win = (slice(NG, NG + N), slice(NG, NG + N), slice(None))
-    # NOT asserted equal: `assert X or True` is a test that cannot fail,
-    # and the two arms are NOT required to agree bitwise -- that is the
-    # entire reason the dry branch exists. The contract below is the one
-    # that must hold.
-    del pt_b
-    pt_c, _ = _pt_pkz()
-    expect = pt_c[win] / pkz
-    pt_d = pt_c.copy()
-    pt_to_theta_v(pt_d, pkz, n=N, ng=NG)
-    assert np.array_equal(pt_d[win], expect), (
+
+    # 1. the dry arm is a single division -- the arithmetic the
+    #    certified 1.1866e-09 parity was measured on.
+    pt_a, pkz = _pt_pkz()
+    expect = pt_a[win] / pkz
+    pt_dry = pt_a.copy()
+    pt_to_theta_v(pt_dry, pkz, n=N, ng=NG)
+    assert np.array_equal(pt_dry[win], expect), (
         "the dry lane is no longer a single division -- the certified "
         "1.1866e-09 parity was measured on this exact arithmetic")
+
+    # 2. and a zeros dp1 now agrees with it BITWISE. If this ever goes
+    #    red the moist association has changed and the dry lane moved
+    #    with it, which is the failure this file exists to catch.
+    pt_zero = pt_a.copy()
+    pt_to_theta_v(pt_zero, pkz, n=N, ng=NG, dp1=np.zeros((N, N, KM)))
+    assert np.array_equal(pt_zero[win], pt_dry[win])
+
+    # 3. ANTI-VACUITY: a real dp1 must move it.
+    pt_wet = pt_a.copy()
+    pt_to_theta_v(pt_wet, pkz, n=N, ng=NG,
+                  dp1=np.full((N, N, KM), 0.0077))
+    assert not np.array_equal(pt_wet[win], pt_dry[win])
 
 
 def test_moist_arm_matches_the_oracle_expression():
