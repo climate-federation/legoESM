@@ -630,6 +630,13 @@ def _row_int_trend(tr):
                          axis=2) * e1u, axis=1)
 
 
+# PUBLIC alias.  ``nemo_accum_torque.py`` needs the SAME row reducer this module
+# uses, and reaching across modules for a private name is forbidden by the repo's
+# import rules; promoted here rather than re-derived there (re-deriving a reducer
+# is how two "identical" row integrals stop being identical).
+row_int_trend = _row_int_trend
+
+
 def _zdf_is_barotropic_subtraction(zdf, un, day):
     """Measure -- not merely read -- WHY utrd_zdf's depth-integral is unusable AS
     DUMPED, and recover the true term.
