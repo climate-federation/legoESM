@@ -97,10 +97,10 @@ def test_ah_profile_file_round_trip_and_helper(tmp_path):
     ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = lat
     ds.close()
 
-    from scripts.run.run_omip_core2 import _ah_profile_from_file
+    from scripts.run.run_omip_core2 import ah_profile_from_file
     from legoesm.grids.latlon import create_latlon_grid
     g = create_latlon_grid(n_lat=90, n_lon=180)
-    prof = _ah_profile_from_file(g, str(f), 20000.0)
+    prof = ah_profile_from_file(g, str(f), 20000.0)
     prof = np.asarray(prof)
     lat_deg = np.degrees(np.asarray(g.lat))
     assert prof[np.argmin(np.abs(lat_deg))] < 0.1       # 0.05 on the plateau
