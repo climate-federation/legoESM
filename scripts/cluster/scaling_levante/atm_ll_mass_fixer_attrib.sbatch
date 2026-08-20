@@ -23,6 +23,22 @@
 #   the gap is small and flat -> the excess is genuine local inefficiency at 16
 #        latitude rows per device, and the next step is a kernel profile.
 #
+# Sharper, pre-registered before the job runs, from review: a tree all-reduce
+# over 32 nodes is roughly fourteen hops at some tens of microseconds each, so
+# a SINGLE scalar reduction should cost 150 to 400 microseconds at 128 devices.
+#   delta near 0.7 ms -> the hypothesis survives, and the explanation must be
+#     several reductions, a batched one carrying real payload, or the barrier
+#     absorbing device skew rather than the transfer itself.
+#   delta near 0.2 ms -> the reduction is real but is a minority of the 0.71 ms
+#     and the rest is elsewhere.
+# The same review made two points this job does NOT resolve, recorded so they
+# are not mistaken for settled. Switching the fixer off removes its local
+# arithmetic AND the global barrier as well as the transfer, so the delta is an
+# upper bound on the transfer; separating them needs a third arm that keeps the
+# barrier and sends zeros, which is a production-code change. And the 32-device
+# excess (12 microseconds, 0.2%) is at the noise floor, so this is two points of
+# growth, not three.
+#
 # Second, independent question in the same allocation: a channel-count sweep
 # found 16 collective channels 12.7% faster than the 8 this campaign has always
 # used, at 64 devices. That is a free change if it holds, so it is checked at
@@ -83,6 +99,11 @@ for REP in 1 2; do
     run_arm "$NDEV" 0 "--no-fix-mass" "full_nofix_n${NDEV}_r${REP}"
     NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16 \
       run_arm "$NDEV" 0 ""            "full_chan16_n${NDEV}_r${REP}"
+    # More collective channels speed up an all-reduce as much as a halo, so if
+    # the channel win survives with the mass fixer OFF it was about the halo,
+    # and if it collapses it was about the reduction. Review's falsifier.
+    NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16 \
+      run_arm "$NDEV" 0 "--no-fix-mass" "full_nofix_chan16_n${NDEV}_r${REP}"
   done
 done
 
@@ -116,5 +137,10 @@ for n in (32, 64, 128):
     c, d = med.get(f"full_n{n}"), med.get(f"full_chan16_n{n}")
     if c and d:
         print(f"{n:>4} devices: 16 channels vs 8 = {100*(d-c)/c:+.1f}%")
+    e, g = med.get(f"full_nofix_n{n}"), med.get(f"full_nofix_chan16_n{n}")
+    if e and g:
+        print(f"{n:>4} devices: 16 channels vs 8, mass fixer OFF = "
+              f"{100*(g-e)/e:+.1f}%  (if this collapses, the channel win was "
+              f"the reduction, not the halo)")
 PYSUM
 echo DONE
