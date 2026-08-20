@@ -760,6 +760,34 @@ retracted claim in this campaign.
 
 ---
 
+## ★ ALL FOUR ARMS ARE ORACLE-CERTIFIED (2026-08-20)
+
+| arm | oracle deck | NumPy (SPEC) | JAX (PORT) |
+|---|---|---|---|
+| hydrostatic dry | run_hydro_1step_gfs | 1.1866e-09 | 1.1866e-09 |
+| hydrostatic MOIST | run_hydro_1step_moist_gfs | 1.1866e-09 | 1.1866e-09 |
+| NH dry | run_nh_1step_gfs | 6.6116e-04 | 6.6116e-04 |
+| **NH MOIST** | run_nh_1step_moist_gfs | **6.6116e-04** | **6.6116e-04** |
+
+Each moist arm lands on its own DRY arm's number, so the moist coupling
+adds nothing on either. Jobs 9442518, 9442762, 9444390.
+`ARM=hydro|nh|moist|nhmoist`.
+
+The NH moist deck did not exist and was built by
+`scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch` (job 9444380):
+the NH deck with `adiabatic` `.true. -> .false.`, ONE line, asserted to
+be the only edit. TRAP: use `build_hydro_gfsconst` (libnetcdf.so.18,
+"FMSConstants: GFS"); `build_hydro_serialnc` is the GFDL build, wants
+so.19, and died rc=127 on every rank in 9444375.
+
+ANTI-VACUITY on both moist arms, because each lands on its dry twin's
+number and that has to be shown not to BE the dry run. The decks' own
+one-step `pt` tendencies differ in the third digit on every face --
+hydro 0.05829/0.002624/0.04613 dry vs 0.05797/0.002658/0.04600 moist;
+NH 0.05833/0.002619/0.04616 dry vs 0.058/0.002653/0.04603 moist -- a
+~1 % difference matching `zvir*q ~ 0.013`, and on EVERY deck the port's
+tendency row equals the oracle's.
+
 ## ★ THE MOIST HYDROSTATIC ARM IS ORACLE-CERTIFIED (2026-08-20)
 
 `full_step_oracle_parity.py --moist --tracers`, job 9442518, pin
@@ -836,14 +864,12 @@ understood.
 
 ### What is still NOT certified
 
-The NON-hydrostatic moist arm. There is no NH moist deck in the pinned
-tree, and `--moist --nh` refuses rather than scoring it against a
-hydrostatic reference. Building one means the hydrostatic moist deck
-with `hydrostatic = .F.`; everything else in it is already right. Until
-then the NH moist arm is source-anchored plus port-vs-spec parity only,
-and the twin-port's inherent limit applies: a SYMMETRIC edit to both
-lanes keeps every parity gate green, so the Fortran source and the dry
-certification are the only asymmetric anchors.
+Nothing in the moist scope -- the NH moist arm was the last gap and it
+closed on 2026-08-20 (job 9444390, 6.6116e-04 both backends, its own dry
+arm's number). All four arms are scored against Fortran runs. The
+twin-port limit no longer bites here: a SYMMETRIC edit to both lanes
+would still pass parity, but it now has to pass four Fortran
+comparisons too.
 
 `consv_te` remains refused and is not planned: ~119 lines
 (`fv_mapz.F90:628-747`) plus an area-weighted `g_sum(..., reproduce =
