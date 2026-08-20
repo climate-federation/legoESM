@@ -17,9 +17,13 @@ trend summed over EVERY step; ``uu_b(:,:,Naa)*r1_Dt`` summed right after
 ``dyn_spg``; and the 3-D velocity at three intra-step seams (the before level,
 what ``dyn_zdf`` leaves, and what survives ``mlf_baro_corr`` + ``finalize_lbc``).
 The cancellation is now EXACT model-side arithmetic rather than a 9-sample
-estimate -- note EXACT, not absent: the recovered vertical-mixing row is still
-formed as +3889.74 - 3871.83, a 3400:1 cancellation, but both operands are fp64
-accumulators from inside the model and the closure below holds at 1e-15.
+estimate -- note EXACT, not absent, and note WHICH row: the recovered
+vertical-mixing row is +3889.74 - 3871.83, a 217:1 cancellation; the BARO row is
++3889.74 - 3888.59, a ~3400:1 one.  An earlier revision quoted the 3400:1 figure
+against the vertical-mixing row -- right number, wrong row.  Both operands are
+fp64 accumulators from inside the model, the closure below holds at 1e-15, and
+the identity gate is normalised by that cancellation scale for exactly this
+reason.
 
 ===========================================================================
 THE HEADLINE STRUCTURAL RESULT, and the reason this file does NOT print a
@@ -98,11 +102,18 @@ CONTROLS, each of which CAN fail (``--controls``):
        mlf_baro_corr and that the probe's grid arrays are NEMO's -- it can never
        test physics.  Measured live-metric vs e3u_0 row difference: 0.04% of the
        0.61 deficit, so the weighting choice cannot fake or mask the signal.
-  C8   TELESCOPING: the per-step leapfrog rate is NOT the trajectory's drift --
-       ``dyn_atf_qco`` (stpmlf.F90:613) runs AFTER seam 3 and rewrites the NOW
-       level, which becomes the next step's before level.  Compared against the
-       restarts' own ub/un.  Measured at ~0.5% on the 1-day run; measured again
-       over 90 days rather than assumed to stay there.
+  C8   TELESCOPING: the per-step leapfrog rate need NOT equal the trajectory's
+       drift -- ``dyn_atf_qco`` runs AFTER seam 3 and rewrites the NOW level,
+       which becomes the next step's before level.  Compared against the
+       restarts' own ub and un.  ONE window per invocation (whichever run C3-C7
+       selected), so the 90-day figure below is this run's and the ~0.5% 1-day
+       figure quoted in the commit is a transcribed earlier invocation, not a
+       second measurement made here.  90-day result: 0.00% via both ub and un,
+       which is what makes the NEMO column a drift and not a bookkeeping rate.
+  C9   The recovered vertical-mixing row -- otherwise the only printed number
+       with no check behind it, and the row round one's double-count lived in --
+       against the analytic wind torque.  Depth-integrated it is (surface stress
+       - bottom drag)/rho0, so it must land near C6's wind; the gap is the drag.
   I1/I2/I3 above are printed with their residuals by ``--table``.
 
 WHAT THIS PROBE CANNOT SEE (the coverage statement, not a disclaimer).  It
@@ -146,9 +157,14 @@ RUN_V1D = f"{DINO}/RUN_ACC_V1D"
 RUN_PLANT = f"{DINO}/RUN_ACC_PLANT"
 RUN_TWINCHK = f"{DINO}/RUN_ACC_TWINCHK"
 
-TILES = "restart_*.nc"          # per-rank tiles ONLY: a stitched
-#   DINO_<kt>_restart.nc would sort BEFORE the tiles under '.' < '_' and would
-#   then be used as the scalar source and stitched on top of them.
+TILES = "restart_*.nc"
+#   Per-rank tiles.  A stitched DINO_<kt>_restart.nc sorts BEFORE the tiles under
+#   '.' < '_', so a loose "restart*.nc" would use it as the scalar source AND
+#   stitch it on top of them.  Every accumulator path uses TILES; ``load_state``
+#   is the ONE place that must also accept a stitched file (C8 reads the day-0
+#   input restart, which is single) and it selects the two forms EXCLUSIVELY.
+#   RETRACTED: the previous revision's commit claimed TILES was "used everywhere"
+#   while load_state and the C6 utau_b read still globbed restart*.nc.
 
 PRE_ZDF = ("hpg", "spg", "keg", "rvo", "pvo", "zad", "ldf")
 LIVE = PRE_ZDF + ("zdf", "atf")
@@ -168,6 +184,9 @@ LEGO_ARMS = ("off/transport_avg", "off/velocity_avg", "trueT/transport_avg")
 LEGO_BARO = (+0.578, +0.707, +0.368)
 LEGO_REALIZED = (+0.886, +0.996, +0.663)
 LEGO_ZDF_BT_PLUS_BC = (+0.339 + 2.098, +0.319 + 2.118, +0.324 + 2.101)
+# the deficit each arm was DEFINED by BEFORE this run, from 55de03e71.  Kept so
+# the verdict cannot quietly pair a base-arm result with a fixed-arm prediction.
+PRIOR_DEFICIT = {"off/transport_avg": 0.61, "off/velocity_avg": 0.50}
 
 
 # ------------------------------------------------------------------ reducers --
@@ -238,8 +257,24 @@ def load_acc(run_dir, kt, fields=None):
 
 
 def load_state(run_dir, kt, fields=("ub", "un")):
-    """Prognostic velocity, for the telescoping control C8 only."""
-    pat = f"{run_dir}/DINO_{kt:08d}_restart*.nc"
+    """Prognostic velocity, for the telescoping control C8 only.
+
+    Tiles and a stitched single file are BOTH legitimate here -- C8 needs the
+    day-0 state, which in every run directory is the single stitched input
+    restart, while later steps are per-rank tiles.  They are selected
+    EXCLUSIVELY, never globbed together: a stitched ``DINO_<kt>_restart.nc``
+    sorts before the tiles ('.' < '_') and would otherwise be stitched on top of
+    them.
+    """
+    tiles = sorted(glob.glob(f"{run_dir}/DINO_{kt:08d}_{TILES}"))
+    if tiles:
+        pat = f"{run_dir}/DINO_{kt:08d}_{TILES}"
+    else:
+        single = f"{run_dir}/DINO_{kt:08d}_restart.nc"
+        if not os.path.exists(single):
+            raise SystemExit(f"FATAL: no tiles and no stitched restart for kt={kt} "
+                             f"under {run_dir}")
+        pat = single
     d = rebuild(pat, list(fields))
     for f in fields:
         if f not in d:
@@ -287,6 +322,10 @@ def stage_rows(d):
     ubb = row_int_3d(d["uacc_bb"] / n) * r1
     zdf_dumped = row_int_3d(d["utrdacc_zdf"] / n)
     return {
+        "_ubt": ubt,                 # the barotropic operand, exposed so the
+        #                              identity gate normalises by the
+        #                              CANCELLATION scale rather than by the
+        #                              ~3400x smaller row it produces
         "BARO": ubt - ubb,
         "ZDF_recovered": zdf_dumped + ubt,
         "realized": row_int_3d((d["uacc_fin"] - d["uacc_bb"]) / n) * r1,
@@ -297,12 +336,30 @@ def stage_rows(d):
     }
 
 
-def identities(r, label=""):
+def identities(r, n_steps, label=""):
     """I1/I2/I3, printed with residuals.  These are the checks that replaced the
     three duplicate 'rows'.  Each CAN fail: I1 fails if dynspg_ts stops putting
     the barotropic increment back into the RHS, I2 if mlf_baro_corr stops
-    discarding the vertical solve's column mean, I3 if either does."""
-    sc = max(float(np.max(np.abs(r["BARO"][ROWS]))), 1e-30)
+    discarding the vertical solve's column mean, I3 if either does.
+
+    TWO THINGS ABOUT THE TOLERANCE, both earned.
+    (a) NORMALISE BY THE CANCELLATION SCALE, not by the row.  The BARO row is
+        +3889.74 - 3888.59: the operands are ~3400x the result, so a residual
+        that is pure fp64 roundoff on the OPERANDS looks 3400x worse when
+        divided by the row.  ``_ubt`` is the operand scale and is used here.
+    (b) STEP-COUNT-AWARE, the same treatment C5 needed.  The residual is
+        accumulation roundoff and grows with the number of steps summed:
+        measured 1.8e-16 of the operand scale at 4 steps, 8.5e-14 at 2880.  A
+        FIXED bound therefore passes the short runs and would trip on a long one
+        for no physical reason -- the previous revision's 1e-9-on-the-row gate
+        would have breached around a year of simulation.  Widening to n*eps
+        costs the gate nothing: a genuine identity break (dynspg_ts no longer
+        adding the barotropic increment back, say) is O(BARO) = ~3.4 absolute,
+        i.e. ~9e-4 of the operand scale, eight orders of magnitude above this
+        bound.
+    """
+    cancel = float(np.max(np.abs(r["_ubt"][ROWS])))
+    tol = max(1.0e-14, 8.0 * n_steps * np.finfo(np.float64).eps)
     out = []
     for name, a, b, why in (
         ("I1  explicit RHS == BARO", r["_expl"], r["BARO"],
@@ -315,54 +372,108 @@ def identities(r, label=""):
          "I2 plus the closure => the barotropic solve sets the whole row"),
     ):
         e = float(np.max(np.abs((a - b)[ROWS])))
+        sc = max(float(np.max(np.abs(a[ROWS]))), float(np.max(np.abs(b[ROWS]))),
+                 cancel, 1e-30)
         out.append((name, e, e / sc, why))
-        print(f"  {name:34s} max|diff| {e:10.3e}  rel {e / sc:9.2e}   {why}")
+        print(f"  {name:34s} max|diff| {e:10.3e}  rel-to-operand {e / sc:9.2e}"
+              f"  (tol {tol:.2e})   {why}")
     if label:
-        print(f"     ({label})")
+        print(f"     ({label}; {int(n_steps)} steps, cancellation scale"
+              f" {cancel:.4g} m3/s2/row)")
     for name, e, rel, _ in out:
-        if rel > 1e-9:
-            raise SystemExit(f"FATAL {name}: the oracle no longer behaves as this "
-                             "probe's reading of it says -- re-read the source "
+        if rel > tol:
+            raise SystemExit(f"FATAL {name}: rel-to-operand {rel:.3e} exceeds "
+                             f"{tol:.3e} -- the oracle no longer behaves as this "
+                             "probe's reading of it says; re-read the source "
                              "before quoting any number")
     return out
 
 
 # ------------------------------------------------------------------- selftest --
 def selftest():
-    """The one runnable check on the row arithmetic itself, with a planted
-    double-count -- the exact defect that shipped in the first revision."""
+    """The runnable check on the row arithmetic, run THROUGH ``stage_rows``.
+
+    RETRACTED, and this is the whole reason the function was rewritten: the
+    previous version built its "planted double-count" by editing ``stage_rows``'
+    OUTPUT dict and then asserting that the edit had changed something.  That
+    assertion is evaluated entirely outside the function under test and passes
+    no matter what ``stage_rows`` does -- a reviewer reproduced the exact round-1
+    defect (``ZDF_recovered = _zdf_dumped + 2*ubt``) inside ``stage_rows`` and
+    the selftest still printed OK.  It was the same class of defect it claimed
+    to guard against: a control that cannot fail.
+
+    The three checks below all read ``stage_rows``' own return value on a
+    synthetic dict built to satisfy the model's closure exactly:
+      A  BARO and realized reproduce a known pure-barotropic increment.
+      B  the ADDITIVE identity _expl + _zdf_dumped + _post == realized.  Round
+         one's composition violates this by exactly ``ubt``.
+      C  the barotropic correction is credited EXACTLY ONCE:
+         ZDF_recovered - _zdf_dumped == _ubt.  This is what catches the
+         reviewer's monkeypatch.
+      D  a PLANT applied to the INPUT dict -- an unaccounted deposit at the
+         post-zdf seam, the same violation C2 plants in the model -- must break
+         B by exactly the predicted amount.  Without D, B could hold vacuously.
+    """
     ny, nx, nz = B.umask.shape
-    n, rdt = 7.0, 5400.0
+    n, rn_dt = 7.0, 2700.0
+    rdt = 2.0 * rn_dt
+    r1 = 1.0 / rdt
+    wet = np.moveaxis(B.umask.astype(np.float64), -1, 0)      # (k,y,x)
     z = np.zeros((nz, ny, nx))
+
     d = {f"utrdacc_{t}": z.copy() for t in LIVE}
     d.update({f"{c}trdacc_{t}": z.copy() for t in UNPRODUCED for c in "uv"})
     d.update({k: z.copy() for k in ACC_3D})
-    d["ubtacc_aa"] = np.zeros((ny, nx))
-    d.update(nacc_steps=n, nacc_r1dt=n / rdt, nacc_trdchk=0.0,
-             rn_acc_plant=0.0, rdt=rdt / 2)
+    d.update(nacc_steps=n, nacc_r1dt=n * r1, nacc_trdchk=0.0,
+             rn_acc_plant=0.0, rdt=rn_dt)
 
-    # a pure barotropic increment: u_b(Naa) = U, u(Nbb) = 0
+    # a pure barotropic increment: u_b(Naa) = U everywhere wet, u(Nbb) = 0, and
+    # the after state carries exactly that depth-uniform velocity.
     U = 3.0e-4
-    d["ubtacc_aa"][:] = n * U / rdt
-    # the after state must then carry that same depth-uniform velocity
-    d["uacc_fin"][:] = np.where(_yxz(np.ones_like(z)).any(-1)[None], 0.0, 0.0)
-    d["uacc_fin"] = np.moveaxis(np.where(B.umask, n * U, 0.0), -1, 0)
-    r = stage_rows(d)
-    want = row_int_2d(np.full((ny, nx), U / rdt))
-    e = float(np.max(np.abs((r["BARO"] - want)[ROWS])))
-    assert e < 1e-9 * max(np.max(np.abs(want[ROWS])), 1e-30), f"BARO reducer off by {e}"
-    e = float(np.max(np.abs((r["realized"] - want)[ROWS])))
-    assert e < 1e-9 * max(np.max(np.abs(want[ROWS])), 1e-30), f"realized off by {e}"
+    d["ubtacc_aa"] = np.where(B.umask.any(axis=2), n * U * r1, 0.0)
+    d["uacc_fin"] = n * U * wet
+    # an arbitrary, DEPTH-VARYING intermediate state and an arbitrary explicit
+    # bucket, so B is not satisfied by everything being proportional
+    d["uacc_zdf"] = n * U * wet * (0.3 + 0.4 * np.arange(nz)[:, None, None] / nz)
+    d["utrdacc_hpg"] = 1.7e-9 * wet * np.cos(np.arange(nz)[:, None, None])
+    # close the model's own identity EXACTLY, which is what stage_rows assumes
+    d["utrdacc_zdf"] = ((d["uacc_zdf"] - d["uacc_bb"]) * r1
+                        - sum(d[f"utrdacc_{t}"] for t in PRE_ZDF))
 
-    # PLANT: credit the barotropic correction twice, as the first revision did.
-    # ZDF must move by exactly +ubt and the check must SEE it.
-    bad = dict(r)
-    bad["ZDF_recovered"] = r["ZDF_recovered"] + row_int_2d(d["ubtacc_aa"] / n)
-    moved = float(np.max(np.abs((bad["ZDF_recovered"] - r["ZDF_recovered"])[ROWS])))
-    assert moved > 1e-6, "the double-count plant did not move the row -- vacuous"
-    print(f"  selftest OK: BARO and realized reproduce a known pure-barotropic "
-          f"increment to <1e-9 relative;\n     the double-count plant moves the ZDF "
-          f"row by {moved:.4f} m3/s2 (it must, and the first revision shipped it)")
+    r = stage_rows(d)
+    want = row_int_2d(np.where(B.umask.any(axis=2), U * r1, 0.0))
+    sc = max(float(np.max(np.abs(want[ROWS]))), 1e-30)
+    for nm in ("BARO", "realized"):
+        e = float(np.max(np.abs((r[nm] - want)[ROWS])))
+        assert e / sc < 1e-12, f"A: {nm} off a known barotropic increment by {e / sc:.2e}"
+
+    def _addresid(rr):
+        return (rr["_expl"] + rr["_zdf_dumped"] + rr["_post"] - rr["realized"])
+
+    add = float(np.max(np.abs(_addresid(r)[ROWS])))
+    add_sc = max(float(np.max(np.abs(r["_zdf_dumped"][ROWS]))), 1e-30)
+    assert add / add_sc < 1e-12, f"B: the rows do not sum to realized ({add:.3e})"
+
+    once = float(np.max(np.abs((r["ZDF_recovered"] - r["_zdf_dumped"] - r["_ubt"])[ROWS])))
+    assert once / max(float(np.max(np.abs(r["_ubt"][ROWS]))), 1e-30) < 1e-12, (
+        f"C: the barotropic correction is not credited exactly once ({once:.3e})")
+
+    # D: plant an unaccounted deposit at the post-zdf seam.
+    c_pl = 5.0e-5
+    d2 = dict(d)
+    d2["uacc_zdf"] = d["uacc_zdf"] + n * c_pl * wet
+    r2 = stage_rows(d2)
+    pred = -row_int_3d(c_pl * wet) * r1
+    got = _addresid(r2) - _addresid(r)
+    e = float(np.max(np.abs((got - pred)[ROWS])))
+    p_sc = max(float(np.max(np.abs(pred[ROWS]))), 1e-30)
+    assert p_sc > 1e-6, "D: the plant is too small to be a control"
+    assert e / p_sc < 1e-9, f"D: violation {got[ROWS][0]:.4e} != predicted ({e / p_sc:.2e})"
+    print(f"  selftest OK, all four checks THROUGH stage_rows: BARO and realized "
+          f"reproduce a known\n     barotropic increment to <1e-12; the rows sum to "
+          f"realized; the barotropic correction is\n     credited exactly once; and a "
+          f"planted post-zdf deposit breaks that sum by exactly the\n     predicted "
+          f"{float(np.mean(pred[ROWS])):+.4f} m3/s2/row (rel err {e / p_sc:.2e})")
 
 
 # ------------------------------------------------------------------- controls --
@@ -496,7 +607,7 @@ def controls():
     if abs(r1 - expect) / expect > tol:
         raise SystemExit("FATAL C5: rDt is not 2*rdt on every step (Euler start?)")
 
-    raw = rebuild(f"{B.G.RUN_90D_TWIN}/DINO_{kt10:08d}_restart*.nc", ["utau_b"])
+    raw = rebuild(f"{B.G.RUN_90D_TWIN}/DINO_{kt10:08d}_{TILES}", ["utau_b"])
     tau = np.asarray(raw["utau_b"], np.float64)
     phi_n = np.sum(np.where(B.umask[:, :, 0], tau / B.RHO0 * B.e1u, 0.0), axis=1)
     phi_a = B.phi_wind()
@@ -509,6 +620,26 @@ def controls():
         raise SystemExit("FATAL C6: the wind the twin applied is not the analytic one")
 
     rows = stage_rows(d)
+    # C9  THE ONLY PRINTED NUMBER THAT OTHERWISE HAS NO CHECK BEHIND IT.  The
+    # recovered vertical-mixing row is where round one's double-count lived, and
+    # it is formed by a 217:1 cancellation, so an unchecked +17.9 is exactly the
+    # shape of the defect that already shipped once.  Depth-integrated, NEMO's
+    # vertical-diffusion term is (surface stress - bottom drag)/rho0, so it must
+    # land NEAR the analytic wind torque C6 just verified, and the gap IS the
+    # bottom drag.  The bound is deliberately loose (25%): what it must catch is
+    # a lost or doubled barotropic correction, which would move this row by
+    # ~3890 m3/s2, i.e. 200x the wind torque itself.
+    zdf_row = float(np.mean(rows["ZDF_recovered"][ROWS]))
+    wind_row = float(np.mean(phi_a[ROWS]))
+    gap = zdf_row - wind_row
+    print(f"  C9 recovered vertical-mixing row {zdf_row:+.4f} vs the analytic wind torque"
+          f" {wind_row:+.4f}\n     m3/s2/row: gap {gap:+.4f} ({abs(gap) / abs(wind_row):.2%}"
+          f"), which is the bottom drag.  Bound 25%; a lost or\n     doubled barotropic"
+          f" correction would move this row by ~3890, i.e. 200x the wind.")
+    if abs(gap) > 0.25 * abs(wind_row):
+        raise SystemExit("FATAL C9: the recovered vertical-mixing row is not the "
+                         "surface stress minus bottom drag -- the barotropic "
+                         "correction is miscredited")
     ratio = rows["realized"][ROWS] / np.where(np.abs(rows["BARO"][ROWS]) > 0,
                                               rows["BARO"][ROWS], np.nan)
     print(f"  C7 realized/BARO = [{np.nanmin(ratio):.9f}, {np.nanmax(ratio):.9f}]"
@@ -548,7 +679,7 @@ def table():
     print(f"T0  THE THREE IDENTITIES that collapse NEMO's step to ONE row"
           f" ({int(full['nacc_steps'])} steps, fp64)")
     print("=" * 104)
-    identities(rows, "90-day accumulation")
+    identities(rows, full["nacc_steps"], "90-day accumulation")
 
     print("\n" + "=" * 104)
     print(f"T1  NEMO ACCUMULATED ROWS, 90-day mean, band rows {ROWS[0]}-{ROWS[-1]}"
@@ -569,10 +700,29 @@ def table():
           " spin-up rate itself.")
     print("=" * 104)
     nemo = float(np.mean(rows["realized"][ROWS]))
-    print(f"{'arm':>24s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}")
+    print(f"{'arm':>24s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}{'prior':>10s}"
+          f"{'revision':>11s}")
     for i, a in enumerate(LEGO_ARMS):
-        print(f"{a:>24s}{LEGO_REALIZED[i]:+12.3f}{nemo:+10.3f}"
-              f"{nemo - LEGO_REALIZED[i]:+12.3f}")
+        gap = nemo - LEGO_REALIZED[i]
+        prior = PRIOR_DEFICIT.get(a)
+        pr = f"{prior:+10.3f}" if prior else f"{'--':>10s}"
+        rev = f"{(gap - prior) / prior:+10.1%}" if prior else f"{'--':>11s}"
+        print(f"{a:>24s}{LEGO_REALIZED[i]:+12.3f}{nemo:+10.3f}{gap:+12.3f}{pr}{rev}")
+    print("\n    PRIOR is the deficit each arm was DEFINED by before this run"
+          " (55de03e71: -0.61 on the\n    base arm, ~0.50 after the velocity_avg flip)."
+          " Pairing a base-arm result against a\n    fixed-arm prediction would flatter"
+          " the result, so both arms are shown: the measured gap\n    comes in ~11-13%"
+          " BELOW its own prior on BOTH, i.e. the magnitude is confirmed and\n    revised"
+          " down consistently, not confirmed on one arm and ignored on the other.")
+    print("    POWER, stated so CONFIRMED is not read as stronger than it is: the"
+          " pre-registered\n    prediction was '~0.5 +/- 0.35'.  +0.544 lands 0.07 inside"
+          " a 0.7-wide window, so this\n    test could not have distinguished 0.5 from"
+          " 0.3 or 0.7.  It is a magnitude check, not\n    a tight one.")
+    print("    NOT MATCHED, and it bounds the whole comparison: NEMO's column is a"
+          " TRAJECTORY DRIFT\n    (C8, 0.00% gap vs its own restarts) while legoESM's is"
+          " its leapfrog STAGE SUM, which\n    its own probe reports as differing from"
+          " plain dR/dt by leapfrog bookkeeping.  Until\n    that gap is quoted, +0.544"
+          " must not be cited outside this file.")
 
     print("\n" + "=" * 104)
     print("T3  THE PRE-REGISTERED BARO-vs-BARO TEST -- band means only, and labelled twice\n"
@@ -580,9 +730,10 @@ def table():
           "    on legoESM realized-minus-BARO is +0.308, a metric artifact of splitting on the\n"
           "    live h_u while reducing with e3u_0, so half the 0.61 deficit already sits\n"
           "    between legoESM's own two rows.  (2) BAND MEAN ONLY: legoESM's PER-ROW array is\n"
-          "    not recorded anywhere -- commit 55de03e71 published band means -- so the\n"
-          "    'broad and single-signed ACROSS ROWS' half of the pre-registered prediction is\n"
-          "    UNTESTABLE from this lane.  An earlier revision printed NEMO's per-row values\n"
+          "    not recorded in commit 55de03e71, which published band means.  Its probe DOES\n"
+          "    save the per-row array under --out-npz (acc_stage), so the 'broad and\n"
+          "    single-signed ACROSS ROWS' half of the pre-registration is UNTESTED, not\n"
+          "    untestable.  An earlier revision printed NEMO's per-row values\n"
           "    against legoESM's band-mean SCALAR and reported the resulting spread as a\n"
           "    per-row difference; that was NEMO's own row structure wearing a cross-model\n"
           "    label, and it is retracted.  To test the shape: re-run\n"
@@ -610,13 +761,13 @@ def table():
           " differences).\n    A circulation deficit LINEAR in time requires a rate"
           " deficit FLAT in time, so flat is\n    the CONFIRMING shape here, not the"
           " disqualifying one.")
-    print("    NOTE the last three columns are NEMO's INTERVAL mean minus legoESM's"
-          " 90-DAY mean.\n    legoESM's own per-interval series is not recorded, so ALL the"
-          " time structure in those\n    columns is NEMO's.  They show whether NEMO alone is"
-          " flat, not whether the DIFFERENCE is.")
+    print("    NEMO ONLY.  An earlier revision also printed NEMO's 10-day interval mean"
+          " minus\n    legoESM's 90-DAY mean; that is a matched-window violation (a"
+          " 10-day number against a\n    90-day one) and labelling it did not make it a"
+          " comparison, so the columns are removed.\n    Differencing per interval needs"
+          " legoESM's own per-interval series.")
     print("=" * 104)
-    print(f"{'interval [d]':>14s}{'BARO = realized':>18s}{'ZDF (discarded)':>18s}"
-          + "".join(f"{'-lego90 ' + a[:7]:>16s}" for a in LEGO_ARMS))
+    print(f"{'interval [d]':>14s}{'BARO = realized':>18s}{'ZDF (discarded)':>18s}")
     ser = []
     prev = None
     for i, kt in enumerate(kts):
@@ -626,8 +777,7 @@ def table():
         m = float(np.mean(seg["realized"][ROWS]))
         ser.append(m)
         print(f"{(i * 10):>6d}-{(i + 1) * 10:<7d}{m:+18.3f}"
-              f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+18.3f}"
-              + "".join(f"{m - LEGO_REALIZED[k]:+16.3f}" for k in range(3)))
+              f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+18.3f}")
     print(f"{'mean+-sd':>14s}{np.mean(ser):+13.3f}+-{np.std(ser):<4.2f}"
           f"   range {max(ser) - min(ser):+.3f} ({max(ser) / min(ser):.2f}x)")
     print("\n    NEMO's rate is NOT flat in time: it rises to day 30-40 and decays"
