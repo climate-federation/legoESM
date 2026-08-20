@@ -40,6 +40,7 @@
 #   GPU_RANKS="1 2 4 8 16"   ladder; rungs above the granted GPUs are skipped
 #   NLEV=26  STEPS=65  WARMUP=5
 #   X64=0                    0 = float32 (default here), 1 = float64
+#   PARTITION=sfc            or metis (the graph-partition arm; needs pymetis)
 #   WIDE=0                   1 = wide halo (LEGOESM_MPAS_WIDE_HALO)
 # ===========================================================================
 set -uo pipefail
@@ -57,6 +58,7 @@ cd "$REPO"
 SUBDIV="${SUBDIV:-7 8 9}"
 GPU_RANKS="${GPU_RANKS:-1 2 4 8 16}"
 NLEV="${NLEV:-26}"
+PARTITION="${PARTITION:-sfc}"
 STEPS="${STEPS:-65}"; WARMUP="${WARMUP:-5}"
 X64="${X64:-0}"
 WIDE="${WIDE:-0}"
@@ -101,7 +103,7 @@ SHIM='export CUDA_VISIBLE_DEVICES=${PALS_LOCAL_RANKID:-0}; '\
 'exec "$@"'
 
 echo "=== HOSTS ==="; sort -u "$PBS_NODEFILE"; date
-echo "ladder=[$GPU_RANKS] subdiv=[$SUBDIV] nlev=$NLEV steps=$STEPS x64=$X64 wide=$WIDE"
+echo "ladder=[$GPU_RANKS] subdiv=[$SUBDIV] nlev=$NLEV x64=$X64 wide=$WIDE partition=$PARTITION"
 echo "reorder-for=$RMAX outdir=$OUTDIR"
 
 rc=0; i=0
@@ -122,7 +124,7 @@ for L in $SUBDIV; do
         --n-devices "$N" \
         --subdivision "$L" --nlev "$NLEV" \
         --steps "$STEPS" --warmup "$WARMUP" --lloyd 0 \
-        --partition-method sfc --reorder-for "$RMAX" \
+        --partition-method "$PARTITION" --reorder-for "$RMAX" \
         --out "$OUTDIR/s${L}_n${N}.jsonl" < /dev/null \
         || { echo "s${L} N=${N} FAILED"; rc=1; }
     sleep 15
