@@ -99,6 +99,15 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   ``enhanced_diffusion_convection``; both integration factory and the
     #   implicit k_profiles path supply them when this is selected.
     n2_mode: str = "insitu"
+    # Which alpha/beta the ``n2_mode="nemo_bn2"`` assembly uses. ``"seos"``
+    # (default, BIT-IDENTICAL legacy) is NEMO's 3-term simplified EOS;
+    # ``"teos10"`` is NEMO's Roquet polynomial with the TEOS-10 coefficient
+    # set -- what ORCA1 runs (``ln_teos10 = .true.``). Same axis, same name
+    # and same default as ``TKEConfig.n2_eos_form``: the EVD trigger's N²
+    # was hard-wired to the simplified EOS while its TKE sibling was already
+    # configurable, so a TEOS-10 card silently ran two different N² kernels.
+    # Ignored by every other ``n2_mode``.
+    n2_eos_form: str = "seos"
     # Static-instability trigger threshold on N² [1/s²]: EVD fires where
     # N² < n2_threshold. Default 0.0 (fire on any negative N²). NEMO zdfevd
     # (ln_zdfevd) fires where MIN(rn2, rn2b) <= -1e-12 — a small NEGATIVE

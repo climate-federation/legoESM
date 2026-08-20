@@ -205,3 +205,98 @@ def test_knife_edge_bn2_matches_nemo_fortran_transcription():
     assert np.allclose(n2_bn2, ref, rtol=0, atol=1e-18), (
         np.max(np.abs(n2_bn2 - ref)))
     assert ref[_KTOP] < _THR
+
+
+# ---------------------------------------------------------------------------
+# EnhancedDiffusionConfig.n2_eos_form -- WHICH alpha/beta the bn2 trigger uses
+# ---------------------------------------------------------------------------
+# The EVD trigger's N2 was hard-wired to the simplified EOS: the bn2 call
+# omitted eos_form and so always took the "seos" default, even on a card whose
+# TKE sibling (TKEConfig.n2_eos_form, threaded in vertical_mixing/_shared.py)
+# was already running the TEOS-10 polynomial.  Same axis, same name, same
+# default here.
+
+
+def _evd_n2_column(n2_eos_form, smooth_transition=False):
+    """(K, flag) at the front interface with the given alpha/beta selector."""
+    z_coord, H_deep, T, S = _compensated_front_column()
+    eos_fn = make_eos_fn("nemo_seos")
+    Tj = jnp.asarray(T)[None, None, :]
+    Sj = jnp.asarray(S)[None, None, :]
+    J = jnp.ones((1, 1))
+    rho_0 = NemoSEOSConfig().rho0
+    gdept, gdepw = nemo_bn2_live_ladders(z_coord, jnp.zeros(()),
+                                         jnp.asarray(H_deep))
+    rho = eos_fn(Tj, Sj, jnp.asarray(np.asarray(gdept))[None, None, :]
+                 * constants.g * rho_0)
+    kwargs = {} if n2_eos_form is None else {"n2_eos_form": n2_eos_form}
+    cfg = EnhancedDiffusionConfig(
+        K_conv=100.0, K_bg=1e-5, smooth_transition=smooth_transition,
+        sigmoid_sharpness=1e10, n2_threshold=_THR, n2_mode="nemo_bn2",
+        **kwargs)
+    K, _, flag = convective_K_A_flag(
+        rho, z_coord.dz_ref, J, cfg, T=Tj, S=Sj,
+        t_depth=gdept[None, None, :], w_depth=gdepw[None, None, :],
+        g=constants.g, rho_ref=rho_0)
+    return np.asarray(K)[0, 0], np.asarray(flag)[0, 0]
+
+
+def test_evd_n2_eos_form_default_is_seos_and_bit_identical():
+    """Omitting the field is BYTE-identical to selecting 'seos' explicitly."""
+    assert EnhancedDiffusionConfig().n2_eos_form == "seos"
+    K_default, flag_default = _evd_n2_column(None)
+    K_seos, flag_seos = _evd_n2_column("seos")
+    assert np.array_equal(K_default, K_seos)
+    assert np.array_equal(flag_default, flag_seos)
+
+
+def test_evd_n2_eos_form_reaches_the_bn2_kernel():
+    """The selector is FORWARDED: 'teos10' gives the trigger a different N2.
+
+    Non-vacuity: run the smooth (sigmoid) trigger so the comparison sees the
+    continuous N2 rather than a saturated 0/1 flag, and check against the
+    kernel called directly with each eos_form.  Before the fix both arms
+    returned the 'seos' answer, so the arrays were byte-equal.
+    """
+    z_coord, H_deep, T, S = _compensated_front_column()
+    Tj = jnp.asarray(T)[None, None, :]
+    Sj = jnp.asarray(S)[None, None, :]
+    gdept, gdepw = nemo_bn2_live_ladders(z_coord, jnp.zeros(()),
+                                         jnp.asarray(H_deep))
+    n2_seos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
+        g=constants.g, eos_form="seos"))[0, 0]
+    n2_teos = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        Tj, Sj, gdept[None, None, :], gdepw[None, None, :],
+        g=constants.g, eos_form="teos10"))[0, 0]
+    assert not np.allclose(n2_seos, n2_teos, rtol=0, atol=1e-18), (
+        "the two alpha/beta sets agree on this column -- the test below "
+        "cannot detect a dropped forward")
+
+    _, flag_seos = _evd_n2_column("seos", smooth_transition=True)
+    _, flag_teos = _evd_n2_column("teos10", smooth_transition=True)
+    assert not np.array_equal(flag_seos, flag_teos), (
+        "convective_K_A_flag ignored n2_eos_form -- the forward to "
+        "compute_buoyancy_frequency_nemo_bn2 is missing again")
+
+
+def test_evd_n2_eos_form_unknown_raises():
+    """Dispatch hardening: a typo raises at function entry, not silently."""
+    z_coord, H_deep, T, S = _compensated_front_column()
+    Tj = jnp.asarray(T)[None, None, :]
+    Sj = jnp.asarray(S)[None, None, :]
+    J = jnp.ones((1, 1))
+    rho_0 = NemoSEOSConfig().rho0
+    gdept, gdepw = nemo_bn2_live_ladders(z_coord, jnp.zeros(()),
+                                         jnp.asarray(H_deep))
+    rho = make_eos_fn("nemo_seos")(
+        Tj, Sj,
+        jnp.asarray(np.asarray(gdept))[None, None, :] * constants.g * rho_0)
+    # Raises even under an n2_mode whose branch never reaches the bn2 kernel.
+    for mode in ("nemo_bn2", "insitu"):
+        cfg = EnhancedDiffusionConfig(n2_mode=mode, n2_eos_form="bogus")
+        with pytest.raises(ValueError, match="n2_eos_form"):
+            convective_K_A_flag(
+                rho, z_coord.dz_ref, J, cfg, T=Tj, S=Sj,
+                t_depth=gdept[None, None, :], w_depth=gdepw[None, None, :],
+                g=constants.g, rho_ref=rho_0)
