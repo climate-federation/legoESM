@@ -160,8 +160,14 @@ def test_halo_depth_is_one_shared_constant():
     assert (inspect.signature(sd.spmd_schedule_cost)
             .parameters["halo_depth"].default == sd.SPMD_HALO_DEPTH)
     prod = inspect.getsource(sd.make_voronoi_sharded_step)
-    assert "halo_depth=SPMD_HALO_DEPTH" in prod, (
-        "production stopped consuming the shared constant")
+    # Wide-halo (2026-08-10): production consumes the shared constant
+    # through _halo_depth_eff, which is SPMD_HALO_DEPTH itself on the
+    # default path and SPMD_HALO_DEPTH * evals under
+    # LEGOESM_MPAS_WIDE_HALO=1 — both spellings keep ONE source depth.
+    assert "halo_depth=_halo_depth_eff" in prod, (
+        "production stopped consuming the resolved depth")
+    assert "_halo_depth_eff = SPMD_HALO_DEPTH" in prod, (
+        "the resolved depth stopped deriving from the shared constant")
 
 
 def test_single_device_reports_no_strategy(mesh):

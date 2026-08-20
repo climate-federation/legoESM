@@ -50,7 +50,15 @@ from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
 # --- Schema keys, validated at load time ---
-_GRID_TYPES = ("latlon", "gaussian", "cubed_sphere")
+# The SCVT Voronoi aliases are here because the DRIVER already builds that mesh
+# (``run_lmip_biophys.make_grid`` branches on it) and only this list stood in
+# the way of asking for one. That gap mattered: a coupled AMIP run on the
+# Voronoi mesh needs its land state spun up on the SAME mesh, because the
+# restart loader compares column counts and refuses a mismatch rather than
+# interpolating. Without the aliases the only offline spin-up reachable for
+# such a run was a different grid whose output it would then reject.
+_GRID_TYPES = ("latlon", "gaussian", "cubed_sphere",
+               "voronoi", "icosahedral", "ico", "mpas", "mpas_voronoi")
 _LAND_MODES = ("multilayer", "slab")
 _SURFACE_SCHEMES = ("two_leaf_canopy", "simple_seb")
 _BULK_SCHEMES = ("most", "constant")
@@ -67,7 +75,12 @@ _STOMATA_SANITY_BOUNDS = (
     ("gs_max", 0.05, 1.5),         # mol m-2 s-1
 )
 
-_DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"
+# The public CESM inputdata naming, which is what `download_lmip_data.sh`
+# stages off-site and what the reader itself defaults to
+# (`cru_jra.CRUJRA_FILE_PREFIX`).  It used to be the glade-only
+# `_filled_antarct_and_grnlnd_` variant, so the two defaults in this repo
+# disagreed and every template asked for files no download could produce.
+_DEFAULT_PREFIX = "clmforc.CRUJRAv2.5_0.5x0.5"
 
 
 class LMIPConfig(NamedTuple):

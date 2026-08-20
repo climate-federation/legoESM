@@ -284,11 +284,14 @@ def test_integrate_clubb_column_multistep_stable():
 
 
 def test_integrate_clubb_column_dry_stress_stays_physical():
-    """A long (~3 h) near-dry, weakly-stratified run stays physical WITH the
-    host-numerical-diffusion stand-in (default): wp2 bounded, T physical, q_v>=0.
-    Root-caused iter 49-51: the bare driver (nu=0) grows grid-scale 2dz noise the
-    coupled dynamical core would damp; a tiny host diffusion removes it (the
-    closure itself is conservative + parity-faithful)."""
+    """A long (~3 h) near-dry, weakly-stratified run stays physical with the
+    host-numerical-diffusion stand-in at its default: wp2 bounded, T physical,
+    q_v >= 0.
+
+    (This used to say the bare nu=0 driver grew grid-scale 2dz noise that only
+    host diffusion removed. Retracted in #1508: that growth was the missing
+    surface second-moment BC, and the bare column is bounded once it is
+    applied -- see the companion test below.)"""
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=2e-3)
     kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)   # near-dry
     kw["q_sfc"] = jnp.full_like(kw["q_sfc"], 1e-5)
@@ -300,10 +303,23 @@ def test_integrate_clubb_column_dry_stress_stays_physical():
     assert float(np.max(np.asarray(m_f.wp2))) < 50.0
 
 
-def test_integrate_clubb_column_host_diffusion_controls_grid_noise():
-    """Root-cause guard: the dry-regime instability is grid-scale (2dz) noise the
-    host numerical diffusion damps. Bare (nu=0) grows wp2 large; the default
-    stand-in keeps it bounded. Pins the root cause + the fix (not a closure bug)."""
+def test_integrate_clubb_column_dry_regime_bounded_without_host_diffusion():
+    """Regression guard for #1508: the dry-regime instability is GONE, and the
+    bare (nu=0) driver no longer needs the host-diffusion stand-in to stay
+    bounded.
+
+    This test used to assert the opposite -- that the bare driver grew wp2
+    above 1.0 and that host diffusion cut it more than fivefold -- and it
+    attributed that growth to grid-scale (2dz) noise a coupled dynamical core
+    would damp, i.e. to driver exposure rather than to the closure.  That
+    attribution was wrong.  The growth was CLUBB's missing surface
+    second-moment boundary condition (`calc_sfc_varnce`): with the level-0 row
+    left at its initial seed, the Cauchy-Schwarz floor pinned the surface
+    theta_l variance at ~9e2 K^2 and drove the column.  A one-variable control
+    (the BC replaced by a no-op, everything else identical) moves this same
+    metric 0.18 -> 1.77, so the assertion below is non-vacuous: it fails if the
+    BC is removed.
+    """
     def _run(nu):
         kw = _scm_column(ncol=1, nlev=24, dtheta_dz=2e-3)
         kw["q_v"] = jnp.full_like(kw["q_v"], 1e-5)
@@ -313,11 +329,25 @@ def test_integrate_clubb_column_host_diffusion_controls_grid_noise():
             host_numerical_diffusion=nu)
         return float(np.max(np.asarray(m_f.wp2)))
     bare, damped = _run(0.0), _run(0.05)
-    # Bare driver: wp2 grows far above the tke_min (1e-6) rest floor (grid-scale
-    # instability). Host-diffusion stand-in: bounded small. Diffusion cuts it >5x.
-    assert bare > 1.0
-    assert damped < 0.2
-    assert bare > 5.0 * damped
+    # Both stay at a physical boundary-layer level; neither runs away, and the
+    # host stand-in is no longer load-bearing for stability here.
+    assert bare < 0.5, f"bare driver wp2 grew to {bare}"
+    # The damped arm was already bounded before the fix, so its cap discriminates
+    # nothing; it is kept only as a boundedness check, at 0.3 rather than the
+    # historical 0.2 because the measured value (0.192) now sits against that
+    # edge and would make the suite brittle.
+    assert damped < 0.3, f"damped driver wp2 grew to {damped}"
+    # Bracketed, not just capped: a regression that collapsed the closure to the
+    # tke_min rest floor would otherwise satisfy an upper bound alone.
+    assert bare > 0.01 and damped > 0.01
+    # And the option is genuinely wired through integrate_clubb_column: if the
+    # kwarg were ignored the two arms would be identical. This is a WIRING
+    # check, not a behaviour one -- any perturbation satisfies it. Testing that
+    # the operator actually damps at the 2dz scale it targets needs a synthetic
+    # noise-injection case, flagged as follow-up and not built here. Note also
+    # that host diffusion now makes this PEAK slightly WORSE (0.192 vs 0.176);
+    # a peak is not an integral, so that is recorded rather than explained.
+    assert bare != damped
 
 
 def test_host_diffusion_conserves_sum_and_preserves_positivity():
@@ -877,17 +907,26 @@ def test_prognostic_clubb_develops_convective_skewness_unlike_clubb_lite():
     for arr in (wp3_conv, wp2_conv, wp3_neut, wp2_neut):
         assert np.all(np.isfinite(arr))
     assert np.all(wp2_conv >= 0.0) and np.all(wp2_neut >= 0.0)
+    # The surface flux itself has to be a physically possible one. Before the
+    # #1508 surface-variance BC landed this same arm reported 974 W/m^2, against
+    # observed peak surface sensible heat fluxes of roughly 500-600 W/m^2 over
+    # the hottest deserts, and every threshold below was calibrated against
+    # that. Guard it explicitly so a future regression of that kind fails here
+    # rather than being absorbed. (400 is a fixture-specific guard, not a
+    # universal physical bound.)
+    assert 0.0 < sh_conv < 400.0, f"unphysical surface heat flux {sh_conv} W/m^2"
     # The control really is near-neutral: its surface heat flux is a small
-    # fraction of the convective case's (verified, not assumed).
-    assert sh_conv > 0.0
-    assert abs(sh_neut) < 0.05 * sh_conv
+    # fraction of the convective case's (verified, not assumed). It is not
+    # ZERO, because the surface BC gives even an unheated column its real
+    # shear-driven turbulence, which then evolves the near-surface temperature.
+    assert abs(sh_neut) < 0.25 * sh_conv
     # (a) The convective case is genuinely turbulent; the control is quiescent.
-    assert float(np.max(wp2_conv)) > 10.0 * float(np.max(wp2_neut))
+    assert float(np.max(wp2_conv)) > 3.0 * float(np.max(wp2_neut))
     assert float(np.max(wp2_conv)) > 0.1
     # (b) THE signature: positive vertical-velocity skewness in the UPPER mixed
     # layer (aloft, surface excluded) — buoyancy-driven, the third moment a
     # down-gradient scheme cannot represent. The near-neutral control has none.
-    assert float(np.max(wp3_conv[upper_bl])) > 0.05      # clear positive peak aloft
+    assert float(np.max(wp3_conv[upper_bl])) > 0.01      # clear positive peak aloft
     assert float(np.mean(wp3_conv[upper_bl])) > 0.0      # net positive skewness aloft
     assert float(np.max(np.abs(wp3_neut[upper_bl]))) < 1e-3
 
@@ -1243,7 +1282,8 @@ def test_prognostic_clubb_convective_bl_physics():
     """Idealized boundary-layer physics check (beyond runs-without-error): in a
     moist, stably-stratified column, STRONG surface heating must drive a
     convective response — the prognostic closure develops substantially more
-    turbulence (column-integrated wp2) than the same column with NO surface
+    turbulence ALOFT (wp2 summed above the surface boundary row, which is a
+    diagnosed value rather than evolved interior turbulence) than the same column with NO surface
     heating, and the heated case has an UPWARD buoyancy flux (wpthvp>0) in the
     lower BL (buoyancy production of TKE). This is the canonical turbulence-
     scheme sanity check, on the genuinely-prognostic path."""
@@ -1255,20 +1295,37 @@ def test_prognostic_clubb_convective_bl_physics():
         kw["T_sfc"] = base["T"][:, -1] + extra_heating
         _, _, _, _, m_f, diags = integrate_clubb_column(
             **kw, dt=120.0, nsteps=60, config=cfg)   # ~2 h
-        col_tke = float(np.sum(np.asarray(m_f.wp2)))
-        return col_tke, np.asarray(diags["wpthvp"])   # (nsteps, ncol, nzm)
+        # ABOVE the surface row: level 0 is now the diagnosed surface BC, whose
+        # dominant term is the shear part a_const*u*^2. That is NEARLY the same
+        # in both arms here -- only T_sfc differs, so the arms part only through
+        # the smaller convective 0.3*w*^2 term (surface contributions come out
+        # 0.245 heated vs 0.232 calm). Including a boundary value that barely
+        # responds would swamp the interior response this test is about. (Before the #1508 BC landed,
+        # level 0 held the initial seed and the unheated arm had essentially no
+        # turbulence at all, which is why a 3x column-integrated ratio used to
+        # be reachable -- against a heated column carrying 27 m^2/s^2 and a
+        # buoyancy flux of 3.2 K m/s, both far outside anything physical.)
+        tke_above_sfc = float(np.sum(np.asarray(m_f.wp2)[:, 1:]))
+        return tke_above_sfc, np.asarray(diags["wpthvp"])   # (nsteps, ncol, nzm)
 
     tke_heated, wpthvp_heated = run(6.0)     # strong surface heating
     tke_calm, _ = run(0.0)                    # no surface heating
 
-    # Convective forcing develops markedly more TKE than the unheated column.
-    assert tke_heated > 3.0 * tke_calm
+    # Convective forcing develops more TKE aloft than the unheated column...
+    assert tke_heated > 1.2 * tke_calm
+    # ...and BOTH arms keep a real amount of it. Every other bound in this test
+    # is an upper one, so without this a regression that collapsed the closure
+    # to zero turbulence would pass everything.
+    assert tke_heated > 0.05 and tke_calm > 0.02
     # Upward buoyancy flux somewhere in the lower BL of the heated case (the
     # buoyancy production that sustains convective TKE). Lower BL = top-down
     # ascending zm: low indices are the surface side.
     final_wpthvp = wpthvp_heated[-1]          # (ncol, nzm) last step
     lower_bl = final_wpthvp[:, :final_wpthvp.shape[1] // 2]
-    assert float(np.max(lower_bl)) > 0.0
+    assert float(np.max(lower_bl)) > 1.0e-3
+    # ...and a buoyancy flux of a physically possible size. The pre-#1508 arm
+    # reported 3.2 K m/s here, ~100x a real convective boundary layer.
+    assert float(np.max(lower_bl)) < 1.0
 
 
 def test_prognostic_clubb_runs_in_combined_physics_pipeline():
@@ -2195,23 +2252,21 @@ def test_clubb_prognostic_rejects_surface_flux_and_explicit_sfc_together():
             sfc_wpthlp=jnp.zeros((ncol,)), surface_flux=sf)
 
 
-# --- #1508: the surface variance boundary condition is MISSING -------------
+# --- #1508: the surface variance boundary condition ------------------------
 #
-# CLUBB sets the zm level-0 (surface) values of wp2/up2/vp2/thlp2/rtp2 from
-# ustar and the surface fluxes (its `sfc_varnce` module).  The prognostic
-# bridge sets only the FLUX BCs (wprtp/wpthlp/upwp/vpwp, clubb.py:5696-5699).
-# Nothing applies the PHYSICAL surface-variance BC — the lower solver row
-# carries the previous value and clip_variance imposes only a correlation-
-# derived LOWER bound — and `CLUBBParams.a_const` /
-# `CLUBBParams.up2_sfc_coef` — the two coefficients that BC uses — are read
-# by no numerical code (only their own defaults and __param_spec__ entries).
+# CLUBB sets the zm level-0 (surface) values of wp2/up2/vp2/thlp2/rtp2/rtpthlp
+# from ustar and the surface fluxes (its `sfc_varnce` module).  Before that BC
+# was ported the prognostic bridge set only the FLUX BCs
+# (wprtp/wpthlp/upwp/vpwp), so the lower solver row carried whatever the
+# previous step left there and clip_variance imposed only a correlation-derived
+# LOWER bound.  On this synthetic L24 fixture the surface value was 209 /
+# 591 K^2; on a production-shaped L30 / dt 75 s column it was 9.29e+02 K^2 (a
+# 30 K RMS theta_l fluctuation) from the first step and the column reached
+# non-finite T in 92 steps.
 #
-# On the synthetic L24 fixture below the surface value is 209 / 591 K^2.  On
-# a production-shaped L30 / dt 75 s column it is 9.29e+02 K^2 (a 30 K RMS
-# theta_l fluctuation) from the first step and the column reaches non-finite T
-# in 92 steps; pinning just those level-0 variances runs the full simulated
-# day.  This test is a broad guard on the defect, NOT a reproducer of that
-# production case.
+# `calc_sfc_varnce` now runs inside `advance_clubb_core`, in CLUBB's own order
+# (after the pre-advance PDF closure, before every moment advance).  This test
+# is a broad guard on the defect, NOT a reproducer of the production case.
 # Reproducer: scripts/validate/clubb_prognostic_stability.py --mode production
 
 
@@ -2219,7 +2274,7 @@ def test_prognostic_surface_theta_l_variance_is_physical():
     """theta_l variance at the surface must be a plausible atmospheric value.
 
     Deliberately loose: 100 K^2 is a 10 K RMS fluctuation, already far beyond
-    anything a surface layer produces.  The measured value is ~9.3e2 K^2, so
+    anything a surface layer produces.  The pre-fix value was ~9.3e2 K^2, so
     the gate does not depend on where a defensible bound is drawn.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import (

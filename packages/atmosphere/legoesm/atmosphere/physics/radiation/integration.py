@@ -362,7 +362,27 @@ def _compute_ozone_vmr(
 # Shared column extraction for all hydrostatic grids
 # ===========================================================================
 
-def _extract_tracer_columns(state, ncol, nlev, dtype=None):
+def _rho_for_number_conversion(state, ncol, nlev, T_col, p_full_col):
+    """Moist air density [kg/m^3] for the per-mass -> per-volume number step.
+
+    ``None`` when the state carries no droplet number, so a warm-rain run pays
+    nothing and the extractor's guard stays reachable.
+    """
+    tracers = getattr(state, "tracers", None)
+    if not tracers or "N_c" not in tracers:
+        return None
+    from legoesm.atmosphere.physics._shared import compute_rho
+
+    _qv = tracers.get("q_v")
+    if _qv is not None:
+        _qv = (_qv.data if hasattr(_qv, "data") else _qv).reshape(ncol, nlev)
+    else:
+        _qv = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
+    return compute_rho(T_col, p_full_col, _qv)
+
+
+def _extract_tracer_columns(state, ncol, nlev, dtype=None,
+                            rho_col=None):
     """Extract water vapor and cloud condensate columns from state tracers.
 
     Works for any state type (HydrostaticState, SpectralHydrostaticState, etc.)
@@ -418,12 +438,21 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None):
             _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
             q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
         # Double-moment NUMBER columns (Morrison / Seifert-Beheng) → M2005 PSD
-        # r_eff. N_c per-VOLUME [#/m³], N_i per-MASS [#/kg]; passed raw (see
-        # docstring UNIT NOTE). Absent ⇒ None ⇒ constant-r_eff fallback.
+        # r_eff.  Both are STORED per MASS [#/kg], so a dycore's mass-mixing-
+        # ratio advection is the right operator for them; the PSD formulas want
+        # N_c per VOLUME [#/m³], so convert here.  N_i is used per-mass and
+        # passes through.  Absent ⇒ None ⇒ constant-r_eff fallback.
         if "N_c" in tracers:
+            if rho_col is None:
+                raise ValueError(
+                    "N_c is stored per MASS [#/kg]; converting it to the "
+                    "per-VOLUME number the cloud-optics PSD expects needs the "
+                    "air density. Pass rho_col to _extract_tracer_columns."
+                )
             _nc_raw = tracers["N_c"]
             _nc_data = _nc_raw.data if hasattr(_nc_raw, "data") else _nc_raw
-            n_cloud_col = jnp.maximum(_nc_data.reshape(ncol, nlev), 0.0)
+            n_cloud_col = jnp.maximum(
+                _nc_data.reshape(ncol, nlev) * rho_col, 0.0)
         if "N_i" in tracers:
             _ni_raw = tracers["N_i"]
             _ni_data = _ni_raw.data if hasattr(_ni_raw, "data") else _ni_raw
@@ -1283,7 +1312,10 @@ def _make_hydrostatic_radiation(
                 _alb_col = _alb_col.reshape(ncol)
 
         q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
-            _extract_tracer_columns(state, ncol, nlev)
+            _extract_tracer_columns(
+                state, ncol, nlev,
+                rho_col=_rho_for_number_conversion(
+                    state, ncol, nlev, T_col, p_full_col))
         )
 
         # Aerosol-CCN droplet number for the cloud-optics PSD (Twomey first
@@ -1656,9 +1688,10 @@ def _make_nonhydrostatic_radiation(
         # reffc=(PGAM+3)/(2·LAMC). Same ``> 8`` (Morrison) guard as N_i.
         n_cloud_col = None
         if n_tracers > 8:
+            # Stored per MASS; the PSD wants per VOLUME (see the extractor).
             n_cloud_col = jnp.clip(
                 state.tracers.data[..., 6], 0.0, None
-            ).reshape(ncol, nlev)
+            ).reshape(ncol, nlev) * rho_total.reshape(ncol, nlev)
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
@@ -2017,9 +2050,10 @@ def _make_plane_radiation(
         n_cloud_col = None
         n_ice_col = None
         if n_tracers > 8:
+            # Stored per MASS; the PSD wants per VOLUME (see the extractor).
             n_cloud_col = jnp.clip(
                 state.tracers.data[..., 6], 0.0, None,
-            ).reshape(ncol, nlev)
+            ).reshape(ncol, nlev) * rho_total.reshape(ncol, nlev)
             n_ice_col = jnp.clip(
                 state.tracers.data[..., 8], 0.0, None,
             ).reshape(ncol, nlev)
@@ -2219,7 +2253,11 @@ def _make_mpas_nh_radiation(
         n_cloud_col = None
         n_ice_col = None
         if n_tracers > 8:
-            n_cloud_col = jnp.clip(state.tracers.data[..., 6], 0.0, None)
+            # Stored per MASS; the PSD wants per VOLUME (see the extractor).
+            from legoesm.atmosphere.physics._shared import compute_rho
+            n_cloud_col = jnp.clip(
+                state.tracers.data[..., 6], 0.0, None
+            ) * compute_rho(T_col, p_full_col, q_v_col)
             n_ice_col = jnp.clip(state.tracers.data[..., 8], 0.0, None)
 
         rad_out = _call_radiation_backend(
@@ -2428,7 +2466,10 @@ def _make_spectral_pe_radiation(
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
         q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
-            _extract_tracer_columns(state, ncol, nlev)
+            _extract_tracer_columns(
+                state, ncol, nlev,
+                rho_col=_rho_for_number_conversion(
+                    state, ncol, nlev, T_col, p_full_col))
         )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None

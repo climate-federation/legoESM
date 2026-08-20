@@ -915,6 +915,7 @@ def timed_scan_blocks(
     n_blocks: int = 2,
     probe_steps: int = 3,
     sync_label: str = "timed_scan_blocks",
+    trace_dir: str | None = None,
     aux=None,
 ):
     """Measurement-contract timing: fused ``lax.scan`` blocks + probe latency.
@@ -1086,6 +1087,13 @@ def timed_scan_blocks(
     scan_compile_ms = (time.perf_counter() - t0) * 1e3
     del _pre, _pre_out
 
+    # Optional jax.profiler trace of the TIMED blocks only (post
+    # pre-compile, so the 1M-event cap is not flooded by compile-phase
+    # host events — the MPAS-lane lesson, job 26854167).
+    if trace_dir is not None:
+        import pathlib as _pl
+        _pl.Path(trace_dir).mkdir(parents=True, exist_ok=True)
+        jax.profiler.start_trace(trace_dir)
     block_ms = []
     for b in range(n_blocks):
         _fence(f"block{b}_start")
@@ -1093,6 +1101,8 @@ def timed_scan_blocks(
         state = _scan_run(state, aux)
         _block(state)
         block_ms.append((time.perf_counter() - t0) * 1e3)
+    if trace_dir is not None:
+        jax.profiler.stop_trace()
     _fence("blocks_end")
 
     # Slowest-rank statistics from the FULL per-block vectors (equal length

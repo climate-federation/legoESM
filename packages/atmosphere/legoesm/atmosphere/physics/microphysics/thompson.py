@@ -64,6 +64,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
     effective_Nc,
@@ -254,6 +255,11 @@ def thompson_microphysics(
 
     # === Ice depositional growth / sublimation ===
     q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    # DEPOSITION target only (see morrison.py): pristine air below 235 K may
+    # hold ice supersaturation up to the IFS/SAM homogeneous-freezing ramp.
+    q_sat_i_dep = q_sat_i * _homogeneous_freezing_rh_factor(
+        T, q_i, enabled=config.homogeneous_ice_supersaturation,
+    )
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
     # Shared diffusional-growth thermodynamics (Thompson 2008 / Reisner 1998):
@@ -262,6 +268,11 @@ def thompson_microphysics(
     #   CONS12 = ρ_ci·π  (mass–size for spherical ice, m = (ρ_ci·π/6)·D³)
     cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
     dv_vap = _DV_PREFACTOR * safe_pow(T, _DV_T_EXP) / jnp.clip(p_full, 1.0)
+    # Clausius-Clapeyron on the PLAIN ice curve: ABI is the psychrometric
+    # correction for latent heating during deposition, a property of the
+    # saturation curve itself. The rh_homo allowance shifts the TARGET the
+    # vapour relaxes toward, not dq_sat/dT, and gSAM's M2005 likewise builds
+    # ABI from the unscaled qvi (module_mp_graupel.f90).
     dqsidt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)
     abi = 1.0 + dqsidt * constants.L_s / constants.c_pd
     if config.ice_growth_scheme == "capacitance":
@@ -278,7 +289,7 @@ def thompson_microphysics(
             * safe_pow(jnp.clip(N_i, 0.0), 2.0 / 3.0)
             * safe_pow(q_i_eff, 1.0 / 3.0)
         )
-        dep_raw = config.ice_deposition_efficiency * epsi * (q_v - q_sat_i) / abi
+        dep_raw = config.ice_deposition_efficiency * epsi * (q_v - q_sat_i_dep) / abi
         # Cap positive deposition at the available ice supersaturation per
         # step: deposition physically HALTS at saturation, so it cannot draw
         # q_v below q_sat_i in one explicit step. Without this the stiff
@@ -288,7 +299,7 @@ def thompson_microphysics(
         # NOT a clip of a physical quantity. Mirrors morrison.py.
         dep_pos = jnp.minimum(
             jnp.maximum(dep_raw, 0.0),
-            jnp.maximum(q_v - q_sat_i, 0.0) / jnp.clip(dt, 1.0),
+            jnp.maximum(q_v - q_sat_i_dep, 0.0) / jnp.clip(dt, 1.0),
         )
         subl_neg = jnp.maximum(
             jnp.minimum(dep_raw, 0.0),
@@ -337,7 +348,7 @@ def thompson_microphysics(
         aggregation = (
             (2.0 * jnp.pi / 3.0) * config.ice_snow_d_auto ** 2 * rho * n0i_ac
             * jnp.exp(-lami_ac * config.ice_snow_d_auto) * dv_vap
-            * jnp.maximum(q_v - q_sat_i, 0.0) / abi
+            * jnp.maximum(q_v - q_sat_i_dep, 0.0) / abi
         )
         aggregation = jnp.where(jnp.clip(q_i, 0.0) > 1.0e-14, aggregation, 0.0)
     else:

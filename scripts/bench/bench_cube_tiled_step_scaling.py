@@ -99,6 +99,13 @@ def main() -> int:
     p.add_argument("--warmup", type=int, default=2,
                    help="Leading samples discarded before the steady median.")
     p.add_argument("--dt", type=float, default=60.0)
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="jax.profiler trace of steps [warmup, warmup+4) "
+                        "from ranks 0-3 into <dir>/rank<k>/ (the shared "
+                        "attribution instrument; analyze with "
+                        "analyze_jax_trace_gaps.py). Steady steps only — "
+                        "the 1M-event cap fills with compile-phase host "
+                        "events otherwise.")
     p.add_argument("--parity-gate", action="store_true",
                    help="Gate vs the serial untiled step (single-process "
                         "smoke windows only).")
@@ -316,11 +323,27 @@ def main() -> int:
     #     feedback loop would require.
     per_step_ms = []
     s = _lower_arg
-    for _ in range(args.steps):
+    _profiling = (args.profile_dir is not None
+                  and jax.process_index() < 4)
+    _prof_on = False
+    for _i in range(args.steps):
+        if _profiling and _i == args.warmup:
+            import pathlib
+            _pd = (pathlib.Path(args.profile_dir)
+                   / f"rank{jax.process_index()}")
+            _pd.mkdir(parents=True, exist_ok=True)
+            jax.profiler.start_trace(str(_pd))
+            _prof_on = True
+        if (_profiling and _prof_on
+                and _i == min(args.warmup + 4, args.steps - 1)):
+            jax.profiler.stop_trace()
+            _prof_on = False
         t0 = time.perf_counter()
         s = compiled(s) if args.closed_loop else compiled(_lower_arg)
         jax.block_until_ready(jax.tree.leaves(s))
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
+    if _profiling and _prof_on:
+        jax.profiler.stop_trace()
 
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils

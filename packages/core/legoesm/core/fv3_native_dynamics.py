@@ -44,26 +44,24 @@ exchange then overwrites -- harmless here, but it would also convert the
 corner-diagonal sentinels, and those are NOT overwritten.  Mirror the
 Fortran window.
 
-TRACERS ARE NOT ADVECTED, AND THAT IS A DECLARED SCOPE LIMIT
-------------------------------------------------------------
-``fv_tracer2d`` is not ported.  On the pinned deck that changes NOTHING
-in ``u``/``v``/``pt``/``delp``, and the reason is checkable rather than
-asserted:
+TRACERS ARE ADVECTED (tracer_2d_1L) AND REMAPPED
+------------------------------------------------
+``fv_tracer2d``'s live arm for this deck -- ``tracer_2d_1L``
+(``z_tracer = .T.``, duo) -- is ported in
+``fv3_native_tracer2d`` and called at the oracle's site
+(``fv_dynamics.F90:534``, between ``dyn_core`` and the remap) on the
+mfx/mfy/cx/cy flux capacitors the acoustic loop accumulates
+(``dyn_core.F90:313`` zeroing + ``sw_core.F90:903-920`` per-sub-step
+accumulation, threaded through ``dsw_transport_phase_3d``).  ``dp1``
+is the pre-dyn_core ``delp`` (``:472-478``), copied per ``n_map``.
+The remap then makes its ``nr`` tracer passes through
+``fv_mapz.F90:330-342`` as before.
 
-* ``adiabatic = .true.`` => ``zvir = 0`` (``driver/solo/atmosphere.F90``),
-  so ``dp1 = zvir*q = 0`` at ``:291`` and the closing
-  ``pt/(1 + r_vir*q(sphum))`` at ``fv_mapz.F90:975`` is an identity;
-* ``consv_te = 0.`` gates out the total-energy fixer
-  (``fv_mapz.F90:628``), the only other place ``q`` reaches ``pt``;
-* ``fill = .F.`` and ``do_sat_adj = .F.`` gate out ``fillz`` and the
-  saturation adjustment, which are the only places ``q`` reaches
-  ``delp``.
-
-So ``q`` is a passenger.  :func:`fv_dynamics_step` still REQUIRES the
-tracer list, because the remap must make the same ``nr`` passes through
-``fv_mapz.F90:330-342`` the oracle makes, and it refuses to run with a
-non-zero ``zvir`` or ``consv`` where the passenger argument would stop
-being true.
+The tracers still do not FEED BACK on this deck, and the guards that
+keep that visible remain: ``zvir != 0`` (the ``dp1 = zvir*q(sphum)``
+coupling at ``:291``/``:402`` and the ``pt/(1 + r_vir*q)`` at
+``fv_mapz.F90:975``) and ``consv_te != 0`` (the total-energy fixer)
+are refused, exactly as before.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------
@@ -83,6 +81,10 @@ import numpy as np
 from legoesm.core.fv3_native_acoustic_3d import acoustic_loop_3d
 from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
 from legoesm.core.fv3_native_state_3d import field_shape
+from legoesm.grids.fv3_native_gridstruct import (
+    FV3_GRAV as _FV3_GRAV,
+    FV3_RDGAS as _FV3_RDGAS,
+)
 
 # fv_grid_utils.F90:56 -- `real, parameter:: ptop_min = 1.d-8`.
 PTOP_MIN = 1.0e-8
@@ -206,6 +208,32 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
         pt[ia:ia + n, ia:ia + n, :] *= (1.0 + dp1) / pkz
 
 
+def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
+                         pt: np.ndarray, *, ptop: float, akap: float,
+                         n: int, ng: int, km: int) -> dict:
+    """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
+
+    ``init_hydro.F90:95-133`` builds ps/pe/peln/pk identically on both
+    lanes; only ``pkz`` differs -- the NH branch (:178-184, dry) is
+
+        pkz = exp( cappa * log( rdg*delp*pt/delz ) ),  rdg = -rdgas/grav
+
+    with ``pt`` still TEMPERATURE at this stage (the theta conversion
+    happens later in fv_dynamics).  Feeding the HYDROSTATIC kappa-mean
+    pkz into an NH run's pt -> theta_v conversion puts a uniform
+    ~kappa(1-kappa)/24 * dlnp^2 error on theta (largest in the thickest
+    log-layer), which surfaced in the first NH parity as a 0.408 m delz
+    residual on every column of every face.
+    """
+    out = p_var_hydrostatic(delp, ptop=ptop, akap=akap, n=n, ng=ng, km=km)
+    rdg = -_FV3_RDGAS / _FV3_GRAV
+    ia = ng
+    out["pkz"][:] = np.exp(akap * np.log(
+        rdg * delp[ia:ia + n, ia:ia + n, :]
+        * pt[ia:ia + n, ia:ia + n, :] / delz))
+    return out
+
+
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      bdt: float, km: int, k_split: int, n_split: int,
                      ptop: float, ak, bk, akap: float, cp_air: float,
@@ -214,8 +242,16 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      zvir: float = 0.0, consv_te: float = 0.0,
                      sphum_index: int | None = None,
                      n_sponge: int = -1, tau: float = -1.0,
+                     hydrostatic: bool = True,
+                     p_fac: float = 0.05, a_imp: float = 1.0,
+                     use_logp: bool = False, kord_wz: int = 9,
+                     w_limiter: bool | None = None,
                      cfg: dict | None = None, a2b_ord: int = 4,
-                     validate: bool = True) -> dict:
+                     validate: bool = True,
+                     hord_tr: int = 6, tracer_q_split: int = 0,
+                     nord_tr: int = 0, trdm2: float = 0.0,
+                     lim_fac: float = 1.0, z_tracer: bool = True,
+                     inline_q: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -228,9 +264,13 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     owns the round trip (``:396-408`` in, ``fv_mapz.F90:209-217`` out).
     A caller that stops between the two gets ``theta_v``.
 
-    ``q`` is six lists of tracer arrays.  It is required -- see the module
-    docstring for why the pinned deck's tracers are passengers and why
-    that must stay a visible choice rather than a default.
+    ``q`` is six lists of tracer arrays (each shaped like ``delp``).
+    They are ADVECTED by ``tracer_2d_1L`` between the acoustic loop and
+    the remap, then remapped -- see the module docstring.  The tracer
+    flags default to the resolved parity deck (``HORD_TR=6 Q_SPLIT=0
+    NORD_TR=0 TRDM2=0 LIM_FAC=1 Z_TRACER=T INLINE_Q=F``, from the
+    logfile echo); any unported arm raises in
+    ``fv3_native_tracer2d.require_tracer_2d_1l_lane``.
     """
     if k_split < 1:
         raise ValueError(f"k_split must be >= 1, got {k_split}")
@@ -257,9 +297,52 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
             "consv_te = 0.")
 
     n, ng = ctx["n"], ctx["ng"]
+    nq = len(q[0])
+    if any(len(qt) != nq for qt in q):
+        raise ValueError(
+            f"every face must carry the same tracer count; got "
+            f"{[len(qt) for qt in q]}")
+    from legoesm.core.fv3_native_tracer2d import (
+        alloc_flux_capacitors,
+        require_tracer_2d_1l_lane,
+        tracer_2d_1l_sixface,
+    )
+    if nq > 0:
+        # Fail on an unported tracer arm BEFORE the acoustic loop, not
+        # after k_split*n_split sub-steps of work.
+        require_tracer_2d_1l_lane(z_tracer=z_tracer,
+                                  q_split=tracer_q_split,
+                                  nord_tr=nord_tr, trdm=trdm2,
+                                  inline_q=inline_q)
     if omga is None:
         omga = [np.zeros(field_shape("delp", n, ng, km), dtype=np.float64)
                 for _ in range(6)]
+
+    ak = np.asarray(ak, dtype=np.float64)
+    bk = np.asarray(bk, dtype=np.float64)
+    # dyn_core.F90:269 -- dp_ref(k) = ak(k+1)-ak(k) + (bk(k+1)-bk(k))*1.E5
+    # (1.E5 is the literal reference surface pressure of the hybrid
+    # coordinate, not a tunable).
+    dp0 = ((ak[1:] - ak[:-1])
+           + (bk[1:] - bk[:-1]) * 1.0e5)  # const-ok: dyn_core.F90:269 literal
+    if not hydrostatic:
+        for t, face in enumerate(state, start=1):
+            if "delz" not in face:
+                raise ValueError(
+                    f"face {t}: hydrostatic=False needs delz in the state "
+                    f"(build_state_3d(hydrostatic=False))")
+        if ctx.get("hs6") is None:
+            raise ValueError(
+                "hydrostatic=False needs ctx['hs6'] (phis) for the NH "
+                "carry (zs = phis/grav, dyn_core.F90:262-278)")
+        if w_limiter is None:
+            # codex NH r3 #3: a silent w_limiter default on the NH lane
+            # contradicts the resolved deck (W_LIMITER=T) without an
+            # error -- an unclamped 200 m/s column is a different model.
+            raise ValueError(
+                "hydrostatic=False needs an explicit w_limiter (the "
+                "resolved NH deck runs W_LIMITER=T; fv_mapz.F90:368)")
+    w_limiter = bool(w_limiter) if w_limiter is not None else False
 
     # :413  mdt = bdt / k_split
     mdt = bdt / float(k_split)
@@ -272,18 +355,35 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     for n_map in range(1, k_split + 1):
         last_step = (n_map == k_split)
 
+        # :472-478  dp1 = delp, full padded box, BEFORE dyn_core.
+        # :313-316 (dyn_core)  fresh zeroed flux capacitors per call.
+        dp1_6 = [np.array(state[t]["delp"], copy=True) for t in range(6)]
+        flux_cap = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
+
         # :502  dyn_core.  press_out receives the remap-step geopk bundle.
         press_out: list = []
         acoustic_loop_3d(ctx, state, mdt, km, n_split=n_split, ptop=ptop,
                          akap=akap, cp_air=cp_air, cfg=cfg,
                          validate=validate, remap_follows=remapped,
-                         press_out=press_out)
+                         hydrostatic=hydrostatic,
+                         p_fac=p_fac, a_imp=a_imp, dp0=dp0,
+                         use_logp=use_logp,
+                         press_out=press_out,
+                         flux_cap=flux_cap)
         if len(press_out) != 6:
             raise RuntimeError(
                 "dyn_core did not return the remap-step pressure bundle; "
                 "acoustic_loop_3d must fill press_out on it == n_split")
 
-        # :528-540  tracer_2d -- see the module docstring. Nothing to do.
+        # :517/:528-540  tracer_2d_1L on the accumulated capacitors
+        # (`if (.not. inline_q .and. nq /= 0)`; inline_q is refused
+        # above, so the gate is just nq).
+        if nq > 0:
+            tracer_2d_1l_sixface(ctx, q, dp1_6, flux_cap,
+                                 km=km, nq=nq, hord_tr=hord_tr, dt=mdt,
+                                 q_split=tracer_q_split, nord_tr=nord_tr,
+                                 trdm=trdm2, lim_fac=lim_fac,
+                                 z_tracer=z_tracer, inline_q=inline_q)
 
         if not remapped:
             # :568 gates the remap on npz > 4 and the oracle leaves pt in
@@ -300,30 +400,46 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 g = press_out[t]
                 press[t]["pe"][:] = g["pe"]
                 press[t]["peln"][:] = g["peln"]
-                press[t]["pkz"][:] = g["pkz"]
-                if "pk_remap" in g:
-                    press[t]["pk"][ng:ng + n, ng:ng + n, :] = \
-                        g["pk_remap"][ng:ng + n, ng:ng + n, :]
+                if hydrostatic:
+                    press[t]["pkz"][:] = g["pkz"]
+                    if "pk_remap" in g:
+                        press[t]["pk"][ng:ng + n, ng:ng + n, :] = \
+                            g["pk_remap"][ng:ng + n, ng:ng + n, :]
+                else:
+                    # The NH tail carries no pkz (mapz owns the NH pkz,
+                    # :479-481, and below the remap gate it never runs);
+                    # pk comes from Riem_Solver3's last_call copy.
+                    press[t]["pk"][ng:ng + n, ng:ng + n, :] = g["pk"]
             continue
 
         for t in range(6):
             g = press_out[t]
-            if "pk_remap" not in g:
-                raise RuntimeError(
-                    f"face {t + 1}: the remap-step geopk bundle has no "
-                    f"'pk_remap'. dyn_core.F90:1511-1519 saves pk BEFORE "
-                    f"one_grad_p overwrites pkc with B-grid corner values, "
-                    f"so remapping against g['pk'] would use the wrong "
-                    f"staggering.")
-            # dyn_core writes pe/peln/pkz through its dummies and copies
-            # pk over the compute window; mirror both onto the carried
-            # bundle so the next step's p_var-equivalent state is current.
-            press[t]["pe"][:] = g["pe"]
-            press[t]["peln"][:] = g["peln"]
-            press[t]["pkz"][:] = g["pkz"]
             ia = ng
-            press[t]["pk"][ia:ia + n, ia:ia + n, :] = \
-                g["pk_remap"][ia:ia + n, ia:ia + n, :]
+            if hydrostatic:
+                if "pk_remap" not in g:
+                    raise RuntimeError(
+                        f"face {t + 1}: the remap-step geopk bundle has no "
+                        f"'pk_remap'. dyn_core.F90:1511-1519 saves pk BEFORE "
+                        f"one_grad_p overwrites pkc with B-grid corner "
+                        f"values, so remapping against g['pk'] would use "
+                        f"the wrong staggering.")
+                # dyn_core writes pe/peln/pkz through its dummies and copies
+                # pk over the compute window; mirror both onto the carried
+                # bundle so the next step's p_var-equivalent state is
+                # current.
+                press[t]["pe"][:] = g["pe"]
+                press[t]["peln"][:] = g["peln"]
+                press[t]["pkz"][:] = g["pkz"]
+                press[t]["pk"][ia:ia + n, ia:ia + n, :] = \
+                    g["pk_remap"][ia:ia + n, ia:ia + n, :]
+            else:
+                # NH: Riem_Solver3's last_call wrote pe (+pe_halo ring),
+                # pk and peln directly (nh_core.F90:164-172); there is no
+                # pk_remap ambiguity because nh_p_grad scratches PKC, not
+                # this pk.
+                press[t]["pe"][:] = g["pe"]
+                press[t]["peln"][:] = g["peln"]
+                press[t]["pk"][ia:ia + n, ia:ia + n, :] = g["pk"]
 
             lagrangian_to_eulerian(
                 pe=press[t]["pe"], peln=press[t]["peln"],
@@ -334,7 +450,14 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 r_vir=zvir, km=km, n=n, ng=ng,
                 kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
                 q=q[t], omga=omga[t], sphum_index=sphum_index,
-                last_step=last_step, hydrostatic=True, adiabatic=True,
+                last_step=last_step, hydrostatic=hydrostatic,
+                adiabatic=True,
+                w=(None if hydrostatic else state[t]["w"]),
+                delz=(None if hydrostatic else state[t]["delz"]),
+                ws=(None if hydrostatic else g["ws"]),
+                kord_wz=kord_wz, w_limiter=w_limiter,
+                rdgas=(None if hydrostatic else _FV3_RDGAS),
+                grav=(None if hydrostatic else _FV3_GRAV),
                 consv=consv_te, fill=False, do_sat_adj=False,
                 do_inline_mp=False, do_adiabatic_init=False)
 

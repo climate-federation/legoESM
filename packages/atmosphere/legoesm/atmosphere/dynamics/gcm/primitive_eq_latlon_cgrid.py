@@ -327,6 +327,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     grid: LatLonGrid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     config: CGridLatLonPrimitiveEquationConfig = CGridLatLonPrimitiveEquationConfig(),
+    *,
+    geom_pads: tuple | None = None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
 
@@ -338,6 +340,16 @@ def cgrid_latlon_hydrostatic_tendencies(
     grid : LatLonGrid
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     config : CGridLatLonPrimitiveEquationConfig
+    geom_pads : tuple, optional
+        ``(lat_pad, lat_pad_pole, cos_lat_pad)`` — the three precomputed
+        stage-invariant 1-D geometry pads, exactly
+        ``pad_with_pole_bc_lat(grid.lat, 1, 0, 0)``,
+        ``pad_with_pole_bc_lat(grid.lat, 1, -pi/2, +pi/2)`` and
+        ``pad_with_pole_bc_lat(grid.cos_lat, 1, 0, 0)``.  Supplied by the
+        SPMD band step (built once from the GLOBAL grid, sliced per band)
+        so the per-stage scalar-row collective-permutes are skipped;
+        ``None`` (every other lane) keeps the in-operator pads
+        byte-identical.
 
     Returns
     -------
@@ -347,6 +359,9 @@ def cgrid_latlon_hydrostatic_tendencies(
     """
     u, v, T, p_s, phis = state.u, state.v, state.T, state.p_s, state.phis
     tracers = state.tracers
+
+    _lat_pad, _lat_pad_pole, _cos_lat_pad = (
+        geom_pads if geom_pads is not None else (None, None, None))
 
     R_d = constants.R_d
     kappa = constants.kappa
@@ -412,8 +427,54 @@ def cgrid_latlon_hydrostatic_tendencies(
         _Bln_stack = jnp.concatenate(
             [B, ln_ps[..., jnp.newaxis]], axis=-1,
         )  # (n_lat, n_lon, nlev+1)
+    # --- Packed per-stage exchange epoch (packing-plan bucket A; opt-in
+    # ``LEGOESM_LATLON_PACKED_EXCHANGE=1``, armed 1-D lat-band SPMD mesh
+    # only).  Merges the three per-stage exchanges whose operands are all
+    # live here — P1 the ``[B|ln p]`` gradient-stack fold pad (halo 1,
+    # gradient_y_cgrid), P4 the PPM T-advection fold pad (halo 2), and P2
+    # the fused wall-BC entry pad (T, u, dp[, p_s], halo 1) — into ONE
+    # north+south ppermute pair per RK stage: raw un-lon-padded edge rows
+    # ride one buffer per dtype group; wall constants / pole folds / lon
+    # wrap are applied locally after receipt (bit-exact — see
+    # ``make_latlon_band_packed_pad_body``).  NOT merged: (a) the
+    # sigma_dot / mass-flux v-interp exchange below — its operand is built
+    # from div(dp*v), which needs the padded dp of THIS epoch first; (b)
+    # the step-entry ``v_lower`` boundary-row ppermute
+    # (``reconstruct_vface_lower``) — its OUTPUT feeds the KE inside B
+    # upstream of this epoch, so merging would be cyclic.  T rides the
+    # epoch twice (fold h2 + wall h1; one duplicated row per direction,
+    # zero extra collectives) to keep the per-field unpacking uniform.
+    # Default OFF: the legacy per-exchange pads below, byte-identical.
+    from legoesm.parallel.latlon_spmd import packed_exchange_mesh
+    _packed_mesh = packed_exchange_mesh()
+    _Bln_pad = None
+    _T_ppm_pad = None
+    if _packed_mesh is not None:
+        from legoesm.parallel.latlon_spmd import (
+            make_latlon_band_packed_pad_body)
+        if _hybrid:
+            _ps3 = p_s[..., jnp.newaxis]
+            _wall_ins = (T, u, dp, _ps3)
+        else:
+            # Same expression as the legacy sigma branch below (dtype
+            # pinned to p_s — see the comment there); built early so its
+            # ghost rows ride this epoch.
+            dp = p_s[..., jnp.newaxis] * sigma_coord.dsigma.astype(p_s.dtype)
+            _wall_ins = (T, u, dp)
+        _packed_specs = (("fold", 1, False), ("fold", 2, False)) + (
+            ("wall", 1, 0.0, 0.0),) * len(_wall_ins)
+        _packed_out = make_latlon_band_packed_pad_body(
+            _packed_mesh, _packed_specs)(_Bln_stack, T, *_wall_ins)
+        _Bln_pad, _T_ppm_pad = _packed_out[0], _packed_out[1]
+        if _hybrid:
+            (_T_lat_pad, _u_lat_pad, _dp_lat_pad,
+             _ps_lat_pad) = _packed_out[2:]
+        else:
+            _T_lat_pad, _u_lat_pad, _dp_lat_pad = _packed_out[2:]
+
     _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, ...)
-    _dBln_dy = gradient_y_cgrid(_Bln_stack, grid)  # (n_lat+1, n_lon, ...)
+    _dBln_dy = gradient_y_cgrid(                   # (n_lat+1, n_lon, ...)
+        _Bln_stack, grid, f_padded=_Bln_pad)
     dB_dx = _dBln_dx[..., :nlev_g]
     dB_dy = _dBln_dy[..., :nlev_g]
     if _hybrid:
@@ -445,7 +506,10 @@ def cgrid_latlon_hydrostatic_tendencies(
     # backend: per-field jnp.pads, value-identical (unused ones are
     # dead-code-eliminated).
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
-    if _hybrid:
+    if _packed_mesh is not None:
+        # Entry pads already produced by the packed exchange epoch above.
+        pass
+    elif _hybrid:
         # #1029: BOTH the momentum correction and the thermodynamic
         # ``v . grad(ln p)`` conversion difference the SB81 ``ln p_k``
         # face gradients from section 5/6, so the analytic
@@ -493,6 +557,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     # --- 8. Coriolis using absolute vorticity (ζ+f) ---
     cor_u, cor_v = absolute_vorticity_coriolis(
         u, v, grid, u_lat_pad=_u_lat_pad,
+        lat_pad=_lat_pad, lat_pad_pole=_lat_pad_pole,
+        cos_lat_pad=_cos_lat_pad,
     )
     du_dt = du_dt + cor_u
     dv_dt = dv_dt + cor_v
@@ -512,7 +578,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
             dp, f_pad=_dp_lat_pad)
-        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid,
+                                  lat_pad=_lat_pad)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_coord.B_range
@@ -525,7 +592,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
         dp_v = interp_cell_to_vface_halo(  # (n_lat+1, n_lon, nlev)
             dp, f_pad=_dp_lat_pad)
-        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid,
+                                  lat_pad=_lat_pad)  # (n_lat, n_lon, nlev)
         _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
         D_total_p = _cumsum_dp[..., -1]
         dp_s_dt = -D_total_p / sigma_range
@@ -583,13 +651,18 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # --- 11. Temperature equation ---
     if config.use_ppm_transport:
-        # C-grid PPM advection of T (4th-order, shared operator)
-        horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(T, u, v, grid)
+        # C-grid PPM advection of T (4th-order, shared operator).
+        # ``q_pad``: the packed epoch's halo-2 fold pad of T (None off the
+        # packed path — the operator pads internally, byte-identical).
+        horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(
+            T, u, v, grid, q_pad=_T_ppm_pad)
     else:
         # Cell-centered gradient advection (fallback) — 3D-native variants
         # share one halo pad + PPM reconstruction across all levels.
-        # Pre-pad T once so both gradient calls share the halo.
-        _T_pad_h2 = pad_halo_latlon_3d(T, halo=2)
+        # Pre-pad T once so both gradient calls share the halo (or reuse
+        # the packed epoch's halo-2 fold pad — same pad, same bits).
+        _T_pad_h2 = (_T_ppm_pad if _T_ppm_pad is not None
+                     else pad_halo_latlon_3d(T, halo=2))
         # iter-169: use the imported aliases (lines 92-93) — bare
         # ``fv_gradient_lon_3d`` would F821 NameError at runtime.
         dT_dx = _fv_gradient_lon_3d(T, grid, padded=_T_pad_h2)
@@ -990,8 +1063,14 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         polar_mask=None,
         polar_mask_v=None,
         pole_v_bc_masks=None,
+        geom_pads=None,
     ) -> tuple:
         """Advance one step on C-grid state (raw arrays). UN-jitted.
+
+        ``geom_pads``: optional ``(lat_pad, lat_pad_pole, cos_lat_pad)``
+        precomputed stage-invariant geometry pads for the band grid,
+        forwarded to :func:`cgrid_latlon_hydrostatic_tendencies` (SPMD
+        band step only; ``None`` everywhere else — byte-identical).
 
         Physics is evaluated inside each RK stage (matching the CDGrid
         PE contract), not as a post-step Euler update.  Every stage
@@ -1017,7 +1096,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
         def tendency_fn(s):
             du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
-                s, grid, sigma_coord, self.config,
+                s, grid, sigma_coord, self.config, geom_pads=geom_pads,
             )
 
             # --- Physics coupling (inside RK stage) ---

@@ -886,6 +886,14 @@ class MorrisonConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1      # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
+    # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
+    # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
+    # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
+    # (~1.45 at 235 K, ~1.67 at 190 K); the allowance is withdrawn the
+    # moment cloud ice exists. ON by default (SAM-faithful); set False to
+    # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
+    homogeneous_ice_supersaturation: bool = True
+
 
 class ThompsonConfig(NamedTuple):
     """Configuration for Thompson hybrid-moment microphysics."""
@@ -976,6 +984,14 @@ class ThompsonConfig(NamedTuple):
     hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
 
+    # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
+    # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
+    # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
+    # (~1.45 at 235 K, ~1.67 at 190 K); the allowance is withdrawn the
+    # moment cloud ice exists. ON by default (SAM-faithful); set False to
+    # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
+    homogeneous_ice_supersaturation: bool = True
+
 
 class P3Config(NamedTuple):
     """Configuration for P3 (Predicted Particle Properties) microphysics.
@@ -1058,6 +1074,14 @@ class P3Config(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1   # RH trigger q_v > thr*q_sat [-]
     hard_sat_max_heating_K: float = 5.0      # per-step latent-heating cap [K]
+
+    # --- IFS/SAM homogeneous-freezing ice-supersaturation allowance ---
+    # gSAM cloud.f90 (Khairoutdinov 2023, after IFS): pristine air below
+    # 235 K may stay ice-supersaturated up to rh_homo = 2.583 - T/207.8
+    # (~1.45 at 235 K, ~1.67 at 190 K); the allowance is withdrawn the
+    # moment cloud ice exists. ON by default (SAM-faithful); set False to
+    # target plain ice saturation.  See thermo.homogeneous_freezing_rh_factor.
+    homogeneous_ice_supersaturation: bool = True
 
 
 class MicrophysicsMLEmulatorConfig(NamedTuple):

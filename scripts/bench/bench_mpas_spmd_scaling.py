@@ -97,7 +97,7 @@ MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
-                          moist=False, lloyd_iterations=50):
+                          moist=False, lloyd_iterations=50, fix_mass=True):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
 
     ``reorder_target`` sets the PARTITION (and ghost padding) so every run
@@ -131,7 +131,7 @@ def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
     # tests/parallel/test_voronoi_sharded_equivalence.py: del4 hyperdiffusion,
     # energy-conserving PV flux, SSP-RK3, global mass fixer.
     cfg = MPASPrimitiveEquationConfig(
-        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=True,
+        nu_del4=1e16, nu_del4_ps=1e16, fix_mass=fix_mass,
         pv_scheme="energy", time_integrator="ssp_rk3",
     )
     dev_config = create_voronoi_device_mesh(
@@ -211,6 +211,38 @@ def main() -> int:
                         "the neighbor-round schedule on small gate "
                         "meshes (the multicontroller selfspawn tests "
                         "do).  Recorded in the JSONL row.")
+    p.add_argument("--wide-halo", action="store_true",
+                   help="Set LEGOESM_MPAS_WIDE_HALO=1 before building "
+                        "the step: ONE halo fill per step at depth "
+                        "evals x SPMD_HALO_DEPTH (communication-"
+                        "avoiding), whole RK body inside shard_map. "
+                        "Effective mode + depth recorded in the JSONL "
+                        "row.")
+    p.add_argument("--profile-dir", type=str, default=None,
+                   help="Write a jax.profiler trace of the timed loop from "
+                        "ranks 0-3 (one node under block:block) into "
+                        "<dir>/rank<k>/. The chrome-format trace.json.gz "
+                        "gives per-thunk device spans — the gap/duration "
+                        "attribution nsys kept silently dropping collectives "
+                        "from (campaign 2026-08-07). Ranks 0-3 share a node "
+                        "clock, so cross-rank collective start-spread is "
+                        "measurable; collective END coincidence is the "
+                        "built-in calibration check.")
+    p.add_argument("--timed-scan", action="store_true",
+                   help="Time the steady window as ONE jit(lax.scan) of "
+                        "(steps - warmup) steps with a single device sync, "
+                        "instead of the per-step Python loop with a "
+                        "block_until_ready every step. Discriminates "
+                        "host-dispatch/per-step-sync share: the per-step "
+                        "loop both pays a host round-trip per step and "
+                        "forbids cross-step pipelining. Warmup steps still "
+                        "run the Python loop (compile + steady check).")
+    p.add_argument("--no-fix-mass", action="store_true",
+                   help="Disable the global mass fixer. TIMING ONLY on a "
+                        "scaling arm: it removes the ONE global allreduce "
+                        "the step performs, so the arm prices that "
+                        "reduction. Mass is then not pinned, and the "
+                        "conservation gate must not be used with it.")
     p.add_argument("--steps", type=int, default=12)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--dt", type=float, default=None,
@@ -313,7 +345,8 @@ def main() -> int:
             f"partition target.")
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
-        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd)
+        moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,
+        fix_mass=not args.no_fix_mass)
 
     if args.multicontroller:
         # Every process computed the reorder independently — assert the
@@ -388,6 +421,8 @@ def main() -> int:
     if args.check_conservation:
         mass_before = _global_dry_mass(s0_global, mesh)
 
+    if args.wide_halo:
+        os.environ["LEGOESM_MPAS_WIDE_HALO"] = "1"
     step = make_voronoi_sharded_step(
         model, dev_config, halo_strategy=args.halo_strategy)
     # Already in the sharded layout (partition-local build) for nd > 1;
@@ -402,7 +437,26 @@ def main() -> int:
     # Per-step timing: step 0 includes compile; record each step so re-trace
     # (every step slow) is visible vs steady-state (steps 1.. fast).
     per_step_ms = []
-    for _ in range(args.steps):
+    scan_median_ms = None
+    _profiling = (args.profile_dir is not None
+                  and jax.process_index() < 4)
+    _prof_on = False
+    if _profiling:
+        import pathlib
+        _pdir = pathlib.Path(args.profile_dir) / f"rank{jax.process_index()}"
+        _pdir.mkdir(parents=True, exist_ok=True)
+    for _i in range(args.warmup + 1 if args.timed_scan else args.steps):
+        # Trace ONLY steps [warmup, warmup+4): tracing from step 0 fills
+        # the profiler's 1M-event cap with compile-phase HOST events and
+        # the device tracks arrive EMPTY (job 26854167: every X event on
+        # pid /host:CPU, zero on /device:GPU:*).
+        if _profiling and _i == args.warmup:
+            jax.profiler.start_trace(str(_pdir))
+            _prof_on = True
+        if _profiling and _prof_on and _i == min(
+                args.warmup + 4, args.steps - 1):
+            jax.profiler.stop_trace()
+            _prof_on = False
         t0 = time.perf_counter()
         if physics_fn is not None:
             s = step(s, dt, physics_fn=physics_fn)
@@ -411,8 +465,51 @@ def main() -> int:
         _block(s)
         per_step_ms.append((time.perf_counter() - t0) * 1e3)
 
+    if args.timed_scan:
+        # ASYNC WINDOW: dispatch (steps - warmup) steps with NO per-step
+        # block_until_ready, ONE sync at the end.  Removes the per-step
+        # host round-trip and lets XLA pipeline across steps — the same
+        # discriminator an outer jit(lax.scan) would give, WITHOUT a new
+        # outer jit: wrapping the step in one closes over its sharded
+        # closure constants (stacked meshes / halo schedules), which
+        # multicontroller forbids (this killed the first scan_b arm,
+        # job 26851745).
+        n_scan = args.steps - args.warmup
+        t0 = time.perf_counter()
+        for _ in range(n_scan):
+            if physics_fn is not None:
+                s = step(s, dt, physics_fn=physics_fn)
+            else:
+                s = step(s, dt)
+        _block(s)
+        scan_median_ms = (time.perf_counter() - t0) * 1e3 / n_scan
+        # Fill per_step_ms so the steady slice below stays meaningful.
+        per_step_ms += [scan_median_ms] * n_scan
+
+    if _profiling and _prof_on:
+        jax.profiler.stop_trace()
+
+    # Per-rank timing spread (skew attribution). Every process measured
+    # the SAME steps with its own wall clock; the cross-rank spread of
+    # the steady medians is the cheapest honest skew signal available on
+    # this stack (nsys records no halo collectives, and wall/max
+    # bucketing was shown to smear arrival variance into whichever term
+    # an arm was measuring). NOTE the floor: each per-step time already
+    # includes a device sync (_block), so what this sees is the spread
+    # of ARRIVALS at the end-of-step sync, not per-collective skew.
+    per_rank_median_ms = None
+    per_rank_spread_ms = None
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
+        _steady = per_step_ms[args.warmup:] or per_step_ms
+        _my_med = float(np.median(np.asarray(_steady)))
+        _all = multihost_utils.process_allgather(
+            np.asarray([_my_med], dtype=np.float32))
+        per_rank_median_ms = [round(float(x), 4)
+                              for x in np.asarray(_all).ravel()]
+        per_rank_spread_ms = round(
+            float(np.max(per_rank_median_ms)
+                  - np.min(per_rank_median_ms)), 4)
         multihost_utils.sync_global_devices("mpas_spmd_bench_end")
 
     # HLO collective-permute census (#1113 ask 2): a STATIC compile property of
@@ -511,6 +608,11 @@ def main() -> int:
         halo_strategy_requested=args.halo_strategy,
         halo_strategy_effective=getattr(
             step, "_halo_strategy_effective", "serial"),
+        wide_halo=bool(getattr(step, "_wide_halo_effective", False)),
+        halo_depth=int(getattr(step, "_halo_depth_effective", 3)),
+        timed_scan=bool(args.timed_scan),
+        scan_median_ms=(round(scan_median_ms, 3)
+                        if scan_median_ms is not None else None),
         steps=args.steps, dt=dt,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
@@ -564,6 +666,22 @@ def main() -> int:
             "steps": args.steps,
             "multicontroller": bool(args.multicontroller),
             "cells_per_device": int(mesh.nCells) // nd * args.nlev,
+            # Which arm actually ran. Without this the receipts of a
+            # measurement arm and of the baseline are distinguishable
+            # only by their FILENAME, and a knob that failed to take
+            # effect is indistinguishable from one that did.
+            "fix_mass": not args.no_fix_mass,
+            "per_rank_median_ms": per_rank_median_ms,
+            "per_rank_spread_ms": per_rank_spread_ms,
+            "halo_knobs": {
+                k: os.environ.get(k, "")
+                for k in ("LEGOESM_MPAS_WIDE_HALO",
+                          "LEGOESM_MPAS_WIDE_HALO_STRIDE",
+                          "LEGOESM_MPAS_RAGGED_HALO",
+                          "LEGOESM_MPAS_HALO_BALLAST",
+                          "LEGOESM_MPAS_HALO_NOCOMM",
+                          "LEGOESM_MPAS_HALO_NOSTAGE")
+            },
         },
     ))
     # Multi-controller: every process times the same program; process 0 owns

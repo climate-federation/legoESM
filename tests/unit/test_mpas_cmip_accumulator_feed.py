@@ -34,6 +34,29 @@ from legoesm.driver.diagnostics import DiagnosticCollector
 
 NLEV = 6
 
+def _as_driver(ns):
+    """Bind the ``ModelDriver`` methods the CMOR feed calls on ``self``.
+
+    ``types.SimpleNamespace`` stand-ins cannot inherit them, and the feed
+    delegates its native-field construction to ``_mpas_cmip_native_kwargs``
+    (shared with the multi-rank gather path).
+    """
+    import functools
+
+    from legoesm.driver.model_driver import ModelDriver
+    ns._mpas_cmip_native_kwargs = functools.partial(
+        ModelDriver._mpas_cmip_native_kwargs, ns)
+    if not hasattr(ns, "sigma"):
+        # The helper publishes `wap` by closing continuity, which needs the
+        # run's vertical coordinate. A stub without one would silently drop
+        # every field, so give it the same coordinate the collector was built
+        # on rather than letting the helper degrade quietly.
+        from legoesm.grids.vertical import create_sigma_coordinate
+        ns.sigma = create_sigma_coordinate(NLEV)
+    return ns
+
+
+
 
 @pytest.fixture(scope="module")
 def mesh():
@@ -296,6 +319,7 @@ def test_driver_helper_feeds_via_reconstruct(mesh):
             _sfc_diag=(None, None, _field(f["precip"])),
         ),
     )
+    _as_driver(fake)
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
 
     # The try/except in the helper swallows glue bugs into a log line, so a
@@ -330,6 +354,7 @@ def test_driver_helper_dry_run_no_precip(mesh):
         ),
         model=types.SimpleNamespace(_sfc_diag=None),
     )
+    _as_driver(fake)
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
     assert "field_2d_tas" in out and "field_2d_ps" in out
@@ -465,8 +490,13 @@ def test_load_cmor_accumulators_resume_roundtrip(mesh, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_feed_gate_serial_mpi_singlerank(mesh):
-    """`_mpas_cmip_feed_enabled`: serial and 1-rank feed; multi-rank does not,
-    but reports wants_cmip=True so the caller can warn."""
+    """`_mpas_cmip_feed_enabled` returns ``(feed_on, wants_cmip)``.
+
+    Every layout this driver knows now feeds — multi-rank through the
+    owned-cell gather (#1517) — so ``feed_on`` tracks ``wants_cmip`` for all
+    three. The PAIR is kept because ``_require_mpas_cmip_feed_supported``
+    consumes ``wants_cmip`` to refuse a layout that is none of them.
+    """
     from legoesm.driver.model_driver import ModelDriver
     dc, _, _ = _make_collector(mesh)
 
@@ -474,19 +504,46 @@ def test_feed_gate_serial_mpi_singlerank(mesh):
     serial = types.SimpleNamespace(_voronoi_layout=None, _mpi_world_size=1)
     assert ModelDriver._mpas_cmip_feed_enabled(serial, dc) == (True, True)
 
-    # Multi-rank cell partition -> disabled, but wants_cmip True.
+    # Multi-rank cell partition -> now ENABLED (gather path).
     multi = types.SimpleNamespace(
         _voronoi_layout=object(), _mpi_world_size=4)
-    assert ModelDriver._mpas_cmip_feed_enabled(multi, dc) == (False, True)
+    assert ModelDriver._mpas_cmip_feed_enabled(multi, dc) == (True, True)
 
-    # 1-rank "distributed" layout owns the whole mesh -> safe to feed.
+    # 1-rank "distributed" layout owns the whole mesh -> direct feed.
     single = types.SimpleNamespace(
         _voronoi_layout=object(), _mpi_world_size=1)
     assert ModelDriver._mpas_cmip_feed_enabled(single, dc) == (True, True)
 
-    # No CMIP output at all -> neither.
+    # No CMIP output at all -> off, and nothing to refuse either.
     dc_off, _, _ = _make_collector(mesh, monthly_means=False, cmip_output=False)
     assert ModelDriver._mpas_cmip_feed_enabled(serial, dc_off) == (False, False)
+
+    # A MULTI-rank layout with NO Voronoi partition has no feed, so it must
+    # still report feed_on=False. This is what keeps the #1545 refusal a live
+    # tripwire instead of dead code: written the lazy way ("layout is None or
+    # world <= 1 or partitioned") this case would wrongly read as feedable.
+    unfed = types.SimpleNamespace(_voronoi_layout=None, _mpi_world_size=4)
+    assert ModelDriver._mpas_cmip_feed_enabled(unfed, dc) == (False, True)
+
+
+def test_multirank_no_longer_trips_the_empty_cmor_refusal(mesh):
+    """The #1545 trap must STOP firing for the layout #1517 now feeds.
+
+    Its own unit tests below still exercise the refusal directly (they hand it
+    ``feed_on=False``), which is what keeps it honest. This one pins the
+    integration fact that matters: the multi-rank cell partition reaches the
+    gather instead of the raise. If the guard still fired here the whole
+    feature would be unreachable in production.
+    """
+    from legoesm.driver.model_driver import ModelDriver
+    dc, _, _ = _make_collector(mesh)
+
+    multi = types.SimpleNamespace(
+        _voronoi_layout=object(), _mpi_world_size=4, _mpi_rank=0)
+    feed_on, wants = ModelDriver._mpas_cmip_feed_enabled(multi, dc)
+    assert feed_on is True
+    # No raise: the cell-partition lane is supported now.
+    ModelDriver._require_mpas_cmip_feed_supported(multi, feed_on, wants)
 
 
 def test_driver_helper_computes_2m_tas(mesh):
@@ -513,6 +570,7 @@ def test_driver_helper_computes_2m_tas(mesh):
         ),
         model=types.SimpleNamespace(_sfc_diag=(None, None, _field(f["precip"]))),
     )
+    _as_driver(fake)
     ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
     out = dc._spatial_monthly.finalize(min_sample_fraction=0)
     tas_r = out["field_2d_tas"][0]
@@ -733,10 +791,15 @@ def _stub_mpi_bcast(monkeypatch, value):
 
 
 def test_multi_rank_cmor_request_is_refused_not_warned(monkeypatch):
-    """#1517: asking for CMOR output on a lane that cannot produce it must
+    """#1545: asking for CMOR output on a lane that cannot produce it must
     FAIL BEFORE ANY TIME STEPPING, not complete and write empty files hours
     later. (Not at `setup()` — the call sits at the top of `_run_mpas`, before
     its first collective and before the loop, which is what costs GPU-hours.)
+
+    Since #1517 the multi-rank Voronoi CELL PARTITION *is* feedable, so this
+    exercises the guard directly with ``feed_on=False``: the layout it now
+    stands for is a multi-rank run with NO Voronoi partition, not "multi-rank"
+    in general.
 
     The refusal must fire on EVERY rank: the inputs are config/layout-derived
     and identical everywhere, so a rank-0-only raise would kill rank 0 and
@@ -748,7 +811,7 @@ def test_multi_rank_cmor_request_is_refused_not_warned(monkeypatch):
     _stub_mpi_bcast(monkeypatch, False)
     for rank in (0, 1, 3):
         drv = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=rank)
-        with pytest.raises(NotImplementedError, match="#1517"):
+        with pytest.raises(NotImplementedError, match="#1545"):
             ModelDriver._require_mpas_cmip_feed_supported(
                 drv, feed_on=False, wants_cmip=True)
 
@@ -778,7 +841,7 @@ def test_empty_cmor_override_requires_exact_1(monkeypatch, value, should_raise):
     # (the cross-rank agreement has its own test below).
     drv = types.SimpleNamespace(_mpi_world_size=2, _mpi_rank=None)
     if should_raise:
-        with pytest.raises(NotImplementedError, match="#1517"):
+        with pytest.raises(NotImplementedError, match="#1545"):
             ModelDriver._require_mpas_cmip_feed_supported(
                 drv, feed_on=False, wants_cmip=True)
     else:
@@ -795,7 +858,7 @@ def test_run_mpas_actually_calls_the_guard():
 
     src = inspect.getsource(ModelDriver._run_mpas)
     assert "_require_mpas_cmip_feed_supported(" in src, (
-        "_run_mpas no longer invokes the #1517 empty-CMOR refusal")
+        "_run_mpas no longer invokes the #1545 empty-CMOR refusal")
 
 
 def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):
@@ -812,7 +875,7 @@ def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):
     monkeypatch.setenv("LEGOESM_ALLOW_EMPTY_CMOR", "1")   # this rank only
     mpi = _stub_mpi_bcast(monkeypatch, False)             # rank 0 says no
     drv = types.SimpleNamespace(_mpi_world_size=4, _mpi_rank=2)
-    with pytest.raises(NotImplementedError, match="#1517"):
+    with pytest.raises(NotImplementedError, match="#1545"):
         ModelDriver._require_mpas_cmip_feed_supported(
             drv, feed_on=False, wants_cmip=True)
 
@@ -822,3 +885,59 @@ def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):
     mpi.COMM_WORLD = types.SimpleNamespace(bcast=lambda obj, root=0: True)
     ModelDriver._require_mpas_cmip_feed_supported(
         drv, feed_on=False, wants_cmip=True)
+
+
+def test_wap_is_published_and_closes_continuity(mesh):
+    """`wap` reaches the CMOR accumulator, and its global mean is ~0.
+
+    A pressure vertical velocity built by integrating continuity must have
+    zero area-weighted global mean at every level, by construction. That is
+    exactly the check the diagnostic this replaces FAILED: estimating omega
+    downstream from monthly-mean regridded winds gave a global mean of
+    -6 hPa/day and amplitudes ~30x ERA5. A test that only asserted the field
+    exists would not have caught that, so this asserts the invariant.
+    """
+    import types
+
+    import numpy as np
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sigma_full, _ = _make_collector(mesh)
+    f = _synthetic_cell_fields(mesh, sigma_full)
+
+    def _field(a):
+        return types.SimpleNamespace(data=np.asarray(a))
+
+    fake = types.SimpleNamespace(
+        diagnostics=dc,
+        grid=mesh,
+        config=types.SimpleNamespace(T_ice=271.4),
+        get_sst_sic=lambda day: (f["T"][:, -1], np.zeros(int(mesh.nCells))),
+        state=types.SimpleNamespace(
+            u=_field(f["u_edge"]), T=_field(f["T"]), p_s=_field(f["p_s"]),
+            phis=_field(f["phis"]), tracers={"q_v": _field(f["q_v"])},
+        ),
+        model=types.SimpleNamespace(_sfc_diag=(None, None, _field(f["precip"]))),
+    )
+    _as_driver(fake)
+
+    kw = fake._mpas_cmip_native_kwargs(15.0, dc)
+    wap = kw["wap"]
+    assert wap is not None, "the helper published no wap"
+    wap = np.asarray(wap)
+    assert wap.shape == (int(mesh.nCells), NLEV), wap.shape
+    assert np.isfinite(wap).all()
+
+    # Continuity closure on the native mesh, area weighted by cell area.
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    gm = (wap * area[:, None]).sum(axis=0) / area.sum()
+    scale = np.abs(wap).mean()
+    assert scale > 0.0, "wap is identically zero -- the wind field did not reach it"
+    assert np.max(np.abs(gm)) < 1e-3 * scale, (
+        f"wap does not close: worst level mean {np.max(np.abs(gm)):.3e} "
+        f"against a typical magnitude of {scale:.3e}")
+
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_3d_wap" in out, sorted(k for k in out if k.startswith("field_3d"))

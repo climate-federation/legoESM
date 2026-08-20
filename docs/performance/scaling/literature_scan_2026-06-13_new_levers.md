@@ -13,6 +13,9 @@ find scaling levers NOT already shipped + transferable to Ginsburg
   Explains the campaign note "XLA already overlaps GPU collectives".
 - **XLA command-buffer / CUDA-graph capture** (#4): ALREADY set
   `xla_gpu_enable_command_buffer=FUSION,CUSTOM_CALL,COLLECTIVES` (line 199)
+  [2026-08-11: `COLLECTIVES` dropped from the default after a measured +25%
+  on the MPAS shard_map lane (job 26873637); `LEGOESM_XLA_CMDBUF_COLLECTIVES=1`
+  restores it]
   — CUSTOM_CALL is included, so the LAPACK gtsv FFI IS in the captured set
   (no graph fragmentation from it). (Worth a one-off Nsight trace to CONFIRM
   the FV3 step is one graph, but the flag coverage is already correct.)

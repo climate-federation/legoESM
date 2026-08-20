@@ -38,9 +38,25 @@ def test_missing_required_field_raises():
 
 def test_bad_grid_type_raises():
     bad = _minimal()
-    bad["grid"]["type"] = "voronoi"
+    bad["grid"]["type"] = "octahedral_reduced_gaussian"
     with pytest.raises(ValueError, match="grid.type"):
         validate_config(bad)
+
+
+@pytest.mark.parametrize(
+    "alias", ["voronoi", "icosahedral", "ico", "mpas", "mpas_voronoi"])
+def test_voronoi_aliases_accepted(alias):
+    """The SCVT mesh is a legal spin-up target, under every alias it goes by.
+
+    A coupled run on that mesh needs its land state spun up on the SAME mesh:
+    the restart loader compares column counts and refuses a mismatch rather
+    than interpolating, so a spin-up on any other grid produces a state that
+    run cannot load.  The driver has always been able to BUILD the mesh; this
+    schema was the only thing refusing to ask for it.
+    """
+    cfg = _minimal()
+    cfg["grid"]["type"] = alias
+    assert validate_config(cfg).grid["type"] == alias
 
 
 def test_simple_seb_plus_most_now_accepted():

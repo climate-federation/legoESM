@@ -368,102 +368,36 @@ def test_wp2_max_matches_upstreams_value():
 
 # ---------------------------------------------------------------------------
 # #1508: the surface variance boundary condition
+#
+# The BC itself landed in PR #1601 with its own tests. Kept here are only the
+# checks that PR does not make, and they are AD checks: the routine has THREE
+# derivative singularities that a forward-only test cannot see (sqrt at zero
+# stress, cbrt at zero buoyancy flux, sqrt inside uf), and a NaN gradient there
+# silently kills the tuning of every CLUBB coefficient rather than raising.
+# I independently wrote this port before finding #1601 had landed; its
+# double-where (`cbrt(where(unstable, x, 1.0))`) is a better guard than the
+# epsilon floor I had used, so its implementation is the one that survived.
 # ---------------------------------------------------------------------------
 
-def _sfc_varnce_inputs(ncol=2, nzm=8):
-    zeros = jnp.zeros((ncol, nzm))
-    return dict(wp2=zeros + 1.0, up2=zeros + 1.0, vp2=zeros + 1.0,
-                thlp2=zeros + 1.0, rtp2=zeros + 1e-6, rtpthlp=zeros)
-
-
-def test_sfc_varnce_matches_the_oracle_formulas():
-    """Hand-evaluated against sfc_varnce_module.F90's l_andre_1978=.false.
-    branch, which is the only live one (it is a compile-time PARAMETER)."""
-    from legoesm.atmosphere.physics.turbulence.clubb import (
-        CLUBBConfig, calc_sfc_varnce,
-    )
-    cfg = CLUBBConfig(prognostic=True)
-    a, coef = cfg.params.a_const, cfg.params.up2_sfc_coef
-    upwp = jnp.asarray([-0.05]); vpwp = jnp.asarray([0.0])
-    wpthlp = jnp.asarray([0.0]); wprtp = jnp.asarray([0.0])   # no buoyancy
-    out = calc_sfc_varnce(upwp, vpwp, wpthlp, wprtp,
-                          **_sfc_varnce_inputs(ncol=1), config=cfg)
-    wp2, up2, vp2 = (np.asarray(o)[:, 0] for o in out[:3])
-    # wstar = 0, so uf = sqrt(|tau|/rho) = sqrt(0.05)
-    uf = float(np.sqrt(0.05))
-    assert wp2[0] == pytest.approx(a * uf ** 2, rel=1e-12)
-    assert up2[0] == pytest.approx(coef * a * uf ** 2, rel=1e-12)
-    assert vp2[0] == pytest.approx(coef * a * uf ** 2, rel=1e-12)
-
-
-def test_sfc_varnce_only_touches_the_surface_level():
-    """Every level above must be returned byte-identical."""
-    from legoesm.atmosphere.physics.turbulence.clubb import (
-        CLUBBConfig, calc_sfc_varnce,
-    )
-    args = _sfc_varnce_inputs()
-    z = jnp.asarray([0.0, 0.0])
-    out = calc_sfc_varnce(z - 0.05, z, z + 0.05, z + 1e-5,
-                          **args, config=CLUBBConfig(prognostic=True))
-    for got, name in zip(out, ("wp2", "up2", "vp2", "thlp2", "rtp2",
-                               "rtpthlp")):
-        ref = np.asarray(args[name])
-        assert np.array_equal(np.asarray(got)[:, 1:], ref[:, 1:]), name
-
-
-def test_sfc_varnce_ustar_floor_bites_in_dead_calm():
-    """ufmin = 0.01 m/s keeps wp2 finite with no wind and no heat flux, where
-    every formula would otherwise divide by zero."""
-    from legoesm.atmosphere.physics.turbulence.clubb import (
-        CLUBBConfig, calc_sfc_varnce,
-    )
-    cfg = CLUBBConfig(prognostic=True)
-    z = jnp.zeros((1,))
-    out = calc_sfc_varnce(z, z, z, z, **_sfc_varnce_inputs(ncol=1), config=cfg)
-    for o in out:
-        assert np.all(np.isfinite(np.asarray(o)))
-    # NOT a_const*ufmin^2 = 1.8e-4: the wp2 correlation floor is
-    # max(w_tol^2, ...) = 4e-4 here and it is the larger of the two, so the
-    # floor is what the surface value ends up at. (My first expectation was
-    # a_const*ufmin^2 and the code was right, not the test.)
-    assert np.asarray(out[0])[0, 0] == pytest.approx(
-        cfg.w_tol ** 2, rel=1e-12)
-    assert cfg.w_tol ** 2 > cfg.params.a_const * 0.01 ** 2, (
-        "this test only means something while the floor is the binding one")
-
-
-def test_sfc_varnce_is_called_by_the_prognostic_core():
-    """NON-VACUOUS: naming the function that RUNS. Upstream calls it every step
-    and says it must precede advance_xp2_xpyp and advance_wp2_wp3."""
-    import inspect
-
-    from legoesm.atmosphere.physics.turbulence import clubb
-
-    src = inspect.getsource(clubb.advance_clubb_core)
-    assert "calc_sfc_varnce(" in src
-    assert src.index("calc_sfc_varnce(") < src.index("advance_xp2_xpyp(")
-    assert src.index("calc_sfc_varnce(") < src.index("advance_wp2_wp3(")
+def _sfc_varnce_moments(ncol=1, nzm=8):
+    z = jnp.zeros((ncol, nzm))
+    return (z + 1.0, z + 1.0, z + 1.0, z + 1.0, z + 1e-6, z)
 
 
 def test_sfc_varnce_gradient_is_finite_under_a_stable_surface():
-    """THE test that would have caught the AD bug this port shipped with.
-
-    A negative surface heat flux takes the `wstar = 0` arm of the where. jax
-    still differentiates the DISCARDED arm, and with a zero floor that arm is
-    cbrt(0), whose derivative is infinite -- 0 * inf = NaN through the mask.
-    The forward value is perfectly finite, so only a gradient check sees it,
-    and GABLS1 is stable for its entire run.
-    """
+    """A negative surface heat flux takes the wstar = 0 arm. jax differentiates
+    the DISCARDED arm too, so a bare cbrt(0) there gives 0 * inf = NaN through
+    the mask -- forward-finite, gradient-poisoned. GABLS1 is stable for its
+    whole run, so this is not a corner case."""
     from legoesm.atmosphere.physics.turbulence.clubb import (
         CLUBBConfig, calc_sfc_varnce,
     )
     cfg = CLUBBConfig(prognostic=True)
-    args = _sfc_varnce_inputs(ncol=1)
+    m = _sfc_varnce_moments()
 
     def loss(wpthlp_sfc):
-        out = calc_sfc_varnce(
-            jnp.asarray([-0.05]), jnp.asarray([0.01]), wpthlp_sfc,
-            jnp.asarray([1.0e-6]), **args, config=cfg)
+        out = calc_sfc_varnce(*m, jnp.asarray([-0.05]), jnp.asarray([0.01]),
+                              wpthlp_sfc, jnp.asarray([1.0e-6]), cfg)
         return sum(jnp.sum(o) for o in out)
 
     for wth in (-0.05, -1e-12, 0.0, 1e-12, 0.06):
@@ -472,29 +406,31 @@ def test_sfc_varnce_gradient_is_finite_under_a_stable_surface():
 
 
 def test_sfc_varnce_gradient_is_finite_in_a_dead_calm():
-    """The sibling singularity: zero stress AND zero buoyancy flux makes the
-    sqrt argument exactly 0, whose derivative the maximum() then masks."""
+    """Zero stress makes sqrt(upwp^2 + vpwp^2) a 0/0 derivative, with nothing
+    masking it -- the NaN reaches the tuned coefficients directly."""
     from legoesm.atmosphere.physics.turbulence.clubb import (
         CLUBBConfig, calc_sfc_varnce,
     )
     cfg = CLUBBConfig(prognostic=True)
-    args = _sfc_varnce_inputs(ncol=1)
+    m = _sfc_varnce_moments()
+    z = jnp.zeros((1,))
 
     def loss(upwp):
-        out = calc_sfc_varnce(
-            upwp, jnp.zeros((1,)), jnp.zeros((1,)), jnp.zeros((1,)),
-            **args, config=cfg)
-        return sum(jnp.sum(o) for o in out)
+        return sum(jnp.sum(o) for o in
+                   calc_sfc_varnce(*m, upwp, z, z, z, cfg))
 
-    g = float(jax.grad(loss)(jnp.zeros((1,)))[0])
-    assert np.isfinite(g), "non-finite gradient in a quiescent column"
+    assert np.isfinite(float(jax.grad(loss)(z)[0])), (
+        "non-finite gradient in a quiescent column")
 
 
-def test_sfc_varnce_tolerances_are_unsquared_in_the_config():
-    """`w_tol` must be the tolerance, not its square: the port writes
-    `config.w_tol ** 2`, so a pre-squared field would floor at tol^4."""
-    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
-
-    cfg = CLUBBConfig()
-    assert cfg.w_tol == pytest.approx(2.0e-2)
-    assert cfg.thl_tol > 0.0 and cfg.rt_tol > 0.0
+def test_sfc_varnce_only_touches_the_surface_level():
+    """Every level above must come back byte-identical."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    m = _sfc_varnce_moments(ncol=2)
+    z = jnp.zeros((2,))
+    out = calc_sfc_varnce(*m, z - 0.05, z, z + 0.05, z + 1e-5,
+                          CLUBBConfig(prognostic=True))
+    for got, ref in zip(out, m):
+        assert np.array_equal(np.asarray(got)[:, 1:], np.asarray(ref)[:, 1:])

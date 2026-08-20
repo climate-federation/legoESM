@@ -123,9 +123,10 @@ def main():
                          "vertex amplifier), 4 = historical mirror-"
                          "monolith order (A/B arm)")
     ap.add_argument("--plain-conventions", action="store_true",
-                    help="A/B arm: plain-conventions lane (default is "
-                         "the bounded lane + ext bundle — the lane "
-                         "this runner exists to test)")
+                    help="RETIRED A/B arm (km=1 corpus migration "
+                         "2026-08-11): c_sw refuses duogrid on unbounded "
+                         "metrics (fv_arrays.F90:1512), so this lane can "
+                         "no longer run; the flag now fails fast")
     ap.add_argument("--preset", default="case8",
                     choices=("case8", "w2tuned"),
                     help="stage configuration: 'case8' = the Zenodo "
@@ -136,6 +137,10 @@ def main():
                          "W2-tuned defaults (damp_v=0.2, dddmp=0.2, "
                          "d_ext=0.02, hord=6)")
     args = ap.parse_args()
+    if args.plain_conventions:
+        ap.error("--plain-conventions is retired: duogrid on unbounded "
+                 "metrics is upstream-impossible (fv_arrays.F90:1512) "
+                 "and c_sw now refuses it")
     if (args.dt is None) == (args.dt_atmos is None):
         ap.error("exactly one of --dt (flat legacy cadence) or "
                  "--dt-atmos [--n-split] (upstream schedule) is required")

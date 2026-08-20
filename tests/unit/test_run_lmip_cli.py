@@ -259,3 +259,22 @@ def test_example_params_file_loads_and_applies():
     cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
     out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_lmip")
     assert out.land.Cd_land == 3.0e-3
+
+
+def test_carbon_ic_flag_round_trips():
+    """--carbon-ic reaches args; it defaults to "" (off, byte-identical)."""
+    assert _parse_args(["--lat", "0.0"]).carbon_ic == ""
+    args = _parse_args(["--lat", "0.0", "--carbon-ic", "/tmp/global_carbon_ic.npz"])
+    assert args.carbon_ic == "/tmp/global_carbon_ic.npz"
+
+
+def test_carbon_ic_config_yaml_round_trips_to_args():
+    """The committed config/lmip/lmip_carbon_ic.yaml is a valid LMIP config and
+    carries the seed keys (a config file whose keys are not argparse dests would
+    raise at load)."""
+    p = _lmip_example_config().parent / "lmip_carbon_ic.yaml"
+    args = _parse_args(["--config", str(p)])
+    assert args.carbon_scheme == "differland"
+    assert args.carbon_ic.endswith("global_carbon_ic.npz")
+    # A seeded config must still build a usable land config.
+    assert build_config_from_args(args).land is not None

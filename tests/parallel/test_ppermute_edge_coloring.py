@@ -125,7 +125,10 @@ def test_schedule_reaches_floor_on_real_mesh():
         f"got {sched['n_rounds']}")
     assert sched["n_rounds"] < sched["n_rounds_greedy"], (
         "multi-start coloring should beat sorted greedy on this mesh")
-    assert sched["coloring_method"] == "multi_greedy"
+    # Size-aware colouring (default ON since 9ff0d5892) may adopt a
+    # byte-better regrouping AT the floor round count; both spellings
+    # certify the multi-start round win this test is about.
+    assert sched["coloring_method"] in ("multi_greedy", "size_aware")
     # ppermute perms are proper: no device appears twice as a source or
     # twice as a destination within a single round.
     for perm in sched["ppermute_perms"]:

@@ -54,7 +54,12 @@ from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
     global_dry_mass,
 )
 from legoesm import constants
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.core.tracers import (
+    make_full_moisture_registry,
+    make_moisture_registry,
+)
 from legoesm.grids.gaussian import (
     GaussianGrid,
     create_gaussian_grid,
@@ -512,21 +517,30 @@ def carry_to_spectral_state(
 
     tracers = None
     if include_tracers:
-        # Build a tracer dict from the SegmentCarry's q_v / q_c / q_r.
-        # Cast to float64 to match the spectral PE precision contract.
+        # The species carried through the time stepping follow the MICROPHYSICS
+        # SCHEME, as they already do in the production driver: the carry's
+        # optional hydrometeor / number fields are seeded (non-None) by
+        # ``prognostic_carry_seeds`` only when the selected scheme needs more
+        # than the three warm-rain slots, so PRESENCE ON THE CARRY *is* the
+        # scheme test.  Names and units come from the registry that defines
+        # them (``make_full_moisture_registry``) rather than being retyped.
+        #
+        # This used to hardcode q_v/q_c/q_r.  A nine-species scheme (morrison,
+        # thompson, p3, seifert_beheng, fast_sbm) then ran against a
+        # three-species state: the microphysics bridge emits a tendency only
+        # for a key already present on ``state.tracers``, so ice, snow, graupel
+        # and the number concentrations restarted from zero at every
+        # evaluation while the vapour and cloud sinks that produced them — and
+        # the latent heat they released — were kept.  Neither water nor energy
+        # closed, and nothing raised.
+        _units = {t.name: t.units for t in make_full_moisture_registry().tracers}
         tracers = {
-            "q_v": Field(
-                carry.q_v.astype(jnp.float64),
-                name="q_v", dims=grid_dims_3d, units="kg/kg",
-            ),
-            "q_c": Field(
-                carry.q_c.astype(jnp.float64),
-                name="q_c", dims=grid_dims_3d, units="kg/kg",
-            ),
-            "q_r": Field(
-                carry.q_r.astype(jnp.float64),
-                name="q_r", dims=grid_dims_3d, units="kg/kg",
-            ),
+            name: Field(
+                getattr(carry, name).astype(jnp.float64),
+                name=name, dims=grid_dims_3d, units=units,
+            )
+            for name, units in _units.items()
+            if getattr(carry, name, None) is not None
         }
 
     return SpectralHydrostaticState(
@@ -579,6 +593,24 @@ def spectral_state_to_carry(
             return tr.data if hasattr(tr, "data") else tr
         return jnp.zeros_like(T)
 
+    # Give back exactly the species the state carried, so a rolled-out carry
+    # has the same structure as the ``era5_to_spectral_carry`` initial
+    # condition it is scored against.  Absent species stay ``None`` rather than
+    # becoming zeros: ``None`` is what marks a slot as unused for this scheme,
+    # and zeros would make a three-species run's carry structurally different
+    # from its own initial condition.
+    # Set difference against the warm-rain registry, not a positional slice:
+    # the three always-present species are defined by name, so a reordering of
+    # the full registry cannot silently shift which ones this treats as
+    # optional.
+    _warm = set(make_moisture_registry().names)
+    _extra = {
+        name: _tracer(name)
+        for name in make_full_moisture_registry().names
+        if name not in _warm
+        and state.tracers is not None and name in state.tracers
+    }
+
     shape_3d = T.shape
     shape_2d = p_s.shape
     return pack_carry(
@@ -586,6 +618,7 @@ def spectral_state_to_carry(
         q_v=_tracer("q_v"),
         q_c=_tracer("q_c"),
         q_r=_tracer("q_r"),
+        **_extra,
         held_dT_rad=jnp.zeros(shape_3d),
         held_sw_net_sfc=jnp.zeros(shape_2d),
         held_lw_net_sfc=jnp.zeros(shape_2d),
@@ -874,7 +907,8 @@ def make_turbulence_only_spectral_physics(dt,
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
 
-def make_physics_params_spectral_physics(params, grid, dt):
+def make_physics_params_spectral_physics(params, grid, dt, *,
+                                         radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
 
     Rebuilds the combined physics (radiation + convection + turbulence + ...)
@@ -882,8 +916,9 @@ def make_physics_params_spectral_physics(params, grid, dt):
     flow through the physics computations back to the parameters.
 
     The trainable parameters are injected into the scheme configs:
-    - ``tau_equator``, ``tau_pole`` → gray radiation optical depth
     - ``sbm_tau_c``, ``sbm_RH_ref`` → SBM convection timescale/humidity
+    Gray radiation takes NO trained value since 2026-08-11 (its optical depths
+    ``tau_equator``/``tau_pole`` left the trainable set with it).
 
     Parameters
     ----------
@@ -909,12 +944,20 @@ def make_physics_params_spectral_physics(params, grid, dt):
 
     p = params.as_dict()
 
-    # Build gray radiation config with trainable tau
-    gray_cfg = GrayRadiationConfig(
-        tau_equator=p.get('tau_equator', 7.2),
-        tau_pole=p.get('tau_pole', 1.8),
-    )
-    rad_cfg = RadiationConfig(scheme="gray", gray=gray_cfg)
+    # Radiation backend. This function HARD-WIRED gray, so the WeatherBench
+    # `physics` arm ran gray no matter what its config said — the campaign pin
+    # could not see it (codex, 2026-08-12). WB/AIMIP now get rrtmgp; gray stays
+    # selectable for the smoke path and for non-campaign callers, and takes no
+    # trained value either way (its optical depths left DEFAULT_TRAINABLE).
+    if radiation == "rrtmgp":
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        rad_cfg = RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig())
+    elif radiation == "gray":
+        rad_cfg = RadiationConfig(scheme="gray", gray=GrayRadiationConfig())
+    else:
+        raise ValueError(
+            f"unsupported radiation {radiation!r} for the trainable-physics "
+            f"spectral path: must be one of ('rrtmgp', 'gray')")
 
     # Build SBM convection config with trainable timescale + RH
     sbm_cfg = SBMConfig(
@@ -924,7 +967,17 @@ def make_physics_params_spectral_physics(params, grid, dt):
     conv_cfg = ConvectionConfig(scheme="sbm", sbm=sbm_cfg)
 
     physics_config = PhysicsConfig(radiation=rad_cfg, convection=conv_cfg)
-    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+    # The trainable SURFACE leaves reach rrtmgp as per-call overrides — writing
+    # them into RRTMGPConfig would key its solver cache on a tracer. Without
+    # this they are inert on the rrtmgp path (codex): gray consumed the blended
+    # albedo directly, so flipping the backend silently froze albedo_ocean /
+    # albedo_ice. C_H / C_E ride the surface-flux config, not radiation.
+    _albedo = p.get("albedo_ocean")
+    _kwargs = {}
+    if _albedo is not None and radiation == "rrtmgp":
+        _kwargs["sfc_albedo_override"] = _albedo
+    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt,
+                          **_kwargs)
 
     def physics_fn(state, grid_, sigma_coord):
         result = raw_fn(state, grid_, sigma_coord)
@@ -1044,6 +1097,62 @@ def _make_spectral_integrator(pe_config, grid, sigma_coord, dt, integrator_name)
     return _integrate_si
 
 
+def positive_tracers(tracers, sigma_coord):
+    """Every water species non-negative after the transport + filter step.
+
+    The spectral core's tracer transport and the post-step SH-round-trip
+    filter are both NON-MONOTONE: at sharp moisture gradients they overshoot
+    (Gibbs), leaving small negative mixing ratios every step (measured
+    q_v ~ -7e-4 kg/kg on a 2016-09-01 ERA5 start at T63). Downstream physics
+    has no negative-water state, and a plain ``max(q, 0)`` would convert the
+    overshoot into a compounding spurious source (the MPAS-century
+    +30 kg/m2/yr water lesson on ``conservative_positive_clip``, and the
+    N_i -> 1e193 -> NaN number lesson on ``TestAllTracersBorrowed``).
+
+    EVERY per-mass tracer — the six water mixing ratios AND the number
+    concentrations, which are stored per mass [#/kg] — gets the per-column
+    conserving borrow: clip to zero, then rescale the column's positive cells
+    so the dsigma-weighted column integral is unchanged (``p_s/g`` is
+    constant per column and cancels in the ratio). Eligibility comes from
+    the SHARED rule (``is_borrow_eligible_tracer``), not a local units
+    split: a units-based "numbers clip freely" branch here would repeat the
+    2026-07-26 exclusion that the century measurement reversed (codex,
+    2026-08-16 round 1, P0).
+
+    Pure-sigma coordinates only: with a hybrid coordinate the layer mass is
+    ``dA·p_ref + dB·p_s`` (per-column), and a flat ``dsigma`` weight would
+    conserve the wrong physical integral — refuse loudly rather than
+    mis-conserve (codex round 1, P1).
+
+    Container-type-preserving like ``apply_filter_to_tracers`` (Field stays
+    Field, raw array stays raw; Field detection requires BOTH ``data`` and
+    ``replace``, matching that helper). Unknown tracer names raise: a new
+    species must state its positivity class rather than inherit one silently.
+    """
+    from legoesm.core.conservation import is_borrow_eligible_tracer
+
+    if tracers is None:
+        return None
+    if not isinstance(sigma_coord, SigmaCoordinate):
+        raise ValueError(
+            "positive_tracers: only pure-sigma coordinates are supported — "
+            f"got {type(sigma_coord).__name__}. A hybrid coordinate needs "
+            "per-column layer-mass weights (dA·p_ref + dB·p_s), not dsigma.")
+    dsigma = sigma_coord.dsigma
+    out = {}
+    for name, val in tracers.items():
+        if not is_borrow_eligible_tracer(name):
+            raise ValueError(
+                f"positive_tracers: tracer {name!r} is not a known per-mass "
+                "species (BORROW_ELIGIBLE_TRACERS); classify it before "
+                "running it through the spectral training core.")
+        is_field = hasattr(val, "data") and hasattr(val, "replace")
+        arr = val.data if is_field else val
+        arr, _created = conservative_positive_clip(arr, dsigma, axis=-1)
+        out[name] = val.replace(data=arr) if is_field else arr
+    return out
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -1059,6 +1168,8 @@ def spectral_rollout(
     *,
     sim_time_offset_seconds: float = 0.0,
     forcing_base: dict | None = None,
+    phys_state_in=None,
+    return_phys_state: bool = False,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -1073,6 +1184,24 @@ def spectral_rollout(
 
     Gradient checkpointing is applied per step so memory scales as
     O(1) per step rather than O(n_steps).
+
+    PROGNOSTIC PHYSICS STATE. When ``physics_fn`` carries the
+    ``with_phys_state`` / ``init_phys_state`` markers (the classical
+    split-rad factory attaches them), the scan carry additionally threads a
+    :class:`PhysicsState` (CLUBB wp2/TKE, Bechtold's organization +
+    stochastic state, the GWD spectrum, the PDF cloud fraction), so
+    stateful schemes keep their memory across steps instead of running at
+    their cold-start floors. Contract (deliberate first-order operator
+    split, made explicit per codex review): every RK stage of a step reads
+    the STEP-INITIAL physics memory; the updated memory is harvested once
+    per step from the pre-step state, and only that harvest enters the
+    next step (Bechtold's PRNG advances exactly once per step — stage
+    evaluations reuse the frozen key and their state outputs are
+    discarded). ``phys_state_in`` seeds the thread (None -> the scheme
+    floors via ``init_phys_state``); ``return_phys_state=True`` returns
+    ``(final_state, final_phys_state)`` so a CHAINED multi-segment loss
+    can carry the memory across segments instead of resetting it every
+    lead (codex P0).
 
     Parameters
     ----------
@@ -1186,23 +1315,9 @@ def spectral_rollout(
                 "seconds_of_day": jnp.mod(t, 86400.0),
             }
 
-        def step_fn(state, step_idx):
-            if forcing_base is not None:
-                fc = _forcing_at(step_idx)
-                def tendency_fn(s):
-                    phys = physics_fn(s, grid, sigma_coord, forcing=fc)
-                    return spectral_pe_tendencies(
-                        s, grid, sigma_coord, pe_config, phys,
-                    )
-            else:
-                def tendency_fn(s):
-                    phys = physics_fn(s, grid, sigma_coord)
-                    return spectral_pe_tendencies(
-                        s, grid, sigma_coord, pe_config, phys,
-                    )
-
-            new_state = _integrate(state, tendency_fn)
-
+        def step_post(new_state):
+            """Post-integration chain, shared by the stateless and stateful
+            ungated bodies (expressions unchanged — extracted verbatim)."""
             # Implicit sponge damping at model top
             if sponge_factor is not None:
                 new_state = apply_sponge_filter(new_state, sponge_factor, ms)
@@ -1223,22 +1338,19 @@ def spectral_rollout(
                     )
                 )
 
-            # MOISTURE POSITIVITY (ACE2-style budget fixer) on forced
-            # learned-physics runs: a q_v gone negative feeds the *1e3
-            # normalized NN feature with huge negative values, saturating
-            # the net into the runaway class. Clip at zero after the step
-            # (physics has no negative-water state). Kept off the classical/
-            # legacy paths, which conserve by construction.
-            if forcing_base is not None and new_state.tracers is not None \
-                    and "q_v" in new_state.tracers:
-                _qv = new_state.tracers["q_v"]
-                if hasattr(_qv, "data"):
-                    _qv = _qv.replace(data=jnp.maximum(_qv.data, 0.0))
-                else:
-                    _qv = jnp.maximum(_qv, 0.0)
-                _tr = dict(new_state.tracers)
-                _tr["q_v"] = _qv
-                new_state = new_state._replace(tracers=_tr)
+            # SPECIES POSITIVITY, every path, every step: the transport and
+            # the filter above are non-monotone, so every species can leave
+            # the step slightly negative. Conserving borrow for mass, plain
+            # clip for numbers — see ``positive_tracers``. This subsumes the
+            # earlier learned-arm-only q_v clip (whose "the classical paths
+            # conserve by construction" rationale predated the nine-species
+            # carry and was wrong for it).
+            if new_state.tracers is not None:
+                new_state = new_state._replace(
+                    tracers=positive_tracers(
+                        new_state.tracers, sigma_coord,
+                    )
+                )
 
             # DRY-MASS ANCHOR, last in the chain so it also absorbs what the
             # sponge / spectral / tracer filters above took out. Off unless a
@@ -1255,8 +1367,90 @@ def spectral_rollout(
             # class-side ``_target_mass`` has by construction).
             if _target_mass is not None:
                 new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
+            return new_state
 
+        def step_fn(state, step_idx):
+            if forcing_base is not None:
+                fc = _forcing_at(step_idx)
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord, forcing=fc)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+            else:
+                def tendency_fn(s):
+                    phys = physics_fn(s, grid, sigma_coord)
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+
+            new_state = step_post(_integrate(state, tendency_fn))
             return new_state, None
+
+        # PROGNOSTIC PHYSICS STATE on the ungated path too (interval-1 /
+        # no-rad classical callers), same markers and operator-split
+        # contract as the rad-gated body below — without this, an
+        # interval-1 classical run would silently stay memoryless while
+        # the gated one threads state (codex P1). Marker + forcing_base
+        # has no caller (learned arms are markerless) and is refused
+        # loudly rather than half-supported.
+        _ps_entry_u = getattr(physics_fn, "with_phys_state", None)
+        _ps_init_u = getattr(physics_fn, "init_phys_state", None)
+        _thread_phys_u = _ps_entry_u is not None and _ps_init_u is not None
+        if _thread_phys_u and forcing_base is not None:
+            raise ValueError(
+                "spectral_rollout: a phys-state-marked physics_fn with "
+                "forcing_base has no supported path; thread forcing through "
+                "the stateful entry first.")
+
+        if _thread_phys_u:
+            if phys_state_in is not None:
+                phys0 = phys_state_in
+            else:
+                # Prefer the state-aware seed (shear-equilibrium TKE) over
+                # the scheme-floor initializer: a floor seed cannot spin up
+                # within a short window (sqrt-production bottleneck).
+                _seed_u = getattr(physics_fn, "seed_phys_state", None)
+                if _seed_u is not None:
+                    phys0 = _seed_u(initial_state, grid, sigma_coord)
+                else:
+                    _ncol = int(grid.n_lat) * int(grid.n_lon)
+                    _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+                    phys0 = _ps_init_u(_ncol, _nlev)
+
+            def step_fn_stateful(carry, _):
+                state, phys_state = carry
+                # Harvest once per step on the pre-step state; stages read
+                # the step-initial memory (same contract as the gated body).
+                _, phys_state_new = _ps_entry_u(
+                    state, grid, sigma_coord, phys_state)
+
+                def tendency_fn(s):
+                    phys = _ps_entry_u(s, grid, sigma_coord, phys_state)[0]
+                    return spectral_pe_tendencies(
+                        s, grid, sigma_coord, pe_config, phys,
+                    )
+
+                new_state = step_post(_integrate(state, tendency_fn))
+                return (new_state, phys_state_new), None
+
+            step_fn_ckpt = jax.checkpoint(
+                step_fn_stateful,
+                prevent_cse=True,
+                policy=jax.checkpoint_policies.nothing_saveable,
+            )
+            (final_state, final_ps), _ = jax.lax.scan(
+                step_fn_ckpt, (initial_state, phys0), None, length=n_steps,
+            )
+            if return_phys_state:
+                return final_state, final_ps
+            return final_state
+
+        if phys_state_in is not None or return_phys_state:
+            raise ValueError(
+                "spectral_rollout: phys_state_in/return_phys_state need a "
+                "physics_fn carrying the with_phys_state/init_phys_state "
+                "markers; this physics_fn has none.")
 
         # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
         # most aggressive memory-saving mode: every intermediate is
@@ -1312,37 +1506,25 @@ def spectral_rollout(
     # consistent dtype regardless of how the offset is supplied.
     _offset = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
 
-    def step_fn_gated(carry, step_idx):
-        state, cached_rad_tendency = carry
+    # PROGNOSTIC PHYSICS STATE thread — opt-in via markers the classical
+    # split-rad factory attaches to its non-rad callable. Without them
+    # (learned arms, older callers) the legacy stateless body below runs
+    # verbatim. With them, the scan carry gains a PhysicsState and every
+    # step feeds the previous step's prognostic physics memory back in:
+    # CLUBB's wp2/TKE, Bechtold's conv_prog_profile + stochastic state,
+    # the GWD spectrum, the PDF cloud fraction. Before this, the combined
+    # wrapper's updated state was DISCARDED every step, so every stateful
+    # scheme ran memoryless — CLUBB's turbulence energy sat at its floor
+    # forever, i.e. the arm effectively had no boundary-layer mixing
+    # (2026-08-17 scene-17 dissection; the same absent-component class as
+    # the nine-species fix, which said "carrying turbulence energy across
+    # steps on this path is separate work" — this is that work).
+    _ps_entry = getattr(physics_fn, "with_phys_state", None)
+    _ps_init = getattr(physics_fn, "init_phys_state", None)
+    _thread_phys = _ps_entry is not None and _ps_init is not None
 
-        # Refresh rad tendency at the start of every gating window.
-        # ``lax.cond`` retains backward-mode differentiability through
-        # the rad branch; on skipped steps the cached tensor flows
-        # through unchanged.
-        should_refresh = (step_idx % rad_update_interval) == 0
-        # Cumulative simulated time = optional caller-supplied offset
-        # plus per-step contribution from THIS rollout's scan index.
-        # Multi-step autoregressive supervision passes the wall time
-        # elapsed since the IC so segment k's rad call sees the right
-        # solar phase (otherwise every segment starts at 00 UTC and
-        # the diurnal cycle is frozen at the IC's time-of-day).
-        sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
-        new_rad_tendency = jax.lax.cond(
-            should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds),
-            lambda _: cached_rad_tendency,
-            operand=None,
-        )
-
-        def tendency_fn(s):
-            non_rad_phys = physics_fn(s, grid, sigma_coord)
-            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
-            return spectral_pe_tendencies(
-                s, grid, sigma_coord, pe_config, combined_phys,
-            )
-
-        new_state = _integrate(state, tendency_fn)
-
+    def _post_step(new_state):
+        """Shared post-integration chain (filters / positivity / anchor)."""
         if sponge_factor is not None:
             new_state = apply_sponge_filter(new_state, sponge_factor, ms)
         if spectral_filter is not None:
@@ -1356,14 +1538,111 @@ def spectral_rollout(
                 )
             )
 
+        # SPECIES POSITIVITY — same fixer as the ungated body; this is the
+        # branch the WB and AIMIP classical arms actually run (split rad).
+        if new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=positive_tracers(new_state.tracers, sigma_coord)
+            )
+
         # Same anchor as the ungated body above, and this is the branch the
         # AIMIP arms actually take: aimip_era5.yaml sets
         # aimip_rad_update_interval 36, so ``use_rad_gating`` is True whenever
         # a radiation physics_fn is supplied.
         if _target_mass is not None:
             new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
+        return new_state
 
+    def _rad_refresh(state, cached_rad_tendency, step_idx):
+        # Refresh rad tendency at the start of every gating window.
+        # ``lax.cond`` retains backward-mode differentiability through
+        # the rad branch; on skipped steps the cached tensor flows
+        # through unchanged.
+        should_refresh = (step_idx % rad_update_interval) == 0
+        # Cumulative simulated time = optional caller-supplied offset
+        # plus per-step contribution from THIS rollout's scan index.
+        # Multi-step autoregressive supervision passes the wall time
+        # elapsed since the IC so segment k's rad call sees the right
+        # solar phase (otherwise every segment starts at 00 UTC and
+        # the diurnal cycle is frozen at the IC's time-of-day).
+        sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
+        return jax.lax.cond(
+            should_refresh,
+            lambda _: _call_rad(state, sim_time_seconds),
+            lambda _: cached_rad_tendency,
+            operand=None,
+        )
+
+    def step_fn_gated(carry, step_idx):
+        state, cached_rad_tendency = carry
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+
+        def tendency_fn(s):
+            non_rad_phys = physics_fn(s, grid, sigma_coord)
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = _post_step(_integrate(state, tendency_fn))
         return (new_state, new_rad_tendency), None
+
+    def step_fn_gated_stateful(carry, step_idx):
+        state, cached_rad_tendency, phys_state = carry
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+
+        # Harvest the updated prognostic physics state ONCE per step, on
+        # the PRE-STEP state (operator-split convention: all RK stages of
+        # this step read the same step-initial physics memory). Stage 1's
+        # in-integrator physics evaluation has identical inputs, so XLA
+        # may CSE the pair; if not, this costs one extra non-rad physics
+        # evaluation per step — correctness over compute here.
+        _, phys_state_new = _ps_entry(state, grid, sigma_coord, phys_state)
+
+        def tendency_fn(s):
+            non_rad_phys = _ps_entry(s, grid, sigma_coord, phys_state)[0]
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = _post_step(_integrate(state, tendency_fn))
+        return (new_state, new_rad_tendency, phys_state_new), None
+
+    if _thread_phys:
+        if phys_state_in is not None:
+            phys0 = phys_state_in
+        else:
+            # Prefer the state-aware seed (shear-equilibrium TKE) over the
+            # scheme-floor initializer: a floor seed cannot spin up within
+            # a short window (sqrt-production bottleneck; GLM option c).
+            _seed = getattr(physics_fn, "seed_phys_state", None)
+            if _seed is not None:
+                phys0 = _seed(initial_state, grid, sigma_coord)
+            else:
+                _ncol = int(grid.n_lat) * int(grid.n_lon)
+                _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+                phys0 = _ps_init(_ncol, _nlev)
+        step_fn_ckpt = jax.checkpoint(
+            step_fn_gated_stateful,
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        (final_state, _, final_ps), _ = jax.lax.scan(
+            step_fn_ckpt,
+            (initial_state, init_rad_tendency, phys0),
+            jnp.arange(n_steps),
+        )
+        if return_phys_state:
+            return final_state, final_ps
+        return final_state
+
+    if phys_state_in is not None or return_phys_state:
+        raise ValueError(
+            "spectral_rollout: phys_state_in/return_phys_state need a "
+            "physics_fn carrying the with_phys_state/init_phys_state "
+            "markers (the classical split-rad factory attaches them); this "
+            "physics_fn has none, so the state would be silently ignored.")
 
     step_fn_ckpt = jax.checkpoint(
         step_fn_gated,
@@ -1512,6 +1791,12 @@ def spectral_amip_rollout(
                 tracers=apply_filter_to_tracers(
                     new_state.tracers, tracer_filter, grid,
                 )
+            )
+        # SPECIES POSITIVITY — same fixer as spectral_rollout, same reason
+        # (non-monotone transport + filter), on the prescribed-SST lane.
+        if new_state.tracers is not None:
+            new_state = new_state._replace(
+                tracers=positive_tracers(new_state.tracers, sigma_coord)
             )
         # Same dry-mass anchor as spectral_rollout, for the same reason. This is
         # the PRESCRIBED-SST lane (classical AMIP inference and AMIP
@@ -3127,7 +3412,7 @@ def _train_spectral_loop(
         ms_weight_sum = 0.0
 
     def _rollout_one_segment(state, physics, n_seg_steps, time_offset_seconds,
-                             forcing_base=None):
+                             forcing_base=None, phys_state=None):
         """Run one autoregressive segment (n_seg_steps dycore steps).
 
         ``time_offset_seconds`` is the cumulative simulated time elapsed
@@ -3140,6 +3425,21 @@ def _train_spectral_loop(
         """
         if isinstance(physics, tuple):
             non_rad_fn, rad_fn = physics
+            # PROGNOSTIC PHYSICS MEMORY across chained segments (codex P0):
+            # a marked stateful physics_fn returns (state, phys_state) so
+            # segment k+1 continues from segment k's memory instead of
+            # re-seeding every seam. The caller threads ``phys_state``.
+            if hasattr(non_rad_fn, "with_phys_state"):
+                return spectral_rollout(
+                    state, non_rad_fn, grid, sigma, pe_config,
+                    config.dt, n_seg_steps,
+                    sponge_factor, spectral_filter,
+                    rad_physics_fn=rad_fn,
+                    rad_update_interval=rad_update_interval,
+                    sim_time_offset_seconds=time_offset_seconds,
+                    phys_state_in=phys_state,
+                    return_phys_state=True,
+                )
             return spectral_rollout(
                 state, non_rad_fn, grid, sigma, pe_config,
                 config.dt, n_seg_steps,
@@ -3147,14 +3447,14 @@ def _train_spectral_loop(
                 rad_physics_fn=rad_fn,
                 rad_update_interval=rad_update_interval,
                 sim_time_offset_seconds=time_offset_seconds,
-            )
+            ), None
         return spectral_rollout(
             state, physics, grid, sigma, pe_config,
             config.dt, n_seg_steps,
             sponge_factor, spectral_filter,
             sim_time_offset_seconds=time_offset_seconds,
             forcing_base=forcing_base,
-        )
+        ), None
 
     # --- rollout curriculum (NeuralGCM-style stability training) ---
     # Each phase supervises ONE autoregressive rollout to phase_lead hours
@@ -3190,7 +3490,7 @@ def _train_spectral_loop(
             # Curriculum phase: one rollout to the phase lead.
             tgt = (target_carry[k_target]
                    if type(target_carry) is tuple else target_carry)
-            pred = _rollout_one_segment(
+            pred, _ = _rollout_one_segment(
                 ic_spectral, physics, n_steps_phase, 0.0,
                 forcing_base=forcing_base,
             )
@@ -3202,10 +3502,11 @@ def _train_spectral_loop(
             total = jnp.float32(0.0)
             comp_total: dict = {}
             t_offset = 0.0
+            seg_ps = None    # physics memory chained across segments
             for k, n_seg in enumerate(segment_steps):
-                state = _rollout_one_segment(
+                state, seg_ps = _rollout_one_segment(
                     state, physics, n_seg, t_offset,
-                    forcing_base=forcing_base,
+                    forcing_base=forcing_base, phys_state=seg_ps,
                 )
                 seg_loss, seg_comp = _spectral_state_loss_components(
                     state, target_carry[k], grid, sigma,
@@ -3224,7 +3525,7 @@ def _train_spectral_loop(
             inv = 1.0 / ms_weight_sum
             return total * inv, {k: v * inv for k, v in comp_total.items()}
         # Legacy single-step path.
-        pred = _rollout_one_segment(
+        pred, _ = _rollout_one_segment(
             ic_spectral, physics, n_steps_rollout, 0.0,
             forcing_base=forcing_base,
         )
@@ -3810,20 +4111,17 @@ def train_neural_gcm_spectral(
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
     spec = PE3DChannelSpec(nlev=config.n_levels)
-    sfno = SFNO(
-        SFNOConfig(
-            # State channels + the surface-forcing planes (T_sfc, sic,
-            # insolation) on the INPUT side only — see
-            # ``make_sfno_spectral_physics``.
-            in_channels=spec.n_channels + N_SFNO_FORCING_CHANNELS,
-            out_channels=spec.n_channels,
-            embed_dim=config.sfno_embed_dim,
-            n_blocks=config.sfno_n_blocks,
-            mlp_expansion=config.sfno_mlp_expansion,
-            residual_prediction=False,
-        ),
-        grid,
-        key=jax.random.PRNGKey(seed),
+    # Channel layout, forcing planes and residual_prediction=False come from
+    # the shared registry, so a WB run and an AIMIP run of this variant build
+    # the same network (they had drifted to 256/8 vs 128/4).
+    from legoesm.training.model_registry import build_variant
+    sfno = build_variant(
+        "sfno_physics", nlev=config.n_levels, grid=grid, seed=seed,
+        overrides={
+            "sfno_embed_dim": config.sfno_embed_dim,
+            "sfno_n_blocks": config.sfno_n_blocks,
+            "sfno_mlp_expansion": config.sfno_mlp_expansion,
+        },
     )
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
     logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
@@ -4014,16 +4312,24 @@ def train_sfno_full_spectral(
     # in_channels carries (1 + history) copies of the packed state; the emulator
     # wrapper validates the two agree rather than mis-slicing.
     _history_steps = int(getattr(config, "sfno_history_steps", 0) or 0)
-    sfno_arch_cfg = SFNOConfig(
-        in_channels=spec.n_channels * (1 + _history_steps),
-        out_channels=spec.n_channels,
-        embed_dim=config.sfno_embed_dim,
-        n_blocks=config.sfno_n_blocks,
-        mlp_expansion=config.sfno_mlp_expansion,
-        residual_prediction=False,
-        dropout=config.sfno_dropout,
+    # Shared registry (same source as the WB lane and as sfno_physics); the
+    # arch config is read back so the emulator wrapper below cannot disagree
+    # with the weights it wraps about channel counts.
+    from legoesm.training.model_registry import (
+        build_variant as _build_variant,
+        sfno_arch_config as _sfno_arch_config,
     )
-    sfno = SFNO(sfno_arch_cfg, grid, key=jax.random.PRNGKey(seed))
+    _sfno_over = {
+        "sfno_embed_dim": config.sfno_embed_dim,
+        "sfno_n_blocks": config.sfno_n_blocks,
+        "sfno_mlp_expansion": config.sfno_mlp_expansion,
+        "sfno_dropout": config.sfno_dropout,
+        "sfno_history_steps": _history_steps,
+    }
+    sfno_arch_cfg = _sfno_arch_config(
+        "sfno_full", nlev=config.n_levels, overrides=_sfno_over)
+    sfno = _build_variant("sfno_full", nlev=config.n_levels, grid=grid,
+                          seed=seed, overrides=_sfno_over)
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
     logger.info(
         f"SFNO full-emulator: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
@@ -5174,7 +5480,10 @@ def train_column_mlp_spectral(
     seed: int = 0,
     hidden_dim: int = 256,
     n_layers: int = 4,
-    residual_scale: float = 0.01,
+    # None = let build_column_physics apply its own default. Restating
+    # 0.01 here made a second source of truth that could drift from the
+    # factory's (and from the WB lane, which never passed it) unnoticed.
+    residual_scale: float | None = None,
     *,
     resume_from_dir=None,
     surface_forcing_path: str | None = None,
@@ -5192,12 +5501,11 @@ def train_column_mlp_spectral(
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    nn_phys = build_column_physics(
-        nlev=config.n_levels,
-        hidden_dim=hidden_dim,
-        n_layers=n_layers,
-        residual_scale=residual_scale,
-        key=jax.random.PRNGKey(seed),
+    from legoesm.training.model_registry import build_variant
+    nn_phys = build_variant(
+        "column_nn", nlev=config.n_levels, seed=seed,
+        overrides={"nn_hidden_dim": hidden_dim, "n_layers": n_layers,
+                   "residual_scale": residual_scale},
     )
     n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(nn_phys, eqx.is_array)))
     logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
@@ -5242,17 +5550,20 @@ def train_physics_params_spectral(
 ):
     """Train physics-based parameterization parameters + spectral PE dycore.
 
-    Tunes the parameters of combined physics schemes (gray radiation,
-    SBM convection) by backpropagating through both the physics
-    computations and the spectral dynamical core.
+    Tunes the parameters of the combined physics schemes (SBM convection and
+    the surface exchange/albedo knobs) by backpropagating through both the
+    physics computations and the spectral dynamical core. Gray radiation runs
+    at its documented defaults — it is not trained.
 
     Trainable parameters (via ``TrainablePhysicsParams``):
-    - ``tau_equator``, ``tau_pole``: gray radiation optical depths
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
 
     Returns (trained_params, loss_history).
     """
+    # The IDEALIZED 2-family parameter set (convection + radiation), not the
+    # campaign "classical" model — the registry's classical is the six-family
+    # AIMIPClassicalParams since 2026-08-12.
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")

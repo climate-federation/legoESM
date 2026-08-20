@@ -774,3 +774,57 @@ class TestZeroOutput:
         assert out.du_dt.shape == (4, 10)
         assert out.eps_gwd.shape == (4,)
         assert jnp.allclose(out.du_dt, 0.0)
+
+
+# ===========================================================================
+# #1514 guard: orographic scalar-fallback warning (ocean pseudo-mountain)
+# ===========================================================================
+
+class TestOrographicScalarFallbackWarning:
+    """Direct tests of ``orographic_scalar_fallback_warning`` (issue #1514).
+
+    The scalar ``h_topo = 500 m`` fallback puts a fictional mountain over
+    every ocean column; the helper must flag exactly the hazardous quadrant
+    (orographic member + empty SSO path + real land/ocean distribution) and
+    stay silent everywhere else.
+    """
+
+    def _fn(self):
+        from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+            orographic_scalar_fallback_warning,
+        )
+        return orographic_scalar_fallback_warning
+
+    def test_fires_for_orographic_member_no_sso_real_land_sea(self):
+        msg = self._fn()("mcfarlane+hines", "", True)
+        assert msg is not None
+        assert "mcfarlane" in msg
+        assert "1514" in msg
+        assert "prep_subgrid_orography" in msg  # remedy named
+
+    def test_silent_without_orographic_member(self):
+        assert self._fn()("hines", "", True) is None
+        assert self._fn()("rayleigh+hines", "", True) is None
+
+    def test_silent_when_sso_file_wired(self):
+        assert self._fn()("mcfarlane", "/path/sso_stdh.nc", True) is None
+
+    def test_silent_on_idealized_run_without_land_sea(self):
+        # No real land/ocean distribution (e.g. no topography chain ran):
+        # the documented legacy scalar fallback stays available quietly.
+        assert self._fn()("mcfarlane", "", False) is None
+
+    def test_composite_names_the_orographic_member(self):
+        msg = self._fn()("hines+e3sm_cam", "", True)
+        assert msg is not None
+        assert "e3sm_cam" in msg
+
+    def test_driver_wires_the_guard(self):
+        # The symbol that RUNS: ModelDriver._create_topography owns the
+        # subgrid_orography_path block (the sso_path if/else) and must call
+        # the helper on its else branch.  This assertion goes red if the
+        # driver call site is reverted while the helper survives.
+        import inspect
+        from legoesm.driver.model_driver import ModelDriver
+        src = inspect.getsource(ModelDriver._create_topography)
+        assert "orographic_scalar_fallback_warning" in src

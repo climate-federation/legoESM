@@ -33,13 +33,19 @@ DATA_DIR="$REPO_ROOT/data"
 CRUJRA_DIR="$DATA_DIR/crujra"
 
 # --- defaults / config ---
-PREFIX="clmforc.CRUJRAv2.5_filled_antarct_and_grnlnd_0.5x0.5"   # glade three_stream naming
+PREFIX="clmforc.CRUJRAv2.5_0.5x0.5"                              # public CESM inputdata naming
 SUFFIX=""                                                        # after-year suffix (none)
 SURFDATA_NAME="legoesm_surfdata_c260716.nc"                      # current dated build
 # Zenodo concept DOI 10.5281/zenodo.21087963 (latest = record 21401647); bump the
 # record + name for a new dated build.  Override with --surfdata-url or $LEGOESM_SURFDATA_URL.
 SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21401647/files/legoesm_surfdata_c260716.nc}"
 CRUJRA_SRC="${LEGOESM_CRUJRA_SRC:-/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream}"
+# Public CESM inputdata mirror of the same three CLM datm streams, 1901-2023, no
+# credentials.  Used when the glade directory is not mounted -- which is every
+# machine that is not NCAR's, and is why staging used to be impossible off-site.
+# ~10 GB per year (Solr 1.4, Prec 1.4, TPQWL 7.2), so years are opt-in one at a
+# time rather than a default sweep.
+CRUJRA_URL="${LEGOESM_CRUJRA_URL:-https://svn-ccsm-inputdata.cgd.ucar.edu/trunk/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20241231/three_stream}"
 
 FORCE=0
 DO_CRUJRA=1
@@ -52,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --crujra-only)   DO_SURFDATA=0 ;;
         --surfdata-only) DO_CRUJRA=0 ;;
         --crujra-src)    CRUJRA_SRC="$2"; shift ;;
+        --crujra-url)    CRUJRA_URL="$2"; shift ;;
         --surfdata-url)  SURFDATA_URL="$2"; shift ;;
         --prefix)        PREFIX="$2"; shift ;;
         --suffix)        SUFFIX="$2"; shift ;;
@@ -75,12 +82,37 @@ verify_netcdf() {
 
 # --- CRU-JRA: symlink the three CLM streams per requested year ---
 if [[ $DO_CRUJRA -eq 1 ]]; then
-    if [[ ! -d "$CRUJRA_SRC" ]]; then
-        echo "ERROR: CRU-JRA source dir not found: $CRUJRA_SRC" >&2
-        echo "       set --crujra-src <glade dir> or \$LEGOESM_CRUJRA_SRC" >&2
-        exit 3
-    fi
     mkdir -p "$CRUJRA_DIR"
+    if [[ ! -d "$CRUJRA_SRC" ]]; then
+        # Not at NCAR: fetch the same three streams over HTTP instead of
+        # symlinking them.  Each file is checked for the NetCDF magic before it
+        # counts as staged, so a truncated transfer or an HTML error page is
+        # never left behind looking like data.
+        echo "=== CRU-JRA ($PREFIX) download ${YEARS[*]} -> $CRUJRA_DIR ==="
+        echo "    source: $CRUJRA_URL"
+        for year in "${YEARS[@]}"; do
+            for stream in Solr Prec TPQWL; do
+                fname="${PREFIX}.${stream}.${year}${SUFFIX}.nc"
+                dest="$CRUJRA_DIR/$fname"
+                if [[ -s "$dest" && $FORCE -ne 1 ]] && verify_netcdf "$dest" 2>/dev/null; then
+                    echo "  [skip] $fname ($(du -h "$dest" | cut -f1))"; continue
+                fi
+                echo "  [get]  $fname"
+                if ! curl -fL --retry 3 --retry-delay 5 -C - -o "$dest.part" \
+                        "$CRUJRA_URL/$fname"; then
+                    echo "  [err]  download failed: $CRUJRA_URL/$fname" >&2
+                    rm -f "$dest.part"; exit 4
+                fi
+                mv -f "$dest.part" "$dest"
+                verify_netcdf "$dest" || { echo "  [err] not NetCDF: $dest" >&2; exit 4; }
+                echo "  [ok]   $fname ($(du -h "$dest" | cut -f1))"
+            done
+        done
+        DO_CRUJRA=0          # done via HTTP; skip the symlink branch below
+    fi
+fi
+
+if [[ $DO_CRUJRA -eq 1 ]]; then
     echo "=== CRU-JRA ($PREFIX) symlink ${YEARS[*]} -> $CRUJRA_DIR ==="
     for year in "${YEARS[@]}"; do
         for stream in Solr Prec TPQWL; do

@@ -33,6 +33,29 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 # PPM edge reconstruction
 # ==============================================================================
 
+def ppm_edge_values_axis0(q):
+    """Axis-0 twin of the DEFAULT-path :func:`ppm_edge_values`.
+
+    Same 4th-order interior + 2nd-order boundary edge formula, swept
+    along axis 0 instead of axis -2 — so callers whose swept axis is
+    leading (the lat-lon latitude PPM) need no ``moveaxis`` round-trip.
+    On the LL2048@64 trace those transposes were the single largest
+    compute-kernel family (input_transpose_fusion, 370 us/step, 11% of
+    compute; codex fusion consult 2026-08-11).
+
+    Deliberately supports ONLY the default options (no ``blend_edges``,
+    no Fortran xppm boundary — the latitude path never used them).
+    Coupled to ``ppm_edge_values`` by a parity unit test
+    (tests/unit/test_ppm_axis0_parity.py): change one formula, the test
+    forces the other.
+    """
+    q_hat_inner = ((7.0 / 12.0) * (q[1:-2] + q[2:-1])
+                   - (1.0 / 12.0) * (q[:-3] + q[3:]))
+    q_hat_lo = 0.5 * (q[0:1] + q[1:2])
+    q_hat_hi = 0.5 * (q[-2:-1] + q[-1:])
+    return jnp.concatenate([q_hat_lo, q_hat_inner, q_hat_hi], axis=0)
+
+
 def ppm_edge_values(q_1d, blend_edges=False,
                      apply_fortran_xppm_boundary=False,
                      n_interior=None):

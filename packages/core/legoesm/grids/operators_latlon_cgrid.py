@@ -70,8 +70,14 @@ def pad_ns_zero_multi(*fields: jnp.ndarray) -> tuple:
     return pad_with_pole_bc_lat_multi(fields, halo=1)
 
 
-def _vface_cos_lat_core(grid) -> jnp.ndarray:
+def _vface_cos_lat_core(grid, *, lat_pad: jnp.ndarray | None = None) -> jnp.ndarray:
     """Raw ``cos(lat_v)`` at the ``n_lat+1`` v-face midpoints (#515 consolidation).
+
+    ``lat_pad`` (optional, exactly ``pad_with_pole_bc_lat(grid.lat, halo=1,
+    0, 0)``): a caller holding the precomputed extended band latitude (the
+    SPMD geometry stacks — stage-invariant, so the per-stage ppermute of a
+    scalar row is pure overhead) passes it to skip the pad; ``None`` keeps
+    the historical in-body pad byte-identical.
 
     The single source for the regular-branch v-face zonal-metric cosine shared by
     ``divergence_cgrid`` and ``gradient_curl_to_v``: pad ``grid.lat`` with the
@@ -83,10 +89,11 @@ def _vface_cos_lat_core(grid) -> jnp.ndarray:
     ``result_type``-cast — unlike the ocean ``vface_zonal_cos_lat``) so the core
     path stays byte-identical to the former inline recompute.
     """
-    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
-    lat_pad = pad_with_pole_bc_lat(
-        grid.lat, halo=1, south_value=0.0, north_value=0.0,
-    )
+    if lat_pad is None:
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        lat_pad = pad_with_pole_bc_lat(
+            grid.lat, halo=1, south_value=0.0, north_value=0.0,
+        )
     lat_v = 0.5 * (lat_pad[:-1] + lat_pad[1:])  # (n_lat+1,)
     return jnp.cos(lat_v)
 
@@ -657,6 +664,8 @@ def gradient_x_cgrid(
 def gradient_y_cgrid(
     f: jnp.ndarray,
     grid: LatLonGrid,
+    *,
+    f_padded: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Meridional gradient df/dy at v-points (lat interfaces).
 
@@ -669,6 +678,14 @@ def gradient_y_cgrid(
     f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
         Scalar field at cell centers.
     grid : LatLonGrid
+    f_padded : array, optional
+        Pre-padded ``f`` supplied by a caller that fused this exchange with
+        others (lat-lon packed-exchange epoch): must be EXACTLY the halo-1
+        fold-family pad of ``f`` — i.e. ``pad_halo_latlon(f, halo=1)`` /
+        ``pad_halo_latlon_3d(f, halo=1)`` output, including the lon halo
+        (which is stripped here, as for the internal pad).  ``None``
+        (default) keeps the in-operator backend-dispatched pad,
+        byte-identical.
 
     Returns
     -------
@@ -700,17 +717,29 @@ def gradient_y_cgrid(
         n_lat = f.shape[0]
         out_shape = (n_lat + 1,) + f.shape[1:]
         return jnp.zeros(out_shape, dtype=f.dtype)
-    if f.ndim == 2:
-        f_padded = pad_halo_latlon(f, halo=1)
-        # Strip the lon halo — gradient_y only needs the lat halo.
-        f_padded = f_padded[:, 1:-1]
-    elif f.ndim == 3:
-        f_padded = pad_halo_latlon_3d(f, halo=1)
-        f_padded = f_padded[:, 1:-1, :]
-    else:
+    if f.ndim not in (2, 3):
         raise ValueError(
             f"gradient_y_cgrid: f.ndim must be 2 or 3, got {f.ndim}"
         )
+    if f_padded is not None:
+        # Caller-fused exchange: validate the pre-pad shape (exactly the
+        # halo-1 fold pad: +2 rows, +2 lon cols), then strip the lon halo
+        # exactly as below.
+        expected = (f.shape[0] + 2, f.shape[1] + 2) + f.shape[2:]
+        if f_padded.shape != expected:
+            raise ValueError(
+                f"gradient_y_cgrid: f_padded must be the halo-1 fold pad "
+                f"of f — expected shape {expected}, got {f_padded.shape}"
+            )
+        f_padded = (f_padded[:, 1:-1] if f.ndim == 2
+                    else f_padded[:, 1:-1, :])
+    elif f.ndim == 2:
+        f_padded = pad_halo_latlon(f, halo=1)
+        # Strip the lon halo — gradient_y only needs the lat halo.
+        f_padded = f_padded[:, 1:-1]
+    else:  # f.ndim == 3 (validated above)
+        f_padded = pad_halo_latlon_3d(f, halo=1)
+        f_padded = f_padded[:, 1:-1, :]
 
     # Compact stencil on padded f — gradient at ALL v-faces of the
     # rank-local band, including the partition cuts.
@@ -850,6 +879,7 @@ def divergence_cgrid(
     *,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
+    lat_pad: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Conservative FV divergence on the C-grid.
 
@@ -867,6 +897,11 @@ def divergence_cgrid(
     grid : LatLonGrid
     u_mask, v_mask : array, optional
         Face masks. Applied before flux computation.
+    lat_pad : array, optional
+        Precomputed extended cell latitude, exactly
+        ``pad_with_pole_bc_lat(grid.lat, halo=1, 0, 0)`` — forwarded to
+        ``_vface_cos_lat_core`` so a stage-invariant geometry pad (SPMD
+        band stacks) skips the per-stage exchange.  ``None``: unchanged.
 
     Returns
     -------
@@ -937,7 +972,8 @@ def divergence_cgrid(
         # pole-side constant ghost; bit-identical to the historical
         # jnp.pad(cos_interior, (1, 1)) on the local backend.
         from legoesm.grids.halo_latlon import zero_polar_lat_ends
-        cos_lat_v = zero_polar_lat_ends(_vface_cos_lat_core(grid))
+        cos_lat_v = zero_polar_lat_ends(
+            _vface_cos_lat_core(grid, lat_pad=lat_pad))
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -1042,6 +1078,8 @@ def curl_vertex_cgrid(
     grid: LatLonGrid,
     *,
     u_ext: jnp.ndarray | None = None,
+    lat_pad_pole: jnp.ndarray | None = None,
+    cos_lat_pad: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Relative vorticity at vertex (corner) points via circulation integral.
 
@@ -1054,6 +1092,15 @@ def curl_vertex_cgrid(
     u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
     grid : LatLonGrid
+    lat_pad_pole : array, optional
+        Precomputed extended cell latitude, exactly
+        ``pad_with_pole_bc_lat(grid.lat, halo=1, -pi/2, +pi/2)``.
+    cos_lat_pad : array, optional
+        Precomputed extended ``cos(lat)``, exactly
+        ``pad_with_pole_bc_lat(grid.cos_lat, halo=1, 0, 0)``.
+        Both are stage-invariant geometry pads a caller (the SPMD band
+        step's geometry stacks) can supply to skip the per-stage
+        exchange; ``None`` keeps the in-body pads byte-identical.
 
     Returns
     -------
@@ -1095,10 +1142,13 @@ def curl_vertex_cgrid(
         # backend-dependent; the literals make it exact by fiat).
         from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
         import math
-        lat_ext_q = pad_with_pole_bc_lat(
-            lat, halo=1,
-            south_value=-math.pi / 2.0, north_value=math.pi / 2.0,
-        )
+        if lat_pad_pole is None:
+            lat_ext_q = pad_with_pole_bc_lat(
+                lat, halo=1,
+                south_value=-math.pi / 2.0, north_value=math.pi / 2.0,
+            )
+        else:
+            lat_ext_q = lat_pad_pole
         sin_ext = jnp.sin(lat_ext_q)
         # Restore the EXACT pole sin (±1.0) at PHYSICAL poles.  Under the
         # single-program SPMD backend ``lat_ends_are_poles()`` is (True, True) on
@@ -1215,9 +1265,12 @@ def curl_vertex_cgrid(
         # ``R * cos * dlon`` on the padded array: row-wise identical
         # arithmetic to padding the precomputed dx_cell, and the zero
         # pole constant maps to an exactly-zero dx row.
-        cos_ext_q = pad_with_pole_bc_lat(
-            cos_lat, halo=1, south_value=0.0, north_value=0.0,
-        )
+        if cos_lat_pad is None:
+            cos_ext_q = pad_with_pole_bc_lat(
+                cos_lat, halo=1, south_value=0.0, north_value=0.0,
+            )
+        else:
+            cos_ext_q = cos_lat_pad
         dx_ext = R * cos_ext_q * dlon
         u_south = u_ext[:-1]
         u_north = u_ext[1:]

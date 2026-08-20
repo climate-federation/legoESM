@@ -36,9 +36,12 @@ class ParamConstraint(NamedTuple):
 
 # Default trainable parameters (the ones already traced through build_segment_fn)
 # Bounds must match tuning.py validated ranges.
+# Gray radiation is NOT trained (user directive 2026-08-11): tau_equator /
+# tau_pole are gray optical depths and were dropped from this set on the same
+# day they were dropped from AIMIPClassicalParams. Gray still RUNS, at its
+# documented defaults. The radiative knobs a classical model trains are
+# RRTMGP's surface albedo + emissivity (see AIMIPClassicalParams).
 DEFAULT_TRAINABLE = [
-    ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
-    ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
     ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
     ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
     ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
@@ -51,10 +54,8 @@ DEFAULT_TRAINABLE = [
 # tau_equator/tau_pole only into the gray solver; the RRTMGP branch
 # explicitly discards them (physics_pipeline.py `del tau_equator,
 # tau_pole`), so under rrtmgp they would be dead degrees of freedom.
-_GRAY_RADIATION_TRAINABLE = [
-    ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
-    ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
-]
+# Emptied 2026-08-11 with DEFAULT_TRAINABLE above: gray is never trained.
+_GRAY_RADIATION_TRAINABLE: list = []
 
 # Surface-albedo parameters.  The blended (ice/ocean/land) albedo
 # reaches the radiative heating through BOTH solvers: RRTMGP consumes

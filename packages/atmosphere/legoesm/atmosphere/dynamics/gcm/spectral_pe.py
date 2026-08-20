@@ -164,6 +164,9 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
             "(missing the 'spectral_layout' marker)."
         )
 
+    def _early_name(n):
+        return n.decode() if isinstance(n, bytes | np.bytes_) else str(n)
+
     def _load_coeff(arr_in):
         """jnp.asarray with a LOUD x64 guard: complex128 coefficients silently
         downcast to complex64 when JAX x64 is disabled — the spectral transforms
@@ -178,6 +181,26 @@ def reconstruct_spectral_state_from_npz(d, *, template: SpectralHydrostaticState
                 "silently downcast the coefficients to complex64."
             )
         return out
+
+    # Refuse an old-convention droplet number BEFORE loading anything.
+    # Droplet number is stored PER MASS [1/kg] since 2026-08-14; an older
+    # checkpoint holds it per VOLUME with nothing else to tell the two apart,
+    # and reloading it as-is scales every droplet count by the air density.
+    # Mirrors the MPAS restart refusal.
+    _early_names = ([_early_name(n) for n in d["tracer_names"]]
+                    if "tracer_names" in keys else [])
+    if any(n in ("N_c", "N_r") for n in _early_names):
+        _stamp = (str(np.asarray(d["number_convention"]).item())
+                  if "number_convention" in keys else None)
+        if _stamp != "per_mass":
+            raise ValueError(
+                "spectral checkpoint carries cloud/rain droplet number "
+                "written under the old PER-VOLUME convention (no "
+                "'number_convention' stamp); the model now stores them "
+                "PER MASS [1/kg]. Re-run from the initial state, or divide "
+                "the stored N_c/N_r by air density and add "
+                "number_convention='per_mass' to the file."
+            )
 
     fields = {}
     for name in _SPECTRAL_COEFF_NAMES:
@@ -295,6 +318,22 @@ class SpectralPEConfig(NamedTuple):
     # numerics for tests that intentionally measure drift.
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    # Vertical advection for u, v, T on BOTH vertical coordinates (sigma and
+    # hybrid): "sb_centered" (DEFAULT — Simmons-Burridge energy-conserving
+    # pairing; sigma via _vertical_advection_sigma_sb, hybrid via
+    # vertical_advection_hybrid_sb) or "upwind" (legacy, NOT recommended:
+    # measured -0.48 K/day mass-weighted global-mean T leak at T63L8 and it
+    # destroys 62% of the atmosphere's vertical T structure in 5 days).
+    # Selecting "upwind" emits a RuntimeWarning at tendency-build time.
+    # TRACERS keep upwind regardless: centered vertical advection overshoots
+    # and would drive moisture negative — upwind's diffusivity is the
+    # positivity choice there, not an accident.
+    vertical_advection_scheme: str = "sb_centered"
+    # Return the KE removed by explicit vor/div hyperdiffusion as local
+    # frictional heating (standard GCM practice, ~0.5-2 W/m^2 at T63; the
+    # post-step filter's KE removal is a documented omission). DEFAULT ON —
+    # disabling it leaves the total-energy budget open, and warns.
+    frictional_heating: bool = True
 
 
 # =============================================================================
@@ -380,6 +419,86 @@ def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
+
+
+_WARNED_NON_CONSERVING: set[tuple[str, bool]] = set()
+
+
+def _warn_non_conserving_numerics(scheme: str, frictional_heating: bool):
+    """Warn ONCE per (scheme, heating) combination that the run is not on the
+    energy-conserving numerics.
+
+    Both defaults are now the conserving choice, so reaching this means a
+    caller opted OUT. Measured cost of opting out (T63L8, zero physics,
+    scripts/validate/aimip_pressure_spinup.py --global-t): the upwind
+    vertical transport leaks -0.48 K/day of mass-weighted global-mean
+    temperature (-2.39 K over 5 days against a true -0.16 K) and erases 62%
+    of the vertical temperature structure; dropping frictional heating
+    leaves the hyperdiffusion KE sink unreturned.
+
+    Deduplicated because ``spectral_pe_tendencies`` runs 3-5x per step: an
+    un-deduplicated warning would emit millions of lines per run and Python
+    filters only per (message, category, module, lineno) by default, which
+    a formatted message defeats.
+    """
+    import warnings
+
+    key = (scheme, bool(frictional_heating))
+    if key in _WARNED_NON_CONSERVING:
+        return
+    _WARNED_NON_CONSERVING.add(key)
+    reasons = []
+    if scheme != "sb_centered":
+        reasons.append(
+            f"vertical_advection_scheme={scheme!r} (not 'sb_centered'): the "
+            "advective upwind form has no discrete conservation pairing with "
+            "continuity — measured -0.48 K/day global-mean temperature leak "
+            "at T63L8")
+    if not frictional_heating:
+        reasons.append(
+            "frictional_heating=False: the kinetic energy removed by "
+            "hyperdiffusion is never returned as heat, so the total-energy "
+            "budget stays open")
+    warnings.warn(
+        "SpectralPEConfig is NOT on the energy-conserving numerics: "
+        + "; ".join(reasons)
+        + ". Defaults are sb_centered + frictional_heating=True; keep the "
+          "legacy settings only to reproduce a pre-2026-08-11 run.",
+        RuntimeWarning, stacklevel=3)
+
+
+def _vertical_advection_sigma_sb(field, sigma_dot, sigma_coord):
+    """Simmons-Burridge (1981) centered vertical advection (energy-conserving).
+
+        -sigma_dot * df/dsigma |_k
+            = -(1/(2*dsigma_k)) * [ sigma_dot_{k+1/2} * (f_{k+1} - f_k)
+                                  + sigma_dot_{k-1/2} * (f_k   - f_{k-1}) ]
+
+    with sigma_dot = 0 at the top and bottom interfaces (the BCs
+    ``_compute_sigma_dot_gaussian`` already builds in). This is the standard
+    ECMWF/SB81 form: it is algebraically identical to a flux-form divergence
+    of the interface flux ``sigma_dot_{j} * (f_k + f_{k+1})/2`` minus
+    ``f_k * (d sigma_dot/d sigma)_k``, so the mass-weighted column integral
+    telescopes against the continuity equation and the discretization
+    supports a conserved ``sum(ps * dsigma * T)`` under adiabatic flow.
+
+    Measured motivation: the legacy first-order UPWIND advective form
+    (:func:`_vertical_advection_sigma_gaussian`) carries a systematic
+    -36 W/m^2 (-0.32 K/day at t=0, -0.47 K/day after adjustment) mass-
+    weighted temperature sink at T63L8 — the dominant term of the dycore's
+    measured -0.48 K/day zero-physics global cooling (2026-08-10 budget
+    probe, scripts/validate/aimip_t_budget.py; closure FD vs budget 2%).
+
+    ``sigma_dot`` is on interfaces, shape (..., nlev+1); ``field`` is on
+    full levels (..., nlev).
+    """
+    df = jnp.diff(field, axis=-1)                 # (..., nlev-1) interior interfaces
+    sd_int = sigma_dot[..., 1:-1]                 # (..., nlev-1)
+    contrib = sd_int * df
+    pad_axes = ((0, 0),) * (contrib.ndim - 1)
+    upper = jnp.pad(contrib, (*pad_axes, (1, 0)))  # sigma_dot_{k-1/2}(f_k - f_{k-1})
+    lower = jnp.pad(contrib, (*pad_axes, (0, 1)))  # sigma_dot_{k+1/2}(f_{k+1} - f_k)
+    return -(upper + lower) / (2.0 * sigma_coord.dsigma)
 
 
 def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
@@ -494,6 +613,28 @@ def spectral_pe_tendencies(
     Returns tendencies in the same pytree structure as state (for SSP-RK3).
     """
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Dispatch hardening on the STATIC config value: an unknown scheme must
+    # raise, not silently run different numerics (a typo here would change
+    # the model's conservation properties without an error). Both vertical
+    # coordinates carry both schemes.
+    _vadv_scheme = config.vertical_advection_scheme
+    if _vadv_scheme == "upwind":
+        _warn_non_conserving_numerics(_vadv_scheme, config.frictional_heating)
+        _vadv_sigma = _vertical_advection_sigma_gaussian
+        _vadv_hybrid = vertical_advection_hybrid
+    elif _vadv_scheme == "sb_centered":
+        if not config.frictional_heating:
+            _warn_non_conserving_numerics(
+                _vadv_scheme, config.frictional_heating)
+        _vadv_sigma = _vertical_advection_sigma_sb
+        from legoesm.grids.vertical import vertical_advection_hybrid_sb
+        _vadv_hybrid = vertical_advection_hybrid_sb
+    else:
+        raise ValueError(
+            f"Unknown vertical_advection_scheme "
+            f"{config.vertical_advection_scheme!r}; valid: 'upwind', "
+            f"'sb_centered'.")
 
     a = grid.radius
     R_d = constants.R_d
@@ -773,9 +914,9 @@ def spectral_pe_tendencies(
 
     # Vertical advection of T
     if _hybrid:
-        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        vert_adv_T = _vadv_hybrid(T, mass_flux, p_s, sigma_coord)
     else:
-        vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
+        vert_adv_T = _vadv_sigma(T, sigma_dot, sigma_coord)
 
     # Adiabatic heating: kappa * T * omega / p
     if _hybrid:
@@ -826,11 +967,11 @@ def spectral_pe_tendencies(
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
-        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
-        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+        vert_adv_u = _vadv_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = _vadv_hybrid(v, mass_flux, p_s, sigma_coord)
     else:
-        vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
-        vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
+        vert_adv_u = _vadv_sigma(u, sigma_dot, sigma_coord)
+        vert_adv_v = _vadv_sigma(v, sigma_dot, sigma_coord)
 
     # Convert to spectral vor/div contributions.  Same batching pattern
     # as the vorticity-flux SH analyses above: stack (vert_u_cos,
@@ -900,6 +1041,31 @@ def spectral_pe_tendencies(
         dvor_hat = dvor_hat + base_diff_stack[..., 0]
         ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
         dT_hat = dT_hat + base_diff_stack[..., 2]
+
+        if config.frictional_heating:
+            # Return the KE removed by the vor/div hyperdiffusion as LOCAL
+            # heating: dT_fric = -(u*du_hd + v*dv_hd)/c_p, with (du_hd,
+            # dv_hd) the velocity tendencies of the hyperdiffusion terms.
+            # Sign convention (heating positive into T): hyperdiff opposes
+            # the wind, so the term heats on average; its global integral
+            # equals the KE sink by construction (locked by
+            # tests/atmosphere/hydrostatic/test_spectral_pe_energy_conserving
+            # .py::test_frictional_heating_returns_exactly_the_hyperdiff_KE).
+            # Heat from the DELIVERED tendencies: the returned vor/div are
+            # dealiased below, so super-cutoff modes lose no KE — computing
+            # heat from the unmasked stack would manufacture energy (codex).
+            _hd_vor = base_diff_stack[..., 0]
+            _hd_div = base_diff_stack[..., 1]
+            if _dealias_3d is not None:
+                _hd_vor = _hd_vor * _dealias_3d
+                _hd_div = _hd_div * _dealias_3d
+            _hd_u_cos, _hd_v_cos = uv_from_vordiv_3d(grid, _hd_vor, _hd_div)
+            _fric_cos2 = -(u_cos * _hd_u_cos + v_cos * _hd_v_cos)
+            # (u*du + v*dv) built from cos-weighted fields carries cos^2:
+            # divide once (clipped like the velocity synthesis above).
+            _fric_heat = _fric_cos2 / (
+                constants.c_pd * cos_lat_3d * cos_lat_3d)
+            dT_hat = dT_hat + sh_analysis_3d(grid, _fric_heat)
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:

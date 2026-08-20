@@ -111,3 +111,43 @@ def test_rollout_hours_matches_first_lead():
     cfg = cfg._replace(multi_step_hours=())
     assert rollout_hours(cfg, {"loss": {"multi_step_hours": [12, 24]}}) == 12.0
     assert rollout_hours(cfg, {}) == 6.0
+
+
+def test_rrtmgp_cache_is_warmed_before_the_traced_loss():
+    """The classical arm builds RRTMGP inside ``make_run_seg``, and ``loss_fn``
+    calls that under ``eqx.filter_value_and_grad``.  With a cold optics cache
+    the NetCDF gas-optics load then runs against Equinox tracers and the job
+    dies with TracerArrayConversionError (job 26905933, six minutes of ERA5
+    loading wasted first).  ``main`` must therefore build the segment once with
+    CONCRETE params, before the training loop.
+    """
+    import ast
+
+    tree = ast.parse(_ENTRY.read_text())
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    # It must be a bare statement in main's OWN body: a call nested in an inner
+    # def is the traced one this guards against, and one wrapped in ``if
+    # cfg.mode == ...`` or a swallowing ``try`` leaves the classical arm exactly
+    # as broken as before (codex).
+    warm = [stmt.value for stmt in main.body
+            if isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "make_run_seg"]
+    assert warm, ("main() must call make_run_seg(...) as an unconditional "
+                  "top-level statement — it warms the RRTMGP optics-table "
+                  "cache outside the trace")
+    assert any(isinstance(a, ast.Name) and a.id == "params"
+               for call in warm for a in call.args), (
+        "the warm-up must pass the concrete params pytree, not a placeholder")
+
+    # ... and before the ERA5 load, so a broken physics config fails in seconds
+    # rather than after minutes of data loading.
+    era5 = [n.lineno for n in ast.walk(main)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "load_era5_samples"]
+    assert era5, "ERA5 loader call not found — did main() get restructured?"
+    assert min(c.lineno for c in warm) < min(era5), (
+        "the warm-up must run BEFORE the ERA5 load, not after it")

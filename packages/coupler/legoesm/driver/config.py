@@ -225,14 +225,16 @@ class DycoreConfig(NamedTuple):
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
     # Column-CONSERVING tracer positivity clamp in the MPAS floors stage.
-    # The default plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
+    # The plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
     # ``tracer_transport_mpas``, horizontal advection undershoot alone made it
     # invent +0.0822 kg/m2/day (+30 kg/m2/yr) of water on the AMIP century
     # (measured 2026-07-26, 96% from q_i/q_c), driving column water 23->42
     # kg/m2, OLR 199->109 W/m2 and +10 K/yr warming.  True borrows the clipped
     # deficit back from the positives (10.4x less spurious mass, measured).
-    # Default False keeps every existing MPAS result bit-identical.
-    mpas_conservative_tracer_clamp: bool = False
+    # Default TRUE since 2026-08-16 (owner decision: "conserving form
+    # always"); ``--no-mpas-conservative-tracer-clamp`` restores the legacy
+    # mass-creating clamp for bit-comparison against older runs.
+    mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default OFF — the
@@ -603,6 +605,12 @@ class ExperimentConfig(NamedTuple):
     # coverage, so enabling both double-discounts the cloud.
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
+    # Saturation curve for the cloud-fraction RH (CloudConfig.saturation_scheme):
+    # "liquid" (legacy/byte-identical, liquid Tetens saturation at all T) or
+    # "mixed_phase" (RH against the ice-fraction-blended liquid/ice curve, IFS
+    # alpha(T) convention — ice-saturated TTL/anvil air then reads RH ~1 and
+    # the RH cloud schemes see the cirrus the model already carries, #1521).
+    cloud_saturation_scheme: str = "liquid"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).
@@ -1164,6 +1172,15 @@ class ExperimentConfig(NamedTuple):
     # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
+    # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
+    # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
+    # raising epsilon_deep dilutes the deep plume faster in dry air, so
+    # convection survives only where the column is already moist -> a narrower,
+    # wetter rain band. Both are scaled in-scheme by the IFS height/RH factors;
+    # these are the BASE rates. Defaults are the published IFS deep values and
+    # are byte-identical to the previous hard-coded behaviour.
+    bechtold_epsilon_deep: float = 1.75e-3   # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4     # BechtoldConfig.delta_deep [1/m]
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
     # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
@@ -1426,6 +1443,24 @@ class ExperimentConfig(NamedTuple):
     # stable-tail selector, not this floor.  Appended at the tuple END to
     # preserve the positional ABI.
     hb_kvf_min: float | None = None
+    # IFS deep entrainment/detrainment base rates (plume-mixing control):
+    # epsilon_deep up = more dilution, weaker and shallower plumes;
+    # delta_deep down = less condensate leaked to the anvil, more left in
+    # the plume to rain out.  Wired 2026-08-13; before this the deep
+    # entrainment rate could not be set from any MIP driver at all.
+    # APPENDED, not inserted beside the other bechtold_* fields: this is a
+    # NamedTuple, so a mid-struct insertion silently reassigns every later
+    # positional argument.
+    bechtold_epsilon_deep: float = 1.75e-3  # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4    # BechtoldConfig.delta_deep [1/m]
+    # Scale on the LAND branch of the diurnal-cycle CAPE subtraction. The IFS
+    # value assumes a ~10 km mesh; 1.0 reproduces it, 0.0 removes the land
+    # branch while leaving the ocean branch alone -- which the on/off flag
+    # cannot do, because it disables both.
+    bechtold_capdcycl_land_tau_scale: float = 1.0
+    bechtold_subcloud_evap_scale: float = 1.0
+    bechtold_rhebc_land: float = 0.75
+    bechtold_rhebc_land_deep: float = 0.70
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1436,6 +1471,26 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must ANNOUNCE itself when invoked. These are
+        # warnings, not errors — the legacy/exception paths stay selectable
+        # for bit-comparison and for the documented MSE-vs-water trade-off.
+        import logging as _logging
+        _wlog = _logging.getLogger(__name__)
+        if not d.mpas_conservative_tracer_clamp:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "mpas_conservative_tracer_clamp=False restores the plain "
+                "max(q, 0) tracer clamp, which CREATES mass at every "
+                "transport undershoot (+30 kg/m2/yr of water measured on "
+                "the AMIP century). Legacy bit-comparison mode only.")
+        if self.energy_consistent_moisture_clip:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "energy_consistent_moisture_clip=True conserves "
+                "moist static energy but CREATES the clipped vapour "
+                "(water is NOT conserved by this floor) — the documented "
+                "exception to 'conserving form always'.")
         if g.resolution <= 0:
             errors.append(f"grid.resolution must be > 0, got {g.resolution}")
         if g.nlev <= 0:
@@ -1627,7 +1682,15 @@ class ExperimentConfig(NamedTuple):
             )
         for _f, _lo, _hi in (
             ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
+            ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
+            ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
+            ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
+            ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
+            ("bechtold_subcloud_evap_scale", 0.1, 4.0),
+            ("bechtold_rhebc_land", 0.5, 1.0),
+            ("bechtold_rhebc_land_deep", 0.5, 1.0),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
@@ -1691,6 +1754,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"cloud_vertical_overlap_optics must be one of "
                 f"{_valid_overlap}, got {self.cloud_vertical_overlap_optics!r}"
+            )
+        _valid_sat = ("liquid", "mixed_phase")
+        if self.cloud_saturation_scheme not in _valid_sat:
+            errors.append(
+                f"cloud_saturation_scheme must be one of {_valid_sat}, "
+                f"got {self.cloud_saturation_scheme!r}"
             )
         if (self.cloud_partial_coverage_optics != "none"
                 and self.cloud_vertical_overlap_optics != "none"):
@@ -3045,6 +3114,18 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_inplume_precip=getattr(
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_epsilon_deep=getattr(amip_cfg, 'bechtold_epsilon_deep', 1.75e-3),
+            bechtold_delta_deep=getattr(amip_cfg, 'bechtold_delta_deep', 0.75e-4),
+            bechtold_capdcycl_land_tau_scale=getattr(
+                amip_cfg, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            bechtold_subcloud_evap_scale=getattr(amip_cfg, 'bechtold_subcloud_evap_scale', 1.0),
+            bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
+            bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
+            bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
+            bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
+            bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
+            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
+            convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
             bechtold_use_ifs_shallow_closure=getattr(
@@ -3207,13 +3288,24 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_evap=self.bechtold_downdraft_evap,
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
-            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
-            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
-            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_epsilon_deep=self.bechtold_epsilon_deep,
+            bechtold_delta_deep=self.bechtold_delta_deep,
+            bechtold_capdcycl_land_tau_scale=self.bechtold_capdcycl_land_tau_scale,
+            bechtold_subcloud_evap_scale=self.bechtold_subcloud_evap_scale,
+            bechtold_rhebc_land=self.bechtold_rhebc_land,
+            bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
+            bechtold_rprcon=self.bechtold_rprcon,
+            bechtold_dnoprc=self.bechtold_dnoprc,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_subsidence_solve=self.bechtold_subsidence_solve,
+            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
+            convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,

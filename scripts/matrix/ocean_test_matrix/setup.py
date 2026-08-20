@@ -116,6 +116,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         eos_linear=None,
                         barotropic_diffusion_alpha: float | None = None,
                         barotropic_div_damp: float | None = None,
+                        barotropic_u_viscosity: float | None = None,
                         tracer_advection: str | None = None,
                         gm_redi=None,
                         pv_scheme: str | None = None,
@@ -259,6 +260,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         if barotropic_div_damp is not None:
             kw["barotropic_div_damp"] = barotropic_div_damp
+        if barotropic_u_viscosity is not None:
+            kw["barotropic_u_viscosity"] = barotropic_u_viscosity
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         if pv_scheme is not None:
@@ -301,6 +304,10 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             "momentum_advection": momentum_advection,
             "weno_d_term": weno_d_term, "barotropic_solver": barotropic_solver,
             "barotropic_diffusion_alpha": barotropic_diffusion_alpha,
+            # codex: omitting this would let a future FESOM experiment set the
+            # depth-mean viscosity and have it SILENTLY dropped, which is
+            # exactly the confound this list exists to prevent.
+            "barotropic_u_viscosity": barotropic_u_viscosity,
             "barotropic_div_damp": barotropic_div_damp,
             "gm_redi": gm_redi, "physics": physics,
         }
@@ -371,6 +378,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         if barotropic_div_damp is not None:
             kw["barotropic_div_damp"] = barotropic_div_damp
+        if barotropic_u_viscosity is not None:
+            kw["barotropic_u_viscosity"] = barotropic_u_viscosity
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         if pv_scheme is not None:
@@ -456,6 +465,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         if barotropic_div_damp is not None:
             kw["barotropic_div_damp"] = barotropic_div_damp
+        if barotropic_u_viscosity is not None:
+            kw["barotropic_u_viscosity"] = barotropic_u_viscosity
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         if gm_redi is not None:
@@ -515,6 +526,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         if barotropic_div_damp is not None:
             kw["barotropic_div_damp"] = barotropic_div_damp
+        if barotropic_u_viscosity is not None:
+            kw["barotropic_u_viscosity"] = barotropic_u_viscosity
         if tracer_advection is not None:
             kw["tracer_advection"] = tracer_advection
         if pv_scheme is not None:
