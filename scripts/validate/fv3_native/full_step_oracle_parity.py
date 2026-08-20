@@ -362,31 +362,6 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
             f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
 
 
-def check_constants_flavour(run_dir: str) -> None:
-    """``FMSConstants: GFS``, asserted from the run's OWN logfile.
-
-    The build comments CLAIMED the harness did this and it did not
-    (GLM M4, job 9444414) -- the build script only ``grep``-printed it.
-    It matters most exactly where the gate is least sensitive: a
-    GFDL-constants binary shifts ``rvgas/rdgas``, so ``zvir`` moves by
-    O(0.1-1 %), which perturbs the scored residual at ~1e-6 -- under
-    the NH arm's own floor. A mis-linked oracle would not show up as a
-    failure, only as a quietly different reference.
-    """
-    log = os.path.join(run_dir, "logfile.000000.out")
-    if not os.path.exists(log):
-        raise SystemExit(
-            f"{run_dir}: no logfile.000000.out, so the constants "
-            f"flavour cannot be read from the run itself.")
-    with open(log, errors="replace") as fh:
-        txt = fh.read()
-    if "FMSConstants: GFS" not in txt:
-        raise SystemExit(
-            f"{run_dir}: logfile does not say 'FMSConstants: GFS'. The "
-            f"port pins the GFS set; a GFDL-linked oracle shifts zvir "
-            f"and the difference hides under the gate.")
-
-
 def check_physics_is_inert(run_dir: str) -> None:
     """Refuse a deck whose fv_phys could touch the state."""
     text = _nml_text(run_dir)
@@ -409,6 +384,11 @@ def check_physics_is_inert(run_dir: str) -> None:
 
 
 def check_moist_deck(run_dir: str) -> None:
+    # SUPERSEDED by check_deck_matches_the_arm, which asks the same
+    # questions with a DIRECTION (adiabatic .false. IFF moist) and adds
+    # the hydrostatic pair. Kept because it is the narrower, standalone
+    # statement of "this deck is moist" and its tests pin the namelist
+    # reader; the parity harness itself no longer calls it.
     """The moist coupling is a DERIVED flag; assert what derives it.
 
     ``zvir`` is nowhere in the namelist. atmosphere.F90:156-161 sets it
@@ -1160,12 +1140,11 @@ def main(argv=None):
     # EVERY ARM, not just --moist: the redirects fire only on exact
     # default-path equality, so an explicit --ic-run/--step-run used to
     # bypass all content checking.
+    # check_deck_matches_the_arm subsumes check_physics_is_inert and the
+    # direction-blind check_moist_deck, and load_oracle already asserts
+    # FMSConstants: GFS per deck via require_gfs_constants.
     for _r in (args.ic_run, args.step_run):
         check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist)
-        check_constants_flavour(_r)
-        for _run in (args.ic_run, args.step_run):
-            check_physics_is_inert(_run)
-            check_moist_deck(_run)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -1618,13 +1597,17 @@ def main(argv=None):
                   for pf in range(6)]
         resp_o = [{f: orc_1[t][f] - orc_dry_1[t][f] for f in fields}
                   for t in range(6)]
+        # apply_map, NOT map_scalar_pair: u and v are STAGGERED
+        # ((48,49) vs (49,48)) and a transposed face exchanges them.
+        # map_scalar_pair is cell-centred only and raised a broadcast
+        # error on the first run -- the staggering trap, again.
+        mapped = [apply_map(resp_p[pf], resp_o[perm[pf]], meta[pf][perm[pf]])
+                  for pf in range(6)]
         worst_rel, worst_f, any_signal = 0.0, None, False
         for f in fields:
             row_p, row_o = [], []
             for pf in range(6):
-                ot = perm[pf]
-                a, b = map_scalar_pair(resp_p[pf][f], resp_o[ot][f],
-                                       meta[pf][ot])
+                a, b = mapped[pf][f]
                 pk_p, pk_o = float(np.abs(a).max()), float(np.abs(b).max())
                 row_p.append(pk_p)
                 row_o.append(pk_o)
