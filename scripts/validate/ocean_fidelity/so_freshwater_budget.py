@@ -138,6 +138,7 @@ def main() -> int:
                 ds.variables[name][:]), np.nan).astype(np.float64)
         emp_raw, empoce_raw = rd("empmr"), rd("emp_oce")
         lat_n = np.asarray(ds.variables["nav_lat"][:], dtype=np.float64)
+        tb = np.asarray(ds.variables["time_centered_bounds"][:], dtype=np.float64)
     finally:
         ds.close()
     lo, hi = (int(x) for x in a.nemo_recs.split(":"))
@@ -145,6 +146,20 @@ def main() -> int:
         raise SystemExit(f"--nemo-recs {a.nemo_recs} selects no records")
     emp = np.nanmean(emp_raw[lo:hi], axis=0)
     empoce = np.nanmean(empoce_raw[lo:hi], axis=0)
+
+    # WINDOW GATE (codex 9442707). Nothing tied --nemo-recs to --day, so a
+    # snapshot could be scored against a NEMO average from a different part of
+    # the run and the mismatch would never show. NEMO's bounds are seconds
+    # since 1900; the run starts at the first record's lower bound.
+    _t0 = tb[0, 0]
+    _win = ((tb[lo, 0] - _t0) / 86400.0, (tb[hi - 1, 1] - _t0) / 86400.0)
+    print(f"[window] NEMO recs {a.nemo_recs} = simulated days "
+          f"{_win[0]:.2f}-{_win[1]:.2f}; model day {a.day:.2f}")
+    if not (_win[0] <= a.day <= _win[1]):
+        raise SystemExit(
+            f"WINDOW MISMATCH: model day {a.day} is outside the NEMO average "
+            f"over days {_win[0]:.2f}-{_win[1]:.2f}. Comparing them would be a "
+            "confound, not a result. Pass --nemo-recs covering the day.")
     wgt_n = _nemo_cell_area(a.mesh, lat_n) * np.isfinite(emp)
 
     # SIGN CONTROL, run every time: the subtropics must be evaporative in
