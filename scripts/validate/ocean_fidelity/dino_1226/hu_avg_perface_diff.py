@@ -165,6 +165,7 @@ import os
 import sys
 
 import numpy as np
+import jax.numpy as jnp
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS_OCEAN_FIDELITY = os.path.dirname(_THIS_DIR)
@@ -294,25 +295,92 @@ def _dssh_from_transport(hu, hv, m):
 _CAP = {}
 
 
+_CAP_ALL = []
+
+
 def _hook_barotropic():
-    """Monkeypatch barotropic_substeps_latlon_cgrid to stash (Hu_avg,Hv_avg).
+    """Monkeypatch barotropic_substeps_latlon_cgrid to stash EVERY (Hu_avg,Hv_avg).
 
     ``step`` is jit-compiled, so Hu_avg is a tracer here -- copy the CONCRETE
-    runtime value out via io_callback (host side-effect, value unchanged)."""
+    runtime value out via io_callback (host side-effect, value unchanged).
+
+    THE DEFECT THIS REPLACES (adversarial physics review, 2026-08-19), and it
+    invalidated every number this probe produced.  ``_leapfrog_step`` calls
+    ``_step_impl`` TWICE per step: the advective Nnn pass
+    (ocean_model_latlon_cgrid.py:7896), whose barotropic solve IS the answer,
+    and a whole-Nbb pass for the dissipative increment (:7941), whose
+    "advective state + barotropic solve are discarded" -- the model's own
+    comment at :7931-7932.  Both run the full section-6 barotropic solve with a
+    DIFFERENT F_slow, so they produce DIFFERENT Hu_avg.  The old hook assigned
+    into a dict, so it kept whichever callback fired LAST, and
+    ``jax.experimental.io_callback`` defaults to ``ordered=False``
+    (jax/_src/callback.py:542) -- there is NO execution-order guarantee, and
+    the effect is not DCE'd, so both fire in an unspecified order that can vary
+    with backend and compilation.  The probe could therefore be differencing
+    the DISCARDED pass's transport against the KEPT pass's eta, which alone
+    manufactures a residual of roughly the Nnn-minus-Nbb transport difference.
+    The old ``if "Hu_avg" not in _CAP`` guard could not see a second write.
+
+    Now every call is appended with the eta the solve was handed, so the passes
+    can be told apart AFTER the run by matching that eta against the known now
+    and before levels -- no reliance on callback ordering at all."""
     import jax
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as omod
     _orig = omod.barotropic_substeps_latlon_cgrid
 
-    def _stash(hu, hv):
-        _CAP["Hu_avg"] = np.asarray(hu)
-        _CAP["Hv_avg"] = np.asarray(hv)
+    def _stash(hu, hv, eta_in):
+        _CAP_ALL.append({"Hu_avg": np.asarray(hu), "Hv_avg": np.asarray(hv),
+                         "eta_in": np.asarray(eta_in)})
 
     def _wrapped(*a, **k):
+        _state_in = a[0] if a else k["state"]
         state_new, (Hu_avg, Hv_avg) = _orig(*a, **k)
-        jax.experimental.io_callback(_stash, None, Hu_avg, Hv_avg)
+        jax.experimental.io_callback(
+            _stash, None, Hu_avg, Hv_avg, _state_in.eta.data)
         return state_new, (Hu_avg, Hv_avg)
     omod.barotropic_substeps_latlon_cgrid = _wrapped
     return _orig
+
+
+def _select_kept_pass(st0):
+    """Pick the KEPT barotropic solve out of the captured passes, by the eta it
+    was handed -- never by call order.
+
+    ``_leapfrog_step`` hands the advective pass the NOW state and the discarded
+    dissipative pass the BEFORE state (``nbb = state._replace(eta=eta_before,
+    ...)``, ocean_model_latlon_cgrid.py:7937-7939).  Matching the captured
+    input eta against ``st0.eta`` / ``st0.eta_before`` therefore identifies the
+    passes unambiguously.  Raises rather than guessing: a silent wrong pick is
+    exactly the defect this function exists to remove."""
+    eta_now = np.asarray(st0.eta.data)
+    eta_bef = np.asarray(st0.eta_before.data)
+    print(f"\n  BAROTROPIC PASSES CAPTURED: {len(_CAP_ALL)}"
+          f"   (|eta_now - eta_before| max = "
+          f"{np.abs(eta_now - eta_bef).max():.4e} m, the tag's own resolution)")
+    tagged = []
+    for i, c in enumerate(_CAP_ALL):
+        d_now = float(np.abs(c["eta_in"] - eta_now).max())
+        d_bef = float(np.abs(c["eta_in"] - eta_bef).max())
+        tag = ("advective/Nnn (KEPT)" if d_now < d_bef
+               else "dissipative/Nbb (DISCARDED)")
+        tagged.append((tag, c))
+        print(f"    pass {i}: {tag:28s} |eta_in - eta_now|={d_now:.3e} "
+              f"|eta_in - eta_before|={d_bef:.3e}  "
+              f"|Hu_avg|max={np.abs(c['Hu_avg']).max():.4e}")
+    kept = [c for t, c in tagged if "KEPT" in t]
+    if len(kept) != 1:
+        raise SystemExit(
+            f"*** PASS SELECTION FAILED: {len(kept)} of {len(_CAP_ALL)} captured "
+            "barotropic solves tag as the KEPT advective pass. The probe cannot "
+            "know which transport belongs with the committed eta; no per-face "
+            "number stands. (Expected exactly 1; see _hook_barotropic.)")
+    if len(_CAP_ALL) > 1:
+        _d = [np.abs(c["Hu_avg"] - kept[0]["Hu_avg"]).max()
+              for t, c in tagged if "DISCARDED" in t]
+        print(f"    KEPT-minus-DISCARDED |Hu_avg| max = "
+              f"{max(_d):.4e} m^2/s  <- the size of the error the old "
+              f"last-write-wins hook could silently make")
+    return kept[0]
 
 
 def _run_one_step_capture():
@@ -430,10 +498,44 @@ def _run_one_step_capture():
           f"sum|eta|={np.abs(eta).sum():.17e}", flush=True)
     _out = os.environ.get("DINO_M1_OUT", "")
     if _out:
+        if os.path.exists(_out):
+            raise SystemExit(
+                f"*** refusing to overwrite {_out}: two arms writing one "
+                "DINO_M1_OUT silently destroy the comparison. Use a per-arm path.")
         np.savez_compressed(_out, u=_u, v=_v, eta=eta, eta_before=eta_b,
                             reconcile=np.array(_recon_env or (_card_recon or "")))
         print(f"  [artifact] -> {_out}", flush=True)
-    return eta, eta_b, st, st0
+    # THE GATE.  Printing two sums is not a control -- nothing fails if the flag
+    # goes inert, and Sum|x| is magnitude-preserving so an IDENTICAL Sum|eta|
+    # would not even prove eta is bit-unchanged (a sign-preserving
+    # redistribution reads the same).  With DINO_M1_REF pointing at the OTHER
+    # arm's dump this becomes a real, failing gate on max|d| of the arrays
+    # themselves: the 3-D velocity MUST move (else the flag is inert and the
+    # null below means nothing) and eta MUST NOT (else the exoneration is
+    # false).  ``eta_before`` is deliberately NOT gated: st0 is built before the
+    # config override, so it is identical BY CONSTRUCTION and proves nothing.
+    _ref = os.environ.get("DINO_M1_REF", "")
+    if _ref:
+        r = np.load(_ref)
+        du = float(np.abs(_u - r["u"]).max())
+        de = float(np.abs(eta - r["eta"]).max())
+        print(f"  LIVE-FLIP GATE vs {_ref}: max|du|={du:.6e} m/s  "
+              f"max|d_eta|={de:.6e} m  (this arm={_recon_env or _card_recon!r}, "
+              f"ref={str(r['reconcile'])!r})", flush=True)
+        if str(r["reconcile"]) == str(_recon_env or (_card_recon or "")):
+            raise SystemExit("*** LIVE-FLIP GATE: reference is the SAME arm; "
+                             "this control cannot fail. Point it at the other arm.")
+        if not du > 0.0:
+            raise SystemExit(
+                "*** LIVE-FLIP GATE FAILED: the 3-D velocity is bit-identical "
+                "across the two reconcile targets, so the flag is INERT and the "
+                "bit-identical eta residual exonerates nothing.")
+        if de != 0.0:
+            raise SystemExit(
+                f"*** LIVE-FLIP GATE FAILED: eta moved by {de:.3e} m across the "
+                "flip, so the flag IS in the eta path and the call-graph reading "
+                "behind this probe's prediction is wrong.")
+    return eta, eta_b, st, st0, br
 
 
 def _per_face_report(tag, lego, nemo, mask, units):
@@ -523,10 +625,49 @@ def main():
     # ================= capture legoESM Hu_avg/Hv_avg ==========================
     print(f"\n=== capturing legoESM Hu_avg/Hv_avg (real bridged step) ===")
     _hook_barotropic()
-    eta_lego, eta_b, st, st0 = _run_one_step_capture()
-    if "Hu_avg" not in _CAP:
-        raise SystemExit("hook missed: Hu_avg not captured (call-site re-lookup?)")
-    Hu_avg = _CAP["Hu_avg"]; Hv_avg = _CAP["Hv_avg"]
+    eta_lego, eta_b, st, st0, _br = _run_one_step_capture()
+    if not _CAP_ALL:
+        raise SystemExit("hook missed: no barotropic solve captured "
+                         "(call-site re-lookup?)")
+    _kept = _select_kept_pass(st0)
+    Hu_avg = _kept["Hu_avg"]; Hv_avg = _kept["Hv_avg"]
+
+    # ==================== INSTRUMENT TEST: whose divergence? ==================
+    # Raised in adversarial physics review and it outranks every per-face number
+    # below.  This probe reconstructs the divergence in NEMO's form
+    # (``_dssh_from_transport``: e2u/e1v fluxes over e1e2t).  C0 validates that
+    # against NEMO's OWN dumps -- correct for NEMO's side, and it says NOTHING
+    # about whether the same operator reproduces legoESM's own divergence of
+    # ``Hu_avg``.  legoESM's ``divergence_cgrid`` uses ``grid.dy * 0.5`` for the
+    # u-face length on a non-tripolar grid (operators_latlon_cgrid.py:919-...),
+    # not ``grid.dy_u``, and picks the v-face metric by
+    # ``reads_stored_vface_metric(grid)``.  If the two operators disagree, the
+    # "invariant violation" this probe reports is the PROBE's metric, not the
+    # model's physics.  So: run legoESM's OWN operator on the captured transport
+    # and test the invariant on legoESM's own terms, with nothing of NEMO's in
+    # it.  A model-side violation must show up HERE too, or it is not real.
+    from legoesm.grids.operators_latlon_cgrid import divergence_cgrid
+    _div_lego = np.asarray(divergence_cgrid(
+        jnp.asarray(Hu_avg), jnp.asarray(Hv_avg), _br.geometry))
+    _eta_now = np.asarray(st.eta.data)
+    _eta_seed = np.asarray(st0.eta_before.data)
+    _cm = np.asarray(_br.geometry.mask if hasattr(_br.geometry, "mask")
+                     else st0.eta.data * 0 + 1) if False else None
+    _pred = -RDT * _div_lego
+    _act = _eta_now - _eta_seed
+    _wetc = np.abs(_act) > 0.0
+    print("\n" + "=" * 74)
+    print("INSTRUMENT TEST -- legoESM's OWN divergence operator, no NEMO metric")
+    print("  invariant: eta(Naa) - eta(Nbb)  ==  -2dt * divergence_cgrid(Hu_avg)")
+    print("=" * 74)
+    _r = (_pred - _act)
+    print(f"    predicted -2dt*div max={np.abs(_pred[_wetc]).max():.4e} m   "
+          f"actual d_eta max={np.abs(_act[_wetc]).max():.4e} m")
+    print(f"    RESIDUAL max={np.abs(_r[_wetc]).max():.4e} m   L2rel="
+          f"{np.sqrt((_r[_wetc]**2).sum()/max((_act[_wetc]**2).sum(),1e-300)):.4e}")
+    print("    (compare with the NEMO-form closure's L2rel printed below: if THIS "
+          "one is\n     roundoff, the reported violation is the probe's metric, "
+          "not the model.)")
     print(f"  captured Hu_avg shape={Hu_avg.shape} dtype={Hu_avg.dtype}  "
           f"Hv_avg shape={Hv_avg.shape}")
     # day-0 gate + the per-step eta increment.  No target is asserted here:
