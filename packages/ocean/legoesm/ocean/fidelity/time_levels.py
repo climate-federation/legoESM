@@ -250,6 +250,52 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
                                         "Interior 52x199, 2-D."),
     "wnd_dump_zv_frc_inc.bin": ("now", "v twin of wnd_dump_zu_frc_inc.bin (same "
                                         "bracket, vtau_b+vtauV, r1_hv(:,:,Kmm))."),
+    # The drag bracket the wind bracket above mirrors, plus the fully-assembled
+    # slow forcing the barotropic loop consumes.  All three are Kmm=Nnn-geometry
+    # RATES [m/s^2] built from this step's puu(Krhs), so they carry the "now"
+    # level for the same reason wnd_dump_zu_frc_inc.bin does.  Read from the
+    # MY_SRC write sites before registering (#1455 audit, 2026-08-19).
+    "drg_dump_zu_frc_inc.bin": ("now", "zu_frc bottom-drag-only increment: "
+                                       "snapshot zu_frc_predrg at MY_SRC "
+                                       "dynspg_ts.F90:379, dump of (zu_frc - "
+                                       "zu_frc_predrg) at :398 immediately "
+                                       "after CALL dyn_drg_init(Kbb,Kmm,...) "
+                                       "at :382-383 -- brackets ONLY the drag "
+                                       "add.  DINO ln_bt_fw=F so dyn_drg_init "
+                                       "takes the Kbb baroclinic residual over "
+                                       "the Kmm depth.  Interior 52x199, 2-D, "
+                                       "[m/s^2]."),
+    "drg_dump_zv_frc_inc.bin": ("now", "v twin of drg_dump_zu_frc_inc.bin "
+                                       "(MY_SRC dynspg_ts.F90:399, same "
+                                       "bracket)."),
+    "drg_dump_rCdU_bot.bin": ("now", "rCdU_bot, the T-point drag "
+                                     "coefficient*speed field from "
+                                     "zdf_drg_nonlin (zdfdrg.F90:189), dumped "
+                                     "at MY_SRC dynspg_ts.F90:397 WRITE(8970) "
+                                     "in the same drag bracket.  FULL haloed "
+                                     "jpi x jpj (ji=1,jpi / jj=1,jpj), NOT the "
+                                     "interior slice its zu_frc_inc siblings "
+                                     "use."),
+    "spg_dump_zu_frc.bin": ("now", "FULLY-ASSEMBLED barotropic slow forcing "
+                                   "zu_frc at MY_SRC dynspg_ts.F90:514/520 "
+                                   "WRITE(8850) -- snapshot after the LAST "
+                                   "write to zu_frc (the wind add, :437-443) "
+                                   "and before the jn=1..icycle substep loop's "
+                                   "own per-substep updates.  Built from "
+                                   "puu(:,:,:,Krhs) over the Kmm=Nnn metric "
+                                   "(:337 e3u_0/r1_hu_0 under key_qco).  "
+                                   "Interior 52x199 (A2D(0), see :511), "
+                                   "[m/s^2]."),
+    "spg_dump_zv_frc.bin": ("now", "v twin of spg_dump_zu_frc.bin (MY_SRC "
+                                   "dynspg_ts.F90:516/521 WRITE(8851))."),
+    "spg_dump_ssh_frc.bin": ("now", "ssh_frc = r1_rho0*r1_2*(emp_b+emp) at "
+                                    "MY_SRC dynspg_ts.F90:518/522 WRITE(8852), "
+                                    "the same snapshot point as "
+                                    "spg_dump_zu_frc.bin.  Units [m/s] (r1_rho0 "
+                                    "already applied, see :510-511).  Written "
+                                    "FULL haloed jpi x jpj (ji=1,jpi / "
+                                    "jj=1,jpj), unlike its zu_frc/zv_frc "
+                                    "siblings in the same WRITE block."),
 
     # --- FACE10 task (2026-08-01): w1400 face-flux + EIV bolus 10-day
     # measurement. Additive WRITE-only per-day dumps (kt = nit000 + 32*iday,
