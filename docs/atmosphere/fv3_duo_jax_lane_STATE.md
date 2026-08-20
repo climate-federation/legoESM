@@ -541,6 +541,52 @@ claims BITWISE parity with a sequential NumPy loop — unroll over the
 static trip count there. Under jit everything is compiled anyway and
 only the ~1e-14 parity contract holds.
 
+## ★ THE NH GAP IS IN THE ACOUSTIC LOOP, NOT THE REMAP (2026-08-20)
+
+Open since 2026-08-19 and now answered. The named discriminator ran
+(`scripts/validate/fv3_native/nh_preremap_w_parity.py`, job 9448074,
+against the instrumented build from job 9447518):
+
+    pre-remap  w rel   9.3761e-04   at face2 -> tile5
+    full-step  w rel   6.6116e-04
+    ratio pre/full     1.418
+
+**The gap is ALREADY THERE when dyn_core returns**, and is in fact
+slightly LARGER before the remap than after -- the remap reduces it a
+little. `kord_wz` and the vertical remap of `w` are EXONERATED; the
+cause is in the acoustic loop.
+
+Per face, pre-remap: 6.85e-05, 9.376e-04, 4.23e-05, 9.376e-04,
+9.376e-04, 3.95e-04. Three faces sit at the same 9.376e-04 to four
+digits. NOT interpreted further here -- the earlier {1,2,4,5} vs {3,6}
+polar split does not match this grouping, and a spatial pattern in a
+damaged field is where damage LANDED, not where it came from.
+
+THREE INSTRUMENT CONTROLS PASSED BEFORE THE NUMBER WAS READ, and the
+second caught a real defect on the first attempt:
+
+* IC face map re-derived: 3.685e-14 against a 1e-12 floor;
+* the script's OWN full-step w residual: 6.6116e-04, i.e. exactly the
+  established figure, so it is running the configuration under
+  investigation. Its first version read 1.0071e+00 -- it had dropped
+  the face map's dihedral and was comparing differently-oriented faces
+  -- and the control stopped the run rather than letting a pre-remap
+  number out. It RAISES now rather than printing;
+* the oracle's own pre-remap-vs-restart difference: 4.7e-09 to 6.3e-08
+  per tile, non-zero, so the dump is genuinely between dyn_core and the
+  remap rather than the restart wearing a different name.
+
+THE INSTRUMENTED ORACLE (`build_nh_wdump_oracle.sbatch`): the pinned
+tree copied (never patched in place -- it is chmod a-w), a
+w/pt/delp/delz dump added between `dyn_core` and
+`Lagrangian_to_Eulerian`, built WITHOUT `-DSW_DYNAMICS`. That define is
+why `dyncore_dump2d` could not answer this: under it `fv_dynamics` sets
+`akap = 1` and excludes the whole 3-D block.
+
+The port side comes from `fv_dynamics_step(..., return_pre_remap=True)`
+-- by RETURN (C6), not a probe re-running the acoustic chain, which
+would have been a second implementation of the thing under test.
+
 ## The NumPy lane's NH gap is LOCALISED (2026-08-19) — and it is small
 
 The 6.6116e-04 headline was a tiny-signal RELATIVE reading: the
