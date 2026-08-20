@@ -69,6 +69,42 @@ actual state difference.  The BARO-vs-BARO pairing is still printed because it
 was pre-registered, but it is labelled CONTAMINATED and no attribution is drawn
 from it.
 
+M2 PRE-REGISTRATION (#1455 decisive measurement, written BEFORE arm B ran)
+==========================================================================
+THE TEST.  Does the barotropic substep-averaging convention own the SHAPE of
+the transient gap vs NEMO, not just 18% of its 90-day mean?  ONE variable:
+``barotropic_reconcile_target``, the two recorded 90-day arms of commit
+55de03e71.  NEMO's side is the SAME run in both, so the whole difference
+between the two gap curves is legoESM's.
+
+HARNESS SELF-CHECK, run first and PASSED (precision-gate rule (a)): the base
+arm through this table reproduces the recorded fingerprint to the last printed
+digit -- -0.523, +1.638, +1.390, +0.850, +0.388, +0.470, +0.255, +0.457,
+-0.036 m3/s2 per u-row, mean +0.543, sd 0.633, RANGE 2.161, peak in the 10-20 d
+window.  NOTE THE SIGN: this table's ``diff`` column is NEMO MINUS legoESM.
+The same nine numbers have been quoted elsewhere in this campaign as a
+"lego-minus-NEMO" curve; that label is inverted, the numbers are these.
+
+NUMBER PRODUCED, per arm: the nine-window gap curve and its RANGE
+(max - min), which is what "loses the peak" means quantitatively.  A pure
+level shift moves the mean and leaves the range alone.
+
+CONFIRMS the convention owns the transient: the velocity_avg arm's range falls
+to <= 1.1 (a >= 50% loss of the rise-and-fall), i.e. the early peak flattens
+rather than the whole curve sliding down.
+
+REFUTES it: the velocity_avg arm keeps the same rise-and-fall -- range within
+noise of 2.161 -- and differs from the base arm by a roughly constant offset
+of order the known 90-day mean shift (+0.886 -> +0.996, i.e. about -0.11 on
+this sign convention).
+
+NOISE, stated honestly because n = 1 per arm.  There is no ensemble; the scale
+comes from the two flanking near-zero windows of the base curve, 0-10 d
+(-0.523) and 80-90 d (-0.036), whose spread 0.487 bounds window-to-window
+variability not attributable to the mean deficit.  So +-0.49 on any single
+window, and about +-0.69 on the RANGE, which is a difference of two windows.
+A range change smaller than 0.69 is not a result.
+
 CONTROLS, each of which CAN fail (``--controls``):
   C0   BIT-IDENTITY: instrumented vs certified binary, 4 steps, every shared
        variable of every tile.
@@ -189,7 +225,23 @@ LEGO_ZDF_BT_PLUS_BC = (+0.339 + 2.098, +0.319 + 2.118, +0.324 + 2.101)
 PRIOR_DEFICIT = {"off/transport_avg": 0.61, "off/velocity_avg": 0.50}
 
 
-def load_lego(npz_path):
+PUBLISHED_ARMS = {
+    # The three arms of commit 55de03e71's stage table, band means [m3/s2 per
+    # u-row].  ``transport_avg`` is the CARD's own resolved default; the gate
+    # used to hard-code it alone, which made the second arm unloadable and so
+    # made the M2 shape test unrunnable.  Every entry here is the published
+    # number, and each is reproduced by its npz to <=1e-3 (measured before this
+    # table was written -- an allow-list reason string is a claim).
+    "transport_avg": {"BARO solve": 0.578, "BCLIN expl+diss": -2.129,
+                      "ZDF bt": 0.339, "ZDF bc": 2.098, "POST fixer": 0.0},
+    "velocity_avg": {"BARO solve": 0.707, "BCLIN expl+diss": -2.148,
+                     "ZDF bt": 0.319, "ZDF bc": 2.118, "POST fixer": 0.0},
+    "true_T_depth": {"BARO solve": 0.368, "BCLIN expl+diss": -2.130,
+                     "ZDF bt": 0.324, "ZDF bc": 2.101, "POST fixer": 0.0},
+}
+
+
+def load_lego(npz_path, arm="transport_avg"):
     """legoESM's OWN per-row arrays, from ``southern_term_torque_accum.py
     --out-npz``.  Until this existed the comparison ran against three
     transcribed band-mean SCALARS and neither the per-row shape nor a matched
@@ -215,14 +267,16 @@ def load_lego(npz_path):
         raise SystemExit(f"FATAL: {npz_path} is a PLANTED control run")
     stg = [str(x) for x in z["stages"]]
     acc = np.asarray(z["acc_stage"], np.float64)          # (n_int, n_stage, ny)
-    published = {"BARO solve": 0.578, "BCLIN expl+diss": -2.129,
-                 "ZDF bt": 0.339, "ZDF bc": 2.098, "POST fixer": 0.0}
+    if arm not in PUBLISHED_ARMS:
+        raise SystemExit(f"unknown --lego-arm {arm!r}: must be one of "
+                         f"{tuple(PUBLISHED_ARMS)}")
+    published = PUBLISHED_ARMS[arm]
     for k, want in published.items():
         got = float(acc[:, stg.index(k), ROWS].mean())
         if abs(got - want) > 1e-3:
             raise SystemExit(f"FATAL: {npz_path} stage {k!r} is {got:+.4f}, but commit "
-                             f"55de03e71 published {want:+.3f}.  This is not the arm the "
-                             "comparison is defined against.")
+                             f"55de03e71 published {want:+.3f} for arm {arm!r}.  This is "
+                             "not the arm the comparison was asked for.")
     Rs = np.asarray(z["R_series"], np.float64)            # (n_int+1, ny), m3/s
     return {
         "per_interval": acc.sum(axis=1),                  # (n_int, ny) realized rate
@@ -698,7 +752,7 @@ def controls():
 
 
 # ---------------------------------------------------------------------- table --
-def table(lego_npz=None):
+def table(lego_npz=None, arm="transport_avg", out_npz=None):
     kt0 = B.G.KT_RESTART
     kts = [kt0 + day * B.G.STEPS_PER_DAY for day in range(10, DAYS_90 + 1, 10)]
     dumps = {}
@@ -717,7 +771,9 @@ def table(lego_npz=None):
     if full["rn_acc_plant"] != 0.0:
         raise SystemExit("FATAL: the 90-day run was PLANTED")
     rows = stage_rows(full)
-    lego = load_lego(lego_npz) if lego_npz else None
+    lego = load_lego(lego_npz, arm) if lego_npz else None
+    if lego is not None:
+        print(f"[protocol] legoESM arm = {arm!r}  npz = {lego_npz}")
 
     print("=" * 104)
     print(f"T0  THE THREE IDENTITIES that collapse NEMO's step to ONE row"
@@ -815,6 +871,7 @@ def table(lego_npz=None):
     print(f"{'interval [d]':>14s}{'NEMO':>10s}{'legoESM':>10s}{'diff':>10s}"
           f"{'NEMO ZDF (discarded)':>22s}")
     diffs = []
+    nemo_w, lego_w = [], []
     prev = None
     for i, kt in enumerate(kts):
         d = dumps[kt]
@@ -823,9 +880,21 @@ def table(lego_npz=None):
         nm = float(np.mean(seg["realized"][ROWS]))
         lg = float(np.mean(lego["per_interval"][i][ROWS]))
         diffs.append(nm - lg)
+        nemo_w.append(nm)
+        lego_w.append(lg)
         print(f"{(i * 10):>6d}-{(i + 1) * 10:<7d}{nm:+10.3f}{lg:+10.3f}{nm - lg:+10.3f}"
               f"{float(np.mean(seg['ZDF_recovered'][ROWS])):+22.3f}")
     a = np.array(diffs)
+    if out_npz:
+        # M2 needs the two curves as ARRAYS: the per-window comparison is made
+        # BETWEEN arms, and a printed table cannot be differenced.  Sign
+        # convention is stamped in the file so it cannot be mis-read later.
+        np.savez_compressed(
+            out_npz, nemo_per_window=np.array(nemo_w), lego_per_window=np.array(lego_w),
+            diff_nemo_minus_lego=a, interval_days=10, arm=np.array(arm),
+            nemo_band_mean=nemo, lego_band_mean=l_drift,
+            sign=np.array("diff = NEMO - legoESM"))
+        print(f"    [artifact] -> {out_npz}")
     npos = int((a > 0).sum())
     print(f"{'mean+-sd':>14s}{'':>10s}{'':>10s}{a.mean():+10.3f}"
           f"   sd {a.std():.3f}, range {a.max() - a.min():.3f}, {npos}/{len(a)} positive")
@@ -853,6 +922,15 @@ def main(argv=None):
                          "--out-npz (base arm, 90 days, 10-day intervals).  WITHOUT it "
                          "the comparison falls back to three transcribed band-mean "
                          "scalars and the per-row and matched-window tests are skipped.")
+    ap.add_argument("--lego-arm", default="transport_avg",
+                    choices=sorted(PUBLISHED_ARMS),
+                    help="which arm of commit 55de03e71's stage table --lego-npz is "
+                         "expected to be; the self-check gates against that arm's "
+                         "published band means.  Default transport_avg = the CARD's "
+                         "own resolved barotropic_reconcile_target.")
+    ap.add_argument("--out-npz", default=None,
+                    help="save the matched-window NEMO and legoESM curves + their "
+                         "difference (sign stamped in the file) for cross-arm analysis.")
     a = ap.parse_args(argv)
     if not (a.selftest or a.controls or a.table):
         ap.error("nothing to do: pass --selftest, --controls and/or --table")
@@ -864,7 +942,7 @@ def main(argv=None):
     if a.controls:
         controls()
     if a.table:
-        table(a.lego_npz)
+        table(a.lego_npz, a.lego_arm, a.out_npz)
 
 
 if __name__ == "__main__":
