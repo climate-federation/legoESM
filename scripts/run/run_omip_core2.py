@@ -7301,7 +7301,11 @@ def main() -> int:
                                               if getattr(grid, "lat_T", None)
                                               is not None else grid.lat))
                 if _latb.shape == _wb.shape:
-                    _wgt = np.cos(np.deg2rad(_latb)) * _wb
+                    # TRUE cell area, not cos(lat): on the eORCA1 tripole the
+                    # two differ by 0.00-1.72x per cell south of 45S, which
+                    # inflated the first Antarctic ice number by ~45%. _Ab is
+                    # the same area the global Sv total above already uses.
+                    _wgt = _Ab * _wb
                     print(f"[fwbudget-bands] day={step * dt / 86400.0:.2f} "
                           "1e-6 kg/m2/s, + = into ocean (evap +up):",
                           flush=True)

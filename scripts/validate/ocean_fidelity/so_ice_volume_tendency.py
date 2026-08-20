@@ -29,7 +29,13 @@ from pathlib import Path
 
 import numpy as np
 
-_RHO_ICE_TO_FW = 1000.0 / 86400.0  # m of ice per day -> kg/m2/s of freshwater
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "core"))
+from legoesm import constants  # noqa: E402
+
+# m of ice per day -> kg/m2/s of freshwater. The model's ice freshwater flux
+# uses rho_ice, NOT the density of fresh water: using 1000 here overstated the
+# flux by 9%.
+_ICE_TO_FW = constants.rho_ice / 86400.0
 
 
 def band_ice_volume(snapshot: Path, area: np.ndarray, lat_max: float) -> float:
@@ -87,12 +93,15 @@ def main() -> int:
             break
         vol = band_ice_volume(snap, area, a.lat_max)
         if prev is not None:
-            print(f"   d{i}  {-(vol - prev) * _RHO_ICE_TO_FW * 1e6:7.1f}")
+            print(f"   d{i}  {-(vol - prev) * _ICE_TO_FW * 1e6:7.1f}")
         prev = vol
     if prev is None:
         raise SystemExit(f"no snapshots found in {a.run_dir}")
-    print("\nNEMO runoff+ice residual south of 45S: 16.67e-6 (our ice term "
-          "alone must be under it, since NEMO's bundles runoff)")
+    print("\nNEMO runoff+ice residual south of 45S, recs 5:6, ON TRUE AREA: "
+          "11.85e-6 (empmr - emp_oce). Our ice term alone must come in UNDER "
+          "it, since NEMO's bundles runoff with the ice exchange.\n"
+          "The 16.67e-6 quoted before 2026-08-20 was the same residual "
+          "weighted by cos(lat) and is 41% too large.")
     return 0
 
 

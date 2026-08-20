@@ -27,9 +27,15 @@ per-term split, so a deficit can be attributed to precipitation, evaporation,
 runoff or ice melt rather than to "the freshwater forcing".
 
 SIGN, stated once: this probe reports everything as POSITIVE = freshwater
-INTO the ocean.  NEMO's ``empmr`` long_name is water_flux_into_sea_water, so
-it is used as-is; ours is ``precip - evap + runoff + ice_fw`` because
+INTO the ocean.  NEMO's ``empmr`` long_name (water_flux_into_sea_water) is
+MISLEADING -- the measured convention is E-P, positive = water OUT -- so both
+NEMO terms are negated; ours is ``precip - evap + runoff + ice_fw`` because
 ``evap`` is positive UP in FreshwaterForcing.
+
+AREA: every band mean uses TRUE cell area ``e1t*e2t``, on both sides.  A
+cos(lat) weight is wrong on this curvilinear mesh by 0.00-1.72x per cell
+south of 45S, which is a 41% error in NEMO's own runoff+ice residual
+(16.67e-6 under cos(lat) against 11.85e-6 on true area).
 
 CAVEAT that bounds every number: NEMO's is a 5-day mean, ours is rebuilt at
 one instant of the matched window.  A 10-20% difference is inside that
@@ -54,6 +60,41 @@ BANDS = {
 }
 
 
+def _mesh_area(mesh_path):
+    """True T-cell area e1t*e2t and its latitudes, from the mesh mask."""
+    import netCDF4 as nc
+    d = nc.Dataset(mesh_path)
+    try:
+        area = (np.squeeze(d["e1t"][:]) * np.squeeze(d["e2t"][:])).astype(np.float64)
+        lat = np.squeeze(d["gphit"][:]).astype(np.float64)
+    finally:
+        d.close()
+    return area, lat
+
+
+def _nemo_cell_area(mesh_path, lat_n):
+    """Cell area on NEMO's OUTPUT grid, aligned by matching latitudes.
+
+    NEMO's XIOS output drops the halo, so the SBC file is (331, 360) where the
+    eORCA1.2 mesh mask is (332, 362) -- and ``nav_lat`` carries -1 fill in the
+    fully-masked southern rows, so a naive comparison of the two latitude
+    fields disagrees by 84 degrees and hides the offset. The alignment is found
+    on VALID cells only and must be exact; anything else is refused rather than
+    silently mis-weighted.
+    """
+    area, lat_m = _mesh_area(mesh_path)
+    ny, nx = lat_n.shape
+    valid = np.isfinite(lat_n) & (lat_n != -1.0)
+    for j0 in range(lat_m.shape[0] - ny + 1):
+        for i0 in range(lat_m.shape[1] - nx + 1):
+            if np.abs(lat_m[j0:j0 + ny, i0:i0 + nx] - lat_n)[valid].max() == 0.0:
+                return area[j0:j0 + ny, i0:i0 + nx]
+    raise SystemExit(
+        f"cannot align NEMO output grid {lat_n.shape} to mesh {lat_m.shape}: "
+        "no offset reproduces the output latitudes exactly. Refusing to "
+        "area-weight with a guessed alignment.")
+
+
 def _band_means(field, lat, wgt, label, scale=1.0):
     out = {}
     for bn, (lo, hi) in BANDS.items():
@@ -70,6 +111,10 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nemo-sbc", required=True,
                     help="5-day SBC file carrying empmr (RUN_GATEWAY).")
+    ap.add_argument("--mesh", default="data/grids/eORCA1.2_mesh_mask.nc",
+                    help="mesh-mask supplying TRUE cell area (e1t*e2t). "
+                         "cos(lat) is NOT an area proxy on the tripole: the "
+                         "two differ by 0.00-1.72x per cell south of 45S.")
     ap.add_argument("--nemo-recs", default="5:6",
                     help="record slice, matched to the snapshot's days.")
     ap.add_argument("--snapshot", default=None,
@@ -100,7 +145,7 @@ def main() -> int:
         raise SystemExit(f"--nemo-recs {a.nemo_recs} selects no records")
     emp = np.nanmean(emp_raw[lo:hi], axis=0)
     empoce = np.nanmean(empoce_raw[lo:hi], axis=0)
-    wgt_n = np.cos(np.deg2rad(lat_n)) * np.isfinite(emp)
+    wgt_n = _nemo_cell_area(a.mesh, lat_n) * np.isfinite(emp)
 
     # SIGN CONTROL, run every time: the subtropics must be evaporative in
     # NEMO's own storage convention (E-P > 0). If this ever fails the file's
@@ -172,7 +217,12 @@ def main() -> int:
     )
     precip = np.asarray(forc["precip"], dtype=np.float64)
     evap = np.asarray(evap, dtype=np.float64)           # +up
-    wgt_o = np.cos(np.deg2rad(lat_o)) * (mask > 0.5)
+    area_o, lat_mesh = _mesh_area(a.mesh)
+    if area_o.shape != lat_o.shape:
+        raise SystemExit(
+            f"mesh area {area_o.shape} does not match the snapshot grid "
+            f"{lat_o.shape} -- wrong --mesh for this run")
+    wgt_o = area_o * (mask > 0.5)
 
     terms = {"precip": precip, "evap(+up)": evap, "P-E": precip - evap}
     print("\nOURS, per term, 1e-6 kg/m2/s (+ = into ocean; evap printed +up):")
