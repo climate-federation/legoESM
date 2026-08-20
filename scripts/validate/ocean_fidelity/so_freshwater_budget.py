@@ -224,7 +224,20 @@ def main() -> int:
             f"{lat_o.shape} -- wrong --mesh for this run")
     wgt_o = area_o * (mask > 0.5)
 
-    terms = {"precip": precip, "evap(+up)": evap, "P-E": precip - evap}
+    # The model does NOT apply the full-cell P-E to the ocean:
+    # blend_ice_ocean_forcing scales evap (and, on the snow-reservoir ice path
+    # the production card runs, precip) by the open-water fraction 1-A, with
+    # the ice-fraction share carried in ice_fw instead. Comparing a full-cell
+    # P-E against NEMO's emp_oce therefore compares an unscaled quantity to a
+    # scaled one, which codex flagged (job 9442707). A is archived in the
+    # snapshot, so both are reported and the reader sees the bound: the
+    # correction is small where the band is mostly open water and large where
+    # it is not (measured 2026-08-20 at day 5: Antarctic A=0.073, so 7%;
+    # Arctic A=0.348, so 35% -- big enough to change an Arctic conclusion).
+    conc = np.asarray(z["ice_concentration"], dtype=np.float64)
+    f_open = 1.0 - conc
+    terms = {"precip": precip, "evap(+up)": evap, "P-E": precip - evap,
+             "f_open*(P-E)": f_open * (precip - evap)}
     print("\nOURS, per term, 1e-6 kg/m2/s (+ = into ocean; evap printed +up):")
     hdr = f"  {'band':22s}" + "".join(f"{k:>13s}" for k in terms)
     print(hdr)
@@ -235,13 +248,18 @@ def main() -> int:
             line += f"{1e6 * rows[k][bn]:13.2f}"
         print(line)
 
-    print("\nLIKE-FOR-LIKE: our P-E vs NEMO's OPEN-OCEAN E-P (emp_oce). Both "
-          "exclude runoff and the ice exchange, so this line alone tests the "
-          "bulk/precip channel:")
+    print("\nLIKE-FOR-LIKE: our OPEN-WATER-SCALED f_open*(P-E) vs NEMO's "
+          "open-ocean E-P (emp_oce). Both exclude runoff and the ice "
+          "exchange, and both are per unit TOTAL cell area, so this line "
+          "alone tests the bulk/precip channel. The unscaled full-cell P-E "
+          "is shown beside it because it is what the model would apply if "
+          "the ice partition were absent -- the gap between the two columns "
+          "is the size of the partition, not a model error:")
     for bn in BANDS:
-        o, n = rows["P-E"][bn], nemo_oce[bn]
+        o, n = rows["f_open*(P-E)"][bn], nemo_oce[bn]
         print(f"  {bn:22s} ours {1e6 * o:+9.2f}  NEMO {1e6 * n:+9.2f}  "
-              f"diff {1e6 * (o - n):+9.2f}")
+              f"diff {1e6 * (o - n):+9.2f}   (full-cell P-E "
+              f"{1e6 * rows['P-E'][bn]:+9.2f})")
     print("\nWHAT THE OTHER CHANNELS OWE: NEMO's runoff+ice contribution is "
           "the residual above; ours is NOT measured here (it is applied "
           "in-model via FreshwaterForcing.runoff/ice_fw), so this is the "
