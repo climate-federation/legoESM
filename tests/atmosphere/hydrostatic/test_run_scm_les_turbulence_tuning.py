@@ -108,8 +108,10 @@ def test_dycoms_is_matched_by_simple_lw_rather_than_refused():
     config would put a radiation confound back without the refusal to catch it.
     """
     assert drv._RADIATION_MISMATCH == {}
-    assert {"dycoms", "astex"} <= drv._SIMPLE_LW_CASES
-    for case in ("dycoms", "astex"):
+    # RF02's prm sets doradsimple too, so it joins its RF01 sibling here; if it
+    # did not, its SCM arm would run a different longwave from its LES.
+    assert {"dycoms", "rf02", "astex"} <= drv._SIMPLE_LW_CASES
+    for case in ("dycoms", "rf02", "astex"):
         cfg = drv.build_physics_config(
             "louis", prescribed_fluxes=True, simple_lw=True)
         assert cfg.radiation.scheme == "simple_lw", (
@@ -1219,3 +1221,84 @@ def test_stale_momentum_really_can_point_uphill():
     updates_fresh, _ = opt.update(g_now, opt.init(params), params)
     assert float(jnp.sum(g_now * updates_fresh)) < 0.0, (
         "a freshly initialised optimizer must descend on the current gradient")
+
+
+# --- DYCOMS-II RF02 SCM arm -------------------------------------------------
+
+def _rf02_available() -> bool:
+    try:
+        from legoesm.atmosphere.forcing.scm.sam_case_scm import (
+            SAM_SCM_CASES, resolve_sam_case_dir,
+        )
+        return Path(
+            resolve_sam_case_dir(SAM_SCM_CASES["rf02"].gsam_dir)).is_dir()
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_is_a_selectable_case_with_a_running_column():
+    """The new case must reach the tuner's own entry points, not just the
+    registry: a case that loads but cannot be integrated is not a case."""
+    jax.config.update("jax_enable_x64", True)
+    import numpy as _np
+
+    assert "rf02" in drv.ALL_CASES
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    assert case.name == "rf02"
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True)
+    assert cfg.radiation.scheme == "simple_lw"
+    hours = 5 * 30.0 / 3600.0                      # exactly 5 steps
+    means, ps_hist = drv._rollout_means(
+        None, base_cfg=cfg, case=case, dt=30.0, hours=hours,
+        analysis_hours=hours, chunk_steps=4,
+    )
+    assert ps_hist.shape == (5,)
+    for name in ("T", "qv", "u", "v"):
+        arr = _np.asarray(means[name])
+        assert arr.shape == (16,), (name, arr.shape)
+        assert _np.all(_np.isfinite(arr)), name
+    drv._assert_surface_pressure_static(ps_hist, case.p_s)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_scm_arm_takes_the_deck_prescribed_fluxes():
+    """RF02's deck fixes SHF/LHF (SFC_FLX_FXD), so the SCM must not also run a
+    bulk heat exchange on top of them."""
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    fluxes = drv.deck_surface_scalar_fluxes(case)
+    assert fluxes is not None
+    assert case.forcing.prescribe == "fluxes"
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_simple_lw_sees_no_cloud_on_the_scm_side_without_microphysics():
+    """The shared longwave KERNEL is not a shared cloud-top cooling.
+
+    `_SIMPLE_LW_CASES` used to be commented "cloud-top radiative cooling is
+    present on both sides". At the default `--microphysics none` the SCM cannot
+    condense, so its column carries q_v and nothing else; the Stevens (2005)
+    kernel's optical depth is an integral of LIQUID, so it collapses to the
+    clear-sky term while the LES runs Morrison and holds real liquid. Pinned
+    because it is the kind of claim that is quietly false for years.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    case = drv.load_case("rf02", nlev=32, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="none")
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    carry = (scm.state, scm.phys_state)
+    for k in range(5):
+        carry, _ = step(carry, jnp.asarray(k))
+    state, _ = carry
+    assert set(state.tracers) == {"q_v"}, (
+        "a condensate tracer appeared; the shared-longwave caveat needs "
+        f"revisiting. tracers={sorted(state.tracers)}")

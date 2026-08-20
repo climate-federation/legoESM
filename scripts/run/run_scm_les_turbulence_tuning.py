@@ -108,10 +108,19 @@ TURBULENCE_SCHEMES: tuple[str, ...] = (
 # forcing the SCM cannot reproduce must be refused the same way, not scored.
 _RADIATION_MISMATCH: dict[str, str] = {}
 
-# Cases whose LES is driven by the gSAM `doradsimple` longwave. The SCM arm
-# selects the SAME kernel, so cloud-top radiative cooling is present on both
-# sides. Both decks set `dolongwave = .true., doradsimple = .true.`.
-_SIMPLE_LW_CASES = frozenset({"dycoms", "astex"})
+# Cases whose LES is driven by the gSAM `doradsimple` longwave, so the SCM arm
+# selects the SAME kernel. All three decks set `dolongwave = .true.,
+# doradsimple = .true.`.
+#
+# The KERNEL is shared; its CLOUD term is not, at the default
+# `--microphysics none`. With no condensation the SCM column carries only q_v
+# (measured: the state's tracer dict holds q_v alone), so the kernel sees zero
+# liquid and reduces to its clear-sky term, while the LES has ~0.7 g/kg of
+# liquid and the full cloud-top cooling. This comment previously claimed
+# cloud-top cooling was "present on both sides", which it is not. The
+# difference is identical across the closures being compared, so the ranking
+# stands; it is listed in `known_scm_les_differences` in the output manifest.
+_SIMPLE_LW_CASES = frozenset({"dycoms", "rf02", "astex"})
 
 ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
     sorted(ANALYTIC_SCM_CASES))
