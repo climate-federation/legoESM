@@ -918,11 +918,43 @@ twin-port limit no longer bites here: a SYMMETRIC edit to both lanes
 would still pass parity, but it now has to pass four Fortran
 comparisons too.
 
-`consv_te` remains refused and is not planned: ~119 lines
-(`fv_mapz.F90:628-747`) plus an area-weighted `g_sum(..., reproduce =
-.true.)` across all six faces, with no deck that resolves it non-zero
-and therefore no oracle. Porting it would trade a loud refusal for
-never-executed numerics -- this campaign's most expensive defect class.
+### RETRACTED: "consv_te has no oracle, so it is not planned"
+
+I wrote that the energy fixer could not be certified because no deck
+resolves `consv_te` non-zero. That was true of the SHIPPED decks and
+FALSE as a statement about what is possible -- deck generation is a
+tested tool now, and the same one-flag machinery that produced the NH
+moist oracle produces this one.
+
+`build_consv_te_oracle.sbatch` (job 9446170): the certified hydrostatic
+deck with `consv_te` `0.0 -> 1.0`, sole edit, asserted. Both arms ran
+rc=0, GFS constants, `consv_te = 1.0` resolved. THE FIXER ENGAGED, and
+the check is a state diff rather than a log line (no `E_Flux` is
+printed on this deck):
+
+    T   max|consv - dry| = 4.220916e-06 K   (rel 1.375e-08)
+    u                    = 0.0  exactly
+    v                    = 0.0  exactly
+    zerostep T           = 0.0  exactly
+
+`u`/`v` unchanged is the right signature -- the fixer touches only `pt`
+(`fv_mapz.F90:975`) -- and the zerostep deck being identical confirms it
+is `last_step`-only. The signal sits ~12x above the hydrostatic gate
+floor of 1.1866e-09, so a residual gate can just see it and a RESPONSE
+gate (consv on minus off, as the moist arm uses) sees it comfortably.
+
+WHAT THE PORT ACTUALLY COSTS, which is more than the line count. The
+fixer is ~119 lines (`fv_mapz.F90:628-747`) plus `compute_total_energy`
+for `te0_2d` (`:1087-1215`, called at `fv_dynamics.F90:359-378`), but
+the structural cost is the reduction: `g_sum` is GLOBAL over all six
+faces while this lane calls `lagrangian_to_eulerian` PER FACE, so
+`dtmp` cannot be known inside a single face's call. Porting it means
+splitting the remap at its own `if (last_step)` boundary into
+compute-te / reduce / apply, in a module currently certified at
+1.1866e-09. The `consv = 0` path must stay bit-identical.
+
+Grid inputs are all present in the port's ext bundle: `area`, `rsin2`,
+`cosa_s`.
 
 ## What the oracle's own flags settle
 
