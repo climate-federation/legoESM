@@ -37,7 +37,32 @@ logger = logging.getLogger(__name__)
 
 
 def _cache_dir() -> Path:
-    return _jra_cache_dir().parent / "core2_nyf"
+    """Default CORE-II NYF cache.
+
+    ``core2_nyf_mod`` is built from the Large & Yeager bias-corrected fields
+    (U_10_MOD, V_10_MOD, T_10_MOD, Q_10_MOD, SWDN_MOD, LWDN_MOD, PRC_MOD) --
+    the ones NEMO ORCA1's namelist reads.  The older ``core2_nyf`` was built
+    from the RAW fields, whose equatorial winds are 33% weaker (the known
+    NCEP-1 trade-wind bias the _MOD correction exists to remove); forcing with
+    them gave roughly half NEMO's equatorial wind stress and a +2.5 C nino3
+    bias that fell to +1.49 C on the corrected forcing at matched day 20.
+
+    The raw cache is deliberately left on disk rather than overwritten, so an
+    older run can still be reproduced by passing ``cache_dir`` explicitly.
+    """
+    root = _jra_cache_dir().parent
+    corrected = root / "core2_nyf_mod"
+    if corrected.exists():
+        return corrected
+    # Fall back to the raw cache only if the corrected one was never built,
+    # and say so -- silently forcing with 33%-weak equatorial winds is the
+    # defect this default exists to prevent.
+    logger.warning(
+        "CORE-II cache %s not found; falling back to the RAW-wind cache at "
+        "%s. Its equatorial winds are ~33%% weaker than the fields NEMO "
+        "reads. Rebuild with scripts/data/build_core2_nyf_zarr.py "
+        "--wind-variant mod.", corrected, root / "core2_nyf")
+    return root / "core2_nyf"
 
 
 def load_core2_nyf(*, cache_dir: Optional[Path] = None,
