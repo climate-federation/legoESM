@@ -1346,3 +1346,89 @@ tendency halo, measured; then a `do_Held_Suarez = .true.` deck for an
 end-to-end one-step parity; then the driver wiring, which is where the physics
 refusal in `component_factory.py` finally narrows. The JAX twin follows the
 NumPy authority, as everywhere else in this port.
+
+---
+
+## Session 2026-08-21 — the per-sub-step instrument, and slice 2's first step
+
+### The NH gap: reading it at every acoustic sub-step
+
+The gap was already localised to the acoustic loop and to `w` alone. That loop
+runs eight sub-steps, and a single end-of-loop reading cannot say whether the
+error arrives at once or accumulates, so both sides now report every sub-step.
+
+* **Oracle**: `scripts/cluster/fv3_native/build_nh_wsubstep_oracle.sbatch` — a
+  second instrumented build that patches `dyn_core.F90` to dump `w`/`pt`/`delp`
+  at the end of every sub-step AND keeps the previous instrument's pre-remap
+  dump. Both capture points in ONE binary is what makes the cross-check free.
+* **Port**: `fv_dynamics_step(..., return_substeps=True)` — one deep copy of the
+  six-face bundle per sub-step, by RETURN, the same contract `return_pre_remap`
+  already states. `acoustic_loop_3d` gains `substeps_out`, the per-sub-step twin
+  of `press_out`.
+* **Probe**: `scripts/validate/fv3_native/nh_substep_w_parity.py`, seven
+  controls, no verdict printed.
+
+**BOTH REVIEWERS SAID THE SAME THING FIRST, AND THEY WERE RIGHT** (codex job
+9450542 BLOCKER, GLM job 9450546 M1/M4): an end-of-sub-step series CANNOT
+separate "one stage is wrong" from "a coefficient is wrong". A stage that runs
+every sub-step injects a similar signed error each time and produces the same
+ramp a wrong coefficient would; a coefficient error can excite a mode that is
+nearly full-size after one sub-step. The probe no longer suggests otherwise.
+What it reports instead is what the data supports: the worst cell's face and
+indices, the SIGNED error there, and the final worst cell's error traced
+backwards through every sub-step — because a maximum over cells is free to move
+between sub-steps and then describes no single error's history. **The
+stage-versus-coefficient question needs captures BETWEEN the stages of one
+sub-step**, which is now the named next cut rather than something this
+instrument was pretending to answer.
+
+**The sharpest single finding was GLM's M2**, and it closed a real hole: every
+control ran through the established `derive_face_map`/`apply_map` machinery,
+while the series is read through a hand-rolled window and dihedral chain that
+nothing exercised. A wrong dihedral on one face or a halo off-by-one produces
+gradient-scale garbage that all five original controls accept. Control 7 now
+requires the last sub-step to reproduce the pre-remap instrument's established
+`1.3003e-07` within a factor of two, which authenticates both capture points and
+the mapping at once.
+
+**One reviewer request was DECLINED, in writing.** Codex asked for a no-dump
+control binary, on the grounds that a call inside the hot loop changes what the
+optimizer may do. The deck runs ONE step, so the restart is a deterministic
+function of everything all eight sub-steps did, and control 3 now demands that
+restart be bitwise the certified one on every prognostic with no tolerance — a
+perturbation big enough to move a sub-step would have to cancel to the last bit
+by the end of the same step to hide from it. The build script says to build the
+control binary if this is ever pointed at a multi-step deck, or if control 3 is
+ever relaxed to a tolerance.
+
+Verified in the pinned source while checking control 4's premise, and worth
+keeping: nothing between the loop's end and `dyn_core`'s return writes `w`, but
+`pt` CAN be written there by the dissipative heating block (`:1769, :1774,
+:1796`) when `d_con > 1e-5`. The pinned deck sets `d_con = 0.0`, so the
+`pt` series is clean on THIS deck — the general statement is a `w` statement.
+
+### Slice 2, first step
+
+Per the disposition above, MPI stays refused and physics coupling is the work.
+The first step is done and the second is not:
+
+* the halo-exchange oracle now dumps `vlon`, `vlat`, `es` and `ew` from its own
+  runtime gridstruct — the four quantities `update_dwinds_phys` multiplies by,
+  none of which the port has ever carried;
+* `compute_fv3_native_wind_vectors` builds them, reusing the already-ported
+  `get_unit_vect2` (the edge tangent turns out to be exactly that expression);
+* `tests/grids/test_fv3_wind_vectors.py` pins their geometry — orthonormality,
+  tangency, orientation, and the window upstream leaves unwritten, which comes
+  back NaN rather than a plausible zero.
+
+**NOT DONE, and it is the next thing**: comparing those against the dumped
+oracle fields. Invariants are not a parity certificate. The comparison needs the
+face-map machinery in `compare_gs_metrics.py` extended to Cartesian 3-vector
+families — note that these components live in a frame independent of the panel,
+so the face map applies to the INDEXING only and carries no dihedral sign, while
+the `es`/`ew` pair does swap under a transposing map exactly as the `dx`/`dy`
+family does.
+
+Also fixed on the way past: the halo-exchange oracle job defaulted to a
+throwaway agent worktree, so it had been reading a tree nobody edits. It now
+defaults to the campaign worktree and prints the SHA it ran.
