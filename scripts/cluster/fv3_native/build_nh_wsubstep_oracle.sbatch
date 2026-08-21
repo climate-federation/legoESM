@@ -26,6 +26,19 @@
 # BITWISE -- and if it does not, one of the two dumps is not where it
 # says it is, with no build drift available as an excuse.
 #
+# A REVIEWER ASKED FOR A NO-DUMP CONTROL BINARY (codex MAJOR, job
+# 9450542): the worry is that inserting a call in the hot loop changes
+# what the optimizer may do, so the eight readings would describe the
+# instrumented program rather than the pinned one. DECLINED, with the
+# reason, rather than silently: this deck runs ONE step, so the restart
+# is a deterministic function of everything all eight sub-steps did, and
+# the probe's control 3 now requires that restart to be BITWISE the
+# certified one on EVERY prognostic. Any perturbation large enough to
+# move a sub-step would have to cancel to the last bit by the end of the
+# same step to hide from that, which floating-point arithmetic does not
+# do. If this instrument is ever pointed at a multi-step deck, or if
+# control 3 is ever relaxed to a tolerance, build the control binary.
+#
 # WHY A NEW BUILD. dyncore_dump2d exists only in fv3_recon/duo_model,
 # which is compiled -DSW_DYNAMICS: under that define fv_dynamics sets
 # akap = 1 and excludes the whole 3-D block, so it cannot produce a 3-D
@@ -58,7 +71,8 @@ import re, sys
 p = sys.argv[1]
 s = open(p).read()
 anchor = "                                           call timing_off('DYN_CORE')"
-assert s.count(anchor) == 1, f"anchor count {s.count(anchor)}"
+if s.count(anchor) != 1:
+    raise SystemExit(f"anchor count {s.count(anchor)}, expected 1")
 dump = anchor + """
 
 ! LEGOESM w-DUMP: the state as dyn_core leaves it, before the remap.
@@ -90,14 +104,21 @@ tail = "\nsubroutine legoesm_wdump(blk, name, arr, ilo, jlo)\n" \
        "  close (un)\n" \
        "end subroutine legoesm_wdump\n\n"
 m = list(re.finditer(r"^end module .*$", s, re.M))
-assert m, "no end module"
+if not m:
+    raise SystemExit("no end module")
 i = m[-1].start()
 s = s[:i] + tail + s[i:]
 open(p, "w").write(s)
 print("patched fv_dynamics.F90: w-dump after dyn_core")
 PYEOF
   [ $? -eq 0 ] || { echo "PATCH FAILED"; exit 8; }
-  grep -q "legoesm_wdump" $SRC/model/fv_dynamics.F90 || { echo "PATCH DID NOT LAND"; exit 8; }
+  # COUNT THE CALL SITES, not the routine. `grep -q legoesm_wdump` is
+  # satisfied by the appended writer alone, so a replace() that silently
+  # no-opped would still have reported success (codex MAJOR, job 9450542).
+  n_call=$(grep -c "call legoesm_wdump(" $SRC/model/fv_dynamics.F90)
+  n_def=$(grep -c "^subroutine legoesm_wdump(" $SRC/model/fv_dynamics.F90)
+  [ "$n_call" = "4" ] && [ "$n_def" = "1" ] || {
+    echo "PATCH DID NOT LAND: fv_dynamics calls=$n_call (want 4) defs=$n_def (want 1)"; exit 8; }
 
   # THE SECOND PATCH: dump w/pt/delp (level 1) at the END of every
   # acoustic sub-step, inside dyn_core's `do it=1,n_split` loop.
@@ -106,7 +127,8 @@ import re, sys
 p = sys.argv[1]
 s = open(p).read()
 anchor = "  enddo   ! time split loop"
-assert s.count(anchor) == 1, f"anchor count {s.count(anchor)}"
+if s.count(anchor) != 1:
+    raise SystemExit(f"anchor count {s.count(anchor)}, expected 1")
 dump = """
 ! LEGOESM SUB-STEP DUMP: the state at the end of acoustic sub-step `it`.
       if ( .not. hydrostatic ) then
@@ -135,14 +157,18 @@ tail = "\nsubroutine legoesm_sdump(it, name, arr, ilo, jlo)\n" \
        "  close (un)\n" \
        "end subroutine legoesm_sdump\n\n"
 m = list(re.finditer(r"^end module .*$", s, re.M))
-assert m, "no end module"
+if not m:
+    raise SystemExit("no end module")
 i = m[-1].start()
 s = s[:i] + tail + s[i:]
 open(p, "w").write(s)
 print("patched dyn_core.F90: per-sub-step dump")
 PYEOF2
   [ $? -eq 0 ] || { echo "DYNCORE PATCH FAILED"; exit 8; }
-  grep -q "legoesm_sdump" $SRC/model/dyn_core.F90 || { echo "DYNCORE PATCH DID NOT LAND"; exit 8; }
+  n_call=$(grep -c "call legoesm_sdump(" $SRC/model/dyn_core.F90)
+  n_def=$(grep -c "^subroutine legoesm_sdump(" $SRC/model/dyn_core.F90)
+  [ "$n_call" = "3" ] && [ "$n_def" = "1" ] || {
+    echo "DYNCORE PATCH DID NOT LAND: calls=$n_call (want 3) defs=$n_def (want 1)"; exit 8; }
 
   cd $B
   FF="-O2 -fdefault-real-8 -fdefault-double-8 -fcray-pointer -ffree-line-length-none -fno-range-check -fdec -cpp"
@@ -186,10 +212,22 @@ cp -r $PIN/run_nh_1step_gfs/INPUT $R/
 for f in input.nml diag_table field_table; do /bin/cp -f $PIN/run_nh_1step_gfs/$f $R/; done
 cd $R
 mpirun -np 6 $B/fv3_wsubstep.exe > run_out.txt 2>&1
-echo "run rc=$?"
+rc=$?
+echo "run rc=$rc"
+[ "$rc" -eq 0 ] || { tail -30 run_out.txt; echo "RUN FAILED"; exit 6; }
 grep -i "FMSConstants" logfile.000000.out | head -1
 grep -iE "^ *(HYDROSTATIC|ADIABATIC|NPZ|K_SPLIT|N_SPLIT) " logfile.000000.out | head -6
 echo "--- pre-remap dumps ---"; ls wdump_*.dat 2>/dev/null | wc -l
 echo "--- sub-step dumps ---"; ls sdump_*.dat 2>/dev/null | head -6
-echo -n "sdump count (expect n_split*3*6): "; ls sdump_*.dat 2>/dev/null | wc -l
+# ASSERT the count, do not print it for a human. A crash three sub-steps
+# in used to leave a partial set, report success, and surface only as a
+# cryptic missing-file exit inside the probe (GLM m3, job 9450546).
+NSP=$(grep -iE "^ *n_split *=" logfile.000000.out | head -1 \
+      | awk -F= '{gsub(/[^0-9]/, "", $2); print $2}')
+NW=$(ls wdump_*.dat 2>/dev/null | wc -l)
+NS=$(ls sdump_*.dat 2>/dev/null | wc -l)
+WANT_S=$((NSP * 3 * 6))
+echo "n_split=$NSP  wdump=$NW  sdump=$NS (want $WANT_S)"
+[ -n "$NSP" ] && [ "$NS" -eq "$WANT_S" ] && [ "$NW" -eq 24 ] || {
+  echo "DUMP COUNT WRONG: the run did not complete every sub-step"; exit 7; }
 echo NH_WSUBSTEP_DONE

@@ -374,3 +374,36 @@ def test_return_substeps_ends_where_return_pre_remap_starts(ctx, eta):
                             akap=AKAP, cp_air=CP, kord_mt=9, kord_tm=-9,
                             kord_tr=9, q=_tracers())
     assert "substeps" not in out2 and "pre_remap" not in out2
+
+
+def test_return_substeps_captures_the_last_outer_iteration_only(ctx, eta):
+    """``k_split`` threading, in the DEFAULT (non-slow) selection.
+
+    The end-to-end check that the capture meets the pre-remap one is slow
+    and therefore invisible to a plain ``pytest`` run, which left
+    ``return_substeps`` with no default coverage at all (codex MINOR, job
+    9450542). This is the cheap half: below the remap gate, with the outer
+    loop running twice, the returned list must hold exactly ``n_split``
+    entries -- the LAST outer iteration's, not both iterations' appended
+    together, and not the first's left behind.
+    """
+    ak, bk, ptop = eta[0], eta[1], eta[2]
+    st = _state(ak, bk, ptop, seed=7)
+    out = fv_dynamics_step(ctx, st, _press(st, ptop), bdt=60.0, km=KM,
+                           k_split=2, n_split=2, ptop=ptop, ak=ak, bk=bk,
+                           akap=AKAP, cp_air=CP, kord_mt=9, kord_tm=-9,
+                           kord_tr=9, q=_tracers(), return_substeps=True)
+    subs = out["substeps"]
+    assert len(subs) == 2, (
+        f"k_split=2 with n_split=2 returned {len(subs)} sub-steps; 4 would "
+        f"mean both outer iterations were appended, 0 that the last one "
+        f"was not")
+    assert all(len(snap) == 6 for snap in subs)
+    # The capture is from the LAST outer iteration: its final entry is the
+    # state the remap then consumed, so it must differ from the state the
+    # step returned (the remap moved delp off the acoustic solution).
+    moved = max(float(np.abs(subs[-1][t]["delp"] - st[t]["delp"]).max())
+                for t in range(6))
+    assert moved > 1e-6, (
+        f"the last sub-step snapshot is within {moved:g} Pa of the returned "
+        f"state, so it is not a pre-remap capture")

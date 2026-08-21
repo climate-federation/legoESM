@@ -334,8 +334,16 @@ def test_substeps_out_captures_one_independent_snapshot_per_substep(ctx):
                 for t in range(6))
         assert d > 0.0, f"sub-step {i + 1} and {i + 2} captured the same w"
 
-    # And nothing is captured unless asked.
+    # Asking for the capture must not CHANGE the answer: the diagnostic is
+    # a copy, not a participant. (An earlier version ran this second loop
+    # and asserted nothing at all, which passed no matter what it did --
+    # codex MINOR, job 9450542.)
     st2 = _nh_state(KM, seed=5)
     acoustic_loop_3d(ctx, st2, dt_atmos=3 * DT, km=KM, n_split=3,
                      ptop=PTOP, akap=AKAP, cp_air=CP,
                      **_nh_kwargs(ctx, KM))
+    for t in range(6):
+        for name in ("delp", "pt", "u", "v", "w"):
+            assert np.array_equal(st[t][name], st2[t][name]), (
+                f"face {t + 1} {name} differs between a run that captured "
+                f"sub-steps and one that did not")
