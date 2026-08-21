@@ -564,6 +564,18 @@ def test_twin_ladder_modes_come_from_the_bridge_not_a_local_copy(_ladder):
     assert _ladder.NEMO_LADDER_TWIN_DEFAULT in NEMO_E3T_MODES
 
 
+def test_precision_gate_shares_the_bridges_mode_tuple(instruments):
+    """The explicit-mode gate must validate against the same tuple the bridge
+    enforces; a re-listed copy drifts and lets a typo through to grid
+    construction. (The twin has this drift test; the gate did not.)"""
+    import inspect
+
+    from legoesm.ocean.fidelity import precision_gate
+    src = inspect.getsource(precision_gate.require_explicit_e3t_mode)
+    assert "NEMO_E3T_MODES" in src
+    assert '("off", "e3t_only", "gdept_only", "both")' not in src
+
+
 def test_twin_ladder_rejects_unknown_env(_ladder, monkeypatch):
     monkeypatch.setenv("LEGOESM_NEMO_E3T", "e3t")     # plausible typo
     with pytest.raises(SystemExit, match="Unknown LEGOESM_NEMO_E3T"):
@@ -593,6 +605,42 @@ def test_the_ladder_banner_is_announced_once_per_mode(_ladder, capsys):
     assert "NON-DEFAULT VERTICAL LADDER" in capsys.readouterr().out
     _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
     assert "NON-DEFAULT VERTICAL LADDER" not in capsys.readouterr().out
+
+
+def test_each_non_default_ladder_gets_its_own_banner_text(_ladder, monkeypatch,
+                                                          capsys):
+    """The banner must describe the grid the operator actually selected.
+
+    The mixed-ladder branch once served BOTH half-ladders, so an ``e3t_only``
+    run was shown the other mode's T-point offset. And the offsets it quotes are
+    per-level, so the level must travel with the number -- pairing 110.2 m at
+    k=32 with 11.3 m (which is at k=34, not k=32, where it is 7.8 m) is the
+    mismatched-window defect this campaign keeps having to retract.
+
+    Measured over the WET levels the model integrates: off 5.28 m at k=33,
+    e3t_only 97.20 m at k=32, gdept_only 110.16 m at k=32, both 11.31 m at k=34.
+    """
+    expect = {
+        "off": ("1-D REFERENCE ladder", "+2.93 Sv"),
+        "e3t_only": ("97.2 m", "k=32"),
+        "gdept_only": ("110.2 m", "k=32"),
+    }
+    for mode, (a, b) in expect.items():
+        monkeypatch.setattr(_ladder, "_LADDER_ANNOUNCED", set())
+        monkeypatch.setenv("LEGOESM_NEMO_E3T", mode)
+        _ladder.resolve_ladder_mode()
+        out = capsys.readouterr().out
+        assert a in out and b in out, f"{mode} banner: missing {a!r}/{b!r}"
+        for other in expect:
+            if other != mode:
+                assert expect[other][0] not in out or expect[other][0] == a, \
+                    f"{mode} banner quotes {other}'s number"
+    # ... and every level cited for 'both' must be its own worst level, k=34.
+    monkeypatch.setattr(_ladder, "_LADDER_ANNOUNCED", set())
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "gdept_only")
+    _ladder.resolve_ladder_mode()
+    out = capsys.readouterr().out
+    assert "11.3 m on 'both' (at k=34)" in out
 
 
 def test_legacy_flag_conflicting_with_env_is_fatal(_ladder, monkeypatch):
@@ -672,6 +720,11 @@ def test_bridge_rejects_an_unknown_ladder_at_entry(instruments):
     with pytest.raises(ValueError, match="unknown e3t_mode"):
         nemo_state_bridge.bridge_nemo_to_legoesm_topo(
             None, None, e3t_mode="e3t")
+    # The default must NOT be rejected -- assert it by getting PAST the guard,
+    # not by assuming it. With grid=None the very next thing raises AttributeError,
+    # which is proof the ladder check let None through.
+    with pytest.raises(AttributeError):
+        nemo_state_bridge.bridge_nemo_to_legoesm_topo(None, None)
 
 
 def test_run_twin_resolves_the_ladder_before_building_the_bridge(instruments):

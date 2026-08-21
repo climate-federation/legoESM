@@ -7,10 +7,11 @@ building its entire vertical grid from NEMO's ``e3t_1d`` while NEMO integrates
 with ``e3t_0``. From k=25 down (top face 982 m -- DINO's rn_hco=1000 m
 re-anchor, not the "~2000 m" this note used to say) the layer thicknesses were
 off by up to 70.4 m, which is 12.9% of e3t_0 and 14.8% of e3t_1d; quote the
-denominator, those are one measurement. Total column depth is unchanged -- both
-ladders sum to 4000.000 m over the wet levels -- but the 25% of columns that do
-not reach the bottom level were 70.4-104.2 m too deep, a 21.9 m mean over all
-wet columns, in exactly the depth range where the ACC deficit is sourced.
+denominator, those are one measurement. In the 75% of columns that reach the
+bottom level this is a pure redistribution -- both ladders sum to the same
+4000.000 m over all 35 wet levels -- but the other 25% stop short, and there the
+1-D ladder put the bottom 70.4-104.2 m too deep (21.9 m unweighted mean over all
+wet columns), in exactly the depth range where the ACC deficit is sourced.
 (Re-measured 2026-08-21, #1455.)
 
 It survived every gate we had:

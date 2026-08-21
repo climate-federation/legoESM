@@ -229,13 +229,23 @@ not by itself proof that no other path contributes.
 
 CAVEATS, both real:
   * my 1-D/1-D arm gives +1.659 Sv where the recorded #1455 baseline gives
-    +1.872335 Sv.  The harness is bit-deterministic (a repeat run reproduces
-    the day-90 velocity field exactly, max|diff| = 0.0) and the only model-side
-    change since that baseline's commit is a dump-name registry the twin never
-    reads, so the 0.21 Sv is real and UNEXPLAINED.  It is below the gate's own
-    0.455 Sv threshold and the four arms above were run back to back on one
-    tree, so it does not touch their comparison -- but the recorded baseline is
-    NOT reproduced.
+    +1.872335 Sv.
+    RESOLVED 2026-08-21: it was PRECISION, and the four arms above are an fp32
+    measurement.  kamm_twin_90d.py sets no precision policy, so it inherits the
+    fp32 control dtype unless it is wrapped in run_fp64.py -- the recorded
+    baseline was, and these arms were not (their logs carry the bridge's
+    NON-fp64 warning).  Re-running the shipped-grid arm at HEAD UNDER fp64
+    returns a state BIT-IDENTICAL to that baseline in every saved field
+    (max|d u3d| at days 30 and 90, max|d T3d| and max|d eta3d| at day 90 all
+    exactly 0.0) and an ACC gap of +1.8723.  So the model diff between the two
+    commits is exactly inert and the precision policy owns 100% of the 0.21 Sv.
+    The "real and UNEXPLAINED" above is WITHDRAWN.
+    Consequence for the table above: every number in it is fp32.  The two arms
+    re-measured at fp64 both moved -- acc_full +1.659 -> +1.8723 ("off") and
+    -0.516 -> -0.5965 ("both"), channel band +3.483 -> +2.9319 and +0.099 ->
+    +0.2874.  The ranking, the signs and the ~90% cut all survive; the reading
+    that the "both" channel band sits AT the 0.091 Sv floor does not -- at fp64
+    it is 3.2x that floor.  The two half-ladder arms have not been re-run.
   * nemo_state_bridge carries a comment stating legoESM is unstable on NEMO's
     ladders (max|u| 0.66 -> 2.2 m/s in 20 days) and citing that as the reason
     the wrong ladder is the default.  It did not reproduce here: day-90 max|u|

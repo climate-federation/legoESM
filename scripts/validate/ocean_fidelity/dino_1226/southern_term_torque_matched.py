@@ -67,10 +67,17 @@ momentum operator carries a near-uniform -0.61 on any ladder.
   pressure + free-surface torque collapses from -6 to ~-0.6 in the wrong-ladder
   arm, ownership is established; if it stays at -6, it is refuted.
 
-WHY THE LADDER CANNOT SIMPLY BE SWITCHED: legoESM is unstable when integrated
-from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over 20 days;
-``nemo_state_bridge.py`` records this as the reason the default is "off").
-That instability and this torque error are candidates for the same root cause.
+WHY THE LADDER WAS NOT SIMPLY SWITCHED: legoESM was recorded as unstable when
+integrated from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over
+20 days), and that was the stated reason the default is "off".
+RETRACTED 2026-08-21 (#1455): the instability did not reproduce. Four 90-day
+arms from the day-180 restart, differing only in the ladder, all ran stable to
+day 90 at 0.633-0.635 m/s peak speed, the two end arms confirmed under fp64. The
+citation above is also stale -- ``nemo_state_bridge.py`` no longer records the
+instability as the reason. A non-reproduction is not a refutation, so the
+observation stands unexplained; but this probe's framing may no longer assume
+the switch is blocked, and "that instability and this torque error share a root
+cause" is now a hypothesis with one of its two legs missing.
 
 WHAT THIS PROBE DOES
 --------------------

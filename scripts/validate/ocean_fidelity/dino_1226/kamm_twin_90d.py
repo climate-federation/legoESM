@@ -411,13 +411,16 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
                   "'both' is offset too --", flush=True)
             print("!! just 10x less (#1455).", flush=True)
         else:   # e3t_only
-            print("!! Half ladder: NEMO's thicknesses with the 1-D T-point "
-                  "depths. It carries", flush=True)
-            print("!! the barotropic half of the geometry fix and not the "
-                  "baroclinic half; the", flush=True)
-            print("!! split it rests on was measured at fp32 and is PLAUSIBLE, "
-                  "not confirmed", flush=True)
-            print("!! (#1455).", flush=True)
+            print("!! Mixed ladders: cells from NEMO's thickness ladder, "
+                  "T-points from the 1-D one.", flush=True)
+            print("!! Worst WET level of each grid: this one puts T-points "
+                  "97.2 m from the centre", flush=True)
+            print("!! of the cell they sit in (at k=32), against 11.3 m on "
+                  "'both' (at k=34).", flush=True)
+            print("!! It also carries only the barotropic half of the geometry "
+                  "fix, and that", flush=True)
+            print("!! split was measured at fp32 -- PLAUSIBLE, not confirmed "
+                  "(#1455).", flush=True)
         print("!" * 78 + "\n", flush=True)
     print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
           f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own thickness "

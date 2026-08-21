@@ -146,8 +146,11 @@ def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
     (``gdept_1d`` = 1225 m -- not the "~2000 m" this note used to say) and
     diverge by up to 105.0 m at k=32.  ``e3t_1d`` is the unstretched analytic
     ladder and ``e3t_0`` is stretched, but they sum to the SAME 4000.000 m over
-    the wet levels, so the difference is a redistribution of thickness rather
-    than a change of domain depth (re-measured 2026-08-21, #1455).  It feeds
+    all 35 wet levels, so for the 75% of columns that reach the bottom level the
+    difference is a redistribution of thickness rather than a change of depth.
+    For the other 25% it IS a change of depth: those columns stop short, and the
+    1-D ladder puts their bottom 70.4-104.2 m too deep (re-measured 2026-08-21,
+    #1455).  It feeds
     straight into T, S and therefore into the PGF being measured.
 
     The blend anchors follow NEMO exactly (usrdef_istate.F90:153-176):
@@ -259,8 +262,11 @@ def main() -> int:
         choices=("off", "e3t_only", "gdept_only", "both"),
         help="Which of NEMO's ACTUAL 3-D scale factors legoESM's grid is built "
              "from (nemo_state_bridge.effective_vertical_scale_factors). The "
-             "bridge DEFAULT is 'off' = the known-wrong 1-D e3t_1d ladder, kept "
-             "only because NEMO's true geometry destabilises long integrations. "
+             "bridge DEFAULT is 'off' = the known-wrong 1-D e3t_1d ladder. It "
+             "was kept because NEMO's true geometry was recorded as "
+             "destabilising long integrations; that did not reproduce in 2026-08 "
+             "and is now an unexplained observation, not an established defect "
+             "(#1455). "
              "A single-step tendency never integrates, so 'both' (NEMO's real "
              "geometry) is the apples-to-apples choice here.")
     args = ap.parse_args()

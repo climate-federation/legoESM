@@ -13,6 +13,10 @@ calls ``divergence_cgrid`` at :166 and re-diagnoses w via
 thicknesses vary 9-13% between adjacent abyssal levels and (the hypothesis
 says) this consistency breaks, giving the bolus a spurious divergent
 component that explains the restart-start instability (addenda 33/35/36).
+NOTE 2026-08-21 (#1455): that instability did not reproduce -- four 90-day arms
+from the day-180 restart, one variable, all stable at 0.633-0.635 m/s. This
+probe's premise is therefore an unexplained observation rather than a live
+failure to explain; the transport question it measures stands on its own.
 
 PRODUCTION DIVERGENCE OPERATOR USED (traced, not re-derived -- Rule 0):
 ``divergence_cgrid`` at

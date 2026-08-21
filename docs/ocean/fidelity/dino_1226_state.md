@@ -1737,7 +1737,12 @@ identity; a true-ladder acceptance is blocked on the restart-start instability.
 kept for protocol identity with the baseline. **The ACC deficit is sourced below 1000 m, which
 is exactly where that ladder is wrong.** So both nulls carry a background geometric error ~100×
 the size of the fixes under test. **The nulls may be measuring the ladder, not the fixes** —
-which is why the true-ladder instability is the campaign's critical path, not more gate rows.
+which is why the true-ladder instability was called the campaign's critical path.
+**Superseded 2026-08-21 (#1455):** that instability did not reproduce (four 90-day
+arms from the day-180 restart, one variable, all stable at 0.633–0.635 m/s peak
+speed; the two end arms confirmed under fp64), so it is no longer the critical
+path — it is an unexplained recorded observation. The DINO twin harness now
+defaults to NEMO's own ladders.
 
 ## Live threads, with resume conditions
 - **`zu_frc` u (8.03e-3)** — PAUSED. Nine candidates refuted. The **write ledger is provably
@@ -1748,7 +1753,7 @@ which is why the true-ladder instability is the campaign's critical path, not mo
   to `F_slow_u` vs the dumped increment — RMS share, error corr vs the `zu_frc` error field,
   ripple/seam/asymmetry. Owns it → the largest row is solved. Doesn't → ledger exhausted, every
   line measured, close it as a bounded negative.
-- **True-ladder instability** — the critical path. Eliminated by measurement: CFL, `ln_zad_Aimp`,
+- **True-ladder instability** — ~~the critical path~~ (retracted 2026-08-21, #1455: did not reproduce). Eliminated by measurement: CFL, `ln_zad_Aimp`,
   `kappa_GM` magnitude, thin cells, slope cap, derived `gdept`, **GM-bolus discrete divergence**
   (2026-07-30: identical on both ladders, and structurally impossible — `nemo_eiv_bolus_transport`
   uses only `e2u`/`e1v`, no `e3` term), **abyssal slope-cap population** (flat, within ~10%).
