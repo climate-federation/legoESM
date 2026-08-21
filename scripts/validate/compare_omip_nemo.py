@@ -34,8 +34,37 @@ import numpy as np
 # (NEMO-vs-observation SST RMSE is ~0.5-1 K; we allow more for coarse legoESM).
 _TOL = {
     "sst_rmse_excellent_C": 1.5, "sst_rmse_good_C": 2.5,
+    # ENSO-box |bias| caps on the SST verdict (regional failure must not hide
+    # under the global L2; nino3 +2.8 C with global rmse 0.94 is NOT excellent).
+    "sst_box_bias_excellent_C": 1.0, "sst_box_bias_good_C": 2.0,
     "sss_rmse_excellent": 0.5, "sss_rmse_good": 1.0,   # gated (runoff=0)
 }
+
+
+def capped_sst_verdict(global_rmse, sst_boxes, tol=None):
+    """SST verdict = global-rmse tier CAPPED at the worst ENSO-box |bias| tier.
+
+    A global L2 hides an area-small regional failure (user callout 2026-08-18:
+    nino3 +2.8 C scored "excellent" under global rmse 0.94).  Returns
+    ``(verdict, capped_by)`` where ``capped_by`` is ``(box_name, bias)`` when a
+    box demoted the verdict, else ``None``.
+    """
+    t = tol or _TOL
+    rank = ("excellent", "good", "poor")
+
+    def tier(x, exc, good):
+        return "excellent" if x < exc else "good" if x < good else "poor"
+
+    v = tier(global_rmse, t["sst_rmse_excellent_C"], t["sst_rmse_good_C"])
+    capped_by = None
+    for bn, bs in (sst_boxes or {}).items():
+        if bs is None:
+            continue
+        bv = tier(abs(bs["bias"]),
+                  t["sst_box_bias_excellent_C"], t["sst_box_bias_good_C"])
+        if rank.index(bv) > rank.index(v):
+            v, capped_by = bv, (bn, bs["bias"])
+    return v, capped_by
 
 
 def _xyz(lat_rad, lon_rad):
@@ -374,7 +403,10 @@ def main() -> int:
 
     def _verdict(rmse, exc, good):
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
-    sst_v = _verdict(sst["rmse"], _TOL["sst_rmse_excellent_C"], _TOL["sst_rmse_good_C"])
+    sst_v, capped_by = capped_sst_verdict(sst["rmse"], sst_boxes)
+    if capped_by is not None:
+        print(f"[verdict] SST capped to {sst_v} by {capped_by[0]} "
+              f"bias {capped_by[1]:+.2f} C")
     sss_v = (_verdict(sss["rmse"], _TOL["sss_rmse_excellent"], _TOL["sss_rmse_good"])
              if args.sss_faithful else None)
 

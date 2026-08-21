@@ -594,7 +594,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             rich_h_actual = maybe_partial_h_actual(state, z_coord)
             rich_p_cell = compute_hydrostatic_pressure(
                 rho, state.eta.data, z_coord.dz_ref, J,
-                constants_config.rho_0, h_actual=rich_h_actual,
+                constants_config.rho_0, constants_config.g,
+                h_actual=rich_h_actual,
             )
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
@@ -690,8 +691,22 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         else:
             u_before_data = v_before_data = None
             u_face_now = v_face_now = u_face_before = v_face_before = None
+        if _shear_disc == "nemo_face_native_now2":
+            # Face-native SPATIAL geometry at NOW^2 time levels -- the
+            # RK3-oracle variant (ORCA1 is compiled key_RK3; there is no Nbb
+            # velocity to be faithful to). Same raw-face requirement as
+            # nemo_face_native, no before-state.
+            if not _staggered:
+                raise ValueError(
+                    "TKEConfig.tke_shear_production='nemo_face_native_now2' "
+                    "requires the RAW (uncollapsed) C-grid face state.u/v -- "
+                    "got a pre-centred state (shape matches T).")
+            u_face_now = state.u.data
+            v_face_now = state.v.data
+            u_face_before = u_face_now
+            v_face_before = v_face_now
         _face_masks_3d = None
-        if _shear_disc == "nemo_face_native":
+        if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )
@@ -783,7 +798,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             h_actual = maybe_partial_h_actual(state, z_coord)
             p_cell = compute_hydrostatic_pressure(
                 rho, state.eta.data, z_coord.dz_ref, J,
-                constants_config.rho_0, h_actual=h_actual,
+                constants_config.rho_0, constants_config.g,
+                h_actual=h_actual,
             )
         # NEMO bn2 trigger (n2_mode="nemo_bn2"): the geometric depth ladders
         # (gdept / interior gdepw); ignored by every other n2_mode.  NEMO
@@ -1126,7 +1142,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         ed_h_actual = maybe_partial_h_actual(state, z_coord)
         ed_p_cell = compute_hydrostatic_pressure(
             rho, state.eta.data, z_coord.dz_ref, J,
-            cc.rho_0, h_actual=ed_h_actual,
+            cc.rho_0, cc.g, h_actual=ed_h_actual,
         )
     # NEMO bn2 trigger (n2_mode="nemo_bn2"): geometric depth ladders
     # (gdept / interior gdepw); ignored by every other n2_mode.  gdept(Kmm)
@@ -1166,7 +1182,7 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
             ed_h_b = maybe_partial_h_actual(state_b, z_coord)
             ed_p_cell_b = compute_hydrostatic_pressure(
                 rho_b, state_b.eta.data, z_coord.dz_ref, J,
-                cc.rho_0, h_actual=ed_h_b,
+                cc.rho_0, cc.g, h_actual=ed_h_b,
             )
         K_b, A_b, _ = convective_K_A_flag(
             rho_b, z_coord.dz_ref, J, cfg,

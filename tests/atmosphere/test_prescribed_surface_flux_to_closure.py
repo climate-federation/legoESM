@@ -317,3 +317,120 @@ def test_the_closure_tracks_a_flux_that_changes_between_steps():
     assert float(midday.h_pbl[0]) > float(morning.h_pbl[0]), (
         "a stronger surface heat flux must deepen the convective PBL; "
         "equal depths mean the per-step value never reached the closure")
+
+
+# ---------------------------------------------------------------------------
+# CLUBB: wp2 is clipped at BOTH ends on the prognostic path
+# ---------------------------------------------------------------------------
+
+def test_clip_variance_applies_the_upper_threshold():
+    """The helper always could; the prognostic call site did not pass it."""
+    from legoesm.atmosphere.physics.turbulence.clubb import clip_variance
+
+    xp2 = jnp.asarray([[1e-9, 5.0, 5000.0, 7000.0]])
+    out = np.asarray(clip_variance(xp2, 1e-4, 1000.0))
+    assert out[0, 0] == pytest.approx(1e-4), "floor"
+    assert out[0, 1] == pytest.approx(5.0), "interior untouched"
+    assert out[0, 2] == pytest.approx(1000.0), "cap"
+    # the TOP level is deliberately left alone (nzm-1), matching upstream
+    assert out[0, 3] == pytest.approx(7000.0)
+
+
+def test_the_prognostic_path_passes_wp2_max():
+    """NON-VACUOUS source check, naming the symbol that RUNS.
+
+    Upstream calls clip_variance with the optional wp2_max and states the
+    reason: "instability caused by large wp2 in CLUBB led unrealistic results
+    in AM3". Our prognostic path passed only the floor, while the DIAGNOSTIC
+    path already capped -- so a source test that looked at the wrong one would
+    have passed throughout. This asserts on ``advance_wp2_wp3``, which is the
+    function the campaign's prognostic runs execute.
+    """
+    import inspect
+
+    from legoesm.atmosphere.physics.turbulence import clubb
+
+    src = inspect.getsource(clubb.advance_wp2_wp3)
+    assert "clip_variance(" in src, "the clip moved; update this test"
+    call = src[src.index("clip_variance("):]
+    call = call[:call.index(")") + 1]
+    assert "wp2_max" in call, (
+        f"advance_wp2_wp3 clips wp2 without an upper threshold: {call!r}")
+
+
+def test_wp2_max_matches_upstreams_value():
+    """1000 m^2/s^2, constants_clubb.F90. A cap at the wrong magnitude is
+    either inert or a new physics change."""
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+    assert CLUBBConfig().wp2_max == pytest.approx(1000.0)
+
+
+# ---------------------------------------------------------------------------
+# #1508: the surface variance boundary condition
+#
+# The BC itself landed in PR #1601 with its own tests. Kept here are only the
+# checks that PR does not make, and they are AD checks: the routine has THREE
+# derivative singularities that a forward-only test cannot see (sqrt at zero
+# stress, cbrt at zero buoyancy flux, sqrt inside uf), and a NaN gradient there
+# silently kills the tuning of every CLUBB coefficient rather than raising.
+# I independently wrote this port before finding #1601 had landed; its
+# double-where (`cbrt(where(unstable, x, 1.0))`) is a better guard than the
+# epsilon floor I had used, so its implementation is the one that survived.
+# ---------------------------------------------------------------------------
+
+def _sfc_varnce_moments(ncol=1, nzm=8):
+    z = jnp.zeros((ncol, nzm))
+    return (z + 1.0, z + 1.0, z + 1.0, z + 1.0, z + 1e-6, z)
+
+
+def test_sfc_varnce_gradient_is_finite_under_a_stable_surface():
+    """A negative surface heat flux takes the wstar = 0 arm. jax differentiates
+    the DISCARDED arm too, so a bare cbrt(0) there gives 0 * inf = NaN through
+    the mask -- forward-finite, gradient-poisoned. GABLS1 is stable for its
+    whole run, so this is not a corner case."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    m = _sfc_varnce_moments()
+
+    def loss(wpthlp_sfc):
+        out = calc_sfc_varnce(*m, jnp.asarray([-0.05]), jnp.asarray([0.01]),
+                              wpthlp_sfc, jnp.asarray([1.0e-6]), cfg)
+        return sum(jnp.sum(o) for o in out)
+
+    for wth in (-0.05, -1e-12, 0.0, 1e-12, 0.06):
+        g = float(jax.grad(loss)(jnp.asarray([wth]))[0])
+        assert np.isfinite(g), f"non-finite d/d(wpthlp_sfc) at wpthlp={wth}"
+
+
+def test_sfc_varnce_gradient_is_finite_in_a_dead_calm():
+    """Zero stress makes sqrt(upwp^2 + vpwp^2) a 0/0 derivative, with nothing
+    masking it -- the NaN reaches the tuned coefficients directly."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    cfg = CLUBBConfig(prognostic=True)
+    m = _sfc_varnce_moments()
+    z = jnp.zeros((1,))
+
+    def loss(upwp):
+        return sum(jnp.sum(o) for o in
+                   calc_sfc_varnce(*m, upwp, z, z, z, cfg))
+
+    assert np.isfinite(float(jax.grad(loss)(z)[0])), (
+        "non-finite gradient in a quiescent column")
+
+
+def test_sfc_varnce_only_touches_the_surface_level():
+    """Every level above must come back byte-identical."""
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        CLUBBConfig, calc_sfc_varnce,
+    )
+    m = _sfc_varnce_moments(ncol=2)
+    z = jnp.zeros((2,))
+    out = calc_sfc_varnce(*m, z - 0.05, z, z + 0.05, z + 1e-5,
+                          CLUBBConfig(prognostic=True))
+    for got, ref in zip(out, m):
+        assert np.array_equal(np.asarray(got)[:, 1:], np.asarray(ref)[:, 1:])

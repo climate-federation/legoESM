@@ -171,7 +171,11 @@ def _make_kpp(config: VerticalMixingConfig,
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-        rho = _compute_rho(state, z_coord, J)
+        # The run's constants, not the library's: this density is what
+        # every downstream pressure integrates (#1627).
+        rho = _compute_rho(state, z_coord, J,
+                           rho0=constants_config.rho_0,
+                           g=constants_config.g)
 
         # Forward surface forcing into KPP.  KPP needs:
         #   tau_x, tau_y [Pa] for the friction velocity u_star

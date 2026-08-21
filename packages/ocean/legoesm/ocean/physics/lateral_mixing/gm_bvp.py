@@ -100,21 +100,23 @@ __physics_contract__ = {
 
 __param_spec__ = {
     "GMBVPConfig": {
-        "c_min": {
-            "units": "m/s", "bounds": (0.01, 2.0), "tunable_tier": 2,
-            "transform": "softplus", "category": "lateral_mixing",
-            "reference": "FESOM2 namelist.oce K_GM_cmin", "shape": None,
+        "scheme_key": "ocean.lat.gm_bvp",
+        "excluded": {
+            "n2_floor": "numerics: regulariser on the BVP diagonal [1/s^2] "
+                        "(a solver floor keeping an unstratified column non-singular, "
+                        "not a closure coefficient)",
         },
-        "mode_number": {
-            "units": "1", "bounds": (1.0, 6.0), "tunable_tier": 2,
-            "transform": "softplus", "category": "lateral_mixing",
-            "reference": "FESOM2 namelist.oce K_GM_cm", "shape": None,
-        },
-        "n2_floor": {
-            "units": "1/s^2", "bounds": (1e-10, 1e-6), "tunable_tier": 0,
-            "transform": "none", "category": "numerics",
-            "reference": "regulariser on the BVP diagonal; excluded: a solver floor, not a closure",
-            "shape": None,
+        "params": {
+            "c_min": {
+                "units": "m/s", "bounds": (0.01, 2.0), "tunable_tier": 2,
+                "transform": "softplus", "category": "lateral_mixing",
+                "reference": "FESOM2 namelist.oce K_GM_cmin", "shape": None,
+            },
+            "mode_number": {
+                "units": "1", "bounds": (1.0, 6.0), "tunable_tier": 2,
+                "transform": "softplus", "category": "lateral_mixing",
+                "reference": "FESOM2 namelist.oce K_GM_cm", "shape": None,
+            },
         },
     }
 }

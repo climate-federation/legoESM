@@ -164,6 +164,8 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/config.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py",
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/output.py",
+        # Config-descend plumbing (nested-CLUBB tunable-leaf helper), not a scheme.
+        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/tunable_subconfig.py",
         # MPI plumbing: slices a deployed per-column override to a rank's tile,
         # not a single-tendency physics scheme.
         "packages/atmosphere/legoesm/atmosphere/physics/turbulence/override_sharding.py",

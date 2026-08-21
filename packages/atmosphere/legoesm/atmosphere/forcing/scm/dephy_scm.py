@@ -21,6 +21,13 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import compute_rho, exner_function
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing.scm.scm_forcing_io import (
+    forcing_cadence as _forcing_cadence,
+    interp_profile_to_pressure as _interp_profile_to_pressure,
+    omega_to_w as _omega_to_w,
+    profile_time_fn as _profile_time_fn,
+    scalar_time_fn as _scalar_time_fn,
+)
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
@@ -455,7 +462,7 @@ def load_dephy_scm_case(
         subsidence_values = None
         if include_vertical_velocity:
             subsidence_values = _vertical_velocity_values(
-                ds, time, p_target, pa_forc, T_profile_np, q_profile_np,
+                ds, time, p_target, pa_forc, T_profile_np, q_specific_np,
                 notes,
             )
 
@@ -472,7 +479,6 @@ def load_dephy_scm_case(
                 time,
                 p_target,
                 T_profile_np,
-                q_profile_np,
                 q_specific_np,
                 include_surface_fluxes=include_surface_fluxes,
                 include_prescribed_surface_temperature=(
@@ -614,16 +620,6 @@ def _time_axis(ds) -> np.ndarray:
     return np.asarray(time, dtype=np.float64)
 
 
-def _forcing_cadence(time: np.ndarray) -> float:
-    if time.size < 2:
-        return 300.0
-    diffs = np.diff(time)
-    diffs = diffs[np.isfinite(diffs) & (diffs > 0.0)]
-    if diffs.size == 0:
-        return 300.0
-    return float(np.nanmin(diffs))
-
-
 def _scalar_var(ds, name: str, fallback=None) -> float:
     if not _has_var(ds, name):
         if fallback is None:
@@ -657,30 +653,6 @@ def _profile_time_var(ds, name: str, ntime: int) -> np.ndarray:
     raise ValueError(
         f"DEPHY variable {name!r} shape {arr.shape} does not match time={ntime}"
     )
-
-
-def _interp_profile_to_pressure(
-    p_target: np.ndarray,
-    p_source: np.ndarray,
-    values: np.ndarray,
-) -> np.ndarray:
-    p = np.asarray(p_source, dtype=np.float64).reshape(-1)
-    v = np.asarray(values, dtype=np.float64).reshape(-1)
-    if p.size != v.size:
-        raise ValueError(
-            f"pressure/profile size mismatch: pressure={p.size}, values={v.size}"
-        )
-    mask = np.isfinite(p) & np.isfinite(v)
-    if np.count_nonzero(mask) < 2:
-        raise ValueError("at least two finite pressure/profile samples are required")
-    p = p[mask]
-    v = v[mask]
-    order = np.argsort(p)
-    p = p[order]
-    v = v[order]
-    p_unique, idx = np.unique(p, return_index=True)
-    v_unique = v[idx]
-    return np.interp(p_target, p_unique, v_unique)
 
 
 def _interp_initial(ds, name: str, p_target: np.ndarray) -> np.ndarray:
@@ -882,7 +854,7 @@ def _vertical_velocity_values(
     p_target: np.ndarray,
     pa_forc: np.ndarray,
     T_profile: np.ndarray,
-    q_profile: np.ndarray | None,
+    q_specific: np.ndarray | None,
     notes: list[str],
 ) -> np.ndarray | None:
     if _has_var(ds, "wa"):
@@ -890,17 +862,9 @@ def _vertical_velocity_values(
     if not _has_var(ds, "wap"):
         return None
     omega = _interp_forcing(ds, "wap", time, p_target, pa_forc)
-    q = np.zeros_like(T_profile) if q_profile is None else q_profile
-    rho = np.asarray(
-        compute_rho(
-            jnp.asarray(T_profile).reshape(1, -1),
-            jnp.asarray(p_target).reshape(1, -1),
-            jnp.asarray(q).reshape(1, -1),
-        )[0],
-        dtype=np.float64,
-    )
+    q_v = None if q_specific is None else q_specific
     notes.append("DEPHY omega (wap) was converted to upward w using hydrostatic density.")
-    return -omega / (rho.reshape(1, -1) * constants.g)
+    return _omega_to_w(omega, T_profile, p_target, q_v)
 
 
 def _surface_forcing_kwargs(
@@ -908,7 +872,6 @@ def _surface_forcing_kwargs(
     time: np.ndarray,
     p_target: np.ndarray,
     T_profile: np.ndarray,
-    q_profile: np.ndarray | None,
     q_specific: np.ndarray | None,
     *,
     include_surface_fluxes: bool,
@@ -917,7 +880,8 @@ def _surface_forcing_kwargs(
 ) -> dict[str, Any]:
     temp_mode = str(ds.attrs.get("surface_forcing_temp", "none")).lower()
     moist_mode = str(ds.attrs.get("surface_forcing_moisture", "none")).lower()
-    q = np.zeros_like(T_profile) if q_profile is None else q_profile
+    # compute_rho expects SPECIFIC humidity (not a mixing ratio).
+    q = np.zeros_like(T_profile) if q_specific is None else q_specific
     rho_sfc = float(
         np.asarray(
             compute_rho(
@@ -1000,30 +964,6 @@ def _scalar_series(ds, name: str, time: np.ndarray) -> np.ndarray:
     raise ValueError(
         f"DEPHY scalar forcing {name!r} length {arr.size} does not match time={time.size}"
     )
-
-
-def _profile_time_fn(time: np.ndarray, values: np.ndarray, dtype):
-    time_np = np.asarray(time, dtype=np.float64)
-    values_np = np.asarray(values, dtype=np.float64)
-
-    def fn(t_seconds: float):
-        t = float(t_seconds)
-        out = np.empty(values_np.shape[1], dtype=np.float64)
-        for k in range(values_np.shape[1]):
-            out[k] = np.interp(t, time_np, values_np[:, k])
-        return jnp.asarray(out, dtype=dtype)
-
-    return fn
-
-
-def _scalar_time_fn(time: np.ndarray, values: np.ndarray):
-    time_np = np.asarray(time, dtype=np.float64)
-    values_np = np.asarray(values, dtype=np.float64)
-
-    def fn(t_seconds: float):
-        return jnp.asarray(np.interp(float(t_seconds), time_np, values_np))
-
-    return fn
 
 
 def _nonzero_array(arr: np.ndarray) -> bool:
