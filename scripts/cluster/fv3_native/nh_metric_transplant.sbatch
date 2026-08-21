@@ -23,7 +23,8 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 ARGS=""
-[ "${WIDEN:-0}" = "1" ] && ARGS="--widen-corners"
+[ "${WIDEN:-0}" = "1" ] && ARGS="$ARGS --widen-corners"
+[ "${DAMPING:-0}" = "1" ] && ARGS="$ARGS --transplant-sentinel-damping"
 echo "args: ${ARGS:-<none>}"
 $PY scripts/validate/fv3_native/nh_metric_transplant.py $ARGS
 rc=$?

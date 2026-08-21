@@ -103,9 +103,42 @@ cannot vote on a permutation (only the WRITE widens); ectx amat6, the
 ext-vector bases and the vertical ak/bk, which keep the base arm's
 boundary; and no corner-rotation repair is performed or emulated.
 
+``--transplant-sentinel-damping`` (OPT-IN, off by default, independent
+of ``--widen-corners``).  The sentinel-region comparison
+(``corner_metric_compare.py``, job 9455470, face map at 8.9e-16) found
+``del6_u``/``del6_v``/``divg_u``/``divg_v`` DISAGREEING between port and
+oracle at 79-99 of the 108 both-sides-sentinel cells per face (7-12 of
+them inside corner regions, |d| 2.5e-06 to 7.0e-06), while every
+trigonometric family is BITWISE identical there.  Both sides hold
+sentinel-magnitude values (~1e8, so the relative disagreement is
+~1e-14), which is exactly why no transplant arm could reach them: a mask
+that drops a cell when either side is sentinel drops all of them.  This
+arm writes the oracle's value at those cells, for those four families
+ONLY, and re-runs the same gate.
+
+PRE-REGISTERED READING, against the stated baseline (step_worst_rel
+6.611558e-04; |d|max on w 1.3003e-07 m/s):
+  * CONFIRMS these coefficients are the seat: w becomes bitwise
+    identical on all six faces.  Anything short of bitwise is NOT a
+    confirmation -- the coefficients start only ~1e-14 apart in
+    relative terms, so a partial improvement is consistent with them
+    contributing without being the seat;
+  * REFUTES: step_worst_rel and the per-face |d|max on w unchanged to
+    the printed precision.  Then this disagreement provably cannot move
+    the 1.3e-07 m/s;
+  * ESTABLISHES NEITHER: improved but not bitwise -- that is
+    participation, not seat.
+
+NOT covered by this arm: any family outside the four; cells where the
+oracle side is non-finite (the arm refuses rather than partially write);
+and the code PATHS that read these arrays -- transplanting a value
+cannot repair a different computation.
+
 usage: python scripts/validate/fv3_native/nh_metric_transplant.py
        python scripts/validate/fv3_native/nh_metric_transplant.py \
            --widen-corners
+       python scripts/validate/fv3_native/nh_metric_transplant.py \
+           --transplant-sentinel-damping
 """
 from __future__ import annotations
 
@@ -612,11 +645,120 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------
+# (--transplant-sentinel-damping) write the oracle's values at the
+# BOTH-SIDES-SENTINEL cells of the four damping families only
+# ---------------------------------------------------------------------
+
+# Restricted to these four BY NAME. Widening to every family that
+# differs at sentinel cells would also rewrite the deliberately poisoned
+# area_c / rarea_c slot (1e30 by construction, not a representation
+# difference), and several families moving at once means no single
+# family's effect can be read out of the gate.
+DAMPING_FAMILIES = frozenset(("del6_u", "del6_v", "divg_u", "divg_v"))
+
+
+def transplant_sentinel_damping(ctx) -> None:
+    """Oracle values at the cells every other arm is blind to."""
+    orcm = load_extchain(EXTCHAIN_C48)
+    gs6 = ctx["gs6"]
+    fmap = derive_metric_face_map(orcm, gs6, N, NG)
+    tiles = [fmap[t][1] for t in range(6)]
+    if sorted(tiles) != list(range(6)):
+        raise SystemExit(f"REFUSING: face map not a bijection: {tiles}")
+    floor = max(fmap[t][0] for t in range(6))
+    if floor > 1.0e-12:
+        raise SystemExit(f"REFUSING: face-map coordinate floor "
+                         f"{floor:.3e} > 1e-12")
+
+    total_corner, total_written = 0, 0
+    missing = []
+    for fam in sorted(DAMPING_FAMILIES):
+        _tag, key, ish, jsh = FAMILIES[fam]
+        if key not in gs6[0]:
+            missing.append(f"{fam} (no port key)")
+            continue
+        rm = region_masks(N, NG, ish, jsh)
+        corner = np.zeros((N + 2 * NG + ish, N + 2 * NG + jsh), dtype=bool)
+        for rk, rv in rm.items():
+            if rk.endswith("_corner"):
+                corner |= rv
+        for pf in range(6):
+            _d, ot, op = fmap[pf]
+            fam_t = SWAP_PARTNER.get(fam, fam) if op[0] else fam
+            o2 = np.asarray(orcm[ot]["arrays"][FAMILIES[fam_t][0]],
+                            np.float64)
+            p_old = np.asarray(gs6[pf][key], np.float64)
+            p2o = op_scalar(p_old, op)
+            if o2.shape != p2o.shape:
+                raise SystemExit(
+                    f"REFUSING: {fam} oracle {o2.shape} vs mapped port "
+                    f"{p2o.shape} (op={op})")
+            if not np.isfinite(o2).all():
+                raise SystemExit(
+                    f"REFUSING: {fam} face {pf + 1} oracle holds "
+                    f"non-finite values; there is nothing to transplant "
+                    f"at those cells and a partial write would be "
+                    f"reported as coverage")
+            # BOTH sides sentinel, spelled out. ``sentinel_mask`` is an
+            # EITHER-side mask; using it here would silently also write
+            # oracle-only-sentinel cells, which is a different set from
+            # the one the comparison measured.
+            write_o = (_sent_mask_single(o2, fam)
+                       & _sent_mask_single(p2o, fam))
+            if not write_o.any():
+                raise SystemExit(
+                    f"REFUSING: {fam} face {pf + 1} has ZERO "
+                    f"both-sides-sentinel cells, but the comparison "
+                    f"measured 108 per face -- the instrument and its "
+                    f"premise have diverged, and a null result here "
+                    f"would be a no-op dressed as a refutation")
+            # The disagreement AT THE WRITE SET, before the write, so a
+            # null gate result is read against a measured starting
+            # disagreement rather than an assumed one.
+            pre = float(np.abs(o2 - p2o)[write_o].max())
+            n_write = int(write_o.sum())
+            corner_o = op_scalar(corner.astype(np.float64), op) > 0.5
+            n_corner = int((write_o & corner_o).sum())
+
+            write_p = _map_to_port(write_o.astype(np.float64), op) > 0.5
+            gs6[pf][key] = np.where(write_p, _map_to_port(o2, op), p_old)
+
+            # Post-transplant exactness over the WRITTEN set.
+            new = np.asarray(gs6[pf][key], np.float64)
+            resid = np.where(write_o,
+                             np.abs(o2 - op_scalar(new, op)), 0.0)
+            if float(resid.max()) != 0.0:
+                raise SystemExit(
+                    f"REFUSING: {fam} face {pf + 1} post-transplant "
+                    f"write-set residual {float(resid.max()):.3e} != 0.0")
+            total_corner += n_corner
+            total_written += n_write
+            print(f"  DAMPING {fam:8s} face {pf + 1}: wrote {n_write} "
+                  f"both-sides-sentinel cells, {n_corner} of them in a "
+                  f"corner region, pre max|d| there {pre:.6e}")
+    if missing:
+        raise SystemExit(
+            f"DAMPING CONTROL FAILED: families absent from the port "
+            f"gridstruct, so this arm would be partial: {missing}")
+    print(f"DAMPING RECEIPT: wrote {total_written} cells, "
+          f"{total_corner} of them in corner regions")
+    # Keyed to the CORNER count, not the total -- the defect review
+    # caught in the widen arm, where a nonzero total from an unrelated
+    # place would have let a no-op pass.
+    if total_corner == 0:
+        raise SystemExit(
+            "DAMPING CONTROL FAILED: zero written cells in any corner "
+            "region. The error under test sits one cell in from the "
+            "panel corners; 'unchanged' from an arm that never wrote a "
+            "corner cell would be a refutation it has not earned.")
+
+
+# ---------------------------------------------------------------------
 # (c) drive the unchanged gate, baseline then transplanted
 # ---------------------------------------------------------------------
 
-def run_gate(tag: str, transplant: bool,
-             widen: bool = False) -> dict | None:
+def run_gate(tag: str, transplant: bool, widen: bool = False,
+             damping: bool = False) -> dict | None:
     import legoesm.core.fv3_native_duo_stepper as ds
 
     out_json = os.path.join(OUT_DIR, f"nh_transplant_{tag}.json")
@@ -630,6 +772,12 @@ def run_gate(tag: str, transplant: bool,
         def wrapper(*a, **kw):
             ctx = real(*a, **kw)
             transplant_metrics(ctx, widen=widen)
+            if damping:
+                # AFTER the base transplant, at cells that arm provably
+                # leaves alone -- so the only difference from the
+                # "transplanted" arm is these four families' sentinel
+                # cells.
+                transplant_sentinel_damping(ctx)
             return ctx
         ds.build_six_face_duo_context = wrapper
     print(f"\n===== GATE ARM: {tag} =====")
@@ -649,14 +797,19 @@ def run_gate(tag: str, transplant: bool,
 def main() -> int:
     argv = sys.argv[1:]
     widen = "--widen-corners" in argv
-    unknown = [a for a in argv if a != "--widen-corners"]
+    damping = "--transplant-sentinel-damping" in argv
+    unknown = [a for a in argv
+               if a not in ("--widen-corners",
+                            "--transplant-sentinel-damping")]
     if unknown:
         # A mistyped flag that is silently ignored is how an arm gets
         # reported under the wrong name.
-        raise SystemExit(f"unknown argument(s): {unknown}. The only flag "
-                         f"is --widen-corners.")
+        raise SystemExit(f"unknown argument(s): {unknown}. The flags are "
+                         f"--widen-corners and "
+                         f"--transplant-sentinel-damping.")
     print(f"REPO_SHA={_sha()}  n={N} ng={NG} km={KM}  "
-          f"extchain={EXTCHAIN_C48}  widen_corners={widen}")
+          f"extchain={EXTCHAIN_C48}  widen_corners={widen}  "
+          f"sentinel_damping={damping}")
     if not (EXTCHAIN_C48 / "extchain_t1.mf").exists():
         raise SystemExit(f"missing extchain C48 dumps at {EXTCHAIN_C48}")
 
@@ -678,6 +831,10 @@ def main() -> int:
         # byte-stable and the earlier numbers remain reproducible.
         arms.append(("widened",
                      run_gate("widened", transplant=True, widen=True)))
+    if damping:
+        arms.append(("sentinel_damping",
+                     run_gate("sentinel_damping", transplant=True,
+                              damping=True)))
 
     print("\nSUMMARY (numbers only; verdict belongs to the analysis):")
     for tag, j in arms:
