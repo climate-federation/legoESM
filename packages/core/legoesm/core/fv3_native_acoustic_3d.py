@@ -357,7 +357,12 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0,
             delz6=[state[t]["delz"] for t in range(6)],
             remap_step=remap_step, use_logp=use_logp, cfg=cfg,
-            remap_follows=remap_follows)
+            remap_follows=remap_follows,
+            # The hydrostatic branch above forwards this; the NH branch
+            # did not, so every S_nh_* stage the tail emits was
+            # unreachable from here and any probe asking for one got
+            # nothing back. Unexercised wiring is unknown wiring.
+            stage_hook=stage_hook)
     if press_out is not None:
         press_out[:] = press
 

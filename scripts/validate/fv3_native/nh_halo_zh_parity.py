@@ -46,10 +46,19 @@ CONTROLS, each fatal:
      story.
 
 WHAT THIS DOES NOT COVER, stated: interfaces 1 and 2 only, so it cannot
-say where in the column the damage is born; the first outer iteration
-only (which is the deck's only one, per control 1); and halo cells
-neither side's exchange writes are compared as stored -- each row prints
-the oracle-side peak so a fill-value band is visible as one.
+say where in the column the damage is born; ACOUSTIC SUB-STEP 1 only --
+which is the only informative one, because the height is duo-exchanged
+at the end of every sub-step, so from sub-step 2 on a bad interior has
+already become a bad halo and the two hypotheses are no longer separable;
+and growth over the loop, which it says nothing about.
+
+AND NOTE WHAT THE HALO ROWS CAN AND CANNOT SHOW. On this deck the
+damping coefficient is above the kernel's threshold, so update_dz_d
+writes the compute window and leaves the halo untouched on BOTH sides
+(nh_utils.F90:264-283). The AFTER-halo therefore equals the BEFORE-halo
+by construction: those rows test the exchange, not the operator, and a
+difference that appears only in the AFTER INTERIOR is the only reading
+that points at the operator.
 
 NO VERDICT IS PRINTED.
 """
@@ -71,10 +80,13 @@ from full_step_oracle_parity import (          # noqa: E402
     N,
     NG,
     ORACLE_ROOT,
+    apply_map,
     build_port_ic,
     derive_face_map,
     load_oracle,
+    oracle_ij,
     port_window,
+    rel,
 )
 # The region split is the one the stage ladder already uses -- reused,
 # not re-derived, so the two instruments cannot drift apart on what
@@ -88,16 +100,17 @@ HALO_ROOT = "/burg-archive/glab/users/pg2328/fv3_wsubstep/run_nh_1step"
 LEVELS = {"zh1": 0, "zh2": 1}
 
 
-def _read_h(run_dir, when, name, tile):
-    """One ``hdump<n_map>_<when>_<name>_t<tile>.dat`` as (ni, nj).
+def _read_h(run_dir, it, when, name, tile, transposed):
+    """One ``hdump<it>_<when>_<name>_t<tile>.dat``, in PORT index order.
 
-    The shared reader stores (k, j, i) to match ``load_oracle``; the
-    padded planes here are square, and the port side is handed the same
-    (j, i) order, so both sides are transposed identically and the
-    comparison never crosses the convention.
+    The shared reader stores (k, j, i) to match ``load_oracle``, so the
+    plane must go through ``oracle_ij`` exactly as every other consumer
+    does -- the padded planes here are SQUARE, so a dropped transpose
+    would sail past a shape check and be scored as a difference. The
+    first version of this function dropped it.
     """
-    return read_dump(run_dir, 1, f"{when}_{name}", tile,
-                     prefix="hdump")[0]
+    d = read_dump(run_dir, it, f"{when}_{name}", tile, prefix="hdump")
+    return oracle_ij(d, transposed)[:, :, 0]
 
 
 def require_k_split_one(run_dir: str) -> None:
@@ -136,7 +149,6 @@ def main(argv=None):
 
     from legoesm.core.fv3_native_acoustic_3d import acoustic_substep_3d
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
-    from legoesm.core.fv3_native_dynamics import p_var_nonhydrostatic
     from legoesm.core.fv3_native_eta import set_eta_analytic
     from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
 
@@ -172,14 +184,18 @@ def main(argv=None):
             tile, payload = rest
             grabbed.setdefault(name, {})[tile] = np.array(payload, copy=True)
 
-    press = [p_var_nonhydrostatic(f["delp"], f["delz"], f["pt"],
-                                 ptop=ptop, akap=FV3_KAPPA,
-                                 n=N, ng=NG, km=KM) for f in state]
+    # The NH arm needs its persistent carry and the reference thickness
+    # profile; without them acoustic_substep_3d raises before the first
+    # hook fires. dp0 is built the way fv_dynamics_step builds it.
+    from legoesm.core.fv3_native_acoustic_3d import build_nh_carry
+    nh = build_nh_carry(ctx, KM, ctx["hs6"])
+    dp0 = np.array([(ak[k + 1] - ak[k]) + (bk[k + 1] - bk[k]) * 1.0e5
+                    for k in range(KM)], dtype=np.float64)
     dt_sub = args.dt / args.n_split
     acoustic_substep_3d(ctx, state, dt_sub, KM, first_substep=True,
                         ptop=ptop, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
                         remap_step=False, remap_follows=True,
-                        hydrostatic=False, press_out=None,
+                        hydrostatic=False, nh=nh, dp0=dp0,
                         stage_hook=hook)
     for need in ("S_nh_before_update_dz_d", "S_nh_after_update_dz_d"):
         if len(grabbed.get(need, {})) != 6:
@@ -199,9 +215,18 @@ def main(argv=None):
                     b = grabbed["S_nh_after_update_dz_d"][pf][:, :, k]
                 else:
                     ot = perm[pf]
-                    a = _read_h(args.hdump, "pre", lvl, ot + 1)
-                    b = _read_h(args.hdump, "post", lvl, ot + 1)
-                if float(np.abs(a - b).max()) == 0.0:
+                    a = _read_h(args.hdump, 1, "pre", lvl, ot + 1,
+                                    meta[pf][ot][0])
+                    b = _read_h(args.hdump, 1, "post", lvl, ot + 1,
+                                    meta[pf][ot][0])
+                # COMPUTE WINDOW ONLY. The deck's damping coefficient
+                # is above the kernel's threshold, so update_dz_d takes
+                # the branch that writes (is:ie, js:je) and leaves the
+                # halo alone on BOTH sides (nh_utils.F90:264-283 and its
+                # port twin). Asking the halo to change would fail on a
+                # correct run.
+                cw = (slice(NG, NG + N), slice(NG, NG + N))
+                if float(np.abs(a[cw] - b[cw]).max()) == 0.0:
                     same.append(pf + 1)
             if same:
                 raise SystemExit(
@@ -209,6 +234,27 @@ def main(argv=None):
                     f"before and after the update on faces {same}; one "
                     f"capture is not where it claims.")
     print("both sides: the two capture points hold different states")
+
+    # CONTROL 5: this must be the configuration whose gap is under
+    # investigation. The sibling probe has this control and it is what
+    # caught a dropped dihedral there; without it a probe that quietly
+    # ran a different sub-step setup would report cleanly. w after ONE
+    # sub-step is not the full-step number, so the check is that the
+    # error is PRESENT at the established order of magnitude, not that
+    # it equals 6.6116e-04.
+    w_worst = 0.0
+    for pf in range(6):
+        ot = perm[pf]
+        _t, nm, _su, _sv = meta[pf][ot]
+        w_worst = max(w_worst, float(np.abs(
+            state[pf]["w"][NG:NG + N, NG:NG + N, 0]).max()))
+    print(f"port |w|max after sub-step 1, compute window: {w_worst:.4e}")
+    if not 1.0e-05 <= w_worst <= 1.0e-01:
+        raise SystemExit(
+            f"INSTRUMENT CONTROL FAILED: |w|max is {w_worst:.4e} after one "
+            f"sub-step. The established sub-step-1 field peaks near "
+            f"4.8e-03 m/s; this is not that configuration, and nothing "
+            f"below would be about the gap under investigation.")
 
     # THE MEASUREMENT.
     rows = []
@@ -218,7 +264,7 @@ def main(argv=None):
             for pf in range(6):
                 ot = perm[pf]
                 _transposed, nm, _su, _sv = meta[pf][ot]
-                ow = _read_h(args.hdump, when, lvl, ot + 1)
+                ow = _read_h(args.hdump, 1, when, lvl, ot + 1, _transposed)
                 pw = DIHEDRAL[nm](grabbed[key][pf][:, :, k])
                 if pw.shape != ow.shape:
                     raise SystemExit(
@@ -226,19 +272,32 @@ def main(argv=None):
                         f"oracle {ow.shape} -- different domains")
                 d = np.abs(pw - ow)
                 masks = region_masks(d.shape[0], d.shape[1], width=NG)
+                # WHERE the interior max sits, not just how big it is.
+                # region_masks' "corner" is the HALO diagonal wedge,
+                # while the w error under investigation lives at COMPUTE
+                # cells one step in from the panel corner -- inside
+                # "interior". A bare interior max cannot tell those
+                # apart, so the argmax and its distance to the nearest
+                # compute corner are printed beside it.
+                di = np.where(masks["interior"], d, -1.0)
+                idx = np.unravel_index(int(di.argmax()), di.shape)
+                ci, cj = idx[0] - NG, idx[1] - NG
+                cdist = min(ci, N - 1 - ci) + min(cj, N - 1 - cj)
                 rows.append((when, lvl, pf + 1, ot + 1,
                              {n: (float(d[m].max()) if d[m].size else 0.0)
                               for n, m in masks.items()},
-                             float(np.abs(ow).max())))
+                             float(np.abs(ow).max()), (ci, cj), cdist))
 
     print("\nzh, port vs oracle, FULL PADDED BOX "
           "(NG=%d rings; 'corner' = the diagonal wedges)" % NG)
     print(" when  level  face->tile   interior       edge        corner"
-          "      oracle |peak|")
-    for when, lvl, pf, ot, reg, peak in rows:
+          "      oracle|peak|  interior argmax (compute i,j)  dist to a"
+          " compute corner")
+    for when, lvl, pf, ot, reg, peak, amax, cdist in rows:
         print(f" {when:5s} {lvl:5s}  {pf}->{ot}       "
               f"{reg['interior']:.4e}  {reg['edge']:.4e}  "
-              f"{reg['corner']:.4e}   {peak:.4e}")
+              f"{reg['corner']:.4e}   {peak:.4e}    "
+              f"{amax}                 {cdist}")
 
     # CONTROL 4: identical ICs mean the BEFORE interior cannot be O(1).
     pre_int = max(r[4]["interior"] for r in rows if r[0] == "pre")

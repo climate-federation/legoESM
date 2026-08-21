@@ -192,6 +192,17 @@ PYEOF2
   # single interface cannot attach a height error to a layer. zh is
   # allocated (isd:ied, jsd:jed, npz+1) at dyn_core.F90:299, so the
   # padded slice below is its own declared extent.
+  #
+  # NAMED BY THE ACOUSTIC SUB-STEP, not by n_map. update_dz_d sits INSIDE
+  # `do it=1,n_split` (dyn_core.F90:339 .. :1737), so an n_map-keyed name
+  # lets sub-steps 2..8 overwrite sub-step 1 and leaves one file that
+  # LOOKS complete. It matters beyond a time offset: `if (it == 1)` at
+  # :537 means only the first sub-step takes its height halo from the
+  # gz exchange at :543, so the surviving file would test a DIFFERENT
+  # exchange than the hypothesis names -- and the artifact (~1e-2 m over
+  # seven sub-steps) is ~300x the signal being hunted (~3e-5 m) while
+  # sitting under the probe's abort threshold. It would have read as a
+  # confirmation.
   python3 - "$SRC/model/dyn_core.F90" <<'PYEOF3'
 import re, sys
 p = sys.argv[1]
@@ -204,16 +215,16 @@ if s.count(tail_a) != 1:
     raise SystemExit(f"update_dz_d tail count {s.count(tail_a)}, expected 1")
 pre = ("! LEGOESM HALO PROBE: the two interfaces bracketing model layer 1,\n"
        "! full padded box, BEFORE update_dz_d writes them.\n"
-       "      call legoesm_hdump(n_map, 'pre', 'zh1', "
+       "      call legoesm_hdump(it, 'pre', 'zh1', "
        "zh(isd:ied, jsd:jed, 1), isd, jsd)\n"
-       "      call legoesm_hdump(n_map, 'pre', 'zh2', "
+       "      call legoesm_hdump(it, 'pre', 'zh2', "
        "zh(isd:ied, jsd:jed, 2), isd, jsd)\n      ") + head
 s = s.replace(head, pre, 1)
 post = tail_a + ("\n"
        "! LEGOESM HALO PROBE: the same two interfaces, AFTER update_dz_d.\n"
-       "      call legoesm_hdump(n_map, 'post', 'zh1', "
+       "      call legoesm_hdump(it, 'post', 'zh1', "
        "zh(isd:ied, jsd:jed, 1), isd, jsd)\n"
-       "      call legoesm_hdump(n_map, 'post', 'zh2', "
+       "      call legoesm_hdump(it, 'post', 'zh2', "
        "zh(isd:ied, jsd:jed, 2), isd, jsd)")
 s = s.replace(tail_a, post, 1)
 
@@ -308,8 +319,12 @@ WANT_S=$((NSP * 4 * 6))
 echo "n_split=$NSP  wdump=$NW  sdump=$NS (want $WANT_S)"
 [ -n "$NSP" ] && [ "$NS" -eq "$WANT_S" ] && [ "$NW" -eq 24 ] || {
   echo "DUMP COUNT WRONG: the run did not complete every sub-step"; exit 7; }
-NH=$(ls hdump_*.dat 2>/dev/null | wc -l)
-echo "hdump=$NH (want 24: 2 capture points x 2 interfaces x 6 tiles)"
-[ "$NH" -eq 24 ] || {
+# `hdump*`, not `hdump_*`: the writer emits hdump<it>_<when>_<name>_t<pe>
+# with no underscore after the stem, so the first version of this glob
+# matched nothing and failed a run that had produced every file.
+NH=$(ls hdump*.dat 2>/dev/null | wc -l)
+WANT_H=$((NSP * 24))
+echo "hdump=$NH (want $WANT_H: n_split x 2 capture points x 2 interfaces x 6 tiles)"
+[ "$NH" -eq "$WANT_H" ] || {
   echo "HDUMP COUNT WRONG: the update_dz_d dumps are incomplete"; exit 7; }
 echo NH_WSUBSTEP_DONE
