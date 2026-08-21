@@ -32,15 +32,25 @@
 #                   + any local work that differs because the two arms are
 #                     no longer integrating the same fields
 #
-# THAT THIRD TERM IS REAL AND HAS TO BE BOUNDED, not assumed away.  The
-# no-comm arm keeps each band's own edge rows as ghosts, so after the first
-# step the two arms carry different states, and limiter branches and clamp
-# counts can differ.  The check is free, because every receipt already
-# records its per-block wall times: if trajectory drift were paying for the
-# difference, the no-comm arm's later block would move relative to its
-# first by an amount comparable to the difference itself.  The scorer below
-# prints that drift next to the communication term and refuses a verdict
-# when the drift is not small against it.
+# THAT THIRD TERM IS REAL, AND IT CANNOT BE BOUNDED BY WATCHING THE NO-COMM
+# ARM WOBBLE.  The no-comm arm keeps each band's own edge rows as ghosts, so
+# from the second step on the two arms carry different states; if the wrong
+# fields make a limiter or a solver take a CONSTANT amount less work, the
+# contamination is steady and every drift check reads clean.
+#
+# So this job runs a third arm, LEGOESM_LATLON_HALO_NOCOMM=wire, which
+# performs the real exchange and then keeps the local rows anyway.  It
+# answers bit-for-bit as the no-comm arm does -- same wrong trajectory, same
+# local work -- while paying the full communication cost:
+#
+#   wire - nocomm = HALO wire time + waiting for the slowest peer, with the
+#                   trajectory identical on both sides by construction
+#
+# That is the number the verdict is taken on.  ``full - nocomm`` is still
+# printed as the upper bound it always was, and the gap between the two IS
+# the trajectory contamination, measured rather than argued.  The no-comm
+# arm's block-to-block drift is printed alongside, as a weak sanity check
+# only -- it can be small while the contamination is large.
 #
 # SCOPE, verified by HLO census on 4 CPU devices (LL32x64 L8, same flags):
 # the knob removes ALL 52 collective-permutes from the compiled step and
@@ -157,8 +167,10 @@ BALLAST_ARMS="${BALLAST_ARMS:-0}"
 for ND in $DEVS; do
   run_arm "$ND" 0 "full_${ND}_a"
   run_arm "$ND" 1 "nc_${ND}_a"
+  run_arm "$ND" wire "wire_${ND}_a"
   run_arm "$ND" 0 "full_${ND}_b"
   run_arm "$ND" 1 "nc_${ND}_b"
+  run_arm "$ND" wire "wire_${ND}_b"
   if [ "$BALLAST_ARMS" = "1" ]; then
     run_arm "$ND" 0 "b2_${ND}_a" 2
     run_arm "$ND" 0 "b2_${ND}_b" 2
@@ -222,8 +234,8 @@ def block_drift_ms(tag):
 rows = {}
 missing = []
 for nd in DEVS:
-    for kind in (("full", "nc", "b2", "b2nc") if BALLAST
-                 else ("full", "nc")):
+    for kind in (("full", "nc", "wire", "b2", "b2nc") if BALLAST
+                 else ("full", "nc", "wire")):
         for rep in ("a", "b"):
             tag = f"{kind}_{nd}_{rep}"
             try:
@@ -235,28 +247,41 @@ if missing:
     print(f"ABORT: arms missing {missing}; no verdict")
     sys.exit(4)
 
-print(f"{'ndev':>5} {'full':>8} {'nocomm':>8} {'comm':>8} {'comm%':>7} "
-      f"{'ideal':>8} {'excess':>8} {'comm/excess':>12} {'spread':>8}")
+print(f"{'ndev':>5} {'full':>8} {'nocomm':>8} {'wire':>8} {'comm':>8} "
+      f"{'upper':>8} {'ideal':>8} {'excess':>8} {'comm/excess':>12} "
+      f"{'spread':>8}")
+print("  comm  = wire - nocomm   (same trajectory on both sides)")
+print("  upper = full - nocomm   (also carries the trajectory difference)")
 verdict_row = None
-contaminated = False
 for nd in DEVS:
     full = (rows[f"full_{nd}_a"] + rows[f"full_{nd}_b"]) / 2
     nc = (rows[f"nc_{nd}_a"] + rows[f"nc_{nd}_b"]) / 2
+    wire = (rows[f"wire_{nd}_a"] + rows[f"wire_{nd}_b"]) / 2
     spread = max(abs(rows[f"full_{nd}_a"] - rows[f"full_{nd}_b"]) / full,
-                 abs(rows[f"nc_{nd}_a"] - rows[f"nc_{nd}_b"]) / nc)
-    comm = full - nc
+                 abs(rows[f"nc_{nd}_a"] - rows[f"nc_{nd}_b"]) / nc,
+                 abs(rows[f"wire_{nd}_a"] - rows[f"wire_{nd}_b"]) / wire)
+    # The wire arm answers exactly as the no-comm arm does, so this
+    # difference is the collective and nothing else.
+    comm = wire - nc
+    # What the old two-arm subtraction gave: the same term PLUS whatever the
+    # two different trajectories cost differently.
+    upper = full - nc
     ideal = T1 / nd
     excess = full - ideal
     frac = comm / excess if excess > 0 else float("nan")
-    print(f"{nd:>5} {full:8.3f} {nc:8.3f} {comm:8.3f} {100*comm/full:6.1f}% "
-          f"{ideal:8.3f} {excess:8.3f} {frac:11.2f} {spread:7.1%}")
+    print(f"{nd:>5} {full:8.3f} {nc:8.3f} {wire:8.3f} {comm:8.3f} "
+          f"{upper:8.3f} {ideal:8.3f} {excess:8.3f} {frac:11.2f} "
+          f"{spread:7.1%}")
+    print(f"      ndev={nd}: the trajectory difference between the full and "
+          f"no-comm arms is worth {upper - comm:+.3f} ms, which the old "
+          f"two-arm subtraction counted as communication")
     # A difference smaller than half the arm spread is not a result.
     if abs(comm) < 0.5 * spread * full:
         print(f"      ndev={nd}: INCONCLUSIVE — comm term is inside the "
               f"arm spread")
-    # The no-comm arm stops answering correctly after the first step, so part
-    # of the difference could be local work that changed with the fields
-    # rather than communication. Its own block-to-block movement bounds that.
+    # Weak sanity check only: block-to-block movement inside the no-comm arm.
+    # A steady difference in local work has zero drift, so this cannot bound
+    # the contamination -- the wire arm above is what does that.
     drifts = [d for d in (block_drift_ms(f"nc_{nd}_a"),
                           block_drift_ms(f"nc_{nd}_b")) if d is not None]
     if drifts:
@@ -266,11 +291,9 @@ for nd in DEVS:
               f"({100 * drift / abs(comm) if comm else float('nan'):.0f}% of "
               f"the {comm:.3f} ms difference)")
         if abs(comm) > 0 and drift > 0.5 * abs(comm):
-            print(f"      ndev={nd}: INCONCLUSIVE — the no-comm arm drifts by "
-                  f"more than half the difference, so the difference cannot "
-                  f"be read as communication alone")
-            if nd == 128:
-                contaminated = True
+            print(f"      ndev={nd}: the no-comm arm is also unsteady within "
+                  f"itself by more than half the communication term; treat "
+                  f"every number in this row as provisional")
     else:
         print(f"      ndev={nd}: no per-block times in the receipt — the "
               f"trajectory-drift bound could not be computed")
@@ -299,11 +322,6 @@ if verdict_row is None:
           "stands on its own; do not read a verdict into it.")
     sys.exit(0)
 comm, excess, spread, full = verdict_row
-if contaminated:
-    print("NO VERDICT: at 128 devices the no-comm arm's own block-to-block "
-          "drift is more than half the full-minus-nocomm difference, so that "
-          "difference is not a clean communication term")
-    sys.exit(7)
 if abs(comm) < 0.5 * spread * full:
     print("NO VERDICT: the 128-device communication term is inside its own "
           "arm spread")

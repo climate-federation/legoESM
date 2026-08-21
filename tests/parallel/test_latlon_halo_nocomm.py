@@ -47,10 +47,11 @@ def _pad(field, mesh):
 
 
 def test_resolver_off_on_and_typo():
-    assert _resolve_halo_nocomm("") is False
-    assert _resolve_halo_nocomm("0") is False
-    assert _resolve_halo_nocomm("1") is True
-    for bad in ("true", "yes", "2", "01", " 1"):
+    assert _resolve_halo_nocomm("") == "off"
+    assert _resolve_halo_nocomm("0") == "off"
+    assert _resolve_halo_nocomm("1") == "1"
+    assert _resolve_halo_nocomm("wire") == "wire"
+    for bad in ("true", "yes", "2", "01", " 1", "WIRE"):
         with pytest.raises(ValueError, match="LEGOESM_LATLON_HALO_NOCOMM"):
             _resolve_halo_nocomm(bad)
 
@@ -233,3 +234,68 @@ def test_ballast_and_nocomm_compose_into_a_packing_only_arm():
     assert both == 0, (
         f"the packing-only control still moves {both} bytes; it cannot "
         f"isolate packing cost")
+
+
+def test_wire_arm_keeps_the_collective_and_the_broken_trajectory():
+    """The control that prices communication without a trajectory difference.
+
+    Subtracting the no-communication arm from the full run does not isolate
+    wire time: the two arms carry different fields from the second step on, so
+    their local work can differ too, and a contamination that is constant is
+    invisible to any drift check.  The ``wire`` arm runs the collective and
+    then keeps the local rows anyway, so it answers exactly as the ``1`` arm
+    does while paying the full wire cost -- the difference between the two is
+    the collective and nothing else.
+
+    Both halves are asserted, because either one alone is satisfiable by a
+    broken implementation: a compiler that deletes the unused collective gives
+    matching answers and no bytes, and an arm that forgot to discard the
+    result gives the right bytes and the wrong (correct) answer.
+    """
+    from jax.sharding import PartitionSpec as P
+
+    mesh = _mesh()
+    rng = np.random.default_rng(20260821)
+    field = jnp.asarray(rng.standard_normal((N_LAT, N_LON)), dtype=jnp.float32)
+    specs = (("fold", HALO, False),)
+
+    def values():
+        body = make_latlon_band_packed_pad_body(mesh, specs)
+        spec = P("lat", None)
+
+        @partial(shard_map, mesh=mesh, in_specs=spec, out_specs=spec,
+                 check_vma=False)
+        def _ex(x):
+            return body(x)[0]
+
+        return np.asarray(_ex(field))
+
+    def _with(setting, fn):
+        if setting is None:
+            os.environ.pop("LEGOESM_LATLON_HALO_NOCOMM", None)
+        else:
+            os.environ["LEGOESM_LATLON_HALO_NOCOMM"] = setting
+        try:
+            return fn()
+        finally:
+            os.environ.pop("LEGOESM_LATLON_HALO_NOCOMM", None)
+
+    full_bytes = _with(None, lambda: _collective_bytes(mesh, field, specs))
+    none_bytes = _with("1", lambda: _collective_bytes(mesh, field, specs))
+    wire_bytes = _with("wire", lambda: _collective_bytes(mesh, field, specs))
+
+    assert full_bytes > 0
+    assert none_bytes == 0
+    assert wire_bytes == full_bytes, (
+        f"the wire arm moves {wire_bytes} bytes, the full run moves "
+        f"{full_bytes}; it is not paying the communication it exists to "
+        f"price, so the difference it anchors is not wire time")
+
+    full_vals = _with(None, values)
+    none_vals = _with("1", values)
+    wire_vals = _with("wire", values)
+
+    assert not np.allclose(full_vals, wire_vals), (
+        "the wire arm answers like the full run, so it did not discard the "
+        "exchange and shares no trajectory with the no-communication arm")
+    np.testing.assert_array_equal(wire_vals, none_vals)

@@ -41,19 +41,31 @@ from legoesm.parallel.shard_map_compat import shard_map
 _FOLD_REF_HALO = 2
 
 
-def _resolve_halo_nocomm(env_value: str) -> bool:
-    """Resolve ``LEGOESM_LATLON_HALO_NOCOMM``: ``'1'`` replaces every lat-lon
-    halo ``ppermute`` with an optimization barrier; ``''``/``'0'`` off
-    (default).
+def _resolve_halo_nocomm(env_value: str) -> str:
+    """Resolve ``LEGOESM_LATLON_HALO_NOCOMM`` to one of three arms.
 
-    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- each device
-    keeps its OWN edge rows instead of the neighbour's, so every ghost row is
-    wrong and the run is meaningless as physics.  It exists because the step
-    time alone cannot be split: the profiler on this stack does not record
-    the halo collectives, so ``full - nocomm`` is the only way to price the
-    wire time plus the wait for the slowest peer against the SAME program.
-    Every other line -- the pack, the concatenate, the split, the pole fold,
-    the wall constants, the kernel count and the shapes -- is unchanged.
+    ``''``/``'0'``   off (default): the real exchange, the right answer.
+    ``'1'``          the collective is replaced by an optimization barrier --
+                     no wire traffic at all, and the answer is wrong.
+    ``'wire'``       the collective RUNS and its result is then discarded, so
+                     the arm pays the wire time while following the SAME wrong
+                     trajectory as ``'1'``.
+
+    The third arm exists because subtracting ``'1'`` from the full run does
+    not isolate communication: the two arms carry different fields after the
+    first step, so their local work can differ too, and a contamination that
+    is merely constant is invisible to any drift check.  ``full - '1'`` is
+    therefore an upper bound; ``'wire' - '1'`` differs from ``'1'`` ONLY by
+    the collective, with the trajectory identical by construction, and is the
+    number to quote as wire time.
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- in both timing
+    arms each device keeps its OWN edge rows instead of the neighbour's, so
+    every ghost row is wrong and the run is meaningless as physics.  It
+    exists because the step time alone cannot be split: the profiler on this
+    stack does not record the halo collectives.  Every other line -- the
+    pack, the concatenate, the split, the pole fold, the wall constants, the
+    kernel count and the shapes -- is unchanged.
 
     The barrier (rather than a bare identity) is load-bearing: without it the
     receive-side slices fold back to the send-side buffer and XLA deletes the
@@ -63,12 +75,12 @@ def _resolve_halo_nocomm(env_value: str) -> bool:
     Never valid in production.  Unknown values raise (dispatch hardening).
     """
     if env_value in ("", "0"):
-        return False
-    if env_value == "1":
-        return True
+        return "off"
+    if env_value in ("1", "wire"):
+        return env_value
     raise ValueError(
-        f"LEGOESM_LATLON_HALO_NOCOMM={env_value!r}: must be '0' or '1' "
-        f"(empty = off). It is a timing knob that BREAKS the answer; "
+        f"LEGOESM_LATLON_HALO_NOCOMM={env_value!r}: must be '0', '1' or "
+        f"'wire' (empty = off). It is a timing knob that BREAKS the answer; "
         f"a typo must not silently enable it.")
 
 
@@ -122,7 +134,11 @@ def _halo_ppermute(x, axis_name, perm):
     or the other, never a select.
 
     ``LEGOESM_LATLON_HALO_NOCOMM=1`` drops the collective entirely (wrong
-    answers, times the program without communication).
+    answers, times the program without communication);
+    ``LEGOESM_LATLON_HALO_NOCOMM=wire`` keeps the collective but discards what
+    it returns, so the arm pays the wire time on the SAME wrong trajectory as
+    ``=1`` -- the pair prices communication without a trajectory difference
+    between the two sides of the subtraction.
     ``LEGOESM_LATLON_HALO_BALLAST=N`` sends N copies and keeps the first
     (bit-identical answers, times the payload slope).
     """
@@ -143,8 +159,21 @@ def _halo_ppermute(x, axis_name, perm):
     rows = x.shape[0]
     send = jnp.concatenate([x] * ballast, axis=0) if ballast > 1 else x
 
-    if nocomm:
+    if nocomm == "1":
         recv = jax.lax.optimization_barrier(send)
+    elif nocomm == "wire":
+        # Run the real collective, then keep the LOCAL rows anyway.
+        #
+        # Holding the exchange in a discarded tuple element is not enough --
+        # XLA deletes a collective nothing consumes, and the first version of
+        # this arm moved zero bytes.  Selecting between the two on a flag the
+        # compiler cannot fold makes the exchange a live operand of the
+        # result, so it survives; the flag is false at run time, so the value
+        # is bit-for-bit the local one the no-communication arm produces.
+        wired = jax.lax.ppermute(send, axis_name, perm)
+        keep_local = jax.lax.optimization_barrier(
+            jnp.zeros((), dtype=jnp.bool_))
+        recv = jnp.where(keep_local, wired, send)
     else:
         recv = jax.lax.ppermute(send, axis_name, perm)
     if ballast > 1:
