@@ -38,7 +38,7 @@ def _ff(value) -> float:
         return float("nan")
 
 
-def _read_csv(path: Path) -> dict[str, dict]:
+def read_arm_csv(path: Path) -> dict[str, dict]:
     with path.open(newline="") as fh:
         rows = list(csv.DictReader(fh))
     if not rows:
@@ -46,7 +46,7 @@ def _read_csv(path: Path) -> dict[str, dict]:
     return {r["scheme"]: r for r in rows}
 
 
-def _arm_dir(root: Path, objective: str, param_set: str, seed: str,
+def arm_dir(root: Path, objective: str, param_set: str, seed: str,
              suffix: str = "") -> Path:
     """Arm directory, optionally tagged with a PROTOCOL suffix.
 
@@ -59,14 +59,14 @@ def _arm_dir(root: Path, objective: str, param_set: str, seed: str,
     return root / f"arm_{objective}_{param_set}{tag}_seed{seed}"
 
 
-def _find_csv(arm: Path) -> Path:
+def find_arm_csv(arm: Path) -> Path:
     candidates = sorted(arm.glob("*.csv"))
     if not candidates:
         raise FileNotFoundError(f"no merged CSV in {arm}")
     return candidates[0]
 
 
-def _ranking(rows: dict[str, dict], subset: set[str] | None = None) -> list[str]:
+def ranking_by_score(rows: dict[str, dict], subset: set[str] | None = None) -> list[str]:
     """Schemes ordered by the objective they were tuned under, best first.
 
     Restricted to ``subset`` BEFORE ranking, and to rows with a FINITE score.
@@ -97,8 +97,8 @@ def compare_seeds(rows_a: dict, rows_b: dict, *, seed_a: str, seed_b: str) -> di
             "the two seeds share no scheme with a finite score in both "
             f"(shared={sorted(shared)}, non-finite={non_finite})")
     subset = set(common)
-    rank_a = {s: i for i, s in enumerate(_ranking(rows_a, subset))}
-    rank_b = {s: i for i, s in enumerate(_ranking(rows_b, subset))}
+    rank_a = {s: i for i, s in enumerate(ranking_by_score(rows_a, subset))}
+    rank_b = {s: i for i, s in enumerate(ranking_by_score(rows_b, subset))}
 
     per_scheme = {}
     for scheme in common:
@@ -126,8 +126,8 @@ def compare_seeds(rows_a: dict, rows_b: dict, *, seed_a: str, seed_b: str) -> di
         }
 
     swaps = []
-    order_a = _ranking(rows_a, subset)
-    order_b = _ranking(rows_b, subset)
+    order_a = ranking_by_score(rows_a, subset)
+    order_b = ranking_by_score(rows_b, subset)
     for i, si in enumerate(order_a):
         for sj in order_a[i + 1:]:
             if order_b.index(si) > order_b.index(sj):
@@ -214,12 +214,12 @@ def main(argv: list[str] | None = None) -> int:
             "--seeds needs at least two: the whole point is the disagreement "
             "between independent searches.")
     seed_a, seed_b = args.seeds[0], args.seeds[1]
-    arm_a = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_a,
+    arm_a = arm_dir(args.arm_dir, args.objective, args.param_set, seed_a,
                      args.arm_suffix)
-    arm_b = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_b,
+    arm_b = arm_dir(args.arm_dir, args.objective, args.param_set, seed_b,
                      args.arm_suffix)
-    rows_a = _read_csv(_find_csv(arm_a))
-    rows_b = _read_csv(_find_csv(arm_b))
+    rows_a = read_arm_csv(find_arm_csv(arm_a))
+    rows_b = read_arm_csv(find_arm_csv(arm_b))
 
     result = compare_seeds(rows_a, rows_b, seed_a=seed_a, seed_b=seed_b)
     result["parameters"] = compare_parameters(arm_a, arm_b)

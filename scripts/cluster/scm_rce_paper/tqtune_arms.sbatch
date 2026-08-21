@@ -13,7 +13,7 @@ set +e
 # the CRM's TEMPERATURE AND HUMIDITY profiles, scored against the EXTERNAL
 # RCEMIP SAM_CRM RCE_small300 reference.
 #
-# TWENTY tasks = 10 schemes x 2 SEEDS.  The second seed is not redundancy: a
+# FIFTY tasks = 10 schemes x 5 SEEDS.  The extra seeds are not redundancy: a
 # uniform search over 20-26 parameters leaves draws ~0.76 of the range apart on
 # every axis, so a single seed's ranking is partly a lottery.  Two seeds make
 # rank REVERSALS visible; they do not make the search converged, and the report
@@ -53,7 +53,10 @@ EVALS_MIN=${EVALS_MIN:-48}
 EVALS_MAX=${EVALS_MAX:-240}
 
 SCHEMES=(sbm dca kuo mass_flux edmf zhang_mcfarlane kain_fritsch emanuel tiedtke bechtold)
-SEEDS=(20260815 20260816)
+# FIVE independent searches per scheme: two give a disagreement, five give a
+# distribution, which is what makes "this scheme improved" separable from
+# "this search got lucky". Array index -> (scheme, seed) as idx%10, idx/10.
+SEEDS=(20260815 20260816 20260817 20260818 20260819)
 SCHEME=${SCHEMES[$(( SLURM_ARRAY_TASK_ID % 10 ))]}
 SEED=${SEEDS[$(( SLURM_ARRAY_TASK_ID / 10 ))]}
 # Coriolis parameter [1/s].  RCEMIP is NONROTATING with a freely evolving
