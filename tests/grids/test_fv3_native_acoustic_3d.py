@@ -296,3 +296,46 @@ def test_nh_state_builder_carries_delz():
     validate_state_3d(st, N, NG, KM)
     hy = build_state_3d(N, NG, KM)
     assert all("delz" not in face for face in hy)
+
+
+def test_substeps_out_captures_one_independent_snapshot_per_substep(ctx):
+    """``substeps_out`` is the per-sub-step twin of ``press_out``.
+
+    Three things have to hold before a per-sub-step parity probe can use
+    it, and each has its own way of silently passing: the list must have
+    one entry per sub-step; the entries must be COPIES (appending the
+    live dict six times gives n_split identical references that pass a
+    length check); and consecutive entries must DIFFER (a capture taken
+    before the sub-step instead of after would repeat the input state).
+    """
+    st = _nh_state(KM, seed=5)
+    kw = _nh_kwargs(ctx, KM)
+    subs: list = []
+    acoustic_loop_3d(ctx, st, dt_atmos=3 * DT, km=KM, n_split=3,
+                     ptop=PTOP, akap=AKAP, cp_air=CP,
+                     substeps_out=subs, **kw)
+    assert len(subs) == 3
+    assert all(len(snap) == 6 for snap in subs)
+
+    # COPIES, not references: the loop keeps mutating `st` after each
+    # append, so a captured snapshot must not have followed it.
+    for snap in subs[:-1]:
+        for t in range(6):
+            assert snap[t]["w"] is not st[t]["w"]
+    moved = max(float(np.abs(subs[0][t]["w"] - st[t]["w"]).max())
+                for t in range(6))
+    assert moved > 0.0, (
+        "sub-step 1's snapshot equals the final state -- it is a live "
+        "reference, not a copy")
+
+    # DISTINCT sub-steps: consecutive snapshots must differ.
+    for i in range(2):
+        d = max(float(np.abs(subs[i][t]["w"] - subs[i + 1][t]["w"]).max())
+                for t in range(6))
+        assert d > 0.0, f"sub-step {i + 1} and {i + 2} captured the same w"
+
+    # And nothing is captured unless asked.
+    st2 = _nh_state(KM, seed=5)
+    acoustic_loop_3d(ctx, st2, dt_atmos=3 * DT, km=KM, n_split=3,
+                     ptop=PTOP, akap=AKAP, cp_air=CP,
+                     **_nh_kwargs(ctx, KM))

@@ -56,14 +56,20 @@ from full_step_oracle_parity import (          # noqa: E402
 WDUMP_ROOT = "/burg-archive/glab/users/pg2328/fv3_wdump/run_nh_1step"
 
 
-def read_dump(run_dir: str, blk: int, name: str, tile: int) -> np.ndarray:
-    """One ``wdump_b<blk>_<name>_t<tile>.dat`` as a (ni, nj) array.
+def read_dump(run_dir: str, blk: int, name: str, tile: int,
+              prefix: str = "wdump_b") -> np.ndarray:
+    """One ``<prefix><blk>_<name>_t<tile>.dat`` as a (ni, nj) array.
+
+    ``prefix`` selects which instrument's dump is being read: the
+    pre-remap one (``wdump_b<n_map>_``) or the per-sub-step one
+    (``sdump_it<it>_``).  Both writers emit the same header/row format,
+    so the READER is shared rather than transcribed twice.
 
     The writer emits ``ilo ihi jlo jhi`` then ``i j value`` rows, with
     the Fortran halo offsets in the header -- so the array is placed by
     its OWN stated bounds rather than by an assumed shape.
     """
-    path = os.path.join(run_dir, f"wdump_b{blk}_{name}_t{tile}.dat")
+    path = os.path.join(run_dir, f"{prefix}{blk}_{name}_t{tile}.dat")
     if not os.path.exists(path):
         raise SystemExit(f"missing dump {path}")
     with open(path) as fh:

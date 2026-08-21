@@ -416,6 +416,7 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      dp0: np.ndarray | None = None,
                      use_logp: bool = False,
                      press_out: list | None = None,
+                     substeps_out: list | None = None,
                      flux_cap: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
 
@@ -429,6 +430,13 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
     `press_out`, when given, receives the pressure bundle of the FINAL
     sub-step -- the one `dyn_core.F90:344-348` marks `remap_step` and the
     one `Lagrangian_to_Eulerian` reads.
+
+    ``substeps_out``, when given, receives ONE deep copy of the six-face
+    prognostic bundle per sub-step (index ``it - 1``), taken immediately
+    after ``acoustic_substep_3d`` returns.  It is the per-sub-step twin of
+    ``press_out``: a diagnostic BY RETURN, never a callback, so a probe
+    cannot substitute its own chain for the one under test.  Cost is
+    ``n_split`` state copies; the caller decides whether to ask.
 
     ``hydrostatic=False``: pass ``dp0`` (dp_ref) and either a carry from
     :func:`build_nh_carry` or None to have one built from ``ctx['hs6']``.
@@ -456,6 +464,10 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             use_logp=use_logp,
                             press_out=(press_out if remap_step else None),
                             flux_cap=flux_cap)
+        if substeps_out is not None:
+            substeps_out.append([{k: np.array(v, copy=True)
+                                  for k, v in state[t].items()}
+                                 for t in range(6)])
         if validate:
             # Fail at the sub-step that broke, not many steps later with a
             # field of NaN and no idea which stage produced it.

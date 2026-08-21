@@ -322,3 +322,55 @@ def test_km_below_the_remap_gate_leaves_pt_in_theta_v(eta):
                            cp_air=CP, kord_mt=9, kord_tm=-9, kord_tr=9,
                            q=_tracers(km))
     assert out["pt_units"] == "theta_v"
+
+
+@pytest.mark.slow
+def test_return_substeps_ends_where_return_pre_remap_starts(ctx, eta):
+    """The two capture points must MEET, or neither is where it claims.
+
+    ``return_pre_remap`` copies the state between the acoustic loop and
+    the remap; ``return_substeps`` copies it after every acoustic
+    sub-step.  Nothing in between writes the prognostics (the tracer
+    transport touches ``q`` only), so the LAST sub-step snapshot must be
+    the pre-remap one, field for field, bitwise.  That single equality is
+    what lets a probe compare an oracle sub-step dump and an oracle
+    pre-remap dump on the same footing -- and it fails loudly if either
+    capture is moved to the wrong side of the remap, which is the way
+    this kind of instrument usually goes wrong.
+    """
+    ak, bk, ptop, _ = eta
+    st = _state(ak, bk, ptop, seed=11)
+    pr = _press(st, ptop)
+    out = fv_dynamics_step(ctx, st, pr, bdt=120.0, km=KM, k_split=1,
+                           n_split=3, ptop=ptop, ak=ak, bk=bk, akap=AKAP,
+                           cp_air=CP, kord_mt=9, kord_tm=-9, kord_tr=9,
+                           q=_tracers(), return_pre_remap=True,
+                           return_substeps=True)
+    subs, pre = out["substeps"], out["pre_remap"]
+    assert len(subs) == 3
+    for t in range(6):
+        for name in ("delp", "pt", "u", "v", "w"):
+            assert np.array_equal(subs[-1][t][name], pre[t][name]), \
+                f"face {t + 1} {name}: last sub-step != pre-remap"
+
+    # NON-VACUITY. If the remap were a no-op the equality above would say
+    # nothing, and if the earlier sub-steps were copies of the last one
+    # the per-sub-step series would carry no information.
+    moved = max(float(np.abs(st[t]["delp"] - pre[t]["delp"]).max())
+                for t in range(6))
+    assert moved > 1e-6, (
+        f"the remap moved delp by only {moved:g} Pa, so 'last sub-step "
+        f"equals pre-remap' is not distinguishing the two capture points")
+    for i in range(2):
+        d = max(float(np.abs(subs[i][t]["delp"]
+                             - subs[i + 1][t]["delp"]).max())
+                for t in range(6))
+        assert d > 0.0, f"sub-steps {i + 1} and {i + 2} are the same state"
+
+    # Not requested, not returned.
+    st2 = _state(ak, bk, ptop, seed=11)
+    out2 = fv_dynamics_step(ctx, st2, _press(st2, ptop), bdt=120.0, km=KM,
+                            k_split=1, n_split=3, ptop=ptop, ak=ak, bk=bk,
+                            akap=AKAP, cp_air=CP, kord_mt=9, kord_tm=-9,
+                            kord_tr=9, q=_tracers())
+    assert "substeps" not in out2 and "pre_remap" not in out2

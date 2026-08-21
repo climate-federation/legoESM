@@ -514,7 +514,8 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      nord_tr: int = 0, trdm2: float = 0.0,
                      lim_fac: float = 1.0, z_tracer: bool = True,
                      inline_q: bool = False,
-                     return_pre_remap: bool = False) -> dict:
+                     return_pre_remap: bool = False,
+                     return_substeps: bool = False) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -772,6 +773,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     # False is the faithful flag for the moist NH arm.  The remap refuses
     # the other combination rather than trusting this line.
     adiabatic_flag = hydrostatic or zvir == 0.0
+    substeps: list | None = [] if return_substeps else None
     for n_map in range(1, k_split + 1):
         last_step = (n_map == k_split)
 
@@ -789,6 +791,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                          p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                          use_logp=use_logp,
                          press_out=press_out,
+                         substeps_out=(substeps if last_step else None),
                          flux_cap=flux_cap)
         if len(press_out) != 6:
             raise RuntimeError(
@@ -930,4 +933,17 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
            "pt_units": "K" if remapped else "theta_v"}
     if return_pre_remap:
         out["pre_remap"] = pre_remap
+    if return_substeps:
+        # SAME CONTRACT AS ``pre_remap``: by RETURN, last ``n_map`` only,
+        # deep copies. ``substeps[-1]`` is the state at ``it == n_split``,
+        # which on the NH arm is bitwise ``pre_remap["w"]`` -- nothing
+        # between the acoustic loop's end and dyn_core's return writes
+        # ``w`` (dyn_core.F90:1736-1830) -- so asking for both gives a
+        # free cross-check that the two capture points are where they
+        # claim to be.
+        if len(substeps) != n_split:
+            raise RuntimeError(
+                f"return_substeps: captured {len(substeps)} sub-steps, "
+                f"expected n_split={n_split}")
+        out["substeps"] = substeps
     return out
