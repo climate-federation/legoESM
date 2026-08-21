@@ -101,6 +101,42 @@ by up to 15% in thickness and 4% in depth -- a DEEP geometry difference, and
 therefore a different thing from the top-two-level shear divergence Phase 1b
 measures.
 
+RETRACTION (2026-08-20, same day, before anything was built on it).  The line
+above -- "NEMO's own T-point depths ... are the only one of the four arms that
+passes the ACC metric" -- is TRUE OF THE RECORDED METRIC AND MISLEADING AS
+PHYSICS.  ``acc_full`` integrates the zonal transport across ALL 199 rows of the
+section, including the CLOSED-BASIN latitudes where gyre recirculation lives.
+``acc_thermal_wind.acc_band`` restricts the same integral to the re-entrant
+channel (rows 14..48, the rows that are wet at every longitude) and weights with
+the true partial-cell thickness -- i.e. it is the circumpolar transport.  The
+two rank the four arms almost OPPOSITELY:
+
+  arm          acc_full gap   acc_band gap   baroclinic gap   barotropic gap
+  1-D,  1-D          +1.659         +3.483           +0.490          +2.717
+  NEMO, 1-D          +0.865         +0.690           +0.582          -0.005
+  1-D,  NEMO         +0.164         +2.893           +0.097          +2.775
+  NEMO, NEMO         -0.516         +0.099           +0.076          +0.058
+
+The depth-only arm wins the recorded metric while leaving a +2.775 Sv
+BAROTROPIC excess in the actual channel.  On the channel band it is NEMO's BOTH
+ladders that close the gap -- +0.099 Sv against the shipped +3.483 Sv, a 97%
+cut, and the only arm where both components are near zero.
+
+The two halves fix DIFFERENT components, which is why neither alone is the
+answer: the THICKNESS ladder fixes the BAROTROPIC (bottom-referenced) transport
+(+2.717 -> -0.005) and the DEPTH ladder fixes the BAROCLINIC (thermal-wind)
+transport (+0.490 -> +0.097).  Only the depth half has the equation-of-state
+path traced below; the thickness half's barotropic path is NOT traced here and
+is OPEN.
+
+WHAT SURVIVES BOTH METRICS: the SHIPPED ladder pair is the WORST of the four on
+both, and the vertical geometry dominates the gap on both.  What does NOT
+survive is any claim that one half alone is the fix.
+
+Why the recorded metric rewards an arm whose channel transport is wrong is
+UNEXPLAINED and is the next thing to settle; do not pick a ladder on the
+strength of ``acc_full`` alone.
+
 METRIC-WEIGHT ROBUSTNESS (the obvious attack on the table above: the recorded
 ACC metric weights every arm with e3t_1d, which is the model's OWN thickness
 only on the two 1-D-thickness arms).  Re-scored with NEMO's true partial-cell
