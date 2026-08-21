@@ -99,6 +99,20 @@ def test_bad_prescribe_rejected():
         _dry_artifact(prescribe="bogus")
 
 
+def test_qc_channel_validation():
+    # A valid recorded cloud-water channel (0 <= qc <= qt) is accepted.
+    assert _moist_artifact(qc=_profile_series(0.001)).is_moist
+    # qc exceeding total water would seed a negative q_v at SCM init — rejected.
+    with pytest.raises(BridgeError, match="qc must not exceed qt"):
+        _moist_artifact(qc=_profile_series(0.02))       # qt is 0.016
+    # negative cloud water is unphysical — rejected.
+    with pytest.raises(BridgeError, match="qc must be non-negative"):
+        _moist_artifact(qc=_profile_series(-0.001))
+    # a dry artifact must not carry cloud water.
+    with pytest.raises(BridgeError):
+        _dry_artifact(qc=_profile_series(0.001))
+
+
 def test_non_monotone_heights_rejected():
     bad = jnp.asarray([100.0, 50.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0])
     with pytest.raises(BridgeError):

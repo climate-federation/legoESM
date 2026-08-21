@@ -146,7 +146,7 @@ class LESReferenceArtifact:
         nt, nz = self.nt, self.nz
         # profile time series: (nt, nz)
         for name in ("theta", "u", "v", "wtheta_resolved", "wtheta_sgs",
-                     "qt", "wqt_resolved", "wqt_sgs"):
+                     "qt", "wqt_resolved", "wqt_sgs", "qc"):
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -185,9 +185,24 @@ class LESReferenceArtifact:
                 raise BridgeError(
                     f"{self.case_name}: moist artifact (qt set) must carry wqt_resolved"
                 )
+            # Recorded cloud water qc (when present): finite, non-negative, and
+            # never exceeding total water (q_t = q_v + q_c + q_r ≥ q_c). The moist
+            # SCM init seeds q_c from qc and sets q_v = q_t − q_c, so qc > qt would
+            # seed a NEGATIVE q_v — reject it at the serialization boundary.
+            if self.qc is not None:
+                qc = jnp.asarray(self.qc)
+                if not bool(jnp.all(jnp.isfinite(qc))):
+                    raise BridgeError(f"{self.case_name}: qc must be finite")
+                if bool(jnp.any(qc < 0.0)):
+                    raise BridgeError(f"{self.case_name}: qc must be non-negative")
+                if bool(jnp.any(qc > jnp.asarray(self.qt))):
+                    raise BridgeError(
+                        f"{self.case_name}: qc must not exceed qt (q_t ≥ q_c); an "
+                        "artifact with qc>qt would seed negative q_v at SCM init"
+                    )
         else:
             dry_forbidden = [
-                n for n in ("wqt_resolved", "wqt_sgs", "qv_adv", "w_qv_s")
+                n for n in ("wqt_resolved", "wqt_sgs", "qv_adv", "w_qv_s", "qc")
                 if getattr(self, n) is not None
             ]
             if dry_forbidden:

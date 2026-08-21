@@ -264,6 +264,10 @@ def build_cbl_scm_from_artifact(
             q_c_adj = jnp.clip(
                 interp_profile(jnp.asarray(artifact.qc)[0], z_les, z_scm), 0.0, None)
             theta_adj = theta_scm + constants.L_v / (constants.c_pd * exner) * q_c_adj
+            # q_v = q_t − q_c folds any rain q_r into vapour (q_t = q_v+q_c+q_r).
+            # Faithful for the suite's NON-precipitating moist cases (q_r≈0;
+            # RICO/precipitating is out of scope, D2) and the Sundqvist SCM carries
+            # no q_r; total water q_t is conserved regardless.
             q_v_scm = qt0 - q_c_adj
         else:
             theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
