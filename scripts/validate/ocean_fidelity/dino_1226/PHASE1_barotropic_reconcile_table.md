@@ -112,9 +112,20 @@ arms → null).
 | arm (HEAD cbd0ac504)            | ACC [Sv] | \|diff vs NEMO d90\| |
 |---------------------------------|----------|----------------------|
 | velocity_avg (legacy default)   | 63.6931  | **1.6761**           |
-| transport_avg (NEMO-faithful)   | 63.6450  | **1.7242**           |
+| transport_avg (see label note)  | 63.6450  | **1.7242**           |
 | arm1_pre (0 fixes, reference)   | 63.8122  | 1.5570               |
 | NEMO d90 (reference)            | 65.3692  | —                    |
+
+**LABEL CORRECTION (#1455 R6, 2026-08-21):** this table originally called
+`transport_avg` "NEMO-faithful". It is NOT. NEMO installs the transport average
+on the NOW level and then UNDOES it (`stpmlf.F90:787-790`, the `.NOT.ln_bt_fw`
+branch DINO runs); what NEMO COMMITS is `uu_b(Kaa)`, the velocity-weighted
+boxcar, because `ln_dynadv_vec=.TRUE.` (`namelist_cfg:321`). The faithful
+configuration is `velocity_avg` TOGETHER WITH
+`barotropic_after_reconcile="nemo_mlf_baro_corr"`, and that is what the
+kamm_mlf card now ships. The arms in this table both ran the second site OFF,
+so neither is the faithful one and the ranking above cannot be read as a
+fidelity verdict.
 
 Reduction: `acc_full` = median over lons 2..-2 of the e3t1d-weighted full-section
 zonal transport [Sv]. Reference: NEMO DINO day-90 twin (tn/sn/un).

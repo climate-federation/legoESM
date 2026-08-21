@@ -309,9 +309,14 @@ class DINOConfig:
     barotropic_een_seed: str = "window_start"
     # 3-D momentum depth-mean reconciliation target (NEMO dyn_spg_ts N6): see
     # BarotropicConfig.barotropic_reconcile_target docstring. "velocity_avg"
-    # (default, bit-identical) = lego's legacy primary/velocity boxcar mean;
-    # "transport_avg" = NEMO's un_adv*r1_hu(Kmm) secondary/transport mean
-    # (dynspg_ts.F90:1170-1172). Only the nemo_dino_kamm_mlf card flips it.
+    # = the primary/velocity boxcar mean, which is ALSO what NEMO's surviving
+    # (committed) reconciliation aims at on this configuration -- uu_b(Kaa)
+    # under ln_dynadv_vec=.TRUE.; "transport_avg" = NEMO's un_adv*r1_hu(Kmm)
+    # secondary/transport mean (dynspg_ts.F90:1170-1172), which NEMO installs
+    # mid-step and then UNDOES at stpmlf.F90:787-790. No card flips it away
+    # from the default any more: the nemo_dino_kamm_mlf card pins
+    # "velocity_avg" EXPLICITLY, together with barotropic_after_reconcile,
+    # because the two are one choice (#1455 R6, see the card).
     barotropic_reconcile_target: str = "velocity_avg"
     # NEMO's SECOND depth-mean reconciliation, mlf_baro_corr (cfgs/DINO/MY_SRC/
     # stpmlf.F90:754-765): see BarotropicConfig.barotropic_after_reconcile.
@@ -319,9 +324,17 @@ class DINOConfig:
     # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf site, which discards
     # the implicit vertical solve's column-mean deposit. (NOT an "after
     # thickness" change: NEMO's weighting is time-level independent -- the
-    # key_qco free-surface factor cancels. Corrected 2026-08-21.) No card flips
-    # it -- it is selected per-run, and matching NEMO needs it TOGETHER with
-    # barotropic_reconcile_target="velocity_avg".
+    # key_qco free-surface factor cancels. Corrected 2026-08-21.) Matching NEMO
+    # needs it TOGETHER with barotropic_reconcile_target="velocity_avg"; the
+    # nemo_dino_kamm_mlf card ships that pair (#1455 R6 arm D). It is one of
+    # the two arms that take the 90-day acceptance gate from 4/5 to 5/5 -- and
+    # the FAITHFUL one; the other (arm B) is not shipped, see the card.
+    # MARGIN CAVEAT, recorded (4d531d5da retraction 4c): arm D's FIFTH gate
+    # pass carries 0.044 Sv of margin, LESS THAN ONE noise floor -- and that
+    # 0.091 Sv floor is a 3-member estimate taken on TEN-YEAR branches and
+    # transferred to 90-DAY runs without the transfer ever being validated.
+    # "5/5" here means "the gate is no longer failing", not "the twin is
+    # finished". Every other card leaves it "off".
     barotropic_after_reconcile: str = "off"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
@@ -1541,21 +1554,165 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # under the leapfrog's Nbb seed, so it lands on THIS card only (under
     # FE the window seed IS Kmm and the options coincide byte-identically).
     "barotropic_een_seed": "nemo_kmm",
-    # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170-1172): reconcile the 3-D momentum
-    # depth-mean onto un_adv*r1_hu(Kmm) -- the SECONDARY/transport-weighted
-    # substep mean (== legoESM Hu_avg, the same quantity already routed to
-    # tracer advection) -- instead of the primary/velocity boxcar mean. The two
-    # kernels sample the substep profile at different phases (DINO nn_e=23:
-    # centroid 22.0 vs 14.67), matching NEMO's placement. CORRECTION
-    # (#1455 M2 lane, e31c9e99b): an earlier softening here claimed the
-    # window "is NOT NEMO's" from a 16%-vs-30% phase-separation measurement;
-    # that measured the FORWARD-EULER weight kernel, which this card does not
-    # run. On the leapfrog kernel this card runs, the window IS NEMO's
-    # bit-identically (primary weights diff 0.0, secondary 7e-18) and the
-    # phase separation IS NEMO's 30%.
-    # MLF-only (the N6 reconciliation is where the leap-frog barotropic
-    # mode lands on the 3-D velocity), so it lands on THIS card only.
-    "barotropic_reconcile_target": "transport_avg",
+    # ------------------------------------------------------------------
+    # The NEMO-faithful depth-mean reconciliation PAIR (#1455 R6).
+    #
+    # These two knobs are ONE choice, not two: NEMO reconciles the 3-D
+    # momentum depth mean TWICE per step, and which average the surviving
+    # site aims at is fixed by the same namelist switch that decides what
+    # the substep loop accumulated. Setting either alone runs a model that
+    # is NEMO at neither site. Measured 2026-08-21 in the four-arm A/B
+    # below; both are pinned here so a silent revert of one goes red
+    # (tests/ocean/unit/test_partial_cells_phase7.py and
+    # tests/ocean/unit/test_barotropic_after_reconcile.py).
+    #
+    # THE TWO NEMO SITES, re-read end to end in the build that ran
+    # (oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC):
+    #
+    #   SITE 1 -- dynspg_ts.F90:1170-1172, inside dyn_spg, NOW level.
+    #     "Correct velocities so that the barotropic velocity equals
+    #      (un_adv, vn_adv) (in all cases)"
+    #     puu(:,:,jk,Kmm) = ( puu(:,:,jk,Kmm) + un_adv(:,:)*r1_hu(:,:,Kmm)
+    #                         - puu_b(:,:,Kmm) ) * umask(:,:,jk)
+    #     un_adv is the TRANSPORT-weighted substep mean (accumulated
+    #     :736 as za2*zhU*r1_e2u, normalised :999 by r1_wgt2s). It is a
+    #     WITHIN-STEP advecting velocity for tracer advection and it is
+    #     UNDONE before the Asselin filter at stpmlf.F90:787-790 -- the
+    #     .NOT.ln_bt_fw branch, which is the branch DINO runs
+    #     (RUN_90D_TWIN/namelist_cfg:353, ln_bt_fw=.false.) -- the two
+    #     lines are algebraic inverses. So it never reaches the committed
+    #     VELOCITY, and matching it there is matching a quantity NEMO
+    #     throws away. It is NOT inert overall: tra_adv runs at
+    #     stpmlf.F90:528, between site 1 and site 2, and advects with the
+    #     un_adv-carrying velocity, so it does reach the committed TRACER
+    #     state. That is why site 1 exists. legoESM routes its own Hu_avg
+    #     to tracer advection on a separate path, so nothing here removes
+    #     the transport average from the model -- only from the committed
+    #     momentum.
+    #
+    #   SITE 2 -- stpmlf.F90:709 mlf_baro_corr, called :578 after dyn_zdf
+    #     and before dyn_atf_qco, AFTER level, body :754-765. It installs
+    #     uu_b(:,:,Kaa). On this card ln_dynadv_vec=.TRUE.
+    #     (namelist_cfg:321), so dynspg_ts.F90:978-980 accumulates
+    #     VELOCITIES (not transports) and :1001 normalises them -- i.e.
+    #     uu_b(Kaa) is the PRIMARY, VELOCITY-weighted boxcar substep
+    #     average, exactly. This is the reconciliation that survives into
+    #     the committed state.
+    #
+    # Hence the faithful pair: aim the in-solve reconciliation at the
+    # VELOCITY average (site 2's target, the one that survives), and run
+    # NEMO's second site as well.
+    #
+    # WHAT SITE 2 DOES PHYSICALLY: it recomputes the column mean AFTER the
+    # implicit vertical momentum solve and overwrites it with the
+    # barotropic solver's own average -- i.e. it DELETES the vertical
+    # solve's column-mean deposit. legoESM without it keeps that deposit.
+    # Measured +17.9 m3/s2 per southern u-row on the 90-day twin, 12x
+    # NEMO's OWN realized spin-up rate (+1.430; against legoESM's realized
+    # rates of +0.66..+1.00 it is 18-27x), discarded by NEMO every step.
+    #
+    # THE FOUR-ARM A/B (90-day DINO twin at d27dc0909, same IC, NEMO's own
+    # ladders, corrected clock, fp64, all stable; ACC gap = |lego - NEMO|
+    # in Sv, gate = the 5-metric 90-day acceptance gate):
+    #
+    #             reconcile      2nd site   ACC gap   gate
+    #   A         transport_avg  off         0.5965   4/5
+    #   B         transport_avg  ON          0.3042   5/5
+    #   C         velocity_avg   off         0.5694   4/5
+    #   D  <--    velocity_avg   ON          0.4107   5/5   FAITHFUL, shipped
+    #
+    # WHY D AND NOT THE LOWER-SCORING-ON-ACC B (0.3042):
+    #   1. B and D are NOT SEPARABLE on ACC. The single-run noise floor is
+    #      0.091 Sv, so a DIFFERENCE of two runs carries sqrt(2)*0.091 =
+    #      0.129 Sv. |B - D| = 0.107 Sv sits UNDER that bar. The same holds
+    #      on all four density metrics (every B-vs-D difference is
+    #      0.05x-0.16x its own floor). B and D are indistinguishable on all
+    #      five gate metrics; "B scores better" is not a readable result.
+    #   2. On the reduction that weights the physics, D is BEST by a wide
+    #      margin and B is the WORST non-baseline arm. The band mean is an
+    #      equal-weight mean over 13 u-rows, but five of them sit against
+    #      the southern wall where NEMO's own 90-day spin-up torque is
+    #      +0.119 against +18.465 for the other eight -- 0.6% of the band's
+    #      physics carrying 72% of the band-mean deficit. Re-reduced over
+    #      rows 6-13 (99.4% of NEMO's spin-up), closure vs arm A:
+    #      B 37.5%, C 41.5%, D 61.9%.
+    #      HONEST SCOPE ON THAT BAR: the pre-registration defined the >50%
+    #      criterion on the EQUAL-WEIGHT 13-row band mean, and on THAT
+    #      reduction BOTH arms miss (D 43.0%, B 48.5%). The rows-6-13
+    #      re-reduction that D clears at 61.9% was chosen AFTER the arms
+    #      ran, on the ground that the five wall rows carry 0.6% of the
+    #      physics. So: the pre-registered bar is MISSED as written and met
+    #      only on a post-hoc, physics-weighted reduction. That is a reason
+    #      to prefer D over B on RANKING (the ranking inverts between the
+    #      two reductions and the physics-weighted one is the defensible
+    #      choice), NOT a claim that the bar was cleared as pre-registered.
+    #      The criterion had a SECOND half -- ">50% closure AND the ACC gap
+    #      shrinking toward the floor" -- which D does satisfy (0.5965 ->
+    #      0.4107). Both verdicts live in
+    #      PHASE2_R6_alignment_and_prereg.md.
+    #   3. Highest-tier evidence, a MATCHED-STATE first step (legoESM
+    #      stepping the state bit-identical to NEMO's restart, against
+    #      NEMO's own first step -- same state, one variable, above any
+    #      90-day trajectory metric). Band-mean barotropic-solve torque:
+    #      transport_avg 0.524 vs NEMO 0.936 (diff -0.413); velocity_avg
+    #      0.993 vs NEMO 0.936 (diff +0.057). NEMO's own average matches
+    #      NEMO 7.2x better on a matched state.
+    #   NOTE ON B's NOMINAL ACC EDGE: by point 1 it is UNREADABLE, so no
+    #   mechanism is needed and none is asserted. Two errors partially
+    #   cancelling in B is one PLAUSIBLE reading (e1acaa685) and nothing
+    #   measured here isolates a second error; the recorded status is
+    #   "cause unknown, not guessed", and it stays that way. Reading a
+    #   mechanism off a sub-floor difference is the exact error retracted
+    #   in 4d531d5da, retraction 4(b).
+    #
+    # REMAINING LEDGER, stated so nobody reads this as closed. TWO
+    # SEPARATE open quantities -- do not merge them, they are different
+    # scales and different evidence:
+    #
+    #   (i) 0.411 Sv of ACC gap survives arm D, and NO named structural
+    #       DIFF between the two models is left to own it. Cause UNKNOWN;
+    #       no candidate is named here, because naming one without
+    #       evidence is the failure mode this campaign already paid for.
+    #
+    #   (ii) the +0.296 m3/s2 per-row ZDF-bt residue -- the part of the
+    #       implicit vertical solve's column-mean deposit that legoESM
+    #       still retains where NEMO discards all of it. Three mechanisms
+    #       contribute and no measurement separates them; all PLAUSIBLE:
+    #         (a) LEADING, and a legoESM defect in its own right: the
+    #             implicit momentum solve builds its u-face control volume
+    #             with interp_cell_to_uface on an ALREADY-MASKED
+    #             thickness, so at a staircase face it returns HALF a
+    #             thickness where NEMO's umask is 0. NEMO's rule is to
+    #             average the face thickness on the UNMASKED reference
+    #             ladder and mask AFTER (filed that way, not as "use the
+    #             min rule"); latlon_cgrid_operators.py's own docstring
+    #             states the house rule this violates for layer thickness.
+    #             HOW IT MOVES A TRANSPORT: the bias is in the COLUMN
+    #             DIVISOR -- sum_k dz_u picks up a half thickness at every
+    #             staircase level, inflating H_u and shrinking the depth
+    #             mean the reconciliation installs. The adjacent guard does
+    #             NOT already fix it: the face VISCOSITY is masked with a
+    #             3-D face mask, but the control volume is not, and the
+    #             u-mask applied to the solve is the 2-D surface mask
+    #             broadcast down. Nor does retraction 6 ("DINO has no
+    #             partial steps") neutralise it -- full-step z still has a
+    #             staircase and the thickness is still pre-masked.
+    #             Named, not fixed, not measured.
+    #         (b) the wet-column floor/weighting difference between the
+    #             two divisor conventions.
+    #         (c) in-matrix bottom drag, which makes the implicit solve
+    #             genuinely non-mean-preserving rather than merely
+    #             re-weighted.
+    # ------------------------------------------------------------------
+    # CONSEQUENCE FOR CALLERS: barotropic_after_reconcile has a site only in
+    # the leap-frog family, so since this flip
+    # `run_dino.py --recipe nemo_dino_kamm_mlf --outer-integrator forward_euler`
+    # (or ab2) RAISES at model construction instead of silently running a
+    # different composition. That is the dispatch gate doing its job, but it is
+    # a new way for a previously-working command line to stop; override with
+    # barotropic_after_reconcile="off" if a non-leapfrog arm is what you want.
+    "barotropic_reconcile_target": "velocity_avg",
+    "barotropic_after_reconcile": "nemo_mlf_baro_corr",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
     # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
     # — meaningful ONLY under the MLF integrator (construction raises

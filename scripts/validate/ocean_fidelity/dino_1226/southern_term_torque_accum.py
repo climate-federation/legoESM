@@ -179,11 +179,19 @@ the PRIMARY velocity-weighted average (dynspg_ts.F90:846-847), and
 ln_dynadv_vec=.TRUE.) and uses ``un_adv*r1_hu(Kmm)`` only on the NOW level
 (:984-987), which ``mlf_baro_corr`` removes again before the Asselin filter
 (cfgs/DINO/MY_SRC/stpmlf.F90:757-760, the .NOT.ln_bt_fw branch;
-ln_bt_fw=.false. at RUN_90D_TWIN/namelist_cfg:353).  legoESM's card sets
-``barotropic_reconcile_target="transport_avg"`` and ``_leapfrog_step`` then
-uses that reconciled depth mean as the AFTER-level mode -- i.e. NEMO's
-NOW-level average in NEMO's AFTER-level slot.  ``velocity_avg`` is the
-NEMO-correct choice for that slot and is already implemented.
+ln_bt_fw=.false. at RUN_90D_TWIN/namelist_cfg:353).  At the time this block
+was recorded legoESM's card set ``barotropic_reconcile_target="transport_avg"``
+and ``_leapfrog_step`` then used that reconciled depth mean as the AFTER-level
+mode -- i.e. NEMO's NOW-level average in NEMO's AFTER-level slot.
+``velocity_avg`` is the NEMO-correct choice for that slot.
+
+SUPERSEDED (#1455 R6): the kamm_mlf card now SHIPS ``velocity_avg`` together
+with ``barotropic_after_reconcile="nemo_mlf_baro_corr"``, so the arms recorded
+in this docstring are no longer what the card runs by default.  Reproduce them
+with ``DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off``.  The
+"-0.61 deficit" and the "18% of the deficit" reading below are RETRACTED
+(commit d69dc6ce0: the valid-stack deficit is -0.361 and capture is 75%);
+they are left in place only as the record of what was measured then.
 
   MEASURED: flipping it moves the barotropic row +0.129 and the realized
   spin-up rate +0.110 m3/s2 per row -- the predicted DIRECTION, and 18% of

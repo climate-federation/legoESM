@@ -501,8 +501,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     if _ar:
         # NEMO mlf_baro_corr (cfgs/DINO/MY_SRC/stpmlf.F90:754-765): the SECOND
         # depth-mean reconciliation, run after dyn_zdf on the committed AFTER
-        # level, which legoESM has no site for. "nemo_mlf_baro_corr" builds it;
-        # "off" is the card default.
+        # level. "nemo_mlf_baro_corr" is what NEMO does.
+        #
+        # CORRECTED 2026-08-21 (#1455 R6): "off" is NO LONGER the card default.
+        # nemo_dino_kamm_mlf now SHIPS the faithful pair, so the twin's default
+        # composition is velocity_avg + nemo_mlf_baro_corr. To reproduce any
+        # arm recorded BEFORE that flip, set BOTH:
+        #     DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off
         #
         # CORRECTED 2026-08-21: an earlier version of this comment called it
         # "orthogonal to DINO_RECONCILE_TARGET" and said "setting both is two

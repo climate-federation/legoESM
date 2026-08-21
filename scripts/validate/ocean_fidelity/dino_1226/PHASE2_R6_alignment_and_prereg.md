@@ -369,6 +369,17 @@ must state which value of the other it held.
 
 ## R6 OWNERSHIP VERDICT — PARTIAL; the pre-registered bar is MISSED, narrowly
 
+> **SUPERSEDED — read the ROUND-2 section below (commit `4d531d5da`) before
+> citing anything in this section.** The reduction used here is the
+> equal-weight 13-row band mean, which is dominated by five wall rows carrying
+> 0.6% of NEMO's spin-up physics. On the physics-weighted rows-6-13 reduction
+> the ranking INVERTS: D is best (61.9%) and B is the worst non-baseline arm
+> (37.5%). "Arm B is the best arm" and "the shortfall is stable across three
+> reductions" are both withdrawn there. What survives from this section: the
+> pre-registered bar, AS WRITTEN on the 13-row band mean, is missed by both
+> arms. What is retracted: the ranking, and every B-vs-D comparison below,
+> which are all under the difference floor and therefore unreadable.
+
 The criterion was: the southern-band gap closes by MORE THAN 50% and the
 full-section ACC gap shrinks toward the floor.
 

@@ -267,6 +267,29 @@ def build_replay_ic(*, recipe: str = RECIPE, run_traj: str = RUN_TRAJ,
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
 
+    # #1455 R6: the kamm_mlf card now SHIPS the NEMO-faithful reconciliation
+    # pair (barotropic_reconcile_target="velocity_avg" +
+    # barotropic_after_reconcile="nemo_mlf_baro_corr").  Every probe that
+    # imports this helper bridges a state with ``u_before`` populated, so the
+    # leap-frog branch runs and NEMO's SECOND reconciliation now fires -- which
+    # SHIFTS every step-level number recorded on those probes before the flip.
+    # Honour the same two ablation env vars kamm_twin_90d.py does, so a
+    # pre-flip baseline is restorable rather than lost:
+    #   DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off
+    # reproduces the composition every pre-2026-08-21 replay number was
+    # recorded on.  Values are validated by the model's own dispatch gates
+    # (barotropic_common.validate_after_reconcile /
+    # barotropic_latlon_cgrid), so a typo raises rather than silently
+    # selecting a default.
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
+    _ar = os.environ.get("DINO_AFTER_RECONCILE")
+    if _ar:
+        cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
+        print(f"ABLATION: barotropic_after_reconcile={_ar}")
+
     st = br.state
     verify_day0_matches_restart(st, s0, br.land_mask)
 

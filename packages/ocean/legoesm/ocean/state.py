@@ -1246,7 +1246,12 @@ class BarotropicConfig(NamedTuple):
     # — dividing by ssh-avg while subtracting a min-rule mean would leave a
     # spurious residual depth-mean.  Closing the remaining 1.3e-4 requires
     # moving BOTH sides to ssh-avg together (a separate change).
-    # Select on the NEMO-DINO oracle card only.  Unknown value
+    # Selectable per-run.  NOTE (#1455 R6): NO shipped card selects the
+    # non-default ``"transport_avg"`` any more -- the NEMO-DINO kamm_mlf card
+    # used to, and now pins ``"velocity_avg"`` explicitly alongside
+    # ``barotropic_after_reconcile="nemo_mlf_baro_corr"``, because NEMO installs
+    # the transport average on the NOW level and UNDOES it before committing
+    # (stpmlf.F90:787-790).  Unknown value
     # raises at the substep post-loop (dispatch hardening, same pattern as
     # ``barotropic_face_depth``/``barotropic_een_seed``).
     barotropic_reconcile_target: str = "velocity_avg"
@@ -1304,9 +1309,13 @@ class BarotropicConfig(NamedTuple):
     # forward-Euler first step (``state.u_before is None``), which returns
     # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
     # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap; it is empty for every use this was built for (a
-    # bridged/restart twin arrives with u_before populated and never takes that
-    # branch). Selecting this on an outer_integrator that has no such site
+    # real one-step gap. It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken) -- but NOT empty for a
+    # FROM-REST run of a card that ships this option, which since #1455 R6
+    # includes nemo_dino_kamm_mlf and therefore its from-rest drivers
+    # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
+    # acc_momentum_budget.py). Those miss NEMO's reconciliation on step 1 only.
+    # Selecting this on an outer_integrator that has no such site
     # (forward_euler, ab2) is rejected at model construction, not ignored.
     #
     # Unknown value raises at outer-step entry (barotropic_common.

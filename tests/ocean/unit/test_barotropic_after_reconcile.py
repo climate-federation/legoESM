@@ -76,16 +76,50 @@ def test_validate_after_reconcile_raises_on_unknown(bad):
 
 
 def test_default_is_off_on_both_config_surfaces():
-    """The option must be opt-in on the model config AND on the DINO card
-    config, or "default = current behaviour" is not true where it is read."""
+    """The option must stay opt-in on the model config AND on the DINO card
+    config, or "default = current behaviour" is not true where it is read.
+
+    The ONE exception is nemo_dino_kamm_mlf, which since #1455 R6 ships the
+    NEMO-faithful pair deliberately (see
+    ``test_kamm_mlf_ships_the_faithful_pair``); every other card stays off."""
     from legoesm.ocean.state import BarotropicConfig
     from legoesm.ocean.experiments.dino import DINOConfig, dino_config_for_recipe
     assert BarotropicConfig().barotropic_after_reconcile == "off"
     assert DINOConfig().barotropic_after_reconcile == "off"
-    # and no shipped DINO recipe silently turns it on
-    for recipe in ("nemo_dino_kamm_mlf", "nemo_dino_kamm", "nemo_paper",
-                   "legoesm_default"):
+    # and no OTHER shipped DINO recipe silently turns it on
+    for recipe in ("nemo_dino_kamm", "nemo_paper", "legoesm_default",
+                   "veros", "mitgcm", "oceananigans"):
         assert dino_config_for_recipe(recipe).barotropic_after_reconcile == "off"
+
+
+def test_kamm_mlf_ships_the_faithful_pair():
+    """#1455 R6 arm D: the kamm_mlf card runs NEMO's SECOND reconciliation
+    (``stpmlf.F90`` ``mlf_baro_corr``) onto the PRIMARY velocity-weighted
+    boxcar mean -- the average NEMO actually commits, because
+    ``ln_dynadv_vec=.TRUE.`` makes ``dynspg_ts.F90`` accumulate velocities.
+
+    The two knobs are ONE choice; either alone is NEMO at neither site. It is
+    the arm the 90-day acceptance gate passed 5/5 on.
+
+    NON-VACUITY. ``"velocity_avg"`` is ALSO the ``DINOConfig`` default, so the
+    RESOLVED-value assertion on that half would still pass with the card line
+    deleted; the assertion that earns it is the membership check on the card
+    dict, which is why it is repeated here rather than left only to
+    ``test_partial_cells_phase7.py::TestBarotropicReconcileTargetCard``.
+    Deleting either card line turns THREE tests red: this one and that class's
+    two."""
+    from legoesm.ocean.experiments.dino import (
+        DINO_RECIPES, dino_config_for_recipe)
+    card = DINO_RECIPES["nemo_dino_kamm_mlf"]
+    # membership first -- this is the half that cannot pass by default
+    assert card.get("barotropic_after_reconcile") == "nemo_mlf_baro_corr"
+    assert card.get("barotropic_reconcile_target") == "velocity_avg", (
+        "the card must PIN the reconcile target explicitly; it equals the "
+        "config default, so dropping the line would otherwise be invisible "
+        "here and would take the after_reconcile line with it")
+    c = dino_config_for_recipe("nemo_dino_kamm_mlf")
+    assert c.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+    assert c.barotropic_reconcile_target == "velocity_avg"
 
 
 # ----------------------------------------------------------------- kernel --

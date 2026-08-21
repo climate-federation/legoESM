@@ -234,9 +234,16 @@ PRIOR_DEFICIT = {"off/transport_avg": 0.61, "off/velocity_avg": 0.50}
 
 PUBLISHED_ARMS = {
     # The three arms of commit 55de03e71's stage table, band means [m3/s2 per
-    # u-row].  ``transport_avg`` is the CARD's own resolved default; the gate
-    # used to hard-code it alone, which made the second arm unloadable and so
-    # made the M2 shape test unrunnable.  PROVENANCE of the <=1e-3 reproduction
+    # u-row].  ``transport_avg`` WAS the card's resolved default when these
+    # arms were recorded; since #1455 R6 the kamm_mlf card ships
+    # ``velocity_avg`` + ``barotropic_after_reconcile="nemo_mlf_baro_corr"``,
+    # so a fresh CARD-DEFAULT artifact is NOT any arm below.  Reproduce these
+    # arms with ``DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off``
+    # (or ``=velocity_avg`` for the second).  The <=1e-3 self-check will go RED
+    # rather than silently mis-gate if a card-default artifact is passed here.
+    # The gate
+    # used to hard-code the first arm alone, which made the second arm
+    # unloadable and so made the M2 shape test unrunnable.  PROVENANCE of the <=1e-3 reproduction
     # claim (an allow-list reason string is a claim, so it gets a command):
     # measured 2026-08-19 from the recorded arms /tmp/dino_stage/v2_off_transport
     # .npz, v2_off_velocity.npz, v2_gdept.npz -- for each, np.load then
@@ -995,9 +1002,12 @@ def main(argv=None):
                     choices=sorted(PUBLISHED_ARMS),
                     help="which arm of commit 55de03e71's stage table --lego-npz is "
                          "expected to be; the self-check gates against that arm's "
-                         "published band means.  Default off/transport_avg = the "
-                         "CARD's own resolved barotropic_reconcile_target on the "
-                         "off-ladder.")
+                         "published band means.  Default off/transport_avg = what "
+                         "the card resolved to WHEN THOSE ARMS WERE RECORDED.  "
+                         "Since #1455 R6 the card ships velocity_avg + "
+                         "barotropic_after_reconcile=nemo_mlf_baro_corr, which is "
+                         "NOT a published arm here -- reproduce a listed arm with "
+                         "DINO_RECONCILE_TARGET/DINO_AFTER_RECONCILE.")
     ap.add_argument("--out-npz", default=None,
                     help="save the matched-window NEMO and legoESM curves + their "
                          "difference (sign stamped in the file) for cross-arm analysis.")

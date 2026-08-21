@@ -444,8 +444,13 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # normalised at :999 (``/r1_wgt2s``).  It is a SUBSTEP TIME MEAN, not a
     # bare leapfrog level; NEMO reconciles the 3-D momentum depth-mean ONTO it
     # at Kmm=NOW (dynspg_ts.F90:1172, ``un_adv*r1_hu(Kmm)``), so it is
-    # registered "now" -- the level of the reconcile that consumes it (the same
-    # transport_avg target the DINO card selects, dino.py:1487).  Written as a
+    # registered "now" -- the level of the reconcile that consumes it, i.e.
+    # legoESM's "transport_avg" target.  (The DINO kamm_mlf card no longer
+    # SELECTS that target: since #1455 R6 it ships "velocity_avg" +
+    # barotropic_after_reconcile="nemo_mlf_baro_corr", because NEMO undoes this
+    # NOW-level reconcile at stpmlf.F90:787-790 before committing.  The
+    # registration of THIS dump is unaffected -- it records which NEMO level
+    # the artifact carries, not which target legoESM selects.)  Written as a
     # SINGLETON (first-step-only, ll_spg_dump=kt==nit000) at :1046 WRITE(8862).
     # Units: [m^2/s] transport per unit width = <SUM_k e3u*u>_substep (map to
     # full transport [m^3/s] via *e2u).
