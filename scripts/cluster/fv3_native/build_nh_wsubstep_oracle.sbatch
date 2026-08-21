@@ -26,6 +26,16 @@
 # BITWISE -- and if it does not, one of the two dumps is not where it
 # says it is, with no build drift available as an excuse.
 #
+# delz IS DUMPED PER SUB-STEP TOO, and it is the field that decides the
+# question. w starts at EXACTLY zero on both sides, and the only routine
+# that can make it non-zero is Riem_Solver3, which is strictly column
+# local (nh_core.F90:42-206 -- every array indexed (i,j) inside the j/i
+# loops, no horizontal stencil). So a corner-localised w error out of a
+# column-local solver is a statement about that solver's INPUTS, and the
+# only input with a horizontal stencil is the layer height, written by
+# update_dz_d (nh_utils.F90:194-311). Scoring w without scoring delz
+# measures the symptom and calls it the cause.
+#
 # A REVIEWER ASKED FOR A NO-DUMP CONTROL BINARY (codex MAJOR, job
 # 9450542): the worry is that inserting a call in the hot loop changes
 # what the optimizer may do, so the eight readings would describe the
@@ -135,6 +145,7 @@ dump = """
          call legoesm_sdump(it, 'w', w(isd:ied, jsd:jed, 1), isd, jsd)
          call legoesm_sdump(it, 'pt', pt(isd:ied, jsd:jed, 1), isd, jsd)
          call legoesm_sdump(it, 'delp', delp(isd:ied, jsd:jed, 1), isd, jsd)
+         call legoesm_sdump(it, 'delz', delz(is:ie, js:je, 1), is, js)
       endif
 """ + anchor
 s = s.replace(anchor, dump, 1)
@@ -167,8 +178,8 @@ PYEOF2
   [ $? -eq 0 ] || { echo "DYNCORE PATCH FAILED"; exit 8; }
   n_call=$(grep -c "call legoesm_sdump(" $SRC/model/dyn_core.F90)
   n_def=$(grep -c "^subroutine legoesm_sdump(" $SRC/model/dyn_core.F90)
-  [ "$n_call" = "3" ] && [ "$n_def" = "1" ] || {
-    echo "DYNCORE PATCH DID NOT LAND: calls=$n_call (want 3) defs=$n_def (want 1)"; exit 8; }
+  [ "$n_call" = "4" ] && [ "$n_def" = "1" ] || {
+    echo "DYNCORE PATCH DID NOT LAND: calls=$n_call (want 4) defs=$n_def (want 1)"; exit 8; }
 
   cd $B
   FF="-O2 -fdefault-real-8 -fdefault-double-8 -fcray-pointer -ffree-line-length-none -fno-range-check -fdec -cpp"
@@ -226,7 +237,7 @@ NSP=$(grep -iE "^ *n_split *=" logfile.000000.out | head -1 \
       | awk -F= '{gsub(/[^0-9]/, "", $2); print $2}')
 NW=$(ls wdump_*.dat 2>/dev/null | wc -l)
 NS=$(ls sdump_*.dat 2>/dev/null | wc -l)
-WANT_S=$((NSP * 3 * 6))
+WANT_S=$((NSP * 4 * 6))
 echo "n_split=$NSP  wdump=$NW  sdump=$NS (want $WANT_S)"
 [ -n "$NSP" ] && [ "$NS" -eq "$WANT_S" ] && [ "$NW" -eq 24 ] || {
   echo "DUMP COUNT WRONG: the run did not complete every sub-step"; exit 7; }

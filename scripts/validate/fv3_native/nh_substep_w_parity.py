@@ -14,12 +14,16 @@ runs EIGHT times per step. A single end-of-loop reading cannot separate
 and those two want completely different searches. This scores the port's
 ``w`` against the oracle's at the end of EVERY sub-step.
 
-WHAT THE SERIES CAN AND CANNOT SETTLE (codex BLOCKER, job 9450542, and
-the reason no verdict is printed). End-of-sub-step readings alone do NOT
-identify the cause. A wrong STAGE that runs every sub-step injects a
-similar signed error each time and produces the same ramp a wrong
-COEFFICIENT would; a wrong coefficient can excite a mode that is nearly
-full-size after one sub-step. What the series DOES give is the shape of
+WHAT THE SERIES CAN AND CANNOT SETTLE (codex BLOCKER job 9450542, then
+all three reviewers again on the RESULT: codex 9451319, GLM 9451321, and
+a third source-reading pass). End-of-sub-step readings alone do NOT
+identify the cause, and the trap is sharper than "a ramp is ambiguous".
+The acoustic solve on this deck is FULLY IMPLICIT (a_imp = 1, so
+SIM1_solver), which means a defect firing in every sub-step SATURATES
+inside the first one and is then indistinguishable from a one-shot
+injection. "Full size at sub-step 1" is not "fires only in sub-step 1".
+The pt and delp increments decaying geometrically rather than staying
+constant is the tell that the response is damped, not integrated. What the series DOES give is the shape of
 the growth and the LOCATION of the damage, and that is what is reported:
 the worst cell's face and indices, the SIGNED error there, and -- because
 a max over cells is free to move between sub-steps and then describes no
@@ -104,7 +108,21 @@ from nh_preremap_w_parity import read_dump      # noqa: E402
 SUBSTEP_ROOT = "/burg-archive/glab/users/pg2328/fv3_wsubstep/run_nh_1step"
 
 #: Fields the sub-step instrument dumps (level 1 / k=0).
-DUMP_FIELDS = ("w", "pt", "delp")
+#:
+#: ``delz`` is here because it is the field that decides the question.
+#: ``w`` starts at EXACTLY zero on both sides (the full-step gate asserts
+#: it), and the only routine that can make it non-zero is ``Riem_Solver3``
+#: -- which is strictly COLUMN LOCAL (nh_core.F90:42-206). A
+#: corner-localised ``w`` error out of a column-local solver is therefore
+#: a statement about that solver's inputs, and the only input carrying a
+#: horizontal stencil is the layer height that ``update_dz_d`` writes
+#: (nh_utils.F90:194-311). Scoring ``w`` alone measures the symptom.
+DUMP_FIELDS = ("w", "pt", "delp", "delz")
+
+#: ``delz`` is allocated COMPUTE-ONLY on both sides (fv_arrays, and
+#: ``field_shape`` in the port), so it is already the window the others
+#: have to be sliced down to.
+COMPUTE_ONLY = ("delz",)
 
 #: The established port-vs-oracle |d|max of ``w`` at k=0 just before the
 #: remap, measured by the pre-remap instrument (job 9448215). The last
@@ -337,8 +355,9 @@ def main(argv=None):
         transposed, nm, _su, _sv = meta[pf][ot]
         ow = _oracle_level0(args.sdump, it, name, ot + 1, transposed,
                             "sdump_it")
-        pw = DIHEDRAL[nm](subs[it - 1][pf][name][cs, cs, :1])
-        return pw, ow
+        arr = subs[it - 1][pf][name]
+        win = arr[:, :, :1] if name in COMPUTE_ONLY else arr[cs, cs, :1]
+        return DIHEDRAL[nm](win), ow
 
     series: dict = {}
     for name in DUMP_FIELDS:
@@ -415,16 +434,53 @@ def main(argv=None):
             f"points, so this is the measurement path -- the window, the "
             f"dihedral or the face pairing -- not physics.")
 
+    # THE SPATIAL PATTERN, from data already in hand. Three reviewers
+    # asked the same questions of the series and all three are answerable
+    # here for free: is the error a CORNER cluster or an EDGE ring; do
+    # many cells carry one amplitude or is one error moving; and does the
+    # amplitude scale with the local flow (it should not, if the cause is
+    # geometry). Printed for the first and last sub-step only.
+    for name in ("w", "delz"):
+        for it in (1, args.n_split):
+            print(f"\n{name} pattern at sub-step {it}:")
+            print("   face  |d|max      |field|peak   n>50%  n>90%  "
+                  "min dist to a face corner")
+            for pf in range(6):
+                pw, ow = _pair(name, it, pf)
+                d = (pw - ow)[:, :, 0]
+                mag = np.abs(d)
+                peak = float(np.abs(ow).max())
+                mx = float(mag.max())
+                if mx <= 0.0:
+                    print(f"   {pf + 1}     (identical)")
+                    continue
+                big = mag >= 0.5 * mx
+                ii, jj = np.nonzero(big)
+                ni, nj = d.shape
+                # distance to the NEAREST of the four face corners
+                dist = np.minimum(ii, ni - 1 - ii) + np.minimum(jj,
+                                                                nj - 1 - jj)
+                pos = int(np.count_nonzero(d[big] > 0))
+                print(f"   {pf + 1}     {mx:.4e}  {peak:.4e}  "
+                      f"{int(big.sum()):5d}  "
+                      f"{int((mag >= 0.9 * mx).sum()):5d}  "
+                      f"{int(dist.min()):3d}   "
+                      f"(+{pos}/-{int(big.sum()) - pos} among the >50% cells)")
+
     if series["w"][1][-1][1] <= 0.0:
         raise SystemExit(
             "the port matches the oracle BITWISE at the last sub-step, "
             "which contradicts control 2's 6.6116e-04 -- the two sides are "
             "not being read at the same point.")
-    print("\nNO VERDICT HERE. End-of-sub-step readings cannot separate a "
-          "wrong stage from a wrong coefficient: a stage that runs every "
-          "sub-step also produces a ramp, and a coefficient can excite a "
-          "mode that is nearly full-size after one. That separation needs "
-          "captures BETWEEN the stages of a single sub-step.")
+    print("\nNO VERDICT HERE, and note what a flat series does NOT mean. "
+          "The acoustic solve on this deck is fully implicit (a_imp = 1), "
+          "so a defect that fires in EVERY sub-step saturates within the "
+          "first one and then looks constant -- 'full size at sub-step 1' "
+          "is not 'fires only in sub-step 1'. The pt and delp increments "
+          "decaying geometrically is the tell that the response is damped "
+          "rather than integrated. Separating a once-only injection from a "
+          "saturated persistent one needs either a sub-step-size sweep "
+          "(deck only) or captures BETWEEN the stages of one sub-step.")
     print("\nSCOPE, stated: level k=0 only -- the level where the worst "
           "full-step error lives. It says nothing about where in the "
           "column the damage is born.")
