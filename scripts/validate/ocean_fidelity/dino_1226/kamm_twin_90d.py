@@ -618,6 +618,15 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         surface_tendency_placement=surface_tendency_placement,
         e3t_mode=ladder_mode)
 
+    # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
+    # materialized geometry and state (arrays cannot lie about their dtype the
+    # way the policy global can). Shared gate, not a re-derivation.
+    from legoesm.ocean.fidelity.precision_gate import require_fp64
+    if _fp64_requested():
+        require_fp64(br.geometry, st, context="kamm_twin_90d oracle twin")
+    control_dtype_stamp = str(np.asarray(st.T.data).dtype)
+    print(f"PRECISION: materialized state dtype = {control_dtype_stamp}")
+
     if perturb_seed is not None:
         rng = np.random.default_rng(perturb_seed)
         t0 = np.asarray(st.T.data, dtype=np.float64)
@@ -742,7 +751,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # -- provenance must not come from mutable process state.
         nemo_ladder_mode=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
-        control_dtype=np.str_(str(_policy_control_dtype())),
+        control_dtype=np.str_(control_dtype_stamp),
     )
     for d in snap_days:
         if d in t3d:
@@ -889,30 +898,26 @@ def provenance_gate() -> None:
                 "to run anyway with the dirt list stamped in the log.")
 
 
-def _policy_control_dtype():
-    from legoesm.core.precision import get_policy
-    return get_policy().control
+def _fp64_requested() -> bool:
+    return os.environ.get("FP64", "1") == "1"
 
 
 def _precision_gate() -> None:
-    """Force the fp64 policy and stamp it, so no twin ever runs fp32 silently.
+    """Set the fp64 policy at entry (the materialized check runs later).
 
-    Added after the 0.213 Sv "baseline discrepancy" (#1455, 512517fdc): the
-    walk's arms ran without the run_fp64.py wrapper, silently building the
-    whole oracle comparison at the fp32 default; re-run under fp64 they are
-    bit-identical to the recorded baseline. JAX_ENABLE_X64 alone does NOT do
-    this (skill Rule 1c) -- the policy control dtype is what matters. An
-    oracle twin at fp32 measures its own rounding, so the harness now sets
-    the policy itself; FP64=0 is the loud escape for a deliberate fp32 arm.
+    Added after the 0.213 Sv "baseline discrepancy" (#1455, 512517fdc): arms
+    run without the run_fp64.py wrapper silently built the whole oracle
+    comparison at the fp32 policy default (JAX_ENABLE_X64 alone does not set
+    the policy -- skill Rule 1c). This only WRITES the policy; writing and
+    re-reading the same global proves nothing (review a0cd04b8: a backend
+    without f64 hardware clamps the real arrays to f32 while the policy
+    still reads f64). The binding check is require_fp64() on the BUILT
+    geometry+state inside run_twin -- the shared gate every sibling probe
+    uses (ocean/fidelity/precision_gate.py). FP64=0 = deliberate fp32 arm.
     """
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    if os.environ.get("FP64", "1") == "1":
+    if _fp64_requested():
         set_policy(PrecisionPolicy.fp64())
-    ctl = _policy_control_dtype()
-    print(f"PRECISION: policy control dtype = {ctl}")
-    if os.environ.get("FP64", "1") == "1" and "float64" not in str(ctl):
-        raise SystemExit("fp64 policy did not take (control dtype "
-                         f"{ctl}) -- refusing to run an fp32 oracle twin.")
 
 
 def main(argv=None):
