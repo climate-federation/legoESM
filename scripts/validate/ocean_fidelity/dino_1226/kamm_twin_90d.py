@@ -322,7 +322,12 @@ _LADDER_RESOLVED: tuple[str | None, str] | None = None
 
 
 def reset_ladder_resolution() -> None:
-    """Forget this process's ladder resolution (tests, and nothing else)."""
+    """Forget this process's ladder resolution.
+
+    The only legitimate callers are tests, plus an operator following the
+    "already resolved" error message above -- which points here, so this must
+    exist and must work.
+    """
     global _LADDER_ANNOUNCED, _LADDER_RESOLVED
     _LADDER_ANNOUNCED, _LADDER_RESOLVED = False, None
 
@@ -372,7 +377,8 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
     reads arm 1's write-back and calls it an explicit override.
     """
     global _LADDER_ANNOUNCED, _LADDER_RESOLVED
-    env = os.environ.get("LEGOESM_NEMO_E3T")
+    raw = os.environ.get("LEGOESM_NEMO_E3T")
+    env = raw
     if _LADDER_RESOLVED is not None and env == _LADDER_RESOLVED[1]:
         env = _LADDER_RESOLVED[0]        # discount this function's own write-back
     if env is not None:
@@ -392,13 +398,24 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
         mode, source = "off", "--legacy-1d-ladder"
     else:
         mode, source = NEMO_LADDER_TWIN_DEFAULT, "twin default"
+    # REJECTED SUGGESTION (round-2 review): "skip the conflict check when the raw
+    # environment already equals the resolved mode, so an operator re-asking for
+    # the mode in effect is not mis-accused." It cannot be done. This function
+    # WROTE that value, so raw == resolved is exactly the write-back case, and
+    # skipping there re-opens the silent second-arm bug: arm 2 asks for the
+    # default, is handed arm 1's grid without a word, and the sweep measures
+    # zero. A fail-closed error whose wording is imperfect beats a silent wrong
+    # grid, so the check stays and the MESSAGE says what actually happened.
     if _LADDER_RESOLVED is not None and mode != _LADDER_RESOLVED[1]:
         raise SystemExit(
             f"this process already resolved the vertical ladder to "
-            f"{_LADDER_RESOLVED[1]!r} and is now being asked for {mode!r}. One "
-            "process builds one grid: run each ladder arm as its own process, "
-            "or call reset_ladder_resolution() if you know the previously built "
-            "state is gone.")
+            f"{_LADDER_RESOLVED[1]!r} (and wrote it into LEGOESM_NEMO_E3T) and "
+            f"is now being asked for {mode!r}. One process builds one grid: run "
+            "each ladder arm as its own process, or call "
+            "reset_ladder_resolution() if you know the previously built state "
+            "is gone. If you set LEGOESM_NEMO_E3T yourself between the two "
+            "calls, note that this function cannot tell your setting apart from "
+            "its own write-back -- reset first, then set it.")
     _LADDER_RESOLVED = (env, mode)
     os.environ["LEGOESM_NEMO_E3T"] = mode          # the bridge reads it HERE
     if not _LADDER_ANNOUNCED:
@@ -421,8 +438,10 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
             else:
                 print("!! Mixed ladders: cells from one, T-points from the "
                       "other. 'gdept_only'", flush=True)
-                print("!! puts T-points 110 m off their own cell centres at "
-                      "k=32 (#1455).", flush=True)
+                print("!! puts T-points 110.2 m from the centre of the cell "
+                      "they sit in at k=32", flush=True)
+                print("!! (measured against the 1-D thickness ladder it keeps; "
+                      "#1455).", flush=True)
             print("!" * 78 + "\n", flush=True)
         print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
               f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own "

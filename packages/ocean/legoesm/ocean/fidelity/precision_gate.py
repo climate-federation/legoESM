@@ -110,11 +110,15 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
 
     ``bridge_nemo_to_legoesm_topo`` defaults this to ``"off"``, which feeds
     legoESM NEMO's *analytic 1-D* ``e3t_1d`` while NEMO itself runs on the 3-D
-    ``e3t_0``.  Those two NEMO ladders differ by up to **12.9%** below k=25 --
-    NEMO builds its reference ladder in two passes (``zgr_lib.F90::zgr_sco_mi96``
-    re-anchors at ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's
-    ``rn_hco = 1000 m`` puts that at k=25 exactly) -- so the default silently
-    puts a 13% geometry error into the deepest third of the column.
+    ``e3t_0``.  Below k=25 those two NEMO ladders diverge, by up to **70.4 m**
+    at the deepest wet level -- which is 12.9% of ``e3t_0`` and 14.8% of
+    ``e3t_1d``.  Always quote the denominator here: those two percentages are
+    ONE measurement and have already been mistaken for a disagreement between
+    two.  NEMO builds its reference ladder in two passes
+    (``zgr_lib.F90::zgr_sco_mi96`` re-anchors at
+    ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's ``rn_hco = 1000 m`` puts
+    that at k=25 exactly), so the default silently puts a 13% geometry error
+    into the deepest third of the column.
 
     It has now contaminated FOUR measurements.  The most recent cost a full
     false root-cause: the barotropic seed measured 2.31e-2 and was attributed to
@@ -142,7 +146,8 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
         raise ValueError(
             f"{context}: LEGOESM_NEMO_E3T is NOT SET, so the bridge would "
             'silently use "off" -- NEMO\'s analytic e3t_1d, which differs from '
-            "the e3t_0 NEMO actually runs on by up to 12.9% below k=25. That "
+            "the e3t_0 NEMO actually runs on by up to 70.4 m below k=25 "
+            "(12.9% of e3t_0, 14.8% of e3t_1d). That "
             "default has already contaminated four measurements, most recently "
             "producing a completely wrong root cause for the barotropic seed. "
             'Set it explicitly: "both" (NEMO\'s true 3-D ladder, what a '

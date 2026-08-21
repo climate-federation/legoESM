@@ -496,6 +496,10 @@ def _ladder(instruments, monkeypatch):
     monkeypatch.delenv("LEGOESM_NEMO_E3T")
     monkeypatch.setattr(kamm_twin_90d, "_LADDER_ANNOUNCED", False)
     monkeypatch.setattr(kamm_twin_90d, "_LADDER_RESOLVED", None)
+    # Via the public entry point, not only by poking the globals: the resolver's
+    # own "already resolved" error tells operators to call this, so it has to
+    # exist and work. The setattr lines above stay, for restoration.
+    kamm_twin_90d.reset_ladder_resolution()
     return kamm_twin_90d
 
 
@@ -602,7 +606,7 @@ def test_second_resolution_to_the_same_ladder_is_fine(_ladder):
     assert _ladder.resolve_ladder_mode() == "both"
 
 
-def test_build_twin_state_does_NOT_resolve_the_ladder(instruments):
+def test_build_twin_state_does_not_resolve_the_ladder(instruments):
     """SCOPE GUARD. A dozen sibling probes import _build_twin_state directly;
     resolving the ladder in there would silently re-grid every one of them that
     does not pin the variable itself (box_budget_twin90.py does not). The twin
@@ -641,6 +645,13 @@ def test_run_twin_resolves_the_ladder_before_building_the_bridge(instruments):
         ["legacy_1d_ladder"], "the --legacy-1d-ladder selection must be passed on"
     assert [t.id for t in calls[0].targets] == ["ladder_mode"]
     assert src.index("resolve_ladder_mode(") < src.index("_build_twin_state(")
+    # ... and nothing may reassign it afterwards. Without this, adding
+    # `ladder_mode = os.environ["LEGOESM_NEMO_E3T"]` further down puts the stamp
+    # back on mutable process state while every other assertion stays green.
+    n_assign = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                   and any(getattr(t, "id", None) == "ladder_mode"
+                           for t in n.targets))
+    assert n_assign == 1, "ladder_mode must be assigned exactly once in run_twin"
 
 
 def test_run_twin_stamps_the_resolved_ladder_into_the_artifact(instruments):
@@ -679,3 +690,78 @@ def test_main_threads_the_legacy_flag_into_run_twin(instruments):
     import inspect
     src = inspect.getsource(instruments.kamm_twin_90d.main)
     assert "legacy_1d_ladder=args.legacy_1d_ladder" in src
+
+
+def test_re_asking_after_a_resolution_is_refused_not_silently_honoured(_ladder,
+                                                                       monkeypatch):
+    """DELIBERATE: this function cannot tell an operator's setting apart from
+    its own write-back, so it refuses rather than guess.
+
+    A round-2 review proposed skipping the conflict check when the environment
+    already holds the resolved mode. That is exactly the write-back case, and it
+    re-opens the silent second-arm bug. Fail-closed wins; the error message
+    carries the explanation and points at reset_ladder_resolution().
+    """
+    assert _ladder.resolve_ladder_mode(legacy_1d_ladder=True) == "off"
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "off")     # explicit, and agreeing
+    with pytest.raises(SystemExit, match="reset_ladder_resolution"):
+        _ladder.resolve_ladder_mode()
+    _ladder.reset_ladder_resolution()                 # the documented way out
+    assert _ladder.resolve_ladder_mode() == "off"
+
+
+def test_the_ladder_banner_is_announced_once_per_process(_ladder, capsys):
+    """Repeating the alarm every call trains operators to ignore it, and the
+    one-shot guard is otherwise pinned by nothing."""
+    _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+    first = capsys.readouterr().out
+    assert "NON-DEFAULT VERTICAL LADDER" in first
+    _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+    assert capsys.readouterr().out == ""
+
+
+def test_reset_ladder_resolution_actually_resets(_ladder):
+    """It is the escape hatch the resolver's error message advertises."""
+    assert _ladder.resolve_ladder_mode(legacy_1d_ladder=True) == "off"
+    _ladder.reset_ladder_resolution()
+    assert _ladder._LADDER_RESOLVED is None
+    assert _ladder._LADDER_ANNOUNCED is False
+    # "off" is still in the environment, and is now honoured as an explicit
+    # setting rather than discounted -- resetting forgets, it does not undo.
+    assert _ladder.resolve_ladder_mode() == "off"
+
+
+def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
+                                                                 monkeypatch,
+                                                                 capsys):
+    """intent (e): the acceptance gate PRINTS the stamped ladder and never
+    refuses on it -- and prints it before the seasonal-clock refusal, so a
+    refused candidate still records which grid it ran on.
+
+    acceptance_gate_90d imports acc_thermal_wind at module scope, which opens
+    NEMO mesh files; load_candidate itself touches neither, so a stub module
+    gets us to the branch under test without the NEMO tree.
+    """
+    import importlib
+    _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
+            / "ocean_fidelity" / "dino_1226")
+    stub = types.ModuleType("acc_thermal_wind")
+    stub.DINO = "/nonexistent"
+    monkeypatch.setitem(sys.modules, "acc_thermal_wind", stub)
+    monkeypatch.syspath_prepend(str(_dir.parent))
+    monkeypatch.syspath_prepend(str(_dir))
+    G = importlib.import_module("acceptance_gate_90d")
+
+    stamped = tmp_path / "stamped.npz"
+    np.savez(stamped, nemo_ladder_mode=np.str_("both"),
+             seasonal_t0_seconds=np.float64(0.0))     # legacy clock -> refused
+    with pytest.raises(SystemExit):
+        G.load_candidate(str(stamped))
+    assert "vertical ladder of this candidate: both" in capsys.readouterr().out
+
+    bare = tmp_path / "bare.npz"
+    np.savez(bare, seasonal_t0_seconds=np.float64(15552000.0))
+    with pytest.raises(SystemExit):        # missing u3d_day90, NOT the ladder
+        G.load_candidate(str(bare))
+    out = capsys.readouterr().out
+    assert "UNSTAMPED" in out

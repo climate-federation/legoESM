@@ -2,13 +2,20 @@
 
 NEMO integrates with the 3-D scale factors ``e3t_0`` (key_vco_3d). ``e3t_1d`` is
 a different, UNSTRETCHED reference ladder. For DINO they agree in the upper
-ocean and diverge below ~2000 m by up to 12.9%: e3t_1d sums to 4506.375 m while
-e3t_0 is stretched so the deepest wet column is exactly the 4000 m domain depth.
+ocean and part company below the ~1000 m re-anchor (first level differing by
+more than 1% is k=25, top face 982.4 m), by up to 70.4 m at the deepest wet
+level -- 12.9% of e3t_0, 14.8% of e3t_1d. Both sum to the same 4000.000 m over
+the wet levels, so this is a REDISTRIBUTION of thickness, not a change of
+domain depth.
 
-Using e3t_1d put legoESM's abyssal layers 7-13% off and its water columns ~22 m
-too deep -- precisely the depth range where #1226's ACC deficit is sourced
-(80% of the missing thermal wind below 2000 m). Thermal wind integrates
-density x THICKNESS, so this corrupted the quantity the deficit is measured in.
+Using e3t_1d put legoESM's abyssal layers 7-13% off, and left the bottom of
+its PARTIAL-DEPTH columns misplaced: identical in the 75% of wet columns that
+reach all 35 levels, but 70.4-104.2 m too deep in the other 25%, a 21.9 m mean
+over all wet columns -- and 4.70e-03 relative on total wet volume. That is
+precisely the depth range where #1226's ACC deficit is sourced (80% of the
+missing thermal wind below 2000 m). Thermal wind integrates density x
+THICKNESS, so this corrupted the quantity the deficit is measured in.
+(Numbers re-measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc, #1455.)
 
 The bug was invisible for GYRE (key_linssh, where e3t_0 == e3t_1d), which is
 why it survived so long. These tests are synthetic -- they do not need the NEMO

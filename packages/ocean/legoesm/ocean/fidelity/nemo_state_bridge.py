@@ -212,22 +212,37 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
 
     NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
-    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO they agree
-    in the upper ocean and diverge below ~2000 m, by up to 14.8% at the deepest
-    wet level (measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc; an earlier "12.9%"
-    here understated it).
+    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO the two agree
+    in the upper ocean and part company below the ~1000 m re-anchor (the first
+    level where they differ by more than 1% is k=25, whose top face sits at
+    982.4 m -- DINO's ``rn_hco = 1000 m``).  Below that the per-level thickness
+    difference REVERSES SIGN once, running -2.1% at k=25 through -8.5% at k=28
+    to +14.8% at k=34.  All percentages here are relative to ``e3t_1d``; the
+    same deepest-level gap is 70.389 m, which is 14.8% of ``e3t_1d`` and 12.9%
+    of ``e3t_0`` -- an earlier version of this docstring "corrected" 12.9% to
+    14.8% as an understatement, which was wrong: they are one measurement under
+    two denominators, and a percentage here without its denominator is not a
+    number.  (All figures measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc.)
 
-    The difference is a REDISTRIBUTION of thickness in the bottom third, not a
-    column-depth error: both ladders sum to exactly 4000.000 m over the 35 wet
-    levels and to 4506.375 m over all 36, so total volume and bathymetry are
-    IDENTICAL between the two. An earlier version of this docstring said the 1-D
-    ladder made legoESM's "water columns ~22 m too deep"; measured excess is
-    0.0000 m and that sentence is withdrawn. What the redistribution does move
-    is the per-level thickness, sign-alternating from -8.5% at k=28 to +14.8% at
-    k=34 -- and thermal wind integrates density x THICKNESS, which is why it
-    reshuffles the bottom-referenced (barotropic) transport. That is where
-    #1226's ACC deficit is sourced (80% of the missing thermal wind below
-    2000 m).
+    What the redistribution costs, measured rather than asserted:
+
+    * TOTAL column depth is unchanged -- both ladders sum to exactly 4000.000 m
+      over the 35 wet levels and to 4506.375 m over all 36.
+    * PER-COLUMN depth is NOT.  It is identical only in the 7442 of 9920 wet
+      columns that reach the full 35 levels (75%).  In the other 25% the 1-D
+      ladder puts the bottom 70.4-104.2 m too DEEP, and the mean over all wet
+      columns is 21.9 m -- so this docstring's long-standing "~22 m too deep"
+      is CORRECT and stands; a 2026-08-21 attempt to withdraw it was itself
+      withdrawn after measurement.
+    * WET VOLUME differs by 4.70e-03 relative (2.546363e+17 vs 2.534390e+17
+      m3), which is the "volume 4.7e-03 -> 6.0e-09" the body comment below
+      already records.
+
+    Thermal wind integrates density x THICKNESS, and bottom-referenced
+    transport integrates it over the column depth, so both the sign-reversing
+    per-level error and the 25% of columns whose bottom is misplaced feed
+    straight into it.  That is where #1226's ACC deficit is sourced (80% of the
+    missing thermal wind below 2000 m).
 
     Falls back to the 1-D ladder when the mesh_mask predates ``e3t_0`` (GYRE,
     ``key_linssh``, where the two coincide -- which is why this went unnoticed).
