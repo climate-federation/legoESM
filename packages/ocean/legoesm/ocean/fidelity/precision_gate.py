@@ -122,10 +122,18 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
     (exact) and the error actually ACCUMULATES through the substeps -- the
     opposite conclusion.
 
-    The default is NOT changed here: it exists because legoESM is unstable when
-    started from a NEMO restart on the true ladder (gate row "STABILITY on NEMO
-    true grid"), which is a real unfixed defect.  So the mode stays a choice --
-    but it must be a CONSCIOUS one, never an inherited silent default.
+    The default is NOT changed here, and this gate stays fail-closed.  But its
+    STATED REASON no longer holds as written: the instability it cites (gate row
+    "STABILITY on NEMO true grid") DID NOT REPRODUCE in 2026-08-21 measurements
+    -- four 90-day DINO twin arms from the day-180 restart, differing only in
+    this variable, all ran stable to day 90 at 0.633-0.635 m/s peak speed, with
+    the two end arms confirmed under an fp64 precision policy (#1455; see
+    scripts/validate/ocean_fidelity/dino_1226/d180_step_walk.py and the note in
+    nemo_state_bridge.effective_vertical_scale_factors).  That is a
+    non-reproduction under one configuration, NOT a refutation, so "a real
+    unfixed defect" is downgraded to "an unexplained recorded observation".
+    Either way the mode stays a CONSCIOUS choice here, never an inherited silent
+    default -- which is the part of this gate that was always load-bearing.
     """
     import os
 

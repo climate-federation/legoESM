@@ -201,17 +201,33 @@ def bridge_nemo_to_legoesm(
     )
 
 
+#: The vertical-ladder selections :func:`effective_vertical_scale_factors`
+#: accepts, and the only values ``LEGOESM_NEMO_E3T`` may take. Exported so a
+#: harness validates against THIS tuple instead of re-listing the literals and
+#: drifting out of step with the function that raises on them.
+NEMO_E3T_MODES = ("off", "e3t_only", "gdept_only", "both")
+
+
 def effective_vertical_scale_factors(grid, tmask, mode=None):
     """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
 
     NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
     ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO they agree
-    in the upper ocean and diverge below ~2000 m by up to 12.9%: ``e3t_1d`` sums
-    to 4506.375 m while ``e3t_0`` is stretched so the deepest wet column is
-    exactly the 4000 m domain depth. Building legoESM's grid from ``e3t_1d`` put
-    its abyssal layers 7-13% off and its water columns ~22 m too deep --
-    precisely where #1226's ACC deficit is sourced (80% of the missing thermal
-    wind below 2000 m), and thermal wind integrates density x THICKNESS.
+    in the upper ocean and diverge below ~2000 m, by up to 14.8% at the deepest
+    wet level (measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc; an earlier "12.9%"
+    here understated it).
+
+    The difference is a REDISTRIBUTION of thickness in the bottom third, not a
+    column-depth error: both ladders sum to exactly 4000.000 m over the 35 wet
+    levels and to 4506.375 m over all 36, so total volume and bathymetry are
+    IDENTICAL between the two. An earlier version of this docstring said the 1-D
+    ladder made legoESM's "water columns ~22 m too deep"; measured excess is
+    0.0000 m and that sentence is withdrawn. What the redistribution does move
+    is the per-level thickness, sign-alternating from -8.5% at k=28 to +14.8% at
+    k=34 -- and thermal wind integrates density x THICKNESS, which is why it
+    reshuffles the bottom-referenced (barotropic) transport. That is where
+    #1226's ACC deficit is sourced (80% of the missing thermal wind below
+    2000 m).
 
     Falls back to the 1-D ladder when the mesh_mask predates ``e3t_0`` (GYRE,
     ``key_linssh``, where the two coincide -- which is why this went unnoticed).
@@ -288,10 +304,10 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     # pressure-gradient geometry, owns the response).
     _mode = (mode if mode is not None
              else _os.environ.get("LEGOESM_NEMO_E3T", "off"))
-    if _mode not in ("off", "e3t_only", "gdept_only", "both"):
+    if _mode not in NEMO_E3T_MODES:
         raise ValueError(
-            f"unknown vertical-scale-factor mode {_mode!r}; expected "
-            '"off", "e3t_only", "gdept_only" or "both"')
+            f"unknown vertical-scale-factor mode {_mode!r}; expected one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     e3t3 = getattr(grid, "e3t_0", None)
     if e3t3 is None or _mode == "off":
         return e3t, t_depth, "e3t_1d"
