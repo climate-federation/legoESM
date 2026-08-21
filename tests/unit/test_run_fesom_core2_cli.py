@@ -102,28 +102,51 @@ def test_tke_surface_bc_flag():
         p.parse_args(base + ["--tke-surface-bc", "robin"])
 
 
-def test_dirichlet_without_the_mixing_length_anchor_is_refused(monkeypatch):
+def test_the_ported_turbulence_card_must_be_taken_whole():
     """The two settings are one card in the model being ported.
 
-    The reference turns both on together and the flag's own help calls the
-    first without the second a half port, yet the pair could be split
-    silently -- a run advertising the ported boundary condition while
-    integrating a different mixing length. Both spellings are checked: the
-    split must stop, and the deliberate opt-in must get through.
+    The reference turns both on together and the flags' own help calls either
+    one alone a half port. Both directions are checked: an earlier version of
+    this guard refused only the Dirichlet-without-anchor split and silently
+    admitted the anchor-without-Dirichlet one, which is exactly as unported.
+    The permitted combinations are asserted to RETURN, so a guard that
+    rejected everything could not pass this.
     """
+    import types
+
     import pytest
-    base = ["prog", "--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
-            "--tke-surface-bc", "dirichlet"]
 
-    monkeypatch.setattr("sys.argv", list(base))
-    with pytest.raises(SystemExit, match="half port"):
-        m.main()
+    def _args(bc, anchor, allow=False):
+        return types.SimpleNamespace(
+            tke_surface_bc=bc, tke_mxl0_anchor=anchor,
+            allow_half_ported_tke=allow)
 
-    # The paired configuration and the deliberate opt-in must both survive the
-    # guard; they stop later, on the mesh this test does not have.
-    for extra in (["--tke-mxl0-anchor", "on"], ["--allow-half-ported-tke"]):
-        monkeypatch.setattr("sys.argv", base + extra)
-        try:
-            m.main()
-        except BaseException as exc:            # noqa: BLE001
-            assert "half port" not in str(exc)
+    # whole card, either way round: no exception, and nothing returned
+    assert m.validate_tke_pair(_args("dirichlet", "on")) is None
+    assert m.validate_tke_pair(_args("neumann", "off")) is None
+
+    # both halves refused
+    for bc, anchor in (("dirichlet", "off"), ("neumann", "on")):
+        with pytest.raises(SystemExit, match="half port"):
+            m.validate_tke_pair(_args(bc, anchor))
+        # ... unless taken deliberately
+        assert m.validate_tke_pair(_args(bc, anchor, allow=True)) is None
+
+
+def test_the_half_port_guard_runs_before_the_driver_does_any_work():
+    """The guard has to be reached from the entry point, not just exist.
+
+    A guard nothing calls is not a guard, and this one has to fire before the
+    mesh is read: a run that spends its allocation and then refuses is no
+    better than one that does not refuse.
+    """
+    import inspect
+
+    src = inspect.getsource(m.main)
+    body = src.split("\n")
+    called_at = next(i for i, line in enumerate(body)
+                     if "validate_tke_pair(" in line)
+    mesh_at = next((i for i, line in enumerate(body) if "load_mesh" in line),
+                   len(body))
+    assert called_at < mesh_at
+

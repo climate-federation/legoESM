@@ -148,23 +148,31 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
     return path
 
 
+def validate_tke_pair(args) -> None:
+    """The ported turbulence card sets two things; refuse to run half of it.
+
+    The reference model's card turns the Dirichlet surface value and the
+    surface mixing-length anchor on TOGETHER, and the flags' own help calls
+    either one alone a half port.  BOTH splits are refused, not just the one
+    that reads more naturally: running the anchor against the default Neumann
+    surface value is exactly as unported as the reverse, and an earlier
+    version of this guard admitted it.
+    """
+    dirichlet = args.tke_surface_bc == "dirichlet"
+    anchored = args.tke_mxl0_anchor == "on"
+    if dirichlet == anchored or args.allow_half_ported_tke:
+        return
+    raise SystemExit(
+        f"--tke-surface-bc {args.tke_surface_bc} with --tke-mxl0-anchor "
+        f"{args.tke_mxl0_anchor} is a half port: the reference card sets the "
+        "Dirichlet surface value and the mixing-length anchor together, and "
+        "the pair is what was validated. Select both or neither, or pass "
+        "--allow-half-ported-tke to run the split deliberately (the run is "
+        "then not the ported one).")
+
 def main() -> int:
     args = build_arg_parser().parse_args()
-    # The Dirichlet surface value and the surface mixing-length anchor are one
-    # setting in the model being ported: that card turns both on together, and
-    # its own help text calls running the first without the second a half
-    # port. Accepting the pair silently split let a run advertise the ported
-    # boundary condition while integrating a different mixing length, so the
-    # combination has to be named rather than defaulted into.
-    if (args.tke_surface_bc == "dirichlet"
-            and args.tke_mxl0_anchor == "off"
-            and not args.allow_half_ported_tke):
-        raise SystemExit(
-            "--tke-surface-bc dirichlet without --tke-mxl0-anchor on is a "
-            "half port: the reference card sets both, and the pair is what "
-            "was validated. Pass --tke-mxl0-anchor on for the ported "
-            "configuration, or --allow-half-ported-tke to run the split "
-            "deliberately (the run is then not the ported one).")
+    validate_tke_pair(args)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 

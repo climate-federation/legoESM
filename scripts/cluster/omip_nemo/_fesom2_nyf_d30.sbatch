@@ -84,19 +84,40 @@ lon = np.asarray(f.lon, dtype=np.float64) % 360
 jy = np.where((lat >= -5) & (lat <= 5))[0]
 ix = np.where((lon >= 210) & (lon <= 270))[0]
 w = np.cos(np.deg2rad(lat[jy]))[:, None] * np.ones(len(ix))[None, :]
-sp = [float(np.nansum(np.hypot(np.asarray(f.u10[k], dtype=np.float64)[np.ix_(jy, ix)],
-                               np.asarray(f.v10[k], dtype=np.float64)[np.ix_(jy, ix)]) * w)
-            / np.nansum(w))
-      for k in range(100, 120)]
-got = float(np.mean(sp))
-variant = ("raw" if 4.4 <= got <= 5.1 else
-           "corrected" if 6.0 <= got <= 6.6 else "unrecognised")
-print(f"equatorial Pacific mean 10 m wind = {got:.3f} m/s  -> {variant}")
-if variant != "raw":
+# Sample the WHOLE record axis, not one window: a cache assembled from two
+# sources -- corrected for part of the year, raw for the rest -- would pass a
+# 20-record probe while the run consumed the other variant for most of its
+# integration.  Every sampled window has to land in the raw band.
+n_rec = int(np.asarray(f.u10).shape[0])
+stride = max(1, n_rec // 40)
+windows = list(range(0, n_rec, stride))
+sp = []
+for k in windows:
+    u = np.asarray(f.u10[k], dtype=np.float64)[np.ix_(jy, ix)]
+    v = np.asarray(f.v10[k], dtype=np.float64)[np.ix_(jy, ix)]
+    sp.append(float(np.nansum(np.hypot(u, v) * w) / np.nansum(w)))
+sp = np.asarray(sp)
+got = float(sp.mean())
+
+
+def _variant(x):
+    if 4.2 <= x <= 5.3:
+        return "raw"
+    if 5.9 <= x <= 6.7:
+        return "corrected"
+    return "unrecognised"
+
+
+variants = sorted({_variant(x) for x in sp})
+print(f"equatorial Pacific mean 10 m wind over {len(windows)} records spanning "
+      f"the whole cache = {got:.3f} m/s (min {sp.min():.3f}, max {sp.max():.3f}) "
+      f"-> {variants}")
+if variants != ["raw"]:
     raise SystemExit(
-        f"this arm is pre-registered on the RAW CORE-II winds and the cache "
-        f"carries {variant} ({got:.3f} m/s); the numbers below were written "
-        f"for the raw arm and are not comparable")
+        f"this arm is pre-registered on the RAW CORE-II winds, but the cache "
+        f"reads as {variants} across its record axis (mean {got:.3f} m/s, "
+        f"range {sp.min():.3f}-{sp.max():.3f}); the numbers below were "
+        f"written for a wholly raw arm and are not comparable")
 PYEOF
 [ $? -eq 0 ] || { echo "FATAL: wind-variant assertion failed"; exit 1; }
 
