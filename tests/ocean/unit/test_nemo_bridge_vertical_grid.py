@@ -8,7 +8,8 @@ level -- 12.9% of e3t_0, 14.8% of e3t_1d. Both sum to the same 4000.000 m over
 the wet levels, so this is a REDISTRIBUTION of thickness, not a change of
 domain depth.
 
-Using e3t_1d put legoESM's abyssal layers 7-13% off, and left the bottom of
+Using e3t_1d put legoESM's abyssal layers 0.9-14.8% off (of e3t_1d; 0.9-12.9%
+of e3t_0) over k=25..34, and left the bottom of
 its PARTIAL-DEPTH columns misplaced: identical in the 75% of wet columns that
 reach all 35 levels, but 70.4-104.2 m too deep in the other 25%, a 21.9 m mean
 over all wet columns -- and 4.70e-03 relative on total wet volume. That is

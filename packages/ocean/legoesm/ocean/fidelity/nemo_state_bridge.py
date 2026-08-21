@@ -213,9 +213,10 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
 
     NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
     ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO the two agree
-    in the upper ocean and part company below the ~1000 m re-anchor (the first
-    level where they differ by more than 1% is k=25, whose top face sits at
-    982.4 m -- DINO's ``rn_hco = 1000 m``).  Below that the per-level thickness
+    in the upper ocean and part company below the ~1000 m re-anchor: they agree to
+    roundoff (2.8e-14 m) through k=24, and k=25 is the first level where they
+    differ AT ALL, by 3.317 m, its top face sitting at 982.4 m -- DINO's
+    ``rn_hco = 1000 m``.  Below that the per-level thickness
     difference REVERSES SIGN once, running -2.1% at k=25 through -8.5% at k=28
     to +14.8% at k=34.  All percentages here are relative to ``e3t_1d``; the
     same deepest-level gap is 70.389 m, which is 14.8% of ``e3t_1d`` and 12.9%
@@ -227,16 +228,21 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     What the redistribution costs, measured rather than asserted:
 
     * TOTAL column depth is unchanged -- both ladders sum to exactly 4000.000 m
-      over the 35 wet levels and to 4506.375 m over all 36.
+      over the 35 wet levels and to 4506.375 m over all 36.  That holds for the
+      ladder THIS FUNCTION BUILDS; a reader who sums raw ``e3t_0`` over all 36
+      levels gets 4617.462 m instead, because level 36 has no wet cell anywhere
+      and the loop below leaves ``e3t_1d``'s 506.375 m there rather than
+      ``e3t_0``'s 617.462.  The model never integrates that level.
     * PER-COLUMN depth is NOT.  It is identical only in the 7442 of 9920 wet
       columns that reach the full 35 levels (75%).  In the other 25% the 1-D
       ladder puts the bottom 70.4-104.2 m too DEEP, and the mean over all wet
       columns is 21.9 m -- so this docstring's long-standing "~22 m too deep"
       is CORRECT and stands; a 2026-08-21 attempt to withdraw it was itself
       withdrawn after measurement.
-    * WET VOLUME differs by 4.70e-03 relative (2.546363e+17 vs 2.534390e+17
-      m3), which is the "volume 4.7e-03 -> 6.0e-09" the body comment below
-      already records.
+    * WET VOLUME differs by 4.70e-03 relative to the 1-D ladder's own volume
+      (2.546363e+17 vs 2.534390e+17 m3 -- 4.72e-03 against the other
+      denominator), which is the "volume 4.7e-03 -> 6.0e-09" the body comment
+      below already records.
 
     Thermal wind integrates density x THICKNESS, and bottom-referenced
     transport integrates it over the column depth, so both the sign-reversing
@@ -433,6 +439,7 @@ def bridge_nemo_to_legoesm_topo(
     f_rtol: float = 1e-3,
     full_step: bool = False,
     metric_convention: str = "auto",
+    e3t_mode: str | None = None,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -445,6 +452,15 @@ def bridge_nemo_to_legoesm_topo(
       :func:`create_latlon_geometry` (``lat_1d``/``lon_1d`` from ``gphit``/``glamt``,
       exact meridional faces from ``gphiv``).  The built ``dx_T``/``f_T`` match
       NEMO's ``e1t``/``ff_t`` by construction (verified to ``f_rtol``).
+    ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
+    :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
+    behaviour every existing caller keeps) falls back to the ``LEGOESM_NEMO_E3T``
+    environment variable and, failing that, to the 1-D reference ladder. Passing
+    it EXPLICITLY is strictly better for a caller that knows what it wants: it
+    removes the need to mutate a process-global variable that this function and
+    every concurrent caller share, and it lets two different ladders be built in
+    one process without either one silently inheriting the other's setting.
+
     * **Full-step-z topography** (``ln_zco``, ``ln_zps=F``): a per-column bottom
       depth ``H_bathy`` from the 3-D ``tmask`` (no partial cells), so bowl / ridge
       / sill bathymetry is represented.  The guard below checks mask TOPOLOGY only
@@ -601,7 +617,8 @@ def bridge_nemo_to_legoesm_topo(
         )
     # NEMO integrates with e3t_0, not the 1-D ladder e3t_1d -- see
     # effective_vertical_scale_factors for why this matters (#1226).
-    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(grid, tmask)
+    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(
+        grid, tmask, mode=e3t_mode)
 
     depth_cum = np.cumsum(e3t_1d)                        # bottom-interface depth
     H_bathy = np.where(

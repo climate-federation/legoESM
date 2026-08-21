@@ -317,19 +317,7 @@ def seasonal_t0_seconds(restart_path: str) -> float:
 # re-listed here: a harness that accepted a mode the bridge rejects three calls
 # later would fail deep inside grid construction instead of at the CLI.
 NEMO_LADDER_TWIN_DEFAULT = "both"
-_LADDER_ANNOUNCED = False
-_LADDER_RESOLVED: tuple[str | None, str] | None = None
-
-
-def reset_ladder_resolution() -> None:
-    """Forget this process's ladder resolution.
-
-    The only legitimate callers are tests, plus an operator following the
-    "already resolved" error message above -- which points here, so this must
-    exist and must work.
-    """
-    global _LADDER_ANNOUNCED, _LADDER_RESOLVED
-    _LADDER_ANNOUNCED, _LADDER_RESOLVED = False, None
+_LADDER_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
 
 
 def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
@@ -365,22 +353,19 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
       nothing                   -> ``"both"``                   [TWIN DEFAULT]
 
     Setting the variable to something the flag contradicts is FATAL rather than
-    silently letting one win.  The resolved mode is written back into
-    ``LEGOESM_NEMO_E3T`` because that is the only channel the bridge reads, and
-    it is returned so the caller stamps the value it actually resolved rather
-    than re-reading mutable process state later.
+    silently letting one win.
 
-    ONE PROCESS RESOLVES ONCE.  A second call that would land on a DIFFERENT
-    mode is fatal, and a second call re-reads the operator's original setting
-    rather than the value this function planted -- without that, an in-process
-    two-arm ladder sweep silently produces two identical arms, because arm 2
-    reads arm 1's write-back and calls it an explicit override.
+    THIS FUNCTION IS PURE apart from its printing: it RETURNS the mode and does
+    NOT write ``LEGOESM_NEMO_E3T``.  It used to write it, because that was the
+    only channel the bridge read, and that write-back was the source of a whole
+    class of defect: a second caller could not tell the operator's setting from
+    the value the first call had planted, so an in-process two-arm sweep silently
+    ran the same grid twice.  No check can separate those two cases -- they are
+    the same string in the same slot -- so the write-back is gone instead, and
+    the resolved mode travels to the bridge as an ARGUMENT (``e3t_mode``).  Two
+    different ladders in one process are now simply two calls.
     """
-    global _LADDER_ANNOUNCED, _LADDER_RESOLVED
-    raw = os.environ.get("LEGOESM_NEMO_E3T")
-    env = raw
-    if _LADDER_RESOLVED is not None and env == _LADDER_RESOLVED[1]:
-        env = _LADDER_RESOLVED[0]        # discount this function's own write-back
+    env = os.environ.get("LEGOESM_NEMO_E3T")
     if env is not None:
         if env not in NEMO_E3T_MODES:
             raise SystemExit(
@@ -398,54 +383,36 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
         mode, source = "off", "--legacy-1d-ladder"
     else:
         mode, source = NEMO_LADDER_TWIN_DEFAULT, "twin default"
-    # REJECTED SUGGESTION (round-2 review): "skip the conflict check when the raw
-    # environment already equals the resolved mode, so an operator re-asking for
-    # the mode in effect is not mis-accused." It cannot be done. This function
-    # WROTE that value, so raw == resolved is exactly the write-back case, and
-    # skipping there re-opens the silent second-arm bug: arm 2 asks for the
-    # default, is handed arm 1's grid without a word, and the sweep measures
-    # zero. A fail-closed error whose wording is imperfect beats a silent wrong
-    # grid, so the check stays and the MESSAGE says what actually happened.
-    if _LADDER_RESOLVED is not None and mode != _LADDER_RESOLVED[1]:
-        raise SystemExit(
-            f"this process already resolved the vertical ladder to "
-            f"{_LADDER_RESOLVED[1]!r} (and wrote it into LEGOESM_NEMO_E3T) and "
-            f"is now being asked for {mode!r}. One process builds one grid: run "
-            "each ladder arm as its own process, or call "
-            "reset_ladder_resolution() if you know the previously built state "
-            "is gone. If you set LEGOESM_NEMO_E3T yourself between the two "
-            "calls, note that this function cannot tell your setting apart from "
-            "its own write-back -- reset first, then set it.")
-    _LADDER_RESOLVED = (env, mode)
-    os.environ["LEGOESM_NEMO_E3T"] = mode          # the bridge reads it HERE
-    if not _LADDER_ANNOUNCED:
-        _LADDER_ANNOUNCED = True
-        # Keyed to the GRID, not to the default: if someone flips the default
-        # back, the warning must survive rather than vanish with it.
-        if mode != "both":
-            print("\n" + "!" * 78, flush=True)
-            print(f"!! NON-DEFAULT VERTICAL LADDER: {mode!r}  [{source}]",
+    # The banner is once per MODE per process (repeating it trains people to
+    # ignore it); the one-line statement of the grid is EVERY call, so no twin
+    # can ever be built without its log saying which ladder it stands on.
+    # Keyed to the GRID, not to the default: if someone flips the default back,
+    # the warning must survive rather than vanish with it.
+    if mode != "both" and mode not in _LADDER_ANNOUNCED:
+        _LADDER_ANNOUNCED.add(mode)
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! NON-DEFAULT VERTICAL LADDER: {mode!r}  [{source}]", flush=True)
+        if mode == "off":
+            print("!! This is the 1-D REFERENCE ladder, NOT the grid the NEMO "
+                  "run integrates", flush=True)
+            print("!! with. Measured cost at day 90: +2.93 Sv of circumpolar "
+                  "transport error", flush=True)
+            print("!! against +0.29 Sv on NEMO's own ladders (#1455). Numbers "
+                  "produced here", flush=True)
+            print("!! score legoESM on a grid NEMO does not have.", flush=True)
+        else:
+            print("!! Mixed ladders: cells from one ladder, T-points from the "
+                  "other. 'gdept_only'", flush=True)
+            print("!! puts T-points 110.2 m from the centre of the cell they "
+                  "sit in at k=32,", flush=True)
+            print("!! against 11.3 m on 'both' -- NEMO's own T-points are not "
+                  "cell centres", flush=True)
+            print("!! either, so 'both' is offset too, just 10x less (#1455).",
                   flush=True)
-            if mode == "off":
-                print("!! This is the 1-D REFERENCE ladder, NOT the grid the "
-                      "NEMO run integrates", flush=True)
-                print("!! with. Measured cost at day 90: +2.93 Sv of "
-                      "circumpolar transport error", flush=True)
-                print("!! against +0.29 Sv on NEMO's own ladders (#1455). "
-                      "Numbers produced here", flush=True)
-                print("!! score legoESM on a grid NEMO does not have.",
-                      flush=True)
-            else:
-                print("!! Mixed ladders: cells from one, T-points from the "
-                      "other. 'gdept_only'", flush=True)
-                print("!! puts T-points 110.2 m from the centre of the cell "
-                      "they sit in at k=32", flush=True)
-                print("!! (measured against the 1-D thickness ladder it keeps; "
-                      "#1455).", flush=True)
-            print("!" * 78 + "\n", flush=True)
-        print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
-              f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own "
-              f"thickness AND T-depth ladders)", flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
+          f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own thickness "
+          f"AND T-depth ladders)", flush=True)
     return mode
 
 
@@ -454,7 +421,8 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
-                       restart_file: str = RESTART_FILE):
+                       restart_file: str = RESTART_FILE,
+                       e3t_mode: str | None = None):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
@@ -486,10 +454,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     """
     # NOTE: this helper deliberately does NOT resolve the vertical ladder. A
     # dozen sibling probes import it directly and must keep the grid they were
-    # recorded on; the twin default is applied in run_twin, one level up.
+    # recorded on; the twin default is applied in run_twin, one level up and
+    # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
+    # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
+    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
+                                     e3t_mode=e3t_mode)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     if vmix_scheme is not None:
@@ -624,15 +595,16 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     (non-``--bridge-before``) state carries no before-level T, so there is
     no tb to perturb in lockstep.
     """
-    # Resolve BEFORE _build_twin_state, which builds the bridge: the bridge reads
-    # LEGOESM_NEMO_E3T while it constructs the vertical grid, so a resolution
-    # placed after it would be inert.
+    # Resolved here and handed DOWN as an argument -- nothing is written into the
+    # environment, so two ladders can be built in one process without either
+    # inheriting the other's setting.
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
-        surface_tendency_placement=surface_tendency_placement)
+        surface_tendency_placement=surface_tendency_placement,
+        e3t_mode=ladder_mode)
 
     if perturb_seed is not None:
         rng = np.random.default_rng(perturb_seed)

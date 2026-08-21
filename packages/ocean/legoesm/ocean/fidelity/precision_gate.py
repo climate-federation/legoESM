@@ -110,15 +110,17 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
 
     ``bridge_nemo_to_legoesm_topo`` defaults this to ``"off"``, which feeds
     legoESM NEMO's *analytic 1-D* ``e3t_1d`` while NEMO itself runs on the 3-D
-    ``e3t_0``.  Below k=25 those two NEMO ladders diverge, by up to **70.4 m**
+    ``e3t_0``.  At and below k=25 (0-based, as everywhere in this file) those two
+    NEMO ladders diverge, by up to **70.4 m**
     at the deepest wet level -- which is 12.9% of ``e3t_0`` and 14.8% of
     ``e3t_1d``.  Always quote the denominator here: those two percentages are
     ONE measurement and have already been mistaken for a disagreement between
     two.  NEMO builds its reference ladder in two passes
     (``zgr_lib.F90::zgr_sco_mi96`` re-anchors at
     ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's ``rn_hco = 1000 m`` puts
-    that at k=25 exactly), so the default silently puts a 13% geometry error
-    into the deepest third of the column.
+    that at ``kkconst = 26`` in Fortran's 1-based indexing, i.e. k=25 here), so
+    the default silently puts a 12.9%-of-``e3t_0`` geometry error into the
+    deepest third of the column.
 
     It has now contaminated FOUR measurements.  The most recent cost a full
     false root-cause: the barotropic seed measured 2.31e-2 and was attributed to
