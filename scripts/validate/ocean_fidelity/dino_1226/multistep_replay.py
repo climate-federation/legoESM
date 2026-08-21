@@ -72,7 +72,8 @@ Precision / fidelity conventions (mandatory, not optional)
 fp64 explicit (``PrecisionPolicy.fp64()`` set before any bridge call, printed
 dtypes), ``LEGOESM_NEMO_E3T=both`` (NEMO's true 3-D e3t/gdept ladder, per
 ``ocean.fidelity.precision_gate.require_explicit_e3t_mode`` -- #1226's
-12.9% analytic-vs-true-ladder trap), registry-checked time levels wherever a
+analytic-vs-true-ladder trap: 70.4 m at the deepest wet
+level, 12.9% of e3t_0 / 14.8% of e3t_1d), registry-checked time levels wherever a
 dump-file convention applies. NEMO restart fields (tn/sn/.../tb/sb/.../en)
 are NOT ambiguous dump files -- their now/before-level convention is the
 restart file format itself (documented on ``NemoState``/``NemoBeforeState``),

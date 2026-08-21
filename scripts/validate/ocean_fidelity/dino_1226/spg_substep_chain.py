@@ -339,7 +339,8 @@ def main() -> int:
     # --- Precondition 3 (added this iteration, see fidelity_bar_gate.py's
     # "dyn_spg_ts puu_b" row, 2026-07-29 correction): the bridge's e3t mode
     # MUST be explicit.  The unset default silently gives NEMO's analytic
-    # e3t_1d (12.9% off NEMO's real e3t_0 below k=25) and produced a false
+    # e3t_1d (up to 70.4 m off NEMO's real e3t_0 at and below k=25 --
+    # 12.9% of e3t_0, 14.8% of e3t_1d) and produced a false
     # "seed owns it" verdict earlier this session (STAGE 4 above, run before
     # this gate existed).  At e3t=both the seed is EXACT and the error
     # accumulates in the substep loop instead -- the opposite conclusion.

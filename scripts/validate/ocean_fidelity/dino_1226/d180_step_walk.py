@@ -163,7 +163,8 @@ deep density contrast improves 14x on that arm as well (3.98e-06 -> 2.87e-07).
 The surface density metrics do not improve on any arm.
 
 The two ladders are IDENTICAL above ~1000 m and differ only over levels 25-34,
-by up to 15% in thickness and 4% in depth -- a DEEP geometry difference, and
+by up to 14.8% in thickness (of e3t_1d; 12.9% of e3t_0) and 3.9% in T-point
+depth -- a DEEP geometry difference, and
 therefore a different thing from the top-two-level shear divergence Phase 1b
 measures.
 
@@ -235,17 +236,23 @@ CAVEATS, both real:
     fp32 control dtype unless it is wrapped in run_fp64.py -- the recorded
     baseline was, and these arms were not (their logs carry the bridge's
     NON-fp64 warning).  Re-running the shipped-grid arm at HEAD UNDER fp64
-    returns a state BIT-IDENTICAL to that baseline in every saved field
+    returns a state BIT-IDENTICAL to that baseline in EVERY SAVED FIELD
     (max|d u3d| at days 30 and 90, max|d T3d| and max|d eta3d| at day 90 all
-    exactly 0.0) and an ACC gap of +1.8723.  So the model diff between the two
-    commits is exactly inert and the precision policy owns 100% of the 0.21 Sv.
+    exactly 0.0; artifacts /tmp/dino_clock_baseline/twin90_corrected.npz and
+    /tmp/dino_fp64_arms/twin90_off_fp64.npz, logs alongside each) and an ACC gap
+    of +1.8723.  So the model diff between the two commits is inert ON THOSE
+    FIELDS -- which is what this comparison scores -- and the precision policy
+    owns 100% of the 0.21 Sv.
     The "real and UNEXPLAINED" above is WITHDRAWN.
     Consequence for the table above: every number in it is fp32.  The two arms
     re-measured at fp64 both moved -- acc_full +1.659 -> +1.8723 ("off") and
     -0.516 -> -0.5965 ("both"), channel band +3.483 -> +2.9319 and +0.099 ->
-    +0.2874.  The ranking, the signs and the ~90% cut all survive; the reading
-    that the "both" channel band sits AT the 0.091 Sv floor does not -- at fp64
-    it is 3.2x that floor.  The two half-ladder arms have not been re-run.
+    +0.2874.  The ranking, the signs, and the shipped-to-NEMO-ladder channel-band
+    cut (+2.9319 -> +0.2874, 90%) all survive; the reading that the "both"
+    channel band sits AT the 0.091 Sv floor does not -- at fp64 it is 3.2x that
+    floor.  The two half-ladder arms have NOT been re-run, so anything resting
+    on them -- including which half fixes which transport component -- is still
+    an fp32 result.
   * nemo_state_bridge carries a comment stating legoESM is unstable on NEMO's
     ladders (max|u| 0.66 -> 2.2 m/s in 20 days) and citing that as the reason
     the wrong ladder is the default.  It did not reproduce here: day-90 max|u|
@@ -305,7 +312,8 @@ def provenance() -> None:
     of a harness at byte-identical committed source differed by 2.5 Sv and the
     difference was unrecoverable because nothing stamped the tree state), plus
     the two knobs that silently change what is being measured here: the e3t
-    ladder mode (#1226's 12.9% analytic-vs-true-ladder trap) and the seasonal
+    ladder mode (#1226's analytic-vs-true-ladder trap: up to 70.4 m at the
+    deepest wet level, 12.9% of e3t_0 / 14.8% of e3t_1d) and the seasonal
     clock offset (#1455's antiphase-forcing confound).
     """
     from kamm_twin_90d import provenance_gate, seasonal_t0_seconds

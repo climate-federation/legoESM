@@ -1814,7 +1814,9 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "FALSIFIED. Still UNMEASURED as a per-element fidelity row (this is a "
         "stability/climate result, not a term comparison). This string used to "
         "end 'the restart-start instability remains a real open defect' -- "
-        "WITHDRAWN 2026-08-21, for the same reason as the sentence above it."),
+        "WITHDRAWN 2026-08-21 (#1455): four 90-day arms from the day-180 NEMO "
+        "restart, differing only in the ladder, all ran stable at 0.633-0.635 "
+        "m/s peak speed, so the blow-up did not reproduce."),
     # dv's residual is the DEFERRED v-face metric (dy_v vs NEMO e2v): the
     # metric_convention work shipped T/u-face only because vface_zonal_cos_lat
     # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
@@ -3497,8 +3499,10 @@ BINARY_GATES: dict[str, bool | None] = {
     # rests on "the blow-up is real and unfixed" -- that premise is withdrawn.
     # It stays False for a NARROWER, still-true reason: a non-reproduction under
     # one configuration is not a demonstration, and the criterion "legoESM runs
-    # on NEMO's actual geometry" has never been measured on the arm that
-    # matters over the multi-year window this scorecard scores.  Flipping it to
+    # on NEMO's actual geometry" has never been measured FROM A NEMO RESTART
+    # over the multi-year window this scorecard scores. (The 5-year STABLE
+    # result above is from REST, which is the easier half of the criterion --
+    # that is exactly why this row does not clear on it.)  Flipping it to
     # True would over-claim in the other direction; the row clears when the
     # discriminating run is done, not before.
     "STABILITY on NEMO true grid (e3t_0)": False,

@@ -132,7 +132,8 @@ MANDATORY PRECONDITIONS (both fail closed)
 ------------------------------------------
 ``precision_gate.require_fp64`` + ``precision_gate.require_explicit_e3t_mode``.
 Run with ``LEGOESM_NEMO_E3T=both``: unset, the bridge silently uses NEMO's
-analytic ``e3t_1d`` ladder (12.9% off below k=25) and every number here is
+analytic ``e3t_1d`` ladder (up to 70.4 m off at and below k=25 -- 12.9% of
+e3t_0, 14.8% of e3t_1d) and every number here is
 worthless -- that default has already ruined four measurements.
 
 Run::
