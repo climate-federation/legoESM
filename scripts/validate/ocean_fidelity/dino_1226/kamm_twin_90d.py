@@ -699,7 +699,7 @@ def _smoke_check_vmix_scheme_override():
           f"({base.surface_tendency_placement} -> {_other})")
 
 
-def _provenance_gate() -> None:
+def provenance_gate() -> None:
     """Stamp source provenance and REFUSE to run from a dirty tracked tree.
 
     Added after the 2026-08-19/20 reconciliation (#1455, a009c6812): two runs
@@ -734,7 +734,7 @@ def _provenance_gate() -> None:
 
 def main(argv=None):
     args = _parse_args(argv)
-    _provenance_gate()
+    provenance_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return
