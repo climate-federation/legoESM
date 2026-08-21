@@ -164,6 +164,9 @@ def provenance(tag: str = "") -> str:
             "DINO_RECONCILE",
             "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
             "DINO_NEMO_RUN_TWIN_STEP1", "DINO_1226_IC_STEP",
+            # #1455 PHASE 1: the seasonal clock is a knob that changes the
+            # answer on a forcing_annual_cycle=True card, so it is stamped.
+            "DINO_1226_T_SECONDS",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
             f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "

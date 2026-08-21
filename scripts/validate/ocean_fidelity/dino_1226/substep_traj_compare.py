@@ -197,8 +197,30 @@ def main():
           f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
           f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]")
     DT = 2700.0
+    # #1455 PHASE 1 (the time axis) -- THE SEASONAL CLOCK, and it is a real
+    # defect in the three commits before this one, not a refactor.  This card
+    # sets forcing_annual_cycle=True (ln_ann_cyc), so the restoring target T*
+    # and the solar Q_sr are functions of t_seconds.  The state being replayed
+    # is NEMO step IC_STEP, i.e. ABSOLUTE time (IC_STEP+1)*DT; passing a bare
+    # DT put legoESM's season at day 0.03 while NEMO's was at day 180+.  That
+    # was harmless at the historical IC only by coincidence (230400 steps x
+    # 2700 s = exactly 20 x 360 d, so relative == absolute -- the coincidence
+    # multistep_replay's own IC_STEP note already flags), and it is NOT
+    # harmless once this walk moves ACROSS the 90-day window: a season
+    # mismatch that varies with the state would fake a time dependence in
+    # exactly the quantity the walk is now measuring.
+    # Set DINO_1226_T_SECONDS=2700 to restore the legacy bare-DT clock (the
+    # A/B that quantifies what the earlier commits' numbers change by).
+    _env_t = os.environ.get("DINO_1226_T_SECONDS")
+    T_SECONDS = float(_env_t) if _env_t not in (None, "") else float(
+        mr.IC_STEP + 1) * DT
+    print(f"  seasonal clock: t_seconds={T_SECONDS:.1f} s "
+          f"(day {T_SECONDS / 86400.0:.2f}); legacy bare-DT = {DT:.1f} s "
+          f"(day {DT / 86400.0:.2f}); annual_cycle="
+          f"{getattr(cfg, 'forcing_annual_cycle', None)}")
     st, rate = apply_dino_lat_lon_surface_forcing(
-        st0, forcing, br.z_coord, cfg, DT, t_seconds=DT, return_rate=True)
+        st0, forcing, br.z_coord, cfg, DT, t_seconds=T_SECONDS,
+        return_rate=True)
     # Run EAGER (disable_jit) so the fori->scan tee yields CONCRETE carries
     # across the jit boundary (fp64, one baroclinic step -- cheap).
     with jax.disable_jit():
