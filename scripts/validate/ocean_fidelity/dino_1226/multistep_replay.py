@@ -111,7 +111,13 @@ RUN_TWIN_STEP1 = os.environ.get(
     "DINO_NEMO_RUN_TWIN_STEP1",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TWIN_STEP1",
 )
-IC_STEP = 230400  # y20 continuation day-0 (DINO_00230400_restart_*.nc per-rank tiles)
+# y20 continuation day-0 (DINO_00230400_restart_*.nc per-rank tiles).
+# #1455: overridable so the SAME replay can run at the 90-day twin's own
+# starting point (DINO_1226_IC_STEP=5760 with DINO_NEMO_RUN_TWIN_STEP1
+# pointing at the day-180 per-step reference restarts).  The default is
+# unchanged, so every existing caller and every sibling that mutates
+# IC_STEP behaves exactly as before.
+IC_STEP = int(os.environ.get("DINO_1226_IC_STEP", "230400"))
 # #1455 NOTE, so the next probe does not inherit a silent bug: 230400 steps x
 # 2700 s = 7200 d = EXACTLY 20 x the 360-day year, so at this IC a relative
 # seasonal clock happens to be in phase with the absolute one and the seasonal
@@ -156,7 +162,7 @@ def provenance(tag: str = "") -> str:
             "DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
             "DINO_RECONCILE",
             "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
-            "DINO_NEMO_RUN_TWIN_STEP1",
+            "DINO_NEMO_RUN_TWIN_STEP1", "DINO_1226_IC_STEP",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
             f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "

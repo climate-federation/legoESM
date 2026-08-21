@@ -187,13 +187,103 @@ def phase0() -> int:
     return 0 if ok else 1
 
 
+# ---------------------------------------------------------------------------
+# PHASE 1 -- free-running walk
+# ---------------------------------------------------------------------------
+# The per-step reference restarts this arm compares against, one NEMO step
+# apart, produced by the CERTIFIED binary at 1 rank from the day-180 restart
+# (RUN_D180_STEP1_1R, nn_stock=1) and exposed under the per-rank filename the
+# replay's stitcher globs for (RUN_D180_STEP1, single-tile symlinks).  Its
+# step-5764 restart is bit-identical to RUN_SEQDUMP_D180_1R's, so this
+# trajectory is the same one Phase 0 certified.
+RUN_D180_STEP1 = os.environ.get(
+    "DINO_NEMO_RUN_D180_STEP1", os.path.join(DINO_CFG, "RUN_D180_STEP1"))
+RUN_Y20_STEP1 = os.environ.get(
+    "DINO_NEMO_RUN_TWIN_STEP1_Y20", os.path.join(DINO_CFG, "RUN_TWIN_STEP1"))
+
+_ARMS = {
+    # arm -> (IC step, per-step reference restart dir)
+    "d180": (5760, RUN_D180_STEP1),
+    "y20": (230400, RUN_Y20_STEP1),
+}
+
+_FIELDS = ("max_deta_now", "max_du_now", "max_dv_now", "max_dT_now",
+           "max_dS_now", "max_de3t", "max_du_before", "max_dv_before",
+           "max_dT_before", "max_dS_before", "max_den")
+
+
+def _run_arm(arm: str, n_steps: int) -> dict:
+    """One free-running replay arm.  ``IC_STEP`` is read at import time, so it
+    must be set BEFORE ``multistep_replay`` is imported -- run each arm in its
+    own subprocess rather than re-importing, which is why this is spawned."""
+    ic, run_dir = _ARMS[arm]
+    env = dict(os.environ)
+    env["DINO_1226_IC_STEP"] = str(ic)
+    env["DINO_NEMO_RUN_TWIN_STEP1"] = run_dir
+    code = (
+        "import json, sys, numpy as np;"
+        "sys.path.insert(0, %r);"
+        "import multistep_replay as m;"
+        "m.provenance('phase1');"
+        "d = m.run_replay(%d);"
+        "print('@@JSON@@' + json.dumps({k: np.asarray(v).tolist() "
+        "for k, v in d.items()}))" % (_THIS_DIR, n_steps))
+    out = subprocess.run([sys.executable, "-c", code], env=env,
+                         capture_output=True, text=True)
+    tail = out.stdout.strip().splitlines()
+    for line in tail:
+        if not line.startswith("@@JSON@@"):
+            print(f"  [{arm}] {line}")
+    hit = [l for l in tail if l.startswith("@@JSON@@")]
+    if not hit:
+        print(out.stderr[-4000:])
+        raise SystemExit(f"arm {arm!r} produced no result")
+    import json
+    return json.loads(hit[-1][len("@@JSON@@"):])
+
+
+def phase1(n_steps: int = 4, arms: tuple[str, ...] = ("d180", "y20")) -> int:
+    """Free-running walk: ONE (then N) legoESM steps from the bridged state,
+    compared against NEMO's OWN restart at each step.
+
+    Both arms run the SAME code with the SAME step count and the SAME
+    seasonal-clock rule; the ONLY variable is the initial condition (and the
+    reference restarts that go with it).  That is what makes a day-180 number
+    comparable with a year-20 number here.
+    """
+    res = {}
+    for arm in arms:
+        print(f"\nPHASE 1  arm={arm}  IC_STEP={_ARMS[arm][0]}  "
+              f"ref={_ARMS[arm][1]}")
+        res[arm] = _run_arm(arm, n_steps)
+        for f in _FIELDS:
+            _fatal_if_nan(np.asarray(res[arm][f]), f"{arm}:{f}")
+
+    print("\nPHASE 1  free-running divergence, max|legoESM - NEMO| on wet cells")
+    hdr = "  " + "field".ljust(16)
+    for arm in arms:
+        hdr += "".join(f"{arm}:k{k+1}".rjust(14) for k in range(n_steps))
+    print(hdr)
+    for f in _FIELDS:
+        line = "  " + f.replace("max_", "").ljust(16)
+        for arm in arms:
+            line += "".join(f"{v:14.4e}" for v in res[arm][f])
+        print(line)
+    print("\nPHASE 1  reported (a FAIL here is the deliverable, not an error)")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--phase", default="0", choices=["0"],
-                    help="which phase to run (1 and 2 land in follow-ups)")
+    ap.add_argument("--phase", default="0", choices=["0", "1"],
+                    help="0 = NEMO-side control, 1 = free-running walk")
+    ap.add_argument("--steps", type=int, default=4)
+    ap.add_argument("--arms", default="d180,y20")
     args = ap.parse_args(argv)
     provenance()
-    return {"0": phase0}[args.phase]()
+    if args.phase == "0":
+        return phase0()
+    return phase1(n_steps=args.steps, arms=tuple(args.arms.split(",")))
 
 
 if __name__ == "__main__":
