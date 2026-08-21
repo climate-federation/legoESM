@@ -113,3 +113,86 @@ def test_the_legitimate_hardcode_is_still_there():
     assert "n_loop = n_substeps" in src, (
         "the branch this test was scoped around has gone; re-check that the "
         "scoping in test_no_caller_hardcodes_the_loop_length still makes sense")
+
+
+@pytest.mark.parametrize("time_filter", ["cosine", "box"])
+def test_default_filter_path_steps_the_model(time_filter):
+    """End-to-end: the DEFAULT barotropic filter branch can take a real step.
+
+    The gates above are STATIC (they read source).  This one RUNS the stock
+    lat-lon C-grid model -- ``barotropic_solver="explicit_substep"`` plus the
+    default ``barotropic_time_filter="cosine"``, i.e. the ``else`` branch of
+    ``_compute_weights``.  Pre-fix it raises ``ValueError: too many values to
+    unpack (expected 3)`` inside the first step.
+
+    NOT a rest state: a rest basin evolves to exactly zero, so "the fields are
+    finite" would be satisfied by all-zeros and could only ever catch a hard
+    raise.  The initial free surface carries a bump, and the test asserts the
+    step actually moved the ocean, so a solver that silently returned its input
+    would fail too.
+
+    The ``n_loop`` assertion is the second half of the guard: re-hardcoding
+    ``n_loop = n_substeps`` (the careless "fix" for the unpack error) restores
+    the half window #1609 removed while leaving the model perfectly able to
+    step, so the stepping assertions alone would not catch it.
+
+    ``"box"`` shares the same branch and is parametrized so the coverage
+    follows the branch rather than one config value.
+    """
+    import numpy as np
+    import jax.numpy as jnp
+
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _compute_weights
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    n_lat, n_lon = 16, 32
+    grid = create_latlon_grid(n_lat, n_lon)
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    ocean_mask = np.ones((n_lat, n_lon))
+    ocean_mask[:2] = 0.0          # 1 = ocean, 0 = land
+    ocean_mask[-2:] = 0.0
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        land_mask_override=jnp.asarray(ocean_mask),
+        H_bathy_override=jnp.full((n_lat, n_lon), 4000.0))
+
+    # A free-surface bump so the barotropic mode has something to propagate.
+    lat_i = np.arange(n_lat)[:, None]
+    lon_j = np.arange(n_lon)[None, :]
+    bump = 0.5 * np.exp(-(((lat_i - n_lat / 2) / 2.0) ** 2
+                          + ((lon_j - n_lon / 2) / 2.0) ** 2))
+    eta0 = jnp.asarray(bump * ocean_mask)
+    state = state._replace(eta=state.eta.replace(data=eta0))
+
+    cfg = LatLonCGridOceanConfig.from_flat(barotropic_time_filter=time_filter)
+    # Non-vacuity: this really is the branch under test.  If a future default
+    # moves the stock config off explicit_substep, the assert says so instead
+    # of the test quietly covering a different solver.
+    assert cfg.barotropic.barotropic_solver == "explicit_substep"
+    assert LatLonCGridOceanConfig().barotropic.barotropic_time_filter == "cosine"
+
+    # The centred window runs 2n-1 substeps; n_loop must come from the callee.
+    n_sub = int(cfg.barotropic.n_barotropic_substeps)
+    w_filter, _w_total, w_transport, n_loop = _compute_weights(
+        cfg, n_sub, jnp.float64)
+    assert n_loop == 2 * n_sub - 1, "half window restored"
+    assert w_filter.shape[0] == n_loop
+    assert w_transport.shape[0] == n_loop
+
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+    for _ in range(2):
+        state = model.step(state, 600.0)
+
+    eta = np.asarray(state.eta.data)
+    assert np.all(np.isfinite(eta)), "eta not finite"
+    assert np.all(np.isfinite(np.asarray(state.u.data))), "u not finite"
+    assert np.all(np.isfinite(np.asarray(state.v.data))), "v not finite"
+    # The step did something: the bump spread and spun up a flow.
+    assert not np.allclose(eta, np.asarray(eta0)), "eta did not evolve"
+    assert np.max(np.abs(np.asarray(state.u.data))) > 0.0, "no flow generated"

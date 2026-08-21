@@ -1140,10 +1140,9 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        w_filter, w_total, w_transport = compute_filter_weights(
+        w_filter, w_total, w_transport, n_loop = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
-        n_loop = n_substeps
     return w_filter, w_total, w_transport, n_loop
 
 
