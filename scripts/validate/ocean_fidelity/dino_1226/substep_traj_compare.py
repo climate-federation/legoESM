@@ -160,7 +160,12 @@ def main():
     # call time), so patching jax.lax.fori_loop globally works; the wrap above
     # sets/restores it around the original run.
 
-    mr.IC_STEP = 230400
+    # #1455 baro-substeps: the IC step is the ENV-selected one (multistep_replay
+    # already reads DINO_1226_IC_STEP); the previous hard pin to 230400 silently
+    # overrode it, so a day-180 SEQDUMP was replayed against the y20 restart
+    # tiles and the probe aborted.  Keep the same default (230400) via the
+    # module global, and STAMP what was actually used.
+    mr.provenance('substep_traj_compare')
     jax.clear_caches()
     g, br, cfg, st0 = mr.build_replay_ic()
     from legoesm.ocean.experiments.dino import (
@@ -441,6 +446,126 @@ def main():
     print(f"    NON-CIRCULARITY resid (verr - dt_s*ΔF): max={np.abs(resid[wet]).max():.4e} "
           f"= {100*np.abs(resid[wet]).max()/max(np.abs(verr[wet]).max(),1e-300):.1f}% of verr "
           f"-> {'DYNAMICS MATCH, forcing owns it' if np.abs(resid[wet]).max() < 0.1*np.abs(verr[wet]).max() else 'loop dynamics ALSO differ -- investigate'}")
+
+    # ===================================================================
+    # #1455 baro-substeps: THE ACC DEPOSIT, SIGNED AND SECTION-INTEGRATED.
+    #
+    # Every number above is a MAXIMUM over faces.  The ACC gap is a SIGNED
+    # SECTION INTEGRAL, and the two are not interchangeable: a max of 5e-2 m^2/s
+    # says nothing about a deposit that only needs ~1e-8 m/s of coherent
+    # section-mean velocity per step.  This block reduces the SAME per-substep
+    # trajectory with the ACCEPTANCE GATE'S OWN metric
+    #   ACC(i) = sum_j sum_k u(j,k,i) * e3t_1d(k) * e2u(j,i)   [per longitude]
+    # (southern_term_torque_accum.py's acc_full weighting; rows 1..197, MEAN over
+    # longitudes 2..-2 so the decomposition is LINEAR -- the gate itself takes the
+    # median, which is not).  A depth-uniform barotropic increment dU contributes
+    # dU * e2u * sum_k e3t_1d*umask, so the substep sum is exact, not a surrogate.
+    #
+    # BUDGET TARGET (what a suspect must be able to pay for): the accumulated
+    # 90-day stage budget (c987db464) puts -0.8069 Sv of full-section barotropic
+    # stage-sum difference over 2880 steps = -2.80e-4 Sv/step, which after the
+    # slaved leap-frog halving is the -0.4014 Sv realized gap.  A per-step
+    # barotropic deposit difference much smaller than 2.80e-4 Sv CANNOT own it.
+    #
+    # INSTRUMENT CONTROL (asserted, not printed): NEMO's own boxcar of the dumped
+    # per-substep ua_e must reproduce spg_dump_puu_b_final.bin to roundoff -- if
+    # it does not, the substep->deposit map is wrong and nothing below stands.
+    print("\n  === ACC-METRIC DEPOSIT (gate weights, signed, Sv) ===")
+    d2 = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+    e3t_1d = np.asarray(d2.variables["e3t_1d"][0], dtype=np.float64)   # (jpk,)
+    umask3 = np.asarray(d2.variables["umask"][0], dtype=np.float64)    # (jpk,jpj,jpi)
+    e2u_2d = np.asarray(d2.variables["e2u"][0], dtype=np.float64)      # (jpj,jpi)
+    d2.close()
+    H1d = np.tensordot(e3t_1d, umask3, axes=(0, 0))          # (jpj,jpi) e3t_1d ladder
+    acc_w = e2u_2d * H1d                                      # (jpj,jpi) [m^2] per m/s
+
+    def acc_sv(dU_cell):
+        """Section-integrated ACC transport of a depth-uniform u increment [Sv].
+
+        Rows 1..197 (the gate's full section), MEAN over longitudes 2..-2."""
+        per_lon = (dU_cell * acc_w)[1:198, :].sum(axis=0)     # (jpi,)
+        return float(per_lon[2:-2].mean()) / 1.0e6
+
+    # NEMO's primary (velocity) boxcar weights, normalised exactly as ts_wgt does.
+    wgtbtp1 = (zwgt1[:Kpit] / zwgt1[:Kpit].sum())
+    # lego's own primary weights, from the SAME helper the model runs.
+    wf_n = np.asarray(wf) / float(np.asarray(wt))
+    print(f"    weights: max|lego_primary - NEMO_wgtbtp1| = "
+          f"{np.abs(wf_n - wgtbtp1).max():.3e}   "
+          f"max|lego_transport - NEMO_wgtbtp2| = {np.abs(w_tr - wgtbtp2).max():.3e}")
+
+    # --- instrument control: rebuild NEMO's puu_b(Kaa) from its own substeps ---
+    _puu_b = np.fromfile(os.path.join(SEQDUMP, "spg_dump_puu_b_final.bin"),
+                         dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                              )[HLS:-HLS, HLS:-HLS]
+    nemo_Ubar_avg = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        nemo_Ubar_avg = nemo_Ubar_avg + wgtbtp1[j - 1] * subs[j]["ua_e"]
+    _wetu = (umask[0] > 0.5)
+    _rel_pb = (np.abs((nemo_Ubar_avg - _puu_b)[_wetu]).max()
+               / max(np.abs(_puu_b[_wetu]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK: boxcar(dumped ua_e) vs spg_dump_puu_b_final "
+          f"rel={_rel_pb:.3e}")
+    assert _rel_pb < 1e-10, (
+        "the substep->puu_b map is WRONG (rel %.3e): the per-substep deposit "
+        "decomposition below cannot be trusted" % _rel_pb)
+
+    # --- lego's own averaged velocity, from the captured carries ---------------
+    def _cell(a2d):
+        return a2d[:, 1:] if a2d.shape[1] == jpi + 1 else a2d
+
+    lego_Ubar_avg = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        lego_Ubar_avg = lego_Ubar_avg + wf_n[j - 1] * _cell(np.asarray(U_bar_stk[j - 1]))
+    dU_avg = (lego_Ubar_avg - nemo_Ubar_avg) * _wetu
+    _dep_vel = acc_sv(dU_avg)
+    # transport-average route (NEMO dynspg_ts.F90:1170-1174 un_adv*r1_hu):
+    _hu_now = np.maximum(hu0_full, 1e-30)
+    dU_tr = (_cell(np.asarray(Hu_sum_stk[Kpit - 1])) - un_adv_cum) / _hu_now * _wetu
+    _dep_tr = acc_sv(dU_tr)
+    _TARGET = -2.80e-4     # Sv/step, the 90-day barotropic stage row / 2880
+    print(f"    velocity-average deposit diff (lego - NEMO)  = {_dep_vel:+.4e} Sv/step"
+          f"   = {100*_dep_vel/_TARGET:6.1f}% of the -2.80e-4 Sv/step budget row")
+    print(f"    transport-average deposit diff (un_adv route) = {_dep_tr:+.4e} Sv/step"
+          f"   = {100*_dep_tr/_TARGET:6.1f}%")
+
+    # --- WHERE IN THE LOOP is it born: cumulative over the weighted substeps ---
+    print("\n    per-substep ACC deposit, cumulative over the boxcar window [Sv]:")
+    print("      jn | w_i        | this substep    | cumulative      | % of budget")
+    _cum = 0.0
+    _rows = []
+    for j in range(1, Kpit + 1):
+        _d = wf_n[j - 1] * acc_sv(
+            (_cell(np.asarray(U_bar_stk[j - 1])) - subs[j]["ua_e"]) * _wetu)
+        _cum += _d
+        _rows.append((j, wf_n[j - 1], _d, _cum))
+    for j, wi, dj, cj in _rows:
+        if j <= 2 or (j >= 22 and j <= 26) or j % 8 == 0 or j >= Kpit - 2:
+            print(f"      {j:2d} | {wi:.6f}   | {dj:+.4e}     | {cj:+.4e}     "
+                  f"| {100*cj/_TARGET:6.1f}%")
+    # fp64 summation-ORDER tolerance: the two sums differ only in the order the
+    # 45 rows are added (per-substep here vs field-then-reduce above), so the
+    # bound is ~n*eps on the partial sums, not on the tiny result.
+    assert abs(_cum - _dep_vel) < 1e-9 * max(abs(_dep_vel), 1e-12), (
+        f"substep decomposition does not close: {_cum} vs {_dep_vel}")
+    print(f"    CLOSURE: sum of per-substep rows = {_cum:+.6e} == deposit "
+          f"{_dep_vel:+.6e} Sv/step (rel {abs(_cum-_dep_vel)/abs(_dep_vel):.1e})")
+
+    # --- DISCRIMINATOR: can the zu_frc residual alone explain the trajectory? --
+    # If the loop DYNAMICS are faithful and only the frozen forcing differs, the
+    # velocity error after jn substeps is jn*dt_s*dF (dF is held constant across
+    # the whole loop on BOTH models).  Compare that prediction, in the SAME ACC
+    # metric, against the measured per-substep error.  A prediction that lands
+    # short means the loop AMPLIFIES rather than merely integrates.
+    _acc_dF_step = acc_sv(dt_s * dF)
+    print(f"\n    zu_frc residual, ACC metric: dt_s*dF = {_acc_dF_step:+.4e} Sv "
+          f"per substep")
+    print("      jn | predicted jn*dt_s*dF | measured err     | measured/predicted")
+    for j in (1, 8, 24, 46, 68):
+        _meas = acc_sv((_cell(np.asarray(U_bar_stk[j - 1])) - subs[j]["ua_e"]) * _wetu)
+        _pred = j * _acc_dF_step
+        _r = _meas / _pred if _pred != 0.0 else float("nan")
+        print(f"      {j:2d} | {_pred:+.4e}          | {_meas:+.4e}      | {_r:8.3f}")
 
     # PLANT: shift NEMO trajectory by one substep -> final diff must blow up
     un_adv_shift = np.zeros_like(hu0_full)
