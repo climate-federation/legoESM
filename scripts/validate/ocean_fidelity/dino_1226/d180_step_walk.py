@@ -64,6 +64,59 @@ ACC gap is 20x the ACC noise floor, so roundoff is quantitatively excluded as
 its owner; a mislabelled "essential" divergence is exactly the failure this
 rule exists to prevent.
 
+RECORDED RESULT (2026-08-20) -- the vertical-ladder arms
+--------------------------------------------------------
+Phase 1c showed the four-step ACC divergence at the twin's own starting point
+is 43x larger under the shipped 1-D thickness ladder than under NEMO's own, so
+the four ladder modes were run out to 90 days.  These are NOT run by this
+module (they need no new code -- they are the existing twin runner and the
+existing acceptance gate, one environment variable apart), so the exact
+commands are recorded here instead:
+
+    for E in off e3t_only gdept_only both; do
+      CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=$E \
+        python kamm_twin_90d.py nemo_dino_kamm_mlf out_$E.npz \
+        --days 90 --bridge-before --save-3d
+      CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=$E \
+        python acceptance_gate_90d.py out_$E.npz --level 5
+    done
+
+All four arms are bit-identical at day 0 (same land mask, max|d u3d| =
+max|d T3d| = 0.0) and all four report STABLE over 2880 steps.
+
+  ladders (thickness, T-depth)   ACC gap vs NEMO d30/d60/d90   ACC gate
+  1-D,  1-D    (SHIPPED DEFAULT)   +1.619  +1.525  +1.659       FAIL
+  NEMO, 1-D                        +1.030  +0.739  +0.865       FAIL
+  1-D,  NEMO                       +0.272  +0.220  +0.164       PASS
+  NEMO, NEMO                       -0.308  -0.557  -0.516       FAIL
+  (gate threshold 0.455 Sv; ACC noise floor 0.091 Sv; NEMO d90 = 65.369 Sv)
+
+NEMO's own T-point depths with the thickness ladder left alone cut the ACC gap
+by 90% and are the only one of the four arms that passes the ACC metric.  The
+deep density contrast improves 14x on that arm as well (3.98e-06 -> 2.87e-07).
+The surface density metrics do not improve on any arm.
+
+The two ladders are IDENTICAL above ~1000 m and differ only over levels 25-34,
+by up to 15% in thickness and 4% in depth -- a DEEP geometry difference, and
+therefore a different thing from the top-two-level shear divergence Phase 1b
+measures.
+
+CAVEATS, both real:
+  * my 1-D/1-D arm gives +1.659 Sv where the recorded #1455 baseline gives
+    +1.872335 Sv.  The harness is bit-deterministic (a repeat run reproduces
+    the day-90 velocity field exactly, max|diff| = 0.0) and the only model-side
+    change since that baseline's commit is a dump-name registry the twin never
+    reads, so the 0.21 Sv is real and UNEXPLAINED.  It is below the gate's own
+    0.455 Sv threshold and the four arms above were run back to back on one
+    tree, so it does not touch their comparison -- but the recorded baseline is
+    NOT reproduced.
+  * nemo_state_bridge carries a comment stating legoESM is unstable on NEMO's
+    ladders (max|u| 0.66 -> 2.2 m/s in 20 days) and citing that as the reason
+    the wrong ladder is the default.  It did not reproduce here: day-90 max|u|
+    is 0.6332 / 0.6341 / 0.6344 / 0.6347 across the four arms.  That comment
+    does not record the state or configuration it was measured on, so this is a
+    non-reproduction under ONE configuration, not proof it was never true.
+
 This module prints measurements and PASS/FAIL against the pre-registered
 criteria above.  It does NOT print an interpretation, a mechanism, or a
 verdict about the +1.87 Sv -- that belongs in the analysis, after the controls
