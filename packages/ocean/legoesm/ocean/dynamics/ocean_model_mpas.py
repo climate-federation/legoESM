@@ -17,6 +17,7 @@ from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.constants_config import ConstantsConfig
+from legoesm.ocean.state import constants_equal
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -158,6 +159,33 @@ class MPASOceanModel:
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
 
+        # ONE MODEL, ONE SET OF CONSTANTS. This configuration carries its own
+        # gravity and reference density, and its physics pipeline carries a
+        # second set. Nothing reconciled them here, so a card pinning the
+        # model's gravity left every mixing and convection path on the
+        # library's -- the two halves of one model on different planets, and
+        # silently. The lat-lon model has refused that since it was found
+        # there; this is the same check, calling the same helper, so there is
+        # one rule rather than two.
+        #
+        # PROVABLY different only: a traced constant is undecidable and must
+        # not raise here, which is why this asks for ``is False`` rather than
+        # using ``!=``.
+        _phys = getattr(self.config, "physics", None)
+        _phys_cc = getattr(_phys, "constants", None) if _phys is not None else None
+        if _phys_cc is not None:
+            _model_cc = ConstantsConfig(g=self.config.g, rho_0=self.config.rho_0)
+            for _name in ("g", "rho_0"):
+                if constants_equal(getattr(_phys_cc, _name),
+                                   getattr(_model_cc, _name)) is False:
+                    raise ValueError(
+                        f"ocean physical constants disagree on {_name!r}: the "
+                        f"model configuration carries "
+                        f"{getattr(_model_cc, _name)} and its physics pipeline "
+                        f"{getattr(_phys_cc, _name)}. One model has one set of "
+                        f"physical constants; pin them once and let them "
+                        f"propagate.")
+
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:
             raise ValueError(
@@ -274,6 +302,14 @@ class MPASOceanModel:
         # Build KPP profile function for implicit vertical mixing path.
         # When implicit_vertical_mixing=True and KPP is enabled, we need
         # the raw K profiles (not tendencies) to feed the implicit solver.
+        # The MODEL's constants are the authoritative pair (the constructor
+        # refuses a physics pipeline that provably disagrees), so read them
+        # from there rather than from the pipeline: a card that pins the model
+        # and leaves the pipeline on defaults is the common case, and it must
+        # get its own values, not the library's.
+        self._constants_config = ConstantsConfig(
+            g=self.config.g, rho_0=self.config.rho_0)
+
         self._kpp_profiles_fn = None
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _vm_cfg = getattr(self.config.physics, "vertical_mixing", None)
@@ -283,7 +319,7 @@ class MPASOceanModel:
                 )
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
                     _vm_cfg, eos_fn=self._eos_fn,
-                    constants_config=self.config.physics.constants)
+                    constants_config=self._constants_config)
 
         # Build TKE profile function for the implicit vertical mixing path.
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
@@ -304,7 +340,7 @@ class MPASOceanModel:
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
                     _vm_cfg_tke, eos_fn=self._eos_fn,
-                    constants_config=self.config.physics.constants)
+                    constants_config=self._constants_config)
                 self._tke_prognostic = bool(
                     getattr(_vm_cfg_tke.tke, "prognostic", False))
 
@@ -313,9 +349,6 @@ class MPASOceanModel:
         # The run's own constants, for the convective-adjustment density below.
         # Read from the physics config the model was built with rather than
         # left to the library default, which the comparison cards do not use.
-        self._constants_config = ConstantsConfig()
-        if self.config.physics is not None:
-            self._constants_config = self.config.physics.constants
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _conv_cfg = getattr(self.config.physics, "convection", None)
             if _conv_cfg is not None and _conv_cfg.scheme == "enhanced_diffusion":
