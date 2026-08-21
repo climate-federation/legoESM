@@ -45,9 +45,14 @@ export LEGOESM_XLA_OVERLAP=1
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"
 export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false --xla_gpu_enable_nccl_comm_splitting=false"
 cd "$REPO" || { echo "cd $REPO FAILED"; exit 2; }
-OUTDIR="$SCRATCH/legoesm_scaling/ll_chan_j${SLURM_JOB_ID}"
+OUTDIR="$SCRATCH/legoesm_scaling/ll_chan${SLURM_JOB_NUM_NODES}n_j${SLURM_JOB_ID}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
+
+# Device count comes from the allocation, so the same sweep runs at 32, 64 or
+# 128 GPUs with `sbatch --nodes=N` and nothing else edited.
+NODES="${SLURM_JOB_NUM_NODES:-16}"; GPN=4; NDEV=$((NODES * GPN))
+echo "sweep at ${NDEV} GPUs on ${NODES} nodes"
 
 run_arm () {  # channels nocomm tag
   local CH=$1 NC=$2 TAG=$3
@@ -56,11 +61,11 @@ run_arm () {  # channels nocomm tag
   LEGOESM_LATLON_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
   NCCL_MIN_NCHANNELS=$CH NCCL_MAX_NCHANNELS=$CH \
   NCCL_P2P_NET_CHUNKSIZE=131072 \
-    timeout 1200 srun --export=ALL --nodes=16 --ntasks=64 \
-      --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none \
+    timeout 1200 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
+      --ntasks-per-node="$GPN" --gpus-per-node="$GPN" --gpu-bind=none \
       --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-      --multicontroller --n-devices 64 --mode strong \
+      --multicontroller --n-devices "$NDEV" --mode strong \
       --n-lat 2048 --n-lon 4096 --nlev 26 --steps 60 --warmup 10 \
       --out "$OUTDIR/${TAG}.jsonl" || echo "ARM $TAG FAILED"
   sleep 5
