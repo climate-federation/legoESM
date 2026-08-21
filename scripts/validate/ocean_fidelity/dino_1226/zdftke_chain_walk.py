@@ -56,6 +56,17 @@ import netCDF4 as nc
 sys.path.insert(0, os.path.dirname(__file__))
 from kamm_twin_90d import _build_twin_state, DT  # noqa: E402
 
+# dump_lane: shared #1455 selector (RUN_DIR/RESTART/KT_DUMP for the chosen
+# DINO_1226_LANE) -- imported by path, the same mechanism every sibling probe
+# already converted to dump_lane uses (ldf_slp_per_element.py,
+# coverage_rows_measure.py). Do not re-implement the lane table here.
+import importlib.util as _ilu
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = _ilu.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = _ilu.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
     require_fp64, require_explicit_e3t_mode,
 )
@@ -80,10 +91,11 @@ _spec.loader.exec_module(_bac)
 _read_dims, _load_haloed, _load_interior = (
     _bac._read_dims, _bac._load_haloed, _bac._load_interior)
 
-DINO = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO"
-RUN = f"{DINO}/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"     # NEMO year-5 restart (the input state)
-NIT000 = 57601                            # dumps written at kt==nit000 (namelist_cfg:94)
+# dump_lane picks the (run dir, restart, kt) triple -- default lane "gdb_y5"
+# is byte-identical to this probe's historical hardcoded RUN_GDB/year-5/57601.
+RUN = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
+NIT000 = dump_lane.KT_DUMP                # dumps written at kt==nit000
 RECIPE = "nemo_dino_kamm_mlf"
 
 RI_CRI_NEMO = 2.0 / (2.0 + 0.7 / 0.1)     # ri_cri = 2/(2+rn_ediss/rn_ediff), zdftke.F90:889
@@ -112,7 +124,8 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64())
 
     print("=" * 100)
-    print(f"STATE: {RUN}/{RESTART}  (NEMO year 5)  dumps at kt==nit000=={NIT000}")
+    print(dump_lane.banner())
+    print(f"STATE: {RUN}/{RESTART}  dumps at kt==nit000=={NIT000}")
     print(f"recipe={RECIPE}  LEGOESM_NEMO_E3T={require_explicit_e3t_mode('zdftke_chain_walk')}"
           f"  JAX_ENABLE_X64={os.environ['JAX_ENABLE_X64']}")
     print("=" * 100)
@@ -142,7 +155,7 @@ def main() -> int:
     # ---- NEMO dumps (all through the time-level registry, Rule 1d) ----
     def dump(name):
         lvl = time_level_for_dump(name)   # raises on unregistered -- the point
-        arr = _load_interior(f"{RUN}/{name}", nx, ny)
+        arr = _load_interior(dump_lane.dump_path(name), nx, ny)
         return arr, lvl
 
     sh2, lvl_sh2 = dump("tke_dump_sh2.bin")
@@ -464,8 +477,8 @@ def main() -> int:
     # SUBSTEP LATER, post-EVD/DDM) is EVD firing vs genuine TKE-closure
     # residual.
     # =====================================================================
-    dump_avt = _load_haloed(f"{RUN}/dump_avt.bin", jpi, jpj, hls)
-    dump_avm = _load_haloed(f"{RUN}/dump_avm.bin", jpi, jpj, hls)
+    dump_avt = _load_haloed(dump_lane.dump_path("dump_avt.bin"), jpi, jpj, hls)
+    dump_avm = _load_haloed(dump_lane.dump_path("dump_avm.bin"), jpi, jpj, hls)
     NKD = dump_avt.shape[-1]
     wet_w = wmask[..., :NKD]
     EVD_THRESH = -1.0e-12

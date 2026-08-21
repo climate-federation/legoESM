@@ -422,9 +422,127 @@ print('@@JSON@@' + json.dumps(out))
     return 0
 
 
+# ---------------------------------------------------------------------------
+# PHASE 1c -- does the per-step divergence build the ACC excess?
+# ---------------------------------------------------------------------------
+def phase1c(arm: str = "d180", n_steps: int = 4) -> int:
+    """Per-step ACC of legoESM and of NEMO, from the same starting state.
+
+    The 90-day gap being chased is +1.87 Sv of ACC, already fully present at
+    day 30 (960 steps) and flat thereafter.  If the step-by-step divergence
+    Phase 1 measures is what builds it, the ACC difference has to open at a
+    rate that reaches ~1.87 Sv inside those 960 steps -- roughly 2e-3 Sv per
+    step on average.  A per-step difference orders below that, or one that
+    oscillates in sign, does NOT build the gap and points at an equilibration
+    response instead.  This measures the rate directly rather than inferring
+    it.
+
+    ONE metric, imported not copied: ``acc_thermal_wind.acc_full`` (the
+    recorded campaign metric -- full-section zonal transport, e3t_1d
+    weighting, median over longitudes 2..-2), applied to BOTH sides with the
+    SAME wet-u mask, so the only difference between the two numbers is the
+    velocity field.
+    """
+    ic, run_dir = _ARMS[arm]
+    env = dict(os.environ)
+    env["DINO_1226_IC_STEP"] = str(ic)
+    env["DINO_NEMO_RUN_TWIN_STEP1"] = run_dir
+    code = r"""
+import json, sys, numpy as np
+sys.path.insert(0, PROBE_DIR)
+import multistep_replay as m
+import acc_thermal_wind as A
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.experiments.dino import (
+    apply_dino_lat_lon_surface_forcing, dino_lat_lon_model_config,
+    dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing)
+m.provenance('phase1c')
+g, br, cfg, st = m.build_replay_ic()
+mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
+forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+sf = dino_step_surface_forcing(forcing) if bool(getattr(cfg,'wind_through_step',False)) else None
+dt = 2700.0
+placement = getattr(cfg, 'surface_tendency_placement', 'applied_now')
+umask = np.asarray(g.umask) > 0.5
+
+
+def lego_u(state):
+    # (nlat, nlon+1, nz) u-faces -> NEMO's 52 u-columns, the SAME slice
+    # multistep_replay uses for its own umask comparison.
+    return np.asarray(state.u.data)[:, 1:, :]
+
+
+rows = []
+u0 = lego_u(st)
+rows.append(dict(kt=m.IC_STEP, acc_lego=A.acc_full(u0, umask),
+                 acc_nemo=A.acc_full(u0, umask)))   # day-0 gate: identical input
+for k in range(1, N_STEPS + 1):
+    kt = m.IC_STEP + k
+    ext = None
+    if placement == 'leapfrog_rhs':
+        st, ext = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg,
+                                                     dt, t_seconds=kt*dt,
+                                                     return_rate=True)
+    else:
+        st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, dt,
+                                                t_seconds=kt*dt)
+    st = model.step(st, dt, surface_forcing=sf, external_tracer_rate=ext)
+    ns = m.nemo_now_state_at(kt)
+    ul = lego_u(st)
+    if not np.isfinite(ul).all() or not np.isfinite(ns.u).all():
+        raise SystemExit('non-finite velocity at kt=%d' % kt)
+    rows.append(dict(kt=kt, acc_lego=A.acc_full(ul, umask),
+                     acc_nemo=A.acc_full(ns.u, umask)))
+# per-level relative size of the final-step difference
+d = np.where(umask, ul - ns.u, 0.0)
+lev = []
+for kk in range(d.shape[-1]):
+    msk = umask[..., kk]
+    if not msk.any():
+        lev.append((0.0, 0.0)); continue
+    lev.append((float(np.sqrt((d[..., kk][msk]**2).mean())),
+                float(np.sqrt((ns.u[..., kk][msk]**2).mean()))))
+print('@@JSON@@' + json.dumps(dict(rows=rows, per_level=lev)))
+"""
+    code = code.replace("PROBE_DIR", repr(_THIS_DIR)).replace(
+        "N_STEPS", str(n_steps))
+    proc = subprocess.run([sys.executable, "-c", code], env=env,
+                          capture_output=True, text=True)
+    hit = [l for l in proc.stdout.splitlines() if l.startswith("@@JSON@@")]
+    for l in proc.stdout.splitlines():
+        if not l.startswith("@@JSON@@") and "provenance" not in l:
+            print(f"  [{arm}] {l}")
+    if not hit:
+        print(proc.stderr[-4000:])
+        raise SystemExit("phase1c produced no result")
+    import json
+    res = json.loads(hit[-1][len("@@JSON@@"):])
+    print(f"\nPHASE 1c  arm={arm}: ACC [Sv], acc_thermal_wind.acc_full, "
+          f"same wet-u mask on both sides")
+    print("     kt      ACC legoESM      ACC NEMO        gap [Sv]   "
+          "gap step-to-step")
+    prev = None
+    for r in res["rows"]:
+        gap = r["acc_lego"] - r["acc_nemo"]
+        d = "" if prev is None else f"{gap - prev:+16.6e}"
+        print(f"  {r['kt']:7d}{r['acc_lego']:16.6f}{r['acc_nemo']:15.6f}"
+              f"{gap:+16.6e}{d}")
+        prev = gap
+    print("\n  per-level rms after the last step: "
+          "diff vs NEMO's own u, and the ratio")
+    print("     k        rms|d_u|      rms|u NEMO|    relative")
+    for k, (dr, nr) in enumerate(res["per_level"]):
+        if nr <= 0:
+            continue
+        if k < 6 or k % 6 == 0:
+            print(f"  {k:4d}{dr:16.4e}{nr:16.4e}{dr/nr:12.4f}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--phase", default="0", choices=["0", "1", "1b"],
+    ap.add_argument("--phase", default="0", choices=["0", "1", "1b", "1c"],
                     help="0 = NEMO-side control, 1 = free-running walk")
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--arms", default="d180,y20")
@@ -436,6 +554,11 @@ def main(argv=None) -> int:
     provenance()
     if args.phase == "0":
         return phase0()
+    if args.phase == "1c":
+        rc = 0
+        for arm in args.arms.split(","):
+            rc |= phase1c(arm, n_steps=args.steps)
+        return rc
     if args.phase == "1b":
         rc = 0
         si = None if args.stress_implicit is None else (args.stress_implicit == "1")
