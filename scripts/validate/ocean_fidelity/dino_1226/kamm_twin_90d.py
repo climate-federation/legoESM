@@ -497,6 +497,16 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         # The confirmation A/B for the barotropic-reconcile term: one variable.
         cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
         print(f"ABLATION: barotropic_reconcile_target={_rt}")
+    _ar = os.environ.get("DINO_AFTER_RECONCILE")
+    if _ar:
+        # NEMO mlf_baro_corr (cfgs/DINO/MY_SRC/stpmlf.F90:754-765): the SECOND
+        # depth-mean reconciliation, on the AFTER level and at the AFTER
+        # thickness, which legoESM has no site for. "nemo_mlf_baro_corr" builds
+        # it; "off" is the card default. Orthogonal to DINO_RECONCILE_TARGET
+        # (that picks WHICH average, this picks WHERE it is enforced), so
+        # setting both is two variables and the A/B must not.
+        cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
+        print(f"ABLATION: barotropic_after_reconcile={_ar}")
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which

@@ -301,6 +301,83 @@ def compute_filter_weights(
     return w_filter, w_total, w_transport, n_loop
 
 
+AFTER_RECONCILE_SCHEMES = ("off", "nemo_mlf_baro_corr")
+
+
+def validate_after_reconcile(scheme: str) -> str:
+    """Dispatch gate for ``BarotropicConfig.barotropic_after_reconcile``.
+
+    Called on the STATIC config value at the top of each outer step, before any
+    array work, so a typo stops the run instead of silently selecting ``"off"``
+    (CLAUDE.md dispatch hardening: a bare ``else: <default>`` here would run
+    different physics on a misspelling).
+    """
+    if scheme not in AFTER_RECONCILE_SCHEMES:
+        raise ValueError(
+            f"unknown barotropic_after_reconcile scheme {scheme!r}: must be "
+            f"one of {AFTER_RECONCILE_SCHEMES}.")
+    return scheme
+
+
+def after_level_column_mean_reconcile(
+    field: jnp.ndarray,
+    h_face_after: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    face_mask3: jnp.ndarray,
+    min_water_col: float,
+) -> jnp.ndarray:
+    """NEMO ``mlf_baro_corr``'s after-level reconciliation, as one kernel.
+
+    Transcribed from ``cfgs/DINO/MY_SRC/stpmlf.F90:754-765`` (the build that
+    ran; ``src/OCE`` differs and its line numbers do not apply)::
+
+        zue(ji,jj) = SUM_k e3u(ji,jj,jk,Kaa) * puu(ji,jj,jk,Kaa) * umask(ji,jj,jk)
+        puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa)
+           &                - zue(ji,jj) * r1_hu(ji,jj,Kaa)
+           &                + uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)
+
+    i.e. replace the column's OWN depth mean, formed with the **AFTER**-level
+    face thicknesses and divided by the **AFTER**-level face column depth, by
+    ``target_mean``.
+
+    Parameters
+    ----------
+    field
+        3-D face velocity at the after level, ``(..., nlev)``.
+    h_face_after
+        Face-cell thicknesses at the AFTER level (NEMO ``e3u(:,:,:,Kaa)``).
+        Passing a NOW-level thickness here silently reproduces the very
+        convention this kernel exists to change, so the caller names the time
+        level; this function cannot check it.
+    target_mean
+        Depth-uniform mean to install, broadcastable against ``field`` with a
+        trailing singleton level axis (NEMO ``uu_b(:,:,Kaa)``).
+    face_mask3
+        3-D wet-face mask; NEMO's ``umask``/``vmask`` factor, applied to the
+        result AND to the thicknesses that build the mean.
+    min_water_col
+        Divide guard on the summed column depth.  This is the LAND guard (a wet
+        column always exceeds it), not a physics clip: NEMO's own divisor adds
+        ``1 - ssumask`` for exactly this reason.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``field`` with its after-thickness column mean replaced.  Exactly
+        idempotent in the sense that reapplying it is a no-op to roundoff, and
+        exactly the identity when ``target_mean`` already equals the column's
+        after-thickness mean.
+
+    Sign/geometry convention: ``h_face_after > 0``, thicknesses sum downward,
+    and no term here changes sign with the z-axis direction — this is a pure
+    weighted-mean replacement, not a flux.
+    """
+    h = jnp.where(face_mask3 > 0, h_face_after, 0.0)
+    depth = jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), min_water_col)
+    own_mean = jnp.sum(h * field, axis=-1, keepdims=True) / depth
+    return (field - own_mean + target_mean) * face_mask3
+
+
 def bebt_blend(
     eta_new: jnp.ndarray,
     eta_old: jnp.ndarray,

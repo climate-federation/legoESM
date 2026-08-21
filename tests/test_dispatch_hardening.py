@@ -278,6 +278,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # guard moved here so the standard-halo path and its wide-halo twin
         # cannot diverge on it again.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_reconcile_targets"),
+        # NEMO mlf_baro_corr's AFTER-level reconciliation (barotropic_after_
+        # reconcile). Called at fn entry on the static config value from BOTH
+        # outer-step paths (_leapfrog_step and _nemo_mlf_step), so a typo stops
+        # the step instead of silently selecting "off" -- i.e. silently NOT
+        # running a reconciliation the card asked for.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_common.py", "validate_after_reconcile"),
         # n2_mode + n2_eos_form guards on the EVD convective trigger.
         ("packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py", "convective_K_A_flag"),
         # In-substep C-grid face-depth scheme (barotropic_face_depth:

@@ -1250,6 +1250,64 @@ class BarotropicConfig(NamedTuple):
     # raises at the substep post-loop (dispatch hardening, same pattern as
     # ``barotropic_face_depth``/``barotropic_een_seed``).
     barotropic_reconcile_target: str = "velocity_avg"
+    # barotropic_after_reconcile (NEMO mlf_baro_corr, cfgs/DINO/MY_SRC/
+    # stpmlf.F90:578 -> :754-765): NEMO reconciles the 3-D depth mean TWICE per
+    # step and legoESM once.
+    #
+    #   NEMO site 1, dynspg_ts.F90:1171-1173, inside dyn_spg (stpmlf.F90:332),
+    #     on the NOW level:  puu(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm).
+    #     This is a WITHIN-STEP advective velocity for tra_adv (:528); it is
+    #     removed again at stpmlf.F90:787-790 before the Asselin filter (the
+    #     .NOT.ln_bt_fw branch, live on the DINO card) and never reaches the
+    #     committed state.
+    #   NEMO site 2, stpmlf.F90:754-765, AFTER dyn_zdf (:396), on the AFTER
+    #     level:  subtract the column's own mean formed with e3u(Kaa) and
+    #     divided by hu(Kaa), add uu_b(Kaa).  This one IS committed, and it is
+    #     what discards the implicit vertical solve's column-mean deposit
+    #     (measured +17.9 m3/s2 per southern u-row on the DINO 90-day twin,
+    #     12x the realized spin-up rate).
+    #
+    # legoESM has no site-2 analogue.  Its single reconciliation happens inside
+    # the barotropic solve (``_reconcile_targets``), at the NOW thickness, and
+    # the after-level column mean it produces then survives the implicit
+    # vertical solve unchanged in principle -- in practice
+    # ``zdf_baroclinic_only`` strips and re-adds the mean around the solve with
+    # a DIFFERENT weighting, leaving a residue.
+    #
+    #   "off" (default)             -> unchanged, BIT-IDENTICAL.
+    #   "nemo_mlf_baro_corr"        -> run NEMO's site 2 after the implicit
+    #                                  vertical solve and before the
+    #                                  conservation fixer/Asselin filter, at
+    #                                  the AFTER-level thickness.
+    #
+    # ORTHOGONAL to ``barotropic_reconcile_target``, deliberately: that field
+    # selects WHICH substep average is installed (NEMO's primary
+    # velocity-weighted ``uu_b(Kaa)`` = "velocity_avg", or the secondary
+    # transport-weighted ``un_adv/hu`` = "transport_avg"); this one selects
+    # WHERE and at WHICH time level's thickness it is enforced.  A card
+    # matching NEMO on both rows needs velocity_avg AND nemo_mlf_baro_corr.
+    # Unknown value raises at outer-step entry (barotropic_common.
+    # validate_after_reconcile), on both the leapfrog and the nemo_mlf path.
+    #
+    # SCOPE, stated rather than left to be discovered: the option's site is in
+    # the LEAP-FROG branch of each outer step. It is NOT applied on the
+    # forward-Euler first step (``state.u_before is None``), which returns
+    # straight out of ``_step_impl`` and has no barotropic-mean slot to
+    # reconcile onto. NEMO does run mlf_baro_corr on its l_1st_euler step, so
+    # that is a real one-step gap -- it is empty in practice for every use this
+    # was built for (a bridged/restart twin arrives with u_before populated and
+    # never takes the Euler branch), and it would need the barotropic mean
+    # threaded out of ``_step_impl`` to close.
+    #
+    # WHAT IT CAN AND CANNOT MOVE, measured: under a pure z-star coordinate
+    # every layer of a column rescales by the same (H+eta)/H, and the min-rule
+    # face depth inherits that, so a thickness-weighted column mean is
+    # IDENTICAL at the now and after levels -- the after-thickness half is then
+    # exactly a no-op (measured 1.1e-16 m/s, gated by
+    # tests/ocean/unit/test_barotropic_after_reconcile.py). It bites only
+    # through partial cells and through a column mean the implicit vertical
+    # solve deposited.
+    barotropic_after_reconcile: str = "off"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for

@@ -69,6 +69,10 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_uface,
     min_cell_to_vface,
 )
+from legoesm.ocean.dynamics.barotropic_common import (
+    after_level_column_mean_reconcile,
+    validate_after_reconcile,
+)
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
 )
@@ -8094,6 +8098,44 @@ class LatLonCGridOceanModel:
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"))
 
+        # 3b. NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation
+        #     (cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765).  Position is
+        #     NEMO's: after dyn_zdf (:396, stage 3 above) and before the
+        #     Asselin filter (dyn_atf_qco, :613, stage 5 below).  Selected by
+        #     ``BarotropicConfig.barotropic_after_reconcile``; "off" (the
+        #     default) skips it entirely and is BIT-IDENTICAL.
+        #
+        #     The target installed is ``btu_exp``/``btv_exp`` -- the depth mean
+        #     the barotropic solve produced, i.e. whichever substep average
+        #     ``barotropic_reconcile_target`` selected.  Under "velocity_avg"
+        #     that is NEMO's ``uu_b(Kaa)`` and this call is NEMO's line
+        #     verbatim; under "transport_avg" it is the card's secondary
+        #     average enforced in NEMO's slot.  The two fields are orthogonal
+        #     on purpose -- see the config docstring.
+        #
+        #     WHAT THIS CHANGES, so it is not read as cosmetic: the enforced
+        #     column mean moves from the NOW-level thickness (which is what the
+        #     combine's own ``h_u``/``h_v`` split above pins) to the AFTER-level
+        #     thickness NEMO divides by, and any depth-mean the implicit
+        #     vertical solve deposited is discarded rather than kept.
+        _after_recon = validate_after_reconcile(
+            self.config.barotropic.barotropic_after_reconcile)
+        if _after_recon == "nemo_mlf_baro_corr":
+            # AFTER-level (Kaa) thicknesses: naa.eta is the barotropic solve's
+            # after ssh, the same level ``e3t_aft`` is built from below.
+            _h_k_aa = compute_layer_thickness(
+                naa.eta.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            _u_rec = after_level_column_mean_reconcile(
+                naa.u.data, min_cell_to_uface(_h_k_aa), btu_exp,
+                u_mask3, 1.0e-10)
+            _u_rec = _u_rec.at[:, -1].set(_u_rec[:, 0])   # periodic-lon wrap
+            _v_rec = after_level_column_mean_reconcile(
+                naa.v.data, min_cell_to_vface(_h_k_aa, _grid), btv_exp,
+                v_mask3, 1.0e-10)
+            naa = naa._replace(u=naa.u.replace(data=_u_rec),
+                               v=naa.v.replace(data=_v_rec))
+
         # 4. Conservation fixer on the final after-state.
         if self.config.use_conservation_fixer:
             naa = ocean_conservation_fixer(
@@ -8406,6 +8448,44 @@ class LatLonCGridOceanModel:
             naa = naa._replace(
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"))
+
+        # 3b. NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation
+        #     (cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765).  Position is
+        #     NEMO's: after dyn_zdf (:396, stage 3 above) and before the
+        #     Asselin filter (dyn_atf_qco, :613, stage 5 below).  Selected by
+        #     ``BarotropicConfig.barotropic_after_reconcile``; "off" (the
+        #     default) skips it entirely and is BIT-IDENTICAL.
+        #
+        #     The target installed is ``btu_exp``/``btv_exp`` -- the depth mean
+        #     the barotropic solve produced, i.e. whichever substep average
+        #     ``barotropic_reconcile_target`` selected.  Under "velocity_avg"
+        #     that is NEMO's ``uu_b(Kaa)`` and this call is NEMO's line
+        #     verbatim; under "transport_avg" it is the card's secondary
+        #     average enforced in NEMO's slot.  The two fields are orthogonal
+        #     on purpose -- see the config docstring.
+        #
+        #     WHAT THIS CHANGES, so it is not read as cosmetic: the enforced
+        #     column mean moves from the NOW-level thickness (which is what the
+        #     combine's own ``h_u``/``h_v`` split above pins) to the AFTER-level
+        #     thickness NEMO divides by, and any depth-mean the implicit
+        #     vertical solve deposited is discarded rather than kept.
+        _after_recon = validate_after_reconcile(
+            self.config.barotropic.barotropic_after_reconcile)
+        if _after_recon == "nemo_mlf_baro_corr":
+            # AFTER-level (Kaa) thicknesses: naa.eta is the barotropic solve's
+            # after ssh, the same level ``e3t_aft`` is built from below.
+            _h_k_aa = compute_layer_thickness(
+                naa.eta.data, state.H_bathy.data, self.z_coord,
+                min_water_column_m=self.config.min_water_column_m)
+            _u_rec = after_level_column_mean_reconcile(
+                naa.u.data, min_cell_to_uface(_h_k_aa), btu_exp,
+                u_mask3, 1.0e-10)
+            _u_rec = _u_rec.at[:, -1].set(_u_rec[:, 0])   # periodic-lon wrap
+            _v_rec = after_level_column_mean_reconcile(
+                naa.v.data, min_cell_to_vface(_h_k_aa, _grid), btv_exp,
+                v_mask3, 1.0e-10)
+            naa = naa._replace(u=naa.u.replace(data=_u_rec),
+                               v=naa.v.replace(data=_v_rec))
 
         # 4. Conservation fixer on the final after-state.
         if self.config.use_conservation_fixer:

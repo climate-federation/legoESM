@@ -313,6 +313,12 @@ class DINOConfig:
     # "transport_avg" = NEMO's un_adv*r1_hu(Kmm) secondary/transport mean
     # (dynspg_ts.F90:1170-1172). Only the nemo_dino_kamm_mlf card flips it.
     barotropic_reconcile_target: str = "velocity_avg"
+    # NEMO's SECOND depth-mean reconciliation, mlf_baro_corr (cfgs/DINO/MY_SRC/
+    # stpmlf.F90:754-765): see BarotropicConfig.barotropic_after_reconcile.
+    # "off" (default, bit-identical) = legoESM's single in-solve reconciliation
+    # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf, after-thickness
+    # site. No card flips it -- it is selected per-run for the ownership A/B.
+    barotropic_after_reconcile: str = "off"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -3135,6 +3141,9 @@ def dino_lat_lon_model_config(
         # NEMO dyn_spg_ts N6 momentum reconciliation target (dynspg_ts.F90:1170;
         # see DINOConfig.barotropic_reconcile_target docstring).
         barotropic_reconcile_target=cfg.barotropic_reconcile_target,
+        # NEMO mlf_baro_corr, the after-level reconciliation (stpmlf.F90:
+        # 754-765; see DINOConfig.barotropic_after_reconcile docstring).
+        barotropic_after_reconcile=cfg.barotropic_after_reconcile,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
