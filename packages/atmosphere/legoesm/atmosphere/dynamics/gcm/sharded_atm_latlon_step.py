@@ -884,6 +884,11 @@ def _refuse_unsupported_spmd_config(model) -> None:
 _CALL_ENTRY_FLAGS = (
     "has_mesh", "n_dev", "axis_names", "axis_sizes",
     "state_schema", "has_phys_state", "phys_state_schema",
+    # The halo switches change the compiled program. Two processes that
+    # disagree here pack in one wire order and unpack in the other, which is
+    # a silently wrong inter-host halo rather than a hang, so it is agreed
+    # with the rest of the per-call schema.
+    "halo_env",
 )
 
 
@@ -913,6 +918,7 @@ def _agree_spmd_call(mesh, state, phys_state, *, where: str) -> None:
     and rejected: whether a call misses is itself rank-local, so a
     conditional gate can desynchronise exactly like the bug it guards.
     """
+    from legoesm.parallel.latlon_spmd import halo_env_signature
     names, sizes = _mesh_axis_terms(mesh)
     assert_flags_agree(_CALL_ENTRY_FLAGS, (
         float(mesh is not None),
@@ -923,6 +929,7 @@ def _agree_spmd_call(mesh, state, phys_state, *, where: str) -> None:
         float(phys_state is not None),
         (tree_schema_digest48(phys_state) if phys_state is not None
          else FLAG_ABSENT),
+        name_digest48(halo_env_signature()),
     ), context=where)
 
 
@@ -1089,9 +1096,15 @@ def make_sharded_atm_latlon_step(model, mesh, physics_fn=None, *,
         # rebuild the shard_map rather than reuse stale specs (codex finding,
         # ocean-twin parity). ``phys_state`` threading is the AIMIP-branch
         # feature main lacks (main rejects a non-None carry here).
+        from legoesm.parallel.latlon_spmd import halo_env_signature
         key = (jax.tree.structure(c_state),
                None if phys_state is None
-               else jax.tree_util.tree_structure(phys_state))
+               else jax.tree_util.tree_structure(phys_state),
+               # The halo switches change the compiled program, so a body
+               # built under the previous setting must not be handed back
+               # after an environment flip -- that is an A/B that measures
+               # nothing while its receipt reports the new value.
+               halo_env_signature())
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(lat_spec, c_state)
@@ -1246,7 +1259,12 @@ def make_sharded_atm_latlon_segment(model, mesh, n_steps: int,
         _refuse_carry(phys_state)
         # Cache key = state pytree STRUCTURE (in/out specs derive from it) —
         # same doctrine as the per-step factory.
-        key = jax.tree.structure(c_state)
+        # The halo switches change the compiled program, so a body built
+        # under the previous setting must not be handed back after an
+        # environment flip -- that is an A/B that measures nothing while
+        # its receipt reports the new value.
+        from legoesm.parallel.latlon_spmd import halo_env_signature
+        key = (jax.tree.structure(c_state), halo_env_signature())
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(lat_spec, c_state)
@@ -1868,7 +1886,12 @@ def make_sharded_atm_latlon_step_2d(model, mesh, physics_fn=None, *,
                 "flatten lat-major over the GLOBAL grid — a contiguous "
                 "dim-0 shard is a lat band, not a 2-D tile).  Thread the "
                 "carry through the 1-D make_sharded_atm_latlon_step.")
-        key = jax.tree.structure(c_state)
+        # The halo switches change the compiled program, so a body built
+        # under the previous setting must not be handed back after an
+        # environment flip -- that is an A/B that measures nothing while
+        # its receipt reports the new value.
+        from legoesm.parallel.latlon_spmd import halo_env_signature
+        key = (jax.tree.structure(c_state), halo_env_signature())
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(tile_spec, c_state)
@@ -1953,7 +1976,12 @@ def make_sharded_atm_latlon_segment_2d(model, mesh, n_steps: int,
         _agree_spmd_call(mesh, c_state, phys_state,
                          where="make_sharded_atm_latlon_segment_2d.segment")
         _refuse_carry(phys_state)
-        key = jax.tree.structure(c_state)
+        # The halo switches change the compiled program, so a body built
+        # under the previous setting must not be handed back after an
+        # environment flip -- that is an A/B that measures nothing while
+        # its receipt reports the new value.
+        from legoesm.parallel.latlon_spmd import halo_env_signature
+        key = (jax.tree.structure(c_state), halo_env_signature())
         fn = _cache.get(key)
         if fn is None:
             in_spec = jax.tree.map(tile_spec, c_state)

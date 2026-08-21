@@ -125,6 +125,125 @@ def _resolve_halo_ballast(env_value: str) -> int:
     return n
 
 
+# --- edge-payload serialisation order (measurement A/B, default off) --------
+#: (h, lon, lev) -> (lev, h, lon): the level axis becomes the major one.
+_EDGE_LEVEL_LEADING_PERM = (2, 0, 1)
+
+
+def _inverse_perm(perm):
+    """Inverse of a permutation tuple, DERIVED rather than written twice.
+
+    The pack side and the unpack side of a halo must be exact inverses. Two
+    hand-written index expressions that are meant to be inverses are a defect
+    waiting for the day one of them is edited.
+    """
+    inv = [0] * len(perm)
+    for i, src in enumerate(perm):
+        inv[src] = i
+    return tuple(inv)
+
+
+def _resolve_halo_level_leading(env_value: str) -> bool:
+    """Resolve ``LEGOESM_LATLON_HALO_LEVEL_LEADING``: serialise 3-D edge
+    payloads level-first on the wire; ``''``/``'0'`` = off (default).
+
+    A MEASUREMENT knob, and unlike the no-comm knob it is bit-identical: it
+    only reorders elements INSIDE each packed message, and the unpack side
+    applies the derived inverse, so the widths, the offsets, the dtype
+    grouping, the field order, the collective count, the payload bytes and
+    the answer are all unchanged.
+
+    Why it exists: the compiled step holds 28 transposes, none of them free,
+    converting between ``(level, lat, lon)`` and ``(lat, lon, level)``. The
+    state is stored lat-leading and XLA:GPU pipelines level-leading. TWENTY-SIX
+    of the 28 act on halo edge slices of one or two latitude rows, whose shape
+    does not depend on how many rows the shard owns -- which is why the
+    transpose class is 87 % device-count independent while every other class
+    scales. Flattening ``(h, lon, lev)`` demands C-order of THAT shape even
+    when the producer is level-leading, and this switch asks for the other
+    order instead.
+
+    It is an experiment, not a promise. XLA may relocate or retain the
+    conversions rather than drop them, so it stays opt-in until a GPU HLO A/B
+    says otherwise.
+
+    Unknown values raise (dispatch hardening): a typo'd opt-in flag that
+    silently no-ops is worse than one that fails loudly.
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_LATLON_HALO_LEVEL_LEADING={env_value!r}: must be '0' or "
+        f"'1' (empty = off).")
+
+
+#: The halo switches that change the COMPILED program rather than only the
+#: numbers. Anything on this list must reach a traced-body cache key, or an
+#: environment flip silently reuses a body built under the previous setting.
+HALO_ENV_FLAGS = (
+    "LEGOESM_LATLON_PACKED_EXCHANGE",
+    "LEGOESM_LATLON_SPMD_FUSED_HALO",
+    "LEGOESM_LATLON_HALO_BALLAST",
+    "LEGOESM_LATLON_HALO_NOCOMM",
+    "LEGOESM_LATLON_HALO_LEVEL_LEADING",
+)
+
+
+def halo_env_signature() -> tuple:
+    """The lat-band halo's compile-relevant environment, as a hashable tuple.
+
+    Two uses, both of which have bitten this campaign:
+
+    * a traced-body cache keyed WITHOUT it hands back a body built under the
+      previous setting while the run's receipt reports the new one, which is
+      how an A/B measures nothing and reports a number;
+    * under multiple controllers each process reads these independently, so
+      two hosts can pack in one order and unpack in the other. That is a
+      silent wrong answer on the inter-host halo, not a crash.
+    """
+    import os  # function-scope, matching this module's convention
+    return tuple(os.environ.get(k, "") for k in HALO_ENV_FLAGS)
+
+
+def _edge_serialisation_perm(shape, level_leading):
+    """The ONE decision point: is this edge payload reordered on the wire?
+
+    Called with the payload's logical shape by both ends; the unpack side
+    applies the derived inverse of whatever this returns. Fields that are not
+    three-dimensional always pass through unchanged.
+    """
+    if level_leading and len(shape) == 3:
+        return _EDGE_LEVEL_LEADING_PERM
+    return None
+
+
+def _pack_edge_slice(edge, level_leading):
+    """Serialise one edge slice into a ``(1, w)`` row of a grouped buffer.
+
+    Returns the row and its width. ``w`` is the element count either way, so
+    every offset in the packed buffer is unchanged by the flag.
+    """
+    perm = _edge_serialisation_perm(edge.shape, level_leading)
+    if perm is not None:
+        edge = jnp.transpose(edge, perm)
+    w = 1
+    for d in edge.shape:
+        w *= int(d)
+    return edge.reshape(1, w), w
+
+
+def _unpack_edge_row(row, shape, level_leading):
+    """Exact inverse of :func:`_pack_edge_slice` for one row of a receive
+    buffer, returning the payload in its logical *shape*."""
+    perm = _edge_serialisation_perm(shape, level_leading)
+    if perm is None:
+        return row.reshape(shape)
+    wire_shape = tuple(shape[d] for d in perm)
+    return jnp.transpose(row.reshape(wire_shape), _inverse_perm(perm))
+
+
 def _halo_ppermute(x, axis_name, perm):
     """Halo ``ppermute``, or one of the two timing substitutes.
 
@@ -335,17 +454,17 @@ def reconstruct_vface_lower_multi(v_lowers, axis: str, perm_north):
     for i, f in enumerate(fields):
         groups.setdefault(str(f.dtype), []).append(i)
 
+    import os  # function-scope, matching this module's convention
+    level_leading = _resolve_halo_level_leading(
+        os.environ.get("LEGOESM_LATLON_HALO_LEVEL_LEADING", ""))
     boundaries: list = [None] * len(fields)
     for _, idxs in sorted(groups.items()):
         flats = []
         widths = []
         for i in idxs:
-            row = fields[i][0:1]
-            w = 1
-            for s in row.shape[1:]:
-                w *= int(s)
+            row, w = _pack_edge_slice(fields[i][0:1], level_leading)
             widths.append(w)
-            flats.append(row.reshape(1, w))
+            flats.append(row)
         buf = jnp.concatenate(flats, axis=1)
         # ONE ppermute for the whole dtype group (north band receives 0).
         recv = _halo_ppermute(buf, axis, perm_north)
@@ -353,7 +472,8 @@ def reconstruct_vface_lower_multi(v_lowers, axis: str, perm_north):
         for k, i in enumerate(idxs):
             w = widths[k]
             tail = fields[i].shape[1:]
-            boundaries[i] = recv[:, off:off + w].reshape((1,) + tail)
+            boundaries[i] = _unpack_edge_row(
+                recv[:, off:off + w], (1,) + tail, level_leading)
             off += w
 
     return tuple(
@@ -1245,6 +1365,9 @@ def make_latlon_band_packed_pad_body(mesh, specs):
         for i, f in enumerate(fields):
             groups.setdefault(str(f.dtype), []).append(i)
 
+        import os  # function-scope, matching this module's convention
+        level_leading = _resolve_halo_level_leading(
+            os.environ.get("LEGOESM_LATLON_HALO_LEVEL_LEADING", ""))
         south_recv: list = [None] * n_fields
         north_recv: list = [None] * n_fields
         for _, idxs in sorted(groups.items()):
@@ -1253,15 +1376,17 @@ def make_latlon_band_packed_pad_body(mesh, specs):
                 h = int(specs[i][1])
                 s_edge = fields[i][:h]     # my south rows
                 n_edge = fields[i][-h:]    # my north rows
-                w = 1
-                for d in s_edge.shape:
-                    w *= int(d)
-                widths.append(w)
                 # PRE-FLATTEN to (1, h*w*lev) BEFORE concat: mixed
                 # trailing dims after concat would force XLA layout
                 # copies; the payload stays contiguous on the minor axis.
-                s_flat.append(s_edge.reshape(1, w))
-                n_flat.append(n_edge.reshape(1, w))
+                # Under LEGOESM_LATLON_HALO_LEVEL_LEADING the elements
+                # inside each row are ordered level-first instead; the
+                # width, and therefore every offset, is the same.
+                s_row, w = _pack_edge_slice(s_edge, level_leading)
+                n_row, _ = _pack_edge_slice(n_edge, level_leading)
+                widths.append(w)
+                s_flat.append(s_row)
+                n_flat.append(n_row)
             south_buf = jnp.concatenate(s_flat, axis=1)
             north_buf = jnp.concatenate(n_flat, axis=1)
             # ONE ppermute pair for the whole dtype group.  My NORTH ghost
@@ -1274,8 +1399,10 @@ def make_latlon_band_packed_pad_body(mesh, specs):
                 h = int(specs[i][1])
                 w = widths[k]
                 shp = (h,) + fields[i].shape[1:]
-                south_recv[i] = s_recv_buf[:, off:off + w].reshape(shp)
-                north_recv[i] = n_recv_buf[:, off:off + w].reshape(shp)
+                south_recv[i] = _unpack_edge_row(
+                    s_recv_buf[:, off:off + w], shp, level_leading)
+                north_recv[i] = _unpack_edge_row(
+                    n_recv_buf[:, off:off + w], shp, level_leading)
                 off += w
 
         outs = []

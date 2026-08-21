@@ -53,12 +53,13 @@ export LEGOESM_JIT_CACHE_DIR=""   # a cached compile does not re-dump
 # Single process, two local devices: the multi-controller launcher needs a
 # coordination service that does not come up on this partition, and it is not
 # needed to make a compiled module.
-run_dump () {  # n_lat n_lon tag
-  local NLAT=$1 NLON=$2 TAG=$3
+run_dump () {  # n_lat n_lon tag [level_leading]
+  local NLAT=$1 NLON=$2 TAG=$3 LL=${4:-0}
   mkdir -p "$OUTDIR/hlo_$TAG"
   echo "=== dump at ${NLAT}x${NLON}, 2 devices (${TAG}) ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=1 JAX_ENABLE_X64=0 \
+  LEGOESM_LATLON_HALO_LEVEL_LEADING=$LL \
   XLA_FLAGS="--xla_gpu_shard_autotuning=false --xla_dump_to=$OUTDIR/hlo_$TAG" \
     timeout 900 srun --export=ALL --nodes=1 --ntasks=1 --gpus-per-node=2 \
       --gpu-bind=none --kill-on-bad-exit=1 \
@@ -73,5 +74,11 @@ run_dump () {  # n_lat n_lon tag
 rc=0
 run_dump 128 256 lat128 || rc=1
 run_dump 256 256 lat256 || rc=1
+# THE A/B THIS JOB EXISTS FOR NOW. Serialising the halo's edge payloads
+# level-first is meant to stop the compiler converting them back to the
+# state's own order. It may instead relocate or retain the conversions,
+# which is why the flag is off by default and why this arm is a dump and
+# not a timing: the count of non-free transposes is the answer.
+run_dump 128 256 lat128_ll 1 || rc=1
 if [ "$rc" -ne 0 ]; then echo "a dump failed; no verdict"; exit 1; fi
 echo DONE

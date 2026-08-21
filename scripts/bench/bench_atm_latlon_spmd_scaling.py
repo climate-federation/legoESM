@@ -687,6 +687,19 @@ def main() -> int:
                      else None),
             "cells_per_device": ((n_lat // p_lat) * (args.n_lon // p_lon)
                                  * args.nlev),
+            # WHICH ARM ACTUALLY RAN. Without this a measurement arm and
+            # its baseline are distinguishable only by their FILENAME, so a
+            # knob that failed to take is indistinguishable from one that
+            # did. The MPAS bench has recorded its halo knobs since the
+            # ballast work; this is the lat-lon twin.
+            "halo_knobs": {
+                k: os.environ.get(k, "")
+                for k in ("LEGOESM_LATLON_PACKED_EXCHANGE",
+                          "LEGOESM_LATLON_SPMD_FUSED_HALO",
+                          "LEGOESM_LATLON_HALO_BALLAST",
+                          "LEGOESM_LATLON_HALO_NOCOMM",
+                          "LEGOESM_LATLON_HALO_LEVEL_LEADING")
+            },
         },
     ))
     if not valid:
