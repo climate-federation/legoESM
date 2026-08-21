@@ -52,6 +52,7 @@ from legoesm.atmosphere.physics.turbulence.integration import (
 )
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
 
 from .bridge import (
     LESReferenceArtifact,
@@ -75,6 +76,12 @@ Array = jnp.ndarray
 # setups; the shallow BL keeps θ within millikelvin of the analytic value).
 _H_SCALE_M = 8.0e3
 _P_S_PA = 1.0e5
+#: How far a cloudy level may sit from its own saturation after the initial
+#: saturation adjustment before the start is refused [kg/kg]. Measured on this
+#: suite's own columns the settled residual is about 1.2e-7 at single
+#: precision, and a column outside the contracting range lands near 1e-3, so
+#: 1e-5 sits roughly two orders clear of both.
+_SAT_ADJUST_RESIDUAL_TOL_KG_KG = 1.0e-5
 # The SCM domain top must sit ABOVE the LES domain, or the CBL hits the model lid and
 # the temperature collapses. Auto-computed sigma_top covers this fraction ABOVE the
 # LES top (a 30% margin so the free atmosphere is resolved, not clipped at the lid).
@@ -271,6 +278,28 @@ def build_cbl_scm_from_artifact(
             q_v_scm = qt0 - q_c_adj
         else:
             theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
+            # The adjustment is a damped fixed point with a fixed trip count,
+            # which contracts over this suite's boundary-layer states and NOT
+            # over arbitrarily warm, moist ones: measured, a 300 K column at
+            # 25 g/kg comes back nearly a gram per kilogram away from its own
+            # saturation. Nothing in the iteration reports that, so a column
+            # outside the regime would start from a plausible-looking wrong
+            # state. Check it here, where this runs once at setup and a plain
+            # exception is available.
+            _q_sat_adj = saturation_mixing_ratio(theta_adj * exner, p_full)
+            _resid = float(jnp.max(jnp.abs(
+                jnp.where(q_c_adj > 0.0, q_v_scm - _q_sat_adj, 0.0))))
+            if _resid > _SAT_ADJUST_RESIDUAL_TOL_KG_KG:
+                raise ValueError(
+                    f"{artifact.case_name}: the saturation adjustment did not "
+                    f"settle -- a cloudy level ends {_resid * 1e3:.3f} g/kg "
+                    "away from its own saturation, where the tolerance is "
+                    f"{_SAT_ADJUST_RESIDUAL_TOL_KG_KG * 1e3:.3f}. The damped "
+                    "iteration contracts over boundary-layer states and this "
+                    "column is outside that range, so the initial state would "
+                    "be wrong in a way nothing downstream can see. Record the "
+                    "cloud-water channel in the reference, which needs no "
+                    "iteration at all.")
         T_profile = theta_adj * exner            # actual temperature (θ_l→θ warmed by q_c)
         if float(jnp.max(q_c_adj)) > 0.0:
             q_c_scm = q_c_adj

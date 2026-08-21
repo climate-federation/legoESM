@@ -523,3 +523,61 @@ def test_partly_cloudy_reference_is_initialised_from_its_recorded_cloud_water():
     scm_yes, _ = build_cbl_scm_from_artifact(_artifact(with_qc=True), _mynn_config())
     q_c0 = np.asarray(scm_yes.state.tracers["q_c"].data[0, 0, 0])
     assert q_c0.max() > 1.0e-5              # the partly-cloud q_c is present at init
+
+
+def test_a_saturation_adjustment_that_did_not_settle_is_refused():
+    """The fallback initialisation contracts over some states and not others.
+
+    The adjustment is a damped fixed point with a fixed trip count. Over this
+    suite's boundary-layer columns it settles exactly; measured outside that
+    range it does not -- a 300 K column at 25 g/kg comes back nearly a gram
+    per kilogram from its own saturation -- and nothing in the iteration says
+    so, which is the dangerous kind of wrong: a plausible number rather than
+    an error. The runner checks the residual and refuses.
+    """
+    import jax.numpy as jnp
+    import pytest
+
+    from legoesm import constants
+    from legoesm.atmosphere.les_suite.bridge import LESReferenceArtifact
+    from legoesm.atmosphere.les_suite.scm_coupling import saturation_adjust
+    from legoesm.atmosphere.les_suite.scm_runner import (
+        build_cbl_scm_from_artifact,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    # First, the measurement the guard rests on, stated as an assertion so it
+    # is re-checked rather than trusted: the iteration settles for a
+    # stratocumulus column and does NOT for a hot, very moist one.
+    p = jnp.full((4,), 1.0e5)
+    exner = (p / constants.p_ref) ** constants.kappa
+
+    def _residual(theta_l, q_t):
+        th, qv, qc = saturation_adjust(
+            jnp.full((4,), theta_l), jnp.full((4,), q_t), exner, p)
+        q_sat = saturation_mixing_ratio(th * exner, p)
+        return float(jnp.max(jnp.abs(jnp.where(qc > 0.0, qv - q_sat, 0.0))))
+
+    # single precision: the settled residual is round-off (~1e-7 kg/kg), the
+    # unsettled one is four orders larger.
+    assert _residual(288.0, 12.0e-3) < 1e-6        # in range: settles
+    assert _residual(300.0, 25.0e-3) > 1e-4        # out of range: does not
+
+    # And now the guard, driven through the runner with no cloud-water channel
+    # so the fallback is the path taken.
+    nz, nt = 8, 2
+    z = jnp.linspace(0.0, 800.0, nz)
+    zero = jnp.zeros((nt, nz))
+    art = LESReferenceArtifact(
+        case_name="too_warm_and_wet", sgs="smagorinsky",
+        heights_m=z, times_s=jnp.asarray([0.0, 3600.0]),
+        theta=jnp.broadcast_to(jnp.full((nz,), 300.0), (nt, nz)),
+        u=zero, v=zero, wtheta_resolved=zero, wtheta_sgs=zero,
+        qt=jnp.broadcast_to(jnp.full((nz,), 25.0e-3), (nt, nz)),
+        wqt_resolved=zero, wqt_sgs=zero,
+        qc=None,                       # forces the iterative fallback
+        prescribe="fluxes",
+        w_theta_s=jnp.zeros(nt), w_qv_s=jnp.zeros(nt),
+    )
+    with pytest.raises(ValueError, match="did not settle"):
+        build_cbl_scm_from_artifact(art, _mynn_config(), nlev=16, dt=10.0)
