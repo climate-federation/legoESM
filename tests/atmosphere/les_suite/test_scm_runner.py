@@ -479,3 +479,47 @@ def test_moist_scm_les_loss_jax_differentiable():
     assert np.isfinite(val) and val >= 0.0
     g = float(jax.grad(loss)(jnp.asarray(1.5e-3)))
     assert np.isfinite(g)
+
+
+def test_partly_cloudy_reference_is_initialised_from_its_recorded_cloud_water():
+    """Partial cloud cover hides from a saturation test — the recorded channel does not.
+
+    A horizontally averaged column with partial cover carries cloud while sitting
+    BELOW saturation in the MEAN, so a grid-mean saturation adjustment would miss it
+    (it would return q_c=0 and start the column clear). When the reference records
+    its cloud-water channel, the runner seeds the column from that recorded q_c
+    DIRECTLY — the exact cloud water it carried — instead of re-deriving it from a
+    (here misleading) mean-saturation test. Without the channel, the saturation
+    fallback sees a subsaturated mean and starts clear (the known legacy limitation).
+    """
+    from legoesm.atmosphere.les_suite.bridge import LESReferenceArtifact
+    from legoesm.atmosphere.les_suite.scm_runner import build_cbl_scm_from_artifact
+
+    nz, nt = 12, 2
+    z = jnp.linspace(0.0, 1500.0, nz)
+    theta = jnp.broadcast_to(jnp.full((nz,), 290.0), (nt, nz))
+    zero = jnp.zeros((nt, nz))
+    # comfortably sub-saturated total water, so a mean-saturation test cannot fire
+    qt = jnp.broadcast_to(jnp.full((nz,), 2.0e-3), (nt, nz))
+    qc = zero.at[0, 5].set(2.0e-4)          # 0.2 g/kg of cloud at t=0
+
+    def _artifact(with_qc):
+        return LESReferenceArtifact(
+            case_name="partly_cloudy", sgs="smagorinsky",
+            heights_m=z, times_s=jnp.asarray([0.0, 3600.0]),
+            theta=theta, u=zero, v=zero,
+            wtheta_resolved=zero, wtheta_sgs=zero,
+            qt=qt, wqt_resolved=zero, wqt_sgs=zero,
+            qc=(qc if with_qc else None),
+            prescribe="fluxes",
+            w_theta_s=jnp.zeros(nt), w_qv_s=jnp.zeros(nt),
+        )
+
+    # Without the channel the mean-saturation fallback sees nothing → clear start.
+    scm_no, _ = build_cbl_scm_from_artifact(_artifact(with_qc=False), _mynn_config())
+    assert np.allclose(np.asarray(scm_no.state.tracers["q_c"].data[0, 0, 0]), 0.0)
+
+    # With the channel the recorded cloud water is SEEDED (not missed, not refused).
+    scm_yes, _ = build_cbl_scm_from_artifact(_artifact(with_qc=True), _mynn_config())
+    q_c0 = np.asarray(scm_yes.state.tracers["q_c"].data[0, 0, 0])
+    assert q_c0.max() > 1.0e-5              # the partly-cloud q_c is present at init

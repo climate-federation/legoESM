@@ -230,8 +230,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # scm_coupling tests: T (temperature) symbol in names/locals reads clearer than
 # snake_case for the θ↔T conversion checks (units-in-names rule).
 "tests/atmosphere/les_suite/test_scm_coupling.py" = ["N802", "N806"]
-# scm_runner: T_profile / T_final (temperature) locals — physical symbol convention.
-"packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N806"]
+# scm_runner: T_profile / T_final (temperature) locals + dtheta_sfc_K (a _K
+# unit-suffixed physical arg) — physical symbol / units-in-names convention.
+"packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N803", "N806"]
 "tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
 # ARM obs scoring: physical symbol T (temperature) locals read clearer than snake_case.
 "packages/atmosphere/legoesm/atmosphere/les_suite/arm_obs_score.py" = ["N806"]

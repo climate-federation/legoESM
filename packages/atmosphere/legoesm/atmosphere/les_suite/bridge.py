@@ -89,6 +89,13 @@ class LESReferenceArtifact:
     qt: Array | None = None
     wqt_resolved: Array | None = None
     wqt_sgs: Array | None = None
+    #: Horizontal-mean CLOUD water, ``(nt, nz)``, when the reference recorded
+    #: it. Optional so older artifacts still load, but a consumer that reads
+    #: the liquid-water potential temperature as an ordinary one needs it: a
+    #: horizontally averaged column can be BELOW saturation in the mean while
+    #: still carrying cloud, so a saturation test alone cannot tell a cloudy
+    #: start from a clear one.
+    qc: Array | None = None
     f_c: float = 0.0
     u_geo: Array | None = None
     v_geo: Array | None = None
@@ -232,7 +239,7 @@ class LESReferenceArtifact:
 # key so an int/str never becomes a 0-d array on round-trip.
 _ARTIFACT_ARRAY_FIELDS = (
     "heights_m", "times_s", "theta", "u", "v",
-    "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs",
+    "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs", "qc",
     "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv",
     "T_s", "w_theta_s", "w_qv_s",
 )

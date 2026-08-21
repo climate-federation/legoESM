@@ -243,16 +243,30 @@ def build_cbl_scm_from_artifact(
     if artifact.is_moist:
         # The moist artifact records LIQUID-WATER potential temperature θ_l (in
         # `artifact.theta`) and TOTAL water q_t (in `artifact.qt`). Reading θ_l as
-        # a plain θ and q_t as vapour is only right for a cloud-free start
-        # (shallow cumulus); a stratocumulus column is SATURATED at t=0 and would
-        # start too cool and too moist, condensing toward a state the reference
-        # never had. Saturation-ADJUST the IC — (θ_l, q_t) → (θ, q_v, q_c) — so a
-        # cloudy start is initialised with the cloud water it actually carries
-        # and total water q_t = q_v + q_c is conserved. A clear column returns
-        # q_c=0, θ=θ_l, q_v=q_t, so BOMEX is byte-unchanged.
+        # a plain θ and q_t as vapour is only right for a cloud-free start; a
+        # stratocumulus column carries cloud at t=0 and would start too cool and
+        # too moist, condensing toward a state the reference never had. Initialise
+        # from the cloud water the reference ACTUALLY carried, so total water
+        # q_t = q_v + q_c is conserved and the SCM's initial θ_l/q_t reproduce the
+        # artifact (θ = θ_l + (L_v/(c_pd·Π))·q_c is the exact inverse of
+        # scm_coupling.liquid_water_theta):
+        #   • if the artifact recorded its cloud-water channel `qc`, use it
+        #     DIRECTLY. A horizontally averaged column can sit BELOW saturation in
+        #     the mean while still carrying cloud (partial cover), so the recorded
+        #     q_c — not a grid-mean saturation test — is the correct evidence.
+        #   • otherwise (older artifact, no channel) fall back to a saturation
+        #     adjustment (θ_l,q_t)→(θ,q_v,q_c), exact only for a fully-saturated
+        #     grid mean but the best available.
+        # A clear column gives q_c=0, θ=θ_l, q_v=q_t either way ⇒ BOMEX unchanged.
         qt0 = interp_profile(jnp.asarray(artifact.qt)[0], z_les, z_scm)
         exner = exner_function(p_full)
-        theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
+        if artifact.qc is not None:
+            q_c_adj = jnp.clip(
+                interp_profile(jnp.asarray(artifact.qc)[0], z_les, z_scm), 0.0, None)
+            theta_adj = theta_scm + constants.L_v / (constants.c_pd * exner) * q_c_adj
+            q_v_scm = qt0 - q_c_adj
+        else:
+            theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
         T_profile = theta_adj * exner            # actual temperature (θ_l→θ warmed by q_c)
         if float(jnp.max(q_c_adj)) > 0.0:
             q_c_scm = q_c_adj
