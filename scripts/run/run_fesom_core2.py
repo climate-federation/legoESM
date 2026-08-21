@@ -60,13 +60,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="NEMO ln_mxl0 surface mixing-length anchor (ORCA1 "
                         "sets .true.; NEMO pairs it with the Dirichlet BC — "
                         "running dirichlet without it is a half-port).")
+    p.add_argument("--allow-half-ported-tke", action="store_true",
+                   help="Permit --tke-surface-bc dirichlet with the surface "
+                        "mixing-length anchor off. The reference card sets "
+                        "both together, so this runs a configuration neither "
+                        "model uses; it exists for isolating which of the two "
+                        "moves a result, and must be stated deliberately.")
     p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
                    help="Sea-ice cold start: 'fesom' = the C-faithful "
                         "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
                         "NEMO's January Ice_initialization.nc (needs "
                         "--ice-init-file) -- the NEMO-matched choice for a "
                         "January start (the fesom seed loads the summer SH "
-                        "with ~40% ice whose melt freshens the Antarctic).")
+                        "with ~40%% ice whose melt freshens the Antarctic).")
     p.add_argument("--ice-init-file", default=None,
                    help="Path to NEMO Ice_initialization.nc (at_i/ht_i/ht_s "
                         "on eORCA1). Required with --ice-ic nemo.")
@@ -144,6 +150,21 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    # The Dirichlet surface value and the surface mixing-length anchor are one
+    # setting in the model being ported: that card turns both on together, and
+    # its own help text calls running the first without the second a half
+    # port. Accepting the pair silently split let a run advertise the ported
+    # boundary condition while integrating a different mixing length, so the
+    # combination has to be named rather than defaulted into.
+    if (args.tke_surface_bc == "dirichlet"
+            and args.tke_mxl0_anchor == "off"
+            and not args.allow_half_ported_tke):
+        raise SystemExit(
+            "--tke-surface-bc dirichlet without --tke-mxl0-anchor on is a "
+            "half port: the reference card sets both, and the pair is what "
+            "was validated. Pass --tke-mxl0-anchor on for the ported "
+            "configuration, or --allow-half-ported-tke to run the split "
+            "deliberately (the run is then not the ported one).")
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +240,7 @@ def main() -> int:
                    "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
                    "tke_surface_bc": args.tke_surface_bc,
                    "tke_mxl0_anchor": args.tke_mxl0_anchor,
+                   "allow_half_ported_tke": bool(args.allow_half_ported_tke),
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),

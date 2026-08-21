@@ -8,18 +8,34 @@
 #SBATCH --time=8:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/fesomnyf_%j.out
 #
-# FESOM2 (fesom-jax) 30-day arm on CORE-II NORMAL-YEAR forcing — the NEMO-
-# matched protocol (fesom c74311d + legoESM 6b93b0b04).  ONE variable vs the
-# fesom_core2_d30 arm 9369143: the atmospheric forcing (JRA55-do 1958 ->
-# the same nyf.zarr the NEMO reference and the tripole/MPAS arms use).
-# PHC IC and fesom-side SSS/runoff/chl stay — the residual differences the
-# manifest states.
+# FESOM2 (fesom-jax) 30-day arm on CORE-II NORMAL-YEAR forcing (fesom
+# c74311d + legoESM 6b93b0b04).  ONE variable vs the fesom_core2_d30 arm
+# 9369143: the atmospheric forcing (JRA55-do 1958 -> the same nyf.zarr the
+# tripole/MPAS arms use).
+#
+# WHAT THIS ARM IS NOT.  It is not a matched comparison against the NEMO
+# reference, and the pre-registered numbers below must not be read as one.
+# Four inputs still differ on the FESOM side: the initial temperature and
+# salinity climatology, the surface-salinity restoring, the river runoff and
+# the chlorophyll field.  A fifth was found in review: the wind speeds.  The
+# cache read here carries the RAW CORE-II winds, mean 4.74 m/s over the
+# equatorial Pacific, while the NEMO reference reads the scatterometer-
+# corrected winds at 6.28 m/s -- roughly 1.8x the surface stress.  The
+# corrected cache exists (core2_nyf_mod, built by _build_nyf_mod.sbatch) but
+# three arms already ran against the raw one and stay reproducible on it, so
+# THIS arm deliberately keeps the raw winds and is comparable to the other
+# legoESM arms, not to NEMO.  The wind variant is asserted below so a log can
+# never be read without knowing which one ran.
 #
 # PRE-REGISTERED, day-30 vs NEMO m1 (protocol confound test):
 #   FESOM2_vs_nemo SST rmse [was 1.49 vs tripole 0.85]:
 #     CONFIRMED protocol-dominated : <= 1.1
 #     PARTIAL                      : 1.1 - 1.35
-#     REFUTED (model, not forcing) : >= 1.35
+#     LARGE RESIDUAL               : >= 1.35
+#   A LARGE RESIDUAL here does NOT establish "model, not forcing": with the
+#   winds, the initial state, the restoring, the runoff and the chlorophyll
+#   all still differing, forcing has not been eliminated. Reading it that way
+#   would attribute to the ocean an error the inputs can produce on their own.
 #   Watch also the hemispheric dipole (SH_midlat +1.47 / NH_midlat -1.94):
 #   a JRA-year seasonal-phase artifact should COLLAPSE under NYF.
 set -uo pipefail
@@ -53,6 +69,36 @@ echo "=== gate: NYF reader + driver CLI tests ==="
 ( cd $FJX && JAX_PLATFORMS=cpu PYTHONPATH=$FJX $PY -m pytest -q \
     fesom_jax/tests/test_nyf_forcing.py -p no:cacheprovider 2>&1 | tail -2 )
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate failed rc=$rc"; exit 1; }
+
+echo "=== assert which winds this cache carries (raw 4.74 vs corrected 6.28) ==="
+JAX_PLATFORMS=cpu $PY - "$NYF" <<'PYEOF'
+import sys
+from pathlib import Path
+
+import numpy as np
+from legoesm.ocean.forcing.core2 import load_core2_nyf
+
+f = load_core2_nyf(cache_dir=Path(sys.argv[1]).parent, allow_synthetic=False)
+lat = np.asarray(f.lat, dtype=np.float64)
+lon = np.asarray(f.lon, dtype=np.float64) % 360
+jy = np.where((lat >= -5) & (lat <= 5))[0]
+ix = np.where((lon >= 210) & (lon <= 270))[0]
+w = np.cos(np.deg2rad(lat[jy]))[:, None] * np.ones(len(ix))[None, :]
+sp = [float(np.nansum(np.hypot(np.asarray(f.u10[k], dtype=np.float64)[np.ix_(jy, ix)],
+                               np.asarray(f.v10[k], dtype=np.float64)[np.ix_(jy, ix)]) * w)
+            / np.nansum(w))
+      for k in range(100, 120)]
+got = float(np.mean(sp))
+variant = ("raw" if 4.4 <= got <= 5.1 else
+           "corrected" if 6.0 <= got <= 6.6 else "unrecognised")
+print(f"equatorial Pacific mean 10 m wind = {got:.3f} m/s  -> {variant}")
+if variant != "raw":
+    raise SystemExit(
+        f"this arm is pre-registered on the RAW CORE-II winds and the cache "
+        f"carries {variant} ({got:.3f} m/s); the numbers below were written "
+        f"for the raw arm and are not comparable")
+PYEOF
+[ $? -eq 0 ] || { echo "FATAL: wind-variant assertion failed"; exit 1; }
 
 $PY -u scripts/run/run_fesom_core2.py \
   --mesh-dir "$MI/mesh_core2" \

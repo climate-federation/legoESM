@@ -100,3 +100,30 @@ def test_tke_surface_bc_flag():
                         ).tke_surface_bc == "dirichlet"
     with pytest.raises(SystemExit):
         p.parse_args(base + ["--tke-surface-bc", "robin"])
+
+
+def test_dirichlet_without_the_mixing_length_anchor_is_refused(monkeypatch):
+    """The two settings are one card in the model being ported.
+
+    The reference turns both on together and the flag's own help calls the
+    first without the second a half port, yet the pair could be split
+    silently -- a run advertising the ported boundary condition while
+    integrating a different mixing length. Both spellings are checked: the
+    split must stop, and the deliberate opt-in must get through.
+    """
+    import pytest
+    base = ["prog", "--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
+            "--tke-surface-bc", "dirichlet"]
+
+    monkeypatch.setattr("sys.argv", list(base))
+    with pytest.raises(SystemExit, match="half port"):
+        m.main()
+
+    # The paired configuration and the deliberate opt-in must both survive the
+    # guard; they stop later, on the mesh this test does not have.
+    for extra in (["--tke-mxl0-anchor", "on"], ["--allow-half-ported-tke"]):
+        monkeypatch.setattr("sys.argv", base + extra)
+        try:
+            m.main()
+        except BaseException as exc:            # noqa: BLE001
+            assert "half port" not in str(exc)
