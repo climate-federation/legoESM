@@ -44,7 +44,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --exclude=l50003,l50139,l50027,l50009,l50100
 #SBATCH --output=ll_trshrink.%j.log
 set -uo pipefail
@@ -65,7 +65,7 @@ rc=0
 # 32 and 128 devices are the two ends of the trend, and both take a PREFIX of
 # the same allocation so the node set is a subset rather than a different draw.
 mapfile -t NODES_ALL < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
-for NDEV in 32 128; do
+for NDEV in ${NDEVS:-32 128}; do
  for NC in 0 1; do
   NNODE=$(( NDEV / 4 ))
   LIST=$(IFS=,; echo "${NODES_ALL[*]:0:$NNODE}")
@@ -74,7 +74,7 @@ for NDEV in 32 128; do
   echo "=== trace ndev=$NDEV $ARM nodes=$NNODE $(date +%T) ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=$NC JAX_ENABLE_X64=0 \
-    timeout 1200 srun --export=ALL --nodelist="$LIST" --nodes="$NNODE" \
+    timeout 2700 srun --export=ALL --nodelist="$LIST" --nodes="$NNODE" \
       --ntasks="$NDEV" --ntasks-per-node=4 --gpus-per-node=4 \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
