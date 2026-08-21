@@ -1427,11 +1427,15 @@ class LateralViscosityConfig(NamedTuple):
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
                                     # for grids extending past 85°.
-    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
-                                    # > 1, multiplies A_h by 1 + (boost-1) *
-                                    # exp(-(lat/sigma)²), so horizontal momentum
-                                    # gets extra dissipation near the equator
-                                    # where f→0 leaves no rotational stiffness.
+    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity shaping.
+                                    # When != 1, multiplies A_h by 1 + (boost-1)
+                                    # * exp(-(lat/sigma)²).  > 1: extra
+                                    # dissipation near the equator where f→0
+                                    # leaves no rotational stiffness.  < 1 (>0):
+                                    # equatorial REDUCTION — NEMO ORCA1's
+                                    # eddy_viscosity_3D file drops ahm 20000 →
+                                    # 1000 m²/s at the equator so the EUC can
+                                    # exist; 0.05 with sigma ~7° mimics it.
                                     # Targets unconstrained equatorial dynamic
                                     # response at coarse resolution that drives
                                     # runaway upwelling cold tongues.  Typical
@@ -1513,6 +1517,18 @@ class LateralViscosityConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+    # --- Prescribed latitudinal A_h profile (NEMO nn_ahm_ijk_t=-30 shape) ---
+    # ORCA1 reads its momentum viscosity from eddy_viscosity_3D.nc: 20000
+    # m2/s midlatitude REDUCED to ~1000 within ~2 deg of the equator.  This
+    # field carries that shape as a per-cell-centre-latitude RATIO to ``A_h``
+    # (a TUPLE of n_lat floats -- hashable, so the config stays a static jit
+    # constant).  ``None`` (default) = off, bit-identical.  When set it
+    # REPLACES the Gaussian ``A_h_eq_boost`` shaping (setting both raises at
+    # the viscosity stage: two overlapping equatorial shapes silently
+    # multiply); the polar-cap boost and ``A_h_floor`` still compose on top.
+    # Built by the driver from the file's zonal median (see run_omip_core2
+    # --A-h-profile-file); v-face values are midpoint-averaged from these.
+    A_h_lat_profile: tuple | None = None
 
 class PolarFilterConfig(NamedTuple):
     """Fourier polar-filter parameters (#501 config grouping).

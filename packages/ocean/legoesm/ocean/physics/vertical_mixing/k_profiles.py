@@ -691,8 +691,22 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         else:
             u_before_data = v_before_data = None
             u_face_now = v_face_now = u_face_before = v_face_before = None
+        if _shear_disc == "nemo_face_native_now2":
+            # Face-native SPATIAL geometry at NOW^2 time levels -- the
+            # RK3-oracle variant (ORCA1 is compiled key_RK3; there is no Nbb
+            # velocity to be faithful to). Same raw-face requirement as
+            # nemo_face_native, no before-state.
+            if not _staggered:
+                raise ValueError(
+                    "TKEConfig.tke_shear_production='nemo_face_native_now2' "
+                    "requires the RAW (uncollapsed) C-grid face state.u/v -- "
+                    "got a pre-centred state (shape matches T).")
+            u_face_now = state.u.data
+            v_face_now = state.v.data
+            u_face_before = u_face_now
+            v_face_before = v_face_now
         _face_masks_3d = None
-        if _shear_disc == "nemo_face_native":
+        if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )

@@ -67,3 +67,24 @@ def test_band_breakdown_is_area_weighted():
     for name, bs in bands.items():
         if bs is not None:
             assert abs(bs["bias"] - 2.5) < 1e-6, name
+
+
+def test_sst_verdict_capped_by_enso_box():
+    """Global rmse 0.94 with nino3 +2.78 must NOT be excellent (2026-08-18)."""
+    boxes = {"nino3_5S5N_150W90W": {"bias": 2.78, "rmse": 2.93, "corr": 0.17},
+             "nino4_5S5N_160E150W": {"bias": 1.38, "rmse": 1.43, "corr": 0.90}}
+    v, capped = _c.capped_sst_verdict(0.94, boxes)
+    assert v == "poor" and capped[0] == "nino3_5S5N_150W90W"
+    # moderate box bias -> good, not excellent
+    v, capped = _c.capped_sst_verdict(0.94, {"nino3_5S5N_150W90W":
+                                             {"bias": -1.5, "rmse": 1.6,
+                                              "corr": 0.8}})
+    assert v == "good"
+    # clean boxes leave the global tier alone
+    v, capped = _c.capped_sst_verdict(0.94, {"nino3_5S5N_150W90W":
+                                             {"bias": 0.3, "rmse": 0.5,
+                                              "corr": 0.95}})
+    assert v == "excellent" and capped is None
+    # empty/None boxes tolerated
+    assert _c.capped_sst_verdict(0.94, {})[0] == "excellent"
+    assert _c.capped_sst_verdict(0.94, {"b": None})[0] == "excellent"

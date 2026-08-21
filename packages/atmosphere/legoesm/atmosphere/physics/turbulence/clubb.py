@@ -4358,7 +4358,19 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
                                 1, nzm - 2, _CAM_FILL_HOLES_TYPE)
     # CAM l_wp2_fill_holes_tke = True (fixed): TKE-conserving wp2 fill.
     wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
-    wp2_c = clip_variance(wp2_c, w_tol_sqd)
+    # BOTH thresholds, as upstream does. Passing only the floor here was a
+    # real fidelity gap: advance_wp2_wp3_module.F90 calls clip_variance with
+    # the optional wp2_max and says why -- "We attempt to clip extreme values
+    # of wp2 to prevent a crash ... instability caused by large wp2 in CLUBB
+    # led unrealistic results in AM3" (dschanen, 11 Apr 2011). The cap was
+    # already applied on the DIAGNOSTIC path and CLUBBConfig.wp2_max already
+    # held upstream's 1000 m^2/s^2; only this call site omitted it.
+    #
+    # MEASURED INERT on every case tried (wangara/bomex/cbl unchanged to every
+    # digit), so it is fidelity, not a fix -- the #1508 surface BC is what
+    # actually repaired those runs. Kept because the gap against the oracle is
+    # real and costs nothing.
+    wp2_c = clip_variance(wp2_c, w_tol_sqd, config.wp2_max)
     wp2_zt = jnp.maximum(zm2zt(wp2_c, gr), w_tol_sqd)
     wp3_c = clip_skewness(wp3_new, wp2_zt, gr.zt, sfc_elevation, skw_max)
     return wp2_c, wp3_c, wp2_zt
