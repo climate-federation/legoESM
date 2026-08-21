@@ -146,6 +146,16 @@ def load_candidate(path, day=90):
                 "(seasonal_t0_seconds=0) -- antiphase to NEMO's forcing. "
                 "Set DINO_GATE_ALLOW_LEGACY_CLOCK=1 only for historical "
                 "reproduction; the score is then NOT a NEMO comparison.")
+    # #1455: the twin harness stamps WHICH vertical ladders the bridge handed
+    # legoESM (nemo_ladder_mode). PRINT it, never refuse on it -- both ladders
+    # are legitimately scoreable and the gate's job is to say which grid a score
+    # was earned on, not to pick one. Artifacts written before the stamp existed
+    # are 1-D-ladder runs by construction (that was the resolved default then),
+    # but that is an inference, so they are reported as UNSTAMPED, not relabelled.
+    ladder = (str(d["nemo_ladder_mode"]) if "nemo_ladder_mode" in d.files
+              else "UNSTAMPED (pre-2026-08-21; the resolved default then was "
+                   "the 1-D reference ladder)")
+    print(f"vertical ladder of this candidate: {ladder}")
     key = f"u3d_day{day}"
     if key not in d:
         raise SystemExit(f"{path} has no {key} -- run kamm_twin_90d.py with "

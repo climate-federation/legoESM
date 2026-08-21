@@ -228,7 +228,8 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     t_depth = np.asarray(grid.gdept_1d).ravel().astype(np.float64)
     # DIAGNOSTIC (#1226, temporary): LEGOESM_NEMO_E3T isolates which half of
     # NEMO's 3-D geometry drives a regression -- the thickness ladder or the
-    # T-depth ladder.  "both" (default) | "e3t_only" | "gdept_only" | "off"
+    # T-depth ladder.  "off" (this function's default, see below) | "e3t_only"
+    # | "gdept_only" | "both"
     import os as _os
     # DEFAULT IS "off" -- i.e. the KNOWN-WRONG 1-D ladder. This is deliberate
     # and temporary. Adopting NEMO's true e3t_0 thicknesses is CORRECT (it makes
@@ -242,29 +243,47 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     #    it ran on a wrong one. That second defect must be found before this can
     #    default to "both". Do NOT flip this default to hide the instability.
     #
-    # 2026-08-20, #1455: THE INSTABILITY ABOVE DID NOT REPRODUCE in one
-    # configuration, and the same measurement shows this default is expensive.
-    # Four 90-day DINO twin arms from the day-180 restart (corrected seasonal
-    # clock, --bridge-before, fp64), differing ONLY in this mode and
-    # bit-identical at day 0, were ALL stable: day-90 max|u| = 0.6332 ("off"),
-    # 0.6341 ("e3t_only"), 0.6344 ("gdept_only"), 0.6347 ("both") -- agreeing
-    # to three decimals, none growing, nothing near the 2.2-3 m/s above. The
+    # 2026-08-20/21, #1455: THE INSTABILITY ABOVE DID NOT REPRODUCE, and the
+    # same measurements show this default is expensive.
+    #
+    # Non-reproduction. Four 90-day DINO twin arms from the day-180 restart
+    # (corrected seasonal clock, --bridge-before), differing ONLY in this mode
+    # and bit-identical at day 0, were ALL STABLE over 2880 steps: day-90
+    # max|u| = 0.6332 ("off"), 0.6341 ("e3t_only"), 0.6344 ("gdept_only"),
+    # 0.6347 ("both"). Re-measured under an fp64 precision policy on branch
+    # fidelity/dino-step-walk, the two end arms give max|u| = 0.6332 ("off")
+    # and 0.6350 ("both") -- so 4/4 arms stable at 0.633-0.635 m/s, agreeing to
+    # three decimals, none growing, nothing near the 2.2-3 m/s above. The
     # comment does not record the state or configuration its measurement came
     # from, so this is a NON-REPRODUCTION under ONE configuration, not proof
     # that it was never true -- but it IS the stated blocker, and it did not
     # fire.
-    # Cost of this default, same four arms, day-90 circumpolar (channel-band)
-    # transport error vs NEMO: "off" +3.483 Sv, "e3t_only" +0.690,
-    # "gdept_only" +2.893, "both" +0.099. The thickness ladder is what fixes
-    # the barotropic component (+2.717 -> -0.005) and the depth ladder the
-    # baroclinic one (+0.490 -> +0.097); neither half alone is the answer, and
-    # "gdept_only" is an internally INCONSISTENT grid (cells from one ladder,
-    # T-points from the other -- 110 m off the cell centre at k=32), so its
-    # good score on the full-section metric is not a recommendation.
-    # This note is a POINTER, not a licence to flip the default: see
+    #
+    # Cost of this default, day-90 circumpolar (channel-band) transport error
+    # vs NEMO, fp64, mean reduction over longitudes 2..-2: "off" +2.93 Sv
+    # against "both" +0.29 Sv. Full-section ACC error over the same pair:
+    # +1.87 Sv against -0.60 Sv. The four-arm fp32 sweep that first ranked them
+    # put the halves at "e3t_only" +0.69 and "gdept_only" +2.89 Sv; those two
+    # numbers have NOT been re-measured at fp64 and are quoted only for the
+    # split they show -- the THICKNESS ladder fixes the barotropic component
+    # and the DEPTH ladder the baroclinic one, so neither half alone is the
+    # answer, and "gdept_only" is in any case an internally INCONSISTENT grid
+    # (cells from one ladder, T-points from the other -- 110 m off the cell
+    # centre at k=32).
+    #
+    # This default is UNCHANGED and still resolves to the 1-D reference ladder,
+    # because the note above is a non-reproduction rather than a refutation and
+    # this function serves every caller, not only oracle twins. What DID change
+    # (2026-08-21) is scoped strictly to bridged DINO twin runs:
+    # scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py resolves this
+    # variable to "both" when nothing sets it, on the argument that a twin only
+    # isolates SCHEME differences if both models stand on the same grid. It
+    # writes the resolved mode back into this environment variable and stamps it
+    # into its output, and an explicit LEGOESM_NEMO_E3T still wins there. See
+    # kamm_twin_90d.resolve_ladder_mode and
     # scripts/validate/ocean_fidelity/dino_1226/d180_step_walk.py for the
-    # measurements, the retractions attached to them, and the discriminating
-    # run that is still owed (pin the EOS depth back to the 1-D ladder on the
+    # measurements, the retractions attached to them, and the discriminating run
+    # that is still owed (pin the EOS depth back to the 1-D ladder on the
     # "gdept_only" arm to find out whether the equation of state, or N^2/the
     # pressure-gradient geometry, owns the response).
     _mode = (mode if mode is not None
