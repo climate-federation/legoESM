@@ -133,6 +133,9 @@ def main():
 
     def _run_wrap(*a, **k):
         _intercept["on"] = True
+        # stash the loop's OWN arguments so the response-factor arm below can
+        # re-run the IDENTICAL loop with one perturbed input and nothing else.
+        captured["loop_args"] = (a, dict(k))
         try:
             jax.lax.fori_loop = _fori_capture
             return _orig_run(*a, **k)
@@ -566,6 +569,96 @@ def main():
         _pred = j * _acc_dF_step
         _r = _meas / _pred if _pred != 0.0 else float("nan")
         print(f"      {j:2d} | {_pred:+.4e}          | {_meas:+.4e}      | {_r:8.3f}")
+
+    # ===================================================================
+    # RESPONSE FACTOR (physics review, measurement #4) -- the measurement that
+    # decides whether the loop is exonerated or is itself the owner.
+    #
+    # The discriminator above compares the measured error to the prediction
+    # jn*dt_s*dF, which assumes the loop's linear response to a STEADY forcing
+    # residual is exactly 1 per substep.  Nobody measured that.  If the true
+    # response is R, the forcing explains R*46*acc(dt_s*dF) of the deposit and
+    # the REST is the loop's own, so "meas/pred = 0.81" is only "the loop is
+    # clean" when R itself is 0.81.  Measure R directly: run the IDENTICAL loop
+    # a second time with F_slow_u perturbed by +dF and nothing else changed.
+    #
+    #   R ~ 0.81  -> the shortfall IS the loop's linear response; residue ~ 0.
+    #   R ~ 1.00  -> residue = -1.28e-3 Sv/step = 458% of the budget row, with
+    #                the budget's own sign, and the loop is a prime suspect.
+    print("\n  === RESPONSE FACTOR: the loop's own reply to a steady dF ===")
+    _a_loop, _k_loop = captured["loop_args"]
+    _Fu_prod = _k_loop["F_slow_u"]
+    # dF lives on NEMO cells (nj,ni); lift it to lego's u-face frame (nj,ni+1).
+    # lego face i+1 == NEMO u(i) (that is exactly what _cell inverts), and face 0
+    # is the west face of cell 0, which under this grid's ZONAL PERIODICITY (the
+    # channel: umask column 0 has 35 wet cells) is NEMO u(jpi-1).
+    _pert = np.zeros((dF.shape[0], dF.shape[1] + 1), dtype=np.float64)
+    _pert[:, 1:] = dF
+    _pert[:, 0] = dF[:, -1]
+    # the lift is ASSERTED, not assumed: round-tripping it through the same
+    # _cell() the deposit uses must return dF bit-for-bit.
+    assert np.array_equal(_cell(_pert), dF), "dF lift to the u-face frame is wrong"
+
+    _k_pert = dict(_k_loop)
+    _k_pert["F_slow_u"] = _Fu_prod + jnp.asarray(_pert, dtype=_Fu_prod.dtype)
+    jax.lax.fori_loop = _fori_capture
+    try:
+        with jax.disable_jit():
+            _orig_run(*_a_loop, **_k_pert)
+    finally:
+        jax.lax.fori_loop = _orig_fori
+    U_bar_stk_p = np.asarray(captured["carries"][1])
+    assert U_bar_stk_p.shape == U_bar_stk.shape
+
+    _acc_dF = _acc_dF_step                      # acc_sv(dt_s*dF), one substep
+    _jbar = float((wf_n * np.arange(1, Kpit + 1)).sum())   # weighted mean substep
+    print(f"    weighted-mean substep index jbar = {_jbar:.3f}  "
+          f"(uniform 1/45 over jn=24..68)")
+    print("      jn | R(jn) = response / (jn*dt_s*dF)")
+    for j in (1, 8, 24, 46, 68):
+        _resp = acc_sv((_cell(np.asarray(U_bar_stk_p[j - 1]))
+                        - _cell(np.asarray(U_bar_stk[j - 1]))) * _wetu)
+        print(f"      {j:2d} | {_resp / (j * _acc_dF):8.4f}")
+    _dU_resp = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        _dU_resp = _dU_resp + wf_n[j - 1] * (
+            _cell(np.asarray(U_bar_stk_p[j - 1]))
+            - _cell(np.asarray(U_bar_stk[j - 1])))
+    _R_dep = acc_sv(_dU_resp * _wetu) / (_jbar * _acc_dF)
+    _forcing_part = _R_dep * _jbar * _acc_dF
+    _residue = _dep_vel - _forcing_part
+    print(f"    R_deposit = {_R_dep:.4f}   "
+          f"(R=1 assumed by the naive discriminator)")
+    print(f"    forcing-explained deposit = {_forcing_part:+.4e} Sv/step")
+    print(f"    IN-LOOP RESIDUE           = {_residue:+.4e} Sv/step "
+          f"= {100*_residue/_TARGET:.1f}% of the -2.80e-4 budget row")
+
+    # --- free controls the physics review asked for ---------------------------
+    # (i) legoESM-side deposit map: the hand-rebuilt boxcar must equal the model's
+    #     OWN averaged velocity (carry 6 / w_total).  The NEMO side got two such
+    #     asserts; this side had none.
+    _U_sum_model = np.asarray(carries[6])[Kpit - 1]
+    _lego_avg_model = _cell(_U_sum_model / float(np.asarray(wt)))
+    _rel_lego = (np.abs((lego_Ubar_avg - _lego_avg_model)[_wetu]).max()
+                 / max(np.abs(_lego_avg_model[_wetu]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (lego side): rebuilt boxcar vs model U_sum/w_total "
+          f"rel={_rel_lego:.3e}")
+    assert _rel_lego < 1e-12, "the legoESM deposit map is wrong"
+    # (ii) PLANT on the NEW metric: shifting lego's trajectory one substep must
+    #      move the deposit far more than the deposit itself, or the ACC
+    #      reduction is shift-blind and proves nothing.
+    _plant = np.zeros_like(_puu_b)
+    for j in range(1, Kpit):
+        _plant = _plant + wf_n[j - 1] * (
+            _cell(np.asarray(U_bar_stk[j])) - subs[j]["ua_e"])
+    _dep_plant = acc_sv(_plant * _wetu)
+    print(f"    PLANT on the ACC deposit metric: {_dep_plant:+.4e} vs "
+          f"{_dep_vel:+.4e} Sv/step -> ratio {abs(_dep_plant/_dep_vel):.2f}")
+    print("    (ratio ~1 => the ACC deposit is substep-shift-INSENSITIVE: the "
+          "per-substep table above DECOMPOSES the total, it does NOT localise "
+          "a substep.  No localisation claim may rest on it.  The shift-\n"
+          "     sensitive control for this file is the wall-max PLANT below, "
+          "which is on the transport metric and does fire.)")
 
     # PLANT: shift NEMO trajectory by one substep -> final diff must blow up
     un_adv_shift = np.zeros_like(hu0_full)
