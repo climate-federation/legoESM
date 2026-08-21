@@ -572,7 +572,8 @@ class MPASOceanModel:
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
                 _rho_conv = compute_ocean_rho(
                     state, z_coord, _J_conv, eos_fn=self._eos_fn,
-                    g=self._constants_config.g)
+                    g=self._constants_config.g,
+                    rho0=self._constants_config.rho_0)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)

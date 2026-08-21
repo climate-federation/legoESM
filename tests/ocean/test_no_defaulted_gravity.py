@@ -71,13 +71,19 @@ _GUARDED = {
     "compute_ocean_rho_and_pressure": (None, None),
 }
 
-#: Calls for which only GRAVITY is demanded. The two density helpers take a
-#: reference density as well, but it is consulted ONLY on the geometric-depth
-#: path and is documented as ignored on the default one, so requiring it
-#: everywhere would force an argument that changes nothing and mean nothing --
-#: the opposite of what a tripwire is for. Gravity enters both paths.
-_GRAVITY_ONLY = frozenset({"compute_ocean_rho", "compute_ocean_rho_and_pressure"})
-_DENSITY_KW = "rho_ref"
+#: NOTHING IS EXEMPT FROM THE REFERENCE DENSITY. The first version of this
+#: extension excused the two density helpers from it, on the strength of a
+#: docstring saying the value is ignored on the default depth path. A reviewer
+#: read the code instead: the in-situ integral's surface term is
+#: ``rho_ref*g*eta``, so the reference density is consulted on BOTH paths and
+#: the docstring was wrong. Both the docstring and the exemption are gone. It
+#: is the third time on this rule that reasoning about what a call COULD need,
+#: rather than checking what it passes, produced a wrong answer.
+#: The reference density is spelled differently by different helpers -- the
+#: pressure integrator takes ``rho_ref``, the two density helpers take
+#: ``rho0`` -- and a rule that knows only one spelling reports the other's
+#: callers clean. Both count.
+_DENSITY_KWS = ("rho_ref", "rho0")
 
 # "<path>::<function>" -> why it cannot pass the run's gravity today.
 # SHRINK-ONLY.  Each needs the constants configuration threaded in from its
@@ -105,18 +111,6 @@ _DEBT: dict[str, str] = {
     "mle_tracer_tendency_mpas":
         "the unstructured mixed-layer tendency builds its pressure from the "
         "library constant and receives no configuration",
-    # Exposed once the rule started resolving import aliases: this file imports
-    # the density helper under another name, so its calls had never been seen.
-    # Checked rather than assumed: the factory's only parameter is a
-    # LateralMixingConfig, which carries no constants, and its sole caller is
-    # the physics combiner -- so clearing this means adding the pair to the
-    # factory's signature and to that call, the same shape as the entries above.
-    "legoesm/ocean/physics/lateral_mixing/integration.py::_make_gm_redi":
-        "the cubed-sphere GM/Redi factory takes only a lateral-mixing "
-        "configuration, which holds no constants; clearing it means threading "
-        "the pair from the combiner that builds it",
-    "legoesm/ocean/physics/lateral_mixing/integration.py::physics_fn":
-        "the closure inside that factory, same reason",
 }
 
 
@@ -167,9 +161,9 @@ def _non_compliant() -> set[str]:
                 kw = {k.arg for k in call.keywords}
                 has_g = ("g" in kw) or (g_pos is not None
                                         and len(call.args) > g_pos)
-                has_rho = (_DENSITY_KW in kw) or (rho_pos is not None
+                has_rho = (bool(kw & set(_DENSITY_KWS))) or (rho_pos is not None
                                                   and len(call.args) > rho_pos)
-                if has_g and (has_rho or name in _GRAVITY_ONLY):
+                if has_g and has_rho:
                     continue
                 out.add(f"{rel}::{fn.name}")
     return out

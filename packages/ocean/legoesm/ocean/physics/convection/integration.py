@@ -64,7 +64,8 @@ def make_convection_physics(
             eos_fn=eos_fn, constants_config=constants_config,
         )
     elif scheme == "plume":
-        return _make_plume(config, eos_fn=eos_fn)
+        return _make_plume(config, eos_fn=eos_fn,
+                           constants_config=constants_config)
     else:
         raise ValueError(f"Unknown ocean convection scheme: {scheme!r}")
 
@@ -103,10 +104,12 @@ def _make_enhanced_diffusion(
         # the default in-situ path stays bit-identical.
         if cfg.n2_mode == "adiabatic":
             rho, p_cell = _compute_rho_and_pressure(
-                state, z_coord, J, eos_fn=eos_fn, g=constants_config.g)
+                state, z_coord, J, eos_fn=eos_fn, g=constants_config.g,
+                rho0=constants_config.rho_0)
         else:
             rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
-                               g=constants_config.g)
+                               g=constants_config.g,
+                               rho0=constants_config.rho_0)
             p_cell = None
         # Suppress momentum mixing (no u/v) when KPP owns interior momentum
         # convection — avoids the A_v double-count flagged in the combiner
@@ -172,7 +175,8 @@ def _make_enhanced_diffusion(
     return physics_fn
 
 
-def _make_plume(config: OceanConvectionConfig, eos_fn: Callable | None = None) -> Callable:
+def _make_plume(config: OceanConvectionConfig, eos_fn: Callable | None = None,
+                constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
     cfg = config.plume
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -183,7 +187,8 @@ def _make_plume(config: OceanConvectionConfig, eos_fn: Callable | None = None) -
         # the SAME eos_fn to both so the buoyancy comparison is consistent.
         # eos_fn=None → wright in both, byte-identical to the legacy path.
         rho, p_hydro = _compute_rho_and_pressure(
-            state, z_coord, J, eos_fn=eos_fn, g=constants_config.g)
+            state, z_coord, J, eos_fn=eos_fn, g=constants_config.g,
+                rho0=constants_config.rho_0)
         out = plume_convection(
             state.T.data, state.S.data, rho, p_hydro, z_coord, J, cfg,
             eos_fn=eos_fn,

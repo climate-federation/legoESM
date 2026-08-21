@@ -283,7 +283,8 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     # density is built on is linear in it, and the cards this lane is compared
     # against pin a value that differs from the module default.
     rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn,
-                                 g=constants_config.g)
+                                 g=constants_config.g,
+                                 rho0=constants_config.rho_0)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
 
     # Land-zero inputs; on partial cells fill sub-seafloor levels with the
@@ -358,6 +359,9 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
         tau_x=tau_x, tau_y=tau_y, B_f=B_f,
         Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
         eos_fn=eos_fn,
+        # The run's gravity, so the boundary-layer depth criterion and the
+        # density it is applied to rest on the same constant.
+        g=constants_config.g,
     )
     return kpp_out, J
 

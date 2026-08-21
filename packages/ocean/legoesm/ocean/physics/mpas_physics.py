@@ -424,7 +424,8 @@ def make_mpas_ocean_physics(
             # is built on is linear in it, and the NEMO comparison cards pin a
             # value that differs from the module default.
             rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn,
-                                    g=config.constants.g)
+                                    g=config.constants.g,
+                                    rho0=config.constants.rho_0)
             # Tracer-only on MPAS: the convective **momentum** viscosity
             # (cfg_c.nu_conv / convective_νz) is intentionally NOT applied
             # here.  MPAS carries edge-normal velocity (nEdges) whose
@@ -442,17 +443,22 @@ def make_mpas_ocean_physics(
                 from legoesm.ocean.eos import compute_ocean_rho_and_pressure
                 _, p_cell = compute_ocean_rho_and_pressure(
                     state, z_coord, jacobian, eos_fn=eos_fn,
-                    g=config.constants.g,
+                    g=config.constants.g, rho0=config.constants.rho_0,
                 )
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     p_cell=p_cell, eos_fn=eos_fn,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    # The run's constants: the density above is now built with
+                    # them, and a trigger evaluated on the library's would put
+                    # the two halves of one decision on different physics.
+                    g=config.constants.g, rho_ref=config.constants.rho_0,
                 )
             else:
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,
                     eta=state.eta.data, H_bathy=state.H_bathy.data,
+                    g=config.constants.g, rho_ref=config.constants.rho_0,
                 )
             dT_dt = dT_dt + c_out.dT_dt * mask[:, None]
             dS_dt = dS_dt + c_out.dS_dt * mask[:, None]
