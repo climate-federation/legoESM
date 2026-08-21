@@ -105,7 +105,41 @@ _DEBT: dict[str, str] = {
     "mle_tracer_tendency_mpas":
         "the unstructured mixed-layer tendency builds its pressure from the "
         "library constant and receives no configuration",
+    # Exposed once the rule started resolving import aliases: this file imports
+    # the density helper under another name, so its calls had never been seen.
+    # Checked rather than assumed: the factory's only parameter is a
+    # LateralMixingConfig, which carries no constants, and its sole caller is
+    # the physics combiner -- so clearing this means adding the pair to the
+    # factory's signature and to that call, the same shape as the entries above.
+    "legoesm/ocean/physics/lateral_mixing/integration.py::_make_gm_redi":
+        "the cubed-sphere GM/Redi factory takes only a lateral-mixing "
+        "configuration, which holds no constants; clearing it means threading "
+        "the pair from the combiner that builds it",
+    "legoesm/ocean/physics/lateral_mixing/integration.py::physics_fn":
+        "the closure inside that factory, same reason",
 }
+
+
+def _local_names(tree) -> dict[str, str]:
+    """Map every local name back to the guarded function it was imported as.
+
+    A file may import a guarded helper under another name -- ``compute_ocean_rho
+    as _compute_rho`` is in the tree today -- and a rule that matches only the
+    original spelling reports that file clean while four of its calls default
+    the run's gravity. Found by a reviewer after the first version of this
+    extension shipped; the alias had hidden them from the audit as well.
+    """
+    alias = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name in _GUARDED:
+                    alias[a.asname or a.name] = a.name
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname and a.name.rsplit(".", 1)[-1] in _GUARDED:
+                    alias[a.asname] = a.name.rsplit(".", 1)[-1]
+    return alias
 
 
 def _non_compliant() -> set[str]:
@@ -116,6 +150,7 @@ def _non_compliant() -> set[str]:
             tree = ast.parse(path.read_text(errors="replace"))
         except SyntaxError:                       # pragma: no cover
             continue
+        aliases = _local_names(tree)
         rel = path.relative_to(_OCEAN)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -125,6 +160,7 @@ def _non_compliant() -> set[str]:
                     continue
                 name = getattr(call.func, "id",
                                getattr(call.func, "attr", None))
+                name = aliases.get(name, name)
                 if name not in _GUARDED:
                     continue
                 g_pos, rho_pos = _GUARDED[name]

@@ -102,9 +102,11 @@ def _make_enhanced_diffusion(
         # cell-centre hydrostatic pressure; compute it only when opted in so
         # the default in-situ path stays bit-identical.
         if cfg.n2_mode == "adiabatic":
-            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J, eos_fn=eos_fn)
+            rho, p_cell = _compute_rho_and_pressure(
+                state, z_coord, J, eos_fn=eos_fn, g=constants_config.g)
         else:
-            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                               g=constants_config.g)
             p_cell = None
         # Suppress momentum mixing (no u/v) when KPP owns interior momentum
         # convection — avoids the A_v double-count flagged in the combiner
@@ -180,7 +182,8 @@ def _make_plume(config: OceanConvectionConfig, eos_fn: Callable | None = None) -
         # Ambient rho and plume-parcel rho MUST share one EOS (#518): pass
         # the SAME eos_fn to both so the buoyancy comparison is consistent.
         # eos_fn=None → wright in both, byte-identical to the legacy path.
-        rho, p_hydro = _compute_rho_and_pressure(state, z_coord, J, eos_fn=eos_fn)
+        rho, p_hydro = _compute_rho_and_pressure(
+            state, z_coord, J, eos_fn=eos_fn, g=constants_config.g)
         out = plume_convection(
             state.T.data, state.S.data, rho, p_hydro, z_coord, J, cfg,
             eos_fn=eos_fn,

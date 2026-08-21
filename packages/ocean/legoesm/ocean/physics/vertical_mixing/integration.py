@@ -146,9 +146,10 @@ def _make_richardson(config: VerticalMixingConfig,
         # in-situ path stays bit-identical.  eos_fn is None here (this factory
         # does not thread a recipe EOS) → Wright, matching the density path.
         if cfg.n2_mode == "adiabatic":
-            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J)
+            rho, p_cell = _compute_rho_and_pressure(
+                state, z_coord, J, g=constants_config.g)
         else:
-            rho = _compute_rho(state, z_coord, J)
+            rho = _compute_rho(state, z_coord, J, g=constants_config.g)
             p_cell = None
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,

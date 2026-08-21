@@ -125,7 +125,8 @@ def _bn2_ladder_kwargs(cfg, z_coord, state):
     return {"t_depth": t_depth, "w_depth": w_depth}
 
 
-def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None):
+def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None,
+                                constants_config=ConstantsConfig()):
     """MPAS surface buoyancy flux ``B_f`` [m^2/s^3] (>0 destabilising) plus the
     kinematic surface heat/salt fluxes for the KPP boundary-layer closure.
 
@@ -155,12 +156,16 @@ def _mpas_surface_buoyancy_flux(q_net, fw, salt, T_3d, S_3d, eos_fn=None):
     """
     # Grid-agnostic kernel (#518 item 1).  MPAS convention: the real salt-mass
     # flux feeds the surface buoyancy ONLY (real_salt_in_qs=False); the floored
-    # non-local Q_sfc_S carries the freshwater term only.  Pass the MPAS module
-    # constants (== canonical defaults) as the constant source.
+    # non-local Q_sfc_S carries the freshwater term only.  The RUN's constants,
+    # not the module's: the interior density this flux is compared against is
+    # now built with the configured gravity, and a surface forcing scaled by a
+    # different one leaves the closure's two halves on different constants --
+    # the same self-inconsistency one level up that #1627 is about.
     return surface_buoyancy_flux(
         q_net, fw, salt,
         T_3d[..., 0], S_3d[..., 0],
-        g=constants.g, rho_0=_RHO_0, c_sw=_C_SW,
+        g=constants_config.g, rho_0=constants_config.rho_0,
+        c_sw=constants_config.c_sw,
         real_salt_in_qs=False,
         eos_fn=eos_fn,
     )
@@ -345,7 +350,7 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
 
     # Surface buoyancy + kinematic T/S fluxes (shared MPAS helper).
     B_f, Q_sfc_T, Q_sfc_S = _mpas_surface_buoyancy_flux(
-        q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn)
+        q_net, fw, salt, T_3d, S_3d, eos_fn=eos_fn, constants_config=constants_config)
 
     kpp_out = kpp_vertical_mixing(
         u_east_w, v_north_w, T_w, S_w,
@@ -874,7 +879,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             tke_old=_tke_seed,
             tau_x_surface=tau_x, tau_y_surface=tau_y,
             dt=_dt_kernel, cfg=cfg,
-            rho_0=_RHO_0, g=constants.g,
+            rho_0=constants_config.rho_0, g=constants_config.g,
             n_iterations=_n_iter,
             z_interface=z_interface,
             boundary_cap=boundary_cap,
