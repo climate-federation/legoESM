@@ -262,6 +262,45 @@ from southern_term_torque_matched import (  # noqa: E402  (one term mapping, sha
 RDT = 2.0 * DT
 ROWS = list(B.ROWS)
 
+# ---------------------------------------------------------- THE GATE METRIC --
+# #1455 SG-C: the rows above are the CIRCULATION reducer (sum_i e1u * sum_k
+# e3u_0), which is a ZONAL integral.  The acceptance gate's ACC number is a
+# MERIDIONAL one -- ``acc_thermal_wind.acc_full``: per longitude i, sum over
+# EVERY row j and level k of u * e3t_1d * e2u, then the MEDIAN over longitudes
+# 2..-2, in Sv.  The two reductions are orthogonal and a row-circulation table
+# cannot decompose an ACC gap.  So the same stage increments are reduced a
+# SECOND time, with the gate metric's OWN weights, per row:
+#
+#     m(j) = mean_{i=2..NX-3}  e2u(j) * sum_k  du(j,i,k) * e3(k) * umask   / 1e6
+#
+# and sum_j m(j) is then the gate's per-longitude transport, MEAN-reduced.
+# MEAN, not median, because the decomposition must be LINEAR in du for a
+# per-stage table to mean anything; the mean-vs-median gap is measured on the
+# real states at every interval boundary (control M0b) rather than assumed
+# small.  Two weightings, because the campaign quotes two numbers:
+#   FULL    e3t_1d  -- acc_full's reference-thickness ladder (the -0.597 Sv)
+#   CHANNEL e3t_0   -- acc_band's real partial cells, which is the reduction
+#                      the +0.287 Sv channel number was measured with
+#                      (floor90_ensemble.band_transport_campaign: e3t_0, MEAN
+#                      over the same longitudes).
+# Both are built from ``acc_thermal_wind``'s own arrays; nothing is re-derived.
+import acc_thermal_wind as A  # noqa: E402
+
+MET_ILON = slice(2, A.NX - 2)                       # acc_full's [2:-2]
+W_FULL = np.where(A.umask, np.broadcast_to(A.e3t1d, A.umask.shape), 0.0) \
+    * A.e2u_col[:, None, None]
+W_CHAN = np.where(A.umask, A.e3t0, 0.0) * A.e2u_col[:, None, None]
+MET_NLON = A.NX - 4
+
+# Row groups.  Row 0 and row NY-1 carry no wet u-face (asserted below), so the
+# FULL section the gate metric sums is rows 1..NY-2.
+SOUTH_ROWS = list(ROWS)                          # 1..J0-1, the recorded band
+CHAN_ROWS = list(range(A.J0, A.J1 + 1))          # the re-entrant channel
+NORTH_ROWS = list(range(A.J1 + 1, B.NY - 1))
+FULL_ROWS = list(range(1, B.NY - 1))
+BANDS = (("southern", SOUTH_ROWS), ("channel", CHAN_ROWS),
+         ("northern", NORTH_ROWS), ("FULL section", FULL_ROWS))
+
 
 def _u_nemo(field):
     """lego u-face array -> NEMO u-column layout (the twin gate's own slice)."""
@@ -323,6 +362,18 @@ def main(argv=None):
 
     def _rowint(x):
         return jnp.sum(jnp.sum(x * _w3, axis=2) * _e1u, axis=1)
+
+    # The gate metric's own per-row reducer (see THE GATE METRIC above).  Two
+    # weightings; both return Sv per row, and their row-sum is the gate's
+    # per-longitude transport MEAN-reduced over longitudes 2..-2.
+    _wf = jnp.asarray(W_FULL)
+    _wc = jnp.asarray(W_CHAN)
+
+    def _met_full(x):
+        return jnp.sum(jnp.sum(x * _wf, axis=2)[:, MET_ILON], axis=1) / (MET_NLON * 1e6)
+
+    def _met_chan(x):
+        return jnp.sum(jnp.sum(x * _wc, axis=2)[:, MET_ILON], axis=1) / (MET_NLON * 1e6)
 
     def _depthint(x):
         return jnp.sum(x * _w3, axis=2)
@@ -482,22 +533,39 @@ def main(argv=None):
         d_ex, d_zdf = u_pre - u_bef, u_post - u_pre
         b_ex, b_zdf = _bt(d_ex), _bt(d_zdf)
         sl = _USLICE
-        rows = jnp.stack([
-            _rowint(b_ex[sl]),
-            _rowint((d_ex - b_ex)[sl]),
-            _rowint(b_zdf[sl]),
-            _rowint((d_zdf - b_zdf)[sl]),
-            _rowint((st2.u.data - u_post)[sl]),
-        ]) / RDT
+        # The five stage INCREMENTS [m/s], stacked once and reduced three
+        # times.  Their sum telescopes to (u_final - u_before) EXACTLY, so
+        # every reducer applied to them closes on that state difference --
+        # which is what makes the metric table below a decomposition of the
+        # gate's own number rather than a second, differently-weighted budget.
+        inc = jnp.stack([
+            b_ex[sl],
+            (d_ex - b_ex)[sl],
+            b_zdf[sl],
+            (d_zdf - b_zdf)[sl],
+            (st2.u.data - u_post)[sl],
+        ])
+        rows = jax.vmap(_rowint)(inc) / RDT
+        # Gate-metric rows, in Sv, NOT divided by rDt: these are CUMULATIVE
+        # contributions to the ACC number and are summed (not averaged) over
+        # the run, so the 90-day total is directly commensurate with the
+        # day-90 ACC gap the campaign quotes.
+        mrows = jnp.stack([jax.vmap(_met_full)(inc), jax.vmap(_met_chan)(inc)])
         u_diag = st2.u.data
         # D_n = R(Nnn) - R(Nbb): the leap-frog two-level offset.  It is what
         # separates the identity's rate from the realized change of the NOW
         # level, and it is where the Asselin filter's own contribution lives:
         #   R(U_{n+1}) - R(U_n) = rDt * sum(stage rows)_n  -  D_n
         offs = _rowint(s.u.data[sl]) - _rowint(u_bef[sl])
-        return rows, offs, u_diag
+        u_nn = s.u.data[sl]
+        mnow = jnp.stack([_met_full(u_nn), _met_chan(u_nn)])
+        mbef = jnp.stack([_met_full(u_bef[sl]), _met_chan(u_bef[sl])])
+        moffs = mnow - mbef
+        return rows, offs, u_diag, mrows, moffs, mnow
 
     stage_fn = jax.jit(_stage_step)
+    metnow_fn = jax.jit(lambda u: jnp.stack([_met_full(u[_USLICE]),
+                                             _met_chan(u[_USLICE])]))
 
     n_steps = args.days * STEPS_PER_DAY
     per_int = args.interval_days * STEPS_PER_DAY
@@ -509,6 +577,15 @@ def main(argv=None):
     R_series = np.zeros((n_int + 1, NY))
     acc_stage = np.zeros((n_int, len(STAGES), NY))    # row torque   [m3/s2]
     acc_offs = np.zeros((n_int, NY))                  # sum_n D_n    [m3/s]
+    # GATE-METRIC accumulators.  Axis 1 selects the weighting: 0 = FULL
+    # (e3t_1d, acc_full's), 1 = CHANNEL (e3t_0, acc_band's).  These are
+    # CUMULATIVE Sv, summed over every step -- not per-step means.
+    METW = ("FULL e3t_1d", "CHAN e3t_0")
+    acc_met = np.zeros((n_int, 2, len(STAGES), NY))   # cumulative   [Sv]
+    acc_moffs = np.zeros((n_int, 2, NY))              # sum_n D^met_n [Sv]
+    Mnow_series = np.zeros((n_int + 1, 2, NY))        # the NOW level's metric
+    acc_med_series = np.zeros(n_int + 1)              # A.acc_full (MEDIAN) [Sv]
+    _u0_host = None                                   # day-0 u, M0's operand
     stage_step0 = np.zeros((len(STAGES), NY))         # step 0 only  [m3/s2]
     Rnow_series = np.zeros((n_int + 1, NY))           # the NOW level's R
     i_plant = COMPS.index("KE_PGF_u")
@@ -557,7 +634,8 @@ def main(argv=None):
         R_now = np.asarray(rowc_fn(s2.u.data))
         if k == 0:
             Rnow_series[0] = R_now
-        stage_dev, offs_dev, u_diag = stage_fn(s2, rate)
+        (stage_dev, offs_dev, u_diag,
+         mrows_dev, moffs_dev, mnow_dev) = stage_fn(s2, rate)
         _ncap = _REC.get("n") if k == 0 else None
         st = step_fn(s2, rate)          # the PRODUCTION trajectory, untouched
         if k == 0:
@@ -603,6 +681,9 @@ def main(argv=None):
         stage_np = np.array(stage_dev, dtype=np.float64)
         if k == 0:
             stage_step0[:] = stage_np         # already a tendency; NO rescale
+            Mnow_series[0] = np.asarray(mnow_dev, dtype=np.float64)
+            _u0_host = np.asarray(s2.u.data, np.float64)[_USLICE]
+            acc_med_series[0] = A.acc_full(_u0_host, A.umask)
         R_naa = np.asarray(rowc_fn(st.u.data))
         rest = (R_naa - R_bb) / RDT - rows_np.sum(axis=0)
 
@@ -611,12 +692,17 @@ def main(argv=None):
         acc_row[i, -1] += rest
         acc_stage[i] += stage_np
         acc_offs[i] += np.asarray(offs_dev, dtype=np.float64)
+        acc_met[i] += np.asarray(mrows_dev, dtype=np.float64)
+        acc_moffs[i] += np.asarray(moffs_dev, dtype=np.float64)
         acc_map[i] += np.asarray(maps_dev, dtype=np.float64)
         acc_n[i] += 1
 
         if (k + 1) % per_int == 0:
             R_series[i + 1] = R_naa
             Rnow_series[i + 1] = R_naa      # Naa becomes the next step's Nnn
+            _uN = np.asarray(st.u.data)[_USLICE]
+            Mnow_series[i + 1] = np.array(metnow_fn(st.u.data), np.float64)
+            acc_med_series[i + 1] = A.acc_full(_uN, A.umask)
             u3 = np.asarray(st.u.data)
             if not np.isfinite(u3).all():
                 raise SystemExit(f"FATAL: non-finite velocity at step {k+1}")
@@ -916,6 +1002,140 @@ def main(argv=None):
           "deficit itself sits BELOW that floor, so\n  this column can bound "
           "the row, never resolve the deficit inside it.")
 
+    # ==================================================== THE GATE METRIC ==
+    # #1455 SG-C.  Everything above reduces zonally (row circulation).  The
+    # acceptance gate's ACC number reduces MERIDIONALLY.  This block reduces
+    # the SAME five stage increments with the gate metric's own weights, over
+    # the FULL section the gate sums, grouped into bands.
+    print("\n" + "=" * 112)
+    print("GATE-METRIC decomposition -- the same five stage increments, reduced "
+          "with acc_full's OWN weights")
+    print("=" * 112)
+
+    # ---- M2 (fails closed): the FULL section really is rows 1..NY-2.
+    _dry = [j for j in (0, B.NY - 1) if A.umask[j].any()]
+    _wetout = [j for j in range(B.NY) if A.umask[j].any()
+               and j not in FULL_ROWS]
+    print(f"  [M2 coverage gate] rows with a wet u-face outside 1..{B.NY - 2}: "
+          f"{_wetout} (must be empty); rows 0/{B.NY - 1} wet: {_dry} (must be "
+          "empty)")
+    if _wetout or _dry:
+        raise SystemExit("FATAL M2: the row groups do not cover exactly the "
+                         "wet section the gate metric sums")
+    _cov = sorted(SOUTH_ROWS + CHAN_ROWS + NORTH_ROWS)
+    if _cov != FULL_ROWS or len(set(_cov)) != len(_cov):
+        raise SystemExit("FATAL M2: the three bands are not a PARTITION of the "
+                         "full section")
+
+    # ---- M2b (fails closed): the recorded harness's u-face slice IS the
+    #      gate's.  ``acceptance_gate_90d.load_candidate`` takes lU[:, 1:53, :]
+    #      and then re-assigns column 47 from lU[:, 48, :].  With the slice
+    #      starting at 1 those are the SAME element, i.e. the re-assignment is
+    #      a no-op and ``_USLICE`` alone reproduces the gate's array.  That is
+    #      a claim about an index, so it is CHECKED, not reasoned about.
+    _probe = np.arange(B.NY * 53 * A.NZ, dtype=np.float64).reshape(B.NY, 53, A.NZ)
+    _gate = _probe[:, 1:53, :].copy()
+    _gate[:, 47, :] = _probe[:, 48, :]
+    if not np.array_equal(_gate, _probe[_USLICE]):
+        raise SystemExit("FATAL M2b: _USLICE does not reproduce the gate's own "
+                         "u-face slice -- every metric row is on a different "
+                         "array than the number being decomposed")
+    print("  [M2b slice gate] _USLICE reproduces load_candidate's u array "
+          "EXACTLY (the col-47 re-assignment is a no-op)")
+
+    # ---- M0 (fails closed): the device metric reducer against a numpy
+    #      evaluation of acc_full's integrand on the SAME day-0 state.  This is
+    #      the only thing standing between a mis-broadcast weight and a table
+    #      of confident wrong numbers.
+    if _u0_host is None:
+        raise SystemExit('FATAL M0: the day-0 state was never captured')
+    _u0 = np.asarray(_u0_host)
+    _integ_full = np.einsum("jik,k,j->ji", np.where(A.umask, _u0, 0.0),
+                            A.e3t1d, A.e2u_col)
+    _ref_full = _integ_full[:, MET_ILON].mean(axis=1) / 1e6
+    _integ_chan = np.einsum("jik,jik,j->ji", np.where(A.umask, _u0, 0.0),
+                            A.e3t0, A.e2u_col)
+    _ref_chan = _integ_chan[:, MET_ILON].mean(axis=1) / 1e6
+    _e_full = float(np.max(np.abs(Mnow_series[0, 0] - _ref_full)))
+    _e_chan = float(np.max(np.abs(Mnow_series[0, 1] - _ref_chan)))
+    print(f"  [M0 reducer gate] device vs numpy acc_full integrand, day 0: "
+          f"FULL max|diff| = {_e_full:.3e} Sv/row, CHANNEL "
+          f"{_e_chan:.3e} Sv/row (must be roundoff)")
+    if max(_e_full, _e_chan) > 1.0e-10:
+        raise SystemExit("FATAL M0: the on-device gate-metric reducer is not "
+                         "acc_full's integrand")
+    # and the CHANNEL row-sum must reproduce floor90_ensemble's recorded
+    # channel reduction (e3t_0, MEAN over the same longitudes) exactly.
+    _chan_ref = float(np.mean(A.acc_band(_u0, A.umask)[2:-2]))
+    _chan_got = float(Mnow_series[0, 1, CHAN_ROWS].sum())
+    print(f"  [M0b channel gate] band row-sum {_chan_got:.6f} Sv vs "
+          f"floor90_ensemble.band_transport_campaign {_chan_ref:.6f} Sv "
+          f"(diff {_chan_got - _chan_ref:.3e})")
+    if abs(_chan_got - _chan_ref) > 1.0e-9:
+        raise SystemExit("FATAL M0b: the channel rows do not sum to the "
+                         "recorded channel metric")
+
+    # ---- M0c: MEAN vs MEDIAN.  acc_full takes the MEDIAN over longitudes; a
+    #      per-stage table must be LINEAR, so the rows here are MEAN-reduced.
+    #      The gap between the two reductions of the SAME state is the size of
+    #      that surrogate, measured at every interval boundary rather than
+    #      assumed.  It is NOT a gate: it bounds how much of a quoted gap the
+    #      linear table can be expected to carry.
+    _mean_series = Mnow_series[:, 0, :].sum(axis=1)
+    print("\n  [M0c mean-vs-median] full-section ACC by interval boundary [Sv]")
+    print(f"  {'day':>6s}{'MEDIAN (acc_full)':>20s}{'MEAN (this table)':>20s}"
+          f"{'median-mean':>14s}")
+    for i in range(n_int + 1):
+        print(f"  {i*args.interval_days:6d}{acc_med_series[i]:20.4f}"
+              f"{_mean_series[i]:20.4f}"
+              f"{acc_med_series[i] - _mean_series[i]:14.4f}")
+    _surr = float(abs((acc_med_series[-1] - _mean_series[-1])
+                      - (acc_med_series[0] - _mean_series[0])))
+    print(f"  the surrogate's own drift over the run = {_surr:.4f} Sv "
+          "(the median-minus-mean CHANGE; a per-stage table cannot resolve a "
+          "gap below it)")
+
+    # ---- M1 (fails closed): the metric budget must CLOSE on the realized
+    #      change of the NOW level, row by row.  Same leap-frog algebra as the
+    #      circulation closure above, a DIFFERENT reducer -- so it re-tests the
+    #      whole chain (capture, split, slice, weights) rather than repeating
+    #      an identity.
+    for w, wname in enumerate(METW):
+        pred = acc_met[:, w].sum(axis=1).sum(axis=0) - acc_moffs[:, w].sum(axis=0)
+        real = Mnow_series[-1, w] - Mnow_series[0, w]
+        e = float(np.max(np.abs(pred - real)[FULL_ROWS]))
+        sc = float(np.max(np.abs(acc_met[:, w].sum(axis=0))[:, FULL_ROWS]))
+        print(f"  [M1 closure gate {wname}] band max |residual| = {e:.3e} Sv "
+              f"against a largest stage contribution of {sc:.3e} Sv "
+              f"({100.0 * e / max(sc, 1e-30):.2e} %)")
+        if sc > 0 and e / sc > 1.0e-8:
+            raise SystemExit(f"FATAL M1 ({wname}): the gate-metric stage budget "
+                             "does not close on the realized ACC change")
+
+    # ---- the table -------------------------------------------------------
+    for w, wname in enumerate(METW):
+        rowsel = CHAN_ROWS if w == 1 else FULL_ROWS
+        print("\n" + "-" * 112)
+        print(f"  CUMULATIVE contribution to the day-{args.days} ACC number, "
+              f"{wname} weighting [Sv], by stage x band")
+        print("-" * 112)
+        cum = acc_met[:, w].sum(axis=0)                  # (n_stage, NY)
+        off = acc_moffs[:, w].sum(axis=0)                # (NY,)
+        print(f"  {'stage':18s}" + "".join(f"{b:>16s}" for b, _ in BANDS))
+        for t, name in enumerate(STAGES):
+            print(f"  {name:18s}"
+                  + "".join(f"{cum[t, r].sum():16.4f}" for _, r in BANDS))
+        print(f"  {'STAGE SUM':18s}"
+              + "".join(f"{cum[:, r].sum():16.4f}" for _, r in BANDS))
+        print(f"  {'- leapfrog offset':18s}"
+              + "".join(f"{-off[r].sum():16.4f}" for _, r in BANDS))
+        real = Mnow_series[-1, w] - Mnow_series[0, w]
+        print(f"  {'= realized d(ACC)':18s}"
+              + "".join(f"{real[r].sum():16.4f}" for _, r in BANDS))
+        print(f"  (the band used for the campaign's number with this weighting "
+              f"is {'channel' if w == 1 else 'FULL section'})")
+        del rowsel
+
     if args.out_npz:
         np.savez_compressed(
             args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
@@ -923,7 +1143,12 @@ def main(argv=None):
             stages=np.array(STAGES), acc_stage=acc_stage,
             acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
             interval_days=args.interval_days, plant=args.plant,
-            stage_plant=args.stage_plant)
+            stage_plant=args.stage_plant,
+            met_weightings=np.array(METW), acc_met=acc_met,
+            acc_moffs=acc_moffs, Mnow_series=Mnow_series,
+            acc_med_series=acc_med_series,
+            south_rows=np.array(SOUTH_ROWS), chan_rows=np.array(CHAN_ROWS),
+            north_rows=np.array(NORTH_ROWS), full_rows=np.array(FULL_ROWS))
         print(f"\n[artifact] -> {args.out_npz}")
 
 
