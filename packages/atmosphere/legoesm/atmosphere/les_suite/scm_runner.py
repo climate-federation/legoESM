@@ -251,6 +251,25 @@ def build_cbl_scm_from_artifact(
         # then condenses its way to a state the reference never had.
         from legoesm.thermo import saturation_mixing_ratio
 
+        # First, the direct evidence, when the reference recorded it. A
+        # horizontally averaged column can sit BELOW saturation in the mean and
+        # still carry cloud -- partial cover does exactly that -- so the
+        # saturation test below cannot stand alone.
+        if artifact.qc is not None:
+            _qc0 = jnp.asarray(artifact.qc)[0]
+            _qc_max = float(jnp.max(_qc0))
+            if _qc_max > 0.0:
+                raise ValueError(
+                    f"{artifact.case_name}: the reference carries cloud water "
+                    f"at t=0 (up to {_qc_max * 1e3:.3f} g/kg). This runner "
+                    "initialises the column by reading the artifact's "
+                    "liquid-water potential temperature as a plain potential "
+                    "temperature and its total water as vapour, which is only "
+                    "correct for a cloud-free start; a cloudy one begins too "
+                    "cool and too moist and condenses toward a state the "
+                    "reference never had. A saturation adjustment at "
+                    "initialisation is needed before this case can be scored.")
+
         q_sat0 = saturation_mixing_ratio(T_profile, p_full)
         _excess = float(jnp.max(q_v_scm - q_sat0))
         if _excess > 0.0:
@@ -266,7 +285,10 @@ def build_cbl_scm_from_artifact(
                 "cloudy case this way makes the column too cool and too moist "
                 "and it condenses toward a state the reference never had. A "
                 "saturation adjustment at initialisation is needed before "
-                "this case can be scored.")
+                "this case can be scored. (The reference records no cloud "
+                "water, so this saturation test is the only evidence "
+                "available; an artifact carrying a cloud-water channel is "
+                "checked directly.)")
         moist_kwargs["w_qv_s"] = _const_scalar(
             float(jnp.asarray(artifact.w_qv_s)[0]))
         for fld in ("subsidence_w", "theta_adv", "qv_adv"):

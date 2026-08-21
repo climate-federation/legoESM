@@ -541,6 +541,20 @@ def main():
     return 0
 
 
+def _resolved_f_cor(args) -> float:
+    """The case's Coriolis parameter, from the run if it carries one.
+
+    Argument resolution puts it on ``args``; a caller that builds an artifact
+    straight from recorded profiles never went through that, so the case table
+    is consulted only in that case.
+    """
+    value = getattr(args, "f_cor", None)
+    if value is not None:
+        return float(value)
+    return float(
+        _STRATOCUMULUS_CASES[_case_key_for_label(args.case_label)]["f_cor"])
+
+
 def _case_key_for_label(case_label):
     """Map an artifact's case label back to its entry in the case table.
 
@@ -595,18 +609,21 @@ def _emit_suite_artifact(args, forc, rad_tend, subsidence_w, out_path):
         u=stack("u"), v=stack("v"),
         wtheta_resolved=wtheta, wtheta_sgs=np.zeros_like(wtheta),
         qt=stack("qt"),
+        # Cloud water, so a consumer can tell a cloudy start from a clear one
+        # without guessing from saturation; absent for a run that carried none.
+        qc=(stack("qc") if "qc" in frames[0] else None),
         wqt_resolved=wqt, wqt_sgs=np.zeros_like(wqt),
         prescribe="fluxes",
         w_theta_s=np.full(nt, float(forc["th_flux"]), np.float64),
         w_qv_s=np.full(nt, float(forc["qv_flux"]), np.float64),
         # The Coriolis parameter is a property of the CASE, not of how the
         # emitter was reached: a caller that builds the artifact from recorded
-        # profiles alone never went through argument resolution. Take it from
-        # the run when it is there and fall back to the case table, which is
-        # where the value is defined in the first place.
-        f_c=float(getattr(args, "f_cor",
-                          _STRATOCUMULUS_CASES[
-                              _case_key_for_label(args.case_label)]["f_cor"])),
+        # profiles alone never went through argument resolution. Resolved
+        # before the call rather than inside a lookup with a default, because
+        # a default argument is evaluated whether or not it is needed -- an
+        # earlier version raised on any unfamiliar case label even for a run
+        # that had the value in hand.
+        f_c=_resolved_f_cor(args),
         u_geo=np.asarray(forc["ug"], np.float64),
         v_geo=np.asarray(forc["vg"], np.float64),
         subsidence_w=np.asarray(subsidence_w, np.float64),

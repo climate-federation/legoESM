@@ -431,3 +431,48 @@ def test_moist_scm_les_loss_jax_differentiable():
     assert np.isfinite(val) and val >= 0.0
     g = float(jax.grad(loss)(jnp.asarray(1.5e-3)))
     assert np.isfinite(g)
+
+
+def test_a_cloudy_reference_is_refused_even_when_it_is_subsaturated_in_the_mean():
+    """Partial cloud cover hides from a saturation test.
+
+    The runner starts the column by reading the reference's liquid-water
+    potential temperature as an ordinary potential temperature and its total
+    water as vapour, which is the same thing only when the start is
+    cloud-free. A horizontally averaged column with partial cover carries
+    cloud while sitting BELOW saturation in the mean, so testing saturation
+    alone lets exactly that case through. The reference's own cloud-water
+    channel is checked first.
+    """
+    import jax.numpy as jnp
+    import pytest
+
+    from legoesm.atmosphere.les_suite.bridge import LESReferenceArtifact
+    from legoesm.atmosphere.les_suite.scm_runner import build_cbl_scm_from_artifact
+
+    nz, nt = 12, 2
+    z = jnp.linspace(0.0, 1500.0, nz)
+    theta = jnp.broadcast_to(jnp.full((nz,), 290.0), (nt, nz))
+    zero = jnp.zeros((nt, nz))
+    # comfortably sub-saturated total water, so the saturation test cannot fire
+    qt = jnp.broadcast_to(jnp.full((nz,), 2.0e-3), (nt, nz))
+    qc = zero.at[0, 5].set(2.0e-4)          # 0.2 g/kg of cloud at t=0
+
+    def _artifact(with_qc):
+        return LESReferenceArtifact(
+            case_name="partly_cloudy", sgs="smagorinsky",
+            heights_m=z, times_s=jnp.asarray([0.0, 3600.0]),
+            theta=theta, u=zero, v=zero,
+            wtheta_resolved=zero, wtheta_sgs=zero,
+            qt=qt, wqt_resolved=zero, wqt_sgs=zero,
+            qc=(qc if with_qc else None),
+            prescribe="fluxes",
+            w_theta_s=jnp.zeros(nt), w_qv_s=jnp.zeros(nt),
+        )
+
+    # Without the cloud-water channel the saturation test sees nothing wrong:
+    # this is the case that used to slip through, and it must still build.
+    build_cbl_scm_from_artifact(_artifact(with_qc=False), _mynn_config())
+
+    with pytest.raises(ValueError, match="cloud water at t=0"):
+        build_cbl_scm_from_artifact(_artifact(with_qc=True), _mynn_config())

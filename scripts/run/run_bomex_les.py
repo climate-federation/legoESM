@@ -403,6 +403,9 @@ def _emit_suite_artifact(args, forc, out_path):
         u=stack("u"), v=stack("v"),
         wtheta_resolved=wtheta, wtheta_sgs=np.zeros_like(wtheta),
         qt=stack("qt"),
+        # Cloud water, so a consumer can tell a cloudy start from a clear one
+        # without guessing from saturation; absent for a run that carried none.
+        qc=(stack("qc") if "qc" in frames[0] else None),
         wqt_resolved=wqt, wqt_sgs=np.zeros_like(wqt),
         prescribe="fluxes",
         w_theta_s=np.full(nt, float(forc["th_flux"]), np.float64),
