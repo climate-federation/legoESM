@@ -41,5 +41,8 @@
     "ponytail@ponytail": true,
     "ralph-loop@claude-plugins-official": false,
     "superpowers@claude-plugins-official": true
+  },
+  "env": {
+    "CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT": "0"
   }
 }
