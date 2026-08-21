@@ -111,21 +111,33 @@ def build(inputs_dir: Path, out: Path, wind_variant: str = "mod") -> Path:
     print(f"[wind] variant {wind_variant!r} -> {_un}/{_vn}")
     u10 = _f64(du[_un].values)
     v10 = _f64(dv[_vn].values)
-    T_air = _f64(dt["T_10"].values)                        # K
+    # T / q / radiation / precip: the SAME _MOD-vs-base choice as the winds.
+    # GLM's review: the CORE bulk formulae were tuned with the corrected set,
+    # so mixing raw winds with corrected humidity (or vice versa) is
+    # inconsistent. Verified before switching -- every base/_MOD pair has
+    # IDENTICAL shape, time axis and physical range (job 9450592); only the
+    # `units` attribute is absent on the _MOD variants, which this builder
+    # never reads. Deltas are modest next to the wind: T +1.2 K, q -3%,
+    # SWDN -5.4 W/m2, LWDN -0.7 W/m2, precip +15%.
+    _t_var = "T_10_MOD" if wind_variant == "mod" else "T_10"
+    _q_var = "Q_10_MOD" if wind_variant == "mod" else "Q_10"
+    T_air = _f64(dt[_t_var].values)                        # K
     # CORE-II Q_10 carries small (~-6e-3) negative specific humidities over
     # arid land (~3.8% of points, min over the Sahel) — a known artifact of the
     # source product. All such points are land (masked when regridded to the
     # ocean grid), so this clip to the physical floor is negligible vs what NEMO
     # ingests over open ocean, and prevents negative-humidity NaNs downstream.
-    q_air = np.maximum(_f64(dq["Q_10"].values), 0.0)       # kg/kg
+    q_air = np.maximum(_f64(dq[_q_var].values), 0.0)       # kg/kg
     if u10.shape[0] != _N_REC:
         raise ValueError(
             f"expected {_N_REC} 6-hourly wind records, got {u10.shape[0]}"
         )
 
     # Radiation is daily (365): broadcast each day across its 4 6-hourly slots.
-    sw_down = np.repeat(_f64(drad["SWDN"].values), _REC_PER_DAY, axis=0)
-    lw_down = np.repeat(_f64(drad["LWDN"].values), _REC_PER_DAY, axis=0)
+    _sw_var = "SWDN_MOD" if wind_variant == "mod" else "SWDN"
+    _lw_var = "LWDN_MOD" if wind_variant == "mod" else "LWDN"
+    sw_down = np.repeat(_f64(drad[_sw_var].values), _REC_PER_DAY, axis=0)
+    lw_down = np.repeat(_f64(drad[_lw_var].values), _REC_PER_DAY, axis=0)
     # Precip is monthly (12): broadcast each month across its (days*4) slots.
     # KEEP snow as its own channel (NEMO reads SNOW separately for the
     # snow-fusion / snow-heat-content terms of q_ns); precip stays the TOTAL.
@@ -133,10 +145,13 @@ def build(inputs_dir: Path, out: Path, wind_variant: str = "mod") -> Path:
         _f64(dprec["SNOW"].values),                          # kg/m^2/s
         _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
     )
-    precip = np.repeat(
-        _f64(dprec["RAIN"].values) + _f64(dprec["SNOW"].values),  # kg/m^2/s
-        _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
-    )
+    # PRC_MOD is the corrected TOTAL precipitation -- the direct analogue of
+    # our RAIN+SNOW construction (measured means 2.656e-5 vs 2.657e-5), and
+    # what NEMO's sn_prec reads. SNOW has no _MOD variant and NEMO reads it
+    # plain, so the snow channel above is unchanged either way.
+    _prc = (_f64(dprec["PRC_MOD"].values) if wind_variant == "mod"
+            else _f64(dprec["RAIN"].values) + _f64(dprec["SNOW"].values))
+    precip = np.repeat(_prc, _DAYS_PER_MONTH * _REC_PER_DAY, axis=0)
     runoff = np.zeros_like(precip)                          # see module docstring
     # Sea-level pressure: 6-hourly like the winds (NEMO sn_slp), used for
     # moist-air density + the Goff saturation humidity.
@@ -222,11 +237,15 @@ def main() -> int:
     p.add_argument("--out", type=Path, default=None,
                    help="output nyf.zarr path (default: legoESM core2 cache)")
     p.add_argument("--wind-variant", choices=("mod", "base"), default="mod",
-                   help="'mod' = U_10_MOD/V_10_MOD, the Large & Yeager "
-                        "scatterometer-corrected winds NEMO's namelist reads "
-                        "(default). 'base' = the raw U_10/V_10 this builder "
-                        "used before 2026-08-21, kept only to reproduce old "
-                        "caches.")
+                   help="Which CORE-II variant to read for EVERY corrected "
+                        "channel. 'mod' (default) = the Large & Yeager "
+                        "bias-corrected fields NEMO's namelist reads: "
+                        "U_10_MOD/V_10_MOD, T_10_MOD, Q_10_MOD, SWDN_MOD, "
+                        "LWDN_MOD, PRC_MOD (SNOW has no _MOD and is read "
+                        "plain, as NEMO does). 'base' = the raw fields this "
+                        "builder used before 2026-08-21, kept only to "
+                        "reproduce old caches. The name is historical -- it "
+                        "selects all channels, not just the wind.")
     args = p.parse_args()
     out = args.out if args.out is not None else _default_out()
     print(f"building CORE-II NYF zarr  ->  {out}  (wind {args.wind_variant})")
