@@ -589,6 +589,19 @@ def main(argv=None):
     acc_moffs = np.zeros((n_int, 2, NY))              # sum_n D^met_n [Sv]
     Mnow_series = np.zeros((n_int + 1, 2, NY))        # the NOW level's metric
     acc_med_series = np.zeros(n_int + 1)              # A.acc_full (MEDIAN) [Sv]
+
+    def _card(name):
+        """The RESOLVED card value, from whichever config object owns it.
+
+        Raises rather than stamping a placeholder: a '?' in an artifact's
+        provenance looks recorded and is not, and the whole point of this
+        stamp is that a reader can tell which card produced the number.
+        """
+        for obj in (cfg, mc, model.config):
+            if hasattr(obj, name):
+                return getattr(obj, name)
+        raise SystemExit(f'FATAL: no config object carries {name!r} -- '
+                         'the artifact cannot record which card it ran on')
     _u0_host = None                                   # day-0 u, M0's operand
     stage_step0 = np.zeros((len(STAGES), NY))         # step 0 only  [m3/s2]
     Rnow_series = np.zeros((n_int + 1, NY))           # the NOW level's R
@@ -794,6 +807,11 @@ def main(argv=None):
                   f"-{(i+1)*args.interval_days})  steps={acc_n[i]}  "
                   f"max|u|={np.max(np.abs(u3)):.4f}  wall={time.time()-t0:.0f}s",
                   flush=True)
+
+    print(f"[card] barotropic_reconcile_target="
+          f"{_card('barotropic_reconcile_target')!r}  "
+          f"barotropic_after_reconcile={_card('barotropic_after_reconcile')!r}  "
+          f"surface_stress_implicit={_card('surface_stress_implicit')!r}")
 
     acc_offs_sum = acc_offs.copy()          # keep the UNAVERAGED sum_n D_n
     for i in range(n_int):
@@ -1108,11 +1126,9 @@ def main(argv=None):
             e3t_mode=E3T_MODE, days=args.days, n_int=n_int,
             git_sha=_GIT_SHA, recipe=args.recipe,
             seasonal_t0_seconds=t0_sec,
-            reconcile_target=str(getattr(mc, "barotropic_reconcile_target",
-                                         "?")),
-            after_reconcile=str(getattr(mc, "barotropic_after_reconcile", "?")),
-            surface_stress_implicit=bool(
-                getattr(mc, "surface_stress_implicit", False)))
+            reconcile_target=_card("barotropic_reconcile_target"),
+            after_reconcile=_card("barotropic_after_reconcile"),
+            surface_stress_implicit=_card("surface_stress_implicit"))
         print(f"\n[artifact] -> {args.out_npz}")
 
     # ==================================================== THE GATE METRIC ==
