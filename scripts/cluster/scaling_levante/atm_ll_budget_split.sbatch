@@ -29,6 +29,18 @@
 # stack does not record the halo collectives at all (receipt 2026-08-13).
 #
 #   full - nocomm = HALO wire time + waiting for the slowest peer
+#                   + any local work that differs because the two arms are
+#                     no longer integrating the same fields
+#
+# THAT THIRD TERM IS REAL AND HAS TO BE BOUNDED, not assumed away.  The
+# no-comm arm keeps each band's own edge rows as ghosts, so after the first
+# step the two arms carry different states, and limiter branches and clamp
+# counts can differ.  The check is free, because every receipt already
+# records its per-block wall times: if trajectory drift were paying for the
+# difference, the no-comm arm's later block would move relative to its
+# first by an amount comparable to the difference itself.  The scorer below
+# prints that drift next to the communication term and refuses a verdict
+# when the drift is not small against it.
 #
 # SCOPE, verified by HLO census on 4 CPU devices (LL32x64 L8, same flags):
 # the knob removes ALL 52 collective-permutes from the compiled step and
@@ -56,10 +68,12 @@
 #
 # Protocol matches the 2^n ladder byte for byte except the knob: LL2048
 # f32, nlev 26, packed stage-entry exchange + fused SPMD halo + XLA
-# overlap + the NCCL multi-channel p2p pair, 60 timed steps after 10
-# warmup, a discarded warm-up arm, then INTERLEAVED arms (12-step arms
-# gave 7.7 % spread on identical controls in this campaign; 60-step arms
-# gave 0.3 %).
+# overlap + the NCCL multi-channel p2p pair, two fused blocks of 60 steps
+# each after the compile call and the latency probe, a whole discarded
+# warm-up arm, then INTERLEAVED arms (12-step arms gave 7.7 % spread on
+# identical controls in this campaign; 60-step arms gave 0.3 %).  The
+# fused lane has no per-step warm-up window -- it separates the compile,
+# the probe and the timed blocks instead -- so nothing here relies on one.
 #
 # SUBMIT: sbatch scripts/cluster/scaling_levante/atm_ll_budget_split.sbatch
 # ===========================================================================
@@ -123,7 +137,7 @@ run_arm () {  # ndev nocomm tag [ballast]
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
       --multicontroller --n-devices "$NDEV" --mode strong \
       --n-lat "$NLAT" --n-lon "$NLON" --nlev 26 \
-      --steps 60 --warmup 10 \
+      --steps 60 \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
   sleep 15
 }
@@ -175,11 +189,34 @@ BALLAST = os.environ.get("BALLAST_ARMS", "0") == "1"
 T1 = 201.4807
 
 
-def med(tag):
+def _record(tag):
     path = os.path.join(outdir, tag + ".jsonl")
     lines = [l for l in open(path).read().strip().split("\n")
              if l.startswith("{")]
-    return json.loads(lines[-1])["steady_median_ms"]
+    return json.loads(lines[-1])
+
+
+def med(tag):
+    return _record(tag)["steady_median_ms"]
+
+
+def block_drift_ms(tag):
+    """How much this arm's per-step time moved between its timed blocks.
+
+    The no-comm arm answers wrongly by construction, so its fields drift away
+    from the full arm's as the run proceeds and its local work can drift with
+    them.  A receipt already carries the per-block wall times of the slowest
+    process, so the size of that drift is free to read: if it is small next to
+    the full-minus-nocomm difference, the difference is not being paid for by
+    the diverging trajectory.  Returns None when the lane recorded no blocks.
+    """
+    rec = _record(tag)
+    blocks = rec.get("parallel_block_ms") or rec.get("block_ms")
+    steps = rec.get("extra", {}).get("steps")
+    if not blocks or len(blocks) < 2 or not steps:
+        return None
+    per_step = [b / steps for b in blocks]
+    return max(per_step) - min(per_step)
 
 
 rows = {}
@@ -201,6 +238,7 @@ if missing:
 print(f"{'ndev':>5} {'full':>8} {'nocomm':>8} {'comm':>8} {'comm%':>7} "
       f"{'ideal':>8} {'excess':>8} {'comm/excess':>12} {'spread':>8}")
 verdict_row = None
+contaminated = False
 for nd in DEVS:
     full = (rows[f"full_{nd}_a"] + rows[f"full_{nd}_b"]) / 2
     nc = (rows[f"nc_{nd}_a"] + rows[f"nc_{nd}_b"]) / 2
@@ -216,6 +254,26 @@ for nd in DEVS:
     if abs(comm) < 0.5 * spread * full:
         print(f"      ndev={nd}: INCONCLUSIVE — comm term is inside the "
               f"arm spread")
+    # The no-comm arm stops answering correctly after the first step, so part
+    # of the difference could be local work that changed with the fields
+    # rather than communication. Its own block-to-block movement bounds that.
+    drifts = [d for d in (block_drift_ms(f"nc_{nd}_a"),
+                          block_drift_ms(f"nc_{nd}_b")) if d is not None]
+    if drifts:
+        drift = max(drifts)
+        print(f"      ndev={nd}: the no-comm arm's per-step time moved "
+              f"{drift:.3f} ms between its own blocks "
+              f"({100 * drift / abs(comm) if comm else float('nan'):.0f}% of "
+              f"the {comm:.3f} ms difference)")
+        if abs(comm) > 0 and drift > 0.5 * abs(comm):
+            print(f"      ndev={nd}: INCONCLUSIVE — the no-comm arm drifts by "
+                  f"more than half the difference, so the difference cannot "
+                  f"be read as communication alone")
+            if nd == 128:
+                contaminated = True
+    else:
+        print(f"      ndev={nd}: no per-block times in the receipt — the "
+              f"trajectory-drift bound could not be computed")
     if BALLAST:
         b2 = (rows[f"b2_{nd}_a"] + rows[f"b2_{nd}_b"]) / 2
         b2nc = (rows[f"b2nc_{nd}_a"] + rows[f"b2nc_{nd}_b"]) / 2
@@ -241,6 +299,11 @@ if verdict_row is None:
           "stands on its own; do not read a verdict into it.")
     sys.exit(0)
 comm, excess, spread, full = verdict_row
+if contaminated:
+    print("NO VERDICT: at 128 devices the no-comm arm's own block-to-block "
+          "drift is more than half the full-minus-nocomm difference, so that "
+          "difference is not a clean communication term")
+    sys.exit(7)
 if abs(comm) < 0.5 * spread * full:
     print("NO VERDICT: the 128-device communication term is inside its own "
           "arm spread")

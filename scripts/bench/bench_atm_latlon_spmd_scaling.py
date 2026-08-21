@@ -263,8 +263,15 @@ def main() -> int:
                               axis="n_lon")
     # Thin-band NCCL-init deadlock guard: only the multi-node GPU lane is
     # affected (the same program runs on CPU virtual devices), and it burns
-    # a full walltime silently, so refuse at submit time.
-    if args.multicontroller:
+    # a full walltime silently, so refuse at submit time.  The platform has to
+    # be read here rather than assumed: applying the GPU floor to the CPU lane
+    # rejects the 12-row virtual-device benchmark this receipt was collected
+    # against.  JAX has not been imported yet (deferred for #1361), so the
+    # selection is taken from the environment variable that decides it.
+    _platforms = os.environ.get("JAX_PLATFORMS", "").strip().lower()
+    _on_cpu_only = bool(_platforms) and all(
+        p.strip() in ("cpu", "") for p in _platforms.split(","))
+    if args.multicontroller and not _on_cpu_only:
         preflight_or_exit(validate_band_rows_gpu,
                           (args.n_lat if args.mode == "strong"
                            else args.nlat_per_dev * args.n_devices),
@@ -646,7 +653,16 @@ def main() -> int:
         extra={
             "physics": args.physics,
             "steps": args.steps,
-            "warmup": args.warmup,
+            # Stamp the warm-up that ACTUALLY applied. The fused lane does not
+            # consult --warmup at all (it separates compile, probe steps and
+            # timed blocks explicitly), so recording the requested value there
+            # advertises a discard window the run never had.
+            "warmup": (args.warmup if seg_n > 0 else None),
+            "warmup_requested": args.warmup,
+            "warmup_applies": ("blocks dropped from steady stats" if seg_n > 0
+                               else "none: the fused lane discards a compile "
+                                    "call and --probe-steps probe steps, and "
+                                    "times every block after them"),
             "multicontroller": bool(args.multicontroller),
             # Which decomposition ran. Without this a tiled row and a band
             # row are indistinguishable in the receipt, and the whole point
