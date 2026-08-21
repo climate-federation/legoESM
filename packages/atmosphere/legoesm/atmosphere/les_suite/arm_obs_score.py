@@ -325,6 +325,22 @@ def build_arm_comparables(
     nsteps = int(np.ceil((t1 - t0) / step))
     doy0 = _day_of_year(case.base_date) + t0 / 86400.0
     sod0 = t0 % 86400.0
+    # The column's INITIAL state, taken before it is advanced. The history the
+    # run returns starts one timestep in -- its clock is the elapsed time at
+    # the END of a step -- while the observation window starts at t0, and
+    # linear interpolation clamps rather than refusing. Without this the first
+    # observation was scored against the model one timestep later, a penalty a
+    # perfect model could not avoid.
+    _ic = {
+        "T": np.asarray(scm.state.T.data[0, 0, 0], dtype=np.float64),
+        "u": np.asarray(scm.state.u.data[0, 0, 0], dtype=np.float64),
+        "v": np.asarray(scm.state.v.data[0, 0, 0], dtype=np.float64),
+        "p_s": float(np.asarray(scm.state.p_s.data[0, 0, 0])),
+    }
+    for _name in ("q_v", "q_c"):
+        _tr = (scm.state.tracers or {}).get(_name)
+        _ic[_name] = (None if _tr is None
+                      else np.asarray(_tr.data[0, 0, 0], dtype=np.float64))
     _final, hist = scm.run(
         nsteps, save_every=save_every,
         start_day_of_year=doy0 % 365.0, start_seconds_of_day=sod0,
@@ -332,8 +348,20 @@ def build_arm_comparables(
 
     # history is top-to-bottom on the SCM sigma grid; forcing/history time is the
     # ELAPSED clock ((k+1)*dt), so shift to absolute IOP seconds before matching.
-    hist_times = np.asarray(hist.time, dtype=np.float64) + t0
-    p_s_hist = np.asarray(hist.p_s, dtype=np.float64)
+    hist_times = np.concatenate(
+        [[t0], np.asarray(hist.time, dtype=np.float64) + t0])
+
+    def _with_ic(name, arr):
+        """Prepend the initial state so the history spans the window's start."""
+        if arr is None:
+            return None
+        head = _ic[name]
+        if head is None:
+            return None
+        return np.concatenate([np.asarray(head)[None, ...],
+                               np.asarray(arr, dtype=np.float64)], axis=0)
+
+    p_s_hist = _with_ic("p_s", np.asarray(hist.p_s, dtype=np.float64))
     sigma = scm.sigma_coord
 
     def _to_obs_levels(field_hist):
@@ -346,18 +374,20 @@ def build_arm_comparables(
             out[it] = interp_profile_to_pressure(obs.pressure_pa, p_full, vals_t[it])
         return out, np.interp(obs_times, hist_times, p_s_hist)
 
-    T_obsgrid, _ = _to_obs_levels(hist.T)
+    T_obsgrid, _ = _to_obs_levels(_with_ic("T", hist.T))
     exner_obs = np.asarray(exner_function(np.asarray(obs.pressure_pa)), dtype=np.float64)
     theta = T_obsgrid / exner_obs[None, :]
-    q = _to_obs_levels(hist.q_v)[0] if hist.q_v is not None else None
-    u = _to_obs_levels(hist.u)[0]
-    v = _to_obs_levels(hist.v)[0]
+    q = (_to_obs_levels(_with_ic("q_v", hist.q_v))[0]
+         if hist.q_v is not None else None)
+    u = _to_obs_levels(_with_ic("u", hist.u))[0]
+    v = _to_obs_levels(_with_ic("v", hist.v))[0]
 
     lwp = None
     if hist.q_c is not None:
         # canonical mass column integral applied to the cloud-liquid tracer.
         lwp_hist = np.asarray(
-            column_water_vapor(hist.q_c, hist.p_s, sigma.dsigma), dtype=np.float64)
+            column_water_vapor(_with_ic("q_c", hist.q_c),
+                               p_s_hist, sigma.dsigma), dtype=np.float64)
         lwp = np.interp(obs_times, hist_times, lwp_hist)
 
     return ARMComparables(

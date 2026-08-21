@@ -241,6 +241,32 @@ def build_cbl_scm_from_artifact(
     if artifact.is_moist:
         qt0 = jnp.asarray(artifact.qt)[0]
         q_v_scm = interp_profile(qt0, z_les, z_scm)
+        # The line above reads the artifact's liquid-water potential
+        # temperature as an ordinary potential temperature and its TOTAL water
+        # as vapour. That is only the same thing when the initial column
+        # carries no condensate, which is true of a cloud-free shallow-cumulus
+        # start and false of a stratocumulus one. Check it instead of assuming
+        # it: if the profile is already saturated anywhere, both fields are
+        # being misread -- the column starts too cool and too moist, and it
+        # then condenses its way to a state the reference never had.
+        from legoesm.thermo import saturation_mixing_ratio
+
+        q_sat0 = saturation_mixing_ratio(T_profile, p_full)
+        _excess = float(jnp.max(q_v_scm - q_sat0))
+        if _excess > 0.0:
+            _n = int(jnp.sum(q_v_scm > q_sat0))
+            raise ValueError(
+                f"{artifact.case_name}: the initial profile is saturated at "
+                f"{_n} of {q_v_scm.size} levels (up to "
+                f"{_excess * 1e3:.2f} g/kg above saturation), so it carries "
+                "cloud water at t=0. This runner initialises the column by "
+                "reading the artifact's liquid-water potential temperature as "
+                "a plain potential temperature and its total water as vapour, "
+                "which is only correct for a cloud-free start. Starting a "
+                "cloudy case this way makes the column too cool and too moist "
+                "and it condenses toward a state the reference never had. A "
+                "saturation adjustment at initialisation is needed before "
+                "this case can be scored.")
         moist_kwargs["w_qv_s"] = _const_scalar(
             float(jnp.asarray(artifact.w_qv_s)[0]))
         for fld in ("subsidence_w", "theta_adv", "qv_adv"):
@@ -253,6 +279,13 @@ def build_cbl_scm_from_artifact(
     forcing = SCMForcing(
         f_c=float(artifact.f_c),
         prescribe="fluxes",
+        # NAME this rather than inherit it. The default puts the prescribed
+        # surface flux in as a tendency on the lowest cell, and the turbulence
+        # closure then sees a surface heat flux of exactly zero. That is the
+        # defining input of every nonlocal closure, and comparing nine closures
+        # against large-eddy truth is the whole purpose here, so the nonlocal
+        # ones would have been ranked on a boundary condition they never got.
+        flux_to_closure=True,
         w_th_s=lambda _t: jnp.asarray(q0),
         **geo_kwargs,
         **moist_kwargs,

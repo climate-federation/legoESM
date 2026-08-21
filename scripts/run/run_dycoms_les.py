@@ -460,7 +460,6 @@ def main():
                 _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
-                qv3=np.asarray(st.tracers[..., 0]),
                 qr3=np.asarray(st.tracers[..., 2]),
                 rho_z=np.asarray(ref.rho_c))
             frame += 1
@@ -542,6 +541,22 @@ def main():
     return 0
 
 
+def _case_key_for_label(case_label):
+    """Map an artifact's case label back to its entry in the case table.
+
+    Labels are the case key with a descriptive suffix (``dycoms_rf01_sc``),
+    so match on the leading key rather than requiring an exact name; an
+    unrecognised label raises rather than silently picking a case.
+    """
+    label = str(case_label)
+    for key in _STRATOCUMULUS_CASES:
+        if label == key or label.startswith(key + "_"):
+            return key
+    raise KeyError(
+        f"case label {label!r} matches no entry in _STRATOCUMULUS_CASES "
+        f"({sorted(_STRATOCUMULUS_CASES)}); its Coriolis parameter and "
+        f"subsidence cannot be resolved")
+
 def _emit_suite_artifact(args, forc, rad_tend, subsidence_w, out_path):
     """Assemble a moist stratocumulus ``LESReferenceArtifact`` from the ``prof_NNN.npz`` series.
 
@@ -584,7 +599,14 @@ def _emit_suite_artifact(args, forc, rad_tend, subsidence_w, out_path):
         prescribe="fluxes",
         w_theta_s=np.full(nt, float(forc["th_flux"]), np.float64),
         w_qv_s=np.full(nt, float(forc["qv_flux"]), np.float64),
-        f_c=float(_FCOR),
+        # The Coriolis parameter is a property of the CASE, not of how the
+        # emitter was reached: a caller that builds the artifact from recorded
+        # profiles alone never went through argument resolution. Take it from
+        # the run when it is there and fall back to the case table, which is
+        # where the value is defined in the first place.
+        f_c=float(getattr(args, "f_cor",
+                          _STRATOCUMULUS_CASES[
+                              _case_key_for_label(args.case_label)]["f_cor"])),
         u_geo=np.asarray(forc["ug"], np.float64),
         v_geo=np.asarray(forc["vg"], np.float64),
         subsidence_w=np.asarray(subsidence_w, np.float64),

@@ -62,3 +62,29 @@ def test_layer_weights_nonuniform_thicker_gets_more():
 def test_layer_weights_rejects_scalar():
     with pytest.raises(ValueError):
         layer_weights_from_heights(jnp.array([1.0]))
+
+
+def test_an_excluded_level_cannot_poison_the_score():
+    """The mask this refactor dropped, and why its absence is dangerous.
+
+    A level given zero weight is one the caller deliberately excluded. Zero
+    times a non-finite residual is still non-finite, so without the mask one
+    such level makes the whole weighted sum non-finite -- and the gradient-safe
+    square root maps a non-finite argument to zero, so the score comes back as
+    a PERFECT fit rather than an error. A wrong answer that looks like success.
+    """
+    w = jnp.array([1.0, 0.0])
+    for bad in (jnp.nan, jnp.inf, -jnp.inf):
+        diff = jnp.array([1.0, bad])
+        assert weighted_rmse(diff, w) == pytest.approx(1.0), (
+            f"a zero-weight level carrying {bad} changed the score")
+    # and the same for the normalisation
+    profile = jnp.array([3.0, jnp.nan])
+    assert jnp.isfinite(weighted_std(profile, w))
+
+
+def test_the_excluded_level_mask_is_a_no_op_when_every_weight_is_positive():
+    w = jnp.array([0.25, 0.75])
+    diff = jnp.array([2.0, 1.0])
+    expected = float(jnp.sqrt(0.25 * 4.0 + 0.75 * 1.0))
+    assert weighted_rmse(diff, w) == pytest.approx(expected)

@@ -33,9 +33,15 @@ def safe_sqrt(x: Array) -> Array:
 
 
 def weighted_std(profile: Array, weights: Array) -> Array:
-    """Mass-weighted vertical standard deviation (weights should sum to 1)."""
+    """Mass-weighted vertical standard deviation (weights should sum to 1).
+
+    Zero-weight levels are masked out for the same reason as in
+    :func:`weighted_rmse`: an excluded level must not be able to make the
+    normalisation non-finite.
+    """
     profile = jnp.asarray(profile)
     weights = jnp.asarray(weights, dtype=profile.dtype)
+    profile = jnp.where(weights > 0, profile, jnp.zeros_like(profile))
     mean = jnp.sum(weights * profile)
     var = jnp.sum(weights * (profile - mean) ** 2)
     return safe_sqrt(var)
@@ -45,9 +51,18 @@ def weighted_rmse(diff: Array, weights: Array) -> Array:
     """Mass-weighted vertical RMSE of ``diff`` (weights should sum to 1).
 
     Uses :func:`safe_sqrt` so the gradient stays finite at a perfect fit.
+
+    A level whose weight is EXACTLY zero contributes exactly zero even if its
+    residual is not finite. Arithmetic says zero times NaN is NaN, so without
+    the mask one bad level inside a region the caller deliberately excluded --
+    the stratosphere above a tropospheric mask, everything above the sub-cloud
+    layer -- poisons the whole sum; and because the safe square root maps a
+    non-finite argument to zero, the score would come back as a PERFECT fit.
+    A no-op whenever every weight is positive, which is the common case.
     """
     diff = jnp.asarray(diff)
     weights = jnp.asarray(weights, dtype=diff.dtype)
+    diff = jnp.where(weights > 0, diff, jnp.zeros_like(diff))
     return safe_sqrt(jnp.sum(weights * diff ** 2))
 
 

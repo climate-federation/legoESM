@@ -207,3 +207,41 @@ def test_dt_and_t0_overrides_are_rejected(tmp_path):
     case = load_arm_sccm_case(mod._write_sccm_fixture(tmp_path / "f.nc"), nlev=16)
     with pytest.raises(ValueError, match="cannot be passed via create_overrides"):
         build_arm_comparables(case, _moist_cfg(), dt=200.0, t0_seconds=0.0)
+
+
+def test_the_first_observation_is_not_scored_against_a_later_model_state(tmp_path):
+    """The model's history used to begin one timestep after the window opens.
+
+    Its clock is the elapsed time at the END of a step, so the earliest state
+    it reported was already one step old, while the first observation sits at
+    the window's opening time. Linear interpolation clamps instead of
+    refusing, so that observation was compared against the model one timestep
+    later -- a penalty a perfect model could not avoid, and one that grows
+    with the timestep. The history now starts at the initial state, so the
+    comparison at the opening time is against the state the run started from.
+    """
+    import importlib.util
+
+    loader_test = (
+        Path(__file__).resolve().parents[2]
+        / "atmosphere/hydrostatic/unit/test_sccm_arm_loader.py"
+    )
+    spec = importlib.util.spec_from_file_location("_sccm_loader_test2", loader_test)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    from legoesm.atmosphere.forcing.scm.sccm_arm import load_arm_sccm_case
+
+    path = mod._write_sccm_fixture(tmp_path / "arm_fixture.nc")
+
+    # Two runs differing ONLY in the timestep. If the opening observation were
+    # still being clamped to the model's first advanced state, the comparable
+    # at that time would move with the timestep; anchored at the initial state
+    # it cannot.
+    case_short = load_arm_sccm_case(path, nlev=20, dt=100.0)
+    case_long = load_arm_sccm_case(path, nlev=20, dt=400.0)
+    short = build_arm_comparables(case_short, _moist_cfg(), save_every=1)
+    long = build_arm_comparables(case_long, _moist_cfg(), save_every=1)
+
+    assert short.time_seconds[0] == long.time_seconds[0]
+    np.testing.assert_allclose(short.theta[0], long.theta[0], rtol=1e-8, atol=1e-8)
+    np.testing.assert_allclose(short.u[0], long.u[0], rtol=1e-8, atol=1e-8)

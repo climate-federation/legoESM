@@ -593,8 +593,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
                 qr3=np.asarray(st.tracers[..., 2]),
-                surface_precip=np.asarray(sdm.surface_precip),
-                qv3=np.asarray(st.tracers[..., 0]))
+                surface_precip=np.asarray(sdm.surface_precip))
             frame += 1
             _last_rec_h[0] = t_hours
 
@@ -855,8 +854,7 @@ def main():
                 qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
-                qr3=np.asarray(st.tracers[..., 2]),
-                qv3=np.asarray(st.tracers[..., 0]))
+                qr3=np.asarray(st.tracers[..., 2]))
             frame += 1
             _last_rec_h[0] = t_hours
 

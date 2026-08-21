@@ -35,7 +35,8 @@ from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
     rewrap_tunable_subconfig,
     tunable_subconfig,
 )
-from legoesm.training.param_collector import apply_param_overrides, build_registry
+from legoesm.core.param_overrides import apply_param_overrides
+from legoesm.training.param_collector import build_registry
 
 
 # A tuned loss at/above this is the AD divergence penalty (scm_les_loss_jax returns a

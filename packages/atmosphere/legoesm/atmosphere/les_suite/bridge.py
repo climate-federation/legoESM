@@ -461,6 +461,11 @@ def artifact_to_scm_forcing(
     if artifact.prescribe == "T_s" and artifact.T_s is not None:
         kwargs["T_s"] = _interp_scalar_fn(artifact.times_s, artifact.T_s)
     if artifact.prescribe == "fluxes":
+        # Hand the flux to the closure, not to the lowest cell as a tendency:
+        # a nonlocal scheme scales its counter-gradient and mixed-layer
+        # velocity on the surface flux, and the default route leaves it at
+        # exactly zero. See SCMForcing.flux_to_closure.
+        kwargs["flux_to_closure"] = True
         if artifact.w_theta_s is not None:
             kwargs["w_th_s"] = _interp_scalar_fn(artifact.times_s, artifact.w_theta_s)
         if artifact.w_qv_s is not None:
