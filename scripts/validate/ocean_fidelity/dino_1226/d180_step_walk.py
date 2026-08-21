@@ -18,13 +18,24 @@ PHASES
 PHASE 0  NEMO side.  Verify the instrumented (SEQ-DUMP) binary reproduces the
          certified trajectory at day 180, so its dumps describe the twin's own
          run and not a perturbed one.
-PHASE 1  FREE-RUNNING walk.  Bridge NEMO's day-180 state into legoESM, take
-         ONE step, and compare legoESM's state after each stage against NEMO's
-         dump for that stage, in NEMO execution order.  Report the FIRST stage
-         over its class bar.
-PHASE 2  RE-SEEDED walk.  Seed each stage's INPUT with NEMO's own pre-stage
-         state, run only that stage, compare its output.  Produces the ranked
-         defect table, reconciled against fidelity_bar_gate.py's year-20 rows.
+PHASE 1  FREE-RUNNING walk.  Bridge NEMO's day-180 state into legoESM,
+         integrate, and compare the WHOLE committed state against NEMO's own
+         restart at each step.  This is a whole-step state replay, NOT a
+         per-stage walk: legoESM's step exposes no per-stage intermediate, so
+         there is nothing to compare stage by stage from inside it.
+PHASE 1b WHERE the one-step velocity difference lives (depth-mean vs shear,
+         and its vertical profile).
+PHASE 1c Whether the per-step ACC difference is of a size that could build the
+         90-day gap.  See the RETRACTION on phase1c: it is not, and the
+         measurement refutes its own premise.
+
+The PER-STAGE (re-seeded) walk is NOT in this module.  It is the ~25 existing
+#1226 per-operator probes re-pointed at the day-180 reference run through
+``dump_lane``; each one seeds its own operator with NEMO's own pre-stage input
+and compares that operator's output.  Run them with ``DINO_1226_LANE=d180``.
+Nothing here imports ``fidelity_bar_gate.CLASS_BAR`` -- the class bars are
+quoted below as the standard those probes are read against, and each probe
+prints its own numbers.
 
 PRE-REGISTERED PASS CRITERIA (written before the first run; do not soften)
 -------------------------------------------------------------------------
@@ -42,13 +53,15 @@ PHASE 0 PASS  ==  every spatial variable of the step-5764 restart agrees to
     A variable present on one side and absent on the other FAILS.
     A NaN anywhere FAILS.
 
-PHASE 1 PASS  ==  no stage exceeds its class bar (fidelity_bar_gate.CLASS_BAR:
-    POINTWISE <= 1e-15, ACCUMULATING <= 1e-12, CONDITIONED = mechanism proof).
-    A FAIL is the DELIVERABLE, not an error: the first failing stage is the
-    answer this instrument was built to produce.
+PHASE 1 PASS  ==  the committed state after each step matches NEMO's own
+    restart at that step to the class bars the #1226 sweep is read against
+    (fidelity_bar_gate: POINTWISE <= 1e-15, ACCUMULATING <= 1e-12, CONDITIONED
+    = mechanism proof only).  A FAIL is the DELIVERABLE, not an error.
+    MEASURED: FAIL by ~13 orders -- see the recorded results below.
 
-PHASE 2 PASS  ==  every re-seeded stage at its class bar.  Expected to FAIL;
-    the ranked table is the deliverable.
+PER-STAGE PASS  ==  every re-seeded operator at its class bar, measured by its
+    own probe on the d180 lane.  Expected to FAIL; the ranked table is the
+    deliverable.
 
 IRREDUCIBILITY RULE (user directive, non-negotiable)
 ----------------------------------------------------
@@ -63,6 +76,59 @@ Failing either test the divergence is DEBT (fixable class), full stop.  The
 ACC gap is 20x the ACC noise floor, so roundoff is quantitatively excluded as
 its owner; a mislabelled "essential" divergence is exactly the failure this
 rule exists to prevent.
+
+RETRACTIONS (2026-08-20, from the dual adversarial review, before the walk's
+numbers were carried anywhere)
+------------------------------------------------------------------------
+R1.  "the one-step divergence is 99% SHEAR" IS A PROPERTY OF A GRID THE
+     PRODUCTION TWIN DOES NOT RUN.  Phase 1b was first recorded with
+     LEGOESM_NEMO_E3T=both.  On the SHIPPED grid ("off") the depth-mean part
+     is far from negligible:
+
+       one step, day 180, wet faces      u rms      depth-mean   share
+       LEGOESM_NEMO_E3T=both           3.0895e-04   2.4382e-06   0.008
+       LEGOESM_NEMO_E3T=off (SHIPPED)  3.4395e-04   4.5876e-05   0.133
+       v, both                         9.1752e-05   8.4998e-06   0.093
+       v, off (SHIPPED)                1.2720e-04   5.5722e-05   0.438
+
+     So on the configuration whose ACC gap is being explained the barotropic
+     part is 19x larger and carries 13% of the u difference and 44% of the v
+     difference.  The surface concentration survives on both grids (top-level
+     rms 1.377e-3 vs 1.367e-3), the "99% shear" framing does not.
+
+R2.  PHASE 1c's PREMISE IS REFUTED BY ITS OWN DATA.  A 4-step ACC rate carries
+     no information about 960 steps here.  NEMO's ACC FALLS over the first 4
+     steps (-3.3e-3 Sv/step) and RISES monotonically over 90 days (+3.42 Sv
+     total), so the reference model's own short-window rate has the wrong sign
+     and ~3x the wrong magnitude.  Extrapolating the arms fails the same way:
+     the 90-day outcomes are +1.659 and -0.516 Sv where their 4-step rates
+     predict +4.8 and -204 Sv.  The per-step deltas also alternate in sign
+     (+1.28e-2, -3.5e-5, +7.2e-3, -3.8e-4), i.e. a leapfrog two-step mode
+     rather than a rate.  Phase 1c is retained as a measurement of the
+     first-step ACC increment; ANY statement of the form "this rate is of the
+     right size to build the 90-day gap" is withdrawn.
+
+R3.  THE STEP-COMPOSITION REFUTATION IS NOT EVIDENCE.  See the note at the
+     ablation itself: it moves two fields, and _nemo_mlf_step is documented as
+     identical to _leapfrog_step except in how the dissipation pass is
+     composed, so the comparison is legoESM against legoESM and says nothing
+     about whether either matches NEMO's composition.  The surface-stress
+     refutation (i) survives as a verdict, but its "50x worse in the depth
+     mean" figure was also measured on the non-production grid; on the shipped
+     grid the depth-mean degradation is 2.9x, not 50x, and the overall u rms
+     gets slightly BETTER, not slightly worse.
+
+R4.  CLASS-BAR LANGUAGE IN THE SWEEP SUMMARY WAS TOO SOFT.  Describing the
+     isoneutral-slope residual as "grow about 10x (still 1e-10)" and the
+     hydrostatic v-component as a small mover understates them: 1e-10 is 100x
+     the ACCUMULATING bar and 2e-5 is ten orders over the POINTWISE bar.
+     Neither was given the operand-identity + growth-nullity proof the
+     irreducibility rule requires, so neither may be called at-bar.
+
+R5.  THE off-ARM NON-REPRODUCTION IS BROADER THAN "0.21 Sv OF ACC".  This
+     tree's shipped-grid arm scores PASS 2 / FAIL 3, where the recorded
+     baseline scores PASS 4 / FAIL 1 at the same 5x level.  Density metrics
+     moved too, so whatever differs is not ACC-only.
 
 RECORDED RESULT (2026-08-20) -- the vertical-ladder arms
 --------------------------------------------------------
@@ -246,6 +312,21 @@ def provenance() -> None:
         print(f"PROVENANCE: {tag}={d} oracle_HEAD={sha}")
 
 
+def _require_clean(proc, arm: str) -> None:
+    """A non-zero exit is FATAL even if the run already printed results.
+
+    Without this a subprocess that emits its JSON and then dies -- on a
+    teardown assertion, an OOM, a late guard -- reports clean numbers, which
+    is the failure mode the campaign's own tool-status rule exists to stop.
+    """
+    if proc.returncode != 0:
+        print(proc.stdout[-2000:])
+        print(proc.stderr[-4000:])
+        raise SystemExit(
+            f"arm {arm!r} exited {proc.returncode}: refusing to report its "
+            "numbers (see the tail above)")
+
+
 def _fatal_if_nan(a: np.ndarray, what: str) -> np.ndarray:
     if not np.isfinite(a).all():
         raise SystemExit(f"NaN/Inf in {what} -- fatal (see module docstring)")
@@ -343,6 +424,7 @@ def _run_arm(arm: str, n_steps: int) -> dict:
         "for k, v in d.items()}))" % (_THIS_DIR, n_steps))
     out = subprocess.run([sys.executable, "-c", code], env=env,
                          capture_output=True, text=True)
+    _require_clean(out, arm)
     tail = out.stdout.strip().splitlines()
     for line in tail:
         if not line.startswith("@@JSON@@"):
@@ -406,9 +488,12 @@ def phase1b(arm: str = "d180", *, stress_implicit: bool | None = None) -> int:
       * surface-spike         -> the wind entry;
       * bottom-spike          -> the drag.
 
-    The split is exact by construction (u = ubar + u'), both sides use the
-    SAME thickness field (NEMO's, from its own restart ssh) so the weighting
-    cannot differ, and the reduction is stated next to every number.
+    The split is exact by construction (u = ubar + u').  Both sides are
+    weighted by the SAME thickness array -- legoESM's own ``H_bathy``/
+    ``z_coord`` evaluated at NEMO's restart ssh, NOT NEMO's own e3t -- so the
+    weighting cannot differ BETWEEN the two sides, which is all the split
+    needs; it is not NEMO's thickness field, and the earlier wording saying so
+    was wrong.  The reduction is stated next to every number.
     """
     ic, run_dir = _ARMS[arm]
     env = dict(os.environ)
@@ -441,11 +526,20 @@ if _si is not None:
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 _oi = os.environ.get('DINO_OUTER_INTEGRATOR', '')
 if _oi:
-    # PRE-REGISTERED ONE-VARIABLE A/B on the STEP COMPOSITION: the DINO card
-    # runs the two-pass leapfrog (a full pipeline pass at Nnn, then a second
-    # dissipation-only pass at Nbb); 'nemo_mlf' is the single-pass stpmlf
-    # transcription NEMO itself runs.  nemo_mlf hard-requires the NEMO
-    # e3w(Kmm) divisor at construction, so force it with the switch.
+    # STEP-COMPOSITION ablation.  NOT one variable, and NOT a test of
+    # legoESM-vs-NEMO step composition -- both corrections are from the
+    # 2026-08-20 adversarial review and are recorded here so the next reader
+    # does not repeat the error:
+    #   (a) TWO fields move.  outer_integrator='nemo_mlf' HARD-REQUIRES
+    #       implicit_vmix_e3t_now_divisor=True at construction, and the DINO
+    #       card never sets that field (model default False), so the arm
+    #       carries a divisor change as well.  Attributing any difference to
+    #       the composition alone needs a third arm: leapfrog + divisor=True.
+    #   (b) _nemo_mlf_step's own docstring says it is IDENTICAL to
+    #       _leapfrog_step except for how the dissipation pass is composed,
+    #       and its verification rung is a bit-comparison against it.  Two
+    #       legoESM implementations of the same composition agreeing tells us
+    #       nothing about whether that composition matches NEMO's.
     if _oi not in ('leapfrog', 'nemo_mlf'):
         raise SystemExit('Unknown DINO_OUTER_INTEGRATOR=' + repr(_oi))
     mc = mc._replace(outer_integrator=_oi,
@@ -505,6 +599,7 @@ print('@@JSON@@' + json.dumps(out))
 """ % (_THIS_DIR,)
     proc = subprocess.run([sys.executable, "-c", code], env=env,
                           capture_output=True, text=True)
+    _require_clean(proc, arm)
     hit = [l for l in proc.stdout.splitlines() if l.startswith("@@JSON@@")]
     for l in proc.stdout.splitlines():
         if not l.startswith("@@JSON@@"):
@@ -588,8 +683,12 @@ def lego_u(state):
 
 rows = []
 u0 = lego_u(st)
+# Day-0 row: BOTH sides are the same array, so its gap is 0.0 BY
+# CONSTRUCTION and proves nothing.  It is printed only as the common
+# starting value.  The real day-0 gate is verify_day0_matches_restart
+# inside build_replay_ic, which is what asserts the bridge equals NEMO.
 rows.append(dict(kt=m.IC_STEP, acc_lego=A.acc_full(u0, umask),
-                 acc_nemo=A.acc_full(u0, umask)))   # day-0 gate: identical input
+                 acc_nemo=float("nan")))
 for k in range(1, N_STEPS + 1):
     kt = m.IC_STEP + k
     ext = None
@@ -622,6 +721,7 @@ print('@@JSON@@' + json.dumps(dict(rows=rows, per_level=lev)))
         "N_STEPS", str(n_steps))
     proc = subprocess.run([sys.executable, "-c", code], env=env,
                           capture_output=True, text=True)
+    _require_clean(proc, arm)
     hit = [l for l in proc.stdout.splitlines() if l.startswith("@@JSON@@")]
     for l in proc.stdout.splitlines():
         if not l.startswith("@@JSON@@") and "provenance" not in l:
@@ -637,6 +737,10 @@ print('@@JSON@@' + json.dumps(dict(rows=rows, per_level=lev)))
           "gap step-to-step")
     prev = None
     for r in res["rows"]:
+        if not np.isfinite(r["acc_nemo"]):
+            print(f"  {r['kt']:7d}{r['acc_lego']:16.6f}"
+                  f"{'(same array)':>15}{'':>16}   <- start, not a gate")
+            continue
         gap = r["acc_lego"] - r["acc_nemo"]
         d = "" if prev is None else f"{gap - prev:+16.6e}"
         print(f"  {r['kt']:7d}{r['acc_lego']:16.6f}{r['acc_nemo']:15.6f}"
