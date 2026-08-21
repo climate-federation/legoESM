@@ -116,6 +116,24 @@ that drops a cell when either side is sentinel drops all of them.  This
 arm writes the oracle's value at those cells, for those four families
 ONLY, and re-runs the same gate.
 
+THIS ARM DOES NOT RUN, AND THE REASON IS THE RESULT. Both reviewers
+returned a BLOCKER and the decisive one is an index-bounds argument that
+costs no compute: all 108 cells sit in the OUTERMOST staggered row or
+column, and at this deck's damping order the stencils reach one ring
+short of them. So the disagreement these four arrays carry is real and
+is at cells nothing dereferences. The gate below refuses on that, rather
+than spending a gate arm to obtain an "unchanged" that was already
+determined. A second, independent argument agrees: 2.5e-06 absolute on
+coefficients of ~1e8 is 2.5e-14 relative, which propagates to ~5e-18 m/s
+of w -- eleven orders below the 1.3e-07 under investigation. Only
+catastrophic cancellation could rescue it, and nobody has shown that
+regime exists here.
+
+The pre-registration is kept below because it is what the arm WOULD have
+tested, and because the "confirms" branch is itself unreachable (see the
+caveat under it) -- a fact worth keeping next to the arm rather than
+rediscovering.
+
 PRE-REGISTERED READING, against the stated baseline (step_worst_rel
 6.611558e-04; |d|max on w 1.3003e-07 m/s):
   * CONFIRMS these coefficients are the seat: w becomes bitwise
@@ -123,11 +141,20 @@ PRE-REGISTERED READING, against the stated baseline (step_worst_rel
     confirmation -- the coefficients start only ~1e-14 apart in
     relative terms, so a partial improvement is consistent with them
     contributing without being the seat;
-  * REFUTES: step_worst_rel and the per-face |d|max on w unchanged to
-    the printed precision.  Then this disagreement provably cannot move
-    the 1.3e-07 m/s;
+  * REFUTES, at the instrument's resolution and NOT more strongly than
+    that: step_worst_rel and the per-face |d|max on w unchanged. The
+    summary rounds to six digits, so a null bounds the effect below that
+    resolution rather than proving it zero (codex MAJOR);
   * ESTABLISHES NEITHER: improved but not bitwise -- that is
     participation, not seat.
+
+CAVEAT ON THE "CONFIRMS" BRANCH, from review: it is unreachable anyway.
+The base transplant leaves ``area_c``/``rarea_c`` differing by 1e30 at
+one cell per face (the deliberately poisoned slot), and ``rarea_c`` is
+read; ``amat6``, the ext-vector bases and ``ak``/``bk`` are untransplanted
+by design. So bitwise ``w`` cannot be reached by any arm here, and this
+instrument could only ever have refuted. An arm whose confirming branch
+cannot fire should say so.
 
 NOT covered by this arm: any family outside the four; cells where the
 oracle side is non-finite (the arm refuses rather than partially write);
@@ -656,6 +683,14 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
 # family's effect can be read out of the gate.
 DAMPING_FAMILIES = frozenset(("del6_u", "del6_v", "divg_u", "divg_v"))
 
+#: The deck's resolved damping order. dyn_core.F90:757 derives
+#: ``nord_v(k) = min(2, flagstruct%nord)`` and the duo stepper passes
+#: that through (fv3_native_duo_stepper.py:678); ``nord_w`` stays at its
+#: 0 default (fv3_native_d_sw.py:2758). The damping stencils read
+#: ``is-nord .. ie+nord+1``, so this sets how far into the halo any of
+#: these four arrays is ever dereferenced.
+_NORD_DECK = 2
+
 
 def transplant_sentinel_damping(ctx) -> None:
     """Oracle values at the cells every other arm is blind to."""
@@ -670,7 +705,7 @@ def transplant_sentinel_damping(ctx) -> None:
         raise SystemExit(f"REFUSING: face-map coordinate floor "
                          f"{floor:.3e} > 1e-12")
 
-    total_corner, total_written = 0, 0
+    total_corner, total_written, total_read = 0, 0, 0
     missing = []
     for fam in sorted(DAMPING_FAMILIES):
         _tag, key, ish, jsh = FAMILIES[fam]
@@ -699,10 +734,20 @@ def transplant_sentinel_damping(ctx) -> None:
                     f"non-finite values; there is nothing to transplant "
                     f"at those cells and a partial write would be "
                     f"reported as coverage")
-            # BOTH sides sentinel, spelled out. ``sentinel_mask`` is an
-            # EITHER-side mask; using it here would silently also write
-            # oracle-only-sentinel cells, which is a different set from
-            # the one the comparison measured.
+            # BOTH sides sentinel, spelled out.
+            #
+            # THE MOTIVATING COMPARISON USED THE EITHER-SIDE SET, so
+            # these are formally different populations and the "108 per
+            # face" it reported is a union count (codex BLOCKER). They
+            # coincide for these four families, and here is why, since
+            # the code cannot show it: the widen arm measured ZERO cells
+            # that are port-sentinel and oracle-real, so port-sentinel is
+            # a subset of oracle-sentinel; and the largest disagreement
+            # over the union is 7.0e-06, far too small for one side to
+            # sit at ~1e8 while the other is O(1). Hence union equals
+            # intersection here. That reasoning does NOT generalise to
+            # another family, so do not copy this mask elsewhere without
+            # redoing it.
             write_o = (_sent_mask_single(o2, fam)
                        & _sent_mask_single(p2o, fam))
             if not write_o.any():
@@ -719,6 +764,13 @@ def transplant_sentinel_damping(ctx) -> None:
             n_write = int(write_o.sum())
             corner_o = op_scalar(corner.astype(np.float64), op) > 0.5
             n_corner = int((write_o & corner_o).sum())
+            # The window every consumer of these arrays actually reads,
+            # in ORACLE index space (the same space write_o lives in).
+            lo, hi = NG - _NORD_DECK, NG + N + _NORD_DECK
+            read = np.zeros_like(write_o)
+            read[max(lo, 0):hi + 1, max(lo, 0):hi + 1] = True
+            n_read = int((write_o & read).sum())
+            total_read += n_read
 
             write_p = _map_to_port(write_o.astype(np.float64), op) > 0.5
             gs6[pf][key] = np.where(write_p, _map_to_port(o2, op), p_old)
@@ -741,16 +793,31 @@ def transplant_sentinel_damping(ctx) -> None:
             f"DAMPING CONTROL FAILED: families absent from the port "
             f"gridstruct, so this arm would be partial: {missing}")
     print(f"DAMPING RECEIPT: wrote {total_written} cells, "
-          f"{total_corner} of them in corner regions")
-    # Keyed to the CORNER count, not the total -- the defect review
-    # caught in the widen arm, where a nonzero total from an unrelated
-    # place would have let a no-op pass.
-    if total_corner == 0:
+          f"{total_corner} of them in corner regions, {total_read} of "
+          f"them inside an operator's read window at nord={_NORD_DECK}")
+    # KEYED TO THE READ WINDOW, not the corner region. Being in a corner
+    # region is not enough: a cell that no operator ever dereferences
+    # cannot move the answer, so an arm that writes only such cells
+    # returns "unchanged" by construction and that null means nothing.
+    #
+    # MEASURED, and it is why this arm does not run: all 108 cells sit
+    # in the OUTERMOST staggered row/column (j in {0, 54} for the
+    # u-families, i in {0, 54} for the v-families, on the 54x55 / 55x54
+    # planes). The damping reads del6_u/del6_v over
+    # ``is-nord .. ie+nord+1`` and divg_u/divg_v over a window one
+    # narrower, and the resolved deck is nord = nord_v = 2 with
+    # nord_w = 0 (fv3_native_d_sw.py:2758 default, and the duo stepper
+    # passes only nord_v/nord_t at :678). That reaches indices 1..53.
+    # Index 0 and 54 would need nord >= 3, which nothing here uses.
+    if total_read == 0:
         raise SystemExit(
-            "DAMPING CONTROL FAILED: zero written cells in any corner "
-            "region. The error under test sits one cell in from the "
-            "panel corners; 'unchanged' from an arm that never wrote a "
-            "corner cell would be a refutation it has not earned.")
+            f"DAMPING CONTROL FAILED: none of the {total_written} written "
+            f"cells lies inside any operator's read window at this deck's "
+            f"nord={_NORD_DECK}. They are all in the outermost halo ring, "
+            f"which the damping stencil reaches only at nord >= 3. This "
+            f"arm would return 'unchanged' by construction, and that null "
+            f"would be worth nothing -- the index bounds already answer "
+            f"it, at no compute. REFUSING.")
 
 
 # ---------------------------------------------------------------------
