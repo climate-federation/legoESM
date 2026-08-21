@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -46,7 +47,9 @@ from compare_gs_metrics import (        # noqa: E402
 )
 
 N, NG = 48, 3
-EXTCHAIN = "/burg-archive/glab/users/pg2328/fv3_duo_gaps/retro_gsmetrics/run_c48"
+# load_oracle builds paths with ``/``, so this must be a Path, not a str.
+EXTCHAIN = Path(
+    "/burg-archive/glab/users/pg2328/fv3_duo_gaps/retro_gsmetrics/run_c48")
 
 
 def _sent(a, fam):
