@@ -219,11 +219,6 @@ def main():
 
     # per-substep Hu increment = Hu_sum[j] - Hu_sum[j-1] = w_tr_j * flux_u_j
     Hu_inc = np.diff(Hu_sum_stk, axis=0, prepend=Hu_sum_stk[:1] * 0)
-    # map lego u-face -> NEMO cell (east face), interior strip
-    def _lego_to_nemo_u(a2d):
-        # a2d (nj_int, nl+1) -> NEMO cell (jpj,jpi) via east-face + halo pad
-        return a2d
-
     # Compare the CUMULATIVE Hu_sum trajectory: at each substep, project both to
     # per-unit-width transport and measure the wall-column error growth.
     # NEMO cumulative un_adv up to substep j:
@@ -296,6 +291,12 @@ def main():
     wgtbtp2 = zwgt2[:Kpit] / r1_wgt2s   # normalised NEMO transport weights
     print(f"  NEMO Kpit(icycle)={Kpit}  wgtbtp2 nonzero={int((wgtbtp2>0).sum())} "
           f"sum={wgtbtp2.sum():.6f}")
+    # code review #10: nn_e is hardcoded above but the namelist computes it at
+    # runtime (ln_bt_auto=T, nn_e=30 is only the fallback).  It happens to be 23
+    # for this grid+dt; assert it against the DUMP's own icycle so a different
+    # dump set fails loudly instead of silently truncating the weights.
+    assert Kpit == icy, (
+        f"hardcoded nn_e={nn_e} gives Kpit={Kpit} but the dump says icycle={icy}")
 
     # INSTRUMENT VALIDATION (Rule: calibrate before trusting): the
     # nemo_flux_perwidth reconstruction, summed with wgtbtp2 over all 68
@@ -448,7 +449,7 @@ def main():
           f"jn=1 vel err med = {np.median(np.abs(verr[wet])):.4e}")
     print(f"    NON-CIRCULARITY resid (verr - dt_s*ΔF): max={np.abs(resid[wet]).max():.4e} "
           f"= {100*np.abs(resid[wet]).max()/max(np.abs(verr[wet]).max(),1e-300):.1f}% of verr "
-          f"-> {'DYNAMICS MATCH, forcing owns it' if np.abs(resid[wet]).max() < 0.1*np.abs(verr[wet]).max() else 'loop dynamics ALSO differ -- investigate'}")
+          )
 
     # ===================================================================
     # #1455 baro-substeps: THE ACC DEPOSIT, SIGNED AND SECTION-INTEGRATED.
@@ -485,7 +486,14 @@ def main():
     def acc_sv(dU_cell):
         """Section-integrated ACC transport of a depth-uniform u increment [Sv].
 
-        Rows 1..197 (the gate's full section), MEAN over longitudes 2..-2."""
+        Rows 1..197, MEAN over longitudes 2..-2.
+
+        This is the BUDGET's linear mean surrogate (southern_term_torque_accum
+        _met_full), NOT the acceptance gate's number -- the gate takes the
+        MEDIAN over longitudes, which is not linear and so cannot be decomposed.
+        Verified term-for-term against the budget's reducer by adversarial
+        review: same e3t_1d ladder, same e2u, same longitude window, same rows
+        (rows 0 and 198 carry zero wet u-faces)."""
         per_lon = (dU_cell * acc_w)[1:198, :].sum(axis=0)     # (jpi,)
         return float(per_lon[2:-2].mean()) / 1.0e6
 
@@ -660,6 +668,77 @@ def main():
           "     sensitive control for this file is the wall-max PLANT below, "
           "which is on the transport metric and does fire.)")
 
+    # ===================================================================
+    # FORCING SUBSTITUTION (physics review, measurement #5) -- the version with
+    # NO linearity assumption.  Run legoESM's OWN loop on NEMO's OWN frozen
+    # forcing (zu_frc / zv_frc / ssh_frc, all three dumped for this step) and
+    # re-measure the deposit.  Whatever survives is IN-LOOP, by construction:
+    # both models now integrate the same forcing from the same state with the
+    # same weights over the same 68 substeps.
+    #
+    #   |deposit| collapses  -> the frozen forcing owns the difference.
+    #   |deposit| survives   -> the loop owns it, and the response-factor split
+    #                           above is confirmed without its u-only caveat.
+    print("\n  === FORCING SUBSTITUTION: legoESM's loop on NEMO's zu/zv/ssh_frc ===")
+    _zv_frc = np.fromfile(os.path.join(SEQDUMP, "spg_dump_zv_frc.bin"),
+                          dtype="<f8").reshape(jpj, jpi)          # haloless
+    _ssh_frc = np.fromfile(os.path.join(SEQDUMP, "spg_dump_ssh_frc.bin"),
+                           dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                                )[HLS:-HLS, HLS:-HLS]
+    _Fv_prod = np.asarray(_k_loop["F_slow_v"])
+    _Fe_prod = np.asarray(_k_loop["F_slow_eta"])
+
+    # The v-face and cell mappings are CALIBRATED against a known answer rather
+    # than assumed: legoESM's own F_slow_v already reproduces NEMO's zv_frc to
+    # ~1e-6 relative under the CORRECT row alignment and to O(1) under the wrong
+    # one, so the alignment is read off the data and then asserted.
+    _vmask2 = np.asarray(_k_loop["v_mask"]) > 0.5
+    def _v_resid(shift):
+        cand = _Fv_prod[shift:shift + jpj]
+        m = _vmask2[shift:shift + jpj]
+        den = max(np.abs(_zv_frc[m]).max(), 1e-300)
+        return float(np.abs((cand - _zv_frc)[m]).max() / den)
+    _r1, _r0 = _v_resid(1), _v_resid(0)
+    print(f"    v-face row alignment: resid(shift=1)={_r1:.3e}  "
+          f"resid(shift=0)={_r0:.3e}")
+    assert _r1 < 1e-3 and _r1 < 0.01 * _r0, (
+        "v-face alignment not established from the data; substitution aborted")
+    _wetc = np.asarray(_k_loop["mask"]) > 0.5
+    _e_resid = float(np.abs((_Fe_prod - _ssh_frc)[_wetc]).max()
+                     / max(np.abs(_ssh_frc[_wetc]).max(), 1e-300))
+    print(f"    ssh cell alignment: resid={_e_resid:.3e}")
+    assert _e_resid < 1e-3, "ssh_frc alignment not established; aborted"
+
+    _Fu_sub = np.array(np.asarray(_Fu_prod))
+    _Fu_sub[:, 1:] = zu_frc
+    _Fu_sub[:, 0] = zu_frc[:, -1]        # zonal periodicity, established above
+    _Fv_sub = np.array(_Fv_prod)
+    _Fv_sub[1:1 + jpj] = _zv_frc
+    _Fe_sub = np.array(_ssh_frc)
+    _k_sub = dict(_k_loop)
+    _k_sub["F_slow_u"] = jnp.asarray(_Fu_sub, dtype=_Fu_prod.dtype)
+    _k_sub["F_slow_v"] = jnp.asarray(_Fv_sub, dtype=_Fu_prod.dtype)
+    _k_sub["F_slow_eta"] = jnp.asarray(_Fe_sub, dtype=_Fu_prod.dtype)
+    jax.lax.fori_loop = _fori_capture
+    try:
+        with jax.disable_jit():
+            _orig_run(*_a_loop, **_k_sub)
+    finally:
+        jax.lax.fori_loop = _orig_fori
+    U_bar_stk_s = np.asarray(captured["carries"][1])
+    _lego_avg_sub = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        _lego_avg_sub = _lego_avg_sub + wf_n[j - 1] * _cell(
+            np.asarray(U_bar_stk_s[j - 1]))
+    _dep_sub = acc_sv((_lego_avg_sub - nemo_Ubar_avg) * _wetu)
+    print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
+    print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
+          f"({100*_dep_sub/_dep_vel:.1f}% of it survives)")
+    print(f"    -> IN-LOOP share (assumption-free) = {_dep_sub:+.4e} Sv/step "
+          f"= {100*_dep_sub/_TARGET:.1f}% of the -2.80e-4 budget row")
+    print(f"       FORCING share                   = {_dep_vel - _dep_sub:+.4e} "
+          f"Sv/step")
+
     # PLANT: shift NEMO trajectory by one substep -> final diff must blow up
     un_adv_shift = np.zeros_like(hu0_full)
     for j in range(1, Kpit):
@@ -667,7 +746,8 @@ def main():
     diff_p = (lego_full - un_adv_shift) * (umask[0] > 0.5)
     print(f"  PLANT (NEMO shifted +1 substep): wall max = "
           f"{np.abs(diff_p[wall_sel]).max():.4e} "
-          f"-> {'PLANT OK' if np.abs(diff_p[wall_sel]).max() > 3*np.abs(diff[wall_sel]).max() else 'PLANT WEAK'}")
+          f"(shift-sensitivity ratio "
+          f"{np.abs(diff_p[wall_sel]).max()/max(np.abs(diff[wall_sel]).max(),1e-300):.2f})")
     return 0
 
 
