@@ -741,6 +741,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # RETURNED at the top of this function, not a re-read of the environment
         # -- provenance must not come from mutable process state.
         nemo_ladder_mode=np.str_(ladder_mode),
+        # #1455 512517fdc: stamp the precision the arm was built at.
+        control_dtype=np.str_(str(_policy_control_dtype())),
     )
     for d in snap_days:
         if d in t3d:
@@ -887,9 +889,36 @@ def provenance_gate() -> None:
                 "to run anyway with the dirt list stamped in the log.")
 
 
+def _policy_control_dtype():
+    from legoesm.core.precision import get_policy
+    return get_policy().control
+
+
+def _precision_gate() -> None:
+    """Force the fp64 policy and stamp it, so no twin ever runs fp32 silently.
+
+    Added after the 0.213 Sv "baseline discrepancy" (#1455, 512517fdc): the
+    walk's arms ran without the run_fp64.py wrapper, silently building the
+    whole oracle comparison at the fp32 default; re-run under fp64 they are
+    bit-identical to the recorded baseline. JAX_ENABLE_X64 alone does NOT do
+    this (skill Rule 1c) -- the policy control dtype is what matters. An
+    oracle twin at fp32 measures its own rounding, so the harness now sets
+    the policy itself; FP64=0 is the loud escape for a deliberate fp32 arm.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    if os.environ.get("FP64", "1") == "1":
+        set_policy(PrecisionPolicy.fp64())
+    ctl = _policy_control_dtype()
+    print(f"PRECISION: policy control dtype = {ctl}")
+    if os.environ.get("FP64", "1") == "1" and "float64" not in str(ctl):
+        raise SystemExit("fp64 policy did not take (control dtype "
+                         f"{ctl}) -- refusing to run an fp32 oracle twin.")
+
+
 def main(argv=None):
     args = _parse_args(argv)
     provenance_gate()
+    _precision_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return
