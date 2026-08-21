@@ -760,27 +760,32 @@ def compute_fv3_native_wind_vectors(grid_lon: np.ndarray,
     vlon, vlat = _get_latlon_vector(
         np.stack([agrid_lon, agrid_lat], axis=-1))
 
-    grid3 = _latlon2xyz(np.stack([grid_lon, grid_lat], axis=-1))
+    grid_ll = np.stack([grid_lon, grid_lat], axis=-1)
 
-    # es(:, i, j, 1), :311-313.  pp is the midpoint of the SOUTH edge of
-    # cell (i, j) -- i.e. the point where the D-grid u lives -- and the
-    # tangent is the edge's own great circle, so agrid never enters.
-    # Fortran: j = jsd+1 .. jed, i = isd .. ied -- so the FIRST row
-    # (jsd) and the LAST row (jed+1) of the allocation are never written,
-    # even though both are inside it.
+    # es(:, i, j, 1) at :311-313 is
+    #     pp = mid_pt_cart(grid(i,j), grid(i+1,j))
+    #     p3 = grid3(i,j) x grid3(i+1,j)
+    #     es = normalize(p3 x pp)
+    # and get_unit_vect2(e1, e2) (:1848-1863, already ported here) is
+    #     pc = mid_pt3(p1, p2);  p3 = p2 x p1;  uc = normalize(pc x p3)
+    # with pc == pp.  Since pc x (p2 x p1) = (p1 x p2) x pc term by term,
+    # the two are the SAME expression -- so this reuses the certified
+    # primitive instead of transcribing the formula a second time.
+    # Neither ``agrid`` nor the panel-edge branches enter: on a bounded
+    # domain the edge tangent is the edge's own great circle.
+    #
+    # Fortran: j = jsd+1 .. jed, i = isd .. ied -- so the FIRST row (jsd)
+    # and the LAST row (jed+1) are never written, even though both are
+    # inside the allocation.
     es1 = np.full((m, m + 1, 3), np.nan, dtype=np.float64)
-    pp_s = _mid_pt3(grid3[:-1, :, :], grid3[1:, :, :])          # (m, m+1, 3)
-    t_s = _vect_cross(grid3[:-1, :, :], grid3[1:, :, :])        # (m, m+1, 3)
-    es1[:, 1:-1, :] = _normalize_vect(
-        _vect_cross(t_s[:, 1:-1, :], pp_s[:, 1:-1, :]))
+    es1[:, 1:-1, :] = _get_unit_vect2(grid_ll[:-1, 1:-1, :],
+                                      grid_ll[1:, 1:-1, :])
 
     # ew(:, i, j, 2), :283-285.  Same construction on the WEST edge, where
     # the D-grid v lives.  Fortran: j = jsd .. jed, i = isd+1 .. ied, so
     # the LAST column (ied+1) is unwritten too.
     ew2 = np.full((m + 1, m, 3), np.nan, dtype=np.float64)
-    pp_w = _mid_pt3(grid3[:, :-1, :], grid3[:, 1:, :])          # (m+1, m, 3)
-    t_w = _vect_cross(grid3[:, :-1, :], grid3[:, 1:, :])        # (m+1, m, 3)
-    ew2[1:-1, :, :] = _normalize_vect(
-        _vect_cross(t_w[1:-1, :, :], pp_w[1:-1, :, :]))
+    ew2[1:-1, :, :] = _get_unit_vect2(grid_ll[1:-1, :-1, :],
+                                      grid_ll[1:-1, 1:, :])
 
     return {"vlon": vlon, "vlat": vlat, "es1": es1, "ew2": ew2}
