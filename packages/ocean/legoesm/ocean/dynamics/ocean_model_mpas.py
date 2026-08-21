@@ -17,7 +17,7 @@ from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.constants_config import ConstantsConfig
-from legoesm.ocean.state import constants_equal
+from legoesm.ocean.state import physics_with_constants
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -161,30 +161,36 @@ class MPASOceanModel:
 
         # ONE MODEL, ONE SET OF CONSTANTS. This configuration carries its own
         # gravity and reference density, and its physics pipeline carries a
-        # second set. Nothing reconciled them here, so a card pinning the
-        # model's gravity left every mixing and convection path on the
-        # library's -- the two halves of one model on different planets, and
-        # silently. The lat-lon model has refused that since it was found
-        # there; this is the same check, calling the same helper, so there is
-        # one rule rather than two.
+        # second set. Nothing reconciled them, so a card pinning the model's
+        # gravity left every mixing and convection path on the library's --
+        # the two halves of one model on different planets, and silently.
         #
-        # PROVABLY different only: a traced constant is undecidable and must
-        # not raise here, which is why this asks for ``is False`` rather than
-        # using ``!=``.
+        # The lat-lon model has refused that since it was found there, and
+        # this delegates to the SAME routing helper rather than re-deriving
+        # the rule. That matters for the case a first version of this check
+        # got wrong: a physics pipeline still PROVABLY on the library
+        # defaults is not a pin, it is an absence, and it must INHERIT the
+        # model's values rather than be rejected as a conflict. Rejecting it
+        # broke a real card -- an unstructured configuration pinning its
+        # reference density beside an untouched physics block -- before its
+        # first step.
+        #
+        # Traced constants stay undecidable and are left alone; that is why
+        # the helper asks for a proven difference rather than using ``!=``.
+        _model_cc = ConstantsConfig(g=self.config.g, rho_0=self.config.rho_0)
         _phys = getattr(self.config, "physics", None)
-        _phys_cc = getattr(_phys, "constants", None) if _phys is not None else None
-        if _phys_cc is not None:
-            _model_cc = ConstantsConfig(g=self.config.g, rho_0=self.config.rho_0)
-            for _name in ("g", "rho_0"):
-                if constants_equal(getattr(_phys_cc, _name),
-                                   getattr(_model_cc, _name)) is False:
-                    raise ValueError(
-                        f"ocean physical constants disagree on {_name!r}: the "
-                        f"model configuration carries "
-                        f"{getattr(_model_cc, _name)} and its physics pipeline "
-                        f"{getattr(_phys_cc, _name)}. One model has one set of "
-                        f"physical constants; pin them once and let them "
-                        f"propagate.")
+        if _phys is not None:
+            _routed = physics_with_constants(_phys, _model_cc)
+            if _routed is not _phys:
+                self.config = self.config._replace(physics=_routed)
+            # The pipeline's own pair is authoritative once routed: it carries
+            # every constant, including the ones the model configuration has
+            # no field for, so rebuilding a pair from gravity and density
+            # alone would drop a pinned specific heat.
+            _cc = getattr(self.config.physics, "constants", None)
+            self._constants_config = _cc if _cc is not None else _model_cc
+        else:
+            self._constants_config = _model_cc
 
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:
@@ -302,14 +308,6 @@ class MPASOceanModel:
         # Build KPP profile function for implicit vertical mixing path.
         # When implicit_vertical_mixing=True and KPP is enabled, we need
         # the raw K profiles (not tendencies) to feed the implicit solver.
-        # The MODEL's constants are the authoritative pair (the constructor
-        # refuses a physics pipeline that provably disagrees), so read them
-        # from there rather than from the pipeline: a card that pins the model
-        # and leaves the pipeline on defaults is the common case, and it must
-        # get its own values, not the library's.
-        self._constants_config = ConstantsConfig(
-            g=self.config.g, rho_0=self.config.rho_0)
-
         self._kpp_profiles_fn = None
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _vm_cfg = getattr(self.config.physics, "vertical_mixing", None)

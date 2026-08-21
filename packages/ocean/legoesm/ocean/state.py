@@ -102,7 +102,7 @@ def _reject_constant_conflicts(cc_explicit: ConstantsConfig,
         )
 
 
-def _physics_with_constants(physics, cc: ConstantsConfig):
+def physics_with_constants(physics, cc: ConstantsConfig):
     """Return ``physics`` carrying the model-level ``cc`` constants.
 
     ``OceanPhysicsConfig`` mirrors ``ConstantsConfig`` so the physics factories
@@ -139,6 +139,13 @@ def _physics_with_constants(physics, cc: ConstantsConfig):
             "propagate."
         )
     return physics                                  # already pinned to cc
+
+
+#: Historical private spelling. The routing rule is now needed by a second
+#: model as well, and this repository forbids importing a private symbol
+#: across modules, so the function is public; this alias keeps the
+#: white-box test that names the old spelling working.
+_physics_with_constants = physics_with_constants
 
 
 # ==============================================================================
@@ -2623,7 +2630,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         The physical constants are routed the same way: the flat
         ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs land in the
         single ``constants: ConstantsConfig`` storage, and the resolved set is
-        propagated into ``physics`` (see :func:`_physics_with_constants`).
+        propagated into ``physics`` (see :func:`physics_with_constants`).
         Passing BOTH a flat scalar and a ``constants=`` that disagrees with it
         raises -- that combination is the silent-divergence bug this routing
         removes, so it is never resolved by a precedence rule.
@@ -2664,7 +2671,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         if _cc_given:
             nested["constants"] = _cc_final
         if "physics" in flat:
-            flat["physics"] = _physics_with_constants(flat["physics"], _cc_final)
+            flat["physics"] = physics_with_constants(flat["physics"], _cc_final)
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
@@ -2774,7 +2781,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                 _cc_final, _cc_given = _pc, True
         if _cc_given:
             nested["constants"] = _cc_final
-        _phys_new = _physics_with_constants(_phys, _cc_final)
+        _phys_new = physics_with_constants(_phys, _cc_final)
         if _phys_new is not _phys:
             overrides["physics"] = _phys_new
         return self._replace(**nested, **overrides)

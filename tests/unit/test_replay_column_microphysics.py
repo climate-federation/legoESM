@@ -286,8 +286,14 @@ def test_issue1515_poisoned_nr_repaired_in_one_step():
     # from 3.6e14 to a ceiling of 520 -- a step four orders SMALLER than the
     # 3.4e7 spacing at 3.6e14 -- so the only reachable values at or below the
     # ceiling are exactly zero, and the round trip lands one place above it.
-    # What protects the physics there is not this bound but the size-parameter
-    # clip the fall-speed and evaporation kernels apply downstream.
+    # AND IT IS NOT ABSORBED DOWNSTREAM. An earlier version of this comment
+    # said the size-parameter clip protects it; that is false, and the routine
+    # says so ten lines above the repair: rain number is consumed UNCLIPPED by
+    # the number-linear kernels -- self-collection and freezing -- so a
+    # residue scales those rates directly. What is true, and is the reason one
+    # place is tolerable, is that it does not RATCHET: the limiter runs again
+    # next step against a number that is now eight orders smaller, and one
+    # representable step from there is a number below the ceiling.
     #
     # Anything ABOVE one place is a real overshoot and still fails: the ratchet
     # this replay exists to catch reached ten orders.

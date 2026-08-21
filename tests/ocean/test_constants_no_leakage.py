@@ -174,3 +174,38 @@ def test_a_pinned_call_does_not_read_the_library(column, fn, request):
         err_msg=(f"{fn.__name__} returns a different answer when the LIBRARY "
                  f"constants move, although the run pinned its own. Something "
                  f"inside it is still reading a module-level constant."))
+
+
+# ---------------------------------------------------------------------------
+# One model, one set of constants
+# ---------------------------------------------------------------------------
+def test_an_untouched_physics_block_inherits_the_models_constants():
+    """The case a first version of this check got wrong.
+
+    The unstructured model configuration carries its own gravity and reference
+    density, and its physics pipeline carries a second set. A pipeline still
+    provably on the library defaults is an ABSENCE, not a pin, and must
+    inherit the model's values. Rejecting it as a conflict broke a real card --
+    one pinning its reference density beside an untouched physics block --
+    before its first step.
+    """
+    from legoesm.ocean.mpas_config import MPASOceanConfig
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.state import physics_with_constants
+
+    cfg = MPASOceanConfig(g=9.80665, rho_0=1026.0, physics=OceanPhysicsConfig())
+    model_cc = ConstantsConfig(g=cfg.g, rho_0=cfg.rho_0)
+    routed = physics_with_constants(cfg.physics, model_cc)
+    assert routed.constants.g == cfg.g
+    assert routed.constants.rho_0 == cfg.rho_0
+
+
+def test_two_conflicting_pins_are_still_refused():
+    """The other half: a pipeline pinned to a DIFFERENT pair is a real
+    contradiction and must not be silently overwritten either way."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.state import physics_with_constants
+
+    pinned = OceanPhysicsConfig(constants=ConstantsConfig(g=9.0, rho_0=1000.0))
+    with pytest.raises(ValueError, match="conflicting ocean constants"):
+        physics_with_constants(pinned, ConstantsConfig(g=9.80665, rho_0=1026.0))
