@@ -49,6 +49,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.column_stepping import (
@@ -60,6 +61,7 @@ from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
+    min_tracer_slots,
 )
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
@@ -921,26 +923,79 @@ class SingleColumnModel:
             q_c_profile=q_c_profile,
             u=u, v=v, p_s=p_s, phis=phis, dtype=dtype,
         )
-        # Pre-allocate condensate/precip species that microphysics or
-        # convection may emit, so the first physics call sees a
-        # consistent tracer registry rather than relying on the
-        # auto-materialisation path in _apply_tendencies.
-        if state.tracers is not None and physics_config.microphysics.scheme != "none":
-            # q_g included unconditionally: the shared MicrophysicsOutput always carries a
-            # dq_g_dt channel, so _apply_tendencies auto-materialises q_g on the FIRST step
-            # regardless of microphysics_substeps. Pre-allocating it here (not only for the
-            # substeps>1 graupel path) keeps the tracer registry fixed from construction —
-            # required for a lax.scan free-run (scm_runner.scm_scan_final_state), whose carry
-            # pytree must not gain a key mid-loop. This does not add a tracer the run() path
-            # lacked; it only moves the materialisation to t=0.
-            extra_keys = ("q_c", "q_r", "q_i", "q_s", "q_g")
+        # Allocate the tracers the configured microphysics consumes, taking
+        # names, ORDER and units from the same registry the global model uses
+        # (`make_full_moisture_registry`) rather than a hand-written list.
+        #
+        # Why this matters beyond tidiness: the physics bridge substitutes
+        # ZEROS for any tracer the state does not carry, silently. The column
+        # used to carry the six water masses and nothing else, so a two-moment
+        # scheme ran with its rain- and ice-number variables pinned at zero
+        # every step. Measured on a fixed column, one field changed at a time:
+        # zero rain number switches graupel formation off outright
+        # (3.54e-7 -> exactly 0 kg/kg/s) and changes the rain tendency by 2.8x
+        # in an ice-free warm column. Rain mass with zero rain number is a
+        # degenerate state -- all the water in zero drops -- so what those runs
+        # measured was the scheme hitting its own guards. Every other lane
+        # (plane, MPAS, LES, the global driver) carries all nine tracers and
+        # raises when a state is too small; this brings the column to the same
+        # contract.
+        if physics_config.microphysics.scheme != "none":
+            scheme_name = physics_config.microphysics.scheme
+            registry = make_full_moisture_registry()
+            units = {t.name: t.units for t in registry.tracers}
+            mass_names = tuple(t.name for t in registry.tracers
+                               if t.units == "kg/kg")
+            # SIZE: the number species are per scheme (kessler needs none, the
+            # two-moment schemes need all three), but every MASS is allocated
+            # whenever microphysics is active. Sizing by min_tracer_slots alone
+            # would give kessler only q_v/q_c/q_r, and the bridge's tendency
+            # dict carries all six masses for every scheme, so q_i and q_s
+            # would reappear at step 1 -- the tracer-set growth this
+            # allocation exists to prevent, since a carry whose pytree changes
+            # between steps cannot go through lax.scan/lax.cond.
+            #
+            # The scheme's own sub-config is passed, not just its name: SDM
+            # needs two slots for condensation but EIGHT with
+            # column_do_coalescence, and the name alone cannot say which.
+            n_slots = max(
+                int(min_tracer_slots(
+                    scheme_name,
+                    getattr(physics_config.microphysics, scheme_name, None))),
+                len(mass_names),
+            )
+            wanted = registry.names[:n_slots]
+            template = state.tracers["q_v"].data          # (1, 1, 1, nlev)
             new_tracers = dict(state.tracers)
-            for k in extra_keys:
-                if k not in new_tracers:
-                    zeros = jnp.zeros_like(state.tracers["q_v"].data)
-                    new_tracers[k] = Field(
-                        data=zeros, name=k, dims=_DIMS_3D, units="kg/kg",
-                    )
+            for name in wanted:
+                if name in new_tracers:
+                    continue
+                # EVERY species starts empty, the numbers included.
+                #
+                # Zero is not a gap here, it is the documented signal for a
+                # SPECIFIED droplet concentration: the cloud optics read
+                # N_c <= 1 as "this scheme does not predict droplet number",
+                # substitute their own specified value, and reconstruct the
+                # IN-CLOUD condensate as q_c / cloud_fraction to pair a
+                # specified in-cloud number with in-cloud water. Seeding a
+                # large N_c instead would take the PROGNOSTIC branch, pairing
+                # that same in-cloud number with GRID-MEAN water: droplets too
+                # small by cf^(1/3), optical depth too large by cf^(-1/3), a
+                # spurious brightening that grows without bound as a layer
+                # breaks up -- worst exactly in the subsiding regimes that
+                # should be the dark end of the shortwave contrast.
+                #
+                # Rain and ice are likewise grown by the model, never
+                # prescribed, so zero mass with zero number is the consistent
+                # empty state. If a future case ever SUPPLIES initial rain or
+                # ice it must supply the matching number too: mass with zero
+                # number is degenerate -- all the water in no particles -- and
+                # the first step would either hit a guard or sediment the
+                # condensate out in one go.
+                new_tracers[name] = Field(
+                    data=jnp.zeros_like(template), name=name,
+                    dims=_DIMS_3D, units=units[name],
+                )
             state = state._replace(tracers=new_tracers)
         microphysics_fn = None
         if (

@@ -243,6 +243,48 @@ That the error.
 - No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
 - **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
 
+## COMPARING TWO CONFIGURATIONS = A SIDE-BY-SIDE TABLE, ALWAYS
+User directive 2026-08-21. Any time two runs / configs / templates / lanes are
+compared, give a table: one row per field that DIFFERS, one column per
+configuration, named in the header. Omit fields that agree — it is a diff, not
+an inventory. Prose comparisons hide the one line that matters; the land
+coupling week was lost to a surface-scheme mismatch a five-row table exposes at
+a glance. This is also the required answer to "why did A work and B not".
+If the table has more than one row, no single output difference is attributable
+yet — say so.
+
+## ACCURACY FIRST — A CLAIM THAT DRIVES A CODE CHANGE GETS REVIEWED BEFORE THE CODE
+User directive 2026-08-21, after a week was spent coupling the WRONG land model
+and then chasing two wrong causes in a row: *"we focus now on accuracy and we
+must check with adversarial reviews our claims, especially when they imply
+coding decisions."*
+
+The existing dual-review rule covers DIFFS. This one covers the CLAIM that
+justifies the diff, and it comes FIRST:
+
+- **State the claim, then get it reviewed, THEN write code.** If a sentence of
+  the form "X causes Y, so I will change Z" is about to become an edit, it goes
+  to codex and GLM as a claim, before the edit exists. Both. A claim reviewed
+  only after the code is written is a claim defended, not tested.
+- **Say which parts are MEASURED and which are READ OFF THE CODE.** A scaling
+  argument, a mechanism, a "this is the only consumer" — each is a separate
+  claim with its own evidence.
+- **Quote the number's PROVENANCE next to it.** "62 K leaf temperature" from a
+  synthetic sweep that deliberately includes unreachable forcings is not the
+  same statement as 62 K in a run. Report the reachable-subset number and the
+  full-box number separately, and say which is which. A frightening number with
+  no provenance wastes the reader's attention and can send the work sideways.
+- **A number a well-posed scheme could never produce is a BUG IN THE
+  INSTRUMENT until proven otherwise.** Check the probe before reporting the
+  physics.
+- **When a working configuration exists, diff against it FIRST.** See
+  [[reuse-the-working-path-dont-rebuild]]: the offline land driver was healthy
+  the whole time; the coupled lane simply called a different parameter provider.
+  The first question on any coupling defect is "what does the working lane do
+  differently", not "what could be wrong with the physics".
+- **Reviewer disagreement is the signal to MEASURE, not to average.** Name the
+  discriminating check and run it; it is usually a grep.
+
 ## Epistemic rules (non-negotiable)
 
 ### Never infer an API — read it

@@ -45,11 +45,26 @@ def test_scheme_list_matches_the_dispatch():
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
 def test_every_scheme_builds_a_config(scheme):
+    """Only turbulence varies. Microphysics is ON -- and identical across arms.
+
+    This used to assert microphysics was "none" along with everything else.
+    That was the old default, and it meant the single column could not
+    condense: no liquid, no condensation buoyancy, and no cloud for the
+    stratocumulus cases' longwave to cool from. What the comparison actually
+    requires is that the non-turbulence components do not VARY between arms,
+    not that they are switched off, so that is what is asserted.
+    """
     cfg = drv.build_physics_config(scheme, prescribed_fluxes=False)
     assert cfg.turbulence.scheme == scheme
-    for other in ("radiation", "convection", "microphysics",
-                  "gravity_wave_drag"):
+    for other in ("radiation", "convection", "gravity_wave_drag"):
         assert getattr(cfg, other).scheme == "none"
+    assert cfg.microphysics.scheme == "morrison", (
+        "condensation must be on by default; a dry column is a different "
+        "regime from the LES it is scored against")
+    reference = drv.build_physics_config(drv.TURBULENCE_SCHEMES[0],
+                                         prescribed_fluxes=False)
+    assert cfg.microphysics == reference.microphysics, (
+        "microphysics must not depend on the turbulence scheme")
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -108,8 +123,10 @@ def test_dycoms_is_matched_by_simple_lw_rather_than_refused():
     config would put a radiation confound back without the refusal to catch it.
     """
     assert drv._RADIATION_MISMATCH == {}
-    assert {"dycoms", "astex"} <= drv._SIMPLE_LW_CASES
-    for case in ("dycoms", "astex"):
+    # RF02's prm sets doradsimple too, so it joins its RF01 sibling here; if it
+    # did not, its SCM arm would run a different longwave from its LES.
+    assert {"dycoms", "rf02", "astex"} <= drv._SIMPLE_LW_CASES
+    for case in ("dycoms", "rf02", "astex"):
         cfg = drv.build_physics_config(
             "louis", prescribed_fluxes=True, simple_lw=True)
         assert cfg.radiation.scheme == "simple_lw", (
@@ -1219,3 +1236,362 @@ def test_stale_momentum_really_can_point_uphill():
     updates_fresh, _ = opt.update(g_now, opt.init(params), params)
     assert float(jnp.sum(g_now * updates_fresh)) < 0.0, (
         "a freshly initialised optimizer must descend on the current gradient")
+
+
+# --- DYCOMS-II RF02 SCM arm -------------------------------------------------
+
+def _rf02_available() -> bool:
+    try:
+        from legoesm.atmosphere.forcing.scm.sam_case_scm import (
+            SAM_SCM_CASES, resolve_sam_case_dir,
+        )
+        return Path(
+            resolve_sam_case_dir(SAM_SCM_CASES["rf02"].gsam_dir)).is_dir()
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_is_a_selectable_case_with_a_running_column():
+    """The new case must reach the tuner's own entry points, not just the
+    registry: a case that loads but cannot be integrated is not a case."""
+    jax.config.update("jax_enable_x64", True)
+    import numpy as _np
+
+    assert "rf02" in drv.ALL_CASES
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    assert case.name == "rf02"
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True)
+    assert cfg.radiation.scheme == "simple_lw"
+    hours = 5 * 30.0 / 3600.0                      # exactly 5 steps
+    means, ps_hist = drv._rollout_means(
+        None, base_cfg=cfg, case=case, dt=30.0, hours=hours,
+        analysis_hours=hours, chunk_steps=4,
+    )
+    assert ps_hist.shape == (5,)
+    for name in ("T", "qv", "u", "v"):
+        arr = _np.asarray(means[name])
+        assert arr.shape == (16,), (name, arr.shape)
+        assert _np.all(_np.isfinite(arr)), name
+    drv._assert_surface_pressure_static(ps_hist, case.p_s)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_scm_arm_takes_the_deck_prescribed_fluxes():
+    """RF02's deck fixes SHF/LHF (SFC_FLX_FXD), so the SCM must not also run a
+    bulk heat exchange on top of them."""
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    fluxes = drv.deck_surface_scalar_fluxes(case)
+    assert fluxes is not None
+    assert case.forcing.prescribe == "fluxes"
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_simple_lw_sees_no_cloud_on_the_scm_side_without_microphysics():
+    """What switching condensation OFF costs, kept as a live demonstration.
+
+    `--microphysics none` leaves the column carrying q_v and nothing else. The
+    Stevens (2005) kernel's optical depth is an integral of LIQUID, so it
+    collapses to its clear-sky term while the LES runs Morrison and holds real
+    liquid -- the stratocumulus cases lose their entire energy source. This was
+    the DEFAULT until the default became the LES's own scheme; it is pinned
+    here so the cost of choosing it stays visible.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    case = drv.load_case("rf02", nlev=32, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="none")
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    carry = (scm.state, scm.phys_state)
+    for k in range(5):
+        carry, _ = step(carry, jnp.asarray(k))
+    state, _ = carry
+    assert set(state.tracers) == {"q_v"}, (
+        "a condensate tracer appeared; the shared-longwave caveat needs "
+        f"revisiting. tracers={sorted(state.tracers)}")
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_default_arm_condenses_and_carries_the_case_droplet_number():
+    """The default single-column arm forms liquid, at the LES's droplet number.
+
+    Two things have to hold for a stratocumulus closure to be scored against
+    its LES at all: the column must actually condense (otherwise the shared
+    longwave has no cloud and the case has no cloud-top cooling), and it must
+    condense with the droplet concentration the LES prescribes (otherwise the
+    two sides drizzle at different rates). RF02's 55 cm^-3 against RF01's 140
+    is a factor 5 in autoconversion, so a library default of 1e8 here would be
+    a real mis-forcing, not a detail.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    import numpy as _np
+
+    case = drv.load_case("rf02", nlev=32, dt=30.0)
+    cfg = drv.build_physics_config(
+        "louis", prescribed_fluxes=True, simple_lw=True,
+        n_c_m3=case.spec.les_n_c_m3)
+    assert cfg.microphysics.scheme == "morrison"
+    assert cfg.microphysics.morrison.Nc_0 == pytest.approx(55.0e6)
+
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    carry = (scm.state, scm.phys_state)
+    for k in range(10):
+        carry, _ = step(carry, jnp.asarray(k))
+    state, _ = carry
+    assert "q_c" in state.tracers, "the default arm must be able to condense"
+    q_c = _np.asarray(state.tracers["q_c"].data)
+    assert _np.all(_np.isfinite(q_c))
+    assert float(q_c.max()) > 1.0e-5, (
+        f"RF02's saturated sub-inversion layer must form liquid; got "
+        f"max q_c={float(q_c.max()):.3e} kg/kg")
+
+
+def test_droplet_number_default_is_not_silently_the_library_value():
+    """The guard above is only meaningful if 55e6 differs from the default."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    assert MorrisonConfig().Nc_0 != pytest.approx(55.0e6)
+    plain = drv.build_physics_config("louis", prescribed_fluxes=True)
+    assert plain.microphysics.morrison.Nc_0 == pytest.approx(
+        MorrisonConfig().Nc_0), (
+        "a case that prescribes no droplet number must keep the scheme default")
+
+
+@pytest.mark.parametrize("case_name,n_c", [("dycoms", 140.0e6),
+                                           ("rf02", 55.0e6),
+                                           ("astex", 100.0e6)])
+def test_scm_droplet_number_matches_the_les_driver(case_name, n_c):
+    """The two arms must prescribe the SAME droplet concentration.
+
+    The LES driver and the single-column spec hold the number separately, so
+    this is the same drift guard the Coriolis parameter already has.
+    """
+    import importlib.util as _ilu
+    from legoesm.atmosphere.forcing.scm.sam_case_scm import SAM_SCM_CASES
+    path = _ROOT / "scripts" / "run" / "run_dycoms_les.py"
+    spec = _ilu.spec_from_file_location("_strato_les_nc", path)
+    mod = _ilu.module_from_spec(spec)
+    sys.modules["_strato_les_nc"] = mod
+    spec.loader.exec_module(mod)
+    assert mod._STRATOCUMULUS_CASES[case_name]["n_c_m3"] == pytest.approx(n_c)
+    assert SAM_SCM_CASES[case_name].les_n_c_m3 == pytest.approx(n_c)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+@pytest.mark.parametrize("scheme", ["kessler", "morrison"])
+@pytest.mark.parametrize("substeps", [1, 2])
+def test_tracer_set_is_invariant_under_a_compiled_scan(scheme, substeps):
+    """The exact failure the q_g pre-allocation fixed, pinned at its own level.
+
+    The SCM used to pre-allocate q_c/q_r/q_i/q_s always but q_g only when
+    substepping was on. Both schemes return a q_g tendency on their first call
+    regardless, so the tracer dict gained a key after step 1, the carry pytree
+    changed between iterations, and every scanned rollout died with "cond
+    branch outputs must have the same pytree structure". Stepping eagerly does
+    NOT reproduce that -- only a compiled scan does -- so this runs one.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from jax import lax
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics=scheme,
+                                   n_c_m3=case.spec.les_n_c_m3)
+    scm = case.create_scm(physics_config=cfg, dt=30.0,
+                          microphysics_substeps=substeps)
+    before = sorted(scm.state.tracers)
+    assert "q_g" in before, "graupel must be allocated before the first step"
+    step = drv._make_step_once(scm, 30.0)
+    (state, _), _ = lax.scan(jax.jit(step), (scm.state, scm.phys_state),
+                             jnp.arange(6))
+    assert sorted(state.tracers) == before
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_kessler_allocates_graupel_but_never_makes_any():
+    """The pre-allocation is bookkeeping, not a new hydrometeor.
+
+    Kessler is a warm-rain scheme with no frozen category, so a non-zero q_g
+    under it would be a wiring bug rather than a harmless zero field. Measured
+    here rather than argued.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    import numpy as _np
+    from jax import lax
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="kessler")
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    (state, _), _ = lax.scan(jax.jit(step), (scm.state, scm.phys_state),
+                             jnp.arange(6))
+    q_g = _np.asarray(state.tracers["q_g"].data)
+    assert _np.max(_np.abs(q_g)) == 0.0, _np.max(_np.abs(q_g))
+    # and the field it DOES make is not zero, or the check above is vacuous
+    assert float(_np.max(_np.asarray(state.tracers["q_c"].data))) > 1.0e-5
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_the_arm_actually_receives_the_case_droplet_number():
+    """Not "the two tables agree" -- what the arm the driver builds ends up with.
+
+    A table can be right while the value never reaches the config that runs.
+    """
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    arm = type("Arm", (), {"case": case, "name": "rf02",
+                           "prescribed_fluxes": True, "surface": None})()
+    args = type("Args", (), {"microphysics": "morrison",
+                             "clubb_prognostic": True})()
+    cfg = drv._arm_config("louis", arm, args)
+    assert cfg.microphysics.scheme == "morrison"
+    assert cfg.microphysics.morrison.Nc_0 == pytest.approx(55.0e6), (
+        "the arm must run RF02's 55 cm^-3, not the library default")
+
+
+def test_the_les_drivers_still_run_the_scm_default_scheme():
+    """The single-column default is Morrison because that is what the LES runs.
+
+    Nothing derives it: the default is a literal. That is fine only while every
+    LES driver actually runs Morrison, so this asserts exactly that, and goes
+    red the day one of them changes -- at which point the comparison has
+    stopped being like-for-like and the default has to follow or become
+    per case.
+    """
+    for script in ("run_dycoms_les.py", "run_bomex_les.py", "run_rico_les.py"):
+        src = (_ROOT / "scripts" / "run" / script).read_text()
+        assert '"--microphysics", default="morrison"' in src \
+            or "'--microphysics', default='morrison'" in src, (
+            f"{script} no longer defaults to morrison; the SCM arm's default "
+            "is now a different scheme from its LES")
+
+
+# --- the column carries what its scheme needs -------------------------------
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_two_moment_scheme_gets_its_number_tracers():
+    """The column used to carry six water masses and nothing else.
+
+    The physics bridge substitutes zeros for absent tracers, so a two-moment
+    scheme ran with rain and ice number pinned at zero every step -- measured,
+    that switches graupel formation off outright and moves the rain tendency by
+    2.8x. Names, order and units now come from the same registry the global
+    model uses.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    scm = drv._create_scm(cfg, case, 30.0)
+    registry = make_full_moisture_registry()
+    assert set(scm.state.tracers) == set(registry.names), sorted(scm.state.tracers)
+    for name, field in scm.state.tracers.items():
+        want = next(t for t in registry.tracers if t.name == name)
+        assert field.units == want.units, (name, field.units, want.units)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_single_moment_scheme_gets_no_number_tracers():
+    """Kessler needs no number variables, and must still get every water MASS.
+
+    Sizing the allocation purely by what the scheme declares would give Kessler
+    only vapour, cloud and rain -- and the bridge's tendency dictionary carries
+    all six masses for every scheme, so ice and snow would reappear at step 1.
+    That is the tracer-set growth the allocation exists to prevent.
+    """
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="kessler")
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    assert set(tracers) == {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"}
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_number_tracers_start_empty_which_the_optics_read_as_specified():
+    """Zero droplet number is the DOCUMENTED signal, not a gap.
+
+    The cloud optics read a droplet number at or below 1 as "this scheme does
+    not predict droplet number", substitute their own specified value, and
+    reconstruct in-cloud condensate as q_c / cloud_fraction so a specified
+    IN-CLOUD number is paired with in-cloud water. Seeding a large number
+    instead takes the prognostic branch and pairs that in-cloud number with
+    GRID-MEAN water: droplets too small by cf^(1/3), optical depth too large by
+    cf^(-1/3), a brightening that grows without bound as a layer breaks up.
+    Pinned because seeding it looks like the safer choice and is not.
+
+    Rain and ice number are likewise empty: the model grows them.
+    """
+    import numpy as _np
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    for name in ("N_c", "N_r", "N_i"):
+        got = _np.asarray(tracers[name].data)
+        assert _np.all(got == 0.0), (name, got.max())
+
+
+def test_slot_count_uses_the_scheme_config_not_just_its_name():
+    """SDM needs two slots for condensation and EIGHT with coalescence.
+
+    Passing only the scheme's name silently gives the coalescence
+    configuration six mass slots and no number slots, so its cloud- and
+    rain-number tendencies would be dropped -- the same silent zero-fill this
+    change exists to remove, one config flag deeper.
+    """
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        min_tracer_slots,
+    )
+
+    base = MicrophysicsConfig(scheme="sdm")
+    plain = min_tracer_slots("sdm", base.sdm)
+    coalescing = min_tracer_slots(
+        "sdm", base.sdm._replace(column_do_coalescence=True))
+    assert coalescing > plain, (plain, coalescing)
+    assert min_tracer_slots("sdm") == plain, (
+        "if the name-only lookup already matched the coalescing case this "
+        "test would be vacuous")
+
+
+@pytest.mark.parametrize("scheme", ["kessler", "morrison", "seifert_beheng",
+                                    "thompson", "p3", "fast_sbm"])
+def test_every_shipped_scheme_can_be_built_in_the_column(scheme):
+    """A scheme that cannot be constructed is a scheme nobody can run.
+
+    fast_sbm and p3 declare the full nine-slot layout but express their droplet
+    closure differently from Morrison; an allocation that insisted on reading a
+    Morrison-style droplet concentration refused them outright.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=False,
+                                   microphysics=scheme)
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=8, dt=60.0,
+        T_profile=jnp.linspace(230.0, 290.0, 8),
+        q_v_profile=jnp.full((8,), 1.0e-3))
+    assert "q_g" in scm.state.tracers, scheme

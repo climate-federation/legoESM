@@ -1,13 +1,22 @@
 """Marine stratocumulus on the spectral TRUE-LES core + swappable microphysics
 (Morrison/M2005 default; non-drizzling RF01).
 
-Two decks, selected with ``--case``: DYCOMS-II RF01 (default, described below)
-and ASTEX flight 209. Both set ``dolongwave = .true., doradsimple = .true.``,
-so both are driven by the SAME Stevens (2005) simple longwave with the same
-constants -- gSAM's rad_simple hardcodes them and applies them to every deck
-that selects it. They differ in Coriolis (ASTEX has none), subsidence
-divergence, domain depth and droplet concentration; see
-``_STRATOCUMULUS_CASES``.
+Three decks, selected with ``--case``: DYCOMS-II RF01 (default, described
+below), DYCOMS-II RF02 (``rf02``, the DRIZZLING flight of the same campaign)
+and ASTEX flight 209. All three set ``dolongwave = .true., doradsimple =
+.true.``, so all three are driven by the SAME Stevens (2005) simple longwave
+with the same constants -- gSAM's rad_simple hardcodes them and applies them to
+every deck that selects it. They differ in Coriolis (ASTEX has none),
+subsidence divergence, domain depth, droplet concentration and the height the
+initial theta perturbation is seeded below; see ``_STRATOCUMULUS_CASES``.
+
+DYCOMS-II RF02 (Ackerman et al. 2009, MWR 137; gSAM ``CASES/DYCOMS_RF02``) is
+the same nocturnal marine stratocumulus regime as RF01 but DRIZZLING: its deck
+sets ``doprecip = .true.`` and a droplet concentration of 55 cm^-3 against
+RF01's non-precipitating 140 cm^-3. Its inversion sits at 795 m (theta_l =
+288.3 K, q_t = 9.45 g/kg below it), its geostrophic wind is SHEARED
+(u_g = 3.0 + 4.3 z_km, v_g = -9.0 + 5.6 z_km, read off the deck's lsf rather
+than assumed uniform) and its surface fluxes are SHF = 16, LHF = 93 W/m^2.
 
 DYCOMS-II RF01 (Stevens et al. 2005, MWR 133; gSAM ``CASES/DYCOMS_RF01``):
 
@@ -114,6 +123,10 @@ _DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
 #   lz_m         ASTEX's inversion sits near 637 m but its sounding runs to
 #                1637 m, so the domain has to clear it.
 # The DYCOMS entry reproduces the historical hardcoded values exactly.
+#   perturb_z_m  the initial theta noise is seeded BELOW this height, which is
+#                the case's inversion: seeding above it puts noise in the free
+#                troposphere the case does not perturb. RF01's 840 m was a
+#                literal in build(); RF02's inversion is at 795 m.
 _STRATOCUMULUS_CASES = {
     "dycoms": {
         "gsam_dir": "DYCOMS_RF01",
@@ -121,7 +134,57 @@ _STRATOCUMULUS_CASES = {
         "subsidence_divergence_s": 3.75e-6,
         "lz_m": 1500.0,
         "n_c_m3": 140.0e6,
+        "perturb_z_m": 840.0,
+        # Printed next to the run's own diagnostics. Per case, because these
+        # ARE RF01's numbers: they were printed for every deck, so an ASTEX or
+        # RF02 run was scored in the log against a case it is not.
+        "ref_targets": "LWP 50-80 g/m^2, cloud cover ~1.0, z_i 840-870 m "
+                       "(Stevens et al. 2005, hours 2-4)",
         "note": "Stevens et al. 2005 RF01 nocturnal stratocumulus.",
+    },
+    "rf02": {
+        "gsam_dir": "DYCOMS_RF02",
+        # READ OFF THIS DECK, not inherited from RF01. RF01's prm sets
+        # `fcor = 0.376e-4` explicitly -- a value that is NOT 2*Omega*sin(31.5)
+        # -- while RF02's prm carries no fcor at all and sets
+        # `latitude0 = 31.5`, leaving gSAM to derive f from the latitude. So
+        # the two flights of the same campaign really do run different
+        # rotation rates, and copying RF01's would halve RF02's.
+        #
+        # A reviewer argued the RF02 intercomparison inherits RF01's 0.376e-4
+        # and that the community decks hardcode it. Checked against two other
+        # RF02 implementations rather than settled by argument: PyCLES sets
+        # `coriolis_param = 2.0*omega*sin(31.5*pi/180)` in the forcing class it
+        # shares between RF01 and RF02, and DALES' cases/dycoms_rf02 namelist
+        # sets `xlat = 31.5, lcoriol = .true.` with no explicit f. Three
+        # independent codes, the same latitude-derived value.
+        "f_cor": 2.0 * constants.Omega * float(np.sin(np.deg2rad(31.5))),
+        # lsf: w_ls = -0.00598 m/s at 1595 m, i.e. D = 3.75e-6 -- the same
+        # divergence as RF01. Still declared per case: the equality is a fact
+        # about these two decks, not a rule (ASTEX's is 5.0e-6).
+        "subsidence_divergence_s": 3.75e-6,
+        # The deck's own stretched grid tops at 1459 m and its sounding runs to
+        # 1595 m, so a 1500 m lid is spanned by the sounding.
+        "lz_m": 1500.0,
+        # prm &MICRO_DRIZZLE Nc0 = 55 cm^-3, and the RF02 SCM/LES
+        # intercomparison specifies the same. RF01 runs 140 cm^-3.
+        #
+        # This driver has no equivalent of gSAM's `doprecip` switch -- Morrison's
+        # warm-rain process is always active -- so the droplet concentration is
+        # the only lever the case has on its defining drizzle, and it is a real
+        # one: on the SAME RF02 column, 55 cm^-3 produces 5.3x the rain
+        # tendency that 140 cm^-3 does (the KK2000-type N_c^-1.79), measured in
+        # tests/unit/test_stratocumulus_les_case_selector.py.
+        "n_c_m3": 55.0e6,
+        # snd: theta_l steps 288.300 -> 296.710 K between 795 and 800 m.
+        "perturb_z_m": 795.0,
+        # No targets registered: the RF02 intercomparison's ensemble LWP /
+        # cloud-cover / entrainment numbers are not in this repo, and RF01's
+        # do not transfer -- RF02 is deeper, moister and drizzling.
+        "ref_targets": None,
+        "note": "Ackerman et al. 2009 RF02 nocturnal DRIZZLING stratocumulus; "
+                "prescribed surface fluxes (SHF 16, LHF 93 W/m^2), sheared "
+                "geostrophic wind from the deck lsf.",
     },
     "astex": {
         "gsam_dir": "ASTEX209",
@@ -129,6 +192,12 @@ _STRATOCUMULUS_CASES = {
         "subsidence_divergence_s": 5.0e-6,   # lsf: w=-0.010 m/s at 2000 m
         "lz_m": 2500.0,
         "n_c_m3": 100.0e6,            # ASTEX intercomparison N_c
+        # UNCHANGED from the literal build() used for every deck, so this diff
+        # does not move ASTEX. It is almost certainly too high -- ASTEX's
+        # inversion is near 637 m -- but correcting it is a separate change
+        # with its own reference run.
+        "perturb_z_m": 840.0,
+        "ref_targets": None,
         "note": "ASTEX flight 209 stratocumulus (Sc-to-Cu transition deck).",
     },
 }
@@ -145,10 +214,11 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--case", choices=sorted(_STRATOCUMULUS_CASES),
                    default="dycoms",
-                   help="which marine-stratocumulus deck to run. Both are "
+                   help="which marine-stratocumulus deck to run. All are "
                         "driven by the same Stevens (2005) simple longwave; "
                         "they differ in Coriolis, subsidence divergence, "
-                        "domain depth and droplet concentration.")
+                        "domain depth, droplet concentration and the height "
+                        "the initial perturbation is seeded below.")
     p.add_argument("--case-dir", default=None,
                    help="override the deck directory --case resolves to.")
     p.add_argument("--nx", type=int, default=96)
@@ -227,6 +297,7 @@ def parse_args():
     args.f_cor = spec["f_cor"]
     args.subsidence_divergence_s = spec["subsidence_divergence_s"]
     args.n_c_m3 = spec["n_c_m3"]
+    args.perturb_z_m = spec["perturb_z_m"]
     return args
 
 
@@ -246,10 +317,12 @@ def build(args, dtype):
     case = Path(args.case_dir)
     if not case.is_dir():
         sys.exit(
-            f"[run_dycoms_les] DYCOMS case directory not found: {case}\n"
-            f"  This case reads the gSAM CASES/DYCOMS_RF01 deck. Populate the "
+            f"[run_dycoms_les] case directory not found: {case}\n"
+            f"  --case {args.case} reads the gSAM "
+            f"CASES/{args.case_spec['gsam_dir']} deck. Populate the "
             f"repo-local cache:\n"
-            f"    python scripts/data/fetch_les_forcing.py --only DYCOMSII\n"
+            f"    python scripts/data/fetch_les_forcing.py --only "
+            f"{'ASTEX' if args.case == 'astex' else 'DYCOMSII'}\n"
             f"  or point at a checkout: LEGOESM_GSAM_ROOT=<root containing "
             f"CASES/>, or --case-dir <path/to/CASES/DYCOMS_RF01>.")
     snd = read_sam_snd(case / "snd")
@@ -280,7 +353,10 @@ def build(args, dtype):
 
     ny, nx, nz = args.ny, args.nx, args.nz
     key = jax.random.PRNGKey(0)
-    seed = (jnp.asarray(z_c) < 840.0).astype(dtype)
+    # Seed the theta noise below the CASE's inversion (840 m for RF01, 795 m
+    # for RF02): a literal here perturbs the free troposphere of any case whose
+    # inversion is lower.
+    seed = (jnp.asarray(z_c) < args.perturb_z_m).astype(dtype)
     th3 = (jnp.broadcast_to(th_col, (ny, nx, nz))
            + 0.1 * jax.random.normal(key, (ny, nx, nz), dtype) * seed)
     u3 = jnp.broadcast_to(jnp.asarray(u_prof, dtype), (ny, nx, nz))
@@ -420,7 +496,7 @@ def main():
 
     T = args.hours * 3600.0
     n_steps = int(round(T / dt0))
-    print(f"[DYCOMS RF01 LES] {args.nx}x{args.ny}x{args.nz} dx={g.dx:.1f} "
+    print(f"[{args.case.upper()} LES] {args.nx}x{args.ny}x{args.nz} dx={g.dx:.1f} "
           f"dz={g.dz:.1f} dt={dt0:.2f}s {args.time_scheme} "
           f"sgs={'LASD' if args.dynamic else args.sgs_model} "
           f"micro={micro.scheme_name} dtype={dtype.__name__}")
@@ -510,10 +586,16 @@ def main():
              qc=np.asarray(st.tracers[..., 1]).mean((0, 1)),
              cloud_cover=d["cloud_cover"], lwp=d["lwp"], zi=d["zi"],
              cloud_cover_timemean=cc_avg, lwp_timemean=lwp_avg)
-    print(f"  FINAL: LWP={d['lwp']:.1f} (2nd-half mean {lwp_avg:.1f}) g/m² "
-          f"(ref 50-80), cloud cover={d['cloud_cover']:.2f} "
-          f"(2nd-half mean {cc_avg:.2f}) (ref ~1.0), "
-          f"z_i={d['zi']:.0f} m (ref 840-870)")
+    print(f"  FINAL: LWP={d['lwp']:.1f} (2nd-half mean {lwp_avg:.1f}) g/m², "
+          f"cloud cover={d['cloud_cover']:.2f} "
+          f"(2nd-half mean {cc_avg:.2f}), z_i={d['zi']:.0f} m")
+    # Per-case reference values, not one deck's hardcoded into the line: the
+    # RF01 targets do not describe ASTEX, and printing them beside an ASTEX
+    # result invites the comparison.
+    ref_targets = args.case_spec.get("ref_targets")
+    print(f"  reference ({args.case}): "
+          + (ref_targets if ref_targets else
+             "none registered for this deck -- RF01's targets do NOT apply"))
     # Persist the 2nd-half-mean radiative θ-tendency [K/s] the SCM needs as theta_adv.
     rad_tend = (rad_tend_sum / n_rad if n_rad else rad_tend_sum)
     np.savez(args.output / "dycoms_rad_forcing.npz",

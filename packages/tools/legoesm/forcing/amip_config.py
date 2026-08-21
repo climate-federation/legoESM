@@ -41,7 +41,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Integration
     start_day: float = 0.0
     days: int = 200
-    diag_days: int = 5
+    diag_days: float = 5.0
     checkpoint_days: int = 0  # 0 = no checkpointing
 
     # Forcing
