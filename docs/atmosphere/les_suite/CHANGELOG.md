@@ -1,0 +1,235 @@
+# LES_SUITE — build CHANGELOG (append-only; condensed every 10 iterations)
+
+Detailed, iteration-level progress log for the LES-truth suite. The living design
+doc is `LES_SUITE.md`; this file is consulted only when the design doc's summary is
+insufficient. Newest entries at the bottom of each section.
+
+Deliverable tracker (LES_SUITE.md §5 architecture + §7 science deliverables):
+
+**§5 INFRASTRUCTURE: COMPLETE** (all les_suite modules built, tested, codex-CLEAN).
+
+| Deliverable | Status (2026-07-24, iter 15) |
+|---|---|
+| §5 infrastructure (registry…scorecard, gate-0) | **DONE** (codex-CLEAN) |
+| Q1a structural ceiling (dry CBL flux sweep) | **DONE** — CG layer at every Q0 0.02→0.12 |
+| Q1b skill threshold (dry CBL, prognostic) | **DONE** — combined-gate NOT significant (wind-dominated); **θ-consistent gate: SIGNIFICANT at every flux** (margins ≫ σ_LES(θ)=0.0074) ⇒ closures distinguishable on θ |
+| Q2 nine-closure ranking | **DONE — FULL 9×5 grid** (45/45 tuned via scan, incl. clubb@nlev=24). Higher-order clubb/clubb_lite/edmf best at every flux > tke > holtslag > smag/louis > ysu/mynn25 ⇒ **closure ORDER buys skill** (both combined & θ) |
+| Q3 inter-regime coefficient spread | **DONE — NOT significant vs σ_LES** (both regimes tuned 9/9; σ_LES(SBL)=0.546; CBL→SBL coeff-transfer penalty 0–0.16 < σ_LES ⇒ apparent spread is tuning noise on loss-insensitive params). §7.3 |
+| D4 AD path (+ AD-vs-DF) | **DONE + AD-vs-DF RUN** — scan rollout makes jax.grad tractable at full res; AD reproduces the DF optimum (gaps ≤0.009, AD occasionally better) ⇒ closures gradient-calibratable |
+| D7 σ_LES | **DONE for dry CBL** (free 0.319 + sheared 0.283 real, gate wired); moist/2×-res remain |
+
+## Durable science results (dry-convective CBL; see LES_SUITE.md §7.1 for the full write-up)
+- **Q1a (structural ceiling)** — a counter-gradient layer is present at **every** flux
+  0.02→0.12 K m/s (base[m]/frac: 0.02→308/0.22, 0.04→292/0.38, 0.06→275/0.24,
+  0.08→392/0.51, 0.12→492/0.36) ⇒ a tuning-independent ceiling on local K≥0 closures
+  across the whole buoyancy axis. The layer-base *trend* is non-monotonic (a 2-point
+  "drops with flux" read, commit ec2fa1cd6, is NOT supported); only presence-at-all-fluxes
+  is claimed.
+- **Q2 (tuned ranking, coarse tier-1, per surface-flux)** — best tuned loss by Q0:
+  | closure | type | 0.02 | 0.04 | 0.06 | 0.08 | 0.12 | flux-mean |
+  |---|---|---|---|---|---|---|---|
+  | holtslag_boville | nonlocal | **0.128** | **0.166** | **0.241** | **0.439** | **0.741** | **0.343** |
+  | smagorinsky (tuned) | local | 0.133 | 0.180 | 0.261 | 0.458 | 0.767 | 0.360 |
+  | louis | local | 0.134 | 0.184 | 0.269 | 0.468 | 0.783 | 0.367 |
+  | ysu | nonlocal | 0.152 | 0.240 | 0.363 | 0.579 | 0.962 | 0.459 |
+  | mynn25 | 1.5-order | 0.152 | 0.241 | 0.365 | 0.580 | 0.965 | 0.461 |
+  Finding: nonlocal (holtslag) best, 1.5-order (mynn25) worst at **every** flux ⇒
+  "closure order buys skill" NOT supported for the dry CBL (consistent with Q1a).
+  Caveats: coarse tier-1 search; only smagorinsky responds to tuning (+8–19%); the
+  flux-mean de-dups the 0.06 anchor (a prior scorecard read 0.326). The tke/clubb_lite/
+  edmf/clubb (closures 6–9) tunes are the running-campaign / deferred follow-on.
+- **Q1b (skill threshold)** — nonlocal (holtslag) beats best-tuned local (smag) at every
+  flux, margins +0.0053,+0.0142,+0.0207,+0.0196,+0.0257 (generally widening, not strictly
+  monotone). **D7 gate:** σ_LES(cbl_nieuwstadt)=0.3186 ⇒ NONE of the margins are
+  significant — but σ_LES(combined) is wind-dominated (σ_θ=0.0074 ≪ σ_u=0.43/σ_v=0.34)
+  and ill-conditioned for the Ug=0 CBL ⇒ a defensible threshold needs the sheared cases.
+- **Q1b (MEASURED diagnostic-flux margin, 2026-07-25, iter 32)** — the explicit closure-vs-
+  closure diagnostic margin is now PRODUCED (superseded the earlier "not produced" note).
+  The 4 K-closures expose `TurbulenceOutput.wtheta_flux = −Kh·(∂θ/∂z−γ)` via the shared
+  `vertical_diffusion.diagnostic_heat_flux_full` (pure diagnostic; no run changes);
+  `scm_runner.diagnostic_scheme_flux` evaluates each at the LES mean state, imposing the LES
+  surface θ-flux (secant-calibrated T_sfc excess; dry q_sfc; Exner-consistent) to avoid the
+  Ch=0 prescribed-flux STARVATION that would make the margin a wiring artifact. On the real
+  sheared CBL (`cbl_nieuwstadt` Ug8, Q0=0.06), normalized flux-RMSE vs LES over {lasd,smag,
+  vreman}, BEST-TUNED closures (Q2 tier-1 params, literal Q1b protocol): local 1.15–1.37 vs
+  nonlocal 0.28–0.47 ⇒ **margin 0.958 ± 0.122 (σ_LES), min 0.795 — ~8× σ_LES** (untuned 0.875
+  ± 0.072; tuning-robust) ⇒ best-tuned nonlocal beats best-tuned local "by > a stated margin, in
+  diagnostic scoring" (Q1b literally satisfied in BOTH scorings). Local closures carry ≈0 mixed-layer flux (F=−Kh·∂θ/∂z, ∂θ/∂z≈0);
+  nonlocal carry the surface flux up. Scope: free-conv (Ug≈0) + stable SBL (negative flux)
+  correctly RAISE (uncalibratable). Codex iterate-to-CLEAN (2 rounds: fixed a latent-flux
+  contamination + a T-vs-θ-flux + a regrid-coordinate bug). 22 les_suite tests + 3 helper.
+
+## Conventions locked during the build
+- LES reference artifacts are **self-describing**: each carries both the truth profiles
+  AND the exact forcing the LES received, so the SCM bridge reconstructs `SCMForcing`
+  from the artifact (the controlled-comparison "same forcing" rule) rather than
+  re-deriving it from the case.
+- Reused profile-metric primitives live in `training/scm_rce_metrics.py` (`weighted_std`,
+  `weighted_rmse`, `safe_sqrt`) — re-exported via `core/profile_metrics.py`. No new numerics.
+- Sign conventions (match `scm_forcing.py`): `subsidence_w` +up; surface kinematic heat
+  flux `w_th_s` [K m/s] +up (into the BL); `theta_adv` [K/s], `qv_adv` [(kg/kg)/s].
+- Coriolis: `f = 2Ω sinφ` (Ω from `legoesm.constants`); NH geostrophic/Ekman
+  `du/dt=+f(v−vg)`, `dv/dt=−f(u−ug)` toward `u_geo`.
+- σ_LES lives in the SCM tuner's EXACT loss units (final-snapshot `prognostic_profile_score`
+  via the shared `scm_runner.final_prognostic_truth`) so it gates the Q1b/Q2 margins.
+
+---
+
+## Iteration log (CONDENSED 2026-07-24 at iter 10 — full prose in each iter's commit
+message; the science numbers are above + in LES_SUITE.md §7.1)
+
+**Iters 1–2 (2026-07-21..22) — infrastructure + first science.** CPU library
+(`bridge`/`counter_gradient`/`score`/`matrix`, codex-CLEAN, 6 round-1 defects fixed);
+GPU pipeline (`emit`/`run_les_suite`, `scm_coupling`/`scm_runner`/`tune_scm_to_les`/
+`scorecard`); gate-0 Nieuwstadt CBL PASSED (σ_w/w_*=0.68); 5 closures wired; the
+`safe_sqrt(NaN)=0` tuner bug fixed (+inf on non-finite; instrument-don't-infer). Perf
+limit identified: the DF tuner recompiles per candidate (~11–12 min/eval) → the AD path
+is the fix.
+
+**Iters 3–9 (2026-07-24, one commit each):**
+- **Iter 3 `18e0bd5de`** — per-flux scorecard + anchor dedup (typed flux key, n-flux
+  denominator); Q2 roster 5→8 (tke/clubb_lite/edmf, probe-finite); 8-closure campaign
+  launched. Q2 flux-robust ranking established.
+- **Iter 4 `cc7a26350`** — 9th closure `clubb` via a shared `tunable_subconfig.py`
+  (extracted the RCE campaign's private nested-CLUBB descend/re-wrap, fixing a private
+  cross-import); apply-site factored to `apply_overrides_to_base`. clubb probe-finite
+  0.235 at nlev=8 (nlev=24 OOMs on the contended node → tuning deferred). D3 ladder complete.
+- **Iter 5 `2e2921637`** — Q1b local→nonlocal skill threshold in the scorecard.
+- **Iter 6 `f27da3608`** — `--sgs` selector (D7 enabler): emit the CBL under
+  {lasd,smagorinsky,vreman}.
+- **Iter 7 `70058135d`** — σ_LES aggregator (`sigma_les.py` + `compute_sigma_les` CLI)
+  in the tuner's exact loss units (factored `scm_runner.final_prognostic_truth`).
+- **Iter 8 `9ee24ead7`** — first REAL σ_LES (GPU SGS spread): 0.3186 combined; D7 gate
+  wired into the scorecard (`--sgs-artifacts-dir`); all Q1b margins NOT significant
+  (wind-dominated caveat).
+- **Iter 9 `d7bcd867b`** — sheared CBL driver (U_g axis): `--Ug`/`--lat` + Coriolis
+  (`_coriolis_f`) + geostrophic IC; artifact records u_geo/v_geo/f_c. GPU-validated
+  Ekman (u 4.69→8.0, v 0.63→0.02); winds now well-conditioned. Sign convention
+  codex-verified.
+
+- **Iter 10 (this commit)** — CHANGELOG condensed (this file). Emitted the sheared
+  {lasd,smagorinsky,vreman} SGS spread at Ug=8 (GPU) and computed the sheared σ_LES:
+  combined 0.283, θ 0.0073, u **0.114**, v 0.476 — vs free-conv 0.319/0.0074/**0.431**/
+  0.344. Shear well-conditions the streamwise wind as hypothesised (σ_u 0.43→0.11, 4×),
+  but the weak Ekman cross-wind keeps σ_v large (0.34→0.48) → σ_combined only drops
+  0.32→0.28; σ_LES(θ)≈0.0074 is a robust metric-invariant floor. ⇒ a clean D7 verdict
+  needs a θ-CONSISTENT metric (score the closure loss AND σ_LES on θ alone — don't mix a
+  combined margin with a θ-only σ). Doc-only + already-reviewed σ_LES code (codex-exempt).
+
+- **Iters 11–20 (2026-07-24, one commit each) — the science campaign + the scan breakthrough**
+  (durable results in the tracker above + LES_SUITE.md §7; per-iter prose in each commit):
+  - **11** — AD path (D4): `scm_les_loss_jax` + `tune_closure_ad` (Adam, traced leaves) + `--method {df,ad,both}`.
+  - **12** — STABLE SBL regime wired (`_build_sbl` GABLS1 sounding + `_make_emit_step` Rayleigh sponge/re-projection).
+  - **13** — resumable science campaign launched (flux sweep + tuning).
+  - **14 `8e47a6dc2`** — flock single-instance guard on the campaign (orphan+resubmit race).
+  - **15 `2211a7065`+`f02769564`** — SBL 4 h VALIDATED (stratified/Ekman, jet emerging) + `scm_les_final_score` (θ/u/v breakdown) + nlev/dt recorded.
+  - **16 `3a7d081a1`** — θ-consistent D7 tool (`theta_significance.py`, self-check HARD GATE; codex-CLEAN).
+  - **17 `f88a980fa`** — **lax.scan SCM rollout (~250×)** (`pure_step`+`scm_scan_final_state`; machine-precision vs `run`, AD-tractable) — the breakthrough that collapsed the compute wall.
+  - **18 `2de7c6260`** — **Q2 COMPLETE (full 9×5)** via scan (clubb@nlev=24 unblocked) ⇒ closure ORDER buys skill (higher-order best; combined + θ agree).
+  - **19 `c1a677e3b`** — **Q3 DONE + geostrophic wiring** (SBL tuned 9/9; σ_LES(SBL)=0.546; CBL→SBL coeff-transfer <σ_LES ⇒ spread NOT significant = tuning noise).
+  - **20 `72d7c278e`** — **D4 bonus RUN** (AD≈DF, gaps ≤0.009 ⇒ closures gradient-calibratable) + this condense.
+  - **MILESTONE: Q1/Q2/Q3/D4/D7 all DONE for the dry regimes (CBL/sheared/SBL). Remaining: moist (BOMEX/DYCOMS) + D9 cloud.**
+
+- **Iters 21–30 (2026-07-24..25) — CONDENSED (full prose in each commit; science in LES_SUITE.md §7):**
+  - **21** — D4 complete 9/9 (clubb 78-param AD gap 0.0001, all AD≈DF). Moist WRONGLY thought
+    blocked on gSAM decks (corrected iter 24).
+  - **22** — sheared CBL Q1b: closure ranking is SHEAR-DEPENDENT (mynn25 worst→3rd under shear).
+  - **23** — Q3-shear axis + scorecard conflation guard + session regression validated.
+  - **24** — CORRECTION: moist NOT blocked (`data/les_cases/{BOMEX,DYCOMS_RF01}` cached; the
+    fetch error was a red herring). Moist build started.
+  - **25–26** — moist DATA pipeline: `run_bomex_les --emit-suite-artifact` converter (θ_l/q_t +
+    Coriolis/geostrophic/subsidence/advection forcing) + `les_record` θ_l/q_t; real BOMEX artifact.
+  - **27** — MOIST SCM built+validated+codex-CLEAN: `_moist_cbl_physics` (Sundqvist), moist branch
+    (q_v IC=q_t, forcing), `scm_final_moist_on` (θ_l/q_t), DF+AD `is_moist`; q_g scan-stability fix.
+    First BOMEX Q2 (later corrected).
+  - **28** — **θ_l CONFOUND FIXED (codex HIGH):** the spectral moist LES prognoses ACTUAL θ, not
+    θ_l → recorded θ vs SCM θ_l. Fix: `scm_coupling.liquid_water_theta` (one canonical reduction,
+    SCM delegates); `_record_theta_l` in both drivers (q_c only); `sigma_les` → moist. Re-emitted 3
+    BOMEX θ_l artifacts → re-tuned 9 → **BOMEX Q2 D7-gated (σ_LES=0.053): holtslag>louis>clubb>...>
+    tke; order does NOT buy skill (top-5 tied, weak tail resolved)**. DYCOMS converter (RF01 LW
+    cooling→theta_adv).
+  - **29** — **DYCOMS (moist regime 2) DELIVERED, σ_LES-gated NULL** (σ_LES=0.231): whole spread <
+    σ_LES → no closure distinguishable; resolution-limited (LWP 9 vs ref 50-80). Combined moist
+    verdict: higher-order does NOT win in moist regimes.
+  - **30** — **D9 CLUBB dual-report** (`cloud_source` native ADG1-PDF vs shared grid-scale +
+    `cloud_buoyancy` control): BOMEX 0.336 vs 0.306, DYCOMS 0.909 vs 0.801 — both sub-σ_LES ⇒ PDF
+    cloud buys no resolvable skill (not a cloud-PDF artifact). Q3 extended to 4 regimes
+    (cross-transfer: 1/18 moist resolvable). All physics codex-CLEAN.
+
+- **Iter 31 (2026-07-25) — LITERAL D9 + Q1b-diagnostic honest close.** (a) The D9 dual-report is
+  the LITERAL native-vs-SHARED-cloud pair (`cloud_source="shared"` = grid-scale Flatau saturation,
+  no interface change), codex-CLEAN — not just the no-cloud control. (b) Q1 "both diagnostic and
+  prognostic scoring": prognostic done; diagnostic THRESHOLD (<0.02) established by the structural
+  argument (local K≥0 gives wrong-signed −Kh·∂θ/∂z in the counter-gradient layer at every flux;
+  D6 maps Q1's diagnostic contribution to Q1a). An explicit diagnostic-flux RECONSTRUCTION
+  (`scm_diagnostic_wtheta`) was ATTEMPTED → **codex 2 HIGH (prescribed-flux injection not the
+  turbulence BC; Exner mismatch; non-conservative center-trapezoid) → REVERTED** (commit
+  cb45cae50). The MEASURED diagnostic-flux MARGIN needs each closure's w'θ' flux exposed across
+  the 9 schemes (not in TurbulenceOutput; nonlocal γ internal) = a high-blast-radius interface
+  change, NOT rushed at session depth. See §7.1.
+
+**STATUS:** §7 deliverables produced (Q1a, Q1b prognostic + diagnostic-threshold, Q2 4-regime, D9
+LITERAL, Q3 4-regime, D4-bonus) — all σ_LES-gated + codex-CLEAN. ONE remaining sub-clause: the
+MEASURED diagnostic-flux margin for Q1b (needs the turbulence-flux-exposure interface change; the
+threshold itself is established structurally). **OPTIONAL REFINEMENTS:** higher-res DYCOMS
+(96²×192); clubb 2×-res σ_LES.
+
+## Observational field-campaign track (NEW; see LES_SUITE.md §10)
+
+A new track requested 2026-07-28: tune/compare the SAME turbulence closures against REAL
+observations from canonical field campaigns with obs data online (complements the LES-truth
+suite). First campaign: **ARM SGP summer 1997** (`arm9707`, base 970618, Lamont OK 36.6°N; the
+obs-constrained NCAR-SCCM variational-analysis product already on disk at
+`data/les_cases/ARM9707/arm9707.nc`).
+
+- **Phase 1 (2026-07-28) — obs-forcing reader DONE.**
+  - `forcing/scm/scm_forcing_io.py` — extracted the format-agnostic netCDF-forcing numerics
+    (`interp_profile_to_pressure`, `omega_to_w`, `forcing_cadence`, `profile_time_fn`,
+    `scalar_time_fn`) so they live ONCE; refactored `dephy_scm.py` onto them (deleted its private
+    duplicates, aliased the public fns to the same names; `_vertical_velocity_values` → `omega_to_w`).
+    No duplicated numerics (CLAUDE.md). dephy test stays green (4 passed).
+  - `forcing/scm/sccm_arm.py::load_arm_sccm_case` — maps the SCCM/ARM file → initial profiles +
+    time-varying `SCMForcing` (subsidence from `omega` [+down→+up]; `theta_adv=divT/Π` from the
+    HORIZONTAL T tendency; `qv_adv=divq` directly, q is a mixing ratio; surface
+    `w_th_s=shflx/(ρ_s c_pd)` [T-flux, matches dephy `hfss`], `w_qv_s=lhflx/(ρ_s L_v)`, +up) +
+    an `ARMObsReference` (GOES cloud→fraction, MWR `cldliq`→LWP kg/m² via `rho_water`,
+    `Prec`→mm/day, soundings, surface scalars). Uses HORIZONTAL advection + prescribed subsidence
+    only (no `vertdiv*` double-count). Integration dt defaults to `min(cadence,300 s)` (the ~3 h
+    cadence is a forcing frame, interpolated between). omega→w density uses the time-varying
+    sounding. Sign/unit conventions at the module head.
+  - Tests: `test_scm_forcing_io.py` (6) + `test_sccm_arm_loader.py` (4, incl. a real-`arm9707.nc`
+    load: base 970618, lat 36.6, GOES cloud∈[0,1], SHF −28→+123 W/m²). All 10 pass; ruff clean
+    (physics `T`/`divT` per-file-ignored, matching dephy). Numerics codex-reviewed.
+  - Phase 2 (below) obs-vs-SCM scoring built next.
+
+- **Phase 2 (2026-07-29) — obs-vs-SCM scoring assembly DONE.**
+  - `les_suite/arm_obs_score.py`: `score_arm_obs(obs, comp)` = NaN-aware per-channel normalized
+    RMSE + RMS-combined, mirroring `score.py` (normalize by the floored OBS spread; missing obs
+    MASKED, never zero-filled). `build_arm_comparables(case, physics_config, ...)` runs the
+    obs-forced SCM over a window (optional obs-sounding restart at the window start) and samples
+    θ/q/u/v at obs pressure levels + obs times, + LWP from the `q_c` tracer via the canonical
+    `column_water_vapor` mass integral.
+  - `scm.py`: added trailing Optional `q_c` to `SCMHistory`, populated in `run()` gated like `q_v`
+    (enables time-resolved LWP). Backward-compatible; `test_scm_forcing.py` (51) + `test_scm.py`
+    (106) stay green.
+  - Constraint documented + SCM-enforced: prescribe="fluxes" ⇒ turbulence `surface.Ch_neutral=0`
+    (no bulk-formula/prescribed double-count). Cloud-fraction + precip left `None` by the runner
+    (SCM emits neither in history yet) but scored when supplied → Phase 2b drop-in.
+  - Tests: `tests/atmosphere/les_suite/test_arm_obs_score.py` (5 deterministic scoring/NaN-mask +
+    1 end-to-end SCM-run scored on θ/q/u/v/LWP). Numerics codex-reviewed.
+  - **Remaining:** Phase 2b (SCM cloud/precip diagnostics in history); Phase 3 driver + campaign
+    registry for the 9-closure obs ranking (golden-day June-21 anchor via the obs-restart path).
+
+- **PR review follow-up (2026-08-21) — saturated-start moist init.** After a dual codex+GLM PR
+  review (8 blocking defects fixed by the reviewer), the one item left "for the author" was the
+  stratocumulus (DYCOMS/ASTEX) cloudy start: `build_cbl_scm_from_artifact` reads the artifact's
+  θ_l as θ and q_t as vapour, which is only right cloud-free, so the reviewer's guard REFUSED a
+  saturated start. Fix: `scm_coupling.saturation_adjust((θ_l,q_t)→(θ,q_v,q_c))` — the exact
+  inverse of `liquid_water_theta`, promoted from `run_dycoms_les.py` (no duplicated numerics) —
+  applied at init so a cloudy column starts with its cloud water and q_t=q_v+q_c is conserved
+  (a clear column is byte-unchanged). `SingleColumnModel.create` gained a `q_c_profile` seed (the
+  microphysics preallocation preserves it). Tests: saturation_adjust clear/saturated + round-trip;
+  a saturated-start artifact seeds q_c and reproduces the artifact θ_l/q_t at init. Physics
+  codex-reviewed (numerics CONFIRMED; docstring over-claims + an unused knob tightened). Also
+  migrated `ocean/.../gm_bvp.py::GMBVPConfig` `__param_spec__` to the nested schema (was the lone
+  param-spec CI failure on the merged main).
