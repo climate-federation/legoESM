@@ -679,3 +679,108 @@ def compute_fv3_native_angles(lon6: np.ndarray, lat6: np.ndarray) -> dict:
         "cosa_v": cosa_v, "sina_v": sina_v,
         "cosa_b": cosa_b, "sina_b": sina_b,
     }
+
+
+# --------------------------------------------------------------------------
+# Wind unit vectors for PHYSICS COUPLING (grid_utils_init,
+# fv_grid_utils.F90:262-317 and :2362) — the four quantities
+# ``update_dwinds_phys`` (:3363-3547) needs to turn an A-grid wind
+# TENDENCY into D-grid increments.  Nothing in the dycore consumes them:
+# it works in grid-relative components and never forms a lat-lon A-grid
+# wind, so physics coupling is their first consumer.
+# --------------------------------------------------------------------------
+
+def compute_fv3_native_wind_vectors(grid_lon: np.ndarray,
+                                    grid_lat: np.ndarray,
+                                    agrid_lon: np.ndarray,
+                                    agrid_lat: np.ndarray) -> dict:
+    """``vlon``/``vlat``/``es[..., 1]``/``ew[..., 2]`` for ONE face.
+
+    Parameters are one face's padded corner lon/lat ``(m + 1, m + 1)`` and
+    cell-centre lon/lat ``(m, m)``, in radians, on the data domain — the
+    same arrays ``fv3_native_gridstruct`` publishes as ``grid_lon`` /
+    ``agrid_lon``.
+
+    Returns ``{"vlon", "vlat", "es1", "ew2"}``.  ``vlon``/``vlat`` are
+    ``(m, m, 3)``, the local east/north unit vectors at cell centres
+    (``unit_vect_latlon``, :2286-2309, invoked at :2362).  ``es1`` and
+    ``ew2`` are ``(m, m + 1, 3)`` and ``(m + 1, m, 3)``: the unit vectors
+    the D-grid ``u`` and ``v`` components lie along, at north/south and
+    east/west cell edges respectively.
+
+    THE DUO LANE IS WHY THIS IS SHORT.  ``bounded_domain`` is forced true
+    for a duo grid (``fv_arrays.F90:1512``: ``regional .or. nested .or.
+    duogrid``), so every ``.not. bounded_domain`` branch in the upstream
+    construction — the zeroed cube-vertex diagonals at :266/:294 and the
+    four panel-edge special cases at :270-277 and :297-304 — is dead
+    here, and one formula covers the whole face.  On an UNBOUNDED cubed
+    sphere those branches are live and this routine would be wrong; that
+    is why it refuses to pretend otherwise (see ``bounded_domain`` in the
+    caller's context).
+
+    ponytail: only the two slots ``update_dwinds_phys`` reads are built.
+    Upstream also fills ``es[..., 2]`` and ``ew[..., 1]``, but their only
+    consumers are the old ``d2a2c_vect`` routines behind
+    ``USE_NORM_VECT`` (:654-687), which is not defined in this build and
+    whose blocks are ``.not. bounded_domain`` guarded anyway.  Add them
+    beside these when something actually reads them.
+
+    PRECISION, stated rather than assumed: ``mid_pt3_cart`` is ``f_p``
+    (extended) upstream and the port's ``_mid_pt3`` is float64.  That is
+    a pre-existing property of the shared primitive, reused here on
+    purpose so these vectors sit at the same floor as everything else
+    built from it, not silently re-derived at a different one.
+
+    CELLS UPSTREAM NEVER WRITES COME BACK ``NaN``, not zero.  The
+    Fortran loops start at ``isd+1`` / ``jsd+1``, so the first column of
+    ``ew`` and the first row of ``es`` are whatever ``allocate`` left
+    there.  A zero would be a finite, plausible unit vector that silently
+    projects a wind to nothing; ``NaN`` makes a consumer that reaches
+    outside the written window fail where it reads.
+    """
+    grid_lon = np.asarray(grid_lon, dtype=np.float64)
+    grid_lat = np.asarray(grid_lat, dtype=np.float64)
+    agrid_lon = np.asarray(agrid_lon, dtype=np.float64)
+    agrid_lat = np.asarray(agrid_lat, dtype=np.float64)
+    if grid_lon.shape != grid_lat.shape or grid_lon.ndim != 2:
+        raise ValueError(
+            f"grid_lon/grid_lat must be one face's 2-D corner arrays of "
+            f"equal shape, got {grid_lon.shape} and {grid_lat.shape}")
+    mb = grid_lon.shape[0]
+    if grid_lon.shape[1] != mb:
+        raise ValueError(f"corner array must be square, got {grid_lon.shape}")
+    m = mb - 1
+    if agrid_lon.shape != (m, m) or agrid_lat.shape != (m, m):
+        raise ValueError(
+            f"agrid_lon/agrid_lat must be ({m}, {m}) for a ({mb}, {mb}) "
+            f"corner array, got {agrid_lon.shape} and {agrid_lat.shape}")
+
+    # :2362  vlon, vlat = unit_vect_latlon(agrid) -- the same routine the
+    # port already carries as get_latlon_vector.
+    vlon, vlat = _get_latlon_vector(
+        np.stack([agrid_lon, agrid_lat], axis=-1))
+
+    grid3 = _latlon2xyz(np.stack([grid_lon, grid_lat], axis=-1))
+
+    # es(:, i, j, 1), :311-313.  pp is the midpoint of the SOUTH edge of
+    # cell (i, j) -- i.e. the point where the D-grid u lives -- and the
+    # tangent is the edge's own great circle, so agrid never enters.
+    # Fortran: j = jsd+1 .. jed, i = isd .. ied -- so the FIRST row
+    # (jsd) and the LAST row (jed+1) of the allocation are never written,
+    # even though both are inside it.
+    es1 = np.full((m, m + 1, 3), np.nan, dtype=np.float64)
+    pp_s = _mid_pt3(grid3[:-1, :, :], grid3[1:, :, :])          # (m, m+1, 3)
+    t_s = _vect_cross(grid3[:-1, :, :], grid3[1:, :, :])        # (m, m+1, 3)
+    es1[:, 1:-1, :] = _normalize_vect(
+        _vect_cross(t_s[:, 1:-1, :], pp_s[:, 1:-1, :]))
+
+    # ew(:, i, j, 2), :283-285.  Same construction on the WEST edge, where
+    # the D-grid v lives.  Fortran: j = jsd .. jed, i = isd+1 .. ied, so
+    # the LAST column (ied+1) is unwritten too.
+    ew2 = np.full((m + 1, m, 3), np.nan, dtype=np.float64)
+    pp_w = _mid_pt3(grid3[:, :-1, :], grid3[:, 1:, :])          # (m+1, m, 3)
+    t_w = _vect_cross(grid3[:, :-1, :], grid3[:, 1:, :])        # (m+1, m, 3)
+    ew2[1:-1, :, :] = _normalize_vect(
+        _vect_cross(t_w[1:-1, :, :], pp_w[1:-1, :, :]))
+
+    return {"vlon": vlon, "vlat": vlat, "es1": es1, "ew2": ew2}
