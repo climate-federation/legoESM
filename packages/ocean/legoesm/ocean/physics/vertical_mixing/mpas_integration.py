@@ -30,6 +30,7 @@ from legoesm.ocean.eos import (
     rho_0 as _RHO_0,
     c_sw as _C_SW,
 )
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 from legoesm.ocean.physics.mixing import (
     vertical_diffusion_variable_K,
@@ -234,7 +235,8 @@ def _vertical_diffusion_edge_partial(
 
 
 def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
-                                  eos_fn=None):
+                                  eos_fn=None,
+                                  constants_config=ConstantsConfig()):
     """Shared MPAS cell-field prep for the vertical-mixing bridges.
 
     Single-sources the edge→cell velocity reconstruction + land/partial-cell
@@ -272,7 +274,11 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
     # with rho_0 (those cells are masked out downstream).
     J_real = compute_ocean_jacobian(eta, H_bathy, z_coord)
     J = jnp.where(mask > 0.5, J_real, 1.0)
-    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn)
+    # The run's gravity, not the library's: the hydrostatic pressure this
+    # density is built on is linear in it, and the cards this lane is compared
+    # against pin a value that differs from the module default.
+    rho_real = compute_ocean_rho(state, z_coord, J_real, eos_fn=eos_fn,
+                                 g=constants_config.g)
     rho = jnp.where(mask[:, None] > 0.5, rho_real, _RHO_0)
 
     # Land-zero inputs; on partial cells fill sub-seafloor levels with the
@@ -300,7 +306,7 @@ def _reconstruct_mpas_cell_fields(state: MPASOceanState, mesh, z_coord,
 
 
 def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
-                  eos_fn=None):
+                  eos_fn=None, constants_config=ConstantsConfig()):
     """Prepare MPAS-KPP inputs and run ``kpp_vertical_mixing`` (#518 item 2).
 
     ``eos_fn`` (``None`` ⇒ Wright default) is the model-selected EOS callable
@@ -324,7 +330,8 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     # (``mask`` is returned for the TKE bridge; KPP masks downstream from
     # ``state.land_mask`` directly, so it is unused here.)
     u_east_w, v_north_w, T_w, S_w, rho, J, _ = _reconstruct_mpas_cell_fields(
-        state, mesh, z_coord, eos_fn=eos_fn)
+        state, mesh, z_coord, eos_fn=eos_fn,
+        constants_config=constants_config)
     T_3d = state.T.data       # (nCells, nlev) — RAW surface T/S for buoyancy flux
     S_3d = state.S.data
     eta = state.eta.data
@@ -350,7 +357,8 @@ def _run_mpas_kpp(state: MPASOceanState, mesh, z_coord, surface_forcing, cfg,
     return kpp_out, J
 
 
-def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
+def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None,
+                          constants_config=ConstantsConfig()) -> Callable:
     """Build KPP physics_fn for MPAS Voronoi mesh.
 
     Parameters
@@ -387,7 +395,8 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
     ):
         # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
         kpp_out, J = _run_mpas_kpp(
-            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn)
+            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn,
+            constants_config=constants_config)
         # State accessors reused by the post-KPP edge-diffusion code below.
         T_3d = state.T.data
         eta = state.eta.data
@@ -550,7 +559,8 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable
     return physics_fn
 
 
-def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
+def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
+                           constants_config=ConstantsConfig()) -> Callable:
     """Build KPP profile-only function for MPAS implicit vertical mixing.
 
     Returns ``(A_v_cells, K_v_cells)`` at half-levels (nCells, nlev-1)
@@ -596,7 +606,8 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
         # Shared MPAS-KPP input prep + KPP call (#518: factored helper).
         # ``J`` is unused on the profiles path (only A_v/K_v are returned).
         kpp_out, _ = _run_mpas_kpp(
-            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn)
+            state, mesh, z_coord, surface_forcing, cfg, eos_fn=eos_fn,
+            constants_config=constants_config)
         T_3d = state.T.data
         mask = state.land_mask.data
 
@@ -631,7 +642,8 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
     return profiles_fn
 
 
-def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callable:
+def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
+                           constants_config=ConstantsConfig()) -> Callable:
     """Build a TKE profile function (diagnostic OR prognostic) for MPAS implicit vmix.
 
     Wires the grid-agnostic Gaspar (1990) / Burchard (2002) TKE closure
@@ -767,7 +779,8 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None) -> Callabl
         # Shared edge→cell reconstruction + land/partial-cell conditioning
         # (the SAME helper KPP uses — one reconstruction on MPAS).
         u_east_w, v_north_w, T_w, S_w, rho, J, mask = (
-            _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn)
+            _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn,
+                                          constants_config=constants_config)
         )
 
         # Cell-centre spacing dz_half = dz_half_ref · J (nCells, nlev-1), the

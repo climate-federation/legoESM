@@ -60,7 +60,23 @@ _GUARDED = {
     "compute_visbeck_kappa_gm": (None, None),
     "compute_eke_kappa_gm": (None, None),
     "compute_treguier_kappa_gm": (None, None),
+    # The density that is fed INTO the pressure. A reviewer's point on #1627,
+    # and the reason a fix that stopped at the pressure calls produced a
+    # DIFFERENTLY wrong number rather than a right one: these build their own
+    # hydrostatic integral internally, so a call that omits gravity hands the
+    # equation of state a pressure the run never used, and the corrected
+    # pressure downstream is then integrated over a density that is still
+    # wrong.
+    "compute_ocean_rho": (None, None),
+    "compute_ocean_rho_and_pressure": (None, None),
 }
+
+#: Calls for which only GRAVITY is demanded. The two density helpers take a
+#: reference density as well, but it is consulted ONLY on the geometric-depth
+#: path and is documented as ignored on the default one, so requiring it
+#: everywhere would force an argument that changes nothing and mean nothing --
+#: the opposite of what a tripwire is for. Gravity enters both paths.
+_GRAVITY_ONLY = frozenset({"compute_ocean_rho", "compute_ocean_rho_and_pressure"})
 _DENSITY_KW = "rho_ref"
 
 # "<path>::<function>" -> why it cannot pass the run's gravity today.
@@ -117,7 +133,7 @@ def _non_compliant() -> set[str]:
                                         and len(call.args) > g_pos)
                 has_rho = (_DENSITY_KW in kw) or (rho_pos is not None
                                                   and len(call.args) > rho_pos)
-                if has_g and has_rho:
+                if has_g and (has_rho or name in _GRAVITY_ONLY):
                     continue
                 out.add(f"{rel}::{fn.name}")
     return out

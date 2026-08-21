@@ -68,7 +68,8 @@ def make_mpas_ocean_physics(
         from legoesm.ocean.physics.vertical_mixing.mpas_integration import (
             make_kpp_physics_mpas,
         )
-        _kpp_fn = make_kpp_physics_mpas(vm_config, eos_fn=eos_fn)
+        _kpp_fn = make_kpp_physics_mpas(vm_config, eos_fn=eos_fn,
+                                        constants_config=config.constants)
     else:
         _kpp_fn = None
 
@@ -419,7 +420,11 @@ def make_mpas_ocean_physics(
             # a depth-dependent (thermobaric) EOS such as ``nemo_seos``, where
             # the stability ranking — not just the dycore tendencies — depends
             # on the EOS; using Wright there would mis-rank N²<0 convection.
-            rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
+            # The run's gravity, not the library's. The pressure this density
+            # is built on is linear in it, and the NEMO comparison cards pin a
+            # value that differs from the module default.
+            rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn,
+                                    g=config.constants.g)
             # Tracer-only on MPAS: the convective **momentum** viscosity
             # (cfg_c.nu_conv / convective_νz) is intentionally NOT applied
             # here.  MPAS carries edge-normal velocity (nEdges) whose
@@ -437,6 +442,7 @@ def make_mpas_ocean_physics(
                 from legoesm.ocean.eos import compute_ocean_rho_and_pressure
                 _, p_cell = compute_ocean_rho_and_pressure(
                     state, z_coord, jacobian, eos_fn=eos_fn,
+                    g=config.constants.g,
                 )
                 c_out = enhanced_diffusion_convection(
                     state.T.data, state.S.data, rho, z_coord, jacobian, cfg_c,

@@ -16,6 +16,7 @@ import numpy as np
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -281,7 +282,8 @@ class MPASOceanModel:
                     make_kpp_profiles_mpas,
                 )
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
-                    _vm_cfg, eos_fn=self._eos_fn)
+                    _vm_cfg, eos_fn=self._eos_fn,
+                    constants_config=self.config.physics.constants)
 
         # Build TKE profile function for the implicit vertical mixing path.
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
@@ -301,12 +303,19 @@ class MPASOceanModel:
                     make_tke_profiles_mpas,
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
-                    _vm_cfg_tke, eos_fn=self._eos_fn)
+                    _vm_cfg_tke, eos_fn=self._eos_fn,
+                    constants_config=self.config.physics.constants)
                 self._tke_prognostic = bool(
                     getattr(_vm_cfg_tke.tke, "prognostic", False))
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
+        # The run's own constants, for the convective-adjustment density below.
+        # Read from the physics config the model was built with rather than
+        # left to the library default, which the comparison cards do not use.
+        self._constants_config = ConstantsConfig()
+        if self.config.physics is not None:
+            self._constants_config = self.config.physics.constants
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _conv_cfg = getattr(self.config.physics, "convection", None)
             if _conv_cfg is not None and _conv_cfg.scheme == "enhanced_diffusion":
@@ -562,7 +571,8 @@ class MPASOceanModel:
                 )
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
                 _rho_conv = compute_ocean_rho(
-                    state, z_coord, _J_conv, eos_fn=self._eos_fn)
+                    state, z_coord, _J_conv, eos_fn=self._eos_fn,
+                    g=self._constants_config.g)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)
