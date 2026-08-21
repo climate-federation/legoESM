@@ -47,21 +47,12 @@ def main(argv=None) -> int:
     G.instrument_self_checks(wet)
 
     z = np.load(args.candidate)
-    # #1455: refuse to score an artifact whose seasonal clock is unknown or
-    # is the legacy relative one -- that is the confound this baseline exists
-    # to remove, and a silently-scored antiphase npz would re-create it.
-    if "seasonal_t0_seconds" not in z:
-        raise SystemExit(
-            f"{args.candidate} predates the seasonal_t0_seconds stamp; re-run "
-            "the twin with the current kamm_twin_90d.py")
-    t0 = float(z["seasonal_t0_seconds"])
+    # #1455: refuse to score an artifact whose seasonal clock is not the one
+    # the NEMO baselines below are on. Same guard the acceptance gate uses.
+    t0, t0_ref = G._twin.assert_nemo_seasonal_clock(z, args.candidate)
     print(f"candidate seasonal clock: t0 = {t0:.0f} s "
-          f"(= day {t0 / 86400.0:.2f} of the 360-day year)")
-    if t0 == 0.0:
-        raise SystemExit(
-            "candidate ran on the LEGACY RELATIVE clock (seasonal_t0_seconds=0) "
-            "-- it is antiphase to every NEMO baseline below and must not be "
-            "scored here (#1455)")
+          f"(= day {t0 / 86400.0:.2f} of the 360-day year); "
+          f"NEMO baseline is at day {t0_ref / 86400.0:.2f}")
 
     n_fail_total = 0
     for day in args.days:
