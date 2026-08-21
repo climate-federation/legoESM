@@ -273,16 +273,175 @@ def phase1(n_steps: int = 4, arms: tuple[str, ...] = ("d180", "y20")) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# PHASE 1b -- WHERE the one-step velocity divergence lives
+# ---------------------------------------------------------------------------
+def phase1b(arm: str = "d180", *, stress_implicit: bool | None = None) -> int:
+    """Split the ONE-step u/v divergence into its depth-mean (barotropic) and
+    shear (baroclinic) parts, and profile it by level.
+
+    Phase 1 reports that ONE step from a bit-exact bridged state already
+    differs by ~1e-2 m/s, while every per-term momentum row in the #1226 sweep
+    sits within ~1e-5 of NEMO.  Those two facts cannot both be about the same
+    thing, so this asks WHICH PART of the velocity carries the difference:
+
+      * depth-mean-dominated  -> the barotropic solve / its reconciliation is
+        the carrier, and it is the part the ACC (a depth-INTEGRATED transport)
+        actually reads;
+      * shear-dominated       -> the implicit vertical solve or the surface
+        stress placement;
+      * surface-spike         -> the wind entry;
+      * bottom-spike          -> the drag.
+
+    The split is exact by construction (u = ubar + u'), both sides use the
+    SAME thickness field (NEMO's, from its own restart ssh) so the weighting
+    cannot differ, and the reduction is stated next to every number.
+    """
+    ic, run_dir = _ARMS[arm]
+    env = dict(os.environ)
+    env["DINO_1226_IC_STEP"] = str(ic)
+    env["DINO_NEMO_RUN_TWIN_STEP1"] = run_dir
+    if stress_implicit is not None:
+        env["DINO_D180_STRESS_IMPLICIT"] = "1" if stress_implicit else "0"
+    else:
+        env.pop("DINO_D180_STRESS_IMPLICIT", None)
+    code = r"""
+import json, os, sys, numpy as np
+sys.path.insert(0, %r)
+import multistep_replay as m
+from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.experiments.dino import (
+    apply_dino_lat_lon_surface_forcing, dino_lat_lon_model_config,
+    dino_lat_lon_surface_forcing_arrays, dino_step_surface_forcing)
+m.provenance('phase1b')
+g, br, cfg, st = m.build_replay_ic()
+_si = os.environ.get('DINO_D180_STRESS_IMPLICIT')
+if _si is not None:
+    # PRE-REGISTERED ONE-VARIABLE A/B.  surface_stress_implicit=False (the
+    # card's default) gives the wind an explicit per-step surface kick;
+    # =True deposits it in the top cell of the implicit vertical solve's RHS,
+    # which is where NEMO's dynzdf puts it.  Nothing else changes.
+    import dataclasses as _dc
+    cfg = _dc.replace(cfg, surface_stress_implicit=(_si == '1'))
+    print('ABLATION: surface_stress_implicit=' + str(cfg.surface_stress_implicit))
+mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+_oi = os.environ.get('DINO_OUTER_INTEGRATOR', '')
+if _oi:
+    # PRE-REGISTERED ONE-VARIABLE A/B on the STEP COMPOSITION: the DINO card
+    # runs the two-pass leapfrog (a full pipeline pass at Nnn, then a second
+    # dissipation-only pass at Nbb); 'nemo_mlf' is the single-pass stpmlf
+    # transcription NEMO itself runs.  nemo_mlf hard-requires the NEMO
+    # e3w(Kmm) divisor at construction, so force it with the switch.
+    if _oi not in ('leapfrog', 'nemo_mlf'):
+        raise SystemExit('Unknown DINO_OUTER_INTEGRATOR=' + repr(_oi))
+    mc = mc._replace(outer_integrator=_oi,
+                     implicit_vmix_e3t_now_divisor=(
+                         True if _oi == 'nemo_mlf'
+                         else mc.implicit_vmix_e3t_now_divisor))
+    print('ABLATION: outer_integrator=' + str(mc.outer_integrator)
+          + ' implicit_vmix_e3t_now_divisor='
+          + str(mc.implicit_vmix_e3t_now_divisor))
+model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
+forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+sf = dino_step_surface_forcing(forcing) if bool(getattr(cfg,'wind_through_step',False)) else None
+dt = 2700.0
+kt = m.IC_STEP + 1
+placement = getattr(cfg, 'surface_tendency_placement', 'applied_now')
+ext = None
+if placement == 'leapfrog_rhs':
+    st, ext = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, dt,
+                                                 t_seconds=kt*dt, return_rate=True)
+else:
+    st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, dt,
+                                            t_seconds=kt*dt)
+st = model.step(st, dt, surface_forcing=sf, external_tracer_rate=ext)
+ns = m.nemo_now_state_at(kt)
+umask = np.asarray(g.umask) > 0.5
+vmask = np.asarray(g.vmask) > 0.5
+# SAME thickness on both sides: NEMO's own ssh at this step.  Only the
+# velocity differs, so the depth-mean split cannot be contaminated by a
+# thickness difference.
+e3 = np.asarray(compute_layer_thickness(ns.ssh, st.H_bathy.data, br.z_coord,
+                                        min_water_column_m=mc.min_water_column_m))
+out = {}
+for tag, lego, nemo, msk in (
+        ('u', np.asarray(st.u.data)[:, 1:, :], ns.u, umask),
+        ('v', np.asarray(st.v.data)[1:, :, :], ns.v, vmask)):
+    d = np.where(msk, lego - nemo, 0.0)
+    h = np.where(msk, e3, 0.0)
+    H = h.sum(axis=-1)
+    dbar = np.divide(( d * h ).sum(axis=-1), H, out=np.zeros_like(H), where=H > 0)
+    dshear = np.where(msk, d - dbar[..., None], 0.0)
+    wet2 = H > 0
+    out[tag] = dict(
+        max_total=float(np.abs(d[msk]).max()),
+        max_depthmean=float(np.abs(dbar[wet2]).max()),
+        max_shear=float(np.abs(dshear[msk]).max()),
+        rms_total=float(np.sqrt((d[msk]**2).mean())),
+        rms_depthmean=float(np.sqrt((dbar[wet2]**2).mean())),
+        rms_shear=float(np.sqrt((dshear[msk]**2).mean())),
+        per_level_rms=[float(np.sqrt((d[..., k][msk[..., k]]**2).mean()))
+                       if msk[..., k].any() else 0.0
+                       for k in range(d.shape[-1])],
+        argmax=[int(x) for x in np.unravel_index(
+            int(np.argmax(np.where(msk, np.abs(d), -np.inf))), d.shape)],
+        max_abs_state=float(np.abs(nemo[msk]).max()),
+    )
+print('@@JSON@@' + json.dumps(out))
+""" % (_THIS_DIR,)
+    proc = subprocess.run([sys.executable, "-c", code], env=env,
+                          capture_output=True, text=True)
+    hit = [l for l in proc.stdout.splitlines() if l.startswith("@@JSON@@")]
+    for l in proc.stdout.splitlines():
+        if not l.startswith("@@JSON@@"):
+            print(f"  [{arm}] {l}")
+    if not hit:
+        print(proc.stderr[-4000:])
+        raise SystemExit("phase1b produced no result")
+    import json
+    res = json.loads(hit[-1][len("@@JSON@@"):])
+    print(f"\nPHASE 1b  arm={arm}: ONE step, max/rms over WET FACES of "
+          f"(legoESM - NEMO), split u = depth-mean + shear on NEMO's own e3")
+    print("  comp  reduction        total    depth-mean         shear   "
+          "depth-mean share of rms")
+    for tag in ("u", "v"):
+        r = res[tag]
+        for red in ("max", "rms"):
+            share = (r[f"{red}_depthmean"] / r[f"{red}_total"]
+                     if r[f"{red}_total"] else float("nan"))
+            print(f"  {tag}     {red:<12s}{r[f'{red}_total']:13.4e}"
+                  f"{r[f'{red}_depthmean']:14.4e}{r[f'{red}_shear']:14.4e}"
+                  f"{share:14.3f}")
+        print(f"        argmax(j,i,k)={tuple(r['argmax'])}  "
+              f"max|NEMO {tag}|={r['max_abs_state']:.4f} m/s")
+        pl = r["per_level_rms"]
+        top = sorted(range(len(pl)), key=lambda k: -pl[k])[:5]
+        print("        per-level rms, 5 largest levels: "
+              + ", ".join(f"k={k}:{pl[k]:.3e}" for k in top))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--phase", default="0", choices=["0", "1"],
+    ap.add_argument("--phase", default="0", choices=["0", "1", "1b"],
                     help="0 = NEMO-side control, 1 = free-running walk")
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--arms", default="d180,y20")
+    ap.add_argument("--stress-implicit", default=None,
+                    choices=["0", "1"],
+                    help="phase 1b only: force DINOConfig.surface_stress_implicit "
+                         "(one-variable A/B against the card default)")
     args = ap.parse_args(argv)
     provenance()
     if args.phase == "0":
         return phase0()
+    if args.phase == "1b":
+        rc = 0
+        si = None if args.stress_implicit is None else (args.stress_implicit == "1")
+        for arm in args.arms.split(","):
+            rc |= phase1b(arm, stress_implicit=si)
+        return rc
     return phase1(n_steps=args.steps, arms=tuple(args.arms.split(",")))
 
 

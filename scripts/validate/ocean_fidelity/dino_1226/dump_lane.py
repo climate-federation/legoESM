@@ -51,6 +51,13 @@ LANES = {
     # bit-identical to the certified binary's from the same restart.
     "d180": (os.path.join(_DINO_CFG, "RUN_SEQDUMP_D180_1R"),
              "DINO_00005760_restart.nc", 5761),
+    # NEMO year 20, 1 rank, SAME instrumented binary and SAME symlink
+    # convention as d180.  Present because several sweep rows were originally
+    # measured here rather than on RUN_GDB, and because RUN_GDB's ocean.output
+    # lacks strings some probes parse -- so this is the lane that can give a
+    # year-20 BASELINE for a probe RUN_GDB cannot run at all.
+    "y20": (os.path.join(_DINO_CFG, "RUN_SEQDUMP_Y20_1R"),
+            "DINO_00230400_restart.nc", 230401),
 }
 
 LANE = os.environ.get("DINO_1226_LANE", "gdb_y5")

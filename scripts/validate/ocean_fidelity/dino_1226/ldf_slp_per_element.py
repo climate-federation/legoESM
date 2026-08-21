@@ -50,6 +50,15 @@ _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 _load_interior = _bn2_alpha_compare._load_interior
 
+# #1455: which NEMO dump run/lane this probe measures against (gdb_y5 default,
+# byte-identical to the prior hardcoded RUN_GDB/kt=57601 pairing; d180 via
+# DINO_1226_LANE=d180) -- ONE shared selector, same importlib-by-path idiom.
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.experiments.dino import (
     dino_config_for_recipe, dino_lat_lon_model_config,
@@ -70,8 +79,8 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
 # from RUN_TRAJ and the restart from RUN_Y5_REBUILD against RUN_GDB's dumps --
 # a cross-run-directory mismatch. mesh_mask.nc also exists in RUN_GDB itself
 # (verified), so there is no reason to reach outside it.
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 FLOOR = 1.0e-12
 OFFSETS = (-2, -1, 0, 1, 2)
@@ -482,6 +491,7 @@ def per_element_report(name, lego, nemo, wet):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")
     print(f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')}")

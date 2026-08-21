@@ -176,8 +176,13 @@ from legoesm.ocean.experiments.dino import (
     dino_step_surface_forcing,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART_FILE = "DINO_00057600_restart.nc"   # the restart RUN_GDB STARTED from
+import dump_lane
+
+# #1455 (dump_lane selector): RUN_DIR/RESTART_FILE come from the shared
+# DINO_1226_LANE-selected run dir, not a hardcoded RUN_GDB path -- the
+# default lane (gdb_y5) resolves to exactly what was hardcoded here before.
+RUN_DIR = dump_lane.RUN_DIR
+RESTART_FILE = dump_lane.RESTART             # the restart the run STARTED from
 DT = 2700.0                                  # rn_Dt (namelist_cfg:116)
 RDT = 2.0 * DT                               # MLF rDt (ocean.output:249)
 
@@ -330,6 +335,7 @@ def _shift_scan(name, lego, nemo, mask):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="acc_momentum_budget")
     print("=" * 100)
     print("ACC MOMENTUM BUDGET -- legoESM vs NEMO, per term, Y5 restart state")
