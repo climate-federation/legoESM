@@ -267,3 +267,34 @@ def test_carbon_pools_revert_with_the_column():
     assert int(n_held) == 1
     assert float(carbon["C_fol"][1]) == 110.0, "carbon advanced on a held column"
     assert float(carbon["C_fol"][0]) == 101.0, "carbon froze on a healthy column"
+
+
+def test_the_production_lane_reports_held_columns():
+    """A hold that nothing prints is a run quietly freezing part of its land.
+
+    The guard's own docstring says the caller is responsible for surfacing the
+    count, and no caller did: the coupled driver unpacked the three-value
+    result and the containment status went nowhere. This asserts the icosahedral
+    production lane -- the function that actually runs, not a wrapper -- takes
+    the diagnostic form, carries the count out of the compiled land step, and
+    logs it.
+    """
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    src = inspect.getsource(ModelDriver._run_mpas)
+    assert "step_multilayer_land_with_diagnostics" in src, (
+        "the production land step uses the three-value form, which discards "
+        "the containment status")
+    assert "n_held" in src
+    # Reported, not merely computed.
+    assert "held" in src.lower().split("logger.warning", 1)[-1][:600] or \
+        any("held" in line.lower()
+            for line in src.splitlines()
+            if "logger.warning" in line or "column-steps" in line), (
+        "the held count is carried out but never logged")
+    # Read at a cadence, not every step: an unconditional int() on a device
+    # scalar stalls the accelerator once per step for a number that is almost
+    # always zero.
+    assert "_HARD_SAT_LOG_CADENCE_STEPS" in src

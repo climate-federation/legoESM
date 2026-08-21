@@ -8797,10 +8797,13 @@ class ModelDriver:
 
             @jax.jit
             def _land_step_fn(land_state, a2s, doy):
-                new_state, resp, _carbon = step_multilayer_land(
-                    land_state, a2s, _lml_cfg, _lml_umin, DT,
-                    lat=_lml_lat, doy=doy, land_params=_lml_params,
-                    carbon_state=_lml_carbon)
+                from legoesm.land.multilayer_land import (
+                    step_multilayer_land_with_diagnostics)
+                new_state, resp, _carbon, _sfc = (
+                    step_multilayer_land_with_diagnostics(
+                        land_state, a2s, _lml_cfg, _lml_umin, DT,
+                        lat=_lml_lat, doy=doy, land_params=_lml_params,
+                        carbon_state=_lml_carbon))
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
@@ -8813,8 +8816,17 @@ class ModelDriver:
                 # the atmosphere re-applying its own exchange coefficient
                 # delivered ~a tenth of the solved flux -- Amazon latent heat
                 # 78 W/m2 offline vs 7 coupled, land 10 K cold in 30 days).
+                # A column whose surface solve was rejected is HELD: its
+                # state is reverted and it conserves neither energy nor water
+                # over that step. The land step is inside a compiled region
+                # where a print is not available on a GPU-only runtime, so the
+                # count comes out here and the loop below reports it. Without
+                # that, a run whose land is quietly frozen somewhere looks
+                # exactly like a healthy one.
+                _n_held = (_sfc.n_held if _sfc.n_held is not None
+                           else jnp.zeros((), jnp.int32))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx)
+                        resp.shflx, resp.lhflx, _n_held)
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8842,6 +8854,11 @@ class ModelDriver:
                         "  mpas_land_beta_soil: traced per-cell beta_soil "
                         "REPLACES the static mpas_land_beta=%.2f over land",
                         _land_beta)
+
+            # Running total of held column-steps, kept on the device so the
+            # hot loop never syncs for it (read at the warning cadence).
+            _land_n_held_accum = jnp.zeros((), jnp.int32)
+            self._land_n_held_reported = 0
 
             from legoesm.land.forcing.solar import cos_solar_zenith as _csz
             _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
@@ -9638,9 +9655,26 @@ class ModelDriver:
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
-                     _land_shflx_step, _land_lhflx_step) = _land_step_fn(
+                     _land_shflx_step, _land_lhflx_step,
+                     _land_n_held_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    # Accumulate ON DEVICE and read at the same cadence the
+                    # other post-step warnings use: reading it every step
+                    # would stall the GPU once per step for a number that is
+                    # almost always zero.
+                    _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                        _n_held_so_far = int(_land_n_held_accum)
+                        if _n_held_so_far > self._land_n_held_reported:
+                            logger.warning(
+                                "land: %d column-steps held since the run "
+                                "began (the surface solve was rejected and "
+                                "the column reverted, so its energy and water "
+                                "budgets do not close over those steps) — at "
+                                "step %d",
+                                _n_held_so_far, step)
+                            self._land_n_held_reported = _n_held_so_far
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction
                     # the consumer refuses the key, and adding it mid-run
