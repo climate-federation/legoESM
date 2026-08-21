@@ -1479,3 +1479,119 @@ def test_the_les_drivers_still_run_the_scm_default_scheme():
             or "'--microphysics', default='morrison'" in src, (
             f"{script} no longer defaults to morrison; the SCM arm's default "
             "is now a different scheme from its LES")
+
+
+# --- the column carries what its scheme needs -------------------------------
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_two_moment_scheme_gets_its_number_tracers():
+    """The column used to carry six water masses and nothing else.
+
+    The physics bridge substitutes zeros for absent tracers, so a two-moment
+    scheme ran with rain and ice number pinned at zero every step -- measured,
+    that switches graupel formation off outright and moves the rain tendency by
+    2.8x. Names, order and units now come from the same registry the global
+    model uses.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    scm = drv._create_scm(cfg, case, 30.0)
+    registry = make_full_moisture_registry()
+    assert set(scm.state.tracers) == set(registry.names), sorted(scm.state.tracers)
+    for name, field in scm.state.tracers.items():
+        want = next(t for t in registry.tracers if t.name == name)
+        assert field.units == want.units, (name, field.units, want.units)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_single_moment_scheme_gets_no_number_tracers():
+    """Kessler needs no number variables, and must still get every water MASS.
+
+    Sizing the allocation purely by what the scheme declares would give Kessler
+    only vapour, cloud and rain -- and the bridge's tendency dictionary carries
+    all six masses for every scheme, so ice and snow would reappear at step 1.
+    That is the tracer-set growth the allocation exists to prevent.
+    """
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="kessler")
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    assert set(tracers) == {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"}
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_number_tracers_start_empty_which_the_optics_read_as_specified():
+    """Zero droplet number is the DOCUMENTED signal, not a gap.
+
+    The cloud optics read a droplet number at or below 1 as "this scheme does
+    not predict droplet number", substitute their own specified value, and
+    reconstruct in-cloud condensate as q_c / cloud_fraction so a specified
+    IN-CLOUD number is paired with in-cloud water. Seeding a large number
+    instead takes the prognostic branch and pairs that in-cloud number with
+    GRID-MEAN water: droplets too small by cf^(1/3), optical depth too large by
+    cf^(-1/3), a brightening that grows without bound as a layer breaks up.
+    Pinned because seeding it looks like the safer choice and is not.
+
+    Rain and ice number are likewise empty: the model grows them.
+    """
+    import numpy as _np
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    for name in ("N_c", "N_r", "N_i"):
+        got = _np.asarray(tracers[name].data)
+        assert _np.all(got == 0.0), (name, got.max())
+
+
+def test_slot_count_uses_the_scheme_config_not_just_its_name():
+    """SDM needs two slots for condensation and EIGHT with coalescence.
+
+    Passing only the scheme's name silently gives the coalescence
+    configuration six mass slots and no number slots, so its cloud- and
+    rain-number tendencies would be dropped -- the same silent zero-fill this
+    change exists to remove, one config flag deeper.
+    """
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        min_tracer_slots,
+    )
+
+    base = MicrophysicsConfig(scheme="sdm")
+    plain = min_tracer_slots("sdm", base.sdm)
+    coalescing = min_tracer_slots(
+        "sdm", base.sdm._replace(column_do_coalescence=True))
+    assert coalescing > plain, (plain, coalescing)
+    assert min_tracer_slots("sdm") == plain, (
+        "if the name-only lookup already matched the coalescing case this "
+        "test would be vacuous")
+
+
+@pytest.mark.parametrize("scheme", ["kessler", "morrison", "seifert_beheng",
+                                    "thompson", "p3", "fast_sbm"])
+def test_every_shipped_scheme_can_be_built_in_the_column(scheme):
+    """A scheme that cannot be constructed is a scheme nobody can run.
+
+    fast_sbm and p3 declare the full nine-slot layout but express their droplet
+    closure differently from Morrison; an allocation that insisted on reading a
+    Morrison-style droplet concentration refused them outright.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=False,
+                                   microphysics=scheme)
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=8, dt=60.0,
+        T_profile=jnp.linspace(230.0, 290.0, 8),
+        q_v_profile=jnp.full((8,), 1.0e-3))
+    assert "q_g" in scm.state.tracers, scheme
