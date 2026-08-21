@@ -55,6 +55,11 @@ WH_NODES="${WH_NODES:-16}"
 WH_GPN="${WH_GPN:-4}"
 WH_SUBDIV="${WH_SUBDIV:-9}"
 WH_NDEV=$((WH_NODES * WH_GPN))
+# 12-step arms gave 7.7% spread on IDENTICAL controls in this campaign and
+# 60-step arms gave 0.3%, so the default is 60. The original -14.1% receipt
+# was taken at 12 and is a weaker measurement than anything taken here.
+WH_STEPS="${WH_STEPS:-60}"
+WH_WARMUP="${WH_WARMUP:-5}"
 
 run_arm () {  # wide tag
   local WH=$1 TAG=$2
@@ -66,8 +71,8 @@ run_arm () {  # wide tag
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
       --multicontroller --n-devices "$WH_NDEV" \
       --subdivision "$WH_SUBDIV" --nlev 26 \
-      --steps 12 --warmup 3 --lloyd 0 --partition-method sfc \
-      --reorder-for "$WH_NDEV" \
+      --steps "$WH_STEPS" --warmup "$WH_WARMUP" --lloyd 0 \
+      --partition-method sfc --reorder-for "$WH_NDEV" \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
 }
 # GPU PARITY GATE first (cheap, 1 node, s6@4): wide step vs the
@@ -84,16 +89,20 @@ LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 JAX_ENABLE_X64=0 \
     --out "$OUTDIR/parity_s6np4.jsonl" \
   || { echo "WIDE PARITY GATE FAILED — timing arms not run"; exit 5; }
 
+# INTERLEAVED, not A/B/A2: a block-sequential order aliases the node
+# warm-up ramp into the ratio (three runs lost to that in this campaign).
 run_arm 0 off_a
 run_arm 1 on_b
 run_arm 0 off_a2
+run_arm 1 on_b2
 
 echo "=== RECEIPTS ==="
 set +e
 WH_NDEV="$WH_NDEV" "$PY" - "$OUTDIR" <<'EOF'
 import json, math, os, sys, pathlib
 out = pathlib.Path(sys.argv[1])
-WANT = {"off_a": (False, 3), "on_b": (True, 9), "off_a2": (False, 3)}
+WANT = {"off_a": (False, 3), "on_b": (True, 9),
+        "off_a2": (False, 3), "on_b2": (True, 9)}
 ND = int(os.environ["WH_NDEV"])
 t = {}
 for tag, (wide, depth) in WANT.items():
@@ -118,15 +127,33 @@ for tag, (wide, depth) in WANT.items():
     t[tag] = r["steady_median_ms"]
     cp = r.get("hlo_collective_permutes")
     print(f"{tag}: {t[tag]:9.2f} ms  (hlo CP: {cp})")
-drift = abs(t["off_a"] - t["off_a2"]) / t["off_a"]
-ratio = t["on_b"] / min(t["off_a"], t["off_a2"])
-print(f"A/A2 drift {100*drift:.1f}% | wide/off ratio {ratio:.3f}")
-if ratio <= 0.70:
-    print("VERDICT: CONFIRMED — wide halo cuts the latency floor")
-elif ratio >= 0.90:
-    print("VERDICT: REFUTED — census the wide step's CP count"); sys.exit(2)
+off = (t["off_a"] + t["off_a2"]) / 2
+on = (t["on_b"] + t["on_b2"]) / 2
+spread = max(abs(t["off_a"] - t["off_a2"]) / off,
+             abs(t["on_b"] - t["on_b2"]) / on)
+ratio = on / off
+print(f"narrow mean {off:.3f} ms | wide mean {on:.3f} ms | "
+      f"wide/narrow {ratio:.3f} | worst arm spread {100*spread:.1f}%")
+if abs(1.0 - ratio) < 0.5 * spread:
+    print("INCONCLUSIVE: the difference is inside the arm spread")
+    sys.exit(3)
+# The question this now answers is NOT the original one. At 64 devices the
+# wide halo won 14% by trading collectives for ghost compute. Where the
+# halo costs nothing -- measured: communication is 0.0 ms of the 23.1 ms
+# step at 8 devices -- that trade should INVERT, because the offline row
+# census says the wide ring adds 6.2% of the local rows at 8 devices and
+# 9.0% at 16 while saving rounds that are already free.
+if ratio >= 1.03:
+    print("VERDICT: CONFIRMS — the wide halo is a net LOSS at this device "
+          "count; it buys communication that is already free and pays for "
+          "it in ghost compute")
+elif ratio <= 0.97:
+    print("VERDICT: REFUTES — the wide halo still wins here, so its gain "
+          "is not the round count and the ghost-compute price is not the "
+          "binding term"); sys.exit(2)
 else:
-    print("VERDICT: intermediate — census + reprice"); sys.exit(3)
+    print("VERDICT: neutral — within 3%; neither the row census nor the "
+          "round saving dominates")
 EOF
 rcv=$?
 [ "$rcv" -ne 0 ] && rc=$rcv

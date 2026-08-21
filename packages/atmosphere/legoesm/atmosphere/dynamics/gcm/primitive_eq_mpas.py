@@ -783,6 +783,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     ):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
+        # The unstructured core's cost per cell per level varies threefold
+        # with the level count, and the lat-lon core measured flat over the
+        # same counts — so the advisory belongs here, not in the shared
+        # vertical-coordinate factory.
+        from legoesm.grids.vertical import warn_if_unaligned_levels
+        warn_if_unaligned_levels(
+            getattr(sigma_coord, "n_levels", 0),
+            where="MPASPrimitiveEquationModel")
         self.config = config or MPASPrimitiveEquationConfig()
         # Owner decision 2026-08-16: conserving form always, and any
         # NON-conserving form must announce itself. Static Python at build
