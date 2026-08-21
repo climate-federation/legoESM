@@ -51,29 +51,50 @@ Instrument controls (refuse loudly, no verdict printed):
 
 ``--widen-corners`` (OPT-IN, off by default; the default arms keep their
 exact behaviour and JSON tags so their numbers stay reproducible).
-THE FIRST ELIMINATION WAS BLIND WHERE THE ERROR LIVES.
 ``sentinel_mask`` (compare_gs_metrics.py) masks a cell when EITHER side
-is sentinel, and the port's single-tile builder leaves 1e30 in exactly
-the corner-diagonal halo cells -- so those were dropped on the PORT side
-and never transplanted, while the oracle holds real, mirror-symmetric
-values there.  Those cells ARE read on this lane: ``del6_vt_flux`` at
-nord=2 fills its work array over the whole padded box including the
-corner diagonals (sw_core.F90:2051-2089), and ``copy_corners`` is skipped
-on a bounded domain on BOTH sides (tp_core.F90:139-141/160-162), so no
-corner repair hides them.  This arm transplants wherever the ORACLE is
-real, i.e. it additionally imports the cells the port marks sentinel.
+is sentinel, so a PORT sentinel dropped the cell even where the oracle
+held a real value.  This arm transplants wherever the ORACLE is real,
+i.e. it additionally imports those cells.
+
+HOW MUCH THAT ACTUALLY BUYS -- MEASURED, because the first version of
+this docstring got it wrong and would have oversold a null result.  The
+port's sentinel is ``BIG_NUMBER = 1.0e8`` (fv3_native_gridstruct.py:72),
+NOT 1e30; the single 1e30 array (``area_c``) is fully overwritten by the
+outermost-ends replication, so it has no sentinel cells left.  At C48,
+tile 1, the cells this arm newly covers are:
+
+    cosa_s   36 per face  (the 3x3 corner wedge, four corners)
+    rsin2     4 per face
+    cosa      2 per face
+    every length / area / reciprocal family:  NONE
+
+So the earlier experiment DID cover the corner diagonals of the length,
+area and reciprocal families -- the widening adds ~42 cells per face in
+three trigonometric families and nothing else.  ``del6_u/del6_v/divg_u/
+divg_v`` carry ``BIG_NUMBER``-derived values on BOTH sides at those
+cells, so neither arm can touch them; if those two families matter, they
+need a comparison, not a transplant.
 
 Controls specific to this arm:
-  * per-family and total count of NEWLY covered cells (port sentinel,
-    oracle real), with the pre-transplant disagreement at those cells,
-    printed BEFORE the physics re-runs.  Total zero => REFUSE: an arm
-    that quietly changed nothing would report "unchanged", which reads
-    as an elimination -- the same mistake this arm exists to correct;
+  * per-family counts of NEWLY covered cells (port sentinel, oracle
+    real), SPLIT by whether the cell lies in a corner region, printed
+    BEFORE the physics re-runs.  Zero corner-region cells => REFUSE.
+    The refusal is keyed to the CORNER count, not the total: a nonzero
+    total sourced from an unrelated family would otherwise let a no-op
+    pass, and "unchanged" from a no-op reads as an elimination -- the
+    same mistake this arm exists to correct.  A skipped family or face
+    is fatal here too, for the same reason;
+  * the printed "pre max|d| there" is, by construction, about the
+    sentinel magnitude (the port holds BIG_NUMBER at those cells); it
+    is a receipt that the arm had something to write, not a physical
+    disagreement;
   * cells where the ORACLE side is sentinel or non-finite are NEVER
     written (they carry no information) and are counted as refused
     rather than silently skipped;
   * the exact post-transplant equality check is re-evaluated over the
-    WIDENED set, with only oracle-sentinel cells excused.
+    WIDENED set, with only oracle-sentinel cells excused -- and it now
+    also covers ``rsina`` and the staggered-grid families, which had no
+    such check at all.
 
 NOT covered by ``--widen-corners`` either, stated rather than implied:
 oracle-sentinel/non-finite cells; the sin_sg/cos_sg slot ASSIGNMENT,
@@ -121,7 +142,10 @@ from compare_gs_metrics import (  # noqa: E402
     FAMILIES_3D,
     SWAP_PARTNER,
     _ODD,
+    region_masks,
     resolve_sign,
+    sent_lo,
+    sent_mag,
     sentinel_mask,
 )
 
@@ -161,7 +185,11 @@ def n0_control() -> bool:
     ak, bk, _ptop, _ks = set_eta_analytic(KM)
     ic_run = f"{fsp.ORACLE_ROOT}/run_nh_zerostep_gfs"
     orc_ic = fsp.load_oracle(ic_run, nh=True)
-    state = fsp.build_port_ic(ctx, ak, bk, nh=True)
+    # build_port_ic returns (state, sphum) since the moist arm landed;
+    # passing the TUPLE to port_window died with "list indices must be
+    # integers" and had made this whole script unrunnable -- the failure
+    # was invisible because the runner reported success on it.
+    state, _sphum = fsp.build_port_ic(ctx, ak, bk, nh=True)
     p_ic = fsp.port_window(state, ctx)
     (cost, meta, perm, worst, _pf, _wo) = fsp.derive_face_map(p_ic, orc_ic)
     print(f"\nA. N=0 CONTROL (port IC vs oracle {ic_run}):")
@@ -269,6 +297,7 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
 
     total_changed = 0
     total_widen_new = 0
+    total_widen_corner = 0
     total_widen_refused = 0
     skipped = []
     for fam in sorted(FAMILIES):
@@ -280,6 +309,7 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
         # -inf, not nan: max(nan, x) returns nan in Python, so a nan
         # seed would swallow every real reading it is compared against.
         fam_widen_total, fam_widen_pre = 0, float("-inf")
+        fam_widen_chg, fam_widen_corner = 0, 0
         for pf in range(6):
             _d, ot, op = fmap[pf]
             sw = op[0]
@@ -322,7 +352,24 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
                         np.abs(o2 - sgn * p2o)[new_cells_o].max()))
                 new_cells_p = _map_to_port(
                     new_cells_o.astype(np.float64), op) > 0.5
-                fam_widen_new = int((new_cells_p & (new != p_old)).sum())
+                # COVERAGE and CHANGE are different questions: a newly
+                # eligible cell whose oracle value already equals the
+                # port's is covered but not changed, and the refusal must
+                # key off coverage (codex MINOR).
+                fam_widen_new = int(new_cells_p.sum())
+                fam_widen_chg += int((new_cells_p & (new != p_old)).sum())
+                # AND KEY IT TO THE REGION THE ARM IS ABOUT. A nonzero
+                # global count can come entirely from a family that has
+                # nothing to do with the corner diagonals, and would then
+                # satisfy the refusal while the cells under test stayed
+                # untouched (codex MAJOR + the third reviewer's M3).
+                ish, jsh = FAMILIES[fam][2], FAMILIES[fam][3]
+                rm = region_masks(N, NG, ish, jsh)
+                corner = np.zeros(new_cells_p.shape, dtype=bool)
+                for rk, rv in rm.items():
+                    if rk.endswith("_corner"):
+                        corner |= rv
+                fam_widen_corner += int((new_cells_p & corner).sum())
                 total_widen_new += fam_widen_new
                 total_widen_refused += int(_sent_mask_single(o2, fam).sum())
             fam_changed += int((new != p_old).sum())
@@ -342,8 +389,10 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
         if widen:
             pre_txt = ("none" if fam_widen_pre == float("-inf")
                        else f"{fam_widen_pre:.4e}")
-            line += (f"  WIDEN newly covered {fam_widen_total} "
-                     f"pre max|d| there {pre_txt}")
+            line += (f"  WIDEN covered {fam_widen_total} "
+                     f"(corner-region {fam_widen_corner}, changed "
+                     f"{fam_widen_chg}) pre max|d| there {pre_txt}")
+            total_widen_corner += fam_widen_corner
         print(line)
 
     # rsina: compute-B extent (M_RSINA dumped is:ie+1, js:je+1)
@@ -384,6 +433,14 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
                     new_cells.astype(np.float64), op) > 0.5
                 rs_widen += int((new_cells_p & (new_win != p_win)).sum())
             fam_changed += int((new_win != p_win).sum())
+            # Post-check, which this family never had: the written cells
+            # must equal the oracle exactly (codex MAJOR).
+            rs_resid = np.where(sent_o, 0.0,
+                                np.abs(o2 - op_scalar(new_win, op)))
+            if float(rs_resid.max()) != 0.0:
+                raise SystemExit(
+                    f"REFUSING: rsina face {pf + 1} post-transplant "
+                    f"masked residual {float(rs_resid.max()):.3e} != 0.0")
             if window is None:
                 gs6[pf]["rsina"] = new_win
             else:
@@ -467,12 +524,21 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
                 else:
                     sent = (np.abs(a) >= 1.0e6) | (np.abs(p3[:, :, sp])
                                                    >= 1.0e6)
-                was_sent_p = np.abs(p3[:, :, sp]) >= 1.0e6
+                # abs(nan) >= 1e6 is False, so a non-finite port value
+                # would not have counted as sentinel (codex MINOR).
+                was_sent_p = ((np.abs(p3[:, :, sp]) >= 1.0e6)
+                              | ~np.isfinite(p3[:, :, sp]))
                 new3[:, :, sp] = np.where(sent, p3[:, :, sp], sgn * a)
                 if widen:
-                    sg_widen += int(((~sent) & was_sent_p
-                                     & (new3[:, :, sp]
-                                        != p3[:, :, sp])).sum())
+                    sg_widen += int(((~sent) & was_sent_p).sum())
+                # Post-check, which this family never had either.
+                sg_resid = np.where(sent, 0.0,
+                                    np.abs(sgn * a - new3[:, :, sp]))
+                if float(sg_resid.max()) != 0.0:
+                    raise SystemExit(
+                        f"REFUSING: {fam} face {pf + 1} slot {sp} "
+                        f"post-transplant residual "
+                        f"{float(sg_resid.max()):.3e} != 0.0")
             fam_changed += int((new3 != p3).sum())
             gs6[pf][key] = new3
         total_changed += fam_changed
@@ -517,15 +583,26 @@ def transplant_metrics(ctx, widen: bool = False) -> None:
         # Printed BEFORE any physics re-runs: this function is called by
         # the context builder, ahead of the gate.
         print(f"WIDEN RECEIPT: newly covered cells TOTAL "
-              f"{total_widen_new}; oracle-sentinel cells left alone "
-              f"{total_widen_refused}")
-        if total_widen_new == 0:
+              f"{total_widen_new}, of which in a CORNER region "
+              f"{total_widen_corner}; oracle-sentinel cells left alone "
+              f"in the 2-D families {total_widen_refused}")
+        if skipped:
+            # A family or face that was skipped is a family this arm did
+            # not cover, and a null result would then be read as covering
+            # it. Under --widen-corners that is fatal, not a note.
             raise SystemExit(
-                "WIDEN CONTROL FAILED: zero newly covered cells, so this "
-                "arm is a no-op and its result would be indistinguishable "
-                "from the narrow arm's. Reporting 'unchanged' from a "
-                "no-op would read as an elimination -- which is exactly "
-                "the blind spot this arm exists to correct. REFUSING.")
+                f"WIDEN CONTROL FAILED: {len(skipped)} family/face "
+                f"entries were skipped, so a null result would claim "
+                f"coverage this run does not have: {skipped}")
+        if total_widen_corner == 0:
+            raise SystemExit(
+                "WIDEN CONTROL FAILED: zero newly covered cells in any "
+                "corner region. The whole point of this arm is the "
+                "corner diagonals; a nonzero total elsewhere would let it "
+                "pass while the cells under test stayed untouched, and "
+                "reporting 'unchanged' from that would read as an "
+                "elimination -- the blind spot this arm exists to "
+                "correct. REFUSING.")
     if total_changed == 0:
         raise SystemExit(
             "TRANSPLANT CONTROL FAILED: zero cells changed -- the arm "
@@ -543,6 +620,11 @@ def run_gate(tag: str, transplant: bool,
     import legoesm.core.fv3_native_duo_stepper as ds
 
     out_json = os.path.join(OUT_DIR, f"nh_transplant_{tag}.json")
+    # An arm that raises before writing would otherwise have its
+    # PREVIOUS run's JSON read back and reported as this run's result
+    # (codex MAJOR).
+    if os.path.exists(out_json):
+        os.unlink(out_json)
     real = ds.build_six_face_duo_context
     if transplant:
         def wrapper(*a, **kw):

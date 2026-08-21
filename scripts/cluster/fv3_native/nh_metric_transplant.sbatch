@@ -26,5 +26,10 @@ ARGS=""
 [ "${WIDEN:-0}" = "1" ] && ARGS="--widen-corners"
 echo "args: ${ARGS:-<none>}"
 $PY scripts/validate/fv3_native/nh_metric_transplant.py $ARGS
-echo "  rc=$?"
+rc=$?
+echo "  rc=$rc"
+# EXIT ON THE PYTHON STATUS. Without -e, a traceback used to be followed
+# by this script's own success token and a COMPLETED job state -- which
+# is how a run that died in its first control got read as a result.
+[ "$rc" -eq 0 ] || { echo "NH_TRANS_FAILED rc=$rc"; exit "$rc"; }
 echo NH_TRANS_DONE
