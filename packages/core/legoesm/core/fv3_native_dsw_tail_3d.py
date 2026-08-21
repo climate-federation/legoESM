@@ -408,6 +408,14 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
         gs_nh = dict(ctx["gs6"][t])
         gs_nh["area"] = area6[t]
         gs_nh["rarea"] = rarea6[t]
+        if stage_hook is not None:
+            # The height as update_dz_d RECEIVES it. The after-hook below
+            # has existed for a while; without this one the two
+            # hypotheses that remain for the NH corner error -- a wrong
+            # halo fill of the height versus a wrong height update --
+            # cannot be separated, because only their sum is observable.
+            stage_hook("S_nh_before_update_dz_d", t,
+                       np.array(nh["zh6"][t], copy=True))
         update_dz_d(ndif, damp, int(c["hord_tm"]), bd, km, npx, npx,
                     area6[t], rarea6[t], dp0, nh["zs6"][t], nh["zh6"][t],
                     crx, cry, xfx, yfx, nh["ws6"][t], rdt, gs_nh,
