@@ -101,6 +101,30 @@ by up to 15% in thickness and 4% in depth -- a DEEP geometry difference, and
 therefore a different thing from the top-two-level shear divergence Phase 1b
 measures.
 
+METRIC-WEIGHT ROBUSTNESS (the obvious attack on the table above: the recorded
+ACC metric weights every arm with e3t_1d, which is the model's OWN thickness
+only on the two 1-D-thickness arms).  Re-scored with NEMO's true partial-cell
+e3t_0 as the vertical weight, applied identically to both sides:
+
+  arm            gap (e3t_1d weight)   gap (e3t_0 weight)
+  1-D,  1-D               +1.659               +1.666
+  NEMO, 1-D               +0.865               +0.787
+  1-D,  NEMO              +0.164               +0.118
+  NEMO, NEMO              -0.516               -0.638
+
+The ranking and the magnitudes survive; the depth-ladder arm stays inside the
+gate threshold under both weights.  The result is not an artifact of the
+metric's vertical weight.
+
+MECHANISM PATH, traced in code rather than inferred: the bridge's T-depth
+ladder becomes ``z_coord.t_depth_ref`` (nemo_state_bridge.py:174,228,275,535),
+which is passed as ``eos_geometric_depth_1d`` into the density/pressure
+computation (ocean_pe_latlon_cgrid.py:1279-1299).  So NEMO's own T-depths
+change the pressure depth the equation of state sees, hence in-situ density,
+hence the thermal-wind shear the transport integrates.  That the deep density
+contrast improves 14x on exactly that arm is consistent with this path; it is
+not by itself proof that no other path contributes.
+
 CAVEATS, both real:
   * my 1-D/1-D arm gives +1.659 Sv where the recorded #1455 baseline gives
     +1.872335 Sv.  The harness is bit-deterministic (a repeat run reproduces
