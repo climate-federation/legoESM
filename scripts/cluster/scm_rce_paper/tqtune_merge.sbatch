@@ -19,6 +19,10 @@ REF=$REPO/results/rcemip_ref_sam300
 OBJECTIVE=${OBJECTIVE:-thermo}
 PARAM_SET=${PARAM_SET:-physical}
 SEEDS=${SEEDS:-"20260815 20260816"}
+# Protocol tag, part of the results directory since the nonrotating (f0)
+# correction: a corrected run and a pinned one are NOT comparable term by term,
+# so they cannot share a directory or a merged table.
+PROTO_TAG=${PROTO_TAG:-}
 
 cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD)
@@ -37,7 +41,11 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
 RC_ALL=0
 for SEED in $SEEDS; do
-  OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_seed${SEED}
+  if [ -n "$PROTO_TAG" ]; then
+    OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_${PROTO_TAG}_seed${SEED}
+  else
+    OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_seed${SEED}
+  fi
   echo "=== MERGE seed=$SEED  $OUT ==="
   [ -d "$OUT" ] || { echo "SKIP: $OUT does not exist"; continue; }
   JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
@@ -51,7 +59,7 @@ for SEED in $SEEDS; do
     for HUM in logq rh qv; do
       JAX_ENABLE_X64=1 $PY $WT/scripts/plot/plot_scm_rce_tq_ranking.py "$CSV" \
         --out $OUT/tq_ranking_${HUM}.png --humidity $HUM --log-x \
-        --suptitle "SCM-RCE convection tuned to CRM T and humidity (seed $SEED)" \
+        --suptitle "SCM-RCE convection tuned to CRM T and humidity (seed $SEED${PROTO_TAG:+, $PROTO_TAG})" \
         2>&1 | tail -2
     done
   fi
@@ -78,6 +86,7 @@ echo "=== SEED AGREEMENT ==="
 JAX_ENABLE_X64=1 $PY $WT/scripts/validate/scm_rce_tq_seed_agreement.py \
   --arm-dir $REPO/results/scm_rce_tqtune \
   --objective $OBJECTIVE --param-set $PARAM_SET --seeds $SEEDS \
+  ${PROTO_TAG:+--arm-suffix $PROTO_TAG} \
   --out $REPO/results/scm_rce_tqtune/seed_agreement.json 2>&1 | tail -40
 ARC=${PIPESTATUS[0]}
 echo "SEED_AGREEMENT_RC=$ARC"

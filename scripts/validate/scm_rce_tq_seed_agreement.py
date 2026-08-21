@@ -46,8 +46,17 @@ def _read_csv(path: Path) -> dict[str, dict]:
     return {r["scheme"]: r for r in rows}
 
 
-def _arm_dir(root: Path, objective: str, param_set: str, seed: str) -> Path:
-    return root / f"arm_{objective}_{param_set}_seed{seed}"
+def _arm_dir(root: Path, objective: str, param_set: str, seed: str,
+             suffix: str = "") -> Path:
+    """Arm directory, optionally tagged with a PROTOCOL suffix.
+
+    The tag exists because the nonrotating (``f0``) correction changed the
+    surface boundary condition: a corrected run and a pinned-wind one are not
+    comparable term by term, so they live in separate directories and can never
+    be merged into one table by accident.
+    """
+    tag = f"_{suffix}" if suffix else ""
+    return root / f"arm_{objective}_{param_set}{tag}_seed{seed}"
 
 
 def _find_csv(arm: Path) -> Path:
@@ -192,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--objective", default="thermo")
     parser.add_argument("--param-set", default="physical")
     parser.add_argument("--seeds", nargs="+", required=True)
+    parser.add_argument(
+        "--arm-suffix", default="",
+        help="protocol tag in the arm directory name (e.g. 'f0' for the "
+             "corrected nonrotating protocol); arms with different tags are "
+             "not comparable and must not be mixed")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -200,8 +214,10 @@ def main(argv: list[str] | None = None) -> int:
             "--seeds needs at least two: the whole point is the disagreement "
             "between independent searches.")
     seed_a, seed_b = args.seeds[0], args.seeds[1]
-    arm_a = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_a)
-    arm_b = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_b)
+    arm_a = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_a,
+                     args.arm_suffix)
+    arm_b = _arm_dir(args.arm_dir, args.objective, args.param_set, seed_b,
+                     args.arm_suffix)
     rows_a = _read_csv(_find_csv(arm_a))
     rows_b = _read_csv(_find_csv(arm_b))
 
