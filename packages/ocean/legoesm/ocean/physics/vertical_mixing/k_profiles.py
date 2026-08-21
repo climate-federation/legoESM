@@ -559,7 +559,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     "ConstantVerticalMixingConfig.lat_dependent=True requires "
                     "lat_deg (column latitudes in degrees) to be threaded to "
                     "compute_vertical_K_profiles; got None.")
-            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+            rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                               g=constants_config.g,
+                               rho0=constants_config.rho_0)
             dz_half = z_coord.dz_half_ref * J[..., jnp.newaxis]
             N2 = compute_N2(
                 rho, dz_half, constants_config.rho_0,
@@ -576,7 +578,9 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v, None
 
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                       g=constants_config.g,
+                       rho0=constants_config.rho_0)
 
     if scheme == "richardson":
         from legoesm.ocean.physics.vertical_mixing.richardson import (
@@ -1129,7 +1133,8 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
     )
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                       g=cc.g, rho0=cc.rho_0)
     # Adiabatic N² trigger (cfg.n2_mode == "adiabatic") needs the cell-centre
     # hydrostatic pressure + the model EOS; computed only when opted in so the
     # default in-situ path is bit-identical (mirrors the richardson/tke branches
@@ -1173,7 +1178,8 @@ def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig,
         T_b, S_b = before_tracers
         state_b = state._replace(T=state.T.replace(data=T_b),
                                  S=state.S.replace(data=S_b))
-        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn)
+        rho_b = _compute_rho(state_b, z_coord, J, eos_fn=eos_fn,
+                             g=cc.g, rho0=cc.rho_0)
         ed_p_cell_b = None
         if getattr(cfg, "n2_mode", "insitu") == "adiabatic":
             from legoesm.ocean.eos import (
@@ -1225,7 +1231,9 @@ def iwm_K_profile(state, z_coord, physics_config, iwm_cfg, *,
     T = state.T.data
     dtype = T.dtype
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                       g=physics_config.constants.g,
+                       rho0=physics_config.constants.rho_0)
 
     if isinstance(z_coord, OceanPartialCellCoordinate):
         # Partial-aware geometry: actual per-cell thickness (0 below the
@@ -1304,7 +1312,9 @@ def ddm_K_profile(state, z_coord, physics_config, ddm_cfg, *, eos_fn):
     dtype = T.dtype
     _eps = jnp.asarray(jnp.finfo(jnp.float32).eps, dtype)
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn,
+                       g=physics_config.constants.g,
+                       rho0=physics_config.constants.rho_0)
 
     # Interface spacing dz_w + interface depth (for the local reference
     # pressure), identical construction to iwm_K_profile.

@@ -60,8 +60,30 @@ _GUARDED = {
     "compute_visbeck_kappa_gm": (None, None),
     "compute_eke_kappa_gm": (None, None),
     "compute_treguier_kappa_gm": (None, None),
+    # The density that is fed INTO the pressure. A reviewer's point on #1627,
+    # and the reason a fix that stopped at the pressure calls produced a
+    # DIFFERENTLY wrong number rather than a right one: these build their own
+    # hydrostatic integral internally, so a call that omits gravity hands the
+    # equation of state a pressure the run never used, and the corrected
+    # pressure downstream is then integrated over a density that is still
+    # wrong.
+    "compute_ocean_rho": (None, None),
+    "compute_ocean_rho_and_pressure": (None, None),
 }
-_DENSITY_KW = "rho_ref"
+
+#: NOTHING IS EXEMPT FROM THE REFERENCE DENSITY. The first version of this
+#: extension excused the two density helpers from it, on the strength of a
+#: docstring saying the value is ignored on the default depth path. A reviewer
+#: read the code instead: the in-situ integral's surface term is
+#: ``rho_ref*g*eta``, so the reference density is consulted on BOTH paths and
+#: the docstring was wrong. Both the docstring and the exemption are gone. It
+#: is the third time on this rule that reasoning about what a call COULD need,
+#: rather than checking what it passes, produced a wrong answer.
+#: The reference density is spelled differently by different helpers -- the
+#: pressure integrator takes ``rho_ref``, the two density helpers take
+#: ``rho0`` -- and a rule that knows only one spelling reports the other's
+#: callers clean. Both count.
+_DENSITY_KWS = ("rho_ref", "rho0")
 
 # "<path>::<function>" -> why it cannot pass the run's gravity today.
 # SHRINK-ONLY.  Each needs the constants configuration threaded in from its
@@ -92,6 +114,28 @@ _DEBT: dict[str, str] = {
 }
 
 
+def _local_names(tree) -> dict[str, str]:
+    """Map every local name back to the guarded function it was imported as.
+
+    A file may import a guarded helper under another name -- ``compute_ocean_rho
+    as _compute_rho`` is in the tree today -- and a rule that matches only the
+    original spelling reports that file clean while four of its calls default
+    the run's gravity. Found by a reviewer after the first version of this
+    extension shipped; the alias had hidden them from the audit as well.
+    """
+    alias = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name in _GUARDED:
+                    alias[a.asname or a.name] = a.name
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname and a.name.rsplit(".", 1)[-1] in _GUARDED:
+                    alias[a.asname] = a.name.rsplit(".", 1)[-1]
+    return alias
+
+
 def _non_compliant() -> set[str]:
     """Every guarded call that does not pass gravity, as '<path>::<function>'."""
     out = set()
@@ -100,6 +144,7 @@ def _non_compliant() -> set[str]:
             tree = ast.parse(path.read_text(errors="replace"))
         except SyntaxError:                       # pragma: no cover
             continue
+        aliases = _local_names(tree)
         rel = path.relative_to(_OCEAN)
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -109,13 +154,14 @@ def _non_compliant() -> set[str]:
                     continue
                 name = getattr(call.func, "id",
                                getattr(call.func, "attr", None))
+                name = aliases.get(name, name)
                 if name not in _GUARDED:
                     continue
                 g_pos, rho_pos = _GUARDED[name]
                 kw = {k.arg for k in call.keywords}
                 has_g = ("g" in kw) or (g_pos is not None
                                         and len(call.args) > g_pos)
-                has_rho = (_DENSITY_KW in kw) or (rho_pos is not None
+                has_rho = (bool(kw & set(_DENSITY_KWS))) or (rho_pos is not None
                                                   and len(call.args) > rho_pos)
                 if has_g and has_rho:
                     continue
