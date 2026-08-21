@@ -21,8 +21,12 @@ The number to compare against is the hand-written step's own census, taken from
 a real run's dumped module: THIRTEEN collective-permutes and ONE all-reduce, at
 32, 64 and 128 devices alike.
 
-Runs on host CPU devices; the collective STRUCTURE is a property of the program
-and not of the device type or the grid size.
+Runs on host CPU devices. The collective structure is NOT assumed to be
+device-count invariant -- that assumption was made once here and measured to be
+false for the automatic path, which is itself the finding: the hand-written
+path's census does not move between 2, 4 and 8 devices and the automatic one
+grows. Both paths are therefore censused at every device count rather than at
+one.
 
     XLA_FLAGS=--xla_force_host_platform_device_count=8 \\
     python scripts/validate/latlon_autoshard_census.py --n-devices 8
@@ -37,9 +41,11 @@ import numpy as np
 
 KINDS = ("collective-permute", "all-gather", "all-reduce", "all-to-all",
          "reduce-scatter", "collective-broadcast", "send", "recv")
-#: The hand-written path, censused from the module a real run compiled
-#: (job 27102260), identical at 32, 64 and 128 devices.
-MANUAL_REFERENCE = {"collective-permute": 13, "all-reduce": 1}
+#: The hand-written path is CENSUSED HERE, through this same function and at
+#: the same device counts, rather than quoted from a production run. A literal
+#: taken at 32-128 GPUs and compared against rows measured on a handful of CPU
+#: devices is a cross-protocol comparison, which is what the first version of
+#: this file did.
 
 
 def census(text):
@@ -108,9 +114,9 @@ def main() -> int:
     if nlat % nd:
         raise SystemExit(f"--n-lat {nlat} must divide {nd} devices")
 
-    def census_of(over, tendency_only=False, replicate=False):
+    def census_at(nd_, over, tendency_only=False, replicate=False):
         model, low, top, shard, mesh = _build(
-            jax, jnp, P, NamedSharding, Mesh, _np, nd, nlat, args.n_lon,
+            jax, jnp, P, NamedSharding, Mesh, _np, nd_, nlat, args.n_lon,
             args.nlev, over)
         if replicate:
             # Control: with nothing sharded there is nothing to communicate.
@@ -136,44 +142,76 @@ def main() -> int:
                      in_shardings=(shard,))
         return census(fn.lower(jax.device_put(low, shard)).compile().as_text())
 
-    # Each rung changes exactly one thing against the baseline above it.
-    ladder = [
-        ("whole step, everything replicated", {}, False, True),
-        ("whole step, default", {}, False, False),
-        ("ONE tendency evaluation", {}, True, False),
-        ("whole step, mass fixer off", dict(fix_mass=False), False, False),
-        ("whole step, mean surface-pressure tendency off",
-         dict(zero_mean_ps_tendency=False), False, False),
-        ("whole step, PPM transport off",
-         dict(use_ppm_transport=False), False, False),
-        ("whole step, pole velocity condition off",
-         dict(pole_v_bc=(False, False)), False, False),
-    ]
+    def manual_census(nd_):
+        """The hand-written path, through this same census function."""
+        from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
+            make_sharded_atm_latlon_step, shard_state_atm_latlon)
+        model, low, top, _shard, mesh = _build(
+            jax, jnp, P, NamedSharding, Mesh, _np, nd_, nlat, args.n_lon,
+            args.nlev, {})
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+            hydrostatic_to_cgrid)
+        from legoesm.atmosphere.forcing.idealized.held_suarez import (
+            held_suarez_init_latlon)
+        full = hydrostatic_to_cgrid(
+            held_suarez_init_latlon(model.grid, model.sigma_coord), model.grid)
+        step = make_sharded_atm_latlon_step(model, mesh)
+        laid = shard_state_atm_latlon(full, mesh)
+        return census(jax.jit(lambda s: step(s, 60.0))
+                      .lower(laid).compile().as_text())
+
+    # Both paths at every device count. The device sweep is not decoration: the
+    # first version of this file asserted the structure was device-independent
+    # and the sweep is what showed that to be false for one of the two paths.
+    print(f"{'devices':>7}  {'path':<38} {'perm':>5} {'a2a':>5} {'agath':>6} "
+          f"{'aredu':>6} {'total':>6}")
     rows = []
-    print(f"{'arm':<46} {'perm':>5} {'a2a':>5} {'agath':>6} {'aredu':>6} "
-          f"{'total':>6}")
-    for name, over, tend, repl in ladder:
+    sweep = [d for d in (2, 4, 8, 16, 32) if d <= nd and nlat % d == 0]
+    for d in sweep:
+        for name, fn in (("hand-written (shard_map + ppermute)",
+                          lambda d_=d: manual_census(d_)),
+                         ("automatic (GSPMD)",
+                          lambda d_=d: census_at(d_, {}))):
+            try:
+                c = fn()
+            except Exception as exc:
+                print(f"{d:>7}  {name:<38} FAILED "
+                      f"{type(exc).__name__}: {str(exc)[:40]}")
+                rows.append({"devices": d, "path": name,
+                             "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            print(f"{d:>7}  {name:<38} {c.get('collective-permute', 0):>5} "
+                  f"{c.get('all-to-all', 0):>5} {c.get('all-gather', 0):>6} "
+                  f"{c.get('all-reduce', 0):>6} {sum(c.values()):>6}")
+            rows.append({"devices": d, "path": name, "census": c,
+                         "total": sum(c.values())})
+
+    # Ablations, automatic path only, at the largest device count. Each changes
+    # exactly one configuration field. Two caveats found in review and kept
+    # visible: turning the mass fixer off also turns the mean surface-pressure
+    # tendency ON (they share one gate), so that row moves two things; and with
+    # the fixer left on, the mean-tendency row is a byte-identical no-op.
+    print()
+    for name, over in (("mass fixer off (also enables the mean tendency)",
+                        dict(fix_mass=False)),
+                       ("PPM transport off", dict(use_ppm_transport=False)),
+                       ("pole velocity condition off",
+                        dict(pole_v_bc=(False, False)))):
         try:
-            c = census_of(over, tendency_only=tend, replicate=repl)
-        except Exception as exc:  # a rung that cannot build is reported, not hidden
-            print(f"{name:<46} FAILED {type(exc).__name__}: {str(exc)[:50]}")
-            rows.append({"arm": name, "error": f"{type(exc).__name__}: {exc}"})
+            c = census_at(nd, over)
+        except Exception as exc:
+            print(f"{nd:>7}  {name:<38} FAILED {type(exc).__name__}")
             continue
-        print(f"{name:<46} {c.get('collective-permute', 0):>5} "
+        print(f"{nd:>7}  {name:<38} {c.get('collective-permute', 0):>5} "
               f"{c.get('all-to-all', 0):>5} {c.get('all-gather', 0):>6} "
               f"{c.get('all-reduce', 0):>6} {sum(c.values()):>6}")
-        rows.append({"arm": name, "overrides": {k: str(v) for k, v in over.items()},
-                     "tendency_only": tend, "replicated": repl,
+        rows.append({"devices": nd, "path": f"automatic, {name}",
                      "census": c, "total": sum(c.values())})
-    ref = MANUAL_REFERENCE
-    print(f"{'hand-written whole step (job 27102260)':<46} "
-          f"{ref['collective-permute']:>5} {0:>5} {0:>6} "
-          f"{ref['all-reduce']:>6} {sum(ref.values()):>6}")
 
     rec = {"component": "latlon_autoshard_census", "n_devices": nd,
            "n_lat": nlat, "n_lon": args.n_lon, "nlev": args.nlev,
            "backend": jax.default_backend(),
-           "hand_written_reference": ref, "ladder": rows}
+           "ladder": rows}
     if args.out:
         import os
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
