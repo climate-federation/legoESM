@@ -49,7 +49,42 @@ Instrument controls (refuse loudly, no verdict printed):
   * post-transplant re-comparison: masked max|oracle - s*mapped(port)|
     must be exactly 0.0 for every transplanted family/face.
 
+``--widen-corners`` (OPT-IN, off by default; the default arms keep their
+exact behaviour and JSON tags so their numbers stay reproducible).
+THE FIRST ELIMINATION WAS BLIND WHERE THE ERROR LIVES.
+``sentinel_mask`` (compare_gs_metrics.py) masks a cell when EITHER side
+is sentinel, and the port's single-tile builder leaves 1e30 in exactly
+the corner-diagonal halo cells -- so those were dropped on the PORT side
+and never transplanted, while the oracle holds real, mirror-symmetric
+values there.  Those cells ARE read on this lane: ``del6_vt_flux`` at
+nord=2 fills its work array over the whole padded box including the
+corner diagonals (sw_core.F90:2051-2089), and ``copy_corners`` is skipped
+on a bounded domain on BOTH sides (tp_core.F90:139-141/160-162), so no
+corner repair hides them.  This arm transplants wherever the ORACLE is
+real, i.e. it additionally imports the cells the port marks sentinel.
+
+Controls specific to this arm:
+  * per-family and total count of NEWLY covered cells (port sentinel,
+    oracle real), with the pre-transplant disagreement at those cells,
+    printed BEFORE the physics re-runs.  Total zero => REFUSE: an arm
+    that quietly changed nothing would report "unchanged", which reads
+    as an elimination -- the same mistake this arm exists to correct;
+  * cells where the ORACLE side is sentinel or non-finite are NEVER
+    written (they carry no information) and are counted as refused
+    rather than silently skipped;
+  * the exact post-transplant equality check is re-evaluated over the
+    WIDENED set, with only oracle-sentinel cells excused.
+
+NOT covered by ``--widen-corners`` either, stated rather than implied:
+oracle-sentinel/non-finite cells; the sin_sg/cos_sg slot ASSIGNMENT,
+which stays derived on the both-sides-live cells because a port sentinel
+cannot vote on a permutation (only the WRITE widens); ectx amat6, the
+ext-vector bases and the vertical ak/bk, which keep the base arm's
+boundary; and no corner-rotation repair is performed or emulated.
+
 usage: python scripts/validate/fv3_native/nh_metric_transplant.py
+       python scripts/validate/fv3_native/nh_metric_transplant.py \
+           --widen-corners
 """
 from __future__ import annotations
 
@@ -190,7 +225,24 @@ def _map_to_port(o2, op):
     return op_scalar(np.ascontiguousarray(o2), op_inverse(op))
 
 
-def transplant_metrics(ctx) -> None:
+def _sent_mask_single(a, fam: str):
+    """Sentinel/non-finite mask for ONE side only.
+
+    The both-sides ``sentinel_mask`` is what blinded the first
+    elimination: a port-side sentinel removed the cell from the
+    transplant even where the oracle held a real value.  This is used on
+    the oracle side to DEFINE the widened transplant set, and on the port
+    side only to COUNT which cells are newly covered.
+    """
+    a = np.asarray(a, dtype=np.float64)
+    m = (np.abs(a) >= sent_mag(fam)) | ~np.isfinite(a)
+    lo = sent_lo(fam)
+    if lo > 0.0:
+        m |= np.abs(a) <= lo
+    return m
+
+
+def transplant_metrics(ctx, widen: bool = False) -> None:
     orcm = load_extchain(EXTCHAIN_C48)
     gs6 = ctx["gs6"]
     fmap = derive_metric_face_map(orcm, gs6, N, NG)
@@ -216,6 +268,8 @@ def transplant_metrics(ctx) -> None:
                  for k in ("dx", "dy")} for t in range(6)]
 
     total_changed = 0
+    total_widen_new = 0
+    total_widen_refused = 0
     skipped = []
     for fam in sorted(FAMILIES):
         tag, key, ish, jsh = FAMILIES[fam]
@@ -223,6 +277,9 @@ def transplant_metrics(ctx) -> None:
             skipped.append(f"{fam} (no port key)")
             continue
         fam_changed, fam_pre = 0, 0.0
+        # -inf, not nan: max(nan, x) returns nan in Python, so a nan
+        # seed would swallow every real reading it is compared against.
+        fam_widen_total, fam_widen_pre = 0, float("-inf")
         for pf in range(6):
             _d, ot, op = fmap[pf]
             sw = op[0]
@@ -235,10 +292,17 @@ def transplant_metrics(ctx) -> None:
                 raise SystemExit(
                     f"REFUSING: {fam} oracle {o2.shape} vs mapped port "
                     f"{p2o.shape} (op={op})")
-            sent_o = sentinel_mask(o2, p2o, fam)
+            sent_both = sentinel_mask(o2, p2o, fam)
             sgn = 1.0
             if fam in _ODD:
-                sgn, _ec, _eo, _det = resolve_sign(o2, p2o, sent_o)
+                # The sign stays resolved on the BOTH-SIDES-live set even
+                # when widening: at a widened cell the port holds its
+                # sentinel, which swamps both candidates equally and
+                # cannot vote on the sign (resolve_sign's contract).
+                sgn, _ec, _eo, _det = resolve_sign(o2, p2o, sent_both)
+            sent_o = _sent_mask_single(o2, fam) if widen else sent_both
+            new_cells_o = ((~sent_o) & _sent_mask_single(p2o, fam)
+                           if widen else None)
             live = ~sent_o
             if live.any():
                 fam_pre = max(fam_pre, float(
@@ -246,22 +310,46 @@ def transplant_metrics(ctx) -> None:
             o_port = sgn * _map_to_port(o2, op)
             sent_p = _map_to_port(sent_o.astype(np.float64), op) > 0.5
             new = np.where(sent_p, p_old, o_port)
+            fam_widen_new = 0
+            if widen:
+                if new_cells_o.any():
+                    # The disagreement AT THE NEWLY COVERED CELLS, before
+                    # any write. The port holds a sentinel there, so this
+                    # is a receipt that the arm had something to change --
+                    # reported as a number rather than inferred from a
+                    # downstream "unchanged".
+                    fam_widen_pre = max(fam_widen_pre, float(
+                        np.abs(o2 - sgn * p2o)[new_cells_o].max()))
+                new_cells_p = _map_to_port(
+                    new_cells_o.astype(np.float64), op) > 0.5
+                fam_widen_new = int((new_cells_p & (new != p_old)).sum())
+                total_widen_new += fam_widen_new
+                total_widen_refused += int(_sent_mask_single(o2, fam).sum())
             fam_changed += int((new != p_old).sum())
             gs6[pf][key] = new
-            # post-check: transplanted values match the oracle EXACTLY
+            # post-check: transplanted values match the oracle EXACTLY,
+            # now over the WIDENED set (only oracle-sentinel excused)
             resid = np.abs(o2 - sgn * op_scalar(new, op))
             resid = np.where(sent_o, 0.0, resid)
             if float(resid.max()) != 0.0:
                 raise SystemExit(
                     f"REFUSING: {fam} face {pf + 1} post-transplant "
                     f"masked residual {float(resid.max()):.3e} != 0.0")
+            fam_widen_total += fam_widen_new
         total_changed += fam_changed
-        print(f"  {fam:10s} pre max|d| {fam_pre:.4e}  cells changed "
-              f"{fam_changed}")
+        line = (f"  {fam:10s} pre max|d| {fam_pre:.4e}  cells changed "
+                f"{fam_changed}")
+        if widen:
+            pre_txt = ("none" if fam_widen_pre == float("-inf")
+                       else f"{fam_widen_pre:.4e}")
+            line += (f"  WIDEN newly covered {fam_widen_total} "
+                     f"pre max|d| there {pre_txt}")
+        print(line)
 
     # rsina: compute-B extent (M_RSINA dumped is:ie+1, js:je+1)
     if "rsina" in gs6[0]:
         fam_changed, fam_pre = 0, 0.0
+        rs_widen, rs_widen_pre = 0, float("-inf")
         for pf in range(6):
             _d, ot, op = fmap[pf]
             o2 = np.asarray(orcm[ot]["arrays"]["M_RSINA"], np.float64)
@@ -278,7 +366,8 @@ def transplant_metrics(ctx) -> None:
             if p_win is None:
                 break
             p2o = op_scalar(p_win, op)
-            sent_o = sentinel_mask(o2, p2o, "rsin2")
+            sent_o = (_sent_mask_single(o2, "rsin2") if widen
+                      else sentinel_mask(o2, p2o, "rsin2"))
             live = ~sent_o
             if live.any():
                 fam_pre = max(fam_pre, float(
@@ -286,6 +375,14 @@ def transplant_metrics(ctx) -> None:
             o_port = _map_to_port(o2, op)
             sent_p = _map_to_port(sent_o.astype(np.float64), op) > 0.5
             new_win = np.where(sent_p, p_win, o_port)
+            if widen:
+                new_cells = (~sent_o) & _sent_mask_single(p2o, "rsin2")
+                if new_cells.any():
+                    rs_widen_pre = max(rs_widen_pre, float(
+                        np.abs(o2 - p2o)[new_cells].max()))
+                new_cells_p = _map_to_port(
+                    new_cells.astype(np.float64), op) > 0.5
+                rs_widen += int((new_cells_p & (new_win != p_win)).sum())
             fam_changed += int((new_win != p_win).sum())
             if window is None:
                 gs6[pf]["rsina"] = new_win
@@ -295,8 +392,15 @@ def transplant_metrics(ctx) -> None:
                 gs6[pf]["rsina"] = p_new
         else:
             total_changed += fam_changed
-            print(f"  {'rsina':10s} pre max|d| {fam_pre:.4e}  cells "
-                  f"changed {fam_changed}")
+            line = (f"  {'rsina':10s} pre max|d| {fam_pre:.4e}  cells "
+                    f"changed {fam_changed}")
+            if widen:
+                total_widen_new += rs_widen
+                pre_txt = ("none" if rs_widen_pre == float("-inf")
+                           else f"{rs_widen_pre:.4e}")
+                line += (f"  WIDEN newly covered {rs_widen} "
+                         f"pre max|d| there {pre_txt}")
+            print(line)
 
     # sin_sg / cos_sg: self-validating slot assignment per face
     for fam in sorted(FAMILIES_3D):
@@ -305,6 +409,7 @@ def transplant_metrics(ctx) -> None:
             skipped.append(f"{fam} (no port key)")
             continue
         fam_changed = 0
+        sg_widen = 0
         for pf in range(6):
             _d, ot, op = fmap[pf]
             sw = op[0]
@@ -353,13 +458,28 @@ def transplant_metrics(ctx) -> None:
             new3 = p3.copy()
             for sp, (_e, so, sgn) in assign.items():
                 a = o3p[:, :, so]
-                sent = (np.abs(a) >= 1.0e6) | (np.abs(p3[:, :, sp])
-                                               >= 1.0e6)
+                if widen:
+                    # THE WRITE widens; the slot ASSIGNMENT above does
+                    # NOT (a port sentinel cannot vote on which oracle
+                    # slot a port slot corresponds to, so widening there
+                    # would let garbage decide a permutation).
+                    sent = (~np.isfinite(a)) | (np.abs(a) >= 1.0e6)
+                else:
+                    sent = (np.abs(a) >= 1.0e6) | (np.abs(p3[:, :, sp])
+                                                   >= 1.0e6)
+                was_sent_p = np.abs(p3[:, :, sp]) >= 1.0e6
                 new3[:, :, sp] = np.where(sent, p3[:, :, sp], sgn * a)
+                if widen:
+                    sg_widen += int(((~sent) & was_sent_p
+                                     & (new3[:, :, sp]
+                                        != p3[:, :, sp])).sum())
             fam_changed += int((new3 != p3).sum())
             gs6[pf][key] = new3
         total_changed += fam_changed
-        print(f"  {fam:10s} cells changed {fam_changed}")
+        if widen:
+            total_widen_new += sg_widen
+        print(f"  {fam:10s} cells changed {fam_changed}"
+              + (f"  WIDEN newly covered {sg_widen}" if widen else ""))
 
     # da_min/da_max scalars from the transplanted areas
     sl = slice(NG, NG + N)
@@ -393,6 +513,19 @@ def transplant_metrics(ctx) -> None:
 
     if skipped:
         print(f"  NOT transplanted: {skipped}")
+    if widen:
+        # Printed BEFORE any physics re-runs: this function is called by
+        # the context builder, ahead of the gate.
+        print(f"WIDEN RECEIPT: newly covered cells TOTAL "
+              f"{total_widen_new}; oracle-sentinel cells left alone "
+              f"{total_widen_refused}")
+        if total_widen_new == 0:
+            raise SystemExit(
+                "WIDEN CONTROL FAILED: zero newly covered cells, so this "
+                "arm is a no-op and its result would be indistinguishable "
+                "from the narrow arm's. Reporting 'unchanged' from a "
+                "no-op would read as an elimination -- which is exactly "
+                "the blind spot this arm exists to correct. REFUSING.")
     if total_changed == 0:
         raise SystemExit(
             "TRANSPLANT CONTROL FAILED: zero cells changed -- the arm "
@@ -405,7 +538,8 @@ def transplant_metrics(ctx) -> None:
 # (c) drive the unchanged gate, baseline then transplanted
 # ---------------------------------------------------------------------
 
-def run_gate(tag: str, transplant: bool) -> dict | None:
+def run_gate(tag: str, transplant: bool,
+             widen: bool = False) -> dict | None:
     import legoesm.core.fv3_native_duo_stepper as ds
 
     out_json = os.path.join(OUT_DIR, f"nh_transplant_{tag}.json")
@@ -413,7 +547,7 @@ def run_gate(tag: str, transplant: bool) -> dict | None:
     if transplant:
         def wrapper(*a, **kw):
             ctx = real(*a, **kw)
-            transplant_metrics(ctx)
+            transplant_metrics(ctx, widen=widen)
             return ctx
         ds.build_six_face_duo_context = wrapper
     print(f"\n===== GATE ARM: {tag} =====")
@@ -431,8 +565,16 @@ def run_gate(tag: str, transplant: bool) -> dict | None:
 
 
 def main() -> int:
+    argv = sys.argv[1:]
+    widen = "--widen-corners" in argv
+    unknown = [a for a in argv if a != "--widen-corners"]
+    if unknown:
+        # A mistyped flag that is silently ignored is how an arm gets
+        # reported under the wrong name.
+        raise SystemExit(f"unknown argument(s): {unknown}. The only flag "
+                         f"is --widen-corners.")
     print(f"REPO_SHA={_sha()}  n={N} ng={NG} km={KM}  "
-          f"extchain={EXTCHAIN_C48}")
+          f"extchain={EXTCHAIN_C48}  widen_corners={widen}")
     if not (EXTCHAIN_C48 / "extchain_t1.mf").exists():
         raise SystemExit(f"missing extchain C48 dumps at {EXTCHAIN_C48}")
 
@@ -448,9 +590,15 @@ def main() -> int:
 
     base = run_gate("baseline", transplant=False)
     trans = run_gate("transplanted", transplant=True)
+    arms = [("baseline", base), ("transplanted", trans)]
+    if widen:
+        # Its own tag, so the two default arms' JSON files stay
+        # byte-stable and the earlier numbers remain reproducible.
+        arms.append(("widened",
+                     run_gate("widened", transplant=True, widen=True)))
 
     print("\nSUMMARY (numbers only; verdict belongs to the analysis):")
-    for tag, j in (("baseline", base), ("transplanted", trans)):
+    for tag, j in arms:
         if j is None:
             print(f"  {tag}: gate did not produce a JSON (arm FAILED)")
             continue
