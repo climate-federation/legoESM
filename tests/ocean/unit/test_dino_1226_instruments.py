@@ -849,3 +849,71 @@ def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
     with pytest.raises(SystemExit, match="has no u3d_day90"):
         gate.load_candidate(str(bare))
     assert "UNSTAMPED" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# traadv_fct_probe: the two conditioning-robust statistics added for #1455.
+# The tracer-advection rows are scored with a ratio of SUMS, which on a row
+# whose horizontal and vertical parts nearly cancel reports the residual
+# amplified by the state's own cancellation rather than the operator's error.
+# These two helpers are what separates the two, so they get direct tests.
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def fct_probe():
+    probe_dir = SCRIPTS_DIR / "validate" / "ocean_fidelity" / "dino_1226"
+    sys.path.insert(0, str(probe_dir))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "_fct_probe_under_test", probe_dir / "traadv_fct_probe.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    finally:
+        try:
+            sys.path.remove(str(probe_dir))
+        except ValueError:
+            pass
+
+
+def test_err_norm_is_zero_for_an_exact_match_and_one_for_a_doubling(fct_probe):
+    rng = np.random.default_rng(0)
+    n = rng.standard_normal(500)
+    assert fct_probe.stats(n.copy(), n)["err_norm"] == pytest.approx(0.0, abs=1e-15)
+    # L = 2N differs from N by exactly N, so err_norm = RMS(N)/RMS(N) = 1.
+    assert fct_probe.stats(2.0 * n, n)["err_norm"] == pytest.approx(1.0, rel=1e-12)
+
+
+def test_err_norm_sees_an_error_that_abs_ratio_reports_as_perfect(fct_probe):
+    """The whole point of the metric: a sign-flipped-in-half field has
+    abs_ratio exactly 1.0 (sum of magnitudes unchanged) while being wrong."""
+    n = np.array([1.0, -1.0, 2.0, -2.0, 3.0, -3.0])
+    lego = -n
+    r = fct_probe.stats(lego, n)
+    assert r["abs_ratio"] == pytest.approx(1.0)
+    assert r["err_norm"] > 1.0
+
+
+def test_cancellation_factor_is_one_without_cancellation(fct_probe):
+    a = np.ones((3, 4, 5))
+    act = np.ones((3, 4, 5), dtype=bool)
+    assert fct_probe.cancellation_factor(a, a, act) == pytest.approx(1.0)
+
+
+def test_cancellation_factor_grows_as_the_two_parts_cancel(fct_probe):
+    a = np.ones((3, 4, 5))
+    act = np.ones((3, 4, 5), dtype=bool)
+    b = -a * (1.0 - 1.0e-3)
+    # (sum|a| + sum|b|) / sum|a+b| = (1 + 0.999) / 1e-3
+    assert fct_probe.cancellation_factor(a, b, act) == pytest.approx(1999.0, rel=1e-9)
+
+
+def test_cancellation_factor_compares_only_the_shared_levels(fct_probe):
+    """The reference carries jpkm1 levels and the model one more; scoring on
+    the union would index past the reference and either raise or silently
+    score a pad level."""
+    a = np.ones((2, 2, 5))                 # model: 5 levels
+    b = -0.5 * np.ones((2, 2, 4))          # reference: 4 levels
+    act = np.ones((2, 2, 6), dtype=bool)   # mask: 6 levels
+    # On the 4 shared levels: (16 + 8) / 8 = 3.0.  Scoring a's 5th level too
+    # would either raise or change the answer, so this pins the slicing.
+    assert fct_probe.cancellation_factor(a, b, act) == pytest.approx(3.0)
