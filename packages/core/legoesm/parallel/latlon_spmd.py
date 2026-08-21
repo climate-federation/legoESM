@@ -180,15 +180,29 @@ def _resolve_halo_level_leading(env_value: str) -> bool:
 
 
 #: The halo switches that change the COMPILED program rather than only the
-#: numbers. Anything on this list must reach a traced-body cache key, or an
-#: environment flip silently reuses a body built under the previous setting.
-HALO_ENV_FLAGS = (
-    "LEGOESM_LATLON_PACKED_EXCHANGE",
-    "LEGOESM_LATLON_SPMD_FUSED_HALO",
-    "LEGOESM_LATLON_HALO_BALLAST",
-    "LEGOESM_LATLON_HALO_NOCOMM",
-    "LEGOESM_LATLON_HALO_LEVEL_LEADING",
-)
+#: numbers, mapped to the value an UNSET variable is equivalent to.
+#:
+#: Anything here must reach a traced-body cache key, or an environment flip
+#: silently reuses a body built under the previous setting. The completeness
+#: of this list is machine-checked, not promised in prose:
+#: ``tests/parallel/test_latlon_halo_level_leading.py`` walks the syntax tree
+#: of the modules the traced body is built from and fails on any switch they
+#: read that is missing here.
+#:
+#: The defaults matter because two spellings of one setting must give the same
+#: signature. A launcher that writes ``0`` where another leaves the variable
+#: unset would otherwise trip the cross-process agreement over nothing, and
+#: two of these default ON rather than off.
+HALO_ENV_FLAGS = {
+    "LEGOESM_LATLON_PACKED_EXCHANGE": "0",
+    "LEGOESM_LATLON_SPMD_FUSED_HALO": "1",
+    # A SECOND, similarly named switch on the same lane, read by the halo
+    # module rather than this one. Both default on; they are not aliases.
+    "LEGOESM_LATLON_FUSED_HALO": "1",
+    "LEGOESM_LATLON_HALO_BALLAST": "1",
+    "LEGOESM_LATLON_HALO_NOCOMM": "0",
+    "LEGOESM_LATLON_HALO_LEVEL_LEADING": "0",
+}
 
 
 def halo_env_signature() -> tuple:
@@ -204,11 +218,21 @@ def halo_env_signature() -> tuple:
       silent wrong answer on the inter-host halo, not a crash.
     """
     import os  # function-scope, matching this module's convention
-    return tuple(os.environ.get(k, "") for k in HALO_ENV_FLAGS)
+    return tuple((os.environ.get(k, "") or d)
+                 for k, d in sorted(HALO_ENV_FLAGS.items()))
 
 
 def _edge_serialisation_perm(shape, level_leading):
     """The ONE decision point: is this edge payload reordered on the wire?
+
+    ASSUMPTION, worth stating because nothing here can check it: on this lane
+    a rank-3 edge payload is ``(rows, longitude, level)``. A future rank-3
+    field whose trailing axis is something else — species, a vector component
+    — would be serialised level-major too. That is a performance
+    misclassification and not a correctness one, because the pack applies a
+    permutation and the unpack applies its exact inverse whatever the axes
+    mean, so every gate in the test file would still pass. A rank-4 field
+    (a vmapped one, say) silently opts out.
 
     Called with the payload's logical shape by both ends; the unpack side
     applies the derived inverse of whatever this returns. Fields that are not

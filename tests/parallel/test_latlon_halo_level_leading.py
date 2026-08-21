@@ -94,7 +94,7 @@ def _run_packed(monkeypatch, n_dev, value):
     return fn(*args)
 
 
-@pytest.mark.parametrize("n_dev", [2, 4])
+@pytest.mark.parametrize("n_dev", [1, 2, 4])
 def test_packed_body_bit_identical_off_vs_on(monkeypatch, n_dev):
     base = _run_packed(monkeypatch, n_dev, None)   # unset is the default
     off = _run_packed(monkeypatch, n_dev, "0")
@@ -209,24 +209,77 @@ def test_flag_actually_changes_the_compiled_body(monkeypatch):
         f"this file would then be vacuous")
 
 
-def test_cache_key_carries_the_flag():
+def test_cache_signature_moves_with_every_flag(monkeypatch):
     """A traced-body cache keyed without the halo environment hands back a
     body built under the previous setting while the receipt reports the new
-    one. The signature is the thing that stops it, so pin that it moves."""
-    import os
+    one. The signature is what stops it, so pin that EVERY switch moves it —
+    not just the one this file is about."""
     from legoesm.parallel.latlon_spmd import HALO_ENV_FLAGS, halo_env_signature
-    assert ENV in HALO_ENV_FLAGS
+    for name in HALO_ENV_FLAGS:
+        monkeypatch.delenv(name, raising=False)
     before = halo_env_signature()
-    old = os.environ.get(ENV)
-    try:
-        os.environ[ENV] = "1"
-        assert halo_env_signature() != before
-    finally:
-        if old is None:
-            os.environ.pop(ENV, None)
-        else:
-            os.environ[ENV] = old
+    for name, default in HALO_ENV_FLAGS.items():
+        other = "0" if default != "0" else "1"
+        monkeypatch.setenv(name, other)
+        assert halo_env_signature() != before, f"{name} does not reach the key"
+        monkeypatch.delenv(name)
     assert halo_env_signature() == before
+
+
+def test_cache_signature_ignores_the_spelling_of_a_default(monkeypatch):
+    """Unset and explicitly-default must give the SAME signature. Otherwise a
+    launcher that writes the default where another leaves it unset trips the
+    cross-process agreement over a difference that is not one."""
+    from legoesm.parallel.latlon_spmd import HALO_ENV_FLAGS, halo_env_signature
+    for name in HALO_ENV_FLAGS:
+        monkeypatch.delenv(name, raising=False)
+    unset = halo_env_signature()
+    for name, default in HALO_ENV_FLAGS.items():
+        monkeypatch.setenv(name, default)
+    assert halo_env_signature() == unset
+
+
+def test_every_switch_the_traced_body_reads_is_in_the_signature():
+    """COMPLETENESS, machine-checked rather than promised in a docstring.
+
+    Walk the syntax tree of the modules the lat-band traced body is built
+    from and collect every LEGOESM_LATLON_* environment read. Any one missing
+    from HALO_ENV_FLAGS is a switch that can flip without rebuilding the
+    body — the exact defect this signature exists to prevent, reappearing in
+    a module nobody thought to check. A line-based grep is not enough here:
+    at least one of these reads is split across two lines.
+    """
+    import ast
+    import pathlib
+
+    from legoesm.parallel import latlon_spmd
+    from legoesm.grids import halo_latlon
+    from legoesm.atmosphere.dynamics.gcm import sharded_atm_latlon_step
+    from legoesm.atmosphere.dynamics.gcm import primitive_eq_latlon_cgrid
+
+    seen = {}
+    for mod in (latlon_spmd, halo_latlon, sharded_atm_latlon_step,
+                primitive_eq_latlon_cgrid):
+        path = pathlib.Path(mod.__file__)
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute)
+                    else fn.id if isinstance(fn, ast.Name) else None)
+            if name not in ("get", "getenv"):
+                continue
+            arg = node.args[0]
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and arg.value.startswith("LEGOESM_LATLON")):
+                seen.setdefault(arg.value, set()).add(path.name)
+    # Non-vacuity: the walk must find the switch this file is about.
+    assert ENV in seen, "the audit found no environment reads at all"
+    missing = sorted(set(seen) - set(latlon_spmd.HALO_ENV_FLAGS))
+    assert not missing, (
+        "these switches are read by the traced body but are not in "
+        f"HALO_ENV_FLAGS, so flipping them reuses a stale compiled body: "
+        + ", ".join(f"{m} (in {sorted(seen[m])})" for m in missing))
 
 
 def test_env_gate_accepts_the_two_documented_spellings():
