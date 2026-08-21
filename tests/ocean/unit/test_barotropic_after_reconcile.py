@@ -8,15 +8,24 @@ site (``cfgs/DINO/MY_SRC/stpmlf.F90:754-765``, called at ``:578`` after
 and, in doing so, discards whatever column mean the implicit vertical solve
 deposited.  This file gates the option that builds it.
 
-NON-VACUITY, stated precisely rather than generously.  Reverting the model-side
-insertion makes exactly FOUR of these fail: the two ``test_option_changes_the_
-after_state_on_both_step_paths`` and the two ``test_unknown_scheme_raises_from_
-inside_each_step_path``.  An EARLIER version of this docstring said "every test
-here fails when the insertion is removed" -- that was FALSE and is retracted:
-the dispatch and kernel tests never touch the model, and several step-path
-tests are one-sided assertions that a revert would satisfy.  Each such test now
-carries, in its own body, an assertion that CAN fail on a revert, or a comment
-saying plainly that it cannot.
+NON-VACUITY, stated precisely and RE-COUNTED against a measured revert.
+Reverting the model-side insertion makes SIX of these fail: the two
+``test_option_changes_the_after_state_on_both_step_paths``, the two
+``test_unknown_scheme_raises_from_inside_each_step_path``, and the two
+``test_the_change_is_a_column_mean_replacement_and_nothing_else`` (which gained
+a "something moved" guard for exactly that reason).  Two earlier versions of
+this paragraph were wrong in BOTH directions and both are retracted: the first
+claimed "every test here fails when the insertion is removed" (false -- the
+dispatch and kernel tests never touch the model); the second said "exactly
+FOUR" (written before the guard above was added, and never re-counted).  The
+count is now measured, not reasoned.
+
+SEPARATELY GATED, because a review put the defect back and every test stayed
+green: WHICH vertical ladder the CALL SITE builds.  The kernel tests pin the
+kernel's use of the thickness it is handed, but nothing pinned the caller
+handing it a REFERENCE ladder rather than a live one -- and that distinction is
+the entire content of the correction in ``d27dc0909``.  See
+``test_call_site_hands_the_kernel_a_REFERENCE_ladder``.
 """
 
 from __future__ import annotations
@@ -327,9 +336,12 @@ def test_zstar_makes_the_after_thickness_half_a_no_op():
     ny, nx, nz, H = 8, 16, 5, 3000.0
     grid = create_latlon_grid(n_lat=ny, n_lon=nx)
     z0c = create_ocean_z_star(n_levels=nz, H_max=H)
-    # deliberately NON-flat bathymetry: the min-rule face depth chooses between
-    # neighbouring columns level by level, which is exactly where a non-uniform
-    # rescale would show up if one existed.
+    # Non-flat bathymetry is carried here for realism only.  MEASURED, so the
+    # comment does not overstate it: under pure z-star the min-rule winner does
+    # NOT vary with level on this fixture (dz_ref is column-independent, so
+    # min(dz_ref*J_i, dz_ref*J_j) = dz_ref*min(J_i,J_j) and the same column wins
+    # at every level), and every cell is wet.  The bathymetry is therefore inert
+    # to this identity -- which is itself the point being asserted.
     H_bathy = jnp.asarray(
         np.full((ny, nx), H * 0.62)
         - 300.0 * np.sin(2 * np.pi * np.arange(nx) / nx)[None, :] ** 2)
@@ -358,3 +370,68 @@ def test_zstar_makes_the_after_thickness_half_a_no_op():
         f"(|mean_now - mean_after| = {spread:.3e}); the after-thickness half "
         "of barotropic_after_reconcile is then NOT a no-op under pure z-star, "
         "and every bound quoted against that fact must be re-measured")
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_call_site_hands_the_kernel_a_REFERENCE_ladder(method, outer):
+    """THE GATE ON THE CORRECTION ITSELF, and it exists because it was missing.
+
+    NEMO's ``mlf_baro_corr`` weights by the fixed reference ladder: under
+    ``key_qco`` the free-surface factor ``(1+r3u)`` multiplies ``e3u`` and
+    divides ``r1_hu``, so it cancels exactly and the reconciliation is
+    TIME-LEVEL INDEPENDENT (``WORK/domzgr_substitute.h90:127,137,46,51``).  The
+    first version of this option weighted by the LIVE after-level thickness
+    instead.  That defect was caught by review, corrected -- and an adversarial
+    re-review then put it BACK and watched all 24 tests stay green.  Nothing
+    constrained which ladder the CALLER builds; the kernel tests only constrain
+    what the kernel does with the one it is given.
+
+    So this captures the argument at the call site and pins it: the thickness
+    handed over must be the eta=0 reference ladder, and must NOT be the live
+    one.  Both are computed here, and the test asserts they are DISTINGUISHABLE
+    before asserting which one was used -- otherwise it would pass vacuously on
+    a card where the two coincide.
+    """
+    import unittest.mock as mock
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    seen = {}
+    real = omlc.after_level_column_mean_reconcile
+
+    def _capture(field, h_face_ref, target_mean, face_mask3, min_water_col):
+        seen.setdefault("h", h_face_ref)
+        return real(field, h_face_ref, target_mean, face_mask3, min_water_col)
+
+    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
+                            dino_drag=True)
+    s1 = model._leapfrog_step(state, _DT)
+    with mock.patch.object(omlc, "after_level_column_mean_reconcile", _capture):
+        naa = getattr(model, method)(s1, _DT)
+    assert "h" in seen, "the option's site never ran -- nothing to gate"
+
+    mwc = model.config.min_water_column_m
+    ref = min_cell_to_uface(compute_layer_thickness(
+        jnp.zeros_like(naa.eta.data), state.H_bathy.data, model.z_coord,
+        min_water_column_m=mwc))
+    live = min_cell_to_uface(compute_layer_thickness(
+        naa.eta.data, state.H_bathy.data, model.z_coord,
+        min_water_column_m=mwc))
+
+    # (a) the two candidates must actually differ, or this test proves nothing
+    spread = float(np.max(np.abs(np.asarray(ref - live))))
+    assert spread > 1e-6, (
+        f"reference and live ladders differ by only {spread:.3e} on this "
+        "fixture, so this test cannot tell them apart -- it would pass "
+        "vacuously and must be re-fixtured before it is trusted")
+    # (b) and the call site must have used the REFERENCE one
+    got = np.asarray(seen["h"])
+    assert np.max(np.abs(got - np.asarray(ref))) < 1e-12, (
+        "the call site handed the kernel a ladder that is not the eta=0 "
+        "reference ladder NEMO's mlf_baro_corr weights by")
+    assert np.max(np.abs(got - np.asarray(live))) > 1e-6, (
+        "the call site handed the kernel the LIVE after-level thickness -- "
+        "this is the exact defect corrected in d27dc0909 (the key_qco "
+        "free-surface factor cancels in NEMO, so the faithful weight carries "
+        "no eta at all)")

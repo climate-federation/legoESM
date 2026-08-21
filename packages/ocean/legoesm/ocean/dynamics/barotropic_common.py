@@ -357,11 +357,21 @@ def after_level_column_mean_reconcile(
     So NEMO's reconciliation is INDEPENDENT OF THE TIME LEVEL and weights by
     the fixed REFERENCE ladder ``e3u_0 / hu_0``.  This kernel therefore takes
     the reference face thickness, not a live one.  RETRACTED 2026-08-21: an
-    earlier revision of this kernel took the live AFTER-level thickness and its
-    docstring called that "the after-level thickness NEMO divides by".  That
-    was a true reading of the Fortran text and a false reading of its
-    arithmetic; under partial cells it also differed from NEMO, because
-    ``min``-of-scaled-thicknesses is not ``scale``-of-min-thicknesses.
+    earlier revision took the live AFTER-level thickness and its docstring
+    called that "the after-level thickness NEMO divides by".  That was a true
+    reading of the Fortran text and a false reading of its arithmetic.
+
+    HOW THE CALLER MUST BUILD ``h_face_ref``, and one thing NOT to assume.
+    NEMO builds ``e3u_0`` as an ARITHMETIC mean of the adjacent ``e3t_0``
+    (``zgr_lib.F90``), not as a minimum -- ``min`` is the MOM6/MITgcm ``hFacW``
+    convention.  On a ladder that is horizontally uniform the two coincide, so
+    a min-rule face depth is exact there and only there.  DINO is exactly that
+    case (``namelist_cfg:70-72`` ``ln_zco_nam=.true.``, ``ln_zps_nam=.false.``,
+    i.e. a pure z-coordinate with NO partial steps; legoESM's bridge builds a
+    matching full-step coordinate), so on that card this kernel reproduces
+    ``SUM_k e3u_0*u*umask / hu_0`` exactly.  A card WITH partial steps would
+    need its face thickness built NEMO's way -- averaged on the unmasked
+    reference ladder and then masked -- before this kernel is faithful there.
 
     Parameters
     ----------

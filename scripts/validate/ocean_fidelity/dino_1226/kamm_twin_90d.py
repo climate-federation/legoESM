@@ -500,11 +500,19 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     _ar = os.environ.get("DINO_AFTER_RECONCILE")
     if _ar:
         # NEMO mlf_baro_corr (cfgs/DINO/MY_SRC/stpmlf.F90:754-765): the SECOND
-        # depth-mean reconciliation, on the AFTER level and at the AFTER
-        # thickness, which legoESM has no site for. "nemo_mlf_baro_corr" builds
-        # it; "off" is the card default. Orthogonal to DINO_RECONCILE_TARGET
-        # (that picks WHICH average, this picks WHERE it is enforced), so
-        # setting both is two variables and the A/B must not.
+        # depth-mean reconciliation, run after dyn_zdf on the committed AFTER
+        # level, which legoESM has no site for. "nemo_mlf_baro_corr" builds it;
+        # "off" is the card default.
+        #
+        # CORRECTED 2026-08-21: an earlier version of this comment called it
+        # "orthogonal to DINO_RECONCILE_TARGET" and said "setting both is two
+        # variables and the A/B must not". BOTH HALVES WERE WRONG, and the
+        # second was an instruction against running the only faithful
+        # configuration. They COMPOSE: NEMO commits uu_b(Kaa), its PRIMARY
+        # velocity-weighted boxcar, so matching NEMO needs
+        # DINO_RECONCILE_TARGET=velocity_avg AND this set to
+        # nemo_mlf_baro_corr. Setting both is the FAITHFUL arm of a 2x2, not a
+        # two-variable mistake -- see PHASE2_R6_alignment_and_prereg.md.
         cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
         print(f"ABLATION: barotropic_after_reconcile={_ar}")
 

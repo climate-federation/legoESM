@@ -316,8 +316,12 @@ class DINOConfig:
     # NEMO's SECOND depth-mean reconciliation, mlf_baro_corr (cfgs/DINO/MY_SRC/
     # stpmlf.F90:754-765): see BarotropicConfig.barotropic_after_reconcile.
     # "off" (default, bit-identical) = legoESM's single in-solve reconciliation
-    # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf, after-thickness
-    # site. No card flips it -- it is selected per-run for the ownership A/B.
+    # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf site, which discards
+    # the implicit vertical solve's column-mean deposit. (NOT an "after
+    # thickness" change: NEMO's weighting is time-level independent -- the
+    # key_qco free-surface factor cancels. Corrected 2026-08-21.) No card flips
+    # it -- it is selected per-run, and matching NEMO needs it TOGETHER with
+    # barotropic_reconcile_target="velocity_avg".
     barotropic_after_reconcile: str = "off"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
