@@ -52,6 +52,14 @@ _GUARDED = {
     # rho, eta, dz, jacobian, rho_ref, g
     "compute_hydrostatic_pressure": (5, 4),
     "compute_buoyancy_frequency_adiabatic": (None, None),
+    # The eddy-closure chain. A reviewer found the hole these close: one path
+    # passed the run's gravity into its PRESSURE and then computed the
+    # buoyancy frequency through here, where gravity was hardcoded to the
+    # library constant -- the same self-inconsistency, one level deeper, and
+    # invisible to a rule that only watched the two calls above.
+    "compute_visbeck_kappa_gm": (None, None),
+    "compute_eke_kappa_gm": (None, None),
+    "compute_treguier_kappa_gm": (None, None),
 }
 _DENSITY_KW = "rho_ref"
 
@@ -69,6 +77,14 @@ _DEBT: dict[str, str] = {
         "constant and receives no configuration",
     "legoesm/ocean/physics/combined.py::physics_fn":
         "the closure inside that factory, same reason",
+    "legoesm/ocean/physics/lateral_mixing/gm_redi.py::gm_redi_lateral_mixing":
+        "the cubed-sphere GM/Redi entry point receives no constants "
+        "configuration, so it reaches the shared eddy closure on library "
+        "constants; clearing this means threading the pair from the model",
+    "legoesm/ocean/physics/lateral_mixing/gm_redi_mpas.py::"
+    "_visbeck_kappa_gm_mpas":
+        "the unstructured Visbeck helper hardcodes its pair and has no "
+        "configuration; needs the pair on its signature and at the model call",
     "legoesm/ocean/physics/lateral_mixing/mle_mpas.py::"
     "mle_tracer_tendency_mpas":
         "the unstructured mixed-layer tendency builds its pressure from the "

@@ -3491,6 +3491,7 @@ def gm_redi_tracer_tendency_latlon(
         else:
             kappa_GM = compute_treguier_kappa_gm(
                 rho, S_x, S_y, z_coord, jacobian, f_coriolis, _treg,
+                rho_ref=rho_0, g=g,
                 omega=omega,
             )
     elif cfg.visbeck.enabled:
@@ -3519,6 +3520,10 @@ def gm_redi_tracer_tendency_latlon(
             _T_vb, _S_vb, _eos_vb = T, S, eos_fn
         kappa_GM = compute_visbeck_kappa_gm(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            # The SAME pair the pressure above was built from. Threading the
+            # density and defaulting the gravity is how this path kept a
+            # library-gravity buoyancy frequency under a configured pressure.
+            rho_ref=rho_0, g=g,
             T=_T_vb, S=_S_vb, p_cell=_p_vb, eos_fn=_eos_vb,
         )
     else:
@@ -4729,7 +4734,7 @@ def compute_eke_step_kappa(
     )
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
-        cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
+        cfg.visbeck, cfg.eke, rho_ref=rho_0, g=g, beta=beta,
         depth_resolved=depth_resolved,
         T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )
