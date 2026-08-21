@@ -5,6 +5,7 @@ session scratchpad (``scripts/validate/ocean_fidelity/dino_1226/``):
 mode projector). All synthetic -- no NEMO artifacts, CPU-fast.
 """
 import importlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -388,3 +389,463 @@ def test_heat_discriminator_import_is_side_effect_free(instruments):
     heat_discriminator = instruments.heat_discriminator
     assert callable(heat_discriminator.main)
     assert callable(heat_discriminator.run_discriminator)
+
+
+# =====================================================================
+# kamm_twin_90d: the #1455 seasonal clock (absolute by DEFAULT)
+# =====================================================================
+
+def _write_restart_stub(path, adatrj, kt):
+    """Minimal NEMO-restart stub carrying only what the clock reader needs."""
+    nc = pytest.importorskip("netCDF4")
+    with nc.Dataset(path, "w") as d:
+        d.createDimension("t", 1)
+        for name, val in (("adatrj", adatrj), ("kt", kt)):
+            v = d.createVariable(name, "f8", ("t",))
+            v[:] = val
+
+
+def test_seasonal_clock_defaults_to_the_restarts_own_day_of_year(
+        instruments, tmp_path, monkeypatch, capsys):
+    """DEFAULT (env unset) must be NEMO's clock, read from ``adatrj``.
+
+    This is the #1455 fix: before it, the default was 0 and a twin bridged
+    from the day-180 restart ran exactly antiphase to the NEMO run it scored
+    against.
+    """
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.delenv("DINO_TWIN_SEASONAL_KT0", raising=False)
+    p = tmp_path / "DINO_00005760_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=5760.0)
+
+    t0 = kamm_twin_90d.seasonal_t0_seconds(str(p))
+
+    assert t0 == pytest.approx(180.0 * 86400.0)
+    assert "restart adatrj" in capsys.readouterr().out
+
+
+def test_seasonal_clock_legacy_relative_is_opt_in_and_shouts(
+        instruments, tmp_path, monkeypatch, capsys):
+    """The old relative clock must still be reachable, and must be loud."""
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.setenv("DINO_TWIN_SEASONAL_KT0", "0")
+    p = tmp_path / "DINO_00005760_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=5760.0)
+
+    assert kamm_twin_90d.seasonal_t0_seconds(str(p)) == 0.0
+    assert "LEGACY RELATIVE CLOCK" in capsys.readouterr().out
+
+
+def test_seasonal_clock_rejects_a_restart_written_at_another_timestep(
+        instruments, tmp_path, monkeypatch):
+    """``adatrj`` and ``kt*DT`` must agree, or the offset is not trustworthy."""
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.delenv("DINO_TWIN_SEASONAL_KT0", raising=False)
+    p = tmp_path / "bad_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=99.0)   # 99 * 2700 s != 180 days
+    with pytest.raises(SystemExit, match="different timestep"):
+        kamm_twin_90d.seasonal_t0_seconds(str(p))
+
+
+def test_run_twin_threads_the_absolute_clock_into_the_forcing(instruments):
+    """The run loop must ADD the offset, not restart the seasonal year.
+
+    Source-level check keyed off the symbol that actually runs (``run_twin``),
+    and it fails if the ``t0_sec +`` term is dropped from either placement
+    branch.
+    """
+    import inspect
+    import re
+    kamm_twin_90d = instruments.kamm_twin_90d
+    src = inspect.getsource(kamm_twin_90d.run_twin)
+    # The regression is the RELATIVE form reappearing; assert its absence
+    # rather than an exact spelling of the fixed form, so an innocuous
+    # reformat (or hoisting the expression into a local) does not go red.
+    assert not re.search(r"t_seconds\s*=\s*\(\s*k\s*\+\s*1\s*\)\s*\*\s*DT", src)
+    assert "seasonal_t0_seconds(" in src
+    assert src.count("t0_sec") >= 3
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d: the vertical-ladder default (#1455)
+#
+# A bridged twin only isolates SCHEME differences if both models stand on the
+# same vertical grid, so run_twin resolves LEGOESM_NEMO_E3T to "both" (NEMO's
+# own thickness AND T-depth ladders) when nothing sets it. Measured cost of the
+# old 1-D reference ladder at day 90: +2.93 Sv of circumpolar transport error
+# against +0.29 Sv on "both", and +1.87 Sv of full-section ACC error against
+# -0.60 Sv (fp64, branch fidelity/dino-step-walk).
+#
+# These tests go RED if that default silently reverts to the 1-D ladder, if the
+# resolution leaks out of run_twin into the helper a dozen sibling probes
+# import, or if the loud banner stops firing.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def _ladder(instruments, monkeypatch):
+    """kamm_twin_90d with LEGOESM_NEMO_E3T cleared and the banner set emptied.
+
+    setenv BEFORE delenv on purpose: monkeypatch records an undo entry only for
+    a variable that existed. The resolver no longer writes the variable, but the
+    tests below do, and a leak here would hand a vertical-ladder selection
+    nobody set to every module collected afterwards -- the exact silent inherited
+    default that require_explicit_e3t_mode exists to prevent, planted inside the
+    test suite where it is invisible.
+    """
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "off")
+    monkeypatch.delenv("LEGOESM_NEMO_E3T")
+    monkeypatch.setattr(kamm_twin_90d, "_LADDER_ANNOUNCED", set())
+    return kamm_twin_90d
+
+
+def test_ladder_fixture_does_not_leak_the_env(_ladder):
+    """The fixture's own contract, asserted so it cannot rot silently."""
+    assert "LEGOESM_NEMO_E3T" not in os.environ
+    _ladder.resolve_ladder_mode()
+    assert "LEGOESM_NEMO_E3T" not in os.environ
+
+
+def test_resolving_the_ladder_does_not_write_the_environment(_ladder,
+                                                             monkeypatch):
+    """THE ROOT FIX. The resolver used to write LEGOESM_NEMO_E3T, which made a
+    second caller unable to tell the operator's setting from the first call's
+    write-back -- so an in-process two-arm sweep silently ran one grid twice.
+    No check can separate those cases; the write must not happen at all."""
+    _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+    assert "LEGOESM_NEMO_E3T" not in os.environ
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "e3t_only")
+    _ladder.resolve_ladder_mode()
+    assert os.environ["LEGOESM_NEMO_E3T"] == "e3t_only"   # untouched
+
+
+def test_two_ladders_in_one_process_stay_distinct_and_both_speak(_ladder,
+                                                                 capsys):
+    """THE SWEEP GUARD: arm 1 on the 1-D ladder, arm 2 on the default, in one
+    process. They must come back DIFFERENT, and neither may be silent."""
+    assert _ladder.resolve_ladder_mode(legacy_1d_ladder=True) == "off"
+    assert "LEGOESM_NEMO_E3T=off" in capsys.readouterr().out
+    assert _ladder.resolve_ladder_mode() == "both"
+    assert "LEGOESM_NEMO_E3T=both" in capsys.readouterr().out
+
+
+def test_every_resolution_states_the_grid_it_chose(_ladder, capsys):
+    """No call may be silent -- a twin must never be built without its log
+    saying which ladder it stands on, even when the loud banner has already
+    fired for that mode earlier in the process."""
+    for _ in range(3):
+        _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+        assert "vertical ladder: LEGOESM_NEMO_E3T=off" in capsys.readouterr().out
+
+
+def test_twin_default_ladder_is_nemos_own_not_the_1d_reference(_ladder):
+    """THE REGRESSION GUARD: no env, no flag -> NEMO's own ladders.
+
+    Red if the twin default reverts to "off" (the 1-D reference ladder), or to
+    either of the mixed half-ladders.
+    """
+    assert _ladder.NEMO_LADDER_TWIN_DEFAULT == "both"
+    mode = _ladder.resolve_ladder_mode()
+    assert mode == "both", (
+        f"twin default reverted to {mode!r}; a bridged twin must stand on "
+        "NEMO's own vertical ladders")
+
+
+def test_twin_ladder_env_override_still_wins(_ladder, monkeypatch):
+    for mode in _ladder.NEMO_E3T_MODES:
+        monkeypatch.setenv("LEGOESM_NEMO_E3T", mode)
+        assert _ladder.resolve_ladder_mode() == mode
+
+
+def test_twin_ladder_modes_come_from_the_bridge_not_a_local_copy(_ladder):
+    """A re-listed tuple drifts: the harness would accept a mode the bridge
+    rejects three calls later, deep inside grid construction."""
+    from legoesm.ocean.fidelity.nemo_state_bridge import NEMO_E3T_MODES
+    assert _ladder.NEMO_E3T_MODES is NEMO_E3T_MODES
+    assert _ladder.NEMO_LADDER_TWIN_DEFAULT in NEMO_E3T_MODES
+
+
+def test_precision_gate_shares_the_bridges_mode_tuple(instruments):
+    """The explicit-mode gate must validate against the same tuple the bridge
+    enforces; a re-listed copy drifts and lets a typo through to grid
+    construction. (The twin has this drift test; the gate did not.)"""
+    import inspect
+
+    from legoesm.ocean.fidelity import precision_gate
+    src = inspect.getsource(precision_gate.require_explicit_e3t_mode)
+    assert "NEMO_E3T_MODES" in src
+    assert '("off", "e3t_only", "gdept_only", "both")' not in src
+
+
+def test_twin_ladder_rejects_unknown_env(_ladder, monkeypatch):
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "e3t")     # plausible typo
+    with pytest.raises(SystemExit, match="Unknown LEGOESM_NEMO_E3T"):
+        _ladder.resolve_ladder_mode()
+
+
+def test_legacy_1d_ladder_flag_selects_off_and_shouts(_ladder, capsys):
+    assert _ladder.resolve_ladder_mode(legacy_1d_ladder=True) == "off"
+    out = capsys.readouterr().out
+    assert "!!" in out and "NON-DEFAULT VERTICAL LADDER" in out
+    assert "1-D REFERENCE ladder" in out
+
+
+def test_the_banner_is_keyed_to_the_grid_not_to_the_default(_ladder, monkeypatch,
+                                                            capsys):
+    """If someone flips the twin default back to the 1-D ladder, the LOUD
+    WARNING must survive rather than vanish along with it -- otherwise one edit
+    removes the correct default and its own alarm in the same stroke."""
+    monkeypatch.setattr(_ladder, "NEMO_LADDER_TWIN_DEFAULT", "off")
+    assert _ladder.resolve_ladder_mode() == "off"
+    assert "NON-DEFAULT VERTICAL LADDER" in capsys.readouterr().out
+
+
+def test_the_ladder_banner_is_announced_once_per_mode(_ladder, capsys):
+    """Repeating the alarm every call trains operators to ignore it."""
+    _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+    assert "NON-DEFAULT VERTICAL LADDER" in capsys.readouterr().out
+    _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+    assert "NON-DEFAULT VERTICAL LADDER" not in capsys.readouterr().out
+
+
+def test_each_non_default_ladder_gets_its_own_banner_text(_ladder, monkeypatch,
+                                                          capsys):
+    """The banner must describe the grid the operator actually selected.
+
+    The mixed-ladder branch once served BOTH half-ladders, so an ``e3t_only``
+    run was shown the other mode's T-point offset. And the offsets it quotes are
+    per-level, so the level must travel with the number -- pairing 110.2 m at
+    k=32 with 11.3 m (which is at k=34, not k=32, where it is 7.8 m) is the
+    mismatched-window defect this campaign keeps having to retract.
+
+    Measured over the WET levels the model integrates: off 5.28 m at k=33,
+    e3t_only 97.20 m at k=32, gdept_only 110.16 m at k=32, both 11.31 m at k=34.
+    """
+    expect = {
+        "off": ("1-D REFERENCE ladder", "+2.93 Sv"),
+        "e3t_only": ("97.2 m", "k=32"),
+        "gdept_only": ("110.2 m", "k=32"),
+    }
+    for mode, (a, b) in expect.items():
+        monkeypatch.setattr(_ladder, "_LADDER_ANNOUNCED", set())
+        monkeypatch.setenv("LEGOESM_NEMO_E3T", mode)
+        _ladder.resolve_ladder_mode()
+        out = capsys.readouterr().out
+        assert a in out and b in out, f"{mode} banner: missing {a!r}/{b!r}"
+        for other in expect:
+            if other != mode:
+                assert expect[other][0] not in out or expect[other][0] == a, \
+                    f"{mode} banner quotes {other}'s number"
+    # ... and every level cited for 'both' must be its own worst level, k=34.
+    monkeypatch.setattr(_ladder, "_LADDER_ANNOUNCED", set())
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "gdept_only")
+    _ladder.resolve_ladder_mode()
+    out = capsys.readouterr().out
+    assert "11.3 m on 'both' (at k=34)" in out
+
+
+def test_legacy_flag_conflicting_with_env_is_fatal(_ladder, monkeypatch):
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "both")
+    with pytest.raises(SystemExit, match="they disagree"):
+        _ladder.resolve_ladder_mode(legacy_1d_ladder=True)
+
+
+def test_legacy_flag_agreeing_with_env_is_allowed(_ladder, monkeypatch):
+    monkeypatch.setenv("LEGOESM_NEMO_E3T", "off")
+    assert _ladder.resolve_ladder_mode(legacy_1d_ladder=True) == "off"
+
+
+def test_default_ladder_path_does_not_print_the_alarm(_ladder, capsys):
+    """The banner is for NON-default grids only; the default must not shout.
+
+    Weak on its own (it asserts an absence) -- it is here to pin the pairing
+    with test_the_banner_is_keyed_to_the_grid..., which asserts the presence.
+    """
+    _ladder.resolve_ladder_mode()
+    out = capsys.readouterr().out
+    assert "NON-DEFAULT VERTICAL LADDER" not in out
+    assert "LEGOESM_NEMO_E3T=both" in out          # ... but it must say SOMETHING
+
+
+def test_build_twin_state_does_not_resolve_the_ladder(instruments):
+    """SCOPE GUARD. A dozen sibling probes import _build_twin_state directly;
+    resolving the ladder in there would silently re-grid every one of them that
+    does not pin the variable itself (box_budget_twin90.py does not). The twin
+    default belongs one level up, in run_twin."""
+    import inspect
+    src = inspect.getsource(instruments.kamm_twin_90d._build_twin_state)
+    assert "resolve_ladder_mode" not in src
+
+
+def test_build_twin_state_defaults_to_the_bridges_own_resolution(instruments):
+    """... and its e3t_mode default must stay None, which is what makes the
+    unchanged-for-siblings claim true."""
+    import ast
+    import inspect
+    import textwrap
+    sig = inspect.signature(instruments.kamm_twin_90d._build_twin_state)
+    assert sig.parameters["e3t_mode"].default is None
+    src = inspect.getsource(instruments.kamm_twin_90d._build_twin_state)
+    assert "e3t_mode=e3t_mode" in src               # forwarded to the bridge
+    # ... and nothing may rebind it on the way. A single `e3t_mode = None` above
+    # the call leaves that substring intact while the twin builds the 1-D ladder
+    # AND stamps "both" into the artifact -- provenance that lies, which is worse
+    # than the sweep bug this whole guard family exists for.
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    assert not [n for n in ast.walk(fn) if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Store) and n.id == "e3t_mode"], \
+        "e3t_mode is a parameter and must reach the bridge unmodified"
+
+
+def test_bridge_accepts_an_explicit_ladder_and_defaults_to_none(instruments):
+    """The argument channel the twin now uses instead of the environment."""
+    import ast
+    import inspect
+    import textwrap
+
+    from legoesm.ocean.fidelity import nemo_state_bridge
+    fn = nemo_state_bridge.bridge_nemo_to_legoesm_topo
+    assert inspect.signature(fn).parameters["e3t_mode"].default is None
+    src = inspect.getsource(fn)
+    assert "mode=e3t_mode" in src
+    tree = ast.parse(textwrap.dedent(src)).body[0]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Store) and n.id == "e3t_mode"], \
+        "e3t_mode must reach effective_vertical_scale_factors unmodified"
+
+
+def test_bridge_rejects_an_unknown_ladder_at_entry(instruments):
+    """A typo must stop the call, not surface ~180 lines in once the geometry
+    is already built. Passing None (the default) must NOT raise."""
+    from legoesm.ocean.fidelity import nemo_state_bridge
+    with pytest.raises(ValueError, match="unknown e3t_mode"):
+        nemo_state_bridge.bridge_nemo_to_legoesm_topo(
+            None, None, e3t_mode="e3t")
+    # The default must NOT be rejected -- assert it by getting PAST the guard,
+    # not by assuming it. With grid=None the very next thing raises AttributeError,
+    # which is proof the ladder check let None through.
+    with pytest.raises(AttributeError):
+        nemo_state_bridge.bridge_nemo_to_legoesm_topo(None, None)
+
+
+def test_run_twin_resolves_the_ladder_before_building_the_bridge(instruments):
+    """PROVE THE PATH EXECUTES: run_twin must resolve, must pass the flag
+    through, must do it BEFORE _build_twin_state, and must hand the result down.
+
+    Asserted on the PARSED function, not on a substring. Substring forms stayed
+    green under real mutations: wrapping the call in `if legacy_1d_ladder:`
+    (every default run then reverts to the 1-D ladder) and the ternary
+    `... if legacy_1d_ladder else "off"` (same effect, substring still present).
+    Requiring an UNCONDITIONAL top-level call kills both.
+    """
+    import ast
+    import inspect
+    import textwrap
+    src = inspect.getsource(instruments.kamm_twin_90d.run_twin)
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    calls = [i for i, n in enumerate(fn.body)     # TOP-LEVEL statements only
+             if isinstance(n, ast.Assign)
+             and isinstance(n.value, ast.Call)
+             and getattr(n.value.func, "id", None) == "resolve_ladder_mode"]
+    assert len(calls) == 1, (
+        "run_twin must call resolve_ladder_mode exactly once, unconditionally, "
+        "at its top level -- a conditional call makes the twin default inert")
+    node = fn.body[calls[0]]
+    assert [getattr(a, "id", None) for a in node.value.args] == \
+        ["legacy_1d_ladder"], "the --legacy-1d-ladder selection must be passed on"
+    assert [t.id for t in node.targets] == ["ladder_mode"]
+    # Nothing may REBIND it afterwards. Counting ast.Assign statements is not
+    # enough -- annotated, augmented, tuple, walrus and for-target bindings all
+    # slip past that. Count store-context names instead.
+    n_bind = sum(1 for n in ast.walk(fn) if isinstance(n, ast.Name)
+                 and isinstance(n.ctx, ast.Store) and n.id == "ladder_mode")
+    assert n_bind == 1, "ladder_mode must be bound exactly once in run_twin"
+    # ... and the resolution must precede the build, by STATEMENT ORDER rather
+    # than by a substring search that a reworded comment could break.
+    builds = [i for i, n in enumerate(fn.body)
+              if "_build_twin_state" in ast.dump(n)]
+    assert builds and calls[0] < builds[0]
+    # The resolved mode must actually reach the bridge.
+    assert "e3t_mode=ladder_mode" in src
+
+
+def test_run_twin_stamps_the_resolved_ladder_into_the_artifact(instruments):
+    """The npz must carry nemo_ladder_mode, the same way it carries
+    seasonal_t0_seconds, so a scorer never infers the grid from a filename --
+    and it must stamp the value the resolver RETURNED, not a re-read of the
+    environment ~90 simulated days later."""
+    import inspect
+    src = inspect.getsource(instruments.kamm_twin_90d.run_twin)
+    assert "nemo_ladder_mode=np.str_(ladder_mode)" in src
+    assert "nemo_ladder_mode=np.str_(os.environ" not in src
+
+
+def test_ladder_stamp_round_trips_through_npz(instruments, tmp_path):
+    """A stamp that reads back as b'both' or ['both'] would be a silent defect."""
+    p = tmp_path / "stamp.npz"
+    np.savez(p, nemo_ladder_mode=np.str_("both"))
+    d = np.load(p)
+    assert "nemo_ladder_mode" in d.files
+    assert str(d["nemo_ladder_mode"]) == "both"
+
+
+def test_parse_args_legacy_1d_ladder_flag(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    args = kamm_twin_90d._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    assert args.legacy_1d_ladder is False
+    args = kamm_twin_90d._parse_args(
+        ["nemo_dino_kamm_mlf", "out.npz", "--legacy-1d-ladder"])
+    assert args.legacy_1d_ladder is True
+
+
+def test_main_threads_the_legacy_flag_into_run_twin(instruments):
+    """Without this, the flag can go inert while every other test stays green:
+    the run would use "both" AND stamp "both", so the artifact would read as
+    correct while the operator asked for the 1-D ladder."""
+    import inspect
+    src = inspect.getsource(instruments.kamm_twin_90d.main)
+    assert "legacy_1d_ladder=args.legacy_1d_ladder" in src
+
+
+def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
+                                                                 monkeypatch,
+                                                                 capsys, request):
+    """intent (e): the acceptance gate PRINTS the stamped ladder and never
+    refuses on it -- and prints it before the seasonal-clock refusal, so a
+    refused candidate still records which grid it ran on.
+
+    acceptance_gate_90d imports acc_thermal_wind at module scope, which opens
+    NEMO mesh files; load_candidate itself touches neither, so a stub module
+    gets us to the branch under test without the NEMO tree.
+    """
+    import importlib
+    _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
+            / "ocean_fidelity" / "dino_1226")
+    stub = types.ModuleType("acc_thermal_wind")
+    stub.DINO = "/nonexistent"
+    monkeypatch.setitem(sys.modules, "acc_thermal_wind", stub)
+    monkeypatch.delitem(sys.modules, "acceptance_gate_90d", raising=False)
+    monkeypatch.syspath_prepend(str(_dir.parent))
+    monkeypatch.syspath_prepend(str(_dir))
+    gate = importlib.import_module("acceptance_gate_90d")
+    # POP at teardown, not monkeypatch.delitem: delitem RESTORES the value on
+    # undo, which would put the module built against the fake acc_thermal_wind
+    # (its DINO paths frozen at import time) back into sys.modules for every
+    # test that runs after this one.
+    request.addfinalizer(lambda: sys.modules.pop("acceptance_gate_90d", None))
+
+    stamped = tmp_path / "stamped.npz"
+    np.savez(stamped, nemo_ladder_mode=np.str_("both"),
+             seasonal_t0_seconds=np.float64(0.0))     # legacy clock -> refused
+    with pytest.raises(SystemExit, match="LEGACY relative clock"):
+        gate.load_candidate(str(stamped))
+    assert "vertical ladder of this candidate: both" in capsys.readouterr().out
+
+    # An UNSTAMPED artifact must still be scoreable: the only refusal it may hit
+    # is the missing day-90 field, never the missing ladder stamp. The `match=`
+    # is load-bearing -- a bare raises() passes even when the gate is mutated to
+    # refuse on the stamp, because the print has already fired by then.
+    bare = tmp_path / "bare.npz"
+    np.savez(bare, seasonal_t0_seconds=np.float64(15552000.0))
+    with pytest.raises(SystemExit, match="has no u3d_day90"):
+        gate.load_candidate(str(bare))
+    assert "UNSTAMPED" in capsys.readouterr().out

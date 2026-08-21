@@ -200,11 +200,11 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
-    # The two cape_threshold entries are tunable_tier 0 (AD-unreachable
-    # trigger, #1417): they stay in this map because the map's contract is
-    # "what the pipeline actually threads", but the tier gate in
-    # apply_params_to_config REFUSES them on the --params route (#1518) —
-    # settable only via the explicit --config/CLI scalars.
+    # The two cape_threshold entries were tunable_tier 0 (AD-unreachable
+    # trigger, #1417) and refused on the --params route by the tier gate in
+    # apply_params_to_config (#1518).  They are tier 2 as of the smooth-trigger
+    # work, so the --params route now accepts them; the gate still refuses any
+    # parameter whose spec says tier 0, whichever those are.
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",

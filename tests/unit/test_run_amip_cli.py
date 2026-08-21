@@ -1893,20 +1893,33 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is the C48/L40 publication lane (#899 restored it from
-    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
-    assert args.resolution == 48
-    assert args.nlev == 40
-    assert args.discretization == "cdgrid"
-    assert args.grid_type == "cubed_sphere"
+    # production lane moved off the cubed sphere on 2026-07-24 and this test
+    # was not moved with it, so it asserted the retired C48/L40 cube deck
+    # against a config that had been the icosahedral MPAS one for weeks --
+    # red on main, and blind to any further drift while it was.  Values below
+    # are the shipped deck: icosahedral level 5 (about 2.2 degrees), 30 sigma
+    # levels, dt 75 s.  The five keys are recipe-sensitive together (the YAML
+    # header records that L40 + hybrid + automatic dt blew up on day one), so
+    # a change here is a stability A/B, not an edit.
+    assert args.resolution == 5
+    assert args.nlev == 30
+    assert args.discretization == "mpas"
+    # The deck spells the mesh "voronoi"; the parser normalises the family's
+    # spellings to one name, so assert the resolved value the run uses.
+    assert args.grid_type == "mpas"
+    assert args.dt == 75.0
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    assert cfg.gravity_wave_drag == "mcfarlane"
+    # orographic AND non-orographic; the orographic-only spelling is the
+    # older deck's.
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"         # required by the tiled surface
-    assert cfg.surface_tiled is True
+    assert cfg.turbulence == "louis"
+    # No tiled surface on this lane -- the tiled port is open work, and the
+    # deck says so at the field.
+    assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
     # convective_cloud ON — mirrors the canonical tuned base
     # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
@@ -1918,9 +1931,9 @@ def test_config_yaml_round_trips_authoritative_values():
     # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
     assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
-    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
-    # non-tiedtke scheme trips run_amip's hard guard at argparse.
-    assert cfg.convective_precip_efficiency == 0.0
+    # The detrained-condensate to convective-rain split, on since the
+    # bechtold rain-split landed.
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -2850,7 +2863,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    # Gravity-wave drag is inherited from the production include, which
+    # gained the non-orographic component; this assertion still named the
+    # orographic-only spelling and so went red with it.
+    assert cfg.convection == "sbm"
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
@@ -3614,6 +3631,45 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
          "--mpas-vert-advection-scheme", "van_leer"]), parser))
     with pytest.raises(ValueError, match="sigma vertical coordinate only"):
         cfg_hyb.validate_strict()
+
+
+def test_fv3_duo_discretization_flows_to_config():
+    """--discretization fv3_duo round-trips into DycoreConfig and passes
+    validate_strict (slice 1: dry, physics-off, fp64, nlev in {5, 10}).
+
+    The dry-stack flags mirror what the fv3_duo component-factory branch
+    requires; the branch's own refusals (physics on, fp32, bad nlev) are
+    covered by tests/atmosphere/hydrostatic/unit/test_fv3_duo_dynamics.py.
+    """
+    parser = build_arg_parser()
+    argv = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+            "--discretization", "fv3_duo", "--resolution", "12",
+            "--nlev", "5", "--precision", "fp64",
+            "--radiation", "none", "--convection", "none",
+            "--microphysics", "none", "--turbulence", "none",
+            "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+    args = _postprocess_args(parser.parse_args(argv), parser)
+    # the disabled-physics gate accepts the stack with the explicit opt-in
+    _require_full_physics_for_amip(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "fv3_duo"
+    assert cfg.grid.grid_type == "cubed_sphere"
+    assert cfg.grid.nlev == 5
+    assert cfg.precision == "fp64"
+    cfg.validate_strict()
+
+    # The factory's DEFAULT-DENY wall must accept a stock CLI-built duo
+    # config — an argparse default drifting off the ExperimentConfig
+    # default would otherwise refuse EVERY run_amip fv3_duo launch.
+    from legoesm.driver.component_factory import (
+        _refuse_fv3_duo_non_default,
+    )
+    _refuse_fv3_duo_non_default(cfg)
+
+    # argparse rejects a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--discretization", "fv3duo"])
 
 
 def test_cmip_resolution_deg_round_trips():

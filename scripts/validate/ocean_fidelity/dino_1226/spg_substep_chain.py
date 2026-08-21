@@ -170,10 +170,13 @@ from legoesm.ocean.experiments.dino import (
     dino_step_surface_forcing,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-# The restart RUN_GDB's kt==nit000 dumps pair with (the run STARTED from
-# this file; it later wrote 00057603).
-RESTART_FILE = "DINO_00057600_restart.nc"
+import dump_lane
+
+# #1455 (dump_lane selector): RUN_DIR/RESTART_FILE come from the shared
+# DINO_1226_LANE-selected run dir, not a hardcoded RUN_GDB path -- the
+# default lane (gdb_y5) resolves to exactly what was hardcoded here before.
+RUN_DIR = dump_lane.RUN_DIR
+RESTART_FILE = dump_lane.RESTART
 DT = 2700.0
 
 # --- Precondition 1: fp64 everywhere (skill Rule 1c) -----------------------
@@ -332,10 +335,12 @@ def _shift_scan(name: str, lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray)
 
 
 def main() -> int:
+    print(dump_lane.banner())
     # --- Precondition 3 (added this iteration, see fidelity_bar_gate.py's
     # "dyn_spg_ts puu_b" row, 2026-07-29 correction): the bridge's e3t mode
     # MUST be explicit.  The unset default silently gives NEMO's analytic
-    # e3t_1d (12.9% off NEMO's real e3t_0 below k=25) and produced a false
+    # e3t_1d (up to 70.4 m off NEMO's real e3t_0 at and below k=25 --
+    # 12.9% of e3t_0, 14.8% of e3t_1d) and produced a false
     # "seed owns it" verdict earlier this session (STAGE 4 above, run before
     # this gate existed).  At e3t=both the seed is EXACT and the error
     # accumulates in the substep loop instead -- the opposite conclusion.

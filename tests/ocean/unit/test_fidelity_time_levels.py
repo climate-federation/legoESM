@@ -103,3 +103,61 @@ def test_cor2d_substep1_dumps_are_before_level():
         # dumping WRITE and the proof chain, not just the file.
         src = _DUMP_TIME_LEVEL[name][1]
         assert "dynspg_ts.F90:" in src and "Kbb" in src, src
+
+
+def test_zu_frc_assembly_dumps_are_levelled_by_their_governing_input():
+    """The #1455 JOB-2 forcing-assembly brackets (dynspg_ts.F90) are levelled
+    INDIVIDUALLY, by the velocity/tracer that governs each one -- not as a
+    block.
+
+    The trap this pins: all six dumps are written inside the same routine and
+    within ~140 lines of each other, which makes "they are all the same level"
+    an easy and wrong assumption (an earlier draft of the registration made
+    exactly that claim). Under DINO's ``ln_bt_fw=.false.``:
+
+      * the drag INCREMENT is the BEFORE-level bottom baroclinic residual
+        ``puu(ikbu,Kbb) - puu_b(Kbb)`` (dynspg_ts.F90:1819-1822) -- only its
+        r1_hu depth is at Kmm.  Same governing level, same switch and same
+        CENTRED branch as the cor2d substep-1 dumps above.
+      * ``rCdU_bot`` is NOT that residual: zdf_drg_nonlin reads uu(:,:,:,Kmm)
+        (zdfdrg.F90:172-189), so it is NOW even though it is dumped in the very
+        same bracket as the BEFORE increment.
+      * the assembled ``zu_frc``/``zv_frc`` come from this step's puu(Krhs),
+        and ``ssh_frc`` from this step's emp/emp_b -- both NOW.
+    """
+    for name in ("drg_dump_zu_frc_inc.bin", "drg_dump_zv_frc_inc.bin"):
+        assert time_level_for_dump(name) == "before", name
+        src = _DUMP_TIME_LEVEL[name][1]
+        # the citation must name the governing BEFORE input, not just the file
+        assert "dynspg_ts.F90:" in src and "Kbb" in src, src
+    for name in ("drg_dump_rCdU_bot.bin", "spg_dump_zu_frc.bin",
+                 "spg_dump_zv_frc.bin", "spg_dump_ssh_frc.bin",
+                 "sbc_dump_utau.bin"):
+        assert time_level_for_dump(name) == "now", name
+        assert _DUMP_TIME_LEVEL[name][1].strip(), name
+
+    # The two dumps written in the SAME bracket must disagree on level -- that
+    # disagreement is the whole point, so assert it directly rather than
+    # trusting the two loops above to have covered it.
+    assert (time_level_for_dump("drg_dump_zu_frc_inc.bin")
+            != time_level_for_dump("drg_dump_rCdU_bot.bin"))
+
+
+def test_zu_frc_assembly_citations_record_the_shape_split():
+    """Three of these dumps are FULL haloed (jpi x jpj) and three are the
+    no-halo interior (A2D(0)) -- and the split does NOT follow the WRITE block:
+    ``spg_dump_ssh_frc`` is haloed while ``spg_dump_zu_frc``/``zv_frc``, in the
+    SAME WRITE block three lines away, are interior.
+
+    A probe that reshapes an interior dump as haloed (or vice versa) gets a
+    plausible array of the wrong size or a silent transpose, so the shape has
+    to travel WITH the level. Verified against the real dump sizes:
+    56*203*8 = 90944 B haloed, 52*199*8 = 82784 B interior.
+    """
+    for name in ("drg_dump_rCdU_bot.bin", "spg_dump_ssh_frc.bin",
+                 "sbc_dump_utau.bin"):
+        src = _DUMP_TIME_LEVEL[name][1]
+        assert "haloed" in src, (name, src)
+    for name in ("drg_dump_zu_frc_inc.bin", "spg_dump_zu_frc.bin"):
+        src = _DUMP_TIME_LEVEL[name][1]
+        assert ("Interior" in src or "interior" in src), (name, src)

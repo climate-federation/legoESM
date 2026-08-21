@@ -4,7 +4,9 @@
 # Submits one self-chaining PBS job per selected AIMIP variant (and/or a WB
 # campaign job) via scripts/cluster/unified_training/train_derecho.pbs. Each
 # AIMIP job self-resumes across the 12 h walltime until params.eqx exists
-# (CHAIN_MAX links); WB is single-link (the WB trainer has no resume yet).
+# (CHAIN_MAX links). WB chains too since its trainer restores parameters,
+# optimizer state and trainable set: a 12-epoch T63 run does not fit one
+# walltime, and pinning it to a single link is what made it unfinishable.
 #
 # USAGE (from the repo root on a Derecho login node):
 #   # AIMIP, all three headline variants:
@@ -62,7 +64,7 @@ case "$CAMPAIGN" in
     fi
     echo "[submit] wb suite=$WB_SUITE modes=$WB_MODES (single link)"
     qsub "${_alloc_flag[@]}" \
-      -v CAMPAIGN=wb,SUITE="$WB_SUITE",VARIANT="$WB_MODES",CHAIN_MAX=0 \
+      -v CAMPAIGN=wb,SUITE="$WB_SUITE",VARIANT="$WB_MODES",CHAIN_MAX="$CHAIN_MAX" \
       "$PBS"
     ;;
   *)

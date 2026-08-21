@@ -678,6 +678,7 @@ def _run_substep_loop(
     ab3_za=None, ab3_zb=None, ab3_hist=None,
     een_pre=None,
     drag_r_u=None, drag_r_v=None,
+    tide_basis=None, tide_cos=None, tide_sin=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -696,6 +697,11 @@ def _run_substep_loop(
     Function boundaries are invisible to tracing (Python inlining), so this
     extraction is jaxpr-identical to the previous inline loop.
     """
+    # Function-scope import (deferred, per the core->physics import rule);
+    # resolved once per trace, not per substep.
+    from legoesm.ocean.physics.tidal_forcing import (
+        tidal_acceleration_from_phase)
+
     (nu_face_u, nu_face_v, diff_u_mask, diff_v_mask,
      div_damp_coeff, div_damp_area_u, div_damp_area_v) = coeffs
     use_div_damp = div_damp_coeff is not None
@@ -757,16 +763,36 @@ def _run_substep_loop(
         carry : tuple
             (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
         """
-        if ab3_za is None:
-            w_i, w_tr_i = wts_i
+        # Unpack the carry.
         if ab3_za is not None:
             (eta_c, U_bar_c, V_bar_c,
              Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c,
              Ub_c, Ubb_c, Vb_c, Vbb_c, etab_c, etabb_c) = carry
-            w_i, w_tr_i, za_i, zb_i = wts_i
         else:
             (eta_c, U_bar_c, V_bar_c,
              Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
+
+        # Unpack this substep's xs. Both extra pairs are STATIC options, so
+        # the tuple layout is a compile-time constant, never a traced branch.
+        if ab3_za is not None:
+            w_i, w_tr_i, za_i, zb_i, *_tide_i = wts_i
+        else:
+            w_i, w_tr_i, *_tide_i = wts_i
+
+        # THE EQUILIBRIUM TIDE IS EVALUATED AT THIS SUBSTEP'S OWN TIME, from
+        # precomputed phase factors (cos/sin of the reduced omega*t + chi).
+        # Freezing it at the loop's start time -- what this code did before
+        # 2026-08-12 -- left it lagging the centred averaging window by nearly
+        # a full step (M2 at dt = 1800 s: 14.5 deg of phase, ~25% of the
+        # complex forcing amplitude). The reconstruction is two contractions
+        # over the constituent axis and is algebraically EXACT, not an
+        # approximation: see tidal_acceleration_basis.
+        if tide_basis is not None:
+            _a_x, _a_y = tidal_acceleration_from_phase(tide_basis, *_tide_i)
+            F_slow_u_i = F_slow_u + _a_x
+            F_slow_v_i = F_slow_v + _a_y
+        else:
+            F_slow_u_i, F_slow_v_i = F_slow_u, F_slow_v
 
         if linear_free_surface:
             # NEMO key_linssh barotropic continuity: FIXED column depth H
@@ -904,7 +930,7 @@ def _run_substep_loop(
         else:
             _drag_u = 0.0
         U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u - g * deta_dx + F_slow_u
+            _cor_u + _drag_u - g * deta_dx + F_slow_u_i
         )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
@@ -931,7 +957,7 @@ def _run_substep_loop(
         else:
             _drag_v = 0.0
         V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v - g * deta_dy + F_slow_v
+            _cor_v + _drag_v - g * deta_dy + F_slow_v_i
         )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
@@ -1035,6 +1061,13 @@ def _run_substep_loop(
     else:
         init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
         _xs = (w_filter, w_transport)
+    if tide_basis is not None:
+        # Per-substep phase factors ride in xs, NOT the carry: the carry's
+        # dtype/shape must be invariant across iterations, and xs entries are
+        # free of that constraint. Shape (n_loop, n_c) is a few thousand
+        # floats -- storing the reconstructed acceleration instead would be
+        # (n_loop, n_lat, n_lon+1), which at n_loop ~ 960 is infeasible.
+        _xs = _xs + (tide_cos, tide_sin)
 
     if config.barotropic.differentiable_barotropic:
         # scan path: pass (averaging, transport) weights as xs per substep
@@ -1048,10 +1081,13 @@ def _run_substep_loop(
     else:
         # fori_loop path: index into the filter + transport weights
         def fori_body(i, carry):
+            _t_i = ((tide_cos[i], tide_sin[i]) if tide_basis is not None
+                    else ())
             if ab3_za is not None:
                 return substep_body(
-                    (w_filter[i], w_transport[i], ab3_za[i], ab3_zb[i]), carry)
-            return substep_body((w_filter[i], w_transport[i]), carry)
+                    (w_filter[i], w_transport[i], ab3_za[i], ab3_zb[i])
+                    + _t_i, carry)
+            return substep_body((w_filter[i], w_transport[i]) + _t_i, carry)
 
         finals = jax.lax.fori_loop(0, n_loop, fori_body, init_carry)
 
@@ -1104,10 +1140,65 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        w_filter, w_total, w_transport, n_loop = compute_filter_weights(
+        w_filter, w_total, w_transport = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
+        n_loop = n_substeps
     return w_filter, w_total, w_transport, n_loop
+
+
+def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
+                       h_k_now, grid, min_water_col, dtype):
+    """3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6,
+    dynspg_ts.F90:1170-1172).
+
+    The caller subtracts the NOW-thickness depth-mean of the 3-D velocity
+    (== NEMO ``puu_b(Kmm)``) and adds back the depth-UNIFORM target returned
+    here:
+
+    * ``"velocity_avg"`` (default): ``U_bar_avg`` — the primary/velocity
+      boxcar mean (bit-identical legacy path).
+    * ``"transport_avg"``: ``Hu_avg/H_u`` — NEMO's ``un_adv*r1_hu(Kmm)``.
+      ``H_u`` is the MIN-RULE NOW u-face column depth built from ``h_k_now``.
+      Under ``barotropic_seed_face_depth="min_rule"`` that is the SAME
+      thickness the subtracted mean is built from, so the reconciled
+      depth-mean is exactly ``Hu_avg/H_u`` (measured residual 3.6e-12).
+      Under ``"nemo_ssh_avg"`` it is NOT: that seed rescales the min-rule
+      face thickness by the NEMO/min-rule column ratio while this divisor
+      does not, leaving a residual wherever the wet-column floor binds
+      asymmetrically (measured 5.5e-3 against |Hu_avg| ~ 4.2e2 on a forced
+      0.30 m shelf; away from the floor the per-column ratio cancels in the
+      weighted mean). Both barotropic paths share the discrepancy exactly,
+      so it is a fidelity gap in the divisor convention, not a path
+      difference -- see the F1 note on
+      ``BarotropicConfig.barotropic_reconcile_target``.
+
+    Shared by BOTH barotropic entry points (standard-halo and wide-halo) so
+    the dispatch — and the raise on an unknown value — exists once.
+
+    Static Python gate on the config string (dispatch hardening). The field
+    always exists on ``BarotropicConfig`` (default ``"velocity_avg"``,
+    ``state.py``) -- a getattr literal-fallback here is the banned pattern
+    (CLAUDE.md: "`getattr(..., 'X', <literal>)` fallbacks count as
+    hardcoded"); read it directly so a future rename/removal of the field
+    raises AttributeError instead of silently reverting to the fallback.
+    """
+    _recon = config.barotropic.barotropic_reconcile_target
+    if _recon not in ("velocity_avg", "transport_avg"):
+        raise ValueError(
+            "unknown barotropic_reconcile_target scheme "
+            f"{_recon!r}: must be one of ('velocity_avg', 'transport_avg').")
+    if _recon != "transport_avg":
+        return U_bar_avg, V_bar_avg
+    # NOW u/v-face column depth = <min_cell_to_uface(h_k_now)>, matching the
+    # thickness that produced the subtracted mean (= NEMO hu(Kmm)); guard the
+    # divide with the wet-column floor (a wet column always exceeds it, so
+    # this is the land-mask guard, not a physics clip).
+    _H_u_now = jnp.maximum(
+        jnp.sum(min_cell_to_uface(h_k_now), axis=-1), min_water_col)
+    _H_v_now = jnp.maximum(
+        jnp.sum(min_cell_to_vface(h_k_now, grid), axis=-1), min_water_col)
+    return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)
 
 
 def barotropic_substeps_latlon_cgrid(
@@ -1235,45 +1326,6 @@ def barotropic_substeps_latlon_cgrid(
     else:
         F_slow_v = F_slow_v.astype(eta.dtype)
 
-    # --- Equilibrium-tide barotropic body force (OPT-IN; #tidal_forcing) -------
-    # Add a = +g*grad(eta_eq_eff) to the SLOW forcing so it (a) is applied at
-    # every substep as a constant-over-the-baroclinic-step body force (the tide
-    # is slowly varying vs the ~s barotropic subcycle), and (b) is MASKED by
-    # u_mask/v_mask together with F_slow inside the substep (lines below:
-    # ``(... + F_slow_u) * u_mask``) — so closed/land faces receive nothing.
-    # Feature-gated on the STATIC config bool (CLAUDE.md feature-gating exception)
-    # AND a supplied traced model time: disabled / no-time => bit-identical.
-    #
-    # FROZEN TIDE vs THE CENTRED WINDOW (2026-08-12, codex HIGH x3).
-    # The tide is held CONSTANT across the substep loop, so the time it is
-    # sampled at sets the quadrature error. Centring the box/cosine window on
-    # t+dt stretched the loop to t+(2n-1)*dt_s, so a tide frozen at the loop
-    # start now lags by nearly a full step -- for M2 at dt=1800 s, 14.5 deg of
-    # phase, ~25% of the complex forcing amplitude.
-    #
-    # A one-line "sample at t + n_substeps*dt_s instead" was TRIED AND
-    # REVERTED: it is only the window centroid for the forward-frame box and
-    # cosine filters. Under the multiple-leapfrog frame dt_s = dt_mom/n with
-    # dt_mom = 2*dt, so that product is 2*dt -- a full outer step too late --
-    # and the discretely trimmed power_law window's centroid is n + 0.0088*n
-    # substeps, not n, while nemo_ab3am4 does no averaging at all and returns
-    # the final substep. One expression cannot be the centroid for all of
-    # them, and a wrong sample time is worse than a documented one.
-    #
-    # So the sampling STAYS at the loop start, unchanged from before this
-    # work. It is not silently fine: a tide-enabled box/cosine run now carries
-    # roughly twice the forcing-quadrature error it used to. It is left as a
-    # documented limitation rather than "fixed", because the two cheap fixes
-    # are both wrong -- the centroid expression above misfires on MLF and
-    # power_law, and refusing the combination outright breaks the working,
-    # tested tide wiring (test_tidal_forcing.py::test_wire_*). FOLLOW-UP: a
-    # per-substep tide at t+(i+1)*dt_s removes the freezing and the whole
-    # centroid question at once.
-    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
-    F_slow_u, F_slow_v = apply_tidal_forcing(
-        F_slow_u, F_slow_v, grid, t_seconds,
-        getattr(config, "tidal_forcing", None), g=g)
-
     # Depth-averaged velocity.  Cast h_k to _dt because z_coord.sigma_w
     # may be float64 (jnp.linspace default under x64), which would
     # promote U_bar/V_bar and break the fori_loop carry-type invariant.
@@ -1397,6 +1449,55 @@ def barotropic_substeps_latlon_cgrid(
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
 
+    # --- Equilibrium-tide barotropic body force (OPT-IN; #tidal_forcing) -------
+    # a = +g*grad(eta_eq_eff) is added to the SLOW forcing inside the substep,
+    # where it is MASKED by u_mask/v_mask together with F_slow (``(... +
+    # F_slow_u_i) * u_mask``) — so closed/land faces receive nothing.
+    #
+    # PER SUBSTEP, not frozen (2026-08-12). The tide used to be evaluated once
+    # here at the step's start time and held constant across the whole loop.
+    # Centring the box/cosine averaging window on t+dt stretched that loop to
+    # ~t+2*dt, which left the frozen value lagging by nearly a full step — for
+    # M2 at dt = 1800 s, 14.5 deg of phase, ~25% of the complex forcing
+    # amplitude. Rather than pick a single "better" sample time (tried twice
+    # and wrong both times: the window centroid is filter- and frame-specific,
+    # and MLF's dt_s = dt_mom/n makes n*dt_s == 2*dt), the freezing itself is
+    # removed. Substep i is forced at t + (i+1)*dt_s, which is the time that
+    # substep's state actually represents, so no centroid or frame reasoning
+    # is required and every filter is correct by construction.
+    #
+    # Cost is kept off the hot path by splitting the harmonic sum: the spatial
+    # basis is built ONCE here and the loop only contracts it against
+    # per-substep cos/sin factors. Feature-gated on the STATIC config bool
+    # (CLAUDE.md feature-gating exception) AND a supplied traced model time:
+    # disabled / no-time => the branch is not traced => bit-identical.
+    from legoesm.ocean.physics.tidal_forcing import (
+        tidal_acceleration_basis, tidal_phase_factors)
+    _tide_cfg = getattr(config, "tidal_forcing", None)
+    _tide_basis = _tide_cos = _tide_sin = None
+    if (_tide_cfg is not None and _tide_cfg.enabled
+            and t_seconds is not None):
+        _tide_basis = tidal_acceleration_basis(grid, _tide_cfg, g=g)
+        # Cast to the working dtype BEFORE the basis is closed over: the
+        # grid geometry can be float64 under x64, and adding a float64
+        # acceleration to the float32 predictor would promote the loop carry
+        # and break its type invariant.
+        _tide_basis = _tide_basis._replace(
+            ax_cos=_tide_basis.ax_cos.astype(eta.dtype),
+            ax_sin=_tide_basis.ax_sin.astype(eta.dtype),
+            ay_cos=_tide_basis.ay_cos.astype(eta.dtype),
+            ay_sin=_tide_basis.ay_sin.astype(eta.dtype))
+        # Phase reduced mod 2*pi at t's OWN precision inside
+        # tidal_phase_factors, before the cast — omega*t reaches ~1e5 rad on a
+        # long run, where float32 resolves only ~1e-2 rad, and once cos/sin
+        # are taken the reduction cannot be recovered.
+        _t_sub = t_seconds + (jnp.arange(1, n_loop + 1,
+                                         dtype=jnp.asarray(dt_s).dtype) * dt_s)
+        _tide_cos, _tide_sin = tidal_phase_factors(_tide_basis, _t_sub)
+        _tide_cos = _tide_cos.astype(eta.dtype)
+        _tide_sin = _tide_sin.astype(eta.dtype)
+
+
     _filter = config.barotropic.barotropic_time_filter
     _boxcar_ab3 = _filter == "nemo_boxcar_ab3"   # NEMO nn_bt_flt=2 (DINO)
     _ab3 = _filter in ("nemo_ab3am4", "nemo_boxcar_ab3")
@@ -1440,6 +1541,7 @@ def barotropic_substeps_latlon_cgrid(
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
         ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
+        tide_basis=_tide_basis, tide_cos=_tide_cos, tide_sin=_tide_sin,
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
     )
@@ -1477,15 +1579,26 @@ def barotropic_substeps_latlon_cgrid(
     if config.barotropic.barotropic_local_subcycle_clamp:
         eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
+    # 3-D momentum depth-mean RECONCILIATION target (NEMO dyn_spg_ts N6);
+    # ``U_bar_corr`` is the NOW-thickness depth-mean of the 3-D velocity
+    # (== NEMO ``puu_b(Kmm)``) the caller subtracts below.  Dispatch +
+    # divisor convention live in the shared helper (same call on the
+    # wide-halo path).
+    recon_u, recon_v = _reconcile_targets(
+        config, U_bar_avg=U_bar_avg, V_bar_avg=V_bar_avg,
+        Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+        h_k_now=_h_k_corr if _seed_override else h_k, grid=grid,
+        min_water_col=min_water_col, dtype=_dt)
+
     # Correct 3D velocities: preserve baroclinic structure.
-    # Use time-averaged barotropic velocity for the 3D correction to ensure
+    # Use the reconciliation target for the 3D correction to ensure
     # consistency with eta_avg (the time-averaged eta used for layer thicknesses).
     u_baro_old = U_bar_corr[..., jnp.newaxis]
     v_baro_old = V_bar_corr[..., jnp.newaxis]
     u_prime = u_corr - u_baro_old
     v_prime = v_corr - v_baro_old
-    u_new = (u_prime + U_bar_avg[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new = (v_prime + V_bar_avg[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    u_new = (u_prime + recon_u[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
+    v_new = (v_prime + recon_v[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
     state_new = state._replace(
         eta=state.eta.replace(data=eta_avg),
@@ -1615,6 +1728,28 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
             "barotropic path (the drag-rate faces would need widening to the "
             "extended band); use the standard split-explicit path or disable "
             "barotropic_wide_halo.")
+    # The AB3 time filters need the predictor coefficient arrays, the
+    # cross-window bt_hist carry and the final-substep state selection that
+    # the standard entry point builds at its _ab3 block; this path builds
+    # NONE of them and passes no ab3_* argument to _run_substep_loop, so
+    # running them here is not an approximation but a wrong answer:
+    # 'nemo_ab3am4' zeroes the filter weights while leaving w_total = 1, so
+    # the wide path divides a zero accumulator and returns sea surface
+    # height IDENTICALLY ZERO (measured, 12 substeps, fp64: standard
+    # max|eta| = 4.377e-01 m, wide = 0.000e+00); 'nemo_boxcar_ab3' -- DINO's
+    # own filter (nn_bt_flt=2) -- runs the boxcar weights without the
+    # predictor and diverges at 2.445e-03 m, nine orders above the 1e-12
+    # parity gate. Refuse both, matching this function's precedent for the
+    # EEN Coriolis and substep-drag options above.
+    if config.barotropic.barotropic_time_filter in (
+            "nemo_ab3am4", "nemo_boxcar_ab3"):
+        raise NotImplementedError(
+            "barotropic_time_filter="
+            f"{config.barotropic.barotropic_time_filter!r} is not wired into "
+            "the wide-halo barotropic path (the AB3 predictor coefficients, "
+            "the cross-window bt_hist carry and the final-substep state "
+            "selection are built only by the standard entry point); use the "
+            "standard split-explicit path or disable barotropic_wide_halo.")
 
     g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data
@@ -1740,18 +1875,29 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 
     # Tide on the EXTENDED geometry (analytic in the grid — no exchange
     # needed; owned rows are bit-identical to the standard path's values).
-    from legoesm.ocean.physics.tidal_forcing import apply_tidal_forcing
-    # Wide-halo path: the equilibrium tide is evaluated on the EXTENDED band
-    # geometry, so the acceleration call must run under local_halo_pads(). The
-    # single-owner wrapper does the enabled/t_seconds gate, masking contract and
-    # the carry-invariant dtype cast; only the halo-pad context is band-specific.
-    with local_halo_pads():
-        # Loop-start sampling, matching the standard path (see the FROZEN
-        # TIDE note there). Both lanes must use the SAME convention or the
-        # wide-halo band runs a different tide phase from the owned rows.
-        Fsu_ext, Fsv_ext = apply_tidal_forcing(
-            Fsu_ext, Fsv_ext, grid_ext, t_seconds,
-            getattr(config, "tidal_forcing", None), g=g)
+    # PER SUBSTEP, matching the standard path: the basis is built once on the
+    # extended band (so it must run under local_halo_pads(), the only
+    # band-specific part) and the loop contracts it against per-substep phase
+    # factors. See the standard path for why the tide is no longer frozen.
+    from legoesm.ocean.physics.tidal_forcing import (
+        tidal_acceleration_basis, tidal_phase_factors)
+    _tide_cfg = getattr(config, "tidal_forcing", None)
+    _tide_basis = _tide_cos = _tide_sin = None
+    if (_tide_cfg is not None and _tide_cfg.enabled
+            and t_seconds is not None):
+        with local_halo_pads():
+            _tide_basis = tidal_acceleration_basis(grid_ext, _tide_cfg, g=g)
+        # Carry-invariant dtype cast (the wrapper used to own this).
+        _tide_basis = _tide_basis._replace(
+            ax_cos=_tide_basis.ax_cos.astype(eta.dtype),
+            ax_sin=_tide_basis.ax_sin.astype(eta.dtype),
+            ay_cos=_tide_basis.ay_cos.astype(eta.dtype),
+            ay_sin=_tide_basis.ay_sin.astype(eta.dtype))
+        _t_sub = t_seconds + (jnp.arange(1, n_loop + 1,
+                                         dtype=jnp.asarray(dt_s).dtype) * dt_s)
+        _tide_cos, _tide_sin = tidal_phase_factors(_tide_basis, _t_sub)
+        _tide_cos = _tide_cos.astype(eta.dtype)
+        _tide_sin = _tide_sin.astype(eta.dtype)
 
     eta_floor_ext = min_water_col - H_ext
     area_ext = grid_ext.area.astype(_dt)
@@ -1771,6 +1917,15 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
         (V_x,) = widen_band_vface_fields((V_c,), W)
         wf = jax.lax.slice_in_dim(w_filter, done, done + k)
         wt = jax.lax.slice_in_dim(w_transport, done, done + k)
+        # Slice the tide phases with the SAME [done, done+k) window as the
+        # weights: that IS the global substep offset, so a chunked run forces
+        # each substep at the same time an unchunked one would. Slicing them
+        # independently (or restarting at 0 per chunk) would repeat the first
+        # chunk's tide in every chunk.
+        tcos = (None if _tide_cos is None
+                else jax.lax.slice_in_dim(_tide_cos, done, done + k))
+        tsin = (None if _tide_sin is None
+                else jax.lax.slice_in_dim(_tide_sin, done, done + k))
         with local_halo_pads():
             finals = _run_substep_loop(
                 eta_x, U_x, V_x,
@@ -1788,6 +1943,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
                 local_subcycle_clamp=True,
                 linear_free_surface=getattr(
                     z_coord, "linear_free_surface", False),
+                tide_basis=_tide_basis, tide_cos=tcos, tide_sin=tsin,
             )
         (eta_ext_f, U_ext_f, V_ext_f,
          Hu_k, Hv_k, eta_sum_k, U_sum_k, V_sum_k) = finals
@@ -1816,12 +1972,21 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     eta_avg = _clamp_redistribute(eta_avg, eta_floor, mask, _area)
 
     # Correct 3D velocities: preserve baroclinic structure (owned rows only).
+    # Same N6 reconciliation dispatch as the standard-halo path (shared
+    # helper).  ``h_k`` / ``grid`` are the OWNED-band NOW thickness and
+    # geometry, matching the ``U_bar`` subtracted just below; this path has
+    # no before-level seed override, so there is no ``_h_k_corr`` variant.
+    recon_u, recon_v = _reconcile_targets(
+        config, U_bar_avg=U_bar_avg, V_bar_avg=V_bar_avg,
+        Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+        h_k_now=h_k, grid=grid, min_water_col=min_water_col, dtype=_dt)
+
     u_baro_old = U_bar[..., jnp.newaxis]
     v_baro_old = V_bar[..., jnp.newaxis]
     u_prime = u - u_baro_old
     v_prime = v - v_baro_old
-    u_new = (u_prime + U_bar_avg[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new = (v_prime + V_bar_avg[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    u_new = (u_prime + recon_u[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
+    v_new = (v_prime + recon_v[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
     state_new = state._replace(
         eta=state.eta.replace(data=eta_avg),

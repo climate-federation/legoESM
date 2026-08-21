@@ -1281,39 +1281,86 @@ def spectral_rollout(
         else None
     )
 
-    use_rad_gating = rad_physics_fn is not None and rad_update_interval > 1
-    if forcing_base is not None and use_rad_gating:
+    if rad_physics_fn is not None and rad_update_interval < 1:
         raise ValueError(
-            "spectral_rollout: forcing_base is the learned-physics forcing "
-            "path and cannot be combined with rad-gating; classical "
-            "prescribed-SST runs go through spectral_amip_rollout."
+            "spectral_rollout: rad_update_interval must be >= 1, got "
+            f"{rad_update_interval}.")
+    # A separate radiation callable ALWAYS routes through the gated body,
+    # interval 1 included (the gate then fires every step).  Treating
+    # interval 1 as "ungated" sent the run down a body that never calls the
+    # radiation callable at all — the run silently had no radiation (codex).
+    use_rad_gating = rad_physics_fn is not None
+
+    # Per-step forcing (prescribed surface temperature + advancing calendar)
+    # is shared by BOTH branches.  It used to be refused whenever radiation
+    # was sub-cycled, which is the configuration every classical training arm
+    # runs: those runs therefore had NO prescribed surface temperature (the
+    # bulk-flux surface temperature fell back to the lowest air temperature,
+    # which makes the sensible heat flux identically zero) and radiation ran
+    # on its module-default calendar — a spring-equinox noon sun for every
+    # scene, whatever the scene's real date and hour.
+    _t_off = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
+
+    # Validate the prescribed surface field ONCE, before anything is traced,
+    # so a wrong-sized field names itself here instead of surfacing later as
+    # whichever consumer happens to check first.  Masked/absent values (NaN
+    # over land in an SST-only field) become the finite fall-back sentinel
+    # rather than entering the carried physics state, where a NaN would
+    # propagate through every step and every gradient.
+    _sfc_override = None
+    if forcing_base is not None and forcing_base.get("T_sfc") is not None:
+        from legoesm.atmosphere.physics.physics_state import NO_SFC_T_OVERRIDE
+        _raw = jnp.asarray(forcing_base["T_sfc"]).reshape(-1)
+        _ncol_grid = int(grid.n_lat) * int(grid.n_lon)
+        if _raw.shape != (_ncol_grid,):
+            raise ValueError(
+                "spectral_rollout: the prescribed surface temperature has "
+                f"shape {_raw.shape}, expected ({_ncol_grid},) — one value "
+                "per column of the physics grid.")
+        _sfc_override = jnp.where(jnp.isfinite(_raw), _raw, NO_SFC_T_OVERRIDE)
+    if forcing_base is not None:
+        _missing = [k for k in ("T_sfc", "sic", "day_of_year",
+                                "seconds_of_day") if k not in forcing_base]
+        if _missing:
+            raise KeyError(
+                "spectral_rollout: forcing_base is missing "
+                f"{_missing} — the per-step forcing needs the prescribed "
+                "surface fields and the scene's calendar.")
+
+    def _forcing_at(step_idx):
+        # Elapsed simulated time -> advancing day-of-year (seasonal
+        # insolation, FRACTIONAL like spectral_amip_rollout so the
+        # declination is continuous within a day — codex) + wrapped
+        # seconds-of-day (diurnal phase).  day_of_year additionally
+        # wraps to [1, 366) so a year-end IC never exceeds
+        # cos_zenith_angle's documented 1-365 domain (the declination
+        # is 365-periodic, so the wrap is phase-preserving).
+        t = (step_idx.astype(jnp.float64) * dt + _t_off
+             + jnp.asarray(forcing_base["seconds_of_day"], jnp.float64))
+        doy = (
+            jnp.asarray(forcing_base["day_of_year"], jnp.float64)
+            + t / 86400.0
         )
+        return {
+            # The RAW field, NaN over land preserved.  It is tempting to
+            # publish the sanitised copy here so every consumer sees one
+            # value, but the consumers disagree ON PURPOSE: the learned
+            # arms (SFNO, column MLP) read NaN as "no prescribed surface
+            # here" and substitute the lowest-level air temperature, and
+            # handing them the finite -1e4 sentinel instead would feed
+            # -10000 K into every land column (codex, overruling an earlier
+            # GLM suggestion).  The sentinel belongs only in the physics
+            # state's override slot, which is where its contract is defined.
+            # This is exactly what spectral_amip_rollout has always done.
+            "T_sfc": forcing_base["T_sfc"],
+            "sic": forcing_base["sic"],
+            "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
+            "seconds_of_day": jnp.mod(t, 86400.0),
+        }
 
     if not use_rad_gating:
         # Legacy single-physics path -- physics_fn computes the full
         # tendency (radiation included or absent) every dycore step.
-        _t_off = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
-
-        def _forcing_at(step_idx):
-            # Elapsed simulated time -> advancing day-of-year (seasonal
-            # insolation, FRACTIONAL like spectral_amip_rollout so the
-            # declination is continuous within a day — codex) + wrapped
-            # seconds-of-day (diurnal phase).  day_of_year additionally
-            # wraps to [1, 366) so a year-end IC never exceeds
-            # cos_zenith_angle's documented 1-365 domain (the declination
-            # is 365-periodic, so the wrap is phase-preserving).
-            t = (step_idx.astype(jnp.float64) * dt + _t_off
-                 + jnp.asarray(forcing_base["seconds_of_day"], jnp.float64))
-            doy = (
-                jnp.asarray(forcing_base["day_of_year"], jnp.float64)
-                + t / 86400.0
-            )
-            return {
-                "T_sfc": forcing_base["T_sfc"],
-                "sic": forcing_base["sic"],
-                "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
-                "seconds_of_day": jnp.mod(t, 86400.0),
-            }
 
         def step_post(new_state):
             """Post-integration chain, shared by the stateless and stateful
@@ -1490,16 +1537,44 @@ def spectral_rollout(
     # kwarg still work because they ignore extra kwargs via the
     # ``physics_fn(... , grid_fields=None, sim_time_seconds=0.0)``
     # default in the integration wrapper.
-    def _call_rad(s, t_seconds):
+    # Which optional kwargs this radiation callable actually accepts, decided
+    # ONCE by reading its signature.  The previous form called it and treated
+    # any TypeError as "old signature" — which also swallowed a genuine
+    # TypeError raised INSIDE radiation (a dtype or shape error) and then
+    # silently re-called it without the elapsed time and without the forcing,
+    # i.e. restored the very default-calendar behaviour this fix removes
+    # (GLM).  A callable taking **kwargs advertises everything.
+    _rad_accepts = None
+    if rad_physics_fn is not None:
+        import inspect as _inspect
         try:
-            return rad_physics_fn(
-                s, grid, sigma_coord, sim_time_seconds=t_seconds,
-            )
-        except TypeError:
-            # Legacy rad_physics_fn signature without sim_time_seconds.
-            return rad_physics_fn(s, grid, sigma_coord)
+            _sig = _inspect.signature(rad_physics_fn)
+        except (TypeError, ValueError):
+            _sig = None
+        if _sig is None:
+            _rad_accepts = None          # unintrospectable: pass everything
+        elif any(pp.kind is _inspect.Parameter.VAR_KEYWORD
+                 for pp in _sig.parameters.values()):
+            _rad_accepts = None
+        else:
+            _rad_accepts = set(_sig.parameters)
 
-    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds)
+    def _call_rad(s, t_seconds, step_idx=None):
+        # ``forcing_base`` (when the caller supplies one) carries the
+        # prescribed surface temperature and the scene's real calendar; the
+        # per-step dict advances that calendar by the elapsed rollout time,
+        # so each radiation call sees its own hour of day rather than the
+        # module-default equinox noon.
+        _kw = {}
+        if _rad_accepts is None or "sim_time_seconds" in _rad_accepts:
+            _kw["sim_time_seconds"] = t_seconds
+        if forcing_base is not None and (
+                _rad_accepts is None or "forcing" in _rad_accepts):
+            _kw["forcing"] = _forcing_at(
+                jnp.asarray(0.0 if step_idx is None else step_idx))
+        return rad_physics_fn(s, grid, sigma_coord, **_kw)
+
+    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds, 0.0)
 
     # Cast the (Python-float) offset into the same dtype the gated
     # branch uses, so the radiation diurnal cycle sees a single
@@ -1568,7 +1643,7 @@ def spectral_rollout(
         sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
         return jax.lax.cond(
             should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds),
+            lambda _: _call_rad(state, sim_time_seconds, step_idx),
             lambda _: cached_rad_tendency,
             operand=None,
         )
@@ -1609,8 +1684,34 @@ def spectral_rollout(
         new_state = _post_step(_integrate(state, tendency_fn))
         return (new_state, new_rad_tendency, phys_state_new), None
 
+    def _with_prescribed_sfc(ps):
+        """Anchor the bulk-flux surface temperature to the prescribed field.
+
+        Without this the turbulence/surface scheme resolves its surface
+        temperature to the lowest model level's air temperature, so the
+        sensible heat flux is identically zero and the latent flux is
+        evaluated against a surface that is by construction at the air
+        temperature — i.e. the run has no surface energy exchange at all.
+        ``spectral_amip_rollout`` has always done this; the training rollout
+        could not, because a forcing dict was refused whenever radiation was
+        sub-cycled.
+        """
+        if _sfc_override is None:
+            return ps
+        _cur = getattr(ps, "surface_T_sfc_override", None)
+        if _cur is None:
+            raise TypeError(
+                "spectral_rollout: forcing_base carries a prescribed surface "
+                "temperature but the threaded physics state has no "
+                "surface_T_sfc_override slot, so the anchor would be silently "
+                f"dropped (state type {type(ps).__name__}).")
+        return ps._replace(
+            surface_T_sfc_override=_sfc_override.astype(_cur.dtype))
+
     if _thread_phys:
         if phys_state_in is not None:
+            # A chained caller's carried memory is re-anchored too: the
+            # prescribed surface belongs to THIS segment, not the previous one.
             phys0 = phys_state_in
         else:
             # Prefer the state-aware seed (shear-equilibrium TKE) over the
@@ -1623,6 +1724,7 @@ def spectral_rollout(
                 _ncol = int(grid.n_lat) * int(grid.n_lon)
                 _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
                 phys0 = _ps_init(_ncol, _nlev)
+        phys0 = _with_prescribed_sfc(phys0)
         step_fn_ckpt = jax.checkpoint(
             step_fn_gated_stateful,
             prevent_cse=True,
@@ -3437,6 +3539,7 @@ def _train_spectral_loop(
                     rad_physics_fn=rad_fn,
                     rad_update_interval=rad_update_interval,
                     sim_time_offset_seconds=time_offset_seconds,
+                    forcing_base=forcing_base,
                     phys_state_in=phys_state,
                     return_phys_state=True,
                 )
@@ -3447,6 +3550,7 @@ def _train_spectral_loop(
                 rad_physics_fn=rad_fn,
                 rad_update_interval=rad_update_interval,
                 sim_time_offset_seconds=time_offset_seconds,
+                forcing_base=forcing_base,
             ), None
         return spectral_rollout(
             state, physics, grid, sigma, pe_config,

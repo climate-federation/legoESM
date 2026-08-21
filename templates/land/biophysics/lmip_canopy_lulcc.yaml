@@ -1,6 +1,6 @@
 # ~4 deg global biophysics LMIP with TRANSIENT LAND-USE / LAND-COVER CHANGE.
 #
-# Same physics as lmip_canopy_10yr (two-leaf canopy + MOST + multilayer Richards +
+# Same physics as lmip_biophys_2deg (two-leaf canopy + MOST + multilayer Richards +
 # freeze/thaw) but with transient anthropogenic cover: the per-column PFT fractions
 # evolve year-by-year from a reconstruction, re-weighting LAI, canopy params, and
 # albedo each step, and E_LUC land-use-change carbon is booked as a post-run

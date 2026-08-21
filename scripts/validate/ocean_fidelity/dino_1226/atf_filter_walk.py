@@ -192,6 +192,7 @@ def _load_sibling(name: str, modname: str):
 
 _bn2 = _load_sibling("bn2_alpha_compare.py", "_bn2_alpha_compare")
 _cancel = _load_sibling("cancelling_rows_per_element.py", "_cancelling_rows_per_element")
+_dump_lane = _load_sibling("dump_lane.py", "_dump_lane_atf_filter_walk")
 _read_dims = _bn2._read_dims
 _load_haloed = _bn2._load_haloed
 _shift_scan = _bn2._shift_scan
@@ -207,9 +208,9 @@ from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
 from legoesm.ocean.fidelity.precision_gate import require_fp64, require_explicit_e3t_mode
 from legoesm.ocean.fidelity.time_levels import register_dump, time_level_for_dump
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
-KT_DUMP = 57601  # nit000, confirmed RUN_GDB/ocean.output "nn_it000 = 57601"
+RUN_DIR = _dump_lane.RUN_DIR
+RESTART = _dump_lane.RESTART
+KT_DUMP = _dump_lane.KT_DUMP  # nit000; lane-dependent, see dump_lane.py
 
 # ---------------------------------------------------------------------------
 # Register this script's own dump (baro_dump_u/v_after.bin) -- not previously
@@ -251,7 +252,7 @@ def build_state():
     set_policy(PrecisionPolicy.fp64())
 
     jpi, jpj, jpk, hls = _read_dims(RUN_DIR)
-    print(f"RUN_GDB dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
+    print(f"[{_dump_lane.LANE}] dims: jpi={jpi} jpj={jpj} jpk={jpk} nn_hls={hls}  "
           f"restart={RESTART}  kt(nit000)={KT_DUMP}  LEGOESM_NEMO_E3T={e3t_mode}")
 
     grid = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
@@ -408,6 +409,7 @@ def measure_atf_uv(st) -> dict:
 
 
 def main() -> None:
+    print(_dump_lane.banner())
     st = build_state()
     self_check_a_baro_before_matches_dynzdf(st)
     self_check_b_baro_before_differs_from_after(st)

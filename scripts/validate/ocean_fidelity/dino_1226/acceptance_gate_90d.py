@@ -123,6 +123,43 @@ def metrics(st, wet):
 def load_candidate(path, day=90):
     """{"T","S","u","land_mask"} (fp64) from a kamm_twin_90d --save-3d npz."""
     d = np.load(path)
+    # #1455: the twin harness stamps WHICH vertical ladders the bridge handed
+    # legoESM (nemo_ladder_mode). PRINT it, never refuse on it -- both ladders
+    # are legitimately scoreable and the gate's job is to say which grid a score
+    # was earned on, not to pick one. An artifact written before the stamp
+    # existed does NOT record its grid at all -- it may have been run with
+    # LEGOESM_NEMO_E3T set to anything -- so it is reported as unknown, never
+    # guessed at from whatever the default was on the day.
+    # It prints BEFORE the seasonal-clock refusal below, so a candidate that
+    # is refused still records which grid it ran on.
+    ladder = (str(d["nemo_ladder_mode"]) if "nemo_ladder_mode" in d.files
+              else "UNSTAMPED -- this artifact predates the nemo_ladder_mode "
+                   "stamp and does not record which vertical ladders it ran "
+                   "on; read its run log")
+    print(f"vertical ladder of this candidate: {ladder}", flush=True)
+    # #1455 season-bug guard (extend-only): a candidate produced on the LEGACY
+    # relative clock is forced exactly antiphase to NEMO's seasonal forcing
+    # (usrdef_sbc.F90:536 runs on absolute kt; the day-180 restart carries
+    # adatrj=180.0), so scoring it here is a cross-season confound, not a
+    # fidelity measurement. The harness stamps seasonal_t0_seconds into every
+    # artifact (kamm_twin_90d.py); refuse artifacts that lack the stamp
+    # (pre-fix) or carry t0=0 (legacy clock), unless explicitly overridden
+    # for historical reproduction.
+    import os as _os
+    if _os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK") != "1":
+        if "seasonal_t0_seconds" not in d.files:
+            raise SystemExit(
+                f"{path} carries no seasonal_t0_seconds stamp -- it predates "
+                "the season-bug fix (#1455, 8e56daafa) and was forced "
+                "antiphase to NEMO. Re-run the twin, or set "
+                "DINO_GATE_ALLOW_LEGACY_CLOCK=1 to score it anyway (the "
+                "result is then NOT a NEMO comparison).")
+        if float(d["seasonal_t0_seconds"]) == 0.0:
+            raise SystemExit(
+                f"{path} was produced on the LEGACY relative clock "
+                "(seasonal_t0_seconds=0) -- antiphase to NEMO's forcing. "
+                "Set DINO_GATE_ALLOW_LEGACY_CLOCK=1 only for historical "
+                "reproduction; the score is then NOT a NEMO comparison.")
     key = f"u3d_day{day}"
     if key not in d:
         raise SystemExit(f"{path} has no {key} -- run kamm_twin_90d.py with "

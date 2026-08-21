@@ -46,6 +46,11 @@ from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
 
+# Keeps a seeded soil moisture strictly inside the van-Genuchten retention
+# range: psi_from_theta is singular at saturation and at the residual.
+_THETA_EDGE_GUARD = 1.0e-3
+
+
 
 def _external_forcing_active(
     radiation_ok: bool,
@@ -1145,6 +1150,13 @@ class ModelDriver:
         # chained C48 SOTA restart resumes the deep-soil spin-up instead of
         # cold-starting. No-op for slab-land runs (_land_ml_state is None).
         if self._land_ml_state is not None:
+            # The soil COLUMN this state belongs to.  The field shapes below
+            # record the layer COUNT only, and two columns with the same count
+            # can span different depths (8 layers over 3 m vs over 6.375 m), in
+            # which case a resumed run reads every soil value at the wrong
+            # depth.  Not a state field, so it gets its own namespace and the
+            # restore's exact-field-set check ignores it.
+            base["land_soil_dz"] = self._land_soil_dz()
             for _f, _v in self._land_ml_state._asdict().items():
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
@@ -1194,6 +1206,57 @@ class ModelDriver:
         return isinstance(carry_aux, dict) and any(
             k.startswith("land_ml_") for k in carry_aux)
 
+    def _check_land_soil_dz(self, ckpt_dz) -> None:
+        """Refuse a checkpoint whose soil column is not this run's.
+
+        The field-shape checks that follow see the layer COUNT only, so a state
+        equilibrated over 6.375 m resumes into a 3 m run without a word — every
+        soil temperature and moisture value read at the wrong depth.  A
+        checkpoint written before the column was recorded carries nothing to
+        check; that is only refused for a run whose column is not the historical
+        default, so existing chains keep working.
+        """
+        want = self._land_soil_dz()
+        if want is None:
+            return
+        calibrated = bool(getattr(self.config, "land_calibrated_physics", False))
+        if ckpt_dz is None:
+            if calibrated:
+                raise ValueError(
+                    "the checkpoint predates soil-column recording, so its layer "
+                    f"depths cannot be checked against this run's column "
+                    f"({want.tolist()} m, total {float(want.sum()):.4f} m). This "
+                    "run is on the calibrated column, not the historical "
+                    "default, so the checkpoint is most likely on the wrong one. "
+                    "Start from a land initial condition on this column instead.")
+            logger.warning(
+                "Checkpoint predates soil-column recording; its layer depths "
+                "CANNOT be checked against this run's column (%s m). If it was "
+                "produced on a different column the soil profile is being read "
+                "at the wrong depths.", want.tolist())
+            return
+        got = np.asarray(ckpt_dz, dtype=np.float64).reshape(-1)
+        from legoesm.land.restart import soil_dz_matches
+        if not soil_dz_matches(got, want):
+            raise ValueError(
+                f"checkpoint soil column does not match this run: checkpoint "
+                f"layer thicknesses {got.tolist()} m (total "
+                f"{float(got.sum()):.4f} m) vs current {want.tolist()} m (total "
+                f"{float(want.sum()):.4f} m). The soil profile would be read at "
+                "the wrong depths.")
+
+    def _land_soil_dz(self):
+        """This run's soil layer thicknesses [m], or ``None`` with no soil tile.
+
+        The one place the column is turned into a checkpointable record, so the
+        save and the check below cannot describe different things.
+        """
+        cfg = getattr(self.physics, "land_ml_cfg", None)
+        if cfg is None:
+            return None
+        from legoesm.land.soil_grid import make_soil_grid
+        return np.asarray(make_soil_grid(cfg.soil_grid).dz, dtype=np.float64)
+
     def _restore_land_ml_from_carry_aux(self) -> None:
         """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
         into ``carry_aux``, so a chained multilayer-land restart resumes the
@@ -1210,9 +1273,14 @@ class ModelDriver:
         refuses a field-set mismatch rather than silently dropping columns."""
         if not isinstance(self._carry_aux, dict):
             return
+        # The soil column the checkpoint's state belongs to (own namespace, so
+        # it is not mistaken for a state field below).  Popped unconditionally
+        # so it never leaks into the next re-save.
+        _ckpt_dz = self._carry_aux.pop("land_soil_dz", None)
         keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
         if not keys:
             return
+        self._check_land_soil_dz(_ckpt_dz)
         # Pop the namespaced keys regardless of land type so a stray land_ml_*
         # (e.g. a slab run chained off a multilayer checkpoint) is never left to
         # leak forward into the next _checkpoint_carry_aux() re-save.
@@ -1289,6 +1357,61 @@ class ModelDriver:
             context=context,
         )
 
+    def _preflight_land_inputs(self) -> None:
+        """Refuse a land initial condition that belongs to a different soil column.
+
+        The layer COUNT is checked later, when the state is loaded, but two
+        columns with the same count can span different depths (8 layers over 3 m
+        against 8 over 6.375 m), and then every soil temperature and moisture
+        value is read at the wrong depth with nothing anywhere complaining.
+
+        Done HERE, from the config and the restart file's own record of its
+        thicknesses, because both are the same on every rank — unlike the load
+        itself, which happens only on ranks that own land.
+        """
+        cfg = self.config
+        ic_path = getattr(cfg, "land_ic_path", "")
+        if not (getattr(cfg, "use_multilayer_land", False) and ic_path):
+            return
+        if not os.path.exists(ic_path):
+            # Symmetric refusal: the loader would otherwise report this only on
+            # ranks that own land, leaving the rest waiting (codex round 11).
+            raise FileNotFoundError(
+                f"land_ic {ic_path!r} does not exist (or is a broken symlink). "
+                "A multilayer run was asked to start from a spun-up land state "
+                "and cannot.")
+        from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+        from legoesm.land.config import calibrated_multilayer_setup
+        if getattr(cfg, "land_calibrated_physics", False):
+            want_grid = calibrated_multilayer_setup()["soil_grid"]
+        else:
+            want_grid = SoilGridConfig(
+                n_layers=cfg.multilayer_n_layers,
+                total_depth=cfg.multilayer_soil_depth)
+        want = np.asarray(make_soil_grid(want_grid).dz, dtype=np.float64)
+        from legoesm.land.restart import (
+            load_land_restart_soil_dz, soil_dz_matches,
+        )
+        got = load_land_restart_soil_dz(ic_path)
+        if got is None:
+            if getattr(cfg, "land_calibrated_physics", False):
+                raise ValueError(
+                    f"land IC {ic_path} predates soil-column recording, so its "
+                    f"layer depths cannot be checked against this run's column "
+                    f"({want.tolist()} m, total {float(want.sum()):.4f} m). This "
+                    "run is on the calibrated column, not the historical "
+                    "default, so the IC is most likely on the wrong one. Re-run "
+                    "the land spin-up on this run's column.")
+            return
+        if not soil_dz_matches(got, want):
+            raise ValueError(
+                f"land IC {ic_path} belongs to a different soil column: its "
+                f"layer thicknesses are {got.tolist()} m (total "
+                f"{float(got.sum()):.4f} m) against this run's {want.tolist()} m "
+                f"(total {float(want.sum()):.4f} m). The soil profile would be "
+                "read at the wrong depths. Re-run the land spin-up on this "
+                "run's column.")
+
     def _reject_shallow_water_unrunnable(self) -> None:
         """Shallow-water is not a runnable ModelDriver equation set.
 
@@ -1316,11 +1439,22 @@ class ModelDriver:
         self._reject_shallow_water_unrunnable()
         # Strict validation — abort early on invalid parameters
         self.config.validate_strict()
-
         # Bootstrap runtime: precision, backend, devices, and (optionally) MPI.
         # This is the canonical single entry point — handles everything before
         # any JAX array creation.
         self._bootstrap_runtime()
+
+        # Land inputs whose validity depends on FILE CONTENTS rather than the
+        # config alone.  Placement is exact and both halves matter: AFTER the
+        # bootstrap, because it builds the soil grid through the shared
+        # (JAX-backed) helper rather than re-deriving the geometry, and nothing
+        # may create a JAX array before the backend is chosen (codex round 11);
+        # BEFORE ``_create_grid``, which is the first step where the ranks
+        # diverge.  Everything it reads — the config and one array out of one
+        # file — is identical on every rank, so the raise is symmetric, unlike
+        # the equivalent check inside the land setup, which runs only on ranks
+        # that own land and would leave the rest waiting (codex round 10).
+        self._preflight_land_inputs()
 
         # Config cross-validation
         config_warnings = self.config.validate()
@@ -1733,7 +1867,11 @@ class ModelDriver:
         if dt_safe < dc.dt:
             logger.warning(
                 f"  CFL: reducing dt from {dc.dt:.0f}s to {dt_safe:.0f}s "
-                f"for {gc.grid_type} C{gc.resolution}"
+                f"for {gc.grid_type} C{gc.resolution} — the GENERIC "
+                f"advective+acoustic heuristic (assumed 50+340 m/s, "
+                f"cfl_check_and_adjust), NOT a scheme-certified stability "
+                f"envelope (in particular not the fv3_duo deck's "
+                f"k_split/n_split envelope)"
             )
             self.config = self.config._replace(
                 dycore=dc._replace(dt=dt_safe),
@@ -2351,6 +2489,7 @@ class ModelDriver:
             self._f_land is not None
             and bool(jnp.any(self._f_land > 0))
         )
+        self._has_land_anywhere = _has_land
         if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
@@ -2548,6 +2687,49 @@ class ModelDriver:
                     "--slab-land-active."
                 )
 
+        # The multilayer tile's flux handoff to the atmosphere needs a soil
+        # column to exist.  A land-mask FILE that is all ocean passes
+        # validate_strict (which cannot read the file) and then builds nothing,
+        # leaving the handoff — and any calibrated canopy conductance riding it —
+        # silently inert.  The flat/no-mask spelling of the same trap IS caught
+        # in validate_strict.
+        #
+        # DELIBERATELY RANK-LOCAL, AND ONLY FATAL WHEN SERIAL.  Under
+        # cell-partition MPI an ocean-only rank legitimately has no land, so the
+        # honest answer needs a cross-rank vote — and a collective here would sit
+        # downstream of file loads and pipeline construction that can raise on
+        # one rank and not another, leaving its peers blocked in the reduction
+        # forever.  Five review rounds went into trying to place such a vote
+        # safely before concluding it does not belong here at all: a guard is not
+        # worth a deadlock.  Serial runs (where configs are written and tested)
+        # get the hard error; distributed runs get a warning naming exactly what
+        # could not be checked.
+        if bool(getattr(self.config, "mpas_land_beta_soil", False)) \
+                and not self._has_land_anywhere:
+            _msg = (
+                "mpas_land_beta_soil=True hands the multilayer land tile's "
+                "solved humidity and fluxes to the atmosphere, but no soil "
+                "column was built (no land in the mask/topography) — the "
+                "handoff, and any calibrated canopy conductance riding it, "
+                "would silently never apply. Check --land-mask-file / "
+                "--topography / --use-multilayer-land."
+            )
+            # "Serial" means NO PEERS, not "no partition object": a one-rank
+            # MPI launch still builds a layout, and that run has no ocean-only
+            # neighbour to protect, so it should get the hard error too (codex).
+            if int(getattr(self, "_mpi_world_size", 1) or 1) <= 1:
+                raise ValueError(_msg)
+            # Under MPI, SAY NOTHING.  A rank owning no land is the ordinary
+            # case on a healthy run — warning here would fire on every
+            # ocean-only rank of every correct run, and a warning that fires
+            # when nothing is wrong trains everyone to ignore it (GLM review).
+            # The config-level check catches the flat/no-mask spelling; counting
+            # land points in the MASK FILE at config time would close the rest
+            # without any collective, and is the follow-up.
+            logger.debug(
+                "rank owns no land; land-flux handoff inactive on this rank "
+                "(normal for an ocean-only partition)")
+
     def _setup_multilayer_land(self, storage_dtype) -> None:
         """Activate the differentiable multilayer (Richards) land tile.
 
@@ -2685,10 +2867,42 @@ class ModelDriver:
                 gs_max=self.config.land_gs_max,
             ),
         )
+        # Deploy the tile in EXACTLY the model its baked per-PFT tables were
+        # calibrated under.  ``calibrated_multilayer_setup`` is the ONE definition
+        # the offline calibrator also builds from, so the fitted physics and the
+        # coupled physics cannot drift; ``validate_strict`` has already checked
+        # that the overlapping config keys agree, so this replaces nothing the
+        # user set differently.  It supplies the settings with no config key of
+        # their own: the calibration soil-growth factor and the differland carbon
+        # scheme that selects the FARQUHAR branch of ``compute_effective_beta``
+        # (without it the same dispatch runs Jarvis, a different stomatal model).
+        if getattr(self.config, "land_calibrated_physics", False):
+            from legoesm.land.config import apply_calibrated_multilayer
+            base = apply_calibrated_multilayer(base)
+
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
 
         self.physics.land_ml_cfg = cfg
         self.physics.land_ml_params = params
+        # The Farquhar branch needs a non-None carbon state at the call site as
+        # well as the differland scheme.  Seed a PRESCRIBED one (fixed leaf
+        # carbon -> fixed LAI = C_fol/LCMA); the pipeline discards the evolved
+        # pools every step, which is exactly what the calibrator does, so the
+        # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
+        # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
+        # without the flag is byte-identical.
+        if cfg.stomata.enabled and cfg.carbon.scheme == "differland":
+            from legoesm.land.carbon.carbon_cycle import init_carbon_state
+            self.physics.land_ml_carbon = init_carbon_state(
+                (int(lat_rad.size),), cfg.carbon)
+            logger.info(
+                "  Land stomata: FARQUHAR (prescribed carbon state, "
+                f"LAI = C_fol/LCMA from C_fol={cfg.carbon.C_fol_init:g} gC/m2) "
+                "— the baked Vc_max25/g1/LCMA are ACTIVE")
+        elif cfg.stomata.enabled:
+            logger.info(
+                "  Land stomata: JARVIS (no differland carbon state) — the baked "
+                "Farquhar Vc_max25/g1/LCMA are NOT used")
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
         # CONCRETE dynamics timestep [s].  The jitted segment passes ``dt`` as a
@@ -2741,7 +2955,29 @@ class ModelDriver:
         # when the IC carries no q_v tracer (the aridity map needs RH).
         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
-        if _qv is not None:
+        _soil_init = getattr(self.config, "land_soil_init", "aridity")
+        if _soil_init == "saturation_fraction":
+            # Seed as a fraction of POROSITY, so the soil can start above field
+            # capacity — the way to keep a run out of the dry-soil attractor
+            # (low soil water -> weak evaporation -> dry boundary layer -> weaker
+            # evaporation).  The aridity seed below cannot do this: it caps at
+            # field capacity by construction.
+            #
+            # Held just below saturation because the van-Genuchten retention is
+            # singular AT saturation — psi_from_theta needs theta < theta_sat —
+            # and just above the residual for the same reason at the dry end.
+            # Same guard the offline calibrator uses on its own seed.
+            _th_sat = jnp.asarray(cfg.hydraulics.theta_sat)
+            _th_res = jnp.asarray(cfg.hydraulics.theta_r)
+            theta_init = jnp.clip(
+                self.config.land_soil_moisture_init_frac * _th_sat,
+                _th_res + _THETA_EDGE_GUARD, _th_sat - _THETA_EDGE_GUARD)
+            logger.info(
+                "  Land tile: soil seeded at %.2f x porosity (saturation_fraction) "
+                "— NOT the aridity map; a wet start trades the desert runaway the "
+                "aridity seed prevents for staying out of the dry-soil attractor.",
+                self.config.land_soil_moisture_init_frac)
+        elif _qv is not None:
             q_v_low = _flat_cols(
                 getattr(_qv, "data", _qv)[..., -1]).astype(storage_dtype)
             p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
@@ -2773,9 +3009,20 @@ class ModelDriver:
             # slab-mode restart raises rather than silently reshaping.
             from legoesm.land.restart import (
                 load_land_restart, merge_land_restart_into_template)
+            from legoesm.land.soil_grid import make_soil_grid
+            # Layer COUNT alone does not identify a soil column: 8 layers over
+            # 3 m at growth 1.5 and 8 over 6.375 m at growth 2 both pass the
+            # shape check while placing every soil value at a different depth.
+            # Pass the thicknesses so a spin-up on the wrong column is refused.
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
-                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers)
+                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
+                expected_soil_grid=cfg.soil_grid,
+                # The calibrated column is not the historical default, so an
+                # older restart carrying no interfaces is almost certainly on
+                # the wrong one: refuse it rather than warn.
+                require_soil_grid=bool(getattr(
+                    self.config, "land_calibrated_physics", False)))
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
@@ -5082,6 +5329,12 @@ class ModelDriver:
                 # a rank-local fragment (#1321).
                 _lm_out = (_land_ml_save if _land_ml_save is not None
                            else self._land_ml_state)
+                # The soil COLUMN these columns belong to: the field shapes
+                # record the layer count only, and two columns with the same
+                # count can span different depths.
+                _lm_dz = self._land_soil_dz()
+                if _lm_dz is not None:
+                    _save["land_soil_dz"] = _lm_dz
                 for _f, _v in _lm_out._asdict().items():
                     if _v is not None:
                         _save[f"land_ml_{_f}"] = np.asarray(_v)
@@ -5625,7 +5878,19 @@ class ModelDriver:
 
         Returns (step, day).  Detects distributed checkpoint directories
         and loads per-rank data when running under MPI.
+
+        fv3_duo refuses HERE, before any decode: run_amip calls
+        ``load_checkpoint`` before ``_run_fv3_duo``'s own no-restart
+        check, so without this early refusal a restart-configured duo
+        run would first try to decode a foreign-schema (cube) checkpoint
+        and die on an unrelated shape error (codex 2026-08-18 MAJOR).
         """
+        if self.config.dycore.discretization == "fv3_duo":
+            raise NotImplementedError(
+                "fv3_duo (slice 1) has no restart: the duo bundle is not "
+                "in the checkpoint schema, so there is no checkpoint this "
+                "lane could decode. Refusing BEFORE any decode is "
+                "attempted. Run from step 0 (drop --restart-from).")
         path = Path(path)
 
         # MPAS path: mirror of the dedicated MPAS branch in
@@ -5766,6 +6031,10 @@ class ModelDriver:
                     self._carry_aux = {}
                 for _k in _lml_keys:
                     self._carry_aux[_k] = jnp.asarray(d[_k])
+                # Stage the soil column too (own namespace, not a state field)
+                # so the shared restore refuses a state from another column.
+                if "land_soil_dz" in d.files:
+                    self._carry_aux["land_soil_dz"] = np.asarray(d["land_soil_dz"])
                 self._restore_land_ml_from_carry_aux()
             # Restore the stateful-physics carry (#413): stash the
             # ``physstate_<field>`` arrays into carry_aux for the
@@ -6092,6 +6361,12 @@ class ModelDriver:
 
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
+            # The raise above means a lat-lon MPI restart never carries a
+            # multilayer land state, so its soil-column stamp has nothing to
+            # describe.  Drop it rather than let it ride into the next re-save
+            # and label THAT state with a column it did not come from.
+            if isinstance(self._carry_aux, dict):
+                self._carry_aux.pop("land_soil_dz", None)
             # Double-moment tracers cannot be band-scattered here: carry_aux is
             # broadcast whole to every rank, so any persisted dmtr_* would give
             # every rank GLOBAL-shape DM state instead of its band. Fail fast
@@ -6302,7 +6577,12 @@ class ModelDriver:
         try:
             # MPAS and spectral states use different pytree layouts;
             # use dedicated simple run loops.
-            if self.config.grid.grid_type == "mpas":
+            # fv3_duo steps its own six-face bundled pytree — keyed on the
+            # DISCRETIZATION (its grid_type is the shared "cubed_sphere"),
+            # so it must dispatch before every grid-keyed branch below.
+            if self.config.dycore.discretization == "fv3_duo":
+                status = self._run_fv3_duo(start_step, start_day)
+            elif self.config.grid.grid_type == "mpas":
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
                 status = self._run_spectral(start_step, start_day)
@@ -7220,6 +7500,156 @@ class ModelDriver:
         byte-identical to ``day_to_calendar(day)``.
         """
         return day_to_calendar(self._insolation_day(day))
+
+    # ------------------------------------------------------------------
+    # FV3 six-face duo-cube lane (slice 1: dry, physics-off, fp64)
+    # ------------------------------------------------------------------
+
+    # Wind-speed blowup envelope for the duo lane's snapshot guard [m/s].
+    # The DCMIP16 baroclinic-wave jet peaks near ~40 m/s; a state past this
+    # bound is a diverged integration, not a strong storm.  Numerics guard,
+    # not a tunable (same role as the acoustic lane's own envelope).
+    _FV3_DUO_BLOWUP_UMAX_MS = 400.0
+
+    def _run_fv3_duo(self, start_step: int = 0,
+                     start_day: float | None = None) -> str:
+        """Dedicated lean lane for the certified FV3 duo-cube step (slice 1).
+
+        Dry adiabatic DCMIP16 baroclinic wave ONLY: the lane builds its
+        own IC (the placeholder ``self.state`` from ``_init_state`` is a
+        CD-grid scaffold this lane never reads; it is REPLACED by the
+        final six-face bundle so the run-manifest digest reflects the
+        actual final state).  Steps the bundled pytree
+        ``{"state","press","q","omga","nh"}`` with the wrapper's jitted
+        step and writes a minimal fp64 ``.npz`` snapshot at the
+        ``diag_days`` cadence (own schema — ``fv3duo_snapshot_step_*.npz``
+        with the face-stacked duo fields; NOT the cube/lat-lon
+        checkpoint schema, which the duo layout does not fit).
+
+        Slice-1 refusals (each loud, none silent): no restart, no MPI /
+        SPMD, no ensemble.  Physics/forcing are already refused at model
+        construction (component factory).  ``cfg.days`` is TOTAL days
+        (the cube/lat-lon convention) — with restart refused the two
+        conventions coincide.
+        """
+        cfg = self.config
+        if start_step != 0 or self._loaded_checkpoint_step_day is not None:
+            raise NotImplementedError(
+                "fv3_duo (slice 1) has no restart: the duo bundle is not "
+                "in the checkpoint schema. Run from step 0.")
+        if cfg.distributed or (self._mpi_world_size or 1) > 1:
+            raise NotImplementedError(
+                "fv3_duo (slice 1) is single-process only: the duo halo "
+                "exchange runs the full six-face stack in one program.")
+        if self._ensemble_size != 1:
+            raise NotImplementedError(
+                f"fv3_duo (slice 1) does not thread an ensemble axis; got "
+                f"ensemble_size={self._ensemble_size}.")
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        if not isinstance(self.model, FV3DuoDynamicsModel):
+            raise TypeError(
+                f"discretization='fv3_duo' but the constructed dycore is "
+                f"{type(self.model).__name__} — the component factory and "
+                f"this lane disagree; refusing to step the wrong model.")
+
+        DT = cfg.dycore.dt
+        n_steps_total = int(cfg.days * 86400.0 / DT)
+        if n_steps_total < 1:
+            raise ValueError(
+                f"fv3_duo: days={cfg.days} at dt={DT}s yields "
+                f"{n_steps_total} steps; nothing to run.")
+        diag_interval = (int(cfg.output.diag_days * 86400.0 / DT)
+                         if cfg.output.diag_days > 0 else n_steps_total)
+        diag_interval = max(1, diag_interval)
+        if start_day is None:
+            start_day = cfg.start_day
+
+        logger.info(
+            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f days), "
+            "snapshots every %d steps",
+            cfg.grid.resolution, self.model.config.km,
+            "hydrostatic" if self.model.config.hydrostatic
+            else "nonhydrostatic",
+            DT, n_steps_total, cfg.days, diag_interval)
+
+        # Overwrite any marker from a prior run in this directory FIRST:
+        # setup permits a same-config retry, and a stale COMPLETED/BLOWUP
+        # surviving an interrupted retry would misclassify it (codex
+        # 2026-08-18 MAJOR). RUNNING is the nonterminal state.
+        self._fv3_duo_write_status("RUNNING")
+        bundle = self.model.dcmip16_initial_state(do_pert=True)
+        t0 = time.time()
+        for step in range(1, n_steps_total + 1):
+            bundle = self.model.step(bundle, DT)
+            if step % diag_interval == 0 or step == n_steps_total:
+                day = start_day + step * DT / 86400.0
+                blowup = self._fv3_duo_snapshot(bundle, step, day)
+                if blowup is not None:
+                    self._fv3_duo_write_status(blowup)
+                    return blowup
+        # Final-state digest (run manifest) hashes self.state — hand it
+        # the ACTUAL final bundle, not the unused CD-grid scaffold.
+        self.state = bundle
+        logger.info("FV3 duo lane COMPLETED: %d steps in %.1fs",
+                    n_steps_total, time.time() - t0)
+        self._fv3_duo_write_status("COMPLETED")
+        return "COMPLETED"
+
+    def _fv3_duo_write_status(self, status: str) -> None:
+        """Persist the lane's terminal status as an EXPLICIT marker.
+
+        ``fv3duo_status.txt`` next to the snapshots: RUNNING is written
+        before the first step (overwriting any stale marker from a prior
+        run in the same directory), then the terminal state — COMPLETED
+        or BLOWUP with day/step. An interrupted run therefore reads
+        RUNNING. SCOPE (codex 2026-08-18): the marker certifies the
+        STEP LOOP's outcome only; the run manifest's ``state_digest`` is
+        written afterwards by ``run()`` and can still fail
+        independently — consult the manifest for provenance, the marker
+        for loop outcome.
+        """
+        (self._output_dir / "fv3duo_status.txt").write_text(status + "\n")
+
+    def _fv3_duo_snapshot(self, bundle: dict, step: int, day: float):
+        """Write one minimal duo snapshot; return a BLOWUP status or None.
+
+        Own schema (face-stacked duo layout): the prognostics from
+        ``bundle["state"]`` plus ``ps`` and the sphum passenger, with
+        ``_step`` / ``_day`` stamps.  The finite + wind-envelope guard
+        runs on the SAME host copies the write uses, so a diverged state
+        is both persisted (for autopsy) and reported.
+        """
+        fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
+        fields["ps"] = np.asarray(bundle["press"]["ps"])
+        for iq, qt in enumerate(bundle["q"]):
+            fields[f"q{iq}"] = np.asarray(qt)
+        path = self._output_dir / f"fv3duo_snapshot_step_{step:06d}.npz"
+        np.savez(path, _step=np.int64(step), _day=np.float64(day), **fields)
+
+        bad = sorted(nm for nm, a in fields.items()
+                     if not np.isfinite(a).all())
+        umax = max(float(np.abs(fields["u"]).max()),
+                   float(np.abs(fields["v"]).max()))
+        if bad or umax > self._FV3_DUO_BLOWUP_UMAX_MS:
+            logger.error(
+                "FV3 duo BLOWUP at step %d (day %.3f): non-finite=%s, "
+                "max|wind|=%.3g m/s (envelope %.0f); state saved to %s",
+                step, day, bad or "none", umax,
+                self._FV3_DUO_BLOWUP_UMAX_MS, path)
+            return f"BLOWUP at day {day:.3f} (step {step})"
+        # ps stats over the COMPUTE window only — the padded halo rows are
+        # zero by construction and would print as a fake 0 hPa minimum.
+        _n, _ng = self.model.grid.n, self.model.grid.ng
+        ps_win = fields["ps"][:, _ng:_ng + _n, _ng:_ng + _n]
+        logger.info(
+            "  fv3_duo step %d day %.3f: max|wind|=%.2f m/s, "
+            "ps=[%.1f, %.1f] hPa -> %s",
+            step, day, umax,
+            float(ps_win.min()) / 100.0,
+            float(ps_win.max()) / 100.0, path.name)
+        return None
 
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
@@ -8165,13 +8595,28 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
-        if _land_beta_soil_on and not _land_ml_on:
+        if _land_beta_soil_on and not bool(
+                getattr(cfg, "use_multilayer_land", False)):
+            # CONFIG-ONLY test, deliberately: it is the same on every rank, so
+            # the raise is symmetric and needs no collective.
+            #
+            # This guard used to test whether THIS rank had built a soil column,
+            # which is wrong under cell-partition MPI — an ocean-only rank
+            # legitimately has none while its neighbours do, so it aborted alone.
+            # Two attempts at a cross-rank vote made it worse: the first was
+            # called only by the land-less ranks (deadlock), the second by every
+            # rank but AFTER a rank-local land-albedo raise that can kill one
+            # rank while the others block in the vote (codex rounds 5 and 6).
+            # There is no collective to get wrong here: validate_strict already
+            # guarantees mpas_land_beta_soil implies use_multilayer_land, and a
+            # globally landless run is refused there too, so the only case the
+            # old state test could still catch was the legitimate ocean-only
+            # rank.  It now publishes nothing, which is what it should do.
             raise ValueError(
-                "mpas_land_beta_soil=True requires the interactive "
-                "multilayer land on the MPAS lane (use_multilayer_land with "
-                "a built land state); without it there is no soil moisture "
-                "to derive beta_soil from — the flag would be silently "
-                "inert."
+                "mpas_land_beta_soil=True requires the interactive multilayer "
+                "land on the MPAS lane (use_multilayer_land); without it there "
+                "is no soil moisture to derive beta_soil from — the flag would "
+                "be silently inert."
             )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
@@ -8212,12 +8657,19 @@ class ModelDriver:
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
             _lml_umin = float(getattr(self.physics, "land_ml_u_min", 1.0))
+            # PRESCRIBED leaf carbon (fixed LAI).  Without it the coupled
+            # stomatal dispatch falls back to Jarvis even when the config asks
+            # for Farquhar, so the baked canopy conductance would be inert on
+            # exactly the lane the AMIP campaign runs.  None on every other
+            # configuration, which keeps those runs byte-identical.
+            _lml_carbon = getattr(self.physics, "land_ml_carbon", None)
 
             @jax.jit
             def _land_step_fn(land_state, a2s, doy):
                 new_state, resp, _carbon = step_multilayer_land(
                     land_state, a2s, _lml_cfg, _lml_umin, DT,
-                    lat=_lml_lat, doy=doy, land_params=_lml_params)
+                    lat=_lml_lat, doy=doy, land_params=_lml_params,
+                    carbon_state=_lml_carbon)
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the

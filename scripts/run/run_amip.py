@@ -184,9 +184,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # downstream factory finds a matching ``(model_type, discretization,
     # grid_type)`` triple.
     # default=None sentinel: see --grid-type; resolves to "centered".
+    # "fv3_duo" is the certified FV3 six-face duo-cube fv_dynamics lane
+    # (cubed_sphere grid only; slice 1: dry, physics-off, fp64, nlev in
+    # {5, 10} — the component factory refuses everything else loudly).
     parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
-                                  "latlon_cgrid", "cdgrid", "mpas", "spectral"])
+                                  "latlon_cgrid", "cdgrid", "mpas", "spectral",
+                                  "fv3_duo"])
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
 
@@ -1169,6 +1173,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multilayer-soil-depth", type=float,
                         default=_EXPERIMENT_DEFAULTS.multilayer_soil_depth,
                         help="Total soil-column depth [m] for --use-multilayer-land.")
+    parser.add_argument("--land-calibrated-physics",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_calibrated_physics,
+                        dest="land_calibrated_physics",
+                        help="Run the multilayer land tile in the SAME model its "
+                             "baked per-PFT tables were calibrated under "
+                             "(legoesm.land.config.calibrated_multilayer_setup): "
+                             "MOST surface exchange, SimpleSEB, Farquhar stomata on "
+                             "a prescribed carbon state, and the calibration soil "
+                             "column. Without it the baked canopy conductance "
+                             "(Vc_max25/g1/LCMA) is inert and the tables run under "
+                             "land physics they were never fitted to. Requires "
+                             "--use-multilayer-land --land-stomatal-beta "
+                             "--land-surface-scheme simple_seb and the calibration "
+                             "soil column (checked, never silently overridden).")
     parser.add_argument("--clm-surfdata-path", type=str,
                         default=_EXPERIMENT_DEFAULTS.clm_surfdata_path,
                         help="Pre-staged CLM surfdata NetCDF (PFT/texture/glacier) "
@@ -1947,6 +1966,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_multilayer_land=args.use_multilayer_land,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
+        land_calibrated_physics=args.land_calibrated_physics,
         clm_surfdata_path=args.clm_surfdata_path,
         transient_land_cover=args.transient_land_cover,
         land_cover_surfdata=args.land_cover_surfdata,

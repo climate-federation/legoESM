@@ -755,6 +755,88 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
+def _make_jax_step(ctx, jit=False):
+    """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
+
+    The scoring below is ~400 lines that read six per-face NumPy dicts
+    and mutate ``state``/``press``/``q`` in place, exactly as the Fortran
+    dummies are.  The JAX lane is face-STACKED and FUNCTIONAL (C1/C4), so
+    this adapter stacks on the way in and writes back on the way out --
+    and NOTHING ELSE about the run changes.  That is deliberate: the IC,
+    the oracle files, the derived face map, the tendency scales and every
+    tolerance stay byte-identical to the NumPy invocation, so the two
+    backends' scores differ only by the lane under test.  A separate
+    JAX-flavoured harness would have made any difference unattributable,
+    which is the confound this campaign has paid for more than once.
+
+    The write-back is the only subtle part: the caller keeps references
+    to the per-face arrays, so the values are copied INTO the existing
+    arrays rather than rebound, or the mutation the scoring relies on
+    would be invisible.
+    """
+    import jax.numpy as _jnp
+    import numpy as _np
+
+    from legoesm.core import fv3_dynamics as _jdyn
+    from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_jax
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+
+    jctx = build_jax_duo_stepper_context(ctx)
+    _cache: dict = {}
+
+    def _stack(per_face, key=None):
+        # jnp, not np: the module indexes these with `.at[...]`, which a
+        # numpy array does not have. Stacking with numpy and handing the
+        # result straight over got as far as the remap's pk update
+        # before failing.
+        return _jnp.asarray(_np.stack([_np.asarray(f[key] if key else f)
+                                       for f in per_face]))
+
+    def _step(_ctx, state, press, **kw):
+        jstate = state_3d_to_jax(state)
+        jpress = {nm: _stack(press, nm)
+                  for nm in ("ps", "pe", "peln", "pk", "pkz")}
+        q_in = kw.pop("q")
+        # TRACER-MAJOR: fv_dynamics_step takes nq face-stacked arrays,
+        # not one (6, nq, ...) stack. The spec's q is [face][iq], so the
+        # transpose is here, in the adapter, where every other layout
+        # difference between the lanes already lives.
+        _nq = len(q_in[0])
+        jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
+                                      for t in range(6)]))
+              for iq in range(_nq)]
+        if jit:
+            # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
+            # through the COMPILED builder, and compilation is not neutral
+            # here -- fused multiply-adds and reassociation can flip an
+            # upwind selector bit, which is the class of difference this
+            # port already had to unroll a scan to remove. Scoring the eager
+            # function therefore scored a lane nobody deploys.
+            _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
+            if "fn" not in _cache:
+                _static = dict(kw)
+                _cache["fn"] = _jdyn.make_fv_dynamics_step_jit(
+                    jctx, _static.pop("km"), **_static)
+            out = _cache["fn"](jstate, jpress, jq, **_dyn)
+        else:
+            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+
+        # Write back IN PLACE -- see the docstring.
+        st = out["state"] if "state" in out else out
+        for t in range(6):
+            for nm, arr in state[t].items():
+                if nm in st:
+                    arr[...] = _np.asarray(st[nm])[t]
+            for nm in ("ps", "pe", "peln", "pk", "pkz"):
+                if nm in out["press"]:
+                    press[t][nm][...] = _np.asarray(out["press"][nm])[t]
+            for iq, arr in enumerate(q_in[t]):
+                arr[...] = _np.asarray(out["q"][iq])[t]
+        return out
+
+    return _step
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_hydro_zerostep")
@@ -787,7 +869,7 @@ def main(argv=None):
                          "carry EXTENDED-lattice metrics instead of the "
                          "kinked builder's. fv_grid_tools.F90:749-835 "
                          "shows the duo oracle builds its model grid "
-                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "FROM dg%%b_pt with every mpp/fill_corners/"
                          "get_symmetry step skipped -- so the extended "
                          "lattice is the FAITHFUL halo geometry and the "
                          "kinked one is the port's residual suspect. "
@@ -833,7 +915,28 @@ def main(argv=None):
                          "~2e-4 m/s after one step -- judging it against "
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
+    ap.add_argument("--backend", choices=("numpy", "jax"), default="numpy",
+                    help="which lane takes the step. 'numpy' is the "
+                         "SPECIFICATION and the established score; 'jax' "
+                         "runs the ported lane through the SAME scoring "
+                         "code, IC, oracle files, face map and tolerances, "
+                         "so the two numbers are comparable by "
+                         "construction. Only the stepping call differs -- "
+                         "everything upstream and downstream of it is "
+                         "byte-identical between the two backends, which "
+                         "is the whole point (a JAX-specific harness would "
+                         "make any difference unattributable).")
+    ap.add_argument("--jit", action="store_true",
+                    help="run the COMPILED step, which is the one the model "
+                         "deploys. Off by default so the established score "
+                         "keeps its meaning; a parity claim about the "
+                         "shipped solver has to be measured with this ON, "
+                         "because compilation can reassociate arithmetic and "
+                         "flip a limiter branch. Ignored unless "
+                         "--backend jax.")
     args = ap.parse_args(argv)
+    if args.jit and args.backend != "jax":
+        raise SystemExit("--jit applies to --backend jax only")
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
     if args.n_steps != 1 and args.step_run in (
@@ -1209,16 +1312,19 @@ def main(argv=None):
     # Each outer call owns one bdt exactly as the Fortran main loop calls
     # fv_dynamics once per dt_atmos: state and press carry between calls
     # (pt round-trips K -> theta_v -> K inside each call).
+    step_fn = fv_dynamics_step
+    if args.backend == "jax":
+        step_fn = _make_jax_step(ctx, jit=args.jit)
     for _step in range(args.n_steps):
-        out = fv_dynamics_step(ctx, state, press, bdt=args.dt, km=KM,
-                               k_split=args.k_split, n_split=args.n_split,
-                               ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
-                               cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
-                               kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
-                               hydrostatic=not args.nh,
-                               # deck: a_imp=1., p_fac=0.05, kord_wz=9,
-                               # use_logp=F, w_limiter=T (resolved namelist)
-                               w_limiter=args.nh)
+        out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
+                      k_split=args.k_split, n_split=args.n_split,
+                      ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
+                      cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
+                      kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
+                      hydrostatic=not args.nh,
+                      # deck: a_imp=1., p_fac=0.05, kord_wz=9,
+                      # use_logp=F, w_limiter=T (resolved namelist)
+                      w_limiter=args.nh)
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)

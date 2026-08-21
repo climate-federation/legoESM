@@ -42,6 +42,19 @@ spectral:
 # --- ERA5 (WB2 canonical zarr; 2020 = the WB2 held-out test year) ---
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
 cache_dir: ".cache/wb_campaign_era5"
+
+# --- cloud condensate in the initial condition ---------------------------
+# The WeatherBench2 store carries NO cloud liquid or ice (only
+# total_cloud_cover), so without this every training sample starts with
+# exactly zero condensate: nothing can activate a microphysics rate
+# coefficient inside a six-hour forecast, and the first radiation call of
+# every sample sees a clear sky.  ARCO-ERA5 has both fields on the same
+# 0.25 degree grid and a superset of these pressure levels, so they are read
+# from it as a second store at the same timestamps.
+# Set on EVERY arm's deck on purpose: the campaign's whole design is that the
+# three arms share one configuration and differ only in the model, so the
+# initial conditions must stay identical across them.
+era5_cloud_condensate: true
 train_years: [2015, 2016, 2017, 2018, 2019]
 train_windows:  # 60 windows = 12 month-start 1-day windows x 5 train-years (~240 6-hourly pairs);
                 # all-season + low-autocorrelation so the NN arms avoid the #1047 60-sample null
@@ -150,6 +163,18 @@ loss:
 
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
+  # #1464: the learned column has NO momentum head, so without this it runs
+  # with no physical surface stress at all, while the classical arm it is
+  # scored against carries `classical.turbulence` below. The scheme here MUST
+  # equal that one — giving the learned arm a *different* momentum scheme
+  # swaps one confound for another. Both arms already share hyperdiffusion and
+  # the spectral filter; the asymmetry this removes is the surface stress
+  # specifically. Intended to remove the confound, not yet shown to move the
+  # 12/16 table: the closing artifact is the re-scored comparison.
+  # NOTE only reached on the spectral training core; on the lat-lon core the
+  # learned arm is built elsewhere and this key is not read.
+  surface_drag: true
+  surface_drag_scheme: "louis"
   nn_hidden: 256
   nn_layers: 4
 sfno:

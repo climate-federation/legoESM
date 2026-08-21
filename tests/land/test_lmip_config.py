@@ -222,3 +222,145 @@ def test_apply_overrides_creates_new_key():
     base = _minimal()
     merged = apply_overrides(base, ["restart.from=/tmp/prev.npz"])
     assert merged["restart"]["from"] == "/tmp/prev.npz"
+
+
+# --------------------------------------------------------------------------
+# Surface albedo values (generic names, config-supplied)
+# --------------------------------------------------------------------------
+def test_albedo_defaults_to_an_empty_block():
+    """No albedo block = the uncalibrated LandAlbedoConfig defaults, so an
+    EXISTING config reproduces its baseline byte-for-byte."""
+    p = validate_config(_minimal()).physics
+    assert p["albedo"] == {}
+    assert p["glacier_albedo_vis"] is None and p["glacier_albedo_nir"] is None
+
+
+def test_albedo_accepts_landalbedoconfig_field_values():
+    cfg_in = _minimal()
+    cfg_in["physics"]["albedo"] = {"alpha_snow_max": 0.8077,
+                                   "snow_depth_crit": 15.4229}
+    p = validate_config(cfg_in).physics
+    assert p["albedo"]["alpha_snow_max"] == 0.8077
+
+
+def test_albedo_rejects_unknown_field():
+    """Dispatch hardening: a typo'd field name must raise, never be silently
+    dropped — the run would carry DIFFERENT physics than the config declares."""
+    bad = _minimal()
+    bad["physics"]["albedo"] = {"alpha_snow_mx": 0.8}      # plausible typo
+    with pytest.raises(ValueError, match="unknown field"):
+        validate_config(bad)
+
+
+def test_albedo_rejects_nonfinite_value():
+    bad = _minimal()
+    bad["physics"]["albedo"] = {"alpha_snow_max": float("nan")}
+    with pytest.raises(ValueError, match="finite"):
+        validate_config(bad)
+
+
+def test_glacier_pair_must_come_together_and_be_a_fraction():
+    half = _minimal()
+    half["physics"]["glacier_albedo_vis"] = 0.8
+    with pytest.raises(ValueError, match="together"):
+        validate_config(half)
+    bad = _minimal()
+    bad["physics"].update(glacier_albedo_vis=1.5, glacier_albedo_nir=0.6)
+    with pytest.raises(ValueError, match="glacier_albedo_vis"):
+        validate_config(bad)
+    ok = _minimal()
+    ok["physics"].update(glacier_albedo_vis=0.8178, glacier_albedo_nir=0.6178)
+    p = validate_config(ok).physics
+    assert (p["glacier_albedo_vis"], p["glacier_albedo_nir"]) == (0.8178, 0.6178)
+
+
+def test_retired_selector_keys_fail_loudly():
+    """An old config carrying the retired 2026-08 selector keys must raise —
+    silently ignoring them would run it uncalibrated."""
+    for key in ("albedo_calibration", "root_calibration"):
+        bad = _minimal()
+        bad["physics"][key] = "amip_multilayer"
+        with pytest.raises(ValueError, match="retired"):
+            validate_config(bad)
+
+
+# --------------------------------------------------------------------------
+# Vertical soil grid
+# --------------------------------------------------------------------------
+def test_soil_grid_defaults_match_soilgridconfig():
+    """Schema defaults must track SoilGridConfig() so a config with no soil keys
+    reproduces the 8-layer / 6.375 m baseline exactly."""
+    from legoesm.land.soil_grid import SoilGridConfig
+    p = validate_config(_minimal()).physics
+    assert p["soil_n_layers"] == SoilGridConfig().n_layers
+    assert p["soil_depth_m"] == SoilGridConfig().total_depth
+    assert p["soil_growth_factor"] == SoilGridConfig().growth_factor
+
+
+def test_soil_grid_amip_parity_accepted():
+    cfg_in = _minimal()
+    cfg_in["physics"].update(soil_n_layers=10, soil_depth_m=3.0)
+    p = validate_config(cfg_in).physics
+    assert (p["soil_n_layers"], p["soil_depth_m"]) == (10, 3.0)
+
+
+@pytest.mark.parametrize("key,bad", [
+    ("soil_n_layers", 0),          # a zero-layer column is not a column
+    ("soil_n_layers", 500),        # absurd
+    ("soil_n_layers", True),       # bool is not an int layer count
+    ("soil_n_layers", 8.5),        # non-integer
+    ("soil_depth_m", -1.0),        # negative depth
+    ("soil_depth_m", 0.05),        # implausibly shallow (0 means "default")
+    ("soil_growth_factor", 0.5),   # shrinking layers with depth
+    ("soil_growth_factor", 9.0),   # out of range
+])
+def test_soil_grid_rejects_nonsense(key, bad):
+    cfg_in = _minimal()
+    cfg_in["physics"][key] = bad
+    with pytest.raises(ValueError, match=key):
+        validate_config(cfg_in)
+
+
+def test_pft_root_lists_default_to_absent():
+    """No lists = the scalar MultiLayerLandConfig values, bit-identical to the
+    pre-existing behaviour."""
+    p = validate_config(_minimal()).physics
+    assert all(p[k] is None for k in
+               ("root_depth_per_pft", "theta_wp_per_pft", "theta_fc_per_pft"))
+
+
+def _root_lists():
+    n = 17
+    return {"root_depth_per_pft": [0.1 + 0.1 * i for i in range(n)],
+            "theta_wp_per_pft": [0.05 + 0.003 * i for i in range(n)],
+            "theta_fc_per_pft": [0.17 + 0.006 * i for i in range(n)]}
+
+
+def test_pft_root_lists_accepted_together():
+    cfg_in = _minimal()
+    cfg_in["physics"].update(_root_lists())
+    p = validate_config(cfg_in).physics
+    assert len(p["root_depth_per_pft"]) == 17
+
+
+def test_pft_root_lists_rejected_when_partial():
+    """The builders gather all three tables at the dominant PFT — a partial
+    specification silently mixing per-PFT and scalar values must raise."""
+    bad = _minimal()
+    bad["physics"]["root_depth_per_pft"] = _root_lists()["root_depth_per_pft"]
+    with pytest.raises(ValueError, match="together"):
+        validate_config(bad)
+
+
+@pytest.mark.parametrize("mutate,match", [
+    (lambda r: r["root_depth_per_pft"].pop(), "17"),            # wrong length
+    (lambda r: r["root_depth_per_pft"].__setitem__(0, 50.0), "root_depth"),
+    (lambda r: r["theta_wp_per_pft"].__setitem__(0, 0.5), "wp"),  # wp >= fc
+])
+def test_pft_root_lists_reject_nonsense(mutate, match):
+    bad = _minimal()
+    r = _root_lists()
+    mutate(r)
+    bad["physics"].update(r)
+    with pytest.raises(ValueError, match=match):
+        validate_config(bad)

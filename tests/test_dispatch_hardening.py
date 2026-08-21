@@ -274,6 +274,12 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # Shared by BOTH barotropic entry points: the reconciliation-target
+        # guard moved here so the standard-halo path and its wide-halo twin
+        # cannot diverge on it again.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_reconcile_targets"),
+        # n2_mode + n2_eos_form guards on the EVD convective trigger.
+        ("packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py", "convective_K_A_flag"),
         # In-substep C-grid face-depth scheme (barotropic_face_depth:
         # min_rule | nemo_ssh_avg, #1226 zero-deviation item 2). A typo must
         # raise, not silently run the wrong flux/drag face-thickness rule.
