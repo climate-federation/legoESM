@@ -20,15 +20,21 @@ extrapolation of turbulence beyond the resolved column).
 from __future__ import annotations
 
 import jax.numpy as jnp
-from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import (
     potential_temperature_from_temperature,
     temperature_from_theta,
 )
+from legoesm.thermo import saturation_mixing_ratio
+
+from legoesm import constants
 
 from .bridge import LESTruth
 
 Array = jnp.ndarray
+
+# Damped fixed-point trip count for saturation_adjust — enough for the ~1e-2
+# convergence-per-step of the under-relaxed iteration to reach machine tolerance.
+_SAT_ADJUST_ITERS = 40
 
 # Re-export the θ↔T pair so the tuner has a single coupling import surface. These
 # are the canonical thermodynamics implementations (θ = T·(p0/p)^κ and its inverse);
@@ -49,6 +55,35 @@ def liquid_water_theta(theta: Array, q_c: Array, exner: Array) -> Array:
     that raised θ above the cloud-conserved θ_l); units (L_v[J/kg]/c_pd[J/kg/K])·q_c/Π = K.
     """
     return theta - (constants.L_v / constants.c_pd) * q_c / exner
+
+
+def saturation_adjust(
+    theta_l: Array, q_t: Array, exner: Array, p: Array,
+) -> tuple[Array, Array, Array]:
+    """(θ_l, q_t) → (θ, q_v, q_c): the INVERSE of :func:`liquid_water_theta`.
+
+    Solves ``θ = θ_l + (L_v/(c_pd·Π))·q_c`` with ``q_c = max(q_t − q_sat(T, p), 0)``
+    (``T = θ·Π``) by DAMPED (½ under-relaxed) fixed-point iteration.  The
+    under-relaxation contracts the update for the boundary-layer thermodynamic
+    states this suite uses (θ_l ≈ 285–300 K, q_t ≲ 20 g/kg — the BOMEX / DYCOMS /
+    ASTEX regime), where the undamped update can otherwise oscillate about the
+    fixed point; it is NOT claimed to converge for arbitrarily warm/moist columns
+    (where ``(L_v/c_pd)·dq_sat/dT`` can push the relaxed map's slope past 1).  A
+    clear column returns ``q_c=0, θ=θ_l, q_v=q_t`` unchanged; a saturated column
+    splits q_t into ``q_v=q_sat`` + cloud ``q_c`` and warms θ above θ_l by the
+    released latent heat, so ``q_v + q_c = q_t`` and ``liquid_water_theta(θ, q_c)``
+    recovers θ_l (to machine tolerance).  Fixed trip count
+    (``_SAT_ADJUST_ITERS``) ⇒ JIT/AD-safe.  Saturation uses the canonical
+    ``thermo.saturation_mixing_ratio`` (no re-derived Clausius–Clapeyron).
+    """
+    q_c = jnp.zeros_like(q_t)
+    for _ in range(_SAT_ADJUST_ITERS):
+        theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
+        T = theta * exner
+        q_sat = saturation_mixing_ratio(T, p)
+        q_c = 0.5 * (q_c + jnp.clip(q_t - q_sat, 0.0, None))   # damped
+    theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
+    return theta, q_t - q_c, q_c
 
 
 def interp_profile(values: Array, z_src: Array, z_dst: Array) -> Array:

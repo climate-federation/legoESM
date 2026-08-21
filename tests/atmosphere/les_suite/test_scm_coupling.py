@@ -7,11 +7,41 @@ from legoesm.atmosphere.les_suite.bridge import LESTruth
 from legoesm.atmosphere.les_suite.scm_coupling import (
     T_from_theta,
     interp_profile,
+    liquid_water_theta,
     regrid_truth,
+    saturation_adjust,
     theta_from_temperature,
 )
+from legoesm.atmosphere.physics._shared import exner_function
 
 from legoesm import constants
+
+
+def test_saturation_adjust_clear_column_is_identity():
+    # A subsaturated column carries no cloud: q_c=0, θ=θ_l, q_v=q_t.
+    p = jnp.array([90000.0, 85000.0, 80000.0])
+    exner = exner_function(p)
+    theta_l = jnp.array([300.0, 301.0, 302.0])
+    q_t = jnp.array([0.002, 0.002, 0.002])
+    theta, q_v, q_c = saturation_adjust(theta_l, q_t, exner, p)
+    assert jnp.allclose(q_c, 0.0, atol=1e-12)
+    assert jnp.allclose(theta, theta_l, atol=1e-9)
+    assert jnp.allclose(q_v, q_t, atol=1e-12)
+
+
+def test_saturation_adjust_saturated_conserves_qt_and_inverts_theta_l():
+    # A saturated column splits q_t into q_v(+q_c) and warms θ above θ_l; the
+    # result is the exact inverse of liquid_water_theta, and q_t is conserved.
+    p = jnp.array([90000.0, 85000.0, 80000.0])
+    exner = exner_function(p)
+    theta_l = jnp.array([289.0, 289.5, 290.0])           # cold marine-Sc mixed layer
+    q_t = jnp.array([0.020, 0.022, 0.024])               # well above saturation
+    theta, q_v, q_c = saturation_adjust(theta_l, q_t, exner, p)
+    assert bool(jnp.all(q_c > 0.0))                      # cloud forms
+    assert jnp.allclose(q_v + q_c, q_t, atol=1e-12)      # total water conserved
+    assert bool(jnp.all(theta > theta_l))               # latent heating raises θ
+    # round-trip: liquid_water_theta(θ, q_c) recovers θ_l exactly.
+    assert jnp.allclose(liquid_water_theta(theta, q_c, exner), theta_l, atol=1e-6)
 
 
 def test_theta_T_roundtrip():

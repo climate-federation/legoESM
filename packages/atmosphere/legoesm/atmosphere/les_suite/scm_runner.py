@@ -64,6 +64,7 @@ from .scm_coupling import (
     interp_profile,
     liquid_water_theta,
     regrid_truth,
+    saturation_adjust,
     theta_from_temperature,
 )
 from .score import PrognosticScore, prognostic_profile_score
@@ -237,36 +238,24 @@ def build_cbl_scm_from_artifact(
     # then forms q_c so the SCM reproduces a cloud-topped moist BL. A dry artifact skips this
     # block entirely (byte-unchanged).
     q_v_scm = None
+    q_c_scm = None
     moist_kwargs: dict = {}
     if artifact.is_moist:
-        qt0 = jnp.asarray(artifact.qt)[0]
-        q_v_scm = interp_profile(qt0, z_les, z_scm)
-        # The line above reads the artifact's liquid-water potential
-        # temperature as an ordinary potential temperature and its TOTAL water
-        # as vapour. That is only the same thing when the initial column
-        # carries no condensate, which is true of a cloud-free shallow-cumulus
-        # start and false of a stratocumulus one. Check it instead of assuming
-        # it: if the profile is already saturated anywhere, both fields are
-        # being misread -- the column starts too cool and too moist, and it
-        # then condenses its way to a state the reference never had.
-        from legoesm.thermo import saturation_mixing_ratio
-
-        q_sat0 = saturation_mixing_ratio(T_profile, p_full)
-        _excess = float(jnp.max(q_v_scm - q_sat0))
-        if _excess > 0.0:
-            _n = int(jnp.sum(q_v_scm > q_sat0))
-            raise ValueError(
-                f"{artifact.case_name}: the initial profile is saturated at "
-                f"{_n} of {q_v_scm.size} levels (up to "
-                f"{_excess * 1e3:.2f} g/kg above saturation), so it carries "
-                "cloud water at t=0. This runner initialises the column by "
-                "reading the artifact's liquid-water potential temperature as "
-                "a plain potential temperature and its total water as vapour, "
-                "which is only correct for a cloud-free start. Starting a "
-                "cloudy case this way makes the column too cool and too moist "
-                "and it condenses toward a state the reference never had. A "
-                "saturation adjustment at initialisation is needed before "
-                "this case can be scored.")
+        # The moist artifact records LIQUID-WATER potential temperature θ_l (in
+        # `artifact.theta`) and TOTAL water q_t (in `artifact.qt`). Reading θ_l as
+        # a plain θ and q_t as vapour is only right for a cloud-free start
+        # (shallow cumulus); a stratocumulus column is SATURATED at t=0 and would
+        # start too cool and too moist, condensing toward a state the reference
+        # never had. Saturation-ADJUST the IC — (θ_l, q_t) → (θ, q_v, q_c) — so a
+        # cloudy start is initialised with the cloud water it actually carries
+        # and total water q_t = q_v + q_c is conserved. A clear column returns
+        # q_c=0, θ=θ_l, q_v=q_t, so BOMEX is byte-unchanged.
+        qt0 = interp_profile(jnp.asarray(artifact.qt)[0], z_les, z_scm)
+        exner = exner_function(p_full)
+        theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
+        T_profile = theta_adj * exner            # actual temperature (θ_l→θ warmed by q_c)
+        if float(jnp.max(q_c_adj)) > 0.0:
+            q_c_scm = q_c_adj
         moist_kwargs["w_qv_s"] = _const_scalar(
             float(jnp.asarray(artifact.w_qv_s)[0]))
         for fld in ("subsidence_w", "theta_adv", "qv_adv"):
@@ -296,6 +285,7 @@ def build_cbl_scm_from_artifact(
         dt=dt,
         T_profile=T_profile,
         q_v_profile=q_v_scm,
+        q_c_profile=q_c_scm,
         u=u_scm,
         v=v_scm,
         p_s=_P_S_PA,

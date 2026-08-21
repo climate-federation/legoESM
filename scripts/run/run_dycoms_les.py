@@ -51,34 +51,35 @@ import jax  # noqa: E402
 if not _F32:
     jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
-
-from legoesm import constants  # noqa: E402
-from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
-from legoesm.atmosphere.physics.radiation.simple_lw import (  # noqa: E402
-    SimpleLWConfig,
-    simple_lw_temperature_tendency,
+from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
+    read_sam_lsf,
+    read_sam_sfc,
+    read_sam_snd,
+    surface_at_day,
 )
 from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
     MicrophysicsConfig,
     MorrisonConfig,
 )
-from legoesm.atmosphere.forcing.sam_case_forcing import (  # noqa: E402
-    read_sam_lsf,
-    read_sam_snd,
-    read_sam_sfc,
-    surface_at_day,
+from legoesm.atmosphere.physics.radiation.simple_lw import (  # noqa: E402
+    SimpleLWConfig,
+    simple_lw_temperature_tendency,
 )
+
+from legoesm import constants  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
-
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
-from legoesm.atmosphere.les_suite.scm_coupling import liquid_water_theta  # noqa: E402
+from legoesm.atmosphere.les_suite.scm_coupling import (  # noqa: E402
+    liquid_water_theta,
+    saturation_adjust,
+)
 
 
 def _record_theta_l(st, ref):
@@ -227,24 +228,6 @@ def parse_args():
     args.subsidence_divergence_s = spec["subsidence_divergence_s"]
     args.n_c_m3 = spec["n_c_m3"]
     return args
-
-
-def saturation_adjust(theta_l, q_t, exner, p, n_iter=40):
-    """(θ_l, q_t) → (θ, q_v, q_c) by DAMPED fixed-point saturation adjustment.
-
-    θ = θ_l + (L_v/(c_pd·Π))·q_c with q_c = max(q_t − q_sat(T, p), 0). The
-    naive fixed point OSCILLATES (the latent heating from a q_c guess raises
-    q_sat above q_t, flipping the next guess back to 0 — period-2 cycle), so
-    each update is under-relaxed by ½, which converges monotonically for any
-    physically admissible (θ_l, q_t). Fixed trip count ⇒ JIT/AD-safe."""
-    q_c = jnp.zeros_like(q_t)
-    for _ in range(n_iter):
-        theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
-        T = theta * exner
-        q_sat = saturation_mixing_ratio(T, p)
-        q_c = 0.5 * (q_c + jnp.clip(q_t - q_sat, 0.0, None))   # damped
-    theta = theta_l + constants.L_v / (constants.c_pd * exner) * q_c
-    return theta, q_t - q_c, q_c
 
 
 def build(args, dtype):
@@ -570,7 +553,9 @@ def _emit_suite_artifact(args, forc, rad_tend, subsidence_w, out_path):
     subsidence_w +up); the cooling sign is verified in ``make_stevens_lw``.
     """
     from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
-        LESReferenceArtifact, save_artifact)
+        LESReferenceArtifact,
+        save_artifact,
+    )
     prof_dir = Path(args.output) / "profiles"
     files = sorted(prof_dir.glob("prof_*.npz"))
     if not files:

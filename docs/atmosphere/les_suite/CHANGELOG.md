@@ -219,3 +219,17 @@ obs-constrained NCAR-SCCM variational-analysis product already on disk at
     1 end-to-end SCM-run scored on θ/q/u/v/LWP). Numerics codex-reviewed.
   - **Remaining:** Phase 2b (SCM cloud/precip diagnostics in history); Phase 3 driver + campaign
     registry for the 9-closure obs ranking (golden-day June-21 anchor via the obs-restart path).
+
+- **PR review follow-up (2026-08-21) — saturated-start moist init.** After a dual codex+GLM PR
+  review (8 blocking defects fixed by the reviewer), the one item left "for the author" was the
+  stratocumulus (DYCOMS/ASTEX) cloudy start: `build_cbl_scm_from_artifact` reads the artifact's
+  θ_l as θ and q_t as vapour, which is only right cloud-free, so the reviewer's guard REFUSED a
+  saturated start. Fix: `scm_coupling.saturation_adjust((θ_l,q_t)→(θ,q_v,q_c))` — the exact
+  inverse of `liquid_water_theta`, promoted from `run_dycoms_les.py` (no duplicated numerics) —
+  applied at init so a cloudy column starts with its cloud water and q_t=q_v+q_c is conserved
+  (a clear column is byte-unchanged). `SingleColumnModel.create` gained a `q_c_profile` seed (the
+  microphysics preallocation preserves it). Tests: saturation_adjust clear/saturated + round-trip;
+  a saturated-start artifact seeds q_c and reproduces the artifact θ_l/q_t at init. Physics
+  codex-reviewed (numerics CONFIRMED; docstring over-claims + an unused knob tightened). Also
+  migrated `ocean/.../gm_bvp.py::GMBVPConfig` `__param_spec__` to the nested schema (was the lone
+  param-spec CI failure on the merged main).

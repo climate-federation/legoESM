@@ -10,6 +10,7 @@ import pytest
 from legoesm.atmosphere.les_suite.bridge import LESReferenceArtifact
 from legoesm.atmosphere.les_suite.scm_coupling import (
     interp_profile,
+    liquid_water_theta,
     theta_from_temperature,
 )
 from legoesm.atmosphere.les_suite.scm_runner import (
@@ -21,6 +22,7 @@ from legoesm.atmosphere.les_suite.scm_runner import (
     scm_scan_final_state,
 )
 from legoesm.atmosphere.physics import TurbulenceConfig
+from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.atmosphere.physics.turbulence.config import (
     MYNN25Config,
     SurfaceLayerConfig,
@@ -103,6 +105,51 @@ def _moist_artifact(**over) -> LESReferenceArtifact:
     return LESReferenceArtifact(**base)
 
 
+def _saturated_moist_artifact(**over):
+    """A stratocumulus-like moist artifact whose IC is SATURATED (cloud at t=0)."""
+    z = np.linspace(10.0, 2500.0, NZ)
+    thl_col = np.full(NZ, 286.0)                     # cold marine mixed layer [θ_l, K]
+    qt_col = np.full(NZ, 0.012)                      # q_t above saturation → cloud
+    return _moist_artifact(
+        theta=np.broadcast_to(thl_col, (NT, NZ)).copy(),
+        qt=np.broadcast_to(qt_col, (NT, NZ)).copy(),
+        heights_m=z, **over)
+
+
+def test_saturated_start_artifact_seeds_qc_and_matches_ic():
+    # A cloudy start is saturation-adjusted at init (no longer refused): q_c is
+    # seeded and the SCM's initial θ_l / q_t reproduce the artifact exactly
+    # (saturation_adjust is the exact inverse of liquid_water_theta).
+    art = _saturated_moist_artifact()
+    scm, grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+
+    q_c0 = np.asarray(scm.state.tracers["q_c"].data[0, 0, 0])
+    q_v0 = np.asarray(scm.state.tracers["q_v"].data[0, 0, 0])
+    assert q_c0.max() > 1.0e-4                         # cloud water actually seeded
+
+    p_full = np.asarray(grid.p_full_pa)
+    exner0 = np.asarray(exner_function(p_full))
+    theta0 = np.asarray(theta_from_temperature(scm.state.T.data[0, 0, 0], p_full))
+    thl_scm = np.asarray(liquid_water_theta(theta0, q_c0, exner0))
+    qt_scm = q_v0 + q_c0
+
+    z_les = np.asarray(art.heights_m)
+    z_scm = np.asarray(grid.z_scm_m)
+    thl_ref = np.asarray(interp_profile(np.asarray(art.theta)[0], z_les, z_scm))
+    qt_ref = np.asarray(interp_profile(np.asarray(art.qt)[0], z_les, z_scm))
+    assert np.allclose(thl_scm, thl_ref, atol=1e-3)   # θ_l reproduced at init
+    assert np.allclose(qt_scm, qt_ref, atol=1e-7)     # total water conserved
+
+
+def test_clear_moist_start_seeds_no_qc():
+    # The clear BOMEX-like artifact (q_t < q_sat) forms no cloud at t=0, so q_c
+    # is all-zero — the saturation adjustment leaves a cloud-free start unchanged.
+    art = _moist_artifact()
+    scm, _ = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)
+    q_c0 = np.asarray(scm.state.tracers["q_c"].data[0, 0, 0])
+    assert np.allclose(q_c0, 0.0, atol=1e-12)
+
+
 def test_build_scm_from_artifact():
     art = _cbl_artifact()
     scm, grid = build_cbl_scm_from_artifact(
@@ -147,8 +194,8 @@ def test_diagnostic_scheme_flux_nonlocal_beats_local():
     # flux while a NONLOCAL closure's counter-gradient carries the surface flux up. So the
     # nonlocal flux RMSE vs the LES flux is materially BELOW the local one.
     from legoesm.atmosphere.les_suite.bridge import diagnostic_truth
-    from legoesm.atmosphere.les_suite.score import diagnostic_flux_score
     from legoesm.atmosphere.les_suite.scm_runner import diagnostic_scheme_flux
+    from legoesm.atmosphere.les_suite.score import diagnostic_flux_score
 
     art = _windy_cbl_artifact()
     truth = diagnostic_truth(art)
@@ -378,8 +425,9 @@ def test_liquid_water_theta_sign_and_exact_decrement():
     # θ_l = θ − (L_v/(c_pd·Π))·q_c: STRICTLY below θ where cloud exists (q_c>0), by exactly
     # the latent-heat decrement. A flipped sign (θ+…) would raise θ_l above θ — this is the
     # guard the broad-bounds test can't catch.
-    from legoesm import constants
     from legoesm.atmosphere.les_suite.scm_runner import _liquid_water_theta
+
+    from legoesm import constants
 
     theta = jnp.array([300.0, 305.0, 310.0])
     q_c = jnp.array([0.0, 1.0e-3, 2.0e-3])       # cloud water [kg/kg]
