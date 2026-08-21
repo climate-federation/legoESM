@@ -62,7 +62,7 @@ def _default_out() -> Path:
     return _cache.sub("forcing") / "core2_nyf" / "nyf.zarr"
 
 
-def build(inputs_dir: Path, out: Path) -> Path:
+def build(inputs_dir: Path, out: Path, wind_variant: str = "mod") -> Path:
     import xarray as xr
 
     def _open(name: str) -> "xr.Dataset":
@@ -83,10 +83,34 @@ def build(inputs_dir: Path, out: Path) -> Path:
     def _f64(a):
         return np.asarray(a, dtype=np.float64)
 
-    # u / v / T / q: KEEP the native 6-hourly axis (1460 records). Base
-    # (non-_MOD) variables are the raw CORE data.
-    u10 = _f64(du["U_10"].values)
-    v10 = _f64(dv["V_10"].values)
+    # u / v / T / q: KEEP the native 6-hourly axis (1460 records).
+    #
+    # WIND VARIANT.  The CORE-II files carry both the raw NCEP-derived winds
+    # (U_10/V_10) and the Large & Yeager corrected ones (U_10_MOD/V_10_MOD),
+    # and NEMO ORCA1's namelist_cfg reads the _MOD pair (sn_wndi=U_10_MOD,
+    # sn_wndj=V_10_MOD).  We built from the base fields, which are the raw
+    # data -- a true statement that justified the wrong choice, because the
+    # oracle uses the correction.
+    #
+    # The _MOD fields are the scatterometer (QuikSCAT) tropical adjustment:
+    # NCEP-1 10 m winds are ~20-30% too weak over the equatorial Pacific, and
+    # measured on this file's own grid the paired speed sqrt(u^2+v^2) differs
+    # by +32.6% over nino3 and +8.9% globally, with only a 3-10 degree turning
+    # angle -- so it is a SPEED correction, not a rotation
+    # (scripts/validate/ocean_fidelity/core2_base_vs_mod_winds.py).  Since
+    # stress goes as the square, the base fields give roughly 1.8x too little
+    # equatorial wind stress.
+    _WIND_VARS = {"mod": ("U_10_MOD", "V_10_MOD"), "base": ("U_10", "V_10")}
+    if wind_variant not in _WIND_VARS:
+        raise SystemExit(f"--wind-variant must be one of {sorted(_WIND_VARS)}")
+    _un, _vn = _WIND_VARS[wind_variant]
+    for _nm, _ds in ((_un, du), (_vn, dv)):
+        if _nm not in _ds:
+            raise SystemExit(f"{_nm} not in the CORE-II file; refusing to "
+                             "silently fall back to another variable")
+    print(f"[wind] variant {wind_variant!r} -> {_un}/{_vn}")
+    u10 = _f64(du[_un].values)
+    v10 = _f64(dv[_vn].values)
     T_air = _f64(dt["T_10"].values)                        # K
     # CORE-II Q_10 carries small (~-6e-3) negative specific humidities over
     # arid land (~3.8% of points, min over the Sahel) — a known artifact of the
@@ -197,10 +221,16 @@ def main() -> int:
                    help="NEMO ORCA1 INPUTS dir containing *.15JUNE2009.nc")
     p.add_argument("--out", type=Path, default=None,
                    help="output nyf.zarr path (default: legoESM core2 cache)")
+    p.add_argument("--wind-variant", choices=("mod", "base"), default="mod",
+                   help="'mod' = U_10_MOD/V_10_MOD, the Large & Yeager "
+                        "scatterometer-corrected winds NEMO's namelist reads "
+                        "(default). 'base' = the raw U_10/V_10 this builder "
+                        "used before 2026-08-21, kept only to reproduce old "
+                        "caches.")
     args = p.parse_args()
     out = args.out if args.out is not None else _default_out()
-    print(f"building CORE-II NYF zarr  ->  {out}")
-    build(args.inputs_dir, out)
+    print(f"building CORE-II NYF zarr  ->  {out}  (wind {args.wind_variant})")
+    build(args.inputs_dir, out, wind_variant=args.wind_variant)
     print("validating ...")
     _validate(out)
     print(f"DONE: {out}")
