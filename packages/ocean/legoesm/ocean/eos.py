@@ -2608,7 +2608,7 @@ def maybe_partial_h_actual(state, z_coord):
 
 
 def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
-                      *, eos_depth="insitu", rho0=None):
+                      *, eos_depth="insitu", rho0=None, g=None):
     """Compute in-situ density from ocean state.
 
     Used by vertical mixing, lateral mixing, and convection integration
@@ -2682,22 +2682,26 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
         else:
             depth = nemo_bn2_live_ladders(z_coord, _eta, _H)[0]
         r0 = rho_0 if rho0 is None else rho0
-        p_eos = (r0 * constants.g) * jnp.asarray(depth, dtype=state.T.data.dtype)
+        _g = constants.g if g is None else g
+        p_eos = (r0 * _g) * jnp.asarray(depth, dtype=state.T.data.dtype)
         return eos_fn(state.T.data, state.S.data, p_eos)
     h_actual = maybe_partial_h_actual(state, z_coord)
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
     rho = eos_fn(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
+    _r0 = rho_0 if rho0 is None else rho0
+    _g = constants.g if g is None else g
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
-            rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+            rho, state.eta.data, z_coord.dz_ref, jacobian, _r0, _g,
             h_actual=h_actual,
         )
         rho = eos_fn(state.T.data, state.S.data, p_hydro)
     return rho
 
 
-def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
+def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None,
+                                   *, rho0=None, g=None):
     """Compute in-situ density and hydrostatic pressure from ocean state.
 
     Dispatches on coord type — see ``compute_ocean_rho``.
@@ -2713,10 +2717,12 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     rho : array — in-situ density [kg/m^3].
     p_hydro : array — hydrostatic pressure [Pa].
     """
-    rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
+    rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn,
+                            rho0=rho0, g=g)
     h_actual = maybe_partial_h_actual(state, z_coord)
     p_hydro = compute_hydrostatic_pressure(
-        rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+        rho, state.eta.data, z_coord.dz_ref, jacobian,
+        rho_0 if rho0 is None else rho0, constants.g if g is None else g,
         h_actual=h_actual,
     )
     return rho, p_hydro
