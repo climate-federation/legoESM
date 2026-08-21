@@ -261,7 +261,9 @@ import netCDF4 as nc  # noqa: E402
 
 import southern_circulation_budget as B  # noqa: E402  (recorded reducers/geometry)
 import acceptance_gate_90d as G  # noqa: E402
-from kamm_twin_90d import DT, _build_twin_state  # noqa: E402  (the recorded twin harness)
+from kamm_twin_90d import (  # noqa: E402  (the recorded twin harness)
+    DT, _build_twin_state, seasonal_t0_seconds,
+)
 from legoesm.ocean.experiments.dino import (  # noqa: E402
     apply_dino_lat_lon_surface_forcing,
 )
@@ -503,6 +505,13 @@ def main(argv=None):
                   f"coriolis_scheme={cfg.coriolis_scheme}  "
                   f"surface_tendency_placement={cfg.surface_tendency_placement}")
         placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+        # #1455 SEASONAL CLOCK: this probe re-bridges NEMO's OWN restart for
+        # each matched day, so the forcing must be evaluated at that restart's
+        # day of year. Passing a bare ``DT`` would run every day's terms at
+        # seasonal day 0.03 against a state from day 180+ -- the antiphase
+        # corrected in 1c03f8311/076217667. Read per day, because the restart
+        # changes per day.
+        t0_sec = seasonal_t0_seconds(f"{rdir}/{rfile}")
 
         def terms_at(state, t_seconds, *, gate=False):
             """lego per-term row torques, mirroring the twin loop's forcing
@@ -518,7 +527,7 @@ def main(argv=None):
                 s2, surface_forcing=sf, sponge=None, dt=RDT)
             return lego_terms(diag, gate=gate), diag
 
-        L, diag0 = terms_at(st, DT, gate=True)
+        L, diag0 = terms_at(st, t0_sec + DT, gate=True)
 
         # C4 -- THE HONEST VERSION.  ``WIND_u`` is DEFINED as
         # ``total_u - sum(components)``, so "sum(terms incl. WIND) == total_u"
@@ -611,7 +620,7 @@ def main(argv=None):
         N = nemo_terms(kt)
         st_bb = st._replace(u=st.u_before, v=st.v_before, T=st.T_before,
                             S=st.S_before, eta=st.eta_before)
-        L_bb, _dbb = terms_at(st_bb, DT)
+        L_bb, _dbb = terms_at(st_bb, t0_sec + DT)
         print("  TIME-LEVEL A/B -- same operators on the restart's NOW vs its "
               "BEFORE level (NEMO's trends belong to BEFORE):")
         print(f"    {'term':14s}{'at NOW':>12s}{'at BEFORE':>12s}"
@@ -668,7 +677,7 @@ def main(argv=None):
         st0 = st._replace(u=st.u.replace(data=z), v=st.v.replace(data=zv),
                           u_before=st.u_before.replace(data=z),
                           v_before=st.v_before.replace(data=zv))
-        L0, _d0 = terms_at(st0, DT)
+        L0, _d0 = terms_at(st0, t0_sec + DT)
         pgf_only = L0["KE_PGF_u"]
         keg_lego = L["KE_PGF_u"] - pgf_only
         print("  EXACT KE/PGF SPLIT (lego evaluated at u=v=0; T/S/eta "
