@@ -541,7 +541,52 @@ claims BITWISE parity with a sequential NumPy loop — unroll over the
 static trip count there. Under jit everything is compiled anyway and
 only the ~1e-14 parity contract holds.
 
-## ★ THE NH GAP IS ALREADY PRESENT PRE-REMAP (2026-08-20)
+## ★ THE NH GAP IS A w-ONLY ACOUSTIC DEFECT (2026-08-20, CONFIRMED)
+
+Open since 2026-08-19, now localised twice over. Corrected measurement,
+`nh_preremap_w_parity.py` job 9448215, four controls passed:
+
+    level 0, ONE shared scale:
+      w     pre 9.3761e-04   post 9.3755e-04
+            |d| 1.3003e-07   |d|  1.3002e-07
+      pt    pre 2.3470e-13
+      delp  pre 3.0193e-10
+
+TWO INDEPENDENT NARROWINGS:
+
+1. **It is generated in the ACOUSTIC LOOP.** The whole 1.3003e-07 m/s
+   gap -- the established figure -- is present when `dyn_core` returns,
+   and the remap changes it by ~1e-11, i.e. 0.008 %. At k=0 the remap
+   is a pass-through. (Scope: k=0 only. Other levels are unmeasured, so
+   the remap is not exonerated globally.)
+2. **It is w-SPECIFIC, by six to nine orders.** `pt` (2.3e-13) and
+   `delp` (3.0e-10) sit at the parity floor while `w` is at 9.4e-04.
+   The defect is not a mass or thermodynamic error propagating into w;
+   it is in the w path itself. In the NH lane w is written by
+   `riem_solver3` every sub-step -- note the separately CONFIRMED
+   ~5.8e-10 libm-`exp` residual there is SIX ORDERS too small to be
+   this.
+
+CONTROL 4 SETTLED THE CROSS-BINARY WORRY OUTRIGHT: the instrumented
+build's own restart against the certified restart is **0.0000e+00,
+bitwise**, on every tile. GLM had bounded the possible drift at
+~5-6e-4 relative, which would have left the verdict a ~15 % margin;
+the actual drift is zero and the margin is the full measurement.
+
+THE 1.418 RATIO I FIRST PUBLISHED WAS THE SCALE ARTIFACT GLM PREDICTED.
+`rel()` takes `max(peaks)` per call; the pre-remap number was level 0
+(peak 1.39e-04) and the full-step number was all-k (peak ~1.9e-03). On
+one domain with one scale the two are 9.3761e-04 and 9.3755e-04 -- the
+ratio is 1.00006, not 1.418, and "the remap slightly reduces it" was an
+artifact of my own denominators.
+
+NEXT, and the instrument already supports it: dump per acoustic
+SUB-STEP rather than once per call, to see whether the w error appears
+at sub-step 1 (a stage is wrong) or accumulates over the eight (a
+coefficient is wrong). The dump call moves from `fv_dynamics.F90` into
+`dyn_core`'s `do it=1,n_split`.
+
+## ★ (SUPERSEDED) the first, mixed-domain reading (2026-08-20)
 
 ### RETRACTED, same day: "the remap is exonerated"
 
