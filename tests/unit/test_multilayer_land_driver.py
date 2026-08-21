@@ -113,6 +113,30 @@ def test_setup_wires_multilayer_land(monkeypatch, tmp_path):
                   & (np.asarray(st.theta_soil) <= 1.0))
 
 
+def test_the_default_land_surface_scheme_is_the_canopy():
+    """Coverage of the DEFAULT that does not need the staged data file.
+
+    The test below drives a real setup and therefore skips wherever the canopy
+    parameter file is absent, which is every clean checkout -- so on its own it
+    leaves the default itself untested and the next flip would go unnoticed.
+    This asserts the declared default directly, and needs nothing staged.
+    """
+    default = ExperimentConfig._field_defaults["land_surface_scheme"]
+    assert default == "two_leaf", (
+        f"the default land surface scheme is {default!r}. The simplified "
+        "scheme evaporates at potential with stomata off and its humidity "
+        "gradient self-extinguishes with them on, which is why the canopy is "
+        "the default; changing it back is a decision, not a tidy-up.")
+    # And the value has to be one the driver will accept.
+    ExperimentConfig(
+        grid=GridConfig(resolution=8, nlev=8),
+        dycore=DycoreConfig(dt=600.0),
+        output=OutputConfig(diag_days=1),
+        days=1, dataset="analytical", radiation="gray",
+        land_surface_scheme=default,
+    ).validate_strict()
+
+
 def test_setup_dispatches_land_surface_scheme(monkeypatch, tmp_path):
     """land_surface_scheme dispatches the right surface scheme onto the
     multilayer land config: each selection must arrive, and the DEFAULT must be

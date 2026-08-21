@@ -8855,10 +8855,21 @@ class ModelDriver:
                         "REPLACES the static mpas_land_beta=%.2f over land",
                         _land_beta)
 
-            # Running total of held column-steps, kept on the device so the
-            # hot loop never syncs for it (read at the warning cadence).
+            # Held-column accounting. The per-step count stays on the DEVICE
+            # and is read only at the warning cadence, so the step loop pays no
+            # synchronisation for it in between -- it is not free, it is as
+            # frequent as the other post-step warnings.
+            #
+            # The device counter is RESET at every read and the running totals
+            # are kept on the host. A 32-bit counter accumulating a whole run's
+            # column-steps overflows: ten thousand columns at a seventy-five
+            # second timestep reach two billion in about half a simulated year,
+            # after which the warning this exists to guarantee would stop
+            # firing precisely when holds had become systemic.
             _land_n_held_accum = jnp.zeros((), jnp.int32)
-            self._land_n_held_reported = 0
+            _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            self._land_n_held_total = 0
+            self._land_n_held_steps = 0
 
             from legoesm.land.forcing.solar import cos_solar_zenith as _csz
             _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
@@ -9661,20 +9672,36 @@ class ModelDriver:
                         jnp.asarray(_doy, dtype=jnp.float64))
                     # Accumulate ON DEVICE and read at the same cadence the
                     # other post-step warnings use: reading it every step
-                    # would stall the GPU once per step for a number that is
-                    # almost always zero.
+                    # would stall the accelerator once per step for a number
+                    # that is almost always zero.
                     _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    _land_n_held_steps_accum = (
+                        _land_n_held_steps_accum
+                        + (_land_n_held_step > 0).astype(jnp.int32))
                     if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
-                        _n_held_so_far = int(_land_n_held_accum)
-                        if _n_held_so_far > self._land_n_held_reported:
+                        _window_cols = int(_land_n_held_accum)
+                        _window_steps = int(_land_n_held_steps_accum)
+                        _land_n_held_accum = jnp.zeros((), jnp.int32)
+                        _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                        if _window_cols:
+                            self._land_n_held_total += _window_cols
+                            self._land_n_held_steps += _window_steps
+                            # Column-steps alone cannot separate one column
+                            # failing every step from many columns failing
+                            # once, and those are different problems: the
+                            # first is a bad column, the second is a bad
+                            # configuration. Report the number of STEPS that
+                            # held as well, and the worst single step.
                             logger.warning(
-                                "land: %d column-steps held since the run "
-                                "began (the surface solve was rejected and "
-                                "the column reverted, so its energy and water "
-                                "budgets do not close over those steps) — at "
-                                "step %d",
-                                _n_held_so_far, step)
-                            self._land_n_held_reported = _n_held_so_far
+                                "land: %d column-steps held in the last %d "
+                                "steps, on %d of those steps (the surface "
+                                "solve was rejected and the column reverted, "
+                                "so its energy and water budgets do not close "
+                                "over those steps); %d column-steps on %d "
+                                "steps since the run began — at step %d",
+                                _window_cols, _HARD_SAT_LOG_CADENCE_STEPS,
+                                _window_steps, self._land_n_held_total,
+                                self._land_n_held_steps, step)
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction
                     # the consumer refuses the key, and adding it mid-run
