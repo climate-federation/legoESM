@@ -42,11 +42,18 @@ from pathlib import Path
 
 _OCEAN = Path(__file__).resolve().parents[2] / "packages" / "ocean"
 
-# call name -> positional index of gravity, or None if it can only be a keyword
+# call name -> (positional index of gravity or None, positional index of the
+# reference density or None). BOTH are gated, not just gravity: these routines
+# take the pair, and a call that passes the run's gravity while defaulting the
+# reference density rebuilds the very self-inconsistency this exists to stop --
+# a pressure on one convention and a buoyancy frequency on another, one layer
+# down (GLM-5.2).
 _GUARDED = {
-    "compute_hydrostatic_pressure": 5,   # rho, eta, dz, jacobian, rho_ref, g
-    "compute_buoyancy_frequency_adiabatic": None,
+    # rho, eta, dz, jacobian, rho_ref, g
+    "compute_hydrostatic_pressure": (5, 4),
+    "compute_buoyancy_frequency_adiabatic": (None, None),
 }
+_DENSITY_KW = "rho_ref"
 
 # "<path>::<function>" -> why it cannot pass the run's gravity today.
 # SHRINK-ONLY.  Each needs the constants configuration threaded in from its
@@ -88,10 +95,13 @@ def _non_compliant() -> set[str]:
                                getattr(call.func, "attr", None))
                 if name not in _GUARDED:
                     continue
-                pos = _GUARDED[name]
-                if "g" in {k.arg for k in call.keywords}:
-                    continue
-                if pos is not None and len(call.args) > pos:
+                g_pos, rho_pos = _GUARDED[name]
+                kw = {k.arg for k in call.keywords}
+                has_g = ("g" in kw) or (g_pos is not None
+                                        and len(call.args) > g_pos)
+                has_rho = (_DENSITY_KW in kw) or (rho_pos is not None
+                                                  and len(call.args) > rho_pos)
+                if has_g and has_rho:
                     continue
                 out.add(f"{rel}::{fn.name}")
     return out
@@ -111,8 +121,8 @@ def test_no_new_call_defaults_the_runs_gravity():
     new = sorted(_non_compliant() - set(_DEBT))
     assert not new, (
         f"{new} call a pressure or buoyancy-frequency routine without passing "
-        f"gravity, so a run pinning its own value silently gets the library "
-        f"constant. Pass it, or add an entry to _DEBT with the signature "
+        f"gravity AND a reference density, so a run pinning its own values "
+        f"silently gets the library constants. Pass it, or add an entry to _DEBT with the signature "
         f"change needed to clear it (#1627).")
 
 
