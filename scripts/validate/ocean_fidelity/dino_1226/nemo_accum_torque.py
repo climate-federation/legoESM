@@ -877,8 +877,17 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
         pr = PRIOR_DEFICIT.get(a)
         if pr and a == arm:
             g = nemo - LEGO_REALIZED[i]
-            print(f"{'  vs published arm ' + a:>34s}{LEGO_REALIZED[i]:+12.3f}"
-                  f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> {(g - pr) / pr:+.1%}")
+            # LABEL IT ON THE LIVE PATH TOO. These are WITHDRAWN-STACK numbers
+            # (antiphase clock, fp32, 1-D ladder); the WITHDRAWN note used to
+            # sit only on the fallback branch, so this line printed "prior
+            # +0.61" unlabelled next to a valid-stack result.
+            print(f"{'  vs WITHDRAWN-STACK arm ' + a:>34s}"
+                  f"{LEGO_REALIZED[i]:+12.3f}"
+                  f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> "
+                  f"{(g - pr) / pr:+.1%}")
+            print("      ^ WITHDRAWN STACK -- see PHASE1_valid_stack_southern_"
+                  "budget.md. Not comparable\n        to a valid-stack number;"
+                  " printed only to show the revision.")
     print("    POWER, so CONFIRMED is not read as stronger than it is: the pre-registered"
           " prediction\n    was '~0.5 +/- 0.35'.  A 0.7-wide window could not have"
           " separated 0.5 from 0.3 or 0.7.")

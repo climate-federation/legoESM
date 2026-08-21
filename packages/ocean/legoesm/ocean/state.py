@@ -1256,57 +1256,52 @@ class BarotropicConfig(NamedTuple):
     #
     #   NEMO site 1, dynspg_ts.F90:1171-1173, inside dyn_spg (stpmlf.F90:332),
     #     on the NOW level:  puu(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm).
-    #     This is a WITHIN-STEP advective velocity for tra_adv (:528); it is
-    #     removed again at stpmlf.F90:787-790 before the Asselin filter (the
-    #     .NOT.ln_bt_fw branch, live on the DINO card) and never reaches the
-    #     committed state.
-    #   NEMO site 2, stpmlf.F90:754-765, AFTER dyn_zdf (:396), on the AFTER
-    #     level:  subtract the column's own mean formed with e3u(Kaa) and
-    #     divided by hu(Kaa), add uu_b(Kaa).  This one IS committed, and it is
-    #     what discards the implicit vertical solve's column-mean deposit
-    #     (measured +17.9 m3/s2 per southern u-row on the DINO 90-day twin,
-    #     12x the realized spin-up rate).
+    #     This is a WITHIN-STEP advecting velocity for tra_adv (:528); it is
+    #     removed again at stpmlf.F90:787-790 (the .NOT.ln_bt_fw branch, live
+    #     on the DINO card) and NEVER reaches the committed state.
+    #   NEMO site 2, stpmlf.F90:754-765, AFTER dyn_zdf (:396): subtract the
+    #     column's own thickness-weighted mean, add uu_b(Kaa).  This one IS
+    #     committed, and it is what discards the implicit vertical solve's
+    #     column-mean deposit -- measured +17.9 m3/s2 per southern u-row on the
+    #     90-day DINO twin, 12x the realized spin-up rate, thrown away
+    #     every step.
     #
     # legoESM has no site-2 analogue.  Its single reconciliation happens inside
-    # the barotropic solve (``_reconcile_targets``), at the NOW thickness, and
-    # the after-level column mean it produces then survives the implicit
-    # vertical solve unchanged in principle -- in practice
-    # ``zdf_baroclinic_only`` strips and re-adds the mean around the solve with
-    # a DIFFERENT weighting, leaving a residue.
+    # the barotropic solve (``_reconcile_targets``) and the leap-frog combine
+    # then pins the after-level column mean; nothing runs after the implicit
+    # vertical solve, so legoESM keeps a residue of that deposit.
     #
-    #   "off" (default)             -> unchanged, BIT-IDENTICAL.
-    #   "nemo_mlf_baro_corr"        -> run NEMO's site 2 after the implicit
-    #                                  vertical solve and before the
-    #                                  conservation fixer/Asselin filter, at
-    #                                  the AFTER-level thickness.
+    #   "off" (default)      -> unchanged, BIT-IDENTICAL.
+    #   "nemo_mlf_baro_corr" -> run NEMO's site 2, after the implicit vertical
+    #                           solve and before the Asselin filter.
     #
-    # ORTHOGONAL to ``barotropic_reconcile_target``, deliberately: that field
-    # selects WHICH substep average is installed (NEMO's primary
-    # velocity-weighted ``uu_b(Kaa)`` = "velocity_avg", or the secondary
-    # transport-weighted ``un_adv/hu`` = "transport_avg"); this one selects
-    # WHERE and at WHICH time level's thickness it is enforced.  A card
-    # matching NEMO on both rows needs velocity_avg AND nemo_mlf_baro_corr.
+    # NOT ORTHOGONAL TO ``barotropic_reconcile_target`` -- they COMPOSE, and
+    # only one of the four combinations is NEMO.  NEMO commits uu_b(Kaa), its
+    # PRIMARY velocity-weighted boxcar, which is "velocity_avg"; the
+    # transport-weighted un_adv/hu ("transport_avg") is the average NEMO
+    # installs only transiently and then DELETES (stpmlf.F90:788).  So the
+    # faithful pair is velocity_avg + nemo_mlf_baro_corr; transport_avg +
+    # nemo_mlf_baro_corr commits, in NEMO's slot, the average NEMO throws away.
+    #
+    # RETRACTED 2026-08-21: this field was first documented as switching to
+    # "the AFTER-level thickness NEMO divides by".  NEMO's weighting is
+    # TIME-LEVEL INDEPENDENT -- under key_qco the (1+r3u) free-surface factor
+    # cancels exactly between e3u(Kaa) and r1_hu(Kaa) -- so the faithful weight
+    # is the REFERENCE ladder e3u_0/hu_0, which is what the kernel now uses.
+    # Any statement sized against "the after-thickness half" must be re-read.
+    #
+    # SCOPE, named rather than left to be discovered: the site is in the
+    # leap-frog branch of each outer step, so it is NOT applied on the
+    # forward-Euler first step (``state.u_before is None``), which returns
+    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
+    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
+    # real one-step gap; it is empty for every use this was built for (a
+    # bridged/restart twin arrives with u_before populated and never takes that
+    # branch). Selecting this on an outer_integrator that has no such site
+    # (forward_euler, ab2) is rejected at model construction, not ignored.
+    #
     # Unknown value raises at outer-step entry (barotropic_common.
     # validate_after_reconcile), on both the leapfrog and the nemo_mlf path.
-    #
-    # SCOPE, stated rather than left to be discovered: the option's site is in
-    # the LEAP-FROG branch of each outer step. It is NOT applied on the
-    # forward-Euler first step (``state.u_before is None``), which returns
-    # straight out of ``_step_impl`` and has no barotropic-mean slot to
-    # reconcile onto. NEMO does run mlf_baro_corr on its l_1st_euler step, so
-    # that is a real one-step gap -- it is empty in practice for every use this
-    # was built for (a bridged/restart twin arrives with u_before populated and
-    # never takes the Euler branch), and it would need the barotropic mean
-    # threaded out of ``_step_impl`` to close.
-    #
-    # WHAT IT CAN AND CANNOT MOVE, measured: under a pure z-star coordinate
-    # every layer of a column rescales by the same (H+eta)/H, and the min-rule
-    # face depth inherits that, so a thickness-weighted column mean is
-    # IDENTICAL at the now and after levels -- the after-thickness half is then
-    # exactly a no-op (measured 1.1e-16 m/s, gated by
-    # tests/ocean/unit/test_barotropic_after_reconcile.py). It bites only
-    # through partial cells and through a column mean the implicit vertical
-    # solve deposited.
     barotropic_after_reconcile: str = "off"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D

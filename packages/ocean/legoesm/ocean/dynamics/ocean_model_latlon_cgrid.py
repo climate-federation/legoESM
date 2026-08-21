@@ -2235,12 +2235,20 @@ class LatLonCGridOceanModel:
                                 "nemo_stage_mean_imposition", False)
                 and config.barotropic.barotropic_solver != "explicit_substep"):
             # Under the split-explicit free surface ("explicit_substep") the
-            # post-solve depth-mean shift is NEMO's OWN MLF arrangement
-            # (stpmlf.F90: dyn_spg THEN dyn_zdf, no post-zdf re-imposition —
-            # the shift feeds the next step's Kbb barotropic seed), and
-            # F_slow carries the wind for the substeps exactly as NEMO's
-            # zu_frc wind term (dynspg_ts.F90 ~L360).  So no stage-mean
+            # post-solve depth-mean shift feeds the next step's Kbb barotropic
+            # seed, and F_slow carries the wind for the substeps exactly as
+            # NEMO's zu_frc wind term (dynspg_ts.F90 ~L360).  So no stage-mean
             # imposition is required there; other solvers keep the guard.
+            #
+            # CORRECTED 2026-08-21 (#1455): this comment used to justify the
+            # exemption by claiming NEMO's MLF has "no post-zdf re-imposition".
+            # THAT IS FALSE -- stpmlf.F90:578 calls mlf_baro_corr AFTER dyn_zdf
+            # (:396) and it re-imposes the barotropic mean on the committed
+            # after level. The exemption still stands on its OTHER leg (F_slow
+            # already carries the wind into the substeps here), which is the
+            # one that was doing the work; the false half is removed rather
+            # than left to be cited. legoESM can now run NEMO's post-zdf site
+            # explicitly -- see BarotropicConfig.barotropic_after_reconcile.
             raise ValueError(
                 "surface_stress_implicit=True deposits the wind stress inside "
                 "the implicit vertical solve, which SHIFTS the depth mean "
@@ -2411,6 +2419,27 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"outer_integrator must be one of {sorted(_valid_outer_int)}, "
                 f"got {_outer_int!r}")
+        # The two outer steps that have NEMO's stpmlf.F90 stage layout. Defined
+        # here because the first consumer is the guard immediately below.
+        _leapfrog_family = ("leapfrog", "nemo_mlf")
+        # barotropic_after_reconcile (NEMO mlf_baro_corr) has a site ONLY in
+        # the two leap-frog-family outer steps. Selecting it on forward_euler
+        # or ab2 would silently do NOTHING -- a card asking for a
+        # reconciliation and not getting one, which is exactly the failure the
+        # fn-entry dispatch guard exists to prevent and which no typo is needed
+        # to reach (forward_euler is the DEFAULT outer_integrator). Reject at
+        # construction instead.
+        _after_recon = getattr(
+            config.barotropic, "barotropic_after_reconcile", "off")
+        if _after_recon != "off" and _outer_int not in _leapfrog_family:
+            raise ValueError(
+                f"barotropic_after_reconcile={_after_recon!r} requires "
+                f"outer_integrator in {sorted(_leapfrog_family)}: NEMO's "
+                "mlf_baro_corr (stpmlf.F90:754-765) runs after dyn_zdf and "
+                "before the Asselin filter, and only the leap-frog-family "
+                "outer steps have that position. Got "
+                f"outer_integrator={_outer_int!r}, which would silently ignore "
+                "the setting.")
         # "leapfrog" (_leapfrog_step, two-pass) and "nemo_mlf" (_nemo_mlf_step,
         # P2 single-pass transcription, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md) are the SAME leap-frog-family
@@ -2424,7 +2453,7 @@ class LatLonCGridOceanModel:
         # "advective"), calls the SAME _seed_centred_forcing_carry, and has no
         # prescribed_flow re-pinning either -- so every one of these raises is
         # extended to the pair, not blanket-copied without re-checking.
-        _leapfrog_family = ("leapfrog", "nemo_mlf")
+        # (_leapfrog_family is defined above, at its first consumer.)
         # NEMO Modified-Leap-Frog (stpmlf.F90) requirements. The leapfrog carries
         # the Coriolis in the explicit RHS (via vorticity_scheme="een_total") and
         # applies the vertical friction/mixing implicitly over 2dt (dyn_zdf), so
@@ -2481,24 +2510,37 @@ class LatLonCGridOceanModel:
                     "implicit-solve gradient divisor is e3w(Kmm) (trazdf.F90:"
                     "219-220), not legoESM's default after-solve midpoint slot. "
                     "Set implicit_vmix_e3t_now_divisor=True.")
-            # mlf_baro_corr (stpmlf.F90 row 30) is WAIVED inside _nemo_mlf_step
-            # citing W1a -- PROVABLY a no-op only because no depth-mean source
-            # exists under surface_stress_implicit=False (see the method's own
-            # docstring). A future card flipping surface_stress_implicit=True
-            # together with nemo_mlf would silently make that waiver WRONG (a
-            # real depth-mean source would then need the corrector call this
-            # method does not build) -- reject rather than let the waiver rot.
+            # RETRACTED 2026-08-21 (#1455): the waiver this guard used to
+            # rest on said mlf_baro_corr (stpmlf.F90 row 30) was "PROVABLY a
+            # no-op" under surface_stress_implicit=False, because no depth-mean
+            # source was thought to exist. THAT IS REFUTED by measurement:
+            # `barotropic_after_reconcile="nemo_mlf_baro_corr"` shifts
+            # _nemo_mlf_step's after-state by 2.0e-4 m/s on a partial-cell
+            # fixture with surface_stress_implicit=False
+            # (tests/ocean/unit/test_barotropic_after_reconcile.py), and on the
+            # 90-day DINO twin the discarded column mean is +0.27 m3/s2 per
+            # southern u-row. The implicit vertical solve IS a depth-mean
+            # source, through the weighting difference between its own strip/
+            # re-add and the combine's split.
+            #
+            # The kernel the old message told the reader to "build first" NOW
+            # EXISTS (barotropic_common.after_level_column_mean_reconcile) and
+            # is wired into BOTH outer-step paths via
+            # _apply_after_level_reconcile, so nemo_mlf is no longer waiving
+            # anything -- it runs row 30 whenever the card selects it. What
+            # remains true is the narrower statement below: legoESM has no
+            # implicit surface-stress source on this path, so that combination
+            # is still untranscribed and still rejected.
             if getattr(config, "surface_stress_implicit", False):
                 raise ValueError(
                     'outer_integrator="nemo_mlf" does not support '
-                    "surface_stress_implicit=True: _nemo_mlf_step WAIVES the "
-                    "mlf_baro_corr call (stpmlf.F90 row 30) citing W1a -- "
-                    "provably a no-op ONLY when surface_stress_implicit=False "
-                    "(no depth-mean source exists in lego's solve to "
-                    "reconcile). Enabling surface_stress_implicit would create "
-                    "a real depth-mean source with no corrector to remove it. "
-                    "Build the mlf_baro_corr kernel (spec §2/§6-5) before "
-                    "lifting this guard.")
+                    "surface_stress_implicit=True: this path does not "
+                    "transcribe NEMO's implicit surface-stress boundary "
+                    "condition, so the after-level state would carry a "
+                    "depth-mean source NEMO builds differently. Note this is "
+                    "no longer a statement about mlf_baro_corr, which IS now "
+                    'available on this path via barotropic_after_reconcile='
+                    '"nemo_mlf_baro_corr".')
         if (getattr(config, "barotropic_forcing_centred", False)
                 and _outer_int not in _leapfrog_family):
             raise ValueError(
@@ -7672,6 +7714,77 @@ class LatLonCGridOceanModel:
                               dims=state.v.dims, units=state.v.units),
         )
 
+    def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,
+                                     u_mask3, v_mask3, grid):
+        """NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation.
+
+        Transcribes ``cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765``.  The
+        CALLER must invoke this at NEMO's position: after ``dyn_zdf`` (:396,
+        the implicit vertical solve) and before the Asselin filter
+        (``dyn_atf_qco``, :613).  Both outer-step paths (``_leapfrog_step``
+        and ``_nemo_mlf_step``) call it there, and this is the ONLY
+        implementation -- the two paths cannot drift apart on it.
+
+        Selected by ``BarotropicConfig.barotropic_after_reconcile``.  ``"off"``
+        (the default) returns ``naa`` unchanged, with no array work, so the
+        default path is bit-identical; an unknown value raises here, on the
+        static config value.
+
+        WHAT IT ACTUALLY DOES, in order of how much it moves -- measured, not
+        assumed, because the option's name misleads on this:
+
+        1. It DISCARDS whatever column mean the implicit vertical solve
+           deposited, which is ~99.8% of its effect.  This is the fidelity row:
+           NEMO throws that deposit away every step (measured at +17.9 m3/s2
+           per southern u-row on the 90-day DINO twin, 12x the realized
+           spin-up rate), and legoESM otherwise keeps a residue of it.
+        2. It re-pins the column mean using the REFERENCE ladder.  NEMO's own
+           weighting is time-level INDEPENDENT -- under ``key_qco`` the
+           ``(1+r3u)`` free-surface factor cancels between ``e3u(Kaa)`` and
+           ``r1_hu(Kaa)`` exactly (see the kernel docstring) -- whereas the
+           caller's ``_split`` weights with the LIVE now-level thickness.
+           Under pure z-star that rescale is column-uniform and the two
+           coincide to roundoff; the difference is a partial-cell effect only.
+
+        THE TARGET is ``btu_exp``/``btv_exp``, the depth mean the barotropic
+        solve produced -- i.e. whichever substep average
+        ``barotropic_reconcile_target`` selected.  NEMO commits ``uu_b(Kaa)``,
+        its PRIMARY velocity-weighted boxcar (``dynspg_ts.F90:978-980,:1001``
+        under ``ln_dynadv_vec``), which is legoESM's ``"velocity_avg"``.  Under
+        ``"transport_avg"`` this installs legoESM's analogue of NEMO's
+        ``un_adv/hu`` instead -- and that is the average NEMO explicitly
+        DELETES again at ``stpmlf.F90:788``, so ``transport_avg`` +
+        ``nemo_mlf_baro_corr`` is NOT the faithful combination.  Matching NEMO
+        on this row needs BOTH ``velocity_avg`` and ``nemo_mlf_baro_corr``.
+
+        Even under ``velocity_avg`` the identity is to ROUNDOFF WHERE THE
+        WET-COLUMN FLOOR DOES NOT BIND, not exact: the barotropic solve builds
+        its own split on a FLOORED eta while the caller's ``_split`` uses the
+        unfloored ``state.eta``.  It is not NEMO's line verbatim and is not
+        claimed to be.
+        """
+        scheme = validate_after_reconcile(
+            self.config.barotropic.barotropic_after_reconcile)
+        if scheme == "off":
+            return naa
+        # REFERENCE ladder (NEMO e3u_0/e3v_0): the free-surface scaling cancels
+        # inside NEMO's own reconciliation, so the faithful weight carries no
+        # eta at all. Built from eta = 0 so partial-cell thicknesses survive
+        # while the z-star Jacobian does not.
+        h_k_ref = compute_layer_thickness(
+            jnp.zeros_like(naa.eta.data), state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        # floor matches the caller's own ``_split`` (depth_mean(..., 1.0e-10)),
+        # so the two means this composes are taken with the same land guard.
+        u_rec = after_level_column_mean_reconcile(
+            naa.u.data, min_cell_to_uface(h_k_ref), btu_exp, u_mask3, 1.0e-10)
+        u_rec = u_rec.at[:, -1].set(u_rec[:, 0])          # periodic-lon wrap
+        v_rec = after_level_column_mean_reconcile(
+            naa.v.data, min_cell_to_vface(h_k_ref, grid), btv_exp,
+            v_mask3, 1.0e-10)
+        return naa._replace(u=naa.u.replace(data=u_rec),
+                            v=naa.v.replace(data=v_rec))
+
     def _leapfrog_step(self, state: LatLonCGridOceanState, dt: float,
                        freshwater=None, surface_forcing=None, sponge=None,
                        *, grid=None, vertex_mask=None,
@@ -8098,43 +8211,12 @@ class LatLonCGridOceanModel:
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"))
 
-        # 3b. NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation
-        #     (cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765).  Position is
-        #     NEMO's: after dyn_zdf (:396, stage 3 above) and before the
-        #     Asselin filter (dyn_atf_qco, :613, stage 5 below).  Selected by
-        #     ``BarotropicConfig.barotropic_after_reconcile``; "off" (the
-        #     default) skips it entirely and is BIT-IDENTICAL.
-        #
-        #     The target installed is ``btu_exp``/``btv_exp`` -- the depth mean
-        #     the barotropic solve produced, i.e. whichever substep average
-        #     ``barotropic_reconcile_target`` selected.  Under "velocity_avg"
-        #     that is NEMO's ``uu_b(Kaa)`` and this call is NEMO's line
-        #     verbatim; under "transport_avg" it is the card's secondary
-        #     average enforced in NEMO's slot.  The two fields are orthogonal
-        #     on purpose -- see the config docstring.
-        #
-        #     WHAT THIS CHANGES, so it is not read as cosmetic: the enforced
-        #     column mean moves from the NOW-level thickness (which is what the
-        #     combine's own ``h_u``/``h_v`` split above pins) to the AFTER-level
-        #     thickness NEMO divides by, and any depth-mean the implicit
-        #     vertical solve deposited is discarded rather than kept.
-        _after_recon = validate_after_reconcile(
-            self.config.barotropic.barotropic_after_reconcile)
-        if _after_recon == "nemo_mlf_baro_corr":
-            # AFTER-level (Kaa) thicknesses: naa.eta is the barotropic solve's
-            # after ssh, the same level ``e3t_aft`` is built from below.
-            _h_k_aa = compute_layer_thickness(
-                naa.eta.data, state.H_bathy.data, self.z_coord,
-                min_water_column_m=self.config.min_water_column_m)
-            _u_rec = after_level_column_mean_reconcile(
-                naa.u.data, min_cell_to_uface(_h_k_aa), btu_exp,
-                u_mask3, 1.0e-10)
-            _u_rec = _u_rec.at[:, -1].set(_u_rec[:, 0])   # periodic-lon wrap
-            _v_rec = after_level_column_mean_reconcile(
-                naa.v.data, min_cell_to_vface(_h_k_aa, _grid), btv_exp,
-                v_mask3, 1.0e-10)
-            naa = naa._replace(u=naa.u.replace(data=_u_rec),
-                               v=naa.v.replace(data=_v_rec))
+        # 3b. NEMO ``mlf_baro_corr`` (see ``_apply_after_level_reconcile``),
+        #     at NEMO's position: after the implicit vertical solve above and
+        #     before the Asselin filter below. ONE implementation, called from
+        #     both outer-step paths. "off" (the default) is bit-identical.
+        naa = self._apply_after_level_reconcile(
+            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid)
 
         # 4. Conservation fixer on the final after-state.
         if self.config.use_conservation_fixer:
@@ -8258,14 +8340,17 @@ class LatLonCGridOceanModel:
         0.0 on T/S/u/v/eta over a 3-level rest-plus-front channel, 2 steps).
         No explicit finalize_lbc-equivalent call is needed.
 
-        ``mlf_baro_corr`` (row 30) — WAIVED per spec §1/§6-5, citing W1a: the
-        plan doc (``nemo_faithful_ocean_implementation_plan.md:39-48``)
-        certifies this call is a provable no-op for the kamm card specifically
-        (no depth-mean source exists under ``surface_stress_implicit=False``,
-        the only value this method supports — same construction-time guard
-        ``_leapfrog_step`` relies on).  Not built as a real call here (YAGNI —
-        zero live callers); a future card enabling ``surface_stress_implicit``
-        must add it before claiming this method transcribes that card too.
+        ``mlf_baro_corr`` (row 30) — BUILT, and the old waiver is RETRACTED
+        (2026-08-21, #1455).  The waiver claimed this call was "a provable
+        no-op ... no depth-mean source exists under
+        ``surface_stress_implicit=False``".  Measurement refutes it: the
+        implicit vertical solve IS a depth-mean source here, through the
+        weighting difference between its own strip/re-add and the combine's
+        split, worth +0.27 m3/s2 per southern u-row on the 90-day DINO twin.
+        The call now runs via ``_apply_after_level_reconcile`` whenever
+        ``BarotropicConfig.barotropic_after_reconcile="nemo_mlf_baro_corr"``,
+        at NEMO's own position (after ``dyn_zdf``, before the Asselin filter).
+        It stays OPT-IN, so a card that does not select it is unchanged.
 
         Implicit-vmix divisor (spec §6-4, resolved decision 4): this method
         does NOT itself raise on ``config.implicit_vmix_e3t_now_divisor`` (that
@@ -8449,43 +8534,12 @@ class LatLonCGridOceanModel:
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"))
 
-        # 3b. NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation
-        #     (cfgs/DINO/MY_SRC/stpmlf.F90:578 -> :754-765).  Position is
-        #     NEMO's: after dyn_zdf (:396, stage 3 above) and before the
-        #     Asselin filter (dyn_atf_qco, :613, stage 5 below).  Selected by
-        #     ``BarotropicConfig.barotropic_after_reconcile``; "off" (the
-        #     default) skips it entirely and is BIT-IDENTICAL.
-        #
-        #     The target installed is ``btu_exp``/``btv_exp`` -- the depth mean
-        #     the barotropic solve produced, i.e. whichever substep average
-        #     ``barotropic_reconcile_target`` selected.  Under "velocity_avg"
-        #     that is NEMO's ``uu_b(Kaa)`` and this call is NEMO's line
-        #     verbatim; under "transport_avg" it is the card's secondary
-        #     average enforced in NEMO's slot.  The two fields are orthogonal
-        #     on purpose -- see the config docstring.
-        #
-        #     WHAT THIS CHANGES, so it is not read as cosmetic: the enforced
-        #     column mean moves from the NOW-level thickness (which is what the
-        #     combine's own ``h_u``/``h_v`` split above pins) to the AFTER-level
-        #     thickness NEMO divides by, and any depth-mean the implicit
-        #     vertical solve deposited is discarded rather than kept.
-        _after_recon = validate_after_reconcile(
-            self.config.barotropic.barotropic_after_reconcile)
-        if _after_recon == "nemo_mlf_baro_corr":
-            # AFTER-level (Kaa) thicknesses: naa.eta is the barotropic solve's
-            # after ssh, the same level ``e3t_aft`` is built from below.
-            _h_k_aa = compute_layer_thickness(
-                naa.eta.data, state.H_bathy.data, self.z_coord,
-                min_water_column_m=self.config.min_water_column_m)
-            _u_rec = after_level_column_mean_reconcile(
-                naa.u.data, min_cell_to_uface(_h_k_aa), btu_exp,
-                u_mask3, 1.0e-10)
-            _u_rec = _u_rec.at[:, -1].set(_u_rec[:, 0])   # periodic-lon wrap
-            _v_rec = after_level_column_mean_reconcile(
-                naa.v.data, min_cell_to_vface(_h_k_aa, _grid), btv_exp,
-                v_mask3, 1.0e-10)
-            naa = naa._replace(u=naa.u.replace(data=_u_rec),
-                               v=naa.v.replace(data=_v_rec))
+        # 3b. NEMO ``mlf_baro_corr`` (see ``_apply_after_level_reconcile``),
+        #     at NEMO's position: after the implicit vertical solve above and
+        #     before the Asselin filter below. ONE implementation, called from
+        #     both outer-step paths. "off" (the default) is bit-identical.
+        naa = self._apply_after_level_reconcile(
+            naa, state, btu_exp, btv_exp, u_mask3, v_mask3, _grid)
 
         # 4. Conservation fixer on the final after-state.
         if self.config.use_conservation_fixer:

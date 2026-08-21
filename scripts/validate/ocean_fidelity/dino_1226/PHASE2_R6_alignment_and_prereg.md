@@ -168,3 +168,112 @@ while the 19 kernel/config tests still pass.
 grow-only baseline.
 
 ---
+
+# AMENDMENT — written after the first A/B ran, BEFORE the replacement 2x2
+
+Committed separately from everything above; the pre-registration text is
+unedited (git history proves the order).  This amendment exists because DUAL
+ADVERSARIAL REVIEW found two defects in the EXPERIMENT, not in the kernel, and
+both change what the arms mean.  The first A/B's numbers are reported as
+SUPERSEDED, not quietly dropped.
+
+## What the reviews found
+
+**(1) NEITHER of the first two arms is NEMO.**  The card resolves
+`barotropic_reconcile_target="transport_avg"`, and the pre-registration pinned
+it there on both arms to keep one variable.  But `transport_avg` is legoESM's
+analogue of NEMO's `un_adv/hu` — the average NEMO installs only TRANSIENTLY at
+`dynspg_ts.F90:1172` and then DELETES again at `stpmlf.F90:788`.  What NEMO
+COMMITS at site 2 is `uu_b(Kaa)`, its primary velocity-weighted boxcar, which
+is legoESM's `velocity_avg`.  So arm B put NEMO's placement around the average
+NEMO throws away, and the faithful pair — `velocity_avg` +
+`nemo_mlf_baro_corr` — was never run.  The two fields COMPOSE; treating them as
+orthogonal was the error.
+
+**(2) THE "AFTER-LEVEL THICKNESS" IS A NO-OP IN NEMO, ALGEBRAICALLY.**  DINO
+builds with `key_qco` (`cpp_DINO.fcm`).  Its substitutions
+(`WORK/domzgr_substitute.h90:127,137,46,51`) are
+
+    e3u(i,j,k,t)  ->  e3u_0(i,j,k) * (1 + r3u(i,j,t)*umask(i,j,k))
+    r1_hu(i,j,t)  ->  r1_hu_0(i,j) / (1 + r3u(i,j,t))
+
+so in `zue * r1_hu(Kaa)` the `(1+r3u(Kaa))` appears once in the sum and once
+inverted in the divisor and CANCELS EXACTLY.  NEMO's reconciliation is
+TIME-LEVEL INDEPENDENT and weights by the fixed reference ladder `e3u_0/hu_0`.
+Verified in the macro file directly, not taken from the review.
+
+Consequences, all recorded as RETRACTIONS:
+
+* **RETRACTED** — "legoESM ... uses the now-level column thickness for an
+  after-level update" as a FIDELITY GAP.  There is no after-level thickness in
+  NEMO's site 2 to be wrong about.
+* **RETRACTED** — the kernel's original "AFTER-level thickness" weighting.  It
+  has been changed to the REFERENCE ladder, which is what NEMO uses.  Under
+  pure z-star the two agree to roundoff (a column-uniform rescale leaves a
+  weighted mean invariant — now gated by its own test); under PARTIAL CELLS
+  they differ, because `min`-of-scaled is not `scale`-of-min, and that
+  difference was a legoESM-only artifact rather than fidelity.
+* **STANDS** — the option's real content: NEMO DISCARDS the implicit vertical
+  solve's column-mean deposit every step and legoESM keeps a residue of it.
+  Independently measured at ~99.8% of the option's effect.
+
+**(3) The `+0.296` residue's CAUSE is not established.**  R6-d(ii) named the
+floor/weighting difference as if it were measured.  At least three mechanisms
+contribute and no measurement here separates them: (a) the implicit solve
+interpolates cell thicknesses to faces with an ARITHMETIC mean where the
+repo's own operator docstring says a partial-cell model must use the MIN rule;
+(b) the floor difference as named; (c) in-matrix bottom drag, which makes the
+solve genuinely non-mean-preserving rather than merely re-weighted.  The
+attribution is downgraded to PLAUSIBLE and (a) is named as a candidate
+legoESM defect in its own right, not fixed here.
+
+## SUPERSEDED first-A/B result, recorded in full
+
+Arms at `92b2420c0`, kernel weighting by the live after-level thickness,
+`transport_avg` on both.  Both stable to day 90.  Arm A was BIT-IDENTICAL
+(max diff exactly 0.0 over every saved field) to the pre-option twin, so
+"default off is inert" is measured, not argued.
+
+    band-mean deficit      -0.361  ->  -0.186   (48.5% closure)
+    day-90 transport gap   -0.772  ->  -0.394 Sv
+    spin-up captured          75%  ->     87%
+    full-section ACC gap   -0.5965 ->  -0.3042 Sv
+    acceptance gate     PASS 4/FAIL 1 -> PASS 5/FAIL 0
+
+The stage decomposition showed the mechanism exactly: a `POST fixer` row
+appeared that cancels the retained `ZDF bt` row identically in every one of the
+nine windows (+0.210/-0.210 ... +0.335/-0.335), i.e. legoESM reproducing NEMO's
+own discard identity.
+
+These numbers are SUPERSEDED because the kernel's weight changed.  The change
+is expected to move them by ~0.2% (the partial-cell-only part), but "expected"
+is not "measured", which is why the arms are re-run rather than re-labelled.
+
+## The replacement design: a 2x2, and the prediction for it
+
+| arm | `barotropic_reconcile_target` | `barotropic_after_reconcile` | what it is |
+|---|---|---|---|
+| A | `transport_avg` | `off` | the card as shipped — the baseline |
+| B | `transport_avg` | `nemo_mlf_baro_corr` | NEMO's placement, the average NEMO deletes |
+| C | `velocity_avg` | `off` | NEMO's average, no second site |
+| D | `velocity_avg` | `nemo_mlf_baro_corr` | **the faithful pair — this is NEMO** |
+
+All four at the same SHA, same IC, same ladder (`both`), corrected clock, fp64,
+90 days.  A/B and C/D are each a one-variable comparison; A/C and B/D are each
+a one-variable comparison on the other axis.
+
+PREDICTION, recorded before the four arms run:
+
+* **A -> B reproduces** the superseded numbers to within ~0.05 Sv on ACC.  If
+  it does not, the reference-ladder change is bigger than the 0.2% argued and
+  that is itself the finding.
+* **D is the best arm on the acceptance gate**, because it is the only one that
+  is NEMO on both rows.  Falsified if D is worse than B.
+* **The second site (off -> on) dominates the average (transport -> velocity)**:
+  |B-A| and |D-C| are each larger than |C-A| and |D-B|.  This is the direct
+  test of the claim that the discard, not the choice of average, is the
+  mechanism.  Falsified if the averages axis moves more.
+* Both axes are expected to be READABLE (> 0.091 Sv on ACC).  The earlier
+  reconcile-target A/B found the averages axis ALONE was climate-inert at
+  0.087 Sv on a withdrawn stack; if `C-A` reproduces that null on the valid
+  stack, the two lanes finally agree.

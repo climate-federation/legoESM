@@ -8,9 +8,15 @@ site (``cfgs/DINO/MY_SRC/stpmlf.F90:754-765``, called at ``:578`` after
 and, in doing so, discards whatever column mean the implicit vertical solve
 deposited.  This file gates the option that builds it.
 
-Every test here fails when the option's insertion is removed from
-``ocean_model_latlon_cgrid`` or when the kernel stops using the thickness it is
-handed -- checked by reverting, not asserted.
+NON-VACUITY, stated precisely rather than generously.  Reverting the model-side
+insertion makes exactly FOUR of these fail: the two ``test_option_changes_the_
+after_state_on_both_step_paths`` and the two ``test_unknown_scheme_raises_from_
+inside_each_step_path``.  An EARLIER version of this docstring said "every test
+here fails when the insertion is removed" -- that was FALSE and is retracted:
+the dispatch and kernel tests never touch the model, and several step-path
+tests are one-sided assertions that a revert would satisfy.  Each such test now
+carries, in its own body, an assertion that CAN fail on a revert, or a comment
+saying plainly that it cannot.
 """
 
 from __future__ import annotations
@@ -117,15 +123,47 @@ def test_kernel_is_the_identity_when_the_mean_is_already_the_target():
 
 
 def test_kernel_uses_the_THICKNESS_it_is_handed():
-    """The whole point of the option is WHICH time level's thickness weights
-    the mean.  A kernel that ignored ``h_face_after`` would pass every test
-    above and this one is the only one that would catch it."""
-    field, h_now, mask, target = _synthetic(seed=11)
-    h_after = h_now * jnp.asarray(
-        np.random.default_rng(12).uniform(1.05, 1.4, size=h_now.shape))
-    a = after_level_column_mean_reconcile(field, h_now, target, mask, 1.0e-10)
-    b = after_level_column_mean_reconcile(field, h_after, target, mask, 1.0e-10)
+    """A kernel that ignored ``h_face_ref`` would pass every other test here;
+    this is the only one that would catch it.  Note the perturbation is
+    DEPTH-VARYING on purpose -- a column-uniform rescale leaves a weighted mean
+    invariant, which is exactly why NEMO's free-surface factor cancels."""
+    field, h_ref, mask, target = _synthetic(seed=11)
+    h_other = h_ref * jnp.asarray(
+        np.random.default_rng(12).uniform(1.05, 1.4, size=h_ref.shape))
+    a = after_level_column_mean_reconcile(field, h_ref, target, mask, 1.0e-10)
+    b = after_level_column_mean_reconcile(field, h_other, target, mask, 1.0e-10)
     assert np.max(np.abs(np.asarray(a - b))) > 1e-3
+
+
+def test_kernel_is_invariant_to_a_column_uniform_thickness_rescale():
+    """NEMO's own reconciliation is TIME-LEVEL INDEPENDENT: under ``key_qco``
+    the ``(1+r3u)`` free-surface factor multiplies ``e3u`` and divides
+    ``r1_hu``, so it cancels (``domzgr_substitute.h90:127,137``).  The kernel
+    must inherit that: scaling a whole column's thicknesses by any factor may
+    not change the answer.  This is what makes passing the REFERENCE ladder
+    the faithful choice rather than a live one."""
+    field, h_ref, mask, target = _synthetic(seed=17)
+    fac = jnp.asarray(
+        np.random.default_rng(18).uniform(1.02, 1.6,
+                                          size=h_ref.shape[:-1]))[..., None]
+    a = after_level_column_mean_reconcile(field, h_ref, target, mask, 1.0e-10)
+    b = after_level_column_mean_reconcile(field, h_ref * fac, target, mask,
+                                          1.0e-10)
+    assert np.max(np.abs(np.asarray(a - b))) < 1e-13
+
+
+def test_kernel_ignores_a_poisoned_masked_cell():
+    """NEMO masks the VELOCITY inside its sum (``* umask(ji,jj,jk)``).  Without
+    that, ``0 * NaN`` is NaN and one dry cell would poison the whole column."""
+    field, h_ref, mask, target = _synthetic(seed=19)
+    clean = after_level_column_mean_reconcile(field, h_ref, target, mask,
+                                              1.0e-10)
+    poisoned = jnp.where(mask > 0, field, jnp.nan)
+    out = after_level_column_mean_reconcile(poisoned, h_ref, target, mask,
+                                            1.0e-10)
+    wet = np.asarray(mask) > 0
+    assert np.all(np.isfinite(np.asarray(out)[wet]))
+    assert np.max(np.abs(np.asarray(out - clean)[wet])) < 1e-13
 
 
 def test_kernel_difference_is_depth_uniform_on_wet_columns():
@@ -222,6 +260,11 @@ def test_the_change_is_a_column_mean_replacement_and_nothing_else(method, outer)
     on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
                       dino_drag=True)
     du = np.asarray(on.u.data - off.u.data)
+    # WITHOUT this line the test passes on du == 0 -- i.e. it would survive the
+    # option being removed entirely, proving nothing. ``checked > 10`` below
+    # counts multi-level wet COLUMNS, which exist either way; it guards against
+    # an empty loop, not against a no-op.
+    assert np.max(np.abs(du)) > 1e-6, "nothing moved -- this test is vacuous"
     wet = (np.abs(np.asarray(off.u.data)) + np.abs(np.asarray(on.u.data))) > 0
     checked = 0
     for j in range(du.shape[0]):
@@ -257,21 +300,61 @@ def test_unknown_scheme_raises_from_inside_each_step_path(method, outer):
     with pytest.raises(ValueError, match="barotropic_after_reconcile"):
         getattr(model, method)(s1, _DT)
 
+def test_zstar_makes_the_after_thickness_half_a_no_op():
+    """A MEASURED BOUND on what this option can own -- asserted DIRECTLY.
 
-@pytest.mark.parametrize("method,outer", _PATHS)
-def test_inert_on_pure_zstar_without_partial_cells(method, outer):
-    """A MEASURED BOUND on what this option can own, not a convenience.
-
-    Under a pure z-star coordinate every layer in a column rescales by the SAME
-    factor ``(H+eta)/H``, and the min-rule face depth inherits that, so a
+    Under a pure z-star coordinate every layer in a column rescales by the same
+    ``(H+eta)/H``, and the min-rule face depth inherits that, so a
     thickness-weighted column mean is INVARIANT between the now and after
-    levels.  The after-thickness half of the reconciliation is therefore
-    exactly a no-op there, and the option can only bite through partial cells
-    or through a column mean the implicit vertical solve deposited.  If this
-    ever starts failing, the geometry argument above has changed and any
-    ownership claim resting on it must be re-checked.
+    levels.  The after-thickness half of the reconciliation is therefore a
+    no-op there, and the option can only bite through partial cells or through
+    a column mean the implicit vertical solve deposited.
+
+    An EARLIER version of this test asserted a whole-STEP null (option on vs
+    off, no partial cells) and is RETRACTED: it differed in TWO variables at
+    once, and -- fatally -- it passed just as well if the option never ran at
+    all.  This asserts the geometric identity itself, on the two thicknesses,
+    with no step involved: it fails if the z-star rescale ever stops being
+    column-uniform, and it cannot be satisfied by the feature being absent.
     """
-    off = _second_step(method, outer=outer, after="off", partial=False)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      partial=False)
-    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) < 1e-14
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, compute_layer_thickness,
+    )
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+
+    ny, nx, nz, H = 8, 16, 5, 3000.0
+    grid = create_latlon_grid(n_lat=ny, n_lon=nx)
+    z0c = create_ocean_z_star(n_levels=nz, H_max=H)
+    # deliberately NON-flat bathymetry: the min-rule face depth chooses between
+    # neighbouring columns level by level, which is exactly where a non-uniform
+    # rescale would show up if one existed.
+    H_bathy = jnp.asarray(
+        np.full((ny, nx), H * 0.62)
+        - 300.0 * np.sin(2 * np.pi * np.arange(nx) / nx)[None, :] ** 2)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z0c, T_water_init_C=10.0, T_deep=10.0, S_uniform=35.0,
+        H_bathy_override=H_bathy)
+    rng = np.random.default_rng(5)
+    u = jnp.asarray(rng.normal(size=np.asarray(state.u.data).shape))
+    h0 = min_cell_to_uface(compute_layer_thickness(
+        jnp.zeros((ny, nx)), H_bathy, z0c, min_water_column_m=1.0))
+    mask = jnp.asarray(np.asarray(h0) > 0)
+
+    eta_now = jnp.asarray(rng.uniform(-0.5, 0.5, size=(ny, nx)))
+    eta_aft = eta_now + jnp.asarray(rng.uniform(0.05, 0.4, size=(ny, nx)))
+    means = []
+    for eta in (eta_now, eta_aft):
+        h_u = min_cell_to_uface(compute_layer_thickness(
+            eta, H_bathy, z0c, min_water_column_m=1.0))
+        hw = jnp.where(mask, h_u, 0.0)
+        means.append(np.asarray(
+            jnp.sum(hw * u, axis=-1)
+            / jnp.maximum(jnp.sum(hw, axis=-1), 1.0e-10)))
+    spread = float(np.max(np.abs(means[0] - means[1])))
+    assert spread < 1e-13, (
+        "the z-star column rescale is no longer column-uniform "
+        f"(|mean_now - mean_after| = {spread:.3e}); the after-thickness half "
+        "of barotropic_after_reconcile is then NOT a no-op under pure z-star, "
+        "and every bound quoted against that fact must be re-measured")

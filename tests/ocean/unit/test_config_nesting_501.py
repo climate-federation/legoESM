@@ -131,11 +131,12 @@ def test_from_flat_both_flat_and_nested_is_loud():
 def test_barotropic_is_nested_not_flat():
     top = set(LatLonCGridOceanConfig._fields)
     assert "barotropic" in top
-    # 31 = 22 (PR2 baseline) + 9 fields added since (pin had drifted; found
+    # 32 = 22 (PR2 baseline) + 10 fields added since (pin had drifted; found
     # red at 28 before barotropic_een_seed, #1226 item 4, made it 29; then a
     # pre-existing +1 on this branch put it at 30; +barotropic_reconcile_target
-    # (NEMO dyn_spg_ts N6) makes it 31).
-    assert len(BarotropicConfig._fields) == 31
+    # (NEMO dyn_spg_ts N6) makes it 31; +barotropic_after_reconcile (NEMO
+    # mlf_baro_corr, stpmlf.F90:754-765) makes it 32).
+    assert len(BarotropicConfig._fields) == 32
     for f in _BT:
         assert f not in top, f"{f} must be nested, not a top-level field"
         assert f in BarotropicConfig._fields

@@ -321,12 +321,12 @@ def validate_after_reconcile(scheme: str) -> str:
 
 def after_level_column_mean_reconcile(
     field: jnp.ndarray,
-    h_face_after: jnp.ndarray,
+    h_face_ref: jnp.ndarray,
     target_mean: jnp.ndarray,
     face_mask3: jnp.ndarray,
     min_water_col: float,
 ) -> jnp.ndarray:
-    """NEMO ``mlf_baro_corr``'s after-level reconciliation, as one kernel.
+    """NEMO ``mlf_baro_corr``'s committed reconciliation, as one kernel.
 
     Transcribed from ``cfgs/DINO/MY_SRC/stpmlf.F90:754-765`` (the build that
     ran; ``src/OCE`` differs and its line numbers do not apply)::
@@ -336,25 +336,47 @@ def after_level_column_mean_reconcile(
            &                - zue(ji,jj) * r1_hu(ji,jj,Kaa)
            &                + uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)
 
-    i.e. replace the column's OWN depth mean, formed with the **AFTER**-level
-    face thicknesses and divided by the **AFTER**-level face column depth, by
+    i.e. replace the column's own thickness-weighted depth mean by
     ``target_mean``.
+
+    WHICH THICKNESS, and why it is the REFERENCE one (this is not obvious from
+    the Fortran, and reading it as written gets it wrong).  Those two lines
+    LOOK like they weight at the after time level, ``Kaa``.  They do not.  DINO
+    builds with ``key_qco`` (``cpp_DINO.fcm``), whose substitutions
+    (``WORK/domzgr_substitute.h90:127,137,46,51``) are::
+
+        e3u(i,j,k,t)  ->  e3u_0(i,j,k) * (1 + r3u(i,j,t)*umask(i,j,k))
+        r1_hu(i,j,t)  ->  r1_hu_0(i,j) / (1 + r3u(i,j,t))
+
+    On a wet cell ``umask = 1``, so the ``(1 + r3u(Kaa))`` factor is CONSTANT
+    over ``k`` within a column and appears once in the sum and once, inverted,
+    in the divisor.  It CANCELS EXACTLY::
+
+        zue * r1_hu(Kaa) = SUM_k( e3u_0 * u * umask ) / hu_0
+
+    So NEMO's reconciliation is INDEPENDENT OF THE TIME LEVEL and weights by
+    the fixed REFERENCE ladder ``e3u_0 / hu_0``.  This kernel therefore takes
+    the reference face thickness, not a live one.  RETRACTED 2026-08-21: an
+    earlier revision of this kernel took the live AFTER-level thickness and its
+    docstring called that "the after-level thickness NEMO divides by".  That
+    was a true reading of the Fortran text and a false reading of its
+    arithmetic; under partial cells it also differed from NEMO, because
+    ``min``-of-scaled-thicknesses is not ``scale``-of-min-thicknesses.
 
     Parameters
     ----------
     field
         3-D face velocity at the after level, ``(..., nlev)``.
-    h_face_after
-        Face-cell thicknesses at the AFTER level (NEMO ``e3u(:,:,:,Kaa)``).
-        Passing a NOW-level thickness here silently reproduces the very
-        convention this kernel exists to change, so the caller names the time
-        level; this function cannot check it.
+    h_face_ref
+        REFERENCE face-cell thicknesses (NEMO ``e3u_0``), i.e. the ladder with
+        no free-surface scaling applied.  The caller names the ladder; this
+        function cannot check it.
     target_mean
         Depth-uniform mean to install, broadcastable against ``field`` with a
         trailing singleton level axis (NEMO ``uu_b(:,:,Kaa)``).
     face_mask3
-        3-D wet-face mask; NEMO's ``umask``/``vmask`` factor, applied to the
-        result AND to the thicknesses that build the mean.
+        3-D wet-face mask.  NEMO's ``umask`` factor, applied to the velocity
+        INSIDE the sum (as NEMO does), to the thicknesses, and to the result.
     min_water_col
         Divide guard on the summed column depth.  This is the LAND guard (a wet
         column always exceeds it), not a physics clip: NEMO's own divisor adds
@@ -363,18 +385,23 @@ def after_level_column_mean_reconcile(
     Returns
     -------
     jnp.ndarray
-        ``field`` with its after-thickness column mean replaced.  Exactly
-        idempotent in the sense that reapplying it is a no-op to roundoff, and
-        exactly the identity when ``target_mean`` already equals the column's
-        after-thickness mean.
+        ``field`` with its reference-thickness column mean replaced.  Applying
+        it twice agrees with applying it once to roundoff, and it reduces to
+        the identity, to roundoff, when ``target_mean`` already equals the
+        column's own mean.
 
-    Sign/geometry convention: ``h_face_after > 0``, thicknesses sum downward,
-    and no term here changes sign with the z-axis direction — this is a pure
-    weighted-mean replacement, not a flux.
+    Sign/geometry convention: ``h_face_ref > 0``, thicknesses sum downward, and
+    no term changes sign with the z-axis direction -- this is a weighted-mean
+    replacement, not a flux.
     """
-    h = jnp.where(face_mask3 > 0, h_face_after, 0.0)
+    wet = face_mask3 > 0
+    h = jnp.where(wet, h_face_ref, 0.0)
+    # mask the VELOCITY inside the sum too, as NEMO's ``* umask(ji,jj,jk)``
+    # does: ``0 * NaN`` is NaN, so an unmasked land value would poison the
+    # whole column mean rather than being ignored.
+    f = jnp.where(wet, field, 0.0)
     depth = jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), min_water_col)
-    own_mean = jnp.sum(h * field, axis=-1, keepdims=True) / depth
+    own_mean = jnp.sum(h * f, axis=-1, keepdims=True) / depth
     return (field - own_mean + target_mean) * face_mask3
 
 
