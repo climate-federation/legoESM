@@ -76,6 +76,13 @@ def _load_campaign():
 
 camp = _load_campaign()
 
+#: Top of the profile plots [km].  The tuning objective is tropospheric and
+#: everything worth reading -- boundary layer, cloud base, the detrainment
+#: layer -- sits below this; the stratosphere above compresses all of it into
+#: the bottom fifth of the axis.  Axis limit only: the scored data are
+#: unchanged.
+PROFILE_PLOT_TOP_KM = 15.0
+
 DEFAULT_OUTDIR = Path("results/scm_rce_convection_intercomparison")
 # Convection schemes to intercompare (the campaign's convection sweep).
 CONVECTION_SCHEMES = camp.SCHEME_SWEEPS["convection"]
@@ -1113,7 +1120,7 @@ def plot_scheme(path: Path, ref, res: SchemeResult) -> None:
         return
     plt = _plt()
     z_km = ref.z_m / _M_PER_KM
-    ztop = float(np.nanmax(z_km))
+    ztop = min(float(np.nanmax(z_km)), PROFILE_PLOT_TOP_KM)
     fig, axes = plt.subplots(1, 3, figsize=(11.5, 5.0))
     prior_panels = _panels(ref, res.prior)
     tuned_panels = _panels(ref, res.tuned)
@@ -1148,7 +1155,7 @@ def plot_all(path: Path, ref, results: list[SchemeResult]) -> None:
         return
     plt = _plt()
     z_km = ref.z_m / _M_PER_KM
-    ztop = float(np.nanmax(z_km))
+    ztop = min(float(np.nanmax(z_km)), PROFILE_PLOT_TOP_KM)
     n = len(ordered)
     fig, axes = plt.subplots(n, 3, figsize=(11.0, 3.1 * n), squeeze=False)
     for i, res in enumerate(ordered):
