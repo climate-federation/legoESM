@@ -1264,3 +1264,85 @@ Each entry cost something. New sessions read this before touching the port.
     function. Never let the identity be the ONLY gate on an operand group —
     that is what happened to mapz's `delp`, and it took the review to see it.
 
+
+---
+
+## Slice 2 — the disposition, measured (2026-08-21)
+
+"Slice 2 (physics coupling, MPI)" has been carried as one remaining item.
+It is TWO items with completely different justification, and they should stop
+being written on one line.
+
+### MPI: recommend NOT building, and keep the refusal loud
+
+Nothing measured asks for it. The certified lane is six faces of C48 with five
+levels in fp64; it runs in one process inside the memory and walltime of a
+`short` job with room to spare, and no run has been blocked on either. The cost
+is not small: the duo halo exchange is the six-face `ext_scalar` / `ext_vector`
+machinery over the full stack, so a decomposition means a duo-grid port of
+what FMS `mpp_domains` does, plus a second correctness ladder (unsharded vs
+sharded, single-rank vs MPI) for a lane whose whole value is bitwise-level
+faithfulness. That is a large, high-risk build against a demand nobody has
+stated.
+
+The refusals stay where they are — `component_factory.py` and the driver lane
+both raise on `distributed` — and they are already loud and specific. The
+entry to revisit this is a MEASUREMENT: a configuration that does not fit, or
+a wall-clock that blocks a science question. Until one exists, this is the
+speculative-need case.
+
+### Physics coupling: real, and the estimate changed after reading the source
+
+This is the campaign's own one-line gap ("certified but not runnable as a
+model"). Four findings, each read in the pinned tree, and two of them move the
+estimate in opposite directions.
+
+1. **The oracle for it can be BUILT, and cheaply.** `fv_phys` (the solo
+   driver's physics) runs whenever `adiabatic = .false.`
+   (`driver/solo/atmosphere.F90:474`), and the Held-Suarez tendencies inside it
+   are gated on `flagstruct%do_Held_Suarez` (`driver/solo/fv_phys.F90:533`) —
+   a namelist flag, not a compile-time one. So a physics-coupled reference deck
+   is two `set_key` edits away, and deck generation is already a tested tool.
+   `do_strat_HS_forcing` is NOT that gate; it is an argument
+   (`fv_phys.F90:539`), which is the same reading error this campaign made once
+   before about the moist deck.
+2. **The wind half is much smaller than it looks.** `update_dwinds_phys`
+   (`model/fv_grid_utils.F90:3363-3547`) is 185 lines, but four of its blocks
+   are guarded on `.not. gridstruct%bounded_domain`, and the duo grid FORCES
+   `bounded_domain = .true.` (`model/fv_arrays.F90:1512`:
+   `regional .or. nested .or. duogrid`). With `grid_type = 0` the live duo path
+   is: rotate the A-grid tendency into a 3-vector with `vlon`/`vlat`, average to
+   cell edges, project onto `es`/`ew`. About 25 lines.
+3. **The scalar half is smaller still, on this deck.** `fv_update_phys`'s live
+   path at `nwat = 0`, `moist_phys = .false.`, `hydrostatic = .false.`,
+   `phys_hydrostatic = .false.` is: advance the tracers, leave `delp` alone
+   (the mass adjustment is multiplication by 1), advance `pt` by
+   `t_dt * dt * cp_air/cv_air` (`model/fv_update_phys.F90:202-205, 396-400`),
+   advance the A-grid winds, then rebuild `pe`/`peln`/`pk`/`ps`. Roughly 60
+   lines. Everything else in that 897-line file is nudging, nesting, diagnostics
+   and moist arms that this deck does not reach.
+4. **THE ACTUAL COST IS GRID MACHINERY THE PORT HAS NEVER NEEDED.** The port's
+   `gridstruct` carries no `vlon`, `vlat`, `es`, `ew`, `a11..a22`, `ec1`, `ec2`
+   — check the key list in `grids/fv3_native_gridstruct.py`. That is not an
+   oversight: the dycore works entirely in grid-relative wind components and
+   never forms a lat-lon A-grid wind, so physics coupling is the FIRST consumer
+   of any of it. These are built from the corner points by cross products and
+   normalisation (`fv_grid_utils.F90:663-684`) and from the cell centres by
+   `unit_vect_latlon` (`:2286-2309, 2362`), so they are not hard — but they are
+   new grid state, and on this campaign's rules new grid state gets its own
+   oracle extract before anything is built on top of it.
+
+There is also one thing that must be MEASURED rather than assumed: before the
+D-grid projection the reference fills a one-cell halo of the A-grid tendencies
+with a plain domain update (`fv_update_phys.F90:640-650`), and there is no
+`duogrid` branch anywhere in that file. What the duo build actually puts in
+those halo cells decides whether the port uses the duo scalar exchange there or
+something else, and it is exactly the kind of seam that has cost this campaign
+measurements before.
+
+**Proposed order, each step certifiable on its own:** grid vectors + their
+oracle extract; `update_dwinds_phys`; `fv_update_phys`'s dry path; the A-grid
+tendency halo, measured; then a `do_Held_Suarez = .true.` deck for an
+end-to-end one-step parity; then the driver wiring, which is where the physics
+refusal in `component_factory.py` finally narrows. The JAX twin follows the
+NumPy authority, as everywhere else in this port.
