@@ -1765,11 +1765,15 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "+0=0.997559, +1=0.906048); corr 0.997559/ratio 0.996197 "
                                                               "(avt) and corr 0.997559/ratio 0.996196 (avm, "
                                                               "indistinguishable). UNCHANGED."),
-    # legoESM cannot RUN on NEMO's true vertical grid: LEGOESM_NEMO_E3T
-    # defaults to "off" (the wrong e3t_1d ladder) because "both" destabilises
-    # multi-day runs (max|u| 0.66 -> 3 m/s). This is a real defect, and it is
-    # why every fidelity probe must set the env var explicitly -- it has
-    # contaminated three measurements so far.
+    # LEGOESM_NEMO_E3T defaults to "off" (the 1-D e3t_1d ladder) model-wide.
+    # The recorded reason -- that "both" destabilises multi-day runs, max|u|
+    # 0.66 -> 3 m/s -- DID NOT REPRODUCE on 2026-08-21: four 90-day twin arms
+    # from the day-180 restart, differing only in this variable, all ran stable
+    # at 0.633-0.635 m/s peak speed (#1455). It is now an unexplained recorded
+    # observation, not an established defect. What is unchanged is WHY every
+    # fidelity probe must still set the variable explicitly: an inherited
+    # default has contaminated four measurements so far (the count in
+    # precision_gate; this comment previously said three).
     # BLOCKER (2026-07-28, CLOSED): z_coord.t_depth_ref was a 1-D-ladder-ONLY
     # API, so a per-column live gdept_0*(1+r3t) could not be expressed for the
     # PGF (eos_geometric_depth_1d) or ldf_slp (compute_nemo_native_slopes'
@@ -1794,9 +1798,11 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "STABLE on NEMO's true ladder: LEGOESM_NEMO_E3T=both, nemo_dino_kamm_mlf, "
         "5 full years (1800 d, 57600 steps) completed with T in [3.5,26.3] C and "
         "max|u_surf| 0.52 m/s -- no growth (dino_year_screen_fullframe.py). The "
-        "documented blow-up (max|u| 0.66 -> 3 m/s over 20 d) is specific to "
-        "starting FROM A NEMO RESTART, not to the ladder itself, so the scope of "
-        "that defect is narrower than recorded. Ladders are IDENTICAL for k=0..24 "
+        "documented blow-up (max|u| 0.66 -> 3 m/s over 20 d) was thought to be "
+        "specific to starting FROM A NEMO RESTART; SUPERSEDED 2026-08-21 -- four "
+        "90-day arms started from exactly such a restart were all stable at "
+        "0.633-0.635 m/s, so that scoping no longer holds either and the blow-up "
+        "is simply unreproduced (#1455). Ladders are IDENTICAL for k=0..24 "
         "(top 913 m) and differ only below ~1000 m (up to +15%): NEMO's e3t_0 is "
         "the FINITE-DIFFERENCE gdepw(k+1)-gdepw(k) (ln_e3_dep), e3t_1d the "
         "analytic derivative. CLIMATE EFFECT MEASURED, controlled (same script, "

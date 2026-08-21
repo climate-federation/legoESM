@@ -631,21 +631,47 @@ def test_build_twin_state_does_not_resolve_the_ladder(instruments):
 def test_build_twin_state_defaults_to_the_bridges_own_resolution(instruments):
     """... and its e3t_mode default must stay None, which is what makes the
     unchanged-for-siblings claim true."""
+    import ast
     import inspect
+    import textwrap
     sig = inspect.signature(instruments.kamm_twin_90d._build_twin_state)
     assert sig.parameters["e3t_mode"].default is None
     src = inspect.getsource(instruments.kamm_twin_90d._build_twin_state)
     assert "e3t_mode=e3t_mode" in src               # forwarded to the bridge
+    # ... and nothing may rebind it on the way. A single `e3t_mode = None` above
+    # the call leaves that substring intact while the twin builds the 1-D ladder
+    # AND stamps "both" into the artifact -- provenance that lies, which is worse
+    # than the sweep bug this whole guard family exists for.
+    fn = ast.parse(textwrap.dedent(src)).body[0]
+    assert not [n for n in ast.walk(fn) if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Store) and n.id == "e3t_mode"], \
+        "e3t_mode is a parameter and must reach the bridge unmodified"
 
 
 def test_bridge_accepts_an_explicit_ladder_and_defaults_to_none(instruments):
     """The argument channel the twin now uses instead of the environment."""
+    import ast
     import inspect
+    import textwrap
 
     from legoesm.ocean.fidelity import nemo_state_bridge
     fn = nemo_state_bridge.bridge_nemo_to_legoesm_topo
     assert inspect.signature(fn).parameters["e3t_mode"].default is None
-    assert "mode=e3t_mode" in inspect.getsource(fn)
+    src = inspect.getsource(fn)
+    assert "mode=e3t_mode" in src
+    tree = ast.parse(textwrap.dedent(src)).body[0]
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+                and isinstance(n.ctx, ast.Store) and n.id == "e3t_mode"], \
+        "e3t_mode must reach effective_vertical_scale_factors unmodified"
+
+
+def test_bridge_rejects_an_unknown_ladder_at_entry(instruments):
+    """A typo must stop the call, not surface ~180 lines in once the geometry
+    is already built. Passing None (the default) must NOT raise."""
+    from legoesm.ocean.fidelity import nemo_state_bridge
+    with pytest.raises(ValueError, match="unknown e3t_mode"):
+        nemo_state_bridge.bridge_nemo_to_legoesm_topo(
+            None, None, e3t_mode="e3t")
 
 
 def test_run_twin_resolves_the_ladder_before_building_the_bridge(instruments):
@@ -729,7 +755,7 @@ def test_main_threads_the_legacy_flag_into_run_twin(instruments):
 
 def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
                                                                  monkeypatch,
-                                                                 capsys):
+                                                                 capsys, request):
     """intent (e): the acceptance gate PRINTS the stamped ladder and never
     refuses on it -- and prints it before the seasonal-clock refusal, so a
     refused candidate still records which grid it ran on.
@@ -748,7 +774,11 @@ def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
     monkeypatch.syspath_prepend(str(_dir.parent))
     monkeypatch.syspath_prepend(str(_dir))
     gate = importlib.import_module("acceptance_gate_90d")
-    monkeypatch.delitem(sys.modules, "acceptance_gate_90d")   # never leave the stub
+    # POP at teardown, not monkeypatch.delitem: delitem RESTORES the value on
+    # undo, which would put the module built against the fake acc_thermal_wind
+    # (its DINO paths frozen at import time) back into sys.modules for every
+    # test that runs after this one.
+    request.addfinalizer(lambda: sys.modules.pop("acceptance_gate_90d", None))
 
     stamped = tmp_path / "stamped.npz"
     np.savez(stamped, nemo_ladder_mode=np.str_("both"),

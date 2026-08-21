@@ -156,8 +156,12 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
             'fidelity comparison wants) or "off" (the 1-D ladder) -- and say '
             "which in the report."
         )
-    if mode not in ("off", "e3t_only", "gdept_only", "both"):
+    # The accepted set comes from the bridge that enforces it, never re-listed
+    # here: a gate that accepted a mode the bridge rejects would pass the typo
+    # straight through to grid construction.
+    from legoesm.ocean.fidelity.nemo_state_bridge import NEMO_E3T_MODES
+    if mode not in NEMO_E3T_MODES:
         raise ValueError(
-            f"{context}: unknown LEGOESM_NEMO_E3T={mode!r}; expected "
-            '"off", "e3t_only", "gdept_only" or "both"')
+            f"{context}: unknown LEGOESM_NEMO_E3T={mode!r}; expected one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     return mode

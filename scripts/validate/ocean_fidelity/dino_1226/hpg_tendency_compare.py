@@ -142,10 +142,13 @@ def nemo_istate_case4(gdept: np.ndarray, gphit: np.ndarray,
 
     ``gdept`` is the depth NEMO ACTUALLY passes as ``pdept`` -- the 3-D
     ``gdept_0``, broadcastable to ``tmask``.  Using the 1-D ``gdept_1d`` ladder
-    here is WRONG for DINO: the two diverge by up to 105 m below ~2000 m
-    (``e3t_1d`` is the unstretched analytic ladder summing to 4506.375 m,
-    ``e3t_0`` is stretched to the 4000 m domain depth), which feeds straight
-    into T, S and therefore into the PGF being measured.
+    here is WRONG for DINO: the two T-depth ladders first part at k=26
+    (``gdept_1d`` = 1225 m -- not the "~2000 m" this note used to say) and
+    diverge by up to 105.0 m at k=32.  ``e3t_1d`` is the unstretched analytic
+    ladder and ``e3t_0`` is stretched, but they sum to the SAME 4000.000 m over
+    the wet levels, so the difference is a redistribution of thickness rather
+    than a change of domain depth (re-measured 2026-08-21, #1455).  It feeds
+    straight into T, S and therefore into the PGF being measured.
 
     The blend anchors follow NEMO exactly (usrdef_istate.F90:153-176):
 

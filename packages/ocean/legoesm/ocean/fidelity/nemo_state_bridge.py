@@ -314,9 +314,10 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     # (2026-08-21) is scoped strictly to bridged DINO twin runs:
     # scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py resolves this
     # variable to "both" when nothing sets it, on the argument that a twin only
-    # isolates SCHEME differences if both models stand on the same grid. It
-    # writes the resolved mode back into this environment variable and stamps it
-    # into its output, and an explicit LEGOESM_NEMO_E3T still wins there. See
+    # isolates SCHEME differences if both models stand on the same grid. It does
+    # NOT write this environment variable -- it passes the resolved mode down as
+    # the ``e3t_mode`` argument and stamps it into its output. An explicit
+    # LEGOESM_NEMO_E3T still wins there. See
     # kamm_twin_90d.resolve_ladder_mode and
     # scripts/validate/ocean_fidelity/dino_1226/d180_step_walk.py for the
     # measurements, the retractions attached to them, and the discriminating run
@@ -452,15 +453,6 @@ def bridge_nemo_to_legoesm_topo(
       :func:`create_latlon_geometry` (``lat_1d``/``lon_1d`` from ``gphit``/``glamt``,
       exact meridional faces from ``gphiv``).  The built ``dx_T``/``f_T`` match
       NEMO's ``e1t``/``ff_t`` by construction (verified to ``f_rtol``).
-    ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
-    :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
-    behaviour every existing caller keeps) falls back to the ``LEGOESM_NEMO_E3T``
-    environment variable and, failing that, to the 1-D reference ladder. Passing
-    it EXPLICITLY is strictly better for a caller that knows what it wants: it
-    removes the need to mutate a process-global variable that this function and
-    every concurrent caller share, and it lets two different ladders be built in
-    one process without either one silently inheriting the other's setting.
-
     * **Full-step-z topography** (``ln_zco``, ``ln_zps=F``): a per-column bottom
       depth ``H_bathy`` from the 3-D ``tmask`` (no partial cells), so bowl / ridge
       / sill bathymetry is represented.  The guard below checks mask TOPOLOGY only
@@ -507,12 +499,38 @@ def bridge_nemo_to_legoesm_topo(
         the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
         which reads ``geom.f_T`` (unaffected by this flag).
 
+    ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
+    :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
+    behaviour every existing caller keeps) falls back to the ``LEGOESM_NEMO_E3T``
+    environment variable and, failing that, to the 1-D reference ladder. Passing
+    it EXPLICITLY is strictly better for a caller that knows what it wants: it
+    removes the need to mutate a process-global variable that this function and
+    every concurrent caller share, and it lets two different ladders be built in
+    one process without either one silently inheriting the other's setting.
+
+    PARTIAL-CELL CAVEAT, worth knowing before selecting a mode: the
+    horizontal-spread guard that rejects an ``ln_zps`` grid lives past the
+    ``"off"`` early return, so ``"off"`` accepts a partial-cell mesh_mask
+    silently while ``"e3t_only"``, ``"gdept_only"`` and ``"both"`` all raise on
+    it. Selecting NEMO's own ladders therefore ADDS a guard rather than removing
+    one; ``"off"`` is the mode that still relies on the caller's ``ln_zps=F``
+    promise.
+
     Raises
     ------
     ValueError
         If ``gphiv`` is missing, the bathymetry is not full-step, or the built
         Coriolis does not match NEMO ``ff_t`` to ``f_rtol``.
+        Also if ``e3t_mode`` is not ``None`` or one of ``NEMO_E3T_MODES``
+        (checked at entry, before any geometry is built).
     """
+    # Validate HERE, on the static argument, rather than ~180 lines further in
+    # when the vertical grid is built: a typo should stop the call, not surface
+    # after the geometry has been constructed.
+    if e3t_mode is not None and e3t_mode not in NEMO_E3T_MODES:
+        raise ValueError(
+            f"unknown e3t_mode {e3t_mode!r}; expected None or one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
     # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
     # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed

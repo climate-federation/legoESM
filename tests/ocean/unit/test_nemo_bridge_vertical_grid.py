@@ -79,10 +79,14 @@ def test_nemogrid_carries_e3t_0_optionally():
 def test_prefers_e3t_0_over_the_1d_ladder():
     """With mode="both" the helper returns NEMO's ACTUAL scale factors.
 
-    NOTE the shipped DEFAULT is mode="off" (the 1-D ladder): adopting e3t_0 is
-    geometrically correct but currently DESTABILISES the model (see the
-    docstring in nemo_state_bridge). These tests pin the correct behaviour so it
-    is ready the moment the instability is fixed.
+    NOTE the shipped MODEL-WIDE default is still mode="off" (the 1-D ladder).
+    The reason recorded here used to be that adopting e3t_0 "DESTABILISES the
+    model"; that instability DID NOT REPRODUCE in 2026-08-21 measurements (four
+    90-day twin arms from the day-180 restart, all stable at 0.633-0.635 m/s
+    peak speed, the two end arms confirmed under fp64), so it is now an
+    unexplained recorded observation rather than an established defect -- see
+    the note in nemo_state_bridge. The DINO twin harness already defaults to
+    NEMO's own ladders; these tests pin the behaviour either way.
     """
     from legoesm.ocean.fidelity.nemo_state_bridge import (
         effective_vertical_scale_factors,

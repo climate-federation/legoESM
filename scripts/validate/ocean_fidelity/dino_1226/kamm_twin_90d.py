@@ -400,15 +400,24 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
             print("!! against +0.29 Sv on NEMO's own ladders (#1455). Numbers "
                   "produced here", flush=True)
             print("!! score legoESM on a grid NEMO does not have.", flush=True)
-        else:
-            print("!! Mixed ladders: cells from one ladder, T-points from the "
-                  "other. 'gdept_only'", flush=True)
-            print("!! puts T-points 110.2 m from the centre of the cell they "
-                  "sit in at k=32,", flush=True)
-            print("!! against 11.3 m on 'both' -- NEMO's own T-points are not "
-                  "cell centres", flush=True)
-            print("!! either, so 'both' is offset too, just 10x less (#1455).",
-                  flush=True)
+        elif mode == "gdept_only":
+            print("!! Mixed ladders: cells from the 1-D thickness ladder, "
+                  "T-points from NEMO's.", flush=True)
+            print("!! Worst level of each grid: this one puts T-points 110.2 m "
+                  "from the centre", flush=True)
+            print("!! of the cell they sit in (at k=32), against 11.3 m on "
+                  "'both' (at k=34).", flush=True)
+            print("!! NEMO's own T-points are not cell centres either, so "
+                  "'both' is offset too --", flush=True)
+            print("!! just 10x less (#1455).", flush=True)
+        else:   # e3t_only
+            print("!! Half ladder: NEMO's thicknesses with the 1-D T-point "
+                  "depths. It carries", flush=True)
+            print("!! the barotropic half of the geometry fix and not the "
+                  "baroclinic half; the", flush=True)
+            print("!! split it rests on was measured at fp32 and is PLAUSIBLE, "
+                  "not confirmed", flush=True)
+            print("!! (#1455).", flush=True)
         print("!" * 78 + "\n", flush=True)
     print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
           f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own thickness "
