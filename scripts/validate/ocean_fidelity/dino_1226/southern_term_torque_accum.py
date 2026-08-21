@@ -261,11 +261,15 @@ from southern_term_torque_matched import (  # noqa: E402  (one term mapping, sha
 
 RDT = 2.0 * DT
 ROWS = list(B.ROWS)
+_GIT_SHA = __import__('subprocess').run(
+    ['git', '-C', _DIR, 'rev-parse', 'HEAD'],
+    capture_output=True, text=True).stdout.strip()
 
 # ---------------------------------------------------------- THE GATE METRIC --
 # #1455 SG-C: the rows above are the CIRCULATION reducer (sum_i e1u * sum_k
 # e3u_0), which is a ZONAL integral.  The acceptance gate's ACC number is a
-# MERIDIONAL one -- ``acc_thermal_wind.acc_full``: per longitude i, sum over
+# MERIDIONAL one (a different linear functional of the same field, not an
+# orthogonal one -- the word was doing rhetorical work) -- ``acc_thermal_wind.acc_full``: per longitude i, sum over
 # EVERY row j and level k of u * e3t_1d * e2u, then the MEDIAN over longitudes
 # 2..-2, in Sv.  The two reductions are orthogonal and a row-circulation table
 # cannot decompose an ACC gap.  So the same stage increments are reduced a
@@ -590,6 +594,45 @@ def main(argv=None):
     Rnow_series = np.zeros((n_int + 1, NY))           # the NOW level's R
     i_plant = COMPS.index("KE_PGF_u")
 
+    # ---- STATIC GRID GATES, run BEFORE the integration.  They are facts
+    #      about the mesh and the slicing, so running them after a 90-day
+    #      loop would cost a full run to catch a one-line indexing error
+    #      (adversarial review, 2026-08-21).
+    # ---- M2 (fails closed): the FULL section really is rows 1..NY-2.
+    _dry = [j for j in (0, B.NY - 1) if A.umask[j].any()]
+    _wetout = [j for j in range(B.NY) if A.umask[j].any()
+               and j not in FULL_ROWS]
+    print(f"  [M2 coverage gate] rows with a wet u-face outside 1..{B.NY - 2}: "
+          f"{_wetout} (must be empty); rows 0/{B.NY - 1} wet: {_dry} (must be "
+          "empty)")
+    if _wetout or _dry:
+        raise SystemExit("FATAL M2: the row groups do not cover exactly the "
+                         "wet section the gate metric sums")
+    _cov = sorted(SOUTH_ROWS + CHAN_ROWS + NORTH_ROWS)
+    if _cov != FULL_ROWS or len(set(_cov)) != len(_cov):
+        raise SystemExit("FATAL M2: the three bands are not a PARTITION of the "
+                         "full section")
+
+    # ---- M2b (fails closed): the recorded harness's u-face slice IS the
+    #      gate's.  ``acceptance_gate_90d.load_candidate`` takes lU[:, 1:53, :]
+    #      and then re-assigns column 47 from lU[:, 48, :].  With the slice
+    #      starting at 1 those are the SAME element, i.e. the re-assignment is
+    #      a no-op and ``_USLICE`` alone reproduces the gate's array.  That is
+    #      a claim about an index, so it is CHECKED, not reasoned about.
+    _probe = np.arange(B.NY * 53 * A.NZ, dtype=np.float64).reshape(B.NY, 53, A.NZ)
+    _gate = _probe[:, 1:53, :].copy()
+    _gate[:, 47, :] = _probe[:, 48, :]
+    if not np.array_equal(_gate, _probe[_USLICE]):
+        raise SystemExit("FATAL M2b: _USLICE does not reproduce the gate's own "
+                         "u-face slice -- every metric row is on a different "
+                         "array than the number being decomposed")
+    print("  [M2b slice gate] _USLICE reproduces the col-47 re-assignment "
+          "the gate loader performs\n      (i.e. that re-assignment is a "
+          "no-op).  COVERAGE, said plainly: this re-implements the\n      "
+          "loader's two lines and would catch a change to _USLICE, NOT a "
+          "change to\n      acceptance_gate_90d.load_candidate itself.")
+
+
     # #1455 SEASONAL CLOCK: this probe twins from NEMO's day-180 restart, so
     # the seasonal forcing must continue NEMO's day-of-year, not restart it.
     t0_sec = seasonal_t0_seconds(f"{G.RUN_90D_TWIN}/DINO_00005760_restart.nc")
@@ -661,9 +704,17 @@ def main(argv=None):
             if isinstance(_zc, OceanPartialCellCoordinate):
                 _a3, _ = compute_face_masks_3d(_zc.is_active, model.grid)
                 _um = _um * np.asarray(_a3)
+            # COVERAGE, widened 2026-08-21 (adversarial review): this gate
+            # used to index ``ROWS`` = the southern band, 13 of the 197 rows
+            # the gate-metric table below sums.  Outside that band nothing
+            # checked that h_u vanishes on masked faces -- and the channel
+            # ridge and the northern continents are where it is most likely
+            # to fail.  It now indexes FULL_ROWS, the whole wet section.
             _leak = float(np.max(np.abs(_hu0 * (1.0 - _um))[:, 1:, :][
-                np.ix_(ROWS, range(_hu0.shape[1] - 1), range(_hu0.shape[-1]))]))
-            print(f"  [S5 geometry gate] max h_u on MASKED faces in the band = "
+                np.ix_(FULL_ROWS, range(_hu0.shape[1] - 1),
+                       range(_hu0.shape[-1]))]))
+            print(f"  [S5 geometry gate] max h_u on MASKED faces over the FULL "
+                  f"section (rows {FULL_ROWS[0]}..{FULL_ROWS[-1]}) = "
                   f"{_leak:.3e} m (must be 0; else the combine's mask injects a "
                   f"barotropic term into BARO)")
             if _leak != 0.0:
@@ -671,6 +722,39 @@ def main(argv=None):
                     "FATAL S5: h_u is non-zero on faces the leap-frog combine "
                     "masks, so depth_mean(u_pre - u_bef) is NOT the barotropic "
                     "increment -- the BARO row is not what it claims to be")
+            # ---- M3 (fails closed): IS legoESM's SPLIT NEMO'S SPLIT? -----
+            # legoESM's leap-frog combine splits the barotropic mode on the
+            # LIVE thickness h_u; NEMO's dynspg_ts splits on the STATIC e3u_0
+            # (under key_qco it uses e3u_0 / r1_hu_0 -- dynspg_ts.F90:330-333).
+            # Those are the same OPERATOR only if h_u = e3u_0 * f(j,i) with f
+            # depth-INDEPENDENT, in which case the two column means coincide
+            # exactly for every field.  That is a property of the vertical
+            # coordinate, so it is MEASURED: the per-column spread of
+            # h_u / e3u_0 across levels.  A non-zero spread means the BARO /
+            # BCLIN partition is NOT the same object on the two sides and the
+            # cross-model BARO row carries a weighting difference on top of the
+            # solve difference.
+            _hu_n = _hu0[_USLICE]
+            _msk = np.asarray(B.umask)
+            _e3 = np.asarray(B.e3u0)
+            _rat = np.where(_msk, _hu_n / np.where(_msk, _e3, 1.0), 0.0)
+            if not np.isfinite(_rat[_msk]).all():
+                raise SystemExit("FATAL M3: non-finite h_u / e3u_0 on a wet face")
+            _wetcol = _msk.any(axis=2)
+            _big = np.where(_msk, _rat, -np.inf).max(axis=2)
+            _small = np.where(_msk, _rat, np.inf).min(axis=2)
+            _sp = float(np.max(np.where(_wetcol, _big - _small, 0.0)))
+            print(f"  [M3 split-operator gate] per-column spread of "
+                  f"h_u/e3u_0 across levels = {_sp:.3e} (0 => legoESM's "
+                  f"live-thickness\n      barotropic split and NEMO's static "
+                  f"e3u_0 split are the SAME operator, so the BARO/BCLIN\n"
+                  f"      partition is cross-model comparable)")
+            if _sp > 1.0e-6:
+                raise SystemExit(
+                    "FATAL M3: legoESM splits the barotropic mode on a "
+                    "thickness that is not a depth-uniform multiple of e3u_0, "
+                    "so its BARO row is not NEMO's BARO row and the two may "
+                    "not be differenced")
             if _ncap != 1:
                 raise SystemExit(
                     f"FATAL S0b: the implicit vertical solve was entered "
@@ -1002,6 +1086,35 @@ def main(argv=None):
           "deficit itself sits BELOW that floor, so\n  this column can bound "
           "the row, never resolve the deficit inside it.")
 
+    # THE ARTIFACT IS WRITTEN BEFORE THE GATES BELOW.  Every array saved here
+    # is complete at this point, and the gate-metric gates below raise
+    # SystemExit -- writing after them means a tripped gate discards a
+    # multi-hour run with nothing to inspect, which is exactly when the raw
+    # arrays are most wanted.  A tripped gate still fails the run loudly; the
+    # consumer (fullsection_stage_gap.py) re-checks the stamps it needs.
+    if args.out_npz:
+        np.savez_compressed(
+            args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
+            acc_row=acc_row, acc_map=acc_map, acc_n=acc_n, R_series=R_series,
+            stages=np.array(STAGES), acc_stage=acc_stage,
+            acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
+            interval_days=args.interval_days, plant=args.plant,
+            stage_plant=args.stage_plant,
+            met_weightings=np.array(METW), acc_met=acc_met,
+            acc_moffs=acc_moffs, Mnow_series=Mnow_series,
+            acc_med_series=acc_med_series,
+            south_rows=np.array(SOUTH_ROWS), chan_rows=np.array(CHAN_ROWS),
+            north_rows=np.array(NORTH_ROWS), full_rows=np.array(FULL_ROWS),
+            e3t_mode=E3T_MODE, days=args.days, n_int=n_int,
+            git_sha=_GIT_SHA, recipe=args.recipe,
+            seasonal_t0_seconds=t0_sec,
+            reconcile_target=str(getattr(mc, "barotropic_reconcile_target",
+                                         "?")),
+            after_reconcile=str(getattr(mc, "barotropic_after_reconcile", "?")),
+            surface_stress_implicit=bool(
+                getattr(mc, "surface_stress_implicit", False)))
+        print(f"\n[artifact] -> {args.out_npz}")
+
     # ==================================================== THE GATE METRIC ==
     # #1455 SG-C.  Everything above reduces zonally (row circulation).  The
     # acceptance gate's ACC number reduces MERIDIONALLY.  This block reduces
@@ -1011,37 +1124,6 @@ def main(argv=None):
     print("GATE-METRIC decomposition -- the same five stage increments, reduced "
           "with acc_full's OWN weights")
     print("=" * 112)
-
-    # ---- M2 (fails closed): the FULL section really is rows 1..NY-2.
-    _dry = [j for j in (0, B.NY - 1) if A.umask[j].any()]
-    _wetout = [j for j in range(B.NY) if A.umask[j].any()
-               and j not in FULL_ROWS]
-    print(f"  [M2 coverage gate] rows with a wet u-face outside 1..{B.NY - 2}: "
-          f"{_wetout} (must be empty); rows 0/{B.NY - 1} wet: {_dry} (must be "
-          "empty)")
-    if _wetout or _dry:
-        raise SystemExit("FATAL M2: the row groups do not cover exactly the "
-                         "wet section the gate metric sums")
-    _cov = sorted(SOUTH_ROWS + CHAN_ROWS + NORTH_ROWS)
-    if _cov != FULL_ROWS or len(set(_cov)) != len(_cov):
-        raise SystemExit("FATAL M2: the three bands are not a PARTITION of the "
-                         "full section")
-
-    # ---- M2b (fails closed): the recorded harness's u-face slice IS the
-    #      gate's.  ``acceptance_gate_90d.load_candidate`` takes lU[:, 1:53, :]
-    #      and then re-assigns column 47 from lU[:, 48, :].  With the slice
-    #      starting at 1 those are the SAME element, i.e. the re-assignment is
-    #      a no-op and ``_USLICE`` alone reproduces the gate's array.  That is
-    #      a claim about an index, so it is CHECKED, not reasoned about.
-    _probe = np.arange(B.NY * 53 * A.NZ, dtype=np.float64).reshape(B.NY, 53, A.NZ)
-    _gate = _probe[:, 1:53, :].copy()
-    _gate[:, 47, :] = _probe[:, 48, :]
-    if not np.array_equal(_gate, _probe[_USLICE]):
-        raise SystemExit("FATAL M2b: _USLICE does not reproduce the gate's own "
-                         "u-face slice -- every metric row is on a different "
-                         "array than the number being decomposed")
-    print("  [M2b slice gate] _USLICE reproduces load_candidate's u array "
-          "EXACTLY (the col-47 re-assignment is a no-op)")
 
     # ---- M0 (fails closed): the device metric reducer against a numpy
     #      evaluation of acc_full's integrand on the SAME day-0 state.  This is
@@ -1075,6 +1157,43 @@ def main(argv=None):
         raise SystemExit("FATAL M0b: the channel rows do not sum to the "
                          "recorded channel metric")
 
+    # ---- M0d: the FULL weighting bound to acc_thermal_wind's own code path.
+    #      M0 above compares the device reducer against a numpy RE-SPELLING of
+    #      acc_full's integrand written in this file, so a wrong mask or a
+    #      wrong e2u column would pass both.  ``A.acc_band(u, wet, e3=e3t1d)``
+    #      is the recorded harness's OWN function carrying the FULL weighting,
+    #      so this closes that hole for the channel rows of W_FULL.
+    _wf_ref = float(np.mean(A.acc_band(_u0, A.umask, A.e3t1d)[2:-2]))
+    _wf_got = float(Mnow_series[0, 0, CHAN_ROWS].sum())
+    print(f"  [M0d recorded-path gate] W_FULL channel rows {_wf_got:.6f} Sv vs "
+          f"acc_thermal_wind.acc_band(e3=e3t_1d) {_wf_ref:.6f} Sv "
+          f"(diff {_wf_got - _wf_ref:.3e})")
+    if abs(_wf_got - _wf_ref) > 1.0e-9:
+        raise SystemExit("FATAL M0d: the FULL weighting is not the recorded "
+                         "harness's e3t_1d weighting")
+
+    # ---- M0e (fails closed): the CHANNEL weighting is DEGENERATE with the
+    #      barotropic/baroclinic split, and that is a property of the grid, not
+    #      an accident of this run.  e3t_0 == e3u_0 on every wet u-face here
+    #      (DINO is full-step z), and the split's own weight is e3u_0, so the
+    #      baroclinic rows integrate to EXACTLY zero under W_CHAN -- per row and
+    #      per longitude.  CONSEQUENCE, stated so nobody reads a decomposition
+    #      into that table: under the channel weighting this is a ONE-ROW table
+    #      and the channel gap is barotropic BY CONSTRUCTION OF THE METRIC, not
+    #      by measurement.  Gated so a grid with real partial cells, where the
+    #      degeneracy breaks, goes red instead of silently changing meaning.
+    _e3gap = float(np.max(np.abs(np.where(A.umask, A.e3t0 - B.e3u0, 0.0))))
+    _bcl = float(np.max(np.abs(acc_met[:, 1, [1, 3], :])))
+    _bclsc = max(float(np.max(np.abs(acc_met[:, 1, :, :]))), 1e-30)
+    print(f"  [M0e channel-degeneracy gate] max|e3t_0 - e3u_0| on wet u-faces = "
+          f"{_e3gap:.3e} m; max|baroclinic rows| under W_CHAN = {_bcl:.3e} Sv "
+          f"({_bcl / _bclsc:.2e} of the largest channel-weighted row)")
+    if _e3gap == 0.0 and _bcl / _bclsc > 1.0e-12:
+        raise SystemExit("FATAL M0e: e3t_0 == e3u_0 on every wet face, so the "
+                         "baroclinic rows MUST vanish under the channel "
+                         "weighting and they do not -- the split and the "
+                         "reducer are not using the thicknesses they claim")
+
     # ---- M0c: MEAN vs MEDIAN.  acc_full takes the MEDIAN over longitudes; a
     #      per-stage table must be LINEAR, so the rows here are MEAN-reduced.
     #      The gap between the two reductions of the SAME state is the size of
@@ -1092,14 +1211,24 @@ def main(argv=None):
     _surr = float(abs((acc_med_series[-1] - _mean_series[-1])
                       - (acc_med_series[0] - _mean_series[0])))
     print(f"  the surrogate's own drift over the run = {_surr:.4f} Sv "
-          "(the median-minus-mean CHANGE; a per-stage table cannot resolve a "
-          "gap below it)")
+          "(the median-minus-mean CHANGE\n  on legoESM's side alone).  The "
+          "quantity that has to be small is the same drift on the\n  "
+          "lego-MINUS-NEMO difference, which is printed by "
+          "fullsection_stage_gap.py, not here.")
 
     # ---- M1 (fails closed): the metric budget must CLOSE on the realized
-    #      change of the NOW level, row by row.  Same leap-frog algebra as the
-    #      circulation closure above, a DIFFERENT reducer -- so it re-tests the
-    #      whole chain (capture, split, slice, weights) rather than repeating
-    #      an identity.
+    #      change of the NOW level, row by row.
+    #      COVERAGE, corrected 2026-08-21 (adversarial review).  An earlier
+    #      revision claimed this "re-tests the whole chain (capture, split,
+    #      slice, weights) rather than repeating an identity".  IT DOES NOT,
+    #      and that is the same class as this module's own retraction (2): the
+    #      five increments sum to (u_final - u_bef) whatever ``_bt`` returns,
+    #      so ANY linear reducer closes, and the weights and slice are the same
+    #      objects on both sides of the comparison and cancel.  What M1 CAN
+    #      move on is instrumented-vs-production divergence (S4 seen through a
+    #      new reducer) and floating-point accumulation over 2880 steps.  It is
+    #      reported for that, not as a check on the split or the weights --
+    #      those are M0/M0b/M0d and the S PLANT.
     for w, wname in enumerate(METW):
         pred = acc_met[:, w].sum(axis=1).sum(axis=0) - acc_moffs[:, w].sum(axis=0)
         real = Mnow_series[-1, w] - Mnow_series[0, w]
@@ -1114,11 +1243,18 @@ def main(argv=None):
 
     # ---- the table -------------------------------------------------------
     for w, wname in enumerate(METW):
-        rowsel = CHAN_ROWS if w == 1 else FULL_ROWS
         print("\n" + "-" * 112)
-        print(f"  CUMULATIVE contribution to the day-{args.days} ACC number, "
+        print(f"  CUMULATIVE leap-frog stage INCREMENTS over {args.days} days, "
               f"{wname} weighting [Sv], by stage x band")
         print("-" * 112)
+        print("  READ THE UNITS.  Each leap-frog increment spans 2*dt while the "
+              "realized change of the\n  NOW level advances by dt, so STAGE SUM "
+              "is ~2x the realized d(ACC) and the offset row\n  takes the other "
+              "half back.  A stage row is therefore NOT 'its share of the ACC "
+              "change'\n  -- divide the stage-sum decomposition, not the "
+              "realized one.  (Same class as this\n  module's own FACTOR OF 2 "
+              "retraction; the caption used to say 'contribution to the ACC\n"
+              "  number' and was inflated 2x per row.)")
         cum = acc_met[:, w].sum(axis=0)                  # (n_stage, NY)
         off = acc_moffs[:, w].sum(axis=0)                # (NY,)
         print(f"  {'stage':18s}" + "".join(f"{b:>16s}" for b, _ in BANDS))
@@ -1134,22 +1270,7 @@ def main(argv=None):
               + "".join(f"{real[r].sum():16.4f}" for _, r in BANDS))
         print(f"  (the band used for the campaign's number with this weighting "
               f"is {'channel' if w == 1 else 'FULL section'})")
-        del rowsel
 
-    if args.out_npz:
-        np.savez_compressed(
-            args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
-            acc_row=acc_row, acc_map=acc_map, acc_n=acc_n, R_series=R_series,
-            stages=np.array(STAGES), acc_stage=acc_stage,
-            acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
-            interval_days=args.interval_days, plant=args.plant,
-            stage_plant=args.stage_plant,
-            met_weightings=np.array(METW), acc_met=acc_met,
-            acc_moffs=acc_moffs, Mnow_series=Mnow_series,
-            acc_med_series=acc_med_series,
-            south_rows=np.array(SOUTH_ROWS), chan_rows=np.array(CHAN_ROWS),
-            north_rows=np.array(NORTH_ROWS), full_rows=np.array(FULL_ROWS))
-        print(f"\n[artifact] -> {args.out_npz}")
 
 
 if __name__ == "__main__":
