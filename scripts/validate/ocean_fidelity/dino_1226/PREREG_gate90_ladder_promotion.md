@@ -157,7 +157,17 @@ partial-cell thicknesses, longitude mean) and has no measured floor. A
 perturbation that moves channel transport and compensates in the closed
 basin leaves the full-section number at zero while moving this one, so the
 full-section floor bounds nothing here. Read +0.2874 as an unbounded
-residual until a channel-band floor is measured on the same metric -- a real, resolvable
+residual until a channel-band floor is measured on the same metric.
+
+CHEAPEST WAY TO GET ONE, so this does not sit unmeasured: the control arm's own
+time series of the CHANNEL metric, if it was logged during the A/B, gives an
+autocorrelation-corrected standard error of its window mean -- same support,
+same weighting, same statistic, no new runs. Failing that, five to ten
+inert-perturbation members through the same harness (a one-unit-in-the-last-place
+initial perturbation), same built ladder, same metric, 90 days each; the floor is
+the ensemble spread of the window mean. Use the MEAN-based floor, not a median
+one, which is biased low for a skewed transport distribution and would overstate
+significance the same way the transferred floor did -- a real, resolvable
 residual, not noise.  The 90% cut against the shipped ladder survives; the
 "at floor" claim does not, and neither does any statement resting on it.
 
