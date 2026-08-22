@@ -1432,3 +1432,45 @@ family does.
 Also fixed on the way past: the halo-exchange oracle job defaulted to a
 throwaway agent worktree, so it had been reading a tree nobody edits. It now
 defaults to the campaign worktree and prints the SHA it ran.
+
+---
+
+## 2026-08-22 — the NH gap is the HEIGHT UPDATE, not the halo fill
+
+Measured (job 9466634, five controls passed, and the previous run's own
+control caught a hand-assembled entry point before it could report).
+
+Layer height, port vs oracle, sub-step 1, full padded box:
+
+| | interior | edge halo | corner halo |
+|---|---|---|---|
+| BEFORE the update | 1.5e-11 | 1.0e-11 | 2.5e-10 |
+| AFTER the update  | **3.7e-05** | 1.0e-11 | 2.5e-10 |
+
+The height enters `update_dz_d` at the parity floor on every ring and
+leaves it wrong in the COMPUTE WINDOW, with the halo untouched (as it
+must be — this deck's damping coefficient takes the branch that writes
+`is:ie, js:je` only). **The duo halo fill of the height is exonerated;
+the operator is the seat.**
+
+WHERE: the interior maximum sits at compute cells 0-1 in from the panel
+corners on all six faces — (0,1), (1,0), (0,0), (46,0), (0,47), (47,47).
+Same two face classes as everything else in this hunt: 3.67e-05 on faces
+1/2/4/5, 1.90e-05 on 3/6.
+
+THE MAGNITUDES LINE UP, which is the part that makes this more than a
+localisation: 3.67e-05 m of height over one 240 s sub-step is
+1.53e-07 m/s, against the 1.30e-07 m/s of `w` the campaign has been
+chasing. Same order, same cells, same face classes.
+
+NEXT: inside `update_dz_d` (nh_utils.F90:194-311). Its corner-region
+behaviour is the remaining space — the transport quotient's corner cells
+and the `del6` term, which is where the port's own docstring already
+flags an unverified substitution (`fv3_native_dsw_tail_3d.py:312-336`
+hands it a Lagrange corner-region fill in place of the oracle's own
+corner-area construction, and predicted in writing that a disagreement
+would "localise to corner-adjacent stencils"). That prediction and this
+measurement are the same sentence.
+
+CAVEAT ON PROCESS: codex could not run for any of this work (expired
+credential, three attempts), so the instrument carries ONE review.
