@@ -92,6 +92,13 @@ rc=0
 # inside the three-hour request.
 ARM_TIMEOUT="${ARM_TIMEOUT:-480}"
 
+# Which channel counts to sweep. Overridable because an arm on this lane is
+# dominated by mesh partitioning and compilation, not by its timed steps, so
+# the only way to fit a larger device count inside a walltime is FEWER ARMS.
+# At 128 ranks every arm of the four-count sweep hit the 480 s timeout and the
+# whole 32-node allocation produced nothing (job 27138080).
+CHANNELS="${CHANNELS:-4 8 16 32}"
+
 run_arm () {  # channels nocomm tag [steps] [debug]
   local CH=$1 NC=$2 TAG=$3 STEPS=${4:-65} DBGON=${5:-0}
   local DBG="" TMO="$ARM_TIMEOUT"
@@ -132,18 +139,19 @@ run_arm 8 0 warmup_discard
 # keeps a drift on the node out of the channel effect AND out of the
 # halo-on-minus-halo-off difference, which a block of one then a block of the
 # other does not.
-for CH in 4 8 16 32; do
+CHANNELS_REV=$(echo "$CHANNELS" | tr ' ' '\n' | tac | tr '\n' ' ')
+for CH in $CHANNELS; do
   run_arm "$CH" 0 "halo_c${CH}_r1"
   run_arm "$CH" 1 "nohalo_c${CH}_r1"
 done
-for CH in 32 16 8 4; do
+for CH in $CHANNELS_REV; do
   run_arm "$CH" 1 "nohalo_c${CH}_r2"
   run_arm "$CH" 0 "halo_c${CH}_r2"
 done
 # Validity, one arm PER CHANNEL COUNT: a curve point whose channel count NCCL
 # silently clamped is not a curve point. The benchmark refuses warmup >= steps,
 # so these cannot be five-step arms.
-for CH in 4 8 16 32; do run_arm "$CH" 0 "val_c${CH}" 12 1; done
+for CH in $CHANNELS; do run_arm "$CH" 0 "val_c${CH}" 12 1; done
 echo "=== NCCL validity: the channel count NCCL actually built, per arm ==="
 for CH in 4 8 16 32; do
   # NCCL prints "Channel 00/04", so the count is ZERO PADDED. Comparing the
@@ -181,12 +189,12 @@ for CH in 4 8 16 32; do
   fi
 done
 
-"$PY" - "$OUTDIR" "$NDEV" "$SUBDIV" "$NLEV" <<'PYEOF'
+"$PY" - "$OUTDIR" "$NDEV" "$SUBDIV" "$NLEV" "$CHANNELS" <<'PYEOF'
 import json, os, statistics, sys
 
 outdir, ndev, subdiv, nlev = (sys.argv[1], int(sys.argv[2]),
                              int(sys.argv[3]), int(sys.argv[4]))
-CHS = [4, 8, 16, 32]
+CHS = [int(c) for c in sys.argv[5].split()]
 ARMS = [("halo", "0"), ("nohalo", "1")]
 problems = []
 
