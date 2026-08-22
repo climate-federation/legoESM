@@ -126,11 +126,54 @@ running now; on the lat-lon lane it did not.
 This lane does NOT have the layout defect: its compiled step holds three
 transposes and they follow the shard (job 27133706). Do not port that fix.
 
+## How far from the limit, and what would close it
+
+Every number in this section is measured at 128 GPUs with the best settings
+known for that lane, against a floor taken from the SAME runs rather than
+from a model: the halo-off arm is the time the step would take if
+communication were free, and no amount of communication work can go below it.
+
+| lane | step | of which local | communication | available if communication were free |
+|---|---|---|---|---|
+| lat-lon 2048x4096x26 | 3.64 ms | 2.30 | 1.34 (37%) | **1.6x** |
+| icosahedral L9 x 26 | 4.99 | 2.33 | 2.66 (53%) | **2.1x** |
+
+The lat-lon local floor is itself 1.46x above what perfect scaling of the
+single-GPU step would cost (1.57 ms), so the total distance to a true limit on
+that lane is about 2.3x, split roughly evenly between communication and
+per-kernel granularity.
+
+The icosahedral lane has no matched single-GPU measurement under this
+configuration, so its local floor is quoted as measured and not compared to
+perfect scaling. Getting one is cheap and is the obvious gap.
+
+What would close each gap, ranked by what the measurements support:
+
+1. **Fewer halo bytes on the lat-lon lane.** Communication there is 94%
+   payload, and a latitude band ships two rows of the entire longitude circle
+   per field however many devices there are. A two-dimensional tile ships a
+   perimeter, roughly six times fewer cells at 128 devices. Blocked on
+   understanding why tiling lost 22% at 64 GPUs, which is not layout and not
+   yet explained.
+2. **Whatever makes icosahedral communication grow 1.83x when devices
+   double.** It is not payload — halo bytes per device fall as the partition
+   shrinks — and the round count is fixed at 11-14 by the edge colouring. The
+   same contention signature as the lat-lon lane's 64-to-128 growth. Nothing
+   measured yet separates fabric contention from per-round serialisation.
+3. **Fewer, larger kernels on the lat-lon lane.** The step runs ~180 kernels
+   whatever the shard size and their mean duration falls to 13 microseconds at
+   128 GPUs. Not reachable by any compiler setting that exists in this build,
+   so it is dycore work.
+4. **The six full-shard layout conversions that survive at the shard-map and
+   scan boundaries.** Plausibly ~0.55 ms of the lat-lon step. The cheap route
+   — pinning the carry's device layout — has not been shown to work; the probe
+   built to test it was void.
+
 ## Decisions that are yours, not taken
 
 | # | decision | evidence |
 |---|---|---|
-| 1 | Sixteen collective channels as the production default on both lanes | -12.4% lat-lon and -9.3% icosahedral at 64 GPUs, two independent lanes, controls flat |
+| 1 | Sixteen collective channels — but chosen PER LANE AND PER DEVICE COUNT, not once | -12.4% lat-lon and -9.3% icosahedral at 64 GPUs; at 128 it is -9.9% on the icosahedral lane and only -1.0% on the lat-lon one |
 | 2 | Thirty-two vertical levels instead of twenty-six on the icosahedral lane | 26 levels measured 3.1x more expensive per cell per level than the cheap counts; faster at every device count despite 23% more work |
 | 3 | Turn the level-leading halo on for the lat-lon lane | -4.0% at 128 GPUs, bit-identical, below the 5% bar it was gated against |
 
