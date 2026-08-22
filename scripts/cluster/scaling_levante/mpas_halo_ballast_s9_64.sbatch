@@ -77,15 +77,26 @@ OUTDIR="${OUTDIR:-$SCRATCH/legoesm_scaling/ballast_j${SLURM_JOB_ID}}"
 mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$SCRATCH/legoesm_scaling/_jitcache_shared"
 mkdir -p "$LEGOESM_JIT_CACHE_DIR"
+# Match the 2^n ladder's environment so a split measured here can be
+# compared against a ladder point: the NCCL multi-channel p2p pair
+# (-13..-18 % at s9@64) and the shard-autotuning disable that this
+# jaxlib needs at >= 64 ranks.
+export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 rc=0
 
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
+# Halo variant under test. The 2^n ladder runs RAGGED=1 (the current
+# lane best, 5.73 ms at s9@64); the original ballast receipt ran the
+# coloured schedule, so the variant has to be selectable or the split
+# belongs to a configuration nothing else is measured in.
+RAGGED="${RAGGED:-0}"
 NDEV=$((NODES * GPN))
 
 run_arm () {  # ballast tag [nocomm] [nostage]
   local BAL=$1 TAG=$2 NC=${3:-0} NS=${4:-0}
-  echo "=== s${SUBDIV}@${NDEV} wide=1 ballast=$BAL nocomm=$NC nostage=$NS [$TAG] ==="
-  LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
+  echo "=== s${SUBDIV}@${NDEV} wide=1 ragged=$RAGGED ballast=$BAL nocomm=$NC nostage=$NS [$TAG] ==="
+  LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO="$RAGGED" \
   LEGOESM_MPAS_HALO_BALLAST=$BAL LEGOESM_MPAS_HALO_NOCOMM=$NC \
   LEGOESM_MPAS_HALO_NOSTAGE=$NS JAX_ENABLE_X64=0 \
     timeout 1800 srun --nodes="$NODES" --ntasks="$NDEV" \
@@ -166,7 +177,7 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         # therefore whatever grows with device count that is NOT the
         # halo: the mass-fix allreduce across nodes, and jitter.
         print(f"  staging (nocomm - nostage) = {nc - ns:+.3f} ms")
-        print(f"  nostage@{NDEV} = {ns:.3f} ms   (compare the 4-device "
+        print(f"  nostage@{ndev} = {ns:.3f} ms   (compare the 4-device "
               f"nostage arm: 2.725 ms at the SAME per-device load; the "
               f"difference is the residual that grows with device count)")
     # A ratio smaller than half the arm spread is not a result.
@@ -196,5 +207,12 @@ if {"b1_a", "b1_b", "b2_a", "b2_b"} <= med.keys():
         else:
             print("VERDICT: intermediate -- reprice before acting")
 EOF
+gate_rc=$?
+# A crashed gate must not report the job COMPLETED: this block exited
+# non-zero on a NameError once while the job still exited 0.
+if [ "$gate_rc" -ne 0 ]; then
+  echo "RECEIPT GATE exited $gate_rc"
+  rc=$gate_rc
+fi
 echo "DONE rc=$rc"
 exit $rc

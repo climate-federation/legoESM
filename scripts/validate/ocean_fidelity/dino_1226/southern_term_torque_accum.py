@@ -228,10 +228,11 @@ from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
 set_policy(PrecisionPolicy.fp64())
 # MANDATORY, fails closed.  Unset, the restart bridge silently substitutes
 # NEMO's ANALYTIC 1-D thickness ladder (``e3t_1d``) for the real ``e3t_0``,
-# which differs by up to 12.9% below k=25 -- and the day-0 twin gate CANNOT
+# which differs by up to 70.4 m at and below k=25 (12.9% of e3t_0,
+# 14.8% of e3t_1d -- one measurement, two denominators) -- and the day-0 twin gate CANNOT
 # see it (it compares T/S/u/v VALUES, not the geometry holding them; skill
 # Rule 2's documented blind spot).  A depth-integrated pressure gradient on a
-# 12.9%-wrong deep ladder is a systematic, time-growing error that looks
+# wrong deep ladder is a systematic, time-growing error that looks
 # exactly like an operator defect.  That default has already ruined four
 # measurements in this campaign; it very nearly ruined this one.
 E3T_MODE = require_explicit_e3t_mode(context='southern_term_torque_accum')
@@ -240,7 +241,9 @@ import jax  # noqa: E402
 
 import southern_circulation_budget as B  # noqa: E402
 import acceptance_gate_90d as G  # noqa: E402
-from kamm_twin_90d import DT, STEPS_PER_DAY, _build_twin_state  # noqa: E402
+from kamm_twin_90d import (  # noqa: E402
+    DT, STEPS_PER_DAY, _build_twin_state, seasonal_t0_seconds,
+)
 from legoesm.ocean.experiments.dino import (  # noqa: E402
     apply_dino_lat_lon_surface_forcing,
 )
@@ -502,10 +505,13 @@ def main(argv=None):
     Rnow_series = np.zeros((n_int + 1, NY))           # the NOW level's R
     i_plant = COMPS.index("KE_PGF_u")
 
+    # #1455 SEASONAL CLOCK: this probe twins from NEMO's day-180 restart, so
+    # the seasonal forcing must continue NEMO's day-of-year, not restart it.
+    t0_sec = seasonal_t0_seconds(f"{G.RUN_90D_TWIN}/DINO_00005760_restart.nc")
     t0 = time.time()
     for k in range(n_steps):
         s2, rate = apply_dino_lat_lon_surface_forcing(
-            st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT,
+            st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT,
             return_rate=True)
         nbb = s2._replace(u=s2.u_before, v=s2.v_before, T=s2.T_before,
                           S=s2.S_before, eta=s2.eta_before)

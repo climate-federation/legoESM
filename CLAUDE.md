@@ -876,6 +876,62 @@ Specialized agents in `.claude/agents/` for dycore, validation, differentiabilit
 
 ## Response Style
 
+### RULE -3 — BREVITY IS THE DEFAULT, LENGTH IS OPT-IN (2026-08-18, FIFTH callout)
+User: *"be succinct and clear - make this a default."* Rules -2, -1 and 0 all
+framed brevity as a CAP to check before sending, and I wrote to the cap every
+time. Inverted:
+
+**DEFAULT REPLY = <=3 LINES. NO HEADER. NO TABLE. NO BULLETS.**
+
+Length is earned, not assumed. It is unlocked ONLY by an explicit ask
+("report", "walkthrough", "long version", "what is left") or by numbers the
+user will genuinely compare (a table of >=3 rows AND >=2 columns). Bold
+headers, per-item verdicts, before/after lists and caveat lines are
+REQUEST-ONLY formats.
+
+Mechanical check: write the reply, delete everything after line 3, and send it
+if it still answers. If it does not, the content wanted a table — keep the
+table and delete the prose.
+
+Background-task notifications get NO reply at all unless a result is ready, a
+claim was refuted, or a decision is needed.
+
+### RULE -2 — MECHANICAL LENGTH LIMITS (2026-08-14, THIRD callout)
+User: *"be more succinct and clearer - make this a rule."* RULE -1 and RULE 0
+below already said this and I still shipped multi-section replies with tables
+and bold headers on routine results. Prose rules did not work, so these are
+COUNTABLE. Check them before sending.
+
+- **5 lines of prose, hard.** Not 5 sentences — 5 rendered lines.
+- **ONE bold header per reply, or none.** Multiple `**Headers**` = a report,
+  and reports are only for when one was asked for.
+- **A table needs >=3 rows AND >=2 columns of real data.** Two numbers go in a
+  sentence. A table of one comparison is decoration.
+- **No line explaining method, discipline, or what a control proved.** The
+  result only. "Pre-registered X, got Y" is one clause, not a paragraph.
+- **No restating a caveat already in the commit.** The commit is the record.
+- Status/job IDs: one line total, at the end, no formatting.
+
+If the content genuinely needs more, say "long version?" and stop.
+
+### RULE -1 — THE CAP APPLIES TO GOOD NEWS AND BAD NEWS ALIKE (2026-08-12)
+User, again, after a session of correct-but-long replies: *"be succinct and
+clear."* The rule below was being followed for status and ignored for
+findings — a retraction, a root cause, or a self-caught instrument bug is
+NOT a licence to write six paragraphs. Length is not proof of rigor.
+
+- **A finding is ONE line: the corrected fact.** Not the discovery story,
+  not what it means for three other workstreams, not a list of what still
+  stands. "X was wrong; the real number is Y" and stop.
+- **Never re-explain a thing already said once in the same reply.** If a
+  number appears in the verdict, it does not reappear in the evidence.
+- **Cut every sentence that exists to show diligence.** "I checked", "the
+  control caught it", "this is the Nth time" — delete. The tool calls are
+  visible; the user is not grading effort.
+- **Detail goes in the commit, the memory file, or the peer message —
+  never the reply.** That is what those artifacts are for.
+- Default reply: **3-5 bullets, under ~60 words.** A long reply must be
+  ASKED for ("report", "walkthrough", "what is left").
 **STRICT RULE, EVERY SESSION, EVERY MODEL (Opus included): be succinct AND
 clear.** Not style preference, not default that decay over long session.
 Succinct = answer first, ~60 words, bullets not paragraphs (RULE 0). Clear =

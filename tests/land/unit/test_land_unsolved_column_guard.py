@@ -267,3 +267,79 @@ def test_carbon_pools_revert_with_the_column():
     assert int(n_held) == 1
     assert float(carbon["C_fol"][1]) == 110.0, "carbon advanced on a held column"
     assert float(carbon["C_fol"][0]) == 101.0, "carbon froze on a healthy column"
+
+
+def _run_mpas_source():
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    return inspect.getsource(ModelDriver._run_mpas)
+
+
+def test_the_production_lane_carries_the_hold_count_out_of_the_land_step():
+    """A hold that nothing reports is a run quietly freezing part of its land.
+
+    The containment guard's own docstring says the caller must surface the
+    count, and no caller did: the coupled driver unpacked the three-value
+    result and the status went nowhere. Keyed off the function that actually
+    runs, not a wrapper around it.
+    """
+    src = _run_mpas_source()
+    assert "step_multilayer_land_with_diagnostics" in src, (
+        "the production land step uses the three-value form, which discards "
+        "the containment status")
+    assert "n_held" in src
+
+
+def test_the_hold_count_is_actually_logged():
+    """Carrying the number out of the step is not the same as reporting it.
+
+    An earlier version of this test searched the whole function for a word and
+    passed with the warning deleted, because a nearby comment still mentioned
+    holds. This one finds the logging calls themselves, so removing the call
+    goes red whatever the comments say.
+    """
+    import ast
+
+    tree = ast.parse("if True:\n" + _run_mpas_source())
+    logged = []
+    for node in ast.walk(tree):
+        fn = getattr(node, "func", None)
+        if not isinstance(node, ast.Call) or not isinstance(fn, ast.Attribute):
+            continue
+        if fn.attr not in ("warning", "error"):
+            continue
+        if not (isinstance(fn.value, ast.Name) and fn.value.id == "logger"):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant):
+            logged.append(str(node.args[0].value))
+    assert logged, "no logger warnings found in the production lane at all"
+    hold_messages = [m for m in logged if "held" in m.lower()]
+    assert hold_messages, (
+        "the production lane logs no warning about held columns, so the count "
+        f"is computed and thrown away. Messages found: {logged[:6]}")
+    # Column-steps alone cannot separate one column failing every step from
+    # many columns failing once, and those are different problems, so the
+    # number of steps that held has to be reported too.
+    assert "steps" in hold_messages[0].lower()
+
+
+def test_the_hold_count_is_read_at_a_cadence_and_cannot_overflow():
+    """Two ways this reporting could quietly stop working.
+
+    Reading a device scalar every step stalls the accelerator once per step
+    for a number that is almost always zero. And a 32-bit counter accumulating
+    a whole run's column-steps wraps: ten thousand columns at a seventy-five
+    second timestep pass two billion in about half a simulated year, after
+    which a comparison against a previous maximum would never fire again. So
+    the device counter is reset at each read and the running totals live on
+    the host as Python integers.
+    """
+    src = _run_mpas_source()
+    assert "_HARD_SAT_LOG_CADENCE_STEPS" in src
+    resets = src.count("_land_n_held_accum = jnp.zeros((), jnp.int32)")
+    assert resets >= 2, (
+        "the device hold counter is never reset, so it accumulates the whole "
+        "run in 32 bits and wraps")
+    assert "self._land_n_held_total += " in src

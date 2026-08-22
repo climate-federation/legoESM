@@ -102,7 +102,7 @@ def _reject_constant_conflicts(cc_explicit: ConstantsConfig,
         )
 
 
-def _physics_with_constants(physics, cc: ConstantsConfig):
+def physics_with_constants(physics, cc: ConstantsConfig):
     """Return ``physics`` carrying the model-level ``cc`` constants.
 
     ``OceanPhysicsConfig`` mirrors ``ConstantsConfig`` so the physics factories
@@ -139,6 +139,13 @@ def _physics_with_constants(physics, cc: ConstantsConfig):
             "propagate."
         )
     return physics                                  # already pinned to cc
+
+
+#: Historical private spelling. The routing rule is now needed by a second
+#: model as well, and this repository forbids importing a private symbol
+#: across modules, so the function is public; this alias keeps the
+#: white-box test that names the old spelling working.
+_physics_with_constants = physics_with_constants
 
 
 # ==============================================================================
@@ -1427,11 +1434,15 @@ class LateralViscosityConfig(NamedTuple):
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
                                     # for grids extending past 85°.
-    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
-                                    # > 1, multiplies A_h by 1 + (boost-1) *
-                                    # exp(-(lat/sigma)²), so horizontal momentum
-                                    # gets extra dissipation near the equator
-                                    # where f→0 leaves no rotational stiffness.
+    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity shaping.
+                                    # When != 1, multiplies A_h by 1 + (boost-1)
+                                    # * exp(-(lat/sigma)²).  > 1: extra
+                                    # dissipation near the equator where f→0
+                                    # leaves no rotational stiffness.  < 1 (>0):
+                                    # equatorial REDUCTION — NEMO ORCA1's
+                                    # eddy_viscosity_3D file drops ahm 20000 →
+                                    # 1000 m²/s at the equator so the EUC can
+                                    # exist; 0.05 with sigma ~7° mimics it.
                                     # Targets unconstrained equatorial dynamic
                                     # response at coarse resolution that drives
                                     # runaway upwelling cold tongues.  Typical
@@ -1513,6 +1524,18 @@ class LateralViscosityConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+    # --- Prescribed latitudinal A_h profile (NEMO nn_ahm_ijk_t=-30 shape) ---
+    # ORCA1 reads its momentum viscosity from eddy_viscosity_3D.nc: 20000
+    # m2/s midlatitude REDUCED to ~1000 within ~2 deg of the equator.  This
+    # field carries that shape as a per-cell-centre-latitude RATIO to ``A_h``
+    # (a TUPLE of n_lat floats -- hashable, so the config stays a static jit
+    # constant).  ``None`` (default) = off, bit-identical.  When set it
+    # REPLACES the Gaussian ``A_h_eq_boost`` shaping (setting both raises at
+    # the viscosity stage: two overlapping equatorial shapes silently
+    # multiply); the polar-cap boost and ``A_h_floor`` still compose on top.
+    # Built by the driver from the file's zonal median (see run_omip_core2
+    # --A-h-profile-file); v-face values are midpoint-averaged from these.
+    A_h_lat_profile: tuple | None = None
 
 class PolarFilterConfig(NamedTuple):
     """Fourier polar-filter parameters (#501 config grouping).
@@ -2607,7 +2630,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         The physical constants are routed the same way: the flat
         ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs land in the
         single ``constants: ConstantsConfig`` storage, and the resolved set is
-        propagated into ``physics`` (see :func:`_physics_with_constants`).
+        propagated into ``physics`` (see :func:`physics_with_constants`).
         Passing BOTH a flat scalar and a ``constants=`` that disagrees with it
         raises -- that combination is the silent-divergence bug this routing
         removes, so it is never resolved by a precedence rule.
@@ -2648,7 +2671,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         if _cc_given:
             nested["constants"] = _cc_final
         if "physics" in flat:
-            flat["physics"] = _physics_with_constants(flat["physics"], _cc_final)
+            flat["physics"] = physics_with_constants(flat["physics"], _cc_final)
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
@@ -2758,7 +2781,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                 _cc_final, _cc_given = _pc, True
         if _cc_given:
             nested["constants"] = _cc_final
-        _phys_new = _physics_with_constants(_phys, _cc_final)
+        _phys_new = physics_with_constants(_phys, _cc_final)
         if _phys_new is not _phys:
             overrides["physics"] = _phys_new
         return self._replace(**nested, **overrides)

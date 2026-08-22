@@ -68,7 +68,9 @@ RESULT (all numbers band-mean m3/s2 per u-row, fp64, controls below all pass).
   over the SAME window, comparing d(R_lego - R_NEMO)/dt per row.  One
   variable (the T-depth ladder; the thickness ladder and therefore the
   barotropic face depth are untouched).  It must report max|u| in both arms,
-  because the true-ladder instability starts inside 20 days.
+  because the true-ladder instability was recorded as starting inside 20 days.
+  (That instability did not reproduce in 2026-08 measurements -- see #1455 --
+  so this window is no longer forced by it, though it remains a fine window.)
 
   Also measured here, from the arms rather than quoted: the deficit's own
   per-interval torque is -0.37 to -1.06 across arms and 30-day intervals,

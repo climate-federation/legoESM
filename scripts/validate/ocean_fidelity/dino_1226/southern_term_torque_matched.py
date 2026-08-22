@@ -67,10 +67,18 @@ momentum operator carries a near-uniform -0.61 on any ladder.
   pressure + free-surface torque collapses from -6 to ~-0.6 in the wrong-ladder
   arm, ownership is established; if it stays at -6, it is refuted.
 
-WHY THE LADDER CANNOT SIMPLY BE SWITCHED: legoESM is unstable when integrated
-from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over 20 days;
-``nemo_state_bridge.py`` records this as the reason the default is "off").
-That instability and this torque error are candidates for the same root cause.
+WHY THE LADDER WAS NOT SIMPLY SWITCHED: legoESM was recorded as unstable when
+integrated from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over
+20 days), and that was the stated reason the default is "off".
+RETRACTED 2026-08-21 (#1455): the instability did not reproduce. Four 90-day
+arms from the day-180 restart, differing only in the ladder, all ran stable to
+day 90 at 0.633-0.635 m/s peak speed, the two end arms confirmed under fp64. The
+citation above is also stale: ``nemo_state_bridge.py`` still PRESERVES the
+original instability paragraph as a record, but its stated reason for the
+default no longer rests on it. A non-reproduction is not a refutation, so the
+observation stands unexplained; but this probe's framing may no longer assume
+the switch is blocked, and "that instability and this torque error share a root
+cause" is now a hypothesis with one of its two legs missing.
 
 WHAT THIS PROBE DOES
 --------------------
@@ -247,10 +255,11 @@ from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
 set_policy(PrecisionPolicy.fp64())
 # MANDATORY, fails closed.  Unset, the restart bridge silently substitutes
 # NEMO's ANALYTIC 1-D thickness ladder (``e3t_1d``) for the real ``e3t_0``,
-# which differs by up to 12.9% below k=25 -- and the day-0 twin gate CANNOT
+# which differs by up to 70.4 m at and below k=25 (12.9% of e3t_0,
+# 14.8% of e3t_1d -- one measurement, two denominators) -- and the day-0 twin gate CANNOT
 # see it (it compares T/S/u/v VALUES, not the geometry holding them; skill
 # Rule 2's documented blind spot).  A depth-integrated pressure gradient on a
-# 12.9%-wrong deep ladder is a systematic, time-growing error that looks
+# wrong deep ladder is a systematic, time-growing error that looks
 # exactly like an operator defect.  That default has already ruined four
 # measurements in this campaign; it very nearly ruined this one.
 E3T_MODE = require_explicit_e3t_mode(context='southern_term_torque_matched')
@@ -261,7 +270,9 @@ import netCDF4 as nc  # noqa: E402
 
 import southern_circulation_budget as B  # noqa: E402  (recorded reducers/geometry)
 import acceptance_gate_90d as G  # noqa: E402
-from kamm_twin_90d import DT, _build_twin_state  # noqa: E402  (the recorded twin harness)
+from kamm_twin_90d import (  # noqa: E402  (the recorded twin harness)
+    DT, _build_twin_state, seasonal_t0_seconds,
+)
 from legoesm.ocean.experiments.dino import (  # noqa: E402
     apply_dino_lat_lon_surface_forcing,
 )
@@ -503,6 +514,13 @@ def main(argv=None):
                   f"coriolis_scheme={cfg.coriolis_scheme}  "
                   f"surface_tendency_placement={cfg.surface_tendency_placement}")
         placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+        # #1455 SEASONAL CLOCK: this probe re-bridges NEMO's OWN restart for
+        # each matched day, so the forcing must be evaluated at that restart's
+        # day of year. Passing a bare ``DT`` would run every day's terms at
+        # seasonal day 0.03 against a state from day 180+ -- the antiphase
+        # corrected in 1c03f8311/076217667. Read per day, because the restart
+        # changes per day.
+        t0_sec = seasonal_t0_seconds(f"{rdir}/{rfile}")
 
         def terms_at(state, t_seconds, *, gate=False):
             """lego per-term row torques, mirroring the twin loop's forcing
@@ -518,7 +536,7 @@ def main(argv=None):
                 s2, surface_forcing=sf, sponge=None, dt=RDT)
             return lego_terms(diag, gate=gate), diag
 
-        L, diag0 = terms_at(st, DT, gate=True)
+        L, diag0 = terms_at(st, t0_sec + DT, gate=True)
 
         # C4 -- THE HONEST VERSION.  ``WIND_u`` is DEFINED as
         # ``total_u - sum(components)``, so "sum(terms incl. WIND) == total_u"
@@ -611,7 +629,7 @@ def main(argv=None):
         N = nemo_terms(kt)
         st_bb = st._replace(u=st.u_before, v=st.v_before, T=st.T_before,
                             S=st.S_before, eta=st.eta_before)
-        L_bb, _dbb = terms_at(st_bb, DT)
+        L_bb, _dbb = terms_at(st_bb, t0_sec + DT)
         print("  TIME-LEVEL A/B -- same operators on the restart's NOW vs its "
               "BEFORE level (NEMO's trends belong to BEFORE):")
         print(f"    {'term':14s}{'at NOW':>12s}{'at BEFORE':>12s}"
@@ -668,7 +686,7 @@ def main(argv=None):
         st0 = st._replace(u=st.u.replace(data=z), v=st.v.replace(data=zv),
                           u_before=st.u_before.replace(data=z),
                           v_before=st.v_before.replace(data=zv))
-        L0, _d0 = terms_at(st0, DT)
+        L0, _d0 = terms_at(st0, t0_sec + DT)
         pgf_only = L0["KE_PGF_u"]
         keg_lego = L["KE_PGF_u"] - pgf_only
         print("  EXACT KE/PGF SPLIT (lego evaluated at u=v=0; T/S/eta "

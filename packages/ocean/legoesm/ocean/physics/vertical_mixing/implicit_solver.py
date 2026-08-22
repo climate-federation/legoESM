@@ -113,10 +113,20 @@ def _restore_column_mass(x: jax.Array, field: jax.Array,
     Add the uniform per-column shift that restores ``Σ(x·dz) == Σ(field·dz)``
     exactly in f64 (the diffusion has zero-flux BCs, so the column integral is
     invariant).  Cheap (one f64 column sum) and mass-exact; the shift is
-    ``~1e-6`` of the field so it is physically negligible.  All inputs f64."""
+    ``~1e-6`` of the field so it is physically negligible.  All inputs f64.
+
+    DRY COLUMNS: ``dz`` is zero at every level of a column that is entirely
+    land (and, for the u/v-face control volume, of any face the wet-face mask
+    closes at every level -- a coastal or walled face).  The correction is
+    then ``0/0``: the FORWARD value is masked away downstream, but the
+    REVERSE-mode derivative of ``0/0`` is NaN and poisons every gradient that
+    flows through the column.  Return the uncorrected solve there instead --
+    a column with no water has no mass to restore."""
     w = jnp.broadcast_to(dz, x.shape)
     deficit = jnp.sum((field - x) * w, axis=-1, keepdims=True)
-    return x + deficit / jnp.sum(w, axis=-1, keepdims=True)
+    denom = jnp.sum(w, axis=-1, keepdims=True)
+    wet = denom > 0.0
+    return x + jnp.where(wet, deficit / jnp.where(wet, denom, 1.0), 0.0)
 
 
 def implicit_vertical_diffusion_ocean(

@@ -547,12 +547,23 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
 # SEQDUMP families carry a _ktNNNNNNNN suffix (per step). Register the exact
 # per-step filenames (fail-closed lookup does not strip the suffix), y20
 # window kt=230401..230404.
+# The DAY-180 window (kt=5761..5764, RUN_SEQDUMP_D180_1R) is the SAME dump
+# code at a different restart: the instrumented binary md5 ea0c113c writes
+# each family from the identical WRITE site already cited in the entry above,
+# only the kt in the filename changes.  This is therefore a kt-range
+# extension of EXISTING registrations, not a new registration class -- no new
+# call site is being asserted, so no new file:line proof is owed.  Keep the
+# two windows in one tuple so a third window cannot be added without noticing
+# the fail-closed lookup does not strip the suffix.
+_SEQDUMP_KT_WINDOWS = (range(230401, 230405),   # y20  RUN_SEQDUMP_Y20_1R
+                       range(5761, 5765))       # d180 RUN_SEQDUMP_D180_1R
 _SEQDUMP_BASES = {k: v for k, v in _DUMP_TIME_LEVEL.items()
                   if k.startswith(("seq_dump_", "r3c_dump_"))}
 for _b, _lv in _SEQDUMP_BASES.items():
-    for _kt in range(230401, 230405):
-        _DUMP_TIME_LEVEL[f"{_b}_kt{_kt:08d}.bin"] = _lv
-del _SEQDUMP_BASES, _b, _lv, _kt
+    for _window in _SEQDUMP_KT_WINDOWS:
+        for _kt in _window:
+            _DUMP_TIME_LEVEL[f"{_b}_kt{_kt:08d}.bin"] = _lv
+del _SEQDUMP_BASES, _b, _lv, _kt, _window
 _EIVDIAG_SOURCE_AEIU = _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_AEIV = _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_WSLPI = _DUMP_TIME_LEVEL["eivdiag_wslpi_yNN_rankRR.bin"][1]
