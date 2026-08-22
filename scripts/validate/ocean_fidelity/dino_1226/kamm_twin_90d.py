@@ -320,6 +320,22 @@ NEMO_LADDER_TWIN_DEFAULT = "both"
 _LADDER_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
 
 
+def resolve_snap_days(snap_days, n_days: int, save_3d: bool) -> tuple[int, ...]:
+    """Which days get a full 3-D snapshot.
+
+    ``snap_days=None`` keeps the recorded :data:`SNAP_DAYS` grid, so every
+    artifact produced before the argument existed is reproduced exactly.  Days
+    beyond ``n_days`` are dropped rather than raising: a caller asking for a
+    year-long grid on a 90-day run gets the 90-day prefix, which is what the
+    filter did before this was a function.  Without ``save_3d`` there are no
+    snapshots at all and the answer is empty regardless of what was asked for.
+    """
+    if not save_3d:
+        return ()
+    grid = SNAP_DAYS if snap_days is None else tuple(int(d) for d in snap_days)
+    return tuple(d for d in grid if d <= n_days)
+
+
 def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
     """Which of NEMO's vertical ladders this TWIN hands legoESM, and why.
 
@@ -621,6 +637,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              perturb_baro_key: str = "dU_avg",
              perturb_baro_scale: float = 1.0,
              daily_acc: bool = False,
+             snap_days: tuple[int, ...] | None = None,
              legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
@@ -646,6 +663,15 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     ``daily_acc``: store the ACC transport every day under two reducers (the
     deposit's own mean-over-longitudes one and the recorded gate's median
     one).  Off by default; adds two float64 arrays to the npz.
+
+    ``snap_days``: which days get a full 3-D T/S/eta/u/v snapshot under
+    ``save_3d``.  ``None`` keeps the recorded ``SNAP_DAYS`` grid so every
+    artifact produced before this argument existed is reproduced exactly;
+    days past ``n_days`` are dropped either way.  #1455 verdict360 needs a
+    10-day grid out to a year so an ensemble spread can be read at the same
+    days NEMO's own ``nn_stock`` restarts land on -- the alternative,
+    growing the module-level tuple, would silently change every sibling
+    probe's artifact.
     """
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
@@ -819,7 +845,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
 
-    snap_days = tuple(d for d in SNAP_DAYS if d <= n_days) if save_3d else ()
+    snaps = resolve_snap_days(snap_days, n_days, save_3d)
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
     if save_3d:
         t3d[0] = np.asarray(st.T.data, dtype=np.float32)
@@ -878,7 +904,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             u_daily[day_idx] = u_now
             v_daily[day_idx] = v_now
 
-            if save_3d and day_num in snap_days:
+            if save_3d and day_num in snaps:
                 t3d[day_num] = np.asarray(st.T.data, dtype=np.float32)
                 s3d[day_num] = np.asarray(st.S.data, dtype=np.float32)
                 eta3d[day_num] = np.asarray(st.eta.data, dtype=np.float32)
@@ -931,7 +957,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # The MEASURED injected transport, the number every retention factor
         # divides by.  Stamped so the scorer never has to be told it.
         save_kwargs["injected_sv"] = np.float64(_injected_sv)
-    for d in snap_days:
+    for d in snaps:
         if d in t3d:
             save_kwargs[f"T3d_day{d}"] = t3d[d]
             save_kwargs[f"S3d_day{d}"] = s3d[d]
@@ -941,7 +967,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
 
     np.savez(out_path, **save_kwargs)
     print(f"SAVED {out_path}  stable={stable}  "
-          f"3-D snapshots at days={sorted(snap_days)}", flush=True)
+          f"3-D snapshots at days={sorted(snaps)}", flush=True)
     return stable
 
 
@@ -1008,6 +1034,10 @@ def _parse_args(argv=None):
     p.add_argument("--perturb-baro-scale", type=float, default=1.0,
                    help="multiplier on the injected field; the linearity "
                         "control arm uses 0.5, the sign arm -1.0")
+    p.add_argument("--snap-days", default=None,
+                   help="comma-separated days for the --save-3d 3-D snapshots "
+                        "(default: the recorded 0,30,60,90 grid). Days past "
+                        "--days are dropped.")
     p.add_argument("--daily-acc", action="store_true",
                    help="#1455 Phase-2: store the ACC transport EVERY day under "
                         "both the deposit's reducer and the recorded gate's. "
@@ -1132,6 +1162,8 @@ def main(argv=None):
               perturb_baro_key=args.perturb_baro_key,
               perturb_baro_scale=args.perturb_baro_scale,
               daily_acc=args.daily_acc,
+              snap_days=(None if args.snap_days is None else
+                         tuple(int(x) for x in args.snap_days.split(","))),
               legacy_1d_ladder=args.legacy_1d_ladder)
 
 

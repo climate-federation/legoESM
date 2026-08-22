@@ -917,3 +917,49 @@ def test_cancellation_factor_compares_only_the_shared_levels(fct_probe):
     # On the 4 shared levels: (16 + 8) / 8 = 3.0.  Scoring a's 5th level too
     # would either raise or change the answer, so this pins the slicing.
     assert fct_probe.cancellation_factor(a, b, act) == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# kamm_twin_90d: the --save-3d snapshot grid (#1455 verdict360)
+# ---------------------------------------------------------------------------
+def test_snap_days_default_is_the_recorded_grid(instruments):
+    """None must reproduce the recorded 0/30/60/90 grid EXACTLY -- every twin
+    artifact produced before --snap-days existed was written on it, and a
+    silently widened default would change what a sibling probe's npz contains."""
+    k = instruments.kamm_twin_90d
+    assert k.resolve_snap_days(None, 90, True) == (0, 30, 60, 90)
+    assert k.resolve_snap_days(None, 90, True) == k.SNAP_DAYS
+
+
+def test_snap_days_explicit_grid_is_used(instruments):
+    k = instruments.kamm_twin_90d
+    assert k.resolve_snap_days((0, 10, 20, 30), 30, True) == (0, 10, 20, 30)
+    assert k.resolve_snap_days(["0", "180", "360"], 360, True) == (0, 180, 360)
+
+
+def test_snap_days_beyond_the_run_length_are_dropped_not_raised(instruments):
+    """A year-long grid on a 90-day run yields the 90-day prefix; asking for a
+    day the run never reaches must not produce a missing-key npz later."""
+    k = instruments.kamm_twin_90d
+    assert k.resolve_snap_days(tuple(range(0, 361, 90)), 90, True) == (0, 90)
+    assert k.resolve_snap_days(None, 45, True) == (0, 30)
+
+
+def test_snap_days_is_empty_without_save_3d(instruments):
+    """Without --save-3d there are no 3-D snapshots at all, whatever was asked
+    for -- otherwise the loop would try to store days it never captured."""
+    k = instruments.kamm_twin_90d
+    assert k.resolve_snap_days((0, 10, 20), 360, False) == ()
+    assert k.resolve_snap_days(None, 360, False) == ()
+
+
+def test_snap_days_cli_parses_a_comma_list(instruments):
+    k = instruments.kamm_twin_90d
+    args = k._parse_args(["nemo_dino_kamm_mlf", "/tmp/x.npz", "--days", "360",
+                          "--save-3d", "--snap-days", "0,90,180,270,360"])
+    assert args.snap_days == "0,90,180,270,360"
+    assert k.resolve_snap_days(
+        tuple(int(x) for x in args.snap_days.split(",")), args.days,
+        args.save_3d) == (0, 90, 180, 270, 360)
+    # and the flag is genuinely optional
+    assert k._parse_args(["r", "/tmp/x.npz"]).snap_days is None
