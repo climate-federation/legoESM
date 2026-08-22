@@ -21,13 +21,16 @@
 # converts to wall-clock at the device count where the lane plateaus, which is
 # the only question this job asks.
 #
-# Falsifiable, written before submit:
-#   CONFIRM: the flag-on step is at least 5% faster than flag-off at 128 GPUs,
-#     with the two-rep spread of each arm below half that difference.
-#   REFUTE: |difference| < 2%. Then the 26 removed conversions were not on the
-#     critical path, the transpose fixed cost measured in the trace belongs to
-#     something else, and the layout reading of the plateau is wrong.
+# Falsifiable, written before submit. The bars are OVERRIDABLE because they
+# are a property of the switch under test, not of this harness: a change that
+# removes a sixth of one exchange epoch cannot be held to the bar set for one
+# that removed sixty layout conversions, and quietly reusing the wrong bar is
+# how a real effect gets recorded as a refutation.
+#   CONFIRM: the flag-on step is at least CONFIRM_PCT faster, with the
+#     two-rep spread of each arm below half that difference.
+#   REFUTE: |difference| < REFUTE_PCT.
 #   INCONCLUSIVE in between, or if the arm spread is not below half the effect.
+# Defaults 5 and 2, which were set for the level-leading switch.
 # A bit-identical change cannot make the model wrong, so there is no accuracy
 # gate here; the receipt records the step time only.
 #SBATCH --job-name=ll_llead
@@ -56,7 +59,15 @@ mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 
 NODES="${SLURM_JOB_NUM_NODES:-32}"; GPN=4; NDEV=$((NODES * GPN))
-echo "level-leading A/B at ${NDEV} GPUs on ${NODES} nodes"
+# WHICH halo switch this A/B moves. One switch per run: every other halo knob
+# below is pinned, so the arms differ in exactly the named variable.
+SWITCH="${SWITCH:-LEGOESM_LATLON_HALO_LEVEL_LEADING}"
+case "$SWITCH" in
+  LEGOESM_LATLON_HALO_LEVEL_LEADING|LEGOESM_LATLON_HALO_DEDUP) ;;
+  *) echo "SWITCH='$SWITCH' is not a halo switch this job knows how to pin"
+     exit 2 ;;
+esac
+echo "A/B of $SWITCH at ${NDEV} GPUs on ${NODES} nodes"
 rc=0
 
 run_arm () {  # level_leading tag
@@ -65,12 +76,13 @@ run_arm () {  # level_leading tag
   # Every halo knob is PINNED, not merely left alone: an inherited no-comm
   # or ballast setting would give a wrong-answer or confounded run a
   # performance verdict, and the filename would not show it.
-  printf 'LEGOESM_LATLON_HALO_LEVEL_LEADING=%s NOCOMM=0 BALLAST=1\n' "$LL" \
-    > "$OUTDIR/${TAG}.env"
+  printf '%s=%s NOCOMM=0 BALLAST=1 (other halo switches pinned off)\n' \
+    "$SWITCH" "$LL" > "$OUTDIR/${TAG}.env"
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=0 LEGOESM_LATLON_HALO_BALLAST=1 \
-  LEGOESM_LATLON_HALO_LEVEL_LEADING=$LL JAX_ENABLE_X64=0 \
-    timeout --kill-after=30 600 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
+  LEGOESM_LATLON_HALO_LEVEL_LEADING=0 LEGOESM_LATLON_HALO_DEDUP=0 \
+  JAX_ENABLE_X64=0 \
+    env "$SWITCH=$LL" timeout --kill-after=30 600 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" --gpu-bind=none \
       --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
@@ -85,9 +97,13 @@ run_arm () {  # level_leading tag
 run_arm 0 warmup_discard
 for A in "0 off_a" "1 on_a" "1 on_b" "0 off_b"; do run_arm $A; done
 
-"$PY" - "$OUTDIR" "$NDEV" <<'PYEOF'
+SWITCH="$SWITCH" CONFIRM_PCT="${CONFIRM_PCT:-5}" REFUTE_PCT="${REFUTE_PCT:-2}" \
+  "$PY" - "$OUTDIR" "$NDEV" <<'PYEOF'
 import json, os, statistics, sys
 outdir, ndev = sys.argv[1], int(sys.argv[2])
+switch = os.environ["SWITCH"]
+confirm_pct = float(os.environ.get("CONFIRM_PCT", "5"))
+refute_pct = float(os.environ.get("REFUTE_PCT", "2"))
 problems = []
 
 
@@ -105,7 +121,11 @@ def load(tag):
     want = "1" if tag.startswith("on") else "0"
     # A filename is not evidence the knob took. If the benchmark does not
     # record this knob yet, say so rather than assuming either way.
-    bind = [("level-leading", knob.get("LEGOESM_LATLON_HALO_LEVEL_LEADING"), want),
+    others = {"LEGOESM_LATLON_HALO_LEVEL_LEADING",
+              "LEGOESM_LATLON_HALO_DEDUP"} - {switch}
+    bind = [("the switch under test", knob.get(switch), want)]
+    bind += [("pinned " + o, knob.get(o), "0") for o in sorted(others)]
+    bind += [
             ("packed exchange", knob.get("LEGOESM_LATLON_PACKED_EXCHANGE"), "1"),
             ("fused halo", knob.get("LEGOESM_LATLON_SPMD_FUSED_HALO"), "1"),
             ("no-comm", knob.get("LEGOESM_LATLON_HALO_NOCOMM"), "0"),
@@ -144,17 +164,18 @@ if "off" in med and "on" in med:
         good = [x for x in v if x is not None]
         if len(good) > 1:
             spreads.append(100.0 * (max(good) - min(good)) / min(good))
-    print("\nlevel-leading vs default at %d GPUs: %+.2f%%" % (ndev, d))
+    print("\n%s on vs off at %d GPUs: %+.2f%%" % (switch, ndev, d))
     if spreads and max(spreads) >= abs(d) / 2.0:
         print("  INCONCLUSIVE: an arm's own spread (%.2f%%) is not below half "
               "the effect. The pre-registered gate refuses this." % max(spreads))
-    elif d <= -5.0:
-        print("  CONFIRM: at or beyond the pre-registered 5% bar.")
-    elif abs(d) < 2.0:
-        print("  REFUTE: under the 2% bar; the removed conversions were not "
-              "on the critical path.")
+    elif d <= -confirm_pct:
+        print("  CONFIRM: at or beyond the pre-registered %.2f%% bar." % confirm_pct)
+    elif abs(d) < refute_pct:
+        print("  REFUTE: under the %.2f%% bar; what the switch removed was "
+              "not on the critical path." % refute_pct)
     else:
-        print("  INCONCLUSIVE: between the 2% and 5% bars.")
+        print("  INCONCLUSIVE: between the %.2f%% and %.2f%% bars."
+              % (refute_pct, confirm_pct))
 if problems:
     print("\nRECEIPT PROBLEMS -- the numbers above are not a verdict:")
     for p in problems:
