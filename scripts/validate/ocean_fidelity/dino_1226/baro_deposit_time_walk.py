@@ -559,21 +559,24 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     # measurement -- and this branch has already had to retract one claim
     # (a sign pattern) for exactly that reason.  Flag it mechanically instead
     # of leaving it to be noticed.
+    print("\n    PRINT-RESOLUTION FLOOR: the child prints 5 significant "
+          "figures, so each channel has its OWN relative quantum "
+          "(1e-07 / |mean|).")
     quantum = 1e-7 / abs(np.mean([r["in_loop"] for r in recs]))
-    print(f"\n    PRINT-RESOLUTION FLOOR: the child prints 5 significant "
-          f"figures, so the relative quantum is {quantum:.1e}.")
     for name in ("total", "forcing", "in_loop"):
+        q = 1e-7 / abs(np.mean([r[name] for r in recs]))
+        print(f"      {name:8s} quantum = {q:.1e}")
         for key in ("spread", "spread_drop_first", "parity_split",
                     "parity_split_drop_first"):
             v = out[name][key]
-            if v < quantum:
-                print(f"      {name}.{key} = {v:.3e} is BELOW one quantum -> "
-                      f"an upper bound of order {quantum:.0e}, NOT a measured "
+            if v < q:
+                print(f"        {name}.{key} = {v:.3e} is BELOW one quantum "
+                      f"-> an upper bound of order {q:.0e}, NOT a measured "
                       f"value")
-    print(f"      the ALIASED arm needs a spread above "
+    print(f"      the ALIASED arm needs an in-loop spread above "
           f"{5 * GRID320_IN_LOOP_SPREAD:.3e} = "
-          f"{5 * GRID320_IN_LOOP_SPREAD / quantum:.0f} quanta, so the verdict "
-          f"itself is not resolution-limited")
+          f"{5 * GRID320_IN_LOOP_SPREAD / quantum:.0f} of that channel's "
+          f"quanta, so the verdict itself is not resolution-limited")
     # POSITIVE CONTROL.  A flat in-loop share means nothing if the instrument
     # could not have seen a step-to-step change at all, so the null needs a
     # channel that DID move.  The primary control is the one in the table
@@ -590,9 +593,12 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     _ctl = out["total"]["spread"] / out["in_loop"]["spread"]
     print(f"\n    PRIMARY POSITIVE CONTROL (same functional, same child runs, "
           f"same five states):")
+    _ctl1 = (out["total"]["spread_drop_first"]
+             / out["in_loop"]["spread_drop_first"])
     print(f"      the TOTAL deposit's spread is {out['total']['spread']:.3e} "
           f"against the in-loop channel's {out['in_loop']['spread']:.3e} "
-          f"-> {_ctl:.0f}x.")
+          f"-> {_ctl:.0f}x   (leave-one-out twin, as promised above: "
+          f"{_ctl1:.0f}x)")
     print("      So the instrument DOES respond to the step-to-step state "
           "change, in the null's own units, while the in-loop channel does "
           "not.")
