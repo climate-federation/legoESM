@@ -1474,3 +1474,51 @@ measurement are the same sentence.
 
 CAVEAT ON PROCESS: codex could not run for any of this work (expired
 credential, three attempts), so the instrument carries ONE review.
+
+---
+
+## 2026-08-22 — THE NH GAP IS FOUND: the port corrupts its own halo areas
+
+Open since 2026-08-19; closed to a factor of 447 by one substitution.
+
+**The defect.** `update_dz_d` is not handed the gridstruct's `area`. It is
+handed a cached copy built by `nh_exchanged_area6`
+(`fv3_native_dsw_tail_3d.py:312-336`), which takes the port's area, runs its
+own `ext_scalar` exchange over it, and fills the corner region itself. The
+gridstruct's area agrees with the reference at the parity floor EVERYWHERE
+(7.2e-02 on 3.5e+10, ~2e-12 relative). The copy that kernel receives is off
+by **4.1e+09 in the halo edge strips (12%) and 1.4e+09 in the corner wedges
+(4%)**, on all six faces, all 36 corner cells (`nh_area_compare.py`, job
+9466872). The builder is fine; the extra exchange is the defect.
+
+**Why nothing found it for three days.** Every metric arm scored
+`gs6[t]["area"]`, which is correct. The corrupted array is derived from it
+afterwards and lives on the ctx, so the transplant experiments could not
+reach it and their null results were true for the array they tested.
+
+**The substitution, and what it buys** (jobs 9466882, 9466902):
+
+| | baseline | oracle areas at the disagreeing cells |
+|---|---|---|
+| height error after its update, k=0 interior | 3.67e-05 / 1.90e-05 | **1.6e-11** (parity floor) |
+| worst one-step relative, all faces/fields | 6.6116e-04 | **1.4778e-06** |
+| `w` \|d\|max | 1.3003e-07 | ~2.9e-10 |
+
+Both readings were PRE-REGISTERED before the run; the height arm's own
+criterion for "confirms" was the parity floor on all six faces and both
+interfaces, and that is what came back.
+
+**Two premises died on the way, both from prose.** `nh_exchanged_area6`'s
+docstring says the gridstruct "leaves BIG_NUMBER sentinels in the
+corner-diagonal halo cells of `area`" — it does not; the arm's own control
+refused on a real value of 2.55e+10 there. And the earlier "corner cells
+were never transplanted" story rested on the same sentence. Prose is a
+pointer.
+
+**NEXT, and it is a real fix rather than a probe:** make
+`nh_exchanged_area6` produce what the reference produces, or establish that
+the kernel should be handed the gridstruct's `area` unmodified. The
+transplant proves the values are wrong; it does not say which of those two
+is the right repair. The residual after the substitution (1.48e-06, led by
+`w`) is a NEW and smaller term — three orders above the hydrostatic arm's
+1.19e-09 — and has not been characterised.
