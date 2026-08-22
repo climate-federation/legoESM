@@ -4093,10 +4093,11 @@ class LatLonCGridOceanModel:
                 # at the ``state_mid = state._replace(...)`` above), so the NOW
                 # velocity has to travel separately.  These are the SAME arrays
                 # the dyn_drg_init pu_RHSi residual above already reads.  NEMO
-                # has ONE rCdU_bot; this model builds it in THREE places, and
-                # the third -- the implicit vertical-mixing matrix, which
-                # rebuilds it from the AFTER state it is handed -- is still on
-                # a level NEMO never uses.  Named, not fixed here (#1455).
+                # has ONE rCdU_bot; this model builds it in three places, and
+                # all three are now on the now level -- the third, the implicit
+                # vertical-mixing matrix, was fixed by the sibling commit that
+                # threads the same u_now/v_now into
+                # ``_apply_implicit_vertical_mixing`` (#1455).
                 _baro_seed = dict(
                     _baro_seed, substep_scale=_barotropic_substep_scale,
                     u_now=state.u.data, v_now=state.v.data)
@@ -6213,6 +6214,19 @@ class LatLonCGridOceanModel:
         (bit-identical single-device path); a band-local grid is injected
         by a future ``shard_map`` wrapper.
         """
+        # Argument validation at ENTRY, not inside the drag branch below: one
+        # component of the now-level velocity without the other would build the
+        # rate's |U| from two time levels, and a caller that gets it wrong with
+        # do_momentum=False or the drag flag off deserves the error just as
+        # much (review N4).  Static Python args -- nothing is traced.
+        if (u_now is None) != (v_now is None):
+            raise ValueError(
+                "implicit vertical mixing's now-level drag velocity must "
+                "supply BOTH u_now and v_now or NEITHER (one alone mixes "
+                "time levels inside one |U|); got "
+                f"u_now={'set' if u_now is not None else None}, "
+                f"v_now={'set' if v_now is not None else None}.")
+
         if dt_mom is None:
             dt_mom = dt
         _grid = grid if grid is not None else self.grid
@@ -6431,8 +6445,8 @@ class LatLonCGridOceanModel:
         # the AFTER thickness — thread eta_now there too, and ``u_now``/
         # ``v_now`` with it (#1455: the bottom-drag rate below has exactly the
         # same NOW-vs-AFTER problem, and is threaded from the same sites).
-        # Static Python
-        # bools (feature-gating exception, CLAUDE.md) — config is not traced.
+        # Static Python bools (feature-gating exception, CLAUDE.md) — config
+        # is not traced.
         _dzw_slot = bool(getattr(self.config, "implicit_vmix_dzw_slot", False))
         _e3t_now_slot = bool(
             getattr(self.config, "implicit_vmix_e3t_now_divisor", False))
@@ -6685,13 +6699,6 @@ class LatLonCGridOceanModel:
             # which on every production path is a post-update AFTER state --
             # exactly the situation ``eta_now`` above already exists for, and
             # threaded from the same call sites.
-            if (u_now is None) != (v_now is None):
-                raise ValueError(
-                    "implicit vertical mixing's now-level drag velocity must "
-                    "supply BOTH u_now and v_now or NEITHER (one alone mixes "
-                    "time levels inside one |U|); got "
-                    f"u_now={'set' if u_now is not None else None}, "
-                    f"v_now={'set' if v_now is not None else None}.")
             _u_drg = state.u.data if u_now is None else u_now
             _v_drg = state.v.data if v_now is None else v_now
             # THICKNESS row, named and deliberately NOT threaded: NEMO builds

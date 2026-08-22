@@ -1304,6 +1304,17 @@ def barotropic_substeps_latlon_cgrid(
     # All-or-none: a partial before-level seed would mix (e.g.) the NOW velocity
     # over the BEFORE eta-thickness — a silent inconsistency.  The MLF always
     # passes all three; reject any partial override (static Python check).
+    # Same all-or-none rule as the before-level seed just below, and checked in
+    # the same place rather than inside the drag branch: one component of the
+    # now-level velocity without the other builds the rate's |U| from two time
+    # levels, and a caller that gets it wrong with the drag flag off deserves
+    # the error just as much (review N4).  Static Python args, nothing traced.
+    if (u_now is None) != (v_now is None):
+        raise ValueError(
+            "barotropic drag-rate now-level velocity must supply BOTH "
+            "u_now and v_now or NEITHER (one alone mixes time levels "
+            f"inside one |U|); got u_now={'set' if u_now is not None else None}, "
+            f"v_now={'set' if v_now is not None else None}.")
     if _seed_override and (eta_init is None or u_init is None or v_init is None):
         raise ValueError(
             "barotropic before-level seed must supply ALL of eta_init/u_init/"
@@ -1466,12 +1477,6 @@ def barotropic_substeps_latlon_cgrid(
         # evaluated at stpmlf.F90:190 BEFORE the dyn_* chain).  ``u_corr`` is
         # whatever velocity ``state`` carries, which on the production path is
         # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
-        if (u_now is None) != (v_now is None):
-            raise ValueError(
-                "barotropic drag-rate now-level velocity must supply BOTH "
-                "u_now and v_now or NEITHER (one alone mixes time levels "
-                f"inside one |U|); got u_now={'set' if u_now is not None else None}, "
-                f"v_now={'set' if v_now is not None else None}.")
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(

@@ -1024,10 +1024,12 @@ def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
     at :156-159 and :296 without ever recomputing it.
 
     So within ONE step there is exactly one drag velocity: the step-entry one.
-    This asserts that invariant over every call routed through the SHARED
-    faces helper -- the barotropic loop, the dyn_drg_init residual and the
-    implicit vertical-mixing matrix -- so a fourth consumer added on that
-    route cannot quietly pick the wrong level.
+    This asserts that invariant over every call that fires IN THIS
+    CONFIGURATION -- the dyn_drg_init residual, the barotropic loop and the
+    implicit vertical-mixing matrix -- so a new consumer on that route cannot
+    quietly pick the wrong level.  ``_bc_bottom_drag`` is a fourth static site
+    on the same helper; it does not fire under ``zdf_drag_in_matrix=True`` and
+    is therefore not covered here.
 
     SCOPE, stated because the obvious wider claim would be false: it does NOT
     cover ``_tke_bottom_dirichlet``, which calls ``nemo_effective_bottom_drag_r``
@@ -1063,7 +1065,7 @@ def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
 
     _pemod.nemo_bottom_drag_rate_faces = _spy
     try:
-        model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+        out = model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
     finally:
         _pemod.nemo_bottom_drag_rate_faces = orig
 
@@ -1078,11 +1080,10 @@ def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
             f"drag call {i} of {len(seen)}: max|dv| = "
             f"{np.abs(v_i - v_now).max():.4e} m/s")
     # ...and the step really did move the velocity, so the equalities above are
-    # assertions about a time level and not a rest-state tautology.
-    out = model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
-    # ``_step_impl`` returns either the state or (state, extras) depending on
-    # the config -- and the state is itself a NamedTuple, so an isinstance
-    # tuple check cannot tell them apart.  Probe for the field instead.
+    # assertions about a time level and not a rest-state tautology.  Uses the
+    # return of the SPIED call above -- ``_step_impl`` returns either the state
+    # or (state, extras), and the state is itself a NamedTuple, so an isinstance
+    # tuple check cannot tell them apart; probe for the field instead.
     _out = out if hasattr(out, "u") else out[0]
     assert np.max(np.abs(np.asarray(_out.u.data) - u_now)) > 1e-6
 
