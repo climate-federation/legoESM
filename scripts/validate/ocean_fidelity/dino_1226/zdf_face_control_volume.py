@@ -25,7 +25,13 @@ first.
     arm with the fix in the tree and one with it reverted, then diff the
     arrays -- NOT printed summaries.
 
-    RECORDED (commit 65d6703de vs its parent 4e652b101):
+    RECORDED (commit 65d6703de vs its parent 4e652b101).  NOTE: these two
+    numbers were taken BEFORE the loop below threaded the card's surface
+    tracer forcing, so they are a difference between two arms that both
+    omitted it.  As a DIFFERENCE they stand -- the omission was common to
+    both -- but they are not the shipped card's trajectory, and the 32-step
+    amplification in particular belongs to a configuration the card does not
+    run.  Re-run them if the number is to be quoted as the card's.
       1 step  : T, S, eta max|A-B| = 0.0 exactly; u 1.45e-15, v 8.33e-16 m/s
                 -- about six ulp on a 0.75 m/s field, i.e. round-off.
       32 steps: u 3.78e-03, v 8.39e-03, T 3.27e-05 -- the model amplifying that
@@ -38,8 +44,24 @@ WHY THE ONE-STEP RESULT IS THE ANSWER AND NOT A DISAPPOINTMENT.  Inside
 back, while ``zdf_drag_in_matrix`` subtracts ``E*c`` from the same solve input.
 The tridiagonal satisfies ``A*1 = (I+E)*1`` (implicit_solver.py:329-336:
 ``b = 1 + alpha + beta + extra_diag``, ``a = -alpha``, ``c = -beta``), so the
-solve returns ``A^-1 u`` for ANY ``c``.  The divisor is algebraically inert
-there; the defect was real geometry with no live consumer.
+solve returns ``A^-1 u`` for ANY ``c``.
+
+SCOPE OF THAT ARGUMENT, because "no live consumer" would be too strong and an
+earlier version of this note said it.  The cancellation is exact only while
+three things hold, and a reader should check them before reusing the claim:
+the column mean is subtracted and restored with the SAME thickness; the
+operator is linear in u and acts as the identity on the depth-uniform mode --
+which a thickness-dependent viscosity or a quadratic bottom drag breaks; and
+the barotropic solver's own operators never see the inflated thickness.
+
+And the divisor is inert only for the depth-integrated transport this A/B
+scores.  A wrong column depth does NOT cancel in the vertical velocity from
+continuity, the free-surface divergence, the bottom drag (which scales with
+the bottom cell's own thickness), the overturning below the last full cell,
+the discrete pressure gradient across a partial step, or any
+thickness-weighted transport diagnostic on the affected columns.  This probe
+measures one metric; it exonerates the operator for that metric and for
+nothing else.
 
 This probe does NOT print a verdict.  The interpretation belongs in the
 analysis, after these controls pass.
@@ -135,7 +157,13 @@ def _run_arm(recipe: str, steps: int, out: str) -> None:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
 
-    from kamm_twin_90d import DT, RUN_STEPDUMP, RUN_TRAJ, _build_twin_state
+    from kamm_twin_90d import (
+        DT, RESTART_FILE, RUN_STEPDUMP, RUN_TRAJ, _build_twin_state,
+        seasonal_t0_seconds,
+    )
+    from legoesm.ocean.experiments.dino import (
+        apply_dino_lat_lon_surface_forcing,
+    )
 
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, RUN_TRAJ, RUN_STEPDUMP, bridge_before=True)
@@ -143,9 +171,30 @@ def _run_arm(recipe: str, steps: int, out: str) -> None:
           f"zdf_drag_in_matrix={mc.zdf_drag_in_matrix} "
           f"reconcile={mc.barotropic.barotropic_reconcile_target} "
           f"after={mc.barotropic.barotropic_after_reconcile}", flush=True)
-    t0 = float(getattr(br, "t_seconds0", 0.0) or 0.0)
+    # STEP THE WAY THE HARNESS STEPS, not a simplification of it. This card
+    # places its surface tendency on the leap-frog right-hand side, which
+    # REQUIRES the forcing to be applied with ``return_rate=True`` and the
+    # rate threaded into the step; calling ``model.step`` without it omits
+    # every heat, salt and solar tendency for the whole run. The arms would
+    # still differ only in the variable under test -- both omit the same
+    # thing -- but the docstring's claim to be an A/B "of the whole model on
+    # the shipped card" would be false, and the amplification quoted at 32
+    # steps would be an amplification in a configuration the card never runs.
+    # Found in review; the two branches below mirror kamm_twin_90d verbatim.
+    _placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    t0 = seasonal_t0_seconds(f"{RUN_STEPDUMP}/{RESTART_FILE}")
     for n in range(steps):
-        st = model.step(st, DT, surface_forcing=sf, t_seconds=t0 + n * DT)
+        _t = t0 + (n + 1) * DT
+        if _placement == "leapfrog_rhs":
+            st, _ext = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=_t,
+                return_rate=True)
+            st = model.step(st, DT, surface_forcing=sf,
+                            external_tracer_rate=_ext, t_seconds=_t)
+        else:
+            st = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=_t)
+            st = model.step(st, DT, surface_forcing=sf, t_seconds=_t)
     np.savez(out, u=np.asarray(st.u.data), v=np.asarray(st.v.data),
              T=np.asarray(st.T.data), S=np.asarray(st.S.data),
              eta=np.asarray(st.eta.data))
