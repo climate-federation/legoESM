@@ -680,7 +680,8 @@ def main() -> int:
                           "LEGOESM_MPAS_RAGGED_HALO",
                           "LEGOESM_MPAS_HALO_BALLAST",
                           "LEGOESM_MPAS_HALO_NOCOMM",
-                          "LEGOESM_MPAS_HALO_NOSTAGE")
+                          "LEGOESM_MPAS_HALO_NOSTAGE",
+                          "LEGOESM_MPAS_HALO_MERGE_SCATTER")
             },
         },
     ))

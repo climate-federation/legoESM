@@ -2157,6 +2157,8 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     recv_edge_pos_out: list[jnp.ndarray] = []
     halo_cells_per_round: list[int] = []
     halo_edges_per_round: list[int] = []
+    recv_cell_pos_np: list[np.ndarray] = []
+    recv_edge_pos_np: list[np.ndarray] = []
 
     for r in range(n_rounds):
         # Max halo size across all pairs in this round
@@ -2213,6 +2215,11 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
         recv_cell_pos_out.append(jnp.array(rc))
         send_edge_idx_out.append(jnp.array(se))
         recv_edge_pos_out.append(jnp.array(re))
+        recv_cell_pos_np.append(rc)
+        recv_edge_pos_np.append(re)
+
+    assert_recv_positions_unique(
+        recv_cell_pos_np, recv_edge_pos_np, n_dev, max_lc, max_le)
 
     return {
         'n_rounds': n_rounds,
@@ -2314,6 +2321,45 @@ def _unpack_cell_state(cell_buf, nlev):
             cell_buf[:, nlev + 1], cell_buf[:, nlev + 2:])
 
 
+
+def assert_recv_positions_unique(recv_cell_pos, recv_edge_pos, n_dev,
+                                 cell_garbage, edge_garbage):
+    """Raise if any device receives the same halo position in two rounds.
+
+    Every halo row has exactly one owner, so a device receives each of its
+    halo positions in exactly one round. The per-round fill does not need
+    that -- later rounds simply overwrite earlier ones -- but the merged fill
+    (``LEGOESM_MPAS_HALO_MERGE_SCATTER``) writes all rounds in a single
+    scatter, where a repeated position has no defined winner and a GPU may
+    resolve it differently from a CPU.
+
+    So if a future schedule ever relays a row through an intermediate value,
+    or sends a shared corner twice, it is caught here, on the host, before
+    any of it reaches a device.
+
+    ``recv_cell_pos`` / ``recv_edge_pos`` are per-round ``(n_dev, max_*)``
+    integer arrays; entries equal to the garbage position are the padding
+    that every round shares and are excluded.
+    """
+    for device in range(n_dev):
+        for name, per_round, garbage in (
+                ("cell", recv_cell_pos, cell_garbage),
+                ("edge", recv_edge_pos, edge_garbage)):
+            written = np.concatenate([r[device] for r in per_round])
+            real = written[written != garbage]
+            positions, counts = np.unique(real, return_counts=True)
+            repeated = positions[counts > 1]
+            if repeated.size:
+                raise ValueError(
+                    f"halo schedule writes the same {name} position more "
+                    f"than once on device {device}: "
+                    f"{repeated[:8].tolist()}"
+                    + (f" and {repeated.size - 8} more"
+                       if repeated.size > 8 else "")
+                    + ". The merged halo scatter has no defined winner for "
+                      "a repeated position.")
+
+
 def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
                         max_lc, max_le):
     """Fill (owned + halo) local buffers from owned shards via ppermute.
@@ -2340,11 +2386,29 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
 
     cells_per = cell_pack.shape[0]
     edges_per = u_shard.shape[0]
-    # +1 garbage slot for padded scatter targets (trimmed at the end):
-    # schedule rows are padded to the round's max halo count, and padding
-    # entries target position max_lc / max_le.
-    cell_local = jnp.pad(cell_pack, ((0, max_lc + 1 - cells_per), (0, 0)))
-    u_local = jnp.pad(u_shard, ((0, max_le + 1 - edges_per), (0, 0)))
+    # ONE scatter per entity class instead of one per round, when asked.
+    merge_scatter = _resolve_halo_merge_scatter(
+        _os_ballast.environ.get("LEGOESM_MPAS_HALO_MERGE_SCATTER", ""))
+
+    # Garbage slots for padded scatter targets, trimmed at the end: schedule
+    # rows are padded to the round's max halo count, and padding entries
+    # target position max_lc / max_le.
+    #
+    # The merged path gives EVERY ROUND ITS OWN garbage row rather than
+    # sharing one. Sharing works forward -- the row is trimmed off, so an
+    # unspecified winner never reaches the answer -- but it makes the single
+    # scatter's index list non-unique, which (a) is undefined behaviour that
+    # a GPU can resolve differently from a CPU, and (b) has a reverse-mode
+    # transpose that gathers that row's cotangent back to the padding entry
+    # of every round at once. One row per round makes the whole index list
+    # unique, which is both correct by construction and cheaper: the scatter
+    # can then be lowered with the no-duplicates promise.
+    n_rounds = len(halo_sl)
+    _pad_slots = n_rounds if merge_scatter else 1
+    cell_local = jnp.pad(
+        cell_pack, ((0, max_lc + _pad_slots - cells_per), (0, 0)))
+    u_local = jnp.pad(
+        u_shard, ((0, max_le + _pad_slots - edges_per), (0, 0)))
 
     ballast = _resolve_halo_ballast(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_BALLAST", ""))
@@ -2352,6 +2416,19 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOCOMM", ""))
     nostage = _resolve_halo_nostage(
         _os_ballast.environ.get("LEGOESM_MPAS_HALO_NOSTAGE", ""))
+
+    # Each halo row has exactly ONE owner, so the real receive positions are
+    # disjoint across rounds; that is what makes the writes safe to defer and
+    # issue together, and it is asserted on the schedule where the schedule
+    # is built, not trusted here.
+    _pending_c, _pending_cp, _pending_e, _pending_ep = [], [], [], []
+
+    if merge_scatter and nostage:
+        raise ValueError(
+            "LEGOESM_MPAS_HALO_MERGE_SCATTER=1 together with "
+            "LEGOESM_MPAS_HALO_NOSTAGE=1: the no-stage arm performs no "
+            "scatters at all, so the merge switch cannot act, and a receipt "
+            "recording both would name a knob that did nothing. Unset one.")
 
     if nostage:
         # MEASUREMENT ONLY, WRONG ANSWERS: skip the whole per-round loop,
@@ -2368,6 +2445,7 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
         # sharded one. Found by codex review after exactly that
         # subtraction had been reported.
         return cell_local[:max_lc], u_local[:max_le]
+
 
     for r, (sc, rc, se, re) in enumerate(halo_sl):
         send_c = cell_pack[sc[0]]             # (hc_r, W)
@@ -2410,8 +2488,20 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
         recv_c = recv_packed[:split_at].reshape(send_c.shape)
         recv_e = recv_packed[split_at:split_at + send_e.size].reshape(
             send_e.shape)
-        cell_local = cell_local.at[rc[0]].set(recv_c)
-        u_local = u_local.at[re[0]].set(recv_e)
+        if merge_scatter:
+            _pending_c.append(recv_c)
+            _pending_cp.append(jnp.where(rc[0] == max_lc, max_lc + r, rc[0]))
+            _pending_e.append(recv_e)
+            _pending_ep.append(jnp.where(re[0] == max_le, max_le + r, re[0]))
+        else:
+            cell_local = cell_local.at[rc[0]].set(recv_c)
+            u_local = u_local.at[re[0]].set(recv_e)
+
+    if merge_scatter and _pending_c:
+        cell_local = cell_local.at[jnp.concatenate(_pending_cp)].set(
+            jnp.concatenate(_pending_c, axis=0), unique_indices=True)
+        u_local = u_local.at[jnp.concatenate(_pending_ep)].set(
+            jnp.concatenate(_pending_e, axis=0), unique_indices=True)
 
     return cell_local[:max_lc], u_local[:max_le]
 
@@ -2419,6 +2509,36 @@ def _ppermute_halo_fill(cell_pack, u_shard, halo_sl, ppermute_perms,
 #: Canonical decimal integer, no sign / whitespace / underscores /
 #: leading zeros — the spellings ``int()`` would silently accept.
 _CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_halo_merge_scatter(env_value: str) -> bool:
+    """Resolve ``LEGOESM_MPAS_HALO_MERGE_SCATTER``: write the received halo
+    rows into the local buffers ONCE instead of once per coloured round;
+    ``''``/``'0'`` = off (default).
+
+    The on-device staging -- gather, concatenate, scatter -- costs 0.310 ms of
+    a 5.760 ms step at 64 GPUs, measured by an arm that skips it entirely. The
+    fill scatters thirteen times, once per round. Each halo row has exactly
+    one owner, so the receive positions are disjoint across rounds and the
+    writes can be deferred and issued together.
+
+    Bit-identical: every real position is written once with the same value
+    either way. The one repeated index is the padding's garbage slot, which
+    every round targets and which is trimmed off the return, so an unspecified
+    winner there cannot reach the answer.
+
+    Off by default because it changes the compiled program, and that is a
+    measurement to take rather than a default to move.
+
+    Unknown values raise (dispatch hardening).
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_MERGE_SCATTER={env_value!r}: must be '0' or '1' "
+        f"(empty = off).")
 
 
 def _resolve_halo_nocomm(env_value: str) -> bool:
