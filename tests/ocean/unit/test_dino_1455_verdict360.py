@@ -248,3 +248,161 @@ def test_scored_day_cadence_matches_the_donor_namelist(V):
     stock = int(re.search(r"=\s*(\d+)", m[0]).group(1))
     cadence_days = stock // V.G.STEPS_PER_DAY
     assert all(d % cadence_days == 0 for d in V.SCORE_DAYS), cadence_days
+
+
+# ---------------------------------------------------------------------------
+# review round 2: the scoring layer driven END TO END on synthetic members
+# ---------------------------------------------------------------------------
+def _synth(V, gap=0.0, tie_day=None, tie_metric="smax", grow=False):
+    """Four members a side on every scored day.
+
+    Member i gets a deterministic offset so the ensemble has a real spread; the
+    legoESM side is additionally displaced by `gap`. `tie_day`/`tie_metric`
+    plant a two-member tie so the tie handling can be exercised; `grow` makes
+    the spread keep growing so the saturation test must say NO.
+    """
+    rows = {"lego": {i: {} for i in range(V.N_MEM)},
+            "nemo": {i: {} for i in range(V.N_MEM)}}
+    for day in V.SCORE_DAYS:
+        scale = (day / 360.0) ** 3 if grow else min(day, 180) / 180.0
+        for side in ("lego", "nemo"):
+            for i in range(V.N_MEM):
+                for k in V.KEYS:
+                    base = 10.0 + V.KEYS.index(k)
+                    off = (i + 1) * 1e-3 * scale * (1.0 if side == "lego" else 0.5)
+                    val = base + off + (gap if side == "lego" else 0.0)
+                    if (tie_day is not None and day == tie_day
+                            and k == tie_metric and side == "lego" and i in (1, 2)):
+                        val = base + 1e-3 * scale + (gap if side == "lego" else 0.0)
+                    rows[side][i][day] = rows[side][i].get(day, {})
+                    rows[side][i][day][k] = val
+    # P5 reads the day-90 ACC on both sides; plant the recorded pair so the
+    # gate passes, since P5 is exercised separately below.
+    rows["lego"][0][90]["acc"] = 64.986934
+    rows["nemo"][0][90]["acc"] = V.R.NEMO_D90_ACC_SV
+    return rows
+
+
+def _quantum(V, tiny=True):
+    q = {k: (1e-12 if tiny else 1e6) for k in V.KEYS}
+    return {d: dict(q) for d in V.HORIZONS}
+
+
+def test_scoring_layer_runs_end_to_end_without_aborting(V, capsys):
+    """The whole reporting path, driven once. Both reviews traced their
+    blocking findings to the fact that this had never been run: a control that
+    raises, or a table that divides by zero, would otherwise surface only after
+    eight multi-hour integrations."""
+    rows = _synth(V)
+    thin = V.separation_control(rows, _quantum(V))
+    unsat = V.saturation_table(rows)
+    V.spread_curves(rows, {k: 1e-12 for k in V.KEYS})
+    V.empirical_rule_controls(rows)
+    V.verdict_table(rows, thin, unsat)
+    V.window_table(rows, unsat)
+    out = capsys.readouterr().out
+    assert "THE VERDICT TABLE" in out and "FINAL-90-DAY WINDOW MEANS" in out
+    for day in V.HORIZONS:
+        assert f"--- day {day} ---" in out
+    for k in V.KEYS:
+        assert V.LABELS[k] in out
+
+
+def test_an_early_tie_is_a_flag_and_a_final_tie_is_fatal(V, capsys):
+    """The exact abort both reviews measured on the real ensemble: the
+    southern-band sigma MAX ties 2-of-4 at day 90 because it is a single-cell
+    maximum of a float32-stored field. That must NOT kill the report."""
+    early = _synth(V, tie_day=90)
+    V.separation_control(early, _quantum(V))          # must not raise
+    assert "SEPARATION / TIES" in capsys.readouterr().out
+    final = _synth(V, tie_day=V.N_DAYS)
+    with pytest.raises(SystemExit, match="distinct member values"):
+        V.separation_control(final, _quantum(V))
+
+
+def test_the_verdict_table_says_no_on_a_planted_gap(V, capsys):
+    """Non-vacuity of the whole printed path, not just of verdict()."""
+    rows = _synth(V, gap=10.0)
+    V.verdict_table(rows, {d: set() for d in V.HORIZONS}, set())
+    # Slice the day-360 ROWS only: the legend below the table contains the
+    # word YES as part of its explanation, so asserting on the whole tail
+    # tests the legend rather than the verdicts (the expectation was wrong
+    # here, not the code).
+    body = capsys.readouterr().out
+    day360 = body.split("--- day 360 ---")[1].split("  verdict:")[0]
+    assert " no" in day360 and "YES" not in day360
+
+
+def test_the_verdict_table_says_yes_when_the_models_agree(V, capsys):
+    rows = _synth(V, gap=0.0)
+    V.verdict_table(rows, {d: set() for d in V.HORIZONS}, set())
+    day360 = capsys.readouterr().out.split("--- day 360 ---")[1] \
+        .split("  verdict:")[0]
+    assert "YES" in day360 and " no" not in day360
+
+
+def test_saturation_needs_two_consecutive_quarters(V, capsys):
+    """A single quarter under the ratio has a measured false positive (NEMO's
+    ACC spread fell 30->60 then grew 300x). A still-growing ensemble must be
+    flagged unsaturated."""
+    assert V.SATURATION_QUARTERS == ((180, 270), (270, 360))
+    flat = V.saturation_table(_synth(V))
+    assert flat == set(), "a flat ensemble must read as saturated"
+    growing = V.saturation_table(_synth(V, grow=True))
+    assert growing == set(V.KEYS), "a growing ensemble must read as unsaturated"
+
+
+def test_one_sided_floor_is_flagged(V):
+    """The pre-registration justified the RSS as sqrt(2) x one side when the
+    two sides wobble equally. Measured, they differ by 9x-16600x, so the flag
+    must fire whenever the RSS is really one model's dispersion."""
+    rows = _synth(V)
+    lopsided = {"lego": {i: {360: {"x": float(v)}} for i, v in enumerate([0, 1, 2, 3])},
+                "nemo": {i: {360: {"x": float(v) * 1e-4} for _ in [0]}
+                         for i, v in enumerate([0, 1, 2, 3])}}
+    saved_keys = V.KEYS
+    try:
+        V.KEYS = ("x",)
+        assert V.one_sided_flags(lopsided, 360) == {"x"}
+        even = {s: {i: {360: {"x": float(v)}} for i, v in enumerate([0, 1, 2, 3])}
+                for s in ("lego", "nemo")}
+        assert V.one_sided_flags(even, 360) == set()
+    finally:
+        V.KEYS = saved_keys
+
+
+def test_p5_gates_the_registered_gap_not_the_two_absolutes(V, capsys):
+    """The registered quantity is the GAP. Two absolutes can each drift the
+    same way and leave the gap perfect (must PASS), or drift opposite ways and
+    blow a gap the per-side test would accept (must FAIL)."""
+    rows = _synth(V)
+    V.p5_provenance_gate(rows)                       # exact -> passes
+    shifted = _synth(V)
+    shifted["lego"][0][90]["acc"] += 0.5             # both sides move together
+    shifted["nemo"][0][90]["acc"] += 0.5
+    V.p5_provenance_gate(shifted)                    # gap unchanged -> passes
+    broken = _synth(V)
+    broken["lego"][0][90]["acc"] += 0.01             # gap moves
+    with pytest.raises(SystemExit, match="P5 REFUTED"):
+        V.p5_provenance_gate(broken)
+
+
+def test_unres_band_helper_is_shared_by_both_printers(V):
+    """It was spelled inline in two printers and tested in neither."""
+    assert V._label(1.5, 1.0) == "YES"
+    assert V._label(2.2, 1.0) == "unres"
+    assert V._label(9.0, 1.0) == "no"
+    assert V._label(-2.2, 1.0) == "unres"
+    assert V._label(1.0, 0.0) == "NO-FLOOR"
+
+
+def test_launch_sha_is_recorded_and_reused(V, tmp_path):
+    """Gating a partially-complete ensemble against LIVE HEAD makes it
+    unresumable the moment anything else is committed -- which happened twice
+    during this campaign."""
+    d = str(tmp_path)
+    first = V.launch_sha(d)
+    assert (tmp_path / ".launch_sha").exists()
+    (tmp_path / ".launch_sha").write_text("deadbeef\n")
+    assert V.launch_sha(d) == "deadbeef"
+    assert first != "deadbeef"

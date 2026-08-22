@@ -43,13 +43,17 @@ METRICS -- all IMPORTED, none re-derived here:
                                                      with its own LAT_GROUPS + _avg)
 
 WHY THE FULL SECTION IS REPORTED BUT NOT THE VERDICT.  ``acc_full`` integrates
-every latitude row into one number, and the campaign's own decomposition shows
-the three latitude groups carry OPPOSITE-SIGNED gaps (south-of-band negative,
-channel positive).  A small full-section number can therefore be two large
-cancelling errors, and a large one can be one small error in a group with
-little compensation.  The gate metric is still printed -- it is the recorded
-headline and dropping it would hide a regression -- but every verdict in the
-table is per-GROUP.
+every latitude row into one number and reduces with a MEDIAN over longitudes,
+so it is not additive over the three latitude groups (``acc_mean`` is, and the
+partition is checked at score time).  The three groups do carry opposite-signed
+gaps -- but MEASURED at day 90 they are south -0.4405, channel +0.0632, north
+-0.0241 Sv against a full-section gap of -0.4107, i.e. the full-section number
+is DOMINATED BY ONE GROUP, lightly offset.  An earlier revision of this
+docstring, and the pre-registration, said "two large cancelling errors"; that
+is RETRACTED as overstated on this data.  The reason to score per-group stands
+either way: which group owns the gap is the actionable fact, and a single
+summed number cannot say.  The gate metric is still printed -- it is the
+recorded headline and dropping it would hide a regression.
 
 VERDICT ARITHMETIC, stated once so it cannot drift:
   gap(day)   = lego member-0 metric - NEMO member-0 metric, SAME day, SAME
@@ -100,6 +104,7 @@ sys.path.insert(0, os.path.dirname(_DIR))
 import acc_driver_decomp as D          # noqa: E402  group_transport / LAT_GROUPS
 import acc_thermal_wind as A           # noqa: E402  mesh, masks, J0/J1
 import acceptance_gate_90d as G        # noqa: E402  the five gate metrics
+import acc_metric_reconciliation as R   # noqa: E402  NEMO_D90_ACC_SV, imported not pasted
 import floor90_ensemble as F           # noqa: E402  spread(), band reductions
 import perturb_nemo_tn_90d as P        # noqa: E402  the committed NEMO kick
 
@@ -134,8 +139,11 @@ LABELS = dict(G.LABELS,
               g_south="SOUTH of band transport [Sv]",
               g_band="channel band transport [Sv] (group)",
               g_north="NORTH of band transport [Sv]")
-# The full section mixes the signs of the three groups, so it is reported and
-# never given a per-group verdict of its own.
+# The full section is a MEDIAN over longitudes and therefore NOT additive over
+# the three latitude groups, so it is reported and never given a per-group
+# verdict of its own.  (It also mixes their signs -- but measured, it is
+# dominated by the southern basin rather than built from cancelling terms; see
+# the module docstring's retraction.)
 SIGN_MIXING = ("acc",)
 
 # The PRE-REGISTERED rule is |gap| <= 2 x floor and is not adjustable.  But the
@@ -158,6 +166,18 @@ QUANTUM_MARGIN = 10.0
 # says so: a YES still stands (the runs did not separate even though they had
 # room to), a `no` does not (the denominator is still growing).
 SATURATION_RATIO_MAX = 1.3
+# N3: ONE quarter under the ratio is not saturation.  Measured false positive on
+# the existing 90-day NEMO ensemble: NEMO's ACC spread FELL from day 30 to 60
+# (ratio 0.52, "saturated") and then grew ~300x -- the Asselin filter damping the
+# leapfrog computational mode before physical error growth takes over.  Two
+# CONSECUTIVE quarters are required, plus a dispersion check (below).
+SATURATION_QUARTERS = ((180, 270), (270, 360))
+# The two sides' spreads must be within ~1 order of magnitude for the RSS to be
+# a genuinely TWO-sided floor.  Measured at day 90 on the existing ensembles,
+# lego/NEMO runs 9.3x to 16596x, so the RSS is in practice LEGO'S OWN DISPERSION
+# and the "sqrt(2) x one side" reading of it is empirically false.  Flagged per
+# metric rather than argued.
+ONE_SIDED_DECADES = 1.0
 
 
 def member_name(i):
@@ -209,7 +229,12 @@ def lego_state(npz, day):
     st = G.load_candidate(npz, day)
     own = np.asarray(st["land_mask"], dtype=np.float64) > 0.5
     ref = np.asarray(A.tmask[:, :, 0]) if A.tmask.ndim == 3 else np.asarray(A.tmask)
-    if own.shape == ref.shape and not np.array_equal(own, ref):
+    if own.shape != ref.shape:
+        raise SystemExit(
+            f"{npz} day {day}: the candidate's land mask is {own.shape} and "
+            f"NEMO's reference mask is {ref.shape}. A shape mismatch used to "
+            f"SKIP this check, which is the one case where it matters most.")
+    if not np.array_equal(own, ref):
         raise SystemExit(
             f"{npz} day {day}: the candidate's own land mask disagrees with "
             f"NEMO's reference mask on {int((own != ref).sum())} cells -- "
@@ -244,6 +269,27 @@ def lego_cmd(out_dir, i):
     return cmd
 
 
+def launch_sha(out_dir):
+    """The revision the ENSEMBLE was launched at, recorded in the output dir.
+
+    Gating a partially-complete ensemble against the LIVE HEAD makes it
+    unresumable the moment anything else is committed -- and this campaign
+    committed twice while its members were integrating.  The ensemble's own
+    revision is the invariant that matters: every member must match EACH OTHER
+    and the recorded launch, not whatever HEAD happens to be now (round-2
+    review).
+    """
+    path = f"{out_dir}/.launch_sha"
+    if os.path.exists(path):
+        with open(path) as fh:
+            return fh.read().strip()
+    sha = F.head_sha()
+    os.makedirs(out_dir, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(sha + "\n")
+    return sha
+
+
 def run_lego(out_dir, gpus):
     """Launch every missing member, one per GPU, at most len(gpus) at a time.
 
@@ -263,7 +309,7 @@ def run_lego(out_dir, gpus):
         # other side, the hole floor90_ensemble.run_member closed deliberately:
         # four members left over from an older revision agree with EACH OTHER
         # and sail through every downstream control (code review finding 3).
-        want, got = F.head_sha(), F.member_sha(lego_log(out_dir, i))
+        want, got = launch_sha(out_dir), F.member_sha(lego_log(out_dir, i))
         if got != want:
             raise SystemExit(
                 f"{lego_npz(out_dir, i)} exists but its log records "
@@ -369,15 +415,22 @@ def setup_nemo():
 def run_nemo(concurrency=1):
     """Launch the four members, `concurrency` at a time.
 
-    SERIAL BY DEFAULT, and that is a measurement, not caution.  Launched
-    4-wide (4 x 16 = 64 of this machine's 80 cores) the members ran at 14
-    steps/min each -- 55 steps/min aggregate -- against 137 steps/min measured
-    for a single 16-rank run of the same binary on the same machine.  Going
-    4-wide therefore made the ENSEMBLE 2.5x slower, not 4x faster: the
-    instrumented oracle binary writes per-step diagnostic dumps and 64 ranks
-    contend on the filesystem rather than on the cores.  Serial reproduces the
-    exact conditions the recorded 90-day twin was measured under, which is also
-    the configuration nemo_continuation_control() checks against.
+    SERIAL BY DEFAULT, and that is a measurement, not caution.  Both rates
+    measured on this machine, on this binary, on this case:
+
+        4-wide (4 x 16 = 64 of 80 cores)      14 steps/min PER MEMBER
+                                              (55 aggregate), ETA 13.7 h
+        serial (16 ranks, nothing else)     1343 steps/min, 8.6 min per
+                                              member, ~35 min for all four
+
+    Going 4-wide made the ENSEMBLE ~24x SLOWER in aggregate, not 4x faster: the
+    instrumented oracle writes per-step diagnostic dumps and 64 ranks contend on
+    the filesystem rather than on the cores.  (An earlier revision of this
+    docstring quoted 137 steps/min as the single-run baseline, taken from file
+    mtimes of an older ensemble that had other work on the machine; it is ~10x
+    low and is corrected here.)  Serial also reproduces the exact conditions the
+    recorded 90-day twin was measured under -- the configuration
+    nemo_continuation_control() checks against.
     """
     todo = list(range(N_MEM))
     while todo:
@@ -498,7 +551,7 @@ def permutation_p(rows, key, day):
         m[list(c)] = True
         stat = abs(pool[m].mean() - pool[~m].mean())
         tot += 1
-        if stat >= obs - 1e-15:
+        if stat >= obs * (1.0 - 1e-12) - 1e-300:
             hits += 1
     return hits / tot, float(obs)
 
@@ -507,7 +560,7 @@ def verdict(gap, floor):
     """INDISTINGUISHABLE iff |gap| is within 2x the two-sided floor."""
     if floor == 0.0:
         return "NO-FLOOR"
-    return "YES" if abs(gap) <= 2.0 * floor else "no"
+    return "YES" if abs(gap) <= K_PREREG * floor else "no"
 
 
 def window_mean(rows, side, i, key):
@@ -594,6 +647,13 @@ def controls(out_dir):
                              "member to drop -- report it and stop.")
         shas[member_name(i)] = F.member_sha(lego_log(out_dir, i))
         d = np.load(lego_npz(out_dir, i))
+        missing = [q for q in ("nemo_ladder_mode", "seasonal_t0_seconds",
+                               "control_dtype") if q not in d.files]
+        if missing:
+            raise SystemExit(
+                f"{lego_npz(out_dir, i)} carries no {missing} stamp -- it "
+                f"predates the provenance stamps and does not record the "
+                f"configuration it ran; re-run the member.")
         stamps[member_name(i)] = (str(d["nemo_ladder_mode"]),
                                   float(d["seasonal_t0_seconds"]),
                                   str(d["control_dtype"]))
@@ -663,140 +723,158 @@ def nemo_continuation_control():
 
 
 def p5_provenance_gate(rows):
-    """P5, MECHANIZED.  The pre-registration says a day-90 miss is a provenance
-    failure to be chased BEFORE any day-360 number is read; that ordering was
-    left to a human reading a table row.  It is a gate now (code review 4).
+    """P5, MECHANIZED, on the quantity the pre-registration actually registered.
 
-    The two recorded numbers are named explicitly because two different day-90
-    gaps circulate in this campaign: 0.4107 Sv is the PRE-drag-fix arm (the
-    floor90 lane's control) and 0.3823 Sv is THIS branch's HEAD after the three
-    bottom-drag fixes.  This gates the latter.
+    Round-2 review: the first spelling of this gate tested the two PER-SIDE
+    ACC values within 1e-3.  The registered criterion is that the GAP
+    reproduces -0.382 Sv within 1e-3 -- a different test in both directions
+    (two absolutes can each drift 9e-4 the same way and leave the gap perfect,
+    or drift opposite ways and blow a gap the per-side test passes).  Silently
+    re-specifying a registered gate after launch is exactly what the
+    pre-registration exists to prevent, so the gap is the gate and the two
+    absolutes are printed as diagnostics beside it.
+
+    Two day-90 gaps circulate in this campaign and they are named rather than
+    assumed: 0.4107 Sv is the PRE-drag-fix arm (the floor90 lane's control) and
+    0.3823 Sv is THIS branch's HEAD after the three bottom-drag fixes.  The
+    NEMO side is IMPORTED from the recorded reconciliation harness, not pasted.
     """
-    lego_d90 = 64.986934      # commit 59e6070a4, arm D = this branch's numerics
-    nemo_d90 = 65.3692043752875   # acc_metric_reconciliation.NEMO_D90_ACC_SV
+    lego_d90 = 64.986934              # commit 59e6070a4, arm D = this branch
+    nemo_d90 = R.NEMO_D90_ACC_SV      # imported, not pasted
+    registered_gap = lego_d90 - nemo_d90
     tol = 1e-3
     lv, nv = rows["lego"][0][90]["acc"], rows["nemo"][0][90]["acc"]
-    print(f"\n[P5 GATE] day-90 full-section ACC  lego {lv:.6f} (recorded "
-          f"{lego_d90:.6f})  NEMO {nv:.6f} (recorded {nemo_d90:.6f})")
-    print(f"[P5 GATE] gap {lv - nv:+.6f} Sv (recorded {lego_d90 - nemo_d90:+.6f})")
-    bad = []
-    if abs(lv - lego_d90) > tol:
-        bad.append(f"legoESM off by {abs(lv - lego_d90):.3e}")
-    if abs(nv - nemo_d90) > tol:
-        bad.append(f"NEMO off by {abs(nv - nemo_d90):.3e}")
-    if bad:
+    gap = lv - nv
+    print(f"\n[P5 GATE] day-90 full-section ACC   lego {lv:.6f} (recorded "
+          f"{lego_d90:.6f})   NEMO {nv:.6f} (recorded {nemo_d90:.6f})")
+    print(f"[P5 GATE] REGISTERED QUANTITY = the GAP: {gap:+.6f} Sv against "
+          f"{registered_gap:+.6f} Sv, tolerance {tol}")
+    if abs(gap - registered_gap) > tol:
         raise SystemExit(
-            f"P5 REFUTED ({'; '.join(bad)}, tolerance {tol}). This is a "
-            f"provenance failure, not a physics result -- chase it before any "
-            f"day-360 number is read.")
-    print("[P5 GATE] CONFIRMED: member 0 reproduces the recorded day-90 state "
-          "on both sides.")
+            f"P5 REFUTED: day-90 gap {gap:+.6f} Sv vs the recorded "
+            f"{registered_gap:+.6f} Sv, off by {abs(gap - registered_gap):.3e} "
+            f"> {tol}. This is a PROVENANCE failure, not a physics result -- "
+            f"chase it before any day-360 number is read.")
+    print(f"[P5 GATE] CONFIRMED: the day-90 gap reproduces the recorded value "
+          f"to {abs(gap - registered_gap):.1e} Sv.")
 
 
-def separation_control(rows, quantum):
-    """The kick must reach EVERY metric on BOTH sides, on ALL FOUR members.
+def tie_report(rows, side, key, day):
+    """(n distinct members, n members) for one metric/side/day."""
+    vals = [rows[side][i][day][key] for i in range(N_MEM)]
+    return len(set(vals)), N_MEM
 
-    The earlier spelling accepted any two of four members differing: three
-    identical members and one outlier passed while making the std meaningless
-    (both reviews).  It now requires four distinct values, and reports how many
-    sit within the storage quantum of each other, because a spread built out of
-    float32 ties is a dtype measurement.
+
+def separation_control(rows, quantum_by_day):
+    """The kick must reach every metric -- but a TIE IS A FLAG, NOT AN ABORT
+    before the final horizon.
+
+    Round-1 review asked for all four members to separate; I tightened to that
+    everywhere and it would have aborted the entire report after eight
+    integrations.  Measured on the four finished legoESM members: at day 90 the
+    southern-band sigma MAX has 2 of 4 distinct values and the deep contrast 3
+    of 4.  That is not a broken ensemble -- sigma MAX is a single-cell maximum
+    of a float32-stored field, so early members tie at the STORAGE quantum
+    while the trajectories differ.  The floor lane had already documented the
+    relaxed form; re-tightening it was my error in both directions.
+
+    So: at the final horizon a metric must separate all four members (there the
+    spread is the published floor and a tie means a zero denominator); at
+    earlier horizons two of four suffice and the tie count is PRINTED, per
+    horizon, so a reader sees which numbers are dtype-limited.
     """
-    for side in ("lego", "nemo"):
-        for k in KEYS:
-            for day in HORIZONS:
-                vals = [rows[side][i][day][k] for i in range(N_MEM)]
-                if len(set(vals)) < N_MEM:
-                    raise SystemExit(
-                        f"{side} metric {k!r} at day {day} does not separate "
-                        f"all {N_MEM} members ({vals}) -- a spread built from "
-                        f"tied members is not a floor")
-    print(f"[control] every metric separates ALL {N_MEM} members, both sides, "
-          f"at every horizon: OK")
-    thin = [k for k in KEYS
-            if spread_at(rows, "lego", k, N_DAYS)[1] < QUANTUM_MARGIN * quantum[k]]
-    if thin:
-        print(f"[control] WARNING: at day {N_DAYS} these metrics' legoESM "
-              f"spread is under {QUANTUM_MARGIN:.0f}x the float32 storage "
-              f"quantum, so their floor is partly dtype: {thin}")
-    else:
-        print(f"[control] every metric's day-{N_DAYS} legoESM spread clears "
-              f"{QUANTUM_MARGIN:.0f}x its float32 storage quantum: OK")
-    return set(thin)
-
-
-def empirical_rule_controls(rows, quantum):
-    """The registered rule, applied to two cases whose answer is KNOWN.
-
-    Arithmetic self-checks prove the formula; they do not prove the rule is
-    CALIBRATED on this data.  Two controls do, and both are free from members
-    already on disk (physics review B2):
-
-      POSITIVE -- legoESM m1 against legoESM m2 at day 360.  Same model, same
-        card, same revision; the only difference is the perturbation seed.  The
-        rule MUST return YES on every metric.  A `no` here means the floor is
-        too small and every `no` in the verdict table is suspect.
-      NEGATIVE -- legoESM m0 at day 360 against NEMO m0 at day 350.  A
-        deliberate 10-day mismatch of two states that are otherwise the closest
-        pair in the campaign.  The rule MUST return `no` on the transports.  A
-        YES here means the floor is so wide the test cannot fail.
-    """
-    print("\n--- EMPIRICAL CONTROLS ON THE REGISTERED RULE (known answers) ---")
-    fails = []
-    print(f"  POSITIVE (lego m1 vs lego m2 at day {N_DAYS}; must be YES)")
-    print(f"    {'metric':<38}{'gap':>13}{'floor':>14}{'ratio':>9}{'verdict':>9}")
+    print("\n--- SEPARATION / TIES (distinct members out of "
+          f"{N_MEM}; ties early are the float32 storage quantum, not a defect) ---")
+    print(f"{'metric':<38}" + "".join(f"{'d' + str(d) + ' L/N':>12}" for d in HORIZONS))
     for k in KEYS:
-        gap = rows["lego"][1][N_DAYS][k] - rows["lego"][2][N_DAYS][k]
-        fl, _, _ = two_sided_floor(rows, k, N_DAYS)
-        v = verdict(gap, fl)
-        if v != "YES":
-            fails.append(f"POSITIVE {k} -> {v}")
-        print(f"    {LABELS[k]:<38}{gap:>+13.4e}{fl:>14.4e}"
-              f"{(abs(gap) / fl if fl else float('inf')):>9.2f}{v:>9}")
-    print(f"  NEGATIVE (lego m0 day {N_DAYS} vs NEMO m0 day {N_DAYS - 10}; "
-          f"transports must be `no`)")
-    print(f"    {'metric':<38}{'gap':>13}{'floor':>14}{'ratio':>9}{'verdict':>9}")
-    for k in ("acc", "acc_mean", "band", "band_c", "g_south", "g_band", "g_north"):
-        gap = rows["lego"][0][N_DAYS][k] - rows["nemo"][0][N_DAYS - 10][k]
-        fl, _, _ = two_sided_floor(rows, k, N_DAYS)
-        v = verdict(gap, fl)
-        if v == "YES":
-            fails.append(f"NEGATIVE {k} -> YES")
-        print(f"    {LABELS[k]:<38}{gap:>+13.4e}{fl:>14.4e}"
-              f"{(abs(gap) / fl if fl else float('inf')):>9.2f}{v:>9}")
-    if fails:
-        print(f"  RULE NOT CALIBRATED on this data: {fails}")
-    else:
-        print("  BOTH CONTROLS PASS: the rule says YES where the answer is "
-              "known-same and `no` where it is known-different.")
-    return fails
+        cells = []
+        for day in HORIZONS:
+            dl = tie_report(rows, "lego", k, day)[0]
+            dn = tie_report(rows, "nemo", k, day)[0]
+            cells.append(f"{str(dl) + '/' + str(dn):>12}")
+            need = N_MEM if day == N_DAYS else 2
+            for side, dd in (("lego", dl), ("nemo", dn)):
+                if dd < need:
+                    raise SystemExit(
+                        f"{side} metric {k!r} at day {day} has only {dd} "
+                        f"distinct member values (need {need} at this "
+                        f"horizon) -- a spread built from tied members is not "
+                        f"a floor")
+        print(f"{LABELS[k]:<38}" + "".join(cells))
+    print(f"[control] every metric separates >= 2 members early and all "
+          f"{N_MEM} at day {N_DAYS}, both sides: OK")
+    thin = {}
+    for day in HORIZONS:
+        thin[day] = {k for k in KEYS
+                     if spread_at(rows, "lego", k, day)[1]
+                     < QUANTUM_MARGIN * quantum_by_day[day][k]}
+        if thin[day]:
+            print(f"[control] day {day}: legoESM spread under "
+                  f"{QUANTUM_MARGIN:.0f}x the float32 storage quantum (partly "
+                  f"dtype) for {sorted(thin[day])}")
+    return thin
+
+
+def one_sided_flags(rows, day):
+    """Which metrics' RSS floor is really only ONE side's dispersion.
+
+    The pre-registration justified the RSS as "sqrt(2) x one side when the two
+    sides wobble equally".  They do not.  Measured at day 90 on the existing
+    ensembles the legoESM/NEMO spread ratio runs 9.3x to 16596x across the ten
+    metrics, so the RSS is numerically legoESM's own dispersion and the sqrt(2)
+    reading is empirically false.  That is not a defect in the arithmetic -- the
+    RSS is still the right combination -- but a reader must not be allowed to
+    believe the floor is a joint property of the two models when it is one
+    model's.  Flagged `1` per metric, per horizon.
+    """
+    out = set()
+    for k in KEYS:
+        ls = spread_at(rows, "lego", k, day)[1]
+        ns = spread_at(rows, "nemo", k, day)[1]
+        if ns <= 0 or ls <= 0:
+            out.add(k)
+            continue
+        if abs(np.log10(ls / ns)) > ONE_SIDED_DECADES:
+            out.add(k)
+    return out
 
 
 def saturation_table(rows):
-    """Has the 1e-14 kick saturated by day 360, or is the floor still growing?
+    """Has the kick saturated by day 360?  TWO consecutive quarters, not one.
 
-    Registered before any day-360 gap existed: SATURATED if
-    spread(360)/spread(270) < 1.3.  The verdict is ASYMMETRIC under an
-    unsaturated floor -- a YES still stands (the two runs did not separate even
-    though the ensemble had room to grow), a `no` does not (the denominator is
-    still growing, so the ratio is an upper bound that will fall).
+    Registered as spread(360)/spread(270) < 1.3 before any day-360 gap existed.
+    Round-2 review then produced a measured FALSE POSITIVE for that single-
+    quarter form on the existing 90-day NEMO ensemble: NEMO's ACC spread FELL
+    from day 30 to day 60 (ratio 0.52, which the single test calls "saturated")
+    and then grew by ~300x -- the Asselin filter damping the leapfrog
+    computational mode before physical error growth takes over.  A transient
+    plateau is not saturation.  The criterion is therefore TIGHTENED (never
+    loosened) to both 180->270 AND 270->360 under 1.3.  Tightening a registered
+    criterion after launch can only make a claim harder to make, which is the
+    safe direction; it is recorded here rather than quietly applied.
     """
-    print(f"\n--- SATURATION: spread(360)/spread(270), saturated if < "
-          f"{SATURATION_RATIO_MAX} ---")
-    print(f"{'metric':<38}{'lego ratio':>13}{'NEMO ratio':>13}{'saturated?':>12}")
-    unsat = []
+    print(f"\n--- SATURATION: consecutive quarter ratios, saturated only if "
+          f"BOTH < {SATURATION_RATIO_MAX} ---")
+    hdr = "".join(f"{'L ' + str(a) + '->' + str(b):>13}{'N ' + str(a) + '->' + str(b):>13}"
+                  for a, b in SATURATION_QUARTERS)
+    print(f"{'metric':<38}{hdr}{'saturated?':>12}")
+    unsat = set()
     for k in KEYS:
-        r = []
-        for side in ("lego", "nemo"):
-            a = spread_at(rows, side, k, 270)[1]
-            b = spread_at(rows, side, k, 360)[1]
-            r.append(b / a if a > 0 else float("inf"))
-        ok = max(r) < SATURATION_RATIO_MAX
+        cells, ok = [], True
+        for a, b in SATURATION_QUARTERS:
+            for side in ("lego", "nemo"):
+                sa = spread_at(rows, side, k, a)[1]
+                sb = spread_at(rows, side, k, b)[1]
+                r = sb / sa if sa > 0 else float("inf")
+                cells.append(r)
+                if not (r < SATURATION_RATIO_MAX):
+                    ok = False
         if not ok:
-            unsat.append(k)
-        print(f"{LABELS[k]:<38}{r[0]:>13.3f}{r[1]:>13.3f}"
-              f"{('yes' if ok else 'NO'):>12}")
-    return set(unsat)
+            unsat.add(k)
+        print(f"{LABELS[k]:<38}"
+              + "".join(f"{c:>13.3f}" for c in (cells[0], cells[1], cells[2], cells[3]))
+              + f"{('yes' if ok else 'NO'):>12}")
+    return unsat
 
 
 def spread_curves(rows, quantum):
@@ -814,42 +892,112 @@ def spread_curves(rows, quantum):
         print(f"    {'metric':<38}{'fp32 quantum':>14}"
               + "".join(f"{'d' + str(d):>12}" for d in CURVE_DAYS))
         for k in KEYS:
-            for stat, tag in ((1, "std"), (0, "rng")):
+            for stat in (1, 0):
                 cells = "".join(f"{spread_at(rows, side, k, d)[stat]:>12.4e}"
                                 for d in CURVE_DAYS)
-                head = f"{LABELS[k]:<38}{quantum[k]:>14.2e}" if stat == 1 \
-                    else f"{'  (range)':<38}{'':>14}"
+                head = (f"{LABELS[k]:<38}{quantum[k]:>14.2e}" if stat == 1
+                        else f"{'  (range)':<38}{'':>14}")
                 print(f"    {head}{cells}")
 
 
-def _row(k, lv, nv, gap, rows, day, quantum, thin, unsat, use_window=False,
-         wfl=None):
-    fl_sd, ls_sd, ns_sd = (wfl if use_window
-                           else two_sided_floor(rows, k, day, stat=1))
-    fl_rg, ls_rg, ns_rg = (wfl if use_window
-                           else two_sided_floor(rows, k, day, stat=0))
-    ratio = float("inf") if fl_sd == 0 else abs(gap) / fl_sd
-    tag = verdict(gap, fl_sd)
-    if tag == "no" and ratio <= K_WELCH:
-        tag = "unres"          # inside the honest Welch band: not resolved
-    flags = ""
-    if k in SIGN_MIXING:
-        flags += "*"
-    if k in thin:
-        flags += "q"
-    if k in unsat:
-        flags += "u"
-    p, _ = permutation_p(rows, k, day) if not use_window else (float("nan"), 0)
-    return (f"{LABELS[k]:<38}{lv:>14.6f}{nv:>14.6f}{gap:>+13.4e}"
-            f"{ls_sd:>12.3e}{ns_sd:>12.3e}{fl_sd:>13.3e}{fl_rg:>13.3e}"
-            f"{ratio:>9.2f}{(f'{p:.3f}' if p == p else '   n/a'):>8}"
-            f"{tag:>8}{flags:>4}")
+def _label(gap, floor):
+    """The registered rule, plus the one band where it is over-confident.
+
+    Spelled ONCE, here, and unit-tested -- it was inline in two printers and
+    tested in neither (round-2 review).
+    """
+    v = verdict(gap, floor)
+    if v == "no" and floor > 0 and abs(gap) <= K_WELCH * floor:
+        return "unres"
+    return v
+
+
+def empirical_rule_controls(rows):
+    """The registered rule applied to cases whose answer is KNOWN.
+
+    Both round-2 reviews rejected the first version of this, for the same
+    reason from two directions, and the code review's form of it is exact:
+    scoring member i against member j while BOTH sit in the denominator caps
+    the ratio at sqrt(n(n-1)/2)/... -- concretely sqrt(6) = 2.449 at n=4, and
+    ~1.73 once the RSS adds a comparable second side.  A `no` was
+    ARITHMETICALLY IMPOSSIBLE, so the control could not fail and proved
+    nothing.
+
+    Fixed by taking the denominator from the members NOT in the numerator
+    (leave-two-out), which has no such ceiling, and by scoring ALL 12
+    within-side pairs (6 per side) as a FRACTION rather than demanding a
+    single pair pass -- a single pair at n=4 is a coin flip, and ~8% of
+    within-side pairs are expected to land outside the band by chance.
+
+    NEGATIVE control: legoESM day 360 against legoESM day 330.  The reviews
+    disagreed here -- one wanted a 30-day mismatch (a 10-day one loses margin
+    against day-360 floors), the other wanted a SELF mismatch rather than a
+    cross-model one (a cross-model time mismatch mostly restates the very
+    quantity under test).  Both objections are right and they are compatible:
+    this is a 30-day SELF mismatch, which has the margin AND isolates the
+    rule from the legoESM-minus-NEMO question entirely.
+    """
+    print("\n--- EMPIRICAL CONTROLS ON THE REGISTERED RULE (known answers) ---")
+    print("  POSITIVE: all 12 within-side member pairs at day "
+          f"{N_DAYS}, floor from the two members NOT in the pair")
+    print("            (a pair scored against a floor it is part of is capped "
+          "at sqrt(6)=2.449 and cannot fail)")
+    npass = ntot = 0
+    worst = []
+    for side in ("lego", "nemo"):
+        other = "nemo" if side == "lego" else "lego"
+        for a, b in itertools.combinations(range(N_MEM), 2):
+            rest = [m for m in range(N_MEM) if m not in (a, b)]
+            gap = rows[side][a][N_DAYS][ "acc"] - rows[side][b][N_DAYS]["acc"]
+            for k in KEYS:
+                gap = rows[side][a][N_DAYS][k] - rows[side][b][N_DAYS][k]
+                s_rest = F.spread([rows[side][m][N_DAYS][k] for m in rest])[1]
+                s_oth = F.spread([rows[other][m][N_DAYS][k]
+                                  for m in range(N_MEM)])[1]
+                fl = float(np.hypot(s_rest, s_oth))
+                lab = _label(gap, fl)
+                ntot += 1
+                if lab in ("YES", "unres"):
+                    npass += 1
+                else:
+                    worst.append((side, k, a, b, abs(gap) / fl if fl else np.inf))
+    frac = npass / ntot if ntot else float("nan")
+    print(f"            {npass}/{ntot} within-side comparisons land inside the "
+          f"band (YES or unres) = {100 * frac:.1f}%")
+    if worst:
+        worst.sort(key=lambda t: -t[-1])
+        print(f"            outside the band: "
+              + ", ".join(f"{s}.{k}(m{a},m{b}) {r:.2f}x"
+                          for s, k, a, b, r in worst[:6]))
+    print(f"  NEGATIVE: legoESM day {N_DAYS} vs legoESM day {N_DAYS - 30} "
+          f"(30-day SELF mismatch; must be `no` on the transports)")
+    print(f"    {'metric':<38}{'gap':>13}{'floor':>14}{'ratio':>9}{'verdict':>9}")
+    neg_ok = True
+    for k in ("acc", "acc_mean", "band", "band_c", "g_south", "g_band", "g_north"):
+        gap = rows["lego"][0][N_DAYS][k] - rows["lego"][0][N_DAYS - 30][k]
+        fl, _, _ = two_sided_floor(rows, k, N_DAYS)
+        lab = _label(gap, fl)
+        if lab != "no":
+            neg_ok = False
+        print(f"    {LABELS[k]:<38}{gap:>+13.4e}{fl:>14.4e}"
+              f"{(abs(gap) / fl if fl else float('inf')):>9.2f}{lab:>9}")
+    print(f"  CALIBRATION: positive {100 * frac:.1f}% inside the band, "
+          f"negative {'all `no`' if neg_ok else 'NOT all `no` -- the floor may '
+          'be too wide to fail'}")
+    return frac, neg_ok
 
 
 def _header():
     return (f"{'metric':<38}{'lego m0':>14}{'NEMO m0':>14}{'gap':>13}"
             f"{'lego std':>12}{'NEMO std':>12}{'floor(std)':>13}"
-            f"{'floor(rng)':>13}{'ratio':>9}{'perm p':>8}{'verd':>8}{'fl':>4}")
+            f"{'floor(rng)':>13}{'ratio':>9}{'perm p':>8}{'verd':>8}{'fl':>5}")
+
+
+def _flags(k, thin_day, unsat, onesided):
+    return (("*" if k in SIGN_MIXING else "")
+            + ("q" if k in thin_day else "")
+            + ("u" if k in unsat else "")
+            + ("1" if k in onesided else ""))
 
 
 def _legend():
@@ -861,65 +1009,82 @@ def _legend():
            "`no` = outside both.")
     print(f"  n={N_MEM}: ~41% relative standard error on every std, so every "
           f"floor is a factor-of-two estimate.")
-    print( "  perm p: exact 4-vs-4 permutation test on all eight runs; floor "
-           "2/70 = 0.029, so 0.029 is `as small as")
-    print( "           this design can report`, not `p < 0.03`.  ~50 cells are "
-           "printed and there is no multiplicity")
-    print( "           correction; the metrics are strongly correlated, so the "
-           "inflation is well below 50 independent tests.")
-    print( "  flags: * sign-mixing reduction (median over longitudes; not "
-           "additive over the latitude groups)")
+    print( "  perm p: exact 4-vs-4 permutation test on all eight runs.  Its "
+           "FLOOR is 2/70 = 0.029, so 0.029 means")
+    print( "           `as small as this design can report`, not `p < 0.03`.  "
+           "It is a supporting column, never the")
+    print( "           headline.  ~50 cells print with no multiplicity "
+           "correction; the metrics are strongly correlated.")
+    print( "  flags: * full-section reduction: a MEDIAN over longitudes, so it "
+           "is NOT additive over the three latitude")
+    print( "           groups (acc_mean is, and is checked).  At day 90 this "
+           "gap is DOMINATED by the southern basin")
+    print( "           rather than built from cancelling terms -- the "
+           "pre-registration's `two large cancelling errors`")
+    print( "           is RETRACTED.")
     print( "         q measured spread under 10x the float32 storage quantum "
-           "-- partly dtype")
-    print(f"         u ensemble not saturated at day {N_DAYS} (spread still "
-           f"growing): a YES stands, a `no` does not")
+           "AT THIS HORIZON -- partly dtype")
+    print(f"         u ensemble not saturated (needs BOTH 180->270 and "
+           f"270->360 under {SATURATION_RATIO_MAX}): a YES stands, a `no` does not")
+    print(f"         1 the two sides' spreads differ by more than "
+           f"{ONE_SIDED_DECADES:.0f} order(s) of magnitude, so the RSS floor is")
+    print( "           effectively ONE model's dispersion -- read it as "
+           "legoESM's own, not as a joint property")
 
 
-def verdict_table(rows, quantum, thin, unsat):
-    print("\n" + "=" * 130)
+def verdict_table(rows, thin, unsat):
+    print("\n" + "=" * 135)
     print("THE VERDICT TABLE -- gap = legoESM(member 0) - NEMO(member 0), "
           "matched day, matched reduction")
     print("floor = sqrt(lego_std^2 + NEMO_std^2) at that day")
-    print("=" * 130)
+    print("=" * 135)
     for day in HORIZONS:
+        onesided = one_sided_flags(rows, day)
         print(f"\n--- day {day} ---")
         print(_header())
         for k in KEYS:
             lv, nv = rows["lego"][0][day][k], rows["nemo"][0][day][k]
-            print(_row(k, lv, nv, lv - nv, rows, day, quantum, thin, unsat))
+            gap = lv - nv
+            fl_sd, ls, ns = two_sided_floor(rows, k, day, stat=1)
+            fl_rg, _, _ = two_sided_floor(rows, k, day, stat=0)
+            ratio = float("inf") if fl_sd == 0 else abs(gap) / fl_sd
+            pv, _ = permutation_p(rows, k, day)
+            print(f"{LABELS[k]:<38}{lv:>14.6f}{nv:>14.6f}{gap:>+13.4e}"
+                  f"{ls:>12.3e}{ns:>12.3e}{fl_sd:>13.3e}{fl_rg:>13.3e}"
+                  f"{ratio:>9.2f}{pv:>8.3f}{_label(gap, fl_sd):>8}"
+                  f"{_flags(k, thin.get(day, set()), unsat, onesided):>5}")
     print()
     _legend()
 
 
-def window_table(rows, quantum, thin, unsat):
-    print("\n" + "=" * 130)
+def window_table(rows, unsat):
+    """Flags here are computed from the WINDOW's own spreads, not inherited
+    from the endpoint -- an endpoint-derived `q`/`1` on a window row labels the
+    wrong statistic (round-2 review)."""
+    print("\n" + "=" * 135)
     print(f"FINAL-90-DAY WINDOW MEANS -- days {WINDOW_DAYS[0]}..{WINDOW_DAYS[-1]} "
           f"every 10 days, {len(WINDOW_DAYS)} samples, IDENTICAL days both sides")
     print("floor = RSS of the two sides' spread of their OWN window means "
           "(not the endpoint floor reused)")
-    print("=" * 130)
+    print("=" * 135)
     print(_header())
     for k in KEYS:
-        lv = window_mean(rows, "lego", 0, k)
-        nv = window_mean(rows, "nemo", 0, k)
-        lsd, lrg = F.spread([window_mean(rows, "lego", i, k)
-                             for i in range(N_MEM)])[1], \
-            F.spread([window_mean(rows, "lego", i, k) for i in range(N_MEM)])[0]
-        nsd, nrg = F.spread([window_mean(rows, "nemo", i, k)
-                             for i in range(N_MEM)])[1], \
-            F.spread([window_mean(rows, "nemo", i, k) for i in range(N_MEM)])[0]
-        wfl_sd = (float(np.hypot(lsd, nsd)), lsd, nsd)
-        gap = lv - nv
-        ratio = float("inf") if wfl_sd[0] == 0 else abs(gap) / wfl_sd[0]
-        tag = verdict(gap, wfl_sd[0])
-        if tag == "no" and ratio <= K_WELCH:
-            tag = "unres"
-        flags = ("*" if k in SIGN_MIXING else "") + ("q" if k in thin else "") \
-            + ("u" if k in unsat else "")
-        print(f"{LABELS[k]:<38}{lv:>14.6f}{nv:>14.6f}{gap:>+13.4e}"
-              f"{lsd:>12.3e}{nsd:>12.3e}{wfl_sd[0]:>13.3e}"
+        lw = [window_mean(rows, "lego", i, k) for i in range(N_MEM)]
+        nw = [window_mean(rows, "nemo", i, k) for i in range(N_MEM)]
+        lrg, lsd = F.spread(lw)
+        nrg, nsd = F.spread(nw)
+        fl_sd = float(np.hypot(lsd, nsd))
+        gap = lw[0] - nw[0]
+        ratio = float("inf") if fl_sd == 0 else abs(gap) / fl_sd
+        one = set()
+        if lsd > 0 and nsd > 0 and abs(np.log10(lsd / nsd)) > ONE_SIDED_DECADES:
+            one.add(k)
+        elif lsd <= 0 or nsd <= 0:
+            one.add(k)
+        print(f"{LABELS[k]:<38}{lw[0]:>14.6f}{nw[0]:>14.6f}{gap:>+13.4e}"
+              f"{lsd:>12.3e}{nsd:>12.3e}{fl_sd:>13.3e}"
               f"{float(np.hypot(lrg, nrg)):>13.3e}{ratio:>9.2f}{'   n/a':>8}"
-              f"{tag:>8}{flags:>4}")
+              f"{_label(gap, fl_sd):>8}{_flags(k, set(), unsat, one):>5}")
 
 
 def growth_control(rows, out_dir):
@@ -989,16 +1154,22 @@ def main(argv=None):
     print("\nscoring...", flush=True)
     rows = collect(args.dir)
     p5_provenance_gate(rows)
-    quantum = fp32_quantum(nemo_state(nemo_dir(0), N_DAYS), A.tmask)
-    thin = separation_control(rows, quantum)
+    # The storage quantum is a property of the STATE, so it is measured at each
+    # scored horizon rather than measured once at day 360 and stamped on all of
+    # them: at day 90 three of the five gate metrics are dtype-dominated and a
+    # day-360 quantum would not have flagged them (round-2 review).
+    quantum_by_day = {d: fp32_quantum(nemo_state(nemo_dir(0), d), A.tmask)
+                      for d in HORIZONS}
+    thin = separation_control(rows, quantum_by_day)
     unsat = saturation_table(rows)
     growth_control(rows, args.dir)
-    spread_curves(rows, quantum)
-    empirical_rule_controls(rows, quantum)
-    verdict_table(rows, quantum, thin, unsat)
-    window_table(rows, quantum, thin, unsat)
+    spread_curves(rows, quantum_by_day[N_DAYS])
+    empirical_rule_controls(rows)
+    verdict_table(rows, thin, unsat)
+    window_table(rows, unsat)
     print("\nEvery number above is a measurement; the pre-registration "
-          "(PREREG_verdict360.md) says which ones were predicted.")
+          "(PREREG_verdict360.md) says which ones were predicted, and the "
+          "result commit carries its corrections.")
     return 0
 
 
