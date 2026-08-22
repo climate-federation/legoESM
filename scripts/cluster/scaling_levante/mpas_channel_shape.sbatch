@@ -102,9 +102,11 @@ CHANNELS="${CHANNELS:-4 8 16 32}"
 run_arm () {  # channels nocomm tag [steps] [debug]
   local CH=$1 NC=$2 TAG=$3 STEPS=${4:-65} DBGON=${5:-0}
   local DBG="" TMO="$ARM_TIMEOUT"
-  # A twelve-step validity arm cannot need the full timed-arm budget, and
-  # four of them at the full budget would not fit the allocation.
-  if [ "$STEPS" -le 20 ]; then TMO=240; fi
+  # A twelve-step validity arm needs less than a timed arm, but NOT a fixed
+  # 240 s: at 128 ranks it still pays the whole mesh partition and compile,
+  # and a constant that fits at 64 killed both validity arms at 128 (job
+  # 27139858) while the timed arms it was meant to certify all succeeded.
+  if [ "$STEPS" -le 20 ]; then TMO=$(( ARM_TIMEOUT * 2 / 3 )); fi
   if [ "$DBGON" = 1 ]; then
     DBG="NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=ENV,INIT,GRAPH,P2P,TUNING NCCL_DEBUG_FILE=$OUTDIR/nccl_${TAG}.%h.%p"
   fi
@@ -153,10 +155,7 @@ done
 # so these cannot be five-step arms.
 for CH in $CHANNELS; do run_arm "$CH" 0 "val_c${CH}" 12 1; done
 echo "=== NCCL validity: the channel count NCCL actually built, per arm ==="
-for CH in 4 8 16 32; do
-  # NCCL prints "Channel 00/04", so the count is ZERO PADDED. Comparing the
-  # padded string against the requested count fails for 4 and 8 and would
-  # void exactly the two arms this sweep exists to compare.
+for CH in $CHANNELS; do
   # NCCL prints "Channel 00/04", so the count is ZERO PADDED — comparing the
   # padded string against the requested count fails for 4 and 8 and would
   # void exactly the arms this sweep exists to compare. It ALSO prints
