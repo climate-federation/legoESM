@@ -76,14 +76,25 @@ import os
 import sys
 
 import numpy as np
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
 import full_step_oracle_parity as fsp      # noqa: E402
 from full_step_oracle_parity import (      # noqa: E402
-    DIHEDRAL, IC_CONTROL_MAX_REL, N, NG, ORACLE_ROOT, build_port_ic,
-    derive_face_map, load_oracle, oracle_ij, port_window,
+    N, NG, ORACLE_ROOT,
+)
+# THE METRIC MACHINERY, not the state machinery. `area` is a 2-D metric
+# plane and maps with op_scalar/op_inverse; `oracle_ij` + DIHEDRAL is for
+# 3-D (k, j, i) state fields and raises on a 2-D array -- which is how
+# the first version of this arm died. This is the SAME mapping the
+# measurement that motivated the arm used (nh_area_compare.py).
+from compare_extchain_oracle import (      # noqa: E402
+    derive_face_map as derive_metric_face_map,
+    load_oracle as load_extchain,
+    op_inverse,
+    op_scalar,
 )
 
 # The instrument that produced the measured baseline, re-run verbatim.
@@ -188,20 +199,22 @@ def build_patched_context(metrics_run: str, ic_run: str):
             raise SystemExit(
                 f"arm: ctx built at n={n} ng={ng}, this arm's mapping "
                 f"and baselines are for n={N} ng={NG}")
-        # Face map: same derivation and same control floor the height
-        # probe enforces, so the transplant lands on the same tile
-        # pairing the baseline was measured with.
-        from legoesm.core.fv3_native_eta import set_eta_analytic
-        ak, bk, ptop, _ks = set_eta_analytic(fsp.KM)
-        orc_ic = load_oracle(ic_run, nh=True)
-        state, _s = build_port_ic(ctx, ak, bk, nh=True)
-        p_ic = port_window(state, ctx)
-        _c, meta, perm, worst, _pf, _wo = derive_face_map(p_ic, orc_ic)
-        if worst > IC_CONTROL_MAX_REL:
+        # The METRIC face map, derived from the dumped coordinates --
+        # the same one the measurement that motivated this arm used, so
+        # the transplant lands on the tile pairing the disagreement was
+        # measured with. Bijection and floor enforced here; the callee
+        # enforces neither.
+        orcm = load_extchain(Path(metrics_run))
+        fmap = derive_metric_face_map(orcm, ctx["gs6"], N, NG)
+        tiles = [fmap[t][1] for t in range(6)]
+        if sorted(tiles) != list(range(6)):
+            raise SystemExit(f"arm: face map is not a bijection: {tiles}")
+        floor = max(fmap[t][0] for t in range(6))
+        if floor > 1.0e-12:
             raise SystemExit(
-                "arm: INSTRUMENT CONTROL FAILED: face-map worst rel "
-                f"{worst:.3e} > floor {IC_CONTROL_MAX_REL:.0e}; the "
-                "transplant would aim at the wrong cells")
+                f"arm: INSTRUMENT CONTROL FAILED: metric face-map "
+                f"coordinate floor {floor:.3e} > 1e-12; the transplant "
+                f"would aim at the wrong cells")
 
         # Trigger the port's own exchange+fill ONCE, then overwrite.
         # Import here, not at module top, so merely reading this file
@@ -237,9 +250,9 @@ def build_patched_context(metrics_run: str, ic_run: str):
             # single-tile gridstruct -- and REFUSE if it does not look
             # like a sentinel, because then the mask below would be a
             # plausible-looking lie.
-            ot = perm[pf]
-            transposed, nm, _su, _sv = meta[pf][ot]
-            ra_full = DIHEDRAL[nm](oracle_ij(ref_area[ot], transposed))
+            _dist, ot, op = fmap[pf]
+            ra_full = op_scalar(np.ascontiguousarray(ref_area[ot]),
+                                op_inverse(op))
             if ra_full.shape != unex.shape:
                 raise SystemExit(
                     f"arm: face {pf + 1}: mapped reference "
@@ -290,7 +303,8 @@ def build_patched_context(metrics_run: str, ic_run: str):
             # for orientation. A dropped stage here was caught once
             # before in this campaign by exactly this reuse.
             ra = ra_full
-            rr = DIHEDRAL[nm](oracle_ij(ref_rarea[ot], transposed))
+            rr = op_scalar(np.ascontiguousarray(ref_rarea[ot]),
+                           op_inverse(op))
             if not np.all(np.isfinite(ra[mask])) or \
                     np.any(ra[mask] <= 0.0):
                 raise SystemExit(
