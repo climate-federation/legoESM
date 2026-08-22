@@ -310,27 +310,41 @@ def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
 
 
 def nh_exchanged_area6(ctx: dict) -> list:
-    """Sentinel-free per-face ``area`` with REAL corner-diagonal halos.
+    """The gridstruct's ``area``, per face, cached for the NH tail.
 
-    The single-tile gridstruct leaves BIG_NUMBER sentinels in the
-    corner-diagonal halo cells of ``area``; ``fv_tp_2d``'s inner
-    updates inside ``update_dz_d`` read them (measured: a constant
-    field's flux then deviates from ``xfx*C`` by 35% near corners; with
-    real areas the deviation is pure rounding).  The ORACLE's
-    ``gridstruct%area`` halos are exchange-filled at grid init, so the
-    six-face NH integration owns supplying the analog: one ext_scalar
-    exchange of the area planes, cached on the ctx (the metric is
-    time-invariant).  PLAUSIBLE, to be adjudicated by the full-step
-    oracle gate: the Lagrange corner-region fill of an exchanged FIELD
-    may differ from the oracle's own corner-area construction in the
-    last bits; any disagreement will localise to corner-adjacent
-    stencils in the parity map.
+    IT NO LONGER EXCHANGES ANYTHING, and that removal is the fix for the
+    NH gap that was open from 2026-08-19 to 2026-08-22.
+
+    The routine used to run its own ``ext_scalar`` over the area planes,
+    on the stated grounds that "the single-tile gridstruct leaves
+    BIG_NUMBER sentinels in the corner-diagonal halo cells" and that
+    ``update_dz_d`` reads them.  Both halves are false here, measured:
+
+      * the gridstruct's area holds a REAL value at the corner-diagonal
+        cell (2.55e+10 against an interior median of 3.56e+10), and it
+        agrees with the oracle's own ``gridstruct%area`` at the parity
+        floor in EVERY region -- interior, halo edge strips and corner
+        wedges alike, 7.2e-02 on values of 3.5e+10 (job 9466872);
+      * the EXCHANGED copy did not. It was off by 4.1e+09 in the halo
+        edge strips (12%) and 1.4e+09 in the corner wedges (4%), on all
+        six faces, and ``update_dz_d`` read that.
+
+    The exchange could not add information the array already carried and
+    demonstrably subtracted it.  Substituting the oracle's values at the
+    disagreeing cells took the height error at this kernel's own output
+    from 3.7e-05 to the parity floor on all six faces, and the worst
+    one-step parity residual from 6.6116e-04 to 1.4778e-06 (jobs
+    9466882, 9466902).
+
+    IF A CONFIGURATION EVER DOES NEED A METRIC HALO FILL, it belongs in
+    the gridstruct builder -- one place, every consumer, and the analog
+    of what the oracle does at grid init -- not in a per-call cache
+    inside the NH tail.  The caller asserts what it receives.
     """
     if "nh_area6" in ctx:
         return ctx["nh_area6"]
     a6 = [np.array(np.asarray(ctx["gs6"][t]["area"]), dtype=np.float64,
                    copy=True) for t in range(6)]
-    _ext_scalar_planes_6(ctx, a6)
     ctx["nh_area6"] = a6
     ctx["nh_rarea6"] = [1.0 / a for a in a6]
     return a6
@@ -393,6 +407,17 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
 
     area6 = nh_exchanged_area6(ctx)
     rarea6 = ctx["nh_rarea6"]
+    # WHAT THIS KERNEL RECEIVES IS THE GRIDSTRUCT'S OWN AREA, bitwise.
+    # A future helper that "improves" it in passing is the defect this
+    # assert exists to catch: the exchanged version differed by 12% in
+    # the halo and cost three days.
+    for _t in range(6):
+        if not np.array_equal(area6[_t], np.asarray(ctx["gs6"][_t]["area"])):
+            raise RuntimeError(
+                f"nh tail: the area handed to update_dz_d on face "
+                f"{_t + 1} is not the gridstruct's own. Any halo fill a "
+                f"configuration needs belongs in the gridstruct builder, "
+                f"not here (see nh_exchanged_area6).")
 
     rdt = 1.0 / dt
     for t in range(6):

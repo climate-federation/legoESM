@@ -592,10 +592,14 @@ def nh_exchanged_area6(ctx):
     - ``rarea`` is not returned: the caller takes ``1.0 / area`` (the
       spec's ``ctx["nh_rarea6"]``), so no second cached value exists.
     """
-    a6 = jnp.stack(
+    # NO EXCHANGE, matching the NumPy authority: the gridstruct's area
+    # already agrees with the oracle at the parity floor in every
+    # region, and exchanging it corrupted the halo by 12% and was the
+    # seat of the NH parity gap (see nh_exchanged_area6's docstring on
+    # the authority lane).
+    return jnp.stack(
         [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
          for t in range(6)], axis=0)
-    return _ext_scalar_planes_6(a6, ctx)
 
 
 def _nh_tail_cfg(fname, cfg, hord_tm, nord_w, damp_w):
