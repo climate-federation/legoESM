@@ -7342,10 +7342,20 @@ def main() -> int:
                 # GLOBAL Sv total cannot show whether OUR runoff+ice reaches
                 # that band. Same fields, area-weighted mean per band, in the
                 # probe's units so the two are directly comparable.
-                _latb = np.degrees(np.asarray(getattr(grid, "lat_T", None)
-                                              if getattr(grid, "lat_T", None)
-                                              is not None else grid.lat))
-                if _latb.shape == _wb.shape:
+                # The structured C-grids call it lat_T (or lat); the MPAS
+                # Voronoi mesh calls it latCell.  Reading grid.lat
+                # unconditionally raised AttributeError on MPAS and killed the
+                # run inside a DIAGNOSTIC (jobs 9466912/9466913) -- a print
+                # must never be able to end an integration, so an unrecognised
+                # geometry skips the band split instead.
+                _latsrc = next(
+                    (v for v in (getattr(grid, "lat_T", None),
+                                 getattr(grid, "lat", None),
+                                 getattr(grid, "latCell", None))
+                     if v is not None), None)
+                _latb = (np.degrees(np.asarray(_latsrc))
+                         if _latsrc is not None else None)
+                if _latb is not None and _latb.shape == _wb.shape:
                     # TRUE cell area, not cos(lat): on the eORCA1 tripole the
                     # two differ by 0.00-1.72x per cell south of 45S, which
                     # inflated the first Antarctic ice number by ~45%. _Ab is
