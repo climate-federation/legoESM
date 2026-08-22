@@ -753,6 +753,87 @@ def main():
         _lego_avg_sub = _lego_avg_sub + wf_n[j - 1] * _cell(
             np.asarray(U_bar_stk_s[j - 1]))
     _dep_sub = acc_sv((_lego_avg_sub - nemo_Ubar_avg) * _wetu)
+
+    # ===================================================================
+    # #1455 PHASE-2: the CANDIDATE-ARRAY substitution, on TOP of the forcing
+    # substitution.  The forcing substitution leaves a constant behind; the
+    # pre-reduction map says that constant lives on rows 195-196, and lego's
+    # own bottom-drag rate runs 1.7x/2.5x NEMO's on exactly those two rows
+    # while matching it to ~7% everywhere else.  This block replaces lego's
+    # drag rate with NEMO's OWN dumped rCdU_bot, averaged to faces by NEMO's
+    # own dyn_drg_init rule, and re-measures.  If the drag owns the constant
+    # it collapses; if it does not, it survives.
+    if os.environ.get("DINO_1455_SUB_DRAG"):
+        print("\n  === CANDIDATE SUBSTITUTION: NEMO's own rCdU_bot ===")
+        if _k_loop.get("drag_r_u") is None:
+            raise SystemExit("FATAL: barotropic drag is OFF on this card; the "
+                             "substitution has nothing to replace")
+        _rcd = np.fromfile(os.path.join(SEQDUMP, "drg_dump_rCdU_bot.bin"),
+                           dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                                )[HLS:-HLS, HLS:-HLS]
+        # NEMO dyn_drg_init (dynspg_ts.F90:1614-1618), in lego's positive-r
+        # convention (r = -pCdU >= 0):
+        #   pCdU_u(ji,jj) = 1/2 ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) )
+        #   pCdU_v(ji,jj) = 1/2 ( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) )
+        _ru_n = np.zeros_like(_rcd)
+        _ru_n[:, :-1] = -0.5 * (_rcd[:, :-1] + _rcd[:, 1:])
+        _ru_n[:, -1] = -0.5 * (_rcd[:, -1] + _rcd[:, 0])     # zonal periodicity
+        _rv_n = np.zeros_like(_rcd)
+        _rv_n[:-1, :] = -0.5 * (_rcd[:-1, :] + _rcd[1:, :])
+        _du_prod = np.asarray(_k_loop["drag_r_u"])
+        _dv_prod = np.asarray(_k_loop["drag_r_v"])
+        # ALIGNMENT, calibrated against a known answer rather than assumed: in
+        # the deep interior BOTH models sit on the same rn_ke0 background floor,
+        # so the two fields must already agree there to a few percent under the
+        # CORRECT staggering and disagree by O(1) under a wrong one.
+        _deep = (np.asarray(_k_loop["u_mask"])[:, 1:] > 0.5)
+        _deep[190:, :] = False        # exclude the rows under test
+        _deep[:10, :] = False
+        # The gate is on the MEDIAN, not the max, and the reason matters: the
+        # two fields agree to machine precision for the median cell (which is
+        # what certifies the staggering) and differ by tens of percent in the
+        # top few percent of cells -- which is the PHYSICS DIFFERENCE UNDER
+        # TEST.  A max-gate here would refuse to run precisely because the
+        # defect it exists to measure is present.  The tail is printed, not
+        # asserted on.
+        _relf = (np.abs(_du_prod[:, 1:] - _ru_n)
+                 / np.maximum(np.abs(_ru_n), 1e-300))[_deep]
+        _med_u = float(np.median(_relf))
+        print(f"    u-face drag alignment (deep interior): median rel="
+              f"{_med_u:.3e}  p95={np.percentile(_relf, 95):.3e}  "
+              f"p99={np.percentile(_relf, 99):.3e}  max={_relf.max():.3e}")
+        assert _med_u < 1e-3, (
+            "drag-face staggering not established from the data (median rel "
+            "%.3e); substitution aborted" % _med_u)
+        _dru_sub = np.array(_du_prod)
+        _dru_sub[:, 1:] = _ru_n
+        _dru_sub[:, 0] = _ru_n[:, -1]        # same wrap the forcing uses
+        _drv_sub = np.array(_dv_prod)
+        _drv_sub[1:1 + jpj] = _rv_n          # same row shift the forcing uses
+        _k_drg = dict(_k_sub)
+        _k_drg["drag_r_u"] = jnp.asarray(_dru_sub, dtype=_du_prod.dtype)
+        _k_drg["drag_r_v"] = jnp.asarray(_drv_sub, dtype=_dv_prod.dtype)
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_drg)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _U_drg = np.asarray(captured["carries"][1])
+        _lego_avg_drg = np.zeros_like(_puu_b)
+        for j in range(1, Kpit + 1):
+            _lego_avg_drg = _lego_avg_drg + wf_n[j - 1] * _cell(
+                np.asarray(_U_drg[j - 1]))
+        _dep_drg = acc_sv((_lego_avg_drg - nemo_Ubar_avg) * _wetu)
+        _collapse = 100.0 * (1.0 - _dep_drg / _dep_sub)
+        print(f"    in-loop deposit, lego's own drag  = {_dep_sub:+.4e} Sv/step")
+        print(f"    in-loop deposit, NEMO's own drag  = {_dep_drg:+.4e} Sv/step")
+        print(f"    COLLAPSE = {_collapse:.1f}%   (pre-registered: OWNER if "
+              f">50%, REFUTED if <10%; point prediction 65%)")
+        # The verdict text is BUILT from the measured value, never hardcoded.
+        _verdict = ("OWNER" if _collapse > 50.0 else
+                    "REFUTED" if _collapse < 10.0 else "INCONCLUSIVE")
+        print(f"    VERDICT (from the measured collapse): {_verdict}")
     print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
     print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
           f"({100*_dep_sub/_dep_vel:.1f}% of it survives)")
@@ -760,6 +841,77 @@ def main():
           f"= {100*_dep_sub/_TARGET:.1f}% of the -2.80e-4 budget row")
     print(f"       FORCING share                   = {_dep_vel - _dep_sub:+.4e} "
           f"Sv/step")
+
+    # ===================================================================
+    # #1455 PHASE-2: the PRE-REDUCTION deposit fields, written only when asked.
+    #
+    # acc_sv() collapses a (jpj,jpi) velocity increment to one number in two
+    # steps -- a sum over rows 1..197 giving a per-longitude transport vector,
+    # then a mean over longitudes 2..-2.  Both intermediates are needed by the
+    # Phase-2 measurements and neither was ever persisted:
+    #   * the per-longitude vector bounds the cancellation caveat (max|per_lon|
+    #     against |mean|), which this campaign has carried unbounded since
+    #     eb3f6d23d;
+    #   * the 2-D map at two states discriminates a STATIC-ARRAY defect (pattern
+    #     identical at both states) from a state-dependent reduction artifact;
+    #   * dU_avg / dU_sub are the deposit-shaped barotropic velocity increments
+    #     that the retention measurement injects into a free-running twin.
+    #
+    # Nothing here changes a printed number: the arrays saved are the exact
+    # operands acc_sv() was already called on, and acc_sv() is re-run on them
+    # below as a round-trip check that the saved fields reproduce the printed
+    # deposits.
+    # The loop's STATIC arrays, saved alongside the map when asked.  The forcing
+    # substitution replaces F_slow_u/v/eta and NOTHING else, so whatever survives
+    # it is carried by one of these -- they are the candidate list the in-loop
+    # constant has to be named from.
+    _stat_out = os.environ.get("DINO_1455_STATIC_ARRAYS")
+    if _stat_out:
+        _stat = {}
+        for _nm in ("H_bathy", "mask", "u_mask", "v_mask", "area",
+                    "f_u", "f_v", "drag_r_u", "drag_r_v"):
+            _v = _k_loop.get(_nm)
+            if _v is not None:
+                _stat[_nm] = np.asarray(_v)
+        _stat["eta_entry"] = np.asarray(_a_loop[0])
+        _stat["U_bar_entry"] = np.asarray(_a_loop[1])
+        for _nm, _v in _stat.items():
+            if not np.all(np.isfinite(_v)):
+                raise SystemExit(f"FATAL: non-finite values in {_nm}")
+        os.makedirs(os.path.dirname(os.path.abspath(_stat_out)), exist_ok=True)
+        np.savez(_stat_out, **_stat)
+        print(f"    [static arrays] wrote {_stat_out}: "
+              + ", ".join(f"{k}{v.shape}" for k, v in _stat.items()))
+
+    _map_out = os.environ.get("DINO_1455_DEPOSIT_MAP")
+    if _map_out:
+        _dU_sub = (_lego_avg_sub - nemo_Ubar_avg) * _wetu
+        _pl_tot = (dU_avg * acc_w)[1:198, :].sum(axis=0)
+        _pl_sub = (_dU_sub * acc_w)[1:198, :].sum(axis=0)
+        # round-trip: the saved operands must reproduce the printed scalars
+        _rt_tot, _rt_sub = acc_sv(dU_avg), acc_sv(_dU_sub)
+        assert _rt_tot == _dep_vel and _rt_sub == _dep_sub, (
+            "saved deposit operands do not reproduce the printed deposits "
+            f"({_rt_tot!r} vs {_dep_vel!r}, {_rt_sub!r} vs {_dep_sub!r})")
+        for _nm, _a in (("dU_avg", dU_avg), ("dU_sub", _dU_sub),
+                        ("acc_w", acc_w), ("per_lon_total", _pl_tot),
+                        ("per_lon_in_loop", _pl_sub)):
+            if not np.all(np.isfinite(_a)):
+                raise SystemExit(f"FATAL: non-finite values in {_nm}")
+        os.makedirs(os.path.dirname(os.path.abspath(_map_out)), exist_ok=True)
+        np.savez(_map_out,
+                 dU_avg=dU_avg, dU_sub=_dU_sub, acc_w=acc_w,
+                 wetu=_wetu.astype(np.int8),
+                 per_lon_total=_pl_tot, per_lon_in_loop=_pl_sub,
+                 dep_total=np.float64(_dep_vel), dep_in_loop=np.float64(_dep_sub),
+                 ic_step=np.int64(mr.IC_STEP), seqdump=np.array(SEQDUMP),
+                 provenance=np.array(mr.provenance("substep_deposit_map")))
+        print(f"    [deposit map] wrote {_map_out}  "
+              f"dU_avg{dU_avg.shape} per_lon{_pl_tot.shape}  "
+              f"cancellation max|per_lon|/|mean| total="
+              f"{np.abs(_pl_tot[2:-2]).max()/max(abs(_pl_tot[2:-2].mean()),1e-300):.3g}"
+              f" in-loop="
+              f"{np.abs(_pl_sub[2:-2]).max()/max(abs(_pl_sub[2:-2].mean()),1e-300):.3g}")
 
     # PLANT: shift NEMO trajectory by one substep -> final diff must blow up
     un_adv_shift = np.zeros_like(hu0_full)

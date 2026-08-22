@@ -617,6 +617,10 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              surface_tendency_placement: str | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
+             perturb_baro: str | None = None,
+             perturb_baro_key: str = "dU_avg",
+             perturb_baro_scale: float = 1.0,
+             daily_acc: bool = False,
              legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
@@ -629,6 +633,19 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     legoESM state's now-level T only -- this twin runner's default
     (non-``--bridge-before``) state carries no before-level T, so there is
     no tb to perturb in lockstep.
+
+    ``perturb_baro``/``perturb_baro_key``/``perturb_baro_scale``: #1455
+    Phase-2 Measurement 1.  Adds ``scale *`` a depth-uniform barotropic
+    velocity field, once at t=0, to the now-level u.  The field is the
+    per-step barotropic deposit measured by ``substep_traj_compare.py`` and
+    saved by its ``DINO_1455_DEPOSIT_MAP`` block, so the injected section
+    transport at t=0+ IS that deposit and the response divided by it is the
+    retention factor -- the quantity whose absence voided every "x times the
+    budget row" ratio this campaign published (eb3f6d23d).
+
+    ``daily_acc``: store the ACC transport every day under two reducers (the
+    deposit's own mean-over-longitudes one and the recorded gate's median
+    one).  Off by default; adds two float64 arrays to the npz.
     """
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
@@ -660,6 +677,47 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         print(f"PERTURB seed={perturb_seed}: max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}",
               flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
+
+    # #1455 PHASE-2 MEASUREMENT 1, the RETENTION FACTOR.  The per-step deposit
+    # is an INJECTION; the ACC gap is an ACCUMULATION, and converting one to
+    # the other needs the trajectory's retention of a one-step injection --
+    # never measured on this campaign, and the thing that voided every
+    # "x times the budget row" ratio (89dadfeb4, eb3f6d23d).
+    #
+    # This injects the MEASURED deposit's own barotropic velocity field, once,
+    # at t=0, on top of an otherwise byte-identical free run.  The field is
+    # depth-UNIFORM, so it adds exactly that barotropic increment and zero
+    # baroclinic shear, and its section transport at t=0+ is the deposit
+    # itself.  Column 0 of lego's u is the periodic wrap of NEMO's last column
+    # -- the same mapping the forcing substitution established.
+    if perturb_baro is not None:
+        _pb = np.load(perturb_baro, allow_pickle=True)
+        _dU = np.asarray(_pb[perturb_baro_key], dtype=np.float64)   # (jpj,jpi)
+        _u0 = np.asarray(st.u.data, dtype=np.float64)               # (jpj,jpi+1,nz)
+        if _dU.shape != (_u0.shape[0], _u0.shape[1] - 1):
+            raise SystemExit(
+                f"FATAL: perturbation {_dU.shape} does not match the u grid "
+                f"{_u0.shape}; refusing to broadcast a guess")
+        if not np.all(np.isfinite(_dU)):
+            raise SystemExit("FATAL: non-finite values in the perturbation field")
+        _add = np.zeros_like(_u0)
+        _add[:, 1:, :] = (perturb_baro_scale * _dU)[:, :, None]
+        _add[:, 0, :] = perturb_baro_scale * _dU[:, -1][:, None]
+        # A dry u-cell must stay exactly 0.  dU_avg is already masked by NEMO's
+        # surface umask, but the column below the bathymetry is not, so mask
+        # against the model's own 3-D wet u-faces rather than a rebuilt guess.
+        import netCDF4 as _nc0
+        _mm0 = _nc0.Dataset(f"{run_traj}/mesh_mask.nc")
+        _umask3 = np.moveaxis(
+            np.asarray(_mm0.variables["umask"][0]).squeeze(), 0, -1) > 0.5
+        _mm0.close()
+        _add[:, 1:, :] = np.where(_umask3, _add[:, 1:, :], 0.0)
+        _add[:, 0, :] = np.where(_umask3[:, -1, :], _add[:, 0, :], 0.0)
+        _u_pert = jnp.asarray(_u0 + _add, dtype=st.u.data.dtype)
+        st = st._replace(u=st.u.replace(data=_u_pert))
+        print(f"PERTURB-BARO {perturb_baro}:{perturb_baro_key} scale="
+              f"{perturb_baro_scale:g}  max|du|={np.abs(_add).max():.4e} m/s  "
+              f"nonzero={int((_add != 0).sum())}", flush=True)
     nsteps = STEPS_PER_DAY * n_days
 
     # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
@@ -680,6 +738,44 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
+
+    # #1455 PHASE-2: daily ACC transport.  The retention curve R(t) needs the
+    # response at DAILY resolution -- the 3-D snapshot days (0/30/60/90) cannot
+    # resolve a decay timescale of a few days, which is the outcome the
+    # measurement is pre-registered to discriminate.  Two reducers are stored:
+    #   acc_dep  -- the DEPOSIT's own reducer (full 2-D e2u, e3t_1d ladder,
+    #               rows 1..197, MEAN over longitudes 2..-2).  R(t) is a ratio
+    #               of this functional to itself, so no cross-metric staggering
+    #               enters the retention number.
+    #   acc_gate -- acc_thermal_wind.acc_full, the recorded gate metric
+    #               (MEDIAN over longitudes, e2u column 25), for the accounting
+    #               against the recorded -0.401 Sv gap.
+    _acc_dep_daily = _acc_gate_daily = None
+    if daily_acc:
+        import netCDF4 as _nc
+        import acc_thermal_wind as _A
+        _mmp = f"{run_traj}/mesh_mask.nc"
+        _mmd = _nc.Dataset(_mmp)
+        _e2u2d = np.asarray(_mmd.variables["e2u"][0]).squeeze()          # (j,i)
+        _e3t1d = np.asarray(_mmd.variables["e3t_1d"][:]).squeeze()       # (k,)
+        _um3 = np.moveaxis(np.asarray(_mmd.variables["umask"][0]).squeeze(),
+                           0, -1) > 0.5                                  # (j,i,k)
+        _mmd.close()
+        _acc_dep_daily = np.full(n_days, np.nan, dtype=np.float64)
+        _acc_gate_daily = np.full(n_days, np.nan, dtype=np.float64)
+        print(f"daily ACC enabled (mesh {_mmp})", flush=True)
+
+        def _acc_pair(u_full):
+            """(deposit-reducer Sv, gate-metric Sv) from the model's u faces."""
+            u = np.asarray(u_full, dtype=np.float64)[:, 1:53, :]
+            u = np.where(_um3, u, 0.0)
+            # rows 1..197 then MEAN over longitudes 2..-2, matching acc_sv
+            col = np.einsum("jik,k,ji->ji", u, _e3t1d, _e2u2d)[1:198, :].sum(axis=0)
+            dep = float(col[2:-2].mean()) / 1.0e6
+            ug = u.copy()
+            ug[:, 47, :] = np.asarray(u_full, dtype=np.float64)[:, 48, :]
+            gate = _A.acc_full(ug, _A.umask)
+            return dep, gate
 
     eta_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
@@ -730,6 +826,16 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             u_now = u_full[:, 1:]
             v_now = v_full[1:, :]
 
+            if daily_acc:
+                _d, _gt = _acc_pair(st.u.data)
+                if not (np.isfinite(_d) and np.isfinite(_gt)):
+                    raise SystemExit(
+                        f"FATAL: non-finite ACC at day {day_num} "
+                        f"(dep={_d!r} gate={_gt!r}) -- a NaN transport must "
+                        "never be averaged away into a retention curve")
+                _acc_dep_daily[day_idx] = _d
+                _acc_gate_daily[day_idx] = _gt
+
             eta_daily[day_idx] = eta_now
             sst_daily[day_idx] = t_now
             u_daily[day_idx] = u_now
@@ -776,6 +882,15 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
     )
+    if daily_acc:
+        # #1455 Phase-2: stamp the perturbation next to the response it caused,
+        # so a retention curve can never be assembled from a mislabelled arm.
+        save_kwargs["acc_dep_daily"] = _acc_dep_daily
+        save_kwargs["acc_gate_daily"] = _acc_gate_daily
+        save_kwargs["perturb_baro"] = np.str_(perturb_baro or "")
+        save_kwargs["perturb_baro_key"] = np.str_(perturb_baro_key)
+        save_kwargs["perturb_baro_scale"] = np.float64(
+            perturb_baro_scale if perturb_baro else 0.0)
     for d in snap_days:
         if d in t3d:
             save_kwargs[f"T3d_day{d}"] = t3d[d]
@@ -842,6 +957,23 @@ def _parse_args(argv=None):
                          "multiplicative perturbation to the bridged now-level "
                          "T using numpy.random.default_rng(seed); default None "
                          "= no perturbation")
+    p.add_argument("--perturb-baro", default=None,
+                   help="#1455 Phase-2 Measurement 1: npz holding a "
+                        "depth-uniform barotropic velocity field, injected ONCE "
+                        "at t=0 into the now-level u. Written by "
+                        "substep_traj_compare.py's DINO_1455_DEPOSIT_MAP block.")
+    p.add_argument("--perturb-baro-key", default="dU_avg",
+                   help="which array in --perturb-baro to inject: dU_avg (the "
+                        "TOTAL per-step deposit) or dU_sub (the in-loop share)")
+    p.add_argument("--perturb-baro-scale", type=float, default=1.0,
+                   help="multiplier on the injected field; the linearity "
+                        "control arm uses 0.5, the sign arm -1.0")
+    p.add_argument("--daily-acc", action="store_true",
+                   help="#1455 Phase-2: store the ACC transport EVERY day under "
+                        "both the deposit's reducer and the recorded gate's. "
+                        "The 0/30/60/90 snapshot grid cannot resolve a decay "
+                        "timescale of days, which is what the retention "
+                        "measurement is pre-registered to discriminate.")
     return p.parse_args(argv)
 
 
@@ -956,6 +1088,10 @@ def main(argv=None):
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
               perturb_seed=args.perturb_seed,
+              perturb_baro=args.perturb_baro,
+              perturb_baro_key=args.perturb_baro_key,
+              perturb_baro_scale=args.perturb_baro_scale,
+              daily_acc=args.daily_acc,
               legacy_1d_ladder=args.legacy_1d_ladder)
 
 
