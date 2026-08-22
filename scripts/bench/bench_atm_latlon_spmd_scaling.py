@@ -59,6 +59,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+
+
+def _latlon_halo_env_flags():
+    """The lat-band halo switches, from the module that owns the list."""
+    from legoesm.parallel.latlon_spmd import HALO_ENV_FLAGS
+    return tuple(sorted(HALO_ENV_FLAGS))
 import time
 
 import sys
@@ -692,13 +698,14 @@ def main() -> int:
             # knob that failed to take is indistinguishable from one that
             # did. The MPAS bench has recorded its halo knobs since the
             # ballast work; this is the lat-lon twin.
+            # Read the switch list from the module that DEFINES it rather
+            # than repeating it here. The first version of this block was a
+            # hand-copied tuple and it went stale the moment a switch was
+            # added: an A/B then ran correctly and was refused for want of a
+            # receipt line, which is a whole 32-node allocation.
             "halo_knobs": {
                 k: os.environ.get(k, "")
-                for k in ("LEGOESM_LATLON_PACKED_EXCHANGE",
-                          "LEGOESM_LATLON_SPMD_FUSED_HALO",
-                          "LEGOESM_LATLON_HALO_BALLAST",
-                          "LEGOESM_LATLON_HALO_NOCOMM",
-                          "LEGOESM_LATLON_HALO_LEVEL_LEADING")
+                for k in _latlon_halo_env_flags()
             },
         },
     ))
