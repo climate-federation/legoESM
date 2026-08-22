@@ -6718,6 +6718,26 @@ class LatLonCGridOceanModel:
             # same two T-point rates (the shared helper used elsewhere for
             # the RHS drag kick), so reproducing NEMO's sum from the
             # average requires the explicit factor of 2 here.
+            #
+            # *** THIS REASONING IS WRONG AND THE TERM IS 2x NEMO (#1455, found
+            # by adversarial physics review, verified independently against the
+            # VISCOSITY in this same matrix -- named here, deliberately NOT
+            # fixed in the time-level change, because halving a drag magnitude
+            # is its own one-variable experiment). ***
+            #   NEMO   (dynzdf.F90:296): zwd -= zDt_2*(rCdU(i+1)+rCdU(i))/e3u
+            #          with zDt_2 = rDt*0.5 (:97), so = rDt * r_avg / e3u.
+            #   here:  2.0 * dt_mom * r_avg / dz, and dt_mom = rdt (the
+            #          dt_mom_ratio default is 1.0), so = 2 * rDt * r_avg / dz.
+            # The decisive cross-check is the viscosity in the SAME tridiagonal:
+            # NEMO's zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw) = -rDt*avm_avg/
+            # (e3u*e3uw) (:182-185), and ours is alpha = dt_mom*A_v_avg/(dz*
+            # dz_half) (implicit_solver.py:325) -- they agree EXACTLY, which is
+            # what proves dt_mom already absorbs NEMO's zDt_2-times-sum.  The
+            # drag line then applies that same factor a second time.  The
+            # zdf_baroclinic_only RHS correction below carries the identical 2x,
+            # so the two are self-consistent with each other and both off by 2
+            # against dynzdf.F90:156-159.  Sign is CORRECT either way (raising
+            # r_eff raises the diagonal, which damps).
             extra_diag_u = (
                 2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
                 / jnp.maximum(dz_u, 1e-10) * _is_bot_u)

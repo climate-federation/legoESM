@@ -1024,11 +1024,16 @@ def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
     at :156-159 and :296 without ever recomputing it.
 
     So within ONE step there is exactly one drag velocity: the step-entry one.
-    This asserts that invariant over EVERY call the model makes to the shared
-    rate helper, which is what makes it catch the whole defect family rather
-    than one site -- #1455 fixed two sites (the barotropic loop, then the
-    implicit vertical-mixing matrix) and a third would slip in silently
-    without this.
+    This asserts that invariant over every call routed through the SHARED
+    faces helper -- the barotropic loop, the dyn_drg_init residual and the
+    implicit vertical-mixing matrix -- so a fourth consumer added on that
+    route cannot quietly pick the wrong level.
+
+    SCOPE, stated because the obvious wider claim would be false: it does NOT
+    cover ``_tke_bottom_dirichlet``, which calls ``nemo_effective_bottom_drag_r``
+    directly and so bypasses this spy entirely.  That site is still on the
+    handed state's velocity, and NEMO's zdftke.F90:285 pairs the Kmm rate with
+    a Kbb speed anyway, so it is a separate two-time-level question.
 
     Scoped to a single ``_step_impl`` so "now" is unambiguous: under the full
     leap-frog the before-level dissipation pass legitimately treats Kbb as its
@@ -1095,3 +1100,62 @@ def test_implicit_vmix_partial_now_velocity_raises():
         with pytest.raises(ValueError, match="BOTH u_now and v_now or NEITHER"):
             model._apply_implicit_vertical_mixing(
                 state, _DT, _sf(), **kw)
+
+
+def test_leapfrog_vmix_drag_rate_uses_the_step_entry_velocity():
+    """N2 from review: scoping the invariant test to ``_step_impl`` leaves the
+    site the shipped kamm_mlf card actually runs -- the implicit vertical-mixing
+    call inside ``_leapfrog_step`` -- untested, so a regression there would pass
+    green.  This covers it directly.
+
+    Unambiguous by construction: both ``_step_impl`` calls inside
+    ``_leapfrog_step`` pass ``_apply_implicit_vmix=False``, so the drag-in-matrix
+    never runs on the before-level pass; the single vertical-mixing call sees the
+    true Nnn state.
+    """
+    import traceback as _tb
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    sf = _sf(tau_x=0.05)
+    # One Euler-start step to populate the before level, then perturb NOW u so a
+    # wrong time-level pick is visible.
+    s1 = model.step(state, dt=_DT, surface_forcing=sf)
+    rng = np.random.default_rng(23)
+    s1 = s1._replace(u=s1.u.replace(
+        data=jnp.asarray(np.asarray(s1.u.data)
+                         + 0.4 * rng.standard_normal(s1.u.data.shape))
+        * s1.u_mask.data[..., None]))
+
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+    seen = []
+    orig = _pemod.nemo_bottom_drag_rate_faces
+
+    def _spy(u, v, h_k, z_coord, config, grid):
+        seen.append((_tb.extract_stack()[-2].name, np.asarray(u)))
+        return orig(u, v, h_k, z_coord, config, grid)
+
+    _pemod.nemo_bottom_drag_rate_faces = _spy
+    try:
+        model._leapfrog_step(s1, _DT, surface_forcing=sf)
+    finally:
+        _pemod.nemo_bottom_drag_rate_faces = orig
+
+    vmix = [u for name, u in seen if name == "_apply_implicit_vertical_mixing"]
+    assert len(vmix) == 1, (
+        f"expected exactly one implicit-vmix drag call on the leap-frog path, "
+        f"got {len(vmix)} (sites seen: {[n for n, _ in seen]})")
+    u_now = np.asarray(s1.u.data)
+    assert np.array_equal(vmix[0], u_now), (
+        "the leap-frog path's implicit vertical-mixing drag rate was built from "
+        f"a velocity that is not the step-entry (Kmm) one: max|du| = "
+        f"{np.abs(vmix[0] - u_now).max():.4e} m/s")
+    # Control: some OTHER call in the same step used a different velocity, so
+    # the equality above discriminates a time level rather than being trivial.
+    others = [u for name, u in seen if name != "_apply_implicit_vertical_mixing"]
+    assert any(not np.array_equal(u, u_now) for u in others), (
+        "no drag call in this step differed from the entry velocity -- the "
+        "assertion above cannot discriminate a time level here")
