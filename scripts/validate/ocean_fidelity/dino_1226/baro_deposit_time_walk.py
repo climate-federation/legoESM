@@ -27,17 +27,27 @@ A child that exits non-zero, or whose output is missing any of those lines, is
 a FATAL for the whole walk -- never a dropped row, because a dropped row would
 silently change the window the integral covers.
 
-THE ONE INSTRUMENT CHANGE, and why it had to happen before this walk could run:
-this card sets ``forcing_annual_cycle=True``, and the walk passed a bare
-``t_seconds=DT`` (day 0.03) while replaying states at day 180-270.  At the
-historical IC that was harmless by coincidence (230400 x 2700 s is exactly 20
-360-day years, so the relative and absolute clocks coincide).  Across THIS
-window it is not: the season mismatch would vary with the state and could fake
-the very time dependence being measured.  ``substep_traj_compare.py`` now uses
-the absolute clock ``(IC_STEP+1)*DT``.  ``--clock-ab`` re-runs one state under
-both clocks so the size of that correction is measured, not assumed, and the
-planted-violation controls inside the instrument (the two NEMO-side map asserts,
-the legoESM-side boxcar assert, the substep-shift PLANT) re-run on EVERY child.
+THE ONE INSTRUMENT CHANGE.  This card sets ``forcing_annual_cycle=True`` and
+the walk passed a bare ``t_seconds=DT`` (day 0.03) while replaying states at
+day 180-270, so the seasonal restoring target and solar flux were evaluated in
+the wrong season.  ``substep_traj_compare.py`` now uses the absolute clock
+``(IC_STEP+1)*DT``.
+
+THE RATIONALE THIS DOCSTRING USED TO GIVE FOR THAT CHANGE IS WITHDRAWN
+(4c14b4d91).  It said the season mismatch "could fake the very time dependence
+being measured".  It could not: ``t_seconds`` reaches only the tracer restoring
+and the solar flux, the wind is built with no clock argument at all, and within
+a single step the tracer update cannot reach the barotropic forcing.  So the
+clock fix is correct hygiene for any probe that reads the TRACER channels, and
+is provably inert for THIS metric.  ``--clock-ab`` therefore does NOT size a
+correction -- it perturbs a channel with no path to the measured quantity, and
+its zero is guaranteed by construction rather than being a bound on anything.
+It is kept only to demonstrate that the override takes effect, and the probe
+prints that warning above the numbers.
+
+What every child DOES re-run is the instrument's own planted-violation controls
+(the two NEMO-side map asserts, the legoESM-side boxcar assert, the v-face/ssh
+alignment asserts and the substep-shift PLANT).
 
 =====================================================================
 PRE-REGISTERED CRITERIA -- written before the first state was run.
@@ -396,6 +406,46 @@ def _assert_threshold_matches_artifact(out_path: str) -> None:
           f"(literal {GRID320_IN_LOOP_SPREAD:.6e})")
 
 
+def consecutive_stats(d: np.ndarray) -> dict:
+    """Spread, parity split and sign pattern of one consecutive-step series.
+
+    Extracted from ``_report_consecutive`` so a test can plant a period-2
+    signal and a null and have them reach THIS code -- the previous test
+    re-implemented the arithmetic inline and passed with the whole block
+    deleted, which is the same defect it was written to prevent.
+
+    PARITY SPLIT is the direct statistic for the mode under test: a period-2
+    component sits entirely in the even-minus-odd difference of the means.
+    The range statistic only bounds it indirectly and is sample-size dependent
+    (a 5-point range underestimates a 10-point range for the same scatter), so
+    the range RATIO must never be quoted as a "times flatter".
+
+    LEAVE-ONE-OUT on the FIRST point is reported because in this campaign's
+    consecutive lanes the first state is the only one whose restart comes from
+    a different run than the rest, and both adversarial reviews found a claim
+    resting on it alone.
+    """
+    d = np.asarray(d, dtype=float)
+    if d.size < 3:
+        raise ValueError("need at least 3 consecutive samples")
+
+    def _stats(x):
+        ev, od = x[0::2], x[1::2]
+        return (float((x.max() - x.min()) / abs(x.mean())),
+                float(abs(ev.mean() - od.mean()) / abs(x.mean())))
+
+    spread, parity = _stats(d)
+    spread1, parity1 = _stats(d[1:])
+    dif = np.diff(d)
+    return {"spread": spread, "parity_split": parity,
+            "spread_drop_first": spread1, "parity_split_drop_first": parity1,
+            "diff_signs": "".join("+" if x > 0 else "-" for x in dif),
+            # a strictly alternating pattern (either phase) arises by chance on
+            # n-1 differences with probability 2/2^(n-1)
+            "p_sign_pattern_by_chance": 2.0 / (2.0 ** len(dif)),
+            "values": d.tolist()}
+
+
 def _raw_state_parity(kts, tiles: str) -> dict:
     """max|du| between consecutive NEMO restarts, and its parity split.
 
@@ -405,7 +455,7 @@ def _raw_state_parity(kts, tiles: str) -> dict:
     import netCDF4 as nc
 
     src = os.path.join(_DINO, tiles)
-    prev, out = None, []
+    prev, out, argmax = None, [], []
     for kt in kts:
         cand = [os.path.join(src, f"DINO_{kt:08d}_restart_0000.nc"),
                 os.path.join(src, f"DINO_{kt:08d}_restart.nc")]
@@ -416,14 +466,20 @@ def _raw_state_parity(kts, tiles: str) -> dict:
         u = np.asarray(d.variables["un"][0], dtype=np.float64)
         d.close()
         if prev is not None:
-            out.append(float(np.abs(u - prev).max()))
+            du = np.abs(u - prev)
+            out.append(float(du.max()))
+            argmax.append([int(v) for v in np.unravel_index(
+                int(du.argmax()), du.shape)])
         prev = u
     a = np.array(out)
     if a.size < 2:
         raise SystemExit("positive control needs at least 3 restarts")
     ev, od = a[0::2], a[1::2]
-    return {"max_du": a.tolist(),
-            "parity_split": float(abs(ev.mean() - od.mean()) / abs(a.mean()))}
+    return {"max_du": a.tolist(), "argmax_cells": argmax,
+            "parity_split": float(abs(ev.mean() - od.mean()) / abs(a.mean())),
+            "parity_split_drop_first":
+                float(abs(a[1::2].mean() - a[2::2].mean()) / abs(a[1:].mean()))
+                if a.size > 3 else float("nan")}
 
 
 def _report_consecutive(recs, out_path, log_dir, prov) -> int:
@@ -460,28 +516,15 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     out = {}
     for name in ("total", "forcing", "in_loop"):
         d = np.array([r[name] for r in recs], dtype=float)
-        spread = float((d.max() - d.min()) / abs(d.mean()))
-        dif = np.diff(d)
-        signs = "".join("+" if x > 0 else "-" for x in dif)
-        # PARITY SPLIT -- the direct statistic for the mode under test, which
-        # both adversarial reviews arrived at independently.  A period-2
-        # component sits entirely in the even-minus-odd difference of the
-        # means; the range statistic only bounds it indirectly and is
-        # sample-size dependent (a 4-point range underestimates a 10-point
-        # range by ~1/3 for the same scatter, so the ratio below flatters the
-        # NOT-ALIASED arm and must not be quoted as a "times flatter").
-        ev, od = d[0::2], d[1::2]
-        parity = abs(ev.mean() - od.mean()) / abs(d.mean())
-        # a '-+-...' pattern arises by chance on n-1 differences with
-        # probability 2/2^(n-1); printed instead of a verdict label.
-        p_chance = 2.0 / (2.0 ** len(dif))
-        out[name] = {"spread": spread, "diff_signs": signs,
-                     "parity_split": parity, "p_sign_pattern_by_chance":
-                         p_chance, "values": d.tolist()}
-        print(f"    {name:8s} spread (max-min)/|mean| = {spread:.4e}   "
-              f"PARITY |even-odd|/|mean| = {parity:.4e}   "
-              f"diff signs '{signs}' (any strict alternation arises by chance "
-              f"with p={p_chance:.3f})")
+        st = consecutive_stats(d)
+        out[name] = st
+        print(f"    {name:8s} spread (max-min)/|mean| = {st['spread']:.4e}   "
+              f"PARITY |even-odd|/|mean| = {st['parity_split']:.4e}   "
+              f"diff signs '{st['diff_signs']}' (any strict alternation arises "
+              f"by chance with p={st['p_sign_pattern_by_chance']:.3f})")
+        print(f"             LEAVE-ONE-OUT dropping the first point: "
+              f"spread {st['spread_drop_first']:.4e}  PARITY "
+              f"{st['parity_split_drop_first']:.4e}")
     r_c = out["in_loop"]["spread"]
     print(f"\n    PRE-REGISTERED: 320-step-grid in-loop spread = "
           f"{GRID320_IN_LOOP_SPREAD:.4e}")
@@ -519,8 +562,10 @@ def main(argv=None) -> int:
                          "instead of the 10-day grid, to test whether the "
                          "in-loop share's constancy is aliasing")
     ap.add_argument("--clock-ab", action="store_true",
-                    help="also run day 180 under the LEGACY bare-dt clock, to "
-                         "size the correction the three prior commits carry")
+                    help="also run day 180 under the LEGACY bare-dt clock. "
+                         "This does NOT size anything: the clock has no path "
+                         "to this metric, so the zero is guaranteed. Kept only "
+                         "to show the override takes effect.")
     ap.add_argument("--out", default=os.path.join(
         _THIS_DIR, "..", "..", "..", "..", "results", "dino_1455",
         "baro_deposit_time_walk.npz"))
@@ -569,9 +614,11 @@ def main(argv=None) -> int:
               f"{abs(0.5 * BARO_ROW_90D):.4f} Sv.")
         print("  NOTE (post-review): both criteria presuppose a retention "
               "factor of 1 between the matched-state injection they score and "
-              "the free-running\n  accumulation they score it against.  The "
-              "instrument's own R_deposit measures 0.089..0.266, so A1/A2 "
-              "cannot be read as an\n  attribution -- see eb3f6d23d.")
+              "the free-running\n  accumulation they score it against.  That "
+              "factor is UNMEASURED, so A1/A2 cannot be read as an "
+              "attribution.  (R_deposit is NOT that\n  factor -- it is a "
+              "within-step forcing-to-transport response ratio against a ramp "
+              "model; that substitution is retracted in 4c14b4d91.)")
 
     recs = [_run_one(day, kt, lane, tiles, t_seconds=None, log_dir=log_dir)
             for (day, kt, lane, tiles) in states]

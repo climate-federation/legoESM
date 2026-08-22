@@ -201,24 +201,45 @@ def test_entry_state_control_reports_the_inode_identity(tmp_path, monkeypatch):
     assert got2["entry_same_inode"] is False
 
 
-def test_consecutive_criterion_separates_a_planted_period2_from_a_flat_series():
-    """The criterion function carries the whole epistemic weight of the
-    aliasing arm, so it gets a planted signal and a planted null."""
+def test_consecutive_stats_separates_a_planted_period2_from_a_planted_null():
+    """The criterion carries the whole epistemic weight of the aliasing arm.
+    This calls the PROBE'S OWN function, so zeroing either statistic inside it
+    fails here -- the previous version re-implemented the arithmetic inline
+    and passed with the whole block deleted."""
     grid = M.GRID320_IN_LOOP_SPREAD
-    flat = np.full(5, 2.0e-3)
-    d = np.array([f["spread"] for f in [
-        {"spread": float((flat.max() - flat.min()) / abs(flat.mean()))}]])
-    assert d[0] / grid <= 2.0                     # NOT ALIASED arm reachable
-    # a period-2 series with 10x the grid spread must land in the ALIASED arm
-    amp = 20.0 * grid * 2.0e-3
-    p2 = 2.0e-3 + amp * np.array([+1.0, -1.0, +1.0, -1.0, +1.0])
-    spread = float((p2.max() - p2.min()) / abs(p2.mean()))
-    assert spread / grid > 5.0
-    ev, od = p2[0::2], p2[1::2]
-    parity = abs(ev.mean() - od.mean()) / abs(p2.mean())
-    assert parity > 10 * grid                     # the parity statistic sees it
-    parity_flat = abs(flat[0::2].mean() - flat[1::2].mean()) / abs(flat.mean())
-    assert parity_flat == pytest.approx(0.0, abs=1e-15)
+    base = 2.0e-3
+
+    # planted PERIOD-2 signal, amplitude 20x the grid spread
+    p2 = base * (1.0 + 20.0 * grid * np.array([+1.0, -1.0, +1.0, -1.0, +1.0]))
+    got = M.consecutive_stats(p2)
+    assert got["spread"] / grid > 5.0            # lands in the ALIASED arm
+    assert got["parity_split"] > 10.0 * grid     # and the parity statistic sees it
+    assert got["diff_signs"] == "-+-+"
+
+    # planted NULL with a real (non-zero) trend, so the "NOT ALIASED" arm is
+    # exercised on a series that is not identically constant -- a constant
+    # series would make the assertion a tautology (a control perturbing a zero)
+    null = base * (1.0 + 1e-5 * np.arange(5.0))
+    got0 = M.consecutive_stats(null)
+    assert 0.0 < got0["spread"] / grid <= 2.0
+    assert got0["parity_split"] < grid
+    assert got0["diff_signs"] == "++++"
+
+    # leave-one-out is reported and is not a copy of the full-sample number
+    assert got["parity_split_drop_first"] != got["parity_split"]
+
+
+def test_consecutive_stats_is_the_one_the_report_uses():
+    import inspect
+    src = inspect.getsource(M._report_consecutive)
+    assert "consecutive_stats(d)" in src, (
+        "_report_consecutive must call consecutive_stats, or the test above "
+        "pins nothing")
+
+
+def test_consecutive_stats_rejects_too_few_samples():
+    with pytest.raises(ValueError):
+        M.consecutive_stats(np.array([1.0, 2.0]))
 
 
 # --- the reconciliation-halves control (baro_recon_halves.py) ---------------

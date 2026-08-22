@@ -147,11 +147,24 @@ def provenance(tag: str = "") -> str:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=_here, capture_output=True,
             text=True, timeout=30).stdout.strip() or "<no-sha>"
+        # TRACKED dirt only: a bare `git status --porcelain` counts UNTRACKED
+        # files too, so the flag was permanently on (this tree carries dozens
+        # of scratch files) and therefore carried no information -- an
+        # adversarial review caught an artifact stamped "+dirty" being
+        # described as clean.  Two sibling stampers in this directory already
+        # pass --untracked-files=no; this matches them, and the untracked
+        # count is reported SEPARATELY so nothing is hidden, only separated.
         dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain"], cwd=_here, capture_output=True,
-            text=True, timeout=60).stdout.strip())
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=_here, capture_output=True, text=True,
+            timeout=60).stdout.strip())
+        n_untracked = len(subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", ":/"],
+            cwd=_here,
+            capture_output=True, text=True,
+            timeout=60).stdout.split())
     except Exception as exc:                      # never let provenance abort a probe
-        sha, dirty = f"<unavailable: {exc}>", False
+        sha, dirty, n_untracked = f"<unavailable: {exc}>", False, -1
     # EVERY knob that can change the answer, including the wind-control env
     # vars: a wind-on and a wind-off run must NOT stamp identically, since the
     # #1455 retraction turns on exactly that variable.  SEQDUMP is stamped too
@@ -169,7 +182,8 @@ def provenance(tag: str = "") -> str:
             "DINO_1226_T_SECONDS",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
-            f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "
+            f"git={sha}{'+dirty-TRACKED' if dirty else ''}"
+            f"+untracked{n_untracked}  {_knobs}  "
             f"IC_STEP={IC_STEP}  RUN_TRAJ={RUN_TRAJ!r}  "
             f"RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
     print(line, flush=True)

@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck shell=bash
 # Build NEMO per-substep SEQ-DUMP reference lanes at the 10-day twin restarts.
 #
 # #1455 PHASE 1 (the time axis).  The barotropic substep walk
@@ -47,6 +48,7 @@ for f in "$REBUILD_EXE" "$BIN" "$TEMPLATE/namelist_cfg" "$TEMPLATE/namelist_ref"
   [ -e "$f" ] || { echo "FATAL: missing $f" >&2; exit 1; }
 done
 mkdir -p "$STAGE"
+n_built=0; n_present=0; n_refused=0
 
 for KT in $KTS; do
   DAY=$(( KT * 2700 / 86400 ))
@@ -68,11 +70,11 @@ for KT in $KTS; do
     echo "SKIPPING kt=${KT}: it resolves to ${RUNDIR}, the reference lane the" \
          "committed walk was measured against. Set DINO_SEQDUMP_NAME_BY_KT=1" \
          "for sub-daily states." >&2
-    continue
+    n_refused=$((n_refused+1)); continue
   fi
   if [ -s "${RUNDIR}/substep_dump.bin" ]; then
     echo "[skip] day ${DAY} (kt=${KT}): ${RUNDIR}/substep_dump.bin present"
-    continue
+    n_present=$((n_present+1)); continue
   fi
 
   # ---- 1. stitch the 16 tiles (or take an existing 1-rank restart) ------------
@@ -87,7 +89,14 @@ for KT in $KTS; do
     fi
     ln -sf "${SRC_1R}/${BASE}.nc" "${STAGE}/${BASE}.nc"
   elif [ ! -s "${STAGE}/${BASE}.nc" ]; then
-    ntile=$(ls "${TWIN}/${BASE}"_[0-9][0-9][0-9][0-9].nc 2>/dev/null | wc -l)
+    # NOT `ls ... | wc -l`: under `set -o pipefail` a no-match `ls` makes the
+    # pipeline return 2 and `set -e` aborts BEFORE the check below, so the
+    # FATAL message it exists to print is unreachable in exactly the case it
+    # is for.  A glob into an array has no such failure mode.
+    shopt -s nullglob
+    tilelist=( "${TWIN}/${BASE}"_[0-9][0-9][0-9][0-9].nc )
+    shopt -u nullglob
+    ntile=${#tilelist[@]}
     [ "$ntile" -eq 16 ] || { echo "FATAL: kt=${KT} has ${ntile} tiles, expected 16" >&2; exit 1; }
     ( cd "$STAGE"
       for i in $(seq 0 15); do ln -sf "../RUN_90D_TWIN/${BASE}_$(printf %04d "$i").nc" .; done
@@ -139,5 +148,16 @@ for KT in $KTS; do
     [ -s "${RUNDIR}/${want}" ] || { echo "FATAL: kt=${KT} produced no ${want}" >&2; exit 1; }
   done
   echo "[done] day ${DAY} (kt=${KT}) -> ${RUNDIR}"
+  n_built=$((n_built+1))
 done
-echo "ALL LANES BUILT"
+echo "lanes built=${n_built} already-present=${n_present} refused=${n_refused}"
+# Success means every requested kt is NOW present -- built here or already
+# there (the script is idempotent by design).  A REFUSAL is different: the
+# caller asked for something that was declined, and a run that only refused
+# must not report success, because "ALL LANES BUILT" on a run that built
+# nothing reads as a green light.
+if [ "$n_refused" -gt 0 ]; then
+  echo "REFUSED ${n_refused} requested kt(s); see the messages above" >&2
+  exit 3
+fi
+echo "ALL REQUESTED LANES PRESENT (built ${n_built}, already had ${n_present})"
