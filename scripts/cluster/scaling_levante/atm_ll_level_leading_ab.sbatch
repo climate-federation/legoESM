@@ -67,7 +67,13 @@ case "$SWITCH" in
   *) echo "SWITCH='$SWITCH' is not a halo switch this job knows how to pin"
      exit 2 ;;
 esac
-echo "A/B of $SWITCH at ${NDEV} GPUs on ${NODES} nodes"
+# What the OTHER halo switches are held at. Default off, which measures a
+# switch against today's behaviour. Set to 1 to measure whether a switch still
+# pays once another one is already on — two switches that touch different
+# things need not add, and assuming they do is how a stacked claim outruns its
+# evidence.
+OTHERS_AT="${OTHERS_AT:-0}"
+echo "A/B of $SWITCH at ${NDEV} GPUs on ${NODES} nodes, others pinned at $OTHERS_AT"
 rc=0
 
 run_arm () {  # level_leading tag
@@ -76,11 +82,12 @@ run_arm () {  # level_leading tag
   # Every halo knob is PINNED, not merely left alone: an inherited no-comm
   # or ballast setting would give a wrong-answer or confounded run a
   # performance verdict, and the filename would not show it.
-  printf '%s=%s NOCOMM=0 BALLAST=1 (other halo switches pinned off)\n' \
-    "$SWITCH" "$LL" > "$OUTDIR/${TAG}.env"
+  printf '%s=%s NOCOMM=0 BALLAST=1 (other halo switches pinned at %s)\n' \
+    "$SWITCH" "$LL" "$OTHERS_AT" > "$OUTDIR/${TAG}.env"
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=0 LEGOESM_LATLON_HALO_BALLAST=1 \
-  LEGOESM_LATLON_HALO_LEVEL_LEADING=0 LEGOESM_LATLON_HALO_DEDUP=0 \
+  LEGOESM_LATLON_HALO_LEVEL_LEADING=$OTHERS_AT \
+  LEGOESM_LATLON_HALO_DEDUP=$OTHERS_AT \
   JAX_ENABLE_X64=0 \
     env "$SWITCH=$LL" timeout --kill-after=30 600 srun --export=ALL --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" --gpu-bind=none \
@@ -97,7 +104,8 @@ run_arm () {  # level_leading tag
 run_arm 0 warmup_discard
 for A in "0 off_a" "1 on_a" "1 on_b" "0 off_b"; do run_arm $A; done
 
-SWITCH="$SWITCH" CONFIRM_PCT="${CONFIRM_PCT:-5}" REFUTE_PCT="${REFUTE_PCT:-2}" \
+SWITCH="$SWITCH" OTHERS_AT="$OTHERS_AT" \
+CONFIRM_PCT="${CONFIRM_PCT:-5}" REFUTE_PCT="${REFUTE_PCT:-2}" \
   "$PY" - "$OUTDIR" "$NDEV" <<'PYEOF'
 import json, os, statistics, sys
 outdir, ndev = sys.argv[1], int(sys.argv[2])
@@ -124,7 +132,8 @@ def load(tag):
     others = {"LEGOESM_LATLON_HALO_LEVEL_LEADING",
               "LEGOESM_LATLON_HALO_DEDUP"} - {switch}
     bind = [("the switch under test", knob.get(switch), want)]
-    bind += [("pinned " + o, knob.get(o), "0") for o in sorted(others)]
+    others_at = os.environ.get("OTHERS_AT", "0")
+    bind += [("pinned " + o, knob.get(o), others_at) for o in sorted(others)]
     bind += [
             ("packed exchange", knob.get("LEGOESM_LATLON_PACKED_EXCHANGE"), "1"),
             ("fused halo", knob.get("LEGOESM_LATLON_SPMD_FUSED_HALO"), "1"),

@@ -53,27 +53,40 @@ At 128 GPUs (job 27138082, same split, 32 channels) doubling the payload costs
 **more than the entire 1.551 ms communication term**, leaving a per-operation
 residual of -0.205 ms.
 
-RETRACTED, same day, on review: I read that as "contention confirmed". It is
-not confirmed. A marginal cost above the average is formally impossible for a
-cost linear in bytes, so the linear split stops describing the data at 128 —
-but TWO things produce that, and two points cannot separate them:
+I first read the negative residual as "contention confirmed", and both
+reviewers refused it: a marginal cost above the average kills the linear model,
+but a saturating resource and a message crossing a protocol threshold both
+produce that and predict opposite things about a SMALLER payload. So the
+curve was measured instead of argued.
 
-* a convex response, a shared resource saturating; or
-* a DISCONTINUITY, the doubled message crossing a protocol or algorithm
-  threshold in the collective library.
+**THE CURVE, four points at 128 GPUs (job 27143144), and it is LINEAR:**
 
-They predict opposite things about halving the payload — convexity says less
-than half the doubling delta, a crossed threshold says possibly more — so the
-extrapolation this was about to justify is not supported. What is needed is a
-CURVE, at least four payload multiples at each device count, not a chord.
+| payload | wire term | per extra copy |
+|---|---|---|
+| x1 | 1.564 ms | — |
+| x2 | 3.329 | 1.765 |
+| x4 | 6.416 | 1.544 |
+| x8 | 13.181 | 1.691 |
 
-Against contention there is also an arithmetic check worth recording: the
-halo moves roughly 11 MB per device per step, so the extra copy's 1.756 ms is
-about 6 GB/s of marginal bandwidth — a quarter of one HDR200 port. If bytes
-were the binding resource that figure would be near line rate. It is not.
+Fitted across an eightfold range: **1.66 ms per payload copy with an intercept
+of -0.10 ms.** The cost is pure payload and there is no fixed term at all —
+not small, zero within the scatter. Nothing is convex and nothing crossed a
+threshold; the earlier "super-linear" reading was the tiny negative intercept
+plus noise, and it is retracted.
 
-What DOES survive: the per-operation term is unmeasurable at 128, so
-message-count levers are closed there regardless of which explanation wins.
+Marginal bandwidth is 6.6 GB/s per rank and stays there across the whole
+range. That is about a quarter of one HDR200 port, and it does NOT degrade as
+payload grows — so the fabric is not saturating; this lane simply gets a
+quarter of a port's worth of bandwidth per rank, which is close to what the
+measured off-node penalty predicts.
+
+Two consequences, both now on four points rather than two:
+
+* **Message-count levers are dead here.** A zero fixed term means removing
+  exchanges buys nothing at this device count.
+* **Byte reduction pays back LINEARLY and predictably.** Removing a sixth of
+  the payload is worth about 0.28 ms, seven percent of the step. Halving it
+  would be worth about 0.83 ms, twenty-one percent.
 
 ### Local work: granularity, not layout
 
@@ -158,6 +171,7 @@ communication were free, and no amount of communication work can go below it.
 | lane | step | of which local | communication | perfect scaling of 1 GPU | distance |
 |---|---|---|---|---|---|
 | lat-lon 2048x4096x26 | 3.909 ms | 2.287 | 1.551 (40%) | 1.574 ms | **2.5x** |
+| lat-lon, both switches on | 3.504 | — | — | 1.574 | **2.2x** |
 | icosahedral L9 x 26 | 5.000 | 2.330 | 2.670 (53%) | 1.359 | **3.7x** |
 
 CORRECTED on review: the lat-lon row previously mixed arms, quoting a step
@@ -215,11 +229,20 @@ What would close each gap, ranked by what the measurements support:
    two-row fold pad and again as a one-row wall pad, and the code says so —
    the duplication buys uniform per-field unpacking. The wall pad's rows are a
    SUBSET of the fold pad's, so the second copy can be sliced out of the first
-   rather than sent. That is roughly a sixth of the epoch's payload, removed
-   losslessly, and unlike every earlier packing idea it is a COPY rather than
-   a re-derivation, so the one-unit-in-the-last-place mismatch that blocked
-   the exchange-merging work does not apply. Codex found it; nobody has
-   built it.
+   rather than sent. Removed losslessly, and unlike every earlier packing idea
+   it is a COPY rather than a re-derivation, so the one-unit-in-the-last-place
+   mismatch that blocked the exchange-merging work does not apply. Codex found
+   it; nobody has built it.
+
+   **BUILT AND MEASURED: -5.69% of the step at 128 GPUs** (job 27145909,
+   3.7899 -> 3.5741 ms, arm spreads 0.20% and 0.34%), against a bar of 1.5%
+   written before the run. Bit-identical, off by default.
+
+   I had predicted one to three percent, from counting the duplicate as 16.6%
+   of that epoch's payload and guessing the epoch's share of the total. The
+   measured saving is 14% of the whole communication term, so the entry epoch
+   carries far more of the halo bytes than I assumed. The arithmetic
+   under-called it; the A/B is why it was run.
 2. **Whatever makes icosahedral communication grow 1.83x when devices
    double.** It is not payload — halo bytes per device fall as the partition
    shrinks — and the round count is fixed at 11-14 by the edge colouring. The
@@ -241,5 +264,7 @@ What would close each gap, ranked by what the measurements support:
 | 1 | Sixteen collective channels — but chosen PER LANE AND PER DEVICE COUNT, not once | -12.4% lat-lon and -9.3% icosahedral at 64 GPUs; at 128 it is -9.9% on the icosahedral lane and only -1.0% on the lat-lon one |
 | 2 | Thirty-two vertical levels instead of twenty-six on the icosahedral lane | 26 levels measured 3.1x more expensive per cell per level than the cheap counts; faster at every device count despite 23% more work |
 | 3 | Turn the level-leading halo on for the lat-lon lane | -4.0% at 128 GPUs, bit-identical, below the 5% bar it was gated against |
+| 4 | Turn the duplicate-row removal on for the lat-lon lane | **-5.69% at 128 GPUs**, bit-identical, past the 1.5% bar set before the run; arm spreads 0.20% and 0.34% |
+| 5 | Turn BOTH lat-lon switches on together | **-7.54% at 128 GPUs**, 3.7899 -> 3.5040 ms. They stack but do not add: the layout switch is worth 4.03% alone and 2.05% on top of the duplicate removal, because removing a row from the wire also removes the conversions that row needed. Measured, not assumed |
 
 Nothing in the model's defaults was changed to produce any number here.
