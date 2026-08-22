@@ -42,6 +42,16 @@ export MPLBACKEND="${MPLBACKEND:-Agg}"          # headless plotting
 # compile (true compile_time_s). Lives on SCRATCH so it survives between jobs.
 export LEGOESM_JIT_CACHE_DIR="${LEGOESM_JIT_CACHE_DIR:-$SCRATCH/legoesm_jit_cache}"
 
+# --- NCCL fabric plugin (aws-ofi-nccl) --------------------------------------
+# Auto-discover the newest build so NCCL-lane GPU jobs never silently run on
+# TCP sockets (or die at the fail-fast) because a qsub -v was forgotten —
+# 2026-08-21: three 32-node jobs were lost to exactly that. An explicit
+# LEGOESM_NCCL_OFI_LIB still wins; no build present keeps the loud fallback.
+if [ -z "${LEGOESM_NCCL_OFI_LIB:-}" ]; then
+    LEGOESM_NCCL_OFI_LIB="$(ls -d /glade/work/$USER/nccl-ofi/*/lib 2>/dev/null | sort -V | tail -n 1)"
+    export LEGOESM_NCCL_OFI_LIB
+fi
+
 # --- HPE Slingshot 11 / libfabric (CXI provider) fabric tuning --------------
 # legoESM's MPI halo exchange (mpi4jax `sendrecv`: route-A latlon latitude-band
 # + icosahedral cell-partition, and the MPI cubed-sphere face-scatter) is a
