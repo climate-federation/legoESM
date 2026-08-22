@@ -313,6 +313,16 @@ What remains is structural rather than contained:
   whatever the shard size, averaging 13 microseconds at 128 GPUs, and no
   compiler setting in this build moves the count. Cutting it means changing
   what the dycore asks for, not how it is compiled.
+* **The on-device halo staging on the icosahedral lane**, 0.310 ms at 64 GPUs,
+  measured by an arm that skips the gather, concatenate and scatter while
+  changing nothing else. The coloured fill scatters into the local buffers once
+  per round, thirteen times, and those receive positions are disjoint by
+  construction (each halo row has one owner), so the scatters could in
+  principle be deferred and merged. The free screen for this did NOT resolve:
+  the per-round scatters do not appear as distinct operations in any module a
+  virtual-device dump produces, and the wide-halo fill is not inside the
+  per-step module. Whether merging recovers any of the 0.310 ms needs hardware,
+  not a dump.
 * **The fixed per-round term on the icosahedral lane**, 0.665 ms across
   thirteen coloured rounds. The colouring is already optimal for the graph, so
   the rounds cannot be cut by repartitioning; cutting them means changing the
@@ -351,10 +361,12 @@ counterexamples looks perfect.
 **The mechanism is not established, and this section deliberately stops
 guessing.** What IS established, and rules out a whole class of explanation:
 the compiled program is structurally IDENTICAL across cheap and expensive
-counts. At 24, 26, 32 and 44 levels the step compiles to 2292, 2292, 2271 and
-2292 instructions, 108 fusions in every case, the same twenty-three opcodes
-with the same histogram, and the same shape multiset with only the extents
-differing. So this is not different code being emitted — it is the same code
+counts. At 24, 26, 32 and 44 levels it compiles to 2292, 2292, 2271 and 2292
+instructions, 108 fusions in every case, the same twenty-three opcodes with
+the same histogram, and the same shape multiset with only the extents
+differing. Precisely: this is the SERIAL step, because the factory returns the
+plain model step at one device — which is the right program, since the level
+anomaly was measured on one GPU, and the comparison is serial against serial. So this is not different code being emitted — it is the same code
 executing differently at different extents, which no dump can resolve and
 which alignment of the state's column stride, tested earlier, was the wrong
 place to look for.
