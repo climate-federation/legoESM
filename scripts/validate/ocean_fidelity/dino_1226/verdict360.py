@@ -877,6 +877,67 @@ def saturation_table(rows):
     return unsat
 
 
+# How many more quarters of growth we are willing to credit an unsaturated
+# floor with, when asking whether "not saturated" could ever overturn a `no`.
+# Four quarters = one more year at the OBSERVED last-quarter rate.
+UNSAT_CREDIT_QUARTERS = 4
+
+
+def unsaturated_materiality(rows, unsat, day):
+    """Which `u` flags could ACTUALLY overturn a `no`, and which are decoration.
+
+    "Not saturated" was voiding every `no` in the table, because 10 of the 11
+    metrics fail the two-quarter test on the legoESM side.  That reading voids
+    the run's own headline for free, and it is not honest: a gap sitting 15x
+    its floor needs the floor to grow ~8x before it becomes a YES, and a floor
+    whose LAST-QUARTER growth is ~1.0x is not going to do that.  So the flag is
+    attached only where the arithmetic permits it to matter:
+
+        x2YES   = ratio / K_PREREG        (the growth the floor needs)
+        g_lastQ = spread(360)/spread(270) (the growth actually observed)
+
+    `u` is MATERIAL iff the metric is unsaturated AND g_lastQ > 1 AND
+    x2YES <= g_lastQ ** UNSAT_CREDIT_QUARTERS -- i.e. another year at the rate
+    the last quarter actually showed could close it.  Everything else keeps the
+    saturation FACT in the printed table below but does not get to void its
+    verdict.
+    """
+    material, table = set(), []
+    for k in KEYS:
+        lv, nv = rows["lego"][0][day][k], rows["nemo"][0][day][k]
+        fl, ls, ns = two_sided_floor(rows, k, day)
+        ratio = float("inf") if fl == 0 else abs(lv - nv) / fl
+        x2yes = ratio / K_PREREG
+        g = []
+        for side in ("lego", "nemo"):
+            a = spread_at(rows, side, k, 270)[1]
+            b = spread_at(rows, side, k, day)[1]
+            g.append(b / a if a > 0 else float("inf"))
+        gl = max(g)
+        can = (k in unsat) and gl > 1.0 and x2yes <= gl ** UNSAT_CREDIT_QUARTERS
+        if can:
+            material.add(k)
+        share = (ls ** 2 / fl ** 2) if fl > 0 else float("nan")
+        table.append((k, ratio, x2yes, gl, can, share))
+    return material, table
+
+
+def unsaturated_table(table, day):
+    print(f"\n--- DOES `u` MATTER? day {day}: the growth an unsaturated floor "
+          f"would need, against the growth it shows ---")
+    print(f"{'metric':<38}{'ratio':>10}{'x2YES':>10}{'g_lastQ':>10}"
+          f"{'u material?':>13}{'lego share of floor':>21}")
+    for k, ratio, x2yes, gl, can, share in table:
+        print(f"{LABELS[k]:<38}{ratio:>10.2f}{x2yes:>10.2f}{gl:>10.2f}"
+              f"{('YES' if can else 'no'):>13}{share:>20.1%}")
+    print(f"  x2YES = ratio / {K_PREREG} (growth the floor needs for a `no` to "
+          f"become YES); g_lastQ = spread({day})/spread(270).")
+    print(f"  `u` is attached to a verdict only when another "
+          f"{UNSAT_CREDIT_QUARTERS} quarters at g_lastQ could close x2YES.")
+    print( "  lego share of floor = lego_std^2 / floor^2: how much of the "
+           "two-sided floor is legoESM's own dispersion.")
+
+
 def spread_curves(rows, quantum):
     print("\n--- SPREAD(t): single-run ensemble spread by day ---")
     print("    std (primary) on the first line of each metric, max-pairwise "
@@ -915,6 +976,29 @@ def _label(gap, floor):
     return v
 
 
+def positive_control_null(k):
+    """P(|gap|/floor <= k) for the leave-two-out positive control, EXACTLY.
+
+    Derived rather than assumed, because the leave-two-out fix CHANGED the null
+    and the control was briefly printing a fraction against no expectation at
+    all.  Within one side, gap = x_i - x_j with x ~ N(0, sigma^2), so
+    gap = sqrt(2) sigma Z.  The denominator is the std of the two members NOT
+    in the pair, which at n=2 is |x_k - x_l| / sqrt(2) = sigma |Z'|.  When the
+    other side's spread is negligible -- which is this system, measured 9x to
+    16600x tighter -- the RSS adds nothing, so
+
+        ratio = sqrt(2) |Z / Z'|,  a folded Cauchy scaled by sqrt(2)
+        P(ratio <= k) = (2/pi) arctan(k / sqrt(2))
+        median ratio  = sqrt(2) = 1.41421...
+
+    So ~61% inside the registered 2.0x band is the HEALTHY value here, not a
+    failure; the MEDIAN is the stable statistic and the fraction is noisy at
+    n=12 pairs.  If the two sides' spreads were comparable instead, the
+    denominator gains a second independent term and the median falls to ~1.16.
+    """
+    return float(2.0 / np.pi * np.arctan(k / np.sqrt(2.0)))
+
+
 def empirical_rule_controls(rows):
     """The registered rule applied to cases whose answer is KNOWN.
 
@@ -947,6 +1031,7 @@ def empirical_rule_controls(rows):
           "at sqrt(6)=2.449 and cannot fail)")
     npass = ntot = 0
     worst = []
+    ratios = []
     for side in ("lego", "nemo"):
         other = "nemo" if side == "lego" else "lego"
         for a, b in itertools.combinations(range(N_MEM), 2):
@@ -959,13 +1044,24 @@ def empirical_rule_controls(rows):
                 fl = float(np.hypot(s_rest, s_oth))
                 lab = _label(gap, fl)
                 ntot += 1
+                if fl > 0:
+                    ratios.append(abs(gap) / fl)
                 if lab in ("YES", "unres"):
                     npass += 1
                 else:
                     worst.append((side, k, a, b, abs(gap) / fl if fl else np.inf))
     frac = npass / ntot if ntot else float("nan")
-    print(f"            {npass}/{ntot} within-side comparisons land inside the "
-          f"band (YES or unres) = {100 * frac:.1f}%")
+    med = float(np.median(ratios)) if ratios else float("nan")
+    exp2, exp245 = positive_control_null(K_PREREG), positive_control_null(K_WELCH)
+    print(f"            HEADLINE (the stable statistic): median ratio "
+          f"{med:.3f}   PREDICTED {np.sqrt(2.0):.3f}")
+    print(f"            fraction inside the band {npass}/{ntot} = "
+          f"{100 * frac:.1f}%   PREDICTED {100 * exp245:.1f}% "
+          f"(inside {K_PREREG}x alone: {100 * exp2:.1f}%)")
+    print(f"            the prediction is the leave-two-out null "
+          f"sqrt(2)|Z/Z'| for a one-sided floor; ~61% is HEALTHY here, not a")
+    print(f"            failure, and the fraction is noisy at n={ntot} while "
+          f"the median is not")
     if worst:
         worst.sort(key=lambda t: -t[-1])
         print(f"            outside the band: "
@@ -983,10 +1079,11 @@ def empirical_rule_controls(rows):
             neg_ok = False
         print(f"    {LABELS[k]:<38}{gap:>+13.4e}{fl:>14.4e}"
               f"{(abs(gap) / fl if fl else float('inf')):>9.2f}{lab:>9}")
-    print(f"  CALIBRATION: positive {100 * frac:.1f}% inside the band, "
+    print(f"  CALIBRATION: positive median {med:.3f} vs predicted "
+          f"{np.sqrt(2.0):.3f} ({100 * frac:.1f}% inside the band), "
           f"negative {'all `no`' if neg_ok else 'NOT all `no` -- the floor may '
           'be too wide to fail'}")
-    return frac, neg_ok
+    return frac, neg_ok, med
 
 
 def _header():
@@ -1027,7 +1124,13 @@ def _legend():
     print( "         q measured spread under 10x the float32 storage quantum "
            "AT THIS HORIZON -- partly dtype")
     print(f"         u ensemble not saturated (needs BOTH 180->270 and "
-           f"270->360 under {SATURATION_RATIO_MAX}): a YES stands, a `no` does not")
+           f"270->360 under {SATURATION_RATIO_MAX}) AND the observed growth")
+    print( "           could still close the gap -- see the `u` materiality "
+           "table.  Where it IS attached, a YES")
+    print( "           stands and a `no` is an UPPER BOUND.  Most metrics here "
+           "are unsaturated but NOT material:")
+    print( "           the floor would have to grow far faster than its last "
+           "quarter shows to overturn the `no`.")
     print(f"         1 the two sides' spreads differ by more than "
            f"{ONE_SIDED_DECADES:.0f} order(s) of magnitude, so the RSS floor is")
     print( "           effectively ONE model's dispersion -- read it as "
@@ -1042,6 +1145,7 @@ def verdict_table(rows, thin, unsat):
     print("=" * 135)
     for day in HORIZONS:
         onesided = one_sided_flags(rows, day)
+        material, _ = unsaturated_materiality(rows, unsat, day)
         print(f"\n--- day {day} ---")
         print(_header())
         for k in KEYS:
@@ -1054,7 +1158,9 @@ def verdict_table(rows, thin, unsat):
             print(f"{LABELS[k]:<38}{lv:>14.6f}{nv:>14.6f}{gap:>+13.4e}"
                   f"{ls:>12.3e}{ns:>12.3e}{fl_sd:>13.3e}{fl_rg:>13.3e}"
                   f"{ratio:>9.2f}{pv:>8.3f}{_label(gap, fl_sd):>8}"
-                  f"{_flags(k, thin.get(day, set()), unsat, onesided):>5}")
+                  f"{_flags(k, thin.get(day, set()), material, onesided):>5}")
+    _, tbl = unsaturated_materiality(rows, unsat, N_DAYS)
+    unsaturated_table(tbl, N_DAYS)
     print()
     _legend()
 
@@ -1166,17 +1272,19 @@ def main(argv=None):
     unsat = saturation_table(rows)
     growth_control(rows, args.dir)
     spread_curves(rows, quantum_by_day[N_DAYS])
-    frac, neg_ok = empirical_rule_controls(rows)
+    frac, neg_ok, med = empirical_rule_controls(rows)
     verdict_table(rows, thin, unsat)
     window_table(rows, unsat)
     # Re-printed AFTER the tables: a calibration number quoted 200 lines above
     # the verdicts it calibrates does not travel with them (round-3 review).
     print(f"\nCALIBRATION OF THE RULE THAT PRODUCED THE TABLES ABOVE: "
-          f"{100 * frac:.1f}% of the 12 within-side member pairs x "
-          f"{len(KEYS)} metrics land inside the band")
-    print(f"  (expected ~92% by chance at n=4; read ~88% as noise and ~60% as "
-          f"a finding -- the comparisons are correlated, so the spread is "
-          f"wider than binomial),")
+          f"positive-control median ratio {med:.3f} against the analytic "
+          f"leave-two-out null {np.sqrt(2.0):.3f},")
+    print(f"  and {100 * frac:.1f}% of the 12 within-side member pairs x "
+          f"{len(KEYS)} metrics inside the band against a predicted "
+          f"{100 * positive_control_null(K_WELCH):.1f}%")
+    print(f"  (the median is the stable statistic; the fraction is noisy at "
+          f"this sample size and the comparisons are correlated),")
     print(f"  and the 30-day self-mismatch negative control is "
           f"{'all `no` as required' if neg_ok else 'NOT all `no` -- the floor '
           'may be too wide to fail'}.")

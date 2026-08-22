@@ -329,7 +329,7 @@ def test_the_verdict_table_says_no_on_a_planted_gap(V, capsys):
     # tests the legend rather than the verdicts (the expectation was wrong
     # here, not the code).
     body = capsys.readouterr().out
-    day360 = body.split("--- day 360 ---")[1].split("  verdict:")[0]
+    day360 = body.split("--- day 360 ---")[1].split("--- DOES")[0]
     assert " no" in day360 and "YES" not in day360
 
 
@@ -337,7 +337,7 @@ def test_the_verdict_table_says_yes_when_the_models_agree(V, capsys):
     rows = _synth(V, gap=0.0)
     V.verdict_table(rows, {d: set() for d in V.HORIZONS}, set())
     day360 = capsys.readouterr().out.split("--- day 360 ---")[1] \
-        .split("  verdict:")[0]
+        .split("--- DOES")[0]
     assert "YES" in day360 and " no" not in day360
 
 
@@ -417,5 +417,38 @@ def test_the_q_flag_print_path_is_exercised(V, capsys):
     assert all(thin[d] == set(V.KEYS) for d in V.HORIZONS)
     assert "under 10x the float32 storage quantum" in out
     V.verdict_table(rows, thin, set())
-    body = capsys.readouterr().out.split("--- day 360 ---")[1].split("  verdict:")[0]
+    body = capsys.readouterr().out.split("--- day 360 ---")[1].split("--- DOES")[0]
     assert "q" in body
+
+
+def test_positive_control_null_matches_the_folded_cauchy(V):
+    """The leave-two-out fix CHANGED the null, and the control briefly printed
+    a fraction against no expectation at all. gap = sqrt(2) sigma Z over a
+    two-member std sigma|Z'| gives sqrt(2)|Z/Z'|, a scaled folded Cauchy."""
+    import numpy as np
+    assert V.positive_control_null(np.sqrt(2.0)) == pytest.approx(0.5)
+    assert V.positive_control_null(2.0) == pytest.approx(0.6082, abs=1e-4)
+    assert V.positive_control_null(2.45) == pytest.approx(0.6667, abs=1e-4)
+    # monotone, and it never promises certainty
+    assert V.positive_control_null(0.0) == pytest.approx(0.0)
+    assert V.positive_control_null(1e9) < 1.0
+
+
+def test_unsaturated_flag_only_voids_a_no_it_could_actually_overturn(V):
+    """10 of 11 metrics fail two-quarter saturation, so an unqualified `u`
+    would void every `no` in the table for free -- including gaps sitting 15x
+    their floor whose floors grew ~1.0x last quarter."""
+    rows = _synth(V)
+    # A huge gap: x2YES is enormous, the floor is flat, so `u` must NOT attach.
+    far = _synth(V, gap=1000.0)
+    material, table = V.unsaturated_materiality(far, set(V.KEYS), V.N_DAYS)
+    assert material == set(), "a flat floor cannot close a 1000x gap"
+    ratios = {k: r for k, r, *_ in table}
+    assert all(r > 100 for r in ratios.values())
+    # A gap just outside the band with a fast-growing floor: `u` SHOULD attach.
+    grow = _synth(V, grow=True)
+    m2, _ = V.unsaturated_materiality(grow, set(V.KEYS), V.N_DAYS)
+    assert m2 == set(V.KEYS)
+    # And a metric that is SATURATED never gets the flag, however small the gap.
+    m3, _ = V.unsaturated_materiality(grow, set(), V.N_DAYS)
+    assert m3 == set()
