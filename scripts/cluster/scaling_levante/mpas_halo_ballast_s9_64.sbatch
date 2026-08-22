@@ -121,17 +121,27 @@ run_arm 1 ns_a 1 1
 run_arm 1 b1_b
 run_arm 1 nc_b 1
 run_arm 1 ns_b 1 1
-run_arm 2 b2_a
-run_arm 2 b2_b
+# A CURVE, not a chord. Two payload points cannot separate a convex response
+# from a message crossing a protocol threshold, and those predict opposite
+# things about REDUCING the payload -- which is the direction any byte cut
+# needs. The lat-lon lane learned this the expensive way.
+BALLAST_LEVELS="${BALLAST_LEVELS:-2}"
+for BL in $BALLAST_LEVELS; do
+  run_arm "$BL" "b${BL}_a"
+  run_arm "$BL" "b${BL}_b"
+done
 
 echo "=== RECEIPTS ==="
-"$PY" - "$OUTDIR" "$NDEV" <<'EOF'
+BALLAST_LEVELS="$BALLAST_LEVELS" "$PY" - "$OUTDIR" "$NDEV" <<'EOF'
 import json, os, sys
 d = sys.argv[1]
 ndev = sys.argv[2]
 med = {}
-for tag in ("b1_a", "b1_b", "nc_a", "nc_b", "ns_a", "ns_b",
-            "b2_a", "b2_b"):
+_levels = [int(x) for x in os.environ.get("BALLAST_LEVELS", "2").split()]
+_tags = ["b1_a", "b1_b", "nc_a", "nc_b", "ns_a", "ns_b"]
+for _bl in _levels:
+    _tags += ["b%d_a" % _bl, "b%d_b" % _bl]
+for tag in _tags:
     p = os.path.join(d, tag + ".jsonl")
     try:
         lines = [l for l in open(p).read().strip().split("\n")
