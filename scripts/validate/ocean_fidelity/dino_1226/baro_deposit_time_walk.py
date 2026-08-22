@@ -148,9 +148,12 @@ _GAP_CUM = np.array(
 #: constant can be called state-independent.  Both sides' restarts exist at
 #: kt = 5760..5763 (RUN_D180_STEP1 tiles for legoESM, RUN_D180_STEP1_1R single
 #: files for NEMO), so this costs four 4-step NEMO runs and five parent steps.
-#: FIVE points, not four: with four, the first (kt=5760) was the only one whose
-#: restart came from a different run than the rest, and an adversarial review
-#: showed a secondary claim rested entirely on that one point.
+#: FIVE points, not four -- but that did NOT fix the provenance confound and an
+#: earlier version of this comment wrongly implied it had.  kt=5760's restart is
+#: the 16-rank 90-day twin's own checkpoint; kt=5761..5764 come from a 1-rank
+#: continuation that STARTED from it.  Adding a point at the far end cannot
+#: change the near end.  The confound stays OPEN, which is why every statistic
+#: is reported with its leave-one-out twin and why the run PRINTS the reason.
 CONSEC_STATES = [(5760, 5760, "RUN_SEQDUMP_D180_1R", "RUN_D180_STEP1")] + [
     (kt, kt, f"RUN_SEQDUMP_KT{kt}_1R", "RUN_D180_STEP1")
     for kt in (5761, 5762, 5763, 5764)]
@@ -439,7 +442,10 @@ def consecutive_stats(d: np.ndarray) -> dict:
     dif = np.diff(d)
     return {"spread": spread, "parity_split": parity,
             "spread_drop_first": spread1, "parity_split_drop_first": parity1,
-            "diff_signs": "".join("+" if x > 0 else "-" for x in dif),
+            # an exact 0.0 is neither: map it to '0' rather than silently
+            # calling it negative.
+            "diff_signs": "".join("+" if x > 0 else "-" if x < 0 else "0"
+                                  for x in dif),
             # a strictly alternating pattern (either phase) arises by chance on
             # n-1 differences with probability 2/2^(n-1)
             "p_sign_pattern_by_chance": 2.0 / (2.0 ** len(dif)),
@@ -447,10 +453,15 @@ def consecutive_stats(d: np.ndarray) -> dict:
 
 
 def _raw_state_parity(kts, tiles: str) -> dict:
-    """max|du| between consecutive NEMO restarts, and its parity split.
+    """max|du| between consecutive NEMO restarts, its parity split, and the
+    CELL each maximum sits in.
 
-    The positive control for the aliasing test: if the raw state has no
-    step-alternating structure, a flat in-loop share proves nothing.
+    SECONDARY control only.  It shows the state was not static.  It is NOT the
+    control that makes the null meaningful -- that is the TOTAL deposit's own
+    spread, which is the same functional from the same runs -- because a
+    max-norm of a 3-D velocity increment and a signed section integral are
+    different functionals, and because the argmax metadata shows the maximum
+    moving between cells rather than one mode being tracked.
     """
     import netCDF4 as nc
 
@@ -508,7 +519,15 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     kts = np.array([r["kt"] for r in recs], dtype=int)
     if len(recs) < 3:
         raise SystemExit("the aliasing test needs at least 3 consecutive steps")
-    print("\n  CONSECUTIVE-STEP arm (the 320-step grid cannot see this):")
+    print("\n  CONSECUTIVE-STEP arm (the 320-step grid cannot see this).")
+    print("  OPEN CONFOUND, printed because a reader of this log cannot infer "
+          "it: the FIRST state's restart is the 16-rank 90-day twin's own")
+    print("  checkpoint, while the rest come from a 1-rank continuation that "
+          "started from it.  A restart written as a run's terminal state need")
+    print("  not carry the same leap-frog time levels as one written "
+          "mid-chain, so the first row's excess has an unexcluded non-physical")
+    print("  explanation.  Every statistic below is therefore reported with "
+          "its leave-one-out twin.")
     print("     kt  |     TOTAL     |    FORCING    |    IN-LOOP")
     for r in recs:
         print(f"    {r['kt']:5d} | {r['total']:+.6e} | {r['forcing']:+.6e} "
@@ -526,14 +545,57 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
               f"spread {st['spread_drop_first']:.4e}  PARITY "
               f"{st['parity_split_drop_first']:.4e}")
     r_c = out["in_loop"]["spread"]
-    print(f"\n    PRE-REGISTERED: 320-step-grid in-loop spread = "
-          f"{GRID320_IN_LOOP_SPREAD:.4e}")
-    print(f"    consecutive/grid ratio = {r_c / GRID320_IN_LOOP_SPREAD:.3f}   "
-          f"(ALIASED if > 5, NOT ALIASED if <= 2, INCONCLUSIVE between)")
-    # POSITIVE CONTROL, and it is the part that makes the null meaningful: the
-    # RAW STATE these steps are bridged from must itself carry a period-2
-    # signature, or the instrument was never offered the signal it reports not
-    # finding.  Measured from the restarts, not assumed.
+    r_c1 = out["in_loop"]["spread_drop_first"]
+    print(f"\n    PRE-REGISTERED (on the SPREAD; the parity split has no "
+          f"threshold and is reported, not scored):")
+    print(f"      320-step-grid in-loop spread = {GRID320_IN_LOOP_SPREAD:.4e}")
+    print(f"      consecutive/grid ratio = {r_c / GRID320_IN_LOOP_SPREAD:.3f}"
+          f"   (ALIASED if > 5, NOT ALIASED if <= 2, INCONCLUSIVE between)")
+    print(f"      same, dropping the cross-provenance first point = "
+          f"{r_c1 / GRID320_IN_LOOP_SPREAD:.3f}")
+    # RESOLUTION FLOOR.  The child instrument prints its deposits at five
+    # significant figures, so on a 2.02e-03 value the print quantum is 1e-07,
+    # i.e. ~5e-05 RELATIVE.  Any statistic below that is an upper BOUND, not a
+    # measurement -- and this branch has already had to retract one claim
+    # (a sign pattern) for exactly that reason.  Flag it mechanically instead
+    # of leaving it to be noticed.
+    quantum = 1e-7 / abs(np.mean([r["in_loop"] for r in recs]))
+    print(f"\n    PRINT-RESOLUTION FLOOR: the child prints 5 significant "
+          f"figures, so the relative quantum is {quantum:.1e}.")
+    for name in ("total", "forcing", "in_loop"):
+        for key in ("spread", "spread_drop_first", "parity_split",
+                    "parity_split_drop_first"):
+            v = out[name][key]
+            if v < quantum:
+                print(f"      {name}.{key} = {v:.3e} is BELOW one quantum -> "
+                      f"an upper bound of order {quantum:.0e}, NOT a measured "
+                      f"value")
+    print(f"      the ALIASED arm needs a spread above "
+          f"{5 * GRID320_IN_LOOP_SPREAD:.3e} = "
+          f"{5 * GRID320_IN_LOOP_SPREAD / quantum:.0f} quanta, so the verdict "
+          f"itself is not resolution-limited")
+    # POSITIVE CONTROL.  A flat in-loop share means nothing if the instrument
+    # could not have seen a step-to-step change at all, so the null needs a
+    # channel that DID move.  The primary control is the one in the table
+    # above, and it is the strongest available because it shares everything
+    # with the null: the TOTAL deposit is the SAME functional, from the SAME
+    # child run at the SAME five states, and it moves ~100x more.  Printed
+    # below.
+    #
+    # The raw-state series that follows is SECONDARY and is not load-bearing:
+    # it is a max-norm of a 3-D velocity increment, a different functional
+    # from the signed section integral the null is measured in, and its own
+    # argmax metadata shows the maximum MOVING between cells rather than one
+    # mode being tracked.  It shows only that the state was not static.
+    _ctl = out["total"]["spread"] / out["in_loop"]["spread"]
+    print(f"\n    PRIMARY POSITIVE CONTROL (same functional, same child runs, "
+          f"same five states):")
+    print(f"      the TOTAL deposit's spread is {out['total']['spread']:.3e} "
+          f"against the in-loop channel's {out['in_loop']['spread']:.3e} "
+          f"-> {_ctl:.0f}x.")
+    print("      So the instrument DOES respond to the step-to-step state "
+          "change, in the null's own units, while the in-loop channel does "
+          "not.")
     pc = _raw_state_parity([r["kt"] for r in recs], recs[0]["tiles"])
     out["raw_state_positive_control"] = pc
     print(f"\n    POSITIVE CONTROL (raw state, max|du| between consecutive "
@@ -543,13 +605,16 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     print(f"      parity split of that series = {pc['parity_split']:.4f}  "
           f"(dropping the first difference: "
           f"{pc['parity_split_drop_first']:.4f})")
-    print("      -> the STATE alternates step to step; the in-loop deposit's "
-          f"parity split is {out['in_loop']['parity_split']:.2e}.")
-    print("         These are DIFFERENT FUNCTIONALS -- a max-norm of a 3-D "
-          "velocity increment against a signed section integral -- so their")
-    print("         RATIO is not a suppression factor and is not quoted.  The "
-          "control's only job is to show the instrument was offered a")
-    print("         step-alternating signal, and it was.")
+    print("      -> SECONDARY, and weaker than it looks: the state changes "
+          "between consecutive steps by amounts differing roughly two-fold,")
+    print("         but the argmax cells above show that is PARTLY the "
+          "maximum MOVING (3 of 4 on one row, 1 in the interior), so this is")
+    print("         not one physical mode sampled four times and must not be "
+          "read as a clean period-2 signature.  It is also a DIFFERENT")
+    print("         FUNCTIONAL from the null (max-norm of a 3-D increment vs "
+          "a signed section integral), so no ratio between them is quoted.")
+    print("         Its only job is to show the state was not static.  The "
+          "load-bearing control is the TOTAL-vs-in-loop contrast above.")
     np.savez(out_path, kts=kts,
              **{f"dep_{k}": np.array([r[k] for r in recs], dtype=float)
                 for k in ("total", "forcing", "in_loop")},

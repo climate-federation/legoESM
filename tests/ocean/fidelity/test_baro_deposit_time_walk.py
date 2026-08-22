@@ -216,13 +216,17 @@ def test_consecutive_stats_separates_a_planted_period2_from_a_planted_null():
     assert got["parity_split"] > 10.0 * grid     # and the parity statistic sees it
     assert got["diff_signs"] == "-+-+"
 
-    # planted NULL with a real (non-zero) trend, so the "NOT ALIASED" arm is
-    # exercised on a series that is not identically constant -- a constant
-    # series would make the assertion a tautology (a control perturbing a zero)
-    null = base * (1.0 + 1e-5 * np.arange(5.0))
+    # planted NULL.  It must not be constant (a tautology) AND must not be a
+    # pure linear trend either: at odd n a straight line has EXACTLY zero
+    # parity split by construction, so that assertion would again be satisfied
+    # by a machine zero rather than by the statistic working.  Use a trend
+    # with a small non-linear wobble, so the parity split is genuinely small
+    # rather than structurally zero.
+    null = base * (1.0 + 1e-5 * np.arange(5.0)
+                   + 2e-6 * np.array([0.0, 0.3, -0.2, 0.4, 0.1]))
     got0 = M.consecutive_stats(null)
     assert 0.0 < got0["spread"] / grid <= 2.0
-    assert got0["parity_split"] < grid
+    assert 0.0 < got0["parity_split"] < grid      # small, but NOT zero
     assert got0["diff_signs"] == "++++"
 
     # leave-one-out is reported and is not a copy of the full-sample number

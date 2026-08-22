@@ -162,7 +162,8 @@ def provenance(tag: str = "") -> str:
             ["git", "ls-files", "--others", "--exclude-standard", ":/"],
             cwd=_here,
             capture_output=True, text=True,
-            timeout=60).stdout.split())
+            timeout=60).stdout.splitlines())   # lines, not whitespace tokens:
+        # a filename containing a space would otherwise be counted twice.
     except Exception as exc:                      # never let provenance abort a probe
         sha, dirty, n_untracked = f"<unavailable: {exc}>", False, -1
     # EVERY knob that can change the answer, including the wind-control env
