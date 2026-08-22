@@ -129,6 +129,19 @@ _GAP_CUM = np.array(
 #: Day 180's tiles live in RUN_D180_STEP1 (a 1-rank "_0000" tile); days 190+
 #: are the 90-day twin's own 16-rank tiles.  The seq-dump lanes for 190+ are
 #: built by scripts/data/gen_dino_nemo_seqdump_states.sh.
+#: CONSECUTIVE-STEP states -- four NEMO steps in a row at day 180.  The 10-day
+#: grid below samples every 320th step, which is an EVEN offset, so it aliases
+#: any oscillation with a period that divides 320 -- in particular a leap-frog
+#: computational mode that alternates sign every step would appear on that grid
+#: as a perfect constant with sign coherence 1.000.  That is exactly what the
+#: in-loop share looks like, so the aliasing must be excluded before the
+#: constant can be called state-independent.  Both sides' restarts exist at
+#: kt = 5760..5763 (RUN_D180_STEP1 tiles for legoESM, RUN_D180_STEP1_1R single
+#: files for NEMO), so this costs three 4-step NEMO runs and four parent steps.
+CONSEC_STATES = [(5760, 5760, "RUN_SEQDUMP_D180_1R", "RUN_D180_STEP1")] + [
+    (kt, kt, f"RUN_SEQDUMP_KT{kt}_1R", "RUN_D180_STEP1")
+    for kt in (5761, 5762, 5763)]
+
 STATES = [(180, 5760, "RUN_SEQDUMP_D180_1R", "RUN_D180_STEP1")] + [
     (180 + 10 * k, 5760 + 320 * k, f"RUN_SEQDUMP_D{180 + 10 * k}_1R",
      "RUN_90D_TWIN")
@@ -177,20 +190,31 @@ def score(d: np.ndarray, baro_win_per_step: np.ndarray) -> dict:
 
 
 def _assert_same_entry_state(day: int, kt: int, lane: str, tiles: str) -> dict:
-    """CONTROL: NEMO and legoESM must enter the step from the SAME bytes.
+    """CONTROL: the two sides must enter the step from the SAME bytes.
 
-    The two sides read the state through different files: legoESM stitches the
-    per-rank restart tiles in memory (``rebuild_nemo_restart.rebuild``, what
-    ``multistep_replay.build_replay_ic`` calls), while NEMO's 1-rank lane reads
-    the single file produced by the shipped REBUILD_NEMO tool.  If those two
-    disagree anywhere, the "deposit" is a difference of initial conditions and
-    not of dynamics -- which is exactly the class of defect that produced this
-    campaign's earlier retractions.  So compare EVERY shared variable, bit for
-    bit, and refuse the state on any mismatch.
+    WHAT THIS COVERS, stated exactly, because an earlier revision of this
+    docstring over-claimed it and an adversarial review caught it.  legoESM
+    stitches the per-rank restart tiles in memory
+    (``rebuild_nemo_restart.rebuild``, what ``multistep_replay.build_replay_ic``
+    calls); NEMO's 1-rank lane reads whichever single file its own namelist
+    names.  This compares EVERY shared float variable of rank >= 3 (which on a
+    NEMO restart INCLUDES the 2-D fields, stored as (time,y,x) -- ssh, uu_b and
+    the surface-forcing carries are covered) bit for bit and refuses the state
+    on any mismatch.
 
-    Day 180 is included: there legoESM reads RUN_D180_STEP1's 1-rank tile and
-    NEMO reads RUN_TRAJ's own restart, two independently written files whose
-    agreement was never actually checked.
+    So it is a check on the TWO STITCHERS, not on two independently produced
+    ocean states:
+      * days 190..270 -- NEMO reads REBUILD_NEMO's Fortran stitch of the twin's
+        16 tiles and legoESM reads the Python stitch of the SAME 16 tiles.
+        Different inodes, one byte source: it genuinely tests halo handling,
+        axis order and variable coverage in the Python stitcher, and nothing
+        about state provenance.
+      * day 180 and the consecutive-step lanes -- both paths resolve to the
+        SAME INODE (measured and printed below).  There the check is an
+        identity and proves nothing at all; it is kept only so that no state is
+        silently exempt from the gate.
+    The inode pair is printed for every state so the reader can see which of
+    the two situations a given row is in rather than inferring it.
     """
     import glob
 
@@ -235,6 +259,13 @@ def _assert_same_entry_state(day: int, kt: int, lane: str, tiles: str) -> dict:
         if d > worst:
             worst, worst_name = d, name
     dn.close()
+    same_inode = False
+    try:
+        st_n = os.stat(os.path.realpath(nemo_file))
+        st_t = os.stat(os.path.realpath(tile_files[0]))
+        same_inode = (st_n.st_ino == st_t.st_ino and st_n.st_dev == st_t.st_dev)
+    except OSError:
+        pass
     if worst != 0.0:
         raise SystemExit(
             f"FATAL day {day}: the two entry states differ (worst {worst:.3e} "
@@ -242,7 +273,8 @@ def _assert_same_entry_state(day: int, kt: int, lane: str, tiles: str) -> dict:
             f"{len(tile_files)} tiles from {tile_glob}. A deposit measured "
             "from different states measures the difference of the states.")
     return {"entry_state_maxdiff": worst, "entry_nvars": len(names),
-            "entry_ntiles": len(tile_files), "nemo_restart": nemo_file}
+            "entry_ntiles": len(tile_files), "nemo_restart": nemo_file,
+            "entry_same_inode": bool(same_inode)}
 
 
 def _run_one(day: int, kt: int, lane: str, tiles: str, *,
@@ -323,10 +355,77 @@ def _run_one(day: int, kt: int, lane: str, tiles: str, *,
     return rec
 
 
+#: The 10-day grid's measured in-loop spread, (max-min)/mean, from the
+#: committed run in 89dadfeb4.  The consecutive-step arm is scored against it.
+GRID320_IN_LOOP_SPREAD = 3.1623e-03
+
+
+def _report_consecutive(recs, out_path, log_dir, prov) -> int:
+    """The ALIASING test, with its criterion pre-registered here in code.
+
+    PRE-REGISTERED, before the three consecutive lanes were ever measured:
+    the in-loop share on the 320-step grid has relative spread
+    (max-min)/mean = 3.16e-03.  Let r_c be the same statistic over four
+    CONSECUTIVE steps.
+
+      ALIASED       iff r_c > 5 * 3.16e-03, i.e. the series moves far more
+                    from step to step than the 320-step grid could see.  A
+                    step-alternating (period-2) pattern is the specific mode
+                    that the even 320-step offset hides completely, so the
+                    sign pattern of the successive differences is printed
+                    next to r_c.
+      NOT ALIASED   iff r_c <= 2 * 3.16e-03: the share really is constant at
+                    step resolution and the 10-day grid was not hiding
+                    structure.
+      INCONCLUSIVE  in between (2x..5x) -- named in advance so an awkward
+                    number cannot be argued either way afterwards.
+
+    Prints numbers and the thresholds.  No verdict.
+    """
+    kts = np.array([r["kt"] for r in recs], dtype=int)
+    if len(recs) < 3:
+        raise SystemExit("the aliasing test needs at least 3 consecutive steps")
+    print("\n  CONSECUTIVE-STEP arm (the 320-step grid cannot see this):")
+    print("     kt  |     TOTAL     |    FORCING    |    IN-LOOP")
+    for r in recs:
+        print(f"    {r['kt']:5d} | {r['total']:+.6e} | {r['forcing']:+.6e} "
+              f"| {r['in_loop']:+.6e}")
+    out = {}
+    for name in ("total", "forcing", "in_loop"):
+        d = np.array([r[name] for r in recs], dtype=float)
+        spread = float((d.max() - d.min()) / abs(d.mean()))
+        dif = np.diff(d)
+        signs = "".join("+" if x > 0 else "-" for x in dif)
+        alt = bool(len(dif) > 1 and np.all(np.sign(dif[:-1]) * np.sign(dif[1:]) < 0))
+        out[name] = {"spread": spread, "diff_signs": signs, "alternating": alt,
+                     "values": d.tolist()}
+        print(f"    {name:8s} consecutive spread (max-min)/|mean| = "
+              f"{spread:.4e}   successive-diff signs '{signs}'"
+              f"{'  [period-2 alternating]' if alt else ''}")
+    r_c = out["in_loop"]["spread"]
+    print(f"\n    PRE-REGISTERED: 320-step-grid in-loop spread = "
+          f"{GRID320_IN_LOOP_SPREAD:.4e}")
+    print(f"    consecutive/grid ratio = {r_c / GRID320_IN_LOOP_SPREAD:.3f}   "
+          f"(ALIASED if > 5, NOT ALIASED if <= 2, INCONCLUSIVE between)")
+    np.savez(out_path, kts=kts,
+             **{f"dep_{k}": np.array([r[k] for r in recs], dtype=float)
+                for k in ("total", "forcing", "in_loop")},
+             summary_json=json.dumps(
+                 {"provenance": prov, "mode": "consecutive",
+                  "grid320_in_loop_spread": GRID320_IN_LOOP_SPREAD,
+                  "records": recs, "stats": out}, default=float))
+    print(f"\n  artifact: {out_path}\n  logs:     {log_dir}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="",
                     help="comma-separated days to run (default: all ten)")
+    ap.add_argument("--consecutive", action="store_true",
+                    help="run the four CONSECUTIVE NEMO steps at day 180 "
+                         "instead of the 10-day grid, to test whether the "
+                         "in-loop share's constancy is aliasing")
     ap.add_argument("--clock-ab", action="store_true",
                     help="also run day 180 under the LEGACY bare-dt clock, to "
                          "size the correction the three prior commits carry")
@@ -339,16 +438,21 @@ def main(argv=None) -> int:
     import multistep_replay as mr
     prov = mr.provenance("baro_deposit_time_walk")
 
+    if args.consecutive and args.out.endswith("baro_deposit_time_walk.npz"):
+        args.out = args.out.replace("baro_deposit_time_walk.npz",
+                                    "baro_deposit_consecutive.npz")
     out_path = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     log_dir = os.path.join(os.path.dirname(out_path), "logs")
     os.makedirs(log_dir, exist_ok=True)
 
+    catalog = CONSEC_STATES if args.consecutive else STATES
     want = ([int(x) for x in args.only.split(",") if x.strip()]
-            if args.only else [s[0] for s in STATES])
-    states = [s for s in STATES if s[0] in want]
+            if args.only else [s[0] for s in catalog])
+    states = [s for s in catalog if s[0] in want]
     if len(states) != len(want):
-        raise SystemExit(f"unknown day(s) in --only={args.only!r}")
+        raise SystemExit(f"unknown state key(s) in --only={args.only!r}; "
+                         f"this mode offers {[s[0] for s in catalog]}")
 
     print(f"\n=== #1455 PHASE 1: the deposit's TIME AXIS "
           f"({len(states)} bridged states) ===")
@@ -376,12 +480,15 @@ def main(argv=None) -> int:
 
     print("\n  deposit(t) and its split, Sv/step (lego - NEMO, gate weights):")
     print("    day |     TOTAL     |    FORCING    |    IN-LOOP    | "
-          "forcing% | plant | wall s")
+          "forcing% | plant | entry maxdiff (2 stitchers? )")
     for r in recs:
         fr = 100.0 * r["forcing"] / r["total"] if r["total"] else float("nan")
+        _one = ("SAME INODE -> identity, proves nothing"
+                if r.get("entry_same_inode") else
+                f"2 stitchers, {r['entry_nvars']} vars")
         print(f"    {r['day']:3.0f} | {r['total']:+.6e} | {r['forcing']:+.6e} "
               f"| {r['in_loop']:+.6e} | {fr:7.1f}% | {r['plant_ratio']:5.2f} "
-              f"| {r['wall_s']:6.1f}")
+              f"| {r['entry_state_maxdiff']:.1e} ({_one})")
 
     if ab is not None:
         print("\n  CLOCK A/B at day 180 (absolute vs the legacy bare-dt clock "
@@ -395,6 +502,9 @@ def main(argv=None) -> int:
             print(f"    delta {k:8s} = {d:+.4e} Sv/step "
                   f"({100 * d / ab[k] if ab[k] else float('nan'):+.2f}% of the "
                   "legacy value)")
+
+    if args.consecutive:
+        return _report_consecutive(recs, out_path, log_dir, prov)
 
     # ---- the pre-registered arithmetic ------------------------------------
     full = len(recs) == len(STATES)

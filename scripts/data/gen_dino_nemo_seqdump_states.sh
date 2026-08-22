@@ -28,7 +28,15 @@ set -euo pipefail
 DINO="${DINO_ORACLE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO}"
 REBUILD_EXE="${DINO}/../../tools/REBUILD_NEMO/rebuild_nemo.exe"
 BIN="${DINO}/BLD/bin/nemo.exe.seqdump_ea0c113c"
-TWIN="${DINO}/RUN_90D_TWIN"
+# Restart source.  Default = the 90-day twin's 16 per-rank tiles (stitched
+# below).  DINO_SEQDUMP_SRC_1R names a directory that already holds SINGLE-FILE
+# 1-rank restarts, in which case no stitching happens and the file is used
+# as-is -- that is the consecutive-step lane (RUN_D180_STEP1_1R).
+TWIN="${DINO_SEQDUMP_SRC:-${DINO}/RUN_90D_TWIN}"
+SRC_1R="${DINO_SEQDUMP_SRC_1R:-}"
+# Lane naming: by DAY for the 10-day grid, by KT when the states are closer
+# together than a day (kt*2700/86400 would collide).
+NAME_BY_KT="${DINO_SEQDUMP_NAME_BY_KT:-0}"
 TEMPLATE="${DINO}/RUN_SEQDUMP_D180_1R"
 STAGE="${DINO}/REBUILD_TWIN"
 
@@ -42,15 +50,30 @@ mkdir -p "$STAGE"
 
 for KT in $KTS; do
   DAY=$(( KT * 2700 / 86400 ))
-  RUNDIR="${DINO}/RUN_SEQDUMP_D${DAY}_1R"
+  if [ "$NAME_BY_KT" = "1" ]; then
+    RUNDIR="${DINO}/RUN_SEQDUMP_KT${KT}_1R"
+  else
+    RUNDIR="${DINO}/RUN_SEQDUMP_D${DAY}_1R"
+  fi
   BASE=$(printf "DINO_%08d_restart" "$KT")
+  # The day-180 lane is the reference the three committed walk commits were
+  # measured against; rebuilding it would move that reference.  Refuse it
+  # explicitly rather than relying on the idempotence skip, because the rm -rf
+  # below would otherwise destroy it on a --force-style re-run.
+  if [ "$KT" = "5760" ]; then
+    echo "REFUSING kt=5760: RUN_SEQDUMP_D180_1R is the reference lane" >&2
+    exit 1
+  fi
   if [ -s "${RUNDIR}/substep_dump.bin" ]; then
     echo "[skip] day ${DAY} (kt=${KT}): ${RUNDIR}/substep_dump.bin present"
     continue
   fi
 
-  # ---- 1. stitch the 16 tiles -------------------------------------------------
-  if [ ! -s "${STAGE}/${BASE}.nc" ]; then
+  # ---- 1. stitch the 16 tiles (or take an existing 1-rank restart) ------------
+  if [ -n "$SRC_1R" ]; then
+    [ -s "${SRC_1R}/${BASE}.nc" ] || { echo "FATAL: no ${SRC_1R}/${BASE}.nc" >&2; exit 1; }
+    ln -sf "${SRC_1R}/${BASE}.nc" "${STAGE}/${BASE}.nc"
+  elif [ ! -s "${STAGE}/${BASE}.nc" ]; then
     ntile=$(ls "${TWIN}/${BASE}"_[0-9][0-9][0-9][0-9].nc 2>/dev/null | wc -l)
     [ "$ntile" -eq 16 ] || { echo "FATAL: kt=${KT} has ${ntile} tiles, expected 16" >&2; exit 1; }
     ( cd "$STAGE"
@@ -70,6 +93,8 @@ for KT in $KTS; do
       "${TEMPLATE}/namelist_cfg" > "${RUNDIR}/namelist_cfg"
   grep -q "nn_it000    =       $((KT+1))" "${RUNDIR}/namelist_cfg" \
     || { echo "FATAL: nn_it000 substitution missed for kt=${KT}" >&2; exit 1; }
+  grep -q "nn_itend    =       $((KT+4))" "${RUNDIR}/namelist_cfg" \
+    || { echo "FATAL: nn_itend substitution missed for kt=${KT}" >&2; exit 1; }
   grep -q "cn_ocerst_in = \"${BASE}\"" "${RUNDIR}/namelist_cfg" \
     || { echo "FATAL: cn_ocerst_in substitution missed for kt=${KT}" >&2; exit 1; }
   ln -sf "../REBUILD_TWIN/${BASE}.nc" "${RUNDIR}/"
@@ -88,9 +113,13 @@ for KT in $KTS; do
     [ -s "${RUNDIR}/substep_dump.bin" ] && break
     echo "[retry] day ${DAY} (kt=${KT}): launch ${try} died in init, retrying"
   done
+  # The final restart proves the run REACHED nn_itend.  Without it, a blowup
+  # after substep 1 would still leave a non-empty substep_dump.bin and pass a
+  # size-only check -- the dumps are overwritten every step, so their existence
+  # proves only that the run STARTED.
   for want in substep_dump.bin spg_dump_puu_b_final.bin spg_dump_zu_frc.bin \
               spg_dump_zv_frc.bin spg_dump_ssh_frc.bin spg_dump_un_adv_final.bin \
-              mesh_mask.nc; do
+              mesh_mask.nc "$(printf 'DINO_%08d_restart.nc' $((KT+4)))"; do
     [ -s "${RUNDIR}/${want}" ] || { echo "FATAL: kt=${KT} produced no ${want}" >&2; exit 1; }
   done
   echo "[done] day ${DAY} (kt=${KT}) -> ${RUNDIR}"

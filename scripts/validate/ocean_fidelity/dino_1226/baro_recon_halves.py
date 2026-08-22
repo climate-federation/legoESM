@@ -77,6 +77,9 @@ def _read3d(path: str, jpi: int, jpj: int, jpk: int) -> np.ndarray:
 def main() -> int:
     import netCDF4 as nc
 
+    sys.path.insert(0, _THIS_DIR)
+    import multistep_replay as mr
+    prov = mr.provenance("baro_recon_halves")
     print("#1455 PHASE 1 control: is the walk's deposit a WHOLE stage?")
     print("  (NEMO's own dumps only -- no legoESM, no model run, no fit)\n")
     print("   day |  ACC[uu_b half] |  ACC[commit]   |  |commit|/|half| |"
@@ -201,6 +204,14 @@ def main() -> int:
     else:
         print(f"\n   (walk artifact {walk} absent: the additive-vs-relative "
               "discrimination is SKIPPED, not assumed)")
+
+    out = os.path.join(_THIS_DIR, "..", "..", "..", "..", "results",
+                       "dino_1455", "baro_recon_halves.npz")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    np.savez(os.path.abspath(out), days=np.array(DAYS),
+             acc_uu_b_half=half, acc_commit=commit,
+             provenance=np.array([prov]))
+    print(f"\n   artifact: {os.path.abspath(out)}")
 
     print("\n   (the walk's per-step deposit is a difference of the FIRST "
           "column between\n    the two models; the stage the budget row "
