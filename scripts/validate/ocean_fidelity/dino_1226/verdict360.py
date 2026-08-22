@@ -1002,38 +1002,33 @@ def positive_control_null(k):
 def empirical_rule_controls(rows):
     """The registered rule applied to cases whose answer is KNOWN.
 
-    Both round-2 reviews rejected the first version of this, for the same
-    reason from two directions, and the code review's form of it is exact:
-    scoring member i against member j while BOTH sit in the denominator caps
-    the ratio at sqrt(n(n-1)/2)/... -- concretely sqrt(6) = 2.449 at n=4, and
-    ~1.73 once the RSS adds a comparable second side.  A `no` was
-    ARITHMETICALLY IMPOSSIBLE, so the control could not fail and proved
-    nothing.
+    POSITIVE, PER SIDE -- and per side is not cosmetic.  The floor is the
+    two-sided RSS, so a pair drawn from the legoESM side is divided by a floor
+    legoESM dominates (the other side is 9x-16600x tighter and adds nothing),
+    while a pair drawn from the NEMO side is divided by a floor that is almost
+    entirely LEGOESM'S spread.  Those are two different nulls, and pooling them
+    reports a median that belongs to neither: the NEMO-side ratios are tiny BY
+    CONSTRUCTION and drag the pooled statistic down.  Only the legoESM side is
+    compared against the analytic sqrt(2)|Z/Z'| null; the NEMO side is printed
+    for completeness with its ratios explicitly labelled uninformative.
 
-    Fixed by taking the denominator from the members NOT in the numerator
-    (leave-two-out), which has no such ceiling, and by scoring ALL 12
-    within-side pairs (6 per side) as a FRACTION rather than demanding a
-    single pair pass -- a single pair at n=4 is a coin flip, and ~8% of
-    within-side pairs are expected to land outside the band by chance.
-
-    NEGATIVE control: legoESM day 360 against legoESM day 330.  The reviews
-    disagreed here -- one wanted a 30-day mismatch (a 10-day one loses margin
-    against day-360 floors), the other wanted a SELF mismatch rather than a
-    cross-model one (a cross-model time mismatch mostly restates the very
-    quantity under test).  Both objections are right and they are compatible:
-    this is a 30-day SELF mismatch, which has the margin AND isolates the
-    rule from the legoESM-minus-NEMO question entirely.
+    NEGATIVE, AT TWO LAGS.  A single lag can have no power for a metric that
+    happens to return near its own value over exactly that interval, which is
+    not the same thing as a floor that is too wide.  Measured here: the
+    southern-basin transport differs by only -0.012 Sv between day 330 and day
+    360 because it is oscillating on that timescale, so the 30-day lag cannot
+    reject it however good the rule is.  A 90-day lag is run alongside, and a
+    metric is only counted as a control FAILURE if it passes at BOTH lags.
     """
     print("\n--- EMPIRICAL CONTROLS ON THE REGISTERED RULE (known answers) ---")
-    print("  POSITIVE: all 12 within-side member pairs at day "
-          f"{N_DAYS}, floor from the two members NOT in the pair")
-    print("            (a pair scored against a floor it is part of is capped "
-          "at sqrt(6)=2.449 and cannot fail)")
-    npass = ntot = 0
-    worst = []
-    ratios = []
+    print(f"  POSITIVE: within-side member pairs at day {N_DAYS}, floor from "
+          f"the two members NOT in the pair")
+    print( "            (a pair scored against a floor it is part of is capped "
+           "at sqrt(6)=2.449 and cannot fail)")
+    stats = {}
     for side in ("lego", "nemo"):
         other = "nemo" if side == "lego" else "lego"
+        ratios, npass, ntot = [], 0, 0
         for a, b in itertools.combinations(range(N_MEM), 2):
             rest = [m for m in range(N_MEM) if m not in (a, b)]
             for k in KEYS:
@@ -1042,48 +1037,62 @@ def empirical_rule_controls(rows):
                 s_oth = F.spread([rows[other][m][N_DAYS][k]
                                   for m in range(N_MEM)])[1]
                 fl = float(np.hypot(s_rest, s_oth))
-                lab = _label(gap, fl)
                 ntot += 1
                 if fl > 0:
                     ratios.append(abs(gap) / fl)
-                if lab in ("YES", "unres"):
+                if _label(gap, fl) in ("YES", "unres"):
                     npass += 1
-                else:
-                    worst.append((side, k, a, b, abs(gap) / fl if fl else np.inf))
-    frac = npass / ntot if ntot else float("nan")
-    med = float(np.median(ratios)) if ratios else float("nan")
-    exp2, exp245 = positive_control_null(K_PREREG), positive_control_null(K_WELCH)
-    print(f"            HEADLINE (the stable statistic): median ratio "
-          f"{med:.3f}   PREDICTED {np.sqrt(2.0):.3f}")
-    print(f"            fraction inside the band {npass}/{ntot} = "
-          f"{100 * frac:.1f}%   PREDICTED {100 * exp245:.1f}% "
-          f"(inside {K_PREREG}x alone: {100 * exp2:.1f}%)")
-    print(f"            the prediction is the leave-two-out null "
-          f"sqrt(2)|Z/Z'| for a one-sided floor; ~61% is HEALTHY here, not a")
-    print(f"            failure, and the fraction is noisy at n={ntot} while "
-          f"the median is not")
-    if worst:
-        worst.sort(key=lambda t: -t[-1])
-        print(f"            outside the band: "
-              + ", ".join(f"{s}.{k}(m{a},m{b}) {r:.2f}x"
-                          for s, k, a, b, r in worst[:6]))
-    print(f"  NEGATIVE: legoESM day {N_DAYS} vs legoESM day {N_DAYS - 30} "
-          f"(30-day SELF mismatch; must be `no` on the transports)")
-    print(f"    {'metric':<38}{'gap':>13}{'floor':>14}{'ratio':>9}{'verdict':>9}")
-    neg_ok = True
+        stats[side] = (float(np.median(ratios)) if ratios else float("nan"),
+                       npass / ntot if ntot else float("nan"), ntot)
+    med_l, frac_l, n_l = stats["lego"]
+    med_n, frac_n, n_n = stats["nemo"]
+    print(f"            legoESM side (the informative one -- its floor is its "
+          f"own spread):")
+    print(f"              HEADLINE median ratio {med_l:.3f}   PREDICTED "
+          f"{np.sqrt(2.0):.3f} (analytic sqrt(2)|Z/Z'| null)")
+    print(f"              inside the band {100 * frac_l:.1f}% of {n_l}   "
+          f"PREDICTED {100 * positive_control_null(K_WELCH):.1f}% "
+          f"(inside {K_PREREG}x alone: {100 * positive_control_null(K_PREREG):.1f}%)")
+    print(f"            NEMO side: median ratio {med_n:.3f}, "
+          f"{100 * frac_n:.1f}% of {n_n} inside -- UNINFORMATIVE BY "
+          f"CONSTRUCTION:")
+    print( "              its numerator is NEMO's tiny member spread and its "
+           "denominator is dominated by legoESM's,")
+    print( "              so these ratios are near zero however good or bad "
+           "the rule is.  Not compared to the null.")
+    print(f"  NEGATIVE: legoESM day {N_DAYS} against its OWN earlier state, at "
+          f"TWO lags (must be `no`)")
+    print(f"    {'metric':<38}{'lag30 gap':>13}{'r30':>8}{'v30':>7}"
+          f"{'lag90 gap':>13}{'r90':>8}{'v90':>7}{'power?':>9}")
+    neg_fail = []
     for k in ("acc", "acc_mean", "band", "band_c", "g_south", "g_band", "g_north"):
-        gap = rows["lego"][0][N_DAYS][k] - rows["lego"][0][N_DAYS - 30][k]
         fl, _, _ = two_sided_floor(rows, k, N_DAYS)
-        lab = _label(gap, fl)
-        if lab != "no":
-            neg_ok = False
-        print(f"    {LABELS[k]:<38}{gap:>+13.4e}{fl:>14.4e}"
-              f"{(abs(gap) / fl if fl else float('inf')):>9.2f}{lab:>9}")
-    print(f"  CALIBRATION: positive median {med:.3f} vs predicted "
-          f"{np.sqrt(2.0):.3f} ({100 * frac:.1f}% inside the band), "
-          f"negative {'all `no`' if neg_ok else 'NOT all `no` -- the floor may '
-          'be too wide to fail'}")
-    return frac, neg_ok, med
+        cells, labs = [], []
+        for lag in (30, 90):
+            gap = rows["lego"][0][N_DAYS][k] - rows["lego"][0][N_DAYS - lag][k]
+            r = abs(gap) / fl if fl else float("inf")
+            lab = _label(gap, fl)
+            cells.append((gap, r, lab))
+            labs.append(lab)
+        if all(l != "no" for l in labs):
+            neg_fail.append(k)
+        power = "BOTH" if all(l == "no" for l in labs) else (
+            "one lag" if any(l == "no" for l in labs) else "NEITHER")
+        print(f"    {LABELS[k]:<38}{cells[0][0]:>+13.4e}{cells[0][1]:>8.2f}"
+              f"{cells[0][2]:>7}{cells[1][0]:>+13.4e}{cells[1][1]:>8.2f}"
+              f"{cells[1][2]:>7}{power:>9}")
+    if neg_fail:
+        print(f"    CONTROL FAILS for {neg_fail}: the rule accepts a "
+              f"known-different state at BOTH lags for these metrics")
+    else:
+        print( "    every transport is rejected at at least one lag; a metric "
+               "passing at one lag only is that lag")
+        print( "    having no power for it (the quantity returns near its own "
+               "value over that interval), not a wide floor")
+    print(f"  CALIBRATION: legoESM-side positive median {med_l:.3f} vs "
+          f"predicted {np.sqrt(2.0):.3f}; negative control "
+          f"{'FAILS for ' + str(neg_fail) if neg_fail else 'rejects every transport'}")
+    return frac_l, (not neg_fail), med_l
 
 
 def _header():
@@ -1280,14 +1289,14 @@ def main(argv=None):
     print(f"\nCALIBRATION OF THE RULE THAT PRODUCED THE TABLES ABOVE: "
           f"positive-control median ratio {med:.3f} against the analytic "
           f"leave-two-out null {np.sqrt(2.0):.3f},")
-    print(f"  and {100 * frac:.1f}% of the 12 within-side member pairs x "
+    print(f"  and {100 * frac:.1f}% of the legoESM-side within-side pairs x "
           f"{len(KEYS)} metrics inside the band against a predicted "
           f"{100 * positive_control_null(K_WELCH):.1f}%")
     print(f"  (the median is the stable statistic; the fraction is noisy at "
           f"this sample size and the comparisons are correlated),")
-    print(f"  and the 30-day self-mismatch negative control is "
-          f"{'all `no` as required' if neg_ok else 'NOT all `no` -- the floor '
-          'may be too wide to fail'}.")
+    print(f"  and the two-lag self-mismatch negative control "
+          f"{'rejects every transport as required' if neg_ok else 'FAILS -- '
+          'the rule accepts a known-different state at BOTH lags somewhere'}.")
     print("\nEvery number above is a measurement; the pre-registration "
           "(PREREG_verdict360.md) says which ones were predicted, and the "
           "result commit carries its corrections.")

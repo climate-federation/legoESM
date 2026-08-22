@@ -452,3 +452,34 @@ def test_unsaturated_flag_only_voids_a_no_it_could_actually_overturn(V):
     # And a metric that is SATURATED never gets the flag, however small the gap.
     m3, _ = V.unsaturated_materiality(grow, set(), V.N_DAYS)
     assert m3 == set()
+
+
+def test_positive_control_is_reported_per_side(V, capsys):
+    """The floor is the two-sided RSS, so a NEMO-side pair is divided by a
+    floor that is almost entirely legoESM's spread -- its ratios are near zero
+    BY CONSTRUCTION. Pooling the two sides reports a median belonging to
+    neither, which is what the first run of this control did."""
+    rows = _synth(V)
+    # make one side's spread 1000x the other, the real situation
+    for i in range(V.N_MEM):
+        for d in V.SCORE_DAYS:
+            for k in V.KEYS:
+                rows["nemo"][i][d][k] = 10.0 + V.KEYS.index(k) + (i + 1) * 1e-6
+    V.empirical_rule_controls(rows)
+    out = capsys.readouterr().out
+    assert "legoESM side (the informative one" in out
+    assert "UNINFORMATIVE BY CONSTRUCTION" in out
+    # and the returned headline is the legoESM side's, not the pooled one
+    frac, neg_ok, med = V.empirical_rule_controls(rows)
+    assert 0.0 <= frac <= 1.0 and med >= 0.0
+
+
+def test_negative_control_runs_two_lags(V, capsys):
+    """A single lag has no power for a metric that returns near its own value
+    over exactly that interval -- measured: the southern-basin transport moves
+    only -0.012 Sv between day 330 and 360. That is not a wide floor."""
+    rows = _synth(V)
+    V.empirical_rule_controls(rows)
+    out = capsys.readouterr().out
+    assert "TWO lags" in out and "lag30 gap" in out and "lag90 gap" in out
+    assert V.N_DAYS - 90 in V.SCORE_DAYS and V.N_DAYS - 30 in V.SCORE_DAYS
