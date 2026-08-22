@@ -120,7 +120,12 @@ CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
 # splitting the nine across jobs is exactly equivalent to running them in
 # one -- provided every other flag is held identical, which is why they are
 # defaulted here rather than passed per job.
+# Pass a subset PLUS-separated ("ysu+edmf"): sbatch --export treats commas
+# as its own entry separator, so a comma-separated value is silently
+# truncated to its first element and the rest become bogus exports --
+# the run would then fit ONE scheme and report it as the whole job.
 SCHEMES=${SCHEMES:-all}
+SCHEMES=${SCHEMES//+/,}
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
 OUT=${OUT:-$R/scm_les_turbulence/all_eight_sfcv}
