@@ -166,6 +166,42 @@ def main() -> int:
     print(f"   mean |ACC[commit]|       = {np.abs(commit).mean():.6e} Sv")
     print(f"   mean cancellation factor = "
           f"{np.abs(commit).mean() / np.abs(half).mean():.6e}")
+    # --- ADDITIVE CONSTANT vs CONSTANT RELATIVE BIAS -----------------------
+    # The time walk found the in-loop share constant to 0.3% over 90 days.  Two
+    # very different defects produce that: an ADDITIVE state-independent offset,
+    # or a constant RELATIVE error in the barotropic transport (which would look
+    # constant only because the transport itself is nearly constant).  The two
+    # are DISTINGUISHABLE with the data already in hand, because the channel
+    # transport is not exactly constant -- it rises across this window -- so a
+    # relative bias must rise with it by the same fraction.  Printed as numbers;
+    # the reading belongs to the analysis.
+    walk = os.path.join(_THIS_DIR, "..", "..", "..", "..", "results",
+                        "dino_1455", "baro_deposit_time_walk.npz")
+    if os.path.isfile(walk):
+        z = np.load(walk, allow_pickle=True)
+        wd, il = np.asarray(z["days"]), np.asarray(z["dep_in_loop"])
+        if list(wd.astype(int)) != DAYS:
+            raise SystemExit(
+                f"walk npz covers days {list(wd.astype(int))}, this probe "
+                f"{DAYS}; refusing to pair mismatched state lists")
+        acc = commit
+        f_acc = 100.0 * (acc[-1] / acc[0] - 1.0)
+        f_il = 100.0 * (il[-1] / il[0] - 1.0)
+        ratio = il / acc
+        print(f"\n   channel transport ACC[commit] change over the window "
+              f"= {f_acc:+.3f}%")
+        print(f"   in-loop deposit change over the same window        "
+              f"= {f_il:+.3f}%")
+        print(f"   a CONSTANT RELATIVE bias predicts the second to equal the "
+              f"first; ratio = {f_il / f_acc if f_acc else float('nan'):.4f}")
+        print(f"   in_loop/ACC spread (relative model)  = "
+              f"{(ratio.max() - ratio.min()) / ratio.mean():.4e}")
+        print(f"   in_loop      spread (additive model) = "
+              f"{(il.max() - il.min()) / il.mean():.4e}")
+    else:
+        print(f"\n   (walk artifact {walk} absent: the additive-vs-relative "
+              "discrimination is SKIPPED, not assumed)")
+
     print("\n   (the walk's per-step deposit is a difference of the FIRST "
           "column between\n    the two models; the stage the budget row "
           "measures is the SECOND.  These\n    levels are within ~3% of each "
