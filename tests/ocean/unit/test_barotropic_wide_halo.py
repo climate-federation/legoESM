@@ -371,12 +371,19 @@ def test_chunk_exceeding_band_height_raises(setup):
 
 
 def test_estimate_halo_messages():
+    # #1609 centred the box/cosine averaging window on t+dt, so the substep
+    # loop runs n_loop = 2n-1 times, not n.  The message count scales with the
+    # substeps actually run, so derive it from the reported n_loop instead of
+    # re-hardcoding a window length that a future filter change would stale out
+    # again (this assertion still read 4*30 -- the pre-#1609 half window).
     cfg = _cfg()
     est = estimate_barotropic_halo_messages(cfg, 30)
-    assert est["standard_messages"] == 4 * 30       # diffusion on by default
+    assert est["n_loop"] == 2 * 30 - 1
+    assert est["standard_messages"] == 4 * est["n_loop"]  # diffusion on by default
     assert est["wide_messages_fixed"] == 4
     assert est["wide_messages_per_chunk"] == 2
     est_dd = estimate_barotropic_halo_messages(
         _cfg(barotropic_div_damp=0.02), 30)
-    assert est_dd["standard_messages"] == 6 * 30
+    assert est_dd["n_loop"] == est["n_loop"]
+    assert est_dd["standard_messages"] == 6 * est_dd["n_loop"]
     assert est_dd["stencil_reach"] == est["stencil_reach"] + 2
