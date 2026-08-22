@@ -22,6 +22,11 @@ echo "host: $(hostname)"; codex --version || exit 91
 cd $WT || exit 92
 HEAD_SHA=$(git rev-parse HEAD); echo "PINNED sha: $HEAD_SHA"
 [ "$HEAD_SHA" = "$PIN" ] || { echo "PREFLIGHT FAIL"; exit 93; }
+git diff --quiet && git diff --cached --quiet || {
+  echo "PREFLIGHT FAIL: DIRTY TREE at $HEAD_SHA — uncommitted edits would run"
+  git status --porcelain | head -20
+  exit 94
+}
 
 codex exec --sandbox read-only -C $WT "$(cat <<'PROMPT'
 ADVERSARIAL REVIEW of a new physics term and its plumbing. Break it. Read the

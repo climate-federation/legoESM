@@ -24,6 +24,11 @@ cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD)
 echo "PINNED sha: $HEAD_SHA"; echo "host: $(hostname)"
 [ "$HEAD_SHA" = "$PIN" ] || { echo "PREFLIGHT FAIL: $HEAD_SHA != $PIN"; exit 91; }
+git diff --quiet && git diff --cached --quiet || {
+  echo "PREFLIGHT FAIL: DIRTY TREE at $HEAD_SHA — uncommitted edits would run"
+  git status --porcelain | head -20
+  exit 94
+}
 
 export JAX_PLATFORMS=cpu
 export PYTHONPATH=$WT/src:$(ls -d $WT/packages/*/ | tr '\n' ':')$WT
