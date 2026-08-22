@@ -1,0 +1,150 @@
+#!/usr/bin/env python
+"""NEMO's own equatorial diffusivities: the target the closure has to hit.
+
+The tripole's equatorial thermocline sits at the right depth and is 2.3 times
+too sharp, its cold tongue is too warm, and its undercurrent is four times too
+weak while the pressure gradient driving it is right.  One number produces all
+three if the turbulence closure mixes momentum too well and heat too poorly:
+the turbulent Prandtl number, viscosity over diffusivity.
+
+NEMO's own five-day output carries ``avm`` (viscosity), ``avt`` (heat
+diffusivity), ``avs`` (salt) and ``bn2`` on the same grid our runs are scored
+against, so the oracle's Prandtl profile is a file read rather than an
+inference.  This prints it, and prints the pieces it is built from, so a later
+comparison against our closure has a target with a known provenance instead of
+a remembered number.
+
+DELIBERATELY ORACLE-ONLY.  It does not touch our model.  A previous round of
+this campaign quoted "NEMO 1.85" for the equatorial Prandtl number from a
+probe whose controls were never shown; this establishes the number itself
+before anything is built on it.
+
+READ IT AS A TARGET, NOT A VERDICT.  A Prandtl profile is not a defect.  What
+it does is say what our closure must reproduce, and at which depths.
+"""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+
+#: Above this, NEMO's diffusivity is the convective-adjustment sentinel rather
+#: than the turbulence closure's answer (rn_avevd is 10 or 100 m2/s; the real
+#: ocean's vertical diffusivity does not exceed ~1e-1 m2/s outside deep
+#: convection).  Used only to report how much of a box is convecting.
+CONVECTIVE_AVT = 1.0            # m2/s
+
+
+def _load(gridw: Path, rec: int, halfwidth: float):
+    import xarray as xr
+    ds = xr.open_dataset(gridw, decode_times=False)
+    for v in ("avm", "avt", "bn2"):
+        if v not in ds:
+            raise SystemExit(
+                f"{gridw}: no {v!r}. Present: {sorted(ds.data_vars)}. This "
+                "probe needs the diffusivity fields; a grid_W written without "
+                "them cannot answer the question.")
+    lat = np.asarray(ds["nav_lat"].values, dtype=np.float64)
+    lon = np.asarray(ds["nav_lon"].values, dtype=np.float64) % 360.0
+    depth_name = "depthw" if "depthw" in ds else "deptht"
+    z = np.abs(np.asarray(ds[depth_name].values, dtype=np.float64))
+
+    def grab(name):
+        a = np.asarray(ds[name].values, dtype=np.float64)
+        if a.ndim == 4:
+            a = a[rec]
+        a = np.where(np.abs(a) > 1e10, np.nan, a)
+        return np.moveaxis(a, 0, -1)                  # (y, x, z)
+
+    return grab("avm"), grab("avt"), grab("bn2"), lat, lon, z
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--nemo-gridw", required=True, type=Path)
+    ap.add_argument("--rec", type=int, default=5,
+                    help="record (5-day file: 5 = days 26-30)")
+    ap.add_argument("--lat-halfwidth", type=float, default=2.0)
+    ap.add_argument("--lon-west", type=float, default=200.0)
+    ap.add_argument("--lon-east", type=float, default=260.0,
+                    help="the cold-tongue longitudes, where the bias lives")
+    ap.add_argument("--depth-max", type=float, default=300.0)
+    a = ap.parse_args()
+
+    avm, avt, bn2, lat, lon, z = _load(a.nemo_gridw, a.rec, a.lat_halfwidth)
+    band = (np.abs(lat) <= a.lat_halfwidth) & (lon >= a.lon_west) & (lon <= a.lon_east)
+    n = int(band.sum())
+    if n == 0:
+        raise SystemExit("no cells in the requested box")
+    print(f"NEMO {a.nemo_gridw.name} record {a.rec}")
+    print(f"box |lat| <= {a.lat_halfwidth}, {a.lon_west:.0f}-{a.lon_east:.0f}E "
+          f"-> {n} columns\n")
+
+    kmax = int(np.searchsorted(z, a.depth_max)) + 1
+    kmax = min(kmax, z.size)
+    # MEDIANS, not means.  NEMO's convective adjustment replaces the closure's
+    # diffusivity with a sentinel of order 10-100 m2/s wherever a column is
+    # unstable, and a handful of such cells drags a mean far outside any
+    # physical diffusivity -- the first version of this probe reported an
+    # equatorial avt of 28 m2/s, which is roughly a thousand times anything
+    # the real ocean does, and would have been quoted as the oracle's value.
+    # The convective fraction is printed alongside so the reader can see how
+    # much of the box the sentinel is covering.
+    print(f"{'depth':>8}{'avm':>11}{'avt':>11}{'Pr=avm/avt':>12}"
+          f"{'N2':>11}{'conv':>7}{'wet':>7}")
+    print(f"{'[m]':>8}{'[m2/s]':>11}{'[m2/s]':>11}{'median':>12}"
+          f"{'[1/s2]':>11}{'frac':>7}{'':>7}")
+    prof = []
+    for k in range(kmax):
+        m = avm[..., k][band]
+        t = avt[..., k][band]
+        b = bn2[..., k][band]
+        ok = np.isfinite(m) & np.isfinite(t) & (t > 0)
+        if not ok.any():
+            continue
+        conv = float(np.mean(t[ok] > CONVECTIVE_AVT))
+        # Prandtl is a RATIO: taken per column, then reduced.  A ratio of
+        # reductions is a different quantity.
+        pr = float(np.median(m[ok] / t[ok]))
+        prof.append((z[k], float(np.median(m[ok])), float(np.median(t[ok])),
+                     pr, float(np.median(b[ok])), int(ok.sum()), conv))
+        print(f"{z[k]:>8.1f}{prof[-1][1]:>11.4g}{prof[-1][2]:>11.4g}"
+              f"{pr:>12.3f}{prof[-1][4]:>11.3g}{conv:>7.3f}"
+              f"{prof[-1][5]:>7d}")
+
+    if not prof:
+        raise SystemExit("no finite diffusivities in the box")
+    arr = np.array([(p[0], p[3], p[6], p[2]) for p in prof])
+    # TWO REGIMES, and they must not be averaged together.  Above roughly 70 m
+    # the turbulence closure sets the diffusivity; below it the closure has
+    # switched off and the background plus internal-wave field sets both avm
+    # and avt, giving a ratio that says nothing about the closure.  A window
+    # spanning the transition reports the background's ratio and calls it the
+    # closure's -- which an earlier version of this summary did.
+    active = (arr[:, 0] >= 5.0) & (arr[:, 0] <= 65.0)
+    deep = arr[:, 0] >= 100.0
+    print(f"\nCLOSURE-ACTIVE layer (5-65 m), where the turbulence scheme is "
+          f"what sets the mixing:")
+    print(f"  Prandtl  median {np.median(arr[active, 1]):.3f}  "
+          f"range {arr[active, 1].min():.3f}-{arr[active, 1].max():.3f}")
+    print(f"  avt      median {np.median(arr[active, 3]):.3g} m2/s")
+    print(f"  convective fraction  max {arr[active, 2].max():.3f}")
+    if deep.any():
+        print(f"BACKGROUND layer (>= 100 m), closure off -- this ratio is the "
+              f"background's, NOT the closure's:")
+        print(f"  Prandtl  median {np.median(arr[deep, 1]):.3f}  "
+              f"avt median {np.median(arr[deep, 3]):.3g} m2/s")
+    print("\nNEMO's Prandtl mapping is Pr = min(10, max(1, zri/ri_cri)) with "
+          "ri_cri = 2/(2 + rn_ediss/rn_ediff) = 2/(2 + 0.7/0.1) = 0.2222, i.e. "
+          "Pr = min(10, max(1, 4.5*zri)) -- read from zdftke.F90:772 and :399, "
+          "not from memory. legoESM's prandtl_ri_coeff of 4.5 is therefore "
+          "FAITHFUL, so a Prandtl discrepancy has to come from the Richardson "
+          "number's INPUTS (N2, avm, shear production), never from the mapping.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

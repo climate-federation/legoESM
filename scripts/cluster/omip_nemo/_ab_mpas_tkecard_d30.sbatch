@@ -98,8 +98,20 @@ echo "=== run rc=$run_rc"
 [ $run_rc -eq 0 ] || { echo "FATAL: run failed rc=$run_rc -- not scoring"; exit 1; }
 
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
+# A run that ends exactly on a snapshot day writes it as snapshot_final.npz,
+# not snapshot_day0030.npz, so the first version of this arm completed 30 days
+# and then refused to score itself.  Accept either, and confirm from the run's
+# own diagnostic table that the last row really is day 30 -- snapshot_final is
+# written whenever the run stops, including early, so its name is not evidence
+# of when it stopped.
 SNAP=$OUT/snapshot_day0030.npz
+[ -f "$SNAP" ] || SNAP=$OUT/snapshot_final.npz
 [ -f "$SNAP" ] || { echo "FATAL: no day-30 snapshot"; exit 1; }
+LASTDAY=$(tail -1 $OUT/diag_timeseries.csv | cut -d, -f2)
+case "$LASTDAY" in
+  30.000|30.0|30) echo "day check: last diagnostic row is day $LASTDAY" ;;
+  *) echo "FATAL: last diagnostic row is day $LASTDAY, not 30 -- refusing to score a partial arm"; exit 1 ;;
+esac
 export JAX_PLATFORMS=cpu
 
 echo "=== score day 30 vs NEMO's MATCHED cold start (GATEWAY rec 5) ==="
