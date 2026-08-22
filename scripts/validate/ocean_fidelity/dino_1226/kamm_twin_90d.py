@@ -678,6 +678,81 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
               flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
 
+    nsteps = STEPS_PER_DAY * n_days
+
+    # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
+    # the rate into model.step(external_tracer_rate=...) (run_dino.py's
+    # driver wiring, mirrored; _check_surface_tendency_placement raises on a
+    # mismatch, so the legacy applied_now loop cannot silently run a
+    # leapfrog_rhs config).
+    _sf_placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if _sf_placement == "leapfrog_rhs":
+        dyn = jax.jit(lambda st, ext: model.step(st, DT, surface_forcing=sf,
+                                                  external_tracer_rate=ext))
+    else:
+        dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
+
+    # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
+    # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
+    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
+
+    land_mask = np.asarray(st.land_mask.data)
+    n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
+
+    # #1455 PHASE-2: the ACC transport reducer, built ONCE and used for both
+    # the daily readout and the injected-transport stamp.  Two reducers here
+    # would be two chances for a staggering drift, which is the defect class
+    # this campaign has spent the most time on.
+    #
+    # Two reductions are stored:
+    #   acc_dep  -- the DEPOSIT's own (full 2-D e2u, e3t_1d ladder, rows
+    #               1..197, MEAN over longitudes 2..-2).  R(t) is a ratio of
+    #               this functional to itself, so no cross-metric staggering
+    #               enters the retention number.
+    #   acc_gate -- acc_thermal_wind.acc_full, the recorded gate metric
+    #               (MEDIAN over longitudes), for context against the gap.
+    _acc_dep_daily = _acc_gate_daily = None
+    _acc_pair = None
+    _injected_sv = 0.0
+    if daily_acc or perturb_baro is not None:
+        import netCDF4 as _nc
+        import acc_thermal_wind as _A
+        _mmp = f"{run_traj}/mesh_mask.nc"
+        # The gate reducer loads its OWN mesh at import time from a hardcoded
+        # path.  If that is not the mesh this run was built on, the two
+        # reductions describe different geometries -- checked, not assumed.
+        if os.path.abspath(getattr(_A, "mm", None).filepath()) != os.path.abspath(_mmp):
+            raise SystemExit(
+                f"FATAL: acc_thermal_wind loaded {_A.mm.filepath()} but this "
+                f"run uses {_mmp}; the two reducers would describe different "
+                "geometries")
+        _mmd = _nc.Dataset(_mmp)
+        _e2u2d = np.asarray(_mmd.variables["e2u"][0]).squeeze()          # (j,i)
+        _e3t1d = np.asarray(_mmd.variables["e3t_1d"][:]).squeeze()       # (k,)
+        _um3 = np.moveaxis(np.asarray(_mmd.variables["umask"][0]).squeeze(),
+                           0, -1) > 0.5                                  # (j,i,k)
+        _mmd.close()
+
+        def _acc_pair(u_full):
+            """(deposit-reducer Sv, gate-metric Sv) from the model's u faces."""
+            u = np.asarray(u_full, dtype=np.float64)[:, 1:53, :]
+            u = np.where(_um3, u, 0.0)
+            # rows 1..197 then MEAN over longitudes 2..-2, matching acc_sv
+            col = np.einsum("jik,k,ji->ji", u, _e3t1d, _e2u2d)[1:198, :].sum(axis=0)
+            dep = float(col[2:-2].mean()) / 1.0e6
+            # NOTE: acc_thermal_wind.load_lego carries a line
+            #   u[:, 47, :] = lU[:, 48, :]
+            # which is a NO-OP after the [:, 1:53] slice (index 47 already IS
+            # original column 48), traced back to an editing leftover in
+            # compare_fullframe.py.  It is deliberately NOT reproduced here.
+            gate = _A.acc_full(u, _A.umask)
+            return dep, gate
+
+    if daily_acc:
+        _acc_dep_daily = np.full(n_days, np.nan, dtype=np.float64)
+        _acc_gate_daily = np.full(n_days, np.nan, dtype=np.float64)
+        print(f"daily ACC enabled (mesh {run_traj}/mesh_mask.nc)", flush=True)
+
     # #1455 PHASE-2 MEASUREMENT 1, the RETENTION FACTOR.  The per-step deposit
     # is an INJECTION; the ACC gap is an ACCUMULATION, and converting one to
     # the other needs the trajectory's retention of a one-step injection --
@@ -714,69 +789,31 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         _add[:, 1:, :] = np.where(_umask3, _add[:, 1:, :], 0.0)
         _add[:, 0, :] = np.where(_umask3[:, -1, :], _add[:, 0, :], 0.0)
         _u_pert = jnp.asarray(_u0 + _add, dtype=st.u.data.dtype)
+        # The BEFORE level gets the SAME increment.  Perturbing only the now
+        # level of a leapfrog state plants a splitting (computational) mode
+        # that the Asselin filter then damps over the first few steps -- which
+        # would contaminate R(day 1), the load-bearing number here, with an
+        # artifact of the time scheme rather than the ocean's response.  The
+        # T-perturbation path documents exactly this hazard and this one
+        # inherited none of it.
+        if getattr(st, "u_before", None) is not None:
+            _ub = np.asarray(st.u_before.data, dtype=np.float64)
+            st = st._replace(u_before=st.u_before.replace(
+                data=jnp.asarray(_ub + _add, dtype=st.u_before.data.dtype)))
+        # THE NORMALISER, MEASURED.  Every retention factor divides by this
+        # number, so it is computed from the state BEFORE and AFTER the
+        # injection with the run's own reducer and STAMPED into the artifact.
+        # It was previously a hand-typed default on the scoring side, which
+        # would have divided an in-loop-pattern response by the TOTAL
+        # deposit the moment --perturb-baro-key changed.
+        _dep_before, _ = _acc_pair(_u0)
+        _dep_after, _ = _acc_pair(np.asarray(_u_pert, dtype=np.float64))
+        _injected_sv = _dep_after - _dep_before
         st = st._replace(u=st.u.replace(data=_u_pert))
         print(f"PERTURB-BARO {perturb_baro}:{perturb_baro_key} scale="
               f"{perturb_baro_scale:g}  max|du|={np.abs(_add).max():.4e} m/s  "
-              f"nonzero={int((_add != 0).sum())}", flush=True)
-    nsteps = STEPS_PER_DAY * n_days
-
-    # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
-    # the rate into model.step(external_tracer_rate=...) (run_dino.py's
-    # driver wiring, mirrored; _check_surface_tendency_placement raises on a
-    # mismatch, so the legacy applied_now loop cannot silently run a
-    # leapfrog_rhs config).
-    _sf_placement = getattr(cfg, "surface_tendency_placement", "applied_now")
-    if _sf_placement == "leapfrog_rhs":
-        dyn = jax.jit(lambda st, ext: model.step(st, DT, surface_forcing=sf,
-                                                  external_tracer_rate=ext))
-    else:
-        dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
-
-    # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
-    # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
-    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
-
-    land_mask = np.asarray(st.land_mask.data)
-    n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
-
-    # #1455 PHASE-2: daily ACC transport.  The retention curve R(t) needs the
-    # response at DAILY resolution -- the 3-D snapshot days (0/30/60/90) cannot
-    # resolve a decay timescale of a few days, which is the outcome the
-    # measurement is pre-registered to discriminate.  Two reducers are stored:
-    #   acc_dep  -- the DEPOSIT's own reducer (full 2-D e2u, e3t_1d ladder,
-    #               rows 1..197, MEAN over longitudes 2..-2).  R(t) is a ratio
-    #               of this functional to itself, so no cross-metric staggering
-    #               enters the retention number.
-    #   acc_gate -- acc_thermal_wind.acc_full, the recorded gate metric
-    #               (MEDIAN over longitudes, e2u column 25), for the accounting
-    #               against the recorded -0.401 Sv gap.
-    _acc_dep_daily = _acc_gate_daily = None
-    if daily_acc:
-        import netCDF4 as _nc
-        import acc_thermal_wind as _A
-        _mmp = f"{run_traj}/mesh_mask.nc"
-        _mmd = _nc.Dataset(_mmp)
-        _e2u2d = np.asarray(_mmd.variables["e2u"][0]).squeeze()          # (j,i)
-        _e3t1d = np.asarray(_mmd.variables["e3t_1d"][:]).squeeze()       # (k,)
-        _um3 = np.moveaxis(np.asarray(_mmd.variables["umask"][0]).squeeze(),
-                           0, -1) > 0.5                                  # (j,i,k)
-        _mmd.close()
-        _acc_dep_daily = np.full(n_days, np.nan, dtype=np.float64)
-        _acc_gate_daily = np.full(n_days, np.nan, dtype=np.float64)
-        print(f"daily ACC enabled (mesh {_mmp})", flush=True)
-
-        def _acc_pair(u_full):
-            """(deposit-reducer Sv, gate-metric Sv) from the model's u faces."""
-            u = np.asarray(u_full, dtype=np.float64)[:, 1:53, :]
-            u = np.where(_um3, u, 0.0)
-            # rows 1..197 then MEAN over longitudes 2..-2, matching acc_sv
-            col = np.einsum("jik,k,ji->ji", u, _e3t1d, _e2u2d)[1:198, :].sum(axis=0)
-            dep = float(col[2:-2].mean()) / 1.0e6
-            ug = u.copy()
-            ug[:, 47, :] = np.asarray(u_full, dtype=np.float64)[:, 48, :]
-            gate = _A.acc_full(ug, _A.umask)
-            return dep, gate
-
+              f"nonzero={int((_add != 0).sum())}  "
+              f"INJECTED TRANSPORT={_injected_sv:+.6e} Sv", flush=True)
     eta_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
@@ -891,6 +928,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         save_kwargs["perturb_baro_key"] = np.str_(perturb_baro_key)
         save_kwargs["perturb_baro_scale"] = np.float64(
             perturb_baro_scale if perturb_baro else 0.0)
+        # The MEASURED injected transport, the number every retention factor
+        # divides by.  Stamped so the scorer never has to be told it.
+        save_kwargs["injected_sv"] = np.float64(_injected_sv)
     for d in snap_days:
         if d in t3d:
             save_kwargs[f"T3d_day{d}"] = t3d[d]

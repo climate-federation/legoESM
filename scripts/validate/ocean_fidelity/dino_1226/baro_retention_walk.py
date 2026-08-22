@@ -67,6 +67,17 @@ READABLE_FLOORS = 3.0
 #: responses must agree to this fraction on the days where both are readable.
 LINEARITY_TOL = 0.25
 
+#: ...AND their response time series must actually be the SAME CURVE.  This
+#: second bar is not decoration, it is the one that works.  Scored on the first
+#: run, the median-ratio test alone PASSED an arm pair whose response series
+#: correlate at 0.06 -- i.e. it certified two essentially unrelated curves as a
+#: linear response, because with sign-oscillating divergence the pointwise
+#: ratio distribution is heavy-tailed and its MEDIAN lands near 1 by accident.
+#: A ratio-of-noise is a statistic that cannot fail the way this test needs to.
+#: The correlation cannot be fooled that way: a linear response is one curve
+#: rescaled, so it correlates at 1 by construction.
+LINEAR_CORR_MIN = 0.90
+
 #: the accumulation this campaign has to explain [Sv], from the full-section
 #: accumulated stage budget (c987db464).
 GAP_FULL_SECTION = -0.401
@@ -149,6 +160,7 @@ def retention(arm: dict, ctrl: dict, injected_sv: float) -> dict:
     if inj == 0.0:
         raise SystemExit("FATAL: retention of an arm with zero injection")
     return {"resp": resp, "resp_gate": resp_gate, "inj": inj,
+            "scale": arm["scale"],
             "R": resp / inj, "R_gate": resp_gate / inj,
             "floors": np.abs(resp) / FLOOR_SV,
             "readable": np.abs(resp) > READABLE_FLOORS * FLOOR_SV}
@@ -162,26 +174,144 @@ def linearity(a: dict, b: dict) -> dict:
     """
     m = a["readable"] & b["readable"]
     if not m.any():
-        return {"n": 0, "median_ratio": float("nan"), "pass": False,
+        return {"n": 0, "median_ratio": float("nan"), "corr": float("nan"),
+                "ratio_ok": False, "corr_ok": False, "pass": False,
                 "reason": "no day where both arms are readable"}
     ratio = a["R"][m] / b["R"][m]
     med = float(np.median(ratio))
-    # correlation of the two RESPONSE time series is the sharper statistic:
-    # a linear response is the SAME curve rescaled, so corr == 1.
-    corr = float(np.corrcoef(a["resp"][m], b["resp"][m])[0, 1])
-    ok = abs(med - 1.0) <= LINEARITY_TOL
-    return {"n": int(m.sum()), "median_ratio": med, "corr": corr, "pass": bool(ok),
-            "reason": ""}
+    # Correlate the R series, NOT the raw responses.  R already divides by the
+    # SIGNED injection, so a perfect linear response gives corr = +1 for every
+    # arm including the negative-scale one -- whereas the raw responses of a
+    # -100x and a +1x arm anti-correlate at -1 when the response is perfectly
+    # linear, which would have been printed next to a "LINEAR" verdict and read
+    # as its opposite.
+    corr = float(np.corrcoef(a["R"][m], b["R"][m])[0, 1])
+    ratio_ok = abs(med - 1.0) <= LINEARITY_TOL
+    corr_ok = corr >= LINEAR_CORR_MIN
+    return {"n": int(m.sum()), "median_ratio": med, "corr": corr,
+            "ratio_ok": bool(ratio_ok), "corr_ok": bool(corr_ok),
+            "pass": bool(ratio_ok and corr_ok), "reason": ""}
+
+
+def _distinct_amplitudes(rets: dict, names: list, i: int) -> int:
+    """How many DISTINCT injection magnitudes are readable on day ``i``.
+
+    A +100x and a -100x arm agree on R whenever the response is merely
+    sign-antisymmetric, which says nothing about AMPLITUDE linearity -- the
+    only property this window exists to certify.  Counting arms rather than
+    magnitudes let that pair certify the window on its own once the smaller
+    arms dropped under the floor.
+    """
+    return len({round(abs(rets[n]["scale"]), 12)
+                for n in names if rets[n]["readable"][i]})
+
+
+def linear_window(rets: dict, names: list) -> list:
+    """The CONTIGUOUS leading run of days on which the amplitudes agree.
+
+    Contiguity is the point.  A response to a t=0 injection is a decaying
+    transient: once the arms have decorrelated, any later day on which three
+    sign-oscillating series happen to land within tolerance is a coincidence,
+    not a resumption of linear response.  Scoring every such day (the first
+    version of this function) inflated the retention sum SEVENFOLD.
+    """
+    # Length comes from the DATA, not from the module's N_DAYS constant: a
+    # shorter series must not index past its end.
+    n_days = min(len(rets[n]["R"]) for n in names)
+    last_certified = -1
+    for i in range(n_days):
+        vals = [rets[n]["R"][i] for n in names if rets[n]["readable"][i]]
+        n_amp = _distinct_amplitudes(rets, names, i)
+        if len(vals) >= 2 and n_amp >= 2:
+            v = np.asarray(vals)
+            mean = float(np.abs(v.mean()))
+            if mean <= 0.0 or np.abs(v - v.mean()).max() > LINEARITY_TOL * mean:
+                break            # a REAL disagreement ends the window
+            last_certified = i
+        # Days with fewer than two DISTINCT injection magnitudes readable carry
+        # no information -- which is not the same as evidence that linearity
+        # ended, so they do not break the run.  They also cannot EXTEND it:
+        # the window ends at the last day actually certified, so a trailing
+        # run of uninformative days can never be scored as linear response.
+    return list(range(last_certified + 1))
+    return out
 
 
 def accumulate(R: np.ndarray, per_step_sv: float) -> float:
-    """The retention-corrected accumulation S = sum_n d_n R(t_end - t_n) [Sv].
+    """The retention-corrected accumulation S = sum_n d_n R(age of step n) [Sv].
 
-    A constant per-step injection d applied at every one of the 2880 steps,
-    each surviving to day 90 with the retention its own age implies.  With a
-    daily R this is d * STEPS_PER_DAY * sum over days of R.
+    A constant per-step injection ``d`` is applied at every one of the 2880
+    steps and each survives to day 90 with the retention its own AGE implies,
+    so S = d * (steps/day) * integral of R over ages 0..90 days.
+
+    THE AGE-ZERO BIN IS NOT OPTIONAL.  ``R`` is sampled at ages 1,2,...,90
+    days, but the 32 steps injected in the final 24 hours have age under one
+    day, where R runs from 1 (by construction: at t=0+ the injected transport
+    IS the deposit) down to R(1 day).  A plain sum over the daily samples drops
+    that bin entirely -- worth up to d * STEPS_PER_DAY = 0.15 Sv against a
+    0.401 Sv target, i.e. up to 37% of the quantity being explained, and always
+    in the direction that makes a suspect look too small.  Both reviews caught
+    it independently.
+
+    R(0) = 1 is prepended and the integral is a trapezoid.  Over the first day
+    that OVERESTIMATES, because the barotropic adjustment is hours and the
+    decay inside day 1 is far faster than linear -- which is the right
+    direction for a bound used to EXONERATE.
     """
-    return float(per_step_sv * STEPS_PER_DAY * np.nansum(R))
+    if not np.all(np.isfinite(R)):
+        raise SystemExit(
+            "FATAL: non-finite retention in accumulate() -- a NaN must never "
+            "be summed away into an accumulation")
+    ages = np.concatenate([[1.0], R])          # R(age=0) == 1 by construction
+    return float(per_step_sv * STEPS_PER_DAY * np.trapezoid(ages))
+
+
+def verdict(s_coh: float, s_all: float, need: float) -> str:
+    """Classify a survivor from its retention-corrected accumulation.
+
+    Extracted from ``main`` so it can be table-tested: an inline version of
+    this had its sign discriminator inverted by mutation and every test stayed
+    green, which is the "test that cannot fail" class this campaign bans.
+
+    ``need`` is the accumulation to be explained.  SIGN IS CHECKED FIRST and on
+    its own: the deposits are positive at every measured state and the gap is
+    negative, so an S of the right SIZE but the wrong SIGN refutes the
+    injection picture just as firmly as one that is too small.
+    """
+    sign_ok = (s_all * need) > 0 or (s_coh * need) > 0
+    big_enough = max(abs(s_coh), abs(s_all)) >= abs(need) / 2.0
+    if not sign_ok and not big_enough:
+        return "EXONERATED (wrong sign AND too small)"
+    if not sign_ok:
+        return "REFUTED BY SIGN (right size, wrong sign)"
+    if not big_enough:
+        return "EXONERATED (right sign, too small)"
+    return "CANDIDATE (right sign and size)"
+
+
+def lyapunov_growth(resp: np.ndarray, floor: float) -> dict:
+    """Fit an exponential envelope to |response| -- the discriminator that works.
+
+    The amplitude ladder CANNOT separate retention from chaos on its own, and
+    this is the review finding that matters most: tangent-linear chaotic growth
+    is EXACTLY proportional to the perturbation amplitude until it saturates,
+    so 0.5x and 1x arms agree to many digits under BOTH hypotheses.  What
+    separates them is the SHAPE in time.  A retention factor is bounded and
+    decays; a chaotic divergence GROWS exponentially.  A positive fitted
+    exponent is therefore positive evidence of divergence, not merely an
+    absence of evidence for retention.
+    """
+    n = len(resp)
+    t = np.arange(1, n + 1, dtype=np.float64)
+    a = np.abs(resp)
+    m = a > floor            # log of a sub-floor value is noise, not signal
+    if m.sum() < 10:
+        return {"n": int(m.sum()), "rate_per_day": float("nan"),
+                "e_folding_days": float("nan"), "growing": False}
+    sl, _ = np.polyfit(t[m], np.log(a[m]), 1)
+    return {"n": int(m.sum()), "rate_per_day": float(sl),
+            "e_folding_days": float(1.0 / sl) if sl != 0 else float("inf"),
+            "growing": bool(sl > 0)}
 
 
 def main(argv=None) -> int:
@@ -263,29 +393,44 @@ def main(argv=None) -> int:
 
     # ---- the coherent (linear) window ------------------------------------
     Rref = rets[ref]["R"]
-    coherent = []
-    for i in range(N_DAYS):
-        vals = [rets[n]["R"][i] for n in names if rets[n]["readable"][i]]
-        if len(vals) < 2:
-            continue
-        v = np.asarray(vals)
-        if np.abs(v).max() > 0 and (np.abs(v - v.mean()).max()
-                                    <= LINEARITY_TOL * np.abs(v.mean())):
-            coherent.append(i)
-    print(f"\n=== THE COHERENT WINDOW: days where every readable arm agrees on "
-          f"R to {int(100*LINEARITY_TOL)}% ===")
-    print(f"  days = {[i+1 for i in coherent] if coherent else 'NONE beyond day 1'}")
+    coherent = linear_window(rets, names)
+    print(f"\n=== THE LINEAR WINDOW: the CONTIGUOUS run of days from day 1 on "
+          f"which every readable arm agrees on R to {int(100*LINEARITY_TOL)}% ===")
+    print("  Contiguous, and that matters: taking every day on which three "
+          "sign-oscillating series happen to agree is a cherry-pick, and it "
+          "inflated this sum by 7x on the first run.  Once the arms decorrelate "
+          "they can re-agree by chance at any later date without any of it "
+          "being a response to the injection.")
+    print(f"  days = {[i+1 for i in coherent] if coherent else 'NONE'}")
     n_coh = len(coherent)
     R_coh = float(np.sum([Rref[i] for i in coherent])) if coherent else 0.0
-    print(f"  sum of R over the coherent window = {R_coh:+.5f} "
-          f"({n_coh} day(s))")
+    print(f"  sum of R over the linear window = {R_coh:+.5f} ({n_coh} day(s))")
+
+    # ---- the discriminator the amplitude ladder cannot provide -----------
+    print("\n=== IS THE POST-TRANSIENT SIGNAL GROWING?  (the shape-in-time "
+          "discriminator) ===")
+    print("  A retention factor is bounded and decays.  A chaotic divergence "
+          "grows exponentially.\n  Tangent-linear chaos is EXACTLY proportional "
+          "to the injection amplitude until it\n  saturates, so the amplitude "
+          "ladder alone cannot tell the two apart -- this can.")
+    lyap = {}
+    for nm in names:
+        gl = lyapunov_growth(rets[nm]["resp"], FLOOR_SV)
+        lyap[nm] = gl
+        print(f"  {nm:>10s}: fitted rate {gl['rate_per_day']:+.4f} /day  "
+              f"e-folding {gl['e_folding_days']:+.1f} d  on {gl['n']} "
+              f"above-floor days -> "
+              f"{'GROWING (divergence)' if gl['growing'] else 'decaying'}")
+    n_grow = sum(1 for v in lyap.values() if v["growing"])
+    print(f"  {n_grow} of {len(lyap)} arms GROW.  Where the signal grows it "
+          f"carries no retention information at any amplitude.")
 
     # ---- the retention-corrected accounting ------------------------------
     dep = load_deposits()
     print("\n=== THE RETENTION-CORRECTED ACCOUNTING ===")
     print(f"  target: full-section gap {GAP_FULL_SECTION:+.3f} Sv, "
           f"channel {GAP_CHANNEL:+.3f} Sv")
-    print("  survivor      | mean d_n [Sv/step] | S coherent-window "
+    print("  survivor      | mean d_n [Sv/step] | S linear-window "
           "| S all-days (UPPER BOUND, contaminated by divergence)")
     acct = {}
     for nm_s, arr in (("total", dep["total"]), ("forcing", dep["forcing"]),
@@ -306,17 +451,7 @@ def main(argv=None) -> int:
         s_coh = acct[nm_s]["S_coherent"]
         s_all = acct[nm_s]["S_all"]
         need = GAP_FULL_SECTION
-        # sign first: a positive S cannot pay a negative gap at any size.
-        sign_ok = (s_all * need) > 0 or (s_coh * need) > 0
-        big_enough = max(abs(s_coh), abs(s_all)) >= abs(need) / 2.0
-        if not sign_ok and not big_enough:
-            v = "EXONERATED (wrong sign AND too small)"
-        elif not sign_ok:
-            v = "REFUTED BY SIGN (right size, wrong sign)"
-        elif not big_enough:
-            v = "EXONERATED (right sign, too small)"
-        else:
-            v = "CANDIDATE (right sign and size)"
+        v = verdict(s_coh, s_all, need)
         short = max(abs(need) / max(abs(s_all), 1e-300), 0.0)
         verdicts[nm_s] = v
         print(f"  {nm_s:8s}: S(all-days upper bound)={s_all:+.4f} Sv vs "
@@ -338,7 +473,7 @@ def main(argv=None) -> int:
                  "R_day1": float(Rref[0]), "R_day2": float(Rref[1]),
                  "linearity": {k: {kk: vv for kk, vv in v.items()
                                    if kk != "reason"} for k, v in lin.items()},
-                 "all_linear": all_linear,
+                 "all_linear": all_linear, "lyapunov": lyap,
                  "accounting": acct, "verdicts": verdicts,
                  "gap_full_section": GAP_FULL_SECTION})),
              **{f"R_{n}": rets[n]["R"] for n in names},
