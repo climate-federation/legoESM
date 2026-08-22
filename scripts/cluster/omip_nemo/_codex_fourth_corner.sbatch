@@ -12,11 +12,16 @@
 # the fourth cell of the factorial.
 set -u
 WT=/burg-archive/glab/users/pg2328/legoESM
-export CODEX_HOME=$(mktemp -d /tmp/codex_home_XXXX)
-cp /burg-archive/home/pg2328/.codex/auth.json   "$CODEX_HOME/" 2>/dev/null || true
-cp /burg-archive/home/pg2328/.codex/config.toml "$CODEX_HOME/" 2>/dev/null || true
-echo "=== CODEX_HOME=$CODEX_HOME contents: $(ls -A $CODEX_HOME) ==="
+# DO NOT copy auth.json into a scratch CODEX_HOME.  Codex rotates its OAuth
+# refresh token on use, so a copy is invalidated the moment anything refreshes
+# the real one, and the job then dies with "refresh token was already used"
+# while the CLI works fine from the home directory.  That failure mode cost
+# this campaign several unreviewed iterations (2026-08-16, 2026-08-22).
+unset CODEX_HOME
 echo "=== repo $WT at $(git -C $WT rev-parse --short HEAD) ==="
+# Shared filesystem, NOT mktemp: $TMPDIR is node-local scratch here and the
+# log vanished under the review that was supposed to read it.
+LOG=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/cdx_4c_${SLURM_JOB_ID}.log
 
 codex exec --sandbox read-only -C $WT \
   "Adversarially review an ocean-model fidelity campaign. This is a JAX ocean
@@ -53,8 +58,18 @@ MEASURED EUC core speed (max over 0-400 m, |lat|<=1 box mean):
   lon 200E: ours 0.116 m/s at 133 m, NEMO 0.496 m/s at 133 m
   lon 220E: ours 0.125, NEMO 0.546
   lon 240E: ours 0.134, NEMO 0.260
-On the RAW forcing the same instrument reported roughly 0.34 at 200E, i.e. the
-undercurrent appears to have got WEAKER under stronger trades.
+The remembered raw-forcing number was 0.34, from a different invocation.  That
+comparison has since been replaced by a MATCHED one (job 9466846, same script,
+same day-30 snapshots, same NEMO 5-day records 5:6, same month):
+
+  lon   control(raw)  arm(corrected)   NEMO      control 10m  arm 10m  NEMO 10m
+  200E     0.163          0.116        0.496       -0.111     -0.232    -0.464
+  220E     0.255          0.125        0.546       -0.111     -0.356    -0.336
+  240E     0.264          0.134        0.260       -0.125     -0.633    -0.786
+
+So on matched numbers the subsurface undercurrent HALVED while the surface
+westward flow moved from far too weak to close to NEMO's.  The core depth at
+200E moved 108 m -> 133 m, which is NEMO's own core depth.
 
 QUESTIONS FOR YOU, and be hostile:
  1. Was that arm actually one-variable? Read _ab_modforcing_d30.sbatch and the
@@ -108,6 +123,16 @@ box mean on this grid, does it handle a longitude convention other than
 0-360, and can the new tests fail if the behaviour they assert is removed?
 Also check the earlier commit 24a25b286 that made the corrected cache the
 default: it shipped with no test and a silent-fallback path.
-" 2>&1 | tail -220
-echo "=== codex rc=$? ==="
+" > "$LOG" 2>&1
+rc=$?
+tail -260 "$LOG"
+echo "=== codex rc=$rc ==="
+# A review that never reached the model is NOT a review.  Scan only codex's
+# own stderr markers, which the prompt above does not contain, so this guard
+# cannot be tripped by the text it echoes.
+if grep -q "Failed to refresh token\|401 Unauthorized\|token_expired" "$LOG"; then
+  echo "FATAL: codex authentication failed -- THIS ITERATION IS UNREVIEWED."
+  echo "Re-authenticate with 'codex login' from an interactive shell."
+  exit 2
+fi
 echo DONE

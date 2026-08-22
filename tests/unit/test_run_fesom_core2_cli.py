@@ -100,3 +100,33 @@ def test_tke_surface_bc_flag():
                         ).tke_surface_bc == "dirichlet"
     with pytest.raises(SystemExit):
         p.parse_args(base + ["--tke-surface-bc", "robin"])
+
+
+def test_nyf_zarr_defaults_to_the_shared_core2_cache():
+    """FESOM must resolve the SAME CORE-II cache the tripole and MPAS drivers
+    do when --nyf-zarr is omitted.
+
+    Before this, --nyf-zarr was required and every FESOM arm carried a
+    hand-written path.  One of those paths pointing at the raw-wind cache
+    while the structured grids had moved to the bias-corrected one would make
+    a three-grid comparison differ in the forcing -- a confound presented as a
+    grid difference, which is exactly the claim these arms exist to make.
+    """
+    from legoesm.ocean.forcing import core2_nyf_cache_dir
+
+    p = m.build_arg_parser()
+    a = p.parse_args(["--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
+                      "--forcing", "core2_nyf"])
+    assert a.nyf_zarr is None            # the driver resolves it, not argparse
+    resolved = core2_nyf_cache_dir() / "nyf.zarr"
+    assert resolved.name == "nyf.zarr"
+    assert resolved.parent.name in ("core2_nyf_mod", "core2_nyf")
+
+
+def test_explicit_nyf_zarr_still_wins():
+    """An explicit path must override the shared default, so an older arm can
+    still be reproduced against the raw-wind cache."""
+    p = m.build_arg_parser()
+    a = p.parse_args(["--mesh-dir", "M", "--ic-dir", "I", "--output", "O",
+                      "--forcing", "core2_nyf", "--nyf-zarr", "/some/other.zarr"])
+    assert a.nyf_zarr == "/some/other.zarr"

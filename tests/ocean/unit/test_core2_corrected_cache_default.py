@@ -28,14 +28,14 @@ def test_default_cache_prefers_the_corrected_fields(tmp_path, monkeypatch):
     root = _fake_root(tmp_path, monkeypatch)
     (root / "core2_nyf").mkdir()
     (root / "core2_nyf_mod").mkdir()
-    assert core2._cache_dir() == root / "core2_nyf_mod"
+    assert core2.core2_nyf_cache_dir() == root / "core2_nyf_mod"
 
 
 def test_missing_corrected_cache_falls_back_loudly(tmp_path, monkeypatch, caplog):
     root = _fake_root(tmp_path, monkeypatch)
     (root / "core2_nyf").mkdir()
     with caplog.at_level("WARNING"):
-        resolved = core2._cache_dir()
+        resolved = core2.core2_nyf_cache_dir()
     assert resolved == root / "core2_nyf"
     # A silent fallback to the raw winds is the defect the default exists to
     # prevent, so the warning is part of the contract.
@@ -72,3 +72,37 @@ def test_nino3_wind_speed_reads_only_the_nino3_box():
         v10=types.SimpleNamespace(values=np.zeros(shape)),
     )
     assert core2._nino3_wind_speed(ds) == pytest.approx(3.0, rel=1e-12)
+
+
+def test_load_prints_the_resolved_cache_and_its_wind_speed(tmp_path, capsys):
+    """The provenance line must survive: a run log that does not name the
+    cache is a run whose forcing cannot be established afterwards.
+
+    Written as an end-to-end load rather than a call to the helper, because
+    the failure this guards against is the print being dropped, not the
+    arithmetic being wrong.
+    """
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+
+    nt, ny, nx = 3, 45, 180
+    lat = np.linspace(-88.0, 88.0, ny)
+    lon = np.linspace(0.0, 358.0, nx)
+    dims = ("time", "lat", "lon")
+    ds = xr.Dataset(
+        {name: (dims, np.full((nt, ny, nx), val))
+         for name, val in (("u10", 7.0), ("v10", 0.0), ("T_air", 280.0),
+                           ("q_air", 0.005), ("sw_down", 200.0),
+                           ("lw_down", 300.0), ("precip", 0.0),
+                           ("runoff", 0.0))},
+        coords={"lat": lat, "lon": lon,
+                "time_s": ("time", np.arange(nt, dtype=float) * 86400.0)},
+    )
+    cache = tmp_path / "core2_nyf_mod"
+    ds.to_zarr(cache / "nyf.zarr")
+
+    core2.load_core2_nyf(cache_dir=cache, allow_synthetic=False)
+    out = capsys.readouterr().out
+    assert "[forcing] CORE-II NYF cache:" in out
+    assert str(cache / "nyf.zarr") in out
+    assert "7.000 m/s" in out

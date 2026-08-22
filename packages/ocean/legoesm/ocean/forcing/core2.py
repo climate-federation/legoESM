@@ -37,7 +37,7 @@ from .jra55_do import (
 logger = logging.getLogger(__name__)
 
 
-def _cache_dir() -> Path:
+def core2_nyf_cache_dir() -> Path:
     """Default CORE-II NYF cache.
 
     ``core2_nyf_mod`` is built from the Large & Yeager bias-corrected fields
@@ -94,7 +94,7 @@ def load_core2_nyf(*, cache_dir: Path | None = None,
     with ``n_time`` daily snapshots (default 365). The seasonal cycle is
     one year long.
     """
-    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
+    root = Path(cache_dir) if cache_dir is not None else core2_nyf_cache_dir()
     zarr_path = root / "nyf.zarr"
     if zarr_path.exists():
         try:
@@ -146,4 +146,4 @@ def load_core2_nyf(*, cache_dir: Path | None = None,
     return synthetic_ocean_forcing(0, n_time=n_time)
 
 
-__all__ = ["load_core2_nyf"]
+__all__ = ["core2_nyf_cache_dir", "load_core2_nyf"]

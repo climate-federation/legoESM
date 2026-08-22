@@ -789,11 +789,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # shear production and reinforces; lower K_H cuts buoyancy destruction
         # and offsets), so the integrated response is what the day-90 A/B
         # measures, not something the algebra gives.
-        # Revert with --tke-kappa-convention -- WHICH REACHES THE TRIPOLE ONLY.
-        # The MPAS branch calls this same card with no overrides, so the pin
-        # changes MPAS too, but `_validate_tke_card_grid` rejects the flag off
-        # the tripole (the standing contract for all four card knobs), so MPAS
-        # cannot be A/B'd from the CLI.  Known asymmetry, not an oversight.
+        # Revert with --tke-kappa-convention, which reaches the tripole and
+        # (since 2026-08-22) the MPAS grid as well, so the same A/B can be run
+        # on either.
         kappa_convention="veros_sqrte",
         lc=True,                        # ln_lc
         lc_coeff=0.25,                  # rn_lc (namelist_cfg override)
@@ -2367,23 +2365,35 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
-                            tke_lc=None, tke_etau=None):
-    """Reject the tripole-zdftke card knobs unless the tke closure is active.
+                            tke_lc=None, tke_etau=None, mpas_vmix="kpp"):
+    """Reject the zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
     ONLY inside the ``tke``
-    branch of ``build_tripole_vmix_config`` (-> ``orca1_zdftke_config``), which
-    the tripole attach block reaches only when ``--tripole-vmix tke`` is set.
-    They are therefore SILENTLY DISCARDED — the dispatch footgun CLAUDE.md
-    forbids — on THREE paths the sibling ``--tripole-vmix`` guard misses:
-      * ``--grid mpas``/``latlon_bathy`` (build_tripole never runs — different
-        builder);
+    branch of ``build_tripole_vmix_config`` (-> ``orca1_zdftke_config``).  Two
+    grids reach that branch: the tripole attach block under ``--tripole-vmix
+    tke``, and the MPAS builder under ``--mpas-vmix tke`` (the "tripole\\_"
+    prefix on the builder is historical; the construction is grid-agnostic and
+    the MPAS TKE bridge consumes the same ``TKEConfig``).  Everywhere else the
+    knobs are SILENTLY DISCARDED — the dispatch footgun CLAUDE.md forbids:
+      * ``--grid latlon_bathy`` / ``cubed_sphere`` (different builder);
       * ``--grid tripole --tripole-vmix none`` (``_use_vmix`` false ->
         build_tripole_vmix_config is never called at all);
-      * ``--grid tripole --tripole-vmix kpp`` (the knob is not applied in the
-        kpp branch).
-    So require the FULL ``--grid tripole --tripole-vmix tke`` context whenever
-    either knob is set (codex 2026-07-22 HIGH).
+      * ``--grid tripole --tripole-vmix kpp`` and ``--grid mpas --mpas-vmix
+        kpp`` (the knob is not applied in the kpp branch).
+    So require one of the two FULL tke contexts whenever a knob is set
+    (codex 2026-07-22 HIGH).
+
+    The MPAS context was opened on 2026-08-22 so the three grids can run the
+    SAME closure card: the surface-TKE Dirichlet boundary condition is the
+    largest single lever this campaign has measured, and while it was
+    tripole-only every cross-grid comparison was made between a tripole
+    running the faithful card and an MPAS running a different one.  The MPAS
+    TKE bridge rejects, loudly and at factory-build time, the handful of
+    ``TKEConfig`` options it does not plumb (``bottom_tke_bc``,
+    ``n2_mode='adiabatic'``, ``veros_dz_slots``, ``buoyancy_timing``,
+    ``advection_scheme``, ``source_eke_diss``, and ``iwm``), so a knob that
+    reaches it either takes effect or raises.
     """
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
@@ -2395,14 +2405,16 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                         ("--tke-prognostic", tke_prognostic),
                         ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production)):
-        if _val is not None and not (grid == "tripole"
-                                     and tripole_vmix == "tke"):
+        _active = ((grid == "tripole" and tripole_vmix == "tke")
+                   or (grid == "mpas" and mpas_vmix == "tke"))
+        if _val is not None and not _active:
             raise SystemExit(
-                f"{_flag} configures the tripole zdftke closure and takes "
-                "effect ONLY under --grid tripole --tripole-vmix tke; got "
-                f"--grid {grid!r} --tripole-vmix {tripole_vmix!r}, where it is "
-                f"silently discarded. Add --tripole-vmix tke (on --grid "
-                f"tripole), or drop {_flag}.")
+                f"{_flag} configures the zdftke closure and takes effect ONLY "
+                "under --grid tripole --tripole-vmix tke or --grid mpas "
+                f"--mpas-vmix tke; got --grid {grid!r} --tripole-vmix "
+                f"{tripole_vmix!r} --mpas-vmix {mpas_vmix!r}, where it is "
+                f"silently discarded. Add the matching --tripole-vmix tke / "
+                f"--mpas-vmix tke, or drop {_flag}.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -5088,11 +5100,13 @@ def main() -> int:
     # --ice-thermo/--sss-restore load it).  Without one, ice_frac stays None:
     # KPP-eice would be silently inert (codex MED), and the MPAS TKE bridge
     # FAIL-FASTS at the first step — reject loudly up front in both cases.
-    # NB: the ORCA1 zdftke card DEFAULTS eice=3 and --tke-eice stays
-    # tripole-gated on this tree (_validate_tke_card_grid), so MPAS+tke
-    # always runs the card's under-ice attenuation and therefore wants ice.
+    # NB: the ORCA1 zdftke card DEFAULTS eice=3, so MPAS+tke wants ice unless
+    # the run explicitly turns the attenuation off with --tke-eice 0 (which
+    # reaches MPAS since 2026-08-22).
+    _mpas_tke_eice = (args.tke_eice if args.tke_eice is not None else 3)
     _wants_eice = (args.kpp_eice not in (None, 0)
-                   or (args.grid == "mpas" and args.mpas_vmix == "tke"))
+                   or (args.grid == "mpas" and args.mpas_vmix == "tke"
+                       and _mpas_tke_eice != 0))
     if _wants_eice and not (
             args.prognostic_sea_ice or args.ice_albedo or args.ice_thermo
             or args.sss_restore):
@@ -5339,7 +5353,8 @@ def main() -> int:
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
                             tke_n2_eos_form=args.tke_n2_eos_form,
-                            tke_lc=args.tke_lc, tke_etau=args.tke_etau)
+                            tke_lc=args.tke_lc, tke_etau=args.tke_etau,
+                            mpas_vmix=args.mpas_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5622,11 +5637,24 @@ def main() -> int:
             # Full #1326 ORCA1 card, including the PROGNOSTIC Mode-A carry —
             # MPASOceanState.tke is seeded by model.seed_tke(state) in the
             # host loop before the first step (pytree-stable carry).
-            # No tke_eice pass-through: _validate_tke_card_grid guarantees
-            # --tke-eice is None off the tripole, so the card default
-            # (eice=3, NEMO nn_eice) applies here (codex LOW: dead arg).
+            # The zdftke card knobs reach MPAS too (2026-08-22): the three
+            # grids have to be able to run the SAME closure or a cross-grid
+            # comparison is measuring the card, not the grid.  Every knob is
+            # threaded — a knob accepted by _validate_tke_card_grid and then
+            # dropped here is the silent-discard footgun that guard exists to
+            # prevent.  iwm stays None: the MPAS TKE bridge rejects it.
             vertical_mixing=(
-                build_tripole_vmix_config("tke", iwm=None)
+                build_tripole_vmix_config(
+                    "tke", iwm=None,
+                    tke_eice=args.tke_eice,
+                    tke_surface_bc=args.tke_surface_bc,
+                    tke_mxl_choice=args.tke_mxl_choice,
+                    tke_prognostic=args.tke_prognostic,
+                    tke_n2_mode=args.tke_n2_mode,
+                    tke_n2_eos_form=args.tke_n2_eos_form,
+                    tke_kappa_convention=args.tke_kappa_convention,
+                    tke_shear_production=args.tke_shear_production,
+                    tke_lc=args.tke_lc, tke_etau=args.tke_etau)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -6429,6 +6457,17 @@ def main() -> int:
     # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
     # failure never aborts a long integration.
     # Process-0 only under --distributed (every process shares one output dir).
+    #
+    # Resolve the CORE-II cache the run will actually read, so the manifest
+    # records the forcing rather than the flag.  --forcing-path wins; otherwise
+    # this is the same default the loader takes, and the two cannot drift
+    # because both call core2_nyf_cache_dir().
+    if args.forcing_path:
+        _resolved_forcing_path = str(args.forcing_path)
+    else:
+        from legoesm.ocean.forcing import core2_nyf_cache_dir
+        _resolved_forcing_path = str(core2_nyf_cache_dir())
+    print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
     manifest_path = None
     if _is_io_proc():
         try:
@@ -6446,7 +6485,13 @@ def main() -> int:
                 total_days=float(total_days),
                 output_path=str(args.output),
                 forcing="core2_nyf",
-                forcing_path=str(args.forcing_path or ""),
+                # RESOLVED, not the flag.  An empty string here used to mean
+                # "the default", and the default silently changed from the raw
+                # CORE-II winds to the bias-corrected ones -- so every manifest
+                # written before this recorded nothing about which forcing the
+                # run actually used, and the loader's own provenance line is
+                # swallowed by the `| tail` most arm scripts pipe through.
+                forcing_path=str(_resolved_forcing_path),
                 woa_init=bool(args.woa_init),
                 woa_t=str(args.woa_t or ""),
                 woa_s=str(args.woa_s or ""),
@@ -6459,7 +6504,7 @@ def main() -> int:
                 dataset_provenance=[
                     dataset_provenance_entry(pth, dataset_id=did)
                     for did, pth in (
-                        ("core2_forcing", args.forcing_path),
+                        ("core2_forcing", _resolved_forcing_path),
                         ("woa_t", args.woa_t),
                         ("woa_s", args.woa_s),
                     )

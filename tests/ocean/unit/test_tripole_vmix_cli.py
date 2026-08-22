@@ -481,3 +481,99 @@ def test_model_step_orca1_tke_latitude_mode():
     for name in ("T", "S", "u", "v", "eta"):
         arr = np.asarray(getattr(out, name).data)
         assert np.isfinite(arr).all(), f"non-finite {name}"
+
+
+# ---------------------------------------------------------------------------
+# The zdftke card on the MPAS grid (2026-08-22)
+#
+# The three grids have to be able to run the SAME closure card, or a
+# cross-grid comparison measures the card rather than the grid.  The surface
+# TKE Dirichlet boundary condition in particular is the largest single lever
+# this campaign has measured, and while it was tripole-only every MPAS-vs-
+# tripole number was a comparison between two different closures.
+# ---------------------------------------------------------------------------
+
+
+def test_tke_card_knobs_allowed_under_mpas_tke():
+    """--mpas-vmix tke reaches the same builder branch the tripole does, so
+    the card knobs take effect there and must NOT be rejected."""
+    r = _runner()
+    r._validate_tke_card_grid("mpas", "none", tke_surface_bc="nemo_dirichlet",
+                              mpas_vmix="tke")
+    r._validate_tke_card_grid("mpas", "none", tke_eice=0, tke_mxl_choice=3,
+                              tke_prognostic=True,
+                              tke_kappa_convention="veros_sqrte",
+                              mpas_vmix="tke")
+
+
+def test_tke_card_knobs_still_rejected_under_mpas_kpp():
+    """The knob is not applied in the kpp branch on ANY grid, so the MPAS
+    default closure must keep rejecting it -- opening the tke context must
+    not open the kpp one."""
+    r = _runner()
+    for knob, val in (("tke_surface_bc", "nemo_dirichlet"),
+                      ("tke_mxl_choice", 3),
+                      ("tke_eice", 1),
+                      ("tke_prognostic", True)):
+        with pytest.raises(SystemExit, match=knob.replace("_", "-")):
+            r._validate_tke_card_grid("mpas", "none", mpas_vmix="kpp",
+                                      **{knob: val})
+
+
+def test_mpas_tke_card_knobs_reach_the_vertical_mixing_config(monkeypatch):
+    """A knob the guard now ACCEPTS on MPAS must actually reach the config.
+
+    Accepting a flag and then dropping it is the exact silent-discard footgun
+    the guard exists to prevent, so this asserts on the VerticalMixingConfig
+    handed to the MPAS builder, not on the flag that was parsed.
+    """
+    import sys
+    r = _runner()
+    captured = {}
+
+    def _capture(*a, **k):
+        captured.update(k)
+        raise SystemExit("captured")      # stop before any mesh/grid work
+
+    monkeypatch.setattr(r, "build_mpas_ocean", _capture, raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_omip_core2.py", "--grid", "mpas", "--mesh", "/nonexistent.nc",
+         "--mpas-vmix", "tke", "--prognostic-sea-ice", "--woa-init",
+         "--tke-surface-bc", "nemo_dirichlet", "--tke-mxl-choice", "3",
+         "--tke-kappa-convention", "veros_sqrte", "--tke-eice", "0"])
+    with pytest.raises(SystemExit):
+        r.main()
+
+    vm = captured.get("vertical_mixing")
+    assert vm is not None, "build_mpas_ocean was not reached with a closure"
+    assert vm.scheme == "tke"
+    assert vm.tke.surface_bc == "nemo_dirichlet"
+    assert int(vm.tke.tke_mxl_choice) == 3
+    assert vm.tke.kappa_convention == "veros_sqrte"
+    assert int(vm.tke.eice) == 0
+
+
+def test_mpas_tke_default_card_still_applies_without_knobs(monkeypatch):
+    """No knobs -> the ORCA1 card defaults, unchanged from before the wiring
+    (so this change moves nothing for a run that does not ask for it)."""
+    import sys
+    r = _runner()
+    captured = {}
+
+    def _capture(*a, **k):
+        captured.update(k)
+        raise SystemExit("captured")
+
+    monkeypatch.setattr(r, "build_mpas_ocean", _capture, raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["run_omip_core2.py", "--grid", "mpas", "--mesh", "/nonexistent.nc",
+         "--mpas-vmix", "tke", "--prognostic-sea-ice", "--woa-init"])
+    with pytest.raises(SystemExit):
+        r.main()
+
+    vm = captured.get("vertical_mixing")
+    assert vm is not None
+    reference = r.build_tripole_vmix_config("tke", iwm=None)
+    assert vm.tke == reference.tke
