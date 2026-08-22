@@ -128,6 +128,16 @@ def main():
             _drg_cap.setdefault("u", []).append(np.asarray(u))
             _drg_cap.setdefault("v", []).append(np.asarray(v))
             _drg_cap.setdefault("h_k", []).append(np.asarray(h_k))
+            # WHICH SITE each call came from (#1455 sibling).  The five calls
+            # were previously attributed by matching velocity fingerprints,
+            # which is inference, not measurement -- and this campaign has been
+            # burned by exactly that.  Record the enclosing function of the
+            # caller (frame 1 = the call site inside ocean_model/barotropic).
+            import traceback as _tb
+            _st = _tb.extract_stack()
+            _drg_cap.setdefault("caller", []).append(
+                f"{os.path.basename(_st[-2].filename)}:{_st[-2].lineno}"
+                f" in {_st[-2].name}")
             return _orig_drg(u, v, h_k, z_coord, config, grid)
 
         _pemod.nemo_bottom_drag_rate_faces = _drg_spy
@@ -948,7 +958,8 @@ def main():
         # stages and only ONE of them is the barotropic loop's; saving call 0
         # and assuming it was the right one produced a field that did not
         # reproduce the runtime coefficient, which is how this was noticed.
-        _saved = {"n_calls": np.int64(len(_drg_cap["u"]))}
+        _saved = {"n_calls": np.int64(len(_drg_cap["u"])),
+                  "caller": np.array(_drg_cap.get("caller", []), dtype=object)}
         for _i in range(len(_drg_cap["u"])):
             _saved[f"u{_i}"] = _drg_cap["u"][_i]
             _saved[f"v{_i}"] = _drg_cap["v"][_i]
