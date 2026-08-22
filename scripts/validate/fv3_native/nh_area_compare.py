@@ -64,13 +64,26 @@ def main() -> int:
     area6 = nh_exchanged_area6(ctx)
     masks = region_masks(m_a, m_a, width=NG)
 
-    print("\narea handed to update_dz_d, vs the reference's own, by region")
+    # BOTH arrays, so the reading is not ambiguous between "the builder
+    # is wrong" and "the port's own extra exchange changes it". The
+    # gridstruct's area is what every earlier metric comparison scored;
+    # the exchanged copy is what update_dz_d is handed.
+    for tag, src in (("gridstruct area (what earlier arms scored)",
+                      [gs6[t]["area"] for t in range(6)]),
+                     ("area handed to update_dz_d (after the port's "
+                      "own exchange + corner fill)", area6)):
+        print(f"\n{tag}, vs the reference's own, by region")
+        _report(fmap, orcm, src, masks)
+    return 0
+
+
+def _report(fmap, orcm, src, masks):
     print(" face->tile   interior       edge         corner      "
           "n differing (corner)")
     for pf in range(6):
         _d, ot, op = fmap[pf]
         o2 = np.asarray(orcm[ot]["arrays"]["M_AREA"], np.float64)
-        p2o = op_scalar(np.asarray(area6[pf], np.float64), op)
+        p2o = op_scalar(np.asarray(src[pf], np.float64), op)
         if o2.shape != p2o.shape:
             raise SystemExit(f"face {pf + 1}: {p2o.shape} vs {o2.shape}")
         d = np.abs(o2 - p2o)
@@ -83,11 +96,10 @@ def main() -> int:
         print(f"  {pf + 1}->{ot + 1}      {d[mo['interior']].max():.4e}  "
               f"{d[mo['edge']].max():.4e}  {d[mo['corner']].max():.4e}  "
               f"{ncorner:6d}")
-    print("\nA zero column is bitwise agreement on that region: whatever "
-          "the port's corner fill produces there, the reference produces "
-          "the same number. A nonzero one is a disagreement the height "
-          "update reads.")
-    return 0
+    print("\nA zero column is bitwise agreement on that region. Read the "
+          "two tables against each other: a disagreement present in BOTH "
+          "is the builder's; one that appears only in the second is "
+          "created by the port's own exchange and corner fill.")
 
 
 if __name__ == "__main__":
