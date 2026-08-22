@@ -282,7 +282,8 @@ def accumulate(R: np.ndarray, per_step_sv: float) -> float:
     return float(per_step_sv * STEPS_PER_DAY * np.trapezoid(ages))
 
 
-def verdict(s_coh: float, s_all: float, need: float) -> str:
+def verdict(s_coh: float, s_all: float, need: float,
+            superposes_beyond_window: bool = True) -> str:
     """Classify a survivor from its retention-corrected accumulation.
 
     Extracted from ``main`` so it can be table-tested: an inline version of
@@ -294,8 +295,27 @@ def verdict(s_coh: float, s_all: float, need: float) -> str:
     negative, so an S of the right SIZE but the wrong SIGN refutes the
     injection picture just as firmly as one that is too small.
     """
-    sign_ok = (s_all * need) > 0 or (s_coh * need) > 0
-    big_enough = max(abs(s_coh), abs(s_all)) >= abs(need) / 2.0
+    # SUPERPOSITION IS A PRECONDITION, NOT A DETAIL.  S = sum_n d_n R(age)
+    # adds the responses of 2880 separate injections, which is only valid
+    # while the response is LINEAR.  Once the perturbed and control
+    # trajectories have decorrelated, their difference is no longer a
+    # response to the injection at all -- it is two chaotic trajectories
+    # drifting apart, and its magnitude reflects when divergence started
+    # rather than how big the injection was.  Summing it as if it
+    # superposed is not a loose upper bound, it is a category error, and it
+    # flipped this verdict from EXONERATED to CANDIDATE on real data purely
+    # on the strength of two late-window chaotic excursions.
+    #
+    # So when the arms have decorrelated, the all-days figure is not
+    # admitted as an accumulation at all and the verdict rests on the linear
+    # window alone.  The chaotic range is reported as UNMEASURABLE BY THIS
+    # INSTRUMENT, which is the honest description of it.
+    if superposes_beyond_window:
+        sign_ok = (s_all * need) > 0 or (s_coh * need) > 0
+        big_enough = max(abs(s_coh), abs(s_all)) >= abs(need) / 2.0
+    else:
+        sign_ok = (s_coh * need) > 0
+        big_enough = abs(s_coh) >= abs(need) / 2.0
     if not sign_ok and not big_enough:
         return "EXONERATED (wrong sign AND too small)"
     if not sign_ok:
@@ -440,6 +460,33 @@ def main(argv=None) -> int:
     print(f"  {n_grow} of {len(lyap)} arms GROW.  Where the signal grows it "
           f"carries no retention information at any amplitude.")
 
+    # Does the response still SUPERPOSE beyond the linear window?  Measured,
+    # not assumed: the R series of two different amplitudes are correlated
+    # inside the window and uncorrelated outside it if the arms have
+    # decorrelated.  This is the precondition for summing d_n R(age) at all.
+    _post = slice(len(coherent), None)
+    _pc = []
+    for _i, _a in enumerate(names):
+        for _b in names[_i + 1:]:
+            if abs(abs(rets[_a]["scale"]) - abs(rets[_b]["scale"])) < 1e-12:
+                continue          # same magnitude proves nothing about linearity
+            _x, _y = rets[_a]["R"][_post], rets[_b]["R"][_post]
+            if len(_x) > 3:
+                _pc.append(float(np.corrcoef(_x, _y)[0, 1]))
+    _post_corr = float(np.median(_pc)) if _pc else float("nan")
+    _superposes = bool(_pc) and _post_corr >= LINEAR_CORR_MIN
+    print(f"\n=== DOES THE RESPONSE STILL SUPERPOSE PAST THE LINEAR WINDOW? ===")
+    print(f"  median R-correlation across amplitudes, days "
+          f"{len(coherent)+1}..{N_DAYS}: {_post_corr:+.4f}  "
+          f"(bar {LINEAR_CORR_MIN})")
+    print(f"  -> {'superposes' if _superposes else 'DOES NOT SUPERPOSE'}: "
+          + ("the all-days sum is admissible."
+             if _superposes else
+             "the all-days sum is NOT an accumulation and is NOT scored.  "
+             "Summing d_n*R(age) over a decorrelated range adds responses "
+             "that never superposed; the range is UNMEASURABLE by an impulse "
+             "experiment, which is the pre-registered UNREADABLE outcome."))
+
     # ---- the retention-corrected accounting ------------------------------
     dep = load_deposits()
     print("\n=== THE RETENTION-CORRECTED ACCOUNTING ===")
@@ -466,11 +513,14 @@ def main(argv=None) -> int:
         s_coh = acct[nm_s]["S_coherent"]
         s_all = acct[nm_s]["S_all"]
         need = GAP_FULL_SECTION
-        v = verdict(s_coh, s_all, need)
+        v = verdict(s_coh, s_all, need, superposes_beyond_window=_superposes)
         short = max(abs(need) / max(abs(s_all), 1e-300), 0.0)
         verdicts[nm_s] = v
-        print(f"  {nm_s:8s}: S(all-days upper bound)={s_all:+.4f} Sv vs "
-              f"needed {need:+.3f} Sv -> {short:.1f}x short -> {v}")
+        _scored = s_all if _superposes else s_coh
+        _lbl = "all-days" if _superposes else "linear-window (all-days NOT scored)"
+        print(f"  {nm_s:8s}: S({_lbl})={_scored:+.4f} Sv vs "
+              f"needed {need:+.3f} Sv -> "
+              f"{abs(need)/max(abs(_scored),1e-300):.1f}x short -> {v}")
     print(f"\n  retention at day 1 = {Rref[0]:+.4f}; "
           f"at day 2 = {Rref[1]:+.4f}; "
           f"|R| falls below 1% of the injection after day "
@@ -491,6 +541,7 @@ def main(argv=None) -> int:
                                    if kk != "reason"} for k, v in lin.items()},
                  "all_linear": all_linear, "lyapunov": lyap,
                  "accounting": acct, "verdicts": verdicts,
+                 "post_window_corr": _post_corr, "superposes": _superposes,
                  "gap_full_section": GAP_FULL_SECTION})),
              **{f"R_{n}": rets[n]["R"] for n in names},
              **{f"resp_{n}": rets[n]["resp"] for n in names})

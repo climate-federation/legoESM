@@ -247,6 +247,22 @@ def test_verdict_table(s_coh, s_all, need, expect):
     assert M.verdict(s_coh, s_all, need) == expect
 
 
+def test_verdict_ignores_the_all_days_sum_when_the_arms_have_decorrelated():
+    """Superposition is a PRECONDITION for summing d_n*R(age), not a detail.
+
+    On the real arms the all-days sum is -1.31 Sv (two late chaotic
+    excursions) while the linear window gives +0.13 Sv.  Scoring the former
+    flipped the verdict from EXONERATED to CANDIDATE on a range where the two
+    amplitudes' R series correlate at 0.016 -- i.e. on numbers that never
+    superposed.  With superposition denied, only the window counts.
+    """
+    s_lin, s_all, need = +0.13, -1.31, -0.401
+    assert M.verdict(s_lin, s_all, need, superposes_beyond_window=True) == (
+        "CANDIDATE (right sign and size)")
+    assert M.verdict(s_lin, s_all, need, superposes_beyond_window=False) == (
+        "EXONERATED (wrong sign AND too small)")
+
+
 def test_verdict_sign_discriminator_is_not_vacuous():
     """Inverting the sign changes the answer -- the property mutation checks."""
     assert M.verdict(0.5, 0.6, -0.401) != M.verdict(-0.5, -0.6, -0.401)
