@@ -193,6 +193,14 @@ PYEOF2
   # allocated (isd:ied, jsd:jed, npz+1) at dyn_core.F90:299, so the
   # padded slice below is its own declared extent.
   #
+  # THE CAPTURES INHERIT `#ifndef SW_DYNAMICS` (dyn_core.F90:1404),
+  # deliberately: the anchor is the height update, which only exists on
+  # the 3-D lane, and this build omits that define (see DEFS below). It
+  # is stated rather than left implied, because "outside every
+  # preprocessor guard" was claimed for these patches and is not true of
+  # this one (codex MINOR, job 9466849). The runtime dump count is what
+  # would catch a build that did define it.
+  #
   # NAMED BY THE ACOUSTIC SUB-STEP, not by n_map. update_dz_d sits INSIDE
   # `do it=1,n_split` (dyn_core.F90:339 .. :1737), so an n_map-keyed name
   # lets sub-steps 2..8 overwrite sub-step 1 and leaves one file that

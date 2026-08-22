@@ -31,7 +31,7 @@ stepper's own ``stage_hook`` -- ``S_nh_before_update_dz_d`` and
 here re-implements the acoustic chain; a probe that did would be
 measuring a different program.
 
-CONTROLS, each fatal:
+FIVE CONTROLS, each fatal:
   1. the deck must be ``k_split=1``; the dumps carry ``n_map`` in their
      names and a second outer iteration would overwrite them, leaving
      the last iteration wearing the whole step's name;
@@ -39,11 +39,17 @@ CONTROLS, each fatal:
   3. the two capture points must DIFFER, on both sides and at both
      interfaces -- if before equals after, one dump is not where it
      claims and every number below is one reading printed twice;
-  4. the BEFORE state's compute-interior difference must be small. Both
-     sides descend from identical initial conditions, so a wrong
-     dihedral, a wrong face pairing, or a wrong assumption about the
-     dump's index order shows up here as O(1) rather than as a halo
-     story.
+  4. the BEFORE state's compute-interior difference must sit at the
+     parity floor in ABSOLUTE metres. Both sides descend from identical
+     initial conditions, so a wrong dihedral, a wrong face pairing, or a
+     wrong assumption about the dump's index order shows up here -- and
+     this is the only control that touches the dump reader's convention
+     at all, which is why its bound is the floor and not a fraction of
+     the field;
+  5. the port's own vertical velocity must land in the band this deck
+     produces, or the probe is not running the configuration whose gap
+     is under investigation. An earlier version of this probe assembled
+     its own sub-step entry point and this control is what caught it.
 
 WHAT THIS DOES NOT COVER, stated: interfaces 1 and 2 only, so it cannot
 say where in the column the damage is born; ACOUSTIC SUB-STEP 1 only --
@@ -95,6 +101,14 @@ from compare_dyncore_stages import region_masks   # noqa: E402
 from nh_preremap_w_parity import read_dump        # noqa: E402
 
 HALO_ROOT = "/burg-archive/glab/users/pg2328/fv3_wsubstep/run_nh_1step"
+
+#: The BEFORE-state compute-interior ceiling, ABSOLUTE metres. Both
+#: sides descend from the same IC through the same implicit sub-step, so
+#: a correct run sits at the fp64 parity floor -- measured 1.5e-11 m
+#: (job 9466634). This is the ONLY control that exercises the hdump
+#: reader's index convention, so it is set an order above that floor
+#: rather than as a fraction of a 5.8e+03 m field.
+BEFORE_INTERIOR_MAX_ABS = 1.0e-09
 
 #: Interfaces bracketing model layer 1; port level indices are 0-based.
 LEVELS = {"zh1": 0, "zh2": 1}
@@ -254,9 +268,8 @@ def main(argv=None):
     # investigation. The sibling probe has this control and it is what
     # caught a dropped dihedral there; without it a probe that quietly
     # ran a different sub-step setup would report cleanly. w after ONE
-    # sub-step is not the full-step number, so the check is that the
-    # error is PRESENT at the established order of magnitude, not that
-    # it equals 6.6116e-04.
+    # This reads the state AFTER the full step, so it is checked against
+    # the established full-step field rather than a sub-step value.
     w_worst = max(float(np.abs(state[pf]["w"][NG:NG + N, NG:NG + N, 0]).max())
                   for pf in range(6))
     print(f"port |w|max after the full step, k=0 compute window: "
@@ -316,13 +329,20 @@ def main(argv=None):
     pre_scale = max(r[5] for r in rows if r[0] == "pre")
     print(f"\nBEFORE-state compute-interior worst: {pre_int:.4e} "
           f"(scale {pre_scale:.4e})")
-    if pre_int > 1.0e-04 * pre_scale:
+    # ABSOLUTE, and set an order above the measured floor rather than
+    # relative to the field. A 1e-4 RELATIVE bound on a 5.8e+03 m height
+    # is 0.58 m, which would admit metre-scale mapping errors while the
+    # signal under investigation is 3.7e-05 m -- the gate would have been
+    # 16000x looser than the thing it protects (codex MAJOR, job
+    # 9466849). The measured floor on a correct run is 1.5e-11 m.
+    if pre_int > BEFORE_INTERIOR_MAX_ABS:
         raise SystemExit(
             f"INSTRUMENT CONTROL FAILED: the BEFORE interior differs by "
-            f"{pre_int:.4e} against a scale of {pre_scale:.4e}. Both sides "
-            f"start from the same IC, so this is the mapping -- the "
-            f"dihedral, the face pairing, or the dump's index order -- "
-            f"not a halo finding.")
+            f"{pre_int:.4e} m, above the {BEFORE_INTERIOR_MAX_ABS:.0e} m "
+            f"floor (scale {pre_scale:.4e}). Both sides start from the "
+            f"same IC and this path -- the hdump reader's index order, "
+            f"the dihedral, the face pairing -- is the only thing control "
+            f"2 does not exercise. This is the mapping, not a finding.")
     print("\nNO VERDICT HERE. Read the two BEFORE rows against the two "
           "AFTER rows, per region: a difference already present in the "
           "BEFORE halo points at the exchange that fills it; one that "
