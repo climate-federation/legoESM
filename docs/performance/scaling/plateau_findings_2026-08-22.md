@@ -375,6 +375,21 @@ The practical consequence is a lookup table rather than a rule, and the
 decision it informs is unchanged: 26 to 24 buys 13%, 26 to 32 buys a factor
 of 2.9.
 
+## Six proposed levers, dispositioned without spending an allocation
+
+Asked for levers this campaign had not considered, six came back. Four are now
+closed on free evidence, one needs hardware, one is a decision rather than an
+optimisation.
+
+| # | lever | disposition |
+|---|---|---|
+| 1 | Pad the derived operator widths on the icosahedral lane, on the grounds that the level-count anomaly is a compiler-shape effect | **REFUTED.** The compiled step is structurally identical at cheap and expensive level counts — same instruction count within 1%, same 108 fusions, same opcode histogram. The shapes do not change the program, so padding them has no shape argument behind it. |
+| 2 | Coalesce the icosahedral halo's thirteen per-round scatters into one | **NEEDS HARDWARE.** Semantically available — receive positions are disjoint by construction — and it attacks a measured 0.310 ms. But the free screen does not work here: the per-round scatters are not distinct operations in any module a virtual-device dump produces. |
+| 3 | A one-evaluation multistep integrator, cutting the icosahedral halo depth from nine rings to three | **NOT AN OPTIMISATION.** Large upside, but it changes the numerics and the stability properties; that is a decision about the model, not a lever to pull. |
+| 4 | Fuse the vertical column pipeline to avoid materialised intermediates | **REFUTED.** All eighteen reverse operations around the vertical cumulative sums are already inside fused computations; none is materialised at top level. There are no full-size intermediates to remove. |
+| 5 | Wire the anchored mass correction into the sharded path so the step reduces one field instead of two | 0.02 to 0.10 ms — below the refute bar of any A/B worth an allocation. |
+| 6 | The scan-folded Runge-Kutta schedule | Folding three stages into a loop compiles fewer distinct kernels but launches the same number, so it cannot move a per-kernel floor. |
+
 ## Decisions that are yours, not taken
 
 | # | decision | evidence |
