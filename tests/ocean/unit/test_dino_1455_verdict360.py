@@ -406,3 +406,16 @@ def test_launch_sha_is_recorded_and_reused(V, tmp_path):
     (tmp_path / ".launch_sha").write_text("deadbeef\n")
     assert V.launch_sha(d) == "deadbeef"
     assert first != "deadbeef"
+
+
+def test_the_q_flag_print_path_is_exercised(V, capsys):
+    """No test drove separation_control with a NON-EMPTY thin set, so the
+    branch that tells a reader a number is dtype-limited had never printed."""
+    rows = _synth(V)
+    thin = V.separation_control(rows, _quantum(V, tiny=False))   # huge quantum
+    out = capsys.readouterr().out
+    assert all(thin[d] == set(V.KEYS) for d in V.HORIZONS)
+    assert "under 10x the float32 storage quantum" in out
+    V.verdict_table(rows, thin, set())
+    body = capsys.readouterr().out.split("--- day 360 ---")[1].split("  verdict:")[0]
+    assert "q" in body

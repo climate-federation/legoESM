@@ -885,11 +885,14 @@ def spread_curves(rows, quantum):
           "compared across.")
     print("    legoESM states are stored float32, NEMO states are read "
           "float64 -- the quantum column is")
-    print("    the metric's own float32 round-trip, and a spread below ~10x it "
-          "is dtype, not physics.")
+    print(f"    the metric's own float32 round-trip MEASURED AT DAY {N_DAYS} "
+          f"-- ONE number labelling all")
+    print("    columns, shown for scale only; the per-horizon quantum used by "
+          "the `q` flag is measured at")
+    print("    each scored horizon separately.")
     for side in ("lego", "nemo"):
         print(f"\n  {side}")
-        print(f"    {'metric':<38}{'fp32 quantum':>14}"
+        print(f"    {'metric':<38}{'quantum@' + str(N_DAYS):>14}"
               + "".join(f"{'d' + str(d):>12}" for d in CURVE_DAYS))
         for k in KEYS:
             for stat in (1, 0):
@@ -948,7 +951,6 @@ def empirical_rule_controls(rows):
         other = "nemo" if side == "lego" else "lego"
         for a, b in itertools.combinations(range(N_MEM), 2):
             rest = [m for m in range(N_MEM) if m not in (a, b)]
-            gap = rows[side][a][N_DAYS][ "acc"] - rows[side][b][N_DAYS]["acc"]
             for k in KEYS:
                 gap = rows[side][a][N_DAYS][k] - rows[side][b][N_DAYS][k]
                 s_rest = F.spread([rows[side][m][N_DAYS][k] for m in rest])[1]
@@ -1164,9 +1166,20 @@ def main(argv=None):
     unsat = saturation_table(rows)
     growth_control(rows, args.dir)
     spread_curves(rows, quantum_by_day[N_DAYS])
-    empirical_rule_controls(rows)
+    frac, neg_ok = empirical_rule_controls(rows)
     verdict_table(rows, thin, unsat)
     window_table(rows, unsat)
+    # Re-printed AFTER the tables: a calibration number quoted 200 lines above
+    # the verdicts it calibrates does not travel with them (round-3 review).
+    print(f"\nCALIBRATION OF THE RULE THAT PRODUCED THE TABLES ABOVE: "
+          f"{100 * frac:.1f}% of the 12 within-side member pairs x "
+          f"{len(KEYS)} metrics land inside the band")
+    print(f"  (expected ~92% by chance at n=4; read ~88% as noise and ~60% as "
+          f"a finding -- the comparisons are correlated, so the spread is "
+          f"wider than binomial),")
+    print(f"  and the 30-day self-mismatch negative control is "
+          f"{'all `no` as required' if neg_ok else 'NOT all `no` -- the floor '
+          'may be too wide to fail'}.")
     print("\nEvery number above is a measurement; the pre-registration "
           "(PREREG_verdict360.md) says which ones were predicted, and the "
           "result commit carries its corrections.")
