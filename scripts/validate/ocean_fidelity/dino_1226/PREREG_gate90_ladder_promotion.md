@@ -149,7 +149,15 @@ dtype.  The two arms re-measured at fp64 both moved:
 | `both` channel band | +0.099 | **+0.2874** |
 
 RETRACTED: "the NEMO/NEMO channel-band gap is +0.099 Sv, i.e. AT the 0.091 Sv
-floor."  At fp64 it is +0.2874 Sv, **3.2x that floor** -- a real, resolvable
+floor."  At fp64 it is +0.2874 Sv. **That is NOT 3.2x a floor** -- an earlier
+version of this line said so, and review corrected it. The 0.091 Sv floor
+was measured on the FULL-SECTION transport (1-D ladder weighting,
+longitude median); the channel band is a different metric (channel only,
+partial-cell thicknesses, longitude mean) and has no measured floor. A
+perturbation that moves channel transport and compensates in the closed
+basin leaves the full-section number at zero while moving this one, so the
+full-section floor bounds nothing here. Read +0.2874 as an unbounded
+residual until a channel-band floor is measured on the same metric -- a real, resolvable
 residual, not noise.  The 90% cut against the shipped ladder survives; the
 "at floor" claim does not, and neither does any statement resting on it.
 

@@ -88,6 +88,9 @@ from legoesm.ocean.experiments.dino import (
 from legoesm.core.field import Field
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
+)
+from legoesm.ocean.fidelity.nemo_state_bridge import (
+    effective_vertical_scale_factors,
     read_nemo_restart,
     read_nemo_restart_before,
     read_nemo_restart_en,
@@ -611,6 +614,26 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # environment, so two ladders can be built in one process without either
     # inheriting the other's setting.
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
+    # WHAT WAS BUILT, not what was asked for. The builder falls back to the
+    # 1-D ladder when the mesh carries no ``e3t_0``, and keeps the 1-D
+    # T-depths when it carries no ``gdept_0`` -- silently, in both cases. So a
+    # run on a mesh missing either one stamps "both" and its score is
+    # attributed to a grid it never stood on. Same defect the seasonal clock
+    # had: the artifact recorded the request. Found in review.
+    _mesh_for_stamp = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
+    _, _, _ladder_built = effective_vertical_scale_factors(
+        _mesh_for_stamp, _mesh_for_stamp.tmask, mode=ladder_mode)
+    _ladder_has_depths = getattr(_mesh_for_stamp, "gdept_0", None) is not None
+    ladder_effective = (
+        "off" if _ladder_built == "e3t_1d"
+        else ("both" if _ladder_has_depths else "e3t"))
+    if ladder_effective != ladder_mode:
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! LADDER FALLBACK: asked for {ladder_mode!r}, the mesh could "
+              f"only build {ladder_effective!r}.", flush=True)
+        print("!! The artifact records what was BUILT; a score from this run "
+              "belongs to that grid.", flush=True)
+        print("!" * 78 + "\n", flush=True)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
@@ -749,7 +772,11 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # of inferring it from a filename. This is the value resolve_ladder_mode
         # RETURNED at the top of this function, not a re-read of the environment
         # -- provenance must not come from mutable process state.
-        nemo_ladder_mode=np.str_(ladder_mode),
+        # The mode the bridge could ACTUALLY build, and the one that was
+        # requested. They differ whenever the mesh lacks a ladder, and the
+        # first is the one a score belongs to.
+        nemo_ladder_mode=np.str_(ladder_effective),
+        nemo_ladder_mode_requested=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
     )

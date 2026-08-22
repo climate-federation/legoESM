@@ -250,7 +250,16 @@ CAVEATS, both real:
     +0.2874.  The ranking, the signs, and the shipped-to-NEMO-ladder channel-band
     cut (+2.9319 -> +0.2874, 90%) all survive; the reading that the "both"
     channel band sits AT the 0.091 Sv floor does not -- at fp64 it is 3.2x that
-    floor.  The two half-ladder arms have NOT been re-run, so anything resting
+    floor.  THAT MULTIPLE IS NOT A RESULT, and the sentence is left here with
+    its correction rather than deleted: the 0.091 Sv floor was measured on the
+    FULL-SECTION transport, weighted by the 1-D ladder and reduced by a
+    longitude MEDIAN.  The channel band is a different metric -- channel only,
+    partial-cell thicknesses, longitude MEAN -- and no floor has been measured
+    for it.  A perturbation that moves channel transport and compensates in the
+    closed basin leaves the full-section number at zero while moving the
+    channel one, so the full-section floor bounds nothing here.  Read +0.2874
+    as an unbounded residual until a channel-band floor is measured on the same
+    metric.  Found in review.  The two half-ladder arms have NOT been re-run, so anything resting
     on them -- including which half fixes which transport component -- is still
     an fp32 result.
   * nemo_state_bridge carries a comment stating legoESM is unstable on NEMO's
@@ -365,8 +374,33 @@ def phase0() -> int:
     print(f"PHASE 0  certified-16r : {tiles}")
 
     one = nc.Dataset(one_path)
-    names = [k for k, v in one.variables.items()
-             if v.ndim >= 3 and "x" in v.dimensions and "y" in v.dimensions]
+
+    def _spatial(ds):
+        return {k for k, v in ds.variables.items()
+                if v.ndim >= 3 and "x" in v.dimensions and "y" in v.dimensions}
+
+    # ENUMERATE BOTH SIDES. Taking the variable list from the single-rank file
+    # alone means a variable present only in the certified tiles is never
+    # asked for, never rebuilt, and never reported -- the check would print
+    # PASS with zero missing and zero differing while the two restarts carry
+    # different state. Found in review; the phase claims absence on EITHER
+    # side is a failure, so it has to look at either side.
+    import glob as _glob
+    _tile_files = sorted(_glob.glob(tiles))
+    if not _tile_files:
+        print(f"PHASE 0  FAIL: no tiles matched {tiles}")
+        return 1
+    with nc.Dataset(_tile_files[0]) as _t0:
+        tile_names = _spatial(_t0)
+    one_names = _spatial(one)
+    only_in_tiles = sorted(tile_names - one_names)
+    only_in_one = sorted(one_names - tile_names)
+    if only_in_tiles or only_in_one:
+        print(f"PHASE 0  FAIL: the two restarts do not carry the same spatial "
+              f"variables. Only in the certified tiles: {only_in_tiles}. "
+              f"Only in the single-rank file: {only_in_one}.")
+        return 1
+    names = sorted(one_names)
     stitched = rebuild(tiles, names)
 
     missing = [k for k in names if k not in stitched]
