@@ -171,6 +171,16 @@ for ND in $DEVS; do
   run_arm "$ND" 0 "full_${ND}_b"
   run_arm "$ND" 1 "nc_${ND}_b"
   run_arm "$ND" wire "wire_${ND}_b"
+  # BALLAST_LEVELS gives the payload CURVE rather than a chord. Two points
+  # cannot tell a convex response from a message crossing a protocol
+  # threshold, and those predict opposite things about REDUCING the payload,
+  # which is the direction any byte-cutting lever needs.
+  for BL in ${BALLAST_LEVELS:-}; do
+    run_arm "$ND" 0 "b${BL}_${ND}_a" "$BL"
+    run_arm "$ND" 1 "b${BL}nc_${ND}_a" "$BL"
+    run_arm "$ND" 0 "b${BL}_${ND}_b" "$BL"
+    run_arm "$ND" 1 "b${BL}nc_${ND}_b" "$BL"
+  done
   if [ "$BALLAST_ARMS" = "1" ]; then
     run_arm "$ND" 0 "b2_${ND}_a" 2
     run_arm "$ND" 0 "b2_${ND}_b" 2

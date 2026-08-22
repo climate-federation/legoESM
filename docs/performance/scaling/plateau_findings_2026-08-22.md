@@ -48,19 +48,32 @@ Two consequences:
   (refuted, job 27134078), and the same dump shows the tiled step compiling
   4895 instructions against the band step's 4118.
 
-**CONFIRMED at 128 GPUs** (job 27138082, same split, 32 channels): doubling the
-payload costs 1.778 ms, of which 0.022 is packing, so the extra bytes cost
-1.756 ms — **more than the entire 1.551 ms communication term**. There is no
-measurable per-operation cost left at all; the residual is -0.205 ms, which is
-not a negative cost but the signature of a payload response that is
-SUPER-LINEAR.
+At 128 GPUs (job 27138082, same split, 32 channels) doubling the payload costs
+1.778 ms, of which 0.022 is packing, so the extra bytes cost 1.756 ms —
+**more than the entire 1.551 ms communication term**, leaving a per-operation
+residual of -0.205 ms.
 
-That is the mechanism, measured rather than argued. The marginal cost of a
-byte RISES with device count: a second copy of the payload costs 0.94x the
-whole communication term at 64 GPUs and 1.13x at 128. Constant bytes per
-device, rising cost per byte — the fabric is contended, and every additional
-rank makes it worse. It also means the message-count lever is not merely small
-at 128, it is unmeasurable.
+RETRACTED, same day, on review: I read that as "contention confirmed". It is
+not confirmed. A marginal cost above the average is formally impossible for a
+cost linear in bytes, so the linear split stops describing the data at 128 —
+but TWO things produce that, and two points cannot separate them:
+
+* a convex response, a shared resource saturating; or
+* a DISCONTINUITY, the doubled message crossing a protocol or algorithm
+  threshold in the collective library.
+
+They predict opposite things about halving the payload — convexity says less
+than half the doubling delta, a crossed threshold says possibly more — so the
+extrapolation this was about to justify is not supported. What is needed is a
+CURVE, at least four payload multiples at each device count, not a chord.
+
+Against contention there is also an arithmetic check worth recording: the
+halo moves roughly 11 MB per device per step, so the extra copy's 1.756 ms is
+about 6 GB/s of marginal bandwidth — a quarter of one HDR200 port. If bytes
+were the binding resource that figure would be near line rate. It is not.
+
+What DOES survive: the per-operation term is unmeasurable at 128, so
+message-count levers are closed there regardless of which explanation wins.
 
 ### Local work: granularity, not layout
 
@@ -144,10 +157,19 @@ communication were free, and no amount of communication work can go below it.
 
 | lane | step | of which local | communication | perfect scaling of 1 GPU | distance |
 |---|---|---|---|---|---|
-| lat-lon 2048x4096x26 | 3.64 ms | 2.30 | 1.34 (37%) | 1.57 ms | **2.3x** |
-| icosahedral L9 x 26 | 4.99 | 2.33 | 2.66 (53%) | 1.36 ms | **3.7x** |
+| lat-lon 2048x4096x26 | 3.909 ms | 2.287 | 1.551 (40%) | 1.574 ms | **2.5x** |
+| icosahedral L9 x 26 | 5.000 | 2.330 | 2.670 (53%) | 1.359 | **3.7x** |
 
-Perfect communication alone is worth 1.6x on the lat-lon lane and 2.1x on the
+CORRECTED on review: the lat-lon row previously mixed arms, quoting a step
+time measured with the level-leading halo ON beside a communication term
+measured with it OFF, and the three columns did not add up. Every lat-lon
+figure above now comes from ONE job (27138082, 32 channels, level-leading
+off), where step minus local minus communication leaves 0.071 ms of
+trajectory difference between the arms. The level-leading switch is worth a
+further 4.0% and is NOT folded in, because it was measured at a different
+channel count.
+
+Perfect communication alone is worth 1.7x on the lat-lon lane and 2.1x on the
 icosahedral one. Both local floors are also above perfect scaling — 1.46x and
 1.71x respectively — so neither lane is granularity-free either.
 
@@ -159,12 +181,45 @@ two figures quoted are the warm-up and the first arm; they agree to 0.01%.
 
 What would close each gap, ranked by what the measurements support:
 
-1. **Fewer halo bytes on the lat-lon lane.** Communication there is 94%
-   payload, and a latitude band ships two rows of the entire longitude circle
-   per field however many devices there are. A two-dimensional tile ships a
-   perimeter, roughly six times fewer cells at 128 devices. Blocked on
-   understanding why tiling lost 22% at 64 GPUs, which is not layout and not
-   yet explained.
+1. **Fewer halo bytes on the lat-lon lane** — but measure the payload CURVE
+   first. Communication there is dominated by payload, and a latitude band
+   ships two rows of the entire longitude circle per field however many
+   devices there are. A two-dimensional tile ships a perimeter, roughly six
+   times fewer cells at 128 devices. Blocked on two things: why tiling lost
+   22% at 64 GPUs, which is not layout and not yet explained; and whether
+   halving the payload saves anything like half, which the doubling
+   measurement cannot answer.
+
+   A REDUCED-PRECISION HALO IS NOT THAT LEVER, on two independent grounds,
+   and my pricing of it was wrong twice over:
+
+   * Arithmetic. Doubling the payload ADDS one payload; halving it REMOVES
+     half of one. Even under a linear cost the downward saving is half the
+     upward delta — at most 0.72 ms at 64 GPUs and 0.88 at 128, before the
+     cast costs anything — and a convex response makes it smaller. I had been
+     quoting the doubling delta as if it were the halving saving.
+   * Numerics. The exchanged stack carries the logarithm of surface pressure,
+     and bfloat16's spacing near ln(100000) is 0.0625. That is enormous for a
+     quantity the step then DIFFERENCES across the band cut, and it breaks the
+     deliberately matched cancellation between the geopotential gradient and
+     the pressure-gradient term, leaving a force at every cut. Sixteen-bit
+     floats are worse still: surface pressure overflows their range outright.
+     If a reduced-precision halo is ever measured, the rounding must also
+     happen at the SOURCE, with the owner using the same rounded value in its
+     own interface flux — a cast on receipt leaves the two sides of every
+     internal boundary computing different fluxes from different copies of one
+     row, which breaks flux-form conservation in a way a short test passes.
+
+   **The exact byte reduction that IS open: the step sends the same
+   temperature rows twice.** The packed epoch carries temperature once as a
+   two-row fold pad and again as a one-row wall pad, and the code says so —
+   the duplication buys uniform per-field unpacking. The wall pad's rows are a
+   SUBSET of the fold pad's, so the second copy can be sliced out of the first
+   rather than sent. That is roughly a sixth of the epoch's payload, removed
+   losslessly, and unlike every earlier packing idea it is a COPY rather than
+   a re-derivation, so the one-unit-in-the-last-place mismatch that blocked
+   the exchange-merging work does not apply. Codex found it; nobody has
+   built it.
 2. **Whatever makes icosahedral communication grow 1.83x when devices
    double.** It is not payload — halo bytes per device fall as the partition
    shrinks — and the round count is fixed at 11-14 by the edge colouring. The
