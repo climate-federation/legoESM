@@ -278,6 +278,7 @@ def test_load_arm_rejects_an_unstable_arm_and_a_nan_arm(tmp_path):
     good = dict(acc_dep_daily=np.zeros(3), acc_gate_daily=np.zeros(3),
                 perturb_baro_scale=np.float64(1.0),
                 perturb_baro_key=np.str_("dU_avg"),
+                injected_sv=np.float64(5.5555e-03),
                 stable=np.array(True), blew_up_at_step=-1)
     p = tmp_path / "ok.npz"
     np.savez(p, **good)
@@ -297,6 +298,29 @@ def test_load_arm_rejects_an_unstable_arm_and_a_nan_arm(tmp_path):
     p4 = tmp_path / "missing.npz"; np.savez(p4, **missing)
     with pytest.raises(SystemExit):
         M.load_arm(str(p4))
+
+    # an arm predating the MEASURED normaliser must be refused, not scored
+    # against a hand-typed default -- the 2.75x silent-error path.
+    unstamped = {k: v for k, v in good.items() if k != "injected_sv"}
+    p5 = tmp_path / "unstamped.npz"; np.savez(p5, **unstamped)
+    with pytest.raises(SystemExit):
+        M.load_arm(str(p5))
+
+
+def test_retention_uses_the_arms_own_measured_normaliser(tmp_path):
+    """The in-loop pattern must be divided by ITS transport, not the total's.
+
+    With the removed CLI default this test's arm would have been normalised by
+    5.5555e-03 instead of its own 2.0198e-03 -- every R wrong by 2.75x, no
+    guard firing.
+    """
+    ctrl = {"path": "c", "acc": np.full(3, 60.0), "gate": np.full(3, 60.0),
+            "scale": 0.0, "key": "dU_sub", "injected_sv": 0.0}
+    arm = {"path": "a", "acc": 60.0 + np.array([1.0, 0.5, 0.0]) * 2.0198e-03,
+           "gate": np.full(3, 60.0), "scale": 1.0, "key": "dU_sub",
+           "injected_sv": 2.0198e-03}
+    r = M.retention(arm, ctrl)
+    assert r["R"] == pytest.approx([1.0, 0.5, 0.0], abs=1e-12)
 
 
 def test_module_actually_uses_its_own_linearity_function():

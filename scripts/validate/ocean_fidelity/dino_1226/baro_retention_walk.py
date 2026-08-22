@@ -147,16 +147,32 @@ def load_arm(path: str) -> dict:
         raise SystemExit(f"FATAL: arm {path} is not stable")
     if not (np.isfinite(acc).all() and np.isfinite(gate).all()):
         raise SystemExit(f"FATAL: non-finite transport in {path}")
+    # The MEASURED injected transport, stamped by the twin.  Older artifacts
+    # predate the stamp; they are refused rather than silently normalised by a
+    # hand-typed default, which is the defect this replaced.
+    if "injected_sv" not in d.files:
+        raise SystemExit(
+            f"FATAL: {path} carries no injected_sv stamp.  It predates the "
+            "measured normaliser, and every retention factor divides by that "
+            "number -- re-run the arm rather than supplying it by hand.")
     return {"path": path, "acc": acc, "gate": gate,
             "scale": float(d["perturb_baro_scale"]),
-            "key": str(d["perturb_baro_key"])}
+            "key": str(d["perturb_baro_key"]),
+            "injected_sv": float(d["injected_sv"])}
 
 
-def retention(arm: dict, ctrl: dict, injected_sv: float) -> dict:
-    """R(t) for one arm, with its readability mask."""
+def retention(arm: dict, ctrl: dict, injected_sv: float | None = None) -> dict:
+    """R(t) for one arm, with its readability mask.
+
+    The normaliser is the arm's OWN measured injected transport.  It used to be
+    a CLI float defaulting to the total deposit, which would have divided an
+    in-loop-pattern response by a number 2.75x too big without any guard
+    firing.  ``injected_sv`` remains only as an override for synthetic tests.
+    """
     resp = arm["acc"] - ctrl["acc"]
     resp_gate = arm["gate"] - ctrl["gate"]
-    inj = injected_sv * arm["scale"]
+    inj = (arm["injected_sv"] if injected_sv is None
+           else injected_sv * arm["scale"])
     if inj == 0.0:
         raise SystemExit("FATAL: retention of an arm with zero injection")
     return {"resp": resp, "resp_gate": resp_gate, "inj": inj,
@@ -318,9 +334,6 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dir", default="/tmp/dino_1455_ret",
                     help="directory holding the arm npz files")
-    ap.add_argument("--injected", type=float, default=5.5555e-03,
-                    help="the day-180 total deposit [Sv], the transport the "
-                         "scale=1 arm injects at t=0+")
     ap.add_argument("--key", default="dU_avg",
                     help="which injected pattern to score (dU_avg = total "
                          "deposit, dU_sub = in-loop share)")
@@ -354,10 +367,12 @@ def main(argv=None) -> int:
                 f"FATAL: {nm} injected {a['key']!r}, this scoring is for "
                 f"{args.key!r} -- refusing to mix two patterns into one curve")
         arms[nm] = a
-        rets[nm] = retention(a, ctrl, args.injected)
+        rets[nm] = retention(a, ctrl)
+        print(f"  {nm:>10s}: scale {a['scale']:+8.2f}  pattern {a['key']:8s}  "
+              f"MEASURED injected transport {a['injected_sv']:+.6e} Sv")
 
-    print(f"\n=== R(t), injected pattern {args.key!r}, "
-          f"scale-1 transport {args.injected:+.4e} Sv ===")
+    print(f"\n=== R(t), injected pattern {args.key!r} "
+          f"(normaliser is each arm's OWN measured injected transport) ===")
     names = list(rets)
     print("  day | " + " | ".join(f"{n:>10s}" for n in names)
           + " |   floors(1x)")
@@ -468,7 +483,8 @@ def main(argv=None) -> int:
              coherent_days=np.asarray([i + 1 for i in coherent], dtype=np.int32),
              summary_json=np.array(json.dumps({
                  "provenance": provenance("baro_retention_walk"),
-                 "injected_sv": args.injected, "key": args.key,
+                 "injected_sv": {n: arms[n]["injected_sv"] for n in names},
+                 "key": args.key,
                  "floor_sv": FLOOR_SV,
                  "R_day1": float(Rref[0]), "R_day2": float(Rref[1]),
                  "linearity": {k: {kk: vv for kk, vv in v.items()
