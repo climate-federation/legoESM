@@ -48,10 +48,19 @@ Two consequences:
   (refuted, job 27134078), and the same dump shows the tiled step compiling
   4895 instructions against the band step's 4118.
 
-PLAUSIBLE mechanism for the growth from 0.87 ms at 64 GPUs to 1.58 at 128
-while payload, message count and fabric latency are all flat: per-rank
-bandwidth falls as more ranks share the fabric. The discriminator is the same
-payload split at 128 GPUs, queued.
+**CONFIRMED at 128 GPUs** (job 27138082, same split, 32 channels): doubling the
+payload costs 1.778 ms, of which 0.022 is packing, so the extra bytes cost
+1.756 ms — **more than the entire 1.551 ms communication term**. There is no
+measurable per-operation cost left at all; the residual is -0.205 ms, which is
+not a negative cost but the signature of a payload response that is
+SUPER-LINEAR.
+
+That is the mechanism, measured rather than argued. The marginal cost of a
+byte RISES with device count: a second copy of the payload costs 0.94x the
+whole communication term at 64 GPUs and 1.13x at 128. Constant bytes per
+device, rising cost per byte — the fabric is contended, and every additional
+rank makes it worse. It also means the message-count lever is not merely small
+at 128, it is unmeasurable.
 
 ### Local work: granularity, not layout
 
@@ -133,19 +142,20 @@ known for that lane, against a floor taken from the SAME runs rather than
 from a model: the halo-off arm is the time the step would take if
 communication were free, and no amount of communication work can go below it.
 
-| lane | step | of which local | communication | available if communication were free |
-|---|---|---|---|---|
-| lat-lon 2048x4096x26 | 3.64 ms | 2.30 | 1.34 (37%) | **1.6x** |
-| icosahedral L9 x 26 | 4.99 | 2.33 | 2.66 (53%) | **2.1x** |
+| lane | step | of which local | communication | perfect scaling of 1 GPU | distance |
+|---|---|---|---|---|---|
+| lat-lon 2048x4096x26 | 3.64 ms | 2.30 | 1.34 (37%) | 1.57 ms | **2.3x** |
+| icosahedral L9 x 26 | 4.99 | 2.33 | 2.66 (53%) | 1.36 ms | **3.7x** |
 
-The lat-lon local floor is itself 1.46x above what perfect scaling of the
-single-GPU step would cost (1.57 ms), so the total distance to a true limit on
-that lane is about 2.3x, split roughly evenly between communication and
-per-kernel granularity.
+Perfect communication alone is worth 1.6x on the lat-lon lane and 2.1x on the
+icosahedral one. Both local floors are also above perfect scaling — 1.46x and
+1.71x respectively — so neither lane is granularity-free either.
 
-The icosahedral lane has no matched single-GPU measurement under this
-configuration, so its local floor is quoted as measured and not compared to
-perfect scaling. Getting one is cheap and is the obvious gap.
+The icosahedral denominator is a fresh single-GPU measurement under today's
+flags rather than a borrowed one: 173.91 ms at subdivision 9 with 26 levels,
+job 27141740, with the discarded warm-up arm reading 173.89 for the same
+configuration. The job timed out before its second labelled repetition, so the
+two figures quoted are the warm-up and the first arm; they agree to 0.01%.
 
 What would close each gap, ranked by what the measurements support:
 

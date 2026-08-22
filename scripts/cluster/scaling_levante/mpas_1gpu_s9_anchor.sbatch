@@ -23,7 +23,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --exclusive
 #SBATCH --mem=0
-#SBATCH --time=00:45:00
+#SBATCH --time=01:30:00
 #SBATCH --exclude=l50003,l50139,l50027,l50009,l50100
 #SBATCH --output=mpas_s9_1gpu.%j.log
 set -uo pipefail
