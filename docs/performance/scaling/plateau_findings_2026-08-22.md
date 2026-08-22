@@ -257,6 +257,35 @@ What would close each gap, ranked by what the measurements support:
    — pinning the carry's device layout — has not been shown to work; the probe
    built to test it was void.
 
+## The icosahedral lane, split three ways (job 27147213, 64 GPUs)
+
+| term | ms | share |
+|---|---|---|
+| local compute | 3.470 | 60% |
+| device-side halo staging | 0.310 | 5% |
+| communication | 1.980 | 34% |
+| step | 5.760 | |
+
+A four-point payload curve on the same job — 5.760, 7.075, 9.550 ms at one,
+two and four times the payload — is LINEAR (2.88 against 3.00 for a pure
+bandwidth term). Communication splits **66% payload, 34% fixed**. The lat-lon
+lane's fixed term was zero, so **the two lanes need different levers**: cutting
+exchanges pays here and pays nothing there.
+
+The obvious byte lever here is REFUTED. The coloured rounds pad every message
+to the widest pair in the round, shipping about twice the true halo, and an
+exact-size path already exists. An older receipt measured it at -6.4%. Re-run
+with the channel count set to sixteen (job 27148079, 65 steps, palindrome, two
+repetitions): wide 5.210 and 5.200 ms, exact-size 5.300 and 5.270 — **+1.54%,
+slower**. Sixteen channels already makes bytes cheap enough that the
+exact-size collective cannot earn back its per-operation cost. The older
+figure was measured at the default channel count against a 6.70 ms baseline
+and does not survive the change.
+
+That is the second pair of levers today that does not stack — the first being
+the two lat-lon halo switches, which stacked at reduced value. A lever's size
+is a property of the configuration it was measured in.
+
 ## Decisions that are yours, not taken
 
 | # | decision | evidence |

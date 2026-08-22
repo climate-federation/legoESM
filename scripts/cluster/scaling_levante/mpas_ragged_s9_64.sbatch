@@ -37,21 +37,43 @@ mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"
 rc=0
 
+# Device count from the allocation, and the collective channel count pinned:
+# sixteen channels is worth 9-10% on this lane at 64 and 128 GPUs, so an arm
+# run at whatever NCCL happens to choose is not comparable to one that is.
+NODES="${SLURM_JOB_NUM_NODES:-16}"; GPN=4; NDEV=$((NODES * GPN))
+CHANNELS="${CHANNELS:-16}"
+# Twelve steps gave 7.7% spread on IDENTICAL arms in this campaign; sixty
+# gave 0.3%. The old arm count here predates that lesson.
+STEPS="${STEPS:-65}"
+echo "ragged A/B at ${NDEV} GPUs, ${CHANNELS} channels, ${STEPS} steps"
+
 run_arm () {  # ragged tag
   local RG=$1 TAG=$2
-  echo "=== s9@64 ragged=$RG [$TAG] ==="
+  echo "=== s9@${NDEV} ragged=$RG channels=$CHANNELS [$TAG] $(date +%T) ==="
+  printf 'RAGGED=%s CHANNELS=%s\n' "$RG" "$CHANNELS" > "$OUTDIR/${TAG}.env"
+  LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_HALO_BALLAST=1 \
+  LEGOESM_MPAS_HALO_NOCOMM=0 LEGOESM_MPAS_HALO_NOSTAGE=0 \
   LEGOESM_MPAS_RAGGED_HALO=$RG JAX_ENABLE_X64=0 \
-    srun --nodes=16 --ntasks=64 --ntasks-per-node=4 --gpus-per-node=4 \
+  NCCL_MIN_NCHANNELS=$CHANNELS NCCL_MAX_NCHANNELS=$CHANNELS \
+  NCCL_P2P_NET_CHUNKSIZE=131072 \
+    timeout --kill-after=30 1500 srun --export=ALL --nodes="$NODES" \
+      --ntasks="$NDEV" --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-      --multicontroller --n-devices 64 --subdivision 9 --nlev 26 \
-      --steps 12 --warmup 3 --lloyd 0 --partition-method sfc \
-      --reorder-for 64 \
+      --multicontroller --n-devices "$NDEV" --subdivision 9 --nlev 26 \
+      --steps "$STEPS" --warmup 5 --lloyd 0 --partition-method sfc \
+      --reorder-for "$NDEV" \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "${TAG} FAILED"; rc=1; }
+  sleep 15
 }
+# Palindrome, two repetitions each: a plain off/on/off gives the two settings
+# different mean time-positions, so a drift on the allocation lands on one of
+# them rather than on both.
+run_arm 0 warmup_discard
 run_arm 0 off_a
+run_arm 1 on_a
 run_arm 1 on_b
-run_arm 0 off_a2
+run_arm 0 off_b
 
 echo "=== RECEIPTS ==="
 set +e
