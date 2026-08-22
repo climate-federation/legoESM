@@ -53,8 +53,8 @@ export LEGOESM_JIT_CACHE_DIR=""   # a cached compile does not re-dump
 # Single process, two local devices: the multi-controller launcher needs a
 # coordination service that does not come up on this partition, and it is not
 # needed to make a compiled module.
-run_dump () {  # n_lat n_lon tag [level_leading]
-  local NLAT=$1 NLON=$2 TAG=$3 LL=${4:-0}
+run_dump () {  # n_lat n_lon tag [level_leading] [p_lon]
+  local NLAT=$1 NLON=$2 TAG=$3 LL=${4:-0} PLON=${5:-1}
   mkdir -p "$OUTDIR/hlo_$TAG"
   echo "=== dump at ${NLAT}x${NLON}, 2 devices (${TAG}) ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
@@ -65,7 +65,7 @@ run_dump () {  # n_lat n_lon tag [level_leading]
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
       --n-devices 2 --mode strong \
-      --n-lat "$NLAT" --n-lon "$NLON" --nlev 26 \
+      --n-lat "$NLAT" --n-lon "$NLON" --nlev 26 --p-lon "$PLON" \
       --steps 3 --warmup 1 --out "$OUTDIR/probe_$TAG.jsonl" \
       || { echo "DUMP $TAG FAILED"; return 1; }
   "$PY" scripts/bench/census_layout_transposes.py --dump-dir "$OUTDIR/hlo_$TAG" \
@@ -80,5 +80,13 @@ run_dump 256 256 lat256 || rc=1
 # which is why the flag is off by default and why this arm is a dump and
 # not a timing: the count of non-free transposes is the answer.
 run_dump 128 256 lat128_ll 1 || rc=1
+# THE TWO-DIMENSIONAL PATH, which lost 6.01 against 4.92 ms at 64 GPUs in
+# an earlier arm for a reason that was never established, despite moving
+# fewer halo bytes than latitude bands. It packs BOTH latitude and longitude
+# edges, so if the band packer's reshape cost twenty-six conversions a step,
+# the tile packer plausibly costs more — and that would be the missing
+# explanation rather than anything about the decomposition itself.
+run_dump 128 256 tile2d 0 2 || rc=1
+run_dump 128 256 tile2d_ll 1 2 || rc=1
 if [ "$rc" -ne 0 ]; then echo "a dump failed; no verdict"; exit 1; fi
 echo DONE

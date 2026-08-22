@@ -96,6 +96,30 @@ MPAS_PARITY_MAX_STEPS = 8
 MASS_RTOL_DEFAULTS = {"float64": 1.0e-11, "float32": 1.0e-5}
 
 
+
+def _peak_bytes_in_use():
+    """Peak bytes this process has had live on its first local device.
+
+    ``Device.memory_stats`` is a runtime method, not a Python one, and it
+    returns ``None`` on backends that do not track allocation (CPU among
+    them). Anything missing is reported as missing.
+    """
+    try:
+        device = jax.local_devices()[0]
+    except Exception:
+        return None
+    stats_fn = getattr(device, "memory_stats", None)
+    if stats_fn is None:
+        return None
+    try:
+        stats = stats_fn()
+    except Exception:
+        return None
+    if not stats:
+        return None
+    return stats.get("peak_bytes_in_use")
+
+
 def build_model_and_state(subdivision, nlev, reorder_target, run_nd, method,
                           moist=False, lloyd_iterations=50, fix_mass=True):
     """Reordered+padded global mesh, MPAS PE model, baroclinic-wave IC.
@@ -619,6 +643,11 @@ def main() -> int:
         multicontroller=bool(args.multicontroller),
         compile_ms=round(per_step_ms[0], 1),
         steady_median_ms=round(med, 2),
+        # Peak device memory, so a lever that trades memory for time is
+        # priced in the same receipt instead of argued about. Reported by
+        # the runtime rather than computed here, absent on CPU, and left
+        # null rather than guessed when the runtime does not offer it.
+        peak_bytes_in_use=_peak_bytes_in_use(),
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
