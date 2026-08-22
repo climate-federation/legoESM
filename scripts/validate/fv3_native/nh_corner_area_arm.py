@@ -217,22 +217,45 @@ def build_patched_context(metrics_run: str, ic_run: str):
 
         for pf in range(6):
             unex = np.asarray(ctx["gs6"][pf]["area"], dtype=np.float64)
+            # THE PREMISE THIS ARM WAS BUILT ON WAS FALSE, and its own
+            # control caught it (job 9466858): the port's area holds a
+            # REAL value at the corner-diagonal cell, not a sentinel --
+            # the claim came from nh_exchanged_area6's docstring and the
+            # measurement does not support it.
+            #
+            # What IS measured (job 9466872): the gridstruct's area
+            # agrees with the reference at the parity floor EVERYWHERE,
+            # while the copy this kernel is handed -- after the port's
+            # own exchange and corner fill -- is off by 4.1e+09 in the
+            # halo edge strips and 1.4e+09 in the corner wedges, on all
+            # six faces. So the write set is simply THE CELLS THAT
+            # DISAGREE, and the sentinel story is gone.
+
             # The port gridstruct marks its unfilled corner-diagonal
             # cells with a single BIG_NUMBER sentinel. Take the value
             # at [0, 0] -- guaranteed sentinel by construction of the
             # single-tile gridstruct -- and REFUSE if it does not look
             # like a sentinel, because then the mask below would be a
             # plausible-looking lie.
-            s = float(unex[0, 0])
-            interior_med = float(np.median(
-                unex[NG:NG + N, NG:NG + N]))
-            if not (s > 1.0e3 * interior_med):
+            ot = perm[pf]
+            transposed, nm, _su, _sv = meta[pf][ot]
+            ra_full = DIHEDRAL[nm](oracle_ij(ref_area[ot], transposed))
+            if ra_full.shape != unex.shape:
                 raise SystemExit(
-                    f"arm: face {pf + 1}: unexchanged area[0,0] = {s:.6e} "
-                    f"is not a sentinel against interior median "
-                    f"{interior_med:.6e}; the sentinel contract this "
-                    f"arm's mask depends on does not hold")
-            mask = unex == s
+                    f"arm: face {pf + 1}: mapped reference "
+                    f"{ra_full.shape} vs port {unex.shape}")
+            mask = area6[pf] != ra_full
+            # The INTERIOR must not be in the write set: it already
+            # agrees at the parity floor, so a mask reaching it would
+            # mean the mapping is wrong, not that the interior needs
+            # transplanting.
+            cw = (slice(NG, NG + N), slice(NG, NG + N))
+            n_int = int(mask[cw].sum())
+            if n_int:
+                raise SystemExit(
+                    f"arm: face {pf + 1}: the write set reaches {n_int} "
+                    f"COMPUTE cells, which the measurement says already "
+                    f"agree; this is the mapping, not the halo")
             cnt = int(mask.sum())
             if cnt == 0:
                 raise SystemExit(
@@ -259,14 +282,8 @@ def build_patched_context(metrics_run: str, ic_run: str):
             # scored with: oracle_ij for storage order, DIHEDRAL[nm]
             # for orientation. A dropped stage here was caught once
             # before in this campaign by exactly this reuse.
-            ot = perm[pf]
-            transposed, nm, _su, _sv = meta[pf][ot]
-            ra = DIHEDRAL[nm](oracle_ij(ref_area[ot], transposed))
+            ra = ra_full
             rr = DIHEDRAL[nm](oracle_ij(ref_rarea[ot], transposed))
-            if ra.shape != unex.shape:
-                raise SystemExit(
-                    f"arm: face {pf + 1}: mapped reference {ra.shape} "
-                    f"vs port {unex.shape}")
             if not np.all(np.isfinite(ra[mask])) or \
                     np.any(ra[mask] <= 0.0):
                 raise SystemExit(
