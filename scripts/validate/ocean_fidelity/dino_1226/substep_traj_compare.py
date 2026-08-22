@@ -944,8 +944,16 @@ def main():
                 "helper was never called -- the capture missed its target, "
                 "which is exactly the failure mode this branch has hit before")
         os.makedirs(os.path.dirname(os.path.abspath(_o)), exist_ok=True)
-        np.savez(_o, n_calls=np.int64(len(_drg_cap["u"])),
-                 u=_drg_cap["u"][0], v=_drg_cap["v"][0], h_k=_drg_cap["h_k"][0])
+        # EVERY call, not just the first.  The helper is called from several
+        # stages and only ONE of them is the barotropic loop's; saving call 0
+        # and assuming it was the right one produced a field that did not
+        # reproduce the runtime coefficient, which is how this was noticed.
+        _saved = {"n_calls": np.int64(len(_drg_cap["u"]))}
+        for _i in range(len(_drg_cap["u"])):
+            _saved[f"u{_i}"] = _drg_cap["u"][_i]
+            _saved[f"v{_i}"] = _drg_cap["v"][_i]
+            _saved[f"h_k{_i}"] = _drg_cap["h_k"][_i]
+        np.savez(_o, **_saved)
         print(f"    [drag inputs] wrote {_o}  calls={len(_drg_cap['u'])}  "
               f"u{_drg_cap['u'][0].shape}")
 
