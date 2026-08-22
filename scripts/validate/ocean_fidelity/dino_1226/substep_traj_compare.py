@@ -111,6 +111,27 @@ def main():
     import jax.numpy as jnp
     import legoesm.ocean.dynamics.barotropic_latlon_cgrid as bmod
 
+    # #1455 PHASE-2: capture the INPUTS the barotropic drag coefficient is
+    # built from.  legoESM's drag FORMULA is bit-exact with NEMO's dumped
+    # rCdU_bot when fed NEMO's own now-level velocity (verified offline: 0.0
+    # relative difference at the median, p99 AND max), so a runtime drag that
+    # differs from NEMO's differs through its INPUT, not its arithmetic.  This
+    # records which.
+    _drg_cap = {}
+    if os.environ.get("DINO_1455_DRAG_INPUTS"):
+        # The caller imports this at FUNCTION scope, so the name must be
+        # rebound on the SOURCE module, not on the caller's module object.
+        import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+        _orig_drg = _pemod.nemo_bottom_drag_rate_faces
+
+        def _drg_spy(u, v, h_k, z_coord, config, grid):
+            _drg_cap.setdefault("u", []).append(np.asarray(u))
+            _drg_cap.setdefault("v", []).append(np.asarray(v))
+            _drg_cap.setdefault("h_k", []).append(np.asarray(h_k))
+            return _orig_drg(u, v, h_k, z_coord, config, grid)
+
+        _pemod.nemo_bottom_drag_rate_faces = _drg_spy
+
     _orig_run = bmod._run_substep_loop
     import multistep_replay as mr
 
@@ -865,6 +886,19 @@ def main():
     # substitution replaces F_slow_u/v/eta and NOTHING else, so whatever survives
     # it is carried by one of these -- they are the candidate list the in-loop
     # constant has to be named from.
+    if os.environ.get("DINO_1455_DRAG_INPUTS"):
+        _o = os.environ["DINO_1455_DRAG_INPUTS"]
+        if not _drg_cap.get("u"):
+            raise SystemExit(
+                "FATAL: DINO_1455_DRAG_INPUTS was requested but the drag "
+                "helper was never called -- the capture missed its target, "
+                "which is exactly the failure mode this branch has hit before")
+        os.makedirs(os.path.dirname(os.path.abspath(_o)), exist_ok=True)
+        np.savez(_o, n_calls=np.int64(len(_drg_cap["u"])),
+                 u=_drg_cap["u"][0], v=_drg_cap["v"][0], h_k=_drg_cap["h_k"][0])
+        print(f"    [drag inputs] wrote {_o}  calls={len(_drg_cap['u'])}  "
+              f"u{_drg_cap['u'][0].shape}")
+
     _stat_out = os.environ.get("DINO_1455_STATIC_ARRAYS")
     if _stat_out:
         _stat = {}
