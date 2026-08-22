@@ -63,24 +63,40 @@ which scale 1.38x for a 4x device increase while every other class manages
 3.2-3.5x.
 
 Those transposes convert between `(level, lat, lon)` and `(lat, lon, level)`:
-the state is stored lat-leading and XLA:GPU pipelines level-leading.
-Twenty-six of the twenty-eight acted on halo edge slices of one or two
-latitude rows, whose shape does not follow the shard.
+the state is stored lat-leading and XLA:GPU pipelines level-leading. Most of
+them act on halo edge slices of one or two latitude rows, whose shape does not
+follow the shard.
 
-`LEGOESM_LATLON_HALO_LEVEL_LEADING=1` serialises those payloads level-first
-and removes 26 of the 28 (job 27132642: 28 -> 2, instructions 4267 -> 4118).
+CORRECTION (2026-08-22): the counts first published here — "28, of which 26
+are edge slices, falling to 2" — were produced by a census whose pattern did
+not allow the `ROOT ` prefix, so it silently skipped every transpose that is
+the root of its computation and reported about a third of the module as the
+whole. Recounted: the step holds **67** transposes, none free, and the switch
+removes **60 of them, leaving 7** (instructions 4267 -> 4118). The direction
+and every conclusion are unchanged and the effect is larger than reported; the
+numbers were wrong. The seven survivors are six full-shard conversions at the
+shard-map and scan boundaries — in both directions, including the staggered
+wind's `n_lon+1` extent — and one single-row leftover.
+
+`LEGOESM_LATLON_HALO_LEVEL_LEADING=1` serialises those payloads level-first.
 **Wall clock at 128 GPUs: -4.03%** (job 27133396, 3.7934 -> 3.6406 ms, arm
 spreads 0.27% and 0.43%). That is below the 5% bar written before the run, so
 by that gate it is inconclusive rather than confirmed. It is bit-identical and
 off by default.
 
 The prediction was 13-15% and the lesson is that **transpose count is not
-transpose time**: the 26 removed act on single rows, the 2 survivors act on
-the full field at the scan carry, and they plausibly carry the other ~0.55 ms.
-Those two are now the largest single named item on this lane.
+transpose time**: the sixty removed act on one- and two-row slices, the
+survivors act on the full field at the shard-map and scan boundaries, and they
+plausibly carry the other ~0.55 ms. Those six full-shard conversions are now
+the largest single named item on this lane.
 
 Not the lever, each refuted cheaply:
 
+* A layout constraint on the scan carry (job 27140236): VOID, not refuted.
+  The synthetic probe compiles to zero transposes in BOTH arms, so its control
+  does not reproduce the thing it was built to test and it can say nothing.
+  It does show the constraint is answer-preserving and costs eight extra
+  instructions. Reproduce the conflict before re-running it.
 * Compiler fusion flags (job 27134604): four of eight do not exist in this
   jaxlib, and the four that do leave the step at exactly 129 fusions. The
   kernel count is the program's shape, not a setting.

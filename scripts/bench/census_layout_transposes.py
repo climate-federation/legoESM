@@ -43,8 +43,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from census_xla_dump import find_module  # noqa: E402  (module selection rules)
 
 # `%fusion.3 = f32[16,4096,26]{2,1,0} transpose(%p), dimensions={1,0,2}`
+# The `ROOT ` prefix is NOT optional decoration: a transpose that is the root
+# of its computation -- which is what every `wrapped_transpose_computation`
+# is -- carries it, and a pattern that does not allow it silently counts a
+# fraction of the module and reports the fraction as the total.
 _TRANSPOSE = re.compile(
-    r"^\s*%?(?P<name>[\w.\-]+)\s*=\s*"
+    r"^\s*(?:ROOT\s+)?%?(?P<name>[\w.\-]+)\s*=\s*"
     r"(?P<shape>[a-z0-9]+\[[0-9,]*\])(?P<layout>\{[0-9,:TE ]*\})?\s*"
     r"transpose\((?P<operands>[^)]*)\)(?P<attrs>[^\n]*)$",
     re.MULTILINE)
@@ -85,6 +89,7 @@ ENTRY main {
   %t1 = f32[8,4,2]{2,1,0} transpose(%p), dimensions={1,0,2}
   %t2 = f32[8,4,2]{2,1,0} transpose(%p), dimensions={1,0,2}
   %t3 = f32[2,4,8]{2,1,0} transpose(%p), dimensions={2,0,1}, metadata={bitcast}
+  ROOT %t4 = f32[8,4,2]{2,1,0} transpose(%p), dimensions={1,0,2}
   %r = f32[64]{0} reshape(%t1)
   %c = f32[64]{0} copy(%r)
   ROOT %out = f32[64]{0} add(%r, %c)
@@ -95,10 +100,13 @@ ENTRY main {
 def _selftest() -> int:
     """The gate must SEE what it claims to see, and separate bitcasts."""
     c = census(_SELFTEST)
-    assert c["n_transpose"] == 3, c
+    # Four, not three: the ROOT-prefixed one counts. An earlier version of
+    # this pattern dropped it and under-reported a real module by a factor
+    # of three (2026-08-22).
+    assert c["n_transpose"] == 4, c
     assert c["n_transpose_bitcast"] == 1, c
     assert c["n_reshape"] == 1 and c["n_copy"] == 1, c
-    assert c["groups"][0]["count"] == 2, c
+    assert c["groups"][0]["count"] == 3, c
     assert c["groups"][0]["dimensions"] == "1,0,2", c
     # A module with no transposes must report zero rather than crash: a
     # census that only works on the case it was written for is not a census.
