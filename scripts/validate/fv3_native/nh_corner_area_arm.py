@@ -344,6 +344,11 @@ def main(argv=None):
     ap.add_argument("--on", action="store_true",
                     help="the opt-in; without it this script exits 0 "
                          "having done nothing at all")
+    ap.add_argument("--full-step", action="store_true",
+                    help="run the full-step NH parity gate instead of "
+                         "the height probe -- the end-to-end question: "
+                         "does the 6.6116e-04 the campaign has been "
+                         "chasing collapse when these areas are fixed?")
     ap.add_argument("--metrics-run", default=METRICS_ROOT)
     ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_nh_zerostep_gfs")
     ap.add_argument("--hdump",
@@ -380,6 +385,15 @@ def main(argv=None):
     # of the package is perturbed.
     import legoesm.core.fv3_native_duo_stepper as duo
     duo.build_six_face_duo_context = builder
+    if args.full_step:
+        # The END-TO-END question. The height probe localises; this asks
+        # whether the number the campaign has actually been chasing --
+        # 6.6116e-04 relative, 1.3003e-07 m/s of w -- moves.
+        print("\nfull-step NH parity gate, with the patched areas "
+              "(baseline: step_worst_rel 6.611558e-04):")
+        rc = fsp.main(["--nh"])
+        print(f"gate rc={rc}")
+        return 0
     probe.main(["--hdump", args.hdump, "--ic-run", args.ic_run,
                 "--dt", str(args.dt),
                 "--n-split", str(args.n_split)] + probe_rest)
