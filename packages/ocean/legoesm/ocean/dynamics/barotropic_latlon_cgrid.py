@@ -1215,6 +1215,8 @@ def barotropic_substeps_latlon_cgrid(
     eta_init=None,
     u_init=None,
     v_init=None,
+    u_now=None,
+    v_now=None,
     substep_scale: int = 1,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
@@ -1232,6 +1234,20 @@ def barotropic_substeps_latlon_cgrid(
     depth-mean REPLACEMENT (``u' = u − ū``) still uses ``state``'s NOW velocity —
     only the fast-mode integration is re-seeded.  With ``None`` the two
     depth-means coincide ⇒ byte-identical for every other caller.
+
+    ``u_now`` / ``v_now`` (default ``None``) supply the NOW-level (NEMO ``Kmm``)
+    3-D velocity used to build the barotropic bottom-drag RATE under
+    ``barotropic_drag_substep``.  NEMO evaluates ``rCdU_bot`` in ``zdf_phy``
+    (``zdfdrg.F90:174-181``, ``uu(:,:,imk,Kmm)``) which ``stpmlf.F90:190`` calls
+    BEFORE ``dyn_adv``/``dyn_vor``/``dyn_ldf``/``dyn_hpg``/``dyn_spg``, so the
+    coefficient ``dyn_drg_init`` freezes over the substep window
+    (``dynspg_ts.F90:1616``) is built from a velocity the 3-D momentum update has
+    not touched.  ``state`` reaching this solver from the production step is the
+    POST-momentum ``state_mid`` (``u* = u^n + dt·RHS`` plus the Matsuno Coriolis
+    rotation), so that caller must pass its own ``state.u/v`` here; without it
+    the rate would be built from ``u*``.  ``None`` ⇒ ``state``'s own velocity,
+    which IS the now level for every caller that hands this solver the
+    un-advanced state (the direct unit-test callers) ⇒ byte-identical there.
 
     ``add_barotropic_coriolis`` (default True) applies the explicit f×U_bt
     Coriolis term inside each substep.  Set False when the planetary Coriolis
@@ -1436,12 +1452,20 @@ def barotropic_substeps_latlon_cgrid(
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_bottom_drag_rate_faces,
         )
-        # NOW-level thickness for the rate (the MLF seed override re-seeds
-        # only the fast integration; the drag coef stays at NOW like NEMO's
-        # zdfdrg rCdU_bot).
+        # NOW-level thickness for the rate: NEMO's zdf_drg_nonlin reads
+        # ``e3t(ji,jj,imk,Kmm)`` (zdfdrg.F90:176), and the MLF seed override
+        # re-seeds only the fast integration, so the rate keeps the NOW
+        # thickness -- which under the override is ``_h_k_corr`` (built from
+        # ``state.eta``, the NOW ssh) and without it is ``h_k`` (same array).
         _hk_now = _h_k_corr if _seed_override else h_k
+        # NOW-level VELOCITY for the rate (zdfdrg.F90:174-175, ``uu(...,Kmm)``,
+        # evaluated at stpmlf.F90:190 BEFORE the dyn_* chain).  ``u_corr`` is
+        # whatever velocity ``state`` carries, which on the production path is
+        # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
+        _u_drg = u_corr if u_now is None else u_now.astype(_dt)
+        _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
-            u_corr, v_corr, _hk_now, z_coord, config, grid)
+            _u_drg, _v_drg, _hk_now, z_coord, config, grid)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
 

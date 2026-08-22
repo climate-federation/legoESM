@@ -494,3 +494,79 @@ def test_implicit_solver_extra_diag_damps_targeted_level():
         field, K, dz, dz_half, dt=600.0, extra_diag=extra_diag)
     expect = jnp.array([1.0, 2.0, 3.0, 4.0, 5.0 / 1.4])
     np.testing.assert_allclose(np.asarray(out), np.asarray(expect), rtol=1e-12)
+
+
+# --------------------------------------------- #1455 drag-rate time level ---
+
+def test_barotropic_drag_rate_uses_u_now_time_level():
+    """The barotropic bottom-drag RATE must be built from the NOW-level
+    (NEMO ``Kmm``) velocity handed in as ``u_now``/``v_now``, not from the
+    velocity carried by ``state``.
+
+    NEMO evaluates ``rCdU_bot`` in ``zdf_drg_nonlin`` from ``uu(ji,jj,imk,Kmm)``
+    (zdfdrg.F90:174-181), inside ``zdf_phy`` at stpmlf.F90:190 — BEFORE
+    ``dyn_adv``/``dyn_vor``/``dyn_ldf``/``dyn_hpg``/``dyn_spg`` — and
+    ``dyn_drg_init`` (dynspg_ts.F90:1616) freezes that same array across the
+    substep window.  The production caller hands this solver a POST-momentum
+    ``state`` (u* = u^n + dt·RHS + the Matsuno rotation), so the now level has
+    to arrive separately.
+
+    Same analytic setup and same DERIVED form as
+    ``test_barotropic_drag_substep_analytic_one_substep`` (uniform zonal flow
+    is divergence-free on the C-grid ⇒ eta and the PGF stay zero), except that
+    the drag velocity and the integrated velocity are now DIFFERENT:
+
+        U_1 = u_state * (1 - dt * r_eff(u_drag) / H_u),
+        r_eff(u) = Cd0 * sqrt(u^2 + ke0)
+    """
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+    # Shallow column (H_u = 124 m): dt*r/H is then O(1e-2), so the two
+    # candidate predictions are separated by ~4 orders of magnitude more than
+    # the 1e-6 tolerance asserted below.
+    grid, z, state, config = _partial_cell_channel(
+        H_max=200.0, barotropic_drag_substep=True)
+    u_state, u_drag = 0.2, 1.4          # r_eff differs by ~7x between them
+    state = _uniform_flow(state, u_state, 0.0)
+    now = _uniform_flow(state, u_drag, 0.0)
+    dt_s = 600.0
+    s_new, _ = barotropic_substeps_latlon_cgrid(
+        state, dt_s, 1, grid, z, config, add_barotropic_coriolis=False,
+        u_now=now.u.data, v_now=now.v.data)
+
+    H_u = float(np.asarray(state.H_bathy.data)[2, 3])   # flat: 124 m
+    r_drag = CD0 * float(np.sqrt(u_drag * u_drag + KE0))
+    r_state = CD0 * float(np.sqrt(u_state * u_state + KE0))
+    expect = u_state * (1.0 - dt_s * r_drag / H_u)
+    wrong = u_state * (1.0 - dt_s * r_state / H_u)
+    # The two predictions must be separable at the tolerance asserted below,
+    # or the test could not fail (a control on the control).
+    assert abs(expect - wrong) / abs(expect) > 1e-3
+    u_new = np.asarray(s_new.u.data)
+    np.testing.assert_allclose(u_new[2, 2:-1, :], expect, rtol=1e-6)
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(u_new[2, 2:-1, :], wrong, rtol=1e-6)
+
+
+def test_barotropic_drag_rate_u_now_default_is_state_velocity():
+    """Omitting ``u_now``/``v_now`` is byte-identical to passing ``state``'s
+    own velocity — the default keeps every direct caller (which hands this
+    solver the un-advanced NOW state) on exactly its previous numbers."""
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        barotropic_substeps_latlon_cgrid,
+    )
+    grid, z, state, config = _partial_cell_channel(
+        barotropic_drag_substep=True)
+    state = _uniform_flow(state, 0.15, -0.05)
+    kw = dict(add_barotropic_coriolis=False)
+    s_a, (hu_a, _) = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 4, grid, z, config, **kw)
+    s_b, (hu_b, _) = barotropic_substeps_latlon_cgrid(
+        state, 600.0, 4, grid, z, config,
+        u_now=state.u.data, v_now=state.v.data, **kw)
+    np.testing.assert_array_equal(np.asarray(s_a.u.data),
+                                  np.asarray(s_b.u.data))
+    np.testing.assert_array_equal(np.asarray(s_a.v.data),
+                                  np.asarray(s_b.v.data))
+    np.testing.assert_array_equal(np.asarray(hu_a), np.asarray(hu_b))

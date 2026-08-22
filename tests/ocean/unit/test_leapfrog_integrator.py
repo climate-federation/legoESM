@@ -947,3 +947,65 @@ def test_barotropic_een_seed_sensitivity_nbb_vs_kmm():
     s_kmm = m_kmm.step(s1_pert, dt=_DT)
     assert np.max(np.abs(np.asarray(s_ws.u.data)
                          - np.asarray(s_kmm.u.data))) > 1e-10
+
+
+# ------------------------------------ #1455 barotropic drag-rate time level ---
+
+def test_barotropic_drag_rate_receives_the_now_velocity_not_u_star():
+    """The production step must hand the barotropic solver the STEP-ENTRY
+    (NEMO ``Kmm``) velocity for the bottom-drag rate.
+
+    NEMO builds ``rCdU_bot`` in ``zdf_phy`` from ``uu(:,:,:,Kmm)``
+    (zdfdrg.F90:174-181) at stpmlf.F90:190, i.e. BEFORE ``dyn_adv``/``dyn_vor``/
+    ``dyn_ldf``/``dyn_hpg``/``dyn_spg``, and ``dyn_drg_init``
+    (dynspg_ts.F90:1616) freezes it across the substep window.  legoESM calls
+    the solver with ``state_mid``, whose velocity is the POST-momentum
+    ``u* = u^n + dt·RHS`` (plus the Matsuno rotation), so the now level must
+    travel as ``u_now``/``v_now``.  This asserts BOTH halves: the forwarded
+    array IS the step-entry velocity, and it is NOT ``state_mid``'s.
+
+    #1455: before the fix the rate was built from ``state_mid``'s velocity,
+    which on the DINO card differed from NEMO's ``un`` by up to 0.11 m/s.
+    """
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    # A wind stress and a non-rest velocity so the momentum update actually
+    # moves u between the step entry and the barotropic call — otherwise
+    # u* == u^n and the assertion below could not fail (control on the control).
+    rng = np.random.default_rng(11)
+    s0 = state._replace(u=state.u.replace(
+        data=jnp.asarray(0.3 * rng.standard_normal(state.u.data.shape))
+        * state.u_mask.data[..., None]))
+
+    captured = {}
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as _m
+    orig = _m.barotropic_substeps_latlon_cgrid
+
+    def _spy(state_mid, *a, **k):
+        captured["u_now"] = (None if k.get("u_now") is None
+                             else np.asarray(k["u_now"]))
+        captured["u_mid"] = np.asarray(state_mid.u.data)
+        return orig(state_mid, *a, **k)
+
+    _m.barotropic_substeps_latlon_cgrid = _spy
+    try:
+        # ``_step_impl`` (not ``step``) so the spy sees concrete arrays
+        # rather than JIT tracers — same escape the substep-scale spy above
+        # uses.
+        model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+    finally:
+        _m.barotropic_substeps_latlon_cgrid = orig
+
+    assert captured, "the barotropic solver was never called"
+    assert captured["u_now"] is not None, (
+        "the production step called the barotropic solver WITHOUT u_now -- the "
+        "bottom-drag rate would be built from the post-momentum u*, not NEMO's "
+        "Kmm velocity (zdfdrg.F90:174-181 via stpmlf.F90:190)")
+    np.testing.assert_array_equal(captured["u_now"], np.asarray(s0.u.data))
+    # ...and the two time levels really are distinct here, so the equality
+    # above is a time-level assertion and not a tautology.
+    assert np.max(np.abs(captured["u_mid"] - captured["u_now"])) > 1e-6

@@ -4084,8 +4084,19 @@ class LatLonCGridOceanModel:
             # nn_e (= _nbaro / scale).  Only the standard path builds the boxcar
             # weights; the wide-halo twin refuses the EEN/boxcar MLF config.
             if _baro_fn is barotropic_substeps_latlon_cgrid:
+                # TIME LEVEL of the barotropic bottom-drag RATE (#1455).  NEMO
+                # builds rCdU_bot in zdf_phy from uu(:,:,:,Kmm) (zdfdrg.F90:
+                # 174-181) at stpmlf.F90:190 -- BEFORE dyn_adv/vor/ldf/hpg/spg
+                # -- and dyn_drg_init (dynspg_ts.F90:1616) freezes that same
+                # array over the substep window.  The solver is handed
+                # ``state_mid``, whose velocity is the POST-momentum u* (built
+                # at the ``state_mid = state._replace(...)`` above), so the NOW
+                # velocity has to travel separately.  These are the SAME arrays
+                # the dyn_drg_init pu_RHSi residual above already reads, which
+                # is the point: NEMO has ONE rCdU_bot and both consumers see it.
                 _baro_seed = dict(
-                    _baro_seed, substep_scale=_barotropic_substep_scale)
+                    _baro_seed, substep_scale=_barotropic_substep_scale,
+                    u_now=state.u.data, v_now=state.v.data)
             state_new, (Hu_avg, Hv_avg) = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, self.z_coord, self.config,
