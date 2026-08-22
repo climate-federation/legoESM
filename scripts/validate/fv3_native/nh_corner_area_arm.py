@@ -244,7 +244,14 @@ def build_patched_context(metrics_run: str, ic_run: str):
                 raise SystemExit(
                     f"arm: face {pf + 1}: mapped reference "
                     f"{ra_full.shape} vs port {unex.shape}")
-            mask = area6[pf] != ra_full
+            # BY MAGNITUDE, not exact inequality. The interior agrees
+            # to ~2e-12 RELATIVE but not bitwise, so `!=` swept 958
+            # compute cells into the write set and the guard below
+            # (rightly) refused. The two populations are ten orders
+            # apart -- halo 4-12%, interior ~2e-12 -- so any cut in
+            # between separates them; this one sits six orders above
+            # the interior floor.
+            mask = np.abs(area6[pf] - ra_full) > 1.0e-06 * np.abs(ra_full)
             # The INTERIOR must not be in the write set: it already
             # agrees at the parity floor, so a mask reaching it would
             # mean the mapping is wrong, not that the interior needs
