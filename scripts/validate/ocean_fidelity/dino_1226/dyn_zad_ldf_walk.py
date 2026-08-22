@@ -290,10 +290,16 @@ from legoesm.ocean.fidelity.nemo_state_bridge import (
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import dino_config_for_recipe, dino_lat_lon_model_config
 
-# Reuse wholesale (not re-derived): the established loaders + RUN_DIR/DT.
+# Reuse wholesale (not re-derived): the established loaders + DT.
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import (
-    RUN_DIR, DT, _load_full_3d,
+    DT, _load_full_3d,
 )
+# Lane selector (#1455): RUN_DIR/RESTART are lane-dependent, NOT
+# zu_frc_term_walk's own hardcoded RUN_GDB/year-5 constants.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 register_dump("ldf_dump_du.bin", "now",
               "dynldf.F90:83 dynldf_lev_lap Krhs increment (np_lap, NOT "
@@ -359,6 +365,7 @@ def _corr_ratio(a, b):
 def main() -> int:
     e3t_mode = require_explicit_e3t_mode(context="dyn_zad_ldf_walk")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both' for this walk)")
+    print(dump_lane.banner())
     assert e3t_mode == "both", "run with LEGOESM_NEMO_E3T=both (task rule)"
 
     dcfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
@@ -368,9 +375,9 @@ def main() -> int:
     assert dcfg.vertical_momentum_scheme == "nemo_advective"
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br_before = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
@@ -613,7 +620,7 @@ def main() -> int:
         e3t0, e3u0, e3v0, e3f0 = _m3("e3t_0"), _m3("e3u_0"), _m3("e3v_0"), _m3("e3f_0")
         umask3, vmask3, fmask3 = _m3("umask") > 0.5, _m3("vmask") > 0.5, _m3("fmask") > 0.5
 
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     ub, vb = before.u, before.v   # (jpj, jpi, jpk), NEMO-native storage
 
     # ahmt/ahmf: static, depth-uniform, MATCHES legoESM (verified above) --

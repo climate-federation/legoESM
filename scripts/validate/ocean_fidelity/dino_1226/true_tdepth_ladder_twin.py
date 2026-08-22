@@ -17,10 +17,27 @@ depth); the thickness ladders differ by up to 70.4 m (14.8% rel).
 
 THE RECORDED INSTABILITY IS THE THICKNESS LADDER, NOT THIS ONE.  Addendum 33's
 four-way isolation (day-10 max|u|): off 0.60 STABLE, gdept_only 0.61 STABLE,
-e3t_only 1.74 GROWING, both 1.61 GROWING.  So ``gdept_only`` -- the arm the
-#1455 four-arm PGF isolation showed collapses the southern pressure-gradient
-gap 88x (-6.13 -> -0.07 m3/s2) -- is the one true-ladder arm that is NOT
-blocked by the restart-start instability.
+e3t_only 1.74 GROWING, both 1.61 GROWING.
+
+  RETRACTED 2026-08-21 (#1455), as a RECORD OF A RUN, not as a claim: those two
+  GROWING rows DID NOT REPRODUCE.  Four 90-day arms on the same restart,
+  differing only in this variable, all ran STABLE to day 90 at 0.6332 / 0.6341 /
+  0.6344 / 0.6347 m/s peak speed, and the two end arms were re-confirmed under
+  an fp64 precision policy at 0.6332 ("off") and 0.6350 ("both").  Nothing
+  approached 1.6-1.7 m/s at any point.
+  PLAUSIBLE discriminator, NOT measured: the seasonal-clock fix landed
+  2026-08-20, one day AFTER the a9e289d8e measurements below, so the GROWING
+  arms were forced exactly antiphase to NEMO's season and the later stable ones
+  were not.  The run that would settle it is this arm at the LEGACY clock
+  (DINO_TWIN_SEASONAL_KT0=0): if day-10 peak speed returns to ~1.6 m/s only
+  there, the recorded instability was the clock and can be retired by name.
+  Until that runs, the two GROWING rows are unexplained, not explained.
+  The inference that USED to hang off them goes with them: this module's
+  original next sentence read "so ``gdept_only`` is the one true-ladder arm
+  that is NOT blocked by the restart-start instability", which is now empty --
+  no arm is blocked, because no arm was unstable.  What survives is the
+  measurement it cited: the #1455 four-arm PGF isolation showed ``gdept_only``
+  collapses the southern pressure-gradient gap 88x (-6.13 -> -0.07 m3/s2).
 
 MEASURED AT HEAD a9e289d8e (fp64, nemo_dino_kamm_mlf, --bridge-before --save-3d,
 production surface placement, wind on, day-0 gate exact on both arms):
@@ -29,11 +46,13 @@ production surface placement, wind on, day-0 gate exact on both arms):
   NEMO restart.  max|u| 0.667 (d1) .. 0.665 (d10) .. 0.634 (d90); max|eta|
   0.830 -> 0.872; finite everywhere; STABLE=True.  The recorded thickness-
   ladder signature (0.69 -> 1.24 by d3, 2.23 by d20, saturating ~3.0) does NOT
-  appear.  This CONFIRMS addendum 33's own four-way isolation rather than
-  contradicting it: only ``e3t_only``/``both`` were ever unstable.  The
-  campaign's "the true-ladder A/B is blocked on the restart instability" is
-  therefore FALSE FOR THE T-DEPTH LADDER -- it was only ever true for the
-  thickness ladder.
+  appear.  The campaign's "the true-ladder A/B is blocked on the restart
+  instability" is therefore FALSE FOR THE T-DEPTH LADDER.
+  SUPERSEDED 2026-08-21, see the retraction above: this block originally read
+  that the result "CONFIRMS addendum 33's own four-way isolation ... only
+  ``e3t_only``/``both`` were ever unstable", and that reading is withdrawn --
+  those two arms did not reproduce as unstable either, so the statement is now
+  FALSE FOR EVERY LADDER, not only for this one.
 
   STEP 3 -- OWNERSHIP A/B vs the analytic-ladder arm (arm3_bn2, same HEAD,
   same protocol, ONE variable = LEGOESM_NEMO_E3T off -> gdept_only).

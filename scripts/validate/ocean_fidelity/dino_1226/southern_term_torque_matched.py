@@ -67,10 +67,18 @@ momentum operator carries a near-uniform -0.61 on any ladder.
   pressure + free-surface torque collapses from -6 to ~-0.6 in the wrong-ladder
   arm, ownership is established; if it stays at -6, it is refuted.
 
-WHY THE LADDER CANNOT SIMPLY BE SWITCHED: legoESM is unstable when integrated
-from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over 20 days;
-``nemo_state_bridge.py`` records this as the reason the default is "off").
-That instability and this torque error are candidates for the same root cause.
+WHY THE LADDER WAS NOT SIMPLY SWITCHED: legoESM was recorded as unstable when
+integrated from a NEMO restart on the true ladder (max|u| 0.66 -> 2.2 m/s over
+20 days), and that was the stated reason the default is "off".
+RETRACTED 2026-08-21 (#1455): the instability did not reproduce. Four 90-day
+arms from the day-180 restart, differing only in the ladder, all ran stable to
+day 90 at 0.633-0.635 m/s peak speed, the two end arms confirmed under fp64. The
+citation above is also stale: ``nemo_state_bridge.py`` still PRESERVES the
+original instability paragraph as a record, but its stated reason for the
+default no longer rests on it. A non-reproduction is not a refutation, so the
+observation stands unexplained; but this probe's framing may no longer assume
+the switch is blocked, and "that instability and this torque error share a root
+cause" is now a hypothesis with one of its two legs missing.
 
 WHAT THIS PROBE DOES
 --------------------
@@ -247,10 +255,11 @@ from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
 set_policy(PrecisionPolicy.fp64())
 # MANDATORY, fails closed.  Unset, the restart bridge silently substitutes
 # NEMO's ANALYTIC 1-D thickness ladder (``e3t_1d``) for the real ``e3t_0``,
-# which differs by up to 12.9% below k=25 -- and the day-0 twin gate CANNOT
+# which differs by up to 70.4 m at and below k=25 (12.9% of e3t_0,
+# 14.8% of e3t_1d -- one measurement, two denominators) -- and the day-0 twin gate CANNOT
 # see it (it compares T/S/u/v VALUES, not the geometry holding them; skill
 # Rule 2's documented blind spot).  A depth-integrated pressure gradient on a
-# 12.9%-wrong deep ladder is a systematic, time-growing error that looks
+# wrong deep ladder is a systematic, time-growing error that looks
 # exactly like an operator defect.  That default has already ruined four
 # measurements in this campaign; it very nearly ruined this one.
 E3T_MODE = require_explicit_e3t_mode(context='southern_term_torque_matched')

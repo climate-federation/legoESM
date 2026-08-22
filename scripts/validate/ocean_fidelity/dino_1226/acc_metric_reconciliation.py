@@ -305,6 +305,30 @@ def split_block(arms, old, new):
               f"barotropic {got[lbl][1]:9.4f}   band total (mean) "
               f"{got[lbl][0] + got[lbl][1]:9.4f}   band total (median) "
               f"{got[lbl][2]:9.4f}   acc_full {got[lbl][3]:9.4f}")
+    # NEMO's OWN band transport, same reduction, so each arm's band number can
+    # be read as a GAP against the oracle instead of only against another arm.
+    # Without this row the block compares legoESM to legoESM (the exact class of
+    # error the campaign has had to retract before).
+    un, _src = nemo_u(90)
+    if un is not None:
+        nbc, nbt = A.bc_bt_band(un, A.umask)
+        if not np.allclose(nbc + nbt, A.acc_band(un, A.umask), rtol=0, atol=1e-10):
+            raise SystemExit("NEMO: bc + bt does not reconstruct acc_band "
+                             "-- the split is invalid, FATAL")
+        nrow = (float(np.mean(nbc[2:-2])), float(np.mean(nbt[2:-2])),
+                float(np.median((nbc + nbt)[2:-2])), A.acc_full(un, A.umask))
+        print(f"  {'NEMO d90':<15} baroclinic {nrow[0]:9.4f}   "
+              f"barotropic {nrow[1]:9.4f}   band total (mean) "
+              f"{nrow[0] + nrow[1]:9.4f}   band total (median) "
+              f"{nrow[2]:9.4f}   acc_full {nrow[3]:9.4f}")
+        for lbl in (old, new):
+            if lbl in got:
+                g = [got[lbl][i] - nrow[i] for i in range(4)]
+                print(f"  {'GAP ' + lbl + '-NEMO':<15} baroclinic {g[0]:+9.4f}   "
+                      f"barotropic {g[1]:+9.4f}   band total (mean) "
+                      f"{g[0] + g[1]:+9.4f}   band total (median) {g[2]:+9.4f}"
+                      f"   acc_full {g[3]:+9.4f}")
+
     if len(got) == 2:
         d = [got[new][i] - got[old][i] for i in range(4)]
         tot = d[0] + d[1]
