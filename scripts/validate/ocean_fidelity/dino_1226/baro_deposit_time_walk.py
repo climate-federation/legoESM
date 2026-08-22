@@ -539,9 +539,17 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     print(f"\n    POSITIVE CONTROL (raw state, max|du| between consecutive "
           f"restarts, m/s):")
     print("      " + "  ".join(f"{v:.4e}" for v in pc["max_du"]))
-    print(f"      parity split of that series = {pc['parity_split']:.4f} "
-          f"-> the state DOES carry a period-2 signature of this size; the "
-          f"in-loop share's is {out['in_loop']['parity_split']:.2e}")
+    print(f"      argmax cells (k,j,i): {pc['argmax_cells']}")
+    print(f"      parity split of that series = {pc['parity_split']:.4f}  "
+          f"(dropping the first difference: "
+          f"{pc['parity_split_drop_first']:.4f})")
+    print("      -> the STATE alternates step to step; the in-loop deposit's "
+          f"parity split is {out['in_loop']['parity_split']:.2e}.")
+    print("         These are DIFFERENT FUNCTIONALS -- a max-norm of a 3-D "
+          "velocity increment against a signed section integral -- so their")
+    print("         RATIO is not a suppression factor and is not quoted.  The "
+          "control's only job is to show the instrument was offered a")
+    print("         step-alternating signal, and it was.")
     np.savez(out_path, kts=kts,
              **{f"dep_{k}": np.array([r[k] for r in recs], dtype=float)
                 for k in ("total", "forcing", "in_loop")},
