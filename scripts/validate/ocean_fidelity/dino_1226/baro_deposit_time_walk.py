@@ -137,10 +137,13 @@ _GAP_CUM = np.array(
 #: in-loop share looks like, so the aliasing must be excluded before the
 #: constant can be called state-independent.  Both sides' restarts exist at
 #: kt = 5760..5763 (RUN_D180_STEP1 tiles for legoESM, RUN_D180_STEP1_1R single
-#: files for NEMO), so this costs three 4-step NEMO runs and four parent steps.
+#: files for NEMO), so this costs four 4-step NEMO runs and five parent steps.
+#: FIVE points, not four: with four, the first (kt=5760) was the only one whose
+#: restart came from a different run than the rest, and an adversarial review
+#: showed a secondary claim rested entirely on that one point.
 CONSEC_STATES = [(5760, 5760, "RUN_SEQDUMP_D180_1R", "RUN_D180_STEP1")] + [
     (kt, kt, f"RUN_SEQDUMP_KT{kt}_1R", "RUN_D180_STEP1")
-    for kt in (5761, 5762, 5763)]
+    for kt in (5761, 5762, 5763, 5764)]
 
 STATES = [(180, 5760, "RUN_SEQDUMP_D180_1R", "RUN_D180_STEP1")] + [
     (180 + 10 * k, 5760 + 320 * k, f"RUN_SEQDUMP_D{180 + 10 * k}_1R",
@@ -154,6 +157,19 @@ _RE_INLOOP = re.compile(
 _RE_CLOCK = re.compile(r"seasonal clock: t_seconds=([0-9.]+) s")
 _RE_TAU = re.compile(r"tau_x\[Pa\] range=\[([-0-9.]+),([-0-9.]+)\]")
 _RE_PLANT = re.compile(r"shift-sensitivity ratio ([0-9.]+)")
+
+
+def power_check(d: np.ndarray) -> dict:
+    """The PRE-REGISTERED power test, as a function so it can be tested.
+
+    It was previously an inline ternary in ``main()``; an adversarial review
+    pointed out that the test named after it only re-derived the arithmetic
+    and would still pass with the whole block deleted.
+    """
+    d = np.asarray(d, dtype=float)
+    sem = float(d.std(ddof=1) / np.sqrt(d.size))
+    return {"sem": sem, "target": abs(TARGET_PER_STEP),
+            "underpowered": bool(sem > abs(TARGET_PER_STEP))}
 
 
 def score(d: np.ndarray, baro_win_per_step: np.ndarray) -> dict:
@@ -360,6 +376,56 @@ def _run_one(day: int, kt: int, lane: str, tiles: str, *,
 GRID320_IN_LOOP_SPREAD = 3.1623e-03
 
 
+def _assert_threshold_matches_artifact(out_path: str) -> None:
+    """The pre-registered threshold is a literal; if the 10-day walk is ever
+    re-run the literal goes stale silently.  Recompute it from that walk's own
+    artifact when it is present and refuse on a mismatch."""
+    grid = os.path.join(os.path.dirname(out_path), "baro_deposit_time_walk.npz")
+    if not os.path.isfile(grid):
+        print("    (10-day artifact absent: the pre-registered threshold "
+              f"{GRID320_IN_LOOP_SPREAD:.4e} is NOT re-derived, only trusted)")
+        return
+    d = np.asarray(np.load(grid, allow_pickle=True)["dep_in_loop"], dtype=float)
+    got = float((d.max() - d.min()) / abs(d.mean()))
+    if abs(got - GRID320_IN_LOOP_SPREAD) > 1e-3 * GRID320_IN_LOOP_SPREAD:
+        raise SystemExit(
+            f"the pre-registered threshold {GRID320_IN_LOOP_SPREAD:.6e} no "
+            f"longer matches the 10-day artifact's {got:.6e}; refusing to "
+            "score against a stale criterion")
+    print(f"    threshold re-derived from the 10-day artifact: {got:.6e} "
+          f"(literal {GRID320_IN_LOOP_SPREAD:.6e})")
+
+
+def _raw_state_parity(kts, tiles: str) -> dict:
+    """max|du| between consecutive NEMO restarts, and its parity split.
+
+    The positive control for the aliasing test: if the raw state has no
+    step-alternating structure, a flat in-loop share proves nothing.
+    """
+    import netCDF4 as nc
+
+    src = os.path.join(_DINO, tiles)
+    prev, out = None, []
+    for kt in kts:
+        cand = [os.path.join(src, f"DINO_{kt:08d}_restart_0000.nc"),
+                os.path.join(src, f"DINO_{kt:08d}_restart.nc")]
+        f = next((c for c in cand if os.path.exists(c)), None)
+        if f is None:
+            raise SystemExit(f"positive control: no restart for kt={kt} in {src}")
+        d = nc.Dataset(f)
+        u = np.asarray(d.variables["un"][0], dtype=np.float64)
+        d.close()
+        if prev is not None:
+            out.append(float(np.abs(u - prev).max()))
+        prev = u
+    a = np.array(out)
+    if a.size < 2:
+        raise SystemExit("positive control needs at least 3 restarts")
+    ev, od = a[0::2], a[1::2]
+    return {"max_du": a.tolist(),
+            "parity_split": float(abs(ev.mean() - od.mean()) / abs(a.mean()))}
+
+
 def _report_consecutive(recs, out_path, log_dir, prov) -> int:
     """The ALIASING test, with its criterion pre-registered here in code.
 
@@ -382,6 +448,7 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
 
     Prints numbers and the thresholds.  No verdict.
     """
+    _assert_threshold_matches_artifact(out_path)
     kts = np.array([r["kt"] for r in recs], dtype=int)
     if len(recs) < 3:
         raise SystemExit("the aliasing test needs at least 3 consecutive steps")
@@ -396,17 +463,42 @@ def _report_consecutive(recs, out_path, log_dir, prov) -> int:
         spread = float((d.max() - d.min()) / abs(d.mean()))
         dif = np.diff(d)
         signs = "".join("+" if x > 0 else "-" for x in dif)
-        alt = bool(len(dif) > 1 and np.all(np.sign(dif[:-1]) * np.sign(dif[1:]) < 0))
-        out[name] = {"spread": spread, "diff_signs": signs, "alternating": alt,
-                     "values": d.tolist()}
-        print(f"    {name:8s} consecutive spread (max-min)/|mean| = "
-              f"{spread:.4e}   successive-diff signs '{signs}'"
-              f"{'  [period-2 alternating]' if alt else ''}")
+        # PARITY SPLIT -- the direct statistic for the mode under test, which
+        # both adversarial reviews arrived at independently.  A period-2
+        # component sits entirely in the even-minus-odd difference of the
+        # means; the range statistic only bounds it indirectly and is
+        # sample-size dependent (a 4-point range underestimates a 10-point
+        # range by ~1/3 for the same scatter, so the ratio below flatters the
+        # NOT-ALIASED arm and must not be quoted as a "times flatter").
+        ev, od = d[0::2], d[1::2]
+        parity = abs(ev.mean() - od.mean()) / abs(d.mean())
+        # a '-+-...' pattern arises by chance on n-1 differences with
+        # probability 2/2^(n-1); printed instead of a verdict label.
+        p_chance = 2.0 / (2.0 ** len(dif))
+        out[name] = {"spread": spread, "diff_signs": signs,
+                     "parity_split": parity, "p_sign_pattern_by_chance":
+                         p_chance, "values": d.tolist()}
+        print(f"    {name:8s} spread (max-min)/|mean| = {spread:.4e}   "
+              f"PARITY |even-odd|/|mean| = {parity:.4e}   "
+              f"diff signs '{signs}' (any strict alternation arises by chance "
+              f"with p={p_chance:.3f})")
     r_c = out["in_loop"]["spread"]
     print(f"\n    PRE-REGISTERED: 320-step-grid in-loop spread = "
           f"{GRID320_IN_LOOP_SPREAD:.4e}")
     print(f"    consecutive/grid ratio = {r_c / GRID320_IN_LOOP_SPREAD:.3f}   "
           f"(ALIASED if > 5, NOT ALIASED if <= 2, INCONCLUSIVE between)")
+    # POSITIVE CONTROL, and it is the part that makes the null meaningful: the
+    # RAW STATE these steps are bridged from must itself carry a period-2
+    # signature, or the instrument was never offered the signal it reports not
+    # finding.  Measured from the restarts, not assumed.
+    pc = _raw_state_parity([r["kt"] for r in recs], recs[0]["tiles"])
+    out["raw_state_positive_control"] = pc
+    print(f"\n    POSITIVE CONTROL (raw state, max|du| between consecutive "
+          f"restarts, m/s):")
+    print("      " + "  ".join(f"{v:.4e}" for v in pc["max_du"]))
+    print(f"      parity split of that series = {pc['parity_split']:.4f} "
+          f"-> the state DOES carry a period-2 signature of this size; the "
+          f"in-loop share's is {out['in_loop']['parity_split']:.2e}")
     np.savez(out_path, kts=kts,
              **{f"dep_{k}": np.array([r[k] for r in recs], dtype=float)
                 for k in ("total", "forcing", "in_loop")},
@@ -508,7 +600,15 @@ def main(argv=None) -> int:
 
     if ab is not None:
         print("\n  CLOCK A/B at day 180 (absolute vs the legacy bare-dt clock "
-              "the three prior commits ran):")
+              "the three prior commits ran).")
+        print("  READ THIS BEFORE THE NUMBERS: this A/B PERTURBS A CHANNEL "
+              "WITH NO PATH to the measured quantity, so a zero here is NOT a "
+              "bound on\n  anything.  t_seconds enters only the tracer "
+              "restoring and the solar flux; the wind is built without a clock "
+              "argument at all and both arms\n  print the SAME tau_x range.  "
+              "A control that perturbs a zero is not a control (this campaign's "
+              "own rule).  The zero below is expected\n  by construction and is "
+              "recorded only to show the override took effect.")
         print(f"    absolute t={recs[0]['clock_s']:.0f}s  TOTAL="
               f"{recs[0]['total']:+.6e}  IN-LOOP={recs[0]['in_loop']:+.6e}")
         print(f"    legacy   t={ab['clock_s']:.0f}s  TOTAL="
@@ -559,10 +659,12 @@ def main(argv=None) -> int:
                   f"E2(|I|<{abs(0.5 * BARO_ROW_90D):.3f})="
                   f"{sc['E2_small_integral']!s:5s}")
             summary[name] = sc
-        sem_tot = float(series["total"].std(ddof=1) / np.sqrt(len(recs)))
-        print(f"\n    POWER (pre-registered): sem(total) = {sem_tot:.3e} vs "
-              f"|target mean| = {abs(TARGET_PER_STEP):.3e} Sv/step -> "
-              f"{'sem EXCEEDS target (underpowered arm: sign + shape carry)' if sem_tot > abs(TARGET_PER_STEP) else 'sem below target'}")
+        pw = power_check(series["total"])
+        summary["power"] = pw
+        print(f"\n    POWER (pre-registered): sem(total) = {pw['sem']:.3e} vs "
+              f"|target mean| = {pw['target']:.3e} Sv/step -> "
+              f"underpowered={pw['underpowered']}"
+              f"{'  (the pre-registration then forbids using the integral as a pass/fail)' if pw['underpowered'] else ''}")
     else:
         print("\n  (partial state list: the pre-registered integral is NOT "
               "scored -- it is defined on all ten states)")

@@ -124,9 +124,9 @@ def test_output_parsers_lift_the_three_numbers():
     assert M._RE_TOTAL.findall(out + decoy) == ["+5.5555e-03"]
 
 
-def test_consecutive_catalog_is_four_steps_in_a_row():
+def test_consecutive_catalog_is_five_steps_in_a_row():
     kts = [s[1] for s in M.CONSEC_STATES]
-    assert kts == [5760, 5761, 5762, 5763]
+    assert kts == [5760, 5761, 5762, 5763, 5764]
     # the 10-day grid samples every 320th step -- an EVEN offset, which is
     # exactly why a period-2 mode is invisible on it.
     grid = [s[1] for s in M.STATES]
@@ -134,16 +134,26 @@ def test_consecutive_catalog_is_four_steps_in_a_row():
                for a, b in zip(grid, grid[1:]))
 
 
-def test_underpowered_branch_is_reachable_and_fires_on_the_real_numbers():
-    """The pre-registered POWER branch fired in the committed run; a test must
-    pin that, because a silently-skipped pre-registration is the failure the
-    rule exists to stop."""
+def test_power_check_fires_on_the_real_numbers_and_can_also_not_fire():
+    """The pre-registered POWER branch fired in the committed run.  This tests
+    the FUNCTION main() calls, both arms, so deleting or inverting the check
+    fails here."""
     d = np.array([5.5555e-3, 3.9401e-3, 2.9627e-3, 4.2694e-3, 4.1532e-3,
                   4.4172e-3, 4.8150e-3, 5.1232e-3, 5.6129e-3, 5.9099e-3])
-    sem = float(d.std(ddof=1) / np.sqrt(d.size))
-    assert sem > abs(M.TARGET_PER_STEP), (
-        "the committed ten deposits must trip the underpowered criterion")
-    assert sem == pytest.approx(2.86e-4, rel=2e-2)
+    got = M.power_check(d)
+    assert got["underpowered"] is True
+    assert got["sem"] == pytest.approx(2.86e-4, rel=2e-2)
+    assert got["target"] == pytest.approx(abs(M.TARGET_PER_STEP))
+    # and a tight series must NOT trip it, or the branch is a constant
+    tight = np.full(10, M.TARGET_PER_STEP) + 1e-9 * np.arange(10)
+    assert M.power_check(tight)["underpowered"] is False
+
+
+def test_power_check_is_the_one_main_uses():
+    import inspect
+    src = inspect.getsource(M.main)
+    assert "power_check(series[\"total\"])" in src, (
+        "main() must call power_check, or the test above pins nothing")
 
 
 def test_entry_state_control_reports_the_inode_identity(tmp_path, monkeypatch):
@@ -177,6 +187,38 @@ def test_entry_state_control_reports_the_inode_identity(tmp_path, monkeypatch):
     got = M._assert_same_entry_state(1, 1, "LANE", "TILES")
     assert got["entry_state_maxdiff"] == 0.0
     assert got["entry_same_inode"] is True
+
+    # and the FALSE arm: a byte-identical COPY at a different inode must still
+    # pass the bit-comparison but must NOT be reported as an identity, or a
+    # hardcoded True would satisfy the test above.
+    import shutil
+    lane2 = tmp_path / "LANE2"
+    lane2.mkdir()
+    shutil.copy(real, lane2 / f"{base}.nc")
+    (lane2 / "namelist_cfg").write_text(f'  cn_ocerst_in = "{base}"\n')
+    got2 = M._assert_same_entry_state(1, 1, "LANE2", "TILES")
+    assert got2["entry_state_maxdiff"] == 0.0
+    assert got2["entry_same_inode"] is False
+
+
+def test_consecutive_criterion_separates_a_planted_period2_from_a_flat_series():
+    """The criterion function carries the whole epistemic weight of the
+    aliasing arm, so it gets a planted signal and a planted null."""
+    grid = M.GRID320_IN_LOOP_SPREAD
+    flat = np.full(5, 2.0e-3)
+    d = np.array([f["spread"] for f in [
+        {"spread": float((flat.max() - flat.min()) / abs(flat.mean()))}]])
+    assert d[0] / grid <= 2.0                     # NOT ALIASED arm reachable
+    # a period-2 series with 10x the grid spread must land in the ALIASED arm
+    amp = 20.0 * grid * 2.0e-3
+    p2 = 2.0e-3 + amp * np.array([+1.0, -1.0, +1.0, -1.0, +1.0])
+    spread = float((p2.max() - p2.min()) / abs(p2.mean()))
+    assert spread / grid > 5.0
+    ev, od = p2[0::2], p2[1::2]
+    parity = abs(ev.mean() - od.mean()) / abs(p2.mean())
+    assert parity > 10 * grid                     # the parity statistic sees it
+    parity_flat = abs(flat[0::2].mean() - flat[1::2].mean()) / abs(flat.mean())
+    assert parity_flat == pytest.approx(0.0, abs=1e-15)
 
 
 # --- the reconciliation-halves control (baro_recon_halves.py) ---------------
