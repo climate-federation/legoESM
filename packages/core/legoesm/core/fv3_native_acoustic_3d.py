@@ -424,6 +424,7 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      use_logp: bool = False,
                      press_out: list | None = None,
                      substeps_out: list | None = None,
+                     stage_hook=None,
                      flux_cap: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
 
@@ -472,6 +473,7 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                             use_logp=use_logp,
                             press_out=(press_out if remap_step else None),
+                            stage_hook=stage_hook,
                             flux_cap=flux_cap)
         if substeps_out is not None:
             # `.copy()` on an ndarray, deepcopy on anything else: a future

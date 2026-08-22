@@ -515,7 +515,8 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      lim_fac: float = 1.0, z_tracer: bool = True,
                      inline_q: bool = False,
                      return_pre_remap: bool = False,
-                     return_substeps: bool = False) -> dict:
+                     return_substeps: bool = False,
+                     stage_hook=None) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -792,6 +793,7 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                          use_logp=use_logp,
                          press_out=press_out,
                          substeps_out=(substeps if last_step else None),
+                         stage_hook=stage_hook,
                          flux_cap=flux_cap)
         if len(press_out) != 6:
             raise RuntimeError(

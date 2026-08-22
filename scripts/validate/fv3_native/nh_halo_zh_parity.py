@@ -147,8 +147,10 @@ def main(argv=None):
 
     require_k_split_one(args.hdump)
 
-    from legoesm.core.fv3_native_acoustic_3d import acoustic_substep_3d
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    from legoesm.core.fv3_native_dynamics import (
+        fv_dynamics_step, p_var_nonhydrostatic,
+    )
     from legoesm.core.fv3_native_eta import set_eta_analytic
     from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
 
@@ -170,39 +172,52 @@ def main(argv=None):
         raise SystemExit("INSTRUMENT CONTROL FAILED: the IC does not "
                          "reproduce the oracle's.")
 
-    # The port's own sub-step 1, with the stepper's stage hook. The two
-    # heights come from the code the deck runs, by hook, not by replay
-    # of a hand-built chain.
+    # THE PORT SIDE RUNS THE REAL STEP, not a hand-assembled sub-step.
+    # The first version called acoustic_substep_3d directly and its own
+    # control caught it: |w| came out at 15 m/s instead of the ~5e-03 the
+    # deck produces, because everything fv_dynamics_step does before the
+    # loop -- the pressure bundle, the temperature-to-theta conversion --
+    # was missing. A probe that assembles its own entry point measures a
+    # different program, which is the trap this campaign already has a
+    # rule about.
     grabbed: dict = {}
+    seen = {"S_nh_before_update_dz_d": 0, "S_nh_after_update_dz_d": 0}
 
     def hook(name, *rest):
-        # The stepper calls this hook with TWO arguments for the
-        # hydrostatic stages and THREE (name, tile, payload) for the NH
-        # ones. A fixed-arity hook raises on the first stage it does not
-        # expect, so this takes both and keeps only what it asked for.
-        if name in ("S_nh_before_update_dz_d", "S_nh_after_update_dz_d"):
-            tile, payload = rest
-            grabbed.setdefault(name, {})[tile] = np.array(payload, copy=True)
+        # Two arguments for the hydrostatic stages, three for the NH
+        # ones; a fixed-arity hook raises on the first it does not
+        # expect. Only SUB-STEP 1 is kept: the height is exchanged at the
+        # end of every sub-step, so from sub-step 2 on a bad interior has
+        # already become a bad halo and the two hypotheses stop being
+        # separable.
+        if name not in seen:
+            return
+        tile, payload = rest
+        seen[name] += 1
+        if seen[name] <= 6:
+            grabbed.setdefault(name, {})[tile] = np.array(payload,
+                                                          copy=True)
 
-    # The NH arm needs its persistent carry and the reference thickness
-    # profile; without them acoustic_substep_3d raises before the first
-    # hook fires. dp0 is built the way fv_dynamics_step builds it.
-    from legoesm.core.fv3_native_acoustic_3d import build_nh_carry
-    nh = build_nh_carry(ctx, KM, ctx["hs6"])
-    dp0 = np.array([(ak[k + 1] - ak[k]) + (bk[k + 1] - bk[k]) * 1.0e5
-                    for k in range(KM)], dtype=np.float64)
-    dt_sub = args.dt / args.n_split
-    acoustic_substep_3d(ctx, state, dt_sub, KM, first_substep=True,
-                        ptop=ptop, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
-                        remap_step=False, remap_follows=True,
-                        hydrostatic=False, nh=nh, dp0=dp0,
-                        stage_hook=hook)
-    for need in ("S_nh_before_update_dz_d", "S_nh_after_update_dz_d"):
+    press = [p_var_nonhydrostatic(f["delp"], f["delz"], f["pt"],
+                                 ptop=ptop, akap=FV3_KAPPA,
+                                 n=N, ng=NG, km=KM) for f in state]
+    q = [[np.zeros((m_a, m_a, KM), dtype=np.float64)] for _ in range(6)]
+    fv_dynamics_step(
+        ctx, state, press, bdt=args.dt, km=KM, k_split=1,
+        n_split=args.n_split, ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
+        cp_air=FV3_CP_AIR, kord_mt=9, kord_tm=-9, kord_tr=9, q=q,
+        hydrostatic=False, w_limiter=True, stage_hook=hook)
+    for need, n_seen in seen.items():
         if len(grabbed.get(need, {})) != 6:
             raise SystemExit(
-                f"INSTRUMENT CONTROL FAILED: the stepper emitted "
-                f"{len(grabbed.get(need, {}))} faces for {need}, not 6; "
-                f"the capture is not where this probe assumes.")
+                f"INSTRUMENT CONTROL FAILED: {need} kept "
+                f"{len(grabbed.get(need, {}))} faces, not 6.")
+        if n_seen != 6 * args.n_split:
+            raise SystemExit(
+                f"INSTRUMENT CONTROL FAILED: {need} fired {n_seen} times, "
+                f"expected {6 * args.n_split} (6 faces x {args.n_split} "
+                f"sub-steps). The capture is not once per face per "
+                f"sub-step and the sub-step-1 slice is not what it says.")
     print("port: both capture points emitted on all six faces")
 
     # CONTROL 3: the two capture points must not be the same state.
@@ -242,19 +257,16 @@ def main(argv=None):
     # sub-step is not the full-step number, so the check is that the
     # error is PRESENT at the established order of magnitude, not that
     # it equals 6.6116e-04.
-    w_worst = 0.0
-    for pf in range(6):
-        ot = perm[pf]
-        _t, nm, _su, _sv = meta[pf][ot]
-        w_worst = max(w_worst, float(np.abs(
-            state[pf]["w"][NG:NG + N, NG:NG + N, 0]).max()))
-    print(f"port |w|max after sub-step 1, compute window: {w_worst:.4e}")
-    if not 1.0e-05 <= w_worst <= 1.0e-01:
+    w_worst = max(float(np.abs(state[pf]["w"][NG:NG + N, NG:NG + N, 0]).max())
+                  for pf in range(6))
+    print(f"port |w|max after the full step, k=0 compute window: "
+          f"{w_worst:.4e}")
+    if not 1.0e-04 <= w_worst <= 1.0e-01:
         raise SystemExit(
-            f"INSTRUMENT CONTROL FAILED: |w|max is {w_worst:.4e} after one "
-            f"sub-step. The established sub-step-1 field peaks near "
-            f"4.8e-03 m/s; this is not that configuration, and nothing "
-            f"below would be about the gap under investigation.")
+            f"INSTRUMENT CONTROL FAILED: |w|max is {w_worst:.4e}. The "
+            f"established field on this deck peaks near 5e-03 m/s at k=0; "
+            f"this is not that configuration, and nothing below would be "
+            f"about the gap under investigation.")
 
     # THE MEASUREMENT.
     rows = []
