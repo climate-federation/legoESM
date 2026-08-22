@@ -1140,6 +1140,13 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
+        # FOUR values, and the fourth is the loop count. The cosine window runs
+        # PAST t+dt so that it is centred there, so its loop count is not the
+        # substep count -- taking the substep count instead would truncate the
+        # window and change the filter. A work-in-progress commit reduced this
+        # to a three-value unpack, which cannot even execute: the default
+        # barotropic path on this grid raised on its first step, and every test
+        # that steps it has been red since.
         w_filter, w_total, w_transport, n_loop = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )

@@ -2645,8 +2645,13 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None,
         been built with the SAME ``rho0`` (``make_eos_fn(rho0=...)``) so the
         value cancels; otherwise the recovered depth is stretched.
     rho0 : float or None
-        Reference density for the geometric ``p = rho0*g*gdept``.  ``None``
-        (default) uses the module ``rho_0``.  Ignored for ``"insitu"``.
+        Boussinesq reference density.  ``None`` (default) uses the module
+        ``rho_0``.  Used on BOTH depth paths, not only the geometric one: the
+        in-situ integral's surface term is ``rho_ref*g*eta``, so a run pinning
+        its own reference density and not passing it here gets the module's in
+        that term while everything downstream uses its own.  (The line this
+        replaces said "ignored for insitu"; it was read as licence to pass
+        gravity alone, and a reviewer caught that the code does no such thing.)
 
     Returns
     -------

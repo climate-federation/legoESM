@@ -96,7 +96,8 @@ def make_vertical_mixing_physics(
     elif scheme == "constant":
         return _make_constant(config, apply_diffusion=apply_diffusion)
     elif scheme == "richardson":
-        return _make_richardson(config, apply_diffusion=apply_diffusion)
+        return _make_richardson(config, apply_diffusion=apply_diffusion,
+                                constants_config=constants_config)
     elif scheme == "kpp":
         return _make_kpp(config, apply_diffusion=apply_diffusion,
                          constants_config=constants_config)
@@ -134,7 +135,8 @@ def _make_constant(config: VerticalMixingConfig,
 
 
 def _make_richardson(config: VerticalMixingConfig,
-                     apply_diffusion: bool = True) -> Callable:
+                     apply_diffusion: bool = True,
+                     constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -146,9 +148,12 @@ def _make_richardson(config: VerticalMixingConfig,
         # in-situ path stays bit-identical.  eos_fn is None here (this factory
         # does not thread a recipe EOS) → Wright, matching the density path.
         if cfg.n2_mode == "adiabatic":
-            rho, p_cell = _compute_rho_and_pressure(state, z_coord, J)
+            rho, p_cell = _compute_rho_and_pressure(
+                state, z_coord, J, g=constants_config.g,
+                rho0=constants_config.rho_0)
         else:
-            rho = _compute_rho(state, z_coord, J)
+            rho = _compute_rho(state, z_coord, J, g=constants_config.g,
+                               rho0=constants_config.rho_0)
             p_cell = None
         out = richardson_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,

@@ -196,3 +196,27 @@ def test_default_filter_path_steps_the_model(time_filter):
     # The step did something: the bump spread and spun up a flow.
     assert not np.allclose(eta, np.asarray(eta0)), "eta did not evolve"
     assert np.max(np.abs(np.asarray(state.u.data))) > 0.0, "no flow generated"
+
+
+def test_the_window_really_extends_past_the_step():
+    """Why the fourth value is not the substep count, stated numerically.
+
+    The two tests above catch a caller that drops the value or re-hardcodes
+    it. This pins the reason either would be wrong: the window is centred on
+    the END of the step, so it runs on past it -- 2n-1 substeps for n. If the
+    two were ever equal, the substitution would be harmless and both checks
+    above would be measuring nothing.
+
+    Merged here from a second gate written for the same defect on another
+    branch, so this file is the one place the rule lives.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.barotropic_common import compute_filter_weights
+
+    n = 6
+    for use_cosine in (False, True):
+        _, _, _, n_loop = compute_filter_weights(n, jnp.float64,
+                                                 use_cosine=use_cosine)
+        assert n_loop == 2 * n - 1, (
+            f"the window covers {n_loop} substeps, not the {2 * n - 1} a "
+            f"window centred on the end of the step needs")
