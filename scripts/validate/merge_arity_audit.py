@@ -60,7 +60,13 @@ def _returns(tree):
                 continue
             if isinstance(sub.value, ast.Tuple) and not any(
                     isinstance(e, ast.Starred) for e in sub.value.elts):
-                out[node.name].add(len(sub.value.elts))
+                # Skip `return ()` -- an empty-input guard clause, never the
+                # contract an unpack site is written against. Counting it made
+                # every caller of pad_with_pole_bc_lat_multi and
+                # thomas_solve_shared look wrong, because their real return is
+                # `body(*fields)`, which this syntactic pass cannot see.
+                if sub.value.elts:
+                    out[node.name].add(len(sub.value.elts))
     return out
 
 

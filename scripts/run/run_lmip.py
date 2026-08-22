@@ -666,7 +666,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
-    p.add_argument("--land-surface-scheme", default="simple_seb",
+    p.add_argument("--land-surface-scheme", default="two_leaf",
                    choices=["simple_seb", "two_leaf", "clm_ml"],
                    dest="land_surface_scheme",
                    help="Surface energy-balance scheme. 'simple_seb' (default) = "

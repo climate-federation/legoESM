@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 # AMIP prescribes no interactive CO2.  Routing the configured / transient CO2
 # here is NOT implemented: every land photosynthesis call uses this value.
 _CO2_PPMV_DEFAULT = 412.0
+# Visible share of surface solar irradiance, for collapsing a canopy's two
+# band albedos into the one broadband number radiation asks for.  ~0.43 of
+# surface shortwave falls below 0.7 um in a clear-sky standard atmosphere
+# (the PAR fraction the land schemes already assume); the remainder is NIR.
+_VIS_FRAC_SOLAR = 0.43
 # Guards 1/(1-albedo) as albedo -> 1 when undoing the albedo to recover
 # downwelling shortwave from the net.
 _ALBEDO_TO_ONE_FLOOR = 1.0e-3
@@ -2294,7 +2299,19 @@ class PhysicsPipeline:
         if _land_active:
             if _ml_active:
                 T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
-                alb_land = ad.unflatten_2d(_lmp_rad.albedo_veg)
+                # Radiation wants ONE broadband land albedo.  A bulk surface
+                # supplies it directly as ``albedo_veg``; a CANOPY parameter set
+                # has no such field — it carries the two solar BAND albedos and
+                # lets the canopy do its own radiative transfer.  Combine them
+                # rather than crash, which is what reading ``albedo_veg`` did on
+                # every structured-grid canopy run (codex).
+                _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
+                if _alb_veg is None:
+                    alb_land = ad.unflatten_2d(
+                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                else:
+                    alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
             else:
                 # Snow-brightened land albedo (snow-albedo feedback); the

@@ -49,6 +49,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.column_stepping import (
@@ -60,6 +61,7 @@ from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
+    min_tracer_slots,
 )
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
@@ -114,6 +116,7 @@ def make_column_state(
     *,
     T_profile: jax.Array,
     q_v_profile: jax.Array | None = None,
+    q_c_profile: jax.Array | None = None,
     u: float | jax.Array = 0.0,
     v: float | jax.Array = 0.0,
     p_s: float = 1.0e5,
@@ -163,6 +166,21 @@ def make_column_state(
                 name="q_v", dims=_DIMS_3D, units="kg/kg",
             )
         }
+
+    # Optional cloud-liquid IC (a saturated-start moist column: seeding q_c keeps
+    # total water q_t = q_v + q_c consistent instead of dropping the cloud mass).
+    if q_c_profile is not None:
+        q_c_arr = jnp.asarray(q_c_profile, dtype=dtype)
+        if q_c_arr.size != nlev:
+            raise ValueError(
+                f"q_c_profile must have {nlev} elements, got {q_c_arr.size}"
+            )
+        if tracers is None:
+            tracers = {}
+        tracers["q_c"] = Field(
+            data=q_c_arr.reshape(1, 1, 1, nlev),
+            name="q_c", dims=_DIMS_3D, units="kg/kg",
+        )
 
     return HydrostaticState(
         u=Field(data=u_data, name="u", dims=_DIMS_3D, units="m/s"),
@@ -462,6 +480,7 @@ class SCMHistory(NamedTuple):
     v: jax.Array           # (n_saved, nlev)
     p_s: jax.Array         # (n_saved,)
     q_v: jax.Array | None  # (n_saved, nlev) or None
+    q_c: jax.Array | None = None  # (n_saved, nlev) cloud liquid, or None
 
 
 class SingleColumnModel:
@@ -800,6 +819,7 @@ class SingleColumnModel:
         dt: float,
         T_profile: jax.Array,
         q_v_profile: jax.Array | None = None,
+        q_c_profile: jax.Array | None = None,
         u: float | jax.Array = 0.0,
         v: float | jax.Array = 0.0,
         p_s: float = 1.0e5,
@@ -831,6 +851,13 @@ class SingleColumnModel:
         q_v_profile
             Optional initial water-vapor mixing ratio [kg/kg], shape
             ``(nlev,)``. When omitted no tracers are carried.
+        q_c_profile
+            Optional initial cloud-liquid mixing ratio [kg/kg], shape
+            ``(nlev,)``, seeding the ``q_c`` tracer at t=0. Used to start a
+            moist column from a saturation-adjusted state (a cloudy start)
+            so total water ``q_t = q_v + q_c`` is preserved rather than the
+            cloud mass being dropped. ``None`` (default) starts cloud-free;
+            an active microphysics scheme still pre-allocates ``q_c`` to zero.
         u, v
             Initial wind components [m/s]. Scalars initialize uniform winds;
             ``(nlev,)`` profiles initialize level-varying winds, indexed
@@ -893,23 +920,82 @@ class SingleColumnModel:
             q_v_profile = jnp.zeros(nlev)
         state = make_column_state(
             nlev, T_profile=T_profile, q_v_profile=q_v_profile,
+            q_c_profile=q_c_profile,
             u=u, v=v, p_s=p_s, phis=phis, dtype=dtype,
         )
-        # Pre-allocate condensate/precip species that microphysics or
-        # convection may emit, so the first physics call sees a
-        # consistent tracer registry rather than relying on the
-        # auto-materialisation path in _apply_tendencies.
-        if state.tracers is not None and physics_config.microphysics.scheme != "none":
-            extra_keys = ("q_c", "q_r", "q_i", "q_s")
-            if microphysics_substeps > 1:
-                extra_keys = extra_keys + ("q_g",)
+        # Allocate the tracers the configured microphysics consumes, taking
+        # names, ORDER and units from the same registry the global model uses
+        # (`make_full_moisture_registry`) rather than a hand-written list.
+        #
+        # Why this matters beyond tidiness: the physics bridge substitutes
+        # ZEROS for any tracer the state does not carry, silently. The column
+        # used to carry the six water masses and nothing else, so a two-moment
+        # scheme ran with its rain- and ice-number variables pinned at zero
+        # every step. Measured on a fixed column, one field changed at a time:
+        # zero rain number switches graupel formation off outright
+        # (3.54e-7 -> exactly 0 kg/kg/s) and changes the rain tendency by 2.8x
+        # in an ice-free warm column. Rain mass with zero rain number is a
+        # degenerate state -- all the water in zero drops -- so what those runs
+        # measured was the scheme hitting its own guards. Every other lane
+        # (plane, MPAS, LES, the global driver) carries all nine tracers and
+        # raises when a state is too small; this brings the column to the same
+        # contract.
+        if physics_config.microphysics.scheme != "none":
+            scheme_name = physics_config.microphysics.scheme
+            registry = make_full_moisture_registry()
+            units = {t.name: t.units for t in registry.tracers}
+            mass_names = tuple(t.name for t in registry.tracers
+                               if t.units == "kg/kg")
+            # SIZE: the number species are per scheme (kessler needs none, the
+            # two-moment schemes need all three), but every MASS is allocated
+            # whenever microphysics is active. Sizing by min_tracer_slots alone
+            # would give kessler only q_v/q_c/q_r, and the bridge's tendency
+            # dict carries all six masses for every scheme, so q_i and q_s
+            # would reappear at step 1 -- the tracer-set growth this
+            # allocation exists to prevent, since a carry whose pytree changes
+            # between steps cannot go through lax.scan/lax.cond.
+            #
+            # The scheme's own sub-config is passed, not just its name: SDM
+            # needs two slots for condensation but EIGHT with
+            # column_do_coalescence, and the name alone cannot say which.
+            n_slots = max(
+                int(min_tracer_slots(
+                    scheme_name,
+                    getattr(physics_config.microphysics, scheme_name, None))),
+                len(mass_names),
+            )
+            wanted = registry.names[:n_slots]
+            template = state.tracers["q_v"].data          # (1, 1, 1, nlev)
             new_tracers = dict(state.tracers)
-            for k in extra_keys:
-                if k not in new_tracers:
-                    zeros = jnp.zeros_like(state.tracers["q_v"].data)
-                    new_tracers[k] = Field(
-                        data=zeros, name=k, dims=_DIMS_3D, units="kg/kg",
-                    )
+            for name in wanted:
+                if name in new_tracers:
+                    continue
+                # EVERY species starts empty, the numbers included.
+                #
+                # Zero is not a gap here, it is the documented signal for a
+                # SPECIFIED droplet concentration: the cloud optics read
+                # N_c <= 1 as "this scheme does not predict droplet number",
+                # substitute their own specified value, and reconstruct the
+                # IN-CLOUD condensate as q_c / cloud_fraction to pair a
+                # specified in-cloud number with in-cloud water. Seeding a
+                # large N_c instead would take the PROGNOSTIC branch, pairing
+                # that same in-cloud number with GRID-MEAN water: droplets too
+                # small by cf^(1/3), optical depth too large by cf^(-1/3), a
+                # spurious brightening that grows without bound as a layer
+                # breaks up -- worst exactly in the subsiding regimes that
+                # should be the dark end of the shortwave contrast.
+                #
+                # Rain and ice are likewise grown by the model, never
+                # prescribed, so zero mass with zero number is the consistent
+                # empty state. If a future case ever SUPPLIES initial rain or
+                # ice it must supply the matching number too: mass with zero
+                # number is degenerate -- all the water in no particles -- and
+                # the first step would either hit a guard or sediment the
+                # condensate out in one go.
+                new_tracers[name] = Field(
+                    data=jnp.zeros_like(template), name=name,
+                    dims=_DIMS_3D, units=units[name],
+                )
             state = state._replace(tracers=new_tracers)
         microphysics_fn = None
         if (
@@ -1005,6 +1091,28 @@ class SingleColumnModel:
         # active-physics config (Louis / gray rad / MYNN).
         return self.state
 
+    def pure_step(self, state, phys_state, t_seconds):
+        """One integration step returning ``(new_state, new_phys_or_None)`` — exactly what
+        :meth:`step` applies for the same stage time — WITHOUT mutating ``self`` or calling
+        the calendar ``set_time``. Intended as the body of a ``lax.scan`` free-run (one
+        compiled program instead of an ``nsteps`` Python loop; also tractable under
+        ``jax.grad``, which UNROLLS the Python loop).
+
+        Reproducibility caveat: it is a pure function of its three arguments ONLY when the
+        configured physics + forcing are themselves stateless/JAX-pure — i.e. no
+        time-dependent radiation reading ``set_time`` (skipped here), and no
+        externally-stateful forcing callable (iterators/counters, or a ``T_s`` override that
+        mutates a physics closure via ``set_T_sfc_override``). That holds for the LES-suite
+        idealized regimes (constant surface flux, radiation off); a caller outside that
+        contract must use :meth:`step`/:meth:`run`. AB2 threads ``_ab2_prev_tend``
+        statefully, so it is not a pure step and is rejected (use a single-stage integrator
+        for scan)."""
+        if self.time_integrator == "ab2":
+            raise ValueError(
+                "pure_step is undefined for the AB2 integrator (it threads prev_tend "
+                "statefully); use forward_euler/rk2/rk4 for a scan rollout.")
+        return self._step_fn(state, phys_state, self._tend_fn, self.dt, t_seconds)
+
     def run(
         self,
         nsteps: int,
@@ -1021,9 +1129,11 @@ class SingleColumnModel:
         """
         seconds_per_day = 86400.0
         times = []
-        Ts, us, vs, p_ss, qvs = [], [], [], [], []
+        Ts, us, vs, p_ss, qvs, qcs = [], [], [], [], [], []
         has_qv = (self.state.tracers is not None
                   and "q_v" in self.state.tracers)
+        has_qc = (self.state.tracers is not None
+                  and "q_c" in self.state.tracers)
 
         for k in range(nsteps):
             elapsed = k * self.dt
@@ -1039,6 +1149,8 @@ class SingleColumnModel:
                 p_ss.append(self.state.p_s.data[0, 0, 0])
                 if has_qv:
                     qvs.append(self.state.tracers["q_v"].data[0, 0, 0])
+                if has_qc:
+                    qcs.append(self.state.tracers["q_c"].data[0, 0, 0])
 
         history = SCMHistory(
             time=jnp.asarray(times),
@@ -1047,5 +1159,6 @@ class SingleColumnModel:
             v=jnp.stack(vs),
             p_s=jnp.asarray(p_ss),
             q_v=jnp.stack(qvs) if has_qv else None,
+            q_c=jnp.stack(qcs) if has_qc else None,
         )
         return self.state, history

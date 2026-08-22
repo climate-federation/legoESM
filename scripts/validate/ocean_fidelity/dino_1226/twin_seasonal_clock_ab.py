@@ -75,7 +75,7 @@ def main(argv=None) -> int:
     print(f"repo HEAD = {R.head_sha()}   fp64 = {np.zeros(1).dtype}")
     G.instrument_self_checks(A.tmask)
 
-    gaps, day0 = {}, {}
+    gaps, day0, run_configs = {}, {}, {}
     for spec in argv:
         label, path = spec.split("=", 1)
         print(f"\n=== PROVENANCE ===\n  {label:<10}{R.stamp(path)}")
@@ -99,6 +99,16 @@ def main(argv=None) -> int:
             raise SystemExit(
                 f"{label}: seasonal_t0_seconds={t0:.0f} but this label requires "
                 f"{want:.0f} -- the arms are mislabelled or the wrong npz was passed")
+        # The clock is the ONE variable under test, so everything else the two
+        # runs could have differed in has to be read from the artifacts and
+        # shown identical. Checking the clock stamp alone cannot see an arm
+        # that also changed the mixing scheme or the flux placement.
+        if "run_config" not in z:
+            raise SystemExit(
+                f"{label}: {path} carries no run_config stamp, so this cannot "
+                "be shown to be a one-variable comparison; re-run the arm "
+                "with the current kamm_twin_90d.py")
+        run_configs[label] = str(z["run_config"])
         series = D.time_series(path, label)
         if DAY not in series:
             raise SystemExit(f"{label}: no day-{DAY} pair in {path}")
@@ -108,6 +118,14 @@ def main(argv=None) -> int:
 
     if set(gaps) != {"armA", "armB"}:
         raise SystemExit(f"expected labels armA and armB, got {sorted(gaps)}")
+    if run_configs["armA"] != run_configs["armB"]:
+        import difflib
+        diff = "\n".join(difflib.unified_diff(
+            [run_configs["armA"]], [run_configs["armB"]],
+            fromfile="armA", tofile="armB", lineterm=""))
+        raise SystemExit(
+            "the two arms differ in more than the seasonal clock, so this is "
+            f"a confound rather than a one-variable A/B:\n{diff}")
     if not all(np.isfinite(v) for v in gaps.values()):
         raise SystemExit(f"non-finite gap: {gaps}")
     # Both arms must start from the SAME bridged state, or they differ in more

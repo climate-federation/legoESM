@@ -49,18 +49,6 @@ selects the old relative clock (which forces the day-180 twin exactly antiphase
 to NEMO) and prints a loud banner; it exists only to reproduce numbers recorded
 before 2026-08-20, none of which are comparable to NEMO.
 
-VERTICAL LADDER (#1455): a twin only isolates SCHEME differences if both
-models stand on the same grid, so :func:`run_twin` defaults to NEMO's OWN
-vertical ladders -- ``LEGOESM_NEMO_E3T=both``, i.e. NEMO's thickness ladder AND
-its T-point depths (see :func:`resolve_ladder_mode`). Two things this does NOT
-touch: the MODEL-WIDE bridge default, which still resolves to the 1-D reference
-ladder for every other caller; and :func:`_build_twin_state`, which a dozen
-sibling probes import directly and which therefore keeps the grid those probes
-were recorded on. Setting ``LEGOESM_NEMO_E3T`` explicitly still wins,
-``--legacy-1d-ladder`` selects the old 1-D ladder with a loud banner, and the
-two disagreeing is fatal rather than one silently winning. The resolved mode is
-stamped into the npz as ``nemo_ladder_mode``.
-
 Usage
 -----
     python kamm_twin_90d.py <recipe> <out.npz> [--days 90] [--save-3d]
@@ -71,6 +59,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import json
 import os
 import time
 
@@ -93,7 +82,6 @@ from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_restart_en,
 )
 from legoesm.ocean.fidelity.nemo_state_bridge import (
-    NEMO_E3T_MODES,
     bridge_before_state_topo,
     bridge_nemo_to_legoesm_topo,
 )
@@ -225,6 +213,38 @@ def _print_before_bridge_verify(st, before, grid) -> None:
           f"max|d_vb|={d_vb:.3e}", flush=True)
 
 
+def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
+    """Refuse an artifact whose seasonal clock is not the one NEMO is on.
+
+    ``stamped`` is anything with ``__contains__`` and ``__getitem__`` over the
+    stamp names -- an ``npz`` handle or a plain dict.  Returns the pair
+    ``(t0_used, t0_nemo)`` in seconds.
+
+    #1455 and its follow-up.  The first version of this guard rejected only
+    ``t0 == 0``, which let every other manual offset through: an explicit step
+    offset of one stamps 2700 s, still most of a year out of phase with the
+    day-180 restart, and the gate called it a NEMO comparison.  Comparing
+    against the offset read from the restart itself rejects ALL of them.
+    """
+    for name in ("seasonal_t0_seconds", "seasonal_t0_reference_seconds"):
+        if name not in stamped:
+            raise SystemExit(
+                f"{path} carries no {name} stamp -- it predates the seasonal "
+                "clock guard (#1455) and its forcing phase cannot be checked "
+                "against NEMO's. Re-run the twin with the current "
+                "kamm_twin_90d.py.")
+    t0 = float(stamped["seasonal_t0_seconds"])
+    t0_nemo = float(stamped["seasonal_t0_reference_seconds"])
+    if abs(t0 - t0_nemo) > 0.5:
+        raise SystemExit(
+            f"{path} ran with its seasonal forcing at {t0 / 86400.0:.2f} d of "
+            f"the 360-day year, but the NEMO run it is scored against is at "
+            f"{t0_nemo / 86400.0:.2f} d "
+            f"({abs(t0 - t0_nemo) / 86400.0:.2f} d out of phase). That is a "
+            "cross-season comparison, not a fidelity measurement.")
+    return t0, t0_nemo
+
+
 def _restart_elapsed_seconds(path: str) -> float:
     """Model seconds elapsed at the restart, read from the restart ITSELF.
 
@@ -313,128 +333,12 @@ def seasonal_t0_seconds(restart_path: str) -> float:
     return t0_sec
 
 
-# The accepted selections come from the bridge itself (NEMO_E3T_MODES), never
-# re-listed here: a harness that accepted a mode the bridge rejects three calls
-# later would fail deep inside grid construction instead of at the CLI.
-NEMO_LADDER_TWIN_DEFAULT = "both"
-_LADDER_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
-
-
-def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
-    """Which of NEMO's vertical ladders this TWIN hands legoESM, and why.
-
-    #1455.  The bridge (:func:`legoesm.ocean.fidelity.nemo_state_bridge.
-    effective_vertical_scale_factors`) resolves ``LEGOESM_NEMO_E3T`` to ``"off"``
-    when nothing sets it -- i.e. legoESM is built on a 1-D reference ladder that
-    is NOT the ladder the NEMO run integrates with.  That model-wide default is
-    left alone; this changes the default for THIS RUNNER'S twin path only
-    (:func:`run_twin`), where the whole point of the run is that the two models
-    share a grid.  It is deliberately NOT called from :func:`_build_twin_state`,
-    because a dozen sibling probes import that helper directly and must keep the
-    grid they were recorded on.
-
-    Measured cost of the 1-D ladder, two 90-day twin arms from the day-180
-    restart differing ONLY in this mode, bit-identical at day 0, both stable,
-    both under an fp64 precision policy (corrected clock, ``--bridge-before``):
-    day-90 circumpolar channel-band transport error vs NEMO +2.93 Sv on ``"off"``
-    against +0.29 Sv on ``"both"``, and full-section ACC error +1.87 Sv against
-    -0.60 Sv.
-
-    PLAUSIBLE, not confirmed: that it takes BOTH halves because the thickness
-    ladder carries the barotropic component and the depth ladder the baroclinic
-    one.  That split comes from the two half-ladder arms, which were measured at
-    the fp32 control dtype and have NOT been re-run at fp64 -- unlike the two
-    arms quoted above.
-
-    Resolution order, highest first:
-
-      ``LEGOESM_NEMO_E3T`` set  -> that mode, whatever it is    [override kept]
-      ``--legacy-1d-ladder``    -> ``"off"``, with a loud banner
-      nothing                   -> ``"both"``                   [TWIN DEFAULT]
-
-    Setting the variable to something the flag contradicts is FATAL rather than
-    silently letting one win.
-
-    THIS FUNCTION IS PURE apart from its printing: it RETURNS the mode and does
-    NOT write ``LEGOESM_NEMO_E3T``.  It used to write it, because that was the
-    only channel the bridge read, and that write-back was the source of a whole
-    class of defect: a second caller could not tell the operator's setting from
-    the value the first call had planted, so an in-process two-arm sweep silently
-    ran the same grid twice.  No check can separate those two cases -- they are
-    the same string in the same slot -- so the write-back is gone instead, and
-    the resolved mode travels to the bridge as an ARGUMENT (``e3t_mode``).  Two
-    different ladders in one process are now simply two calls.
-    """
-    env = os.environ.get("LEGOESM_NEMO_E3T")
-    if env is not None:
-        if env not in NEMO_E3T_MODES:
-            raise SystemExit(
-                f"Unknown LEGOESM_NEMO_E3T={env!r}: expected one of "
-                f"{', '.join(NEMO_E3T_MODES)}")
-        if legacy_1d_ladder and env != "off":
-            raise SystemExit(
-                f"--legacy-1d-ladder selects the 1-D ladder ('off') but "
-                f"LEGOESM_NEMO_E3T={env!r} selects {env!r}; they disagree. "
-                "Pass one or the other, not both.")
-        source = ("LEGOESM_NEMO_E3T + --legacy-1d-ladder (agreeing)"
-                  if legacy_1d_ladder else "LEGOESM_NEMO_E3T (explicit override)")
-        mode = env
-    elif legacy_1d_ladder:
-        mode, source = "off", "--legacy-1d-ladder"
-    else:
-        mode, source = NEMO_LADDER_TWIN_DEFAULT, "twin default"
-    # The banner is once per MODE per process (repeating it trains people to
-    # ignore it); the one-line statement of the grid is EVERY call, so no twin
-    # can ever be built without its log saying which ladder it stands on.
-    # Keyed to the GRID, not to the default: if someone flips the default back,
-    # the warning must survive rather than vanish with it.
-    if mode != "both" and mode not in _LADDER_ANNOUNCED:
-        _LADDER_ANNOUNCED.add(mode)
-        print("\n" + "!" * 78, flush=True)
-        print(f"!! NON-DEFAULT VERTICAL LADDER: {mode!r}  [{source}]", flush=True)
-        if mode == "off":
-            print("!! This is the 1-D REFERENCE ladder, NOT the grid the NEMO "
-                  "run integrates", flush=True)
-            print("!! with. Measured cost at day 90: +2.93 Sv of circumpolar "
-                  "transport error", flush=True)
-            print("!! against +0.29 Sv on NEMO's own ladders (#1455). Numbers "
-                  "produced here", flush=True)
-            print("!! score legoESM on a grid NEMO does not have.", flush=True)
-        elif mode == "gdept_only":
-            print("!! Mixed ladders: cells from the 1-D thickness ladder, "
-                  "T-points from NEMO's.", flush=True)
-            print("!! Worst level of each grid: this one puts T-points 110.2 m "
-                  "from the centre", flush=True)
-            print("!! of the cell they sit in (at k=32), against 11.3 m on "
-                  "'both' (at k=34).", flush=True)
-            print("!! NEMO's own T-points are not cell centres either, so "
-                  "'both' is offset too --", flush=True)
-            print("!! just 10x less (#1455).", flush=True)
-        else:   # e3t_only
-            print("!! Mixed ladders: cells from NEMO's thickness ladder, "
-                  "T-points from the 1-D one.", flush=True)
-            print("!! Worst WET level of each grid: this one puts T-points "
-                  "97.2 m from the centre", flush=True)
-            print("!! of the cell they sit in (at k=32), against 11.3 m on "
-                  "'both' (at k=34).", flush=True)
-            print("!! It also carries only the barotropic half of the geometry "
-                  "fix, and that", flush=True)
-            print("!! split was measured at fp32 -- PLAUSIBLE, not confirmed "
-                  "(#1455).", flush=True)
-        print("!" * 78 + "\n", flush=True)
-    print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
-          f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own thickness "
-          f"AND T-depth ladders)", flush=True)
-    return mode
-
-
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = False,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
-                       restart_file: str = RESTART_FILE,
-                       e3t_mode: str | None = None):
+                       restart_file: str = RESTART_FILE):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
@@ -464,15 +368,9 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
     """
-    # NOTE: this helper deliberately does NOT resolve the vertical ladder. A
-    # dozen sibling probes import it directly and must keep the grid they were
-    # recorded on; the twin default is applied in run_twin, one level up and
-    # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
-    # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
-                                     e3t_mode=e3t_mode)
+    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     if vmix_scheme is not None:
@@ -593,8 +491,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
              restart_file: str = RESTART_FILE,
-             perturb_seed: int | None = None,
-             legacy_1d_ladder: bool = False) -> bool:
+             perturb_seed: int | None = None) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
     ``perturb_seed``: optional #1492 item-2.2 noise-control lane -- if set,
@@ -607,25 +504,11 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     (non-``--bridge-before``) state carries no before-level T, so there is
     no tb to perturb in lockstep.
     """
-    # Resolved here and handed DOWN as an argument -- nothing is written into the
-    # environment, so two ladders can be built in one process without either
-    # inheriting the other's setting.
-    ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
-        surface_tendency_placement=surface_tendency_placement,
-        e3t_mode=ladder_mode)
-
-    # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
-    # materialized geometry and state (arrays cannot lie about their dtype the
-    # way the policy global can). Shared gate, not a re-derivation.
-    from legoesm.ocean.fidelity.precision_gate import require_fp64
-    if _fp64_requested():
-        require_fp64(br.geometry, st, context="kamm_twin_90d oracle twin")
-    control_dtype_stamp = str(np.asarray(st.T.data).dtype)
-    print(f"PRECISION: materialized state dtype = {control_dtype_stamp}")
+        surface_tendency_placement=surface_tendency_placement)
 
     if perturb_seed is not None:
         rng = np.random.default_rng(perturb_seed)
@@ -654,6 +537,22 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
     # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
     t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
+    # The clock the NEMO run this twin is scored against is actually on, read
+    # from the same restart.  Stamping it next to the clock the twin USED lets
+    # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
+    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    # Everything about this run a comparison must hold fixed.  A two-arm A/B
+    # that changes the clock and something else is a confound, and nothing in
+    # the artifact could see it before this stamp existed.
+    run_config = json.dumps({
+        "recipe": recipe, "n_days": int(n_days),
+        "run_traj": run_traj, "run_stepdump": run_stepdump,
+        "restart_file": restart_file,
+        "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
+        "surface_tendency_placement": surface_tendency_placement,
+        "perturb_seed": perturb_seed,
+    }, sort_keys=True)
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
@@ -744,14 +643,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # #1455: stamp the seasonal-clock offset INTO the artifact so a scorer
         # can read the one variable under test instead of trusting a filename.
         seasonal_t0_seconds=np.float64(t0_sec),
-        # #1455: same reason -- stamp WHICH vertical ladders the bridge handed
-        # legoESM, so the gate can say which grid a score was earned on instead
-        # of inferring it from a filename. This is the value resolve_ladder_mode
-        # RETURNED at the top of this function, not a re-read of the environment
-        # -- provenance must not come from mutable process state.
-        nemo_ladder_mode=np.str_(ladder_mode),
-        # #1455 512517fdc: stamp the precision the arm was built at.
-        control_dtype=np.str_(control_dtype_stamp),
+        # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
+        seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
+        run_config=np.str_(run_config),
     )
     for d in snap_days:
         if d in t3d:
@@ -806,14 +700,6 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
-    p.add_argument("--legacy-1d-ladder", action="store_true",
-                   help="build legoESM on the 1-D REFERENCE vertical ladder "
-                        "(LEGOESM_NEMO_E3T=off) instead of NEMO's own "
-                        "thickness+T-depth ladders. Historical-reproduction "
-                        "mode: it costs +2.93 Sv of day-90 circumpolar "
-                        "transport error against +0.29 Sv on the default "
-                        "(#1455), and prints a loud banner. Fatal if "
-                        "LEGOESM_NEMO_E3T is also set to anything but 'off'.")
     p.add_argument("--perturb-seed", type=int, default=None,
                     help="#1492 item-2.2 noise control: apply a 1e-14-relative "
                          "multiplicative perturbation to the bridged now-level "
@@ -865,7 +751,7 @@ def _smoke_check_vmix_scheme_override():
           f"({base.surface_tendency_placement} -> {_other})")
 
 
-def provenance_gate() -> None:
+def _provenance_gate() -> None:
     """Stamp source provenance and REFUSE to run from a dirty tracked tree.
 
     Added after the 2026-08-19/20 reconciliation (#1455, a009c6812): two runs
@@ -898,32 +784,9 @@ def provenance_gate() -> None:
                 "to run anyway with the dirt list stamped in the log.")
 
 
-def _fp64_requested() -> bool:
-    return os.environ.get("FP64", "1") == "1"
-
-
-def _precision_gate() -> None:
-    """Set the fp64 policy at entry (the materialized check runs later).
-
-    Added after the 0.213 Sv "baseline discrepancy" (#1455, 512517fdc): arms
-    run without the run_fp64.py wrapper silently built the whole oracle
-    comparison at the fp32 policy default (JAX_ENABLE_X64 alone does not set
-    the policy -- skill Rule 1c). This only WRITES the policy; writing and
-    re-reading the same global proves nothing (review a0cd04b8: a backend
-    without f64 hardware clamps the real arrays to f32 while the policy
-    still reads f64). The binding check is require_fp64() on the BUILT
-    geometry+state inside run_twin -- the shared gate every sibling probe
-    uses (ocean/fidelity/precision_gate.py). FP64=0 = deliberate fp32 arm.
-    """
-    from legoesm.core.precision import PrecisionPolicy, set_policy
-    if _fp64_requested():
-        set_policy(PrecisionPolicy.fp64())
-
-
 def main(argv=None):
     args = _parse_args(argv)
-    provenance_gate()
-    _precision_gate()
+    _provenance_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return
@@ -932,8 +795,7 @@ def main(argv=None):
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
-              perturb_seed=args.perturb_seed,
-              legacy_1d_ladder=args.legacy_1d_ladder)
+              perturb_seed=args.perturb_seed)
 
 
 if __name__ == "__main__":

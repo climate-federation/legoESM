@@ -100,3 +100,53 @@ def test_tke_surface_bc_flag():
                         ).tke_surface_bc == "dirichlet"
     with pytest.raises(SystemExit):
         p.parse_args(base + ["--tke-surface-bc", "robin"])
+
+
+def test_the_ported_turbulence_card_must_be_taken_whole():
+    """The two settings are one card in the model being ported.
+
+    The reference turns both on together and the flags' own help calls either
+    one alone a half port. Both directions are checked: an earlier version of
+    this guard refused only the Dirichlet-without-anchor split and silently
+    admitted the anchor-without-Dirichlet one, which is exactly as unported.
+    The permitted combinations are asserted to RETURN, so a guard that
+    rejected everything could not pass this.
+    """
+    import types
+
+    import pytest
+
+    def _args(bc, anchor, allow=False):
+        return types.SimpleNamespace(
+            tke_surface_bc=bc, tke_mxl0_anchor=anchor,
+            allow_half_ported_tke=allow)
+
+    # whole card, either way round: no exception, and nothing returned
+    assert m.validate_tke_pair(_args("dirichlet", "on")) is None
+    assert m.validate_tke_pair(_args("neumann", "off")) is None
+
+    # both halves refused
+    for bc, anchor in (("dirichlet", "off"), ("neumann", "on")):
+        with pytest.raises(SystemExit, match="half port"):
+            m.validate_tke_pair(_args(bc, anchor))
+        # ... unless taken deliberately
+        assert m.validate_tke_pair(_args(bc, anchor, allow=True)) is None
+
+
+def test_the_half_port_guard_runs_before_the_driver_does_any_work():
+    """The guard has to be reached from the entry point, not just exist.
+
+    A guard nothing calls is not a guard, and this one has to fire before the
+    mesh is read: a run that spends its allocation and then refuses is no
+    better than one that does not refuse.
+    """
+    import inspect
+
+    src = inspect.getsource(m.main)
+    body = src.split("\n")
+    called_at = next(i for i, line in enumerate(body)
+                     if "validate_tke_pair(" in line)
+    mesh_at = next((i for i, line in enumerate(body) if "load_mesh" in line),
+                   len(body))
+    assert called_at < mesh_at
+

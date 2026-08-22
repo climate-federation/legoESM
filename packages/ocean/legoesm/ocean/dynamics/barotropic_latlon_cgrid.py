@@ -1140,11 +1140,13 @@ def _compute_weights(config, n_substeps: int, dtype, substep_scale: int = 1):
                 n_substeps, dtype, substep_scale=substep_scale))
     else:
         use_cosine_filter = config.barotropic.barotropic_time_filter == "cosine"
-        # compute_filter_weights returns FOUR values (the fourth is the loop
-        # count). The merge of PR #1638 left this site unpacking three while
-        # the MPAS site unpacked four, which would raise at the first
-        # barotropic step on the lat-lon C-grid path -- the tripole OMIP
-        # production path -- for every filter except the boxcar branch above.
+        # FOUR values, and the fourth is the loop count. The cosine window runs
+        # PAST t+dt so that it is centred there, so its loop count is not the
+        # substep count -- taking the substep count instead would truncate the
+        # window and change the filter. A work-in-progress commit reduced this
+        # to a three-value unpack, which cannot even execute: the default
+        # barotropic path on this grid raised on its first step, and every test
+        # that steps it has been red since.
         w_filter, w_total, w_transport, n_loop = compute_filter_weights(
             n_substeps, dtype, use_cosine=use_cosine_filter,
         )
