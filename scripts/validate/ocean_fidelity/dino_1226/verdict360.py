@@ -194,31 +194,41 @@ def lego_cmd(out_dir, i):
 
 
 def run_lego(out_dir, gpus):
-    """Launch every missing member, at most len(gpus) at a time, one per GPU."""
+    """Launch every missing member, one per GPU, at most len(gpus) at a time.
+
+    Members are pinned to a GPU SLOT and a slot is refilled only after the run
+    occupying it has exited.  The obvious spelling -- pick the GPU from the
+    current queue length, then drain -- hands the next member a device that is
+    still busy, because the drain happens after the choice.
+    """
     os.makedirs(out_dir, exist_ok=True)
     todo = [i for i in range(N_MEM) if not os.path.exists(lego_npz(out_dir, i))]
     for i in range(N_MEM):
         if i not in todo:
             print(f"[skip] {lego_npz(out_dir, i)} exists", flush=True)
-    running = []
-    for i in todo:
-        gpu = gpus[len(running) % len(gpus)]
-        while len(running) >= len(gpus):
-            j, pr, fh = running.pop(0)
-            rc = pr.wait()
-            fh.close()
-            print(f"[done] {member_name(j)} rc={rc}", flush=True)
+    slots = {g: None for g in gpus}          # gpu -> (member, Popen, filehandle)
+
+    def _reap(gpu):
+        j, pr, fh = slots[gpu]
+        rc = pr.wait()
+        fh.close()
+        slots[gpu] = None
+        print(f"[done] {member_name(j)} on GPU {gpu} rc={rc}", flush=True)
+
+    for n, i in enumerate(todo):
+        gpu = gpus[n % len(gpus)]
+        if slots[gpu] is not None:
+            _reap(gpu)
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu, JAX_ENABLE_X64="1",
                    XLA_PYTHON_CLIENT_PREALLOCATE="false")
         cmd = lego_cmd(out_dir, i)
         print("RUN:", " ".join(cmd), f"[CUDA_VISIBLE_DEVICES={gpu}]", flush=True)
         fh = open(lego_log(out_dir, i), "w")
-        running.append((i, subprocess.Popen(cmd, env=env, stdout=fh,
-                                            stderr=subprocess.STDOUT), fh))
-    for j, pr, fh in running:
-        rc = pr.wait()
-        fh.close()
-        print(f"[done] {member_name(j)} rc={rc}", flush=True)
+        slots[gpu] = (i, subprocess.Popen(cmd, env=env, stdout=fh,
+                                          stderr=subprocess.STDOUT), fh)
+    for gpu in gpus:
+        if slots[gpu] is not None:
+            _reap(gpu)
 
 
 def lego_completed(log_path):

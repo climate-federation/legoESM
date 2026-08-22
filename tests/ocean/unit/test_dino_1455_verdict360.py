@@ -103,3 +103,36 @@ def test_the_full_section_metric_is_flagged_as_sign_mixing(V):
     assert set(V.SIGN_MIXING) <= set(V.KEYS)
     for k in ("g_south", "g_band", "g_north", "band", "band_c"):
         assert k in V.KEYS and k not in V.SIGN_MIXING
+
+
+def test_no_two_concurrent_members_share_a_gpu(V, tmp_path, monkeypatch):
+    """The scheduler pins a member to a GPU slot and refills the slot only
+    after the run occupying it exits.  Picking the GPU from the queue length
+    and draining afterwards hands member 3 the device member 1 is still on --
+    two 30 GB JAX processes on one 32 GB card.
+    """
+    live = {}          # gpu -> member currently holding it
+    order = []
+
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, cwd=None):
+            self.gpu = env["CUDA_VISIBLE_DEVICES"]
+            self.member = cmd[cmd.index("--perturb-seed") + 1] \
+                if "--perturb-seed" in cmd else "control"
+            assert live.get(self.gpu) is None, (
+                f"member {self.member} launched on GPU {self.gpu} while "
+                f"{live[self.gpu]} still holds it")
+            live[self.gpu] = self.member
+            order.append((self.member, self.gpu))
+
+        def wait(self):
+            live[self.gpu] = None
+            return 0
+
+    monkeypatch.setattr(V.subprocess, "Popen", FakePopen)
+    V.run_lego(str(tmp_path), ["0", "1"])
+    assert len(order) == V.N_MEM
+    assert all(v is None for v in live.values())
+    # both devices were actually used -- a scheduler that serialises onto one
+    # GPU would also pass the no-collision assert
+    assert {g for _, g in order} == {"0", "1"}
