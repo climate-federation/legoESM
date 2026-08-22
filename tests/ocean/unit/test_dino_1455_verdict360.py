@@ -136,3 +136,115 @@ def test_no_two_concurrent_members_share_a_gpu(V, tmp_path, monkeypatch):
     # both devices were actually used -- a scheduler that serialises onto one
     # GPU would also pass the no-collision assert
     assert {g for _, g in order} == {"0", "1"}
+
+
+# ---------------------------------------------------------------------------
+# review round 1: the statistics the two reviews required
+# ---------------------------------------------------------------------------
+def test_permutation_test_floor_is_two_in_seventy(V):
+    """A perfectly separated 4-vs-4 can only reach 2/70 = 0.029. Printing that
+    as `p = 0.029` without saying it is the design's floor reads like a result
+    and is partly a sample-size artifact."""
+    sep = {"lego": {i: {90: {"x": float(v)}} for i, v in enumerate([1, 2, 3, 4])},
+           "nemo": {i: {90: {"x": float(v)}} for i, v in enumerate([11, 12, 13, 14])}}
+    p, obs = V.permutation_p(sep, "x", 90)
+    assert p == pytest.approx(2.0 / 70.0)
+    assert obs == pytest.approx(10.0)
+
+
+def test_permutation_test_cannot_manufacture_significance(V):
+    ident = {s: {i: {90: {"x": float(v)}} for i, v in enumerate([1, 2, 3, 4])}
+             for s in ("lego", "nemo")}
+    assert V.permutation_p(ident, "x", 90)[0] == pytest.approx(1.0)
+
+
+def test_permutation_test_takes_intermediate_values(V):
+    """Otherwise it is a two-valued indicator dressed as a p-value."""
+    mid = {"lego": {i: {90: {"x": float(v)}} for i, v in enumerate([1, 2, 3, 9])},
+           "nemo": {i: {90: {"x": float(v)}} for i, v in enumerate([2, 4, 5, 6])}}
+    p = V.permutation_p(mid, "x", 90)[0]
+    assert 2.0 / 70.0 < p < 1.0
+
+
+def test_the_unresolved_band_sits_above_the_registered_rule(V):
+    """The registered 2x rule decides; the Welch constant only marks where that
+    rule is over-confident about an ESTIMATED floor. If the order ever flipped,
+    the advisory would start overriding the pre-registration."""
+    assert V.K_PREREG == 2.0
+    assert V.K_WELCH > V.K_PREREG
+    # and the advisory must never turn a registered YES into anything else
+    assert V.verdict(1.5, 1.0) == "YES"
+
+
+def test_latitude_groups_partition_the_mean_reduced_full_section(V):
+    """acc is a MEDIAN over longitudes and the groups are MEANS, so the groups
+    can only be checked against the MEAN-reduced full section. all_metrics
+    asserts it at score time; this pins that the row exists to check against."""
+    assert "acc_mean" in V.KEYS
+    assert "acc_mean" not in V.SIGN_MIXING
+    assert "acc" in V.SIGN_MIXING
+
+
+def test_namelist_edit_hits_exactly_one_line_and_never_the_commented_one(
+        V, tmp_path, monkeypatch):
+    """The single most consequential text edit in the file. The donor namelist
+    carries a commented `!nn_itend` directly above the live one; matching it
+    would produce a run of the wrong length that still looks correct."""
+    donor = tmp_path / "src"
+    donor.mkdir()
+    (donor / "namelist_cfg").write_text(
+        "&namrun\n"
+        "   nn_it000    =       5761\n"
+        "   !nn_itend    =       32     ! commented decoy\n"
+        "   nn_itend    =       8640   ! the live one\n"
+        "   nn_stock    =        320\n"
+        "/\n")
+    (donor / "namelist_ref").write_text("ref\n")
+    monkeypatch.setattr(V, "NEMO_SRC", str(donor))
+    monkeypatch.setattr(V, "NEMO_CERT", str(tmp_path / "fake_nemo"))
+    (tmp_path / "fake_nemo").write_text("binary")
+    monkeypatch.setattr(V, "nemo_dir", lambda i: str(tmp_path / f"M{i}"))
+    monkeypatch.setattr(V.P, "SRC", tmp_path / "restart.nc")
+    (tmp_path / "restart.nc").write_text("restart")
+    monkeypatch.setattr(V.P, "perturb", lambda seed, d: {"max_abs_tn_diff": 1e-12})
+    V.setup_nemo()
+    out = (tmp_path / "M0" / "namelist_cfg").read_text().splitlines()
+    live = [ln for ln in out if ln.strip().startswith("nn_itend")]
+    decoy = [ln for ln in out if ln.strip().startswith("!nn_itend")]
+    assert len(live) == 1 and str(V.KT_END) in live[0]
+    assert len(decoy) == 1 and "32" in decoy[0], "the decoy must be untouched"
+    # every other line survives byte-for-byte
+    src = (donor / "namelist_cfg").read_text().splitlines()
+    assert [l for l in out if not l.strip().startswith("nn_itend")] == \
+           [l for l in src if not l.strip().startswith("nn_itend")]
+
+
+def test_setup_refuses_a_directory_that_already_carries_output(
+        V, tmp_path, monkeypatch):
+    """Scoring a mix of an old run's states and a new run's is a silent
+    confound; the pre-registration's `nothing existing is overwritten` was
+    false of these four directories."""
+    donor = tmp_path / "src"
+    donor.mkdir()
+    (donor / "namelist_cfg").write_text("   nn_itend    =       8640\n")
+    (donor / "namelist_ref").write_text("ref\n")
+    monkeypatch.setattr(V, "NEMO_SRC", str(donor))
+    monkeypatch.setattr(V, "nemo_dir", lambda i: str(tmp_path / "M0"))
+    (tmp_path / "M0").mkdir()
+    (tmp_path / "M0" / "time.step").write_text("9999\n")
+    with pytest.raises(SystemExit, match="already carries"):
+        V.setup_nemo()
+
+
+def test_scored_day_cadence_matches_the_donor_namelist(V):
+    """The restart cadence is nn_stock in the donor namelist, not a constant
+    this test is free to invent -- if the source changes, this must go red."""
+    import re
+    src = f"{V.NEMO_SRC}/namelist_cfg"
+    txt = open(src).read()
+    m = [ln for ln in txt.splitlines()
+         if ln.strip().startswith("nn_stock") and "=" in ln]
+    assert len(m) == 1, m
+    stock = int(re.search(r"=\s*(\d+)", m[0]).group(1))
+    cadence_days = stock // V.G.STEPS_PER_DAY
+    assert all(d % cadence_days == 0 for d in V.SCORE_DAYS), cadence_days
