@@ -563,3 +563,84 @@ def test_barotropic_drag_rate_partial_now_velocity_raises():
             barotropic_substeps_latlon_cgrid(
                 state, 600.0, 2, grid, z, config,
                 add_barotropic_coriolis=False, **kw)
+
+
+# ------------------------------------ #1455 implicit drag MAGNITUDE (factor 2) ---
+
+def test_drag_in_matrix_diagonal_magnitude_matches_nemo():
+    """The implicit bottom-drag term on the tridiagonal diagonal must carry
+    NEMO's prefactor, not twice it.
+
+    DERIVED from NEMO, not from the code under test.  dynzdf.F90 builds the
+    momentum diagonal as ``zwd = 1 - zzwi - zzws`` (:186) and then, under
+    ``ln_drgimp`` (DINO's setting), subtracts the bottom drag at :296::
+
+        zwd(iku) -= zDt_2 * ( rCdU_bot(i+1,j) + rCdU_bot(i,j) ) / e3u(iku,Kaa)
+
+    with ``zDt_2 = rDt * 0.5`` (:97).  The bracket is the SUM of the two
+    T-point rates, so ``zDt_2 * sum == rDt * average``; in this model's
+    positive convention (``r_eff = -rCdU_bot >= 0``, and ``r_eff`` IS that
+    average) the diagonal contribution is
+
+        extra_diag = rDt * r_eff / e3u          (NOT 2 * rDt * r_eff / e3u)
+
+    The same identity is visible in the VISCOSITY of the same matrix, which is
+    the independent check that ``rDt`` is the right prefactor: NEMO's
+    ``zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw)`` (:182-183) equals
+    ``-rDt*avm_avg/(e3u*e3uw)``, and this model's solver uses
+    ``alpha = dt*A_v_avg/(dz*dz_half)`` (implicit_solver.py:325) -- so ``dt``
+    already carries NEMO's half-times-sum, and the drag must not apply it again.
+
+    With ``A_v = 0`` the tridiagonal decouples (alpha = beta = 0, so a = c = 0
+    and ``b = 1 + extra_diag``) and the bottom cell reduces to a scalar:
+
+        u_bot_new = u_bot_old / (1 + dt * r_eff / dz_bot)
+
+    which is analytically checkable and separates the two candidate prefactors
+    by ~40% at the parameters below.
+    """
+    # The fixture already defaults A_v = K_v = 0 and implicit_vertical_mixing
+    # on, which is exactly the decoupled regime this derivation needs.
+    grid, z, state, config = _partial_cell_channel(
+        H_max=200.0,                       # shallow => dt*r/dz is O(1), not O(1e-6)
+        # The FULL NEMO composition, because the construction guard requires it
+        # (drag_in_matrix + explicit_substep demands the in-subcycle drag).  The
+        # analytic form below is UNCHANGED by it: with uniform flow the depth
+        # mean IS u0, so the baroclinic residual is zero everywhere, the RHS
+        # correction puts -dt*r/dz*u0 in the bottom cell, the solve divides by
+        # (1 + dt*r/dz), and re-adding the mean gives
+        #     u0 - u0*(dt*r/dz)/(1+dt*r/dz) = u0/(1 + dt*r/dz)
+        # -- identical.  That makes this one assertion cover BOTH places the
+        # prefactor appears (the diagonal and the baroclinic-only RHS term).
+        zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True,
+        barotropic_drag_substep=True)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    model = LatLonCGridOceanModel(grid, z, config)
+    u0 = 0.5
+    state = _uniform_flow(state, u0, 0.0)
+    dt = 3600.0
+
+    out = model._apply_implicit_vertical_mixing(
+        state, dt, None, A_v_phys=jnp.zeros_like(state.u.data),
+        do_tracers=False)
+    s_new = out if hasattr(out, "u") else out[0]
+
+    # Sample at the column's OWN bottom level, not the last index: with a
+    # partial-cell coordinate the deepest ACTIVE level is bottom_level, and on
+    # this flat bathymetry the face bottom (min of the two adjacent columns)
+    # coincides with it.
+    kbot = int(np.asarray(z.bottom_level)[2, 3])
+    dz_bot = float(np.asarray(z.h_partial)[2, 3, kbot])
+    r_eff = CD0 * float(np.sqrt(u0 * u0 + KE0))
+    expect = u0 / (1.0 + dt * r_eff / dz_bot)          # NEMO
+    wrong = u0 / (1.0 + 2.0 * dt * r_eff / dz_bot)     # the doubled prefactor
+    # The two predictions must be far apart at the tolerance asserted below, or
+    # the test could not discriminate (a control on the control).
+    assert abs(expect - wrong) / abs(expect) > 0.1, (
+        f"prefactors not separated: expect={expect:.6f} wrong={wrong:.6f} "
+        f"(dz_bot={dz_bot}, r={r_eff:.3e})")
+    u_bot = np.asarray(s_new.u.data)[2, 2:-1, kbot]
+    np.testing.assert_allclose(u_bot, expect, rtol=1e-6)

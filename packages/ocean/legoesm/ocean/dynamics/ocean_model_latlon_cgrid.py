@@ -6722,34 +6722,27 @@ class LatLonCGridOceanModel:
             # (no 1/2), with zDt_2 = the physical timestep (not the 2*dt
             # leapfrog form despite the name). ``_r_eff_{u,v}`` is
             # ``nemo_bottom_drag_rate_faces``'s 0.5*(...) AVERAGE of those
-            # same two T-point rates (the shared helper used elsewhere for
-            # the RHS drag kick), so reproducing NEMO's sum from the
-            # average requires the explicit factor of 2 here.
+            # same two T-point rates.  NEMO's zDt_2 = rDt*0.5 (:97) multiplies
+            # the SUM, i.e. zDt_2*sum == rDt*average, and ``dt_mom`` here IS
+            # rDt -- so the average is already correctly scaled and NO extra
+            # factor of 2 belongs here.  The comment this replaced argued the
+            # opposite and the code carried a 2x for it (#1455).
             #
-            # *** THIS REASONING IS WRONG AND THE TERM IS 2x NEMO (#1455, found
-            # by adversarial physics review, verified independently against the
-            # VISCOSITY in this same matrix -- named here, deliberately NOT
-            # fixed in the time-level change, because halving a drag magnitude
-            # is its own one-variable experiment). ***
-            #   NEMO   (dynzdf.F90:296): zwd -= zDt_2*(rCdU(i+1)+rCdU(i))/e3u
-            #          with zDt_2 = rDt*0.5 (:97), so = rDt * r_avg / e3u.
-            #   here:  2.0 * dt_mom * r_avg / dz, and dt_mom = rdt (the
-            #          dt_mom_ratio default is 1.0), so = 2 * rDt * r_avg / dz.
-            # The decisive cross-check is the viscosity in the SAME tridiagonal:
-            # NEMO's zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw) = -rDt*avm_avg/
-            # (e3u*e3uw) (:182-185), and ours is alpha = dt_mom*A_v_avg/(dz*
-            # dz_half) (implicit_solver.py:325) -- they agree EXACTLY, which is
-            # what proves dt_mom already absorbs NEMO's zDt_2-times-sum.  The
-            # drag line then applies that same factor a second time.  The
-            # zdf_baroclinic_only RHS correction below carries the identical 2x,
-            # so the two are self-consistent with each other and both off by 2
-            # against dynzdf.F90:156-159.  Sign is CORRECT either way (raising
-            # r_eff raises the diagonal, which damps).
+            # THE DECISIVE CROSS-CHECK is the VISCOSITY in this same
+            # tridiagonal, not the drag line itself.  NEMO (:182-183):
+            #   zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw) = -rDt*avm_avg/(...)
+            # ours (implicit_solver.py:325):
+            #   alpha = dt*A_v_avg/(dz*dz_half),  dt = dt_mom = rDt
+            # Those agree EXACTLY, which is what proves dt_mom already carries
+            # NEMO's half-times-sum.  The drag must not apply it a second time.
+            # The zdf_baroclinic_only RHS correction below uses the identical
+            # prefactor for the identical reason (dynzdf.F90:156-159).
+            # Sign unchanged: raising r_eff raises the diagonal, which damps.
             extra_diag_u = (
-                2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
+                dt_mom * _r_eff_u[..., jnp.newaxis]
                 / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
             extra_diag_v = (
-                2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
+                dt_mom * _r_eff_v[..., jnp.newaxis]
                 / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
@@ -6762,10 +6755,10 @@ class LatLonCGridOceanModel:
                 # /e3u * u_bt_mean`` before the solve, matching NEMO's
                 # damping direction.
                 u_solve_in = u_solve_in - (
-                    2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
+                    dt_mom * _r_eff_u[..., jnp.newaxis]
                     / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
                 v_solve_in = v_solve_in - (
-                    2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
+                    dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
