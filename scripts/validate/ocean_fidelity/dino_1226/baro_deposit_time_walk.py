@@ -455,15 +455,31 @@ def main(argv=None) -> int:
                          f"this mode offers {[s[0] for s in catalog]}")
 
     print(f"\n=== #1455 PHASE 1: the deposit's TIME AXIS "
-          f"({len(states)} bridged states) ===")
-    print("PRE-REGISTERED (see module docstring): ACCUMULATOR iff the 90-day "
-          "trapezoid integral")
-    print(f"  I in [{2 * BARO_ROW_90D:+.4f}, {0.5 * BARO_ROW_90D:+.4f}] Sv "
-          f"(factor 2 either side of the {BARO_ROW_90D:+.4f} Sv budget row) "
-          "AND sign-agrees with")
-    print("  the per-window row in >=7 of 9 windows.  EXONERATED iff "
-          "|mean|/rms < 0.5 AND |I| < "
-          f"{abs(0.5 * BARO_ROW_90D):.4f} Sv.")
+          f"({len(states)} bridged states"
+          f"{', CONSECUTIVE steps' if args.consecutive else ''}) ===")
+    if args.consecutive:
+        # the 10-day banner below does not apply to this arm and printing it
+        # would attach the wrong pre-registration to the numbers.
+        print("PRE-REGISTERED (see _report_consecutive): ALIASED iff the "
+              "consecutive in-loop spread exceeds 5x the 320-step grid's "
+              f"{GRID320_IN_LOOP_SPREAD:.4e},")
+        print("  NOT ALIASED iff <= 2x, INCONCLUSIVE between.  The 90-day "
+              "integral criteria are NOT defined on this arm and are not "
+              "scored.")
+    else:
+        print("PRE-REGISTERED (see module docstring): ACCUMULATOR iff the "
+              "90-day trapezoid integral")
+        print(f"  I in [{2 * BARO_ROW_90D:+.4f}, {0.5 * BARO_ROW_90D:+.4f}]"
+              f" Sv (factor 2 either side of the {BARO_ROW_90D:+.4f} Sv budget"
+              " row) AND sign-agrees with")
+        print("  the per-window row in >=7 of 9 windows.  EXONERATED iff "
+              "|mean|/rms < 0.5 AND |I| < "
+              f"{abs(0.5 * BARO_ROW_90D):.4f} Sv.")
+        print("  NOTE (post-review): both criteria presuppose a retention "
+              "factor of 1 between the matched-state injection they score and "
+              "the free-running\n  accumulation they score it against.  The "
+              "instrument's own R_deposit measures 0.089..0.266, so A1/A2 "
+              "cannot be read as an\n  attribution -- see eb3f6d23d.")
 
     recs = [_run_one(day, kt, lane, tiles, t_seconds=None, log_dir=log_dir)
             for (day, kt, lane, tiles) in states]
