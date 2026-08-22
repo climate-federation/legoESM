@@ -4092,8 +4092,11 @@ class LatLonCGridOceanModel:
                 # ``state_mid``, whose velocity is the POST-momentum u* (built
                 # at the ``state_mid = state._replace(...)`` above), so the NOW
                 # velocity has to travel separately.  These are the SAME arrays
-                # the dyn_drg_init pu_RHSi residual above already reads, which
-                # is the point: NEMO has ONE rCdU_bot and both consumers see it.
+                # the dyn_drg_init pu_RHSi residual above already reads.  NEMO
+                # has ONE rCdU_bot; this model builds it in THREE places, and
+                # the third -- the implicit vertical-mixing matrix, which
+                # rebuilds it from the AFTER state it is handed -- is still on
+                # a level NEMO never uses.  Named, not fixed here (#1455).
                 _baro_seed = dict(
                     _baro_seed, substep_scale=_barotropic_substep_scale,
                     u_now=state.u.data, v_now=state.v.data)

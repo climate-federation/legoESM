@@ -964,8 +964,12 @@ def test_barotropic_drag_rate_receives_the_now_velocity_not_u_star():
     travel as ``u_now``/``v_now``.  This asserts BOTH halves: the forwarded
     array IS the step-entry velocity, and it is NOT ``state_mid``'s.
 
-    #1455: before the fix the rate was built from ``state_mid``'s velocity,
-    which on the DINO card differed from NEMO's ``un`` by up to 0.11 m/s.
+    #1455: before the fix the rate was built from ``state_mid``'s velocity.
+    On the DINO card that velocity differed from the now-level one by
+    1.115e-01 m/s at the maximum over wet cells -- measured, not asserted
+    here, from the retention lane's committed capture of every drag-helper
+    call in one card step (``results/dino_1455/maps/drag_inputs_d180.npz``,
+    probe commit 888d846f3).
     """
     state, model = _leapfrog_partial_cell_channel(
         bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,

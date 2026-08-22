@@ -529,11 +529,11 @@ def test_barotropic_drag_rate_uses_u_now_time_level():
         H_max=200.0, barotropic_drag_substep=True)
     u_state, u_drag = 0.2, 1.4          # r_eff differs by ~7x between them
     state = _uniform_flow(state, u_state, 0.0)
-    now = _uniform_flow(state, u_drag, 0.0)
     dt_s = 600.0
     s_new, _ = barotropic_substeps_latlon_cgrid(
         state, dt_s, 1, grid, z, config, add_barotropic_coriolis=False,
-        u_now=now.u.data, v_now=now.v.data)
+        u_now=jnp.full_like(state.u.data, u_drag),
+        v_now=jnp.zeros_like(state.v.data))
 
     H_u = float(np.asarray(state.H_bathy.data)[2, 3])   # flat: 124 m
     r_drag = CD0 * float(np.sqrt(u_drag * u_drag + KE0))
@@ -545,28 +545,21 @@ def test_barotropic_drag_rate_uses_u_now_time_level():
     assert abs(expect - wrong) / abs(expect) > 1e-3
     u_new = np.asarray(s_new.u.data)
     np.testing.assert_allclose(u_new[2, 2:-1, :], expect, rtol=1e-6)
-    with pytest.raises(AssertionError):
-        np.testing.assert_allclose(u_new[2, 2:-1, :], wrong, rtol=1e-6)
 
 
-def test_barotropic_drag_rate_u_now_default_is_state_velocity():
-    """Omitting ``u_now``/``v_now`` is byte-identical to passing ``state``'s
-    own velocity — the default keeps every direct caller (which hands this
-    solver the un-advanced NOW state) on exactly its previous numbers."""
+def test_barotropic_drag_rate_partial_now_velocity_raises():
+    """Supplying one component of the now-level velocity and not the other
+    would build the drag rate's ``|U|`` from one component at the now level
+    and the other at the post-momentum level -- a plausible-looking number
+    with no error anywhere.  Rejected at the call, both ways round."""
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         barotropic_substeps_latlon_cgrid,
     )
     grid, z, state, config = _partial_cell_channel(
         barotropic_drag_substep=True)
     state = _uniform_flow(state, 0.15, -0.05)
-    kw = dict(add_barotropic_coriolis=False)
-    s_a, (hu_a, _) = barotropic_substeps_latlon_cgrid(
-        state, 600.0, 4, grid, z, config, **kw)
-    s_b, (hu_b, _) = barotropic_substeps_latlon_cgrid(
-        state, 600.0, 4, grid, z, config,
-        u_now=state.u.data, v_now=state.v.data, **kw)
-    np.testing.assert_array_equal(np.asarray(s_a.u.data),
-                                  np.asarray(s_b.u.data))
-    np.testing.assert_array_equal(np.asarray(s_a.v.data),
-                                  np.asarray(s_b.v.data))
-    np.testing.assert_array_equal(np.asarray(hu_a), np.asarray(hu_b))
+    for kw in ({"u_now": state.u.data}, {"v_now": state.v.data}):
+        with pytest.raises(ValueError, match="BOTH u_now and v_now or NEITHER"):
+            barotropic_substeps_latlon_cgrid(
+                state, 600.0, 2, grid, z, config,
+                add_barotropic_coriolis=False, **kw)

@@ -1246,8 +1246,12 @@ def barotropic_substeps_latlon_cgrid(
     POST-momentum ``state_mid`` (``u* = u^n + dt·RHS`` plus the Matsuno Coriolis
     rotation), so that caller must pass its own ``state.u/v`` here; without it
     the rate would be built from ``u*``.  ``None`` ⇒ ``state``'s own velocity,
-    which IS the now level for every caller that hands this solver the
-    un-advanced state (the direct unit-test callers) ⇒ byte-identical there.
+    which IS the now level for every OTHER caller -- the unit tests, the MPI
+    scaling benchmark and the fidelity probes all hand this solver an
+    un-advanced state ⇒ byte-identical there.  Supply BOTH or NEITHER: one
+    alone would build the rate from one component at the now level and the
+    other at the post-momentum level, which is a plausible-looking number with
+    no error anywhere, so it is rejected below.
 
     ``add_barotropic_coriolis`` (default True) applies the explicit f×U_bt
     Coriolis term inside each substep.  Set False when the planetary Coriolis
@@ -1462,6 +1466,12 @@ def barotropic_substeps_latlon_cgrid(
         # evaluated at stpmlf.F90:190 BEFORE the dyn_* chain).  ``u_corr`` is
         # whatever velocity ``state`` carries, which on the production path is
         # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
+        if (u_now is None) != (v_now is None):
+            raise ValueError(
+                "barotropic drag-rate now-level velocity must supply BOTH "
+                "u_now and v_now or NEITHER (one alone mixes time levels "
+                f"inside one |U|); got u_now={'set' if u_now is not None else None}, "
+                f"v_now={'set' if v_now is not None else None}.")
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
