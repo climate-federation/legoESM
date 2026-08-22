@@ -117,17 +117,31 @@ def test_drag_in_matrix_analytic_bottom_cell():
     term decouples the tridiagonal system into independent per-level scalar
     equations (K=0 -> a=c=0 everywhere), so
 
-        b_bot = 1 + 2 * dt_mom * r_eff / e3_bot   (extra_diag at the bottom only)
+        b_bot = 1 + dt_mom * r_eff / e3_bot   (extra_diag at the bottom only)
         u_new_bot = u_old_bot / b_bot
 
     and every level ABOVE the bottom is unchanged (b=1 there).  b_bot is
-    DERIVED from NEMO's dynzdf.F90:293-296, NOT from the legoESM code under
-    test: ``zwd(iku) -= zDt_2*(rCdU_bot(i+1)+rCdU_bot(i))/e3u(iku)`` is a SUM
-    of the two T-point rates (rCdU_bot<=0, so the subtraction ADDS damping);
-    ``r_eff = -rCdU_bot`` here is the 0.5-AVERAGE of those same two rates
-    (``nemo_bottom_drag_rate_faces``'s shared convention), so reproducing
-    NEMO's SUM from the AVERAGE needs the explicit factor of 2:
-    b gains ``+2*dt_mom*r_eff/e3u`` at the bottom cell, where
+    DERIVED from NEMO's dynzdf.F90:296, NOT from the legoESM code under test:
+    ``zwd(iku) -= zDt_2*(rCdU_bot(i+1)+rCdU_bot(i))/e3u(iku)`` with
+    ``zDt_2 = rDt*0.5`` (:97).  The bracket is a SUM of the two T-point rates
+    (rCdU_bot<=0, so the subtraction ADDS damping), and ``zDt_2 * sum`` is
+    exactly ``rDt * average``.  ``r_eff`` here IS that 0.5-average
+    (``nemo_bottom_drag_rate_faces``'s shared convention) and ``dt_mom`` IS
+    rDt, so b gains ``+dt_mom*r_eff/e3u`` at the bottom cell -- with NO extra
+    factor of 2, which would apply the half-times-sum twice.
+
+    CORRECTED 2026-08-22 (#1455).  This docstring previously argued that
+    "reproducing NEMO's SUM from the AVERAGE needs the explicit factor of 2",
+    and the assertion below hardcoded it; the model carried the same 2x.  The
+    check that settles it is the VISCOSITY in this same tridiagonal, because
+    NEMO applies the IDENTICAL ``zDt_2 * two-point sum`` to both terms:
+    ``zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw)`` (:182-183) against this
+    model's ``alpha = dt*A_v_avg/(dz*dz_half)`` (implicit_solver.py:325).
+    Those agree, so ``dt_mom`` already carries the half-times-sum and the drag
+    must not apply it again.  Before the fix the drag was 2x the viscosity in
+    the same matrix, which is the ratio that cannot be explained away by any
+    timestep convention.
+
     ``r_eff = Cd*sqrt(u^2+v^2+ke0)`` (nemo_quadratic)."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -149,9 +163,14 @@ def test_drag_in_matrix_analytic_bottom_cell():
     bl = int(np.asarray(z.bottom_level)[2, 3])
     h_bot = float(np.asarray(z.h_partial)[2, 3, bl])
     r_eff = CD0 * float(np.sqrt(u0 * u0 + v0 * v0 + KE0))
-    b_bot = 1.0 + 2.0 * dt_mom * r_eff / h_bot
+    b_bot = 1.0 + dt_mom * r_eff / h_bot
     expect_u_bot = u0 / b_bot
     expect_v_bot = v0 / b_bot
+    # CONTROL ON THE CONTROL: the doubled prefactor this test used to assert
+    # must be separated from the faithful one by far more than the tolerance
+    # below, or the assertion could not tell them apart.
+    _wrong = u0 / (1.0 + 2.0 * dt_mom * r_eff / h_bot)
+    assert abs(expect_u_bot - _wrong) / abs(expect_u_bot) > 0.1
 
     u_new = np.asarray(s_new.u.data)
     v_new = np.asarray(s_new.v.data)
@@ -362,10 +381,16 @@ def test_baroclinic_only_plus_drag_in_matrix_bt_correction_damps():
 
     Trace: baroclinic strip zeroes u_solve_in everywhere (uniform column);
     the BT correction then sets the bottom cell to
-    ``-2*dt_mom*r_eff/e3u * u0``; the decoupled A_v=0 solve divides that by
-    ``b_bot = 1 + 2*dt_mom*r_eff/e3u``; re-adding u_bt_mean=u0 afterward gives
+    ``-dt_mom*r_eff/e3u * u0``; the decoupled A_v=0 solve divides that by
+    ``b_bot = 1 + dt_mom*r_eff/e3u``; re-adding u_bt_mean=u0 afterward gives
 
-        u_final_bot = u0 - 2*dt_mom*r_eff/e3u*u0 / b_bot = u0 / b_bot
+        u_final_bot = u0 - dt_mom*r_eff/e3u*u0 / b_bot = u0 / b_bot
+
+    Prefactor CORRECTED 2026-08-22 (#1455) in step with the diagonal: NEMO's
+    RHS correction (dynzdf.F90:156-159) carries the SAME ``zDt_2 * two-point
+    sum`` = ``rDt * average`` as the diagonal, so both lose the explicit 2x
+    together -- halving only one would break the composition's internal
+    consistency, which it previously had (both were doubled).
 
     i.e. the SAME damped form as the drag-in-matrix-alone case (test 2),
     with |u_final_bot| < |u0| since b_bot > 1 (r_eff > 0)."""
@@ -386,7 +411,7 @@ def test_baroclinic_only_plus_drag_in_matrix_bt_correction_damps():
     bl = int(np.asarray(z.bottom_level)[2, 3])
     h_bot = float(np.asarray(z.h_partial)[2, 3, bl])
     r_eff = CD0 * float(np.sqrt(u0 * u0 + KE0))
-    b_bot = 1.0 + 2.0 * dt_mom * r_eff / h_bot
+    b_bot = 1.0 + dt_mom * r_eff / h_bot
     expect_u_bot = u0 / b_bot
     assert abs(expect_u_bot) < abs(u0)
 
@@ -564,83 +589,3 @@ def test_barotropic_drag_rate_partial_now_velocity_raises():
                 state, 600.0, 2, grid, z, config,
                 add_barotropic_coriolis=False, **kw)
 
-
-# ------------------------------------ #1455 implicit drag MAGNITUDE (factor 2) ---
-
-def test_drag_in_matrix_diagonal_magnitude_matches_nemo():
-    """The implicit bottom-drag term on the tridiagonal diagonal must carry
-    NEMO's prefactor, not twice it.
-
-    DERIVED from NEMO, not from the code under test.  dynzdf.F90 builds the
-    momentum diagonal as ``zwd = 1 - zzwi - zzws`` (:186) and then, under
-    ``ln_drgimp`` (DINO's setting), subtracts the bottom drag at :296::
-
-        zwd(iku) -= zDt_2 * ( rCdU_bot(i+1,j) + rCdU_bot(i,j) ) / e3u(iku,Kaa)
-
-    with ``zDt_2 = rDt * 0.5`` (:97).  The bracket is the SUM of the two
-    T-point rates, so ``zDt_2 * sum == rDt * average``; in this model's
-    positive convention (``r_eff = -rCdU_bot >= 0``, and ``r_eff`` IS that
-    average) the diagonal contribution is
-
-        extra_diag = rDt * r_eff / e3u          (NOT 2 * rDt * r_eff / e3u)
-
-    The same identity is visible in the VISCOSITY of the same matrix, which is
-    the independent check that ``rDt`` is the right prefactor: NEMO's
-    ``zzwi = -zDt_2*(avm(i+1)+avm(i))/(e3u*e3uw)`` (:182-183) equals
-    ``-rDt*avm_avg/(e3u*e3uw)``, and this model's solver uses
-    ``alpha = dt*A_v_avg/(dz*dz_half)`` (implicit_solver.py:325) -- so ``dt``
-    already carries NEMO's half-times-sum, and the drag must not apply it again.
-
-    With ``A_v = 0`` the tridiagonal decouples (alpha = beta = 0, so a = c = 0
-    and ``b = 1 + extra_diag``) and the bottom cell reduces to a scalar:
-
-        u_bot_new = u_bot_old / (1 + dt * r_eff / dz_bot)
-
-    which is analytically checkable and separates the two candidate prefactors
-    by ~40% at the parameters below.
-    """
-    # The fixture already defaults A_v = K_v = 0 and implicit_vertical_mixing
-    # on, which is exactly the decoupled regime this derivation needs.
-    grid, z, state, config = _partial_cell_channel(
-        H_max=200.0,                       # shallow => dt*r/dz is O(1), not O(1e-6)
-        # The FULL NEMO composition, because the construction guard requires it
-        # (drag_in_matrix + explicit_substep demands the in-subcycle drag).  The
-        # analytic form below is UNCHANGED by it: with uniform flow the depth
-        # mean IS u0, so the baroclinic residual is zero everywhere, the RHS
-        # correction puts -dt*r/dz*u0 in the bottom cell, the solve divides by
-        # (1 + dt*r/dz), and re-adding the mean gives
-        #     u0 - u0*(dt*r/dz)/(1+dt*r/dz) = u0/(1 + dt*r/dz)
-        # -- identical.  That makes this one assertion cover BOTH places the
-        # prefactor appears (the diagonal and the baroclinic-only RHS term).
-        zdf_drag_in_matrix=True,
-        zdf_baroclinic_only=True,
-        barotropic_drag_substep=True)
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-    )
-    model = LatLonCGridOceanModel(grid, z, config)
-    u0 = 0.5
-    state = _uniform_flow(state, u0, 0.0)
-    dt = 3600.0
-
-    out = model._apply_implicit_vertical_mixing(
-        state, dt, None, A_v_phys=jnp.zeros_like(state.u.data),
-        do_tracers=False)
-    s_new = out if hasattr(out, "u") else out[0]
-
-    # Sample at the column's OWN bottom level, not the last index: with a
-    # partial-cell coordinate the deepest ACTIVE level is bottom_level, and on
-    # this flat bathymetry the face bottom (min of the two adjacent columns)
-    # coincides with it.
-    kbot = int(np.asarray(z.bottom_level)[2, 3])
-    dz_bot = float(np.asarray(z.h_partial)[2, 3, kbot])
-    r_eff = CD0 * float(np.sqrt(u0 * u0 + KE0))
-    expect = u0 / (1.0 + dt * r_eff / dz_bot)          # NEMO
-    wrong = u0 / (1.0 + 2.0 * dt * r_eff / dz_bot)     # the doubled prefactor
-    # The two predictions must be far apart at the tolerance asserted below, or
-    # the test could not discriminate (a control on the control).
-    assert abs(expect - wrong) / abs(expect) > 0.1, (
-        f"prefactors not separated: expect={expect:.6f} wrong={wrong:.6f} "
-        f"(dz_bot={dz_bot}, r={r_eff:.3e})")
-    u_bot = np.asarray(s_new.u.data)[2, 2:-1, kbot]
-    np.testing.assert_allclose(u_bot, expect, rtol=1e-6)

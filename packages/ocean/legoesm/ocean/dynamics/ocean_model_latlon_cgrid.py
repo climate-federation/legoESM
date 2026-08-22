@@ -6660,9 +6660,12 @@ class LatLonCGridOceanModel:
         # T-point rates (zwd -= zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u),
         # which ADDS positive definiteness (damping); legoESM's r_eff =
         # -rCdU_bot >= 0 is the 0.5-AVERAGE of those same two rates, so
-        # extra_diag = +2*dt_mom*r_eff/h at the bottom cell reproduces
-        # NEMO's sum (see the factor-of-2 comment at the extra_diag_u/v
-        # assignment below).  This flag requires a NEMO bottom-drag scheme,
+        # extra_diag = +dt_mom*r_eff/h at the bottom cell reproduces NEMO's
+        # term: zDt_2 = rDt*0.5 (dynzdf.F90:97) times the SUM is rDt times the
+        # AVERAGE, and dt_mom IS rDt -- so no extra factor of 2 (#1455; the
+        # code and this comment both carried one until 2026-08-22).  The
+        # derivation and its viscosity cross-check are at the extra_diag_u/v
+        # assignment below.  This flag requires a NEMO bottom-drag scheme,
         # and under barotropic_solver="explicit_substep" it additionally
         # requires barotropic_drag_substep=True (validated at construction):
         # skipping ``_bc_bottom_drag`` here removes the barotropic
@@ -6751,9 +6754,10 @@ class LatLonCGridOceanModel:
                 # barotropic bottom velocity uu_b/vv_b, opposing it, not
                 # reinforcing it). legoESM's r_eff = -rCdU_bot >= 0, so the
                 # sign-translated term SUBTRACTS from the solve input:
-                # the barotropic-mode bottom cell loses ``2*dt_mom*r_eff
+                # the barotropic-mode bottom cell loses ``dt_mom*r_eff
                 # /e3u * u_bt_mean`` before the solve, matching NEMO's
-                # damping direction.
+                # damping direction.  Same prefactor as the diagonal above and
+                # for the same reason (zDt_2*sum == rDt*average, #1455).
                 u_solve_in = u_solve_in - (
                     dt_mom * _r_eff_u[..., jnp.newaxis]
                     / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
