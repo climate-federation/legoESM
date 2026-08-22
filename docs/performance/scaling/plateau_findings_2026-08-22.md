@@ -321,6 +321,48 @@ What remains is structural rather than contained:
   to cut that lane's halo bytes substantially, and which lost 22% at 64 GPUs
   for a reason still not established.
 
+## The icosahedral level-count table, and why the mechanism stays unknown
+
+One GPU, subdivision 6, the same mesh throughout, two repetitions each.
+
+| levels | ms per level | | levels | ms per level |
+|---|---|---|---|---|
+| 16 | 0.253 | | 26 | 0.779 |
+| 20 | 0.248 | | 27 | 0.633 |
+| **24** | **0.679** | | 28 | **0.665** |
+| 32 | 0.266 | | 30 | 0.751 |
+| 36 | 0.279 | | 31 | 0.613 |
+| 40 | 0.271 | | 34 | 0.481 |
+| 44 | 0.270 | | 46 | 0.450 |
+| | | | 18, 21, 22, 25 | 0.371 - 0.691 |
+
+Cheap: 16, 20, 32, 36, 40, 44. Everything else measured is two to three times
+dearer per level.
+
+Divisibility by four is NECESSARY — all fourteen counts not divisible by four
+are expensive, without exception — but NOT sufficient: 24 and 28 are multiples
+of four and cost 2.5x what 44 does. I claimed the divisibility rule was a
+perfect separation and predicted 24 and 28 would be cheap; the prediction was
+written down, tested within the hour, and refuted. The original scan had
+measured twelve level counts and both counterexamples happened to be absent
+from it, which is how a rule fitted to a set that excludes its own
+counterexamples looks perfect.
+
+**The mechanism is not established, and this section deliberately stops
+guessing.** What IS established, and rules out a whole class of explanation:
+the compiled program is structurally IDENTICAL across cheap and expensive
+counts. At 24, 26, 32 and 44 levels the step compiles to 2292, 2292, 2271 and
+2292 instructions, 108 fusions in every case, the same twenty-three opcodes
+with the same histogram, and the same shape multiset with only the extents
+differing. So this is not different code being emitted — it is the same code
+executing differently at different extents, which no dump can resolve and
+which alignment of the state's column stride, tested earlier, was the wrong
+place to look for.
+
+The practical consequence is a lookup table rather than a rule, and the
+decision it informs is unchanged: 26 to 24 buys 13%, 26 to 32 buys a factor
+of 2.9.
+
 ## Decisions that are yours, not taken
 
 | # | decision | evidence |
