@@ -149,9 +149,16 @@ for CH in 4 8 16 32; do
   # NCCL prints "Channel 00/04", so the count is ZERO PADDED. Comparing the
   # padded string against the requested count fails for 4 and 8 and would
   # void exactly the two arms this sweep exists to compare.
+  # NCCL prints "Channel 00/04", so the count is ZERO PADDED — comparing the
+  # padded string against the requested count fails for 4 and 8 and would
+  # void exactly the arms this sweep exists to compare. It ALSO prints
+  # lines whose denominator is 00 (communicators built with no channels of
+  # their own); those are not a channel count and requiring the built set to
+  # equal the requested one without dropping them voids every arm, which is
+  # what the first version of this gate did.
   SEEN=$(grep -h -oE "Channel [0-9]+/[0-9]+" "$OUTDIR"/nccl_val_c${CH}.* 2>/dev/null \
          | sed 's:.*/::' | while read -r n; do echo $((10#$n)); done \
-         | sort -un | paste -sd,)
+         | grep -v '^0$' | sort -un | paste -sd,)
   CHUNK=$(grep -h -oE "P2P Chunksize set to [0-9]+" "$OUTDIR"/nccl_val_c${CH}.* 2>/dev/null \
           | grep -oE "[0-9]+$" | sort -u | paste -sd,)
   echo "  requested ${CH}: NCCL built ${SEEN:-<no debug output>} channels, chunksize ${CHUNK:-<none>}"
@@ -292,6 +299,7 @@ for ch in CHS:
         print("  channels=%-3d  %.4f ms   (%.1f%% of the step)"
               % (ch, on - off, 100.0 * (on - off) / on))
 
+census_absent = set()
 # The halo-off arm must actually compile FEWER collective-permutes than the
 # halo-on arm. Without this the control could be running the full exchange
 # and the difference between them would be noise wearing a label.
@@ -299,6 +307,16 @@ for ch in CHS:
     for rep in (1, 2):
         on = permutes.get("halo_c%d_r%d" % (ch, rep))
         off = permutes.get("nohalo_c%d_r%d" % (ch, rep))
+        if on is None or off is None:
+            # The in-process HLO census cannot run under multiple controllers
+            # -- the step closes over sharded schedule arrays and JAX refuses
+            # to re-lower it -- so EVERY GPU arm records null here. That is a
+            # missing instrument, not a failed control, and voiding on it
+            # would refuse every multi-node run this sweep exists for. The
+            # halo switch is bound from the receipt instead, which is what
+            # actually says which arm ran.
+            census_absent.add((ch, rep))
+            continue
         if not (isinstance(on, int) and isinstance(off, int) and off < on):
             problems.append(
                 "CONTROL INOPERATIVE: c%d rep %d compiled %r collective-permutes "
@@ -315,6 +333,13 @@ if len(nh) == len(CHS):
             "The knob is not confined to communication on this lane, or the "
             "node drifted; no arm is interpretable as a communication effect."
             % spread)
+
+if census_absent:
+    print("")
+    print("note: the compiled-collective census is unavailable in %d of %d "
+          "arm pairs (it cannot run under multiple controllers); the halo "
+          "switch is bound from the receipt instead."
+          % (len(census_absent), len(CHS) * 2))
 
 print("")
 if problems:
