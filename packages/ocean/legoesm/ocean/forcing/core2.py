@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 from .jra55_do import (
     OceanForcing,
     synthetic_ocean_forcing,
+)
+from .jra55_do import (
     _cache_dir as _jra_cache_dir,
 )
 
@@ -65,7 +66,26 @@ def _cache_dir() -> Path:
     return root / "core2_nyf"
 
 
-def load_core2_nyf(*, cache_dir: Optional[Path] = None,
+def _nino3_wind_speed(ds) -> float:
+    """Time-and-area mean 10 m wind speed over nino3 (5S-5N, 150W-90W).
+
+    Provenance only: the corrected (``_MOD``) CORE-II fields give ~6.3 m/s
+    here and the raw ones ~4.7 m/s, so this single number identifies which
+    cache a run was forced with.
+    """
+    lat = np.asarray(ds.lat.values, dtype=np.float64)
+    lon = np.asarray(ds.lon.values, dtype=np.float64) % 360.0
+    jj = np.where((lat >= -5.0) & (lat <= 5.0))[0]
+    ii = np.where((lon >= 210.0) & (lon <= 270.0))[0]
+    if jj.size == 0 or ii.size == 0:
+        return float("nan")
+    u = np.asarray(ds.u10.values, dtype=np.float64)[:, jj][:, :, ii]
+    v = np.asarray(ds.v10.values, dtype=np.float64)[:, jj][:, :, ii]
+    w = np.cos(np.deg2rad(lat[jj]))[None, :, None]
+    return float((np.hypot(u, v) * w).sum() / (np.ones_like(u) * w).sum())
+
+
+def load_core2_nyf(*, cache_dir: Path | None = None,
                    allow_synthetic: bool = True,
                    n_time: int = 365) -> OceanForcing:
     """Load the CORE-II Normal Year (NYF) climatology.
@@ -84,6 +104,12 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
                 "CORE-II NYF real-data load requires xarray + zarr"
             ) from exc
         ds = xr.open_zarr(zarr_path)
+        # Provenance, printed rather than logged so it lands in every run log
+        # next to the other [setup] lines.  The nino3 wind speed is the number
+        # that distinguishes the corrected cache (~6.3 m/s) from the raw one
+        # (~4.7 m/s), so a silent fallback is visible in the log itself.
+        print(f"[forcing] CORE-II NYF cache: {zarr_path} "
+              f"(nino3 mean |U10| = {_nino3_wind_speed(ds):.3f} m/s)")
         return OceanForcing(
             lon=np.asarray(ds.lon.values, dtype=np.float64),
             lat=np.asarray(ds.lat.values, dtype=np.float64),
