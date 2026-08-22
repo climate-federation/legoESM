@@ -401,3 +401,51 @@ optimisation.
 | 5 | Turn BOTH lat-lon switches on together | **-7.54% at 128 GPUs**, 3.7899 -> 3.5040 ms. They stack but do not add: the layout switch is worth 4.03% alone and 2.05% on top of the duplicate removal, because removing a row from the wire also removes the conversions that row needed. Measured, not assumed |
 
 Nothing in the model's defaults was changed to produce any number here.
+
+## In flight: writing the icosahedral halo once instead of thirteen times
+
+The icosahedral halo runs thirteen coloured rounds at 64 GPUs, and each round
+writes its received rows into the local buffers as it lands. The rows a device
+receives are disjoint across rounds, so those thirteen writes can be deferred
+and issued as one. That is what the merged-scatter switch does, off by
+default, and the 64-GPU arm for it is queued.
+
+What it is aimed at is measured rather than fitted: the arm that keeps the
+kernel and the local region but performs no halo staging at all runs 0.310 ms
+faster than the arm that keeps the staging and deletes the communication. So
+0.310 ms of a 5.760 ms step is the entire gather, concatenate and scatter
+budget, and the scatters are one of those three. The gate written before
+submitting asks for 1%, and flags anything larger than 0.310 ms as the knob
+moving something it was not built to move.
+
+Both reviewers pushed back on the same thing and both were right: the original
+version had every round share one padding row, which made the single scatter's
+index list non-unique. That is fine going forward, because the shared row is
+trimmed off before anything reads it, but a repeated index has no defined
+winner and its reverse-mode transpose sends that row's cotangent back to every
+round at once. Each round now owns its own padding row, so every index is
+unique and the scatter carries the no-duplicates promise. The disjointness the
+whole thing rests on is asserted where the schedule is built, on the host,
+rather than trusted in the fill.
+
+## A defect found while gating that change, not while looking for it
+
+The icosahedral step's reverse-mode gradient is finite on one device and NOT
+finite once the model is sharded: 96 non-finite entries of the gradient on two
+devices, 224 on four, on interior cells, growing with the device count. Same
+initial state, same time step, same loss. Since end-to-end differentiability
+is a goal of this model, that is a defect of the sharded path, and it means
+training on a sharded unstructured mesh currently carries undefined gradients
+on roughly one cell in a hundred.
+
+The cause is not established and no attempt was made to establish it here.
+`scripts/validate/mpas_sharded_grad_finiteness.py` reproduces the table in
+under a minute on CPU.
+
+Two smaller things worth knowing before trusting a green suite on this lane.
+The halo test suites pollute one another when run in one process — a
+bandwidth test that passes alone fails in company — because the switches are
+read when the program is traced and a compiled program is cached. And the
+compiled-program checks in these gates count operations; they do not measure
+time, which is why every claim above rests on a machine arm and not on a
+count.
