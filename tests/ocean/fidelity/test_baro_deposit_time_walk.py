@@ -116,3 +116,39 @@ def test_output_parsers_lift_the_three_numbers():
     other = ("    transport-average deposit diff (un_adv route) = "
              "+2.9505e-03 Sv/step\n")
     assert M._RE_TOTAL.findall(out + other) == ["+5.5555e-03"]
+
+
+# --- the reconciliation-halves control (baro_recon_halves.py) ---------------
+
+def _load_halves():
+    path = os.path.join(os.path.dirname(_MOD_PATH), "baro_recon_halves.py")
+    spec = importlib.util.spec_from_file_location("_baro_halves", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_baro_halves"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+H = _load_halves()
+
+
+def test_read3d_strips_exactly_the_two_cell_halo(tmp_path):
+    jpi, jpj, nlev = 9, 7, 3
+    a = np.arange(nlev * jpj * jpi, dtype="<f8").reshape(nlev, jpj, jpi)
+    f = tmp_path / "d.bin"
+    a.tofile(f)
+    got = H._read3d(str(f), jpi, jpj, nlev)
+    assert got.shape == (nlev, jpj - 2 * H.HLS, jpi - 2 * H.HLS)
+    # the strip must take the INTERIOR, not the corner
+    assert np.array_equal(got, a[:, H.HLS:-H.HLS, H.HLS:-H.HLS])
+
+
+def test_read3d_rejects_a_partial_level(tmp_path):
+    f = tmp_path / "bad.bin"
+    np.arange(9 * 7 * 3 - 1, dtype="<f8").tofile(f)
+    with pytest.raises(SystemExit):
+        H._read3d(str(f), 9, 7, 3)
+
+
+def test_halves_lane_days_match_the_walk_states():
+    assert H.DAYS == [s[0] for s in M.STATES]
