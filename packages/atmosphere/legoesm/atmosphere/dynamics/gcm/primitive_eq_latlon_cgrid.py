@@ -463,8 +463,17 @@ def cgrid_latlon_hydrostatic_tendencies(
             _wall_ins = (T, u, dp)
         _packed_specs = (("fold", 1, False), ("fold", 2, False)) + (
             ("wall", 1, 0.0, 0.0),) * len(_wall_ins)
+        # T is the first wall input AND the halo-2 fold input, so it appears
+        # as two OUTPUTS of one INPUT. Say so: the sharing cannot be seen
+        # inside the traced body (one array passed twice becomes two distinct
+        # tracers), and under LEGOESM_LATLON_HALO_DEDUP the packer then ships
+        # its rows once at the deeper halo and slices the wall pad out of what
+        # arrives — the same rows, a sixth fewer bytes on this epoch.
+        assert _wall_ins[0] is T
+        _packed_ins = (_Bln_stack, T) + tuple(_wall_ins[1:])
+        _packed_srcs = (0, 1, 1) + tuple(range(2, 1 + len(_wall_ins)))
         _packed_out = make_latlon_band_packed_pad_body(
-            _packed_mesh, _packed_specs)(_Bln_stack, T, *_wall_ins)
+            _packed_mesh, _packed_specs, _packed_srcs)(*_packed_ins)
         _Bln_pad, _T_ppm_pad = _packed_out[0], _packed_out[1]
         if _hybrid:
             (_T_lat_pad, _u_lat_pad, _dp_lat_pad,

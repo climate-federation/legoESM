@@ -202,6 +202,7 @@ HALO_ENV_FLAGS = {
     "LEGOESM_LATLON_HALO_BALLAST": "1",
     "LEGOESM_LATLON_HALO_NOCOMM": "0",
     "LEGOESM_LATLON_HALO_LEVEL_LEADING": "0",
+    "LEGOESM_LATLON_HALO_DEDUP": "0",
 }
 
 
@@ -220,6 +221,36 @@ def halo_env_signature() -> tuple:
     import os  # function-scope, matching this module's convention
     return tuple((os.environ.get(k, "") or d)
                  for k, d in sorted(HALO_ENV_FLAGS.items()))
+
+
+def _resolve_halo_dedup(env_value: str) -> bool:
+    """Resolve ``LEGOESM_LATLON_HALO_DEDUP``: pack an array ONCE when several
+    outputs of one exchange epoch read it; ``''``/``'0'`` = off (default).
+
+    The dycore's packed epoch asks for temperature twice — a two-row fold pad
+    and a one-row wall pad — and the second copy rides the same buffer. A
+    four-point payload curve at 128 GPUs measured 1.66 ms per copy of the halo
+    payload with a fixed term of ZERO, so on that lane bytes are the only
+    thing that costs anything and the duplicate is pure waste.
+
+    The rows the shallower consumer needs are a SUBSET of the deeper one's, so
+    they can be sliced out of what already arrived. That is a copy, not a
+    re-derivation, which is what separates this from the exchange-merging work
+    that a one-unit-in-the-last-place mismatch blocked: the bits are the same
+    bits.
+
+    Bit-identical either way. Off by default because it changes what goes on
+    the wire, and that is a measurement to take rather than a default to move.
+
+    Unknown values raise (dispatch hardening).
+    """
+    if env_value in ("", "0"):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_LATLON_HALO_DEDUP={env_value!r}: must be '0' or '1' "
+        f"(empty = off).")
 
 
 def _edge_serialisation_perm(shape, level_leading):
@@ -1309,7 +1340,7 @@ def packed_exchange_mesh():
     return mesh
 
 
-def make_latlon_band_packed_pad_body(mesh, specs):
+def make_latlon_band_packed_pad_body(mesh, specs, sources=None):
     """PACKED multi-field, mixed-halo, mixed-SEMANTICS band exchange
     (packing-plan bucket A): ONE north+south ``ppermute`` pair per dtype
     group carries the RAW (un-lon-padded) edge rows of every field of a
@@ -1319,7 +1350,7 @@ def make_latlon_band_packed_pad_body(mesh, specs):
     lon wrap (``jnp.pad(mode="wrap")``) and the fold act per-row, so they
     commute with the lat exchange exactly.
 
-    ``specs`` — STATIC tuple, one entry per field (trace-time facts):
+    ``specs`` — STATIC tuple, one entry per OUTPUT (trace-time facts):
 
     * ``("fold", halo, negate)`` — full fold-family pad; output
       ``(nl + 2h, n_lon + 2h[, lev])``, bit-equal to
@@ -1330,6 +1361,32 @@ def make_latlon_band_packed_pad_body(mesh, specs):
       semantics).
 
     An unknown kind raises ``ValueError`` (dispatch hardening).
+
+    ``sources`` — optional STATIC tuple, one entry per spec, naming the INPUT
+    array that output reads.
+
+    THE CONTRACT, because ``sources`` makes it easy to lie to this function
+    and the lie is silent.  Two outputs may name one input only when the
+    shallower one's ghost rows are NESTED inside the deeper one's: same
+    neighbours, same orientation, ghosts in adjacency order, and the shallower
+    halo no wider than the deeper.  All four hold for a nearest-neighbour
+    latitude-band exchange, which is the only mesh this factory accepts.  What
+    would break them is over-decomposition — a band owning fewer rows than the
+    deepest halo, so the exchange stops being one hop and the near rows stop
+    being a clean suffix — and that is asserted below rather than trusted.  A
+    future caller that deduplicates outputs whose rows are NOT nested gets
+    wrong values, not an error, so read this before adding one.  Default ``None`` means one input per output, the
+    historical arity.  It exists because two outputs can share one array — the
+    dycore asks for temperature at halo 2 with fold semantics AND at halo 1
+    with wall semantics — and that sharing cannot be recovered inside the
+    traced body: handing one array twice to a jitted ``shard_map`` produces
+    two distinct tracers, so an identity test there is always false.  With
+    ``LEGOESM_LATLON_HALO_DEDUP=1`` a shared input rides the wire ONCE at the
+    deepest halo any of its outputs asks for and the shallower outputs are
+    sliced from what arrives; with the switch off every output is packed
+    separately and the buffer is byte-identical to the historical one.  The
+    body's arity follows ``sources``: ``max(sources) + 1`` arrays, not one per
+    spec.
 
     POLAR BANDS: the poleward ghost is NOT remote — ``perm_north`` /
     ``perm_south`` (from :func:`latlon_band_perms`) already omit the polar
@@ -1375,31 +1432,89 @@ def make_latlon_band_packed_pad_body(mesh, specs):
     n_fields = len(specs)
     if n_fields < 1:
         raise ValueError("specs must name >= 1 field")
+    # ``sources`` maps each OUTPUT to the input array it reads. It exists
+    # because two outputs can share one array -- the dycore asks for
+    # temperature at two depths with two different semantics -- and that
+    # sharing CANNOT be detected inside the traced body: passing one array
+    # twice to a jitted function yields two distinct tracers (checked, not
+    # assumed), so identity there is always False. The caller knows; the
+    # caller says.
+    if sources is None:
+        sources = tuple(range(n_fields))
+    # STRICT: int() would accept 1.9, True and "1" and quietly index with
+    # them. A source list is a static wiring diagram; a value that merely
+    # converts to an integer is a caller mistake, not an input.
+    for x in sources:
+        if not isinstance(x, int) or isinstance(x, bool):
+            raise ValueError(
+                f"sources must be plain integers, got {x!r} of type "
+                f"{type(x).__name__}")
+    sources = tuple(sources)
+    if len(sources) != n_fields:
+        raise ValueError(
+            f"sources must name one input per spec: {len(sources)} for "
+            f"{n_fields} specs")
+    n_inputs = max(sources) + 1
+    if min(sources) != 0 or set(sources) != set(range(n_inputs)):
+        raise ValueError(
+            f"sources must use every input index from 0 to {n_inputs - 1} "
+            f"exactly once or more: {sources}")
+
+    _deepest = max(int(sp[1]) for sp in specs)
 
     def body(*fields):
-        if len(fields) != n_fields:
+        if len(fields) != n_inputs:
             raise ValueError(
-                f"packed pad body built for {n_fields} fields, got "
-                f"{len(fields)}")
+                f"packed pad body built for {n_inputs} input arrays "
+                f"({n_fields} outputs), got {len(fields)}")
+        # The nesting a shared pack relies on needs each band to own at least
+        # the deepest halo: below that the exchange is no longer one hop and
+        # the shallower rows stop being a suffix of the deeper ones. The
+        # per-output path has always required it too — it reshapes a received
+        # row back to the full halo depth — so this turns a confusing reshape
+        # error into the statement of the invariant.
+        _local_rows = int(fields[0].shape[0])
+        if _local_rows < _deepest:
+            raise ValueError(
+                f"band owns {_local_rows} rows but the deepest halo is "
+                f"{_deepest}: the exchange would need more than one hop and "
+                f"the packed ghosts would no longer nest")
         b = jax.lax.axis_index(axis)
 
         # Group by dtype (static trace-time fact) — one buffer / one
         # ppermute pair per dtype group, matching the fused-pad contract.
-        groups: dict = {}
-        for i, f in enumerate(fields):
-            groups.setdefault(str(f.dtype), []).append(i)
-
         import os  # function-scope, matching this module's convention
         level_leading = _resolve_halo_level_leading(
             os.environ.get("LEGOESM_LATLON_HALO_LEVEL_LEADING", ""))
-        south_recv: list = [None] * n_fields
-        north_recv: list = [None] * n_fields
+        dedup = _resolve_halo_dedup(
+            os.environ.get("LEGOESM_LATLON_HALO_DEDUP", ""))
+
+        # What actually goes on the wire, as a list of (input index, depth).
+        # OFF: one entry per output, exactly as before, so the buffer, the
+        # widths and every offset are byte-identical to the default path.
+        # ON: one entry per distinct INPUT, at the deepest halo any of its
+        # outputs asks for; the shallower outputs are sliced from it below.
+        if dedup:
+            depth: dict = {}
+            for i in range(n_fields):
+                src = sources[i]
+                depth[src] = max(depth.get(src, 0), int(specs[i][1]))
+            sends = [(src, depth[src]) for src in sorted(depth)]
+        else:
+            sends = [(sources[i], int(specs[i][1])) for i in range(n_fields)]
+
+        groups: dict = {}
+        for slot, (src, _h) in enumerate(sends):
+            groups.setdefault(str(fields[src].dtype), []).append(slot)
+
+        south_deep: list = [None] * len(sends)
+        north_deep: list = [None] * len(sends)
         for _, idxs in sorted(groups.items()):
             s_flat, n_flat, widths = [], [], []
-            for i in idxs:
-                h = int(specs[i][1])
-                s_edge = fields[i][:h]     # my south rows
-                n_edge = fields[i][-h:]    # my north rows
+            for slot in idxs:
+                src, h = sends[slot]
+                s_edge = fields[src][:h]     # my south rows
+                n_edge = fields[src][-h:]    # my north rows
                 # PRE-FLATTEN to (1, h*w*lev) BEFORE concat: mixed
                 # trailing dims after concat would force XLA layout
                 # copies; the payload stays contiguous on the minor axis.
@@ -1419,18 +1534,43 @@ def make_latlon_band_packed_pad_body(mesh, specs):
             n_recv_buf = _halo_ppermute(south_buf, axis, perm_north)
             s_recv_buf = _halo_ppermute(north_buf, axis, perm_south)
             off = 0
-            for k, i in enumerate(idxs):
-                h = int(specs[i][1])
+            for k, slot in enumerate(idxs):
+                src, h = sends[slot]
                 w = widths[k]
-                shp = (h,) + fields[i].shape[1:]
-                south_recv[i] = _unpack_edge_row(
+                shp = (h,) + fields[src].shape[1:]
+                south_deep[slot] = _unpack_edge_row(
                     s_recv_buf[:, off:off + w], shp, level_leading)
-                north_recv[i] = _unpack_edge_row(
+                north_deep[slot] = _unpack_edge_row(
                     n_recv_buf[:, off:off + w], shp, level_leading)
                 off += w
 
+        # Hand each output its own depth. The SOUTH ghost holds the south
+        # neighbour's LAST rows in their natural order, so a shallower
+        # consumer wants the LAST of them; the NORTH ghost holds the north
+        # neighbour's FIRST rows, so a shallower consumer wants the FIRST.
+        # (Both directions read off the two comments beside the ppermute
+        # pair above.) Getting this backwards is silent: the shapes match
+        # and only the values are wrong, which is what the bit-identity
+        # gate in tests/parallel/test_latlon_halo_dedup.py is for.
+        slot_of = {}
+        for slot, (src, _h) in enumerate(sends):
+            slot_of.setdefault(src, slot)
+        south_recv: list = [None] * n_fields
+        north_recv: list = [None] * n_fields
+        for i in range(n_fields):
+            slot = slot_of[sources[i]] if dedup else i
+            h = int(specs[i][1])
+            deep = sends[slot][1]
+            if h == deep:
+                south_recv[i] = south_deep[slot]
+                north_recv[i] = north_deep[slot]
+            else:
+                south_recv[i] = south_deep[slot][-h:]
+                north_recv[i] = north_deep[slot][:h]
+
         outs = []
-        for i, f in enumerate(fields):
+        for i in range(n_fields):
+            f = fields[sources[i]]
             spec = specs[i]
             h = int(spec[1])
             if spec[0] == "wall":
