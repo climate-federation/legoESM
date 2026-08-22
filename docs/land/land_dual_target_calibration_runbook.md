@@ -868,6 +868,108 @@ atmosphere, and the soil seed and the stomatal response both key off that
 atmosphere's near-surface humidity.  A dry model boundary layer would depress both
 at once.  NOT TESTED; stated as the next thing to test, not as a finding.
 
+## simple_seb IS STRUCTURALLY BROKEN; two-leaf canopy is now the DEFAULT (2026-08-20)
+
+User directive: *"simple_seb should be used only for academic simplified tests.
+Default should be two-leaf canopy + MOST, with the option to have simple slab
+(one or two layers with two as default) or Richards equation / diffusion heat
+soils."*  Measured evidence, well-watered column, one day, realistic forcing,
+latent heat W/m2 (tropical forest / C3 grass / bare soil):
+
+| simple_seb | forest | grass | bare |
+|---|---|---|---|
+| stomata OFF | 405 | 283 | 194 |
+| stomata ON | 129 | **4.1** | **2.0** |
+
+THREE separate defects, not one:
+
+1. **Stomata off: nothing limits evaporation.**  It runs at potential while the
+   soil top layer barely drains.
+2. **Stomata on: the humidity gradient SELF-EXTINGUISHES.**  The dominant one,
+   and predicted by GLM before it was measured.  The scheme sets surface humidity
+   as `beta * q_sat(T_sfc)`.  Throttling warms the surface, which raises q_sat,
+   which the throttle shrinks back — the column settles exactly where the surface
+   humidity equals the AIR humidity and evaporation stops:
+
+   | stomata on | T_sfc | q_sfc | q_air | gradient | LE |
+   |---|---|---|---|---|---|
+   | forest | 27.9 C | 0.0153 | 0.014 | 1.3e-3 | 129 |
+   | grass | 33.3 C | 0.0141 | 0.014 | 9e-5 | 4.1 |
+   | bare | 37.2 C | 0.0141 | 0.014 | 1e-4 | 2.0 |
+
+   Sensible heat takes everything (273 W/m2 over grass) and the ground runs
+   8-12 K hot.  This is the alpha-method pathology: a moderate throttle plus a
+   free surface temperature drives the gradient to zero.
+3. **The Jarvis conductance has NO leaf-area term**, so BARE GROUND is throttled
+   by stomata it does not have.  (Not the dominant term — Jarvis returns
+   beta_canopy 0.27 at the reference case, not 0.02 — but real.)
+
+The two-leaf canopy computes evaporation from leaf-to-canopy-air RESISTANCES, so
+it cannot self-extinguish this way.  Every LMIP template uses it, which is why
+those simulations reproduce observed latent heat and photosynthesis while the
+coupled arms did not.
+
+**COUPLED CONFIRMATION** (5-day January, res-4 mesh, wet soil, plants on, ocean
+control clean at -0.27 W/m2):
+
+| coupled land latent heat | W/m2 |
+|---|---|
+| simple_seb, plants off | 50.2 |
+| simple_seb, plants on | 8.9 |
+| **two-leaf canopy, plants on** | **37.8** |
+| observed, annual | 28-32 |
+
+A fourfold recovery into the physical range, with land precipitation up
+0.26 mm/day and the surface cooler.
+
+**Defaults changed**: both land configs to the two-leaf canopy and MOST exchange;
+the AMIP driver's land surface scheme to `two_leaf`.  A slab-only run falls back
+(the canopy runs inside the soil tile) rather than refusing a run that never asked
+for a canopy; asking explicitly without the tile is still refused.
+
+**CONSEQUENCE FOR THE CALIBRATION**: the offline tables were fitted under
+`simple_seb`, i.e. under all three defects above.  They are inconsistent with the
+new default and must be re-fitted against the two-leaf canopy.  GLM's ordering
+advice: land scheme behind a flag, re-tune against the same offline benchmarks,
+then flip default and tables TOGETHER with the benchmark evidence attached.
+
+### Review of the defaults change (codex + GLM, 2026-08-20)
+
+**RETRACTION of my own headline.** The coupled two-leaf number (37.8 W/m2) was
+NOT the calibrated canopy: `clm_multilayer_setup` returns `LandSurfaceParams`,
+and the two-leaf scheme reads canopy fields (`hc`, `ALB_VIS`, `ALB_NIR`, `rz0m`,
+...) that are absent there, so it fell back to GENERIC canopy height, albedo and
+roughness and ignored the tuned per-PFT values (codex).  The measurement stands
+as two-leaf vs simple_seb — a real fourfold recovery — but it is NOT evidence
+that the tuned canopy parameters work coupled.  **Wiring real canopy parameters
+onto that path is the top open item.**
+
+**Fixed from the review:**
+* A `--config` YAML asking for a canopy arrives as an argparse DEFAULT, so the
+  "was it requested?" test missed it and silently rewrote the request to
+  simple_seb — the exact silent degradation the guard exists to prevent.  The
+  loader now records which keys the file set, and the guard reads them.
+* The slab fallback was an assignment under a comment promising to "SAY SO".  It
+  now warns, unconditionally, naming why simple_seb is academic-only.
+* BOTH offline calibrators inherited the new default, which consumes neither the
+  constant exchange coefficient the slab trainer fits nor the scheme its tables
+  belong to; the multilayer trainer's no-inert gate would have aborted at step 0.
+  Both are now PINNED to simple_seb, and the shared calibrated definition records
+  that it names the scheme the tables were FITTED under, not a good scheme.
+* `run_lmip`'s default moved to the canopy too.
+* Three AMIP decks that are calibration / regression baselines now state
+  `land_surface_scheme: simple_seb` explicitly, so their numbers do not silently
+  become a different model; new runs take the default.
+* The dispatch test asserted the OLD default; it now pins the default AND the
+  explicit simple_seb selection, so that coverage is not lost.
+
+**GLM's release conditions, recorded, NOT yet met:** re-tune against the canopy
+before treating the default as production; validate roughness per surface class
+(a wrong constant coefficient was roughly right everywhere, a wrong roughness is
+badly wrong somewhere); define and test a canopy solver fallback with a
+diagnostic; make stomata-on with zero vegetation an error even in academic use;
+run a GLOBAL offline comparison at the new default before trusting it.
+
 ### The cheapest next measurement (GLM, and it answers the OPEN question)
 
 Evaluate the DEPLOYED soil-availability function beta_soil(theta) — the one both

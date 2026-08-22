@@ -45,6 +45,42 @@ set +e
 # the SCM arm runs that SAME Stevens (2005) kernel, so cloud-top radiative
 # cooling is on both sides rather than only in the LES.
 #
+#
+# ============================ 2026-08-21 RE-RUN ============================
+# Re-fit at HEAD, because CLUBB's missing surface boundary condition is now
+# ported. In the previous eight-case fit (job 9419739, pin c780e2f29) CLUBB
+# was LAST of nine at 2.5367 and could not take a single reducing step
+# ("no_reducing_step"): its Wangara gradient was 1.33e16 against a loss of 1,
+# a near-singular denominator rather than a physical sensitivity. The cause
+# was `calc_sfc_varnce` -- CLUBB's own surface second-moment BC, called
+# unconditionally every timestep upstream -- being entirely UNPORTED (#1508).
+# It is ported now (24eb46cef + d7050fcf8, 0433205ca, 7c8666f79).
+#
+# PRE-REGISTERED, before the queue: this run produces the joint default and
+# tuned score of all nine closures over all eight cases.
+#   CONFIRMS the fix  -> clubb's status is `tuned`, not `no_reducing_step`,
+#                        and its joint DEFAULT score is below 1.0.
+#   REFUTES it        -> clubb still cannot take a reducing step, or its
+#                        joint default stays above 2.0.
+# Expected from the three single-case arms already run at this pin
+# (_sfcv_wangara/_sfcv_bomex/_sfcv_cbl): wangara default 15.21 -> 1.145,
+# bomex 0.053, cbl 0.064, each tuning 16-22% on its own.
+#
+# Why not answer this offline: the three per-case arms above ARE the cheap
+# test and they have already run. What they cannot produce is the deliverable
+# -- ONE parameter set per closure that holds across all eight regimes -- and
+# a joint objective is a mean, so per-case fits do not compose into it.
+#
+# This is a NEW BASELINE, not a term-by-term successor to job 9419739. Only
+# CLUBB's change is under test with independent per-case evidence; the other
+# eight closures also moved from c780e2f29 to this pin (the hydrostatic lane
+# now exports its surface fluxes as diagnostics, and the dead-parameter freeze
+# is derived from source instead of a hardcoded CLUBB-only list). Both are
+# expected to be identity for these arms -- the first is a None-guarded
+# diagnostic field and the second only relabels parameters the zero-gradient
+# gate already froze -- but "expected" is not measured, so do not read a small
+# non-CLUBB move as a physics result.
+# ===========================================================================
 # WALLTIME, sized from the ONE measurement available (job 9333698: 9 schemes,
 # 5 cases, 8 steps, 21 h 43). That run's cost is dominated by XLA compilation
 # of the per-(scheme, case) rollout graph, which scales with schemes x cases
@@ -81,7 +117,7 @@ R=/burg-archive/glab/users/pg2328/legoESM/results
 CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
-OUT=${OUT:-$R/scm_les_turbulence/all_eight_wangara}
+OUT=${OUT:-$R/scm_les_turbulence/all_eight_sfcv}
 
 # PREFLIGHT: refuse to start if any reference is missing. This is a long job
 # and discovering a missing deck after the queue wait wastes the slot.

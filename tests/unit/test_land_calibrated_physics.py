@@ -432,11 +432,11 @@ def test_a_wrong_column_land_ic_is_caught_before_any_land_work(tmp_path):
         theta_soil=jnp.full((n_col, n_lay), 0.3),
         runoff_surface=jnp.zeros(n_col), runoff_subsurface=jnp.zeros(n_col),
         snow_depth=jnp.zeros(n_col), snow_age=jnp.zeros(n_col), TgC=None)
-    other = SoilGridConfig(n_layers=n_lay, total_depth=6.375,
-                           growth_factor=2.0)
+    other = make_soil_grid(SoilGridConfig(n_layers=n_lay, total_depth=6.375,
+                                          growth_factor=2.0)).dz
     ic = tmp_path / "wrong_column.npz"
     save_land_restart(ic, state, land_mode="multilayer", t_end_s=0.0,
-                      n_steps_completed=0, soil_grid=other)
+                      n_steps_completed=0, soil_dz=other)
     assert load_land_restart_soil_dz(ic) is not None, "the stamp was not written"
 
     cal = calibrated_multilayer_setup()
@@ -465,7 +465,7 @@ def test_a_wrong_column_land_ic_is_caught_before_any_land_work(tmp_path):
     ok = tmp_path / "right_column.npz"
     save_land_restart(ok, state, land_mode="multilayer", t_end_s=0.0,
                       n_steps_completed=0,
-                      soil_grid=cal["soil_grid"])
+                      soil_dz=make_soil_grid(cal["soil_grid"]).dz)
     ModelDriver(cfg._replace(land_ic_path=str(ok)),
                 output_dir=tmp_path / "out3")._preflight_land_inputs()
 
@@ -559,3 +559,144 @@ def test_a_near_saturated_seed_stays_inside_the_retention_range():
     assert np.all(seeded > theta_r), "seeded at or below the residual"
     # And it really is NEAR saturation, not quietly pulled back to mid-range.
     assert np.all(seeded > 0.95 * theta_sat)
+
+
+def test_the_default_land_surface_is_the_two_leaf_canopy():
+    """The production default must be the canopy, not the simplified scheme.
+
+    Measured on a well-watered column, one day, realistic forcing: the simplified
+    scheme evaporates at potential with stomata off (405 W/m2 over forest) and
+    throttles BARE GROUND to 2 W/m2 with them on, because its conductance has no
+    leaf-area dependence.  It is for academic tests; the canopy is the default.
+    """
+    from scripts.run.run_amip import (
+        build_arg_parser, build_config_from_args, _postprocess_args,
+    )
+    from legoesm.land.config import LandConfig, MultiLayerLandConfig
+    from legoesm.land.surface_scheme import SimpleSEBConfig
+
+    for cfg in (LandConfig(), MultiLayerLandConfig()):
+        assert not isinstance(cfg.surface_scheme, SimpleSEBConfig), (
+            f"{type(cfg).__name__} defaults to the simplified surface scheme")
+        assert cfg.bulk_scheme == "most", (
+            f"{type(cfg).__name__} does not default to Monin-Obukhov exchange")
+
+    parser = build_arg_parser()
+    multi = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-mask-file", "l.nc",
+         "--use-multilayer-land"]), parser, []))
+    assert multi.land_surface_scheme == "two_leaf"
+
+    # A slab-only run must still START: the canopy runs inside the multilayer
+    # tile, so a default it cannot honour must not refuse a run that never asked
+    # for a canopy.  The field is left ALONE (rewriting it would make it
+    # non-default, which the strict single-purpose lanes reject outright) and is
+    # inert on the slab by construction; the warning is what stops that being
+    # silent.
+    slab = _postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser, [])
+    assert slab.land_surface_scheme == "two_leaf"
+    assert slab.use_multilayer_land is False
+
+    # But asking for it explicitly without the tile is still refused.
+    with pytest.raises(SystemExit):
+        _postprocess_args(
+            parser.parse_args(["--dataset", "analytical",
+                               "--land-surface-scheme", "two_leaf"]),
+            parser, ["--land-surface-scheme", "two_leaf"])
+
+
+def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
+    """A canopy scheme on the coupled path must receive CANOPY parameters.
+
+    They already existed and were already per-plant-type — canopy height, C4
+    fraction, Vcmax25, roughness ratio, band albedos — built by the same routine
+    the offline LMIP simulations use.  The coupled driver simply read a different
+    provider, whose only variants are soil ones, so the canopy fell back to
+    generic constants and every tuned per-PFT value went inert.
+    """
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_multilayer_land_driver import _patch_land_loaders, _small_cfg
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.land.canopy.config import CanopyLandParams
+
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(land_surface_scheme="two_leaf",
+                                surfdata_path="data/legoesm_surfdata_c260716.nc")
+    import os
+    if not os.path.exists(cfg.surfdata_path):
+        pytest.skip("harmonized surfdata not staged in this checkout")
+
+    driver = ModelDriver(cfg, output_dir=tmp_path / "canopy")
+    driver.setup()
+    params = driver.physics.land_ml_params
+    assert isinstance(params, CanopyLandParams), (
+        f"canopy scheme received {type(params).__name__}, so its tuned per-PFT "
+        "values are inert")
+    # And they VARY by column — a constant would mean the fallback, dressed up.
+    import numpy as np
+    for field in ("hc", "rz0m", "Vcmax25_C3_leaf"):
+        v = np.asarray(getattr(params, field))
+        assert np.ptp(v[np.isfinite(v)]) > 0.0, (
+            f"{field} is uniform across columns — that is the generic fallback, "
+            "not per-plant-type parameters")
+    # HONEST LIMIT, pinned so it is not forgotten (GLM): the original defect
+    # named roughness, albedo AND emissivity. Roughness is fixed above. The
+    # canopy builder emits a SINGLE emissivity, and the canopy computes its own
+    # radiation from soil colour plus leaf optics rather than a bulk vegetation
+    # albedo — so the tuned per-PFT emissivity and albedo do NOT reach it. That
+    # is a re-fit item, not wiring, and this asserts the current truth so a
+    # future change that fixes it fails here and gets noticed.
+    assert np.ptp(np.asarray(params.emissivity)) == 0.0, (
+        "emissivity now varies by column — if that is intended, this test is "
+        "stale and the tuned emissivity may finally be reaching the canopy")
+    # And the two datasets agreed on the column count.
+    assert np.asarray(params.hc).shape[0] == int(driver.grid.lat.size)
+
+
+def test_a_canopy_without_its_surfdata_is_refused(monkeypatch, tmp_path):
+    """No silent generic-constant canopy: refuse instead."""
+    import sys
+    sys.path.insert(0, "tests/unit")
+    from test_multilayer_land_driver import _patch_land_loaders, _small_cfg
+    from legoesm.driver.model_driver import ModelDriver
+
+    _patch_land_loaders(monkeypatch)
+    cfg = _small_cfg()._replace(land_surface_scheme="two_leaf", surfdata_path="")
+    with pytest.raises(ValueError, match="CANOPY parameters"):
+        ModelDriver(cfg, output_dir=tmp_path / "nosd").setup()
+
+
+def test_a_structured_grid_canopy_survives_radiation(monkeypatch, tmp_path):
+    """A canopy run must reach RADIATION, not just setup.
+
+    Radiation asks the land for one broadband albedo.  A bulk surface supplies it
+    directly; a canopy parameter set has no such field — it carries the two solar
+    band albedos and does its own transfer.  Reading the bulk field threw on
+    every structured-grid canopy run, at the first radiation call, after setup had
+    already reported success.
+    """
+    import os
+    import sys
+    import numpy as np
+    sys.path.insert(0, "tests/unit")
+    from test_multilayer_land_driver import _patch_land_loaders, _small_cfg
+    from legoesm.driver.model_driver import ModelDriver
+
+    sd = "data/legoesm_surfdata_c260716.nc"
+    if not os.path.exists(sd):
+        pytest.skip("harmonized surfdata not staged in this checkout")
+    _patch_land_loaders(monkeypatch)
+    driver = ModelDriver(
+        _small_cfg()._replace(land_surface_scheme="two_leaf", surfdata_path=sd),
+        output_dir=tmp_path / "rad")
+    driver.setup()
+
+    # Step it: setup succeeding proves nothing about the radiation call.
+    run_seg, carry0, forcing = driver.build_training_segment(2)
+    out = run_seg(carry0, 2, forcing)
+    _T = getattr(out.T, "data", out.T)
+    assert np.all(np.isfinite(np.asarray(_T))), (
+        "a structured-grid canopy run produced non-finite temperatures")
+    assert np.all(np.isfinite(np.asarray(out.land_ml.T_soil)))

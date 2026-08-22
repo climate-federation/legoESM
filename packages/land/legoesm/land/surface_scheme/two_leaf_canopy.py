@@ -451,7 +451,8 @@ def compute_two_leaf_canopy_fluxes(
 
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
+        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
+            initial_state, bundles_k)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -601,6 +602,11 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
+        # Whether the Newton closure actually reached a root on this column.
+        # False means the fluxes above are a stopped iterate, not a solution —
+        # the caller decides what to do with the column; it must not simply
+        # spend them.  Carried from the LAST Picard pass.
+        converged=converged,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

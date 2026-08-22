@@ -677,3 +677,46 @@ buoyancy mixing via convection OK, wind-KPP under-rep — refinement).
 snapshot (332×362, 20 lev, °C) → NEMO grid_T (to/so/tos/sos/zos/MLD, 75 lev); compute SST/SSS/
 SSH RMSE + integral diags (ACC Drake, AMOC@26N, MOC, MLD) at matching year; score vs tolerances.
 Extend `ocean/fidelity` (references.py/metrics.py/tolerances.py NEMO tier). Build while runs proceed.
+
+## 2026-08-18/19 session — the viscosity file, the third grid, and the closure
+(Resumed after a session crash at codex 9417318; full detail in memory
+`omip_euc_viscosity_2026-08-18.md`. Every claim below is arm- or probe-backed.)
+
+**ENSO / cold tongue (tripole):** the +3.2 C nino3 chain closed. Matched-window
+instruments (RUN_GATEWAY 5-day wo/uo/vo at the same simulated days) showed the
+EUC 3-4x weak and failing to spin up, the 120W ascent reversed, and the 10 m
+Ekman drift 3-4x weak with MATCHED stress. Config root: ORCA1 reads momentum
+viscosity from eddy_viscosity_3D.nc (20000 midlat -> 1000 at the equator);
+our card ran A_h=1e5 flat + Smag C=3 (~100x at the EUC). The prescribed
+latitudinal profile (A_h_lat_profile, 9421984b3) restores upwelling
+(-12 -> +32e-6 m/s at 240E), the Ekman drift, Z20 (gap -0.9 m), and bends
+nino3 (+2.17 vs +2.50 at d20, growth stopped; control accelerates to +3.19).
+d90 run 9435841 pre-registered nino3 <= +1.5. REFUTED on the way: prandtl
+mode, mxl choice, etau, Langmuir, bg-diff, IWM background, bulk algo, vfac,
+face-native shear (spatial). SST verdicts now capped at the worst ENSO box
+(03a640559) — prior "excellent" labels over a +2 C nino3 are retracted.
+
+**Three grids:** tripole<->MPAS share the physics package: SST rmse 0.245,
+corr 1.000 (d30 matched pair). FESOM2 was NOT sharing physics (fesom-jax =
+FESOM2's own CVMix card); the mimic arm (our tripole on its card) REPRODUCED
+its signature, and porting the ORCA1 branches into fesom-jax (Dirichlet
+surface-TKE BC + ln_mxl0 anchor, cb389c7/77013b0) plus the NEMO January ice
+IC and CORE-II NYF forcing took FESOM2-vs-NEMO SST from 1.49 to 1.16-1.18
+with the warm-hemisphere dipole collapsed (SH_midlat +1.76 -> +0.31).
+Residual: NH-midlat -2.0 — BC/IC/forcing/bulk all eliminated by measurement;
+attributed (PLAUSIBLE) to WBC transport on the coarse CORE2 mesh, FESOM2's
+own documented character.
+
+**Polar SSS / SO:** the oracle-ratio control reversed the first Antarctic
+verdict: NEMO's own summer band is S-controlled (ratio 0.10) and FESOM2
+matches it; TRIPOLE is the outlier (0.88) — surface +0.19 psu salty, the
+top-30 m fresh layer HALVED (dS -0.221 vs NEMO -0.460) from an IC that has
+NEMO's structure. Mechanism = virtual-salt under-freshening (the Arctic
+PR#1484 mechanism, southern edition). Arm 9436519 runs the guard's sole
+sanctioned pairing (real_freshwater + water_flux/live_s restoring = NEMO
+nn_sssr=2) with pre-registered dS <= -0.35.
+
+**Instruments committed:** matched-window wo/uo/vo blocks + EUC width +
+meridional profiles (equatorial_thermocline.py), MLD T/S decomposition with
+the NEMO branch (mld_decomposition.py), fesom NYF forcing + ice IC
+(fesom-jax), bulk-parity regime scan, ENSO-capped SST verdict.

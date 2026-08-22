@@ -2634,6 +2634,316 @@ def _build_wide_halo_rings(global_mesh, partitions, max_lc, max_le,
     return cell_ring, edge_ring
 
 
+def _build_rim_rings(global_mesh, partitions, max_lc, max_le,
+                     max_width):
+    """Per-device INWARD ring distances — the rim complement of
+    :func:`_build_wide_halo_rings`.
+
+    Returns ``(cell_rim, edge_rim)`` int32 arrays of shape
+    ``(n_dev, max_lc)`` / ``(n_dev, max_le)``:
+
+    * ``cell_rim[d, i]`` — BFS hops (over ``cellsOnCell``) from device
+      *d*'s i-th local cell to the nearest cell NOT owned by *d*;
+      non-owned (halo) rows are the seed and get 0; owned cells farther
+      than ``max_width`` hops (the interior) and padding rows get
+      ``_WIDE_RING_FAR``. The width-``w`` RIM — the owned cells whose
+      radius-``w`` stencil can see a ghost value, i.e. the rows an
+      interior/rim split must recompute after the halo fill — is
+      ``1 <= cell_rim <= w``.
+    * ``edge_rim[d, j]`` — min of the two adjacent cells' rim
+      distances (an edge is ghost-affected iff EITHER cell is —
+      dual to the outward builder's AND/max), ``_WIDE_RING_FAR`` when
+      padding.
+
+    The BFS seeds from every non-owned LOCAL cell; owned boundary cells
+    adjacent to a cell of another device that is absent from the local
+    halo cannot occur for ``max_width <= halo_depth`` (depth-1 closure
+    contains every neighbour of an owned cell), which the caller must
+    hold — asserted below.
+    """
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    n_dev = len(partitions)
+    cell_rim = np.full((n_dev, max_lc), _WIDE_RING_FAR, dtype=np.int32)
+    edge_rim = np.full((n_dev, max_le), _WIDE_RING_FAR, dtype=np.int32)
+
+    for d, part in enumerate(partitions):
+        g2l = part.cell_g2l
+        n_owned = part.n_owned_cells
+        n_local = part.n_local_cells
+        assert max_width >= 1, "rim width must be >= 1"
+        rim_l = np.full(max_lc, _WIDE_RING_FAR, dtype=np.int64)
+        # Seed: every local non-owned (halo) cell at distance 0.
+        rim_l[n_owned:n_local] = 0
+        frontier = np.asarray(part.local_cells[n_owned:n_local])
+        # done marks GLOBAL cells already labelled (seed + visited owned).
+        done = np.zeros(coc.shape[1], dtype=bool)
+        done[frontier] = True
+        for r in range(1, max_width + 1):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~done[nb]]
+            done[nb] = True
+            lidx = g2l[nb]
+            # keep OWNED rows only — the rim lives in the owned block.
+            nb_owned = lidx[(lidx >= 0) & (lidx < n_owned)]
+            rim_l[nb_owned] = r
+            frontier = nb
+        cell_rim[d] = rim_l.astype(np.int32)
+
+        le = np.asarray(part.local_edges)
+        c12 = coe[:, le]                          # (2, n_local_edges)
+        r12 = np.full_like(c12, _WIDE_RING_FAR, dtype=np.int64)
+        for side in range(2):
+            cs = c12[side]
+            valid = cs >= 0
+            lidx = np.full(cs.shape, -1, dtype=np.int64)
+            lidx[valid] = g2l[cs[valid]]
+            present = lidx >= 0
+            r12[side, present] = rim_l[lidx[present]]
+        edge_rim[d, :le.shape[0]] = np.min(
+            r12, axis=0).astype(np.int32)
+
+    return cell_rim, edge_rim
+
+
+def _build_rim_plan(global_mesh, partitions, cell_rim, edge_rim,
+                    rim_width, stencil_depth):
+    """Per-device compact RIM SUBMESH plan for the interior/rim split.
+
+    v2 after codex review of v1 (two blockers fixed):
+
+    * EDGE SCATTER comes from ``edge_rim`` on DEVICE-owned rows (the
+      contiguous shard blocks that production returns), predicate
+      ``0 <= edge_rim <= rim_width`` — cut edges carry 0 under the
+      min-of-cells rule. v1 adopted the synthetic partition's
+      lower-cell edge-ownership, an unrelated set that could miss,
+      mis-scatter into halo rows, or double-patch.
+    * The closure is built with VECTORIZED numpy (frontier BFS over
+      ``cellsOnCell``, mask reductions for edges/vertices) — no
+      per-device call into the Python-loop generic partitioner, whose
+      cost at production scale (s9/64) is billions of interpreter
+      iterations.
+
+    Per device the compact submesh rows are ordered: rim cells first
+    (sorted global), then closure cells; scatter-target edges first,
+    then remaining closure edges. ``build_local_mesh`` consumes only
+    the index/g2l fields of the partition descriptor, so the comm
+    schedules are ``None``.
+
+    Returns a list (one entry per device) of dicts with ``sub_mesh``,
+    ``n_rim_cells``/``n_rim_edges``, ``cell_gather``/``edge_gather``
+    (device-LOCAL rows supplying each submesh entity, submesh order)
+    and ``cell_scatter``/``edge_scatter`` (device-LOCAL owned rows
+    receiving submesh tendency rows ``[0:n_rim_*)``). Raises if any
+    closure entity leaves the device-local region. Setup-time only.
+    """
+    from legoesm.parallel.voronoi_partition import (
+        VoronoiPartition, build_local_mesh,
+    )
+
+    coc = np.asarray(global_mesh.cellsOnCell)     # (maxEdges, nCells)
+    coe = np.asarray(global_mesh.cellsOnEdge)     # (2, nEdges)
+    cov = np.asarray(global_mesh.cellsOnVertex)   # (vDeg, nVertices)
+    nCells = int(global_mesh.nCells)
+    nEdges = int(global_mesh.nEdges)
+    nVertices = int(global_mesh.nVertices)
+
+    plans = []
+    for d, part in enumerate(partitions):
+        n_owned_c = part.n_owned_cells
+        n_owned_e = part.n_owned_edges
+        rim_mask = ((cell_rim[d, :n_owned_c] >= 1)
+                    & (cell_rim[d, :n_owned_c] <= rim_width))
+        rim_global = np.sort(
+            np.asarray(part.local_cells)[np.where(rim_mask)[0]])
+
+        # scatter-target edges FIRST (needed to seed the closure):
+        # DEVICE-owned rows with rim distance in [0, rim_width] — cut
+        # edges are 0 and their far cell lives in the device HALO, so
+        # the closure must be seeded from the edges' cells too, not
+        # from rim cells alone (v2 fix: 77 scatter edges escaped a
+        # rim-only closure on the s3@6 fixture).
+        own_e_rows = np.where(
+            (edge_rim[d, :n_owned_e] >= 0)
+            & (edge_rim[d, :n_owned_e] <= rim_width))[0]
+        # EXACT-COVER tripwire (GLM r4 Q2.4): every device-owned edge
+        # must be classified — scatter (0..width) or interior (finite
+        # rim > width). A FAR owned edge (an adjacent cell absent from
+        # the device-local region) would be computed from garbage by
+        # the interior pass and never overwritten; refuse to build.
+        _own_rim = edge_rim[d, :n_owned_e]
+        if (_own_rim == _WIDE_RING_FAR).any():
+            _n_far = int((_own_rim == _WIDE_RING_FAR).sum())
+            raise ValueError(
+                f"rim plan device {d}: {_n_far} owned edges have FAR rim "
+                f"distance (adjacent cell missing from the device-local "
+                f"region) — neither scatter nor interior covers them")
+        scatter_e_global = np.sort(
+            np.asarray(part.local_edges)[own_e_rows])
+        seed_cells = coe[:, scatter_e_global].ravel()
+        seed_cells = np.unique(np.concatenate(
+            [rim_global, seed_cells[seed_cells >= 0]]))
+
+        # --- vectorized cell closure: BFS depth stencil_depth ---
+        in_local = np.zeros(nCells, dtype=bool)
+        in_local[seed_cells] = True
+        frontier = seed_cells
+        for _ in range(stencil_depth):
+            if frontier.size == 0:
+                break
+            nb = coc[:, frontier].ravel()
+            nb = nb[nb >= 0]
+            nb = np.unique(nb)
+            nb = nb[~in_local[nb]]
+            in_local[nb] = True
+            frontier = nb
+        not_rim = in_local.copy()
+        not_rim[rim_global] = False
+        closure_cells = np.where(not_rim)[0]
+        local_cells = np.concatenate([rim_global, closure_cells])
+
+        # --- edges: any adjacent cell local ---
+        e_c1, e_c2 = coe[0], coe[1]
+        c_loc = np.zeros(nCells + 1, dtype=bool)
+        c_loc[:nCells] = in_local
+        e_local_mask = c_loc[np.where(e_c1 >= 0, e_c1, nCells)] | \
+            c_loc[np.where(e_c2 >= 0, e_c2, nCells)]
+        # Restrict to edges the DEVICE partition carries: the production
+        # builder's closed cellsOnEdge construction (AND-filter, mesh
+        # corners) drops a handful of outer-boundary edges the generic
+        # OR-rule would keep. Those sit at maximum distance from every
+        # rim entity; the full-tendency closure gate
+        # (test_rim_plan_closure) is the arbiter that dropping them
+        # never reaches a rim value — scatter edges stay strict below.
+        dev_has_edge = part.edge_g2l >= 0
+        e_local_mask &= dev_has_edge
+        # every scatter edge is in the closure by construction now
+        # (its cells seeded the BFS) — keep the assert as a tripwire.
+        if not e_local_mask[scatter_e_global].all():
+            raise ValueError(
+                f"rim plan device {d}: {int((~e_local_mask[scatter_e_global]).sum())} "
+                f"scatter-target edges outside the closure — seeding bug")
+        e_local_mask_rest = e_local_mask.copy()
+        e_local_mask_rest[scatter_e_global] = False
+        local_edges = np.concatenate(
+            [scatter_e_global, np.where(e_local_mask_rest)[0]])
+
+        # --- vertices: any incident cell local ---
+        v_c = cov
+        v_local_mask = np.zeros(nVertices, dtype=bool)
+        for k in range(v_c.shape[0]):
+            ck = v_c[k]
+            valid = ck >= 0
+            v_local_mask[valid] |= in_local[ck[valid]]
+        # boolean-or over incident cells per vertex needs vertex-major
+        # reduction; the loop above is over vertexDegree (3), not N.
+        local_vertices = np.where(v_local_mask)[0]
+
+        def g2l_of(local_ids, n_global):
+            m = np.full(n_global, -1, dtype=np.int32)
+            m[local_ids] = np.arange(len(local_ids), dtype=np.int32)
+            return m
+
+        rim_part = VoronoiPartition(
+            rank=0, n_ranks=2,
+            nCells_global=nCells, nEdges_global=nEdges,
+            nVertices_global=nVertices,
+            n_owned_cells=len(rim_global),
+            n_owned_edges=len(scatter_e_global),
+            n_owned_vertices=0,
+            n_local_cells=len(local_cells),
+            n_local_edges=len(local_edges),
+            n_local_vertices=len(local_vertices),
+            local_cells=local_cells, local_edges=local_edges,
+            local_vertices=local_vertices,
+            cell_g2l=g2l_of(local_cells, nCells),
+            edge_g2l=g2l_of(local_edges, nEdges),
+            vertex_g2l=g2l_of(local_vertices, nVertices),
+            cell_comm=None, edge_comm=None, vertex_comm=None,
+        )
+        sub_mesh = build_local_mesh(global_mesh, rim_part)
+
+        cell_gather = part.cell_g2l[local_cells]
+        edge_gather = part.edge_g2l[local_edges]
+        if (cell_gather < 0).any() or (edge_gather < 0).any():
+            raise ValueError(
+                f"rim plan device {d}: closure leaves the device-local "
+                f"region ({int((cell_gather < 0).sum())} cells, "
+                f"{int((edge_gather < 0).sum())} edges) — rim_width="
+                f"{rim_width} + stencil_depth={stencil_depth} exceeds "
+                f"the partition halo depth")
+
+        plans.append({
+            "sub_mesh": sub_mesh,
+            "n_rim_cells": int(len(rim_global)),
+            "n_rim_edges": int(len(scatter_e_global)),
+            "cell_gather": cell_gather.astype(np.int64),
+            "edge_gather": edge_gather.astype(np.int64),
+            "cell_scatter": cell_gather[:len(rim_global)].astype(np.int64),
+            "edge_scatter": edge_gather[:len(scatter_e_global)].astype(np.int64),
+        })
+    return plans
+
+
+def _stack_rim_plans(plans):
+    """Stack per-device rim plans into shard_map-able arrays.
+
+    Uses the SAME padding machinery as the device meshes
+    (:func:`_pad_local_mesh_to`): every submesh is padded to the
+    across-device maxima and stacked on a leading device axis;
+    gather/scatter index vectors are padded with a trailing GARBAGE
+    slot index (the padded buffers carry one sacrificial row, mirroring
+    the halo fill's ``max_lc + 1`` convention) so padded lanes read and
+    write only garbage. Returns a dict of stacked arrays plus the
+    per-device true sizes (int32 vectors) the kernel masks with.
+    Setup-time only.
+    """
+    n_dev = len(plans)
+    max_rc = max(p["sub_mesh"].nCells for p in plans)
+    max_re = max(p["sub_mesh"].nEdges for p in plans)
+    max_rv = max(p["sub_mesh"].nVertices for p in plans)
+
+    padded = [_pad_local_mesh_to(p["sub_mesh"], max_rc, max_re, max_rv)
+              for p in plans]
+    stacked_sub = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves, axis=0), *padded)
+
+    def pad_idx(vecs, width, garbage):
+        out = np.full((n_dev, width), garbage, dtype=np.int64)
+        for d, v in enumerate(vecs):
+            out[d, :len(v)] = v
+        return out
+
+    # gather indices point into the device-local (owned+halo+garbage)
+    # buffers; scatter indices point into owned+garbage tendency rows.
+    # The garbage slot index is the buffer's LAST row, appended by the
+    # consumer before the gather/scatter (max_lc / cells_per etc. + 0).
+    cg = pad_idx([p["cell_gather"] for p in plans], max_rc, -1)
+    eg = pad_idx([p["edge_gather"] for p in plans], max_re, -1)
+    max_sc = max(len(p["cell_scatter"]) for p in plans)
+    max_se = max(len(p["edge_scatter"]) for p in plans)
+    cs = pad_idx([p["cell_scatter"] for p in plans], max_sc, -1)
+    es = pad_idx([p["edge_scatter"] for p in plans], max_se, -1)
+
+    return {
+        "sub_mesh": stacked_sub,
+        "cell_gather": cg, "edge_gather": eg,
+        "cell_scatter": cs, "edge_scatter": es,
+        "n_rim_cells": np.array([p["n_rim_cells"] for p in plans],
+                                dtype=np.int32),
+        "n_rim_edges": np.array([p["n_rim_edges"] for p in plans],
+                                dtype=np.int32),
+        "n_sub_cells": np.array([p["sub_mesh"].nCells for p in plans],
+                                dtype=np.int32),
+        "n_sub_edges": np.array([p["sub_mesh"].nEdges for p in plans],
+                                dtype=np.int32),
+    }
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 

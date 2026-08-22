@@ -209,6 +209,41 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # snake_case; same rationale as the clubb modules.
 "packages/atmosphere/legoesm/atmosphere/dynamics/column_les_diagnosis.py" = ["N803", "N806", "N815"]
 "packages/atmosphere/legoesm/atmosphere/dynamics/column_les.py" = ["N803", "N806", "N815"]
+# LES-suite case registry (docs/atmosphere/les_suite): case-definition dataclass
+# fields and generator args carry CLAUDE.md-mandated unit suffixes on kinematic
+# fluxes (surface_theta_flux_K_m_s [K m/s], fluxes_K_m_s) whose Kelvin "K" reads as
+# mixedCase to pep8-naming. The unit suffix is load-bearing (units-in-names rule);
+# same rationale as the clubb / column-LES modules. N815 = dataclass field, N803 = arg.
+"packages/atmosphere/legoesm/atmosphere/les_suite/registry.py" = ["N815"]
+"packages/atmosphere/legoesm/atmosphere/les_suite/catalog.py" = ["N803"]
+# CBL intercomparison gate: physical symbol Q0 (surface heat flux) as an arg, and
+# the mK/m unit suffix on the well-mixed metric field read clearer than snake_case
+# (units-in-names rule); same rationale as the clubb / column-LES modules.
+"packages/atmosphere/legoesm/atmosphere/les_suite/intercomparison.py" = ["N803", "N815"]
+"tests/atmosphere/les_suite/test_intercomparison.py" = ["N802", "N803", "N806"]
+# LES-suite emit driver: physical symbols Q0 (surface heat flux) and T (integration
+# length) read clearer than snake_case (units-in-names rule).
+"scripts/run/run_les_suite.py" = ["N803", "N806"]
+# emit.py: T_s kwarg matches the bridge artifact's surface-temperature field name.
+"packages/atmosphere/legoesm/atmosphere/les_suite/emit.py" = ["N803"]
+"tests/atmosphere/les_suite/test_emit.py" = ["N806"]
+# scm_coupling tests: T (temperature) symbol in names/locals reads clearer than
+# snake_case for the θ↔T conversion checks (units-in-names rule).
+"tests/atmosphere/les_suite/test_scm_coupling.py" = ["N802", "N806"]
+# scm_runner: T_profile / T_final (temperature) locals + dtheta_sfc_K (a _K
+# unit-suffixed physical arg) — physical symbol / units-in-names convention.
+"packages/atmosphere/legoesm/atmosphere/les_suite/scm_runner.py" = ["N803", "N806"]
+"tests/atmosphere/les_suite/test_scm_runner.py" = ["N806"]
+# ARM obs scoring: physical symbol T (temperature) locals read clearer than snake_case.
+"packages/atmosphere/legoesm/atmosphere/les_suite/arm_obs_score.py" = ["N806"]
+"tests/atmosphere/les_suite/test_arm_obs_score.py" = ["N806"]
+# SCM forcing IO + ARM/SCCM loader: physical symbols T (temperature), divT (T
+# advective tendency) as args/locals read clearer than snake_case, matching the
+# sibling dephy_scm loader (units-in-names rule).
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/scm_forcing_io.py" = ["N803", "N806"]
+"packages/atmosphere/legoesm/atmosphere/forcing/scm/sccm_arm.py" = ["N803", "N806"]
+"tests/atmosphere/hydrostatic/unit/test_scm_forcing_io.py" = ["N806"]
+"tests/atmosphere/hydrostatic/unit/test_sccm_arm_loader.py" = ["N806"]
 # Column large-scale extractor: physical symbol names (T, T_v for temperature /
 # virtual temperature) read clearer than snake_case; same rationale. Test files
 # use the same symbols (T) + set jax_enable_x64 before importing (E402).
@@ -267,6 +302,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # Run-as-a-script sys.path bootstrap (iter 321) must precede the ``scripts.*`` import, so the
 # subsequent module-level imports trip E402; the bootstrap makes ``python scripts/...`` work.
 "scripts/validate/run_perfect_model_osse.py" = ["E402"]
+# Same run-as-a-script sys.path bootstrap (REPO_ROOT insert precedes the ``scripts.run``
+# import), so its module-level imports trip E402.
+"scripts/run/train_scm_rce_params.py" = ["E402"]
 # ERA5->model regridders + their tests: physical symbol names (T, u, v, q) +
 # field-name vars (T_cell, T_model) read clearer than snake_case; E402 covers the
 # x64-before-import idiom / logging setup.
