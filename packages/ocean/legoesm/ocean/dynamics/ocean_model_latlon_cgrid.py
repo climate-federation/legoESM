@@ -5233,6 +5233,7 @@ class LatLonCGridOceanModel:
                     # post-update AFTER state; state.eta is NOW. No-op when
                     # implicit_vmix_e3t_now_divisor is off.
                     eta_now=state.eta.data,
+                    u_now=state.u.data, v_now=state.v.data,
                 )
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state)
@@ -5247,6 +5248,7 @@ class LatLonCGridOceanModel:
                     n2_tracers_before=_n2_tracers_before,
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling call.
                     eta_now=state.eta.data,
+                    u_now=state.u.data, v_now=state.v.data,
                 )
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -6126,6 +6128,8 @@ class LatLonCGridOceanModel:
         n2_tracers=None,
         n2_tracers_before=None,
         eta_now=None,
+        u_now=None,
+        v_now=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -6424,7 +6428,10 @@ class LatLonCGridOceanModel:
         # passes the step-entry state directly, so its fallback
         # (eta_now=None -> state.eta) IS the NOW eta.  A future call site
         # that passes an AFTER state without eta_now would silently divide by
-        # the AFTER thickness — thread eta_now there too.  Static Python
+        # the AFTER thickness — thread eta_now there too, and ``u_now``/
+        # ``v_now`` with it (#1455: the bottom-drag rate below has exactly the
+        # same NOW-vs-AFTER problem, and is threaded from the same sites).
+        # Static Python
         # bools (feature-gating exception, CLAUDE.md) — config is not traced.
         _dzw_slot = bool(getattr(self.config, "implicit_vmix_dzw_slot", False))
         _e3t_now_slot = bool(
@@ -6667,9 +6674,39 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_bottom_drag_rate_faces,
             )
+            # TIME LEVEL of rCdU_bot (#1455 sibling).  NEMO computes the
+            # coefficient ONCE per step in zdf_phy from uu(:,:,:,Kmm)
+            # (zdfdrg.F90:174-181) and ``dyn_zdf`` only ``USE zdfdrg``
+            # (dynzdf.F90:22) -- it READS the stored array at :156-159 and
+            # :296 and never recomputes it (under ln_drgimp=.TRUE., DINO's
+            # setting, zdf_drg_exp at :101 does not run either).  So the
+            # implicit diagonal sees the SAME Kmm coefficient the barotropic
+            # loop does.  ``state`` here is whatever the caller handed us,
+            # which on every production path is a post-update AFTER state --
+            # exactly the situation ``eta_now`` above already exists for, and
+            # threaded from the same call sites.
+            if (u_now is None) != (v_now is None):
+                raise ValueError(
+                    "implicit vertical mixing's now-level drag velocity must "
+                    "supply BOTH u_now and v_now or NEITHER (one alone mixes "
+                    "time levels inside one |U|); got "
+                    f"u_now={'set' if u_now is not None else None}, "
+                    f"v_now={'set' if v_now is not None else None}.")
+            _u_drg = state.u.data if u_now is None else u_now
+            _v_drg = state.v.data if v_now is None else v_now
+            # THICKNESS row, named and deliberately NOT threaded: NEMO builds
+            # the rate from e3t(...,Kmm) (zdfdrg.F90:176) while ``dz_cell``
+            # here is built from ``state.eta`` -- the AFTER eta on the same
+            # call sites.  It is INERT on every card that ships today: the
+            # thickness reaches the rate only through nemo_loglayer's
+            # Cd(h_bot) (ocean_tendency_common.py:1085-1087), and the
+            # nemo_quadratic law DINO selects returns a constant ``cd = cd0``
+            # (:1089-1090) without reading h_bot at all.  A card that selects
+            # bottom_drag_scheme="nemo_loglayer" WOULD pick up the after-level
+            # thickness -- thread a now-level dz here before shipping one.
             _r_eff_u, _r_eff_v, _is_bot_u, _is_bot_v = (
                 nemo_bottom_drag_rate_faces(
-                    state.u.data, state.v.data, dz_cell, self.z_coord,
+                    _u_drg, _v_drg, dz_cell, self.z_coord,
                     self.config, _grid))
             _r_eff_u = _r_eff_u.astype(state.u.data.dtype)
             _r_eff_v = _r_eff_v.astype(state.v.data.dtype)
@@ -7645,6 +7682,7 @@ class LatLonCGridOceanModel:
                     # post-AB2 AFTER state; state.eta is NOW (un-rebound
                     # _ab2_step parameter). No-op when the flag is off.
                     eta_now=state.eta.data,
+                    u_now=state.u.data, v_now=state.v.data,
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _trac
@@ -7672,6 +7710,7 @@ class LatLonCGridOceanModel:
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling
                     # additive-friction tracer call above.
                     eta_now=state.eta.data,
+                    u_now=state.u.data, v_now=state.v.data,
                 )
                 if _tke_prog:
                     state_ab2, tke_new_ab2 = _seq
@@ -8209,6 +8248,7 @@ class LatLonCGridOceanModel:
                 # recipe (outer_integrator=leapfrog). No-op when the flag is
                 # off.
                 eta_now=state.eta.data,
+                u_now=state.u.data, v_now=state.v.data,
             )
             if _tke_prog:
                 naa, tke_new = _res
@@ -8532,6 +8572,7 @@ class LatLonCGridOceanModel:
                 n2_tracers=self._n2_before_advection_tracers(state),
                 n2_tracers_before=self._n2_nemo_before_tracers(state),
                 eta_now=state.eta.data,
+                u_now=state.u.data, v_now=state.v.data,
             )
             if _tke_prog:
                 naa, tke_new = _res
@@ -8745,7 +8786,8 @@ class LatLonCGridOceanModel:
             # #1226 W1): the true pre-barotropic-solve NOW eta (state_corr.eta
             # is the AFTER/Naa level built at step 3 above). No-op when the
             # flag is off (eta_now is read only inside the _e3t_now_slot branch).
-            eta_now=state.eta.data)
+            eta_now=state.eta.data,
+            u_now=state.u.data, v_now=state.v.data)
 
         # 5. Carry the explicit increments for the next AB2 step.
         return state_new._replace(

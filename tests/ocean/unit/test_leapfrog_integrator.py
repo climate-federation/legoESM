@@ -1013,3 +1013,82 @@ def test_barotropic_drag_rate_receives_the_now_velocity_not_u_star():
     # ...and the two time levels really are distinct here, so the equality
     # above is a time-level assertion and not a tautology.
     assert np.max(np.abs(captured["u_mid"] - captured["u_now"])) > 1e-6
+
+
+def test_every_bottom_drag_rate_uses_the_step_entry_velocity():
+    """NEMO builds ``rCdU_bot`` ONCE per step, in ``zdf_phy`` from
+    ``uu(:,:,:,Kmm)`` (zdfdrg.F90:174-181 via zdfphy.F90:277 at stpmlf.F90:190),
+    and every consumer reads that one stored array: ``dyn_drg_init`` for the
+    barotropic loop (dynspg_ts.F90:1616), the ``pu_RHSi`` residual (:1642), and
+    ``dyn_zdf``, which only ``USE zdfdrg`` (dynzdf.F90:22) and reads the array
+    at :156-159 and :296 without ever recomputing it.
+
+    So within ONE step there is exactly one drag velocity: the step-entry one.
+    This asserts that invariant over EVERY call the model makes to the shared
+    rate helper, which is what makes it catch the whole defect family rather
+    than one site -- #1455 fixed two sites (the barotropic loop, then the
+    implicit vertical-mixing matrix) and a third would slip in silently
+    without this.
+
+    Scoped to a single ``_step_impl`` so "now" is unambiguous: under the full
+    leap-frog the before-level dissipation pass legitimately treats Kbb as its
+    own now level.
+    """
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=1.0e-3,
+        bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=2.5e-3,
+        zdf_drag_in_matrix=True, zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    # A sheared, non-rest velocity plus wind, so the momentum update actually
+    # moves u between the step entry and each drag site -- otherwise every
+    # candidate velocity coincides and the assertion could not fail.
+    rng = np.random.default_rng(7)
+    s0 = state._replace(u=state.u.replace(
+        data=jnp.asarray(0.3 * rng.standard_normal(state.u.data.shape))
+        * state.u_mask.data[..., None]))
+
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+    seen = []
+    orig = _pemod.nemo_bottom_drag_rate_faces
+
+    def _spy(u, v, h_k, z_coord, config, grid):
+        seen.append((np.asarray(u), np.asarray(v)))
+        return orig(u, v, h_k, z_coord, config, grid)
+
+    _pemod.nemo_bottom_drag_rate_faces = _spy
+    try:
+        model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+    finally:
+        _pemod.nemo_bottom_drag_rate_faces = orig
+
+    assert len(seen) >= 2, f"expected the drag helper to fire at several sites, got {len(seen)}"
+    u_now, v_now = np.asarray(s0.u.data), np.asarray(s0.v.data)
+    for i, (u_i, v_i) in enumerate(seen):
+        assert np.array_equal(u_i, u_now), (
+            f"drag call {i} of {len(seen)} was built from a velocity that is "
+            f"not the step-entry (Kmm) one: max|du| = "
+            f"{np.abs(u_i - u_now).max():.4e} m/s")
+        assert np.array_equal(v_i, v_now), (
+            f"drag call {i} of {len(seen)}: max|dv| = "
+            f"{np.abs(v_i - v_now).max():.4e} m/s")
+    # ...and the step really did move the velocity, so the equalities above are
+    # assertions about a time level and not a rest-state tautology.
+    out = model._step_impl(s0, _DT, surface_forcing=_sf(tau_x=0.05))
+    _out_u = out[0].u.data if isinstance(out, tuple) else out.u.data
+    assert np.max(np.abs(np.asarray(_out_u) - u_now)) > 1e-6
+
+
+def test_implicit_vmix_partial_now_velocity_raises():
+    """One component of the now-level velocity without the other would build
+    the drag rate's ``|U|`` from two different time levels -- a plausible
+    number with no error anywhere.  Rejected, both ways round (same rule the
+    barotropic solver applies)."""
+    state, model = _leapfrog_partial_cell_channel(
+        bottom_drag_scheme="nemo_quadratic", zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True, barotropic_drag_substep=True,
+        barotropic_solver="explicit_substep")
+    for kw in ({"u_now": state.u.data}, {"v_now": state.v.data}):
+        with pytest.raises(ValueError, match="BOTH u_now and v_now or NEITHER"):
+            model._apply_implicit_vertical_mixing(
+                state, _DT, _sf(), **kw)
