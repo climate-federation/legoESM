@@ -286,12 +286,47 @@ That is the second pair of levers today that does not stack — the first being
 the two lat-lon halo switches, which stacked at reduced value. A lever's size
 is a property of the configuration it was measured in.
 
+## What is left, and why it is not cheap any more
+
+Both lanes are out of cheap exact byte cuts.
+
+On the lat-lon lane a full audit of what actually goes on the wire found one
+remaining exact reduction after the duplicate row: two vertical endpoints of
+the mass-flux and vertical-velocity fields are literal zero by construction
+and are shipped anyway. It is 8,192 elements per direction per stage against
+the duplicate row's 106,496, so about 0.4% of the step — below the bar of any
+A/B worth a 32-node allocation. The larger candidates on that lane, the layer
+thickness and the pressure logarithm, are both reconstructible from surface
+pressure but are RE-DERIVATIONS rather than copies, and this campaign has a
+receipt showing a mathematically identical local reconstruction differing by
+one unit in the last place where a copied operand matched exactly.
+
+On the icosahedral lane the static surface geopotential is packed into every
+exchange and its tendency is zeroed by construction — verified in the source,
+not taken on report. It is one element per cell record out of twenty-eight, so
+roughly 0.3% of the step. Recorded and deliberately NOT built: knowing the
+size was cheaper than building it and measuring.
+
+What remains is structural rather than contained:
+
+* **Kernel granularity on the lat-lon lane.** The step runs about 180 kernels
+  whatever the shard size, averaging 13 microseconds at 128 GPUs, and no
+  compiler setting in this build moves the count. Cutting it means changing
+  what the dycore asks for, not how it is compiled.
+* **The fixed per-round term on the icosahedral lane**, 0.665 ms across
+  thirteen coloured rounds. The colouring is already optimal for the graph, so
+  the rounds cannot be cut by repartitioning; cutting them means changing the
+  halo depth, which follows from the integrator's stage count.
+* **A two-dimensional lat-lon decomposition**, which is the only remaining way
+  to cut that lane's halo bytes substantially, and which lost 22% at 64 GPUs
+  for a reason still not established.
+
 ## Decisions that are yours, not taken
 
 | # | decision | evidence |
 |---|---|---|
 | 1 | Sixteen collective channels — but chosen PER LANE AND PER DEVICE COUNT, not once | -12.4% lat-lon and -9.3% icosahedral at 64 GPUs; at 128 it is -9.9% on the icosahedral lane and only -1.0% on the lat-lon one |
-| 2 | Thirty-two vertical levels instead of twenty-six on the icosahedral lane | 26 levels measured 3.1x more expensive per cell per level than the cheap counts; faster at every device count despite 23% more work |
+| 2 | Thirty-two vertical levels instead of twenty-six on the icosahedral lane | 26 levels measured 3.1x more expensive per cell per level than the cheap counts, on ONE GPU. Local compute is 60% of that lane's step, so this is its largest candidate — but the number at 128 GPUs with the right channel count is being measured now rather than assumed from the single-GPU table |
 | 3 | Turn the level-leading halo on for the lat-lon lane | -4.0% at 128 GPUs, bit-identical, below the 5% bar it was gated against |
 | 4 | Turn the duplicate-row removal on for the lat-lon lane | **-5.69% at 128 GPUs**, bit-identical, past the 1.5% bar set before the run; arm spreads 0.20% and 0.34% |
 | 5 | Turn BOTH lat-lon switches on together | **-7.54% at 128 GPUs**, 3.7899 -> 3.5040 ms. They stack but do not add: the layout switch is worth 4.03% alone and 2.05% on top of the duplicate removal, because removing a row from the wire also removes the conversions that row needed. Measured, not assumed |
