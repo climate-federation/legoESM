@@ -6725,7 +6725,14 @@ class LatLonCGridOceanModel:
             # (no 1/2), with zDt_2 = the physical timestep (not the 2*dt
             # leapfrog form despite the name). ``_r_eff_{u,v}`` is
             # ``nemo_bottom_drag_rate_faces``'s 0.5*(...) AVERAGE of those
-            # same two T-point rates.  NEMO's zDt_2 = rDt*0.5 (:97) multiplies
+            # same two T-point rates.  EVERY dynzdf.F90 line number in this
+            # block is from src/OCE/DYN/dynzdf.F90 (vanilla).  The DINO card
+            # BUILDS cfgs/DINO/MY_SRC/dynzdf.F90, where the same statements sit
+            # at :115/:174/:200/:206/:314 -- textually identical on the drag and
+            # viscosity lines, so no physics differs, but do not chase these
+            # numbers in the MY_SRC copy (cf. barotropic_common.py:332, which
+            # warns about exactly this for its sibling file).
+            # NEMO's zDt_2 = rDt*0.5 (:97) multiplies
             # the SUM, i.e. zDt_2*sum == rDt*average, and ``dt_mom`` here IS
             # rDt -- so the average is already correctly scaled and NO extra
             # factor of 2 belongs here.  The comment this replaced argued the
