@@ -814,3 +814,164 @@ recirculates internally** and only 4.4 mm of sea surface accumulates against
 the 24.9 m a genuine convergence would have built. That is a control volume
 drawn once, offline, that rules out an entire class of mechanism — every one
 whose signature is net convergence — for the cost of an afternoon.
+
+---
+
+# Part 7 — the nonlinear terms, and the escalation
+
+Every linear candidate was closed by Parts 5-6. The forcing matches to 2.2e-19
+Pa, the deficit is a pure recirculation, and the surviving suspects were the
+nonlinear momentum terms and their wall behaviour.
+
+## What NEMO runs there, read from the compiled source
+
+DINO sets vector-form momentum advection with the Hollingsworth kinetic-energy
+scheme, so the horizontal advection is carried entirely by the KE gradient plus
+the vertical advection, with the rotational part in the vorticity flux already
+decomposed in Part 5.
+
+**The Hollingsworth kinetic-energy scheme has a meridional stencil the standard
+scheme does not.** Its cell-centre kinetic energy reads the rows above *and
+below*, so at the first wet row it reads the land row — where the stored
+velocity is exactly zero — and the cross term degenerates to a one-sided value
+rather than a symmetric pair. legoESM builds the same stencil but fills the
+off-row by edge replication rather than by reading a masked zero. Those two
+agree **only because DINO's land row stores exactly zero**, which is a property
+of the state and not of the code, so it is measured rather than assumed: the
+probe plants a large velocity on that dry row and the kinetic-energy score moves
+by **nineteen orders of magnitude**. The agreement is real and it rests entirely
+on the dry-face gate.
+
+The vertical advection has no meridional stencil for the zonal momentum at all —
+its transport is a zonal average — so the wall rows are not special in its
+construction. What *is* special is that its deepest wet level is a separate case
+in which nothing is advected through the sea floor, and the wall rows are the
+shallowest columns in the basin, so the fraction of the column governed by that
+case is largest there.
+
+## The three-way partition, and it is genuinely three-way
+
+The residual list assumed the advection and the kinetic-energy/pressure terms
+could only be compared as a union. They cannot only be compared that way: the
+oracle dumps all three in isolation and legoESM's own helper returns its kinetic
+energy and pressure gradients separately. So the partition is three-way, and the
+union is kept only as a cross-check.
+
+Three instrument controls passed before anything was scored. The oracle's own
+partition closes **exactly** — its advection trend equals the sum of its two
+isolated dumps to the last bit, on four files with four distinct checksums, so
+the reader and the vector-form assumption are both right. legoESM's recomputed
+pieces reproduce its own published diagnostics **bit-identically**. And the
+stored velocity on every dry face is exactly zero.
+
+The vertical-advection comparison is matched in quantity, which mattered: the
+card selects the oracle-faithful advective form of the full velocity, not
+legoESM's default perturbation form, so both sides advect the same thing.
+
+## The three nonlinear terms match — but two of them could never have mattered
+
+Scored on the three legs registered in advance, each on the statistic its own
+bar was calibrated for. **The table now carries a headroom column, which the
+first version lacked and which changes what two of the three rows mean.**
+
+| term | wall difference | headroom | headroom / bar | largest single cell | verdict |
+|---|---|---|---|---|---|
+| kinetic-energy gradient | 4.3e-27 | 5.5e-11 | **0.93×** | 3.3e-24 | matches, but too small to matter |
+| pressure gradient | 1.3e-19 | 1.5e-08 | **259×** | 4.8e-17 | **genuine agreement** |
+| vertical advection | 1.0e-15 | 3.7e-11 | **0.62×** | 1.8e-14 | matches, but too small to matter |
+
+Headroom is the score legoESM would earn by computing *zero* for the term — the
+largest error it could possibly contribute at the wall. **For the kinetic-energy
+gradient and the vertical advection the headroom is below the bar**, so those
+two are refuted by their own size and the measured agreement is not doing the
+work. Only the pressure gradient has real room to be wrong, and it agrees to
+3e-12 relative. The meridional component of all three was also scored and
+behaves the same way.
+
+The instrument was checked from the oracle's side, which the first version could
+not do: corrupting the reference — shifting it one row, one column, one level,
+zeroing it, or pairing it with the wrong term — moves every score to at or above
+the bar, while the true pairing sits ten to fifteen orders below.
+
+**Retracted:** the premise that motivated this probe. legoESM's fill returns the
+*true* neighbouring row for every scored row and differs from the oracle only on
+rows that are entirely dry, so the two stencils agree for any land value — not
+"only because the stored velocity there is zero". The mechanism did not exist.
+The measurement stands on its own.
+
+## RETRACTED: "candidates exhausted" — the term list was incomplete
+
+The first draft of this section escalated the campaign on the grounds that every
+operator had been compared. **That was wrong, and adversarial review overturned
+it.** The partition covers only the terms inside the tendency calculation.
+Roughly a third of what reaches the wall-row velocity in this configuration
+happens *after* it, and none of it has ever been compared against the oracle:
+
+- the leap-frog recombination of the split velocity;
+- the split-explicit barotropic solve (its own gate sits eight times outside its
+  bar, and its note says the residual is diffuse and unattributed);
+- **the implicit vertical solve, whose gate row is blank and whose only
+  end-to-end number is a 15% discrepancy — the largest unexplained figure
+  anywhere in the campaign, on the one stage never isolated**;
+- the after-level reconciliation, which *sets the depth-uniform part of the
+  velocity* while the deficit is itself depth-uniform, and whose gate row is
+  also blank;
+- the time filter's composition with all of the above, and the free-surface
+  drift correction that has no oracle analogue.
+
+**And a real defect was measured during that review.** One step uses **two
+different column depths for the same velocity**: the barotropic/baroclinic split
+uses the masked minimum rule, while the implicit vertical solve divides by an
+*unmasked* face average that keeps half a cell of rock at every topographic
+step. The divisor is 0.3–1.2% too deep, and the error carries a ~0.9
+percentage-point meridional gradient concentrated across the first twenty rows —
+the exact band the deficit occupies. So the step removes the barotropic mean
+with one rule and re-adds it with another. This was a known open item filed as
+"not measured"; it is measured now.
+
+**The second thing review overturned:** refuting a term by its largest single
+cell is sound only against *direct* forcing. At a bridged state the two models
+are identical, so the probe measures the forcing difference alone and says
+nothing about how a difference grows once the trajectories separate. This
+campaign has already proved that map is badly non-linear in the other direction
+— closing 96-98% of a genuine operator error moved the transport by 0.07 noise
+floors — and a map that non-linear cannot be inverted to license "small now,
+therefore never the owner".
+
+## The claim that IS supported, and what to do next
+
+> No term of the baroclinic momentum tendency differs from the oracle by enough
+> to force the wall-row deficit **directly** at the day-180 state. Rectification
+> through the trajectory is untested, and the terms outside the tendency
+> function are unexamined.
+
+Four operator-level tests remain, all cheap, none requiring a new oracle run:
+
+1. **Fix and re-measure the column-divisor mismatch.** The only *confirmed*
+   defect on the list; the mask it needs is already computed three lines away.
+2. **Diff one committed step against the oracle's own next restart**, bisected
+   across the four post-tendency stages using dumps already on disk. Highest
+   information available for zero new oracle work.
+3. **The after-level reconciliation against its own bracket** — it sets the
+   depth-uniform velocity, and the deficit is depth-uniform.
+4. **The implicit vertical solve in isolation**, which needs a port rather than
+   a bracket, but whose 15% discrepancy should not stay unexplained while
+   cheaper tests go unrun.
+
+Trajectory-feedback experiments are the tier *after* those, and by then they
+would be justified by evidence rather than by exhaustion.
+
+## Two pieces of debt this lane uncovered
+
+**The Hollingsworth stencil's boundary fill is not the oracle's convention.**
+Zero-Dirichlet gives one cross term; edge replication gives roughly four times
+that for smooth flow. They coincide here only because the boundary row is dry
+and stores zero. On a restart from a model that does not zero land velocities,
+or a wetting-drying case, they would differ by a factor of four at any wet
+boundary row.
+
+**And that stencil is not halo-aware.** It fills the neighbouring row with a
+bare edge replication and no halo exchange — verified, there is none before the
+call. Under latitude-decomposed parallelism a rank whose first row is an
+interior row would silently replicate its own data instead of reading its
+neighbour's. Filed as debt; not fixed here.
