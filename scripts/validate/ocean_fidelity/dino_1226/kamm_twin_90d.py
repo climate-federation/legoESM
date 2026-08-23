@@ -258,7 +258,7 @@ def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
     return t0, t0_nemo
 
 
-def _restart_elapsed_seconds(path: str) -> float:
+def restart_elapsed_seconds(path: str) -> float:
     """Model seconds elapsed at the restart, read from the restart ITSELF.
 
     NEMO writes both ``adatrj`` (elapsed days) and ``kt`` (step index) into the
@@ -312,7 +312,7 @@ def seasonal_t0_seconds(restart_path: str) -> float:
     """
     env = os.environ.get("DINO_TWIN_SEASONAL_KT0")
     if env is None or env == "restart":
-        t0_sec = _restart_elapsed_seconds(restart_path)
+        t0_sec = restart_elapsed_seconds(restart_path)
         source = "restart adatrj" + ("" if env is None else " (explicit)")
     else:
         try:
@@ -757,7 +757,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # The clock the NEMO run this twin is scored against is actually on, read
     # from the same restart.  Stamping it next to the clock the twin USED lets
     # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
-    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    t0_reference_sec = restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
     # Everything about this run a comparison must hold fixed.  A two-arm A/B
     # that changes the clock and something else is a confound, and nothing in
     # the artifact could see it before this stamp existed.
