@@ -331,6 +331,42 @@ What remains is structural rather than contained:
   to cut that lane's halo bytes substantially, and which lost 22% at 64 GPUs
   for a reason still not established.
 
+## At 128 GPUs the icosahedral step is more than half communication, and its compute has stopped shrinking
+
+Job 27148747, 128 GPUs, subdivision 9, wide halo, coloured schedule, sixty
+timed steps per arm, two arms each in palindrome order. The no-communication
+arms replace every exchange with the identity, so they give wrong answers and
+leave every other line of the step alone.
+
+| levels | full step | no communication | the communication |
+|---|---|---|---|
+| 26 | 4.925 ms | 2.355 ms | 2.57 ms |
+| 32 | 5.015 ms | 1.940 ms | 3.08 ms |
+
+Two things fall out, and the second is the more important.
+
+**Thirty-two levels really is cheaper to compute than twenty-six** -- 1.94
+against 2.36 ms for 23% more work -- which is the single-GPU anomaly holding
+up at scale. But it also moves more bytes, and at 128 GPUs the extra
+communication more than eats the saving: the full step is 1.8% SLOWER at 32
+levels. So the recommendation that came out of the single-GPU table does not
+survive at this device count, and the level count should be chosen on physics.
+
+**Communication is 52% of the step at 26 levels and 61% at 32.** And the
+compute has stopped shrinking: it was about 2.0 ms per device at 64 GPUs and
+is 2.36 ms at 128, i.e. doubling the machine made the per-device arithmetic
+slightly WORSE. That is the same surface-to-volume effect as the halo, showing
+up in the arithmetic: the wide-halo step builds a nine-ring ghost region so
+that one exchange serves all three stages, and at 128 GPUs that ghost region
+is a large part of what each device computes on. Half the machine's work at
+this size is arithmetic on other devices' cells.
+
+That makes the halo DEPTH a lever in its own right, separate from the
+schedule: turning the wide halo off trades one exchange per step for three and
+shrinks the ghost region threefold. The receipt that made wide halo the
+default was taken at 64 GPUs, where compute was still shrinking.
+
+
 ## The icosahedral level-count table, and why the mechanism stays unknown
 
 One GPU, subdivision 6, the same mesh throughout, two repetitions each.
