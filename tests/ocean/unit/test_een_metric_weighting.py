@@ -201,3 +201,46 @@ def test_unknown_een_metric_weighting_raises():
             jnp.ones((st["h"].shape[0], st["h"].shape[1])), st["grid"],
             "vector_invariant", "split",
             een_metric_weighting="nemoo")
+
+
+# ----------------------------------------------------------------------
+# The card selection, locked.
+# ----------------------------------------------------------------------
+
+def test_dino_mlf_card_selects_the_nemo_weighting():
+    """The oracle card must ship what NEMO actually computes.
+
+    Goes RED if the card is ever silently reverted to the per-unit-width form.
+    That matters more than usual here because the revert is INVISIBLE in every
+    90-day acceptance metric -- the A/B measured every gated number moving
+    inside its noise floor -- so nothing else in the suite would notice.
+    """
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+    assert dino_config_for_recipe(
+        "nemo_dino_kamm_mlf").een_metric_weighting == "nemo", (
+        "the NEMO MLF oracle card no longer selects NEMO's own transport "
+        "metric weighting (dynvor.F90:791-792, :804). It ships what NEMO "
+        "computes; reverting it is a fidelity regression that no acceptance "
+        "gate can see.")
+
+
+def test_card_selection_reaches_the_model_config():
+    """A card value nobody reads is not a selection.
+
+    The card field and the model-config field are separate objects; this pins
+    the pass-through, which is the half a card-only assertion cannot cover.
+    """
+    from legoesm.ocean.experiments.dino import (
+        dino_config_for_recipe, dino_lat_lon_model_config, dino_lat_lon_grid)
+    cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+    mc, _ = dino_lat_lon_model_config(dino_lat_lon_grid(cfg), cfg)
+    assert mc.een_metric_weighting == "nemo"
+
+
+def test_other_cards_are_unchanged():
+    """The flip is one card, not a global default change."""
+    from legoesm.ocean.experiments.dino import dino_config_for_recipe
+    for recipe in ("legoesm_default", "nemo_dino_kamm", "veros", "mitgcm"):
+        assert dino_config_for_recipe(recipe).een_metric_weighting == "off", (
+            f"{recipe} picked up the NEMO transport metric weighting; the "
+            "#1455 flip was scoped to the NEMO MLF oracle card alone")

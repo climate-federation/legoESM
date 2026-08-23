@@ -1495,18 +1495,36 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "een_e3f_scheme": "nemo_avg",         # nn_e3f_typ=1: masked AVERAGE e3f
                                           # (dynvor.F90::vor_een, not min-rule)
-    # NOT SELECTED YET, deliberately. vor_een weights the meridional transport
-    # by e1v and divides the u-tendency by e1u (dynvor.F90:791-792, :804),
-    # symmetrically e2u/e2v for v; legoESM's AL81 triad uses neither, and the
-    # option "nemo" supplies it. It closes 98.7% of the wall-row vorticity-flux
-    # disagreement against NEMO's own dumped tendency and it is what makes the
-    # discrete energy budget conserve the PHYSICAL norm rather than a per-area
-    # one. But the wall-row DEPTH-MEAN correction points AWAY from NEMO on
-    # three of the four wall rows, so switching it on here is not yet
-    # justified on this card (#1455). The barotropic path already runs the
-    # same weighting (barotropic_coriolis="een_metric" below), so the card is
-    # internally inconsistent until this is settled -- named, not hidden.
-    # "een_metric_weighting": "nemo",
+    # dynvor.F90:791-792 weights the meridional transport by e1v (the V-face
+    # zonal width) and :804 divides the assembled u-tendency by e1u,
+    # symmetrically e2u/e2v for v. THIS IS WHAT NEMO ACTUALLY COMPUTES, so the
+    # card ships it (#1455). Three reasons, in the order they matter:
+    #   1. FAITHFULNESS. legoESM's AL81 triad used neither factor, which is the
+    #      per-unit-width form -- a different operator on any grid whose
+    #      metrics vary. Measured against NEMO's own dumped vorticity tendency
+    #      on the one-step oracle state, supplying it closes 96-98% of the
+    #      wall-row disagreement and 86% of the far interior. It is a GLOBAL
+    #      fidelity correction that happened to be found at the wall.
+    #   2. IT CONSERVES THE RIGHT INVARIANT. On a stretched grid the weighted
+    #      form conserves the PHYSICAL kinetic-energy norm to roundoff (1e-16)
+    #      while the unweighted one conserves kinetic energy per unit AREA
+    #      instead, which is not a physical invariant. See
+    #      tests/ocean/unit/test_een_metric_weighting.py, which asserts both
+    #      directions.
+    #   3. GATE-NEUTRAL, MEASURED -- not assumed. One controlled 90-day pair
+    #      differing only in this field: all five acceptance-gate metrics PASS
+    #      at 5x on both arms and EVERY move is inside its noise floor (the
+    #      wall-row transport shifts 0.0062 Sv = 0.07x the floor). So there is
+    #      no compensating-error risk here: nothing was bought and nothing was
+    #      paid.
+    # It also removes a standing internal inconsistency: the barotropic solver
+    # has always run the metric-weighted EEN (barotropic_coriolis="een_metric"
+    # below) while the 3-D momentum ran the unweighted one.
+    # THE LESSON THIS CARRIES, because it cost a lane to learn: closing 96-98%
+    # of an OPERATOR mismatch moved the 90-day TRANSPORT by 0.07 noise floors.
+    # A tendency error and the transport error at the same place are DIFFERENT
+    # OBJECTS, and closing one is not evidence about the other.
+    "een_metric_weighting": "nemo",
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
