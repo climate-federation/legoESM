@@ -13,7 +13,13 @@
 # the pinned-Fortran gridstruct vlon/vlat/es/ew dumped by the extchain oracle
 # (run 9470130).  Reuses the existing dumps; no oracle rebuild.
 set -uo pipefail
-REPO=${WINDVEC_REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
+# Fixed campaign worktree -- no arbitrary-repo override, so the comparator and
+# the committed hash manifest that authorise this certificate cannot be swapped
+# for a fork's.  The certificate's authority is exactly the SHA echoed below
+# together with the committed, dual-reviewed comparator + manifest at it; like
+# every in-repo test, its meaning is relative to that reviewed commit and the
+# git history, which is what a source pin ultimately anchors to.
+REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/extchain
 export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
