@@ -601,7 +601,10 @@ def test_radial_spread_tracks_a_ring_moving_outward(ewt):
     r = np.sqrt((jj - 20) ** 2 + (ii - 20) ** 2)
     for n, want in enumerate((5.0, 10.0, 15.0)):
         field[n] = (np.abs(r - want) < 0.5).astype(float)
-    got = ewt.radial_spread(field, wet, area, 20, 20, dx, dy)
+    r_km = ewt.distance_field_km(wet, np.full((ny, nx), dx),
+                                 np.full((ny, nx), dy), 20, 20,
+                                 periodic_i=False)
+    got = ewt.radial_spread(field, wet, area, r_km)
     for g, want in zip(got, (5.0, 10.0, 15.0)):
         assert g == pytest.approx(want * dx / 1e3, rel=0.05)
 
@@ -610,7 +613,7 @@ def test_radial_spread_refuses_an_empty_sample(ewt):
     wet = np.ones((5, 5), dtype=bool)
     with pytest.raises(SystemExit, match="no energy"):
         ewt.radial_spread(np.zeros((2, 5, 5)), wet, np.ones((5, 5)),
-                          2, 2, 1e4, 1e4)
+                          np.ones((5, 5)))
 
 
 def test_extract_nemo_rejects_a_wrong_internal_step_counter(ewt, tmp_path):
@@ -713,3 +716,75 @@ def test_make_impulse_restart_bumps_only_wet_cells_and_both_levels(ewt, tmp_path
     assert wet[info["centre_j"], info["centre_i"]]
     with netCDF4.Dataset(src) as ds:
         assert float(np.asarray(ds["sshn"][:]).max()) == 0.0, "source mutated"
+
+
+def test_distance_field_uses_the_real_metric_and_wraps(ewt):
+    """A constant-cell grid must give exact cell distances, and the zonal
+    distance must take the short way round on a periodic domain."""
+    ny, nx = 5, 8
+    wet = np.ones((ny, nx), dtype=bool)
+    e1 = np.full((ny, nx), 1.0e4)
+    e2 = np.full((ny, nx), 2.0e4)
+    r = ewt.distance_field_km(wet, e1, e2, 2, 0, periodic_i=True)
+    assert r[2, 0] == pytest.approx(0.0)
+    assert r[2, 1] == pytest.approx(10.0)
+    assert r[4, 0] == pytest.approx(40.0)
+    # column 7 is one cell WEST of column 0 the short way round
+    assert r[2, 7] == pytest.approx(10.0)
+    flat = ewt.distance_field_km(wet, e1, e2, 2, 0, periodic_i=False)
+    assert flat[2, 7] == pytest.approx(70.0)
+
+
+def test_distance_field_varies_with_a_stretched_metric(ewt):
+    """Using one cell's width everywhere would make these two equal."""
+    ny, nx = 3, 5
+    wet = np.ones((ny, nx), dtype=bool)
+    e1 = np.tile(np.array([1e4, 2e4, 4e4, 8e4, 1e4]), (ny, 1))
+    e2 = np.full((ny, nx), 1.0e4)
+    r = ewt.distance_field_km(wet, e1, e2, 1, 0, periodic_i=False)
+    assert r[1, 1] == pytest.approx(10.0)
+    assert r[1, 2] == pytest.approx(30.0)     # 1e4 + 2e4
+    assert r[1, 3] == pytest.approx(70.0)     # + 4e4
+
+
+def test_two_dt_phase_agreement_separates_shared_from_independent_modes(ewt):
+    wet, _ = _basin()
+    n = 20
+    rng = np.random.default_rng(21)
+    shape = (n,) + wet.shape
+    mode = ((-1.0) ** np.arange(n))[:, None, None] * rng.normal(size=(1,) + wet.shape)
+    same = ewt.two_dt_phase_agreement(mode, mode, wet)
+    assert min(same) > 0.99
+    other = ((-1.0) ** np.arange(n))[:, None, None] * rng.normal(size=(1,) + wet.shape)
+    indep = ewt.two_dt_phase_agreement(mode, other, wet)
+    assert abs(np.mean(indep)) < 0.5
+    assert np.zeros(shape).shape == shape
+
+
+def test_two_dt_leakage_floor_is_small_for_a_true_alternation(ewt):
+    """Smoothing kills a real 2-step mode, so its leakage floor is tiny; a
+    slow field's floor is comparable to its own reported amplitude."""
+    wet, _ = _basin()
+    n = 64
+    t = np.arange(n)
+    alt = np.zeros((n,) + wet.shape)
+    alt[:, wet] = ((-1.0) ** t)[:, None]
+    slow = np.zeros((n,) + wet.shape)
+    slow[:, wet] = np.sin(2 * np.pi * t / 6.0)[:, None]
+    assert ewt.two_dt_leakage_floor(alt, wet) < 0.05 * ewt.two_dt_mode(
+        alt, wet)["first_8_mean_m"]
+    assert ewt.two_dt_leakage_floor(slow, wet) > 0.2 * ewt.two_dt_mode(
+        slow, wet)["first_8_mean_m"]
+
+
+def test_two_dt_mode_reports_a_locus_when_regions_are_given(ewt):
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    n = 12
+    field = np.zeros((n,) + wet.shape)
+    field[:, r["wall"]] = ((-1.0) ** np.arange(n))[:, None]
+    out = ewt.two_dt_mode(field, wet, None, r)
+    assert out["locus_first_sample"]["wall"]["share"] > 0.99
+    # ...and without regions the caller gets no locus at all rather than a
+    # silently basin-wide one
+    assert "locus_first_sample" not in ewt.two_dt_mode(field, wet)

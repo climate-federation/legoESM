@@ -98,7 +98,14 @@ import numpy as np
 # it is CHECKED against the 'rdt' variable in every restart it reads.
 NEMO_RDT_S = 2700.0
 # NEMO namelist_ref:73 rn_atfp -- the Asselin filter weight, needed for the
-# time-level identity that DISCRIMINATES the extractor's pairing.
+# time-level identity below.
+#
+# That identity is EXACT here, and that is CONFIGURATION-DEPENDENT rather than
+# a property of NEMO: ssh_atf (MY_SRC/sshwzv.F90:519-528) also subtracts a
+# freshwater-forcing term, which vanishes in DINO because rn_emp_prop = 0 and
+# ln_rnf / ln_isf are false.  A DINO variant with a real emp would leave a
+# smooth residual of order rn_atfp*rn_Dt*d(emp)/rho0 and would be wrongly
+# accused by the gate below of a broken dump-to-time-level mapping.
 NEMO_ATFP = 0.1
 
 
@@ -257,7 +264,8 @@ def extract_nemo(run_dir: str, kt0: int, nsteps: int, out: str,
         raise SystemExit(
             f"TIME-LEVEL IDENTITY FAILED: |sshb - Asselin(sshb,sshn)| = "
             f"{resid_max:.3e} m against a field of {scale:.3e} m. The "
-            "identity is exact in NEMO, so any residual above roundoff means "
+            "identity is exact for THIS configuration (see NEMO_ATFP), so a "
+            "residual above roundoff means "
             "sshb and sshn are misaligned or time runs backwards.")
     # NB: a zero residual does NOT on its own prove the mapping is right --
     # the identity is invariant to a uniform shift of the window.  The kt
@@ -774,9 +782,30 @@ def propagation_lag(eta: np.ndarray, wet: np.ndarray, jrow: int, dx_m: float,
     }
 
 
+def distance_field_km(wet: np.ndarray, e1t: np.ndarray, e2t: np.ndarray,
+                      centre_j: int, centre_i: int,
+                      periodic_i: bool = True) -> np.ndarray:
+    """Distance from a centre cell, integrating the model's ACTUAL metric.
+
+    Using the centre cell's e1t/e2t for the whole grid is wrong by up to 1.46x
+    at the far corners of this basin, and not wrapping in x is wrong by about
+    two cells for the far columns of a zonally periodic domain.  Both are
+    invisible in a model-to-model RATIO and both make the distances themselves
+    -- which get read as kilometres -- wrong.
+    """
+    ny, nx = wet.shape
+    ycum = np.concatenate([[0.0], np.cumsum(e2t[:-1, centre_i])])
+    dy = ycum - ycum[centre_j]
+    xcum = np.concatenate([[0.0], np.cumsum(e1t[centre_j, :-1])])
+    dx = xcum - xcum[centre_i]
+    if periodic_i:
+        lx = float(e1t[centre_j, :].sum())
+        dx = np.where(np.abs(dx) > 0.5 * lx, np.abs(dx) - lx, dx)
+    return np.sqrt(dy[:, None] ** 2 + dx[None, :] ** 2) / 1.0e3
+
+
 def radial_spread(field: np.ndarray, wet: np.ndarray, area: np.ndarray,
-                  centre_j: int, centre_i: int, dx_m: float,
-                  dy_m: float) -> list[float]:
+                  r_km: np.ndarray) -> list[float]:
     """Energy-weighted mean distance of a field from a centre, per sample [km].
 
     This is how wave propagation IS resolvable here.  Cell-to-cell phase lag is
@@ -786,14 +815,12 @@ def radial_spread(field: np.ndarray, wet: np.ndarray, area: np.ndarray,
     rates is therefore the honest form of "do they propagate at the same
     speed".
 
-    Distances use the model's own metric at the centre cell rather than a
-    re-derived great-circle formula, so the measure is round in the same
-    metric the model steps on.
+    SATURATION is the trap here.  Once the response has filled the basin this
+    measure stops moving and any model-to-model ratio is forced toward 1, so
+    the caller must compare it against the saturation value (the same measure
+    on a uniform field) and read only the samples well below it.  ``r_km``
+    comes from ``distance_field_km``.
     """
-    ny, nx = wet.shape
-    jj, ii = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
-    r_km = np.sqrt(((jj - centre_j) * dy_m) ** 2
-                   + ((ii - centre_i) * dx_m) ** 2) / 1.0e3
     out = []
     for n in range(field.shape[0]):
         w = area * field[n] ** 2 * wet
@@ -806,7 +833,8 @@ def radial_spread(field: np.ndarray, wet: np.ndarray, area: np.ndarray,
 
 
 def two_dt_mode(field: np.ndarray, wet: np.ndarray,
-                area: np.ndarray | None = None) -> dict:
+                area: np.ndarray | None = None,
+                regions: dict | None = None) -> dict:
     """Amplitude of the 2-step (Nyquist) component, per sample.
 
     Leapfrog carries a computational mode that alternates sign every step, and
@@ -826,20 +854,83 @@ def two_dt_mode(field: np.ndarray, wet: np.ndarray,
     """
     if field.shape[0] < 3:
         raise SystemExit("two_dt_mode needs at least 3 samples")
-    alt = 0.5 * (field[1:-1] - 0.5 * (field[:-2] + field[2:]))
+    alt = two_dt_component(field)
     w = np.ones(int(wet.sum())) if area is None else area[wet]
     amp = [float(np.sqrt(np.sum(w * alt[n][wet] ** 2) / np.sum(w)))
            for n in range(alt.shape[0])]
-    return {"amplitude_by_sample_m": amp,
-            "first_8_mean_m": float(np.mean(amp[:8])),
-            "last_half_mean_m": float(np.mean(amp[len(amp) // 2:]))}
+    out = {"amplitude_by_sample_m": amp,
+           "first_8_mean_m": float(np.mean(amp[:8])),
+           "last_half_mean_m": float(np.mean(amp[len(amp) // 2:]))}
+    if regions is not None:
+        # A basin rms cannot tell a genuine basin-wide computational mode from
+        # a transient stuck on two boundary rows, and those are very different
+        # findings.  The locus of the FIRST sample is reported so the reader
+        # can see which one it is.
+        out["locus_first_sample"] = locus_shares(alt[0], regions, area)
+    return out
+
+
+def two_dt_component(field: np.ndarray) -> np.ndarray:
+    """The alternating (2-step) part of a series, interior samples only.
+
+    ``0.5*(x[n] - (x[n-1]+x[n+1])/2)``: for ``x[n] = A*(-1)**n`` this is -A,
+    so the result is an amplitude and not twice one.
+    """
+    if field.shape[0] < 3:
+        raise SystemExit("two_dt_component needs at least 3 samples")
+    return 0.5 * (field[1:-1] - 0.5 * (field[:-2] + field[2:]))
+
+
+def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
+                         area: np.ndarray | None = None) -> float:
+    """How much of the reported 2-step amplitude is just a SLOW field leaking.
+
+    The 2-step operator is a curvature high-pass, not a notch: about 29% of a
+    6-hour signal passes it.  Running it on a copy of the field with the
+    2-step component REMOVED gives the part of the answer that is leakage
+    rather than mode, and that floor belongs next to any ratio quoted from it.
+
+    The smoother is the symmetric [1,2,1]/4 kernel, which annihilates the
+    2-step mode EXACTLY (1-2+1 = 0) while passing 85% of a 6-hour signal.  An
+    odd boxcar does not: a 5-point mean leaves an alternating series at 1/5 of
+    its amplitude, so the "floor" would be a fifth of the mode itself.
+    """
+    k = np.array([1.0, 2.0, 1.0]) / 4.0
+    flat = field.reshape(field.shape[0], -1)
+    sm = np.apply_along_axis(
+        lambda v: np.convolve(v, k, mode="same"), 0, flat).reshape(field.shape)
+    alt = two_dt_component(sm)
+    w = np.ones(int(wet.sum())) if area is None else area[wet]
+    amp = [float(np.sqrt(np.sum(w * alt[n][wet] ** 2) / np.sum(w)))
+           for n in range(min(8, alt.shape[0]))]
+    return float(np.mean(amp))
+
+
+def two_dt_phase_agreement(a: np.ndarray, b: np.ndarray, wet: np.ndarray,
+                           area: np.ndarray | None = None,
+                           n_samples: int = 8) -> list[float]:
+    """Signed spatial correlation of two fields' 2-step components.
+
+    Amplitude alone cannot tell "both models ring the SAME mode" from "each
+    rings its own": a ratio near 1 is consistent with both.  A positive
+    correlation says the same mode; near zero says they are unrelated.
+    """
+    aa, bb = two_dt_component(a), two_dt_component(b)
+    w = np.ones(int(wet.sum())) if area is None else area[wet]
+    out = []
+    for n in range(min(n_samples, aa.shape[0])):
+        x, y = aa[n][wet], bb[n][wet]
+        den = np.sqrt(np.sum(w * x ** 2) * np.sum(w * y ** 2))
+        out.append(float(np.sum(w * x * y) / den) if den > 0 else 0.0)
+    return out
 
 
 def alternation_ratio(series: list[float], n_early: int = 8) -> float:
-    """Mean of the odd-index samples over the mean of the even ones.
+    """Mean over ODD STEPS divided by mean over EVEN STEPS.
 
-    A value near 1 means no step-to-step alternation; a large value means the
-    quantity is ringing at the 2-step period.
+    Sample index 0 is step 1, so the odd STEPS are the even INDICES -- hence
+    ``series[0::2]`` in the numerator.  A value near 1 means no step-to-step
+    alternation; a large value means the quantity rings at the 2-step period.
     """
     a = np.asarray(series[:n_early], dtype=np.float64)
     if a.size < 2:
@@ -856,20 +947,56 @@ def time_level_discriminator(lego_eta, sshn, sshb, wet) -> dict:
     is the pre-swap AFTER level).  This is the EMPIRICAL check of that reading:
     the registered pairing is scored against the three obvious alternatives.
 
-    It also reports NEMO's OWN inter-level spread, which sets the scale below
-    which a pairing question cannot be answered at all -- if the two models
-    differ by less than NEMO's two time levels differ from each other, the
-    pairing choice is not resolvable and no conclusion may rest on it.
+    Resolvability is decided by BOOTSTRAPPING over samples, not by comparing
+    the margin to NEMO's inter-level spread.  That spread was the wrong yard
+    stick: in the impulse lane both levels are responses, so their difference
+    is largest exactly when the N-vs-N-1 question is EASIEST, and the test
+    could never fire.  Here the samples are resampled with replacement and the
+    fraction of draws in which the registered pairing still wins is reported --
+    a number that means the same thing in both lanes.
+
+    All four candidates are scored on the SAME nt-1 window so the two shifted
+    ones are not compared on a different amount of data.
     """
+    n = lego_eta.shape[0]
+
     def rms(a):
         return float(np.sqrt(np.mean(a[:, wet] ** 2)))
-    return {
-        "registered_lego_N_vs_sshn_N": rms(lego_eta - sshn),
-        "alt_lego_N_vs_sshb_N": rms(lego_eta - sshb),
-        "alt_lego_N_vs_sshn_Nminus1": rms(lego_eta[1:] - sshn[:-1]),
-        "alt_lego_Nminus1_vs_sshn_N": rms(lego_eta[:-1] - sshn[1:]),
-        "nemo_own_sshn_minus_sshb": rms(sshn - sshb),
+
+    def per_sample(a):
+        return np.array([np.mean(a[k][wet] ** 2) for k in range(a.shape[0])])
+
+    pairs = {
+        "registered_lego_N_vs_sshn_N": (lego_eta - sshn)[1:],
+        "alt_lego_N_vs_sshb_N": (lego_eta - sshb)[1:],
+        "alt_lego_N_vs_sshn_Nminus1": lego_eta[1:] - sshn[:-1],
+        "alt_lego_Nminus1_vs_sshn_N": lego_eta[:-1] - sshn[1:],
     }
+    ms = {k: per_sample(v) for k, v in pairs.items()}
+    out = {k: float(np.sqrt(v.mean())) for k, v in ms.items()}
+    out["nemo_own_sshn_minus_sshb"] = rms(sshn - sshb)
+
+    rng = np.random.default_rng(0)
+    keys = list(ms)
+    wins = 0
+    draws = 500
+    for _ in range(draws):
+        idx = rng.integers(0, n - 1, size=n - 1)
+        scores = {k: ms[k][idx].mean() for k in keys}
+        if min(scores, key=scores.get) == "registered_lego_N_vs_sshn_N":
+            wins += 1
+    out["registered_wins_bootstrap_fraction"] = wins / draws
+    order = sorted(keys, key=lambda k: out[k])
+    out["closest"] = order[0]
+    out["margin_m"] = float(out[order[1]] - out[order[0]])
+    out["registered_is_closest"] = bool(
+        order[0] == "registered_lego_N_vs_sshn_N")
+    # Resolvable means the sampling itself agrees, not that the margin beats
+    # some other quantity.
+    out["resolvable"] = bool(out["registered_wins_bootstrap_fraction"] > 0.95
+                             or out["registered_wins_bootstrap_fraction"]
+                             < 0.05)
+    return out
 
 
 def compare(nemo_npz: str, lego_npz: str, outdir: str,
@@ -1009,7 +1136,13 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         st["step"] = n + 1
         growth.append(st)
     floor = growth[0]["max_abs_m"]
-    bar = GROWTH_BAR_LINEAR * nt * floor
+    # The linear bar only means something where the error GROWS from a small
+    # first-step floor.  In the impulse lane the first sample is the LARGEST
+    # value in the series (the response then decays), so n*floor cannot be
+    # exceeded by construction and the criterion is a test that cannot fail.
+    # It is reported as null with a reason instead of as a spectacular pass.
+    growing = floor < max(g["max_abs_m"] for g in growth)
+    bar = GROWTH_BAR_LINEAR * nt * floor if growing else None
 
     # ---- pre-registered snapshot times ---------------------------------
     snaps = []
@@ -1080,22 +1213,22 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
             "pairing cannot be discriminated. Re-extract with sshb.")
     levels = time_level_discriminator(lego["eta"], nemo["eta"],
                                       nemo["eta_before"], wet)
-    cands = {k: v for k, v in levels.items()
-             if k != "nemo_own_sshn_minus_sshb"}
-    order = sorted(cands, key=lambda k: cands[k])
-    margin = cands[order[1]] - cands[order[0]]
-    # The four candidates are separated by at most NEMO's own inter-level
-    # spread.  If the model-to-model difference is larger than that, all four
-    # numbers are dominated by model error and the argmin is essentially a
-    # coin toss -- so the gate must report UNRESOLVED rather than accuse the
-    # extractor of a wrong pairing it cannot actually see.
-    levels["resolvable"] = bool(margin > levels["nemo_own_sshn_minus_sshb"])
-    levels["margin_m"] = float(margin)
-    levels["closest"] = order[0]
-    if levels["resolvable"] and order[0] != "registered_lego_N_vs_sshn_N":
-        raise SystemExit(
-            "TIME-LEVEL CONTROL FAILED: the source-cited pairing (sshn) is "
-            f"resolvably NOT the closest; {order[0]} is. {levels}")
+    # A pairing that is not the registered one is a FINDING, not a silent
+    # field buried in a nested dict -- it means legoESM's state lines up
+    # better with a different NEMO time level, i.e. a sub-step timing offset.
+    # It is surfaced at the top of the result either way.
+    time_level_warning = None
+    if not levels["registered_is_closest"]:
+        time_level_warning = (
+            f"legoESM lines up better with {levels['closest']} than with the "
+            f"source-cited sshn pairing "
+            f"({levels[levels['closest']]:.3e} vs "
+            f"{levels['registered_lego_N_vs_sshn_N']:.3e} m rms, registered "
+            f"wins in {levels['registered_wins_bootstrap_fraction']:.0%} of "
+            "bootstrap draws). In the impulse lane this is a SUB-STEP TIMING "
+            "OFFSET in the response, not an extractor bug -- the extractor's "
+            "mapping is pinned independently by each dump's own kt.")
+        print("WARNING: " + time_level_warning)
 
     bands = {"NEMO": variance_bands(nemo["eta"], wet, dt, area),
              "legoESM": variance_bands(lego["eta"], wet, dt, area)}
@@ -1111,28 +1244,47 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
     # the mean radius of the whole balanced field, which answers nothing.
     spread = None
     if lane == "impulse_response":
-        cj, ci = np.unravel_index(
-            np.argmax(np.where(wet, np.abs(nemo["eta"][0]), -np.inf)),
-            wet.shape)
-        sp_n = radial_spread(nemo["eta"], wet, area, int(cj), int(ci),
-                             float(e1t[cj, ci]), float(e2t[cj, ci]))
-        sp_l = radial_spread(lego["eta"], wet, area, int(cj), int(ci),
-                             float(e1t[cj, ci]), float(e2t[cj, ci]))
+        # The PRE-REGISTERED bump centre, not the argmax of the response: by
+        # the first sample the peak sits on the radiating ring and the centre
+        # has already reversed sign, so the argmax lands three rows away.
+        cj, ci = named_cell(lat, lon, wet, IMPULSE_CENTRE_LAT,
+                            IMPULSE_CENTRE_LON)
+        r_km = distance_field_km(wet, e1t, e2t, cj, ci)
+        sp_n = radial_spread(nemo["eta"], wet, area, r_km)
+        sp_l = radial_spread(lego["eta"], wet, area, r_km)
         ratio = [b / a_ for a_, b in zip(sp_n, sp_l)]
+        # A UNIFORM field's mean radius is where this measure saturates. Past
+        # about half of it the response has filled the basin, both models say
+        # the same thing by construction, and the ratio is forced to 1 -- a
+        # median over the whole run is therefore a saturated number, not a
+        # measurement.
+        sat = float((area * r_km * wet).sum() / (area * wet).sum())
+        usable = [n for n, v in enumerate(sp_n) if v < 0.5 * sat]
         spread = {
             "centre_j": int(cj), "centre_i": int(ci),
+            "saturation_radius_km": sat,
             "nemo_km": sp_n, "lego_km": sp_l,
             "ratio_lego_over_nemo": ratio,
-            # The odd samples carry the leapfrog alternation, so the EVEN ones
-            # are where the spreading rates can be compared cleanly.
-            "ratio_even_samples_median": float(np.median(ratio[1::2])),
-            "ratio_all_samples_median": float(np.median(ratio)),
+            "n_samples_below_half_saturation": len(usable),
+            "ratio_unsaturated_samples": [ratio[n] for n in usable],
+            "ratio_unsaturated_median": (float(np.median([ratio[n]
+                                                          for n in usable]))
+                                         if usable else None),
+            "ratio_first_4_samples": ratio[:4],
+            # kept for continuity, but SATURATED -- do not quote it alone
+            "ratio_all_samples_median_SATURATED": float(np.median(ratio)),
         }
 
     two_dt = {
-        "difference": two_dt_mode(diff, wet, area),
-        "NEMO": two_dt_mode(nemo["eta"], wet, area),
-        "legoESM": two_dt_mode(lego["eta"], wet, area),
+        "difference": two_dt_mode(diff, wet, area, regions),
+        "NEMO": two_dt_mode(nemo["eta"], wet, area, regions),
+        "legoESM": two_dt_mode(lego["eta"], wet, area, regions),
+        "leakage_floor_m": {
+            "NEMO": two_dt_leakage_floor(nemo["eta"], wet, area),
+            "legoESM": two_dt_leakage_floor(lego["eta"], wet, area),
+        },
+        "phase_agreement_first8": two_dt_phase_agreement(
+            lego["eta"], nemo["eta"], wet, area),
     }
     # The alternation of the DIFFERENCE itself: if the two models' leapfrog
     # modes were identical the difference would not alternate at all.
@@ -1143,6 +1295,7 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         diff_rms_by_step[8:], min(16, max(2, len(diff_rms_by_step) - 8)))
 
     result = {
+        "time_level_warning": time_level_warning,
         "radial_spread": spread,
         "two_dt_mode": two_dt,
         "lane": lane,
@@ -1155,9 +1308,14 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         "n_steps": nt,
         "dt_seconds": dt,
         "linear_bar_m": bar,
+        "linear_bar_applicable": bool(growing),
+        "linear_bar_note": (None if growing else
+                            "the first sample is the largest in the series, "
+                            "so n*floor cannot be exceeded; this criterion is "
+                            "vacuous in this lane"),
         "final_max_abs_m": growth[-1]["max_abs_m"],
-        "growth_over_linear_bar": (growth[-1]["max_abs_m"] / bar
-                                   if bar > 0 else float("inf")),
+        "growth_over_linear_bar": ((growth[-1]["max_abs_m"] / bar)
+                                   if (growing and bar > 0) else None),
         "snapshots": snaps,
         "growth": [{k: v for k, v in g.items()} for g in growth],
         "spectra": {k: {kk: vv for kk, vv in v.items()
@@ -1187,18 +1345,24 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
     return result
 
 
+def named_cell(lat, lon, wet, target_lat, target_lon) -> tuple[int, int]:
+    """Nearest WET cell to a target position.
+
+    A degree of longitude is cos(lat) of a degree of latitude, so an unscaled
+    degree-space distance biases every mid-latitude choice zonally.
+    """
+    dlon = (lon - target_lon) * np.cos(np.deg2rad(target_lat))
+    cost = np.where(wet, (lat - target_lat) ** 2 + dlon ** 2, np.inf)
+    j, i = np.unravel_index(np.argmin(cost), cost.shape)
+    if not wet[j, i]:
+        raise SystemExit("cell placement landed on a dry cell")
+    return int(j), int(i)
+
+
 def named_probes(lat, lon, wet) -> dict:
     """Four wet probe points, named for the physics they are meant to expose."""
     def pick(target_lat, target_lon):
-        # a degree of longitude is cos(lat) of a degree of latitude, so an
-        # unscaled degree-space distance biases every mid-latitude probe
-        # zonally
-        dlon = (lon - target_lon) * np.cos(np.deg2rad(target_lat))
-        cost = np.where(wet, (lat - target_lat) ** 2 + dlon ** 2, np.inf)
-        j, i = np.unravel_index(np.argmin(cost), cost.shape)
-        if not wet[j, i]:
-            raise SystemExit("probe placement landed on a dry cell")
-        return int(j), int(i)
+        return named_cell(lat, lon, wet, target_lat, target_lon)
     return {
         "channel": pick(-55.0, 25.0),     # the ACC channel
         "equator": pick(0.0, 25.0),       # f -> 0, structural-zero territory
