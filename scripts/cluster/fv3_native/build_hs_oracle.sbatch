@@ -18,7 +18,9 @@
 set -uo pipefail
 MPI=/burg/opt/openmpi-4.1.1_ucx_cuda_11.0.3_support
 export PATH=$MPI/bin:$PATH
-export LD_LIBRARY_PATH=$MPI/lib:/burg/opt/netcdf-fortran-4.6.2/lib:/burg/opt/netcdf-c-4.9.3/lib:${LD_LIBRARY_PATH:-}
+# gfsconst exe links libnetcdf.so.18 (netcdf-c-4.7.4) + libnetcdff.so.7
+# (netcdf-fortran-4.5.3); serialnc wants so.19 and dies rc=127 (memory note).
+export LD_LIBRARY_PATH=$MPI/lib:/burg/opt/netcdf-fortran-4.5.3/lib:/burg/opt/netcdf-c-4.7.4/lib:/cm/shared/apps/hdf5/1.10.1/lib:${LD_LIBRARY_PATH:-}
 PIN=/burg-archive/glab/users/pg2328/fv3_oracle_pinned
 EXE=${EXE:-$PIN/build_hydro_gfsconst/fv3_solo_hydro.exe}
 [ -x "$EXE" ] || { echo "PREFLIGHT FAILED: no exe at $EXE"; exit 5; }
