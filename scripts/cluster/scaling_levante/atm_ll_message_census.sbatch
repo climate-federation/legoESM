@@ -4,7 +4,7 @@
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=4
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=00:40:00
@@ -43,10 +43,18 @@
 #             not the difference, the source reading was wrong, and the tile's
 #             loss needs a different explanation before anyone spends more.
 #
-# Two devices and one process, which is enough to make a compiled module: the
-# count of messages in the module is a static property of the program, not of
-# how many GPUs run it. It does NOT measure time, and no timing claim may be
-# taken from this arm.
+# FOUR devices, not two. A "tile" needs a split in BOTH directions, and at two
+# devices asking for two longitude splits leaves ONE latitude band -- that is
+# not a tile, it is a longitude band, and comparing it against a latitude band
+# compares two one-dimensional decompositions in different directions. A first
+# version of this arm did exactly that and returned a verdict; the verdict was
+# discarded. Four devices give the band arm four latitude bands and the tile
+# arm a two-by-two grid, which is the comparison the question is about.
+#
+# One process, which is enough to make a compiled module: the count of
+# messages in the module is a static property of the program, not of how many
+# GPUs run it. It does NOT measure time, and no timing claim may be taken from
+# this arm.
 #
 # SUBMIT: sbatch scripts/cluster/scaling_levante/atm_ll_message_census.sbatch
 # ===========================================================================
@@ -63,17 +71,24 @@ mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR=""   # a cached compile does not re-dump
 rc=0
 
+NDEV="${NDEV:-4}"
+
 run_dump () {  # n_lat n_lon tag p_lon
   local NLAT=$1 NLON=$2 TAG=$3 PLON=$4
+  local PLAT=$((NDEV / PLON))
+  case "$TAG" in tile*) if [ "$PLAT" -lt 2 ] || [ "$PLON" -lt 2 ]; then
+    echo "REFUSING: p_lat=$PLAT p_lon=$PLON is not a tile, it is a band."
+    return 1
+  fi ;; esac
   mkdir -p "$OUTDIR/hlo_$TAG"
-  echo "=== ${NLAT}x${NLON}, 2 devices, p_lon=${PLON} (${TAG}) ==="
+  echo "=== ${NLAT}x${NLON}, ${NDEV} devices, p_lat=${PLAT} p_lon=${PLON} (${TAG}) ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=0 JAX_ENABLE_X64=0 \
   XLA_FLAGS="--xla_gpu_shard_autotuning=false --xla_dump_to=$OUTDIR/hlo_$TAG" \
     timeout 1200 srun --export=ALL --nodes=1 --ntasks=1 --gpus-per-node=2 \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
-      --n-devices 2 --mode strong \
+      --n-devices "$NDEV" --mode strong \
       --n-lat "$NLAT" --n-lon "$NLON" --nlev 26 --p-lon "$PLON" \
       --steps 3 --warmup 1 --out "$OUTDIR/probe_$TAG.jsonl" \
       || { echo "DUMP $TAG FAILED"; return 1; }
@@ -83,6 +98,9 @@ run_dump () {  # n_lat n_lon tag p_lon
 
 run_dump 128 256 band 1 || rc=1
 run_dump 128 256 tile 2 || rc=1
+# p_lon=4 on four devices would leave one latitude band; the guard above
+# refuses it, which is the point of having the guard.
+run_dump 128 256 tile4 4 || echo "(tile4 refused, as designed)"
 
 echo "=== VERDICT ==="
 "$PY" - "$OUTDIR" <<'PYEOF'
@@ -90,7 +108,7 @@ import json, os, sys
 
 outdir = sys.argv[1]
 counts = {}
-for tag in ("band", "tile"):
+for tag in ("band", "tile", "tile4"):
     try:
         with open(os.path.join(outdir, f"census_{tag}.json")) as fh:
             c = json.load(fh)
@@ -98,7 +116,7 @@ for tag in ("band", "tile"):
     except Exception as exc:
         print(f"{tag}: MISSING -> {exc}")
 
-if len(counts) != 2:
+if "band" not in counts or "tile" not in counts:
     print("ABORT: an arm is missing; no verdict")
     sys.exit(4)
 
