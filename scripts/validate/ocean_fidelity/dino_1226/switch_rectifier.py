@@ -74,7 +74,22 @@ SPREAD_BAR = 3.0                       # PREREG: below 3 proportional, at/above 
 ARMS = {
     "baseline":     lambda mc: mc,
     "evd_off":      lambda mc: _conv(mc, scheme="none"),
+    # smooth_transition=True at the config's DEFAULT sharpness 1e6, i.e. a
+    # ramp whose width in N2 is ~1e-6 -- ordinary deep-ocean stratification,
+    # not a neighbourhood of the threshold. Kept because it was run and its
+    # numbers are recorded, but it is NOT a one-variable arm: it mixes most of
+    # the stratified ocean 1e5-1e7x harder than the card. Read `evd_sharp`
+    # instead (review finding 1).
     "evd_smooth":   lambda mc: _evd(mc, smooth_transition=True),
+    # THE one-variable discontinuity arm: same ramp, width 1e-13 in N2, which
+    # is BELOW the switch's own -1e-12 offset. Mixing is then identical to the
+    # shipped card everywhere except within a hair of the threshold, so a
+    # collapse here isolates the DISCONTINUITY and nothing else. Caveat kept in
+    # view: the ramp is centred on N2=0 while the hard test fires at -1e-12, so
+    # the trigger location moves by 1e-12 in N2 -- negligible against real
+    # stratification, but it is a difference and it is stated.
+    "evd_sharp":    lambda mc: _evd(mc, smooth_transition=True,
+                                    sigmoid_sharpness=1e13),
     "limiter_off":  lambda mc: mc._replace(tracer_advection="centered"),
     "gm_redi_off":  None,               # handled at build time, not on mc
 }
@@ -236,6 +251,19 @@ def _self_check():
     return 0
 
 
+def rung_set(gain_by_eps, grid):
+    """The rungs excluded as floor-bound, decided ONCE at the SHORTEST horizon
+    and applied to every column.
+
+    The control's response is not a fixed arithmetic floor -- a one-ulp seed is
+    a real perturbation and it GROWS (measured: the baseline's control response
+    rises 124x from step 1 to step 320). Re-deciding per column therefore
+    swallows honest rungs at long horizons and makes the columns
+    non-comparable, which is what the first version did (review finding 2).
+    """
+    return floor_excluded(gain_by_eps, grid[0])
+
+
 def _grid(results):
     """The step counts every arm actually reached. ``--steps N`` stops short of
     the full grid, and printing a column nobody ran raised a KeyError on the
@@ -284,7 +312,8 @@ def table(results):
         print(f"\n  {arm}")
         print(f"    {'nudge':<12}" + "".join(f"{'n=' + str(n):>16}"
                                              for n in grid) + "   note")
-        excl = {n: floor_excluded(g, n) for n in grid}
+        ex = rung_set(g, grid)
+        excl = {n: ex for n in grid}
         for eps in sorted(g):
             note = ("round-off control" if eps == FLOOR_EPS else
                     ("at floor -> excluded" if all(eps in excl[n] for n in grid)
@@ -304,7 +333,7 @@ def table(results):
     for arm, g in results.items():
         cells = []
         for n in grid:
-            s = spread(g, n, floor_excluded(g, n))
+            s = spread(g, n, rung_set(g, grid))
             cells.append(f"{s:>10.2f} {'R' if s >= SPREAD_BAR else '.':<3}")
         print(f"{arm:<16}" + "".join(cells))
     print("  R = rectified at that horizon, . = proportional")
@@ -367,6 +396,41 @@ def census():
               f"{100 * near / max(int(wet.sum()), 1):>9.4f}%")
     print("\n  (a switch can only rectify a nudge if some interface is within "
           "the nudge's reach of its threshold)")
+
+    # ---- IS THE `evd_smooth` ARM A ONE-VARIABLE COMPARISON? -----------------
+    # The smoothed arm replaces jnp.where(N2 < thr, K_conv, K_bg) with
+    #   K_bg + (K_conv - K_bg) * sigmoid(-N2 * sigmoid_sharpness)
+    # so its transition has a WIDTH in N2 of about 1/sharpness. If a large
+    # share of the ocean sits inside that width, the smoothed arm is not the
+    # same physics with a softer edge -- it is a DIFFERENT MIXING FIELD, and
+    # its collapse of the gain spread would then prove something other than
+    # "the discontinuity is the rectifier". This is the arm's validity check
+    # and it belongs next to the arm, not in a reviewer's head.
+    sharp = float(ed.sigmoid_sharpness)
+    width = 1.0 / sharp
+    import jax
+    sig = np.asarray(jax.nn.sigmoid(-n2 * sharp), dtype=np.float64)
+    K_hard = np.where(n2 < thr, ed.K_conv, ed.K_bg)
+    K_soft = ed.K_bg + (ed.K_conv - ed.K_bg) * sig
+    inside = (np.abs(n2) < width) & wet
+    ratio = np.where(K_hard > 0, K_soft / np.maximum(K_hard, 1e-300), np.nan)
+    print("\n  ARM VALIDITY -- is `evd_smooth` a softened switch or a "
+          "different ocean?")
+    print(f"    sigmoid_sharpness={sharp:.3g} -> transition half-width in N2 "
+          f"~{width:.3e} s^-2")
+    print(f"    wet interfaces inside that width: {int(inside.sum())} "
+          f"({100 * inside.sum() / max(int(wet.sum()), 1):.3f}%)")
+    print(f"    K_smooth / K_hard over wet interfaces: median "
+          f"{np.nanmedian(ratio[wet]):.4g}, "
+          f"90th pct {np.nanpercentile(ratio[wet], 90):.4g}, "
+          f"max {np.nanmax(ratio[wet]):.4g}")
+    frac_moved = float(np.mean(np.abs(ratio[wet] - 1.0) > 0.1))
+    print(f"    wet interfaces whose diffusivity moves by >10%: "
+          f"{100 * frac_moved:.3f}%")
+    print("    (a one-variable 'softened switch' moves only interfaces NEAR "
+          "the threshold; a large share")
+    print("     moving means the arm changed the mixing field itself and its "
+          "result is not about the edge)")
 
 
 def main(argv=None):
