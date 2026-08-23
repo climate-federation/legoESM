@@ -43,19 +43,16 @@ for d in run_c12 run_c48; do
     echo "REFUSE: $d has no EXTCHAIN_DRIVER_DONE marker (unprovenanced dump)"; exit 3; fi
   echo "provenance $d: $(grep -m1 -iE 'FMSConstants|GFS|pinned' "$RO" 2>/dev/null | head -c 120)"
 done
-# PIN the exact oracle bytes to the committed sha256 manifest (generated from the
-# genuine job-9470130 pinned-Fortran output).  The verification is IN-PROCESS in
-# the comparator (--verify-manifest): the pass token is refused for a substituted
-# or stale dump even under direct invocation, not only through this wrapper.
-MANIFEST=$REPO/tests/grids/fixtures/fv3_wind_vectors_oracle.sha256
-
+# Provenance is pinned IN-PROCESS by the comparator against the git-committed
+# manifest it resolves from its own path -- no manifest is passed in, so a
+# fabricated one cannot be trusted, under this wrapper or direct invocation.
 rc=0
 echo "=== C12 ==="
 $PY $REPO/scripts/validate/fv3_native/compare_wind_vectors.py \
-    --oracle-dir $OUT/run_c12 --n 12 --ng 3 --verify-manifest "$MANIFEST" || rc=1
+    --oracle-dir $OUT/run_c12 --n 12 --ng 3 || rc=1
 echo "=== C48 ==="
 $PY $REPO/scripts/validate/fv3_native/compare_wind_vectors.py \
-    --oracle-dir $OUT/run_c48 --n 48 --ng 3 --verify-manifest "$MANIFEST" || rc=1
+    --oracle-dir $OUT/run_c48 --n 48 --ng 3 || rc=1
 
 echo "=== offline unit tests (geometry + transform helpers, no dumps) ==="
 $PY -m pytest $REPO/tests/grids/test_fv3_wind_vectors.py -q 2>&1 | tail -6 || rc=1

@@ -150,22 +150,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--oracle-dir", required=True,
                     help="dir with extchain_t{1..6}.dat/.mf (vector dump)")
-    ap.add_argument("--verify-manifest",
-                    help="committed sha256 manifest the dumps must match; "
-                         "REQUIRED to emit the parity-pass token")
     ap.add_argument("--n", type=int, default=48)
     ap.add_argument("--ng", type=int, default=3)
     args = ap.parse_args()
     n, ng = args.n, args.ng
     odir = Path(args.oracle_dir)
 
-    # the pass token requires in-process provenance: without a verified manifest
-    # the comparator refuses to certify (it may still print the numbers).
-    if args.verify_manifest:
-        nfiles = verify_manifest(odir, Path(args.verify_manifest))
-        print(f"provenance OK: {nfiles} dump files match {args.verify_manifest}")
-    else:
-        print("PROVENANCE UNVERIFIED: no --verify-manifest; refusing to certify")
+    # provenance is pinned to the GIT-COMMITTED manifest, resolved from this
+    # script's own location -- not a caller-supplied path -- so no fabricated
+    # manifest can be trusted.  The residual (a commit could change the committed
+    # manifest itself) is the irreducible authority of any in-repo test: the
+    # certificate means "true for the committed comparator + manifest at the
+    # reviewed SHA", which no self-check can supersede.
+    manifest = (Path(__file__).resolve().parents[3]
+                / "tests" / "grids" / "fixtures"
+                / "fv3_wind_vectors_oracle.sha256")
+    if not manifest.exists():
+        raise SystemExit(f"committed manifest not found at {manifest} -- "
+                         f"refuse to certify without pinned provenance")
+    nfiles = verify_manifest(odir, manifest)
+    print(f"provenance OK: {nfiles} dump files match committed {manifest.name}")
 
     from legoesm.grids.fv3_native_metrics import (
         compute_fv3_native_wind_vectors,
@@ -330,12 +334,12 @@ def main() -> int:
 
     print(f"\nworst gated (interior+edge) over all families: "
           f"{max(worst_gate.values()):.4e} (gate {PARITY_FLOOR:.1e})")
-    # the pass token requires BOTH parity AND verified provenance
-    certified = ok and bool(args.verify_manifest)
-    tag = "OK" if certified else "FAIL"
-    print(f"WIND_VECTOR_PARITY_{tag} n={n}"
-          + ("" if args.verify_manifest else " (UNVERIFIED PROVENANCE)"))
-    return 0 if certified else 1
+    # provenance against the committed manifest is a hard precondition above
+    # (verify_manifest raises on any mismatch), so reaching here means the dumps
+    # are the pinned bytes; the token then reflects parity alone.
+    tag = "OK" if ok else "FAIL"
+    print(f"WIND_VECTOR_PARITY_{tag} n={n}")
+    return 0 if ok else 1
 
 
 def _oshape_for(fam, orc, ot):
