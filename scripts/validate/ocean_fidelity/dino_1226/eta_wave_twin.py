@@ -763,12 +763,16 @@ def two_dt_mode(field: np.ndarray, wet: np.ndarray,
     short to resolve as a spectral peak.
 
     The alternating part of a series at sample n is
-    ``x[n] - (x[n-1] + x[n+1]) / 2``: a smooth series annihilates it, an
-    alternating one returns its own amplitude.  Interior samples only.
+    ``x[n] - (x[n-1] + x[n+1]) / 2``.  A smooth series annihilates it; for
+    ``x[n] = A*(-1)**n`` it returns -2A, so the operator is halved here and
+    the reported number IS the amplitude A, not twice it.  Getting that factor
+    wrong would not change any ratio between the two models but would make
+    every absolute value quoted from this function wrong by two.  Interior
+    samples only.
     """
     if field.shape[0] < 3:
         raise SystemExit("two_dt_mode needs at least 3 samples")
-    alt = field[1:-1] - 0.5 * (field[:-2] + field[2:])
+    alt = 0.5 * (field[1:-1] - 0.5 * (field[:-2] + field[2:]))
     w = np.ones(int(wet.sum())) if area is None else area[wet]
     amp = [float(np.sqrt(np.sum(w * alt[n][wet] ** 2) / np.sum(w)))
            for n in range(alt.shape[0])]

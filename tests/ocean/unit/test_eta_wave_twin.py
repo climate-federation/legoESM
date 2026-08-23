@@ -559,7 +559,9 @@ def test_two_dt_mode_recovers_a_planted_alternation(ewt):
     amp = 0.004
     alt = amp * ((-1.0) ** np.arange(n))[:, None, None] * np.ones((1,) + wet.shape)
     out = ewt.two_dt_mode(alt, wet)
-    assert out["first_8_mean_m"] == pytest.approx(2 * amp)
+    # the reported number is the amplitude A of x[n] = A*(-1)**n, NOT 2A: the
+    # raw second-difference operator returns -2A and is halved in the function
+    assert out["first_8_mean_m"] == pytest.approx(amp)
 
 
 def test_two_dt_mode_is_not_fooled_by_a_slow_oscillation(ewt):
