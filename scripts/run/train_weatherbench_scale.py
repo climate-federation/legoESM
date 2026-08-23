@@ -333,15 +333,39 @@ def _rank_aware_warmup(desired_warmup: int, nproc: int) -> int:
 
     Dividing by ``nproc`` restores the configured warmup FRACTION at any rank
     count: ``warmup/(n_epochs*len(local)) == warmup_steps/(n_epochs*n_global)``.
-    At a single rank this is the identity, so serial runs are unchanged; only
-    the multi-rank schedule — where the bug lives — moves.  The result still
-    passes through :func:`_clamped_warmup` for the optax positivity constraint.
+    Because the shards are balanced (``_sharded_indices`` drops the remainder,
+    so every rank has the SAME ``len(local)`` and therefore the same
+    ``total_steps``), that fraction is exact and identical on every rank — no
+    per-rank schedule divergence.  At a single rank the division is the
+    identity, so serial runs are unchanged; only the multi-rank schedule —
+    where the bug lives — moves.  The result still passes through
+    :func:`_clamped_warmup` for the optax positivity constraint.
+
+    CONVENTION: this holds the warmup FRACTION of the schedule invariant, which
+    is the right target under this trainer's FIXED peak LR (it is equivalent to
+    holding the number of SAMPLES seen during warmup constant across rank
+    count).  It would be the WRONG target under a linear-LR-scaling rule
+    (LR ∝ nproc), where warmup should instead be held constant in steps — this
+    trainer does not scale LR with rank count.  Note the schedule LENGTH in
+    optimizer steps is still ``1/nproc`` (fewer, larger-batch updates over the
+    same data): that is the standard large-batch trade, by design, not a bug
+    this fixes — runs at different rank counts are not step-for-step equivalent.
 
     A YAML that intends a literal per-rank warmup can set ``nproc``-scaled
     values, but the global-fraction reading matches every committed WB config
     and the trainer's own ``n_global_samples`` fingerprint.
+
+    ``desired <= 0`` stays 0 (no warmup, as configured).  A positive warmup
+    floors at 1 rather than rounding away to 0 at very large rank counts: the
+    bug being fixed is warmup SWALLOWING the run, and silently deleting it
+    entirely at high ``nproc`` is the same class of surprise in the other
+    direction.  The upper bound (``< total_steps``) is left to
+    :func:`_clamped_warmup`.
     """
-    return max(0, round(max(0, int(desired_warmup)) / max(1, int(nproc))))
+    d = max(0, int(desired_warmup))
+    if d == 0:
+        return 0
+    return max(1, round(d / max(1, int(nproc))))
 
 
 def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:

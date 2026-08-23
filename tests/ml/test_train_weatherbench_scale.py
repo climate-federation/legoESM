@@ -109,6 +109,15 @@ def test_rank_aware_warmup_non_negative_and_never_inflates():
             assert 0 <= w <= desired
 
 
+def test_rank_aware_warmup_positive_config_never_vanishes_at_high_rank():
+    # A configured (positive) warmup must not silently round away to 0 at large
+    # rank counts — that is the same "warmup wrong" class in the other
+    # direction. Floors at 1; only warmup_steps: 0 gives no warmup.
+    assert _rank_aware_warmup(1, 16) == 1
+    assert _rank_aware_warmup(200, 1024) == 1
+    assert _rank_aware_warmup(0, 1024) == 0          # 0 stays 0 (as configured)
+
+
 @pytest.mark.parametrize("total_steps,desired", [(100_000, 1000), (4000, 1000)])
 def test_clamped_warmup_preserves_configured_warmup(total_steps, desired):
     # A real run must keep its configured warmup verbatim whenever it is valid
