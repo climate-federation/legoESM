@@ -419,7 +419,35 @@ that makes a band's exchange one message per stage is latitude-only, the tile
 exchanges latitude and longitude in separate rounds, every tile runs the pole
 handling whether or not it touches a pole, and each east-west wrap becomes two
 ring messages instead of a local copy. Off the source that is 108 messages
-against 13. It is READ, not measured, and an arm to measure it is queued.
+against 13.
+
+**Measured now, on the compiled program at four GPUs, 128x256:** latitude
+bands send 13 point-to-point messages per step, a two-by-two tile sends 28.
+So 2.1 times, not eight — the source reading overstated it, because the
+compiler already groups several fields into one message. The extra fifteen are
+the east-west exchanges, and they are thin: one column of longitude by
+sixty-four rows by twenty-six levels, about seven kilobytes each, which is
+latency rather than bandwidth. Fifteen small messages is the right order to
+account for the 1.09 ms the tile lost at 64 GPUs, though that arithmetic is a
+coincidence until something measures it.
+
+Two attempts at this census were discarded before this one. The first read its
+counts from the layout dump, which runs with the exchange replaced by the
+identity and therefore reports none. The second compared a latitude band
+against a "tile" on two devices, where asking for two longitude splits leaves
+a single latitude band -- two one-dimensional decompositions pointing in
+different directions, not a tile. The arm now refuses to run anything labelled
+a tile that is not split in both directions.
+
+**And the fix is already written.** There is a packed two-dimensional exchange
+in the code, with its own receipts, which carries every field of a stage in
+one message per direction instead of one per field. Nothing calls it. The
+atmosphere step asks for the packed exchange through a helper that returns
+nothing at all for a two-dimensional mesh, by design, so the tiled lane has
+never run packed. Wiring it is blocked on one thing: the step's exchange packs
+three kinds of field at two halo depths in a single message, and the
+two-dimensional body accepts only one kind at one depth, where its
+one-dimensional twin accepts both.
 
 **A caveat that applies to the transpose numbers above.** The layout-dump arm
 runs with the halo exchange replaced by the identity, so that the staging work
