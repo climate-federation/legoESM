@@ -457,10 +457,13 @@ def _fake_nemo_run(tmp_path, nsteps=6, ny=6, nx=4, offset=0, kt_shift=0,
                    name="run"):
     """Write per-step NEMO-style restart TILES obeying the Asselin identity.
 
-    Two tiles split in y, so `rebuild`'s DOMAIN_position placement and halo
-    handling are actually exercised -- a single full-domain tile always covers
-    the grid and would leave that path, and extract's "a tile did not cover
-    the whole domain" refusal, untested.
+    Two tiles split in y, so `rebuild`'s DOMAIN_position PLACEMENT is actually
+    exercised -- a single full-domain tile always covers the grid and would
+    leave that path, and extract's "a tile did not cover the whole domain"
+    refusal, untested.  NOTE the halo-STRIP branch is still not exercised: the
+    halo sizes here are 0, exactly as in the production restarts, so there is
+    nothing to strip in either case. Do not read this fixture as covering a
+    non-zero halo.
 
     ``offset``   shifts the sshb series by one dump (the mapping error the
                  Asselin identity catches).
@@ -675,11 +678,34 @@ def test_variance_bands_weights_conjugate_pairs(ewt):
     assert b["gt_24h"] == pytest.approx(0.5, abs=0.03)
 
 
+def _synthetic_mesh(tmp_path, ny=21, nx=13, name="mesh_imp.nc"):
+    """A standalone mesh_mask, so these tests do not bind the production one."""
+    import netCDF4
+    mesh = tmp_path / name
+    wet = np.zeros((ny, nx), dtype=bool)
+    wet[2:-2, 2:-2] = True
+    lat = np.linspace(-60.0, 60.0, ny)[:, None] * np.ones((1, nx))
+    lon = np.linspace(0.0, 40.0, nx)[None, :] * np.ones((ny, 1))
+    with netCDF4.Dataset(mesh, "w") as ds:
+        ds.createDimension("x", nx)
+        ds.createDimension("y", ny)
+        ds.createDimension("z", 2)
+        ds.createDimension("t", 1)
+        ds.createVariable("tmask", "f8", ("t", "z", "y", "x"))[:] = \
+            np.broadcast_to(wet, (1, 2, ny, nx))
+        ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = lat
+        ds.createVariable("nav_lon", "f8", ("y", "x"))[:] = lon
+        ds.createVariable("e1t", "f8", ("t", "y", "x"))[:] = np.full((1, ny, nx), 6e4)
+        ds.createVariable("e2t", "f8", ("t", "y", "x"))[:] = np.full((1, ny, nx), 6e4)
+    return str(mesh), wet
+
+
 def test_make_impulse_restart_refuses_before_writing_anything(ewt, tmp_path):
     """A guard that fires after the mutation leaves the bad file on disk."""
     import netCDF4
+    mesh, wet = _synthetic_mesh(tmp_path)
     src = tmp_path / "src.nc"
-    ny, nx = 199, 52
+    ny, nx = wet.shape
     with netCDF4.Dataset(src, "w") as ds:
         ds.createDimension("x", nx)
         ds.createDimension("y", ny)
@@ -690,14 +716,14 @@ def test_make_impulse_restart_refuses_before_writing_anything(ewt, tmp_path):
         ds.createVariable("e3t", "f8", ("t", "z", "y", "x"))[:] = np.ones((1, 2, ny, nx))
     out = tmp_path / "out.nc"
     with pytest.raises(SystemExit, match="carries e3t"):
-        ewt.make_impulse_restart(str(src), str(out))
+        ewt.make_impulse_restart(str(src), str(out), mesh_mask=mesh)
     assert not out.exists(), "the refused restart was written anyway"
 
 
 def test_make_impulse_restart_bumps_only_wet_cells_and_both_levels(ewt, tmp_path):
     import netCDF4
+    mesh, wet = _synthetic_mesh(tmp_path, name="mesh_imp2.nc")
     src = tmp_path / "src2.nc"
-    wet = ewt.wet_mask()
     ny, nx = wet.shape
     with netCDF4.Dataset(src, "w") as ds:
         ds.createDimension("x", nx)
@@ -706,7 +732,9 @@ def test_make_impulse_restart_bumps_only_wet_cells_and_both_levels(ewt, tmp_path
         for vn in ("sshn", "sshb"):
             ds.createVariable(vn, "f8", ("t", "y", "x"))[:] = np.zeros((1, ny, nx))
     out = tmp_path / "out2.nc"
-    info = ewt.make_impulse_restart(str(src), str(out), amplitude_m=0.05)
+    info = ewt.make_impulse_restart(str(src), str(out), amplitude_m=0.05,
+                                    radius_m=2.0e5, centre_lat=-30.0,
+                                    centre_lon=20.0, mesh_mask=mesh)
     with netCDF4.Dataset(out) as ds:
         n = np.asarray(ds["sshn"][:]).squeeze()
         b = np.asarray(ds["sshb"][:]).squeeze()
@@ -788,3 +816,44 @@ def test_two_dt_mode_reports_a_locus_when_regions_are_given(ewt):
     # ...and without regions the caller gets no locus at all rather than a
     # silently basin-wide one
     assert "locus_first_sample" not in ewt.two_dt_mode(field, wet)
+
+
+def test_two_dt_leakage_floor_is_not_an_edge_artifact_of_a_large_mean(ewt):
+    """A CONSTANT field has no 2-step content at all, so its floor must be
+    zero. Zero-padded convolution on an 0.83 m mean would report ~0.2 m."""
+    wet, _ = _basin()
+    n = 32
+    field = np.full((n,) + wet.shape, 0.83)
+    assert ewt.two_dt_leakage_floor(field, wet) < 1e-12
+
+
+def test_step_noise_ratio_shares_are_area_weighted(ewt):
+    """Without weights these two calls return the same shares."""
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    rng = np.random.default_rng(31)
+    nemo = rng.normal(size=(20,) + wet.shape)
+    lego = nemo.copy()
+    lego[:, r["wall"]] *= 3.0            # excess lives on the wall
+    flat = ewt.step_noise_ratio(lego, nemo, wet, r)
+    # give the wall cells ten times the area of everything else
+    area = np.where(r["wall"], 10.0, 1.0)
+    heavy = ewt.step_noise_ratio(lego, nemo, wet, r, area)
+    fw = flat["excess_share_by_locus"]["wall"]
+    hw = heavy["excess_share_by_locus"]["wall"]
+    assert fw["area_fraction"] != pytest.approx(hw["area_fraction"])
+    assert fw["enrichment"] != pytest.approx(hw["enrichment"])
+    # weighting cannot change WHERE the excess is, only how it is normalised
+    assert fw["share"] == pytest.approx(1.0, abs=1e-6)
+    assert hw["share"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_propagation_lag_survives_a_short_record(ewt):
+    """max_lag exceeding the record length must not crash."""
+    dt = 2700.0
+    n, ny, nx = 12, 3, 6
+    wet = np.ones((ny, nx), dtype=bool)
+    rng = np.random.default_rng(32)
+    eta = rng.normal(size=(n, ny, nx))
+    out = ewt.propagation_lag(eta, wet, 1, 6e4, dt, max_lag=20)
+    assert np.isfinite(out["median_lag_steps"])

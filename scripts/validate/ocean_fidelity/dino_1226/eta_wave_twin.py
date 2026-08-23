@@ -626,8 +626,11 @@ def variance_bands(eta: np.ndarray, wet: np.ndarray, dt: float,
     """Share of TEMPORAL variance in each period band, summed over wet cells.
 
     Window-weighted-demeaned and Hann-windowed per cell, the same way
-    ``spectra`` does it, so the single-cell spectra and this domain-wide
-    number really are the same estimator.
+    ``spectra`` does it.  The BIN WEIGHTING deliberately differs: ``spectra``
+    reports an amplitude per bin and so halves the unpaired zero and Nyquist
+    bins, while this reports a VARIANCE SHARE and so doubles the paired
+    interior ones.  Both follow from the same Parseval identity; neither is
+    the other's convention.
 
     Interior bins of a one-sided spectrum each stand for a CONJUGATE PAIR and
     carry twice the variance of the unpaired zero and Nyquist bins, so they
@@ -761,7 +764,10 @@ def propagation_lag(eta: np.ndarray, wet: np.ndarray, jrow: int, dx_m: float,
         for lag in range(-max_lag, max_lag + 1):
             xs = x[max(0, lag):x.size + min(0, lag)]
             ys = y[max(0, -lag):y.size + min(0, -lag)]
-            if xs.size < 8:
+            # A lag at or beyond the record length leaves the two slices with
+            # DIFFERENT sizes (the negative-wrap case), which np.corrcoef does
+            # not reject cleanly -- it crashes for short records.
+            if xs.size < 8 or xs.size != ys.size:
                 continue
             c = float(np.corrcoef(xs, ys)[0, 1])
             if np.isfinite(c) and c > best_c:
@@ -894,15 +900,27 @@ def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
     2-step mode EXACTLY (1-2+1 = 0) while passing 85% of a 6-hour signal.  An
     odd boxcar does not: a 5-point mean leaves an alternating series at 1/5 of
     its amplitude, so the "floor" would be a fifth of the mode itself.
+
+    Two edge traps, both of which made the first version of this return a
+    floor SEVEN HUNDRED TIMES the signal it was supposed to bound.  The
+    convolution zero-pads, so on a field with a large mean (0.83 m here) the
+    end samples come back short by a quarter of the mean -- a 0.2 m artifact.
+    The field is therefore de-meaned in time per cell before smoothing, AND
+    the two samples that the padding touches are dropped from the average.
     """
     k = np.array([1.0, 2.0, 1.0]) / 4.0
     flat = field.reshape(field.shape[0], -1)
+    flat = flat - flat.mean(axis=0, keepdims=True)
     sm = np.apply_along_axis(
         lambda v: np.convolve(v, k, mode="same"), 0, flat).reshape(field.shape)
     alt = two_dt_component(sm)
+    if alt.shape[0] < 3:
+        raise SystemExit("two_dt_leakage_floor needs enough samples to drop "
+                         "the padded ends")
     w = np.ones(int(wet.sum())) if area is None else area[wet]
-    amp = [float(np.sqrt(np.sum(w * alt[n][wet] ** 2) / np.sum(w)))
-           for n in range(min(8, alt.shape[0]))]
+    usable = alt[1:-1]
+    amp = [float(np.sqrt(np.sum(w * usable[n][wet] ** 2) / np.sum(w)))
+           for n in range(min(8, usable.shape[0]))]
     return float(np.mean(amp))
 
 
