@@ -1924,13 +1924,23 @@ def _resolve_size_coloring(env_value: str) -> bool:
         f"(empty = ON — the receipted default)")
 
 
-def padded_weight(edge_colors, pair_w):
+def padded_weight(edge_colors, pair_w, floor=0):
     """Total padded wire weight of a colouring: per round, every pair
     ships the round max (cells and edges tracked with equal weight —
-    their per-entity widths are nlev+2 vs nlev, near-equal)."""
+    their per-entity widths are nlev+2 vs nlev, near-equal).
+
+    ``floor`` is the smallest extent the schedule arrays can have. The built
+    schedule floors each entity's per-round extent at one row, so a round that
+    exchanges only cells still ships one edge row per active pair, and scoring
+    it at zero underprices it (codex review). Left at zero by default: the
+    colouring that ships today was chosen against the unfloored score, and
+    changing the score would change that colouring in every run without
+    anyone asking for it. The annealed search passes ``floor=1`` and compares
+    against a floored baseline, so both sides of ITS decision agree.
+    """
     from collections import defaultdict
-    rounds_c = defaultdict(int)
-    rounds_e = defaultdict(int)
+    rounds_c = defaultdict(lambda: floor)
+    rounds_e = defaultdict(lambda: floor)
     counts = defaultdict(int)
     for pair, color in edge_colors.items():
         wc, we = pair_w[pair]
@@ -2069,11 +2079,15 @@ def anneal_coloring(pairs, pair_w, colors, n_colors, n_moves, seed=0):
         endpoints[color][pair[1]] += 1
 
     def class_cost(color):
+        # Floored at one row per entity, because the schedule arrays are: a
+        # round that exchanges only cells still ships one edge row per active
+        # pair. Scoring it at zero would let the search "win" by emptying an
+        # entity out of a round that still pays for it (codex review).
         group = members[color]
         if not group:
             return 0
-        return len(group) * (max(pair_w[q][0] for q in group)
-                             + max(pair_w[q][1] for q in group))
+        return len(group) * (max([pair_w[q][0] for q in group] + [1])
+                             + max([pair_w[q][1] for q in group] + [1]))
 
     total = sum(class_cost(c) for c in list(members))
     best_total, best_colors = total, dict(colors)
@@ -2269,7 +2283,8 @@ def _maybe_anneal(comm_pairs, edge_colors, pair_w, weight, method):
         raise AssertionError(
             "annealed colouring is improper; two exchanges in one round "
             "would collide at a device")
-    searched_w = padded_weight(searched, pair_w)
+    searched_w = padded_weight(searched, pair_w, floor=1)
+    weight = padded_weight(edge_colors, pair_w, floor=1)
     if searched_w >= weight:
         logger.info(
             "  annealed colouring found no improvement (padded weight %d)",
@@ -2367,8 +2382,21 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
     # adopted only when the round count DOES NOT regress and the padded
     # wire weight strictly improves.
     import os as _os_sc
-    if _resolve_size_coloring(
+    if not _resolve_size_coloring(
             _os_sc.environ.get("LEGOESM_MPAS_SIZE_COLORING", "")):
+        # The annealed search is a separate switch and must not be silently
+        # inert because this one is off (codex review).
+        pair_w = {}
+        for (u, v) in comm_pairs:
+            wc = max(len(cell_send_map.get((u, v), [])),
+                     len(cell_send_map.get((v, u), [])))
+            we = max(len(edge_send_map.get((u, v), [])),
+                     len(edge_send_map.get((v, u), [])))
+            pair_w[(u, v)] = (wc * cell_width, we * edge_width)
+        edge_colors, n_rounds, coloring_method = _maybe_anneal(
+            comm_pairs, edge_colors, pair_w,
+            padded_weight(edge_colors, pair_w), coloring_method)
+    else:
         import random as _random_sc
         # Pair weights in TRUE relative units (codex review: an
         # equal-weight proxy can rate a cell/edge trade as improving

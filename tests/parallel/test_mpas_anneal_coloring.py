@@ -178,12 +178,55 @@ def _build(devices: int, *, anneal: str, monkeypatch):
     return step, state, 600.0
 
 
+def _assert_the_search_changes_this_mesh(devices: int) -> None:
+    """Non-vacuity for the gate below: unless the search actually moves an
+    exchange to a different round on THIS mesh, comparing the model's output
+    with the switch on and off compares the same schedule twice and proves
+    nothing (codex review)."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.voronoi_partition import (
+        reorder_voronoi_for_sharding,
+    )
+    from legoesm.parallel.sharded_dynamics import (
+        anneal_coloring, greedy_edge_coloring, multi_ordering_edge_coloring,
+        size_aware_edge_coloring,
+    )
+
+    mesh = reorder_voronoi_for_sharding(
+        create_voronoi_mesh(subdivision_level=4), devices)
+    cells_per = int(mesh.nCells) // devices
+    owner = np.repeat(np.arange(devices), cells_per)
+    cells_on_cell = np.asarray(mesh.cellsOnCell)
+    pairs, weights = set(), {}
+    for rank in range(devices):
+        owned = np.arange(rank * cells_per, (rank + 1) * cells_per)
+        nb = cells_on_cell[:, owned].ravel()
+        nb = nb[(nb >= 0) & (nb < devices * cells_per)]
+        for other, count in zip(*np.unique(owner[nb], return_counts=True)):
+            if int(other) == rank:
+                continue
+            key = tuple(sorted((rank, int(other))))
+            pairs.add(key)
+            weights[key] = (max(weights.get(key, (0, 0))[0], int(count)),
+                            max(weights.get(key, (0, 0))[1], int(count)))
+    greedy = greedy_edge_coloring(pairs)
+    multi, _ = multi_ordering_edge_coloring(pairs)
+    seed = multi if max(multi.values()) < max(greedy.values()) else greedy
+    adopted, rounds, _ = size_aware_edge_coloring(
+        pairs, seed, weights, max(seed.values()) + 1)
+    searched = anneal_coloring(pairs, weights, adopted, rounds + 1, 2_000_000)
+    assert searched != adopted, (
+        "the search returns its input on this mesh, so the gate below would "
+        "compare one schedule with itself")
+
+
 def test_a_different_schedule_gives_the_same_answer(monkeypatch):
     """The schedule decides which rows travel in which round. Regrouping the
     rounds moves no data and must move no bits; if it does, the new schedule
     is delivering the wrong rows and everything downstream is wrong quietly.
     """
     _need(4)
+    _assert_the_search_changes_this_mesh(4)
     on, st_on, dt = _build(4, anneal="2", monkeypatch=monkeypatch)
     out_on = on(st_on, dt)
     off, st_off, _ = _build(4, anneal="0", monkeypatch=monkeypatch)

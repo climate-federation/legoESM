@@ -290,6 +290,10 @@ def main() -> int:
     # third is what the model actually ships, produced by calling the model's
     # own colouring rather than a re-derivation of it. Quoting a seed row as
     # "the schedule" overstates what is left to win by about a factor of two.
+    if os.environ.get("LEGOESM_MPAS_SIZE_COLORING", "") == "0":
+        raise SystemExit(
+            "LEGOESM_MPAS_SIZE_COLORING=0 is set, so production does NOT run "
+            "the colouring this probe would label as shipped. Unset it.")
     seed_rounds = max(baseline.values()) + 1
     adopted, adopted_rounds, method = sd.size_aware_edge_coloring(
         pair_set, baseline, pair_w, seed_rounds)
