@@ -361,6 +361,63 @@ def interp_cell_to_uface(f: jnp.ndarray,
 
 
 
+
+def lon_wrap_is_a_message() -> bool:
+    """Is the longitude wrap a message, or a local copy?
+
+    Mirrors :func:`pad_lon_cgrid`'s own dispatch, so the answer cannot drift
+    from what that function does. On a latitude band, or serially, every
+    device owns the whole circle of longitude and the wrap is a pad; only a
+    genuine longitude split makes it an exchange.
+
+    Callers use this to decide whether batching several fields into one wrap
+    is worth the concatenate. On a band it is not -- the wrap costs nothing
+    and the concatenate is a copy -- so the band lane keeps the program it
+    already has, byte for byte.
+    """
+    from legoesm.grids.halo import (
+        get_halo_backend, get_mpi_topology, get_spmd_mesh,
+    )
+    backend = get_halo_backend()
+    if backend == "mpi":
+        from legoesm.parallel.latlon_mpi import LatLon2DLayout
+        topology = get_mpi_topology()
+        return (isinstance(topology, LatLon2DLayout)
+                and int(getattr(topology, "proc_lon", 1)) > 1)
+    if backend == "spmd":
+        mesh = get_spmd_mesh()
+        if mesh is None:
+            return False
+        shape = getattr(mesh, "shape", {})
+        return int(shape.get("lon", 1)) > 1
+    return False
+
+
+
+def pad_lon_cgrid_grouped(fields, halo: int = 1):
+    """:func:`pad_lon_cgrid_many`, but split by dtype first.
+
+    A packed buffer promotes mixed widths and nothing casts back, so the
+    batched wrap refuses a mixed-dtype group rather than silently changing a
+    field's precision. Callers that do not control their fields' dtypes -- the
+    dycore carries a float32 initial condition through a float64 run -- want
+    the grouping done for them: one exchange per dtype, results back in the
+    order they were given.
+    """
+    fields = tuple(fields)
+    if not fields:
+        return ()
+    by_dtype: dict = {}
+    for i, f in enumerate(fields):
+        by_dtype.setdefault(str(f.dtype), []).append(i)
+    out = [None] * len(fields)
+    for _, idxs in sorted(by_dtype.items()):
+        padded = pad_lon_cgrid_many([fields[i] for i in idxs], halo=halo)
+        for i, pad in zip(idxs, padded):
+            out[i] = pad
+    return tuple(out)
+
+
 def _lon_pad_or_check(where: str, f, f_pad_lon):
     """Use a caller's longitude pad, or make one. Validate rather than trust.
 

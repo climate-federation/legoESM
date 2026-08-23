@@ -102,3 +102,22 @@ def test_a_wrong_pre_wrap_is_refused_not_used():
     (pad,) = pad_lon_cgrid_many((f,))
     with pytest.raises(ValueError, match="dtype"):
         interp_cell_to_uface(f, f_pad_lon=pad.astype(jnp.bfloat16))
+
+
+def test_mixed_dtypes_are_grouped_not_refused():
+    """The strict batched wrap refuses a mixed-dtype group, because a packed
+    buffer promotes and nothing casts back. Callers that do not control their
+    fields' dtypes -- the dycore carries a float32 initial condition through a
+    float64 run -- get the grouping done for them, one exchange per dtype,
+    results in the order given."""
+    from legoesm.grids.operators_latlon_cgrid import pad_lon_cgrid_grouped
+
+    rng = np.random.default_rng(9)
+    a = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 2)), dtype=jnp.float32)
+    b = jnp.asarray(rng.standard_normal((N_LAT, N_LON)), dtype=jnp.bfloat16)
+    c = jnp.asarray(rng.standard_normal((N_LAT, N_LON, 3)), dtype=jnp.float32)
+    padded = pad_lon_cgrid_grouped((a, b, c))
+    for got, want in zip(padded, (a, b, c)):
+        assert got.dtype == want.dtype, "the grouping promoted a field"
+        np.testing.assert_array_equal(
+            np.asarray(got), np.asarray(pad_lon_cgrid(want, halo=1)))

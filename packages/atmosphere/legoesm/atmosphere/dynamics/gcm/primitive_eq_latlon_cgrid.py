@@ -493,7 +493,24 @@ def cgrid_latlon_hydrostatic_tendencies(
         else:
             _T_lat_pad, _u_lat_pad, _dp_lat_pad = _packed_out[2:]
 
-    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, ...)
+    # ONE longitude wrap for the fields that need one, instead of one each.
+    # On a latitude band the wrap is a local copy and batching would only add
+    # a concatenate, so the band lane keeps the program it already has; on a
+    # tile the wrap is a ring exchange and doing it per field is most of why
+    # the tiled step sends twice a band's messages while moving several times
+    # fewer halo rows.
+    # Grouped by dtype, because these two need not share one: the dycore
+    # carries a float32 initial condition through a float64 run.
+    from legoesm.grids.operators_latlon_cgrid import (
+        lon_wrap_is_a_message, pad_lon_cgrid_grouped)
+    _lon_batched = lon_wrap_is_a_message()
+    if _lon_batched:
+        _Bln_lon_pad, _T_lon_pad = pad_lon_cgrid_grouped((_Bln_stack, T))
+    else:
+        _Bln_lon_pad = _T_lon_pad = None
+
+    _dBln_dx = gradient_x_cgrid(  # (n_lat, n_lon+1, ...)
+        _Bln_stack, grid, f_pad_lon=_Bln_lon_pad)
     _dBln_dy = gradient_y_cgrid(                   # (n_lat+1, n_lon, ...)
         _Bln_stack, grid, f_padded=_Bln_pad)
     dB_dx = _dBln_dx[..., :nlev_g]
@@ -553,7 +570,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
             (T, u, dp), halo=1)
 
-    T_u = interp_cell_to_uface(T)
+    T_u = interp_cell_to_uface(T, f_pad_lon=_T_lon_pad)
     T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
 
     # Momentum pressure-gradient correction ``-R_d T grad_eta(ln p)``:
