@@ -133,14 +133,30 @@ def test_packed_collapses_the_message_count():
 
 def test_refuses_what_it_cannot_pack():
     mesh = _mesh(2, 2)
-    with pytest.raises(ValueError, match="only 'fold' specs"):
-        make_latlon_2d_packed_pad_body(mesh, (("wall", 1, 0.0, 0.0),))
-    with pytest.raises(ValueError, match="share one halo depth"):
-        make_latlon_2d_packed_pad_body(
-            mesh, (("fold", 1, False), ("fold", 2, False)))
+    with pytest.raises(ValueError, match="unknown spec kind"):
+        make_latlon_2d_packed_pad_body(mesh, (("bucket", 1, 0.0),))
     with pytest.raises(ValueError, match="needs a 2-D"):
         band = Mesh(np.array(jax.devices()[:2]), axis_names=("lat",))
         make_latlon_2d_packed_pad_body(band, (("fold", 1, False),))
+    with pytest.raises(ValueError, match="fold spec must be"):
+        make_latlon_2d_packed_pad_body(mesh, (("fold", 1),))
+    with pytest.raises(ValueError, match="wall spec must be"):
+        make_latlon_2d_packed_pad_body(mesh, (("wall", 1, 0.0),))
+    with pytest.raises(ValueError, match="sources must be plain integers"):
+        make_latlon_2d_packed_pad_body(
+            mesh, (("fold", 1, False),), sources=(True,))
+
+
+def test_takes_what_the_band_twin_takes():
+    """Non-vacuity for the refusals above, and the contract this body was
+    widened to meet: wall specs and mixed halo depths are ACCEPTED now, so
+    the dycore's stage epoch -- two fold depths and several walls -- can ride
+    one exchange on a tile the way it already does on a band."""
+    mesh = _mesh(2, 2)
+    body = make_latlon_2d_packed_pad_body(
+        mesh, (("fold", 1, False), ("fold", 2, False),
+               ("wall", 1, 0.0, 0.0)))
+    assert callable(body)
 
 
 def test_refuses_mixed_dtypes_rather_than_promoting_them():
@@ -154,3 +170,77 @@ def test_refuses_mixed_dtypes_rather_than_promoting_them():
     specs = (("fold", HALO, False), ("fold", HALO, False))
     with pytest.raises(ValueError, match="share one dtype"):
         _run_packed(mesh, specs, [a, b])
+
+
+def test_mixed_depths_match_the_per_field_body():
+    """The dycore's stage epoch asks for one field at halo 1 and another at
+    halo 2 in the same exchange. Packing them together must give exactly what
+    padding each separately gives -- the exchange is a bit-copy and the pack
+    is a reshape, so anything else is an indexing mistake in the unpacking."""
+    mesh = _mesh(2, 2)
+    rng = np.random.default_rng(11)
+    fields = _fields(rng, [3, 3])
+    specs = (("fold", 1, False), ("fold", 2, True))
+    packed = _run_packed(mesh, specs, fields)
+    per_field = _run_per_field(mesh, specs, fields)
+    for i, (a, b) in enumerate(zip(packed, per_field)):
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"field {i} at halo {specs[i][1]} differs from the "
+                    f"per-field pad")
+
+
+def test_a_wall_field_matches_the_wall_body():
+    """A wall field's pole ghost is a constant, not the atmospheric fold, and
+    its pad is latitude-only. Riding it in the packed exchange must give what
+    the wall body gives on the same tile mesh; applying fold semantics to it
+    would be silent, since the shapes would still line up in latitude."""
+    from legoesm.parallel.latlon_spmd import make_latlon_band_wall_pad_body
+
+    mesh = _mesh(2, 2)
+    rng = np.random.default_rng(12)
+    fields = _fields(rng, [3, 3])
+    specs = (("fold", 1, False), ("wall", 1, -2.5, 7.25))
+    packed = _run_packed(mesh, specs, fields)
+
+    wall_body = make_latlon_band_wall_pad_body(
+        mesh, halo=1, south_value=-2.5, north_value=7.25)
+    isp = P("lat", "lon", None)
+
+    @partial(shard_map, mesh=mesh, in_specs=isp, out_specs=isp,
+             check_vma=False)
+    def _ex(x):
+        return wall_body(x)
+
+    np.testing.assert_array_equal(
+        np.asarray(packed[1]), np.asarray(_ex(fields[1])),
+        err_msg="the packed wall field differs from the wall body")
+    # Non-vacuity: the wall constants must actually appear, or this would
+    # pass on two bodies that both quietly dropped them.
+    edge = np.asarray(packed[1])
+    assert np.isclose(edge[0], -2.5).any() or np.isclose(edge[-1], 7.25).any()
+
+
+def test_sources_let_one_array_ride_twice():
+    """The stage epoch asks for temperature at two depths with two different
+    semantics from ONE array. The sharing cannot be seen inside the traced
+    body, so the caller declares it; both outputs must still match what
+    padding that array separately gives."""
+    mesh = _mesh(2, 2)
+    rng = np.random.default_rng(13)
+    field = _fields(rng, [3])[0]
+    specs = (("fold", 1, False), ("fold", 2, False))
+    body = make_latlon_2d_packed_pad_body(mesh, specs, sources=(0, 0))
+    isp = P("lat", "lon", None)
+
+    @partial(shard_map, mesh=mesh, in_specs=(isp,), out_specs=(isp, isp),
+             check_vma=False)
+    def _ex(x):
+        return body(x)
+
+    shared = _ex(field)
+    separate = _run_per_field(mesh, specs, [field, field])
+    for i, (a, b) in enumerate(zip(shared, separate)):
+        np.testing.assert_array_equal(
+            np.asarray(a), np.asarray(b),
+            err_msg=f"shared-input output {i} differs from the per-field pad")
