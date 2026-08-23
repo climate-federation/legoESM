@@ -661,10 +661,19 @@ def cgrid_latlon_hydrostatic_tendencies(
         # precomputed above (iter-54 reuse — no extra cross-shard reduction).
         mass_flux = compute_mass_flux_from_cumsum(
             _cumsum_dp, D_total_p[..., jnp.newaxis], sigma_coord)
-        mf_u = interp_cell_to_uface(mass_flux)
-        # mass_flux depends on div(dp*v) -> cannot join the entry pad.
+        # The mass flux and the surface pressure are both wanted on u-faces
+        # here, so they share one longitude exchange. The mass flux depends on
+        # div(dp*v) and so cannot join the batch at the top of the stage; this
+        # is the next point at which two fields are ready together.
+        _ps_col = p_s[..., jnp.newaxis]
+        if _lon_batched:
+            _mf_lon_pad, _ps_lon_pad = pad_lon_cgrid_grouped(
+                (mass_flux, _ps_col))
+        else:
+            _mf_lon_pad = _ps_lon_pad = None
+        mf_u = interp_cell_to_uface(mass_flux, f_pad_lon=_mf_lon_pad)
         mf_v = interp_cell_to_vface_halo(mass_flux)
-        ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
+        ps_u = interp_cell_to_uface(_ps_col, f_pad_lon=_ps_lon_pad)[..., 0]
         ps_v = interp_cell_to_vface_halo(
             p_s[..., jnp.newaxis], f_pad=_ps_lat_pad)[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
