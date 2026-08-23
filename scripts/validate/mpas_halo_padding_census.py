@@ -154,6 +154,95 @@ def census(colors, pairs, cell_send, edge_send, n_dev):
     }
 
 
+
+
+def balanced_edge_coloring(pairs, weights, n_colors_max):
+    """Heaviest-first best-fit, then steepest-descent single-pair moves.
+
+    Written by GLM-5.2 against this objective, which it identified as batch
+    scheduling on an unbounded machine rather than as graph colouring: a class
+    costs its size times its largest member, so a heavy pair prices the whole
+    class it sits in and belongs somewhere sparse, while light pairs should
+    fill the crowded classes.
+
+    Scored here rather than shipped: it is a candidate against the colouring
+    the model already runs, and the comparison is the point.
+    """
+    pairs = [tuple(p) for p in pairs]
+    n = len(pairs)
+    w = np.asarray(weights, float)
+    n_colors = int(n_colors_max)
+    key = w[:, 0] + w[:, 1]
+    order = sorted(range(n), key=lambda i: (-key[i], i))
+
+    used = [set() for _ in range(n_colors)]
+    items = [[] for _ in range(n_colors)]
+    count = [0] * n_colors
+    max_c = [-np.inf] * n_colors
+    max_e = [-np.inf] * n_colors
+    color = {}
+
+    def cost(k):
+        return count[k] * (max_c[k] + max_e[k]) if count[k] else 0.0
+
+    for i in order:
+        a, b = pairs[i]
+        c, e = w[i, 0], w[i, 1]
+        best, best_delta = -1, np.inf
+        for k in range(n_colors):
+            if a in used[k] or b in used[k]:
+                continue
+            delta = ((count[k] + 1) * (max(max_c[k], c) + max(max_e[k], e))
+                     - cost(k))
+            if delta < best_delta - 1e-12:
+                best, best_delta = k, delta
+        if best < 0:
+            raise ValueError(
+                f"n_colors_max={n_colors} is below the edge-chromatic number")
+        used[best].update((a, b))
+        items[best].append(i)
+        count[best] += 1
+        max_c[best] = max(max_c[best], c)
+        max_e[best] = max(max_e[best], e)
+        color[i] = best
+
+    for _ in range(1000):
+        improved = False
+        for i in range(n):          # ascending index, so this is deterministic
+            a, b = pairs[i]
+            c, e = w[i, 0], w[i, 1]
+            k0 = color[i]
+            used[k0].difference_update((a, b))
+            items[k0].remove(i)
+            count[k0] -= 1
+            if count[k0]:
+                max_c[k0] = max(w[j, 0] for j in items[k0])
+                max_e[k0] = max(w[j, 1] for j in items[k0])
+            else:
+                max_c[k0] = max_e[k0] = -np.inf
+            back = ((count[k0] + 1) * (max(max_c[k0], c) + max(max_e[k0], e))
+                    - cost(k0))
+            best_k, best_delta = k0, 0.0
+            for k in range(n_colors):
+                if a in used[k] or b in used[k]:
+                    continue
+                delta = ((count[k] + 1) * (max(max_c[k], c) + max(max_e[k], e))
+                         - cost(k) - back)
+                if delta < best_delta - 1e-9:
+                    best_k, best_delta = k, delta
+            used[best_k].update((a, b))
+            items[best_k].append(i)
+            count[best_k] += 1
+            max_c[best_k] = max(max_c[best_k], c)
+            max_e[best_k] = max(max_e[best_k], e)
+            color[i] = best_k
+            if best_delta < -1e-9:
+                improved = True
+        if not improved:
+            break
+    return {pairs[i]: color[i] for i in range(n)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--devices", type=int, default=64)
@@ -165,9 +254,17 @@ def main() -> int:
     parser.add_argument("--cache-dir", default=os.environ.get(
         "LEGOESM_MESH_CACHE_DIR", ".mesh_cache"))
     parser.add_argument("--per-round", action="store_true")
+    parser.add_argument("--anneal", type=float, default=0.0,
+                        help="millions of moves to spend searching harder "
+                             "than the model does, to bound what is left "
+                             "to win")
+    parser.add_argument("--anneal-extra-rounds", type=int, default=1,
+                        help="colours the anneal may use beyond the shipped "
+                             "count")
     args = parser.parse_args()
 
     from legoesm.parallel import sharded_dynamics as sd
+    from legoesm.parallel.sharded_dynamics import anneal_coloring
 
     pairs, cell_send, edge_send = _cached_maps(
         args.subdivision, args.devices, args.depth, args.cache_dir)
@@ -209,6 +306,34 @@ def main() -> int:
             for r, directed, mc, me in c["per_round"]:
                 print(f"      round {r:2d}: {directed:3d} directed pairs  "
                       f"max cells {mc:6d}  max edges {me:6d}")
+
+    for n_colors in (adopted_rounds - 1, adopted_rounds, adopted_rounds + 1):
+        try:
+            cand = balanced_edge_coloring(
+                pairs, np.array([pair_w[p] for p in pairs], float), n_colors)
+        except ValueError as exc:
+            print(f"{'batch-greedy ' + str(n_colors):>16}: {exc}")
+            continue
+        assert sd.check_proper_edge_coloring(cand, pair_set), (
+            "batch-greedy returned a colouring that would collide")
+        c = census(cand, pairs, cell_send, edge_send, args.devices)
+        print(f"{'batch-greedy':>16}: {c['rounds']:3d} rounds   "
+              f"{c['real']:>10,} real   {c['shipped']:>11,} shipped   "
+              f"padding {c['padding_fraction']:6.1%}   "
+              f"weight {sd.padded_weight(cand, pair_w):,}")
+
+    if args.anneal > 0:
+        searched = anneal_coloring(
+            pair_set, pair_w, adopted,
+            adopted_rounds + args.anneal_extra_rounds,
+            int(args.anneal * 1e6))
+        assert sd.check_proper_edge_coloring(searched, pair_set), (
+            "the anneal returned a colouring that would collide at a device")
+        c = census(searched, pairs, cell_send, edge_send, args.devices)
+        print(f"{'annealed':>16}: {c['rounds']:3d} rounds   "
+              f"{c['real']:>10,} real   {c['shipped']:>11,} shipped   "
+              f"padding {c['padding_fraction']:6.1%}   "
+              f"weight {sd.padded_weight(searched, pair_w):,}")
     return 0
 
 

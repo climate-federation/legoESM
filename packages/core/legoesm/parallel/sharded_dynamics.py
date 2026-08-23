@@ -1941,6 +1941,122 @@ def padded_weight(edge_colors, pair_w):
 
 
 
+
+def _resolve_anneal_coloring(env_value: str) -> int:
+    """Resolve ``LEGOESM_MPAS_ANNEAL_COLORING``: how many moves of annealed
+    search to spend refining the halo round schedule. ``''``/``'0'`` = off
+    (default), otherwise a positive count in MILLIONS of moves.
+
+    Off by default because it changes the schedule, and whether a schedule
+    that ships fewer bytes over one more round is faster on the machine is a
+    measurement to take rather than a default to move. Measured offline at 64
+    devices: two million moves take the padded share of the wire from 34.4% to
+    25.9%, at about five seconds of host time; a hundred million only reach
+    25.6%, so a small budget is the whole win.
+
+    Unknown values raise (dispatch hardening: a typo must not silently pick a
+    different halo schedule).
+    """
+    if env_value in ("", "0"):
+        return 0
+    if not _CANONICAL_INT_RE.fullmatch(env_value):
+        raise ValueError(
+            f"LEGOESM_MPAS_ANNEAL_COLORING={env_value!r}: must be a positive "
+            f"whole number of millions of search moves, or '0'/empty for off.")
+    millions = int(env_value)
+    if millions > 200:
+        raise ValueError(
+            f"LEGOESM_MPAS_ANNEAL_COLORING={millions}: out of range 1..200. "
+            f"The search flattens by two million moves, so a larger budget "
+            f"spends setup time it cannot convert into bytes.")
+    return millions * 1_000_000
+
+
+def anneal_coloring(pairs, pair_w, colors, n_colors, n_moves, seed=0):
+    """How much room is left in the colouring? Search harder and see.
+
+    Same move as the model's local search -- give one pair a different legal
+    colour -- but accepting an uphill move with a decreasing probability, so
+    the search can leave the basin the model's strictly-downhill version stops
+    in. Allowed to use more colours than the model's result, because an extra
+    round costs about 15 microseconds on this lane while a round of padding
+    costs far more.
+
+    Measured at 64 devices, subdivision 9, depth 9: the shipped colouring
+    ships 34.4% padding, and two million moves take that to 25.9% -- about a
+    tenth off the wire, for about five seconds of host time at setup. A
+    hundred million moves only reach 25.6%, so the budget is small on purpose.
+
+    Off unless LEGOESM_MPAS_ANNEAL_COLORING asks for it.
+
+    Driven by a MOVE COUNT, not by a clock. Every process of a
+    multi-controller run derives its own schedule and they must agree exactly,
+    so a wall-clock budget would hand different ranks different colourings and
+    the exchange would collide.
+    """
+    import math
+    import random
+    from collections import defaultdict
+
+    rng = random.Random(seed)
+    colors = dict(colors)
+    pair_list = sorted(pairs)
+
+    members = defaultdict(list)
+    endpoints = defaultdict(lambda: defaultdict(int))
+    for pair, color in colors.items():
+        members[color].append(pair)
+        endpoints[color][pair[0]] += 1
+        endpoints[color][pair[1]] += 1
+
+    def class_cost(color):
+        group = members[color]
+        if not group:
+            return 0
+        return len(group) * (max(pair_w[q][0] for q in group)
+                             + max(pair_w[q][1] for q in group))
+
+    total = sum(class_cost(c) for c in list(members))
+    best_total, best_colors = total, dict(colors)
+
+    # A temperature on the scale of one pair's weight: hot enough to cross a
+    # class boundary early, cold enough to stop wandering at the end.
+    scale = max(w[0] + w[1] for w in pair_w.values())
+    moves = accepted = 0
+    block = 2000
+    n_blocks = max(1, int(n_moves) // block)
+    for b in range(n_blocks):
+        frac = 1.0 - b / n_blocks
+        temperature = scale * 0.25 * frac + 1.0
+        for _ in range(block):
+            moves += 1
+            pair = pair_list[rng.randrange(len(pair_list))]
+            old = colors[pair]
+            new = rng.randrange(n_colors)
+            if new == old:
+                continue
+            if endpoints[new][pair[0]] or endpoints[new][pair[1]]:
+                continue          # would collide at a device
+            before = class_cost(old) + class_cost(new)
+            members[old].remove(pair)
+            members[new].append(pair)
+            after = class_cost(old) + class_cost(new)
+            delta = after - before
+            if delta <= 0 or rng.random() < math.exp(-delta / temperature):
+                accepted += 1
+                colors[pair] = new
+                for node in pair:
+                    endpoints[old][node] -= 1
+                    endpoints[new][node] += 1
+                total += delta
+                if total < best_total:
+                    best_total, best_colors = total, dict(colors)
+            else:
+                members[new].remove(pair)
+                members[old].append(pair)
+    print(f"  anneal: {moves:,} moves, {accepted:,} accepted")
+    return best_colors
+
 def size_aware_edge_coloring(comm_pairs, edge_colors, pair_w, n_rounds,
                              coloring_method="greedy"):
     """Regroup an edge colouring so similar-sized exchanges share a round.
@@ -2057,13 +2173,55 @@ def size_aware_edge_coloring(comm_pairs, edge_colors, pair_w, n_rounds,
         logger.info(
             "  size-aware colouring found no improvement "
             "(padded weight %d)", base_w)
-        return edge_colors, n_rounds, coloring_method
+        return _maybe_anneal(comm_pairs, edge_colors, pair_w, base_w,
+                             coloring_method)
     logger.info(
         "  size-aware colouring adopted: padded weight %d -> %d "
         "(-%.0f%%), rounds %d", base_w, best_w,
         100 * (1 - best_w / max(base_w, 1)),
         max(best_ec.values()) + 1)
-    return best_ec, max(best_ec.values()) + 1, "size_aware"
+    return _maybe_anneal(comm_pairs, best_ec, pair_w, best_w, "size_aware")
+
+
+def _maybe_anneal(comm_pairs, edge_colors, pair_w, weight, method):
+    """Refine a colouring by annealed search, when asked, and only when it
+    strictly wins. Returns ``(colours, rounds, method)`` either way.
+
+    Kept separate from the descent above because it answers a different
+    question: the descent finds the bottom of the basin its seeds land in,
+    while this one is allowed to climb out. It is also allowed ONE more round
+    than the descent settled on -- an extra sequential exchange prices at
+    about fifteen microseconds here, and a round of padding costs far more.
+    """
+    import os as _os_anneal
+
+    n_moves = _resolve_anneal_coloring(
+        _os_anneal.environ.get("LEGOESM_MPAS_ANNEAL_COLORING", ""))
+    rounds = max(edge_colors.values()) + 1
+    if not n_moves:
+        return edge_colors, rounds, method
+
+    searched = anneal_coloring(comm_pairs, pair_w, edge_colors, rounds + 1,
+                               n_moves)
+    if not check_proper_edge_coloring(searched, comm_pairs):
+        # Cannot happen by construction -- the move rejects any colour already
+        # holding an endpoint -- which is exactly why it is checked: a silent
+        # improper schedule collides at a device and corrupts the halo.
+        raise AssertionError(
+            "annealed colouring is improper; two exchanges in one round "
+            "would collide at a device")
+    searched_w = padded_weight(searched, pair_w)
+    if searched_w >= weight:
+        logger.info(
+            "  annealed colouring found no improvement (padded weight %d)",
+            weight)
+        return edge_colors, rounds, method
+    searched_rounds = max(searched.values()) + 1
+    logger.info(
+        "  annealed colouring adopted: padded weight %d -> %d (-%.0f%%), "
+        "rounds %d -> %d", weight, searched_w,
+        100 * (1 - searched_w / max(weight, 1)), rounds, searched_rounds)
+    return searched, searched_rounds, "size_aware_annealed"
 
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                              edges_per, max_lc, max_le,
