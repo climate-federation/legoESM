@@ -489,6 +489,35 @@ the wraps are hoisted, the stage exchange is the next thing that would
 dominate.
 
 
+### Messages, not arithmetic. Measured by deleting the wire.
+
+The tile's compiled program has thirty percent more instructions than the
+band's, which was a real competing explanation for its loss. Deleting the
+communication from both sides settles it. Four GPUs, 128x256, sixty timed
+steps, arms in palindrome order:
+
+| | band | tile | tile / band |
+|---|---|---|---|
+| no communication at all | 0.514 ms | 0.560 ms | 1.09 |
+| with communication | 0.896 ms | 1.579 ms | 1.76 |
+| the wire itself | +0.382 ms | +1.019 ms | 2.67 |
+
+The tile's local work is nine percent more, not thirty -- the instruction
+count overstated it. Its communication costs nearly three times the band's,
+while moving several times fewer halo rows. That is the message count, and it
+matches the counted messages closely: 13 against 28, a ratio of 2.15, against
+a wire-time ratio of 2.67.
+
+So the east-west wrap is the lever, and the arithmetic is not the problem.
+
+One honesty note on that table: the gate written before the run asked for
+every arm pair to agree with itself to better than one percent, and the two
+full-communication tile arms disagree by four. By that rule it returned no
+verdict, and the number to quote is the direction rather than the third digit.
+The effect is nineteen times the disagreement, so the direction is not in
+doubt.
+
+
 ## In flight: writing the icosahedral halo once instead of thirteen times
 
 The icosahedral halo runs thirteen coloured rounds at 64 GPUs, and each round
