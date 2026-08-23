@@ -379,6 +379,51 @@ class Arm:
         return nemo_completed(self.nemo_dir_fn(i), self.nemo_log_glob)
 
 
+def recorded_arm():
+    """The RECORDED one-level arm: the 360-day verdict members, at the source
+    revision they ran at, scored at day 90.
+
+    Scored ALONGSIDE and NEVER mixed into the verdict -- its legoESM members
+    sit 45 commits back, across two that change this card's physics, which is
+    exactly why the one-level arm was re-run (code review B1). It is here for
+    one purpose: to say whether a re-measured one-level ratio that differs from
+    the recorded one differs because of the MODEL or because of the INSTRUMENT.
+    Same instrument on both, so any difference is the model.
+    """
+    return Arm("recorded", V.LEGO_DIR_DEFAULT, V.nemo_dir,
+               G.STEPS_PER_DAY * V.N_DAYS, "run_verdict360_m*.log")
+
+
+def recorded_cross_check(rows_one, excluded):
+    print("\n" + "=" * 110)
+    print("CROSS-CHECK -- the RECORDED one-level arm (45 commits back), scored "
+          "ALONGSIDE, never in the verdict")
+    print("=" * 110)
+    print("Same probe, same reductions, same spread arithmetic, same day. The "
+          "only difference from the re-run")
+    print("one-level arm is the legoESM source revision, so a difference here "
+          "is the MODEL, not the instrument.")
+    try:
+        rows_rec = collect(recorded_arm(), (SCORE_DAY,))
+    except (OSError, KeyError, SystemExit) as exc:
+        print(f"  (recorded arm not scoreable: {exc})")
+        return None
+    print(f"{'metric':<38}{'recorded R1':>15}{'re-run R1':>15}"
+          f"{'re-run/recorded':>17}  flag")
+    rec, rerun = {}, {}
+    for k in KEYS:
+        rec[k] = ratio(rows_rec, k, SCORE_DAY)
+        rerun[k] = ratio(rows_one, k, SCORE_DAY)
+        r = (rerun[k] / rec[k]) if np.isfinite(rec[k]) and rec[k] else float("nan")
+        print(f"{LABELS[k]:<38}{rec[k]:>15.4g}{rerun[k]:>15.4g}{r:>17.4g}"
+              f"  {'q (excluded)' if k in excluded else ''}")
+    med_rec = median_over(rec, excluded)
+    med_rerun = median_over(rerun, excluded)
+    print(f"{'MEDIAN':<38}{med_rec:>15.4g}{med_rerun:>15.4g}"
+          f"{med_rerun / med_rec:>17.4g}")
+    return med_rec
+
+
 def arms(dir_one, dir_two):
     """The two arms.
 
@@ -938,6 +983,7 @@ def main(argv=None):
     predicted = predicted_arm_ratio(asselin_gamma_lego())
     med_al, med_an = arm_table(rows_one, rows_two, excluded, predicted)
     flips, persists = decay_table(rows_one, rows_two)
+    med_rec = recorded_cross_check(rows_one, excluded)
 
     print("\n" + "=" * 110)
     print("PRE-REGISTERED COMPARISON (PREREG_kick_asymmetry.md section 4)")
@@ -950,6 +996,9 @@ def main(argv=None):
           f"{R2_TWO_SIDED:.0f}")
     print(f"  closed-form arm ratio, per model              = "
           f"{predicted:.4f}   measured: lego {med_al:.4g}, NEMO {med_an:.4g}")
+    if med_rec is not None:
+        print(f"  cross-check: the RECORDED one-level arm (older revision) "
+              f"gives median R1 = {med_rec:.4g}")
     print(f"  registered outcome: {verdict(med_f, med_r2, med_r1)}")
     print(f"  decay signature: {len(flips)} of {len(flips) + len(persists)} "
           f"decaying NEMO metrics lost the decay under the two-level kick")
