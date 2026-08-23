@@ -958,6 +958,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         nemo_ladder_mode=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
+        # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
+        # rn_Uv). It is the one variable in the viscosity ablation, and a
+        # scorer that reads it from the filename can be handed a swapped file
+        # and produce a confidently wrong sign. Taken from the BUILT config,
+        # not from the CLI argument, so it records what the model used.
+        rn_Uv=np.float64(cfg.U_M),
     )
     if daily_acc:
         # #1455 Phase-2: stamp the perturbation next to the response it caused,
@@ -1126,6 +1132,44 @@ def _smoke_check_vmix_scheme_override():
         f"--u-m doubling must double A_h; got {_ah1} -> {_ah2}")
     print(f"OK: --u-m override doubles the lateral viscosity "
           f"(U_M {base.U_M} -> {doubled.U_M}, A_h {_ah1:.4f} -> {_ah2:.4f} m2/s)")
+
+    # "changes A_h" is only half the claim the pre-registration makes; the other
+    # half is "and nothing else". Diff every leaf of the two built configs and
+    # require exactly one to move, so a future edit that quietly routes U_M into
+    # a second consumer (a CFL-derived substep count, a diagnostic coefficient)
+    # turns this red instead of silently making the ablation two-variable.
+    def _leaves(obj, path=""):
+        if hasattr(obj, "_fields"):
+            for f in obj._fields:
+                yield from _leaves(getattr(obj, f), f"{path}.{f}" if path else f)
+        elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            for f in dataclasses.fields(obj):
+                yield from _leaves(getattr(obj, f.name),
+                                   f"{path}.{f.name}" if path else f.name)
+        else:
+            yield path, obj
+
+    _l1 = dict(_leaves(dino_lat_lon_model_config(_g, base, physics=False)[0]))
+    _l2 = dict(_leaves(dino_lat_lon_model_config(_g, doubled, physics=False)[0]))
+    assert set(_l1) == set(_l2), "the two configs do not have the same leaves"
+    _moved = sorted(k for k in _l1
+                    if not _eq_leaf(_l1[k], _l2[k]))
+    assert _moved == ["lateral_viscosity.A_h"], (
+        f"--u-m must move exactly lateral_viscosity.A_h and nothing else; it "
+        f"moved {_moved} (of {len(_l1)} leaves)")
+    print(f"OK: --u-m moves exactly one of the {len(_l1)} built-config leaves "
+          f"({_moved[0]}) -- the ablation is one variable")
+
+
+def _eq_leaf(a, b) -> bool:
+    """Leaf equality that tolerates arrays and None."""
+    import numpy as _np
+    if a is None or b is None:
+        return a is b
+    try:
+        return bool(_np.array_equal(_np.asarray(a), _np.asarray(b)))
+    except Exception:
+        return a is b or a == b
 
 
 def provenance_gate() -> None:

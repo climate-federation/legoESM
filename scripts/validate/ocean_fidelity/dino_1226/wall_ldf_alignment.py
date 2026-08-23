@@ -18,13 +18,21 @@ B. **the viscous flux through the wall face.**  Free slip means the wall
    f-point carries no stress.  This part evaluates the operator's own wall
    contribution on both sides and requires it to be exactly zero.
 
-C. **the e3 (layer-thickness) weighting**, the one transcription difference
-   that is already known: NEMO weights the divergence and the vorticity by the
-   layer thickness (``dynldf_lev_rot_scheme.h90:22-29,41,51``) and the shipped
-   card does not (``lateral_viscosity_e3_weighting="off"``).  This part applies
-   BOTH treatments to the SAME bridged state and reports the per-row difference
-   in the resulting viscous tendency, so the difference can be compared against
-   the measured wall fingerprint (a 34% amplitude error on four rows) instead of
+C. **the mask dimensionality.**  NEMO masks this operator in 3-D on every leg;
+   legoESM's production call hands it the 2-D cell and face masks
+   (``ocean_pe_latlon_cgrid.py:4246-4247``).  This part applies both maskings to
+   the same state, WITH a control that plants a velocity on the faces below the
+   sea floor -- without that control the answer is zero for the trivial reason
+   that the state is already zero there, which is a fact about the state and
+   not about the operator.
+
+D. **the e3 (layer-thickness) weighting**, the other known transcription
+   difference: NEMO weights the divergence and the vorticity by the layer
+   thickness (``dynldf_lev_rot_scheme.h90:23,27-29,41,51``) and the shipped card
+   does not (``lateral_viscosity_e3_weighting="off"``).  This part applies BOTH
+   treatments to the SAME bridged state and reports the per-row difference in
+   the resulting viscous tendency, so the difference can be compared against the
+   measured wall fingerprint (a 34% amplitude error on four rows) instead of
    argued about.
 
 Both models are fed the SAME state -- NEMO's own day-180 restart, bridged with
@@ -256,8 +264,16 @@ def part_a(nemo, geom, half_UM, ahmt, ahmf, vertex_mask, vm3, cell_mask):
     return ahmf_eff_nemo, ahmf_eff_lego
 
 
-def part_b(ahmf_eff_nemo, ahmf_eff_lego, nemo):
-    """The viscous stress carried by the wall f-row must be zero on both sides."""
+def part_b(ahmf_eff_nemo, ahmf_eff_lego, nemo, zeta_wall_lego):
+    """The wall f-row must carry no viscous stress on either side.
+
+    Two things are needed and both are checked: the COEFFICIENT at the wall
+    corner must be zero (that is what free slip means here, and it is what
+    makes the corner unable to carry a stress whatever the flow does), and the
+    STRESS the operator actually forms there -- ``ahmf * zeta`` at the wall
+    corner -- must be zero on the real state.  Printing only the coefficient
+    would be printing the input to the claim rather than the claim.
+    """
     print("\n--- B. the viscous flux through the wall face -----------------")
     # NEMO's wall f-row for a southern wall at cell row 0 is f-row 0
     # (fmask(ji,0) = tmask(ji,0)*tmask(ji+1,0)*tmask(ji,1)*tmask(ji+1,1)).
@@ -268,8 +284,17 @@ def part_b(ahmf_eff_nemo, ahmf_eff_lego, nemo):
           f"max = {np.abs(ahmf_eff_nemo[:, wall_f, :]).max():.3e}")
     print(f"legoESM ahmf*vertex_mask at the same f-row: "
           f"max = {np.abs(ahmf_eff_lego[:, wall_f, :]).max():.3e}")
-    print("(both must be exactly 0 -- free slip, rn_shlat=0: the wall f-point "
-          "carries no shear stress, so no lateral momentum crosses the wall)")
+    print(f"legoESM ahmf*zeta at the same f-row, on the REAL state: "
+          f"max = {np.abs(zeta_wall_lego).max():.3e} m2/s2")
+    for name, arr in (("NEMO ahmf*fmask", ahmf_eff_nemo[:, wall_f, :]),
+                      ("legoESM ahmf*vertex_mask", ahmf_eff_lego[:, wall_f, :]),
+                      ("legoESM ahmf*zeta on the real state", zeta_wall_lego)):
+        m = float(np.abs(arr).max())
+        assert m == 0.0, (
+            f"{name} is {m:.3e} at the wall f-row, not zero -- the wall is "
+            "not free-slip on that side")
+    print("(all exactly 0 -- free slip, rn_shlat=0: the wall f-point carries "
+          "no shear stress, so no lateral momentum crosses the wall)")
 
 
 def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
@@ -282,9 +307,19 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
     multiplied by the 3-D ``tmask`` and ``ahmf`` by the 3-D ``fmask``
     (``ldfdyn.F90:328-330``) and the velocities it reads are 3-D masked.
 
-    This applies both maskings to the same bridged state and reports the
-    per-row difference in the resulting viscous tendency, so the difference can
-    be compared with the measured wall fingerprint rather than argued about.
+    Applying both maskings to the bridged state as it stands returns exactly
+    zero, and that number is NOT a statement about the operator: the state's
+    velocity is already zero below the sea floor, so the cells the two maskings
+    disagree about contribute nothing whichever mask is used.  A probe that
+    returns the same answer for a correct and an incorrect operator is not
+    measuring the operator.  So this also runs a CONTROL that plants a velocity
+    on exactly those below-seafloor faces and re-runs both arms: that says how
+    much the masking would be worth if the state were ever nonzero there, and
+    it is what makes the zero above meaningful.
+
+    It also reports the tendency the production (2-D-masked) arm produces on
+    those below-seafloor faces, which is not zero, since that is real wiring
+    debt even though nothing downstream reads it.
     """
     print("\n--- C. 2-D vs 3-D masking of the same operator ----------------")
     act = getattr(br.z_coord, "is_active", None)
@@ -319,13 +354,22 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
     wet = um3
     n_wet = wet.sum(axis=(1, 2))
 
-    def rma(x, w):
-        return np.where(n_wet > 0, (np.abs(x) * w).sum(axis=(1, 2)),
-                        np.nan) / np.maximum(n_wet, 1)
+    dry = 1.0 - wet
+    n_dry = dry.sum(axis=(1, 2))
 
-    base = rma(prod_u, wet)
-    dwet = rma(full_u - prod_u, wet)
-    ddry = rma(full_u - prod_u, 1.0 - wet)
+    def rma(x, w, n):
+        """Mean |x| over the cells w selects -- divided by THAT cell count.
+
+        Normalising a dry-cell sum by the wet-cell count understates it by the
+        dry/wet ratio, which at these rows is a factor of four to six.
+        """
+        return np.where(n > 0, (np.abs(x) * w).sum(axis=(1, 2)),
+                        np.nan) / np.maximum(n, 1)
+
+    base = rma(prod_u, wet, n_wet)
+    dwet = rma(full_u - prod_u, wet, n_wet)
+    ddry = rma(full_u - prod_u, dry, n_dry)
+    prod_dry = rma(prod_u, dry, n_dry)
     print(" row   phi[deg]   mean|du_prod|   d(3D-2D) on WET   rel"
           "     d on DRY cells")
     interior = []
@@ -345,8 +389,43 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
     print(f"max|3D-2D| anywhere on a wet face: "
           f"{np.abs((full_u - prod_u) * wet).max():.6e} m/s2  "
           f"(v: {np.abs((full_v - prod_v) * vm3f).max():.6e})")
+
+    # How much of the field the two maskings even disagree about, and whether
+    # the state is nonzero there -- the fact that decides what the zero means.
+    dis_u = ((u_mask[..., None] if u_mask.ndim == 2 else u_mask) > 0) & (um3 <= 0)
+    print(f"u-faces the two maskings disagree about (2-D wet, 3-D dry): "
+          f"{int(dis_u.sum())}")
+    print(f"  max|u| on those faces in this state: "
+          f"{np.abs(np.where(dis_u, u, 0.0)).max():.6e} m/s")
+    print(f"  tendency the PRODUCTION 2-D-masked arm writes there: "
+          f"max {np.abs(np.where(dis_u, prod_u, 0.0)).max():.6e} m/s2, "
+          f"row-mean {np.nanmax(prod_dry):.6e} "
+          f"(wiring debt: below the sea floor, nothing downstream reads it)")
+
+    # THE CONTROL. Plant on exactly the disputed faces and re-run both arms.
+    u_p = np.where(dis_u, 0.5, u)
+    dis_v = ((v_mask[..., None] if v_mask.ndim == 2 else v_mask) > 0) & (
+        np.asarray(compute_face_masks_3d(act3, grid=geom)[1]) <= 0)
+    v_p = np.where(dis_v, 0.5, v)
+    p2 = np.asarray(nemo_ldf_lap_viscosity_cgrid(
+        u_p, v_p, geom, ahmt, ahmf, mask=cell_mask, u_mask=u_mask,
+        v_mask=v_mask, vertex_mask=vm3)[0])
+    p3 = np.asarray(nemo_ldf_lap_viscosity_cgrid(
+        u_p, v_p, geom, ahmt, ahmf, mask=cm3, u_mask=um3, v_mask=vm3f,
+        vertex_mask=vm3)[0])
+    ctl = np.abs((p3 - p2) * wet).max()
+    print(f"CONTROL, 0.5 m/s planted on the {int(dis_u.sum())} disputed "
+          f"u-faces: max|3D-2D| on a WET face becomes {ctl:.6e} m/s2, "
+          f"{ctl / max(np.abs(prod_u * wet).max(), 1e-300):.2f}x the wet-face "
+          f"tendency -- so the zero above is a property of THIS STATE (u=0 "
+          f"below the sea floor), not of the two maskings being equivalent")
+    assert ctl > 0.0, (
+        "the control planted a velocity on the disputed faces and the two "
+        "maskings STILL agree exactly -- this A/B cannot distinguish them and "
+        "its zero proves nothing")
     return dict(wall_rel=float(np.mean(w)),
-                interior_rel=float(np.nanmean(interior)))
+                interior_rel=float(np.nanmean(interior)),
+                control=float(ctl))
 
 
 def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
@@ -469,7 +548,15 @@ def main(argv=None) -> int:
           f"{br.f_match_max_abs:.3e}")
     half_UM, ahmt, ahmf, vtx, vm3 = effective_coefficients(br, geom, cm)
     a_n, a_l = part_a(nemo, geom, half_UM, ahmt, ahmf, vtx, vm3, cm)
-    part_b(a_n, a_l, nemo)
+    # the stress the operator actually forms at the wall corner on this state:
+    # ahmf * zeta at legoESM vertex row 1 (== NEMO f-row 0, the wall corner).
+    from legoesm.grids.operators_latlon_cgrid import curl_vertex_cgrid
+    _um = um[..., None] if um.ndim == 2 else um
+    _vm = vm[..., None] if vm.ndim == 2 else vm
+    _zeta = np.asarray(curl_vertex_cgrid(u * _um, v * _vm, geom))
+    _zeta_wall = _zeta[1] * (vm3[1] if vm3 is not None else vtx[1][..., None]) \
+        * ahmf[1]
+    part_b(a_n, a_l, nemo, _zeta_wall)
     part_c(br, geom, u, v, um, vm, cm, vm3, ahmt, ahmf, nemo)
     part_d(br, geom, u, v, um, vm, cm, vm3, ahmt, ahmf, nemo)
     return 0
