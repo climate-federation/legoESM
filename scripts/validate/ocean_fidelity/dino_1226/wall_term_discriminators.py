@@ -75,7 +75,15 @@ RESTART = RUN / "DINO_00005760_restart.nc"
 JPI, JPJ, JPK, HLS = 56, 203, 36, 2
 JPKM1 = JPK - 1
 WALL_ROWS = [1, 2, 3, 4]
-INTERIOR_ROWS = [8, 12, 20, 40, 60, 99, 150]
+# THE INTERIOR ROW SET WAS NOT PINNED IN THE PRE-REGISTRATION, and the
+# enrichment verdict depends on it, so BOTH readings are reported and neither
+# is presented as the answer. The parent document measured the wall gap
+# decaying over about EIGHT rows, so rows 8 and 12 are inside the boundary
+# layer, not interior to it -- including them in the denominator dilutes the
+# enrichment. That was noticed AFTER the numbers existed, which is exactly why
+# it is reported as a sensitivity rather than used to re-cut the verdict.
+INTERIOR_ROWS = [8, 12, 20, 40, 60, 99, 150]        # as first written
+INTERIOR_ROWS_FAR = [20, 40, 60, 99, 150]           # outside the 8-row decay
 # Pre-registered bars (PREREG_wall_drag_and_een.md).
 BAR_ENRICH = 3.0
 BAR_MAG = 5.9e-11          # m/s2 at the wall rows
@@ -124,12 +132,22 @@ def row_report(name, diff, wet, unit="m/s2"):
         print(f"    row {j:>3}  {rm(j):.6e}{tag}")
     wall = float(np.nanmean([rm(j) for j in WALL_ROWS]))
     inter = float(np.nanmean([rm(j) for j in INTERIOR_ROWS]))
+    far = float(np.nanmean([rm(j) for j in INTERIOR_ROWS_FAR]))
     enrich = wall / inter if inter > 0 else np.inf
-    print(f"    wall-row mean {wall:.6e}   interior mean {inter:.6e}   "
-          f"enrichment {enrich:.2f}x")
-    print(f"    vs bars: enrichment {enrich:.2f} (>= {BAR_ENRICH} to pass), "
-          f"magnitude {wall:.3e} (>= {BAR_MAG:.2e} to pass, "
-          f"< {BAR_MAG_REFUTE:.2e} refutes)")
+    enrich_far = wall / far if far > 0 else np.inf
+    print(f"    wall-row mean {wall:.6e}")
+    print(f"    interior mean {inter:.6e} (rows {INTERIOR_ROWS})"
+          f"   enrichment {enrich:.2f}x")
+    print(f"    far-interior  {far:.6e} (rows {INTERIOR_ROWS_FAR}, outside "
+          f"the 8-row decay)   enrichment {enrich_far:.2f}x")
+    print(f"    vs bars: enrichment {enrich:.2f} / {enrich_far:.2f} "
+          f"(>= {BAR_ENRICH} to pass), magnitude {wall:.3e} "
+          f"(>= {BAR_MAG:.2e} to pass, < {BAR_MAG_REFUTE:.2e} refutes)")
+    if (enrich >= BAR_ENRICH) != (enrich_far >= BAR_ENRICH):
+        print("    NOTE: the two interior sets straddle the enrichment bar, so "
+              "this leg of the shape test is NOT decided by the data alone. "
+              "The pre-registration did not pin the interior set; reported as "
+              "undecided rather than re-cut.")
     del n
     return wall, inter, enrich
 
