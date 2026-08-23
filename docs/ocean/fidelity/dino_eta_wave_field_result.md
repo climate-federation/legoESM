@@ -1,214 +1,323 @@
 # DINO sea-surface wave-field twin — legoESM vs NEMO, sampled every model step
 
-**Question asked.** Do the first-days sea-surface patterns match between the two
-models? Both start from the same NEMO day-180 restart, single-step comparisons
-match to small levels, and the 90-day climate is scored — but the propagating
-free-surface field had never been compared at its own timescale. The saved twin
-output was DAILY (32 model steps), while a barotropic gravity wave crosses the
-DINO basin in roughly eight hours.
+**The question.** Do the first-days sea-surface wave patterns match between the
+two models? Both start from the same NEMO day-180 restart and single-step
+comparisons match closely, but the propagating free-surface field had never
+been compared at its own timescale: the saved twin output was DAILY (32 model
+steps) while a barotropic gravity wave crosses the DINO basin in about four
+hours.
 
-**What was run.** Five days from `DINO_00005760_restart.nc` (md5
-`ad5ba426…`), 160 steps of 2700 s, sea surface height saved EVERY step on both
-sides.
+**The short answer.** The wave patterns match. Where a wave actually exists,
+legoESM reproduces NEMO's free-surface response to within a few per cent, with
+the spectral peaks at identical frequencies and no band carrying excess
+legoESM energy. Getting to that answer required a second experiment, because
+the free run turned out to have no waves in it at all.
 
-- NEMO: the certified binary `nemo.exe.certified_d3cf9242` (md5
-  `d3cf9242289b633d671013d0299803a3`, byte-identical copy, original untouched),
-  the `RUN_90D_TWIN` namelist with two fields changed — `nn_itend` 8640 → 5920
-  and `nn_stock` 320 → 1 — 16 MPI ranks, `STOP 0`, no errors. Run directory
-  `/tmp/dino_eta_waves/nemo_5d` (namelists and log retained; the 35 GB of raw
-  per-step restarts were deleted after extraction and are reproducible in
-  ~3 minutes).
-- legoESM: `kamm_twin_90d.py nemo_dino_kamm_mlf --days 5 --output-every-steps 1`
-  at fp64 on one GPU, 74 s. Day-0 gate: `max|dT| = max|d_eta| = max|du| =
-  max|dv| = 0.000e+00` against the restart, so the two models start from
-  bit-identical data.
+---
+
+## Two retractions, up front
+
+**1. The premise of the run was wrong, and so was my first explanation of why.**
+The daily record was not aliasing the basin's barotropic waves — there are no
+such waves in the free run to alias. NEMO's own free surface at day 180 moves
+1.8e-4 m per step against an 0.83 m field, and 99.99 % of its temporal variance
+sits at periods longer than a day. The basin radiated its free gravity-wave
+energy away during 180 days of spin-up under smooth seasonal forcing. I then
+attributed that to the split-explicit time-averaging filtering the waves out;
+**that is also retracted** — the 90-minute averaging window passes 94 % of an
+8-hour signal, so it is not what removed them.
+
+**2. The time-level identity I first wrote was wrong, and its residual was
+nearly read as physics.** The check on which dump corresponds to which time
+level was written as
+
+    sshb[n] = sshn[n-1] + a*( sshn[n-2] - 2 sshn[n-1] + sshn[n] )      WRONG
+
+which leaves a residual that looks like a small physical correction — 1.3 % of
+a step's change on the quiet run — and was about to be explained as a
+forcing-exclusion term. The level entering the filter is the already-filtered
+one:
+
+    sshb[n] = sshn[n-1] + a*( sshb[n-1] - 2 sshn[n-1] + sshn[n] )      RIGHT
+
+In that form the residual is **exactly 0.0**, to the last bit, on both NEMO
+runs. There is no physical residual. The wrong form was caught only because it
+failed on the excited run, where the same second-order error is 16 % rather
+than 1.3 %.
+
+---
+
+## What was run
+
+Five days (160 steps of 2700 s) from `DINO_00005760_restart.nc`
+(md5 `ad5ba426…`), free surface saved EVERY step on both sides — 45-minute
+sampling, finer than the hourly asked for, because an hourly cadence is not an
+integer number of NEMO steps.
+
+| arm | NEMO | legoESM |
+|---|---|---|
+| FREE | certified binary, `RUN_90D_TWIN` namelist with only `nn_itend` and `nn_stock` changed, 16 ranks, `STOP 0` | twin harness, fp64, 74 s on one GPU |
+| IMPULSE | same namelist, only the restart differs | same, only the restart differs |
+
+The impulse arm adds an identical 0.05 m Gaussian sea-surface bump (300 km
+e-folding radius, centred 30°S / 25°E, applied to both `sshn` and `sshb` so the
+leapfrog starts consistent) to the shared restart. It is coordinate-safe: the
+DINO restart carries only `sshb`/`sshn` for the free surface and the vertical
+ladder comes from the static mesh, so both models rebuild the stretched
+coordinate from the ssh they read. The generator refuses to run if it finds an
+ssh-dependent thickness field in the restart.
+
+legoESM's day-0 gate reported `max|dT| = max|d_eta| = max|du| = max|dv| =
+0.000e+00` against the restart in every arm, so the two models start from
+bit-identical data.
 
 Instrument: `scripts/validate/ocean_fidelity/dino_1226/eta_wave_twin.py`.
 
-## Time centering — cited, then measured
+---
+
+## Time centering
 
 NEMO swaps its time-level indices at `MY_SRC/stpmlf.F90:621-624` BEFORE calling
-`rst_write(kstp, Nbb, Nnn)` at `:634`, and calls it without a `Kaa` argument, so
-the MLF branch `restart.F90:197` writes `sshn` from the POST-swap `Kmm`. That
-level is the pre-swap AFTER level, i.e. **the sea surface height after `kt`
-steps** — and it is the UNFILTERED after-level; the Asselin-filtered level is
-what becomes `sshb`. The same ordering is in the untouched upstream
-`src/OCE/stpmlf.F90:402`, so this is core NEMO, not a MY_SRC edit.
+`rst_write(kstp, Nbb, Nnn)` at `:634`, and calls it without a `Kaa` argument,
+so the MLF branch `restart.F90:197` writes `sshn` from the POST-swap `Kmm` —
+the pre-swap AFTER level, i.e. **the sea surface height after `kt` steps**, and
+unfiltered. The same ordering is in the untouched upstream
+`src/OCE/stpmlf.F90:402`, so it is core NEMO rather than a local edit. On the
+legoESM side the Asselin result is parked separately and the saved `eta` is
+likewise the unfiltered after-level, so the comparison is like with like.
 
-The empirical discriminator agrees but only weakly (rms over 160 samples, wet
-cells):
+Two independent confirmations: the exact Asselin identity above (residual
+0.0), and a four-way scoring of the registered pairing against its
+alternatives. The second one is **UNRESOLVED and reports itself as such** — the
+four candidates are separated by 3.7e-6 m while NEMO's own two time levels sit
+1.8e-5 m apart, so the empirical test cannot see the difference it is asked
+about. The source citation and the exact identity are what carry the claim.
 
-| pairing | rms difference |
-|---|---|
-| legoESM(N) vs NEMO `sshn`(N) — **the registered pairing** | 3.628e-05 m |
-| legoESM(N) vs NEMO `sshb`(N) | 4.096e-05 m |
-| legoESM(N) vs NEMO `sshn`(N-1) | 4.108e-05 m |
-| legoESM(N-1) vs NEMO `sshn`(N) | 3.999e-05 m |
-| NEMO's own `sshn`(N) − `sshb`(N) | 1.815e-05 m |
+---
 
-The registered pairing wins, but by only 10%, and NEMO's own two time levels
-differ by half the model-to-model difference. **No conclusion below ~2e-5 m may
-rest on the pairing choice.**
+## Result 1 — the free run: no waves, and none expected
 
-## The premise correction, which reframes the whole question
-
-The mission assumed daily output was ALIASING an ~8 h barotropic wave. It is
-not aliasing it — the wave is not in this field at all. NEMO runs a
-split-explicit free surface with time-averaging over 30 barotropic substeps, so
-the free surface handed to the baroclinic step is already the filtered, slow
-one. Share of temporal variance over wet cells, 45-minute sampling:
+Share of temporal variance over wet cells, area-weighted, 45-minute sampling:
 
 | period band | NEMO | legoESM | their difference |
 |---|---|---|---|
-| < 6 h | 3.6e-06 | 4.2e-06 | 7.4e-03 |
-| 6–24 h | 7.0e-05 | 8.2e-05 | 2.9e-02 |
-| > 24 h | 0.99993 | 0.99991 | 0.9634 |
+| < 6 h | 2.8e-06 | 3.3e-06 | 0.0053 |
+| 6–24 h | 7.0e-05 | 8.3e-05 | 0.0277 |
+| > 24 h | 0.99993 | 0.99992 | 0.9670 |
 
-Both models put 99.99% of their free-surface variance at periods longer than a
-day. The single-cell spectra say the same thing: at all four probe points the
-spectral peak sits in the LOWEST resolved bin (period = the 120 h record
-length), i.e. there is no wave peak to compare, only a trend.
+Both models put 99.99 % of their free-surface variance at periods longer than a
+day, and at all four probe points the spectral peak sits in the lowest resolved
+bin — the record length, not a wave. Only two spectral bands clear the
+live-band threshold at all.
 
-A second, independent measurement says the same thing from the propagation
-side. Along the ACC channel row (54.9°S, 51 adjacent wet pairs, 63.9 km cells)
-the lag that maximises the cross-correlation of the sub-24 h free surface
-between neighbouring cells is **exactly zero steps in BOTH models and in their
-difference**, with 51 of 51 pairs inside one step. That is the arithmetic one
-expects: a barotropic wave at sqrt(gH) = 210 m/s (H = 4506 m) crosses one
-63.9 km cell in 304 s, which is 0.11 of a 2700 s time step, and the whole
-3323 km basin in 4.4 h. Resolving that propagation needs a sampling interval
-below about 300 s, roughly nine times finer than the model's own baroclinic
-step. **No wave-speed or wave-phase claim — agreement OR disagreement — can be
-made from baroclinic-step output for this basin.** The two models agree that
-the resolvable signal is standing, which is the strongest statement the data
-supports.
+A second, independent measurement agrees. Along the ACC channel row (54.9°S,
+51 adjacent wet pairs, 63.9 km cells) the lag that maximises the
+cross-correlation between neighbouring cells is **exactly zero steps in both
+models and in their difference**, 51 pairs out of 51 within one step. That is
+the arithmetic one expects: a barotropic wave at sqrt(gH) = 210 m/s crosses one
+cell in 304 s, 0.11 of a time step, and the whole 3323 km basin in 4.4 h.
+**Cell-to-cell phase lag is unresolvable at baroclinic-step output for this
+basin, in either direction** — no wave-speed claim, agreement or disagreement,
+can be made from it. Propagation is resolvable spatially (where the front has
+reached at each sample), not temporally.
 
-**Consequence:** this experiment CANNOT certify barotropic wave-speed or
-wave-phase fidelity, because the observable does not contain barotropic waves.
-Doing so would need the free surface INSIDE the barotropic substep loop, which
-neither model currently writes at that cadence.
+**What the free run does say.** The two free surfaces track closely: the day-5
+difference is 2.6 % of NEMO's own five-day change at the worst cell and 2.3 %
+in rms, and it saturates near 8e-4 m around day 3 rather than growing. Against
+the pre-registered bound of 160 × the one-step floor it is 0.14×.
 
-What the experiment CAN and does answer is the sharper question underneath it:
-does legoESM inject free-surface structure on timescales the oracle does not
-have, and where.
+Two things worth naming anyway:
 
-## Results
+- **The one-step agreement is not roundoff.** After a single step the two free
+  surfaces differ by 3.4e-5 m where NEMO's own one-step change is 2.2e-4 m —
+  the free-surface increment disagrees by 19 % at the worst cell and 36 % in
+  rms. "Single-step comparisons match to tiny levels" is true of the tendency
+  terms; it is not true of the assembled free-surface increment. That the
+  accumulated difference nonetheless stays at 2 % of the signal means those
+  per-step disagreements largely cancel.
+- **legoESM's free surface carries a two-step computational mode the oracle
+  very nearly does not.** Measuring the alternating component directly over the
+  first eight steps: NEMO 3.9e-7 m, legoESM 7.0e-6 m — **18× the oracle** —
+  decaying to 1.4× over the second half of the run. In absolute terms this is
+  small (7e-6 m on an 0.83 m field), and it is a start-up transient rather
+  than a growing mode. But it is present in the free run and ABSENT from the
+  impulse run (where the ratio is 1.07×), which places it in how legoESM
+  settles a balanced background, not in how it propagates a wave.
+- **That excess sits on the walls.** Per-cell ratio of mean-squared step-to-step change:
+  median 1.06, 90th percentile 2.59, maximum 57.6. Splitting the excess by
+  region, area-weighted, gives an **enrichment of 7.5× on land-adjacent cells**
+  (28 % of the excess in 3.8 % of the area), 0.77× in the interior and 0.18× at
+  the equator; the wall enrichment of the difference field itself climbs from
+  1.6 at the first sample to 8.0 by day 2. The difference field is also far
+  less red than either signal: 3.3 % of its variance is at periods under a day,
+  against 0.007 % for the signals.
 
-**The difference is small and SUBLINEAR.** Wet-cell max |eta_lego − eta_nemo|:
+---
 
-| target | actual t | max abs | rms | locus wall/eq/interior |
+## Result 2 — the impulse run: this is where the wave answer is
+
+Adding the bump does what it was meant to. NEMO's response carries 16.5 % of
+its variance in the 6–24 h band, against 0.007 % in the free run.
+
+**Spectral peaks match exactly, and amplitudes to under one per cent:**
+
+| probe | peak period, NEMO | peak period, legoESM | peak amplitude NEMO / legoESM | worst band ratio |
 |---|---|---|---|---|
-| 1 h | 0.75 h | 3.374e-05 m | 6.02e-06 m | 0.09 / 0.05 / 0.85 |
-| 2 h | 2.25 h | 4.317e-05 m | 6.70e-06 m | 0.10 / 0.11 / 0.80 |
-| 4 h | 3.75 h | 5.836e-05 m | 6.57e-06 m | 0.11 / 0.02 / 0.87 |
-| 8 h | 8.25 h | 1.906e-04 m | 8.42e-06 m | 0.29 / 0.12 / 0.59 |
-| 12 h | 12.00 h | 2.526e-04 m | 1.17e-05 m | 0.29 / 0.09 / 0.62 |
-| 24 h | 24.00 h | 5.219e-04 m | 1.71e-05 m | 0.37 / 0.10 / 0.53 |
-| 48 h | 48.00 h | 7.210e-04 m | 2.98e-05 m | 0.32 / 0.08 / 0.60 |
-| 120 h | 120.00 h | 7.453e-04 m | 5.73e-05 m | 0.29 / 0.14 / 0.57 |
+| channel (54.9°S) | 30 h | 30 h | 1.030e-4 / 1.035e-4 m | 1.04 at 10 h |
+| equator | 20 h | 20 h | 4.796e-5 / 4.847e-5 m | 1.17 at 6.3 h |
+| west wall | 30 h | 30 h | 1.697e-4 / 1.703e-4 m | 1.06 at 60 h |
+| mid-basin | 30 h | 30 h | 1.302e-4 / 1.306e-4 m | 1.11 at 6 h |
 
-Targets are hours; `rn_Dt = 2700 s` makes an hourly cadence a non-integer number
-of steps, so each target is realised at the nearest step and the true time is
-printed beside it.
+Every band ratio is inside the pre-registered factor of 2, evaluated in code
+rather than by eye, over 11–21 live bands per probe. **No band carries excess
+legoESM energy.**
 
-The maximum SATURATES near 8e-04 m around day 3 and then decays. Against the
-pre-registered bound (160 × the one-step floor of 3.374e-05 m = 5.399e-03 m) the
-day-5 value is **0.138×**, i.e. seven times below a merely linear accumulation
-of the one-step disagreement. Relative to NEMO's own five-day change of the free
-surface (max 2.85e-02 m, rms 2.77e-03 m), the day-5 difference is **2.6% of the
-max and 2.1% of the rms**.
+**The two models propagate it at the same speed.** Cell-to-cell phase lag is
+unresolvable here, but the RADIUS the response has spread to is not, because
+the wave covers about nine cells per step. The energy-weighted mean radius of
+the response, legoESM over NEMO, has a **median of 1.0013 over even samples**
+(1.0020 over all): the spreading rates agree to about a tenth of a per cent.
+The odd samples run 0.72–0.90 and the even ones 0.98–1.02, which is the
+leapfrog alternation described below rather than a speed difference — it
+cancels on alternate samples, a speed error would not.
 
-**But the one-step agreement is NOT roundoff, and that is worth naming.** After
-a single step the two free surfaces differ by 3.374e-05 m where NEMO's own
-one-step change is 2.193e-04 m — the free-surface INCREMENT disagrees by 19% at
-the worst cell and 36% in rms. The certification "single-step comparisons match
-to tiny levels" is true of the tendency terms; it is NOT true of the assembled
-free-surface increment. That the accumulated difference nonetheless stays at 2%
-of the signal means these per-step disagreements largely CANCEL rather than
-accumulate.
+**The response difference decays.** As a fraction of the response NEMO itself
+produced:
 
-**The excess energy is high-frequency and it lives on the walls.** The
-difference field is ~500× less red than either model's field: 3.7% of its
-variance sits at periods below 24 h versus 0.0074% for the signals. Per-cell
-ratio of mean-squared step-to-step change, legoESM / NEMO:
+| t | max abs difference | rms difference | rms as a fraction of the response |
+|---|---|---|---|
+| 0.75 h | 5.79e-03 m | 1.01e-03 m | 1.22 |
+| 2.25 h | 1.67e-03 m | 5.29e-04 m | 0.84 |
+| 3.75 h | 1.58e-03 m | 3.60e-04 m | 0.85 |
+| 8.25 h | 3.84e-04 m | 1.06e-04 m | 0.31 |
+| 12 h | 1.70e-04 m | 6.29e-05 m | 0.19 |
+| 24 h | 9.94e-05 m | 3.48e-05 m | 0.15 |
+| 48 h | 1.77e-05 m | 8.46e-06 m | 0.032 |
+| 120 h | 2.37e-05 m | 8.44e-06 m | 0.038 |
 
-- median **1.067** — the basin interior jitters alike,
-- 90th percentile **3.48**,
-- maximum **193.6**, at a land-adjacent cell on the eastern wall (46.7°N,
-  49.5°E).
+Unlike the free run, the excess in this lane is NOT on the walls: the
+enrichment of the step-to-step excess is 0.13 on the walls, 0.11 at the
+equator and 1.06 in the interior. legoESM's wall problem is a property of how
+it carries the balanced background, not of how it propagates a wave.
 
-Splitting the EXCESS (legoESM minus NEMO step-to-step variance, clipped at zero)
-by region: **wall 36.3%, equator 0.20%, interior 63.5%**, against area shares of
-4.9% / 2.4% / 92.6% — an enrichment of **7.3× on the walls**, 0.7× in the
-interior, 0.08× at the equator. legoESM's largest single-step free-surface jumps
-(7.4e-04 m, 3.4× NEMO's largest anywhere) all occur at STEP 2 in the two
-northern corners of the basin (69.2°N at both 1.5°E and 48.5°E) — a start-up
-transient in the corners, absent in NEMO.
+**The early disagreement is the leapfrog computational mode, and here the two
+models agree about it.** The difference alternates sign step to step: odd
+samples average 5.1× the even ones over the first eight steps, falling to 1.37
+afterwards. Both models ring at the two-step period after an impulsive
+displacement, which is what leapfrog does. Measuring the alternating component
+directly: over the first eight steps NEMO's is 1.283e-4 m and legoESM's
+1.369e-4 m — **legoESM 1.07× the oracle** — and over the second half of the run
+both are 8.51e-7 m, a ratio of 1.00. When a genuine wave dominates the
+signal, legoESM's computational mode is not under-damped.
+
+Note also that the bump is largely gone after ONE baroclinic step: NEMO's
+response drops from 2.3e-3 m rms at the start to 8.3e-4 m after one step, and
+at the bump's centre the response has already reversed sign. With 30
+barotropic substeps per step the wave travels ~9 cells inside a single step, so
+the radiation is a sub-step process here. What the sampled record shows is the
+adjustment after that, settling to a ~2.2e-4 m basin-scale pattern that the two
+models agree on to 4 %.
+
+---
 
 ## Verdict against the pre-registration
 
-Registered before the comparison ran: CONFIRM wave fidelity if (i) the
-difference stays within 1.0 × (160 × the one-step floor) and (ii) no resolved
-spectral band shows a power ratio beyond 2×.
+Registered before the comparison ran: CONFIRM if (i) the difference stays
+within 1.0 × (160 × the one-step floor) and (ii) no resolved spectral band
+shows a ratio beyond 2×.
 
-- (i) **PASSES** — 0.138× the bound.
-- (ii) **PASSES, but at the bar.** Worst per-band amplitude ratios at the four
-  probe points: channel 1.49 (12 h band), equator 0.88 (30 h), west wall 1.67
-  (12 h), mid-basin 1.92 (15 h). All four peaks agree in frequency exactly and
-  in amplitude within 4%.
+- **FREE lane: (i) PASSES at 0.14×. (ii) PASSES**, but only two bands are live,
+  so it is close to vacuous — there is nothing to compare.
+- **IMPULSE lane: (i) PASSES at 0.00003×, and that pass is VACUOUS** — the
+  "one-step floor" in this lane IS the peak of the response error, which then
+  decays, so 160 × the floor cannot be exceeded by construction. The criterion
+  was written for a lane where the error grows. **(ii) PASSES with margin** —
+  worst ratio 1.17 of an allowed 2.0, across 11–21 live bands per probe, and
+  that is the criterion the verdict rests on.
 
-**The registered verdict is therefore CONFIRM — and it is worth less than it
-looks**, because the observable turned out to contain no waves (see the premise
-correction). The bar was written for a wave field and got applied to a slowly
-evolving one.
+**CONFIRMED: the sea-surface wave patterns match.** The claim rests on the
+impulse lane, which is the only one with a wave in it. It does NOT rest on the
+free lane, whose registered pass is an artefact of there being no signal.
 
-**The finding that does carry weight** is the one the registered bar was not
-written for: legoESM's free surface carries step-to-step energy the oracle does
-not, concentrated 7.3× on the land-adjacent cells, peaking at ~200× on one
-eastern-wall cell, with a start-up transient in the two northern corners at
-step 2. This is the same locus the campaign's wall-row velocity work has been
-circling, and it is a feedback-tier result rather than a certification.
+**The feedback-tier finding is the free lane's**, and it is separate from the
+wave question: in a free run legoESM's free surface carries a two-step
+computational mode 18× the oracle's over the first eight steps (decaying to
+1.4×), and the step-to-step excess is enriched 7.5× on land-adjacent cells,
+peaking at ~58× on one cell of the eastern wall. The same mode is only 1.07× the
+oracle's when the impulse gives it a real wave to carry. This is the locus the
+campaign's wall-row velocity work has been circling.
 
-## Controls that were run before any number above was believed
+---
 
-- **Mask.** The wet mask comes from NEMO's own `mesh_mask` surface `tmask`
-  (9920 wet, 428 dry cells), never from "where the field is zero" — that would
-  also delete genuinely zero ocean values and the equator. Every dry cell was
-  then poisoned with 1e6 and the run ABORTS unless every masked statistic is
-  bit-identical on the poisoned copy AND the unmasked statistic moves. It
-  passed both halves.
-- **Time level.** Checked in source (cited above), checked mechanically at
-  extraction (consecutive dumps must differ; `sshn` must differ from `sshb`),
-  and scored against three alternative pairings.
-- **`rn_Dt`.** Read back from every NEMO dump and required to equal 2700 s, so
-  the extractor cannot silently read a differently-configured run.
-- **NaN.** Fatal everywhere; there is no `nanmax`/`nanmean`/`nansum` in the
-  comparison path. Stitched fields must be fully finite or the extractor exits.
-- **Equator.** Reported as its own locus region rather than normalised through;
-  spectral ratios are formed only where NEMO carries real power (> 1e-3 of its
-  peak), so a structural zero cannot manufacture a band mismatch.
-- **Instrument tests.** 19 direct unit tests, built as known-answer and
-  synthetic-violation controls rather than smoke tests: the spectrum recovers a
-  0.37 m / 8 h sinusoid to 5%; a planted 2-step oscillation on the wall band is
-  detected and attributed to `wall` with >99% of the excess; a motionless
-  oracle cell is excluded rather than becoming an infinite ratio; removing the
-  mask changes the statistic by 2000×.
+## Controls run before any number above was believed
+
+- **Time level.** Cited in source; verified by NEMO's exact Asselin identity
+  (residual 0.0 both arms); a synthetic one-dump offset is planted in a fake
+  NEMO run and the extractor is required to refuse it. The four-way empirical
+  discriminator reports itself UNRESOLVED rather than pretending to settle it.
+- **Mask.** From the model's own `mesh_mask` surface `tmask` (9920 wet, 428 dry),
+  never from "where the field is zero" — that would delete genuinely zero ocean
+  values and the equator. Every dry cell is then poisoned with 1e6 and the run
+  aborts unless every masked statistic is bit-identical on the poisoned copy
+  AND the unmasked one moves. Both halves passed.
+- **Periodicity.** DINO is zonally periodic and its east–west walls are land
+  columns, so the zonal neighbour test wraps; the earlier version mislabelled
+  the re-entrant channel's 70-cell seam as wall, in the very statistic used to
+  name a locus.
+- **Locus width.** The wall band (1 cell) and equator band (2°) are choices, so
+  the split is reported at four equator widths (2/5/10/26°, the last being the
+  barotropic equatorial radius) and two wall widths.
+- **Area weighting.** All global statistics weighted by cell area; the basin
+  spans 70°S–70°N.
+- **Spectra.** Window-consistent demean; the coherent-gain correction halved at
+  the zero and Nyquist bins (Nyquist is where a computational mode would sit);
+  the live-band cut symmetric over both models so a band where legoESM rings
+  and the oracle is silent cannot be excluded.
+- **`rn_Dt`.** Read back from every NEMO dump and required to be 2700 s.
+- **Precision.** The comparison refuses a float32 artifact; the free surface is
+  stored at fp64 on both sides.
+- **NaN.** Fatal in the statistics path; the only nan-reductions are in figure
+  colour scaling, on data already proven finite.
+- **Mesh identity.** The mesh supplying the equator band and the four probe
+  points is checked against the NEMO artifact's own coordinates.
+- **Instrument tests.** 50 direct unit tests, written as known-answer and
+  synthetic-violation controls: the spectrum recovers a 0.37 m / 8 h sinusoid to
+  5 % and a Nyquist oscillation at its true amplitude; a planted wall-band
+  2-step mode is detected and attributed to `wall` with >99 % of the excess; a
+  planted travelling wave returns its exact lag; the two-step-mode metric
+  annihilates a smooth ramp to 1e-12 and returns a planted sign-flip's own
+  amplitude; removing the zonal wrap turns
+  a seam cell into a wall and a test goes red; a float32 artifact, a mismatched
+  mesh, a one-sided impulse lane and a one-dump time offset are all refused;
+  `compare` itself is exercised end to end on a synthetic mesh and artifact
+  pair; a NEMO run whose files carry a wrong internal step counter is refused,
+  as is one with a missing tile.
+
+- **Registration.** The Asselin identity is a recurrence in the array index and
+  is therefore invariant to a uniform shift of the whole window — it pins
+  `sshb` against `sshn` and the direction of time, but NOT which file is step
+  N. That is pinned separately from each dump's own step counter. Neither
+  check alone closes the question; together they do.
+
+---
 
 ## Figures
 
-`/tmp/dino_eta_waves/figs/` — `fig_diff_maps.png` (difference maps at the eight
-pre-registered times), `fig_hovmoller.png` (time-longitude at the channel
-latitude and time-latitude at mid-basin longitude, both models and their
-difference), `fig_growth_locus.png` (growth curve against the linear bound, plus
-the locus shares), `fig_spectra.png` (spectra at the four probe points). Full
-numbers in `eta_wave_twin.json`.
+`/tmp/dino_eta_waves/figs/free/` and `/tmp/dino_eta_waves/figs/impulse/`, each
+with `fig_diff_maps.png` (difference maps at the eight pre-registered times),
+`fig_hovmoller.png` (time–longitude at the channel latitude and time–latitude
+at mid-basin longitude, both models and their difference), `fig_growth_locus.png`
+(growth curve against the linear bound, plus locus enrichment on a log axis)
+and `fig_spectra.png`. Full numbers in each directory's `eta_wave_twin.json`.
 
 ## What this does NOT establish
 
-- Nothing about barotropic wave speed or phase. The observable does not contain
-  those waves; see the premise correction.
+- Nothing about barotropic wave PHASE SPEED. The sampling cannot resolve
+  cell-to-cell lag in this basin (0.11 of a step per cell) and no output either
+  model currently writes can. That would need the free surface inside the
+  barotropic substep loop, at ~90 s.
 - Nothing about the 78–435× kick-amplification result that motivated the run.
-  This experiment measures the difference between two unperturbed models, not
-  the growth of an injected perturbation, and five days is far short of the
-  thirty over which that ratio was measured.
-- Nothing below ~2e-5 m, which is where NEMO's own two time levels sit apart.
+  That measures the growth of an injected perturbation over thirty days; this
+  measures the difference between two models over five.
+- Nothing below ~2e-5 m in the free lane, which is where NEMO's own two time
+  levels sit apart.
