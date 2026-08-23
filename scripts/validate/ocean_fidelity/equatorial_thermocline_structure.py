@@ -13,10 +13,17 @@ whose SST matches with the oracle's thermocline structure is right.
 This reads a snapshot from EITHER grid layout -- the structured curvilinear
 tripole, shape (ny, nx, nlev), or an unstructured node cloud, shape (n, nlev) --
 because the whole point is to compare the two, and reduces both to the same
-per-longitude band statistic on their OWN grids.  No regridding: within two
-degrees of the equator the area weight cos(lat) varies by less than 0.07%, so a
-band mean is a band mean either way, and a horizontal remap would add an
-interpolation error to the quantity under test.
+per-longitude band statistic on their OWN grids -- no regridding, since a
+horizontal remap would add an interpolation error to the quantity under test.
+
+WEIGHTING.  Each column is weighted by the model's OWN cell area when the
+snapshot carries it, and by cos(lat) only as a fallback, which the probe
+prints.  An earlier version argued that cos(lat) hardly varies within two
+degrees of the equator and therefore weighting did not matter.  That reasoning
+was wrong: the issue is not how cos(lat) varies but that native CELL SIZES
+differ across a stretched curvilinear grid and, far more, across a non-uniform
+node cloud, so an unweighted mean of native columns compares sampling rather
+than ocean (codex 2026-08-22).
 
 Z20 comes from ``equatorial_thermocline.z20_from_column`` -- the same helper the
 sibling probe uses, not a second implementation.
@@ -50,7 +57,14 @@ def _load_z20_helper():
 
 
 def _flatten(snapshot: Path):
-    """(T, lat, lon, wet, z) as point clouds, from either grid layout."""
+    """(T, lat, lon, wet, z, area) as point clouds, from either grid layout.
+
+    ``area`` is the model's own cell area when the snapshot carries it, else
+    None -- the caller falls back to cos(lat) and SAYS SO.  An unweighted mean
+    over native columns is not a band mean on either a stretched curvilinear
+    grid or a non-uniform node cloud, and comparing two such means across
+    meshes reports a sampling difference as a physical one.
+    """
     z = np.load(snapshot)
     T = np.asarray(z["T"], dtype=np.float64)
     lat = np.asarray(z["lat_T"], dtype=np.float64)
@@ -67,7 +81,22 @@ def _flatten(snapshot: Path):
         # Some writers store radians. Degrees is the convention here; a mesh
         # that never leaves +-pi degrees does not exist, so this is safe.
         lat, lon = np.degrees(lat), np.degrees(lon)
-    return T, lat, lon % 360.0, wet > 0.5, zc
+    area = np.asarray(z["cell_area"], dtype=np.float64).ravel() \
+        if "cell_area" in z else None
+    return T, lat, lon % 360.0, wet > 0.5, zc, area
+
+
+def _nemo_area(ds, lat):
+    """NEMO cell area if the file carries it, else None."""
+    for name in ("area", "areacello", "e1t"):
+        if name in ds:
+            a = np.asarray(ds[name].values, dtype=np.float64)
+            if name == "e1t" and "e2t" in ds:
+                a = a * np.asarray(ds["e2t"].values, dtype=np.float64)
+            elif name == "e1t":
+                return None
+            return np.squeeze(a).ravel()
+    return None
 
 
 def _nemo_columns(gridt: Path, rec: int):
@@ -87,7 +116,7 @@ def _nemo_columns(gridt: Path, rec: int):
     lat = np.asarray(ds["nav_lat"].values, dtype=np.float64).ravel()
     lon = np.asarray(ds["nav_lon"].values, dtype=np.float64).ravel() % 360.0
     T = T.reshape(-1, zc.size)
-    return T, lat, lon, np.isfinite(T[:, 0]), zc
+    return T, lat, lon, np.isfinite(T[:, 0]), zc, _nemo_area(ds, lat)
 
 
 def _max_dtdz(T: np.ndarray, zc: np.ndarray, depth_max: float) -> np.ndarray:
@@ -105,7 +134,9 @@ def _max_dtdz(T: np.ndarray, zc: np.ndarray, depth_max: float) -> np.ndarray:
         return np.nanmax(np.where(np.isfinite(g), g, np.nan), axis=1)
 
 
-def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max):
+def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max,
+                area=None):
+    w_all = area if area is not None else np.cos(np.deg2rad(lat))
     sel = wet & (np.abs(lat) <= halfwidth)
     rows = []
     for lo, hi in bins:
@@ -114,12 +145,16 @@ def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max):
             rows.append((lo, hi, np.nan, np.nan, np.nan, 0))
             continue
         Tm = T[m]
+        w = np.asarray(w_all)[m]
         z20 = np.array([z20_fn(col, zc) for col in Tm], dtype=np.float64)
         sharp = _max_dtdz(Tm, zc, depth_max)
-        rows.append((lo, hi,
-                     float(np.nanmean(Tm[:, 0])),
-                     float(np.nanmean(z20)),
-                     float(np.nanmean(sharp)),
+
+        def wmean(v):
+            ok = np.isfinite(v) & np.isfinite(w) & (w > 0)
+            return float((v[ok] * w[ok]).sum() / w[ok].sum()) if ok.any() \
+                else float("nan")
+
+        rows.append((lo, hi, wmean(Tm[:, 0]), wmean(z20), wmean(sharp),
                      int(m.sum())))
     return rows
 
@@ -153,13 +188,15 @@ def main() -> int:
 
     tables = {}
     for snap, lab in zip(a.snapshot, a.label):
-        T, lat, lon, wet, zc = _flatten(snap)
+        T, lat, lon, wet, zc, area = _flatten(snap)
         tables[lab] = _band_table(T, lat, lon, wet, zc, z20_fn,
-                                  a.lat_halfwidth, bins, a.depth_max)
-        print(f"[{lab}] {snap}  ({int(wet.sum())} wet columns, {zc.size} levels)")
-    T, lat, lon, wet, zc = _nemo_columns(a.nemo_gridt, a.nemo_rec)
+                                  a.lat_halfwidth, bins, a.depth_max, area)
+        print(f"[{lab}] {snap}  ({int(wet.sum())} wet columns, {zc.size} "
+              f"levels, weight={'cell_area' if area is not None else 'cos(lat)'})")
+    T, lat, lon, wet, zc, area = _nemo_columns(a.nemo_gridt, a.nemo_rec)
     tables["NEMO"] = _band_table(T, lat, lon, wet, zc, z20_fn,
-                                 a.lat_halfwidth, bins, a.depth_max)
+                                 a.lat_halfwidth, bins, a.depth_max, area)
+    print(f"[NEMO] weight={'cell_area' if area is not None else 'cos(lat)'}")
     print(f"[NEMO] {a.nemo_gridt} record {a.nemo_rec}\n")
 
     order = [*a.label, "NEMO"]

@@ -3692,7 +3692,8 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
 
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
-                   io_proc: bool = True, ice_state=None, grid=None):
+                   io_proc: bool = True, ice_state=None, grid=None,
+                   step: int | None = None, day: float | None = None):
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -3704,6 +3705,25 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
         land_mask=np.asarray(state.land_mask.data),
         lat_T=np.asarray(lat2d), lon_T=np.asarray(lon2d),
     )
+    # WHEN, inside the payload.  Until now the simulated time lived only in the
+    # FILE NAME, so a reader had to trust a convention -- and `snapshot_final`
+    # is written whenever a run stops, including early, so its name says nothing
+    # about when it stopped.  A comparison against a dated oracle record cannot
+    # be checked without this.
+    if step is not None:
+        save_kw["step"] = np.asarray(int(step))
+    if day is not None:
+        save_kw["time_days"] = np.asarray(float(day))
+    # CELL AREA, so a band or box mean can be area-weighted on the model's own
+    # mesh.  cos(lat) is only the right weight on a regular grid; on the
+    # eORCA tripole it is wrong wherever the mesh is stretched, and a
+    # cross-mesh comparison that used it is reporting a sampling difference as
+    # a physical one (codex 2026-08-22 CRITICAL).
+    for _area_attr in ("cell_area", "area_T", "areacello"):
+        _a = getattr(grid, _area_attr, None) if grid is not None else None
+        if _a is not None:
+            save_kw["cell_area"] = np.asarray(getattr(_a, "data", _a))
+            break
     # Prognostic sea ice (--prognostic-sea-ice): concentration + thickness on
     # the T-grid, ocean-masked (audited output gap — ice growth was invisible
     # in snapshots).  Cell areas are derivable from lat_T/lon_T (or grid
@@ -6874,7 +6894,8 @@ def main() -> int:
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
                 _save_snapshot(out_dir, f"day{int(round(day)):04d}",
                                state, lat2d, lon2d, z_coord=z_coord,
-                               io_proc=_is_io_proc())
+                               io_proc=_is_io_proc(), grid=grid,
+                               step=step, day=day)
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
@@ -6884,7 +6905,7 @@ def main() -> int:
         state = jax.block_until_ready(state)
         _io = _is_io_proc()
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
-                       io_proc=_io)
+                       io_proc=_io, grid=grid, step=step, day=day)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
@@ -7754,7 +7775,8 @@ def main() -> int:
             state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
-                           ice_state=ice_state)
+                           ice_state=ice_state, grid=grid,
+                           step=step, day=day)
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
             # gateway_step, so the row's n_steps matches the snapshot's day.
@@ -7775,7 +7797,8 @@ def main() -> int:
     state = _ensure_global_state(state)
     _io = _is_io_proc()
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
-                   io_proc=_io, ice_state=ice_state)
+                   io_proc=_io, ice_state=ice_state, grid=grid,
+                   step=step, day=day)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

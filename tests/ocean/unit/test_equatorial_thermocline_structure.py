@@ -110,8 +110,11 @@ def test_flatten_handles_both_grid_layouts(tmp_path):
     np.savez(n, T=T3.reshape(-1, nlev), lat_T=lat3.ravel(),
              lon_T=lon3.ravel(), land_mask=mask3.ravel(), z_center_ref=zc)
 
-    Ts, lats, lons, wets, zs = _MOD._flatten(s)
-    Tn, latn, lonn, wetn, zn = _MOD._flatten(n)
+    Ts, lats, lons, wets, zs, areas = _MOD._flatten(s)
+    Tn, latn, lonn, wetn, zn, arean = _MOD._flatten(n)
+    # Neither fixture carries cell_area, so both must fall back to cos(lat)
+    # rather than silently weighting by something else.
+    assert areas is None and arean is None
     assert Ts.shape == Tn.shape == (ny * nx, nlev)
     assert np.allclose(Ts, Tn) and np.allclose(lats, latn)
     assert np.allclose(lons, lonn) and np.array_equal(wets, wetn)
