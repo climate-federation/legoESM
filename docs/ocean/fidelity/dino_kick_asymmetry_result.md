@@ -4,7 +4,7 @@
 published — legoESM's ensemble spread is about **3000× NEMO's** at day 90 — but
 it is **not** the leapfrog computational mode: kicking both time levels instead
 of one changes the ratio by a factor of **0.96**, against a bar of 4.95, and
-the two models turn out to run the **identical time filter**, so there was no
+the two models turn out to use the **same filter strength**, so there was no
 asymmetry there to find.
 
 Written for a reader who has not followed the campaign. Pre-registration:
@@ -32,11 +32,19 @@ models, and re-measure.
 
 ## Two things were found before any run finished
 
-**1. The premise is false, and it was checkable offline.** Both models run the
-identical time filter — the plain Robert–Asselin form at coefficient 0.1
-(NEMO reports `rn_atfp = 0.1` in its own output; the legoESM card sets the same
-value) — and neither starts with a forward-Euler step. There is no asymmetry
-between the two filters for the hypothesis to live in.
+**1. The premise is false, and it was checkable offline.** Both models filter
+with the **same coefficient, 0.1** — NEMO reports `rn_atfp = 0.1` in its own
+output and the legoESM card sets the same value — and neither starts with a
+forward-Euler step. The hypothesis needs NEMO's filter to be *stronger*; it is
+not.
+
+*Scope of that check, because a reviewer caught the overstatement:* only the
+**coefficient** was compared. legoESM applies a thickness-weighted variant of
+the filter, not the textbook form, and NEMO's own variable-volume version was
+not read from its source. So what is established is that the filter *strengths*
+match, not that the two implementations are line-for-line identical. That is
+enough for the hypothesis, which is entirely about one side damping harder than
+the other.
 
 Worse for the hypothesis, the filter's own algebra makes a **point prediction**:
 a one-level nudge leaves 4/9 of itself on the physical solution, a two-level
@@ -75,28 +83,60 @@ magnitude short.
 **Verdict: REFUTED.** Removing the time-level mismatch does not touch the
 asymmetry.
 
-### The calibration says the instrument was working
+### The calibration did **not** work — and failing it produced the best finding here
+
+The plan was to check the instrument against the filter's own algebra: each
+model's spread should grow by 2.25 between the arms. It does not check out, and
+an earlier draft of this document claimed it did. **That claim is retracted.**
 
 | | predicted | legoESM | NEMO |
 |---|---:|---:|---:|
-| spread ratio between the two arms, within one model | 2.25 | **1.39** | **1.31** |
+| between-arm spread ratio, within one model | 2.25 | 1.39 | 1.31 |
 
-Both models show the arm effect, both at about 60% of the day-0 prediction —
-expected, since the prediction is about the instant the nudge is applied and
-this is measured 90 days and much nonlinear growth later. The load-bearing
-number is that the two sides agree with **each other** to 6%. That is precisely
-why the ratio between them did not move, and it is the closed form's
-prediction confirmed rather than a null result from an instrument that saw
-nothing.
+With four members, a ratio like this carries a null band of about ±3.1×. So
+1.39 is neither distinguishable from 1.0 nor from 2.25. It resolves nothing,
+and reading the two models' 6% agreement as confirmation was exactly the error
+this run's own decision rule was amended to forbid, pointed the other way.
+
+The design is **paired** — the same seed produces the same draw in both arms —
+so the sharper test costs nothing: compare each seed's day-10 perturbation
+against its own control, two-level over one-level. In a regime where the
+perturbation still grows in proportion to itself, that ratio *is* 2.25, with no
+ensemble noise at all. Measured on NEMO, it is **1.00**.
+
+**Why it fails is the finding.** The day-10 perturbations are not proportional
+to the nudge at all:
+
+* the six perturbation sizes span a factor of **309**, not a factor of 2;
+* only **two distinct locations** carry the largest perturbation across three
+  members;
+* seeds 1 and 3 — genuinely different runs, from genuinely different perturbed
+  restarts — produce perturbation sizes agreeing to **5 parts in a million**,
+  at the **same cell**. Independent random draws cannot do that.
+
+Something discrete is setting the amplitude: in some members a localized
+process fires and multiplies the nudge by ~300×, in others it does not. That is
+rectification, not growth, and it is the leading remaining explanation for an
+offset that appears immediately and leaves growth rates alone. It also means
+the filter algebra — a statement about proportional response — was never
+testable at day 10, on either model.
+
+None of this touches the refutation: it needed a collapse of ~480× and measured
+0.96×, and both arms sit in the same regime, whatever that regime is.
 
 ### The published 78–435× is too small — the asymmetry is ~3000×
 
 Scored with this probe, the *recorded* runs give a median ratio of **3051×**
-across the eleven metrics (the re-run at the current revision gives 4827×, a
-further 1.6×). The probe reproduces the recorded report's own headline metric
-exactly (289.6 here vs 290 recorded), so this is not an instrument difference:
-the published range was quoted from a narrower subset and understates the
-effect by about an order of magnitude. **The 78–435× figure is retracted.**
+across all eleven metrics — an order of magnitude above the published range's
+top end. The re-run at the current revision gives 4827×, a further 1.6×.
+
+The probe is not the difference: on the recorded artifacts it reproduces the
+recorded report's own headline metric exactly (289.6 here against 290 there).
+But **which** metrics the published 78–435× covered is not recorded anywhere,
+so this is a *wider re-measurement*, not a demonstration that the same number
+was computed wrongly. Stated precisely: **78–435× is not the range over the
+eleven metrics this campaign scores**, and it should not be quoted as the size
+of the effect.
 
 ### One thing the two-level nudge *did* change
 
@@ -126,23 +166,39 @@ done here.
 
 ## What is now worth doing, cheapest first
 
-1. **One step, three nudge sizes** (1e-14, 1e-12, 1e-10) in double precision:
-   is legoESM's response proportional to the nudge? If not, a discrete switch —
-   convective adjustment firing, a mixed-layer level index moving — is
-   rectifying the nudge in a single step, which would explain an offset that
-   appears immediately and leaves growth rates untouched. Seconds of compute,
-   and it is the single best remaining candidate.
-2. **One legoESM member, 60 days, double-precision daily temperature dumps**,
-   overlaid on NEMO's. NEMO's raw largest temperature difference *shrinks*
-   from 1.74e-06 K at day 10 to 7.79e-09 K at day 60 — a factor **224** —
-   before growing to 1.28e-04 K by day 90, while legoESM's only rises. Whether
-   legoESM shares that dip is one curve, and it settles the "born in the first
-   30 days" claim. It cannot be read today because legoESM's early snapshots
-   are at the storage floor.
-3. **Sweep the filter coefficient** on one model. Insensitivity kills the
-   filter family of explanations with one variable and one model.
-4. **Project** the day-90 spread pattern onto the basin-deficit pattern — the
-   measurement that would license, or kill, the feedback connection above.
+Re-ranked after the second review and after the day-10 measurement above.
+
+1. **Find the switch.** One step, three nudge sizes (1e-14, 1e-12, 1e-10) in
+   double precision: is the response proportional to the nudge? The day-10
+   evidence says it is not, so the follow-up is to name the culprit — re-run
+   with convective adjustment, the mixed-layer index, and the tracer limiter
+   disabled in turn until the ~300× amplification stops. Seconds of compute per
+   arm, and it is now the leading candidate rather than one of four.
+2. **Compare the two models' early transients.** One legoESM member, 60 days,
+   double-precision daily temperature dumps, overlaid on NEMO's. NEMO's largest
+   temperature difference *shrinks* from 1.74e-06 K at day 10 to 7.79e-09 K at
+   day 60 — a factor 224 — before growing to 1.28e-04 K by day 90, while
+   legoESM's only rises. In logarithms that dip is about two-thirds of the
+   entire 3000× gap, so this may be NEMO's missing decay rather than legoESM's
+   excess growth. It cannot be read today: legoESM's early snapshots are at the
+   storage floor.
+3. **Kick only the cells NEMO also kicks.** 4.8% of the grid is nudged in
+   legoESM and not in NEMO — cells below the sea floor, in a model with a
+   documented history of below-bottom values leaking into wet stencils. One
+   member with the nudge masked to NEMO's non-zero cells settles it, free.
+4. **Look at the scale of the spread.** The spatial spectrum of the day-10 to
+   day-30 difference: energy at the two-grid-point scale points at the limiter
+   or the dissipation, energy at the eddy scale points at the dynamics.
+5. **Does the nudged ensemble's *mean* drift off the control?** This replaces
+   the pattern projection the pre-registration proposed for connecting this to
+   the basin deficit. A deficit is a difference in the *mean*, so mean drift —
+   rectification — is the quantity that would connect them; a pattern
+   correlation would light up simply because both fields live in the same
+   eddy-active basin.
+
+**Dropped:** sweeping the filter coefficient. The filter's own algebra says the
+computational mode is gone by day 10, so it cannot set a day-90 amplitude —
+keeping that on the list contradicted the rest of this document.
 
 ## Limitations a reader should carry away
 
@@ -177,9 +233,12 @@ from each side's own output. All sixteen runs judged complete by their own
 success line, never by an exit code. Every nudge receipted: on the oracle side
 every variable and every attribute compared against the source, with the two
 time levels confirmed to have received the same draw; on the legoESM side the
-whole model state compared before and after. And the decisive one — the two
-arms' **unperturbed** controls agree to **exactly zero** on all eleven metrics,
-so the arms differ in the nudge and in nothing else.
+whole model state compared before and after. And the two arms' **unperturbed** controls agree
+to **exactly zero** on all eleven metrics — which establishes that the new
+option is completely inert when it is not used, and rules out an accidental
+change to the model along the way. It does not by itself prove that nothing
+else differs for the *nudged* members; that rests on the command lines
+differing in one token and on the nudge receipts.
 
 ## Review
 
@@ -192,11 +251,19 @@ receipts. All were applied and the pre-registration was amended with them
 before scoring.
 
 **Mechanism review — commissioned at the same time, did not return, and was
-re-commissioned after scoring.** Its verdict is recorded in the campaign
-notes when it lands. Until then, the physics claims in this document rest on
-measurements made and checked here, not on a second opinion, and the two that
-matter most are worth restating with their sources: the filter coefficients
-were read from each model's own configuration and output, and the arm-effect
-algebra reproduces a closed form already recorded independently in this
-repository's ocean code. The reader should treat the *interpretation* — not
-the measurements — as carrying one review rather than two.
+re-commissioned after scoring.** It has now reported. It re-derived the filter
+algebra independently and confirmed it; it confirmed that the two arms really
+do differ, by checking that legoESM's stepping consumes the earlier time level
+on the first step rather than discarding it, and that both arms ran in double
+precision so the nudge was never quantised away; and it confirmed that the
+refutation clears its own bar with two decades to spare.
+
+It also found four overstatements in an earlier draft of this document, all of
+which are corrected above: the claim that the instrument had confirmed the
+filter algebra (it had not — that is the retraction in the calibration section,
+and chasing it produced the day-10 finding), "identical time filter" where only
+the coefficient was compared, a published-range comparison that set a new
+eleven-metric median against an old range of unrecorded scope, and a control
+described as proving more than it does. Its ranking of the remaining candidates
+is the one used above, including dropping the filter-coefficient sweep as
+inconsistent with this document's own argument.
