@@ -402,6 +402,35 @@ optimisation.
 
 Nothing in the model's defaults was changed to produce any number here.
 
+## The lat-lon lane's remaining lever, and why its one measurement failed
+
+At 128 GPUs a latitude band ships FOUR rows of halo for every row it owns. The
+band's halo is two whole circles of longitude however thin the band gets, so
+adding devices thins the band and leaves the halo alone. Splitting longitude
+as well turns the band into a tile whose perimeter shrinks with it: eight
+longitude splits take the ratio from 4.00 to 0.62, six times less traffic.
+That is the largest single lever left on this lane and it is pure geometry,
+reproducible in a second with
+`scripts/validate/latlon_halo_surface_ratio.py`.
+
+The tile was measured once at 64 GPUs and LOST, 6.01 against 4.92 ms. Reading
+the code says why, and the reason is messages rather than bytes: the packing
+that makes a band's exchange one message per stage is latitude-only, the tile
+exchanges latitude and longitude in separate rounds, every tile runs the pole
+handling whether or not it touches a pole, and each east-west wrap becomes two
+ring messages instead of a local copy. Off the source that is 108 messages
+against 13. It is READ, not measured, and an arm to measure it is queued.
+
+**A caveat that applies to the transpose numbers above.** The layout-dump arm
+runs with the halo exchange replaced by the identity, so that the staging work
+around it can be counted on its own. Its compiled module contains no halo
+messages at all. The transpose counts taken there stand -- the staging
+survives, only the wire is removed -- but a MESSAGE count taken from that arm
+reads zero and means nothing. One was taken and discarded before it reached
+this document; the arm that replaces it leaves the communication in and
+refuses to return a verdict if the band arm reads zero messages.
+
+
 ## In flight: writing the icosahedral halo once instead of thirteen times
 
 The icosahedral halo runs thirteen coloured rounds at 64 GPUs, and each round
