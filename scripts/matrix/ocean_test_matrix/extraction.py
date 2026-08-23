@@ -103,6 +103,17 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         "S_3d": S_3d,
         "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
+    if mesh is not None:
+        # SURFACE SPEED, ALWAYS -- see the identical block in the monolithic
+        # runner. Without it this arm writes no cell-shaped velocity at all
+        # and the cross-grid velocity row reads as agreement rather than as
+        # "never compared". Level 0 only; the per-level loop below stays
+        # behind include_velocity_3d because that is what costs.
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity as _rcv
+        _ue0, _vn0 = _rcv(state.u.data[:, 0], mesh)
+        result["speed_sfc"] = np.sqrt(
+            np.asarray(_ue0, dtype=np.float64) ** 2
+            + np.asarray(_vn0, dtype=np.float64) ** 2)
     if include_velocity_3d and mesh is not None:
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_edge = np.asarray(state.u.data, dtype=np.float64)  # (nEdges, nlev)
@@ -117,6 +128,11 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         result["u_3d"] = u_cc
         result["v_3d"] = v_cc
         result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
+        # Reuse level 0 rather than reconstructing it a second time: the
+        # surface block above already did this solve, and the loop has now
+        # redone it at k=0 (codex 2026-08-13). Same value, one less Perot
+        # reconstruction per 3-D snapshot.
+        result["speed_sfc"] = result["speed_3d"][..., 0]
 
         # Add vertical velocity if available (for future MPAS implementation)
         if hasattr(state, "w"):
@@ -443,7 +459,9 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
                                        include_velocity_3d=False)
         return extract_fn
     elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
-        _mesh = grid if include_velocity_3d else None
+        # Always, so the cheap surface speed can be produced -- the same
+        # fix as the monolithic runner, which this module had not received.
+        _mesh = grid
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
                                        include_velocity_3d=include_velocity_3d)

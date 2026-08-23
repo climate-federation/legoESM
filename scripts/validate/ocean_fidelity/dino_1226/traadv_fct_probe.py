@@ -59,8 +59,12 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
 )
 
-D = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO"
-G = f"{D}/RUN_GDB"
+import dump_lane
+
+# #1455 (dump_lane selector): G comes from the shared DINO_1226_LANE-selected
+# run dir, not a hardcoded RUN_GDB path -- the default lane (gdb_y5) resolves
+# to exactly what was hardcoded here before.
+G = dump_lane.RUN_DIR
 JPK, JPJ, JPI = 35, 203, 56  # NEMO dump shape (halo-included, jpk x jpj x jpi)
 
 
@@ -118,7 +122,7 @@ def nemo_div(Fx, Fy, Fz):
 
 def build_bridge_and_fluxes():
     grid = read_nemo_mesh_mask(f"{G}/mesh_mask.nc", nn_hls=0)
-    R = f"{G}/DINO_00057600_restart.nc"
+    R = f"{G}/{dump_lane.RESTART}"
     now = read_nemo_restart(R, nn_hls=0)
     bef = read_nemo_restart_before(R, nn_hls=0)
 
@@ -218,7 +222,7 @@ def nemo_pure_tendency_and_metrics(sal=False):
     e3t_0 = np.moveaxis(mm["e3t_0"][0].filled(np.nan), 0, -1)
     tmask3 = np.moveaxis(mm["tmask"][0].filled(0), 0, -1).astype(float)
     mm.close()
-    r = nc.Dataset(f"{G}/DINO_00057600_restart.nc")
+    r = nc.Dataset(f"{G}/{dump_lane.RESTART}")
     sshn = r.variables["sshn"][0].filled(np.nan)
     r.close()
 
@@ -299,7 +303,8 @@ def run(tracer_name, tracer_now, tracer_bef, ctx, sal):
     r_v = stats_at_offset(dT_v, nemo["trd_pure_v"], 0, act)
     r_up = stats_at_offset(dT_up, nemo["trd_pure_up"], 0, act)
 
-    print(f"\n{'=' * 78}\n{tracer_name}  (RUN_GDB kt=57601, offset=0, e3t={_e3t_mode()})\n{'=' * 78}")
+    print(f"\n{'=' * 78}\n{tracer_name}  ({dump_lane.LANE} kt={dump_lane.KT_DUMP}, "
+          f"offset=0, e3t={_e3t_mode()})\n{'=' * 78}")
     print(f"  upstream zonal flux (east face)      : {r_fu}")
     print(f"  upstream meridional flux (north face) : {r_fv}")
     print(f"  upstream vertical flux (area-scaled) : {r_fw}")
@@ -316,6 +321,7 @@ def _e3t_mode():
 
 
 if __name__ == "__main__":
+    print(dump_lane.banner())
     ctx = build_bridge_and_fluxes()
     res_T = run("TEMPERATURE", ctx["T_now"], ctx["T_bef"], ctx, sal=False)
     res_S = run("SALINITY", ctx["S_now"], ctx["S_bef"], ctx, sal=True)

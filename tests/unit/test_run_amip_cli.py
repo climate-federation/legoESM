@@ -476,12 +476,27 @@ def test_land_soil_moisture_init_frac_flag_flows_to_config():
 
 
 def test_land_surface_scheme_flag_flows_to_config():
-    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector);
-    default is the SimpleSEB path, 'two_leaf' selects the DifferBESS canopy."""
+    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector).
+
+    The DEFAULT is now the two-leaf canopy. It used to be SimpleSEB, which
+    measurement retired: on a well-watered column SimpleSEB evaporates at
+    potential with stomata off, and with them on its humidity gradient
+    self-extinguishes.
+
+    The config carries "two_leaf" either way. A canopy needs a multilayer land
+    tile to run inside, and when there is none the DRIVER resolves back to
+    SimpleSEB and warns at setup — the config value is not rewritten, so that
+    fallback is not visible here.
+    """
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.land_surface_scheme == "simple_seb"
+    assert cfg_default.land_surface_scheme == "two_leaf"
+    cfg_ml_default = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
+    ]), parser))
+    assert cfg_ml_default.land_surface_scheme == "two_leaf"
 
     # Canopy schemes require --use-multilayer-land (they run inside the multilayer
     # land tile); the flag round-trips with it set.
@@ -522,11 +537,12 @@ def test_canopy_scheme_requires_multilayer_land():
     not a silent drop to the slab land (dispatch-hardening)."""
     parser = build_arg_parser()
     for scheme in ("two_leaf", "clm_ml"):
+        argv = ["--dataset", "analytical", "--land-surface-scheme", scheme]
         with pytest.raises(SystemExit):
-            _postprocess_args(parser.parse_args([
-                "--dataset", "analytical", "--land-surface-scheme", scheme,
-            ]), parser)
-    # simple_seb (the default) is a no-op on the slab and is NOT gated.
+            _postprocess_args(parser.parse_args(argv), parser, argv)
+    # simple_seb is a no-op on the slab and is NOT gated.  (It is no longer the
+    # default — the two-leaf canopy is — but an EXPLICIT canopy request without
+    # the tile is still refused, which is what the loop above checks.)
     _postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
     ]), parser)
@@ -1893,20 +1909,33 @@ def test_config_yaml_round_trips_authoritative_values():
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
     # grid geometry (resolution/nlev/discretization are CLI dests baked into
     # cfg.grid, so assert them at the args level the YAML controls).  The
-    # production YAML is the C48/L40 publication lane (#899 restored it from
-    # the C12/L20 land-switch screen; dt=150, fp64 — see the YAML header).
-    assert args.resolution == 48
-    assert args.nlev == 40
-    assert args.discretization == "cdgrid"
-    assert args.grid_type == "cubed_sphere"
+    # production lane moved off the cubed sphere on 2026-07-24 and this test
+    # was not moved with it, so it asserted the retired C48/L40 cube deck
+    # against a config that had been the icosahedral MPAS one for weeks --
+    # red on main, and blind to any further drift while it was.  Values below
+    # are the shipped deck: icosahedral level 5 (about 2.2 degrees), 30 sigma
+    # levels, dt 75 s.  The five keys are recipe-sensitive together (the YAML
+    # header records that L40 + hybrid + automatic dt blew up on day one), so
+    # a change here is a stability A/B, not an edit.
+    assert args.resolution == 5
+    assert args.nlev == 30
+    assert args.discretization == "mpas"
+    # The deck spells the mesh "voronoi"; the parser normalises the family's
+    # spellings to one name, so assert the resolved value the run uses.
+    assert args.grid_type == "mpas"
+    assert args.dt == 75.0
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
-    assert cfg.gravity_wave_drag == "mcfarlane"
+    # orographic AND non-orographic; the orographic-only spelling is the
+    # older deck's.
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"         # required by the tiled surface
-    assert cfg.surface_tiled is True
+    assert cfg.turbulence == "louis"
+    # No tiled surface on this lane -- the tiled port is open work, and the
+    # deck says so at the field.
+    assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
     # convective_cloud ON — mirrors the canonical tuned base
     # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
@@ -1918,9 +1947,9 @@ def test_config_yaml_round_trips_authoritative_values():
     # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
     assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
-    # 0.0 until the bechtold rain-split lands (#932/#929): 0.5 with a
-    # non-tiedtke scheme trips run_amip's hard guard at argparse.
-    assert cfg.convective_precip_efficiency == 0.0
+    # The detrained-condensate to convective-rain split, on since the
+    # bechtold rain-split landed.
+    assert cfg.convective_precip_efficiency == pytest.approx(0.8)
 
 
 def test_config_yaml_explicit_cli_flag_overrides_file():
@@ -2850,7 +2879,11 @@ def test_latlon24_production_variant_pins_polar_filter():
     # ~47 regardless of every numerics lever, while sbm is stable (95-day soak)
     # and lifts hfls 40->70 (#847).  The cube lane keeps bechtold.
     cfg = build_config_from_args(args)
-    assert cfg.convection == "sbm" and cfg.gravity_wave_drag == "mcfarlane"
+    # Gravity-wave drag is inherited from the production include, which
+    # gained the non-orographic component; this assertion still named the
+    # orographic-only spelling and so went red with it.
+    assert cfg.convection == "sbm"
+    assert cfg.gravity_wave_drag == "mcfarlane+hines"
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
@@ -3616,6 +3649,45 @@ def test_mpas_vert_advection_scheme_flag_flows_to_config():
         cfg_hyb.validate_strict()
 
 
+def test_fv3_duo_discretization_flows_to_config():
+    """--discretization fv3_duo round-trips into DycoreConfig and passes
+    validate_strict (slice 1: dry, physics-off, fp64, nlev in {5, 10}).
+
+    The dry-stack flags mirror what the fv3_duo component-factory branch
+    requires; the branch's own refusals (physics on, fp32, bad nlev) are
+    covered by tests/atmosphere/hydrostatic/unit/test_fv3_duo_dynamics.py.
+    """
+    parser = build_arg_parser()
+    argv = ["--dataset", "analytical", "--grid-type", "cubed_sphere",
+            "--discretization", "fv3_duo", "--resolution", "12",
+            "--nlev", "5", "--precision", "fp64",
+            "--radiation", "none", "--convection", "none",
+            "--microphysics", "none", "--turbulence", "none",
+            "--gravity-wave-drag", "none", "--allow-disabled-physics"]
+    args = _postprocess_args(parser.parse_args(argv), parser)
+    # the disabled-physics gate accepts the stack with the explicit opt-in
+    _require_full_physics_for_amip(args, parser)
+    cfg = build_config_from_args(args)
+    assert cfg.dycore.discretization == "fv3_duo"
+    assert cfg.grid.grid_type == "cubed_sphere"
+    assert cfg.grid.nlev == 5
+    assert cfg.precision == "fp64"
+    cfg.validate_strict()
+
+    # The factory's DEFAULT-DENY wall must accept a stock CLI-built duo
+    # config — an argparse default drifting off the ExperimentConfig
+    # default would otherwise refuse EVERY run_amip fv3_duo launch.
+    from legoesm.driver.component_factory import (
+        _refuse_fv3_duo_non_default,
+    )
+    _refuse_fv3_duo_non_default(cfg)
+
+    # argparse rejects a typo before anything else runs.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset", "analytical",
+                           "--discretization", "fv3duo"])
+
+
 def test_cmip_resolution_deg_round_trips():
     """--cmip-resolution-deg reaches OutputConfig; default unchanged.
 
@@ -3656,3 +3728,42 @@ def test_capdcycl_land_tau_scale_reaches_the_kernel_and_defaults_to_ifs():
     assert convection_config_for(cfg).bechtold.capdcycl_land_tau_scale == 0.25
     with pytest.raises(ValueError, match="capdcycl_land_tau_scale"):
         ExperimentConfig(bechtold_capdcycl_land_tau_scale=5.0).validate_strict()
+
+
+def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
+    """A blow-up is reported at the first DIAGNOSTIC SAMPLE, not the first bad
+    step, so the cadence bounds how precisely a failure can be located in time.
+    An integer-only cadence pinned that bound at one simulated day.  Sub-daily
+    values must survive the CLI, reach the config, and — critically — must never
+    round down to a zero-step interval, which every guard in the run loop reads
+    as "diagnostics disabled" and would silently turn the blow-up check OFF.
+
+    The step arithmetic is exercised through the PRODUCTION helper the run loops
+    call, not a copy of it: a local re-implementation would keep passing if the
+    real cadence lost its floor.
+    """
+    from legoesm.driver.diagnostics import diagnostic_interval_steps
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "0.01",
+    ]), parser))
+    assert cfg.output.diag_days == pytest.approx(0.01)
+
+    # At the production MPAS timestep: 0.01 d = 11.5 steps -> 11, and a cadence
+    # far below one step floors to 1 rather than collapsing to "off".
+    assert diagnostic_interval_steps(0.01, 75.0, 999) == 11
+    assert diagnostic_interval_steps(1e-6, 75.0, 999) == 1, \
+        "a fine cadence silently disabled the blow-up check"
+    assert diagnostic_interval_steps(1.0, 75.0, 999) == 1152
+    # The "no periodic cadence" sentinel still yields the caller's fallback.
+    assert diagnostic_interval_steps(0.0, 75.0, 999) == 999
+    # A non-finite cadence is refused, not silently reinterpreted.
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="diag_days"):
+            diagnostic_interval_steps(bad, 75.0, 999)
+
+    # The integer default is unchanged.
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.output.diag_days == pytest.approx(5.0)

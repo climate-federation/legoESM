@@ -1628,7 +1628,8 @@ that failed is a SUCCESS of the process.
 2. **Time level** — `time_levels.time_level_for_dump` (fails closed). NEMO routines mix
    Kbb/Kmm/Kaa within one call; establish each input's level from source.
 3. **`LEGOESM_NEMO_E3T` explicit** — the default `"off"` is a known-wrong 1-D ladder
-   (12.9% off below k=25) and has contaminated four measurements.
+   (up to 70.4 m off at and below k=25 — 12.9% of `e3t_0`, 14.8% of `e3t_1d`;
+   quote the denominator, they are one measurement) and has contaminated four measurements.
 4. **Metric identity** — before comparing two numbers from different scripts/ledgers,
    verify **same metric, same aggregation, same POPULATION, same reducer**.
    Four false conclusions today came from violating this.
@@ -1703,7 +1704,10 @@ the campaign's **1e-6-class fixes are CLIMATE-INERT**: year-1 upper contrast 0.9
 **below 1000 m in the southern channel**. **⇒ Priority follows residual magnitude.** This does
 not refute exactness-first — the 1e-2 rows remain untested — but it bounds the optimism.
 Caveat: that run used `e3t=off` (the wrong 1-D ladder), matched to baseline for protocol
-identity; a true-ladder acceptance is blocked on the restart-start instability.
+identity; a true-ladder acceptance was recorded as blocked on the restart-start
+instability. **Superseded 2026-08-21 (#1455):** that instability did not reproduce
+(four 90-day arms from the day-180 restart, one variable, all stable at
+0.633–0.635 m/s), so the acceptance is not blocked on it.
 
 ## Human decisions — SETTLED 2026-07-30
 1. `sh2` — **PARKED** (exact transcription in; family climate-inert).
@@ -1725,19 +1729,30 @@ identity; a true-ladder acceptance is blocked on the restart-start instability.
   `eos.py`, shortwave, box budget).
 - **Non-NEMO recipes are byte-identical.** Every fix is a gated option, default = prior
   behaviour, each with a bit-identity test asserting `max|diff| == 0.0` (`==`, not `allclose`).
-- **Known broken, and PRE-EXISTING**: restart-start on the true 3-D ladder
-  (`LEGOESM_NEMO_E3T=both`) — max|u| 0.69 → ~3 m/s over 20 d. Predates this work (addendum 33).
+- ~~**Known broken, and PRE-EXISTING**: restart-start on the true 3-D ladder
+  (`LEGOESM_NEMO_E3T=both`) — max|u| 0.69 → ~3 m/s over 20 d.~~ **Retracted 2026-08-21
+  (#1455): did not reproduce.** Four 90-day arms from the day-180 restart, differing only
+  in this variable and bit-identical at day 0, all ran stable to day 90 at 0.6332 / 0.6341 /
+  0.6344 / 0.6347 m/s peak speed; the two end arms were re-confirmed under fp64 at 0.6332 and
+  0.6350. Nothing approached 3 m/s. A non-reproduction under one configuration is not proof it
+  was never true, so this is now an *unexplained recorded observation*, not a known defect —
+  and it does not belong in a "verified, not assumed" list.
 
 ## The strategic result — read this before spending anything
 **TWO acceptance runs, both NULL.** Run 1: three 1e-6-class fixes. Run 2: the ZAD fix
 (4.9e-3 → 3e-5, >100×, with a deep shelf-edge signature across 7255 columns). Year-5 ΔACC
 **+0.0001 Sv**; upper contrast 0.8956 → 0.8954; the 5-year deep decay 0.4373 → 0.4370 untouched.
 **Per-term transcription fidelity is not what costs the 25 Sv.**
-**⚠ BUT BOTH RUNS USED THE WRONG LADDER** (`LEGOESM_NEMO_E3T` unset — 12.9% off below k=25),
+**⚠ BUT BOTH RUNS USED THE WRONG LADDER** (`LEGOESM_NEMO_E3T` unset — up to 70.4 m off at and below k=25, 12.9% of `e3t_0` / 14.8% of `e3t_1d`),
 kept for protocol identity with the baseline. **The ACC deficit is sourced below 1000 m, which
 is exactly where that ladder is wrong.** So both nulls carry a background geometric error ~100×
 the size of the fixes under test. **The nulls may be measuring the ladder, not the fixes** —
-which is why the true-ladder instability is the campaign's critical path, not more gate rows.
+which is why the true-ladder instability was called the campaign's critical path.
+**Superseded 2026-08-21 (#1455):** that instability did not reproduce (four 90-day
+arms from the day-180 restart, one variable, all stable at 0.633–0.635 m/s peak
+speed; the two end arms confirmed under fp64), so it is no longer the critical
+path — it is an unexplained recorded observation. The DINO twin harness now
+defaults to NEMO's own ladders.
 
 ## Live threads, with resume conditions
 - **`zu_frc` u (8.03e-3)** — PAUSED. Nine candidates refuted. The **write ledger is provably
@@ -1748,7 +1763,7 @@ which is why the true-ladder instability is the campaign's critical path, not mo
   to `F_slow_u` vs the dumped increment — RMS share, error corr vs the `zu_frc` error field,
   ripple/seam/asymmetry. Owns it → the largest row is solved. Doesn't → ledger exhausted, every
   line measured, close it as a bounded negative.
-- **True-ladder instability** — the critical path. Eliminated by measurement: CFL, `ln_zad_Aimp`,
+- **True-ladder instability** — ~~the critical path~~ (retracted 2026-08-21, #1455: did not reproduce). Eliminated by measurement: CFL, `ln_zad_Aimp`,
   `kappa_GM` magnitude, thin cells, slope cap, derived `gdept`, **GM-bolus discrete divergence**
   (2026-07-30: identical on both ladders, and structurally impossible — `nemo_eiv_bolus_transport`
   uses only `e2u`/`e1v`, no `e3` term), **abyssal slope-cap population** (flat, within ~10%).

@@ -127,3 +127,73 @@ def test_bandlocal_build_steps_like_reference():
             np.asarray(jax.device_get(getattr(s_ref, name))),
             np.asarray(jax.device_get(getattr(s_got, name))),
             err_msg=f"{name}: stepped states diverge")
+
+
+def _mesh_2d(p_lat=2, p_lon=2):
+    need = p_lat * p_lon
+    if len(jax.devices()) < need:
+        pytest.skip(f"needs --xla_force_host_platform_device_count={need}")
+    return jax.sharding.Mesh(
+        np.array(jax.devices()[:need]).reshape(p_lat, p_lon),
+        axis_names=("lat", "lon"))
+
+
+def test_tilelocal_build_bit_identical_to_global_tile_shard():
+    """The tiled twin of the gate above.
+
+    The tiled lane exists because a latitude band's halo never shrinks with
+    device count. It became usable only once this builder could produce the
+    tiled layout directly: the alternative, a global build handed to
+    ``shard_state_atm_latlon_2d``, is a device_put onto a cross-process
+    sharding that XLA services with an all-gather, and it asked for 105 GiB
+    per device at production resolution. That makes this parity check the
+    contract the whole tiled lane rests on.
+    """
+    mesh = _mesh_2d()
+    grid, sigma = _grid_sigma()
+    from legoesm.atmosphere.forcing.idealized.held_suarez import (
+        held_suarez_init_latlon)
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        hydrostatic_to_cgrid)
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
+        build_sharded_held_suarez_state_atm_latlon,
+        shard_state_atm_latlon_2d)
+
+    ref = shard_state_atm_latlon_2d(
+        hydrostatic_to_cgrid(held_suarez_init_latlon(grid, sigma), grid), mesh)
+    got = build_sharded_held_suarez_state_atm_latlon(grid, sigma, mesh)
+
+    for name in ("u", "v", "T", "p_s", "phis"):
+        a = getattr(ref, name)
+        b = getattr(got, name)
+        assert a.shape == b.shape, f"{name}: shape {b.shape} != {a.shape}"
+        assert a.dtype == b.dtype, f"{name}: dtype {b.dtype} != {a.dtype}"
+        assert a.sharding.is_equivalent_to(b.sharding, a.ndim), (
+            f"{name}: sharding differs")
+        np.testing.assert_array_equal(
+            np.asarray(jax.device_get(a)), np.asarray(jax.device_get(b)),
+            err_msg=f"{name}: tile-local build differs from global+shard")
+    assert got.tracers == {}
+
+
+def test_builder_refuses_a_mesh_it_cannot_lay_out():
+    """A swapped or unknown axis tuple used to fall through to the band
+    layout and build a state whose shards do not match the step."""
+    grid, sigma = _grid_sigma()
+    from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
+        build_sharded_held_suarez_state_atm_latlon)
+
+    if len(jax.devices()) < 4:
+        pytest.skip("needs 4 devices")
+    swapped = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(2, 2), axis_names=("lon", "lat"))
+    with pytest.raises(ValueError, match="mesh axes must be"):
+        build_sharded_held_suarez_state_atm_latlon(grid, sigma, swapped)
+
+    # n_lon = 12 is not divisible by a lon split of 8.
+    if len(jax.devices()) >= 8:
+        bad = jax.sharding.Mesh(
+            np.array(jax.devices()[:8]).reshape(1, 8),
+            axis_names=("lat", "lon"))
+        with pytest.raises(ValueError, match="n_lon"):
+            build_sharded_held_suarez_state_atm_latlon(grid, sigma, bad)

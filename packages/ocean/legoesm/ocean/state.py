@@ -67,7 +67,15 @@ def constants_equal(a, b) -> bool | None:
     """
     try:
         return bool(a == b)
-    except TypeError:                       # TracerBoolConversionError et al.
+    except (TypeError, ValueError):
+        # TypeError: TracerBoolConversionError et al. (a JAX tracer).
+        # ValueError: "truth value of an array with more than one element is
+        # ambiguous" -- a numpy/JAX ARRAY operand with >1 element makes
+        # ``a == b`` an elementwise array, and ``bool()`` on that raises
+        # ValueError, not TypeError. Before this widening that ValueError
+        # escaped uncaught, breaking the "undecidable never discards a value
+        # the caller supplied" contract documented above for any array-valued
+        # constant.
         return None
 
 
@@ -94,7 +102,7 @@ def _reject_constant_conflicts(cc_explicit: ConstantsConfig,
         )
 
 
-def _physics_with_constants(physics, cc: ConstantsConfig):
+def physics_with_constants(physics, cc: ConstantsConfig):
     """Return ``physics`` carrying the model-level ``cc`` constants.
 
     ``OceanPhysicsConfig`` mirrors ``ConstantsConfig`` so the physics factories
@@ -131,6 +139,13 @@ def _physics_with_constants(physics, cc: ConstantsConfig):
             "propagate."
         )
     return physics                                  # already pinned to cc
+
+
+#: Historical private spelling. The routing rule is now needed by a second
+#: model as well, and this repository forbids importing a private symbol
+#: across modules, so the function is public; this alias keeps the
+#: white-box test that names the old spelling working.
+_physics_with_constants = physics_with_constants
 
 
 # ==============================================================================
@@ -1201,6 +1216,47 @@ class BarotropicConfig(NamedTuple):
     # mean carries unfiltered divergence noise (depth-uniform w noise).
     # Default False: bit-identical legacy behaviour.
     nemo_stage_mean_imposition: bool = False
+    # Which time-averaged barotropic mean the 3-D momentum update reconciles the
+    # velocity depth-mean onto after the substep window (NEMO dyn_spg_ts N6,
+    # dynspg_ts.F90:1170-1172:
+    #   puu(Kmm) = (puu(Kmm) + un_adv*r1_hu(Kmm) - puu_b(Kmm))*umask
+    # comment: "Correct velocities so that the barotropic velocity equals
+    # (un_adv, vn_adv)").  This is a depth-UNIFORM increment that replaces the
+    # 3-D velocity's NOW-thickness depth-mean (``puu_b``) with a chosen mean.
+    # NEMO uses ``un_adv/hu(Kmm)`` — the SECONDARY/transport-weighted substep
+    # accumulation (``wgtbtp2`` tail-sums) divided by the NOW column depth.
+    # "velocity_avg" (DEFAULT, bit-identical legacy): legoESM adds
+    # ``U_bar_avg`` = ``U_sum_f/w_total``, the PRIMARY/velocity boxcar mean
+    # (``wgtbtp1``).  The two kernels both sum to 1 but sample the substep
+    # velocity profile at different phases (DINO nn_e=23: primary centroid
+    # substep 22.0, secondary 14.67), so any RHS change shifts them by
+    # different amounts — only the velocity mean reaches the ACC velocity while
+    # the transport mean (``Hu_avg`` = NEMO's ``un_adv``, computed in the same
+    # call at barotropic_latlon_cgrid.py) is routed only to tracer advection
+    # (ocean_model_latlon_cgrid.py delta_U correction).  "transport_avg":
+    # reconcile the momentum depth-mean onto ``Hu_avg/H_u`` — NEMO's
+    # ``un_adv/hu(Kmm)`` (dynspg_ts.F90:1170-1172, unconditional: "in all
+    # cases"; the only other reconciliation, the ln_wd_dl branch at :1178,
+    # is dead for DINO and ALSO targets un_adv).  ``H_u`` is the MIN-RULE
+    # NOW u-face column depth (``<min_cell_to_uface(h_k_now)>``) — the SAME
+    # thickness the subtracted mean ``U_bar_corr`` (= ``puu_b``) is built
+    # from, so the reconciled depth-mean equals ``Hu_avg/H_u`` EXACTLY by
+    # internal consistency.  KNOWN second-order DEVIATION from NEMO
+    # (adversarial-review F1, measured): NEMO's r1_hu(Kmm) under key_qco is
+    # the SSH-AVERAGE now depth hu_0*(1+r3u(Kmm)) (domqco.F90:227 builds r3u
+    # from adjacent-cell ssh means), NOT a min-rule depth; on a DINO-like
+    # partial-cell bathymetry at eta=0.4 m the resulting depth-mean differs
+    # by ~1.3e-4 relative (~1e-5 m/s).  Min-rule is kept deliberately: in
+    # NEMO both the subtracted puu_b and the un_adv divisor use the same
+    # hu(Kmm), and mirroring that INTERNAL consistency (same thickness on
+    # both sides of the reconciliation) outranks matching the divisor alone
+    # — dividing by ssh-avg while subtracting a min-rule mean would leave a
+    # spurious residual depth-mean.  Closing the remaining 1.3e-4 requires
+    # moving BOTH sides to ssh-avg together (a separate change).
+    # Select on the NEMO-DINO oracle card only.  Unknown value
+    # raises at the substep post-loop (dispatch hardening, same pattern as
+    # ``barotropic_face_depth``/``barotropic_een_seed``).
+    barotropic_reconcile_target: str = "velocity_avg"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for
@@ -2574,7 +2630,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         The physical constants are routed the same way: the flat
         ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs land in the
         single ``constants: ConstantsConfig`` storage, and the resolved set is
-        propagated into ``physics`` (see :func:`_physics_with_constants`).
+        propagated into ``physics`` (see :func:`physics_with_constants`).
         Passing BOTH a flat scalar and a ``constants=`` that disagrees with it
         raises -- that combination is the silent-divergence bug this routing
         removes, so it is never resolved by a precedence rule.
@@ -2615,7 +2671,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         if _cc_given:
             nested["constants"] = _cc_final
         if "physics" in flat:
-            flat["physics"] = _physics_with_constants(flat["physics"], _cc_final)
+            flat["physics"] = physics_with_constants(flat["physics"], _cc_final)
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
@@ -2725,7 +2781,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                 _cc_final, _cc_given = _pc, True
         if _cc_given:
             nested["constants"] = _cc_final
-        _phys_new = _physics_with_constants(_phys, _cc_final)
+        _phys_new = physics_with_constants(_phys, _cc_final)
         if _phys_new is not _phys:
             overrides["physics"] = _phys_new
         return self._replace(**nested, **overrides)

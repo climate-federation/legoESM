@@ -387,3 +387,67 @@ def test_rho_sfc_does_not_depend_on_nlev():
     a = load_sam_scm_case("bomex", nlev=24).rho_sfc
     b = load_sam_scm_case("bomex", nlev=96).rho_sfc
     assert a == pytest.approx(b, rel=1e-12), (a, b)
+
+
+# --- DYCOMS-II RF02 ---------------------------------------------------------
+
+requires_rf02 = pytest.mark.skipif(
+    not _deck_available("rf02"), reason="DYCOMS_RF02 gSAM deck not cached"
+)
+
+
+@requires_rf02
+def test_rf02_prescribes_the_deck_surface_fluxes():
+    """SHF 16 / LHF 93 W/m^2, which are RF01's 15 / 115 in neither term."""
+    case = load_sam_scm_case("rf02", nlev=32)
+    assert case.forcing.prescribe == "fluxes"
+    sfc = read_sam_sfc(f"{case.case_dir}/sfc")
+    assert float(sfc.shf[0]) == pytest.approx(16.0)
+    assert float(sfc.lhf[0]) == pytest.approx(93.0)
+    w_th = float(case.forcing.w_th_s(0.0))
+    w_qv = float(case.forcing.w_qv_s(0.0))
+    assert w_th == pytest.approx(
+        surface_kinematic_temperature_flux(16.0, case.rho_sfc), rel=1e-9)
+    assert w_qv == pytest.approx(
+        surface_kinematic_moisture_flux(93.0, case.rho_sfc), rel=1e-9)
+
+
+@requires_rf02
+def test_rf02_geostrophic_wind_is_sheared_not_uniform():
+    """The RF02 spec's u_g = 3.0 + 4.3 z_km, v_g = -9.0 + 5.6 z_km. RF01's is
+    a uniform (7, -5.5), so a uniform-wind assumption is a real mis-forcing
+    here and not a cosmetic one."""
+    case = load_sam_scm_case("rf02", nlev=48)
+    z = np.asarray(case.z_full)
+    u_g = np.asarray(case.forcing.u_geo(0.0))
+    v_g = np.asarray(case.forcing.v_geo(0.0))
+    inside = case.les_mask()
+    np.testing.assert_allclose(u_g[inside], 3.0 + 4.3 * z[inside] / 1000.0,
+                               atol=2e-3)
+    np.testing.assert_allclose(v_g[inside], -9.0 + 5.6 * z[inside] / 1000.0,
+                               atol=2e-3)
+    assert np.ptp(u_g[inside]) > 1.0, "a uniform profile would pass vacuously"
+
+
+@requires_rf02
+def test_rf02_column_carries_the_deck_inversion_at_795_m():
+    """theta_l steps 288.300 -> 296.710 K between 795 and 800 m in the deck."""
+    case = load_sam_scm_case("rf02", nlev=96)
+    z = np.asarray(case.z_full)
+    theta = np.asarray(case.T_profile) / np.asarray(
+        exner_function(case.p_full))
+    below = (z > 100.0) & (z < 700.0)
+    above = (z > 900.0) & (z < 1400.0)
+    assert theta[below].max() - theta[below].min() < 0.5, "mixed layer"
+    assert theta[above].min() - theta[below].max() > 6.0, "inversion jump"
+
+
+@requires_rf02
+def test_rf02_coriolis_is_the_latitude_value_unlike_rf01():
+    """RF01's deck hardcodes fcor = 0.376e-4; RF02's does not and sets
+    latitude0 = 31.5, so the two flights rotate at different rates."""
+    case = load_sam_scm_case("rf02", nlev=16)
+    derived = 2.0 * constants.Omega * np.sin(np.deg2rad(31.5))
+    assert case.forcing.f_c == pytest.approx(derived, rel=1e-12)
+    assert not np.isclose(case.forcing.f_c, SAM_SCM_CASES["dycoms"].les_f_c,
+                          rtol=0.05)

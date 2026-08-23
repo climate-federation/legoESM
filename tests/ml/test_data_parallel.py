@@ -545,3 +545,46 @@ def test_systemic_skipping_aborts_loudly():
         mpi_data_parallel_training_loop(
             loss, w, opt_state, optimizer, [poisoned] * 4,
             n_epochs=1, num_processes=1)
+
+
+def test_mpi_abort_on_uncaught_lets_a_clean_exit_through():
+    """``--help`` raises SystemExit(0) through this wrapper. Aborting on it
+    would turn printing the usage text into MPI_Abort on every rank."""
+    comm = _FakeComm(size=4)
+
+    @mpi_abort_on_uncaught(comm=comm)
+    def _boom():
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit):
+        _boom()
+    assert comm.aborts == []
+
+
+@pytest.mark.parametrize("exit_code", [2, "usage error", 0.0, object()])
+def test_mpi_abort_on_uncaught_still_aborts_on_a_failing_exit(exit_code):
+    """The interpreter exits 0 only for None and an integer 0. A string or any
+    other object exits 1 -- and ``SystemExit("")`` is falsy, so a truthiness
+    test would have let a FAILING rank through silently."""
+    comm = _FakeComm(size=4)
+
+    @mpi_abort_on_uncaught(comm=comm, code=3)
+    def _boom():
+        raise SystemExit(exit_code)
+
+    with pytest.raises(SystemExit):
+        _boom()
+    assert comm.aborts == [3]
+
+
+@pytest.mark.parametrize("exit_code", [None, 0, False])
+def test_mpi_abort_on_uncaught_lets_every_clean_exit_through(exit_code):
+    comm = _FakeComm(size=4)
+
+    @mpi_abort_on_uncaught(comm=comm)
+    def _boom():
+        raise SystemExit(exit_code)
+
+    with pytest.raises(SystemExit):
+        _boom()
+    assert comm.aborts == []

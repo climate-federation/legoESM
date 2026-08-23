@@ -172,8 +172,12 @@ def build_state(fp64: bool = True):
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0,
     )
     assert cfg.eos == "nemo_seos", f"expected nemo_dino_kamm eos='nemo_seos', got {cfg.eos!r}"
-    assert cfg.convection_n2_mode == "adiabatic", (
-        f"expected the card's own N2 mode 'adiabatic', got {cfg.convection_n2_mode!r}")
+    # The card now selects the exact eosbn2 transcription (the "adiabatic"
+    # no-op-equivalence claim this probe was written to test is REFUTED — 48
+    # missed trigger interfaces out of NEMO's 60845). The comparison below is
+    # unaffected: it evaluates BOTH formulas explicitly, not via the card.
+    assert cfg.convection_n2_mode == "nemo_bn2", (
+        f"expected the card's own N2 mode 'nemo_bn2', got {cfg.convection_n2_mode!r}")
     assert cfg.convection_n2_threshold == THR, (
         f"THR={THR} must match the card's convection_n2_threshold="
         f"{cfg.convection_n2_threshold}")

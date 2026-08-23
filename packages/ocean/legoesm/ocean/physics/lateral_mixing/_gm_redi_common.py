@@ -383,6 +383,7 @@ def compute_visbeck_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: VisbeckConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     T: jnp.ndarray | None = None,
     S: jnp.ndarray | None = None,
@@ -412,7 +413,7 @@ def compute_visbeck_kappa_gm(
         the configured bounds.
     """
     sigma_bar, L, wet_col, _int_N_dz, _sigma_local, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref, g,
         n2_mode=getattr(cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
@@ -525,6 +526,7 @@ def compute_treguier_kappa_gm(
     f_coriolis: jnp.ndarray,
     cfg: TreguierConfig,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     omega: float = constants.Omega,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) / Held-Larichev (1996) eddy-induced-velocity
@@ -569,7 +571,7 @@ def compute_treguier_kappa_gm(
     # length fields; none of its values reach the Treguier formula.
     sigma_bar, _L, wet_col, int_N_dz, sigma, dz_half = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis,
-        _TREGUIER_LENGTH_STUB, rho_ref,
+        _TREGUIER_LENGTH_STUB, rho_ref, g,
     )
     del sigma_bar, _L
     f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
@@ -611,6 +613,7 @@ def _eady_growth_and_length(
     f_coriolis: jnp.ndarray,
     cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     n2_mode: str = "insitu",
     n2_over_dzw: bool = False,
@@ -656,7 +659,7 @@ def _eady_growth_and_length(
     # Local growth rate sigma_Eady ~ N * |S| at each interior interface.
     if n2_mode == "insitu":
         N2 = compute_buoyancy_frequency(
-            rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=constants.g,
+            rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=g,
         )
     elif n2_mode == "adiabatic":
         if T is None or S is None or p_cell is None or eos_fn is None:
@@ -679,7 +682,7 @@ def _eady_growth_and_length(
                 if n2_over_dzw else None)
         N2 = compute_buoyancy_frequency_adiabatic(
             T, S, p_cell, z_coord.dz_ref, jacobian,
-            eos_fn=eos_fn, rho_ref=rho_ref, g=constants.g,
+            eos_fn=eos_fn, rho_ref=rho_ref, g=g,
             dz_half=_dzw,
         )
     else:
@@ -745,6 +748,7 @@ def compute_geometric_column_integrals(
     f_coriolis: jnp.ndarray,
     visbeck_cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     n2_mode: str = "insitu",
     n2_over_dzw: bool = False,
@@ -779,7 +783,7 @@ def compute_geometric_column_integrals(
     Returns ``(int_sigma2_dz, int_sigma_dz, int_N_dz, H_col, wet_col)``.
     """
     _sigma_bar, _L, wet_col, int_N_dz, sigma, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref, g,
         n2_mode=n2_mode, n2_over_dzw=n2_over_dzw,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
     )
@@ -806,6 +810,7 @@ def compute_eke_kappa_gm(
     visbeck_cfg,
     eke_cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    g: float = constants.g,
     *,
     beta: jnp.ndarray | None = None,
     depth_resolved: bool = False,
@@ -846,7 +851,7 @@ def compute_eke_kappa_gm(
     # independently. ``visbeck_cfg`` is still used for the LENGTH params
     # (L_min/L_max/f_min/use_rossby_radius/L_fixed).
     sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local, _dzh = _eady_growth_and_length(
-        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref, g,
         n2_mode=getattr(eke_cfg, "n2_mode", "insitu"),
         n2_over_dzw=getattr(eke_cfg, "n2_over_dzw", False),
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,

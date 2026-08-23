@@ -20,7 +20,7 @@ export LEGOESM_JIT_CACHE_DIR=""
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 JAX_ENABLE_X64=1 $PY -u scripts/validate/scm_rce_blqv_discriminator.py \
   --scheme ${SCHEME:-mass_flux} \
-  --arms ${ARMS:-control,entrainment,coare3,hb} \
+  --arms ${ARMS:-control,entrainment,coare3,hb,emanuel_ctl,downdraft,wind2,wind8,f0,nosatadj,subs,f0_coare3} \
   --out $REPO/results/scm_rce_tqtune/blqv_discriminator_${TAG:-${SCHEME:-mass_flux}}.json \
   2>&1 | grep --line-buffered -v "^E[0-9]\|pjrt_executable\|cpu_aot_loader\|cuInit\|CUDA"
 echo "RC=${PIPESTATUS[0]}"

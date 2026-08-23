@@ -307,6 +307,12 @@ class DINOConfig:
     # :1349-1379). Only differs from the default under the MLF leapfrog, so
     # only the nemo_dino_kamm_mlf card flips it.
     barotropic_een_seed: str = "window_start"
+    # 3-D momentum depth-mean reconciliation target (NEMO dyn_spg_ts N6): see
+    # BarotropicConfig.barotropic_reconcile_target docstring. "velocity_avg"
+    # (default, bit-identical) = lego's legacy primary/velocity boxcar mean;
+    # "transport_avg" = NEMO's un_adv*r1_hu(Kmm) secondary/transport mean
+    # (dynspg_ts.F90:1170-1172). Only the nemo_dino_kamm_mlf card flips it.
+    barotropic_reconcile_target: str = "velocity_avg"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -410,12 +416,17 @@ class DINOConfig:
     # which LEAKS ~O(K_conv) mixing into weakly-STABLE water (N^2~+1e-6 s^-2) that
     # NEMO never mixes — over-eroding the thermocline (62-day matched-grid check:
     # basin-mean T@262m 8.78 vs NEMO 9.50; the hard step restores 9.55-9.57).
-    # NEMO's rn2 (eosbn2) is the ADIABATIC static stability (local alpha,beta),
-    # so the faithful pair is hard-step + n2_mode="adiabatic". Set on the
-    # nemo_paper (oracle) recipe; other recipes keep the smooth legoESM default.
+    # NEMO's rn2 is eosbn2 ``bn2`` (eosbn2.F90:1459-1467), which legoESM
+    # transcribes EXACTLY as n2_mode="nemo_bn2" -- that is what the
+    # nemo_dino_kamm cards select. n2_mode="adiabatic" is the parcel-
+    # displacement static stability (Veros form); it is CLOSE to bn2 in
+    # magnitude but NOT equivalent for the sign test the EVD trigger performs
+    # (48 missed interfaces out of NEMO's 60845 -- see the retraction block on
+    # the nemo_dino_kamm card). nemo_paper still selects "adiabatic"; other
+    # recipes keep the smooth legoESM default.
     # See docs/ocean/fidelity/dino_tendency_certificate.md.
     convection_smooth_transition: bool = True   # False = NEMO hard rn2<0 switch
-    convection_n2_mode: str = "insitu"          # "adiabatic" = NEMO eosbn2
+    convection_n2_mode: str = "insitu"          # "nemo_bn2" = NEMO eosbn2 rn2
     # NEMO zdfevd threshold (zdfevd.F90): EVD fires where the N² <= -1e-12 —
     # a small NEGATIVE threshold that ignores marginally-neutral interfaces
     # (vs the legoESM default 0.0). Default 0.0 keeps other recipes unchanged;
@@ -432,9 +443,11 @@ class DINOConfig:
     # threshold), enabled on the nemo_dino_kamm card below.
     # TKE static-stability trigger. Default "insitu" (BIT-IDENTICAL legacy).
     # NEMO's zdftke consumes the SAME rn2 (eosbn2 bn2) as zdfevd — select
-    # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². For the DINO S-EOS
-    # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
-    # convection comment), so no recipe switches by default.
+    # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². The nemo_dino_kamm
+    # cards select it for BOTH consumers; other recipes keep the legacy
+    # default. (The former note here, that bn2 and the "adiabatic" parcel N²
+    # agree to ~9e-7 s^-2 and so the choice is immaterial, is RETRACTED — see
+    # the retraction block on the nemo_dino_kamm card.)
     tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
     # NEMO's step-entry (Nnow) N² sequencing (bn2 computed BEFORE tra_adv,
     # stpmlf.F90:186-190) — Phase-2 #1317 T5. Consumed by BOTH zdfevd (via
@@ -1105,18 +1118,60 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
-        # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
-        # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
-        # tke_n2_mode="nemo_bn2". VERIFIED same-state (bridge restart state) to
-        # reproduce NEMO rn2_stg at 99.9% per-depth agreement. Kept at
-        # "adiabatic" here because, for the DINO S-EOS, the parcel-displacement
-        # "adiabatic" N² is numerically EQUIVALENT to the exact bn2 (corr 1.0000,
-        # maxdiff ~9e-7 s^-2 → ~0.1% of marginal interfaces flip) — "adiabatic"
-        # already matches NEMO rn2_stg to 99.9% same-state, so the exact bn2 is a
-        # no-op-equivalent provenance option, not a fidelity fix. See
-        # tests/ocean/unit/test_nemo_bn2.py + docs/ocean/fidelity.
+        # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
+        # 1459-1467): LOCAL alpha/beta evaluated at each cell's own gdept,
+        # interpolated to the w-point by the geometric zrw weight, differenced
+        # LINEARLY in T and S. Both arms are built on the Nnn geometry
+        # (MY_SRC/stpmlf.F90:200-201) and consumed at zdfevd.F90:93 and :119.
+        # We select that exact transcription: convection_n2_mode="nemo_bn2"
+        # (enhanced_diffusion.py:147/161), matching tke_n2_mode above and
+        # gm_redi_slope_n2 below, which already select it.
+        #
+        # RETRACTION (2026-08-18). This line previously selected "adiabatic"
+        # (parcel displacement of both interface cells to the upper cell's
+        # pressure, differenced through the full nonlinear in-situ density) on
+        # the stated grounds that it is "numerically EQUIVALENT to the exact
+        # bn2 (corr 1.0000, maxdiff ~9e-7 s^-2)". That justification is
+        # REFUTED, and the metric that produced it could not have detected the
+        # failure: the EVD trigger is not a magnitude comparison but a SIGN
+        # TEST at rn2 < -1e-12, while the whole convective population sits at
+        # |N^2| ~ 1e-10..1e-12 — five orders below the stratified interior that
+        # sets the correlation. Measured on NEMO's own restart state, one step,
+        # fp64, over all 322294 wet interior interfaces (trigger population
+        # MIN(rn2,rn2b) <= -1e-12; window = interfaces 1..34, i.e. NEMO w-levels
+        # 2..35 — the full-window count incl. interface 0 is 70389/70389/0/0):
+        #     NEMO                          60845
+        #     n2_mode="nemo_bn2"            60845   0 missed, 0 spurious
+        #     n2_mode="adiabatic"           60797   48 MISSED, 0 spurious
+        # Agreement is exact at EVERY threshold swept (-1e-10..0: NEMO 41874,
+        # 67454, 70389, 70473, 70475 — nemo_bn2 identical at each; the parcel
+        # form is not), i.e. the two fields agree in their ORDERING near zero,
+        # not just on one cut. Directionality is state-dependent: at the
+        # measured state 48 missed / 0 spurious; across the four following
+        # trajectory states (kt 230401..230404, bn2 as reference) 32-43 missed
+        # and 0-2 spurious. WHY they differ (settled by review, adversarial
+        # decomposition at the spike): bn2's zrw weight puts alpha at
+        # z = gdept_lo*(1-zrw) + gdept_up*zrw = gdepw, EXACTLY the interface;
+        # the parcel form evaluates both parcels at the UPPER cell's depth —
+        # off-centred by dz/2 from where N^2 lives, first-order there instead
+        # of second. Swapping only that reference depth reproduces 47 of the
+        # 48 misses (the T/S weight is a 13% effect, no flip; the Boussinesq
+        # p/(rho0 g) depth reconstruction is 0.1%). At the spike — column
+        # (j=158,i=42), interface 9 / NEMO w-level 10, the BEFORE (rn2b) arm —
+        # the two disagree in SIGN on identical inputs: bn2 gives -4.066547e-09
+        # (fires; reproduces NEMO's rn2b to every printed digit), the parcel
+        # form gives +5.988313e-09 (does not fire). (The NOW arm at the same
+        # cell is -7.19e-12 vs -7.52e-13 — a threshold crossing, not a sign
+        # flip.) That one interface carried 99.995% of
+        # the run's largest per-step tracer error: 5.710106e-02 K collapses to
+        # -2.837890e-06 K when the exact N^2 is supplied, with the next five
+        # largest errors bit-identical (a surgical fix, not a reshuffle).
+        # Probe: scripts/validate/ocean_fidelity/dino_1226/evd_before_arm_n2.py
+        # Acceptance test: tests/ocean/unit/test_evd_n2_mode_kamm_card.py
+        # (card selection + a compensated-front column where the two modes
+        # disagree in sign at the knife-edge).
         "convection_smooth_transition": False,
-        "convection_n2_mode": "adiabatic",
+        "convection_n2_mode": "nemo_bn2",
         "convection_n2_threshold": -1e-12,
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
@@ -1476,6 +1531,21 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # under the leapfrog's Nbb seed, so it lands on THIS card only (under
     # FE the window seed IS Kmm and the options coincide byte-identically).
     "barotropic_een_seed": "nemo_kmm",
+    # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170-1172): reconcile the 3-D momentum
+    # depth-mean onto un_adv*r1_hu(Kmm) -- the SECONDARY/transport-weighted
+    # substep mean (== legoESM Hu_avg, the same quantity already routed to
+    # tracer advection) -- instead of the primary/velocity boxcar mean. The two
+    # kernels sample the substep profile at different phases (DINO nn_e=23:
+    # centroid 22.0 vs 14.67), matching NEMO's placement. CORRECTION
+    # (#1455 M2 lane, e31c9e99b): an earlier softening here claimed the
+    # window "is NOT NEMO's" from a 16%-vs-30% phase-separation measurement;
+    # that measured the FORWARD-EULER weight kernel, which this card does not
+    # run. On the leapfrog kernel this card runs, the window IS NEMO's
+    # bit-identically (primary weights diff 0.0, secondary 7e-18) and the
+    # phase separation IS NEMO's 30%.
+    # MLF-only (the N6 reconciliation is where the leap-frog barotropic
+    # mode lands on the 3-D velocity), so it lands on THIS card only.
+    "barotropic_reconcile_target": "transport_avg",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
     # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
     # — meaningful ONLY under the MLF integrator (construction raises
@@ -3062,6 +3132,9 @@ def dino_lat_lon_model_config(
         # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
         # DINOConfig.barotropic_een_seed docstring).
         barotropic_een_seed=cfg.barotropic_een_seed,
+        # NEMO dyn_spg_ts N6 momentum reconciliation target (dynspg_ts.F90:1170;
+        # see DINOConfig.barotropic_reconcile_target docstring).
+        barotropic_reconcile_target=cfg.barotropic_reconcile_target,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the

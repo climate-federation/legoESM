@@ -317,7 +317,7 @@ class EvaluationConfig(NamedTuple):
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
-    diag_days: int = 5
+    diag_days: float = 5.0   # diagnostic cadence [days]; sub-daily values are honoured (a NaN is reported at the first sample, so a coarse cadence only bounds it from above)
     checkpoint_days: int = 0
     monthly_means: bool = False
     cmip_output: bool = False
@@ -824,7 +824,17 @@ class ExperimentConfig(NamedTuple):
     # which holds land ET below potential and breaks the over-evaporation wet loop
     # that the SimpleSEB beta_soil path (=1 at field capacity, no canopy resistance)
     # produces. Only affects use_multilayer_land runs.
-    land_surface_scheme: str = "simple_seb"
+    # DEFAULT: the two-leaf canopy.  It reads per-PFT CANOPY parameters, which
+    # the driver now builds through the same routine the offline LMIP
+    # simulations use; a canopy run without that surfdata is refused rather than
+    # quietly given generic constants.
+    #
+    # "simple_seb" is ACADEMIC ONLY: measured on a well-watered column it
+    # evaporates at potential with stomata off, and with them on its humidity
+    # gradient SELF-EXTINGUISHES — the throttle warms the surface, saturation
+    # rises, the throttle shrinks it back, and evaporation stops (2 W/m2 over
+    # bare soil, surface 8-12 K hot).
+    land_surface_scheme: str = "two_leaf"
     # Initial multilayer soil water as a fraction of saturation (theta_init =
     # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
     # the init_multilayer_land_state default. The multilayer over-evaporation wet
@@ -833,6 +843,26 @@ class ExperimentConfig(NamedTuple):
     # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
     # use_multilayer_land runs.
     land_soil_moisture_init_frac: float = 0.5
+    # HOW the multilayer soil is seeded at a cold start.
+    #
+    #   "aridity" (default, unchanged) — from the initial atmosphere's
+    #       near-surface relative humidity, mapped into the plant-available
+    #       range: theta = theta_wp + RH*(theta_fc - theta_wp).  Arid columns
+    #       start near wilting, which is what stops a desert cold-start
+    #       evaporation runaway (#730).  NOTE this caps the start at FIELD
+    #       CAPACITY and makes ``land_soil_moisture_init_frac`` INERT — that
+    #       field was only ever a fallback for an initial state carrying no
+    #       humidity, which a real AMIP run never has (measured 2026-08-19: two
+    #       arms differing only in the fraction were byte-identical).
+    #
+    #   "saturation_fraction" — theta = land_soil_moisture_init_frac * theta_sat,
+    #       so the fraction becomes a real control and the soil can start ABOVE
+    #       field capacity, up to near saturation.  Use it to keep a run out of
+    #       the dry-soil attractor, where low soil water suppresses evaporation,
+    #       which dries the boundary layer, which suppresses evaporation further.
+    #       The trade is the runaway the aridity seed exists to prevent, so a
+    #       wet start wants watching over the first week rather than trusting.
+    land_soil_init: str = "aridity"
     # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
     # water (SWE) accumulates from snowfall and melts (degree-day), brightening
     # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
@@ -909,6 +939,22 @@ class ExperimentConfig(NamedTuple):
     use_multilayer_land: bool = False
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
+    # Run the multilayer land tile in EXACTLY the configuration its baked
+    # per-PFT tables were calibrated under (the single definition lives in
+    # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
+    # exchange, the SimpleSEB surface scheme, Farquhar stomata on a PRESCRIBED
+    # carbon state, and the calibration soil column (8 layers, 3 m, geometric
+    # growth 1.5).  Off (default) leaves every existing run's numerics
+    # unchanged.
+    #
+    # Without it the baked canopy conductance (Vc_max25/g1/LCMA) is INERT: the
+    # coupled tile took the no-stomata branch of ``compute_effective_beta``, so
+    # the tables were deployed under land physics they were never fitted to.
+    # Setting ``land_stomatal_beta`` alone does NOT fix that — with no carbon
+    # state the same dispatch falls to JARVIS, a different stomatal model.
+    # Validation below requires the overlapping config keys to already carry the
+    # calibration values, so nothing is silently overridden.
+    land_calibrated_physics: bool = False
     # CLM-ML only: derive each column's PFT from the surface map's DOMINANT PFT
     # (argmax of pft_fractions) instead of one pft_clm for all columns -> mixed-PFT
     # heterogeneous columns, compiled at O(#distinct structures) by the group-by-
@@ -1231,6 +1277,11 @@ class ExperimentConfig(NamedTuple):
     # then throttled by the soil's own moisture state — the same
     # land_tile_beta_soil the coupled pipeline applies).  Requires
     # use_multilayer_land on the MPAS lane; default OFF = byte-identical.
+    # NOTE: this now publishes the land tile's SOLVED surface humidity AND its
+    # solved sensible/latent fluxes to the atmosphere, not merely a root-zone
+    # beta — the flux handoff replaced the humidity-only one after the latter was
+    # measured to deliver about a tenth of the solved flux.  With it off the mesh
+    # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
 
     # Held-Suarez forcing
@@ -2038,6 +2089,92 @@ class ExperimentConfig(NamedTuple):
                 "land-mask file has NO land (elevation-derived f_land is 0 "
                 "everywhere) — pass a real --topography or a --land-mask-file."
             )
+        # The same "no land anywhere" trap, on the MESH lane, which does not use
+        # surface_tiled and so never reached the check above: the flux handoff
+        # (and any calibrated canopy conductance riding it) would build no soil
+        # column at all and go silently inert.  A degenerate all-ocean MASK FILE
+        # cannot be seen from the config.  The driver checks that case too, but
+        # only fatally for a SINGLE-rank run: under a cell partition a rank
+        # legitimately owns no land, and the cross-rank vote that would settle it
+        # cannot be placed safely (it would sit downstream of per-rank setup that
+        # can raise, leaving peers blocked).  Counting land points in the mask
+        # file HERE, where the check is rank-symmetric, is the open follow-up.
+        if (self.mpas_land_beta_soil and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "mpas_land_beta_soil with topography='flat' and no land-mask "
+                "file has NO land (elevation-derived f_land is 0 everywhere), so "
+                "no soil column is built and the land-flux handoff is silently "
+                "inert — pass a real --topography or a --land-mask-file."
+            )
+        # Deploying the baked land tables under the physics they were calibrated
+        # under.  The overlapping keys are CHECKED, not overridden, so a run can
+        # never believe it is on the calibrated model while one key disagrees;
+        # the settings with no config key (soil growth factor, carbon scheme,
+        # stomatal model) come from the shared calibrated_multilayer_setup().
+        if self.land_calibrated_physics:
+            from legoesm.land.config import calibrated_multilayer_setup
+            _cal = calibrated_multilayer_setup()
+            _grid = _cal["soil_grid"]
+            if not self.use_multilayer_land:
+                errors.append(
+                    "land_calibrated_physics=True requires use_multilayer_land=True: "
+                    "the calibrated tables are a MULTILAYER bake and the slab tile "
+                    "has no equivalent (its coupled implementation is the driver's "
+                    "own _step_slab_land, not the calibrated legoesm.land.slab_land "
+                    "model)."
+                )
+            _want = {
+                "land_stomatal_beta": (self.land_stomatal_beta, True),
+                "land_surface_scheme": (self.land_surface_scheme, "simple_seb"),
+                "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
+                "multilayer_soil_depth": (self.multilayer_soil_depth,
+                                          _grid.total_depth),
+                # gs_max only feeds the Jarvis model, which the calibrated setup
+                # does not select — but the setup replaces the whole stomatal
+                # config, so a value set here would vanish without a word.
+                "land_gs_max": (self.land_gs_max, _cal["stomata"].gs_max),
+                # The land setup forces this on, so `false` here would pass
+                # validation and then be silently reversed.
+                "snow_albedo_feedback": (self.snow_albedo_feedback,
+                                         _cal["snow_albedo_feedback"]),
+            }
+            for _key, (_got, _exp) in _want.items():
+                if _got != _exp:
+                    errors.append(
+                        f"land_calibrated_physics=True requires {_key}={_exp!r} "
+                        f"(the value the baked tables were fitted under); got "
+                        f"{_got!r}. Set it or drop land_calibrated_physics — "
+                        "these are not silently overridden."
+                    )
+            # ONLY THE UNSTRUCTURED (MESH) LANE CAN CARRY THIS TODAY, and the
+            # reason is specific: that lane hands the atmosphere the land tile's
+            # SOLVED sensible and latent fluxes, so the calibrated canopy
+            # conductance arrives as the number the land model computed.  Every
+            # other lane re-derives the land flux from a scaled saturation
+            # humidity, which cannot reproduce it — the land scheme applies its
+            # throttle to the humidity GRADIENT and bypasses it for snow and
+            # dew, so the re-derivation can reach the opposite SIGN, and the
+            # atmosphere's exchange coefficient uses a scalar roughness where
+            # the land uses a per-column tuned one.  Both reviewers refuted the
+            # humidity route independently (2026-08-19).  Extending the FLUX
+            # handoff to the structured lanes means carrying those fluxes at the
+            # radiation cadence through SegmentCarry; until then, refuse rather
+            # than deploy the tables under a coupling that cannot express them.
+            _is_mesh_lane = (d.discretization == "mpas"
+                             or normalize_grid_type(g.grid_type) == "mpas")
+            if not _is_mesh_lane:
+                errors.append(
+                    "land_calibrated_physics=True is supported only on the MPAS "
+                    f"(Voronoi) lane today; discretization={d.discretization!r} "
+                    "re-derives the land flux from a scaled saturation humidity "
+                    "instead of taking the land tile's solved flux, which cannot "
+                    "reproduce the calibrated canopy conductance (and can reach "
+                    "the wrong sign over snow and dew). Run the calibrated arm on "
+                    "the mesh lane. (There is no partial form: the soil growth "
+                    "factor and the carbon scheme this switch supplies have no "
+                    "config keys of their own.)"
+                )
         # Transient land-use cover re-weights the MULTILAYER land vegetation params
         # from a transient surfdata; without both signals it would silently no-op
         # (there is no slab-land transient-cover path).  Fail early rather than run
@@ -2139,6 +2276,40 @@ class ExperimentConfig(NamedTuple):
                     "humidity; turbulence='none' has no surface latent flux "
                     "to throttle — the knob would be silently inert."
                 )
+            if (self.land_calibrated_physics and self.use_multilayer_land
+                    and not self.mpas_land_beta_soil):
+                # Without this the mesh lane SOLVES the land tile's humidity
+                # and fluxes and then throws them away, keeping the static
+                # mpas_land_beta instead — so the fitted plant model would
+                # change the land tile's own temperature and nothing the
+                # atmosphere sees (codex round 3).  A calibrated run whose
+                # canopy conductance never reaches the atmosphere is the same
+                # inert-parameter defect the flag exists to remove.
+                errors.append(
+                    "land_calibrated_physics=True on the MPAS lane requires "
+                    "mpas_land_beta_soil=True: without it the lane discards the "
+                    "land tile's solved humidity and fluxes and keeps the static "
+                    "mpas_land_beta, so the calibrated canopy conductance would "
+                    "never reach the atmosphere."
+                )
+            if self.mpas_land_beta_soil and self.turbulence != "none":
+                # The land tile's SOLVED fluxes are handed to the turbulence
+                # kernel, and a kernel whose signature has no ``surface_flux``
+                # argument REFUSES them — at run time, after the job has started.
+                # Ask the same signature scan the runtime guard uses, so a run
+                # that could never couple the land fluxes fails at config time
+                # instead of hours in (codex round 5).
+                from legoesm.atmosphere.physics.turbulence.integration import (
+                    schemes_accepting_surface_flux,
+                )
+                _flux_ok = schemes_accepting_surface_flux()
+                if self.turbulence not in _flux_ok:
+                    errors.append(
+                        f"mpas_land_beta_soil=True hands the land tile's solved "
+                        f"surface fluxes to the turbulence scheme, but "
+                        f"{self.turbulence!r} takes no 'surface_flux' argument "
+                        f"and refuses them at run time. Use one of {_flux_ok}."
+                    )
             if self.mpas_land_beta_soil:
                 # Traced beta_soil needs the multilayer land producing it and
                 # the turbulence surface flux consuming it (inert-corner
@@ -2506,6 +2677,11 @@ class ExperimentConfig(NamedTuple):
                 f"in [1e4, 1e8]; got {self.C_land!r}."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
+        _soil_init_modes = ("aridity", "saturation_fraction")
+        if self.land_soil_init not in _soil_init_modes:
+            errors.append(
+                f"land_soil_init must be one of {_soil_init_modes}, got "
+                f"{self.land_soil_init!r}.")
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
                 f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "

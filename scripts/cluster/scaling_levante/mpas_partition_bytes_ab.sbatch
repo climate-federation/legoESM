@@ -89,6 +89,14 @@ run_arm () {  # method tag
 
 # Parity first: a partition change must not change the answer.
 echo "=== parity gate: s6@4 metis ==="
+# The gate compares against the single-device reference with EXACT-exchange
+# tolerances, so it must run with the narrow halo even when the timing arms
+# run the deep one. The deep halo is physically equivalent, not bit-exact --
+# it recomputes an outer ring, which puts u about 3e-3 off the serial
+# reference and stays there at double precision. Submitting this job with
+# the deep halo exported once made the gate fail and killed both arms
+# before any timing ran.
+LEGOESM_MPAS_WIDE_HALO=0 \
 JAX_ENABLE_X64=0 srun --nodes=1 --ntasks=4 --ntasks-per-node=4 \
     --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
   "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
