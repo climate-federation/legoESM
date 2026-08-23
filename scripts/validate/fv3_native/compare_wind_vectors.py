@@ -75,7 +75,7 @@ NO_FLIP = {"vlon", "vlat"}
 # divg_u/divg_v (compare_extchain_oracle.op_vector): es plays the i/u role, ew
 # the j/v role.  The sign is DERIVED from the op and the data's best fit must
 # agree -- a negated port es/ew then fails instead of being absorbed.
-PARITY_FLOOR = 1.0e-13  # interior gate; ~3x the observed C48 float64 floor
+PARITY_FLOOR = 1.0e-13  # compute-block gate; ~3x the observed C48 float64 floor
 
 
 def edge_expected_sign(fam: str, op) -> float:
@@ -141,6 +141,20 @@ def main() -> int:
 
     orc = load_oracle(Path(args.oracle_dir))
 
+    # provenance: refuse an unprovenanced dump.  The norm/orthogonality controls
+    # cannot tell a genuine pinned-Fortran dump from a substituted or stale one
+    # that happens to hold valid unit vectors, so require the physics-vector NOTE
+    # lines only the patched Fortran driver (fv3_extchain_oracle_driver.F90)
+    # writes.  The sbatch additionally records the dump hashes and asserts the
+    # driver's own EXTCHAIN_DRIVER_DONE marker in run_out.txt.
+    for t in range(6):
+        notes = " ".join(orc[t].get("notes", []))
+        if "VLON_BOUNDS" not in notes or "gridstruct%es/ew" not in notes:
+            raise SystemExit(
+                f"tile {t+1}: dump lacks the wind-vector provenance NOTE lines "
+                f"(VLON_BOUNDS / gridstruct%es/ew) the patched Fortran driver "
+                f"writes -- refuse to certify from an unprovenanced dump")
+
     # production gridstructs: update_dwinds_phys reads gridstruct%vlon on the
     # oracle_conventions bounded context, so build the vectors from THAT grid.
     gs6 = build_six_face_duo_context(
@@ -167,8 +181,9 @@ def main() -> int:
 
     # ---- instrument self-controls on the ORACLE (known answers) ----
     # The oracle ZERO-FILLS unwritten edge slots (not NaN), so a finite value is
-    # NOT proof of a written cell.  Run the unit/orthogonality checks ONLY on the
-    # interior mask each family is scored on -- and require those cells finite.
+    # NOT proof of a written cell.  Run the unit/orthogonality checks on the
+    # STRICT interior mask (a subset of the interior|edge block the parity gate
+    # scores) and require those cells finite.
     def _ovec_int(t, stem, halo):
         v = np.stack([np.asarray(orc[t]["arrays"][f"{stem}{c}"],
                                  dtype=np.float64) for c in (1, 2, 3)], -1)
