@@ -88,3 +88,52 @@ nudge visible.
   because a difference in firing *rate* is a difference in time-mean mixing.
   It is reported here as a census on both models at the shared state; it is
   **not** a claim about the deficit.
+
+---
+
+## AMENDMENT, after a harness smoke test and before any arm ran to completion
+
+A 10-step smoke run of the `baseline` arm — done to check the harness threads
+the card's surface forcing correctly, which it did not first time, and the
+model's own guard raised — produced gains that exposed a **missing control**.
+The ladder is changed before the real run.
+
+The smoke numbers, recorded because they are measurements and not to be quietly
+re-taken:
+
+| nudge | G(1 step) | G(10 steps) |
+|---|---:|---:|
+| 1e-14 | 1.6859e+04 | 1.4449e+05 |
+| 1e-12 | 5.8441e+03 | 5.8285e+03 |
+| 1e-10 | 1.1868e+07 | 5.0449e+06 |
+
+Two things are visible; only one is trustworthy.
+
+* **1e-10 is 2031× off 1e-12 at a single step.** No round-off produces that.
+  Rectification within one step is real at that amplitude.
+* **1e-14 sits 2.9× *above* 1e-12** — the wrong direction for a nonlinearity
+  that grows with amplitude, and exactly what an **arithmetic floor** looks
+  like. A 1e-14 relative nudge is ~2e-13 K on a ~20 K field against ~4e-15 K of
+  double-precision round-off per cell: only ~45× clear. Not enough to quote.
+
+**The fix, registered before the run.** Five rungs, **1e-16 … 1e-8**, with
+**1e-16 as a round-off control**: at that size the kick is at round-off, so the
+response it produces *is* the arithmetic floor. A rung whose **response**
+`G × ε` is within **3×** of the control's is measuring that floor and is
+excluded from the spread. The number of rungs actually used is printed in every
+column, so an arm scored on two rungs cannot be mistaken for one scored on four.
+
+*Note on the comparison, because getting it backwards is easy and the first
+implementation did:* the floor is a floor on the **response**, not on the
+**gain**. At `ε = 1e-16` the gain is enormous precisely because ε sits in the
+denominator, so comparing *gains* would exclude every honest rung and keep the
+floor — the exact inversion. The self-check asserts the exclusion flips the
+verdict **both ways**: a floor-contaminated ladder reads rectified without it
+and proportional with it, and a genuinely rectified ladder survives it.
+
+A control was added; the bar was not moved. `spread >= 3` still decides, now
+computed only over rungs that clear the floor.
+
+**Consequence for the reading.** The question sharpens: does rectification
+appear at the **ensemble's own 1e-14 amplitude**, or only far above it? Only the
+first would explain the recorded 309×. Three rungs could not tell; five can.

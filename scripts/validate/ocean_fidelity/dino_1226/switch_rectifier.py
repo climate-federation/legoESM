@@ -201,20 +201,26 @@ def _self_check():
                             1e-10: {1: 1.0}}, 1))
     # the round-off floor control: a rung reporting the SAME gain as the
     # sub-resolution control is measuring arithmetic and must be dropped.
-    g = {1e-16: {1: 100.0}, 1e-14: {1: 120.0}, 1e-12: {1: 5.0},
-         1e-10: {1: 5.0}, 1e-8: {1: 5.0}}
+    # Round-off floor: response 1e-14 everywhere below 1e-12, then a clean
+    # linear response of 5.0 gain.  1e-16 and 1e-14 both sit AT the floor
+    # response (1e-14) and must go; 1e-12 and up are honest.
+    g = {1e-16: {1: 1e-14 / 1e-16},      # gain 100      -> response 1e-14
+         1e-14: {1: 1.2e-14 / 1e-14},    # gain 1.2      -> response 1.2e-14  FLOOR
+         1e-12: {1: 5.0},                # response 5e-12
+         1e-10: {1: 5.0},
+         1e-8:  {1: 5.0}}
     ex = floor_excluded(g, 1)
     assert ex == {1e-16, 1e-14}, ex
-    # WITHOUT the exclusion the floor manufactures a 24x "nonlinearity"; WITH
-    # it, the three real rungs are flat and the arm reads proportional. This is
-    # the whole point of the control, so it is asserted both ways.
-    assert abs(spread(g, 1) - 24.0) < 1e-9
+    # WITHOUT the exclusion the floor manufactures an 83x "nonlinearity"; WITH
+    # it the three real rungs are flat and the arm reads proportional. That is
+    # the whole point of the control, so it is asserted BOTH ways.
+    assert spread(g, 1) >= SPREAD_BAR, spread(g, 1)
     assert abs(spread(g, 1, ex) - 1.0) < 1e-12
-    assert spread(g, 1) >= SPREAD_BAR and spread(g, 1, ex) < SPREAD_BAR
+    assert spread(g, 1, ex) < SPREAD_BAR
     # a genuinely rectified ladder survives the exclusion
     g2 = {1e-16: {1: 1.0}, 1e-14: {1: 5.0}, 1e-12: {1: 5.0},
           1e-10: {1: 1500.0}, 1e-8: {1: 1500.0}}
-    assert floor_excluded(g2, 1) == {1e-16}
+    assert floor_excluded(g2, 1) == {1e-16}, floor_excluded(g2, 1)
     assert spread(g2, 1, floor_excluded(g2, 1)) >= SPREAD_BAR
     # fewer than two usable rungs is NaN, never a flattering 1.0
     assert np.isnan(spread({1e-16: {1: 1.0}, 1e-14: {1: 1.0}}, 1,
@@ -243,20 +249,27 @@ def _grid(results):
 
 
 def floor_excluded(gain_by_eps, n):
-    """Rungs whose gain sits within FLOOR_MARGIN of the round-off control's.
+    """Rungs whose RESPONSE is at the arithmetic floor.
 
-    The control rung kicks BELOW fp64 resolution, so its gain is the
-    arithmetic floor. Any rung reporting a similar gain is measuring the same
-    floor and cannot contribute to a linearity statistic.
+    The comparison is on the response ``||dT|| = G * eps``, NOT on the gain.
+    The floor is a floor on the response: at ``FLOOR_EPS`` the kick is below
+    fp64 resolution, so ``||dT||`` there is round-off and nothing else. Its
+    GAIN is enormous precisely because the eps in the denominator is tiny, so
+    comparing gains excludes every honest rung and keeps the floor -- the exact
+    inversion, which is what the first version of this function did.
+
+    A rung is excluded when its response is within ``FLOOR_MARGIN`` of the
+    control's, i.e. when it cannot be told apart from round-off.
     """
     if FLOOR_EPS not in gain_by_eps:
         return set()
-    floor = gain_by_eps[FLOOR_EPS][n]
+    floor_norm = gain_by_eps[FLOOR_EPS][n] * FLOOR_EPS
     out = {FLOOR_EPS}
-    if not np.isfinite(floor) or floor == 0:
+    if not np.isfinite(floor_norm) or floor_norm == 0:
         return out
     for e, per in gain_by_eps.items():
-        if e != FLOOR_EPS and np.isfinite(per[n]) and per[n] <= FLOOR_MARGIN * floor:
+        if e != FLOOR_EPS and np.isfinite(per[n]) \
+                and per[n] * e <= FLOOR_MARGIN * floor_norm:
             out.add(e)
     return out
 
