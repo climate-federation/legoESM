@@ -27,6 +27,30 @@ set +e
 #
 # `--steps 1` reaches the preflight gradient and stops. The driver reports
 # `no_active_gradient` with a per-parameter reason, which is the measurement.
+#
+# ---------------------- 2026-08-21 REUSED, for smagorinsky ------------------
+# Same instrument, second question. In the eight-case fit at pin 5d3ae37cf,
+# smagorinsky reports preflight loss = 1 (exactly 1 by construction under
+# `default_relative`) with |grad| of 9.27e17 / 1.75e17 / 1.31e17 on C_s / Pr_t
+# / l_mix_max -- all three within 7x of each other. A single near-singular
+# denominator would show up in ONE parameter, so the flat spread points at the
+# objective rather than at a coefficient, and the earlier "the mixing-length
+# cutoff is non-smooth" reading does not account for it.
+#
+# The joint loss is a mean, so per-case gradients ADD and one bad case sets the
+# scale for every parameter at once -- which is exactly how CLUBB's missing
+# surface BC was finally localised (#1508). Enumerate before theorising.
+#
+# PRE-REGISTERED:
+#   CONFIRMS case-localised -> one or two cases carry |grad| >= 1e10 while the
+#                              rest sit at <= 1e4.
+#   REFUTES it              -> all eight cases come back near 1e17, i.e. the
+#                              defect is a shared term in the closure and not a
+#                              property of any regime.
+# The per-case LOSS carries no information here (default_relative normalises
+# each case by its own default, so a single-case arm is 1 by construction).
+# The GRADIENT is the measurement.
+# ---------------------------------------------------------------------------
 : "${G_WT:?set G_WT to the pinned worktree}"
 WT=$G_WT
 cd "$WT" || exit 1
@@ -35,16 +59,18 @@ export PYTHONPATH=$WT/src:$(ls -d "$WT"/packages/*/ | tr '\n' ':')$PYTHONPATH
 export XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results
-OUT=$R/scm_les_turbulence/_gradcase
+SCHEME=${G_SCHEME:-louis}
+CASE_LIST=${G_CASES:-"bomex ekman cbl gabls1 rico astex dycoms"}
+OUT=${G_OUT:-$R/scm_les_turbulence/_gradcase}
 rm -rf "$OUT"
 
-for c in bomex ekman cbl gabls1 rico astex dycoms; do
+for c in $CASE_LIST; do
   echo "=================== $c ==================="
   $PY scripts/run/run_scm_les_turbulence_tuning.py \
       --cases "$c:$R/les_ref/$c" --outdir "$OUT/$c" \
-      --nlev 48 --steps 1 --schemes louis \
+      --nlev 48 --steps 1 --schemes "$SCHEME" \
       --joint-aggregation default_relative --surface-flux-to-closure \
-      2>&1 | grep -E "^\[tune\]|^\[eval\]|joint|status|FAILED|Traceback|Error" | tail -8
+      2>&1 | grep -E "preflight loss|largest:|^\[tune\]|^\[eval\]|joint|status|FAILED|Traceback|Error" | tail -10
   echo "  --- frozen reasons ---"
   $PY - "$OUT/$c/tuned_parameters.json" <<'PYEOF'
 import json, sys
@@ -64,6 +90,7 @@ for s in p["schemes"]:
 PYEOF
 done
 
+if [ "${G_RAD_DISCRIM:-1}" = 1 ]; then
 echo "=================== the two stratocumulus arms WITHOUT simple_lw ==============="
 # If astex/dycoms are the culprits, the discriminator is the RADIATION, not the
 # case: same deck, same reference, kernel off. This is a confounded score (the
@@ -93,4 +120,5 @@ for s in p["schemes"]:
           f"nonfinite_grad={len(nf)}")
 PYEOF
 done
+fi
 echo "DONE $(date +%T)"

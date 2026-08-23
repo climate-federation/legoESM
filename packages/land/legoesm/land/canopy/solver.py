@@ -457,8 +457,13 @@ def solve_canopy_closure(
 
     Returns
     -------
-    x_final : shape (6,)  — converged state
-    n_iters : scalar int  — iteration count when convergence was first reached
+    x_final : shape (6,)  — the final Newton iterate
+    n_iters : scalar int  — iteration count when the loop stopped
+    converged : scalar bool — whether the loop stopped because the Newton step
+        fell below ``tol`` (True) rather than because it ran out of iterations
+        or its Jacobian went singular (False).  A False here means ``x_final``
+        is NOT a root of the canopy residual, so the fluxes derived from it are
+        not physics; callers must not consume them as if they were.
     """
     # Fail-early on a typo'd LE_module: the internal leaf-energy dispatch is a
     # bare ``if LE_module == "BT": ... else: # PM``, so an unknown value would
@@ -547,11 +552,21 @@ def _make_implicit_newton_solver(
             # Jacobian / non-finite residual at the calm cold-night MOST edge
             # makes ``solve`` return NaN, and ``jnp.clip(nan)`` stays NaN — a
             # single non-finite step then poisons the whole coupled land state
-            # (every soil leaf goes NaN, forcing the atomic land guard to revert
-            # the step).  Replace it with 0 (no update this iteration) so the
-            # closure returns the last finite iterate instead, keeping the flux
-            # finite.  inf is already mapped to +/-5 by the clip below.
-            delta = jnp.where(jnp.isfinite(delta), delta, 0.0)
+            # (every soil leaf goes NaN).  Replace it with 0 (no update this
+            # iteration) so the closure returns the last finite iterate instead,
+            # keeping the flux finite.  inf is already mapped to +/-5 by the
+            # clip below.
+            #
+            # ZEROING A BAD STEP IS NOT CONVERGENCE.  ``delta = 0`` has zero
+            # norm, so the test below used to read the substituted step as
+            # "converged" — the solver reported SUCCESS on precisely the column
+            # whose Jacobian had just gone singular, handed its garbage state to
+            # the caller as if it were a root, and defeated the backward pass's
+            # convergence mask (which exists to zero the gradient of a
+            # non-root).  Carry the step's finiteness into the flag so a
+            # substituted step can never be mistaken for a solution.
+            step_finite = jnp.all(jnp.isfinite(delta))
+            delta = jnp.where(step_finite, delta, jnp.zeros_like(delta))
             # Constant scalar clamp on the Newton step.  The earlier
             # decaying clamp (10 → 0.1) starved late iterations of step
             # size during dusk transitions; constant 5.0 lets the solver
@@ -559,7 +574,7 @@ def _make_implicit_newton_solver(
             # preventing catastrophic overshoot.
             delta = jnp.clip(delta, -5.0, 5.0)  # coeff-ok: constant Newton step cap (see note above)
             x_new = x + delta
-            new_converged = jnp.linalg.norm(delta) < tol
+            new_converged = step_finite & (jnp.linalg.norm(delta) < tol)
             return (x_new, i + 1, new_converged)
 
         x_final, n_iters, converged = jax.lax.while_loop(
@@ -568,16 +583,19 @@ def _make_implicit_newton_solver(
 
     @jax.custom_vjp
     def solve(x0, bundle):
-        x_final, n_iters, _converged = _forward(x0, bundle)
-        return x_final, n_iters
+        x_final, n_iters, converged = _forward(x0, bundle)
+        return x_final, n_iters, converged
 
     def solve_fwd(x0, bundle):
         x_final, n_iters, converged = _forward(x0, bundle)
-        return (x_final, n_iters), (x_final, bundle, converged)
+        return (x_final, n_iters, converged), (x_final, bundle, converged)
 
     def solve_bwd(res, g):
         x_star, bundle, converged = res
-        g_x, _ = g  # ignore cotangent for the integer iteration count
+        # Cotangents for the iteration count and the convergence flag are
+        # ignored: both are integer/boolean diagnostics, not differentiable
+        # outputs.
+        g_x, _, _ = g
 
         # NaN / divergence guard: substitute zeros so the adjoint solve
         # is well-defined even if Newton diverged.

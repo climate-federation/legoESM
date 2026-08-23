@@ -71,6 +71,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import json
 import os
 import time
 
@@ -223,6 +224,38 @@ def _print_before_bridge_verify(st, before, grid) -> None:
     print(f"BEFORE-LEVEL BRIDGE VERIFY vs NEMO restart tb/sb/ub/vb (wet cells): "
           f"max|d_tb|={d_tb:.3e}  max|d_sb|={d_sb:.3e}  max|d_ub|={d_ub:.3e}  "
           f"max|d_vb|={d_vb:.3e}", flush=True)
+
+
+def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
+    """Refuse an artifact whose seasonal clock is not the one NEMO is on.
+
+    ``stamped`` is anything with ``__contains__`` and ``__getitem__`` over the
+    stamp names -- an ``npz`` handle or a plain dict.  Returns the pair
+    ``(t0_used, t0_nemo)`` in seconds.
+
+    #1455 and its follow-up.  The first version of this guard rejected only
+    ``t0 == 0``, which let every other manual offset through: an explicit step
+    offset of one stamps 2700 s, still most of a year out of phase with the
+    day-180 restart, and the gate called it a NEMO comparison.  Comparing
+    against the offset read from the restart itself rejects ALL of them.
+    """
+    for name in ("seasonal_t0_seconds", "seasonal_t0_reference_seconds"):
+        if name not in stamped:
+            raise SystemExit(
+                f"{path} carries no {name} stamp -- it predates the seasonal "
+                "clock guard (#1455) and its forcing phase cannot be checked "
+                "against NEMO's. Re-run the twin with the current "
+                "kamm_twin_90d.py.")
+    t0 = float(stamped["seasonal_t0_seconds"])
+    t0_nemo = float(stamped["seasonal_t0_reference_seconds"])
+    if abs(t0 - t0_nemo) > 0.5:
+        raise SystemExit(
+            f"{path} ran with its seasonal forcing at {t0 / 86400.0:.2f} d of "
+            f"the 360-day year, but the NEMO run it is scored against is at "
+            f"{t0_nemo / 86400.0:.2f} d "
+            f"({abs(t0 - t0_nemo) / 86400.0:.2f} d out of phase). That is a "
+            "cross-season comparison, not a fidelity measurement.")
+    return t0, t0_nemo
 
 
 def _restart_elapsed_seconds(path: str) -> float:
@@ -677,6 +710,22 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
     # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
     t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
+    # The clock the NEMO run this twin is scored against is actually on, read
+    # from the same restart.  Stamping it next to the clock the twin USED lets
+    # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
+    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    # Everything about this run a comparison must hold fixed.  A two-arm A/B
+    # that changes the clock and something else is a confound, and nothing in
+    # the artifact could see it before this stamp existed.
+    run_config = json.dumps({
+        "recipe": recipe, "n_days": int(n_days),
+        "run_traj": run_traj, "run_stepdump": run_stepdump,
+        "restart_file": restart_file,
+        "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
+        "surface_tendency_placement": surface_tendency_placement,
+        "perturb_seed": perturb_seed,
+    }, sort_keys=True)
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
@@ -775,6 +824,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         nemo_ladder_mode=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
+        # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
+        seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
+        run_config=np.str_(run_config),
     )
     for d in snap_days:
         if d in t3d:

@@ -75,8 +75,8 @@ def test_config_has_no_flag_leaves():
     param_leaves = jax.tree_util.tree_leaves(CLUBBParams())
     surface_leaves = jax.tree_util.tree_leaves(cfg.surface)
     # clubb_dt + w_tol + rt_tol + thl_tol + wp2_max + tke_min + T0 + prognostic
-    # = 8 scalar fields on CLUBBConfig itself.
-    assert len(cfg_leaves) == len(param_leaves) + len(surface_leaves) + 8
+    # + cloud_buoyancy + cloud_source = 10 scalar fields on CLUBBConfig itself.
+    assert len(cfg_leaves) == len(param_leaves) + len(surface_leaves) + 10
 
 
 def test_is_pytree_round_trip():

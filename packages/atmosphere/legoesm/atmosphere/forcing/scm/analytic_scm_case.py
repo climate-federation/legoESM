@@ -140,6 +140,11 @@ class AnalyticSCMCaseSpec:
     def bulk_ce(self) -> None:
         return None
 
+    @property
+    def les_n_c_m3(self) -> None:
+        """Analytic cases are dry, so no droplet concentration applies."""
+        return None
+
 
 ANALYTIC_SCM_CASES: dict[str, AnalyticSCMCaseSpec] = {
     "gabls1": AnalyticSCMCaseSpec(

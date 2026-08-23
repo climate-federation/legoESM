@@ -76,6 +76,7 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig, calibrated_multilayer_setup
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
@@ -418,6 +419,11 @@ def build_multilayer_cfg(cp, data):
     # feedback come from it, and the mode fields below are the CLI-switchable
     # ones seeded from it in the module constants above.
     cfg = MultiLayerLandConfig(**_CALIBRATED)._replace(
+        # PINNED to the scheme these tables were fitted under.  The library
+        # default is now the two-leaf canopy; inheriting it here would fit
+        # canopy physics while the bake claims simple_seb.  Re-targeting this
+        # calibrator at the canopy is a deliberate re-fit, not a default change.
+        surface_scheme=SimpleSEBConfig(),
         soil_grid=SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
                                  growth_factor=_SOIL_GROWTH),
         hydraulics=hyd, thermal=thermal,
