@@ -93,3 +93,123 @@ def update_dwinds_phys_duo_jax(u, v, u_dt, v_dt, dt, vlon, vlat, es1, ew2,
     u_new = jnp.asarray(u).at[ng:ng + n, ng:ng + n + 1].add(du)
     v_new = jnp.asarray(v).at[ng:ng + n + 1, ng:ng + n].add(dv)
     return u_new, v_new
+
+
+# --- Held-Suarez forcing (Held & Suarez 1994; driver/solo/hswf.F90) ---
+_HS_DTY = 60.0            # equator-pole equilibrium dT [K]
+_HS_DTZ = 10.0           # static-stability dtheta [K]
+_HS_KAPPA = 2.0 / 7.0
+_HS_P0 = 1.0e5           # reference pressure [Pa]
+_HS_T0 = 200.0           # equilibrium-T floor [K]
+_HS_T_EQ0 = 315.0        # equatorial surface equilibrium theta [K]
+_HS_H0 = 7.0             # scale height [km], strat/meso lapse thickness
+_HS_SDAY = 86400.0       # seconds per day
+_HS_KA_DAYS = 40.0       # tropospheric k_a = 1/40 day
+_HS_KS_DAYS = 4.0        # surface k_s = 1/4 day
+_HS_KF_DAYS = 1.0        # Rayleigh k_f = 1/1 day
+_HS_SIGB = 0.7           # boundary-layer sigma
+_HS_MS_DAYS = 10.0       # mesosphere relaxation [day]
+_HS_ST_DAYS = 40.0       # stratosphere relaxation at 100 mb [day]
+_HS_REF_RADIUS = 6.371e6  # H&S reference radius for the time-scale ratio [m]
+_HS_STRAT_LAPSE = 2.25   # strat/meso lapse [K/km]
+_HS_P_MESO = 1.0e2       # mesosphere top boundary, 1 mb [Pa]
+_HS_P_STRAT = 100.0e2    # stratosphere boundary, 100 mb [Pa]
+_HS_TAU_PREF = 100.0     # relaxation-time log reference (pl in mb)
+
+
+def held_suarez_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
+                     strat=True, radius=None):
+    """Held-Suarez forcing, one cube face, all levels: faithful port of
+    ``Held_Suarez_Tend`` (``driver/solo/hswf.F90``).  Tendencies are accumulated
+    from zero; the k-loop runs bottom-up so the equilibrium-temperature column
+    reproduces the Fortran ``teq(k) = teq(k+1) + dt_tropic`` recursion.
+
+    Shapes: pt, ua, va, delp, pkz ``(n, n, npz)``; peln, pe ``(n, n, npz+1)``;
+    lat ``(n, n)`` radians; pdt [s]; radius [m] (default ``constants.R_earth``).
+    Returns ``(t_dt, u_dt, v_dt)`` each ``(n, n, npz)``.  NumPy authority; the
+    strat teq recursion needs ``lax.scan`` for a JAX twin (deferred).
+    """
+    from legoesm import constants
+    if radius is None:
+        radius = constants.R_earth
+    pt = np.asarray(pt, dtype=np.float64)
+    ua = np.asarray(ua, dtype=np.float64)
+    va = np.asarray(va, dtype=np.float64)
+    delp = np.asarray(delp, dtype=np.float64)
+    peln = np.asarray(peln, dtype=np.float64)
+    pkz = np.asarray(pkz, dtype=np.float64)
+    pe = np.asarray(pe, dtype=np.float64)
+    lat = np.asarray(lat, dtype=np.float64)
+    ny, nx, npz = pt.shape
+
+    rdt = 1.0 / pdt
+    rad_ratio = radius / _HS_REF_RADIUS
+    kf_day = _HS_SDAY * rad_ratio
+    rkv = pdt / (_HS_KF_DAYS * kf_day)
+    rka = pdt / (_HS_KA_DAYS * kf_day)
+    rks = pdt / (_HS_KS_DAYS * kf_day)
+    t_ms = _HS_MS_DAYS * rad_ratio
+    t_st = _HS_ST_DAYS * rad_ratio
+    tau = (t_st - t_ms) / np.log(_HS_TAU_PREF)
+    rms = pdt / (t_ms * _HS_SDAY)
+    rmr = 1.0 / (1.0 + rms)
+    rsgb = 1.0 / (1.0 - _HS_SIGB)
+    ap0k = 1.0 / _HS_P0 ** _HS_KAPPA
+    algpk = np.log(ap0k)
+
+    clat = np.cos(lat)
+    c2 = clat ** 2
+    tey = ap0k * (_HS_T_EQ0 - _HS_DTY * np.sin(lat) ** 2)
+    tez = _HS_DTZ * (ap0k / _HS_KAPPA) * c2
+    ps = pe[:, :, npz]                                  # surface pressure
+    pl = delp / (peln[:, :, 1:] - peln[:, :, :-1])      # layer-mean pressure
+
+    t_dt = np.zeros((ny, nx, npz))
+    u_dt = np.zeros((ny, nx, npz))
+    v_dt = np.zeros((ny, nx, npz))
+    teq = np.zeros((ny, nx, npz + 1))                   # slot npz = teq(npz+1), unread
+
+    for k in range(npz - 1, -1, -1):                    # bottom-up (Fortran k=npz..1)
+        plk = pl[:, :, k]
+        ptk = pt[:, :, k]
+        pkzk = pkz[:, :, k]
+
+        # troposphere: standard Held & Suarez
+        sigl = plk / ps
+        f1 = np.maximum(0.0, (sigl - _HS_SIGB) * rsgb)
+        teq_t = tey - tez * (np.log(pkzk) + algpk)
+        teq_t = np.maximum(_HS_T0, teq_t * pkzk)
+        rkt = rka + (rks - rka) * f1 * c2 * c2          # cos^4 lat
+        t_trop = rkt * (teq_t - ptk) / (1.0 + rkt) * rdt
+
+        sigf = (sigl - _HS_SIGB) * rsgb * rkv
+        fric = sigf > 0.0
+
+        if strat:
+            # dz = h0 * log(pl_{k+1}/pl_k) (LAYER-mean, not interface); the
+            # bottom (k=npz-1) is always tropospheric so its clamped pl_{k+1}
+            # is discarded by the meso/strat masks.
+            plk1 = pl[:, :, k + 1] if k + 1 < npz else plk
+            dz = _HS_H0 * (np.log(plk1) - np.log(plk))
+            meso = plk <= _HS_P_MESO
+            stratm = (~meso) & (plk <= _HS_P_STRAT)
+            teq_m = teq[:, :, k + 1] - _HS_STRAT_LAPSE * clat * dz
+            t_meso = ((ptk + rms * teq_m) * rmr - ptk) * rdt
+            with np.errstate(divide="ignore", invalid="ignore"):
+                relx = pdt / ((t_ms + tau * np.log(0.01 * plk)) * _HS_SDAY)
+                teq_s = teq[:, :, k + 1] + _HS_STRAT_LAPSE * clat * dz
+                t_strat = relx * (teq_s - ptk) / (1.0 + relx) * rdt
+            t_dt[:, :, k] += np.where(meso, t_meso,
+                                      np.where(stratm, t_strat, t_trop))
+            teq[:, :, k] = np.where(meso, teq_m,
+                                    np.where(stratm, teq_s, teq_t))
+            fric = fric & ~(meso | stratm)
+        else:
+            t_dt[:, :, k] += t_trop
+            teq[:, :, k] = teq_t
+
+        sigf = np.where(fric, sigf, 0.0)
+        tmp = sigf / (1.0 + sigf) * rdt
+        u_dt[:, :, k] -= (ua[:, :, k] + u_dt[:, :, k]) * tmp
+        v_dt[:, :, k] -= (va[:, :, k] + v_dt[:, :, k]) * tmp
+    return t_dt, u_dt, v_dt

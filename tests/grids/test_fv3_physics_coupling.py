@@ -132,3 +132,118 @@ def test_differentiable_wrt_the_tendency(case):
     minus = jnp.asarray(c["u_dt"]).at[idx].add(-eps)
     fd = (loss(pert) - loss(minus)) / (2 * eps)
     assert np.isclose(float(g[idx]), float(fd), rtol=1e-5, atol=1e-6)
+
+
+# ---- Held-Suarez forcing: vectorized authority vs an independent loop ref ----
+from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
+    held_suarez_tend,
+    _HS_DTY, _HS_DTZ, _HS_KAPPA, _HS_P0, _HS_T0, _HS_T_EQ0, _HS_H0, _HS_SDAY,
+    _HS_KA_DAYS, _HS_KS_DAYS, _HS_KF_DAYS, _HS_SIGB, _HS_MS_DAYS, _HS_ST_DAYS,
+    _HS_REF_RADIUS, _HS_STRAT_LAPSE, _HS_P_MESO, _HS_P_STRAT, _HS_TAU_PREF,
+)
+
+NPZ = 20
+R_E = 6.371e6
+
+
+def _hs_column(n=5, npz=NPZ, seed=1):
+    """A plausible sigma-pressure column that triggers meso/strat/tropo."""
+    rng = np.random.default_rng(seed)
+    ps = 1.0e5 + rng.normal(scale=200.0, size=(n, n))          # ~surface Pa
+    # half-level sigma from ~1e-5 (top) to 1 (surface): spans all three regimes
+    sig = np.exp(np.linspace(np.log(1e-5), np.log(1.0), npz + 1))
+    pe = ps[:, :, None] * sig[None, None, :]                    # (n,n,npz+1)
+    peln = np.log(pe)
+    delp = pe[:, :, 1:] - pe[:, :, :-1]
+    pk = pe ** _HS_KAPPA
+    pkz = (pk[:, :, 1:] - pk[:, :, :-1]) / (
+        _HS_KAPPA * (peln[:, :, 1:] - peln[:, :, :-1]))
+    pt = 250.0 + rng.normal(scale=20.0, size=(n, n, npz))       # theta-like
+    ua = rng.normal(scale=10.0, size=(n, n, npz))
+    va = rng.normal(scale=10.0, size=(n, n, npz))
+    lat = rng.uniform(-1.4, 1.4, size=(n, n))
+    return dict(pt=pt, ua=ua, va=va, delp=delp, peln=peln, pkz=pkz, pe=pe,
+                lat=lat, pdt=1800.0)
+
+
+def _hs_ref(pt, ua, va, delp, peln, pkz, pe, lat, pdt, strat, radius=R_E):
+    """Independent triple-loop transcription of Held_Suarez_Tend (hswf.F90)."""
+    ny, nx, npz = pt.shape
+    rdt = 1.0 / pdt
+    rr = radius / _HS_REF_RADIUS
+    kf = _HS_SDAY * rr
+    rkv = pdt / (_HS_KF_DAYS * kf); rka = pdt / (_HS_KA_DAYS * kf)
+    rks = pdt / (_HS_KS_DAYS * kf)
+    t_ms = _HS_MS_DAYS * rr; t_st = _HS_ST_DAYS * rr
+    tau = (t_st - t_ms) / np.log(_HS_TAU_PREF)
+    rms = pdt / (t_ms * _HS_SDAY); rmr = 1.0 / (1.0 + rms)
+    rsgb = 1.0 / (1.0 - _HS_SIGB); ap0k = 1.0 / _HS_P0 ** _HS_KAPPA
+    algpk = np.log(ap0k)
+    t_dt = np.zeros((ny, nx, npz)); u_dt = np.zeros((ny, nx, npz))
+    v_dt = np.zeros((ny, nx, npz))
+    for j in range(ny):
+        for i in range(nx):
+            ps = pe[j, i, npz]
+            plc = delp[j, i, :] / (peln[j, i, 1:] - peln[j, i, :-1])
+            teq = np.zeros(npz + 1)
+            la = lat[j, i]
+            for k in range(npz - 1, -1, -1):
+                plk = plc[k]; ptk = pt[j, i, k]; pkzk = pkz[j, i, k]
+                tey = ap0k * (_HS_T_EQ0 - _HS_DTY * np.sin(la) ** 2)
+                tez = _HS_DTZ * (ap0k / _HS_KAPPA) * np.cos(la) ** 2
+                if strat and plk <= _HS_P_MESO:
+                    dz = _HS_H0 * np.log(plc[k + 1] / plk)
+                    teq[k] = teq[k + 1] - _HS_STRAT_LAPSE * np.cos(la) * dz
+                    t_dt[j, i, k] += ((ptk + rms * teq[k]) * rmr - ptk) * rdt
+                elif strat and _HS_P_MESO < plk <= _HS_P_STRAT:
+                    dz = _HS_H0 * np.log(plc[k + 1] / plk)
+                    relx = pdt / ((t_ms + tau * np.log(0.01 * plk)) * _HS_SDAY)
+                    teq[k] = teq[k + 1] + _HS_STRAT_LAPSE * np.cos(la) * dz
+                    t_dt[j, i, k] += relx * (teq[k] - ptk) / (1.0 + relx) * rdt
+                else:
+                    sigl = plk / ps
+                    f1 = max(0.0, (sigl - _HS_SIGB) * rsgb)
+                    tq = tey - tez * (np.log(pkzk) + algpk)
+                    teq[k] = max(_HS_T0, tq * pkzk)
+                    rkt = rka + (rks - rka) * f1 * np.cos(la) ** 4
+                    t_dt[j, i, k] += rkt * (teq[k] - ptk) / (1.0 + rkt) * rdt
+                    sf = (sigl - _HS_SIGB) * rsgb * rkv
+                    if sf > 0.0:
+                        tmp = sf / (1.0 + sf) * rdt
+                        u_dt[j, i, k] -= (ua[j, i, k] + u_dt[j, i, k]) * tmp
+                        v_dt[j, i, k] -= (va[j, i, k] + v_dt[j, i, k]) * tmp
+    return t_dt, u_dt, v_dt
+
+
+@pytest.mark.parametrize("strat", [True, False])
+def test_held_suarez_matches_the_loop_reference(strat):
+    c = _hs_column()
+    a = held_suarez_tend(c["pt"], c["ua"], c["va"], c["delp"], c["peln"],
+                         c["pkz"], c["pe"], c["lat"], c["pdt"], strat=strat,
+                         radius=R_E)
+    r = _hs_ref(c["pt"], c["ua"], c["va"], c["delp"], c["peln"], c["pkz"],
+                c["pe"], c["lat"], c["pdt"], strat)
+    for got, ref, nm in zip(a, r, ("t_dt", "u_dt", "v_dt")):
+        assert np.allclose(got, ref, atol=1e-15, rtol=1e-11), \
+            f"{nm} strat={strat}: {np.abs(got - ref).max():.3e}"
+
+
+def test_held_suarez_exercises_all_three_regimes():
+    """The column must actually hit meso/strat/tropo, else the ref is vacuous."""
+    c = _hs_column()
+    pl = c["delp"] / (c["peln"][:, :, 1:] - c["peln"][:, :, :-1])
+    assert (pl <= _HS_P_MESO).any(), "no mesosphere levels"
+    assert ((pl > _HS_P_MESO) & (pl <= _HS_P_STRAT)).any(), "no stratosphere"
+    assert (pl > _HS_P_STRAT).any(), "no troposphere"
+
+
+def test_held_suarez_friction_opposes_wind_and_only_in_boundary_layer():
+    c = _hs_column()
+    _, u_dt, v_dt = held_suarez_tend(
+        c["pt"], c["ua"], c["va"], c["delp"], c["peln"], c["pkz"], c["pe"],
+        c["lat"], c["pdt"], strat=True, radius=R_E)
+    # drag opposes the wind where it acts
+    acts = u_dt != 0.0
+    assert np.all(u_dt[acts] * c["ua"][acts] <= 0.0), "friction not opposing u"
+    # and only below sigma_b (boundary layer) -- top levels untouched
+    assert not u_dt[:, :, 0].any(), "friction acting at the model top"
