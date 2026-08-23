@@ -51,7 +51,7 @@ count is irrelevant.  Hence
 
 which is exactly :func:`padded_bytes` here.  Production's size-aware
 colouring minimises the SAME SHAPE of quantity but not the same number
-(``_padded_weight``, :1917, counts each undirected pair once, works in
+(``padded_weight``, :1917, counts each undirected pair once, works in
 element-width units rather than float32 bytes, and does not apply the
 schedule's ``max(..., 1)`` floor) -- normally a factor of 8 apart, and not
 even proportional for a round whose entity max is 0.  This byte model is

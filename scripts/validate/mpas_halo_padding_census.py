@@ -189,18 +189,22 @@ def main() -> int:
 
     print(f"devices {args.devices}  subdivision {args.subdivision}  "
           f"depth {args.depth}  pairs {len(pairs)}  max degree {max_degree}")
-    # NOTE: these two are the SEEDS the size-aware search starts from, not
-    # what production ships. Size-aware colouring is on by default, and it
-    # rewrites the colouring before it is used -- at 64 devices, depth 9, it
-    # takes the padding from 75.5% down to 34.4%. Quoting a seed row as "the
-    # schedule" overstates the remaining prize by a factor of two.
+    # The first two rows are the SEEDS the size-aware search starts from; the
+    # third is what the model actually ships, produced by calling the model's
+    # own colouring rather than a re-derivation of it. Quoting a seed row as
+    # "the schedule" overstates what is left to win by about a factor of two.
+    seed_rounds = max(baseline.values()) + 1
+    adopted, adopted_rounds, method = sd.size_aware_edge_coloring(
+        pair_set, baseline, pair_w, seed_rounds)
+
     for name, colors in (("greedy seed", greedy),
-                         ("multi-ordering seed", baseline)):
+                         ("multi-ordering seed", baseline),
+                         (f"SHIPPED ({method})", adopted)):
         c = census(colors, pairs, cell_send, edge_send, args.devices)
         print(f"{name:>16}: {c['rounds']:3d} rounds   "
               f"{c['real']:>10,} real   {c['shipped']:>11,} shipped   "
               f"padding {c['padding_fraction']:6.1%}   "
-              f"weight {sd._padded_weight(colors, pair_w):,}")
+              f"weight {sd.padded_weight(colors, pair_w):,}")
         if args.per_round:
             for r, directed, mc, me in c["per_round"]:
                 print(f"      round {r:2d}: {directed:3d} directed pairs  "

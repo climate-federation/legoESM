@@ -20,7 +20,7 @@ import random
 
 import pytest
 from legoesm.parallel.sharded_dynamics import (
-    _check_proper_edge_coloring,
+    check_proper_edge_coloring,
     greedy_edge_coloring,
     multi_ordering_edge_coloring,
 )
@@ -45,7 +45,7 @@ def test_multi_ordering_proper_and_no_regression(seed):
         pytest.skip("empty graph")
     colors, max_degree = multi_ordering_edge_coloring(pairs)
     # proper
-    assert _check_proper_edge_coloring(colors, pairs)
+    assert check_proper_edge_coloring(colors, pairs)
     rounds = max(colors.values()) + 1
     # chromatic-index lower bound
     assert rounds >= max_degree
@@ -64,7 +64,7 @@ def test_complete_graph_proper_and_bounded():
     for n in range(2, 12):
         pairs = {(i, j) for i in range(n) for j in range(i + 1, n)}
         colors, max_degree = multi_ordering_edge_coloring(pairs)
-        assert _check_proper_edge_coloring(colors, pairs)
+        assert check_proper_edge_coloring(colors, pairs)
         rounds = max(colors.values()) + 1
         assert max_degree <= rounds <= 2 * max_degree - 1
 
@@ -89,7 +89,7 @@ def test_star_graph_single_round_floor():
     colors, max_degree = multi_ordering_edge_coloring(pairs)
     assert max_degree == m
     assert max(colors.values()) + 1 == m
-    assert _check_proper_edge_coloring(colors, pairs)
+    assert check_proper_edge_coloring(colors, pairs)
 
 
 def test_schedule_reaches_floor_on_real_mesh():

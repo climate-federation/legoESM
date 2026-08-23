@@ -1759,7 +1759,7 @@ def greedy_edge_coloring(comm_pairs):
     return greedy_edge_coloring_ordered(comm_pairs, edges)
 
 
-def _check_proper_edge_coloring(edge_colors, comm_pairs):
+def check_proper_edge_coloring(edge_colors, comm_pairs):
     """Every pair colored, and no vertex sees a color twice."""
     from collections import defaultdict
 
@@ -1924,7 +1924,7 @@ def _resolve_size_coloring(env_value: str) -> bool:
         f"(empty = ON — the receipted default)")
 
 
-def _padded_weight(edge_colors, pair_w):
+def padded_weight(edge_colors, pair_w):
     """Total padded wire weight of a colouring: per round, every pair
     ships the round max (cells and edges tracked with equal weight —
     their per-entity widths are nlev+2 vs nlev, near-equal)."""
@@ -1939,6 +1939,131 @@ def _padded_weight(edge_colors, pair_w):
         counts[color] += 1
     return sum(counts[r] * (rounds_c[r] + rounds_e[r]) for r in counts)
 
+
+
+def size_aware_edge_coloring(comm_pairs, edge_colors, pair_w, n_rounds,
+                             coloring_method="greedy"):
+    """Regroup an edge colouring so similar-sized exchanges share a round.
+
+    Every pair in a round ships that round's LARGEST halo, because the sharded
+    step needs one shape across devices. So the wire cost of a colouring is
+    :func:`padded_weight`, and a heavy pair landing in a crowded round is
+    expensive while grouping similar payloads together is cheap. This searches
+    for a lighter colouring at the same round count, and accepts one extra
+    round only when it buys at least a tenth of the weight -- an extra
+    sequential exchange prices at about 15 microseconds on this lane, which is
+    a good trade while the lane is bytes-bound.
+
+    Returns ``(colours, rounds, method)``; the inputs are returned unchanged
+    when nothing better is found, so the caller does not have to check.
+
+    Deterministic: every process in a multi-controller run derives its own
+    schedule and they must agree, so the orderings tie-break on the pair
+    itself rather than on set iteration order, and the jitter is seeded.
+
+    Extracted from the schedule builder so that the probes measuring how much
+    padding is left (scripts/validate/mpas_halo_padding_census.py) score the
+    colouring the model actually ships rather than a re-derivation of it.
+    """
+    import random as _random_sc
+    base_w = padded_weight(edge_colors, pair_w)
+    # Seed candidates: payload-descending first-fit + jitters. These
+    # often overshoot the round budget on dense graphs (s9@64: every
+    # reorder blew past 11 rounds and the guard rejected them all,
+    # job 26856688) — so ALWAYS follow with a round-PRESERVING local
+    # search that moves pairs between existing rounds.
+    # FULL tie-break key (weight, then the pair itself): every
+    # multicontroller process must derive the IDENTICAL colouring
+    # independently, and a weight-only key leaves equal-weight order
+    # to set-iteration order.
+    edges_by_size = sorted(
+        comm_pairs,
+        key=lambda p: (-(pair_w[p][0] + pair_w[p][1]), p))
+    candidates = [edges_by_size]
+    for seed in (1, 2, 3):
+        jit = edges_by_size[:]
+        rng = _random_sc.Random(seed)
+        for i in range(0, len(jit) - 1, 2):
+            if rng.random() < 0.5:
+                jit[i], jit[i + 1] = jit[i + 1], jit[i]
+        candidates.append(jit)
+    # +1-ROUND CANDIDATES admitted (2026-08-11): the cross-lane law
+    # (wide-halo 0.970, mixed-pad 0.983) prices an extra sequential
+    # collective at ~15 us marginal while the lane is BYTES-bound —
+    # so a colouring that spends one extra round to cut padded
+    # weight is a good trade. Admission bar at adoption below:
+    # equal rounds need ANY strict weight win; rounds+1 needs
+    # >= 10% below the best equal-rounds weight.
+    seeds = [dict(edge_colors)]
+    for order in candidates:
+        ec = greedy_edge_coloring_ordered(comm_pairs, order)
+        if max(ec.values(), default=-1) + 1 <= n_rounds + 1:
+            seeds.append(ec)
+
+    def _local_search(ec):
+        """Move pairs between existing rounds (endpoint-conflict
+        free) while the padded weight strictly drops."""
+        from collections import defaultdict
+        colors = dict(ec)
+        n_r = max(colors.values()) + 1
+        occupied = defaultdict(set)   # round -> endpoint set
+        members = defaultdict(list)
+        for p, c in colors.items():
+            occupied[c].update(p)
+            members[c].append(p)
+        improved = True
+        while improved:
+            improved = False
+            w_now = padded_weight(colors, pair_w)
+            for p in sorted(colors, key=lambda q:
+                            (-(pair_w[q][0] + pair_w[q][1]), q)):
+                c0 = colors[p]
+                for c1 in range(n_r):
+                    if c1 == c0 or (occupied[c1] & set(p)):
+                        continue
+                    colors[p] = c1
+                    w_try = padded_weight(colors, pair_w)
+                    if w_try < w_now:
+                        occupied[c0] = set(
+                            x for q in members[c0] if q != p for x in q)
+                        members[c0].remove(p)
+                        members[c1].append(p)
+                        occupied[c1].update(p)
+                        w_now = w_try
+                        improved = True
+                        break
+                    colors[p] = c0
+        return colors
+
+    best_w, best_ec = base_w, None          # equal-rounds champion
+    plus_w, plus_ec = None, None            # rounds+1 champion
+    for seed_ec in seeds:
+        ec = _local_search(seed_ec)
+        if not check_proper_edge_coloring(ec, comm_pairs):
+            continue
+        r = max(ec.values(), default=-1) + 1
+        if r > n_rounds + 1:
+            continue
+        w = padded_weight(ec, pair_w)
+        if r <= n_rounds:
+            if w < best_w:
+                best_w, best_ec = w, ec
+        else:
+            if plus_w is None or w < plus_w:
+                plus_w, plus_ec = w, ec
+    if plus_ec is not None and plus_w < 0.90 * best_w:
+        best_w, best_ec = plus_w, plus_ec
+    if best_ec is None:
+        logger.info(
+            "  size-aware colouring found no improvement "
+            "(padded weight %d)", base_w)
+        return edge_colors, n_rounds, coloring_method
+    logger.info(
+        "  size-aware colouring adopted: padded weight %d -> %d "
+        "(-%.0f%%), rounds %d", base_w, best_w,
+        100 * (1 - best_w / max(base_w, 1)),
+        max(best_ec.values()) + 1)
+    return best_ec, max(best_ec.values()) + 1, "size_aware"
 
 def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
                              edges_per, max_lc, max_le,
@@ -2040,106 +2165,9 @@ def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
             we = max(len(edge_send_map.get((u, v), [])),
                      len(edge_send_map.get((v, u), [])))
             pair_w[(u, v)] = (wc * cell_width, we * edge_width)
-        base_w = _padded_weight(edge_colors, pair_w)
-        # Seed candidates: payload-descending first-fit + jitters. These
-        # often overshoot the round budget on dense graphs (s9@64: every
-        # reorder blew past 11 rounds and the guard rejected them all,
-        # job 26856688) — so ALWAYS follow with a round-PRESERVING local
-        # search that moves pairs between existing rounds.
-        # FULL tie-break key (weight, then the pair itself): every
-        # multicontroller process must derive the IDENTICAL colouring
-        # independently, and a weight-only key leaves equal-weight order
-        # to set-iteration order.
-        edges_by_size = sorted(
-            comm_pairs,
-            key=lambda p: (-(pair_w[p][0] + pair_w[p][1]), p))
-        candidates = [edges_by_size]
-        for seed in (1, 2, 3):
-            jit = edges_by_size[:]
-            rng = _random_sc.Random(seed)
-            for i in range(0, len(jit) - 1, 2):
-                if rng.random() < 0.5:
-                    jit[i], jit[i + 1] = jit[i + 1], jit[i]
-            candidates.append(jit)
-        # +1-ROUND CANDIDATES admitted (2026-08-11): the cross-lane law
-        # (wide-halo 0.970, mixed-pad 0.983) prices an extra sequential
-        # collective at ~15 us marginal while the lane is BYTES-bound —
-        # so a colouring that spends one extra round to cut padded
-        # weight is a good trade. Admission bar at adoption below:
-        # equal rounds need ANY strict weight win; rounds+1 needs
-        # >= 10% below the best equal-rounds weight.
-        seeds = [dict(edge_colors)]
-        for order in candidates:
-            ec = greedy_edge_coloring_ordered(comm_pairs, order)
-            if max(ec.values(), default=-1) + 1 <= n_rounds + 1:
-                seeds.append(ec)
-
-        def _local_search(ec):
-            """Move pairs between existing rounds (endpoint-conflict
-            free) while the padded weight strictly drops."""
-            from collections import defaultdict
-            colors = dict(ec)
-            n_r = max(colors.values()) + 1
-            occupied = defaultdict(set)   # round -> endpoint set
-            members = defaultdict(list)
-            for p, c in colors.items():
-                occupied[c].update(p)
-                members[c].append(p)
-            improved = True
-            while improved:
-                improved = False
-                w_now = _padded_weight(colors, pair_w)
-                for p in sorted(colors, key=lambda q:
-                                (-(pair_w[q][0] + pair_w[q][1]), q)):
-                    c0 = colors[p]
-                    for c1 in range(n_r):
-                        if c1 == c0 or (occupied[c1] & set(p)):
-                            continue
-                        colors[p] = c1
-                        w_try = _padded_weight(colors, pair_w)
-                        if w_try < w_now:
-                            occupied[c0] = set(
-                                x for q in members[c0] if q != p for x in q)
-                            members[c0].remove(p)
-                            members[c1].append(p)
-                            occupied[c1].update(p)
-                            w_now = w_try
-                            improved = True
-                            break
-                        colors[p] = c0
-            return colors
-
-        best_w, best_ec = base_w, None          # equal-rounds champion
-        plus_w, plus_ec = None, None            # rounds+1 champion
-        for seed_ec in seeds:
-            ec = _local_search(seed_ec)
-            if not _check_proper_edge_coloring(ec, comm_pairs):
-                continue
-            r = max(ec.values(), default=-1) + 1
-            if r > n_rounds + 1:
-                continue
-            w = _padded_weight(ec, pair_w)
-            if r <= n_rounds:
-                if w < best_w:
-                    best_w, best_ec = w, ec
-            else:
-                if plus_w is None or w < plus_w:
-                    plus_w, plus_ec = w, ec
-        if plus_ec is not None and plus_w < 0.90 * best_w:
-            best_w, best_ec = plus_w, plus_ec
-        if best_ec is not None:
-            edge_colors = best_ec
-            n_rounds = max(edge_colors.values()) + 1
-            coloring_method = "size_aware"
-            logger.info(
-                "  size-aware colouring adopted: padded weight %d -> %d "
-                "(-%.0f%%), rounds %d", base_w, best_w,
-                100 * (1 - best_w / max(base_w, 1)), n_rounds)
-        else:
-            logger.info(
-                "  size-aware colouring found no improvement "
-                "(padded weight %d)", base_w)
-    assert _check_proper_edge_coloring(edge_colors, comm_pairs), (
+        edge_colors, n_rounds, coloring_method = size_aware_edge_coloring(
+            comm_pairs, edge_colors, pair_w, n_rounds, coloring_method)
+    assert check_proper_edge_coloring(edge_colors, comm_pairs), (
         "improper ppermute edge coloring — two same-round exchanges "
         "would collide at a device")
     rounds: dict[int, list[tuple[int, int]]] = defaultdict(list)
