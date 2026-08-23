@@ -957,7 +957,8 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
           " separated 0.5 from 0.3 or 0.7.")
 
     print("\n" + "=" * 104)
-    print("T3  THE PRE-REGISTERED SHAPE TEST -- per row, drift vs drift, both 90-day"
+    print(f"T3  THE PRE-REGISTERED SHAPE TEST -- per row, drift vs drift, both "
+          f"{DAYS_90}-day"
           " means.\n    Predicted: 'broad and single-signed across the southern-band"
           " rows'.")
     print("=" * 104)

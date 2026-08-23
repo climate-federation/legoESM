@@ -23,6 +23,12 @@ Probe: `basin_seasonal_decomp.py`. Series: `/tmp/dino_basin_seasonal_decomp.json
    **76%** of the measured per-level difference by variance and **93%** of its
    total. legoESM's southern-basin flow is uniformly too weak in the eastward
    sense, by about half a millimetre per second, all the way down.
+   **One qualification, added after Part 3.** "Uniform" describes the bulk of
+   the column. In the bottom cell specifically — the level that sets the
+   bottom-drag rate — the two models differ by **−1.5e-3 m/s** at day 360
+   (−6.5e-3 against −5.0e-3), about three times the uniform value fitted on the
+   same day. Any argument that runs through the bottom stress must use that
+   number, not the uniform one.
 2. **The water masses are not the cause.** The two models' southern-basin
    densities agree to 4e-5 kg/m³ on a 1027 kg/m³ field. Mechanisms that work by
    changing the water masses are ruled out at the basin scale, though the
@@ -32,11 +38,15 @@ Probe: `basin_seasonal_decomp.py`. Series: `/tmp/dino_basin_seasonal_decomp.json
    the wall over about eight rows, and the four rows from 69.5°S to 68.4°S
    carry −0.905 Sv of the −0.952 Sv net. The shape is stable through the year
    (day-90 against day-360 row profiles correlate at 0.96; day-270 at 0.70).
-4. **The surface forcing is identical and is exonerated for free.** The wind
-   torque legoESM applies to these rows is 17.811 in every one of the 36
-   ten-day windows of the year-long budget, and DINO's wind has no seasonal
-   cycle at all. The whole difference is in the sinks and in how momentum is
-   redistributed, not in what is put in.
+4. **The surface forcing is identical, and that is measured.** The oracle's
+   dumped wind stress matches the analytic form legoESM uses to 1e-10 per row,
+   and the torque legoESM applies to these rows is 17.811 in every one of the
+   36 ten-day windows of the year-long budget — DINO's wind has no time
+   dependence at all. The whole difference is in the sinks and in how momentum
+   is redistributed, not in what is put in. (The oracle's *vertical-solve* row
+   is 18.100 rather than 17.811, but that row carries its bottom stress and
+   vertical viscosity in the same number, so the 0.29 is not a wind
+   difference.)
 5. **The seasonal reading returns no verdict.** The registered test asked for a
    correlation of 0.7 between the gap and a forcing phase after removing its
    growth; the best measured is 0.48.
@@ -138,7 +148,7 @@ climates.
 The basin south of the channel is 14 model rows, 69.9°S to 64.9°S. At day 360
 the gap decays monotonically away from the southern wall — −0.277, −0.252,
 −0.209, −0.167, −0.106, −0.076, −0.040, −0.005 Sv over rows 1 to 8 — and then
-turns slightly positive. It is a boundary layer about 300 km wide.
+turns slightly positive, over a width of about 300 km.
 
 * the four rows nearest the wall carry −0.905 Sv of the −0.952 Sv net, i.e.
   95% of the net but **80% of the negative signal** (the eight negative rows
@@ -146,6 +156,16 @@ turns slightly positive. It is a boundary layer about 300 km wide.
 * eleven of the fourteen rows have a gap clearing twice their own noise floor;
 * the shape is stable through the year: day-90 against day-360 profiles
   correlate at **+0.96**, day-180 at +0.89, day-270 at **+0.70**.
+
+**Careful with the words "boundary layer".** The decay above is measured; the
+label is a description. For the *rate* at which each model builds circulation —
+a different quantity, measured in Part 3 — the answer is sharper and different:
+both models deposit westward circulation in the six rows nearest the wall and
+eastward beyond, and legoESM's westward lobe is **34% too strong** while its
+eastward rows are right to **0.5%**. A rigid displacement of the profile
+explains under 1% of the difference; two separate lobe gains explain 88%. For
+the rate that is an **amplitude error, not a width error**, and it is the more
+specific fact.
 
 ## Season: no verdict
 
@@ -254,15 +274,16 @@ arithmetic, not physics. It is **not independent evidence** about the
 mechanism, and the "0.3%" residual is simply the rounding of the quoted rate
 difference; unrounded it is 0.05%.
 
-The budget also **localises nothing yet**. NEMO's depth-integrated circulation
-after a step collapses to a single number — its barotropic solve — because the
-implicit vertical solve's contribution to the column mean is discarded before
-the next step. legoESM's does not collapse that way. The two are therefore in
-incompatible bases and there is currently **no per-term cross-model
-comparison**. The single most valuable next measurement is to ask whether
-legoESM's realised rate also equals its own barotropic-solve deposit: if it
-does, the whole 23% is localised to the barotropic solve and every other term
-is exonerated in one number.
+**SUPERSEDED by Part 3, and the correction matters.** This paragraph said the
+two models were in incompatible bases and named the collapse test as the next
+measurement. The collapse is real — legoESM's realised rate equals its own
+barotropic-solve row, and the two sides are in one basis — but it is an
+**algebraic identity** on this configuration, not a measurement, and it
+**narrowed nothing**: in a split-explicit scheme with this post-solve
+correction, every term that can move depth-integrated momentum arrives through
+that one row by construction. The sentence that followed, promising the test
+would "exonerate every other term in one number", was wrong in the way that
+wastes work — it described an identity as a discriminator. See Part 3.
 
 ## Per 10-day window: the mean is the only signal
 
@@ -288,11 +309,11 @@ Only the year mean is signal.
 
 ## Two structural facts worth carrying forward
 
-**The forcing is identical, and that is a free exoneration.** The wind torque
-applied to these rows is 17.811 in every one of the 36 windows on the legoESM
-side, and DINO's wind stress has no time dependence at all. Whatever is
-different, it is not what is being put in — it is the sinks and the
-redistribution.
+**The forcing is identical, and it is measured rather than assumed.** The
+oracle's own dumped stress matches the analytic form to 1e-10 per row; the
+torque legoESM applies is 17.811 in every one of the 36 windows; and DINO's
+wind stress has no time dependence at all. Whatever is different, it is not
+what is being put in — it is the sinks and the redistribution.
 
 
 
@@ -308,24 +329,39 @@ overshoot of the wall's return lobe, with the boundary layer too wide. That
 points at the momentum sink and the momentum flux **at the wall**, and away
 from anything interior or anything vertical.
 
-## What is still open
+## The stage-resolved half
 
-The stage-resolved half of this budget — which of the barotropic solve, the
-explicit terms, or the implicit vertical solve carries the 0.112 — was printed
-but its per-row artifact was lost when the run aborted in an optional trailing
-diagnostic that has since been made tolerant. The run is repeating. The
-pre-registered prediction on it (one stage carrying at least 60% of the
-difference with a constant sign) is unscored until it lands.
+Delivered in Part 3, from the completed artifact. The per-window numbers quoted
+above were regenerated from that artifact through the committed instrument.
 
-Note also the limitation carried over from the instrument itself: NEMO's
-depth-integrated circulation after a step is set entirely by its barotropic
-solve, while legoESM keeps part of the vertical solve's contribution, so the
-two models' stage tables are not row-comparable. Only realized-against-realized
-is, and that is what is reported above.
+**A free reproducibility measurement fell out of that.** Two independent
+360-day accumulations of the same configuration were run (the first aborted
+before writing its artifact, so its numbers had been read off its printed
+output). Comparing them: the oracle side is bit-identical, and the two legoESM
+runs agree to **0.007** on any single ten-day window and to **0.004** on the
+year mean — against a shortfall of 0.112 and a window-to-window spread of
+0.322. So a single accumulation's year mean is good to about 4%, and the
+window-level scatter reported above is physical variability rather than
+run-to-run noise. The most likely source of the 0.007 is non-deterministic
+accumulation order on the GPU amplified over 11 520 steps by the same chaos the
+verdict run's ensemble measures; a third run would confirm it, and nothing in
+this document turns on the difference.
+
+**SUPERSEDED by Part 3.** The limitation recorded here — that legoESM keeps
+part of the vertical solve's contribution to the depth-integrated circulation,
+so the two stage tables are not row-comparable — was measured on an OLDER card.
+The shipped card replicates the oracle's post-solve correction and the vertical
+solve's net contribution is exactly zero on both sides. The caveat is withdrawn
+— but withdrawing it buys no new power, because in the shared basis each side's
+table has exactly one non-degenerate row.
 
 ---
 
-# Ranked mechanism candidates, and how to decide between them
+# Ranked mechanism candidates — the ranking BEFORE the deciders ran
+
+**This section is the record of what was ranked and why, before the two offline
+deciders in Part 3 scored candidates 1 and 2. It is superseded by Part 3's
+ranking and is kept because the deciders were registered against it.**
 
 **None of these is confirmed.** This is the naming lane; no fix is built here.
 Each is listed with the cheapest measurement that would settle it, cheapest
@@ -357,10 +393,11 @@ velocity are not selected and are inert. So if drag is the owner, it is through
 substep, how the coefficient is averaged onto the faces — not through its
 coefficients.
 
-*Decider, offline, from the states already saved*: compute each model's own
-per-row bottom-drag torque from its bottom-cell velocities using the shared
-transcription, and compare. A 20%-plus excess in legoESM in the four wall rows
-settles it.
+*Decider as registered*: compute each model's own per-row bottom-drag torque
+from its bottom-cell velocities using the shared transcription, and compare.
+**This was run (Part 3) and it does not settle the candidate either way** — it
+constrains the shape, not the ownership. Retiring bottom drag needs a
+perturbation arm.
 
 ## 2. The barotropic solve itself
 
@@ -370,11 +407,12 @@ the split-explicit barotropic solve. Everything about that solve — its time
 filter, the substep count, which velocity average it deposits, the face depths
 it uses — is a candidate.
 
-*Decider, offline, from the 360-day accumulation now finishing*: apply to
-legoESM the collapse the oracle satisfies exactly. If legoESM's realised row
-rate also equals its own barotropic-solve deposit to roundoff, then the entire
-23% shortfall is inside that solve and every other term is exonerated in a
-single number. This is the highest-value next measurement in the queue.
+*Decider as registered*: apply to legoESM the collapse the oracle satisfies
+exactly. **This was run (Part 3) and the sentence that followed it here was
+wrong.** The collapse holds, but it is an identity and it exonerates nothing:
+the barotropic-solve row is the depth mean of the entire explicit tendency plus
+the wind, the substep drag and the barotropic biharmonic, so everything arrives
+through it by construction.
 
 ## 3. The lateral momentum flux at the free-slip wall
 
@@ -418,3 +456,205 @@ the instrument used to convert that into "the density predicts 1% of the
 velocity difference" is not validated and is insensitive to exactly the rows
 that own the gap. Measure the row-by-row meridional density difference
 directly, offline, from the states already saved.
+
+---
+
+# Part 3 — three offline deciders, and what they actually settle
+
+Pre-registration: `PREREG_basin_deciders.md`, written before any number existed.
+Probe: `southern_basin_deciders.py`. Everything here runs on artifacts already
+on disk. **Sign convention, stated once: differences below are legoESM minus
+NEMO unless the column says otherwise; the realised-rate deficit is quoted as
+NEMO minus legoESM, +0.112 per row per year.**
+
+**Read the summary first: none of the three deciders identifies the cause. Two
+of them narrow the field, one of them turned out to be an identity, and the
+per-term route is closed by an instrument gap. The honest state is that the
+error is characterised precisely and its owner is not yet named.**
+
+## Decider 0 — amplitude, or position?
+
+Both models deposit *westward* circulation in the six rows nearest the southern
+wall and eastward beyond, so the rate profile has a node. Two very different
+errors look identical in a band mean.
+
+Fit three shape models to all thirteen per-row differences:
+
+| model fitted to legoESM − NEMO | explains |
+|---|---:|
+| a rigid meridional translation of the oracle's own profile | **0.8%** (best shift +0.06 rows) |
+| one global gain | 29.9% (gain 1.081) |
+| separate gains for the wall lobe and the rest | **87.8%** (gains **1.335** / **1.031**) |
+
+**A rigid position error is refuted by its own residual.** legoESM's westward
+wall lobe is **34% too strong** while the rest of the basin is right to 3%;
+over the rows where the oracle's own profile is eastward the magnitude ratio is
+**0.995**. This is the sharpest characterisation the campaign has of the
+defect.
+
+**A correction to how this was first argued.** The first version of this
+section cited the node — legoESM crosses zero at row 6.44, the oracle at 6.24 —
+and asserted "the node does not move". It does move, by 0.20 rows (4% of the
+wall lobe's width), and more importantly the node cannot decide the question at
+all: a width change confined to the interior of the wall lobe leaves it exactly
+where it is, and a pure gain on one lobe cannot move it either. The node is
+reported for completeness; the shape fits are the evidence.
+
+## Decider 2 — an algebraic identity, reported as such
+
+legoESM's realised circulation rate equals its own barotropic-solve row on
+every row. At full precision the supporting cancellations are 4.2e-15 and
+5.1e-14 against a scale of 1.7 — twelve orders inside the pass threshold, which
+is the signature of a bin that could not have failed. Three exact facts force
+it: two of the five stage rows are depth *deviations* and the reducer is a
+depth *integral*; and the card's post-solve correction overwrites the
+after-level column mean with the barotropic solve's own average.
+
+**Two things in that table do have power, and they are the deliverable.**
+
+* **The wiring.** The post-solve correction's row comes out at exactly minus
+  the vertical-solve row (−0.388 against +0.388). With the correction disabled
+  it would be zero and the realised rate would exceed the barotropic solve by
+  that whole row. This is an arithmetic counterfactual read off the same table,
+  not an A/B with the option switched off — strong, but call it what it is. It
+  says the implicit vertical solve contributes **nothing net** to the
+  depth-integrated circulation on either side.
+* **The time filter is exonerated.** The per-step two-level rate and the
+  endpoint-to-endpoint circulation drift do not telescope — the time filter is
+  exactly what breaks the telescoping — and they agree to **0.02%** against a
+  23% deficit.
+
+**What it does not establish.** The barotropic-solve row is not the solver in
+isolation: it is the depth mean of the *entire* explicit tendency (advection,
+vorticity and Coriolis, pressure gradient, lateral friction) plus the wind
+stress, the in-substep drag correction and the barotropic biharmonic. In a
+split-explicit scheme with this post-solve correction, everything that can move
+depth-integrated momentum arrives through that one row by construction. Nothing
+was narrowed.
+
+## Decider 1 — bottom drag: not shaped like the deficit, and not retired
+
+The drag torque each model's own state implies, under one shared transcription,
+differs by **+0.099** on a time-weighted year mean. The registered bin returns
+**REFUTE**, and the reason is spatial:
+
+| (both time-weighted) | four wall rows | rows 5–13 | ratio |
+|---|---:|---:|---:|
+| realised-rate deficit | +0.339 | +0.011 | **32×** |
+| drag-torque difference | +0.125 | +0.112 | **1.1×** |
+
+Row-wise correlation between the two shapes: **+0.36**. The deficit is sharply
+wall-concentrated; the drag difference is flat across the basin. The
+pre-registered concentration clause is not met.
+
+**Three retractions, all logged in the probe where they happened.**
+
+1. The pre-registration read a positive difference as "legoESM's sink is
+   weaker", assuming the bottom flow here is eastward. It is westward in both
+   models, so a drag sink there pushes *eastward* and a positive difference
+   means legoESM's drag pushes *harder*.
+2. The replacement sentence — "drag opposes the anomaly, therefore it is a
+   consequence not a cause" — is **also wrong**, and this one is a logical
+   error. For *any* sink-type cause the same pattern appears: too strong a sink
+   gives a weaker equilibrium flow, and evaluating the shared law on the two
+   states then yields a difference that opposes the anomaly. The sign carries
+   no information, and it is no longer part of the verdict.
+3. An earlier draft reported +0.116 and called it "103% of the shortfall", from
+   a plain mean over 19 non-uniformly spaced days, ten of which sit in the last
+   quarter. Time-weighted it is +0.099 — and the ratio to the shortfall is no
+   longer quoted at all, because this diagnostic is the full-velocity drag
+   torque, whose column mean the post-solve correction discards every step. It
+   is not a term in the budget the deficit lives in, so the ratio compares two
+   different budgets.
+
+**One more limit.** At these speeds the oracle's background kinetic energy
+keeps the drag rate within 0.5% of constant, so the "non-linear" law is running
+in its linear regime and this measurement is close to a restatement of the
+velocity difference itself.
+
+**Bottom drag is therefore not retired.** What the model applies is a substep
+integral of an evolving depth-mean flow, which no offline diagnostic can see.
+Only a perturbation arm can close it.
+
+## Decider 3 — the per-term table closes, and still cannot attribute
+
+With both models' per-term momentum trends accumulated over the same 360 days
+and reduced identically, the four term groups **close to 2e-9 per row** against
+each model's own realised rate.
+
+**That closure is a correction to this document's previous version, and the
+correction matters.** The first version of this section reported a closure
+*failure* of 49 per row and published it as "the two models' term sets are not
+in bijection at this level", then commissioned "building a matched term
+correspondence" as the next piece of work. **That was a bug in the probe, not a
+property of the models**: the oracle's barotropic operand was being credited
+into the surface group while its post-solve row was left out, double-counting a
+number of order 1e4. Both reviewers found it independently and both verified
+the repricing. The recommended work item it generated is withdrawn.
+
+**But the closed table does not attribute anything.** In the wall rows the four
+groups differ by 105 in total magnitude and sum to 0.339 — a **310:1**
+cancellation. Reading a 0.3% residual out of groups that individually differ by
+4–8% is not a measurement. And the pattern of those differences — the totals
+agreeing to 0.02% while every individual term is off by several percent — is
+the signature of a time-level or staging difference in the *diagnostics*, not
+of physics. Nothing may be drawn from it until the group differences are shown
+to survive a time-level control.
+
+Two structural notes, both of which limit the table further: legoESM's last
+group is defined as a remainder, so its side closes by construction and only
+the oracle's side could ever have failed; and legoESM's dominant
+wall-concentrated group is 99.7% a single fused diagnostic (kinetic-energy
+gradient plus pressure gradient) that the model cannot currently split.
+
+## Where this leaves the candidates
+
+The signature every candidate must now reproduce: **legoESM's westward
+circulation lobe against the southern wall is 34% too strong, the rest of the
+basin is right to 3%, a rigid displacement of the profile explains under 1% of
+the difference, the water masses are identical, and the wind input is identical
+to 1e-10.**
+
+1. **Whatever sets the sea-surface set-up against the wall.** A boundary
+   current 34% too strong in near-geostrophic balance implies a cross-shore
+   surface slope about 34% too large. **This is the top work item and it is
+   fully offline**: both models already save the sea-surface field, so
+   comparing the cross-shore slope in the four wall rows is minutes of work on
+   existing files. It is a *balance* test rather than another bookkeeping
+   decomposition, which is exactly why it is immune to the 310:1 cancellation
+   that makes the term table useless. If legoESM's slope is high by roughly the
+   same factor as its velocity, the lobe is geostrophic and the owner is the
+   barotropic solve's treatment of the wall. If the slope matches while the
+   velocity does not, the lobe is ageostrophic and the owner is friction or
+   advection at the wall.
+2. **The lateral momentum flux at the free-slip wall** — the ageostrophic arm
+   of the same test, promoted from third.
+3. **The barotropic mode's Coriolis term inside the substep loop**, where the
+   meridional-velocity stencil at the wall-adjacent row is one-sided. Demoted
+   from a previous draft's top pick, for two reasons: the vorticity and
+   Coriolis group's wall difference is 4.8× smaller than the pressure and
+   kinetic-energy pair's, and a one-sided stencil is a one- or two-row defect
+   while the measured error decays smoothly over eight rows and leaves the
+   eastward lobe right to 0.5%. That is the signature of something scaling a
+   whole boundary current, not of something breaking one row.
+4. **Bottom drag** — not shaped like the deficit, not retired. One arm with a
+   halved drag coefficient over 90 days would close it; the wall rows must move
+   from 1.34 toward 1.0 by the predicted amount.
+5. **The enhanced vertical viscosity** — dead as a *direct* contributor (its
+   entire column-mean effect is removed on both sides), alive only as an
+   upstream path, because the bottom-cell velocity difference is larger than
+   the depth-uniform one and that is what any drag term sees.
+
+**Positively closed, with numbers.** The wind stress matches to 1e-10 per row
+and is constant across all 36 windows. The face-thickness convention (minimum
+versus arithmetic averaging) accounts for about 1% and is *anti-aligned* with
+the deficit — refuted as owner, logged as convention debt. The time filter is
+exonerated at 0.02%.
+
+**What none of this is.** No perturbation test has been run. Nothing above may
+be called confirmed until one arm changes one thing and moves the wall rows in
+the predicted direction. Three of this lane's own conclusions were retracted
+after review — a claimed depth dependence that was a layer-thickness artifact,
+a sign argument that was a logical error, and a closure failure that was a
+pairing bug — so the standing instruction for the next lane is to run the
+balance test above before building anything.
