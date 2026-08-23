@@ -56,7 +56,16 @@ sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.dirname(_DIR))
 import kamm_twin_90d as K              # noqa: E402  state, model, forcing, kick
 
-EPS_LADDER = (1e-14, 1e-12, 1e-10)
+# Five decades, not three. The bottom rung is a ROUND-OFF CONTROL: at eps=1e-16
+# the kick is ~2e-15 K on a ~20 K field, i.e. at fp64 round-off, so whatever
+# gain it reports is the floor rather than a response. A rung whose gain sits
+# at that floor is measuring arithmetic, not physics, and is excluded from the
+# spread. The top rung is there so the shape of G(eps) is visible across the
+# whole range rather than inferred from three points -- the first (three-rung)
+# version of this ladder could not tell a round-off floor from rectification.
+EPS_LADDER = (1e-16, 1e-14, 1e-12, 1e-10, 1e-8)
+FLOOR_EPS = 1e-16                      # the round-off control rung
+FLOOR_MARGIN = 3.0                     # a rung within this factor of the floor gain is excluded
 STEP_GRID = (1, 10, 100, 320)          # 320 steps = day 10, where 309x was seen
 SEED = 1                               # one seed; the ladder is the variable
 SPREAD_BAR = 3.0                       # PREREG: below 3 proportional, at/above 3 rectified
@@ -158,15 +167,20 @@ def gains(arm, eps_ladder=EPS_LADDER, n_steps=None):
 
 
 # ------------------------------------------------------------------ scoring ---
-def spread(gain_by_eps, n):
+def spread(gain_by_eps, n, exclude=()):
     """PREREG statistic: max gain / min gain across the eps ladder, at n steps.
 
-    NaN propagates and a zero minimum gives inf rather than a plausible finite
-    number -- a gain of exactly zero means the nudge never reached the metric,
-    which is a finding, not a linear response.
+    ``exclude`` drops rungs shown to sit at the fp64 round-off floor -- they
+    measure arithmetic, not response, and leaving them in manufactures a
+    nonlinearity that is really the floor. NaN propagates and a zero minimum
+    gives inf rather than a plausible finite number: a gain of exactly zero
+    means the nudge never reached the field, which is a finding, not a linear
+    response.
     """
-    v = np.asarray([gain_by_eps[e][n] for e in sorted(gain_by_eps)],
-                   dtype=np.float64)
+    keep = [e for e in sorted(gain_by_eps) if e not in exclude]
+    if len(keep) < 2:
+        return float("nan")
+    v = np.asarray([gain_by_eps[e][n] for e in keep], dtype=np.float64)
     if not np.isfinite(v).all():
         return float("nan")
     lo = float(np.min(v))
@@ -185,10 +199,66 @@ def _self_check():
     # NaN propagates rather than being skipped
     assert np.isnan(spread({1e-14: {1: float("nan")}, 1e-12: {1: 1.0},
                             1e-10: {1: 1.0}}, 1))
+    # the round-off floor control: a rung reporting the SAME gain as the
+    # sub-resolution control is measuring arithmetic and must be dropped.
+    g = {1e-16: {1: 100.0}, 1e-14: {1: 120.0}, 1e-12: {1: 5.0},
+         1e-10: {1: 5.0}, 1e-8: {1: 5.0}}
+    ex = floor_excluded(g, 1)
+    assert ex == {1e-16, 1e-14}, ex
+    # WITHOUT the exclusion the floor manufactures a 24x "nonlinearity"; WITH
+    # it, the three real rungs are flat and the arm reads proportional. This is
+    # the whole point of the control, so it is asserted both ways.
+    assert abs(spread(g, 1) - 24.0) < 1e-9
+    assert abs(spread(g, 1, ex) - 1.0) < 1e-12
+    assert spread(g, 1) >= SPREAD_BAR and spread(g, 1, ex) < SPREAD_BAR
+    # a genuinely rectified ladder survives the exclusion
+    g2 = {1e-16: {1: 1.0}, 1e-14: {1: 5.0}, 1e-12: {1: 5.0},
+          1e-10: {1: 1500.0}, 1e-8: {1: 1500.0}}
+    assert floor_excluded(g2, 1) == {1e-16}
+    assert spread(g2, 1, floor_excluded(g2, 1)) >= SPREAD_BAR
+    # fewer than two usable rungs is NaN, never a flattering 1.0
+    assert np.isnan(spread({1e-16: {1: 1.0}, 1e-14: {1: 1.0}}, 1,
+                           {1e-16, 1e-14}))
+    # _grid() reports only step counts EVERY arm reached
+    r = {"a": {1e-14: {1: 0.0, 10: 0.0}}, "b": {1e-14: {1: 0.0}}}
+    assert _grid(r) == (1,), _grid(r)
     print(f"SELF-CHECK OK: spread = max/min gain across the ladder, bar "
           f"{SPREAD_BAR:g}; zero gain -> inf; NaN propagates; "
+          f"the {FLOOR_EPS:.0e} round-off control excludes floor-bound rungs "
+          f"(shown to change the verdict both ways); "
           f"{len(EPS_LADDER)} nudge sizes x {len(STEP_GRID)} step counts")
     return 0
+
+
+def _grid(results):
+    """The step counts every arm actually reached. ``--steps N`` stops short of
+    the full grid, and printing a column nobody ran raised a KeyError on the
+    first real run rather than printing a blank."""
+    reached = None
+    for g in results.values():
+        for per in g.values():
+            ks = set(per)
+            reached = ks if reached is None else (reached & ks)
+    return tuple(n for n in STEP_GRID if reached and n in reached)
+
+
+def floor_excluded(gain_by_eps, n):
+    """Rungs whose gain sits within FLOOR_MARGIN of the round-off control's.
+
+    The control rung kicks BELOW fp64 resolution, so its gain is the
+    arithmetic floor. Any rung reporting a similar gain is measuring the same
+    floor and cannot contribute to a linearity statistic.
+    """
+    if FLOOR_EPS not in gain_by_eps:
+        return set()
+    floor = gain_by_eps[FLOOR_EPS][n]
+    out = {FLOOR_EPS}
+    if not np.isfinite(floor) or floor == 0:
+        return out
+    for e, per in gain_by_eps.items():
+        if e != FLOOR_EPS and np.isfinite(per[n]) and per[n] <= FLOOR_MARGIN * floor:
+            out.add(e)
+    return out
 
 
 def table(results):
@@ -196,25 +266,32 @@ def table(results):
     print("GAIN LADDER -- ||dT||_2 / eps.  A proportional response gives the "
           "SAME gain for every nudge size.")
     print("=" * 100)
+    grid = _grid(results)
     for arm, g in results.items():
         print(f"\n  {arm}")
         print(f"    {'nudge':<12}" + "".join(f"{'n=' + str(n):>16}"
-                                             for n in STEP_GRID))
+                                             for n in grid) + "   note")
+        excl = {n: floor_excluded(g, n) for n in grid}
         for eps in sorted(g):
+            note = ("round-off control" if eps == FLOOR_EPS else
+                    ("at floor -> excluded" if all(eps in excl[n] for n in grid)
+                     else ""))
             print(f"    {eps:<12.0e}" + "".join(f"{g[eps][n]:>16.6e}"
-                                                for n in STEP_GRID))
-        print(f"    {'SPREAD':<12}" + "".join(f"{spread(g, n):>16.3f}"
-                                              for n in STEP_GRID))
+                                               for n in grid) + f"   {note}")
+        print(f"    {'SPREAD':<12}"
+              + "".join(f"{spread(g, n, excl[n]):>16.3f}" for n in grid))
+        print(f"    {'(rungs used)':<12}"
+              + "".join(f"{len(g) - len(excl[n]):>16d}" for n in grid))
 
     print("\n" + "=" * 100)
     print(f"PRE-REGISTERED RULE -- spread < {SPREAD_BAR:g} proportional, "
           f">= {SPREAD_BAR:g} rectified")
     print("=" * 100)
-    print(f"{'arm':<16}" + "".join(f"{'n=' + str(n):>14}" for n in STEP_GRID))
+    print(f"{'arm':<16}" + "".join(f"{'n=' + str(n):>14}" for n in grid))
     for arm, g in results.items():
         cells = []
-        for n in STEP_GRID:
-            s = spread(g, n)
+        for n in grid:
+            s = spread(g, n, floor_excluded(g, n))
             cells.append(f"{s:>10.2f} {'R' if s >= SPREAD_BAR else '.':<3}")
         print(f"{arm:<16}" + "".join(cells))
     print("  R = rectified at that horizon, . = proportional")
