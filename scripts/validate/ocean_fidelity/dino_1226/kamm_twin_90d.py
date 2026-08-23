@@ -199,6 +199,42 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
                                   dims=("lat", "lon", "level"), units="m^2/s^2"))
 
 
+def _perturb_receipt(st_pre, st_post, moved) -> int:
+    """The perturbation-correctness receipt: EXACTLY the named state fields
+    moved, and every other field is bit-identical.
+
+    Written as a check over the whole state pytree rather than a comment,
+    because "I only called ``_replace`` on T" is a claim about the code and
+    this is a claim about the arrays. Returns the number of fields verified
+    untouched. Raises if a field that should have moved did not (a kick that
+    silently did nothing would make the ensemble spread zero by construction,
+    the most flattering possible artifact) or if one that should not have
+    moved did.
+    """
+    import jax
+    n_same = 0
+    for name in st_pre._fields:
+        a = jax.tree_util.tree_leaves(getattr(st_pre, name))
+        b = jax.tree_util.tree_leaves(getattr(st_post, name))
+        same = (len(a) == len(b)
+                and all(np.array_equal(np.asarray(x), np.asarray(y))
+                        for x, y in zip(a, b)))
+        if name in moved:
+            if same:
+                raise SystemExit(
+                    f"state.{name} was supposed to be perturbed but is "
+                    f"bit-identical -- the kick did not land")
+        elif not same:
+            raise SystemExit(
+                f"state.{name} changed and it should not have; the "
+                f"perturbation is not confined to {moved}")
+        else:
+            n_same += 1
+    if n_same == 0:
+        raise SystemExit("the perturbation receipt verified nothing")
+    return n_same
+
+
 def _print_before_bridge_verify(st, before, grid) -> None:
     """Print max|d_tb|/max|d_sb|/max|d_ub|/max|d_vb| vs the raw restart
     before-level (wet cells) -- the --bridge-before day-0 gate companion to
@@ -659,6 +695,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
+             perturb_both_levels: bool = False,
              perturb_baro: str | None = None,
              perturb_baro_key: str = "dU_avg",
              perturb_baro_scale: float = 1.0,
@@ -676,6 +713,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     legoESM state's now-level T only -- this twin runner's default
     (non-``--bridge-before``) state carries no before-level T, so there is
     no tb to perturb in lockstep.
+
+    ``perturb_both_levels``: #1455 kick-asymmetry discriminator
+    (``PREREG_kick_asymmetry.md``). Applies the SAME draw to
+    ``state.T_before`` as well, so the kick carries no leapfrog time-level
+    mismatch of its own. Requires ``bridge_before`` (raises otherwise). The
+    NEMO-side counterpart is ``perturb_nemo_tn_90d.py --both-levels``.
 
     ``perturb_baro``/``perturb_baro_key``/``perturb_baro_scale``: #1455
     Phase-2 Measurement 1.  Adds ``scale *`` a depth-uniform barotropic
@@ -720,15 +763,50 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     print(f"PRECISION: materialized state dtype = {control_dtype_stamp}")
 
     if perturb_seed is not None:
+        st_pre = st
         rng = np.random.default_rng(perturb_seed)
         t0 = np.asarray(st.T.data, dtype=np.float64)
-        factor = 1.0 + 1e-14 * rng.standard_normal(t0.shape)
+        factor = 1.0 + 1e-14 * rng.standard_normal(t0.shape)   # ONE draw
         t_pert = jnp.asarray(t0 * factor, dtype=st.T.data.dtype)
         d_t = float(np.max(np.abs(np.asarray(t_pert) - t0)))
         rel = float(np.max(np.abs(np.asarray(t_pert) - t0) / np.maximum(np.abs(t0), 1e-30)))
-        print(f"PERTURB seed={perturb_seed}: max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}",
-              flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
+        moved = ["T"]
+        if perturb_both_levels:
+            # #1455 kick-asymmetry discriminator (PREREG_kick_asymmetry.md).
+            # The SAME draw multiplies the BEFORE-level T, so the kick adds no
+            # tn-tb mismatch of its own and therefore projects far less onto
+            # the leapfrog computational mode than the now-only kick does.
+            # Reusing `factor` is the whole point: a second rng.standard_normal
+            # would make the two levels INDEPENDENTLY perturbed, which is a
+            # LARGER time-level mismatch than the default, not a smaller one.
+            if st.T_before is None:
+                raise SystemExit(
+                    "--perturb-both-levels needs a before-level T, and this "
+                    "state has none. Pass --bridge-before (which is what the "
+                    "recorded ensembles run); without it the twin's leapfrog "
+                    "entry is a forward-Euler cold start and there is no "
+                    "second time level to kick.")
+            tb0 = np.asarray(st.T_before.data, dtype=np.float64)
+            if tb0.shape != t0.shape:
+                raise SystemExit(
+                    f"before-level T is {tb0.shape} and now-level T is "
+                    f"{t0.shape}; the same draw cannot be applied to both")
+            tb_pert = jnp.asarray(tb0 * factor, dtype=st.T_before.data.dtype)
+            d_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)))
+            rel_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)
+                                  / np.maximum(np.abs(tb0), 1e-30)))
+            st = st._replace(T_before=st.T_before.replace(data=tb_pert))
+            moved.append("T_before")
+        else:
+            d_tb, rel_tb = 0.0, 0.0
+        n_other = _perturb_receipt(st_pre, st, moved)
+        print(f"PERTURB seed={perturb_seed} levels="
+              f"{'now+before' if perturb_both_levels else 'now'}: "
+              f"max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}  "
+              f"max|dT_before|={d_tb:.3e}  max_rel|dT_before/T_before|={rel_tb:.3e}  "
+              f"other_state_fields_bit_identical={n_other}",
+              flush=True)
 
     nsteps = STEPS_PER_DAY * n_days
 
@@ -1062,6 +1140,10 @@ def _parse_args(argv=None):
                          "multiplicative perturbation to the bridged now-level "
                          "T using numpy.random.default_rng(seed); default None "
                          "= no perturbation")
+    p.add_argument("--perturb-both-levels", action="store_true",
+                   help="apply --perturb-seed's SAME draw to the before-level "
+                        "T as well as the now-level T (needs --bridge-before); "
+                        "the #1455 two-time-level kick")
     p.add_argument("--perturb-baro", default=None,
                    help="#1455 Phase-2 Measurement 1: npz holding a "
                         "depth-uniform barotropic velocity field, injected ONCE "
@@ -1253,6 +1335,7 @@ def main(argv=None):
               surface_tendency_placement=args.surface_tendency_placement,
               u_m=args.u_m,
               perturb_seed=args.perturb_seed,
+              perturb_both_levels=args.perturb_both_levels,
               perturb_baro=args.perturb_baro,
               perturb_baro_key=args.perturb_baro_key,
               perturb_baro_scale=args.perturb_baro_scale,

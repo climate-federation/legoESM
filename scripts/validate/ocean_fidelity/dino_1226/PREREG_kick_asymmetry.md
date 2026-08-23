@@ -89,21 +89,26 @@ F(k)  = R1(k) / R2(k)                        the collapse factor
 **How much collapse is resolvable.** At n=4 the log of a spread estimate has
 standard deviation `1/sqrt(2(n-1)) = 0.408`. `F` is built from four
 independent spread estimates, so `log F` carries `sqrt(4) x 0.408 = 0.816`.
-A two-sided 95% band is `1.96 x 0.816 = 1.60` in log, i.e. a factor of
-**e^1.60 = 5.0**. An `F` below 5.0 is not distinguishable from no change at
-all.
+A two-sided 95% band is `1.96 x 0.8165 = 1.6006` in log, i.e. a factor of
+**e^1.6006 = 4.955**. An `F` below 4.955 is not distinguishable from no change
+at all.
+
+*Amendment, before any member of the two-level arm ran*: this paragraph first
+rounded the bar to "5.0". The bar is now stated, and computed in the probe, as
+the exact `exp(1.96 * sqrt(4) / sqrt(2*(n-1)))` = **4.955** at n=4. Nothing
+else changed; the rounding was in the prose, never in a number.
 
 Decided on the **median over the ten metrics** (the median, not the mean, so
 one saturated or quantization-limited metric cannot carry the verdict):
 
-* **CONFIRMS H1** if `median F >= 5.0` **and** `median R2 <= 10`.
+* **CONFIRMS H1** if `median F >= 4.955` **and** `median R2 <= 10`.
   The asymmetry collapses, and what is left is within the ~one-decade band
   where an RSS two-sided floor is a genuinely two-sided floor
   (`verdict360.ONE_SIDED_DECADES`).
-* **REFUTES H1** if `median F < 5.0`.
+* **REFUTES H1** if `median F < 4.955`.
   The asymmetry survives removal of the time-level mismatch, so it is not the
   computational mode.
-* **PARTIAL** if `median F >= 5.0` but `median R2 > 10`.
+* **PARTIAL** if `median F >= 4.955` but `median R2 > 10`.
   The computational mode contributes a resolvable share and does not own the
   asymmetry. Report the share; do not call it the cause.
 
