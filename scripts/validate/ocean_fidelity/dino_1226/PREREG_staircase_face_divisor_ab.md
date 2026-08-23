@@ -187,3 +187,49 @@ barotropic split inside a single step, are defects whether or not they move a
 metric.  The gate is 5/5 at 5× on both arms; the climate cost is 0.037 of one
 floor.  The A/B decided **attribution**, and its answer is that this is not the
 owner.
+
+---
+
+# RESULT, SUPERSEDING ARM B (the shipped rule is main's, not mine)
+
+Nothing above is edited.  Arm B scored the **min rule**, which review then
+showed forks a rule PR #1642 already owns on main.  The branch now carries
+main's construction — the centred average multiplied by the both-cells-wet face
+mask, with an unmasked alias feeding the bottom-drag diagonal and the gradient
+slot, which NEMO does not mask.  A third arm was run on that, on a clean tree at
+HEAD `ec6f0ffb2`, identical in every other flag.  **Arm B2 is the shipped
+change; arm B is retained only as the measurement of the rule choice itself.**
+
+| quantity | arm A (pre-fix) | arm B (min rule) | **arm B2 (shipped, masked average)** | floor |
+|---|---|---|---|---|
+| ACC gap [Sv] | 0.3761 | 0.3795 | **0.3757** | 0.091 |
+| upper contrast gap [kg/m³] | 2.399e-4 | 2.402e-4 | **2.395e-4** | 1.1e-4 |
+| deep contrast gap [kg/m³] | 1.260e-6 | 1.167e-6 | **1.249e-6** | 4.5e-5 |
+| surface sigma MAX gap | 9.444e-5 | 9.601e-5 | **9.454e-5** | 9.5e-5 |
+| surface sigma MEAN gap | 2.977e-4 | 2.974e-4 | **2.973e-4** | 9.5e-5 |
+| acceptance gate | PASS 5/5 @5× | PASS 5/5 @5× | **PASS 5/5 @5×** | — |
+| G4, wall rows 1–4 [Sv] | −0.2946 | −0.2956 | **−0.2946** | 0.091 |
+| basin rows 0–13 [Sv] | −0.4324 | −0.4353 | **−0.4326** | — |
+| A_wall [mm] | 1.698 | 1.709 | **1.697** | — |
+
+**The shipped change is climate-inert.**  `|ΔG4| = 0.0000 Sv` (−0.0 %), ACC gap
+improves by 0.0004 Sv = 0.004 of one floor, every density metric moves in the
+fourth significant figure or beyond.  This independently reproduces PR #1642's
+own A/B on this card (it measured 0.00011 Sv on ACC).
+
+**REFUTED as the deficit's owner, now by four orders** rather than fifty times:
+`|ΔG4| = 0.0000 Sv` against the 0.05 Sv refutation threshold.
+
+**What arm B was actually measuring, in hindsight.**  The 0.0010 Sv it moved is
+not the staircase fix — arm B2 shows that is zero — it is the **min-versus-
+average rule choice** on a tilted free surface, the very difference PR #1642
+scored as 74× against the min rule.  Recording it that way makes arm B a useful
+measurement rather than a discarded one.
+
+**My retracted directional prediction stays retracted, and the reviewer's
+amended magnitude is also refuted.**  I predicted +0.003 Sv improving; arm B
+gave −0.0010 Sv and arm B2 gives 0.0000.  The physics review, correcting my
+input error, predicted 1e-6 to 3e-5 Sv through the drag divisor; arm B moved 30×
+more than its upper bound.  **Neither chain predicted the measurement, so the
+mechanism of arm B's 0.0010 Sv is UNKNOWN** and is not cited as anything.  What
+is CONFIRMED is the shipped number: zero.
