@@ -2529,6 +2529,10 @@ class LatLonCGridOceanModel:
                     f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
+            # "nemo_face_native_now2" = the face-native SPATIAL geometry at
+            # NOW^2 time levels — the RK3-oracle-compatible variant (ORCA1 is
+            # compiled key_RK3, so no Nbb velocity exists to be faithful TO);
+            # it needs no before-state and runs under any integrator.
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int not in _leapfrog_family):
                 raise ValueError(
@@ -3805,8 +3809,29 @@ class LatLonCGridOceanModel:
                 # would subtract a per-band mean.
                 from legoesm.ocean.freshwater import normalize_freshwater_net
                 _g_eta = _grid if _grid is not None else self.grid
-                F_slow_eta = normalize_freshwater_net(
-                    F_slow_eta, _g_eta.area_T, state.land_mask.data)
+                # RESTORING IS EXCLUDED FROM THE NORMALIZATION (codex round 2
+                # RED).  The flag exists to remove the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact.  SSS restoring is not part of
+                # that imbalance, and NEMO never normalizes its `erp`
+                # (sbcssr.F90 adds it straight to `emp`; the global correction
+                # in NEMO applies to the forcing fields, not the damping term).
+                # Normalizing the full net would subtract the restoring's own
+                # global mean from EVERY cell -- a spurious uniform water flux
+                # plus a globally weakened restoring, both silent.
+                #
+                # So: normalize the PHYSICAL net, then add the restoring rate
+                # back untouched.  When `restoring` is absent this is exactly
+                # the previous expression.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                if _fw_rest is None:
+                    F_slow_eta = normalize_freshwater_net(
+                        F_slow_eta, _g_eta.area_T, state.land_mask.data)
+                else:
+                    _F_rest = (jnp.asarray(_fw_rest) / self.config.rho_0
+                               ) * state.land_mask.data
+                    F_slow_eta = normalize_freshwater_net(
+                        F_slow_eta - _F_rest, _g_eta.area_T,
+                        state.land_mask.data) + _F_rest
             # barotropic_forcing_centred (#1226 item 3; NEMO ln_bt_fw=.FALSE.,
             # dynspg_ts.F90:415-421 ssh_frc = ((emp+emp_b) -
             # (rnf+rnf_b))/(2*rho0)): centre ONLY this eta/barotropic channel — NEMO's
@@ -6230,7 +6255,8 @@ class LatLonCGridOceanModel:
                 _vmix_cfg_here is not None
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
-                           "squared_centered") == "nemo_face_native"
+                           "squared_centered") in ("nemo_face_native",
+                                                   "nemo_face_native_now2")
             )
             if _keep_raw_faces:
                 cc_state = state
@@ -6488,6 +6514,16 @@ class LatLonCGridOceanModel:
             # Fused v-interps: one sendrecv pair per cut for A_v + dz
             # (audit lever O4; both are independent cell fields here).
             A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
+            # UNMASKED face thickness, kept under its own name because two
+            # consumers need a POSITIVE thickness rather than the masked
+            # control volume built below: the centre-to-centre gradient slot
+            # ``dz_half_{u,v}`` (whose value at a closed interface is
+            # irrelevant — the viscosity there is already zero — but which
+            # must not become 1/eps), and the ``zdf_drag_in_matrix`` diagonal,
+            # whose NEMO counterpart divides by ``e3u(ji,jj,iku,Kaa)``
+            # (dynzdf.F90:296), a scale factor NEMO never masks.  Both stay
+            # BIT-IDENTICAL to the behaviour before the control-volume fix.
+            dz_u_open, dz_v_open = dz_u, dz_v
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
                 # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
@@ -6503,10 +6539,12 @@ class LatLonCGridOceanModel:
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
             if _dzw_slot:
-                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to the
-                # faces with the SAME interp that built the control volumes
-                # dz_u/dz_v (J is level-independent, so dz_u = dz_ref·J_u and the
-                # gradient slot dz_half_ref·J_u stays consistent with it).
+                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to
+                # the faces with the SAME interp that built the UNMASKED face
+                # thickness dz_{u,v}_open (J is level-independent, so
+                # dz_u_open = dz_ref·J_u and the gradient slot dz_half_ref·J_u
+                # stays consistent with it).  Deliberately NOT the masked
+                # control volume: see the dz_*_open note above.
                 J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
                 J_v = interp_to_v_points(J_cell[..., jnp.newaxis], _grid)
                 dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)
@@ -6514,15 +6552,79 @@ class LatLonCGridOceanModel:
             elif _e3t_now_slot:
                 # NEMO e3w(Kmm) at u/v-faces (#1226 W1): interpolate the SAME
                 # NOW-level thickness (e3t_now, cell-centered above) to the
-                # faces with the SAME interps used for dz_u/dz_v, matching the
-                # dzw-slot sibling's face-consistency pattern.
+                # faces with the SAME interps that built the UNMASKED
+                # dz_{u,v}_open, matching the dzw-slot sibling's
+                # face-consistency pattern.  NEMO closes this interface with
+                # ``wumask`` (dynzdf.F90:183-185), not with a zeroed e3uw, so
+                # the mask does not belong on the gradient slot either.
                 e3t_now_u = interp_cell_to_uface(e3t_now)
                 e3t_now_v = interp_to_v_points(e3t_now, _grid)
                 dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
                 dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
             else:
-                dz_half_u = build_dz_half(dz_u)
-                dz_half_v = build_dz_half(dz_v)
+                # UNMASKED (``dz_*_open``): a closed interface's gradient slot
+                # is multiplied by an already-zero viscosity, and feeding it
+                # the masked control volume would make it 1/eps there for no
+                # gain.  BIT-IDENTICAL to the pre-#1455 behaviour.
+                dz_half_u = build_dz_half(dz_u_open)
+                dz_half_v = build_dz_half(dz_v_open)
+            if _wet_if_vmix is not None:
+                # FACE CONTROL VOLUME = NEMO's ``e3u_0 * umask`` (#1455).
+                # ``dz_cell`` is h_partial*J, which is ALREADY ZERO below the
+                # seafloor, so the cell->face AVERAGE returns HALF a thickness
+                # at a bathymetry-staircase face — a face NEMO's umask closes.
+                # NEMO never gets a half: its ``e3t_0`` is defined on the
+                # UNMASKED reference ladder at every level (DINO ln_zco:
+                # ``pe3u = 0.5*(pe3t(i)+pe3t(i+1))``, cfgs/DINO/MY_SRC/
+                # zgr_lib.F90:231; ln_zps: ``e3u_0 = MIN(e3t_0(i),e3t_0(i+1))``,
+                # tools/DOMAINcfg/src/domzgr.F90:1166), and the mask is applied
+                # SEPARATELY when the column is summed —
+                # ``hu_0 = hu_0 + e3u_0(:,:,jk)*umask(:,:,jk)`` (domain.F90:145).
+                # Averaging the already-masked thickness therefore inflates the
+                # column divisor by half a reference cell at every staircase
+                # level (measured on the shipped DINO card: 1560 u-faces at
+                # exactly 0.5000 of the ladder, 1559 wet u-columns inflated by
+                # up to 370 m = 15.7% of their depth).  Multiplying by the
+                # both-cells-wet face mask restores NEMO's value exactly: at a
+                # wet-wet face the masked and unmasked averages coincide, and
+                # at a closed face both rules give zero.
+                # SCOPE: this changes EVERY face the mask closes, which is
+                # more than the bathymetry staircase -- a LAND-ADJACENT face
+                # on a flat bottom, and a configured seam wall
+                # (``grid.seam_wall_rows``, ``_apply_seam_wall_u``), are
+                # closed at every level and now carry a zero column too.  All
+                # of those faces are discarded by the ``u_mask``/``v_mask``
+                # ``jnp.where`` after the solve, so no velocity changes; what
+                # changes is the divisor.  A face the mask leaves OPEN is
+                # BIT-IDENTICAL (the multiplier is exactly 1.0), and a
+                # coordinate that is not partial-cell never enters this branch.
+                # Why not ``min_cell_to_uface`` (the thickness house rule in
+                # its own docstring): the min rule would ALSO change wet-wet
+                # faces whose two columns differ in the z-star Jacobian, where
+                # NEMO AVERAGES the free-surface factor -- for DINO the
+                # e1e2t-area-weighted form ``pr3u = 0.5*(e1e2t_i*ssh_i +
+                # e1e2t_{i+1}*ssh_{i+1})*r1_hu_0*r1_e1e2u``, domqco.F90:219-222
+                # (cpp_DINO.fcm sets key_qco and NOT key_qcoTest_FluxForm, so
+                # :227's plain-average sibling is the arm DINO does not build).
+                # AT REST the two rules are identical on this card (measured
+                # over the whole DINO geometry).  They separate as soon as the
+                # sea surface tilts: scored against NEMO's
+                # ``hu = hu_0 + ssh_avg`` on the DINO geometry with a
+                # N(0, 0.5 m) sea surface, this masked average is 0.0038 m
+                # mean / 0.115 m max off, the min rule 0.280 m / 1.389 m, and
+                # the pre-fix unmasked average 31.7 m / 370.1 m -- so the
+                # masked average is ~74x closer to NEMO than the min rule.
+                # NAMED, NOT FIXED (one owner needed, out of scope here): the
+                # sibling site ``after_level_column_mean_reconcile``
+                # (barotropic_common.py:322, called at :7834 below)
+                # reconstructs the SAME NEMO face thickness by the MIN rule on
+                # the eta=0 reference ladder.  The two agree only on a
+                # horizontally uniform full-step ladder at rest.  Relatedly, on
+                # a genuine ln_zps partial-cell coordinate the wet-wet average
+                # here is still not NEMO's MIN (domzgr.F90:1166); DINO has no
+                # partial cells (namelist_cfg:70-72 ln_zco_nam=.true.).
+                dz_u = dz_u * _act_u3.astype(dz_u.dtype)
+                dz_v = dz_v * _act_v3.astype(dz_v.dtype)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 
@@ -6602,10 +6704,10 @@ class LatLonCGridOceanModel:
             # average requires the explicit factor of 2 here.
             extra_diag_u = (
                 2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
-                / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
+                / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u)
             extra_diag_v = (
                 2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
-                / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
+                / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v)
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
                 # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
@@ -6618,10 +6720,10 @@ class LatLonCGridOceanModel:
                 # damping direction.
                 u_solve_in = u_solve_in - (
                     2.0 * dt_mom * _r_eff_u[..., jnp.newaxis]
-                    / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
+                    / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u * _u_bt_mean)
                 v_solve_in = v_solve_in - (
                     2.0 * dt_mom * _r_eff_v[..., jnp.newaxis]
-                    / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
+                    / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static

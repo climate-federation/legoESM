@@ -37,7 +37,49 @@ logger = logging.getLogger(__name__)
 
 
 def _cache_dir() -> Path:
-    return _jra_cache_dir().parent / "core2_nyf"
+    """Default CORE-II NYF cache.
+
+    ``core2_nyf_mod`` is built from the Large & Yeager bias-corrected fields
+    (U_10_MOD, V_10_MOD, T_10_MOD, Q_10_MOD, SWDN_MOD, LWDN_MOD, PRC_MOD) --
+    the ones NEMO ORCA1's namelist reads.  The older ``core2_nyf`` was built
+    from the RAW fields, whose equatorial winds are 33% weaker (the known
+    NCEP-1 trade-wind bias the _MOD correction exists to remove); forcing with
+    them gave roughly half NEMO's equatorial wind stress and a +2.5 C nino3
+    bias that fell to +1.49 C on the corrected forcing at matched day 20.
+
+    The raw cache is deliberately left on disk rather than overwritten, so an
+    older run can still be reproduced by passing ``cache_dir`` explicitly.
+    """
+    root = _jra_cache_dir().parent
+    corrected = root / "core2_nyf_mod"
+    if corrected.exists():
+        return corrected
+    # Fall back to the raw cache only if the corrected one was never built,
+    # and say so -- silently forcing with 33%-weak equatorial winds is the
+    # defect this default exists to prevent.
+    logger.warning(
+        "CORE-II cache %s not found; falling back to the RAW-wind cache at "
+        "%s. Its equatorial winds are ~33%% weaker than the fields NEMO "
+        "reads. Rebuild with scripts/data/build_core2_nyf_zarr.py "
+        "--wind-variant mod.", corrected, root / "core2_nyf")
+    return root / "core2_nyf"
+
+
+def core2_nyf_path(cache_dir: Optional[Path] = None) -> Path:
+    """Resolve the ``nyf.zarr`` archive :func:`load_core2_nyf` would read.
+
+    Exposed so a caller can RECORD which archive a run actually used.  With
+    ``cache_dir`` unset the location comes from ``_cache_dir()``, i.e. from the
+    environment / home directory, so two runs launched with identical command
+    lines can read DIFFERENT forcing (codex r8): ``run_omip_core2`` folds this
+    resolved path into its restart configuration fingerprint rather than the
+    raw ``--forcing-path`` argument, which is ``None`` in exactly that case.
+
+    Single source of truth: :func:`load_core2_nyf` resolves through this
+    function, so the recorded path cannot drift from the loaded one.
+    """
+    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
+    return root / "nyf.zarr"
 
 
 def load_core2_nyf(*, cache_dir: Optional[Path] = None,
@@ -49,8 +91,7 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
     with ``n_time`` daily snapshots (default 365). The seasonal cycle is
     one year long.
     """
-    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
-    zarr_path = root / "nyf.zarr"
+    zarr_path = core2_nyf_path(cache_dir)
     if zarr_path.exists():
         try:
             import xarray as xr
@@ -95,4 +136,4 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
     return synthetic_ocean_forcing(0, n_time=n_time)
 
 
-__all__ = ["load_core2_nyf"]
+__all__ = ["load_core2_nyf", "core2_nyf_path"]

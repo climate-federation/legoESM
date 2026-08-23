@@ -26,6 +26,8 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 
+from legoesm import constants
+
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.atmosphere.physics.convection.config import (
     ConvectionConfig,
@@ -704,6 +706,83 @@ CLASSICAL_DEFAULT_SCHEMES = {
 
 _UNFILLED = ("", "none", "off", "false")
 
+# --- Per-rollout TKE seed (training-lane seeding POLICY, not scheme
+# physics; GLM 2026-08-17 review, option c) -------------------------------
+# ``init_physics_state`` seeds the TKE slot at the scheme floor
+# (~1e-6 m^2/s^2). Turbulence production scales with sqrt(TKE), so a floor
+# seed cannot spin up inside a 6-h training window (measured: threading the
+# memory moved the 12-step loss by only 5e-4 relative) — the mixing stays
+# effectively absent. The seed below evaluates the NEUTRAL
+# production-dissipation balance on the initial state,
+#     c_K * L * sqrt(w) * S^2 = w^(3/2) / L   =>   w = c_K * L^2 * S^2,
+# with fixed policy constants: TKE is quasi-equilibrium (tau ~ minutes to
+# tens of minutes), so any physically-scaled seed relaxes to the scheme's
+# own balance within a few steps — the seed's job is escaping the sqrt
+# bottleneck, not being exact. The active scheme's own c_K IS used when
+# available — DETACHED via stop_gradient, so the seed tracks the trained
+# equilibrium without the trained value retro-coupling into its own
+# initial condition (GLM round 2); the constants below are the fallback
+# policy values and the fixed length/clip band, deliberately not tunables.
+_TKE_SEED_CK = 0.5          # representative eddy-diffusivity coefficient
+_TKE_SEED_LENGTH_M = 100.0  # neutral-BL mixing-length scale [m]
+_TKE_SEED_FLOOR = 1.0e-6    # scheme tke_min class floor [m^2/s^2]
+_TKE_SEED_CAP = 10.0        # sanity cap [m^2/s^2] (jet shear layers)
+
+
+def _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=None):
+    """Replace ``ps.tke`` with the shear-equilibrium wp2 seed (see above).
+
+    ``c_k``: the ACTIVE scheme's eddy coefficient, DETACHED
+    (``lax.stop_gradient``) by the caller — the seed then matches the
+    scheme's own equilibrium as training moves c_K, without the trained
+    value retro-coupling into its own initial condition (GLM: a fixed
+    policy c_K guarantees a per-window adjustment transient the loss
+    would mis-attribute to the sink terms). ``None`` falls back to the
+    fixed policy constant. Bechtold's organization profile and the GWD
+    spectrum keep their cold defaults — no diagnostic exists for them
+    (named open item).
+    """
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        spectral_pe_to_grid,
+    )
+
+    if ps.tke is None:
+        return ps
+    ncol = int(grid_.n_lat) * int(grid_.n_lon)
+    nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
+    fields = spectral_pe_to_grid(state, grid_, sigma_coord)
+    u = fields["u"].reshape(ncol, nlev)
+    v = fields["v"].reshape(ncol, nlev)
+    T = fields["T"].reshape(ncol, nlev)
+    # Layer separation dz ~ (R_d T / g) * dln(p): the grid converter exposes
+    # no heights, and a seed needs only order-of-magnitude shear. sigma_full
+    # is static, so dln p is a trace-time constant.
+    sig = jnp.asarray(sigma_coord.sigma_full)
+    dlnp = jnp.abs(jnp.log(sig[1:]) - jnp.log(sig[:-1]))      # (nlev-1,)
+    T_half = 0.5 * (T[:, :-1] + T[:, 1:])
+    dz = jnp.clip((constants.R_d / constants.g) * T_half * dlnp, 1.0, None)
+    s2_half = (((u[:, :-1] - u[:, 1:]) / dz) ** 2
+               + ((v[:, :-1] - v[:, 1:]) / dz) ** 2)
+    # Interior interfaces -> full levels by edge-replicated averaging (the
+    # same half->full stencil the diagnostic scheme itself uses).
+    s2 = jnp.concatenate(
+        [s2_half[:, :1],
+         0.5 * (s2_half[:, :-1] + s2_half[:, 1:]),
+         s2_half[:, -1:]], axis=1)
+    # 1-2-1 vertical smoothing: raw per-layer S^2 from analysis winds is
+    # grid-noisy, and a noisy seed imprints spurious layer-scale K at step 1
+    # (GLM). Replicated-edge convolution: the endpoints blend 3/4-1/4 with
+    # their neighbour (leaving them raw skips the smoothing exactly at the
+    # surface, where the seed matters most — codex round 2).
+    s2 = jnp.concatenate(
+        [0.75 * s2[:, :1] + 0.25 * s2[:, 1:2],
+         0.25 * s2[:, :-2] + 0.5 * s2[:, 1:-1] + 0.25 * s2[:, 2:],
+         0.25 * s2[:, -2:-1] + 0.75 * s2[:, -1:]], axis=1)
+    _ck = _TKE_SEED_CK if c_k is None else jax.lax.stop_gradient(c_k)
+    wp2_seed = jnp.clip(_ck * _TKE_SEED_LENGTH_M ** 2 * s2,
+                        _TKE_SEED_FLOOR, _TKE_SEED_CAP)
+    return ps._replace(tke=wp2_seed.astype(ps.tke.dtype))
+
 
 def validate_classical_scheme_set(
     *, convection: str, turbulence: str, cloud: str, microphysics: str,
@@ -1059,6 +1138,12 @@ def make_aimip_classical_spectral_physics(
     gwd_scheme: str = "mcfarlane",
     microphysics_scheme: str = "sundqvist",
     cloud_scheme: str = "xu_randall",
+    # CAM ``trop_cloud_top_press`` [Pa] for turbulence_scheme="clubb": the
+    # pressure above which CLUBB's mixing tapers to zero. None keeps
+    # CLUBBConfig's default 0.0 = OFF (CAM's own code default; the taper is a
+    # no-op branch); the 32-level WB arm sets 5000 Pa (see CLUBBConfig
+    # docstring).
+    clubb_top_press: float | None = None,
     # Ablations that deliberately drop a family set this True; production
     # training does not (see validate_classical_scheme_set).
     allow_unfilled_families: bool = False,
@@ -1365,9 +1450,14 @@ def make_aimip_classical_spectral_physics(
         }
         factory = _surface_scheme_configs.get(turbulence_scheme)
         if factory is not None:
+            _turb_sub = factory()
+            if turbulence_scheme == "clubb" and clubb_top_press is not None:
+                # CAM trop_cloud_top_press override (see the kwarg above).
+                _turb_sub = _turb_sub._replace(
+                    trop_cloud_top_press=float(clubb_top_press))
             turb_cfg = TurbulenceConfig(
                 scheme=turbulence_scheme,
-                **{turbulence_scheme: _spatial_surface_override(factory())},
+                **{turbulence_scheme: _spatial_surface_override(_turb_sub)},
             )
         else:
             # "none" — no surface sub-config to thread the bulk scheme onto.
@@ -1442,6 +1532,38 @@ def make_aimip_classical_spectral_physics(
             result = combined_raw(state, grid_, sigma_coord)
             return result[0] if isinstance(result, tuple) else result
 
+        def combined_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                        forcing=None):
+            # Same stateful contract as the split-rad entry below (codex P1:
+            # the non-split path must not stay silently memoryless).
+            result = combined_raw(
+                state, grid_, sigma_coord, phys_state=phys_state,
+                forcing=forcing,
+            )
+            if not (isinstance(result, tuple) and len(result) == 2):
+                raise TypeError(
+                    "stateful classical physics expected (tendencies, "
+                    f"phys_state), got {type(result)!r}")
+            return result
+
+        def _init_phys_state_combined(ncol: int, nlev: int, dtype=None):
+            from legoesm.atmosphere.physics.physics_state import (
+                init_physics_state,
+            )
+            return init_physics_state(ncol, nlev, physics_config, dtype=dtype)
+
+        def _seed_phys_state_combined(state, grid_, sigma_coord):
+            ps = _init_phys_state_combined(
+                int(grid_.n_lat) * int(grid_.n_lon),
+                int(jnp.shape(sigma_coord.sigma_full)[0]))
+            _ck = None
+            if turb_cfg.scheme == "clubb" and turb_cfg.clubb is not None:
+                _ck = turb_cfg.clubb.params.c_K
+            return _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=_ck)
+
+        combined_fn.with_phys_state = combined_fn_with_phys_state
+        combined_fn.init_phys_state = _init_phys_state_combined
+        combined_fn.seed_phys_state = _seed_phys_state_combined
         return combined_fn
 
     # Rad-split path: separate non-radiative and radiative callables.
@@ -1488,6 +1610,57 @@ def make_aimip_classical_spectral_physics(
             state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
         )
         return result[0] if isinstance(result, tuple) else result
+
+    def non_rad_fn_with_phys_state(state, grid_, sigma_coord, phys_state,
+                                   forcing=None):
+        """``(tendencies, phys_state_out)`` — the STATEFUL entry.
+
+        The combined spectral wrapper has always produced the updated
+        prognostic physics state (CLUBB's wp2/TKE, Bechtold's
+        ``conv_prog_profile`` + stochastic state, the GWD spectrum, the
+        PDF cloud fraction) and ``non_rad_fn`` above DISCARDS it — so the
+        WB/AIMIP spectral training rollout ran every stateful scheme
+        MEMORYLESS: CLUBB's turbulence energy sat at its floor forever,
+        i.e. effectively NO boundary-layer mixing (2026-08-17 scene-17
+        dissection: four in-scheme probes were bit-flat because they
+        patched outputs this lane threw away). ``spectral_rollout``
+        threads this entry's state through its scan carry when the
+        marker below is present.
+        """
+        result = non_rad_raw(
+            state, grid_, sigma_coord, phys_state=phys_state, forcing=forcing,
+        )
+        if not (isinstance(result, tuple) and len(result) == 2):
+            # A silent fallback here would freeze the physics memory and
+            # reintroduce the memoryless pathology this entry exists to fix
+            # (codex P3) — fail loudly instead.
+            raise TypeError(
+                "stateful classical physics expected (tendencies, "
+                f"phys_state) from the combined wrapper, got {type(result)!r}")
+        return result
+
+    def _init_phys_state(ncol: int, nlev: int, dtype=None):
+        from legoesm.atmosphere.physics.physics_state import (
+            init_physics_state,
+        )
+        return init_physics_state(ncol, nlev, non_rad_cfg, dtype=dtype)
+
+    def _seed_phys_state(state, grid_, sigma_coord):
+        ps = _init_phys_state(
+            int(grid_.n_lat) * int(grid_.n_lon),
+            int(jnp.shape(sigma_coord.sigma_full)[0]))
+        # The active scheme's own (possibly trained/traced) c_K, detached
+        # in _apply_wp2_seed; None -> fixed policy constant.
+        _ck = None
+        if turb_cfg.scheme == "clubb" and turb_cfg.clubb is not None:
+            _ck = turb_cfg.clubb.params.c_K
+        return _apply_wp2_seed(ps, state, grid_, sigma_coord, c_k=_ck)
+
+    # Markers consumed by ``spectral_rollout``: their ABSENCE selects the
+    # legacy stateless path (learned arms, older callers) byte-identically.
+    non_rad_fn.with_phys_state = non_rad_fn_with_phys_state
+    non_rad_fn.init_phys_state = _init_phys_state
+    non_rad_fn.seed_phys_state = _seed_phys_state
 
     def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
         # ``make_radiation_physics`` returns the per-module physics_fn

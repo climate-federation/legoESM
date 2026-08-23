@@ -24,6 +24,7 @@ from legoesm.forcing.time_utils import daily_forcing_bucket, day_to_calendar
 from legoesm.core.conservation import (
     compute_global_moisture, fix_moisture_hydrostatic,
     energy_consistent_moisture_floor,
+    conservative_positive_clip, is_borrow_eligible_tracer,
 )
 from legoesm.core.tracers import (
     TracerRegistry,
@@ -44,6 +45,11 @@ from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
+
+# Keeps a seeded soil moisture strictly inside the van-Genuchten retention
+# range: psi_from_theta is singular at saturation and at the residual.
+_THETA_EDGE_GUARD = 1.0e-3
+
 
 
 def _external_forcing_active(
@@ -807,6 +813,33 @@ def _is_mpas_cell_partitioned(drv) -> bool:
             and (getattr(drv, "_mpi_world_size", 1) or 1) > 1)
 
 
+def _validate_number_convention(payload, tracer_names) -> None:
+    """Refuse a restart whose droplet number uses the old per-VOLUME units.
+
+    Cloud and rain number are stored PER MASS [1/kg] since 2026-08-14 so the
+    dycores' mass-mixing-ratio advection is the right operator for them. A file
+    written before that holds [1/m^3]; reloading it as per-mass is wrong by the
+    air density — roughly 1.2 near the surface and 2.5 in the upper
+    troposphere — and nothing else in the file distinguishes the two. Fail
+    loudly rather than continue with silently wrong droplet sizes.
+    """
+    if not any(n in ("N_c", "N_r") for n in tracer_names):
+        return
+    stamp = payload.get("number_convention") if hasattr(payload, "get") else None
+    if stamp is None and "number_convention" in payload:
+        stamp = payload["number_convention"]
+    stamp = None if stamp is None else str(np.asarray(stamp).item())
+    if stamp != "per_mass":
+        raise ValueError(
+            "This restart carries cloud/rain droplet number written under the "
+            "old PER-VOLUME convention (no 'number_convention' stamp); the "
+            "model now stores them PER MASS [1/kg]. Loading it as-is would "
+            "scale droplet number by the air density. Re-run from the initial "
+            "state, or divide the stored N_c/N_r by air density and add "
+            "number_convention='per_mass' to the file."
+        )
+
+
 class ModelDriver:
     """Top-level simulation driver.
 
@@ -1043,10 +1076,32 @@ class ModelDriver:
         return {k: self.tracers[k] for k in self._DOUBLE_MOMENT_TRACERS
                 if self.tracers.get(k) is not None}
 
+    def _conserving_floor(self, field, dp=None):
+        """Column-conserving non-negativity for a per-mass field
+        ``(..., nlev)``: clip negatives, rescale the column's positives so
+        the TRUE layer-mass (dp) weighted integral is unchanged (owner
+        decision 2026-08-16: conserving form always — the plain
+        ``max(q, 0)`` invents mass at every overdraw/undershoot, the
+        MPAS-century +30 kg/m2/yr class). dp from ``pressure_at_half`` is
+        hybrid-correct and reduces to ``dsigma * p_s`` on pure sigma (the
+        per-column ``p_s`` cancels in the rescale); non-positive dp (broken
+        hybrid layer over terrain) is zero-weighted rather than divided by —
+        mirrors the MPAS floors stage. Pass a precomputed ``dp`` when
+        flooring several fields against the same ``p_s`` (the double-moment
+        loop) to skip recomputing it per field."""
+        if dp is None:
+            _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+            dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+        fixed, _created = conservative_positive_clip(field, dp, axis=-1)
+        return fixed
+
     def _apply_double_moment_tendencies(self, phys_out, dt) -> None:
         """Integrate the ice/snow/graupel + number tracers one step from the
-        matching ``PhysicsOutput`` tendencies, clipped non-negative. No-op
-        unless the full-moisture registry is active (q_i present)."""
+        matching ``PhysicsOutput`` tendencies, floored non-negative by the
+        column-conserving borrow (every one of these is per-mass and
+        borrow-eligible; a plain clip invented number at x2.2/day compound on
+        century3 until N_i overflowed). No-op unless the full-moisture
+        registry is active (q_i present)."""
         if not (isinstance(self.tracers, dict)
                 and self.tracer_registry.has("q_i")):
             return
@@ -1055,9 +1110,13 @@ class ModelDriver:
             "q_g": phys_out.dq_g_dt, "N_c": phys_out.dN_c_dt,
             "N_r": phys_out.dN_r_dt, "N_i": phys_out.dN_i_dt,
         }
+        _ph = self.sigma.pressure_at_half(self.state.p_s.data)
+        _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
         for k, tend in _upd.items():
             if self.tracers.get(k) is not None:
-                self.tracers[k] = jnp.maximum(self.tracers[k] + dt * tend, 0.0)
+                assert is_borrow_eligible_tracer(k), k
+                self.tracers[k] = self._conserving_floor(
+                    self.tracers[k] + dt * tend, dp=_dp)
 
     def _checkpoint_carry_aux(self) -> dict | None:
         """``self._carry_aux`` augmented with the evolved double-moment tracers
@@ -1074,6 +1133,9 @@ class ModelDriver:
         dm = self._double_moment_step_inputs()
         for k, v in dm.items():
             base[f"dmtr_{k}"] = v
+        if any(k in ("N_c", "N_r") for k in dm):
+            # Same per-mass droplet-number stamp as the MPAS/spectral writers.
+            base["dmtr_number_convention"] = np.asarray("per_mass")
         # Tag the convection carry with its scheme (codex round 8): a
         # scheme change that keeps the carry SHAPE (mass_flux<->edmf
         # both carry (ncol,); the profile-prognostic schemes all carry
@@ -1088,6 +1150,13 @@ class ModelDriver:
         # chained C48 SOTA restart resumes the deep-soil spin-up instead of
         # cold-starting. No-op for slab-land runs (_land_ml_state is None).
         if self._land_ml_state is not None:
+            # The soil COLUMN this state belongs to.  The field shapes below
+            # record the layer COUNT only, and two columns with the same count
+            # can span different depths (8 layers over 3 m vs over 6.375 m), in
+            # which case a resumed run reads every soil value at the wrong
+            # depth.  Not a state field, so it gets its own namespace and the
+            # restore's exact-field-set check ignores it.
+            base["land_soil_dz"] = self._land_soil_dz()
             for _f, _v in self._land_ml_state._asdict().items():
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
@@ -1104,7 +1173,20 @@ class ModelDriver:
         if not (isinstance(self._carry_aux, dict)
                 and isinstance(_tracers, dict)):
             return
-        for key in [k for k in self._carry_aux if k.startswith("dmtr_")]:
+        _stamp = self._carry_aux.pop("dmtr_number_convention", None)
+        _keys = [k for k in self._carry_aux if k.startswith("dmtr_")]
+        if any(k in ("dmtr_N_c", "dmtr_N_r") for k in _keys):
+            _stamp = None if _stamp is None else str(np.asarray(_stamp).item())
+            if _stamp != "per_mass":
+                raise ValueError(
+                    "checkpoint carries cloud/rain droplet number written "
+                    "under the old PER-VOLUME convention (no "
+                    "'dmtr_number_convention' stamp); the model now stores "
+                    "them PER MASS [1/kg]. Re-run from the initial state, or "
+                    "divide the stored N_c/N_r by air density and add the "
+                    "stamp."
+                )
+        for key in _keys:
             _tracers[key[len("dmtr_"):]] = self._carry_aux.pop(key)
 
     @staticmethod
@@ -1124,6 +1206,57 @@ class ModelDriver:
         return isinstance(carry_aux, dict) and any(
             k.startswith("land_ml_") for k in carry_aux)
 
+    def _check_land_soil_dz(self, ckpt_dz) -> None:
+        """Refuse a checkpoint whose soil column is not this run's.
+
+        The field-shape checks that follow see the layer COUNT only, so a state
+        equilibrated over 6.375 m resumes into a 3 m run without a word — every
+        soil temperature and moisture value read at the wrong depth.  A
+        checkpoint written before the column was recorded carries nothing to
+        check; that is only refused for a run whose column is not the historical
+        default, so existing chains keep working.
+        """
+        want = self._land_soil_dz()
+        if want is None:
+            return
+        calibrated = bool(getattr(self.config, "land_calibrated_physics", False))
+        if ckpt_dz is None:
+            if calibrated:
+                raise ValueError(
+                    "the checkpoint predates soil-column recording, so its layer "
+                    f"depths cannot be checked against this run's column "
+                    f"({want.tolist()} m, total {float(want.sum()):.4f} m). This "
+                    "run is on the calibrated column, not the historical "
+                    "default, so the checkpoint is most likely on the wrong one. "
+                    "Start from a land initial condition on this column instead.")
+            logger.warning(
+                "Checkpoint predates soil-column recording; its layer depths "
+                "CANNOT be checked against this run's column (%s m). If it was "
+                "produced on a different column the soil profile is being read "
+                "at the wrong depths.", want.tolist())
+            return
+        got = np.asarray(ckpt_dz, dtype=np.float64).reshape(-1)
+        from legoesm.land.restart import soil_dz_matches
+        if not soil_dz_matches(got, want):
+            raise ValueError(
+                f"checkpoint soil column does not match this run: checkpoint "
+                f"layer thicknesses {got.tolist()} m (total "
+                f"{float(got.sum()):.4f} m) vs current {want.tolist()} m (total "
+                f"{float(want.sum()):.4f} m). The soil profile would be read at "
+                "the wrong depths.")
+
+    def _land_soil_dz(self):
+        """This run's soil layer thicknesses [m], or ``None`` with no soil tile.
+
+        The one place the column is turned into a checkpointable record, so the
+        save and the check below cannot describe different things.
+        """
+        cfg = getattr(self.physics, "land_ml_cfg", None)
+        if cfg is None:
+            return None
+        from legoesm.land.soil_grid import make_soil_grid
+        return np.asarray(make_soil_grid(cfg.soil_grid).dz, dtype=np.float64)
+
     def _restore_land_ml_from_carry_aux(self) -> None:
         """Rebuild ``self._land_ml_state`` from any ``land_ml_*`` entries restored
         into ``carry_aux``, so a chained multilayer-land restart resumes the
@@ -1140,9 +1273,14 @@ class ModelDriver:
         refuses a field-set mismatch rather than silently dropping columns."""
         if not isinstance(self._carry_aux, dict):
             return
+        # The soil column the checkpoint's state belongs to (own namespace, so
+        # it is not mistaken for a state field below).  Popped unconditionally
+        # so it never leaks into the next re-save.
+        _ckpt_dz = self._carry_aux.pop("land_soil_dz", None)
         keys = [k for k in self._carry_aux if k.startswith("land_ml_")]
         if not keys:
             return
+        self._check_land_soil_dz(_ckpt_dz)
         # Pop the namespaced keys regardless of land type so a stray land_ml_*
         # (e.g. a slab run chained off a multilayer checkpoint) is never left to
         # leak forward into the next _checkpoint_carry_aux() re-save.
@@ -1219,6 +1357,61 @@ class ModelDriver:
             context=context,
         )
 
+    def _preflight_land_inputs(self) -> None:
+        """Refuse a land initial condition that belongs to a different soil column.
+
+        The layer COUNT is checked later, when the state is loaded, but two
+        columns with the same count can span different depths (8 layers over 3 m
+        against 8 over 6.375 m), and then every soil temperature and moisture
+        value is read at the wrong depth with nothing anywhere complaining.
+
+        Done HERE, from the config and the restart file's own record of its
+        thicknesses, because both are the same on every rank — unlike the load
+        itself, which happens only on ranks that own land.
+        """
+        cfg = self.config
+        ic_path = getattr(cfg, "land_ic_path", "")
+        if not (getattr(cfg, "use_multilayer_land", False) and ic_path):
+            return
+        if not os.path.exists(ic_path):
+            # Symmetric refusal: the loader would otherwise report this only on
+            # ranks that own land, leaving the rest waiting (codex round 11).
+            raise FileNotFoundError(
+                f"land_ic {ic_path!r} does not exist (or is a broken symlink). "
+                "A multilayer run was asked to start from a spun-up land state "
+                "and cannot.")
+        from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+        from legoesm.land.config import calibrated_multilayer_setup
+        if getattr(cfg, "land_calibrated_physics", False):
+            want_grid = calibrated_multilayer_setup()["soil_grid"]
+        else:
+            want_grid = SoilGridConfig(
+                n_layers=cfg.multilayer_n_layers,
+                total_depth=cfg.multilayer_soil_depth)
+        want = np.asarray(make_soil_grid(want_grid).dz, dtype=np.float64)
+        from legoesm.land.restart import (
+            load_land_restart_soil_dz, soil_dz_matches,
+        )
+        got = load_land_restart_soil_dz(ic_path)
+        if got is None:
+            if getattr(cfg, "land_calibrated_physics", False):
+                raise ValueError(
+                    f"land IC {ic_path} predates soil-column recording, so its "
+                    f"layer depths cannot be checked against this run's column "
+                    f"({want.tolist()} m, total {float(want.sum()):.4f} m). This "
+                    "run is on the calibrated column, not the historical "
+                    "default, so the IC is most likely on the wrong one. Re-run "
+                    "the land spin-up on this run's column.")
+            return
+        if not soil_dz_matches(got, want):
+            raise ValueError(
+                f"land IC {ic_path} belongs to a different soil column: its "
+                f"layer thicknesses are {got.tolist()} m (total "
+                f"{float(got.sum()):.4f} m) against this run's {want.tolist()} m "
+                f"(total {float(want.sum()):.4f} m). The soil profile would be "
+                "read at the wrong depths. Re-run the land spin-up on this "
+                "run's column.")
+
     def _reject_shallow_water_unrunnable(self) -> None:
         """Shallow-water is not a runnable ModelDriver equation set.
 
@@ -1246,11 +1439,22 @@ class ModelDriver:
         self._reject_shallow_water_unrunnable()
         # Strict validation — abort early on invalid parameters
         self.config.validate_strict()
-
         # Bootstrap runtime: precision, backend, devices, and (optionally) MPI.
         # This is the canonical single entry point — handles everything before
         # any JAX array creation.
         self._bootstrap_runtime()
+
+        # Land inputs whose validity depends on FILE CONTENTS rather than the
+        # config alone.  Placement is exact and both halves matter: AFTER the
+        # bootstrap, because it builds the soil grid through the shared
+        # (JAX-backed) helper rather than re-deriving the geometry, and nothing
+        # may create a JAX array before the backend is chosen (codex round 11);
+        # BEFORE ``_create_grid``, which is the first step where the ranks
+        # diverge.  Everything it reads — the config and one array out of one
+        # file — is identical on every rank, so the raise is symmetric, unlike
+        # the equivalent check inside the land setup, which runs only on ranks
+        # that own land and would leave the rest waiting (codex round 10).
+        self._preflight_land_inputs()
 
         # Config cross-validation
         config_warnings = self.config.validate()
@@ -1488,6 +1692,20 @@ class ModelDriver:
                 and self._f_land is not None):
             self.grid = self.grid._replace(
                 land_frac=jnp.asarray(self._f_land, dtype=_sd).reshape(-1))
+        # Under MPI the compiled step does NOT use ``self.grid`` -- it closes
+        # over ``self._voronoi_layout.local_mesh``, which was built during grid
+        # creation, i.e. BEFORE this attach.  Without this refresh the mask
+        # reaches the serial lane and silently misses the distributed one, so a
+        # run would get land physics or not depending on how it was launched.
+        # That is the failure mode this whole land-mask work is about; keep the
+        # two copies in step.
+        if (self._voronoi_layout is not None
+                and getattr(self.grid, "land_frac", None) is not None
+                and getattr(self._voronoi_layout.local_mesh, "land_frac",
+                            "no-field") is None):
+            self._voronoi_layout = self._voronoi_layout._replace(
+                local_mesh=self._voronoi_layout.local_mesh._replace(
+                    land_frac=self.grid.land_frac))
 
         # Per-column subgrid orographic stddev for the orographic GWD launch
         # (tau_0 ∝ h_topo²). Attached to the grid pytree so the physics
@@ -2271,6 +2489,7 @@ class ModelDriver:
             self._f_land is not None
             and bool(jnp.any(self._f_land > 0))
         )
+        self._has_land_anywhere = _has_land
         if _has_land:
             from legoesm.surface_albedo import land_vegetation_albedo
             from legoesm.core.precision import get_policy
@@ -2468,6 +2687,49 @@ class ModelDriver:
                     "--slab-land-active."
                 )
 
+        # The multilayer tile's flux handoff to the atmosphere needs a soil
+        # column to exist.  A land-mask FILE that is all ocean passes
+        # validate_strict (which cannot read the file) and then builds nothing,
+        # leaving the handoff — and any calibrated canopy conductance riding it —
+        # silently inert.  The flat/no-mask spelling of the same trap IS caught
+        # in validate_strict.
+        #
+        # DELIBERATELY RANK-LOCAL, AND ONLY FATAL WHEN SERIAL.  Under
+        # cell-partition MPI an ocean-only rank legitimately has no land, so the
+        # honest answer needs a cross-rank vote — and a collective here would sit
+        # downstream of file loads and pipeline construction that can raise on
+        # one rank and not another, leaving its peers blocked in the reduction
+        # forever.  Five review rounds went into trying to place such a vote
+        # safely before concluding it does not belong here at all: a guard is not
+        # worth a deadlock.  Serial runs (where configs are written and tested)
+        # get the hard error; distributed runs get a warning naming exactly what
+        # could not be checked.
+        if bool(getattr(self.config, "mpas_land_beta_soil", False)) \
+                and not self._has_land_anywhere:
+            _msg = (
+                "mpas_land_beta_soil=True hands the multilayer land tile's "
+                "solved humidity and fluxes to the atmosphere, but no soil "
+                "column was built (no land in the mask/topography) — the "
+                "handoff, and any calibrated canopy conductance riding it, "
+                "would silently never apply. Check --land-mask-file / "
+                "--topography / --use-multilayer-land."
+            )
+            # "Serial" means NO PEERS, not "no partition object": a one-rank
+            # MPI launch still builds a layout, and that run has no ocean-only
+            # neighbour to protect, so it should get the hard error too (codex).
+            if int(getattr(self, "_mpi_world_size", 1) or 1) <= 1:
+                raise ValueError(_msg)
+            # Under MPI, SAY NOTHING.  A rank owning no land is the ordinary
+            # case on a healthy run — warning here would fire on every
+            # ocean-only rank of every correct run, and a warning that fires
+            # when nothing is wrong trains everyone to ignore it (GLM review).
+            # The config-level check catches the flat/no-mask spelling; counting
+            # land points in the MASK FILE at config time would close the rest
+            # without any collective, and is the follow-up.
+            logger.debug(
+                "rank owns no land; land-flux handoff inactive on this rank "
+                "(normal for an ocean-only partition)")
+
     def _setup_multilayer_land(self, storage_dtype) -> None:
         """Activate the differentiable multilayer (Richards) land tile.
 
@@ -2605,10 +2867,148 @@ class ModelDriver:
                 gs_max=self.config.land_gs_max,
             ),
         )
+        # Deploy the tile in EXACTLY the model its baked per-PFT tables were
+        # calibrated under.  ``calibrated_multilayer_setup`` is the ONE definition
+        # the offline calibrator also builds from, so the fitted physics and the
+        # coupled physics cannot drift; ``validate_strict`` has already checked
+        # that the overlapping config keys agree, so this replaces nothing the
+        # user set differently.  It supplies the settings with no config key of
+        # their own: the calibration soil-growth factor and the differland carbon
+        # scheme that selects the FARQUHAR branch of ``compute_effective_beta``
+        # (without it the same dispatch runs Jarvis, a different stomatal model).
+        if getattr(self.config, "land_calibrated_physics", False):
+            from legoesm.land.config import apply_calibrated_multilayer
+            base = apply_calibrated_multilayer(base)
+
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+        # A CANOPY SCHEME GETS CANOPY PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity for a bulk surface.  A canopy scheme
+        # reads different quantities (canopy height, clumping, band albedos,
+        # roughness RATIO, per-PFT Vcmax25) and, given soil parameters, silently
+        # falls back to generic constants, leaving the tuned values inert.
+        #
+        # Those canopy parameters already exist and are already per-PFT:
+        # ``surface_data_to_land_params`` dispatches on the surface scheme and
+        # builds ``CanopyLandParams`` from the harmonized surfdata — the same
+        # route the offline LMIP simulations use, which is why THEY reproduce
+        # observed latent heat and photosynthesis.  The coupled driver simply
+        # never called it; it read the CLM provider, whose only variants are
+        # "slab" and "multilayer".  This is that missing call, not new physics.
+        #
+        # Soil hydraulics / thermal / albedo stay with the CLM map: only the
+        # SURFACE parameters come from the canopy builder.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+            _sd_path = getattr(self.config, "surfdata_path", "")
+            if not _sd_path:
+                raise ValueError(
+                    f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
+                    "which needs per-PFT CANOPY parameters (canopy height, band "
+                    "albedos, roughness ratio, Vcmax25). Those are built from the "
+                    "harmonized surfdata, so --surfdata is required. Without it the "
+                    "canopy would run on generic constants and every tuned per-PFT "
+                    "value would be inert — refusing rather than doing that quietly.")
+            from legoesm.land.boundary_data import init_land_surface_data
+            _clm_params = params
+            _, params, _ = init_land_surface_data(
+                _sd_path, self.grid, cfg, float(self.config.start_day),
+                year=(None if getattr(self.config, "start_year", None) is None
+                      else float(self.config.start_year)))
+            # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
+            # Replacing the parameter object wholesale also dropped the CLM
+            # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
+            # canopy parameter object leaves unset — so the land step silently
+            # fell back to one scalar value per field for the whole globe, and
+            # every column's root-zone moisture stress changed. Those are soil
+            # properties, not surface ones; carry them across (found by both
+            # reviewers).
+            _root_fields = {
+                f: getattr(_clm_params, f)
+                for f in ("root_depth", "theta_wp", "theta_fc")
+                if getattr(params, f, None) is None
+                and getattr(_clm_params, f, None) is not None}
+            if _root_fields:
+                params = params._replace(**_root_fields)
+                logger.info(
+                    "  Land tile: kept the CLM per-column %s with the canopy "
+                    "parameters (they are soil properties, not surface ones).",
+                    ", ".join(sorted(_root_fields)))
+            # TWO PROVIDERS, ONE COLUMN INDEX.  The canopy parameters come from
+            # one dataset and the soil beneath them from another, each regridded
+            # independently.  A differing column COUNT or ORDER would attach every
+            # canopy property to the wrong column and the run would still look
+            # entirely healthy — so check the count structurally, at t=0, rather
+            # than hope (GLM).
+            _n_canopy = int(jnp.asarray(params.hc).shape[0])
+            _n_soil = int(jnp.asarray(lat_rad).size)
+            if _n_canopy != _n_soil:
+                raise ValueError(
+                    f"canopy parameters have {_n_canopy} columns but the soil map "
+                    f"has {_n_soil}: the two surface datasets did not regrid onto "
+                    "the same columns, so every canopy property would sit on the "
+                    "wrong one. Check --surfdata and --clm-surfdata-path cover "
+                    "this grid.")
+            logger.info(
+                "  Land tile: %s on per-PFT CANOPY parameters from %s "
+                "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
+                "emissivity is a single constant in this builder and the canopy "
+                "computes its own radiation from soil colour + leaf optics, so "
+                "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
+                "to it — those are re-fit items, not wiring.",
+                type(cfg.surface_scheme).__name__, _sd_path,
+                float(jnp.min(params.hc)), float(jnp.max(params.hc)),
+                float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+
+        # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity.  The two-leaf and CLM-ML canopies
+        # read CANOPY properties (canopy height, band albedos, roughness ratio)
+        # and, finding none, fall back to generic constants: the tuned per-PFT
+        # values are then INERT, which a gradient test caught as exactly zero
+        # sensitivity to the trained roughness.  Inert trained parameters are a
+        # defect here, not a nuisance, and a comment in a document is not a
+        # control (GLM).  Say it at startup, every run, so nobody reports a
+        # canopy run as validating tuned land parameters it never used.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+            _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
+                              if getattr(params, f, None) is not None]
+            if not _canopy_fields:
+                logger.warning(
+                    "  Land tile: %s is running on SOIL parameters — it reads "
+                    "canopy height, band albedos and roughness ratio, none of "
+                    "which are present, so it is using GENERIC canopy constants "
+                    "and the tuned per-PFT roughness / albedo / emissivity are "
+                    "INERT. Do not report this run as validating tuned land "
+                    "parameters. Use --land-surface-scheme simple_seb to run the "
+                    "scheme those parameters belong to.",
+                    type(cfg.surface_scheme).__name__)
 
         self.physics.land_ml_cfg = cfg
         self.physics.land_ml_params = params
+        # The Farquhar branch needs a non-None carbon state at the call site as
+        # well as the differland scheme.  Seed a PRESCRIBED one (fixed leaf
+        # carbon -> fixed LAI = C_fol/LCMA); the pipeline discards the evolved
+        # pools every step, which is exactly what the calibrator does, so the
+        # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
+        # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
+        # without the flag is byte-identical.
+        if cfg.stomata.enabled and cfg.carbon.scheme == "differland":
+            from legoesm.land.carbon.carbon_cycle import init_carbon_state
+            self.physics.land_ml_carbon = init_carbon_state(
+                (int(lat_rad.size),), cfg.carbon)
+            logger.info(
+                "  Land stomata: FARQUHAR (prescribed carbon state, "
+                f"LAI = C_fol/LCMA from C_fol={cfg.carbon.C_fol_init:g} gC/m2) "
+                "— the baked Vc_max25/g1/LCMA are ACTIVE")
+        elif cfg.stomata.enabled:
+            logger.info(
+                "  Land stomata: JARVIS (no differland carbon state) — the baked "
+                "Farquhar Vc_max25/g1/LCMA are NOT used")
         self.physics.land_ml_lat = jnp.asarray(lat_rad, dtype=storage_dtype)
         self.physics.land_ml_doy = 0.0
         # CONCRETE dynamics timestep [s].  The jitted segment passes ``dt`` as a
@@ -2661,14 +3061,45 @@ class ModelDriver:
         # when the IC carries no q_v tracer (the aridity map needs RH).
         _qv = self.q_v  # canonical tracer store: raw (...,nlev) array, same column
         # layout as self.state.T.data; populated by both the analytical and ERA5 IC.
-        if _qv is not None:
+        _soil_init = getattr(self.config, "land_soil_init", "aridity")
+        if _soil_init == "saturation_fraction":
+            # Seed as a fraction of POROSITY, so the soil can start above field
+            # capacity — the way to keep a run out of the dry-soil attractor
+            # (low soil water -> weak evaporation -> dry boundary layer -> weaker
+            # evaporation).  The aridity seed below cannot do this: it caps at
+            # field capacity by construction.
+            #
+            # Held just below saturation because the van-Genuchten retention is
+            # singular AT saturation — psi_from_theta needs theta < theta_sat —
+            # and just above the residual for the same reason at the dry end.
+            # Same guard the offline calibrator uses on its own seed.
+            _th_sat = jnp.asarray(cfg.hydraulics.theta_sat)
+            _th_res = jnp.asarray(cfg.hydraulics.theta_r)
+            theta_init = jnp.clip(
+                self.config.land_soil_moisture_init_frac * _th_sat,
+                _th_res + _THETA_EDGE_GUARD, _th_sat - _THETA_EDGE_GUARD)
+            logger.info(
+                "  Land tile: soil seeded at %.2f x porosity (saturation_fraction) "
+                "— NOT the aridity map; a wet start trades the desert runaway the "
+                "aridity seed prevents for staying out of the dry-soil attractor.",
+                self.config.land_soil_moisture_init_frac)
+        elif _qv is not None:
             q_v_low = _flat_cols(
                 getattr(_qv, "data", _qv)[..., -1]).astype(storage_dtype)
             p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
             rh_low = q_v_low / jnp.maximum(
                 saturation_mixing_ratio(T_init, p_s), 1e-12)
-            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
-            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            # ``getattr(x, k, default)`` returns the ATTRIBUTE when it exists and
+            # is None, which is not what is wanted here: the canopy parameter
+            # struct declares these fields and leaves them unset unless per-PFT
+            # root parameters were supplied, so the default has to cover None as
+            # well as absent.
+            def _or_cfg(name, fallback):
+                v = getattr(params, name, None)
+                return jnp.asarray(fallback if v is None else v)
+
+            theta_wp = _or_cfg("theta_wp", cfg.theta_wp)
+            theta_fc = _or_cfg("theta_fc", cfg.theta_fc)
             theta_init = aridity_theta_init(
                 rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
         else:
@@ -2693,9 +3124,23 @@ class ModelDriver:
             # slab-mode restart raises rather than silently reshaping.
             from legoesm.land.restart import (
                 load_land_restart, merge_land_restart_into_template)
+            from legoesm.land.soil_grid import make_soil_grid
+            # Layer COUNT alone does not identify a soil column: 8 layers over
+            # 3 m at growth 1.5 and 8 over 6.375 m at growth 2 both pass the
+            # shape check while placing every soil value at a different depth.
+            # Pass the thicknesses so a spin-up on the wrong column is refused.
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
-                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers)
+                expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
+                # Same quantity this driver's PRE-LOAD check already carries
+                # (``load_land_restart_soil_dz`` returns thicknesses), so the
+                # column travels one form through both checks.
+                expected_soil_dz=make_soil_grid(cfg.soil_grid).dz,
+                # The calibrated column is not the historical default, so an
+                # older restart carrying no stamp is almost certainly on the
+                # wrong one: refuse it rather than warn.
+                require_soil_dz=bool(getattr(
+                    self.config, "land_calibrated_physics", False)))
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
@@ -2829,8 +3274,15 @@ class ModelDriver:
             init_land_surface_data, fill_land_param_gaps,
         )
 
-        # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
-        land_cfg = LandConfig()
+        # PINNED to the bulk scheme, not the library default.  This adapter wants
+        # ONE number per column — the blended soil/vegetation albedo the radiation
+        # uses — and reads it as ``albedo_veg``.  The default is now the two-leaf
+        # canopy, whose parameter struct has no such field (it carries BAND
+        # albedos and does its own radiative transfer), so inheriting the default
+        # crashed here.  A canopy run gets its albedo from the canopy itself; this
+        # path is the static-map fallback and is bulk by construction.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        land_cfg = LandConfig(surface_scheme=SimpleSEBConfig())
         # Sample transient cover at the run start year; a config without start_year
         # (or a static single-year surfdata) falls back to the legacy year-mean.
         _start_year = getattr(self.config, "start_year", None)
@@ -4984,6 +5436,11 @@ class ModelDriver:
             # byte-identical to before.
             if trc_d is not None:
                 _save["tracer_names"] = np.asarray(sorted(trc_d.keys()))
+                # Droplet number is stored PER MASS [1/kg] since 2026-08-14.
+                # Stamp it: a file written under the old per-VOLUME convention
+                # reloaded as per-mass is wrong by the air density, silently,
+                # and there is no other way to tell the two apart.
+                _save["number_convention"] = np.asarray("per_mass")
                 for _k in trc_d:
                     _save[f"trc_{_k}"] = np.asarray(trc_d[_k])
             # Multilayer (Richards) land columns (MPAS port): same namespaced
@@ -4997,6 +5454,12 @@ class ModelDriver:
                 # a rank-local fragment (#1321).
                 _lm_out = (_land_ml_save if _land_ml_save is not None
                            else self._land_ml_state)
+                # The soil COLUMN these columns belong to: the field shapes
+                # record the layer count only, and two columns with the same
+                # count can span different depths.
+                _lm_dz = self._land_soil_dz()
+                if _lm_dz is not None:
+                    _save["land_soil_dz"] = _lm_dz
                 for _f, _v in _lm_out._asdict().items():
                     if _v is not None:
                         _save[f"land_ml_{_f}"] = np.asarray(_v)
@@ -5085,6 +5548,8 @@ class ModelDriver:
             )
             if s.tracers is not None:
                 _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                # Same per-mass droplet-number stamp as the MPAS writer above.
+                _save["number_convention"] = np.asarray("per_mass")
                 for _k in s.tracers:
                     _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
             # #1310: persist the anchored mass-fixer target.  With
@@ -5662,12 +6127,15 @@ class ModelDriver:
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             if "tracer_names" in d:
                 _names = [str(n) for n in d["tracer_names"]]
+                _validate_number_convention(d, _names)
                 self.state = self.state._replace(tracers={
                     _k: Field(
                         data=(scatter_to_local(
                                   jnp.asarray(d[f"trc_{_k}"]), part, "cell")
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
-                        name=_k, dims=("nCells", "nlev"), units="kg/kg")
+                        name=_k, dims=("nCells", "nlev"),
+                        units=("1/kg" if _k in ("N_c", "N_r", "N_i")
+                               else "kg/kg"))
                     for _k in _names
                 })
             # Multilayer (Richards) land columns (MPAS port): stage the
@@ -5684,6 +6152,10 @@ class ModelDriver:
                     self._carry_aux = {}
                 for _k in _lml_keys:
                     self._carry_aux[_k] = jnp.asarray(d[_k])
+                # Stage the soil column too (own namespace, not a state field)
+                # so the shared restore refuses a state from another column.
+                if "land_soil_dz" in d.files:
+                    self._carry_aux["land_soil_dz"] = np.asarray(d["land_soil_dz"])
                 self._restore_land_ml_from_carry_aux()
             # Restore the stateful-physics carry (#413): stash the
             # ``physstate_<field>`` arrays into carry_aux for the
@@ -6010,6 +6482,12 @@ class ModelDriver:
 
             self._scatter_global_state_to_bands(state_global, tracers_global)
             self._carry_aux = carry_aux if carry_aux else {}
+            # The raise above means a lat-lon MPI restart never carries a
+            # multilayer land state, so its soil-column stamp has nothing to
+            # describe.  Drop it rather than let it ride into the next re-save
+            # and label THAT state with a column it did not come from.
+            if isinstance(self._carry_aux, dict):
+                self._carry_aux.pop("land_soil_dz", None)
             # Double-moment tracers cannot be band-scattered here: carry_aux is
             # broadcast whole to every rank, so any persisted dmtr_* would give
             # every rank GLOBAL-shape DM state instead of its band. Fail fast
@@ -6527,8 +7005,9 @@ class ModelDriver:
                 self._feed_mpas_cmip_multirank(
                     day, diag, self._voronoi_layout)
             else:
-                diag.feed_cmip_accumulators_native(
-                    day, **self._mpas_cmip_native_kwargs(day, diag))
+                _kw = self._mpas_cmip_native_kwargs(day, diag)
+                diag.feed_cmip_accumulators_native(day, **_kw)
+                self._feed_mpas_moisture_budget(day, diag, _kw)
         except Exception as exc:  # pragma: no cover - defensive diag guard
             logger.error(
                 "  CMOR accumulator feed FAILED at day %.2f (run continues; "
@@ -6541,6 +7020,65 @@ class ModelDriver:
             _acc = getattr(self, "_mpas_sfc_accum", None)
             if _acc is not None:
                 _acc.reset(window_start_day=day)
+
+    def _feed_mpas_moisture_budget(self, day: float, diag, kw: dict) -> None:
+        """Record the atmospheric water-budget closure E - P - dW/dt.
+
+        The model has always carried this tracker, and this lane has never fed
+        it: the tracker is updated inside ``DiagnosticCollector.collect``, which
+        the MPAS run loop does not call, so every run of this campaign published
+        a blank moisture residual. A ~0.4 mm/day gap between the reported global
+        evaporation and rainfall therefore sat unexamined for months. An
+        instrument that is not wired is not a check.
+
+        Fed from the SAME window-mean ``precip`` and ``hfls`` the CMOR output
+        publishes, which is the tracker's own stated contract: the residual then
+        closes against the numbers a reader can see in ``pr`` and ``hfls``,
+        rather than against a second, privately-averaged pair that could differ
+        for reasons nobody could trace.
+
+        SERIAL ONLY, deliberately. The tracker takes a plain area-weighted mean,
+        which under a cell partition would be rank-local and count halo cells
+        twice -- a confidently wrong global number, which is worse than none.
+        The multi-rank path needs the owned-mask-and-allreduce treatment
+        ``_mpas_global_diag`` already does, and says so once rather than
+        publishing rubbish.
+        """
+        if self._voronoi_layout is not None:
+            if not getattr(self, "_logged_moisture_budget_mpi", False):
+                logger.info(
+                    "  moisture-budget closure NOT recorded under the cell "
+                    "partition (the tracker's area mean is rank-local); serial "
+                    "runs publish it.")
+                self._logged_moisture_budget_mpi = True
+            return
+        # The CMOR slot getter falls back to an INSTANTANEOUS diagnostic when a
+        # slot has no accumulated samples.  Mixing a mean rainfall with an
+        # instantaneous evaporation (or the reverse) manufactures an imbalance
+        # out of nothing, so this closure takes the window means or nothing.
+        _acc = getattr(self, "_mpas_sfc_accum", None)
+        if _acc is None or not _acc.has_samples() or not _acc.is_complete():
+            return
+        precip = kw.get("precip")
+        hfls = kw.get("hfls")
+        tracers = self.state.tracers
+        if (precip is None or hfls is None or tracers is None
+                or "q_v" not in tracers):
+            return          # dry run, or a window whose fluxes were withheld
+        area = getattr(self.grid, "areaCell", None)
+        _p_s = self.state.p_s.data
+        _p_half = self.sigma.pressure_at_half(_p_s)
+        diag.moisture_tracker.update(
+            tracers["q_v"].data, _p_s, self.sigma.dsigma,
+            precip, hfls,
+            elapsed_seconds=float(day) * 86400.0,
+            area_weights=(None if area is None
+                          else jnp.asarray(area).reshape(-1)),
+            # Hybrid coordinates make ``p_s * dsigma`` wrong for a bottom-heavy
+            # tracer over terrain; the half-level difference is right for either
+            # coordinate.
+            dp=_p_half[..., 1:] - _p_half[..., :-1],
+        )
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
                                  u_override=None) -> dict:
@@ -6584,6 +7122,35 @@ class ModelDriver:
         # Geographic cell-centre winds from the edge-normal velocity.
         u_east, v_north = reconstruct_cell_velocity(
             state.u.data if u_override is None else u_override, self.grid)
+        # Pressure vertical velocity, for the subsidence the scorecard could
+        # previously only guess at.  Built from the SAME halo-refreshed edge
+        # field, through the pair the column-forcing extractor already
+        # composes on this mesh: cell divergence of the edge-normal wind, then
+        # the coordinate-aware continuity integral.  Not the dycore's own
+        # omega -- the dycore closes continuity in FLUX form div(u*dp) while
+        # this rebuilds it from the advective div(v)*dp, and the two differ
+        # wherever the surface-pressure gradient is large (see the comment in
+        # primitive_eq_mpas beside the mass-flux branch).  It IS a closed
+        # continuity solve, which the monthly-mean-wind estimate it replaces
+        # was not: that one returned a global mean of -6 hPa/day where
+        # continuity requires ~0, and amplitudes ~30x ERA5.
+        wap = None
+        _sigma = getattr(self, "sigma", None)
+        if _sigma is None:
+            # Absent only on a partially built driver. Say so: the enclosing
+            # feed swallows exceptions, so a raise here would drop the WHOLE
+            # CMOR stream silently rather than just this field.
+            logger.warning(
+                "no vertical coordinate on the driver: publishing no wap, so "
+                "subsidence cannot be scored for this run")
+        else:
+            from legoesm.atmosphere.forcing.column_large_scale_extract import (
+                omega_from_divergence)
+            from legoesm.core.operators_voronoi import divergence_cell_3d
+            _u_edge = state.u.data if u_override is None else u_override
+            wap = omega_from_divergence(
+                divergence_cell_3d(jnp.asarray(_u_edge), self.grid),
+                state.p_s.data, _sigma)
         # Water vapour (moist runs only).
         q_v = None
         if (state.tracers is not None and "q_v" in state.tracers):
@@ -6737,6 +7304,7 @@ class ModelDriver:
             hfls=hfls,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
+            wap=wap,
             flux_interval_days=_flux_days,
         )
 
@@ -7552,7 +8120,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # Phase of the diagnostic cadence.  A real periodic cadence
         # (diag_days > 0) is phased on the ABSOLUTE step so a restart chain
         # keeps ONE global diagnostic clock (#1353: a restored partial flux
@@ -7678,7 +8252,7 @@ class ModelDriver:
                 and (float(cfg.output.diag_days) <= 0.0
                      or _true_cad_days >= 1.0)):
             _diag.cmip_snapshot_vars = {
-                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va"}
+                "tas", "ps", "psl", "prw", "ta", "hus", "ua", "va", "wap"}
             if cfg.output.clear_sky_diag:
                 # The cloud-diagnostic trio (fed only with --clear-sky-diag,
                 # see _feed_mpas_cmip_accumulators) is state-derived => same
@@ -8441,19 +9015,37 @@ class ModelDriver:
         # phase-2b follow-up (see the port plan).
         _land_ml_on = (bool(getattr(cfg, "use_multilayer_land", False))
                        and self._land_ml_state is not None)
-        if _land_beta_soil_on and not _land_ml_on:
+        if _land_beta_soil_on and not bool(
+                getattr(cfg, "use_multilayer_land", False)):
+            # CONFIG-ONLY test, deliberately: it is the same on every rank, so
+            # the raise is symmetric and needs no collective.
+            #
+            # This guard used to test whether THIS rank had built a soil column,
+            # which is wrong under cell-partition MPI — an ocean-only rank
+            # legitimately has none while its neighbours do, so it aborted alone.
+            # Two attempts at a cross-rank vote made it worse: the first was
+            # called only by the land-less ranks (deadlock), the second by every
+            # rank but AFTER a rank-local land-albedo raise that can kill one
+            # rank while the others block in the vote (codex rounds 5 and 6).
+            # There is no collective to get wrong here: validate_strict already
+            # guarantees mpas_land_beta_soil implies use_multilayer_land, and a
+            # globally landless run is refused there too, so the only case the
+            # old state test could still catch was the legitimate ocean-only
+            # rank.  It now publishes nothing, which is what it should do.
             raise ValueError(
-                "mpas_land_beta_soil=True requires the interactive "
-                "multilayer land on the MPAS lane (use_multilayer_land with "
-                "a built land state); without it there is no soil moisture "
-                "to derive beta_soil from — the flag would be silently "
-                "inert."
+                "mpas_land_beta_soil=True requires the interactive multilayer "
+                "land on the MPAS lane (use_multilayer_land); without it there "
+                "is no soil moisture to derive beta_soil from — the flag would "
+                "be silently inert."
             )
         _land_step_fn = None
         _land_T_skin = None            # (nCells,) land skin T of the last step
         _land_albedo_cells = None      # (nCells,) land albedo of the last step
         _land_beta_fn = None           # jitted land-state -> per-cell beta_soil
         _land_beta_cells = None        # (nCells,) traced beta of the last step
+        _land_qsfc_cells = None        # (nCells,) land's solved q_sfc, last step
+        _land_shflx_cells = None       # (nCells,) land's own sensible flux
+        _land_lhflx_cells = None       # (nCells,) land's own latent flux
         if _land_ml_on:
             if not _sst_forcing:
                 raise ValueError(
@@ -8485,17 +9077,45 @@ class ModelDriver:
             _lml_params = self.physics.land_ml_params
             _lml_lat = self.physics.land_ml_lat
             _lml_umin = float(getattr(self.physics, "land_ml_u_min", 1.0))
+            # PRESCRIBED leaf carbon (fixed LAI).  Without it the coupled
+            # stomatal dispatch falls back to Jarvis even when the config asks
+            # for Farquhar, so the baked canopy conductance would be inert on
+            # exactly the lane the AMIP campaign runs.  None on every other
+            # configuration, which keeps those runs byte-identical.
+            _lml_carbon = getattr(self.physics, "land_ml_carbon", None)
 
             @jax.jit
             def _land_step_fn(land_state, a2s, doy):
-                new_state, resp, _carbon = step_multilayer_land(
-                    land_state, a2s, _lml_cfg, _lml_umin, DT,
-                    lat=_lml_lat, doy=doy, land_params=_lml_params)
+                from legoesm.land.multilayer_land import (
+                    step_multilayer_land_with_diagnostics)
+                new_state, resp, _carbon, _sfc = (
+                    step_multilayer_land_with_diagnostics(
+                        land_state, a2s, _lml_cfg, _lml_umin, DT,
+                        lat=_lml_lat, doy=doy, land_params=_lml_params,
+                        carbon_state=_lml_carbon))
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
                 # land tile's snow-albedo feedback never reached radiation.
-                return new_state, resp.T_sfc, resp.albedo
+                # resp.q_surface is the scheme's SOLVED boundary humidity;
+                # resp.shflx / resp.lhflx are the fluxes its OWN energy
+                # balance closed with.  The FLUXES are the coupling now: the
+                # humidity handoff was measured insufficient (the canopy's
+                # boundary humidity sits close to the air by construction, so
+                # the atmosphere re-applying its own exchange coefficient
+                # delivered ~a tenth of the solved flux -- Amazon latent heat
+                # 78 W/m2 offline vs 7 coupled, land 10 K cold in 30 days).
+                # A column whose surface solve was rejected is HELD: its
+                # state is reverted and it conserves neither energy nor water
+                # over that step. The land step is inside a compiled region
+                # where a print is not available on a GPU-only runtime, so the
+                # count comes out here and the loop below reports it. Without
+                # that, a run whose land is quietly frozen somewhere looks
+                # exactly like a healthy one.
+                _n_held = (_sfc.n_held if _sfc.n_held is not None
+                           else jnp.zeros((), jnp.int32))
+                return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
+                        resp.shflx, resp.lhflx, _n_held)
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8511,11 +9131,41 @@ class ModelDriver:
                         land_tile_beta_soil(
                             land_state.theta_soil, _lml_cfg, _lml_params),
                         0.0, 1.0)
+
+                # The land's SOLVED surface humidity is handed to the
+                # turbulence VERBATIM via forcing["q_sfc_land"] -- review
+                # refuted the previous effective-beta round trip here (its
+                # saturation anchors disagreed by 0.3-2.5 % and its clip could
+                # only shrink the flux), so there is no inversion any more.
+
                 if _land_beta != 1.0:
                     logger.info(
                         "  mpas_land_beta_soil: traced per-cell beta_soil "
                         "REPLACES the static mpas_land_beta=%.2f over land",
                         _land_beta)
+
+            # Held-column accounting. The per-step count stays on the DEVICE
+            # and is read only at the warning cadence, so the step loop pays no
+            # synchronisation for it in between -- it is not free, it is as
+            # frequent as the other post-step warnings.
+            #
+            # The device counter is RESET at every read and the running totals
+            # are kept on the host. A 32-bit counter accumulating a whole run's
+            # column-steps overflows: ten thousand columns at a seventy-five
+            # second timestep reach two billion in about half a simulated year,
+            # after which the warning this exists to guarantee would stop
+            # firing precisely when holds had become systemic.
+            _land_n_held_accum = jnp.zeros((), jnp.int32)
+            _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            self._land_n_held_total = 0
+            self._land_n_held_steps = 0
+
+            from legoesm.land.forcing.solar import cos_solar_zenith as _csz
+            _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
+
+            @jax.jit
+            def _cos_zen_fn(doy, hour_utc):
+                return _csz(_lml_lat, _lml_lon, doy, hour_utc)
 
             def _marshal_land_forcing():
                 """AtmToSurface from the last radiation export + current state.
@@ -8549,10 +9199,13 @@ class ModelDriver:
                 u_c, v_c = reconstruct_cell_velocity(
                     self.state.u.data[:, -1], self.grid)
                 # Same conventions as the coupled tile: p_lowest ~ 0.99 p_s,
-                # ideal-gas rho at the lowest level, snow split at T_freeze,
-                # fixed cos_zenith=0.5 for the non-canopy schemes (the real
-                # zenith already drives RRTMGP; the land uses it only for
-                # canopy radiation, which is coupled-pipeline-only here).
+                # ideal-gas rho at the lowest level, snow split at T_freeze.
+                # The zenith is the REAL per-cell sun (same doy/seconds the
+                # radiation uses this step): it was a fixed 0.5 when only the
+                # bulk scheme ran here (which never reads it), but the two-leaf
+                # canopy now runs on this lane and its radiation partitioning
+                # is zenith-driven -- a fixed sun would give the canopy neither
+                # a diurnal cycle nor night.
                 return AtmToSurface(
                     sw_down=sw_down, lw_down=lw_down,
                     precip_total=precip,
@@ -8562,7 +9215,9 @@ class ModelDriver:
                     u_lowest=u_c, v_lowest=v_c,
                     p_lowest=0.99 * p_s, p_surface=p_s,
                     rho_lowest=p_s / (constants.R_d * T_air),
-                    cos_zenith=jnp.full_like(T_air, 0.5),
+                    cos_zenith=_cos_zen_fn(
+                        jnp.asarray(_doy, dtype=jnp.float64),
+                        jnp.asarray(_sod, dtype=jnp.float64) / 3600.0),
                     co2_ppmv=jnp.full_like(T_air, float(
                         getattr(cfg, "co2_ppmv", 412.0))),
                     has_radiation=jnp.ones_like(T_air),
@@ -8650,9 +9305,16 @@ class ModelDriver:
         # ``CWV`` (column water vapor) is recorded on moist runs (NaN on dry);
         # ``_save_lightweight_timeseries`` already persists a ``CWV`` channel
         # and ``validate_amip_run.py`` checks its bounds.
+        # ``moisture_residual`` (E - P - dW/dt, mm/day) rides here because this
+        # lane writes its OWN series and never calls the collector's saver --
+        # which is why feeding the tracker was not enough on its own: it
+        # updated in memory and was then discarded, leaving the published
+        # residual blank exactly as before. Sampled from the tracker at each
+        # daily write, so the series is as long as the others.
         _ts: dict[str, list] = {
             "days": [], "T_atm": [], "T_min": [], "T_max": [],
             "max_wind": [], "dry_mass_ps": [], "T_finite": [], "CWV": [],
+            "moisture_residual": [],
         }
 
         t_start = time.time()
@@ -8671,6 +9333,13 @@ class ModelDriver:
         # ``get_sst_sic`` call per day, not per step; the dict structure is
         # constant so the jit'd step compiles once (the value is traced).
         _forcing = None
+        # Does the convection scheme want the diurnal-cycle CAPE subtraction?
+        # Resolved once: a static Python bool, so the per-step seeding below is
+        # a trace-time branch and cannot retrace.
+        _capdcycl_on = bool(getattr(
+            getattr(self.config, "convection_config", None), "use_ifs_capdcycl",
+            False)) or bool(getattr(self.config, "bechtold_use_ifs_capdcycl",
+                                    False))
         _last_force_day = None
         # External CMIP6 forcing (ozone file / aerosol / transient GHG) on
         # the MPAS path: threaded through the same per-step TRACED
@@ -8837,7 +9506,8 @@ class ModelDriver:
                 # never evolved), added 2026-07 — checkpoints written
                 # before then legitimately lack it, and the fresh seed's
                 # arange is byte-identical to what the save would have
-                # stored.  The ``PHYSSTATE_INPUT_FIELDS`` (dyn_tendency_*) are
+                # stored.  The ``PHYSSTATE_INPUT_FIELDS`` (the dyn_tendency_*
+                # pair and the prescribed surface-flux overrides) are
                 # likewise exempt: per-step driver INPUTS, never persisted
                 # (the save skips their None), re-seeded fresh.  Every
                 # EVOLVING field stays mandatory.
@@ -8951,6 +9621,28 @@ class ModelDriver:
         # ``model.step``.
         if _land_beta_fn is not None:
             _land_beta_cells = _land_beta_fn(self._land_ml_state)
+            # Seed the SOLVED-humidity channel too (the forcing pytree must be
+            # structurally stable from step 0 -- adding the key mid-run would
+            # retrace model.step).  Before the first land step there is no
+            # solved humidity, so reconstruct the bounded gradient form from
+            # the seed beta at the model's own lowest level; the land's real
+            # answer replaces it from step 1.
+            from legoesm.thermo import saturation_mixing_ratio as _satmr0
+            _qv_tr0 = (self.state.tracers or {}).get("q_v")
+            if _qv_tr0 is not None:
+                _q_air0 = jnp.asarray(_qv_tr0.data[:, -1]).reshape(-1)
+                _ph0 = self.sigma.pressure_at_half(
+                    jnp.asarray(self.state.p_s.data).reshape(-1))
+                _p_low0 = 0.5 * (_ph0[..., -1] + _ph0[..., -2])
+                _T_land0 = jnp.asarray(
+                    self._land_ml_state.T_soil[:, 0]).reshape(-1)
+                _qsat0 = _satmr0(_T_land0, _p_low0)
+                _land_qsfc_cells = (
+                    _q_air0 + _land_beta_cells * (_qsat0 - _q_air0))
+                # Flux-channel seeds: zero exchange for the one step before
+                # the land produces its first solved fluxes.
+                _land_shflx_cells = jnp.zeros_like(_q_air0)
+                _land_lhflx_cells = jnp.zeros_like(_q_air0)
         # Current forcing day's SST/SIC, cached at each daily boundary for the
         # per-step ice-skin advance AND per-step T_sfc re-anchor (None until
         # the first boundary / when the skin feature is off).
@@ -9129,6 +9821,28 @@ class ModelDriver:
                 _forcing = dict(_forcing_daily)
                 _forcing["day_of_year"] = jnp.asarray(_doy)
                 _forcing["seconds_of_day"] = jnp.asarray(_sod)
+                # Surface heat fluxes for the convective diurnal-cycle CAPE
+                # subtraction, which is what delays land storms from noon to
+                # late afternoon.  They are the PREVIOUS step's: turbulence
+                # produces them after convection inside the same step, so this
+                # step's do not exist yet.  75 s of lag against a daily cycle.
+                #
+                # The keys are seeded UNCONDITIONALLY with zeros on the first
+                # step, exactly as beta_land is, so the forcing pytree keeps a
+                # stable structure and the compiled step does not retrace when
+                # real values first arrive.  Zero flux on step one means the
+                # subtraction is simply absent for that step, which is correct:
+                # there has been no surface heating yet.
+                if _capdcycl_on:
+                    _sd_prev = getattr(self.model, "_sfc_diag", None)
+                    _zero = jnp.zeros((self.grid.grid_shape_2d[0],),
+                                      dtype=self.state.p_s.data.dtype)
+                    for _slot, _key in ((6, "shflx_sfc"), (7, "lhflx_sfc")):
+                        _v = None
+                        if (_sd_prev is not None and len(_sd_prev) > _slot
+                                and _sd_prev[_slot] is not None):
+                            _v = jnp.asarray(_sd_prev[_slot].data).reshape(-1)
+                        _forcing[_key] = _zero if _v is None else _v
                 # Interactive land skin T (one-step lag): blend the multilayer
                 # tile's last skin temperature into the surface anchor over the
                 # land fraction.  Ocean/ice keep the prescribed SST/SIC blend;
@@ -9157,6 +9871,14 @@ class ModelDriver:
                 # structurally stable — no retrace).
                 if _land_beta_cells is not None:
                     _forcing["beta_land"] = _land_beta_cells
+                # The land's solved boundary humidity, used verbatim by the
+                # turbulence over the land fraction (supersedes beta there).
+                if _land_qsfc_cells is not None:
+                    _forcing["q_sfc_land"] = _land_qsfc_cells
+                # The land's OWN turbulent fluxes -- the actual coupling.
+                if _land_shflx_cells is not None:
+                    _forcing["shflx_land"] = _land_shflx_cells
+                    _forcing["lhflx_land"] = _land_lhflx_cells
             # Radiation sub-cycle: solve RRTMGP on step 0 (cache warm-up,
             # always) and every RAD_UPDATE_STEPS-th step; reuse the held
             # heating (PhysicsState.rad_heating) in between.  ``step`` is
@@ -9232,10 +9954,54 @@ class ModelDriver:
                 _a2s = _marshal_land_forcing()
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
-                     _land_albedo_cells) = _land_step_fn(
+                     _land_albedo_cells, _land_qsfc_step,
+                     _land_shflx_step, _land_lhflx_step,
+                     _land_n_held_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
-                    if _land_beta_fn is not None:
+                    # Accumulate ON DEVICE and read at the same cadence the
+                    # other post-step warnings use: reading it every step
+                    # would stall the accelerator once per step for a number
+                    # that is almost always zero.
+                    _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    _land_n_held_steps_accum = (
+                        _land_n_held_steps_accum
+                        + (_land_n_held_step > 0).astype(jnp.int32))
+                    if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                        _window_cols = int(_land_n_held_accum)
+                        _window_steps = int(_land_n_held_steps_accum)
+                        _land_n_held_accum = jnp.zeros((), jnp.int32)
+                        _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                        if _window_cols:
+                            self._land_n_held_total += _window_cols
+                            self._land_n_held_steps += _window_steps
+                            # Column-steps alone cannot separate one column
+                            # failing every step from many columns failing
+                            # once, and those are different problems: the
+                            # first is a bad column, the second is a bad
+                            # configuration. Report the number of STEPS that
+                            # held as well, and the worst single step.
+                            logger.warning(
+                                "land: %d column-steps held in the last %d "
+                                "steps, on %d of those steps (the surface "
+                                "solve was rejected and the column reverted, "
+                                "so its energy and water budgets do not close "
+                                "over those steps); %d column-steps on %d "
+                                "steps since the run began — at step %d",
+                                _window_cols, _HARD_SAT_LOG_CADENCE_STEPS,
+                                _window_steps, self._land_n_held_total,
+                                self._land_n_held_steps, step)
+                    # Published only under the same switch that threads f_land
+                    # into the turbulence factory: without the land fraction
+                    # the consumer refuses the key, and adding it mid-run
+                    # would change the forcing pytree and retrace.
+                    if _land_beta_soil_on:
+                        _land_qsfc_cells = _land_qsfc_step
+                        _land_shflx_cells = _land_shflx_step
+                        _land_lhflx_cells = _land_lhflx_step
+                    if _land_beta_fn is not None and _land_qsfc_cells is None:
+                        # Root-zone beta only until the humidity channel is
+                        # live (or when the scheme solves none).
                         _land_beta_cells = _land_beta_fn(self._land_ml_state)
             # Top sponge (#836): per-step Rayleigh decay of the edge winds
             # toward rest above sigma_top (see profile construction above).
@@ -9418,6 +10184,15 @@ class ModelDriver:
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
                 _ts["CWV"].append(_cwv)
+                # Latest closure the CMOR feed recorded, or NaN before the
+                # first complete diagnostic window.  NaN, never 0: a zero here
+                # reads as "the budget closes", which is the one answer this
+                # series must never invent.
+                _mt = getattr(getattr(self, "diagnostics", None),
+                              "moisture_tracker", None)
+                _ts["moisture_residual"].append(
+                    float(_mt.residual[-1])
+                    if _mt is not None and _mt.residual else float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -9680,7 +10455,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
         # 4: the spectral loop historically wrote NO checkpoints, so a
         # --spectral AMIP run silently ignored --checkpoint-days and
@@ -11004,6 +11785,16 @@ class ModelDriver:
         import math as _math
 
         day_steps = max(1, int(86400.0 / DT))
+        # NOT routed through ``diagnostic_interval_steps``: this lane REFUSES a
+        # sub-step cadence (below) instead of flooring it, because its segment
+        # length is the gcd of the cadences — flooring to one step here would
+        # silently run the whole lane one step per segment.  It still borrows
+        # that helper's finiteness check, because ``NaN > 0`` is False and a
+        # NaN cadence would otherwise slip past as "no cadence" (review).
+        if not _math.isfinite(cfg.output.diag_days):
+            raise ValueError(
+                f"tiled cube SPMD: diag_days must be a finite number of days; "
+                f"got {cfg.output.diag_days!r}.")
         diag_steps = (int(cfg.output.diag_days * 86400.0 / DT)
                       if cfg.output.diag_days > 0 else 0)
         ckpt_steps = (int(cfg.output.checkpoint_days * 86400.0 / DT)
@@ -11609,7 +12400,9 @@ class ModelDriver:
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
-        diag_interval = int(cfg.output.diag_days * 86400 / DT)
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, 0)
         checkpoint_interval = (
             int(cfg.output.checkpoint_days * 86400 / DT)
             if cfg.output.checkpoint_days > 0 else 0
@@ -12982,7 +13775,9 @@ class ModelDriver:
                     if getattr(self.physics, "land_ml_dt", None) is not None:
                         self.physics.land_ml_dt = DT
                     n_steps_total = int(cfg.days * 86400 / DT)
-                    diag_interval = int(cfg.output.diag_days * 86400 / DT)
+                    from legoesm.driver.diagnostics import diagnostic_interval_steps
+                    diag_interval = diagnostic_interval_steps(
+                        cfg.output.diag_days, DT, 0)
                     checkpoint_interval = (
                         int(cfg.output.checkpoint_days * 86400 / DT)
                         if cfg.output.checkpoint_days > 0 else 0
@@ -13296,9 +14091,11 @@ class ModelDriver:
         if self.config.energy_consistent_moisture_clip:
             self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
         else:
-            self.q_v = jnp.maximum(_qv_raw, 0.0)
-        self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-        self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+            # Conserving form always (owner decision 2026-08-16): the plain
+            # ``max(q, 0)`` invented water at every physics overdraw.
+            self.q_v = self._conserving_floor(_qv_raw)
+        self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+        self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
         self._apply_double_moment_tendencies(phys_out, DT)
 
         if MICROPHYSICS == "none":
@@ -13314,8 +14111,11 @@ class ModelDriver:
                 u=self.state.u.replace(data=self.state.u.data + DT * phys_out.du_dt),
                 v=self.state.v.replace(data=self.state.v.data + DT * phys_out.dv_dt),
             )
-        self.q_v = jnp.maximum(
-            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff), 0.0
+        # Conserving form always (owner decision 2026-08-16): the
+        # hyperdiffusion tail is non-monotone, so its floor is the same
+        # mass-creating clamp class as the physics floors above.
+        self.q_v = self._conserving_floor(
+            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
         )
         self.state = self.state._replace(
             u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
@@ -13446,9 +14246,10 @@ class ModelDriver:
             if self.config.energy_consistent_moisture_clip:
                 self.q_v, new_T = energy_consistent_moisture_floor(_qv_raw, new_T)
             else:
-                self.q_v = jnp.maximum(_qv_raw, 0.0)
-            self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
-            self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+                # Conserving form always (owner decision 2026-08-16).
+                self.q_v = self._conserving_floor(_qv_raw)
+            self.q_c = self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)
+            self.q_r = self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)
 
             # Apply ice/number tracer tendencies when full registry is active
             self._apply_double_moment_tendencies(phys_out, DT)
@@ -13486,10 +14287,10 @@ class ModelDriver:
                     self.state.p_s.data, dsigma, self.grid,
                 )
 
-            # Moisture smoothing
-            self.q_v = jnp.maximum(
-                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff),
-                0.0,
+            # Moisture smoothing — conserving floor (owner decision
+            # 2026-08-16), same class as the warmup-lane site.
+            self.q_v = self._conserving_floor(
+                self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
             )
 
             # Rayleigh friction

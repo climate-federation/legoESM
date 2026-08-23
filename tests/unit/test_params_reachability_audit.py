@@ -357,11 +357,20 @@ def test_no_tier0_param_is_calibratable():
                 scalar_param_map=build_atm_scalar_param_map())
 
 
-def test_tier0_refused_on_the_real_routes():
+def test_tier0_refused_on_the_real_routes(monkeypatch):
     """The two production surfaces where #1518 was live go RED without the
-    guard: the atm scalar map (run_amip/run_coupled) accepted
-    ``BechtoldConfig.cape_threshold``, and run_lmip's nested class router
-    accepted every ``land.canopy.clm_ml.*`` tier-0 default."""
+    guard: the atm scalar map (run_amip/run_coupled) accepted a tier-0
+    parameter, and run_lmip's nested class router accepted every
+    ``land.canopy.clm_ml.*`` tier-0 default.
+
+    The atm half no longer names a real tier-0 parameter. It used to use
+    ``BechtoldConfig.cape_threshold``, which has since been promoted to tier 2,
+    and no parameter in the atm scalar map is tier 0 today. That must not
+    silently retire the guard — the route is what is under test, not any
+    particular knob — so the tier is forced to 0 on one mapped parameter for
+    the duration of the call. The test then stays meaningful whichever knobs
+    happen to be tier 0.
+    """
     import pytest
     from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
     from legoesm.driver.run_config_yaml import apply_params_to_config
@@ -375,11 +384,19 @@ def test_tier0_refused_on_the_real_routes():
         convection="bechtold")
     qname = "atm.conv.BechtoldConfig.cape_threshold"
     assert qname in build_atm_scalar_param_map(), (
-        "map entry vanished — update this test to another mapped tier-0 param")
+        "map entry vanished — point this test at another mapped parameter")
+
+    import legoesm.training.param_collector as pc
+    forced = [m._replace(tunable_tier=0) if m.qualified_name == qname else m
+              for m in build_registry()]
+    assert any(m.qualified_name == qname and m.tunable_tier == 0
+               for m in forced), "the forced-tier fixture did not take"
+    monkeypatch.setattr(pc, "build_registry", lambda *a, **k: forced)
     with pytest.raises(SystemExit, match="tunable_tier 0"):
         apply_params_to_config(
             atm_cfg, {qname: _mid_bounds(reg[qname])}, driver="run_amip",
             scalar_param_map=build_atm_scalar_param_map())
+    monkeypatch.undo()
 
     # run_lmip nested class-router route.
     from scripts.run.run_lmip import _parse_args as lmip_args

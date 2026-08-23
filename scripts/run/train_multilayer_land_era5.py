@@ -38,11 +38,18 @@ land default — so the roughness z0 is calibrated (the key diurnal-coupling par
 default z_ref=10 fits best).  Trainable per-PFT (17): albedo, emissivity, root depth,
 roughness z0, soil thermal inertia (C_soil + k_solid -> seasonal-cycle amplitude/phase),
 and the PLANT water-stress thresholds theta_wp/theta_fc (CLM btran, DISTINCT from the
-soil van-Genuchten retention).  Ch is inert under MOST (used only under ``--bulk
-constant``).  The Farquhar photosynthesis params (Vc_max25/g1/LCMA) are wired in but OFF
-by default (``--stomata``): the offline single column has no atmospheric feedback to
-stabilise them (~3 -> ~12 K RMSE), so they stay at physical CLM5 defaults and are
-calibrated only in the coupled model (where they ARE active).
+soil van-Genuchten retention).  Ch has no gradient path under MOST (used only under
+``--bulk constant``) and is frozen out of the trainable set.  The Farquhar
+photosynthesis params (Vc_max25/g1/LCMA) are ON by default (2026-08-17): the loss is
+the ERA5 DUAL TARGET (latent heat + skin temperature, shared with the slab
+calibrator), and the latent-heat term directly constrains the canopy-conductance
+chain that skin T alone could not (--no-stomata restores the legacy energy-only
+mode).
+
+STRICT RULE: no inert parameters, ever.  Mode-inactive params are frozen out of the
+trainable pytree (``_inactive_keys``), and the first training step asserts every
+remaining leaf carries loss gradient (``assert_no_inert``) — a zero-gradient
+parameter aborts the run instead of silently pretending to be calibrated.
 
 Result (ERA5 skin T, land, MOST default + 24-h forcing, full-grid): RMSE 3.15 K, bias
 +0.42 K, seasonal-amplitude bias -0.73 K; z0 physically structured (forests ~1-2 m,
@@ -68,7 +75,8 @@ import optax
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.coupling_fields import AtmToSurface
-from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.config import MultiLayerLandConfig, calibrated_multilayer_setup
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
@@ -90,9 +98,15 @@ _DAYS = 12           # representative days per month (keeps the AD scan tractabl
 _DT = (24 / _NH) * 3600.0   # 6 h
 _SPM = _DAYS * _NH   # steps per month
 _EQ_STEPS = 600      # ~150 days of annual-mean spin -> deep-soil equilibrium
-_N_LAYERS = 8
-_SOIL_DEPTH_M = 3.0
-_SOIL_GROWTH = 1.5
+# Soil column + surface-exchange + stomata mode come from the ONE shared
+# definition of the calibrated land model (legoesm.land.config).  The coupled
+# driver builds its tile from the same function, so what is fitted here and what
+# is deployed in AMIP cannot drift apart; the CLI flags below still override the
+# mode for exploratory fits (a fit that overrides them is NOT the baked model).
+_CALIBRATED = calibrated_multilayer_setup()
+_N_LAYERS = _CALIBRATED["soil_grid"].n_layers
+_SOIL_DEPTH_M = _CALIBRATED["soil_grid"].total_depth
+_SOIL_GROWTH = _CALIBRATED["soil_grid"].growth_factor
 _FREEZE_FROM = 0     # pin ALL soil-moisture layers at the Stage-A annual equilibrium.
                      # The under-resolved offline forcing desiccates the top layer
                      # (bare-soil evaporation) -> ET collapse -> runaway when moisture
@@ -102,19 +116,16 @@ _FREEZE_FROM = 0     # pin ALL soil-moisture layers at the Stage-A annual equili
 _N_PFT = S._N_PFT
 _PI = S._PI
 _TBL = np.asarray(S._TABLE)              # (17,12) CLM5 init values per column
-# Surface-exchange / photosynthesis mode (set by the CLI).  DEFAULT = the stable
-# offline config: a constant (per-PFT) bulk coefficient and soil-only beta.  The
-# faithful MOST exchange (makes z0 trainable) and Farquhar stomata (make Vc_max25/g1/
-# LCMA trainable) are reachable via --bulk most / --stomata, but the crude offline
-# single-column forcing cannot constrain them — they roughly TRIPLE the skin-T RMSE
-# (~3.7 -> ~12 K) and need the coupled diurnal atmosphere to calibrate.
-# MOST surface exchange (matches the coupled DIURNAL default -> z0 trainable, RMSE ~3.1
-# vs constant-Ch 3.3).  Farquhar stomata are OFF for the OFFLINE calibration: with no
-# atmospheric feedback the offline single column cannot constrain Vc_max25/g1/LCMA (they
-# triple the RMSE), so they stay at physical CLM5 defaults — they ARE active in the
-# coupled model (land_diurnal_surface).  --stomata re-enables them for experiments.
-_BULK_SCHEME = "most"
-_STOMATA_ON = False
+# Surface-exchange / photosynthesis mode (set by the CLI).  MOST surface exchange
+# (matches the coupled DIURNAL default -> z0 trainable, RMSE ~3.1 vs constant-Ch 3.3).
+_BULK_SCHEME = _CALIBRATED["bulk_scheme"]
+# Farquhar stomata ON by default (user directive 2026-08-17): with the ERA5
+# latent-heat target in the loss the canopy conductance chain (Vc_max25/g1/LCMA
+# -> stomatal resistance -> transpiration) is directly constrained, so the
+# photosynthesis params are UNFROZEN.  --no-stomata restores the legacy
+# energy-only mode (which would leave them inert — and the inert-parameter gate
+# then requires them out of the trainable set, handled by _inactive_keys).
+_STOMATA_ON = _CALIBRATED["stomata"].enabled
 # Sub-grid elevation-band snow (legoesm.land.snow_bands): banded precip phase /
 # melt / permanent snow from the CLM STD_ELEV map.  Off by default (legacy
 # cell-mean snowpack); enable with --elev-bands.
@@ -137,6 +148,19 @@ _LAM_SM = 3.0e3
 # RMSE term still holds the pattern).  Default 0 = OFF (no change to existing behaviour);
 # raise via --lam-tbias to explicitly target a low global skin-T bias.
 _LAM_TBIAS = 0.0
+# Latent-heat loss weight (ERA5 dual target: evaporation + skin T).  LE MSE is
+# O(10^2-10^3) (W/m2)^2 vs skin-T MSE O(10) K^2; 0.02 puts the two on the same
+# footing.  This is the term that constrains the unfrozen canopy-conductance
+# chain (Vc_max25/g1/LCMA) and the plant water-stress thresholds.
+_LAM_LE = 0.02
+# MONTHLY-mean bias penalties (user 2026-08-17: "RMSE reduction is challenging —
+# natural variability. Reducing mean bias, including monthly, is a MUST").
+# Per-month area-weighted mean error, squared, averaged over the 12 months —
+# targets the seasonal-cycle bias directly while the RMSE terms hold the
+# spatial pattern.  Monthly T bias ~1.5 K and weight 30 puts the term at ~70
+# vs tmse ~6; monthly LE bias ~10 W/m2 and 0.3 puts it at ~30.
+_LAM_TBIAS_MON = 30.0
+_LAM_LEBIAS_MON = 0.3
 # Per-cell gradient-norm cap for the pre-train pathological-cell filter.  Healthy land
 # cells have a per-cell |grad| ~ 1e1-1e3 (logged p90 ~ 3e3); a near-singular stiff-clay/
 # saturated cell whose MOST flux backward is approaching the overflow reads 1e5-1e41.
@@ -187,6 +211,12 @@ BOUNDS_EXT = dict(
     # equilibrium root-zone soil moisture can be pulled toward ERA5 (the soil-moisture
     # target is what makes the retention trainable — skin T alone could not constrain it).
     pft_smscale=(0.7, 1.3),
+    # per-PFT snow-cover masking scale (CLM-style canopy snow burial): forests hide
+    # ground snow (<1), open tundra/grass may whiten faster than the global
+    # snow_depth_crit implies (>1); 1.0 = legacy full Niu-Yang cover.  The NH>55
+    # albedo mosaic (forests +0.05 too bright, tundra/grass -0.05..-0.09 too dark)
+    # is exactly the signature this closes.
+    pft_snowmask=(0.2, 1.2),
     # per-PFT SCALE on the per-cell texture-derived soil thermal k_solid / C_solid
     # (texture sets the spatial pattern; the scale sets the per-PFT magnitude)
     pft_kscale=(0.1, 1.5), pft_cscale=(0.3, 2.0),
@@ -242,6 +272,7 @@ def init_ext_params() -> dict:
         pft_wp=_inv_ext(wp0, "pft_wp"),
         pft_fcgap=_inv_ext(np.clip(fc0 - wp0, 0.04, 0.29), "pft_fcgap"),
         pft_smscale=_inv_ext(full(1.0), "pft_smscale"),    # start at texture porosity
+        pft_snowmask=_inv_ext(full(1.0), "pft_snowmask"),  # start at legacy full cover
         # init scales so texture*scale ~ the previous effective inertia (texture
         # k_base~5 -> k_scale~0.35 gives k_solid~1.8; C_base~2.3e6 -> c_scale~0.9)
         pft_kscale=_inv_ext(full(0.35), "pft_kscale"),
@@ -291,6 +322,12 @@ def baked_init_params() -> dict:
         soil_dry_boost=_inv_ext(C.TUNED_SOIL_DRY_BOOST_MULTILAYER, "soil_dry_boost"),
         soil_alb_scale=_inv_ext(C.TUNED_SOIL_ALB_SCALE_MULTILAYER, "soil_alb_scale"),
         th_glacier_cboost=_inv_ext(C.TUNED_GLACIER_CBOOST_MULTILAYER, "th_glacier_cboost"),
+        # v6 Farquhar bake (dual-target LE calibration)
+        pft_vcmax=_inv_ext(np.asarray(C._TUNED_PFT_VCMAX_MULTILAYER), "pft_vcmax"),
+        pft_g1=_inv_ext(np.asarray(C._TUNED_PFT_G1_MULTILAYER), "pft_g1"),
+        pft_lcma=_inv_ext(np.asarray(C._TUNED_PFT_LCMA_MULTILAYER), "pft_lcma"),
+        pft_snowmask=_inv_ext(np.asarray(C._TUNED_PFT_SNOWMASK_MULTILAYER),
+                              "pft_snowmask"),
     )
     p.update({k: jnp.asarray(v) for k, v in over.items()})
     return p
@@ -343,10 +380,16 @@ def _ml_land_params(cp, data):
 
 def build_multilayer_cfg(cp, data):
     """Assemble (config, land_params, hydraulics, carbon_state) for the multilayer
-    forward from the constrained extended params + the per-cell CLM soil map.  Surface
-    exchange + stomata follow the module mode (_BULK_SCHEME / _STOMATA_ON): the default
-    is a constant per-PFT Ch with soil-only beta; --bulk most / --stomata switch on the
-    MOST (z0) and Farquhar (Vc_max25/g1/LCMA) paths.  Soil thermal inertia is per-PFT."""
+    forward from the constrained extended params + the per-cell CLM soil map.
+
+    The DEFAULT is the calibrated land model (legoesm.land.config.
+    calibrated_multilayer_setup): MOST surface exchange with the per-cell CLM z0,
+    the big-leaf surface energy balance, and Farquhar stomata on a prescribed leaf
+    carbon, so Vc_max25 / g1 / LCMA are active and trainable.  The CLI can override
+    the mode for an exploratory fit (--bulk constant returns to a constant per-PFT
+    Ch, --no-stomata to soil-only beta); a fit run that way is NOT a bake candidate,
+    because the coupled driver deploys the shared definition, not the override.
+    Soil thermal inertia is per-PFT."""
     col = lambda k: data["vg_" + k].reshape(-1, 1)
     # Per-PFT POROSITY scale on the texture theta_sat (trainable via the soil-moisture
     # target).  Clamp theta_sat above BOTH theta_r and the PLANT field capacity (wp+gap):
@@ -369,14 +412,30 @@ def build_multilayer_cfg(cp, data):
         cp["pft_kscale"], cp["pft_cscale"], cp["th_glacier_cboost"])
     thermal = SoilThermalConfig(k_solid=k_eff.reshape(-1, 1), C_soil=c_eff.reshape(-1, 1))
     ch = data["pft"] @ cp["pft_ch"]              # per-PFT bulk exchange coefficient
-    cfg = MultiLayerLandConfig(
+    # START from the shared definition of the calibrated land model, then apply
+    # the per-cell maps and any exploratory CLI override.  Starting here (rather
+    # than restating the same choices) is what makes "the fit and the coupled run
+    # use one land model" true rather than a comment: surface scheme and the snow
+    # feedback come from it, and the mode fields below are the CLI-switchable
+    # ones seeded from it in the module constants above.
+    cfg = MultiLayerLandConfig(**_CALIBRATED)._replace(
+        # PINNED to the scheme these tables were fitted under.  The library
+        # default is now the two-leaf canopy; inheriting it here would fit
+        # canopy physics while the bake claims simple_seb.  Re-targeting this
+        # calibrator at the canopy is a deliberate re-fit, not a default change.
+        surface_scheme=SimpleSEBConfig(),
         soil_grid=SoilGridConfig(n_layers=_N_LAYERS, total_depth=_SOIL_DEPTH_M,
                                  growth_factor=_SOIL_GROWTH),
         hydraulics=hyd, thermal=thermal,
         bulk_scheme=_BULK_SCHEME, Ch_land=ch, Cd_land=ch,  # MOST uses z0; constant uses ch
-        stomata=StomataConfig(enabled=_STOMATA_ON),  # Farquhar -> Vc_max25/g1/LCMA active
-        carbon=CarbonConfig(scheme="differland" if _STOMATA_ON else "none"),
-        snow_albedo_feedback=True,
+        # Derived from the SHARED definition rather than rebuilt from class
+        # defaults, so a future non-default field in the calibrated stomatal or
+        # carbon config reaches the fit as well as the deployment instead of
+        # silently differing between them (codex).  Only the mode itself is
+        # overridden, and only by the CLI.
+        stomata=_CALIBRATED["stomata"]._replace(enabled=_STOMATA_ON),
+        carbon=_CALIBRATED["carbon"]._replace(
+            scheme=_CALIBRATED["carbon"].scheme if _STOMATA_ON else "none"),
         # Sub-grid elevation-band snow: banded precip phase / melt gating /
         # permanent snow from the CLM STD_ELEV sub-grid topography (module toggle).
         elev_bands=(ElevationSnowBandConfig(
@@ -387,6 +446,9 @@ def build_multilayer_cfg(cp, data):
             alpha_glacier_ice=cp["glac_ice_alb"])
             if _ELEV_BANDS_ON else None),
         land_albedo=LandAlbedoConfig(
+            # canopy snow masking; glacier cells blend to 1 (no canopy on ice)
+            snow_cover_scale=((1.0 - data["fg"]) * (data["pft"] @ cp["pft_snowmask"])
+                              + data["fg"]),
             alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
             snow_depth_crit=cp["snow_dcrit"],
             tau_snow_decay=cp["snow_tau_days"] * 86400.0,    # days -> seconds
@@ -447,14 +509,17 @@ def forward_ml(cp, data):
         return s2, None
     st, _ = jax.lax.scan(eq_body, st0, None, length=_EQ_STEPS)
 
-    # PARTIAL moisture freeze: pin the DEEP soil layers (the slow supply reservoir) at
-    # their Stage-A annual equilibrium, let only the shallow ROOT-ZONE layers evolve.
-    # Fully-evolving moisture under the under-resolved offline forcing drains the thin
-    # sandy tropical cells to wilting -> ET collapse -> +50 C runaway (untrainable);
-    # fully-frozen moisture is stable but kills the SEASONAL water-stress signal.  The
-    # split keeps the deep root supply wet (energy-limited tropics stay supplied) while
-    # the shallow layers dry down and recharge seasonally -> a real, trainable btran
-    # cycle (a dry season warms the surface).
+    # Moisture freeze.  ``_FREEZE_FROM`` is the first pinned layer, and it is 0, so
+    # EVERY layer is pinned at its Stage-A annual equilibrium — not the partial,
+    # deep-only freeze this comment used to describe (codex, 2026-08-19: the prose
+    # said the root zone still evolved; the slice says otherwise, and the slice is
+    # what runs).  Fully-evolving moisture under the under-resolved offline forcing
+    # drains the thin sandy tropical cells to wilting -> ET collapse -> +50 C
+    # runaway.  The cost is that the seasonal water-stress signal is absent from
+    # the fit while the coupled run evolves moisture prognostically: that is a real
+    # calibration/deployment difference no configuration switch can remove, and it
+    # is recorded as such in the runbook.  Restoring a partial freeze means setting
+    # ``_FREEZE_FROM`` to the first deep layer AND rewriting this comment.
     deep = st.theta_soil[:, _FREEZE_FROM:]
     deep_psi = st.psi_soil[:, _FREEZE_FROM:]
     # Root-zone (0-28cm = ERA5 swvl1+2) soil moisture from the Stage-A EQUILIBRIUM,
@@ -466,7 +531,7 @@ def forward_ml(cp, data):
     # --- STAGE B: seasonal years with subdaily forcing -> monthly means ----------
     @jax.checkpoint     # remat per step -> bounded backward memory
     def body(carry, k):
-        s, Tsum, Asum, Wsum = carry
+        s, Tsum, Asum, Wsum, Lsum = carry
         month = k // spm; hour = k % nh
         f = jax.tree.map(lambda x: x[month, hour], fstack)
         s2, r = step(s, f)
@@ -484,17 +549,20 @@ def forward_ml(cp, data):
         _sw_w = jnp.maximum(f.sw_down, 0.0)
         Asum = Asum.at[month].add(r.albedo * _sw_w)
         Wsum = Wsum.at[month].add(_sw_w)
-        return (s2, Tsum, Asum, Wsum), None
+        Lsum = Lsum.at[month].add(r.lhflx)
+        return (s2, Tsum, Asum, Wsum, Lsum), None
 
     # First seasonal pass is an unscored spin; only the second year is scored so the
     # monthly means are free of first-cycle thermal/snow transients.
     z = lambda: jnp.zeros((12, n), dtype=st.T_soil.dtype)
-    (st, _, _, _), _ = jax.lax.scan(body, (st, z(), z(), z()), jnp.arange(nstep))
-    (st, Tsum, Asum, Wsum), _ = jax.lax.scan(body, (st, z(), z(), z()), jnp.arange(nstep))
-    return Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm
+    (st, _, _, _, _), _ = jax.lax.scan(body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    (st, Tsum, Asum, Wsum, Lsum), _ = jax.lax.scan(
+        body, (st, z(), z(), z(), z()), jnp.arange(nstep))
+    return Tsum / spm, Asum / jnp.maximum(Wsum, 1e-6), W_sm, Lsum / spm
 
 
-def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_tbias=None):
+def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_tbias=None,
+            lam_le=None, lam_tbias_mon=None, lam_lebias_mon=None):
     # weights default to the module globals (CLI-tunable) so the jitted
     # value_and_grad picks up an updated lam_amp without re-partialling.
     lam_alb = _LAM_ALB if lam_alb is None else lam_alb
@@ -502,8 +570,11 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     lam_amp = _LAM_AMP if lam_amp is None else lam_amp
     lam_sm = _LAM_SM if lam_sm is None else lam_sm
     lam_tbias = _LAM_TBIAS if lam_tbias is None else lam_tbias
+    lam_le = _LAM_LE if lam_le is None else lam_le
+    lam_tbias_mon = _LAM_TBIAS_MON if lam_tbias_mon is None else lam_tbias_mon
+    lam_lebias_mon = _LAM_LEBIAS_MON if lam_lebias_mon is None else lam_lebias_mon
     cp = constrain_ext(p)
-    T, A, W = forward_ml(cp, data)
+    T, A, W, L = forward_ml(cp, data)
     w = data["w"][None, :]
     tmse = jnp.sum(w * (T - data["skt"]) ** 2) / jnp.sum(w) / 12
     # Albedo MSE is INSOLATION-weighted (area w x monthly SW): a polar-night month-cell
@@ -530,6 +601,25 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
         smse = jnp.sum(wsm * (W_s - sm_s) ** 2) / (jnp.sum(wsm) + 1e-9)
     else:
         smse = jnp.zeros((), tmse.dtype)
+    # Latent heat vs ERA5 slhf_wm2 (positive-up) — the second leg of the dual
+    # target.  Same finite-mask + input-sanitise pattern as the SM term (a NaN
+    # reaching the diff poisons the VJP even where()-discarded); lam_le == 0 is a
+    # STATIC flag, so the LE path is skipped entirely when off.
+    if lam_le > 0.0 or lam_lebias_mon > 0.0:
+        le_ok = jnp.isfinite(L) & jnp.isfinite(data["le"])
+        L_s = jnp.where(le_ok, L, 0.0)
+        le_t = jnp.where(le_ok, data["le"], 0.0)
+        wle = w * le_ok
+        lemse = jnp.sum(wle * (L_s - le_t) ** 2) / (jnp.sum(wle) + 1e-9)
+        # per-month area-weighted mean LE bias, squared, averaged over months
+        mb_le = jnp.sum(wle * (L_s - le_t), axis=1) / (jnp.sum(wle, axis=1) + 1e-9)
+        lebias_mon = jnp.mean(mb_le ** 2)
+    else:
+        lemse = jnp.zeros((), tmse.dtype)
+        lebias_mon = jnp.zeros((), tmse.dtype)
+    # per-month area-weighted mean skin-T bias (the seasonal-cycle bias target)
+    mb_t = jnp.sum(w * (T - data["skt"]), axis=1) / jnp.sum(w)
+    tbias_mon = jnp.mean(mb_t ** 2)
     ann = (T - data["skt"]).mean(0)
     oh = data["dom_onehot"] * data["w"][:, None]
     pb = (oh * ann[:, None]).sum(0) / (oh.sum(0) + 1e-9)
@@ -541,8 +631,9 @@ def loss_ml(p, data, lam_alb=None, lam_pft=None, lam_amp=None, lam_sm=None, lam_
     # Global (area-weighted) skin-T bias [K].  ``ann`` is the per-cell annual bias above.
     gbias = jnp.sum(data["w"] * ann) / jnp.sum(data["w"])
     loss = (tmse + lam_alb * amse + lam_pft * ppft + lam_amp * samp + lam_sm * smse
-            + lam_tbias * gbias ** 2)
-    return loss, (tmse, amse, ppft, samp, smse, gbias)
+            + lam_tbias * gbias ** 2 + lam_le * lemse
+            + lam_tbias_mon * tbias_mon + lam_lebias_mon * lebias_mon)
+    return loss, (tmse, amse, ppft, samp, smse, gbias, lemse, tbias_mon, lebias_mon)
 
 
 def _params_dict(p):
@@ -558,7 +649,7 @@ def _select_cells(data: dict, idx) -> dict:
     for k, v in data.items():
         if k == "forc":
             out[k] = [jax.tree.map(lambda x: x[:, idx], f) for f in v]
-        elif k in ("skt", "alb", "alb_wt"):     # (12, ncol) monthly targets/weights
+        elif k in ("skt", "alb", "alb_wt", "le"):   # (12, ncol) monthly targets/weights
             out[k] = v[:, idx]
         elif k == "rz_w":
             out[k] = v
@@ -615,7 +706,7 @@ def _split_cells(data: dict, frac: float, seed: int):
 
 def _metrics(cp: dict, data: dict):
     """Area-weighted skin-T / albedo RMSE + bias for a constrained param set."""
-    T, A, _ = forward_ml(cp, data)
+    T, A, _, _ = forward_ml(cp, data)
     w = data["w"]; sw = float(jnp.sum(w))
     tr = float(jnp.sqrt(jnp.sum(w[None] * (T - data["skt"]) ** 2) / sw / 12))
     tb = float(jnp.sum(w[None] * (T - data["skt"])) / sw / 12)
@@ -633,6 +724,25 @@ def _report_test(tuned: dict, test_data: dict):
     print(f"#   skin-T RMSE {ti:.3f} -> {tc:.3f} K   bias {tbi:+.3f} -> {tbc:+.3f} K",
           flush=True)
     print(f"#   albedo RMSE {ai:.4f} -> {ac:.4f}   bias {abi:+.4f} -> {abc:+.4f}", flush=True)
+
+
+def _inactive_keys() -> set:
+    """Params with NO gradient path in the current mode — excluded from the trainable
+    set (strict no-inert-parameters rule; everything left must carry gradient, gated
+    by ``assert_no_inert`` on the first training step).  They are still baked into
+    the config (frozen at init) so the forward and the saved JSON are complete."""
+    ks = {"pft_ch"} if _BULK_SCHEME == "most" else {"pft_z0"}
+    if not _STOMATA_ON:
+        ks |= {"pft_vcmax", "pft_g1", "pft_lcma"}
+    if not _ELEV_BANDS_ON:
+        ks |= {"elev_lapse", "elev_sw_grad", "elev_lw_lapse", "glac_ice_alb"}
+    # snow_zenith is inert in EVERY current mode — the gate caught it on the
+    # first full-grid dual-target run: no compute_land_albedo call site (SEB,
+    # multilayer post-step, snow bands) passes cos_zenith, so the BATS zenith
+    # brightening never executes.  Frozen until that wiring exists (a production
+    # albedo change, out of calibration scope).
+    ks.add("snow_zenith")
+    return ks
 
 
 def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
@@ -654,10 +764,18 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
     ncol_tr = int(data["lat"].shape[0])
     use_batch = 0 < batch < ncol_tr
     _brng = np.random.default_rng(20260701)          # mini-batch sampler (fixed seed)
-    vg = jax.jit(jax.value_and_grad(loss_ml, has_aux=True))
+    # STRICT no-inert-parameters rule: mode-inactive keys (no gradient path) are
+    # FROZEN at init and removed from the optimised pytree; the first computed
+    # gradient then asserts every remaining leaf is live (S.assert_no_inert).
+    frozen = {k: p[k] for k in _inactive_keys() if k in p}
+    p = {k: v for k, v in p.items() if k not in frozen}
+    if frozen:
+        print(f"# frozen (no gradient path in this mode): {sorted(frozen)}", flush=True)
+    loss_full = lambda q, d: loss_ml({**q, **frozen}, d)
+    vg = jax.jit(jax.value_and_grad(loss_full, has_aux=True))
     # Full-training-set score for best-checkpoint + logging (a mini-batch loss varies
     # cell-to-cell and cannot rank iterates).  Evaluated only at the log cadence.
-    fscore = jax.jit(lambda q: loss_ml(q, data)) if use_batch else None
+    fscore = jax.jit(lambda q: loss_full(q, data)) if use_batch else None
     # Gradient clipping: the initial loss is large (extreme high-latitude / desert /
     # ice cells contribute a huge skin-T error + seasonal-amplitude term), so unclipped
     # Adam at lr~3e-2 overshoots into a Richards/MOST-unstable parameter region and NaNs
@@ -673,6 +791,12 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         bdata = _select_cells(data, _brng.choice(ncol_tr, batch, replace=False)) \
             if use_batch else data
         (l, aux), g = vg(p, bdata)                    # step on the (mini-)batch gradient
+        if it == 0:
+            # Inert gate on the FULL-data init gradient, never a mini-batch (a
+            # snow/glacier param absent from one 300-cell batch is not inert —
+            # codex/GLM).  In batch mode this costs one extra full-data grad eval
+            # at init; in full-batch mode g already is the full-data gradient.
+            S.assert_no_inert(vg(p, data)[1] if use_batch else g)
         # Dynamic safety net.  The static pre-filter only removes cells pathological at
         # the INIT params; a parameter step can push a previously-healthy cell into the
         # stiff-clay/saturated regime whose MOST-iteration backward overflows to NaN/inf.
@@ -689,9 +813,9 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         # Score + rank on the FULL training set at the log/checkpoint cadence (the batch
         # loss is too noisy to rank iterates); p here is the PRE-update iterate.
         if not use_batch:
-            score, (tm, am, pp, sa, sm, gb) = float(l), aux
+            score, (tm, am, pp, sa, sm, gb, lm, tbm, lbm) = float(l), aux
         elif log or (ckpt_path and it > 0 and it % ckpt_every == 0):
-            fl, (tm, am, pp, sa, sm, gb) = fscore(p); score = float(fl)
+            fl, (tm, am, pp, sa, sm, gb, lm, tbm, lbm) = fscore(p); score = float(fl)
         else:
             score = None
         if score is not None and np.isfinite(score) and score < best_l:
@@ -699,7 +823,8 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         upd, state = opt.update(g, state); p = optax.apply_updates(p, upd)
         if log:
             print(f"# it {it:3d} loss {score:.3f} T-RMSE {float(jnp.sqrt(tm)):.3f} "
-                  f"T-bias {float(gb):+.3f} "
+                  f"T-bias {float(gb):+.3f} T-mbias {float(jnp.sqrt(tbm)):.3f} "
+                  f"LE-RMSE {float(jnp.sqrt(lm)):.2f} LE-mbias {float(jnp.sqrt(lbm)):.2f} "
                   f"alb-RMSE {float(jnp.sqrt(am)):.4f} sm-RMSE {float(jnp.sqrt(sm)):.4f} "
                   f"perPFT {float(jnp.sqrt(pp)):.3f} seas-amp {float(jnp.sqrt(sa)):.3f}",
                   flush=True)
@@ -707,7 +832,7 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
         # BEST-so-far params (not a late, possibly-diverged iterate) are captured.
         if ckpt_path and it > 0 and it % ckpt_every == 0:
             with open(ckpt_path, "w") as f:
-                json.dump(_params_dict(best_p), f, indent=2)
+                json.dump(_params_dict({**best_p, **frozen}), f, indent=2)
             print(f"# checkpoint -> {ckpt_path} (best loss {best_l:.3f} @ it {it})",
                   flush=True)
         # Early stop: the MOST/thermal cliff makes a too-large step blow the seasonal-
@@ -722,7 +847,7 @@ def train(data, n_iter=250, lr=3e-2, ckpt_path=None, ckpt_every=50, clip=1.0,
               f"(transient MOST-iteration singular cells); clip handled the rest",
               flush=True)
     print(f"# returning BEST params (loss {best_l:.3f})", flush=True)
-    return _params_dict(best_p)
+    return _params_dict({**best_p, **frozen})
 
 
 # --------------------------------------------------------------------------- #
@@ -812,6 +937,13 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
     _ssrd_month = np.sum(_ssrd, axis=1)                        # (12, ncol) monthly SW total
     alb = np.clip(np.sum(g("forecast_albedo") * _ssrd, axis=1)
                   / np.maximum(_ssrd_month, 1e-6), 0.05, 0.85)
+    # latent-heat target: ERA5 slhf_wm2 (positive-up, monthly mean over the sampled
+    # hours) — the evaporation leg of the dual target.  Legacy npz without the field
+    # yields all-NaN, dropped by the loss finite-mask.
+    try:
+        le = g("slhf_wm2").mean(1)                             # (12, ncol)
+    except KeyError:
+        le = np.full((12, latc.size), np.nan)
     # soil-moisture target: ERA5 swvl1 (0-7cm) + swvl2 (7-28cm), depth-weighted to a
     # single 0-28cm root-zone value, then the ANNUAL mean (the frozen column's signal).
     # Backward-compat: an OLD npz without soil moisture yields an all-NaN target, which
@@ -829,7 +961,11 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
     _dz = np.asarray(_grid.dz); _bot = np.cumsum(_dz)
     _ov = np.clip(0.28 - (_bot - _dz), 0.0, _dz)              # layer∩[0,0.28m]
     _K = int((_ov > 1e-9).sum())
-    data = dict(forc=forc, lat=jnp.asarray(latc), pft=jnp.asarray(pft),
+    # per-cell longitude [deg], SAME (subsampled/permuted) order as every other
+    # field — plotters must use this, not a re-derived unpermuted index map
+    lon = lonc if lonc is not None else np.zeros_like(latc)
+    data = dict(forc=forc, lat=jnp.asarray(latc), lon=jnp.asarray(lon),
+                pft=jnp.asarray(pft),
                 sm=jnp.asarray(sm), rz_w=jnp.asarray(_ov[:_K]),
                 fg=jnp.asarray(np.asarray(cmap["glacier_frac"])[sub]),
                 wp=jnp.asarray(np.asarray(cmap["theta_wp"])[sub]),
@@ -840,7 +976,7 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
                 soil_albedo=jnp.asarray(np.asarray(cmap["soil_albedo"])[sub]),
                 # sub-grid elevation std [m] (elevation-band snow scheme)
                 std_elev=jnp.asarray(np.asarray(cmap["std_elev"])[sub]),
-                skt=jnp.asarray(skt), alb=jnp.asarray(alb),
+                skt=jnp.asarray(skt), alb=jnp.asarray(alb), le=jnp.asarray(le),
                 # per-(month,cell) monthly SW total -> insolation weight for the albedo
                 # loss so polar-night months (no sun, garbage albedo) don't bias amse.
                 alb_wt=jnp.asarray(_ssrd_month),
@@ -854,7 +990,7 @@ def _pack(g, latc, cmap, sub, lonc=None, hours=None, nh=_NH) -> dict:
 
 def main():
     global _BULK_SCHEME, _STOMATA_ON, _ELEV_BANDS_ON, _LAM_AMP, _LAM_SM, _LAM_PFT, _LAM_ALB
-    global _LAM_TBIAS
+    global _LAM_TBIAS, _LAM_LE, _LAM_TBIAS_MON, _LAM_LEBIAS_MON
     jax.config.update("jax_enable_x64", True)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lam-tbias", type=float, default=_LAM_TBIAS,
@@ -893,9 +1029,18 @@ def main():
     ap.add_argument("--elev-bands", action="store_true",
                     help="enable the sub-grid elevation-band snow scheme (banded "
                          "precip phase/melt + permanent snow from CLM STD_ELEV)")
-    ap.add_argument("--stomata", action="store_true",
-                    help="enable Farquhar stomata (makes Vc_max25/g1/LCMA trainable; "
-                         "degrades the offline fit — needs the coupled model)")
+    ap.add_argument("--no-stomata", action="store_true",
+                    help="disable Farquhar stomata (DEFAULT ON: the ERA5 latent-heat "
+                         "target constrains Vc_max25/g1/LCMA; disabling freezes them "
+                         "at CLM5 and drops them from the trainable set)")
+    ap.add_argument("--lam-le", type=float, default=_LAM_LE,
+                    help="latent-heat loss weight (ERA5 slhf_wm2 dual target; needs an "
+                         "npz fetched with mean_surface_latent_heat_flux; 0 disables)")
+    ap.add_argument("--lam-tbias-mon", type=float, default=_LAM_TBIAS_MON,
+                    help="MONTHLY skin-T mean-bias penalty (seasonal-cycle bias is the "
+                         "primary calibration target; RMSE fights natural variability)")
+    ap.add_argument("--lam-lebias-mon", type=float, default=_LAM_LEBIAS_MON,
+                    help="MONTHLY latent-heat mean-bias penalty (0 disables)")
     ap.add_argument("--out", default="results/land_tuned_multilayer.json")
     ap.add_argument("--holdout", type=float, default=0.0,
                     help="fraction of sampled cells held OUT of training to report a "
@@ -925,14 +1070,24 @@ def main():
                          "and layered over the baked defaults; overrides --init-from so a "
                          "re-tune REFINES the current best instead of the baked prior")
     args = ap.parse_args()
-    _BULK_SCHEME, _STOMATA_ON = args.bulk, args.stomata
+    _BULK_SCHEME, _STOMATA_ON = args.bulk, not args.no_stomata
     _ELEV_BANDS_ON = args.elev_bands
     _LAM_AMP = args.lam_amp
     _LAM_SM = args.lam_sm
     _LAM_TBIAS = args.lam_tbias
+    _LAM_LE = args.lam_le
+    _LAM_TBIAS_MON = args.lam_tbias_mon
+    _LAM_LEBIAS_MON = args.lam_lebias_mon
     _LAM_PFT = args.lam_pft
     _LAM_ALB = args.lam_alb
     data = load_training_data(args.diurnal_npz, args.n_sub, args.seed, args.days)
+    # A missing LE field must not silently degrade the dual target to skin-T-only
+    # (codex): the all-NaN fallback zeroes the LE term through the finite-mask.
+    if _LAM_LE > 0.0 and not bool(np.isfinite(np.asarray(data["le"])).any()):
+        raise SystemExit(
+            "npz has no slhf_wm2 (latent-heat target): re-fetch with "
+            "scripts/data/fetch_era5_hourly_climatology.py, or pass --lam-le 0 "
+            "to explicitly train skin-T-only")
     # Pre-filter, cached: compute the per-cell NaN-gradient keep-set once (on CPU) and
     # reuse it so a GPU full-grid run trains on the CLEAN set without the slow per-cell
     # scan.  Filtering happens BEFORE the train/test split so both partitions are clean.

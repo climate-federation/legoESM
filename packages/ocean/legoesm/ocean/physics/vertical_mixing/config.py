@@ -315,6 +315,11 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # Which alpha/beta the n2_mode="nemo_bn2" assembly uses. "seos" (default,
+    # BIT-IDENTICAL legacy) is the 3-term simplified fit; "teos10" is NEMO's
+    # Roquet polynomial with the TEOS-10 coefficient set -- what ORCA1 runs
+    # (ln_teos10=.true., namelist_cfg:308). Ignored by every other n2_mode.
+    n2_eos_form: str = "seos"
     # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
     # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
     #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S

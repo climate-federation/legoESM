@@ -82,10 +82,41 @@ def _get(lp, name: str, fallback):
     either ``LandSurfaceParams`` (for SimpleSEB; full field set) or
     ``CanopyLandParams`` (for TwoLeafCanopy; disjoint field set).  Missing
     fields fall back to the caller-supplied default rather than raising.
+
+    A field that EXISTS but is ``None`` is also treated as absent: optional
+    per-column params (``root_depth``/``theta_wp``/``theta_fc``) are declared on
+    ``CanopyLandParams`` with a ``None`` default, so a params object that does
+    not carry them must still fall back to the scalar config value rather than
+    propagating ``None`` into the arithmetic.
     """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    v = getattr(lp, name, fallback)
+    return fallback if v is None else v
+
+
+def resolve_plant_wilting_point(land_params, config):
+    """The PLANT wilting point that drives root-zone transpiration and GPP.
+
+    It is deliberately separate from the SOIL wilting point (deep-rooted
+    vegetation extracts water below the soil-evaporation cutoff), and it is
+    resolved in one place because the two callers -- the multilayer land step
+    and the coupler's land-tile beta -- disagreed: the step fell straight back
+    to the SCALAR ``config.theta_wp`` and so ignored a per-column
+    ``theta_wp``.  Any calibration that varies the wilting point by plant
+    functional type therefore reached soil evaporation and was silently inert
+    in transpiration and GPP -- the two arms of the same column disagreeing
+    about how dry the soil is.
+
+    Order, most specific first: a per-column ``theta_wp_plant``, then a
+    per-column ``theta_wp``, then ``config.theta_wp_plant``, then the scalar
+    ``config.theta_wp``.  With none of them set this reproduces the
+    single-wilting-point behaviour exactly.
+    """
+    scalar = (config.theta_wp_plant if config.theta_wp_plant is not None
+              else config.theta_wp)
+    return _get(land_params, "theta_wp_plant",
+                _get(land_params, "theta_wp", scalar))
 
 
 def root_zone_moisture_stress(theta, beta_min, root_depth, theta_wp, theta_fc,
@@ -147,10 +178,7 @@ def land_tile_beta_soil(theta_soil, config, land_params=None):
     root_depth = _get(land_params, "root_depth", config.root_depth)
     # Plant wilting point (transpiration extraction) drives this root-zone
     # availability; falls back to the soil wilting point when unset.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp   = _get(land_params, "theta_wp_plant",
-                      _get(land_params, "theta_wp", _wp_plant_cfg))
+    theta_wp   = resolve_plant_wilting_point(land_params, config)
     theta_fc   = _get(land_params, "theta_fc", config.theta_fc)
     beta_soil, _, _, _ = root_zone_moisture_stress(
         theta_soil, config.beta_min, root_depth, theta_wp, theta_fc,
@@ -407,9 +435,7 @@ def _step_multilayer_land_impl(
     # water below the soil-evaporation cutoff.  Falls back to ``theta_wp`` (per-
     # column params first, then config) so an unset plant wp reproduces the
     # single-wilting-point behaviour exactly.
-    _wp_plant_cfg = (config.theta_wp_plant if config.theta_wp_plant is not None
-                     else config.theta_wp)
-    theta_wp_plant = _get(lp, "theta_wp_plant", _wp_plant_cfg)
+    theta_wp_plant = resolve_plant_wilting_point(lp, config)
 
     # Start-of-step skin temperature = top soil layer.
     T_surface = T_soil[:, 0]
@@ -715,7 +741,12 @@ def _step_multilayer_land_impl(
     # per-band albedo + per-band skin T), keeping the (cell-mean) turbulent fluxes
     # from the surface scheme.  ``band_rad.Rn_bands`` drives per-band melt below.
     if bands is not None:
-        _cover_fn = lambda s: snow_cover_fraction(s, config.land_albedo)
+        # per-band cover with the canopy snow mask applied and clipped PER BAND
+        # (post-aggregate scaling is wrong on saturated bands — see land_albedo)
+        _scl = (1.0 if config.land_albedo.snow_cover_scale is None
+                else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None])
+        _cover_fn = lambda s: jnp.clip(
+            snow_cover_fraction(s, config.land_albedo) * _scl, 0.0, 1.0)
         # gap 3: solar-zenith snow brightening (cos_zenith per cell -> broadcast over
         # the band axis).  Inactive where cos_zenith is a constant placeholder.
         _cz = forcing.cos_zenith[:, None]
@@ -1097,7 +1128,11 @@ def _step_multilayer_land_impl(
             _cz_new = forcing.cos_zenith[:, None]
             alpha_bands_new = band_albedo(
                 snow_bands_new, snow_age_bands_new, _base_new,
-                lambda s: snow_cover_fraction(s, config.land_albedo),
+                lambda s: jnp.clip(
+                    snow_cover_fraction(s, config.land_albedo)
+                    * (1.0 if config.land_albedo.snow_cover_scale is None
+                       else jnp.asarray(config.land_albedo.snow_cover_scale)[:, None]),
+                    0.0, 1.0),
                 lambda a: snow_albedo(a, config.land_albedo, cos_zenith=_cz_new),
                 ice_bands=ice_bands_new, cfg=bands)
         else:
@@ -1148,18 +1183,34 @@ def _step_multilayer_land_impl(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
-        # CLM-ML computes q_surface via the Philip (1957) soil-humidity formula
-        # (rhg_soil * q_sat) internally and returns it in surface_out.q_surface.
-        # Use it directly so the coupler sees the same humidity as CLM-ML used
-        # for soil evaporation.  Override with q_sat_ice over snow (physically
-        # correct; CLM-ML always runs with snl=0, so this path is dormant).
+    # Snow that was present when the scheme computed its humidity but melted
+    # away during the step leaves that humidity stale on the ICE curve; the
+    # end-state reconstruction below is the honest value for that transition.
+    _snow_melted_out = (snow > 1e-6) & ~has_snow_new
+    if surface_out.q_surface is not None:
+        # The surface scheme SOLVED for its own boundary humidity -- CLM-ML's
+        # Philip soil relative humidity, the two-leaf canopy's canopy-air
+        # humidity q_c (solved through the stomatal + soil + aerodynamic
+        # resistance network), or SimpleSEB's bounded gradient form.  Use it.
+        # This branch used to be CLM-ML only, and the else-branch OVERWROTE the
+        # two-leaf canopy's solved q_c with the product form beta*q_sat -- the
+        # resistance physics ran and was then discarded at the boundary (the
+        # slab wrapper preserved it; this wrapper did not).  Snow still
+        # overrides to the ice-saturation surface.
         q_sfc_new = jnp.where(has_snow_new, q_sat_sfc_new, surface_out.q_surface)
+        q_sfc_new = jnp.where(
+            _snow_melted_out,
+            forcing.q_lowest
+            + jnp.where(has_snow_new, 1.0, beta_new)
+            * (q_sat_sfc_new - forcing.q_lowest),
+            q_sfc_new)
     else:
-        # SimpleSEB / TwoLeafCanopy: beta·qsat with the updated moisture state
-        # (``beta_new`` computed unconditionally above).
+        # Scheme returned no humidity: reconstruct the bounded GRADIENT form
+        # (never the product form -- beta is a flux efficiency, and beta*q_sat
+        # manufactures condensation over dry soil; see simple_seb.py).
         beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
-        q_sfc_new = beta_effective_new * q_sat_sfc_new
+        q_sfc_new = (forcing.q_lowest
+                     + beta_effective_new * (q_sat_sfc_new - forcing.q_lowest))
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -1243,7 +1294,173 @@ def _step_multilayer_land_impl(
         salt_flux=jnp.zeros(ncol),
     )
 
+    # The hold must be ATOMIC over everything this step advanced. The carbon
+    # pools are stepped above from the SAME rejected GPP and surface
+    # temperature, so a column held in the soil but advanced in carbon would
+    # carry that inconsistency into the restart file.
+    new_state, response, carbon_state_new, _held_mask, _n_held = (
+        _hold_unsolved_columns(state, new_state, response, surface_out,
+                               forcing, config, ncol,
+                               carbon_old=carbon_state,
+                               carbon_new=carbon_state_new))
+    surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+
     return new_state, response, carbon_state_new, surface_out
+
+
+# ---------------------------------------------------------------------------
+# Per-column containment: an unsolved column must not be able to kill the model
+# ---------------------------------------------------------------------------
+
+def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
+                           config, ncol, carbon_old=None, carbon_new=None):
+    """Freeze any column the land model failed to solve, and say so.
+
+    Two things make a column's new state untrustworthy:
+
+    * the surface scheme's iterative closure did not reach a root
+      (``SurfaceFluxOutput.converged is False``), so its fluxes are a stopped
+      iterate rather than a solution of the surface energy balance; or
+    * some leaf of the new state or of the tile response came back non-finite.
+
+    Either way the column is HELD: its state (soil, snow, ponding, carbon)
+    reverts to the start of the step and its tile response reports no turbulent
+    exchange and no runoff, with a surface temperature equal to the (finite)
+    previous top-soil temperature and a surface humidity equal to the air's.
+
+    That does NOT mean the atmosphere exchanges nothing with a held column.
+    On the coupled path the land tile hands back only the skin temperature and
+    albedo and the atmosphere recomputes its own sensible and latent fluxes
+    from them, so it keeps exchanging with the held surface — it simply does so
+    against a finite, frozen surface instead of a diverging one.  Making the
+    atmosphere's own flux law honour the hold needs the mask threaded to it and
+    is NOT done here.
+
+    Why this exists.  Before it, ONE column of 2562 that went non-finite
+    reached the atmosphere through the land skin temperature and, via the
+    dynamical core's global mass fixer, made every column of the model
+    non-finite within a single step: a 5-day AMIP run died 7 hours in with a
+    NaN in every field. Containing the damage to the column that produced it
+    turns a dead run into a reported defect.
+
+    This is CONTAINMENT, NOT PHYSICS. A held column conserves neither energy
+    nor water over the step it is held, so it must never be absorbed silently —
+    a run whose land is quietly frozen somewhere is worse than one that stops.
+    Returning the per-column mask and the count is how that is made visible:
+    this function runs inside the jitted step, where a host print is not
+    available on a GPU-only runtime (``jax.debug.print`` raises there), so the
+    caller is responsible for surfacing them.  ``SurfaceFluxOutput.held`` and
+    ``SurfaceFluxOutput.n_held`` carry them out.
+
+    Returns
+    -------
+    held_state, held_response, held_carbon, held_mask (ncol,) bool,
+    n_held () int32
+    """
+    def _is_float_leaf(leaf):
+        # NOT ``dtype.kind in "fc"``: bfloat16 is an extension dtype whose kind
+        # is "V", so a kind test silently skips it and a bfloat16 NaN would go
+        # unheld (reproduced by review).  ``jnp.issubdtype(..., jnp.inexact)``
+        # covers every float and complex dtype JAX supports.
+        dtype = getattr(leaf, "dtype", None)
+        return dtype is not None and jnp.issubdtype(dtype, jnp.inexact)
+
+    def _col_bad(leaf):
+        """Per-column non-finiteness of one (ncol, ...) array leaf."""
+        arr = jnp.asarray(leaf)
+        if arr.ndim == 0 or arr.shape[0] != ncol:
+            return jnp.zeros(ncol, dtype=bool)
+        flat = arr.reshape(ncol, -1)
+        return jnp.any(~jnp.isfinite(flat), axis=-1)
+
+    def _any_bad(tree):
+        # Over tree LEAVES, so a nested carrier (the CLM-ML canopy state) is
+        # inspected too, not just the top-level fields.
+        acc = jnp.zeros(ncol, dtype=bool)
+        for leaf in jax.tree.leaves(tree):
+            if _is_float_leaf(leaf):
+                acc = acc | _col_bad(leaf)
+        return acc
+
+    bad = _any_bad(new_state) | _any_bad(response)
+    if surface_out.converged is not None:
+        bad = bad | ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool)
+
+    n_held = jnp.sum(bad.astype(jnp.int32))
+
+    def _hold_leaf(new_leaf, old_leaf):
+        if not _is_float_leaf(new_leaf) or old_leaf is None:
+            return new_leaf
+        if new_leaf.ndim == 0 or new_leaf.shape[0] != ncol:
+            return new_leaf
+        old_arr = jnp.asarray(old_leaf)
+        if old_arr.shape != new_leaf.shape:
+            return new_leaf
+        mask = bad.reshape((ncol,) + (1,) * (new_leaf.ndim - 1))
+        return jnp.where(mask, old_arr, new_leaf)
+
+    def _hold_field(new_field, old_field):
+        # Per FIELD rather than one tree.map over the whole state: a field that
+        # is None on one side and an array on the other (an optional store
+        # switched on mid-run) makes the two states different pytrees, which a
+        # single tree.map cannot walk.  Inside a field we DO recurse, so a
+        # nested carrier (the CLM-ML canopy state) is held as well.
+        if new_field is None or old_field is None:
+            return new_field
+        if _is_float_leaf(new_field):
+            return _hold_leaf(new_field, old_field)
+        try:
+            return jax.tree.map(_hold_leaf, new_field, old_field)
+        except (ValueError, TypeError):
+            # Structurally different this step (e.g. a carrier rebuilt from
+            # scratch): nothing to revert to, so leave it. Loud rather than
+            # silent — the count below still reports the column as held.
+            return new_field
+
+    held_state = new_state._replace(
+        **{name: _hold_field(getattr(new_state, name), getattr(state, name))
+           for name in new_state._fields})
+
+    # Inert-surface response for a held column.
+    T_prev = state.T_soil[:, 0]
+    eps = jnp.full(ncol, config.emissivity_land)
+    inert = dict(
+        T_sfc=T_prev, T_rad=T_prev,
+        albedo=jnp.full(ncol, config.albedo_land),
+        emissivity=eps,
+        z0=jnp.full(ncol, config.z0_land),
+        # Equal to the air, so any consumer that forms a humidity GRADIENT from
+        # this field gets zero.  Note the coupled atmosphere is not such a
+        # consumer — it recomputes surface humidity from saturation at the skin
+        # temperature and ignores this field (see the note in the docstring).
+        q_surface=jnp.asarray(forcing.q_lowest).reshape(-1),
+        lw_up=eps * constants.sigma_sb * T_prev ** 4,
+    )
+
+    def _hold_response(name, leaf):
+        if leaf is None or not _is_float_leaf(leaf):
+            return leaf
+        arr = jnp.asarray(leaf)
+        if arr.ndim == 0 or arr.shape[0] != ncol:
+            return leaf
+        fallback = inert.get(name, jnp.zeros_like(arr))
+        return jnp.where(bad, jnp.broadcast_to(fallback, arr.shape), arr)
+
+    held_response = response._replace(
+        **{name: _hold_response(name, getattr(response, name))
+           for name in response._fields})
+
+    held_carbon = carbon_new
+    if carbon_old is not None and carbon_new is not None:
+        try:
+            held_carbon = jax.tree.map(_hold_leaf, carbon_new, carbon_old)
+        except (ValueError, TypeError):
+            # The carbon carrier changed structure this step, so there is no
+            # matching value to revert to. Leave it rather than guess; the
+            # column is still reported held by the count below.
+            held_carbon = carbon_new
+
+    return held_state, held_response, held_carbon, bad, n_held
 
 
 def init_multilayer_land_state(

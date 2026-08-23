@@ -1,0 +1,51 @@
+# AMIP land overlay — v6/v7 DUAL-TARGET land calibration (2026-08-18).
+# v7 update: the multilayer bake gained per-PFT canopy snow masking
+# (snow_cover_scale) and the retuned tables (skin-T bias +0.16 K, LE +0.35
+# W/m2, NH albedo mean bias closed); the spin-up IC below is regenerated under
+# the v7 bake (same path).  The slab stays on its v6 bake (the v7 slab fit
+# traded a +0.074 global albedo bias for temperature — rejected).
+#
+# The v6 per-PFT tables (ERA5 latent heat + skin T + soil moisture, monthly-
+# bias-first; docs/land/land_dual_target_calibration_runbook.md) are BAKED into
+# clm_surface_map, so any run with use_multilayer_land picks them up with no
+# key here.  This overlay adds only what the bake cannot carry:
+#
+#   * the SPUN-UP land initial condition (results/land/land_spinup_v6/
+#     restart_1979_d000h00.npz — 5 years CRU-JRA 1974-1978 on the voronoi
+#     res-4 mesh under the v6 bake; run config/lmip/amip_mpas4_spinup.yaml to
+#     regenerate).  The restart loader refuses a column-count mismatch, so this
+#     IC is for the 2562-cell res-4 arms; re-run the spin-up for other meshes.
+#   * the soil-column geometry that MATCHES the spin-up driver's default
+#     (8 layers over 6.375 m, first layer 0.025 m — see the spin-up config's
+#     header for why these exact numbers).
+#
+# Usage — run_amip takes ONE --config, so for campaign runs keep the production
+# config and add the three flags on the CLI:
+#   python scripts/run/run_amip.py --config config/amip/amip_production.yaml \
+#       --land-ic results/land/land_spinup_v6/restart_1979_d000h00.npz \
+#       --multilayer-n-layers 8 --multilayer-soil-depth 6.375
+# This file carries the same values as a --config for land-focused runs, and as
+# the durable record of the v6 land setup.
+#
+# Slab-fallback arms need no overlay: the slab family (_TUNED_PFT_ALBEDO/WMAX/
+# EMISSIVITY + TUNED_CH/TUNED_SNOW_ALBEDO_MAX/TUNED_GLACIER_ALBEDO) is baked
+# too and --slab-land-active picks it up directly.
+#
+# NOTE on stomata: the v6 Farquhar conductance (Vc_max25/g1/LCMA) is calibrated
+# offline against monthly LE and baked, but coupled it stays TRIPLE-gated OFF:
+# reaching the Farquhar path needs land_stomatal_beta: true AND differland
+# carbon AND a prescribed carbon state, and AMIP initializes no such state —
+# so flipping land_stomatal_beta alone tests the JARVIS stomata, not the v6
+# tables (codex).  #741 found the pre-v6 conductance over-transpiring coupled,
+# and the offline-effective v6 g1 (~10) is ~35% stronger still (GLM predicts a
+# late-season LE collapse + hot bias if enabled naively): a coupled Farquhar
+# arm must wire the carbon state deliberately and run as a controlled A/B.
+# (No template_* keys here: run_amip's strict --config loader accepts only
+# argument dests.)
+
+use_multilayer_land: true
+multilayer_n_layers: 8
+multilayer_soil_depth: 6.375
+land_ic: results/land/land_spinup_v6/restart_1979_d000h00.npz
+land_stomatal_beta: false
+snow_albedo_feedback: true

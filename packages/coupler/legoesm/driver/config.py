@@ -225,14 +225,16 @@ class DycoreConfig(NamedTuple):
     # Appended last to preserve positional ABI.
     mpas_nu_vert4_T: float = 2.0e-6
     # Column-CONSERVING tracer positivity clamp in the MPAS floors stage.
-    # The default plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
+    # The plain ``max(q, 0)`` is NOT mass-neutral: with no limiter in
     # ``tracer_transport_mpas``, horizontal advection undershoot alone made it
     # invent +0.0822 kg/m2/day (+30 kg/m2/yr) of water on the AMIP century
     # (measured 2026-07-26, 96% from q_i/q_c), driving column water 23->42
     # kg/m2, OLR 199->109 W/m2 and +10 K/yr warming.  True borrows the clipped
     # deficit back from the positives (10.4x less spurious mass, measured).
-    # Default False keeps every existing MPAS result bit-identical.
-    mpas_conservative_tracer_clamp: bool = False
+    # Default TRUE since 2026-08-16 (owner decision: "conserving form
+    # always"); ``--no-mpas-conservative-tracer-clamp`` restores the legacy
+    # mass-creating clamp for bit-comparison against older runs.
+    mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
     # and the momentum/thermo ln p^SB gradients).  Default OFF — the
@@ -315,7 +317,7 @@ class EvaluationConfig(NamedTuple):
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
-    diag_days: int = 5
+    diag_days: float = 5.0   # diagnostic cadence [days]; sub-daily values are honoured (a NaN is reported at the first sample, so a coarse cadence only bounds it from above)
     checkpoint_days: int = 0
     monthly_means: bool = False
     cmip_output: bool = False
@@ -822,7 +824,17 @@ class ExperimentConfig(NamedTuple):
     # which holds land ET below potential and breaks the over-evaporation wet loop
     # that the SimpleSEB beta_soil path (=1 at field capacity, no canopy resistance)
     # produces. Only affects use_multilayer_land runs.
-    land_surface_scheme: str = "simple_seb"
+    # DEFAULT: the two-leaf canopy.  It reads per-PFT CANOPY parameters, which
+    # the driver now builds through the same routine the offline LMIP
+    # simulations use; a canopy run without that surfdata is refused rather than
+    # quietly given generic constants.
+    #
+    # "simple_seb" is ACADEMIC ONLY: measured on a well-watered column it
+    # evaporates at potential with stomata off, and with them on its humidity
+    # gradient SELF-EXTINGUISHES — the throttle warms the surface, saturation
+    # rises, the throttle shrinks it back, and evaporation stops (2 W/m2 over
+    # bare soil, surface 8-12 K hot).
+    land_surface_scheme: str = "two_leaf"
     # Initial multilayer soil water as a fraction of saturation (theta_init =
     # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
     # the init_multilayer_land_state default. The multilayer over-evaporation wet
@@ -831,6 +843,26 @@ class ExperimentConfig(NamedTuple):
     # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
     # use_multilayer_land runs.
     land_soil_moisture_init_frac: float = 0.5
+    # HOW the multilayer soil is seeded at a cold start.
+    #
+    #   "aridity" (default, unchanged) — from the initial atmosphere's
+    #       near-surface relative humidity, mapped into the plant-available
+    #       range: theta = theta_wp + RH*(theta_fc - theta_wp).  Arid columns
+    #       start near wilting, which is what stops a desert cold-start
+    #       evaporation runaway (#730).  NOTE this caps the start at FIELD
+    #       CAPACITY and makes ``land_soil_moisture_init_frac`` INERT — that
+    #       field was only ever a fallback for an initial state carrying no
+    #       humidity, which a real AMIP run never has (measured 2026-08-19: two
+    #       arms differing only in the fraction were byte-identical).
+    #
+    #   "saturation_fraction" — theta = land_soil_moisture_init_frac * theta_sat,
+    #       so the fraction becomes a real control and the soil can start ABOVE
+    #       field capacity, up to near saturation.  Use it to keep a run out of
+    #       the dry-soil attractor, where low soil water suppresses evaporation,
+    #       which dries the boundary layer, which suppresses evaporation further.
+    #       The trade is the runaway the aridity seed exists to prevent, so a
+    #       wet start wants watching over the first week rather than trusting.
+    land_soil_init: str = "aridity"
     # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
     # water (SWE) accumulates from snowfall and melts (degree-day), brightening
     # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
@@ -907,6 +939,22 @@ class ExperimentConfig(NamedTuple):
     use_multilayer_land: bool = False
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
+    # Run the multilayer land tile in EXACTLY the configuration its baked
+    # per-PFT tables were calibrated under (the single definition lives in
+    # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
+    # exchange, the SimpleSEB surface scheme, Farquhar stomata on a PRESCRIBED
+    # carbon state, and the calibration soil column (8 layers, 3 m, geometric
+    # growth 1.5).  Off (default) leaves every existing run's numerics
+    # unchanged.
+    #
+    # Without it the baked canopy conductance (Vc_max25/g1/LCMA) is INERT: the
+    # coupled tile took the no-stomata branch of ``compute_effective_beta``, so
+    # the tables were deployed under land physics they were never fitted to.
+    # Setting ``land_stomatal_beta`` alone does NOT fix that — with no carbon
+    # state the same dispatch falls to JARVIS, a different stomatal model.
+    # Validation below requires the overlapping config keys to already carry the
+    # calibration values, so nothing is silently overridden.
+    land_calibrated_physics: bool = False
     # CLM-ML only: derive each column's PFT from the surface map's DOMINANT PFT
     # (argmax of pft_fractions) instead of one pft_clm for all columns -> mixed-PFT
     # heterogeneous columns, compiled at O(#distinct structures) by the group-by-
@@ -1170,6 +1218,15 @@ class ExperimentConfig(NamedTuple):
     # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
+    # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
+    # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
+    # raising epsilon_deep dilutes the deep plume faster in dry air, so
+    # convection survives only where the column is already moist -> a narrower,
+    # wetter rain band. Both are scaled in-scheme by the IFS height/RH factors;
+    # these are the BASE rates. Defaults are the published IFS deep values and
+    # are byte-identical to the previous hard-coded behaviour.
+    bechtold_epsilon_deep: float = 1.75e-3   # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4     # BechtoldConfig.delta_deep [1/m]
     bechtold_dx_m: float = 0.0
     # IFS convective downdraft (cudlfsn+cuddrafn).  Default ON since
     # 2026-07-17 (RCE/AMIP A/B); mirrors BechtoldConfig.use_ifs_downdraft.
@@ -1220,6 +1277,11 @@ class ExperimentConfig(NamedTuple):
     # then throttled by the soil's own moisture state — the same
     # land_tile_beta_soil the coupled pipeline applies).  Requires
     # use_multilayer_land on the MPAS lane; default OFF = byte-identical.
+    # NOTE: this now publishes the land tile's SOLVED surface humidity AND its
+    # solved sensible/latent fluxes to the atmosphere, not merely a root-zone
+    # beta — the flux handoff replaced the humidity-only one after the latter was
+    # measured to deliver about a tenth of the solved flux.  With it off the mesh
+    # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
 
     # Held-Suarez forcing
@@ -1432,6 +1494,24 @@ class ExperimentConfig(NamedTuple):
     # stable-tail selector, not this floor.  Appended at the tuple END to
     # preserve the positional ABI.
     hb_kvf_min: float | None = None
+    # IFS deep entrainment/detrainment base rates (plume-mixing control):
+    # epsilon_deep up = more dilution, weaker and shallower plumes;
+    # delta_deep down = less condensate leaked to the anvil, more left in
+    # the plume to rain out.  Wired 2026-08-13; before this the deep
+    # entrainment rate could not be set from any MIP driver at all.
+    # APPENDED, not inserted beside the other bechtold_* fields: this is a
+    # NamedTuple, so a mid-struct insertion silently reassigns every later
+    # positional argument.
+    bechtold_epsilon_deep: float = 1.75e-3  # BechtoldConfig.epsilon_deep [1/m]
+    bechtold_delta_deep: float = 0.75e-4    # BechtoldConfig.delta_deep [1/m]
+    # Scale on the LAND branch of the diurnal-cycle CAPE subtraction. The IFS
+    # value assumes a ~10 km mesh; 1.0 reproduces it, 0.0 removes the land
+    # branch while leaving the ocean branch alone -- which the on/off flag
+    # cannot do, because it disables both.
+    bechtold_capdcycl_land_tau_scale: float = 1.0
+    bechtold_subcloud_evap_scale: float = 1.0
+    bechtold_rhebc_land: float = 0.75
+    bechtold_rhebc_land_deep: float = 0.70
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -1442,6 +1522,26 @@ class ExperimentConfig(NamedTuple):
         g = self.grid
         d = self.dycore
         errors: list[str] = []
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must ANNOUNCE itself when invoked. These are
+        # warnings, not errors — the legacy/exception paths stay selectable
+        # for bit-comparison and for the documented MSE-vs-water trade-off.
+        import logging as _logging
+        _wlog = _logging.getLogger(__name__)
+        if not d.mpas_conservative_tracer_clamp:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "mpas_conservative_tracer_clamp=False restores the plain "
+                "max(q, 0) tracer clamp, which CREATES mass at every "
+                "transport undershoot (+30 kg/m2/yr of water measured on "
+                "the AMIP century). Legacy bit-comparison mode only.")
+        if self.energy_consistent_moisture_clip:
+            _wlog.warning(
+                "NON-CONSERVING form selected: "
+                "energy_consistent_moisture_clip=True conserves "
+                "moist static energy but CREATES the clipped vapour "
+                "(water is NOT conserved by this floor) — the documented "
+                "exception to 'conserving form always'.")
         if g.resolution <= 0:
             errors.append(f"grid.resolution must be > 0, got {g.resolution}")
         if g.nlev <= 0:
@@ -1633,7 +1733,15 @@ class ExperimentConfig(NamedTuple):
             )
         for _f, _lo, _hi in (
             ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
+            ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
+            ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
+            ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
+            ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
+            ("bechtold_subcloud_evap_scale", 0.1, 4.0),
+            ("bechtold_rhebc_land", 0.5, 1.0),
+            ("bechtold_rhebc_land_deep", 0.5, 1.0),
             ("bechtold_downdraft_evap", 0.0, 0.5),
             ("bechtold_downdraft_alpha", 0.0, 0.9),
             ("bechtold_downdraft_rh_min", 0.0, 1.0),
@@ -1981,6 +2089,92 @@ class ExperimentConfig(NamedTuple):
                 "land-mask file has NO land (elevation-derived f_land is 0 "
                 "everywhere) — pass a real --topography or a --land-mask-file."
             )
+        # The same "no land anywhere" trap, on the MESH lane, which does not use
+        # surface_tiled and so never reached the check above: the flux handoff
+        # (and any calibrated canopy conductance riding it) would build no soil
+        # column at all and go silently inert.  A degenerate all-ocean MASK FILE
+        # cannot be seen from the config.  The driver checks that case too, but
+        # only fatally for a SINGLE-rank run: under a cell partition a rank
+        # legitimately owns no land, and the cross-rank vote that would settle it
+        # cannot be placed safely (it would sit downstream of per-rank setup that
+        # can raise, leaving peers blocked).  Counting land points in the mask
+        # file HERE, where the check is rank-symmetric, is the open follow-up.
+        if (self.mpas_land_beta_soil and not self.land_mask_path
+                and self.topography == "flat"):
+            errors.append(
+                "mpas_land_beta_soil with topography='flat' and no land-mask "
+                "file has NO land (elevation-derived f_land is 0 everywhere), so "
+                "no soil column is built and the land-flux handoff is silently "
+                "inert — pass a real --topography or a --land-mask-file."
+            )
+        # Deploying the baked land tables under the physics they were calibrated
+        # under.  The overlapping keys are CHECKED, not overridden, so a run can
+        # never believe it is on the calibrated model while one key disagrees;
+        # the settings with no config key (soil growth factor, carbon scheme,
+        # stomatal model) come from the shared calibrated_multilayer_setup().
+        if self.land_calibrated_physics:
+            from legoesm.land.config import calibrated_multilayer_setup
+            _cal = calibrated_multilayer_setup()
+            _grid = _cal["soil_grid"]
+            if not self.use_multilayer_land:
+                errors.append(
+                    "land_calibrated_physics=True requires use_multilayer_land=True: "
+                    "the calibrated tables are a MULTILAYER bake and the slab tile "
+                    "has no equivalent (its coupled implementation is the driver's "
+                    "own _step_slab_land, not the calibrated legoesm.land.slab_land "
+                    "model)."
+                )
+            _want = {
+                "land_stomatal_beta": (self.land_stomatal_beta, True),
+                "land_surface_scheme": (self.land_surface_scheme, "simple_seb"),
+                "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
+                "multilayer_soil_depth": (self.multilayer_soil_depth,
+                                          _grid.total_depth),
+                # gs_max only feeds the Jarvis model, which the calibrated setup
+                # does not select — but the setup replaces the whole stomatal
+                # config, so a value set here would vanish without a word.
+                "land_gs_max": (self.land_gs_max, _cal["stomata"].gs_max),
+                # The land setup forces this on, so `false` here would pass
+                # validation and then be silently reversed.
+                "snow_albedo_feedback": (self.snow_albedo_feedback,
+                                         _cal["snow_albedo_feedback"]),
+            }
+            for _key, (_got, _exp) in _want.items():
+                if _got != _exp:
+                    errors.append(
+                        f"land_calibrated_physics=True requires {_key}={_exp!r} "
+                        f"(the value the baked tables were fitted under); got "
+                        f"{_got!r}. Set it or drop land_calibrated_physics — "
+                        "these are not silently overridden."
+                    )
+            # ONLY THE UNSTRUCTURED (MESH) LANE CAN CARRY THIS TODAY, and the
+            # reason is specific: that lane hands the atmosphere the land tile's
+            # SOLVED sensible and latent fluxes, so the calibrated canopy
+            # conductance arrives as the number the land model computed.  Every
+            # other lane re-derives the land flux from a scaled saturation
+            # humidity, which cannot reproduce it — the land scheme applies its
+            # throttle to the humidity GRADIENT and bypasses it for snow and
+            # dew, so the re-derivation can reach the opposite SIGN, and the
+            # atmosphere's exchange coefficient uses a scalar roughness where
+            # the land uses a per-column tuned one.  Both reviewers refuted the
+            # humidity route independently (2026-08-19).  Extending the FLUX
+            # handoff to the structured lanes means carrying those fluxes at the
+            # radiation cadence through SegmentCarry; until then, refuse rather
+            # than deploy the tables under a coupling that cannot express them.
+            _is_mesh_lane = (d.discretization == "mpas"
+                             or normalize_grid_type(g.grid_type) == "mpas")
+            if not _is_mesh_lane:
+                errors.append(
+                    "land_calibrated_physics=True is supported only on the MPAS "
+                    f"(Voronoi) lane today; discretization={d.discretization!r} "
+                    "re-derives the land flux from a scaled saturation humidity "
+                    "instead of taking the land tile's solved flux, which cannot "
+                    "reproduce the calibrated canopy conductance (and can reach "
+                    "the wrong sign over snow and dew). Run the calibrated arm on "
+                    "the mesh lane. (There is no partial form: the soil growth "
+                    "factor and the carbon scheme this switch supplies have no "
+                    "config keys of their own.)"
+                )
         # Transient land-use cover re-weights the MULTILAYER land vegetation params
         # from a transient surfdata; without both signals it would silently no-op
         # (there is no slab-land transient-cover path).  Fail early rather than run
@@ -2082,6 +2276,40 @@ class ExperimentConfig(NamedTuple):
                     "humidity; turbulence='none' has no surface latent flux "
                     "to throttle — the knob would be silently inert."
                 )
+            if (self.land_calibrated_physics and self.use_multilayer_land
+                    and not self.mpas_land_beta_soil):
+                # Without this the mesh lane SOLVES the land tile's humidity
+                # and fluxes and then throws them away, keeping the static
+                # mpas_land_beta instead — so the fitted plant model would
+                # change the land tile's own temperature and nothing the
+                # atmosphere sees (codex round 3).  A calibrated run whose
+                # canopy conductance never reaches the atmosphere is the same
+                # inert-parameter defect the flag exists to remove.
+                errors.append(
+                    "land_calibrated_physics=True on the MPAS lane requires "
+                    "mpas_land_beta_soil=True: without it the lane discards the "
+                    "land tile's solved humidity and fluxes and keeps the static "
+                    "mpas_land_beta, so the calibrated canopy conductance would "
+                    "never reach the atmosphere."
+                )
+            if self.mpas_land_beta_soil and self.turbulence != "none":
+                # The land tile's SOLVED fluxes are handed to the turbulence
+                # kernel, and a kernel whose signature has no ``surface_flux``
+                # argument REFUSES them — at run time, after the job has started.
+                # Ask the same signature scan the runtime guard uses, so a run
+                # that could never couple the land fluxes fails at config time
+                # instead of hours in (codex round 5).
+                from legoesm.atmosphere.physics.turbulence.integration import (
+                    schemes_accepting_surface_flux,
+                )
+                _flux_ok = schemes_accepting_surface_flux()
+                if self.turbulence not in _flux_ok:
+                    errors.append(
+                        f"mpas_land_beta_soil=True hands the land tile's solved "
+                        f"surface fluxes to the turbulence scheme, but "
+                        f"{self.turbulence!r} takes no 'surface_flux' argument "
+                        f"and refuses them at run time. Use one of {_flux_ok}."
+                    )
             if self.mpas_land_beta_soil:
                 # Traced beta_soil needs the multilayer land producing it and
                 # the turbulence surface flux consuming it (inert-corner
@@ -2449,6 +2677,11 @@ class ExperimentConfig(NamedTuple):
                 f"in [1e4, 1e8]; got {self.C_land!r}."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
+        _soil_init_modes = ("aridity", "saturation_fraction")
+        if self.land_soil_init not in _soil_init_modes:
+            errors.append(
+                f"land_soil_init must be one of {_soil_init_modes}, got "
+                f"{self.land_soil_init!r}.")
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
                 f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "
@@ -3057,6 +3290,18 @@ class ExperimentConfig(NamedTuple):
             bechtold_use_ifs_inplume_precip=getattr(
                 amip_cfg, 'bechtold_use_ifs_inplume_precip', True),
             bechtold_dx_m=getattr(amip_cfg, 'bechtold_dx_m', 0.0),
+            bechtold_epsilon_deep=getattr(amip_cfg, 'bechtold_epsilon_deep', 1.75e-3),
+            bechtold_delta_deep=getattr(amip_cfg, 'bechtold_delta_deep', 0.75e-4),
+            bechtold_capdcycl_land_tau_scale=getattr(
+                amip_cfg, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            bechtold_subcloud_evap_scale=getattr(amip_cfg, 'bechtold_subcloud_evap_scale', 1.0),
+            bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
+            bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
+            bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
+            bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
+            bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
+            convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
+            convective_cloud=getattr(amip_cfg, 'convective_cloud', False),
             bechtold_use_ifs_downdraft=getattr(
                 amip_cfg, 'bechtold_use_ifs_downdraft', True),
             bechtold_use_ifs_shallow_closure=getattr(
@@ -3219,13 +3464,24 @@ class ExperimentConfig(NamedTuple):
             bechtold_downdraft_evap=self.bechtold_downdraft_evap,
             bechtold_downdraft_alpha=self.bechtold_downdraft_alpha,
             bechtold_downdraft_rh_min=self.bechtold_downdraft_rh_min,
-            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
-            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
-            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
             bechtold_use_ifs_cape_closure=self.bechtold_use_ifs_cape_closure,
             bechtold_use_ifs_subcloud_evap=self.bechtold_use_ifs_subcloud_evap,
             bechtold_use_ifs_inplume_precip=self.bechtold_use_ifs_inplume_precip,
             bechtold_dx_m=self.bechtold_dx_m,
+            bechtold_epsilon_deep=self.bechtold_epsilon_deep,
+            bechtold_delta_deep=self.bechtold_delta_deep,
+            bechtold_capdcycl_land_tau_scale=self.bechtold_capdcycl_land_tau_scale,
+            bechtold_subcloud_evap_scale=self.bechtold_subcloud_evap_scale,
+            bechtold_rhebc_land=self.bechtold_rhebc_land,
+            bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
+            bechtold_rprcon=self.bechtold_rprcon,
+            bechtold_dnoprc=self.bechtold_dnoprc,
+            bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
+            bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
+            bechtold_downdraft_transport=self.bechtold_downdraft_transport,
+            bechtold_subsidence_solve=self.bechtold_subsidence_solve,
+            convective_buoyancy_death_memory=self.convective_buoyancy_death_memory,
+            convective_cloud=self.convective_cloud,
             bechtold_use_ifs_downdraft=self.bechtold_use_ifs_downdraft,
             bechtold_use_ifs_shallow_closure=self.bechtold_use_ifs_shallow_closure,
             bechtold_use_ifs_capdcycl=self.bechtold_use_ifs_capdcycl,

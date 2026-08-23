@@ -256,7 +256,17 @@ def _one_step(arm, st, br, cfg, model, forcing, kt, t_seconds,
     """
     from legoesm.ocean.experiments.dino import (
         apply_dino_lat_lon_surface_forcing,
+        dino_step_surface_forcing,
     )
+
+    # #1455 retraction fix: the card routes the WIND MOMENTUM through
+    # model.step(surface_forcing=sf) (run_dino.py:665-670,763-767); the
+    # applicator SKIPS its eq-7 wind when wind_through_step=True
+    # (dino.py:3756), so surface_forcing=None dropped the wind entirely.
+    # EVERY recorded arm/ratio of this probe (avt_k/avm_k exonerations,
+    # A/B placement ratios, the 0.16 K/step base) was measured WIND-OFF.
+    _wind = bool(getattr(cfg, "wind_through_step", False))
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
 
     _INJECT["K"] = None
     _INJECT["evd_keep"] = arm != "B_all"
@@ -280,12 +290,12 @@ def _one_step(arm, st, br, cfg, model, forcing, kt, t_seconds,
         elif arm == "A_nemo_now":
             rate = nemo_rate["now"]
         # null_rate / A_lf: legoESM's own rate, pushed through the same slot.
-        st = model.step(st, DT, surface_forcing=None,
+        st = model.step(st, DT, surface_forcing=sf_step,
                         external_tracer_rate=rate)
     else:
         st = apply_dino_lat_lon_surface_forcing(
             st, forcing, br.z_coord, cfg_arm, DT, t_seconds=t_seconds)
-        st = model.step(st, DT, surface_forcing=None,
+        st = model.step(st, DT, surface_forcing=sf_step,
                         external_tracer_rate=None)
     _INJECT["K"] = None
     return st
@@ -336,6 +346,22 @@ def main(argv: list[str]) -> int:
                 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
                 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
                 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+                # FORCING state, adjacent to the day-0 gate (printed by
+                # build_replay_ic just above): _one_step passes sf iff
+                # wind_through_step (#1455 retraction fix).
+                _wind = bool(getattr(cfg, "wind_through_step", False))
+                if _wind:
+                    from legoesm.ocean.experiments.dino import (
+                        dino_step_surface_forcing)
+                    _sf = dino_step_surface_forcing(forcing)
+                    _tlo = float(np.min(np.asarray(_sf.tau_x)))
+                    _thi = float(np.max(np.asarray(_sf.tau_x)))
+                else:
+                    _tlo = _thi = 0.0
+                print(f"  FORCING: wind_through_step={_wind} "
+                      f"surface_stress_implicit="
+                      f"{getattr(cfg, 'surface_stress_implicit', None)} "
+                      f"tau_x[Pa] range=[{_tlo:.4f},{_thi:.4f}]", flush=True)
                 zc = br.z_coord
                 for f in ("t_depth_ref", "dz_ref", "z_full_ref", "z_half_ref"):
                     if hasattr(zc, f):

@@ -99,7 +99,10 @@ def test_gm_treguier_threads_the_kappa_min_floor():
     assert cfg.gm_kappa_min == 0.0          # oracle default = raw NEMO
     mc = nemo_match_tripole_model_config(cfg)
     assert mc.gm_redi.treguier.enabled is True
-    assert mc.gm_redi.treguier.aei0 == pytest.approx(1800.0)
+    # 900 = 1/2*rn_Ue*rn_Le (laplacian prefactor, ldftra.F90:290-293); NEMO's
+    # emitted aeiu_2d maxes at exactly 900 on eORCA1.  The old 1800 here
+    # encoded the bilaplacian prefactor, which NEMO rejects for EIV.
+    assert mc.gm_redi.treguier.aei0 == pytest.approx(900.0)
     assert mc.gm_redi.treguier.kappa_min == 0.0
     # Visbeck stays off (mutually exclusive), Redi/S_max untouched
     assert mc.gm_redi.visbeck.enabled is False

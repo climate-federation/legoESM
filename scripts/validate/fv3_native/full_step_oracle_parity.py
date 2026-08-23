@@ -924,7 +924,7 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
-def _make_jax_step(ctx):
+def _make_jax_step(ctx, jit=False):
     """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
 
     The scoring below is ~400 lines that read six per-face NumPy dicts
@@ -951,6 +951,7 @@ def _make_jax_step(ctx):
     from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
 
     jctx = build_jax_duo_stepper_context(ctx)
+    _cache: dict = {}
 
     def _stack(per_face, key=None):
         # jnp, not np: the module indexes these with `.at[...]`, which a
@@ -973,7 +974,21 @@ def _make_jax_step(ctx):
         jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
                                       for t in range(6)]))
               for iq in range(_nq)]
-        out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+        if jit:
+            # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
+            # through the COMPILED builder, and compilation is not neutral
+            # here -- fused multiply-adds and reassociation can flip an
+            # upwind selector bit, which is the class of difference this
+            # port already had to unroll a scan to remove. Scoring the eager
+            # function therefore scored a lane nobody deploys.
+            _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
+            if "fn" not in _cache:
+                _static = dict(kw)
+                _cache["fn"] = _jdyn.make_fv_dynamics_step_jit(
+                    jctx, _static.pop("km"), **_static)
+            out = _cache["fn"](jstate, jpress, jq, **_dyn)
+        else:
+            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
 
         # Write back IN PLACE -- see the docstring.
         st = out["state"] if "state" in out else out
@@ -1030,7 +1045,7 @@ def main(argv=None):
                          "carry EXTENDED-lattice metrics instead of the "
                          "kinked builder's. fv_grid_tools.F90:749-835 "
                          "shows the duo oracle builds its model grid "
-                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "FROM dg%%b_pt with every mpp/fill_corners/"
                          "get_symmetry step skipped -- so the extended "
                          "lattice is the FAITHFUL halo geometry and the "
                          "kinked one is the port's residual suspect. "
@@ -1111,7 +1126,17 @@ def main(argv=None):
                          "byte-identical between the two backends, which "
                          "is the whole point (a JAX-specific harness would "
                          "make any difference unattributable).")
+    ap.add_argument("--jit", action="store_true",
+                    help="run the COMPILED step, which is the one the model "
+                         "deploys. Off by default so the established score "
+                         "keeps its meaning; a parity claim about the "
+                         "shipped solver has to be measured with this ON, "
+                         "because compilation can reassociate arithmetic and "
+                         "flip a limiter branch. Ignored unless "
+                         "--backend jax.")
     args = ap.parse_args(argv)
+    if args.jit and args.backend != "jax":
+        raise SystemExit("--jit applies to --backend jax only")
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
     if args.n_steps != 1 and args.step_run in (
@@ -1561,7 +1586,7 @@ def main(argv=None):
     # (pt round-trips K -> theta_v -> K inside each call).
     step_fn = fv_dynamics_step
     if args.backend == "jax":
-        step_fn = _make_jax_step(ctx)
+        step_fn = _make_jax_step(ctx, jit=args.jit)
     for _step in range(args.n_steps):
         out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
                       k_split=args.k_split, n_split=args.n_split,

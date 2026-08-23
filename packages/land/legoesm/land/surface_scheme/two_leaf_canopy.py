@@ -170,10 +170,20 @@ def advance_TgC_ema(
 
 
 def _get(lp, name: str, fallback):
-    """Read from per-column params if available; else return fallback."""
+    """Read from per-column params if available; else return fallback.
+
+    ``None``-valued fields count as absent: LandSurfaceParams declares every
+    optional field with a ``None`` default, so ``getattr`` finds the attribute
+    and hands back the ``None`` — which then detonates arithmetic ("float -
+    NoneType") the first time a setup runs that never populated the field. The
+    LAI read below had grown its own local guard for exactly this; the AMIP
+    two-leaf run on the Voronoi mesh then hit the same trap on ``fC4``. One
+    guard here covers every field the same way.
+    """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    got = getattr(lp, name, None)
+    return fallback if got is None else got
 
 
 def compute_two_leaf_canopy_fluxes(
@@ -441,7 +451,8 @@ def compute_two_leaf_canopy_fluxes(
 
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
+        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
+            initial_state, bundles_k)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -591,6 +602,11 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
+        # Whether the Newton closure actually reached a root on this column.
+        # False means the fluxes above are a stopped iterate, not a solution —
+        # the caller decides what to do with the column; it must not simply
+        # spend them.  Carried from the LAST Picard pass.
+        converged=converged,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

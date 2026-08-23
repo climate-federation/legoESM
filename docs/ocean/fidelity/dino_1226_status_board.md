@@ -93,11 +93,21 @@ diagnostics hook — NEMO dumps already exist), `lbc_lnk` sign convention,
 - **`zdf_mxl_turb`** — no legoESM equivalent. NEMO's `hmld` turbocline is
   diagnostic-only and never feeds dynamics, so this is waivable, but it is a
   genuine missing term.
-- **legoESM is UNSTABLE on NEMO's true vertical grid.** `LEGOESM_NEMO_E3T`
-  defaults to the *wrong* 1-D ladder because `both` blows runs up
-  (max\|u\| 0.66 → 3 m/s). That default has contaminated three measurements.
-  This is arguably the most important open defect: we cannot run faithfully on
-  the oracle's own geometry.
+- **~~legoESM is UNSTABLE on NEMO's true vertical grid.~~ RETRACTED 2026-08-21
+  (#1455) — the instability did not reproduce.** Four 90-day twin arms from the
+  day-180 NEMO restart, differing only in `LEGOESM_NEMO_E3T` and bit-identical
+  at day 0, all ran stable to day 90 at 0.633–0.635 m/s peak speed; the two end
+  arms were re-confirmed under an fp64 precision policy. Nothing approached the
+  recorded 0.66 → 3 m/s. That is a non-reproduction under one configuration, not
+  a proof it was never true, so this is now an *unexplained recorded
+  observation* rather than "the most important open defect".
+  What the same measurement DID establish is the cost of the wrong ladder:
+  day-90 circumpolar transport error +2.93 Sv on the 1-D ladder against
+  +0.29 Sv on NEMO's own, and full-section ACC error +1.87 Sv against −0.60 Sv.
+  The DINO twin harness now defaults to NEMO's own ladders; the model-wide
+  bridge default is unchanged. An inherited default has contaminated **four**
+  measurements (this line previously said three), which is why every fidelity
+  probe must still set the variable explicitly.
 
 ## 4. THE CLIMATE QUESTION — the target is the RATE, not an offset
 

@@ -1554,9 +1554,19 @@ def morrison_microphysics(
     _ci_psd = jnp.pi * config.rho_cloud_ice
     n_i_hi = config.lami_max ** 3 * q_i_new / _ci_psd
     n_i_lo = config.lami_min ** 3 * q_i_new / _ci_psd
-    n_i_new = jnp.clip(jnp.clip(N_i, 0.0) + dN_i_dt * dt, n_i_lo, n_i_hi)
+    _n_i_post = jnp.clip(N_i, 0.0) + dN_i_dt * dt
+    n_i_new = jnp.clip(_n_i_post, n_i_lo, n_i_hi)
     n_i_new = jnp.where(q_i_new > 1.0e-14, n_i_new, 0.0)
-    dN_i_dt = (n_i_new - jnp.clip(N_i, 0.0)) / jnp.maximum(dt, 1.0e-10)
+    # Recompute the rate ONLY where a bound or the clearing actually moved the
+    # number, the way the rain branch above already does. Without the guard the
+    # rate was back-solved in EVERY cell, and that round trip is not the
+    # identity in single precision: measured, a cell carrying 1e18 per cubic
+    # metre has its rate returned 4.0e8 different, so a cell nothing touched
+    # was having the scheme's own computed tendency replaced by a noisier
+    # reconstruction of itself, every step.
+    dN_i_dt = jnp.where(
+        n_i_new == _n_i_post, dN_i_dt,
+        (n_i_new - jnp.clip(N_i, 0.0)) / jnp.maximum(dt, 1.0e-10))
 
     # Snow NUMBER budget (double-moment snow). Number is CONSERVED across the
     # phase changes: the ice→snow autoconversion that removes dN_i_autoconv

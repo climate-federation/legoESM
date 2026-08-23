@@ -42,9 +42,17 @@ def _as_driver(ns):
     (shared with the multi-rank gather path).
     """
     import functools
+
     from legoesm.driver.model_driver import ModelDriver
     ns._mpas_cmip_native_kwargs = functools.partial(
         ModelDriver._mpas_cmip_native_kwargs, ns)
+    if not hasattr(ns, "sigma"):
+        # The helper publishes `wap` by closing continuity, which needs the
+        # run's vertical coordinate. A stub without one would silently drop
+        # every field, so give it the same coordinate the collector was built
+        # on rather than letting the helper degrade quietly.
+        from legoesm.grids.vertical import create_sigma_coordinate
+        ns.sigma = create_sigma_coordinate(NLEV)
     return ns
 
 
@@ -877,3 +885,59 @@ def test_override_is_agreed_across_ranks_not_read_per_rank(monkeypatch):
     mpi.COMM_WORLD = types.SimpleNamespace(bcast=lambda obj, root=0: True)
     ModelDriver._require_mpas_cmip_feed_supported(
         drv, feed_on=False, wants_cmip=True)
+
+
+def test_wap_is_published_and_closes_continuity(mesh):
+    """`wap` reaches the CMOR accumulator, and its global mean is ~0.
+
+    A pressure vertical velocity built by integrating continuity must have
+    zero area-weighted global mean at every level, by construction. That is
+    exactly the check the diagnostic this replaces FAILED: estimating omega
+    downstream from monthly-mean regridded winds gave a global mean of
+    -6 hPa/day and amplitudes ~30x ERA5. A test that only asserted the field
+    exists would not have caught that, so this asserts the invariant.
+    """
+    import types
+
+    import numpy as np
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    dc, sigma_full, _ = _make_collector(mesh)
+    f = _synthetic_cell_fields(mesh, sigma_full)
+
+    def _field(a):
+        return types.SimpleNamespace(data=np.asarray(a))
+
+    fake = types.SimpleNamespace(
+        diagnostics=dc,
+        grid=mesh,
+        config=types.SimpleNamespace(T_ice=271.4),
+        get_sst_sic=lambda day: (f["T"][:, -1], np.zeros(int(mesh.nCells))),
+        state=types.SimpleNamespace(
+            u=_field(f["u_edge"]), T=_field(f["T"]), p_s=_field(f["p_s"]),
+            phis=_field(f["phis"]), tracers={"q_v": _field(f["q_v"])},
+        ),
+        model=types.SimpleNamespace(_sfc_diag=(None, None, _field(f["precip"]))),
+    )
+    _as_driver(fake)
+
+    kw = fake._mpas_cmip_native_kwargs(15.0, dc)
+    wap = kw["wap"]
+    assert wap is not None, "the helper published no wap"
+    wap = np.asarray(wap)
+    assert wap.shape == (int(mesh.nCells), NLEV), wap.shape
+    assert np.isfinite(wap).all()
+
+    # Continuity closure on the native mesh, area weighted by cell area.
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    gm = (wap * area[:, None]).sum(axis=0) / area.sum()
+    scale = np.abs(wap).mean()
+    assert scale > 0.0, "wap is identically zero -- the wind field did not reach it"
+    assert np.max(np.abs(gm)) < 1e-3 * scale, (
+        f"wap does not close: worst level mean {np.max(np.abs(gm)):.3e} "
+        f"against a typical magnitude of {scale:.3e}")
+
+    ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+    out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+    assert "field_3d_wap" in out, sorted(k for k in out if k.startswith("field_3d"))

@@ -16,6 +16,8 @@ import numpy as np
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.ocean.constants_config import ConstantsConfig
+from legoesm.ocean.state import physics_with_constants
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
@@ -157,6 +159,39 @@ class MPASOceanModel:
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
 
+        # ONE MODEL, ONE SET OF CONSTANTS. This configuration carries its own
+        # gravity and reference density, and its physics pipeline carries a
+        # second set. Nothing reconciled them, so a card pinning the model's
+        # gravity left every mixing and convection path on the library's --
+        # the two halves of one model on different planets, and silently.
+        #
+        # The lat-lon model has refused that since it was found there, and
+        # this delegates to the SAME routing helper rather than re-deriving
+        # the rule. That matters for the case a first version of this check
+        # got wrong: a physics pipeline still PROVABLY on the library
+        # defaults is not a pin, it is an absence, and it must INHERIT the
+        # model's values rather than be rejected as a conflict. Rejecting it
+        # broke a real card -- an unstructured configuration pinning its
+        # reference density beside an untouched physics block -- before its
+        # first step.
+        #
+        # Traced constants stay undecidable and are left alone; that is why
+        # the helper asks for a proven difference rather than using ``!=``.
+        _model_cc = ConstantsConfig(g=self.config.g, rho_0=self.config.rho_0)
+        _phys = getattr(self.config, "physics", None)
+        if _phys is not None:
+            _routed = physics_with_constants(_phys, _model_cc)
+            if _routed is not _phys:
+                self.config = self.config._replace(physics=_routed)
+            # The pipeline's own pair is authoritative once routed: it carries
+            # every constant, including the ones the model configuration has
+            # no field for, so rebuilding a pair from gravity and density
+            # alone would drop a pinned specific heat.
+            _cc = getattr(self.config.physics, "constants", None)
+            self._constants_config = _cc if _cc is not None else _model_cc
+        else:
+            self._constants_config = _model_cc
+
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:
             raise ValueError(
@@ -281,7 +316,8 @@ class MPASOceanModel:
                     make_kpp_profiles_mpas,
                 )
                 self._kpp_profiles_fn = make_kpp_profiles_mpas(
-                    _vm_cfg, eos_fn=self._eos_fn)
+                    _vm_cfg, eos_fn=self._eos_fn,
+                    constants_config=self._constants_config)
 
         # Build TKE profile function for the implicit vertical mixing path.
         # Like KPP, TKE returns raw (A_v, K_v) cell profiles that feed the
@@ -301,12 +337,16 @@ class MPASOceanModel:
                     make_tke_profiles_mpas,
                 )
                 self._tke_profiles_fn = make_tke_profiles_mpas(
-                    _vm_cfg_tke, eos_fn=self._eos_fn)
+                    _vm_cfg_tke, eos_fn=self._eos_fn,
+                    constants_config=self._constants_config)
                 self._tke_prognostic = bool(
                     getattr(_vm_cfg_tke.tke, "prognostic", False))
 
         # Cache convection config for implicit vertical mixing path.
         self._conv_config = None
+        # The run's own constants, for the convective-adjustment density below.
+        # Read from the physics config the model was built with rather than
+        # left to the library default, which the comparison cards do not use.
         if self.config.implicit_vertical_mixing and self.config.physics is not None:
             _conv_cfg = getattr(self.config.physics, "convection", None)
             if _conv_cfg is not None and _conv_cfg.scheme == "enhanced_diffusion":
@@ -562,7 +602,9 @@ class MPASOceanModel:
                 )
                 _J_conv = jnp.where(mask > 0.5, _J_conv, 1.0)
                 _rho_conv = compute_ocean_rho(
-                    state, z_coord, _J_conv, eos_fn=self._eos_fn)
+                    state, z_coord, _J_conv, eos_fn=self._eos_fn,
+                    g=self._constants_config.g,
+                    rho0=self._constants_config.rho_0)
                 # Density difference at half-levels: drho > 0 ⇒ unstable
                 # (denser water sits above lighter water).
                 _drho = _rho_conv[:, :-1] - _rho_conv[:, 1:]  # (nCells, nlev-1)
@@ -784,9 +826,20 @@ class MPASOceanModel:
                     refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
                 ocean_area = jnp.sum(area * mask)
-                F_mean = jnp.sum(F_slow_eta * area) / jnp.maximum(
+                # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
+                # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
+                # a forcing-dataset artifact; SSS restoring is not part of it,
+                # and NEMO never normalizes its `erp`.  Normalizing the full
+                # net would subtract the restoring's own global mean from every
+                # cell -- a spurious uniform water flux AND a globally weakened
+                # restoring, both silent.
+                _fw_rest = getattr(freshwater, "restoring", None)
+                _F_rest = (0.0 if _fw_rest is None
+                           else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
+                _F_phys = F_slow_eta - _F_rest
+                F_mean = jnp.sum(_F_phys * area) / jnp.maximum(
                     ocean_area, 1e-10)
-                F_slow_eta = (F_slow_eta - F_mean * mask)
+                F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
 

@@ -388,3 +388,142 @@ def test_heat_discriminator_import_is_side_effect_free(instruments):
     heat_discriminator = instruments.heat_discriminator
     assert callable(heat_discriminator.main)
     assert callable(heat_discriminator.run_discriminator)
+
+
+# =====================================================================
+# kamm_twin_90d: the #1455 seasonal clock (absolute by DEFAULT)
+# =====================================================================
+
+def _write_restart_stub(path, adatrj, kt):
+    """Minimal NEMO-restart stub carrying only what the clock reader needs."""
+    nc = pytest.importorskip("netCDF4")
+    with nc.Dataset(path, "w") as d:
+        d.createDimension("t", 1)
+        for name, val in (("adatrj", adatrj), ("kt", kt)):
+            v = d.createVariable(name, "f8", ("t",))
+            v[:] = val
+
+
+def test_seasonal_clock_defaults_to_the_restarts_own_day_of_year(
+        instruments, tmp_path, monkeypatch, capsys):
+    """DEFAULT (env unset) must be NEMO's clock, read from ``adatrj``.
+
+    This is the #1455 fix: before it, the default was 0 and a twin bridged
+    from the day-180 restart ran exactly antiphase to the NEMO run it scored
+    against.
+    """
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.delenv("DINO_TWIN_SEASONAL_KT0", raising=False)
+    p = tmp_path / "DINO_00005760_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=5760.0)
+
+    t0 = kamm_twin_90d.seasonal_t0_seconds(str(p))
+
+    assert t0 == pytest.approx(180.0 * 86400.0)
+    assert "restart adatrj" in capsys.readouterr().out
+
+
+def test_seasonal_clock_legacy_relative_is_opt_in_and_shouts(
+        instruments, tmp_path, monkeypatch, capsys):
+    """The old relative clock must still be reachable, and must be loud."""
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.setenv("DINO_TWIN_SEASONAL_KT0", "0")
+    p = tmp_path / "DINO_00005760_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=5760.0)
+
+    assert kamm_twin_90d.seasonal_t0_seconds(str(p)) == 0.0
+    assert "LEGACY RELATIVE CLOCK" in capsys.readouterr().out
+
+
+def test_seasonal_clock_rejects_a_restart_written_at_another_timestep(
+        instruments, tmp_path, monkeypatch):
+    """``adatrj`` and ``kt*DT`` must agree, or the offset is not trustworthy."""
+    kamm_twin_90d = instruments.kamm_twin_90d
+    monkeypatch.delenv("DINO_TWIN_SEASONAL_KT0", raising=False)
+    p = tmp_path / "bad_restart.nc"
+    _write_restart_stub(p, adatrj=180.0, kt=99.0)   # 99 * 2700 s != 180 days
+    with pytest.raises(SystemExit, match="different timestep"):
+        kamm_twin_90d.seasonal_t0_seconds(str(p))
+
+
+def test_run_twin_threads_the_absolute_clock_into_the_forcing(instruments):
+    """The run loop must ADD the offset, not restart the seasonal year.
+
+    Source-level check keyed off the symbol that actually runs (``run_twin``),
+    and it fails if the ``t0_sec +`` term is dropped from either placement
+    branch.
+    """
+    import inspect
+    import re
+    kamm_twin_90d = instruments.kamm_twin_90d
+    src = inspect.getsource(kamm_twin_90d.run_twin)
+    # The regression is the RELATIVE form reappearing; assert its absence
+    # rather than an exact spelling of the fixed form, so an innocuous
+    # reformat (or hoisting the expression into a local) does not go red.
+    assert not re.search(r"t_seconds\s*=\s*\(\s*k\s*\+\s*1\s*\)\s*\*\s*DT", src)
+    assert "seasonal_t0_seconds(" in src
+    assert src.count("t0_sec") >= 3
+
+
+# ---------------------------------------------------------------------------
+# the seasonal-clock guard every scorer shares
+# ---------------------------------------------------------------------------
+def test_clock_guard_accepts_the_restarts_own_day_of_year(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    day180 = 180.0 * 86400.0
+    stamped = {"seasonal_t0_seconds": day180,
+               "seasonal_t0_reference_seconds": day180}
+    assert kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "ok.npz") == (
+        day180, day180)
+
+
+def test_clock_guard_rejects_a_nonzero_offset_the_old_test_let_through(
+        instruments):
+    """The defect the pair-check fixes.
+
+    The first guard rejected only ``t0 == 0``.  An explicit step offset of one
+    stamps 2700 s -- still 179.97 days out of phase with the day-180 restart --
+    and passed, so the gate reported a NEMO comparison for a run forced in the
+    opposite season.  A ``t0 != 0`` test cannot fail on this input; the
+    pair-check must.
+    """
+    kamm_twin_90d = instruments.kamm_twin_90d
+    stamped = {"seasonal_t0_seconds": 2700.0,              # kt0 = 1
+               "seasonal_t0_reference_seconds": 180.0 * 86400.0}
+    assert stamped["seasonal_t0_seconds"] != 0.0           # old guard: passes
+    with pytest.raises(SystemExit, match="out of phase"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "kt0_1.npz")
+
+
+def test_clock_guard_still_rejects_the_legacy_relative_clock(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    stamped = {"seasonal_t0_seconds": 0.0,
+               "seasonal_t0_reference_seconds": 180.0 * 86400.0}
+    with pytest.raises(SystemExit, match="out of phase"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "legacy.npz")
+
+
+def test_clock_guard_rejects_an_artifact_missing_either_stamp(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match="seasonal_t0_seconds"):
+        kamm_twin_90d.assert_nemo_seasonal_clock({}, "old.npz")
+    with pytest.raises(SystemExit, match="seasonal_t0_reference_seconds"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(
+            {"seasonal_t0_seconds": 0.0}, "half.npz")
+
+
+def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
+        instruments):
+    """Both stamps the guards read must be written by the runner.
+
+    Source-level, keyed off ``run_twin`` itself -- the symbol that runs -- and
+    it goes red if either stamp is dropped from the artifact.
+    """
+    import inspect
+    kamm_twin_90d = instruments.kamm_twin_90d
+    src = inspect.getsource(kamm_twin_90d.run_twin)
+    assert "seasonal_t0_reference_seconds=" in src
+    assert "run_config=" in src
+    # the reference must come from the restart, not from the same override the
+    # twin itself used -- otherwise the pair-check compares a value to itself
+    assert "_restart_elapsed_seconds(" in src

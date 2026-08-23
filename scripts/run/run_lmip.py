@@ -411,8 +411,16 @@ def _save_restart(
     day: float,
     state,
     carbon_state=None,
+    soil_frozen_fraction=None,
 ) -> None:
-    """Save a restart checkpoint as .npz."""
+    """Save a restart checkpoint as .npz.
+
+    ``soil_frozen_fraction`` (the permafrost phi that came with a ``--carbon-ic``
+    seed) round-trips too: it is not part of the land state, so without it a
+    restart would silently resume UNPROTECTED and the seeded high-latitude SOM
+    would decay away — the seed would hold for the first leg of a run and quietly
+    stop holding after the first restart.
+    """
     payload = {
         "step": np.array(step, dtype=np.int64),
         "day": np.array(day, dtype=np.float64),
@@ -437,6 +445,8 @@ def _save_restart(
             payload[f"carbon_{field}"] = np.asarray(
                 getattr(carbon_state, field)
             )
+    if soil_frozen_fraction is not None:
+        payload["soil_frozen_fraction"] = np.asarray(soil_frozen_fraction)
     np.savez_compressed(str(restart_path), **payload)
 
 
@@ -495,7 +505,12 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
             carbon_state = init_carbon_state(
                 tuple(state.T_soil.shape[:-1]), config.carbon
             )
-    return state, carbon_state, start_step, start_day
+    # The permafrost phi of a --carbon-ic seed, if this restart carries one.
+    # None (a restart written before this field existed, or an unseeded run) =
+    # unprotected, i.e. exactly the previous behaviour.
+    soil_frozen_fraction = (jnp.asarray(data["soil_frozen_fraction"])
+                            if "soil_frozen_fraction" in data else None)
+    return state, carbon_state, start_step, start_day, soil_frozen_fraction
 
 
 # ===========================================================================
@@ -504,7 +519,8 @@ def _load_restart(restart_path: Path, config: MultiLayerLandConfig):
 
 def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
                                 lat_jnp, dt, start_doy, precip_rate,
-                                clm_ml_grid_info=None):
+                                clm_ml_grid_info=None,
+                                soil_frozen_fraction=None):
     """Finish a land-carbon spin-up with the semi-analytic soil-C equilibrium.
 
     A single soil-C pool (~68-270-yr turnover) needs millennia to equilibrate
@@ -536,10 +552,15 @@ def semi_analytic_carbon_spinup(state, carbon_state, config, lat_rad, lon_rad,
         new_state, _resp, carbon_new = step_multilayer_land(
             state, forcing, config, U_MIN, dt,
             lat=lat_jnp, carbon_state=carbon, doy=doy,
-            clm_ml_grid_info=grid_info)
+            clm_ml_grid_info=grid_info,
+            soil_frozen_fraction=soil_frozen_fraction)
+        # The analytic SOM reset is built from THESE diagnostics, so the
+        # protection must be applied on both sides or the reset would target an
+        # unprotected equilibrium and undo the seed.
         diag = reconstruct_carbon_diagnostics(
             new_state, forcing, carbon, config, root_frac, config.theta_wp,
-            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False)
+            config.theta_fc, config.beta_min, lat_jnp, doy, dt, spatial=False,
+            soil_frozen_fraction=soil_frozen_fraction)
         return new_state, carbon_new, diag
 
     # CLM-ML needs a concrete GridInfo threaded into the jit (same warm-start
@@ -645,7 +666,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--bulk-scheme", default="most",
                    choices=["constant", "most"],
                    help="Bulk flux scheme")
-    p.add_argument("--land-surface-scheme", default="simple_seb",
+    p.add_argument("--land-surface-scheme", default="two_leaf",
                    choices=["simple_seb", "two_leaf", "clm_ml"],
                    dest="land_surface_scheme",
                    help="Surface energy-balance scheme. 'simple_seb' (default) = "
@@ -698,6 +719,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--carbon-scheme", default="none",
                    choices=_VALID_CARBON_SCHEMES,
                    help="Land carbon cycle scheme")
+    p.add_argument("--carbon-ic", dest="carbon_ic", type=str, default="",
+                   help="Initialise the carbon pools from a GLOBAL carbon "
+                        "finidat (global_carbon_ic.npz from "
+                        "scripts/data/build_global_carbon_ic.py, or the prebuilt "
+                        "land-carbon-ic-v1 release) instead of cold-starting "
+                        "them, so the run starts near a spun-up state rather "
+                        "than centuries away from one.  The nearest LAND cell to "
+                        "--lat/--lon is used: the pools are per-area densities "
+                        "[gC/m2], so no regridding is involved.  This is a "
+                        "nearest-cell initialisation, NOT an equilibrium of this "
+                        "site -- the cell is a PFT mixture under its own "
+                        "grid-mean climate, so expect some drift (mismatches are "
+                        "warned about at startup).  Requires --carbon-scheme "
+                        "differland; ignored when resuming from a --restart-from "
+                        "that already carries carbon pools.  See "
+                        "docs/land/global_carbon_ic_spinup.md.")
     p.add_argument("--carbon-woody",
                    action=argparse.BooleanOptionalAction,
                    default=CarbonConfig().woody,
@@ -825,9 +862,14 @@ def main() -> None:
         n_total_steps = steps_per_day * args.days
 
     # --- Initialise state ---
+    # Per-cell permafrost/anaerobic SOM protection.  None = unprotected (the
+    # historical behaviour, bit-identical); a --carbon-ic seed sets it below to
+    # the SAME phi the spin-up used, so the seeded high-latitude SOC is held by
+    # the same protection that produced it instead of decaying away.
+    carbon_phi = None
     if args.restart_from is not None:
         print(f"Loading restart from {args.restart_from}")
-        state, carbon_state, start_step, start_day_abs = _load_restart(
+        state, carbon_state, start_step, start_day_abs, carbon_phi = _load_restart(
             Path(args.restart_from), config
         )
         print(f"  Resumed at step {start_step}, day {start_day_abs:.2f}")
@@ -850,6 +892,55 @@ def main() -> None:
             if config.carbon.scheme == "differland"
             else None
         )
+        # --- optional: start AT the spun-up equilibrium instead of cold ---------
+        # Only on a cold start; a --restart-from that carries carbon pools has
+        # already set carbon_state above and must not be overwritten.
+        carbon_ic = getattr(args, "carbon_ic", "")
+        if carbon_ic:
+            if config.carbon.scheme != "differland":
+                raise SystemExit(
+                    f"--carbon-ic {carbon_ic!r} needs --carbon-scheme differland "
+                    f"(got {config.carbon.scheme!r}); there are no carbon pools "
+                    "to seed otherwise.")
+            from legoesm.land.carbon.global_init import (
+                load_finidat_carbon_ic_at_point)
+            carbon_state, carbon_phi, _match = load_finidat_carbon_ic_at_point(
+                carbon_ic, args.lat, args.lon)
+            print(f"  carbon IC: seeded from {carbon_ic} cell {_match.index} "
+                  f"({_match.lat_deg:.3f}, {_match.lon_deg:.3f}), "
+                  f"{_match.distance_deg:.3f} deg from the site"
+                  + ("" if carbon_phi is None
+                     else f", permafrost phi={float(carbon_phi[0]):.3f}"))
+            # This is a nearest-cell INITIALISATION, not an equilibrium of this
+            # site: report every way the seed's provenance differs from the run
+            # so the mismatch is visible rather than implied away.
+            if ((_match.n_layers is not None and _match.n_layers != args.n_layers)
+                    or (_match.soil_depth_m is not None
+                        and abs(_match.soil_depth_m - args.soil_depth) > 1e-6)):
+                print(
+                    f"  WARNING: the carbon IC was spun up on "
+                    f"{_match.n_layers} layers / {_match.soil_depth_m} m but this "
+                    f"run uses {args.n_layers} / {args.soil_depth} m; the pools "
+                    "load (they are per-area stocks) but they equilibrated under "
+                    "a different soil column.", file=sys.stderr)
+            # A finidat cell is a cover-weighted PFT MIXTURE; this run is one
+            # veg_type.  Even when they agree by name the seed carries the
+            # mixture's equilibrium, so print the cover fraction either way.
+            if _match.dominant_pft is not None:
+                if _match.dominant_pft != args.veg_type:
+                    print(
+                        f"  WARNING: the seeded cell's dominant cover is "
+                        f"{_match.dominant_pft!r}"
+                        + ("" if _match.dominant_pft_weight is None
+                           else f" ({_match.dominant_pft_weight:.0%} of the cell)")
+                        + f" but this run is {args.veg_type!r}; the pools "
+                        "equilibrated under different vegetation and will drift "
+                        "toward this site's own equilibrium.", file=sys.stderr)
+                elif _match.dominant_pft_weight is not None:
+                    print(f"  cell cover: {_match.dominant_pft} "
+                          f"{_match.dominant_pft_weight:.0%} (the rest of the "
+                          "cell is other PFTs, whose equilibria are mixed into "
+                          "the seed)")
         start_step = 0
         start_day_abs = 0.0
 
@@ -863,6 +954,7 @@ def main() -> None:
                 state, forcing, config, U_MIN, dt,
                 lat=lat_jnp, carbon_state=carbon_state, doy=doy,
                 clm_ml_grid_info=grid_info,
+                soil_frozen_fraction=carbon_phi,
             )
         return _s
 
@@ -885,6 +977,7 @@ def main() -> None:
             out = step_multilayer_land(
                 state, forcing, config, U_MIN, dt,
                 lat=lat_jnp, carbon_state=carbon_state, doy=float(doy),
+                soil_frozen_fraction=carbon_phi,
             )
             _jitted["grid_info"] = extract_clm_ml_grid_info(out[0].canopy_state)
             _jitted["fn"] = _make_step(_jitted["grid_info"])
@@ -1021,7 +1114,7 @@ def main() -> None:
                     restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
                     _save_restart(
                         restart_path, global_step + 1, abs_day, state,
-                        carbon_state,
+                        carbon_state, soil_frozen_fraction=carbon_phi,
                     )
                     elapsed = time.time() - t_wall_start
                     print(
@@ -1042,7 +1135,7 @@ def main() -> None:
                     restart_path = out_dir / f"restart_day{int(abs_day):06d}.npz"
                     _save_restart(
                         restart_path, global_step + 1, abs_day, state,
-                        carbon_state,
+                        carbon_state, soil_frozen_fraction=carbon_phi,
                     )
                     print(
                         f"  Wallclock budget "
@@ -1089,7 +1182,8 @@ def main() -> None:
         state, carbon_state = semi_analytic_carbon_spinup(
             state, carbon_state, config, lat_rad, lon_rad, lat_jnp, dt,
             _final_doy, args.precip_rate,
-            clm_ml_grid_info=_jitted["grid_info"])
+            clm_ml_grid_info=_jitted["grid_info"],
+            soil_frozen_fraction=carbon_phi)
         c_wood1 = float(np.asarray(carbon_state.C_wood).reshape(-1)[0])
         c_som1 = float(np.asarray(som_total(carbon_state)).reshape(-1)[0])
         print(f"[semi-analytic spin-up] C_wood {c_wood0:.0f}->{c_wood1:.0f}, "
@@ -1099,7 +1193,8 @@ def main() -> None:
     # --- Save final restart ---
     final_restart = out_dir / "restart_final.npz"
     _save_restart(final_restart, start_step + n_total_steps,
-                  start_day_abs + args.days, state, carbon_state)
+                  start_day_abs + args.days, state, carbon_state,
+                  soil_frozen_fraction=carbon_phi)
 
     # --- Summary JSON ---
     wall_time = time.time() - t_wall_start

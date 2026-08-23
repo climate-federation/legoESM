@@ -39,7 +39,15 @@ OUT="${OUT:-results/unified_${CAMPAIGN}/$(basename "${SUITE%.*}")}"
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS=cuda,cpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+# The WB classical value-and-grad step asks for ONE ~45 GiB scratch arena. The
+# default BFC allocator grows its pool in pieces and then cannot serve that
+# single block on a card measured at 0.04 GiB in use of 75.29 — pure
+# fragmentation, and exactly how job 27093614 died. JAX's own allocator knob is
+# this one (TF_GPU_ALLOCATOR is TensorFlow's name and JAX ignores it), and
+# cuda_async serves it. PREALLOCATE=true is WORSE: reserving the arena up front
+# starves the kernel launches.
+export XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async
 
 mkdir -p "$OUT"
 # 12 h walltime minus 45 min drain for the chain resubmit.

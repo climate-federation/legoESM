@@ -17,6 +17,21 @@ import jax.numpy as jnp
 
 logger = logging.getLogger(__name__)
 
+# Ambient CO2 handed to the land tile's photosynthesis [ppmv].  One definition,
+# because the land step and the land-tile surface humidity must see the SAME air
+# or their two stomatal conductances would disagree about the same column.
+# AMIP prescribes no interactive CO2.  Routing the configured / transient CO2
+# here is NOT implemented: every land photosynthesis call uses this value.
+_CO2_PPMV_DEFAULT = 412.0
+# Visible share of surface solar irradiance, for collapsing a canopy's two
+# band albedos into the one broadband number radiation asks for.  ~0.43 of
+# surface shortwave falls below 0.7 um in a clear-sky standard atmosphere
+# (the PAR fraction the land schemes already assume); the remainder is NIR.
+_VIS_FRAC_SOLAR = 0.43
+# Guards 1/(1-albedo) as albedo -> 1 when undoing the albedo to recover
+# downwelling shortwave from the net.
+_ALBEDO_TO_ONE_FLOOR = 1.0e-3
+
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import (
@@ -849,7 +864,7 @@ class PhysicsPipeline:
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
             p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
-            cos_zenith=_cosz, co2_ppmv=412.0 * ones,
+            cos_zenith=_cosz, co2_ppmv=_CO2_PPMV_DEFAULT * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
         # CLM-ML needs a CONCRETE dt to resolve its static ML sub-step count
@@ -875,10 +890,37 @@ class PhysicsPipeline:
             clm_ml_pft_per_col=self.clm_ml_pft_per_col)
         return land_new, resp.T_sfc, resp.albedo
 
+    def _land_par_from_net_sw(self, sw_net_sfc, lat, snow):
+        """Downwelling shortwave at the land surface, from the NET the step holds.
+
+        The physics step carries only the NET surface shortwave, while every
+        land stomatal model wants the DOWNWELLING light.  Undoing the albedo is
+        the reconstruction the slab land already used; it lives here so the slab
+        beta and the multilayer canopy cannot end up looking at different suns
+        for the same column.  Falls back to the net flux when no land albedo map
+        is loaded, which is the best available and never larger than the truth.
+
+        DO NOT fold the lookalike in ``physics_step_no_rad`` (the Jarvis PAR
+        term) into this.  It runs the same arithmetic but its no-albedo-map case
+        means something DIFFERENT: it computes no light at all, and the slab beta
+        then stays ``None`` — a wet surface.  Routing it through here would hand
+        it the net flux instead and silently start throttling ocean-only runs.
+        """
+        if self.albedo_land is None:
+            return sw_net_sfc
+        _alb = (self._land_albedo_eff(lat, snow)
+                if (self.snow_albedo_feedback and snow is not None)
+                else self.albedo_land)
+        return sw_net_sfc / jnp.maximum(1.0 - _alb, _ALBEDO_TO_ONE_FLOOR)
+
     def _land_qsfc_multilayer(self, land_ml, T_land, p_s, land_ml_params=None):
         """Effective land-tile surface humidity for the multilayer land tile,
-        ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha-method, matching
-        ``simple_seb``'s ``q_sfc = beta_effective * q_sat_sfc``), in GRID format.
+        ``q_sfc = beta_soil * q_sat(T_land)`` (the alpha method), in GRID format.
+
+        NOT the same closure the land scheme uses, despite what this said before:
+        ``simple_seb`` applies its throttle to the humidity GRADIENT and bypasses
+        it for snow and dew.  This is a soil-moisture throttle on the atmosphere's
+        own bulk flux, which is all it has ever been.
 
         ``beta_soil`` is the root-zone soil-moisture stress the land SEB itself
         applies (``legoesm.land.multilayer_land.land_tile_beta_soil``, resolved
@@ -890,6 +932,17 @@ class PhysicsPipeline:
         the throttled land-model flux was discarded and the atmosphere
         re-derived a saturated land surface.  ``T_land`` is the (grid) skin
         temperature already coupled from the Richards column.
+
+        THE CANOPY IS NOT HERE, AND CANNOT BE ADDED THIS WAY (2026-08-19).
+        Routing the canopy conductance into this humidity was tried and REFUTED
+        by review: the land scheme applies its throttle to the humidity GRADIENT
+        and bypasses it entirely for snow and dew, so re-deriving the flux from
+        a scaled saturation humidity can reach the opposite SIGN; and the
+        atmosphere re-derives the exchange with a scalar roughness while the
+        land uses a per-column tuned one, so the two coefficients differ anyway.
+        The correct handoff is the land tile's SOLVED fluxes, which is what the
+        unstructured lane does.  Doing that here needs those fluxes carried at
+        the radiation cadence through ``SegmentCarry`` — see the runbook.
         """
         from legoesm.land.multilayer_land import land_tile_beta_soil
         ad = self.adapter
@@ -2246,7 +2299,19 @@ class PhysicsPipeline:
         if _land_active:
             if _ml_active:
                 T_land_grid = ad.unflatten_2d(land_ml.T_soil[:, 0])
-                alb_land = ad.unflatten_2d(_lmp_rad.albedo_veg)
+                # Radiation wants ONE broadband land albedo.  A bulk surface
+                # supplies it directly as ``albedo_veg``; a CANOPY parameter set
+                # has no such field — it carries the two solar BAND albedos and
+                # lets the canopy do its own radiative transfer.  Combine them
+                # rather than crash, which is what reading ``albedo_veg`` did on
+                # every structured-grid canopy run (codex).
+                _alb_veg = getattr(_lmp_rad, "albedo_veg", None)
+                if _alb_veg is None:
+                    alb_land = ad.unflatten_2d(
+                        _VIS_FRAC_SOLAR * _lmp_rad.ALB_VIS
+                        + (1.0 - _VIS_FRAC_SOLAR) * _lmp_rad.ALB_NIR)
+                else:
+                    alb_land = ad.unflatten_2d(_alb_veg)
                 emis_land = ad.unflatten_2d(_lmp_rad.emissivity)
             else:
                 # Snow-brightened land albedo (snow-albedo feedback); the
@@ -2571,10 +2636,7 @@ class PhysicsPipeline:
             _sw_beta = sw_down_sfc
             if (self.land_interface_flux == "unified"
                     and self.albedo_land is not None):
-                _alb_par = (self._land_albedo_eff(lat, snow)
-                            if (self.snow_albedo_feedback and snow is not None)
-                            else self.albedo_land)
-                _sw_beta = sw_net_sfc / jnp.maximum(1.0 - _alb_par, 1e-3)
+                _sw_beta = self._land_par_from_net_sw(sw_net_sfc, lat, snow)
             T_land_new = self._step_slab_land(
                 T_land, sw_down_sfc, lw_down_sfc, T, p_s, q_v, u, v, dt,
                 beta_land=self._land_beta(
@@ -3277,10 +3339,6 @@ def _resolve_convection(config):
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
-            cape_sink_heating_ratio=getattr(
-                config, 'bechtold_cape_sink_heating_ratio', 5.0),
-            cape_relaxation_sink=getattr(
-                config, 'bechtold_cape_relaxation_sink', False),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
             # Bechtold takes this dedicated branch (never the shared _split
             # block below), so thread the precip-split selector + autoconv
@@ -3314,6 +3372,13 @@ def _resolve_convection(config):
             use_ifs_inplume_precip=getattr(
                 config, 'bechtold_use_ifs_inplume_precip', True),
             rprcon=getattr(config, 'bechtold_rprcon', 1.4e-3),
+            epsilon_deep=getattr(config, 'bechtold_epsilon_deep', 1.75e-3),
+            delta_deep=getattr(config, 'bechtold_delta_deep', 0.75e-4),
+            capdcycl_land_tau_scale=getattr(
+                config, 'bechtold_capdcycl_land_tau_scale', 1.0),
+            subcloud_evap_scale=getattr(config, 'bechtold_subcloud_evap_scale', 1.0),
+            rhebc_land=getattr(config, 'bechtold_rhebc_land', 0.75),
+            rhebc_land_deep=getattr(config, 'bechtold_rhebc_land_deep', 0.70),
             dnoprc=getattr(config, 'bechtold_dnoprc', 3.0e-4),
             dx_m=getattr(config, 'bechtold_dx_m', 0.0),
             use_ifs_downdraft=getattr(
