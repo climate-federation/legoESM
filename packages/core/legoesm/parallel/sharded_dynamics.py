@@ -3712,6 +3712,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Setup: build per-device local meshes and gather indices
     # ------------------------------------------------------------------
+    pp_sched = None   # set below when the coloured schedule is built
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
         "(nCells=%d, nEdges=%d, halo_depth=%d, strategy=%s%s) ...",
@@ -4437,6 +4438,14 @@ def make_voronoi_sharded_step(
         "ppermute_ragged" if use_ragged else halo_strategy)
     _voronoi_step._wide_halo_effective = use_wide_halo
     _voronoi_step._halo_depth_effective = _halo_depth_eff
+    # WHICH SCHEDULE this step actually got. An A/B on the halo schedule that
+    # does not record the schedule cannot say whether the knob acted, and one
+    # was run that way: the arms differed by less than their own noise and
+    # there was no way to tell a null result from a switch that never armed.
+    _voronoi_step._coloring_method_effective = (
+        pp_sched.get("coloring_method") if pp_sched else None)
+    _voronoi_step._n_rounds_effective = (
+        pp_sched.get("n_rounds") if pp_sched else None)
     return _voronoi_step
 
 

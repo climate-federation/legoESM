@@ -648,6 +648,10 @@ def main() -> int:
         # the runtime rather than computed here, absent on CPU, and left
         # null rather than guessed when the runtime does not offer it.
         peak_bytes_in_use=_peak_bytes_in_use(),
+        # WHICH halo schedule ran. Without this an A/B on the schedule cannot
+        # distinguish a null result from a switch that never armed.
+        coloring_method=getattr(step, "_coloring_method_effective", None),
+        halo_rounds=getattr(step, "_n_rounds_effective", None),
         steady_min_ms=round(float(np.min(steady)), 2),
         per_step_ms=[round(x, 1) for x in per_step_ms],
         cells=int(mesh.nCells) * args.nlev,
