@@ -459,6 +459,36 @@ this document; the arm that replaces it leaves the communication in and
 refuses to return a verdict if the band arm reads zero messages.
 
 
+### The packer was wired, and it did not help. Here is where the messages are.
+
+The tiled packer now takes what the band packer takes and the dycore calls it,
+behind its own switch, bit-identical. The gate written before the run asked for
+the tile's message count to fall towards the band's. It did not: 29 messages
+against 28 with the packing off, i.e. one more.
+
+The packer is not inert -- the compiled program changes, and the latitude
+message grows from a ten-thousand-element buffer to a thirty-three-thousand
+one, which is exactly the epoch's fields being carried together. It is simply
+that the stage exchange was never where the tile's extra messages were.
+
+Sorted by which devices they connect, the tile's 28 point-to-point messages
+are 16 east-west and 12 north-south. The band's 13 are all north-south. So
+every one of the tile's extra messages is a LONGITUDE exchange, and the packer
+only merged the handful the stage epoch owns.
+
+Those sixteen are the per-operator longitude wrap. On a latitude band the
+whole circle of longitude is local, so wrapping a field to get its east and
+west ghosts is a copy; on a tile it is two ring messages, and every zonal
+gradient and interpolation in the step does its own. Cutting them means
+padding longitude ONCE per stage and handing the padded field to the
+operators, rather than each operator wrapping for itself -- a larger change
+than packing the stage exchange, and now the one the lever depends on.
+
+The packer stays, off by default. It is a prerequisite rather than a win: once
+the wraps are hoisted, the stage exchange is the next thing that would
+dominate.
+
+
 ## In flight: writing the icosahedral halo once instead of thirteen times
 
 The icosahedral halo runs thirteen coloured rounds at 64 GPUs, and each round
