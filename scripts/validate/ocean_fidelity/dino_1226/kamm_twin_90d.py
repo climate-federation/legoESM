@@ -510,6 +510,18 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         if not (u_m > 0.0):
             raise ValueError(f"u_m (rn_Uv) must be > 0, got {u_m!r}")
         cfg = dataclasses.replace(cfg, U_M=float(u_m))
+    _em = os.environ.get("DINO_EEN_METRIC")
+    if _em:
+        # #1455: NEMO's vor_een weights the meridional transport by e1v and
+        # divides the u-tendency by e1u (dynvor.F90:791-792, :804); legoESM's
+        # AL81 triad uses neither. "nemo" selects NEMO's form. The card leaves
+        # it "off" while its wall-row consequence is disputed, so this is the
+        # arm switch for the controlled A/B.
+        if _em not in ("off", "nemo"):
+            raise ValueError(
+                f"DINO_EEN_METRIC must be 'off' or 'nemo', got {_em!r}")
+        cfg = dataclasses.replace(cfg, een_metric_weighting=_em)
+        print(f"ARM: een_metric_weighting={_em}")
     _ba = os.environ.get("DINO_BOLUS_ADV")
     if _ba:
         # #1226: "through_fct" folds the GM bolus into the ADVECTING MASS FLUX;

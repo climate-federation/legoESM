@@ -82,3 +82,53 @@ measured at 1.47e-4 relative at wall vertices, and inert at 0.010× the
 tendency bar — it is logged as transcription debt, not fixed here.
 
 Nothing about any outcome is known at the time of writing.
+
+---
+
+# AMENDMENT, written after the dual review and BEFORE either arm was launched
+
+Both reviewers reported. Neither overturned the operator-level measurement —
+both confirmed it, and one measured the energy-norm property behind it. But
+two things in the parent registration are now void and are corrected here
+rather than quietly reinterpreted.
+
+## The reduction the bars were written on is not the one they name
+
+Every wall-row number this campaign has published, including the −0.288 Sv
+transport gap's companion tendency numbers, was called "thickness-weighted".
+It is not: the reduction weights by the wet MASK, an unweighted mean over
+levels, and DINO's layers span 10.14 m to 545.20 m. Rescored with real
+thickness the wall-row tendency mismatch is 12.4× smaller and **inverts sign
+on three of the four wall rows**.
+
+Consequence for this registration: **the directional prediction is WITHDRAWN.**
+The parent registered "|G4| must shrink by more than 40%". That direction was
+derived from a reading of the wall rows that the corrected reduction does not
+support. No directional prediction replaces it.
+
+## What is registered instead, before the arms run
+
+The A/B is now a **two-sided measurement with a one-sided ship gate**:
+
+* **Measured, no prediction:** `G4`, the day-90 wall-row transport gap, and
+  the whole-basin gap. Both directions are reported. A shrink is evidence the
+  operator error carried the deficit; a growth is evidence it did not and that
+  the campaign's wall-row narrative was an artifact of the reduction. Either
+  is a result. Nothing is registered as CONFIRM on this metric alone.
+* **The ship gate is UNCHANGED and remains one-sided:** the four
+  acceptance-gate metrics (ACC 0.091 Sv, upper contrast 1.1e-4, deep contrast
+  4.5e-5, surface sigma 9.5e-5 kg/m³) must not move past their floors in the
+  degrading direction. The channel is the crown jewel. Transport and density
+  are read jointly, in one table, exactly as before.
+* **Scope correction:** the metric weighting closes 86% of the FAR-INTERIOR
+  operator mismatch as well as 96-98% of the wall's. It is a global fidelity
+  correction, so the basin-wide and circumpolar metrics are as relevant as the
+  wall rows, not a side check.
+
+## The arms
+
+Both re-run at the same HEAD; they differ in ONE config field, set by
+`DINO_EEN_METRIC` (`off` | `nemo`, unknown raises). The card itself keeps the
+option OFF, so the baseline arm is the shipped card verbatim.
+
+Nothing about either outcome is known at the time of writing.
