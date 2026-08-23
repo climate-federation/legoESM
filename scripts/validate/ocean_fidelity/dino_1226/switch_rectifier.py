@@ -105,13 +105,28 @@ def _run(br, cfg, model, forcing, sf, st, n_steps, t0_sec):
     has spent the most time on -- so it is copied line for line and the SAME
     seasonal clock is used."""
     import jax
-    dyn = jax.jit(lambda s: model.step(s, K.DT, surface_forcing=sf))
+    # BOTH placements, exactly as run_twin dispatches them. The shipped card is
+    # 'leapfrog_rhs', which REQUIRES return_rate=True and the rate threaded
+    # into model.step -- mixing the two raises rather than silently reverting
+    # to legacy placement, and it raised here on the first attempt.
+    placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    if placement == "leapfrog_rhs":
+        dyn = jax.jit(lambda s, ext: model.step(
+            s, K.DT, surface_forcing=sf, external_tracer_rate=ext))
+    else:
+        dyn = jax.jit(lambda s: model.step(s, K.DT, surface_forcing=sf))
     out = {}
     for k in range(n_steps):
-        st = K.apply_dino_lat_lon_surface_forcing(
-            st, forcing, br.z_coord, cfg, K.DT,
-            t_seconds=t0_sec + (k + 1) * K.DT)
-        st = dyn(st)
+        if placement == "leapfrog_rhs":
+            st, ext = K.apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, K.DT,
+                t_seconds=t0_sec + (k + 1) * K.DT, return_rate=True)
+            st = dyn(st, ext)
+        else:
+            st = K.apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, K.DT,
+                t_seconds=t0_sec + (k + 1) * K.DT)
+            st = dyn(st)
         if (k + 1) in STEP_GRID:
             out[k + 1] = np.asarray(st.T.data, dtype=np.float64).copy()
     return out
