@@ -135,3 +135,69 @@ def test_land_columns_are_excluded_from_the_band_mean():
                             2.0, [(190.0, 210.0)], 400.0)
     assert rows[0][5] == 1                       # one column counted
     assert rows[0][2] == pytest.approx(warm[0], rel=1e-9)
+
+
+def _write_snapshot(path, sst, nlev=6):
+    """A minimal structured snapshot whose surface temperature is prescribed."""
+    ny, nx = 2, 4
+    zc = np.linspace(5.0, 300.0, nlev)
+    T = np.zeros((ny, nx, nlev))
+    T[..., 0] = sst
+    T[..., 1:] = 10.0
+    np.savez(path,
+             T=T,
+             lat_T=np.zeros((ny, nx)),
+             lon_T=np.tile(np.array([150.0, 170.0, 210.0, 230.0]), (ny, 1)),
+             land_mask=np.ones((ny, nx)),
+             z_center_ref=zc)
+    return path
+
+
+def test_the_tendency_table_reports_the_change_not_the_state(tmp_path, capsys):
+    """A still-growing bias has to be judged on its RATE.
+
+    The tripole's cold tongue warms while NEMO's settles, so a day-30 value is
+    a rate caught mid-flight. This pins that --snapshot-early turns the tables
+    into differences, and that the difference is the one the arm is judged on:
+    a run whose day-30 SST matches NEMO exactly but arrived there by warming
+    when NEMO cooled must NOT read as agreement.
+    """
+    import subprocess
+    import sys as _sys
+
+    early = _write_snapshot(tmp_path / "early.npz", 26.0)
+    late = _write_snapshot(tmp_path / "late.npz", 27.5)
+    # A NEMO stand-in is not available here, so drive the two model tables
+    # directly through the same helper the CLI uses.
+    z20 = _MOD._load_z20_helper()
+    bins = [(200.0, 220.0), (220.0, 240.0)]
+    Te, late_e = _MOD._flatten(early), _MOD._flatten(late)
+    rows_e = _MOD._band_table(*Te[:5], z20, 2.0, bins, 400.0, Te[5])
+    rows_l = _MOD._band_table(*late_e[:5], z20, 2.0, bins, 400.0, late_e[5])
+    d = [l[2] - e[2] for l, e in zip(rows_l, rows_e)]
+    assert np.allclose(d, [1.5, 1.5])
+
+    # And the CLI must refuse a half-specified tendency rather than silently
+    # comparing a late model state against an early oracle record.
+    out = subprocess.run(
+        [_sys.executable, str(_P), "--snapshot", str(late), "--label", "x",
+         "--nemo-gridt", str(tmp_path / "missing.nc"),
+         "--snapshot-early", str(early)],
+        capture_output=True, text=True)
+    assert out.returncode != 0
+    assert "go together" in (out.stderr + out.stdout)
+
+
+def test_an_equator_only_snapshot_is_not_mistaken_for_radians(tmp_path):
+    """Latitude alone cannot tell degrees from radians near the equator.
+
+    A band-limited snapshot has |lat| of a few degrees, which looks exactly
+    like radians, and converting it moved a 230 E column to 218 E -- into the
+    wrong longitude bin, silently. Longitude is what settles it: a degree
+    field spans far more than 2*pi.
+    """
+    _write_snapshot(tmp_path / "band.npz", 26.0)
+    _, lat, lon, _, _, _ = _MOD._flatten(tmp_path / "band.npz")
+    assert np.allclose(sorted(set(np.round(lon, 6))), [150.0, 170.0, 210.0,
+                                                       230.0])
+    assert np.allclose(lat, 0.0)
