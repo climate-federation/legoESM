@@ -1974,6 +1974,7 @@ def _bc_pv_flux(
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
     een_e3f_scheme="min",
+    een_metric_weighting="off",
     dz_ref=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
@@ -2000,6 +2001,14 @@ def _bc_pv_flux(
         raise ValueError(
             f"unknown een_e3f_scheme {een_e3f_scheme!r}; expected "
             f"'min' or 'nemo_avg'"
+        )
+    # Fail-early on an unknown EEN transport metric weighting (static config
+    # value). "off" is the per-unit-width form this operator has always used;
+    # "nemo" supplies dyn_vor's e1v/e1u (and e2u/e2v) scale factors.
+    if een_metric_weighting not in ("off", "nemo"):
+        raise ValueError(
+            f"unknown een_metric_weighting {een_metric_weighting!r}; expected "
+            f"'off' or 'nemo'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -2234,11 +2243,23 @@ def _bc_pv_flux(
                     vertex_coriolis,
                 )
                 _f_vtx_al = vertex_coriolis(grid)
+            # NEMO vor_een weights the transport by the neighbour face width
+            # and normalises by the local one (dynvor.F90:791-792, :804-806).
+            # The same weighting the barotropic EEN Coriolis already applies
+            # under barotropic_coriolis="een_metric"
+            # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
+            # baroclinic path's selector for it. "off" is bit-identical.
+            _mw = None
+            if een_metric_weighting == "nemo":
+                from legoesm.grids.latlon import ensure_geometry
+                _g = ensure_geometry(grid)
+                _mw = (_g.dx_u, _g.dx_v, _g.dy_u, _g.dy_v)
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
+                metric_widths=_mw,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -4109,6 +4130,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_e3f_scheme=config.een_e3f_scheme,
+            een_metric_weighting=getattr(
+                config, "een_metric_weighting", "off"),
             dz_ref=z_coord.dz_ref,
         )
 

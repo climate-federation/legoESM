@@ -891,6 +891,9 @@ class DINOConfig:
     # (default, MITgcm hFacZ convention) or "nemo_avg" (NEMO nn_e3f_typ=1,
     # dynvor.F90::vor_een masked average — #1226 item 10).
     een_e3f_scheme: str = "min"
+    # "off" (default, bit-identical) or "nemo" (dyn_vor's e1v/e1u and e2u/e2v
+    # weighting on the EEN transport, dynvor.F90:791-792 and :804-806).
+    een_metric_weighting: str = "off"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -1492,6 +1495,18 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "een_e3f_scheme": "nemo_avg",         # nn_e3f_typ=1: masked AVERAGE e3f
                                           # (dynvor.F90::vor_een, not min-rule)
+    # NOT SELECTED YET, deliberately. vor_een weights the meridional transport
+    # by e1v and divides the u-tendency by e1u (dynvor.F90:791-792, :804),
+    # symmetrically e2u/e2v for v; legoESM's AL81 triad uses neither, and the
+    # option "nemo" supplies it. It closes 98.7% of the wall-row vorticity-flux
+    # disagreement against NEMO's own dumped tendency and it is what makes the
+    # discrete energy budget conserve the PHYSICAL norm rather than a per-area
+    # one. But the wall-row DEPTH-MEAN correction points AWAY from NEMO on
+    # three of the four wall rows, so switching it on here is not yet
+    # justified on this card (#1455). The barotropic path already runs the
+    # same weighting (barotropic_coriolis="een_metric" below), so the card is
+    # internally inconsistent until this is settled -- named, not hidden.
+    # "een_metric_weighting": "nemo",
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
@@ -3249,6 +3264,7 @@ def dino_lat_lon_model_config(
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
         een_e3f_scheme=cfg.een_e3f_scheme,
+        een_metric_weighting=cfg.een_metric_weighting,
         asselin_gamma=cfg.asselin_gamma,
         tracer_combine=cfg.tracer_combine,
         fix_eta_drift=cfg.fix_eta_drift,

@@ -1880,6 +1880,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
     #   value raises in the operator.
     een_e3f_scheme: str = "min"
+    # Horizontal metric weighting on the AL81/EEN transport:
+    # "off" (default, bit-identical legacy) — the per-unit-width form, exact
+    #   on a uniform-metric grid.
+    # "nemo" — NEMO dyn_vor's own weighting (dynvor.F90:791-792 weights the
+    #   meridional transport by e1v, :804 divides the u-tendency by e1u, and
+    #   symmetrically e2u/e2v for v). Retaining the factors makes discrete
+    #   enstrophy conservation exact on the sphere; dropping them leaves an
+    #   O(dcos phi) residual that grows as dphi*tan(phi), i.e. largest at high
+    #   latitude. This is the SAME weighting barotropic_coriolis="een_metric"
+    #   already applies on the barotropic path. Unknown value raises in
+    #   _bc_pv_flux.
+    een_metric_weighting: str = "off"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution

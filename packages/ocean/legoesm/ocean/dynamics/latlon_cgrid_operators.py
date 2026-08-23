@@ -4042,6 +4042,7 @@ def pv_flux_ene(
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
 
+
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
     # q already has shape (n_lat+1, n_lon+1, nlev) with the periodic wrap
     # column, so q[:-1]/q[1:] are the south/north vertices of each u-face.
@@ -4107,6 +4108,7 @@ def pv_flux_al81_partial_cell(
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
     q_boundary: str = "neumann_fill",
+    metric_widths: tuple | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4250,6 +4252,30 @@ def pv_flux_al81_partial_cell(
         Floor on ``h_vtx`` to avoid divide-by-zero at fully-dry verts.
         Already partially handled by ``BIG_H`` sentinel; this is a
         belt-and-braces guard.
+    metric_widths : tuple ``(e1u, e1v, e2u, e2v)`` or None
+        NEMO's HORIZONTAL scale factors at the u- and v-points.  ``None``
+        (default) is the per-unit-width form this operator has always
+        computed, and is bit-identical.
+
+        NEMO's ``vor_een`` does NOT use the bare mass fluxes: it weights the
+        meridional transport by ``e1v``, the V-face zonal width
+        (``dynvor.F90:791-792`` ``zwy = e1v*e3v*pv``), and divides the
+        assembled u-tendency by ``e1u`` (``dynvor.F90:804`` ``r1_e1u``), and
+        symmetrically ``e2u``/``r1_e2v`` for the v-tendency.  On a grid with
+        uniform metrics the two forms are identical; on latitude-longitude
+        they differ by the cos-latitude ratio across a cell, which grows as
+        ``dphi*tan(phi)`` and is therefore largest near the poles.
+
+        Retaining the factors is what makes discrete enstrophy conservation
+        exact on the sphere.  This is the SAME weighting the barotropic EEN
+        Coriolis already applies under ``barotropic_coriolis="een_metric"``
+        (``barotropic_latlon_cgrid.een_barotropic_coriolis``, which folds it
+        in externally); the baroclinic path had no way to select it until
+        this argument existed.  Measured on the DINO oracle (#1455): supplying
+        it closes 98.7% of the wall-row disagreement against NEMO's own dumped
+        vorticity tendency, 3.10e-10 -> 4.1e-12 m/s2.
+
+        Each factor is a per-column 2-D face array broadcast over levels.
 
     Returns
     -------
@@ -4321,6 +4347,23 @@ def pv_flux_al81_partial_cell(
     # exactly zero — required for q·F to vanish at the coast.
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+
+    # NEMO's horizontal metric weighting on the transport (see ``metric_widths``
+    # in the docstring).  Every triad term already reads the mass flux at a
+    # specific face, so multiplying the FLUX FIELD by that face's width attaches
+    # each term's own e1v/e2u exactly as NEMO's ffu/ffv coefficients do; the
+    # 1/e1u, 1/e2v normalisation is applied to the assembled tendency at the end.
+    # Identical construction to een_barotropic_coriolis, which does it outside
+    # this operator because it also has a depth integral to factor through.
+    _e1u = _e1v = _e2u = _e2v = None
+    if metric_widths is not None:
+        if len(metric_widths) != 4:
+            raise ValueError(
+                "pv_flux_al81_partial_cell: metric_widths must be the 4-tuple "
+                f"(e1u, e1v, e2u, e2v); got {len(metric_widths)} entries")
+        _e1u, _e1v, _e2u, _e2v = metric_widths
+        F_u = F_u * _e2u[..., jnp.newaxis]
+        F_v = F_v * _e1v[..., jnp.newaxis]
 
     # --- 3. Corner triads at every cell ----------------------------
     # Each triad lives at a corner of a cell.  We index triads by the
@@ -4508,6 +4551,15 @@ def pv_flux_al81_partial_cell(
         + t_SW_N * F_u_N_W     # north-cell SW × NW U  (NEMO ztsw(ji,jj+1)·zwx(ji-1,jj+1))
         + t_SE_N * F_u_N_E     # north-cell SE × NE U  (NEMO ztse(ji,jj+1)·zwx(ji  ,jj+1))
     )
+
+    if metric_widths is not None:
+        # NEMO r1_e1u (dynvor.F90:804) and r1_e2v (:806).  The eps floor mirrors
+        # the h_vtx guard: e1u = R*cos(phi)*dlambda vanishes only on a
+        # pole-covering row, e2v is always positive.
+        diag_vortcor_u = diag_vortcor_u / jnp.maximum(
+            _e1u[..., jnp.newaxis], eps_h)
+        diag_vortcor_v = diag_vortcor_v / jnp.maximum(
+            _e2v[..., jnp.newaxis], eps_h)
 
     return diag_vortcor_u, diag_vortcor_v
 
