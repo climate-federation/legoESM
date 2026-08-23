@@ -24,6 +24,7 @@ from scripts.run.train_weatherbench_scale import (
     _apply_smoke_overrides,
     _clamped_warmup,
     _rank_aware_warmup,
+    _resolve_warmup,
     _uses_reachability_freeze,
     build_scale_config_from_args,
 )
@@ -107,6 +108,24 @@ def test_rank_aware_warmup_non_negative_and_never_inflates():
         for nproc in (1, 3, 4, 16):
             w = _rank_aware_warmup(desired, nproc)
             assert 0 <= w <= desired
+
+
+def test_resolve_warmup_is_rank_aware_at_the_call_site():
+    # Covers the PRODUCTION resolution the training loop calls (not just the
+    # helper): _resolve_warmup == _clamped_warmup(total, _rank_aware(desired)).
+    # The raw path (no /nproc) is what the bug was; assert the resolved warmup
+    # matches the rank-aware composition and DIFFERS from the raw-clamped value
+    # at >1 rank, so a call-site revert to the YAML value fails here.
+    n_epochs, n_global, desired = 24, 240, 1000
+    for nproc in (1, 4, 16):
+        total = n_epochs * (n_global // nproc)
+        got = _resolve_warmup(desired, total, nproc)
+        assert got == _clamped_warmup(total, _rank_aware_warmup(desired, nproc))
+        raw = _clamped_warmup(total, desired)          # the reverted behaviour
+        if nproc == 1:
+            assert got == raw                          # identity, serial
+        else:
+            assert got != raw                          # rank-aware actually moves it
 
 
 def test_rank_aware_warmup_positive_config_never_vanishes_at_high_rank():

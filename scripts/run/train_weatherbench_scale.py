@@ -332,7 +332,10 @@ def _rank_aware_warmup(desired_warmup: int, nproc: int) -> int:
     T106 defect, and the same latent bug in the other multi-rank WB configs).
 
     Dividing by ``nproc`` restores the configured warmup FRACTION at any rank
-    count: ``warmup/(n_epochs*len(local)) == warmup_steps/(n_epochs*n_global)``.
+    count: ``warmup/(n_epochs*len(local)) ≈ warmup_steps/(n_epochs*n_global)``,
+    to the NEAREST INTEGER warmup step (``round`` ties-to-even) — e.g. T106 at
+    16 ranks resolves ``round(1000/16)=62`` for ``62/360=17.2%`` against an
+    intended ``17.36%``, the closest a whole-step warmup can sit.
     Because the shards are balanced (``_sharded_indices`` drops the remainder,
     so every rank has the SAME ``len(local)`` and therefore the same
     ``total_steps``), that fraction is exact and identical on every rank — no
@@ -366,6 +369,17 @@ def _rank_aware_warmup(desired_warmup: int, nproc: int) -> int:
     if d == 0:
         return 0
     return max(1, round(d / max(1, int(nproc))))
+
+
+def _resolve_warmup(desired_warmup: int, total_steps: int, nproc: int) -> int:
+    """The warmup the optimizer actually gets: rank-aware, then optax-clamped.
+
+    The single resolution the training loop uses — kept as one named seam so a
+    test covers the PRODUCTION path (not just the pieces): reverting the call
+    site to the raw YAML ``warmup_steps`` moves this function's output at
+    ``nproc > 1`` and fails ``test_resolve_warmup_is_rank_aware_at_the_call_site``.
+    """
+    return _clamped_warmup(total_steps, _rank_aware_warmup(desired_warmup, nproc))
 
 
 def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
@@ -592,10 +606,9 @@ def _main(argv=None):
     # ``_rank_aware_warmup``; identity at nproc==1).  Then clamp safely below
     # total_steps (``_clamped_warmup``): the cosine schedule needs
     # decay_steps > 0, which the tiny --smoke run otherwise violates.
-    warmup = _clamped_warmup(
-        total_steps,
-        _rank_aware_warmup(
-            yml.get("warmup_steps", TrainingConfig().warmup_steps), nproc))
+    warmup = _resolve_warmup(
+        yml.get("warmup_steps", TrainingConfig().warmup_steps),
+        total_steps, nproc)
 
     # --- resume from the last completed epoch --------------------------------
     # Restored BEFORE the freeze, and the frozen set is restored WITH the
