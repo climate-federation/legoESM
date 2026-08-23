@@ -77,9 +77,14 @@ def _flatten(snapshot: Path):
         lat, lon, wet = lat.ravel(), lon.ravel(), wet.ravel()
     elif T.ndim != 2:                     # (n, nlev) node cloud
         raise SystemExit(f"unexpected T shape {T.shape} in {snapshot}")
-    if lat.max() <= np.pi + 1e-6 and lat.min() >= -np.pi - 1e-6:
-        # Some writers store radians. Degrees is the convention here; a mesh
-        # that never leaves +-pi degrees does not exist, so this is safe.
+    if (np.nanmax(np.abs(lat)) <= np.pi + 1e-6
+            and np.nanmax(np.abs(lon)) <= 2.0 * np.pi + 1e-6):
+        # Some writers store radians.  Degrees is the convention here.  BOTH
+        # coordinates have to look like radians before converting: a snapshot
+        # covering only the equatorial band has |lat| of a few degrees, which
+        # on its own is indistinguishable from radians, and converting it
+        # scattered a 230 E column to 218 E.  A degree longitude field spans
+        # far more than 2*pi, so the pair is decisive where lat alone is not.
         lat, lon = np.degrees(lat), np.degrees(lon)
     area = np.asarray(z["cell_area"], dtype=np.float64).ravel() \
         if "cell_area" in z else None
@@ -172,15 +177,35 @@ def main() -> int:
     ap.add_argument("--lat-halfwidth", type=float, default=2.0)
     ap.add_argument("--depth-max", type=float, default=400.0,
                     help="depth over which the sharpness maximum is taken")
+    ap.add_argument("--snapshot-early", type=Path, action="append",
+                    default=None,
+                    help="Earlier snapshot per model, in the SAME order as "
+                         "--snapshot. Turns the tables into a TENDENCY: the "
+                         "change from the early state to the late one, which "
+                         "is what a still-drifting bias has to be judged on. "
+                         "A day-30 value of a growing drift is a rate caught "
+                         "mid-flight, not an equilibrium bias.")
+    ap.add_argument("--nemo-rec-early", type=int, default=None,
+                    help="the matching NEMO record for --snapshot-early "
+                         "(5-day file: 1 = days 6-10)")
     a = ap.parse_args()
     if len(a.snapshot) != len(a.label):
         raise SystemExit("--snapshot and --label must be given in pairs")
+    if bool(a.snapshot_early) != (a.nemo_rec_early is not None):
+        raise SystemExit(
+            "--snapshot-early and --nemo-rec-early go together: a tendency "
+            "with only one side moving is not a comparison.")
+    if a.snapshot_early and len(a.snapshot_early) != len(a.snapshot):
+        raise SystemExit(
+            "--snapshot-early must be given once per --snapshot, in the same "
+            "order")
 
     z20_fn = _load_z20_helper()
     bins = [(lo, lo + 20.0) for lo in np.arange(140.0, 280.0, 20.0)]
 
     print(f"Equatorial band |lat| <= {a.lat_halfwidth} deg, on each model's OWN "
-          f"grid (no regrid; cos(lat) varies < 0.1% across the band).")
+          f"grid (no regrid; each column weighted by its own cell area where "
+          f"the snapshot carries one, cos(lat) otherwise -- printed below).")
     print(f"SST [C], Z20 = depth of the 20 C isotherm [m], sharpness = mean of "
           f"the per-column max |dT/dz| over the top {a.depth_max:.0f} m [K/m].")
     print("A matching SST with a DEEPER and SMOOTHER thermocline is the "
@@ -210,6 +235,33 @@ def main() -> int:
         print(f"{'band mean':>12}" + "".join(
             f"{np.nanmean([r[idx] for r in tables[o]]):>14.4g}" for o in order))
         print()
+
+    if a.snapshot_early:
+        early = {}
+        for snap, lab in zip(a.snapshot_early, a.label):
+            T, lat, lon, wet, zc, area = _flatten(snap)
+            early[lab] = _band_table(T, lat, lon, wet, zc, z20_fn,
+                                     a.lat_halfwidth, bins, a.depth_max, area)
+            print(f"[early {lab}] {snap}")
+        T, lat, lon, wet, zc, area = _nemo_columns(a.nemo_gridt,
+                                                   a.nemo_rec_early)
+        early["NEMO"] = _band_table(T, lat, lon, wet, zc, z20_fn,
+                                    a.lat_halfwidth, bins, a.depth_max, area)
+        print(f"[early NEMO] {a.nemo_gridt} record {a.nemo_rec_early}\n")
+        print(f"=== CHANGE from the early state to the late one "
+              f"(NEMO records {a.nemo_rec_early} -> {a.nemo_rec}) ===")
+        print("The cold tongue is where a still-growing bias lives, so this "
+              "table -- not the day-30 value -- is what an arm is judged on.\n")
+        for field, idx, unit in (("dSST", 2, "C"), ("dZ20", 3, "m"),
+                                 ("dsharpness", 4, "K/m")):
+            print(f"--- {field} [{unit}] ---")
+            print(f"{'lon':>12}" + "".join(f"{o:>14}" for o in order))
+            for j, (lo, hi) in enumerate(bins):
+                cells = "".join(
+                    f"{tables[o][j][idx] - early[o][j][idx]:>14.4g}"
+                    for o in order)
+                print(f"{f'{lo:.0f}-{hi:.0f}E':>12}{cells}")
+            print()
 
     print("counts per bin (columns entering each mean):")
     print(f"{'lon':>12}" + "".join(f"{o:>14}" for o in order))

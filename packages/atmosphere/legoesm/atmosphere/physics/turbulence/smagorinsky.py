@@ -71,6 +71,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     buoyancy_coefficient,
     exner_function,
+    deardorff_stable_eddy_viscosity,
     lilly_buoyancy_factor,
     mixing_length,
     virtual_temperature,
@@ -210,10 +211,25 @@ def smagorinsky_turbulence(
     # AD-safe double-``where`` cutoff (finite cotangent at Ri = Pr_t) lives in the
     # shared helper (with the S²+1e-10 floor above keeping Ri finite). Enhances
     # mixing when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.
-    f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
-
-    # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
-    Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy        # (ncol, nlev-1)
+    # Stable-stratification treatment.  Dispatch on the STATIC config value at
+    # function entry (never a silent ``else``): an unknown value must not run
+    # different physics under a typo.
+    if config.stability_form == "lilly":
+        f_buoy = lilly_buoyancy_factor(Ri, config.Pr_t)
+        # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
+        Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy    # (ncol, nlev-1)
+    elif config.stability_form == "deardorff":
+        # Deardorff (1980) stable-length limit — stratification shrinks the
+        # mixing length instead of driving a stability factor to zero.  Takes
+        # the RAW S² (the N²/Pr_t subtraction happens inside the helper);
+        # passing the already-corrected strain would apply it twice.
+        Km_half = deardorff_stable_eddy_viscosity(
+            S2, N2, l_mix, config.C_s, config.Pr_t)
+    else:
+        raise ValueError(
+            f"Unknown SmagorinskyConfig.stability_form "
+            f"{config.stability_form!r}; expected 'lilly' or 'deardorff'."
+        )
     Kh_half = Km_half / config.Pr_t
 
     # Interpolate to full levels for diagnostics (single concat; same

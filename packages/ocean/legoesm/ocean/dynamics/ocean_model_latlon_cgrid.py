@@ -6066,6 +6066,7 @@ class LatLonCGridOceanModel:
         return_tke: bool = False,
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
+        return_K_profiles: bool = False,
         grid=None,
         n2_tracers=None,
         n2_tracers_before=None,
@@ -6331,6 +6332,17 @@ class LatLonCGridOceanModel:
                     n2_tracers_before=n2_tracers_before,
                     eta_now=eta_now,
                 )
+
+        # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
+        # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
+        # exactly the point the tracer/momentum solves consume them — AFTER the
+        # closure, the config background floors AND the additive internal-wave
+        # mixing, which is what NEMO publishes as avt/avm.  Returned before the
+        # solve so the call is a pure profile read, and before the K33
+        # isoneutral fold, which NEMO carries in its lateral operator, not in
+        # avt.  Reads the SAME code the step runs; it is not a re-derivation.
+        if return_K_profiles:
+            return K_v_cell, A_v_cell
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
         # column heights match the partial-cell / z* layer thicknesses
@@ -6932,6 +6944,48 @@ class LatLonCGridOceanModel:
         if return_tke:
             return state_out, tke_new
         return state_out
+
+    def diagnose_vertical_K(self, state: LatLonCGridOceanState, dt: float,
+                            surface_forcing=None, *, grid=None):
+        """The vertical diffusivity and viscosity the step consumes, avt/avm.
+
+        NEMO publishes ``avm`` and ``avt`` in its five-day output; ours are
+        built inside the implicit vertical solve and are not visible on the
+        tendency (for the TKE closure ``physics_fn`` deliberately returns
+        ``K_v=None`` so the solve computes the profile itself). This runs the
+        SAME setup the step runs — ``_step_impl`` with the implicit mixing
+        turned off to obtain the surfaced ``K_v_phys``/``tke_source`` inputs,
+        then ``_apply_implicit_vertical_mixing`` with ``return_K_profiles`` —
+        and returns the coefficients at the point the solve reads them, AFTER
+        the closure, the config background and the additive internal-wave
+        mixing. It is the model's own code, not a re-derivation, so the number
+        is directly comparable against NEMO's published field.
+
+        Returns ``(K_H, K_M)`` at interior interfaces, shape
+        ``(n_lat, n_lon, nlev-1)`` — heat diffusivity first, viscosity second.
+        No prognostic field is advanced.
+        """
+        _grid = grid if grid is not None else self.grid
+        state_expl, (K_v_phys, A_v_phys, k33_implicit,
+                     surface_tracer_forcing, tke_source,
+                     diss_incr, tracer_source) = self._step_impl(
+            state, dt, surface_forcing=surface_forcing,
+            _apply_implicit_vmix=False, grid=_grid)
+        _tke_prog = self._tke_prognostic_active()
+        _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
+                    else None)
+        dt_mom = dt / self.config.dt_mom_ratio
+        # Mirror the step's tracer solve exactly, but stop at the profile: same
+        # N² (step-entry, before-advection), same carried TKE, same NOW eta,
+        # same surfaced physics K.
+        return self._apply_implicit_vertical_mixing(
+            state, dt, surface_forcing,
+            K_v_phys=K_v_phys, A_v_phys=A_v_phys,
+            dt_mom=dt_mom, tke_old=_tke_old, tke_source=tke_source,
+            n2_tracers=self._n2_before_advection_tracers(state),
+            eta_now=state.eta.data,
+            return_K_profiles=True, grid=_grid,
+        )
 
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
