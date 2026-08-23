@@ -195,8 +195,12 @@ tested.
 
 # AMENDMENT, before any member was scored — three reviewer findings
 
-Both adversarial reviews landed while the two-level arm was still integrating
-and before `kick_asymmetry.py` had scored a single member. Everything below is
+The code review landed while the two-level arm was still integrating and
+before `kick_asymmetry.py` had scored a single member; the mechanism review of
+the same work was commissioned at the same time but did not return, and was
+re-commissioned after scoring (its verdict is recorded in the result document).
+Findings below are attributed to the review that produced them, or to a
+measurement made here. Everything below is
 recorded here, in the pre-registration, rather than in the result — because two
 of the three change what this experiment can conclude.
 
@@ -303,28 +307,33 @@ feedback-tier consequence. The CONFIRM branch of section 6 is unaffected.
   identical 1e-14 nudge on both models" is true of the magnitude and the
   distribution, not of the cell set or the per-cell values (the two draws are
   filled in different axis orders).
-* **legoESM's snapshots are float32.** Between day 10 and day 60 the recorded
-  one-level members' temperature differs from their control in 1 to 5 cells of
-  372,528, i.e. at 1–4 units in the last place. The legoESM side of "the offset
-  is born in the first 30 days" is therefore *censored, not measured*. Day 90
-  is fully resolved on both sides. Fixing this needs one fp64 snapshot per
-  member per early day — named, not built here.
+* **legoESM's snapshots are float32.** MEASURED here, on the re-run one-level
+  arm (seed 1 against its control): the temperature differs in **2** cells of
+  372,528 at day 10 and **8** at day 30, with `max|dT|` of 4.77e-07 and
+  1.91e-06 K — half a unit and one unit in the last place of a ~20 K field. By
+  day 60 it is 26,691 cells and by day 90 59,768. The legoESM side of "the
+  offset is born in the first 30 days" is therefore *censored, not measured*,
+  on either arm. Day 90 is fully resolved on both sides. Fixing this needs one
+  fp64 snapshot per member per early day — named, not built here.
 * **The kick is on temperature; the scored metrics are transports.** Velocity
   and sea surface height acquire a one-time-level perturbation in *both* arms,
   so the two-level kick removes the time-level mismatch from the tracer
   equation only. A refutation therefore refutes tracer-level computational-mode
   content, which is what section 2 proposed, and not every route by which a
   time-level mismatch could matter.
-* **The residual mismatch of the relative-factor choice is ~1e-4 of the kick.**
-  The zero-computational-mode direction is equal *absolute* increments at both
-  levels; the same *relative* factor leaves `f x (T_now − T_before)`, one
-  leapfrog step of tendency, which is ~1e-4 of the kick on this configuration
-  against the one-level kick's 100%. The choice is correct and changes no
-  interpretation.
-* **The number motivating section 5 is 1.1σ.** NEMO's recorded day-30→60 spread
-  ratio of 0.52 carries a log standard error of 0.577 at n=4, i.e. 1.13σ from
-  1.0. It is a hint, not a fact, and the prose it was quoted from also asserted
-  the mechanism it was being used as evidence for.
+* **The relative-factor choice leaves a small residual time-level mismatch.**
+  The exactly-zero-computational-mode direction is equal *absolute* increments
+  at both levels; the same *relative* factor leaves `f x (T_now − T_before)`,
+  one leapfrog step of tendency. MEASURED on the source restart over cells
+  where both levels are wet: `|tn−tb|/|tn|` has median **4.2e-06** and max
+  **1.5e-02**, against the one-level kick's 100%. So the two-level kick removes
+  essentially all of the mismatch for a typical cell and ~98.5% of it in the
+  worst one. The choice is correct and changes no interpretation.
+* **The number motivating section 5 is 1.1σ.** ARITHMETIC, not a measurement:
+  NEMO's recorded day-30→60 spread ratio of 0.52 carries a log standard error
+  of `sqrt(2)/sqrt(2(n-1)) = 0.577` at n=4, so `ln(0.52)/0.577 = −1.13`. It is
+  a hint, not a fact, and the prose it was quoted from also asserted the
+  mechanism it was being offered as evidence for.
 
 ## A6. The measurements this experiment does NOT make, named so they are not forgotten
 
@@ -336,8 +345,11 @@ Ranked by what they would settle, cheapest first. None is built here.
    rectify the kick in one step and produce exactly the recorded signature
    (offset immediate, growth rates unchanged). Seconds of compute.
 2. **One legoESM member, 60 days, fp64 daily temperature dumps**, overlaid on
-   NEMO's: NEMO's raw perturbation decays 224x between day 10 and day 60 and
-   then grows; whether legoESM shares that transient is the single curve that
+   NEMO's. MEASURED in this run's own growth control: NEMO's raw `max|dT|`
+   falls from 1.74e-06 K at day 10 to 7.79e-09 K at day 60 — a factor **224** —
+   and then grows to 1.28e-04 K by day 90, while legoESM's rises monotonically.
+   But legoESM's day-10/day-30 values are at the storage floor (2 and 8 cells),
+   so the comparison of early transients is not yet possible. That one curve
    settles the open item.
 3. **Sweep γ on one model** (0.05 / 0.1 / 0.2, one-level kick) and measure how
    the ratio responds: insensitivity kills the filter mechanism with one

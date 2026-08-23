@@ -133,9 +133,12 @@ done here.
    appears immediately and leaves growth rates untouched. Seconds of compute,
    and it is the single best remaining candidate.
 2. **One legoESM member, 60 days, double-precision daily temperature dumps**,
-   overlaid on NEMO's. NEMO's raw perturbation *shrinks* 224× between day 10
-   and day 60 before growing; whether legoESM shares that dip is one curve and
-   it settles the "born in the first 30 days" claim.
+   overlaid on NEMO's. NEMO's raw largest temperature difference *shrinks*
+   from 1.74e-06 K at day 10 to 7.79e-09 K at day 60 — a factor **224** —
+   before growing to 1.28e-04 K by day 90, while legoESM's only rises. Whether
+   legoESM shares that dip is one curve, and it settles the "born in the first
+   30 days" claim. It cannot be read today because legoESM's early snapshots
+   are at the storage floor.
 3. **Sweep the filter coefficient** on one model. Insensitivity kills the
    filter family of explanations with one variable and one model.
 4. **Project** the day-90 spread pattern onto the basin-deficit pattern — the
@@ -144,10 +147,11 @@ done here.
 ## Limitations a reader should carry away
 
 * **legoESM's early spread is not measured, it is censored.** Its saved states
-  are single precision, and between day 10 and day 60 the nudged members differ
-  from their control in a handful of cells out of 372,528 — at the storage
-  resolution. Day 90 is fully resolved on both sides; the "first 30 days" half
-  of the original claim has no legoESM measurement behind it on either arm.
+  are single precision, and a nudged member differs from its control in **2**
+  cells out of 372,528 at day 10 and **8** at day 30 — half a unit and one unit
+  in the last place. By day 60 it is 26,691 cells and by day 90 59,768. Day 90
+  is fully resolved on both sides; the "first 30 days" half of the original
+  claim has no legoESM measurement behind it on either arm.
 * **Four members.** Every spread is a factor-of-two estimate and every ratio a
   factor-of-four one. That is why the bar is 4.95 and why a 0.96 is read as
   "nothing moved" rather than as a precise 4% shift.
@@ -179,10 +183,20 @@ so the arms differ in the nudge and in nothing else.
 
 ## Review
 
-Two independent adversarial reviews before any number was cited. The code
-review found the model-revision mismatch that would have voided the comparison,
-an inert precision gate, a decision rule that turned "underpowered" into a
-positive claim, and a control threshold set at the size of the signal. The
-mechanism review found that the hypothesis's premise was checkable offline and
-false. All findings were applied, and the pre-registration was amended with
-them before scoring.
+**Code review — completed before any number was cited.** It found the
+model-revision mismatch that would have voided the whole comparison, a
+precision gate that had never once fired, a decision rule that turned
+"underpowered" into a positive claim, a control threshold set at the size of
+the signal it was meant to police, and four defects in the perturbation
+receipts. All were applied and the pre-registration was amended with them
+before scoring.
+
+**Mechanism review — commissioned at the same time, did not return, and was
+re-commissioned after scoring.** Its verdict is recorded in the campaign
+notes when it lands. Until then, the physics claims in this document rest on
+measurements made and checked here, not on a second opinion, and the two that
+matter most are worth restating with their sources: the filter coefficients
+were read from each model's own configuration and output, and the arm-effect
+algebra reproduces a closed form already recorded independently in this
+repository's ocean code. The reader should treat the *interpretation* — not
+the measurements — as carrying one review rather than two.
