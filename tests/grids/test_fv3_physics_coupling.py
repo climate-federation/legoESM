@@ -13,6 +13,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+# the FV3 duo lane is fp64; enable x64 explicitly so the JAX-twin numerical
+# identity is tested at the production precision, not JAX's default float32.
+from jax import config as _jax_config
+_jax_config.update("jax_enable_x64", True)
+
 from legoesm.core.fv3_native_physics_coupling import (
     update_dwinds_phys_duo,
     update_dwinds_phys_duo_jax,
@@ -84,16 +89,19 @@ def test_only_the_compute_block_moves(case):
     mask = np.zeros_like(du, dtype=bool)
     mask[NG:NG + N, NG:NG + N + 1] = True
     assert not np.any(du[~mask]), "u changed outside its D-grid compute block"
+    assert np.all(du[mask] != 0.0), "some intended u cells were not written"
     dv = vn - case["v"]
     maskv = np.zeros_like(dv, dtype=bool)
     maskv[NG:NG + N + 1, NG:NG + N] = True
     assert not np.any(dv[~maskv]), "v changed outside its D-grid compute block"
+    assert np.all(dv[maskv] != 0.0), "some intended v cells were not written"
 
 
 def test_jax_twin_matches_numpy_and_jit_equals_eager(case):
     import jax
     un, vn = update_dwinds_phys_duo(*_args(case))
     uj, vj = update_dwinds_phys_duo_jax(*_args(case))
+    assert np.asarray(uj).dtype == np.float64, "jax twin demoted to float32"
     assert np.allclose(np.asarray(uj), un, atol=1e-12, rtol=0)
     assert np.allclose(np.asarray(vj), vn, atol=1e-12, rtol=0)
     f = jax.jit(update_dwinds_phys_duo_jax, static_argnums=(9, 10))
@@ -118,6 +126,8 @@ def test_differentiable_wrt_the_tendency(case):
     # linear map -> central FD matches analytic grad at one probed cell
     eps = 1e-3
     idx = (NG + 2, NG + 2)
+    # the probe is non-vacuous only if this cell actually influences the loss
+    assert abs(float(g[idx])) > 1e-6, "probed gradient is ~0; FD check is vacuous"
     pert = jnp.asarray(c["u_dt"]).at[idx].add(eps)
     minus = jnp.asarray(c["u_dt"]).at[idx].add(-eps)
     fd = (loss(pert) - loss(minus)) / (2 * eps)

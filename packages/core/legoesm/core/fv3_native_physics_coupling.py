@@ -44,6 +44,9 @@ def update_dwinds_phys_duo(u, v, u_dt, v_dt, dt, vlon, vlat, es1, ew2, n, ng):
 
     Returns ``(u_new, v_new)``; inputs are not mutated.
     """
+    if ng < 1:
+        raise ValueError(f"ng must be >= 1 (got {ng}); the edge projection would "
+                         f"otherwise read the builder's NaN es/ew margins")
     dt5 = 0.5 * dt
 
     # v3 on (is-1:ie+1, js-1:je+1): A-grid tendency -> Earth-frame 3-vector.
@@ -70,9 +73,16 @@ def update_dwinds_phys_duo(u, v, u_dt, v_dt, dt, vlon, vlat, es1, ew2, n, ng):
 def update_dwinds_phys_duo_jax(u, v, u_dt, v_dt, dt, vlon, vlat, es1, ew2,
                                n, ng):
     """JAX twin of :func:`update_dwinds_phys_duo` -- identical slicing, ``.at``
-    scatter for the non-mutating update.  Differentiable and jittable."""
+    scatter for the non-mutating update.  Differentiable and jittable.
+
+    ``n`` and ``ng`` set slice bounds, so they are static under ``jax.jit``
+    (``static_argnums``).  Numerical identity with the NumPy authority holds at
+    matched precision -- run with ``jax_enable_x64`` for the duo lane's fp64.
+    """
     import jax.numpy as jnp
 
+    if ng < 1:
+        raise ValueError(f"ng must be >= 1 (got {ng})")
     dt5 = 0.5 * dt
     w = slice(ng - 1, ng + n + 1)
     v3 = u_dt[w, w, None] * vlon[w, w, :] + v_dt[w, w, None] * vlat[w, w, :]
