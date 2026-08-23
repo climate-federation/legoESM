@@ -70,6 +70,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--schemes", nargs="*", default=None,
                     help="subset to plot; default all")
+    ap.add_argument("--show-prior", action="store_true",
+                    help="overlay the untuned (prior) seed-mean as a dashed "
+                         "line in the same colour as each scheme")
+    ap.add_argument("--no-band", action="store_true",
+                    help="drop the seed min-max band (cleaner when priors are "
+                         "also shown)")
     args = ap.parse_args(argv)
 
     if "rcemip1_n128" in str(args.reference_dir):
@@ -95,14 +101,19 @@ def main(argv: list[str] | None = None) -> int:
     for name in order:
         r = data[name]
         c = colors[name]
-        for ax, key in ((axT, "T"), (axQ, "q")):
+        n = len(r["T"])
+        for ax, key, pkey in ((axT, "T", "Tpri"), (axQ, "q", "qpri")):
             arr = np.vstack(r[key])[:, m]
             mean = arr.mean(0)
-            lo, hi = arr.min(0), arr.max(0)
-            n = len(r[key])
-            ax.fill_betweenx(z[m], lo, hi, color=c, alpha=0.18, lw=0)
+            if not args.no_band:
+                ax.fill_betweenx(z[m], arr.min(0), arr.max(0),
+                                 color=c, alpha=0.15, lw=0)
+            # SOLID = tuned, DASHED = prior (untuned), SAME colour per scheme.
             ax.plot(mean, z[m], color=c, lw=1.8,
                     label=f"{name} (n={n})" if ax is axT else None)
+            if args.show_prior:
+                pri = np.vstack(r[pkey])[:, m].mean(0)
+                ax.plot(pri, z[m], color=c, lw=1.2, ls="--", alpha=0.7)
 
     axT.plot(Tref[m], z[m], "k", lw=2.6, label="SAM CRM", zorder=10)
     axQ.plot(qref[m], z[m], "k", lw=2.6, zorder=10)
@@ -113,10 +124,12 @@ def main(argv: list[str] | None = None) -> int:
     for ax in (axT, axQ):
         ax.grid(alpha=0.25)
     axT.legend(fontsize=7, loc="upper right", ncol=1, framealpha=0.9)
+    _sub = ("solid = tuned, dashed = prior (untuned), same colour per scheme"
+            if args.show_prior else
+            "line = 5-seed mean, band = seed min-max (width = parameter "
+            "non-identifiability)")
     fig.suptitle("SCM convection tuned to SAM CRM, RCEMIP RCE300 "
-                 "(nonrotating protocol)\n"
-                 "line = 5-seed mean, band = seed min-max (width = "
-                 "parameter non-identifiability)", fontsize=11)
+                 f"(nonrotating protocol)\n{_sub}", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=200)
