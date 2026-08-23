@@ -835,8 +835,9 @@ def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
 
     stamped = tmp_path / "stamped.npz"
     np.savez(stamped, nemo_ladder_mode=np.str_("both"),
-             seasonal_t0_seconds=np.float64(0.0))     # legacy clock -> refused
-    with pytest.raises(SystemExit, match="LEGACY relative clock"):
+             seasonal_t0_seconds=np.float64(0.0),      # legacy clock -> refused
+             seasonal_t0_reference_seconds=np.float64(180.0 * 86400.0))
+    with pytest.raises(SystemExit, match="out of phase"):
         gate.load_candidate(str(stamped))
     assert "vertical ladder of this candidate: both" in capsys.readouterr().out
 
@@ -845,7 +846,8 @@ def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
     # is load-bearing -- a bare raises() passes even when the gate is mutated to
     # refuse on the stamp, because the print has already fired by then.
     bare = tmp_path / "bare.npz"
-    np.savez(bare, seasonal_t0_seconds=np.float64(15552000.0))
+    np.savez(bare, seasonal_t0_seconds=np.float64(15552000.0),
+             seasonal_t0_reference_seconds=np.float64(15552000.0))
     with pytest.raises(SystemExit, match="has no u3d_day90"):
         gate.load_candidate(str(bare))
     assert "UNSTAMPED" in capsys.readouterr().out
