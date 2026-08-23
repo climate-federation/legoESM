@@ -445,13 +445,25 @@ def cgrid_latlon_hydrostatic_tendencies(
     # epoch twice (fold h2 + wall h1; one duplicated row per direction,
     # zero extra collectives) to keep the per-field unpacking uniform.
     # Default OFF: the legacy per-exchange pads below, byte-identical.
-    from legoesm.parallel.latlon_spmd import packed_exchange_mesh
+    # Two packers, two switches. The band one is armed on a 1-D latitude mesh
+    # and is what every existing receipt was measured with; the tile one is
+    # armed on a 2-D mesh, where the band packer refuses to run and the lane
+    # has therefore always sent one message PER FIELD. Both take the same
+    # specs and the same sources, so the epoch below is written once.
+    from legoesm.parallel.latlon_spmd import (
+        packed_2d_exchange_mesh, packed_exchange_mesh)
     _packed_mesh = packed_exchange_mesh()
+    _packed_is_tile = False
+    if _packed_mesh is None:
+        _packed_mesh = packed_2d_exchange_mesh()
+        _packed_is_tile = _packed_mesh is not None
     _Bln_pad = None
     _T_ppm_pad = None
     if _packed_mesh is not None:
         from legoesm.parallel.latlon_spmd import (
-            make_latlon_band_packed_pad_body)
+            make_latlon_2d_packed_pad_body, make_latlon_band_packed_pad_body)
+        _packer = (make_latlon_2d_packed_pad_body if _packed_is_tile
+                   else make_latlon_band_packed_pad_body)
         if _hybrid:
             _ps3 = p_s[..., jnp.newaxis]
             _wall_ins = (T, u, dp, _ps3)
@@ -472,7 +484,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         assert _wall_ins[0] is T
         _packed_ins = (_Bln_stack, T) + tuple(_wall_ins[1:])
         _packed_srcs = (0, 1, 1) + tuple(range(2, 1 + len(_wall_ins)))
-        _packed_out = make_latlon_band_packed_pad_body(
+        _packed_out = _packer(
             _packed_mesh, _packed_specs, _packed_srcs)(*_packed_ins)
         _Bln_pad, _T_ppm_pad = _packed_out[0], _packed_out[1]
         if _hybrid:

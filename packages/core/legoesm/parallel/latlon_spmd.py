@@ -203,6 +203,7 @@ HALO_ENV_FLAGS = {
     "LEGOESM_LATLON_HALO_NOCOMM": "0",
     "LEGOESM_LATLON_HALO_LEVEL_LEADING": "0",
     "LEGOESM_LATLON_HALO_DEDUP": "0",
+    "LEGOESM_LATLON_PACKED_2D_EXCHANGE": "0",
 }
 
 
@@ -1110,12 +1111,40 @@ def make_latlon_2d_packed_pad_body(mesh, specs, sources=None):
             south_deep = [jnp.zeros_like(x) for x in deep_s]
             north_deep = [jnp.zeros_like(x) for x in deep_n]
         else:
-            sbuf, sw = _chan_pack(deep_s)
-            nbuf, nw = _chan_pack(deep_n)
-            north_deep = _chan_unpack(
-                _halo_ppermute(sbuf, "lat", perm_north), sw, deep_s)
-            south_deep = _chan_unpack(
-                _halo_ppermute(nbuf, "lat", perm_south), nw, deep_n)
+            # FLATTENED to one row per field before concatenating, the way the
+            # band twin does it, rather than packed on a channel axis. The
+            # fields of a stage's epoch do NOT share a longitude width -- the
+            # velocity lives on the left face and carries one column more than
+            # the cell-centred fields -- and a channel pack keeps the two
+            # leading axes, so it refuses them. Nothing downstream of the
+            # latitude message needs those axes; the longitude ring and the
+            # fold, which do, are packed per group below.
+            s_rows, n_rows, widths = [], [], []
+            for x, y in zip(deep_s, deep_n):
+                s_row, w = _pack_edge_slice(x, False)
+                n_row, _ = _pack_edge_slice(y, False)
+                s_rows.append(s_row)
+                n_rows.append(n_row)
+                widths.append(w)
+            dtypes = {str(x.dtype) for x in deep_s}
+            if len(dtypes) != 1:
+                # Concatenating promotes and nothing casts back, so a mixed
+                # group would silently change field dtypes.
+                raise ValueError(
+                    f"make_latlon_2d_packed_pad_body: all fields must share "
+                    f"one dtype to ride in one buffer; got {sorted(dtypes)}")
+            n_recv = _halo_ppermute(
+                jnp.concatenate(s_rows, axis=1), "lat", perm_north)
+            s_recv = _halo_ppermute(
+                jnp.concatenate(n_rows, axis=1), "lat", perm_south)
+            south_deep, north_deep, off = [], [], 0
+            for i, w in enumerate(widths):
+                shp = (deepest,) + fields[sources[i]].shape[1:]
+                south_deep.append(
+                    _unpack_edge_row(s_recv[:, off:off + w], shp, False))
+                north_deep.append(
+                    _unpack_edge_row(n_recv[:, off:off + w], shp, False))
+                off += w
         # The SOUTH ghost holds the south neighbour's LAST rows in their
         # natural order, so a shallower consumer wants the LAST of them; the
         # NORTH ghost holds the north neighbour's FIRST rows, so a shallower
@@ -1169,6 +1198,17 @@ def make_latlon_2d_packed_pad_body(mesh, specs, sources=None):
             # this bit-identical to the per-field body.
             s_edges = [fields[sources[i]][:d] for i in group]
             n_edges = [fields[sources[i]][-d:] for i in group]
+            fold_widths = {int(fields[sources[i]].shape[1]) for i in group}
+            if len(fold_widths) != 1:
+                # The fold's row mirror and its window column map act on the
+                # longitude axis, so a packed fold needs one width. Staggered
+                # fields carry one column more; they are wall fields in the
+                # dycore's epoch and never reach here, but say so rather than
+                # failing inside a concatenate.
+                raise ValueError(
+                    f"make_latlon_2d_packed_pad_body: fold fields at halo "
+                    f"{d} have different longitude widths "
+                    f"{sorted(fold_widths)}; the packed fold needs one.")
             if p_lon == 1:
                 pad_lon = ((0, 0), (d, d))
 
@@ -1412,6 +1452,44 @@ def packed_exchange_mesh():
         return None
     mesh = get_spmd_mesh()
     if mesh is None or tuple(getattr(mesh, "axis_names", ())) != ("lat",):
+        return None
+    return mesh
+
+
+def packed_2d_exchange_mesh():
+    """The armed 2-D ``("lat", "lon")`` tile mesh when the packed TILE
+    exchange is enabled, else ``None``.
+
+    Env gate ``LEGOESM_LATLON_PACKED_2D_EXCHANGE``: ``''`` / ``'0'`` (default)
+    is OFF; ``'1'`` is ON — any other value RAISES, so a typo cannot silently
+    run the default path. ON additionally requires the armed tile mesh:
+    serial, MPI and the 1-D band mesh return ``None``, so callers keep the
+    pads they already use.
+
+    Separate from :func:`packed_exchange_mesh` on purpose. That one answers
+    "is the BAND packer armed", and it returns nothing for a tile mesh by
+    design; this one answers the same question for the tile packer. One switch
+    covering both would make it impossible to run the band packing without the
+    tile packing, which is what every existing receipt was measured with.
+
+    Why it is off by default: the tiled decomposition moves several times
+    fewer halo bytes than latitude bands and has always measured SLOWER, and
+    whether packing its exchange turns that around is a measurement to take on
+    the machine, not a default to move.
+    """
+    import os
+    val = os.environ.get("LEGOESM_LATLON_PACKED_2D_EXCHANGE", "")
+    if val in ("", "0"):
+        return None
+    if val != "1":
+        raise ValueError(
+            f"LEGOESM_LATLON_PACKED_2D_EXCHANGE must be '', '0' or '1'; "
+            f"got {val!r}")
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    if get_halo_backend() != "spmd":
+        return None
+    mesh = get_spmd_mesh()
+    if mesh is None or tuple(getattr(mesh, "axis_names", ())) != ("lat", "lon"):
         return None
     return mesh
 
