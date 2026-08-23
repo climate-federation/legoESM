@@ -75,6 +75,16 @@ def main() -> int:
     ap.add_argument("--legoesm-snapshot", required=True)
     ap.add_argument("--nemo-gridt", required=True)
     ap.add_argument("--nemo-month", type=int, default=1)
+    ap.add_argument("--nemo-t-recs", default=None,
+                    help="Explicit record slice 'A:B' into --nemo-gridt, "
+                         "averaged, INSTEAD of selecting a calendar month. "
+                         "Use it with RUN_GATEWAY's 5-day grid_T so the "
+                         "thermocline is compared against NEMO's MATCHED cold "
+                         "start rather than a multi-year monthly climatology "
+                         "(rec 5 = days 26-30, rec 17 = days 86-90) -- the "
+                         "same records --nemo-w-recs already selects for the "
+                         "velocity side, which was the only half of this "
+                         "instrument using the matched reference.")
     ap.add_argument("--lat-halfwidth", type=float, default=2.0)
     ap.add_argument("--label", default="legoESM")
     ap.add_argument("--nemo-wfile", default=None,
@@ -172,13 +182,24 @@ def main() -> int:
     # NEMO on its own grid, band-averaged after regridding to the same target.
     nT = np.asarray(ds[tvar].values)
     if nT.ndim == 4:
-        from compare_omip_nemo import _nemo_record_months
-        tdim = ds[tvar].dims[0]
-        nt = int(ds.sizes[tdim])
-        months = _nemo_record_months(ds, tdim, nt)
-        idx = ([i for i in range(nt) if months[i] == a.nemo_month]
-               if months is not None else [a.nemo_month - 1])
-        nT = np.nanmean(nT[idx], axis=0)
+        if a.nemo_t_recs:
+            # Explicit records: the matched cold-start window, same convention
+            # as --nemo-w-recs on the velocity side.
+            sel = _select_recs(nT, a.nemo_t_recs)
+            print(f"[nemo] temperature from records {a.nemo_t_recs} "
+                  f"({sel.shape[0]} of {nT.shape[0]}) -- MATCHED window")
+            nT = np.nanmean(sel, axis=0)
+        else:
+            from compare_omip_nemo import _nemo_record_months
+            tdim = ds[tvar].dims[0]
+            nt = int(ds.sizes[tdim])
+            months = _nemo_record_months(ds, tdim, nt)
+            idx = ([i for i in range(nt) if months[i] == a.nemo_month]
+                   if months is not None else [a.nemo_month - 1])
+            print(f"[nemo] temperature from calendar month {a.nemo_month} "
+                  f"({len(idx)} records averaged) -- pass --nemo-t-recs for "
+                  f"the matched cold-start window instead")
+            nT = np.nanmean(nT[idx], axis=0)
     nT = np.where(np.abs(nT) > 1e10, np.nan, nT)
     nT = np.where(nT == 0.0, np.nan, nT)
     zn = np.asarray(ds["deptht"].values, dtype=np.float64)

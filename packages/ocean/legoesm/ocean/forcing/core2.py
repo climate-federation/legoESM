@@ -23,20 +23,21 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
 from .jra55_do import (
     OceanForcing,
     synthetic_ocean_forcing,
+)
+from .jra55_do import (
     _cache_dir as _jra_cache_dir,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _cache_dir() -> Path:
+def core2_nyf_cache_dir() -> Path:
     """Default CORE-II NYF cache.
 
     ``core2_nyf_mod`` is built from the Large & Yeager bias-corrected fields
@@ -65,24 +66,44 @@ def _cache_dir() -> Path:
     return root / "core2_nyf"
 
 
-def core2_nyf_path(cache_dir: Optional[Path] = None) -> Path:
+def _nino3_wind_speed(ds) -> float:
+    """Time-and-area mean 10 m wind speed over nino3 (5S-5N, 150W-90W).
+
+    Provenance only: the corrected (``_MOD``) CORE-II fields give ~6.3 m/s
+    here and the raw ones ~4.7 m/s, so this single number identifies which
+    cache a run was forced with.
+    """
+    lat = np.asarray(ds.lat.values, dtype=np.float64)
+    lon = np.asarray(ds.lon.values, dtype=np.float64) % 360.0
+    jj = np.where((lat >= -5.0) & (lat <= 5.0))[0]
+    ii = np.where((lon >= 210.0) & (lon <= 270.0))[0]
+    if jj.size == 0 or ii.size == 0:
+        return float("nan")
+    u = np.asarray(ds.u10.values, dtype=np.float64)[:, jj][:, :, ii]
+    v = np.asarray(ds.v10.values, dtype=np.float64)[:, jj][:, :, ii]
+    w = np.cos(np.deg2rad(lat[jj]))[None, :, None]
+    return float((np.hypot(u, v) * w).sum() / (np.ones_like(u) * w).sum())
+
+
+def core2_nyf_path(cache_dir: Path | None = None) -> Path:
     """Resolve the ``nyf.zarr`` archive :func:`load_core2_nyf` would read.
 
     Exposed so a caller can RECORD which archive a run actually used.  With
-    ``cache_dir`` unset the location comes from ``_cache_dir()``, i.e. from the
-    environment / home directory, so two runs launched with identical command
-    lines can read DIFFERENT forcing (codex r8): ``run_omip_core2`` folds this
-    resolved path into its restart configuration fingerprint rather than the
-    raw ``--forcing-path`` argument, which is ``None`` in exactly that case.
+    ``cache_dir`` unset the location comes from :func:`core2_nyf_cache_dir`,
+    i.e. from the environment / home directory, so two runs launched with
+    identical command lines can read DIFFERENT forcing (codex r8):
+    ``run_omip_core2`` folds this resolved path into its restart configuration
+    fingerprint rather than the raw ``--forcing-path`` argument, which is
+    ``None`` in exactly that case.
 
     Single source of truth: :func:`load_core2_nyf` resolves through this
     function, so the recorded path cannot drift from the loaded one.
     """
-    root = Path(cache_dir) if cache_dir is not None else _cache_dir()
+    root = Path(cache_dir) if cache_dir is not None else core2_nyf_cache_dir()
     return root / "nyf.zarr"
 
 
-def load_core2_nyf(*, cache_dir: Optional[Path] = None,
+def load_core2_nyf(*, cache_dir: Path | None = None,
                    allow_synthetic: bool = True,
                    n_time: int = 365) -> OceanForcing:
     """Load the CORE-II Normal Year (NYF) climatology.
@@ -100,6 +121,12 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
                 "CORE-II NYF real-data load requires xarray + zarr"
             ) from exc
         ds = xr.open_zarr(zarr_path)
+        # Provenance, printed rather than logged so it lands in every run log
+        # next to the other [setup] lines.  The nino3 wind speed is the number
+        # that distinguishes the corrected cache (~6.3 m/s) from the raw one
+        # (~4.7 m/s), so a silent fallback is visible in the log itself.
+        print(f"[forcing] CORE-II NYF cache: {zarr_path} "
+              f"(nino3 mean |U10| = {_nino3_wind_speed(ds):.3f} m/s)")
         return OceanForcing(
             lon=np.asarray(ds.lon.values, dtype=np.float64),
             lat=np.asarray(ds.lat.values, dtype=np.float64),
@@ -136,4 +163,4 @@ def load_core2_nyf(*, cache_dir: Optional[Path] = None,
     return synthetic_ocean_forcing(0, n_time=n_time)
 
 
-__all__ = ["load_core2_nyf", "core2_nyf_path"]
+__all__ = ["core2_nyf_cache_dir", "core2_nyf_path", "load_core2_nyf"]

@@ -115,6 +115,17 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 R=/burg-archive/glab/users/pg2328/legoESM/results
 CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
+# SCHEMES: subset for a completion/split run. Each closure is fitted
+# INDEPENDENTLY (the joint objective averages over CASES, not schemes), so
+# splitting the nine across jobs is exactly equivalent to running them in
+# one -- provided every other flag is held identical, which is why they are
+# defaulted here rather than passed per job.
+# Pass a subset PLUS-separated ("ysu+edmf"): sbatch --export treats commas
+# as its own entry separator, so a comma-separated value is silently
+# truncated to its first element and the rest become bogus exports --
+# the run would then fit ONE scheme and report it as the whole job.
+SCHEMES=${SCHEMES:-all}
+SCHEMES=${SCHEMES//+/,}
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
 OUT=${OUT:-$R/scm_les_turbulence/all_eight_sfcv}
@@ -161,7 +172,7 @@ t0=$SECONDS
 # $? is the driver's own status.
 $PY scripts/run/run_scm_les_turbulence_tuning.py \
     --cases "$CASES" --outdir "$OUT" --nlev 48 --steps "$STEPS" \
-    --joint-aggregation "$AGG" --surface-flux-to-closure
+    --joint-aggregation "$AGG" --schemes "$SCHEMES" --surface-flux-to-closure
 rc=$?
 echo "driver rc=$rc wall=$((SECONDS - t0))s"
 

@@ -789,11 +789,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # shear production and reinforces; lower K_H cuts buoyancy destruction
         # and offsets), so the integrated response is what the day-90 A/B
         # measures, not something the algebra gives.
-        # Revert with --tke-kappa-convention -- WHICH REACHES THE TRIPOLE ONLY.
-        # The MPAS branch calls this same card with no overrides, so the pin
-        # changes MPAS too, but `_validate_tke_card_grid` rejects the flag off
-        # the tripole (the standing contract for all four card knobs), so MPAS
-        # cannot be A/B'd from the CLI.  Known asymmetry, not an oversight.
+        # Revert with --tke-kappa-convention, which reaches the tripole and
+        # (since 2026-08-22) the MPAS grid as well, so the same A/B can be run
+        # on either.
         kappa_convention="veros_sqrte",
         lc=True,                        # ln_lc
         lc_coeff=0.25,                  # rn_lc (namelist_cfg override)
@@ -2367,23 +2365,35 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
-                            tke_lc=None, tke_etau=None):
-    """Reject the tripole-zdftke card knobs unless the tke closure is active.
+                            tke_lc=None, tke_etau=None, mpas_vmix="kpp"):
+    """Reject the zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
     ONLY inside the ``tke``
-    branch of ``build_tripole_vmix_config`` (-> ``orca1_zdftke_config``), which
-    the tripole attach block reaches only when ``--tripole-vmix tke`` is set.
-    They are therefore SILENTLY DISCARDED — the dispatch footgun CLAUDE.md
-    forbids — on THREE paths the sibling ``--tripole-vmix`` guard misses:
-      * ``--grid mpas``/``latlon_bathy`` (build_tripole never runs — different
-        builder);
+    branch of ``build_tripole_vmix_config`` (-> ``orca1_zdftke_config``).  Two
+    grids reach that branch: the tripole attach block under ``--tripole-vmix
+    tke``, and the MPAS builder under ``--mpas-vmix tke`` (the "tripole\\_"
+    prefix on the builder is historical; the construction is grid-agnostic and
+    the MPAS TKE bridge consumes the same ``TKEConfig``).  Everywhere else the
+    knobs are SILENTLY DISCARDED — the dispatch footgun CLAUDE.md forbids:
+      * ``--grid latlon_bathy`` / ``cubed_sphere`` (different builder);
       * ``--grid tripole --tripole-vmix none`` (``_use_vmix`` false ->
         build_tripole_vmix_config is never called at all);
-      * ``--grid tripole --tripole-vmix kpp`` (the knob is not applied in the
-        kpp branch).
-    So require the FULL ``--grid tripole --tripole-vmix tke`` context whenever
-    either knob is set (codex 2026-07-22 HIGH).
+      * ``--grid tripole --tripole-vmix kpp`` and ``--grid mpas --mpas-vmix
+        kpp`` (the knob is not applied in the kpp branch).
+    So require one of the two FULL tke contexts whenever a knob is set
+    (codex 2026-07-22 HIGH).
+
+    The MPAS context was opened on 2026-08-22 so the three grids can run the
+    SAME closure card: the surface-TKE Dirichlet boundary condition is the
+    largest single lever this campaign has measured, and while it was
+    tripole-only every cross-grid comparison was made between a tripole
+    running the faithful card and an MPAS running a different one.  The MPAS
+    TKE bridge rejects, loudly and at factory-build time, the handful of
+    ``TKEConfig`` options it does not plumb (``bottom_tke_bc``,
+    ``n2_mode='adiabatic'``, ``veros_dz_slots``, ``buoyancy_timing``,
+    ``advection_scheme``, ``source_eke_diss``, and ``iwm``), so a knob that
+    reaches it either takes effect or raises.
     """
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
@@ -2395,14 +2405,16 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                         ("--tke-prognostic", tke_prognostic),
                         ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production)):
-        if _val is not None and not (grid == "tripole"
-                                     and tripole_vmix == "tke"):
+        _active = ((grid == "tripole" and tripole_vmix == "tke")
+                   or (grid == "mpas" and mpas_vmix == "tke"))
+        if _val is not None and not _active:
             raise SystemExit(
-                f"{_flag} configures the tripole zdftke closure and takes "
-                "effect ONLY under --grid tripole --tripole-vmix tke; got "
-                f"--grid {grid!r} --tripole-vmix {tripole_vmix!r}, where it is "
-                f"silently discarded. Add --tripole-vmix tke (on --grid "
-                f"tripole), or drop {_flag}.")
+                f"{_flag} configures the zdftke closure and takes effect ONLY "
+                "under --grid tripole --tripole-vmix tke or --grid mpas "
+                f"--mpas-vmix tke; got --grid {grid!r} --tripole-vmix "
+                f"{tripole_vmix!r} --mpas-vmix {mpas_vmix!r}, where it is "
+                f"silently discarded. Add the matching --tripole-vmix tke / "
+                f"--mpas-vmix tke, or drop {_flag}.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -3948,7 +3960,9 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
 
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
-                   io_proc: bool = True, ice_state=None, grid=None):
+                   io_proc: bool = True, ice_state=None, grid=None,
+                   step: int | None = None, day: float | None = None,
+                   extra: dict | None = None):
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -3960,6 +3974,25 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
         land_mask=np.asarray(state.land_mask.data),
         lat_T=np.asarray(lat2d), lon_T=np.asarray(lon2d),
     )
+    # WHEN, inside the payload.  Until now the simulated time lived only in the
+    # FILE NAME, so a reader had to trust a convention -- and `snapshot_final`
+    # is written whenever a run stops, including early, so its name says nothing
+    # about when it stopped.  A comparison against a dated oracle record cannot
+    # be checked without this.
+    if step is not None:
+        save_kw["step"] = np.asarray(int(step))
+    if day is not None:
+        save_kw["time_days"] = np.asarray(float(day))
+    # CELL AREA, so a band or box mean can be area-weighted on the model's own
+    # mesh.  cos(lat) is only the right weight on a regular grid; on the
+    # eORCA tripole it is wrong wherever the mesh is stretched, and a
+    # cross-mesh comparison that used it is reporting a sampling difference as
+    # a physical one (codex 2026-08-22 CRITICAL).
+    for _area_attr in ("cell_area", "area_T", "areacello"):
+        _a = getattr(grid, _area_attr, None) if grid is not None else None
+        if _a is not None:
+            save_kw["cell_area"] = np.asarray(getattr(_a, "data", _a))
+            break
     # Prognostic sea ice (--prognostic-sea-ice): concentration + thickness on
     # the T-grid, ocean-masked (audited output gap — ice growth was invisible
     # in snapshots).  Cell areas are derivable from lat_T/lon_T (or grid
@@ -4037,10 +4070,64 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
         zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
         save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
+    # Caller-supplied diagnostic arrays (``--kprofile-snapshots`` writes the
+    # closure's viscosity and diffusivity here).  Kept as EXTRA keys so an old
+    # reader ignores them and an old snapshot still loads.
+    if extra:
+        for _k, _v in extra.items():
+            if _v is not None:
+                save_kw[_k] = np.asarray(_v)
     if not io_proc:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
+
+
+def _kprofiles(model, state, sf, dt, z_coord):
+    """The closure's own K_M/K_H at this state, for a snapshot.
+
+    NEMO publishes ``avm`` and ``avt`` in its five-day output, so the oracle's
+    turbulent Prandtl number is a file read.  Ours was not comparable at all:
+    the diffusivities are built inside the step and never persisted, so every
+    statement about our equatorial mixing has been an inference from TKE and
+    the stratification rather than a measurement of the quantity NEMO
+    publishes.
+
+    The diffusivities are built INSIDE the implicit vertical solve, not on the
+    tendency -- for the TKE closure ``physics_fn`` deliberately returns
+    ``K_v=None`` so the solve computes the profile itself -- so this asks the
+    model for ``diagnose_vertical_K``, which runs the same solve setup and
+    returns the coefficients at the point it consumes them, after the closure,
+    the background floor and the additive internal-wave mixing.  That is the
+    quantity NEMO publishes as avt/avm; reading ``K_v`` off the tendency would
+    have returned nothing for the production arm.
+
+    Returns an empty dict (and says why) when the model exposes no such method
+    or the evaluation fails, so the snapshot is written either way and a
+    diagnostic can never end an integration.
+    """
+    if not hasattr(model, "diagnose_vertical_K"):
+        print("[kprofile] SKIPPED: this model exposes no diagnose_vertical_K "
+              "(the diffusivity dump is a lat-lon C-grid feature only)",
+              flush=True)
+        return {}
+    try:
+        K_H, K_M = model.diagnose_vertical_K(state, dt, surface_forcing=sf)
+    except Exception as exc:            # pragma: no cover - config-dependent
+        print(f"[kprofile] SKIPPED: diagnose_vertical_K failed: {exc}",
+              flush=True)
+        return {}
+    out = {"K_H_diag": np.asarray(getattr(K_H, "data", K_H)),
+           "K_M_diag": np.asarray(getattr(K_M, "data", K_M))}
+    # The TRUE interior interface depths the profile lives on, so a reader
+    # compares against NEMO's depthw on the same levels instead of a
+    # cell-centre midpoint reconstruction (which shifted a 64.96 m interface
+    # to 65.12 m and dropped it from a <=65 m window -- codex 2026-08-23).
+    z_half = getattr(z_coord, "z_half_ref", None) if z_coord is not None \
+        else None
+    if z_half is not None:
+        out["z_interface_ref"] = np.abs(np.asarray(z_half)[1:-1])
+    return out
 
 
 def _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d, tag=""):
@@ -5017,6 +5104,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "payload checksum, so an edit to an array's VALUES at "
                         "the same shape resumes silently, and forcing/mesh "
                         "inputs are pinned by PATH, not by content hash.")
+    p.add_argument("--kprofile-snapshots", action="store_true",
+                   help="Store the vertical viscosity and diffusivity the "
+                        "implicit solve consumes (K_M_diag/K_H_diag, with "
+                        "z_interface_ref) in each day/final snapshot of the "
+                        "standard loop. NEMO publishes avm/avt, so this makes "
+                        "the turbulent Prandtl number comparable against the "
+                        "oracle instead of inferred from TKE. The TKE closure "
+                        "returns no K on the tendency (the solve builds it), "
+                        "so this uses the model's diagnose_vertical_K. Costs "
+                        "one extra solve-setup per snapshot, changes no "
+                        "prognostic field, and is refused with --scan-block "
+                        "(that lane does not thread the dump).")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -5397,11 +5496,13 @@ def main() -> int:
     # --ice-thermo/--sss-restore load it).  Without one, ice_frac stays None:
     # KPP-eice would be silently inert (codex MED), and the MPAS TKE bridge
     # FAIL-FASTS at the first step — reject loudly up front in both cases.
-    # NB: the ORCA1 zdftke card DEFAULTS eice=3 and --tke-eice stays
-    # tripole-gated on this tree (_validate_tke_card_grid), so MPAS+tke
-    # always runs the card's under-ice attenuation and therefore wants ice.
+    # NB: the ORCA1 zdftke card DEFAULTS eice=3, so MPAS+tke wants ice unless
+    # the run explicitly turns the attenuation off with --tke-eice 0 (which
+    # reaches MPAS since 2026-08-22).
+    _mpas_tke_eice = (args.tke_eice if args.tke_eice is not None else 3)
     _wants_eice = (args.kpp_eice not in (None, 0)
-                   or (args.grid == "mpas" and args.mpas_vmix == "tke"))
+                   or (args.grid == "mpas" and args.mpas_vmix == "tke"
+                       and _mpas_tke_eice != 0))
     if _wants_eice and not (
             args.prognostic_sea_ice or args.ice_albedo or args.ice_thermo
             or args.sss_restore):
@@ -5648,7 +5749,8 @@ def main() -> int:
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
                             tke_n2_eos_form=args.tke_n2_eos_form,
-                            tke_lc=args.tke_lc, tke_etau=args.tke_etau)
+                            tke_lc=args.tke_lc, tke_etau=args.tke_etau,
+                            mpas_vmix=args.mpas_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5931,11 +6033,24 @@ def main() -> int:
             # Full #1326 ORCA1 card, including the PROGNOSTIC Mode-A carry —
             # MPASOceanState.tke is seeded by model.seed_tke(state) in the
             # host loop before the first step (pytree-stable carry).
-            # No tke_eice pass-through: _validate_tke_card_grid guarantees
-            # --tke-eice is None off the tripole, so the card default
-            # (eice=3, NEMO nn_eice) applies here (codex LOW: dead arg).
+            # The zdftke card knobs reach MPAS too (2026-08-22): the three
+            # grids have to be able to run the SAME closure or a cross-grid
+            # comparison is measuring the card, not the grid.  Every knob is
+            # threaded — a knob accepted by _validate_tke_card_grid and then
+            # dropped here is the silent-discard footgun that guard exists to
+            # prevent.  iwm stays None: the MPAS TKE bridge rejects it.
             vertical_mixing=(
-                build_tripole_vmix_config("tke", iwm=None)
+                build_tripole_vmix_config(
+                    "tke", iwm=None,
+                    tke_eice=args.tke_eice,
+                    tke_surface_bc=args.tke_surface_bc,
+                    tke_mxl_choice=args.tke_mxl_choice,
+                    tke_prognostic=args.tke_prognostic,
+                    tke_n2_mode=args.tke_n2_mode,
+                    tke_n2_eos_form=args.tke_n2_eos_form,
+                    tke_kappa_convention=args.tke_kappa_convention,
+                    tke_shear_production=args.tke_shear_production,
+                    tke_lc=args.tke_lc, tke_etau=args.tke_etau)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -6954,6 +7069,17 @@ def main() -> int:
     # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
     # failure never aborts a long integration.
     # Process-0 only under --distributed (every process shares one output dir).
+    #
+    # Resolve the CORE-II cache the run will actually read, so the manifest
+    # records the forcing rather than the flag.  --forcing-path wins; otherwise
+    # this is the same default the loader takes, and the two cannot drift
+    # because both call core2_nyf_cache_dir().
+    if args.forcing_path:
+        _resolved_forcing_path = str(args.forcing_path)
+    else:
+        from legoesm.ocean.forcing import core2_nyf_cache_dir
+        _resolved_forcing_path = str(core2_nyf_cache_dir())
+    print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
     manifest_path = None
     if _is_io_proc():
         try:
@@ -6971,7 +7097,13 @@ def main() -> int:
                 total_days=float(total_days),
                 output_path=str(args.output),
                 forcing="core2_nyf",
-                forcing_path=str(args.forcing_path or ""),
+                # RESOLVED, not the flag.  An empty string here used to mean
+                # "the default", and the default silently changed from the raw
+                # CORE-II winds to the bias-corrected ones -- so every manifest
+                # written before this recorded nothing about which forcing the
+                # run actually used, and the loader's own provenance line is
+                # swallowed by the `| tail` most arm scripts pipe through.
+                forcing_path=str(_resolved_forcing_path),
                 woa_init=bool(args.woa_init),
                 woa_t=str(args.woa_t or ""),
                 woa_s=str(args.woa_s or ""),
@@ -6984,7 +7116,7 @@ def main() -> int:
                 dataset_provenance=[
                     dataset_provenance_entry(pth, dataset_id=did)
                     for did, pth in (
-                        ("core2_forcing", args.forcing_path),
+                        ("core2_forcing", _resolved_forcing_path),
                         ("woa_t", args.woa_t),
                         ("woa_s", args.woa_s),
                     )
@@ -7296,6 +7428,15 @@ def main() -> int:
                 and not args.sss_restore
                 and not _tide_enabled
                 and _tti != "ab2")
+    if args.kprofile_snapshots and use_scan:
+        # The scan-block lane does not thread the per-snapshot K dump, so
+        # honouring --kprofile-snapshots there would silently write no
+        # diffusivities.  Refuse rather than mislead (the fidelity arms run
+        # with --sss-restore, which already disables the scan lane).
+        raise SystemExit(
+            "--kprofile-snapshots is not wired into the --scan-block lane; "
+            "drop --scan-block (the standard per-step loop dumps the "
+            "diffusivities) or drop --kprofile-snapshots.")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
@@ -7423,7 +7564,8 @@ def main() -> int:
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
                 _save_snapshot(out_dir, f"day{int(round(day)):04d}",
                                state, lat2d, lon2d, z_coord=z_coord,
-                               io_proc=_is_io_proc())
+                               io_proc=_is_io_proc(), grid=grid,
+                               step=step, day=day)
                 print(f"[snapshot] day {day:.0f} saved", flush=True)
             if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
                 yr = step // steps_per_year
@@ -7433,7 +7575,7 @@ def main() -> int:
         state = jax.block_until_ready(state)
         _io = _is_io_proc()
         _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
-                       io_proc=_io)
+                       io_proc=_io, grid=grid, step=step, day=day)
         _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
@@ -7897,10 +8039,20 @@ def main() -> int:
                 # GLOBAL Sv total cannot show whether OUR runoff+ice reaches
                 # that band. Same fields, area-weighted mean per band, in the
                 # probe's units so the two are directly comparable.
-                _latb = np.degrees(np.asarray(getattr(grid, "lat_T", None)
-                                              if getattr(grid, "lat_T", None)
-                                              is not None else grid.lat))
-                if _latb.shape == _wb.shape:
+                # The structured C-grids call it lat_T (or lat); the MPAS
+                # Voronoi mesh calls it latCell.  Reading grid.lat
+                # unconditionally raised AttributeError on MPAS and killed the
+                # run inside a DIAGNOSTIC (jobs 9466912/9466913) -- a print
+                # must never be able to end an integration, so an unrecognised
+                # geometry skips the band split instead.
+                _latsrc = next(
+                    (v for v in (getattr(grid, "lat_T", None),
+                                 getattr(grid, "lat", None),
+                                 getattr(grid, "latCell", None))
+                     if v is not None), None)
+                _latb = (np.degrees(np.asarray(_latsrc))
+                         if _latsrc is not None else None)
+                if _latb is not None and _latb.shape == _wb.shape:
                     # TRUE cell area, not cos(lat): on the eORCA1 tripole the
                     # two differ by 0.00-1.72x per cell south of 45S, which
                     # inflated the first Antarctic ice number by ~45%. _Ab is
@@ -8301,7 +8453,10 @@ def main() -> int:
             state = _ensure_global_state(state)
             _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
-                           ice_state=ice_state)
+                           ice_state=ice_state, grid=grid,
+                           step=step, day=day,
+                           extra=(_kprofiles(model, state, sf, dt, z_coord)
+                                  if args.kprofile_snapshots else None))
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
             # gateway_step, so the row's n_steps matches the snapshot's day.
@@ -8329,7 +8484,10 @@ def main() -> int:
     state = _ensure_global_state(state)
     _io = _is_io_proc()
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
-                   io_proc=_io, ice_state=ice_state)
+                   io_proc=_io, ice_state=ice_state, grid=grid,
+                   step=step, day=day,
+                   extra=(_kprofiles(model, state, sf, dt, z_coord)
+                          if args.kprofile_snapshots else None))
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

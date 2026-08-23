@@ -88,8 +88,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "differences with every scored number.")
     p.add_argument("--nyf-zarr", default=None,
                    help="Path to nyf.zarr (built by legoESM's "
-                        "scripts/data/build_core2_nyf_zarr.py). Required with "
-                        "--forcing core2_nyf.")
+                        "scripts/data/build_core2_nyf_zarr.py). Defaults to "
+                        "the SAME cache the tripole and MPAS arms resolve "
+                        "(legoesm.ocean.forcing.core2_nyf_cache_dir), so a "
+                        "three-grid comparison cannot silently end up with "
+                        "one grid on the raw CORE-II winds and another on "
+                        "the bias-corrected ones.")
     p.add_argument("--snapshot-every-days", type=float, default=30.0)
     p.add_argument("--output", required=True)
     return p
@@ -218,11 +222,20 @@ def main() -> int:
     if args.ice_ic == "nemo" and not args.ice_init_file:
         raise SystemExit("--ice-ic nemo requires --ice-init-file")
     if args.forcing == "core2_nyf":
-        if not args.nyf_zarr:
-            raise SystemExit("--forcing core2_nyf requires --nyf-zarr")
+        nyf_zarr = args.nyf_zarr
+        if not nyf_zarr:
+            # Same resolution the tripole and MPAS drivers use, so the three
+            # grids cannot drift onto different CORE-II wind fields.
+            from legoesm.ocean.forcing import core2_nyf_cache_dir
+            nyf_zarr = str(core2_nyf_cache_dir() / "nyf.zarr")
+        if not os.path.exists(nyf_zarr):
+            raise SystemExit(
+                f"--forcing core2_nyf: no CORE-II cache at {nyf_zarr}. Build "
+                "it with scripts/data/build_core2_nyf_zarr.py --wind-variant "
+                "mod, or pass --nyf-zarr explicitly.")
         forcing = surface_forcing.build_surface_forcing(
-            mesh, args.year, sst_ic=sst0, nyf_zarr=args.nyf_zarr)
-        print(f"[forcing] CORE-II NYF ({args.nyf_zarr}) ready in "
+            mesh, args.year, sst_ic=sst0, nyf_zarr=nyf_zarr)
+        print(f"[forcing] CORE-II NYF ({nyf_zarr}) ready in "
               f"{time.time()-t0:.1f} s", flush=True)
     elif args.forcing == "jra55":
         forcing = surface_forcing.build_surface_forcing(mesh, args.year,
