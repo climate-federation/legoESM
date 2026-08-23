@@ -194,7 +194,7 @@ def main(argv=None) -> int:
           f"(1 row = {dy_km:.0f} km)")
 
     print("\nPER-ROW SOUTHERN-BASIN TRANSPORT GAP, legoESM - NEMO [Sv], day 90")
-    hdr = f"{'row':>4}{'lat':>9}" + "".join(f"{l:>14}" for l in labels)
+    hdr = f"{'row':>4}{'lat':>9}" + "".join(f"{lab:>14}" for lab in labels)
     print(hdr)
     for j in range(A.J0):
         tag = "  WALL" if j in WALL_ROWS else ""
@@ -204,14 +204,14 @@ def main(argv=None) -> int:
     print(f"{'sum0-13':>13}" + "".join(f"{r['Gbasin']:>14.4f}" for r in res))
 
     print("\nSEA-SURFACE DIFFERENCE, legoESM - NEMO [mm, row mean over wet]")
-    print(f"{'row':>4}{'lat':>9}" + "".join(f"{l:>14}" for l in labels))
+    print(f"{'row':>4}{'lat':>9}" + "".join(f"{lab:>14}" for lab in labels))
     for j in range(A.J0):
         tag = "  WALL" if j in WALL_ROWS else ""
         print(f"{j:>4}{A.gphit[j, 25]:>9.2f}"
               + "".join(f"{r['eta_prof_mm'][j]:>14.4f}" for r in res) + tag)
 
     print("\nTHE REGISTERED NUMBERS")
-    print(f"{'quantity':>22}" + "".join(f"{l:>14}" for l in labels))
+    print(f"{'quantity':>22}" + "".join(f"{lab:>14}" for lab in labels))
     for key, name, fmt in (("G4", "G4 wall rows [Sv]", "{:>14.4f}"),
                            ("Gbasin", "basin rows 0-13 [Sv]", "{:>14.4f}"),
                            ("A_wall_mm", "A_wall [mm]", "{:>14.4f}"),

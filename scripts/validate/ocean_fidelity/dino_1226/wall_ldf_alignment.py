@@ -207,7 +207,6 @@ def part_a(nemo, geom, half_UM, ahmt, ahmf, vertex_mask, vm3, cell_mask):
     #   == NEMO f-point row j (fmask(ji,jj) uses tmask rows jj, jj+1).
     # legoESM vertex column c is the corner west of cell column c
     #   == NEMO f-point column c-1.
-    n_lat = cell_mask.shape[0]
     # legoESM's T-point coefficient carries the 2-D cell mask ONLY: the
     # production call at ocean_pe_latlon_cgrid.py:4246 hands the operator
     # ``mask`` (the 2-D land mask), not the 3-D ``mask_3d`` every other
@@ -307,8 +306,10 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
     full_u, full_v = nemo_ldf_lap_viscosity_cgrid(
         u, v, geom, ahmt, ahmf, mask=cm3, u_mask=um3,
         v_mask=vm3f, vertex_mask=vm3)
-    prod_u = np.asarray(prod_u); full_u = np.asarray(full_u)
-    prod_v = np.asarray(prod_v); full_v = np.asarray(full_v)
+    prod_u = np.asarray(prod_u)
+    full_u = np.asarray(full_u)
+    prod_v = np.asarray(prod_v)
+    full_v = np.asarray(full_v)
 
     # Score on WET u-faces only, per row, depth- and longitude-averaged so a
     # deeper row does not automatically score higher.  Weight by the 3-D face
@@ -372,7 +373,8 @@ def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
     off_u, off_v = nemo_ldf_lap_viscosity_cgrid(u, v, geom, ahmt, ahmf, **kw)
     e3_u, e3_v = nemo_ldf_lap_viscosity_e3_cgrid(u, v, geom, ahmt, ahmf, h_k,
                                                  **kw)
-    off_u = np.asarray(off_u); e3_u = np.asarray(e3_u)
+    off_u = np.asarray(off_u)
+    e3_u = np.asarray(e3_u)
 
     um3, _ = compute_face_masks_3d(
         __import__("jax").numpy.asarray(
