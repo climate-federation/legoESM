@@ -55,6 +55,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
     interp_to_v_points,
+    interp_to_v_points_multi,
     centered_cell_to_uface,
     upwind_to_u_points,
     upwind_to_v_points,
@@ -6585,41 +6586,19 @@ class LatLonCGridOceanModel:
             if _wet_if_vmix is not None:
                 A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
-            # FACE THICKNESS = the min rule, the SAME owner as every other
-            # face thickness in this model (barotropic split, PE tendency,
-            # slow forcing, after-level reconcile: min_cell_to_uface /
-            # min_cell_to_vface -- see the h_u/h_v build near the top of this
-            # module and its comment "Arithmetic mean overestimates face depth
-            # at topographic steps").  ``dz_cell`` is ALREADY ZERO below the
-            # sea floor (vertical.py: h_partial = where(is_active, h_full, 0)),
-            # so the arithmetic mean this replaced handed the solve HALF a
-            # reference cell at every staircase face -- water on a level that
-            # exists on neither column.  That half summed into the column
-            # divisor of the solve's own barotropic split (``depth_mean(...,
-            # dz_u, ...)`` below), which is why the two sides of one step
-            # disagreed: measured on the DINO card, sum_k dz_u exceeded NEMO's
-            # own hu_0 = sum_k e3u_0*umask on 1396 of 9758 wet u-columns, by up
-            # to 365.9 m (0.27% at the southern wall row, 0.92% at row 20),
-            # while the min rule reproduces hu_0 EXACTLY on all 9758
-            # (scripts/validate/ocean_fidelity/dino_1226/
-            # staircase_control_volume.py).
-            # NEMO-faithful, not merely self-consistent: the partial-step
-            # builder is e3u_0 = MIN(e3t_0(i), e3t_0(i+1)) (DOMAINcfg
-            # domzgr.F90:1166) and the full-step builder's arithmetic mean
-            # (zgr_lib.F90:231) is identical to the min on a horizontally
-            # uniform reference ladder, which is what DINO's ln_zco_nam=.true.
-            # card has.  The residual live-free-surface difference (min of
-            # h_ref*J vs NEMO's per-column ssh-averaged (1+r3u) stretch) is the
-            # same documented O(eta/H) convention approximation the rest of the
-            # split-explicit solver already carries -- see
-            # ``barotropic_seed_face_depth`` in config.py.
-            dz_u = min_cell_to_uface(dz_cell)
-            # A_v keeps the centred interp (it is a diffusivity, not a control
-            # volume).  Its v-interp no longer fuses with dz_v's exchange --
-            # the min rule runs its own halo pad -- so this stage costs one
-            # extra sendrecv pair per cut per step (audit lever O4 gave up).
-            A_v_v = interp_to_v_points(A_v_cell, _grid)
-            dz_v = min_cell_to_vface(dz_cell, _grid)
+            dz_u = interp_cell_to_uface(dz_cell)
+            # Fused v-interps: one sendrecv pair per cut for A_v + dz
+            # (audit lever O4; both are independent cell fields here).
+            A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
+            # UNMASKED face thickness, kept under its own name because two
+            # consumers need a POSITIVE thickness rather than the masked
+            # control volume built below: the centre-to-centre gradient slot
+            # ``dz_half_{u,v}`` (whose value at a closed interface is
+            # irrelevant -- the viscosity there is already zero -- but which
+            # must not become 1/eps), and the ``zdf_drag_in_matrix`` diagonal,
+            # whose NEMO counterpart divides by ``e3u(ji,jj,iku,Kaa)``
+            # (dynzdf.F90:296), a scale factor NEMO never masks.
+            dz_u_open, dz_v_open = dz_u, dz_v
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
                 # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
@@ -6636,14 +6615,11 @@ class LatLonCGridOceanModel:
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
             if _dzw_slot:
                 # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to
-                # the faces with the CENTRED interp.  This slot is the Veros
-                # gradient spacing, deliberately built from the coordinate's
-                # own dz_half_ref ladder and NOT from ``dz_u``/``dz_v`` (which
-                # now carry the min rule); it is a center-to-center distance,
-                # not a control volume, so the two are not required to share a
-                # rule.  #428's original wording claimed they used the same
-                # interp -- that stopped being true when the control volumes
-                # moved to the min rule, and this slot's numbers are unchanged.
+                # the faces with the SAME interp that built the UNMASKED face
+                # thickness dz_{u,v}_open.  Deliberately NOT the masked control
+                # volume: a closed interface's gradient slot is multiplied by an
+                # already-zero viscosity, and masking it would make it 1/eps
+                # there for no gain.
                 J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
                 J_v = interp_to_v_points(J_cell[..., jnp.newaxis], _grid)
                 dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)
@@ -6651,15 +6627,49 @@ class LatLonCGridOceanModel:
             elif _e3t_now_slot:
                 # NEMO e3w(Kmm) at u/v-faces (#1226 W1): interpolate the SAME
                 # NOW-level thickness (e3t_now, cell-centered above) to the
-                # faces with the SAME interps used for dz_u/dz_v, matching the
-                # dzw-slot sibling's face-consistency pattern.
+                # faces with the SAME interps that built the UNMASKED
+                # dz_{u,v}_open, matching the dzw-slot sibling's
+                # face-consistency pattern.  NEMO closes this interface with
+                # ``wumask`` (dynzdf.F90:183-185), not with a zeroed e3uw, so
+                # the mask does not belong on the gradient slot either.
                 e3t_now_u = interp_cell_to_uface(e3t_now)
                 e3t_now_v = interp_to_v_points(e3t_now, _grid)
                 dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
                 dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
             else:
-                dz_half_u = build_dz_half(dz_u)
-                dz_half_v = build_dz_half(dz_v)
+                dz_half_u = build_dz_half(dz_u_open)
+                dz_half_v = build_dz_half(dz_v_open)
+            if _wet_if_vmix is not None:
+                # FACE CONTROL VOLUME = NEMO's ``e3u_0 * umask``.  ``dz_cell``
+                # is h_partial*J, ALREADY ZERO below the seafloor, so the
+                # cell->face average returns HALF a thickness at a staircase
+                # face -- a face the model's own mask closes -- and that half
+                # summed into the column divisor of the barotropic split.
+                # NEMO builds the face thickness on the UNMASKED reference
+                # ladder and applies the mask SEPARATELY when the column is
+                # summed (``hu_0 = hu_0 + e3u_0*umask``, domain.F90:145), so a
+                # closed face contributes exactly zero.
+                #
+                # THIS IS MAIN'S OWNER, PORTED VERBATIM, NOT A SECOND RULE.
+                # The construction, its NEMO citations and the
+                # masked-average-vs-min decision all belong to PR #1642
+                # (merged to main 2026-08-22, commit 4734c2d5f), which this
+                # branch predates.  An earlier revision of THIS branch fixed
+                # the same defect with ``min_cell_to_uface`` and was replaced
+                # by this port after review: main's rule is the more
+                # NEMO-faithful one on a tilted free surface, because NEMO
+                # AVERAGES the free-surface factor between the two columns
+                # (``pr3u = 0.5*(e1e2t_i*ssh_i + e1e2t_{i+1}*ssh_{i+1})
+                # *r1_hu_0*r1_e1e2u``, domqco.F90:219-222, the arm DINO's
+                # key_qco builds) where the min rule would take the shallower
+                # column's.  Scored against NEMO's own ``hu_0 + ssh_avg`` with
+                # a N(0, 0.5 m) sea surface: masked average 0.0038 m mean /
+                # 0.115 m max, min rule 0.280 / 1.389, pre-fix unmasked
+                # average 31.7 / 370.1.  At rest on this card the two rules
+                # are identical, so nothing on the DINO twin turns on the
+                # choice -- but the repo must not carry two.
+                dz_u = dz_u * _act_u3.astype(dz_u.dtype)
+                dz_v = dz_v * _act_v3.astype(dz_v.dtype)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 
@@ -6785,10 +6795,10 @@ class LatLonCGridOceanModel:
             # Sign unchanged: raising r_eff raises the diagonal, which damps.
             extra_diag_u = (
                 dt_mom * _r_eff_u[..., jnp.newaxis]
-                / jnp.maximum(dz_u, 1e-10) * _is_bot_u)
+                / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u)
             extra_diag_v = (
                 dt_mom * _r_eff_v[..., jnp.newaxis]
-                / jnp.maximum(dz_v, 1e-10) * _is_bot_v)
+                / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v)
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
                 # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
@@ -6802,10 +6812,10 @@ class LatLonCGridOceanModel:
                 # for the same reason (zDt_2*sum == rDt*average, #1455).
                 u_solve_in = u_solve_in - (
                     dt_mom * _r_eff_u[..., jnp.newaxis]
-                    / jnp.maximum(dz_u, 1e-10) * _is_bot_u * _u_bt_mean)
+                    / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u * _u_bt_mean)
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
-                    / jnp.maximum(dz_v, 1e-10) * _is_bot_v * _v_bt_mean)
+                    / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static

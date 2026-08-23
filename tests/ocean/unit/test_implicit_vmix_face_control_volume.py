@@ -7,9 +7,9 @@ cell-centre thickness is ALREADY ZERO below the sea floor (``ocean/vertical.py``
 ``h_partial = jnp.where(is_active, h_full, 0.0)``), so a cell->face ARITHMETIC
 mean hands the solve HALF a reference cell at every face whose two columns have
 different bottom levels -- water on a level that exists on neither column, summed
-into the column divisor.  The min rule (``min_cell_to_uface`` /
-``min_cell_to_vface``) -- the rule every OTHER face thickness in this model
-already uses -- gives exactly zero there.
+into the column divisor.  Multiplying that average by the
+both-cells-wet face mask -- the mask the same block already builds for the
+viscosity, three lines away -- gives exactly zero there.
 
 NEMO's own value for the same face column is ``hu_0 = SUM_k e3u_0 * umask``
 (``src/OCE/DOM/domain.F90:145``), with ``e3u_0 = MIN(e3t_0(i), e3t_0(i+1))`` on
@@ -20,9 +20,16 @@ reference ladder DINO's ``ln_zco_nam=.true.`` card has.  Either way the level is
 REMOVED, not halved, so the reference below is computed the NEMO way: sum the
 reference thickness over the levels where BOTH adjacent columns are wet.
 
+OWNERSHIP.  The construction under test is PR #1642's, merged to main on
+2026-08-22 and ported onto this branch verbatim rather than re-invented; this
+file is the branch's own gate on it, and it is deliberately written against the
+NEMO VALUE rather than against either candidate rule, so it passes for main's
+masked average and would also pass for the min rule -- what it forbids is the
+half.
+
 NON-VACUITY, measured not reasoned.  Reverting the two lines under test
-(``dz_u = min_cell_to_uface(dz_cell)`` -> ``interp_cell_to_uface(dz_cell)``, and
-the ``dz_v`` sibling) makes ``test_u_face_column_depth_is_the_nemo_value`` and
+(``dz_u = dz_u * _act_u3`` and its ``dz_v`` sibling) makes
+``test_u_face_column_depth_is_the_nemo_value`` and
 ``test_v_face_column_depth_is_the_nemo_value`` FAIL, by exactly the half-cell
 sum that ``test_the_staircase_is_real_and_the_two_rules_disagree`` computes
 independently.  That third test is the premise check: it uses NO model code, so
@@ -163,8 +170,8 @@ def test_u_face_column_depth_is_the_nemo_value():
     # periodic wrap of it, and neither is a face between two of these columns.
     np.testing.assert_allclose(H_u[:, 1:-1], nemo_u, rtol=0, atol=1e-9)
     assert np.abs(H_u[:, 1:-1] - mean_u).max() > 1e-3, (
-        "the min rule and the arithmetic mean agree everywhere on this "
-        "fixture -- the test proves nothing")
+        "the masked and unmasked averages agree everywhere on this fixture "
+        "-- the test proves nothing")
 
 
 def test_v_face_column_depth_is_the_nemo_value():
@@ -175,12 +182,11 @@ def test_v_face_column_depth_is_the_nemo_value():
     # rows 1..N_LAT-1 are the faces between adjacent cell rows.
     np.testing.assert_allclose(H_v[1:-1], nemo_v, rtol=0, atol=1e-9)
     assert np.abs(H_v[1:-1] - mean_v).max() > 1e-3, (
-        "the min rule and the arithmetic mean agree everywhere on this "
-        "fixture -- the test proves nothing")
+        "the masked and unmasked averages agree everywhere on this fixture "
+        "-- the test proves nothing")
 
 
-@pytest.mark.parametrize("rule", ["min"])
-def test_no_face_carries_water_on_a_level_neither_column_has(rule):
+def test_no_face_carries_water_on_a_level_neither_column_has():
     """The property the fix exists for, stated directly."""
     H_u, H_v, z = _capture_solve_face_thickness()
     nemo_u, nemo_v = _nemo_reference_face_depths(z)
