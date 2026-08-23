@@ -99,14 +99,20 @@ from legoesm.ocean.experiments.dino import (
     dino_step_surface_forcing,
 )
 
-# Reuse wholesale (module-reuse rule) -- same RUN_DIR/DT/loaders/self-checks
+# Reuse wholesale (module-reuse rule) -- same DT/loaders/self-checks
 # every sibling #1226 probe in this package already shares.
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import (
-    RUN_DIR, DT, _load_full,
+    DT, _load_full,
 )
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_u_structure_probe import (
     _err_norm, _align_scan,
 )
+# Lane selector (#1455): RUN_DIR/RESTART are lane-dependent, NOT
+# zu_frc_term_walk's own hardcoded RUN_GDB/year-5 constants.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 JPI, JPJ, HLS = 56, 203, 2
 SEAM_COL = 49  # already-documented periodic-seam/DINO-sill column (sill_lon_m_deg=1.0)
@@ -147,6 +153,7 @@ def _capture_cor_sub(model, st, sf):
 def main() -> int:
     e3t_mode = require_explicit_e3t_mode(context="probe_dyn_cor_2d")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both')")
+    print(dump_lane.banner())
 
     dcfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
     print(f"barotropic_coriolis_split={dcfg.barotropic_coriolis_split!r}  "
@@ -155,9 +162,9 @@ def main() -> int:
     assert dcfg.barotropic_coriolis_split == "live"
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)

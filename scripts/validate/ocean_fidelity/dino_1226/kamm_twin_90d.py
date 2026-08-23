@@ -41,6 +41,26 @@ a card that reads them every step from step 0). ``--bridge-tke`` (TKE closure
 memory) is a SEPARATE, independent caveat/flag -- still cold-start by
 default.
 
+SEASONAL CLOCK (#1455): the analytic DINO surface forcing follows the DAY OF
+YEAR, so a twin bridged from a mid-year NEMO restart must continue NEMO's own
+seasonal clock, not restart the year at zero. This harness reads the offset
+from the restart's ``adatrj`` BY DEFAULT. Setting ``DINO_TWIN_SEASONAL_KT0=0``
+selects the old relative clock (which forces the day-180 twin exactly antiphase
+to NEMO) and prints a loud banner; it exists only to reproduce numbers recorded
+before 2026-08-20, none of which are comparable to NEMO.
+
+VERTICAL LADDER (#1455): a twin only isolates SCHEME differences if both
+models stand on the same grid, so :func:`run_twin` defaults to NEMO's OWN
+vertical ladders -- ``LEGOESM_NEMO_E3T=both``, i.e. NEMO's thickness ladder AND
+its T-point depths (see :func:`resolve_ladder_mode`). Two things this does NOT
+touch: the MODEL-WIDE bridge default, which still resolves to the 1-D reference
+ladder for every other caller; and :func:`_build_twin_state`, which a dozen
+sibling probes import directly and which therefore keeps the grid those probes
+were recorded on. Setting ``LEGOESM_NEMO_E3T`` explicitly still wins,
+``--legacy-1d-ladder`` selects the old 1-D ladder with a loud banner, and the
+two disagreeing is fatal rather than one silently winning. The resolved mode is
+stamped into the npz as ``nemo_ladder_mode``.
+
 Usage
 -----
     python kamm_twin_90d.py <recipe> <out.npz> [--days 90] [--save-3d]
@@ -51,6 +71,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import json
 import os
 import time
 
@@ -73,6 +94,7 @@ from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_restart_en,
 )
 from legoesm.ocean.fidelity.nemo_state_bridge import (
+    NEMO_E3T_MODES,
     bridge_before_state_topo,
     bridge_nemo_to_legoesm_topo,
 )
@@ -204,12 +226,264 @@ def _print_before_bridge_verify(st, before, grid) -> None:
           f"max|d_vb|={d_vb:.3e}", flush=True)
 
 
+def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
+    """Refuse an artifact whose seasonal clock is not the one NEMO is on.
+
+    ``stamped`` is anything with ``__contains__`` and ``__getitem__`` over the
+    stamp names -- an ``npz`` handle or a plain dict.  Returns the pair
+    ``(t0_used, t0_nemo)`` in seconds.
+
+    #1455 and its follow-up.  The first version of this guard rejected only
+    ``t0 == 0``, which let every other manual offset through: an explicit step
+    offset of one stamps 2700 s, still most of a year out of phase with the
+    day-180 restart, and the gate called it a NEMO comparison.  Comparing
+    against the offset read from the restart itself rejects ALL of them.
+    """
+    for name in ("seasonal_t0_seconds", "seasonal_t0_reference_seconds"):
+        if name not in stamped:
+            raise SystemExit(
+                f"{path} carries no {name} stamp -- it predates the seasonal "
+                "clock guard (#1455) and its forcing phase cannot be checked "
+                "against NEMO's. Re-run the twin with the current "
+                "kamm_twin_90d.py.")
+    t0 = float(stamped["seasonal_t0_seconds"])
+    t0_nemo = float(stamped["seasonal_t0_reference_seconds"])
+    if abs(t0 - t0_nemo) > 0.5:
+        raise SystemExit(
+            f"{path} ran with its seasonal forcing at {t0 / 86400.0:.2f} d of "
+            f"the 360-day year, but the NEMO run it is scored against is at "
+            f"{t0_nemo / 86400.0:.2f} d "
+            f"({abs(t0 - t0_nemo) / 86400.0:.2f} d out of phase). That is a "
+            "cross-season comparison, not a fidelity measurement.")
+    return t0, t0_nemo
+
+
+def _restart_elapsed_seconds(path: str) -> float:
+    """Model seconds elapsed at the restart, read from the restart ITSELF.
+
+    NEMO writes both ``adatrj`` (elapsed days) and ``kt`` (step index) into the
+    restart, and ``usrdef_sbc.F90:536`` makes the seasonal phase a function of
+    ``REAL(kt)*rn_Dt``.  Reading ``adatrj`` makes the offset independent of the
+    run's timestep; cross-checking it against ``kt*DT`` catches a restart whose
+    timestep differs from this harness's ``DT``.
+    """
+    import netCDF4 as nc
+    with nc.Dataset(path) as d:
+        for name in ("adatrj", "kt"):
+            if name not in d.variables:
+                raise SystemExit(f"{path}: restart has no '{name}' variable")
+        adatrj = float(np.asarray(d.variables["adatrj"][:]).ravel()[0])
+        kt = float(np.asarray(d.variables["kt"][:]).ravel()[0])
+    t_from_days, t_from_kt = adatrj * 86400.0, kt * DT
+    if not np.isfinite([t_from_days, t_from_kt]).all():
+        raise SystemExit(f"{path}: non-finite adatrj/kt ({adatrj}, {kt})")
+    if abs(t_from_days - t_from_kt) > 0.5 * DT:
+        raise SystemExit(
+            f"{path}: restart adatrj={adatrj} d ({t_from_days:.0f} s) disagrees "
+            f"with kt={kt:.0f} x DT={DT:.0f} s ({t_from_kt:.0f} s) -- the "
+            "restart was written at a different timestep than this harness runs")
+    return t_from_days
+
+
+def seasonal_t0_seconds(restart_path: str) -> float:
+    """Absolute seasonal-clock offset [s] for a twin bridged from ``restart_path``.
+
+    #1455.  DINO's analytic surface forcing is a function of the DAY OF YEAR
+    through the ABSOLUTE step index (``usrdef_sbc.F90:536-547``:
+    ``ztime = REAL(kt)*rn_Dt``), so a twin that restarts its own seasonal year
+    at zero forces legoESM out of phase with the NEMO run it is compared
+    against.  For the canonical ``DINO_00005760_restart.nc`` (day 180 of a
+    360-day year) that offset is EXACTLY antiphase, and it was measured to own
+    99.1% of the day-30 southern surface-density gap (commits 1c03f8311,
+    076217667, afd8e06b6).
+
+    DEFAULT (env unset) is therefore the NEMO clock, read from the restart
+    ITSELF (``adatrj``, cross-checked against ``kt*DT``) -- never hardcoded and
+    never scraped from a filename.  ``DINO_TWIN_SEASONAL_KT0`` (the same knob
+    the clock A/B lane used) remains available to override it:
+
+      unset / "restart"  -> t0 from the restart's own ``adatrj``   [DEFAULT]
+      "0"                -> t0 = 0, the LEGACY relative clock; reproduces
+                            historical (antiphase) numbers ONLY
+      <integer>          -> t0 = <integer> * DT, explicit step offset
+
+    Any non-default selection prints a loud banner, so a log can never be read
+    without knowing which clock produced it.
+    """
+    env = os.environ.get("DINO_TWIN_SEASONAL_KT0")
+    if env is None or env == "restart":
+        t0_sec = _restart_elapsed_seconds(restart_path)
+        source = "restart adatrj" + ("" if env is None else " (explicit)")
+    else:
+        try:
+            kt0 = int(env)
+        except ValueError:
+            raise SystemExit(
+                f"Unknown DINO_TWIN_SEASONAL_KT0={env!r}: expected 'restart' "
+                "(lowercase) or an integer step index") from None
+        if kt0 < 0:
+            raise SystemExit(
+                f"DINO_TWIN_SEASONAL_KT0={kt0} is negative; expected >= 0")
+        t0_sec = kt0 * DT
+        banner = ("LEGACY RELATIVE CLOCK" if kt0 == 0
+                  else f"MANUAL STEP OFFSET kt0={kt0}")
+        source = f"OVERRIDE {banner}"
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! {banner}: DINO_TWIN_SEASONAL_KT0={env}", flush=True)
+        print("!! The seasonal forcing does NOT follow the restart's own "
+              "day-of-year.", flush=True)
+        print("!! This is a HISTORICAL-REPRODUCTION mode (#1455). Numbers "
+              "produced here are", flush=True)
+        print("!! NOT comparable to the NEMO run this twin scores against.",
+              flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
+          f"[source: {source}]  "
+          f"(restart is day {(t0_sec / 86400.0) % 360.0:.2f} of the 360-day "
+          f"year, {t0_sec / 86400.0:.2f} d elapsed in total; NEMO logs "
+          f"nday_year = {int(t0_sec // 86400.0) % 360 + 1} at its next step)",
+          flush=True)
+    return t0_sec
+
+
+# The accepted selections come from the bridge itself (NEMO_E3T_MODES), never
+# re-listed here: a harness that accepted a mode the bridge rejects three calls
+# later would fail deep inside grid construction instead of at the CLI.
+NEMO_LADDER_TWIN_DEFAULT = "both"
+_LADDER_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
+
+
+def resolve_snap_days(snap_days, n_days: int, save_3d: bool) -> tuple[int, ...]:
+    """Which days get a full 3-D snapshot.
+
+    ``snap_days=None`` keeps the recorded :data:`SNAP_DAYS` grid, so every
+    artifact produced before the argument existed is reproduced exactly.  Days
+    beyond ``n_days`` are dropped rather than raising: a caller asking for a
+    year-long grid on a 90-day run gets the 90-day prefix, which is what the
+    filter did before this was a function.  Without ``save_3d`` there are no
+    snapshots at all and the answer is empty regardless of what was asked for.
+    """
+    if not save_3d:
+        return ()
+    grid = SNAP_DAYS if snap_days is None else tuple(int(d) for d in snap_days)
+    return tuple(d for d in grid if d <= n_days)
+
+
+def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
+    """Which of NEMO's vertical ladders this TWIN hands legoESM, and why.
+
+    #1455.  The bridge (:func:`legoesm.ocean.fidelity.nemo_state_bridge.
+    effective_vertical_scale_factors`) resolves ``LEGOESM_NEMO_E3T`` to ``"off"``
+    when nothing sets it -- i.e. legoESM is built on a 1-D reference ladder that
+    is NOT the ladder the NEMO run integrates with.  That model-wide default is
+    left alone; this changes the default for THIS RUNNER'S twin path only
+    (:func:`run_twin`), where the whole point of the run is that the two models
+    share a grid.  It is deliberately NOT called from :func:`_build_twin_state`,
+    because a dozen sibling probes import that helper directly and must keep the
+    grid they were recorded on.
+
+    Measured cost of the 1-D ladder, two 90-day twin arms from the day-180
+    restart differing ONLY in this mode, bit-identical at day 0, both stable,
+    both under an fp64 precision policy (corrected clock, ``--bridge-before``):
+    day-90 circumpolar channel-band transport error vs NEMO +2.93 Sv on ``"off"``
+    against +0.29 Sv on ``"both"``, and full-section ACC error +1.87 Sv against
+    -0.60 Sv.
+
+    PLAUSIBLE, not confirmed: that it takes BOTH halves because the thickness
+    ladder carries the barotropic component and the depth ladder the baroclinic
+    one.  That split comes from the two half-ladder arms, which were measured at
+    the fp32 control dtype and have NOT been re-run at fp64 -- unlike the two
+    arms quoted above.
+
+    Resolution order, highest first:
+
+      ``LEGOESM_NEMO_E3T`` set  -> that mode, whatever it is    [override kept]
+      ``--legacy-1d-ladder``    -> ``"off"``, with a loud banner
+      nothing                   -> ``"both"``                   [TWIN DEFAULT]
+
+    Setting the variable to something the flag contradicts is FATAL rather than
+    silently letting one win.
+
+    THIS FUNCTION IS PURE apart from its printing: it RETURNS the mode and does
+    NOT write ``LEGOESM_NEMO_E3T``.  It used to write it, because that was the
+    only channel the bridge read, and that write-back was the source of a whole
+    class of defect: a second caller could not tell the operator's setting from
+    the value the first call had planted, so an in-process two-arm sweep silently
+    ran the same grid twice.  No check can separate those two cases -- they are
+    the same string in the same slot -- so the write-back is gone instead, and
+    the resolved mode travels to the bridge as an ARGUMENT (``e3t_mode``).  Two
+    different ladders in one process are now simply two calls.
+    """
+    env = os.environ.get("LEGOESM_NEMO_E3T")
+    if env is not None:
+        if env not in NEMO_E3T_MODES:
+            raise SystemExit(
+                f"Unknown LEGOESM_NEMO_E3T={env!r}: expected one of "
+                f"{', '.join(NEMO_E3T_MODES)}")
+        if legacy_1d_ladder and env != "off":
+            raise SystemExit(
+                f"--legacy-1d-ladder selects the 1-D ladder ('off') but "
+                f"LEGOESM_NEMO_E3T={env!r} selects {env!r}; they disagree. "
+                "Pass one or the other, not both.")
+        source = ("LEGOESM_NEMO_E3T + --legacy-1d-ladder (agreeing)"
+                  if legacy_1d_ladder else "LEGOESM_NEMO_E3T (explicit override)")
+        mode = env
+    elif legacy_1d_ladder:
+        mode, source = "off", "--legacy-1d-ladder"
+    else:
+        mode, source = NEMO_LADDER_TWIN_DEFAULT, "twin default"
+    # The banner is once per MODE per process (repeating it trains people to
+    # ignore it); the one-line statement of the grid is EVERY call, so no twin
+    # can ever be built without its log saying which ladder it stands on.
+    # Keyed to the GRID, not to the default: if someone flips the default back,
+    # the warning must survive rather than vanish with it.
+    if mode != "both" and mode not in _LADDER_ANNOUNCED:
+        _LADDER_ANNOUNCED.add(mode)
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! NON-DEFAULT VERTICAL LADDER: {mode!r}  [{source}]", flush=True)
+        if mode == "off":
+            print("!! This is the 1-D REFERENCE ladder, NOT the grid the NEMO "
+                  "run integrates", flush=True)
+            print("!! with. Measured cost at day 90: +2.93 Sv of circumpolar "
+                  "transport error", flush=True)
+            print("!! against +0.29 Sv on NEMO's own ladders (#1455). Numbers "
+                  "produced here", flush=True)
+            print("!! score legoESM on a grid NEMO does not have.", flush=True)
+        elif mode == "gdept_only":
+            print("!! Mixed ladders: cells from the 1-D thickness ladder, "
+                  "T-points from NEMO's.", flush=True)
+            print("!! Worst level of each grid: this one puts T-points 110.2 m "
+                  "from the centre", flush=True)
+            print("!! of the cell they sit in (at k=32), against 11.3 m on "
+                  "'both' (at k=34).", flush=True)
+            print("!! NEMO's own T-points are not cell centres either, so "
+                  "'both' is offset too --", flush=True)
+            print("!! just 10x less (#1455).", flush=True)
+        else:   # e3t_only
+            print("!! Mixed ladders: cells from NEMO's thickness ladder, "
+                  "T-points from the 1-D one.", flush=True)
+            print("!! Worst WET level of each grid: this one puts T-points "
+                  "97.2 m from the centre", flush=True)
+            print("!! of the cell they sit in (at k=32), against 11.3 m on "
+                  "'both' (at k=34).", flush=True)
+            print("!! It also carries only the barotropic half of the geometry "
+                  "fix, and that", flush=True)
+            print("!! split was measured at fp32 -- PLAUSIBLE, not confirmed "
+                  "(#1455).", flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"vertical ladder: LEGOESM_NEMO_E3T={mode}  [source: {source}]  "
+          f"(twin default {NEMO_LADDER_TWIN_DEFAULT!r} = NEMO's own thickness "
+          f"AND T-depth ladders)", flush=True)
+    return mode
+
+
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = False,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
-                       restart_file: str = RESTART_FILE):
+                       restart_file: str = RESTART_FILE,
+                       e3t_mode: str | None = None):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
 
     ``restart_file``: basename of the (rebuilt, single-file) NEMO restart
@@ -239,9 +513,15 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
     """
+    # NOTE: this helper deliberately does NOT resolve the vertical ladder. A
+    # dozen sibling probes import it directly and must keep the grid they were
+    # recorded on; the twin default is applied in run_twin, one level up and
+    # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
+    # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
-    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
+    br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
+                                     e3t_mode=e3t_mode)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
         lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     if vmix_scheme is not None:
@@ -258,6 +538,37 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         # instability arrives through the advecting velocity.
         cfg = dataclasses.replace(cfg, gm_bolus_advection=_ba)
         print(f"ABLATION: gm_bolus_advection={_ba}")
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170): which time-averaged barotropic
+        # mean the 3-D momentum depth-mean is reconciled onto ("velocity_avg" =
+        # primary boxcar; "transport_avg" = un_adv/hu secondary/transport mean).
+        # The confirmation A/B for the barotropic-reconcile term: one variable.
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
+    _ar = os.environ.get("DINO_AFTER_RECONCILE")
+    if _ar:
+        # NEMO mlf_baro_corr (cfgs/DINO/MY_SRC/stpmlf.F90:754-765): the SECOND
+        # depth-mean reconciliation, run after dyn_zdf on the committed AFTER
+        # level. "nemo_mlf_baro_corr" is what NEMO does.
+        #
+        # CORRECTED 2026-08-21 (#1455 R6): "off" is NO LONGER the card default.
+        # nemo_dino_kamm_mlf now SHIPS the faithful pair, so the twin's default
+        # composition is velocity_avg + nemo_mlf_baro_corr. To reproduce any
+        # arm recorded BEFORE that flip, set BOTH:
+        #     DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off
+        #
+        # CORRECTED 2026-08-21: an earlier version of this comment called it
+        # "orthogonal to DINO_RECONCILE_TARGET" and said "setting both is two
+        # variables and the A/B must not". BOTH HALVES WERE WRONG, and the
+        # second was an instruction against running the only faithful
+        # configuration. They COMPOSE: NEMO commits uu_b(Kaa), its PRIMARY
+        # velocity-weighted boxcar, so matching NEMO needs
+        # DINO_RECONCILE_TARGET=velocity_avg AND this set to
+        # nemo_mlf_baro_corr. Setting both is the FAITHFUL arm of a 2x2, not a
+        # two-variable mistake -- see PHASE2_R6_alignment_and_prereg.md.
+        cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
+        print(f"ABLATION: barotropic_after_reconcile={_ar}")
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which
@@ -353,7 +664,14 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
-             perturb_seed: int | None = None) -> bool:
+             restart_file: str = RESTART_FILE,
+             perturb_seed: int | None = None,
+             perturb_baro: str | None = None,
+             perturb_baro_key: str = "dU_avg",
+             perturb_baro_scale: float = 1.0,
+             daily_acc: bool = False,
+             snap_days: tuple[int, ...] | None = None,
+             legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
     ``perturb_seed``: optional #1492 item-2.2 noise-control lane -- if set,
@@ -365,12 +683,48 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     legoESM state's now-level T only -- this twin runner's default
     (non-``--bridge-before``) state carries no before-level T, so there is
     no tb to perturb in lockstep.
+
+    ``perturb_baro``/``perturb_baro_key``/``perturb_baro_scale``: #1455
+    Phase-2 Measurement 1.  Adds ``scale *`` a depth-uniform barotropic
+    velocity field, once at t=0, to the now-level u.  The field is the
+    per-step barotropic deposit measured by ``substep_traj_compare.py`` and
+    saved by its ``DINO_1455_DEPOSIT_MAP`` block, so the injected section
+    transport at t=0+ IS that deposit and the response divided by it is the
+    retention factor -- the quantity whose absence voided every "x times the
+    budget row" ratio this campaign published (eb3f6d23d).
+
+    ``daily_acc``: store the ACC transport every day under two reducers (the
+    deposit's own mean-over-longitudes one and the recorded gate's median
+    one).  Off by default; adds two float64 arrays to the npz.
+
+    ``snap_days``: which days get a full 3-D T/S/eta/u/v snapshot under
+    ``save_3d``.  ``None`` keeps the recorded ``SNAP_DAYS`` grid so every
+    artifact produced before this argument existed is reproduced exactly;
+    days past ``n_days`` are dropped either way.  #1455 verdict360 needs a
+    10-day grid out to a year so an ensemble spread can be read at the same
+    days NEMO's own ``nn_stock`` restarts land on -- the alternative,
+    growing the module-level tuple, would silently change every sibling
+    probe's artifact.
     """
+    # Resolved here and handed DOWN as an argument -- nothing is written into the
+    # environment, so two ladders can be built in one process without either
+    # inheriting the other's setting.
+    ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
-        use_gm_redi=use_gm_redi,
-        surface_tendency_placement=surface_tendency_placement)
+        use_gm_redi=use_gm_redi, restart_file=restart_file,
+        surface_tendency_placement=surface_tendency_placement,
+        e3t_mode=ladder_mode)
+
+    # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
+    # materialized geometry and state (arrays cannot lie about their dtype the
+    # way the policy global can). Shared gate, not a re-derivation.
+    from legoesm.ocean.fidelity.precision_gate import require_fp64
+    if _fp64_requested():
+        require_fp64(br.geometry, st, context="kamm_twin_90d oracle twin")
+    control_dtype_stamp = str(np.asarray(st.T.data).dtype)
+    print(f"PRECISION: materialized state dtype = {control_dtype_stamp}")
 
     if perturb_seed is not None:
         rng = np.random.default_rng(perturb_seed)
@@ -382,6 +736,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         print(f"PERTURB seed={perturb_seed}: max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}",
               flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
+
     nsteps = STEPS_PER_DAY * n_days
 
     # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
@@ -396,15 +751,150 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     else:
         dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
 
+    # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
+    # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
+    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
+    # The clock the NEMO run this twin is scored against is actually on, read
+    # from the same restart.  Stamping it next to the clock the twin USED lets
+    # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
+    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    # Everything about this run a comparison must hold fixed.  A two-arm A/B
+    # that changes the clock and something else is a confound, and nothing in
+    # the artifact could see it before this stamp existed.
+    run_config = json.dumps({
+        "recipe": recipe, "n_days": int(n_days),
+        "run_traj": run_traj, "run_stepdump": run_stepdump,
+        "restart_file": restart_file,
+        "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
+        "surface_tendency_placement": surface_tendency_placement,
+        "perturb_seed": perturb_seed,
+    }, sort_keys=True)
+
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
 
+    # #1455 PHASE-2: the ACC transport reducer, built ONCE and used for both
+    # the daily readout and the injected-transport stamp.  Two reducers here
+    # would be two chances for a staggering drift, which is the defect class
+    # this campaign has spent the most time on.
+    #
+    # Two reductions are stored:
+    #   acc_dep  -- the DEPOSIT's own (full 2-D e2u, e3t_1d ladder, rows
+    #               1..197, MEAN over longitudes 2..-2).  R(t) is a ratio of
+    #               this functional to itself, so no cross-metric staggering
+    #               enters the retention number.
+    #   acc_gate -- acc_thermal_wind.acc_full, the recorded gate metric
+    #               (MEDIAN over longitudes), for context against the gap.
+    _acc_dep_daily = _acc_gate_daily = None
+    _acc_pair = None
+    _injected_sv = 0.0
+    if daily_acc or perturb_baro is not None:
+        import netCDF4 as _nc
+        import acc_thermal_wind as _A
+        _mmp = f"{run_traj}/mesh_mask.nc"
+        # The gate reducer loads its OWN mesh at import time from a hardcoded
+        # path.  If that is not the mesh this run was built on, the two
+        # reductions describe different geometries -- checked, not assumed.
+        if os.path.abspath(getattr(_A, "mm", None).filepath()) != os.path.abspath(_mmp):
+            raise SystemExit(
+                f"FATAL: acc_thermal_wind loaded {_A.mm.filepath()} but this "
+                f"run uses {_mmp}; the two reducers would describe different "
+                "geometries")
+        _mmd = _nc.Dataset(_mmp)
+        _e2u2d = np.asarray(_mmd.variables["e2u"][0]).squeeze()          # (j,i)
+        _e3t1d = np.asarray(_mmd.variables["e3t_1d"][:]).squeeze()       # (k,)
+        _um3 = np.moveaxis(np.asarray(_mmd.variables["umask"][0]).squeeze(),
+                           0, -1) > 0.5                                  # (j,i,k)
+        _mmd.close()
+
+        def _acc_pair(u_full):
+            """(deposit-reducer Sv, gate-metric Sv) from the model's u faces."""
+            u = np.asarray(u_full, dtype=np.float64)[:, 1:53, :]
+            u = np.where(_um3, u, 0.0)
+            # rows 1..197 then MEAN over longitudes 2..-2, matching acc_sv
+            col = np.einsum("jik,k,ji->ji", u, _e3t1d, _e2u2d)[1:198, :].sum(axis=0)
+            dep = float(col[2:-2].mean()) / 1.0e6
+            # NOTE: acc_thermal_wind.load_lego carries a line
+            #   u[:, 47, :] = lU[:, 48, :]
+            # which is a NO-OP after the [:, 1:53] slice (index 47 already IS
+            # original column 48), traced back to an editing leftover in
+            # compare_fullframe.py.  It is deliberately NOT reproduced here.
+            gate = _A.acc_full(u, _A.umask)
+            return dep, gate
+
+    if daily_acc:
+        _acc_dep_daily = np.full(n_days, np.nan, dtype=np.float64)
+        _acc_gate_daily = np.full(n_days, np.nan, dtype=np.float64)
+        print(f"daily ACC enabled (mesh {run_traj}/mesh_mask.nc)", flush=True)
+
+    # #1455 PHASE-2 MEASUREMENT 1, the RETENTION FACTOR.  The per-step deposit
+    # is an INJECTION; the ACC gap is an ACCUMULATION, and converting one to
+    # the other needs the trajectory's retention of a one-step injection --
+    # never measured on this campaign, and the thing that voided every
+    # "x times the budget row" ratio (89dadfeb4, eb3f6d23d).
+    #
+    # This injects the MEASURED deposit's own barotropic velocity field, once,
+    # at t=0, on top of an otherwise byte-identical free run.  The field is
+    # depth-UNIFORM, so it adds exactly that barotropic increment and zero
+    # baroclinic shear, and its section transport at t=0+ is the deposit
+    # itself.  Column 0 of lego's u is the periodic wrap of NEMO's last column
+    # -- the same mapping the forcing substitution established.
+    if perturb_baro is not None:
+        _pb = np.load(perturb_baro, allow_pickle=True)
+        _dU = np.asarray(_pb[perturb_baro_key], dtype=np.float64)   # (jpj,jpi)
+        _u0 = np.asarray(st.u.data, dtype=np.float64)               # (jpj,jpi+1,nz)
+        if _dU.shape != (_u0.shape[0], _u0.shape[1] - 1):
+            raise SystemExit(
+                f"FATAL: perturbation {_dU.shape} does not match the u grid "
+                f"{_u0.shape}; refusing to broadcast a guess")
+        if not np.all(np.isfinite(_dU)):
+            raise SystemExit("FATAL: non-finite values in the perturbation field")
+        _add = np.zeros_like(_u0)
+        _add[:, 1:, :] = (perturb_baro_scale * _dU)[:, :, None]
+        _add[:, 0, :] = perturb_baro_scale * _dU[:, -1][:, None]
+        # A dry u-cell must stay exactly 0.  dU_avg is already masked by NEMO's
+        # surface umask, but the column below the bathymetry is not, so mask
+        # against the model's own 3-D wet u-faces rather than a rebuilt guess.
+        import netCDF4 as _nc0
+        _mm0 = _nc0.Dataset(f"{run_traj}/mesh_mask.nc")
+        _umask3 = np.moveaxis(
+            np.asarray(_mm0.variables["umask"][0]).squeeze(), 0, -1) > 0.5
+        _mm0.close()
+        _add[:, 1:, :] = np.where(_umask3, _add[:, 1:, :], 0.0)
+        _add[:, 0, :] = np.where(_umask3[:, -1, :], _add[:, 0, :], 0.0)
+        _u_pert = jnp.asarray(_u0 + _add, dtype=st.u.data.dtype)
+        # The BEFORE level gets the SAME increment.  Perturbing only the now
+        # level of a leapfrog state plants a splitting (computational) mode
+        # that the Asselin filter then damps over the first few steps -- which
+        # would contaminate R(day 1), the load-bearing number here, with an
+        # artifact of the time scheme rather than the ocean's response.  The
+        # T-perturbation path documents exactly this hazard and this one
+        # inherited none of it.
+        if getattr(st, "u_before", None) is not None:
+            _ub = np.asarray(st.u_before.data, dtype=np.float64)
+            st = st._replace(u_before=st.u_before.replace(
+                data=jnp.asarray(_ub + _add, dtype=st.u_before.data.dtype)))
+        # THE NORMALISER, MEASURED.  Every retention factor divides by this
+        # number, so it is computed from the state BEFORE and AFTER the
+        # injection with the run's own reducer and STAMPED into the artifact.
+        # It was previously a hand-typed default on the scoring side, which
+        # would have divided an in-loop-pattern response by the TOTAL
+        # deposit the moment --perturb-baro-key changed.
+        _dep_before, _ = _acc_pair(_u0)
+        _dep_after, _ = _acc_pair(np.asarray(_u_pert, dtype=np.float64))
+        _injected_sv = _dep_after - _dep_before
+        st = st._replace(u=st.u.replace(data=_u_pert))
+        print(f"PERTURB-BARO {perturb_baro}:{perturb_baro_key} scale="
+              f"{perturb_baro_scale:g}  max|du|={np.abs(_add).max():.4e} m/s  "
+              f"nonzero={int((_add != 0).sum())}  "
+              f"INJECTED TRANSPORT={_injected_sv:+.6e} Sv", flush=True)
     eta_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
 
-    snap_days = tuple(d for d in SNAP_DAYS if d <= n_days) if save_3d else ()
+    snaps = resolve_snap_days(snap_days, n_days, save_3d)
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
     if save_3d:
         t3d[0] = np.asarray(st.T.data, dtype=np.float32)
@@ -423,12 +913,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     for k in range(nsteps):
         if _sf_placement == "leapfrog_rhs":
             st, _ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT,
-                return_rate=True)
+                st, forcing, br.z_coord, cfg, DT,
+                t_seconds=t0_sec + (k + 1) * DT, return_rate=True)
             st = dyn(st, _ext_rate)
         else:
-            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                     t_seconds=(k + 1) * DT)
+            st = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
 
         if (k + 1) % STEPS_PER_DAY == 0:
@@ -448,12 +938,22 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             u_now = u_full[:, 1:]
             v_now = v_full[1:, :]
 
+            if daily_acc:
+                _d, _gt = _acc_pair(st.u.data)
+                if not (np.isfinite(_d) and np.isfinite(_gt)):
+                    raise SystemExit(
+                        f"FATAL: non-finite ACC at day {day_num} "
+                        f"(dep={_d!r} gate={_gt!r}) -- a NaN transport must "
+                        "never be averaged away into a retention curve")
+                _acc_dep_daily[day_idx] = _d
+                _acc_gate_daily[day_idx] = _gt
+
             eta_daily[day_idx] = eta_now
             sst_daily[day_idx] = t_now
             u_daily[day_idx] = u_now
             v_daily[day_idx] = v_now
 
-            if save_3d and day_num in snap_days:
+            if save_3d and day_num in snaps:
                 t3d[day_num] = np.asarray(st.T.data, dtype=np.float32)
                 s3d[day_num] = np.asarray(st.S.data, dtype=np.float32)
                 eta3d[day_num] = np.asarray(st.eta.data, dtype=np.float32)
@@ -482,8 +982,34 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         day=np.arange(1, n_days + 1, dtype=np.int32),
         blew_up_at_step=(blew_up_at if blew_up_at is not None else -1),
         stable=stable,
+        # #1455: stamp the seasonal-clock offset INTO the artifact so a scorer
+        # can read the one variable under test instead of trusting a filename.
+        seasonal_t0_seconds=np.float64(t0_sec),
+        # #1455: same reason -- stamp WHICH vertical ladders the bridge handed
+        # legoESM, so the gate can say which grid a score was earned on instead
+        # of inferring it from a filename. This is the value resolve_ladder_mode
+        # RETURNED at the top of this function, not a re-read of the environment
+        # -- provenance must not come from mutable process state.
+        nemo_ladder_mode=np.str_(ladder_mode),
+        # #1455 512517fdc: stamp the precision the arm was built at.
+        control_dtype=np.str_(control_dtype_stamp),
+        # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
+        seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
+        run_config=np.str_(run_config),
     )
-    for d in snap_days:
+    if daily_acc:
+        # #1455 Phase-2: stamp the perturbation next to the response it caused,
+        # so a retention curve can never be assembled from a mislabelled arm.
+        save_kwargs["acc_dep_daily"] = _acc_dep_daily
+        save_kwargs["acc_gate_daily"] = _acc_gate_daily
+        save_kwargs["perturb_baro"] = np.str_(perturb_baro or "")
+        save_kwargs["perturb_baro_key"] = np.str_(perturb_baro_key)
+        save_kwargs["perturb_baro_scale"] = np.float64(
+            perturb_baro_scale if perturb_baro else 0.0)
+        # The MEASURED injected transport, the number every retention factor
+        # divides by.  Stamped so the scorer never has to be told it.
+        save_kwargs["injected_sv"] = np.float64(_injected_sv)
+    for d in snaps:
         if d in t3d:
             save_kwargs[f"T3d_day{d}"] = t3d[d]
             save_kwargs[f"S3d_day{d}"] = s3d[d]
@@ -493,7 +1019,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
 
     np.savez(out_path, **save_kwargs)
     print(f"SAVED {out_path}  stable={stable}  "
-          f"3-D snapshots at days={sorted(snap_days)}", flush=True)
+          f"3-D snapshots at days={sorted(snaps)}", flush=True)
     return stable
 
 
@@ -536,11 +1062,40 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
+    p.add_argument("--legacy-1d-ladder", action="store_true",
+                   help="build legoESM on the 1-D REFERENCE vertical ladder "
+                        "(LEGOESM_NEMO_E3T=off) instead of NEMO's own "
+                        "thickness+T-depth ladders. Historical-reproduction "
+                        "mode: it costs +2.93 Sv of day-90 circumpolar "
+                        "transport error against +0.29 Sv on the default "
+                        "(#1455), and prints a loud banner. Fatal if "
+                        "LEGOESM_NEMO_E3T is also set to anything but 'off'.")
     p.add_argument("--perturb-seed", type=int, default=None,
                     help="#1492 item-2.2 noise control: apply a 1e-14-relative "
                          "multiplicative perturbation to the bridged now-level "
                          "T using numpy.random.default_rng(seed); default None "
                          "= no perturbation")
+    p.add_argument("--perturb-baro", default=None,
+                   help="#1455 Phase-2 Measurement 1: npz holding a "
+                        "depth-uniform barotropic velocity field, injected ONCE "
+                        "at t=0 into the now-level u. Written by "
+                        "substep_traj_compare.py's DINO_1455_DEPOSIT_MAP block.")
+    p.add_argument("--perturb-baro-key", default="dU_avg",
+                   help="which array in --perturb-baro to inject: dU_avg (the "
+                        "TOTAL per-step deposit) or dU_sub (the in-loop share)")
+    p.add_argument("--perturb-baro-scale", type=float, default=1.0,
+                   help="multiplier on the injected field; the linearity "
+                        "control arm uses 0.5, the sign arm -1.0")
+    p.add_argument("--snap-days", default=None,
+                   help="comma-separated days for the --save-3d 3-D snapshots "
+                        "(default: the recorded 0,30,60,90 grid). Days past "
+                        "--days are dropped.")
+    p.add_argument("--daily-acc", action="store_true",
+                   help="#1455 Phase-2: store the ACC transport EVERY day under "
+                        "both the deposit's reducer and the recorded gate's. "
+                        "The 0/30/60/90 snapshot grid cannot resolve a decay "
+                        "timescale of days, which is what the retention "
+                        "measurement is pre-registered to discriminate.")
     return p.parse_args(argv)
 
 
@@ -587,8 +1142,65 @@ def _smoke_check_vmix_scheme_override():
           f"({base.surface_tendency_placement} -> {_other})")
 
 
+def provenance_gate() -> None:
+    """Stamp source provenance and REFUSE to run from a dirty tracked tree.
+
+    Added after the 2026-08-19/20 reconciliation (#1455, a009c6812): two runs
+    of this harness at byte-identical committed source differed by 2.5 Sv in
+    day-90 ACC, and the second review's log forensics left "an uncommitted
+    working-tree edit" as the sole surviving candidate -- the difference is
+    unrecoverable because nothing stamped the tree state. Every future run
+    prints the HEAD sha and the tracked-file dirt count; a dirty tree aborts
+    unless LEGOESM_ALLOW_DIRTY=1 is set explicitly (and then the dirt list is
+    printed so the log carries what the tree carried).
+    """
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    dirt = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.strip()
+    print(f"PROVENANCE: HEAD={sha} dirty_tracked_files={len(dirt.splitlines())}")
+    if dirt:
+        print("PROVENANCE: dirty tracked files:")
+        for line in dirt.splitlines():
+            print(f"  {line}")
+        if os.environ.get("LEGOESM_ALLOW_DIRTY") != "1":
+            raise SystemExit(
+                "REFUSING to run from a dirty tracked tree (see #1455 "
+                "a009c6812: an uncommitted edit produced an unattributable "
+                "2.5 Sv shift). Commit or stash, or set LEGOESM_ALLOW_DIRTY=1 "
+                "to run anyway with the dirt list stamped in the log.")
+
+
+def _fp64_requested() -> bool:
+    return os.environ.get("FP64", "1") == "1"
+
+
+def _precision_gate() -> None:
+    """Set the fp64 policy at entry (the materialized check runs later).
+
+    Added after the 0.213 Sv "baseline discrepancy" (#1455, 512517fdc): arms
+    run without the run_fp64.py wrapper silently built the whole oracle
+    comparison at the fp32 policy default (JAX_ENABLE_X64 alone does not set
+    the policy -- skill Rule 1c). This only WRITES the policy; writing and
+    re-reading the same global proves nothing (review a0cd04b8: a backend
+    without f64 hardware clamps the real arrays to f32 while the policy
+    still reads f64). The binding check is require_fp64() on the BUILT
+    geometry+state inside run_twin -- the shared gate every sibling probe
+    uses (ocean/fidelity/precision_gate.py). FP64=0 = deliberate fp32 arm.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    if _fp64_requested():
+        set_policy(PrecisionPolicy.fp64())
+
+
 def main(argv=None):
     args = _parse_args(argv)
+    provenance_gate()
+    _precision_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return
@@ -597,7 +1209,14 @@ def main(argv=None):
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
-              perturb_seed=args.perturb_seed)
+              perturb_seed=args.perturb_seed,
+              perturb_baro=args.perturb_baro,
+              perturb_baro_key=args.perturb_baro_key,
+              perturb_baro_scale=args.perturb_baro_scale,
+              daily_acc=args.daily_acc,
+              snap_days=(None if args.snap_days is None else
+                         tuple(int(x) for x in args.snap_days.split(","))),
+              legacy_1d_ladder=args.legacy_1d_ladder)
 
 
 if __name__ == "__main__":

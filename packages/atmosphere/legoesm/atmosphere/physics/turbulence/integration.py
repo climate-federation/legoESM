@@ -1140,7 +1140,20 @@ def _make_spectral_pe_turbulence(
         # Pin the column-physics dtype to the gridded state precision so
         # we never silently flow x64 zeros into the column path.
         _state_dtype = T.dtype
-        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+        # Water vapour from the state's tracer pytree, exactly as the
+        # hydrostatic / MPAS / cubed-sphere bridges above do.  This lane
+        # used to hand the scheme a hard-coded ZERO humidity column: the
+        # turbulence closure then saw a bone-dry atmosphere (no moist
+        # buoyancy in w'thv', a PDF cloud fraction computed from q_v = 0)
+        # and its surface latent flux was evaluated against q_v = 0, i.e.
+        # the largest moisture gradient the bulk formula can produce.
+        # Clipped at zero on the way in, matching the microphysics bridge.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = jnp.maximum(_qv_data.reshape(ncol, nlev), 0.0)
+        else:
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -1212,12 +1225,38 @@ def _make_spectral_pe_turbulence(
         # Temperature tendency to spectral
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
+        # Moisture tendency [kg/kg/s], positive = moistening, the same
+        # sign convention the hydrostatic and MPAS bridges export.  Without
+        # this the boundary layer moved momentum and heat but NOT water:
+        # surface evaporation and vertical moisture mixing were computed by
+        # the scheme and then discarded, so no turbulent flux of water
+        # vapour reached the dycore on the spectral lane.  Untouched tracer
+        # keys are mirrored as zeros so the combined wrapper's per-key
+        # accumulation and the RK tree-map see a complete pytree.
+        tracers_tend = None
+        if state.tracers is not None:
+            dq_v_dt = turb_out.dq_v_dt.reshape(n_lat, n_lon, nlev)
+            tracers_tend = {}
+            for name, template in state.tracers.items():
+                if name == "q_v":
+                    arr = dq_v_dt
+                elif hasattr(template, "data"):
+                    arr = jnp.zeros_like(template.data)
+                else:
+                    arr = jnp.zeros_like(template)
+                if hasattr(template, "data") and hasattr(template, "replace"):
+                    tracers_tend[name] = template.replace(
+                        data=arr.astype(template.data.dtype))
+                else:
+                    tracers_tend[name] = arr.astype(template.dtype)
+
         tendencies = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=dvor_hat),
             div_hat=state.div_hat.replace(data=ddiv_hat),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=tracers_tend,
         )
         return tendencies, _carry_update_with_cloud_fraction(
             carry_field, tke_out, turb_out)

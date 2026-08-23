@@ -57,11 +57,47 @@ is the pre-dyn_core ``delp`` (``:472-478``), copied per ``n_map``.
 The remap then makes its ``nr`` tracer passes through
 ``fv_mapz.F90:330-342`` as before.
 
-The tracers still do not FEED BACK on this deck, and the guards that
-keep that visible remain: ``zvir != 0`` (the ``dp1 = zvir*q(sphum)``
-coupling at ``:291``/``:402`` and the ``pt/(1 + r_vir*q)`` at
-``fv_mapz.F90:975``) and ``consv_te != 0`` (the total-energy fixer)
-are refused, exactly as before.
+MOIST FEEDBACK IS ENABLED ON BOTH ARMS (hydrostatic 2026-08-19,
+non-hydrostatic 2026-08-20).  ``zvir != 0`` forms
+``dp1 = zvir*q(sphum)`` (``:291``) once before the k_split loop and
+couples it into ``pt*(1+dp1)/pkz`` (``:402``), with the closing
+``pt/(1 + r_vir*q)`` at ``fv_mapz.F90:975`` consuming the POST-transport
+humidity.  On the NON-hydrostatic arm it ALSO enters the ``pkz`` this
+module recomputes at ``:299-322`` --
+``exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz))``, the factor INSIDE the log
+-- which is why that pkz is recomputed from the step-entry state rather
+than taken from the caller.  On the PINNED (adiabatic) deck zvir is 0
+and the tracers remain passengers, which is why the certified 1.1866e-09
+parity is unaffected.  Still refused, and gated by a behavioural test:
+``consv_te != 0`` (the total-energy fixer, ``fv_mapz.F90:628-747``).
+
+The oracle's ``moist_phys = .false.`` NH arm (``:335``) forces
+``dp1 = 0`` and takes the DRY pkz, so it is not a third lane: it is
+exactly the ``zvir = 0`` lane, and needs no flag here.  ``moist_phys``
+reaches nothing else this lane models -- its only other uses are the
+refused ``consv_te`` energy path (``:364``), a ``fv_mapz`` argument the
+oracle itself marks ``not used`` (``fv_mapz.F90:129``), and the
+``#ifdef FILL2D`` block at ``:546``, which touches only the condensate
+species (liq_wat/rainwat/ice_wat/snowwat/graupel), each guarded on
+``> 0`` and all absent from this sphum-only lane.
+
+``adiabatic`` likewise reaches exactly ONE branch, ``fv_mapz.F90:985``
+(``flagstruct%adiabatic`` is passed at ``:627`` and used nowhere else),
+which is why threading it honestly on the moist NH arm changes nothing
+else -- and why the moist HYDROSTATIC arm can keep passing
+``adiabatic=True`` where the oracle deck resolves ``.false.``: ``:975``
+is ungated, which the mapz gate's hydrostatic control checks.
+
+THAT SINGLE-BRANCH CLAIM IS ENFORCED BY NOTHING, so re-run the grep
+before adding any ``adiabatic``-keyed branch to either lane, or before
+reading a new one out of the oracle::
+
+    grep -n adiabatic <oracle>/model/fv_mapz.F90   # :985 only, besides
+                                                   # the declarations
+    grep -rn adiabatic packages/core/legoesm/core/fv3*mapz.py
+
+A second gated branch would make ``adiabatic_flag = hydrostatic or
+zvir == 0.0`` silently wrong on the moist hydrostatic arm.
 
 OMEGA IS AN OUTPUT-ONLY PASSENGER TOO
 -------------------------------------
@@ -76,10 +112,16 @@ returned so a caller can see it, but its values are meaningless and
 """
 from __future__ import annotations
 
+import operator as _operator
+
 import numpy as np
 
 from legoesm.core.fv3_native_acoustic_3d import acoustic_loop_3d
-from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
+from legoesm.core.fv3_native_mapz import (
+    CONSV_MIN,
+    close_out_pt,
+    lagrangian_to_eulerian,
+)
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.grids.fv3_native_gridstruct import (
     FV3_GRAV as _FV3_GRAV,
@@ -198,19 +240,31 @@ def pt_to_theta_v(pt: np.ndarray, pkz: np.ndarray, *, n: int, ng: int,
 
     ``pt = pt*(1 + dp1)/pkz`` with ``dp1 = zvir*q(sphum)``.  ``dp1=None``
     means the adiabatic ``zvir = 0`` lane, where the factor is exactly
-    ``1`` -- written as a separate branch rather than multiplying by a
-    zeros array so the adiabatic lane is bit-identical to ``pt/pkz``.
+    ``1``.  It is a separate branch because the ORACLE forms no ``dp1``
+    at all when ``zvir = 0`` (``:281-294`` is the moist branch), not
+    because a zeros array would round differently: since the
+    association was corrected to ``(pt*(1+dp1))/pkz`` a zeros array is
+    bit-identical (``win*1.0`` is exact).  Gated by
+    ``test_dry_lane_is_bitwise_under_the_moist_patch``.
     """
     ia = ng
     if dp1 is None:
         pt[ia:ia + n, ia:ia + n, :] /= pkz
     else:
-        pt[ia:ia + n, ia:ia + n, :] *= (1.0 + dp1) / pkz
+        # ASSOCIATION IS THE ORACLE'S, not convenience: Fortran evaluates
+        # `pt*(1.+dp1)/pkz` (:402) left to right as (pt*(1+dp1))/pkz.
+        # `pt *= (1.0 + dp1) / pkz` instead forms the quotient FIRST and
+        # multiplies -- a different rounding, and the moist arm had never
+        # been exercised to catch it (the adiabatic lane takes the branch
+        # above). Found by test_moist_arm_matches_the_oracle_expression.
+        win = pt[ia:ia + n, ia:ia + n, :]
+        pt[ia:ia + n, ia:ia + n, :] = win * (1.0 + dp1) / pkz
 
 
 def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
                          pt: np.ndarray, *, ptop: float, akap: float,
-                         n: int, ng: int, km: int) -> dict:
+                         n: int, ng: int, km: int,
+                         dp1: np.ndarray | None = None) -> dict:
     """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
 
     ``init_hydro.F90:95-133`` builds ps/pe/peln/pk identically on both
@@ -224,14 +278,222 @@ def p_var_nonhydrostatic(delp: np.ndarray, delz: np.ndarray,
     ~kappa(1-kappa)/24 * dlnp^2 error on theta (largest in the thickest
     log-layer), which surfaced in the first NH parity as a 0.408 m delz
     residual on every column of every face.
+
+    ``dp1`` selects the MOIST arm (``fv_dynamics.F90:307-309``, the
+    ``moist_phys`` branch), where the log argument carries an extra
+    ``(1.+dp1)`` -- INSIDE the log, in the Fortran's own left-to-right
+    association.  Pre-scaling ``pt`` at the call site instead would
+    reassociate the product.  A separate branch, matching the oracle's
+    own ``moist_phys`` split, so the certified dry NH lane keeps its
+    exact expression.  The
+    oracle's ``moist_phys = .false.`` arm (``:335``) forces ``dp1 = 0``
+    and takes the dry form, so it IS the ``dp1=None`` branch here and
+    needs no flag of its own.
     """
     out = p_var_hydrostatic(delp, ptop=ptop, akap=akap, n=n, ng=ng, km=km)
     rdg = -_FV3_RDGAS / _FV3_GRAV
     ia = ng
+    dpw = delp[ia:ia + n, ia:ia + n, :]
+    ptw = pt[ia:ia + n, ia:ia + n, :]
     out["pkz"][:] = np.exp(akap * np.log(
-        rdg * delp[ia:ia + n, ia:ia + n, :]
-        * pt[ia:ia + n, ia:ia + n, :] / delz))
+        nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1)))
     return out
+
+
+def nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1=None):
+    """The NH ``pkz`` log argument: ``rdg*delp*pt*(1.+dp1)/delz``.
+
+    FACTORED OUT SO THE ASSOCIATION CAN BE GATED BITWISE.  ``pkz``
+    itself ends in ``exp(kappa*log(...))``, and XLA's ``exp`` differs
+    from libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz``
+    is not available -- and a tolerance loose enough to survive that
+    also admits the very mistake the association is guarding against:
+    pre-scaling ``pt`` at the CALL SITE (``rdg*delp*(pt*(1+dp1))/delz``)
+    is algebraically identical and differs only by multiplication
+    rounding, well inside any exp/log-sized window (codex MAJOR, job
+    9442717).  Below the transcendentals the two trees differ by real
+    bits, so the gate can be exact.
+
+    Association is the Fortran's, left to right
+    (``fv_dynamics.F90:314-315``): ``((rdg*delp)*pt)*(1+dp1)/delz`` on
+    the moist arm, ``((rdg*delp)*pt)/delz`` on the dry one.
+    """
+    if dp1 is None:
+        return rdg * dpw * ptw / delz
+    return rdg * dpw * ptw * (1.0 + dp1) / delz
+
+
+def _hs_face(ctx, t: int, n: int, ng: int) -> np.ndarray:
+    """Surface geopotential for face ``t``, or zeros.
+
+    Every duo deck this lane runs resolves ``mountain = .F.`` and the
+    parity harness ASSERTS the oracle's phis is identically zero, so
+    ``hs`` is zeros here -- but the energy integrals reference it at
+    two places each (``phiz(km+1) = hs`` and ``pe(km+1)*hs``), and
+    writing them against a real array rather than dropping the term
+    keeps them readable against the Fortran and correct if a
+    non-zero-orography deck ever appears.
+    """
+    hs6 = ctx.get("hs6")
+    if hs6 is None:
+        return np.zeros((n + 2 * ng, n + 2 * ng), dtype=np.float64)
+    return np.asarray(hs6[t], dtype=np.float64)
+
+
+# --------------------------------------------------------------------
+# The consv_te energy fixer (fv_mapz.F90:628-747 + compute_total_energy)
+# --------------------------------------------------------------------
+# TWO DIFFERENT COLUMN INTEGRALS, and they are NOT the same expression --
+# porting one and reusing it for the other would be wrong in the last
+# bits and wrong in kind:
+#
+#   te0_2d  compute_total_energy (:1128-1151), called from
+#           fv_dynamics.F90:359 BEFORE the theta conversion, so its pt is
+#           TEMPERATURE and it forms tv = pt*(1+qc) itself. Its phiz
+#           accumulates DOWNWARD from the surface (k = km..1).
+#   te_2d   the fixer (:638-658), on the POST-remap state where pt is
+#           already T_v, so it uses cp*pt with no virtual factor. Its gz
+#           accumulates UPWARD from hs (k = 1..km).
+#
+# Both telescope to the same quantity with hs = 0, but not to the same
+# rounding, and the fixer's te_2d is subtracted from te0_2d -- a
+# difference of two ~1e9 numbers whose result drives a ~4e-6 K
+# correction. Each is written in its own direction on purpose.
+
+
+def total_energy_2d_hydrostatic(pt, delp, u, v, pe, peln, hs, rsin2,
+                                cosa_s, *, qc=None, cp: float, rg: float,
+                                n: int, ng: int, km: int) -> np.ndarray:
+    """``te0_2d``: compute_total_energy's hydrostatic branch (:1128-1151).
+
+    ``pt`` is TEMPERATURE here and ``qc`` is ``dp1 = zvir*q(sphum)``
+    (``fv_dynamics.F90:291``), so ``tv`` is the virtual temperature the
+    routine forms itself.  ``qc=None`` is the dry lane, where the
+    oracle's ``pt*(1.+0)`` is exactly ``pt``.
+    """
+    # LAYOUTS (field_shape, verified not assumed): pe is
+    # (n+2, km+1, n+2) with a ONE-cell halo, peln is (n, km+1, n)
+    # compute-only -- BOTH are (i, k, j), so peln[:, k, :] is already
+    # (i, j) and needs no transpose. pt/delp/hs/rsin2/cosa_s are padded
+    # (m_a, ...) and take [ng:ng+n].
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n))
+    ptw = pt[ia:ia + n, ia:ia + n, :]
+    tv = ptw if qc is None else ptw * (1.0 + qc)
+    # phiz DOWNWARD from the surface: k = km..1  (:1133-1138)
+    phiz = np.empty((n, n, km + 1), dtype=np.float64)
+    phiz[:, :, km] = hs[win]
+    for k in range(km - 1, -1, -1):
+        phiz[:, :, k] = phiz[:, :, k + 1] + rg * tv[:, :, k] * (
+            peln[:, k + 1, :] - peln[:, k, :])
+    pe_w = pe[1:n + 1, :, 1:n + 1]          # pe carries a ONE-cell halo
+    te = pe_w[:, km, :] * phiz[:, :, km] - pe_w[:, 0, :] * phiz[:, :, 0]
+    te = te + _ke_column(delp[ia:ia + n, ia:ia + n, :], u, v, rsin2,
+                         cosa_s, cp_times=cp * tv, n=n, ng=ng, km=km)
+    return te
+
+
+def fixer_energy_2d_hydrostatic(pt, delp, u, v, pe, peln, hs, rsin2,
+                                cosa_s, *, cp: float, rg: float,
+                                n: int, ng: int, km: int) -> np.ndarray:
+    """``te_2d``: the fixer's own integral (:638-658).
+
+    ``pt`` is POST-remap ``T_v`` -- the theta_v -> T_v conversion at
+    :209-217 has already run and the closing :975 divide has NOT -- so
+    this uses ``cp*pt`` with no virtual factor, unlike te0_2d above.
+    ``gz`` accumulates UPWARD from ``hs`` (k = 1..km), also unlike it.
+    """
+    ia = ng
+    win = (slice(ia, ia + n), slice(ia, ia + n))
+    ptw = pt[ia:ia + n, ia:ia + n, :]
+    gz = np.array(hs[win], dtype=np.float64, copy=True)
+    for k in range(km):                                     # :641-645
+        gz = gz + rg * ptw[:, :, k] * (peln[:, k + 1, :]
+                                       - peln[:, k, :])
+    pe_w = pe[1:n + 1, :, 1:n + 1]          # pe carries a ONE-cell halo
+    te = pe_w[:, km, :] * hs[win] - pe_w[:, 0, :] * gz       # :646-648
+    te = te + _ke_column(delp[ia:ia + n, ia:ia + n, :], u, v, rsin2,
+                         cosa_s, cp_times=cp * ptw, n=n, ng=ng, km=km)
+    return te
+
+
+def _ke_column(delpw, u, v, rsin2, cosa_s, *, cp_times, n: int, ng: int,
+               km: int) -> np.ndarray:
+    """``sum_k delp*(<cp term> + 0.25*rsin2*KE)`` -- identical in both
+    integrals (:650-656 and :1145-1150), so it is shared rather than
+    written twice.
+
+    The KE form is the oracle's D-grid one: the two u faces of the cell
+    and the two v faces, with a ``cosa_s`` cross term for the
+    non-orthogonality.  ``u`` is (m_a, m_a+1) and ``v`` is (m_a+1, m_a),
+    so the j+1 / i+1 neighbours are slices along DIFFERENT axes.
+    """
+    ia = ng
+    r = rsin2[ia:ia + n, ia:ia + n][:, :, None]
+    c = cosa_s[ia:ia + n, ia:ia + n][:, :, None]
+    u0 = u[ia:ia + n, ia:ia + n, :]          # u(i, j)
+    u1 = u[ia:ia + n, ia + 1:ia + 1 + n, :]  # u(i, j+1)
+    v0 = v[ia:ia + n, ia:ia + n, :]          # v(i, j)
+    v1 = v[ia + 1:ia + 1 + n, ia:ia + n, :]  # v(i+1, j)
+    ke = 0.25 * r * (u0 ** 2 + u1 ** 2 + v0 ** 2 + v1 ** 2
+                     - (u0 + u1) * (v0 + v1) * c)
+    return np.sum(delpw * (cp_times + ke), axis=2)
+
+
+def energy_fixer_zsum0_hydrostatic(pkz, delp, pk, *, ptop: float,
+                                   n: int, ng: int, km: int):
+    """``zsum0`` (:692-703): the column's pkz-weighted mass, plus the
+    ptop term the hydrostatic arm adds."""
+    ia = ng
+    zsum1 = np.sum(pkz * delp[ia:ia + n, ia:ia + n, :], axis=2)
+    return ptop * (pk[ia:ia + n, ia:ia + n, 0]
+                   - pk[ia:ia + n, ia:ia + n, km]) + zsum1
+
+
+def energy_fixer_dtmp(te0_faces, te_faces, zsum0_faces, area_faces,
+                      *, consv: float, n: int, ng: int,
+                      returns_kappa: bool = False):
+    """``dtmp`` (:708-714), the one number the fixer reduces to.
+
+    ``g_sum(..., mode=0, reproduce=.true.)`` is an AREA-WEIGHTED SUM
+    (fv_grid_utils.F90:2946-2996; mode 1 would divide by the global
+    area, and mode 0 does not), so the global-area normalisation cancels
+    in this ratio and only the weighting matters.
+
+    THE NUMERATOR CANCELS, AND THE FIRST VERSION OF THIS DOCSTRING GOT
+    THE ERROR ANALYSIS WRONG (GLM MAJOR, job 9446300). It said a float64
+    sum differs from the oracle's BITWISE_EFP_SUM "at ~1e-16 relative".
+    That bound is relative to ``sum |te0-te|*a``, NOT to the cancelling
+    ``|sum (te0-te)*a|`` that actually divides into ``dtmp`` -- the
+    cancellation amplifies it by the condition number
+
+        kappa = sum |te0-te|*a / |sum (te0-te)*a|
+
+    so the honest statement is ``~1e-16 * kappa``, and kappa is a
+    property of the state, not a constant. ``returns_kappa=True``
+    reports it alongside dtmp so the claim is measured rather than
+    asserted; ``scripts/validate/fv3_native/consv_te_conditioning.py``
+    is the committed probe that prints it and re-does both sums with
+    ``math.fsum`` for comparison.
+
+    What IS established: on the certified deck the gate passes at
+    1.1866e-09 with the response at 1.347e-08. That is a measurement on
+    one state, not a bound for every state.
+    """
+    ia = ng
+    num = den = absnum = 0.0
+    for te0, te, z0, ar in zip(te0_faces, te_faces, zsum0_faces,
+                               area_faces):
+        a = ar[ia:ia + n, ia:ia + n]
+        d = (te0 - te) * a                       # :690, te0_2d - te_2d
+        num += float(np.sum(d))
+        absnum += float(np.sum(np.abs(d)))
+        den += float(np.sum(z0 * a))
+    dtmp = consv * num / den
+    if returns_kappa:
+        kappa = absnum / abs(num) if num != 0.0 else float("inf")
+        return dtmp, kappa
+    return dtmp
 
 
 def fv_dynamics_step(ctx: dict, state: list, press: list, *,
@@ -251,7 +513,10 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                      hord_tr: int = 6, tracer_q_split: int = 0,
                      nord_tr: int = 0, trdm2: float = 0.0,
                      lim_fac: float = 1.0, z_tracer: bool = True,
-                     inline_q: bool = False) -> dict:
+                     inline_q: bool = False,
+                     return_pre_remap: bool = False,
+                     return_substeps: bool = False,
+                     stage_hook=None) -> dict:
     """One ``fv_dynamics`` call: ``bdt`` of model time (``:451-674``).
 
     ``state`` is the six-face prognostic bundle from
@@ -259,6 +524,15 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     ``press`` is six per-face dicts of ``ps``/``pe``/``peln``/``pk``/
     ``pkz`` as :func:`p_var_hydrostatic` builds them.  BOTH are mutated
     in place, exactly as the Fortran's ``intent(inout)`` dummies are.
+
+    THE RETURNED ``press["pkz"]`` IS DRY, ALWAYS.  The remap writes it
+    from the post-remap state with no ``(1+dp1)`` (``fv_mapz.F90:
+    479-481``), and on the moist NH arm the NEXT call overwrites it at
+    ``fv_dynamics.F90:299-322``.  That is exactly what the oracle
+    exposes between calls, so it is not a divergence -- but a consumer
+    that stops BETWEEN steps and assumes "moist run implies moist pkz"
+    would be wrong, which is why it is stated here rather than only in
+    a test (GLM MINOR, job 9442483).
 
     ``pt`` enters as TEMPERATURE and leaves as TEMPERATURE: this routine
     owns the round trip (``:396-408`` in, ``fv_mapz.F90:209-217`` out).
@@ -283,18 +557,102 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     require_uniform_damping_lane(n_sponge=n_sponge, tau=tau, npz=km)
 
     if zvir != 0.0:
-        raise NotImplementedError(
-            "zvir != 0 makes the tracers stop being passengers: dp1 = "
-            "zvir*q(sphum) enters the pt->theta_v conversion "
-            "(fv_dynamics.F90:291, :402) and the closing pt/(1+r_vir*q) "
-            "(fv_mapz.F90:975), and fv_tracer2d -- which would have advected "
-            "that q across the step -- is NOT ported. The pinned deck is "
-            "adiabatic, so zvir = 0.")
-    if consv_te != 0.0:
-        raise NotImplementedError(
-            "consv_te != 0 activates the total-energy fixer "
-            "(fv_mapz.F90:628-747), which is not ported. The pinned deck has "
-            "consv_te = 0.")
+        # HYDROSTATIC moist coupling is enabled; consv_te stays refused
+        # (separate phase). dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291;
+        # USE_COND is NOT defined in this build, so no q_con term) feeds
+        # pt = pt*(1.+dp1)/pkz (:402, ported as pt_to_theta_v) and the
+        # closing pt/(1+r_vir*q) (fv_mapz.F90:975, already ported in
+        # lagrangian_to_eulerian).  Validate, never default: a guessed
+        # tracer index would silently couple an arbitrary species.
+        if q is None:
+            raise ValueError(
+                "zvir != 0 requires tracer arrays, but q is None: "
+                "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
+                "humidity to read.")
+        # operator.index NORMALISES; hasattr alone does not. A object
+        # that implements only __index__ passed the old check and then
+        # died on the bounds COMPARISON with an incidental TypeError
+        # (codex MINOR, job 9442482). bool is excluded by name because
+        # it has __index__ too, and True would select tracer 1.
+        if isinstance(sphum_index, bool):
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer index "
+                f"into q; got the bool {sphum_index!r}, which would "
+                f"silently select tracer {int(sphum_index)}.")
+        try:
+            sphum_index = _operator.index(sphum_index)
+        except TypeError:
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer "
+                f"indexing the specific-humidity tracer in q; got "
+                f"{sphum_index!r}. A guessed index would silently couple "
+                f"the wrong species into theta_v.") from None
+        for _t, _qf in enumerate(q):
+            if len(_qf) <= 0:
+                raise ValueError(
+                    f"zvir != 0 requires nq > 0, but face {_t} carries no "
+                    f"tracers (fv_dynamics.F90:291 needs sphum).")
+            if not 0 <= sphum_index < len(_qf):
+                raise ValueError(
+                    f"sphum_index={sphum_index} out of range "
+                    f"[0, {len(_qf)}) for face {_t}; a negative index would "
+                    f"silently select another tracer by Python wrap-around.")
+        if not hydrostatic and any("delz" not in f for f in state):
+            raise ValueError(
+                "zvir != 0 with non-hydrostatic dynamics needs delz on "
+                "every face: the moist NH pkz is recomputed here from "
+                "delp/pt/delz (fv_dynamics.F90:299-322).")
+    if abs(consv_te) > CONSV_MIN:
+        # Fortran's DEAD BAND (fv_mapz.F90:630): 0 < |consv| <= consv_min
+        # is ACCEPTED and leaves dtmp exactly 0, so it is fixer-OFF here
+        # rather than an error (codex MINOR, job 9446299). Raising on it
+        # was stricter than the oracle.
+        # The energy fixer IS ported now. What it needs that the dry
+        # lane does not: the per-face grid (area/rsin2/cosa_s for the
+        # two column integrals) and a surface geopotential.
+        if not hydrostatic:
+            raise NotImplementedError(
+                "consv_te != 0 with non-hydrostatic dynamics is not "
+                "enabled: compute_total_energy and the fixer both take "
+                "their NON-hydrostatic branches (fv_mapz.F90:1155-1190 "
+                "and :659-687), which integrate phiz from delz and carry "
+                "the w**2 term. Only the hydrostatic pair is ported, and "
+                "the generated oracle deck is hydrostatic.")
+        if consv_te < 0.0:
+            # NEGATIVE consv IS A DIFFERENT PROGRAM, not a sign choice
+            # (codex MAJOR, job 9446299). fv_mapz.F90:738-741 treats it
+            # as a PRESCRIBED energy flux --
+            # dtmp = consv*(grav*pdt*4*pi*radius**2)/g_sum(zsum0) -- and
+            # never forms te0_2d - te_2d at all. Accepting it here would
+            # run the positive branch's physics under the negative
+            # branch's flag.
+            raise NotImplementedError(
+                f"consv_te={consv_te} < 0: fv_mapz.F90:738-741 is the "
+                f"PRESCRIBED-FLUX branch, which needs pdt, grav and the "
+                f"planetary radius and does not use te0_2d - te_2d. Only "
+                f"the positive branch (:630-715) is ported.")
+        if zvir != 0.0:
+            # MOIST x CONSV IS UNSCORED (GLM MAJOR, job 9446300). The
+            # harness refuses the combination, but a refusal that lives
+            # only in the harness is not a refusal: the qc path of
+            # total_energy_2d_hydrostatic (forms tv itself, integrates
+            # DOWN) and the no-virtual path of
+            # fixer_energy_2d_hydrostatic (takes T_v, integrates UP) are
+            # exactly the distinction this port advertises, and under
+            # every existing gate they are dead code. Build a moist
+            # consv deck before enabling this.
+            raise NotImplementedError(
+                "zvir != 0 with consv_te != 0 has no oracle deck, so the "
+                "two energy integrals' virtual-temperature conventions "
+                "are unscored -- the one thing about this port most "
+                "likely to be wrong. Build a moist consv_te deck "
+                "(build_consv_te_oracle.sbatch on the moist deck) "
+                "first.")
+        if ctx.get("gs6") is None:
+            raise ValueError(
+                "consv_te != 0 needs ctx['gs6']: the energy integrals "
+                "are area-weighted and use rsin2/cosa_s "
+                "(fv_mapz.F90:650-656).")
 
     n, ng = ctx["n"], ctx["ng"]
     nq = len(q[0])
@@ -347,11 +705,76 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
     # :413  mdt = bdt / k_split
     mdt = bdt / float(k_split)
 
+    # :355-365  te0_2d, BEFORE the theta conversion below, because
+    # compute_total_energy is called at :359 while pt is still
+    # TEMPERATURE and forms its own tv = pt*(1+dp1).
+    pre_remap = None
+    te0_2d = None
+    if abs(consv_te) > CONSV_MIN:
+        te0_2d = []
+        for t in range(6):
+            gs = ctx["gs6"][t]
+            qc = (zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
+                  if zvir != 0.0 else None)
+            te0_2d.append(total_energy_2d_hydrostatic(
+                state[t]["pt"], state[t]["delp"], state[t]["u"],
+                state[t]["v"], press[t]["pe"], press[t]["peln"],
+                _hs_face(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
+                qc=qc, cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
+
     # :396-408  T -> theta_v, once per fv_dynamics call, on every face.
     for t in range(6):
-        pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
+        if zvir != 0.0:
+            # dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291), formed once
+            # per face BEFORE the k_split loop -- from the step-initial q,
+            # exactly as :281-294 precedes :451. Sliced to the COMPUTE
+            # WINDOW because pkz is (n, n, km) and pt_to_theta_v expects
+            # dp1 already matching it.
+            dp1 = zvir * q[t][sphum_index][ng:ng + n, ng:ng + n, :]
+            if not hydrostatic:
+                # :299-322 is INSIDE fv_dynamics and runs on every call
+                # on BOTH NH arms -- but only the MOIST one is recomputed
+                # here. The dry NH arm still trusts the caller's pkz,
+                # which is covered by the certified dry parity and is
+                # deliberately left alone; do not read this comment as
+                # licence to recompute there (GLM, job 9442483). Moist:
+                # on the NH moist arm it OVERWRITES pkz with
+                # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
+                # step-entry state, while pt is still TEMPERATURE. The
+                # caller's pkz -- built dry by p_var_nonhydrostatic, or
+                # carried over from the previous step's remap -- is
+                # missing the virtual factor, so it is recomputed here
+                # rather than trusted. The dry NH lane never enters this
+                # branch and keeps its certified expression untouched.
+                press[t]["pkz"][:] = p_var_nonhydrostatic(
+                    state[t]["delp"], state[t]["delz"], state[t]["pt"],
+                    ptop=ptop, akap=akap, n=n, ng=ng, km=km,
+                    dp1=dp1)["pkz"]
+            pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng,
+                          dp1=dp1)
+        else:
+            # dp1=None is the ORACLE's shape: fv_dynamics.F90:281-294
+            # forms no dp1 at all when zvir = 0, so there is nothing to
+            # multiply by. NOT a rounding argument -- an earlier version
+            # of this comment claimed a zeros array 'rounds twice', which
+            # was true of the OLD association `(1.+dp1)/pkz` and became
+            # FALSE when it was corrected: 1.0+0.0 is exactly 1.0 and
+            # win*1.0 is exact, so zeros is now bit-identical. Measured,
+            # job 9442478. The branch stays because it is the oracle's
+            # structure and skips a whole-field multiply.
+            pt_to_theta_v(state[t]["pt"], press[t]["pkz"], n=n, ng=ng)
 
     remapped = km > REMAP_MIN_NPZ
+    # fv_mapz.F90:985: on the NH arm the closing T_v -> T conversion is
+    # inside `if (.not. adiabatic)`.  The certified deck is adiabatic AND
+    # dry, so True was unconditionally right; with moist NH it is not --
+    # adiabatic=True there would make the oracle skip the conversion and
+    # leave pt virtual.  With consv = 0, dtmp is identically 0 and the
+    # oracle's :987 expression is exactly the one this lane computes, so
+    # False is the faithful flag for the moist NH arm.  The remap refuses
+    # the other combination rather than trusting this line.
+    adiabatic_flag = hydrostatic or zvir == 0.0
+    substeps: list | None = [] if return_substeps else None
     for n_map in range(1, k_split + 1):
         last_step = (n_map == k_split)
 
@@ -369,6 +792,8 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                          p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                          use_logp=use_logp,
                          press_out=press_out,
+                         substeps_out=(substeps if last_step else None),
+                         stage_hook=stage_hook,
                          flux_cap=flux_cap)
         if len(press_out) != 6:
             raise RuntimeError(
@@ -412,6 +837,21 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                     press[t]["pk"][ng:ng + n, ng:ng + n, :] = g["pk"]
             continue
 
+        if return_pre_remap and last_step:
+            # BY RETURN, never a callback (C6), and never a probe that
+            # re-runs the acoustic chain itself -- that would be a
+            # second implementation of the thing under test, i.e. how
+            # you measure a different program and report it as this
+            # one's. Only the LAST n_map is captured, because that is
+            # the state the oracle's own dump sees: its dump sits
+            # between dyn_core and Lagrangian_to_Eulerian.
+            pre_remap = [{k: np.array(v, copy=True)
+                          for k, v in state[t].items()} for t in range(6)]
+
+        # The fixer runs only at last_step (fv_mapz.F90:628), so only
+        # that iteration defers its closing conversion. Every other
+        # n_map keeps the certified path byte for byte.
+        _defer = bool(last_step) and abs(consv_te) > CONSV_MIN
         for t in range(6):
             g = press_out[t]
             ia = ng
@@ -451,16 +891,61 @@ def fv_dynamics_step(ctx: dict, state: list, press: list, *,
                 kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
                 q=q[t], omga=omga[t], sphum_index=sphum_index,
                 last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=True,
                 w=(None if hydrostatic else state[t]["w"]),
                 delz=(None if hydrostatic else state[t]["delz"]),
                 ws=(None if hydrostatic else g["ws"]),
                 kord_wz=kord_wz, w_limiter=w_limiter,
                 rdgas=(None if hydrostatic else _FV3_RDGAS),
                 grav=(None if hydrostatic else _FV3_GRAV),
+                adiabatic=adiabatic_flag,
                 consv=consv_te, fill=False, do_sat_adj=False,
-                do_inline_mp=False, do_adiabatic_init=False)
+                do_inline_mp=False, do_adiabatic_init=False,
+                defer_close=_defer)
 
-    return {"state": state, "press": press, "q": q,
-            "omga": omga, "omga_is_meaningless": True,
-            "pt_units": "K" if remapped else "theta_v"}
+        if _defer:
+            # THE REDUCTION, and the reason the remap had to be split.
+            # fv_mapz does te_2d -> g_sum -> apply inside ONE call
+            # because its "domain" is every tile at once; here a call is
+            # one face, so the six te_2d/zsum0 are collected first, the
+            # area-weighted sums taken over all of them, and only then
+            # is :975 applied. pt is T_v at this point on every face --
+            # defer_close skipped exactly that conversion.
+            te_2d, zsum0 = [], []
+            for t in range(6):
+                gs = ctx["gs6"][t]
+                te_2d.append(fixer_energy_2d_hydrostatic(
+                    state[t]["pt"], state[t]["delp"], state[t]["u"],
+                    state[t]["v"], press[t]["pe"], press[t]["peln"],
+                    _hs_face(ctx, t, n, ng), gs["rsin2"], gs["cosa_s"],
+                    cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km))
+                zsum0.append(energy_fixer_zsum0_hydrostatic(
+                    press[t]["pkz"], state[t]["delp"], press[t]["pk"],
+                    ptop=ptop, n=n, ng=ng, km=km))
+            dtmp = energy_fixer_dtmp(
+                te0_2d, te_2d, zsum0,
+                [ctx["gs6"][t]["area"] for t in range(6)],
+                consv=consv_te, n=n, ng=ng)
+            for t in range(6):
+                close_out_pt(state[t]["pt"], press[t]["pkz"], q[t],
+                             sphum_index=sphum_index, r_vir=zvir,
+                             dtmp=dtmp, cp=cp_air, n=n, ng=ng)
+
+    out = {"state": state, "press": press, "q": q,
+           "omga": omga, "omga_is_meaningless": True,
+           "pt_units": "K" if remapped else "theta_v"}
+    if return_pre_remap:
+        out["pre_remap"] = pre_remap
+    if return_substeps:
+        # SAME CONTRACT AS ``pre_remap``: by RETURN, last ``n_map`` only,
+        # deep copies. ``substeps[-1]`` is the state at ``it == n_split``,
+        # which on the NH arm is bitwise ``pre_remap["w"]`` -- nothing
+        # between the acoustic loop's end and dyn_core's return writes
+        # ``w`` (dyn_core.F90:1736-1830) -- so asking for both gives a
+        # free cross-check that the two capture points are where they
+        # claim to be.
+        if len(substeps) != n_split:
+            raise RuntimeError(
+                f"return_substeps: captured {len(substeps)} sub-steps, "
+                f"expected n_split={n_split}")
+        out["substeps"] = substeps
+    return out

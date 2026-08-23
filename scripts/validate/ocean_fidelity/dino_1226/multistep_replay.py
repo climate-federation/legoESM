@@ -72,7 +72,8 @@ Precision / fidelity conventions (mandatory, not optional)
 fp64 explicit (``PrecisionPolicy.fp64()`` set before any bridge call, printed
 dtypes), ``LEGOESM_NEMO_E3T=both`` (NEMO's true 3-D e3t/gdept ladder, per
 ``ocean.fidelity.precision_gate.require_explicit_e3t_mode`` -- #1226's
-12.9% analytic-vs-true-ladder trap), registry-checked time levels wherever a
+analytic-vs-true-ladder trap: 70.4 m at the deepest wet
+level, 12.9% of e3t_0 / 14.8% of e3t_1d), registry-checked time levels wherever a
 dump-file convention applies. NEMO restart fields (tn/sn/.../tb/sb/.../en)
 are NOT ambiguous dump files -- their now/before-level convention is the
 restart file format itself (documented on ``NemoState``/``NemoBeforeState``),
@@ -111,10 +112,83 @@ RUN_TWIN_STEP1 = os.environ.get(
     "DINO_NEMO_RUN_TWIN_STEP1",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TWIN_STEP1",
 )
-IC_STEP = 230400  # y20 continuation day-0 (DINO_00230400_restart_*.nc per-rank tiles)
+# y20 continuation day-0 (DINO_00230400_restart_*.nc per-rank tiles).
+# #1455: overridable so the SAME replay can run at the 90-day twin's own
+# starting point (DINO_1226_IC_STEP=5760 with DINO_NEMO_RUN_TWIN_STEP1
+# pointing at the day-180 per-step reference restarts).  The default is
+# unchanged, so every existing caller and every sibling that mutates
+# IC_STEP behaves exactly as before.
+IC_STEP = int(os.environ.get("DINO_1226_IC_STEP", "230400"))
+# #1455 NOTE, so the next probe does not inherit a silent bug: 230400 steps x
+# 2700 s = 7200 d = EXACTLY 20 x the 360-day year, so at this IC a relative
+# seasonal clock happens to be in phase with the absolute one and the seasonal
+# forcing is bit-identical either way. That is a COINCIDENCE of this restart,
+# not a property of the harness -- every sibling probe that imports IC_STEP and
+# passes a bare `t_seconds=DT` is accidentally, not structurally, correct. The
+# loop below uses the absolute `kt` so a future non-year-boundary IC stays
+# right.
 STEPS_PER_DAY = 32  # RUN_TWIN_STEP1 covers exactly nit000+1 .. nit000+32 (one day)
 
 RECIPE = "nemo_dino_kamm_mlf"
+
+
+def provenance(tag: str = "") -> str:
+    """Print (and return) the git SHA + the effective flags a probe's number
+    depends on.
+
+    A recorded probe number is not citable without these: ``LEGOESM_NEMO_E3T``
+    selects the thickness convention, ``DINO_NEMO_RUN_*`` select the oracle
+    dump set, and the SHA pins the model code that produced it.  ``+dirty``
+    means the working tree carried uncommitted edits at run time.
+    """
+    import subprocess
+    _here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_here, capture_output=True,
+            text=True, timeout=30).stdout.strip() or "<no-sha>"
+        # TRACKED dirt only: a bare `git status --porcelain` counts UNTRACKED
+        # files too, so the flag was permanently on (this tree carries dozens
+        # of scratch files) and therefore carried no information -- an
+        # adversarial review caught an artifact stamped "+dirty" being
+        # described as clean.  Two sibling stampers in this directory already
+        # pass --untracked-files=no; this matches them, and the untracked
+        # count is reported SEPARATELY so nothing is hidden, only separated.
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=_here, capture_output=True, text=True,
+            timeout=60).stdout.strip())
+        n_untracked = len(subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", ":/"],
+            cwd=_here,
+            capture_output=True, text=True,
+            timeout=60).stdout.splitlines())   # lines, not whitespace tokens:
+        # a filename containing a space would otherwise be counted twice.
+    except Exception as exc:                      # never let provenance abort a probe
+        sha, dirty, n_untracked = f"<unavailable: {exc}>", False, -1
+    # EVERY knob that can change the answer, including the wind-control env
+    # vars: a wind-on and a wind-off run must NOT stamp identically, since the
+    # #1455 retraction turns on exactly that variable.  SEQDUMP is stamped too
+    # -- nothing otherwise ties the oracle's ocean.output (read for namelist
+    # switches) to the dump set the numbers came from.
+    _knobs = " ".join(
+        f"{k}={os.environ.get(k)!r}" for k in (
+            "LEGOESM_NEMO_E3T", "JAX_ENABLE_X64", "CUDA_VISIBLE_DEVICES",
+            "DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+            "DINO_RECONCILE",
+            "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
+            "DINO_NEMO_RUN_TWIN_STEP1", "DINO_1226_IC_STEP",
+            # #1455 PHASE 1: the seasonal clock is a knob that changes the
+            # answer on a forcing_annual_cycle=True card, so it is stamped.
+            "DINO_1226_T_SECONDS",
+        ))
+    line = (f"[provenance{(' ' + tag) if tag else ''}] "
+            f"git={sha}{'+dirty-TRACKED' if dirty else ''}"
+            f"+untracked{n_untracked}  {_knobs}  "
+            f"IC_STEP={IC_STEP}  RUN_TRAJ={RUN_TRAJ!r}  "
+            f"RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
+    print(line, flush=True)
+    return line
 
 
 def have_step1_artifacts() -> bool:
@@ -211,6 +285,29 @@ def build_replay_ic(*, recipe: str = RECIPE, run_traj: str = RUN_TRAJ,
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
 
+    # #1455 R6: the kamm_mlf card now SHIPS the NEMO-faithful reconciliation
+    # pair (barotropic_reconcile_target="velocity_avg" +
+    # barotropic_after_reconcile="nemo_mlf_baro_corr").  Every probe that
+    # imports this helper bridges a state with ``u_before`` populated, so the
+    # leap-frog branch runs and NEMO's SECOND reconciliation now fires -- which
+    # SHIFTS every step-level number recorded on those probes before the flip.
+    # Honour the same two ablation env vars kamm_twin_90d.py does, so a
+    # pre-flip baseline is restorable rather than lost:
+    #   DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off
+    # reproduces the composition every pre-2026-08-21 replay number was
+    # recorded on.  Values are validated by the model's own dispatch gates
+    # (barotropic_common.validate_after_reconcile /
+    # barotropic_latlon_cgrid), so a typo raises rather than silently
+    # selecting a default.
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
+    _ar = os.environ.get("DINO_AFTER_RECONCILE")
+    if _ar:
+        cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
+        print(f"ABLATION: barotropic_after_reconcile={_ar}")
+
     st = br.state
     verify_day0_matches_restart(st, s0, br.land_mask)
 
@@ -254,6 +351,7 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         apply_dino_lat_lon_surface_forcing,
         dino_lat_lon_model_config,
         dino_lat_lon_surface_forcing_arrays,
+        dino_step_surface_forcing,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
 
@@ -261,8 +359,41 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
         surface_tendency_placement=surface_tendency_placement,
         run_traj=run_traj, run_twin_step1=run_twin_step1)
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+
+    # Opt-in outer_integrator override for the nemo_mlf step-transcription A/B
+    # (rung (b) of nemo_mlf_step_transcription_spec.md). Same pattern as
+    # dino_year_screen_fullframe.py / kamm_twin_90d.py -- unset/"leapfrog"
+    # leaves the recipe default untouched. nemo_mlf HARD-REQUIRES the NEMO
+    # e3w(Kmm) divisor at construction, so force it here too.
+    _oi = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+    if _oi:
+        if _oi not in ("leapfrog", "nemo_mlf"):
+            raise SystemExit(
+                f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
+                "'leapfrog' or 'nemo_mlf'")
+        mc = mc._replace(
+            outer_integrator=_oi,
+            implicit_vmix_e3t_now_divisor=(
+                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+
     model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
     forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+
+    # #1455 retraction fix: the card routes the WIND MOMENTUM through
+    # model.step(surface_forcing=sf), NOT through the analytic
+    # apply_dino_lat_lon_surface_forcing applicator (which carries only
+    # heat/salt/SW). Passing surface_forcing=None (the retracted bug) drops
+    # the wind entirely -> a fabricated per-step residual. Mirror production
+    # (run_dino.py:665-670,763-767) exactly: build sf iff wind_through_step.
+    _wind = bool(getattr(cfg, "wind_through_step", False))
+    sf_step = dino_step_surface_forcing(forcing) if _wind else None
+    _tau_lo = float(np.min(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    _tau_hi = float(np.max(np.asarray(sf_step.tau_x))) if sf_step is not None else 0.0
+    print(f"FORCING: wind_through_step={_wind} "
+          f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
+          f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]", flush=True)
 
     tmask3 = np.asarray(g.tmask) > 0.5
     umask3 = np.asarray(g.umask) > 0.5
@@ -283,13 +414,20 @@ def run_replay(n_steps: int, *, surface_tendency_placement: str | None = None,
     for k in range(1, n_steps + 1):
         kt = IC_STEP + k
         ext_rate = None
+        # #1455 SEASONAL CLOCK: DINO's analytic forcing follows the DAY OF
+        # YEAR through the ABSOLUTE step index (usrdef_sbc.F90:536), and this
+        # replay starts at NEMO step IC_STEP. Passing k*dt would run the
+        # seasonal year from zero while NEMO is at step IC_STEP+k, which is
+        # the confound corrected in 1c03f8311/076217667. ``kt`` (= IC_STEP+k)
+        # is the same index used to select NEMO's own dump on the next line,
+        # so the two sides cannot drift apart.
         if placement == "leapfrog_rhs":
             st, ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, dt, t_seconds=k * dt, return_rate=True)
+                st, forcing, br.z_coord, cfg, dt, t_seconds=kt * dt, return_rate=True)
         else:
             st = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, dt, t_seconds=k * dt)
-        st = model.step(st, dt, surface_forcing=None, external_tracer_rate=ext_rate)
+                st, forcing, br.z_coord, cfg, dt, t_seconds=kt * dt)
+        st = model.step(st, dt, surface_forcing=sf_step, external_tracer_rate=ext_rate)
 
         # --- path 1: now-level state vs NEMO's restart at the SAME step ---
         ns = nemo_now_state_at(kt, run_twin_step1=run_twin_step1)

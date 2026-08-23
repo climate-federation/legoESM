@@ -110,7 +110,33 @@ __physics_contract__ = {
 # Cloud-optics defaults (fixed): effective-radius bounds.
 _CLOUD_R_EFF_MAX_M = 60.0e-6     # max liquid effective radius for lamc clip [m]
 _R_EFF_ICE_PSD_COEFF = 1.5       # ice effective-radius PSD coefficient
+_RHO_CLOUD_ICE_DEFAULT = 500.0   # coeff-ok: CloudConfig.rho_cloud_ice default [kg/m^3]
 _R_EFF_ICE_DEFAULT_M = 25.0e-6   # fallback ice effective radius [m]
+
+
+def initial_ice_number_from_mass(q_i, rho_cloud_ice: float = _RHO_CLOUD_ICE_DEFAULT):
+    """Ice crystal number [1/kg] giving a PHYSICAL crystal size for seeded ice.
+
+    The initialization counterpart of the M2005 ice effective radius diagnosed
+    below.  That diagnostic inverts the ice PSD, ``r_eff = 1.5 / lambda_i`` with
+    ``lambda_i = (rho_ci*pi*N_i/q_i)^(1/3)``, so ice MASS with a zero crystal
+    NUMBER produces an effective radius of HUNDREDS OF METRES — a finite,
+    plausible-looking number that makes the cloud radiatively almost invisible
+    until the downstream lookup-table clamp pins it at the largest tabulated
+    size instead.
+
+    An initial condition that takes cloud ice from a reanalysis has mass but no
+    number (a reanalysis reports neither), so it hits exactly that case on its
+    first radiation call.  Inverting the same relation at the module's own
+    default ice radius gives the crystals a sane size from the start; the
+    prognostic scheme then evolves the number from there, and its own
+    mass-consistency limiter is free to move it.
+
+    Returns per-MASS number [1/kg], the convention the tracer carries.
+    """
+    lami = _R_EFF_ICE_PSD_COEFF / _R_EFF_ICE_DEFAULT_M
+    return jnp.maximum(jnp.asarray(q_i), 0.0) * lami ** 3 / (
+        jnp.pi * rho_cloud_ice)
 # --- two_region sub-grid cloud-optics inhomogeneity ---
 _INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
 _INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]

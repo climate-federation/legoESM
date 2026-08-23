@@ -957,7 +957,8 @@ class CoupledESMDriver:
                 and self._atm._grid_lat is not None):
             from legoesm.land.clm_surface_map import (
                 download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
-                clm_multilayer_thermal_config, clm_multilayer_ch)
+                clm_multilayer_thermal_config, clm_multilayer_ch,
+                _TUNED_PFT_SNOWMASK_MULTILAYER)
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
@@ -969,9 +970,20 @@ class CoupledESMDriver:
             _c = lambda x: x.astype(_sd) if isinstance(x, jnp.ndarray) else x
             cast = lambda t: jax.tree.map(_c, t)   # cast only the array fields
             ch_cell = clm_multilayer_ch(smap).astype(_sd)
+            # v7 per-PFT canopy snow masking (per-cell scale on the snow-cover
+            # fraction; glacier blends to 1 — no canopy on ice).  Set here, where
+            # the surface map exists: the scalar snow-constant block above cannot
+            # carry a per-cell field (codex: coupled runs were missing the mask).
+            _mask_cell = (
+                (1.0 - jnp.asarray(smap["glacier_frac"]))
+                * (jnp.asarray(smap["pft_fractions"])
+                   @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER))
+                + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
                 hydraulics=cast(clm_hydraulics_config(smap)),
                 thermal=cast(clm_multilayer_thermal_config(smap)),
+                land_albedo=land_cfg.land_albedo._replace(
+                    snow_cover_scale=_mask_cell),
                 Ch_land=ch_cell, Cd_land=ch_cell)
             logger.info("  Soil: CLM reference VG + per-PFT thermal/Ch map (per-column)")
 

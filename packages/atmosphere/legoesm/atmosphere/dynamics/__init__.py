@@ -109,6 +109,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CGridLatLonPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
     "CGridLatLonHydrostaticState": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "CGridLatLonHydrostaticState"),
     "cgrid_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid", "cgrid_latlon_hydrostatic_tendencies"),
+    # --- FV3 six-face duo cube (certified fv_dynamics JAX lane) ---
+    "FV3DuoDynamicsModel": ("legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics", "FV3DuoDynamicsModel"),
+    "FV3DuoConfig": ("legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics", "FV3DuoConfig"),
     # --- MPAS icosahedral ---
     "MPASPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas", "MPASPrimitiveEquationModel"),
     "MPASPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
@@ -223,6 +226,7 @@ AVAILABLE_SOLVERS = [
     "latlon_cgrid_primitive_equations",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
+    "fv3_duo_primitive_equations",
     "plane_compressible_euler",
     "tracer_transport",
     "tracer_transport_mpas",
@@ -250,6 +254,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
 DISCRETIZATION_OPTIONS = [
     "cdgrid", "spectral", "sfno", "u_cast", "mpas", "latlon_cgrid", "plane",
+    "fv3_duo",
     # Legacy names kept as valid options (default to cdgrid when grid is
     # unknown; the driver resolves more precisely using grid_type).
     "finite_volume", "centered",
@@ -278,6 +283,13 @@ _AXIS_TO_SOLVER = {
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
     ("nonhydrostatic", "plane"): "plane_compressible_euler",
+    # ONE solver serves both fv3_duo arms: the certified fv_dynamics lane
+    # is a single program with a static ``hydrostatic`` switch (unlike
+    # mpas/cdgrid, whose NH is a separate solver class).  NH is listed
+    # FIRST so the reverse map below (last key wins on a value collision)
+    # reports the hydrostatic pair as the canonical axes.
+    ("nonhydrostatic", "fv3_duo"): "fv3_duo_primitive_equations",
+    ("hydrostatic", "fv3_duo"): "fv3_duo_primitive_equations",
     ("shallow_water", "latlon_cgrid"): "latlon_cgrid_shallow_water",
     ("hydrostatic", "latlon_cgrid"): "latlon_cgrid_primitive_equations",
     # "finite_volume" and "centered" default to cdgrid when used without
@@ -398,6 +410,7 @@ _SOLVER_TO_CLASS = {
     "tracer_transport_spectral": "SpectralTracerTransportModel",
     "mpas_primitive_equations": "MPASPrimitiveEquationModel",
     "mpas_compressible_euler": "MPASCompressibleEulerModel",
+    "fv3_duo_primitive_equations": "FV3DuoDynamicsModel",
     "plane_compressible_euler": "PlaneCompressibleEulerModel",
     "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
     "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",

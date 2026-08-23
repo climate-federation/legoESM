@@ -19,16 +19,18 @@ def _synthetic_data(ncol=16):
     lat = np.deg2rad(rng.uniform(-80, 80, ncol))
     pft = rng.random((ncol, _N_PFT)); pft /= pft.sum(1, keepdims=True)
     z = lambda v: jnp.full((ncol,), v)
-    # snow falls where the air is below freezing (matches the loader) so the
-    # snow-albedo params carry gradient and the no-inert gate passes in train()
+    # snow falls where the air is below freezing (matches the loader), but only
+    # in the first two months — the pack then AGES over the rest of the year so
+    # the aged-snow params (snow_min, snow_tau_days) carry gradient and the
+    # no-inert gate passes in train() (continuous snowfall pins snow_age at 0).
     Tair = jnp.asarray(285 - 0.3 * np.abs(np.rad2deg(lat)))
     f = [AtmToSurface(
         sw_down=z(200.0), lw_down=z(320.0), precip_total=z(2e-5),
-        precip_snow=jnp.where(Tair < constants.T_freeze, 2e-5, 0.0),
+        precip_snow=jnp.where(Tair < constants.T_freeze, 2e-5 if m < 2 else 0.0, 0.0),
         T_lowest=jnp.asarray(285 - 0.3 * np.abs(np.rad2deg(lat))),
         q_lowest=z(5e-3), u_lowest=z(3.0), v_lowest=z(2.0), p_lowest=z(9.9e4),
         p_surface=z(1.0e5), rho_lowest=z(1.2), cos_zenith=z(0.5), co2_ppmv=z(412.0),
-        has_radiation=z(1.0), has_precipitation=z(1.0)) for _ in range(12)]
+        has_radiation=z(1.0), has_precipitation=z(1.0)) for m in range(12)]
     dom = pft.argmax(1); oh = np.zeros((ncol, _N_PFT)); oh[np.arange(ncol), dom] = 1.0
     return dict(forc=f, lat=jnp.asarray(lat), pft=jnp.asarray(pft),
                 fg=jnp.asarray(rng.random(ncol) * 0.3), wp=z(0.12), fc=z(0.30),

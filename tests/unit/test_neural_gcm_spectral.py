@@ -320,9 +320,11 @@ class TestSpectralRollout:
         diff = float(jnp.max(jnp.abs(out_a.T_hat.data - out_b.T_hat.data)))
         assert diff > 1e-14, "prescribed SST did not reach the rollout physics"
 
-    def test_forcing_with_rad_gating_raises(self):
-        """forcing_base + rad-gating is the classical AMIP combination and
-        must be rejected here (spectral_amip_rollout owns it)."""
+    def test_forcing_reaches_a_subcycled_radiation_call(self):
+        """Sub-cycled radiation plus a forcing dict is the CLASSICAL TRAINING
+        combination and used to be refused outright — which left every such
+        run with no prescribed surface temperature and a fixed equinox-noon
+        sun.  The prescribed field must now reach the radiation call."""
         from legoesm.training.neural_gcm_spectral import (
             carry_to_spectral_state,
             make_sfno_spectral_physics,
@@ -334,13 +336,53 @@ class TestSpectralRollout:
         state = carry_to_spectral_state(carry, _GRID)
         physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
         pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
-        with pytest.raises(ValueError, match="forcing_base"):
-            spectral_rollout(
-                state, physics_fn, _GRID, _SIGMA, pe_config,
-                dt=1800.0, n_steps=1,
-                rad_physics_fn=physics_fn, rad_update_interval=4,
-                forcing_base=self._forcing_base(),
-            )
+        seen = []
+
+        def rad_fn(s, g, sc, *, sim_time_seconds=0.0, forcing=None):
+            seen.append(forcing)
+            return physics_fn(s, g, sc)
+
+        out = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=1,
+            rad_physics_fn=rad_fn, rad_update_interval=4,
+            forcing_base=self._forcing_base(),
+        )
+        assert jnp.all(jnp.isfinite(out.T_hat.data))
+        assert seen and seen[0] is not None
+        assert "T_sfc" in seen[0] and "day_of_year" in seen[0]
+
+    def test_a_radiation_callable_without_a_forcing_kwarg_still_runs(self):
+        """Legacy signature (sim_time_seconds but no forcing): it must keep
+        its elapsed-time thread rather than silently fall back to a call that
+        drops it."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.gcm.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        physics_fn = make_sfno_spectral_physics(_make_small_sfno(), _GRID)
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+        seen = []
+
+        def rad_fn(s, g, sc, *, sim_time_seconds=0.0):
+            seen.append(sim_time_seconds)
+            return physics_fn(s, g, sc)
+
+        spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=1,
+            rad_physics_fn=rad_fn, rad_update_interval=4,
+            sim_time_offset_seconds=7200.0,
+        )
+        # A non-zero offset: the no-kwargs fallback would report 0.0, so this
+        # fails if the call degrades to the signature-less form (codex).
+        assert seen, "the legacy radiation callable was never called"
+        assert float(seen[0]) == pytest.approx(7200.0)
 
 
 # ---------------------------------------------------------------------------

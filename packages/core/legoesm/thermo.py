@@ -625,6 +625,40 @@ def specific_humidity_to_mixing_ratio(
     return q / denom
 
 
+def specific_condensate_to_mixing_ratio(
+    specific_condensate: jax.Array,
+    specific_humidity: jax.Array,
+    *,
+    denominator_floor: float = 1.0e-12,
+) -> jax.Array:
+    """Convert a specific CONDENSATE content to a dry-air mixing ratio.
+
+    Reanalyses report cloud liquid and cloud ice the way they report humidity —
+    as a mass fraction of MOIST air (ERA5 ``specific_cloud_liquid_water_content``
+    / ``specific_cloud_ice_water_content``, both kg/kg).  The physics consumes
+    mixing ratios, mass per unit DRY air, so the conversion divides by the dry
+    fraction rather than by ``1 - c``::
+
+        r_c = c / (1 - q_v - c_liquid - c_ice - ...)
+
+    The dry fraction here uses the VAPOUR content alone, matching
+    :func:`specific_humidity_to_mixing_ratio`, which is the convention the rest
+    of the initialisation path already applies to ``q``.  Omitting the
+    condensate from the denominator understates ``r_c`` by about ``c`` in
+    relative terms: with a heavy cloud load of 1 g/kg that is one part in a
+    thousand, far below the uncertainty of the analysis itself.  It is NOT the
+    same as ``c / (1 - c)``, which would divide by the wrong quantity
+    entirely.
+
+    Negative input (an interpolation undershoot at a cloud edge) is clipped to
+    zero: a negative condensate mass has no meaning and every microphysics
+    scheme downstream would have to guard it.
+    """
+    c = jnp.maximum(jnp.asarray(specific_condensate), 0.0)
+    q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
+    return c / jnp.maximum(1.0 - q, denominator_floor)
+
+
 def specific_humidity_tendency_to_mixing_ratio_tendency(
     specific_humidity: jax.Array,
     specific_humidity_tendency: jax.Array,

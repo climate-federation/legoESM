@@ -79,6 +79,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)                       # acc_thermal_wind (sibling)
 sys.path.insert(0, os.path.dirname(_DIR))      # rebuild_nemo_restart (parent)
 import acc_thermal_wind as A  # noqa: E402  (recorded harness, imported not copied)
+import kamm_twin_90d as _twin  # noqa: E402  (one shared seasonal-clock guard)
 
 DINO = A.DINO
 RUN_90D_TWIN = os.environ.get("DINO_NEMO_RUN_90D_TWIN", f"{DINO}/RUN_90D_TWIN")
@@ -123,6 +124,31 @@ def metrics(st, wet):
 def load_candidate(path, day=90):
     """{"T","S","u","land_mask"} (fp64) from a kamm_twin_90d --save-3d npz."""
     d = np.load(path)
+    # #1455: the twin harness stamps WHICH vertical ladders the bridge handed
+    # legoESM (nemo_ladder_mode). PRINT it, never refuse on it -- both ladders
+    # are legitimately scoreable and the gate's job is to say which grid a score
+    # was earned on, not to pick one. An artifact written before the stamp
+    # existed does NOT record its grid at all -- it may have been run with
+    # LEGOESM_NEMO_E3T set to anything -- so it is reported as unknown, never
+    # guessed at from whatever the default was on the day.
+    # It prints BEFORE the seasonal-clock refusal below, so a candidate that
+    # is refused still records which grid it ran on.
+    ladder = (str(d["nemo_ladder_mode"]) if "nemo_ladder_mode" in d.files
+              else "UNSTAMPED -- this artifact predates the nemo_ladder_mode "
+                   "stamp and does not record which vertical ladders it ran "
+                   "on; read its run log")
+    print(f"vertical ladder of this candidate: {ladder}", flush=True)
+    # #1455 season-bug guard (extend-only): NEMO's analytic surface forcing is
+    # a function of the day of year through the absolute step index
+    # (usrdef_sbc.F90:536), and the day-180 restart carries adatrj=180.0, so a
+    # candidate forced on any other day of the year is a cross-season confound
+    # rather than a fidelity measurement. The guard lives in kamm_twin_90d so
+    # every scorer applies the same one; it refuses an artifact that carries no
+    # clock stamps and one whose clock is not the restart's own.
+    import os as _os
+    if _os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK") != "1":
+        _twin.assert_nemo_seasonal_clock(d, path)
+
     key = f"u3d_day{day}"
     if key not in d:
         raise SystemExit(f"{path} has no {key} -- run kamm_twin_90d.py with "

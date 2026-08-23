@@ -184,9 +184,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # downstream factory finds a matching ``(model_type, discretization,
     # grid_type)`` triple.
     # default=None sentinel: see --grid-type; resolves to "centered".
+    # "fv3_duo" is the certified FV3 six-face duo-cube fv_dynamics lane
+    # (cubed_sphere grid only; slice 1: dry, physics-off, fp64, nlev in
+    # {5, 10} — the component factory refuses everything else loudly).
     parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
-                                  "latlon_cgrid", "cdgrid", "mpas", "spectral"])
+                                  "latlon_cgrid", "cdgrid", "mpas", "spectral",
+                                  "fv3_duo"])
     parser.add_argument("--truncation", type=int, default=None,
                         help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
 
@@ -314,7 +318,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "explicit path will blow up."
         ),
     )
-    parser.add_argument("--diag-days", type=int, default=5)
+    parser.add_argument("--diag-days", type=float, default=5.0,
+                        help="Diagnostic/blow-up-check cadence in days. Values "
+                             "below 1 are honoured and are how a blow-up gets "
+                             "localised in time: the reported failure day is the "
+                             "first SAMPLE, not the first bad step.")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
@@ -1169,6 +1177,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--multilayer-soil-depth", type=float,
                         default=_EXPERIMENT_DEFAULTS.multilayer_soil_depth,
                         help="Total soil-column depth [m] for --use-multilayer-land.")
+    parser.add_argument("--land-calibrated-physics",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_calibrated_physics,
+                        dest="land_calibrated_physics",
+                        help="Run the multilayer land tile in the SAME model its "
+                             "baked per-PFT tables were calibrated under "
+                             "(legoesm.land.config.calibrated_multilayer_setup): "
+                             "MOST surface exchange, SimpleSEB, Farquhar stomata on "
+                             "a prescribed carbon state, and the calibration soil "
+                             "column. Without it the baked canopy conductance "
+                             "(Vc_max25/g1/LCMA) is inert and the tables run under "
+                             "land physics they were never fitted to. Requires "
+                             "--use-multilayer-land --land-stomatal-beta "
+                             "--land-surface-scheme simple_seb and the calibration "
+                             "soil column (checked, never silently overridden).")
     parser.add_argument("--clm-surfdata-path", type=str,
                         default=_EXPERIMENT_DEFAULTS.clm_surfdata_path,
                         help="Pre-staged CLM surfdata NetCDF (PFT/texture/glacier) "
@@ -1319,6 +1342,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "#730). Only active with --land-stomatal-beta. "
                              f"Default {_EXPERIMENT_DEFAULTS.land_gs_max} "
                              "(byte-identical when unchanged).")
+    parser.add_argument("--land-soil-init", type=str,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_init,
+                        choices=["aridity", "saturation_fraction"],
+                        dest="land_soil_init",
+                        help="How the multilayer soil is seeded at a cold start. "
+                             "'aridity' (default) maps the initial atmosphere's "
+                             "near-surface relative humidity into the plant-"
+                             "available range, capping the start at FIELD "
+                             "CAPACITY and leaving "
+                             "--land-soil-moisture-init-frac inert. "
+                             "'saturation_fraction' uses that fraction times "
+                             "porosity instead, so the soil can start near "
+                             "SATURATION — use it to keep a run out of the "
+                             "dry-soil attractor, at the cost of the desert "
+                             "evaporation runaway the aridity seed prevents.")
     parser.add_argument("--land-soil-moisture-init-frac", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac,
                         dest="land_soil_moisture_init_frac",
@@ -1333,17 +1371,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["simple_seb", "two_leaf", "clm_ml"],
                         default=_EXPERIMENT_DEFAULTS.land_surface_scheme,
                         dest="land_surface_scheme",
-                        help="Multilayer-land surface scheme (issue #730). "
-                             "'simple_seb' (default) = bulk SEB with the beta_soil "
-                             "moisture path; 'two_leaf' = DifferBESS two-leaf canopy "
-                             "energy balance (Kelvin h_r bare-soil + two-leaf "
-                             "stomatal transpiration) that holds land ET below "
-                             "potential and breaks the over-evaporation wet loop; "
-                             "'clm_ml' = the CLM-ML-JAX multilayer canopy (needs the "
-                             "clm-ml-jax backend; coupled/global multi-column support "
-                             "is pending the ncol>1 traceable path — single-point "
-                             "CLM-ML runs today via run_lmip). "
-                             "Only affects --use-multilayer-land runs.")
+                        help="Multilayer-land surface scheme. 'two_leaf' "
+                             "(DEFAULT) is the two-leaf canopy: it partitions each "
+                             "cell into canopy and soil and gives each its own "
+                             "resistance, which is what reproduces observed latent "
+                             "heat and photosynthesis. 'simple_seb' is for ACADEMIC "
+                             "/ SIMPLIFIED tests only — with stomata off it "
+                             "evaporates at potential, and with them on it throttles "
+                             "BARE GROUND with a conductance that has no leaf-area "
+                             "dependence. 'clm_ml' is the full multilayer canopy.")
     parser.add_argument("--clm-ml-use-surfdata-pft", action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.clm_ml_use_surfdata_pft,
                         dest="clm_ml_use_surfdata_pft",
@@ -1947,6 +1983,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_multilayer_land=args.use_multilayer_land,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
+        land_calibrated_physics=args.land_calibrated_physics,
         clm_surfdata_path=args.clm_surfdata_path,
         transient_land_cover=args.transient_land_cover,
         land_cover_surfdata=args.land_cover_surfdata,
@@ -1968,6 +2005,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_stomatal_beta=args.land_stomatal_beta,
         land_gs_max=args.land_gs_max,
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
+        land_soil_init=args.land_soil_init,
         land_surface_scheme=args.land_surface_scheme,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
@@ -2145,7 +2183,8 @@ def _apply_spectral_scheme_fallback(args: argparse.Namespace, argv,
     return args
 
 
-def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
+def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
+                      argv: list[str] | None = None) -> argparse.Namespace:
     # Auto-detect MPI environment.
     # SLURM_NTASKS=1 is always set in batch jobs even for single-task GPU runs;
     # only treat it as an MPI signal when > 1 actual tasks are allocated.
@@ -2272,15 +2311,46 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # Canopy surface schemes run INSIDE the multilayer land tile; without
     # --use-multilayer-land the slab land runs and the scheme is silently dropped
     # (the user asked for a canopy, got the slab).  Fail early rather than degrade
-    # silently.  simple_seb is the default and is a no-op on the slab, so it is not
-    # gated.
+    # silently.
+    #
+    # Only when the canopy was asked for EXPLICITLY.  The two-leaf canopy is now
+    # the DEFAULT surface scheme, so gating on the value alone would refuse every
+    # slab-only run that never mentioned a canopy at all.  A default that cannot
+    # be left alone is not a default.
+    # "Asked for" means the COMMAND LINE or a --config YAML.  A YAML key sets
+    # argparse DEFAULTS, so testing argv alone silently rewrote a config that
+    # explicitly requested a canopy — the exact silent degradation this guard
+    # exists to prevent (codex).  ``_config_keys`` is stamped by the loader.
+    _argv = argv if argv is not None else sys.argv[1:]
+    _canopy_explicit = (
+        any(a == "--land-surface-scheme" or a.startswith("--land-surface-scheme=")
+            for a in _argv)
+        or "land_surface_scheme" in getattr(args, "_config_keys", ()))
     if (args.land_surface_scheme in ("two_leaf", "clm_ml")
             and not args.use_multilayer_land):
-        parser.error(
-            f"--land-surface-scheme {args.land_surface_scheme} is a canopy scheme "
-            "that runs inside the multilayer land tile and has NO effect on the "
-            "slab land — it would be silently dropped. Pass --use-multilayer-land, "
-            "or use --land-surface-scheme simple_seb.")
+        if _canopy_explicit:
+            parser.error(
+                f"--land-surface-scheme {args.land_surface_scheme} is a canopy "
+                "scheme that runs inside the multilayer land tile and has NO "
+                "effect on the slab land — it would be silently dropped. Pass "
+                "--use-multilayer-land, or use --land-surface-scheme simple_seb.")
+        # Not asked for: fall back to the slab's own surface treatment, and say so
+        # UNCONDITIONALLY, so a slab run never silently claims a canopy it does
+        # not have.  A comment promising to say so is not saying so (codex).
+        print(
+            f"WARNING: land surface scheme resolved to 'simple_seb'. The default "
+            f"'{args.land_surface_scheme}' is a canopy that runs inside the "
+            "multilayer land tile, and this run has no such tile (no "
+            "--use-multilayer-land), so the slab's own surface treatment is used "
+            "instead. simple_seb is an ACADEMIC scheme: its evaporation runs at "
+            "potential with stomata off and self-extinguishes with them on. Pass "
+            "--use-multilayer-land for the canopy.", file=sys.stderr)
+        # DELIBERATELY not rewritten.  The field is documented as affecting
+        # multilayer runs only, so it is inert here by construction, and the
+        # warning above is what stops that being silent.  Assigning a value
+        # instead would make the field NON-DEFAULT on every slab run, which the
+        # strict single-purpose lanes reject outright (fv3_duo refuses any
+        # non-default field it does not consume).
     if args.physics_parameterization == "ml":
         if args.convection != "mass_flux" or args.turbulence != "louis":
             parser.error(
@@ -2738,11 +2808,17 @@ def main(argv: list[str] | None = None):
     pre, _ = parser.parse_known_args(argv)
     if pre.config is not None:
         from legoesm.driver.run_config_yaml import load_yaml_config
-        parser.set_defaults(**load_yaml_config(
+        _cfg_keys = load_yaml_config(
             pre.config, parser,
             example_keys="'convection', 'microphysics', 'surface_bulk_scheme', "
                          "'q_c_diagnostic', 'gustiness_zi', "
-                         "'bulk_thermo_convention', 'convective_cloud'"))
+                         "'bulk_thermo_convention', 'convective_cloud'")
+        parser.set_defaults(**_cfg_keys)
+        # Remember WHICH keys the file set.  A YAML key arrives as an argparse
+        # DEFAULT, so downstream checks cannot otherwise tell "the user asked for
+        # this" from "nobody mentioned it" — and one such check was silently
+        # rewriting an explicitly requested canopy scheme (codex).
+        parser.set_defaults(_config_keys=frozenset(_cfg_keys))
 
     args = parser.parse_args(argv)
     # Postprocess FIRST: it resolves the grid/discretization sentinels
@@ -2751,7 +2827,7 @@ def main(argv: list[str] | None = None):
     # — calling it on the unresolved sentinel made it a silent no-op for the
     # ``--truncation``-only spelling, so gaussian AMIP died at setup on the
     # prognostic default schemes (2026-07-21 audit — cross-grid smoke).
-    args = _postprocess_args(args, parser)
+    args = _postprocess_args(args, parser, argv if argv is not None else sys.argv[1:])
     _apply_spectral_scheme_fallback(
         args, argv if argv is not None else sys.argv[1:], parser)
 

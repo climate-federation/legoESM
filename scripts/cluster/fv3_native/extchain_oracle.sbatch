@@ -30,7 +30,12 @@ FMSSRC=/burg-archive/glab/users/pg2328/fv3_recon/fms_sentinel_work/fms-src
 FMSLIB=$(find $FMSB -name "libfms_r8.a" | head -1)
 FMSINC=$FMSB/include_r8
 
-REPO=${EXTCHAIN_REPO:-/burg-archive/glab/users/pg2328/legoESM/.claude/worktrees/agent-a0099839a1b861d35}
+# The DEFAULT used to be a throwaway agent worktree, so this job read a
+# tree nobody was editing and silently ran an older driver -- the same
+# "numbers attributable to no SHA" failure the pin rule exists for.
+REPO=${EXTCHAIN_REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
+[ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
+echo "REPO sha: $(git -C "$REPO" rev-parse HEAD)  dirty: $(git -C "$REPO" status --porcelain | wc -l)"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1

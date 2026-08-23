@@ -1,4 +1,9 @@
-# AMIP land overlay — v6 DUAL-TARGET land calibration (2026-08-18).
+# AMIP land overlay — v6/v7 DUAL-TARGET land calibration (2026-08-18).
+# v7 update: the multilayer bake gained per-PFT canopy snow masking
+# (snow_cover_scale) and the retuned tables (skin-T bias +0.16 K, LE +0.35
+# W/m2, NH albedo mean bias closed); the spin-up IC below is regenerated under
+# the v7 bake (same path).  The slab stays on its v6 bake (the v7 slab fit
+# traded a +0.074 global albedo bias for temperature — rejected).
 #
 # The v6 per-PFT tables (ERA5 latent heat + skin T + soil moisture, monthly-
 # bias-first; docs/land/land_dual_target_calibration_runbook.md) are BAKED into

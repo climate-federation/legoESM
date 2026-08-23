@@ -1036,11 +1036,20 @@ def timed_scan_blocks(
         _advance = advance
 
     # --- 1. compile (first call of advance, separated from all timing) ---
+    # Flushed, rank-tagged banners: three 192-rank lat-lon arms burned full
+    # walltimes hung somewhere past setup with nothing in the log; these
+    # split "waiting at the pre-compile fence" from "inside the first
+    # (compiling) call" from "inside the timed blocks".
+    import os as _os_b
+    _r = _os_b.environ.get("SLURM_PROCID", "?")
+    print(f"[bench r{_r}] pre-compile fence", flush=True)
     _fence("compile_start")
+    print(f"[bench r{_r}] first (compiling) call begins", flush=True)
     t0 = time.perf_counter()
     state = _advance(state, aux)
     _block(state)
     compile_ms = (time.perf_counter() - t0) * 1e3
+    print(f"[bench r{_r}] first call done in {compile_ms:.0f} ms", flush=True)
 
     # --- 2. dispatch-latency probe: individually synced steps, reported
     # separately (NEVER mixed into the fused number) ---

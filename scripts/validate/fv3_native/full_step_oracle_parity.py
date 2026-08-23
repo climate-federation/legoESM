@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -86,6 +87,18 @@ NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
 # advected+remapped, the dnats tail (rainwat) is INERT -- fv_dynamics.F90
 # :191 `nq = nq_tot - flagstruct%dnats`.
 ADVECTED_TRACERS = ("sphum", "liq_wat")
+# The moist RESPONSE (moist deck minus dry deck) is a first-order
+# quantity, not a residual, so port and oracle should agree on it as a
+# FIELD. The bound is loose because each side carries its own parity
+# noise (1e-9 hydro, 6.6e-4 NH) riding on a difference that is itself
+# ~1e-2 of the state, and TOL-PENDING until measured on both arms; it
+# is still four orders tighter than "did anything move", and a dropped,
+# halved or mis-signed coupling cannot pass it.
+MOIST_RESPONSE_MAX_REL = 0.2
+# A response only carries information where it clears the parity floor.
+# At one step that is pt alone: u/v/delp move at rounding scale on both
+# sides, and comparing two noise fields returns ~2.0 by construction.
+MOIST_RESPONSE_SNR = 10.0
 INERT_TRACERS = ("rainwat",)
 
 # The IC control must land at the quad-geometry floor. 1e-12 is two
@@ -200,77 +213,233 @@ def require_flat_orography(tiles: list) -> None:
 # port side
 # ----------------------------------------------------------------------
 
-def build_port_ic(ctx, ak, bk, nh: bool = False):
+def build_port_ic(ctx, ak, bk, nh: bool = False, zvir: float = 0.0):
     """The test_case = -13 IC on all six faces, in state_3d layout.
 
+    DELEGATES to the committed home,
+    ``fv3_native_dcmip16_ic.dcmip16_bc_six_face_state`` -- this function
+    is where that assembly was originally established, and the two were
+    line-for-line copies. They must not stay copies now that the moist
+    arm couples ``pt`` to ``q``: ``test_cases.F90:6760`` divides pt by
+    ``(1 + zvir*q(sphum))``, so pt and the tracer IC have to come out of
+    ONE construction or a second implementation decides half of it.
+
     ``nh=True`` adds ``make_nh``'s initial state (``init_hydro.F90:
-    147-158``): ``w = 0`` and ``delz = -(rdgas/grav) * T * dpeln`` from
-    the IC's own hydrostatic column -- the exact arithmetic the oracle's
-    ``delz computed from hydrostatic state`` message announces (zvir = 0
-    on the adiabatic deck).
+    147-158``); ``zvir != 0`` selects the moist (non-adiabatic) IC.
+    Returns ``(state, sphum)`` -- sphum is the SAME array the pt
+    division used.
     """
-    from legoesm.core.fv3_native_dcmip16_bc import GFS_CONSTANTS
-    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_face
-    from legoesm.core.fv3_native_state_3d import build_state_3d
-    from legoesm.grids.fv3_native_gridstruct import FV3_GRAV, FV3_RDGAS
-    from legoesm.grids.fv3_native_metrics import great_circle_dist as _gcd
-
-    def gcdr(p1, p2, r):
-        return _gcd(np.asarray(p1, float), np.asarray(p2, float)) * r
-
-    n, ng = ctx["n"], ctx["ng"]
-    st = build_state_3d(n, ng, KM, remap_follows=True,
-                        hydrostatic=not nh)
-    cs, cc = slice(ng, ng + n), slice(ng, ng + n + 1)
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        co = np.stack([np.asarray(gs["grid_lon"])[cc, cc],
-                       np.asarray(gs["grid_lat"])[cc, cc]], -1)
-        ce = np.stack([np.asarray(gs["agrid_lon"])[cs, cs],
-                       np.asarray(gs["agrid_lat"])[cs, cs]], -1)
-        o = dcmip16_bc_face(co, ce, ak, bk, KM, do_pert=True,
-                            constants=GFS_CONSTANTS, great_circle_dist=gcdr)
-        st[t]["delp"][cs, cs, :] = o["delp"]
-        st[t]["pt"][cs, cs, :] = o["pt"]
-        st[t]["u"][cs, cc, :] = o["u"]
-        st[t]["v"][cc, cs, :] = o["v"]
-        if nh:
-            pe = np.full((n, n), float(ak[0]))
-            for k in range(KM):
-                dp = st[t]["delp"][cs, cs, k]
-                dpeln = np.log(pe + dp) - np.log(pe)
-                st[t]["delz"][:, :, k] = (-(FV3_RDGAS / FV3_GRAV)
-                                          * st[t]["pt"][cs, cs, k] * dpeln)
-                pe = pe + dp
-    return st
+    from legoesm.core.fv3_native_dcmip16_ic import (
+        dcmip16_bc_six_face_state,
+    )
+    return dcmip16_bc_six_face_state(
+        ctx, ak, bk, KM, hydrostatic=not nh, do_pert=True, zvir=zvir)
 
 
-def build_port_tracer_ic(ctx, ak, bk) -> list:
+# --------------------------------------------------------------------
+# The moist deck's preconditions, ASSERTED from its own input.nml
+# --------------------------------------------------------------------
+# Reading the Fortran established that fv_phys is a no-op for this deck;
+# these two functions make that a CHECKED precondition of every moist
+# run instead of a claim in a docstring. The chain is:
+#   atmosphere.F90:474  calls fv_phys whenever npz /= 1 .and. .not.
+#                       adiabatic -- and the moist deck IS .not.
+#                       adiabatic, so fv_phys DOES get called;
+#   fv_phys.F90:590     applies nothing unless `no_tendency` was cleared;
+#   no_tendency is cleared ONLY by fv_sg_adj > 0 (:303), do_LS_cond
+#   (:306), K_sedi_transport under do_K_warm_rain (:412),
+#   do_GFDL_sim_phys (:456), do_reed_sim_phys (:530), and the
+#   do_Held_Suarez / do_surf_drag pair (:533/:541, which also writes pt
+#   in place at :559-563).
+# do_Held_Suarez lives in &fv_core_nml and defaults .false.
+# (fv_arrays.F90:511); the rest live in the sim_phys namelists and all
+# default .false. (fv_phys.F90:88-142) EXCEPT do_strat_HS_forcing, which
+# is .true. by default but is only an ARGUMENT to Held_Suarez_Tend and
+# is therefore unreachable while do_Held_Suarez is false.
+_PHYSICS_SWITCHES = (
+    "do_held_suarez", "do_surf_drag", "do_ls_cond", "do_k_warm_rain",
+    "do_gfdl_sim_phys", "do_reed_sim_phys", "do_terminator",
+)
+
+
+def _nml_text(run_dir: str) -> str:
+    path = os.path.join(run_dir, "input.nml")
+    if not os.path.exists(path):
+        raise SystemExit(f"missing {path}: cannot verify the deck")
+    with open(path) as fh:
+        return fh.read()
+
+
+def _nml_value(text: str, key: str, pattern: str):
+    """The LAST assignment wins, comments stripped first.
+
+    ONE parser for logicals, integers and reals. The first version had
+    ``_nml_logical`` doing this correctly and then let ``fv_sg_adj`` and
+    ``consv_te`` bypass it with a raw ``re.search`` -- which is
+    FIRST-match-wins and comment-blind, so ``fv_sg_adj = -1`` followed
+    by ``fv_sg_adj = 1``, or a commented-out ``consv_te = 0.`` above a
+    live non-zero one, would have been read as the safe value and the
+    harness would have scored dynamics against dynamics-plus-physics
+    (codex MAJOR, job 9442717). These decks routinely carry a commented
+    alternative and then the live value -- ``duogrid``, ``do_schmidt``
+    and ``dnats`` all appear twice in the pinned ones -- so this is the
+    shape the input actually has, not a hypothetical.
+
+    KNOWN LIMIT, stated rather than fixed: the search is whole-file and
+    GROUP-BLIND, so a key set in a different ``&group`` with a different
+    value would be read here where Fortran would not apply it.  The keys
+    checked (adiabatic, fv_sg_adj, consv_te, the physics switches) are
+    unique across groups in every pinned deck; a deck that reused one
+    would need a group-aware parser.  Likewise a ``!`` inside a quoted
+    string truncates the line.
+
+    Returns the last match's captured group, or None.
+    """
+    val = None
+    for raw in text.splitlines():
+        line = raw.split("!", 1)[0]          # `!` starts a comment
+        m = re.search(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
+        if m:
+            val = m.group(1)
+    return val
+
+
+def _nml_logical(text: str, key: str):
+    tok = _nml_value(text, key, r"\.?[A-Za-z]+\.?")
+    if tok is None:
+        return None
+    return tok.strip().lower().strip(".") in ("t", "true")
+
+
+def _nml_int(text: str, key: str):
+    tok = _nml_value(text, key, r"[-+]?\d+")
+    return None if tok is None else int(tok)
+
+
+def _nml_real(text: str, key: str):
+    tok = _nml_value(text, key, r"[-+]?[0-9.]+(?:[eEdD][-+]?[0-9]+)?")
+    if tok is None:
+        return None
+    return float(tok.replace("d", "e").replace("D", "e"))
+
+
+def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
+                               moist: bool, consv: float = 0.0) -> None:
+    """The deck must BE the arm the flags say it is.
+
+    The redirects fire only on exact default-path equality, so explicit
+    ``--ic-run``/``--step-run`` bypassed every content check -- and
+    ``--moist --ic-run <nh deck>`` without ``--nh`` would run the
+    HYDROSTATIC port against NH files, ignore W/DZ, and print a
+    meaningless score without raising (codex MAJOR / GLM M2, jobs
+    9444413 and 9444414). Worse, if the DRY step deck were ever
+    regenerated moist, the dry arm would score a zvir=0 port against a
+    moist reference at ~1e-6 rel -- comfortably under its own gate.
+
+    So every arm, not just ``--moist``, asserts the deck's own resolved
+    namelist against the flags: ``adiabatic`` is ``.false.`` IFF moist,
+    ``hydrostatic``/``phys_hydrostatic`` track ``nh``, ``consv_te`` is
+    0, and the physics cannot have touched the state.
+    """
+    check_physics_is_inert(run_dir)
+    text = _nml_text(run_dir)
+    want_adiab = not moist
+    got_adiab = _nml_logical(text, "adiabatic")
+    if got_adiab is not want_adiab:
+        raise SystemExit(
+            f"{run_dir}: resolves adiabatic = {got_adiab!r} but the "
+            f"flags say moist = {moist}. In the solo driver that one "
+            f"flag IS the moisture switch (atmosphere.F90:156-161), so "
+            f"this pairing scores the port against the wrong physics.")
+    for key in ("hydrostatic", "phys_hydrostatic"):
+        got = _nml_logical(text, key)
+        if got is not (not nh):
+            raise SystemExit(
+                f"{run_dir}: resolves {key} = {got!r} but the flags say "
+                f"nh = {nh}. A hydrostatic port loading NH files simply "
+                f"ignores W/DZ and prints a number.")
+    got = _nml_real(text, "consv_te")
+    if got is None or got != consv:
+        raise SystemExit(
+            f"{run_dir}: resolves consv_te = "
+            f"{got if got is not None else 'nothing'}, but this arm "
+            f"expects {consv}. The fixer is last_step-only and moves pt "
+            f"by ~4e-6 K, so a mismatched deck reads as a defect rather "
+            f"than a configuration error.")
+
+
+def check_physics_is_inert(run_dir: str) -> None:
+    """Refuse a deck whose fv_phys could touch the state."""
+    text = _nml_text(run_dir)
+    on = [k for k in _PHYSICS_SWITCHES if _nml_logical(text, k) is True]
+    if on:
+        raise SystemExit(
+            f"{run_dir}: physics switches {on} are ON in input.nml. This "
+            f"deck's RESTART is one dynamics step PLUS a forcing "
+            f"tendency, and the port has no physics -- the residual "
+            f"would be unattributable. Use a deck with them off.")
+    sg = _nml_int(text, "fv_sg_adj")
+    if sg is None:
+        raise SystemExit(f"{run_dir}: input.nml does not set fv_sg_adj; "
+                         f"fv_phys.F90:303 clears no_tendency when it is "
+                         f"> 0, so it must be pinned, not defaulted.")
+    if sg > 0:
+        raise SystemExit(
+            f"{run_dir}: fv_sg_adj = {sg} > 0 runs fv_subgrid_z "
+            f"(fv_phys.F90:305) and clears no_tendency. Not ported.")
+
+
+def check_moist_deck(run_dir: str) -> None:
+    # SUPERSEDED by check_deck_matches_the_arm, which asks the same
+    # questions with a DIRECTION (adiabatic .false. IFF moist) and adds
+    # the hydrostatic pair. Kept because it is the narrower, standalone
+    # statement of "this deck is moist" and its tests pin the namelist
+    # reader; the parity harness itself no longer calls it.
+    """The moist coupling is a DERIVED flag; assert what derives it.
+
+    ``zvir`` is nowhere in the namelist. atmosphere.F90:156-161 sets it
+    to ``rvgas/rdgas - 1`` exactly when ``adiabatic = .false.``, and
+    sets ``moist_phys = .true.`` in the same branch. So the deck must
+    say ``adiabatic = .false.`` or the run this is scored against was
+    DRY and the comparison is a category error, not a tolerance
+    question. ``consv_te`` must also be 0: the energy fixer is refused.
+    """
+    text = _nml_text(run_dir)
+    adiab = _nml_logical(text, "adiabatic")
+    if adiab is not False:
+        raise SystemExit(
+            f"{run_dir}: input.nml resolves adiabatic = {adiab!r}, not "
+            f".false. -- atmosphere.F90:157-161 then leaves zvir = 0 and "
+            f"the oracle ran DRY. Scoring the moist port against it "
+            f"would measure the coupling itself as the error.")
+    consv = _nml_real(text, "consv_te")
+    if consv is None or consv != 0.0:
+        raise SystemExit(
+            f"{run_dir}: consv_te must be pinned to 0 (found "
+            f"{consv if consv is not None else 'nothing'}); the "
+            f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
+
+
+def build_port_tracer_ic(sphum6) -> list:
     """[face][iq] padded tracer arrays for the resolved deck.
 
-    ``sphum`` is the analytic DCMIP16_BC moisture (test_cases.F90:
-    6737-6744); ``liq_wat`` is identically zero (:6728-6735 zeroes all
-    tracers and only sphum is filled -- CONFIRMED against the zerostep
-    fv_tracer.res: liq_wat/rainwat are 0.0 everywhere).  Halos stay
-    zero: the init-time ``mpp_update_domains(q)`` is inside the
+    ``sphum`` comes from :func:`build_port_ic`, NOT from a second call:
+    on the moist arm the IC's ``pt`` was divided by ``(1 + zvir*q)``
+    using that exact array (``test_cases.F90:6760``), so rebuilding q
+    here would make the two halves of one IC come from two
+    constructions. ``liq_wat`` is identically zero (:6728-6735 zeroes
+    all tracers and only sphum is filled -- CONFIRMED against the
+    zerostep fv_tracer.res: liq_wat/rainwat are 0.0 everywhere). Halos
+    stay zero: the init-time ``mpp_update_domains(q)`` is inside the
     terminator-tracer branch (cl/cl2), absent on this deck; tracer_2d
     fills its own halos via ext_scalar.
     """
-    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_sphum
-    from legoesm.core.fv3_native_state_3d import field_shape
-
-    n, ng = ctx["n"], ctx["ng"]
-    cs = slice(ng, ng + n)
-    q6 = []
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        lat_c = np.asarray(gs["agrid_lat"])[cs, cs]
-        sphum = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
-        sphum[cs, cs, :] = dcmip16_bc_sphum(ak, bk, lat_c, KM)
-        liq = np.zeros(field_shape("delp", n, ng, KM), dtype=np.float64)
-        q6.append([sphum, liq])
-    return q6
-
+    if sphum6 is None:
+        raise ValueError(
+            "build_port_tracer_ic got sphum6=None -- build_port_ic was "
+            "called with with_sphum=False, so there is no humidity to "
+            "advect and none to have divided pt on the moist arm.")
+    return [[q, np.zeros_like(q)] for q in sphum6]
 
 def tracer_window(q6, ctx) -> list:
     """Compute-window copies of the advected tracers, (i, j, k)."""
@@ -755,6 +924,99 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
+def _make_jax_step(ctx, jit=False):
+    """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
+
+    The scoring below is ~400 lines that read six per-face NumPy dicts
+    and mutate ``state``/``press``/``q`` in place, exactly as the Fortran
+    dummies are.  The JAX lane is face-STACKED and FUNCTIONAL (C1/C4), so
+    this adapter stacks on the way in and writes back on the way out --
+    and NOTHING ELSE about the run changes.  That is deliberate: the IC,
+    the oracle files, the derived face map, the tendency scales and every
+    tolerance stay byte-identical to the NumPy invocation, so the two
+    backends' scores differ only by the lane under test.  A separate
+    JAX-flavoured harness would have made any difference unattributable,
+    which is the confound this campaign has paid for more than once.
+
+    The write-back is the only subtle part: the caller keeps references
+    to the per-face arrays, so the values are copied INTO the existing
+    arrays rather than rebound, or the mutation the scoring relies on
+    would be invisible.
+    """
+    import jax.numpy as _jnp
+    import numpy as _np
+
+    from legoesm.core import fv3_dynamics as _jdyn
+    from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_jax
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+
+    jctx = build_jax_duo_stepper_context(ctx)
+    _cache: dict = {}
+
+    def _stack(per_face, key=None):
+        # jnp, not np: the module indexes these with `.at[...]`, which a
+        # numpy array does not have. Stacking with numpy and handing the
+        # result straight over got as far as the remap's pk update
+        # before failing.
+        return _jnp.asarray(_np.stack([_np.asarray(f[key] if key else f)
+                                       for f in per_face]))
+
+    def _step(_ctx, state, press, **kw):
+        jstate = state_3d_to_jax(state)
+        jpress = {nm: _stack(press, nm)
+                  for nm in ("ps", "pe", "peln", "pk", "pkz")}
+        q_in = kw.pop("q")
+        # TRACER-MAJOR: fv_dynamics_step takes nq face-stacked arrays,
+        # not one (6, nq, ...) stack. The spec's q is [face][iq], so the
+        # transpose is here, in the adapter, where every other layout
+        # difference between the lanes already lives.
+        _nq = len(q_in[0])
+        jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
+                                      for t in range(6)]))
+              for iq in range(_nq)]
+        if jit:
+            # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
+            # through the COMPILED builder, and compilation is not neutral
+            # here -- fused multiply-adds and reassociation can flip an
+            # upwind selector bit, which is the class of difference this
+            # port already had to unroll a scan to remove. Scoring the eager
+            # function therefore scored a lane nobody deploys.
+            _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
+            # Key the compiled fn by the STATIC deck, not merely by presence:
+            # zvir / consv_te / sphum_index are baked into the jitted program
+            # (make_fv_dynamics_step_jit marks them static), so a moist/consv
+            # scored arm and its dry twin need DIFFERENT compiled functions.
+            # Caching one and reusing it would run the dry twin on the moist
+            # deck and silently invalidate the response gate. Array deck
+            # constants (ak/bk/ptop) are invariant across arms, so the scalar
+            # kwargs are a sufficient key.
+            _key = tuple(sorted(
+                (k, v) for k, v in kw.items()
+                if isinstance(v, (int, float, bool, str, type(None)))))
+            if _key not in _cache:
+                _static = dict(kw)
+                _cache[_key] = _jdyn.make_fv_dynamics_step_jit(
+                    jctx, _static.pop("km"), **_static)
+            out = _cache[_key](jstate, jpress, jq, **_dyn)
+        else:
+            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+
+        # Write back IN PLACE -- see the docstring.
+        st = out["state"] if "state" in out else out
+        for t in range(6):
+            for nm, arr in state[t].items():
+                if nm in st:
+                    arr[...] = _np.asarray(st[nm])[t]
+            for nm in ("ps", "pe", "peln", "pk", "pkz"):
+                if nm in out["press"]:
+                    press[t][nm][...] = _np.asarray(out["press"][nm])[t]
+            for iq, arr in enumerate(q_in[t]):
+                arr[...] = _np.asarray(out["q"][iq])[t]
+        return out
+
+    return _step
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_hydro_zerostep")
@@ -763,6 +1025,13 @@ def main(argv=None):
     ap.add_argument("--k-split", type=int, default=K_SPLIT)
     ap.add_argument("--dt", type=float, default=DT_ATMOS)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--save-fields", default=None,
+                    help="write an .npz of the MAPPED one-step port "
+                         "and oracle planes (the same arrays the "
+                         "residual table scores, after the face map "
+                         "and dihedral) so the maps a human looks at "
+                         "are the arrays the gate scored, not a "
+                         "second rendering of the state.")
     ap.add_argument("--trace-substeps", action="store_true",
                     help="DIAGNOSTIC: run the acoustic loop one sub-step at "
                          "a time and print max|field - IC| after each, then "
@@ -787,7 +1056,7 @@ def main(argv=None):
                          "carry EXTENDED-lattice metrics instead of the "
                          "kinked builder's. fv_grid_tools.F90:749-835 "
                          "shows the duo oracle builds its model grid "
-                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "FROM dg%%b_pt with every mpp/fill_corners/"
                          "get_symmetry step skipped -- so the extended "
                          "lattice is the FAITHFUL halo geometry and the "
                          "kinked one is the port's residual suspect. "
@@ -833,7 +1102,52 @@ def main(argv=None):
                          "~2e-4 m/s after one step -- judging it against "
                          "the 20 m/s winds would be the delp-agreement "
                          "trap again)")
+    ap.add_argument("--consv", type=float, default=0.0,
+                    help="ENERGY-FIXER gate: score against "
+                         "run_hydro_{zerostep,1step}_consv_gfs, the "
+                         "certified hydrostatic deck with consv_te set to "
+                         "this value (build_consv_te_oracle.sbatch). The "
+                         "fixer is last_step-only and touches pt alone, "
+                         "so its signal is ~4.2e-06 K -- only ~12x this "
+                         "arm's 1.1866e-09 floor, which is thin. The "
+                         "RESPONSE gate is what certifies it, exactly as "
+                         "on the moist arms.")
+    ap.add_argument("--moist", action="store_true",
+                    help="MOIST gate: defaults the runs to "
+                         "run_hydro_{zerostep,1step}_moist_gfs, which are "
+                         "the same test_case=-13 deck with "
+                         "adiabatic=.false. -- and in the solo driver "
+                         "(atmosphere.F90:156-161) that ONE flag is what "
+                         "sets zvir = rvgas/rdgas - 1 and moist_phys=T. "
+                         "Requires --tracers, because dp1 = zvir*q(sphum) "
+                         "has nothing to read otherwise. The deck's "
+                         "physics switches are ASSERTED inert from its own "
+                         "input.nml (see check_physics_is_inert); a deck "
+                         "that ran Held-Suarez or Kessler would score the "
+                         "port against dynamics PLUS forcing and the "
+                         "residual would be unattributable.")
+    ap.add_argument("--backend", choices=("numpy", "jax"), default="numpy",
+                    help="which lane takes the step. 'numpy' is the "
+                         "SPECIFICATION and the established score; 'jax' "
+                         "runs the ported lane through the SAME scoring "
+                         "code, IC, oracle files, face map and tolerances, "
+                         "so the two numbers are comparable by "
+                         "construction. Only the stepping call differs -- "
+                         "everything upstream and downstream of it is "
+                         "byte-identical between the two backends, which "
+                         "is the whole point (a JAX-specific harness would "
+                         "make any difference unattributable).")
+    ap.add_argument("--jit", action="store_true",
+                    help="run the COMPILED step, which is the one the model "
+                         "deploys. Off by default so the established score "
+                         "keeps its meaning; a parity claim about the "
+                         "shipped solver has to be measured with this ON, "
+                         "because compilation can reassociate arithmetic and "
+                         "flip a limiter branch. Ignored unless "
+                         "--backend jax.")
     args = ap.parse_args(argv)
+    if args.jit and args.backend != "jax":
+        raise SystemExit("--jit applies to --backend jax only")
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
     if args.n_steps != 1 and args.step_run in (
@@ -853,6 +1167,61 @@ def main(argv=None):
             args.ic_run = f"{ORACLE_ROOT}/run_nh_zerostep_gfs"
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
+    args.dry_twin_run = None
+    if args.consv:
+        if args.moist or args.nh:
+            raise SystemExit(
+                "--consv is hydrostatic-and-dry only: the generated deck "
+                "is hydrostatic, and both energy integrals take their "
+                "NON-hydrostatic branches under --nh, which are not "
+                "ported.")
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_consv_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_hydro_1step_consv_gfs"
+        args.dry_twin_run = f"{ORACLE_ROOT}/run_hydro_1step_gfs"
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                raise SystemExit(
+                    f"missing consv oracle run {_r}; build it with "
+                    f"scripts/cluster/fv3_native/build_consv_te_oracle.sbatch")
+    if args.moist:
+        if not args.tracers:
+            raise SystemExit(
+                "--moist requires --tracers: dp1 = zvir*q(sphum) "
+                "(fv_dynamics.F90:291) has no specific humidity to read "
+                "without the tracer IC, and a zvir with q=None is refused "
+                "by the lane anyway.")
+        # --nh has already redirected these to the NH decks above, so
+        # the moist redirect keys off whichever pair is in play. Both
+        # arms then go through the same two deck checkers.
+        _arm = "nh" if args.nh else "hydro"
+        _dry_ic = (f"{ORACLE_ROOT}/run_nh_zerostep_gfs" if args.nh
+                   else f"{ORACLE_ROOT}/run_hydro_zerostep")
+        _dry_step = (f"{ORACLE_ROOT}/run_nh_1step_gfs" if args.nh
+                     else f"{ORACLE_ROOT}/run_hydro_1step_gfs")
+        args.dry_twin_run = _dry_step
+        if args.ic_run == _dry_ic:
+            args.ic_run = f"{ORACLE_ROOT}/run_{_arm}_zerostep_moist_gfs"
+        if args.step_run == _dry_step:
+            args.step_run = f"{ORACLE_ROOT}/run_{_arm}_1step_moist_gfs"
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                _how = ("scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch"
+                        if args.nh else "the shipped hydrostatic moist pair")
+                raise SystemExit(
+                    f"missing moist oracle run {_r}. The {_arm} pair "
+                    f"comes from {_how}.")
+
+    # EVERY ARM, not just --moist: the redirects fire only on exact
+    # default-path equality, so an explicit --ic-run/--step-run used to
+    # bypass all content checking.
+    # check_deck_matches_the_arm subsumes check_physics_is_inert and the
+    # direction-blind check_moist_deck, and load_oracle already asserts
+    # FMSConstants: GFS per deck via require_gfs_constants.
+    for _r in (args.ic_run, args.step_run):
+        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist,
+                                   consv=args.consv)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -861,7 +1230,9 @@ def main(argv=None):
     from legoesm.core.fv3_native_mapz import lagrangian_to_eulerian
     from legoesm.core.fv3_native_eta import set_eta_analytic
     from legoesm.core.fv3_native_state_3d import field_shape
-    from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
+    from legoesm.grids.fv3_native_gridstruct import (
+        FV3_CP_AIR, FV3_KAPPA, FV3_RDGAS, FV3_RVGAS,
+    )
 
     print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
     print(f"                (2/7 = {2/7!r}; rel diff "
@@ -942,7 +1313,9 @@ def main(argv=None):
                 "runs?")
 
     # ---------------- instrument control: the IC ----------------
-    state = build_port_ic(ctx, ak, bk, nh=args.nh)
+    state, sphum6 = build_port_ic(
+        ctx, ak, bk, nh=args.nh,
+        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0)
     p_ic = port_window(state, ctx)
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
@@ -1026,7 +1399,7 @@ def main(argv=None):
         # port's analytic sphum against the zerostep fv_tracer.res.
         # sphum is analytic in (lat, ak, bk) with no quad step beyond
         # the agrid latitudes, so the quad-geometry floor applies.
-        q = build_port_tracer_ic(ctx, ak, bk)
+        q = build_port_tracer_ic(sphum6)
         p_tr_ic = tracer_window(q, ctx)
         worst_tr_ic = 0.0
         for pf in range(6):
@@ -1182,11 +1555,24 @@ def main(argv=None):
                 pkz=press[t]["pkz"], delp=state[t]["delp"], pt=state[t]["pt"],
                 u=state[t]["u"], v=state[t]["v"], ps=press[t]["ps"],
                 ak=ak, bk=bk, ptop=ptop, akap=FV3_KAPPA, cp=FV3_CP_AIR,
-                r_vir=0.0, km=KM, n=n, ng=ng, kord_mt=KORD_MT,
+                # NOT hardcoded dry: under --moist this localisation
+                # tool used to run a DRY remap while the deck and the
+                # scored step were moist, i.e. it was wrong in exactly
+                # the regime it exists for (GLM MINOR, job 9444414).
+                r_vir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0,
+                sphum_index=(ADVECTED_TRACERS.index("sphum")
+                             if args.moist else None),
+                km=KM, n=n, ng=ng, kord_mt=KORD_MT,
                 kord_tm=KORD_TM, kord_tr=KORD_TR, q=q[t],
                 omga=np.zeros(field_shape("delp", n, ng, KM),
                               dtype=np.float64),
-                last_step=True, hydrostatic=True, adiabatic=True, consv=0.0,
+                # NOT hardcoded dry any more: under --moist this
+                # localisation tool used to run a DRY remap while the
+                # deck and the scored step were moist, i.e. it was wrong
+                # in exactly the regime it exists for (GLM MINOR, job
+                # 9444414).
+                last_step=True, hydrostatic=not args.nh,
+                adiabatic=(not args.moist) or (not args.nh), consv=0.0,
                 fill=False, do_sat_adj=False, do_inline_mp=False,
                 do_adiabatic_init=False)
         post = port_window(state, ctx)
@@ -1209,19 +1595,152 @@ def main(argv=None):
     # Each outer call owns one bdt exactly as the Fortran main loop calls
     # fv_dynamics once per dt_atmos: state and press carry between calls
     # (pt round-trips K -> theta_v -> K inside each call).
+    step_fn = fv_dynamics_step
+    if args.backend == "jax":
+        step_fn = _make_jax_step(ctx, jit=args.jit)
     for _step in range(args.n_steps):
-        out = fv_dynamics_step(ctx, state, press, bdt=args.dt, km=KM,
-                               k_split=args.k_split, n_split=args.n_split,
-                               ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
-                               cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
-                               kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
-                               hydrostatic=not args.nh,
-                               # deck: a_imp=1., p_fac=0.05, kord_wz=9,
-                               # use_logp=F, w_limiter=T (resolved namelist)
-                               w_limiter=args.nh)
+        out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
+                      k_split=args.k_split, n_split=args.n_split,
+                      ptop=ptop, ak=ak, bk=bk, akap=FV3_KAPPA,
+                      cp_air=FV3_CP_AIR, kord_mt=KORD_MT,
+                      kord_tm=KORD_TM, kord_tr=KORD_TR, q=q,
+                      hydrostatic=not args.nh,
+                      # deck: a_imp=1., p_fac=0.05, kord_wz=9,
+                      # use_logp=F, w_limiter=T (resolved namelist)
+                      w_limiter=args.nh,
+                      # zvir is NOT a namelist entry: atmosphere.F90:
+                      # 156-161 derives it from `adiabatic`, which
+                      # check_moist_deck asserts. sphum is index 0 of
+                      # ADVECTED_TRACERS, matching build_port_tracer_ic.
+                      **({"zvir": FV3_RVGAS / FV3_RDGAS - 1.0,
+                          "sphum_index": ADVECTED_TRACERS.index("sphum")}
+                         if args.moist else {}),
+                      **({"consv_te": args.consv} if args.consv else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     p_1 = port_window(state, ctx)
+
+    if args.moist or args.consv:
+        # ---- THE MOIST-SIGNAL GATE (GLM M1, job 9444414) ------------
+        # The headline residual is NOT evidence that the moist coupling
+        # is live, and on the NH arm it is structurally blind to the
+        # question. Arithmetic: the two decks' one-step pt tendencies
+        # differ by ~3.3e-4 K, about 1e-6 of the pt peak, while the NH
+        # gate floor is 6.6e-4 -- roughly 660x larger. A port whose
+        # moist coupling is dead in an NH-only path (an r_vir dropped at
+        # the remap, say) scores IDENTICALLY whether it runs moist or
+        # dry. The hydrostatic arm is the opposite case: its 1.19e-9
+        # floor sits ~1000x BELOW that signal, so there the headline
+        # number does certify the moist path.
+        #
+        # So measure the moist RESPONSE and compare it to the oracle's
+        # own, on a matched experiment: port(moist deck) - port(dry
+        # deck) against oracle(moist deck) - oracle(dry deck). Both
+        # sides are the same pair of decks, differing in the one flag.
+        print("\n=== MOIST-SIGNAL GATE: the response, not the residual ===")
+        if args.dry_twin_run is None or not os.path.isdir(args.dry_twin_run):
+            raise SystemExit(
+                "--moist needs the DRY twin of the step deck to measure "
+                "the moist response, and an explicit --step-run gives no "
+                "way to identify it. Re-run with the default decks, or "
+                "extend this to take the twin explicitly.")
+        from legoesm.core.fv3_native_dynamics import (
+            p_var_nonhydrostatic as _p_var_nh,
+        )
+        orc_dry_1 = load_oracle(args.dry_twin_run, nh=args.nh)
+        st_d = build_port_ic(ctx, ak, bk, nh=args.nh, zvir=0.0)[0]
+        if args.nh:
+            press_d = [_p_var_nh(f["delp"], f["delz"], f["pt"],
+                                 ptop=ptop, akap=FV3_KAPPA,
+                                 n=n, ng=ng, km=KM) for f in st_d]
+        else:
+            press_d = [p_var_hydrostatic(f["delp"], ptop=ptop,
+                                         akap=FV3_KAPPA, n=n, ng=ng,
+                                         km=KM) for f in st_d]
+        q_d = [[np.zeros_like(a) for a in face] for face in q]
+        step_fn(ctx, st_d, press_d, bdt=args.dt, km=KM,
+                k_split=args.k_split, n_split=args.n_split, ptop=ptop,
+                ak=ak, bk=bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
+                kord_mt=KORD_MT, kord_tm=KORD_TM, kord_tr=KORD_TR,
+                q=q_d, hydrostatic=not args.nh, w_limiter=args.nh)
+        p_dry_1 = port_window(st_d, ctx)
+
+        # FIELD-LEVEL, not max-vs-max. Two different fields share a
+        # maximum routinely, and the maxima need not even sit at the
+        # same cell -- the same weakness codex flagged in an earlier
+        # anti-vacuity gate. So build the response as a STATE and push
+        # it through the SAME derived face map the residuals use, then
+        # score it the same way.
+        resp_p = [{f: p_1[pf][f] - p_dry_1[pf][f] for f in fields}
+                  for pf in range(6)]
+        resp_o = [{f: orc_1[t][f] - orc_dry_1[t][f] for f in fields}
+                  for t in range(6)]
+        # apply_map, NOT map_scalar_pair: u and v are STAGGERED
+        # ((48,49) vs (49,48)) and a transposed face exchanges them.
+        # map_scalar_pair is cell-centred only and raised a broadcast
+        # error on the first run -- the staggering trap, again.
+        # apply_map returns (pairs, wind_scale); the residual path uses
+        # that scale for u/v, so this scores on identical terms.
+        mapped = [apply_map(resp_p[pf], resp_o[perm[pf]], meta[pf][perm[pf]])
+                  for pf in range(6)]
+        # A RESPONSE BELOW THE PARITY FLOOR IS NOT A RESPONSE. At one
+        # step the moist signal lives in pt (~3.2 K); u, v and delp move
+        # only at rounding scale (~3e-13, ~3e-11) on BOTH sides, and
+        # rel() on two uncorrelated noise fields of equal magnitude
+        # returns exactly 2.0 -- which is what the first version of this
+        # gate reported as a failure. That was comparing two zeros. So a
+        # field/face is SCORED only where the oracle's own response
+        # clears its own port-vs-oracle residual by a decade; everything
+        # else is reported as carrying no resolvable signal.
+        state_map = [apply_map(p_1[pf], orc_1[perm[pf]], meta[pf][perm[pf]])
+                     for pf in range(6)]
+        worst_rel, worst_f, any_signal, n_scored = 0.0, None, False, 0
+        for f in fields:
+            row_p, row_o, marks = [], [], []
+            for pf in range(6):
+                pairs_r, ws_r = mapped[pf]
+                a, b = pairs_r[f]
+                sa, sb = state_map[pf][0][f]
+                resid = float(np.abs(sa - sb).max())
+                pk_p, pk_o = float(np.abs(a).max()), float(np.abs(b).max())
+                row_p.append(pk_p)
+                row_o.append(pk_o)
+                if pk_o <= MOIST_RESPONSE_SNR * resid:
+                    marks.append(".")     # below the floor: not scored
+                    continue
+                marks.append("*")
+                any_signal = any_signal or pk_p > 0.0
+                n_scored += 1
+                r = rel(a, b, ws_r if f in ("u", "v") else None)
+                if r > worst_rel:
+                    worst_rel, worst_f = r, f"{f} face{pf + 1}"
+            print(f"  {f:5s} port response "
+                  + "  ".join(f"{x:9.4g}" for x in row_p)
+                  + "   scored: " + "".join(marks))
+            print(f"        oracle       "
+                  + "  ".join(f"{x:9.4g}" for x in row_o))
+        if n_scored == 0:
+            raise SystemExit(
+                "MOIST-SIGNAL GATE FAILED: NO field/face has a moist "
+                "response that clears its own parity residual, so this "
+                "run cannot say whether the coupling is live at all.")
+        if not any_signal:
+            raise SystemExit(
+                "MOIST-SIGNAL GATE FAILED: the port's moist and dry runs "
+                "are IDENTICAL, so zvir reaches nothing in the step. The "
+                "headline residual cannot see this on the NH arm.")
+        if worst_rel > MOIST_RESPONSE_MAX_REL:
+            raise SystemExit(
+                f"MOIST-SIGNAL GATE FAILED: the port's moist response "
+                f"differs from the oracle's by {worst_rel:.3e} at "
+                f"{worst_f} (limit {MOIST_RESPONSE_MAX_REL:.0e}). The "
+                f"port moves under zvir, but not the way the oracle "
+                f"does.")
+        print(f"MOIST-SIGNAL GATE PASSED: worst port-vs-oracle response "
+              f"rel {worst_rel:.3e} at {worst_f} over {n_scored} scored "
+              f"field/face pairs (limit {MOIST_RESPONSE_MAX_REL:.0e}; "
+              f"pairs whose response sits under {MOIST_RESPONSE_SNR}x "
+              f"their own residual are marked '.' above and not scored).")
 
     # THE DISCRIMINATOR. A large residual vs oracle_1step has two very
     # different causes and one number separates them: if the PORT's own
@@ -1244,9 +1763,15 @@ def main(argv=None):
           "with the oracle's own one-step tendency for scale:")
     res = {}
     worst_step = 0.0
+    saved = {}
     for pf in range(6):
         ot = perm[pf]
         pairs, ws = apply_map(p_1[pf], orc_1[ot], meta[pf][ot])
+        if args.save_fields:
+            for f_, (a_, b_) in pairs.items():
+                saved[f"port_f{pf+1}_{f_}"] = np.asarray(a_)
+                saved[f"oracle_f{pf+1}_{f_}"] = np.asarray(b_)
+            saved[f"perm_f{pf+1}"] = np.asarray(ot)
         row = {}
         for f, (a, b) in pairs.items():
             r = rel(a, b, ws if f in ("u", "v") else None)
@@ -1328,6 +1853,11 @@ def main(argv=None):
                       f"|d|/tend={row[nm]['frac_of_tendency']:9.3e}"
                       + ("  [VACUOUS: constant IC]" if vac else ""))
 
+    if args.save_fields:
+        saved["fields"] = np.asarray(fields)
+        saved["nh"] = np.asarray(bool(args.nh))
+        np.savez_compressed(args.save_fields, **saved)
+        print(f"\nsaved mapped port/oracle planes -> {args.save_fields}")
     print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
     print(f"IC control (same harness, same map): {worst:.4e}")
     print(f"amplification over one step: "
