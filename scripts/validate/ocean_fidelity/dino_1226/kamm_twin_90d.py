@@ -115,6 +115,34 @@ STEPS_PER_DAY = 32  # 32 * 2700s = 86400s = 1 day
 SNAP_DAYS = (0, 30, 60, 90)  # full 3-D T/S snapshot days when --save-3d
 
 
+def resolve_capture_cadence(n_days: int, capture_every_steps: int | None):
+    """Return ``(every, n_out, nsteps)`` for the surface-field capture loop.
+
+    The twin has always captured its surface fields once per model DAY.  A day
+    is 32 steps here, and a barotropic gravity wave crosses the DINO basin in
+    roughly eight hours, so the daily record ALIASES every free-surface wave
+    the model carries.  ``capture_every_steps`` lets a caller sample at the
+    step cadence instead (1 => every 2700 s), which is what a wave-field
+    comparison against NEMO needs.
+
+    ``None`` reproduces the historical daily behaviour exactly.
+
+    Raises SystemExit rather than silently dropping the final partial bucket:
+    a series whose last sample is missing looks identical to a series that
+    stopped early, and this runner already writes NaN tails on blow-up.
+    """
+    nsteps = STEPS_PER_DAY * int(n_days)
+    every = STEPS_PER_DAY if capture_every_steps is None else int(capture_every_steps)
+    if every < 1:
+        raise SystemExit(f"--output-every-steps must be >= 1, got {every}")
+    if nsteps % every != 0:
+        raise SystemExit(
+            f"--output-every-steps {every} does not divide the run length "
+            f"{nsteps} steps ({n_days} days x {STEPS_PER_DAY}); refusing to "
+            "drop a partial final bucket")
+    return every, nsteps // every, nsteps
+
+
 def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e-8) -> None:
     """Day-0 gate: raise SystemExit unless ``st`` == the NEMO restart on wet cells.
 
@@ -664,7 +692,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              perturb_baro_scale: float = 1.0,
              daily_acc: bool = False,
              snap_days: tuple[int, ...] | None = None,
-             legacy_1d_ladder: bool = False) -> bool:
+             legacy_1d_ladder: bool = False,
+             capture_every_steps: int | None = None) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
     ``perturb_seed``: optional #1492 item-2.2 noise-control lane -- if set,
@@ -730,7 +759,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
               flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
 
-    nsteps = STEPS_PER_DAY * n_days
+    capture_every, n_out, nsteps = resolve_capture_cadence(
+        n_days, capture_every_steps)
 
     # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
     # the rate into model.step(external_tracer_rate=...) (run_dino.py's
@@ -801,8 +831,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             return dep, gate
 
     if daily_acc:
-        _acc_dep_daily = np.full(n_days, np.nan, dtype=np.float64)
-        _acc_gate_daily = np.full(n_days, np.nan, dtype=np.float64)
+        _acc_dep_daily = np.full(n_out, np.nan, dtype=np.float64)
+        _acc_gate_daily = np.full(n_out, np.nan, dtype=np.float64)
         print(f"daily ACC enabled (mesh {run_traj}/mesh_mask.nc)", flush=True)
 
     # #1455 PHASE-2 MEASUREMENT 1, the RETENTION FACTOR.  The per-step deposit
@@ -866,10 +896,14 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
               f"{perturb_baro_scale:g}  max|du|={np.abs(_add).max():.4e} m/s  "
               f"nonzero={int((_add != 0).sum())}  "
               f"INJECTED TRANSPORT={_injected_sv:+.6e} Sv", flush=True)
-    eta_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
-    sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
-    u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
-    v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
+    # eta is kept at FULL PRECISION while the other three surface diagnostics
+    # stay float32.  Reason: the per-step twin certification lives far below
+    # float32's ~1e-7 relative quantum, so a float32 free surface would round
+    # the very floor a wave-fidelity comparison has to measure against.
+    eta_daily = np.full((n_out, n_lat, n_lon), np.nan, dtype=np.float64)
+    sst_daily = np.full((n_out, n_lat, n_lon), np.nan, dtype=np.float32)
+    u_daily = np.full((n_out, n_lat, n_lon), np.nan, dtype=np.float32)
+    v_daily = np.full((n_out, n_lat, n_lon), np.nan, dtype=np.float32)
 
     snaps = resolve_snap_days(snap_days, n_days, save_3d)
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
@@ -898,9 +932,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
                 st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
 
-        if (k + 1) % STEPS_PER_DAY == 0:
-            day_idx = (k + 1) // STEPS_PER_DAY - 1
-            day_num = day_idx + 1
+        if (k + 1) % capture_every == 0:
+            day_idx = (k + 1) // capture_every - 1
+            # day_num stays in WHOLE DAYS: it selects the --save-3d snapshot
+            # days and labels the progress line.  At a sub-daily cadence it is
+            # only meaningful on exact day boundaries, which is why the 3-D
+            # snapshot below is additionally gated on that boundary.
+            day_num = (k + 1) // STEPS_PER_DAY
             t_now3d = np.asarray(st.T.data)
             m = land_mask > 0.5
             finite = bool(np.isfinite(t_now3d[m]).all())
@@ -908,7 +946,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             tmin = float(t_now3d[m].min()) if finite else float("nan")
             unstable = not (finite and tmax < 60.0)
 
-            eta_now = np.asarray(st.eta.data, dtype=np.float32)
+            eta_now = np.asarray(st.eta.data, dtype=np.float64)
             t_now = np.asarray(st.T.data[:, :, 0], dtype=np.float32)
             u_full = np.asarray(st.u.data[:, :, 0], dtype=np.float32)
             v_full = np.asarray(st.v.data[:, :, 0], dtype=np.float32)
@@ -930,7 +968,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             u_daily[day_idx] = u_now
             v_daily[day_idx] = v_now
 
-            if save_3d and day_num in snaps:
+            if save_3d and (k + 1) % STEPS_PER_DAY == 0 and day_num in snaps:
                 t3d[day_num] = np.asarray(st.T.data, dtype=np.float32)
                 s3d[day_num] = np.asarray(st.S.data, dtype=np.float32)
                 eta3d[day_num] = np.asarray(st.eta.data, dtype=np.float32)
@@ -956,7 +994,16 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     save_kwargs = dict(
         eta=eta_daily, sst=sst_daily, u=u_daily, v=v_daily,
         land_mask=land_mask.astype(np.float32),
-        day=np.arange(1, n_days + 1, dtype=np.int32),
+        # ``day`` keeps its historical int32 meaning at the daily cadence so
+        # every existing consumer reads it unchanged; at a sub-daily cadence an
+        # int day index would be a mislabelled axis, so it becomes fractional
+        # days.  ``t_seconds`` is the unambiguous axis and is ALWAYS written.
+        day=(np.arange(1, n_out + 1, dtype=np.int32)
+             if capture_every == STEPS_PER_DAY
+             else np.arange(1, n_out + 1, dtype=np.float64) * capture_every * DT / 86400.0),
+        t_seconds=np.arange(1, n_out + 1, dtype=np.float64) * capture_every * DT,
+        capture_every_steps=np.int32(capture_every),
+        dt_seconds=np.float64(DT),
         blew_up_at_step=(blew_up_at if blew_up_at is not None else -1),
         stable=stable,
         # #1455: stamp the seasonal-clock offset INTO the artifact so a scorer
@@ -1008,6 +1055,13 @@ def _parse_args(argv=None):
     p.add_argument("recipe", help="dino recipe name, e.g. nemo_dino_kamm_mlf")
     p.add_argument("out", help="output .npz path")
     p.add_argument("--days", type=int, default=90, help="twin length in days (default 90)")
+    p.add_argument("--output-every-steps", dest="output_every_steps", type=int,
+                   default=None,
+                   help="surface-field capture cadence in MODEL STEPS "
+                        "(default: 32 = once per day, the historical "
+                        "behaviour). 1 samples every 2700 s, which is what a "
+                        "free-surface wave-field comparison needs -- the daily "
+                        "record aliases every barotropic wave.")
     p.add_argument("--save-3d", action="store_true",
                     help="also save full 3-D T/S/eta/u/v at days 0/30/60/90")
     p.add_argument("--run-traj", default=RUN_TRAJ, help="NEMO RUN_TRAJ dir (mesh_mask donor)")
@@ -1259,7 +1313,8 @@ def main(argv=None):
               daily_acc=args.daily_acc,
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
-              legacy_1d_ladder=args.legacy_1d_ladder)
+              legacy_1d_ladder=args.legacy_1d_ladder,
+              capture_every_steps=args.output_every_steps)
 
 
 if __name__ == "__main__":

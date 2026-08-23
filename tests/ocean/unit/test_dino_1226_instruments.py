@@ -963,3 +963,43 @@ def test_snap_days_cli_parses_a_comma_list(instruments):
         args.save_3d) == (0, 90, 180, 270, 360)
     # and the flag is genuinely optional
     assert k._parse_args(["r", "/tmp/x.npz"]).snap_days is None
+
+
+# ---------------------------------------------------------------------------
+# sub-daily capture cadence (the eta wave-field twin needs per-step sampling;
+# the historical daily record aliases every barotropic wave in the basin)
+# ---------------------------------------------------------------------------
+def test_capture_cadence_default_reproduces_the_daily_record(instruments):
+    k = instruments.kamm_twin_90d
+    every, n_out, nsteps = k.resolve_capture_cadence(90, None)
+    assert every == k.STEPS_PER_DAY
+    assert n_out == 90
+    assert nsteps == 90 * k.STEPS_PER_DAY
+
+
+def test_capture_cadence_every_step_gives_one_sample_per_step(instruments):
+    k = instruments.kamm_twin_90d
+    every, n_out, nsteps = k.resolve_capture_cadence(5, 1)
+    assert (every, n_out, nsteps) == (1, 160, 160)
+
+
+def test_capture_cadence_rejects_a_non_divisor(instruments):
+    """A cadence that drops a partial final bucket is refused, not truncated."""
+    k = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match="does not divide"):
+        k.resolve_capture_cadence(5, 7)
+
+
+def test_capture_cadence_rejects_a_non_positive_cadence(instruments):
+    k = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match=">= 1"):
+        k.resolve_capture_cadence(5, 0)
+
+
+def test_parse_args_output_every_steps_flag(instruments):
+    k = instruments.kamm_twin_90d
+    a = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    assert a.output_every_steps is None
+    b = k._parse_args(["nemo_dino_kamm_mlf", "out.npz", "--days", "5",
+                       "--output-every-steps", "1"])
+    assert b.output_every_steps == 1 and b.days == 5
