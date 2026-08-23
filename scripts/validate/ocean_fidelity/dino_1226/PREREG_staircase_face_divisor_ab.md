@@ -124,3 +124,66 @@ python -m scripts.validate.ocean_fidelity.dino_1226.wall_visc_ablation_gap \
 Both arms run from a **clean tracked tree** so `provenance_gate()` passes
 without `LEGOESM_ALLOW_DIRTY`; arm A is run before the fix is committed and arm
 B after, and each log stamps its own HEAD.
+
+---
+
+# RESULT (appended after both arms ran; nothing above was edited)
+
+Arms, one variable, everything else byte-identical.  Arm A ran on a clean tree
+at HEAD `4a1704b43` (pre-fix), arm B on a clean tree at HEAD `7dd773437`
+(post-fix); both `dirty_tracked_files=0`, both `LEGOESM_NEMO_E3T=both`, both
+fp64, both 2880 steps, both `STABLE=True`, arm A 215 s and arm B 216 s.
+
+## The joint table
+
+| quantity | arm A (pre-fix) | arm B (post-fix) | change | floor / bar |
+|---|---|---|---|---|
+| ACC [Sv], gap to NEMO day 90 | 0.3761 | 0.3795 | +0.0034 | 0.091 → **0.037 floors** |
+| upper contrast <1400 m [kg/m³], gap | 2.399e-4 | 2.402e-4 | +3e-7 | 1.1e-4 |
+| deep contrast >1400 m [kg/m³], gap | 1.260e-6 | 1.167e-6 | −9e-8 | 4.5e-5 |
+| S-band surface sigma MAX [kg/m³], gap | 9.444e-5 | 9.601e-5 | +1.6e-6 | 9.5e-5 |
+| S-band surface sigma MEAN [kg/m³], gap | 2.977e-4 | 2.974e-4 | −3e-7 | 9.5e-5 |
+| **acceptance gate** | **PASS 5 / FAIL 0 at 5×** | **PASS 5 / FAIL 0 at 5×** | — | — |
+| G4, wall rows 1–4 [Sv] | −0.2946 | −0.2956 | **−0.0010 (+0.3 % worse)** | 0.091 |
+| basin rows 0–13 [Sv] | −0.4324 | −0.4353 | −0.0029 | — |
+| A_wall [mm] | 1.698 | 1.709 | +0.011 | — |
+| wall e-folding width [rows] | 2.63 | 2.66 | +1.2 % | — |
+
+Density and transport read together, in one table, as registered.  No metric
+moves past a floor in the degrading direction; the largest movement is 0.037 of
+the ACC floor.
+
+## Against the registered decision rule
+
+* **REFUTED as the deficit's owner.**  `|ΔG4| = 0.0010 Sv` against the
+  registered refutation threshold of 0.05 Sv — refuted by fifty times — and
+  against the 0.115 Sv the confirmation arm would have needed, by 115 times.
+  The staircase divisor is a real defect and it is **not** what carries the
+  −0.29 Sv wall gap.
+* **MY REGISTERED DIRECTIONAL PREDICTION IS FALSIFIED, and I retract it.**  I
+  registered that the gap would move in the **improving** (less negative)
+  direction.  It moved the other way: −0.2946 → −0.2956 Sv.  The registered
+  falsification condition ("FALSIFIED if ΔG4 is negative") fired.
+* **The registered SIZE stands.**  I registered ≈0.003 Sv with a band
+  0.0003–0.03 Sv; the measured 0.0010 Sv is inside that band.  The magnitude
+  arithmetic — the drag channel, the 0.17 spin-down over 90 days, the 0.48 %
+  divisor error — survives; only its sign was wrong.
+* **Why the sign was wrong (PLAUSIBLE, not measured).**  The prediction took
+  the band's flow direction from the **bottom-cell** velocity (−6.5e-3 m/s
+  against NEMO's −5.0e-3) and used it as the **depth-uniform** one.  The result
+  document warns in as many words that any argument through the bottom stress
+  must use the bottom number rather than the uniform one; I made the inverse
+  substitution.  If the band's depth-mean flow is eastward where its bottom
+  cell is westward, then extra damping shrinks an eastward mean, which is
+  exactly the direction measured.  This is a hypothesis about the sign, not a
+  measurement of it, and it is not cited anywhere as established.
+
+## Ship decision
+
+The fix ships on **correctness**, as the pre-registration said it would
+independently of the climate number: a control volume that carried water on a
+level neither adjacent column has, and a divisor that disagreed with the
+barotropic split inside a single step, are defects whether or not they move a
+metric.  The gate is 5/5 at 5× on both arms; the climate cost is 0.037 of one
+floor.  The A/B decided **attribution**, and its answer is that this is not the
+owner.
