@@ -493,24 +493,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         else:
             _T_lat_pad, _u_lat_pad, _dp_lat_pad = _packed_out[2:]
 
-    # ONE longitude wrap for the fields that need one, instead of one each.
-    # On a latitude band the wrap is a local copy and batching would only add
-    # a concatenate, so the band lane keeps the program it already has; on a
-    # tile the wrap is a ring exchange and doing it per field is most of why
-    # the tiled step sends twice a band's messages while moving several times
-    # fewer halo rows.
-    # Grouped by dtype, because these two need not share one: the dycore
-    # carries a float32 initial condition through a float64 run.
-    from legoesm.grids.operators_latlon_cgrid import (
-        lon_wrap_is_a_message, pad_lon_cgrid_grouped)
-    _lon_batched = lon_wrap_is_a_message()
-    if _lon_batched:
-        _Bln_lon_pad, _T_lon_pad = pad_lon_cgrid_grouped((_Bln_stack, T))
-    else:
-        _Bln_lon_pad = _T_lon_pad = None
-
-    _dBln_dx = gradient_x_cgrid(  # (n_lat, n_lon+1, ...)
-        _Bln_stack, grid, f_pad_lon=_Bln_lon_pad)
+    _dBln_dx = gradient_x_cgrid(_Bln_stack, grid)  # (n_lat, n_lon+1, ...)
     _dBln_dy = gradient_y_cgrid(                   # (n_lat+1, n_lon, ...)
         _Bln_stack, grid, f_padded=_Bln_pad)
     dB_dx = _dBln_dx[..., :nlev_g]
@@ -570,7 +553,7 @@ def cgrid_latlon_hydrostatic_tendencies(
         _T_lat_pad, _u_lat_pad, _dp_lat_pad = pad_with_pole_bc_lat_multi(
             (T, u, dp), halo=1)
 
-    T_u = interp_cell_to_uface(T, f_pad_lon=_T_lon_pad)
+    T_u = interp_cell_to_uface(T)
     T_v = interp_cell_to_vface_halo(T, f_pad=_T_lat_pad)
 
     # Momentum pressure-gradient correction ``-R_d T grad_eta(ln p)``:
@@ -661,19 +644,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         # precomputed above (iter-54 reuse — no extra cross-shard reduction).
         mass_flux = compute_mass_flux_from_cumsum(
             _cumsum_dp, D_total_p[..., jnp.newaxis], sigma_coord)
-        # The mass flux and the surface pressure are both wanted on u-faces
-        # here, so they share one longitude exchange. The mass flux depends on
-        # div(dp*v) and so cannot join the batch at the top of the stage; this
-        # is the next point at which two fields are ready together.
-        _ps_col = p_s[..., jnp.newaxis]
-        if _lon_batched:
-            _mf_lon_pad, _ps_lon_pad = pad_lon_cgrid_grouped(
-                (mass_flux, _ps_col))
-        else:
-            _mf_lon_pad = _ps_lon_pad = None
-        mf_u = interp_cell_to_uface(mass_flux, f_pad_lon=_mf_lon_pad)
+        mf_u = interp_cell_to_uface(mass_flux)
+        # mass_flux depends on div(dp*v) -> cannot join the entry pad.
         mf_v = interp_cell_to_vface_halo(mass_flux)
-        ps_u = interp_cell_to_uface(_ps_col, f_pad_lon=_ps_lon_pad)[..., 0]
+        ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
         ps_v = interp_cell_to_vface_halo(
             p_s[..., jnp.newaxis], f_pad=_ps_lat_pad)[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)

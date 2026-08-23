@@ -329,9 +329,7 @@ def pad_lon_cgrid(f: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
     return jnp.pad(f, tuple(pad), mode="wrap")
 
 
-def interp_cell_to_uface(f: jnp.ndarray,
-                         f_pad_lon: jnp.ndarray | None = None
-                         ) -> jnp.ndarray:
+def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     """Interpolate a cell-center field to u-face (lon interface) positions.
 
     Simple average of the two cells sharing each lon face.
@@ -340,11 +338,6 @@ def interp_cell_to_uface(f: jnp.ndarray,
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
-    f_pad_lon : array, optional
-        ``f`` already wrapped in longitude by halo 1, from
-        :func:`pad_lon_cgrid_many`, so that several fields share ONE ring
-        exchange instead of one each. Bit-identical: the same columns, moved
-        together.
 
     Returns
     -------
@@ -355,136 +348,8 @@ def interp_cell_to_uface(f: jnp.ndarray,
     # former ``0.5*(roll(f,1)+f)`` + wrap-column concat at proc_lon==1, and
     # spans lon partition cuts under a 2-D split.  Output face j = mean of
     # the two cells sharing it; n_lon+1 faces (the last the periodic closure).
-    f_pad = _lon_pad_or_check("interp_cell_to_uface", f, f_pad_lon)
+    f_pad = pad_lon_cgrid(f, halo=1)
     return 0.5 * (f_pad[:, :-1] + f_pad[:, 1:])
-
-
-
-
-
-def lon_wrap_is_a_message() -> bool:
-    """Is the longitude wrap a message, or a local copy?
-
-    Mirrors :func:`pad_lon_cgrid`'s own dispatch, so the answer cannot drift
-    from what that function does. On a latitude band, or serially, every
-    device owns the whole circle of longitude and the wrap is a pad; only a
-    genuine longitude split makes it an exchange.
-
-    Callers use this to decide whether batching several fields into one wrap
-    is worth the concatenate. On a band it is not -- the wrap costs nothing
-    and the concatenate is a copy -- so the band lane keeps the program it
-    already has, byte for byte.
-    """
-    from legoesm.grids.halo import (
-        get_halo_backend, get_mpi_topology, get_spmd_mesh,
-    )
-    backend = get_halo_backend()
-    if backend == "mpi":
-        from legoesm.parallel.latlon_mpi import LatLon2DLayout
-        topology = get_mpi_topology()
-        return (isinstance(topology, LatLon2DLayout)
-                and int(getattr(topology, "proc_lon", 1)) > 1)
-    if backend == "spmd":
-        mesh = get_spmd_mesh()
-        if mesh is None:
-            return False
-        shape = getattr(mesh, "shape", {})
-        return int(shape.get("lon", 1)) > 1
-    return False
-
-
-
-def pad_lon_cgrid_grouped(fields, halo: int = 1):
-    """:func:`pad_lon_cgrid_many`, but split by dtype first.
-
-    A packed buffer promotes mixed widths and nothing casts back, so the
-    batched wrap refuses a mixed-dtype group rather than silently changing a
-    field's precision. Callers that do not control their fields' dtypes -- the
-    dycore carries a float32 initial condition through a float64 run -- want
-    the grouping done for them: one exchange per dtype, results back in the
-    order they were given.
-    """
-    fields = tuple(fields)
-    if not fields:
-        return ()
-    by_dtype: dict = {}
-    for i, f in enumerate(fields):
-        by_dtype.setdefault(str(f.dtype), []).append(i)
-    out = [None] * len(fields)
-    for _, idxs in sorted(by_dtype.items()):
-        padded = pad_lon_cgrid_many([fields[i] for i in idxs], halo=halo)
-        for i, pad in zip(idxs, padded):
-            out[i] = pad
-    return tuple(out)
-
-
-def _lon_pad_or_check(where: str, f, f_pad_lon):
-    """Use a caller's longitude pad, or make one. Validate rather than trust.
-
-    A wrong pre-pad is silent: the shapes line up in every axis but longitude,
-    and a field padded from the wrong neighbour gives plausible numbers at the
-    seam. So the shape is checked against what this field's own pad would be.
-    """
-    if f_pad_lon is None:
-        return pad_lon_cgrid(f, halo=1)
-    expected = (f.shape[0], f.shape[1] + 2) + f.shape[2:]
-    if f_pad_lon.shape != expected:
-        raise ValueError(
-            f"{where}: f_pad_lon must be the halo-1 longitude wrap of f — "
-            f"expected shape {expected}, got {f_pad_lon.shape}")
-    if f_pad_lon.dtype != f.dtype:
-        raise ValueError(
-            f"{where}: f_pad_lon has dtype {f_pad_lon.dtype} against f's "
-            f"{f.dtype}; a promoted pad would change the answer's precision")
-    return f_pad_lon
-
-
-def pad_lon_cgrid_many(fields, halo: int = 1):
-    """Periodic longitude halo for SEVERAL cell-aligned fields in ONE
-    exchange.
-
-    On a latitude-band decomposition every device owns the whole circle of
-    longitude, so :func:`pad_lon_cgrid` is a local copy and doing it once per
-    field costs nothing. On a tiled decomposition it is a ring exchange, and
-    doing it once per field is why the tiled step sends 28 point-to-point
-    messages where a band sends 13 -- measured on the compiled program, and
-    measured again by deleting the wire: the tile's communication costs 2.67
-    times the band's while moving several times fewer halo rows.
-
-    So: view every field as ``(n_lat, n_lon, -1)``, concatenate on that
-    trailing axis, pad ONCE, and split. The exchange itself is
-    :func:`pad_lon_cgrid` unchanged, so every backend -- local wrap, the
-    two-dimensional MPI pencil, the SPMD ring -- behaves exactly as it does
-    for one field, and there is no second implementation to drift.
-
-    All fields must share their first two axes and one dtype. A concatenate
-    promotes mixed dtypes and nothing casts back, which would silently change
-    a field's precision; group by dtype and call once per group.
-    """
-    fields = tuple(fields)
-    if not fields:
-        return ()
-    lead = fields[0].shape[:2]
-    for f in fields:
-        if f.shape[:2] != lead:
-            raise ValueError(
-                f"pad_lon_cgrid_many: every field must share its (lat, lon) "
-                f"extent to ride one exchange; got {lead} and {f.shape[:2]}")
-    dtypes = {str(f.dtype) for f in fields}
-    if len(dtypes) != 1:
-        raise ValueError(
-            f"pad_lon_cgrid_many: all fields must share one dtype; got "
-            f"{sorted(dtypes)}. Group by dtype and call once per group.")
-    views = [f.reshape(lead[0], lead[1], -1) for f in fields]
-    widths = [int(v.shape[2]) for v in views]
-    padded = pad_lon_cgrid(jnp.concatenate(views, axis=2), halo=halo)
-    out, off = [], 0
-    for w, f in zip(widths, fields):
-        piece = padded[:, :, off:off + w]
-        out.append(piece.reshape(padded.shape[0], padded.shape[1],
-                                 *f.shape[2:]))
-        off += w
-    return tuple(out)
 
 
 def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -750,7 +615,6 @@ def cell_to_cgrid_winds(
 def gradient_x_cgrid(
     f: jnp.ndarray,
     grid: LatLonGrid,
-    f_pad_lon: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Zonal gradient df/dx at u-points (lon interfaces).
 
@@ -763,11 +627,6 @@ def gradient_x_cgrid(
     f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
         Scalar field at cell centers.
     grid : LatLonGrid
-    f_pad_lon : array, optional
-        ``f`` already wrapped in longitude by halo 1, from
-        :func:`pad_lon_cgrid_many`, so that several fields share ONE ring
-        exchange instead of one each. Bit-identical: the same columns, moved
-        together.
 
     Returns
     -------
@@ -782,7 +641,7 @@ def gradient_x_cgrid(
     # closure).  ndim-agnostic (lon = axis 1).  Bit-identical to the former
     # ``roll(f,1)`` + wrap-column concat at proc_lon==1, and spans lon
     # partition cuts under a 2-D split.
-    f_pad = _lon_pad_or_check("gradient_x_cgrid", f, f_pad_lon)
+    f_pad = pad_lon_cgrid(f, halo=1)
     df_full = f_pad[:, 1:] - f_pad[:, :-1]
 
     # dx at u-point.  On a regular lat-lon grid (dlat > 0), use the

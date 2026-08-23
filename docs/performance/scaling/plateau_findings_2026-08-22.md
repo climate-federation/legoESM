@@ -554,6 +554,36 @@ The effect is nineteen times the disagreement, so the direction is not in
 doubt.
 
 
+### Batching the east-west wraps at the source does not work, because the compiler already did it
+
+The tile's loss is what it sends -- 2.67 times the band's communication for
+several times fewer halo rows -- and 16 of its 28 messages are the
+per-operator east-west wrap. The obvious fix is to wrap several fields
+together, and it was built: a batched wrap, a pre-wrapped argument on the two
+zonal operators mirroring the one the meridional gradient already takes, and
+the stage's five separate wraps grouped down to three.
+
+It made things slightly worse. Same four-GPU protocol, same grid, sixty timed
+steps, one variable:
+
+| | separate wraps | batched |
+|---|---|---|
+| tile, local work only | 0.560 ms | 0.530 ms |
+| tile, full step | 1.579 ms | 1.585 ms |
+| the tile's communication | 1.019 ms | 1.055 ms |
+| messages in the compiled step | 29 | 31 |
+
+The batching does what it says locally -- five percent off the arithmetic, and
+two hundred fewer instructions -- and then the message count goes UP. The
+compiler was already merging those exchanges, and concatenating the fields by
+hand gave it buffers it merged less well.
+
+So the whole change was reverted, helpers and all. What survives is the
+finding: on this lane, reducing the number of exchanges written in the source
+does not reduce the number sent. Anything aimed at the tile's message count
+has to be checked against the compiled program before it is built, not after.
+
+
 ## In flight: writing the icosahedral halo once instead of thirteen times
 
 The icosahedral halo runs thirteen coloured rounds at 64 GPUs, and each round
