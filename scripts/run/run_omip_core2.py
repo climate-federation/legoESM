@@ -3693,7 +3693,8 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
 
 def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
                    io_proc: bool = True, ice_state=None, grid=None,
-                   step: int | None = None, day: float | None = None):
+                   step: int | None = None, day: float | None = None,
+                   extra: dict | None = None):
     # io_proc=False (non-process-0 under --distributed): the state is replicated
     # and the host pull below is pure NumPy (no collective), but only process 0
     # writes the file — N processes would otherwise clobber the same .npz.  Still
@@ -3795,10 +3796,51 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     if z_coord is not None and getattr(z_coord, "z_half_ref", None) is not None:
         zh = np.asarray(z_coord.z_half_ref)              # (nlev+1,), <=0
         save_kw["z_center_ref"] = np.abs(0.5 * (zh[:-1] + zh[1:]))   # (nlev,) positive
+    # Caller-supplied diagnostic arrays (``--kprofile-snapshots`` writes the
+    # closure's viscosity and diffusivity here).  Kept as EXTRA keys so an old
+    # reader ignores them and an old snapshot still loads.
+    if extra:
+        for _k, _v in extra.items():
+            if _v is not None:
+                save_kw[_k] = np.asarray(_v)
     if not io_proc:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
+
+
+def _kprofiles(model, state, sf, dt):
+    """The closure's own K_M/K_H at this state, for a snapshot.
+
+    NEMO publishes ``avm`` and ``avt`` in its five-day output, so the oracle's
+    turbulent Prandtl number is a file read.  Ours was not comparable at all:
+    the diffusivities are built inside the step and never persisted, so every
+    statement about our equatorial mixing has been an inference from TKE and
+    the stratification rather than a measurement of the quantity NEMO
+    publishes.
+
+    This asks the model for one tendency evaluation at the snapshot's own
+    state -- the SAME ``physics_fn`` the step consumes, not a re-derived
+    lookalike -- and returns the ``K_v``/``A_v`` it carries.  Returns an empty
+    dict when the configuration produces neither (a run with no vertical-mixing
+    physics), so the snapshot is written either way.
+    """
+    try:
+        tend = model.tendencies(state, surface_forcing=sf, dt=dt)
+    except Exception as exc:            # pragma: no cover - config-dependent
+        print(f"[kprofile] SKIPPED: tendency evaluation failed: {exc}",
+              flush=True)
+        return {}
+    out = {}
+    for _key, _name in (("K_v", "K_H_diag"), ("A_v", "K_M_diag")):
+        _f = getattr(tend, _key, None)
+        _d = getattr(_f, "data", _f)
+        if _d is not None:
+            out[_name] = np.asarray(_d)
+    if not out:
+        print("[kprofile] SKIPPED: this configuration returns no K_v/A_v "
+              "(no vertical-mixing physics on the tendency)", flush=True)
+    return out
 
 
 def _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d, tag=""):
@@ -4740,6 +4782,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "to yearly + final). 0=off. Lets a long run be scored "
                         "mid-flight (e.g. day-30 SST vs NEMO) without waiting "
                         "for the full integration.")
+    p.add_argument("--kprofile-snapshots", action="store_true",
+                   help="Store the closure's own vertical viscosity and "
+                        "diffusivity (K_M_diag/K_H_diag) in every snapshot. "
+                        "NEMO publishes avm/avt, so this is what makes the "
+                        "turbulent Prandtl number comparable against the "
+                        "oracle instead of inferred from TKE. Costs one extra "
+                        "tendency evaluation per snapshot and changes no "
+                        "prognostic field.")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -7776,7 +7826,9 @@ def main() -> int:
             _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d,
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state, grid=grid,
-                           step=step, day=day)
+                           step=step, day=day,
+                           extra=(_kprofiles(model, state, sf, dt)
+                                  if args.kprofile_snapshots else None))
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
             # gateway_step, so the row's n_steps matches the snapshot's day.
@@ -7798,7 +7850,9 @@ def main() -> int:
     _io = _is_io_proc()
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state, grid=grid,
-                   step=step, day=day)
+                   step=step, day=day,
+                   extra=(_kprofiles(model, state, sf, dt)
+                          if args.kprofile_snapshots else None))
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
