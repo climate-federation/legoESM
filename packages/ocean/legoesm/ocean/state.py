@@ -927,9 +927,17 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
-        the planetary Coriolis f×u is applied in the forward-backward step
-        function and is NOT included in these diagnostics)
+        The vorticity-flux momentum tendency.  WHAT IT CONTAINS DEPENDS ON THE
+        SELECTED SCHEME, so read it here rather than assuming:
+
+        * ``vorticity_scheme`` in the ``*_total`` family (e.g. ``een_total``,
+          NEMO's ``ln_dynvor_een``): the TOTAL (f+ζ) flux — the planetary part
+          IS included, because those schemes put ``f`` inside the triad and the
+          separate face-``f`` Coriolis add is gated off for exactly that reason
+          (``ocean_pe_latlon_cgrid.py``, the ``_f_vtx_al`` branch).  This is the
+          form that pairs with NEMO's ``dyn_vor`` when comparing term by term.
+        * otherwise: RELATIVE vorticity only (ζ × v_at_u / −ζ × u_at_v), with
+          the planetary Coriolis f×u applied in the step function instead.
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z.  With
         ``adaptive_implicit_vertadv=True`` this holds the start-of-step

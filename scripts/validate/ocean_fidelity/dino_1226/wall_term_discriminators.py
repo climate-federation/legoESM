@@ -64,9 +64,9 @@ from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 from legoesm.ocean.experiments.dino import (  # noqa: E402
     dino_config_for_recipe, dino_lat_lon_model_config)
 from legoesm.ocean.fidelity.nemo_io import (  # noqa: E402
-    read_nemo_mesh_mask, read_nemo_restart)
+    read_nemo_mesh_mask, read_nemo_restart, read_nemo_restart_before)
 from legoesm.ocean.fidelity.nemo_state_bridge import (  # noqa: E402
-    bridge_nemo_to_legoesm_topo)
+    bridge_before_state_topo, bridge_nemo_to_legoesm_topo)
 
 DINO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO")
 RUN = DINO / "RUN_D180_1STEP_1R"
@@ -82,8 +82,16 @@ WALL_ROWS = [1, 2, 3, 4]
 # layer, not interior to it -- including them in the denominator dilutes the
 # enrichment. That was noticed AFTER the numbers existed, which is exactly why
 # it is reported as a sensitivity rather than used to re-cut the verdict.
-INTERIOR_ROWS = [8, 12, 20, 40, 60, 99, 150]        # as first written
-INTERIOR_ROWS_FAR = [20, 40, 60, 99, 150]           # outside the 8-row decay
+# ROW 99 IS THE EQUATOR (latitude 0.000), where f = 0 and the vorticity flux
+# STRUCTURALLY COLLAPSES -- its own magnitude there is 2.6e-9 against ~1e-6 at
+# every other sampled row. Putting a row where the term vanishes into the
+# denominator of an enrichment ratio deflates the interior mean and inflates
+# the ratio; it took the far-interior reading from 2.81x to 3.51x, i.e. across
+# the registered bar, on one degenerate sample. It is excluded from every
+# interior set and reported separately.
+INTERIOR_ROWS = [8, 12, 20, 40, 60, 150]            # as first written, minus f=0
+INTERIOR_ROWS_FAR = [20, 40, 60, 150]               # outside the 8-row decay
+DEGENERATE_ROWS = [99]                              # f = 0, reported alone
 # Pre-registered bars (PREREG_wall_drag_and_een.md).
 BAR_ENRICH = 3.0
 BAR_MAG = 5.9e-11          # m/s2 at the wall rows
@@ -110,26 +118,109 @@ def build_lego():
     cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
                                      omega=cfg.omega, e3t_mode="both")
+    # THE BEFORE LEVEL IS NOT OPTIONAL. NEMO's dyn_drg_init reads puu(ikbu,Kbb)
+    # under ln_bt_fw=.false. (dynspg_ts.F90), and this bridge call alone leaves
+    # u_before as None -- an earlier version of this probe fell back to the NOW
+    # velocity and every drag-increment number came out ~100x too large while
+    # still looking entirely plausible. Bridged explicitly, with the sibling's
+    # own helpers (acc_momentum_budget.py:355-356), and asserted below.
+    before = read_nemo_restart_before(str(RESTART), nn_hls=0)
+    st = bridge_before_state_topo(br, g, before, periodic_i=True)
+    br = br._replace(state=st)
+    if br.state.u_before is None or br.state.v_before is None:
+        raise SystemExit(
+            "the bridged state has no before level -- this probe compares "
+            "NEMO's Kbb-level drag term and cannot silently substitute the "
+            "now level for it")
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     return g, br, cfg, mc
 
 
-def row_report(name, diff, wet, unit="m/s2"):
-    """Row-mean |diff| over wet cells, wall rows against interior, vs the bars."""
-    n = wet.sum(axis=tuple(range(1, wet.ndim)))
+def coherent_rows(diff, wet, h=None):
+    """The SIGNED, thickness-weighted, zonally-averaged difference per row.
+
+    THIS is the quantity the pre-registered bar was derived for: a persistent
+    depth-mean acceleration that survives long enough to build a velocity
+    error. ``mean|diff|`` -- which every earlier version of this probe reported
+    -- is an UPPER BOUND on it, and a loose one for any term whose difference
+    changes sign with depth or with longitude. Both are now printed side by
+    side, with the ratio, so a term cannot be credited with a difference that
+    cancels the moment it is projected onto the mode the defect lives in.
+    """
+    w = wet.astype(np.float64)
+    if diff.ndim == 3:
+        hh = w if h is None else h * w
+        dm = np.divide((diff * hh).sum(axis=-1),
+                       np.maximum(hh.sum(axis=-1), 1e-30))
+        wet2 = wet.any(axis=-1)
+    else:
+        dm = diff * w
+        wet2 = wet
+    n = wet2.sum(axis=1)
+    signed = np.divide((dm * wet2).sum(axis=1), np.maximum(n, 1))
+    absol = np.divide((np.abs(dm) * wet2).sum(axis=1), np.maximum(n, 1))
+    return signed, absol
+
+
+def coherent_report(name, diff, wet, h=None):
+    """Report the coherent (bar-relevant) reduction against the bar."""
+    signed, absol = coherent_rows(diff, wet, h)
+    print(f"\n  {name}: SIGNED thickness-weighted zonal mean [m/s2] "
+          f"-- the quantity the bar is defined on")
+    print(f"    {'row':>5}{'signed':>14}{'mean|.|':>14}{'coherent':>10}")
+    for j in WALL_ROWS + INTERIOR_ROWS_FAR:
+        c = abs(signed[j]) / absol[j] if absol[j] > 0 else np.nan
+        tag = "  WALL" if j in WALL_ROWS else ""
+        print(f"    {j:>5}{signed[j]:>14.4e}{absol[j]:>14.4e}{c:>10.3f}{tag}")
+    w = float(np.mean([abs(signed[j]) for j in WALL_ROWS]))
+    i = float(np.mean([abs(signed[j]) for j in INTERIOR_ROWS_FAR]))
+    print(f"    wall {w:.4e}   far interior {i:.4e}   "
+          f"enrichment {w / i if i > 0 else np.nan:.2f}x")
+    print(f"    vs the {BAR_MAG:.2e} m/s2 bar: {w / BAR_MAG:.2f}x "
+          f"({'clears' if w >= BAR_MAG else 'FAILS'})")
+    return w, i
+
+
+def row_report(name, diff, wet, unit="m/s2", term=None):
+    """Row-mean |diff| over wet cells, wall rows against interior, vs the bars.
+
+    ``term``: the magnitude of the TERM itself, so the relative error can be
+    reported beside the absolute one. That matters because the vorticity flux
+    scales with |f| and therefore varies ~400x across the sampled rows -- an
+    absolute-difference ratio between rows where the quantity itself differs
+    that much confounds the wall with the latitude dependence of f, and is the
+    wrong shape statistic. The relative error is the one that answers "how
+    wrong is the term here".
+    """
 
     def rm(j):
         w = wet[j]
         return float(np.abs(diff[j][w]).mean()) if w.any() else np.nan
+
+    def tm(j):
+        if term is None:
+            return np.nan
+        w = wet[j]
+        return float(np.abs(term[j][w]).mean()) if w.any() else np.nan
 
     print(f"\n  {name}: row-mean |NEMO - legoESM| [{unit}]")
     print(f"    max |difference| over all wet cells: "
           f"{float(np.abs(diff[wet]).max()):.6e}   "
           f"cells above 1e-15: {int((np.abs(diff[wet]) > 1e-15).sum())} "
           f"of {int(wet.sum())}")
-    for j in WALL_ROWS + INTERIOR_ROWS:
-        tag = "  WALL" if j in WALL_ROWS else ""
-        print(f"    row {j:>3}  {rm(j):.6e}{tag}")
+    hdr = f"    {'row':>5}{'|diff|':>14}"
+    if term is not None:
+        hdr += f"{'|term|':>14}{'relative':>12}"
+    print(hdr)
+    for j in WALL_ROWS + INTERIOR_ROWS + DEGENERATE_ROWS:
+        tag = ("  WALL" if j in WALL_ROWS else
+               "  f=0 (excluded from the interior mean)"
+               if j in DEGENERATE_ROWS else "")
+        line = f"    {j:>5}{rm(j):>14.6e}"
+        if term is not None:
+            t = tm(j)
+            line += f"{t:>14.6e}{(rm(j) / t if t > 0 else np.nan):>12.2e}"
+        print(line + tag)
     wall = float(np.nanmean([rm(j) for j in WALL_ROWS]))
     inter = float(np.nanmean([rm(j) for j in INTERIOR_ROWS]))
     far = float(np.nanmean([rm(j) for j in INTERIOR_ROWS_FAR]))
@@ -148,7 +239,14 @@ def row_report(name, diff, wet, unit="m/s2"):
               "this leg of the shape test is NOT decided by the data alone. "
               "The pre-registration did not pin the interior set; reported as "
               "undecided rather than re-cut.")
-    del n
+    if term is not None:
+        rw = float(np.nanmean([rm(j) / tm(j) for j in WALL_ROWS
+                               if tm(j) > 0]))
+        ri = float(np.nanmean([rm(j) / tm(j) for j in INTERIOR_ROWS_FAR
+                               if tm(j) > 0]))
+        print(f"    RELATIVE error: wall {rw:.3e}, far interior {ri:.3e}, "
+              f"enrichment {rw / ri if ri > 0 else np.nan:.2f}x  "
+              f"<- the shape statistic that is not confounded by f")
     return wall, inter, enrich
 
 
@@ -220,8 +318,9 @@ def part1(g, br, cfg, mc, plant=None):
     H_u = h_u.sum(axis=-1)
     # the card sets barotropic_forcing_centred=True -> the BEFORE level, which
     # is NEMO's ln_bt_fw=.false. Kbb branch (dynspg_ts.F90 dyn_drg_init)
-    u_src = np.asarray(st.u_before.data if st.u_before is not None
-                       else st.u.data, dtype=np.float64)
+    # NEMO's Kbb branch (ln_bt_fw=.false.). build_lego has already refused to
+    # return a state without it, so no fallback is reachable here.
+    u_src = np.asarray(st.u_before.data, dtype=np.float64)
     if plant is not None:
         um3 = np.asarray(st.u_mask.data)[..., None] > 0
         u_src = np.where(um3, u_src, plant)
@@ -235,8 +334,9 @@ def part1(g, br, cfg, mc, plant=None):
           f"max {inc_nemo[umask_s].max():.6e} m/s2")
     print(f"    legoESM:        min {inc_lego[umask_s].min():.6e}, "
           f"max {inc_lego[umask_s].max():.6e} m/s2")
+    coherent_report("1c drag increment", inc_nemo - inc_lego, umask_s)
     return row_report("1c drag increment to the barotropic forcing",
-                      inc_nemo - inc_lego, umask_s)
+                      inc_nemo - inc_lego, umask_s, term=inc_nemo)
 
 
 def part2(g, br, cfg, mc, plant=None):
@@ -265,7 +365,54 @@ def part2(g, br, cfg, mc, plant=None):
     umask3 = np.asarray(g.umask)[..., :JPKM1] > 0.5
     print(f"  NEMO   |vor| max {np.abs(vor_nemo)[umask3].max():.6e} m/s2")
     print(f"  legoESM|vor| max {np.abs(vor_lego)[umask3].max():.6e} m/s2")
-    return row_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3)
+    # M5: the row score is a mean of per-level |diff|, which is >= |depth mean|
+    # and can be much larger when the difference changes sign with depth. The
+    # registered bar is defined on a DEPTH-MEAN acceleration, so the depth mean
+    # is reported beside it rather than the reader being left to assume they
+    # are the same quantity.
+    h3 = umask3.astype(np.float64)
+    dm = np.divide((vor_nemo - vor_lego) * h3, np.maximum(
+        h3.sum(axis=-1, keepdims=True), 1.0)).sum(axis=-1)
+    wet2 = umask3.any(axis=-1)
+    print(f"  depth-MEAN difference (the quantity the bar is defined on): "
+          f"wall rows {np.abs(dm[WALL_ROWS])[wet2[WALL_ROWS]].mean():.6e}, "
+          f"far interior "
+          f"{np.abs(dm[INTERIOR_ROWS_FAR])[wet2[INTERIOR_ROWS_FAR]].mean():.6e}"
+          f" m/s2 -- compare the per-level mean below, which is an upper bound "
+          f"on it")
+    coherent_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3)
+    return row_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3,
+                      term=vor_nemo)
+
+
+def _gate_dry_faces(br) -> float:
+    """Both scored terms read land; this is what licenses that.
+
+    The drag coefficient's T-point speed averages the two adjacent u- AND
+    v-faces, and the EEN triads read both components directly, so the scored
+    numbers only mean something if the stored value on every dry face is
+    exactly zero. That is a property of the STATE, so it is measured on every
+    run -- scoring path included -- rather than assumed.
+    """
+    st = br.state
+    um3 = np.asarray(st.u_mask.data)[..., None] > 0
+    vm3 = np.asarray(st.v_mask.data)[..., None] > 0
+    arrs = [(um3, st.u), (vm3, st.v)]
+    if st.u_before is not None:
+        arrs.append((um3, st.u_before))
+    if st.v_before is not None:
+        arrs.append((vm3, st.v_before))
+    dry_max = float(max(
+        np.abs(np.where(m, 0.0, np.asarray(f.data, dtype=np.float64))).max()
+        for m, f in arrs))
+    print(f"dry-face gate: max |u|,|v| on dry faces (now and before) = "
+          f"{dry_max:.3e} m/s")
+    if dry_max != 0.0:
+        raise SystemExit(
+            f"the bridged state carries {dry_max:.3e} m/s on dry faces -- both "
+            "scored terms read those cells, so their differences are not "
+            "attributable to the terms")
+    return dry_max
 
 
 def self_test(g, br, cfg, mc) -> int:
@@ -292,18 +439,7 @@ def self_test(g, br, cfg, mc) -> int:
             gate (i) is protecting.
     """
     print("=== SELF-TEST ===")
-    st = br.state
-    um3 = np.asarray(st.u_mask.data)[..., None] > 0
-    u = np.asarray(st.u.data, dtype=np.float64)
-    ub = (np.asarray(st.u_before.data, dtype=np.float64)
-          if st.u_before is not None else u)
-    dry_max = float(max(np.abs(np.where(um3, 0.0, u)).max(),
-                        np.abs(np.where(um3, 0.0, ub)).max()))
-    print(f"(i)  production gate: max |u| on dry faces = {dry_max:.3e} m/s")
-    assert dry_max == 0.0, (
-        f"the bridged state carries {dry_max:.3e} m/s on dry faces -- the "
-        "drag and vorticity stencils read those cells, so the scored "
-        "differences are not attributable to the terms")
+    _gate_dry_faces(br)
 
     base1 = part1(g, br, cfg, mc)
     base2 = part2(g, br, cfg, mc)
@@ -359,11 +495,12 @@ def self_test(g, br, cfg, mc) -> int:
     # (iv) sensitivity to dry-face values, reported.
     def _plant_all(b):
         s0 = b.state
+        m3 = np.asarray(s0.u_mask.data)[..., None] > 0
         rep = {"u": s0.u.replace(
-            data=np.where(um3, np.asarray(s0.u.data), 1e3))}
+            data=np.where(m3, np.asarray(s0.u.data), 1e3))}
         if s0.u_before is not None:
             rep["u_before"] = s0.u_before.replace(
-                data=np.where(um3, np.asarray(s0.u_before.data), 1e3))
+                data=np.where(m3, np.asarray(s0.u_before.data), 1e3))
         return b._replace(state=s0._replace(**rep))
 
     a1 = part1(g, _plant_all(br), cfg, mc)
@@ -383,8 +520,17 @@ def main(argv=None) -> int:
     stamp()
     g, br, cfg, mc = build_lego()
     print(f"bridge f_T self-check: {br.f_match_max_abs:.3e}")
+    # Resolved scheme strings: part 2's entire grouping claim rests on these.
+    print(f"resolved: vorticity_scheme={mc.vorticity_scheme!r} "
+          f"coriolis_scheme={mc.coriolis_scheme!r} "
+          f"momentum_advection={mc.momentum_advection!r} "
+          f"een_q_boundary={getattr(mc, 'een_q_boundary', None)!r} "
+          f"een_e3f_scheme={getattr(mc, 'een_e3f_scheme', None)!r}")
     if args.self_test:
         return self_test(g, br, cfg, mc)
+    # The dry-face gate runs on the SCORING path too. A gate that only fires
+    # under a separate flag is not protecting the numbers that get reported.
+    _gate_dry_faces(br)
     part1(g, br, cfg, mc)
     part2(g, br, cfg, mc)
     return 0

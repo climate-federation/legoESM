@@ -112,3 +112,76 @@ residual list already establishes is separable today.
   trusting the arithmetic.
 
 Nothing about either outcome is known at the time of writing.
+
+---
+
+# ADDENDUM, written after dual review, recording what the registration got wrong
+
+Both reviewers read the probe and the results. Between them they overturned the
+reduction, the interior sampling, and four claims in the ranking that promoted
+these two candidates in the first place. What follows is recorded here rather
+than reinterpreted quietly.
+
+## The reduction was wrong, and it decided both verdicts
+
+The registration named a bar — 5.9e-11 m/s² — derived for **a persistent
+depth-mean acceleration** (4.6e-4 m/s over 90 days). The probe then scored
+`mean |difference|` over every wet cell and every level. Those are not the same
+quantity: the mean of absolute values is an **upper bound** on the depth mean,
+and a loose one for any term whose difference changes sign with depth or with
+longitude. Measured coherence (|signed| ÷ |mean of magnitudes|) is 0.5-0.8 for
+the drag increment but as low as 0.07 for the vorticity flux at some rows.
+
+**Corrected**: both terms are now scored as the **signed, thickness-weighted,
+zonally-averaged** difference per row — the quantity the bar was derived for —
+with the old `mean|·|` printed beside it and the coherence ratio between them,
+so no term can be credited with a difference that cancels the moment it is
+projected onto the mode the defect lives in.
+
+## The interior sample contained a degenerate row
+
+Row 99 is the **equator**, where `f = 0` and the vorticity flux structurally
+collapses (its own magnitude there is 2.6e-9 against ~1e-6 at every other
+sampled row). Putting it in the denominator of an enrichment ratio inflated
+that ratio. It is excluded from every interior set and reported separately.
+
+## The before level was silently substituted
+
+`dyn_drg_init` reads the **before** velocity (`ln_bt_fw=.false.`). The bridge
+call the probe used leaves `u_before` as `None`, and the probe fell back to the
+**now** velocity — a fallback that produced entirely plausible numbers about
+100× too large. The before level is now bridged explicitly and its absence
+**raises** instead of defaulting.
+
+## Four claims in the ranking that promoted these candidates are RETRACTED
+
+1. **"Rows 1-4 are a zonally periodic band."** FALSE. Those rows have land at
+   columns 0 and 51; the re-entrant channel is rows **14-48**. Rows 1-13 are a
+   **closed sub-basin**. The zonal-integral argument that made bottom drag the
+   top candidate — that the pressure gradient drops out, leaving drag — does not
+   hold on a blocked row, and neither does the vanishing of bottom form stress.
+   **The argument that promoted drag to #1 is void.**
+2. **"A 1.77× differential H/r gives 0.19-0.34 e-folds over 90 days."** FALSE.
+   Those are the *absolute* e-folds (0.176 at the wall, 0.107 in the interior);
+   the **differential is 0.07 e-folds**, about 7% against a 34% target. Drag was
+   promoted on a number roughly 5× too large.
+3. **"The vorticity flux agrees to 1.4e-5 relative."** FALSE — that was a
+   max-versus-max statistic on a single outlier cell. Pointwise it is **2.1e-3
+   at the wall rows** and 4.9e-4 in the interior, two orders *worse* than this
+   campaign's matched-operator floor. It is the **worst-matched operator the
+   campaign has reported**, which inverts the framing that number was used for.
+4. **The drag site list mislabelled one site and omitted the one that
+   matters.** `dynzdf.F90:172-177` is the implicit path's barotropic re-add, not
+   an explicit bottom-stress source; the genuinely explicit site
+   (`dynzdf.F90:119`) is **dead code** under `ln_drgimp=.true.`. And the site
+   that damps the **depth mean** — the barotropic substep drag at
+   `dynspg_ts.F90:820-824` — was never in the list at all.
+
+## Drag is refuted anyway, and by something better than the measurement
+
+Summing all active drag sites at the wall rows on the coherent reduction gives
+about **1.3e-10 m/s²**, so the defect would need **45% of the entire bottom-drag
+term**. The coefficient is bit-exact, the bottom-level index is exact, and the
+column depth agrees to 0.5%. No composition error in the unmeasured sites
+delivers 45%. That bound refutes drag over-determined, independently of which
+single site was measured.
