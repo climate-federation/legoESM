@@ -47,7 +47,6 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -66,7 +65,8 @@ def _staircase_channel():
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.state import LatLonCGridOceanConfig
     from legoesm.ocean.vertical import (
-        create_ocean_z_star, create_partial_cell_coordinate,
+        create_ocean_z_star,
+        create_partial_cell_coordinate,
     )
 
     grid = create_latlon_grid(n_lat=N_LAT, n_lon=N_LON)
@@ -125,6 +125,7 @@ def _capture_solve_face_thickness():
     # a tracer, and stops a cached compiled step from ignoring the patch.  The
     # Python statements executed are the production ones.
     from unittest import mock
+
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as omlc
 
     grid, z, state, config = _staircase_channel()

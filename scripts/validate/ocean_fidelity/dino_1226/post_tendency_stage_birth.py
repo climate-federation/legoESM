@@ -89,11 +89,10 @@ os.environ.setdefault("DINO_NEMO_RUN_TWIN_STEP1",
                       os.path.join(DINO_CFG, "RUN_D180_STEP1"))
 os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 
-import numpy as np                                            # noqa: E402
-import netCDF4 as nc                                          # noqa: E402
-import jax                                                    # noqa: E402
-
-import dump_lane                                              # noqa: E402
+import dump_lane  # noqa: E402
+import jax  # noqa: E402
+import netCDF4 as nc  # noqa: E402
+import numpy as np  # noqa: E402
 
 JPI, JPJ, JPK, HLS = 56, 203, 36, 2
 NI, NJ = JPI - 2 * HLS, JPJ - 2 * HLS          # 52 x 199 interior
@@ -180,9 +179,8 @@ def main() -> int:
     dump_lane.banner()
 
     import multistep_replay as mr
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
     from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.experiments.dino import (
         apply_dino_lat_lon_surface_forcing,
         dino_lat_lon_model_config,
@@ -288,8 +286,6 @@ def main() -> int:
     with nc.Dataset(os.path.join(dump_lane.RUN_DIR, "mesh_mask.nc")) as ds:
         umask = np.transpose(np.asarray(ds["umask"][0], dtype=np.float64),
                              (1, 2, 0))
-        e3u0 = np.transpose(np.asarray(ds["e3u_0"][0], dtype=np.float64),
-                            (1, 2, 0))
         e2u = np.asarray(ds["e2u"][0], dtype=np.float64)
         gphit = np.asarray(ds["gphit"][0], dtype=np.float64)
 
@@ -336,7 +332,6 @@ def main() -> int:
                 f"{'S1 basin [m/s]':>17}{'S3 enrich':>11}"
                 f"{'S1 wall LAYER-AVG':>19}")
     print(rows_hdr)
-    prev = None
     table = {}
     for b in ("B1", "B2", "B3", "B4"):
         tw, lay = _cols(cap[f"{b}_u"], ref[b])
@@ -349,7 +344,6 @@ def main() -> int:
         table[b] = (s1w, s2, s1b, s3, s1l)
         print(f"{b:<10}{s1w:>16.6e}{s2:>15.6e}{s1b:>17.6e}{s3:>11.2f}"
               f"{s1l:>19.6e}")
-        prev = b
 
     print(f"\n{'stage BORN in':<34}{'d S1 wall [m/s]':>18}"
           f"{'d S2 wall [Sv]':>17}{'over bar?':>11}")
