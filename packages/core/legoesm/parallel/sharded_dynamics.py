@@ -3679,6 +3679,35 @@ def interior_rim_tendency(
     return du, dT, dps
 
 
+def _resolve_halo_overlap(env_value: str) -> bool:
+    """Resolve LEGOESM_MPAS_HALO_OVERLAP: '1' on, '0'/'' off (default).
+
+    On: the ppermute step computes the tendency for owned cells/edges whose
+    stencil is entirely device-owned WHILE the halo exchange is in flight, then
+    recomputes the boundary rim on a compact submesh once the halo lands. Off
+    (default): every existing configuration is byte-identical. Unknown values
+    raise (dispatch-hardening, same contract as LEGOESM_MPAS_WIDE_HALO)."""
+    if env_value in ("0", ""):
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_MPAS_HALO_OVERLAP={env_value!r}: must be '0' or '1' "
+        f"(empty = off)")
+
+
+def _overlap_rim_n_rounds(cfg) -> int:
+    """Structural-closure hop count for the interior/rim split, sized to the
+    RHS the config selects. 3 covers the bare dry 2-hop stencil; hyperdiffusion
+    (del4 = two composed del2s) or APVM reach ~4 incidence hops, so 5 with a
+    margin. Over-sizing only grows the rim pass; under-sizing is a silent wrong
+    answer, so this rounds UP."""
+    wide = (float(getattr(cfg, "nu_del4", 0.0)) > 0.0
+            or float(getattr(cfg, "nu_del4_ps", 0.0)) > 0.0
+            or float(getattr(cfg, "apvm_scale", 0.0)) > 0.0)
+    return 5 if wide else 3
+
+
 def _resolve_wide_halo(env_value: str) -> bool:
     """Resolve LEGOESM_MPAS_WIDE_HALO: '1' on, '0'/'' off (default).
 
@@ -4134,6 +4163,24 @@ def make_voronoi_sharded_step(
         _os_ragged.environ.get("LEGOESM_MPAS_RAGGED_HALO", "0"),
         n_dev) and use_ppermute
 
+    # Interior/rim halo-compute overlap (opt-in, default off). Computes the
+    # tendency for owned entities whose stencil is entirely device-owned while
+    # the ppermute fill is in flight, then recomputes the rim on a submesh once
+    # the halo lands. Requires the ppermute strategy; the standalone core is
+    # dry-only, so tracers on this path are refused at the kernel below.
+    import os as _os_overlap
+    use_overlap = _resolve_halo_overlap(
+        _os_overlap.environ.get("LEGOESM_MPAS_HALO_OVERLAP", ""))
+    if use_overlap and not use_ppermute:
+        raise ValueError(
+            "LEGOESM_MPAS_HALO_OVERLAP=1 requires the ppermute halo strategy "
+            "(the overlap hides the ppermute fill); this run selected "
+            f"halo_strategy={halo_strategy!r}")
+    if use_overlap and use_ragged:
+        raise ValueError(
+            "LEGOESM_MPAS_HALO_OVERLAP=1 and LEGOESM_MPAS_RAGGED_HALO=1 are "
+            "mutually exclusive halo strategies")
+
     if use_ragged:
         t1 = time.time()
         rg_sched = _build_ragged_halo_schedule(
@@ -4223,10 +4270,52 @@ def make_voronoi_sharded_step(
     mesh_in_specs = jax.tree.map(lambda _: P("device"), stacked_meshes)
     halo_in_specs = jax.tree.map(lambda _: P("device"), halo_args)
 
+    # Interior/rim overlap plan (setup-time, gated). The structural rim is
+    # sized to the RHS the config selects (dry 3 hops, hyperdiffusion 5); the
+    # plan's compact submesh + gather/scatter arrays ride as P("device")
+    # shard_map ARGUMENTS, like the stacked meshes and the halo schedule.
+    rim_arg = ()
+    rim_in_specs = ()
+    if use_overlap:
+        t1 = time.time()
+        _cr, _er = _build_rim_rings_structural(
+            global_mesh, partitions_out, max_lc, max_le,
+            n_rounds=_overlap_rim_n_rounds(cfg))
+        _rim_plans = _build_rim_plan(
+            global_mesh, partitions_out, _cr, _er,
+            rim_width=1, stencil_depth=2)
+        _stacked_rim = _stack_rim_plans(_rim_plans)
+        # Host arrays first (multiprocess_safe_device_put passes a replicated
+        # leaf through unchanged; a host array is always fully addressable, so
+        # the P("device") shard is guaranteed on every controller — same
+        # reasoning as areaCell below).
+        _sub_dev = jax.tree.map(
+            lambda a: multiprocess_safe_device_put(
+                np.asarray(a), dev_sharding),
+            _stacked_rim["sub_mesh"])
+        rim_arg = (
+            _sub_dev,
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["cell_gather"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["edge_gather"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["cell_scatter"]), dev_sharding),
+            multiprocess_safe_device_put(
+                np.asarray(_stacked_rim["edge_scatter"]), dev_sharding),
+        )
+        rim_in_specs = jax.tree.map(lambda _: P("device"), rim_arg)
+        logger.info(
+            "  interior/rim overlap plan built in %.3fs (n_rounds=%d, "
+            "submesh gather width cells/edges %d/%d)", time.time() - t1,
+            _overlap_rim_n_rounds(cfg),
+            int(_stacked_rim["cell_gather"].shape[-1]),
+            int(_stacked_rim["edge_gather"].shape[-1]))
+
     def _make_local_tendency(tkeys: tuple):
 
         def _local_tendency(u_shard, T_shard, ps_shard, phis_shard,
-                            q_shard, dt_val, mesh_sl, halo_sl):
+                            q_shard, dt_val, mesh_sl, halo_sl, rim_sl=None):
             """Inside shard_map: full-state halo fill → local tendency.
 
             ``q_shard`` is the tracer block ``(cells_per, nlev * n_q)``
@@ -4266,6 +4355,25 @@ def make_voronoi_sharded_step(
             # This device's local mesh (leading axis is the length-1
             # device slice of the stacked meshes).
             my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)
+
+            if use_overlap:
+                # Interior pass runs on the OWNED shards (pre-fill, so it is
+                # independent of the collective and the scheduler can run it
+                # while the halo is in flight); the rim pass reads the FILLED
+                # buffers. Dry-only core, so tracers are refused here.
+                if tkeys:
+                    raise ValueError(
+                        "LEGOESM_MPAS_HALO_OVERLAP=1 does not support tracers "
+                        "yet; the interior/rim core is dry-only")
+                _sub_mesh = jax.tree.map(lambda x: x[0], rim_sl[0])
+                du_o, dT_o, dps_o = interior_rim_tendency(
+                    mpas_hydrostatic_tendencies, sigma, cfg, dt_val,
+                    u_shard, T_shard, ps_shard, phis_shard,
+                    u_local, T_local, ps_local, phis_local,
+                    my_mesh, _sub_mesh,
+                    rim_sl[1][0], rim_sl[2][0], rim_sl[3][0], rim_sl[4][0])
+                return (du_o, dT_o, dps_o,
+                        jnp.zeros((cells_per, 0), dtype=T_shard.dtype))
 
             tracers_local = None
             if tkeys:
@@ -4323,7 +4431,8 @@ def make_voronoi_sharded_step(
                 mesh=jax_mesh,
                 in_specs=(P("device"), P("device"), P("device"),
                           P("device"), P("device"), P(),
-                          mesh_in_specs, halo_in_specs),
+                          mesh_in_specs, halo_in_specs)
+                         + ((rim_in_specs,) if use_overlap else ()),
                 out_specs=(P("device"), P("device"), P("device"),
                            P("device")),
                 check_vma=False,
@@ -4543,7 +4652,7 @@ def make_voronoi_sharded_step(
 
         @jax.jit
         def _step(state, dt, forcing, phys_state,
-                  mesh_arg, halo_arg, area_arg, wide_arg):
+                  mesh_arg, halo_arg, area_arg, wide_arg, rim_arg):
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
@@ -4569,6 +4678,7 @@ def make_voronoi_sharded_step(
                 du, dT, dps, dq = shard_tendency(
                     s.u.data, s.T.data, s.p_s.data, s.phis.data,
                     _pack_tracers(s), dt, mesh_arg, halo_arg,
+                    *((rim_arg,) if use_overlap else ()),
                 )
                 # Static workload-gated fusion barrier (codex rounds
                 # 11-12; see _FUSION_BARRIER_WORKLOADS). Every gate
@@ -4765,7 +4875,7 @@ def make_voronoi_sharded_step(
             _step_cache[key] = fn
         state_new, phys_state_out = fn(
             state, dt, forcing, phys_state,
-            stacked_meshes, halo_args, _area_for_mass, wide_args,
+            stacked_meshes, halo_args, _area_for_mass, wide_args, rim_arg,
         )
         if return_phys_state:
             return state_new, phys_state_out
