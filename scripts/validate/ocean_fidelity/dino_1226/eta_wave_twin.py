@@ -196,8 +196,24 @@ def extract_nemo(run_dir: str, kt0: int, nsteps: int, out: str,
             eta[name][n - 1] = a
         kts.append(kt)
         # rdt sanity: read once per file group, cheap and catches a wrong run
-        if n in (1, nsteps):
-            with netCDF4.Dataset(tiles[0]) as ds:
+        # The Asselin identity below is a RECURRENCE IN THE ARRAY INDEX, so it
+        # is exactly invariant to a uniform shift of the whole window: it pins
+        # sshb-against-sshn and the direction of time, NOT the kt0 <-> step-N
+        # registration legoESM is lined up against.  That registration is
+        # pinned here instead, from each dump's OWN step counter.
+        with netCDF4.Dataset(tiles[0]) as ds:
+            if "kt" in ds.variables:
+                kt_in_file = int(np.squeeze(ds.variables["kt"][:]))
+                if kt_in_file != kt:
+                    raise SystemExit(
+                        f"dump named kt={kt} carries kt={kt_in_file} inside; "
+                        "the file<->step registration is wrong")
+            elif n == 1:
+                raise SystemExit(
+                    "the NEMO dumps carry no 'kt' variable, so the "
+                    "file<->step registration cannot be pinned; refusing "
+                    "rather than trusting the filename")
+            if n in (1, nsteps):
                 rdt_seen.add(float(np.squeeze(ds.variables["rdt"][:])))
 
     if rdt_seen != {NEMO_RDT_S}:
@@ -242,7 +258,11 @@ def extract_nemo(run_dir: str, kt0: int, nsteps: int, out: str,
             f"TIME-LEVEL IDENTITY FAILED: |sshb - Asselin(sshb,sshn)| = "
             f"{resid_max:.3e} m against a field of {scale:.3e} m. The "
             "identity is exact in NEMO, so any residual above roundoff means "
-            "the dump<->time-level mapping is wrong.")
+            "sshb and sshn are misaligned or time runs backwards.")
+    # NB: a zero residual does NOT on its own prove the mapping is right --
+    # the identity is invariant to a uniform shift of the window.  The kt
+    # check in the loop above pins the absolute registration; the two together
+    # are what close the question.
     d_consec = float(np.max(np.abs(sn[1] - sn[0])))
     d_bn = float(np.max(np.abs(sn[0] - sb[0])))
 
@@ -315,16 +335,42 @@ def make_impulse_restart(restart_in: str, restart_out: str,
     """
     import shutil
     mesh_mask = mesh_mask or MESH_MASK
-    shutil.copyfile(restart_in, restart_out)
     wet = wet_mask(mesh_mask)
+    # EVERY refusal happens before a single byte is written.  A guard that
+    # fires after the mutation leaves the exact coordinate-inconsistent
+    # restart it exists to prevent sitting on disk, where a retry or an
+    # unchecked exit code runs the model from it.
+    with netCDF4.Dataset(restart_in) as ds:
+        for name in ("e3t", "gdept", "r3t", "e3t_n"):
+            if name in ds.variables:
+                raise SystemExit(
+                    f"{restart_in} carries {name}, which depends on ssh -- "
+                    "bumping ssh alone would leave the vertical coordinate "
+                    "inconsistent; refusing")
+        for name in ("sshn", "sshb"):
+            if name not in ds.variables:
+                raise SystemExit(f"{name} absent from {restart_in}")
+        raw = ds.variables["sshn"][:]
+        if np.asarray(raw).squeeze().shape != wet.shape:
+            raise SystemExit(
+                f"restart ssh {np.asarray(raw).squeeze().shape} does not "
+                f"match the mesh {wet.shape}")
+        if np.ma.isMaskedArray(raw):
+            restart_wet = ~np.ma.getmaskarray(raw).squeeze()
+            if not np.array_equal(restart_wet & wet, wet):
+                raise SystemExit(
+                    "the restart masks cells the mesh calls wet; a bump there "
+                    "would be written on top of a fill value")
+    shutil.copyfile(restart_in, restart_out)
     with netCDF4.Dataset(mesh_mask) as ds:
         lat = np.asarray(ds.variables["nav_lat"][:]).squeeze()
         lon = np.asarray(ds.variables["nav_lon"][:]).squeeze()
         e1t = np.asarray(ds.variables["e1t"][0]).squeeze()
         e2t = np.asarray(ds.variables["e2t"][0]).squeeze()
-    # distance on the model's own metric, integrated from the centre cell --
-    # not a great-circle formula re-derived here, so the bump is round in the
-    # same metric the model steps on.
+    # Distance from the centre using the CENTRE CELL's own e1t/e2t, i.e. a
+    # locally-Cartesian approximation on the model's metric rather than a
+    # re-derived great-circle formula.  At 300 km against 64 km cells the
+    # error is small, but it IS an approximation, and it does not wrap in x.
     cost = np.where(wet, (lat - centre_lat) ** 2 + (lon - centre_lon) ** 2,
                     np.inf)
     jc, ic = np.unravel_index(np.argmin(cost), cost.shape)
@@ -341,16 +387,8 @@ def make_impulse_restart(restart_in: str, restart_out: str,
 
     with netCDF4.Dataset(restart_out, "r+") as ds:
         for name in ("sshn", "sshb"):
-            if name not in ds.variables:
-                raise SystemExit(f"{name} absent from {restart_in}")
             a = np.asarray(ds.variables[name][:])
             ds.variables[name][:] = a + bump[None, ...]
-        for name in ("e3t", "gdept", "r3t", "e3t_n"):
-            if name in ds.variables:
-                raise SystemExit(
-                    f"{restart_in} carries {name}, which depends on ssh -- "
-                    "bumping ssh alone would leave the vertical coordinate "
-                    "inconsistent; refusing")
     info = {"centre_j": int(jc), "centre_i": int(ic),
             "centre_lat": float(lat[jc, ic]), "centre_lon": float(lon[jc, ic]),
             "amplitude_m": float(amplitude_m), "radius_m": float(radius_m),
@@ -579,17 +617,29 @@ def variance_bands(eta: np.ndarray, wet: np.ndarray, dt: float,
                    area: np.ndarray | None = None) -> dict:
     """Share of TEMPORAL variance in each period band, summed over wet cells.
 
-    De-meaned and Hann-windowed per cell, exactly as ``spectra`` does, so the
-    single-cell spectra and this domain-wide number are the same estimator.
-    The zero-frequency bin is excluded: the series are de-meaned, so it holds
-    only window leakage and dividing by a total that includes it would make
-    every share depend on the leakage.
+    Window-weighted-demeaned and Hann-windowed per cell, the same way
+    ``spectra`` does it, so the single-cell spectra and this domain-wide
+    number really are the same estimator.
+
+    Interior bins of a one-sided spectrum each stand for a CONJUGATE PAIR and
+    carry twice the variance of the unpaired zero and Nyquist bins, so they
+    are weighted 2 here.  Weighting every bin equally inflates the Nyquist end
+    -- which is exactly where a leapfrog computational mode sits, i.e. the
+    band this probe is hunting.  The zero bin is then excluded outright: the
+    series are demeaned, so it holds only window leakage, and dividing by a
+    total that includes it would make every share depend on the leakage.
     """
     x = eta[:, wet]
-    x = x - x.mean(axis=0, keepdims=True)
     w = np.hanning(x.shape[0])[:, None]
+    nt = x.shape[0]
+    x = (x - np.sum(x * w, axis=0, keepdims=True) / w.sum()) * w
     aw = (np.ones(x.shape[1]) if area is None else area[wet])
-    power = (np.abs(np.fft.rfft(x * w, axis=0)) ** 2) * aw[None, :]
+    power = (np.abs(np.fft.rfft(x, axis=0)) ** 2) * aw[None, :]
+    pair = np.full(power.shape[0], 2.0)
+    pair[0] = 1.0
+    if nt % 2 == 0:
+        pair[-1] = 1.0
+    power = power * pair[:, None]
     freq = np.fft.rfftfreq(x.shape[0], d=dt)
     period_h = np.full(freq.shape, np.inf)
     period_h[1:] = 1.0 / (freq[1:] * 3600.0)
@@ -606,7 +656,7 @@ def variance_bands(eta: np.ndarray, wet: np.ndarray, dt: float,
 
 
 def step_noise_ratio(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
-                     regions: dict) -> dict:
+                     regions: dict, area: np.ndarray | None = None) -> dict:
     """Per-cell ratio of mean-squared STEP-TO-STEP change, legoESM / NEMO.
 
     The highest frequency either model can represent is the 2-step mode, and
@@ -637,13 +687,17 @@ def step_noise_ratio(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     # which locus does the excess live in?  Share of the EXCESS (num - den,
     # clipped at zero) per region, so a region with many mildly-noisy cells
     # cannot be hidden by one extreme cell elsewhere.
-    excess = np.where(live, np.maximum(num - den, 0.0), 0.0)
+    # AREA-WEIGHTED, like every other global statistic here: the wall band
+    # includes the outermost rows and is latitude-biased by construction, and
+    # this grid spans 70S-70N.
+    aw = np.ones_like(num) if area is None else area
+    excess = np.where(live, np.maximum(num - den, 0.0), 0.0) * aw
     tot = float(excess.sum())
     if tot > 0:
         shares = {}
-        n_live = float(live.sum())
+        n_live = float((aw * live).sum())
         for k, m in regions.items():
-            frac = float((m & live).sum()) / n_live
+            frac = float((aw * (m & live)).sum()) / n_live
             sh = float(excess[m].sum()) / tot
             shares[k] = {"share": sh, "area_fraction": frac,
                          "enrichment": (sh / frac) if frac > 0 else 0.0}
@@ -836,18 +890,27 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
     nemo = load_side(nemo_npz, "NEMO")
     lego = load_side(lego_npz, "legoESM")
     lane = "free"
+    dtypes = {"NEMO": nemo["dtype_on_disk"], "legoESM": lego["dtype_on_disk"]}
     if (nemo_free_npz is None) != (lego_free_npz is None):
         raise SystemExit("the impulse lane needs BOTH free runs or neither -- "
                          "differencing one side only would compare a response "
                          "against a full field")
     if nemo_free_npz is not None:
         nf = load_side(nemo_free_npz, "NEMO free")
+        for side in (nemo, nf):
+            if "eta_before" not in side:
+                raise SystemExit(
+                    f"{side['name']} carries no eta_before, so the response "
+                    "cannot keep the before-level in step with the after "
+                    "one. Re-extract with sshb.")
         lf = load_side(lego_free_npz, "legoESM free")
         for a, b in ((nemo, nf), (lego, lf)):
             if a["eta"].shape != b["eta"].shape or not np.array_equal(
                     a["t"], b["t"]):
                 raise SystemExit("a perturbed run and its free run disagree "
                                  "in shape or clock")
+        dtypes["NEMO free"] = nf["dtype_on_disk"]
+        dtypes["legoESM free"] = lf["dtype_on_disk"]
         nemo = dict(nemo, eta=nemo["eta"] - nf["eta"],
                     eta_before=nemo["eta_before"] - nf["eta_before"])
         lego = dict(lego, eta=lego["eta"] - lf["eta"])
@@ -870,14 +933,18 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         e1t = np.asarray(ds.variables["e1t"][0]).squeeze()   # zonal cell width
         e2t = np.asarray(ds.variables["e2t"][0]).squeeze()
     area = np.where(wet, e1t * e2t, 0.0)
-    if "nav_lat" in np.load(nemo_npz).files:
-        nav = np.load(nemo_npz)
-        for name, ref in (("nav_lat", lat), ("nav_lon", lon)):
-            if not np.allclose(np.asarray(nav[name]), ref, atol=1e-4):
-                raise SystemExit(
-                    f"{name} in the NEMO artifact does not match the mesh at "
-                    f"{mesh_mask}. The equator band and all four probe points "
-                    "would be placed on the wrong cells.")
+    for path in (nemo_npz, lego_npz, nemo_free_npz, lego_free_npz):
+        if path is None:
+            continue
+        with np.load(path) as nav:
+            for name, ref in (("nav_lat", lat), ("nav_lon", lon)):
+                if name not in nav.files:
+                    continue
+                if not np.allclose(np.asarray(nav[name]), ref, atol=1e-4):
+                    raise SystemExit(
+                        f"{name} in {path} does not match the mesh at "
+                        f"{mesh_mask}. The equator band and all four probe "
+                        "points would be placed on the wrong cells.")
 
     t = nemo["t"]
     dt = float(t[1] - t[0])
@@ -1031,9 +1098,13 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
             f"resolvably NOT the closest; {order[0]} is. {levels}")
 
     bands = {"NEMO": variance_bands(nemo["eta"], wet, dt, area),
-             "legoESM": variance_bands(lego["eta"], wet, dt, area),
-             "difference": variance_bands(diff, wet, dt, area)}
-    noise = step_noise_ratio(lego["eta"], nemo["eta"], wet, regions)
+             "legoESM": variance_bands(lego["eta"], wet, dt, area)}
+    # A field with no temporal variance has no band SHARES -- 0/0, not zeros.
+    # That is a legitimate state here (two identical models) and must not
+    # crash, but it must also not be reported as if the shares were measured.
+    bands["difference"] = (variance_bands(diff, wet, dt, area)
+                           if np.any(diff[:, wet]) else None)
+    noise = step_noise_ratio(lego["eta"], nemo["eta"], wet, regions, area)
 
     # Spatial spreading of the response.  Only meaningful in the impulse lane,
     # where there is a response with a centre; in the free lane it would be
@@ -1096,8 +1167,7 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
             "nemo_npz": nemo_npz, "lego_npz": lego_npz,
             "mesh_mask": mesh_mask, "lane": lane,
             "nemo_free_npz": nemo_free_npz, "lego_free_npz": lego_free_npz,
-            "nemo_dtype_on_disk": nemo["dtype_on_disk"],
-            "lego_dtype_on_disk": lego["dtype_on_disk"],
+            "dtype_on_disk": dtypes,
             "wet_cells": int(wet.sum()),
             "dry_cells": int((~wet).sum()),
             "mask_control": "PASSED (dry poison inert on masked stats, "

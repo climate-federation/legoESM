@@ -453,11 +453,19 @@ def test_compare_refuses_a_mismatched_mesh(ewt, tmp_path):
         ewt.compare(npz_n, npz_l, str(tmp_path / "o3"), mesh)
 
 
-def _fake_nemo_run(tmp_path, nsteps=6, ny=5, nx=4, offset=0):
-    """Write per-step NEMO-style restart tiles obeying the Asselin identity.
+def _fake_nemo_run(tmp_path, nsteps=6, ny=6, nx=4, offset=0, kt_shift=0,
+                   name="run"):
+    """Write per-step NEMO-style restart TILES obeying the Asselin identity.
 
-    ``offset`` shifts the sshb series by one dump, which is exactly the
-    mapping error the identity exists to catch.
+    Two tiles split in y, so `rebuild`'s DOMAIN_position placement and halo
+    handling are actually exercised -- a single full-domain tile always covers
+    the grid and would leave that path, and extract's "a tile did not cover
+    the whole domain" refusal, untested.
+
+    ``offset``   shifts the sshb series by one dump (the mapping error the
+                 Asselin identity catches).
+    ``kt_shift`` writes a wrong step counter INSIDE each file (the registration
+                 error the identity is blind to, being shift-invariant).
     """
     import netCDF4
     rng = np.random.default_rng(12)
@@ -467,30 +475,30 @@ def _fake_nemo_run(tmp_path, nsteps=6, ny=5, nx=4, offset=0):
     sshb[0] = sshn[0]
     for n in range(1, sshn.shape[0]):
         sshb[n] = sshn[n - 1] + atfp * (sshb[n - 1] - 2 * sshn[n - 1] + sshn[n])
-    run = tmp_path / "run"
+    run = tmp_path / name
     run.mkdir()
+    halves = ((0, ny // 2), (ny // 2, ny))
     for n in range(1, nsteps + 1):
         kt = 5760 + n
-        f = run / f"DINO_{kt:08d}_restart_0000.nc"
-        with netCDF4.Dataset(f, "w") as ds:
-            ds.createDimension("x", nx)
-            ds.createDimension("y", ny)
-            ds.createDimension("t", 1)
-            for name, arr in (("sshn", sshn[n]),
-                              ("sshb", sshb[n + offset]),
-                              ("nav_lat", None), ("nav_lon", None)):
-                if name.startswith("nav"):
-                    v = ds.createVariable(name, "f8", ("y", "x"))
-                    v[:] = np.zeros((ny, nx))
-                else:
-                    v = ds.createVariable(name, "f8", ("t", "y", "x"))
-                    v[:] = arr[None]
-            ds.createVariable("rdt", "f8")[...] = 2700.0
-            ds.DOMAIN_size_global = np.array([nx, ny])
-            ds.DOMAIN_position_first = np.array([1, 1])
-            ds.DOMAIN_position_last = np.array([nx, ny])
-            ds.DOMAIN_halo_size_start = np.array([0, 0])
-            ds.DOMAIN_halo_size_end = np.array([0, 0])
+        for tile, (y0, y1) in enumerate(halves):
+            f = run / f"DINO_{kt:08d}_restart_{tile:04d}.nc"
+            with netCDF4.Dataset(f, "w") as ds:
+                ds.createDimension("x", nx)
+                ds.createDimension("y", y1 - y0)
+                ds.createDimension("t", 1)
+                for vn, arr in (("sshn", sshn[n]), ("sshb", sshb[n + offset])):
+                    ds.createVariable(vn, "f8", ("t", "y", "x"))[:] = \
+                        arr[y0:y1][None]
+                for vn in ("nav_lat", "nav_lon"):
+                    ds.createVariable(vn, "f8", ("y", "x"))[:] = \
+                        np.zeros((y1 - y0, nx))
+                ds.createVariable("rdt", "f8")[...] = 2700.0
+                ds.createVariable("kt", "i4")[...] = kt + kt_shift
+                ds.DOMAIN_size_global = np.array([nx, ny])
+                ds.DOMAIN_position_first = np.array([1, y0 + 1])
+                ds.DOMAIN_position_last = np.array([nx, y1])
+                ds.DOMAIN_halo_size_start = np.array([0, 0])
+                ds.DOMAIN_halo_size_end = np.array([0, 0])
     return str(run)
 
 
@@ -498,7 +506,8 @@ def test_extract_nemo_accepts_a_correctly_mapped_run(ewt, tmp_path):
     run = _fake_nemo_run(tmp_path)
     out = tmp_path / "n.npz"
     got = ewt.extract_nemo(run, 5760, 6, str(out))
-    assert got["eta"].shape == (6, 5, 4)
+    assert got["eta"].shape == (6, 6, 4)
+    assert np.isfinite(got["eta"]).all()
 
 
 def test_extract_nemo_rejects_a_one_dump_time_level_offset(ewt, tmp_path):
@@ -602,3 +611,105 @@ def test_radial_spread_refuses_an_empty_sample(ewt):
     with pytest.raises(SystemExit, match="no energy"):
         ewt.radial_spread(np.zeros((2, 5, 5)), wet, np.ones((5, 5)),
                           2, 2, 1e4, 1e4)
+
+
+def test_extract_nemo_rejects_a_wrong_internal_step_counter(ewt, tmp_path):
+    """The Asselin identity is shift-invariant, so the registration is pinned
+    by each dump's OWN kt. This is the error the identity cannot see."""
+    run = _fake_nemo_run(tmp_path, kt_shift=3, name="shifted")
+    with pytest.raises(SystemExit, match="file<->step registration is wrong"):
+        ewt.extract_nemo(run, 5760, 6, str(tmp_path / "n3.npz"))
+
+
+def test_extract_nemo_rejects_dumps_without_a_step_counter(ewt, tmp_path):
+    import netCDF4
+    run = _fake_nemo_run(tmp_path, name="nokt")
+    for f in sorted(__import__("glob").glob(f"{run}/*.nc")):
+        with netCDF4.Dataset(f, "r+") as ds:
+            ds.renameVariable("kt", "kt_disabled")
+    with pytest.raises(SystemExit, match="no 'kt' variable"):
+        ewt.extract_nemo(run, 5760, 6, str(tmp_path / "n4.npz"))
+
+
+def test_extract_nemo_rejects_a_missing_tile(ewt, tmp_path):
+    """A tile that does not cover its share leaves NaN, which must be fatal."""
+    import os
+    run = _fake_nemo_run(tmp_path, name="holed")
+    os.remove(f"{run}/DINO_00005763_restart_0001.nc")
+    with pytest.raises(SystemExit, match="did not cover the whole domain"):
+        ewt.extract_nemo(run, 5760, 6, str(tmp_path / "n5.npz"))
+
+
+def test_spectra_halves_the_zero_bin(ewt):
+    """Directly exercise the DC coherent-gain correction."""
+    dt = 2700.0
+    n = 128
+    w = np.hanning(n)
+    x = np.ones(n)                      # pure DC before demeaning
+    x[0] += 1.0                         # break the exact cancellation
+    f, a = ewt.spectra(x, dt)
+    raw = np.abs(np.fft.rfft(
+        (x - np.average(x, weights=w)) * w))[0] * 2.0 / w.sum()
+    assert a[0] == pytest.approx(0.5 * raw)
+
+
+def test_variance_bands_weights_conjugate_pairs(ewt):
+    """A 50/50 split between a 2-step mode and a slow mode must read 50/50.
+
+    Weighting every bin equally inflates the Nyquist end, which is exactly the
+    band a leapfrog computational mode lives in.
+    """
+    wet, _ = _basin()
+    dt = 2700.0
+    n = 256
+    t = np.arange(n) * dt
+    nyq = ((-1.0) ** np.arange(n))
+    slow = np.sqrt(2.0) * np.sin(2 * np.pi * t / (48.0 * 3600.0))
+    eta = np.zeros((n,) + wet.shape)
+    eta[:, wet] = (nyq + slow)[:, None]
+    b = ewt.variance_bands(eta, wet, dt)
+    assert b["lt_6h"] == pytest.approx(0.5, abs=0.03)
+    assert b["gt_24h"] == pytest.approx(0.5, abs=0.03)
+
+
+def test_make_impulse_restart_refuses_before_writing_anything(ewt, tmp_path):
+    """A guard that fires after the mutation leaves the bad file on disk."""
+    import netCDF4
+    src = tmp_path / "src.nc"
+    ny, nx = 199, 52
+    with netCDF4.Dataset(src, "w") as ds:
+        ds.createDimension("x", nx)
+        ds.createDimension("y", ny)
+        ds.createDimension("z", 2)
+        ds.createDimension("t", 1)
+        for vn in ("sshn", "sshb"):
+            ds.createVariable(vn, "f8", ("t", "y", "x"))[:] = np.zeros((1, ny, nx))
+        ds.createVariable("e3t", "f8", ("t", "z", "y", "x"))[:] = np.ones((1, 2, ny, nx))
+    out = tmp_path / "out.nc"
+    with pytest.raises(SystemExit, match="carries e3t"):
+        ewt.make_impulse_restart(str(src), str(out))
+    assert not out.exists(), "the refused restart was written anyway"
+
+
+def test_make_impulse_restart_bumps_only_wet_cells_and_both_levels(ewt, tmp_path):
+    import netCDF4
+    src = tmp_path / "src2.nc"
+    wet = ewt.wet_mask()
+    ny, nx = wet.shape
+    with netCDF4.Dataset(src, "w") as ds:
+        ds.createDimension("x", nx)
+        ds.createDimension("y", ny)
+        ds.createDimension("t", 1)
+        for vn in ("sshn", "sshb"):
+            ds.createVariable(vn, "f8", ("t", "y", "x"))[:] = np.zeros((1, ny, nx))
+    out = tmp_path / "out2.nc"
+    info = ewt.make_impulse_restart(str(src), str(out), amplitude_m=0.05)
+    with netCDF4.Dataset(out) as ds:
+        n = np.asarray(ds["sshn"][:]).squeeze()
+        b = np.asarray(ds["sshb"][:]).squeeze()
+    assert np.array_equal(n, b), "the two time levels must get the SAME bump"
+    assert n.max() == pytest.approx(0.05, rel=1e-6)
+    assert np.all(n[~wet] == 0.0), "a dry cell was bumped"
+    assert wet[info["centre_j"], info["centre_i"]]
+    with netCDF4.Dataset(src) as ds:
+        assert float(np.asarray(ds["sshn"][:]).max()) == 0.0, "source mutated"
