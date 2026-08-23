@@ -69,7 +69,17 @@ import verdict360 as V  # noqa: E402  all_metrics, loaders, KEYS
 N_DAYS = 90
 SEEDS = V.SEEDS                        # (None, 1, 2, 3) -- the recorded convention
 N_MEM = len(SEEDS)
-CURVE_DAYS = tuple(range(10, N_DAYS + 1, 10))
+# The days BOTH arms can be scored on. The one-level arm's NEMO members kept
+# only the restart dumps at kt 6080/6720/7680/8640 -- days 10/30/60/90 -- so
+# that is the matched grid, and every cross-arm number below is computed on it.
+# Asking for a 10-day cadence on both arms would silently drop the one-level
+# NEMO side to whatever `rebuild` found, which is the confound this constant
+# exists to prevent.
+COMMON_DAYS = (10, 30, 60, 90)
+# The two-level arm dumps every 10 days on BOTH sides (nn_stock=320 and the
+# legoESM --snap-days grid), so its own spread curve is printed at that
+# cadence -- as an extra table, never mixed into an arm-to-arm comparison.
+FINE_DAYS = tuple(range(10, N_DAYS + 1, 10))
 SNAP_GRID = tuple(range(0, N_DAYS + 1, 10))
 SCORE_DAY = 90                         # the day the recorded asymmetry was quoted at
 DECAY_PAIR = (30, 60)                  # the recorded NEMO spread decay
@@ -100,8 +110,21 @@ def member_name(i):
     return V.member_name(i)
 
 
+# The two-level arm's NEMO members live on LOCAL SCRATCH, not next to the
+# recorded runs under ``A.DINO``.  Each 90-day member writes ~2.4 GB (nine
+# 16-rank restart dumps plus the instrumented oracle's per-step diagnostic
+# dumps) and the DINO config directory already holds 133 GB; the first attempt
+# ran the home-directory quota out mid-ensemble, which is a run lost for a
+# reason that has nothing to do with the physics.  A DINO run directory is
+# self-contained -- two namelists, one input restart, a symlink to the
+# certified binary, and an analytically-generated domain -- so where it sits
+# is not a variable of the experiment, and control C4 tests exactly that by
+# comparing the two arms' unperturbed controls.
+NEMO_RUN_ROOT = "/tmp/dino_kick2_nemo"
+
+
 def nemo_dir(i):
-    return f"{A.DINO}/RUN_KICK2_M{i}"
+    return f"{NEMO_RUN_ROOT}/RUN_KICK2_M{i}"
 
 
 def lego_npz(out_dir, i):
@@ -180,16 +203,28 @@ def setup_nemo():
     ran 360 days; this arm does not, so the namelist is COPIED and the
     'one variable' claim needs no line-editing to be true.
     """
+    os.makedirs(NEMO_RUN_ROOT, exist_ok=True)
     for i in range(N_MEM):
         d = nemo_dir(i)
         stale = (glob.glob(f"{d}/DINO_*_restart_*.nc") + glob.glob(f"{d}/time.step")
                  + glob.glob(f"{d}/ocean.output"))
         if stale:
+            # A member that already ran to completion is RESUMED, not rebuilt:
+            # rebuilding would perturb a fresh restart and throw away a finished
+            # 90-day integration. A member carrying PARTIAL output still
+            # refuses, because scoring a mix of old and new states is exactly
+            # the silent confound this guard exists for. (The first launch of
+            # this ensemble died on a disk quota with two members finished; the
+            # refuse-always form would have discarded both.)
+            done, why = nemo_completed(d, "run_kick2_m*.log")
+            if done:
+                print(f"[{member_name(i)}] {d}: already COMPLETE, left alone")
+                continue
             raise SystemExit(
-                f"{d} already carries {len(stale)} output file(s) from an "
-                f"earlier run (e.g. {os.path.basename(stale[0])}). Scoring a "
-                f"mix of old and new states is a silent confound -- clear the "
-                f"directory deliberately, or point at a fresh one.")
+                f"{d} carries {len(stale)} output file(s) from an INCOMPLETE "
+                f"earlier run ({why}; e.g. {os.path.basename(stale[0])}). "
+                f"Scoring a mix of old and new states is a silent confound -- "
+                f"clear the directory deliberately, or point at a fresh one.")
         os.makedirs(d, exist_ok=True)
         for f in ("namelist_cfg", "namelist_ref"):
             shutil.copy2(f"{NEMO_SRC}/{f}", f"{d}/{f}")
@@ -229,6 +264,10 @@ def run_nemo():
         d = nemo_dir(i)
         if not os.path.exists(f"{d}/nemo"):
             raise SystemExit(f"{d} not set up -- run --setup-nemo first")
+        done, _ = nemo_completed(d, "run_kick2_m*.log")
+        if done:
+            print(f"[skip] NEMO {member_name(i)} already complete", flush=True)
+            continue
         cmd = [MPIRUN, "-np", str(N_RANK), "./nemo"]
         print("RUN:", " ".join(cmd), f"[cwd={d}]", flush=True)
         with open(f"{d}/run_kick2_m{i}.log", "w") as fh:
@@ -575,6 +614,8 @@ def growth_table(arm):
 
 def spread_curves(rows_one, rows_two):
     print("\n--- SPREAD(t): single-run ensemble spread by day, both arms ---")
+    print(f"    MATCHED GRID {COMMON_DAYS}: the one-level arm's NEMO members "
+          f"kept restart dumps only at those days.")
     print("    sample std (the primary statistic).  At n=4 every value carries "
           f"~{100 * LOG_SD_SPREAD:.0f}% relative standard error, so read a")
     print("    factor of two, not three digits.  legoESM states are stored "
@@ -583,11 +624,24 @@ def spread_curves(rows_one, rows_two):
         for tag, rows in (("one-level", rows_one), ("two-level", rows_two)):
             print(f"\n  {side}  /  {tag}")
             print(f"    {'metric':<38}"
-                  + "".join(f"{'d' + str(d):>12}" for d in CURVE_DAYS))
+                  + "".join(f"{'d' + str(d):>12}" for d in COMMON_DAYS))
             for k in KEYS:
                 cells = "".join(f"{spread_at(rows, side, k, d):>12.4e}"
-                                for d in CURVE_DAYS)
+                                for d in COMMON_DAYS)
                 print(f"    {LABELS[k]:<38}{cells}")
+
+    print("\n--- SPREAD(t) at 10-day cadence, TWO-LEVEL ARM ONLY ---")
+    print("    Printed because the two-level arm has it on both sides. It is "
+          "NOT compared against the")
+    print("    one-level arm, which does not have these days on its NEMO side.")
+    for side in ("lego", "nemo"):
+        print(f"\n  {side}  /  two-level")
+        print(f"    {'metric':<38}"
+              + "".join(f"{'d' + str(d):>12}" for d in FINE_DAYS))
+        for k in KEYS:
+            cells = "".join(f"{spread_at(rows_two, side, k, d):>12.4e}"
+                            for d in FINE_DAYS)
+            print(f"    {LABELS[k]:<38}{cells}")
 
 
 def ratio_table(rows_one, rows_two, excluded):
@@ -681,8 +735,8 @@ def main(argv=None):
     _self_check()
     one, two = arms(args.dir)
     print("\nscoring both arms (this loads every state exactly once)")
-    rows_one = collect(one, CURVE_DAYS)
-    rows_two = collect(two, CURVE_DAYS)
+    rows_one = collect(one, COMMON_DAYS)
+    rows_two = collect(two, FINE_DAYS)
 
     quantum = V.fp32_quantum(V.lego_state(lego_npz(two.lego_dir, 0), SCORE_DAY),
                              A.tmask)
