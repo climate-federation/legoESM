@@ -37,7 +37,11 @@ CONTROLS, all fatal, all printed before any number is used:
      perturbation ensemble and not four copies of one run.
   C3 DAY-0 IDENTITY.  lego and NEMO must agree at day 0 in T and S to the fp32
      snapshot quantum, or the two sides are not the same twin.
-  C4 NaN.  A single non-finite value on the wet mask is fatal.  No nanmean.
+  C4 NaN.  A single non-finite value on the wet mask is fatal, and the
+     difference field is zeroed off the mask so a dry-cell NaN cannot reach a
+     sum.  No NaN-tolerant reduction appears in ANY REPORTED STATISTIC; the two
+     ``nanpercentile`` calls in this file set colourbar limits on arrays that
+     are deliberately NaN-masked for display, downstream of that fatal check.
   C5 MASK BITE (planted violation).  A dry cell is given a difference of 1e6
      and every reported reduction must be unchanged to 1e-12 relative.  A
      statistic that moves means the mask does not bite.
@@ -71,10 +75,10 @@ import numpy as np
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.dirname(_DIR))
-import acc_driver_decomp as D           # noqa: E402  group_transport, LAT_GROUPS, _avg
-import acc_thermal_wind as A            # noqa: E402  mesh, masks, J0/J1
-import acceptance_gate_90d as G         # noqa: E402  load_candidate (stamp refusals)
-import kamm_twin_90d as T               # noqa: E402  the twin's OWN clock guard
+import acc_driver_decomp as D  # noqa: E402  group_transport, LAT_GROUPS, _avg
+import acc_thermal_wind as A  # noqa: E402  mesh, masks, J0/J1
+import acceptance_gate_90d as G  # noqa: E402  load_candidate (stamp refusals)
+import kamm_twin_90d as T  # noqa: E402  the twin's OWN clock guard
 from rebuild_nemo_restart import rebuild  # noqa: E402
 
 LEGO_DIR = "/tmp/dino_verdict360"
@@ -85,12 +89,33 @@ N_MEM = len(SEEDS)
 DAY0_BAR = 1e-5
 # the registered kick: 1e-14 relative on the now-level T of NEMO members 1..3
 KICK_REL_LO, KICK_REL_HI = 1e-16, 1e-12
+# The verdict run's OWN recorded day-360 south-of-band transport gap
+# (a1387f1f7, "SOUTH of band -0.95191"). C7 reproduces THIS -- a control that
+# only checks the row split against its own group sum is an algebraic identity
+# of two linear reductions and cannot fail, which is what the first version was.
+D360_SOUTH_GAP_RECORDED_SV = -0.95191
+D360_SOUTH_GAP_TOL_SV = 1e-4
+# member 3's NEMO run was relocated off the certified tree when the home quota
+# filled mid-campaign; a1387f1f7 records that its restart was re-verified as the
+# seed-3 perturbation and reproduced independently before it was re-run. Named
+# here so the refusal below is a NAMED exception with a reason, not a print line
+# a reader is expected to eyeball.
+NEMO_DIR_ALLOWED_OUTSIDE_TREE = {"/tmp/dino_v360_m3"}
+# the vertical ladder the registration scores on; refused on VALUE, not printed
+LADDER_REQUIRED = "both"
 
 # ---- registered partitions (PREREG sec.2) -----------------------------------
 UPPER_M, DEEP_M = 200.0, A.DEEP_M           # 200 m, 1400 m
-WALL_ROWS = slice(1, 6)                     # southern_circulation_budget's 1-5
-MAIN_ROWS = slice(6, 14)                    # its main rows 6-13
 SOUTH_ROWS = list(range(1, A.J0))           # basin rows 1..13 (row 0 is dry)
+# southern_circulation_budget.py's own split: wall rows 1-5, main rows 6-13.
+# Expressed ONCE, as absolute T-rows, and every consumer derives its positional
+# slice into SOUTH_ROWS from it -- a second hand-written `[:5]` is how the two
+# definitions drift apart.  The task brief said "the 4 wall rows"; the committed
+# split is FIVE and it was not changed to match prose.
+WALL_ROWS = list(range(1, 6))
+MAIN_ROWS = [j for j in SOUTH_ROWS if j not in WALL_ROWS]
+N_WALL = len(WALL_ROWS)
+assert WALL_ROWS + MAIN_ROWS == SOUTH_ROWS, "wall/main split is not a partition"
 # registered bars, question 2
 Q2_R_BAR, Q2_RET_BAR = 0.50, 0.25
 Q2_SPREAD_RET, Q2_SPREAD_ROWS, Q2_SPREAD_M = 0.15, 10.0, 500.0
@@ -135,33 +160,52 @@ def wrms(d, w, sel=None):
     weight is already zero on land, so a dry cell contributes nothing whatever
     it holds -- that is what C5 plants against."""
     ww = w if sel is None else np.where(sel, w, 0.0)
-    tot = ww.sum()
-    if tot <= 0.0:
-        return float("nan")
-    return float(np.sqrt(float((ww * d * d).sum()) / float(tot)))
+    tot = float(ww.sum())
+    # An empty selection ABORTS.  Returning NaN would print a plausible-looking
+    # blank into a table and let a mis-specified region or depth band survive
+    # to the findings document.
+    if not tot > 0.0:
+        raise SystemExit("FATAL: wrms over a selection with zero wet volume -- "
+                         "a region or depth band that selects nothing is a "
+                         "defect in the partition, not a NaN to print")
+    return float(np.sqrt(float((ww * d * d).sum()) / tot))
 
 
 def wcorr(a, b, w):
     """Volume-weighted Pearson correlation of two fields over the weight
     support."""
-    tot = w.sum()
+    tot = float(w.sum())
+    if not tot > 0.0:
+        raise SystemExit("FATAL: wcorr over a zero-volume support")
     ma = float((w * a).sum()) / tot
     mb = float((w * b).sum()) / tot
     da, db = a - ma, b - mb
     cov = float((w * da * db).sum()) / tot
     va = float((w * da * da).sum()) / tot
     vb = float((w * db * db).sum()) / tot
-    if va <= 0.0 or vb <= 0.0:
-        return float("nan")
+    if not (va > 0.0 and vb > 0.0):
+        raise SystemExit("FATAL: wcorr on a field with zero weighted variance "
+                         "-- the correlation is undefined, not NaN to print")
     return float(cov / np.sqrt(va * vb))
 
 
 def centroid(d, w):
-    """Volume-weighted centroid of d^2 in (T-row index, depth [m])."""
+    """Volume-weighted centroid of d^2 in (T-row index, depth [m]).
+
+    DEVIATION FROM THE REGISTRATION: PREREG sec.3 S2 says ``gdept_1d``; this
+    uses ``gdept_0``, the 3-D partial-cell T-point depth, so a bottom partial
+    cell is placed at its own depth rather than at the reference ladder's.
+    That is the physically correct depth of the water the difference sits in,
+    and it differs from the registered choice only in bottom partial cells.
+    Recorded rather than silently taken.  (The depth CLASSES use ``gdept_1d``
+    as registered, because a class boundary must be one number for all
+    columns, not a per-column one.)
+    """
     m = w * d * d
-    tot = m.sum()
-    if tot <= 0.0:
-        return float("nan"), float("nan")
+    tot = float(m.sum())
+    if not tot > 0.0:
+        raise SystemExit("FATAL: centroid of a zero squared-difference field "
+                         "-- undefined, not NaN to print")
     rows = np.arange(A.NY, dtype=np.float64)[:, None, None]
     return (float((m * rows).sum()) / float(tot),
             float((m * _f64(A.gdept0)).sum()) / float(tot))
@@ -169,8 +213,15 @@ def centroid(d, w):
 
 def hotspot_set(d0, w, frac=Q2_NULL):
     """The cells holding the top `frac` of the WET VOLUME when ranked by |d0|.
-    Ranking is by intensity, selection is by cumulative volume, so the set's
-    null share of any later sum-of-w*d^2 is exactly `frac`."""
+
+    DEVIATION FROM THE REGISTRATION, recorded here so it is not read as "as
+    registered": PREREG sec.3 S3 says "top 5% of V*d^2".  Ranking by ``V*d^2``
+    would rank a large cell above a more strongly diverged small one, which
+    makes the set a statement about cell size and destroys the exact 0.05 null.
+    Ranking is therefore by INTENSITY (|d0|) and the CUT is by cumulative
+    volume, which is what gives the set a null share of exactly `frac` of any
+    later sum of w*d^2.  The self-test measures that null on unequal weights.
+    """
     flat_i = np.argsort(np.abs(d0), axis=None)[::-1]
     wflat = w.reshape(-1)[flat_i]
     cum = np.cumsum(wflat)
@@ -184,7 +235,10 @@ def retention(d, w, hot):
     """Share of the total volume-weighted d^2 sitting inside `hot`."""
     m = w * d * d
     tot = float(m.sum())
-    return float(m[hot].sum()) / tot if tot > 0.0 else float("nan")
+    if not tot > 0.0:
+        raise SystemExit("FATAL: retention of a zero squared-difference field "
+                         "-- undefined, not NaN to print")
+    return float(m[hot].sum()) / tot
 
 
 def spearman(x, y):
@@ -193,13 +247,86 @@ def spearman(x, y):
     rx -= rx.mean()
     ry -= ry.mean()
     den = np.sqrt((rx * rx).sum() * (ry * ry).sum())
-    return float((rx * ry).sum() / den) if den > 0 else float("nan")
+    if not den > 0:
+        raise SystemExit("FATAL: spearman on a constant profile -- the rank "
+                         "correlation is undefined, not NaN to print")
+    return float((rx * ry).sum() / den)
 
 
 def pearson(x, y):
     x, y = _f64(x) - np.mean(x), _f64(y) - np.mean(y)
     den = np.sqrt((x * x).sum() * (y * y).sum())
-    return float((x * y).sum() / den) if den > 0 else float("nan")
+    if not den > 0:
+        raise SystemExit("FATAL: pearson on a constant profile -- the "
+                         "correlation is undefined, not NaN to print")
+    return float((x * y).sum() / den)
+
+
+def lag1(x):
+    """Lag-1 autocorrelation of a 1-D profile (about its own mean)."""
+    x = _f64(x) - np.mean(x)
+    den = float((x * x).sum())
+    return float((x[:-1] * x[1:]).sum() / den) if den > 0 else 0.0
+
+
+def n_eff(x, y):
+    """Dawdy-Matalas effective sample size for a correlation between two
+    AUTOCORRELATED profiles: n_eff = n * (1 - r1x*r1y) / (1 + r1x*r1y).
+
+    The registered bar |rho| >= 0.56 is the two-sided p<0.05 critical value for
+    THIRTEEN INDEPENDENT samples.  These 13 samples are adjacent latitude rows
+    in one basin and are strongly autocorrelated, so that bar is too generous by
+    construction.  This is a first-order correction quoted from standard
+    practice, not derived here; the shift/wrong-time nulls below are exact and
+    are what the conclusion should rest on.
+    """
+    p = lag1(x) * lag1(y)
+    return float(len(x) * (1.0 - p) / (1.0 + p)) if p > -1.0 else float(len(x))
+
+
+def shift_null(a, b, stat=None):
+    """Exact cyclic-shift null for a profile correlation.
+
+    Rolling `b` by 1..n-1 rows preserves BOTH profiles' own shapes and their
+    autocorrelation exactly, and destroys only the row-by-row alignment -- which
+    is the thing being tested.  Returns (observed, p) where p is the fraction of
+    shifts whose |statistic| is at least the observed one, including the
+    observed alignment itself.  The resolution floor is 1/n, so p can never go
+    below 1/13 = 0.077 here: that IS the test's power, and quoting it is the
+    honest alternative to quoting a normal-theory p-value the samples do not
+    support.
+    """
+    stat = spearman if stat is None else stat
+    obs = stat(a, b)
+    alt = [abs(stat(a, np.roll(b, k))) for k in range(1, len(b))]
+    return obs, float((1 + sum(v >= abs(obs) for v in alt)) / (1 + len(alt)))
+
+
+def row_volume(w):
+    """Wet volume of each southern-basin row [m3], in SOUTH_ROWS order."""
+    v = np.array([float(w[j].sum()) for j in SOUTH_ROWS], dtype=np.float64)
+    if not (v > 0.0).all():
+        raise SystemExit(f"FATAL: southern-basin rows with zero wet volume: "
+                         f"{[SOUTH_ROWS[i] for i in np.nonzero(v <= 0)[0]]} -- "
+                         f"a dry row inside the basin would silently drop out "
+                         f"of every share and correlation below")
+    return v
+
+
+def _wall_share(rms_rows, row_vol):
+    """Share of the southern-basin volume-weighted d^2 sitting in the wall rows.
+
+    ``rms_rows`` is the per-row volume-weighted rms, so ``rms^2`` is that row's
+    volume-weighted MEAN square and must be multiplied by the row's own volume
+    to recover the row's contribution to the total.  Weighting is not optional
+    here: the 13 rows span 4.6 degrees of latitude and differ in wet volume.
+    """
+    contrib = np.asarray(row_vol, dtype=np.float64) * np.asarray(rms_rows, dtype=np.float64) ** 2
+    tot = float(contrib.sum())
+    if not tot > 0.0:
+        raise SystemExit("FATAL: southern-basin squared difference is zero -- "
+                         "the wall share is undefined, not 0.0")
+    return float(contrib[:N_WALL].sum() / tot)
 
 
 def row_deficit(u_lego, u_nemo):
@@ -296,6 +423,14 @@ def control_provenance():
         if str(d["control_dtype"]) != "float64":
             raise SystemExit(f"FATAL: {lego_npz(i)} control_dtype "
                              f"{d['control_dtype']} -- fp64 required")
+        # the ladder stamp is REFUSED on value, not merely printed: a member run
+        # on a different vertical ladder would otherwise pass this control and
+        # inflate the chaotic floor every table divides by
+        if str(d["nemo_ladder_mode"]) != LADDER_REQUIRED:
+            raise SystemExit(f"FATAL: {lego_npz(i)} ran vertical ladder "
+                             f"{d['nemo_ladder_mode']!r}, not the registered "
+                             f"{LADDER_REQUIRED!r} -- members on different "
+                             f"ladders are not one ensemble")
         print(f"  m{i} head={head[:9]} dtype={dtype} ladder={d['nemo_ladder_mode']} "
               f"clock_t0={float(d['seasonal_t0_seconds']):.0f}s")
     control_clock()
@@ -306,7 +441,23 @@ def control_provenance():
             raise SystemExit(f"FATAL: NEMO member {i} is missing scored horizons "
                              f"{sorted(set(days) - have)}")
     print(f"  scored horizons ({len(days)}) : {days}")
-    print(f"  NEMO member dirs        : {[os.path.realpath(nemo_dir(i)) for i in range(N_MEM)]}")
+    # The registration refuses a member outside the certified NEMO tree.  It is
+    # a REFUSAL, not a print: member 3 really does resolve outside it, and it
+    # feeds the chaotic floor in every row of both growth tables, so "a reader
+    # will notice the path" is not a control.
+    cert_root = os.path.realpath(A.DINO)
+    for i in range(N_MEM):
+        real = os.path.realpath(nemo_dir(i))
+        inside = os.path.commonpath([real, cert_root]) == cert_root
+        allowed = real in NEMO_DIR_ALLOWED_OUTSIDE_TREE
+        if not inside and not allowed:
+            raise SystemExit(
+                f"FATAL: NEMO member {i} resolves to {real}, outside the "
+                f"certified tree {cert_root}, and is not in the named "
+                f"allow-list. A member on unaudited storage is refused, not "
+                f"printed for a reader to eyeball.")
+        note = "" if inside else "  [NAMED EXCEPTION: relocated, a1387f1f7]"
+        print(f"  NEMO m{i} dir           : {real}{note}")
     try:
         sha_now = subprocess.run(["git", "-C", _DIR, "rev-parse", "HEAD"],
                                  capture_output=True, text=True, check=True).stdout.strip()
@@ -360,13 +511,16 @@ def control_clock():
           "bypassed for the loads below, its PHASE check is not")
 
 
-def control_kick():
+def control_kick(wet):
     print("[C2 KICK] NEMO members 1-3 vs member 0 at day 0, relative on tn")
     t0 = load_nemo(0, 0)["T"]
-    fin = np.isfinite(t0)
     for i in range(1, N_MEM):
         ti = load_nemo(i, 0)["T"]
-        rel = np.abs(ti[fin] - t0[fin]) / np.maximum(np.abs(t0[fin]), 1e-12)
+        # on the WET mask, like every other statistic here.  The previous
+        # version used isfinite(), which is the one place a control in this
+        # file touched dry cells.
+        rel = (np.abs(ti[wet] - t0[wet])
+               / np.maximum(np.abs(t0[wet]), 1e-12))
         mx = float(rel.max())
         print(f"  m{i} max relative |dT| = {mx:.3e}")
         if not (KICK_REL_LO <= mx <= KICK_REL_HI):
@@ -404,17 +558,40 @@ def control_mask_bite(d, w, wet):
     idx = tuple(int(v[0]) for v in np.nonzero(dry))
     poisoned = d.copy()
     poisoned[idx] = 1e6
-    checks = [("global wrms", lambda x: wrms(x, w)),
-              ("south-upper wrms", lambda x: wrms(x, w, _sel(REGIONS[0][1], DEPTH_CLASSES[0][1]))),
-              ("centroid row", lambda x: centroid(x, w)[0]),
-              ("centroid depth", lambda x: centroid(x, w)[1])]
+    ref = np.asarray(A.gdept0, dtype=np.float64)      # a fixed second field for wcorr
+    rows_of = lambda x: np.array(                                       # noqa: E731
+        [wrms(x, w, _sel(slice(j, j + 1), np.ones(A.NZ, bool))) for j in SOUTH_ROWS])
+    hot0 = hotspot_set(d, w)
+    # EVERY reported reduction, as registered -- not the four that were easiest
+    # to reach.  A reduction absent from this list is one whose mask behaviour
+    # was argued rather than measured.
+    checks = [
+        ("global wrms", lambda x: wrms(x, w)),
+        ("south-upper wrms", lambda x: wrms(x, w, _sel(REGIONS[0][1], DEPTH_CLASSES[0][1]))),
+        ("share south-upper", lambda x: float(
+            (w * x * x)[_sel(REGIONS[0][1], DEPTH_CLASSES[0][1])].sum()
+            / max(float((w * x * x).sum()), 1e-300))),
+        ("centroid row", lambda x: centroid(x, w)[0]),
+        ("centroid depth", lambda x: centroid(x, w)[1]),
+        ("retention", lambda x: retention(x, w, hot0)),
+        ("hot overlap", lambda x: float(
+            w[hotspot_set(x, w) & hot0].sum() / w[hot0].sum())),
+        ("wcorr vs depth", lambda x: wcorr(np.abs(x), ref, w)),
+        ("row rms (basin sum)", lambda x: float(rows_of(x).sum())),
+        ("wall share", lambda x: _wall_share(rows_of(x), row_volume(w))),
+    ]
     for name, fn in checks:
         a, b = fn(d), fn(poisoned)
         rel = abs(b - a) / max(abs(a), 1e-30)
-        print(f"  {name:<18} clean {a:.12e}  planted {b:.12e}  rel {rel:.2e}")
-        if rel > 1e-12:
+        print(f"  {name:<20} clean {a:.12e}  planted {b:.12e}  rel {rel:.2e}")
+        # NEGATED form deliberately: `rel > tol` is FALSE for NaN, so the
+        # original comparison PASSED on a NaN -- in the one control whose whole
+        # job is dry-cell behaviour, and NaN is exactly what an unwritten
+        # restart region carries.
+        if not (rel <= 1e-12):
             raise SystemExit(f"FATAL: the mask does not bite -- {name} moved "
-                             f"{rel:.2e} when a DRY cell was poisoned")
+                             f"{rel:.2e} when a DRY cell was poisoned "
+                             f"(a non-finite value here is a failure, not a pass)")
     # and prove the check is not vacuous: the same plant on a WET cell MUST move it
     wet_idx = tuple(int(v[0]) for v in np.nonzero(wet))
     live = d.copy()
@@ -481,15 +658,52 @@ def self_test():
     # hotspot retention: if d is UNCHANGED the top-5%-by-volume set holds far
     # more than 5% of d^2 when d is concentrated, and exactly 5% when d is flat
     flat = np.ones_like(dd)
-    hot = hotspot_set(flat, ww3)
-    assert abs(retention(flat, ww3, hot) - float(ww3[hot].sum() / ww3.sum())) < 1e-12
-    print(f"  retention of a FLAT field {retention(flat, ww3, hot):.4f} "
-          f"(== its volume share, the {Q2_NULL} null)")
+    # On UNEQUAL weights, so the "selection is by cumulative VOLUME" property is
+    # actually exercised.  The earlier version used all-ones weights and asserted
+    # retention == the selected volume share, which is true BY CONSTRUCTION for a
+    # flat field and ANY selector whatsoever -- it passed for a selector taking
+    # half the cells.  What must be asserted is that the selected VOLUME is the
+    # registered 0.05, because that is what makes the null 0.05.
+    w2 = rng.uniform(0.1, 10.0, size=dd.shape)
+    h = hotspot_set(flat, w2)
+    assert abs(float(w2[h].sum() / w2.sum()) - Q2_NULL) < 1e-3
+    assert abs(retention(flat, w2, h) - Q2_NULL) < 1e-3
+    # ...and a case where cutting by VOLUME and cutting by COUNT give visibly
+    # different sets, so the assertion above cannot pass a count-based selector.
+    # Rank the field so the HEAVIEST cells come first: the top 5% of volume is
+    # then far fewer than 5% of cells.
+    heavy = w2.copy()                       # |d0| ordering == weight ordering
+    h2 = hotspot_set(heavy, w2)
+    vol_share = float(w2[h2].sum() / w2.sum())
+    cell_share = float(h2.sum() / h2.size)
+    assert abs(vol_share - Q2_NULL) < 1e-3, vol_share
+    # a COUNT-based cut would give exactly Q2_NULL here; a volume cut gives far
+    # fewer cells because the heaviest ones rank first
+    assert cell_share < 0.7 * Q2_NULL, (cell_share, "cut is by COUNT, not volume")
+    print(f"  hotspot cuts by VOLUME    {vol_share:.4f} of volume but only "
+          f"{cell_share:.4f} of cells when the heaviest cells rank first "
+          f"(a count-based cut would give {Q2_NULL})")
     spike = np.zeros_like(dd)
     spike[:2, :, :] = 10.0
     hot2 = hotspot_set(spike, ww3)
     assert retention(spike, ww3, hot2) > 0.9
     print(f"  retention of a CONCENTRATED field {retention(spike, ww3, hot2):.4f}")
+
+    # the wall share must weight each row's mean-square by that ROW's volume.
+    # Case: wall rows carry rms 1 on tiny volume, main rows rms 1 on large
+    # volume -- the correct share is the VOLUME share, and the unweighted
+    # answer (N_WALL/13) is excluded.
+    vol = np.array([1.0] * N_WALL + [9.0] * (len(SOUTH_ROWS) - N_WALL))
+    got = _wall_share(np.ones(len(SOUTH_ROWS)), vol)
+    want = float(vol[:N_WALL].sum() / vol.sum())
+    assert abs(got - want) < 1e-12, (got, want)
+    assert abs(got - N_WALL / len(SOUTH_ROWS)) > 0.1, "unweighted answer not excluded"
+    print(f"  wall share volume-weighted {got:.6f} (want {want:.6f}; the "
+          f"unweighted answer {N_WALL / len(SOUTH_ROWS):.6f} is excluded)")
+    # and it must respond to intensity, not only to volume
+    hot = np.ones(len(SOUTH_ROWS))
+    hot[:N_WALL] = 3.0
+    assert _wall_share(hot, vol) > got
 
     x = np.arange(13, dtype=np.float64)
     assert abs(spearman(x, x ** 3) - 1.0) < 1e-12       # monotone, non-linear
@@ -503,17 +717,18 @@ def self_test():
 # -------------------------------------------------------------------- atlas ---
 def run(out_dir):
     days = control_provenance()
-    control_kick()
 
     lego0 = np.load(lego_npz(0))
     wet, w = build_weights(lego0["land_mask"])
+    control_kick(wet)
     control_dtype(("volume weight", w), ("e3t_0", A.e3t0), ("gdept_0", A.gdept0),
-                  ("gdept_1d", A.gdept1d))
+                  ("gdept_1d", A.gdept1d), ("cell volume", CELL_VOL),
+                  ("gphit", _f64(A.gphit)))
     print(f"[mask] {int(wet.sum())} wet T-cells of {wet.size}; "
           f"total volume {w.sum():.6e} m3")
-    print(f"[regions] " + "; ".join(
+    print("[regions] " + "; ".join(
         f"{n} rows {s.start}..{s.stop - 1}" for n, s in REGIONS))
-    print(f"[depths]  " + "; ".join(
+    print("[depths]  " + "; ".join(
         f"{n} = {int(m.sum())} levels" for n, m in DEPTH_CLASSES))
     control_day0(wet)
 
@@ -526,6 +741,8 @@ def run(out_dir):
     keep = {}                     # full 3-D difference at the figure horizons
     hot = {}
     d10 = {}
+    d90 = {}
+    d_prev = {}
     fig_days = [d for d in (10, 90, 180, 270, 360) if d in days]
 
     for day in days:
@@ -535,7 +752,16 @@ def run(out_dir):
         for fld in ("T", "S"):
             control_finite(f"lego m0 {fld} day{day}", lg[fld], wet)
             control_finite(f"NEMO m0 {fld} day{day}", nm[fld], wet)
-            d = _f64(lg[fld]) - _f64(nm[fld])
+            # ZERO the difference off the wet mask.  rebuild() fills unwritten
+            # restart regions with NaN and control_finite only polices the WET
+            # mask, so a dry-cell NaN would reach `0.0 * nan = nan` and poison
+            # every global sum.  The weight is already zero there, so this
+            # changes no reported number -- it only removes the one route by
+            # which a dry cell can affect a wet-cell statistic.
+            d = np.where(wet, _f64(lg[fld]) - _f64(nm[fld]), 0.0)
+            control_dtype((f"lego {fld} day{day}", lg[fld]),
+                          (f"NEMO {fld} day{day}", nm[fld]),
+                          (f"difference {fld} day{day}", d))
             if day == days[0] and fld == "T":
                 control_mask_bite(d, w, wet)
             if day == 10:
@@ -543,13 +769,31 @@ def run(out_dir):
                 hot[fld] = hotspot_set(d, w)
                 hot_reg[fld] = {rn: hotspot_set(d, wreg[rn]) for rn, _ in REGIONS}
             rec[f"{fld}_all"] = wrms(d, w)
+            # INCREMENT NORM.  A flat rms is a statement about AMPLITUDE only:
+            # a difference field that is completely re-drawn between two
+            # horizons at constant amplitude has a flat rms too.  The norm of
+            # the CHANGE in the difference field is what separates them, and
+            # without it "the divergence saturates" cannot be said at all.
+            rec[f"{fld}_incr_prev"] = (wrms(d - d_prev[fld], w)
+                                       if fld in d_prev else float("nan"))
+            rec[f"{fld}_incr_d90"] = (wrms(d - d90[fld], w)
+                                      if fld in d90 else float("nan"))
+            d_prev[fld] = d.copy()
+            if day == 90:
+                d90[fld] = d.copy()
             tot_sq = float((w * d * d).sum())
             for key, sel in sels.items():
                 rec[f"{fld}_{key[0]}|{key[1]}"] = wrms(d, w, sel)
                 # SHARE of the total volume-weighted d^2, so "where the
                 # divergence is" is separable from "how intense it is there"
+                if not tot_sq > 0.0:
+                    raise SystemExit(f"FATAL: day {day} {fld} difference is "
+                                     f"identically zero on the wet mask -- two "
+                                     f"models cannot be bit-identical after "
+                                     f"{day} days, so this is an artifact read "
+                                     f"error, not a result")
                 rec[f"{fld}_share_{key[0]}|{key[1]}"] = (
-                    float((w * d * d)[sel].sum()) / tot_sq if tot_sq > 0 else float("nan"))
+                    float((w * d * d)[sel].sum()) / tot_sq)
             for rn, rs in REGIONS:
                 rec[f"{fld}_{rn}"] = wrms(d, w, _sel(rs, np.ones(A.NZ, bool)))
             for dn, dm in DEPTH_CLASSES:
@@ -561,10 +805,22 @@ def run(out_dir):
                 rec[f"{fld}_r_abs"] = wcorr(np.abs(d), np.abs(d10[fld]), w)
                 rec[f"{fld}_r_signed"] = wcorr(d, d10[fld], w)
                 rec[f"{fld}_retention"] = retention(d, w, hot[fld])
+                hot_t = hotspot_set(d, w)
                 # does the HOTSPOT SET itself move?  Volume overlap of this
                 # horizon's own top-5%-by-volume set with day 10's.  Null = 0.05.
                 rec[f"{fld}_hot_overlap"] = float(
-                    w[hotspot_set(d, w) & hot[fld]].sum() / w[hot[fld]].sum())
+                    w[hot_t & hot[fld]].sum() / w[hot[fld]].sum())
+                # REVERSE retention: how much of the DAY-10 squared difference
+                # sits inside THIS horizon's hotspot.  Forward retention alone
+                # cannot distinguish "the divergence moved somewhere new" from
+                # "it moved somewhere that was already enriched", and those are
+                # different findings.  Same 0.05 null.
+                rec[f"{fld}_retention_rev"] = retention(d10[fld], w, hot_t)
+                rec[f"{fld}_selfret"] = retention(d, w, hot_t)
+                for rn, _rs in REGIONS:
+                    hr = hotspot_set(d, wreg[rn])
+                    rec[f"{fld}_{rn}_retention_rev"] = retention(d10[fld], wreg[rn], hr)
+                    rec[f"{fld}_{rn}_selfret"] = retention(d, wreg[rn], hr)
                 # SUPPLEMENTARY, POST-HOC (not registered): the same three Q2
                 # statistics computed INSIDE each region.  Needed because the
                 # share table shows one box holds ~98% of the global d^2, so
@@ -598,27 +854,47 @@ def run(out_dir):
         control_finite(f"NEMO m0 u day{day}", nm["u"], A.umask)
         full_deficit = row_deficit(lg["u"], nm["u"])
         rec["deficit_rows"] = full_deficit[SOUTH_ROWS]
-        # C7 INSTRUMENT VALIDATION: the per-row split must reproduce the number
-        # the campaign already recorded.  The 13 basin rows plus the dry row 0
-        # ARE acc_driver_decomp's "south of band" group, so their sum must equal
-        # that group's own transport gap.  A probe that cannot reproduce a known
-        # answer is not usable on an unknown one.
+        # C7a LINEARITY, and it is ONLY that.  group_transport is an einsum over
+        # the row axis and _avg is a mean over longitudes, so the per-row split
+        # summing back to the group total is an ALGEBRAIC IDENTITY of two linear
+        # reductions -- it holds for garbage `u` just as well as for this one and
+        # CANNOT FAIL on physics.  It is kept because it would catch a future
+        # refactor that made the row split non-linear, and for NO other reason.
+        # It is not the known-answer control; C7b below is.
         want = (D._avg(D.group_transport(lg["u"], A.umask, D.LAT_GROUPS[0][1]))
                 - D._avg(D.group_transport(nm["u"], A.umask, D.LAT_GROUPS[0][1])))
         got = float(full_deficit[D.LAT_GROUPS[0][1]].sum())
-        if abs(got - want) > 1e-9 * max(abs(want), 1e-9) + 1e-12:
+        if not (abs(got - want) <= 1e-9 * max(abs(want), 1e-9) + 1e-12):
             raise SystemExit(
                 f"FATAL: day {day} per-row deficits sum to {got:.9f} Sv but "
                 f"acc_driver_decomp's own south-of-band group gap is "
                 f"{want:.9f} Sv -- the row split is not the recorded reduction")
         rec["deficit_south_group"] = want
+        # C7b KNOWN ANSWER, the real one: at day 360 the number this instrument
+        # computes must equal the value the campaign ALREADY RECORDED in
+        # a1387f1f7, compared IN CODE rather than read off a table by a human.
+        # A probe that cannot reproduce an answer we already know is not usable
+        # on one we do not.
+        if day == 360:
+            if not (abs(want - D360_SOUTH_GAP_RECORDED_SV) <= D360_SOUTH_GAP_TOL_SV):
+                raise SystemExit(
+                    f"FATAL: day-360 south-of-band gap is {want:.5f} Sv but the "
+                    f"verdict run recorded {D360_SOUTH_GAP_RECORDED_SV:.5f} Sv "
+                    f"(tolerance {D360_SOUTH_GAP_TOL_SV:.0e}). Either this probe "
+                    f"is reading different artifacts or the recorded number is "
+                    f"wrong -- both are findings, neither is a number to publish.")
+            print(f"  [C7b known answer] day-360 south-of-band gap {want:.5f} Sv "
+                  f"vs recorded {D360_SOUTH_GAP_RECORDED_SV:.5f} Sv "
+                  f"(|d| = {abs(want - D360_SOUTH_GAP_RECORDED_SV):.2e})")
         # within-side chaotic floor: rms difference between each member and its
         # own side's control, RSS'd across the two sides (verdict360's convention)
+        mem = {i: (G.load_candidate(lego_npz(i), day),
+                   load_nemo(i, day, fields=("tn", "sn", "un")))
+               for i in range(1, N_MEM)}
         for fld in ("T", "S"):
             lo, no = [], []
             for i in range(1, N_MEM):
-                li = G.load_candidate(lego_npz(i), day)[fld]
-                ni = load_nemo(i, day, fields=("tn", "sn"))[fld]
+                li, ni = mem[i][0][fld], mem[i][1][fld]
                 control_finite(f"lego m{i} {fld} day{day}", li, wet)
                 control_finite(f"NEMO m{i} {fld} day{day}", ni, wet)
                 lo.append(wrms(_f64(li) - _f64(lg[fld]), w))
@@ -627,12 +903,37 @@ def run(out_dir):
             rec[f"{fld}_floor_nemo"] = float(np.sqrt(np.mean(np.square(no))))
             rec[f"{fld}_floor"] = float(np.hypot(rec[f"{fld}_floor_lego"],
                                                  rec[f"{fld}_floor_nemo"]))
+            # THE FLOOR'S OWN GEOGRAPHY.  Reducing the ensemble spread to one
+            # global number and throwing away where it lives makes the gap's
+            # share table uninterpretable: if one model's difference from
+            # ITSELF is concentrated in the same box, "98% of the divergence
+            # lives there" is a statement about where any perturbation to this
+            # configuration grows, not about the two models.  Member 1 of each
+            # side, same mask, same weights, same reduction.
+            df_l = np.where(wet, _f64(mem[1][0][fld]) - _f64(lg[fld]), 0.0)
+            df_n = np.where(wet, _f64(mem[1][1][fld]) - _f64(nm[fld]), 0.0)
+            for tag, df in (("floorL", df_l), ("floorN", df_n)):
+                tsq = float((w * df * df).sum())
+                for key, sel in sels.items():
+                    rec[f"{fld}_{tag}_share_{key[0]}|{key[1]}"] = (
+                        float((w * df * df)[sel].sum()) / tsq if tsq > 0 else 0.0)
+                    rec[f"{fld}_{tag}_{key[0]}|{key[1]}"] = (
+                        wrms(df, w, sel) if tsq > 0 else 0.0)
+        # PER-ROW TRANSPORT FLOOR.  F1 rank-correlates against the per-row
+        # deficit; without its floor there is no way to know how many of the 13
+        # ranks are set by numbers below the chaotic noise, and an arbitrary
+        # rank is a large perturbation on a 13-point rank correlation.
+        rd_floor = []
+        for i in range(1, N_MEM):
+            rd_floor.append(np.abs(row_deficit(mem[i][0]["u"], lg["u"]))[SOUTH_ROWS])
+            rd_floor.append(np.abs(row_deficit(mem[i][1]["u"], nm["u"]))[SOUTH_ROWS])
+        rec["deficit_rows_floor"] = np.sqrt(np.mean(np.square(rd_floor), axis=0))
         rows.append(rec)
         print(f"  day {day:>3}  rms dT {rec['T_all']:.4e} K (floor "
               f"{rec['T_floor']:.2e})   rms dS {rec['S_all']:.4e} g/kg (floor "
               f"{rec['S_floor']:.2e})", flush=True)
 
-    report(rows, days, out_dir)
+    report(rows, days, w, out_dir)
     figures(rows, days, zm, keep, fig_days, wet, w, out_dir)
     return 0
 
@@ -659,7 +960,38 @@ def _ratio(gap, floor):
     return "n/a" if not floor > 0.0 else f"{gap / floor:.1f}"
 
 
-def report(rows, days, out_dir):
+def _amp_row(by, days, fld, d):
+    """One row of the amplitude-vs-pattern table."""
+    prev = by[days[days.index(d) - 1]][f"{fld}_all"]
+    damp = abs(by[d][f"{fld}_all"] - prev)
+    incr = by[d][f"{fld}_incr_prev"]
+    return (f"{d:>5}{by[d][f'{fld}_all']:>13.4e}{damp:>17.4e}{incr:>16.4e}"
+            f"{incr / max(damp, 1e-300):>9.1f}"
+            f"{by[d][f'{fld}_incr_d90']:>19.4e}"
+            f"{by[d][f'{fld}_incr_d90'] / by[d][f'{fld}_all']:>10.3f}")
+
+
+def _snr_row(r, fld, day):
+    """One row of the signal-to-noise share table: gap^2/floor^2 per box,
+    renormalised.  The floor is the RSS of the two sides' member-1 rms in that
+    box, matching the global floor's own convention."""
+    vals = []
+    for rn, _ in REGIONS:
+        for dn, _ in DEPTH_CLASSES:
+            gap = r[f"{fld}_{rn}|{dn}"]
+            fl = float(np.hypot(r[f"{fld}_floorL_{rn}|{dn}"],
+                                r[f"{fld}_floorN_{rn}|{dn}"]))
+            vals.append((gap / fl) ** 2 if fl > 0 else 0.0)
+    v = np.array(vals)
+    tot = float(v.sum())
+    if not tot > 0.0:
+        raise SystemExit(f"FATAL: day {day} {fld} signal-to-noise is zero "
+                         f"everywhere -- the floor cannot exceed the gap in "
+                         f"every box at once")
+    return f"{day:>5}" + "".join(f"{x:>13.4f}" for x in v / tot)
+
+
+def report(rows, days, w, out_dir):
     by = {r["day"]: r for r in rows}
 
     for fld, unit in (("T", "K"), ("S", "g/kg")):
@@ -682,6 +1014,19 @@ def report(rows, days, out_dir):
                                   for rn, _ in REGIONS for dn, _ in DEPTH_CLASSES)
               for d in days])
 
+        _tbl("AMPLITUDE vs PATTERN -- is the difference FIELD settling, or only "
+             "its SIZE?\n'change in rms' is how much the amplitude moved since "
+             "the previous scored horizon; 'rms of the change'\nis the size of "
+             "the difference between the two horizons' difference FIELDS.  A "
+             "field that is completely\nre-drawn at constant amplitude has a "
+             "flat rms too, so the first column alone can never support the\n"
+             "word 'saturates'.  Ratio >> 1 means the pattern is turning over "
+             "far faster than the amplitude is.",
+             f"{'day':>5}{'rms':>13}{'|change in rms|':>17}"
+             f"{'rms of change':>16}{'ratio':>9}{'rms of (d - d90)':>19}"
+             f"{'.. / rms':>10}",
+             [_amp_row(by, days, fld, d) for d in days[1:]])
+
         _tbl(f"WHERE IT IS -- share of the TOTAL volume-weighted d{fld}^2 held by "
              f"each region x depth class (rows sum to 1).\nThe rms table above says "
              f"how INTENSE the divergence is in a box; this says how much of it "
@@ -692,6 +1037,35 @@ def report(rows, days, out_dir):
              [f"{d:>5}" + "".join(f"{by[d][f'{fld}_share_{rn}|{dn}']:>13.4f}"
                                   for rn, _ in REGIONS for dn, _ in DEPTH_CLASSES)
               for d in days])
+
+    for fld in ("T", "S"):
+        _tbl(f"THE SAME SHARE TABLE FOR THE CHAOTIC FLOOR -- d{fld}^2 of ONE "
+             f"MODEL against ITSELF (member 1 - member 0),\nsame mask, same "
+             f"weights, same reduction.  If the floor is concentrated in the "
+             f"same box as the gap, then\n'the divergence lives there' is a "
+             f"statement about where ANY perturbation to this configuration "
+             f"grows,\nnot about the two models.  L = legoESM side, N = NEMO "
+             f"side.",
+             f"{'day':>5}{'side':>6}" + "".join(
+                 f"{(rn.split()[0][:5] + '/' + dn.split()[0][:4]):>13}"
+                 for rn, _ in REGIONS for dn, _ in DEPTH_CLASSES),
+             [f"{d:>5}{side:>6}" + "".join(
+                 f"{by[d][f'{fld}_{tag}_share_{rn}|{dn}']:>13.4f}"
+                 for rn, _ in REGIONS for dn, _ in DEPTH_CLASSES)
+              for d in (days[-1],) for side, tag in (("L", "floorL"), ("N", "floorN"))])
+
+        _tbl(f"SIGNAL-TO-NOISE SHARE, d{fld} -- each box's gap^2 divided by that "
+             f"box's OWN floor^2, renormalised to\nsum to 1.  This asks WHERE "
+             f"THE TWO MODELS DIFFER BY MORE THAN ONE OF THEM DIFFERS FROM "
+             f"ITSELF, which is\na different question from where the raw "
+             f"difference is largest, and the two need not have the same "
+             f"answer.\nREAD ONLY THE SATURATED ROW. Before the 1e-14 kick has "
+             f"grown, the denominator is a storage artifact, so\nthe day-90 row "
+             f"is printed for contrast and is NOT usable as a measurement.",
+             f"{'day':>5}" + "".join(
+                 f"{(rn.split()[0][:5] + '/' + dn.split()[0][:4]):>13}"
+                 for rn, _ in REGIONS for dn, _ in DEPTH_CLASSES),
+             [_snr_row(by[d], fld, d) for d in (90, days[-1]) if d in by])
 
     # ---- QUESTION 2 -------------------------------------------------------
     print("\n" + "=" * 118)
@@ -706,19 +1080,25 @@ def report(rows, days, out_dir):
         print(f"    (registered bars: r >= {Q2_R_BAR}, retention >= {Q2_RET_BAR}; "
               f"null retention = {Q2_NULL}; spread if retention < {Q2_SPREAD_RET}\n"
               f"     AND the centroid moves > {Q2_SPREAD_ROWS} rows or > {Q2_SPREAD_M} m)")
-        print(f"    {'day':>5}{'r(|d|,|d10|)':>15}{'r(d,d10)':>12}"
-              f"{'retention':>12}{'hot overlap':>13}{'cent row':>11}{'d row':>9}"
-              f"{'cent z [m]':>12}{'d z [m]':>10}")
+        print("    'retention' is FORWARD (day-10 hotspot, this horizon's d^2). "
+              "'rev' is REVERSE (this horizon's\n     hotspot, day-10's d^2), "
+              "and 'self' is this horizon's own concentration. Forward alone "
+              "cannot tell\n     'the divergence moved somewhere new' from 'it "
+              "moved somewhere already enriched'; all three nulls are 0.05.")
+        print(f"    {'day':>5}{'r(|d|,|d10|)':>14}{'r(d,d10)':>11}"
+              f"{'ret fwd':>9}{'ret rev':>9}{'self':>8}{'overlap':>9}"
+              f"{'cent row':>10}{'d row':>8}{'cent z':>9}{'d z':>8}")
         c0 = (by[10][f"{fld}_cent_row"], by[10][f"{fld}_cent_z"])
         for d in days:
             if d == 0:
                 continue
             r = by[d]
-            print(f"    {d:>5}{r[f'{fld}_r_abs']:>15.4f}{r[f'{fld}_r_signed']:>12.4f}"
-                  f"{r[f'{fld}_retention']:>12.4f}{r[f'{fld}_hot_overlap']:>13.4f}"
-                  f"{r[f'{fld}_cent_row']:>11.2f}"
-                  f"{r[f'{fld}_cent_row'] - c0[0]:>+9.2f}{r[f'{fld}_cent_z']:>12.1f}"
-                  f"{r[f'{fld}_cent_z'] - c0[1]:>+10.1f}")
+            print(f"    {d:>5}{r[f'{fld}_r_abs']:>14.4f}{r[f'{fld}_r_signed']:>11.4f}"
+                  f"{r[f'{fld}_retention']:>9.4f}{r[f'{fld}_retention_rev']:>9.4f}"
+                  f"{r[f'{fld}_selfret']:>8.4f}{r[f'{fld}_hot_overlap']:>9.4f}"
+                  f"{r[f'{fld}_cent_row']:>10.2f}"
+                  f"{r[f'{fld}_cent_row'] - c0[0]:>+8.2f}{r[f'{fld}_cent_z']:>9.1f}"
+                  f"{r[f'{fld}_cent_z'] - c0[1]:>+8.1f}")
 
     print("\n" + "=" * 118)
     print("QUESTION 2, SUPPLEMENTARY and POST-HOC -- the SAME statistics computed "
@@ -732,22 +1112,26 @@ def report(rows, days, out_dir):
     for fld in ("T", "S"):
         print(f"\n  {fld}")
         print(f"    {'day':>5}" + "".join(
-            f"{rn.split()[0][:6] + ' r':>12}{rn.split()[0][:6] + ' ret':>13}"
+            f"{rn.split()[0][:5] + ' r':>10}{rn.split()[0][:5] + ' fwd':>12}"
+            f"{rn.split()[0][:5] + ' rev':>12}{rn.split()[0][:5] + ' self':>13}"
             for rn, _ in REGIONS))
         for d in days:
             if d == 0:
                 continue
             print(f"    {d:>5}" + "".join(
-                f"{by[d][f'{fld}_{rn}_r_abs']:>12.3f}"
-                f"{by[d][f'{fld}_{rn}_retention']:>13.3f}" for rn, _ in REGIONS))
-        print(f"    day-360 centroid per region (row, depth m): " + "; ".join(
+                f"{by[d][f'{fld}_{rn}_r_abs']:>10.3f}"
+                f"{by[d][f'{fld}_{rn}_retention']:>12.3f}"
+                f"{by[d][f'{fld}_{rn}_retention_rev']:>12.3f}"
+                f"{by[d][f'{fld}_{rn}_selfret']:>13.3f}" for rn, _ in REGIONS))
+        print("    day-360 centroid per region (row, depth m): " + "; ".join(
             f"{rn} ({by[360][f'{fld}_{rn}_cent_row']:.1f}, "
             f"{by[360][f'{fld}_{rn}_cent_z']:.0f})" for rn, _ in REGIONS))
-        print(f"    day-10  centroid per region (row, depth m): " + "; ".join(
+        print("    day-10  centroid per region (row, depth m): " + "; ".join(
             f"{rn} ({by[10][f'{fld}_{rn}_cent_row']:.1f}, "
             f"{by[10][f'{fld}_{rn}_cent_z']:.0f})" for rn, _ in REGIONS))
 
     # ---- QUESTION 3 -------------------------------------------------------
+    q3_days = [d for d in days if d != 0]
     print("\n" + "=" * 118)
     print("QUESTION 3 -- FEEDBACK FINGERPRINT.  Per-row tracer rms against the "
           "per-row zonal transport deficit\n(acc_driver_decomp.group_transport, "
@@ -756,58 +1140,190 @@ def report(rows, days, out_dir):
     print("=" * 118)
     print(f"  F1 co-location: Spearman rank correlation across the "
           f"{len(SOUTH_ROWS)} rows (registered bar |rho| >= {Q3_RHO_BAR})")
-    print(f"    {'day':>5}{'rho(T,|D|)':>13}{'rho(S,|D|)':>13}"
-          f"{'sum|D| [Sv]':>14}{'wall 1-5 D':>13}{'main 6-13 D':>13}"
-          f"{'S-of-band gap':>16}")
-    for d in days:
+    print("     Day 0 is EXCLUDED from F1/F2/F3: the transport deficit there is "
+          "identically zero, so any\n     correlation or share against it is a "
+          "statistic of rounding noise.")
+    print("     The registered bar is applied IDENTICALLY to both fields and at "
+          "EVERY horizon, two-sided.\n     A qualifier that admits one field's "
+          "early negative values as a finding and excludes the other's is\n"
+          "     not the registered criterion.")
+    print("     The bar is the p<0.05 critical value for 13 INDEPENDENT samples. "
+          "These 13 rows are adjacent\n     latitudes and are autocorrelated, so "
+          "n_eff and the EXACT cyclic-shift p are printed beside it;\n"
+          "     the shift null is what the conclusion should rest on (its "
+          "resolution floor is 1/13 = 0.077).")
+    print(f"    {'day':>5}{'rho(T,|D|)':>12}{'p_shift':>9}{'rho(S,|D|)':>12}"
+          f"{'p_shift':>9}{'n_eff':>7}{'|rho|crit':>10}{'sum|D|':>10}"
+          f"{'wall D':>10}{'main D':>10}{'rows<2fl':>9}")
+    for d in q3_days:
         r = by[d]
         Dd = np.abs(r["deficit_rows"])
-        wall = slice(0, 5)                       # rows 1-5 within SOUTH_ROWS
-        main = slice(5, len(SOUTH_ROWS))         # rows 6-13
-        print(f"    {d:>5}{spearman(r['T_rows'], Dd):>13.3f}"
-              f"{spearman(r['S_rows'], Dd):>13.3f}{Dd.sum():>14.4f}"
-              f"{r['deficit_rows'][wall].sum():>+13.4f}"
-              f"{r['deficit_rows'][main].sum():>+13.4f}"
-              f"{r['deficit_south_group']:>+16.4f}")
+        wall = slice(0, N_WALL)                  # WALL_ROWS, positionally
+        main = slice(N_WALL, len(SOUTH_ROWS))    # MAIN_ROWS, positionally
+        rt, pt = shift_null(r["T_rows"], Dd)
+        rs, ps = shift_null(r["S_rows"], Dd)
+        ne = n_eff(r["T_rows"], Dd)
+        crit = (float(2.0 / np.sqrt(max(ne - 2.0, 1e-9) + 4.0))
+                if ne > 2.0 else float("inf"))
+        below = int((Dd < 2.0 * r["deficit_rows_floor"]).sum())
+        print(f"    {d:>5}{rt:>12.3f}{pt:>9.3f}{rs:>12.3f}{ps:>9.3f}"
+              f"{ne:>7.1f}{crit:>10.3f}{Dd.sum():>10.4f}"
+              f"{r['deficit_rows'][wall].sum():>+10.4f}"
+              f"{r['deficit_rows'][main].sum():>+10.4f}{below:>9d}")
+    print(f"    ('rows<2fl' = how many of the {len(SOUTH_ROWS)} rows carry a "
+          f"deficit below twice their own ensemble floor;\n     those rows' "
+          f"ranks are set by chaotic noise and each one perturbs the rank "
+          f"correlation.)")
+
+    # WRONG-TIME NULL: does the alignment happen to be TIME-SPECIFIC at all?  If
+    # the day-t tracer profile matches the day-t deficit no better than it
+    # matches some OTHER horizon's deficit, what is being measured is a standing
+    # shape the two share, not a relationship in time.
+    print("\n  F1b wrong-time null: rank of the MATCHED pairing among all "
+          "horizon pairings.\n     A matched pairing that does not beat the "
+          "mismatched ones is not evidence of a time relationship.")
+    print(f"    {'day':>5}{'rho matched T':>16}{'rank/N':>9}{'mean mismatched T':>20}"
+          f"{'rho matched S':>16}{'rank/N':>9}")
+    for d in q3_days:
+        out = [f"{d:>5}"]
+        for fld in ("T", "S"):
+            prof = by[d][f"{fld}_rows"]
+            vals = [(dd, spearman(prof, np.abs(by[dd]["deficit_rows"])))
+                    for dd in q3_days]
+            matched = dict(vals)[d]
+            order = sorted(vals, key=lambda kv: -kv[1])
+            rank = 1 + [k for k, _ in order].index(d)
+            mism = float(np.mean([v for dd, v in vals if dd != d]))
+            out.append(f"{matched:>16.3f}{f'{rank}/{len(vals)}':>9}"
+                       + (f"{mism:>20.3f}" if fld == "T" else ""))
+        print("".join(out))
     print("    (last column: acc_driver_decomp's OWN south-of-band group gap, "
           "which the wall+main columns must sum to -- C7)")
 
-    print(f"\n  F2 lead/lag: mean over horizons of the {len(SOUTH_ROWS)}-row "
-          f"Pearson r between the tracer profile at t and |D| at t+k,\n"
-          f"     k in scored-horizon steps (the cadence is UNEVEN -- the median "
-          f"day offset of each k is printed).")
-    print(f"    {'k':>4}{'median dt [d]':>15}{'mean r (T)':>13}{'mean r (S)':>13}{'n pairs':>10}")
-    for k in (-2, -1, 0, 1, 2):
-        rT, rS, dt = [], [], []
-        for a in range(len(days)):
-            b = a + k
-            if b < 0 or b >= len(days) or days[a] == 0:
-                continue
-            Dd = np.abs(by[days[b]]["deficit_rows"])
-            rT.append(pearson(by[days[a]]["T_rows"], Dd))
-            rS.append(pearson(by[days[a]]["S_rows"], Dd))
-            dt.append(days[b] - days[a])
-        print(f"    {k:>+4}{np.median(dt) if dt else float('nan'):>15.0f}"
-              f"{np.mean(rT):>13.3f}{np.mean(rS):>13.3f}{len(rT):>10}")
+    ks = (-2, -1, 0, 1, 2)
+    # ONE COMMON SET OF HORIZONS for every k.  Averaging each k over a different
+    # subset makes the argmax a protocol difference rather than a lag signal --
+    # and the cadence is uneven (half the horizons sit in days 270-360), so the
+    # subsets differ in WHERE they are concentrated, not only in count.  Day 0
+    # is excluded on BOTH sides: its deficit is identically zero, so any pair
+    # touching it correlates a profile against numerical noise.
+    idx = [a for a in range(len(days))
+           if days[a] != 0 and all(0 <= a + k < len(days) and days[a + k] != 0
+                                   for k in ks)]
+    if not idx:
+        raise SystemExit("FATAL: no horizon supports the full lead/lag sweep")
+    print(f"\n  F2 lead/lag: mean over ONE COMMON SET of {len(idx)} horizons of "
+          f"the {len(SOUTH_ROWS)}-row Pearson r\n     between the tracer profile "
+          f"at t and |D| at t+k, k in scored-horizon steps.")
+    print("     SIGN, stated once because it is easy to invert: |D| is read at "
+          "the LATER horizon for k>0,\n     so a peak at k<0 means the tracer "
+          "matches an EARLIER deficit, i.e. MOMENTUM LEADS THE TRACER.\n"
+          "     (PREREG sec.4 F2 states this the wrong way round; the formula "
+          "is the registered one, its legend was not.)\n"
+          "     The cadence is uneven, so the median day offset of each k is "
+          "printed. 'sd' is the horizon-to-horizon\n     standard deviation of "
+          "r, i.e. the scatter any difference between k rows has to beat.")
+    print(f"    {'k':>4}{'median dt [d]':>15}{'mean r (T)':>13}{'sd (T)':>10}"
+          f"{'mean r (S)':>13}{'sd (S)':>10}{'n':>8}{'r(k)-r(0) +- SE':>18}")
+    r_at = {k: [pearson(by[days[a]]["T_rows"],
+                        np.abs(by[days[a + k]]["deficit_rows"])) for a in idx]
+            for k in ks}
+    for k in ks:
+        rT = r_at[k]
+        rS = [pearson(by[days[a]]["S_rows"],
+                      np.abs(by[days[a + k]]["deficit_rows"])) for a in idx]
+        dt = [days[a + k] - days[a] for a in idx]
+        # PAIRED difference against k=0 on the SAME horizons, with its standard
+        # error.  "The profile declines from its peak" is not a finding until
+        # the decline is compared with the scatter of the thing declining --
+        # and the paired SE is one line, so "no error bar could be computed"
+        # was never true.
+        dif = np.array(rT) - np.array(r_at[0])
+        se = float(np.std(dif, ddof=1) / np.sqrt(len(dif))) if k != 0 else 0.0
+        pair = ("      --" if k == 0
+                else f"{float(dif.mean()):>+7.3f}+-{se:.3f}")
+        print(f"    {k:>+4}{np.median(dt):>15.0f}"
+              f"{np.mean(rT):>13.3f}{np.std(rT, ddof=1):>10.3f}"
+              f"{np.mean(rS):>13.3f}{np.std(rS, ddof=1):>10.3f}{len(rT):>8}"
+              f"{pair:>18}")
 
-    print(f"\n  F3 wall-vs-main share.  Tracer share = share of the southern-basin "
-          f"volume-weighted d^2\n     in wall rows 1-5; deficit share = the same "
-          f"rows' share of sum|D|.")
+    print("\n  F3 wall-vs-main share.  Tracer share = share of the southern-basin "
+          "volume-weighted d^2\n     in wall rows 1-5; deficit share = the same "
+          "rows' share of sum|D|.")
     print(f"    {'day':>5}{'T wall share':>15}{'S wall share':>15}{'|D| wall share':>17}")
+    # The tracer share is a share of the total volume-weighted d^2, so each
+    # row's mean-square must be re-weighted by that ROW's own wet volume before
+    # summing.  Summing the per-row rms^2 unweighted would be an unweighted mean
+    # over cells of unequal volume -- the exact reduction the campaign's
+    # layer-averaging retraction forbids -- and these rows differ in volume by
+    # ~20% through cos(lat) alone, before bathymetry.
+    rv = row_volume(w)
     shares = []
-    for d in days:
+    for d in q3_days:
         r = by[d]
         Dd = np.abs(r["deficit_rows"])
-        sT = float((r["T_rows"][:5] ** 2).sum() / (r["T_rows"] ** 2).sum())
-        sS = float((r["S_rows"][:5] ** 2).sum() / (r["S_rows"] ** 2).sum())
-        sD = float(Dd[:5].sum() / Dd.sum()) if Dd.sum() > 0 else float("nan")
+        sT = _wall_share(r["T_rows"], rv)
+        sS = _wall_share(r["S_rows"], rv)
+        if not float(Dd.sum()) > 0.0:
+            raise SystemExit(f"FATAL: day {d} transport deficit is identically "
+                             f"zero; day 0 should already be excluded here")
+        sD = float(Dd[:N_WALL].sum() / Dd.sum())
         shares.append((sT, sS, sD))
         print(f"    {d:>5}{sT:>15.4f}{sS:>15.4f}{sD:>17.4f}")
     sh = np.array(shares)
-    print(f"    {'MEAN':>5}{sh[:, 0].mean():>15.4f}{sh[:, 1].mean():>15.4f}"
-          f"{sh[:, 2].mean():>17.4f}")
-    print(f"    (the 5 wall rows are {5 / len(SOUTH_ROWS):.3f} of the rows by count; "
-          f"'AVOIDS' was registered as tracer share < half the deficit share)")
+    # TIME-WEIGHTED over the horizon spacing, and day 0 already excluded.  A
+    # plain mean over these horizons is roughly a mean of the final quarter,
+    # because half of them sit in days 270-360 -- calling that "the full-year
+    # mean" would be a sampling artifact wearing the name of a yearly average.
+    tw = np.gradient(np.asarray(q3_days, dtype=np.float64))
+    tw = tw / tw.sum()
+    print(f"    {'MEAN':>5}" + "".join(
+        f"{float((sh[:, c] * tw).sum()):>15.4f}" if c < 2
+        else f"{float((sh[:, c] * tw).sum()):>17.4f}" for c in range(3)))
+    print(f"    (MEAN row is TIME-WEIGHTED over the uneven horizon spacing; the "
+          f"unweighted mean of the same\n     column would be "
+          f"{sh[:, 0].mean():.4f}/{sh[:, 1].mean():.4f}/{sh[:, 2].mean():.4f}, "
+          f"i.e. mostly the final quarter, since half the\n     horizons sit in "
+          f"days 270-360)")
+    vol_null = float(rv[:N_WALL].sum() / rv.sum())
+    print(f"    GEOMETRIC NULL: wall rows {WALL_ROWS[0]}-{WALL_ROWS[-1]} hold "
+          f"{vol_null:.3f} of the basin's wet VOLUME.")
+    print(f"    That -- not the {N_WALL / len(SOUTH_ROWS):.3f} share BY ROW "
+          f"COUNT -- is the null a volume-weighted d^2 share is judged\n"
+          f"    against; a share equal to {vol_null:.3f} means the divergence is "
+          f"spread as the water is.")
+    print("    The registered 'AVOIDS' criterion is a RELATIVE one (tracer "
+          "share < half the deficit share) and is\n    scored as registered; "
+          "it is a different statement from sitting below the geometric null, "
+          "and a field\n    can clear one and not the other.")
+    dwall = np.array([float(np.abs(by[d]["deficit_rows"])[:N_WALL].sum()
+                            / np.abs(by[d]["deficit_rows"]).sum())
+                      for d in q3_days])
+    print(f"    The deficit's OWN wall share over the {len(q3_days)} scored "
+          f"horizons ranges {dwall.min():.3f}..{dwall.max():.3f} "
+          f"(mean {dwall.mean():.3f}) --\n    quote the range, not a band read "
+          f"off the horizons that happen to be flat.")
+
+    print("\n" + "=" * 118)
+    print("SEASONAL CONFOUND -- read this before any statement about WHEN "
+          "something happened.")
+    print("=" * 118)
+    print("  The restart is day 180 of a 360-day year, so elapsed time and "
+          "season are DEGENERATE in this run:\n  the 'final quarter' (days "
+          "270-360) is day-of-year 90-180, one particular season, and the early "
+          "horizons\n  (days 10-60 = day-of-year 190-240) are another. Every "
+          "sign change and every 'grows in the final\n  quarter' statement here "
+          "is confounded with season and CANNOT be deconfounded from one year.\n"
+          "  The only same-season pair in the run is day 0 and day 360, and day "
+          "0 is the identity -- so no\n  seasonal control exists inside this "
+          "run at all. The upstream verdict result carries the same\n  "
+          "limitation and uses a full-cycle mean as its remedy; the same remedy "
+          "applies to every series above.")
+    print("  The horizon cadence is also uneven -- 30-day for the first three "
+          "quarters, 10-day for the last --\n  so half the scored horizons sit "
+          "in the final quarter. Any unweighted mean over horizons is\n  "
+          "therefore mostly a mean of that quarter, which is why the F3 mean is "
+          "time-weighted.")
 
     npz = os.path.join(out_dir, "ts_divergence_atlas.npz")
     np.savez_compressed(npz, days=np.array(days),
