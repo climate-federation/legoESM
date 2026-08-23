@@ -104,6 +104,83 @@ TUNED_CH = 0.004575              # LandConfig.Ch_land / Cd_land bulk transfer
 _TUNED_PFT_ALBEDO_MULTILAYER = (0.3000, 0.1180, 0.1163, 0.0973, 0.1177, 0.1528, 0.1610, 0.1700, 0.1700, 0.2127, 0.2529, 0.1804, 0.1964, 0.1777, 0.1828, 0.1583, 0.1727)
 _TUNED_PFT_EMISSIVITY_MULTILAYER = (0.9838, 0.9550, 0.9498, 0.9444, 0.9518, 0.9747, 0.9651, 0.9656, 0.9588, 0.9856, 0.9860, 0.9619, 0.9636, 0.9591, 0.9668, 0.9592, 0.9616)
 _TUNED_PFT_ROOT_DEPTH_MULTILAYER = (0.082, 1.628, 1.094, 0.923, 1.331, 1.784, 1.484, 1.299, 0.797, 0.721, 0.515, 0.484, 0.362, 0.398, 0.410, 0.360, 0.415)  # const-ok: baked per-PFT root-depth calibration table (v5 multilayer tuning, #892), not a physical constant — same class as the annotated-by-budget _TUNED_PFT_*_MULTILAYER siblings above
+
+# --- Biophysics LMIP calibration (two-leaf canopy) -------------------------
+# Source: templates/land/biophysics/lmip_biophys_2deg.yaml — the as-run values
+# of the 10-year, 2-degree offline CRU-JRA configuration.
+#
+# PROVENANCE, STATED HONESTLY. That template RUNS the two-leaf canopy, but these
+# parameter values were FITTED under SimpleSEB, and the template says so: it
+# calls the root tables "the TEST half, NOT a known-good default ... the pairing
+# is a hypothesis. Run against the scalar-default baseline before adopting", and
+# notes the albedo terms have "not been re-validated" with the canopy. They are
+# adopted here as a deliberate choice, not because the pairing is established.
+# Any run using them is an ARM to be scored against the same run with the
+# defaults — not a calibrated baseline.
+# CLM5 PFT order, 17 entries. root depth [m]; theta_wp / theta_fc [m3/m3].
+BIOPHYS_LMIP_N_LAYERS = 10        # [-] soil layers in the LMIP calibration
+BIOPHYS_LMIP_SOIL_DEPTH_M = 3.0   # [m] total soil column depth
+BIOPHYS_LMIP_SOIL_GROWTH = 2.0    # [-] layer-thickness growth ratio
+_BIOPHYS_LMIP_PFT_ROOT_DEPTH_M = (
+    0.088, 1.706, 1.469, 1.414, 1.631, 1.675, 1.527, 1.408, 1.088,
+    0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)  # const-ok: baked per-PFT calibration table (LMIP biophysics 2-deg), not a physical constant
+_BIOPHYS_LMIP_PFT_THETA_WP = (
+    0.0846, 0.0915, 0.0942, 0.0907, 0.1154, 0.0988, 0.1162, 0.1062, 0.1035,
+    0.0988, 0.0838, 0.0839, 0.0865, 0.0874, 0.0869, 0.0822, 0.0988)  # const-ok: baked per-PFT calibration table (LMIP biophysics 2-deg)
+_BIOPHYS_LMIP_PFT_THETA_FC = (
+    0.1706, 0.2249, 0.2351, 0.2253, 0.2890, 0.2492, 0.2918, 0.2676, 0.2599,
+    0.2635, 0.1995, 0.2045, 0.2164, 0.2171, 0.2193, 0.2123, 0.2469)  # const-ok: baked per-PFT calibration table (LMIP biophysics 2-deg)
+
+# Scalar snow / soil albedo settings of the SAME calibration. These are
+# LandAlbedoConfig field values; the offline LMIP consumes them through
+# ``lmip_config`` (physics.albedo), and the coupled path applies them in
+# ``land.config.apply_biophysics_lmip_two_leaf``.
+_BIOPHYS_LMIP_SNOW_ALBEDO_MAX = 0.8077    # [-] fresh-snow albedo
+_BIOPHYS_LMIP_SNOW_ALBEDO_MIN = 0.5207    # [-] aged-snow albedo
+_BIOPHYS_LMIP_SNOW_DCRIT = 15.4229        # [kg/m2] Niu-Yang half-cover SWE
+_BIOPHYS_LMIP_SNOW_TAU_S = 317424.96      # [s] snow-age decay (3.674 days)
+_BIOPHYS_LMIP_SOIL_DRY_BOOST = 0.1458     # [-] dry-soil brightening
+_BIOPHYS_LMIP_GLACIER_ALBEDO = (0.8178, 0.6178)   # [-] (visible, near-infrared)
+
+
+def biophysics_lmip_pft_root_params() -> dict:
+    """Per-PFT root / soil-moisture tables of the biophysics LMIP calibration.
+
+    Shape and ordering match every other ``pft_root_params`` consumer
+    (``build_canopy_land_params``, ``make_step_land_params_updater``): length-17
+    CLM5 order, applied at the column's DOMINANT PFT.
+    """
+    return {
+        "root_depth": _BIOPHYS_LMIP_PFT_ROOT_DEPTH_M,
+        "theta_wp": _BIOPHYS_LMIP_PFT_THETA_WP,
+        "theta_fc": _BIOPHYS_LMIP_PFT_THETA_FC,
+    }
+
+
+def biophysics_lmip_glacier_albedo() -> tuple:
+    """(visible, near-infrared) ice albedo of the same calibration.
+
+    Passed to the canopy parameter builder as ``glacier_alb``; without it the
+    builder takes its 0.70 / 0.50 default and the calibrated pair is inert.
+    """
+    return _BIOPHYS_LMIP_GLACIER_ALBEDO
+
+
+def biophysics_lmip_albedo_scalars() -> dict:
+    """``LandAlbedoConfig`` scalar fields of the biophysics LMIP calibration.
+
+    SCALARS ONLY, deliberately: the coupled ``land_albedo`` also carries the
+    per-column ``snow_cover_scale`` map built from the surfdata, and replacing
+    the whole object would throw that away.
+    """
+    return {
+        "alpha_snow_max": _BIOPHYS_LMIP_SNOW_ALBEDO_MAX,
+        "alpha_snow_min": _BIOPHYS_LMIP_SNOW_ALBEDO_MIN,
+        "snow_depth_crit": _BIOPHYS_LMIP_SNOW_DCRIT,
+        "tau_snow_decay": _BIOPHYS_LMIP_SNOW_TAU_S,
+        "soil_dry_albedo_boost": _BIOPHYS_LMIP_SOIL_DRY_BOOST,
+    }
+
 # per-PFT roughness length z0 [m] (drives the MOST surface exchange -> tall forests
 # rough ~1-2 m, grass/crop/bare smooth ~0.02-0.23 m).  Calibrated under MOST (the
 # coupled diurnal-surface default); the constant-bulk fallback ignores it.
@@ -157,7 +234,7 @@ _TUNED_PFT_LCMA_MULTILAYER = (60.92, 88.43, 83.77, 85.68, 53.69, 59.19, 60.97, 6
 # snow (<1), open tundra/shrub/crop whitens faster than the global snow_depth_crit
 # implies (>1); consumed as LandAlbedoConfig.snow_cover_scale (PFT-weighted per
 # cell).  Closed the NH>55 mean albedo bias (-0.028 -> +0.003).
-_TUNED_PFT_SNOWMASK_MULTILAYER = (0.922, 0.885, 0.988, 1.027, 0.988, 0.998, 1.009, 0.979, 1.025, 1.087, 1.120, 1.048, 1.042, 0.990, 1.063, 0.993, 1.112)
+TUNED_PFT_SNOWMASK_MULTILAYER = (0.922, 0.885, 0.988, 1.027, 0.988, 0.998, 1.009, 0.979, 1.025, 1.087, 1.120, 1.048, 1.042, 0.990, 1.063, 0.993, 1.112)
 # btran needs theta_fc > theta_wp per PFT; PFT-weighting (a convex combination) then
 # preserves the ordering for every mixed cell, so the stress range never inverts.
 assert all(fc > wp for wp, fc in zip(_TUNED_PFT_WP_MULTILAYER, _TUNED_PFT_FC_MULTILAYER)), \
@@ -170,7 +247,7 @@ assert all(len(t) == _N_PFT for t in (
     _TUNED_PFT_KSCALE_MULTILAYER, _TUNED_PFT_CSCALE_MULTILAYER,
     _TUNED_PFT_WP_MULTILAYER, _TUNED_PFT_FC_MULTILAYER,
     _TUNED_PFT_VCMAX_MULTILAYER, _TUNED_PFT_G1_MULTILAYER,
-    _TUNED_PFT_LCMA_MULTILAYER, _TUNED_PFT_SNOWMASK_MULTILAYER)), \
+    _TUNED_PFT_LCMA_MULTILAYER, TUNED_PFT_SNOWMASK_MULTILAYER)), \
     f"every _TUNED_PFT_*_MULTILAYER tuple must have {_N_PFT} entries"
 
 # Per-variant lookup: snow-free per-PFT (albedo, emissivity, root_depth) columns +
@@ -580,7 +657,7 @@ def clm_multilayer_setup(surface_map: dict, base_config=None, variant: str = "mu
         snow_cover_scale=(
             (1.0 - jnp.asarray(surface_map["glacier_frac"]))
             * (jnp.asarray(surface_map["pft_fractions"])
-               @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER))
+               @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
             + jnp.asarray(surface_map["glacier_frac"])),
         alpha_snow_max=TUNED_SNOW_ALBEDO_MAX_MULTILAYER,
         alpha_snow_min=TUNED_SNOW_ALBEDO_MIN_MULTILAYER,

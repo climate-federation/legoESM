@@ -1,0 +1,11 @@
+# Kept only so an in-flight run chain that names this file keeps resolving.
+#
+# Its contents moved into amip_production.yaml on 2026-08-22: the tropical-rain
+# science configuration and the interactive land surface are now the DEFAULT,
+# rather than settings a side deck had to remember.  A run built on production
+# alone was verified to reproduce the 13 August configuration except for the
+# land surface (scripts/validate/amip_config_diff.py against that run's own
+# recorded configuration).
+#
+# New runs should name amip_production.yaml.  This file adds nothing.
+include: amip_production.yaml

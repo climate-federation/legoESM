@@ -76,6 +76,61 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - **MPI AD**: `global_sum_mpi` (allreduce SUM) full VJP. MPI halo: `_sendrecv_vjp` custom_vjp. `fix_mass`/`zero_mean_tendency` flow grads via global reductions. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
 - **NO INERT PARAMETERS EVER (STRICT, user 2026-08-17).** Every leaf of trainable pytree must carry loss gradient. Mode-inactive params frozen OUT of trainable set (`_inactive_keys` pattern); first training step gates rest via `assert_no_inert` (`train_land_params_era5.py`) — zero-gradient leaf aborts run. Any new trainer/calibrator adopt both pieces; param "wired in but off" without freeze-out = defect.
 
+## RULE 4 — SEARCH BEFORE YOU BUILD, AND PONYTAIL FULL IS THE DEFAULT.
+User directive 2026-08-23, after a nearest-neighbour-on-the-sphere regridder
+was written into a data script while the coupler ALREADY had a grid-remap
+module (`coupler/grid_remap.py`) and core had another (`grids/regridding.py`):
+*"always check if anything already exists before implementing"*.
+
+- **Before writing ANY new function, class, script, or numerical method: grep
+  the repo for an existing one.** Name in the status what was searched and what
+  was found — "searched X, found nothing" is a claim and gets the grep pasted.
+  This extends the existing pre-impl-search rule from numerics to EVERYTHING,
+  and it applies to scripts and probes, not just packages.
+- Found something close? EXTEND it or move it to the right home (generic
+  methods live in the shared package, e.g. cross-grid machinery in the
+  coupler) — never a second implementation "for now".
+- NO GATE exists for this; it is honour-system, so compliance is stated
+  explicitly every time (RULE 2).
+- **Ponytail FULL is the default, every session** (user 2026-08-20 and again
+  2026-08-23): laziest working solution, reuse over rebuild, delete before
+  add, shortest diff that is actually correct. Not a mode to be asked for.
+
+## RULE 3 — A FIX WHOSE DEFAULT KEEPS THE BUG IS NOT A FIX. IT IS A BUG WITH A KNOB.
+User directive 2026-08-22, on finding non-orographic gravity waves still being
+launched at the SURFACE months after that exact defect was "fixed": *"Why does
+gravity-wave drag now launch at the surface? This is absurd and we should never
+ever make arbitrary choices like this without my supervision and agreement."*
+
+WHAT ACTUALLY HAPPENED, because the shape repeats: #1394 measured the defect
+(55% of the wave's momentum deposited below 1 km), added `hines_launch_p` as the
+cure, and left its default at `0.0` — which the field's own comment documents as
+"unset = legacy SURFACE launch". One campaign config set 70000. The production
+config never did. Every production run since has carried the defect the fix was
+written to remove, and the tropical ocean lost a third of its evaporation.
+NOBODY CHOSE THIS. That is precisely why it survived.
+
+STRICT, MECHANICAL:
+1. **Landing a fix behind a default that preserves the old behaviour is
+   FORBIDDEN unless the user is asked, in that PR, in one line: "default stays
+   broken (X) or moves to the fixed value (Y)?"** No exceptions for "callers can
+   override", "it is only a default", or ABI/positional-tuple preservation —
+   those explain the mechanism, never the choice.
+2. **A knob whose default is documented as "unset", "legacy", "off", or
+   "0.0 = old behaviour" is a DEFECT REPORT, not a feature.** Grep for that
+   wording before any campaign; each hit is an open bug in every run that does
+   not set it.
+3. **The fix's PR must edit the PRODUCTION config, not only a campaign deck.**
+   The existing rule "new knob ships with a committed config that selects it"
+   was satisfied by a side deck here and still shipped the bug — so the
+   production config is now named explicitly.
+4. **Before any production campaign, diff the run's RESOLVED config against the
+   best previous run's resolved config and read every differing row out loud.**
+   Not the deck, the resolved config. This regression was one row in such a
+   diff and would have been caught before the GPU-hours, not after.
+5. A default that disagrees with the best known configuration is reported as a
+   FINDING the moment it is noticed — never silently carried into a run.
+
 ## ABSOLUTE RULE — NO UNASKED CHOICES. ASK FIRST, EVERY TIME.
 User directive 2026-08-21, stated ABSOLUTE and repeated: *"Every choice such
 as changing options should be checked with me before being changed"* and *"Do

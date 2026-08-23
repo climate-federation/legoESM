@@ -1381,9 +1381,13 @@ class ModelDriver:
                 "A multilayer run was asked to start from a spun-up land state "
                 "and cannot.")
         from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-        from legoesm.land.config import calibrated_multilayer_setup
+        from legoesm.land.config import biophysics_lmip_two_leaf_setup
         if getattr(cfg, "land_calibrated_physics", False):
-            want_grid = calibrated_multilayer_setup()["soil_grid"]
+            # The soil column a spun-up land state must match is the one the
+            # calibration defines, so this reads the SAME setup the tile is
+            # built from — a second copy of the geometry here would let a
+            # restart pass the check and then run on a different column.
+            want_grid = biophysics_lmip_two_leaf_setup()["soil_grid"]
         else:
             want_grid = SoilGridConfig(
                 n_layers=cfg.multilayer_n_layers,
@@ -2867,20 +2871,35 @@ class ModelDriver:
                 gs_max=self.config.land_gs_max,
             ),
         )
-        # Deploy the tile in EXACTLY the model its baked per-PFT tables were
-        # calibrated under.  ``calibrated_multilayer_setup`` is the ONE definition
-        # the offline calibrator also builds from, so the fitted physics and the
-        # coupled physics cannot drift; ``validate_strict`` has already checked
-        # that the overlapping config keys agree, so this replaces nothing the
-        # user set differently.  It supplies the settings with no config key of
-        # their own: the calibration soil-growth factor and the differland carbon
-        # scheme that selects the FARQUHAR branch of ``compute_effective_beta``
-        # (without it the same dispatch runs Jarvis, a different stomatal model).
+        # Deploy the tile in EXACTLY the model its parameters were calibrated
+        # under: the biophysics LMIP two-leaf canopy
+        # (``templates/land/biophysics/lmip_biophys_2deg.yaml``), which is the
+        # offline configuration scored against observed land fluxes.
+        #
+        # AMIP no longer has a route to the legacy SimpleSEB-fitted bake. That
+        # pairing — SimpleSEB tables under a coupled run — is what produced the
+        # land surface-flux bias, and keeping a switch for it only preserved the
+        # chance of selecting it again. ``calibrated_multilayer_setup`` remains
+        # in the land package for reproducing old OFFLINE runs; nothing coupled
+        # reaches it.
         if getattr(self.config, "land_calibrated_physics", False):
-            from legoesm.land.config import apply_calibrated_multilayer
-            base = apply_calibrated_multilayer(base)
+            from legoesm.land.config import apply_biophysics_lmip_two_leaf
+            base = apply_biophysics_lmip_two_leaf(base)
 
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+        # RE-APPLY THE CALIBRATION'S ALBEDO SCALARS, AFTER the bake.
+        # ``clm_multilayer_setup`` rebuilds ``land_albedo`` and overwrites all
+        # five scalar fields with its own values, so applying them before it
+        # loses them without a word: a run asking for a fresh-snow albedo of
+        # 0.8077 was measured getting 0.8362. The bake's per-column
+        # ``snow_cover_scale`` map is built here and must survive, so replace
+        # the SCALARS on the object the bake just produced.
+        if getattr(self.config, "land_calibrated_physics", False):
+            from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    **biophysics_lmip_albedo_scalars()))
 
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
@@ -2900,8 +2919,18 @@ class ModelDriver:
         #
         # Soil hydraulics / thermal / albedo stay with the CLM map: only the
         # SURFACE parameters come from the canopy builder.
-        from legoesm.land.surface_scheme import SimpleSEBConfig
-        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+        from legoesm.land.canopy import CanopyConfig
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        # Both canopy schemes take their per-PFT SURFACE params from
+        # init_land_surface_data: a two-leaf CanopyConfig -> CanopyLandParams
+        # (hc/rz0m); the CLM-ML canopy -> LandSurfaceParams with PRESCRIBED
+        # LAI/SAI/htop (the accurate per-plant structure its interface requires,
+        # vs the LAI-only clm_multilayer_setup fallback that left htop at the 5 m
+        # scalar default).  Explicit positive dispatch on the two canopy types
+        # (not `not SimpleSEBConfig`) so an unknown scheme cannot slip in.  #1624
+        # read params.hc here unconditionally, which crashed CLM-ML (no hc); the
+        # reads below dispatch on the actual struct.
+        if isinstance(cfg.surface_scheme, (CanopyConfig, CLMMLCanopyConfig)):
             _sd_path = getattr(self.config, "surfdata_path", "")
             if not _sd_path:
                 raise ValueError(
@@ -2913,10 +2942,25 @@ class ModelDriver:
                     "value would be inert — refusing rather than doing that quietly.")
             from legoesm.land.boundary_data import init_land_surface_data
             _clm_params = params
+            # THE CALIBRATION'S OWN TABLES, or none. Without these the builder
+            # leaves the root fields unset and the code below fills them from
+            # the CLM map — i.e. the LEGACY tables — so the calibration's root
+            # depth, wilting point and field capacity never reached the model.
+            # Same for the glacier albedo, which otherwise takes the 0.70/0.50
+            # default instead of the calibrated pair.
+            _cal_on = getattr(self.config, "land_calibrated_physics", False)
+            _pft_root, _glacier_alb = None, None
+            if _cal_on:
+                from legoesm.land.clm_surface_map import (
+                    biophysics_lmip_pft_root_params,
+                    biophysics_lmip_glacier_albedo)
+                _pft_root = biophysics_lmip_pft_root_params()
+                _glacier_alb = biophysics_lmip_glacier_albedo()
             _, params, _ = init_land_surface_data(
                 _sd_path, self.grid, cfg, float(self.config.start_day),
                 year=(None if getattr(self.config, "start_year", None) is None
-                      else float(self.config.start_year)))
+                      else float(self.config.start_year)),
+                pft_root_params=_pft_root, glacier_alb=_glacier_alb)
             # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
             # Replacing the parameter object wholesale also dropped the CLM
             # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
@@ -2942,7 +2986,13 @@ class ModelDriver:
             # canopy property to the wrong column and the run would still look
             # entirely healthy — so check the count structurally, at t=0, rather
             # than hope (GLM).
-            _n_canopy = int(jnp.asarray(params.hc).shape[0])
+            # Struct differs by scheme: two-leaf -> CanopyLandParams (hc, rz0m);
+            # CLM-ML -> LandSurfaceParams (htop, LAI, NO hc).  Read the column
+            # count off whichever per-column height field the provider set, and
+            # log the fields that exist for that struct.
+            _hc = getattr(params, "hc", None)
+            _height_field = _hc if _hc is not None else params.htop
+            _n_canopy = int(jnp.asarray(_height_field).shape[0])
             _n_soil = int(jnp.asarray(lat_rad).size)
             if _n_canopy != _n_soil:
                 raise ValueError(
@@ -2951,16 +3001,25 @@ class ModelDriver:
                     "the same columns, so every canopy property would sit on the "
                     "wrong one. Check --surfdata and --clm-surfdata-path cover "
                     "this grid.")
-            logger.info(
-                "  Land tile: %s on per-PFT CANOPY parameters from %s "
-                "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
-                "emissivity is a single constant in this builder and the canopy "
-                "computes its own radiation from soil colour + leaf optics, so "
-                "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
-                "to it — those are re-fit items, not wiring.",
-                type(cfg.surface_scheme).__name__, _sd_path,
-                float(jnp.min(params.hc)), float(jnp.max(params.hc)),
-                float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+            if _hc is not None:
+                logger.info(
+                    "  Land tile: %s on per-PFT CANOPY parameters from %s "
+                    "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
+                    "emissivity is a single constant in this builder and the canopy "
+                    "computes its own radiation from soil colour + leaf optics, so "
+                    "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
+                    "to it — those are re-fit items, not wiring.",
+                    type(cfg.surface_scheme).__name__, _sd_path,
+                    float(jnp.min(_hc)), float(jnp.max(_hc)),
+                    float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+            else:
+                logger.info(
+                    "  Land tile: %s on per-PFT CLM-ML surface parameters from %s "
+                    "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
+                    "the accurate per-plant structure the multilayer canopy needs.",
+                    type(cfg.surface_scheme).__name__, _sd_path,
+                    float(jnp.min(params.htop)), float(jnp.max(params.htop)),
+                    float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
 
         # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
         #
@@ -2973,8 +3032,11 @@ class ModelDriver:
         # defect here, not a nuisance, and a comment in a document is not a
         # control (GLM).  Say it at startup, every run, so nobody reports a
         # canopy run as validating tuned land parameters it never used.
-        from legoesm.land.surface_scheme import SimpleSEBConfig
-        if not isinstance(cfg.surface_scheme, SimpleSEBConfig):
+        from legoesm.land.canopy import CanopyConfig
+        # Two-leaf only: it reads CanopyLandParams (hc/ALB/rz0m).  CLM-ML runs on
+        # a LandSurfaceParams by design (its canopy structure is LAI/SAI/htop),
+        # so this "running on SOIL parameters" check does not apply to it.
+        if isinstance(cfg.surface_scheme, CanopyConfig):
             _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
                               if getattr(params, f, None) is not None]
             if not _canopy_fields:
@@ -2997,7 +3059,13 @@ class ModelDriver:
         # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
         # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
         # without the flag is byte-identical.
-        if cfg.stomata.enabled and cfg.carbon.scheme == "differland":
+        # A canopy scheme carries its OWN photosynthesis (Farquhar GPP), so it
+        # also needs the differland carbon state seeded even though the bulk
+        # ``cfg.stomata`` throttle is off — otherwise the calibrated two-leaf
+        # run, fitted WITH differland, would deploy under a "none" carbon cycle.
+        from legoesm.land.surface_scheme import SimpleSEBConfig as _SimpleSEBConfig
+        _is_canopy = not isinstance(cfg.surface_scheme, _SimpleSEBConfig)
+        if (cfg.stomata.enabled or _is_canopy) and cfg.carbon.scheme == "differland":
             from legoesm.land.carbon.carbon_cycle import init_carbon_state
             self.physics.land_ml_carbon = init_carbon_state(
                 (int(lat_rad.size),), cfg.carbon)
@@ -3145,6 +3213,24 @@ class ModelDriver:
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
             _merged = merge_land_restart_into_template(_ic_state, _template)
+            # A REGRIDDED state's matric potential is not this run's.  The
+            # Richards step evolves potential directly, but potential and water
+            # content are tied through each column's own soil-texture retention
+            # curve — and a regridded column carries the SOURCE column's
+            # texture in its potential.  Water content is the conserved
+            # quantity, so keep theta and re-derive psi on THIS run's
+            # hydraulics, exactly as the cold-start does.  Scoped to states
+            # whose metadata says they were regridded: a byte-exact same-grid
+            # restart is left untouched.
+            if _ic_meta.get("regridded_from"):
+                from legoesm.land.soil_hydraulics import psi_from_theta
+                _merged = _merged._replace(
+                    psi_soil=psi_from_theta(_merged.theta_soil,
+                                            cfg.hydraulics))
+                logger.info(
+                    "  Land tile: regridded IC (%s) — psi_soil re-derived "
+                    "from theta_soil on this run's soil texture.",
+                    _ic_meta.get("regridded_from"))
             self._land_ml_state = jax.tree_util.tree_map(
                 lambda a: (a.astype(storage_dtype)
                            if hasattr(a, "dtype")
@@ -3177,53 +3263,24 @@ class ModelDriver:
         # cold-starts to T_lowest (converges in ~10 days).
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         if isinstance(cfg.surface_scheme, CLMMLCanopyConfig):
-            from legoesm.core.coupling_fields import AtmToSurface
-            from legoesm.land.multilayer_land import step_multilayer_land
-            from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
-            _o = jnp.ones(ncol, dtype=storage_dtype)
-            _warm_forcing = AtmToSurface(
-                sw_down=400.0 * _o, lw_down=350.0 * _o,
-                precip_total=0.0 * _o, precip_snow=0.0 * _o,
-                T_lowest=T_init, q_lowest=0.008 * _o,
-                u_lowest=3.0 * _o, v_lowest=0.0 * _o,
-                p_lowest=0.99e5 * _o, p_surface=1.0e5 * _o, rho_lowest=1.2 * _o,
-                cos_zenith=0.5 * _o, co2_ppmv=400.0 * _o,
-                has_radiation=_o, has_precipitation=_o)
-            # Per-column PFT: OPT-IN (use_surfdata_pft) => each column's DOMINANT PFT
-            # (argmax of the surface map's pft_fractions), a concrete (ncol,) int
-            # array -> mixed-PFT / heterogeneous columns that the group-by-structure
-            # scan compiles at O(#distinct structures).  Default (flag off) => None ->
-            # the single pft_clm for all columns (byte-identical to before).  Stored on
-            # the pipeline so the jitted coupled step re-installs the SAME per-column
-            # topology; it also drives the warm-start below (where patch.itype is set).
-            _clm_ml_pft_per_col = None
-            if getattr(cfg.surface_scheme, "use_surfdata_pft", False):
-                _dom = np.asarray(
-                    surface_map["pft_fractions"]).argmax(axis=1).astype(np.int32)
-                # Surface CLM5 PFT axis (CLM5_PFT_NAMES) aligns with the MLpftcon
-                # canopy table for slots 0..15 (bare, trees, grasses incl c4_grass at
-                # 14, crop_c3==c3_crop at 15).  ONLY surface slot 16 (crop_c4) differs:
-                # MLpftcon 16 is c3_irrigated, NOT a C4 crop.  Cross-walk crop_c4 ->
-                # c3_crop (15) — the nearest CROP structure — rather than install the
-                # wrong (irrigated) canopy; the C4->C3 photosynthesis is the model's
-                # already-documented C4-as-C3 approximation (surface_params CLM5 table
-                # note), so no new physics is lost.  (codex: slot-16 axis mismatch.)
-                _clm_ml_pft_per_col = np.where(_dom == 16, 15, _dom).astype(np.int32)
-            self.physics.clm_ml_pft_per_col = _clm_ml_pft_per_col
-            # Eager cold canopy step (grid_info=None, ncol>1 eager path): builds the
-            # per-column vertical structure and a warm canopy_state.
-            _warm_state, _, _ = step_multilayer_land(
-                self._land_ml_state, _warm_forcing, cfg,
-                self.physics.land_ml_u_min, float(self.config.dycore.dt),
+            # The eager cold-canopy warm-start (builds the per-column grid_info +
+            # a warm canopy_state, host-side) is the ONE shared helper the offline
+            # run_lmip_biophys driver also calls, so they cannot drift.  Per-column
+            # PFT topology is opt-in via use_surfdata_pft (the surface map's
+            # dominant PFT); None keeps the single pft_clm for all columns.
+            from legoesm.land.canopy.clm_ml_interface import warm_start_clm_ml
+            _pft_fracs = (surface_map["pft_fractions"]
+                          if getattr(cfg.surface_scheme, "use_surfdata_pft", False)
+                          else None)
+            self._land_ml_state, _gi, _clm_ml_pft_per_col = warm_start_clm_ml(
+                self._land_ml_state, cfg, params,
                 lat=self.physics.land_ml_lat,
-                carbon_state=self.physics.land_ml_carbon, doy=0.0,
-                land_params=params, clm_ml_grid_info=None,
-                clm_ml_pft_per_col=_clm_ml_pft_per_col)
-            self._land_ml_state = self._land_ml_state._replace(
-                canopy_state=_warm_state.canopy_state)
-            self.physics.clm_ml_grid_info = extract_clm_ml_grid_info(
-                _warm_state.canopy_state)
-            _gi = self.physics.clm_ml_grid_info
+                u_min=self.physics.land_ml_u_min,
+                dt=float(self.config.dycore.dt), ncol=ncol, T_init=T_init,
+                carbon_state=self.physics.land_ml_carbon,
+                pft_fractions=_pft_fracs, dtype=storage_dtype)
+            self.physics.clm_ml_pft_per_col = _clm_ml_pft_per_col
+            self.physics.clm_ml_grid_info = _gi
             logger.info(
                 "  Land tile: CLM-ML canopy warm-started (%d columns; per-column "
                 "grid_info threaded into the jitted step)",
@@ -3249,7 +3306,21 @@ class ModelDriver:
         cover, years, rebuild = _trans
         cover_year = float(self._start_year) + day / 365.0
         fracs = interp_annual(cover, years, jnp.asarray(cover_year))
-        return rebuild(fracs)()
+        _rebuilt = rebuild(fracs)()
+        # The transient rebuild re-weights vegetation params by cover year via the
+        # CLM (LAI-only) provider; it does NOT carry the CLM-ML canopy's prescribed
+        # SAI / htop, which are STRUCTURAL (frozen, not cover-varying).  Carry them
+        # from the setup-time params so a transient CLM-ML run does not silently
+        # revert to the htop=5 / SAI=0.5 scalar defaults after step 0 (codex).
+        _init = getattr(self.physics, "land_ml_params", None)
+        if _init is not None:
+            _carry = {f: getattr(_init, f)
+                      for f in ("SAI", "htop")
+                      if getattr(_rebuilt, f, None) is None
+                      and getattr(_init, f, None) is not None}
+            if _carry:
+                _rebuilt = _rebuilt._replace(**_carry)
+        return _rebuilt
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -8795,6 +8866,10 @@ class ModelDriver:
             # configuration, which keeps those runs byte-identical.
             _lml_carbon = getattr(self.physics, "land_ml_carbon", None)
 
+            # Land fraction as a closure constant of the compiled land step,
+            # for the land-weighted held count below.
+            _f_land_cols = jnp.asarray(self._f_land).reshape(-1)
+
             @jax.jit
             def _land_step_fn(land_state, a2s, doy):
                 from legoesm.land.multilayer_land import (
@@ -8825,8 +8900,23 @@ class ModelDriver:
                 # exactly like a healthy one.
                 _n_held = (_sfc.n_held if _sfc.n_held is not None
                            else jnp.zeros((), jnp.int32))
+                # The raw count spans EVERY mesh column, but ocean columns run
+                # the land solve on placeholder forcing and their output is
+                # discarded by the land-fraction weighting — a held ocean
+                # column costs nothing physically.  Count the LAND-weighted
+                # holds separately, so the log can tell a frozen continent
+                # from noise on discarded columns (codex, 2026-08-23: the
+                # undivided counter read as half the mesh held when the
+                # physically-meaningful share was unknown).
+                _held_mask = getattr(_sfc, "held", None)
+                _n_held_land = (
+                    jnp.sum((jnp.asarray(_held_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols) > 0.5))
+                            .astype(jnp.int32))
+                    if _held_mask is not None
+                    else jnp.zeros((), jnp.int32))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx, _n_held)
+                        resp.shflx, resp.lhflx, _n_held, _n_held_land)
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8867,6 +8957,7 @@ class ModelDriver:
             # after which the warning this exists to guarantee would stop
             # firing precisely when holds had become systemic.
             _land_n_held_accum = jnp.zeros((), jnp.int32)
+            _land_n_held_land_accum = jnp.zeros((), jnp.int32)
             _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
             self._land_n_held_total = 0
             self._land_n_held_steps = 0
@@ -9667,7 +9758,7 @@ class ModelDriver:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
                      _land_shflx_step, _land_lhflx_step,
-                     _land_n_held_step) = _land_step_fn(
+                     _land_n_held_step, _land_n_held_land_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
                     # Accumulate ON DEVICE and read at the same cadence the
@@ -9675,13 +9766,17 @@ class ModelDriver:
                     # would stall the accelerator once per step for a number
                     # that is almost always zero.
                     _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    _land_n_held_land_accum = (
+                        _land_n_held_land_accum + _land_n_held_land_step)
                     _land_n_held_steps_accum = (
                         _land_n_held_steps_accum
                         + (_land_n_held_step > 0).astype(jnp.int32))
                     if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
                         _window_cols = int(_land_n_held_accum)
+                        _window_land = int(_land_n_held_land_accum)
                         _window_steps = int(_land_n_held_steps_accum)
                         _land_n_held_accum = jnp.zeros((), jnp.int32)
+                        _land_n_held_land_accum = jnp.zeros((), jnp.int32)
                         _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
                         if _window_cols:
                             self._land_n_held_total += _window_cols
@@ -9694,13 +9789,16 @@ class ModelDriver:
                             # held as well, and the worst single step.
                             logger.warning(
                                 "land: %d column-steps held in the last %d "
-                                "steps, on %d of those steps (the surface "
-                                "solve was rejected and the column reverted, "
-                                "so its energy and water budgets do not close "
-                                "over those steps); %d column-steps on %d "
-                                "steps since the run began — at step %d",
+                                "steps (%d of them on LAND columns — the "
+                                "physically meaningful share; the rest are "
+                                "ocean columns whose land output is "
+                                "discarded), on %d of those steps (a held "
+                                "column's energy and water budgets do not "
+                                "close); %d column-steps on %d steps since "
+                                "the run began — at step %d",
                                 _window_cols, _HARD_SAT_LOG_CADENCE_STEPS,
-                                _window_steps, self._land_n_held_total,
+                                _window_land, _window_steps,
+                                self._land_n_held_total,
                                 self._land_n_held_steps, step)
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction

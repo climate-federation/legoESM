@@ -2107,14 +2107,15 @@ class ExperimentConfig(NamedTuple):
                 "no soil column is built and the land-flux handoff is silently "
                 "inert — pass a real --topography or a --land-mask-file."
             )
-        # Deploying the baked land tables under the physics they were calibrated
-        # under.  The overlapping keys are CHECKED, not overridden, so a run can
-        # never believe it is on the calibrated model while one key disagrees;
-        # the settings with no config key (soil growth factor, carbon scheme,
-        # stomatal model) come from the shared calibrated_multilayer_setup().
+        # Deploying the baked land parameters under the physics they were
+        # calibrated under — the biophysics LMIP two-leaf canopy. The
+        # overlapping keys are CHECKED, not overridden, so a run can never
+        # believe it is on the calibrated model while one key disagrees; the
+        # settings with no config key of their own (soil growth factor, the
+        # canopy's intrinsic stomata) come from the one shared setup.
         if self.land_calibrated_physics:
-            from legoesm.land.config import calibrated_multilayer_setup
-            _cal = calibrated_multilayer_setup()
+            from legoesm.land.config import biophysics_lmip_two_leaf_setup
+            _cal = biophysics_lmip_two_leaf_setup()
             _grid = _cal["soil_grid"]
             if not self.use_multilayer_land:
                 errors.append(
@@ -2125,8 +2126,11 @@ class ExperimentConfig(NamedTuple):
                     "model)."
                 )
             _want = {
-                "land_stomatal_beta": (self.land_stomatal_beta, True),
-                "land_surface_scheme": (self.land_surface_scheme, "simple_seb"),
+                # The canopy runs its own Ball-Berry stomata, so the coupled
+                # stomatal beta must be OFF: on, it throttles the same
+                # conductance a second time.
+                "land_stomatal_beta": (self.land_stomatal_beta, False),
+                "land_surface_scheme": (self.land_surface_scheme, "two_leaf"),
                 "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
                 "multilayer_soil_depth": (self.multilayer_soil_depth,
                                           _grid.total_depth),

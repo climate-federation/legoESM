@@ -76,6 +76,58 @@ from legoesm.land.canopy.energy_balance import (
 _ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
 _ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
 
+# --- Damped-least-squares canopy solve (numerics; never tunable) ------------
+# WHY NOT PLAIN NEWTON.  A small share of columns -- hot, bright and CALM --
+# never converged at any iteration count: the unsolved share was flat at 0.66%
+# from 25 iterations through 50.  They do not stall, they OSCILLATE, moving
+# ~3.9 K per iteration forever while solved columns move exactly 0.0.  In calm
+# air the aerodynamic conductance collapses and one direction of the Jacobian
+# goes nearly flat; Newton divides by that tiny slope, the step overshoots the
+# root, and a FIXED step clamp of the same magnitude as the overshoot turns the
+# overshoot into a stable period-2 cycle.  The root sits BETWEEN consecutive
+# iterates and the iteration can never land on it.
+#
+# Shrinking the clamp cannot fix that: the bulk of columns legitimately need
+# steps of order 1 K early on, and a clamp of 1.0 left 80-92% of ALL columns
+# unconverged.  One constant cannot serve both regimes.
+#
+# The cure is damping that ADAPTS: the step is the solution of a least-squares
+# problem whose damping rises whenever a step fails to reduce the residual and
+# falls when it succeeds, so ordinary columns never feel it and a cycling column
+# is damped until it lands inside the bracket.  Steps that fail are REJECTED
+# rather than taken, which is what makes the residual monotone.
+#
+# The damped system is solved in AUGMENTED form via QR, never through the normal
+# equations: this Jacobian's condition number is ~1e5, and squaring it to 1e10
+# exceeds single precision, which is what this path runs in -- that would trade
+# an oscillation for numerical noise.
+_LM_LAMBDA_0 = 1.0e-2       # [-] initial damping, relative to the scaled system
+_LM_LAMBDA_MAX = 1.0e10     # [-] damping at which a column is declared unsolved
+_LM_LAMBDA_UP = 4.0         # [-] damping growth after a rejected step
+_LM_LAMBDA_DOWN = 3.0       # [-] damping decay after a good step
+_LM_RHO_BAD, _LM_RHO_GOOD = 0.25, 0.75   # [-] Nielsen gain-ratio thresholds
+_LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
+
+# Characteristic increment of each unknown, in its own units:
+#   [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] = [K, K, umol/mol, umol/mol, K, kg/kg]
+# The solver previously CLAMPED every component to the same +/-5, which is 5 K on
+# a temperature and 5 umol/mol on a CO2 concentration -- both sensible -- but
+# FIVE HUNDRED TIMES its own magnitude on a specific humidity of ~0.01 kg/kg,
+# i.e. no constraint at all on the one variable that most needed one.  These
+# values are that characteristic magnitude per unknown; solving in them
+# (z = x/xscale) makes the damping act evenly across components.
+# NOTE: this is a SCALE, not the old hard clip -- there is no longer a fixed
+# +/-5 cap on the step.  The step is instead bounded by the adaptive damping and
+# the accept-only-if-the-residual-drops rule; a component's move is
+# xscale[i]*dz[i], which the damping shrinks whenever a trial is rejected.
+_LM_XSCALE = jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0e-3])
+
+# The residual is already weighted where it is built: its humidity row carries a
+# factor of 1e3, which puts a kg/kg difference on the same footing as a kelvin
+# one.  So no further residual weighting is applied here -- adding a second one
+# would double-count it, and putting it on the wrong row would weight CO2
+# instead.
+
 
 # ---------------------------------------------------------------------------
 # Forcing bundle NamedTuple — groups all per-column inputs for the closure
@@ -272,6 +324,14 @@ def _canopy_residual(
     # for ``Tf_Sun`` or ``Ci_Sun``.  Collapse to a single-leaf model by
     # smoothly blending ``Tf_Sun → Tf_Sh`` as fSun shrinks (the two-leaf
     # partition is physically marginal anyway when direct beam is tiny).
+    #
+    # NOTE (2026-08-21): retargeting this trigger to the sunlit LEAF AREA was
+    # tried and REVERTED.  It fires in the leafless limit, but it replaces the
+    # residual of the leaf that still HAS area with equality to the empty one —
+    # the wrong direction, and both reviewers flagged it as the mechanism that
+    # spreads a degenerate leaf state into the canopy air.  Measured, it moved
+    # the failure count only 186 -> 172 of 4500.  If this is revisited, the
+    # EMPTY class must lose its equation and the active class must keep its own.
     #
     # The blend weight is a tanh smoother centred at ``fSun = 0.08`` with
     # transition half-width 0.03: anchor_weight ≈ 1 at fSun ≲ 0.05, ≈ 0
@@ -538,47 +598,105 @@ def _make_implicit_newton_solver(
         )
 
     def _forward(x0, bundle):
+        """Damped least-squares solve; see the module constants for the why.
+
+        Each iteration proposes a step, accepts it only if it reduces the
+        residual, and adjusts the damping from how well the actual reduction
+        matched the one the local model predicted.  A rejected step leaves the
+        iterate untouched and raises the damping, so the residual can never
+        increase and an overshooting column is progressively pulled back inside
+        the bracket it was jumping over.
+        """
+        # ``max_iters`` comes from CanopyConfig and is honoured as the cap, so
+        # a hard case can still be given more budget from config.  ``tol`` was
+        # the old STEP-norm tolerance; the damped solve converges on the
+        # RESIDUAL (_LM_RTOL/_LM_ATOL) because a step can be small purely from
+        # damping — reusing ``tol``'s value with a different meaning would be a
+        # silent semantic change, so it is deliberately unused on this path.
         F = partial(_F, bundle=bundle)
         Jac = jax.jacfwd(F)
 
+        def _res_jac(x):
+            """Residual and Jacobian in SCALED variables (z = x / xscale)."""
+            return F(x), Jac(x) * _LM_XSCALE          # columns scaled
+
+        def _step(J_z, resid, lam):
+            """Damped step, via QR of the augmented system.
+
+            Solves  min || [J ; sqrt(lam) I] dz - [-F ; 0] ||.  Stacking the
+            damping as extra ROWS keeps the conditioning at the Jacobian's own,
+            where forming the normal equations would square it -- fatal here in
+            single precision at a condition number of ~1e5.
+            """
+            n = resid.shape[0]
+            aug = jnp.vstack([J_z, jnp.sqrt(lam) * jnp.eye(n)])
+            rhs = jnp.concatenate([-resid, jnp.zeros(n, resid.dtype)])
+            q, r = jnp.linalg.qr(aug)
+            dz = jax.scipy.linalg.solve_triangular(r, q.T @ rhs, lower=False)
+            # Reduction the local linear model predicts for ||F||^2, computed
+            # from the model residual rather than from a normal-equations
+            # quadratic, so it cannot disagree with the step actually taken.
+            pred_resid = resid + J_z @ dz
+            return dz, jnp.sum(pred_resid * pred_resid)
+
         def cond(state):
-            _, i, converged = state
-            return (~converged) & (i < max_iters)
+            _, _, _, _, _, _, done = state
+            return ~done
 
         def body(state):
-            x, i, _ = state
-            delta = jnp.linalg.solve(Jac(x), -F(x))
-            # Sanitise a non-finite Newton step BEFORE the clip: a singular
-            # Jacobian / non-finite residual at the calm cold-night MOST edge
-            # makes ``solve`` return NaN, and ``jnp.clip(nan)`` stays NaN — a
-            # single non-finite step then poisons the whole coupled land state
-            # (every soil leaf goes NaN).  Replace it with 0 (no update this
-            # iteration) so the closure returns the last finite iterate instead,
-            # keeping the flux finite.  inf is already mapped to +/-5 by the
-            # clip below.
-            #
-            # ZEROING A BAD STEP IS NOT CONVERGENCE.  ``delta = 0`` has zero
-            # norm, so the test below used to read the substituted step as
-            # "converged" — the solver reported SUCCESS on precisely the column
-            # whose Jacobian had just gone singular, handed its garbage state to
-            # the caller as if it were a root, and defeated the backward pass's
-            # convergence mask (which exists to zero the gradient of a
-            # non-root).  Carry the step's finiteness into the flag so a
-            # substituted step can never be mistaken for a solution.
-            step_finite = jnp.all(jnp.isfinite(delta))
-            delta = jnp.where(step_finite, delta, jnp.zeros_like(delta))
-            # Constant scalar clamp on the Newton step.  The earlier
-            # decaying clamp (10 → 0.1) starved late iterations of step
-            # size during dusk transitions; constant 5.0 lets the solver
-            # traverse the radiation-collapse smoothly while still
-            # preventing catastrophic overshoot.
-            delta = jnp.clip(delta, -5.0, 5.0)  # coeff-ok: constant Newton step cap (see note above)
-            x_new = x + delta
-            new_converged = step_finite & (jnp.linalg.norm(delta) < tol)
-            return (x_new, i + 1, new_converged)
+            x, resid, J_z, n_sq, lam, i, _ = state
+            dz, n_sq_pred = _step(J_z, resid, lam)
+            x_trial = x + _LM_XSCALE * dz
+            resid_t = F(x_trial)
+            n_sq_t = jnp.sum(resid_t * resid_t)
 
-        x_final, n_iters, converged = jax.lax.while_loop(
-            cond, body, (x0, jnp.array(0), jnp.array(False)))
+            # Gain ratio: actual reduction over predicted.  Both terms come from
+            # THIS step, so the first iteration is a real measurement rather
+            # than a fiction inherited from an initialised-to-infinity carry.
+            rho = (n_sq - n_sq_t) / jnp.maximum(n_sq - n_sq_pred, 1e-30)
+            accept = (rho > 0.0) & jnp.all(jnp.isfinite(resid_t))
+
+            # A REJECTED STEP IS NOT TAKEN.  Raising the damping for next time
+            # while still moving is what makes an oscillation persist; keeping
+            # the iterate is what makes the residual monotone.
+            x = jnp.where(accept, x_trial, x)
+            resid = jnp.where(accept, resid_t, resid)
+            n_sq_new = jnp.where(accept, n_sq_t, n_sq)
+            J_z = jnp.where(accept, Jac(x_trial) * _LM_XSCALE, J_z)
+
+            # A non-finite trial residual makes ``rho`` NaN, and every NaN
+            # comparison is False — written naively that freezes the damping
+            # and retries the SAME divergent trial until the iteration cap
+            # (codex).  Phrase the bad-step test so NaN lands in it: damping
+            # must RISE on any step that is not demonstrably adequate.
+            step_bad = ~(rho >= _LM_RHO_BAD)          # True for NaN
+            step_good = rho > _LM_RHO_GOOD            # False for NaN
+            lam = jnp.clip(
+                jnp.where(step_bad, lam * _LM_LAMBDA_UP,
+                          jnp.where(step_good, lam / _LM_LAMBDA_DOWN, lam)),
+                0.0, _LM_LAMBDA_MAX)
+
+            # CONVERGENCE IS THE RESIDUAL, NOT THE STEP.  A step can be small
+            # merely because the damping is large, which is exactly the state a
+            # stalled column ends in -- calling that converged would hand the
+            # backward pass a point that is not a root and unmask a gradient
+            # that must be zeroed.  A stalled column instead leaves the loop by
+            # the damping ceiling, with converged False.
+            converged = n_sq_new <= (_LM_ATOL + _LM_RTOL * n_sq_0)
+            done = converged | (lam >= _LM_LAMBDA_MAX) | (i + 1 >= max_iters)
+            return (x, resid, J_z, n_sq_new, lam, i + 1, done)
+
+        resid_0, J_z_0 = _res_jac(x0)
+        n_sq_0 = jnp.sum(resid_0 * resid_0)
+        conv_0 = n_sq_0 <= _LM_ATOL
+        x_final, _r, _j, _n, _lam, n_iters, _done = jax.lax.while_loop(
+            cond, body,
+            (x0, resid_0, J_z_0, n_sq_0, jnp.asarray(_LM_LAMBDA_0, x0.dtype),
+             jnp.array(0), conv_0))
+        # Recompute the flag on the returned iterate so what the caller reads is
+        # a statement about the state it is handed, not about a loop variable.
+        resid_f = F(x_final)
+        converged = jnp.sum(resid_f * resid_f) <= (_LM_ATOL + _LM_RTOL * n_sq_0)
         return x_final, n_iters, converged
 
     @jax.custom_vjp
@@ -602,8 +720,9 @@ def _make_implicit_newton_solver(
         x_safe = jnp.where(jnp.isnan(x_star), jnp.zeros_like(x_star), x_star)
         had_nan = jnp.any(jnp.isnan(x_star)) | jnp.any(jnp.isnan(g_x))
         # Convergence guard: the IFT adjoint dx*/dθ = -(∂F/∂x)^{-1} ∂F/∂θ is
-        # only valid at a true root F(x*) = 0.  If the forward Newton hit
-        # max_iters without ||Δx|| < tol, x* is not a root and the adjoint is
+        # only valid at a true root F(x*) = 0.  If the forward solve hit
+        # max_iters (or the damping ceiling) without the RESIDUAL norm reaching
+        # tolerance, x* is not a root and the adjoint is
         # inconsistent — zero the cotangent (mirrors the NaN guard) rather than
         # emit a misleading gradient.  ``converged`` is the forward loop's own
         # convergence flag, so genuinely-converged columns are never masked.

@@ -484,3 +484,38 @@ def rotate_tpoint_currents_to_geographic(u_c, v_c, cos_alpha_u, sin_alpha_u):
     u_east = u_c * cos_T - v_c * sin_T
     v_north = u_c * sin_T + v_c * cos_T
     return u_east, v_north
+
+
+def nearest_column_map(
+    src_lat, src_lon, dst_lat, dst_lon, *, src_valid=None,
+) -> np.ndarray:
+    """Index of the nearest source column for every target column.
+
+    Generic point-cloud nearest-neighbour on the sphere, for moving PER-COLUMN
+    STATE between any two of the coupler's grids (lat-lon, Voronoi mesh, cube
+    face — anything that yields per-column lat/lon in radians).  Chord distance
+    through unit vectors: exact ordering, no pole or dateline seams.  This is
+    for state carried point-to-point (soil columns, snow, per-column
+    parameters); FLUXES need the conservative remappers above, never this.
+
+    ``src_valid``: optional boolean mask; targets then map onto the nearest
+    VALID source column (e.g. land state selects only land donors, so ocean
+    placeholders can never leak into a land column).
+    """
+    src_lat = np.asarray(src_lat, np.float64).ravel()
+    src_lon = np.asarray(src_lon, np.float64).ravel()
+    dst_lat = np.asarray(dst_lat, np.float64).ravel()
+    dst_lon = np.asarray(dst_lon, np.float64).ravel()
+    if src_valid is not None:
+        idx = np.flatnonzero(np.asarray(src_valid).ravel())
+        if idx.size == 0:
+            raise ValueError("src_valid excludes every source column")
+        return idx[nearest_column_map(src_lat[idx], src_lon[idx],
+                                      dst_lat, dst_lon)]
+
+    def unit(lat, lon):
+        return np.stack([np.cos(lat) * np.cos(lon),
+                         np.cos(lat) * np.sin(lon),
+                         np.sin(lat)], axis=-1)
+
+    return np.argmax(unit(dst_lat, dst_lon) @ unit(src_lat, src_lon).T, axis=1)
