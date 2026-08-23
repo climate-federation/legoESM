@@ -999,6 +999,13 @@ def main(argv=None):
     ap.add_argument("--k-split", type=int, default=K_SPLIT)
     ap.add_argument("--dt", type=float, default=DT_ATMOS)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--save-fields", default=None,
+                    help="write an .npz of the MAPPED one-step port "
+                         "and oracle planes (the same arrays the "
+                         "residual table scores, after the face map "
+                         "and dihedral) so the maps a human looks at "
+                         "are the arrays the gate scored, not a "
+                         "second rendering of the state.")
     ap.add_argument("--trace-substeps", action="store_true",
                     help="DIAGNOSTIC: run the acoustic loop one sub-step at "
                          "a time and print max|field - IC| after each, then "
@@ -1720,9 +1727,15 @@ def main(argv=None):
           "with the oracle's own one-step tendency for scale:")
     res = {}
     worst_step = 0.0
+    saved = {}
     for pf in range(6):
         ot = perm[pf]
         pairs, ws = apply_map(p_1[pf], orc_1[ot], meta[pf][ot])
+        if args.save_fields:
+            for f_, (a_, b_) in pairs.items():
+                saved[f"port_f{pf+1}_{f_}"] = np.asarray(a_)
+                saved[f"oracle_f{pf+1}_{f_}"] = np.asarray(b_)
+            saved[f"perm_f{pf+1}"] = np.asarray(ot)
         row = {}
         for f, (a, b) in pairs.items():
             r = rel(a, b, ws if f in ("u", "v") else None)
@@ -1804,6 +1817,11 @@ def main(argv=None):
                       f"|d|/tend={row[nm]['frac_of_tendency']:9.3e}"
                       + ("  [VACUOUS: constant IC]" if vac else ""))
 
+    if args.save_fields:
+        saved["fields"] = np.asarray(fields)
+        saved["nh"] = np.asarray(bool(args.nh))
+        np.savez_compressed(args.save_fields, **saved)
+        print(f"\nsaved mapped port/oracle planes -> {args.save_fields}")
     print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
     print(f"IC control (same harness, same map): {worst:.4e}")
     print(f"amplification over one step: "
