@@ -94,3 +94,111 @@ run is pre-registered, not because the cost is large.
 Nothing about either arm's outcome is known at the time of writing. If the
 result lands in the NO VERDICT band it will be reported as such rather than
 re-cut against a new threshold.
+
+---
+
+# ADDENDUM, written 2026-08-23 after dual adversarial review, before the 1.5x arm ran
+
+Two independent reviewers read the two arms above. Both found the same defect in
+this pre-registration and each found one the other did not. What follows is
+registered BEFORE the third arm was launched; the two existing arms' numbers are
+known and are restated here so the reader can see exactly what was and was not
+in hand when the new bands were written.
+
+## What is withdrawn from the registration above
+
+**W1. The signed four-row sum `G4` is withdrawn as the primary metric, and the
+CONFIRM it produced is withdrawn with it.** `G4` is a signed sum over four rows,
+and under a doubled viscosity the per-row error becomes DIPOLAR inside that
+window (+0.218, +0.123, -0.059, -0.237 Sv on rows 1-4). The signed sum therefore
+falls 85% while the sum of the individual rows' magnitudes RISES from 0.288 to
+0.636 Sv, and across the whole southern band from 0.446 to 1.800 Sv. Every row
+got worse; they cancel. A metric that a sign flip can turn from a degradation
+into an 85% improvement is not a metric. **The registered metric set gains
+`sum |gap|` over rows 1-4 and over rows 0-13, and no verdict may be issued on a
+signed sum alone.**
+
+**W2. The Munk `A^(1/3)` prediction is withdrawn as the wrong scaling law, not
+merely as a mis-estimate.** `(A/beta)^(1/3)` balances `beta*psi_x` against
+`A*del4(psi)` in a boundary layer whose cross-shore direction is zonal, i.e. on
+a MERIDIONAL wall. DINO's southern wall is ZONAL and the current along it is
+zonal, and the basin is closed in longitude, so the depth-integrated meridional
+transport vanishes at every latitude at steady state and `beta*v` never enters
+the balance. The 87 km the parent document quotes has no derivation on this
+wall; its agreement with the measured 112 km is arithmetic. A frictional
+sidewall layer here scales as `sqrt(A/r_bottom)`, which with NEMO's own drag
+constants is of order 500 km, and the 90-day viscous spreading scale
+`sqrt(A*t)` is about 205 km. Neither is 112 km either.
+
+**W3. The e-folding scale `L_e` is withdrawn as a mechanism discriminator.** On
+this grid the first baroclinic deformation radius is roughly 9 km against a 40
+km cell, so any wall-trapped baroclinic structure is resolution-limited to two
+or three cells whatever produces it. The measured 2.69 rows IS that limit. It
+therefore carries no information about which term made the anomaly, and the
+parent document's argument that "112 km is neither the grid scale nor the
+deformation radius" does not hold: 2.69 rows is the grid scale for a smooth
+decaying structure. `L_e` stays in the reported table as a shape descriptor and
+is no longer a CONFIRM route.
+
+**W4. "One variable" was true of the CONFIG and false of the REGION.** Doubling
+the lateral viscosity changes legoESM's own velocity by about 12% RMS in every
+latitude band of the model, including 70N, and moves the sea surface more
+outside the southern basin (5-6.6 mm) than inside it (1.8-2.2 mm). It is a
+globally-acting parameter read through a four-row window, so an improvement seen
+in that window has to survive a compensation check before it counts.
+
+## What the two existing arms are now taken to have established
+
+Restated with the metric set of W1, and labelled:
+
+* **CONFIRMED**: the four wall rows are strongly sensitive to the lateral
+  viscosity. Every norm moves by far more than the registered 15%: the signed
+  sum by 85%, the unsigned by 120%, and the change is 3.7 times the day-90
+  ensemble floor.
+* **CONFIRMED**: doubling the viscosity DEGRADES the southern basin. Unsigned
+  error 2.2x worse over the four wall rows and 4.0x worse over rows 0-13.
+* **CONFIRMED**: the band total is nearly invariant (-0.4258 to -0.4180 Sv,
+  1.8%). With free slip at the wall the meridionally-integrated lateral friction
+  telescopes to a single stress at the band's northern edge, so this is close to
+  a property of the operator rather than a discovery -- which makes it an
+  argument AGAINST lateral friction owning a band-integrated deficit.
+* **NOT ESTABLISHED**: that friction owns the wall lobe. The verdict registered
+  above is withdrawn.
+
+## The third arm, registered now
+
+**One variable, `rn_Uv` = 0.405 (1.5x), everything else byte-identical to the
+other two arms, same commit, all three re-run together so that no arm predates
+the artifact stamp the reader now requires.**
+
+It separates the only two readings of the existing pair that survive review:
+
+* **Reading A -- an effective-coefficient deficit.** legoESM's realized lateral
+  dissipation at these rows is genuinely about 1.8x too weak (the zero crossing
+  of the signed `G4` between the two existing arms sits at 1.82-1.87x). Then the
+  UNSIGNED basin error `sum |gap|` over rows 0-13 falls from 1x through 1.5x and
+  is at or near a minimum somewhere below 2x.
+* **Reading B -- the viscosity is a lever on someone else's error.** Then
+  `sum |gap|` rises MONOTONICALLY from 1x through 1.5x to 2x, and the signed
+  `G4` crosses zero purely by cancellation.
+
+**Registered discriminator**: `sum |gap|` over rows 0-13 at 1.5x, against 0.4459
+(1x) and 1.8002 (2x).
+  * below 0.4459 -> **Reading A**, and the effective-coefficient deficit becomes
+    the named next work item.
+  * above 1.8002, or monotone between the two endpoints within 10% of the
+    straight line joining them -> **Reading B**, and the lateral viscosity is
+    recorded as a lever and not the owner.
+  * anything else -> reported as neither, with the numbers.
+
+**Second registered reading, on the same arm**: the upper density contrast error
+against its 5.5e-4 kg/m3 gate, alongside the circumpolar transport error. A real
+improvement moves both monotonically in the same direction. A compensating error
+shows the transport metric with an interior optimum while the density metric
+degrades monotonically. The two existing arms already show transport 5.6x better
+while its own controlling density contrast is 6x worse, which is the
+compensation signature; the third point says whether that is monotone.
+
+**Cost**: one 90-day twin, about 215 s. All three arms re-run: about 11 minutes.
+
+Nothing about the third arm's outcome is known at the time of writing.
