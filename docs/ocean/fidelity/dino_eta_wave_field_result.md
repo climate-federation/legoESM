@@ -7,13 +7,18 @@ been compared at its own timescale: the saved twin output was DAILY (32 model
 steps) while a barotropic gravity wave crosses the DINO basin in about four
 hours.
 
-**The short answer.** The wave patterns match in the frequency domain: where a
-wave actually exists, legoESM reproduces NEMO's free-surface response with the
-spectral peaks at identical frequencies, peak amplitudes within 0.5 %, and no
-band carrying excess energy. Wave SPEED cannot be certified either way — the
-measurement saturates after two samples, and that is a limit of the available
-output, not a finding about the models. Getting even this far required a second
-experiment, because the free run turned out to have no waves in it at all.
+**The short answer.** The wave patterns match in SHAPE and in the frequency
+domain — spectral peaks at identical frequencies, peak amplitudes within 0.5 %,
+no band carrying excess energy — but they are OFFSET IN TIME:
+
+> **legoESM's barotropic impulse response lags NEMO's by 0.47 of a baroclinic
+> step, about 21 minutes.** One scalar explains 71 % of the entire
+> model-to-model residual in the impulse run. The free run, used as a control,
+> shows no lag (0.02 steps, explaining 0 %).
+
+That is the finding. Getting to it took a second experiment, because the free
+run has no waves in it at all, and a better estimator, because a half-step lag
+is invisible to any test that can only score whole steps.
 
 ---
 
@@ -33,11 +38,17 @@ attributed that to the split-explicit time-averaging filtering the waves out;
 withdrawn.** The spreading-rate measure saturates: a uniform field has a mean
 radius of 4542 km and NEMO's response passes half of that within two samples of
 160, after which both models simply say "the basin is full" and the ratio is
-forced to 1. The median I quoted was a saturated number. Only two samples are
-usable and they give 0.713 and 0.995. **No propagation-speed claim, in either
-direction, is supported by this data.**
+forced to 1. The median I quoted was that forced number.
 
-**3. The time-level identity I first wrote was wrong, and its residual was
+**3. I then wrote that the timing question was OPEN and that settling it would
+need the free surface sampled inside the barotropic substep loop. Both halves
+are withdrawn.** The question was not open — my discriminator could only score
+whole-step offsets, so a half-step lag made every candidate equally bad and
+produced the 44 % coin toss I reported as inconclusive. **"Inconclusive" was
+the signature of the answer.** And it needed no finer output: fitting the lag
+as a continuous quantity settles it from the same 45-minute samples.
+
+**4. The time-level identity I first wrote was wrong, and its residual was
 nearly read as physics.** The check on which dump corresponds to which time
 level was written as
 
@@ -151,13 +162,20 @@ Two things worth naming anyway:
   of 9.9e-8 and 1.3e-6 m, so both are above their floors and the above-floor
   ratio is 19.5. It decays to 1.4× over the second half of the run.
 
+  Quote it as **18–20×**: 17.95 on the raw amplitudes, 19.50 after subtracting
+  each side's own leakage floor. The floor is a similar fraction of both sides
+  (25 % and 19 %), so it largely cancels and the ratio is insensitive to how it
+  is handled.
+
   Two qualifiers that matter. Its signed spatial correlation with NEMO's is
   **−0.09 to +0.08, i.e. zero**: unlike the impulse lane, legoESM is not
   ringing the oracle's mode harder, it is ringing a different one. And it is
   **not basin-wide** — the wall enrichment of its first sample is 9.4, so this
   is a BOUNDARY transient, and calling it "the leapfrog computational mode
   under-damped by 18×" would overstate it. In absolute terms it is small
-  (7e-6 m on an 0.83 m field) and it decays.
+  (7e-6 m on an 0.83 m field) and it decays. Unlike the impulse lane's
+  alternation, this one is NOT a re-description of the lag: the free run has
+  no lag.
 - **That excess sits on the walls.** Per-cell ratio of mean-squared step-to-step change:
   median 1.06, 90th percentile 2.59, maximum 57.6. Splitting the excess by
   region, area-weighted, gives an **enrichment of 7.5× on land-adjacent cells**
@@ -187,22 +205,53 @@ Every band ratio is inside the pre-registered factor of 2, evaluated in code
 rather than by eye, over 11–21 live bands per probe. **No band carries excess
 legoESM energy.**
 
-**Propagation speed: NOT MEASURABLE here, in either direction.** Cell-to-cell
-phase lag is unresolvable (0.11 of a step per cell) and the spatial alternative
-saturates. The energy-weighted mean radius of the response reaches half its
-saturation value (4542 km, the value for a uniform field) within two samples,
-so only samples 1 and 2 carry information: their ratios are 0.713 and 0.995,
-and samples 3 and 4 are 0.772 and 0.977. That odd/even pattern is entangled
-with the leapfrog alternation described below, and two usable samples cannot
-separate the two. The whole-run median is 1.002 and means nothing.
+### The response is half a step late
 
-The time-level discriminator says the same thing from another angle: with all
-four candidate pairings scored on the same window, the registered one is the
-closest, but it wins in only **44 % of bootstrap draws**, so whether legoESM's
-response is offset by a fraction of a step is **open, not answered**. (An
-earlier reading that a one-step-lagged pairing beat the registered one by 31 %
-came from scoring the candidates on different-length windows; equalised, it
-does not.)
+A lagged trajectory is, to first order, a linear interpolation between two of
+the reference's samples, so fitting
+
+    eta_lego[k] - eta_nemo[k]  =  alpha * ( eta_nemo[k-1] - eta_nemo[k] )
+
+by area-weighted least squares over wet cells and samples returns the lag
+directly, as a continuous number of steps. Measured:
+
+| lane | lag alpha | in minutes | share of residual variance explained |
+|---|---|---|---|
+| **impulse, all 160 samples** | **+0.470 steps** | **+21.2 min** | **0.714** |
+| impulse, first 8 samples | +0.458 steps | +20.6 min | 0.679 |
+| free (control), all samples | −0.132 steps | −5.9 min | 0.004 |
+| free (control), first 8 | +0.018 steps | +0.8 min | 0.000 |
+
+Positive means legoESM is behind. The competing explanation — that legoESM's
+field is simply scaled rather than delayed — was fitted alongside and explains
+0.1 % of the same residual against the lag's 71 %. The free run is the control
+that matters: the same estimator, the same two models, no wave in the field,
+returns no lag and explains nothing, so the fit is not manufacturing a number
+out of any two imperfectly matching trajectories.
+
+**Four things reported below are re-descriptions of this one lag, not
+independent findings**: the step-to-step alternation of the difference (odd
+samples 5.1× the even ones), the sample-1 spreading ratio of 0.713 against
+0.995 at sample 2, the 2-step ringing in the impulse lane, and the 44 %
+bootstrap. A half-step offset sampled on alternate steps produces all four.
+
+**PLAUSIBLE mechanism, not confirmed.** Half a step is exactly what a
+disagreement about where the barotropic time-average is CENTRED would produce
+— an average over `[t, t+dt]` sits half a step later than one over
+`[t-dt/2, t+dt/2]`. This campaign already has history on that exact window: the
+two barotropic averaging kernels (the velocity boxcar and the
+transport-weighted tail-sum) are recorded in `ocean/state.py` as sampling the
+substep profile at different phases, with centroids 7.3 substeps apart out of
+23 — about 0.32 of a step. Right family, right order, not equal to the 0.47
+measured here. The discriminating test is cheap and has not been run: compare
+the two kernels' centroids at the twin's actual substep count and see whether
+the difference matches. Until then this is a labelled guess; the lag itself is
+measured.
+
+**What is still not measurable here.** Cell-to-cell phase lag (0.11 of a step
+per cell) and the spreading-rate comparison, which saturates after two samples
+— its usable ratios are 0.713 and 0.995, and the whole-run median of 1.002
+means nothing.
 
 **The response difference decays.** As a fraction of the response NEMO itself
 produced:
@@ -266,12 +315,11 @@ in it — and on the response difference falling to 3.8 % of the response by day
 5. It does NOT rest on the free lane, whose registered pass is an artefact of
 there being no signal, nor on criterion (i) in either lane.
 
-**NOT ESTABLISHED: wave speed or phase.** Both available measurements are
-inconclusive by construction rather than by result — the temporal one is below
-resolution, the spatial one saturates after two samples, and the pairing
-bootstrap is a coin toss at 44 %. Settling it needs the free surface sampled
-inside the barotropic substep loop (~90 s), which neither model currently
-writes.
+**CONFIRMED, and the more consequential half: legoESM's barotropic response is
+0.47 of a step late** — 21 minutes, explaining 71 % of the impulse-lane
+residual, with a free-run control at zero. The shapes agree; the clocks do
+not. What remains unmeasurable here is cell-to-cell phase lag and the
+spreading-rate comparison, both below resolution or saturated.
 
 **The feedback-tier finding is the free lane's**, and it is separate from the
 wave question: in a free run legoESM's free surface carries its OWN two-step
@@ -320,7 +368,11 @@ campaign's wall-row velocity work has been circling.
   floor of its own estimator — the operator is a curvature high-pass, not a
   notch, so about 29 % of a 6-hour signal passes it and a ratio taken without
   the floor can be mostly leakage.
-- **Instrument tests.** 58 direct unit tests, written as known-answer and
+- **Lag estimator.** Validated on a planted ladder: lags of 0, 0.25, 0.5 and
+  0.75 steps are recovered exactly, the sign flips when the two models' roles
+  are swapped, and a uniformly scaled field with no lag is correctly reported
+  as an amplitude error rather than a lag.
+- **Instrument tests.** 66 direct unit tests, written as known-answer and
   synthetic-violation controls: the spectrum recovers a 0.37 m / 8 h sinusoid to
   5 % and a Nyquist oscillation at its true amplitude; a planted wall-band
   2-step mode is detected and attributed to `wall` with >99 % of the excess; a
@@ -352,10 +404,12 @@ and `fig_spectra.png`. Full numbers in each directory's `eta_wave_twin.json`.
 
 ## What this does NOT establish
 
-- Nothing about barotropic wave PHASE SPEED. The sampling cannot resolve
-  cell-to-cell lag in this basin (0.11 of a step per cell) and no output either
-  model currently writes can. That would need the free surface inside the
-  barotropic substep loop, at ~90 s.
+- Nothing about barotropic wave PHASE SPEED as a propagation rate. The 0.47-step
+  result is a whole-response timing offset, not a dispersion measurement.
+  Cell-to-cell lag remains unresolvable (0.11 of a step per cell) and the
+  spreading-rate comparison saturates after two samples.
+- Nothing about the CAUSE of the lag. The averaging-centroid mechanism above is
+  labelled PLAUSIBLE and its discriminating test has not been run.
 - Nothing about the 78–435× kick-amplification result that motivated the run.
   That measures the growth of an injected perturbation over thirty days; this
   measures the difference between two models over five.
