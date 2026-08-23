@@ -109,3 +109,24 @@ provenance and the figure is retired rather than repeated.
 4. **NaN is fatal**; provenance (HEAD, dirty count, lane, dump paths, dtypes,
    e3t mode) is stamped on every run; the probe prints numbers and never prints
    a verdict.
+
+
+---
+
+# AMENDMENT, recorded AFTER the run and labelled as such
+
+The two magnitude bars above are **not mutually consistent**, and I did not
+notice before running.  `BAR_S1` was derived from the deficit's depth-uniform
+VELOCITY (4.6e-4 m/s, a whole-southern-basin figure) and `BAR_S2` from the wall
+band's TRANSPORT gap (0.288 Sv, a four-row figure).  Those describe different
+regions, and on this band's cross-section (~2e10 m2) they disagree by about a
+factor of thirty.  A result can therefore sit under one and over the other, and
+the committed one-step difference does exactly that: +2.2e-8 m/s is 7x under
+`BAR_S1` while +4.9e-4 Sv is 4.9x over `BAR_S2`.
+
+**Nothing above is edited and no bar is moved.**  What changes is which legs the
+conclusion is allowed to rest on: the SIGN leg and the SHAPE leg, both fixed in
+advance and both unambiguous, carry it.  The magnitude leg is recorded as
+INCONCLUSIVE for this probe until the two published figures are reconciled on a
+common region — which is itself a finding, and belongs to whoever next quotes
+either of them.

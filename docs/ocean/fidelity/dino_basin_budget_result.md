@@ -843,9 +843,24 @@ thickness-weighted over the four rows against the southern wall.
 4. **The implicit vertical solve is the smallest term in the step**, 340 times
    under the velocity bar. It is not the owner.
 
+**One honest caveat about the bars, and it changes how row 2 reads.** The two
+magnitude bars were derived from two different published figures — the deficit's
+depth-uniform velocity (4.6e-4 m/s) and the wall band's transport gap
+(0.288 Sv) — and those two describe different regions, so they are not mutually
+consistent: they disagree by about a factor of thirty on this band's
+cross-section. The committed one-step difference of +2.2e-8 m/s is seven times
+*under* the velocity bar but +4.9e-4 Sv is five times *over* the transport one.
+The refutation therefore does **not** rest on magnitude. It rests on the two
+legs that are unambiguous and that the pre-registration fixed in advance: the
+committed difference has the **wrong sign** (positive, where the deficit is
+negative), and the **wrong shape** (0.34 on the wall-concentration measure
+against a bar of 2.0, i.e. the difference is nine times larger in the interior
+than at the wall). A birth pushing the other way, spread over the wrong rows, is
+not the owner however large it is.
+
 **Verdict, CONFIRMED for the day-180 state:** none of the four post-tendency
-stages is born large enough, or with the right sign, or with the right shape, to
-be the southern deficit's owner at this state. As registered, this refutes them
+stages is born with the right sign or the right shape to be the southern
+deficit's owner at this state. As registered, this refutes them
 under *linear* retention only — this campaign has already measured a badly
 non-linear map from operator error to transport, so the honest statement is that
 the deficit is not injected here, not that these stages can never matter.
