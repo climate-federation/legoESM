@@ -340,6 +340,23 @@ SIBLING_PARITY_BASELINE: tuple[tuple[str, str, str], ...] = (
     # (barotropic_latlon_cgrid.py:1302-1305). VERIFIED: `vorticity_scheme`
     # appears NOWHERE in barotropic_latlon_cgrid, by design, not by omission.
     ("ocean_pe_latlon_cgrid", "barotropic_latlon_cgrid", "vorticity_scheme"),
+    # LEGITIMATE, and the TWIN of the entry above -- same pair, same reason.
+    # `een_metric_weighting` ("off"/"nemo", #1455) selects NEMO's transport
+    # metric weighting on the 3-D EEN triad (dynvor.F90:791-792 weights the
+    # meridional transport by e1v, :804 divides the u-tendency by e1u). The
+    # barotropic path ALREADY APPLIES THE SAME WEIGHTING, and has since before
+    # this option existed -- under its own card selector
+    # `barotropic_coriolis="een_metric"` (barotropic_latlon_cgrid.py
+    # `een_barotropic_coriolis`, which folds the widths in externally because
+    # it also has a depth integral to factor through). So this is a
+    # DIFFERENT NAME for physics that is present on both paths, not a
+    # threading gap: the physics parity the gate exists to protect HOLDS, and
+    # the NEMO MLF oracle card selects both.
+    # FOLLOW-UP, named not built (#1455): the two selectors should be unified
+    # so a card cannot ask for the weighting baroclinically and decline it
+    # barotropically. That is a rename touching a shipped, twin-verified
+    # barotropic path and is deliberately out of scope here.
+    ("ocean_pe_latlon_cgrid", "barotropic_latlon_cgrid", "een_metric_weighting"),
     # LEGITIMATE: gm_redi_latlon_cgrid is the full grid-specific tendency;
     # _gm_redi_common is the small shared-math helper module (taper functions,
     # resolution scaling, Visbeck/Treguier kappa formulas) that operates on

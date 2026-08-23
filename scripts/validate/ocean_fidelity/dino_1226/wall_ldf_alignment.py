@@ -403,13 +403,31 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
 
         Normalising a dry-cell sum by the wet-cell count understates it by the
         dry/wet ratio, which at these rows is a factor of four to six.
+
+        #1455 RETRACTION: this averages over longitude AND LEVEL with no
+        thickness weight (the comment above calls it "depth-averaged", which it
+        is only in the sense of an unweighted level mean). On DINO's
+        10.14 m-to-545.20 m layers that over-weights the surface ~54x. The
+        mass-weighted twin is computed below and both are reported.
         """
         return np.where(n > 0, (np.abs(x) * w).sum(axis=(1, 2)),
                         np.nan) / np.maximum(n, 1)
 
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.vertical import compute_layer_thickness as _clt
+    _hk = np.asarray(_clt(np.asarray(br.state.eta.data, dtype=np.float64),
+                          np.asarray(br.state.H_bathy.data, dtype=np.float64),
+                          br.z_coord), dtype=np.float64)
+    _hu = np.asarray(min_cell_to_uface(
+        __import__("jax").numpy.asarray(_hk)), dtype=np.float64)
+    wet_m = wet * _hu
+    n_wet_m = wet_m.sum(axis=(1, 2))
+
     base = rma(prod_u, wet, n_wet)
     dwet = rma(full_u - prod_u, wet, n_wet)
     ddry = rma(full_u - prod_u, dry, n_dry)
+    base_m = rma(prod_u, wet_m, n_wet_m)
+    dwet_m = rma(full_u - prod_u, wet_m, n_wet_m)
     prod_dry = rma(prod_u, dry, n_dry)
     print(" row   phi[deg]   mean|du_prod|   d(3D-2D) on WET   rel"
           "     d on DRY cells")
@@ -424,7 +442,9 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
         if j not in WALL_ROWS:
             interior.append(rel)
     w = [dwet[j] / base[j] for j in WALL_ROWS if base[j] > 0]
-    print(f"wall-row mean relative change on wet faces: {np.mean(w):.3e}")
+    w_m = [dwet_m[j] / base_m[j] for j in WALL_ROWS if base_m[j] > 0]
+    print(f"wall-row mean relative change on wet faces: {np.mean(w):.3e}"
+          f"   [MASS-weighted {np.mean(w_m):.3e}]")
     print(f"interior-row mean relative change:          "
           f"{np.nanmean(interior):.3e}")
     print(f"max|3D-2D| anywhere on a wet face: "
@@ -465,6 +485,7 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
         "maskings STILL agree exactly -- this A/B cannot distinguish them and "
         "its zero proves nothing")
     return dict(wall_rel=float(np.mean(w)),
+                wall_rel_mass=float(np.mean(w_m)),
                 interior_rel=float(np.nanmean(interior)),
                 control=float(ctl))
 
@@ -503,12 +524,31 @@ def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
         u_mask[..., None] if u_mask.ndim == 2 else u_mask)
     n_wet = wet.sum(axis=(1, 2))
 
-    def rma(x):
-        return np.where(n_wet > 0, (np.abs(x) * wet).sum(axis=(1, 2)),
-                        np.nan) / np.maximum(n_wet, 1)
+    # #1455 RETRACTION. This mean is over longitude AND LEVEL with no
+    # thickness weight, so it over-weights the surface by ~54x on DINO's
+    # 10.14 m-to-545.20 m layers. The enrichment ratio below is a ratio of two
+    # such means, and reweighting moves numerator and denominator differently,
+    # so the "34% at the wall, 3% in the interior" fingerprint this block
+    # produced is NOT weighting-independent. Both readings are computed now.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    _hu = np.asarray(min_cell_to_uface(
+        __import__("jax").numpy.asarray(h_k)), dtype=np.float64)
+    wet_m = wet * _hu
+    n_wet_m = wet_m.sum(axis=(1, 2))
+
+    def rma(x, w=None, n=None):
+        w = wet if w is None else w
+        n = n_wet if n is None else n
+        return np.where(n > 0, (np.abs(x) * w).sum(axis=(1, 2)),
+                        np.nan) / np.maximum(n, 1)
+
+    def rma_m(x):
+        return rma(x, wet_m, n_wet_m)
 
     base = rma(off_u)
     d = rma(e3_u - off_u)
+    base_m = rma_m(off_u)
+    d_m = rma_m(e3_u - off_u)
     print(" row   phi[deg]   mean|du_off|    mean|d(e3-off)|      rel")
     interior = []
     for j in list(WALL_ROWS) + [8, 12, 20, 40, 99, 150]:
@@ -521,12 +561,18 @@ def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
         if j not in WALL_ROWS:
             interior.append(rel)
     w = [d[j] / base[j] for j in WALL_ROWS if base[j] > 0]
+    w_m = [d_m[j] / base_m[j] for j in WALL_ROWS if base_m[j] > 0]
+    int_m = [d_m[j] / base_m[j] for j in [8, 12, 20, 40, 99, 150]
+             if j < len(base_m) and base_m[j] > 0]
     print(f"wall-row mean relative change from the e3 weighting: "
-          f"{np.mean(w):.4f}")
+          f"{np.mean(w):.4f}   [MASS-weighted {np.mean(w_m):.4f}]")
     print(f"interior-row mean relative change:                   "
-          f"{np.nanmean(interior):.4f}")
+          f"{np.nanmean(interior):.4f}   [MASS-weighted "
+          f"{np.nanmean(int_m):.4f}]")
     print(f"enrichment (wall / interior): "
-          f"{np.mean(w) / np.nanmean(interior):.2f}x")
+          f"{np.mean(w) / np.nanmean(interior):.2f}x"
+          f"   [MASS-weighted "
+          f"{np.mean(w_m) / np.nanmean(int_m):.2f}x]")
     # the same scores over EVERY row, so the four wall rows are not being
     # compared against a hand-picked interior sample
     allrel = np.where(base > 0, d / np.maximum(base, 1e-300), np.nan)
@@ -535,7 +581,9 @@ def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
           f"max {np.nanmax(allrel):.4f} at row "
           f"{int(np.nanargmax(allrel))}")
     return dict(wall_rel=float(np.mean(w)),
-                interior_rel=float(np.nanmean(interior)))
+                interior_rel=float(np.nanmean(interior)),
+                wall_rel_mass=float(np.mean(w_m)),
+                interior_rel_mass=float(np.nanmean(int_m)))
 
 
 def self_test() -> int:

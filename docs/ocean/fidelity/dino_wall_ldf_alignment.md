@@ -701,3 +701,116 @@ mechanism whose signature is net convergence is ruled out.
    inconsistency, it conserves the physical energy norm, and it is neutral on
    every 90-day gate. It is left OFF pending that decision.
 3. `pv_flux_ene` carries the same gap and is unfixed.
+
+---
+
+# Part 6 — the rescore, and the instrument lessons
+
+## Every refutation, rescored on the corrected weighting
+
+Offline, no runs. The rescore drives the same probes that produced the original
+verdicts rather than re-deriving any term, and it is pinned to the
+configuration the verdicts were taken under (metric weighting off), because the
+card has since been flipped on and that changes the same term by two orders.
+
+**A first version of this rescore was wrong, in the way the lane keeps being
+wrong.** It declared lateral friction immune on the grounds that its probe
+contains no call to the affected reduction — a test that counted a *name*. The
+friction probe carries the same defect under a different name: its own row-mean
+helper averages over longitude **and level** with no thickness weight, and one
+of its outputs is an enrichment ratio, where reweighting moves numerator and
+denominator differently. Friction is now actually rescored. Adversarial review
+caught this; the immunity claim did not survive it.
+
+| candidate | old verdict | rescored | |
+|---|---|---|---|
+| **bottom drag** | REFUTED | **REFUTED** — 3.93e-18 identical to the last bit under both weightings | **survives** |
+| **friction, mask dimensionality** | REFUTED | **REFUTED** — exactly 0.0 under both | **survives** |
+| **friction, e3 weighting** | REFUTED (1e-4 relative) | **REFUTED** — 6.75e-5 → 5.65e-5, a 16% move inside the same order | **survives on the leg that carried it** |
+| **EEN vorticity flux** | CLEARS BOTH LEGS → sole candidate | **NO VERDICT under both weightings** | **the promotion was never supportable** |
+
+**Nothing reopens.** Drag is immune by construction — its scored quantity is
+already depth-averaged, so there is no vertical weight left to get wrong, and
+that is measured (a 53× thickness contrast moves the 3-D reduction and leaves
+the 2-D one bit-identical) rather than argued.
+
+Friction's magnitude leg is what refuted it and that leg survives: the layer
+weighting NEMO applies and the card does not changes the viscous tendency by
+about 1e-4 *relative* on either reading, and a 1e-4 relative effect cannot
+carry a 34% transport error whatever its spatial concentration. Its
+**enrichment** leg does move, 2.35× → 5.16×, crossing the 3× bar — so on the
+corrected weighting that difference genuinely *is* wall-concentrated. It is
+simply far too small to matter, and it is reported rather than buried.
+
+## The promotion was wrong twice over
+
+The EEN vorticity flux was promoted to sole candidate on "clears both legs,
+8.74× enriched against a 3× bar". Both halves fail:
+
+- **The enrichment leg was scored on the wrong statistic.** The
+  pre-registration defines enrichment on the row-mean *absolute* difference,
+  and calibrated its 3× bar against comparators measured that way (2.4 for the
+  viscosity thickness weighting, 0.57 for the implicit control volume). The
+  8.74× came from dividing *signed coherent means* instead. On the registered
+  statistic the term scores **1.86×** over the full interior and **2.81×** over
+  the far interior — **it fails the enrichment leg on both interior sets**,
+  under the published weighting, before any correction.
+- **The magnitude leg then fails too** once the reduction is corrected:
+  3.10e-10 → 2.50e-11 against a 5.9e-11 bar, with all four wall rows' signs
+  inverted.
+
+So the term that this lane spent its whole budget on never cleared the bar it
+was said to clear. That is independently consistent with the 90-day A/B, where
+closing 96-98% of it moved every gated metric by less than one noise floor —
+two different instruments agreeing that it was never the owner.
+
+## Three instrument lessons, and they belong together
+
+The campaign's expensive errors have all been instrument errors, not physics
+errors. These three are the same failure at three scales.
+
+**1. Injection is not accumulation.** A per-step source and a drift are
+different objects; a term can inject every step and accumulate nothing, and a
+replay harness that drops a forcing manufactures the first while measuring the
+second.
+
+**2. A tendency error is not a transport error.** This lane's lesson, and the
+sharpest one. The EEN vorticity flux disagreed with the oracle by 96-98% more
+than any other operator this campaign has measured, at exactly the four rows
+carrying the deficit, concentrated ~9× there. Closing it moved the 90-day
+transport by **0.07 noise floors**. Operator fidelity and climate error are
+different objects, and closing one is not evidence about the other — in either
+direction. An operator can be wrong and inert; it can also be right and the
+model still wrong.
+
+**3a. A bar belongs to a STATISTIC, not to a quantity.** The magnitude leg and
+the enrichment leg of the same shape test are registered on two different
+reductions, and scoring both with one of them silently changed a 1.86× into an
+8.74× — across the bar, in the direction that promoted a candidate. When a
+pre-registration names a statistic, the code must read that statistic, and a
+comparator calibrated on one is meaningless against the other.
+
+**3. A reduction is part of the claim, and its NAME is a testable assertion.**
+A statistic called "thickness-weighted" that averages over levels is not a
+labelling slip: on this grid it over-weights the surface 54×, and it promoted a
+candidate whose corrected sign is the opposite of the one that was reasoned
+from. The helper was correct the whole time; every caller and its own docstring
+were wrong. Before a reduction decides anything, print what it actually
+computes on a case whose answer is known — a 53× thickness contrast that fails
+to move a "thickness-weighted" mean is a one-line test that would have caught
+this a year ago.
+
+And **do not test for the defect by searching for its name.** The first attempt
+to clear lateral friction counted occurrences of the broken helper in the
+friction probe, found none, and declared immunity — while the same arithmetic
+sat there inlined under a different name. A guard that can only fire on a
+string it does not find is guaranteed to pass and proves nothing. Test the
+behaviour: feed the reduction a known thickness contrast and require it to
+respond.
+
+The recirculation result belongs beside them as the positive form of the same
+discipline: the closed sub-basin's budget says **99.98% of the transport error
+recirculates internally** and only 4.4 mm of sea surface accumulates against
+the 24.9 m a genuine convergence would have built. That is a control volume
+drawn once, offline, that rules out an entire class of mechanism — every one
+whose signature is net convergence — for the cost of an afternoon.

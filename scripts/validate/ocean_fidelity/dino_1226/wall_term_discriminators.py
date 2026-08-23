@@ -136,16 +136,41 @@ def build_lego():
     return g, br, cfg, mc
 
 
+# Every ``coherent_report`` result, so a driver can tabulate both reductions
+# without this module having to change its callers' return contracts.
+# ponytail: module-level dict, keyed by report name; make it a return value if
+# a second driver ever needs them concurrently.
+LAST_COHERENT: dict = {}
+# ``row_report``'s numbers, which is where the REGISTERED enrichment leg lives
+# (the pre-registration defines it on the row-mean ABSOLUTE difference, not on
+# the signed coherent mean). Recorded so a driver scores each leg on the
+# statistic its own bar was calibrated against -- adversarial review C2.
+LAST_ROW: dict = {}
+
+
 def coherent_rows(diff, wet, h=None):
-    """The SIGNED, thickness-weighted, zonally-averaged difference per row.
+    """The SIGNED, zonally-averaged difference per row.
+
+    RETRACTION (#1455, 2026-08-23). This was documented as, and every caller
+    described its output as, the "thickness-weighted" mean. It is only that if
+    ``h`` is supplied, and NO caller ever supplied it -- so every wall-row
+    number this campaign published is the MASK-weighted mean, i.e. an
+    unweighted average over wet LEVELS. DINO's layers span 10.14 m to 545.20 m,
+    so that over-weights the surface by about 54x relative to mass, and the
+    pre-registered bars were derived for a DEPTH-MEAN acceleration, which is
+    the mass-weighted one.
+
+    The function was always correct; its callers and its docstring were not.
+    ``coherent_report`` now reports BOTH and no caller can silently take the
+    level mean alone.
 
     THIS is the quantity the pre-registered bar was derived for: a persistent
     depth-mean acceleration that survives long enough to build a velocity
-    error. ``mean|diff|`` -- which every earlier version of this probe reported
-    -- is an UPPER BOUND on it, and a loose one for any term whose difference
-    changes sign with depth or with longitude. Both are now printed side by
-    side, with the ratio, so a term cannot be credited with a difference that
-    cancels the moment it is projected onto the mode the defect lives in.
+    error. ``mean|diff|`` is an UPPER BOUND on it, and a loose one for any term
+    whose difference changes sign with depth or with longitude. Both are
+    printed side by side, with the ratio, so a term cannot be credited with a
+    difference that cancels the moment it is projected onto the mode the defect
+    lives in.
     """
     w = wet.astype(np.float64)
     if diff.ndim == 3:
@@ -163,21 +188,55 @@ def coherent_rows(diff, wet, h=None):
 
 
 def coherent_report(name, diff, wet, h=None):
-    """Report the coherent (bar-relevant) reduction against the bar."""
-    signed, absol = coherent_rows(diff, wet, h)
-    print(f"\n  {name}: SIGNED thickness-weighted zonal mean [m/s2] "
-          f"-- the quantity the bar is defined on")
-    print(f"    {'row':>5}{'signed':>14}{'mean|.|':>14}{'coherent':>10}")
+    """Report the reduction against the bar, under BOTH vertical weightings.
+
+    ``h``: the thickness the tendency acts on (u-face thickness for a
+    u-tendency). Supplying it gives the MASS-weighted mean, which is the
+    quantity the bar was derived for. Omitting it gives the LEVEL mean, which
+    is what this campaign published while calling it thickness-weighted.
+
+    A 2-D ``diff`` (an already-depth-averaged quantity, e.g. the barotropic
+    drag increment) is IMMUNE: ``coherent_rows`` takes its 2-D branch, where
+    ``h`` is not read at all. That is reported explicitly rather than left for
+    the reader to infer, because "this verdict was scored on the broken
+    instrument" and "this verdict cannot be affected by it" look identical
+    from the call site.
+    """
+    two_d = np.asarray(diff).ndim == 2
+    signed, absol = coherent_rows(diff, wet, None)
+    hs, ha = (signed, absol) if (two_d or h is None) else coherent_rows(
+        diff, wet, h)
+    lbl = ("2-D input: depth already removed, so the two reductions are the "
+           "SAME by construction" if two_d else
+           "mass-weighted column not supplied" if h is None else
+           "LEVEL mean (as published) vs MASS-weighted (the bar's quantity)")
+    print(f"\n  {name}: signed zonal mean [m/s2] -- {lbl}")
+    print(f"    {'row':>5}{'signed(lvl)':>14}{'mean|.|':>13}"
+          f"{'signed(mass)':>15}{'coh(lvl)':>10}")
     for j in WALL_ROWS + INTERIOR_ROWS_FAR:
         c = abs(signed[j]) / absol[j] if absol[j] > 0 else np.nan
         tag = "  WALL" if j in WALL_ROWS else ""
-        print(f"    {j:>5}{signed[j]:>14.4e}{absol[j]:>14.4e}{c:>10.3f}{tag}")
-    w = float(np.mean([abs(signed[j]) for j in WALL_ROWS]))
-    i = float(np.mean([abs(signed[j]) for j in INTERIOR_ROWS_FAR]))
-    print(f"    wall {w:.4e}   far interior {i:.4e}   "
-          f"enrichment {w / i if i > 0 else np.nan:.2f}x")
-    print(f"    vs the {BAR_MAG:.2e} m/s2 bar: {w / BAR_MAG:.2f}x "
+        print(f"    {j:>5}{signed[j]:>14.4e}{absol[j]:>13.4e}"
+              f"{hs[j]:>15.4e}{c:>10.3f}{tag}")
+
+    def _wi(sg):
+        return (float(np.mean([abs(sg[j]) for j in WALL_ROWS])),
+                float(np.mean([abs(sg[j]) for j in INTERIOR_ROWS_FAR])))
+
+    w, i = _wi(signed)
+    wm, im = _wi(hs)
+    print(f"    LEVEL mean:    wall {w:.4e}  far {i:.4e}  "
+          f"enrichment {w / i if i > 0 else np.nan:.2f}x  "
+          f"vs the {BAR_MAG:.2e} bar {w / BAR_MAG:.2f}x "
           f"({'clears' if w >= BAR_MAG else 'FAILS'})")
+    print(f"    MASS-weighted: wall {wm:.4e}  far {im:.4e}  "
+          f"enrichment {wm / im if im > 0 else np.nan:.2f}x  "
+          f"vs the {BAR_MAG:.2e} bar {wm / BAR_MAG:.2f}x "
+          f"({'clears' if wm >= BAR_MAG else 'FAILS'})")
+    LAST_COHERENT[name] = dict(level_wall=w, level_far=i, mass_wall=wm,
+                               mass_far=im, two_d=two_d,
+                               level_rows=[float(signed[j]) for j in WALL_ROWS],
+                               mass_rows=[float(hs[j]) for j in WALL_ROWS])
     return w, i
 
 
@@ -239,6 +298,10 @@ def row_report(name, diff, wet, unit="m/s2", term=None):
               "this leg of the shape test is NOT decided by the data alone. "
               "The pre-registration did not pin the interior set; reported as "
               "undecided rather than re-cut.")
+    LAST_ROW[name] = dict(wall=wall, interior=inter, far=far,
+                          enrich=enrich, enrich_far=enrich_far,
+                          straddles=((enrich >= BAR_ENRICH)
+                                     != (enrich_far >= BAR_ENRICH)))
     if term is not None:
         rw = float(np.nanmean([rm(j) / tm(j) for j in WALL_ROWS
                                if tm(j) > 0]))
@@ -334,6 +397,8 @@ def part1(g, br, cfg, mc, plant=None):
           f"max {inc_nemo[umask_s].max():.6e} m/s2")
     print(f"    legoESM:        min {inc_lego[umask_s].min():.6e}, "
           f"max {inc_lego[umask_s].max():.6e} m/s2")
+    # 2-D increment: the depth mean is already taken, so this verdict is
+    # STRUCTURALLY immune to the weighting retraction. Reported, not assumed.
     coherent_report("1c drag increment", inc_nemo - inc_lego, umask_s)
     return row_report("1c drag increment to the barotropic forcing",
                       inc_nemo - inc_lego, umask_s, term=inc_nemo)
@@ -341,8 +406,11 @@ def part1(g, br, cfg, mc, plant=None):
 
 def part2(g, br, cfg, mc, plant=None):
     """EEN vorticity flux at the wall, NEMO stage4 - stage3 vs legoESM vortcor."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel)
+    from legoesm.ocean.vertical import compute_layer_thickness
     print("\n=== PART 2 -- THE EEN VORTICITY FLUX ===")
     d03 = _load_full_3d(str(RUN / "stp_dump_03_dynadv_du.bin"),
                         JPI, JPJ, JPKM1, HLS)
@@ -363,24 +431,46 @@ def part2(g, br, cfg, mc, plant=None):
     assert vor_nemo.shape == vor_lego.shape, (
         f"shape mismatch {vor_nemo.shape} vs {vor_lego.shape}")
     umask3 = np.asarray(g.umask)[..., :JPKM1] > 0.5
+    # The mass weight: the u-face thickness this tendency acts on, in NEMO
+    # layout, on the integrated levels. Never supplied before (#1455).
+    # NB min_cell_to_uface is the model's own face rule (min of the two
+    # adjacent cells); NEMO's e3u under vvl is e3u_0 plus an area-weighted
+    # anomaly. On this full-step ladder they agree to sub-percent, which is
+    # far below the 12x the weighting itself is worth, but the two are not
+    # identical and this is the model's rule, not NEMO's.
+    _hu = _u_to_nemo(np.asarray(min_cell_to_uface(jnp.asarray(np.asarray(
+        compute_layer_thickness(
+            st.eta.data, st.H_bathy.data, br.z_coord,
+            min_water_column_m=mc.min_water_column_m), dtype=np.float64))),
+        dtype=np.float64))[..., :JPKM1]
     print(f"  NEMO   |vor| max {np.abs(vor_nemo)[umask3].max():.6e} m/s2")
     print(f"  legoESM|vor| max {np.abs(vor_lego)[umask3].max():.6e} m/s2")
-    # M5: the row score is a mean of per-level |diff|, which is >= |depth mean|
-    # and can be much larger when the difference changes sign with depth. The
-    # registered bar is defined on a DEPTH-MEAN acceleration, so the depth mean
-    # is reported beside it rather than the reader being left to assume they
-    # are the same quantity.
-    h3 = umask3.astype(np.float64)
-    dm = np.divide((vor_nemo - vor_lego) * h3, np.maximum(
-        h3.sum(axis=-1, keepdims=True), 1.0)).sum(axis=-1)
+    # #1455 RETRACTION, adversarial review finding C3. This block used the
+    # MASK as its vertical weight (h3 = umask3) and printed the result as "the
+    # depth-MEAN difference (the quantity the bar is defined on)". It is not:
+    # an unweighted level mean over 10.14 m-to-545.20 m layers is not a depth
+    # mean, and on this state the two differ by a factor of 20 (5.17e-10 vs
+    # 2.50e-11). The false label sat four lines above the corrected reduction
+    # and shipped into the receipts file. Both are printed now, correctly
+    # named, and the mass-weighted one is the bar's quantity.
+    lvl_w = umask3.astype(np.float64)
+    mass_w = lvl_w * _hu
     wet2 = umask3.any(axis=-1)
-    print(f"  depth-MEAN difference (the quantity the bar is defined on): "
-          f"wall rows {np.abs(dm[WALL_ROWS])[wet2[WALL_ROWS]].mean():.6e}, "
-          f"far interior "
-          f"{np.abs(dm[INTERIOR_ROWS_FAR])[wet2[INTERIOR_ROWS_FAR]].mean():.6e}"
-          f" m/s2 -- compare the per-level mean below, which is an upper bound "
-          f"on it")
-    coherent_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3)
+
+    def _vmean(w):
+        return np.divide((vor_nemo - vor_lego) * w,
+                         np.maximum(w.sum(axis=-1, keepdims=True), 1e-30)
+                         ).sum(axis=-1)
+
+    for lbl, w in (("LEVEL mean (NOT the bar's quantity)", lvl_w),
+                   ("MASS-weighted depth mean (the bar's quantity)", mass_w)):
+        dm = _vmean(w)
+        print(f"  {lbl}: wall rows "
+              f"{np.abs(dm[WALL_ROWS])[wet2[WALL_ROWS]].mean():.6e}, far "
+              f"interior "
+              f"{np.abs(dm[INTERIOR_ROWS_FAR])[wet2[INTERIOR_ROWS_FAR]].mean():.6e}"
+              f" m/s2")
+    coherent_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3, h=_hu)
     return row_report("2 EEN vorticity flux", vor_nemo - vor_lego, umask3,
                       term=vor_nemo)
 
