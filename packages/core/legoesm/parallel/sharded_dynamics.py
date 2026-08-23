@@ -3160,21 +3160,39 @@ def _build_rim_plan(global_mesh, partitions, cell_rim, edge_rim,
         # the closure must be seeded from the edges' cells too, not
         # from rim cells alone (v2 fix: 77 scatter edges escaped a
         # rim-only closure on the s3@6 fixture).
-        own_e_rows = np.where(
-            (edge_rim[d, :n_owned_e] >= 0)
-            & (edge_rim[d, :n_owned_e] <= rim_width))[0]
-        # EXACT-COVER tripwire (GLM r4 Q2.4): every device-owned edge
-        # must be classified — scatter (0..width) or interior (finite
-        # rim > width). A FAR owned edge (an adjacent cell absent from
-        # the device-local region) would be computed from garbage by
-        # the interior pass and never overwritten; refuse to build.
         _own_rim = edge_rim[d, :n_owned_e]
-        if (_own_rim == _WIDE_RING_FAR).any():
-            _n_far = int((_own_rim == _WIDE_RING_FAR).sum())
+        # EXACT-PARTITION tripwire: _build_rim_rings initialises owned
+        # rim distance to _WIDE_RING_FAR and its BFS never assigns a
+        # finite value above rim_width, so every owned edge is either
+        # scatter (0..rim_width) or deep-interior (FAR). Anything else
+        # means the ring arrays are inconsistent with this rim_width.
+        own_e_rows = np.where(
+            (_own_rim >= 0) & (_own_rim <= rim_width))[0]
+        interior_e_rows = np.where(_own_rim == _WIDE_RING_FAR)[0]
+        if own_e_rows.size + interior_e_rows.size != n_owned_e:
+            _n_bad = int(n_owned_e
+                         - own_e_rows.size - interior_e_rows.size)
             raise ValueError(
-                f"rim plan device {d}: {_n_far} owned edges have FAR rim "
-                f"distance (adjacent cell missing from the device-local "
-                f"region) — neither scatter nor interior covers them")
+                f"rim plan device {d}: {_n_bad} owned edges have a "
+                f"finite rim distance > {rim_width} — inconsistent "
+                f"with _build_rim_rings output for this rim_width")
+        # A FAR owned edge is deep interior by construction: its whole
+        # rim_width stencil lies inside the device-local region, so BOTH
+        # adjacent cells must be device-local. If not, the partition is
+        # genuinely broken (an adjacent cell absent from the device-local
+        # region) and the interior pass would compute from garbage;
+        # refuse to build.
+        if interior_e_rows.size:
+            _int_e = np.asarray(part.local_edges)[interior_e_rows]
+            _int_cells = coe[:, _int_e]
+            _cell_g2l = np.asarray(part.cell_g2l)
+            _bad = (_int_cells < 0) | (_cell_g2l[_int_cells] < 0)
+            if _bad.any():
+                _n_bad = int(_bad.sum())
+                raise ValueError(
+                    f"rim plan device {d}: {_n_bad} cells adjacent to "
+                    f"interior owned edges are not device-local — "
+                    f"partition inconsistent with its local region")
         scatter_e_global = np.sort(
             np.asarray(part.local_edges)[own_e_rows])
         seed_cells = coe[:, scatter_e_global].ravel()

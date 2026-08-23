@@ -167,3 +167,50 @@ def test_stack_rim_plans_shapes_and_sentinels(rim_setup):
         assert st["n_rim_cells"][d] == plan["n_rim_cells"]
     # stacked submesh leading dim = device axis, uniform trailing shapes
     assert st["sub_mesh"].cellsOnEdge.shape[0] == n_dev
+
+
+def test_rim_plan_builds_on_compact_partition_with_interior():
+    """Regression: a METIS-compact partition with a non-empty interior
+    must build a rim plan.
+
+    The old FAR-owned-edge tripwire raised on exactly this case — it read
+    every deep-interior owned edge (rim distance == _WIDE_RING_FAR) as an
+    uncovered edge and refused to build, so the interior/rim split could
+    never run on a real compact partition. This asserts the plan builds,
+    that the interior is non-empty on at least one device, and that
+    edge_scatter carries no duplicate index per device (a repeated scatter
+    index has no defined winner and its reverse-mode transpose would send
+    one cotangent to several rows — a real AD bug this repo hit before).
+    """
+    import numpy as np
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.parallel.voronoi_partition import (
+        reorder_voronoi_for_sharding,
+    )
+    from legoesm.parallel.sharded_dynamics import (
+        _build_rim_plan, _build_rim_rings, _build_voronoi_partition_infra,
+    )
+
+    n_dev = 6  # divides s6 cleanly: 40962 cells, 122880 edges
+    mesh = create_voronoi_mesh(subdivision_level=6)
+    mesh = reorder_voronoi_for_sharding(mesh, n_dev, method="metis")
+    (_sm, _gc, _ge, _noc, _noe, max_lc, max_le, partitions,
+     _owner) = _build_voronoi_partition_infra(mesh, n_dev, halo_depth=4)
+    cell_rim, edge_rim = _build_rim_rings(mesh, partitions, max_lc, max_le,
+                                          max_width=2)
+
+    # (a) builds — the pre-fix code raised ValueError here.
+    plans = _build_rim_plan(mesh, partitions, cell_rim, edge_rim,
+                            rim_width=2, stencil_depth=2)
+
+    assert len(plans) == n_dev
+    n_with_interior = 0
+    for d, plan in enumerate(plans):
+        # (c) unique scatter indices per device.
+        scatter = np.asarray(plan["edge_scatter"])
+        assert np.unique(scatter).size == scatter.size, (
+            f"device {d}: duplicate index in edge_scatter")
+        # (b) interior non-empty on at least one device.
+        if int(plan["n_rim_edges"]) < partitions[d].n_owned_edges:
+            n_with_interior += 1
+    assert n_with_interior >= 1, "expected a non-empty interior on a device"
