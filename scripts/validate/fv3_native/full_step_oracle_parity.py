@@ -982,11 +982,22 @@ def _make_jax_step(ctx, jit=False):
             # port already had to unroll a scan to remove. Scoring the eager
             # function therefore scored a lane nobody deploys.
             _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
-            if "fn" not in _cache:
+            # Key the compiled fn by the STATIC deck, not merely by presence:
+            # zvir / consv_te / sphum_index are baked into the jitted program
+            # (make_fv_dynamics_step_jit marks them static), so a moist/consv
+            # scored arm and its dry twin need DIFFERENT compiled functions.
+            # Caching one and reusing it would run the dry twin on the moist
+            # deck and silently invalidate the response gate. Array deck
+            # constants (ak/bk/ptop) are invariant across arms, so the scalar
+            # kwargs are a sufficient key.
+            _key = tuple(sorted(
+                (k, v) for k, v in kw.items()
+                if isinstance(v, (int, float, bool, str, type(None)))))
+            if _key not in _cache:
                 _static = dict(kw)
-                _cache["fn"] = _jdyn.make_fv_dynamics_step_jit(
+                _cache[_key] = _jdyn.make_fv_dynamics_step_jit(
                     jctx, _static.pop("km"), **_static)
-            out = _cache["fn"](jstate, jpress, jq, **_dyn)
+            out = _cache[_key](jstate, jpress, jq, **_dyn)
         else:
             out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
 

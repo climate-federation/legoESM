@@ -7747,9 +7747,14 @@ class ModelDriver:
                 f"; nothing to run. days counts from the epoch, NOT from "
                 f"the checkpoint (the MPAS days-this-job convention does "
                 f"not apply to this lane).")
-        diag_interval = (int(cfg.output.diag_days * 86400.0 / DT)
-                         if cfg.output.diag_days > 0 else n_steps_total)
-        diag_interval = max(1, diag_interval)
+        # The SHARED cadence helper, not an inline copy: it is the single
+        # definition of the diag/blow-up interval and it REFUSES a non-finite
+        # diag_days (NaN/inf) instead of letting it fall through to the
+        # "no cadence" sentinel — the inline form this replaced accepted NaN
+        # and ran with a cadence nobody asked for.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         ckpt_interval = (max(1, int(cfg.output.checkpoint_days * 86400.0
                                     / DT))
                          if cfg.output.checkpoint_days > 0 else 0)
