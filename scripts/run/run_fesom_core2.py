@@ -60,13 +60,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="NEMO ln_mxl0 surface mixing-length anchor (ORCA1 "
                         "sets .true.; NEMO pairs it with the Dirichlet BC — "
                         "running dirichlet without it is a half-port).")
+    p.add_argument("--allow-half-ported-tke", action="store_true",
+                   help="Permit --tke-surface-bc dirichlet with the surface "
+                        "mixing-length anchor off. The reference card sets "
+                        "both together, so this runs a configuration neither "
+                        "model uses; it exists for isolating which of the two "
+                        "moves a result, and must be stated deliberately.")
     p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
                    help="Sea-ice cold start: 'fesom' = the C-faithful "
                         "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
                         "NEMO's January Ice_initialization.nc (needs "
                         "--ice-init-file) -- the NEMO-matched choice for a "
                         "January start (the fesom seed loads the summer SH "
-                        "with ~40% ice whose melt freshens the Antarctic).")
+                        "with ~40%% ice whose melt freshens the Antarctic).")
     p.add_argument("--ice-init-file", default=None,
                    help="Path to NEMO Ice_initialization.nc (at_i/ht_i/ht_s "
                         "on eORCA1). Required with --ice-ic nemo.")
@@ -146,8 +152,31 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
     return path
 
 
+def validate_tke_pair(args) -> None:
+    """The ported turbulence card sets two things; refuse to run half of it.
+
+    The reference model's card turns the Dirichlet surface value and the
+    surface mixing-length anchor on TOGETHER, and the flags' own help calls
+    either one alone a half port.  BOTH splits are refused, not just the one
+    that reads more naturally: running the anchor against the default Neumann
+    surface value is exactly as unported as the reverse, and an earlier
+    version of this guard admitted it.
+    """
+    dirichlet = args.tke_surface_bc == "dirichlet"
+    anchored = args.tke_mxl0_anchor == "on"
+    if dirichlet == anchored or args.allow_half_ported_tke:
+        return
+    raise SystemExit(
+        f"--tke-surface-bc {args.tke_surface_bc} with --tke-mxl0-anchor "
+        f"{args.tke_mxl0_anchor} is a half port: the reference card sets the "
+        "Dirichlet surface value and the mixing-length anchor together, and "
+        "the pair is what was validated. Select both or neither, or pass "
+        "--allow-half-ported-tke to run the split deliberately (the run is "
+        "then not the ported one).")
+
 def main() -> int:
     args = build_arg_parser().parse_args()
+    validate_tke_pair(args)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -232,6 +261,7 @@ def main() -> int:
                    "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
                    "tke_surface_bc": args.tke_surface_bc,
                    "tke_mxl0_anchor": args.tke_mxl0_anchor,
+                   "allow_half_ported_tke": bool(args.allow_half_ported_tke),
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
