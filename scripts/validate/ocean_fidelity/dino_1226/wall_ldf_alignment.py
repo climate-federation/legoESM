@@ -127,6 +127,10 @@ def load_nemo():
             "e2t": np.asarray(ds["e2t"][0], dtype=np.float64),
             "e1f": np.asarray(ds["e1f"][0], dtype=np.float64),
             "e2f": np.asarray(ds["e2f"][0], dtype=np.float64),
+            "e1u": np.asarray(ds["e1u"][0], dtype=np.float64),
+            "e2u": np.asarray(ds["e2u"][0], dtype=np.float64),
+            "e1v": np.asarray(ds["e1v"][0], dtype=np.float64),
+            "e2v": np.asarray(ds["e2v"][0], dtype=np.float64),
             "gphit": np.asarray(ds["gphit"][0], dtype=np.float64),
         }
     return out
@@ -261,6 +265,43 @@ def part_a(nemo, geom, half_UM, ahmt, ahmf, vertex_mask, vm3, cell_mask):
     print(f"{'':>16s}  levels with any disagreement: "
           f"{bad if bad else 'none'}")
     del act_disagree
+
+    # The metrics INSIDE the operator, not just the ones inside the
+    # coefficient. NEMO's rot scheme divides the vorticity by e1e2f
+    # (h90:23), the divergence by e1e2t (:27), and the two tendencies by
+    # e2u/e1u (:41-42) and e1v/e2v (:51-52). legoESM's shared operators use
+    # the geometry's own dual-cell area, cell area and face lengths for the
+    # same roles. Comparing only the coefficient metrics would leave these
+    # unchecked.
+    print("\n  metrics INSIDE the operator (NEMO vs the geometry legoESM uses)")
+    e1e2t_n = nemo["e1t"] * nemo["e2t"]
+    e1e2f_n = nemo["e1f"] * nemo["e2f"]
+    pairs = [
+        ("e1e2t  (T-cell area, zdiv)", e1e2t_n, np.asarray(geom.area_T)),
+        ("e1e2f  (F-cell area, zcur)", e1e2f_n,
+         np.asarray(geom.area_q)[1:, 1:]),
+        ("e2u    (u-face length)", nemo["e2u"], np.asarray(geom.dy_u)[:, 1:]),
+        ("e1u    (u-face width)", nemo["e1u"], np.asarray(geom.dx_u)[:, 1:]),
+        ("e1v    (v-face width)", nemo["e1v"], np.asarray(geom.dx_v)[1:, :]),
+        ("e2v    (v-face length)", nemo["e2v"], np.asarray(geom.dy_v)[1:, :]),
+    ]
+    for name, a, b in pairs:
+        if a.shape != b.shape:
+            print(f"  {name:>28}: SHAPE MISMATCH {a.shape} vs {b.shape} "
+                  "-- not compared")
+            continue
+        rel = np.abs(a - b) / np.maximum(np.abs(a), 1e-300)
+        wall = rel[WALL_ROWS[0]:WALL_ROWS[-1] + 1]
+        jm = int(np.unravel_index(int(np.argmax(rel)), rel.shape)[0])
+        # A max quoted without where it sits cannot be acted on: the two
+        # geometries genuinely differ at the polar end rows, where legoESM
+        # zeroes the dual-cell metric as a wall BC, and that has nothing to do
+        # with a wall four rows from the other end of the domain.
+        wet_rows = rel[1:-1]
+        print(f"  {name:>28}: max rel {rel.max():.3e} at row {jm}"
+              f"{' (POLAR END ROW)' if jm in (0, rel.shape[0] - 1) else ''}"
+              f";  excluding the two end rows {wet_rows.max():.3e};"
+              f"  wall rows {wall.max():.3e}")
     return ahmf_eff_nemo, ahmf_eff_lego
 
 
