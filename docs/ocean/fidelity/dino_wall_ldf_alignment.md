@@ -923,11 +923,36 @@ happens *after* it, and none of it has ever been compared against the oracle:
 different column depths for the same velocity**: the barotropic/baroclinic split
 uses the masked minimum rule, while the implicit vertical solve divides by an
 *unmasked* face average that keeps half a cell of rock at every topographic
-step. The divisor is 0.3–1.2% too deep, and the error carries a ~0.9
-percentage-point meridional gradient concentrated across the first twenty rows —
-the exact band the deficit occupies. So the step removes the barotropic mean
-with one rule and re-adds it with another. This was a known open item filed as
+step. The divisor is 0.3–1.2% too deep. This was a known open item filed as
 "not measured"; it is measured now.
+
+> **CORRECTION, 2026-08-23. Two sentences that stood here are withdrawn, and
+> the defect is now closed.** They were: that the error's meridional gradient is
+> *"concentrated across the first twenty rows — the exact band the deficit
+> occupies"*, and that *"the step removes the barotropic mean with one rule and
+> re-adds it with another"*.
+>
+> **The gradient runs the wrong way.** Measured against the oracle's own column
+> depth on the shipped card, the bias is +0.27 % at wall row 1 and rises
+> northward to +0.92 % by row 20 and +1.49 % by row 48. The four wall rows
+> average +0.48 % against +0.84 % over the sampled interior — a wall/interior
+> enrichment of **0.57×**. The wall band is where this error is *smallest*.
+>
+> **The step does not use two rules across the split.** It removes and re-adds
+> the *same* stored mean; the two-rule disagreement is between this stage and
+> the barotropic *solver*, not across the split. That matters because the split
+> is an exact algebraic no-op — including the bottom-drag pair — so the divisor
+> is inert through the route the original sentence implied. Perturbing that
+> divisor by a factor of two moves the solve's answer by exactly zero.
+>
+> **Closed.** The defect itself is real and is fixed on main by PR #1642, which
+> masks the face average rather than switching to the minimum rule (NEMO
+> averages the free-surface factor between the two columns, so the average is
+> the more faithful of the two candidates once the sea surface tilts; at rest on
+> this card they are identical). A pre-registered 90-day A/B on the shipped card
+> **refutes it as the deficit's owner**: the wall-band gap moves by 0.001 Sv
+> against a 0.05 Sv refutation threshold, and both arms pass the acceptance gate
+> 5/5 at the 5× level.
 
 **The second thing review overturned:** refuting a term by its largest single
 cell is sound only against *direct* forcing. At a bridged state the two models

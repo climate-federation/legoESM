@@ -89,6 +89,11 @@ def main() -> int:
     print(f"PROVENANCE  HEAD={sha}  dirty_tracked={len(dirt.splitlines())}")
     print(f"PROVENANCE  mesh={MESH}  restart={RESTART}")
     print(f"PROVENANCE  JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')}")
+    print("PROVENANCE  GEOMETRY = the REFERENCE ladder with the free-surface "
+          "stretch set to 1 (eta = 0), NOT a running-model thickness. Every "
+          "number below is therefore the static staircase effect with the "
+          "z-star Jacobian removed on purpose; the live free-surface residual "
+          "is a separate, much smaller term and is not measured here.")
 
     g = read_nemo_mesh_mask(str(MESH), nn_hls=0)
     s = read_nemo_restart(str(RESTART), nn_hls=0)
@@ -158,18 +163,25 @@ def main() -> int:
     print(f"columns differing by more than 1e-9 m: "
           f"{int((np.abs(d) > 1e-9).sum())} of {int(wet.sum())}")
 
-    print(f"\n{'row':>4}{'lat':>9}{'H_lego':>10}{'H_nemo':>10}"
-          f"{'mean bias':>11}{'rel':>9}{'max bias':>10}")
+    # Per-row table for BOTH rules, so the historical per-row percentages stay
+    # reproducible from this probe after the repair rather than becoming a row
+    # of zeros that no longer supports the numbers quoted in the commits.
+    print(f"\n{'row':>4}{'lat':>9}{'H_live':>10}{'H_nemo':>10}"
+          f"{'live bias':>11}{'live rel':>10}{'UNMASKED rel':>14}"
+          f"{'live max':>10}")
     rel_wall, rel_int = [], []
     for j in list(WALL_ROWS) + [6, 8, 12, 20, 40, 99, 150]:
         w = wet[j]
         if not w.any():
             continue
         hl, hn = H_lego[j][w].mean(), H_nemo[j][w].mean()
+        hm = H_mean[j][w].mean()
         rel = (hl - hn) / hn
+        rel_pre = (hm - hn) / hn
         tag = "  WALL" if j in WALL_ROWS else ""
         print(f"{j:>4}{gphit[j, 25]:>9.2f}{hl:>10.1f}{hn:>10.1f}"
-              f"{hl - hn:>11.2f}{rel:>9.4f}{np.abs(d[j][w]).max():>10.2f}{tag}")
+              f"{hl - hn:>11.2f}{rel:>10.4f}{rel_pre:>14.4f}"
+              f"{np.abs(d[j][w]).max():>10.2f}{tag}")
         (rel_wall if j in WALL_ROWS else rel_int).append(rel)
     print(f"\nmean relative bias, four wall rows: {np.mean(rel_wall):.4f}")
     print(f"mean relative bias, sampled interior rows: {np.mean(rel_int):.4f}")

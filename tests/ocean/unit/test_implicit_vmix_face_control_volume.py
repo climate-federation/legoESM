@@ -120,6 +120,10 @@ def _capture_solve_face_thickness():
     call inside ``_apply_implicit_vertical_mixing`` -- i.e. the quantity under
     test, not a re-derivation of it.
     """
+    # ``jax.disable_jit`` is load-bearing for the capture, not a different
+    # code path: it keeps the intercepted thickness a concrete array instead of
+    # a tracer, and stops a cached compiled step from ignoring the patch.  The
+    # Python statements executed are the production ones.
     from unittest import mock
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as omlc
 
@@ -140,6 +144,13 @@ def _capture_solve_face_thickness():
     v_shape = (N_LAT + 1, N_LON, N_LEV)
     h_u = [h for h in seen if h.shape == u_shape]
     h_v = [h for h in seen if h.shape == v_shape]
+    # Exactly one call each: taking "the first match" silently starts
+    # measuring a different stage if any earlier one ever makes a call of the
+    # same shape, and the test would stay green.
+    assert len(h_u) == 1 and len(h_v) == 1, (
+        f"expected exactly one u-face and one v-face depth_mean call, saw "
+        f"{len(h_u)} and {len(h_v)} -- the capture may be reading a "
+        "different stage than the implicit solve")
     assert h_u and h_v, (
         "the implicit solve's depth_mean was never reached with a 3-D face "
         f"thickness -- shapes seen: {[h.shape for h in seen]}.  The capture, "

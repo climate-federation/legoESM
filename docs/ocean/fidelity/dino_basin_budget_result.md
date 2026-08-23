@@ -785,3 +785,100 @@ are not a pairing artifact.
    exonerated and the barotropic solve returns to the top.
 3. **The barotropic face depth at the last wet row**, offline, both models.
 
+
+---
+
+# The post-tendency stages, bisected
+
+Follow-on, 2026-08-23. Everything above compared terms *inside* the explicit
+momentum tendency. This section covers the stages that run *after* it, which had
+never been compared against the oracle at all.
+
+Pre-registration (written before any number existed):
+`scripts/validate/ocean_fidelity/dino_1226/PREREG_post_tendency_stage_birth.md`.
+Probe: `post_tendency_stage_birth.py`. Lane: day 180, one step, kt 5760 → 5761,
+where the two models are identical at entry — so every number below is a pure
+operator difference with no trajectory feedback in it.
+
+Written for a reader who has not followed the campaign. Every difference is
+legoESM minus the oracle, and the deficit this campaign is chasing is **negative**
+in that convention.
+
+## The table
+
+Each row is the difference that exists *at* that point in the step; the second
+table is the difference *born* between one point and the next. Everything is
+thickness-weighted over the four rows against the southern wall.
+
+| point in the step | wall velocity difference [m/s] | wall transport difference [Sv] | how wall-concentrated |
+|---|---|---|---|
+| after the barotropic solve and the leap-frog recombination | −2.00e-6 | −0.0468 | 0.11× |
+| after the implicit vertical solve | −2.00e-6 | −0.0467 | 0.11× |
+| after the after-level reconciliation | +2.25e-8 | +0.00049 | 0.34× |
+| the committed state | +2.25e-8 | +0.00049 | 0.34× |
+
+| stage | difference BORN in it [m/s] | [Sv] | clears its registered bar? |
+|---|---|---|---|
+| barotropic solve + leap-frog recombination | −2.00e-6 | −0.0468 | yes, 12× and 468× over |
+| implicit vertical solve | +4.7e-10 | +1.05e-5 | **no** — 340× and 9.5× under |
+| after-level reconciliation | +2.03e-6 | +0.0472 | yes, 13× and 472× over |
+| time filter and commit | 0 | 0 | no |
+
+## What it says
+
+1. **The two big stages are one object, and it nearly cancels.** The barotropic
+   solve deposits a large depth-uniform difference and the after-level
+   reconciliation removes 99 % of it — which is what that stage is *for*: it
+   overwrites the column mean with the barotropic solve's own answer. Reporting
+   either of them alone as a "birth" would be the mistake this campaign has
+   already made once, of budgeting across a boundary where the state changes
+   representation. **Read them as a pair.**
+2. **Netted over one whole step, nothing clears the bar.** The committed
+   difference is **+2.2e-8 m/s**, seven times *under* the per-step bar, and it
+   has the **wrong sign**: the deficit is negative and this is positive. A stage
+   that pushes the other way cannot own it however large its internals are.
+3. **Nothing is wall-shaped.** Every point in the step scores 0.11–0.34 on the
+   wall-concentration measure, against a registered bar of 2.0. The difference
+   these stages make is basin-wide, and the deficit is not.
+4. **The implicit vertical solve is the smallest term in the step**, 340 times
+   under the velocity bar. It is not the owner.
+
+**Verdict, CONFIRMED for the day-180 state:** none of the four post-tendency
+stages is born large enough, or with the right sign, or with the right shape, to
+be the southern deficit's owner at this state. As registered, this refutes them
+under *linear* retention only — this campaign has already measured a badly
+non-linear map from operator error to transport, so the honest statement is that
+the deficit is not injected here, not that these stages can never matter.
+
+## The implicit solve's "15 %", decomposed
+
+The one end-to-end number ever attached to the implicit vertical solve was a
+"15 % discrepancy", carried in prose as the campaign's largest unexplained
+figure. It does have a probe behind it and it reproduces exactly. It is a
+**root-mean-square amplitude ratio** — legoESM's after-level velocity is 15.3 %
+larger in RMS than the oracle's (23 % for the north-south component) — measured
+**end-to-end**, on the year-5 state, with every upstream difference inherited.
+It is not a per-point error and it is not the solve's own.
+
+Feeding the solve the oracle's *own* input and comparing against the oracle's
+own output separates it, on the day-180 state:
+
+| | u | v |
+|---|---|---|
+| the solve's own operation, oracle input in | **2.2 %** | **1.4 %** |
+| the input the solve is handed, like-for-like | **0.66 %** | — |
+| end-to-end, as the 15 % figure was measured | 30 % | 38 % |
+| doing nothing at all (the no-op reference) | 11 % | 4.9 % |
+
+And the end-to-end figure splits cleanly: the *baroclinic* part of legoESM's
+post-solve velocity matches the oracle's to **2.2 %**, the same as the seeded
+arm. All of the remainder lives in the depth-uniform part, where the oracle's
+dump has had the barotropic mode removed and legoESM's has not — the oracle
+takes it out before the solve and puts it back two stages later, legoESM strips
+and restores it inside the stage.
+
+**So the 15 % is a representation mismatch at a stage boundary, not a physics
+error, and the solve's own operation is a 1–2 % effect.** The campaign's largest
+unexplained figure is explained, and the "gate row is blank" framing that went
+with it is withdrawn: the row was never blank, it carried this number plus a
+note saying it did not isolate the solve.
