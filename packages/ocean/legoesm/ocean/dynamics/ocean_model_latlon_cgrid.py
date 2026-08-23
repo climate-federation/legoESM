@@ -55,7 +55,6 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
     interp_to_v_points,
-    interp_to_v_points_multi,
     centered_cell_to_uface,
     upwind_to_u_points,
     upwind_to_v_points,
@@ -6586,10 +6585,41 @@ class LatLonCGridOceanModel:
             if _wet_if_vmix is not None:
                 A_v_cell = A_v_cell * _wet_if_vmix
             A_v_u = interp_cell_to_uface(A_v_cell)        # (n_lat, n_lon+1, nlev-1)
-            dz_u = interp_cell_to_uface(dz_cell)
-            # Fused v-interps: one sendrecv pair per cut for A_v + dz
-            # (audit lever O4; both are independent cell fields here).
-            A_v_v, dz_v = interp_to_v_points_multi((A_v_cell, dz_cell))
+            # FACE THICKNESS = the min rule, the SAME owner as every other
+            # face thickness in this model (barotropic split, PE tendency,
+            # slow forcing, after-level reconcile: min_cell_to_uface /
+            # min_cell_to_vface -- see the h_u/h_v build near the top of this
+            # module and its comment "Arithmetic mean overestimates face depth
+            # at topographic steps").  ``dz_cell`` is ALREADY ZERO below the
+            # sea floor (vertical.py: h_partial = where(is_active, h_full, 0)),
+            # so the arithmetic mean this replaced handed the solve HALF a
+            # reference cell at every staircase face -- water on a level that
+            # exists on neither column.  That half summed into the column
+            # divisor of the solve's own barotropic split (``depth_mean(...,
+            # dz_u, ...)`` below), which is why the two sides of one step
+            # disagreed: measured on the DINO card, sum_k dz_u exceeded NEMO's
+            # own hu_0 = sum_k e3u_0*umask on 1396 of 9758 wet u-columns, by up
+            # to 365.9 m (0.27% at the southern wall row, 0.92% at row 20),
+            # while the min rule reproduces hu_0 EXACTLY on all 9758
+            # (scripts/validate/ocean_fidelity/dino_1226/
+            # staircase_control_volume.py).
+            # NEMO-faithful, not merely self-consistent: the partial-step
+            # builder is e3u_0 = MIN(e3t_0(i), e3t_0(i+1)) (DOMAINcfg
+            # domzgr.F90:1166) and the full-step builder's arithmetic mean
+            # (zgr_lib.F90:231) is identical to the min on a horizontally
+            # uniform reference ladder, which is what DINO's ln_zco_nam=.true.
+            # card has.  The residual live-free-surface difference (min of
+            # h_ref*J vs NEMO's per-column ssh-averaged (1+r3u) stretch) is the
+            # same documented O(eta/H) convention approximation the rest of the
+            # split-explicit solver already carries -- see
+            # ``barotropic_seed_face_depth`` in config.py.
+            dz_u = min_cell_to_uface(dz_cell)
+            # A_v keeps the centred interp (it is a diffusivity, not a control
+            # volume).  Its v-interp no longer fuses with dz_v's exchange --
+            # the min rule runs its own halo pad -- so this stage costs one
+            # extra sendrecv pair per cut per step (audit lever O4 gave up).
+            A_v_v = interp_to_v_points(A_v_cell, _grid)
+            dz_v = min_cell_to_vface(dz_cell, _grid)
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
                 # leaves A_v_face = ½·A_deep at interfaces BELOW the shallower
@@ -6605,10 +6635,15 @@ class LatLonCGridOceanModel:
                 A_v_u = A_v_u * _act_u3.astype(A_v_u.dtype)[..., 1:]
                 A_v_v = A_v_v * _act_v3.astype(A_v_v.dtype)[..., 1:]
             if _dzw_slot:
-                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to the
-                # faces with the SAME interp that built the control volumes
-                # dz_u/dz_v (J is level-independent, so dz_u = dz_ref·J_u and the
-                # gradient slot dz_half_ref·J_u stays consistent with it).
+                # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to
+                # the faces with the CENTRED interp.  This slot is the Veros
+                # gradient spacing, deliberately built from the coordinate's
+                # own dz_half_ref ladder and NOT from ``dz_u``/``dz_v`` (which
+                # now carry the min rule); it is a center-to-center distance,
+                # not a control volume, so the two are not required to share a
+                # rule.  #428's original wording claimed they used the same
+                # interp -- that stopped being true when the control volumes
+                # moved to the min rule, and this slot's numbers are unchanged.
                 J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
                 J_v = interp_to_v_points(J_cell[..., jnp.newaxis], _grid)
                 dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)

@@ -35,6 +35,12 @@ larger relative one there.  The measured defect must be reported BOTH ways --
 absolute and relative -- because only the relative one can be compared against
 the 34%-on-four-rows fingerprint.
 
+FIXED 2026-08-23.  ``dz_u``/``dz_v`` now use the min rule, so the live model
+reproduces ``hu_0`` exactly on every wet u-column.  This probe reports BOTH
+rules every run and reads which one the model actually uses from the model's
+own source, so it keeps measuring the defect after the repair rather than
+becoming a tautology.
+
 This probe prints numbers and never prints a verdict.
 
 Run::
@@ -59,7 +65,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
-    interp_cell_to_uface)
+    interp_cell_to_uface, min_cell_to_uface)
 from legoesm.ocean.experiments.dino import dino_config_for_recipe  # noqa: E402
 from legoesm.ocean.fidelity.nemo_io import (  # noqa: E402
     read_nemo_mesh_mask, read_nemo_restart)
@@ -99,11 +105,36 @@ def main() -> int:
     # The SAME expression ocean/vertical.py:621 builds, on the same coordinate.
     dz_cell = np.where(act, np.broadcast_to(np.asarray(zc.dz_ref), act.shape),
                        0.0).astype(np.float64)
-    # The SAME interpolation the implicit solve uses at :6589.
-    dz_u = np.asarray(interp_cell_to_uface(dz_cell), dtype=np.float64)
+    # BOTH rules, so this probe reports the defect AND its repair in one run.
+    #   mean : the arithmetic cell->face mean the implicit solve used before
+    #          the 2026-08-23 fix (the historical :6589 line).
+    #   min  : the min rule the solve uses now -- the SAME owner as the
+    #          barotropic split, the PE tendency and the after-level
+    #          reconcile.  Which one the shipped model runs is read from the
+    #          model source below, so this probe cannot drift away from it.
+    dz_u_mean = np.asarray(interp_cell_to_uface(dz_cell), dtype=np.float64)
+    dz_u_min = np.asarray(min_cell_to_uface(dz_cell), dtype=np.float64)
+    import inspect
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    _src = inspect.getsource(
+        LatLonCGridOceanModel._apply_implicit_vertical_mixing)
+    _live_is_min = "dz_u = min_cell_to_uface(dz_cell)" in _src
+    _live_is_mean = "dz_u = interp_cell_to_uface(dz_cell)" in _src
+    if _live_is_min == _live_is_mean:
+        raise SystemExit(
+            "cannot tell which face rule _apply_implicit_vertical_mixing "
+            "uses -- the probe must not report a number it cannot attribute")
+    print(f"LIVE MODEL RULE  dz_u = "
+          f"{'min_cell_to_uface' if _live_is_min else 'interp_cell_to_uface'}"
+          f"  (read from _apply_implicit_vertical_mixing's source)")
+    dz_u = dz_u_min if _live_is_min else dz_u_mean
     # legoESM's u-face array carries a west-wall column at index 0; NEMO's u
     # column i is index i+1 (nemo_state_bridge._u_east_to_face).
     H_lego = dz_u.sum(axis=-1)[:, 1:]
+    H_mean = dz_u_mean.sum(axis=-1)[:, 1:]
+    H_min = dz_u_min.sum(axis=-1)[:, 1:]
 
     with nc.Dataset(MESH) as ds:
         e3u0 = np.asarray(ds["e3u_0"][0], dtype=np.float64)   # (k,j,i)
@@ -115,6 +146,14 @@ def main() -> int:
         raise SystemExit(f"shape mismatch {H_lego.shape} vs {H_nemo.shape}")
 
     d = np.where(wet, H_lego - H_nemo, 0.0)
+    d_mean = np.where(wet, H_mean - H_nemo, 0.0)
+    d_min = np.where(wet, H_min - H_nemo, 0.0)
+    print(f"\nBOTH RULES vs NEMO hu_0 = sum_k e3u_0*umask, over "
+          f"{int(wet.sum())} wet u-columns:")
+    print(f"  arithmetic mean : max |diff| = {np.abs(d_mean).max():.4f} m, "
+          f"columns off by >1e-9 m = {int((np.abs(d_mean) > 1e-9).sum())}")
+    print(f"  min rule        : max |diff| = {np.abs(d_min).max():.4e} m, "
+          f"columns off by >1e-9 m = {int((np.abs(d_min) > 1e-9).sum())}")
     print(f"\nu-columns compared: {int(wet.sum())}")
     print(f"max |sum_k dz_u - hu_0| anywhere: {np.abs(d).max():.4f} m")
     print(f"columns differing by more than 1e-9 m: "
@@ -135,8 +174,14 @@ def main() -> int:
         (rel_wall if j in WALL_ROWS else rel_int).append(rel)
     print(f"\nmean relative bias, four wall rows: {np.mean(rel_wall):.4f}")
     print(f"mean relative bias, sampled interior rows: {np.mean(rel_int):.4f}")
-    print(f"wall / interior enrichment: "
-          f"{np.mean(rel_wall) / np.mean(rel_int):.2f}x")
+    _rw, _ri = float(np.mean(rel_wall)), float(np.mean(rel_int))
+    if abs(_ri) < 1e-12:
+        print("wall / interior enrichment: UNDEFINED (interior bias is zero "
+              "-- the rule under test reproduces hu_0 exactly)")
+    else:
+        print(f"wall / interior enrichment: {_rw / _ri:.2f}x")
+    if not np.isfinite([_rw, _ri]).all():
+        raise SystemExit("non-finite relative bias -- fatal")
 
     # CONTROL. The comparison must be able to return zero. A column with a FLAT
     # bottom has no staircase face, so the two rules must agree there exactly;
@@ -160,8 +205,9 @@ def main() -> int:
         f"flat-bottom faces already differ by {fd.max():.3e} m -- the bias "
         "measured above is not the staircase mechanism but a convention "
         "offset, and the reading must not be attributed to staircases")
-    print("  (zero on flat faces, nonzero on staircase faces => the difference "
-          "IS the staircase rule, not a convention offset)")
+    print("  (the control is zero on flat faces under EITHER rule; the "
+          "staircase faces are where the two rules can differ, and the "
+          "'BOTH RULES' block above says by how much)")
     return 0
 
 
