@@ -658,3 +658,130 @@ after review — a claimed depth dependence that was a layer-thickness artifact,
 a sign argument that was a logical error, and a closure failure that was a
 pairing bug — so the standing instruction for the next lane is to run the
 balance test above before building anything.
+
+
+---
+
+# Part 4 — the balance test: the lobe is geostrophic, and the owner is probably friction
+
+Pre-registration: `PREREG_wall_balance.md`, written before any number existed.
+Probe: `southern_wall_balance.py`. Read-only, from states already on disk.
+
+## Why this test and not another decomposition
+
+Every bookkeeping route into this defect is closed by cancellation: the stage
+table is an identity, and the per-term table closes to 2e-9 but its groups
+cancel 310:1 against what they would have to explain. A balance test asks
+whether the flow is in the balance it should be in, and the quantity of
+interest is its numerator, so cancellation cannot swamp it.
+
+## The result: the wall lobe is in geostrophic balance
+
+Decomposing the circulation difference in the four wall rows at day 360:
+
+| term | Δ [10⁶ m³/s] | share |
+|---|---:|---:|
+| **circulation difference (legoESM − NEMO)** | **−10.54** | 100% |
+| of which the sea-surface slope | −9.59 | **91.0%** |
+| of which the density gradient | −0.71 | 6.7% |
+| **ageostrophic residual** | **−0.24** | **2.3%** |
+
+Robustness, all measured: the surface-slope share alone reads 94.1% at day 360,
+90.3% as the ratio of the 19-day sums, 88.7% time-weighted and 78.9% as the
+mean of daily ratios — every one clears the pre-registered 70% bar. Across the
+four ensemble member pairs it is 93.3–95.6%, a spread of 2.4 points. The
+circulation difference is 19 ensemble floors wide and the slope difference 22.
+
+**Registered verdict: CONFIRM geostrophic.**
+
+**The density term was measured, not assumed.** The pre-registration dropped it
+because the two models' *basin-mean* densities agree to 4e-5 kg/m³ — an
+assertion about a mean, not about the meridional gradient in four rows. Measured
+with a common reference profile (so the huge hydrostatic common mode cancels
+rather than being differenced), it is 6.7% and *same-signed*, so it adds to the
+explanation. Three independent implementations — this probe's and both
+reviewers' — agree at 6.7–6.9%.
+
+## But the registered *consequence* does not follow, and the width says why
+
+The pre-registration said a confirm would name the barotropic solve's wall
+treatment as the owner. **It does not.** Geostrophy is a diagnostic relation:
+*any* wall-trapped momentum error — friction, advection, the boundary vorticity
+— adjusts to it within days and would produce exactly this table. What the test
+establishes is a **target** (the wall's sea-surface set-up carries the
+difference) and an **elimination** (the lobe is not ageostrophic, so work aimed
+at an ageostrophic wall imbalance would have been misdirected).
+
+The **length scale** does discriminate, and it points the other way. legoESM
+piles about **4.4 mm** too much sea surface against the wall, decaying with an
+e-folding scale of **2.6 rows ≈ 112 km**, with no basin-wide offset (0.06 mm).
+A barotropic-solver wall artifact lives at the grid scale (1 row) or at the
+barotropic deformation radius (~1500 km here). Neither is 112 km. The
+frictional (Munk) boundary layer is: with the oracle's own viscosity at these
+rows — 5387 m²/s, from its namelist formula on its own mesh — the Munk width is
+**87 km = 2.0 rows**.
+
+**So the leading hypothesis is now the lateral-friction boundary layer at the
+wall, not the free-surface solve.** One coincidence, one number: **PLAUSIBLE**.
+
+legoESM sets the same viscosity coefficient by construction — its card's
+viscous velocity scale is 0.27 m/s, the oracle's `rn_Uv`, embedded as
+½·U·max(e1,e2) inside the same divergence–curl operator — and the probe's own
+gate pins the two models' grid spacings to 1.3e-5. So a coefficient mismatch is
+not the explanation; if friction owns this, it is in how the operator meets the
+free-slip wall, not in its magnitude.
+
+## A land value inverted this verdict once
+
+Row 0 is entirely dry, and both models store a sea surface of exactly 0.0 there
+while the wet surface nearby is near −0.97 m. A centred meridional difference at
+row 1 therefore straddles a one-metre step that is a land value. Before that
+stencil was masked, row 1 returned a **wrong-sign** contribution large enough to
+drag the wall mean from 94% to 37% and the verdict from *confirm* to *"leaning
+refute — the owner is friction or advection at the wall"*. **The branch was
+inverted by a land value.** Row 1 is now recovered with a one-sided difference
+that touches no land, and a planted value on the dry row is required to move no
+scored row.
+
+## Pre-registration clauses that did not survive contact
+
+* **The slope-ratio clause is withdrawn as mis-specified.** The slope-only
+  circulation deliberately omits the density term, so its ratio could never
+  approach the target however geostrophic the lobe was.
+* **The window for the fraction was not named.** All four aggregates are
+  reported; the ratio of the sums is the defensible one and every reading
+  clears the bar, so the choice decides nothing.
+* **The consequence clause is reported as not following**, per the argument
+  above, rather than quoted.
+
+## Two controls that came with it
+
+**The per-term group differences are physical, not diagnostic staging — and the
+parent document's claim to the contrary is retracted.** Part 3 said those
+differences "have the signature of a time-level or staging difference in the
+diagnostics rather than of physics". Measured in the first ten days, when the
+two trajectories still agree to storage precision, the magnitude-weighted ratio
+of window-1 to year-mean differences is **0.072** — they grow with the
+separation, so they are physical. Reported as **plausible** rather than
+confirmed: a staging error would scale with the terms themselves, and the terms
+are also smaller early, which narrows the margin over the refute bar.
+
+**legoESM's fused pressure-gradient diagnostic carries the hydrostatic gradient
+only.** The deciding fact is in the routine that builds the pressure anomaly: it
+iterates the equation of state against the *reference* thickness precisely to
+avoid double-counting the surface-gradient forcing the barotropic solver
+applies. The per-term pairing was therefore correct and the group differences
+are not a pairing artifact.
+
+## What the next lane should do first
+
+1. **The free-slip wall condition in the lateral-viscosity operator** — how
+   legoESM's divergence–curl form meets the boundary, against the oracle's
+   `rn_shlat = 0`. The coefficients match; the boundary treatment has not been
+   compared.
+2. **A one-variable viscosity ablation.** Munk scaling predicts the wall-row
+   excess moves as the cube root of the coefficient, i.e. −26% for a doubling.
+   Moves as predicted → the owner is named. Barely moves → friction is
+   exonerated and the barotropic solve returns to the top.
+3. **The barotropic face depth at the last wet row**, offline, both models.
+
