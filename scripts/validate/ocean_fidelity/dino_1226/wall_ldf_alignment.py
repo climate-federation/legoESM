@@ -74,7 +74,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (  # noqa: E402
     compute_face_masks_3d,
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
+    nemo_ldf_lap_viscosity_e3_cgrid,
 )
+from legoesm.ocean.vertical import compute_layer_thickness  # noqa: E402
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 
@@ -346,6 +348,74 @@ def part_c(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
                 interior_rel=float(np.nanmean(interior)))
 
 
+def part_d(br, geom, u, v, u_mask, v_mask, cell_mask, vm3, ahmt, ahmf, nemo):
+    """The e3 (layer-thickness) weighting: both treatments on the SAME state.
+
+    NEMO weights the divergence and the vorticity by the layer thickness
+    (``dynldf_lev_rot_scheme.h90:23`` e3f on zcur, ``:27-29`` e3t/e3u/e3v inside
+    zdiv, ``:41,:51`` the /e3u,/e3v outside); the shipped legoESM card runs
+    ``lateral_viscosity_e3_weighting="off"``.  This is the surviving
+    transcription difference, so its SHAPE has to be measured against the
+    measured wall fingerprint -- a 34% amplitude error confined to four rows
+    with the rest of the basin right to 3% -- before it can be called the owner.
+
+    Both arms are the model's own operators, not a re-transcription: the shipped
+    ``nemo_ldf_lap_viscosity_cgrid`` and the faithful
+    ``nemo_ldf_lap_viscosity_e3_cgrid``, on the identical bridged state.
+    """
+    print("\n--- D. e3 weighting: both treatments on the same state --------")
+    eta = np.asarray(br.state.eta.data, dtype=np.float64)
+    H = np.asarray(br.state.H_bathy.data, dtype=np.float64)
+    h_k = np.asarray(compute_layer_thickness(eta, H, br.z_coord),
+                     dtype=np.float64)
+    kw = dict(mask=cell_mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=vm3)
+    off_u, off_v = nemo_ldf_lap_viscosity_cgrid(u, v, geom, ahmt, ahmf, **kw)
+    e3_u, e3_v = nemo_ldf_lap_viscosity_e3_cgrid(u, v, geom, ahmt, ahmf, h_k,
+                                                 **kw)
+    off_u = np.asarray(off_u); e3_u = np.asarray(e3_u)
+
+    um3, _ = compute_face_masks_3d(
+        __import__("jax").numpy.asarray(
+            np.asarray(br.z_coord.is_active, dtype=np.float64)), grid=geom)
+    wet = np.asarray(um3, dtype=np.float64) * (
+        u_mask[..., None] if u_mask.ndim == 2 else u_mask)
+    n_wet = wet.sum(axis=(1, 2))
+
+    def rma(x):
+        return np.where(n_wet > 0, (np.abs(x) * wet).sum(axis=(1, 2)),
+                        np.nan) / np.maximum(n_wet, 1)
+
+    base = rma(off_u)
+    d = rma(e3_u - off_u)
+    print(" row   phi[deg]   mean|du_off|    mean|d(e3-off)|      rel")
+    interior = []
+    for j in list(WALL_ROWS) + [8, 12, 20, 40, 99, 150]:
+        if j >= len(base):
+            continue
+        rel = d[j] / base[j] if base[j] > 0 else np.nan
+        tag = "  WALL" if j in WALL_ROWS else ""
+        print(f"{j:4d} {nemo['gphit'][j, 26]:+9.3f}  {base[j]:13.6e}  "
+              f"{d[j]:16.6e}  {rel:9.4f}{tag}")
+        if j not in WALL_ROWS:
+            interior.append(rel)
+    w = [d[j] / base[j] for j in WALL_ROWS if base[j] > 0]
+    print(f"wall-row mean relative change from the e3 weighting: "
+          f"{np.mean(w):.4f}")
+    print(f"interior-row mean relative change:                   "
+          f"{np.nanmean(interior):.4f}")
+    print(f"enrichment (wall / interior): "
+          f"{np.mean(w) / np.nanmean(interior):.2f}x")
+    # the same scores over EVERY row, so the four wall rows are not being
+    # compared against a hand-picked interior sample
+    allrel = np.where(base > 0, d / np.maximum(base, 1e-300), np.nan)
+    print(f"all rows: median rel {np.nanmedian(allrel):.4f}, "
+          f"90th pct {np.nanpercentile(allrel, 90):.4f}, "
+          f"max {np.nanmax(allrel):.4f} at row "
+          f"{int(np.nanargmax(allrel))}")
+    return dict(wall_rel=float(np.mean(w)),
+                interior_rel=float(np.nanmean(interior)))
+
+
 def self_test() -> int:
     """The dry-row trap, both directions.
 
@@ -399,6 +469,7 @@ def main(argv=None) -> int:
     a_n, a_l = part_a(nemo, geom, half_UM, ahmt, ahmf, vtx, vm3, cm)
     part_b(a_n, a_l, nemo)
     part_c(br, geom, u, v, um, vm, cm, vm3, ahmt, ahmf, nemo)
+    part_d(br, geom, u, v, um, vm, cm, vm3, ahmt, ahmf, nemo)
     return 0
 
 
