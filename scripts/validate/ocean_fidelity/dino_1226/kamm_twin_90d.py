@@ -258,6 +258,107 @@ def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
     return t0, t0_nemo
 
 
+# The ladder mode and precision this campaign's headline claims are about.
+# A candidate on anything else is scoreable but NOT certifiable against that
+# claim -- see :func:`certifiable_grid_and_precision`.
+CLAIM_LADDER_MODE = "both"
+CLAIM_CONTROL_DTYPE = "float64"
+
+
+def vertical_ladder_sha256(z_coord) -> str:
+    """Content hash of the vertical-coordinate arrays ACTUALLY in memory.
+
+    GLM's #1640 point, and it is the right one: **a label is a taxonomy, not
+    an identity**.  ``nemo_ladder_mode`` records which ladder the runner MEANT
+    to build; it cannot tell two runs apart that carry the same label and
+    different numbers (a changed bridge, a changed reference profile, a
+    silently-different dtype).  Hashing the arrays makes "same grid" DECIDABLE
+    instead of asserted: equal hash => bit-identical ladders, full stop.
+
+    SCOPE -- THIS IS A LADDER IDENTITY, NOT A FULL GRID IDENTITY, and the
+    name of the stamp should be read that way.  It hashes the four 1-D
+    reference arrays, which is what the ladder MODE moves: the DINO bridge
+    collapses NEMO's 3-D thickness/depth fields to a 1-D mean profile before
+    they reach ``z_coord`` (``nemo_state_bridge.effective_vertical_scale_
+    factors``; it raises if the card has genuine horizontal ``e3t_0``
+    variation).  It deliberately does NOT cover ``h_partial`` /
+    ``bottom_level`` / ``is_active`` -- the bathymetry and the wet/dry
+    staircase -- so TWO RUNS ON DIFFERENT TOPOLOGIES HASH IDENTICALLY.  An
+    earlier draft justified that exclusion by claiming the extra arrays
+    "cannot distinguish the thing this hash exists to distinguish"; that is
+    backwards -- extra content never reduces a hash's discriminating power --
+    and is RETRACTED.  The honest reason is narrower: the ladder question is
+    the one the gate's claim turns on, and keeping the input small keeps the
+    stamp comparable across the runs already recorded.  Widening it to the
+    topology is a strict improvement whenever someone wants it.
+
+    Dtype is folded in deliberately: the same numbers at fp32 and fp64 are NOT
+    the same grid for a claim that depends on precision.  A MISSING attribute
+    and a present-but-``None`` one are also distinguished, so a future field
+    rename degrades loudly rather than into a stable-looking weaker value.
+    """
+    import hashlib
+    _MISSING = object()
+    h = hashlib.sha256()
+    for name in ("z_full_ref", "z_half_ref", "dz_ref", "t_depth_ref"):
+        a = getattr(z_coord, name, _MISSING)
+        if a is _MISSING:
+            h.update(f"{name}:ABSENT|".encode())
+            continue
+        if a is None:
+            h.update(f"{name}:None|".encode())
+            continue
+        a = np.asarray(a)
+        h.update(f"{name}:{a.dtype.str}:{a.shape}|".encode())
+        h.update(np.ascontiguousarray(a).tobytes())
+    return h.hexdigest()
+
+
+def certifiable_grid_and_precision(stamped) -> tuple:
+    """Report whether a candidate is on the claim's grid/precision.
+
+    NOT named ``assert_*``: its sibling ``assert_nemo_seasonal_clock`` in this
+    module RAISES, and this one deliberately does not -- an off-claim
+    candidate is still worth scoring, so the caller decides between a verdict
+    and UNCERTIFIED.  (It was briefly called ``assert_certifiable_...`` with an
+    unused ``path`` argument; review caught both.)
+
+    #1640, the reviewer's minimum ask.  The gate deliberately SCORES any
+    ladder -- both are legitimately scoreable and the gate's job is to say
+    which grid a score was earned on.  But this campaign's headline is
+    specifically about the reference's ladders at double precision, and a gate
+    that will score anything cannot certify that.  So the two are separated:
+    the score is always printed, and the PASS/FAIL VERDICT is withheld
+    (UNCERTIFIED) when the candidate is not on the claim's grid/precision.
+
+    Returns ``(ok, reasons, ladder, dtype)``.  Raises nothing -- the caller
+    decides between a verdict and UNCERTIFIED, because an off-claim candidate
+    is still worth scoring and printing.
+    """
+    ladder = (str(stamped["nemo_ladder_mode"])
+              if "nemo_ladder_mode" in stamped else None)
+    dtype = (str(stamped["control_dtype"])
+             if "control_dtype" in stamped else None)
+    reasons = []
+    if ladder is None:
+        reasons.append(
+            "no nemo_ladder_mode stamp -- this artifact predates the stamp and "
+            "does not record which vertical ladders it ran on")
+    elif ladder != CLAIM_LADDER_MODE:
+        reasons.append(
+            f"vertical ladder is {ladder!r}, but the claim is about "
+            f"{CLAIM_LADDER_MODE!r} (NEMO's own thickness AND depth ladders)")
+    if dtype is None:
+        reasons.append(
+            "no control_dtype stamp -- the precision this arm was built at is "
+            "not recorded")
+    elif dtype != CLAIM_CONTROL_DTYPE:
+        reasons.append(
+            f"control dtype is {dtype!r}, but the claim is about "
+            f"{CLAIM_CONTROL_DTYPE!r}")
+    return (not reasons), reasons, ladder, dtype
+
+
 def _restart_elapsed_seconds(path: str) -> float:
     """Model seconds elapsed at the restart, read from the restart ITSELF.
 
@@ -293,9 +394,23 @@ def seasonal_t0_seconds(restart_path: str) -> float:
     ``ztime = REAL(kt)*rn_Dt``), so a twin that restarts its own seasonal year
     at zero forces legoESM out of phase with the NEMO run it is compared
     against.  For the canonical ``DINO_00005760_restart.nc`` (day 180 of a
-    360-day year) that offset is EXACTLY antiphase, and it was measured to own
-    99.1% of the day-30 southern surface-density gap (commits 1c03f8311,
-    076217667, afd8e06b6).
+    360-day year) that offset is EXACTLY antiphase.  Correcting it collapsed
+    the day-30 southern surface-density gap from -0.013224 to -0.000125
+    kg/m3, i.e. from 139x the noise floor to 1.3x, AT THE TWO SAMPLED PHASES
+    (commits 1c03f8311, 076217667, afd8e06b6).
+
+    RETRACTED, 2026-08-23 (GLM review on PR #1634): this docstring previously
+    said the offset "owns 99.1% of" that gap.  THE PERCENTAGE IS WITHDRAWN and
+    no percentage replaces it.  Two sampled phases cannot yield a fraction --
+    that needs a dose-response curve through intermediate offsets -- and the
+    decomposition silently assumed error = season + ocean with no interaction
+    term.  Report the two measured multipliers (139x -> 1.3x), never a share.
+    BLIND SPOT, also unquantified: an exact 180/360-day antiphase flips only
+    the ODD harmonics, so the SEMIANNUAL component is IN PHASE in both arms
+    and this experiment cannot see semiannual error, including whatever part
+    of the residual is semiannual.  Settling it needs a phase sweep
+    (0/45/90/135/180 days) plus a control in which the REFERENCE model is run
+    with artificially antiphased forcing -- named as follow-up, not run.
 
     DEFAULT (env unset) is therefore the NEMO clock, read from the restart
     ITSELF (``adatrj``, cross-checked against ``kt*DT``) -- never hardcoded and
@@ -993,6 +1108,11 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         nemo_ladder_mode=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
+        # #1640 (GLM): a label is a taxonomy, not an identity. Hash the
+        # vertical-coordinate arrays ACTUALLY in memory so "same grid" is
+        # decidable rather than asserted -- nemo_ladder_mode records intent,
+        # this records the numbers.
+        vertical_ladder_sha256=np.str_(vertical_ladder_sha256(br.z_coord)),
         # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
         seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
         run_config=np.str_(run_config),

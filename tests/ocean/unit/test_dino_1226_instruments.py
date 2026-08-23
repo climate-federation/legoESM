@@ -8,6 +8,7 @@ import importlib
 import os
 import sys
 import types
+import unittest.mock as mock
 from pathlib import Path
 
 import numpy as np
@@ -851,6 +852,110 @@ def test_gate_prints_the_ladder_before_it_can_refuse_a_candidate(tmp_path,
     with pytest.raises(SystemExit, match="has no u3d_day90"):
         gate.load_candidate(str(bare))
     assert "UNSTAMPED" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# #1640: the ladder CONTENT HASH (identity, not taxonomy) and the gate's
+# refusal to issue a verdict off the claim's grid/precision.
+# ---------------------------------------------------------------------------
+class _FakeLadder:
+    """Only the four 1-D arrays the hash reads -- see vertical_ladder_sha256."""
+
+    def __init__(self, dz, t_depth=None, dtype=np.float64):
+        self.dz_ref = np.asarray(dz, dtype=dtype)
+        self.z_full_ref = np.cumsum(self.dz_ref) - 0.5 * self.dz_ref
+        self.z_half_ref = np.concatenate(
+            [np.zeros(1, dtype=dtype), np.cumsum(self.dz_ref)])
+        self.t_depth_ref = (None if t_depth is None
+                            else np.asarray(t_depth, dtype=dtype))
+
+
+def test_ladder_hash_is_an_identity_not_a_label(instruments):
+    """A label cannot tell two runs apart that share it; a content hash can.
+
+    Non-vacuity is the point of every assertion here: the hash must be STABLE
+    across rebuilds of the same ladder (or it is useless as an identity) and
+    must MOVE for each thing that makes a grid a different grid -- a changed
+    thickness, a changed T-depth array, and a changed dtype.
+    """
+    h = instruments.kamm_twin_90d.vertical_ladder_sha256
+    base = [10.0, 20.0, 40.0, 80.0]
+    assert h(_FakeLadder(base)) == h(_FakeLadder(base)), (
+        "same ladder must hash the same, or the hash cannot certify identity")
+    # a changed thickness is a different grid
+    assert h(_FakeLadder([10.0, 20.0, 40.0, 80.5])) != h(_FakeLadder(base))
+    # a present-vs-absent t_depth_ref is a different grid (this is exactly the
+    # gdept half of the ladder mode, so the hash MUST separate them)
+    assert h(_FakeLadder(base, t_depth=[5.0, 20.0, 50.0, 110.0])) != h(
+        _FakeLadder(base))
+    # and the SAME numbers at a different precision are not the same grid for a
+    # claim that depends on precision
+    assert h(_FakeLadder(base, dtype=np.float32)) != h(
+        _FakeLadder(base, dtype=np.float64))
+
+
+@pytest.mark.parametrize("stamps,expect", [
+    ({"nemo_ladder_mode": "both", "control_dtype": "float64"}, True),
+    ({"nemo_ladder_mode": "off", "control_dtype": "float64"}, False),
+    ({"nemo_ladder_mode": "both", "control_dtype": "float32"}, False),
+    ({"nemo_ladder_mode": "both"}, False),                    # dtype unstamped
+    ({"control_dtype": "float64"}, False),                    # ladder unstamped
+    ({}, False),                                              # both unstamped
+])
+def test_certifiable_only_on_the_claims_grid_and_precision(instruments, stamps,
+                                                           expect):
+    """#1640: the gate SCORES anything, CERTIFIES only the claim's grid.
+
+    All six arms are asserted, so the guard cannot pass by accepting or by
+    rejecting everything -- the on-claim arm proves it is not vacuously
+    strict, the five off-claim arms that it is not vacuously permissive."""
+    ok, reasons, _, _ = (
+        instruments.kamm_twin_90d.certifiable_grid_and_precision(stamps))
+    assert ok is expect
+    assert (reasons == []) is expect, (
+        "an off-claim candidate must SAY why it cannot be certified")
+
+
+def test_uncertified_gate_prints_no_verdict_token_anywhere(instruments):
+    """The reviewer's ask is that the gate REFUSE TO ISSUE PASS/FAIL, not that
+    it merely drop the tally line -- a per-row status IS a verdict, so a
+    version that suppressed only the tally would still have issued one five
+    times over.  This asserts no verdict token survives anywhere in the
+    output, and (non-vacuity) that the certified call still emits them."""
+    import importlib
+    import io
+    import contextlib
+    _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
+            / "ocean_fidelity" / "dino_1226")
+    stub = types.ModuleType("acc_thermal_wind")
+    stub.DINO = "/nonexistent"
+    with mock.patch.dict(sys.modules, {"acc_thermal_wind": stub}):
+        sys.modules.pop("acceptance_gate_90d", None)
+        sys.path.insert(0, str(_dir))
+        try:
+            gate = importlib.import_module("acceptance_gate_90d")
+        finally:
+            sys.path.remove(str(_dir))
+            sys.modules.pop("acceptance_gate_90d", None)
+
+    rows = [(k, 1.0, 1.0, 0.0, 1.0, True) for k in list(gate.LABELS)[:2]]
+    rows += [(k, 1.0, 9.0, 8.0, 1.0, False) for k in list(gate.LABELS)[2:3]]
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        gate.print_gate(rows, 5, certified=False)
+    out = buf.getvalue()
+    assert "PASS" not in out and "FAIL" not in out, (
+        f"an uncertified gate must issue no verdict token, got:\n{out}")
+    assert "GATE 90D-TWIN" not in out, "the tally line is itself a verdict"
+
+    buf2 = io.StringIO()
+    with contextlib.redirect_stdout(buf2):
+        gate.print_gate(rows, 5)
+    out2 = buf2.getvalue()
+    assert "PASS" in out2 and "FAIL" in out2 and "GATE 90D-TWIN" in out2, (
+        "the CERTIFIED path must still issue verdicts, or this test would "
+        "pass against a gate that never says anything")
 
 
 # ---------------------------------------------------------------------------
