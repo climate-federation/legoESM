@@ -540,3 +540,38 @@ def test_compare_refuses_a_one_sided_impulse_lane(ewt, tmp_path):
     mesh, npz_n, npz_l = _synthetic_pair(tmp_path)
     with pytest.raises(SystemExit, match="BOTH free runs or neither"):
         ewt.compare(npz_n, npz_l, str(tmp_path / "o4"), mesh, npz_n, None)
+
+
+def test_two_dt_mode_annihilates_a_smooth_series(ewt):
+    wet, _ = _basin()
+    n = 20
+    smooth = np.linspace(0.0, 1.0, n)[:, None, None] * np.ones((1,) + wet.shape)
+    out = ewt.two_dt_mode(smooth, wet)
+    assert max(out["amplitude_by_sample_m"]) < 1e-12
+
+
+def test_two_dt_mode_recovers_a_planted_alternation(ewt):
+    """A field flipping sign every step must return its own amplitude."""
+    wet, _ = _basin()
+    n = 20
+    amp = 0.004
+    alt = amp * ((-1.0) ** np.arange(n))[:, None, None] * np.ones((1,) + wet.shape)
+    out = ewt.two_dt_mode(alt, wet)
+    assert out["first_8_mean_m"] == pytest.approx(2 * amp)
+
+
+def test_two_dt_mode_is_not_fooled_by_a_slow_oscillation(ewt):
+    wet, _ = _basin()
+    n = 64
+    t = np.arange(n)
+    slow = 0.01 * np.sin(2 * np.pi * t / 32.0)[:, None, None] * np.ones((1,) + wet.shape)
+    out = ewt.two_dt_mode(slow, wet)
+    assert out["first_8_mean_m"] < 0.01 * 0.05
+
+
+def test_alternation_ratio_is_one_for_a_flat_series(ewt):
+    assert ewt.alternation_ratio([1.0] * 8) == pytest.approx(1.0)
+
+
+def test_alternation_ratio_detects_ringing(ewt):
+    assert ewt.alternation_ratio([10.0, 1.0] * 4) == pytest.approx(10.0)

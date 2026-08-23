@@ -720,6 +720,45 @@ def propagation_lag(eta: np.ndarray, wet: np.ndarray, jrow: int, dx_m: float,
     }
 
 
+def two_dt_mode(field: np.ndarray, wet: np.ndarray,
+                area: np.ndarray | None = None) -> dict:
+    """Amplitude of the 2-step (Nyquist) component, per sample.
+
+    Leapfrog carries a computational mode that alternates sign every step, and
+    an impulsive displacement excites it.  "Is legoESM's version of that mode
+    under-damped relative to the oracle's" is the concrete form of the
+    excess-energy question, and a single-cell spectrum cannot answer it
+    because the mode is basin-wide and decays within a few steps -- far too
+    short to resolve as a spectral peak.
+
+    The alternating part of a series at sample n is
+    ``x[n] - (x[n-1] + x[n+1]) / 2``: a smooth series annihilates it, an
+    alternating one returns its own amplitude.  Interior samples only.
+    """
+    if field.shape[0] < 3:
+        raise SystemExit("two_dt_mode needs at least 3 samples")
+    alt = field[1:-1] - 0.5 * (field[:-2] + field[2:])
+    w = np.ones(int(wet.sum())) if area is None else area[wet]
+    amp = [float(np.sqrt(np.sum(w * alt[n][wet] ** 2) / np.sum(w)))
+           for n in range(alt.shape[0])]
+    return {"amplitude_by_sample_m": amp,
+            "first_8_mean_m": float(np.mean(amp[:8])),
+            "last_half_mean_m": float(np.mean(amp[len(amp) // 2:]))}
+
+
+def alternation_ratio(series: list[float], n_early: int = 8) -> float:
+    """Mean of the odd-index samples over the mean of the even ones.
+
+    A value near 1 means no step-to-step alternation; a large value means the
+    quantity is ringing at the 2-step period.
+    """
+    a = np.asarray(series[:n_early], dtype=np.float64)
+    if a.size < 2:
+        raise SystemExit("alternation_ratio needs at least 2 samples")
+    ev = a[1::2].mean()
+    return float(a[0::2].mean() / ev) if ev > 0 else float("inf")
+
+
 def time_level_discriminator(lego_eta, sshn, sshb, wet) -> dict:
     """Which NEMO time level does legoESM's eta actually line up with?
 
@@ -961,7 +1000,21 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
              "difference": variance_bands(diff, wet, dt, area)}
     noise = step_noise_ratio(lego["eta"], nemo["eta"], wet, regions)
 
+    two_dt = {
+        "difference": two_dt_mode(diff, wet, area),
+        "NEMO": two_dt_mode(nemo["eta"], wet, area),
+        "legoESM": two_dt_mode(lego["eta"], wet, area),
+    }
+    # The alternation of the DIFFERENCE itself: if the two models' leapfrog
+    # modes were identical the difference would not alternate at all.
+    diff_rms_by_step = [g["rms_m"] for g in growth]
+    two_dt["difference_alternation_ratio_first8"] = alternation_ratio(
+        diff_rms_by_step, 8)
+    two_dt["difference_alternation_ratio_rest"] = alternation_ratio(
+        diff_rms_by_step[8:], min(16, max(2, len(diff_rms_by_step) - 8)))
+
     result = {
+        "two_dt_mode": two_dt,
         "lane": lane,
         "locus_sensitivity": locus_sensitivity,
         "propagation": prop,
