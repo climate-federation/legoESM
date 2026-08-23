@@ -186,7 +186,7 @@ import southern_circulation_budget as B  # noqa: E402  (recorded band/rows/reduc
 from rebuild_nemo_restart import rebuild  # noqa: E402
 
 DINO = os.path.dirname(B.G.RUN_90D_TWIN)
-RUN_ACC90 = f"{DINO}/RUN_ACC90"
+RUN_ACC90 = os.environ.get("DINO_ACC_RUN_DIR", f"{DINO}/RUN_ACC90")
 RUN_V4 = f"{DINO}/RUN_ACC_V4"
 RUN_CERT4 = f"{DINO}/RUN_ACC_CERT4"
 RUN_V1D = f"{DINO}/RUN_ACC_V1D"
@@ -211,7 +211,11 @@ SCALARS = ("nacc_steps", "nacc_r1dt", "nacc_trdchk", "rn_acc_plant", "rdt")
 
 ROWS = list(B.ROWS)
 H_U = np.sum(np.where(B.umask, B.e3u0, 0.0), axis=2)      # column depth at u-pts [m]
-DAYS_90 = 90
+# The accumulation length.  90 for the recorded twin; the SAME protocol runs
+# unchanged at any multiple of the 10-day dump interval (the oracle change is
+# nn_itend and nothing else), so it is an env knob rather than a fork.  Both the
+# run directory and the length are STAMPED into every table this file prints.
+DAYS_90 = int(os.environ.get("DINO_ACC_DAYS", "90"))
 
 # legoESM's recorded stage table (commit 55de03e71), band-mean m3/s2 per row,
 # for the three arms of the SAME 90-day twin.  Transcribed constants: nothing
@@ -303,6 +307,11 @@ def load_lego(npz_path, arm="off/transport_avg"):
     z = np.load(npz_path, allow_pickle=True)
     if list(z["rows"]) != ROWS:
         raise SystemExit(f"FATAL: {npz_path} rows {list(z['rows'])} != band {ROWS}")
+    if int(z["days"]) != DAYS_90:
+        raise SystemExit(f"FATAL: {npz_path} accumulated {int(z['days'])} days, "
+                         f"but this comparison is set up for {DAYS_90} "
+                         "(DINO_ACC_DAYS) -- the two sides would cover different "
+                         "spans")
     if int(z["interval_days"]) != 10:
         raise SystemExit(f"FATAL: {npz_path} interval is {int(z['interval_days'])} d, "
                          "not the 10 d NEMO dumps at")
@@ -310,10 +319,40 @@ def load_lego(npz_path, arm="off/transport_avg"):
         raise SystemExit(f"FATAL: {npz_path} is a PLANTED control run")
     stg = [str(x) for x in z["stages"]]
     acc = np.asarray(z["acc_stage"], np.float64)          # (n_int, n_stage, ny)
-    if arm not in PUBLISHED_ARMS:
+    if arm == "card":
+        # A run whose CARD postdates every published arm cannot be gated against
+        # a transcribed stage mean -- and inventing a new PUBLISHED_ARMS entry
+        # from this very run would be a gate that cannot fail.  What CAN fail,
+        # and is the thing the comparison actually needs, is that the budget ran
+        # the SAME configuration as the trajectory it is explaining: the shipped
+        # kamm_mlf card, NEMO's 3-D vertical ladder, and NEMO's own day-of-year.
+        # Each is stamped into the artifact by southern_term_torque_accum.py.
+        want = {"reconcile_target": "velocity_avg",
+                "after_reconcile": "nemo_mlf_baro_corr",
+                "e3t_mode": "both",
+                "recipe": "nemo_dino_kamm_mlf"}
+        for k, v in want.items():
+            got = str(z[k]) if k in z.files else "<absent>"
+            if got != v:
+                raise SystemExit(
+                    f"FATAL: {npz_path} stamps {k}={got!r}, but --lego-arm card "
+                    f"requires {v!r} -- this budget did not run the shipped card "
+                    "whose trajectory is being explained.")
+        t0 = float(z["seasonal_t0_seconds"]) if "seasonal_t0_seconds" in z.files else -1.0
+        if t0 != 15552000.0:
+            raise SystemExit(
+                f"FATAL: {npz_path} stamps seasonal_t0_seconds={t0}, not the "
+                "15552000 s (day 180) NEMO's restart carries -- the two sides "
+                "would be in different seasons.")
+        print(f"[arm gate] {npz_path} runs the shipped card on NEMO's ladder and "
+              f"NEMO's day-of-year: " + ", ".join(f"{k}={v}" for k, v in want.items())
+              + ", seasonal_t0=15552000 s")
+        published = {}
+    elif arm not in PUBLISHED_ARMS:
         raise SystemExit(f"unknown --lego-arm {arm!r}: must be one of "
-                         f"{tuple(PUBLISHED_ARMS)}")
-    published = PUBLISHED_ARMS[arm]
+                         f"{tuple(PUBLISHED_ARMS)} or 'card'")
+    else:
+        published = PUBLISHED_ARMS[arm]
     for k, want in published.items():
         got = float(acc[:, stg.index(k), ROWS].mean())
         if abs(got - want) > 1e-3:
@@ -323,9 +362,11 @@ def load_lego(npz_path, arm="off/transport_avg"):
     Rs = np.asarray(z["R_series"], np.float64)            # (n_int+1, ny), m3/s
     return {
         "per_interval": acc.sum(axis=1),                  # (n_int, ny) realized rate
-        "stage_sum": acc.sum(axis=1).mean(axis=0),        # 90-day mean, per row
+        "stage_sum": acc.sum(axis=1).mean(axis=0),        # run mean, per row
         "drift": (Rs[-1] - Rs[0]) / (DAYS_90 * B.SEC_PER_DAY),
-        "stages": {k: acc[:, stg.index(k), :].mean(axis=0) for k in published},
+        "stages": {k: acc[:, stg.index(k), :].mean(axis=0)
+                   for k in (published or
+                             [x for x in stg if x != "STAGE SUM"])},
     }
 
 
@@ -714,7 +755,8 @@ def controls():
     d = load_acc(RUN_ACC90, kt90) if have90 else d1d
     run, ktlo, kthi = ((RUN_ACC90, B.G.KT_RESTART, kt90) if have90
                        else (RUN_V1D, B.G.KT_RESTART, B.G.KT_RESTART + B.G.STEPS_PER_DAY))
-    tag = "90-day run" if have90 else "1-day validation run (90-day not yet present)"
+    tag = (f"{DAYS_90}-day run" if have90 else
+           f"1-day validation run ({DAYS_90}-day not yet present)")
     if d["rn_acc_plant"] != 0.0:
         raise SystemExit(f"FATAL: {tag} was PLANTED (rn_acc_plant="
                          f"{d['rn_acc_plant']}) -- it is not a production run")
@@ -802,17 +844,18 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
     for kt in kts:
         if not sorted(glob.glob(f"{RUN_ACC90}/DINO_{kt:08d}_{TILES}")):
             raise SystemExit(f"FATAL: {RUN_ACC90} has no dump at kt={kt}; run the "
-                             "90-day accumulation first")
+                             f"{DAYS_90}-day accumulation first")
         dumps[kt] = load_acc(RUN_ACC90, kt)
     full = dumps[kts[-1]]
     want_steps = DAYS_90 * B.G.STEPS_PER_DAY
     if int(full["nacc_steps"]) != want_steps:
         raise SystemExit(f"FATAL: the final dump accumulated {int(full['nacc_steps'])} "
-                         f"steps, not {want_steps} -- this is NOT a 90-day mean (the "
+                         f"steps, not {want_steps} -- this is NOT a {DAYS_90}-day "
+                         "mean (the "
                          "accumulators are SAVE-initialised and a chained job restarts "
                          "them at zero)")
     if full["rn_acc_plant"] != 0.0:
-        raise SystemExit("FATAL: the 90-day run was PLANTED")
+        raise SystemExit(f"FATAL: the {DAYS_90}-day run was PLANTED")
     rows = stage_rows(full)
     lego = load_lego(lego_npz, arm) if lego_npz else None
     if lego is not None:
@@ -822,10 +865,12 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
     print(f"T0  THE THREE IDENTITIES that collapse NEMO's step to ONE row"
           f" ({int(full['nacc_steps'])} steps, fp64)")
     print("=" * 104)
-    identities(rows, full["nacc_steps"], "90-day accumulation")
+    identities(rows, full["nacc_steps"], f"{DAYS_90}-day accumulation "
+               f"({os.path.basename(RUN_ACC90)})")
 
     print("\n" + "=" * 104)
-    print(f"T1  NEMO ACCUMULATED ROWS, 90-day mean, band rows {ROWS[0]}-{ROWS[-1]}"
+    print(f"T1  NEMO ACCUMULATED ROWS, {DAYS_90}-day mean, band rows "
+          f"{ROWS[0]}-{ROWS[-1]}"
           " [m3/s2 per u-row].\n    Only two independent numbers: the circulation the"
           " barotropic solve deposits, and the\n    vertical-mixing deposit that"
           " mlf_baro_corr then DISCARDS.")
@@ -842,10 +887,22 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
     print("=" * 104)
     nemo = float(np.mean(rows["realized"][ROWS]))
     if lego is None:
+        if DAYS_90 != 90:
+            # The three transcribed legoESM scalars are 90-DAY means.  Pairing
+            # them against a NEMO column of a different length is a differing
+            # window on the two sides, i.e. a confound, not a result -- and an
+            # earlier revision printed exactly that (a 360-day NEMO mean against
+            # 90-day lego scalars, with a "revision -165%" column).  Refuse.
+            raise SystemExit(
+                f"FATAL: this run accumulated {DAYS_90} days, and the fallback "
+                "table's legoESM column is a set of transcribed 90-DAY means. "
+                "Pairing them would compare two different windows.  Supply "
+                "--lego-npz from a matching-length run (with --lego-arm card "
+                "for the shipped card), or run this table at 90 days.")
         print("    legoESM's per-row artifact was not supplied (--lego-npz), so this"
               " falls back to\n    three transcribed band-mean scalars and the per-row"
               " and matched-window tests below\n    are SKIPPED.  Regenerate with:"
-              " southern_term_torque_accum.py --days 90 --out-npz ...")
+              f" southern_term_torque_accum.py --days {DAYS_90} --out-npz ...")
         print("    NOTE: the three arms in this fallback table are the WITHDRAWN-STACK"
               " arms (see the\n    LEGO_BARO comment and"
               " PHASE1_valid_stack_southern_budget.md).  The valid-stack arm has"
@@ -957,7 +1014,7 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
              else "changes sign")
     print(f"    FLATNESS: {'CONFIRMED' if flat else 'REFUTED'} (criterion: sd <"
           f" 0.25 x |mean|) -- the difference varies by"
-          f" {a.max() - a.min():.2f} m3/s2/row across the\n    nine windows (sd"
+          f" {a.max() - a.min():.2f} m3/s2/row across the\n    {len(a)} windows (sd"
           f" {a.std():.3f} against a mean of {a.mean():+.3f}) and {_sign}"
           f" ({npos}/{len(a)} positive).")
 
@@ -999,7 +1056,7 @@ def main(argv=None):
                          "the comparison falls back to three transcribed band-mean "
                          "scalars and the per-row and matched-window tests are skipped.")
     ap.add_argument("--lego-arm", default="off/transport_avg",
-                    choices=sorted(PUBLISHED_ARMS),
+                    choices=sorted(PUBLISHED_ARMS) + ["card"],
                     help="which arm of commit 55de03e71's stage table --lego-npz is "
                          "expected to be; the self-check gates against that arm's "
                          "published band means.  Default off/transport_avg = what "

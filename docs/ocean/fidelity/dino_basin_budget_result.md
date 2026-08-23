@@ -1,0 +1,420 @@
+# The southern-basin deficit: where it lives, and what it is not
+
+Follow-on to `dino_verdict360_result.md`, which measured that one year of
+legoESM from a shared NEMO restart matches NEMO in the circumpolar channel to
+17 parts per million and is short by 0.95 Sv in the basin south of it, along a
+path that is not monotonic. That verdict registered one next action: *a
+term-by-term southern-basin transport budget*. This is that work.
+
+Written for a reader who has not followed the campaign.
+
+Pre-registrations, both written before their numbers existed:
+`scripts/validate/ocean_fidelity/dino_1226/PREREG_basin_seasonal_decomp.md`
+and `PREREG_basin_stage_budget_360.md`.
+Probe: `basin_seasonal_decomp.py`. Series: `/tmp/dino_basin_seasonal_decomp.json`.
+
+---
+
+## The headline
+
+1. **The deficit is a depth-uniform velocity error — a barotropic momentum
+   problem, not a vertical-structure or water-mass one.** A single constant
+   velocity difference of **−4.6e-4 m/s**, applied at every level, reproduces
+   **76%** of the measured per-level difference by variance and **93%** of its
+   total. legoESM's southern-basin flow is uniformly too weak in the eastward
+   sense, by about half a millimetre per second, all the way down.
+2. **The water masses are not the cause.** The two models' southern-basin
+   densities agree to 4e-5 kg/m³ on a 1027 kg/m³ field. Mechanisms that work by
+   changing the water masses are ruled out at the basin scale, though the
+   density *gradient* in the rows that own the gap has not been measured
+   directly (see the caveat below).
+3. **It lives against the southern wall.** The gap decays monotonically from
+   the wall over about eight rows, and the four rows from 69.5°S to 68.4°S
+   carry −0.905 Sv of the −0.952 Sv net. The shape is stable through the year
+   (day-90 against day-360 row profiles correlate at 0.96; day-270 at 0.70).
+4. **The surface forcing is identical and is exonerated for free.** The wind
+   torque legoESM applies to these rows is 17.811 in every one of the 36
+   ten-day windows of the year-long budget, and DINO's wind has no seasonal
+   cycle at all. The whole difference is in the sinks and in how momentum is
+   redistributed, not in what is put in.
+5. **The seasonal reading returns no verdict.** The registered test asked for a
+   correlation of 0.7 between the gap and a forcing phase after removing its
+   growth; the best measured is 0.48.
+
+**A retraction, in place.** An earlier version of this document said the
+deficit "grows with depth", with 82% of it below 500 m, and read the 92 m shift
+of the transport's centre of mass as independent evidence of a
+vertical-structure error. **That was wrong, and it was wrong in the way that
+matters: it pointed the next work item at vertical mixing.** The per-level
+transport difference grows with depth only because the model's layers grow from
+10 m to 450 m thick; divided by each level's own wet cross-section, the
+velocity difference is flat to three digits over the top 1000 m. And a
+depth-uniform velocity difference *predicts* a centroid shift of −107 m against
+the −92 m measured, so the centroid is a consequence of the uniform deficit,
+not evidence against it. The probe now fits and scores both hypotheses side by
+side.
+
+---
+
+## What DINO's forcing can and cannot do
+
+The oracle's analytical surface forcing (`usrdef_sbc.F90`, `nn_forcingtype=4`)
+builds the zonal wind stress from a fixed list of latitude/stress knots with no
+time dependence at all, and the evaporation-minus-precipitation field is
+switched off. **The wind does not have a seasonal cycle in this configuration**,
+so no seasonal-wind explanation of the deficit is available. The only
+*prescribed* seasonal channels are the solar flux (peaking 21 June) and the
+target temperature the surface heat flux restores towards (peaking 21 July);
+the salinity restoring is active but its target is time-constant.
+
+Run day 0 of the verdict run is day-of-year 180 — 1 July, austral midwinter.
+So day 90 is spring, day 180 midsummer, day 270 autumn, day 360 midwinter
+again.
+
+## The gap through the year
+
+Southern-basin transport, legoESM minus NEMO, at the 19 days both models saved
+a state. "floor" is how far apart four runs of the same model drift from a
+1e-14 nudge, combined across the two models.
+
+| run day | day of year | season | gap [Sv] | floor [Sv] | gap/floor |
+|---:|---:|:--|---:|---:|---:|
+| 10 | 190 | winter | +0.026 | 7e-10 | — |
+| 90 | 270 | spring | −0.426 | 1.4e-04 | 2937 |
+| 180 | 0 | summer | −0.232 | 2.2e-02 | 10 |
+| 270 | 90 | autumn | −0.057 | 6.2e-02 | 0.9 |
+| 330 | 150 | winter | −0.597 | 4.1e-02 | 15 |
+| 360 | 180 | winter | −0.952 | 6.2e-02 | 15 |
+
+Before about day 120 the four members have barely separated from their shared
+restart, so the floor there is roundoff and the ratios are meaningless; read
+them from day 150 on.
+
+## The day-270 "agreement" is a cancellation, not agreement
+
+Split the basin's transport into the part carried by the deepest wet cell times
+the full water depth, and everything above it. The two halves are algebraic
+complements, so this is one measurement and not two — but it shows the size of
+what is cancelling. On the four-member mean rather than the single control
+member:
+
+| day | bottom-referenced part [Sv] | the rest [Sv] | net [Sv] |
+|---:|---:|---:|---:|
+| 90 | −0.62 | +0.21 | −0.43 |
+| 270 | −1.74 | +1.56 | **−0.18** |
+| 360 | −2.61 | +1.71 | −0.90 |
+
+At day 270 the two models disagree by about 1.7 Sv one way and 1.6 Sv the
+other; the net is small because those nearly cancel — a **19-fold**
+cancellation. (On the single control member the same ratio is 53-fold and the
+net is −0.06 Sv; the ensemble is the honest number.) Reporting day 270 as
+"momentarily indistinguishable" is true of the metric and false of the physics.
+
+This split is fragile by construction — it multiplies one cell per column by
+3300 m — so everything below uses integrals instead.
+
+## Where the transport sits in the vertical
+
+Two hypotheses, fitted the same way to the per-level transport difference at
+day 360 and scored on the same residual:
+
+| null | explains, by variance | by total size | residual left |
+|---|---:|---:|---:|
+| a constant velocity difference of −4.6e-4 m/s at every level | **75.7%** | 65.5% | −0.070 of −0.935 Sv |
+| legoESM = 0.938 × NEMO at every level | 37.5% | 52.1% | −0.336 of −0.935 Sv |
+
+The uniform-velocity hypothesis wins on every score, and it also predicts the
+observed shift in where the transport is centred (−107 m predicted, −92 m
+measured) which the scaling hypothesis cannot produce at all. What is left over
+after removing it is small and sits in the two deepest broad levels — 2890 m
+and 3300 m — which is where an additional bottom-confined difference would go.
+
+For orientation: both models spin this basin up hard over the year, from
+5.9 Sv to 8.7–9.7 Sv, so these are two rapidly-adjusting trajectories, not two
+climates.
+
+## Where it lives in latitude
+
+The basin south of the channel is 14 model rows, 69.9°S to 64.9°S. At day 360
+the gap decays monotonically away from the southern wall — −0.277, −0.252,
+−0.209, −0.167, −0.106, −0.076, −0.040, −0.005 Sv over rows 1 to 8 — and then
+turns slightly positive. It is a boundary layer about 300 km wide.
+
+* the four rows nearest the wall carry −0.905 Sv of the −0.952 Sv net, i.e.
+  95% of the net but **80% of the negative signal** (the eight negative rows
+  total −1.13 Sv and the six positive ones +0.18 Sv);
+* eleven of the fourteen rows have a gap clearing twice their own noise floor;
+* the shape is stable through the year: day-90 against day-360 profiles
+  correlate at **+0.96**, day-180 at +0.89, day-270 at **+0.70**.
+
+## Season: no verdict
+
+After removing a straight-line growth, the gap's best correlation with any
+forcing phase is **0.48** (against the 21-July restoring-temperature phase).
+The pre-registration set 0.7 to confirm and 0.3 to refute, so the answer is
+neither. Two further cautions, both registered in advance:
+
+* the four forcing columns are two independent channels — the restoring target
+  is an exact linear function of the 21-July cosine, and the solar flux nearly
+  so;
+* with one cycle and 19 correlated samples, a curve that is merely not straight
+  will correlate about 0.5 with a cosine of that same single period by
+  construction. There are roughly three or four independent samples here.
+
+## Controls
+
+Every one of these can fail, and all passed.
+
+* The probe reproduces the parent verdict run's own day-90 and day-360
+  southern-basin gaps **and** its member floors, to five decimal places.
+* The three latitude bands sum to the full section on all 152 states read —
+  checked on every state, including states served from the probe's cache.
+* The per-level profile sums exactly to the transport it decomposes.
+* The generalised bottom-referenced split reproduces the campaign's recorded
+  channel-band split exactly, and the depth index it rests on is checked
+  against the mask rather than assumed.
+* legoESM's land mask equals NEMO's surface mask on all 10 348 cells.
+* All four legoESM members stamp the same vertical ladder, the same seasonal
+  clock and the same precision.
+
+**A retraction.** The first version of this probe gated itself against a
+day-90 gap of −0.4405 Sv taken from a code comment. That number belongs to a
+different run. The gate failed on it and the constant was replaced with the
+value the verdict run itself printed, −0.42578. A code comment is a pointer,
+never a citable fact.
+
+**A caveat on one instrument.** The density check above compares each model's
+basin-mean density and, separately, the transport its density field predicts by
+thermal wind. That second instrument reproduces neither model's own
+bottom-referenced transport — it is short by 6–7 Sv on both sides, five times
+the difference it is being used to exonerate — and the way it accumulates
+across the basin makes it hundreds of times less sensitive to the interior rows
+than to the end rows. Its verdict (that the density fields predict 1% of the
+velocity difference) is therefore **plausible, not confirmed**. The basin-mean
+density agreement is solid on its own; the row-by-row density gradient has not
+been measured and should be, cheaply, from the states already saved.
+
+## A note on weighting
+
+The headline −0.952 Sv uses the model's reference layer thicknesses, the
+metric the campaign has recorded throughout. The per-level, centroid and
+bottom-referenced numbers use the actual (partial-cell) thicknesses and sum to
+−0.936 Sv. The two weightings differ by about 3.5% within each model and that
+difference very nearly cancels between them — the largest discrepancy over the
+19 days is 0.028 Sv, below the noise floor at day 360.
+
+---
+
+# Part 2 — the accumulated momentum budget over the full year
+
+Pre-registration: `PREREG_basin_stage_budget_360.md`, written before either run
+started and disclosing in advance that this budget reduces to the
+depth-integrated circulation and is therefore blind to how the transport is
+distributed in the vertical.
+
+## The two runs, and the control that makes them comparable
+
+Both models were run again over the same 360 days from the same restart, with
+every term of the momentum equation accumulated at every one of the 11 520
+steps — legoESM inside its own step, NEMO through the instrumented build of the
+oracle whose only namelist change is the run length.
+
+**The instrumented oracle is bit-identical to the certified one over the whole
+year.** Temperature, salinity and both velocity components agree to exactly
+zero at day 90 and at day 360 against the verdict run. The accumulation is
+therefore taken on the very trajectory whose gap is being explained, and the
+instrumentation changes no physics at the new length.
+
+On the legoESM side the same check was made through the circulation the budget
+reduces to: a separate 10-day run reproduces the verdict member's day-10 state
+to 4e-9 relative, which is the precision at which that member's velocity was
+stored.
+
+## The budget closes on the measured gap
+
+| | legoESM | NEMO |
+|---|---:|---:|
+| rate from the accumulated per-step budget | +0.3750 | +0.4866 |
+| rate measured from the states alone | +0.3749 | +0.4866 |
+
+(band mean over the 13 wet southern rows, in cubic metres per second squared
+per row; the year-mean rate at which each model builds eastward circulation in
+this basin.)
+
+The year-mean shortfall is **0.112**, i.e. legoESM builds southern-basin
+circulation about **23% slower** than NEMO over the year as a whole.
+
+**What this does and does not establish, said plainly.** Each model's own
+budget reproducing its own state change to four decimal places is a real
+*instrument* check — it proves the per-step term decomposition is complete on
+both sides, that no term is missing or mis-signed, and that the accumulation
+harness reads the same states the transport metric reads. But once each side
+closes, the cross-model step (rate difference × time = state-gap difference) is
+arithmetic, not physics. It is **not independent evidence** about the
+mechanism, and the "0.3%" residual is simply the rounding of the quoted rate
+difference; unrounded it is 0.05%.
+
+The budget also **localises nothing yet**. NEMO's depth-integrated circulation
+after a step collapses to a single number — its barotropic solve — because the
+implicit vertical solve's contribution to the column mean is discarded before
+the next step. legoESM's does not collapse that way. The two are therefore in
+incompatible bases and there is currently **no per-term cross-model
+comparison**. The single most valuable next measurement is to ask whether
+legoESM's realised rate also equals its own barotropic-solve deposit: if it
+does, the whole 23% is localised to the barotropic solve and every other term
+is exonerated in one number.
+
+## Per 10-day window: the mean is the only signal
+
+Across the 36 windows the difference has mean +0.112 but a spread of 0.322 —
+**three times its own mean** — and 13 of the 36 windows have the opposite sign.
+The first quarter averages +0.199 and the last +0.406, but with nine windows a
+quarter that separation is about 1.4 standard errors.
+
+Consequences, both registered in advance:
+
+* the pre-registered "roughly constant in time" prediction returned REFUTE by a
+  hair (2.04× against a 2× refute bar) — but at this scatter that bar has almost
+  no power: a series that really is constant at +0.112 would fail it more often
+  than not. The registered test executed and returned REFUTE; the **question is
+  open**, and the result must not be reported as measured growth;
+* the day-260→270 window, which sits at the transport metric's near-zero
+  moment, is **entirely unremarkable** here (+0.093 against a median of about
+  +0.19), exactly as pre-registered. The mid-year "recovery" is a property of
+  the transport metric's cancellation, not of the momentum deposit.
+
+**No per-window or per-season attribution is supportable from this budget.**
+Only the year mean is signal.
+
+## Two structural facts worth carrying forward
+
+**The forcing is identical, and that is a free exoneration.** The wind torque
+applied to these rows is 17.811 in every one of the 36 windows on the legoESM
+side, and DINO's wind stress has no time dependence at all. Whatever is
+different, it is not what is being put in — it is the sinks and the
+redistribution.
+
+
+
+**legoESM overshoots the wall's westward lobe.** NEMO's own year-mean deposit
+into these rows is a meridional dipole: the five rows nearest the southern wall
+receive *westward* circulation at −0.9 to −0.6, while rows further north
+receive up to +2.0. The gap has the same dipole shape as NEMO's own deposit
+(the two per-row profiles correlate at +0.94), with the node displaced about
+two rows further from the wall. Read the signs directly: legoESM builds *more*
+westward circulation than NEMO in exactly the rows where NEMO is already
+building westward. This is not a failure to build the eastward flow — it is an
+overshoot of the wall's return lobe, with the boundary layer too wide. That
+points at the momentum sink and the momentum flux **at the wall**, and away
+from anything interior or anything vertical.
+
+## What is still open
+
+The stage-resolved half of this budget — which of the barotropic solve, the
+explicit terms, or the implicit vertical solve carries the 0.112 — was printed
+but its per-row artifact was lost when the run aborted in an optional trailing
+diagnostic that has since been made tolerant. The run is repeating. The
+pre-registered prediction on it (one stage carrying at least 60% of the
+difference with a constant sign) is unscored until it lands.
+
+Note also the limitation carried over from the instrument itself: NEMO's
+depth-integrated circulation after a step is set entirely by its barotropic
+solve, while legoESM keeps part of the vertical solve's contribution, so the
+two models' stage tables are not row-comparable. Only realized-against-realized
+is, and that is what is reported above.
+
+---
+
+# Ranked mechanism candidates, and how to decide between them
+
+**None of these is confirmed.** This is the naming lane; no fix is built here.
+Each is listed with the cheapest measurement that would settle it, cheapest
+first. Every signature they have to reproduce is now specific: a **depth-uniform
+eastward velocity deficit of about half a millimetre per second**, confined to a
+**300 km boundary layer against the southern wall**, with **identical water
+masses**, **identical wind input**, and a small extra residual in the two
+deepest levels.
+
+## 1. The momentum sink at the bottom — the barotropic drag
+
+The oracle runs *non-linear* bottom drag, whose coefficient scales with the
+local speed, and it applies it implicitly. That is a sink on the whole column,
+not on the bottom cell alone, so it is the one candidate that naturally
+produces a depth-uniform velocity error. It is also largest where the water is
+shallowest — the wall rows — and it grows faster than linearly with the flow,
+which fits a difference that grows through a spin-up year. The campaign has
+already seen drag move this metric once: three drag fixes shifted the day-90
+channel gap from 0.41 to 0.38 Sv.
+
+**What is already ruled out inside this candidate**: the drag *law* and its
+*constants* match. legoESM's shipped card resolves the non-linear NEMO drag
+law, with the same drag coefficient (1e-3) and the same background kinetic
+energy (2.5e-3 m²/s²) the oracle uses, with the drag on the implicit vertical
+diagonal and a separate barotropic in-substep drag — the same three-part
+composition the oracle has. The older linear-drag path and its background
+velocity are not selected and are inert. So if drag is the owner, it is through
+*where and how* the sink is applied — which velocity it sees, at which
+substep, how the coefficient is averaged onto the faces — not through its
+coefficients.
+
+*Decider, offline, from the states already saved*: compute each model's own
+per-row bottom-drag torque from its bottom-cell velocities using the shared
+transcription, and compare. A 20%-plus excess in legoESM in the four wall rows
+settles it.
+
+## 2. The barotropic solve itself
+
+A depth-uniform velocity error is, by definition, an error in the depth-mean
+mode, and on the oracle side the depth-mean after a step is set **entirely** by
+the split-explicit barotropic solve. Everything about that solve — its time
+filter, the substep count, which velocity average it deposits, the face depths
+it uses — is a candidate.
+
+*Decider, offline, from the 360-day accumulation now finishing*: apply to
+legoESM the collapse the oracle satisfies exactly. If legoESM's realised row
+rate also equals its own barotropic-solve deposit to roundoff, then the entire
+23% shortfall is inside that solve and every other term is exonerated in a
+single number. This is the highest-value next measurement in the queue.
+
+## 3. The lateral momentum flux at the free-slip wall
+
+The gap is a boundary layer, and the oracle's wall is free-slip. The width of
+that layer is set by the lateral viscosity and by how the vorticity flux is
+computed at the coastal boundary — a place the two models have historically
+differed.
+
+*Decider, offline*: measure the e-folding width of the per-row gap in each
+model against that model's own frictional boundary-layer scale, and look at the
+per-longitude structure of the difference. A broad, single-signed difference
+points away from a coastal stencil; a few-column feature points straight at it.
+
+## 4. The enhanced vertical viscosity in a convecting basin — **demoted**
+
+This was the leading candidate before the vertical decomposition was done
+correctly, on the reasoning that the basin convects all year and the two models
+must decide the trigger on density differences far below any agreement two
+equations of state can be held to. It is now fourth, for three independent
+reasons:
+
+* vertical mixing **redistributes** momentum within a column at fixed column
+  mean; it cannot by itself create a depth-uniform velocity error;
+* on the oracle side, the implicit vertical solve's contribution to the column
+  mean is **discarded** before the next step, so a difference in it has no
+  direct path into the quantity that is wrong;
+* the oracle's own vertical deposit into these rows is 35 times larger at the
+  far end of the basin than at the wall, while the gap is 8.6 times larger at
+  the wall than at the far end — the two are anti-aligned.
+
+It survives only as a possible *upstream* driver: a different near-bottom
+velocity feeds the non-linear drag, which is a barotropic sink. It should be
+run only if candidates 1 to 3 all come back null, and it is the only one on
+this list that needs a fresh instrumented oracle run rather than an offline
+measurement.
+
+## 5. Close the density question properly
+
+Not a mechanism, a loose end. The basin-mean density agreement is solid, but
+the instrument used to convert that into "the density predicts 1% of the
+velocity difference" is not validated and is insensitive to exactly the rows
+that own the gap. Measure the row-by-row meridional density difference
+directly, offline, from the states already saved.
