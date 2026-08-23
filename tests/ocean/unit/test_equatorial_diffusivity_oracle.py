@@ -31,10 +31,14 @@ def _load():
     return mod
 
 
-def _snapshot(tmp_path, name, *, nk_offset=-1, with_k=True, land_col=None):
+def _snapshot(tmp_path, name, *, with_k=True, with_zint=True, land_col=None,
+              nk=4):
+    """A minimal snapshot. The closure's K live at the nlev-1=4 interior
+    interfaces; z_interface_ref carries their true depths (as the driver now
+    stores), so the probe never reconstructs a cell-centre midpoint."""
     ny, nx, nlev = 3, 4, 5
     zc = np.array([1.0, 3.0, 7.0, 15.0, 31.0])
-    nk = nlev + nk_offset
+    z_int = np.array([2.0, 5.0, 11.0, 23.0])            # true interior faces
     lat = np.tile(np.array([[-1.0], [0.0], [1.0]]), (1, nx))
     lon = np.tile(np.linspace(210.0, 250.0, nx), (ny, 1))
     mask = np.ones((ny, nx))
@@ -42,6 +46,8 @@ def _snapshot(tmp_path, name, *, nk_offset=-1, with_k=True, land_col=None):
         mask[:, land_col] = 0.0
     kw = dict(lat_T=lat, lon_T=lon, land_mask=mask, z_center_ref=zc,
               T=np.zeros((ny, nx, nlev)))
+    if with_zint:
+        kw["z_interface_ref"] = z_int
     if with_k:
         kw["K_M_diag"] = np.full((ny, nx, nk), 4.0e-3)
         kw["K_H_diag"] = np.full((ny, nx, nk), 1.0e-3)
@@ -59,25 +65,31 @@ def test_a_snapshot_without_the_diffusivities_is_refused(tmp_path):
         mod._load_ours(p)
 
 
-def test_interface_levels_get_interface_depths(tmp_path):
-    """K lives at interfaces, so its depth axis is the midpoint of the
-    adjacent cell centres -- labelling it with cell-centre depths would
-    compare our 3 m value against NEMO's 2 m one."""
+def test_the_true_interface_depths_are_used_not_a_midpoint(tmp_path):
+    """K lives at interfaces, and the snapshot now carries their true depths.
+    A cell-centre midpoint reconstruction is a DIFFERENT axis -- on ORCA1 it
+    shifted a 64.96 m interface to 65.12 m and dropped it from a <=65 m window
+    NEMO's 64.98 m depthw kept -- so the probe must read z_interface_ref."""
     mod = _load()
     avm, avt, bn2, lat, lon, zk = mod._load_ours(
-        _snapshot(tmp_path, "iface.npz", nk_offset=-1))
+        _snapshot(tmp_path, "iface.npz"))
     assert bn2 is None
-    assert np.allclose(zk, [2.0, 5.0, 11.0, 23.0])
+    assert np.allclose(zk, [2.0, 5.0, 11.0, 23.0])       # the stored faces
     assert avm.shape[-1] == zk.size
 
 
-def test_cell_centred_k_is_accepted_and_a_third_convention_is_not(tmp_path):
+def test_a_snapshot_without_interface_depths_is_refused_not_guessed(tmp_path):
+    """An old snapshot lacking z_interface_ref must not fall back to a
+    midpoint guess for a diffusivity's depth axis."""
     mod = _load()
-    _, _, _, _, _, zk = mod._load_ours(
-        _snapshot(tmp_path, "centre.npz", nk_offset=0))
-    assert np.allclose(zk, [1.0, 3.0, 7.0, 15.0, 31.0])
-    with pytest.raises(SystemExit, match="depth axis would be a guess"):
-        mod._load_ours(_snapshot(tmp_path, "odd.npz", nk_offset=-3))
+    with pytest.raises(SystemExit, match="z_interface_ref"):
+        mod._load_ours(_snapshot(tmp_path, "old.npz", with_zint=False))
+
+
+def test_a_depth_axis_that_disagrees_with_the_data_fails(tmp_path):
+    mod = _load()
+    with pytest.raises(SystemExit, match="disagree"):
+        mod._load_ours(_snapshot(tmp_path, "bad.npz", nk=3))
 
 
 def test_land_columns_are_excluded_from_the_reduction(tmp_path):

@@ -3809,7 +3809,7 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
     np.savez_compressed(out_dir / f"snapshot_{tag}.npz", **save_kw)
 
 
-def _kprofiles(model, state, sf, dt):
+def _kprofiles(model, state, sf, dt, z_coord):
     """The closure's own K_M/K_H at this state, for a snapshot.
 
     NEMO publishes ``avm`` and ``avt`` in its five-day output, so the oracle's
@@ -3819,27 +3819,40 @@ def _kprofiles(model, state, sf, dt):
     the stratification rather than a measurement of the quantity NEMO
     publishes.
 
-    This asks the model for one tendency evaluation at the snapshot's own
-    state -- the SAME ``physics_fn`` the step consumes, not a re-derived
-    lookalike -- and returns the ``K_v``/``A_v`` it carries.  Returns an empty
-    dict when the configuration produces neither (a run with no vertical-mixing
-    physics), so the snapshot is written either way.
+    The diffusivities are built INSIDE the implicit vertical solve, not on the
+    tendency -- for the TKE closure ``physics_fn`` deliberately returns
+    ``K_v=None`` so the solve computes the profile itself -- so this asks the
+    model for ``diagnose_vertical_K``, which runs the same solve setup and
+    returns the coefficients at the point it consumes them, after the closure,
+    the background floor and the additive internal-wave mixing.  That is the
+    quantity NEMO publishes as avt/avm; reading ``K_v`` off the tendency would
+    have returned nothing for the production arm.
+
+    Returns an empty dict (and says why) when the model exposes no such method
+    or the evaluation fails, so the snapshot is written either way and a
+    diagnostic can never end an integration.
     """
-    try:
-        tend = model.tendencies(state, surface_forcing=sf, dt=dt)
-    except Exception as exc:            # pragma: no cover - config-dependent
-        print(f"[kprofile] SKIPPED: tendency evaluation failed: {exc}",
+    if not hasattr(model, "diagnose_vertical_K"):
+        print("[kprofile] SKIPPED: this model exposes no diagnose_vertical_K "
+              "(the diffusivity dump is a lat-lon C-grid feature only)",
               flush=True)
         return {}
-    out = {}
-    for _key, _name in (("K_v", "K_H_diag"), ("A_v", "K_M_diag")):
-        _f = getattr(tend, _key, None)
-        _d = getattr(_f, "data", _f)
-        if _d is not None:
-            out[_name] = np.asarray(_d)
-    if not out:
-        print("[kprofile] SKIPPED: this configuration returns no K_v/A_v "
-              "(no vertical-mixing physics on the tendency)", flush=True)
+    try:
+        K_H, K_M = model.diagnose_vertical_K(state, dt, surface_forcing=sf)
+    except Exception as exc:            # pragma: no cover - config-dependent
+        print(f"[kprofile] SKIPPED: diagnose_vertical_K failed: {exc}",
+              flush=True)
+        return {}
+    out = {"K_H_diag": np.asarray(getattr(K_H, "data", K_H)),
+           "K_M_diag": np.asarray(getattr(K_M, "data", K_M))}
+    # The TRUE interior interface depths the profile lives on, so a reader
+    # compares against NEMO's depthw on the same levels instead of a
+    # cell-centre midpoint reconstruction (which shifted a 64.96 m interface
+    # to 65.12 m and dropped it from a <=65 m window -- codex 2026-08-23).
+    z_half = getattr(z_coord, "z_half_ref", None) if z_coord is not None \
+        else None
+    if z_half is not None:
+        out["z_interface_ref"] = np.abs(np.asarray(z_half)[1:-1])
     return out
 
 
@@ -4783,13 +4796,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "mid-flight (e.g. day-30 SST vs NEMO) without waiting "
                         "for the full integration.")
     p.add_argument("--kprofile-snapshots", action="store_true",
-                   help="Store the closure's own vertical viscosity and "
-                        "diffusivity (K_M_diag/K_H_diag) in every snapshot. "
-                        "NEMO publishes avm/avt, so this is what makes the "
-                        "turbulent Prandtl number comparable against the "
-                        "oracle instead of inferred from TKE. Costs one extra "
-                        "tendency evaluation per snapshot and changes no "
-                        "prognostic field.")
+                   help="Store the vertical viscosity and diffusivity the "
+                        "implicit solve consumes (K_M_diag/K_H_diag, with "
+                        "z_interface_ref) in each day/final snapshot of the "
+                        "standard loop. NEMO publishes avm/avt, so this makes "
+                        "the turbulent Prandtl number comparable against the "
+                        "oracle instead of inferred from TKE. The TKE closure "
+                        "returns no K on the tendency (the solve builds it), "
+                        "so this uses the model's diagnose_vertical_K. Costs "
+                        "one extra solve-setup per snapshot, changes no "
+                        "prognostic field, and is refused with --scan-block "
+                        "(that lane does not thread the dump).")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -6841,6 +6858,15 @@ def main() -> int:
                 and not args.sss_restore
                 and not _tide_enabled
                 and _tti != "ab2")
+    if args.kprofile_snapshots and use_scan:
+        # The scan-block lane does not thread the per-snapshot K dump, so
+        # honouring --kprofile-snapshots there would silently write no
+        # diffusivities.  Refuse rather than mislead (the fidelity arms run
+        # with --sss-restore, which already disables the scan lane).
+        raise SystemExit(
+            "--kprofile-snapshots is not wired into the --scan-block lane; "
+            "drop --scan-block (the standard per-step loop dumps the "
+            "diffusivities) or drop --kprofile-snapshots.")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
@@ -7827,7 +7853,7 @@ def main() -> int:
                            lon2d, z_coord=z_coord, io_proc=_is_io_proc(),
                            ice_state=ice_state, grid=grid,
                            step=step, day=day,
-                           extra=(_kprofiles(model, state, sf, dt)
+                           extra=(_kprofiles(model, state, sf, dt, z_coord)
                                   if args.kprofile_snapshots else None))
             print(f"[snapshot] day {day:.0f} saved", flush=True)
             # Same cadence as the snapshot, and AFTER this step's
@@ -7851,7 +7877,7 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state, grid=grid,
                    step=step, day=day,
-                   extra=(_kprofiles(model, state, sf, dt)
+                   extra=(_kprofiles(model, state, sf, dt, z_coord)
                           if args.kprofile_snapshots else None))
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)

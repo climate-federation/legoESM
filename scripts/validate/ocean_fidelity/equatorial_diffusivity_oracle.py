@@ -94,17 +94,28 @@ def _load_ours(snapshot: Path):
     lon = np.asarray(z["lon_T"], dtype=np.float64) % 360.0
     if np.nanmax(np.abs(lat)) <= np.pi + 1e-6:
         lat, lon = np.degrees(lat), np.degrees(lon) % 360.0
-    zc = np.abs(np.asarray(z["z_center_ref"], dtype=np.float64))
     nk = avm.shape[-1]
-    if nk == zc.size - 1:
-        zk = 0.5 * (zc[:-1] + zc[1:])
-    elif nk == zc.size:
-        zk = zc
+    # The TRUE interior interface depths, as the closure and NEMO's depthw
+    # define them.  A cell-centre midpoint reconstruction is NOT the same: on
+    # ORCA1 it put the nominal 64.96 m interface at 65.12 m, which drops it
+    # from a <=65 m window that keeps NEMO's 64.98 m depthw -- an unequal
+    # vertical window presented as a common-level comparison (codex 2026-08-23).
+    if "z_interface_ref" in z:
+        zk = np.abs(np.asarray(z["z_interface_ref"], dtype=np.float64))
+        if zk.size != nk:
+            raise SystemExit(
+                f"{snapshot}: z_interface_ref has {zk.size} levels against "
+                f"{nk} K levels; the depth axis and the data disagree.")
     else:
-        raise SystemExit(
-            f"{snapshot}: K has {nk} levels against {zc.size} cell centres; "
-            "neither the interface nor the centre convention fits, so the "
-            "depth axis would be a guess.")
+        zc = np.abs(np.asarray(z["z_center_ref"], dtype=np.float64))
+        if nk == zc.size:
+            zk = zc
+        else:
+            raise SystemExit(
+                f"{snapshot}: K has {nk} interior interfaces but the snapshot "
+                "carries no z_interface_ref; a cell-centre midpoint is the "
+                "wrong depth axis for a diffusivity. Re-run with "
+                "--kprofile-snapshots on the current code, which stores it.")
     wet = np.asarray(z["land_mask"], dtype=np.float64) > 0.5
     avm = np.where(wet[..., None], avm, np.nan)
     avt = np.where(wet[..., None], avt, np.nan)

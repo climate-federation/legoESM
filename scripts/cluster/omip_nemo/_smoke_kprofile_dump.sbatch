@@ -50,7 +50,7 @@ print("snapshot:", f[-1])
 print("keys:", sorted(z.files))
 for k in ("K_M_diag", "K_H_diag"):
     if k not in z:
-        raise SystemExit(f"FAIL: {k} absent -- the dump did not execute")
+        raise SystemExit(f"FAIL: {k} absent -- diagnose_vertical_K did not run")
     a = z[k]
     fin = np.isfinite(a)
     print(f"{k}: shape {a.shape}  finite {fin.mean():.3f}  "
@@ -58,9 +58,23 @@ for k in ("K_M_diag", "K_H_diag"):
           f"median>0 {np.nanmedian(a[fin & (a > 0)]) if (fin & (a > 0)).any() else float('nan'):.4g}")
     if not (fin & (a > 0)).any():
         raise SystemExit(f"FAIL: {k} has no finite positive value")
+if "z_interface_ref" not in z:
+    raise SystemExit("FAIL: z_interface_ref absent -- the depth axis is a guess")
 nlev = z["T"].shape[-1]
-print(f"levels: T {nlev}, K {z['K_M_diag'].shape[-1]} "
-      f"({'interfaces' if z['K_M_diag'].shape[-1] == nlev - 1 else 'centres'})")
+nk = z["K_M_diag"].shape[-1]
+zi = z["z_interface_ref"]
+print(f"levels: T {nlev}, K {nk}, z_interface_ref {zi.size}  "
+      f"(faces {zi[0]:.2f}..{zi[-1]:.2f} m)")
+if nk != nlev - 1 or zi.size != nk:
+    raise SystemExit(f"FAIL: K has {nk} levels, T {nlev}, z_interface_ref "
+                     f"{zi.size}; expected interior interfaces nlev-1")
+# The Prandtl number the whole campaign hangs on: viscosity over diffusivity,
+# in the upper ocean, must be a sane O(1-10) where both are closure-set.
+avm, avt = z["K_M_diag"], z["K_H_diag"]
+ok = np.isfinite(avm) & np.isfinite(avt) & (avt > 1e-6) & (avm > 1e-6)
+if ok.any():
+    pr = np.median(avm[ok] / avt[ok])
+    print(f"global median Pr where both closure-set: {pr:.3f}")
 print("PASS")
 PY
 echo DONE

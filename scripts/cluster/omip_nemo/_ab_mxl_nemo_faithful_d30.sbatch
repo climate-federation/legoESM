@@ -140,7 +140,13 @@ echo "=== ${ARM} equatorial diffusivity vs NEMO's published avm/avt (day 30) ===
 $PY -u scripts/validate/ocean_fidelity/equatorial_diffusivity_oracle.py \
   --nemo-gridw "$GW_W" --rec 5 \
   --legoesm-snapshot $OUT/snapshot_day0030.npz 2>&1 | tail -90
-echo "=== eqdiff rc=$?"
+eqdiff_rc=$?
+echo "=== eqdiff rc=$eqdiff_rc"
+# The whole point of this arm is the diffusivity comparison; if the probe
+# could not read our side (an empty snapshot, a shape mismatch) the run
+# produced no measurement and must not report success (codex 2026-08-23).
+[ $eqdiff_rc -eq 0 ] || { echo "FATAL: the diffusivity comparison did not "\
+"run -- the arm produced no Prandtl measurement"; exit 1; }
 
 echo "=== ${ARM} equatorial thermocline structure (day 30) ==="
 $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline_structure.py \

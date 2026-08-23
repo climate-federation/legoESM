@@ -51,20 +51,32 @@ def _state(n_lat=4, n_lon=6, nlev=2):
     )
 
 
-class _Model:
-    """Stands in for the ocean model's public ``tendencies`` entry point."""
+class _ZCoord:
+    """A z-coordinate stub carrying interface depths (z_half_ref, <=0)."""
+    def __init__(self, nlev):
+        self.z_half_ref = -np.linspace(0.0, 300.0, nlev + 1)
 
-    def __init__(self, K_v, A_v, raises=False):
-        self._K_v, self._A_v, self._raises = K_v, A_v, raises
+
+class _Model:
+    """Stands in for the ocean model's diagnose_vertical_K entry point.
+
+    The production TKE closure returns K_v=None on the TENDENCY -- the
+    diffusivities are built inside the implicit solve -- so a probe that read
+    the tendency would measure nothing for the arm under test. The real path
+    is diagnose_vertical_K, and this stub exercises exactly that; a stub with
+    a `tendencies` method but no diagnose_vertical_K must be reported skipped,
+    which is what the real TKE model would do if the method were removed.
+    """
+    def __init__(self, K_H, K_M, raises=False):
+        self._K_H, self._K_M, self._raises = K_H, K_M, raises
         self.calls = []
 
-    def tendencies(self, state, surface_forcing=None, dt=None):
+    def diagnose_vertical_K(self, state, dt, surface_forcing=None):
         if self._raises:
-            raise RuntimeError("no physics on this configuration")
-        self.calls.append((surface_forcing, dt))
-        return SimpleNamespace(
-            K_v=None if self._K_v is None else _field(self._K_v),
-            A_v=None if self._A_v is None else _field(self._A_v))
+            raise RuntimeError("solve setup failed on this configuration")
+        self.calls.append((dt, surface_forcing))
+        return (None if self._K_H is None else _field(self._K_H),
+                None if self._K_M is None else _field(self._K_M))
 
 
 def test_the_flag_is_off_by_default_and_parses():
@@ -75,35 +87,41 @@ def test_the_flag_is_off_by_default_and_parses():
     assert p.parse_args(base + ["--kprofile-snapshots"]).kprofile_snapshots
 
 
-def test_kprofiles_returns_the_models_own_diffusivities():
-    """The probe must read the SAME tendency the step consumes, and must pass
-    the snapshot's own state and timestep to it -- a diagnostic evaluated at a
-    different state or dt is not the run's mixing."""
+def test_kprofiles_reads_the_solves_own_diffusivities_and_true_depths():
+    """The probe must call diagnose_vertical_K -- the K the implicit solve
+    consumes, not the tendency's None -- at the snapshot's own state and dt,
+    and must store the interior interface depths, not a cell-centre guess."""
     mod = _load()
-    K_H = np.full((4, 6, 1), 1.5e-3)
-    K_M = np.full((4, 6, 1), 3.0e-3)
+    nlev = 3
+    K_H = np.full((4, 6, nlev - 1), 1.5e-3)
+    K_M = np.full((4, 6, nlev - 1), 3.0e-3)
     m = _Model(K_H, K_M)
-    st = _state()
-    out = mod._kprofiles(m, st, "SF", 150.0)
-    assert set(out) == {"K_H_diag", "K_M_diag"}
+    out = mod._kprofiles(m, _state(nlev=nlev), "SF", 150.0, _ZCoord(nlev))
+    assert set(out) == {"K_H_diag", "K_M_diag", "z_interface_ref"}
     assert np.allclose(out["K_H_diag"], K_H)
     assert np.allclose(out["K_M_diag"], K_M)
-    assert m.calls == [("SF", 150.0)]
+    # interior interfaces only (drop surface and seafloor), positive-down
+    assert out["z_interface_ref"].size == nlev - 1
+    assert np.all(out["z_interface_ref"] > 0)
+    assert m.calls == [(150.0, "SF")]
 
 
-def test_a_configuration_with_no_diffusivities_says_so(capsys):
+def test_a_model_without_the_diagnostic_method_is_skipped(capsys):
+    """A grid whose model has no diagnose_vertical_K (e.g. MPAS) must be
+    reported skipped rather than crashing or silently writing nothing."""
     mod = _load()
-    assert mod._kprofiles(_Model(None, None), _state(), None, 150.0) == {}
+    m = SimpleNamespace(tendencies=lambda *a, **k: None)   # no diagnose method
+    assert mod._kprofiles(m, _state(), None, 150.0, _ZCoord(2)) == {}
     assert "SKIPPED" in capsys.readouterr().out
 
 
-def test_a_failed_tendency_evaluation_does_not_kill_the_run(capsys):
+def test_a_failed_evaluation_does_not_kill_the_run(capsys):
     """A diagnostic must never be able to end an integration -- a freshwater
     band print that read a field one grid did not have killed every MPAS run
     for three days."""
     mod = _load()
-    assert mod._kprofiles(_Model(None, None, raises=True), _state(), None,
-                          150.0) == {}
+    m = _Model(None, None, raises=True)
+    assert mod._kprofiles(m, _state(), None, 150.0, _ZCoord(2)) == {}
     assert "SKIPPED" in capsys.readouterr().out
 
 
