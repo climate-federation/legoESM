@@ -1003,3 +1003,13 @@ def test_parse_args_output_every_steps_flag(instruments):
     b = k._parse_args(["nemo_dino_kamm_mlf", "out.npz", "--days", "5",
                        "--output-every-steps", "1"])
     assert b.output_every_steps == 1 and b.days == 5
+
+
+def test_daily_acc_is_refused_at_a_sub_daily_cadence(instruments, tmp_path):
+    """The ACC series are read as DAYS by their consumers; combining them with
+    a sub-daily capture would silently mislabel a retention curve's age axis.
+    """
+    k = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        k.run_twin("nemo_dino_kamm_mlf", str(tmp_path / "x.npz"), n_days=5,
+                   daily_acc=True, capture_every_steps=1)

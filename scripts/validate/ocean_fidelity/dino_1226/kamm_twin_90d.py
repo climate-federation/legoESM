@@ -728,6 +728,21 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     growing the module-level tuple, would silently change every sibling
     probe's artifact.
     """
+    # Resolved FIRST, before any expensive setup: a rejected cadence should
+    # cost a millisecond, not a bridge build.
+    capture_every, n_out, nsteps = resolve_capture_cadence(
+        n_days, capture_every_steps)
+    if daily_acc and capture_every != STEPS_PER_DAY:
+        # The ACC series are named *_daily and every consumer reads their
+        # index as a DAY -- baro_retention_walk.py builds its retention curve
+        # from `np.arange(1, n+1)` taken as days and never looks at
+        # capture_every_steps. At a sub-daily cadence that curve's age axis
+        # would be wrong by the cadence factor with nothing to catch it, so
+        # refuse the combination rather than emit a silently mislabelled arm.
+        raise SystemExit(
+            "--daily-acc is a DAILY series and its consumers read the index "
+            "as days; it cannot be combined with --output-every-steps "
+            f"{capture_every}. Run them as separate arms.")
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
     # inheriting the other's setting.
@@ -759,8 +774,6 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
               flush=True)
         st = st._replace(T=st.T.replace(data=t_pert))
 
-    capture_every, n_out, nsteps = resolve_capture_cadence(
-        n_days, capture_every_steps)
 
     # #1492: "leapfrog_rhs" placement REQUIRES return_rate=True + threading
     # the rate into model.step(external_tracer_rate=...) (run_dino.py's

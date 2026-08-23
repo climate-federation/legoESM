@@ -53,9 +53,11 @@ def test_plant_dry_violation_is_inert_on_masked_stats(ewt):
     eta = rng.normal(size=wet.shape)
     poisoned = ewt.plant_dry_violation(eta, wet)
     assert ewt.masked_stats(eta, wet) == ewt.masked_stats(poisoned, wet)
-    # ...and NOT inert on the unmasked one -- otherwise the control proves
-    # nothing at all.
-    assert np.max(np.abs(poisoned)) > 1e5
+    # ...and NOT inert on the UNMASKED statistic, which is what makes the
+    # control non-vacuous.  (Asserting that the poison itself is large would
+    # be a tautology -- the function writes the value.)
+    assert (ewt.masked_stats(poisoned, np.ones_like(wet))["max_abs_m"]
+            > 1e3 * ewt.masked_stats(poisoned, wet)["max_abs_m"])
 
 
 def test_plant_dry_violation_refuses_an_all_wet_frame(ewt):
@@ -99,15 +101,20 @@ def test_locus_shares_sum_to_one_and_localise(ewt):
     diff = np.zeros(wet.shape)
     diff[r["wall"]] = 1.0
     sh = ewt.locus_shares(diff, r)
-    assert sh["wall"] == pytest.approx(1.0)
-    assert sum(sh.values()) == pytest.approx(1.0)
+    assert sh["wall"]["share"] == pytest.approx(1.0)
+    assert sum(v["share"] for v in sh.values()) == pytest.approx(1.0)
+    # the enrichment is the number that can name a locus: the wall holds all
+    # the signal while occupying a fraction of the domain
+    assert sh["wall"]["enrichment"] > 1.0
+    assert sh["wall"]["enrichment"] == pytest.approx(
+        1.0 / sh["wall"]["area_fraction"])
 
 
 def test_locus_shares_of_an_exactly_zero_field_is_zero_not_nan(ewt):
     wet, lat = _basin()
     r = ewt.locus_partition(wet, lat)
     sh = ewt.locus_shares(np.zeros(wet.shape), r)
-    assert all(v == 0.0 for v in sh.values())
+    assert all(v["share"] == 0.0 for v in sh.values())
 
 
 def test_spectra_recovers_a_known_sinusoid(ewt):
@@ -149,5 +156,298 @@ def test_provenance_stamps_sha_clock_and_dtype(ewt):
     prov = ewt.provenance({"source": "test"})
     for key in ("git_sha", "git_dirty", "utc", "dtype", "numpy", "argv"):
         assert key in prov
-    assert prov["dtype"] == "float64"
     assert prov["source"] == "test"
+    # NB: prov["dtype"] describes the ANALYSIS and is a literal, so asserting
+    # it here would be a tautology. The dtype each ARTIFACT was stored at is
+    # checked where it matters, in test_compare_refuses_a_float32_lego_artifact.
+
+
+def test_variance_bands_puts_a_known_sinusoid_in_the_right_band(ewt):
+    """Known-answer control: a pure 4 h oscillation must land in '<6h'."""
+    wet, _ = _basin()
+    dt = 2700.0
+    n = 256
+    t = np.arange(n) * dt
+    eta = np.zeros((n,) + wet.shape)
+    eta[:, wet] = np.sin(2 * np.pi * t / (4.0 * 3600.0))[:, None]
+    b = ewt.variance_bands(eta, wet, dt)
+    assert b["lt_6h"] > 0.98
+    assert sum(b.values()) == pytest.approx(1.0)
+
+
+def test_variance_bands_puts_a_slow_signal_in_the_slow_band(ewt):
+    wet, _ = _basin()
+    dt = 2700.0
+    n = 256
+    t = np.arange(n) * dt
+    eta = np.zeros((n,) + wet.shape)
+    eta[:, wet] = np.sin(2 * np.pi * t / (72.0 * 3600.0))[:, None]
+    b = ewt.variance_bands(eta, wet, dt)
+    assert b["gt_24h"] > 0.98
+
+
+def test_variance_bands_refuses_a_static_field(ewt):
+    wet, _ = _basin()
+    with pytest.raises(SystemExit, match="no temporal variance"):
+        ewt.variance_bands(np.ones((8,) + wet.shape), wet, 2700.0)
+
+
+def test_step_noise_ratio_is_one_for_identical_fields(ewt):
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    rng = np.random.default_rng(1)
+    a = rng.normal(size=(20,) + wet.shape)
+    out = ewt.step_noise_ratio(a, a, wet, r)
+    assert out["median"] == pytest.approx(1.0)
+    assert out["max"] == pytest.approx(1.0)
+    assert all(v["share"] == 0.0
+               for v in out["excess_share_by_locus"].values())
+
+
+def test_step_noise_ratio_finds_a_planted_wall_mode(ewt):
+    """Synthetic violation: plant a 2-step oscillation on the wall band only.
+
+    The ratio must blow up AND the excess must be attributed to 'wall'.
+    """
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    rng = np.random.default_rng(2)
+    nemo = rng.normal(size=(20,) + wet.shape) * 1e-3
+    lego = nemo.copy()
+    flip = ((-1.0) ** np.arange(20))[:, None]
+    lego[:, r["wall"]] += flip * 1.0
+    out = ewt.step_noise_ratio(lego, nemo, wet, r)
+    assert out["max"] > 100.0
+    assert out["excess_share_by_locus"]["wall"]["share"] > 0.99
+    assert out["excess_share_by_locus"]["wall"]["enrichment"] > 1.0
+    assert r["wall"][out["argmax_j"], out["argmax_i"]]
+
+
+def test_step_noise_ratio_excludes_a_motionless_nemo_cell(ewt):
+    """A cell where the oracle never moves must not become an infinite ratio."""
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    rng = np.random.default_rng(3)
+    nemo = rng.normal(size=(20,) + wet.shape)
+    nemo[:, 10, 5] = 7.0          # exactly static
+    lego = rng.normal(size=(20,) + wet.shape)
+    out = ewt.step_noise_ratio(lego, nemo, wet, r)
+    assert np.isfinite(out["max"])
+    assert out["n_live_cells"] == int(wet.sum()) - 1
+
+
+def test_time_level_discriminator_picks_the_matching_level(ewt):
+    """Known-answer control: build a series where lego == sshn exactly."""
+    wet, _ = _basin()
+    rng = np.random.default_rng(4)
+    sshn = rng.normal(size=(12,) + wet.shape)
+    sshb = sshn + 0.5 * rng.normal(size=sshn.shape)
+    d = ewt.time_level_discriminator(sshn.copy(), sshn, sshb, wet)
+    assert d["registered_lego_N_vs_sshn_N"] == pytest.approx(0.0)
+    assert d["alt_lego_N_vs_sshb_N"] > 0.0
+    assert d["nemo_own_sshn_minus_sshb"] > 0.0
+
+
+def test_time_level_discriminator_would_expose_a_wrong_pairing(ewt):
+    """Synthetic violation: if lego actually equals sshb, the check must say so."""
+    wet, _ = _basin()
+    rng = np.random.default_rng(5)
+    sshn = rng.normal(size=(12,) + wet.shape)
+    sshb = sshn + 0.5 * rng.normal(size=sshn.shape)
+    d = ewt.time_level_discriminator(sshb.copy(), sshn, sshb, wet)
+    assert d["alt_lego_N_vs_sshb_N"] < d["registered_lego_N_vs_sshn_N"]
+
+
+def test_highpass_removes_the_slow_component(ewt):
+    dt = 2700.0
+    n = 256
+    t = np.arange(n) * dt
+    slow = 3.0 * np.sin(2 * np.pi * t / (96.0 * 3600.0))
+    fast = 0.5 * np.sin(2 * np.pi * t / (4.0 * 3600.0))
+    out = ewt.highpass((slow + fast)[:, None], dt)[:, 0]
+    assert np.abs(out - fast).max() < 1e-8 * 0.5 + 1e-9
+    assert out.std() == pytest.approx(fast.std(), rel=1e-6)
+
+
+def test_propagation_lag_recovers_a_planted_travelling_wave(ewt):
+    """Known-answer control: a signal shifted by exactly 2 steps per cell."""
+    dt = 2700.0
+    dx = 60_000.0
+    n, nx, ny = 256, 12, 3
+    wet = np.ones((ny, nx), dtype=bool)
+    rng = np.random.default_rng(7)
+    base = ewt.highpass(rng.normal(size=(n, 1)), dt)[:, 0]
+    eta = np.zeros((n, ny, nx))
+    for i in range(nx):
+        eta[:, 1, i] = np.roll(base, 2 * i)
+    out = ewt.propagation_lag(eta, wet, 1, dx, dt)
+    assert out["median_lag_steps"] == pytest.approx(2.0)
+    assert out["phase_speed_m_s"] == pytest.approx(dx / (2 * dt))
+    assert out["n_pairs"] == nx - 1
+
+
+def test_propagation_lag_reports_standing_when_there_is_no_lag(ewt):
+    """A signal identical in every column must read as zero lag, not a speed."""
+    dt = 2700.0
+    n, nx, ny = 128, 10, 3
+    wet = np.ones((ny, nx), dtype=bool)
+    rng = np.random.default_rng(8)
+    base = ewt.highpass(rng.normal(size=(n, 1)), dt)[:, 0]
+    eta = np.zeros((n, ny, nx))
+    eta[:, 1, :] = base[:, None]
+    out = ewt.propagation_lag(eta, wet, 1, 60_000.0, dt)
+    assert out["median_lag_steps"] == 0.0
+    assert out["phase_speed_m_s"] is None
+    assert out["frac_pairs_within_one_step"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# fixes demanded by the two adversarial reviews of this instrument
+# ---------------------------------------------------------------------------
+def test_locus_partition_does_not_call_a_periodic_seam_a_wall(ewt):
+    """DINO is zonally periodic; the first and last columns are the ACC
+    channel's seam, not a wall. This test FAILS if the wrap is removed."""
+    ny, nx = 11, 8
+    wet = np.zeros((ny, nx), dtype=bool)
+    wet[1:-1, :] = True                 # open all the way round in x
+    lat = np.linspace(-40.0, 40.0, ny)[:, None] * np.ones((1, nx))
+    r = ewt.locus_partition(wet, lat, periodic_i=True)
+    # an interior row's seam columns have wet neighbours all round
+    assert not r["wall"][5, 0]
+    assert not r["wall"][5, -1]
+    # ...and with the wrap switched off they WOULD be walls
+    r2 = ewt.locus_partition(wet, lat, periodic_i=False)
+    assert r2["wall"][5, 0] and r2["wall"][5, -1]
+
+
+def test_locus_partition_wall_width_grows(ewt):
+    wet, lat = _basin(ny=21, nx=13)
+    one = ewt.locus_partition(wet, lat, wall_cells=1)["wall"].sum()
+    two = ewt.locus_partition(wet, lat, wall_cells=2)["wall"].sum()
+    assert two > one
+
+
+def test_locus_partition_equator_width_is_a_parameter(ewt):
+    wet, lat = _basin(ny=41, nx=9)
+    narrow = ewt.locus_partition(wet, lat, equator_half_width_deg=1.0)
+    wide = ewt.locus_partition(wet, lat, equator_half_width_deg=3.0)
+    assert wide["equator"].sum() > narrow["equator"].sum()
+
+
+def test_masked_stats_rms_is_area_weighted(ewt):
+    """An unweighted rms would ignore the area argument entirely."""
+    wet = np.ones((2, 2), dtype=bool)
+    diff = np.array([[1.0, 0.0], [0.0, 0.0]])
+    flat = ewt.masked_stats(diff, wet, None)["rms_m"]
+    heavy = ewt.masked_stats(diff, wet, np.array([[9.0, 1.0], [1.0, 1.0]]))
+    assert flat == pytest.approx(0.5)
+    assert heavy["rms_m"] == pytest.approx(np.sqrt(9.0 / 12.0))
+    assert heavy["rms_m"] != pytest.approx(flat)
+
+
+def test_spectra_does_not_double_count_the_nyquist_bin(ewt):
+    """A pure 2-step oscillation sits exactly on Nyquist, where the coherent-
+    gain factor is 1/sum(w), not 2/sum(w)."""
+    dt = 2700.0
+    n = 256
+    amp = 0.3
+    x = amp * ((-1.0) ** np.arange(n))
+    f, a = ewt.spectra(x, dt)
+    assert a[-1] == pytest.approx(amp, rel=0.05)
+
+
+def test_step_noise_ratio_floors_a_near_static_denominator(ewt):
+    """A nearly-motionless oracle cell must not dominate the headline max."""
+    wet, lat = _basin(ny=21, nx=11)
+    r = ewt.locus_partition(wet, lat)
+    rng = np.random.default_rng(9)
+    nemo = rng.normal(size=(20,) + wet.shape)
+    nemo[:, 10, 5] *= 1e-12          # near-static, NOT exactly static
+    lego = rng.normal(size=(20,) + wet.shape)
+    out = ewt.step_noise_ratio(lego, nemo, wet, r)
+    assert out["denominator_floor_m2"] > 0.0
+    assert out["max"] < 1e6          # unfloored this would be ~1e24
+
+
+def test_time_level_discriminator_and_gate_shape(ewt):
+    wet, _ = _basin()
+    rng = np.random.default_rng(10)
+    sshn = rng.normal(size=(12,) + wet.shape)
+    sshb = sshn + 0.5 * rng.normal(size=sshn.shape)
+    d = ewt.time_level_discriminator(sshn.copy(), sshn, sshb, wet)
+    assert set(d) >= {"registered_lego_N_vs_sshn_N", "alt_lego_N_vs_sshb_N",
+                      "alt_lego_N_vs_sshn_Nminus1",
+                      "alt_lego_Nminus1_vs_sshn_N",
+                      "nemo_own_sshn_minus_sshb"}
+
+
+def _synthetic_pair(tmp_path, nt=24, ny=9, nx=7, lego_offset=0.0):
+    """A minimal mesh_mask + two artifacts, enough to run compare() for real."""
+    import netCDF4
+    mesh = tmp_path / "mesh.nc"
+    wet = np.zeros((ny, nx), dtype=bool)
+    wet[1:-1, 1:-1] = True
+    lat = np.linspace(-60.0, 60.0, ny)[:, None] * np.ones((1, nx))
+    lon = np.linspace(0.0, 30.0, nx)[None, :] * np.ones((ny, 1))
+    with netCDF4.Dataset(mesh, "w") as ds:
+        ds.createDimension("x", nx)
+        ds.createDimension("y", ny)
+        ds.createDimension("z", 2)
+        ds.createDimension("t", 1)
+        ds.createVariable("tmask", "f8", ("t", "z", "y", "x"))[:] = np.broadcast_to(
+            wet, (1, 2, ny, nx))
+        ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = lat
+        ds.createVariable("nav_lon", "f8", ("y", "x"))[:] = lon
+        ds.createVariable("e1t", "f8", ("t", "y", "x"))[:] = np.full((1, ny, nx), 6e4)
+        ds.createVariable("e2t", "f8", ("t", "y", "x"))[:] = np.full((1, ny, nx), 6e4)
+    dt = 2700.0
+    t = np.arange(1, nt + 1) * dt
+    rng = np.random.default_rng(11)
+    base = rng.normal(size=(nt, ny, nx)) * 1e-3
+    base += np.linspace(0.0, 0.05, nt)[:, None, None]
+    npz_n = tmp_path / "nemo.npz"
+    npz_l = tmp_path / "lego.npz"
+    np.savez(npz_n, eta=base, eta_before=base * 0.999, t_seconds=t,
+             nav_lat=lat, nav_lon=lon)
+    np.savez(npz_l, eta=base + lego_offset, t_seconds=t)
+    return str(mesh), str(npz_n), str(npz_l)
+
+
+def test_compare_runs_end_to_end_and_reports_the_registered_fields(ewt, tmp_path):
+    """The function that produces the scientific number, exercised for real."""
+    mesh, npz_n, npz_l = _synthetic_pair(tmp_path, lego_offset=1e-6)
+    out = tmp_path / "out"
+    res = ewt.compare(npz_n, npz_l, str(out), mesh)
+    for key in ("propagation", "time_levels_rms_m", "variance_bands",
+                "step_noise_ratio", "one_step_floor_max_abs_m", "linear_bar_m",
+                "growth_over_linear_bar", "snapshots", "growth", "spectra",
+                "locus_sensitivity", "provenance"):
+        assert key in res, key
+    assert (out / "eta_wave_twin.json").exists()
+    for fig in ("fig_diff_maps.png", "fig_hovmoller.png",
+                "fig_growth_locus.png", "fig_spectra.png"):
+        assert (out / fig).exists(), fig
+    # the pre-registered spectral bar is EVALUATED, not merely stamped
+    for v in res["spectra"].values():
+        assert isinstance(v["exceeds_spectral_bar"], bool)
+    # every retained snapshot lies inside the run
+    for s in res["snapshots"]:
+        assert s["t_hours"] <= res["growth"][-1]["t_hours"] + 1e-9
+
+
+def test_compare_refuses_a_float32_lego_artifact(ewt, tmp_path):
+    mesh, npz_n, npz_l = _synthetic_pair(tmp_path)
+    d = dict(np.load(npz_l))
+    d["eta"] = d["eta"].astype(np.float32)
+    np.savez(npz_l, **d)
+    with pytest.raises(SystemExit, match="float32"):
+        ewt.compare(npz_n, npz_l, str(tmp_path / "o2"), mesh)
+
+
+def test_compare_refuses_a_mismatched_mesh(ewt, tmp_path):
+    import netCDF4
+    mesh, npz_n, npz_l = _synthetic_pair(tmp_path)
+    with netCDF4.Dataset(mesh, "r+") as ds:
+        ds.variables["nav_lat"][:] = ds.variables["nav_lat"][:] + 5.0
+    with pytest.raises(SystemExit, match="does not match the mesh"):
+        ewt.compare(npz_n, npz_l, str(tmp_path / "o3"), mesh)
