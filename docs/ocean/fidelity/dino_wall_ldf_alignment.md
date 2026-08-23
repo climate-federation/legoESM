@@ -567,3 +567,137 @@ band total is insensitive to viscosity while its meridional distribution is not,
 beyond the telescoping argument, which is suggestive and not a proof. And the
 compensation reading rests on three points of an anti-correlation with no
 mechanism test behind it.
+
+---
+
+# Part 5 — the EEN vorticity flux, decomposed to the end; and two retractions
+
+Written 2026-08-23. The ranked residual list above is now stale in three places
+and is corrected here rather than left to be built on.
+
+## The lead was right about the term and wrong about the mechanism
+
+The EEN vorticity flux was the sole surviving candidate, at 3.10e-10 m/s² on
+the four wall rows. It has now been decomposed exhaustively, and the
+decomposition closes: NEMO's `vor_een` transcribed verbatim reproduces NEMO's
+own dumped tendency to **2.0e-20 m/s²**, 7.7e-15 of the field's RMS. So the
+ledger is complete, not merely ranked.
+
+**The registered mechanism — the F-point thickness — is REFUTED as the owner,
+and the reading behind it was right about everything except the size.** NEMO
+applies *no* free-surface stretching to the F-point thickness at a vertex with
+a dry neighbour (`fe3mask` is the four-`tmask` product, zero there), while
+legoESM averages the live thickness over the wet count. The difference is real
+and exactly where predicted — 1.47e-4 relative at wall vertices against 2.0e-6
+at fully-wet ones, a 74× enrichment *in the e3f error itself*. Propagated
+through the same triad code it delivers 3.25e-12 m/s², 95× too small, and
+closes 0% of the mismatch. The campaign's standing lore that "the count-
+normalised mean matches" was wrong in mechanism and right in consequence.
+
+**Every input to the triad is exonerated.** F-point thickness, vertex Coriolis,
+relative vorticity, face mass fluxes, the two face masks, the vertex mask, and
+all of them together: each closes 0%. Two of them are not inert but do not
+help — the boundary-vorticity convention is a 2.3× lever at the wall and 22.6×
+in the far interior, confirming `nemo_live` is load-bearing, and the vertex
+mask is provably unused under it.
+
+**The owner is a missing metric weighting in the assembly.** NEMO weights the
+meridional transport by the V-face zonal width and divides the assembled
+u-tendency by the u-point zonal width (`dynvor.F90:791-792`, `:804`); legoESM's
+Arakawa-Lamb triad used neither. Supplying it closes **96-98%** of the wall-row
+disagreement and **86%** of the far interior — so it is a global fidelity
+defect first measured at the wall, not a wall mechanism. NEMO's assembly driven
+by legoESM's *own* inputs leaves only 2.1%, so the 12-point index pattern and
+the triad-to-flux pairing were already identical.
+
+It is also the difference between conserving the right quadratic invariant and
+the wrong one. Measured on a closed domain with real metrics: with the
+weighting the physical kinetic-energy norm conserves to 1e-16 and without it to
+7e-10; without it what conserves instead is kinetic energy *per unit area*,
+which is not an invariant on a stretched grid.
+
+legoESM's barotropic solver has had this weighting all along
+(`barotropic_coriolis="een_metric"`) and the DINO card already selects it, so
+the card was running the metric-weighted EEN barotropically and the unweighted
+one in the 3-D momentum. `pv_flux_ene` has the same gap.
+
+## RETRACTION — the reduction every wall number was scored on
+
+**Every wall-row number this campaign has published, including the 3.10e-10
+headline, was called "signed thickness-weighted zonal mean". It is not.** The
+reduction weights by the wet mask — an unweighted mean over levels — and DINO's
+layers span 10.14 m to 545.20 m, so it over-weights the surface by ~54× relative
+to mass.
+
+| reduction | wall | far | enrich | the four wall rows |
+|---|---|---|---|---|
+| level mean (as published) | 3.098e-10 | 3.545e-11 | 8.74× | +5.49e-10 +4.48e-10 +2.17e-10 −2.50e-11 |
+| **mass-weighted** | **2.500e-11** | 4.854e-12 | 5.15× | **−1.50e-11 −3.46e-11 −3.83e-11 +1.21e-11** |
+
+The magnitude is 12.4× smaller and **the sign inverts on three of the four wall
+rows** — in the depth mean legoESM's wall-row vorticity flux is more *eastward*
+than NEMO's, not less. The reading that promoted this whole line of inquiry does
+not survive its own instrument. **The drag and lateral-friction refutations were
+scored on the same instrument and have not been re-run.**
+
+## RETRACTION — the latitude argument
+
+"The metric error grows as Δφ·tan φ and is therefore largest at the wall" is
+false. On DINO's Mercator grid Δφ = Δλ·cos φ, so the growth cancels and the
+ratio saturates: 1.008203 at the wall against 1.007706 at row 20, a 6% variation
+that cannot produce an 8.74× enrichment. The enrichment comes from the
+north-minus-south imbalance of the meridional flux, which is 6.98× enriched
+because at the southernmost wet row the south face is land and the imbalance is
+exactly one-sided.
+
+## The 90-day A/B: the operator error does not carry the transport deficit
+
+One controlled pair, same commit, differing in that one config field.
+
+| | metric off (shipped card) | metric on | floor |
+|---|---|---|---|
+| wall rows 1-4 transport gap [Sv] | −0.2884 | −0.2946 | 0.091 |
+| basin rows 0-13 [Sv] | −0.4258 | −0.4324 | 0.091 |
+| sea-surface excess at the wall [mm] | 1.722 | 1.698 | — |
+| circumpolar transport error [Sv] | 0.3823 | 0.3761 | 0.091 |
+| upper density contrast [kg/m³] | 2.403e-4 | 2.399e-4 | 1.1e-4 |
+| deep density contrast [kg/m³] | 1.429e-6 | 1.260e-6 | 4.5e-5 |
+| southern surface σ max / mean [kg/m³] | 9.916e-5 / 2.936e-4 | 9.444e-5 / 2.977e-4 | 9.5e-5 |
+
+All five gated metrics PASS at 5× on both arms, and **every single move is
+inside its noise floor**. The wall-row transport changes by 0.0062 Sv, which is
+**0.07× the floor**.
+
+**So the registered falsification fired: the operator error is real, is now
+closed to 2-4%, and is NOT what carries the −0.29 Sv wall-row transport gap.**
+The wall-row tendency error and the wall-row transport error are different
+objects. Nothing in the ranked list above survives as an explanation of the
+basin deficit.
+
+## Two ride-alongs, both closed
+
+**The wall-row wind stress is exact.** Scored in absolute Pascals against a
+1.4e-4 Pa bar — because an RMS-normalised score is structurally blind where the
+stress is 0.23 mPa — the four wall rows agree to **2.2e-19 Pa**, fifteen orders
+below the bar. The specific worry that the two models evaluate the profile at
+different latitudes is void: on a latitude-longitude C-grid the u-points are
+offset in longitude only, and the two latitudes agree exactly.
+
+**The transport error is a recirculation, not a mass source.** Rows 1-13 are a
+closed sub-basin (land at columns 0 and 51; the re-entrant channel is rows
+14-48). If the 0.95 Sv deficit were a net convergence into that volume for a
+year its sea surface would rise 24.9 m; the measured excess is 4.4 mm, so
+**99.98% of the transport error recirculates inside the sub-basin**. Any
+mechanism whose signature is net convergence is ruled out.
+
+## What the next lane should do first
+
+1. **Re-run the drag and lateral-friction refutations on the corrected,
+   mass-weighted reduction.** They were decided on an instrument that
+   over-weights the surface 54× and whose wall-row sign inverts. This is a
+   rescore, not a run, and it is the cheapest thing on this list.
+2. **Decide whether the DINO card should select the metric weighting.** It is
+   NEMO's actual operator, it fixes the card's internal barotropic/baroclinic
+   inconsistency, it conserves the physical energy norm, and it is neutral on
+   every 90-day gate. It is left OFF pending that decision.
+3. `pv_flux_ene` carries the same gap and is unfixed.
