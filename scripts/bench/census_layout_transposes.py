@@ -73,8 +73,24 @@ def census(text: str) -> dict:
         if len(g["examples"]) < 3:
             g["examples"].append(m.group("name"))
     n_instr = len(re.findall(r"^\s*%?[\w.\-]+\s*=\s", text, re.MULTILINE))
+    # Collectives, because the count of MESSAGES is the other half of what a
+    # decomposition costs. A tiled split ships far fewer halo rows than
+    # latitude bands and was measured slower anyway; the candidate
+    # explanation is that it sends many more, smaller messages, and that is
+    # countable on the compiled module rather than argued from the source.
+    collectives = collections.OrderedDict()
+    for family in ("collective-permute", "all-gather", "all-reduce",
+                   "all-to-all", "reduce-scatter", "collective-broadcast"):
+        # Word boundary on the left only: "collective-permute-start" and
+        # "-done" are the same message split in two, and counting both would
+        # double every asynchronous exchange.
+        hits = re.findall(rf"=\s*[^=\n]*?\b{family}(?:-start)?\(", text)
+        if hits:
+            collectives[family] = len(hits)
     return {
         "n_instructions": n_instr,
+        "collectives": collectives,
+        "n_collectives": sum(collectives.values()),
         "n_transpose": sum(g["count"] for g in groups.values()),
         "n_transpose_bitcast": sum(g["bitcast"] for g in groups.values()),
         "n_reshape": len(re.findall(r"=\s*[^=\n]*?\breshape\(", text)),
@@ -90,6 +106,10 @@ ENTRY main {
   %t2 = f32[8,4,2]{2,1,0} transpose(%p), dimensions={1,0,2}
   %t3 = f32[2,4,8]{2,1,0} transpose(%p), dimensions={2,0,1}, metadata={bitcast}
   ROOT %t4 = f32[8,4,2]{2,1,0} transpose(%p), dimensions={1,0,2}
+  %cp = f32[8,4,2]{2,1,0} collective-permute(%t1), source_target_pairs={{0,1},{1,0}}
+  %cps = f32[8,4,2]{2,1,0} collective-permute-start(%t2), source_target_pairs={{0,1}}
+  %cpd = f32[8,4,2]{2,1,0} collective-permute-done(%cps)
+  %ag = f32[16,4,2]{2,1,0} all-gather(%t1), dimensions={0}
   %r = f32[64]{0} reshape(%t1)
   %c = f32[64]{0} copy(%r)
   ROOT %out = f32[64]{0} add(%r, %c)
@@ -112,6 +132,12 @@ def _selftest() -> int:
     # census that only works on the case it was written for is not a census.
     empty = census("ENTRY main {\n  ROOT %p = f32[4]{0} parameter(0)\n}\n")
     assert empty["n_transpose"] == 0 and empty["groups"] == [], empty
+    # Three messages, not four: the -start/-done pair is ONE exchange, and
+    # counting the halves separately would double every asynchronous one.
+    assert c["collectives"]["collective-permute"] == 2, c["collectives"]
+    assert c["collectives"]["all-gather"] == 1, c["collectives"]
+    assert c["n_collectives"] == 3, c
+    assert empty["n_collectives"] == 0, empty
     print("selftest OK")
     return 0
 
@@ -135,7 +161,10 @@ def main() -> int:
     print(f"{path.name}: {c['n_instructions']} instructions, "
           f"{c['n_transpose']} transposes "
           f"({c['n_transpose_bitcast']} of them bitcasts, i.e. free), "
-          f"{c['n_reshape']} reshapes, {c['n_copy']} copies")
+          f"{c['n_reshape']} reshapes, {c['n_copy']} copies, "
+          f"{c['n_collectives']} messages")
+    for family, n in c["collectives"].items():
+        print(f"  {n:4d} x {family}")
     if not c["groups"]:
         print("  no transposes in this module")
     for g in c["groups"]:
