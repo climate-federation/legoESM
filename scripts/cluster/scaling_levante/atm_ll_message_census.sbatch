@@ -77,8 +77,8 @@ rc=0
 # launch and both arms died before compiling anything.
 NDEV="${NDEV:-4}"
 
-run_dump () {  # n_lat n_lon tag p_lon
-  local NLAT=$1 NLON=$2 TAG=$3 PLON=$4
+run_dump () {  # n_lat n_lon tag p_lon [packed_2d]
+  local NLAT=$1 NLON=$2 TAG=$3 PLON=$4 P2D=${5:-0}
   local PLAT=$((NDEV / PLON))
   case "$TAG" in tile*) if [ "$PLAT" -lt 2 ] || [ "$PLON" -lt 2 ]; then
     echo "REFUSING: p_lat=$PLAT p_lon=$PLON is not a tile, it is a band."
@@ -87,6 +87,7 @@ run_dump () {  # n_lat n_lon tag p_lon
   mkdir -p "$OUTDIR/hlo_$TAG"
   echo "=== ${NLAT}x${NLON}, ${NDEV} devices, p_lat=${PLAT} p_lon=${PLON} (${TAG}) ==="
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
+  LEGOESM_LATLON_PACKED_2D_EXCHANGE="$P2D" \
   LEGOESM_LATLON_HALO_NOCOMM=0 JAX_ENABLE_X64=0 \
   XLA_FLAGS="--xla_gpu_shard_autotuning=false --xla_dump_to=$OUTDIR/hlo_$TAG" \
     timeout 1200 srun --export=ALL --nodes=1 --ntasks=1 --gpus-per-node="$NDEV" \
@@ -102,6 +103,9 @@ run_dump () {  # n_lat n_lon tag p_lon
 
 run_dump 128 256 band 1 || rc=1
 run_dump 128 256 tile 2 || rc=1
+# The same tiling with its exchange PACKED -- the thing the packer was wired
+# in to do. This is the arm the whole lever rests on.
+run_dump 128 256 tile_packed 2 1 || rc=1
 # p_lon=4 on four devices would leave one latitude band; the guard above
 # refuses it, which is the point of having the guard.
 run_dump 128 256 tile4 4 || echo "(tile4 refused, as designed)"
@@ -112,7 +116,7 @@ import json, os, sys
 
 outdir = sys.argv[1]
 counts = {}
-for tag in ("band", "tile", "tile4"):
+for tag in ("band", "tile", "tile_packed", "tile4"):
     try:
         with open(os.path.join(outdir, f"census_{tag}.json")) as fh:
             c = json.load(fh)
@@ -130,6 +134,7 @@ for tag, c in counts.items():
           f"   {c['n_instructions']} instructions")
 
 band, tile = counts["band"]["n_collectives"], counts["tile"]["n_collectives"]
+packed = counts.get("tile_packed", {}).get("n_collectives")
 if band == 0:
     # The one way this census lies: an arm with the exchange switched off
     # reads zero and looks like a triumph.
@@ -146,5 +151,20 @@ elif tile <= 1.5 * band:
 else:
     print(f"PARTIAL: {tile / band:.1f}x. More messages, but not enough to "
           f"account for a 22% loss on its own.")
+
+if packed is None:
+    print("the packed tile arm is missing; no verdict on the packer")
+elif packed >= tile:
+    print(f"REFUTED: packing the tile exchange did not cut its messages "
+          f"({tile} -> {packed}). The packer is wired but inert, or the "
+          f"messages are not where the source says they are.")
+elif packed <= 1.5 * band:
+    print(f"CONFIRMED: the packed tile sends {packed} messages against the "
+          f"band's {band} and the unpacked tile's {tile}. The tiled "
+          f"decomposition can now be timed on its bytes rather than on its "
+          f"message count.")
+else:
+    print(f"PARTIAL: {tile} -> {packed} messages, still {packed / band:.1f}x "
+          f"the band. Better, and not yet at parity.")
 PYEOF
 exit $rc
