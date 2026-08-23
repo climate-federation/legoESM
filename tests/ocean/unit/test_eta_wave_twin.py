@@ -521,7 +521,9 @@ def test_compare_impulse_lane_differences_each_side_against_its_own_free_run(
     nt, ny, nx = d_n["eta"].shape
     resp = np.zeros((nt, ny, nx))
     for n in range(nt):
-        resp[n, :, (n % nx)] = 0.02
+        # interior columns only: a response planted on the dry rim would carry
+        # no energy over wet cells and is not a response at all
+        resp[n, 1:-1, 1 + (n % (nx - 2))] = 0.02
     pn, pl = tmp_path / "nemo_imp.npz", tmp_path / "lego_imp.npz"
     np.savez(pn, **{**d_n, "eta": d_n["eta"] + resp,
                     "eta_before": d_n["eta_before"] + resp})
@@ -575,3 +577,26 @@ def test_alternation_ratio_is_one_for_a_flat_series(ewt):
 
 def test_alternation_ratio_detects_ringing(ewt):
     assert ewt.alternation_ratio([10.0, 1.0] * 4) == pytest.approx(10.0)
+
+
+def test_radial_spread_tracks_a_ring_moving_outward(ewt):
+    """Known-answer control: a ring at a known radius must be reported there."""
+    ny, nx = 41, 41
+    wet = np.ones((ny, nx), dtype=bool)
+    area = np.ones((ny, nx))
+    dx = dy = 10_000.0
+    field = np.zeros((3, ny, nx))
+    jj, ii = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    r = np.sqrt((jj - 20) ** 2 + (ii - 20) ** 2)
+    for n, want in enumerate((5.0, 10.0, 15.0)):
+        field[n] = (np.abs(r - want) < 0.5).astype(float)
+    got = ewt.radial_spread(field, wet, area, 20, 20, dx, dy)
+    for g, want in zip(got, (5.0, 10.0, 15.0)):
+        assert g == pytest.approx(want * dx / 1e3, rel=0.05)
+
+
+def test_radial_spread_refuses_an_empty_sample(ewt):
+    wet = np.ones((5, 5), dtype=bool)
+    with pytest.raises(SystemExit, match="no energy"):
+        ewt.radial_spread(np.zeros((2, 5, 5)), wet, np.ones((5, 5)),
+                          2, 2, 1e4, 1e4)

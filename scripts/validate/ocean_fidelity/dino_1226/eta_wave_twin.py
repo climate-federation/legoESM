@@ -720,6 +720,37 @@ def propagation_lag(eta: np.ndarray, wet: np.ndarray, jrow: int, dx_m: float,
     }
 
 
+def radial_spread(field: np.ndarray, wet: np.ndarray, area: np.ndarray,
+                  centre_j: int, centre_i: int, dx_m: float,
+                  dy_m: float) -> list[float]:
+    """Energy-weighted mean distance of a field from a centre, per sample [km].
+
+    This is how wave propagation IS resolvable here.  Cell-to-cell phase lag is
+    not -- a barotropic wave crosses one cell in 0.11 of a time step -- but the
+    radius the response has spread to at each sample is, because the wave
+    covers about nine cells per step.  Comparing the two models' spreading
+    rates is therefore the honest form of "do they propagate at the same
+    speed".
+
+    Distances use the model's own metric at the centre cell rather than a
+    re-derived great-circle formula, so the measure is round in the same
+    metric the model steps on.
+    """
+    ny, nx = wet.shape
+    jj, ii = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    r_km = np.sqrt(((jj - centre_j) * dy_m) ** 2
+                   + ((ii - centre_i) * dx_m) ** 2) / 1.0e3
+    out = []
+    for n in range(field.shape[0]):
+        w = area * field[n] ** 2 * wet
+        tot = float(w.sum())
+        if tot <= 0.0:
+            raise SystemExit("radial_spread: a sample carries no energy at "
+                             "all, so its mean radius is undefined")
+        out.append(float((w * r_km).sum() / tot))
+    return out
+
+
 def two_dt_mode(field: np.ndarray, wet: np.ndarray,
                 area: np.ndarray | None = None) -> dict:
     """Amplitude of the 2-step (Nyquist) component, per sample.
@@ -1000,6 +1031,29 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
              "difference": variance_bands(diff, wet, dt, area)}
     noise = step_noise_ratio(lego["eta"], nemo["eta"], wet, regions)
 
+    # Spatial spreading of the response.  Only meaningful in the impulse lane,
+    # where there is a response with a centre; in the free lane it would be
+    # the mean radius of the whole balanced field, which answers nothing.
+    spread = None
+    if lane == "impulse_response":
+        cj, ci = np.unravel_index(
+            np.argmax(np.where(wet, np.abs(nemo["eta"][0]), -np.inf)),
+            wet.shape)
+        sp_n = radial_spread(nemo["eta"], wet, area, int(cj), int(ci),
+                             float(e1t[cj, ci]), float(e2t[cj, ci]))
+        sp_l = radial_spread(lego["eta"], wet, area, int(cj), int(ci),
+                             float(e1t[cj, ci]), float(e2t[cj, ci]))
+        ratio = [b / a_ for a_, b in zip(sp_n, sp_l)]
+        spread = {
+            "centre_j": int(cj), "centre_i": int(ci),
+            "nemo_km": sp_n, "lego_km": sp_l,
+            "ratio_lego_over_nemo": ratio,
+            # The odd samples carry the leapfrog alternation, so the EVEN ones
+            # are where the spreading rates can be compared cleanly.
+            "ratio_even_samples_median": float(np.median(ratio[1::2])),
+            "ratio_all_samples_median": float(np.median(ratio)),
+        }
+
     two_dt = {
         "difference": two_dt_mode(diff, wet, area),
         "NEMO": two_dt_mode(nemo["eta"], wet, area),
@@ -1014,6 +1068,7 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         diff_rms_by_step[8:], min(16, max(2, len(diff_rms_by_step) - 8)))
 
     result = {
+        "radial_spread": spread,
         "two_dt_mode": two_dt,
         "lane": lane,
         "locus_sensitivity": locus_sensitivity,
