@@ -825,9 +825,20 @@ class TestBarotropicReconcileTarget:
 
 
     def test_ssh_avg_face_depth_divisor_convention(self, grid, z_coord):
-        """F1 (adversarial review): on the CARD's actual composition
-        (``barotropic_face_depth="nemo_ssh_avg"``, inherited from
-        nemo_dino_kamm), the transport-target divisor convention is pinned:
+        """F1 (adversarial review): on the ``transport_avg`` branch, run with
+        the card's barotropic composition (``barotropic_face_depth=
+        "nemo_ssh_avg"``, inherited from nemo_dino_kamm), the divisor
+        convention is pinned:
+
+        SCOPE, corrected 2026-08-21 (#1455 R6): this exercises the
+        ``transport_avg`` branch, which the kamm_mlf card NO LONGER selects --
+        it now ships ``velocity_avg`` + ``barotropic_after_reconcile=
+        "nemo_mlf_baro_corr"``.  The divisor convention pinned here is still a
+        live invariant of that branch and of the option as a whole, but do not
+        read this as certifying the card's own composition; the card's pair is
+        gated by ``TestBarotropicReconcileTargetCard`` (wiring) and by the
+        90-day twin (behaviour).  Nothing drives the card's ACTUAL pair through
+        the solver in this file -- a known coverage gap, named not filled.
         the reconciled depth-mean STILL equals ``Hu_avg / H_u_min_rule``
         exactly (internal ``puu_b`` consistency — the deliberate choice
         documented on ``BarotropicConfig.barotropic_reconcile_target``), and
@@ -956,15 +967,51 @@ class TestBarotropicReconcileTarget:
 
 
 class TestBarotropicReconcileTargetCard:
-    """Card wiring: only nemo_dino_kamm_mlf selects transport_avg."""
+    """Card wiring: nemo_dino_kamm_mlf ships the NEMO-faithful reconciliation
+    PAIR (#1455 R6 arm D) -- ``barotropic_reconcile_target="velocity_avg"``
+    (NEMO commits ``uu_b(Kaa)``, the primary VELOCITY-weighted boxcar, under
+    ``ln_dynadv_vec=.TRUE.``) TOGETHER WITH
+    ``barotropic_after_reconcile="nemo_mlf_baro_corr"`` (NEMO's second site,
+    ``stpmlf.F90`` ``mlf_baro_corr``).
 
-    def test_kamm_mlf_selects_transport_avg(self):
+    NON-VACUITY. ``"velocity_avg"`` is ALSO the config default, so asserting
+    only the resolved value would still pass if the card's entry were deleted
+    -- and deleting it would silently drop the ``barotropic_after_reconcile``
+    line beside it, reverting the card to a non-NEMO arm. So this asserts the
+    keys are present IN THE CARD DICT as well as their resolved values. The
+    parent card ``nemo_dino_kamm`` sets NEITHER key, so the membership check
+    cannot be satisfied by inheritance. Reverting either card line turns three
+    tests red: both tests in this class and
+    ``test_barotropic_after_reconcile.py::test_kamm_mlf_ships_the_faithful_pair``."""
+
+    _FAITHFUL_PAIR = {
+        "barotropic_reconcile_target": "velocity_avg",
+        "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+    }
+
+    def test_kamm_mlf_card_pins_the_faithful_pair_explicitly(self):
+        from legoesm.ocean.experiments.dino import DINO_RECIPES
+        card = DINO_RECIPES["nemo_dino_kamm_mlf"]
+        for key, want in self._FAITHFUL_PAIR.items():
+            assert key in card, (
+                f"nemo_dino_kamm_mlf no longer pins {key!r} explicitly. The "
+                "two knobs are ONE choice (#1455 R6): dropping either reverts "
+                "the card to an arm that is NEMO at neither reconciliation "
+                "site.")
+            assert card[key] == want, (
+                f"nemo_dino_kamm_mlf: {key} = {card[key]!r}, want {want!r}")
+
+    def test_resolved_pair_on_kamm_mlf_and_off_elsewhere(self):
         from legoesm.ocean.experiments.dino import dino_config_for_recipe
-        for recipe, want in (
-            ("legoesm_default", "velocity_avg"),
-            ("nemo_dino_kamm", "velocity_avg"),
-            ("nemo_dino_kamm_mlf", "transport_avg"),
-        ):
-            c = dino_config_for_recipe(recipe)
-            assert c.barotropic_reconcile_target == want, (
-                f"{recipe}: got {c.barotropic_reconcile_target}, want {want}")
+        c = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert c.barotropic_reconcile_target == "velocity_avg"
+        assert c.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+        # No OTHER shipped card runs either half of the pair -- all six,
+        # not a sample, so a new card cannot pick it up unnoticed.
+        for recipe in ("legoesm_default", "nemo_dino_kamm", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            o = dino_config_for_recipe(recipe)
+            assert o.barotropic_reconcile_target == "velocity_avg", (
+                f"{recipe}: got {o.barotropic_reconcile_target}")
+            assert o.barotropic_after_reconcile == "off", (
+                f"{recipe}: got {o.barotropic_after_reconcile}")

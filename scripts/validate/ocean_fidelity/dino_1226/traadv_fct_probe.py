@@ -79,16 +79,42 @@ def load_dump(name):
 
 def stats(L, N):
     finite = np.isfinite(L) & np.isfinite(N)
+    n_dropped = int(finite.size - finite.sum())
     L, N = L[finite], N[finite]
     n = L.size
     if n < 2:
-        return dict(n=n, corr=np.nan)
+        # every key the callers print, so an empty mask reports rather than
+        # raising KeyError three frames away.
+        return dict(n=n, n_dropped=n_dropped, corr=np.nan, abs_ratio=np.nan,
+                    rms_ratio=np.nan, err_norm=np.nan)
     corr = np.corrcoef(L, N)[0, 1]
     absN = np.abs(N).sum()
     abs_ratio = np.abs(L).sum() / absN if absN != 0 else np.nan
-    rms_ratio = (np.sqrt((L ** 2).mean()) / np.sqrt((N ** 2).mean())
-                 if (N ** 2).mean() != 0 else np.nan)
-    return dict(n=n, corr=corr, abs_ratio=abs_ratio, rms_ratio=rms_ratio)
+    rms_N = np.sqrt((N ** 2).mean())
+    rms_ratio = np.sqrt((L ** 2).mean()) / rms_N if rms_N != 0 else np.nan
+    # #1455: abs_ratio is sum|L|/sum|N| -- an L1-NORM ratio.  Since
+    # ||L|-|N|| <= |L-N| pointwise, |abs_ratio - 1| is BOUNDED ABOVE by the L1
+    # relative error, so it can only ever be smaller than the row's true
+    # residual, never larger: it is that residual after the pointwise errors
+    # have been allowed to cancel across the domain.  It therefore carries no
+    # information err_norm lacks, and a large move in it between two states
+    # says how well the error signs happened to cancel, NOT that the operator
+    # changed.  err_norm is the honest companion (same definition
+    # ldf_slp_per_element.py uses): RMS of the signed difference over RMS of
+    # the reference.  Judge a row on err_norm; read abs_ratio as a lower bound.
+    #
+    # RETRACTED 2026-08-21, in the same commit that first wrote it: this
+    # comment previously said abs_ratio was amplified by the horizontal/
+    # vertical CANCELLATION and err_norm was not.  Both are normalised by the
+    # same total, so cancellation amplifies BOTH equally -- and the measured
+    # cancellation factor FELL (710 -> 392 between NEMO year 5 and day 180)
+    # while abs_ratio worsened 10x, i.e. the retracted mechanism predicts the
+    # wrong sign.  Two independent reviewers caught it.
+    err_norm = np.sqrt(((L - N) ** 2).mean()) / rms_N if rms_N != 0 else np.nan
+    # A non-finite point is DROPPED, and dropping points can only flatter
+    # err_norm, so the count is reported rather than swallowed.
+    return dict(n=n, n_dropped=n_dropped, corr=corr, abs_ratio=abs_ratio,
+                rms_ratio=rms_ratio, err_norm=err_norm)
 
 
 def stats_at_offset(lego_field, nemo_field, offset, act):
@@ -104,6 +130,30 @@ def stats_at_offset(lego_field, nemo_field, offset, act):
     if not Ls:
         return dict(n=0, corr=np.nan)
     return stats(np.concatenate(Ls), np.concatenate(Ns))
+
+
+def cancellation_factor(part_a, part_b, act):
+    """(sum|A| + sum|B|) / sum|A+B| over the wet mask -- how much the two
+    sub-terms cancel.  1.0 = no cancellation; large = the total is a small
+    residual of two big opposing terms, so BOTH metrics scored on that total
+    (abs_ratio and err_norm alike) are amplified by roughly this factor
+    relative to the scale of the sub-terms.  It is therefore context for
+    reading a row's bar -- an err_norm of 1e-2 on a total whose parts cancel
+    400x is ~2e-5 on the scale of the parts -- and NOT a discriminator between
+    the two metrics, which it amplifies equally.
+
+    Both FIELDS come from one model (no cross-model mixing); the wet MASK is
+    the model's, which is what ``stats_at_offset`` also scores on."""
+    # the reference (jpkm1) and the model may carry a different level count;
+    # compare on the levels BOTH resolve, exactly as stats_at_offset does.
+    nk = min(part_a.shape[2], part_b.shape[2], act.shape[2])
+    sel = act[:, :, :nk]
+    a = part_a[:, :, :nk][sel]
+    b = part_b[:, :, :nk][sel]
+    denom = np.abs(a + b).sum()
+    if denom == 0:
+        return np.nan
+    return (np.abs(a).sum() + np.abs(b).sum()) / denom
 
 
 def nemo_div(Fx, Fy, Fz):
@@ -312,6 +362,10 @@ def run(tracer_name, tracer_now, tracer_bef, ctx, sal):
     print(f"  FULL tendency (traadv_fct tendency)   : {r_final}")
     print(f"  HORIZONTAL-only tendency (NEW)         : {r_h}")
     print(f"  VERTICAL-only tendency                 : {r_v}")
+    cf_nemo = cancellation_factor(nemo["trd_pure_h"], nemo["trd_pure_v"], act)
+    cf_lego = cancellation_factor(dT_h, dT_v, act)
+    print(f"  horiz/vert CANCELLATION factor        : nemo={cf_nemo:.3f}  "
+          f"lego={cf_lego:.3f}")
     return dict(fu=r_fu, fv=r_fv, fw=r_fw, up=r_up, final=r_final, h=r_h, v=r_v)
 
 
@@ -338,4 +392,6 @@ if __name__ == "__main__":
     print(f"traadv_fct vertical upstream flux (T): corr={res_T['fw']['corr']:.6f} "
           f"ratio={res_T['fw']['abs_ratio']:.6f}")
     print(f"traadv_fct (SALINITY): corr={res_S['final']['corr']:.6f} "
-          f"ratio={res_S['final']['abs_ratio']:.6f}")
+          f"ratio={res_S['final']['abs_ratio']:.6f} "
+          f"err_norm={res_S['final']['err_norm']:.3e}")
+    print(f"traadv_fct (TEMPERATURE) err_norm: {res_T['final']['err_norm']:.3e}")

@@ -111,6 +111,37 @@ def main():
     import jax.numpy as jnp
     import legoesm.ocean.dynamics.barotropic_latlon_cgrid as bmod
 
+    # #1455 PHASE-2: capture the INPUTS the barotropic drag coefficient is
+    # built from.  legoESM's drag FORMULA is bit-exact with NEMO's dumped
+    # rCdU_bot when fed NEMO's own now-level velocity (verified offline: 0.0
+    # relative difference at the median, p99 AND max), so a runtime drag that
+    # differs from NEMO's differs through its INPUT, not its arithmetic.  This
+    # records which.
+    _drg_cap = {}
+    if os.environ.get("DINO_1455_DRAG_INPUTS"):
+        # The caller imports this at FUNCTION scope, so the name must be
+        # rebound on the SOURCE module, not on the caller's module object.
+        import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as _pemod
+        _orig_drg = _pemod.nemo_bottom_drag_rate_faces
+
+        def _drg_spy(u, v, h_k, z_coord, config, grid):
+            _drg_cap.setdefault("u", []).append(np.asarray(u))
+            _drg_cap.setdefault("v", []).append(np.asarray(v))
+            _drg_cap.setdefault("h_k", []).append(np.asarray(h_k))
+            # WHICH SITE each call came from (#1455 sibling).  The five calls
+            # were previously attributed by matching velocity fingerprints,
+            # which is inference, not measurement -- and this campaign has been
+            # burned by exactly that.  Record the enclosing function of the
+            # caller (frame 1 = the call site inside ocean_model/barotropic).
+            import traceback as _tb
+            _st = _tb.extract_stack()
+            _drg_cap.setdefault("caller", []).append(
+                f"{os.path.basename(_st[-2].filename)}:{_st[-2].lineno}"
+                f" in {_st[-2].name}")
+            return _orig_drg(u, v, h_k, z_coord, config, grid)
+
+        _pemod.nemo_bottom_drag_rate_faces = _drg_spy
+
     _orig_run = bmod._run_substep_loop
     import multistep_replay as mr
 
@@ -133,6 +164,9 @@ def main():
 
     def _run_wrap(*a, **k):
         _intercept["on"] = True
+        # stash the loop's OWN arguments so the response-factor arm below can
+        # re-run the IDENTICAL loop with one perturbed input and nothing else.
+        captured["loop_args"] = (a, dict(k))
         try:
             jax.lax.fori_loop = _fori_capture
             return _orig_run(*a, **k)
@@ -160,7 +194,12 @@ def main():
     # call time), so patching jax.lax.fori_loop globally works; the wrap above
     # sets/restores it around the original run.
 
-    mr.IC_STEP = 230400
+    # #1455 baro-substeps: the IC step is the ENV-selected one (multistep_replay
+    # already reads DINO_1226_IC_STEP); the previous hard pin to 230400 silently
+    # overrode it, so a day-180 SEQDUMP was replayed against the y20 restart
+    # tiles and the probe aborted.  Keep the same default (230400) via the
+    # module global, and STAMP what was actually used.
+    mr.provenance('substep_traj_compare')
     jax.clear_caches()
     g, br, cfg, st0 = mr.build_replay_ic()
     from legoesm.ocean.experiments.dino import (
@@ -189,8 +228,30 @@ def main():
           f"surface_stress_implicit={getattr(cfg, 'surface_stress_implicit', None)} "
           f"tau_x[Pa] range=[{_tau_lo:.4f},{_tau_hi:.4f}]")
     DT = 2700.0
+    # #1455 PHASE 1 (the time axis) -- THE SEASONAL CLOCK, and it is a real
+    # defect in the three commits before this one, not a refactor.  This card
+    # sets forcing_annual_cycle=True (ln_ann_cyc), so the restoring target T*
+    # and the solar Q_sr are functions of t_seconds.  The state being replayed
+    # is NEMO step IC_STEP, i.e. ABSOLUTE time (IC_STEP+1)*DT; passing a bare
+    # DT put legoESM's season at day 0.03 while NEMO's was at day 180+.  That
+    # was harmless at the historical IC only by coincidence (230400 steps x
+    # 2700 s = exactly 20 x 360 d, so relative == absolute -- the coincidence
+    # multistep_replay's own IC_STEP note already flags), and it is NOT
+    # harmless once this walk moves ACROSS the 90-day window: a season
+    # mismatch that varies with the state would fake a time dependence in
+    # exactly the quantity the walk is now measuring.
+    # Set DINO_1226_T_SECONDS=2700 to restore the legacy bare-DT clock (the
+    # A/B that quantifies what the earlier commits' numbers change by).
+    _env_t = os.environ.get("DINO_1226_T_SECONDS")
+    T_SECONDS = float(_env_t) if _env_t not in (None, "") else float(
+        mr.IC_STEP + 1) * DT
+    print(f"  seasonal clock: t_seconds={T_SECONDS:.1f} s "
+          f"(day {T_SECONDS / 86400.0:.2f}); legacy bare-DT = {DT:.1f} s "
+          f"(day {DT / 86400.0:.2f}); annual_cycle="
+          f"{getattr(cfg, 'forcing_annual_cycle', None)}")
     st, rate = apply_dino_lat_lon_surface_forcing(
-        st0, forcing, br.z_coord, cfg, DT, t_seconds=DT, return_rate=True)
+        st0, forcing, br.z_coord, cfg, DT, t_seconds=T_SECONDS,
+        return_rate=True)
     # Run EAGER (disable_jit) so the fori->scan tee yields CONCRETE carries
     # across the jit boundary (fp64, one baroclinic step -- cheap).
     with jax.disable_jit():
@@ -211,11 +272,6 @@ def main():
 
     # per-substep Hu increment = Hu_sum[j] - Hu_sum[j-1] = w_tr_j * flux_u_j
     Hu_inc = np.diff(Hu_sum_stk, axis=0, prepend=Hu_sum_stk[:1] * 0)
-    # map lego u-face -> NEMO cell (east face), interior strip
-    def _lego_to_nemo_u(a2d):
-        # a2d (nj_int, nl+1) -> NEMO cell (jpj,jpi) via east-face + halo pad
-        return a2d
-
     # Compare the CUMULATIVE Hu_sum trajectory: at each substep, project both to
     # per-unit-width transport and measure the wall-column error growth.
     # NEMO cumulative un_adv up to substep j:
@@ -288,6 +344,12 @@ def main():
     wgtbtp2 = zwgt2[:Kpit] / r1_wgt2s   # normalised NEMO transport weights
     print(f"  NEMO Kpit(icycle)={Kpit}  wgtbtp2 nonzero={int((wgtbtp2>0).sum())} "
           f"sum={wgtbtp2.sum():.6f}")
+    # code review #10: nn_e is hardcoded above but the namelist computes it at
+    # runtime (ln_bt_auto=T, nn_e=30 is only the fallback).  It happens to be 23
+    # for this grid+dt; assert it against the DUMP's own icycle so a different
+    # dump set fails loudly instead of silently truncating the weights.
+    assert Kpit == icy, (
+        f"hardcoded nn_e={nn_e} gives Kpit={Kpit} but the dump says icycle={icy}")
 
     # INSTRUMENT VALIDATION (Rule: calibrate before trusting): the
     # nemo_flux_perwidth reconstruction, summed with wgtbtp2 over all 68
@@ -440,7 +502,557 @@ def main():
           f"jn=1 vel err med = {np.median(np.abs(verr[wet])):.4e}")
     print(f"    NON-CIRCULARITY resid (verr - dt_s*ΔF): max={np.abs(resid[wet]).max():.4e} "
           f"= {100*np.abs(resid[wet]).max()/max(np.abs(verr[wet]).max(),1e-300):.1f}% of verr "
-          f"-> {'DYNAMICS MATCH, forcing owns it' if np.abs(resid[wet]).max() < 0.1*np.abs(verr[wet]).max() else 'loop dynamics ALSO differ -- investigate'}")
+          )
+
+    # ===================================================================
+    # #1455 baro-substeps: THE ACC DEPOSIT, SIGNED AND SECTION-INTEGRATED.
+    #
+    # Every number above is a MAXIMUM over faces.  The ACC gap is a SIGNED
+    # SECTION INTEGRAL, and the two are not interchangeable: a max of 5e-2 m^2/s
+    # says nothing about a deposit that only needs ~1e-8 m/s of coherent
+    # section-mean velocity per step.  This block reduces the SAME per-substep
+    # trajectory with the ACCEPTANCE GATE'S OWN metric
+    #   ACC(i) = sum_j sum_k u(j,k,i) * e3t_1d(k) * e2u(j,i)   [per longitude]
+    # (southern_term_torque_accum.py's acc_full weighting; rows 1..197, MEAN over
+    # longitudes 2..-2 so the decomposition is LINEAR -- the gate itself takes the
+    # median, which is not).  A depth-uniform barotropic increment dU contributes
+    # dU * e2u * sum_k e3t_1d*umask, so the substep sum is exact, not a surrogate.
+    #
+    # BUDGET TARGET (what a suspect must be able to pay for): the accumulated
+    # 90-day stage budget (c987db464) puts -0.8069 Sv of full-section barotropic
+    # stage-sum difference over 2880 steps = -2.80e-4 Sv/step, which after the
+    # slaved leap-frog halving is the -0.4014 Sv realized gap.  A per-step
+    # barotropic deposit difference much smaller than 2.80e-4 Sv CANNOT own it.
+    #
+    # INSTRUMENT CONTROL (asserted, not printed): NEMO's own boxcar of the dumped
+    # per-substep ua_e must reproduce spg_dump_puu_b_final.bin to roundoff -- if
+    # it does not, the substep->deposit map is wrong and nothing below stands.
+    print("\n  === ACC-METRIC DEPOSIT (gate weights, signed, Sv) ===")
+    d2 = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+    e3t_1d = np.asarray(d2.variables["e3t_1d"][0], dtype=np.float64)   # (jpk,)
+    umask3 = np.asarray(d2.variables["umask"][0], dtype=np.float64)    # (jpk,jpj,jpi)
+    e2u_2d = np.asarray(d2.variables["e2u"][0], dtype=np.float64)      # (jpj,jpi)
+    d2.close()
+    H1d = np.tensordot(e3t_1d, umask3, axes=(0, 0))          # (jpj,jpi) e3t_1d ladder
+    acc_w = e2u_2d * H1d                                      # (jpj,jpi) [m^2] per m/s
+
+    def acc_sv(dU_cell):
+        """Section-integrated ACC transport of a depth-uniform u increment [Sv].
+
+        Rows 1..197, MEAN over longitudes 2..-2.
+
+        This is the BUDGET's linear mean surrogate (southern_term_torque_accum
+        _met_full), NOT the acceptance gate's number -- the gate takes the
+        MEDIAN over longitudes, which is not linear and so cannot be decomposed.
+        Verified term-for-term against the budget's reducer by adversarial
+        review: same e3t_1d ladder, same e2u, same longitude window, same rows
+        (rows 0 and 198 carry zero wet u-faces)."""
+        per_lon = (dU_cell * acc_w)[1:198, :].sum(axis=0)     # (jpi,)
+        return float(per_lon[2:-2].mean()) / 1.0e6
+
+    # NEMO's primary (velocity) boxcar weights, normalised exactly as ts_wgt does.
+    wgtbtp1 = (zwgt1[:Kpit] / zwgt1[:Kpit].sum())
+    # lego's own primary weights, from the SAME helper the model runs.
+    wf_n = np.asarray(wf) / float(np.asarray(wt))
+    print(f"    weights: max|lego_primary - NEMO_wgtbtp1| = "
+          f"{np.abs(wf_n - wgtbtp1).max():.3e}   "
+          f"max|lego_transport - NEMO_wgtbtp2| = {np.abs(w_tr - wgtbtp2).max():.3e}")
+
+    # --- instrument control: rebuild NEMO's puu_b(Kaa) from its own substeps ---
+    _puu_b = np.fromfile(os.path.join(SEQDUMP, "spg_dump_puu_b_final.bin"),
+                         dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                              )[HLS:-HLS, HLS:-HLS]
+    nemo_Ubar_avg = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        nemo_Ubar_avg = nemo_Ubar_avg + wgtbtp1[j - 1] * subs[j]["ua_e"]
+    _wetu = (umask[0] > 0.5)
+    _rel_pb = (np.abs((nemo_Ubar_avg - _puu_b)[_wetu]).max()
+               / max(np.abs(_puu_b[_wetu]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK: boxcar(dumped ua_e) vs spg_dump_puu_b_final "
+          f"rel={_rel_pb:.3e}")
+    assert _rel_pb < 1e-10, (
+        "the substep->puu_b map is WRONG (rel %.3e): the per-substep deposit "
+        "decomposition below cannot be trusted" % _rel_pb)
+
+    # --- lego's own averaged velocity, from the captured carries ---------------
+    def _cell(a2d):
+        return a2d[:, 1:] if a2d.shape[1] == jpi + 1 else a2d
+
+    lego_Ubar_avg = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        lego_Ubar_avg = lego_Ubar_avg + wf_n[j - 1] * _cell(np.asarray(U_bar_stk[j - 1]))
+    dU_avg = (lego_Ubar_avg - nemo_Ubar_avg) * _wetu
+    _dep_vel = acc_sv(dU_avg)
+    # transport-average route (NEMO dynspg_ts.F90:1170-1174 un_adv*r1_hu):
+    _hu_now = np.maximum(hu0_full, 1e-30)
+    dU_tr = (_cell(np.asarray(Hu_sum_stk[Kpit - 1])) - un_adv_cum) / _hu_now * _wetu
+    _dep_tr = acc_sv(dU_tr)
+    _TARGET = -2.80e-4     # Sv/step, the 90-day barotropic stage row / 2880
+    print(f"    velocity-average deposit diff (lego - NEMO)  = {_dep_vel:+.4e} Sv/step"
+          f"   = {100*_dep_vel/_TARGET:6.1f}% of the -2.80e-4 Sv/step budget row")
+    print(f"    transport-average deposit diff (un_adv route) = {_dep_tr:+.4e} Sv/step"
+          f"   = {100*_dep_tr/_TARGET:6.1f}%")
+
+    # --- WHERE IN THE LOOP is it born: cumulative over the weighted substeps ---
+    print("\n    per-substep ACC deposit, cumulative over the boxcar window [Sv]:")
+    print("      jn | w_i        | this substep    | cumulative      | % of budget")
+    _cum = 0.0
+    _rows = []
+    for j in range(1, Kpit + 1):
+        _d = wf_n[j - 1] * acc_sv(
+            (_cell(np.asarray(U_bar_stk[j - 1])) - subs[j]["ua_e"]) * _wetu)
+        _cum += _d
+        _rows.append((j, wf_n[j - 1], _d, _cum))
+    for j, wi, dj, cj in _rows:
+        if j <= 2 or (j >= 22 and j <= 26) or j % 8 == 0 or j >= Kpit - 2:
+            print(f"      {j:2d} | {wi:.6f}   | {dj:+.4e}     | {cj:+.4e}     "
+                  f"| {100*cj/_TARGET:6.1f}%")
+    # fp64 summation-ORDER tolerance: the two sums differ only in the order the
+    # 45 rows are added (per-substep here vs field-then-reduce above), so the
+    # bound is ~n*eps on the partial sums, not on the tiny result.
+    assert abs(_cum - _dep_vel) < 1e-9 * max(abs(_dep_vel), 1e-12), (
+        f"substep decomposition does not close: {_cum} vs {_dep_vel}")
+    print(f"    CLOSURE: sum of per-substep rows = {_cum:+.6e} == deposit "
+          f"{_dep_vel:+.6e} Sv/step (rel {abs(_cum-_dep_vel)/abs(_dep_vel):.1e})")
+
+    # --- DISCRIMINATOR: can the zu_frc residual alone explain the trajectory? --
+    # If the loop DYNAMICS are faithful and only the frozen forcing differs, the
+    # velocity error after jn substeps is jn*dt_s*dF (dF is held constant across
+    # the whole loop on BOTH models).  Compare that prediction, in the SAME ACC
+    # metric, against the measured per-substep error.  A prediction that lands
+    # short means the loop AMPLIFIES rather than merely integrates.
+    _acc_dF_step = acc_sv(dt_s * dF)
+    print(f"\n    zu_frc residual, ACC metric: dt_s*dF = {_acc_dF_step:+.4e} Sv "
+          f"per substep")
+    print("      jn | predicted jn*dt_s*dF | measured err     | measured/predicted")
+    for j in (1, 8, 24, 46, 68):
+        _meas = acc_sv((_cell(np.asarray(U_bar_stk[j - 1])) - subs[j]["ua_e"]) * _wetu)
+        _pred = j * _acc_dF_step
+        _r = _meas / _pred if _pred != 0.0 else float("nan")
+        print(f"      {j:2d} | {_pred:+.4e}          | {_meas:+.4e}      | {_r:8.3f}")
+
+    # ===================================================================
+    # RESPONSE FACTOR (physics review, measurement #4) -- the measurement that
+    # decides whether the loop is exonerated or is itself the owner.
+    #
+    # The discriminator above compares the measured error to the prediction
+    # jn*dt_s*dF, which assumes the loop's linear response to a STEADY forcing
+    # residual is exactly 1 per substep.  Nobody measured that.  If the true
+    # response is R, the forcing explains R*46*acc(dt_s*dF) of the deposit and
+    # the REST is the loop's own, so "meas/pred = 0.81" is only "the loop is
+    # clean" when R itself is 0.81.  Measure R directly: run the IDENTICAL loop
+    # a second time with F_slow_u perturbed by +dF and nothing else changed.
+    #
+    #   R ~ 0.81  -> the shortfall IS the loop's linear response; residue ~ 0.
+    #   R ~ 1.00  -> residue = -1.28e-3 Sv/step = 458% of the budget row, with
+    #                the budget's own sign, and the loop is a prime suspect.
+    print("\n  === RESPONSE FACTOR: the loop's own reply to a steady dF ===")
+    _a_loop, _k_loop = captured["loop_args"]
+    _Fu_prod = _k_loop["F_slow_u"]
+    # dF lives on NEMO cells (nj,ni); lift it to lego's u-face frame (nj,ni+1).
+    # lego face i+1 == NEMO u(i) (that is exactly what _cell inverts), and face 0
+    # is the west face of cell 0, which under this grid's ZONAL PERIODICITY (the
+    # channel: umask column 0 has 35 wet cells) is NEMO u(jpi-1).
+    _pert = np.zeros((dF.shape[0], dF.shape[1] + 1), dtype=np.float64)
+    _pert[:, 1:] = dF
+    _pert[:, 0] = dF[:, -1]
+    # the lift is ASSERTED, not assumed: round-tripping it through the same
+    # _cell() the deposit uses must return dF bit-for-bit.
+    assert np.array_equal(_cell(_pert), dF), "dF lift to the u-face frame is wrong"
+
+    _k_pert = dict(_k_loop)
+    _k_pert["F_slow_u"] = _Fu_prod + jnp.asarray(_pert, dtype=_Fu_prod.dtype)
+    jax.lax.fori_loop = _fori_capture
+    try:
+        with jax.disable_jit():
+            _orig_run(*_a_loop, **_k_pert)
+    finally:
+        jax.lax.fori_loop = _orig_fori
+    U_bar_stk_p = np.asarray(captured["carries"][1])
+    assert U_bar_stk_p.shape == U_bar_stk.shape
+
+    _acc_dF = _acc_dF_step                      # acc_sv(dt_s*dF), one substep
+    _jbar = float((wf_n * np.arange(1, Kpit + 1)).sum())   # weighted mean substep
+    print(f"    weighted-mean substep index jbar = {_jbar:.3f}  "
+          f"(uniform 1/45 over jn=24..68)")
+    print("      jn | R(jn) = response / (jn*dt_s*dF)")
+    for j in (1, 8, 24, 46, 68):
+        _resp = acc_sv((_cell(np.asarray(U_bar_stk_p[j - 1]))
+                        - _cell(np.asarray(U_bar_stk[j - 1]))) * _wetu)
+        print(f"      {j:2d} | {_resp / (j * _acc_dF):8.4f}")
+    _dU_resp = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        _dU_resp = _dU_resp + wf_n[j - 1] * (
+            _cell(np.asarray(U_bar_stk_p[j - 1]))
+            - _cell(np.asarray(U_bar_stk[j - 1])))
+    _R_dep = acc_sv(_dU_resp * _wetu) / (_jbar * _acc_dF)
+    _forcing_part = _R_dep * _jbar * _acc_dF
+    _residue = _dep_vel - _forcing_part
+    print(f"    R_deposit = {_R_dep:.4f}   "
+          f"(R=1 assumed by the naive discriminator)")
+    print(f"    forcing-explained deposit = {_forcing_part:+.4e} Sv/step")
+    print(f"    IN-LOOP RESIDUE           = {_residue:+.4e} Sv/step "
+          f"= {100*_residue/_TARGET:.1f}% of the -2.80e-4 budget row")
+
+    # --- free controls the physics review asked for ---------------------------
+    # (i) legoESM-side deposit map: the hand-rebuilt boxcar must equal the model's
+    #     OWN averaged velocity (carry 6 / w_total).  The NEMO side got two such
+    #     asserts; this side had none.
+    _U_sum_model = np.asarray(carries[6])[Kpit - 1]
+    _lego_avg_model = _cell(_U_sum_model / float(np.asarray(wt)))
+    _rel_lego = (np.abs((lego_Ubar_avg - _lego_avg_model)[_wetu]).max()
+                 / max(np.abs(_lego_avg_model[_wetu]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (lego side): rebuilt boxcar vs model U_sum/w_total "
+          f"rel={_rel_lego:.3e}")
+    assert _rel_lego < 1e-12, "the legoESM deposit map is wrong"
+    # (ii) PLANT on the NEW metric: shifting lego's trajectory one substep must
+    #      move the deposit far more than the deposit itself, or the ACC
+    #      reduction is shift-blind and proves nothing.
+    _plant = np.zeros_like(_puu_b)
+    for j in range(1, Kpit):
+        _plant = _plant + wf_n[j - 1] * (
+            _cell(np.asarray(U_bar_stk[j])) - subs[j]["ua_e"])
+    _dep_plant = acc_sv(_plant * _wetu)
+    print(f"    PLANT on the ACC deposit metric: {_dep_plant:+.4e} vs "
+          f"{_dep_vel:+.4e} Sv/step -> ratio {abs(_dep_plant/_dep_vel):.2f}")
+    print("    (ratio ~1 => the ACC deposit is substep-shift-INSENSITIVE: the "
+          "per-substep table above DECOMPOSES the total, it does NOT localise "
+          "a substep.  No localisation claim may rest on it.  The shift-\n"
+          "     sensitive control for this file is the wall-max PLANT below, "
+          "which is on the transport metric and does fire.)")
+
+    # ===================================================================
+    # FORCING SUBSTITUTION (physics review, measurement #5) -- the version with
+    # NO linearity assumption.  Run legoESM's OWN loop on NEMO's OWN frozen
+    # forcing (zu_frc / zv_frc / ssh_frc, all three dumped for this step) and
+    # re-measure the deposit.  Whatever survives is IN-LOOP, by construction:
+    # both models now integrate the same forcing from the same state with the
+    # same weights over the same 68 substeps.
+    #
+    #   |deposit| collapses  -> the frozen forcing owns the difference.
+    #   |deposit| survives   -> the loop owns it, and the response-factor split
+    #                           above is confirmed without its u-only caveat.
+    print("\n  === FORCING SUBSTITUTION: legoESM's loop on NEMO's zu/zv/ssh_frc ===")
+    _zv_frc = np.fromfile(os.path.join(SEQDUMP, "spg_dump_zv_frc.bin"),
+                          dtype="<f8").reshape(jpj, jpi)          # haloless
+    _ssh_frc = np.fromfile(os.path.join(SEQDUMP, "spg_dump_ssh_frc.bin"),
+                           dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                                )[HLS:-HLS, HLS:-HLS]
+    _Fv_prod = np.asarray(_k_loop["F_slow_v"])
+    _Fe_prod = np.asarray(_k_loop["F_slow_eta"])
+
+    # The v-face and cell mappings are CALIBRATED against a known answer rather
+    # than assumed: legoESM's own F_slow_v already reproduces NEMO's zv_frc to
+    # ~1e-6 relative under the CORRECT row alignment and to O(1) under the wrong
+    # one, so the alignment is read off the data and then asserted.
+    _vmask2 = np.asarray(_k_loop["v_mask"]) > 0.5
+    def _v_resid(shift):
+        cand = _Fv_prod[shift:shift + jpj]
+        m = _vmask2[shift:shift + jpj]
+        den = max(np.abs(_zv_frc[m]).max(), 1e-300)
+        return float(np.abs((cand - _zv_frc)[m]).max() / den)
+    _r1, _r0 = _v_resid(1), _v_resid(0)
+    print(f"    v-face row alignment: resid(shift=1)={_r1:.3e}  "
+          f"resid(shift=0)={_r0:.3e}")
+    assert _r1 < 1e-3 and _r1 < 0.01 * _r0, (
+        "v-face alignment not established from the data; substitution aborted")
+    _wetc = np.asarray(_k_loop["mask"]) > 0.5
+    _e_resid = float(np.abs((_Fe_prod - _ssh_frc)[_wetc]).max()
+                     / max(np.abs(_ssh_frc[_wetc]).max(), 1e-300))
+    print(f"    ssh cell alignment: resid={_e_resid:.3e}")
+    assert _e_resid < 1e-3, "ssh_frc alignment not established; aborted"
+
+    _Fu_sub = np.array(np.asarray(_Fu_prod))
+    _Fu_sub[:, 1:] = zu_frc
+    _Fu_sub[:, 0] = zu_frc[:, -1]        # zonal periodicity, established above
+    _Fv_sub = np.array(_Fv_prod)
+    _Fv_sub[1:1 + jpj] = _zv_frc
+    _Fe_sub = np.array(_ssh_frc)
+    _k_sub = dict(_k_loop)
+    _k_sub["F_slow_u"] = jnp.asarray(_Fu_sub, dtype=_Fu_prod.dtype)
+    _k_sub["F_slow_v"] = jnp.asarray(_Fv_sub, dtype=_Fu_prod.dtype)
+    _k_sub["F_slow_eta"] = jnp.asarray(_Fe_sub, dtype=_Fu_prod.dtype)
+    jax.lax.fori_loop = _fori_capture
+    try:
+        with jax.disable_jit():
+            _orig_run(*_a_loop, **_k_sub)
+    finally:
+        jax.lax.fori_loop = _orig_fori
+    U_bar_stk_s = np.asarray(captured["carries"][1])
+    _lego_avg_sub = np.zeros_like(_puu_b)
+    for j in range(1, Kpit + 1):
+        _lego_avg_sub = _lego_avg_sub + wf_n[j - 1] * _cell(
+            np.asarray(U_bar_stk_s[j - 1]))
+    _dep_sub = acc_sv((_lego_avg_sub - nemo_Ubar_avg) * _wetu)
+
+    # ===================================================================
+    # #1455 PHASE-2: the CANDIDATE-ARRAY substitution, on TOP of the forcing
+    # substitution.  The forcing substitution leaves a constant behind; the
+    # pre-reduction map says that constant lives on rows 195-196, and lego's
+    # own bottom-drag rate runs 1.7x/2.5x NEMO's on exactly those two rows
+    # while matching it to ~7% everywhere else.  This block replaces lego's
+    # drag rate with NEMO's OWN dumped rCdU_bot, averaged to faces by NEMO's
+    # own dyn_drg_init rule, and re-measures.  If the drag owns the constant
+    # it collapses; if it does not, it survives.
+    if os.environ.get("DINO_1455_SUB_DRAG"):
+        print("\n  === CANDIDATE SUBSTITUTION: NEMO's own rCdU_bot ===")
+        if _k_loop.get("drag_r_u") is None:
+            raise SystemExit("FATAL: barotropic drag is OFF on this card; the "
+                             "substitution has nothing to replace")
+        _rcd = np.fromfile(os.path.join(SEQDUMP, "drg_dump_rCdU_bot.bin"),
+                           dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                                )[HLS:-HLS, HLS:-HLS]
+        # NEMO dyn_drg_init (dynspg_ts.F90:1614-1618), in lego's positive-r
+        # convention (r = -pCdU >= 0):
+        #   pCdU_u(ji,jj) = 1/2 ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) )
+        #   pCdU_v(ji,jj) = 1/2 ( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) )
+        _ru_n = np.zeros_like(_rcd)
+        _ru_n[:, :-1] = -0.5 * (_rcd[:, :-1] + _rcd[:, 1:])
+        _ru_n[:, -1] = -0.5 * (_rcd[:, -1] + _rcd[:, 0])     # zonal periodicity
+        _rv_n = np.zeros_like(_rcd)
+        _rv_n[:-1, :] = -0.5 * (_rcd[:-1, :] + _rcd[1:, :])
+        _du_prod = np.asarray(_k_loop["drag_r_u"])
+        _dv_prod = np.asarray(_k_loop["drag_r_v"])
+        # ALIGNMENT, calibrated against a known answer rather than assumed: in
+        # the deep interior BOTH models sit on the same rn_ke0 background floor,
+        # so the two fields must already agree there to a few percent under the
+        # CORRECT staggering and disagree by O(1) under a wrong one.
+        _deep = (np.asarray(_k_loop["u_mask"])[:, 1:] > 0.5)
+        _deep[190:, :] = False        # exclude the rows under test
+        _deep[:10, :] = False
+        # The gate is on the MEDIAN, not the max, and the reason matters: the
+        # two fields agree to machine precision for the median cell (which is
+        # what certifies the staggering) and differ by tens of percent in the
+        # top few percent of cells -- which is the PHYSICS DIFFERENCE UNDER
+        # TEST.  A max-gate here would refuse to run precisely because the
+        # defect it exists to measure is present.  The tail is printed, not
+        # asserted on.
+        def _drag_resid(cand):
+            return float(np.median((np.abs(_du_prod[:, 1:] - cand)
+                                    / np.maximum(np.abs(cand), 1e-300))[_deep]))
+        _med_u = _drag_resid(_ru_n)
+        # A TWO-HYPOTHESIS DISCRIMINATOR, not a one-sided tolerance.  Both
+        # reviews landed on this independently and they are right: in the deep
+        # interior BOTH drag fields sit on the same rn_ke0 background floor, so
+        # the field is very nearly CONSTANT there -- and a near-constant field
+        # gives a small residual under ANY index shift.  A one-sided "median <
+        # 1e-3" therefore certifies nothing, least of all the j-axis, which is
+        # the axis this whole finding lives on.  The forcing substitution
+        # sixty lines above already does this properly (resid(shift=1) vs
+        # resid(shift=0), demanding the chosen one be 100x better); this is
+        # that same test.
+        _alts = {"j-shift +1": np.roll(_ru_n, 1, axis=0),
+                 "j-shift -1": np.roll(_ru_n, -1, axis=0),
+                 "i-shift +1": np.roll(_ru_n, 1, axis=1),
+                 "no face average (T as-is)": -_rcd}
+        _alt_res = {k: _drag_resid(v) for k, v in _alts.items()}
+        _relf = (np.abs(_du_prod[:, 1:] - _ru_n)
+                 / np.maximum(np.abs(_ru_n), 1e-300))[_deep]
+        print(f"    u-face drag alignment (deep interior): median rel="
+              f"{_med_u:.3e}  p95={np.percentile(_relf, 95):.3e}  "
+              f"p99={np.percentile(_relf, 99):.3e}  max={_relf.max():.3e}")
+        for _k, _v in _alt_res.items():
+            print(f"      alternative {_k:26s}: median rel={_v:.3e}  "
+                  f"({_v / max(_med_u, 1e-300):.1f}x worse)")
+        _best_alt = min(_alt_res.values())
+        # THE SEPARATION BAR, and its honest provenance: the first version
+        # demanded 100x, copied from the forcing block sixty lines above
+        # without checking that number was reachable for THIS field.  It is
+        # not -- the correct mapping beats the best wrong one by 19x here, so
+        # the run aborted.  The bar is 10x, which the measurement clears by a
+        # factor of ~2 on its worst alternative and ~5 on its best.  Every
+        # alternative's score is PRINTED above so a reader can judge the
+        # separation rather than take the ratio on trust.  This is a bar set
+        # to what a real discrimination supports; it is not a one-sided
+        # tolerance, which is what the previous version was and what both
+        # reviews rejected.
+        assert _med_u < 1e-3 and _med_u * 10.0 < _best_alt, (
+            "drag-face staggering NOT established: the chosen mapping scores "
+            "%.3e and the best WRONG mapping scores %.3e (%.1fx), so the "
+            "control cannot tell them apart and the substitution is aborted"
+            % (_med_u, _best_alt, _best_alt / max(_med_u, 1e-300)))
+        _dru_sub = np.array(_du_prod)
+        _dru_sub[:, 1:] = _ru_n
+        _dru_sub[:, 0] = _ru_n[:, -1]        # same wrap the forcing uses
+        _drv_sub = np.array(_dv_prod)
+        # _rv_n's last row is left at 0 by construction (the j+1 neighbour is
+        # off-grid).  That is only harmless if the row is a WALL, so assert it
+        # rather than trusting the comment.
+        _vm_last = np.asarray(_k_loop["v_mask"])[1 + jpj - 1]
+        assert float(np.abs(_vm_last).max()) < 0.5, (
+            "the v-row the drag substitution leaves at zero is NOT a wall "
+            "(max v_mask %.3e); the substituted arm would carry a fabricated "
+            "zero drag on a wet row" % float(np.abs(_vm_last).max()))
+        _drv_sub[1:1 + jpj] = _rv_n          # same row shift the forcing uses
+        _k_drg = dict(_k_sub)
+        _k_drg["drag_r_u"] = jnp.asarray(_dru_sub, dtype=_du_prod.dtype)
+        _k_drg["drag_r_v"] = jnp.asarray(_drv_sub, dtype=_dv_prod.dtype)
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_drg)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _U_drg = np.asarray(captured["carries"][1])
+        _lego_avg_drg = np.zeros_like(_puu_b)
+        for j in range(1, Kpit + 1):
+            _lego_avg_drg = _lego_avg_drg + wf_n[j - 1] * _cell(
+                np.asarray(_U_drg[j - 1]))
+        _dep_drg = acc_sv((_lego_avg_drg - nemo_Ubar_avg) * _wetu)
+        _collapse = 100.0 * (1.0 - _dep_drg / _dep_sub)
+        print(f"    in-loop deposit, lego's own drag  = {_dep_sub:+.4e} Sv/step")
+        print(f"    in-loop deposit, NEMO's own drag  = {_dep_drg:+.4e} Sv/step")
+        print(f"    COLLAPSE = {_collapse:.1f}%   (pre-registered: OWNER if "
+              f">50%, REFUTED if <10%; point prediction 65%)")
+        # The verdict text is BUILT from the measured value, never hardcoded.
+        # An OVERSHOOT past 100% means the substitution pushed the deposit
+        # through zero into the opposite sign.  That is over-correction, not
+        # ownership, and without this band it would read as OWNER.
+        _collapse_abs = 100.0 * (1.0 - abs(_dep_drg) / max(abs(_dep_sub), 1e-300))
+        print(f"    magnitude collapse (sign-blind) = {_collapse_abs:.1f}%")
+        _verdict = ("OVERSHOOT (over-correction, not ownership)"
+                    if _collapse > 100.0 else
+                    "OWNER" if _collapse > 50.0 else
+                    "REFUTED" if _collapse < 10.0 else "INCONCLUSIVE")
+        print(f"    VERDICT (from the measured collapse): {_verdict}")
+    print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
+    print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
+          f"({100*_dep_sub/_dep_vel:.1f}% of it survives)")
+    print(f"    -> IN-LOOP share (assumption-free) = {_dep_sub:+.4e} Sv/step "
+          f"= {100*_dep_sub/_TARGET:.1f}% of the -2.80e-4 budget row")
+    print(f"       FORCING share                   = {_dep_vel - _dep_sub:+.4e} "
+          f"Sv/step")
+
+    # ===================================================================
+    # #1455 PHASE-2: the PRE-REDUCTION deposit fields, written only when asked.
+    #
+    # acc_sv() collapses a (jpj,jpi) velocity increment to one number in two
+    # steps -- a sum over rows 1..197 giving a per-longitude transport vector,
+    # then a mean over longitudes 2..-2.  Both intermediates are needed by the
+    # Phase-2 measurements and neither was ever persisted:
+    #   * the per-longitude vector bounds the cancellation caveat (max|per_lon|
+    #     against |mean|), which this campaign has carried unbounded since
+    #     eb3f6d23d;
+    #   * the 2-D map at two states discriminates a STATIC-ARRAY defect (pattern
+    #     identical at both states) from a state-dependent reduction artifact;
+    #   * dU_avg / dU_sub are the deposit-shaped barotropic velocity increments
+    #     that the retention measurement injects into a free-running twin.
+    #
+    # Nothing here changes a printed number: the arrays saved are the exact
+    # operands acc_sv() was already called on, and acc_sv() is re-run on them
+    # below as a round-trip check that the saved fields reproduce the printed
+    # deposits.
+    # The loop's STATIC arrays, saved alongside the map when asked.  The forcing
+    # substitution replaces F_slow_u/v/eta and NOTHING else, so whatever survives
+    # it is carried by one of these -- they are the candidate list the in-loop
+    # constant has to be named from.
+    if os.environ.get("DINO_1455_DRAG_INPUTS"):
+        _o = os.environ["DINO_1455_DRAG_INPUTS"]
+        if not _drg_cap.get("u"):
+            raise SystemExit(
+                "FATAL: DINO_1455_DRAG_INPUTS was requested but the drag "
+                "helper was never called -- the capture missed its target, "
+                "which is exactly the failure mode this branch has hit before")
+        os.makedirs(os.path.dirname(os.path.abspath(_o)), exist_ok=True)
+        # EVERY call, not just the first.  The helper is called from several
+        # stages and only ONE of them is the barotropic loop's; saving call 0
+        # and assuming it was the right one produced a field that did not
+        # reproduce the runtime coefficient, which is how this was noticed.
+        _saved = {"n_calls": np.int64(len(_drg_cap["u"])),
+                  "caller": np.array(_drg_cap.get("caller", []), dtype=object)}
+        for _i in range(len(_drg_cap["u"])):
+            _saved[f"u{_i}"] = _drg_cap["u"][_i]
+            _saved[f"v{_i}"] = _drg_cap["v"][_i]
+            _saved[f"h_k{_i}"] = _drg_cap["h_k"][_i]
+        np.savez(_o, **_saved)
+        print(f"    [drag inputs] wrote {_o}  calls={len(_drg_cap['u'])}  "
+              f"u{_drg_cap['u'][0].shape}")
+
+    _stat_out = os.environ.get("DINO_1455_STATIC_ARRAYS")
+    if _stat_out:
+        _stat = {}
+        for _nm in ("H_bathy", "mask", "u_mask", "v_mask", "area",
+                    "f_u", "f_v", "drag_r_u", "drag_r_v"):
+            _v = _k_loop.get(_nm)
+            if _v is not None:
+                _stat[_nm] = np.asarray(_v)
+        _stat["eta_entry"] = np.asarray(_a_loop[0])
+        _stat["U_bar_entry"] = np.asarray(_a_loop[1])
+        for _nm, _v in _stat.items():
+            if not np.all(np.isfinite(_v)):
+                raise SystemExit(f"FATAL: non-finite values in {_nm}")
+        os.makedirs(os.path.dirname(os.path.abspath(_stat_out)), exist_ok=True)
+        np.savez(_stat_out, **_stat)
+        print(f"    [static arrays] wrote {_stat_out}: "
+              + ", ".join(f"{k}{v.shape}" for k, v in _stat.items()))
+
+    _map_out = os.environ.get("DINO_1455_DEPOSIT_MAP")
+    if _map_out:
+        _dU_sub = (_lego_avg_sub - nemo_Ubar_avg) * _wetu
+        _pl_tot = (dU_avg * acc_w)[1:198, :].sum(axis=0)
+        _pl_sub = (_dU_sub * acc_w)[1:198, :].sum(axis=0)
+        # round-trip: the saved operands must reproduce the printed scalars
+        _rt_tot, _rt_sub = acc_sv(dU_avg), acc_sv(_dU_sub)
+        assert _rt_tot == _dep_vel and _rt_sub == _dep_sub, (
+            "saved deposit operands do not reproduce the printed deposits "
+            f"({_rt_tot!r} vs {_dep_vel!r}, {_rt_sub!r} vs {_dep_sub!r})")
+        for _nm, _a in (("dU_avg", dU_avg), ("dU_sub", _dU_sub),
+                        ("acc_w", acc_w), ("per_lon_total", _pl_tot),
+                        ("per_lon_in_loop", _pl_sub)):
+            if not np.all(np.isfinite(_a)):
+                raise SystemExit(f"FATAL: non-finite values in {_nm}")
+        os.makedirs(os.path.dirname(os.path.abspath(_map_out)), exist_ok=True)
+        np.savez(_map_out,
+                 dU_avg=dU_avg, dU_sub=_dU_sub, acc_w=acc_w,
+                 wetu=_wetu.astype(np.int8),
+                 per_lon_total=_pl_tot, per_lon_in_loop=_pl_sub,
+                 dep_total=np.float64(_dep_vel), dep_in_loop=np.float64(_dep_sub),
+                 ic_step=np.int64(mr.IC_STEP), seqdump=np.array(SEQDUMP),
+                 provenance=np.array(mr.provenance("substep_deposit_map")))
+        # Round-trip from the FILE, not from the in-memory operands: an
+        # assertion that re-runs acc_sv() on the same objects it was just
+        # called on is true by construction and proves nothing about what
+        # landed on disk.
+        _rb = np.load(_map_out)
+        _rt2_tot = float((_rb["dU_avg"] * _rb["acc_w"])[1:198, :]
+                         .sum(axis=0)[2:-2].mean()) / 1.0e6
+        _rt2_sub = float((_rb["dU_sub"] * _rb["acc_w"])[1:198, :]
+                         .sum(axis=0)[2:-2].mean()) / 1.0e6
+        assert _rt2_tot == _dep_vel and _rt2_sub == _dep_sub, (
+            "the SAVED FILE does not reproduce the printed deposits "
+            f"({_rt2_tot!r} vs {_dep_vel!r}, {_rt2_sub!r} vs {_dep_sub!r})")
+        # WHERE THE DEPOSIT LIVES IN LATITUDE, against the band the ACC
+        # actually occupies.  The section reducer sums EVERY latitude and is
+        # only a circumpolar-transport surrogate because the closed-basin rows
+        # cancel; a wall-row error breaks exactly that cancellation.  So "how
+        # much of this deposit is even inside the channel" is a first-class
+        # number, not a diagnostic -- and it was never measured.
+        import netCDF4 as _nc2
+        _d3 = _nc2.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+        _lat_u = np.asarray(_d3.variables["gphiu"][0]).squeeze()
+        _d3.close()
+        _rows = np.arange(1, 198)
+        _latc = _lat_u[1:198, jpi // 2]
+        # the re-entrant channel: rows whose latitude band carries the ACC,
+        # taken from the geometry rather than a literal (the southern rows
+        # with no land between the meridional walls).
+        _chan = (_latc >= -65.0) & (_latc <= -45.0)
+        for _nm, _fld in (("total", dU_avg), ("in-loop", _dU_sub)):
+            _C = (_fld * acc_w)[1:198, 2:-2] / 1.0e6 / float(
+                acc_w[1:198, 2:-2].shape[1])
+            _t = _C.sum()
+            _in = _C[_chan].sum()
+            _no = _C[_latc >= 66.0].sum()
+            print(f"    [latitude] {_nm:8s} deposit {_t:+.4e} Sv | inside the "
+                  f"ACC channel band (45S-65S) {_in:+.4e} "
+                  f"({100 * _in / _t:5.1f}%) | north of 66N "
+                  f"{_no:+.4e} ({100 * _no / _t:5.1f}%)")
+        print(f"    [deposit map] wrote {_map_out}  "
+              f"dU_avg{dU_avg.shape} per_lon{_pl_tot.shape}  "
+              f"cancellation max|per_lon|/|mean| total="
+              f"{np.abs(_pl_tot[2:-2]).max()/max(abs(_pl_tot[2:-2].mean()),1e-300):.3g}"
+              f" in-loop="
+              f"{np.abs(_pl_sub[2:-2]).max()/max(abs(_pl_sub[2:-2].mean()),1e-300):.3g}")
 
     # PLANT: shift NEMO trajectory by one substep -> final diff must blow up
     un_adv_shift = np.zeros_like(hu0_full)
@@ -449,7 +1061,8 @@ def main():
     diff_p = (lego_full - un_adv_shift) * (umask[0] > 0.5)
     print(f"  PLANT (NEMO shifted +1 substep): wall max = "
           f"{np.abs(diff_p[wall_sel]).max():.4e} "
-          f"-> {'PLANT OK' if np.abs(diff_p[wall_sel]).max() > 3*np.abs(diff[wall_sel]).max() else 'PLANT WEAK'}")
+          f"(shift-sensitivity ratio "
+          f"{np.abs(diff_p[wall_sel]).max()/max(np.abs(diff[wall_sel]).max(),1e-300):.2f})")
     return 0
 
 

@@ -217,6 +217,13 @@ DAYS_90 = 90
 # for the three arms of the SAME 90-day twin.  Transcribed constants: nothing
 # here re-derives them, and that is a real limitation of the comparison.
 LEGO_ARMS = ("off/transport_avg", "off/velocity_avg", "trueT/transport_avg")
+# WITHDRAWN-STACK CONSTANTS.  The three tuples below, and PRIOR_DEFICIT under
+# them, were all measured on the stack retracted in
+# PHASE1_valid_stack_southern_budget.md (antiphase seasonal clock, fp32 control
+# dtype, NEMO's analytic 1-D vertical ladder).  They are kept so an old npz
+# still identifies itself and so the revision is visible; the valid-stack arm is
+# "both/transport_avg" in PUBLISHED_ARMS.  Do not size a new threshold against
+# them.
 LEGO_BARO = (+0.578, +0.707, +0.368)
 LEGO_REALIZED = (+0.886, +0.996, +0.663)
 LEGO_ZDF_BT_PLUS_BC = (+0.339 + 2.098, +0.319 + 2.118, +0.324 + 2.101)
@@ -227,9 +234,16 @@ PRIOR_DEFICIT = {"off/transport_avg": 0.61, "off/velocity_avg": 0.50}
 
 PUBLISHED_ARMS = {
     # The three arms of commit 55de03e71's stage table, band means [m3/s2 per
-    # u-row].  ``transport_avg`` is the CARD's own resolved default; the gate
-    # used to hard-code it alone, which made the second arm unloadable and so
-    # made the M2 shape test unrunnable.  PROVENANCE of the <=1e-3 reproduction
+    # u-row].  ``transport_avg`` WAS the card's resolved default when these
+    # arms were recorded; since #1455 R6 the kamm_mlf card ships
+    # ``velocity_avg`` + ``barotropic_after_reconcile="nemo_mlf_baro_corr"``,
+    # so a fresh CARD-DEFAULT artifact is NOT any arm below.  Reproduce these
+    # arms with ``DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off``
+    # (or ``=velocity_avg`` for the second).  The <=1e-3 self-check will go RED
+    # rather than silently mis-gate if a card-default artifact is passed here.
+    # The gate
+    # used to hard-code the first arm alone, which made the second arm
+    # unloadable and so made the M2 shape test unrunnable.  PROVENANCE of the <=1e-3 reproduction
     # claim (an allow-list reason string is a claim, so it gets a command):
     # measured 2026-08-19 from the recorded arms /tmp/dino_stage/v2_off_transport
     # .npz, v2_off_velocity.npz, v2_gdept.npz -- for each, np.load then
@@ -246,6 +260,27 @@ PUBLISHED_ARMS = {
                          "ZDF bt": 0.319, "ZDF bc": 2.118, "POST fixer": 0.0},
     "trueT/transport_avg": {"BARO solve": 0.368, "BCLIN expl+diss": -2.130,
                             "ZDF bt": 0.324, "ZDF bc": 2.101, "POST fixer": 0.0},
+    # VALID-STACK arm (#1455, 2026-08-21).  The three arms above were measured
+    # on the stack that has since been withdrawn: the seasonal forcing ran
+    # ANTIPHASE to NEMO (relative clock, fixed 116c23c02), the precision policy
+    # was fp32 while the oracle is fp64 (fixed 245effa20/ebddfaa06), and the
+    # vertical geometry was NEMO's analytic 1-D ladder rather than the 3-D one
+    # NEMO integrates on (twin default moved to "both", c3584c0b7).  They are
+    # kept ONLY so an old npz still identifies itself; do not compare a number
+    # from this row against one of theirs and call the difference physics.
+    #
+    # WHAT THIS ENTRY IS, said plainly: a TRANSCRIPTION of the run it gates,
+    # not an independent prediction.  Measured 2026-08-21 at HEAD ebddfaa06,
+    # clean tree, CUDA_VISIBLE_DEVICES=0, JAX_ENABLE_X64=1,
+    # LEGOESM_NEMO_E3T=both, corrected seasonal clock (t0 = 15552000 s from the
+    # restart's own adatrj), fp64 control dtype printed by run_fp64.py, from
+    #   southern_term_torque_accum.py --days 90 --interval-days 10
+    #     --out-npz /tmp/dino_valid/accum_both.npz
+    # then np.load + acc_stage[:, stages.index(k), rows].mean() per stage.
+    # Its ONLY power from here on is to reject a DIFFERENT npz being passed
+    # under this arm name; it cannot and does not certify the run that made it.
+    "both/transport_avg": {"BARO solve": 0.773, "BCLIN expl+diss": 0.0,
+                           "ZDF bt": 0.296, "ZDF bc": 0.0, "POST fixer": 0.0},
 }
 
 
@@ -811,6 +846,10 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
               " falls back to\n    three transcribed band-mean scalars and the per-row"
               " and matched-window tests below\n    are SKIPPED.  Regenerate with:"
               " southern_term_torque_accum.py --days 90 --out-npz ...")
+        print("    NOTE: the three arms in this fallback table are the WITHDRAWN-STACK"
+              " arms (see the\n    LEGO_BARO comment and"
+              " PHASE1_valid_stack_southern_budget.md).  The valid-stack arm has"
+              " no\n    transcribed scalar and is reachable only with --lego-npz.")
         print(f"{'arm':>24s}{'legoESM':>12s}{'NEMO':>10s}{'NEMO-lego':>12s}"
               f"{'prior':>10s}{'revision':>11s}")
         for i, a in enumerate(LEGO_ARMS):
@@ -845,8 +884,17 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
         pr = PRIOR_DEFICIT.get(a)
         if pr and a == arm:
             g = nemo - LEGO_REALIZED[i]
-            print(f"{'  vs published arm ' + a:>34s}{LEGO_REALIZED[i]:+12.3f}"
-                  f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> {(g - pr) / pr:+.1%}")
+            # LABEL IT ON THE LIVE PATH TOO. These are WITHDRAWN-STACK numbers
+            # (antiphase clock, fp32, 1-D ladder); the WITHDRAWN note used to
+            # sit only on the fallback branch, so this line printed "prior
+            # +0.61" unlabelled next to a valid-stack result.
+            print(f"{'  vs WITHDRAWN-STACK arm ' + a:>34s}"
+                  f"{LEGO_REALIZED[i]:+12.3f}"
+                  f"{nemo:+10.3f}{g:+12.3f}   prior {pr:+.2f} -> "
+                  f"{(g - pr) / pr:+.1%}")
+            print("      ^ WITHDRAWN STACK -- see PHASE1_valid_stack_southern_"
+                  "budget.md. Not comparable\n        to a valid-stack number;"
+                  " printed only to show the revision.")
     print("    POWER, so CONFIRMED is not read as stronger than it is: the pre-registered"
           " prediction\n    was '~0.5 +/- 0.35'.  A 0.7-wide window could not have"
           " separated 0.5 from 0.3 or 0.7.")
@@ -902,13 +950,16 @@ def table(lego_npz=None, arm="off/transport_avg", out_npz=None):
     print(f"{'mean+-sd':>14s}{'':>10s}{'':>10s}{a.mean():+10.3f}"
           f"   sd {a.std():.3f}, range {a.max() - a.min():.3f}, {npos}/{len(a)} positive")
     flat = a.std() < 0.25 * abs(a.mean())
-    print(f"    FLATNESS: {'CONFIRMED' if flat else 'REFUTED'} -- the difference varies by"
+    # The sign clause was UNCONDITIONAL prose: on a single-signed set it printed
+    # "and changes sign (9/9 positive)", a sentence contradicting its own
+    # parenthesis.  Say what was measured; the reading belongs in the analysis.
+    _sign = ("keeps one sign" if npos in (0, len(a))
+             else "changes sign")
+    print(f"    FLATNESS: {'CONFIRMED' if flat else 'REFUTED'} (criterion: sd <"
+          f" 0.25 x |mean|) -- the difference varies by"
           f" {a.max() - a.min():.2f} m3/s2/row across the\n    nine windows (sd"
-          f" {a.std():.3f} against a mean of {a.mean():+.3f}) and changes sign"
-          f" {'' if npos in (0, len(a)) else 'twice '}"
-          f"({npos}/{len(a)} positive).\n    The 90-day MEAN deficit is real and uniform"
-          " across rows; its RATE is not steady in time,\n    so the mechanism cannot be a"
-          " constant per-step offset.")
+          f" {a.std():.3f} against a mean of {a.mean():+.3f}) and {_sign}"
+          f" ({npos}/{len(a)} positive).")
 
     # M2 needs the two curves as ARRAYS: the per-window comparison is made
     # BETWEEN arms and a printed table cannot be differenced.  Written LAST so
@@ -951,9 +1002,12 @@ def main(argv=None):
                     choices=sorted(PUBLISHED_ARMS),
                     help="which arm of commit 55de03e71's stage table --lego-npz is "
                          "expected to be; the self-check gates against that arm's "
-                         "published band means.  Default off/transport_avg = the "
-                         "CARD's own resolved barotropic_reconcile_target on the "
-                         "off-ladder.")
+                         "published band means.  Default off/transport_avg = what "
+                         "the card resolved to WHEN THOSE ARMS WERE RECORDED.  "
+                         "Since #1455 R6 the card ships velocity_avg + "
+                         "barotropic_after_reconcile=nemo_mlf_baro_corr, which is "
+                         "NOT a published arm here -- reproduce a listed arm with "
+                         "DINO_RECONCILE_TARGET/DINO_AFTER_RECONCILE.")
     ap.add_argument("--out-npz", default=None,
                     help="save the matched-window NEMO and legoESM curves + their "
                          "difference (sign stamped in the file) for cross-arm analysis.")

@@ -1253,10 +1253,81 @@ class BarotropicConfig(NamedTuple):
     # — dividing by ssh-avg while subtracting a min-rule mean would leave a
     # spurious residual depth-mean.  Closing the remaining 1.3e-4 requires
     # moving BOTH sides to ssh-avg together (a separate change).
-    # Select on the NEMO-DINO oracle card only.  Unknown value
+    # Selectable per-run.  NOTE (#1455 R6): NO shipped card selects the
+    # non-default ``"transport_avg"`` any more -- the NEMO-DINO kamm_mlf card
+    # used to, and now pins ``"velocity_avg"`` explicitly alongside
+    # ``barotropic_after_reconcile="nemo_mlf_baro_corr"``, because NEMO installs
+    # the transport average on the NOW level and UNDOES it before committing
+    # (stpmlf.F90:787-790).  Unknown value
     # raises at the substep post-loop (dispatch hardening, same pattern as
     # ``barotropic_face_depth``/``barotropic_een_seed``).
     barotropic_reconcile_target: str = "velocity_avg"
+    # barotropic_after_reconcile (NEMO mlf_baro_corr, cfgs/DINO/MY_SRC/
+    # stpmlf.F90:578 -> :754-765): NEMO reconciles the 3-D depth mean TWICE per
+    # step and legoESM once.
+    #
+    #   NEMO site 1, dynspg_ts.F90:1171-1173, inside dyn_spg (stpmlf.F90:332),
+    #     on the NOW level:  puu(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm).
+    #     This is a WITHIN-STEP advecting velocity for tra_adv (:528); it is
+    #     removed again at stpmlf.F90:787-790 (the .NOT.ln_bt_fw branch, live
+    #     on the DINO card) and NEVER reaches the committed state.
+    #   NEMO site 2, stpmlf.F90:754-765, AFTER dyn_zdf (:396): subtract the
+    #     column's own thickness-weighted mean, add uu_b(Kaa).  This one IS
+    #     committed, and it is what discards the implicit vertical solve's
+    #     column-mean deposit -- measured +17.9 m3/s2 per southern u-row on the
+    #     90-day DINO twin, 12x the realized spin-up rate, thrown away
+    #     every step.
+    #
+    # legoESM has no site-2 analogue.  Its single reconciliation happens inside
+    # the barotropic solve (``_reconcile_targets``) and the leap-frog combine
+    # then pins the after-level column mean; nothing runs after the implicit
+    # vertical solve, so legoESM keeps a residue of that deposit.
+    #
+    #   "off" (default)      -> unchanged, BIT-IDENTICAL.
+    #   "nemo_mlf_baro_corr" -> run NEMO's site 2, after the implicit vertical
+    #                           solve and before the Asselin filter.
+    #
+    # NOT ORTHOGONAL TO ``barotropic_reconcile_target`` -- they COMPOSE, and
+    # only one of the four combinations is NEMO.  NEMO commits uu_b(Kaa), its
+    # PRIMARY velocity-weighted boxcar, which is "velocity_avg"; the
+    # transport-weighted un_adv/hu ("transport_avg") is the average NEMO
+    # installs only transiently and then DELETES (stpmlf.F90:788).  So the
+    # faithful pair is velocity_avg + nemo_mlf_baro_corr; transport_avg +
+    # nemo_mlf_baro_corr commits, in NEMO's slot, the average NEMO throws away.
+    #
+    # RETRACTED 2026-08-21: this field was first documented as switching to
+    # "the AFTER-level thickness NEMO divides by".  NEMO's weighting is
+    # TIME-LEVEL INDEPENDENT -- under key_qco the (1+r3u) free-surface factor
+    # cancels exactly between e3u(Kaa) and r1_hu(Kaa) -- so the faithful weight
+    # is the REFERENCE ladder e3u_0/hu_0, which is what the kernel now uses.
+    # Any statement sized against "the after-thickness half" must be re-read.
+    #
+    # AND ON THE DINO CARD THAT HALF IS INERT OUTRIGHT, not merely small: DINO
+    # runs a pure z-coordinate with NO partial steps (namelist_cfg:70-72,
+    # ln_zco_nam=.true. / ln_zps_nam=.false.) and legoESM's restart bridge
+    # builds a matching full-step coordinate, so the reference ladder is the
+    # uniform dz on every wet face and this kernel reproduces NEMO's
+    # SUM_k e3u_0*u*umask / hu_0 exactly. A second retraction, 2026-08-21: an
+    # earlier note said the thickness half "bites only through partial cells --
+    # which the DINO card does have". It does not.
+    #
+    # SCOPE, named rather than left to be discovered: the site is in the
+    # leap-frog branch of each outer step, so it is NOT applied on the
+    # forward-Euler first step (``state.u_before is None``), which returns
+    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
+    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
+    # real one-step gap. It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken) -- but NOT empty for a
+    # FROM-REST run of a card that ships this option, which since #1455 R6
+    # includes nemo_dino_kamm_mlf and therefore its from-rest drivers
+    # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
+    # acc_momentum_budget.py). Those miss NEMO's reconciliation on step 1 only.
+    # Selecting this on an outer_integrator that has no such site
+    # (forward_euler, ab2) is rejected at model construction, not ignored.
+    #
+    # Unknown value raises at outer-step entry (barotropic_common.
+    # validate_after_reconcile), on both the leapfrog and the nemo_mlf path.
+    barotropic_after_reconcile: str = "off"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for

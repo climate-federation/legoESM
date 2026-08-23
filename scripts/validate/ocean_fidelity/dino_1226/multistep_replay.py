@@ -147,11 +147,25 @@ def provenance(tag: str = "") -> str:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=_here, capture_output=True,
             text=True, timeout=30).stdout.strip() or "<no-sha>"
+        # TRACKED dirt only: a bare `git status --porcelain` counts UNTRACKED
+        # files too, so the flag was permanently on (this tree carries dozens
+        # of scratch files) and therefore carried no information -- an
+        # adversarial review caught an artifact stamped "+dirty" being
+        # described as clean.  Two sibling stampers in this directory already
+        # pass --untracked-files=no; this matches them, and the untracked
+        # count is reported SEPARATELY so nothing is hidden, only separated.
         dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain"], cwd=_here, capture_output=True,
-            text=True, timeout=60).stdout.strip())
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=_here, capture_output=True, text=True,
+            timeout=60).stdout.strip())
+        n_untracked = len(subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", ":/"],
+            cwd=_here,
+            capture_output=True, text=True,
+            timeout=60).stdout.splitlines())   # lines, not whitespace tokens:
+        # a filename containing a space would otherwise be counted twice.
     except Exception as exc:                      # never let provenance abort a probe
-        sha, dirty = f"<unavailable: {exc}>", False
+        sha, dirty, n_untracked = f"<unavailable: {exc}>", False, -1
     # EVERY knob that can change the answer, including the wind-control env
     # vars: a wind-on and a wind-off run must NOT stamp identically, since the
     # #1455 retraction turns on exactly that variable.  SEQDUMP is stamped too
@@ -164,9 +178,13 @@ def provenance(tag: str = "") -> str:
             "DINO_RECONCILE",
             "DINO_NEMO_RUN_SEQDUMP", "DINO_NEMO_RUN_TRAJ",
             "DINO_NEMO_RUN_TWIN_STEP1", "DINO_1226_IC_STEP",
+            # #1455 PHASE 1: the seasonal clock is a knob that changes the
+            # answer on a forcing_annual_cycle=True card, so it is stamped.
+            "DINO_1226_T_SECONDS",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
-            f"git={sha}{'+dirty' if dirty else ''}  {_knobs}  "
+            f"git={sha}{'+dirty-TRACKED' if dirty else ''}"
+            f"+untracked{n_untracked}  {_knobs}  "
             f"IC_STEP={IC_STEP}  RUN_TRAJ={RUN_TRAJ!r}  "
             f"RUN_TWIN_STEP1={RUN_TWIN_STEP1!r}")
     print(line, flush=True)
@@ -266,6 +284,29 @@ def build_replay_ic(*, recipe: str = RECIPE, run_traj: str = RUN_TRAJ,
                                lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
+
+    # #1455 R6: the kamm_mlf card now SHIPS the NEMO-faithful reconciliation
+    # pair (barotropic_reconcile_target="velocity_avg" +
+    # barotropic_after_reconcile="nemo_mlf_baro_corr").  Every probe that
+    # imports this helper bridges a state with ``u_before`` populated, so the
+    # leap-frog branch runs and NEMO's SECOND reconciliation now fires -- which
+    # SHIFTS every step-level number recorded on those probes before the flip.
+    # Honour the same two ablation env vars kamm_twin_90d.py does, so a
+    # pre-flip baseline is restorable rather than lost:
+    #   DINO_RECONCILE_TARGET=transport_avg DINO_AFTER_RECONCILE=off
+    # reproduces the composition every pre-2026-08-21 replay number was
+    # recorded on.  Values are validated by the model's own dispatch gates
+    # (barotropic_common.validate_after_reconcile /
+    # barotropic_latlon_cgrid), so a typo raises rather than silently
+    # selecting a default.
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
+    _ar = os.environ.get("DINO_AFTER_RECONCILE")
+    if _ar:
+        cfg = dataclasses.replace(cfg, barotropic_after_reconcile=_ar)
+        print(f"ABLATION: barotropic_after_reconcile={_ar}")
 
     st = br.state
     verify_day0_matches_restart(st, s0, br.land_mask)

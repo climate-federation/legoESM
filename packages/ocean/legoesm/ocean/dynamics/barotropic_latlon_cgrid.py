@@ -1222,6 +1222,8 @@ def barotropic_substeps_latlon_cgrid(
     eta_init=None,
     u_init=None,
     v_init=None,
+    u_now=None,
+    v_now=None,
     substep_scale: int = 1,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
@@ -1239,6 +1241,24 @@ def barotropic_substeps_latlon_cgrid(
     depth-mean REPLACEMENT (``u' = u − ū``) still uses ``state``'s NOW velocity —
     only the fast-mode integration is re-seeded.  With ``None`` the two
     depth-means coincide ⇒ byte-identical for every other caller.
+
+    ``u_now`` / ``v_now`` (default ``None``) supply the NOW-level (NEMO ``Kmm``)
+    3-D velocity used to build the barotropic bottom-drag RATE under
+    ``barotropic_drag_substep``.  NEMO evaluates ``rCdU_bot`` in ``zdf_phy``
+    (``zdfdrg.F90:174-181``, ``uu(:,:,imk,Kmm)``) which ``stpmlf.F90:190`` calls
+    BEFORE ``dyn_adv``/``dyn_vor``/``dyn_ldf``/``dyn_hpg``/``dyn_spg``, so the
+    coefficient ``dyn_drg_init`` freezes over the substep window
+    (``dynspg_ts.F90:1616``) is built from a velocity the 3-D momentum update has
+    not touched.  ``state`` reaching this solver from the production step is the
+    POST-momentum ``state_mid`` (``u* = u^n + dt·RHS`` plus the Matsuno Coriolis
+    rotation), so that caller must pass its own ``state.u/v`` here; without it
+    the rate would be built from ``u*``.  ``None`` ⇒ ``state``'s own velocity,
+    which IS the now level for every OTHER caller -- the unit tests, the MPI
+    scaling benchmark and the fidelity probes all hand this solver an
+    un-advanced state ⇒ byte-identical there.  Supply BOTH or NEITHER: one
+    alone would build the rate from one component at the now level and the
+    other at the post-momentum level, which is a plausible-looking number with
+    no error anywhere, so it is rejected below.
 
     ``add_barotropic_coriolis`` (default True) applies the explicit f×U_bt
     Coriolis term inside each substep.  Set False when the planetary Coriolis
@@ -1291,6 +1311,17 @@ def barotropic_substeps_latlon_cgrid(
     # All-or-none: a partial before-level seed would mix (e.g.) the NOW velocity
     # over the BEFORE eta-thickness — a silent inconsistency.  The MLF always
     # passes all three; reject any partial override (static Python check).
+    # Same all-or-none rule as the before-level seed just below, and checked in
+    # the same place rather than inside the drag branch: one component of the
+    # now-level velocity without the other builds the rate's |U| from two time
+    # levels, and a caller that gets it wrong with the drag flag off deserves
+    # the error just as much (review N4).  Static Python args, nothing traced.
+    if (u_now is None) != (v_now is None):
+        raise ValueError(
+            "barotropic drag-rate now-level velocity must supply BOTH "
+            "u_now and v_now or NEITHER (one alone mixes time levels "
+            f"inside one |U|); got u_now={'set' if u_now is not None else None}, "
+            f"v_now={'set' if v_now is not None else None}.")
     if _seed_override and (eta_init is None or u_init is None or v_init is None):
         raise ValueError(
             "barotropic before-level seed must supply ALL of eta_init/u_init/"
@@ -1443,12 +1474,20 @@ def barotropic_substeps_latlon_cgrid(
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_bottom_drag_rate_faces,
         )
-        # NOW-level thickness for the rate (the MLF seed override re-seeds
-        # only the fast integration; the drag coef stays at NOW like NEMO's
-        # zdfdrg rCdU_bot).
+        # NOW-level thickness for the rate: NEMO's zdf_drg_nonlin reads
+        # ``e3t(ji,jj,imk,Kmm)`` (zdfdrg.F90:176), and the MLF seed override
+        # re-seeds only the fast integration, so the rate keeps the NOW
+        # thickness -- which under the override is ``_h_k_corr`` (built from
+        # ``state.eta``, the NOW ssh) and without it is ``h_k`` (same array).
         _hk_now = _h_k_corr if _seed_override else h_k
+        # NOW-level VELOCITY for the rate (zdfdrg.F90:174-175, ``uu(...,Kmm)``,
+        # evaluated at stpmlf.F90:190 BEFORE the dyn_* chain).  ``u_corr`` is
+        # whatever velocity ``state`` carries, which on the production path is
+        # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
+        _u_drg = u_corr if u_now is None else u_now.astype(_dt)
+        _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
-            u_corr, v_corr, _hk_now, z_coord, config, grid)
+            _u_drg, _v_drg, _hk_now, z_coord, config, grid)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
 
