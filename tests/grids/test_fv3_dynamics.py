@@ -23,15 +23,23 @@ kernel below it is certified in its own gate file; what is new here is:
   advected nothing still returns a perfectly good dynamical state, so
   ``q`` is asserted to have MOVED as well as to match.
 
-* **THE LANE REFUSALS ARE PART OF THE PORT.**  ``zvir != 0`` and
-  ``consv_te != 0`` reach unported code (the tracers stop being
-  passengers; the energy fixer does not exist here).  Per C5 those raise
-  rather than run something adjacent, and the raise is gated -- an
-  unported arm that silently proceeds is the defect class this campaign
-  ranks worst, because it returns numbers.
+* **THE LANE REFUSALS ARE PART OF THE PORT.**  Moist coupling
+  (``zvir != 0``) IS enabled on BOTH arms and gated below; on the NH
+  arm ``pkz`` is RECOMPUTED here with the ``(1+dp1)`` factor inside its
+  log (``fv_dynamics.F90:299-322``) rather than taken from the caller.
+  What stays refused is NEGATIVE ``consv_te`` (a different Fortran
+  branch entirely) and moist x consv (no oracle deck), not the fixer
+  exist here).  Per C5 those raise rather
+  than run something adjacent, and the raise is gated -- an unported
+  arm that silently proceeds is the defect class this campaign ranks
+  worst, because it returns numbers.  ``sphum_index`` is VALIDATED, not
+  defaulted: a guessed index couples the wrong species and still
+  returns numbers.
 
 TOLERANCE POLICY.  Every numeric bound in this file is MEASURED (job
-9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10.
+9425079, the LEGOESM_FV3_TOL_MEASURE sweep) and set to measured x 10,
+EXCEPT any bound still carrying a ``TOL-PENDING`` marker -- those are
+provisional and are not certification limits.
 The worst composed-chain figure is w at 3.126e-11 relative (NH
 k_split=2); pressure diagnostics sit at 1e-16..5e-15.  The contract and
 movement gates carry no tolerance and are final.
@@ -63,6 +71,11 @@ from legoesm.core.fv3_native_duo_stepper import (  # noqa: E402
 from legoesm.core.fv3_native_eta import set_eta_analytic  # noqa: E402
 from legoesm.core.fv3_native_state_3d import (  # noqa: E402
     build_state_3d,
+)
+
+from legoesm.grids.fv3_native_gridstruct import (  # noqa: E402
+    FV3_GRAV as _FV3_GRAV,
+    FV3_RDGAS as _FV3_RDGAS,
 )
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
@@ -162,10 +175,19 @@ def _state(hydrostatic, seed=21):
     return st
 
 
-def _tracers(seed=22):
+def _tracers(seed=22, scale=1.0):
+    """``scale`` exists for the MOIST arm only.
+
+    The default tracers sit at O(1), which is fine while they are
+    passengers; once ``zvir != 0`` they enter ``pt*(1+zvir*q)`` and an
+    O(1) q would double the temperature.  The moist gates pass
+    ``scale=0.01`` so dp1 lands at a physical few per mil.  Both lanes
+    call this with the same seed and scale, so q is identical by
+    construction rather than by copying.
+    """
     rng = np.random.default_rng(seed)
-    return [[1.0 + 0.3 * t + 0.7 * iq
-             + 0.2 * rng.standard_normal((MA, MA, KM))
+    return [[scale * (1.0 + 0.3 * t + 0.7 * iq
+                      + 0.2 * rng.standard_normal((MA, MA, KM)))
              for iq in range(NQ)] for t in range(6)]
 
 
@@ -189,29 +211,37 @@ def _common(ptop, ak, bk, hydrostatic, k_split, n_split):
                 w_limiter=not hydrostatic)
 
 
-def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2):
+def _moist(zvir, sphum_index):
+    return {} if zvir == 0.0 else dict(zvir=zvir, sphum_index=sphum_index)
+
+
+def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
+            sphum_index=None, q_scale=1.0):
     ak, bk, ptop = eta
     st = _state(hydrostatic)
-    q = _tracers()
+    q = _tracers(scale=q_scale)
     press = _press_np(st, ptop)
     npdyn.fv_dynamics_step(ctx, st, press,
                            q=q, **_common(ptop, ak, bk, hydrostatic,
-                                          k_split, n_split))
+                                          k_split, n_split),
+                           **_moist(zvir, sphum_index))
     return st, press, q
 
 
-def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2):
+def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
+             sphum_index=None, q_scale=1.0):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
     # Tracer-major, matching this module's contract (nq entries, each
     # face-stacked) -- NOT module 5's single (6, nq, ...) stack.
-    _t = _tracers()
+    _t = _tracers(scale=q_scale)
     q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
          for iq in range(NQ)]
     press = _press_jax(jst, ptop)
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q,
                                  **_common(ptop, ak, bk, hydrostatic,
-                                           k_split, n_split))
+                                           k_split, n_split),
+                                 **_moist(zvir, sphum_index))
 
 
 def _out_state(got):
@@ -262,6 +292,323 @@ def test_full_step_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
     # measured x 10.
     cmp_fields(np.asarray(got["q"]), want_q,
                f"q (hydro={hydrostatic}, k_split={k_split})", tol=3.5e-13)
+
+
+ZVIR = 0.6077338443  # rvgas/rdgas - 1, the pinned deck's constant
+
+Q_SCALE = 0.01  # physical specific humidity; see _tracers
+
+
+@pytest.mark.parametrize("hydrostatic", [True, False])
+@pytest.mark.parametrize("k_split", [1, 2])
+def test_moist_parity_against_the_spec(ctx, jctx, eta, hydrostatic,
+                                       k_split):
+    """The zvir arm, port against spec, over the same composition axis.
+
+    ``zvir != 0`` makes the tracers stop being passengers twice over:
+    dp1 = zvir*q(sphum) enters ``pt = pt*(1.+dp1)/pkz``
+    (fv_dynamics.F90:291/:402) at entry, and ``r_vir`` enters the
+    closing ``pt/(1+r_vir*q)`` (fv_mapz.F90:975) at exit.  Both hops are
+    on this path; a lane that wired only one would still return numbers.
+    """
+    ref_state, _ref_press, ref_q = _run_np(
+        ctx, eta, hydrostatic=hydrostatic, k_split=k_split, zvir=ZVIR,
+        sphum_index=0, q_scale=Q_SCALE)
+    got = _run_jax(jctx, eta, hydrostatic=hydrostatic, k_split=k_split,
+                   zvir=ZVIR, sphum_index=0, q_scale=Q_SCALE)
+    state = _out_state(got)
+    tag = f"hydro={hydrostatic}, k_split={k_split}"
+    names = ["delp", "pt", "u", "v"] + ([] if hydrostatic
+                                        else ["w", "delz"])
+    for nm in names:
+        want = np.stack([np.asarray(ref_state[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy moist {nm} ({tag})")
+        # TOL-PENDING(moist-parity)
+        cmp_fields(np.asarray(state[nm]), want, f"moist {nm} ({tag})",
+                   tol=3.2e-10)
+    want_q = np.stack([np.stack([ref_q[t][iq] for t in range(6)])
+                       for iq in range(NQ)])
+    assert_real(want_q, "numpy moist q")
+    # TOL-PENDING(moist-parity-q)
+    cmp_fields(np.asarray(got["q"]), want_q, f"moist q ({tag})",
+               tol=3.5e-13)
+
+
+def _run_jax_press(jctx, eta, press, *, hydrostatic, zvir, sphum_index,
+                   k_split=1):
+    """One moist step on a CALLER-SUPPLIED pressure bundle."""
+    ak, bk, ptop = eta
+    jst = state_3d_to_jax(_state(hydrostatic))
+    _t = _tracers(scale=Q_SCALE)
+    q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
+         for iq in range(NQ)]
+    return _out_state(jdyn.fv_dynamics_step(
+        jctx, jst, press, q=q,
+        **_common(ptop, ak, bk, hydrostatic, k_split, 2),
+        **_moist(zvir, sphum_index)))
+
+
+@pytest.mark.parametrize("k_split", [1, 2])
+def test_nh_moist_pkz_is_recomputed_not_trusted(jctx, eta, k_split):
+    """fv_dynamics.F90:299-322 OVERWRITES pkz on every NH call.
+
+    A caller's pkz is dry -- ``p_var_nonhydrostatic`` builds it dry, and
+    a previous step's remap returns it dry (fv_mapz.F90:479-481 carries
+    no ``(1+dp1)``).  A lane that trusted it would run the whole moist
+    NH step against a pkz missing the virtual factor and still return
+    numbers.  So: hand the SAME moist NH step two DIFFERENT pkz values
+    and require the answer not to move.
+
+    The hydrostatic arm is the control.  It does NOT recompute -- the
+    oracle's hydrostatic branch (:281-294) only forms dp1 -- so there
+    the same substitution MUST move the answer.  Without that half this
+    gate could pass on a lane that ignored pkz everywhere.
+
+    WHAT THIS TEST DOES NOT PIN: that the recompute is MOIST.  A lane
+    that recomputed with ``dp1=None`` -- the dry form -- stays green
+    here, because the answer still stops depending on the caller's pkz.
+    Moistness is pinned by
+    :func:`test_nh_moist_pkz_matches_the_oracle_expression`'s
+    anti-vacuity assert.  NOT by the parity gate: that one is
+    wet-port-vs-wet-spec and cannot see a SYMMETRIC drop in both lanes,
+    and unlike the hydrostatic arm the NH arm has no oracle deck to
+    catch it either (GLM MINOR, job 9442724).  ``k_split`` is
+    parametrized because a consumer of the caller's pkz on a
+    non-last-step path would escape a single-iteration run.
+    """
+    # k_split=2 USED TO BE SKIPPED HERE: it died in XLA with "LLVM
+    # compilation error: Cannot allocate memory" after a ~11 min
+    # jit_scan compile. The mechanism is now MEASURED, not guessed
+    # (scripts/validate/fv3_native/nh_ksplit2_compile_probe.py, job
+    # 9447330):
+    #
+    #   4 steps, k_split=2            -> step 1 ok (661 s), step 2 FAILS
+    #   4 steps, k_split=2, --clear   -> all 4 compile
+    #   4 steps, k_split=1            -> all 4 compile (~80 s each)
+    #
+    # So it is compiled-CODE accumulation across eager fv_dynamics_step
+    # calls, and jax.clear_caches() releases enough of it. Two earlier
+    # explanations were tested and refuted first: the job's memory
+    # limit (9443826, alone at 600G) and accumulation across the
+    # module's other graphs (9443895, alone in a fresh process). This
+    # test makes FOUR step calls, which is why it hit the wall while
+    # the single-call parity gate did not.
+    ak, bk, ptop = eta
+    for hydrostatic in (False, True):
+        jst = state_3d_to_jax(_state(hydrostatic))
+        press_a = _press_jax(jst, ptop)
+        # The second bundle is the first with pkz PERTURBED, not an NH
+        # p_var: build_state_3d allocates delz only on the NH arm, so
+        # the hydrostatic control cannot ask for an NH pressure bundle
+        # (it raised KeyError: 'delz' in job 9442478). A scaled pkz is
+        # the cleaner substitution anyway -- the claim under test is
+        # only "a DIFFERENT pkz", and this way both arms are perturbed
+        # identically.
+        press_b = dict(press_a)
+        press_b["pkz"] = press_a["pkz"] * 1.001
+        # anti-vacuity: the two bundles must actually differ in pkz, or
+        # "the answer did not move" is trivially true.
+        assert (np.asarray(press_a["pkz"]).tobytes()
+                != np.asarray(press_b["pkz"]).tobytes())
+        a = _run_jax_press(jctx, eta, press_a, hydrostatic=hydrostatic,
+                           zvir=ZVIR, sphum_index=0, k_split=k_split)
+        # BETWEEN the two calls, for the measured reason above. The
+        # autouse fixture clears once per TEST; this test compiles four
+        # full steps inside one, and at k_split=2 the second one is
+        # where XLA runs out.
+        jax.clear_caches()
+        b = _run_jax_press(jctx, eta, press_b, hydrostatic=hydrostatic,
+                           zvir=ZVIR, sphum_index=0, k_split=k_split)
+        jax.clear_caches()
+        # EVERY returned field, not just pt: a consumer of the caller's
+        # pkz sitting in the w or delz path would escape a pt-only
+        # comparison and be caught only later, indirectly, at tolerance
+        # level (GLM MINOR, job 9442483).
+        names = ["delp", "pt", "u", "v"] + ([] if hydrostatic
+                                            else ["w", "delz"])
+        same = all(np.asarray(a[nm]).tobytes()
+                   == np.asarray(b[nm]).tobytes() for nm in names)
+        if hydrostatic:
+            assert not same, ("the hydrostatic arm must CONSUME the "
+                              "caller's pkz; if it does not, the NH half "
+                              "of this gate proves nothing")
+        else:
+            assert same, ("the NH moist arm must RECOMPUTE pkz "
+                          "(fv_dynamics.F90:299-322), not consume the "
+                          "caller's dry one")
+
+
+def test_nh_moist_pkz_matches_the_oracle_expression(eta):
+    """The association is gated BELOW the transcendentals.
+
+    ``pkz = exp(kappa*log(arg))``, and XLA's ``exp`` differs from
+    libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz`` is not
+    available.  The previous version of this test therefore compared
+    ``pkz`` under a 10x-of-the-dry-residual window -- and codex showed
+    that window ADMITS the exact mistake the docstring claimed to
+    reject (job 9442717): pre-scaling ``pt`` at the call site,
+    ``rdg*delp*(pt*(1+dp1))/delz``, is algebraically identical and
+    differs only by multiplication rounding, comfortably inside any
+    exp/log-sized tolerance.  The comment claiming a misassociation
+    "would blow up" was false.
+
+    ``nh_pkz_log_arg`` exists so this gate can be exact: below the
+    transcendentals the trees differ by real bits.
+    """
+    faces = _state(False)
+    jst = state_3d_to_jax(_state(False))
+    rdg = -_FV3_RDGAS / _FV3_GRAV
+    dp1 = 0.0077 * np.ones((6, N, N, KM))
+    cs = slice(NG, NG + N)
+
+    for t in range(6):                       # ALL SIX FACES
+        dpw = faces[t]["delp"][cs, cs, :]
+        ptw = faces[t]["pt"][cs, cs, :]
+        dz = faces[t]["delz"]
+        want = npdyn.nh_pkz_log_arg(rdg, dpw, ptw, dz, dp1[t])
+        got = np.asarray(jdyn.nh_pkz_log_arg(
+            rdg, jnp.asarray(dpw), jnp.asarray(ptw), jnp.asarray(dz),
+            jnp.asarray(dp1[t])))
+        assert got.tobytes() == want.tobytes(), \
+            f"face {t}: port and spec disagree on the log argument"
+
+        # THE MUTATION THIS GATE EXISTS FOR: the call-site formulation.
+        call_site = rdg * dpw * (ptw * (1.0 + dp1[t])) / dz
+        assert call_site.tobytes() != want.tobytes(), \
+            (f"face {t}: the two multiplication trees agree bitwise on "
+             f"this fixture, so the gate above cannot see the mistake "
+             f"it exists to catch")
+        # and the factor OUTSIDE the log, the other named mistake
+        outside = rdg * dpw * ptw / dz * (1.0 + dp1[t])
+        assert outside.tobytes() != want.tobytes()
+
+        # ANTI-VACUITY: dp1 must change the argument at all.
+        assert want.tobytes() != npdyn.nh_pkz_log_arg(
+            rdg, dpw, ptw, dz).tobytes()
+
+    # and the composed pkz still agrees across lanes at the exp/log
+    # floor -- the association gate above says nothing about the
+    # transcendental chain, so both layers are asserted.
+    kw = dict(ptop=eta[2], akap=AKAP, n=N, ng=NG, km=KM)
+    got_pkz = np.asarray(jdyn.p_var_nonhydrostatic(
+        jst["delp"], jst["delz"], jst["pt"],
+        dp1=jnp.asarray(dp1), **kw)["pkz"])
+    for t in range(6):
+        want_pkz = npdyn.p_var_nonhydrostatic(
+            faces[t]["delp"], faces[t]["delz"], faces[t]["pt"],
+            dp1=dp1[t], **kw)["pkz"]
+        # MEASURED: 1 ulp of fp64 on an exp/log chain.
+        # TOL-PENDING(nh-moist-pkz)
+        assert np.max(np.abs(got_pkz[t] - want_pkz)
+                      / np.abs(want_pkz)) <= 1e-14
+
+
+def test_the_moist_arm_actually_changed_the_answer(ctx, jctx, eta):
+    """Anti-vacuity: without this, a zvir that was silently dropped on
+    the port side would pass the parity gate above by matching a spec
+    lane that had dropped it too.  Both lanes must MOVE, and move by
+    the same amount, relative to their own dry run.
+
+    dp1 ~ zvir*q ~ 6e-3 here, so pt moves in the third digit -- far
+    above any parity residual, which is why a plain magnitude assert is
+    enough and no tolerance is needed.
+    """
+    dry = _out_state(_run_jax(jctx, eta, hydrostatic=True, q_scale=Q_SCALE))
+    wet = _out_state(_run_jax(jctx, eta, hydrostatic=True, zvir=ZVIR,
+                              sphum_index=0, q_scale=Q_SCALE))
+    resp_port = np.asarray(wet["pt"]) - np.asarray(dry["pt"])
+    assert np.max(np.abs(resp_port)) > 1.0e-3, \
+        f"zvir moved pt by only {np.max(np.abs(resp_port)):.3e} K"
+
+    dry_np, _, _ = _run_np(ctx, eta, hydrostatic=True, q_scale=Q_SCALE)
+    wet_np, _, _ = _run_np(ctx, eta, hydrostatic=True, zvir=ZVIR,
+                           sphum_index=0, q_scale=Q_SCALE)
+    resp_spec = (np.stack([wet_np[t]["pt"] for t in range(6)])
+                 - np.stack([dry_np[t]["pt"] for t in range(6)]))
+    # THE WHOLE RESPONSE FIELD, not its maximum. Two different fields
+    # can share a max magnitude, so a port that coupled the wrong cell,
+    # face, axis or tracer would pass a scalar comparison (codex MAJOR,
+    # job 9442422). The response is a DIFFERENCE of two ~300 K fields,
+    # so its own scale is ~1 K and the parity tolerance applies to it
+    # directly.
+    assert_real(resp_spec, "spec moist response")
+    # TOL-PENDING(moist-response)
+    cmp_fields(resp_port, resp_spec, "moist pt response (wet - dry)",
+               tol=3.2e-10)
+
+
+def test_dry_branch_is_not_a_multiply_by_one(jctx, eta):
+    """The dry branch exists for the ORACLE's structure, not for rounding.
+
+    THIS TEST USED TO ASSERT THE OPPOSITE AND WAS WRONG (job 9442478).
+    Both lanes' comments said a zeros array "rounds twice" because
+    ``(1.0+dp1)/pkz`` forms a reciprocal first -- true of the OLD
+    association ``pt *= (1.0+dp1)/pkz``, and FALSE since the association
+    was corrected to the oracle's ``(pt*(1+dp1))/pkz``: ``1.0+0.0`` is
+    exactly 1.0 and ``win*1.0`` is exact in IEEE, so the zeros array is
+    now bit-identical to the dry branch.  (Codex confirmed the
+    retraction holds for every finite input including subnormals and
+    both signed zeros, job 9442717.)
+
+    What the branch is actually for, and what is asserted here: the
+    oracle forms no ``dp1`` AT ALL when ``zvir = 0``
+    (fv_dynamics.F90:281-294 is the moist branch), so ``dp1=None`` is
+    the faithful shape, and it avoids materialising and multiplying a
+    whole zeros field.  Equality is the CONTRACT -- if these two ever
+    diverge, the dry lane's certified 1.1866e-09 has silently moved.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    ref = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG)
+    wet0 = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                              dp1=jnp.zeros_like(pkz))
+    assert np.asarray(ref).tobytes() == np.asarray(wet0).tobytes(), \
+        ("dp1=zeros is no longer bit-identical to dp1=None; the moist "
+         "association changed and the dry certification has moved")
+
+    # ANTI-VACUITY: a NON-zero dp1 must move it, or the equality above
+    # would be satisfied by a lane that ignored dp1 entirely.
+    wet = jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                             dp1=jnp.full_like(pkz, 0.0077))
+    assert np.asarray(ref).tobytes() != np.asarray(wet).tobytes()
+
+
+@pytest.mark.skipif(jax.default_backend() != "cpu",
+                    reason="a BITWISE association claim is a compiler "
+                           "contract, and this lane's is the fp64 CPU "
+                           "backend; XLA on GPU/TPU may contract the "
+                           "multiply-add or reassociate (codex MAJOR, "
+                           "job 9442422)")
+def test_moist_association_matches_the_spec_bitwise(eta):
+    """``pt*(1.+dp1)/pkz`` (:402) associates left to right.
+
+    The claim under test is NOT "Fortran guarantees two roundings" --
+    that is the compiler's business.  It is the one this port is
+    actually held to: the JAX lane must agree with the NumPy SPEC,
+    which is the authority, and numpy evaluates the same source
+    expression without reassociating.  Comparing the port against the
+    SPEC rather than against a locally re-typed expression is also what
+    makes this a cross-lane check instead of a self-comparison.
+    """
+    jst = state_3d_to_jax(_state(True))
+    pkz = _press_jax(jst, eta[2])["pkz"]
+    dp1 = 0.0077 * np.ones(np.asarray(pkz).shape)
+
+    got = np.asarray(jdyn.pt_to_theta_v(jst["pt"], pkz, n=N, ng=NG,
+                                        dp1=jnp.asarray(dp1)))
+    ref = np.stack([f["pt"] for f in _state(True)])
+    for t in range(6):
+        npdyn.pt_to_theta_v(ref[t], np.asarray(pkz)[t], n=N, ng=NG,
+                            dp1=dp1[t])
+    assert got.tobytes() == ref.tobytes(), \
+        "port and spec disagree bitwise on the moist conversion"
+
+    # ANTI-VACUITY: the wrong association must actually differ on this
+    # data, or the assert above would pass with either spelling.
+    win = np.asarray(jst["pt"])[:, NG:NG + N, NG:NG + N, :]
+    pkzn = np.asarray(pkz)
+    bad = win * ((1.0 + dp1) / pkzn)
+    assert bad.tobytes() != ref[:, NG:NG + N, NG:NG + N, :].tobytes()
 
 
 @pytest.mark.parametrize("hydrostatic", [True, False])
@@ -377,8 +724,27 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 # --------------------------------------------------------------------
 
 @pytest.mark.parametrize("kw,exc", [
-    ({"zvir": 0.61}, NotImplementedError),
-    ({"consv_te": 1.0}, NotImplementedError),
+    # zvir is ENABLED on BOTH arms and so is the energy fixer; what
+    # stays refused is NEGATIVE consv_te and moist x consv,
+    # and what stays VALIDATED is the sphum index and the NH arm's
+    # need for delz (the fixture here is a HYDROSTATIC state, which
+    # carries none, so hydrostatic=False must be caught rather than
+    # indexed into).
+    # match= is REQUIRED here: deleting the delz guard would otherwise
+    # leave this green via the NH hs6/w_limiter ValueErrors, and the
+    # "caught rather than indexed into" claim would silently change
+    # referent (GLM MINOR, job 9442483).
+    ({"zvir": 0.61, "sphum_index": 0, "hydrostatic": False},
+     (ValueError, "delz")),
+    ({"zvir": 0.61}, ValueError),                       # sphum_index None
+    ({"zvir": 0.61, "sphum_index": -1}, ValueError),    # wrap-around
+    ({"zvir": 0.61, "sphum_index": NQ}, ValueError),    # out of range
+    ({"zvir": 0.61, "sphum_index": True}, ValueError),  # bool is not int
+    # positive consv_te RUNS now; these are the arms that do not.
+    ({"consv_te": -1.0}, NotImplementedError),   # prescribed-flux branch
+    ({"consv_te": 1.0, "zvir": 0.61, "sphum_index": 0},
+     NotImplementedError),                       # moist x consv, unscored
+    ({"consv_te": 1.0, "hydrostatic": False}, NotImplementedError),
     ({"k_split": 0}, ValueError),
     ({"n_split": 0}, ValueError),
     ({"n_sponge": 2}, (ValueError, NotImplementedError)),
@@ -386,12 +752,15 @@ def test_mass_drift_parity_not_conservation(ctx, jctx, eta):
 ])
 def test_unported_arms_raise_instead_of_running_something_adjacent(
         jctx, eta, kw, exc):
-    """Each of these reaches code that is not in this port.
+    """Each of these is either unported or invalid input.
 
-    ``zvir != 0`` makes the tracers stop being passengers; ``consv_te !=
-    0`` calls an energy fixer that does not exist here; the sponge
-    arguments select non-uniform damping.  Running the default instead
-    would return numbers, which is the worst available outcome.
+    a NEGATIVE ``consv_te`` selects a prescribed-flux branch that is
+    not ported, and moist x consv has no oracle deck;
+    the sponge arguments select non-uniform damping; and a bad
+    ``sphum_index`` would couple an arbitrary tracer into theta_v.
+    Running the default instead would return numbers, which is the
+    worst available outcome.  (Hydrostatic ``zvir != 0`` is NOT here --
+    it is supported, and its gates are above.)
     """
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(True))
@@ -403,7 +772,11 @@ def test_unported_arms_raise_instead_of_running_something_adjacent(
     press = _press_jax(jst, ptop)
     args = _common(ptop, ak, bk, True, 1, 2)
     args.update(kw)
-    with pytest.raises(exc):
+    if isinstance(exc, tuple) and len(exc) == 2 and isinstance(exc[1], str):
+        exc, match = exc
+    else:
+        match = None
+    with pytest.raises(exc, match=match):
         jdyn.fv_dynamics_step(jctx, jst, press, q=q, **args)
 
 

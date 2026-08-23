@@ -196,17 +196,26 @@ def test_rayleigh_deck_is_refused():
         require_uniform_damping_lane(n_sponge=-1, tau=10.0, npz=KM)
 
 
-def test_moist_and_energy_fixing_lanes_are_refused(ctx, eta):
+def test_moist_validation_and_the_energy_fixer_refusal(ctx, eta):
+    """zvir is SUPPORTED now; what this pins is that it is VALIDATED.
+
+    This test asserted ``NotImplementedError`` on ``zvir != 0`` and was
+    left stale by the commit that enabled moist coupling in this lane --
+    the refusal it named had already become a validation error.
+    """
     ak, bk, ptop, _ = eta
     st = _state(ak, bk, ptop)
     pr = _press(st, ptop)
     common = dict(bdt=60.0, km=KM, k_split=1, n_split=1, ptop=ptop,
                   ak=ak, bk=bk, akap=AKAP, cp_air=CP,
                   kord_mt=9, kord_tm=-9, kord_tr=9, q=_tracers())
-    with pytest.raises(NotImplementedError, match="zvir"):
+    # no sphum_index -> a guessed index would couple the wrong species
+    with pytest.raises(ValueError, match="sphum_index"):
         fv_dynamics_step(ctx, st, pr, zvir=0.61, **common)
+    # POSITIVE consv_te runs now (the fixer is ported and certified);
+    # what raises is the prescribed-flux branch at a negative value.
     with pytest.raises(NotImplementedError, match="consv_te"):
-        fv_dynamics_step(ctx, st, pr, consv_te=1.0, **common)
+        fv_dynamics_step(ctx, st, pr, consv_te=-1.0, **common)
 
 
 def test_face_count_is_checked(ctx, eta):
@@ -313,3 +322,88 @@ def test_km_below_the_remap_gate_leaves_pt_in_theta_v(eta):
                            cp_air=CP, kord_mt=9, kord_tm=-9, kord_tr=9,
                            q=_tracers(km))
     assert out["pt_units"] == "theta_v"
+
+
+@pytest.mark.slow
+def test_return_substeps_ends_where_return_pre_remap_starts(ctx, eta):
+    """The two capture points must MEET, or neither is where it claims.
+
+    ``return_pre_remap`` copies the state between the acoustic loop and
+    the remap; ``return_substeps`` copies it after every acoustic
+    sub-step.  Nothing in between writes the prognostics (the tracer
+    transport touches ``q`` only), so the LAST sub-step snapshot must be
+    the pre-remap one, field for field, bitwise.  That single equality is
+    what lets a probe compare an oracle sub-step dump and an oracle
+    pre-remap dump on the same footing -- and it fails loudly if either
+    capture is moved to the wrong side of the remap, which is the way
+    this kind of instrument usually goes wrong.
+    """
+    ak, bk, ptop, _ = eta
+    st = _state(ak, bk, ptop, seed=11)
+    pr = _press(st, ptop)
+    out = fv_dynamics_step(ctx, st, pr, bdt=120.0, km=KM, k_split=1,
+                           n_split=3, ptop=ptop, ak=ak, bk=bk, akap=AKAP,
+                           cp_air=CP, kord_mt=9, kord_tm=-9, kord_tr=9,
+                           q=_tracers(), return_pre_remap=True,
+                           return_substeps=True)
+    subs, pre = out["substeps"], out["pre_remap"]
+    assert len(subs) == 3
+    for t in range(6):
+        for name in ("delp", "pt", "u", "v", "w"):
+            assert np.array_equal(subs[-1][t][name], pre[t][name]), \
+                f"face {t + 1} {name}: last sub-step != pre-remap"
+
+    # NON-VACUITY. If the remap were a no-op the equality above would say
+    # nothing, and if the earlier sub-steps were copies of the last one
+    # the per-sub-step series would carry no information.
+    moved = max(float(np.abs(st[t]["delp"] - pre[t]["delp"]).max())
+                for t in range(6))
+    assert moved > 1e-6, (
+        f"the remap moved delp by only {moved:g} Pa, so 'last sub-step "
+        f"equals pre-remap' is not distinguishing the two capture points")
+    for i in range(2):
+        d = max(float(np.abs(subs[i][t]["delp"]
+                             - subs[i + 1][t]["delp"]).max())
+                for t in range(6))
+        assert d > 0.0, f"sub-steps {i + 1} and {i + 2} are the same state"
+
+    # Not requested, not returned.
+    st2 = _state(ak, bk, ptop, seed=11)
+    out2 = fv_dynamics_step(ctx, st2, _press(st2, ptop), bdt=120.0, km=KM,
+                            k_split=1, n_split=3, ptop=ptop, ak=ak, bk=bk,
+                            akap=AKAP, cp_air=CP, kord_mt=9, kord_tm=-9,
+                            kord_tr=9, q=_tracers())
+    assert "substeps" not in out2 and "pre_remap" not in out2
+
+
+def test_return_substeps_captures_the_last_outer_iteration_only(ctx, eta):
+    """``k_split`` threading, in the DEFAULT (non-slow) selection.
+
+    The end-to-end check that the capture meets the pre-remap one is slow
+    and therefore invisible to a plain ``pytest`` run, which left
+    ``return_substeps`` with no default coverage at all (codex MINOR, job
+    9450542). This is the cheap half: below the remap gate, with the outer
+    loop running twice, the returned list must hold exactly ``n_split``
+    entries -- the LAST outer iteration's, not both iterations' appended
+    together, and not the first's left behind.
+    """
+    ak, bk, ptop = eta[0], eta[1], eta[2]
+    st = _state(ak, bk, ptop, seed=7)
+    out = fv_dynamics_step(ctx, st, _press(st, ptop), bdt=60.0, km=KM,
+                           k_split=2, n_split=2, ptop=ptop, ak=ak, bk=bk,
+                           akap=AKAP, cp_air=CP, kord_mt=9, kord_tm=-9,
+                           kord_tr=9, q=_tracers(), return_substeps=True)
+    subs = out["substeps"]
+    assert len(subs) == 2, (
+        f"k_split=2 with n_split=2 returned {len(subs)} sub-steps; 4 would "
+        f"mean both outer iterations were appended, 0 that the last one "
+        f"was not")
+    assert all(len(snap) == 6 for snap in subs)
+    # The capture is from the LAST outer iteration: its final entry is the
+    # state the remap then consumed, so it must differ from the state the
+    # step returned (the remap moved delp off the acoustic solution).
+    moved = max(float(np.abs(subs[-1][t]["delp"] - st[t]["delp"]).max())
+                for t in range(6))
+    assert moved > 1e-6, (
+        f"the last sub-step snapshot is within {moved:g} Pa of the returned "
+        f"state, so it is not a pre-remap capture")

@@ -6004,18 +6004,14 @@ class ModelDriver:
         Returns (step, day).  Detects distributed checkpoint directories
         and loads per-rank data when running under MPI.
 
-        fv3_duo refuses HERE, before any decode: run_amip calls
-        ``load_checkpoint`` before ``_run_fv3_duo``'s own no-restart
-        check, so without this early refusal a restart-configured duo
-        run would first try to decode a foreign-schema (cube) checkpoint
-        and die on an unrelated shape error (codex 2026-08-18 MAJOR).
+        fv3_duo dispatches HERE, before any generic decode: the duo
+        bundle has its own schema (``fv3duo_ckpt_v1``), and the loader
+        is schema-gated so a foreign (cube/lat-lon/MPAS) checkpoint is
+        refused loudly instead of dying on an unrelated shape error
+        deeper in a decode (codex 2026-08-18 MAJOR, kept as a gate).
         """
         if self.config.dycore.discretization == "fv3_duo":
-            raise NotImplementedError(
-                "fv3_duo (slice 1) has no restart: the duo bundle is not "
-                "in the checkpoint schema, so there is no checkpoint this "
-                "lane could decode. Refusing BEFORE any decode is "
-                "attempted. Run from step 0 (drop --restart-from).")
+            return self._load_fv3_duo_checkpoint(Path(path))
         path = Path(path)
 
         # MPAS path: mirror of the dedicated MPAS branch in
@@ -7635,10 +7631,13 @@ class ModelDriver:
     # bound is a diverged integration, not a strong storm.  Numerics guard,
     # not a tunable (same role as the acoustic lane's own envelope).
     _FV3_DUO_BLOWUP_UMAX_MS = 400.0
+    _FV3_DUO_CKPT_SCHEMA = "fv3duo_ckpt_v1"
+    _FV3_DUO_PRESS_KEYS = ("ps", "pe", "peln", "pk", "pkz")
 
     def _run_fv3_duo(self, start_step: int = 0,
                      start_day: float | None = None) -> str:
-        """Dedicated lean lane for the certified FV3 duo-cube step (slice 1).
+        """Dedicated lean lane for the certified FV3 duo-cube step
+        (slice 1 dynamics + slice 2 restart).
 
         Dry adiabatic DCMIP16 baroclinic wave ONLY: the lane builds its
         own IC (the placeholder ``self.state`` from ``_init_state`` is a
@@ -7651,17 +7650,75 @@ class ModelDriver:
         with the face-stacked duo fields; NOT the cube/lat-lon
         checkpoint schema, which the duo layout does not fit).
 
-        Slice-1 refusals (each loud, none silent): no restart, no MPI /
+        Slice-2 restart contract (READ THIS before writing a chain
+        launcher — it deliberately CONTRASTS with ``_run_mpas``):
+        ``cfg.days`` is TOTAL days since the epoch (the cube/lat-lon
+        convention), NOT days-this-job.  A restarted job therefore
+        passes the SAME ``--days`` as the straight run and this loop
+        advances ``n_steps_total - loaded_step`` steps; ``_run_mpas``
+        instead treats ``--days`` as the number of days *this job*
+        advances and its chain launchers pass remaining days — do not
+        copy that convention here.  Restart flows ONLY through
+        WHY THE BUNDLE IS SUFFICIENT (stated, not assumed -- GLM
+        2026-08-19 flagged that "restart is bitwise" proves only that the
+        DYNAMICAL STATE round-trips, and is blind to whatever the driver
+        loop carries): this lane carries NO loop state. There are no
+        diagnostic accumulators (snapshots are written straight from the
+        bundle, no time-means), the blowup guard is stateless (it
+        re-evaluates each snapshot from scratch), the CFL clamp is a pure
+        function of the config, and the step loop runs over GLOBAL step
+        numbers (``range(loaded_step + 1, n_steps_total + 1)``), so the
+        diagnostic and checkpoint cadences are pure functions of the
+        restored step and their phase is restart-invariant by
+        construction. Any FUTURE loop state -- an accumulator, a
+        hysteretic clamp, a physics carry -- breaks that invariant and
+        must join the bundle, not the loop.
+
+        ``load_checkpoint`` on an ``fv3duo_ckpt_v1`` file, which stages
+        the FULL persisted bundle (state/press/q/omga/nh, fp64) —
+        nothing is rebuilt from delp, so the resumed trajectory is
+        BITWISE the straight one (same jitted program, exact fp64 npz
+        round-trip).  Checkpoints are written at the shared
+        ``output.checkpoint_days`` cadence (absolute-step phase) plus
+        the final step, as ``fv3duo_ckpt_step_*.npz`` (atomic:
+        tmp + os.replace).
+
+        Slice-1 refusals that REMAIN (each loud, none silent): no MPI /
         SPMD, no ensemble.  Physics/forcing are already refused at model
-        construction (component factory).  ``cfg.days`` is TOTAL days
-        (the cube/lat-lon convention) — with restart refused the two
-        conventions coincide.
+        construction (component factory).  A restarted run overwrites
+        the status marker (RUNNING-first, as always).
         """
         cfg = self.config
-        if start_step != 0 or self._loaded_checkpoint_step_day is not None:
-            raise NotImplementedError(
-                "fv3_duo (slice 1) has no restart: the duo bundle is not "
-                "in the checkpoint schema. Run from step 0.")
+        loaded = self._loaded_checkpoint_step_day
+        restart_bundle = getattr(self, "_fv3_duo_restart_bundle", None)
+        if (start_step != 0 or loaded is not None) \
+                and restart_bundle is None:
+            raise ValueError(
+                "fv3_duo restart flows ONLY through load_checkpoint on an "
+                "fv3duo_ckpt_v1 checkpoint (which stages the bundle to "
+                "resume from); a bare start_step has no bundle to start "
+                "from. Run from step 0, or pass --restart-from an "
+                "fv3duo_ckpt_step_*.npz.")
+        loaded_step = 0
+        if restart_bundle is not None:
+            if loaded is not None and start_day is not None \
+                    and start_day != loaded[1]:
+                # codex MAJOR: only the STEP was bound, so
+                # run(start_step=step, start_day=<anything>) was accepted
+                # and wrote snapshots stamped with a shifted day. The dry
+                # dynamics never reads day, so the bitwise state test
+                # stayed green while the provenance drifted.
+                raise ValueError(
+                    f"fv3_duo restart: start_day={start_day} does not match "
+                    f"the loaded checkpoint day {loaded[1]}; the pair is "
+                    f"the checkpoint's, not the caller's.")
+            if loaded is None or start_step != loaded[0]:
+                raise ValueError(
+                    f"fv3_duo restart: start_step={start_step} does not "
+                    f"match the loaded checkpoint step "
+                    f"{None if loaded is None else loaded[0]}; pass "
+                    f"load_checkpoint's returned step through unchanged.")
+            loaded_step = start_step
         if cfg.distributed or (self._mpi_world_size or 1) > 1:
             raise NotImplementedError(
                 "fv3_duo (slice 1) is single-process only: the duo halo "
@@ -7681,44 +7738,69 @@ class ModelDriver:
 
         DT = cfg.dycore.dt
         n_steps_total = int(cfg.days * 86400.0 / DT)
-        if n_steps_total < 1:
+        n_this_job = n_steps_total - loaded_step
+        if n_this_job < 1:
             raise ValueError(
-                f"fv3_duo: days={cfg.days} at dt={DT}s yields "
-                f"{n_steps_total} steps; nothing to run.")
+                f"fv3_duo: days={cfg.days} is TOTAL days ({n_steps_total} "
+                f"steps at dt={DT}s) and the run "
+                f"{'is already at/past that target (checkpoint step ' + str(loaded_step) + ')' if loaded_step else 'yields no steps'}"
+                f"; nothing to run. days counts from the epoch, NOT from "
+                f"the checkpoint (the MPAS days-this-job convention does "
+                f"not apply to this lane).")
+        # The SHARED cadence helper, not an inline copy: it is the single
+        # definition of the diag/blow-up interval and it REFUSES a non-finite
+        # diag_days (NaN/inf) instead of letting it fall through to the
+        # "no cadence" sentinel — the inline form this replaced accepted NaN
+        # and ran with a cadence nobody asked for.
         from legoesm.driver.diagnostics import diagnostic_interval_steps
         diag_interval = diagnostic_interval_steps(
             cfg.output.diag_days, DT, n_steps_total)
+        ckpt_interval = (max(1, int(cfg.output.checkpoint_days * 86400.0
+                                    / DT))
+                         if cfg.output.checkpoint_days > 0 else 0)
         if start_day is None:
             start_day = cfg.start_day
 
         logger.info(
-            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f days), "
-            "snapshots every %d steps",
+            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f total "
+            "days, %d this job%s), snapshots every %d steps, checkpoints "
+            "every %s steps",
             cfg.grid.resolution, self.model.config.km,
             "hydrostatic" if self.model.config.hydrostatic
             else "nonhydrostatic",
-            DT, n_steps_total, cfg.days, diag_interval)
+            DT, n_steps_total, cfg.days, n_this_job,
+            f", RESTART from step {loaded_step}" if loaded_step else "",
+            diag_interval, ckpt_interval or "never")
 
         # Overwrite any marker from a prior run in this directory FIRST:
         # setup permits a same-config retry, and a stale COMPLETED/BLOWUP
         # surviving an interrupted retry would misclassify it (codex
         # 2026-08-18 MAJOR). RUNNING is the nonterminal state.
         self._fv3_duo_write_status("RUNNING")
-        bundle = self.model.dcmip16_initial_state(do_pert=True)
+        if restart_bundle is not None:
+            bundle = restart_bundle
+        else:
+            bundle = self.model.dcmip16_initial_state(do_pert=True)
         t0 = time.time()
-        for step in range(1, n_steps_total + 1):
+        for step in range(loaded_step + 1, n_steps_total + 1):
             bundle = self.model.step(bundle, DT)
+            # start_day is the ABSOLUTE day at loaded_step (the day the
+            # checkpoint was written; cfg.start_day on a fresh run), so
+            # `day` is absolute simulated time on both arms of a chain.
+            day = start_day + (step - loaded_step) * DT / 86400.0
             if step % diag_interval == 0 or step == n_steps_total:
-                day = start_day + step * DT / 86400.0
                 blowup = self._fv3_duo_snapshot(bundle, step, day)
                 if blowup is not None:
                     self._fv3_duo_write_status(blowup)
                     return blowup
+            if ckpt_interval and (step % ckpt_interval == 0
+                                  or step == n_steps_total):
+                self._fv3_duo_save_checkpoint(bundle, step, day)
         # Final-state digest (run manifest) hashes self.state — hand it
         # the ACTUAL final bundle, not the unused CD-grid scaffold.
         self.state = bundle
         logger.info("FV3 duo lane COMPLETED: %d steps in %.1fs",
-                    n_steps_total, time.time() - t0)
+                    n_this_job, time.time() - t0)
         self._fv3_duo_write_status("COMPLETED")
         return "COMPLETED"
 
@@ -7775,6 +7857,218 @@ class ModelDriver:
             float(ps_win.min()) / 100.0,
             float(ps_win.max()) / 100.0, path.name)
         return None
+
+    def _fv3_duo_flatten_bundle(self, bundle: dict) -> dict:
+        """Flatten the duo bundle to prefixed fp64 numpy arrays.
+
+        ONE naming convention shared by the checkpoint writer, the
+        loader's inverse, and the bitwise A/B test: ``state_<k>``,
+        ``press_<k>`` (exactly the five p_var keys), ``q_<i>``,
+        ``omga``, and ``nh_<k>`` (non-hydrostatic only).  Refuses a
+        non-float64 leaf — the checkpoint contract is a bit-exact fp64
+        round-trip, so a lossy leaf is a defect, not a cast site.
+        """
+        arrays: dict[str, np.ndarray] = {}
+        for nm, v in bundle["state"].items():
+            arrays[f"state_{nm}"] = np.asarray(v)
+        if set(bundle["press"]) != set(self._FV3_DUO_PRESS_KEYS):
+            raise RuntimeError(
+                f"fv3_duo bundle press keys {sorted(bundle['press'])} != "
+                f"{sorted(self._FV3_DUO_PRESS_KEYS)} — the p_var contract "
+                f"changed under this writer; refusing a partial persist.")
+        for nm in self._FV3_DUO_PRESS_KEYS:
+            arrays[f"press_{nm}"] = np.asarray(bundle["press"][nm])
+        for iq, qt in enumerate(bundle["q"]):
+            arrays[f"q_{iq}"] = np.asarray(qt)
+        arrays["omga"] = np.asarray(bundle["omga"])
+        if bundle["nh"] is not None:
+            for nm, v in bundle["nh"].items():
+                arrays[f"nh_{nm}"] = np.asarray(v)
+        bad = sorted(nm for nm, a in arrays.items()
+                     if a.dtype != np.float64)
+        if bad:
+            raise RuntimeError(
+                f"fv3_duo bundle leaves {bad} are not float64; the "
+                f"checkpoint schema persists fp64 bit-exact only.")
+        return arrays
+
+    def _fv3_duo_save_checkpoint(self, bundle: dict, step: int,
+                                 day: float) -> None:
+        """Persist the FULL duo bundle as ONE fp64 ``fv3duo_ckpt_v1`` npz.
+
+        The bundle IS the state: press/nh are persisted verbatim, never
+        rebuilt from delp at load (a rebuild risks diverging from the
+        certified in-step aliasing).  Atomic: written to a ``.tmp``
+        sibling then ``os.replace``d, so a reader never sees a partial
+        checkpoint and an interrupted write never poisons a restart.
+        """
+        from legoesm.io.git_provenance import git_provenance
+        arrays = self._fv3_duo_flatten_bundle(bundle)
+        mcfg = self.model.config
+        path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
+        # UNIQUE tmp name (GLM 2026-08-19): a fixed "<name>.tmp" lets two
+        # concurrent writers in one directory interleave their bytes, and
+        # os.replace then atomically publishes garbage -- an atomic rename
+        # of a non-atomically-produced file is not atomicity.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        with open(tmp, "wb") as fh:
+            np.savez(
+                fh,
+                _schema=self._FV3_DUO_CKPT_SCHEMA,
+                _step=np.int64(step),
+                _day=np.float64(day),
+                _dt=np.float64(self.config.dycore.dt),
+                _hydrostatic=np.bool_(mcfg.hydrostatic),
+                _km=np.int64(mcfg.km),
+                _resolution=np.int64(self.model.grid.n),
+                # nq is CONTRACT, not decoration: the loader checks the
+                # tracer leaves against it, because a contiguity check
+                # alone accepts the empty set and resumes with tracers
+                # silently dropped (codex BLOCKER 2026-08-19).
+                _nq=np.int64(len(bundle["q"])),
+                _git_sha=git_provenance(Path(__file__)).commit,
+                **arrays)
+            # fsync BEFORE the rename, and the directory after it: page
+            # cache survives SIGKILL but not node loss, and os.replace is
+            # metadata-only. Without this the claim is "kill-atomic", not
+            # crash-durable -- and crash durability is what a checkpoint
+            # is for (GLM 2026-08-19).
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        _dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(_dfd)
+        finally:
+            os.close(_dfd)
+        logger.info("  fv3_duo checkpoint: step %d day %.3f -> %s",
+                    step, day, path.name)
+
+    def _load_fv3_duo_checkpoint(self, path: Path) -> tuple[int, float]:
+        """Load an ``fv3duo_ckpt_v1`` bundle and stage it for restart.
+
+        Schema-gated: refuses any npz that does not declare
+        ``_schema='fv3duo_ckpt_v1'`` (a cube/lat-lon/MPAS checkpoint is
+        a foreign schema this lane must never half-decode), then refuses
+        km / resolution / hydrostatic / dt mismatches against the
+        CONSTRUCTED model BEFORE touching any array.  The staged bundle
+        is consumed by ``_run_fv3_duo`` (total-days convention: the
+        resumed job advances ``total - loaded`` steps).
+        """
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        if not isinstance(getattr(self, "model", None),
+                          FV3DuoDynamicsModel):
+            raise RuntimeError(
+                "fv3_duo restart: load_checkpoint validates the bundle "
+                "against the CONSTRUCTED duo model (km/resolution/"
+                "hydrostatic) — call setup() before load_checkpoint.")
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"fv3_duo checkpoint not found (or is a directory): "
+                f"{path}")
+        mcfg = self.model.config
+        schema = self._FV3_DUO_CKPT_SCHEMA
+        with np.load(path, allow_pickle=False) as d:
+            files = set(d.files)
+            if "_schema" not in files or str(d["_schema"]) != schema:
+                got = str(d["_schema"]) if "_schema" in files else "absent"
+                raise ValueError(
+                    f"{path.name} is not an {schema} checkpoint "
+                    f"(_schema={got!r}); the fv3_duo lane decodes ONLY "
+                    f"its own bundle schema — a cube/lat-lon/MPAS "
+                    f"checkpoint cannot restart this lane.")
+            for nm, have, want in (
+                    ("km", int(d["_km"]), int(mcfg.km)),
+                    ("resolution", int(d["_resolution"]),
+                     int(self.model.grid.n)),
+                    ("hydrostatic", bool(d["_hydrostatic"]),
+                     bool(mcfg.hydrostatic))):
+                if have != want:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name} {nm} mismatch: "
+                        f"checkpoint {nm}={have!r} vs constructed model "
+                        f"{nm}={want!r}; restarting would reinterpret "
+                        f"the bundle on the wrong deck. Match the config "
+                        f"to the checkpoint.")
+            dt_ck, dt_now = float(d["_dt"]), float(self.config.dycore.dt)
+            if dt_ck != dt_now:
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} dt mismatch: "
+                    f"checkpoint dt={dt_ck}s vs configured (post-setup) "
+                    f"dt={dt_now}s; the total-days step accounting and "
+                    f"the bitwise restart contract both assume ONE dt "
+                    f"across the chain.")
+
+            def _leaf(nm):
+                a = d[nm]
+                if a.dtype != np.float64:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name}: array {nm!r} "
+                        f"is {a.dtype}, not float64 — the schema is a "
+                        f"bit-exact fp64 round-trip; refusing a lossy "
+                        f"leaf.")
+                return jnp.asarray(a)
+
+            state = {nm[len("state_"):]: _leaf(nm) for nm in sorted(files)
+                     if nm.startswith("state_")}
+            press = {nm[len("press_"):]: _leaf(nm) for nm in sorted(files)
+                     if nm.startswith("press_")}
+            if (not state or "omga" not in files
+                    or set(press) != set(self._FV3_DUO_PRESS_KEYS)):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} is truncated: state "
+                    f"keys {sorted(state)}, press keys {sorted(press)} "
+                    f"(need every press_* of "
+                    f"{sorted(self._FV3_DUO_PRESS_KEYS)}), omga "
+                    f"{'present' if 'omga' in files else 'MISSING'}.")
+            qi = sorted(int(nm[len("q_"):]) for nm in files
+                        if nm.startswith("q_"))
+            # CONTIGUITY IS NOT ENOUGH (codex BLOCKER 2026-08-19): the
+            # empty set is trivially contiguous, so a checkpoint whose
+            # q_* leaves were all dropped loaded as q=[] and RESUMED
+            # SUCCESSFULLY -- silent tracer loss, invisible to a bitwise
+            # state test because zvir=0 keeps the tracer dynamically
+            # passive. The count is part of the deck contract and is
+            # stamped in the checkpoint, so check against it.
+            # _nq is METADATA, so it is read raw and carries the "_"
+            # prefix of the other stamps: routing it through _leaf made
+            # the fp64 lossy-leaf guard refuse an int64 count (job
+            # 9441043 -- the guard working, my naming wrong).
+            n_expect = (int(np.asarray(d["_nq"])) if "_nq" in files
+                        else None)
+            if n_expect is None:
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} predates the _nq stamp "
+                    f"and cannot prove its tracer set is complete; rewrite "
+                    f"it with the current writer.")
+            if qi != list(range(n_expect)):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name}: tracer leaves {qi} "
+                    f"are not exactly q_0..q_{n_expect - 1} as the stamped "
+                    f"nq={n_expect} requires (an empty or short set would "
+                    f"otherwise resume with tracers silently dropped).")
+            q = [_leaf(f"q_{i}") for i in qi]
+            omga = _leaf("omga")
+            nh = None
+            if not mcfg.hydrostatic:
+                nh = {nm[len("nh_"):]: _leaf(nm) for nm in sorted(files)
+                      if nm.startswith("nh_")}
+                if not nh:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name}: "
+                        f"non-hydrostatic restart needs the persisted nh "
+                        f"carry (nh_* arrays); found none.")
+            step = int(d["_step"])
+            day = float(d["_day"])
+        self._fv3_duo_restart_bundle = {
+            "state": state, "press": press, "q": q, "omga": omga,
+            "nh": nh}
+        logger.info("  Loaded fv3_duo checkpoint: step=%d, day=%.3f",
+                    step, day)
+        self._loaded_checkpoint_step_day = (step, day)
+        return step, day
 
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.

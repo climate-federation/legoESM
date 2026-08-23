@@ -43,19 +43,31 @@ pt_to_theta_v, ported literally with the oracle's operation order); the
 barrier and exchange extents are the halo module's; d_con = 0.0 throughout
 and is NOT a parameter of this module -- the KE-to-heat pathway and its
 heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
-inactive on the shipped duo decks; the moist path is dead (zvir != 0 and
-consv_te != 0 are refused); pfull is computed-and-unused on this lane and is
+inactive on the shipped duo decks; the moist path is supported on BOTH arms
+(zvir != 0 couples dp1 into pt_to_theta_v and r_vir into the remap, and
+on the NH arm also into the pkz this module recomputes at :299-322;
+consv_te > CONSV_MIN runs the total-energy fixer through the
+two-phase defer/reduce/apply protocol, while NEGATIVE consv_te and
+moist x consv are refused); pfull is computed-and-unused on this lane and is
 not ported; omga is an output-only passenger whose values are meaningless;
 and dyn_core's use_old_omega fill is not ported (no u/v/pt/delp parity).
 """
 from __future__ import annotations
+
+import operator as _operator
+
+import numpy as np
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.core import Tracer as _Tracer
 from legoesm.core.fv3_acoustic_3d import acoustic_loop_3d, build_nh_carry
-from legoesm.core.fv3_mapz import lagrangian_to_eulerian
+from legoesm.core.fv3_mapz import (
+    CONSV_MIN as _CONSV_MIN,
+    close_out_pt,
+    lagrangian_to_eulerian,
+)
 
 # NOT `fv3_state_3d` -- the shape authority is the NumPy lane's
 # `fv3_native_state_3d`, and the guessed home would have failed
@@ -185,6 +197,121 @@ def p_var_hydrostatic(delp, *, ptop, akap, n: int, ng: int, km: int,
     return {"ps": ps, "pe": pe, "peln": peln, "pk": pk, "pkz": pkz}
 
 
+# --------------------------------------------------------------------
+# The consv_te energy integrals -- JAX twins of the spec lane's
+# --------------------------------------------------------------------
+# WRITTEN IN jnp, NOT REUSED FROM THE SPEC VIA np.asarray. The first
+# version did that on the argument that these run "outside any traced
+# loop"; codex showed the argument is false for the public jit entry
+# point (BLOCKER, job 9446299): make_fv_dynamics_step_jit wraps the
+# WHOLE step, so the peeled final n_map iteration is still inside
+# jax.jit and np.asarray(tracer) raises TracerArrayConversionError.
+# jax.grad, vmap or any enclosing scan have the same problem.
+#
+# So these are twins in the repo's established two-lane pattern, and
+# they are FACE-STACKED where the spec's are per-face -- the six faces
+# reduce together anyway.
+
+
+def _ke_column_jax(delpw, u, v, rsin2, cosa_s, *, cp_times, n, ng):
+    """``sum_k delp*(<cp term> + 0.25*rsin2*KE)``, the term both
+    integrals share (fv_mapz.F90:650-656 and :1145-1150).
+
+    ``u`` is (6, m_a, m_a+1) and ``v`` is (6, m_a+1, m_a), so the j+1
+    and i+1 neighbours slice DIFFERENT axes.
+    """
+    ia = ng
+    r = rsin2[:, ia:ia + n, ia:ia + n][:, :, :, None]
+    c = cosa_s[:, ia:ia + n, ia:ia + n][:, :, :, None]
+    u0 = u[:, ia:ia + n, ia:ia + n, :]
+    u1 = u[:, ia:ia + n, ia + 1:ia + 1 + n, :]
+    v0 = v[:, ia:ia + n, ia:ia + n, :]
+    v1 = v[:, ia + 1:ia + 1 + n, ia:ia + n, :]
+    ke = 0.25 * r * (u0 ** 2 + u1 ** 2 + v0 ** 2 + v1 ** 2
+                     - (u0 + u1) * (v0 + v1) * c)
+    return jnp.sum(delpw * (cp_times + ke), axis=3)
+
+
+def total_energy_2d_hydrostatic_jax(pt, delp, u, v, pe, peln, hs, rsin2,
+                                    cosa_s, *, qc=None, cp, rg, n, ng, km):
+    """``te0_2d`` (compute_total_energy, :1128-1151), face-stacked.
+
+    ``pt`` is TEMPERATURE and ``qc = zvir*q(sphum)``, so ``tv`` is the
+    virtual temperature this routine forms itself. ``phiz`` accumulates
+    DOWNWARD, k = km..1 -- the OTHER integral goes upward, and they are
+    deliberately not shared.
+    """
+    ia = ng
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    tv = ptw if qc is None else ptw * (1.0 + qc)
+    dpe = peln[:, :, 1:, :] - peln[:, :, :-1, :]      # (6, n, km, n)
+    dpe = jnp.transpose(dpe, (0, 1, 3, 2))            # -> (6, n, n, km)
+    lay = rg * tv * dpe
+    # phiz[k] = hs + sum_{k' >= k} lay[k'] : a reverse cumulative sum,
+    # which IS the k = km..1 recurrence, without a Python loop.
+    rev = jnp.cumsum(lay[:, :, :, ::-1], axis=3)[:, :, :, ::-1]
+    hs_w = hs[:, ia:ia + n, ia:ia + n]
+    phiz_top = hs_w + rev[:, :, :, 0]
+    pe_w = pe[:, 1:n + 1, :, 1:n + 1]
+    te = (pe_w[:, :, km, :] * hs_w) - (pe_w[:, :, 0, :] * phiz_top)
+    return te + _ke_column_jax(delp[:, ia:ia + n, ia:ia + n, :], u, v,
+                               rsin2, cosa_s, cp_times=cp * tv, n=n, ng=ng)
+
+
+def fixer_energy_2d_hydrostatic_jax(pt, delp, u, v, pe, peln, hs, rsin2,
+                                    cosa_s, *, cp, rg, n, ng, km):
+    """``te_2d`` (the fixer, :638-658), face-stacked.
+
+    ``pt`` is POST-remap ``T_v`` so this uses ``cp*pt`` with NO virtual
+    factor, and ``gz`` accumulates UPWARD from ``hs``.
+    """
+    ia = ng
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    dpe = peln[:, :, 1:, :] - peln[:, :, :-1, :]
+    dpe = jnp.transpose(dpe, (0, 1, 3, 2))
+    hs_w = hs[:, ia:ia + n, ia:ia + n]
+    gz = hs_w + jnp.sum(rg * ptw * dpe, axis=3)       # k = 1..km, upward
+    pe_w = pe[:, 1:n + 1, :, 1:n + 1]
+    te = (pe_w[:, :, km, :] * hs_w) - (pe_w[:, :, 0, :] * gz)
+    return te + _ke_column_jax(delp[:, ia:ia + n, ia:ia + n, :], u, v,
+                               rsin2, cosa_s, cp_times=cp * ptw, n=n, ng=ng)
+
+
+def energy_fixer_zsum0_hydrostatic_jax(pkz, delp, pk, *, ptop, n, ng, km):
+    """``zsum0`` (:692-703), face-stacked."""
+    ia = ng
+    zsum1 = jnp.sum(pkz * delp[:, ia:ia + n, ia:ia + n, :], axis=3)
+    return ptop * (pk[:, ia:ia + n, ia:ia + n, 0]
+                   - pk[:, ia:ia + n, ia:ia + n, km]) + zsum1
+
+
+def energy_fixer_dtmp_jax(te0, te, zsum0, area, *, consv, n, ng):
+    """``dtmp`` (:708-714) -- a TRACED scalar, not a Python float.
+
+    See the spec twin's docstring for why the numerator's cancellation
+    means the summation choice is a measured question rather than an
+    obvious one.
+    """
+    ia = ng
+    a = area[:, ia:ia + n, ia:ia + n]
+    return consv * jnp.sum((te0 - te) * a) / jnp.sum(zsum0 * a)
+
+
+def _hs_face_jax(ctx, t: int, n: int, ng: int):
+    """Surface geopotential for face ``t`` as NUMPY, or zeros.
+
+    The energy integrals are the spec lane's and take numpy; every duo
+    deck resolves ``mountain = .F.`` and the parity harness asserts the
+    oracle's phis is identically zero, so this is zeros in practice --
+    written against a real array because the integrals reference ``hs``
+    twice each and a non-zero-orography deck would need it.
+    """
+    hs6 = getattr(ctx, "hs6", None)
+    if hs6 is None:
+        return np.zeros((n + 2 * ng, n + 2 * ng), dtype=np.float64)
+    return np.asarray(hs6[t], dtype=np.float64)
+
+
 def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     """fv_dynamics.F90:396-408, COMPUTE WINDOW ONLY -- functional (C4):
     returns the converted pt instead of mutating it.
@@ -192,8 +319,17 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     The halo rows keep TEMPERATURE until the it==1 scalar exchange
     (dyn_core.F90:470) overwrites them; converting the padded array would
     also convert the corner-diagonal sentinels, which are NOT overwritten.
-    ``dp1=None`` is the adiabatic ``zvir = 0`` lane; a separate branch,
-    not a zeros multiply, keeps it bit-identical to ``pt/pkz``.
+    ``dp1=None`` is the adiabatic ``zvir = 0`` lane. It is a
+    separate branch because the oracle forms no ``dp1`` there at
+    all (:281-294 is the moist branch), NOT because a zeros array
+    would round differently -- since the association was corrected
+    to ``(pt*(1+dp1))/pkz`` a zeros array is bit-identical
+    (``win*1.0`` is exact; codex confirmed this holds for every finite
+    input including subnormals and both signed zeros, job 9442717).
+    Gated in THIS lane by
+    ``tests/grids/test_fv3_dynamics.py::test_dry_branch_is_not_a_multiply_by_one``
+    and in the NumPy lane by
+    ``test_fv3_moist_dynamics.py::test_dry_lane_is_bitwise_under_the_moist_patch``.
     """
     pt = jnp.asarray(pt)
     pkz = jnp.asarray(pkz)
@@ -204,14 +340,19 @@ def pt_to_theta_v(pt, pkz, *, n: int, ng: int, dp1=None):
     if dp1 is None:  # static None-ness: stays a Python if
         new = win / pkz
     else:
-        new = win * ((1.0 + dp1) / pkz)
+        # ASSOCIATION IS THE ORACLE'S. Fortran evaluates `pt*(1.+dp1)/pkz`
+        # (:402) left to right as (pt*(1+dp1))/pkz. Forming the quotient
+        # first and multiplying rounds differently; the spec lane carries
+        # the same comment for the same reason.
+        new = win * (1.0 + dp1) / pkz
     # the six per-face compute windows are disjoint; no face reads
     # another's write, so the spec's face loop is one stacked slice
     return pt.at[:, ia:ia + n, ia:ia + n, :].set(new)
 
 
 def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
-                         km: int, check_args: bool = False) -> dict:
+                         km: int, check_args: bool = False,
+                         dp1=None) -> dict:
     """``p_var``'s NON-hydrostatic pkz on top of the hydrostatic column.
 
     init_hydro.F90:178-184 (dry): ``pkz = exp(cappa*log(rdg*delp*pt/delz))``
@@ -221,6 +362,18 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
     ``delz`` broadcasts to the compute window exactly as in the spec's own
     expression.  pkz's layout IS the compute window, so the whole array is
     replaced.
+
+    ``dp1`` is the MOIST arm (``fv_dynamics.F90:307-309``, the
+    ``moist_phys`` branch), where the log argument carries an extra
+    ``(1.+dp1)``.  It is a separate branch, matching the oracle's own
+    ``moist_phys`` split, so the certified dry NH lane keeps its exact
+    expression;
+    the factor sits INSIDE the log in the Fortran's own left-to-right
+    association, not applied to ``pt`` at the call site, which would
+    reassociate the product.  The oracle's ``moist_phys = .false.`` arm
+    (``:335``) forces ``dp1 = 0`` and computes the DRY form, so it is
+    reached here by passing ``dp1=None`` -- i.e. it is exactly the
+    ``zvir = 0`` lane and needs no flag of its own.
     """
     delp = jnp.asarray(delp)
     delz = jnp.asarray(delz)
@@ -231,10 +384,37 @@ def p_var_nonhydrostatic(delp, delz, pt, *, ptop, akap, n: int, ng: int,
                             check_args=check_args)
     rdg = -_FV3_RDGAS / _FV3_GRAV
     ia = ng
+    dpw = delp[:, ia:ia + n, ia:ia + n, :]
+    ptw = pt[:, ia:ia + n, ia:ia + n, :]
+    if dp1 is not None:
+        dp1 = jnp.asarray(dp1)
+        require_f64_jax("p_var_nonhydrostatic", {"dp1": dp1})
     out["pkz"] = jnp.exp(akap * jnp.log(
-        rdg * delp[:, ia:ia + n, ia:ia + n, :]
-        * pt[:, ia:ia + n, ia:ia + n, :] / delz))
+        nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1)))
     return out
+
+
+def nh_pkz_log_arg(rdg, dpw, ptw, delz, dp1=None):
+    """The NH ``pkz`` log argument: ``rdg*delp*pt*(1.+dp1)/delz``.
+
+    FACTORED OUT SO THE ASSOCIATION CAN BE GATED BITWISE.  ``pkz``
+    itself ends in ``exp(kappa*log(...))``, and XLA's ``exp`` differs
+    from libm's by ~1 ulp, so a cross-lane bitwise check on ``pkz``
+    is not available -- and a tolerance loose enough to survive that
+    also admits the very mistake the association is guarding against:
+    pre-scaling ``pt`` at the CALL SITE (``rdg*delp*(pt*(1+dp1))/delz``)
+    is algebraically identical and differs only by multiplication
+    rounding, well inside any exp/log-sized window (codex MAJOR, job
+    9442717).  Below the transcendentals the two trees differ by real
+    bits, so the gate can be exact.
+
+    Association is the Fortran's, left to right
+    (``fv_dynamics.F90:314-315``): ``((rdg*delp)*pt)*(1+dp1)/delz`` on
+    the moist arm, ``((rdg*delp)*pt)/delz`` on the dry one.
+    """
+    if dp1 is None:  # static None-ness: stays a Python if
+        return rdg * dpw * ptw / delz
+    return rdg * dpw * ptw * (1.0 + dp1) / delz
 
 
 def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
@@ -287,6 +467,15 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     spec's ``validate`` renamed (C5); it raises on a tracer, so run it
     eagerly outside jit.
 
+    THE RETURNED ``press["pkz"]`` IS DRY, ALWAYS.  The remap writes it
+    from the post-remap state with no ``(1+dp1)`` (``fv_mapz.F90:
+    479-481``), and on the moist NH arm the NEXT call overwrites it at
+    ``fv_dynamics.F90:299-322``.  That is exactly what the oracle
+    exposes between calls, so it is not a divergence -- but a consumer
+    that stops BETWEEN steps and assumes "moist run implies moist pkz"
+    would be wrong, which is why it is stated here rather than only in
+    a test (GLM MINOR, job 9442483).
+
     pt enters as TEMPERATURE and leaves as TEMPERATURE (theta_v in
     between: :396-408 in, fv_mapz.F90:209-217 out); a caller stopping in
     between gets theta_v.  omga is returned but meaningless (use_old_omega
@@ -299,16 +488,98 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         raise ValueError(f"n_split must be >= 1, got {n_split}")
     require_uniform_damping_lane(n_sponge=n_sponge, tau=tau, npz=km)
     if zvir != 0.0:  # static deck constant, stays a Python if
-        raise NotImplementedError(
-            "zvir != 0 makes the tracers stop being passengers: dp1 = "
-            "zvir*q(sphum) enters the pt->theta_v conversion "
-            "(fv_dynamics.F90:291, :402) and the closing pt/(1+r_vir*q) "
-            "(fv_mapz.F90:975). The pinned deck is adiabatic, zvir = 0.")
-    if consv_te != 0.0:
-        raise NotImplementedError(
-            "consv_te != 0 activates the total-energy fixer "
-            "(fv_mapz.F90:628-747), which is not ported. The pinned deck "
-            "has consv_te = 0.")
+        # HYDROSTATIC moist coupling is enabled, mirroring the spec lane
+        # (fv3_native_dynamics.py). dp1 = zvir*q(sphum)
+        # (fv_dynamics.F90:291; USE_COND is not defined in the pinned
+        # build, so no q_con term) feeds pt = pt*(1.+dp1)/pkz (:402) and
+        # the closing pt/(1+r_vir*q) (fv_mapz.F90:975), which
+        # lagrangian_to_eulerian already carries via r_vir=zvir below.
+        # Validate, never default: a guessed tracer index would silently
+        # couple an arbitrary species into theta_v.
+        if q is None:
+            raise ValueError(
+                "zvir != 0 requires tracer arrays, but q is None: "
+                "dp1 = zvir*q(sphum) (fv_dynamics.F90:291) has no specific "
+                "humidity to read.")
+        # operator.index NORMALISES; hasattr alone does not. A object
+        # that implements only __index__ passed the old check and then
+        # died on the bounds COMPARISON with an incidental TypeError
+        # (codex MINOR, job 9442482). bool is excluded by name because
+        # it has __index__ too, and True would select tracer 1.
+        if isinstance(sphum_index, bool):
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer index "
+                f"into q; got the bool {sphum_index!r}, which would "
+                f"silently select tracer {int(sphum_index)}.")
+        try:
+            sphum_index = _operator.index(sphum_index)
+        except TypeError:
+            raise ValueError(
+                f"zvir != 0 requires sphum_index to be an integer "
+                f"indexing the specific-humidity tracer in q; got "
+                f"{sphum_index!r}. A guessed index would silently couple "
+                f"the wrong species into theta_v.") from None
+        if len(q) <= 0:
+            raise ValueError(
+                "zvir != 0 requires nq > 0, but q carries no tracers "
+                "(fv_dynamics.F90:291 needs sphum).")
+        if not 0 <= sphum_index < len(q):
+            raise ValueError(
+                f"sphum_index={sphum_index} out of range [0, {len(q)}); a "
+                f"negative index would silently select another tracer by "
+                f"Python wrap-around.")
+        if not hydrostatic and "delz" not in state:
+            raise ValueError(
+                "zvir != 0 with non-hydrostatic dynamics needs state["
+                "'delz']: the moist NH pkz is recomputed here from "
+                "delp/pt/delz (fv_dynamics.F90:299-322).")
+    if abs(consv_te) > _CONSV_MIN:
+        # Fortran's DEAD BAND (fv_mapz.F90:630): 0 < |consv| <= consv_min
+        # is ACCEPTED and leaves dtmp exactly 0, so it is fixer-OFF here
+        # rather than an error (codex MINOR, job 9446299). Raising on it
+        # was stricter than the oracle.
+        if not hydrostatic:
+            raise NotImplementedError(
+                "consv_te != 0 with non-hydrostatic dynamics is not "
+                "enabled: compute_total_energy and the fixer both take "
+                "their NON-hydrostatic branches (fv_mapz.F90:1155-1190 "
+                "and :659-687), which integrate phiz from delz and carry "
+                "the w**2 term. Only the hydrostatic pair is ported.")
+        if consv_te < 0.0:
+            # NEGATIVE consv IS A DIFFERENT PROGRAM, not a sign choice
+            # (codex MAJOR, job 9446299). fv_mapz.F90:738-741 treats it
+            # as a PRESCRIBED energy flux --
+            # dtmp = consv*(grav*pdt*4*pi*radius**2)/g_sum(zsum0) -- and
+            # never forms te0_2d - te_2d at all. Accepting it here would
+            # run the positive branch's physics under the negative
+            # branch's flag.
+            raise NotImplementedError(
+                f"consv_te={consv_te} < 0: fv_mapz.F90:738-741 is the "
+                f"PRESCRIBED-FLUX branch, which needs pdt, grav and the "
+                f"planetary radius and does not use te0_2d - te_2d. Only "
+                f"the positive branch (:630-715) is ported.")
+        if zvir != 0.0:
+            # MOIST x CONSV IS UNSCORED (GLM MAJOR, job 9446300). The
+            # harness refuses the combination, but a refusal that lives
+            # only in the harness is not a refusal: the qc path of
+            # total_energy_2d_hydrostatic (forms tv itself, integrates
+            # DOWN) and the no-virtual path of
+            # fixer_energy_2d_hydrostatic (takes T_v, integrates UP) are
+            # exactly the distinction this port advertises, and under
+            # every existing gate they are dead code. Build a moist
+            # consv deck before enabling this.
+            raise NotImplementedError(
+                "zvir != 0 with consv_te != 0 has no oracle deck, so the "
+                "two energy integrals' virtual-temperature conventions "
+                "are unscored -- the one thing about this port most "
+                "likely to be wrong. Build a moist consv_te deck "
+                "(build_consv_te_oracle.sbatch on the moist deck) "
+                "first.")
+        if getattr(ctx, "gs6", None) is None:
+            raise ValueError(
+                "consv_te != 0 needs ctx.gs6: the energy integrals are "
+                "area-weighted and use rsin2/cosa_s "
+                "(fv_mapz.F90:650-656).")
     n, ng = ctx.n, ctx.ng
     want_delp = (6,) + tuple(field_shape("delp", n, ng, km))
     for nm in ("delp", "pt", "u", "v"):
@@ -375,17 +646,87 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     mdt = bdt / float(k_split)
     ia = ng
     remapped = km > REMAP_MIN_NPZ  # :568, static
+    # fv_mapz.F90:985: on the NH arm the closing T_v -> T conversion is
+    # inside `if (.not. adiabatic)`.  The certified deck is adiabatic AND
+    # dry, so True was unconditionally right; with moist NH it is not --
+    # adiabatic=True there would make the oracle skip the conversion and
+    # leave pt virtual.  With consv = 0, dtmp is identically 0 and the
+    # oracle's :987 expression is exactly the one this lane computes, so
+    # False is the faithful flag for the moist NH arm.  The remap refuses
+    # the other combination rather than trusting this line.
+    adiabatic_flag = hydrostatic or zvir == 0.0
 
     # :396-408  T -> theta_v once per call; the six per-face compute
     # windows are disjoint, so the spec's face loop is one stacked call
     state = dict(state)
-    state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
+    # :355-365  te0_2d, BEFORE the theta conversion below, because
+    # compute_total_energy runs at :359 while pt is still TEMPERATURE.
+    # THE SPEC'S INTEGRALS ARE REUSED, not re-written in jnp: they are
+    # pure per-face numpy, run ONCE per step outside any traced loop,
+    # and a second implementation of numerics this repo already has is
+    # exactly what the no-duplicate-numerics rule forbids.
+    te0_2d = None
+    if abs(consv_te) > _CONSV_MIN:
+        _gs = ctx.gs6
+        _stack = lambda k: jnp.asarray(  # noqa: E731
+            np.stack([np.asarray(_gs[t][k]) for t in range(6)]))
+        _rsin2, _cosa_s = _stack("rsin2"), _stack("cosa_s")
+        _area = _stack("area")
+        _hs = jnp.asarray(np.stack([_hs_face_jax(ctx, t, n, ng)
+                                    for t in range(6)]))
+        qc = (zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
+              if zvir != 0.0 else None)
+        te0_2d = total_energy_2d_hydrostatic_jax(
+            state["pt"], state["delp"], state["u"], state["v"],
+            press["pe"], press["peln"], _hs, _rsin2, _cosa_s,
+            qc=qc, cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km)
+    if zvir != 0.0:
+        # dp1 = zvir*q(i,j,k,sphum) (fv_dynamics.F90:291), formed ONCE
+        # from the step-initial q before the k_split loop, exactly as
+        # :281-294 precedes :451. Sliced to the COMPUTE WINDOW because
+        # pkz is (6, n, n, km) and pt_to_theta_v expects dp1 matching it.
+        dp1_theta = zvir * q[sphum_index][:, ia:ia + n, ia:ia + n, :]
+        if not hydrostatic:
+            # :299-322 is INSIDE fv_dynamics and runs on every call on
+            # BOTH NH arms -- but only the MOIST one is recomputed here.
+            # The dry NH arm still trusts the caller's pkz, which is
+            # covered by the certified dry parity and is deliberately
+            # left alone; do not read this comment as licence to
+            # recompute there (GLM, job 9442483). On the moist arm:
+            # the NH moist arm it OVERWRITES pkz with
+            # exp(kappa*log(rdg*delp*pt*(1.+dp1)/delz)) from the
+            # step-entry state, while pt is still TEMPERATURE. The
+            # caller's pkz -- built dry by p_var_nonhydrostatic, or
+            # carried over from the previous step's remap -- is missing
+            # the virtual factor, so it is recomputed here rather than
+            # trusted. The dry NH lane never enters this branch and
+            # keeps its certified expression untouched.
+            press = dict(press)
+            press["pkz"] = p_var_nonhydrostatic(
+                state["delp"], state["delz"], state["pt"], ptop=ptop,
+                akap=akap, n=n, ng=ng, km=km, dp1=dp1_theta)["pkz"]
+        state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng,
+                                    dp1=dp1_theta)
+    else:
+        # dp1=None is the ORACLE's shape: fv_dynamics.F90:281-294
+        # forms no dp1 at all when zvir = 0, so there is nothing to
+        # multiply by. NOT a rounding argument -- an earlier version
+        # of this comment claimed a zeros array 'rounds twice', which
+        # was true of the OLD association `(1.+dp1)/pkz` and became
+        # FALSE when it was corrected: 1.0+0.0 is exactly 1.0 and
+        # win*1.0 is exact, so zeros is now bit-identical. Measured,
+        # job 9442478. The branch stays because it is the oracle's
+        # structure and skips a whole-field multiply.
+        state["pt"] = pt_to_theta_v(state["pt"], press["pkz"], n=n, ng=ng)
 
     def _n_map(carry, last_step: bool):
         st, pr, qq, om, nhc, nspl, nexc = carry
         # :472-478 dp1 = delp, full padded box, BEFORE dyn_core; arrays are
-        # immutable here so the spec's anti-alias copy is a plain binding
-        dp1 = st["delp"]
+        # immutable here so the spec's anti-alias copy is a plain binding.
+        # NAMED dp1_delp, not dp1: the Fortran reuses the name `dp1` for
+        # two unrelated things (the moist zvir*q above and this delp
+        # snapshot), and one of them is now live on this lane.
+        dp1_delp = st["delp"]
         # dyn_core.F90:313-316 sits INSIDE dyn_core: one zeroing per n_map
         # call (never per acoustic sub-step); k_split=1 makes it once per
         # fv_dynamics_step.  This module owns the zeroing (D3).
@@ -412,7 +753,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             # -- the spec's own [face][iq] order. Passing the list
             # straight through made the callee see nq as the face axis.
             _q_in = jnp.stack(qq, axis=1)
-            _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1, ac["flux_cap"],
+            _tr = tracer_2d_1l_sixface(ctx, _q_in, dp1_delp, ac["flux_cap"],
                                        km=km, nq=nq, hord_tr=hord_tr,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
@@ -490,7 +831,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 q=[qq[i][t] for i in range(nq)],
                 omga=om[t], sphum_index=sphum_index,
                 last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=True, consv=consv_te,
+                adiabatic=adiabatic_flag, consv=consv_te,
                 w=(None if hydrostatic else st["w"][t]),
                 delz=(None if hydrostatic else st["delz"][t]),
                 ws=(None if hydrostatic else g["ws"][t]),
@@ -498,7 +839,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                 rdgas=(None if hydrostatic else _FV3_RDGAS),
                 grav=(None if hydrostatic else _FV3_GRAV),
                 fill=False, do_sat_adj=False, do_inline_mp=False,
-                do_adiabatic_init=False))
+                do_adiabatic_init=False,
+                defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
         # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
         # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
         # from scratch DROPS a hydrostatic run's `w` -- which the state
@@ -533,6 +875,37 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
                                              *[o.q for o in fs]))
         om = jnp.stack([o.omga for o in fs])
+
+        if last_step and abs(consv_te) > _CONSV_MIN:
+            # THE REDUCTION, and the reason the remap was split. fv_mapz
+            # does te_2d -> g_sum -> apply inside ONE call because its
+            # "domain" is every tile; a call here is one face, so all
+            # six are collected, summed with area weights, and only then
+            # is :975 applied. pt is T_v on every face at this point --
+            # defer_close skipped exactly that conversion.
+            #
+            # pr["pe"]/["peln"]/["pkz"] here are the POST-remap bundle
+            # rebuilt from `fs` a few lines above, not the caller's --
+            # GLM asked for that in writing, because a stale pe would
+            # move dtmp at O(1) relative and pt by ~1e-8, over the gate.
+            te_2d = fixer_energy_2d_hydrostatic_jax(
+                st["pt"], st["delp"], st["u"], st["v"],
+                pr["pe"], pr["peln"], _hs, _rsin2, _cosa_s,
+                cp=cp_air, rg=_FV3_RDGAS, n=n, ng=ng, km=km)
+            zsum0 = energy_fixer_zsum0_hydrostatic_jax(
+                pr["pkz"], st["delp"], pr["pk"], ptop=ptop, n=n, ng=ng,
+                km=km)
+            dtmp = energy_fixer_dtmp_jax(te0_2d, te_2d, zsum0, _area,
+                                         consv=consv_te, n=n, ng=ng)
+            st = dict(st)
+            st["pt"] = jnp.stack([
+                close_out_pt(st["pt"][t], pr["pkz"][t],
+                             [qq[i][t] for i in range(nq)],
+                             sphum_index=sphum_index, r_vir=zvir,
+                             dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                             fixer_on=True)
+                for t in range(6)])
+
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 
     # nsplt seeds at 1 (a schedule of all-ones is "no sub-cycling", the
@@ -541,7 +914,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
     carry0 = (state, press, q, omga, nh,
               jnp.ones((km,), dtype=jnp.int32), jnp.asarray(False))
     # D1: with the NH carry prebuilt at entry, iterations 1..k_split-1 are
-    # ONE program (dp1 and the capacitors are re-derived identically each
+    # ONE program (dp1_delp and the capacitors are re-derived identically each
     # time); only the LAST differs -- last_step=True reaches the remap
     # (:482) -- so the middle scans and the last is peeled.  k_split == 1
     # is first AND last.  Middle iterations' stage payloads are dropped,

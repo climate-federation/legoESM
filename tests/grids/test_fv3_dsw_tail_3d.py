@@ -1211,3 +1211,31 @@ def test_nh_update_dz_d_twins_agree_on_this_fixture(ctx, jctx, nh_bundle,
             f"{int((zh_ja != zh_np).sum() - (~(np.isfinite(zh_ja)) & ~(np.isfinite(zh_np))).sum())} cells. "
             f"The eager edge_profile/update_dz_d path regressed from "
             f"op-by-op primitives (see the RESOLVED note above).")
+
+
+def test_require_real_area_refuses_the_builder_sentinel():
+    """The NH tail no longer fills the area halo, so it must check it.
+
+    The plain gridstruct builder writes ``-BIG_NUMBER`` into the
+    corner-diagonal cells and the six-face context repairs them; a caller
+    that hands over a raw plain result would otherwise put a sentinel
+    into ``update_dz_d`` and get a plausible wrong number rather than an
+    error (codex review, 2026-08-23).
+    """
+    import numpy as np
+    import pytest
+
+    from legoesm.core.fv3_native_dsw_tail_3d import require_real_area
+
+    good = np.full((8, 8), 3.5e10)
+    require_real_area(good, 0)          # must not raise
+
+    sentinel = good.copy()
+    sentinel[0, 0] = -1.0e30
+    with pytest.raises(ValueError, match="not a real area"):
+        require_real_area(sentinel, 2)
+
+    nan = good.copy()
+    nan[3, 3] = np.nan
+    with pytest.raises(ValueError, match="not a real area"):
+        require_real_area(nan, 5)

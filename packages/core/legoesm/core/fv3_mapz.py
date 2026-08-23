@@ -112,6 +112,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import operator as _operator
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -1274,7 +1276,7 @@ def _omega_interp(mid, pe0_old, pe3_om, om_in, km: int):
 def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
                           do_sat_adj: bool, do_inline_mp: bool,
                           do_adiabatic_init: bool, nq: int,
-                          last_step: bool) -> None:
+                          last_step: bool, defer_close: bool = False) -> None:
     """Reject every configuration whose ``fv_mapz`` branch is not ported.
 
     Re-states the NumPy lane's private ``_refuse_unported_lane`` on the
@@ -1285,12 +1287,19 @@ def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
     """
     # The energy fixer is inside `if (last_step .and. ...)` at :628, so a
     # non-last_step call never reaches it whatever consv says.
-    if last_step and (consv > CONSV_MIN or consv < -CONSV_MIN):
+    if (last_step and (consv > CONSV_MIN or consv < -CONSV_MIN)
+            and not defer_close):
+        # The fixer IS ported, but only through the two-phase protocol:
+        # its dtmp is a global sum over six faces and this call sees
+        # one. A caller passing consv WITHOUT deferring would get the
+        # un-fixed answer and no error.
         raise NotImplementedError(
-            f"consv={consv} at last_step: the total-energy fixer "
-            f"(fv_mapz.F90:628-747) is NOT ported. The reference deck pins "
-            f"consv_te=0.0, which leaves dtmp exactly 0. |consv| must be "
-            f"<= {CONSV_MIN}.")
+            f"consv={consv} at last_step without defer_close: the "
+            f"total-energy fixer needs a GLOBAL sum over all six faces "
+            f"(fv_mapz.F90:708, g_sum) and this call sees one. Use "
+            f"defer_close=True, reduce, then apply close_out_pt -- which "
+            f"is what fv_dynamics_step does. |consv| <= {CONSV_MIN} keeps "
+            f"the fixer off entirely.")
     # fillz is called at :336, INSIDE the `elseif (nq > 0)` tracer arm
     # opened at :330 -- with no tracers it is unreachable.
     if fill and nq > 0:
@@ -1316,6 +1325,40 @@ def _refuse_unported_lane(*, consv: float, fill: bool, kord_tm: int,
             f"NOT ported. The reference deck has nr=2 (ncnst=3, dnats=1).")
 
 
+def close_out_pt(pt, pkz, q, *, sphum_index, r_vir, dtmp, cp,
+                 n: int, ng: int, fixer_on: bool = False):
+    """``fv_mapz.F90:975`` -- the deferred half of the remap, FUNCTIONAL.
+
+    Returns the converted ``pt``; the NumPy twin mutates in place (C4).
+    Split out because ``dtmp`` is a global reduction over all six faces
+    while :func:`lagrangian_to_eulerian` runs one face at a time -- see
+    the ``defer_close`` comment there.
+
+    ``fixer_on=False`` keeps the certified expression exactly, rather
+    than acquiring an add of a zero -- and is a STATIC choice, so the
+    compiled program differs rather than branching on a traced value.
+    """
+    pt = jnp.asarray(pt)
+    _require_f64_jax("close_out_pt", {"pt": pt, "pkz": pkz})
+    ia = ng
+    win = pt[ia:ia + n, ia:ia + n, :]
+    # BRANCH ON THE STATIC FLAG, NOT ON dtmp'S VALUE. dtmp is a TRACED
+    # scalar under jit (it is a global reduction of traced fields), so
+    # `if dtmp == 0.0` would raise a ConcretizationTypeError there.
+    # `fixer_on` comes from consv_te, which is a static deck constant.
+    if not fixer_on:
+        if r_vir == 0.0:
+            return pt
+        new = win / (1.0 + r_vir * q[int(sphum_index)][ia:ia + n,
+                                                       ia:ia + n, :])
+    else:
+        add = win + dtmp / cp * pkz
+        new = (add if r_vir == 0.0
+               else add / (1.0 + r_vir * q[int(sphum_index)][ia:ia + n,
+                                                             ia:ia + n, :]))
+    return pt.at[ia:ia + n, ia:ia + n, :].set(new)
+
+
 def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            ak, bk, ptop, akap, cp, r_vir,
                            km, n, ng,
@@ -1326,7 +1369,7 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                            w=None, delz=None, ws=None, kord_wz=9,
                            w_limiter=False, rdgas=None, grav=None,
                            fill=False, do_sat_adj=False, do_inline_mp=False,
-                           do_adiabatic_init=False):
+                           do_adiabatic_init=False, defer_close=False):
     """``Lagrangian_to_Eulerian`` for ONE face (fv_mapz.F90:62-1080).
 
     FUNCTIONAL twin of ``fv3_native_mapz.lagrangian_to_eulerian``: that
@@ -1383,10 +1426,21 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
             "deck has nr=2 and the oracle makes two passes through "
             "fv_mapz.F90:330-342.")
     nq = len(q)
+    if defer_close and not last_step:
+        # SILENTLY IGNORED BEFORE (GLM MINOR, job 9446300): the
+        # non-last_step arm does `pt /= pkz` (theta_v back-conversion)
+        # regardless, so a caller believing pt was deferred T_v would
+        # then hand theta_v to close_out_pt and get
+        # (theta_v + dtmp/cp*pkz)/... -- garbage, with no error.
+        raise ValueError(
+            "defer_close=True with last_step=False: the fixer lives "
+            "inside `if (last_step)` (fv_mapz.F90:628), so there is "
+            "nothing to defer here, and the non-last_step arm converts "
+            "pt back to theta_v -- which close_out_pt must never see.")
     _refuse_unported_lane(consv=consv, fill=fill, kord_tm=kord_tm,
                           do_sat_adj=do_sat_adj, do_inline_mp=do_inline_mp,
                           do_adiabatic_init=do_adiabatic_init, nq=nq,
-                          last_step=last_step)
+                          last_step=last_step, defer_close=defer_close)
     ppm_profile_is_unported(kord_mt)
     ppm_profile_is_unported(abs(int(kord_tm)))
     kords_tr = ([int(x) for x in kord_tr]
@@ -1406,12 +1460,50 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
                 "r_vir != 0 needs the tracers for the closing T_v -> T "
                 "conversion (fv_mapz.F90:975). The reference deck is "
                 "adiabatic (driver/solo/atmosphere.F90:156-158, zvir = 0).")
-        if sphum_index is None or not (0 <= int(sphum_index) < nq):
+        # int() would COERCE: True -> 1, 1.5 -> 1, "1" -> 1, so the
+        # "never guess the species" guard would admit a bool, a float or
+        # a string and divide by tracer 1 (GLM MINOR, job 9442423).
+        # __index__ accepts int and numpy integers and rejects the rest;
+        # bool has one, so it is excluded by name.
+        # operator.index NORMALISES; the bounds test must then run on
+        # the normalised value, not the original object (codex MINOR,
+        # job 9442482). bool has __index__ too and is excluded by name.
+        _si_in = sphum_index          # keep for the message
+        if isinstance(sphum_index, bool):
+            sphum_index = None
+        else:
+            try:
+                sphum_index = _operator.index(sphum_index)
+            except TypeError:
+                sphum_index = None
+        if sphum_index is None or not 0 <= sphum_index < nq:
             raise ValueError(
-                f"r_vir != 0 needs sphum_index in [0, {nq}) -- "
+                f"r_vir != 0 needs sphum_index an int in [0, {nq}) -- "
                 f"fv_mapz.F90:975 uses the explicit sphum argument, and "
                 f"assuming tracer 0 divides by the wrong species. Got "
-                f"{sphum_index!r}.")
+                f"{_si_in!r}.")
+        if not hydrostatic and adiabatic:
+            # fv_mapz.F90:985 -- on the NON-hydrostatic arm the closing
+            # T_v -> T conversion sits inside `if (.not. adiabatic)`, so
+            # with adiabatic=.true. the oracle does NOT convert at all
+            # and pt stays virtual.  This lane always divides, which is
+            # the `.not. adiabatic` branch (:987).  dtmp is initialised
+            # to 0. at :627 and assigned ONLY inside `consv > consv_min`
+            # (:629/:708) and `consv < -consv_min` (:738-741), both of
+            # which this lane refuses, so dtmp is identically 0 and
+            # `(pt + dtmp/cv_air*pkz)/(1+r_vir*q)` reduces EXACTLY to
+            # what is computed here -- cv_air vs cp cannot matter on a
+            # term that is zero.  Refuse the
+            # combination rather than silently running a different branch
+            # of the oracle than the flag names.  (The HYDROSTATIC :975
+            # divide is ungated by adiabatic, which is why this is
+            # NH-only.)
+            raise NotImplementedError(
+                "r_vir != 0 with hydrostatic=False and adiabatic=True: "
+                "the oracle SKIPS the closing T_v -> T conversion there "
+                "(fv_mapz.F90:985) while this lane always divides. Pass "
+                "adiabatic=False -- with consv = 0 the oracle's :987 "
+                "expression is exactly this lane's.")
     if not hydrostatic:
         missing = [nm for nm, a in (("w", w), ("delz", delz), ("ws", ws),
                                     ("rdgas", rdgas), ("grav", grav))
@@ -1577,7 +1669,14 @@ def lagrangian_to_eulerian(*, pe, peln, pk, pkz, delp, pt, u, v, ps,
     vw = unpad1(map1_ppm(pe0_v, pad1(vw), pe3_v, km, km, -1, int(kord_mt)))
 
     # ---------------- :964-1004 -- close out pt -------------------------
-    if last_step:
+    if last_step and defer_close:
+        # THE ENERGY FIXER NEEDS A GLOBAL SUM AND THIS LANE IS PER FACE.
+        # fv_mapz.F90 does te_2d -> g_sum -> apply at :975 inside ONE
+        # call because its "domain" is every tile; here a call is one
+        # face, so dtmp cannot be known yet. Leave ptw as T_v and let
+        # the caller reduce over six faces and apply close_out_pt.
+        pass
+    elif last_step:
         if r_vir != 0.0:                                     # :975
             ptw = ptw / (1.0 + r_vir * q_out[int(sphum_index)])
     else:                                                    # :996-1001

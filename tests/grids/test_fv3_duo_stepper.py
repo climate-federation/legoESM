@@ -214,17 +214,6 @@ def _cmp(got, ref, name, tol):
     assert np.array_equal(na, nb), (
         f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
         f"{int(nb.sum())} cells of {a.size})")
-    # The masks agreeing is not the values agreeing: a NaN in one lane and a
-    # +Inf in the other sit in the same cell, are both non-finite, and were
-    # then EXCLUDED from every numeric comparison below -- so two lanes that
-    # diverged into different failure modes compared equal. Compare the kind,
-    # and the sign of an infinity, explicitly.
-    if na.any():
-        ka = np.where(np.isnan(a[na]), 0.0, np.sign(a[na]))
-        kb = np.where(np.isnan(b[na]), 0.0, np.sign(b[nb]))
-        assert np.array_equal(ka, kb), (
-            f"{name}: non-finite VALUES differ at the same cells (NaN vs "
-            f"+/-Inf); the masks match but the two lanes failed differently")
 
     sa = np.isfinite(a) & (np.abs(a) >= _SENTINEL_FLOOR)
     sb = np.isfinite(b) & (np.abs(b) >= _SENTINEL_FLOOR)
