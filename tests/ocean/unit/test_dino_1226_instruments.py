@@ -963,3 +963,64 @@ def test_snap_days_cli_parses_a_comma_list(instruments):
         args.save_3d) == (0, 90, 180, 270, 360)
     # and the flag is genuinely optional
     assert k._parse_args(["r", "/tmp/x.npz"]).snap_days is None
+# the seasonal-clock guard every scorer shares
+# ---------------------------------------------------------------------------
+def test_clock_guard_accepts_the_restarts_own_day_of_year(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    day180 = 180.0 * 86400.0
+    stamped = {"seasonal_t0_seconds": day180,
+               "seasonal_t0_reference_seconds": day180}
+    assert kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "ok.npz") == (
+        day180, day180)
+
+
+def test_clock_guard_rejects_a_nonzero_offset_the_old_test_let_through(
+        instruments):
+    """The defect the pair-check fixes.
+
+    The first guard rejected only ``t0 == 0``.  An explicit step offset of one
+    stamps 2700 s -- still 179.97 days out of phase with the day-180 restart --
+    and passed, so the gate reported a NEMO comparison for a run forced in the
+    opposite season.  A ``t0 != 0`` test cannot fail on this input; the
+    pair-check must.
+    """
+    kamm_twin_90d = instruments.kamm_twin_90d
+    stamped = {"seasonal_t0_seconds": 2700.0,              # kt0 = 1
+               "seasonal_t0_reference_seconds": 180.0 * 86400.0}
+    assert stamped["seasonal_t0_seconds"] != 0.0           # old guard: passes
+    with pytest.raises(SystemExit, match="out of phase"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "kt0_1.npz")
+
+
+def test_clock_guard_still_rejects_the_legacy_relative_clock(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    stamped = {"seasonal_t0_seconds": 0.0,
+               "seasonal_t0_reference_seconds": 180.0 * 86400.0}
+    with pytest.raises(SystemExit, match="out of phase"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(stamped, "legacy.npz")
+
+
+def test_clock_guard_rejects_an_artifact_missing_either_stamp(instruments):
+    kamm_twin_90d = instruments.kamm_twin_90d
+    with pytest.raises(SystemExit, match="seasonal_t0_seconds"):
+        kamm_twin_90d.assert_nemo_seasonal_clock({}, "old.npz")
+    with pytest.raises(SystemExit, match="seasonal_t0_reference_seconds"):
+        kamm_twin_90d.assert_nemo_seasonal_clock(
+            {"seasonal_t0_seconds": 0.0}, "half.npz")
+
+
+def test_run_twin_stamps_the_reference_clock_and_the_run_configuration(
+        instruments):
+    """Both stamps the guards read must be written by the runner.
+
+    Source-level, keyed off ``run_twin`` itself -- the symbol that runs -- and
+    it goes red if either stamp is dropped from the artifact.
+    """
+    import inspect
+    kamm_twin_90d = instruments.kamm_twin_90d
+    src = inspect.getsource(kamm_twin_90d.run_twin)
+    assert "seasonal_t0_reference_seconds=" in src
+    assert "run_config=" in src
+    # the reference must come from the restart, not from the same override the
+    # twin itself used -- otherwise the pair-check compares a value to itself
+    assert "_restart_elapsed_seconds(" in src

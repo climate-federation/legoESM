@@ -57,6 +57,7 @@ from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.field import Field
 from legoesm.land import LandState
 from legoesm.land.config import LandConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 from legoesm.land.slab_land import step_land
 from legoesm.land.surface_params import (
@@ -175,7 +176,14 @@ def _land_params(cp, data):
         d_soil=other[:, _PI["d_soil"]], root_depth=other[:, _PI["root_depth"]],
         theta_wp=data["wp"], theta_fc=data["fc"], Vc_max25=other[:, _PI["Vc_max25"]],
         LCMA=other[:, _PI["LCMA"]], g1=other[:, _PI["g1"]])
-    cfg = LandConfig(snow_albedo_feedback=True, Ch_land=cp["ch"], Cd_land=cp["ch"],
+    # PINNED, not inherited.  The library default is now the two-leaf canopy +
+    # MOST, which consumes neither the constant exchange coefficient this
+    # calibrator trains (``ch``) nor its slab surface treatment — inheriting it
+    # would make that parameter inert and trip the no-inert gate at step 0.
+    # This calibrator fits the SLAB tier and must stay on the slab scheme; a
+    # canopy calibration is a different trainer against different parameters.
+    cfg = LandConfig(surface_scheme=SimpleSEBConfig(), bulk_scheme="constant",
+                     snow_albedo_feedback=True, Ch_land=cp["ch"], Cd_land=cp["ch"],
                      land_albedo=LandAlbedoConfig(
                          alpha_snow_max=cp["snow_max"], alpha_snow_min=cp["snow_min"],
                          snow_depth_crit=cp["snow_dcrit"],

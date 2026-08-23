@@ -150,3 +150,30 @@ class TestPreflightOrExit:
         est = preflight_or_exit(validate_memory, n_columns=100, nlev=2,
                                 n_devices=1)
         assert est > 0
+
+
+class TestValidateBandRowsGpu:
+    """Thin-band NCCL-init deadlock guard (empirical floor, 2026-08-18)."""
+
+    def test_refuses_twelve_row_bands(self):
+        from legoesm.scaling_preflight import validate_band_rows_gpu
+        with pytest.raises(ValueError, match="deadlock"):
+            validate_band_rows_gpu(2304, 192)   # the receipted hang config
+
+    def test_accepts_fifteen_row_bands(self):
+        from legoesm.scaling_preflight import validate_band_rows_gpu
+        validate_band_rows_gpu(2880, 192)       # the receipted clean config
+
+    def test_escape_hatch(self, monkeypatch):
+        from legoesm.scaling_preflight import validate_band_rows_gpu
+        monkeypatch.setenv("LEGOESM_ALLOW_THIN_BANDS", "1")
+        validate_band_rows_gpu(2304, 192)
+
+    def test_floor_is_the_named_constant(self):
+        # The guard must key off MIN_GPU_BAND_ROWS, not a re-hardcoded 15:
+        # tightening the constant must tighten the guard.
+        from legoesm import scaling_preflight as sp
+        rows_at_floor = sp.MIN_GPU_BAND_ROWS
+        sp.validate_band_rows_gpu(rows_at_floor * 8, 8)
+        with pytest.raises(ValueError):
+            sp.validate_band_rows_gpu((rows_at_floor - 1) * 8, 8)

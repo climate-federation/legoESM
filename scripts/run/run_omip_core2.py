@@ -508,7 +508,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         n2_eos_form: str | None = None,
                         prognostic: bool | None = None,
                         kappa_convention: str | None = None,
-                        shear_production: str | None = None):
+                        shear_production: str | None = None,
+                        lc: bool | None = None,
+                        etau_mode: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -815,6 +817,18 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # Langmuir + surface-TKE penetration overrides (``--tke-lc``/``--tke-etau``).
+    # DEFAULT keeps the ORCA1 card (ln_lc=T, nn_etau=1).  The OFF settings
+    # exist to build a "fesom-mimic" card: fesom-jax's CVMix TKE has no
+    # Langmuir and no etau penetration, and quantifying the FESOM2 skill gap
+    # requires running OUR physics with THOSE branches off (2026-08-18).
+    if lc is not None:
+        _cfg = _cfg._replace(lc=bool(lc))
+    if etau_mode is not None:
+        if etau_mode not in ("below_ml", "none"):
+            raise ValueError(f"orca1_zdftke_config etau_mode {etau_mode!r} "
+                             "invalid; expected 'below_ml' or 'none'.")
+        _cfg = _cfg._replace(etau_mode=etau_mode)
     # K-from-TKE amplitude (``--tke-kappa-convention``).  DEFAULT keeps the
     # card value (``veros_sqrte`` = NEMO's ``rn_ediff*zmxlm*sqrt(en)``);
     # ``gaspar_sqrt2e`` restores the legacy sqrt(2)-double-counting amplitude
@@ -836,11 +850,13 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # tripole under --partial-cell.
     if shear_production is not None:
         if shear_production not in ("squared_centered", "nemo_face_native",
-                                    "nemo_burchard"):
+                                    "nemo_face_native_now2", "nemo_burchard"):
             raise ValueError(
                 f"orca1_zdftke_config shear_production {shear_production!r} "
                 "invalid; expected 'squared_centered', 'nemo_face_native' "
-                "(NEMO zdf_sh2) or 'nemo_burchard'.")
+                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_now2' "
+                "(same face geometry at NOW^2 -- the key_RK3 oracle variant) "
+                "or 'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
@@ -909,11 +925,46 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     return _cfg
 
 
+def ah_profile_from_file(grid, path, A_h_base: float):
+    """Latitudinal A_h profile from ORCA1's eddy_viscosity_3D.nc.
+
+    Zonal MEDIAN of the surface-level ahmf per source row, interpolated onto
+    the grid's nominal latitude rows and returned as a tuple of RATIOS to
+    ``A_h_base`` (the hashable static form LateralViscosityConfig carries).
+    The bipolar cap's nominal latitudes are distorted, but the file is a
+    uniform 20000 there, so the interpolation error multiplies a constant.
+    """
+    import netCDF4 as nc4
+    ds = nc4.Dataset(path)
+    try:
+        ahm = np.ma.filled(np.ma.masked_invalid(
+            ds.variables["ahmf_3d"][:]), np.nan).astype(np.float64).squeeze()
+        src_lat = np.asarray(ds.variables["nav_lat"][:], dtype=np.float64)
+    finally:
+        ds.close()
+    surf = ahm[0]                                  # (ny, nx), level 0
+    surf = np.where(surf > 0.0, surf, np.nan)      # 0 = land in this file
+    row_lat = np.nanmedian(src_lat, axis=1)        # (ny,)
+    row_ahm = np.nanmedian(surf, axis=1)
+    good = np.isfinite(row_lat) & np.isfinite(row_ahm)
+    if good.sum() < 10:
+        raise SystemExit(f"--A-h-profile-file {path}: <10 usable rows")
+    order = np.argsort(row_lat[good])
+    xs, ys = row_lat[good][order], row_ahm[good][order]
+    lat_deg = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+    prof = np.interp(lat_deg, xs, ys, left=ys[0], right=ys[-1]) / float(A_h_base)
+    print(f"[A_h profile] {path}: ratio min {prof.min():.4f} (lat "
+          f"{lat_deg[int(np.argmin(prof))]:.1f}) max {prof.max():.4f}; "
+          f"A_h_base {A_h_base:g}")
+    return tuple(float(x) for x in prof)
+
+
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
-                              tke_shear_production=None):
+                              tke_shear_production=None, tke_lc=None,
+                              tke_etau=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -942,6 +993,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
                     ("--tke-mxl-choice", tke_mxl_choice),
+                    ("--tke-lc", tke_lc),
+                    ("--tke-etau", tke_etau),
                     ("--tke-n2-mode", tke_n2_mode),
                     ("--tke-n2-eos-form", tke_n2_eos_form),
                     ("--tke-prognostic", tke_prognostic),
@@ -961,7 +1014,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    n2_eos_form=tke_n2_eos_form,
                                    prognostic=tke_prognostic,
                                    kappa_convention=tke_kappa_convention,
-                                   shear_production=tke_shear_production)
+                                   shear_production=tke_shear_production,
+                                   lc=tke_lc, etau_mode=tke_etau)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -982,7 +1036,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
 
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
-                  pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
+                  pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
@@ -1006,6 +1060,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
+                  tke_lc=None, tke_etau=None, A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1073,6 +1128,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     _ovr = {k: v for k, v in (("pgf_scheme", pgf_scheme), ("A_h", A_h),
                               ("B_h", B_h), ("K_bih", K_bih),
                               ("A_h_eq_boost", A_h_eq_boost),
+                              ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
@@ -1214,7 +1270,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
-            tke_shear_production=tke_shear_production)
+            tke_shear_production=tke_shear_production,
+            tke_lc=tke_lc, tke_etau=tke_etau)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -1300,6 +1357,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         )
         # #501/#661: _ovr carries FLAT names (A_h/C_smag_lap/barotropic_solver/
         # bottom_drag_r/...) now nested in sub-configs; replace_flat routes them.
+        if A_h_profile_file:
+            _ovr["A_h_lat_profile"] = ah_profile_from_file(
+                grid, A_h_profile_file,
+                _ovr.get("A_h", config.lateral_viscosity.A_h))
         config = config.replace_flat(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
@@ -1410,7 +1471,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
 def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        n_lat: int = 180, n_lon: int = 360,
                        woa_init: bool = False, woa_t=None, woa_s=None,
-                       pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
+                       pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                        ke_gradient_scheme=None, partial_cell=False,
                        adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
@@ -1464,6 +1525,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         vertical_mixing=vertical_mixing,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
+                              ("A_h_eq_boost", A_h_eq_boost),
+                              ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
@@ -2303,7 +2366,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_surface_bc=None, tke_mxl_choice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
-                            tke_n2_mode=None, tke_n2_eos_form=None):
+                            tke_n2_mode=None, tke_n2_eos_form=None,
+                            tke_lc=None, tke_etau=None):
     """Reject the tripole-zdftke card knobs unless the tke closure is active.
 
     ``--tke-eice`` / ``--tke-surface-bc`` / ``--tke-mxl-choice`` are applied
@@ -2324,6 +2388,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
                         ("--tke-mxl-choice", tke_mxl_choice),
+                        ("--tke-lc", tke_lc),
+                        ("--tke-etau", tke_etau),
                         ("--tke-n2-mode", tke_n2_mode),
                         ("--tke-n2-eos-form", tke_n2_eos_form),
                         ("--tke-prognostic", tke_prognostic),
@@ -4420,6 +4486,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--A-h-eq-boost", type=float, default=None,
                    help="Equatorial Laplacian-viscosity boost factor -- damps the f->0 "
                         "velocity growth (A_h *= 1+(boost-1)*exp(-(lat/sigma)^2)).")
+    p.add_argument("--A-h-eq-sigma-deg", type=float, default=None,
+                   help="Gaussian half-width [deg] of the equatorial A_h shaping "
+                        "(--A-h-eq-boost). NEMO ORCA1's eddy_viscosity_3D ramp is ~7.")
+    p.add_argument("--A-h-profile-file", type=str, default=None,
+                   help="ORCA1 eddy_viscosity_3D.nc: prescribe the LATITUDINAL "
+                        "A_h shape from the oracle's own momentum-viscosity "
+                        "file (zonal median, ratio to --A-h). Replaces "
+                        "--A-h-eq-boost. Tripole only.")
     p.add_argument("--adaptive-implicit-vertadv", action="store_true",
                    help="Enable adaptive-implicit vertical momentum advection "
                         "(Shchepetkin 2015 / NEMO ln_zad_Aimp) -- removes the vertical-CFL "
@@ -5033,8 +5107,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-lc", type=str, default=None, choices=("on", "off"),
+                   help="Langmuir cell parameterisation in the tripole TKE "
+                        "card (NEMO ln_lc). None keeps the ORCA1 card (on). "
+                        "'off' exists for the fesom-mimic card: fesom-jax's "
+                        "CVMix TKE has no Langmuir term.")
+    p.add_argument("--tke-etau", type=str, default=None,
+                   choices=("below_ml", "none"),
+                   help="Surface-TKE penetration mode (NEMO nn_etau). None "
+                        "keeps the ORCA1 card (below_ml). 'none' for the "
+                        "fesom-mimic card (fesom-jax has no etau term).")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
+                            "nemo_face_native_now2",
                             "nemo_burchard"],
                    help="TKE shear-production discretisation for "
                         "--tripole-vmix tke. None (default) keeps the card "
@@ -5554,12 +5639,16 @@ def main() -> int:
     # --grid tripole --tripole-vmix tke; reject every other context (they are
     # silently discarded there) — the --tripole-vmix guard above misses them at
     # its "none" default and under the kpp closure.
+    if args.A_h_profile_file and args.grid != "tripole":
+        raise SystemExit("--A-h-profile-file is tripole-only (the profile is "
+                         "built on the eORCA nominal latitude rows).")
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
                             args.tke_surface_bc, args.tke_mxl_choice,
                             args.tke_prognostic, args.tke_kappa_convention,
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
-                            tke_n2_eos_form=args.tke_n2_eos_form)
+                            tke_n2_eos_form=args.tke_n2_eos_form,
+                            tke_lc=args.tke_lc, tke_etau=args.tke_etau)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
     if args.gm_treguier and args.grid != "tripole":
@@ -5723,6 +5812,8 @@ def main() -> int:
             n_gpus=args.n_gpus,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
+            A_h_eq_sigma_deg=args.A_h_eq_sigma_deg,
+            A_h_profile_file=args.A_h_profile_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
@@ -5769,6 +5860,8 @@ def main() -> int:
             tke_prognostic=args.tke_prognostic,
             tke_kappa_convention=args.tke_kappa_convention,
             tke_shear_production=args.tke_shear_production,
+            tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
+            tke_etau=args.tke_etau,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
@@ -5867,6 +5960,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
+            A_h_eq_sigma_deg=args.A_h_eq_sigma_deg,
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
@@ -7776,7 +7870,14 @@ def main() -> int:
                 from legoesm.ocean.freshwater import net_freshwater_flux
                 sf = sf._replace(
                     freshwater=net_freshwater_flux(fw._replace(restoring=None)))
-            if step == 1 and fw is not None:                 # [fwbudget] DIAG (temp)
+            # Print at step 1 AND on a daily stride: a step-1-only budget
+            # cannot tell INITIALISATION SHOCK from a persistent bias, and
+            # the step-1 numbers (Antarctic ice 44.8e-6 vs NEMO's entire
+            # runoff+ice 16.7; Arctic ice MELTING +23.6 in January where NEMO
+            # freezes at -17.2) are exactly the kind that need a trajectory
+            # before they are believed.
+            _fwb_stride = max(1, int(round(86400.0 / float(dt))))
+            if fw is not None and (step == 1 or step % _fwb_stride == 0):
                 _Ab = np.asarray(grid.areaCell if hasattr(grid, "areaCell")
                                  else grid.area)
                 _wb = np.asarray(state.land_mask.data) > 0.5
@@ -7784,10 +7885,51 @@ def main() -> int:
                                   if _x is not None else 0.0)   # noqa: E731
                 _P, _E, _Rn, _Ic = (_ig(fw.precip), _ig(fw.evap),
                                      _ig(fw.runoff), _ig(fw.ice_fw))
-                print(f"[fwbudget] {app_grid_type}: P={_P:+.4f} E={_E:+.4f} "
+                print(f"[fwbudget] step={step} day={step * dt / 86400.0:.2f} "
+                      f"{app_grid_type}: P={_P:+.4f} E={_E:+.4f} "
                       f"R={_Rn:+.4f} ice={_Ic:+.4f} net(P-E+R+ice)="
                       f"{_P - _E + _Rn + _Ic:+.4f} Sv (raw pre-normalize, "
                       f"area-wtd over wet)", flush=True)
+                # PER-BAND split (2026-08-19). The SO freshwater budget probe
+                # localised the missing Antarctic summer fresh layer to the
+                # runoff+ice channel (NEMO: 16.7e-6 kg/m2/s of a 30.4 total,
+                # while our P-E already matches NEMO's open-ocean E-P), and a
+                # GLOBAL Sv total cannot show whether OUR runoff+ice reaches
+                # that band. Same fields, area-weighted mean per band, in the
+                # probe's units so the two are directly comparable.
+                _latb = np.degrees(np.asarray(getattr(grid, "lat_T", None)
+                                              if getattr(grid, "lat_T", None)
+                                              is not None else grid.lat))
+                if _latb.shape == _wb.shape:
+                    # TRUE cell area, not cos(lat): on the eORCA1 tripole the
+                    # two differ by 0.00-1.72x per cell south of 45S, which
+                    # inflated the first Antarctic ice number by ~45%. _Ab is
+                    # the same area the global Sv total above already uses.
+                    _wgt = _Ab * _wb
+                    print(f"[fwbudget-bands] day={step * dt / 86400.0:.2f} "
+                          "1e-6 kg/m2/s, + = into ocean (evap +up):",
+                          flush=True)
+                    for _bn, (_lo, _hi) in (("antarctic_S_of_45S", (-90, -45)),
+                                            ("SH_midlat_45S_23S", (-45, -23)),
+                                            ("arctic_N_of_45N", (45, 90))):
+                        _m = (_latb >= _lo) & (_latb < _hi) & (_wgt > 0)
+                        if not _m.any():
+                            continue
+                        def _bm(_x):
+                            if _x is None:
+                                return 0.0
+                            _a = np.asarray(_x)
+                            return float((_a[_m] * _wgt[_m]).sum()
+                                         / _wgt[_m].sum())
+                        _p, _e = _bm(fw.precip), _bm(fw.evap)
+                        _r, _i = _bm(fw.runoff), _bm(fw.ice_fw)
+                        print(f"[fwbudget-bands]   {_bn:22s} P={1e6*_p:8.2f} "
+                              f"E={1e6*_e:8.2f} R={1e6*_r:8.2f} "
+                              f"ice={1e6*_i:8.2f}  P-E+R+ice="
+                              f"{1e6*(_p-_e+_r+_i):8.2f}", flush=True)
+                else:
+                    print(f"[fwbudget-bands] SKIPPED: lat {_latb.shape} does "
+                          f"not align with the mask {_wb.shape}", flush=True)
             # _ocean_step = single-device model.step (default), the lat-band
             # SPMD global-in/global-out step (--n-gpus > 1), or the PERSISTENT
             # sharded inner step (--spmd-persistent-state); all apply the

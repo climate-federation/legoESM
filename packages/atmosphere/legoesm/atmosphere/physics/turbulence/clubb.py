@@ -401,11 +401,45 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
     rcm, cloud_frac = calc_pdf_liquid_cloud_frac(adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
 
+    # D9 cloud-source dispatch (static config value; raises on unknown — dispatch hardening).
+    # "native" keeps the ADG1 assumed-PDF rcm/cloud_frac above; "shared" REPLACES them with a
+    # crude grid-scale all-or-nothing saturation control (a simple non-PDF cloud, NOT the exact
+    # delta-PDF limit) so CLUBB sees the SAME kind of grid-mean-only cloud as the other closures
+    # — the literal D9 forced-shared arm.
+    if config.cloud_source not in ("native", "shared"):
+        raise ValueError(
+            f"CLUBBConfig.cloud_source={config.cloud_source!r} unknown; "
+            "expected 'native' (ADG1 PDF) or 'shared' (grid-scale saturation).")
+    if config.cloud_source == "shared":
+        # CRUDE grid-scale (non-PDF) saturation control: T≈θ_l·Π (cloud-free first guess),
+        # r_sat via the canonical Flatau sat_mixrat_liq; rcm = max(rt − r_sat, 0). This is a
+        # NON-PDF cloud that sees only the grid-MEAN saturation (no sub-grid saturation-deficit
+        # variance) — the D9 contrast against the ADG1 PDF, which forms cloud in its saturated
+        # tail even when the grid mean is subsaturated. It is a FIRST-GUESS (no latent-heat
+        # correction) so it mildly over-condenses AT grid-mean saturation — acceptable for a
+        # control arm, and immaterial in these BLs where the grid mean is subsaturated (so the
+        # grid-scale cloud is ~0, isolating the PDF cloud). cloud_frac is all-or-nothing
+        # (1 where condensate forms, 0 else — the non-PDF limit; NaN-free, no 0/0). This
+        # OVERRIDES the ADG1 rcm/cloud_frac for this arm.
+        t_gridscale = thlm * exner
+        rsat_gridscale = sat_mixrat_liq(p_in_Pa, t_gridscale)
+        rcm = jnp.maximum(rtm - rsat_gridscale, 0.0)
+        cloud_frac = jnp.where(rcm > 0.0, 1.0, 0.0)
+
     # Moist buoyancy flux: wpthvp = wpthlp + ep1*thv_ds*wprtp + rc_coef*wprcp,
     # with a down-gradient cloud-water flux wprcp (rc_coef = Lv/(exner*Cp) - ep2*thv).
-    wprcp = -Kh * _grad_zt(rcm, gr)
-    rc_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
-    wpthvp = wpthlp + _EP1 * thv_ds * wprtp + rc_coef * wprcp
+    # The cloud-liquid term rc_coef*wprcp is CLUBB's cloud buoyancy — gated by the static
+    # ``cloud_buoyancy`` feature flag (Python if on the static config bool, NOT jnp.where: the
+    # D9 control needs one branch compiled, matching the fix_mass/fix_moisture doctrine). It
+    # uses whichever rcm was selected above (ADG1 PDF for cloud_source='native', grid-scale
+    # for 'shared'); disabling it drops the term entirely (dry buoyancy).
+    wprtp_term = _EP1 * thv_ds * wprtp
+    if config.cloud_buoyancy:
+        wprcp = -Kh * _grad_zt(rcm, gr)
+        rc_coef = constants.L_v / (exner * constants.c_pd) - _EP2 * thv_ds
+        wpthvp = wpthlp + wprtp_term + rc_coef * wprcp
+    else:
+        wpthvp = wpthlp + wprtp_term
     return cloud_frac, rcm, wpthvp
 
 
@@ -589,6 +623,26 @@ class CLUBBConfig(NamedTuple):
         in (default ``False``) so existing ``scheme="clubb"`` runs are unchanged.
         Read only at setup/dispatch time (a static Python branch), never in
         traced code, so it stays a valid plain pytree-leaf field.
+    cloud_buoyancy : bool
+        Whether CLUBB's ADG1 assumed-PDF cloud water contributes to the moist
+        buoyancy flux ``wpthvp`` (the ``rc_coef·wprcp`` cloud-liquid term). Default
+        ``True`` = the native CLUBB closure. Set ``False`` to DISABLE the PDF-cloud
+        buoyancy (dry buoyancy: ``wpthvp = wpthlp + ε1·θv·wprtp`` only) — the D9
+        control that isolates how much CLUBB's assumed-PDF cloud buys in skill vs a
+        cloud-blind buoyancy (see LES_SUITE.md §7.6). A static feature-gate bool
+        (Python ``if`` on the static config value), not traced.
+    cloud_source : str
+        Which cloud CLUBB uses for its liquid ``rcm``/``cloud_frac`` and hence its
+        buoyancy: ``"native"`` (default) = the ADG1 double-Gaussian assumed-PDF
+        closure (the distinctive CLUBB feature); ``"shared"`` = a CRUDE grid-scale
+        all-or-nothing saturation control (``rcm = max(rtm − r_sat(T,p), 0)`` via the
+        canonical Flatau ``sat_mixrat_liq``, a cloud-free first guess with no
+        latent-heat correction — a simple NON-PDF cloud, not the exact delta-PDF
+        limit) — the SAME kind of grid-mean-only cloud the other closures see. Tuning ``native`` vs
+        ``shared`` is the LITERAL D9 native-vs-shared-cloud pair (LES_SUITE.md §7.6),
+        isolating CLUBB's PDF-cloud advantage from its higher-order closure. Static
+        dispatch: validated at ``diagnose_cloud_and_buoyancy`` entry (raises on
+        unknown), never a traced branch.
     trop_cloud_top_press : float
         Pressure [Pa] above which the scheme's mixing is tapered to zero —
         CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
@@ -623,6 +677,8 @@ class CLUBBConfig(NamedTuple):
     tke_min: float = 1.0e-6
     T0: float = 300.0
     prognostic: bool = False
+    cloud_buoyancy: bool = True
+    cloud_source: str = "native"
     trop_cloud_top_press: float = 0.0
     trop_cloud_taper_lnp_width: float = 0.15
 
@@ -4358,7 +4414,19 @@ def advance_wp2_wp3(wp2, wp3, up2, vp2, sigma_sqd_w, wp3_on_wp2,
                                 1, nzm - 2, _CAM_FILL_HOLES_TYPE)
     # CAM l_wp2_fill_holes_tke = True (fixed): TKE-conserving wp2 fill.
     wp2_c, _, _ = fill_holes_wp2_from_horz_tke(wp2_c, up2, vp2, w_tol_sqd, 0, nzm - 3)
-    wp2_c = clip_variance(wp2_c, w_tol_sqd)
+    # BOTH thresholds, as upstream does. Passing only the floor here was a
+    # real fidelity gap: advance_wp2_wp3_module.F90 calls clip_variance with
+    # the optional wp2_max and says why -- "We attempt to clip extreme values
+    # of wp2 to prevent a crash ... instability caused by large wp2 in CLUBB
+    # led unrealistic results in AM3" (dschanen, 11 Apr 2011). The cap was
+    # already applied on the DIAGNOSTIC path and CLUBBConfig.wp2_max already
+    # held upstream's 1000 m^2/s^2; only this call site omitted it.
+    #
+    # MEASURED INERT on every case tried (wangara/bomex/cbl unchanged to every
+    # digit), so it is fidelity, not a fix -- the #1508 surface BC is what
+    # actually repaired those runs. Kept because the gap against the oracle is
+    # real and costs nothing.
+    wp2_c = clip_variance(wp2_c, w_tol_sqd, config.wp2_max)
     wp2_zt = jnp.maximum(zm2zt(wp2_c, gr), w_tol_sqd)
     wp3_c = clip_skewness(wp3_new, wp2_zt, gr.zt, sfc_elevation, skw_max)
     return wp2_c, wp3_c, wp2_zt

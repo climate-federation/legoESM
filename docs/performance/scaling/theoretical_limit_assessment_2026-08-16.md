@@ -160,6 +160,162 @@ Ranked levers:
    recorded) and/or padding size-classes instead of one global max;
    (iii) **~0.6 ms masking/machinery** — HLO census of the
    no-staging arm (single-node, cheap) before any lever is named.
+2a. **2026-08-18 receipts (jobs 27039649 + 27040145), read before
+   touching the ragged/wide levers:**
+   (i) the WIDE-halo step is only PHYSICALLY equivalent to the exact
+   step (documented outer-ring recompute, band 1e-2 — its unit test),
+   so the bench parity gate (exact-exchange tolerances, u x64 1e-5)
+   fails wide configs BY CONTRACT (u 2.66e-3 at s6@8, x64-confirmed,
+   narrow clean at 1e-9). Not a regression; do not parity-gate wide
+   arms with exact tolerances.
+   (ii) ragged and coloured ppermute produce IDENTICAL fields under
+   wide at s6@8 — the ragged machinery moves the same rows multi-node;
+   its correctness gap is closed by a NARROW multi-host parity gate.
+   (iii) XLA's multi-host ragged decomposer flag HANGS compile at 2
+   nodes (arms b/d) — REFUTED as a lever on this jaxlib; the one-shot
+   kernel flag compiles and runs (arm c) and stays on the ladder
+   (GLM predicts inert cross-node; the ladder decides).
+2b. **2026-08-18 afternoon receipts — the ragged lever LANDED, the
+   overlap lever DIED, both cleanly:**
+   (i) RAGGED WIN at 64 (job 27040575, narrow parity green, 60-step
+   arms): ragged wide 6.25/6.29 ms vs coloured controls 6.79/6.61
+   (mean 6.70, spread 2.7%) — ratio 0.933. The 1.220x loss is GONE on
+   the current stack with no XLA flags; the one-shot flag is inert
+   (0.939). Replicated off-arms 6.17/6.28 in 27041201 (best 6.225
+   mean). The zero-size-slice pathology no longer binds at 64.
+   (ii) OVERLAP-BY-SCHEDULER REFUTED with mechanism (jobs 27041261 +
+   27041201): the latency-hiding scheduler DOES lower both ragged
+   collectives as async start/done pairs (HLO dump receipt,
+   is_sync:false) — the flag is not inert — yet the step gets 25-31%
+   SLOWER and wildly noisy (median 7.8-8.5, per-step 5.4-15.7). With
+   the wide fill at step start gating all compute there is NO
+   independent work to hide behind (GLM r3 predicted exactly this);
+   the async machinery only buys collisions. Scheduler flags are OFF
+   the table for this program shape.
+   (iii) Surviving overlap path = RESTRUCTURE: interior/rim split
+   (compute owned-interior tendencies while the exchange flies, then
+   the rim), or cells/edges fills placed at their first consumers.
+   Code change in the sharded step, not an env var. Unpriced.
+   (iv) mcp2p on ragged WITH overlap flags: no help (7.81/8.49 vs
+   7.83/7.78). WITHOUT overlap (job 27041921): **NEW LANE BEST
+   5.70/5.75 ms** vs same-job ragged base 6.26/6.17 (ratio 0.921,
+   spread 1.4%) — the pair transfers to the 2-collective exchange.
+   s9@64 progression, all receipted: 9.60 baseline -> 8.40
+   size-colouring -> 6.98 wide -> 5.87 coloured+mcp2p -> 5.73
+   ragged+mcp2p (cumulative -40%). On the figure as step 4.
+2c. **Interior/rim split — the surviving wire-hiding design (2026-08-18,
+   unbuilt, dual design review pending).** Preconditions now all
+   receipted: async lowering of the 2 ragged collectives works (HLO
+   27041261); overlap fails ONLY because the fill gates every consumer
+   (27041201); single-collective overlap hides 79% when independent
+   work exists (microbench). Design: make the INTERIOR tendency
+   independent of the fill at the DEPENDENCY level — no manual sync:
+   (i) compute the full-field tendency from the PRE-fill local buffer
+   (interior cells correct by construction: their whole stencil is
+   owned; rim cells garbage); (ii) after the ragged fill lands,
+   recompute ONLY the rim band (cells within stencil reach of a ghost)
+   via the ring-distance indices the wide-halo machinery already
+   carries, and scatter into the tendency; (iii) XLA's latency-hiding
+   then hoists (i) between ragged-start and ragged-done on its own —
+   the mechanism the A/B proved functional. Cost: rim recompute is a
+   subset gather-compute (~surface/volume fraction, at s9@64 wide the
+   ghost fraction is ~0.45 of rows — the win shrinks as rim grows, so
+   price at NARROW depth too, where rim is ~10-15%). Risks (for
+   review): masked-garbage contamination via reductions (any global
+   sum before the rim patch must mask rim rows); double-compute
+   determinism (rim rows computed twice must take the SECOND value
+   bitwise); AD through the scatter (VJP of a scatter-overwrite is
+   well-defined but must be tested with check_grads); pytree/shape
+   stability of the rim index sets (static, from the partition build).
+   Compute cost bound: interior pass over all rows + rim pass over rim
+   rows = 1 + rim_frac of today's compute; wins iff hidden wire >
+   rim_frac * compute.
+   DESIGN REVIEW VERDICTS (2026-08-18, both reviewers):
+   - GLM: mechanism sound (shared reads don't serialize; SSA), rim
+     subset recompute is the right shape (break-even rim ~40-60%),
+     scatter-overwrite with unique_indices is AD-exact (grads flow
+     through the SECOND value by construction), ghosts must be
+     STALE-FINITE never NaN (0*NaN backward hazard), receipts =
+     bitwise-vs-unsplit + NaN-poison forward. Prefer the LAYOUT-SPLIT
+     formulation (interior-prefix/rim-suffix packed arrays — no
+     scatter at all) if reindexing is acceptable.
+   - codex: the win is NOT obtainable by scattering rows from a second
+     full call to the tendency function (it always evaluates full
+     arrays) — a SUBSET/rim execution path in the RHS, or a compact
+     static rim submesh fed to the unchanged RHS, is REQUIRED. Rim
+     membership must come from the ACTUAL dependency graph (PV via
+     vertices + kiteAreas, APVM, del4, edgesOnEdge tangential paths),
+     not cellsOnCell hops alone — the committed `_build_rim_rings`
+     (cell-hop BFS) is a conservative approximation whose width must
+     be VERIFIED by the ghost-poison test before any receipt. Change
+     surface: `_ragged_halo_fill` (factor pre-fill buffers),
+     `_make_local_wide_step` (launch fill -> interior work -> rim
+     patch of all four tendency channels), new static rim plan
+     threaded through `make_voronoi_sharded_step`. Seven existing
+     gates must stay green (wide equivalence, AD, native parity,
+     SPMD-vs-serial, ragged schedule, multicontroller parity) + a new
+     GPU split-vs-unsplit integration gate (CPU cannot run the ragged
+     collective).
+   STATUS: spec complete, build NOT started — this is the next major
+   work item; est. multi-session. The rim ring builder + tests are
+   committed (65eaea84d).
+   BUILD ROUTE (2026-08-18, reuse discovery): the compact rim submesh
+   needs NO new partition logic — feed the existing partition builder a
+   synthetic two-rank ownership (device d's rim cells owned by rank 0,
+   everything else rank 1, halo_depth = RHS stencil radius) and its
+   closure IS the rim closure; `build_local_mesh` then emits the
+   remapped compact mesh the unchanged RHS runs on (external refs -1,
+   already masked by the TRiSK operators). Remaining new code: the
+   static gather map (device-local buffer -> submesh order), the rim
+   scatter of the four tendency channels, per-device padding to the max
+   rim size, and the poison-verified stencil width. Phase 1 = builder +
+   CPU test (operator on submesh == operator on full mesh at rim rows).
+   PHASE-1 CODE REVIEW (codex, 2026-08-18): landed (a90a68db6) but DO
+   NOT WIRE until three blockers clear:
+   (i) edge SCATTER set must come from `edge_rim` (predicate
+   `0 <= edge_rim <= width` — cut edges are 0 under the min rule)
+   restricted to device-owned shard rows; the synthetic partition's
+   lower-cell edge-ownership rule is unrelated to production rows and
+   can miss / mis-scatter / double-patch. Use rim_part ONLY for the
+   submesh.
+   (ii) RESOLVED 2026-08-18 (test_rim_plan_closure.py): the FULL
+   tendency (energy PV via vertices + kites, APVM, del4 1e16) on the
+   submesh matches the global tendency at every rim entity to the f64
+   floor (1.39e-10, plateau across depths 2-4) at closure depth 2,
+   while depth 1 fails at 1.06e-3 — seven orders of separation, gate
+   provably non-vacuous. codex's partially-closed-vertex hazard does
+   not bite this RHS config at depth >= 2 (a real gap would keep
+   improving with depth; a plateau is closure). Gate must be re-run if
+   the RHS grows a new operator.
+   (iii) per-device `partition_voronoi_mesh` is a Python-loop setup
+   wall at s9/64 (~billions of iterations incl. rank-1's whole-mesh
+   comm schedule that the plan never uses) — replace with a
+   vectorized, comm-free compact-closure builder before any
+   production-scale receipt.
+   GLM review landed 2026-08-18 evening (r4) — the WIRING CHECKLIST,
+   each item mechanical:
+   (1) INTERIOR-EDGE LEAK (the big one): interior-classified edges with
+   wide tangential (edgesOnEdge) stencils read unfilled halo in the
+   pre-fill pass and are never overwritten; the static closure gate is
+   structurally blind (compares rim/scatter rows only). Fixes: edge rim
+   from edge-graph BFS or an overhang margin on the predicate, AND the
+   wiring receipt must be a BITWISE diff of ALL owned rows vs the
+   unsplit step (not rim rows only). rim FAR-edge exact-cover tripwire
+   added to the builder (this commit).
+   (2) padded-submesh runs need where-based masking (multiplicative
+   mask x NaN garbage leaks through row reductions) and a NaN-canary
+   bitwise assertion; mask BEFORE indexing (negative take wraps).
+   (3) buffer discipline: gather must read the post-wait receive
+   buffer (double-buffer if reused); no per-device reduction between
+   interior pass and rim overwrite (diagnostics/CFL stats included);
+   the tendency buffer must never be read by the interior pass.
+   (4) branch-dependent stencils (limiters, APVM upwind selection)
+   mean smooth-IC gates under-cover: production runs need a masked-
+   read assertion (any -1/external read on a non-pad row = hard error)
+   rather than outcome-only gates.
+   (5) sizing holds (submesh 0.2-1 ms vs 2-3 ms window) IFF the
+   submesh RHS is one pre-compiled static-shape call; budget against
+   the MIN rank window, not the mean.
 2. **Few-collective halo (`ragged_all_to_all`) at 64+**: currently a
    RECEIPTED 1.22× LOSS at s9/64 (unpruned zero-size slices), and it
    is 11 rounds → 2 collectives (cells + edges), not 1. Demoted as a
@@ -382,3 +538,213 @@ structure — consistent with every receipt above.
 7. Ragged slice-pruning fix → few-collective exchange → overlap A/B
    (§c2) — the only path on this stack where the wire term can be
    HIDDEN rather than shrunk.
+
+---
+
+# Supersedes sections a and c — measured 2026-08-19
+
+Everything below is a receipted arm from one day of measurement. Where it
+contradicts sections a or c above, this section is the record; the older
+text is kept for provenance, not for citation.
+
+## The two atmosphere lanes are limited by opposite things
+
+Paired arms, every halo collective deleted and the otherwise identical
+program re-timed, which is the only way to split the step on this stack —
+the profiler does not record these collectives, and a capture attempted
+on 2026-08-19 returned identical row counts for two runs three times
+apart in length, i.e. truncated and unusable (job 27072274, discarded).
+
+lat-lon 2048x4096 L26, one allocation, arms pinned to the same nodes
+(job 27071069):
+
+| devices | step | local | communication | share | perfect |
+|---|---|---|---|---|---|
+| 32 | 6.972 | 6.308 | 0.664 | 9.5% | 6.296 |
+| 64 | 4.728 | 3.368 | 1.360 | 28.8% | 3.148 |
+| 128 | 3.950 | 2.285 | 1.665 | 42.2% | 1.574 |
+
+icosahedral subdivision 9, deep + ragged halo (jobs 27068830/32/33):
+
+| devices | step | local | communication | share |
+|---|---|---|---|---|
+| 8 | 23.135 | 23.055 | 0.080 | 0.3% |
+| 16 | 19.230 | 19.120 | 0.110 | 0.6% |
+| 32 | 7.230 | 7.190 | 0.040 | 0.6% |
+
+## a. lat-lon — bandwidth, and the boundary that never shrinks
+
+CONFIRMED. The halo moves 18.515 MB per device per step in 13 messages,
+counted from the compiled program at production resolution. Against the
+measured communication that is about 11 GB/s per device at 128 devices on
+a node link of roughly 25 GB/s shared by four devices — within about a
+factor of two of the fabric.
+
+CONFIRMED, with the packing control the first attempt lacked (job
+27073582, 64 devices): doubling the payload costs +1.554 ms, of which
++0.105 is the device-side packing the multiplier itself adds, so the extra
+bytes cost +1.450 on the wire. Of 1.464 ms of communication, 1.450 is
+payload and 0.014 is per-operation — about one microsecond per message.
+
+RETRACTED then RESTORED. The first payload arm had no packing control and
+its raw delta exceeded the whole communication term, which cannot license
+"per-operation cost is zero"; it licenses only "packing exceeds the
+per-operation term". The controlled arm above restores the conclusion.
+
+The structural cause: a device owns a latitude BAND spanning the full
+longitude circle, so its halo is two rows of 4,096 columns at any device
+count. Adding devices shrinks the work and leaves the boundary alone.
+
+CONFIRMED by compiled-program census, 16 devices, 4096 longitudes, 26
+levels: latitude bands move 18.515 MB in 13 collectives; a 2x8 tiling
+moves 3.483 MB in 108. The byte cut is 5.3x, the geometric prediction, and
+there is NO all-gather in the tiled program — the mechanism review's
+objection that the tiled pole fold would gather the whole circle on every
+tile is refuted by the artifact. Six of the 108 touch a full longitude
+extent.
+
+At one microsecond per message, 108 messages cost about 0.1 ms against a
+payload cut of 1.450 to 0.27, so the tiled lane is predicted at roughly
+3.75 ms against 4.841 at 64 devices. That A/B is the open item.
+
+Also CONFIRMED and unresolved: at 128 devices the LOCAL work is 2.285 ms
+against 1.574 perfect, 45% above, while at 32 devices it is 0.2% above.
+Tiling does not address that term — per-device cell count is unchanged —
+and the mechanism review attributes it to a fixed per-step kernel-count
+floor plus reductions whose latency grows with rank count.
+
+## c. icosahedral — not communication, and not the mesh either
+
+CONFIRMED: communication is 0.04–0.11 ms of the step at 8, 16 and 32
+devices, and doubling the wire payload costs nothing measurable. Below 64
+devices this lane does not communicate.
+
+REFUTED, each with its own receipt:
+- ghost-ring size and exchange round count as the cause of the 8-to-16
+  stall — both on trend at every device count, offline census job 27068906
+  (space-filling curve) and 27070623 (graph partitioner);
+- partition quality — the graph partitioner wins 19.3% at 8 devices and
+  only 5.5% at 16, and with it the step is 18.10 ms at 8 devices and
+  18.47 at 16, so doubling the devices buys nothing at all (jobs
+  27070258/59);
+- host dispatch — removing every per-step synchronisation changes the
+  stalled size by 1% (job 27072488);
+- the deep halo's own trade — it still wins 15.5% at 8 devices and 6.1%
+  at 16 where communication measures zero, so its gain is compilation and
+  fusion across the step body, not messages avoided (jobs 27069554/55).
+
+CONFIRMED cause, single GPU, no devices and no collectives involved:
+
+| cells | 13 levels | 26 levels | 52 levels |
+|---|---|---|---|
+| 40,962 | 1.630 | 2.000 | 2.830 |
+| 163,842 | 7.500 | 20.245 | 13.820 |
+| 655,362 | 33.250 | 50.170 | 51.640 |
+| 2,621,442 | 121.425 | 173.750 | 214.530 |
+
+At 163,842 cells, 52 levels runs 32% FASTER than 26 despite twice the
+work; everywhere else more levels cost more. As per-cell excess over
+neighbouring mesh sizes: 1.15x at 13 levels, 2.53x at 26, 1.22x at 52.
+Production runs 26 levels, and at 16 devices each device holds 163,841
+cells — the exact cell of that table. That is the stall.
+
+The graph partitioner's win is separable and real: 4–7% fewer cells to
+compute, and 18% cheaper per cell at 8 devices, which is memory locality
+on a step that runs about six times off a bandwidth roofline. It is a
+configuration flip. It does NOT survive into the trapped shape, where the
+graph arm is 2% worse per cell.
+
+Open: whether the trap is a cache straddle (the live set at 26 levels is
+about 33 MB against a 40 MB last-level cache — broad hump predicted) or
+stride alignment and address aliasing (104-byte rows at 26 levels are not
+16-byte aligned; 208 at 52 are — sharp spike predicted). The level scan
+that separates them by response shape is running. The fix follows from the
+shape and must be verified as a band of good paddings, never a single
+lucky value.
+
+## What NOT to do, updated
+
+- Do not cite "collective COUNT is the wall" for lat-lon. Per-operation
+  cost is about one microsecond per message; the wall is bytes.
+- Do not tune the icosahedral lane's communication below 64 devices. It
+  does not have any.
+- Do not tune the icosahedral partition to fix the 16-device stall. Two
+  partitioners and an offline census say it is not the partition.
+- Do not quote the padded-byte verdict string in the partition A/B
+  harness. It was written for a bytes hypothesis, and at 8 devices there
+  are no bytes to save.
+
+## Addendum, later on 2026-08-19 — the icosahedral cause, and three tiled blockers
+
+### The icosahedral stall is a level-count tax on the unstructured kernels
+
+One GPU, no devices, no collectives, float32, 163,842 cells, 60 timed
+steps per arm, two replicates, spreads at or under 1% apart from a single
+4.8% outlier. Cost per cell per level, picoseconds:
+
+  13 3520 | 16 1547 | 18 2318 | 20 1524 | 21 2578 | 22 4910 | 24 4147
+  25 4224 | 26 4755 | 27 3861 | 28 4058 | 30 4591 | 31 3741 | 32 1629
+  34 2949 | 36 1706 | 40 1664 | 52 1621
+
+Cheap: 16, 20, 32, 36, 40, 52. Expensive: everything from 22 to 31, plus
+18, 21 and 34. The step is 22.6 ms at 30 levels and 8.5 ms at 32 — more
+work, a third of the time. Production runs 26, at 3.1x the cheapest.
+
+That IS the 8-to-16 device stall: at 16 devices each device holds 163,841
+cells at 26 levels, and the parallel step (18.9 ms) matches the
+single-GPU step at that shape (20.2 ms).
+
+Two explanations were tested and both REFUTED by the table:
+- byte alignment of a cell's column — 24 and 28 levels give 96- and
+  112-byte strides, both multiples of the 16-byte vector width, and both
+  are expensive;
+- cache capacity — 52 levels holds the largest live set measured and is
+  among the cheapest.
+An earlier commit asserted the alignment rule from five samples and was
+retracted when the finer scan arrived. The cause is UNKNOWN.
+
+It is NOT a compiler or hardware property. The lat-lon core over the same
+level counts on one GPU is flat: 851 to 954 picoseconds per column per
+level, 1.12x end to end, 26 levels at 1.04x the cheapest, every arm to
+0.0% (job 27078027). So it belongs to the unstructured core's kernels —
+which points at the neighbour gathers over irregular connectivity, the one
+structure the lat-lon core does not have.
+
+Shipped: an advisory raised from the unstructured model's constructor (NOT
+from the shared vertical-coordinate factory, which serves both lanes)
+carrying the measured table, disclaiming a cause, and saying counts absent
+from the table are unmeasured rather than cheap.
+
+### Three blockers cleared on the tiled lat-lon lane, none of them visible in tests
+
+The tiled step, its state layout and its pole masks already existed and
+were gated by single-process tests. Getting it onto the cluster took
+three fixes, and each failure mode was invisible to those tests:
+
+1. The initial state was built globally and handed to the tiled sharder,
+   which XLA services with an all-gather: 105 GiB per device at 2048x4096
+   on 64 devices. Fixed by making the existing shard-local builder take
+   either mesh — the only band-specific thing in it was the partition
+   spec.
+2. The benchmark rejected legal tiled runs, because it checked that the
+   latitude rows divide by the DEVICE count, which is the band rule.
+3. The tiled factory defaults to SHARDED geometry stacks, and a
+   multi-process program may not close over a sharded global array. Every
+   tiled arm died on "Closing over jax.Array that spans non-addressable
+   devices ... float32[4,8,512,512]". The band lane has always defaulted
+   to replicated stacks; the bench now asks for the same.
+
+Compiled-program census, unchanged by any of the above: latitude bands
+move 18.515 MB per device per step in 13 collectives, a 2x8 tiling moves
+3.483 MB in 108, and there is no all-gather in the tiled program.
+
+### Standing prediction for the tiled A/B
+
+Communication at 64 devices is 1.464 ms, of which 1.450 is payload and
+0.014 per-operation across 13 messages — about one microsecond each,
+measured with the packing control. At that price 108 messages cost about
+0.1 ms and the payload falls 5.3x to 0.27, so the tiled step should land
+near 3.75 ms against 4.841 for bands. If it lands at or above 4.8, the
+per-message cost does not extrapolate from 13 messages to 108 and the
+next move is packing the tiled exchanges the way the band lane packs its
+own, not abandoning tiling.

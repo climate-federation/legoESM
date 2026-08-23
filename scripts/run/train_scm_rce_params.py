@@ -38,6 +38,12 @@ from jax import lax
 from legoesm.atmosphere.physics import PhysicsConfig
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+# Shared nested-CLUBB tunable-leaf descend/re-wrap (previously reached via a private
+# cross-module import off the campaign module — now the shared public helper).
+from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
+    rewrap_tunable_subconfig,
+    tunable_subconfig,
+)
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.core.param_overrides import apply_param_overrides
 from legoesm.training.param_collector import (
@@ -384,8 +390,8 @@ def _apply_static_record_values(
     out = cfg
     for scheme_key, field_values in grouped.items():
         component_name, component, subcfg = _active_subconfig_by_scheme_key(out)[scheme_key]
-        tuned_tunable = apply_param_overrides(campaign._tunable_subconfig(subcfg), field_values)
-        tuned_subcfg = campaign._rewrap_tunable_subconfig(subcfg, tuned_tunable)
+        tuned_tunable = apply_param_overrides(tunable_subconfig(subcfg), field_values)
+        tuned_subcfg = rewrap_tunable_subconfig(subcfg, tuned_tunable)
         out = _replace_active_subconfig(out, component_name, component, tuned_subcfg)
     return out
 
@@ -407,8 +413,8 @@ def _apply_trainable_params(
         component_name, component, subcfg = by_scheme[scheme_key]
         # Descend into CLUBB's nested .params and re-wrap (traced-safe: isinstance
         # on the static config type, NamedTuple._replace is a pytree op).
-        new_tunable = apply_param_overrides(campaign._tunable_subconfig(subcfg), field_values)
-        new_subcfg = campaign._rewrap_tunable_subconfig(subcfg, new_tunable)
+        new_tunable = apply_param_overrides(tunable_subconfig(subcfg), field_values)
+        new_subcfg = rewrap_tunable_subconfig(subcfg, new_tunable)
         out = _replace_active_subconfig(out, component_name, component, new_subcfg)
     return out
 
