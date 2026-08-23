@@ -1522,3 +1522,55 @@ transplant proves the values are wrong; it does not say which of those two
 is the right repair. The residual after the substitution (1.48e-06, led by
 `w`) is a NEW and smaller term — three orders above the hydrostatic arm's
 1.19e-09 — and has not been characterised.
+
+
+## 2026-08-23 — the maps, and what the residual's LOCATION says
+
+The one-step state is now drawn (`scripts/plot/fv3_duo_face_maps.py`, fed by
+`--save-fields` on the parity script, jobs 9470096 / 9470105). Six faces per
+field, the port above and |port - oracle| below, on the arrays the gate scored.
+
+**No cube-panel imprint in either arm.** The port's fields are smooth across
+every seam at the plotting scale; what structure sits on a panel edge (the `w`
+band along the bottom rows of faces 3/4/5) is in the ORACLE too, to 4e-11.
+
+**The boundary concentration is the SAME in both arms, and that is the finding.**
+Mean |port - oracle| on the 3-cell boundary strip over the interior:
+
+| arm | worst rel | delp f1 | u f2 | w f6 |
+|---|---|---|---|---|
+| hydrostatic | 1.1866e-09 | 75.7x | 66.3x | — |
+| non-hydrostatic | 1.4778e-06 | 90.6x | 66.5x | 81.9x |
+
+The hydrostatic arm, three orders lower and long treated as the floor, is
+boundary-concentrated to the same degree. So "the NH residual is
+boundary-localised" is NOT an NH-specific signature and never was — every
+residual in this port lives on the panel strips. The NH question is the
+MAGNITUDE at those cells, not their location, and any candidate whose story is
+"it happens at the boundary" is not discriminating.
+
+**THE EDGE METRIC THAT DID NOT SURVIVE REVIEW.** The first version compared the
+port's boundary-strip roughness with the oracle's and gated the ratio at 1.5x.
+Codex and GLM-5.2 independently killed it: `port = C * oracle` scores exactly
+1.0000x for any C, a second difference annihilates a smooth edge bias, and a
+handful of bad corner cells averaged over a ~500-cell strip moves the ratio by
+at most a third — i.e. it would have passed the very defect (12% wrong corner
+areas) that had just been fixed. It is report-only now, with the proportional
+blindness pinned as a test. What replaced it needs no constant: the same
+edge/interior ratio on the RESIDUAL, which is the table above.
+
+Neither number is a cross-seam test, and the docstring no longer implies one:
+the saved planes are the compute window, so no halo and no neighbouring panel
+value is in them. GLM's proposal for the real seam test — audit each face's
+halo cells bitwise against the neighbour's owned cells through the exchange's
+own permutation, on both port and oracle — is the next instrument if the seam
+question is asked directly.
+
+Also from that review round: the area fix's premise (the gridstruct carries a
+real area everywhere) is true of the contexts this path is built with and FALSE
+of a raw plain builder result, which does write `-BIG_NUMBER` into the
+corner-diagonal cells. `require_real_area` now checks it in both lanes. The JAX
+twin's docstring still described the exchange it no longer performs, and the
+bitwise assertion the fix advertised existed only on the NumPy side.
+
+Units after all of it: 91 passed, 1 skipped (job 9470106).
