@@ -202,13 +202,13 @@ def main() -> int:
     # The sign is DERIVED from the face op (edge_expected_sign / +1 for the
     # absolute pair), not fit to the data; the data's best-fit sign is computed
     # too and REQUIRED to agree, so a negated port es/ew or vlon/vlat fails.
-    print(f"\n{'family':7s} {'interior':>12s} {'edge':>12s} "
+    print(f"\n{'family':7s} {'interior':>12s} {'edge':>12s} {'GATE':>12s} "
           f"{'ring(max)':>12s}  signs[f1..f6] (=agree !disagree ?abstain)")
-    worst_interior = {}
+    worst_gate = {}
     ok = True
     for fam, (stem, key, halo) in FAMILIES.items():
-        per_int = per_edge = per_ring = 0.0
-        n_live_int = 0
+        per_int = per_edge = per_gate = per_ring = 0.0
+        n_live_cmp = 0
         signs = []
         for pf in range(6):
             _d, ot, op = fmap[pf]
@@ -230,15 +230,21 @@ def main() -> int:
             imask = _interior_mask(oshape_o, halo)
             emask = _edge_mask(oshape_o, halo)
             rmask = _ring_mask(oshape_o, halo)
-            # the required interior must be finite on BOTH sides -- a defect must
-            # show as error, never be silently masked to zero by a NaN.
-            if not (np.isfinite(mapped[imask]).all()
-                    and np.isfinite(ovec[imask]).all()):
+            # GATE THE FULL COMPUTE BLOCK, not just the interior: the wind
+            # builder applies no panel-edge special (bounded domain -> one
+            # formula covers the face), and update_dwinds_phys reads every
+            # compute cell/edge including the boundary row/col.  The halo rings
+            # stay reported-only (a separate tendency-halo seam).
+            cmask = imask | emask
+            # the whole compute block must be finite on BOTH sides -- a defect
+            # must show as error, never be silently masked to zero by a NaN.
+            if not (np.isfinite(mapped[cmask]).all()
+                    and np.isfinite(ovec[cmask]).all()):
                 raise SystemExit(
-                    f"{fam} face{pf+1}: NaN in the required interior -- a "
+                    f"{fam} face{pf+1}: NaN in the gated compute block -- a "
                     f"defect would be masked to zero, not scored")
-            if not imask.any():
-                raise SystemExit(f"{fam} face{pf+1}: empty interior mask")
+            if not cmask.any():
+                raise SystemExit(f"{fam} face{pf+1}: empty compute mask")
             # expected sign from the op; data's best fit must agree
             s_exp = 1.0 if fam in NO_FLIP else edge_expected_sign(fam, op)
             live = np.isfinite(mapped).all(-1) & np.isfinite(ovec).all(-1)
@@ -251,33 +257,31 @@ def main() -> int:
                 print(f"  SIGN FINDING {fam} face{pf+1}: data sign "
                       f"{s_dat:+.0f} != expected {s_exp:+.0f} from op {op}")
             diff = np.abs(ovec - s_exp * mapped).max(-1)
-            n_live_int += int(imask.sum())
+            n_live_cmp += int(cmask.sum())
             per_int = max(per_int, float(diff[imask].max()))
-            per_edge = max(per_edge, float(diff[emask & live].max()
-                                           if (emask & live).any() else 0.0))
+            per_edge = max(per_edge, float(diff[emask].max())
+                           if emask.any() else per_edge)
+            per_gate = max(per_gate, float(diff[cmask].max()))
             per_ring = max(per_ring, float(diff[rmask & live].max()
                                            if (rmask & live).any() else 0.0))
-        # non-vacuous gate: the interior must actually be mostly live.  Expected
-        # ~= 6 faces x (n-2)^2 cell centres; require at least half so a masking
+        # non-vacuous gate: the compute block must actually be mostly live.
+        # Expected ~= 6 faces x (n-1)^2 cells; require at least half so a masking
         # regression cannot turn the gate green by emptying it.
-        expect = 6 * (n - 2) * (n - 2) // 2
-        if n_live_int < expect:
+        expect = 6 * (n - 1) * (n - 1) // 2
+        if n_live_cmp < expect:
             raise SystemExit(
-                f"{fam}: only {n_live_int} live interior cells (< {expect}); "
-                f"the gate is not scoring a full interior")
-        worst_interior[fam] = per_int
-        print(f"{fam:7s} {per_int:12.4e} {per_edge:12.4e} {per_ring:12.4e}  "
-              f"[{' '.join(signs)}]  live={n_live_int}")
-        if per_int > PARITY_FLOOR:
+                f"{fam}: only {n_live_cmp} gated compute cells (< {expect}); "
+                f"the gate is not scoring a full compute block")
+        worst_gate[fam] = per_gate
+        print(f"{fam:7s} {per_int:12.4e} {per_edge:12.4e} {per_gate:12.4e} "
+              f"{per_ring:12.4e}  [{' '.join(signs)}]  cells={n_live_cmp}")
+        if per_gate > PARITY_FLOOR:
             ok = False
 
-    print(f"\nworst interior over all families: "
-          f"{max(worst_interior.values()):.4e} "
-          f"(gate {PARITY_FLOOR:.1e})")
-    if ok:
-        print("WIND_VECTOR_PARITY_OK")
-    else:
-        print("WIND_VECTOR_PARITY_FAIL")
+    print(f"\nworst gated (interior+edge) over all families: "
+          f"{max(worst_gate.values()):.4e} (gate {PARITY_FLOOR:.1e})")
+    tag = "OK" if ok else "FAIL"
+    print(f"WIND_VECTOR_PARITY_{tag} n={n}")
     return 0 if ok else 1
 
 

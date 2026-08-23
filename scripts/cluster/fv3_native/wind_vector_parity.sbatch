@@ -36,4 +36,8 @@ $PY $REPO/scripts/validate/fv3_native/compare_wind_vectors.py \
     --oracle-dir $OUT/run_c48 --n 48 --ng 3 || rc=1
 
 echo "WINDVEC_RC=$rc"
+# single unambiguous verdict: only emit the pass token if BOTH resolutions
+# passed (each comparator prints its own tagged WIND_VECTOR_PARITY_OK n=<N>;
+# a grep consumer must key on WINDVEC_BOTH_OK, not the per-resolution token).
+if [ "$rc" = "0" ]; then echo "WINDVEC_BOTH_OK"; else echo "WINDVEC_BOTH_FAIL"; fi
 exit $rc
