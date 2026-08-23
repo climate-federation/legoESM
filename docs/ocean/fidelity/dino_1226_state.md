@@ -1802,3 +1802,58 @@ cron (a FLOOR — fire manually for bursts), **ONE lane per iteration**, **expli
 **Protected: the adversarial reviews** (they caught a stale test encoding a bug as correct, a
 wrong `Kmm` instruction, a missing mandatory `mask=`, a vacuous fp32 control) **and numeric
 precision in any compression** — reconciliation needs old numbers exact and findable.
+
+---
+
+## INSTRUMENT GAP (2026-08-23) — legoESM's EARLY perturbation response is UNMEASURABLE. CONFIRMED
+
+**What is broken.** The legoESM twin saves its 3-D snapshots in **single
+precision**. A 1e-14 relative temperature nudge produces a response far below
+that resolution for the first several weeks, so the saved states cannot show it.
+
+**Measured**, on the #1455 one-level 90-day ensemble (seed 1 against its own
+control, `/tmp/dino_kick1`):
+
+| day | cells differing | max\|dT\| [K] |
+|---:|---:|---:|
+| 10 | **2** of 372,528 | 4.77e-07 (half a unit in the last place) |
+| 30 | **8** of 372,528 | 1.91e-06 (one unit in the last place) |
+| 60 | 26,691 | 2.43e-03 |
+| 90 | 59,768 | 8.68e-03 |
+
+So days 10 and 30 are **storage quantisation, not physics**. NEMO has no such
+problem — its restarts are double precision, and its own day-10 response
+(1.74e-06 K, falling to 7.79e-09 K by day 60) is fully resolved.
+
+**What this blocks, concretely.** Three questions cannot be answered today:
+
+1. Whether legoESM shares NEMO's **224× decay** between day 10 and day 60. In
+   logarithms that dip is about two-thirds of the whole ~3000× spread gap, so
+   this is not a detail — the gap may be NEMO's missing decay rather than
+   legoESM's excess growth, and nobody can currently tell.
+2. Whether legoESM shows the **discrete rectification** found on NEMO at day 10
+   (perturbation sizes spanning 309×, two seeds coinciding to 5 parts in a
+   million at the same cell).
+3. Any legoESM-side ensemble spread before ~day 45. The published claim that
+   the legoESM/NEMO offset is "born in the first 30 days" has **no legoESM
+   measurement behind it**, on either kick convention.
+
+**Not a defect in any result so far.** Day 90 is fully resolved on both sides,
+so every scored number in the acceptance gate, the 360-day verdict and the
+kick-asymmetry run stands. The gap bounds what may be asked, not what has been
+answered.
+
+**The fix, named and NOT built** (nobody asked for it): an opt-in fp64 snapshot
+flag on the twin — `--snap-dtype f64`, defaulting to the current `float32` so
+every existing artifact and every byte-comparison against one is unchanged.
+Cost is 2× the npz size on the members that opt in. The alternative that needs
+no flag is to compute the diagnostic in memory during the run, which is what
+`switch_rectifier.py` does and why it can see a 1e-14 nudge at step 1.
+
+**Related, already fixed:** the `q` storage-precision flag that was supposed to
+catch exactly this class of problem in the scorers had **never fired** — it
+compared an already-single-precision state against itself and returned exactly
+0.0 for every metric, in the 360-day verdict as well. Fixed at the source
+(`verdict360.fp32_quantum` now dithers by one unit in the last place). Four of
+eleven metrics turn out to have ensemble spreads at or below their storage
+resolution at day 90 and are now excluded from medians.
