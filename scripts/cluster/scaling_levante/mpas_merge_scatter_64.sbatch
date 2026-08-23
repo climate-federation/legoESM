@@ -72,6 +72,11 @@ export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_shard_autotuning=false"
 rc=0
 
 NODES="${NODES:-16}"; GPN="${GPN:-4}"; SUBDIV="${SUBDIV:-9}"
+# Per-arm wall limit. Thirty minutes was enough at 64 GPUs and NOT at 128,
+# where one arm was killed mid-run and the job returned no verdict at all
+# after burning its whole reservation. It scales with the node count for the
+# same reason the compile does.
+ARM_TIMEOUT="${ARM_TIMEOUT:-$((900 + 60 * NODES))}"
 NDEV=$((NODES * GPN))
 
 run_arm () {  # merge tag
@@ -79,7 +84,7 @@ run_arm () {  # merge tag
   echo "=== s${SUBDIV}@${NDEV} wide=1 coloured merge_scatter=$MRG [$TAG] ==="
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=0 \
   LEGOESM_MPAS_HALO_MERGE_SCATTER="$MRG" JAX_ENABLE_X64=0 \
-    timeout 1800 srun --nodes="$NODES" --ntasks="$NDEV" \
+    timeout "$ARM_TIMEOUT" srun --nodes="$NODES" --ntasks="$NDEV" \
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
