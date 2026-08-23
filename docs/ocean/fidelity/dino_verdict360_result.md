@@ -192,6 +192,17 @@ Measured: **15.4** (endpoint), **20.9** (registered 90-day window), **22.9**
 
 ## Open item recorded, not investigated
 
+> **RETRACTED and answered, 2026-08-23** — see
+> `dino_kick_asymmetry_result.md`. Two corrections to what follows. (1) The
+> **78–435×** range is too small: the same artifacts, scored by the same
+> reductions, give a median **3051×** across the eleven metrics. (2) The
+> mechanism proposed below is **refuted** — the two models run the *identical*
+> time filter (coefficient 0.1 on both sides), so nudging both leapfrog levels
+> moves the ratio by 0.96× against a 4.95× bar. The amplification itself is
+> real and unexplained. Note also that the `q` storage-precision flag in this
+> document's own tables never fired: it compared an already-single-precision
+> state against itself and always returned zero (fixed at the source).
+
 legoESM amplifies an identical 1e-14 nudge 78–435× more than NEMO by day 90,
 while the two growth *rates* match — so the offset is born in the first 30
 days, not in the growth rate. Plausibly an asymmetry in how the two time
