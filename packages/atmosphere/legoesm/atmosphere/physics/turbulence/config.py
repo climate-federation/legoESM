@@ -359,12 +359,20 @@ class SmagorinskyConfig(NamedTuple):
         shared with the other turbulence closures).
     Pr_t : float
         Turbulent Prandtl number; Kh = Km / Pr_t (default 1.0).
+    stability_form : str
+        How stable stratification suppresses mixing.  ``"lilly"`` (default,
+        unchanged behaviour) multiplies by ``√(max(0, 1 − Ri/Pr_t))``.
+        ``"deardorff"`` instead SHRINKS the mixing length under stable
+        stratification (Deardorff 1980, as used by SAM/PALM/ARPS/ERF and by
+        this repo's own CRM and TKE-LES lanes), which avoids the hard cutoff
+        whose slope diverges and makes ``"lilly"`` untunable on stable cases.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
     C_s: float = 0.2
     l_mix_max: float = 100.0
     Pr_t: float = 1.0
+    stability_form: str = "lilly"
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
