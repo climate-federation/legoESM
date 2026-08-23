@@ -152,33 +152,42 @@ def _table(avm, avt, bn2, band, z, depth_max, label):
 
     if not prof:
         raise SystemExit(f"[{label}] no finite diffusivities in the box")
-    arr = np.array([(p[0], p[3], p[6], p[2]) for p in prof])
-    # TWO REGIMES, and they must not be averaged together.  Above roughly 70 m
-    # the turbulence closure sets the diffusivity; below it the closure has
-    # switched off and the background plus internal-wave field sets both avm
-    # and avt, giving a ratio that says nothing about the closure.  A window
-    # spanning the transition reports the background's ratio and calls it the
-    # closure's -- which an earlier version of this summary did.
-    active = (arr[:, 0] >= 5.0) & (arr[:, 0] <= 65.0)
-    deep = arr[:, 0] >= 100.0
+    # cols: depth, Pr, conv-frac, avt (heat), avm (viscosity)
+    arr = np.array([(p[0], p[3], p[6], p[2], p[1]) for p in prof])
+
+    def _band(lo, hi, title, tag):
+        m = (arr[:, 0] >= lo) & (arr[:, 0] <= hi)
+        if not m.any():
+            print(f"[{label}] {title}: no levels in {lo:.0f}-{hi:.0f} m")
+            return {}
+        s = dict(pr=float(np.median(arr[m, 1])),
+                 avt=float(np.median(arr[m, 3])),
+                 avm=float(np.median(arr[m, 4])),
+                 conv=float(arr[m, 2].max()))
+        print(f"[{label}] {title} ({lo:.0f}-{hi:.0f} m):")
+        print(f"  Prandtl median {s['pr']:.3f}  "
+              f"avm {s['avm']:.3g}  avt {s['avt']:.3g} m2/s  "
+              f"conv-frac max {s['conv']:.3f}")
+        return {f"{tag}_{k}": v for k, v in s.items()}
+
+    # THREE bands, because the cooling budget is generated between the mixed
+    # layer and the thermocline, not in the top 60 m (GLM 2026-08-23).  The
+    # 5-65 m band is the surface closure; the 65-105 m ENTRAINMENT band, from
+    # the mixed-layer base to Z20, is where -w dT/dz and d(avt dT/dz)/dz peak
+    # and where the missing cooling has to come from; below 100 m is
+    # background, whose ratio says nothing about the closure and must not be
+    # averaged with either.  Reporting avm AND avt separately (not just their
+    # ratio) is what tells a Prandtl-RATIO defect (avm~NEMO, avt<<NEMO) from
+    # TURBULENCE STARVATION (both <<NEMO): a ratio of two log-varying fields
+    # is unstable and hides which one moved.
+    print()
     summary = {}
-    print(f"\n[{label}] CLOSURE-ACTIVE layer (5-65 m), where the turbulence "
-          f"scheme is what sets the mixing:")
-    if active.any():
-        summary = dict(pr=float(np.median(arr[active, 1])),
-                       avt=float(np.median(arr[active, 3])),
-                       conv=float(arr[active, 2].max()))
-        print(f"  Prandtl  median {summary['pr']:.3f}  "
-              f"range {arr[active, 1].min():.3f}-{arr[active, 1].max():.3f}")
-        print(f"  avt      median {summary['avt']:.3g} m2/s")
-        print(f"  convective fraction  max {summary['conv']:.3f}")
-    else:
-        print("  no levels in 5-65 m -- nothing to summarise")
-    if deep.any():
-        print(f"[{label}] BACKGROUND layer (>= 100 m), closure off -- this "
-              f"ratio is the background's, NOT the closure's:")
-        print(f"  Prandtl  median {np.median(arr[deep, 1]):.3f}  "
-              f"avt median {np.median(arr[deep, 3]):.3g} m2/s")
+    summary.update(_band(5.0, 65.0, "SURFACE closure", "sfc"))
+    summary.update(_band(65.0, 105.0, "ENTRAINMENT zone", "ent"))
+    _band(100.0, 1.0e9, "BACKGROUND (closure off)", "bkg")
+    # Back-compat keys for callers that read the flat names.
+    if "sfc_pr" in summary:
+        summary["pr"], summary["avt"] = summary["sfc_pr"], summary["sfc_avt"]
     return summary
 
 
@@ -237,11 +246,23 @@ def main() -> int:
         ours = _table(oavm, oavt, obn2, oband, oz, a.depth_max,
                       Path(snap).parent.name)
         if ours and nemo:
-            print(f"\n[{Path(snap).parent.name} vs NEMO] closure-active layer:"
-                  f"  Prandtl {ours['pr']:.3f} vs {nemo['pr']:.3f} "
-                  f"(x{ours['pr'] / nemo['pr']:.2f})"
-                  f"   avt {ours['avt']:.3g} vs {nemo['avt']:.3g} "
-                  f"(x{ours['avt'] / nemo['avt']:.2f})")
+            print(f"\n[{Path(snap).parent.name} vs NEMO]  ours vs NEMO (xratio):")
+            for tag, band in (("sfc", "surface 5-65 m"),
+                              ("ent", "entrainment 65-105 m")):
+                if f"{tag}_pr" not in ours or f"{tag}_pr" not in nemo:
+                    continue
+                _r = lambda k: (ours[f"{tag}_{k}"] / nemo[f"{tag}_{k}"]
+                                if nemo[f"{tag}_{k}"] else float("nan"))
+                print(f"  {band:22s}  Pr {ours[f'{tag}_pr']:.2f}/"
+                      f"{nemo[f'{tag}_pr']:.2f} (x{_r('pr'):.2f})   "
+                      f"avm {ours[f'{tag}_avm']:.3g}/{nemo[f'{tag}_avm']:.3g} "
+                      f"(x{_r('avm'):.2f})   "
+                      f"avt {ours[f'{tag}_avt']:.3g}/{nemo[f'{tag}_avt']:.3g} "
+                      f"(x{_r('avt'):.2f})")
+            print("  RATIO defect (avm~1x, avt<<1x) vs STARVATION (both <<1x): "
+                  "read avm and avt separately, never their Prandtl ratio "
+                  "alone -- a length-scale knob moves both together and cannot "
+                  "fix a partition (GLM 2026-08-23).")
             print("  Our snapshot is INSTANTANEOUS and NEMO's record is a "
                   "five-day MEAN; a diffusivity is intermittent, so read a "
                   "factor of two as a factor of two and not more.")

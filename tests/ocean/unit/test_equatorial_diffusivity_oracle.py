@@ -126,10 +126,29 @@ def test_the_table_reduces_the_ratio_per_column_not_the_ratio_of_medians(
     out = capsys.readouterr().out
     assert summary["pr"] == pytest.approx(2.0)
     assert summary["avt"] == pytest.approx(1.0e-3)
-    assert "unit" in out and "CLOSURE-ACTIVE" in out
+    assert "unit" in out and "SURFACE closure" in out
+    # avm is reported separately so a ratio defect (avm~NEMO, avt<<NEMO) is
+    # distinguishable from starvation (both small) -- GLM 2026-08-23.
+    assert summary["sfc_avm"] == pytest.approx(3.0e-3)   # median of avm itself
     # The ratio of the medians would have been 3.0; reporting that would let
     # a single over-viscous column set the number for the whole box.
     assert summary["pr"] != pytest.approx(3.0)
+
+
+def test_surface_and_entrainment_bands_are_summarised_separately():
+    """The cooling budget is generated in the 65-105 m entrainment zone, not
+    the top 60 m, so the two bands must be reported apart -- averaging them
+    reports a background ratio as the closure's (GLM 2026-08-23)."""
+    mod = _load()
+    z = np.array([10.0, 40.0, 80.0, 100.0])
+    ny, nx = 1, 1
+    avm = np.array([[[3e-3, 3e-3, 6e-6, 6e-6]]])
+    avt = np.array([[[1e-3, 1e-3, 5e-6, 5e-6]]])
+    s = mod._table(avm, avt, None, np.ones((ny, nx), bool), z, 300.0, "b")
+    assert "sfc_avm" in s and "ent_avm" in s
+    assert s["sfc_avt"] == pytest.approx(1e-3)     # surface closure value
+    assert s["ent_avt"] == pytest.approx(5e-6)     # entrainment (deeper) value
+    assert s["sfc_avt"] != s["ent_avt"]
 
 
 def test_a_box_with_no_finite_diffusivities_fails_loudly():
