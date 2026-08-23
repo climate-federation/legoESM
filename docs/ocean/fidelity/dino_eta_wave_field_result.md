@@ -7,11 +7,13 @@ been compared at its own timescale: the saved twin output was DAILY (32 model
 steps) while a barotropic gravity wave crosses the DINO basin in about four
 hours.
 
-**The short answer.** The wave patterns match. Where a wave actually exists,
-legoESM reproduces NEMO's free-surface response to within a few per cent, with
-the spectral peaks at identical frequencies and no band carrying excess
-legoESM energy. Getting to that answer required a second experiment, because
-the free run turned out to have no waves in it at all.
+**The short answer.** The wave patterns match in the frequency domain: where a
+wave actually exists, legoESM reproduces NEMO's free-surface response with the
+spectral peaks at identical frequencies, peak amplitudes within 0.5 %, and no
+band carrying excess energy. Wave SPEED cannot be certified either way — the
+measurement saturates after two samples, and that is a limit of the available
+output, not a finding about the models. Getting even this far required a second
+experiment, because the free run turned out to have no waves in it at all.
 
 ---
 
@@ -27,7 +29,15 @@ attributed that to the split-explicit time-averaging filtering the waves out;
 **that is also retracted** — the 90-minute averaging window passes 94 % of an
 8-hour signal, so it is not what removed them.
 
-**2. The time-level identity I first wrote was wrong, and its residual was
+**2. I claimed the two models propagate at the same speed to 0.13 %. That is
+withdrawn.** The spreading-rate measure saturates: a uniform field has a mean
+radius of 4542 km and NEMO's response passes half of that within two samples of
+160, after which both models simply say "the basin is full" and the ratio is
+forced to 1. The median I quoted was a saturated number. Only two samples are
+usable and they give 0.713 and 0.995. **No propagation-speed claim, in either
+direction, is supported by this data.**
+
+**3. The time-level identity I first wrote was wrong, and its residual was
 nearly read as physics.** The check on which dump corresponds to which time
 level was written as
 
@@ -135,14 +145,19 @@ Two things worth naming anyway:
   terms; it is not true of the assembled free-surface increment. That the
   accumulated difference nonetheless stays at 2 % of the signal means those
   per-step disagreements largely cancel.
-- **legoESM's free surface carries a two-step computational mode the oracle
-  very nearly does not.** Measuring the alternating component directly over the
-  first eight steps: NEMO 3.9e-7 m, legoESM 7.0e-6 m — **18× the oracle** —
-  decaying to 1.4× over the second half of the run. In absolute terms this is
-  small (7e-6 m on an 0.83 m field), and it is a start-up transient rather
-  than a growing mode. But it is present in the free run and ABSENT from the
-  impulse run (where the ratio is 1.07×), which places it in how legoESM
-  settles a balanced background, not in how it propagates a wave.
+- **legoESM's free surface carries its OWN two-step mode, on the walls.**
+  Measuring the alternating component directly over the first eight steps:
+  NEMO 3.9e-7 m, legoESM 7.0e-6 m — **18× the oracle** — against leakage floors
+  of 9.9e-8 and 1.3e-6 m, so both are above their floors and the above-floor
+  ratio is 19.5. It decays to 1.4× over the second half of the run.
+
+  Two qualifiers that matter. Its signed spatial correlation with NEMO's is
+  **−0.09 to +0.08, i.e. zero**: unlike the impulse lane, legoESM is not
+  ringing the oracle's mode harder, it is ringing a different one. And it is
+  **not basin-wide** — the wall enrichment of its first sample is 9.4, so this
+  is a BOUNDARY transient, and calling it "the leapfrog computational mode
+  under-damped by 18×" would overstate it. In absolute terms it is small
+  (7e-6 m on an 0.83 m field) and it decays.
 - **That excess sits on the walls.** Per-cell ratio of mean-squared step-to-step change:
   median 1.06, 90th percentile 2.59, maximum 57.6. Splitting the excess by
   region, area-weighted, gives an **enrichment of 7.5× on land-adjacent cells**
@@ -172,14 +187,22 @@ Every band ratio is inside the pre-registered factor of 2, evaluated in code
 rather than by eye, over 11–21 live bands per probe. **No band carries excess
 legoESM energy.**
 
-**The two models propagate it at the same speed.** Cell-to-cell phase lag is
-unresolvable here, but the RADIUS the response has spread to is not, because
-the wave covers about nine cells per step. The energy-weighted mean radius of
-the response, legoESM over NEMO, has a **median of 1.0013 over even samples**
-(1.0020 over all): the spreading rates agree to about a tenth of a per cent.
-The odd samples run 0.72–0.90 and the even ones 0.98–1.02, which is the
-leapfrog alternation described below rather than a speed difference — it
-cancels on alternate samples, a speed error would not.
+**Propagation speed: NOT MEASURABLE here, in either direction.** Cell-to-cell
+phase lag is unresolvable (0.11 of a step per cell) and the spatial alternative
+saturates. The energy-weighted mean radius of the response reaches half its
+saturation value (4542 km, the value for a uniform field) within two samples,
+so only samples 1 and 2 carry information: their ratios are 0.713 and 0.995,
+and samples 3 and 4 are 0.772 and 0.977. That odd/even pattern is entangled
+with the leapfrog alternation described below, and two usable samples cannot
+separate the two. The whole-run median is 1.002 and means nothing.
+
+The time-level discriminator says the same thing from another angle: with all
+four candidate pairings scored on the same window, the registered one is the
+closest, but it wins in only **44 % of bootstrap draws**, so whether legoESM's
+response is offset by a fraction of a step is **open, not answered**. (An
+earlier reading that a one-step-lagged pairing beat the registered one by 31 %
+came from scoring the candidates on different-length windows; equalised, it
+does not.)
 
 **The response difference decays.** As a fraction of the response NEMO itself
 produced:
@@ -206,9 +229,12 @@ samples average 5.1× the even ones over the first eight steps, falling to 1.37
 afterwards. Both models ring at the two-step period after an impulsive
 displacement, which is what leapfrog does. Measuring the alternating component
 directly: over the first eight steps NEMO's is 1.283e-4 m and legoESM's
-1.369e-4 m — **legoESM 1.07× the oracle** — and over the second half of the run
-both are 8.51e-7 m, a ratio of 1.00. When a genuine wave dominates the
-signal, legoESM's computational mode is not under-damped.
+1.369e-4 m — **legoESM 1.07× the oracle** — against leakage floors of 5.8e-5
+and 6.3e-5 m, so both sit well above the floor and the above-floor ratio is
+1.05. Their signed spatial correlation is **+0.83 to +0.97 on odd samples**:
+the two models are ringing the SAME mode, not each its own. And it is
+basin-wide here (interior enrichment 1.08, wall 0.12). When a genuine wave
+dominates the signal, legoESM's computational mode is not under-damped.
 
 Note also that the bump is largely gone after ONE baroclinic step: NEMO's
 response drops from 2.3e-3 m rms at the start to 8.3e-4 m after one step, and
@@ -228,23 +254,33 @@ shows a ratio beyond 2×.
 
 - **FREE lane: (i) PASSES at 0.14×. (ii) PASSES**, but only two bands are live,
   so it is close to vacuous — there is nothing to compare.
-- **IMPULSE lane: (i) PASSES at 0.00003×, and that pass is VACUOUS** — the
-  "one-step floor" in this lane IS the peak of the response error, which then
-  decays, so 160 × the floor cannot be exceeded by construction. The criterion
-  was written for a lane where the error grows. **(ii) PASSES with margin** —
-  worst ratio 1.17 of an allowed 2.0, across 11–21 live bands per probe, and
-  that is the criterion the verdict rests on.
+- **IMPULSE lane: (i) NOT APPLICABLE** — the first sample is the largest in the
+  series, so 160 × the floor cannot be exceeded by construction. The instrument
+  reports this as null with a reason rather than as a spectacular pass.
+  **(ii) PASSES with margin** — worst ratio 1.17 of an allowed 2.0, across
+  11–21 live bands per probe, and that is the criterion the verdict rests on.
 
-**CONFIRMED: the sea-surface wave patterns match.** The claim rests on the
-impulse lane, which is the only one with a wave in it. It does NOT rest on the
-free lane, whose registered pass is an artefact of there being no signal.
+**CONFIRMED: the sea-surface wave patterns match in the frequency domain.** The
+claim rests on criterion (ii) in the impulse lane — the only lane with a wave
+in it — and on the response difference falling to 3.8 % of the response by day
+5. It does NOT rest on the free lane, whose registered pass is an artefact of
+there being no signal, nor on criterion (i) in either lane.
+
+**NOT ESTABLISHED: wave speed or phase.** Both available measurements are
+inconclusive by construction rather than by result — the temporal one is below
+resolution, the spatial one saturates after two samples, and the pairing
+bootstrap is a coin toss at 44 %. Settling it needs the free surface sampled
+inside the barotropic substep loop (~90 s), which neither model currently
+writes.
 
 **The feedback-tier finding is the free lane's**, and it is separate from the
-wave question: in a free run legoESM's free surface carries a two-step
-computational mode 18× the oracle's over the first eight steps (decaying to
-1.4×), and the step-to-step excess is enriched 7.5× on land-adjacent cells,
-peaking at ~58× on one cell of the eastern wall. The same mode is only 1.07× the
-oracle's when the impulse gives it a real wave to carry. This is the locus the
+wave question: in a free run legoESM's free surface carries its OWN two-step
+mode — 18× the oracle's amplitude over the first eight steps, uncorrelated
+with the oracle's, concentrated on the boundary rows (wall enrichment 9.4),
+decaying to 1.4× — and the step-to-step excess is enriched 7.5× on
+land-adjacent cells, peaking at ~58× on one cell of the eastern wall. When the
+impulse gives it a real wave to carry, the same measure is 1.07× and the two
+models' modes are strongly correlated. This is the locus the
 campaign's wall-row velocity work has been circling.
 
 ---
@@ -280,7 +316,11 @@ campaign's wall-row velocity work has been circling.
   colour scaling, on data already proven finite.
 - **Mesh identity.** The mesh supplying the equator band and the four probe
   points is checked against the NEMO artifact's own coordinates.
-- **Instrument tests.** 50 direct unit tests, written as known-answer and
+- **Estimator floors.** Every 2-step amplitude is quoted next to the leakage
+  floor of its own estimator — the operator is a curvature high-pass, not a
+  notch, so about 29 % of a 6-hour signal passes it and a ratio taken without
+  the floor can be mostly leakage.
+- **Instrument tests.** 58 direct unit tests, written as known-answer and
   synthetic-violation controls: the spectrum recovers a 0.37 m / 8 h sinusoid to
   5 % and a Nyquist oscillation at its true amplitude; a planted wall-band
   2-step mode is detected and attributed to `wall` with >99 % of the excess; a
