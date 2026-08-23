@@ -798,6 +798,11 @@ def distance_field_km(wet: np.ndarray, e1t: np.ndarray, e2t: np.ndarray,
     two cells for the far columns of a zonally periodic domain.  Both are
     invisible in a model-to-model RATIO and both make the distances themselves
     -- which get read as kilometres -- wrong.
+
+    This is a SEPARABLE distance (integrate along the centre row in x, along
+    the centre column in y, then Pythagoras), not a geodesic on the mesh.  On
+    a lat-lon basin the two differ where the zonal metric varies strongly with
+    latitude, so treat the kilometres as good to a few per cent, not exact.
     """
     ny, nx = wet.shape
     ycum = np.concatenate([[0.0], np.cumsum(e2t[:-1, centre_i])])
@@ -846,9 +851,15 @@ def two_dt_mode(field: np.ndarray, wet: np.ndarray,
     Leapfrog carries a computational mode that alternates sign every step, and
     an impulsive displacement excites it.  "Is legoESM's version of that mode
     under-damped relative to the oracle's" is the concrete form of the
-    excess-energy question, and a single-cell spectrum cannot answer it
-    because the mode is basin-wide and decays within a few steps -- far too
-    short to resolve as a spectral peak.
+    excess-energy question, and a single-cell spectrum cannot answer it,
+    because such a mode decays within a few steps -- far too short to resolve
+    as a spectral peak.
+
+    Whether it is basin-wide or stuck on a few boundary rows is NOT assumed:
+    pass ``regions`` and the locus of the first sample is reported.  In the
+    free DINO run it comes back wall-enriched 9.4x, i.e. a boundary transient
+    rather than a basin mode, which is a much weaker claim than "the leapfrog
+    computational mode is under-damped" and is the one the data supports.
 
     The alternating part of a series at sample n is
     ``x[n] - (x[n-1] + x[n+1]) / 2``.  A smooth series annihilates it; for
@@ -897,7 +908,9 @@ def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
     rather than mode, and that floor belongs next to any ratio quoted from it.
 
     The smoother is the symmetric [1,2,1]/4 kernel, which annihilates the
-    2-step mode EXACTLY (1-2+1 = 0) while passing 85% of a 6-hour signal.  An
+    2-step mode EXACTLY (1-2+1 = 0) while passing 85% of a 6-hour signal.  It
+    passes 85%, not 100%, so the floor is CONSERVATIVE by roughly that 15%:
+    it slightly under-states the leakage rather than over-stating it.  An
     odd boxcar does not: a 5-point mean leaves an alternating series at 1/5 of
     its amplitude, so the "floor" would be a fifth of the mode itself.
 
@@ -955,6 +968,78 @@ def alternation_ratio(series: list[float], n_early: int = 8) -> float:
         raise SystemExit("alternation_ratio needs at least 2 samples")
     ev = a[1::2].mean()
     return float(a[0::2].mean() / ev) if ev > 0 else float("inf")
+
+
+def substep_lag_fit(lego_eta: np.ndarray, nemo_eta: np.ndarray,
+                    wet: np.ndarray, area: np.ndarray | None = None,
+                    n_samples: int | None = None) -> dict:
+    """Fit a CONTINUOUS time lag between two model trajectories, in steps.
+
+    The four-way pairing discriminator can only score integer offsets, so a
+    lag of about half a step makes every candidate equally bad and the
+    bootstrap comes out at a coin toss.  "Inconclusive" is then the SIGNATURE
+    of a half-step lag, not the absence of one -- which is exactly what
+    happened here, and it is why this fit exists.
+
+    To first order a lagged trajectory is a linear interpolation between two
+    of the reference's samples::
+
+        lego[k] ~ nemo[k - alpha] ~ nemo[k] + alpha * ( nemo[k-1] - nemo[k] )
+
+    so with ``d = nemo[k-1] - nemo[k]`` and ``r = lego[k] - nemo[k]`` the
+    least-squares slope over wet cells and samples is::
+
+        alpha = sum(w * d * r) / sum(w * d * d)
+
+    POSITIVE alpha means legoESM is BEHIND the oracle by that fraction of a
+    step.  ``r_squared`` is the share of the residual variance the single
+    scalar explains; a lag interpretation is only worth stating when it is
+    large, because an amplitude error also produces a nonzero slope.  The
+    competing explanation is testable and is what ``amplitude_only_r_squared``
+    is for: it fits ``r ~ beta * nemo[k]`` instead, i.e. "legoESM's field is
+    uniformly scaled", and a lag claim needs to beat it.
+    """
+    n = lego_eta.shape[0] if n_samples is None else min(n_samples,
+                                                        lego_eta.shape[0])
+    w = np.ones(int(wet.sum())) if area is None else area[wet]
+    num = den = res = tot = 0.0
+    anum = aden = ares = 0.0
+    for k in range(1, n):
+        d = (nemo_eta[k - 1] - nemo_eta[k])[wet]
+        r = (lego_eta[k] - nemo_eta[k])[wet]
+        a = nemo_eta[k][wet]
+        num += float(np.sum(w * d * r))
+        den += float(np.sum(w * d * d))
+        tot += float(np.sum(w * r * r))
+        anum += float(np.sum(w * a * r))
+        aden += float(np.sum(w * a * a))
+    if den <= 0.0:
+        raise SystemExit("substep_lag_fit: the reference never moves, so no "
+                         "lag is identifiable")
+    alpha = num / den
+    if tot <= 0.0:
+        # The two trajectories are IDENTICAL. That is a legitimate state (a
+        # perfect match), not a failure, and it is a different condition from
+        # a static reference -- conflating the two made a zero-lag control
+        # abort. There is no residual to explain, so r-squared is undefined.
+        return {"alpha_steps": 0.0, "r_squared": None,
+                "amplitude_only_beta": 0.0,
+                "amplitude_only_r_squared": None,
+                "n_samples_used": int(n)}
+    beta = anum / aden if aden > 0 else 0.0
+    for k in range(1, n):
+        d = (nemo_eta[k - 1] - nemo_eta[k])[wet]
+        r = (lego_eta[k] - nemo_eta[k])[wet]
+        a = nemo_eta[k][wet]
+        res += float(np.sum(w * (r - alpha * d) ** 2))
+        ares += float(np.sum(w * (r - beta * a) ** 2))
+    return {
+        "alpha_steps": float(alpha),
+        "r_squared": float(1.0 - res / tot),
+        "amplitude_only_beta": float(beta),
+        "amplitude_only_r_squared": float(1.0 - ares / tot),
+        "n_samples_used": int(n),
+    }
 
 
 def time_level_discriminator(lego_eta, sshn, sshb, wet) -> dict:
@@ -1293,6 +1378,13 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
             "ratio_all_samples_median_SATURATED": float(np.median(ratio)),
         }
 
+    # A CONTINUOUS lag fit, because the four-way pairing test above can only
+    # score integer offsets and therefore reads a half-step lag as a coin
+    # toss.  Fitted over the whole record and over the first eight samples,
+    # where an impulse response is still sharp.
+    lag = {"all_samples": substep_lag_fit(lego["eta"], nemo["eta"], wet, area),
+           "first_8": substep_lag_fit(lego["eta"], nemo["eta"], wet, area, 9)}
+
     two_dt = {
         "difference": two_dt_mode(diff, wet, area, regions),
         "NEMO": two_dt_mode(nemo["eta"], wet, area, regions),
@@ -1313,6 +1405,7 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         diff_rms_by_step[8:], min(16, max(2, len(diff_rms_by_step) - 8)))
 
     result = {
+        "substep_lag": lag,
         "time_level_warning": time_level_warning,
         "radial_spread": spread,
         "two_dt_mode": two_dt,

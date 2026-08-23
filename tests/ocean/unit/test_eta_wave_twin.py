@@ -857,3 +857,64 @@ def test_propagation_lag_survives_a_short_record(ewt):
     eta = rng.normal(size=(n, ny, nx))
     out = ewt.propagation_lag(eta, wet, 1, 6e4, dt, max_lag=20)
     assert np.isfinite(out["median_lag_steps"])
+
+
+def _lagged_pair(alpha, n=40, ny=9, nx=7, seed=41):
+    """A reference trajectory and a copy lagged by exactly ``alpha`` steps.
+
+    The lag is applied by LINEAR interpolation between neighbouring samples,
+    which is the same first-order model the fit inverts, so a correct fit must
+    return alpha exactly.
+    """
+    rng = np.random.default_rng(seed)
+    wet = np.zeros((ny, nx), dtype=bool)
+    wet[1:-1, 1:-1] = True
+    base = np.cumsum(rng.normal(size=(n + 1,) + wet.shape) * 1e-3, axis=0)
+    nemo = base[1:]
+    lego = (1.0 - alpha) * base[1:] + alpha * base[:-1]
+    return lego, nemo, wet
+
+
+@pytest.mark.parametrize("alpha", [0.0, 0.25, 0.5, 0.75])
+def test_substep_lag_fit_recovers_a_planted_lag(ewt, alpha):
+    lego, nemo, wet = _lagged_pair(alpha)
+    out = ewt.substep_lag_fit(lego, nemo, wet)
+    assert out["alpha_steps"] == pytest.approx(alpha, abs=1e-9)
+    if alpha > 0:
+        assert out["r_squared"] > 0.999
+    else:
+        # identical trajectories: no residual to explain, reported as such
+        # rather than as an abort or a fabricated 1.0
+        assert out["r_squared"] is None
+
+
+def test_substep_lag_fit_beats_the_amplitude_explanation_for_a_real_lag(ewt):
+    """A lag claim must out-explain 'legoESM is just uniformly scaled'."""
+    lego, nemo, wet = _lagged_pair(0.5)
+    out = ewt.substep_lag_fit(lego, nemo, wet)
+    assert out["r_squared"] > out["amplitude_only_r_squared"] + 0.5
+
+
+def test_substep_lag_fit_reports_a_pure_amplitude_error_as_such(ewt):
+    """The converse control: scale the field, plant no lag, and the lag fit
+    must NOT be the better explanation."""
+    _, nemo, wet = _lagged_pair(0.0)
+    lego = nemo * 1.05
+    out = ewt.substep_lag_fit(lego, nemo, wet)
+    assert out["amplitude_only_r_squared"] > 0.99
+    assert out["r_squared"] < out["amplitude_only_r_squared"]
+
+
+def test_substep_lag_fit_refuses_a_static_reference(ewt):
+    _, nemo, wet = _lagged_pair(0.0)
+    flat = np.repeat(nemo[:1], nemo.shape[0], axis=0)
+    with pytest.raises(SystemExit, match="never moves"):
+        ewt.substep_lag_fit(flat * 1.01, flat, wet)
+
+
+def test_substep_lag_fit_sign_convention(ewt):
+    """POSITIVE alpha must mean legoESM is BEHIND the oracle."""
+    lego, nemo, wet = _lagged_pair(0.4)
+    assert ewt.substep_lag_fit(lego, nemo, wet)["alpha_steps"] > 0
+    # swap the roles and the sign must flip
+    assert ewt.substep_lag_fit(nemo, lego, wet)["alpha_steps"] < 0
