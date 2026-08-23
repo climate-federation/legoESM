@@ -2784,6 +2784,274 @@ def _idx_t(step: int, dt: float, n_rec: int) -> int:
     return int(t // _SEC_PER_6H) % n_rec
 
 
+_SOURCE_REV_UNAVAILABLE = "unavailable"
+# Bounds on the provenance probe (codex r9).  Each foreign namespace portion
+# costs up to three `git` subprocesses at setup, so on a slow shared filesystem
+# an unbounded sweep is a real startup stall; and the recorded string ends up
+# in the archive, so it must not grow without limit either.  legoesm has ~10
+# portions today and they are normally all in ONE checkout, which the cheap
+# `--show-toplevel` fast path settles in a single command each.
+_MAX_TREE_PROBES: int = 16
+_MAX_TREE_TAGS: int = 4
+
+# --- LEGOESM_* environment in the restart fingerprint ----------------------
+# Several numerics levers are ENV-gated rather than CLI flags
+# (LEGOESM_BAROCLINIC_F32, LEGOESM_VMIX_F32_SOLVE, LEGOESM_VMIX_BATCHED,
+# LEGOESM_TRACER_PAIR, ...), so two legs with identical command lines can
+# integrate different numerics.  They are hashed as a fail-CLOSED SWEEP with an
+# EXCLUSION list — the same doctrine as _RESTART_FP_EXCLUDE for CLI args, so a
+# lever added later is covered automatically.
+#
+# BUT a BARE prefix sweep is a FALSE-ABORT regression (codex tail-round RED):
+# ~120 LEGOESM_* variables exist and many are per-job INFRASTRUCTURE
+# (LEGOESM_JIT_CACHE_DIR, LEGOESM_NCPUS, LEGOESM_COORD_PORT, ...) that
+# legitimately differ between chained legs.  Hashing those aborts every real
+# restart — breaking exactly the feature this exists to protect.
+#
+# The exclusions are STRUCTURAL FAMILIES, not a hand-listed set of names:
+# filesystem locations, interpreters, resource counts, ports and debug dumps
+# cannot change the trajectory.  Everything else stays hashed.  If a legitimate
+# chain false-aborts, EXTEND THIS LIST — and never add a variable that changes
+# numerics.
+_RESTART_ENV_EXCLUDE_SUFFIX: tuple[str, ...] = (
+    "_DIR", "_PATH", "_ROOT", "_CACHE", "_SRC", "_URL", "_FILE", "_PORT",
+    "_LIB", "_REF",
+)
+_RESTART_ENV_EXCLUDE_EXACT: frozenset[str] = frozenset({
+    # interpreters / environments / repo locations
+    "LEGOESM_PYTHON", "LEGOESM_PY", "LEGOESM_CONDA_ENV", "LEGOESM_REPO",
+    "LEGOESM_CLIMATEEVAL_PYTHON",
+    # scheduler + resource shape: these change per job by construction and the
+    # model's answer is invariant across them
+    "LEGOESM_NCPUS", "LEGOESM_NGPUS", "LEGOESM_SLURM_ACCOUNT",
+    "LEGOESM_JAX_COORDINATOR",
+    # compile / mesh cache policy switches
+    "LEGOESM_JIT_CACHE_MIN_SECS", "LEGOESM_JAX_CACHE_DISABLE",
+    "LEGOESM_MESH_CACHE_DISABLE", "LEGOESM_ALLOW_CPU_COMPILE_CACHE",
+    # data staging locations carrying none of the suffixes above
+    "LEGOESM_CLM_SURFDATA", "LEGOESM_CMIP7_RAW",
+    # diagnostics / profiling / test-selection switches
+    "LEGOESM_PROFILE_MPI", "LEGOESM_VARIANT_COLORS", "LEGOESM_REGEN_GOLDEN",
+    "LEGOESM_SCALING_KIND", "LEGOESM_DEBUG_HELD", "LEGOESM_DUMP_RAD",
+    "LEGOESM_JAX_DISTRIBUTED_TEST", "LEGOESM_RUN_AMIP_INTEGRATION",
+    "LEGOESM_RUN_SLOW_RCE",
+})
+
+
+def _restart_env_items(environ=None) -> list[tuple[str, str]]:
+    """The ``LEGOESM_*`` settings that belong in the restart fingerprint.
+
+    SORTED, so the digest cannot depend on environment iteration order.
+    Factored out of ``main`` so BOTH directions are directly testable: a
+    numerics gate must be included, an infrastructure path must not.
+    """
+    import os as _os
+    env = _os.environ if environ is None else environ
+    return sorted(
+        (k, v) for k, v in env.items()
+        if k.startswith("LEGOESM_")
+        and k not in _RESTART_ENV_EXCLUDE_EXACT
+        and not k.endswith(_RESTART_ENV_EXCLUDE_SUFFIX)
+    )
+
+
+def _source_revision(start_dir=None) -> str:
+    """Git revision of the checkout this driver is RUNNING FROM.
+
+    Recorded in every ``--restart-save`` archive and compared on resume, so a
+    scorecard is never attributed to the wrong revision.
+
+    Three things the naive ``git rev-parse HEAD`` got wrong (codex r6 MEDIUM):
+
+    1. **Scope.** A bare ``git rev-parse`` resolves against the CWD, so a job
+       launched from ``$HOME`` or from another worktree recorded a DIFFERENT
+       repository's HEAD.  It is scoped to ``__file__``'s directory here, which
+       is the tree whose code is actually executing (this repo runs pinned
+       worktrees per job precisely because a shared checkout is not
+       reproducible).
+    2. **Dirty state.** A SHA describes committed content only.  Modified
+       tracked files are appended as ``-dirty`` — ``git describe --dirty``
+       semantics, i.e. UNTRACKED files are deliberately not counted: this repo
+       always carries hundreds of untracked scratch scripts, so counting them
+       would pin the marker permanently on and make it uninformative.
+    3. **Silent failure.** ``None`` on error was indistinguishable from "the
+       archive predates this field", and both sides silently skipped the
+       comparison.  A failure is now recorded EXPLICITLY as
+       ``_SOURCE_REV_UNAVAILABLE`` so the resume can say the check could not
+       run rather than implying it passed.
+
+    4. **Mixed trees** (codex r7 MEDIUM, widened at r8).  The DRIVER script and
+       the imported ``legoesm`` packages need not come from the same checkout —
+       every sbatch wrapper here sets ``PYTHONPATH`` explicitly, and a wrong
+       value silently runs this script against ANOTHER worktree's model code,
+       which is exactly the shared-checkout hazard the pinned-worktree workflow
+       exists to avoid.  ``legoesm`` is a PEP-420 namespace package, so it is
+       not one directory but a LIST (``legoesm.__path__``: ``src/legoesm`` plus
+       every ``packages/*/legoesm``); ALL of them are checked, not just the one
+       that happens to define this module.  Any divergence from the driver's
+       root is recorded as ``+mixedtree:<sha12>[,<sha12>...]``.  ``start_dir``
+       skips the cross-check (unit testing of the git plumbing itself).
+
+    5. **Inherited git environment** (codex r8 MEDIUM).  ``git -C <dir>`` does
+       NOT override ``GIT_DIR`` / ``GIT_WORK_TREE`` / ``GIT_COMMON_DIR``: under
+       a hook or a wrapper that exports them, both probes would report an
+       unrelated repository as clean and this function would return a
+       confidently WRONG plain sha.  They are stripped from the child
+       environment.
+
+    Returns the revision string; never raises.
+    """
+    import os as _os
+    import subprocess as _sp
+    here = str(Path(__file__).resolve().parent if start_dir is None
+               else Path(start_dir))
+    # Repository-DISCOVERY variables only: leaving the rest of the environment
+    # intact keeps git's own PATH/credential setup working.
+    _env = {k: v for k, v in _os.environ.items()
+            if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                         "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                         "GIT_CEILING_DIRECTORIES")}
+
+    def _git(cwd, *a):
+        # check=False: a non-repo / missing git is an expected outcome here,
+        # not an exception path.
+        return _sp.run(["git", "-C", cwd, *a], capture_output=True,
+                       text=True, timeout=10, check=False, env=_env)
+
+    def _describe(cwd):
+        """``(toplevel, revision-string)`` for one directory, or ``(None, …)``."""
+        rev = _git(cwd, "rev-parse", "HEAD")
+        if rev.returncode != 0 or not rev.stdout.strip():
+            return None, _SOURCE_REV_UNAVAILABLE
+        sha = rev.stdout.strip()
+        top = _git(cwd, "rev-parse", "--show-toplevel")
+        root = top.stdout.strip() if top.returncode == 0 else None
+        st = _git(cwd, "status", "--porcelain", "--untracked-files=no")
+        if st.returncode != 0:
+            # HEAD resolved but the dirty check did not: say so rather than
+            # implying a clean tree.
+            return root, f"{sha}-dirty-unknown"
+        return root, (f"{sha}-dirty" if st.stdout.strip() else sha)
+
+    try:
+        root, rev = _describe(here)
+        if rev == _SOURCE_REV_UNAVAILABLE or start_dir is not None:
+            return rev
+        if root is None:
+            # HEAD resolved but the repository ROOT did not, so the cross-check
+            # below cannot run.  Keep the sha (it is real) but mark it
+            # ambiguous rather than reporting a clean, fully-describing
+            # revision (codex r8).
+            return f"{rev}+mixedtree:unknown"
+        # Cross-check EVERY tree that supplies model code.  BOUNDED WORK
+        # (codex r9): the cheap `--show-toplevel` probe runs first and, for the
+        # overwhelmingly common case of one checkout, is the ONLY command per
+        # portion; the two extra commands run only for a portion that actually
+        # differs.  Portions are capped and the suffix is truncated so neither
+        # the setup latency nor the recorded string can grow without bound on a
+        # slow shared filesystem.
+        import legoesm as _lego
+        found: set[str] = set()
+        seen: set[str] = set()
+        probes = 0
+        truncated = False
+        for portion in sorted(getattr(_lego, "__path__", [])):
+            pkg_dir = str(Path(portion).resolve())
+            if pkg_dir in seen:
+                continue
+            seen.add(pkg_dir)
+            probes += 1
+            if probes > _MAX_TREE_PROBES:
+                truncated = True
+                break
+            top = _git(pkg_dir, "rev-parse", "--show-toplevel")
+            pkg_root = top.stdout.strip() if top.returncode == 0 else None
+            if pkg_root and Path(pkg_root) == Path(root):
+                continue          # same checkout: nothing more to ask
+            if pkg_root is None:
+                # Root unresolved -> we cannot say WHICH tree it is; the
+                # docstring promises 'unknown' here (codex r9 LOW).
+                tag = "unknown"
+            else:
+                _, pkg_rev = _describe(pkg_dir)
+                tag = (pkg_rev if pkg_rev == _SOURCE_REV_UNAVAILABLE
+                       else pkg_rev.split("-")[0][:12])
+            found.add(tag)
+        if not found and not truncated:
+            return rev
+        # CANONICAL + HONEST ABOUT TRUNCATION (codex tail round): the portions
+        # are visited in sorted order and the tags are sorted before capping,
+        # so the recorded provenance is deterministic rather than dependent on
+        # __path__ order; and when tags ARE dropped the string says so instead
+        # of looking complete.
+        tags = sorted(found)
+        if len(tags) > _MAX_TREE_TAGS:
+            tags = tags[:_MAX_TREE_TAGS] + [f"+{len(found) - _MAX_TREE_TAGS}-more"]
+        if truncated:
+            tags.append("probe-cap-reached")
+        return f"{rev}+mixedtree:{','.join(tags)}"
+    except Exception:                       # noqa: BLE001 — provenance only
+        return _SOURCE_REV_UNAVAILABLE
+
+
+def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
+    """Warning text for a resume across a source change, or ``None`` if silent.
+
+    OUTCOMES KEPT DISTINCT (codex r6 MEDIUM).  The pre-fix code stored ``None``
+    on failure and skipped the comparison whenever either side was falsy, so
+    "the check could not run" was indistinguishable from "the check ran and
+    matched" — the resume looked verified when nothing had been verified.
+    EQUAL-BUT-AMBIGUOUS is a further case: a ``-dirty`` marker does not
+    identify WHICH uncommitted edits were present, and ``+mixedtree`` says the
+    SHA describes only part of the running code, so equality of two such
+    strings is not equality of the code.
+
+    Pure function of the two strings so it is directly testable; ``main`` only
+    prints the result.
+    """
+    unknown = {None, "", _SOURCE_REV_UNAVAILABLE}
+    if parent_sha in unknown or this_sha in unknown:
+        return ("[warn] source-revision drift check SKIPPED: parent="
+                f"{parent_sha or 'absent'}, this leg={this_sha}. The archive "
+                "predates the field or the revision could not be resolved — "
+                "this is NOT evidence that the code matches.")
+    if parent_sha != this_sha:
+        return (f"[warn] --restart-from was written at source revision "
+                f"{parent_sha[:20]} but this leg is running {this_sha[:20]}: "
+                "the model code changed between legs.  The state and "
+                "configuration still validated, so the resume proceeds — but "
+                "attribute results to BOTH revisions.")
+    why = _revision_ambiguity(this_sha)
+    if why:
+        return (f"[warn] both legs report {this_sha}, but that string does not "
+                f"pin the code: {why}  Matching markers do not prove matching "
+                "source.")
+    return None
+
+
+def _revision_ambiguity(rev) -> str | None:
+    """Why a revision string fails to identify the running code, or ``None``.
+
+    ``-dirty`` / ``-dirty-unknown`` = uncommitted (or unknown) tracked edits;
+    ``+mixedtree`` = the driver and the imported ``legoesm`` packages came from
+    different checkouts, so ONE sha cannot describe both.
+    """
+    s = str(rev)
+    reasons = []
+    if "-dirty-unknown" in s:
+        reasons.append("the dirty-state check itself failed, so uncommitted "
+                       "tracked edits can neither be confirmed nor ruled out;")
+    elif "-dirty" in s:
+        reasons.append("the tree had uncommitted changes to tracked files, "
+                       "which the sha does not describe;")
+    if "+mixedtree" in s:
+        reasons.append("the driver script and the imported legoesm packages "
+                       "came from DIFFERENT checkouts (PYTHONPATH), so this "
+                       "sha describes only the driver;")
+    return " ".join(reasons) if reasons else None
+
+
 def _diag(state, lat2d=None, lon2d=None) -> dict:
     """Cheap scalar diagnostics over ocean cells (one device->host pull).
 
@@ -3774,14 +4042,20 @@ def _save_snapshot(out_dir: Path, tag: str, state, lat2d, lon2d, z_coord=None,
                     save_kw[_m] = np.asarray(_val)
                 except Exception:       # pragma: no cover - exotic grid proxy
                     pass
-    # Free surface: needed to RESTART a run from this snapshot (--restart-from)
-    # without a barotropic-adjustment shock; the scorer ignores it.
+    # Free surface: carried so an OFFLINE tool can re-seed a state from this
+    # snapshot without a barotropic-adjustment shock; the scorer ignores it.
+    # NB --restart-from does NOT read snapshots (codex r4 LOW): the restart
+    # loader rejects an archive with no '_slot_kinds' manifest.  Use
+    # --restart-save / save_run_restart for a resumable checkpoint.
     eta = getattr(state, "eta", None)
     if eta is not None:
         save_kw["eta"] = np.asarray(eta.data)
-    # Prognostic TKE carry (tke closure prognostic=True, any grid): needed to
-    # RESTART without re-spinning the turbulence from the background seed
-    # (the #1310 lesson: an uncheckpointed carry breaks bit-exact restart).
+    # Prognostic TKE carry (tke closure prognostic=True, any grid): recorded so
+    # an offline re-seed does not re-spin the turbulence from the background
+    # value — an uncheckpointed carry cold-starts and the re-seeded run is not
+    # a continuation of this one (the #1310 lesson, there an uncheckpointed
+    # mass-fixer anchor in the SPECTRAL model).  Again NOT the --restart-from
+    # path — see the note above.
     # EXTRA key only — scorers and old readers are unaffected.
     tke = getattr(state, "tke", None)
     if tke is not None:
@@ -4740,6 +5014,41 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "to yearly + final). 0=off. Lets a long run be scored "
                         "mid-flight (e.g. day-30 SST vs NEMO) without waiting "
                         "for the full integration.")
+    p.add_argument("--restart-save", type=str, default=None,
+                   help="Write a RESUMABLE restart to this .npz path (atomic "
+                        "overwrite) at the --snapshot-every-days cadence and "
+                        "at the end of the run. Unlike snapshot_*.npz (a "
+                        "diagnostic artifact) this carries EVERY prognostic "
+                        "and integrator-carry slot, the UNMANGLED sea-ice "
+                        "state, and the absolute step counter — so a 72 h job "
+                        "chain integrates forward instead of re-paying the "
+                        "cold-start spin-up each time. Cadence: "
+                        "--restart-every-days (defaults to "
+                        "--snapshot-every-days); always also written at the "
+                        "end of the run.")
+    p.add_argument("--restart-every-days", type=float, default=0.0,
+                   help="Cadence for --restart-save [sim-days]. 0 (default) "
+                        "follows --snapshot-every-days. With BOTH at 0 the "
+                        "restart is written only at the end of the run, so a "
+                        "wallclock kill loses the whole leg — the driver warns "
+                        "when that is the case.")
+    p.add_argument("--restart-from", type=str, default=None,
+                   help="Resume from a --restart-save archive: the ocean "
+                        "carry, the sea-ice state and the step counter are "
+                        "restored, and the loop continues to the ABSOLUTE "
+                        "--years target (it does not re-run the completed "
+                        "steps). Grid-type, dt, forcing-record count, x64 and "
+                        "a digest of the RESOLVED configuration must match "
+                        "(hard errors); a source-revision change only WARNS, "
+                        "since chaining across a bug fix is a supported "
+                        "workflow. SCOPE: this is a guarded RECOVERY resume "
+                        "that catches configuration drift, archive truncation/"
+                        "corruption and STRUCTURAL tampering (a renamed, "
+                        "relabelled or removed slot) — NOT a cryptographically "
+                        "strict or bit-identical continuation. There is no "
+                        "payload checksum, so an edit to an array's VALUES at "
+                        "the same shape resumes silently, and forcing/mesh "
+                        "inputs are pinned by PATH, not by content hash.")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -5846,6 +6155,10 @@ def main() -> int:
     # the UNSMOOTHED WOA surface salinity BEFORE --woa-smoothing-passes damps the
     # IC fronts (restoring must target the true climatology, not the smoothed IC).
     visc_schedule = None
+    # Index of the NEXT schedule segment to apply. Fast-forwarded below when
+    # resuming: left at zero, a restart at day 60 would first re-apply the
+    # day-0 viscosity to a day-60 state and integrate with the wrong lateral
+    # mixing until the schedule caught up.
     visc_seg_idx = 0
     if args.visc_schedule:
         if app_grid_type not in ("tripole", "latlon"):
@@ -6315,6 +6628,16 @@ def main() -> int:
     )
     n_rec = int(forcing.u10.shape[0])
     print(f"[setup] grid {lat2d.shape}, forcing records {n_rec}, dt={args.dt}s")
+    # RESOLVED forcing archive, always logged.  With --forcing-path unset the
+    # loader picks an environment/home-dependent cache, so two chained legs can
+    # read DIFFERENT forcing from identical command lines.  It is hashed into
+    # the restart fingerprint (a mismatch is then a hard error on resume), but
+    # the digest is opaque — printing the path is what makes that error
+    # DIAGNOSABLE from the two legs' logs.
+    from legoesm.ocean.forcing import core2_nyf_path as _core2_path
+    print("[setup] forcing archive: "
+          f"{_core2_path(Path(args.forcing_path) if args.forcing_path else None)}",
+          flush=True)
 
     # Prognostic sea-ice (--prognostic-sea-ice): build the canonical SeaIceConfig
     # + a zero-ice cold-start state on the OCEAN grid.  The REAL model
@@ -6454,12 +6777,214 @@ def main() -> int:
 
     snap_every = (int(args.snapshot_every_days * _SEC_PER_DAY / dt)
                   if args.snapshot_every_days > 0 else 0)
+    # Restart cadence is INDEPENDENT of the diagnostic snapshot cadence (the two
+    # are different contracts), but defaults to it so one flag is usually
+    # enough.  Both zero => end-of-run only, which a wallclock kill destroys —
+    # warn, because silently having no mid-run checkpoint is the exact failure
+    # this feature exists to prevent.
+    restart_every = (int(args.restart_every_days * _SEC_PER_DAY / dt)
+                     if args.restart_every_days > 0 else snap_every)
+    if args.restart_save and restart_every <= 0:
+        print("[warn] --restart-save with no cadence (--restart-every-days / "
+              "--snapshot-every-days both 0): the restart is written ONLY at "
+              "the end of the run, so a wallclock kill loses this leg "
+              "entirely.", flush=True)
+
+    # ------------------------------------------------------------------
+    # --restart-from: resume the integration (full carry + sea ice + step).
+    # Placed AFTER the ocean state, the sea-ice state and the step-derived run
+    # controls exist, and BEFORE the step-0 diagnostic, so the [diag] line and
+    # the CSV report the RESTORED state rather than the cold-start template.
+    # The target is ABSOLUTE (--years / --smoke): a resumed leg integrates from
+    # the restart step up to n_steps, it does not re-run n_steps more.
+    # ------------------------------------------------------------------
+    # RESOLVED-RUN fingerprint for the restart (codex r2/r3 HIGH).
+    #
+    # EXCLUSION list, not an inclusion list: every CLI setting is hashed unless
+    # it is explicitly a run-control / IO knob that legitimately differs
+    # between chained legs.  That is fail-CLOSED — a new flag added later is
+    # covered automatically, whereas an inclusion list silently omits it.  The
+    # earlier version hashed only repr(model.config) and so missed
+    # --visc-schedule, --forcing-ramp-days, --sss-restore and every other
+    # host-loop forcing knob, all of which change step N+1.
+    #
+    # Computed HERE, at setup, before the --visc-schedule mid-run model
+    # rebuild, so a scheduled leg still matches its siblings.
+    #
+    # LIMITS, stated rather than papered over: values are hashed via repr(),
+    # which ELIDES the interior of a large array (e.g. a runoff-depth map), and
+    # the forcing archive is pinned by RESOLVED PATH, not by a content hash.
+    # So this detects configuration DRIFT, not a deliberately forged archive or
+    # a mutated forcing file at the same path.
+    _RESTART_FP_EXCLUDE = frozenset({
+        # resume plumbing + the absolute target, which grows leg by leg
+        "restart_from", "restart_save", "restart_every_days", "years", "smoke",
+        # pure output / cadence knobs
+        "output", "snapshot_every_days", "diag_every_days",
+        # read-only diagnostics that never touch the state (codex r4 LOW):
+        # including them would false-abort a leg that merely turned a
+        # diagnostic on or off.
+        "gateway_transports", "diag_momentum_step",
+    })
+    # Path-valued args are normalised before hashing so an equivalent relative
+    # path or symlink cannot false-abort a legitimate chained leg.
+    _RESTART_FP_PATH_KEYS = frozenset({
+        "forcing_path", "mesh", "config", "woa_t", "woa_s", "ice_init",
+        "siconc_file", "tos_monthly_file", "chl_file",
+        # codex r5 LOW: these were still hashed as RAW text, so an equivalent
+        # relative or symlinked spelling false-aborted a valid chained leg.
+        "nemo_vertical_file", "isf_forcing_file", "iwm_forcing_file",
+        "sss_restore_file",
+        # nargs=2: ONE dest holding two paths, normalised element-wise below.
+        "nemo_monthly_init",
+    })
+    _restart_cfg_fp = None
+    if args.restart_save or args.restart_from:
+        import hashlib as _hashlib
+        _fp_items = []
+        for _k in sorted(vars(args)):
+            if _k in _RESTART_FP_EXCLUDE:
+                continue
+            _v = getattr(args, _k)
+            if _k in _RESTART_FP_PATH_KEYS and _v:
+                if isinstance(_v, str):
+                    _v = str(Path(_v).resolve())
+                elif isinstance(_v, (list, tuple)):
+                    _v = [str(Path(_e).resolve()) if isinstance(_e, str) and _e
+                          else _e for _e in _v]
+            _fp_items.append(f"{_k}={_v!r}")
+        # The resolved model + sea-ice configs too: they capture defaults and
+        # preset expansions that never appear as an explicit CLI value.
+        _fp_items.append(f"model_config={model.config!r}")
+        _fp_items.append(f"ice_config={ice_config!r}")
+        _fp_items.append(f"grid_type={app_grid_type}")
+        # RESOLVED forcing archive, not the raw flag (codex r8 MEDIUM): with
+        # --forcing-path unset the loader falls back to an environment/home
+        # dependent cache directory, so two legs whose command lines are
+        # IDENTICAL (both recording forcing_path=None) can read different
+        # CORE-II archives and still produce matching fingerprints.  Resolved
+        # through the loader's own helper so the recorded path cannot drift
+        # from the loaded one.
+        from legoesm.ocean.forcing import core2_nyf_path
+        _fp_forcing = core2_nyf_path(
+            Path(args.forcing_path) if args.forcing_path else None)
+        _fp_items.append(f"forcing_archive={_fp_forcing.resolve()}")
+        # BEHAVIOUR-CHANGING ENVIRONMENT (codex r9 HIGH; narrowed in the tail
+        # round to stop it false-aborting on per-job cache dirs and ports).
+        # See _restart_env_items / _RESTART_ENV_EXCLUDE_* above.
+        # JAX_ENABLE_X64 is pinned separately by the archive's _x64 record.
+        _fp_items.append(f"env={_restart_env_items()!r}")
+        _restart_cfg_fp = _hashlib.sha256(
+            "|".join(_fp_items).encode("utf-8")).hexdigest()[:32]
+    # SOURCE REVISION (codex r5 HIGH; scoping/dirty/explicit-failure fixed in
+    # r6): a changed model implementation with identical options otherwise
+    # resumes silently.  Recorded always, via _source_revision() — which scopes
+    # the query to THIS script's checkout, marks a dirty tree, and returns
+    # _SOURCE_REV_UNAVAILABLE instead of silently omitting the field.
+    # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
+    # across a bug fix is a legitimate and expected workflow, and a hard error
+    # would make the feature unusable exactly when it matters.  The state
+    # itself is still validated by the config fingerprint; this line makes the
+    # code drift visible in the log and in the archive so a scorecard is never
+    # attributed to the wrong revision.  It is provenance, NOT a proof of
+    # identical code — see ocean.restart's SCOPE OF THE GUARANTEE.
+    _restart_src_sha = None
+    if args.restart_save or args.restart_from:
+        _restart_src_sha = _source_revision()
+        if _restart_src_sha == _SOURCE_REV_UNAVAILABLE:
+            print("[warn] could not determine the source revision of "
+                  f"{Path(__file__).resolve().parent} (not a git checkout, or "
+                  "git unavailable): the restart archive will record "
+                  f"{_SOURCE_REV_UNAVAILABLE!r} and the leg-to-leg code-drift "
+                  "check cannot run.", flush=True)
+        else:
+            _amb = _revision_ambiguity(_restart_src_sha)
+            if _amb:
+                print(f"[warn] source revision {_restart_src_sha} does not "
+                      f"describe the code being executed: {_amb} Results from "
+                      "this leg are not reproducible from the recorded "
+                      "revision alone — commit, and run the driver and the "
+                      "packages from ONE checkout, before a production leg.",
+                      flush=True)
+
+    start_step = 0
+    if args.restart_save or args.restart_from:
+        # FAIL FAST: if this build's state exposes a slot the restart
+        # persistence policy does not classify, abort now (seconds in) rather
+        # than at the first mid-run checkpoint, hours into an integration.
+        from legoesm.ocean.restart import validate_restart_policy
+        try:
+            validate_restart_policy(state, ice_state)
+        except KeyError as _pol_err:
+            # KeyError's str() is repr-quoted; args[0] is the plain message.
+            raise SystemExit(_pol_err.args[0]) from _pol_err
+    if args.restart_save and args.restart_from:
+        # Refuse to overwrite the archive we are resuming FROM: a leg that
+        # blows up after its first cadence write would have destroyed the only
+        # good parent restart, i.e. the spin-up this feature exists to keep.
+        # Checked BEFORE the load so it costs nothing.
+        if Path(args.restart_save).resolve() == Path(
+                args.restart_from).resolve():
+            raise SystemExit(
+                "--restart-save and --restart-from point at the same file "
+                f"({args.restart_save}); write the new leg to a distinct path "
+                "so the parent restart survives a failed leg.")
+    if args.restart_from:
+        from legoesm.ocean.restart import load_run_restart
+        _rs_path = Path(args.restart_from)
+        if not _rs_path.exists():
+            raise SystemExit(f"--restart-from: no such file {_rs_path}")
+        # load_run_restart RAISES on an ice present/absent mismatch, so the
+        # returned ice_state is non-None exactly when this run has prognostic
+        # ice — no silent cold-start fallback is possible here.
+        state, ice_state, _rs_meta = load_run_restart(
+            _rs_path, state, ice_template=ice_state,
+            grid_type=app_grid_type, dt_seconds=dt,
+            n_forcing_records=n_rec, config_fingerprint=_restart_cfg_fp)
+        # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
+        # equal-but-dirty), decided by the pure helper so the logic is unit
+        # tested rather than only exercised by a full driver run.
+        _drift_note = _source_revision_drift_note(_rs_meta.get("sha"),
+                                                  _restart_src_sha)
+        if _drift_note:
+            print(_drift_note, flush=True)
+        start_step = int(_rs_meta["step"])
+        if start_step >= n_steps:
+            # Never exit silently "already at target" (CLAUDE.md run-target
+            # rule): a chain launcher must see WHY nothing ran.
+            raise SystemExit(
+                f"--restart-from {_rs_path} is already at step {start_step} "
+                f"(day {_rs_meta['time_days']:.2f}) but this run targets only "
+                f"{n_steps} steps ({total_days:.0f} days).  Raise --years, or "
+                "point at an earlier restart.")
+        print(f"[restart] resumed from {_rs_path}: step {start_step} "
+              f"(day {_rs_meta['time_days']:.2f}), carry slots "
+              f"{sorted(_rs_meta['slots'])}"
+              + (f", ice slots {sorted(_rs_meta['ice_slots'])}"
+                 if _rs_meta["ice_slots"] else ", no sea ice"), flush=True)
+        if getattr(args, "gateway_transports", False):
+            print("[restart] NOTE --gateway-transports accumulates a TIME MEAN "
+                  "from the resume point only; a chained run's per-leg means "
+                  "must be recombined offline (weighted by leg length).",
+                  flush=True)
+    start_day = start_step * dt / _SEC_PER_DAY
+    if visc_schedule and start_step:
+        # Skip every segment whose start day the checkpoint is already past,
+        # so the resumed leg begins on the viscosity the schedule says applies
+        # at this time rather than replaying the ramp from the cold start.
+        while (visc_seg_idx + 1 < len(visc_schedule)
+               and visc_schedule[visc_seg_idx + 1][0] <= start_day):
+            visc_seg_idx += 1
+        print(f"[restart] viscosity schedule fast-forwarded to segment "
+              f"{visc_seg_idx + 1}/{len(visc_schedule)} "
+              f"(day {visc_schedule[visc_seg_idx][0]:g})", flush=True)
 
     print(f"[run] {total_days:.0f} days = {n_steps} steps "
           f"(diag every {diag_every} steps"
-          f"{f', snapshot every {snap_every} steps' if snap_every else ''})")
+          f"{f', snapshot every {snap_every} steps' if snap_every else ''}"
+          f"{f', resuming at step {start_step}' if start_step else ''})")
     d0 = _diag(state, lat2d, lon2d)
-    print(f"[diag] step 0: {d0}", flush=True)
+    print(f"[diag] step {start_step}: {d0}", flush=True)
 
     # Progress time-series CSV, flushed each diag -> observable mid-run even when
     # stdout is pipe-buffered, and a record for post-hoc analysis.  mkdir on EVERY
@@ -6550,9 +7075,27 @@ def main() -> int:
     # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
     # and the writer/closer below are no-ops.
     _csv = None
+    _csv_appended = False
     if _is_io_proc():
-        _csv = open(out_dir / "diag_timeseries.csv", "w")
-        _csv.write(",".join(_csv_cols) + "\n")
+        # Resuming APPENDS to an existing series (a chained leg must not erase
+        # the parent leg's record); a fresh run truncates and writes the header.
+        _csv_path = out_dir / "diag_timeseries.csv"
+        # A header-only or empty file is NOT a parent series: appending to it
+        # and then suppressing the restart row would leave the leg with no
+        # starting point at all (codex r3 LOW).
+        _csv_has_rows = False
+        if _csv_path.exists():
+            with open(_csv_path) as _fh:
+                # Count NON-BLANK lines past the header: a header plus a stray
+                # blank line is not a parent series (codex r4 LOW).
+                _csv_has_rows = sum(
+                    1 for _i, _ln in enumerate(_fh)
+                    if _i > 0 and _ln.strip()) > 0
+        _csv_append = bool(args.restart_from) and _csv_has_rows
+        _csv_appended = _csv_append
+        _csv = open(_csv_path, "a" if _csv_append else "w")
+        if not _csv_append:
+            _csv.write(",".join(_csv_cols) + "\n")
 
     def _log_diag_csv(step, day, d, rate, ice=None):
         if _csv is None:
@@ -6574,7 +7117,34 @@ def main() -> int:
         if _csv is not None:
             _csv.close()
 
-    _log_diag_csv(0, 0.0, d0, 0.0, ice=ice_state)
+    # Seed the series with the initial state — UNLESS we are appending to a
+    # parent leg's CSV, which already logged this exact step as its final row.
+    # Keyed off whether we actually appended, not off --restart-from: a resume
+    # into a FRESH output dir writes a new CSV that would otherwise have no
+    # starting row at all (codex r2 LOW).
+    if not (_is_io_proc() and _csv_appended):
+        _log_diag_csv(start_step, start_day, d0, 0.0, ice=ice_state)
+
+    def _write_run_restart(step_i: int, day_f: float, st, ice_st) -> None:
+        """Write the resumable restart (``--restart-save``), process-0 only.
+
+        Overwrites the SAME path atomically each cadence, so a chain launcher
+        always finds one valid, latest checkpoint.  Separate from
+        ``_save_snapshot`` on purpose: snapshots are a diagnostic contract with
+        downstream scorers (ice fields land-masked + category-aggregated),
+        restarts carry every prognostic + integrator-carry slot unmangled.
+        """
+        if not args.restart_save or not _is_io_proc():
+            return
+        from legoesm.ocean.restart import save_run_restart
+        save_run_restart(args.restart_save, st, step=step_i, time_days=day_f,
+                         grid_type=app_grid_type, dt_seconds=dt,
+                         n_forcing_records=n_rec,
+                         config_fingerprint=_restart_cfg_fp,
+                         parent=args.restart_from, sha=_restart_src_sha,
+                         ice_state=ice_st)
+        print(f"[restart] saved step {step_i} (day {day_f:.2f}) -> "
+              f"{args.restart_save}", flush=True)
 
     # ------------------------------------------------------------------
     # Multi-GPU lat-band SPMD step (--n-gpus N): partition the GLOBAL ocean state
@@ -6843,6 +7413,24 @@ def main() -> int:
                 "loop (omit --scan-block), or drop "
                 "--runoff/--sss-restore/--ice-albedo/--ice-thermo/--geothermal/"
                 "--dm2dc and pass --no-emp for the momentum/heat-only scan path.")
+        if args.restart_save or args.restart_from:
+            # UNCONDITIONAL refusal (codex r2 HIGH).  The scan body calls
+            # model._step_impl DIRECTLY and never calls seed_scan_carry, so it
+            # PROMOTES optional slots None -> Field on the first block step
+            # (prognostic TKE documents exactly that).  My earlier guard tested
+            # the CURRENT state's populated slots, which are all None at setup
+            # for a fresh TKE/EKE/leapfrog config — so it passed and the lane
+            # then created a carry the restart neither saved nor advanced.
+            # There is no cheap value-based test that closes that hole, and the
+            # lane's own eligibility gap is pre-existing and out of scope here,
+            # so restarts on this lane are refused outright.
+            raise SystemExit(
+                "--restart-save/--restart-from is not supported with "
+                "--scan-block: the scan body steps model._step_impl directly "
+                "and never seeds or advances the scan carry, so it can promote "
+                "an integrator slot mid-block that the restart neither records "
+                "nor continues.  Run the restartable leg on the host Python "
+                "loop (omit --scan-block).")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -6862,12 +7450,16 @@ def main() -> int:
             # year boundary -> the modulo-gated I/O below fires at exactly
             # the same cadence as the Python loop (codex #354 finding 2).
             nb = min(bsz, n_steps - step)
+            # No restart_every here: this lane REFUSES restarts (above).
             for period in (diag_every, snap_every, steps_per_year):
                 if period and period > 0:
                     nb = min(nb, period - (step % period))
             return max(1, nb)
 
-        step = 0
+        # Resume at the restart's absolute step (0 for a fresh run): the block
+        # forcing indices below are pure functions of `step`, so continuing the
+        # counter reproduces the forcing exactly.
+        step = start_step
         while step < n_steps:
             nb = _block_steps(step)
             idx_block = jnp.asarray(
@@ -6880,7 +7472,9 @@ def main() -> int:
             if step % diag_every == 0 or step == n_steps:
                 state = jax.block_until_ready(state)
                 d = _diag(state, lat2d, lon2d)
-                rate = step / (time.time() - t_wall)
+                # Throughput of THIS leg: a resumed run has done (step-start_step)
+                # steps in (now - t_wall), not `step` of them.
+                rate = (step - start_step) / (time.time() - t_wall)
                 print(f"[diag] step {step} (day {day:.0f}): {d} | "
                       f"{rate:.2f} steps/s", flush=True)
                 _log_diag_csv(step, day, d, rate)
@@ -6912,8 +7506,9 @@ def main() -> int:
         _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
         _record_final_state_digest(manifest_path, state)
         _close_csv()
-        rate = n_steps / (time.time() - t_wall)
-        print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
+        rate = (n_steps - start_step) / (time.time() - t_wall)
+        print(f"[done] {n_steps - start_step} steps this leg "
+              f"(absolute step {n_steps}) @ {rate:.2f} steps/s (scan); "
               f"final: {_diag(state, lat2d, lon2d)}")
         if args.smoke:
             yr_est = steps_per_year / rate / 3600.0
@@ -7064,7 +7659,12 @@ def main() -> int:
                               f"run-end row; pass --snapshot-every-days N to "
                               f"make windowed means recoverable", flush=True)
 
-    for step in range(1, n_steps + 1):
+    # RESUME AT THE RESTART'S ABSOLUTE STEP. Starting at 1 replays the whole
+    # run against an already-advanced state: a step-4 checkpoint with an
+    # 8-step target applied the forcing for steps 1..8 to that state, advanced
+    # twelve physical steps, and then labelled the result step 8. The scan
+    # lane already continued the counter; this one did not.
+    for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
@@ -7743,7 +8343,9 @@ def main() -> int:
             _pers_res.count_leaf_full(
                 gathers=1 + int(getattr(state, "v", None) is not None))
             d = _diag(state, lat2d, lon2d)
-            rate = step / (time.time() - t_wall)
+            # Throughput of THIS leg: a resumed run has done (step-start_step)
+            # steps in (now - t_wall), not `step` of them.
+            rate = (step - start_step) / (time.time() - t_wall)
             day = step * dt / _SEC_PER_DAY
             print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
                   flush=True)
@@ -7783,6 +8385,13 @@ def main() -> int:
             # `step != n_steps` above excludes the final step; the run-end row
             # below covers it, so each dump point appears exactly once.
             _gateway_cumulative_row(_gw_csv, _gw_acc, step, day)
+        if (restart_every > 0 and step % restart_every == 0
+                and step != n_steps):
+            # Own cadence, own contract: the state may still be sharded on the
+            # persistent SPMD lane, so gather before serialising (idempotent
+            # when the snapshot block above already did).
+            state = _ensure_global_state(state)
+            _write_run_restart(step, step * dt / _SEC_PER_DAY, state, ice_state)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
@@ -7799,6 +8408,7 @@ def main() -> int:
     _save_snapshot(out_dir, "final", state, lat2d, lon2d, z_coord=z_coord,
                    io_proc=_io, ice_state=ice_state, grid=grid,
                    step=step, day=day)
+    _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
@@ -7812,7 +8422,7 @@ def main() -> int:
     _gateway_transport_diag(_gw_acc, out_dir, io_proc=_io)
     _record_final_state_digest(manifest_path, state)
     _close_csv()
-    rate = n_steps / (time.time() - t_wall)
+    rate = (n_steps - start_step) / (time.time() - t_wall)
     if _spmd_persistent:
         # The honest cost lines (codex batch4 HIGH): (1) FULL-STATE layout
         # flips the persistent lane actually performed (the old wrapper does
@@ -7826,19 +8436,24 @@ def main() -> int:
         _builder_pulls = (host_pull_ledger()["surface_slice_pulls"]
                           - _ledger0["surface_slice_pulls"])
         _slice_pulls = _pers_res.leaf_slice_pulls + _builder_pulls
+        # Per-step rates use THIS LEG's step count: the counters above were
+        # zeroed at leg start, so dividing by the absolute n_steps would
+        # under-report a resumed leg's cost (codex r1 LOW).
+        _leg_steps = max(1, n_steps - start_step)
         print(f"[spmd-persistent] full-STATE gathers={_pers_res.gathers} "
-              f"shards={_pers_res.shards} over {n_steps} steps "
-              f"({_pers_res.gathers / max(1, n_steps):.4f} gathers/step; "
-              f"wrapper lane would be {n_steps} + {n_steps})", flush=True)
+              f"shards={_pers_res.shards} over {_leg_steps} steps this leg "
+              f"({_pers_res.gathers / _leg_steps:.4f} gathers/step; "
+              f"wrapper lane would be {_leg_steps} + {_leg_steps})", flush=True)
         print(f"[spmd-persistent] LEAF host transfers (NOT in the full-STATE "
               f"count above): 2-D surface-slice pulls={_slice_pulls} "
-              f"({_slice_pulls / max(1, n_steps):.2f}/step; {_builder_pulls} "
+              f"({_slice_pulls / _leg_steps:.2f}/step; {_builder_pulls} "
               f"from the forcing builders), surface-slice "
               f"write-backs={_pers_res.leaf_slice_writes}, FULL-3D leaf "
               f"gathers={_pers_res.leaf_full_gathers} "
               f"uploads={_pers_res.leaf_full_uploads} (WOA nudge / spin-up "
               f"drag while active + diag-cadence u,v).", flush=True)
-    print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
+    print(f"[done] {n_steps - start_step} steps this leg (absolute step "
+          f"{n_steps}) @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0
         print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "

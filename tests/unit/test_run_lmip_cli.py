@@ -12,9 +12,15 @@ def test_land_surface_scheme_dispatch():
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     from legoesm.land.canopy.config import CLMMLCanopyConfig
 
-    # Default is SimpleSEB (byte-identical to no flag).
+    # Default is the TWO-LEAF CANOPY since 2026-08-20 (the simplified scheme is
+    # academic-only: its evaporation runs at potential with stomata off and its
+    # humidity gradient self-extinguishes with them on).
     default = build_config_from_args(_parse_args(["--lat", "45.0"])).land
-    assert isinstance(default.surface_scheme, SimpleSEBConfig)
+    assert isinstance(default.surface_scheme, TwoLeafCanopyConfig)
+    # and the simplified scheme still arrives when explicitly selected
+    seb = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--land-surface-scheme", "simple_seb"])).land
+    assert isinstance(seb.surface_scheme, SimpleSEBConfig)
 
     two = build_config_from_args(
         _parse_args(["--lat", "45.0", "--land-surface-scheme", "two_leaf"])).land
@@ -50,10 +56,11 @@ def test_clm_ml_subflags_flow_to_config():
 
 
 def test_clm_ml_subflags_ignored_without_clm_ml():
-    """CLM-ML sub-flags on a non-clm_ml scheme don't change the (SEB) config."""
+    """CLM-ML sub-flags on a non-clm_ml scheme don't change the config."""
     from legoesm.land.surface_scheme import SimpleSEBConfig
     cfg = build_config_from_args(_parse_args([
-        "--lat", "45.0", "--clm-ml-pft", "13"])).land
+        "--lat", "45.0", "--land-surface-scheme", "simple_seb",
+        "--clm-ml-pft", "13"])).land
     assert isinstance(cfg.surface_scheme, SimpleSEBConfig)
 
 

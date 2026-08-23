@@ -1252,6 +1252,11 @@ class _LockExchangeCfg:
     T_reference_C: float
     S_uniform: float
     front_longitude: float  # radians
+    # Part of the LockExchangeConfig contract the initialiser reads. Present
+    # with the shipped default so this stand-in stays a faithful stand-in: a
+    # missing field here would push the initialiser into a getattr fallback,
+    # i.e. a silent default in production code to keep a test's stub happy.
+    front_width_deg: float = 0.0
 
 
 def _load_source_mesh():

@@ -183,7 +183,12 @@ def _read_frames(prof_dir: Path, *, expect_case: str | None = None):
 _CASE_ALIASES: dict[str, frozenset[str]] = {
     "bomex": frozenset({"bomex"}),
     "rico": frozenset({"rico"}),
-    "dycoms": frozenset({"dycoms", "dycoms_rf01", "dycoms_rf02", "dycomsii"}),
+    # "dycoms_rf02" is deliberately NOT here. It used to be, so a genuine
+    # RF02 reference -- a DRIZZLING case with a 795 m inversion and 55 cm^-3
+    # droplets -- was accepted as RF01's, which is the same class of silent
+    # substitution the ASTEX relabelling fixed. RF02 is its own case below.
+    "dycoms": frozenset({"dycoms", "dycoms_rf01", "dycomsii"}),
+    "rf02": frozenset({"rf02", "dycoms_rf02"}),
     "gabls1": frozenset({"gabls1"}),
     # run_spectral_cbl.py labels its output "wangara", but the case it
     # integrates is Nieuwstadt CBL_N91 (theta = 300 K under an 800 m

@@ -52,6 +52,7 @@ from legoesm.driver.model_driver import ModelDriver
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.stomata import StomataConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.clm_surface_map import (
     load_clm_surface, download_clm_surfdata, _nearest_regrid,
 )
@@ -127,6 +128,14 @@ def setup_driver(args):
     # Farquhar stomata (enabled + differland carbon + a prescribed carbon state) make
     # Vc_max25/g1/LCMA active.  Thermal/hydraulics stay the per-cell CLM maps.
     pipe.land_ml_cfg = pipe.land_ml_cfg._replace(
+        # PINNED to the scheme whose parameters this trainer fits.  The library
+        # default is now the two-leaf canopy, which reads CANOPY properties
+        # (rz0m x canopy height, band albedos) and NOT the per-PFT ``z0`` /
+        # albedo / emissivity on LandSurfaceParams that this trainer optimises —
+        # inheriting it would leave every trained leaf with zero gradient, which
+        # the no-inert-parameters rule treats as a defect, not a nuisance.
+        # Re-targeting this trainer at canopy parameters is a deliberate re-fit.
+        surface_scheme=SimpleSEBConfig(),
         bulk_scheme="most",
         stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"),

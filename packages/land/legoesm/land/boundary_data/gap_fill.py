@@ -11,7 +11,7 @@ Two flavours of the fill:
   - :func:`fill_land_param_gaps` — public, host-side: computes the
     surfdata-covered mask from the gsd via :func:`surfdata_covered`, builds a
     per-scheme bare fallback, and ``jnp.where`` -fills the leaves.  Used at
-    simulation start by :func:`~legoesm.land.boundary_data.init_land_surface_data`.
+    simulation start by the coupled ``ModelDriver``.
   - :func:`gap_fill_tree` — internal, JAX-pure: takes a *precomputed* covered
     mask and bare-fallback tree, so it can run inside a ``lax.scan`` body
     without a host roundtrip.  Used by
@@ -52,9 +52,26 @@ def bare_land_surface_params(ncol: int):
     return p._replace(fC4=jnp.zeros(ncol))
 
 
-def bare_canopy_params(ncol: int) -> CanopyLandParams:
-    """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol."""
+# Bare ground is index 0 of the CLM5 17-PFT axis (CLM5_PFT_NAMES[0]).
+_BARE_PFT_INDEX = 0
+
+
+def bare_canopy_params(ncol: int, *, pft_root_params: dict | None = None) -> CanopyLandParams:
+    """Bare (no-vegetation) :class:`CanopyLandParams` broadcast to ncol.
+
+    ``pft_root_params`` (per-PFT length-17 tables, keys ``root_depth`` /
+    ``theta_wp`` / ``theta_fc``) also fills the optional per-column root fields
+    from the BARE-SOIL row (PFT index 0).  This must MATCH the params being
+    gap-filled: the fallback and the values are combined leaf-by-leaf through a
+    pytree map, so a fallback carrying ``None`` where the params carry an array
+    is a structure mismatch (``None is not a valid value for jnp.array``), not a
+    silent default.
+    """
     full = lambda v: jnp.full(ncol, v)
+    _root_kw = {}
+    if pft_root_params is not None:
+        _root_kw = {k: full(float(np.asarray(v)[_BARE_PFT_INDEX]))
+                    for k, v in pft_root_params.items()}
     return CanopyLandParams(
         LAI=full(0.0), hc=full(HC_MIN_M), fC4=full(0.0), FNonVeg=full(1.0),
         CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
@@ -63,6 +80,7 @@ def bare_canopy_params(ncol: int) -> CanopyLandParams:
         alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
         ALB_VIS=full(ALB_VIS_BARE), ALB_NIR=full(ALB_NIR_BARE),
         emissivity=full(EMISS_BARE), rz0m=full(RZ0M_BARE), rd=full(0.0),
+        **_root_kw,
     )
 
 
@@ -102,7 +120,19 @@ def fill_land_param_gaps(land_params, gsd, f_land=None):
                 f"{ncol}; ravel / grid-column mismatch."
             )
         keep_col = keep_col & (f_land > 0.0)                # surfdata only on driver-land
-    fb = (bare_canopy_params(ncol) if isinstance(land_params, CanopyLandParams)
+    if (isinstance(land_params, CanopyLandParams)
+            and land_params.root_depth is not None):
+        # The bare fallback must structure-match the params leaf-for-leaf, and
+        # this host-side path has no per-PFT tables to fill the root fields
+        # from.  The per-step updater builds its own matching fallback; no
+        # production caller reaches here with per-column roots — fail loudly
+        # rather than guess a value.
+        raise ValueError(
+            "fill_land_param_gaps: land_params carries per-column root fields; "
+            "use make_step_land_params_updater (which builds a matching bare "
+            "fallback from its pft_root_params) instead.")
+    fb = (bare_canopy_params(ncol)
+          if isinstance(land_params, CanopyLandParams)
           else bare_land_surface_params(ncol))
 
     def _fill(v, f):

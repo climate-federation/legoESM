@@ -1,0 +1,30 @@
+{
+  "case": "cbl_nieuwstadt",
+  "reference": "Nieuwstadt et al. (1993) convective-BL LES intercomparison (CBL_N91)",
+  "core": "spectral_les_plane (incompressible pseudo-spectral)",
+  "sgs": "LASD (dynamic Bou-Zeid scale-dependent)",
+  "config": {
+    "grid": "96x96x96",
+    "Lx_m": 3200.0,
+    "Ly_m": 3200.0,
+    "Lz_m": 1600.0,
+    "Q0_K_m_s": 0.06,
+    "zi0_m": 800.0,
+    "hours": 2.0,
+    "dt_s": 1.0,
+    "precision": "float64",
+    "time_scheme": "rk3",
+    "adaptive_cfl": 0.8
+  },
+  "diagnostics": {
+    "z_i_m": 1008.3333333333334,
+    "w_star_m_s": 1.2551945117367576,
+    "sigma_w_over_wstar_max": 0.6788111606862101,
+    "mixed_layer_dtheta_dz_mK_m": 0.0704966971663248,
+    "surface_flux_ratio": 0.861252472914463,
+    "entrainment_flux_ratio": -0.1564213207104235
+  },
+  "gate_passed": true,
+  "note": "surface_flux_ratio uses RESOLVED flux only (0.86); +SGS -> ~1.0. entrainment = flux minimum (inversion base), A_R=0.156. Buoyant path validated.",
+  "date": "2026-07-21"
+}

@@ -1765,11 +1765,15 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
                                                               "+0=0.997559, +1=0.906048); corr 0.997559/ratio 0.996197 "
                                                               "(avt) and corr 0.997559/ratio 0.996196 (avm, "
                                                               "indistinguishable). UNCHANGED."),
-    # legoESM cannot RUN on NEMO's true vertical grid: LEGOESM_NEMO_E3T
-    # defaults to "off" (the wrong e3t_1d ladder) because "both" destabilises
-    # multi-day runs (max|u| 0.66 -> 3 m/s). This is a real defect, and it is
-    # why every fidelity probe must set the env var explicitly -- it has
-    # contaminated three measurements so far.
+    # LEGOESM_NEMO_E3T defaults to "off" (the 1-D e3t_1d ladder) model-wide.
+    # The recorded reason -- that "both" destabilises multi-day runs, max|u|
+    # 0.66 -> 3 m/s -- DID NOT REPRODUCE on 2026-08-21: four 90-day twin arms
+    # from the day-180 restart, differing only in this variable, all ran stable
+    # at 0.633-0.635 m/s peak speed (#1455). It is now an unexplained recorded
+    # observation, not an established defect. What is unchanged is WHY every
+    # fidelity probe must still set the variable explicitly: an inherited
+    # default has contaminated four measurements so far (the count in
+    # precision_gate; this comment previously said three).
     # BLOCKER (2026-07-28, CLOSED): z_coord.t_depth_ref was a 1-D-ladder-ONLY
     # API, so a per-column live gdept_0*(1+r3t) could not be expressed for the
     # PGF (eos_geometric_depth_1d) or ldf_slp (compute_nemo_native_slopes'
@@ -1794,18 +1798,25 @@ MEASUREMENTS: dict[str, tuple[float | None, float | None, str]] = {
         "STABLE on NEMO's true ladder: LEGOESM_NEMO_E3T=both, nemo_dino_kamm_mlf, "
         "5 full years (1800 d, 57600 steps) completed with T in [3.5,26.3] C and "
         "max|u_surf| 0.52 m/s -- no growth (dino_year_screen_fullframe.py). The "
-        "documented blow-up (max|u| 0.66 -> 3 m/s over 20 d) is specific to "
-        "starting FROM A NEMO RESTART, not to the ladder itself, so the scope of "
-        "that defect is narrower than recorded. Ladders are IDENTICAL for k=0..24 "
-        "(top 913 m) and differ only below ~1000 m (up to +15%): NEMO's e3t_0 is "
+        "documented blow-up (max|u| 0.66 -> 3 m/s over 20 d) was thought to be "
+        "specific to starting FROM A NEMO RESTART; SUPERSEDED 2026-08-21 -- four "
+        "90-day arms started from exactly such a restart were all stable at "
+        "0.633-0.635 m/s, so that scoping no longer holds either and the blow-up "
+        "is simply unreproduced (#1455). Ladders are IDENTICAL for k=0..24 "
+        "(down to the 982.4 m level face; 913 m is that level's T-POINT, a "
+        "different thing) and first differ at k=25, by up to 70.4 m at the "
+        "deepest wet level = 14.8% of e3t_1d / 12.9% of e3t_0: NEMO's e3t_0 is "
         "the FINITE-DIFFERENCE gdepw(k+1)-gdepw(k) (ln_e3_dep), e3t_1d the "
         "analytic derivative. CLIMATE EFFECT MEASURED, controlled (same script, "
         "same NEMO reference, ONLY the ladder differs): y5 ACC 67.7 -> 66.2 Sv, "
         "i.e. the CORRECT ladder moves 1.5 Sv FURTHER from NEMO's 91.1. The "
         "hypothesis that this ladder explains the deep-contrast deficit is "
         "FALSIFIED. Still UNMEASURED as a per-element fidelity row (this is a "
-        "stability/climate result, not a term comparison); the restart-start "
-        "instability remains a real open defect."),
+        "stability/climate result, not a term comparison). This string used to "
+        "end 'the restart-start instability remains a real open defect' -- "
+        "WITHDRAWN 2026-08-21 (#1455): four 90-day arms from the day-180 NEMO "
+        "restart, differing only in the ladder, all ran stable at 0.633-0.635 "
+        "m/s peak speed, so the blow-up did not reproduce."),
     # dv's residual is the DEFERRED v-face metric (dy_v vs NEMO e2v): the
     # metric_convention work shipped T/u-face only because vface_zonal_cos_lat
     # is a tested #516 invariant. Metric-substituted, dv closes to 1.000000007.
@@ -3481,10 +3492,19 @@ def check_provenance_scripts_exist(
 #   None  = still genuinely unmeasured     -> UNMEASURED
 BINARY_GATES: dict[str, bool | None] = {
     # From rest, 5 full years on NEMO's true e3t_0 ladder: STABLE, no growth.
-    # But the restart-start blow-up (max|u| 0.66 -> 3 m/s over 20 d) is REAL and
-    # unfixed, so the criterion "legoESM runs on NEMO's actual geometry" is only
-    # half met.  FAILED, not passed -- this row does not get to clear on the
-    # easier half of its own criterion.
+    # The restart-start blow-up (max|u| 0.66 -> 3 m/s over 20 d) DID NOT
+    # REPRODUCE on 2026-08-21 either: four 90-day arms from the day-180 restart,
+    # differing only in the ladder, all stable at 0.633-0.635 m/s peak speed,
+    # the two end arms under fp64 (#1455).  So the DEBT verdict below no longer
+    # rests on "the blow-up is real and unfixed" -- that premise is withdrawn.
+    # It stays False for a NARROWER, still-true reason: a non-reproduction under
+    # one configuration is not a demonstration, and the criterion "legoESM runs
+    # on NEMO's actual geometry" has never been measured FROM A NEMO RESTART
+    # over the multi-year window this scorecard scores. (The 5-year STABLE
+    # result above is from REST, which is the easier half of the criterion --
+    # that is exactly why this row does not clear on it.)  Flipping it to
+    # True would over-claim in the other direction; the row clears when the
+    # discriminating run is done, not before.
     "STABILITY on NEMO true grid (e3t_0)": False,
     # MEASURED 2026-07-30 (coverage_rows_measure.py measure_lbc_lnk, RUN_GDB
     # kt=57601). DINO is zonally re-entrant (usr_def_nam.F90:157 ldIperio=

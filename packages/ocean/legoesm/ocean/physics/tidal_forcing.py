@@ -278,6 +278,16 @@ def _species_geometry(species: int, sin_lat: jnp.ndarray, lat: jnp.ndarray) -> j
     raise ValueError(f"unknown tidal species code {species!r}")
 
 
+def _enabled_constituents(config: TidalForcingConfig):
+    """The constituents this (static) config selects.
+
+    Shared by :func:`tidal_acceleration` and :func:`tidal_acceleration_basis`
+    so the two paths cannot drift apart in which constituents they include.
+    """
+    cfg = config if config is not None else TidalForcingConfig()
+    return [c for c in _CONSTITUENTS if _species_included(c.species, cfg)]
+
+
 def equilibrium_tide_elevation(lat, lon, t_seconds, config: TidalForcingConfig | None = None):
     """Effective equilibrium tidal elevation eta_eq_eff [m] (pure, vectorised).
 
@@ -321,9 +331,9 @@ def equilibrium_tide_elevation(lat, lon, t_seconds, config: TidalForcingConfig |
     sin_lat = jnp.sin(lat)
 
     eta = jnp.zeros(jnp.broadcast_shapes(lat.shape, lon.shape), dtype=dtype)
-    for c in _CONSTITUENTS:
-        if not _species_included(c.species, cfg):
-            continue  # static Python skip -> constituent contributes nothing
+    # Constituent selection goes through the shared helper so this path and
+    # tidal_acceleration_basis cannot drift on WHICH constituents they include.
+    for c in _enabled_constituents(cfg):
         geom = _species_geometry(c.species, sin_lat, lat)
         # Argument omega*t + chi + n*lambda. n=species is the longitude multiplier
         # nu (0 for long-period -> no lon dependence). Westward-propagating bulge.
@@ -430,3 +440,132 @@ def apply_tidal_forcing(du_dt, dv_dt, grid, t_seconds, config: TidalForcingConfi
     if v_mask is not None:
         a_y = a_y * v_mask
     return du_dt + a_x.astype(du_dt.dtype), dv_dt + a_y.astype(dv_dt.dtype)
+
+
+# ==============================================================================
+# Per-substep evaluation: harmonic basis + phase reconstruction
+# ==============================================================================
+#
+# WHY THIS EXISTS. The barotropic substep loop needs the tide at each substep's
+# own time, not frozen at the step's start. Calling :func:`tidal_acceleration`
+# inside the loop would redo the latitude/longitude trigonometry and two C-grid
+# gradients per substep, and the loop runs 2*n_substeps-1 times (up to ~960).
+#
+# The time dependence separates EXACTLY. With the same argument the direct path
+# builds, ``arg = time_phase_c + n_c*lambda`` where
+# ``time_phase_c = mod(omega_c*t + chi_c, 2*pi)``:
+#
+#     cos(arg) = cos(time_phase_c)*cos(n_c*lam) - sin(time_phase_c)*sin(n_c*lam)
+#
+# so eta_eq is a sum of products of a SCALAR function of time and a
+# TIME-INDEPENDENT field. The gradient operators are linear, so the same holds
+# for the acceleration:
+#
+#     a_x(t) = sum_c [ cos(tp_c)*AX_cos_c + sin(tp_c)*AX_sin_c ]
+#
+# with ``AX_cos_c = +g*grad_x(scale*A_c*G_n*cos(n*lam))`` and
+# ``AX_sin_c = -g*grad_x(scale*A_c*G_n*sin(n*lam))`` -- the minus folded in so
+# the hot-path combine is a plain additive tensordot. This is an algebraic
+# identity, NOT an approximation: :func:`tidal_acceleration_at` reproduces
+# :func:`tidal_acceleration` to round-off, which
+# ``test_tidal_forcing.py::TestPerSubstepBasis`` checks against random times out
+# to a year.
+
+
+class TidalBasis(NamedTuple):
+    """Time-independent harmonic basis for the tidal acceleration.
+
+    Built ONCE per outer step; the per-substep cost is then two ``tensordot``
+    contractions per component over the constituent axis.
+
+    ``*_sin`` fields carry the minus sign of the angle-addition identity
+    already, so the reconstruction is ``cos*X_cos + sin*X_sin``.
+    """
+
+    ax_cos: jnp.ndarray     # (n_c, n_lat, n_lon+1)  u-faces
+    ax_sin: jnp.ndarray     # (n_c, n_lat, n_lon+1)
+    ay_cos: jnp.ndarray     # (n_c, n_lat+1, n_lon)  v-faces
+    ay_sin: jnp.ndarray     # (n_c, n_lat+1, n_lon)
+    omega_rad_s: jnp.ndarray    # (n_c,) angular frequencies
+    phase_rad: jnp.ndarray      # (n_c,) reference phases chi_c
+
+
+def tidal_acceleration_basis(grid, config: TidalForcingConfig, *,
+                             g: float = constants.g) -> TidalBasis:
+    """Precompute the time-independent part of the tidal acceleration.
+
+    Evaluated at TRACER points and differentiated with the same canonical
+    C-grid operators :func:`tidal_acceleration` uses, so the two agree by
+    construction rather than by coincidence.
+
+    Built at the grid's own (possibly float64) precision. The CALLER must cast
+    to its working dtype before the result enters a ``scan``/``fori_loop``
+    closure: adding a float64 acceleration to a float32 predictor upcasts the
+    carry and breaks the loop's carry-type invariant.
+    """
+    cfg = config if config is not None else TidalForcingConfig()
+    lat = jnp.asarray(grid.lat2d)
+    lon = jnp.asarray(grid.lon2d)
+    dtype = jnp.result_type(lat.dtype, lon.dtype, jnp.float32)
+    lat = lat.astype(dtype)
+    lon = lon.astype(dtype)
+    sin_lat = jnp.sin(lat)
+    scale = cfg.beta_sal * cfg.love_factor * cfg.amplitude_scale
+
+    ax_c, ax_s, ay_c, ay_s, om, ph = [], [], [], [], [], []
+    for c in _enabled_constituents(cfg):
+        geom = _species_geometry(c.species, sin_lat, lat)
+        amp = scale * c.amplitude_m * geom
+        # The longitude phase n*lambda is the ONLY spatial part of the
+        # argument; chi_c rides with omega*t in the scalar phase (matching
+        # equilibrium_tide_elevation, which reduces omega*t + chi mod 2*pi).
+        eta_cos = amp * jnp.cos(c.species * lon)
+        eta_sin = amp * jnp.sin(c.species * lon)
+        ax_c.append(g * gradient_x_cgrid(eta_cos, grid))
+        ax_s.append(-g * gradient_x_cgrid(eta_sin, grid))
+        ay_c.append(g * gradient_y_cgrid(eta_cos, grid))
+        ay_s.append(-g * gradient_y_cgrid(eta_sin, grid))
+        om.append(c.omega_rad_s)
+        ph.append(c.phase_rad)
+    return TidalBasis(
+        ax_cos=jnp.stack(ax_c), ax_sin=jnp.stack(ax_s),
+        ay_cos=jnp.stack(ay_c), ay_sin=jnp.stack(ay_s),
+        omega_rad_s=jnp.asarray(om), phase_rad=jnp.asarray(ph))
+
+
+def tidal_phase_factors(basis: TidalBasis, t_seconds):
+    """``(cos, sin)`` of the reduced time phase, shape ``(..., n_c)``.
+
+    ``t_seconds`` may be scalar or an array of times (e.g. one per substep),
+    giving a leading time axis.
+
+    THE MODULO MUST HAPPEN HERE, at t's own precision, and it is not optional:
+    ``omega*t`` reaches ~1e5 rad on a long integration, where float32 resolves
+    only ~1e-2 rad of phase. Reducing to [0, 2*pi) first keeps full precision,
+    and once cos/sin are taken the reduction can no longer be recovered. This
+    mirrors what ``equilibrium_tide_elevation`` does inline.
+    """
+    t = jnp.asarray(t_seconds)
+    phase = jnp.mod(t[..., None] * basis.omega_rad_s + basis.phase_rad,
+                    constants.TWO_PI)
+    return jnp.cos(phase), jnp.sin(phase)
+
+
+def tidal_acceleration_from_phase(basis: TidalBasis, cos_phase, sin_phase):
+    """Reconstruct ``(a_x, a_y)`` from precomputed phase factors.
+
+    THE HOT PATH: two contractions per component over the constituent axis, no
+    Python loop and no trigonometry. ``cos_phase``/``sin_phase`` are ``(n_c,)``.
+    """
+    a_x = (jnp.tensordot(cos_phase, basis.ax_cos, axes=1)
+           + jnp.tensordot(sin_phase, basis.ax_sin, axes=1))
+    a_y = (jnp.tensordot(cos_phase, basis.ay_cos, axes=1)
+           + jnp.tensordot(sin_phase, basis.ay_sin, axes=1))
+    return a_x, a_y
+
+
+def tidal_acceleration_at(basis: TidalBasis, t_seconds):
+    """Single-shot reconstruction at one time. Equals
+    :func:`tidal_acceleration` to round-off; used by tests and offline code."""
+    cos_p, sin_p = tidal_phase_factors(basis, t_seconds)
+    return tidal_acceleration_from_phase(basis, cos_p, sin_p)

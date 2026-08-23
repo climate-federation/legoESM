@@ -345,7 +345,8 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
                                use_logp: bool = False,
                                square_domain: bool = True,
                                cfg: dict | None = None,
-                               remap_follows: bool = False) -> list:
+                               remap_follows: bool = False,
+                               stage_hook=None) -> list:
     """The NH D-grid tail (``dyn_core.F90:1403-1543``): ``update_dz_d``
     -> ``Riem_Solver3`` -> ``pe_halo``/``pk3_halo`` -> zh/pkc duo
     exchanges -> ``gz = zh*grav`` -> ``nh_p_grad``.
@@ -411,6 +412,13 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
                     area6[t], rarea6[t], dp0, nh["zs6"][t], nh["zh6"][t],
                     crx, cry, xfx, yfx, nh["ws6"][t], rdt, gs_nh,
                     lim_fac=1.0)
+        if stage_hook is not None:
+            # The two kernels that write zh, observed BETWEEN them:
+            # without this the only way to bisect the phase is to
+            # rebuild it by hand outside, and a hand-built chain is a
+            # second implementation that can differ for its own reasons.
+            stage_hook("S_nh_after_update_dz_d", t,
+                       np.array(nh["zh6"][t], copy=True))
 
         riem_solver3(0, dt, bd, km, akap, cp_air, ptop, nh["zs6"][t],
                      tail_outs[t]["w"], delz6[t], dsw_outs[t]["pt"],
@@ -419,6 +427,9 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
                      nh["peln6"][t], nh["ws6"][t], p_fac, a_imp,
                      use_logp=use_logp, last_call=remap_step,
                      fp_out=False)
+        if stage_hook is not None:
+            stage_hook("S_nh_after_riem_solver3", t,
+                       np.array(nh["zh6"][t], copy=True))
 
         if remap_step:
             pe_halo(nh["pe6"][t], dsw_outs[t]["delp"], bd,

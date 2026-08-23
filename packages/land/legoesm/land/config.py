@@ -13,7 +13,7 @@ from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
-from legoesm.land.surface_scheme import SimpleSEBConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 
 
@@ -76,7 +76,9 @@ class LandConfig(NamedTuple):
     Cd_land: float = 3.0e-3     # Land drag coefficient (constant scheme)
     Ch_land: float = 3.0e-3     # Land heat transfer coefficient (constant)
     beta_min: float = 0.1       # Minimum moisture availability (dry soil)
-    bulk_scheme: str = "constant"  # "constant" or "most"
+    # DEFAULT: Monin-Obukhov, the exchange law the coupled land tile runs;
+    # "constant" is a fixed coefficient for idealized work.
+    bulk_scheme: str = "most"  # "most" or "constant"
     z_ref: float = 10.0           # Reference height for MOST [m]
     bulk_n_iter: int = 5          # MOST iterations
     # Snow/albedo
@@ -91,7 +93,23 @@ class LandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
     # Type hint is ``Any`` because NamedTuple does not support Unions well;
     # dispatch is done via ``isinstance`` inside ``step_land``.
-    surface_scheme: Any = SimpleSEBConfig()
+    # DEFAULT: the two-leaf canopy with Monin-Obukhov surface exchange.
+    #
+    # ``SimpleSEBConfig`` is for ACADEMIC / SIMPLIFIED TESTS ONLY and must not be
+    # a production default (user directive 2026-08-20).  Measured on a
+    # well-watered column, one day, realistic forcing, latent heat in W/m2:
+    #
+    #     simple_seb, stomata off :  405 forest / 283 grass / 194 bare
+    #     simple_seb, stomata on  :  129 forest /   4 grass /   2 bare
+    #
+    # Both are unusable and for opposite reasons.  With stomata off nothing
+    # limits evaporation, so it runs at potential over a soil whose top layer
+    # barely drains.  With stomata on, the Jarvis conductance has NO leaf-area
+    # dependence, so BARE GROUND is throttled by stomata it does not have.  The
+    # two-leaf canopy partitions the cell into canopy and soil and gives each its
+    # own resistance, which is why the LMIP simulations built on it reproduce
+    # observed latent heat and photosynthesis.
+    surface_scheme: Any = TwoLeafCanopyConfig()
     # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
     # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
     # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
@@ -140,7 +158,7 @@ class MultiLayerLandConfig(NamedTuple):
     # and unbiased LE vs energy-closure-corrected obs; well within the published
     # forest-floor range (~1e2-1e3 s/m).
     soil_evap_litter_resistance_s_m: float = 300.0
-    bulk_scheme: str = "constant"
+    bulk_scheme: str = "most"       # see LandConfig.bulk_scheme
     z_ref: float = 10.0
     bulk_n_iter: int = 5
     # Snow/albedo
@@ -176,7 +194,23 @@ class MultiLayerLandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default), ``TwoLeafCanopyConfig``,
     # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
     # ``step_multilayer_land``.
-    surface_scheme: Any = SimpleSEBConfig()
+    # DEFAULT: the two-leaf canopy with Monin-Obukhov surface exchange.
+    #
+    # ``SimpleSEBConfig`` is for ACADEMIC / SIMPLIFIED TESTS ONLY and must not be
+    # a production default (user directive 2026-08-20).  Measured on a
+    # well-watered column, one day, realistic forcing, latent heat in W/m2:
+    #
+    #     simple_seb, stomata off :  405 forest / 283 grass / 194 bare
+    #     simple_seb, stomata on  :  129 forest /   4 grass /   2 bare
+    #
+    # Both are unusable and for opposite reasons.  With stomata off nothing
+    # limits evaporation, so it runs at potential over a soil whose top layer
+    # barely drains.  With stomata on, the Jarvis conductance has NO leaf-area
+    # dependence, so BARE GROUND is throttled by stomata it does not have.  The
+    # two-leaf canopy partitions the cell into canopy and soil and gives each its
+    # own resistance, which is why the LMIP simulations built on it reproduce
+    # observed latent heat and photosynthesis.
+    surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
     # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
@@ -200,3 +234,72 @@ def resolve_land_config(land_mode: str, land_config=None):
     if land_mode == "none":
         return LandConfig()
     return land_config if isinstance(land_config, LandConfig) else LandConfig()
+
+
+# ===========================================================================
+# The land model the baked _TUNED_*_MULTILAYER tables were calibrated under
+# ===========================================================================
+# ``scripts/run/train_multilayer_land_era5.py`` fits EVERY baked multilayer table
+# (albedo, emissivity, snow, soil thermal/hydraulic scales, and the canopy
+# conductance Vc_max25/g1/LCMA) inside this exact configuration.  Both the
+# calibrator and the coupled driver build their tile through this one function,
+# so a run can no longer deploy the tables under different land physics.
+#
+# WHY IT EXISTS (2026-08-19): the coupled AMIP tile ran with ``stomata.enabled``
+# False and no carbon state, so ``compute_effective_beta`` took its third branch
+# (beta = beta_soil) and the baked canopy conductance was INERT — parameters
+# fitted against a stomatal resistance the coupled run did not have.  Flipping
+# ``land_stomatal_beta`` alone was not enough either: without the differland
+# carbon scheme AND a prescribed carbon state the same dispatch falls to Jarvis,
+# a different stomatal model from the Farquhar one the tables were fitted under.
+_CALIB_ML_N_LAYERS = 8
+_CALIB_ML_SOIL_DEPTH_M = 3.0      # total soil-column depth [m]
+_CALIB_ML_SOIL_GROWTH = 1.5       # geometric layer-thickness growth factor [-]
+
+
+def calibrated_multilayer_setup() -> dict:
+    """Mode settings of the multilayer land model the baked tables were fit under.
+
+    Returns a FRESH dict of :class:`MultiLayerLandConfig` field values (never a
+    shared mutable singleton) covering only the non-spatial *mode* choices:
+    surface-exchange law, stomatal/photosynthesis path, soil-column geometry and
+    surface scheme.  The per-cell hydraulics / thermal / albedo maps are NOT here
+    — those already come from the one shared ``clm_multilayer_setup`` bake, which
+    preserves every field returned by this function.
+
+    ``carbon.scheme == "differland"`` selects the Farquhar branch of
+    ``stomata_utils.compute_effective_beta``, but that branch ALSO needs a
+    non-None ``carbon_state`` at the call site; a consumer that applies this
+    setup must seed one (see ``init_carbon_state``), exactly as the calibrator
+    and ``train_coupled_land_era5.py`` do.
+    """
+    return dict(
+        soil_grid=SoilGridConfig(n_layers=_CALIB_ML_N_LAYERS,
+                                 total_depth=_CALIB_ML_SOIL_DEPTH_M,
+                                 growth_factor=_CALIB_ML_SOIL_GROWTH),
+        bulk_scheme="most",
+        stomata=StomataConfig(enabled=True),
+        carbon=CarbonConfig(scheme="differland"),
+        snow_albedo_feedback=True,
+        # simple_seb, because that is what the tables were FITTED under — not
+        # because it is good.  It is structurally broken (its humidity gradient
+        # self-extinguishes) and is no longer the library default.  These tables
+        # must be re-fitted against the two-leaf canopy; until then this records
+        # the scheme they belong to rather than pretending otherwise.
+        surface_scheme=SimpleSEBConfig(),
+    )
+
+
+def apply_calibrated_multilayer(config: MultiLayerLandConfig) -> MultiLayerLandConfig:
+    """Return ``config`` with the calibration land model applied.
+
+    Every other field (per-cell hydraulics, thermal, albedo, Richards, runoff,
+    interception, ...) is carried through untouched.
+    """
+    if not isinstance(config, MultiLayerLandConfig):
+        raise TypeError(
+            "apply_calibrated_multilayer expects a MultiLayerLandConfig, got "
+            f"{type(config).__name__}; the calibrated tables are a MULTILAYER "
+            "bake and have no slab equivalent."
+        )
+    return config._replace(**calibrated_multilayer_setup())

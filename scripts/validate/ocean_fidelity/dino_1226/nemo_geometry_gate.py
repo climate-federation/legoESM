@@ -4,9 +4,15 @@ WHY THIS EXISTS
 ---------------
 On 2026-07-26, days into the #1226 investigation, we found legoESM had been
 building its entire vertical grid from NEMO's ``e3t_1d`` while NEMO integrates
-with ``e3t_0``. Below 2000 m the layer thicknesses were off by up to 12.9% and
-water columns were ~22 m too deep -- in exactly the depth range where the ACC
-deficit is sourced.
+with ``e3t_0``. From k=25 down (top face 982 m -- DINO's rn_hco=1000 m
+re-anchor, not the "~2000 m" this note used to say) the layer thicknesses were
+off by up to 70.4 m, which is 12.9% of e3t_0 and 14.8% of e3t_1d; quote the
+denominator, those are one measurement. In the 75% of columns that reach the
+bottom level this is a pure redistribution -- both ladders sum to the same
+4000.000 m over all 35 wet levels -- but the other 25% stop short, and there the
+1-D ladder put the bottom 70.4-104.2 m too deep (21.9 m unweighted mean over all
+wet columns), in exactly the depth range where the ACC deficit is sourced.
+(Re-measured 2026-08-21, #1455.)
 
 It survived every gate we had:
   * the day-0 twin gate asserts T/S/u/v/eta are BIT-EXACT  -> passes (state is

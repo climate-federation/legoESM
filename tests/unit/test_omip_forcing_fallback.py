@@ -17,7 +17,7 @@ import logging
 
 import pytest
 
-from legoesm.ocean.forcing.core2 import load_core2_nyf
+from legoesm.ocean.forcing.core2 import core2_nyf_path, load_core2_nyf
 from legoesm.ocean.forcing.jra55_do import load_jra55_do
 
 
@@ -46,3 +46,23 @@ def test_jra55_synthetic_fallback_warns(tmp_path, caplog):
         load_jra55_do(1990, cache_dir=tmp_path, allow_synthetic=True)
     assert any("SYNTHETIC" in r.message and "OMIP-2" in r.message
                for r in caplog.records), "missing loud synthetic-fallback warning"
+
+
+def test_core2_nyf_path_is_the_path_the_loader_reads(tmp_path):
+    """``core2_nyf_path`` exists so a run can RECORD which archive it used
+    (codex r8: with --forcing-path unset the location comes from the
+    environment/home, so two identical command lines can read DIFFERENT
+    forcing while the restart fingerprint recorded only ``forcing_path=None``).
+
+    It must therefore agree with the loader EXACTLY.  Proven, not asserted:
+    the loader names the resolved path in its FileNotFoundError.
+    """
+    assert core2_nyf_path(tmp_path) == tmp_path / "nyf.zarr"
+    with pytest.raises(FileNotFoundError) as exc:
+        load_core2_nyf(cache_dir=tmp_path, allow_synthetic=False)
+    assert str(core2_nyf_path(tmp_path)) in str(exc.value)
+
+    # ...and the default (cache_dir=None) resolves somewhere else entirely,
+    # which is the whole reason the resolved path has to be fingerprinted.
+    assert core2_nyf_path() != core2_nyf_path(tmp_path)
+    assert core2_nyf_path().name == "nyf.zarr"

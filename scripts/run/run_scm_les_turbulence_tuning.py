@@ -67,6 +67,9 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics._shared import exner_function  # noqa: E402
 from legoesm.atmosphere.physics.combined import PhysicsConfig  # noqa: E402
+from legoesm.atmosphere.physics.microphysics.config import (  # noqa: E402
+    MorrisonConfig,
+)
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.config import (  # noqa: E402
     TurbulenceConfig,
@@ -108,10 +111,19 @@ TURBULENCE_SCHEMES: tuple[str, ...] = (
 # forcing the SCM cannot reproduce must be refused the same way, not scored.
 _RADIATION_MISMATCH: dict[str, str] = {}
 
-# Cases whose LES is driven by the gSAM `doradsimple` longwave. The SCM arm
-# selects the SAME kernel, so cloud-top radiative cooling is present on both
-# sides. Both decks set `dolongwave = .true., doradsimple = .true.`.
-_SIMPLE_LW_CASES = frozenset({"dycoms", "astex"})
+# Cases whose LES is driven by the gSAM `doradsimple` longwave, so the SCM arm
+# selects the SAME kernel. All three decks set `dolongwave = .true.,
+# doradsimple = .true.`.
+#
+# The KERNEL is shared; its CLOUD term is not, at the default
+# `--microphysics none`. With no condensation the SCM column carries only q_v
+# (measured: the state's tracer dict holds q_v alone), so the kernel sees zero
+# liquid and reduces to its clear-sky term, while the LES has ~0.7 g/kg of
+# liquid and the full cloud-top cooling. This comment previously claimed
+# cloud-top cooling was "present on both sides", which it is not. The
+# difference is identical across the closures being compared, so the ranking
+# stands; it is listed in `known_scm_les_differences` in the output manifest.
+_SIMPLE_LW_CASES = frozenset({"dycoms", "rf02", "astex"})
 
 ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
     sorted(ANALYTIC_SCM_CASES))
@@ -411,13 +423,21 @@ def unimplemented_params(module, config_cls) -> frozenset[str]:
 
 
 def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
-                         microphysics: str = "none",
+                         microphysics: str = "morrison",
+                         n_c_m3: float | None = None,
                          bulk_ch: float | None = None,
                          bulk_ce: float | None = None,
                          surface=None,
                          clubb_prognostic: bool = True,
                          simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
+
+    ``microphysics`` defaults to "morrison", which is what every LES driver in
+    this repo runs today. It is a DEFAULT, not a value derived from the LES
+    configuration -- nothing here reads the driver -- so a case whose LES used
+    a different scheme would silently stop being a like-for-like comparison.
+    ``test_the_les_drivers_still_run_the_scm_default_scheme`` goes red if that
+    ever becomes true.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
     active scheme's surface sub-config. The SCM refuses ``prescribe="fluxes"``
@@ -465,17 +485,42 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
         radiation=(base.radiation._replace(scheme="simple_lw")
                    if simple_lw else _scheme_none(base.radiation)),
         convection=_scheme_none(base.convection),
-        # Held identical across arms either way. "none" means the SCM has no
-        # condensation, so the cloud layer carries supersaturated vapour where
-        # the LES (Morrison) would condense -- a real SCM-vs-LES thermodynamic
-        # difference in the buoyancy, not an artefact of the comparison.
-        microphysics=base.microphysics._replace(scheme=microphysics),
+        # Condensation is ON by default, and by default it is the SAME
+        # scheme the LES runs. It used to default to "none", which left the
+        # single-column cloud layer as supersaturated vapour: no liquid, hence
+        # no buoyancy from condensation and -- for the stratocumulus cases --
+        # no cloud for the shared Stevens longwave to cool from, which is the
+        # entire energy source of those cases. Held identical across arms
+        # either way, so the ranking was never biased between closures; it was
+        # the wrong regime for all of them.
+        microphysics=_microphysics_config(base.microphysics, microphysics,
+                                          n_c_m3),
         gravity_wave_drag=_scheme_none(base.gravity_wave_drag),
     )
 
 
 def _scheme_none(component):
     return component._replace(scheme="none")
+
+
+def _microphysics_config(base, scheme: str, n_c_m3: float | None):
+    """Microphysics sub-config, carrying the case's own droplet concentration.
+
+    ``n_c_m3`` is the value the case's LES driver prescribes (140e6 for DYCOMS
+    RF01, 55e6 for RF02, 100e6 for ASTEX). Morrison runs with a SPECIFIED
+    droplet number rather than a predicted one on both sides, so leaving the
+    library default of 1e8 here would give RF02's single column 100 cm^-3
+    against its LES's 55 -- a factor 5 in autoconversion, and so a different
+    liquid water path feeding the shared longwave.
+
+    A case that prescribes nothing keeps the scheme default, which is what its
+    LES uses too.
+    """
+    cfg = base._replace(scheme=scheme)
+    if scheme != "morrison" or n_c_m3 is None:
+        return cfg
+    morrison = getattr(cfg, "morrison", None) or MorrisonConfig()
+    return cfg._replace(morrison=morrison._replace(Nc_0=float(n_c_m3)))
 
 
 def _assert_arms_differ_only_in_turbulence(configs: dict[str, PhysicsConfig]) -> None:
@@ -850,6 +895,7 @@ def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
     return build_physics_config(
         scheme, prescribed_fluxes=arm.prescribed_fluxes,
         microphysics=args.microphysics,
+        n_c_m3=arm.case.spec.les_n_c_m3,
         simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
         surface=arm.surface, clubb_prognostic=args.clubb_prognostic,
@@ -1304,11 +1350,14 @@ def parse_args(argv=None):
                         "case's own LES z0 (which reproduces the LES u*), and "
                         "is required whenever the case prescribes its surface "
                         "heat flux, since the MOST path would double-count it.")
-    p.add_argument("--microphysics", default="none",
+    p.add_argument("--microphysics", default="morrison",
                    help="microphysics scheme, held identical across arms. "
-                        "'none' means the SCM cannot condense, so its cloud "
-                        "layer is supersaturated vapour where the LES "
-                        "condenses.")
+                        "Defaults to morrison, which is the scheme every LES "
+                        "driver here runs today. 'none' means "
+                        "the SCM cannot condense at all, so its cloud layer "
+                        "is supersaturated vapour where the LES holds liquid "
+                        "and the stratocumulus cases lose their cloud-top "
+                        "radiative cooling entirely.")
     p.add_argument("--surface-flux-to-closure",
                    action=argparse.BooleanOptionalAction, default=False,
                    help="Hand a case deck's PRESCRIBED surface heat/moisture "

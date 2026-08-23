@@ -41,6 +41,14 @@ a card that reads them every step from step 0). ``--bridge-tke`` (TKE closure
 memory) is a SEPARATE, independent caveat/flag -- still cold-start by
 default.
 
+SEASONAL CLOCK (#1455): the analytic DINO surface forcing follows the DAY OF
+YEAR, so a twin bridged from a mid-year NEMO restart must continue NEMO's own
+seasonal clock, not restart the year at zero. This harness reads the offset
+from the restart's ``adatrj`` BY DEFAULT. Setting ``DINO_TWIN_SEASONAL_KT0=0``
+selects the old relative clock (which forces the day-180 twin exactly antiphase
+to NEMO) and prints a loud banner; it exists only to reproduce numbers recorded
+before 2026-08-20, none of which are comparable to NEMO.
+
 Usage
 -----
     python kamm_twin_90d.py <recipe> <out.npz> [--days 90] [--save-3d]
@@ -51,6 +59,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import json
 import os
 import time
 
@@ -204,6 +213,126 @@ def _print_before_bridge_verify(st, before, grid) -> None:
           f"max|d_vb|={d_vb:.3e}", flush=True)
 
 
+def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
+    """Refuse an artifact whose seasonal clock is not the one NEMO is on.
+
+    ``stamped`` is anything with ``__contains__`` and ``__getitem__`` over the
+    stamp names -- an ``npz`` handle or a plain dict.  Returns the pair
+    ``(t0_used, t0_nemo)`` in seconds.
+
+    #1455 and its follow-up.  The first version of this guard rejected only
+    ``t0 == 0``, which let every other manual offset through: an explicit step
+    offset of one stamps 2700 s, still most of a year out of phase with the
+    day-180 restart, and the gate called it a NEMO comparison.  Comparing
+    against the offset read from the restart itself rejects ALL of them.
+    """
+    for name in ("seasonal_t0_seconds", "seasonal_t0_reference_seconds"):
+        if name not in stamped:
+            raise SystemExit(
+                f"{path} carries no {name} stamp -- it predates the seasonal "
+                "clock guard (#1455) and its forcing phase cannot be checked "
+                "against NEMO's. Re-run the twin with the current "
+                "kamm_twin_90d.py.")
+    t0 = float(stamped["seasonal_t0_seconds"])
+    t0_nemo = float(stamped["seasonal_t0_reference_seconds"])
+    if abs(t0 - t0_nemo) > 0.5:
+        raise SystemExit(
+            f"{path} ran with its seasonal forcing at {t0 / 86400.0:.2f} d of "
+            f"the 360-day year, but the NEMO run it is scored against is at "
+            f"{t0_nemo / 86400.0:.2f} d "
+            f"({abs(t0 - t0_nemo) / 86400.0:.2f} d out of phase). That is a "
+            "cross-season comparison, not a fidelity measurement.")
+    return t0, t0_nemo
+
+
+def _restart_elapsed_seconds(path: str) -> float:
+    """Model seconds elapsed at the restart, read from the restart ITSELF.
+
+    NEMO writes both ``adatrj`` (elapsed days) and ``kt`` (step index) into the
+    restart, and ``usrdef_sbc.F90:536`` makes the seasonal phase a function of
+    ``REAL(kt)*rn_Dt``.  Reading ``adatrj`` makes the offset independent of the
+    run's timestep; cross-checking it against ``kt*DT`` catches a restart whose
+    timestep differs from this harness's ``DT``.
+    """
+    import netCDF4 as nc
+    with nc.Dataset(path) as d:
+        for name in ("adatrj", "kt"):
+            if name not in d.variables:
+                raise SystemExit(f"{path}: restart has no '{name}' variable")
+        adatrj = float(np.asarray(d.variables["adatrj"][:]).ravel()[0])
+        kt = float(np.asarray(d.variables["kt"][:]).ravel()[0])
+    t_from_days, t_from_kt = adatrj * 86400.0, kt * DT
+    if not np.isfinite([t_from_days, t_from_kt]).all():
+        raise SystemExit(f"{path}: non-finite adatrj/kt ({adatrj}, {kt})")
+    if abs(t_from_days - t_from_kt) > 0.5 * DT:
+        raise SystemExit(
+            f"{path}: restart adatrj={adatrj} d ({t_from_days:.0f} s) disagrees "
+            f"with kt={kt:.0f} x DT={DT:.0f} s ({t_from_kt:.0f} s) -- the "
+            "restart was written at a different timestep than this harness runs")
+    return t_from_days
+
+
+def seasonal_t0_seconds(restart_path: str) -> float:
+    """Absolute seasonal-clock offset [s] for a twin bridged from ``restart_path``.
+
+    #1455.  DINO's analytic surface forcing is a function of the DAY OF YEAR
+    through the ABSOLUTE step index (``usrdef_sbc.F90:536-547``:
+    ``ztime = REAL(kt)*rn_Dt``), so a twin that restarts its own seasonal year
+    at zero forces legoESM out of phase with the NEMO run it is compared
+    against.  For the canonical ``DINO_00005760_restart.nc`` (day 180 of a
+    360-day year) that offset is EXACTLY antiphase, and it was measured to own
+    99.1% of the day-30 southern surface-density gap (commits 1c03f8311,
+    076217667, afd8e06b6).
+
+    DEFAULT (env unset) is therefore the NEMO clock, read from the restart
+    ITSELF (``adatrj``, cross-checked against ``kt*DT``) -- never hardcoded and
+    never scraped from a filename.  ``DINO_TWIN_SEASONAL_KT0`` (the same knob
+    the clock A/B lane used) remains available to override it:
+
+      unset / "restart"  -> t0 from the restart's own ``adatrj``   [DEFAULT]
+      "0"                -> t0 = 0, the LEGACY relative clock; reproduces
+                            historical (antiphase) numbers ONLY
+      <integer>          -> t0 = <integer> * DT, explicit step offset
+
+    Any non-default selection prints a loud banner, so a log can never be read
+    without knowing which clock produced it.
+    """
+    env = os.environ.get("DINO_TWIN_SEASONAL_KT0")
+    if env is None or env == "restart":
+        t0_sec = _restart_elapsed_seconds(restart_path)
+        source = "restart adatrj" + ("" if env is None else " (explicit)")
+    else:
+        try:
+            kt0 = int(env)
+        except ValueError:
+            raise SystemExit(
+                f"Unknown DINO_TWIN_SEASONAL_KT0={env!r}: expected 'restart' "
+                "(lowercase) or an integer step index") from None
+        if kt0 < 0:
+            raise SystemExit(
+                f"DINO_TWIN_SEASONAL_KT0={kt0} is negative; expected >= 0")
+        t0_sec = kt0 * DT
+        banner = ("LEGACY RELATIVE CLOCK" if kt0 == 0
+                  else f"MANUAL STEP OFFSET kt0={kt0}")
+        source = f"OVERRIDE {banner}"
+        print("\n" + "!" * 78, flush=True)
+        print(f"!! {banner}: DINO_TWIN_SEASONAL_KT0={env}", flush=True)
+        print("!! The seasonal forcing does NOT follow the restart's own "
+              "day-of-year.", flush=True)
+        print("!! This is a HISTORICAL-REPRODUCTION mode (#1455). Numbers "
+              "produced here are", flush=True)
+        print("!! NOT comparable to the NEMO run this twin scores against.",
+              flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"seasonal clock: t_seconds = {t0_sec:.0f}s + (k+1)*{DT:.0f}s  "
+          f"[source: {source}]  "
+          f"(restart is day {(t0_sec / 86400.0) % 360.0:.2f} of the 360-day "
+          f"year, {t0_sec / 86400.0:.2f} d elapsed in total; NEMO logs "
+          f"nday_year = {int(t0_sec // 86400.0) % 360 + 1} at its next step)",
+          flush=True)
+    return t0_sec
+
+
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = False,
                        vmix_scheme: str | None = None,
@@ -258,6 +387,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         # instability arrives through the advecting velocity.
         cfg = dataclasses.replace(cfg, gm_bolus_advection=_ba)
         print(f"ABLATION: gm_bolus_advection={_ba}")
+    _rt = os.environ.get("DINO_RECONCILE_TARGET")
+    if _rt:
+        # NEMO dyn_spg_ts N6 (dynspg_ts.F90:1170): which time-averaged barotropic
+        # mean the 3-D momentum depth-mean is reconciled onto ("velocity_avg" =
+        # primary boxcar; "transport_avg" = un_adv/hu secondary/transport mean).
+        # The confirmation A/B for the barotropic-reconcile term: one variable.
+        cfg = dataclasses.replace(cfg, barotropic_reconcile_target=_rt)
+        print(f"ABLATION: barotropic_reconcile_target={_rt}")
 
     # CRITICAL: st MUST be the NEMO-restart-carrying bridged state (br.state)
     # -- NOT dino_lat_lon_state(...) (the analytic paper-IC rest state), which
@@ -353,6 +490,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
 
@@ -369,7 +507,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
-        use_gm_redi=use_gm_redi,
+        use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement)
 
     if perturb_seed is not None:
@@ -395,6 +533,26 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
                                                   external_tracer_rate=ext))
     else:
         dyn = jax.jit(lambda st: model.step(st, DT, surface_forcing=sf))
+
+    # #1455 SEASONAL CLOCK. Absolute (NEMO's own day-of-year, read from the
+    # bridged restart) by DEFAULT; see seasonal_t0_seconds() for the override.
+    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{restart_file}")
+    # The clock the NEMO run this twin is scored against is actually on, read
+    # from the same restart.  Stamping it next to the clock the twin USED lets
+    # a scorer reject ANY offset that is not NEMO's, not merely t0=0.
+    t0_reference_sec = _restart_elapsed_seconds(f"{run_stepdump}/{restart_file}")
+    # Everything about this run a comparison must hold fixed.  A two-arm A/B
+    # that changes the clock and something else is a confound, and nothing in
+    # the artifact could see it before this stamp existed.
+    run_config = json.dumps({
+        "recipe": recipe, "n_days": int(n_days),
+        "run_traj": run_traj, "run_stepdump": run_stepdump,
+        "restart_file": restart_file,
+        "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
+        "surface_tendency_placement": surface_tendency_placement,
+        "perturb_seed": perturb_seed,
+    }, sort_keys=True)
 
     land_mask = np.asarray(st.land_mask.data)
     n_lat, n_lon = br.geometry.n_lat, br.geometry.n_lon
@@ -423,12 +581,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     for k in range(nsteps):
         if _sf_placement == "leapfrog_rhs":
             st, _ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=(k + 1) * DT,
-                return_rate=True)
+                st, forcing, br.z_coord, cfg, DT,
+                t_seconds=t0_sec + (k + 1) * DT, return_rate=True)
             st = dyn(st, _ext_rate)
         else:
-            st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                     t_seconds=(k + 1) * DT)
+            st = apply_dino_lat_lon_surface_forcing(
+                st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
 
         if (k + 1) % STEPS_PER_DAY == 0:
@@ -482,6 +640,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         day=np.arange(1, n_days + 1, dtype=np.int32),
         blew_up_at_step=(blew_up_at if blew_up_at is not None else -1),
         stable=stable,
+        # #1455: stamp the seasonal-clock offset INTO the artifact so a scorer
+        # can read the one variable under test instead of trusting a filename.
+        seasonal_t0_seconds=np.float64(t0_sec),
+        # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
+        seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
+        run_config=np.str_(run_config),
     )
     for d in snap_days:
         if d in t3d:
@@ -587,8 +751,42 @@ def _smoke_check_vmix_scheme_override():
           f"({base.surface_tendency_placement} -> {_other})")
 
 
+def _provenance_gate() -> None:
+    """Stamp source provenance and REFUSE to run from a dirty tracked tree.
+
+    Added after the 2026-08-19/20 reconciliation (#1455, a009c6812): two runs
+    of this harness at byte-identical committed source differed by 2.5 Sv in
+    day-90 ACC, and the second review's log forensics left "an uncommitted
+    working-tree edit" as the sole surviving candidate -- the difference is
+    unrecoverable because nothing stamped the tree state. Every future run
+    prints the HEAD sha and the tracked-file dirt count; a dirty tree aborts
+    unless LEGOESM_ALLOW_DIRTY=1 is set explicitly (and then the dirt list is
+    printed so the log carries what the tree carried).
+    """
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    sha = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    dirt = subprocess.run(
+        ["git", "-C", repo, "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True).stdout.strip()
+    print(f"PROVENANCE: HEAD={sha} dirty_tracked_files={len(dirt.splitlines())}")
+    if dirt:
+        print("PROVENANCE: dirty tracked files:")
+        for line in dirt.splitlines():
+            print(f"  {line}")
+        if os.environ.get("LEGOESM_ALLOW_DIRTY") != "1":
+            raise SystemExit(
+                "REFUSING to run from a dirty tracked tree (see #1455 "
+                "a009c6812: an uncommitted edit produced an unattributable "
+                "2.5 Sv shift). Commit or stash, or set LEGOESM_ALLOW_DIRTY=1 "
+                "to run anyway with the dirt list stamped in the log.")
+
+
 def main(argv=None):
     args = _parse_args(argv)
+    _provenance_gate()
     if args.recipe == "smoke-check":
         _smoke_check_vmix_scheme_override()
         return

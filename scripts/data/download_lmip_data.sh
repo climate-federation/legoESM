@@ -19,11 +19,20 @@
 #                     to the current dated build; override with --surfdata-url or
 #                     $LEGOESM_SURFDATA_URL.
 #
+#   data/lmip_soil_ic/restart_1985_d000h00.npz — the spun-up 2 deg soil-state IC
+#                     (10-yr 1975-1984 calibrated spin-up end state), DOWNLOADED
+#                     from Zenodo.  Warm-start with run_lmip_biophys.py
+#                     --restart-from; usable ONLY on the 2 deg / 10-layer grid it
+#                     was built on (the loader refuses anything else).  See
+#                     docs/land/lmip_biophys_soil_ic_spinup.md.  Override with
+#                     --soil-ic-url or $LEGOESM_SOIL_IC_URL.
+#
 # Usage:
-#   ./scripts/data/download_lmip_data.sh                       # both, year 1920
+#   ./scripts/data/download_lmip_data.sh                       # all three, year 1920
 #   ./scripts/data/download_lmip_data.sh --year 1919 --year 1920
 #   ./scripts/data/download_lmip_data.sh --crujra-only
 #   ./scripts/data/download_lmip_data.sh --surfdata-only --force
+#   ./scripts/data/download_lmip_data.sh --soil-ic-only
 
 set -euo pipefail
 
@@ -39,6 +48,14 @@ SURFDATA_NAME="legoesm_surfdata_c260716.nc"                      # current dated
 # Zenodo concept DOI 10.5281/zenodo.21087963 (latest = record 21401647); bump the
 # record + name for a new dated build.  Override with --surfdata-url or $LEGOESM_SURFDATA_URL.
 SURFDATA_URL="${LEGOESM_SURFDATA_URL:-https://zenodo.org/records/21401647/files/legoesm_surfdata_c260716.nc}"
+SOIL_IC_NAME="restart_1985_d000h00.npz"
+# Spun-up soil-state IC — Zenodo concept DOI 10.5281/zenodo.21986852 (latest =
+# record 21986853, version DOI 10.5281/zenodo.21986853).  md5 in
+# docs/land/lmip_biophys_soil_ic_spinup.md; bump record + md5 together.
+SOIL_IC_URL="${LEGOESM_SOIL_IC_URL:-https://zenodo.org/records/21986853/files/restart_1985_d000h00.npz}"
+SOIL_IC_MD5="e619b555cf6bd018a19ac8a52f77b52a"
+# Env-override = different build: drop the md5 pin (magic check still applies).
+if [[ -n "${LEGOESM_SOIL_IC_URL:-}" ]]; then SOIL_IC_MD5=""; fi
 CRUJRA_SRC="${LEGOESM_CRUJRA_SRC:-/glade/campaign/cesm/cesmdata/inputdata/atm/datm7/atm_forcing.datm7.CRUJRA.0.5d.c20260129/three_stream}"
 # Public CESM inputdata mirror of the same three CLM datm streams, 1901-2023, no
 # credentials.  Used when the glade directory is not mounted -- which is every
@@ -50,16 +67,21 @@ CRUJRA_URL="${LEGOESM_CRUJRA_URL:-https://svn-ccsm-inputdata.cgd.ucar.edu/trunk/
 FORCE=0
 DO_CRUJRA=1
 DO_SURFDATA=1
+DO_SOIL_IC=1
 declare -a YEARS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force)         FORCE=1 ;;
-        --crujra-only)   DO_SURFDATA=0 ;;
-        --surfdata-only) DO_CRUJRA=0 ;;
+        --crujra-only)   DO_SURFDATA=0; DO_SOIL_IC=0 ;;
+        --surfdata-only) DO_CRUJRA=0; DO_SOIL_IC=0 ;;
+        --soil-ic-only)  DO_CRUJRA=0; DO_SURFDATA=0 ;;
         --crujra-src)    CRUJRA_SRC="$2"; shift ;;
         --crujra-url)    CRUJRA_URL="$2"; shift ;;
         --surfdata-url)  SURFDATA_URL="$2"; shift ;;
+        # A non-default URL is a different build: drop the md5 pin (magic
+        # check still applies).
+        --soil-ic-url)   SOIL_IC_URL="$2"; SOIL_IC_MD5=""; shift ;;
         --prefix)        PREFIX="$2"; shift ;;
         --suffix)        SUFFIX="$2"; shift ;;
         --year)          YEARS+=("$2"); shift ;;
@@ -146,6 +168,43 @@ if [[ $DO_SURFDATA -eq 1 ]]; then
         mv "$dest.partial" "$dest"
         echo "  [done] $dest ($(du -h "$dest" | cut -f1))"
         verify_netcdf "$dest" || true
+    fi
+fi
+
+# --- soil-state IC: download the spun-up 2 deg land restart from Zenodo ---
+verify_soil_ic() {
+    # .npz is a zip: magic "PK".  Catches truncated transfers / HTML error pages.
+    local path="$1"
+    if [[ "$(head -c 2 "$path")" != "PK" ]]; then
+        echo "  [err]  $path is not an .npz (zip magic missing)" >&2; return 1
+    fi
+    # md5 pinned to the published Zenodo build (md5sum on Linux, md5 on macOS);
+    # empty pin (custom URL) = magic check only.
+    [[ -z "$SOIL_IC_MD5" ]] && return 0
+    local got=""
+    if command -v md5sum >/dev/null 2>&1; then got=$(md5sum "$path" | cut -d' ' -f1)
+    elif command -v md5 >/dev/null 2>&1; then got=$(md5 -q "$path")
+    else echo "  [warn] no md5 tool; checksum not verified" >&2; return 0; fi
+    if [[ "$got" != "$SOIL_IC_MD5" ]]; then
+        echo "  [err]  md5 mismatch for $path: got $got want $SOIL_IC_MD5" >&2
+        return 1
+    fi
+}
+
+if [[ $DO_SOIL_IC -eq 1 ]]; then
+    SOIL_IC_DIR="$DATA_DIR/lmip_soil_ic"
+    mkdir -p "$SOIL_IC_DIR"
+    dest="$SOIL_IC_DIR/$SOIL_IC_NAME"
+    if [[ -s "$dest" && $FORCE -ne 1 ]] && verify_soil_ic "$dest"; then
+        echo "=== soil IC: [skip] $dest already present ($(du -h "$dest" | cut -f1)) ==="
+    else
+        echo "=== soil IC download -> $dest ==="
+        echo "  [get]  $SOIL_IC_URL"
+        curl --fail --location --retry 3 --retry-delay 5 \
+             --show-error --silent --output "$dest.partial" "$SOIL_IC_URL"
+        verify_soil_ic "$dest.partial" || { rm -f "$dest.partial"; exit 4; }
+        mv "$dest.partial" "$dest"
+        echo "  [done] $dest ($(du -h "$dest" | cut -f1))"
     fi
 fi
 

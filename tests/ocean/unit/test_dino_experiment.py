@@ -349,7 +349,9 @@ class TestDINORecipes:
             "eos": "nemo_seos", "eos_depth": "geometric",
             "vertical_coordinate": "masked_zco",          # ln_zco_nam, full-step
             "vmix_scheme": "tke", "tke_momentum_visc_bg": 1.2e-4,  # rn_avm0
-            "convection_smooth_transition": False, "convection_n2_mode": "adiabatic",
+            # nemo_bn2 = the exact eosbn2 bn2 the zdfevd trigger consumes
+            # (eosbn2.F90:1459-1466); see the card comment's retraction.
+            "convection_smooth_transition": False, "convection_n2_mode": "nemo_bn2",
             "convection_n2_threshold": -1e-12,            # zdfevd
             "bottom_drag_scheme": "nemo_quadratic",       # ln_non_lin
             "tracer_advection": "fct2",                   # nn_fct=2

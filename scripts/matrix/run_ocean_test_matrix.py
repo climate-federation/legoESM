@@ -198,6 +198,14 @@ MATCHED_TRACER_ADV = "tvd"  # limited scheme: no dispersive over/undershoot
 # 3e-12/day at ico3 resolution) -- documented per-grid difference.
 LOCKEX_CGRID_TRACER_ADV = "fct2"
 
+#: Grid families by WHERE THEY KEEP THE CELL AREA. Voronoi meshes expose
+#: ``areaCell``; the structured/curvilinear grids expose ``area``. Keeping
+#: the split explicit is what stops a new grid type silently reading
+#: whichever attribute happens to exist (see ``_rpe_extract``).
+_MPAS_GRID_TYPES = ("mpas", "mpas_regional", "mpas_channel")
+_CELL_AREA_GRID_TYPES = ("latlon", "latlon_regional", "latlon_channel",
+                         "cubed_sphere", "cs_regional", "tripole", "fesom")
+
 # Physical constants for idealized ocean test cases — use canonical values.
 from legoesm import constants as _C
 _A_EARTH = _C.R_earth   # Earth radius (m)
@@ -444,6 +452,13 @@ def _build_test_matrix() -> list[TestCase]:
             "lat_north": +0.018,
             "lon_west": 0.0,
             "lon_east": 0.576,
+            # The lock is released at the CHANNEL MIDPOINT. The default front
+            # sits on the prime meridian, which on this domain is the western
+            # wall: measured, exactly ONE of the 66 columns (the wall column
+            # at -0.0045) was cold and the other 65 warm, so the arm was a
+            # uniform 30 degC box and the bounds and mixing gates certified a
+            # gravity current that never existed.
+            "front_longitude": 0.288,
             # Petersen geometry has dx ~ 1 km, sqrt(g*H) ~ 14 m/s, so the
             # default 300 s timestep violates CFL by ~4x and silently
             # damps the gravity current. Use 30 s to match Veros peer.
@@ -480,11 +495,73 @@ def _build_test_matrix() -> list[TestCase]:
             "beta_S": 0.0,
             "T_ref": 17.5,
             "S_ref": 35.0,
-            # WENO5 tracer advection: less front-diffusive than the
+            # PPM + flux correction. This arm is the ONLY lock-exchange
+            # arm that resolves its own front, and until 2026-08-13 it was
+            # the only FAILING case in the whole ocean-grid suite: it
+            # finished with water at -3.00 degC from an initial range of
+            # exactly [5, 30], which is not a tolerance question, it is
+            # water that cannot exist.
+            #
+            # It ran WENO5, chosen for being "less front-diffusive than the
             # default TVD scheme, comparable in sharpness to Veros's
-            # superbee flux limiter. A diffused front weakens the local
-            # density gradient that drives the gravity current.
-            "tracer_advection": "weno5",
+            # superbee flux limiter". Sharpness was the right thing to
+            # want and the wrong property to select on: WENO5 is
+            # essentially-non-oscillatory, NOT monotonicity-preserving, and
+            # superbee -- the scheme it was being matched to -- is a TVD
+            # limiter that cannot create a new extremum.
+            #
+            # MEASURED 2026-08-13, one variable, this arm, everything else
+            # in this registration held fixed. Final T range against the
+            # initial [5.00, 30.00], and the spurious-mixing number the
+            # case exists to report:
+            #
+            #   scheme     T range [degC]      RPE_rel
+            #   weno5      -3.00 .. 31.77      6.536e-06   FAIL
+            #   tvd        -0.40 .. 30.00      9.832e-06   FAIL
+            #   superbee   -2.99 .. 30.00      8.889e-06   FAIL
+            #   ppm_fct     5.00 .. 30.00      6.261e-06   PASS
+            #   fct2        5.00 .. 30.00      6.852e-06   PASS
+            #
+            # The flux LIMITERS all undershoot; only the flux-CORRECTED
+            # schemes are bounded. That is the expected split: tvd and
+            # superbee are one-dimensional limiters applied direction by
+            # direction, and the multi-dimensional combination of monotone
+            # sweeps is not itself monotone, whereas FCT corrects the
+            # antidiffusive flux against the local min/max of the whole
+            # stencil. Note tvd and superbee produce NO overshoot above
+            # 30.00 while still undershooting by 5.4 and 8.0 degC -- the
+            # one-sidedness is what shows the limiter is working in each
+            # sweep and the combination still is not.
+            #
+            # THE SAME CONSTANT THE GLOBAL LAT-LON ARM USES. This case's
+            # global sibling already runs LOCKEX_CGRID_TRACER_ADV, and the
+            # benchmark doc already states the policy this arm had drifted
+            # from: "Zalesak FCT class on latlon + tripole ... Dim-split
+            # TVD is not multi-D monotone on distorted curvilinear cells;
+            # certified FCT is." The channel arm's run_kwargs overrode that
+            # with weno5, and the regional grid branch does not inherit the
+            # global one's default, so the choice has to be written here --
+            # but it is written as the shared constant, not a second
+            # literal, so the two lock-exchange lanes cannot drift apart
+            # again.
+            #
+            # ppm_fct measured 9% lower spurious mixing (6.261e-6 vs
+            # 6.852e-6) and is equally bounded, so it is the better arm on
+            # the diagnostic alone; matching the family was judged worth
+            # more than 9% of an already-small number. Revisit with a
+            # deliberate one-line change if the mixing number becomes the
+            # binding term.
+            # NOT a vertical-CFL artefact, and the FCT schemes are not
+            # masking one. dz = 1 m and dt = 30 s put CFL_v = 1 at only
+            # 0.033 m/s, so an unstable vertical operator was the obvious
+            # competing explanation (GLM-5.2 ranked it first). PERTURBATION
+            # TEST, weno5, only dt changed: 30 s -> -3.00 degC, 15 s ->
+            # -2.92, 7.5 s -> -2.88. A 4x reduction in dt moves the
+            # undershoot by 4%, where a CFL mechanism predicts it falling
+            # roughly with dt. The undershoot is a property of the spatial
+            # scheme, so ppm_fct's boundedness is real and not a clip over
+            # a hidden instability.
+            "tracer_advection": LOCKEX_CGRID_TRACER_ADV,
             # WENO5 momentum advection: removes the intrinsic dissipation
             # of the vector_invariant scheme that can damp the baroclinic
             # mode on this small, sharply-stratified geometry.
@@ -1666,6 +1743,37 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
 # File writers
 # ---------------------------------------------------------------------------
 
+def _arm_provenance() -> dict[str, str]:
+    """What produced THIS arm: the commit, whether that tree was dirty, and
+    the interpreter.
+
+    Written per arm because nothing else records it.  Comparing file
+    modification times across arms was the previous stand-in, and it is not
+    one: rerunning a single case hours later against different code leaves the
+    spread narrow, while copying with timestamps preserved, clock skew between
+    nodes and archive extraction each defeat it from the other side.  A
+    commit that is compared arm to arm cannot be defeated that way.
+
+    ``--dirty`` is part of it deliberately: pinning the import path to this
+    checkout does not make this checkout CLEAN, and uncommitted edits in the
+    pinned copy reproduce the very incident the pin exists to prevent -- with
+    the pin now lending it credibility.
+    """
+    import subprocess
+    import sys
+
+    here = str(Path(__file__).resolve().parent)
+    try:
+        out = subprocess.run(
+            ["git", "-C", here, "describe", "--always", "--dirty", "--abbrev=12"],
+            capture_output=True, text=True, timeout=30)
+        commit = out.stdout.strip() if out.returncode == 0 else "unknown"
+    except Exception:                       # noqa: BLE001 — provenance only
+        commit = "unknown"
+    return {"provenance_commit": commit or "unknown",
+            "provenance_python": sys.executable}
+
+
 def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                        *, diag: dict | None = None,
                        blowup_info: dict | None = None):
@@ -1695,6 +1803,7 @@ def _write_results_txt(output_dir: Path, rows: dict[str, Any],
                     "notes": f"{blowup_str}; last clean: {original_notes}"}
         else:
             rows = {**rows, "notes": blowup_str}
+    rows = {**rows, **_arm_provenance()}
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
@@ -3242,6 +3351,20 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         "S_3d": S_3d,
         "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
+    if mesh is not None:
+        # SURFACE SPEED, ALWAYS -- one cell-shaped velocity field so the
+        # arm can be compared against the structured one. The lat-lon
+        # extractor has always written speed_sfc and this one did not, so
+        # the cross-grid velocity row was silently absent from every
+        # comparison: the reports read "velocity agrees" when velocity had
+        # never been looked at (2026-08-13). Level 0 only; the full 3-D
+        # reconstruction below stays behind include_velocity_3d because it
+        # costs one solve per level.
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity as _rcv
+        _ue0, _vn0 = _rcv(state.u.data[:, 0], mesh)
+        result["speed_sfc"] = np.sqrt(
+            np.asarray(_ue0, dtype=np.float64) ** 2
+            + np.asarray(_vn0, dtype=np.float64) ** 2)
     if include_velocity_3d and mesh is not None:
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
         u_edge = np.asarray(state.u.data, dtype=np.float64)  # (nEdges, nlev)
@@ -3256,6 +3379,11 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         result["u_3d"] = u_cc
         result["v_3d"] = v_cc
         result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
+        # Reuse level 0 rather than reconstructing it a second time: the
+        # surface block above already did this solve, and the loop has now
+        # redone it at k=0 (codex 2026-08-13). Same value, one less Perot
+        # reconstruction per 3-D snapshot.
+        result["speed_sfc"] = result["speed_3d"][..., 0]
         
         # Add vertical velocity if available (for future MPAS implementation)
         if hasattr(state, "w"):
@@ -3609,7 +3737,14 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
             return _extract_spectral_ocean(s, grid)
         return extract_fn
     elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
-        _mesh = grid if include_velocity_3d else None
+        # The mesh goes in ALWAYS. It used to be passed only when the
+        # 3-D velocity reconstruction was requested, which meant the
+        # cheap SURFACE speed could never be produced either -- so the
+        # cross-grid velocity row was blank on every MPAS arm and read as
+        # agreement rather than as "never compared" (2026-08-13).
+        # include_velocity_3d still gates the per-level loop, which is the
+        # part that actually costs.
+        _mesh = grid
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
                                        include_velocity_3d=include_velocity_3d)
@@ -6238,7 +6373,25 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 # parcel height in a minimum-energy sorted state.
 # ===========================================================================
 
-def _init_lock_exchange(state, grid_type, grid, z_coord):
+def _lock_exchange_config(tc):
+    """The case's own ``LockExchangeConfig``, not a fresh default.
+
+    Front position and width are case geometry: the Petersen channel case
+    spans 0 to 0.576 degrees east, so the default front on the prime meridian
+    sits on its WESTERN WALL and the whole channel initialises warm -- no cold
+    water, no gravity current, and a bounded-advection gate that certifies a
+    uniform box.  Reading them from ``run_kwargs`` is what lets a case put the
+    front where its own domain needs it.
+    """
+    import dataclasses
+
+    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
+    names = {f.name for f in dataclasses.fields(LockExchangeConfig)}
+    kw = {k: v for k, v in (tc.run_kwargs or {}).items() if k in names}
+    return LockExchangeConfig(**kw)
+
+
+def _init_lock_exchange(state, grid_type, grid, z_coord, lx_config=None):
     """Initialize lock-exchange: cold dense west / warm light east.
 
     Following Petersen et al. (2015) Fig. 5:
@@ -6256,20 +6409,20 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
     from legoesm.core.field import Field
     from legoesm.ocean.experiments.lock_exchange import (
         LockExchangeConfig as _LXC0)
+    lx = _LXC0() if lx_config is None else lx_config
 
     # SINGLE SOURCE with the FESOM arm's IC and the T_min/T_max_front gates
     # (codex 2026-08-10: hardcoded 5/30 here would silently diverge from the
     # gates' LockExchangeConfig bounds on a config change).
-    T_cold = float(_LXC0().T_cold_C)   # degC (dense side, Petersen 2015)
-    T_warm = float(_LXC0().T_warm_C)   # degC (light side, Petersen 2015)
+    T_cold = float(lx.T_cold_C)        # degC (dense side, Petersen 2015)
+    T_warm = float(lx.T_warm_C)        # degC (light side, Petersen 2015)
 
     # _get_cell_latlon_rad returns RADIANS; LockExchangeConfig.front_longitude
     # is in DEGREES. Convert explicitly -- a radian/degree mix would move the
     # front by a factor of 57.
     lat, lon_rad = _get_cell_latlon_rad(grid_type, grid)
     lon = np.degrees(np.asarray(lon_rad))                       # degrees
-    from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
-    lon_front = float(LockExchangeConfig().front_longitude)     # degrees
+    lon_front = float(lx.front_longitude)                       # degrees
     # Wrapping-aware "west of front", IDENTICAL to
     # lock_exchange._add_temperature_front, so every arm (including FESOM,
     # which is initialised through that helper) starts from the same state.
@@ -6277,7 +6430,33 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
     # a different initial condition from FESOM, and mis-classified points
     # across the dateline.
     dlon = (lon - lon_front + 180.0) % 360.0 - 180.0             # degrees
-    west_of_front = dlon < 0.0
+    # ONE profile for every arm, ramp included: this branch used its own hard
+    # step, so a case asking for a softened front got one on the FESOM arm and
+    # a full-contrast jump here.
+    from legoesm.ocean.experiments.lock_exchange import (
+        lock_exchange_warm_fraction)
+    warm_frac = lock_exchange_warm_fraction(lon, lx)
+    T_profile = T_cold + (T_warm - T_cold) * warm_frac
+
+    # A lock exchange with no lock is not a lock exchange. This case ran for
+    # months with its front on the western wall of a regional channel: one wet
+    # column of sixty-six was cold, so the bounded-advection gate could not
+    # undershoot and the mixing metric had nothing to mix. Both water masses
+    # must be present in the WET domain, or the case measures nothing and must
+    # say so at construction rather than reporting a pass.
+    _wet = (np.asarray(state.land_mask_grid.data
+                       if grid_type == "spectral" else state.land_mask.data)
+            > 0.5)
+    _wf = np.broadcast_to(warm_frac, _wet.shape)[_wet]
+    if _wf.size:
+        _warm_share = float((_wf > 0.5).mean())
+        if not (0.05 <= _warm_share <= 0.95):
+            raise ValueError(
+                f"lock_exchange on {grid_type}: {100 * _warm_share:.1f}% of "
+                f"wet cells are warm, so the domain holds only one water "
+                f"mass and there is no lock to release. The front is at "
+                f"{lon_front} degrees; check it lies inside this case's "
+                f"longitude range.")
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis_3d
@@ -6286,7 +6465,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        T_field = np.where(west_of_front[..., None], T_cold, T_warm) * mask[..., None]
+        T_field = T_profile[..., None] * mask[..., None]
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
         return state._replace(T_hat=Field(new_T_hat))
 
@@ -6310,7 +6489,7 @@ def _init_lock_exchange(state, grid_type, grid, z_coord):
                 T_data[..., k] = T_front * mask
         else:
             for k in range(nlev):
-                T_data[..., k] = np.where(west_of_front, T_cold, T_warm) * mask
+                T_data[..., k] = T_profile * mask
         return state._replace(T=Field(jnp.array(T_data)))
 
 
@@ -6329,16 +6508,33 @@ def _rpe_extract(state, grid_type, grid, z_coord):
         # GaussianGrid exposes grid_area, NOT area (codex 2026-08-08).
         area = np.asarray(getattr(grid, "grid_area", None), dtype=np.float64)
         mask_attr = "land_mask_grid"
-    elif grid_type == "mpas":
+    elif grid_type in _MPAS_GRID_TYPES:
+        # EVERY Voronoi grid, not just the global one. A VoronoiMesh
+        # carries areaCell and NOT area, so a regional or channel mesh fell
+        # through to the else branch below and raised on grid.area -- and
+        # run_lock_exchange calls this diagnostic BEFORE its first step, so
+        # such an arm would have died before integrating rather than
+        # producing a wrong number (codex 2026-08-13, found while scoping a
+        # resolved lock-exchange arm on mpas_regional).
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.areaCell, dtype=np.float64)
         mask_attr = "land_mask"
-    else:
+    elif grid_type in _CELL_AREA_GRID_TYPES:
         T = np.asarray(state.T.data, dtype=np.float64)
         S = np.asarray(state.S.data, dtype=np.float64)
         area = np.asarray(grid.area, dtype=np.float64)
         mask_attr = "land_mask"
+    else:
+        # NOT a silent default. The two families above expose their cell
+        # area under different names, so a new grid type reaching here
+        # would pick one at random; say which name it needs instead.
+        raise ValueError(
+            f"_rpe_extract: unknown grid_type {grid_type!r}. Add it to "
+            f"_MPAS_GRID_TYPES (cell area on .areaCell) or to "
+            f"_CELL_AREA_GRID_TYPES (cell area on .area); do not rely on a "
+            f"fall-through, which reads whichever attribute happens to "
+            f"exist.")
 
     _MISSING = object()
     mask_obj = getattr(state, mask_attr, _MISSING)
@@ -7281,10 +7477,11 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         from legoesm.ocean.dynamics.ocean_model_fesom import (
             create_lock_exchange_state)
         from legoesm.ocean.experiments.lock_exchange import LockExchangeConfig
-        state = create_lock_exchange_state(grid.mesh, LockExchangeConfig())
+        state = create_lock_exchange_state(grid.mesh, _lock_exchange_config(tc))
     else:
         state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+        state = _init_lock_exchange(state, tc.grid_type, grid, z_coord,
+                                    lx_config=_lock_exchange_config(tc))
 
     # Compute initial PE (dynamic, blow-up detector) AND sorted RPE (the
     # actual spurious-mixing metric -- plain PE also moves through the
