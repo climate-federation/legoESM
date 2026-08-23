@@ -58,7 +58,10 @@ from legoesm.core.fv3_duo_sw_core import (
     d_sw5_duo,
     d_sw6_duo,
 )
-from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
+from legoesm.core.fv3_native_dsw_tail_3d import (
+    DUO_TAIL_CFG,
+    require_real_area,
+)
 from legoesm.core.fv3_native_state_3d import (
     field_shape,
     require_no_remap_needed,
@@ -566,37 +569,42 @@ def _ext_scalar_planes_6(planes6, ctx):
 
 
 def nh_exchanged_area6(ctx):
-    """Sentinel-free face-stacked ``area`` with REAL corner-diagonal halos.
+    """The gridstruct's ``area``, face-stacked, EXCHANGING NOTHING.
 
     Twin of the spec's ``nh_exchanged_area6`` (which returns a per-face
     LIST and caches on the ctx): ONE ``(6, i, j)`` stack comes back here
-    (convention C1).  The single-tile gridstruct leaves BIG_NUMBER
-    sentinels in the corner-diagonal halo cells of ``area`` and
-    ``fv_tp_2d``'s inner updates inside ``update_dz_d`` read them; the
-    oracle's ``gridstruct%area`` halos are exchange-filled at grid init,
-    so the six-face NH integration supplies the analog: one A-grid
-    six-face exchange of the area planes.  PLAUSIBLE, in the spec's own
-    words: the Lagrange corner-region fill of an exchanged FIELD may
-    differ from the oracle's own corner-area construction in the last
-    bits; any disagreement will localise to corner-adjacent stencils.
+    (convention C1).
+
+    The NAME is historical and the behaviour it names is gone.  This
+    routine used to run an A-grid six-face exchange over the area planes,
+    on the stated grounds that the gridstruct leaves BIG_NUMBER sentinels
+    in the corner-diagonal halo.  Measured 2026-08-22: on the contexts
+    this path is built with, it does not -- and the exchanged copy was
+    12% wrong in the halo edge strips, which was the whole non-hydrostatic
+    parity gap (6.6116e-04 -> 1.4778e-06 on its removal).  The authority
+    lane's docstring carries the numbers.
+
+    The precondition that deletion rests on -- a real area everywhere --
+    is CHECKED, by the same ``require_real_area`` the authority lane
+    calls, on the static gridstruct arrays before any tracing.  A raw
+    plain builder result does carry the sentinel and is refused here.
 
     Deviations from the spec, each with its reason:
     - No ``ctx["nh_area6"]`` cache: a value cached during one trace is a
       TRACER, and handing it to the next trace is exactly the defect the
-      cache would cause.  The metric is time-invariant and a pure
-      function of static inputs, so XLA constant-folds the whole
-      exchange -- the same work the cache saved.
+      cache would cause.  The metric is a pure function of static inputs,
+      so XLA constant-folds it -- the same work the cache saved.
     - No per-face ``copy``: the spec's ``np.array(..., copy=True)``
       guards a buffer alias that cannot exist on a functional lane
       (sibling deviation D2's rule).
     - ``rarea`` is not returned: the caller takes ``1.0 / area`` (the
       spec's ``ctx["nh_rarea6"]``), so no second cached value exists.
     """
-    # NO EXCHANGE, matching the NumPy authority: the gridstruct's area
-    # already agrees with the oracle at the parity floor in every
-    # region, and exchanging it corrupted the halo by 12% and was the
-    # seat of the NH parity gap (see nh_exchanged_area6's docstring on
-    # the authority lane).
+    # The gridstruct arrays are STATIC (concrete numpy on the ctx), so
+    # this is a build-time check on the same values the authority lane
+    # checks, not a data-dependent branch on a tracer.
+    for t in range(6):
+        require_real_area(ctx.gs6[t]["area"], t)
     return jnp.stack(
         [jnp.asarray(ctx.gs6[t]["area"], dtype=jnp.float64)
          for t in range(6)], axis=0)
@@ -806,8 +814,9 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # update_dz_d / riem_solver3 take the STATIC (is_, ie, js, je, ng)
     # bounds tuple, not the bd object.
     bounds = (bd.is_, bd.ie, bd.js, bd.je, int(ng))
-    # Sentinel-free area/rarea: the spec's nh_exchanged_area6 plus its
-    # ctx["nh_rarea6"], computed here instead of cached (see that twin).
+    # The gridstruct's own area/rarea: the spec's nh_exchanged_area6
+    # (which exchanges nothing) plus its ctx["nh_rarea6"], computed here
+    # instead of cached (see that twin).
     area6 = nh_exchanged_area6(ctx)
     rarea6 = 1.0 / area6
 

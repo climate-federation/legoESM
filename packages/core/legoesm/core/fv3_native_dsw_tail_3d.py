@@ -309,6 +309,36 @@ def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
         exchange_agrid_scalar_halos(planes6, t, ctx["n"], ctx["ng"])
 
 
+def require_real_area(area, face: int) -> None:
+    """Refuse an ``area`` plane that still carries the builder's sentinel.
+
+    Deleting this module's own halo exchange of the area is safe only
+    because the contexts this path is built with carry a real area over
+    the whole lattice.  That is TRUE of the bounded gridstruct the oracle
+    parity driver uses and of the six-face context's plain lane, which
+    repairs the corner cells at construction -- and FALSE of a raw plain
+    builder result, which writes ``-BIG_NUMBER`` into the corner-diagonal
+    cells (``fv3_native_gridstruct.py``, the ``area[~cell_ok]`` line).
+
+    So the deletion is a claim about the CALLER, and this is where that
+    claim is checked.  A sentinel reaching ``update_dz_d`` would produce
+    a plausible wrong number rather than an error, which is the failure
+    mode this campaign has paid for twice.  (codex review, 2026-08-23.)
+    """
+    a = np.asarray(area)
+    if not np.all(np.isfinite(a)) or float(a.min()) <= 0.0:
+        raise ValueError(
+            f"nh tail: the area on face {face + 1} is not a real area "
+            f"everywhere (min {float(np.nanmin(a)):.6g}, "
+            f"{int(np.count_nonzero(~np.isfinite(a)))} non-finite). The "
+            f"raw plain gridstruct leaves -BIG_NUMBER in the "
+            f"corner-diagonal halo; build the context through the "
+            f"six-face builder (or the bounded gridstruct), which "
+            f"repairs those cells. This module deliberately does NOT "
+            f"exchange the area -- doing so is what broke the NH parity "
+            f"until 2026-08-22.")
+
+
 def nh_exchanged_area6(ctx: dict) -> list:
     """The gridstruct's ``area``, per face, cached for the NH tail.
 
@@ -345,6 +375,8 @@ def nh_exchanged_area6(ctx: dict) -> list:
         return ctx["nh_area6"]
     a6 = [np.array(np.asarray(ctx["gs6"][t]["area"]), dtype=np.float64,
                    copy=True) for t in range(6)]
+    for _t, _a in enumerate(a6):
+        require_real_area(_a, _t)
     ctx["nh_area6"] = a6
     ctx["nh_rarea6"] = [1.0 / a for a in a6]
     return a6
@@ -411,13 +443,23 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     # A future helper that "improves" it in passing is the defect this
     # assert exists to catch: the exchanged version differed by 12% in
     # the halo and cost three days.
+    # It is a VALUE equality, not a provenance check -- a different array
+    # holding the same numbers passes, which is all this needs to catch
+    # the failure it is here for (a helper that fills or smooths in
+    # passing). rarea is checked with it: it is handed to the same kernel
+    # and a stale one would be just as wrong (codex review, 2026-08-23).
     for _t in range(6):
-        if not np.array_equal(area6[_t], np.asarray(ctx["gs6"][_t]["area"])):
+        _gs_area = np.asarray(ctx["gs6"][_t]["area"])
+        if not np.array_equal(area6[_t], _gs_area):
             raise RuntimeError(
                 f"nh tail: the area handed to update_dz_d on face "
                 f"{_t + 1} is not the gridstruct's own. Any halo fill a "
                 f"configuration needs belongs in the gridstruct builder, "
                 f"not here (see nh_exchanged_area6).")
+        if not np.array_equal(rarea6[_t], 1.0 / area6[_t]):
+            raise RuntimeError(
+                f"nh tail: rarea on face {_t + 1} is not 1/area of the "
+                f"array handed to update_dz_d.")
 
     rdt = 1.0 / dt
     for t in range(6):
