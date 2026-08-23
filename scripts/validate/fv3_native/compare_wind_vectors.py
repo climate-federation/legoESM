@@ -123,14 +123,49 @@ def crop_to_oracle(port2d: np.ndarray, oshape) -> np.ndarray:
     return port2d[di:hi, dj:hj]
 
 
+def verify_manifest(oracle_dir: Path, manifest: Path) -> int:
+    """In-process provenance gate: the oracle dir's dumps must match the committed
+    sha256 manifest for this resolution.  Lives HERE, not only in the sbatch, so
+    the pass token cannot be emitted from an unpinned or fabricated dir even when
+    the comparator is invoked directly.  Returns the number of files verified."""
+    import hashlib
+    base = oracle_dir.name  # run_c12 / run_c48
+    want = {}
+    for line in Path(manifest).read_text().splitlines():
+        h, _, name = line.partition("  ")
+        if name.startswith(base + "/"):
+            want[name.split("/", 1)[1]] = h
+    if not want:
+        raise SystemExit(f"provenance: manifest {manifest} has no '{base}/' "
+                         f"entries -- cannot verify this dump")
+    for fn, exp in want.items():
+        got = hashlib.sha256((oracle_dir / fn).read_bytes()).hexdigest()
+        if got != exp:
+            raise SystemExit(f"provenance FAIL: {base}/{fn} sha256 {got[:12]} "
+                             f"!= committed {exp[:12]} -- refuse to certify")
+    return len(want)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--oracle-dir", required=True,
                     help="dir with extchain_t{1..6}.dat/.mf (vector dump)")
+    ap.add_argument("--verify-manifest",
+                    help="committed sha256 manifest the dumps must match; "
+                         "REQUIRED to emit the parity-pass token")
     ap.add_argument("--n", type=int, default=48)
     ap.add_argument("--ng", type=int, default=3)
     args = ap.parse_args()
     n, ng = args.n, args.ng
+    odir = Path(args.oracle_dir)
+
+    # the pass token requires in-process provenance: without a verified manifest
+    # the comparator refuses to certify (it may still print the numbers).
+    if args.verify_manifest:
+        nfiles = verify_manifest(odir, Path(args.verify_manifest))
+        print(f"provenance OK: {nfiles} dump files match {args.verify_manifest}")
+    else:
+        print("PROVENANCE UNVERIFIED: no --verify-manifest; refusing to certify")
 
     from legoesm.grids.fv3_native_metrics import (
         compute_fv3_native_wind_vectors,
@@ -139,7 +174,7 @@ def main() -> int:
         build_six_face_duo_context,
     )
 
-    orc = load_oracle(Path(args.oracle_dir))
+    orc = load_oracle(odir)
 
     # provenance: refuse an unprovenanced dump.  The norm/orthogonality controls
     # cannot tell a genuine pinned-Fortran dump from a substituted or stale one
@@ -295,9 +330,12 @@ def main() -> int:
 
     print(f"\nworst gated (interior+edge) over all families: "
           f"{max(worst_gate.values()):.4e} (gate {PARITY_FLOOR:.1e})")
-    tag = "OK" if ok else "FAIL"
-    print(f"WIND_VECTOR_PARITY_{tag} n={n}")
-    return 0 if ok else 1
+    # the pass token requires BOTH parity AND verified provenance
+    certified = ok and bool(args.verify_manifest)
+    tag = "OK" if certified else "FAIL"
+    print(f"WIND_VECTOR_PARITY_{tag} n={n}"
+          + ("" if args.verify_manifest else " (UNVERIFIED PROVENANCE)"))
+    return 0 if certified else 1
 
 
 def _oshape_for(fam, orc, ot):
