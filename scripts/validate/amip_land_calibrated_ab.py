@@ -119,8 +119,9 @@ def _maps(args, area, land, rows):
             fig.colorbar(m, ax=ax, shrink=0.85, label=unit if c == 2 else "")
 
     fig.suptitle(
-        f"Land: {args.control} (plants off) vs {args.calibrated} (plants on)"
-        "  —  ocean blanked, 5-day January mean", fontsize=11)
+        f"Land: {args.control} ({args.label_control}) vs "
+        f"{args.calibrated} ({args.label_calibrated})"
+        f"  —  ocean blanked, {args.window}", fontsize=11)
     fig.savefig(args.maps, dpi=110)
     print(f"\nmaps written to {args.maps}")
 
@@ -132,6 +133,15 @@ def main() -> int:
     ap.add_argument("--calibrated", required=True, help="run with it ON")
     ap.add_argument("--maps", metavar="PNG",
                     help="also write comparison maps to this path")
+    # The figure must say what the two arms ACTUALLY differ in. The defaults
+    # describe the pair this was written for (plant model off vs on); any other
+    # pair has to relabel, or the figure claims an experiment nobody ran.
+    ap.add_argument("--label-control", default="plants off",
+                    help="what the control arm is, for the figure title")
+    ap.add_argument("--label-calibrated", default="plants on",
+                    help="what the other arm is, for the figure title")
+    ap.add_argument("--window", default="5-day January mean",
+                    help="the averaging window, for the figure title")
     args = ap.parse_args()
 
     area, land, ocean = _masks(args.root, args.control)

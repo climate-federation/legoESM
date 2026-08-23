@@ -68,9 +68,13 @@ def test_a_discarded_non_finite_newton_step_is_not_convergence():
     _, n_iters, converged = solve_canopy_closure(
         _X0, _bundle(La=jnp.nan), CanopyConfig())
     assert not bool(converged), (
-        "the solver called a discarded (zeroed) Newton step a converged "
+        "the solver called a discarded (zeroed) step a converged "
         "solution — the caller would spend its fluxes as physics")
-    assert int(n_iters) == CanopyConfig().max_iters
+    # The damped least-squares solver bails a non-finite column early via the
+    # damping ceiling (lambda -> lambda_max) rather than running the full
+    # max_iters, so the count is <= the cap, not exactly it.  The invariant that
+    # matters is `not converged`, asserted above.
+    assert int(n_iters) <= CanopyConfig().max_iters
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +95,10 @@ def _state(T0, theta0):
         snow_depth=jnp.zeros(n), snow_age=jnp.zeros(n),
         surface_water=jnp.zeros(n),
     )
+
+
+def _new_state():
+    return _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])  # const-ok: fixed test soil T[K]/moisture
 
 
 def _response(**over):
@@ -133,7 +141,7 @@ def _run(new_state, response, converged=None):
 
 
 def test_a_healthy_step_is_untouched():
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     resp = _response()
     _, (held, held_resp, mask, n_held) = _run(new, resp, converged=jnp.ones(_NCOL, bool))
     for f in new._fields:
@@ -148,7 +156,7 @@ def test_a_healthy_step_is_untouched():
 
 
 def test_a_non_finite_column_is_reverted_and_its_neighbours_are_not():
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     bad_T = new.T_soil.at[1, 0].set(jnp.nan)
     new = new._replace(T_soil=bad_T)
     old, (held, held_resp, mask, n_held) = _run(new, _response())
@@ -177,7 +185,7 @@ def test_a_non_converged_column_is_held_even_though_it_is_finite():
     # The dangerous case is not NaN — it is a FINITE stopped iterate. A canopy
     # closure that hit its iteration cap returns large, plausible-looking fluxes
     # that then drive the soil out of range over the following steps.
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     resp = _response(shflx=jnp.array([40.0, -2040.0, 40.0]),
                      lhflx=jnp.array([60.0, -3231.0, 60.0]))
     old, (held, held_resp, mask, n_held) = _run(
@@ -192,7 +200,7 @@ def test_a_non_converged_column_is_held_even_though_it_is_finite():
 
 
 def test_the_guard_survives_jit():
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     new = new._replace(T_soil=new.T_soil.at[0, 2].set(jnp.inf))
     old = _state([280.0, 281.0, 282.0], [0.30, 0.31, 0.32])
     resp = _response()
@@ -214,7 +222,7 @@ def test_a_bfloat16_leaf_is_still_checked():
     # REGRESSION: the non-finiteness test filtered leaves by ``dtype.kind``,
     # and bfloat16 (an extension dtype) reports kind "V" — so a bfloat16 NaN
     # was skipped entirely and the column was never held (reproduced by review).
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     bf = new.T_soil.astype(jnp.bfloat16).at[1, 0].set(jnp.nan)
     new = new._replace(T_soil=bf)
     old, (held, held_resp, mask, n_held) = _run(new, _response())
@@ -225,7 +233,7 @@ def test_a_bfloat16_leaf_is_still_checked():
 def test_a_nested_carrier_is_held_too():
     # The land state can carry a nested pytree (the multilayer-canopy state).
     # Holding only the top-level array fields left a NaN inside the carrier.
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     good = {"inner": jnp.arange(_NCOL, dtype=float)}
     bad_inner = {"inner": jnp.arange(_NCOL, dtype=float).at[1].set(jnp.nan)}
     old_state = _state([280.0, 281.0, 282.0], [0.30, 0.31, 0.32])._replace(
@@ -249,7 +257,7 @@ def test_carbon_pools_revert_with_the_column():
     # The carbon pools advance from the same rejected surface state, so a
     # column held in the soil but advanced in carbon would carry that
     # inconsistency into the restart file.
-    new = _state([285.0, 286.0, 287.0], [0.33, 0.34, 0.35])
+    new = _new_state()
     new = new._replace(T_soil=new.T_soil.at[1, 0].set(jnp.nan))
     old = _state([280.0, 281.0, 282.0], [0.30, 0.31, 0.32])
     carbon_old = {"C_fol": jnp.array([100.0, 110.0, 120.0])}

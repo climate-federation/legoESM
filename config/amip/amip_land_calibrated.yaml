@@ -1,103 +1,73 @@
-# AMIP land overlay — run the land model the tuned tables were actually fitted to.
-# RUNS ON ANY ATMOSPHERIC GRID. The values below are written for the mesh
-# (Voronoi/MPAS) arms; on a cubed-sphere or lat-lon run, drop the mesh-only key
-# and pass --surface-tiled instead (see the note further down).
+# AMIP land overlay — run the land model the parameters were actually fitted to.
 #
-# WHY THIS FILE EXISTS. The per-PFT land tables baked into the model (albedo,
-# emissivity, snow, soil thermal and hydraulic scales, and the canopy
-# conductance) were all fitted offline inside one specific land model: MOST
-# surface exchange, the bulk surface energy balance, Farquhar stomata on a
-# prescribed leaf carbon, and a 3 m soil column in eight geometrically growing
-# layers. The coupled runs deployed those tables under a DIFFERENT land model —
-# stomata switched off entirely, and a 6.375 m soil column. The canopy
-# conductance the calibration leaned on to set evaporation was not merely
-# mistuned in the coupled run, it was not being used at all.
+# WHAT THIS SELECTS. The biophysics LMIP calibration: a two-leaf canopy with
+# MOST surface exchange, its own Ball-Berry stomata, and a 3 m soil column in
+# ten geometrically growing layers, together with the per-plant-type root depth,
+# wilting point and field capacity, and the snow and glacier albedo settings
+# that calibration produced. Its offline definition is
+# ``templates/land/biophysics/lmip_biophys_2deg.yaml`` — a 10-year, 2-degree
+# CRU-JRA run scored against observed land fluxes.
 #
-# Turning stomata on alone does not repair that. Reaching the Farquhar model
-# needs the stomatal switch AND the carbon scheme AND a leaf-carbon state to
-# read leaf area from; with any of them missing the code takes the Jarvis
-# model instead, which is a different model with different parameters. The
-# single switch below selects all of it at once from one shared definition that
-# the offline calibrator builds from too, so the fitted model and the deployed
-# model cannot drift apart again.
+# WHY. AMIP previously deployed a DIFFERENT calibration — one fitted under the
+# bulk surface energy balance (SimpleSEB) — inside a coupled run. Parameters
+# fitted under one surface scheme and run under another give wrong surface
+# fluxes, which is where the land precipitation bias came from. AMIP no longer
+# has a route to that pairing; the older bake remains in the land package only
+# for reproducing old OFFLINE runs.
 #
-# WHAT YOU MUST REGENERATE BEFORE USING THIS. The soil column is now 3 m rather
-# than 6.375 m, so the existing spun-up land state does not belong to it — the
-# layer count is unchanged, which is exactly why nothing used to complain. Land
-# restarts and coupled checkpoints now record their layer thicknesses and a
-# mismatch is refused. An older file carries no thicknesses: under THIS overlay
-# it is REFUSED (its column cannot be checked and is most likely wrong); a run on
-# the historical column only gets a warning. Re-run the land spin-up on this
-# column and pass the result:
+# THE KEYS BELOW ARE CHECKED, NOT OVERRIDDEN. They overlap the calibration, so
+# stating them here means a typo fails the run instead of quietly changing the
+# land physics. The settings with no config key of their own — soil growth
+# factor, the canopy's intrinsic stomata, the albedo scalars — come from the one
+# shared definition, so the fitted model and the deployed model cannot drift.
 #
-#   # 1. spin up, AT THE RESOLUTION YOUR AMIP RUN USES (the restart loader
-#   #    compares column counts and refuses a mismatch; the shipped spin-up
-#   #    config is resolution 4 = 2562 cells, while the production AMIP config
-#   #    is resolution 5 = 10242, so edit grid.resolution to match)
+# THE SOIL STATE IS NOT INCLUDED, AND MATTERS. The calibration's spun-up soil
+# came from a 2-degree lat-lon run; the restart loader compares column counts
+# and refuses a mismatch, so it cannot be read onto a mesh. Spin the same
+# configuration up on the grid the AMIP run uses, then pass the result:
+#
+#   # NOTE the shipped spin-up config still selects the LEGACY land model
+#   # (SimpleSEB, 8 layers), so its restart carries the wrong soil column and
+#   # THIS run refuses it. The spin-up has to be re-cut on the model below
+#   # before the --land-ic line is usable; until then the run cold-starts.
 #   python scripts/run/run_lmip_biophys.py \
-#       --config config/lmip/amip_mpas4_spinup_calibrated.yaml \
+#       --config <a spin-up config on THIS land model> \
 #       --output-dir results/land/land_spinup_calibrated
-#   # 2. run AMIP with the production config plus these flags (run_amip takes
-#   #    ONE --config, so the overlay's keys go on the command line)
 #   python scripts/run/run_amip.py --config config/amip/amip_production.yaml \
-#       --use-multilayer-land --land-calibrated-physics --land-stomatal-beta \
-#       --land-surface-scheme simple_seb --snow-albedo-feedback \
-#       --mpas-land-beta-soil --multilayer-n-layers 8 \
-#       --multilayer-soil-depth 3.0 \
+#       --use-multilayer-land --land-calibrated-physics --snow-albedo-feedback \
+#       --mpas-land-beta-soil --land-surface-scheme two_leaf \
+#       --multilayer-n-layers 10 --multilayer-soil-depth 3.0 \
 #       --land-ic results/land/land_spinup_calibrated/<restart>.npz
 #
-# An older restart cannot be used: it carries no record of its soil column, and
-# under this overlay the loader refuses one it cannot verify rather than reading
-# the soil profile at the wrong depths.
+# Started cold instead, the soil column is out of balance and the first weeks of
+# land evaporation are the spin-up, not the calibration.
 #
-# ON OTHER GRIDS, PASS --surface-tiled INSTEAD OF THE KEY ABOVE. The land tile
-# hands the atmosphere a surface humidity, and that humidity now carries the
-# canopy conductance as well as the soil moisture — so the fitted plant model
-# reaches the air on a cubed-sphere or lat-lon run too. It needs the mosaic
-# (tiled) surface to do it: the non-tiled path runs one scheme on a blended
-# surface temperature with a saturated humidity, where a plant conductance has
-# nothing to act on, and validation refuses that combination rather than
-# half-applying the switch.
-#
-#   python scripts/run/run_amip.py --grid-type cubed_sphere --surface-tiled \
-#       --turbulence louis --use-multilayer-land --land-calibrated-physics \
-#       --land-stomatal-beta --land-surface-scheme simple_seb \
-#       --snow-albedo-feedback --multilayer-n-layers 8 \
-#       --multilayer-soil-depth 3.0 --land-ic <restart>
-#
-# ONE PART OF THE CHAIN IS STILL NOT MATCHED. The spin-up driver builds its
-# per-plant-type parameters from its own surface dataset, not from the tuned
-# tables the coupled run uses, so the switch above matches the spin-up's PHYSICS
-# but not its PARAMETERS. Routing it through the tuned tables means changing
-# which surface dataset the spin-up reads — a separate decision, not done here.
+# ON A CUBED-SPHERE OR LAT-LON GRID, pass --surface-tiled instead of
+# mpas_land_beta_soil below: the land tile's humidity carries the canopy
+# conductance to the air only through the mosaic surface. The non-tiled path
+# runs one scheme on a blended surface temperature at saturation, where a plant
+# conductance has nothing to act on, and validation refuses that combination
+# rather than half-applying it.
 #
 # STILL UNPROVEN COUPLED. The offline fit says these parameters are unbiased in
-# evaporation and skin temperature; the previous bake did too and then lost two
-# thirds of its tropical evaporation once coupled. Treat the first run with this
-# overlay as one arm of a controlled pair against the current coupled default,
-# changing only this overlay, and read land evaporation, land rain, top-of-
-# atmosphere balance and soil-moisture drift before adopting it.
-#
-# This file carries the same settings as a --config for land-focused runs, and
-# as the durable record of the calibrated land setup. (No template_* keys:
-# run_amip's strict --config loader accepts only argument dests.)
-
+# evaporation and skin temperature. The previous bake said that too and then
+# lost two thirds of its tropical evaporation once coupled. Treat the first run
+# as one arm of a controlled pair against the current default, changing only
+# this overlay, and read land evaporation, land rain, top-of-atmosphere balance
+# and soil-moisture drift before adopting it.
 use_multilayer_land: true
 land_calibrated_physics: true
-
 # WITHOUT THIS THE MESH LANE THROWS THE PLANT MODEL AWAY. The mesh (Voronoi/MPAS)
-# lane solves the land tile's humidity and fluxes and then publishes them to the
+# lane solves the land tile's humidity and fluxes and publishes them to the
 # atmosphere only under this switch; with it off the atmosphere keeps a static
-# evaporation efficiency of 0.6 and the fitted canopy conductance changes the
-# land tile's own temperature and nothing else. Validation refuses a calibrated
-# mesh run without it.
+# evaporation efficiency of 0.6 and the canopy changes the land tile's own
+# temperature and nothing else. Validation refuses a calibrated mesh run
+# without it.
 mpas_land_beta_soil: true
-
-# The keys below overlap the calibrated model and are CHECKED against it rather
-# than silently overridden, so this file has to state them and a typo fails the
-# run instead of quietly changing the land physics.
-land_stomatal_beta: true
-land_surface_scheme: simple_seb
-multilayer_n_layers: 8
+land_surface_scheme: two_leaf
+# The canopy carries its own Ball-Berry stomata; a coupled stomatal beta on top
+# throttles the same conductance twice, and the calibration ran without one.
+land_stomatal_beta: false
+multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 snow_albedo_feedback: true
