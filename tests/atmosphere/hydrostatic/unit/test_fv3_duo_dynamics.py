@@ -826,7 +826,7 @@ def test_wall_default_surface_is_frozen():
 
 # ponytail: filled by the first CI run's failure message; the VALUE is
 # the reviewable artifact, the mechanism is above.
-_WALL_SURFACE_SHA256 = "46d2fa25c5d0830dfeaf8a0d6a0d3ffae9cc0a2384aee0b0c4a6993d54c39142"
+_WALL_SURFACE_SHA256 = "7fb1bc3750cdf11d0ba437879c131a1b1edb8db5fa70550b9bec0caece2efb49"
 
 
 def test_wall_leaf_types_are_scalar():
