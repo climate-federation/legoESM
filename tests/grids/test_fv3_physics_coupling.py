@@ -137,9 +137,7 @@ def test_differentiable_wrt_the_tendency(case):
 # ---- Held-Suarez forcing: vectorized authority vs an independent loop ref ----
 from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
     held_suarez_tend,
-    _HS_DTY, _HS_DTZ, _HS_KAPPA, _HS_P0, _HS_T0, _HS_T_EQ0, _HS_H0, _HS_SDAY,
-    _HS_KA_DAYS, _HS_KS_DAYS, _HS_KF_DAYS, _HS_SIGB, _HS_MS_DAYS, _HS_ST_DAYS,
-    _HS_REF_RADIUS, _HS_STRAT_LAPSE, _HS_P_MESO, _HS_P_STRAT, _HS_TAU_PREF,
+    _HS_KAPPA, _HS_P_MESO, _HS_P_STRAT,   # column build + regime-coverage guard only
 )
 
 NPZ = 20
@@ -167,17 +165,20 @@ def _hs_column(n=5, npz=NPZ, seed=1):
 
 
 def _hs_ref(pt, ua, va, delp, peln, pkz, pe, lat, pdt, strat, radius=R_E):
-    """Independent triple-loop transcription of Held_Suarez_Tend (hswf.F90)."""
+    """Independent triple-loop transcription of Held_Suarez_Tend (hswf.F90).
+
+    Constants are FROZEN LOCAL literals (hswf.F90), not the production _HS_*, so a
+    wrong port coefficient cannot corrupt both sides together (codex finding)."""
     ny, nx, npz = pt.shape
+    sday = 86400.0; akap = 2.0 / 7.0; p0 = 1.0e5
     rdt = 1.0 / pdt
-    rr = radius / _HS_REF_RADIUS
-    kf = _HS_SDAY * rr
-    rkv = pdt / (_HS_KF_DAYS * kf); rka = pdt / (_HS_KA_DAYS * kf)
-    rks = pdt / (_HS_KS_DAYS * kf)
-    t_ms = _HS_MS_DAYS * rr; t_st = _HS_ST_DAYS * rr
-    tau = (t_st - t_ms) / np.log(_HS_TAU_PREF)
-    rms = pdt / (t_ms * _HS_SDAY); rmr = 1.0 / (1.0 + rms)
-    rsgb = 1.0 / (1.0 - _HS_SIGB); ap0k = 1.0 / _HS_P0 ** _HS_KAPPA
+    rr = radius / 6371.0e3
+    kf = sday * rr
+    rkv = pdt / (1.0 * kf); rka = pdt / (40.0 * kf); rks = pdt / (4.0 * kf)
+    t_ms = 10.0 * rr; t_st = 40.0 * rr
+    tau = (t_st - t_ms) / np.log(100.0)
+    rms = pdt / (t_ms * sday); rmr = 1.0 / (1.0 + rms)
+    rsgb = 1.0 / (1.0 - 0.7); ap0k = 1.0 / p0 ** akap
     algpk = np.log(ap0k)
     t_dt = np.zeros((ny, nx, npz)); u_dt = np.zeros((ny, nx, npz))
     v_dt = np.zeros((ny, nx, npz))
@@ -189,25 +190,25 @@ def _hs_ref(pt, ua, va, delp, peln, pkz, pe, lat, pdt, strat, radius=R_E):
             la = lat[j, i]
             for k in range(npz - 1, -1, -1):
                 plk = plc[k]; ptk = pt[j, i, k]; pkzk = pkz[j, i, k]
-                tey = ap0k * (_HS_T_EQ0 - _HS_DTY * np.sin(la) ** 2)
-                tez = _HS_DTZ * (ap0k / _HS_KAPPA) * np.cos(la) ** 2
-                if strat and plk <= _HS_P_MESO:
-                    dz = _HS_H0 * np.log(plc[k + 1] / plk)
-                    teq[k] = teq[k + 1] - _HS_STRAT_LAPSE * np.cos(la) * dz
+                tey = ap0k * (315.0 - 60.0 * np.sin(la) ** 2)
+                tez = 10.0 * (ap0k / akap) * np.cos(la) ** 2
+                if strat and plk <= 1.0e2:
+                    dz = 7.0 * np.log(plc[k + 1] / plk)
+                    teq[k] = teq[k + 1] - 2.25 * np.cos(la) * dz
                     t_dt[j, i, k] += ((ptk + rms * teq[k]) * rmr - ptk) * rdt
-                elif strat and _HS_P_MESO < plk <= _HS_P_STRAT:
-                    dz = _HS_H0 * np.log(plc[k + 1] / plk)
-                    relx = pdt / ((t_ms + tau * np.log(0.01 * plk)) * _HS_SDAY)
-                    teq[k] = teq[k + 1] + _HS_STRAT_LAPSE * np.cos(la) * dz
+                elif strat and 1.0e2 < plk <= 100.0e2:
+                    dz = 7.0 * np.log(plc[k + 1] / plk)
+                    relx = pdt / ((t_ms + tau * np.log(0.01 * plk)) * sday)
+                    teq[k] = teq[k + 1] + 2.25 * np.cos(la) * dz
                     t_dt[j, i, k] += relx * (teq[k] - ptk) / (1.0 + relx) * rdt
                 else:
                     sigl = plk / ps
-                    f1 = max(0.0, (sigl - _HS_SIGB) * rsgb)
+                    f1 = max(0.0, (sigl - 0.7) * rsgb)
                     tq = tey - tez * (np.log(pkzk) + algpk)
-                    teq[k] = max(_HS_T0, tq * pkzk)
+                    teq[k] = max(200.0, tq * pkzk)
                     rkt = rka + (rks - rka) * f1 * np.cos(la) ** 4
                     t_dt[j, i, k] += rkt * (teq[k] - ptk) / (1.0 + rkt) * rdt
-                    sf = (sigl - _HS_SIGB) * rsgb * rkv
+                    sf = (sigl - 0.7) * rsgb * rkv
                     if sf > 0.0:
                         tmp = sf / (1.0 + sf) * rdt
                         u_dt[j, i, k] -= (ua[j, i, k] + u_dt[j, i, k]) * tmp

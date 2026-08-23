@@ -190,7 +190,7 @@ def held_suarez_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
             # bottom (k=npz-1) is always tropospheric so its clamped pl_{k+1}
             # is discarded by the meso/strat masks.
             plk1 = pl[:, :, k + 1] if k + 1 < npz else plk
-            dz = _HS_H0 * (np.log(plk1) - np.log(plk))
+            dz = _HS_H0 * np.log(plk1 / plk)
             meso = plk <= _HS_P_MESO
             stratm = (~meso) & (plk <= _HS_P_STRAT)
             teq_m = teq[:, :, k + 1] - _HS_STRAT_LAPSE * clat * dz
