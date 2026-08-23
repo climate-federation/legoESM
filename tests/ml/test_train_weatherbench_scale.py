@@ -23,6 +23,7 @@ from scripts.run.train_weatherbench_scale import (
     ScaleConfig,
     _apply_smoke_overrides,
     _clamped_warmup,
+    _rank_aware_warmup,
     _uses_reachability_freeze,
     build_scale_config_from_args,
 )
@@ -68,6 +69,44 @@ def test_clamped_warmup_degenerate_single_step():
     # total_steps == 1 (one epoch over a single local sample) is the case that
     # previously produced decay_steps == 0 and crashed create_optimizer.
     assert _clamped_warmup(1, 1000) == 0
+
+
+def test_rank_aware_warmup_is_identity_at_single_rank():
+    # Serial runs must be byte-identical to the pre-fix behaviour: the bug only
+    # manifests multi-rank, so nproc==1 may not move the warmup.
+    for desired in (0, 1, 200, 500, 1000):
+        assert _rank_aware_warmup(desired, 1) == desired
+
+
+def test_rank_aware_warmup_holds_the_schedule_fraction_constant():
+    # THE FIX (#1464): warmup_steps is sized against the global schedule
+    # (n_epochs * n_global_samples) but total_steps is per-rank
+    # (n_epochs * n_global_samples / nproc).  Passing warmup_steps through
+    # verbatim made the warmup FRACTION scale with nproc — 17% at 1 rank became
+    # ~69% at 4 and ~100% at 16.  With the rank-aware conversion the fraction is
+    # invariant.  Reverting the fix (using the raw desired) makes this FAIL.
+    n_epochs, n_global = 24, 240        # the T106 config
+    desired = 1000                      # its committed warmup_steps
+    global_total = n_epochs * n_global
+    target_fraction = desired / global_total          # ~0.174
+    for nproc in (1, 2, 4, 8, 16):
+        per_rank_total = n_epochs * (n_global // nproc)
+        warmup = _clamped_warmup(
+            per_rank_total, _rank_aware_warmup(desired, nproc))
+        frac = warmup / per_rank_total
+        assert abs(frac - target_fraction) < 0.02, (
+            f"nproc={nproc}: warmup fraction {frac:.3f} drifted from the "
+            f"configured {target_fraction:.3f}")
+        assert per_rank_total - warmup >= 1        # cosine decay stays positive
+
+
+def test_rank_aware_warmup_non_negative_and_never_inflates():
+    # Guard rails: never negative, and dividing never produces MORE warmup than
+    # the raw count (the clamp handles the upper bound; this handles the helper).
+    for desired in (0, 1, 7, 200, 1000):
+        for nproc in (1, 3, 4, 16):
+            w = _rank_aware_warmup(desired, nproc)
+            assert 0 <= w <= desired
 
 
 @pytest.mark.parametrize("total_steps,desired", [(100_000, 1000), (4000, 1000)])

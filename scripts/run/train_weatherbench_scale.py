@@ -319,6 +319,31 @@ def _clamped_warmup(total_steps: int, desired_warmup: int) -> int:
     return min(max(0, int(desired_warmup)), max(0, total_steps - 1))
 
 
+def _rank_aware_warmup(desired_warmup: int, nproc: int) -> int:
+    """Rank-invariant per-rank warmup from a GLOBAL-schedule ``warmup_steps``.
+
+    ``total_steps`` fed to the cosine schedule is PER-RANK
+    (``n_epochs * len(local)`` with ``len(local) == n_global_samples / nproc``),
+    but ``warmup_steps`` in the YAML is sized against the GLOBAL schedule
+    (``n_epochs * n_global_samples``).  Passed through verbatim it is therefore
+    ``nproc`` times too large as a FRACTION of the per-rank schedule — 17% of
+    the schedule at 1 rank becomes 69% at 4 ranks and ~100% at 16, where the
+    learning rate never leaves warmup and never enters cosine decay (the #1464
+    T106 defect, and the same latent bug in the other multi-rank WB configs).
+
+    Dividing by ``nproc`` restores the configured warmup FRACTION at any rank
+    count: ``warmup/(n_epochs*len(local)) == warmup_steps/(n_epochs*n_global)``.
+    At a single rank this is the identity, so serial runs are unchanged; only
+    the multi-rank schedule — where the bug lives — moves.  The result still
+    passes through :func:`_clamped_warmup` for the optax positivity constraint.
+
+    A YAML that intends a literal per-rank warmup can set ``nproc``-scaled
+    values, but the global-fraction reading matches every committed WB config
+    and the trainer's own ``n_global_samples`` fingerprint.
+    """
+    return max(0, round(max(0, int(desired_warmup)) / max(1, int(nproc))))
+
+
 def _apply_smoke_overrides(cfg: ScaleConfig, yml: dict) -> ScaleConfig:
     """Shrink ``yml`` (in place) + ``cfg`` to a fast single-GPU wiring check.
 
@@ -537,11 +562,16 @@ def _main(argv=None):
     # below fingerprints the schedule: a run that changed its warmup or its
     # step count must not silently continue on restored Adam moments.
     total_steps = cfg.n_epochs * max(len(local), 1)
-    # Honor the YAML warmup but clamp it safely below total_steps (see
-    # ``_clamped_warmup``): the cosine schedule needs decay_steps > 0, which the
-    # tiny --smoke run otherwise violates.
+    # Make the YAML warmup RANK-AWARE before clamping: warmup_steps is sized
+    # against the global schedule but total_steps is per-rank, so a literal
+    # count balloons to ~nproc x its intended fraction (see
+    # ``_rank_aware_warmup``; identity at nproc==1).  Then clamp safely below
+    # total_steps (``_clamped_warmup``): the cosine schedule needs
+    # decay_steps > 0, which the tiny --smoke run otherwise violates.
     warmup = _clamped_warmup(
-        total_steps, yml.get("warmup_steps", TrainingConfig().warmup_steps))
+        total_steps,
+        _rank_aware_warmup(
+            yml.get("warmup_steps", TrainingConfig().warmup_steps), nproc))
 
     # --- resume from the last completed epoch --------------------------------
     # Restored BEFORE the freeze, and the frozen set is restored WITH the
