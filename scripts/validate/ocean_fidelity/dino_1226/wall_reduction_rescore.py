@@ -66,7 +66,6 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 _OUT = REPO_ROOT / "results" / "dino_1455_rescore"
 
 import wall_term_discriminators as W  # noqa: E402
-
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 
 # The bars the original verdicts were taken against (PREREG_wall_drag_and_een).
@@ -269,21 +268,21 @@ def main(argv=None) -> int:
     _chg = abs(dwm - dw) / dw if dw else float("nan")
     _order = (int(np.floor(np.log10(dw))) == int(np.floor(np.log10(dwm)))
               if dw > 0 and dwm > 0 else False)
-    print(f"  WHAT REFUTED FRICTION WAS THE MAGNITUDE, NOT THE SHAPE. The e3")
+    print("  WHAT REFUTED FRICTION WAS THE MAGNITUDE, NOT THE SHAPE. The e3")
     print(f"  weighting legoESM omits changes the viscous tendency by "
           f"{dw:.2e} relative published")
     print(f"  and {dwm:.2e} mass-weighted -- a {_chg * 100:.0f}% move that "
           f"stays {'in the same order of magnitude' if _order else 'in a DIFFERENT order of magnitude'}.")
-    print(f"  A ~1e-4 relative effect cannot carry a 34% transport error "
-          f"whatever its spatial")
-    print(f"  concentration, so the refutation SURVIVES on the leg that "
-          f"carried it. The enrichment")
+    print("  A ~1e-4 relative effect cannot carry a 34% transport error "
+          "whatever its spatial")
+    print("  concentration, so the refutation SURVIVES on the leg that "
+          "carried it. The enrichment")
     print(f"  leg genuinely moves ({de:.2f}x -> {dem:.2f}x, crossing the "
           f"{BAR_ENRICH}x bar) and is reported")
-    print(f"  rather than buried: on the corrected weighting this difference "
-          f"IS wall-concentrated,")
-    print(f"  it is simply far too small to matter. Part C is exactly zero "
-          f"under both weightings.")
+    print("  rather than buried: on the corrected weighting this difference "
+          "IS wall-concentrated,")
+    print("  it is simply far too small to matter. Part C is exactly zero "
+          "under both weightings.")
     print()
     print("  The other friction legs are immune by CONSTRUCTION, not by "
           "measurement: exact-count")
@@ -336,7 +335,7 @@ def self_test(C) -> int:
         f"the verdict rule does not reach all four branches: {seen}. The "
         "'big enough, not enriched' branch is the one the EEN term lands in "
         "on the registered statistic, so it must be exercised.")
-    print(f"(i) all FOUR verdict branches are reachable:")
+    print("(i) all FOUR verdict branches are reachable:")
     for v in sorted(seen):
         print(f"      {v}")
     # (ii) the 2-D immunity claim must be a MEASURED property of the array,
