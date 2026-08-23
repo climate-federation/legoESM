@@ -71,6 +71,10 @@ mkdir -p "$OUTDIR"; echo "outdir=$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR=""   # a cached compile does not re-dump
 rc=0
 
+# ONE place names the device count. The reservation asks for it, the launcher
+# asks for it, and the model is told it -- and the first version of this arm
+# had them disagree, so the model asked for four devices inside a two-GPU
+# launch and both arms died before compiling anything.
 NDEV="${NDEV:-4}"
 
 run_dump () {  # n_lat n_lon tag p_lon
@@ -85,7 +89,7 @@ run_dump () {  # n_lat n_lon tag p_lon
   LEGOESM_LATLON_PACKED_EXCHANGE=1 LEGOESM_LATLON_SPMD_FUSED_HALO=1 \
   LEGOESM_LATLON_HALO_NOCOMM=0 JAX_ENABLE_X64=0 \
   XLA_FLAGS="--xla_gpu_shard_autotuning=false --xla_dump_to=$OUTDIR/hlo_$TAG" \
-    timeout 1200 srun --export=ALL --nodes=1 --ntasks=1 --gpus-per-node=2 \
+    timeout 1200 srun --export=ALL --nodes=1 --ntasks=1 --gpus-per-node="$NDEV" \
       --gpu-bind=none --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_atm_latlon_spmd_scaling.py \
       --n-devices "$NDEV" --mode strong \
