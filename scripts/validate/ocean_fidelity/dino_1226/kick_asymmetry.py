@@ -379,6 +379,104 @@ class Arm:
         return nemo_completed(self.nemo_dir_fn(i), self.nemo_log_glob)
 
 
+def paired_arm_calibration():
+    """The arm effect measured PAIRED, on NEMO, at day 10 -- the calibration
+    the ratio-of-spreads table cannot deliver.
+
+    WHY THIS EXISTS (mechanism review, finding e): the within-model arm ratio
+    built from two 4-member ensemble spreads carries a null band of ~3.1x, so a
+    measured 1.39 is 0.57 sigma from 1.0 and 0.83 sigma from the predicted
+    2.25 -- indistinguishable from BOTH. Quoting it as "the closed form
+    confirmed" is the same error the amended decision rule forbids, in the
+    opposite direction.
+
+    The design is PAIRED -- the same seed produces the same draw in both arms
+    -- so the paired ratio throws away none of that power. For each seed:
+
+        ||T_perturbed - T_control||_2  at day 10, two-level arm
+        -------------------------------------------------------
+        ||T_perturbed - T_control||_2  at day 10, one-level arm
+
+    In the linear regime this is exactly 2(1-g)/(1-2g) with no ensemble noise
+    at all. Day 10 is chosen because the perturbation is ~1e-7 relative there,
+    i.e. deeply linear, and because NEMO writes a full fp64 restart at day 10.
+
+    NEMO ONLY. legoESM's day-10 snapshots differ from their control in 2 cells
+    of 372,528 -- the single-precision storage floor -- so the same statistic
+    is not computable on that side without an fp64 dump that does not exist.
+    The L2 norm is used rather than max|dT| deliberately: the argmax cell moves
+    between arms, which makes the max a meaningless paired statistic.
+    """
+    from rebuild_nemo_restart import rebuild
+    kt = G.KT_RESTART + 10 * G.STEPS_PER_DAY
+
+    def _tn(run_dir):
+        return np.asarray(rebuild(f"{run_dir}/DINO_{kt:08d}_restart_*.nc",
+                                  ["tn"])["tn"], dtype=np.float64)
+
+    out = {}
+    ctl1, ctl2 = _tn(V.nemo_dir(0)), _tn(nemo_dir(0))
+    for i in range(1, N_MEM):
+        d1 = _tn(V.nemo_dir(i)) - ctl1
+        d2 = _tn(nemo_dir(i)) - ctl2
+        for v in (d1, d2):
+            if not np.isfinite(v).all():
+                raise SystemExit("non-finite day-10 tn difference -- a finding")
+        n1, n2 = float(np.linalg.norm(d1)), float(np.linalg.norm(d2))
+        out[member_name(i)] = (n1, n2, float("nan") if n1 == 0 else n2 / n1,
+                               np.unravel_index(int(np.abs(d1).argmax()),
+                                                d1.shape))
+    return out
+
+
+def paired_arm_table(predicted):
+    print("\n" + "=" * 110)
+    print("PAIRED ARM CALIBRATION -- NEMO, day 10, same seed in both arms")
+    print("=" * 110)
+    print("The ratio-of-spreads arm table below carries a ~3.1x null band at "
+          "n=4 and cannot resolve 2.25 from 1.0.")
+    print("This one is PAIRED and carries no ensemble noise: in the linear "
+          "regime it IS the closed-form factor.")
+    print("legoESM cannot be measured this way -- its day-10 snapshots sit at "
+          "the single-precision storage floor.")
+    try:
+        rows = paired_arm_calibration()
+    except (OSError, SystemExit) as exc:
+        print(f"  (not computable: {exc})")
+        return None
+    print(f"{'member':<14}{'||dT|| one-level':>20}{'||dT|| two-level':>20}"
+          f"{'ratio':>12}{'ratio/pred':>12}   argmax cell (one-level)")
+    vals = []
+    for name, (n1, n2, r, am) in rows.items():
+        vals.append(r)
+        print(f"{name:<14}{n1:>20.6e}{n2:>20.6e}{r:>12.4f}"
+              f"{r / predicted:>12.4f}   {am}")
+    med = float(np.median(vals))
+    print(f"{'MEDIAN':<14}{'':>20}{'':>20}{med:>12.4f}{med / predicted:>12.4f}"
+          f"   (closed form {predicted:.4f})")
+    # THE REGIME CHECK, printed next to the number it invalidates. The closed
+    # form is a LINEAR statement, so the paired ratio only measures it if the
+    # day-10 perturbation is still linear in the draw. Two independent seeds
+    # whose norms agree to several significant figures AT THE SAME CELL are
+    # not linear in the draw -- they have been captured by one structure, and
+    # the ratio above is then measuring capture, not the filter.
+    norms = sorted(n for v in rows.values() for n in v[:2])
+    argmaxes = {tuple(int(x) for x in v[3]) for v in rows.values()}
+    print("\n  REGIME CHECK -- is day 10 still linear in the draw?")
+    print(f"    the six ||dT|| values span {norms[0]:.3e} .. {norms[-1]:.3e}, "
+          f"a factor {norms[-1] / norms[0]:.0f}")
+    print(f"    distinct argmax cells across the {len(rows)} one-level "
+          f"members: {len(argmaxes)} of {len(rows)}  {sorted(argmaxes)}")
+    close = [(a, b) for a in rows for b in rows if a < b
+             and rows[a][0] > 0
+             and abs(rows[a][0] / rows[b][0] - 1.0) < 1e-3]
+    for a, b in close:
+        print(f"    {a} and {b} agree in ||dT|| to "
+              f"{abs(rows[a][0] / rows[b][0] - 1.0):.1e} relative -- "
+              f"independent draws do not do that")
+    return med
+
+
 def recorded_arm():
     """The RECORDED one-level arm: the 360-day verdict members, at the source
     revision they ran at, scored at day 90.
@@ -982,6 +1080,7 @@ def main(argv=None):
     med_r1, med_r2, med_f = ratio_table(rows_one, rows_two, excluded)
     predicted = predicted_arm_ratio(asselin_gamma_lego())
     med_al, med_an = arm_table(rows_one, rows_two, excluded, predicted)
+    med_paired = paired_arm_table(predicted)
     flips, persists = decay_table(rows_one, rows_two)
     med_rec = recorded_cross_check(rows_one, excluded)
 
@@ -995,7 +1094,12 @@ def main(argv=None):
     print(f"  two-sided band for R2                        = <= "
           f"{R2_TWO_SIDED:.0f}")
     print(f"  closed-form arm ratio, per model              = "
-          f"{predicted:.4f}   measured: lego {med_al:.4g}, NEMO {med_an:.4g}")
+          f"{predicted:.4f}")
+    print(f"    ratio-of-spreads (null band ~3.1x, resolves nothing): "
+          f"lego {med_al:.4g}, NEMO {med_an:.4g}")
+    if med_paired is not None:
+        print(f"    PAIRED, NEMO, day 10 (no ensemble noise):            "
+              f"{med_paired:.4f}")
     if med_rec is not None:
         print(f"  cross-check: the RECORDED one-level arm (older revision) "
               f"gives median R1 = {med_rec:.4g}")
