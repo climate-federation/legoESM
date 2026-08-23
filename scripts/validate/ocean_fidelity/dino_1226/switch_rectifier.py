@@ -406,31 +406,30 @@ def census():
     # its collapse of the gain spread would then prove something other than
     # "the discontinuity is the rectifier". This is the arm's validity check
     # and it belongs next to the arm, not in a reviewer's head.
-    sharp = float(ed.sigmoid_sharpness)
-    width = 1.0 / sharp
     import jax
-    sig = np.asarray(jax.nn.sigmoid(-n2 * sharp), dtype=np.float64)
     K_hard = np.where(n2 < thr, ed.K_conv, ed.K_bg)
-    K_soft = ed.K_bg + (ed.K_conv - ed.K_bg) * sig
-    inside = (np.abs(n2) < width) & wet
-    ratio = np.where(K_hard > 0, K_soft / np.maximum(K_hard, 1e-300), np.nan)
-    print("\n  ARM VALIDITY -- is `evd_smooth` a softened switch or a "
+    print("\n  ARM VALIDITY -- is a smoothed arm a softened switch, or a "
           "different ocean?")
-    print(f"    sigmoid_sharpness={sharp:.3g} -> transition half-width in N2 "
-          f"~{width:.3e} s^-2")
-    print(f"    wet interfaces inside that width: {int(inside.sum())} "
-          f"({100 * inside.sum() / max(int(wet.sum()), 1):.3f}%)")
-    print(f"    K_smooth / K_hard over wet interfaces: median "
-          f"{np.nanmedian(ratio[wet]):.4g}, "
-          f"90th pct {np.nanpercentile(ratio[wet], 90):.4g}, "
-          f"max {np.nanmax(ratio[wet]):.4g}")
-    frac_moved = float(np.mean(np.abs(ratio[wet] - 1.0) > 0.1))
-    print(f"    wet interfaces whose diffusivity moves by >10%: "
-          f"{100 * frac_moved:.3f}%")
-    print("    (a one-variable 'softened switch' moves only interfaces NEAR "
-          "the threshold; a large share")
-    print("     moving means the arm changed the mixing field itself and its "
-          "result is not about the edge)")
+    print("    A one-variable 'softened switch' moves only interfaces NEAR the "
+          "threshold. A large share")
+    print("    moving means the arm changed the MIXING FIELD itself, and its "
+          "result is not about the edge.")
+    print(f"    {'arm':<14}{'sharpness':>12}{'ramp width in N2':>19}"
+          f"{'inside width':>14}{'median K/K_hard':>18}{'moved >10%':>12}")
+    for arm_name, sharp in (("evd_smooth", 1e6), ("evd_sharp", 1e13)):
+        width = 1.0 / sharp
+        sig = np.asarray(jax.nn.sigmoid(-n2 * sharp), dtype=np.float64)
+        K_soft = ed.K_bg + (ed.K_conv - ed.K_bg) * sig
+        inside = (np.abs(n2) < width) & wet
+        ratio = np.where(K_hard > 0, K_soft / np.maximum(K_hard, 1e-300), np.nan)
+        moved = float(np.mean(np.abs(ratio[wet] - 1.0) > 0.1))
+        print(f"    {arm_name:<14}{sharp:>12.0e}{width:>19.3e}"
+              f"{100 * inside.sum() / max(int(wet.sum()), 1):>13.3f}%"
+              f"{np.nanmedian(ratio[wet]):>18.4g}{100 * moved:>11.3f}%")
+    print("    (the sharp arm's ramp is narrower than the switch's own "
+          "-1e-12 offset, so away from the threshold its mixing is the "
+          "shipped card's to the digit -- that is what makes it "
+          "one-variable)")
 
 
 def main(argv=None):
