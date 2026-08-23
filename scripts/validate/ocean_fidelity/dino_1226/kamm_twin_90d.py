@@ -205,7 +205,8 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
 PERTURB_EPS = 1e-14
 
 
-def apply_temperature_kick(st, seed: int, both_levels: bool):
+def apply_temperature_kick(st, seed: int, both_levels: bool,
+                           eps: float = None):
     """Apply the ensemble temperature kick and return ``(state, stamp)``.
 
     ``T *= 1 + PERTURB_EPS * N(0,1)`` per grid point, from
@@ -222,9 +223,14 @@ def apply_temperature_kick(st, seed: int, both_levels: bool):
     both conventions -- are testable without a 90-day integration (review N4).
     """
     st_pre = st
+    # ``eps`` overrides the ensemble magnitude for the #1455 nonlinearity
+    # ladder (switch_rectifier.py), which walks 1e-14 / 1e-12 / 1e-10 through
+    # THIS function so the ladder and the ensembles cannot drift apart. The
+    # default is the ensemble value and every existing caller keeps it.
+    eps = PERTURB_EPS if eps is None else float(eps)
     rng = np.random.default_rng(seed)
     t0 = np.asarray(st.T.data, dtype=np.float64)
-    factor = 1.0 + PERTURB_EPS * rng.standard_normal(t0.shape)   # ONE draw
+    factor = 1.0 + eps * rng.standard_normal(t0.shape)           # ONE draw
     t_pert = jnp.asarray(t0 * factor, dtype=st.T.data.dtype)
     d_t = float(np.max(np.abs(np.asarray(t_pert) - t0)))
     rel = float(np.max(np.abs(np.asarray(t_pert) - t0)
