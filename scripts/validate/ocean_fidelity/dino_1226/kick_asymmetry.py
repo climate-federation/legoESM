@@ -19,9 +19,14 @@ THE ONE VARIABLE.  Same restart, same card, same namelist, same certified
 binary, same seeds, same 90-day horizon, same reductions, same scorer.  Only
 the perturbation convention differs:
 
-  arm ONE-LEVEL  (recorded, already on disk, NOT re-run)
-      legoESM  /tmp/dino_verdict360/m{0..3}   days 0-90 of the 360-day members
-      NEMO     RUN_VERDICT360_M{0..3}         kt 5760-8640
+  arm ONE-LEVEL
+      legoESM  /tmp/dino_kick1/m{0..3}        re-run at the CURRENT revision --
+                                              the recorded 360-day members sit
+                                              45 commits back, across two that
+                                              change this card's physics
+      NEMO     RUN_VERDICT360_M{0..3}         kt 5760-8640, reused: same
+                                              certified binary, namelists
+                                              differ in nn_itend alone
   arm TWO-LEVEL  (new)
       legoESM  /tmp/dino_kick2/m{0..3}        kamm_twin_90d --perturb-both-levels
       NEMO     RUN_KICK2_M{0..3}              perturb_nemo_tn_90d --both-levels
@@ -44,7 +49,8 @@ Usage
   kick_asymmetry.py --self-check              # arithmetic, no runs needed
   kick_asymmetry.py --setup-nemo              # build the 4 two-level NEMO dirs
   kick_asymmetry.py --run-nemo                # launch them (serial, ~8 min each)
-  kick_asymmetry.py --run-lego --gpu 0        # launch the 4 legoESM members
+  kick_asymmetry.py --run-lego one --gpu 0    # 4 one-level legoESM members
+  kick_asymmetry.py --run-lego two --gpu 0    # 4 two-level legoESM members
   kick_asymmetry.py                           # score both arms
 """
 import argparse
@@ -87,7 +93,8 @@ KEYS = V.KEYS
 LABELS = V.LABELS
 
 KT_END = G.KT_RESTART + N_DAYS * G.STEPS_PER_DAY          # 8640
-LEGO_DIR_DEFAULT = "/tmp/dino_kick2"
+LEGO_DIR_ONE_DEFAULT = "/tmp/dino_kick1"   # one-level kick, CURRENT source revision
+LEGO_DIR_TWO_DEFAULT = "/tmp/dino_kick2"   # two-level kick, same revision
 NEMO_SRC = V.NEMO_SRC                  # RUN_90D_TWIN: namelist donor, ALREADY 90 days
 NEMO_CERT = V.NEMO_CERT
 MPIRUN = V.MPIRUN
@@ -103,7 +110,61 @@ N_RANK = V.N_RANK
 LOG_SD_SPREAD = float(1.0 / np.sqrt(2 * (N_MEM - 1)))
 F_RESOLVABLE = float(np.exp(1.96 * np.sqrt(4.0) * LOG_SD_SPREAD))
 R2_TWO_SIDED = 10.0 ** V.ONE_SIDED_DECADES     # 10x: the band where an RSS floor is two-sided
+# The two arms' UNPERTURBED controls run the identical command at the identical
+# source revision, so they should be bit-identical. The bar is 1% of an
+# ensemble spread, not the 100% an earlier revision allowed: member 0 is one of
+# the four values feeding each spread, so a drift of ~1 spread would corrupt
+# the ratio by ~100% and still pass (code review B4).
+C4_MAX_DRIFT = 1e-2
 QUANTUM_MARGIN = V.QUANTUM_MARGIN              # 10x storage quantum or the metric is flagged
+
+
+# --------------------------------------------------- the closed-form control ---
+# Both models integrate tracers with plain Robert-Asselin leapfrog.  The
+# 2-state [T_before, T_now] recursion has eigenvalues 1 (physical) and
+# 2*gamma-1 (computational) -- recorded independently in this repo at
+# packages/ocean/legoesm/ocean/experiments/dino.py:255-268.  Projecting a kick
+# onto that basis:
+#
+#   one-level kick (0, eps):  physical amplitude (1-2g)/(2(1-g)) = 4/9 at g=0.1
+#   two-level kick (eps,eps): physical amplitude 1
+#
+# so the two-level arm should start with 2(1-g)/(1-2g) = 2.25x more SURVIVING
+# perturbation, PER MODEL.  That factor depends only on gamma, and gamma is
+# read from BOTH sides below and required to be equal -- so it CANCELS in the
+# legoESM/NEMO ratio and the collapse factor F is predicted to be exactly 1.
+# This is the calibration that makes the null informative: a per-side arm ratio
+# near 2.25 says the instrument measured the physics the closed form predicts,
+# and F near 1 then says the time-filter asymmetry H1 blames does not exist.
+def asselin_gamma_lego():
+    """The card's own Asselin coefficient -- imported, never typed."""
+    from legoesm.ocean.experiments.dino import DINO_RECIPES
+    return float(DINO_RECIPES["nemo_dino_kamm_mlf"]["asselin_gamma"])
+
+
+def asselin_gamma_nemo(run_dir):
+    """NEMO's rn_atfp as the RUN ITSELF reported it, read from ocean.output --
+    not from a namelist the run may not have used."""
+    path = f"{run_dir}/ocean.output"
+    with open(path, errors="replace") as fh:
+        for ln in fh:
+            if "rn_atfp" in ln and "=" in ln:
+                return float(ln.split("=", 1)[1].split()[0])
+    raise SystemExit(f"no rn_atfp line in {path} -- cannot confirm the two "
+                     f"models share an Asselin coefficient, which is the "
+                     f"assumption the closed-form prediction rests on")
+
+
+def predicted_arm_ratio(gamma):
+    """two-level surviving amplitude / one-level surviving amplitude, per model.
+
+    = 1 / ((1-2g)/(2(1-g))) = 2(1-g)/(1-2g).  2.25 at gamma=0.1.
+    """
+    if not 0.0 <= gamma < 0.5:
+        raise SystemExit(f"Asselin gamma {gamma} outside [0, 0.5): the "
+                         f"computational mode is not damped and the closed "
+                         f"form does not apply")
+    return 2.0 * (1.0 - gamma) / (1.0 - 2.0 * gamma)
 
 
 def member_name(i):
@@ -136,7 +197,7 @@ def lego_log(out_dir, i):
 
 
 # ------------------------------------------------------------- legoESM runs ---
-def lego_cmd(out_dir, i):
+def lego_cmd(out_dir, i, both_levels=True):
     """``floor90_ensemble``'s own member command at 90 days, plus the 10-day
     snapshot grid this probe reads and, for the perturbed members, the
     two-level kick.  No other option flags: the card's defaults are what is
@@ -146,11 +207,13 @@ def lego_cmd(out_dir, i):
            "--days", str(N_DAYS), "--bridge-before", "--save-3d",
            "--snap-days", ",".join(str(d) for d in SNAP_GRID)]
     if SEEDS[i] is not None:
-        cmd += ["--perturb-seed", str(SEEDS[i]), "--perturb-both-levels"]
+        cmd += ["--perturb-seed", str(SEEDS[i])]
+        if both_levels:
+            cmd += ["--perturb-both-levels"]
     return cmd
 
 
-def run_lego(out_dir, gpu):
+def run_lego(out_dir, gpu, both_levels=True):
     """Sequential, one GPU.  90 days is ~3 min per member, so the two-GPU
     slot machinery verdict360 needs at 360 days buys nothing here and its
     refill bug class is not worth re-importing."""
@@ -170,26 +233,12 @@ def run_lego(out_dir, gpu):
             continue
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), JAX_ENABLE_X64="1",
                    XLA_PYTHON_CLIENT_PREALLOCATE="false")
-        cmd = lego_cmd(out_dir, i)
+        cmd = lego_cmd(out_dir, i, both_levels)
         print("RUN:", " ".join(cmd), f"[CUDA_VISIBLE_DEVICES={gpu}]", flush=True)
         with open(lego_log(out_dir, i), "w") as fh:
             rc = subprocess.run(cmd, env=env, stdout=fh,
                                 stderr=subprocess.STDOUT).returncode
         print(f"[done] {member_name(i)} rc={rc}", flush=True)
-
-
-def lego_completed(log_path):
-    """The harness's OWN success line -- an exit code is not evidence."""
-    if not os.path.exists(log_path):
-        return False, "no log"
-    with open(log_path, errors="replace") as fh:
-        txt = fh.read()
-    if f"DONE nsteps={G.STEPS_PER_DAY * N_DAYS} STABLE=True" in txt:
-        return True, "OK"
-    for ln in txt.splitlines():
-        if ln.startswith("BLOWUP") or ln.startswith("DONE "):
-            return False, ln.strip()
-    return False, "no DONE line (still running or killed)"
 
 
 # ---------------------------------------------------------------- NEMO runs ---
@@ -330,10 +379,22 @@ class Arm:
         return nemo_completed(self.nemo_dir_fn(i), self.nemo_log_glob)
 
 
-def arms(lego_dir):
-    one = Arm("one-level", V.LEGO_DIR_DEFAULT, V.nemo_dir,
-              G.STEPS_PER_DAY * V.N_DAYS, "run_verdict360_m*.log")
-    two = Arm("two-level", lego_dir, nemo_dir,
+def arms(dir_one, dir_two):
+    """The two arms.
+
+    The legoESM side of the ONE-LEVEL arm is re-run here rather than reusing
+    the recorded 360-day verdict members: those ran 45 commits back, and two of
+    those commits change the physics of the very card both arms run (the EEN
+    transport-metric weighting and the implicit vertical solve's face control
+    volume). Reusing them would have compared two MODEL REVISIONS and called
+    the difference a kick convention (code review B1). The NEMO side is reused
+    unchanged -- NEMO's binary is the same certified executable in both arms
+    and this repo's commits cannot touch it; the two namelists differ in
+    nn_itend alone, which changes when the run stops, not what it computes.
+    """
+    one = Arm("one-level", dir_one, V.nemo_dir,
+              G.STEPS_PER_DAY * N_DAYS, "run_verdict360_m*.log")
+    two = Arm("two-level", dir_two, nemo_dir,
               G.STEPS_PER_DAY * N_DAYS, "run_kick2_m*.log")
     return one, two
 
@@ -392,16 +453,44 @@ def _self_check():
     fake["lego"] = {i: {90: {"acc": 3.0 * i}} for i in range(N_MEM)}
     assert abs(ratio(fake, "acc", 90) - 3.0) < 1e-12, ratio(fake, "acc", 90)
 
-    # verdict(): the three registered outcomes, and only those.
-    assert verdict(9.0, 5.0) == "CONFIRMS H1"
-    assert verdict(9.0, 50.0) == "PARTIAL"
-    assert verdict(4.9, 3.0) == "REFUTES H1"      # F below the bar decides alone
-    assert verdict(4.9, 500.0) == "REFUTES H1"
-    assert verdict(float("nan"), 5.0) == "INDETERMINATE"
-    assert verdict(9.0, float("nan")) == "INDETERMINATE"
+    # verdict(): the four outcomes of the AMENDED rule, and only those.
+    assert verdict(9.0, 5.0, 100.0) == "CONFIRMS H1"
+    assert verdict(9.0, 50.0, 400.0) == "PARTIAL"
+    # below the bar with a MODEST required collapse -> NO INFORMATION, because
+    # the 95% upper limit on F still reaches the collapse H1 needs.  This is
+    # the case the original rule wrongly called REFUTES.
+    assert verdict(1.0, 30.0, 30.0) == "NOT RESOLVED"     # need 3.0x, upper limit 4.95
+    assert verdict(1.0, 49.0, 49.0) == "NOT RESOLVED"     # need 4.9x, upper limit 4.95
+    # below the bar with a LARGE required collapse -> genuinely refuted: even
+    # the 95% upper limit cannot reach the collapse H1 demands.
+    assert verdict(1.0, 100.0, 100.0) == "REFUTES H1"     # need 10x, upper limit 4.95
+    assert verdict(1.0, 400.0, 400.0) == "REFUTES H1"     # need 40x, upper limit 4.95
+    assert verdict(float("nan"), 5.0, 100.0) == "INDETERMINATE"
+    assert verdict(9.0, float("nan"), 100.0) == "INDETERMINATE"
+    assert verdict(9.0, 5.0, float("nan")) == "INDETERMINATE"
     # exactly at the bar counts as resolvable (>=, as registered)
-    assert verdict(F_RESOLVABLE, 10.0) == "CONFIRMS H1"
-    assert verdict(F_RESOLVABLE, 10.0001) == "PARTIAL"
+    assert verdict(F_RESOLVABLE, 10.0, 100.0) == "CONFIRMS H1"
+    assert verdict(F_RESOLVABLE, 10.0001, 100.0) == "PARTIAL"
+
+    # F is identically arm_ratio(nemo)/arm_ratio(lego): the ratio table and the
+    # arm table are two views of one number, so a discrepancy is a bug.
+    r1 = {"lego": {i: {SCORE_DAY: {"x": 1.0 * i}} for i in range(N_MEM)},
+          "nemo": {i: {SCORE_DAY: {"x": 2.0 * i}} for i in range(N_MEM)}}
+    r2 = {"lego": {i: {SCORE_DAY: {"x": 7.0 * i}} for i in range(N_MEM)},
+          "nemo": {i: {SCORE_DAY: {"x": 3.0 * i}} for i in range(N_MEM)}}
+    f_direct = ratio(r1, "x", SCORE_DAY) / ratio(r2, "x", SCORE_DAY)
+    f_arms = (arm_ratio(r1, r2, "nemo", "x") / arm_ratio(r1, r2, "lego", "x"))
+    assert abs(f_direct - f_arms) < 1e-12, (f_direct, f_arms)
+
+    # the closed form: 2.25 at gamma=0.1, and it must refuse an undamped filter
+    assert abs(predicted_arm_ratio(0.1) - 2.25) < 1e-12
+    assert abs(predicted_arm_ratio(0.0) - 2.0) < 1e-12
+    try:
+        predicted_arm_ratio(0.5)
+    except SystemExit:
+        pass
+    else:                                          # pragma: no cover
+        raise AssertionError("gamma=0.5 leaves the computational mode undamped")
 
     # median_over(): NaN must PROPAGATE out of an included metric rather than
     # being skipped -- np.median does that, np.nanmedian would not.
@@ -423,13 +512,42 @@ def _self_check():
     return 0
 
 
-def verdict(med_f, med_r2):
-    """PREREG section 4, spelled ONCE and unit-tested."""
-    if not (np.isfinite(med_f) and np.isfinite(med_r2)):
+def verdict(med_f, med_r2, med_r1):
+    """PREREG section 4 as AMENDED, spelled ONCE and unit-tested.
+
+    The amendment (code review B2): ``F < F_RESOLVABLE`` is the width of the
+    null band at n=4, i.e. NO INFORMATION -- F=1 and F=4.9 are the same
+    measurement. The original rule returned ``REFUTES H1`` there, which is a
+    positive claim the statistic cannot carry, and REFUTE is the branch the
+    pre-registration attaches a consequence to. A refutation now requires the
+    95% UPPER limit on F (``F * F_RESOLVABLE``, the band being multiplicative)
+    to fall short of the collapse H1 needs, which is ``med_R1 / R2_TWO_SIDED``
+    -- the factor that would bring the measured one-level ratio down into the
+    band where an RSS floor is genuinely two-sided.
+    """
+    if not all(np.isfinite(v) for v in (med_f, med_r2, med_r1)):
         return "INDETERMINATE"
-    if med_f < F_RESOLVABLE:
+    if med_f >= F_RESOLVABLE:
+        return "CONFIRMS H1" if med_r2 <= R2_TWO_SIDED else "PARTIAL"
+    f_required = med_r1 / R2_TWO_SIDED
+    if med_f * F_RESOLVABLE < f_required:
         return "REFUTES H1"
-    return "CONFIRMS H1" if med_r2 <= R2_TWO_SIDED else "PARTIAL"
+    return "NOT RESOLVED"
+
+
+def arm_ratio(rows_one, rows_two, side, key, day=None):
+    """Within ONE model: two-level spread / one-level spread.
+
+    This is the quantity the leapfrog closed form predicts (2(1-g)/(1-2g),
+    2.25 at gamma=0.1), and it is what makes a null result on F informative:
+    it says the instrument measured the arm effect the time discretisation
+    demands. Note the identity F = arm_ratio(nemo) / arm_ratio(lego), checked
+    in the self-check -- the two tables are two views of one number.
+    """
+    d = SCORE_DAY if day is None else day
+    a = spread_at(rows_one, side, key, d)
+    b = spread_at(rows_two, side, key, d)
+    return float("nan") if a == 0.0 else b / a
 
 
 def median_over(values, excluded):
@@ -470,6 +588,34 @@ def controls(one, two, rows_one, rows_two, quantum):
                              f"source revisions: {shas}")
         print(f"[C2 {arm.name:<9}] all {N_MEM} legoESM members at HEAD="
               f"{list(shas.values())[0][:12]}")
+
+    # C2c: the two arms' legoESM members at the SAME source revision. C2 only
+    # checks WITHIN an arm; the recorded 360-day members sit 45 commits back,
+    # across two that change this card's physics, and comparing them against a
+    # current-revision arm would have measured the revision (code review B1).
+    sha_one = F.member_sha(lego_log(one.lego_dir, 0))
+    sha_two = F.member_sha(lego_log(two.lego_dir, 0))
+    if sha_one != sha_two:
+        raise SystemExit(
+            f"the two arms' legoESM members ran at DIFFERENT source "
+            f"revisions ({sha_one} vs {sha_two}). Every number below would "
+            f"then be a model-revision difference reported as a kick-"
+            f"convention difference.")
+    print(f"[C2c] BOTH arms' legoESM members at the same HEAD={sha_one[:12]}")
+
+    # C2d: the two models share an Asselin coefficient. The closed-form arm
+    # prediction, and the claim that it cancels in F, rest entirely on this.
+    g_lego = asselin_gamma_lego()
+    g_nemo = asselin_gamma_nemo(two.nemo_dir_fn(0))
+    g_nemo1 = asselin_gamma_nemo(one.nemo_dir_fn(0))
+    print(f"[C2d] Asselin gamma: legoESM card {g_lego:.6f}, NEMO two-level "
+          f"{g_nemo:.6f}, NEMO one-level {g_nemo1:.6f}")
+    if not (abs(g_lego - g_nemo) < 1e-9 and abs(g_nemo - g_nemo1) < 1e-9):
+        raise SystemExit(
+            "the two models do NOT share an Asselin coefficient. The "
+            "closed-form arm ratio then differs per model and does NOT cancel "
+            "in F -- which would make H1 testable in a way it is not when the "
+            "coefficients match. Re-derive before reading any number.")
 
     # C2b: the same certified NEMO binary everywhere, both arms.
     for arm, dfn in ((one, V.nemo_dir), (two, nemo_dir)):
@@ -522,10 +668,11 @@ def controls(one, two, rows_one, rows_two, quantum):
             worst = max(worst, r)
     print(f"     worst drift/std over both sides and all {len(KEYS)} metrics: "
           f"{worst:.3f}")
-    if worst >= 1.0:
+    if worst >= C4_MAX_DRIFT:
         raise SystemExit(
             f"C4 FAILED: the two arms' UNPERTURBED controls differ by "
-            f"{worst:.2f}x the two-level ensemble spread. The arms then differ "
+            f"{worst:.4f}x the two-level ensemble spread (bar "
+            f"{C4_MAX_DRIFT:g}). The arms then differ "
             f"in something other than the kick convention and no ratio between "
             f"them is interpretable. Find that difference before reading any "
             f"number in this run.")
@@ -556,12 +703,16 @@ def controls(one, two, rows_one, rows_two, quantum):
 
     # C7 storage quantum: which metrics are resolved at all.
     print(f"\n[C7] float32 storage quantum of the legoESM npz at day "
-          f"{SCORE_DAY}, and the two-level spread against it")
-    print(f"     {'metric':<38}{'quantum':>13}{'two-level lego std':>21}"
+          f"{SCORE_DAY}, and the ONE-LEVEL spread against it")
+    print("     Measured on the ONE-LEVEL arm, deliberately: H1 predicts the "
+          "TWO-level spread is the one that")
+    print("     moves, so excluding on it would drop the most-collapsed "
+          "metrics from the median and bias F down.")
+    print(f"     {'metric':<38}{'quantum':>13}{'one-level lego std':>21}"
           f"{'std/quantum':>13}  flag")
     excluded = set()
     for k in KEYS:
-        sd = spread_at(rows_two, "lego", k, SCORE_DAY)
+        sd = spread_at(rows_one, "lego", k, SCORE_DAY)
         q = quantum[k]
         r = float("inf") if q == 0 else sd / q
         flag = ""
@@ -670,6 +821,41 @@ def ratio_table(rows_one, rows_two, excluded):
     return med_r1, med_r2, med_f
 
 
+def arm_table(rows_one, rows_two, excluded, predicted):
+    """The WITHIN-MODEL arm effect, against the leapfrog closed form.
+
+    This is the calibration that makes a null F informative. The two-level kick
+    starts with 2(1-g)/(1-2g) times more surviving perturbation than the
+    one-level kick BECAUSE the one-level kick spends the rest of itself on the
+    computational mode, which the Asselin filter kills. Both models carry the
+    same gamma, so both should show the same factor -- and it cancels in F.
+    """
+    print("\n" + "=" * 110)
+    print(f"THE ARM TABLE -- two-level spread / one-level spread, WITHIN each "
+          f"model, at day {SCORE_DAY}")
+    print("=" * 110)
+    print("Leapfrog closed form (eigenvalues 1 and 2g-1 of the "
+          "[T_before, T_now] Asselin recursion):")
+    print("  one-level kick keeps (1-2g)/(2(1-g)) of itself on the physical "
+          "mode, two-level keeps all of it,")
+    print(f"  so the arm effect is 2(1-g)/(1-2g) = {predicted:.4f} PER MODEL, "
+          f"and it cancels in F.")
+    print(f"{'metric':<38}{'lego arm':>13}{'NEMO arm':>13}"
+          f"{'lego/pred':>12}{'NEMO/pred':>12}  flag")
+    al, an = {}, {}
+    for k in KEYS:
+        al[k] = arm_ratio(rows_one, rows_two, "lego", k)
+        an[k] = arm_ratio(rows_one, rows_two, "nemo", k)
+        print(f"{LABELS[k]:<38}{al[k]:>13.4g}{an[k]:>13.4g}"
+              f"{al[k] / predicted:>12.3f}{an[k] / predicted:>12.3f}"
+              f"  {'q (excluded)' if k in excluded else ''}")
+    med_al = median_over(al, excluded)
+    med_an = median_over(an, excluded)
+    print(f"{'MEDIAN':<38}{med_al:>13.4g}{med_an:>13.4g}"
+          f"{med_al / predicted:>12.3f}{med_an / predicted:>12.3f}")
+    return med_al, med_an
+
+
 def decay_table(rows_one, rows_two):
     d0, d1 = DECAY_PAIR
     print("\n" + "=" * 110)
@@ -711,13 +897,16 @@ def decay_table(rows_one, rows_two):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--dir", default=LEGO_DIR_DEFAULT,
-                   help="directory for the two-level legoESM members")
+    p.add_argument("--dir-one", default=LEGO_DIR_ONE_DEFAULT,
+                   help="directory for the ONE-level legoESM members")
+    p.add_argument("--dir-two", default=LEGO_DIR_TWO_DEFAULT,
+                   help="directory for the TWO-level legoESM members")
     p.add_argument("--gpu", default="0", help="CUDA_VISIBLE_DEVICES for --run-lego")
     p.add_argument("--self-check", action="store_true")
     p.add_argument("--setup-nemo", action="store_true")
     p.add_argument("--run-nemo", action="store_true")
-    p.add_argument("--run-lego", action="store_true")
+    p.add_argument("--run-lego", choices=("one", "two"), default=None,
+                   help="launch one arm's four legoESM members")
     args = p.parse_args(argv)
 
     if args.self_check:
@@ -729,11 +918,12 @@ def main(argv=None):
         run_nemo()
         return 0
     if args.run_lego:
-        run_lego(args.dir, args.gpu)
+        run_lego(args.dir_one if args.run_lego == "one" else args.dir_two,
+                 args.gpu, both_levels=(args.run_lego == "two"))
         return 0
 
     _self_check()
-    one, two = arms(args.dir)
+    one, two = arms(args.dir_one, args.dir_two)
     print("\nscoring both arms (this loads every state exactly once)")
     rows_one = collect(one, COMMON_DAYS)
     rows_two = collect(two, FINE_DAYS)
@@ -745,6 +935,8 @@ def main(argv=None):
         growth_table(arm)
     spread_curves(rows_one, rows_two)
     med_r1, med_r2, med_f = ratio_table(rows_one, rows_two, excluded)
+    predicted = predicted_arm_ratio(asselin_gamma_lego())
+    med_al, med_an = arm_table(rows_one, rows_two, excluded, predicted)
     flips, persists = decay_table(rows_one, rows_two)
 
     print("\n" + "=" * 110)
@@ -756,7 +948,9 @@ def main(argv=None):
           f"    resolvable at >= {F_RESOLVABLE:.2f}")
     print(f"  two-sided band for R2                        = <= "
           f"{R2_TWO_SIDED:.0f}")
-    print(f"  registered outcome: {verdict(med_f, med_r2)}")
+    print(f"  closed-form arm ratio, per model              = "
+          f"{predicted:.4f}   measured: lego {med_al:.4g}, NEMO {med_an:.4g}")
+    print(f"  registered outcome: {verdict(med_f, med_r2, med_r1)}")
     print(f"  decay signature: {len(flips)} of {len(flips) + len(persists)} "
           f"decaying NEMO metrics lost the decay under the two-level kick")
     print("\n(the outcome above is the mechanical application of a rule fixed "

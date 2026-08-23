@@ -96,6 +96,17 @@ def perturb(seed: int, dest_dir: Path, src: Path = SRC,
     d.close()
 
     report = _verify(src, dst, targets)
+    # A kick that silently did nothing gives an ensemble spread of exactly zero
+    # -- the most flattering possible artifact -- so a target that did not move
+    # is FATAL here, in the path setup_nemo actually calls, not only in the
+    # self-check (review N1: the guard existed in the tests and nowhere else).
+    dead = [n for n, pt in report["per_target"].items() if pt["n_changed"] == 0]
+    if dead:
+        raise SystemExit(
+            f"perturbation of {dst} did NOT move {dead} -- the kick did not "
+            f"land (a float32/packed/scale_factor variable, or an all-zero "
+            f"field). An ensemble built on this restart would have a spread "
+            f"of zero by construction.")
     if not (report["other_vars_bit_identical"] and report["attrs_bit_identical"]):
         raise SystemExit(
             f"perturbation of {dst} touched something besides {targets}: "
@@ -137,9 +148,19 @@ def _verify(src: Path, dst: Path, targets: tuple = ("tn",)) -> dict:
         if a.shape != b.shape:
             other_ok, changed_vars = False, changed_vars + [vname]
             continue
-        d_ = (float(np.nanmax(np.abs(a.astype(np.float64) - b.astype(np.float64))))
-              if a.dtype.kind in "fc" and a.size else
-              (0.0 if np.array_equal(a, b) else 1.0))
+        if a.dtype.kind in "fc" and a.size:
+            # np.max, NOT np.nanmax (review N2): a bystander holding NaN where
+            # the copy holds a number would report a difference of ZERO under
+            # nanmax and be certified bit-identical. The NaN PATTERN is checked
+            # separately, because NaN-vs-NaN differences NaN under plain max.
+            if not np.array_equal(np.isnan(a), np.isnan(b)):
+                other_ok, changed_vars = False, changed_vars + [vname + "(NaN pattern)"]
+            fin = ~np.isnan(a) & ~np.isnan(b)
+            d_ = (float(np.max(np.abs(a.astype(np.float64)[fin]
+                                      - b.astype(np.float64)[fin])))
+                  if fin.any() else 0.0)
+        else:
+            d_ = 0.0 if np.array_equal(a, b) else 1.0
         if vname not in targets:
             max_other_diff = max(max_other_diff, d_)
             if d_ != 0.0:

@@ -199,6 +199,74 @@ def bridge_tke_from_restart(st, restart_en, land_mask):
                                   dims=("lat", "lon", "level"), units="m^2/s^2"))
 
 
+# The perturbation magnitude, named once.  The NEMO-side counterpart is
+# ``perturb_nemo_tn_90d.EPS`` and the two must stay equal: the whole point of
+# the ensembles is that both models get the SAME size kick (review N7).
+PERTURB_EPS = 1e-14
+
+
+def apply_temperature_kick(st, seed: int, both_levels: bool):
+    """Apply the ensemble temperature kick and return ``(state, stamp)``.
+
+    ``T *= 1 + PERTURB_EPS * N(0,1)`` per grid point, from
+    ``numpy.random.default_rng(seed)``.  With ``both_levels`` the SAME draw
+    also multiplies ``T_before``, so the kick carries no leapfrog time-level
+    mismatch of its own -- the #1455 discriminator
+    (``PREREG_kick_asymmetry.md``).  ONE draw is taken and reused; a second
+    ``rng.standard_normal`` would perturb the two levels INDEPENDENTLY, which
+    is a LARGER time-level mismatch than the one-level kick, not a smaller
+    one, and would silently invert the experiment.
+
+    Lifted out of ``run_twin`` so the two properties the discriminator rests
+    on -- same draw on both levels, same seed giving the same now-level T in
+    both conventions -- are testable without a 90-day integration (review N4).
+    """
+    st_pre = st
+    rng = np.random.default_rng(seed)
+    t0 = np.asarray(st.T.data, dtype=np.float64)
+    factor = 1.0 + PERTURB_EPS * rng.standard_normal(t0.shape)   # ONE draw
+    t_pert = jnp.asarray(t0 * factor, dtype=st.T.data.dtype)
+    d_t = float(np.max(np.abs(np.asarray(t_pert) - t0)))
+    rel = float(np.max(np.abs(np.asarray(t_pert) - t0)
+                       / np.maximum(np.abs(t0), 1e-30)))
+    st = st._replace(T=st.T.replace(data=t_pert))
+    moved = ["T"]
+    if both_levels:
+        if st.T_before is None:
+            raise SystemExit(
+                "--perturb-both-levels needs a before-level T, and this state "
+                "has none. Pass --bridge-before (which is what the recorded "
+                "ensembles run); without it the twin's leapfrog entry is a "
+                "forward-Euler cold start and there is no second time level "
+                "to kick.")
+        tb0 = np.asarray(st.T_before.data, dtype=np.float64)
+        if tb0.shape != t0.shape:
+            raise SystemExit(
+                f"before-level T is {tb0.shape} and now-level T is {t0.shape}; "
+                f"the same draw cannot be applied to both")
+        tb_pert = jnp.asarray(tb0 * factor, dtype=st.T_before.data.dtype)
+        d_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)))
+        rel_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)
+                              / np.maximum(np.abs(tb0), 1e-30)))
+        st = st._replace(T_before=st.T_before.replace(data=tb_pert))
+        moved.append("T_before")
+    else:
+        d_tb, rel_tb = 0.0, 0.0
+    # NOTE for whoever reads the stamp: the "untouched" count is structurally
+    # guaranteed by NamedTuple._replace (every other field is the SAME object),
+    # so it is a regression guard on this function, NOT evidence that nothing
+    # leaked (review N3). The load-bearing half is the "did the kick land"
+    # check above it.
+    n_other = _perturb_receipt(st_pre, st, moved)
+    stamp = (f"PERTURB seed={seed} levels="
+             f"{'now+before' if both_levels else 'now'}: "
+             f"max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}  "
+             f"max|dT_before|={d_tb:.3e}  "
+             f"max_rel|dT_before/T_before|={rel_tb:.3e}  "
+             f"other_state_fields_bit_identical={n_other}")
+    return st, stamp
+
+
 def _perturb_receipt(st_pre, st_post, moved) -> int:
     """The perturbation-correctness receipt: EXACTLY the named state fields
     moved, and every other field is bit-identical.
@@ -216,8 +284,12 @@ def _perturb_receipt(st_pre, st_post, moved) -> int:
     for name in st_pre._fields:
         a = jax.tree_util.tree_leaves(getattr(st_pre, name))
         b = jax.tree_util.tree_leaves(getattr(st_post, name))
+        # equal_nan=True: without it an array containing NaN compares UNEQUAL
+        # to itself, which would make the "did the kick land" check pass
+        # VACUOUSLY on a state that already went non-finite (review N3).
         same = (len(a) == len(b)
-                and all(np.array_equal(np.asarray(x), np.asarray(y))
+                and all(np.array_equal(np.asarray(x), np.asarray(y),
+                                       equal_nan=True)
                         for x, y in zip(a, b)))
         if name in moved:
             if same:
@@ -228,7 +300,11 @@ def _perturb_receipt(st_pre, st_post, moved) -> int:
             raise SystemExit(
                 f"state.{name} changed and it should not have; the "
                 f"perturbation is not confined to {moved}")
-        else:
+        elif a:
+            # Count only fields that actually HAVE arrays. A None field
+            # (T_before without --bridge-before, the unused SOM moments) has
+            # zero leaves and compares equal trivially; counting it would
+            # inflate the receipt with fields nothing could have touched.
             n_same += 1
     if n_same == 0:
         raise SystemExit("the perturbation receipt verified nothing")
@@ -763,50 +839,8 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     print(f"PRECISION: materialized state dtype = {control_dtype_stamp}")
 
     if perturb_seed is not None:
-        st_pre = st
-        rng = np.random.default_rng(perturb_seed)
-        t0 = np.asarray(st.T.data, dtype=np.float64)
-        factor = 1.0 + 1e-14 * rng.standard_normal(t0.shape)   # ONE draw
-        t_pert = jnp.asarray(t0 * factor, dtype=st.T.data.dtype)
-        d_t = float(np.max(np.abs(np.asarray(t_pert) - t0)))
-        rel = float(np.max(np.abs(np.asarray(t_pert) - t0) / np.maximum(np.abs(t0), 1e-30)))
-        st = st._replace(T=st.T.replace(data=t_pert))
-        moved = ["T"]
-        if perturb_both_levels:
-            # #1455 kick-asymmetry discriminator (PREREG_kick_asymmetry.md).
-            # The SAME draw multiplies the BEFORE-level T, so the kick adds no
-            # tn-tb mismatch of its own and therefore projects far less onto
-            # the leapfrog computational mode than the now-only kick does.
-            # Reusing `factor` is the whole point: a second rng.standard_normal
-            # would make the two levels INDEPENDENTLY perturbed, which is a
-            # LARGER time-level mismatch than the default, not a smaller one.
-            if st.T_before is None:
-                raise SystemExit(
-                    "--perturb-both-levels needs a before-level T, and this "
-                    "state has none. Pass --bridge-before (which is what the "
-                    "recorded ensembles run); without it the twin's leapfrog "
-                    "entry is a forward-Euler cold start and there is no "
-                    "second time level to kick.")
-            tb0 = np.asarray(st.T_before.data, dtype=np.float64)
-            if tb0.shape != t0.shape:
-                raise SystemExit(
-                    f"before-level T is {tb0.shape} and now-level T is "
-                    f"{t0.shape}; the same draw cannot be applied to both")
-            tb_pert = jnp.asarray(tb0 * factor, dtype=st.T_before.data.dtype)
-            d_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)))
-            rel_tb = float(np.max(np.abs(np.asarray(tb_pert) - tb0)
-                                  / np.maximum(np.abs(tb0), 1e-30)))
-            st = st._replace(T_before=st.T_before.replace(data=tb_pert))
-            moved.append("T_before")
-        else:
-            d_tb, rel_tb = 0.0, 0.0
-        n_other = _perturb_receipt(st_pre, st, moved)
-        print(f"PERTURB seed={perturb_seed} levels="
-              f"{'now+before' if perturb_both_levels else 'now'}: "
-              f"max|dT|={d_t:.3e}  max_rel|dT/T|={rel:.3e}  "
-              f"max|dT_before|={d_tb:.3e}  max_rel|dT_before/T_before|={rel_tb:.3e}  "
-              f"other_state_fields_bit_identical={n_other}",
-              flush=True)
+        st, stamp = apply_temperature_kick(st, perturb_seed, perturb_both_levels)
+        print(stamp, flush=True)
 
     nsteps = STEPS_PER_DAY * n_days
 

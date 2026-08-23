@@ -190,3 +190,156 @@ It prints tables and the mechanical section-4 comparison. It does not edit a
 floor, does not re-open the verdict-360 verdict, and does not extend to 360
 days - 90 days is where the asymmetry was recorded and 90 days is where it is
 tested.
+
+---
+
+# AMENDMENT, before any member was scored — three reviewer findings
+
+Both adversarial reviews landed while the two-level arm was still integrating
+and before `kick_asymmetry.py` had scored a single member. Everything below is
+recorded here, in the pre-registration, rather than in the result — because two
+of the three change what this experiment can conclude.
+
+## A1. RETRACTION: H1's premise is false. The two time filters are identical.
+
+Section 2 says NEMO's filter chain "removes more" of the computational mode
+than legoESM's. **That is refuted, offline, from the two models' own
+configurations:**
+
+| | Asselin coefficient | source |
+|---|---|---|
+| NEMO | `rn_atfp = 0.10000000000000001` | the run's own `ocean.output`, inherited from `cfgs/SHARED/namelist_ref` |
+| legoESM | `asselin_gamma = 0.1` | the `nemo_dino_kamm_mlf` card itself |
+
+Same coefficient, same plain Robert–Asselin form, and neither model takes a
+forward-Euler first step (`ln_1st_euler = .false.`, and legoESM's leapfrog
+branch is taken from step 1). There is no asymmetry in the filters for H1 to
+live in.
+
+**The closed form, which this repo already records** (the eigen-decomposition
+of the two-state `[T_before, T_now]` Asselin/leapfrog recursion, eigenvalues
+`1` and `2γ−1`, at `dino.py:255-268`):
+
+```
+one-level kick (0, ε)   keeps (1−2γ)/(2(1−γ)) = 4/9  of itself on the physical mode
+two-level kick (ε, ε)   keeps 1
+arm effect              = 2(1−γ)/(1−2γ) = 2.25,  PER MODEL
+collapse factor F       = arm(NEMO)/arm(legoESM) = 2.25/2.25 = 1.00
+```
+
+So **F is predicted to be exactly 1.00 against a bar of 4.955**, and the reason
+is not that H1 is subtle — it is that the mechanism is symmetric and cancels.
+
+A second, independent offline fact points the same way: the computational mode
+decays by `|2γ−1| = 0.8` per step, i.e. `7.9e-4` per day and `1e-31` by day 10.
+Nothing that decays that fast can be shaping a day-30-to-day-60 signature, so
+**section 5's decay signature cannot bear on H1 in either direction.** It is
+still measured and reported, now as a description of NEMO's behaviour rather
+than as a test of anything.
+
+**What the experiment is now for.** It is a calibration of the ensemble
+instrument against a closed form: the per-model arm ratio should measure 2.25
+and F should measure 1.00. A null on F is only informative if the arm ratio
+lands on its prediction — otherwise a null means the instrument saw nothing at
+all. The probe therefore prints the per-model arm ratio table next to the
+collapse-factor table, and both are read together.
+
+## A2. The two arms were about to compare two different models.
+
+The one-level arm was to reuse the recorded 360-day members. Those ran **45
+commits back**, across two commits that change the physics of the very card
+both arms run (NEMO's EEN transport-metric weighting, and the implicit vertical
+solve's face control volume). The recorded day-90 ACC ensemble spread is
+2.0e-05 Sv; either change moves day-90 ACC by orders of magnitude more.
+
+**Corrected:** the one-level arm's legoESM side is re-run at the current
+revision as four 90-day members, and a new control (C2c) requires both arms'
+legoESM members to record the same source revision. The NEMO side is still
+reused: NEMO's binary is the same certified executable in both arms, this
+repo's commits cannot touch it, and the two namelists differ in `nn_itend`
+alone — when the run stops, not what it computes.
+
+## A3. "Below the resolvability bar" is NO INFORMATION, not a refutation.
+
+Section 4 mapped `median F < 4.955` to **REFUTES H1**. 4.955 is the *width of
+the null band* at n=4: below it, `F = 1` and `F = 4.9` are the same
+measurement. Turning that into a positive claim is wrong in the one direction
+that matters, because REFUTE is the branch section 6 attaches a consequence to.
+
+**Corrected rule** (this replaces section 4's three-way rule; the bars
+themselves are unchanged):
+
+* **CONFIRMS H1** — `median F >= 4.955` and `median R2 <= 10`.
+* **PARTIAL** — `median F >= 4.955` and `median R2 > 10`.
+* **REFUTES H1** — `median F < 4.955` **and** the 95% upper limit on F
+  (`F x 4.955`, the band being multiplicative) falls short of the collapse H1
+  needs, which is `median R1 / 10`. Only then has the run excluded H1 rather
+  than merely failed to see it.
+* **NOT RESOLVED** — anything else. The run said nothing.
+
+## A4. Section 6's REFUTE consequence is withdrawn pending one free measurement.
+
+Section 6 claims a REFUTE promotes legoESM's amplification to a feedback-tier
+candidate for the southern-basin deficit. That step is not sound as written:
+ensemble dispersion is the transient gain of the tangent-linear operator about
+a trajectory, while the deficit is a difference between two nonlinear
+attractors. The two connect only if the amplifying mode has a non-trivial
+projection onto the deficit pattern.
+
+**Withdrawn until measured.** The discriminating measurement is free — both
+fields are already on disk: project the day-90 ensemble-spread pattern onto the
+southern-basin transport-deficit pattern. Until that projection is non-trivial,
+the result document will state the refutation and stop, and will NOT claim a
+feedback-tier consequence. The CONFIRM branch of section 6 is unaffected.
+
+## A5. Recorded limitations, not fixed here
+
+* **The two models are not kicked on the same cells.** A relative kick cannot
+  move a cell that is exactly zero. NEMO's `tn` has 30,394 exact zeros, the
+  bridged legoESM T has 12,420, and 17,974 cells (4.8% of the grid) are kicked
+  in legoESM and not in NEMO — below-bottom cells where legoESM carries a
+  bridged value and NEMO stores zero. The asymmetry is identical in both arms,
+  so the collapse factor is protected; the absolute ratios are not. "An
+  identical 1e-14 nudge on both models" is true of the magnitude and the
+  distribution, not of the cell set or the per-cell values (the two draws are
+  filled in different axis orders).
+* **legoESM's snapshots are float32.** Between day 10 and day 60 the recorded
+  one-level members' temperature differs from their control in 1 to 5 cells of
+  372,528, i.e. at 1–4 units in the last place. The legoESM side of "the offset
+  is born in the first 30 days" is therefore *censored, not measured*. Day 90
+  is fully resolved on both sides. Fixing this needs one fp64 snapshot per
+  member per early day — named, not built here.
+* **The kick is on temperature; the scored metrics are transports.** Velocity
+  and sea surface height acquire a one-time-level perturbation in *both* arms,
+  so the two-level kick removes the time-level mismatch from the tracer
+  equation only. A refutation therefore refutes tracer-level computational-mode
+  content, which is what section 2 proposed, and not every route by which a
+  time-level mismatch could matter.
+* **The residual mismatch of the relative-factor choice is ~1e-4 of the kick.**
+  The zero-computational-mode direction is equal *absolute* increments at both
+  levels; the same *relative* factor leaves `f x (T_now − T_before)`, one
+  leapfrog step of tendency, which is ~1e-4 of the kick on this configuration
+  against the one-level kick's 100%. The choice is correct and changes no
+  interpretation.
+* **The number motivating section 5 is 1.1σ.** NEMO's recorded day-30→60 spread
+  ratio of 0.52 carries a log standard error of 0.577 at n=4, i.e. 1.13σ from
+  1.0. It is a hint, not a fact, and the prose it was quoted from also asserted
+  the mechanism it was being used as evidence for.
+
+## A6. The measurements this experiment does NOT make, named so they are not forgotten
+
+Ranked by what they would settle, cheapest first. None is built here.
+
+1. **One step, three kick sizes** (1e-14 / 1e-12 / 1e-10), legoESM, fp64: is
+   the response linear in the kick? A discrete switch firing — convective
+   adjustment, an enhanced-diffusion trigger, a mixed-layer level index — would
+   rectify the kick in one step and produce exactly the recorded signature
+   (offset immediate, growth rates unchanged). Seconds of compute.
+2. **One legoESM member, 60 days, fp64 daily temperature dumps**, overlaid on
+   NEMO's: NEMO's raw perturbation decays 224x between day 10 and day 60 and
+   then grows; whether legoESM shares that transient is the single curve that
+   settles the open item.
+3. **Sweep γ on one model** (0.05 / 0.1 / 0.2, one-level kick) and measure how
+   the ratio responds: insensitivity kills the filter mechanism with one
+   variable and one model.
+4. **The spread-pattern projection** of A4.

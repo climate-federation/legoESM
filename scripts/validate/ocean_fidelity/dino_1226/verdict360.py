@@ -520,7 +520,19 @@ def fp32_quantum(st, wet):
     machine epsilon, because the metrics are integrals whose conditioning is
     not the scalar eps (physics review B3, code review 8).
     """
-    lo = {k: (np.asarray(v, dtype=np.float32).astype(np.float64)
+    # DITHER by one float32 ulp -- do NOT round-trip through float32.
+    # The legoESM states this is handed come from a float32-stored npz that was
+    # upcast to float64 on load, so their values are ALREADY exactly
+    # float32-representable and `astype(np.float32).astype(np.float64)` is the
+    # IDENTITY: the round-trip form returned exactly 0.0 for every metric, the
+    # `q` flag could never fire, and four of the eleven metrics whose spread
+    # sits at or below their storage resolution were silently scored as
+    # resolved (kick-asymmetry code review B3). A fixed seed keeps the probe
+    # reproducible.
+    rng = np.random.default_rng(0)
+    eps32 = float(np.finfo(np.float32).eps)
+    lo = {k: (np.asarray(v, dtype=np.float64)
+              * (1.0 + eps32 * rng.standard_normal(np.shape(v)))
               if k in ("T", "S", "u") else v) for k, v in st.items()}
     a, b = all_metrics(st, wet), all_metrics(lo, wet)
     return {k: abs(a[k] - b[k]) for k in KEYS}

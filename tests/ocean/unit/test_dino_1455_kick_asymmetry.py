@@ -72,22 +72,65 @@ def test_ratio_is_lego_over_nemo_and_nan_on_a_zero_denominator(K):
     assert np.isnan(K.ratio(rows, "x", 90))     # not inf, not a big float
 
 
-@pytest.mark.parametrize("f, r2, want", [
-    (100.0, 3.0, "CONFIRMS H1"),
-    (100.0, 30.0, "PARTIAL"),
-    (4.0, 3.0, "REFUTES H1"),
-    (4.0, 500.0, "REFUTES H1"),
-    (float("nan"), 3.0, "INDETERMINATE"),
-    (100.0, float("nan"), "INDETERMINATE"),
+@pytest.mark.parametrize("f, r2, r1, want", [
+    (100.0, 3.0, 300.0, "CONFIRMS H1"),
+    (100.0, 30.0, 3000.0, "PARTIAL"),
+    # Below the resolvability bar the outcome depends on how big a collapse H1
+    # needs: if the 95% upper limit on F could still deliver it, the run said
+    # NOTHING. The pre-amendment rule called both of these REFUTES.
+    (1.0, 30.0, 30.0, "NOT RESOLVED"),      # needs 3.0x, upper limit 4.95x
+    (1.0, 100.0, 100.0, "REFUTES H1"),      # needs 10x, upper limit 4.95x
+    (float("nan"), 3.0, 300.0, "INDETERMINATE"),
+    (100.0, float("nan"), 300.0, "INDETERMINATE"),
+    (100.0, 3.0, float("nan"), "INDETERMINATE"),
 ])
-def test_registered_outcome_rule(K, f, r2, want):
-    assert K.verdict(f, r2) == want
+def test_registered_outcome_rule(K, f, r2, r1, want):
+    assert K.verdict(f, r2, r1) == want
+
+
+def test_a_below_bar_result_is_never_silently_a_refutation(K):
+    """The amendment that matters (code review B2): the resolvability bar is
+    the width of the null band, so everything under it is NO INFORMATION.
+    Turning that into REFUTES was a positive claim the statistic cannot carry,
+    and REFUTES is the branch the pre-registration attaches a consequence to."""
+    # a genuine 4x collapse -- real physics, under the n=4 bar
+    assert K.verdict(4.0, 25.0, 100.0) == "NOT RESOLVED"
 
 
 def test_outcome_rule_boundary_is_inclusive_as_registered(K):
-    assert K.verdict(K.F_RESOLVABLE, K.R2_TWO_SIDED) == "CONFIRMS H1"
-    assert K.verdict(K.F_RESOLVABLE * (1 - 1e-9), 1.0) == "REFUTES H1"
-    assert K.verdict(K.F_RESOLVABLE, K.R2_TWO_SIDED * 1.0001) == "PARTIAL"
+    assert K.verdict(K.F_RESOLVABLE, K.R2_TWO_SIDED, 100.0) == "CONFIRMS H1"
+    assert K.verdict(K.F_RESOLVABLE, K.R2_TWO_SIDED * 1.0001, 100.0) == "PARTIAL"
+
+
+# ------------------------------------------------- the leapfrog closed form ---
+def test_predicted_arm_ratio_matches_the_asselin_eigen_decomposition(K):
+    """A one-level kick (0, eps) keeps (1-2g)/(2(1-g)) of itself on the
+    physical eigenvector; a two-level kick (eps, eps) keeps all of it. The arm
+    effect is the reciprocal of the first, per model."""
+    for g in (0.0, 0.05, 0.1, 0.2):
+        one_level_survives = (1 - 2 * g) / (2 * (1 - g))
+        assert abs(K.predicted_arm_ratio(g) - 1.0 / one_level_survives) < 1e-12
+    assert abs(K.predicted_arm_ratio(0.1) - 2.25) < 1e-12
+    with pytest.raises(SystemExit):
+        K.predicted_arm_ratio(0.5)      # computational mode undamped
+
+
+def test_the_card_and_the_closed_form_agree_on_gamma(K):
+    assert abs(K.asselin_gamma_lego() - 0.1) < 1e-12
+
+
+def test_collapse_factor_is_the_ratio_of_the_two_arm_ratios(K):
+    """F = R1/R2 and F = arm(nemo)/arm(lego) are the same number. The two
+    tables are two views of one measurement, so a discrepancy is a bug."""
+    d = K.SCORE_DAY
+    r1 = {"lego": {i: {d: {"x": 1.0 * i}} for i in range(4)},
+          "nemo": {i: {d: {"x": 2.0 * i}} for i in range(4)}}
+    r2 = {"lego": {i: {d: {"x": 7.0 * i}} for i in range(4)},
+          "nemo": {i: {d: {"x": 3.0 * i}} for i in range(4)}}
+    direct = K.ratio(r1, "x", d) / K.ratio(r2, "x", d)
+    via_arms = (K.arm_ratio(r1, r2, "nemo", "x")
+                / K.arm_ratio(r1, r2, "lego", "x"))
+    assert abs(direct - via_arms) < 1e-12
 
 
 def test_median_propagates_nan_but_honours_the_quantum_exclusion(K):
@@ -110,17 +153,24 @@ def test_only_the_perturbed_members_get_the_two_level_flag(K, tmp_path):
         assert "--perturb-both-levels" in cmd
         assert cmd[cmd.index("--perturb-seed") + 1] == str(K.SEEDS[i])
         assert "--bridge-before" in cmd
+        # the ONE-level arm runs the same command WITHOUT that flag, and the
+        # two command lines must otherwise be identical -- the arms differ in
+        # exactly one token.
+        one = K.lego_cmd(str(tmp_path), i, both_levels=False)
+        assert "--perturb-both-levels" not in one
+        assert [t for t in cmd if t != "--perturb-both-levels"] == one
     assert K.SEEDS == (None, 1, 2, 3)     # the recorded seed convention
 
 
 def test_the_two_arms_are_scored_on_different_directories(K, tmp_path):
-    one, two = K.arms(str(tmp_path))
+    one, two = K.arms(str(tmp_path / "one"), str(tmp_path / "two"))
     assert one.lego_dir != two.lego_dir
     assert one.nemo_dir_fn(1) != two.nemo_dir_fn(1)
-    # the one-level arm's legoESM members ran 360 days, the two-level arm 90 --
-    # a completion check that used the wrong step count would pass on a member
-    # that stopped a quarter of the way through.
-    assert one.lego_nsteps == 4 * two.lego_nsteps
+    # Both arms are now 90-day legoESM runs at the SAME source revision (code
+    # review B1: reusing the recorded 360-day members compared two model
+    # revisions). Only the NEMO side of the one-level arm is reused.
+    assert one.lego_nsteps == two.lego_nsteps == 32 * K.N_DAYS
+    assert one.nemo_log_glob != two.nemo_log_glob
 
 
 # ---------------------------------------------- the NEMO perturbation tool ---
@@ -321,10 +371,99 @@ def test_receipt_raises_when_a_target_did_not_move(receipt):
 
 def test_receipt_handles_an_absent_before_level(receipt):
     """Without --bridge-before the state's before-level fields are None on both
-    sides; tree_leaves(None) is empty, which must read as 'unchanged', not as
-    a spurious difference."""
+    sides. tree_leaves(None) is empty, which must read as 'unchanged' rather
+    than as a spurious difference -- but it must NOT be counted as a field the
+    receipt verified, because nothing could have touched it (review N3)."""
     pre = _State(T=Field(np.asarray([1.0])), T_before=None,
                  S=Field(np.asarray([30.0])))
     post = _State(T=Field(np.asarray([1.0 + 1e-14])), T_before=None,
                   S=Field(np.asarray([30.0])))
-    assert receipt(pre, post, ["T"]) == 2
+    assert receipt(pre, post, ["T"]) == 1      # S only; the None is not counted
+
+
+# ------------------------------------------- the legoESM kick's own properties ---
+@pytest.fixture(scope="module")
+def kick():
+    sys.path.insert(0, str(PROBE_DIR))
+    try:
+        import kamm_twin_90d
+        return kamm_twin_90d
+    finally:
+        try:
+            sys.path.remove(str(PROBE_DIR))
+        except ValueError:
+            pass
+
+
+def _kick_state(kick):
+    rng = np.random.default_rng(7)
+    t = 5.0 + rng.random((4, 5, 3))
+    return _State(T=Field(np.asarray(t)),
+                  T_before=Field(np.asarray(t + 1e-3)),
+                  S=Field(np.asarray(35.0 + rng.random((4, 5, 3)))))
+
+
+def _rel(a, b):
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    return (b - a) / a
+
+
+def test_lego_two_level_kick_uses_the_same_draw_on_both_levels(kick):
+    """The property the whole discriminator rests on, and until now proven
+    only by reading the source (review N4). Two independent draws would still
+    move both levels and still pass a naive 'both changed' test."""
+    pre = _kick_state(kick)
+    post, stamp = kick.apply_temperature_kick(pre, 11, True)
+    rt = _rel(pre.T.data, post.T.data)
+    rb = _rel(pre.T_before.data, post.T_before.data)
+    scale = float(np.max(np.abs(rt)))
+    dev = float(np.max(np.abs(rt - rb)))
+    # round-off on the reconstructed relative change is ~1 ulp / draw ~ 5e-3;
+    # independent draws would put this at ~1.
+    assert dev / scale < 0.05, (dev, scale)
+    assert "levels=now+before" in stamp
+
+
+def test_the_lego_same_draw_check_is_not_vacuous(kick):
+    """PROOF the statistic above can fail: two independent draws of the same
+    size blow past the bar."""
+    pre = _kick_state(kick)
+    rng = np.random.default_rng(11)
+    shape = np.asarray(pre.T.data).shape
+    a = np.asarray(pre.T.data, dtype=np.float64) * (
+        1 + kick.PERTURB_EPS * rng.standard_normal(shape))
+    b = np.asarray(pre.T_before.data, dtype=np.float64) * (
+        1 + kick.PERTURB_EPS * rng.standard_normal(shape))   # SECOND draw
+    rt, rb = _rel(pre.T.data, a), _rel(pre.T_before.data, b)
+    assert float(np.max(np.abs(rt - rb))) / float(np.max(np.abs(rt))) > 0.5
+
+
+def test_same_seed_gives_the_same_now_level_in_both_conventions(kick):
+    """The arms must differ ONLY in whether the before level moved. If the
+    two-level path consumed the generator differently, the now level would
+    differ too and the arms would differ in more than one variable."""
+    one, _ = kick.apply_temperature_kick(_kick_state(kick), 11, False)
+    two, _ = kick.apply_temperature_kick(_kick_state(kick), 11, True)
+    assert np.array_equal(np.asarray(one.T.data), np.asarray(two.T.data))
+
+
+def test_one_level_kick_leaves_the_before_level_bit_identical(kick):
+    pre = _kick_state(kick)
+    post, stamp = kick.apply_temperature_kick(pre, 11, False)
+    assert np.array_equal(np.asarray(pre.T_before.data),
+                          np.asarray(post.T_before.data))
+    assert "levels=now" in stamp and "levels=now+before" not in stamp
+
+
+def test_two_level_kick_without_a_before_level_raises(kick):
+    pre = _State(T=Field(np.asarray([[1.0, 2.0]])), T_before=None,
+                 S=Field(np.asarray([[35.0]])))
+    with pytest.raises(SystemExit, match="bridge-before"):
+        kick.apply_temperature_kick(pre, 11, True)
+
+
+def test_both_models_kick_at_the_same_magnitude(kick, PN):
+    """The two ensembles are only comparable if the kick is the same size on
+    both sides; nothing else ties the two constants together (review N7)."""
+    assert kick.PERTURB_EPS == PN.EPS == 1e-14
