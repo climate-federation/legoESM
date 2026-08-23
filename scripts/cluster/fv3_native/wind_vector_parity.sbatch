@@ -37,9 +37,13 @@ for d in run_c12 run_c48; do
     echo "REFUSE: $d has no EXTCHAIN_DRIVER_DONE marker (unprovenanced dump)"; exit 3; fi
   echo "provenance $d: $(grep -m1 -iE 'FMSConstants|GFS|pinned' "$RO" 2>/dev/null | head -c 120)"
 done
-echo "=== dump hashes (the exact oracle bytes scored) ==="
-sha256sum $OUT/run_c12/extchain_t*.dat $OUT/run_c12/extchain_t*.mf \
-          $OUT/run_c48/extchain_t*.dat $OUT/run_c48/extchain_t*.mf | sed 's#'"$OUT"'/##'
+# PIN the exact oracle bytes: the dumps must match the committed sha256 manifest
+# (generated from the genuine job-9470130 pinned-Fortran output).  A substituted
+# or stale dump fails here -- this is the tamper-evident provenance control.
+MANIFEST=$REPO/tests/grids/fixtures/fv3_wind_vectors_oracle.sha256
+echo "=== verify oracle dumps against committed manifest ==="
+if ! ( cd $OUT && sha256sum -c "$MANIFEST" ); then
+  echo "REFUSE: oracle dumps do not match the committed sha256 manifest"; exit 4; fi
 
 rc=0
 echo "=== C12 ==="
@@ -48,6 +52,9 @@ $PY $REPO/scripts/validate/fv3_native/compare_wind_vectors.py \
 echo "=== C48 ==="
 $PY $REPO/scripts/validate/fv3_native/compare_wind_vectors.py \
     --oracle-dir $OUT/run_c48 --n 48 --ng 3 || rc=1
+
+echo "=== offline unit tests (geometry + transform helpers, no dumps) ==="
+$PY -m pytest $REPO/tests/grids/test_fv3_wind_vectors.py -q 2>&1 | tail -6 || rc=1
 
 echo "WINDVEC_RC=$rc"
 # single unambiguous verdict: only emit the pass token if BOTH resolutions
