@@ -16,12 +16,20 @@ NEMO, traced end to end for DINO's ``key_qco`` leap-frog (no ``key_RK3``):
   * ``stpmlf.F90:686``   ``rDt = 2*rn_Dt`` from the second step on
     (``:135`` sets ``rDt = rn_Dt`` for the single Euler start).  ``rn_Dt=2700``
     (``namelist_cfg:116``), so ``rDt = 5400 s``.
-  * ``dynzdf.F90:145-150`` the after level is
-    ``puu(Kaa) = ((1+r3u(Kbb))*puu(Kbb) + rDt*(1+r3u(Kmm))*puu(Krhs))
-    / (1+r3u(Kaa))`` -- so the friction increment is ``2*dt`` times the
-    operator evaluated on the BEFORE velocity, applied to the BEFORE velocity.
-  * ``dynatf_qco.F90:200`` then filters the NOW level with ``rn_atfp = 0.1``
-    (``namelist_ref:73``).
+  * ``dynzdf.F90:137-142`` the after level is
+    ``puu(Kaa) = (puu(Kbb) + rDt*puu(Krhs)) * umask`` -- the friction increment
+    is ``2*dt`` times the operator on the BEFORE velocity, added to the BEFORE
+    velocity, with NO thickness weighting.  This is the ``ln_dynadv_vec`` arm,
+    and DINO sets ``ln_dynadv_vec = .true.`` (``namelist_cfg:321``); the
+    ``(1+r3u)``-weighted form at ``:145-150`` is the ELSE arm and is DEAD CODE
+    on this card.
+  * ``dynatf_qco.F90:165-166`` then filters the NOW level with the PLAIN
+    ``puu(Kmm) + rn_atfp*(puu(Kbb) - 2*puu(Kmm) + puu(Kaa))``,
+    ``rn_atfp = 0.1`` (``namelist_ref:73``) -- again the ``ln_dynadv_vec`` arm
+    (branch at ``:162``).  The thickness-weighted filter at ``:190-206`` is the
+    ELSE arm and is also dead here.  legoESM's filter
+    (``ocean_model_latlon_cgrid.py:8322-8324``) is the identical expression, so
+    the two filters agree EXACTLY rather than to O(eta/H).
 
 legoESM on the ``nemo_dino_kamm_mlf`` card:
 
@@ -33,7 +41,11 @@ legoESM on the ``nemo_dino_kamm_mlf`` card:
   * ``ocean_model_latlon_cgrid.py:3478``  ``_diss_du_incr = dt_mom *
     tend.du_diss.data`` with ``dt_mom = dt / config.dt_mom_ratio`` (``:3424``),
     and ``dt`` here IS ``rdt``.
-  * ``:8548`` the after level adds that increment to the BEFORE velocity.
+  * ``:8548`` the after level adds the BAROCLINIC part of that increment to
+    the before velocity.  The DEPTH MEAN travels separately, folded into the
+    barotropic solver's slow forcing at ``:3905-3911`` with the same thickness
+    weight, so the increment-level agreement below settles only part of the
+    question and the whole-step measurement is what covers the rest.
   * ``:8322-8324`` the Asselin filter, ``gamma = config.asselin_gamma``.
 
 So the two agree IF AND ONLY IF ``dt_mom_ratio`` is 1 on this card.  That is a
@@ -192,6 +204,12 @@ def diss_increment(model, state, rdt):
     Calls the model's own step with the same private arguments
     ``_nemo_mlf_step`` uses (``ocean_model_latlon_cgrid.py:8500-8519``), so this
     is the production path and not a re-derivation of it.
+
+    ``surface_forcing`` is deliberately omitted -- the same omission that
+    forced the 59e33f8e5 retraction, so it is stated rather than left to be
+    rediscovered. It is harmless HERE for two independent reasons: the wind is
+    not part of ``du_diss``, and both arms share a state so anything it
+    contributed would cancel in the difference this probe takes.
     """
     _, extras = model._step_impl(
         state, rdt, _apply_implicit_vmix=False,
@@ -214,8 +232,12 @@ def diss_increment(model, state, rdt):
 def ldf_tendency(model, state):
     """The lateral-friction tendency on the BEFORE velocity, m/s2.
 
-    The production operator through the production dispatch, evaluated on the
-    same before-level velocity ``_ldf_state`` hands it.
+    The production OPERATOR, on the same before-level velocity ``_ldf_state``
+    hands it -- but NOT through the production dispatch: the coefficients and
+    the 3-D vertex mask are rebuilt here, and the slope-foot multiply and the
+    e3-weighting selector (``ocean_pe_latlon_cgrid.py:2751-2790``) are skipped.
+    Both are no-ops on this card and ``assert_branch`` refuses to run if they
+    stop being no-ops, but this is a re-derivation and is labelled as one.
     """
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         nemo_lateral_viscosity_coefficients, nemo_ldf_lap_viscosity_cgrid)

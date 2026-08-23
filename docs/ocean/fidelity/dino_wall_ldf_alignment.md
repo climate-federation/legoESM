@@ -261,8 +261,8 @@ Probe: `friction_timestep_check.py`.
 | which velocity the operator reads | the **before** level: `dyn_ldf(kstp, Nbb, Nnn, uu, vv, Nrhs)` (`stpmlf.F90:319`), and the scheme takes `pu_in(...,Kbb)` (`dynldf_lev_rot_scheme.h90:24-25,28-29`) | the **before** level: `_ldf_state=(T_before, S_before, u_before, v_before)` (`ocean_model_latlon_cgrid.py:8516-8518`), routed onto the friction call alone (`ocean_pe_latlon_cgrid.py:4241-4242`) |
 | where it accumulates | `Krhs` | the withheld dissipative increment (`ab2_scope="advective"`) |
 | the timestep | `rDt = 2·rn_Dt = 5400 s` from the second step on (`stpmlf.F90:686`; `:135-136` is the single Euler start), `rn_Dt=2700` (`namelist_cfg:116`) | `rdt = 2.0·dt = 5400 s` (`ocean_model_latlon_cgrid.py:8478`), and the increment is `dt_mom · du_diss` with `dt_mom = dt/dt_mom_ratio` (`:3478`, `:3424`), `dt_mom_ratio` **measured = 1.0** on this card |
-| what it is added to | the **before** velocity: `puu(Kaa) = ((1+r3u(Kbb))·puu(Kbb) + rDt·(1+r3u(Kmm))·puu(Krhs))/(1+r3u(Kaa))` (`dynzdf.F90:145-150`) | the **before** velocity: `u_naa = (ubc_bef + (ubc_exp − ubc_now)) + du_diss_bc + btu_exp` (`:8548`) |
-| the time filter | `rn_atfp = 0.1` (`namelist_ref:73`, not overridden) | `asselin_gamma = 0.1` (`dino.py:1490`) |
+| what it is added to | the **before** velocity: `puu(Kaa) = (puu(Kbb) + rDt·puu(Krhs))·umask` (`dynzdf.F90:137-142`), with **no** thickness weighting — DINO sets `ln_dynadv_vec = .true.` (`namelist_cfg:321`) | the **before** velocity: `u_naa = (ubc_bef + (ubc_exp − ubc_now)) + du_diss_bc + btu_exp` (`:8548`), the depth mean travelling separately (`:3905-3911`) |
+| the time filter | the **plain** `puu(Kmm) + rn_atfp·(puu(Kbb) − 2·puu(Kmm) + puu(Kaa))` (`dynatf_qco.F90:165-166`, the `ln_dynadv_vec` arm selected at `:162`), `rn_atfp = 0.1` (`namelist_ref:73`) | the identical expression (`ocean_model_latlon_cgrid.py:8322-8324`), `asselin_gamma = 0.1` (`dino.py:1490`) |
 
 ### Measured, not read
 
@@ -325,11 +325,28 @@ exonerated end to end: same operator, same coefficient, same wall condition,
 same time level, same timestep, same filter coefficient, and the depth mean
 arrives.
 
-One residual difference, logged and not chased: NEMO's momentum time filter in
-the moving-coordinate branch is thickness-weighted by `(1+r3u)`
-(`dynatf_qco.F90:193-201`) where legoESM's is the plain form
-(`ocean_model_latlon_cgrid.py:8322-8324`). That is an O(η/H) ≈ 4e-4 effect on
-the filter, three orders below a factor of two.
+**A retraction, in place.** An earlier version of this section said NEMO's
+momentum time filter is thickness-weighted where legoESM's is plain, and put
+the residual at O(η/H) ≈ 4e-4. **Both halves were wrong, and wrong the same
+way: I quoted a branch that does not execute.** DINO sets
+`ln_dynadv_vec = .true.` (`namelist_cfg:321`), which selects the *plain*
+velocity filter at `dynatf_qco.F90:165-166` and the *plain* velocity update at
+`dynzdf.F90:137-142`; the thickness-weighted forms I cited (`:190-206` and
+`:145-150`) are the `ELSE` arms and are dead code on this card. The two filters
+and the two updates are therefore the **identical algebra**, agreeing exactly
+rather than to 4e-4. The correction strengthens the match; it was caught by
+review, not by me, and it is the same class of error the campaign's own rules
+warn about — citing a line without proving its branch runs.
+
+**One condition the multiplier does not cover, met by configuration.** NEMO
+overwrites the entire after-level depth mean with the barotropic solver's
+answer *after* `dyn_zdf` and *before* the filter (`mlf_baro_corr`,
+`stpmlf.F90:709`, called at `:578`, body `:754-765`), so the filter never sees
+the raw leap-frog depth mean. Two models agreeing on multiplier, time level and
+filter coefficient but disagreeing on whether that overwrite runs would deliver
+different effective damping of the depth-mean friction. This card runs it, at
+NEMO's position in the step (`dino.py:1714-1715`,
+`ocean_model_latlon_cgrid.py:8303`).
 
 ---
 
@@ -369,53 +386,92 @@ formula does not apply to a zonal wall, and the measured 2.69-row width is the
 grid's resolution limit for a smooth decaying structure, so it carries no
 mechanism information either way.
 
-**Cause unknown.** Every candidate below is unmeasured; each is listed with the
-cheapest thing that would move it. Ranked by how wall-concentrated the mechanism
-is *by construction*, since the defect is confined to four rows while the rest of
-the basin is right to 3%.
+**Cause unknown.** Ranked below by whether the mechanism carries a `1/H` — the
+wall rows are about 2260 m against 4000 m in the interior, so *every* `1/H` term
+is amplified 1.77× there, and that is a better sort key than "does it touch the
+wall". Ranking corrected after physics review, which inverted both ends of my
+first attempt.
 
-1. **The EEN vorticity scheme's corner convention at the wall.** The strongest
-   candidate, because it is the largest momentum term in a wall-parallel jet and
-   because it is the *one* place the coastal corner is deliberately handled
-   differently from the viscosity: NEMO sets `ln_dynvor_msk = .false.`
-   (`namelist_cfg:333`), keeping the coastal relative vorticity **live** in the
-   vorticity flux, where the viscosity's `fmask` kills it. The card matches that
-   by configuration (`dino.py:1491`, `een_q_boundary="nemo_live"`;
-   `een_e3f_scheme="nemo_avg"` for `nn_e3f_typ=1`) — but configuration matching
-   is exactly what row 5 of the alignment table above was *before* it was
-   measured, and the triads have never been compared numerically at a corner
-   where one of the four cells is land.
-   *Cheapest discriminator*: the alignment probe, retargeted. Compare the EEN
-   triad's effective potential vorticity and its `e3f` at the wall corners,
-   cell by cell, against NEMO's, on the shared restart. Offline, minutes, no run.
-2. **Bottom drag on the shallow wall columns.** Wall-concentrated by
-   construction: the drag tendency goes as `r·u/H` and the wall rows are about
-   2260 m against 4000 m in the interior, so it is roughly 1.8× stronger there
-   for the same velocity. The parent document already measured that the
-   **bottom-cell** velocity difference is three times the depth-uniform one, and
-   the bottom cell is exactly what the drag sees. Never perturbed.
-   *Cheapest discriminator*: offline first — the per-row bottom-drag tendency
-   difference between the two models on the shared state, checked against the
-   four-row fingerprint. If the shape matches, one 90-day arm at half the drag
-   coefficient through the same rig (215 s), pre-registered, with the unsigned
-   band error required to **fall** — the test the viscosity arms failed.
-3. **The barotropic solve at the last wet row.** The defect is depth-uniform, so
-   it lives in the depth-mean mode. The *friction* route into that mode is now
-   closed — Part 3 measures the depth mean of the friction arriving at the wall
-   rows with slope 0.9987 — so what is left is the solve's own geometry rather
-   than what is fed into it.
-   *Cheapest discriminator*: the barotropic face depth at the last wet row,
-   offline, both models — the item the parent document registered and never ran.
-4. **Momentum advection and the fused kinetic-energy-plus-pressure-gradient
-   pair.** Largest in the parent document's per-term table, and demoted only
-   because legoESM cannot currently split that pair in its diagnostics, so it
-   needs a diagnostic split before it can be compared at all. That split is the
-   work item, not a measurement.
+1. **Bottom drag on the shallow wall columns.** Now the top candidate, on three
+   independent grounds. *Physics*: the transport is zonal in a zonally periodic
+   band, so zonally integrating the depth-integrated zonal momentum equation
+   drops the pressure gradient identically, leaving bottom drag, bottom form
+   stress and lateral friction — and the telescoping argument says lateral
+   friction cannot change the band total under free slip. A band-integrated
+   zonal transport error points here first. *Magnitude*: with
+   `ln_non_lin=.true.`, `rn_Cd0=1e-3`, `rn_ke0=2.5e-3`, the barotropic spin-down
+   `H/r` is 1.77× longer in the interior than at the wall, giving 0.19–0.34
+   e-folds of differential damping over 90 days — the right order for a 34%
+   wall-concentrated error, which no other surviving term can claim.
+   *Surface for error*: drag has **three** composition sites, each with its own
+   time level and sign convention, and none has been compared numerically — the
+   in-matrix implicit term (`dynzdf.F90:314`), the explicit bottom-stress source
+   at the bottom cell (`dynzdf.F90:174-177`), and the `dyn_drg_init` baroclinic
+   residual folded into the barotropic forcing (`dynspg_ts.F90:374-401`) — plus
+   the bottom-level index itself (`mbku` against legoESM's `_isb_u`), where a
+   one-level offset at a staircase face is wall-concentrated by construction.
+   *Cheapest discriminator, offline, no run*: the oracle already dumps the
+   drag-only increment (`drg_dump_zu_frc_inc.bin`, `drg_dump_rcdu_bot.bin`).
+   Diff legoESM's against it at rows 1–4 on the matched restart, and diff
+   `_isb_u` against the mesh's `mbku`. Same instrument shape as the wall
+   alignment probe, pointed at a term nobody has pointed it at. Only if that
+   passes does a drag-coefficient ablation earn its 215 s.
+2. **The EEN vorticity triads at the wall.** Three of its legs turn out to be
+   aligned already, by reading: the coastal relative vorticity is genuinely
+   live on both sides (`ln_dynvor_msk=.false.`, `dynvor.F90:807-813`); under
+   `key_qco` the `e3f` coefficient is precomputed as a count-normalised mean
+   (`dynvor.F90:927-938`) and legoESM's `nemo_avg` is the same rule
+   (`ocean_pe_latlon_cgrid.py:1893-1895`), so the wall corner gets the full
+   thickness — had legoESM used a min or a divide-by-four, `q = f/e3f` at the
+   wall would have been up to 2× wrong, an O(1) depth-uniform wall error; and
+   the reference-vs-live thickness there is O(η/H). What remains unchecked is
+   the numeric triad value.
+   *Cheapest discriminator*: no new instrument needed on either side — NEMO's
+   Krhs chain dumps give `dyn_vor` as dump 4 minus dump 3, and legoESM already
+   exposes `vortcor_u/v` separately. One matched-state step, diff at rows 1–4.
+3. **Momentum advection and the kinetic-energy / pressure-gradient pair.**
+   Promoted, and my earlier "not currently separable" is **retracted**: the two
+   models group these differently but a matched partition exists today — compare
+   the unions `{KEG+ZAD+HPG}` against `{KE_PGF + vertadv}`, with the vorticity
+   and friction groups each alone.
+   *Cheapest discriminator*: that union comparison on a matched state.
+4. **The barotropic solve's face depth at the last wet row.** Demoted to last.
+   The substep loop is already bit-identical at substep 1 (3.1e-15), the
+   sea-surface operator exact (9.3e-15) and the transport reconstruction exact
+   (7.3e-16), and substep 1 exercises the face depths through the transport.
+   Do not re-open without a reason that survives those three numbers.
+
+**Raised by review, measured here, and refuted as the owner.** The implicit
+vertical momentum solve builds its u-face column from an already-masked
+thickness — the partial-cell thickness is zeroed below the sea floor
+(`ocean/vertical.py:621`), then averaged arithmetically onto the face
+(`ocean_model_latlon_cgrid.py:6589`), so a face whose two columns have different
+bottom levels gets half a level that exists on neither, and the 2-D mask
+broadcast down (`:6628`) does not remove it. NEMO masks after building on the
+reference ladder, so the level simply has no water. The mechanism is **real**:
+`staircase_control_volume.py` measures legoESM's u-column depth against NEMO's
+`hu_0` and finds it deeper by up to 272.6 m at 1396 of 9758 columns, and exactly
+0.000e+00 at all 8331 flat-bottom faces — so the difference is the staircase
+rule and not a convention offset. But the **shape is wrong for this defect**:
+the relative bias is 0.48% at the four wall rows against 0.84% in the sampled
+interior, an enrichment of **0.57×** — the wall rows are *less* affected than the
+interior — and under 1% against a 34% target. Logged as transcription debt,
+refuted as the owner.
 
 **Not returning to the top.** The barotropic free-surface solve as a whole. The
 original pre-registration said a *refuted* friction hypothesis would send it
-back there; friction was reclassified as a lever rather than refuted, and
-candidate 3 above is a specific and much narrower claim than "the solve".
+back there; friction was reclassified as a lever rather than refuted, and the
+only piece of the solve still open (candidate 4) is far narrower than "the
+solve" and is already fenced by three roundoff-level numbers.
+
+**Also closed by measurement, not by argument.** The route by which the depth
+mean of the friction reaches the state. legoESM folds it into the barotropic
+forcing (`ocean_model_latlon_cgrid.py:3905-3911`) with the *same* thickness
+weight the 3-D combine removes it with (`:8543-8548`), so nothing is lost or
+double-counted by construction; and Part 3 measures it arriving at the wall rows
+with slope 0.9987. The campaign's earlier `F_slow == zu_frc` to roundoff is the
+same statement from the other side, since NEMO's `zu_frc` contains the
+lateral-friction depth mean by construction (`dynspg_ts.F90:336-339`).
 
 ## Everything this does not establish
 
