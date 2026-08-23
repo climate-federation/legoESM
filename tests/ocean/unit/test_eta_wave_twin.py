@@ -451,3 +451,92 @@ def test_compare_refuses_a_mismatched_mesh(ewt, tmp_path):
         ds.variables["nav_lat"][:] = ds.variables["nav_lat"][:] + 5.0
     with pytest.raises(SystemExit, match="does not match the mesh"):
         ewt.compare(npz_n, npz_l, str(tmp_path / "o3"), mesh)
+
+
+def _fake_nemo_run(tmp_path, nsteps=6, ny=5, nx=4, offset=0):
+    """Write per-step NEMO-style restart tiles obeying the Asselin identity.
+
+    ``offset`` shifts the sshb series by one dump, which is exactly the
+    mapping error the identity exists to catch.
+    """
+    import netCDF4
+    rng = np.random.default_rng(12)
+    sshn = np.cumsum(rng.normal(size=(nsteps + 2, ny, nx)) * 1e-3, axis=0)
+    atfp = 0.1
+    sshb = np.zeros_like(sshn)
+    sshb[0] = sshn[0]
+    for n in range(1, sshn.shape[0]):
+        sshb[n] = sshn[n - 1] + atfp * (sshb[n - 1] - 2 * sshn[n - 1] + sshn[n])
+    run = tmp_path / "run"
+    run.mkdir()
+    for n in range(1, nsteps + 1):
+        kt = 5760 + n
+        f = run / f"DINO_{kt:08d}_restart_0000.nc"
+        with netCDF4.Dataset(f, "w") as ds:
+            ds.createDimension("x", nx)
+            ds.createDimension("y", ny)
+            ds.createDimension("t", 1)
+            for name, arr in (("sshn", sshn[n]),
+                              ("sshb", sshb[n + offset]),
+                              ("nav_lat", None), ("nav_lon", None)):
+                if name.startswith("nav"):
+                    v = ds.createVariable(name, "f8", ("y", "x"))
+                    v[:] = np.zeros((ny, nx))
+                else:
+                    v = ds.createVariable(name, "f8", ("t", "y", "x"))
+                    v[:] = arr[None]
+            ds.createVariable("rdt", "f8")[...] = 2700.0
+            ds.DOMAIN_size_global = np.array([nx, ny])
+            ds.DOMAIN_position_first = np.array([1, 1])
+            ds.DOMAIN_position_last = np.array([nx, ny])
+            ds.DOMAIN_halo_size_start = np.array([0, 0])
+            ds.DOMAIN_halo_size_end = np.array([0, 0])
+    return str(run)
+
+
+def test_extract_nemo_accepts_a_correctly_mapped_run(ewt, tmp_path):
+    run = _fake_nemo_run(tmp_path)
+    out = tmp_path / "n.npz"
+    got = ewt.extract_nemo(run, 5760, 6, str(out))
+    assert got["eta"].shape == (6, 5, 4)
+
+
+def test_extract_nemo_rejects_a_one_dump_time_level_offset(ewt, tmp_path):
+    """The synthetic violation the identity exists to catch."""
+    run = _fake_nemo_run(tmp_path, offset=1)
+    with pytest.raises(SystemExit, match="TIME-LEVEL IDENTITY FAILED"):
+        ewt.extract_nemo(run, 5760, 6, str(tmp_path / "n2.npz"))
+
+
+def test_compare_impulse_lane_differences_each_side_against_its_own_free_run(
+        ewt, tmp_path):
+    """The response lane must subtract like from like, and it must actually
+    change the answer relative to the free lane."""
+    mesh, nf, lf = _synthetic_pair(tmp_path, lego_offset=1e-6)
+    # Give each side the SAME extra response on top of a DIFFERENT background,
+    # so a lane that differenced against the wrong run would see the
+    # background difference and a correct one sees only the (identical)
+    # response.
+    d_n, d_l = dict(np.load(nf)), dict(np.load(lf))
+    nt, ny, nx = d_n["eta"].shape
+    resp = np.zeros((nt, ny, nx))
+    for n in range(nt):
+        resp[n, :, (n % nx)] = 0.02
+    pn, pl = tmp_path / "nemo_imp.npz", tmp_path / "lego_imp.npz"
+    np.savez(pn, **{**d_n, "eta": d_n["eta"] + resp,
+                    "eta_before": d_n["eta_before"] + resp})
+    np.savez(pl, **{**d_l, "eta": d_l["eta"] + resp})
+    res = ewt.compare(str(pn), str(pl), str(tmp_path / "imp"), mesh,
+                      nf, lf)
+    assert res["lane"] == "impulse_response"
+    # both responses are the SAME planted field, so they agree exactly, even
+    # though the two backgrounds differ by 1e-6 m
+    assert res["final_max_abs_m"] < 1e-12
+    free = ewt.compare(str(pn), str(pl), str(tmp_path / "fre"), mesh)
+    assert free["final_max_abs_m"] > 1e-9   # the free lane sees the background
+
+
+def test_compare_refuses_a_one_sided_impulse_lane(ewt, tmp_path):
+    mesh, npz_n, npz_l = _synthetic_pair(tmp_path)
+    with pytest.raises(SystemExit, match="BOTH free runs or neither"):
+        ewt.compare(npz_n, npz_l, str(tmp_path / "o4"), mesh, npz_n, None)

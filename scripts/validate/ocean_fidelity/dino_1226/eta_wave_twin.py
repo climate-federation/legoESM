@@ -164,9 +164,9 @@ def extract_nemo(run_dir: str, kt0: int, nsteps: int, out: str,
     kt0 is the restart step the run STARTED from (5760), so dump kt0+n holds
     the state after n steps.  Time coordinate t[n] = n * rdt seconds.
     """
-    if nsteps < 3:
-        raise SystemExit("nsteps must be >= 3 (the time-level identity needs "
-                         "three consecutive dumps)")
+    if nsteps < 2:
+        raise SystemExit("nsteps must be >= 2 (the time-level identity needs "
+                         "two consecutive dumps)")
     exe = os.path.join(run_dir, "nemo.exe")
     binary_md5 = md5(exe) if os.path.exists(exe) else "ABSENT"
     rebuild = _load_rebuild()
@@ -214,23 +214,35 @@ def extract_nemo(run_dir: str, kt0: int, nsteps: int, out: str,
     # ---- TIME-LEVEL CONTROL, and it has to be one that can FAIL.
     # "consecutive dumps differ" and "sshn differs from sshb" both pass just
     # as happily under a one-dump offset, so they prove nothing on their own.
-    # The discriminating check is NEMO's own Asselin identity: with the swap
-    # at stpmlf.F90:621-624 preceding rst_write at :634, the sshb written at
-    # dump n must be the FILTERED level built from sshn at n-2, n-1 and n:
-    #     sshb[n] = sshn[n-1] + rn_atfp * (sshn[n-2] - 2 sshn[n-1] + sshn[n])
-    # A one-dump offset breaks this by roughly a whole step's change.
+    # The discriminating check is NEMO's own Asselin filter, written out
+    # EXACTLY.  At step n the filter (ssh_atf) acts on the pre-swap now level
+    # and its result is what the swap turns into the written `sshb`:
+    #
+    #     sshb[n] = sshn[n-1] + rn_atfp * ( sshb[n-1] - 2 sshn[n-1] + sshn[n] )
+    #
+    # The BEFORE level entering the filter at step n is the already-FILTERED
+    # now level of step n-1, i.e. sshb[n-1] -- NOT the unfiltered sshn[n-2].
+    # Getting that wrong leaves a residual that looks like a small physical
+    # term (it is second order in the filter weight and grows with how fast
+    # the field is changing: 1.3% of a step's change on a quiet run, 16% on an
+    # excited one) and invites exactly the wrong conclusion.  In the correct
+    # form the identity is EXACT -- measured 0.0 to the last bit -- which is
+    # what makes it a real control: a one-dump offset cannot hide inside a
+    # tolerance that is machine zero.
     sn, sb = eta["sshn"], eta["sshb"]
-    resid = sb[2:] - (sn[1:-1] + NEMO_ATFP * (sn[:-2] - 2 * sn[1:-1] + sn[2:]))
+    resid = sb[1:] - (sn[:-1] + NEMO_ATFP * (sb[:-1] - 2 * sn[:-1] + sn[1:]))
     step_change = float(np.max(np.abs(sn[1:] - sn[:-1])))
     resid_max = float(np.max(np.abs(resid)))
+    scale = float(np.max(np.abs(sn)))
     if step_change <= 0.0:
         raise SystemExit("the free surface never changes; the time-level "
                          "identity cannot be tested")
-    if resid_max > 0.1 * step_change:
+    if resid_max > 1.0e-9 * scale:
         raise SystemExit(
-            f"TIME-LEVEL IDENTITY FAILED: |sshb - Asselin(sshn)| = "
-            f"{resid_max:.3e} m exceeds 10% of the per-step change "
-            f"{step_change:.3e} m -- the dump<->time-level mapping is wrong")
+            f"TIME-LEVEL IDENTITY FAILED: |sshb - Asselin(sshb,sshn)| = "
+            f"{resid_max:.3e} m against a field of {scale:.3e} m. The "
+            "identity is exact in NEMO, so any residual above roundoff means "
+            "the dump<->time-level mapping is wrong.")
     d_consec = float(np.max(np.abs(sn[1] - sn[0])))
     d_bn = float(np.max(np.abs(sn[0] - sb[0])))
 
@@ -733,10 +745,39 @@ def time_level_discriminator(lego_eta, sshn, sshb, wet) -> dict:
 
 
 def compare(nemo_npz: str, lego_npz: str, outdir: str,
-            mesh_mask: str = MESH_MASK) -> dict:
+            mesh_mask: str = MESH_MASK,
+            nemo_free_npz: str | None = None,
+            lego_free_npz: str | None = None) -> dict:
+    """Compare two eta time series cell by cell, band by band.
+
+    With ``nemo_free_npz``/``lego_free_npz`` supplied, the observable becomes
+    the IMPULSE RESPONSE -- each model's perturbed run minus its OWN free run.
+    That is the lane that can actually say something about waves: it removes
+    the balanced background both models are merely carrying along, leaving the
+    radiating signal the bump excited.  Each side is differenced against its
+    own free run, never against the other model's, so a background difference
+    cannot leak into the response.
+    """
     os.makedirs(outdir, exist_ok=True)
     nemo = load_side(nemo_npz, "NEMO")
     lego = load_side(lego_npz, "legoESM")
+    lane = "free"
+    if (nemo_free_npz is None) != (lego_free_npz is None):
+        raise SystemExit("the impulse lane needs BOTH free runs or neither -- "
+                         "differencing one side only would compare a response "
+                         "against a full field")
+    if nemo_free_npz is not None:
+        nf = load_side(nemo_free_npz, "NEMO free")
+        lf = load_side(lego_free_npz, "legoESM free")
+        for a, b in ((nemo, nf), (lego, lf)):
+            if a["eta"].shape != b["eta"].shape or not np.array_equal(
+                    a["t"], b["t"]):
+                raise SystemExit("a perturbed run and its free run disagree "
+                                 "in shape or clock")
+        nemo = dict(nemo, eta=nemo["eta"] - nf["eta"],
+                    eta_before=nemo["eta_before"] - nf["eta_before"])
+        lego = dict(lego, eta=lego["eta"] - lf["eta"])
+        lane = "impulse_response"
     wet = wet_mask(mesh_mask)
 
     if nemo["eta"].shape != lego["eta"].shape:
@@ -817,6 +858,12 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
         # measured error itself, so it can only see super-linear growth.
         st["rms_over_signal_change"] = (float(st["rms_m"] / signal_change[n])
                                         if signal_change[n] > 0 else None)
+        # For the impulse lane this is the number that matters: the
+        # disagreement as a fraction of the RESPONSE the bump excited.
+        ref_rms = float(np.sqrt(np.sum(area[wet] * nemo["eta"][n][wet] ** 2)
+                                / np.sum(area[wet])))
+        st["rms_over_reference_rms"] = (float(st["rms_m"] / ref_rms)
+                                        if ref_rms > 0 else None)
         st["t_hours"] = float(t[n] / 3600.0)
         st["step"] = n + 1
         growth.append(st)
@@ -915,6 +962,7 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
     noise = step_noise_ratio(lego["eta"], nemo["eta"], wet, regions)
 
     result = {
+        "lane": lane,
         "locus_sensitivity": locus_sensitivity,
         "propagation": prop,
         "time_levels_rms_m": levels,
@@ -934,7 +982,11 @@ def compare(nemo_npz: str, lego_npz: str, outdir: str,
                     for k, v in spec.items()},
         "provenance": provenance({
             "nemo_npz": nemo_npz, "lego_npz": lego_npz,
-            "mesh_mask": mesh_mask, "wet_cells": int(wet.sum()),
+            "mesh_mask": mesh_mask, "lane": lane,
+            "nemo_free_npz": nemo_free_npz, "lego_free_npz": lego_free_npz,
+            "nemo_dtype_on_disk": nemo["dtype_on_disk"],
+            "lego_dtype_on_disk": lego["dtype_on_disk"],
+            "wet_cells": int(wet.sum()),
             "dry_cells": int((~wet).sum()),
             "mask_control": "PASSED (dry poison inert on masked stats, "
                             "active on unmasked)",
@@ -1100,6 +1152,11 @@ def main(argv=None):
     c.add_argument("--lego", required=True)
     c.add_argument("--outdir", required=True)
     c.add_argument("--mesh-mask", default=MESH_MASK)
+    c.add_argument("--nemo-free", default=None,
+                   help="NEMO's UNPERTURBED run; supplying it (with "
+                        "--lego-free) switches the observable to the impulse "
+                        "RESPONSE, each model minus its own free run")
+    c.add_argument("--lego-free", default=None)
 
     a = ap.parse_args(argv)
     if a.cmd == "extract-nemo":
@@ -1108,7 +1165,8 @@ def main(argv=None):
         make_impulse_restart(a.restart_in, a.restart_out, a.amplitude_m,
                              a.radius_m, mesh_mask=a.mesh_mask)
     elif a.cmd == "compare":
-        compare(a.nemo, a.lego, a.outdir, a.mesh_mask)
+        compare(a.nemo, a.lego, a.outdir, a.mesh_mask,
+                a.nemo_free, a.lego_free)
 
 
 if __name__ == "__main__":
