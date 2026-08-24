@@ -19,9 +19,9 @@ export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/hs_$SLURM_JOB_ID
 mkdir -p $OUT
 cd "$REPO"
-# report-only (no --max-rel): SEE the residual before choosing a gate.
+# GATED at 1e-7 (worst field v ~1.6e-8); --save-fields feeds the maps.
 $PY scripts/validate/fv3_native/full_step_oracle_parity.py --physics held_suarez --max-rel 1e-7 \
- report-only (no --max-rel): SEE the residual before choosing a gate.  --save-fields $OUT/hs_fields.npz
+    --save-fields $OUT/hs_fields.npz
 $PY scripts/plot/fv3_duo_face_maps.py $OUT/hs_fields.npz --out-dir $OUT/maps
 ls -la $OUT/maps/*.png
 echo FV3_HS_PARITY_DONE
