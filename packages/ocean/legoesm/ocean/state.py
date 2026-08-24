@@ -934,9 +934,17 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
-        the planetary Coriolis f×u is applied in the forward-backward step
-        function and is NOT included in these diagnostics)
+        The vorticity-flux momentum tendency.  WHAT IT CONTAINS DEPENDS ON THE
+        SELECTED SCHEME, so read it here rather than assuming:
+
+        * ``vorticity_scheme`` in the ``*_total`` family (e.g. ``een_total``,
+          NEMO's ``ln_dynvor_een``): the TOTAL (f+ζ) flux — the planetary part
+          IS included, because those schemes put ``f`` inside the triad and the
+          separate face-``f`` Coriolis add is gated off for exactly that reason
+          (``ocean_pe_latlon_cgrid.py``, the ``_f_vtx_al`` branch).  This is the
+          form that pairs with NEMO's ``dyn_vor`` when comparing term by term.
+        * otherwise: RELATIVE vorticity only (ζ × v_at_u / −ζ × u_at_v), with
+          the planetary Coriolis f×u applied in the step function instead.
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z.  With
         ``adaptive_implicit_vertadv=True`` this holds the start-of-step
@@ -1908,6 +1916,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
     #   value raises in the operator.
     een_e3f_scheme: str = "min"
+    # Horizontal metric weighting on the AL81/EEN transport:
+    # "off" (default, bit-identical legacy) — the per-unit-width form, exact
+    #   on a uniform-metric grid.
+    # "nemo" — NEMO dyn_vor's own weighting (dynvor.F90:791-792 weights the
+    #   meridional transport by e1v, :804 divides the u-tendency by e1u, and
+    #   symmetrically e2u/e2v for v). Retaining the factors makes discrete
+    #   enstrophy conservation exact on the sphere; dropping them leaves an
+    #   O(dcos phi) residual that grows as dphi*tan(phi), i.e. largest at high
+    #   latitude. This is the SAME weighting barotropic_coriolis="een_metric"
+    #   already applies on the barotropic path. Unknown value raises in
+    #   _bc_pv_flux.
+    een_metric_weighting: str = "off"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution

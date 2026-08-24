@@ -161,3 +161,34 @@ def test_zu_frc_assembly_citations_record_the_shape_split():
     for name in ("drg_dump_zu_frc_inc.bin", "spg_dump_zu_frc.bin"):
         src = _DUMP_TIME_LEVEL[name][1]
         assert ("Interior" in src or "interior" in src), (name, src)
+
+
+def test_post_tendency_stage_state_dumps_are_registered_at_the_after_level():
+    """#1455 post-tendency bisection: the two momentum STATE checkpoints that
+    bracket the implicit vertical solve, and the barotropic loop's committed
+    velocity, must resolve without the caller asserting a level.
+
+    Both ``stp_dump_state_and_bt`` call sites hand it ``uu(:,:,:,Naa)``
+    (cfgs/DINO/MY_SRC/stpmlf.F90:337 for stage 7, :403 for stage 8), and
+    ``spg_dump_puu_b_final`` is written from ``puu_b(ji,jj,Kaa)``
+    (dynspg_ts.F90:1043) -- all three are AFTER-level artifacts.
+
+    The filename ordering matters and is the reason these need their own
+    registration rather than riding the seq-dump window expansion: this family
+    puts the kt BEFORE the field name (``stp_dump_07_dynspg_kt00005761_u.bin``)
+    while the seq_dump families put it after.
+    """
+    for name in ("stp_dump_07_dynspg_kt00005761_u.bin",
+                 "stp_dump_07_dynspg_kt00005761_ub.bin",
+                 "stp_dump_08_dynzdf_kt00005761_v.bin",
+                 "stp_dump_08_dynzdf_kt00230401_u.bin",
+                 "spg_dump_puu_b_final.bin",
+                 "spg_dump_pvv_b_final.bin",
+                 "spg_dump_pssh_final.bin"):
+        assert time_level_for_dump(name) == "after", name
+        assert _DUMP_TIME_LEVEL[name][1].strip(), name
+
+    # Non-vacuity: the registry is fail-closed, so a name from the SAME family
+    # at a kt outside the two instrumented windows must still raise.
+    with pytest.raises(ValueError):
+        time_level_for_dump("stp_dump_08_dynzdf_kt00009999_u.bin")

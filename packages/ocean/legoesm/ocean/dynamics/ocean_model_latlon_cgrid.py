@@ -6613,11 +6613,10 @@ class LatLonCGridOceanModel:
             # consumers need a POSITIVE thickness rather than the masked
             # control volume built below: the centre-to-centre gradient slot
             # ``dz_half_{u,v}`` (whose value at a closed interface is
-            # irrelevant — the viscosity there is already zero — but which
+            # irrelevant -- the viscosity there is already zero -- but which
             # must not become 1/eps), and the ``zdf_drag_in_matrix`` diagonal,
             # whose NEMO counterpart divides by ``e3u(ji,jj,iku,Kaa)``
-            # (dynzdf.F90:296), a scale factor NEMO never masks.  Both stay
-            # BIT-IDENTICAL to the behaviour before the control-volume fix.
+            # (dynzdf.F90:296), a scale factor NEMO never masks.
             dz_u_open, dz_v_open = dz_u, dz_v
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
@@ -6636,10 +6635,10 @@ class LatLonCGridOceanModel:
             if _dzw_slot:
                 # Veros dzw at u/v-faces (#428): dz_half_ref·J interpolated to
                 # the faces with the SAME interp that built the UNMASKED face
-                # thickness dz_{u,v}_open (J is level-independent, so
-                # dz_u_open = dz_ref·J_u and the gradient slot dz_half_ref·J_u
-                # stays consistent with it).  Deliberately NOT the masked
-                # control volume: see the dz_*_open note above.
+                # thickness dz_{u,v}_open.  Deliberately NOT the masked control
+                # volume: a closed interface's gradient slot is multiplied by an
+                # already-zero viscosity, and masking it would make it 1/eps
+                # there for no gain.
                 J_u = interp_cell_to_uface(J_cell[..., jnp.newaxis])
                 J_v = interp_to_v_points(J_cell[..., jnp.newaxis], _grid)
                 dz_half_u = (self.z_coord.dz_half_ref * J_u).astype(dz_u.dtype)
@@ -6657,71 +6656,37 @@ class LatLonCGridOceanModel:
                 dz_half_u = build_dz_half(e3t_now_u).astype(dz_u.dtype)
                 dz_half_v = build_dz_half(e3t_now_v).astype(dz_v.dtype)
             else:
-                # UNMASKED (``dz_*_open``): a closed interface's gradient slot
-                # is multiplied by an already-zero viscosity, and feeding it
-                # the masked control volume would make it 1/eps there for no
-                # gain.  BIT-IDENTICAL to the pre-#1455 behaviour.
                 dz_half_u = build_dz_half(dz_u_open)
                 dz_half_v = build_dz_half(dz_v_open)
             if _wet_if_vmix is not None:
-                # FACE CONTROL VOLUME = NEMO's ``e3u_0 * umask`` (#1455).
-                # ``dz_cell`` is h_partial*J, which is ALREADY ZERO below the
-                # seafloor, so the cell->face AVERAGE returns HALF a thickness
-                # at a bathymetry-staircase face — a face NEMO's umask closes.
-                # NEMO never gets a half: its ``e3t_0`` is defined on the
-                # UNMASKED reference ladder at every level (DINO ln_zco:
-                # ``pe3u = 0.5*(pe3t(i)+pe3t(i+1))``, cfgs/DINO/MY_SRC/
-                # zgr_lib.F90:231; ln_zps: ``e3u_0 = MIN(e3t_0(i),e3t_0(i+1))``,
-                # tools/DOMAINcfg/src/domzgr.F90:1166), and the mask is applied
-                # SEPARATELY when the column is summed —
-                # ``hu_0 = hu_0 + e3u_0(:,:,jk)*umask(:,:,jk)`` (domain.F90:145).
-                # Averaging the already-masked thickness therefore inflates the
-                # column divisor by half a reference cell at every staircase
-                # level (measured on the shipped DINO card: 1560 u-faces at
-                # exactly 0.5000 of the ladder, 1559 wet u-columns inflated by
-                # up to 370 m = 15.7% of their depth).  Multiplying by the
-                # both-cells-wet face mask restores NEMO's value exactly: at a
-                # wet-wet face the masked and unmasked averages coincide, and
-                # at a closed face both rules give zero.
-                # SCOPE: this changes EVERY face the mask closes, which is
-                # more than the bathymetry staircase -- a LAND-ADJACENT face
-                # on a flat bottom, and a configured seam wall
-                # (``grid.seam_wall_rows``, ``_apply_seam_wall_u``), are
-                # closed at every level and now carry a zero column too.  All
-                # of those faces are discarded by the ``u_mask``/``v_mask``
-                # ``jnp.where`` after the solve, so no velocity changes; what
-                # changes is the divisor.  A face the mask leaves OPEN is
-                # BIT-IDENTICAL (the multiplier is exactly 1.0), and a
-                # coordinate that is not partial-cell never enters this branch.
-                # Why not ``min_cell_to_uface`` (the thickness house rule in
-                # its own docstring): the min rule would ALSO change wet-wet
-                # faces whose two columns differ in the z-star Jacobian, where
-                # NEMO AVERAGES the free-surface factor -- for DINO the
-                # e1e2t-area-weighted form ``pr3u = 0.5*(e1e2t_i*ssh_i +
-                # e1e2t_{i+1}*ssh_{i+1})*r1_hu_0*r1_e1e2u``, domqco.F90:219-222
-                # (cpp_DINO.fcm sets key_qco and NOT key_qcoTest_FluxForm, so
-                # :227's plain-average sibling is the arm DINO does not build).
-                # AT REST the two rules are identical on this card (measured
-                # over the whole DINO geometry).  They separate as soon as the
-                # sea surface tilts: scored against NEMO's
-                # ``hu = hu_0 + ssh_avg`` on the DINO geometry with a
-                # N(0, 0.5 m) sea surface, this masked average is 0.0038 m
-                # mean / 0.115 m max off, the min rule 0.280 m / 1.389 m, and
-                # the pre-fix unmasked average 31.7 m / 370.1 m -- so the
-                # masked average is ~74x closer to NEMO than the min rule.
-                # RESOLVED (was "NAMED, NOT FIXED — one owner needed"): the
-                # sibling site ``after_level_column_mean_reconcile``
-                # (barotropic_common.py:322, called from
-                # ``_apply_after_level_reconcile`` below) rebuilt the SAME NEMO
-                # face thickness by the MIN rule on the eta=0 reference ladder,
-                # so the two sites disagreed off a horizontally uniform
-                # full-step ladder at rest.  That site now uses
-                # ``mean_cell_to_uface``/``mean_cell_to_vface`` — the same
-                # masked-arithmetic-average rule as here — so the two agree by
-                # construction.  Relatedly, on
-                # a genuine ln_zps partial-cell coordinate the wet-wet average
-                # here is still not NEMO's MIN (domzgr.F90:1166); DINO has no
-                # partial cells (namelist_cfg:70-72 ln_zco_nam=.true.).
+                # FACE CONTROL VOLUME = NEMO's ``e3u_0 * umask``.  ``dz_cell``
+                # is h_partial*J, ALREADY ZERO below the seafloor, so the
+                # cell->face average returns HALF a thickness at a staircase
+                # face -- a face the model's own mask closes -- and that half
+                # summed into the column divisor of the barotropic split.
+                # NEMO builds the face thickness on the UNMASKED reference
+                # ladder and applies the mask SEPARATELY when the column is
+                # summed (``hu_0 = hu_0 + e3u_0*umask``, domain.F90:145), so a
+                # closed face contributes exactly zero.
+                #
+                # THIS IS MAIN'S OWNER, PORTED VERBATIM, NOT A SECOND RULE.
+                # The construction, its NEMO citations and the
+                # masked-average-vs-min decision all belong to PR #1642
+                # (merged to main 2026-08-22, commit 4734c2d5f), which this
+                # branch predates.  An earlier revision of THIS branch fixed
+                # the same defect with ``min_cell_to_uface`` and was replaced
+                # by this port after review: main's rule is the more
+                # NEMO-faithful one on a tilted free surface, because NEMO
+                # AVERAGES the free-surface factor between the two columns
+                # (``pr3u = 0.5*(e1e2t_i*ssh_i + e1e2t_{i+1}*ssh_{i+1})
+                # *r1_hu_0*r1_e1e2u``, domqco.F90:219-222, the arm DINO's
+                # key_qco builds) where the min rule would take the shallower
+                # column's.  Scored against NEMO's own ``hu_0 + ssh_avg`` with
+                # a N(0, 0.5 m) sea surface: masked average 0.0038 m mean /
+                # 0.115 m max, min rule 0.280 / 1.389, pre-fix unmasked
+                # average 31.7 / 370.1.  At rest on this card the two rules
+                # are identical, so nothing on the DINO twin turns on the
+                # choice -- but the repo must not carry two.
                 dz_u = dz_u * _act_u3.astype(dz_u.dtype)
                 dz_v = dz_v * _act_v3.astype(dz_v.dtype)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
