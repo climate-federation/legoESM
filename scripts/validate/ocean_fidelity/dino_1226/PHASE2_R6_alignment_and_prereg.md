@@ -462,7 +462,18 @@ interaction changing sign between the two slices).
   solve interpolates cell thicknesses to faces with an ARITHMETIC mean where
   the repo's own operator docstring says a partial-cell model must use the MIN
   rule.  Named, not fixed, not measured.
-* No card default is changed by this work.  The option ships off.
+  RETRACTED: this had the polarity BACKWARDS.  The arithmetic mean is what
+  NEMO uses for the reference face thickness (`e3u_0 = 0.5*(e3t_0(i) +
+  e3t_0(i+1))`, `zgr_lib.F90:231`, masked separately at `domain.F90:145`); the
+  MIN rule is the MOM6/MITgcm `hFacW` convention and a DIFFERENT quantity.  The
+  implicit solve was right and the *reconciliation* was the one on the min
+  rule — fixed on `fix/pierre-review-triage`, which also gave the min-rule
+  operator docstring the missing cross-reference.
+* No card default is changed **by this work**.  SUPERSEDED AFTER THIS
+  DOCUMENT WAS WRITTEN (`1d5b19a1d`): the `nemo_dino_kamm_mlf` card now
+  ships the NEMO-faithful PAIR **on** (`barotropic_reconcile_target=
+  "velocity_avg"` + `barotropic_after_reconcile="nemo_mlf_baro_corr"`,
+  arm D — `dino.py:1714-1715`).  Every other card still ships it off.
 
 ## Stage decomposition, both option arms — the discard identity holds on each
 
@@ -665,4 +676,8 @@ the circulation actually is.
   reproduce NEMO's discard identity window by window.
 * My original pre-registered prediction is still wrong in direction, for the
   reason already recorded.
-* No card default changed. The option still ships off.
+* No card default changed **by this work**.  SUPERSEDED — see the note in
+  the section above: `1d5b19a1d` turned the faithful pair ON for the
+  `nemo_dino_kamm_mlf` card only, after this document was written.  A
+  driver following this line as written would expect the old state and
+  get a velocity-changing reconciliation.

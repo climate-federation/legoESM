@@ -891,6 +891,9 @@ class DINOConfig:
     # (default, MITgcm hFacZ convention) or "nemo_avg" (NEMO nn_e3f_typ=1,
     # dynvor.F90::vor_een masked average — #1226 item 10).
     een_e3f_scheme: str = "min"
+    # "off" (default, bit-identical) or "nemo" (dyn_vor's e1v/e1u and e2u/e2v
+    # weighting on the EEN transport, dynvor.F90:791-792 and :804-806).
+    een_metric_weighting: str = "off"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -1492,6 +1495,36 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "een_e3f_scheme": "nemo_avg",         # nn_e3f_typ=1: masked AVERAGE e3f
                                           # (dynvor.F90::vor_een, not min-rule)
+    # dynvor.F90:791-792 weights the meridional transport by e1v (the V-face
+    # zonal width) and :804 divides the assembled u-tendency by e1u,
+    # symmetrically e2u/e2v for v. THIS IS WHAT NEMO ACTUALLY COMPUTES, so the
+    # card ships it (#1455). Three reasons, in the order they matter:
+    #   1. FAITHFULNESS. legoESM's AL81 triad used neither factor, which is the
+    #      per-unit-width form -- a different operator on any grid whose
+    #      metrics vary. Measured against NEMO's own dumped vorticity tendency
+    #      on the one-step oracle state, supplying it closes 96-98% of the
+    #      wall-row disagreement and 86% of the far interior. It is a GLOBAL
+    #      fidelity correction that happened to be found at the wall.
+    #   2. IT CONSERVES THE RIGHT INVARIANT. On a stretched grid the weighted
+    #      form conserves the PHYSICAL kinetic-energy norm to roundoff (1e-16)
+    #      while the unweighted one conserves kinetic energy per unit AREA
+    #      instead, which is not a physical invariant. See
+    #      tests/ocean/unit/test_een_metric_weighting.py, which asserts both
+    #      directions.
+    #   3. GATE-NEUTRAL, MEASURED -- not assumed. One controlled 90-day pair
+    #      differing only in this field: all five acceptance-gate metrics PASS
+    #      at 5x on both arms and EVERY move is inside its noise floor (the
+    #      wall-row transport shifts 0.0062 Sv = 0.07x the floor). So there is
+    #      no compensating-error risk here: nothing was bought and nothing was
+    #      paid.
+    # It also removes a standing internal inconsistency: the barotropic solver
+    # has always run the metric-weighted EEN (barotropic_coriolis="een_metric"
+    # below) while the 3-D momentum ran the unweighted one.
+    # THE LESSON THIS CARRIES, because it cost a lane to learn: closing 96-98%
+    # of an OPERATOR mismatch moved the 90-day TRANSPORT by 0.07 noise floors.
+    # A tendency error and the transport error at the same place are DIFFERENT
+    # OBJECTS, and closing one is not evidence about the other.
+    "een_metric_weighting": "nemo",
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
@@ -3249,6 +3282,7 @@ def dino_lat_lon_model_config(
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
         een_e3f_scheme=cfg.een_e3f_scheme,
+        een_metric_weighting=cfg.een_metric_weighting,
         asselin_gamma=cfg.asselin_gamma,
         tracer_combine=cfg.tracer_combine,
         fix_eta_drift=cfg.fix_eta_drift,

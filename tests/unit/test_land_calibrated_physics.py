@@ -24,6 +24,7 @@ from legoesm.land.config import (
     MultiLayerLandConfig,
     apply_calibrated_multilayer,
     calibrated_multilayer_setup,
+    biophysics_lmip_two_leaf_setup,
 )
 from legoesm.land.soil_grid import make_soil_grid
 
@@ -90,6 +91,10 @@ def test_offline_calibrator_builds_the_shared_definition():
     """
     import scripts.run.train_multilayer_land_era5 as T
 
+    # The ERA5 calibrator fits the LEGACY (SimpleSEB) tables, so it is pinned to
+    # the legacy setup — not to the biophysics LMIP calibration AMIP deploys.
+    # Those are two calibrations of two different surface schemes; the anti-drift
+    # check is that each calibrator matches ITS OWN definition.
     cal = calibrated_multilayer_setup()
     assert T._N_LAYERS == cal["soil_grid"].n_layers
     assert T._SOIL_DEPTH_M == cal["soil_grid"].total_depth
@@ -114,7 +119,7 @@ def test_amip_flag_flows_to_config_and_gate_rejects_disagreement():
         build_arg_parser, build_config_from_args, _postprocess_args,
     )
     parser = build_arg_parser()
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
 
     off = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
@@ -126,7 +131,7 @@ def test_amip_flag_flows_to_config_and_gate_rejects_disagreement():
         "--dataset", "analytical", "--grid-type", "mpas",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--mpas-land-beta-soil",
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
         "--multilayer-soil-depth", str(cal["soil_grid"].total_depth),
@@ -137,13 +142,13 @@ def test_amip_flag_flows_to_config_and_gate_rejects_disagreement():
 
     # Each overlapping key, disagreeing on its own, must fail.
     with pytest.raises(ValueError, match="land_stomatal_beta"):
-        cfg._replace(land_stomatal_beta=False).validate_strict()
+        cfg._replace(land_stomatal_beta=True).validate_strict()
     with pytest.raises(ValueError, match="land_surface_scheme"):
-        cfg._replace(land_surface_scheme="two_leaf").validate_strict()
+        cfg._replace(land_surface_scheme="simple_seb").validate_strict()
     with pytest.raises(ValueError, match="multilayer_soil_depth"):
         cfg._replace(multilayer_soil_depth=6.375).validate_strict()
     with pytest.raises(ValueError, match="multilayer_n_layers"):
-        cfg._replace(multilayer_n_layers=10).validate_strict()
+        cfg._replace(multilayer_n_layers=8).validate_strict()
     with pytest.raises(ValueError, match="snow_albedo_feedback"):
         cfg._replace(snow_albedo_feedback=False).validate_strict()
     with pytest.raises(ValueError, match="land_gs_max"):
@@ -285,12 +290,12 @@ def test_mesh_lane_calibrated_run_must_hand_its_fluxes_to_the_atmosphere():
         build_arg_parser, build_config_from_args, _postprocess_args,
     )
     parser = build_arg_parser()
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
     argv = [
         "--dataset", "analytical", "--grid-type", "mpas",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--mpas-land-beta-soil",
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
         "--multilayer-soil-depth", str(cal["soil_grid"].total_depth),
@@ -318,11 +323,11 @@ def test_calibrated_physics_is_refused_off_the_mesh_lane():
         build_arg_parser, build_config_from_args, _postprocess_args,
     )
     parser = build_arg_parser()
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-mask-file", "lsm.nc",
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--surface-tiled", "--turbulence", "louis",
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
         "--multilayer-soil-depth", str(cal["soil_grid"].total_depth),
@@ -350,12 +355,12 @@ def test_calibrated_mesh_run_needs_a_turbulence_scheme_that_takes_the_fluxes():
     assert accepting, "no turbulence scheme takes the fluxes — the scan is broken"
 
     parser = build_arg_parser()
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
     argv = [
         "--dataset", "analytical", "--grid-type", "mpas",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--mpas-land-beta-soil",
         "--turbulence", accepting[0],
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
@@ -390,12 +395,12 @@ def test_a_mesh_run_with_no_land_anywhere_is_refused():
         build_arg_parser, build_config_from_args, _postprocess_args,
     )
     parser = build_arg_parser()
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--grid-type", "mpas",
         "--topography", "flat",              # and NO --land-mask-file
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--mpas-land-beta-soil",
         "--turbulence", "louis",
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
@@ -439,13 +444,13 @@ def test_a_wrong_column_land_ic_is_caught_before_any_land_work(tmp_path):
                       n_steps_completed=0, soil_dz=other)
     assert load_land_restart_soil_dz(ic) is not None, "the stamp was not written"
 
-    cal = calibrated_multilayer_setup()
+    cal = biophysics_lmip_two_leaf_setup()
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--grid-type", "mpas",
         "--land-mask-file", "lsm.nc",
         "--use-multilayer-land", "--land-calibrated-physics",
-        "--land-stomatal-beta", "--land-surface-scheme", "simple_seb",
+        "--land-surface-scheme", "two_leaf",
         "--snow-albedo-feedback", "--mpas-land-beta-soil",
         "--turbulence", "louis", "--land-ic", str(ic),
         "--multilayer-n-layers", str(cal["soil_grid"].n_layers),
@@ -622,6 +627,14 @@ def test_a_canopy_gets_per_pft_canopy_parameters(monkeypatch, tmp_path):
     from legoesm.land.canopy.config import CanopyLandParams
 
     _patch_land_loaders(monkeypatch)
+    # _patch_land_loaders stubs init_land_surface_data with a UNIFORM stand-in
+    # (hc=5.0 everywhere).  This test verifies the REAL per-PFT canopy builder
+    # reaches the coupled driver, so restore the real loader — it reads the
+    # staged surfdata and produces per-column variety (verified: hc 0.1..34 m).
+    import legoesm.land.boundary_data as _bd
+    from legoesm.land.boundary_data.builders import (
+        init_land_surface_data as _real_init_land_surface_data)
+    monkeypatch.setattr(_bd, "init_land_surface_data", _real_init_land_surface_data)
     cfg = _small_cfg()._replace(land_surface_scheme="two_leaf",
                                 surfdata_path="data/legoesm_surfdata_c260716.nc")
     import os

@@ -34,7 +34,7 @@ oracle (rel 1e-9) that reimplements the published closed forms:
     canopy Vcmax25 integral (sunlit = LAI Vc (1 - e^{-CI(kn + kb LAI)})/(kn +
     kb LAI)) — all Ryu (2011) forms, with Sellers (1985) the two-stream lineage.
     MODEL-SPECIFIC choices layered on top: the fixed 2% UV band, the
-    (1 - FNonVeg) soil-reflectance scaling, and the tanh dusk ramp.
+    canopy-cover scaling of the ground-reflected soil term, and the tanh dusk ramp.
 
 The Erbs / spectral-fraction / Sellers-Ryu scheme coefficients are transcribed
 as independent oracle literals and canaried against the module constants
@@ -86,8 +86,8 @@ _ERBS_FD_HIGH = 0.165      # diffuse fraction for k_t > _ERBS_KT_HIGH
 # --- Sellers (1985) / Ryu et al. (2011) two-stream scattering & extinction [-] ---
 _SIGMA_PAR    = 0.175      # PAR leaf scattering coefficient
 _SIGMA_NIR    = 0.825      # NIR leaf scattering coefficient
-_RHO_PAR_SOIL = 0.15       # PAR soil reflectance factor (× (1 - FNonVeg))
-_RHO_NIR_SOIL = 0.30       # NIR soil reflectance factor (× (1 - FNonVeg))
+_RHO_PAR_SOIL = 0.15       # PAR soil reflectance factor (x canopy cover)
+_RHO_NIR_SOIL = 0.30       # NIR soil reflectance factor (x canopy cover)
 _KPB_PAR      = 0.46       # beam + scattered PAR extinction numerator (/cos SZA)
 _KD_PAR       = 0.72       # diffuse PAR extinction
 _KD_NIR_COEF  = 0.35       # diffuse NIR extinction coefficient
@@ -95,6 +95,33 @@ _RHO_UV       = 0.05       # UV reflectance (leaf + soil, PAR-like band)
 _KD_LW        = 0.78       # diffuse longwave extinction
 _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
+
+
+def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
+    """Fraction of the ground shaded by foliage, ``1 - exp(-G CI LAI)``.
+
+    The complement of the canopy GAP fraction, with the same spherical-leaf
+    ``G = 0.5`` and clumping the beam extinction uses.  It vanishes like
+    ``0.5 CI LAI`` as the leaf area does, which is the property everything
+    downstream needs: a term describing radiation intercepted BY LEAVES must
+    go to zero with the leaves.
+
+    This is computed here rather than taken as an input because it used to be
+    one: a per-column ``FNonVeg`` field that two builders filled in two
+    incompatible ways — the flux-tower builder with this gap fraction, the
+    global builder with a BINARY dominant-plant-type flag. At a leaf area of
+    0.019 those disagree by 0.99, and the binary value left the ground-reflected
+    radiation heating a canopy that had no leaves to absorb it: measured, the
+    sunlit leaf temperature ran 124 K from freezing and the closure failed to
+    solve in 405 of 4500 sampled weather states. Deriving it from ``LAI`` and
+    ``CI``, which the caller already passes, makes the inconsistency
+    unrepresentable.
+
+    The same expression appears as the bare-vs-dense weight in
+    ``stability.compute_below_canopy_resistance``; that one keeps its own form
+    because it may later want stem area or snow burial, which this one must not.
+    """
+    return -jnp.expm1(-_KB_BEAM * CI * LAI)
 
 # --- Night ramp for the sunlit fraction (numerics; see canopy_shortwave_rt) ---
 _NIGHT_RAMP_CENTER_WM2    = 30.0   # tanh centre in direct-beam SW [W m-2]
@@ -230,7 +257,6 @@ def canopy_shortwave_rt(
     Vcmax25_C3_leaf: jax.Array,
     Vcmax25_C4_leaf: jax.Array,
     kn: jax.Array,
-    FNonVeg: jax.Array,
 ) -> CanopySWOutput:
     """Two-leaf shortwave radiative transfer (Sellers 1985, Ryu et al. 2011).
 
@@ -249,7 +275,6 @@ def canopy_shortwave_rt(
     Vcmax25_C3_leaf,
     Vcmax25_C4_leaf   : (ncol,) per-leaf Vcmax25 [μmol m-2 s-1]
     kn                : (ncol,) nitrogen extinction coefficient [-]
-    FNonVeg           : (ncol,) non-vegetated fraction [-]
 
     Returns
     -------
@@ -259,9 +284,13 @@ def canopy_shortwave_rt(
 
     # ---- Scattering/reflectance coefficients (Sellers 1985) ----
     sigma_P   = _SIGMA_PAR                  # PAR leaf scattering coefficient
-    rho_PSoil = _RHO_PAR_SOIL * (1.0 - FNonVeg)   # PAR soil reflectance
+    # Ground-reflected radiation returned UPWARD INTO THE CANOPY, so it is
+    # scaled by the foliage that can intercept it — NOT the bare-ground albedo,
+    # which is applied to the incident flux further down.
+    cover    = canopy_cover(LAI, CI)
+    rho_PSoil = _RHO_PAR_SOIL * cover       # PAR soil reflectance into the canopy
     sigma_N   = _SIGMA_NIR                  # NIR leaf scattering coefficient
-    rho_NSoil = _RHO_NIR_SOIL * (1.0 - FNonVeg)   # NIR soil reflectance
+    rho_NSoil = _RHO_NIR_SOIL * cover       # NIR soil reflectance into the canopy
 
     # ---- Extinction coefficients (Ryu et al. 2011 Table A1) ----
     cos_sza = jnp.cos(jnp.radians(SZA))

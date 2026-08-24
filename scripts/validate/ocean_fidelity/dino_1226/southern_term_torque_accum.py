@@ -827,7 +827,7 @@ def main(argv=None):
     print("=" * 112)
     print(f"  {'term':14s}" + "".join(f"{i*args.interval_days:>9d}"
                                       for i in range(n_int))
-          + f"{'  90d mean':>12s}")
+          + f"{'  run mean':>12s}")
     for t, name in enumerate(TERMS):
         v = acc_row[:, t, :][:, ROWS].mean(axis=1)
         if np.max(np.abs(v)) == 0.0:
@@ -850,24 +850,45 @@ def main(argv=None):
     print("vs NEMO's own dumped trends (INSTANTANEOUS 10-day samples -- see the "
           "sampling note)")
     print("=" * 112)
-    nem = {}
+    # The NEMO side of THIS comparison is the recorded 90-day twin's own 10-day
+    # restarts, so it exists for the first 90 days only.  A run longer than that
+    # (--days 360) previously died here -- inside an OPTIONAL diagnostic, AFTER
+    # the whole accumulation was finished and BEFORE --out-npz was written, so a
+    # four-hour run produced no artifact.  Restrict the comparison to the
+    # intervals the twin covers and say how many; never abort the run for it.
+    import glob as _glob
+    n_cmp = 0
     for i in range(n_int):
+        kt = G.KT_RESTART + i * args.interval_days * STEPS_PER_DAY
+        if not _glob.glob(f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart*.nc"):
+            break
+        n_cmp = i + 1
+    if n_cmp == 0:
+        raise SystemExit("FATAL: the recorded 90-day twin has no restart at the "
+                         "first sample day -- this comparison cannot run at all")
+    if n_cmp < n_int:
+        print(f"  [coverage] the recorded twin ({G.RUN_90D_TWIN}) has dumps for "
+              f"{n_cmp} of this run's {n_int} intervals, i.e. the first "
+              f"{n_cmp * args.interval_days} days.  THIS TABLE COVERS THOSE "
+              f"INTERVALS ONLY; the rest of the run is not in it.")
+    nem = {}
+    for i in range(n_cmp):
         kt = G.KT_RESTART + i * args.interval_days * STEPS_PER_DAY
         nem[i] = nemo_terms(kt)
     idx = {name: t for t, name in enumerate(TERMS)}
     print(f"  {'group':24s}{'lego acc':>11s}{'NEMO samp':>11s}{'diff':>10s}")
     for gname, lkeys in LEGO_GROUPS.items():
         lv = np.mean([acc_row[i, [idx[k] for k in lkeys if k in idx], :]
-                      .sum(axis=0)[ROWS].mean() for i in range(n_int)])
+                      .sum(axis=0)[ROWS].mean() for i in range(n_cmp)])
         nv = np.mean([group_sum(nem[i], NEMO_GROUPS[gname])[ROWS].mean()
-                      for i in range(n_int)])
+                      for i in range(n_cmp)])
         print(f"  {gname:24s}{lv:11.3f}{nv:11.3f}{lv - nv:10.3f}")
-    lv = np.mean([acc_row[i, idx["REST"], ROWS].mean() for i in range(n_int)])
+    lv = np.mean([acc_row[i, idx["REST"], ROWS].mean() for i in range(n_cmp)])
     nv = np.mean([(nem[i]["spg"] + nem[i]["__zdf_true__"] + nem[i]["atf"]
                    - nem[i]["__zdf_true__"] * 0)[ROWS].mean()
-                  for i in range(n_int)])
+                  for i in range(n_cmp)])
     nv_spg_atf = np.mean([(nem[i]["spg"] + nem[i]["atf"])[ROWS].mean()
-                          for i in range(n_int)])
+                          for i in range(n_cmp)])
     print(f"  {'REST (LUMPED bucket)':24s}{lv:11.3f}{nv_spg_atf:11.3f}"
           f"{lv - nv_spg_atf:10.3f}")
     print("    REST = spg + implicit-vertical + atf + split leftovers; the NEMO\n"
@@ -885,7 +906,7 @@ def main(argv=None):
     print("=" * 112)
     print(f"  {'stage':18s}" + "".join(f"{i*args.interval_days:>9d}"
                                        for i in range(n_int))
-          + f"{'  90d mean':>12s}")
+          + f"{'  run mean':>12s}")
     for t, name in enumerate(STAGES):
         v = acc_stage[:, t, :][:, ROWS].mean(axis=1)
         print(f"  {name:18s}" + "".join(f"{x:9.3f}" for x in v)
@@ -1017,6 +1038,31 @@ def main(argv=None):
     # ---- the fingerprint: the lego-MINUS-NEMO per-row structure -------------
     ib = STAGES.index("BARO solve")
     baro_t = acc_stage[:, ib, :]
+    # ARTIFACT FIRST.  Everything below this line is REPORTING, and every
+    # report section can raise -- a tripped gate, or an optional comparison
+    # against a run that is SHORTER than this one.  A 360-day accumulation
+    # costs four hours and was lost to exactly that, so the npz is written
+    # as soon as its last input exists.
+    if args.out_npz:
+        np.savez_compressed(
+            args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
+            acc_row=acc_row, acc_map=acc_map, acc_n=acc_n, R_series=R_series,
+            stages=np.array(STAGES), acc_stage=acc_stage,
+            acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
+            interval_days=args.interval_days, plant=args.plant,
+            stage_plant=args.stage_plant,
+            met_weightings=np.array(METW), acc_met=acc_met,
+            acc_moffs=acc_moffs, Mnow_series=Mnow_series,
+            acc_med_series=acc_med_series,
+            south_rows=np.array(SOUTH_ROWS), chan_rows=np.array(CHAN_ROWS),
+            north_rows=np.array(NORTH_ROWS), full_rows=np.array(FULL_ROWS),
+            e3t_mode=E3T_MODE, days=args.days, n_int=n_int,
+            git_sha=_GIT_SHA, recipe=args.recipe,
+            seasonal_t0_seconds=t0_sec,
+            reconcile_target=_card("barotropic_reconcile_target"),
+            after_reconcile=_card("barotropic_after_reconcile"),
+            surface_stress_implicit=_card("surface_stress_implicit"))
+        print(f"\n[artifact] -> {args.out_npz}")
 
     # -------------------------------- NEMO's own barotropic-solve net row ---
     # Rule 0 -- read off NEMO's source, not inferred:
@@ -1040,12 +1086,12 @@ def main(argv=None):
     NEMO_PRE_SPG = ("hpg", "keg", "rvo", "pvo", "zad", "ldf")
     print("\n" + "=" * 112)
     print("BAROTROPIC-SOLVE NET ROW: lego (accumulated) vs NEMO (recovered "
-          "from utrd_spg, INSTANTANEOUS samples)")
+          f"from utrd_spg, INSTANTANEOUS samples) -- FIRST {n_cmp} INTERVALS ONLY")
     print("=" * 112)
     print(f"  {'day':>5s}{'lego BARO':>12s}{'NEMO baro':>12s}{'diff':>10s}"
           f"{'NEMO utrd_spg':>16s}{'|pre-spg|':>12s}")
     _canc = []
-    for i in range(n_int):
+    for i in range(n_cmp):        # NEMO side covers n_cmp intervals only
         pre = sum(nem[i][t] for t in NEMO_PRE_SPG)
         nb = nem[i]["spg"] + pre
         lb = baro_t[i][ROWS].mean()
@@ -1062,13 +1108,13 @@ def main(argv=None):
           "the SHAPE of\n  either one alone says nothing.  Per-row DIFFERENCE, "
           "per interval [m3/s2]:")
     print(f"  {'row':>5s}" + "".join(f"{i*args.interval_days:>9d}"
-                                     for i in range(n_int)) + f"{'  mean':>9s}")
-    _dif = np.zeros((n_int, B.NY))
-    for i in range(n_int):
+                                     for i in range(n_cmp)) + f"{'  mean':>9s}")
+    _dif = np.zeros((n_cmp, B.NY))
+    for i in range(n_cmp):
         _dif[i] = baro_t[i] - (nem[i]["spg"]
                                + sum(nem[i][t] for t in NEMO_PRE_SPG))
     for j in ROWS:
-        print(f"  {j:5d}" + "".join(f"{_dif[i, j]:9.2f}" for i in range(n_int))
+        print(f"  {j:5d}" + "".join(f"{_dif[i, j]:9.2f}" for i in range(n_cmp))
               + f"{_dif[:, j].mean():9.2f}")
     _bm = _dif[:, ROWS].mean(axis=1)
     _se = float(np.std(_bm, ddof=1) / np.sqrt(len(_bm)))
@@ -1110,26 +1156,6 @@ def main(argv=None):
     # multi-hour run with nothing to inspect, which is exactly when the raw
     # arrays are most wanted.  A tripped gate still fails the run loudly; the
     # consumer (fullsection_stage_gap.py) re-checks the stamps it needs.
-    if args.out_npz:
-        np.savez_compressed(
-            args.out_npz, terms=np.array(TERMS), rows=np.array(ROWS),
-            acc_row=acc_row, acc_map=acc_map, acc_n=acc_n, R_series=R_series,
-            stages=np.array(STAGES), acc_stage=acc_stage,
-            acc_offs_sum=acc_offs_sum, Rnow_series=Rnow_series,
-            interval_days=args.interval_days, plant=args.plant,
-            stage_plant=args.stage_plant,
-            met_weightings=np.array(METW), acc_met=acc_met,
-            acc_moffs=acc_moffs, Mnow_series=Mnow_series,
-            acc_med_series=acc_med_series,
-            south_rows=np.array(SOUTH_ROWS), chan_rows=np.array(CHAN_ROWS),
-            north_rows=np.array(NORTH_ROWS), full_rows=np.array(FULL_ROWS),
-            e3t_mode=E3T_MODE, days=args.days, n_int=n_int,
-            git_sha=_GIT_SHA, recipe=args.recipe,
-            seasonal_t0_seconds=t0_sec,
-            reconcile_target=_card("barotropic_reconcile_target"),
-            after_reconcile=_card("barotropic_after_reconcile"),
-            surface_stress_implicit=_card("surface_stress_implicit"))
-        print(f"\n[artifact] -> {args.out_npz}")
 
     # ==================================================== THE GATE METRIC ==
     # #1455 SG-C.  Everything above reduces zonally (row circulation).  The

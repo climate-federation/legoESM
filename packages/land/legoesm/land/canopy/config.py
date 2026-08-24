@@ -160,10 +160,14 @@ VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
 
-    # Newton-Raphson solver.  With the scalar-clamp damping and the
-    # outer Picard canopy↔thermal loop in canopy_land.py, 50 iters is
-    # normally ample.
-    max_iters: int = 50
+    # Damped least-squares solver (see solver.py).  The safeguarded step breaks
+    # the period-2 oscillation that starved plain Newton on hot/bright/calm
+    # columns, but it is SLOWER on the stiffest low-leaf-area columns: a bare
+    # LAI=0.02 column takes 50 iterations to reach the residual tolerance (plain
+    # Newton took 39).  Budget 60 so those columns converge with margin rather
+    # than landing exactly on the cap; the extra rounds touch only the ~0.35% of
+    # columns that need them.
+    max_iters: int = 60
     tol: float = 1e-2
     # Only the DifferBESS FULLY_COUPLED scheme is implemented (leaves and
     # soil share the canopy air space Tc, q_c via clumping-weighted

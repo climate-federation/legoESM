@@ -258,6 +258,107 @@ def assert_nemo_seasonal_clock(stamped, path: str) -> tuple[float, float]:
     return t0, t0_nemo
 
 
+# The ladder mode and precision this campaign's headline claims are about.
+# A candidate on anything else is scoreable but NOT certifiable against that
+# claim -- see :func:`certifiable_grid_and_precision`.
+CLAIM_LADDER_MODE = "both"
+CLAIM_CONTROL_DTYPE = "float64"
+
+
+def vertical_ladder_sha256(z_coord) -> str:
+    """Content hash of the vertical-coordinate arrays ACTUALLY in memory.
+
+    GLM's #1640 point, and it is the right one: **a label is a taxonomy, not
+    an identity**.  ``nemo_ladder_mode`` records which ladder the runner MEANT
+    to build; it cannot tell two runs apart that carry the same label and
+    different numbers (a changed bridge, a changed reference profile, a
+    silently-different dtype).  Hashing the arrays makes "same grid" DECIDABLE
+    instead of asserted: equal hash => bit-identical ladders, full stop.
+
+    SCOPE -- THIS IS A LADDER IDENTITY, NOT A FULL GRID IDENTITY, and the
+    name of the stamp should be read that way.  It hashes the four 1-D
+    reference arrays, which is what the ladder MODE moves: the DINO bridge
+    collapses NEMO's 3-D thickness/depth fields to a 1-D mean profile before
+    they reach ``z_coord`` (``nemo_state_bridge.effective_vertical_scale_
+    factors``; it raises if the card has genuine horizontal ``e3t_0``
+    variation).  It deliberately does NOT cover ``h_partial`` /
+    ``bottom_level`` / ``is_active`` -- the bathymetry and the wet/dry
+    staircase -- so TWO RUNS ON DIFFERENT TOPOLOGIES HASH IDENTICALLY.  An
+    earlier draft justified that exclusion by claiming the extra arrays
+    "cannot distinguish the thing this hash exists to distinguish"; that is
+    backwards -- extra content never reduces a hash's discriminating power --
+    and is RETRACTED.  The honest reason is narrower: the ladder question is
+    the one the gate's claim turns on, and keeping the input small keeps the
+    stamp comparable across the runs already recorded.  Widening it to the
+    topology is a strict improvement whenever someone wants it.
+
+    Dtype is folded in deliberately: the same numbers at fp32 and fp64 are NOT
+    the same grid for a claim that depends on precision.  A MISSING attribute
+    and a present-but-``None`` one are also distinguished, so a future field
+    rename degrades loudly rather than into a stable-looking weaker value.
+    """
+    import hashlib
+    _MISSING = object()
+    h = hashlib.sha256()
+    for name in ("z_full_ref", "z_half_ref", "dz_ref", "t_depth_ref"):
+        a = getattr(z_coord, name, _MISSING)
+        if a is _MISSING:
+            h.update(f"{name}:ABSENT|".encode())
+            continue
+        if a is None:
+            h.update(f"{name}:None|".encode())
+            continue
+        a = np.asarray(a)
+        h.update(f"{name}:{a.dtype.str}:{a.shape}|".encode())
+        h.update(np.ascontiguousarray(a).tobytes())
+    return h.hexdigest()
+
+
+def certifiable_grid_and_precision(stamped) -> tuple:
+    """Report whether a candidate is on the claim's grid/precision.
+
+    NOT named ``assert_*``: its sibling ``assert_nemo_seasonal_clock`` in this
+    module RAISES, and this one deliberately does not -- an off-claim
+    candidate is still worth scoring, so the caller decides between a verdict
+    and UNCERTIFIED.  (It was briefly called ``assert_certifiable_...`` with an
+    unused ``path`` argument; review caught both.)
+
+    #1640, the reviewer's minimum ask.  The gate deliberately SCORES any
+    ladder -- both are legitimately scoreable and the gate's job is to say
+    which grid a score was earned on.  But this campaign's headline is
+    specifically about the reference's ladders at double precision, and a gate
+    that will score anything cannot certify that.  So the two are separated:
+    the score is always printed, and the PASS/FAIL VERDICT is withheld
+    (UNCERTIFIED) when the candidate is not on the claim's grid/precision.
+
+    Returns ``(ok, reasons, ladder, dtype)``.  Raises nothing -- the caller
+    decides between a verdict and UNCERTIFIED, because an off-claim candidate
+    is still worth scoring and printing.
+    """
+    ladder = (str(stamped["nemo_ladder_mode"])
+              if "nemo_ladder_mode" in stamped else None)
+    dtype = (str(stamped["control_dtype"])
+             if "control_dtype" in stamped else None)
+    reasons = []
+    if ladder is None:
+        reasons.append(
+            "no nemo_ladder_mode stamp -- this artifact predates the stamp and "
+            "does not record which vertical ladders it ran on")
+    elif ladder != CLAIM_LADDER_MODE:
+        reasons.append(
+            f"vertical ladder is {ladder!r}, but the claim is about "
+            f"{CLAIM_LADDER_MODE!r} (NEMO's own thickness AND depth ladders)")
+    if dtype is None:
+        reasons.append(
+            "no control_dtype stamp -- the precision this arm was built at is "
+            "not recorded")
+    elif dtype != CLAIM_CONTROL_DTYPE:
+        reasons.append(
+            f"control dtype is {dtype!r}, but the claim is about "
+            f"{CLAIM_CONTROL_DTYPE!r}")
+    return (not reasons), reasons, ladder, dtype
+
+
 def _restart_elapsed_seconds(path: str) -> float:
     """Model seconds elapsed at the restart, read from the restart ITSELF.
 
@@ -293,9 +394,23 @@ def seasonal_t0_seconds(restart_path: str) -> float:
     ``ztime = REAL(kt)*rn_Dt``), so a twin that restarts its own seasonal year
     at zero forces legoESM out of phase with the NEMO run it is compared
     against.  For the canonical ``DINO_00005760_restart.nc`` (day 180 of a
-    360-day year) that offset is EXACTLY antiphase, and it was measured to own
-    99.1% of the day-30 southern surface-density gap (commits 1c03f8311,
-    076217667, afd8e06b6).
+    360-day year) that offset is EXACTLY antiphase.  Correcting it collapsed
+    the day-30 southern surface-density gap from -0.013224 to -0.000125
+    kg/m3, i.e. from 139x the noise floor to 1.3x, AT THE TWO SAMPLED PHASES
+    (commits 1c03f8311, 076217667, afd8e06b6).
+
+    RETRACTED, 2026-08-23 (GLM review on PR #1634): this docstring previously
+    said the offset "owns 99.1% of" that gap.  THE PERCENTAGE IS WITHDRAWN and
+    no percentage replaces it.  Two sampled phases cannot yield a fraction --
+    that needs a dose-response curve through intermediate offsets -- and the
+    decomposition silently assumed error = season + ocean with no interaction
+    term.  Report the two measured multipliers (139x -> 1.3x), never a share.
+    BLIND SPOT, also unquantified: an exact 180/360-day antiphase flips only
+    the ODD harmonics, so the SEMIANNUAL component is IN PHASE in both arms
+    and this experiment cannot see semiannual error, including whatever part
+    of the residual is semiannual.  Settling it needs a phase sweep
+    (0/45/90/135/180 days) plus a control in which the REFERENCE model is run
+    with artificially antiphased forcing -- named as follow-up, not run.
 
     DEFAULT (env unset) is therefore the NEMO clock, read from the restart
     ITSELF (``adatrj``, cross-checked against ``kt*DT``) -- never hardcoded and
@@ -482,6 +597,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
+                       u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
                        e3t_mode: str | None = None):
     """Bridge the NEMO restart into a legoESM state and run the day-0 gate.
@@ -511,6 +627,14 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     tendency rate is folded into the Nnn RHS instead, see dino.py:262-281).
     ``None`` (default) leaves the recipe's own value.
 
+    ``u_m``: optional override of ``DINOConfig.U_M`` (NEMO ``rn_Uv``, the
+    lateral viscous velocity scale [m/s], card default 0.27).  It is the
+    ONLY input to the lateral-viscosity coefficient on this card --
+    ``A_h_base = 0.5*U_M*R*dlon`` (dino.py:3020) and nothing else reads it
+    (dino.py:3494 is the MPAS builder, not this lat-lon lane; B_h is 0 and
+    the barotropic diffusion is off), so scaling it is a genuine
+    one-variable viscosity ablation.  ``None`` (default) leaves 0.27.
+
     Returns (br, cfg, mc, model, forcing, sf, st) ready to integrate.
     """
     # NOTE: this helper deliberately does NOT resolve the vertical ladder. A
@@ -530,6 +654,22 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
+    if u_m is not None:
+        if not (u_m > 0.0):
+            raise ValueError(f"u_m (rn_Uv) must be > 0, got {u_m!r}")
+        cfg = dataclasses.replace(cfg, U_M=float(u_m))
+    _em = os.environ.get("DINO_EEN_METRIC")
+    if _em:
+        # #1455: NEMO's vor_een weights the meridional transport by e1v and
+        # divides the u-tendency by e1u (dynvor.F90:791-792, :804); legoESM's
+        # AL81 triad uses neither. "nemo" selects NEMO's form. The card leaves
+        # it "off" while its wall-row consequence is disputed, so this is the
+        # arm switch for the controlled A/B.
+        if _em not in ("off", "nemo"):
+            raise ValueError(
+                f"DINO_EEN_METRIC must be 'off' or 'nemo', got {_em!r}")
+        cfg = dataclasses.replace(cfg, een_metric_weighting=_em)
+        print(f"ARM: een_metric_weighting={_em}")
     _ba = os.environ.get("DINO_BOLUS_ADV")
     if _ba:
         # #1226: "through_fct" folds the GM bolus into the ADVECTING MASS FLUX;
@@ -664,6 +804,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
+             u_m: float | None = None,
              restart_file: str = RESTART_FILE,
              perturb_seed: int | None = None,
              perturb_baro: str | None = None,
@@ -715,7 +856,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_tendency_placement=surface_tendency_placement,
-        e3t_mode=ladder_mode)
+        u_m=u_m, e3t_mode=ladder_mode)
 
     # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
     # materialized geometry and state (arrays cannot lie about their dtype the
@@ -993,6 +1134,17 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         nemo_ladder_mode=np.str_(ladder_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
+        # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
+        # rn_Uv). It is the one variable in the viscosity ablation, and a
+        # scorer that reads it from the filename can be handed a swapped file
+        # and produce a confidently wrong sign. Taken from the BUILT config,
+        # not from the CLI argument, so it records what the model used.
+        rn_Uv=np.float64(cfg.U_M),
+        # #1640 (GLM): a label is a taxonomy, not an identity. Hash the
+        # vertical-coordinate arrays ACTUALLY in memory so "same grid" is
+        # decidable rather than asserted -- nemo_ladder_mode records intent,
+        # this records the numbers.
+        vertical_ladder_sha256=np.str_(vertical_ladder_sha256(br.z_coord)),
         # #1455 follow-up: the clock NEMO is on, and the rest of the recipe.
         seasonal_t0_reference_seconds=np.float64(t0_reference_sec),
         run_config=np.str_(run_config),
@@ -1062,6 +1214,13 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
+    p.add_argument("--u-m", dest="u_m", type=float, default=None,
+                   help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
+                        "viscous velocity [m/s]; card default 0.27). The "
+                        "lateral viscosity coefficient is A_h = 0.5*U_M*dx, "
+                        "so --u-m 0.54 DOUBLES the lateral viscosity and "
+                        "nothing else (#1455 Munk ablation). Default None "
+                        "leaves the recipe's own value.")
     p.add_argument("--legacy-1d-ladder", action="store_true",
                    help="build legoESM on the 1-D REFERENCE vertical ladder "
                         "(LEGOESM_NEMO_E3T=off) instead of NEMO's own "
@@ -1141,6 +1300,61 @@ def _smoke_check_vmix_scheme_override():
           f"cfg.surface_tendency_placement "
           f"({base.surface_tendency_placement} -> {_other})")
 
+    # --u-m: the #1455 Munk ablation knob. Assert BOTH that the field moves
+    # and that the quantity it feeds (the lateral-viscosity coefficient the
+    # dycore actually reads) moves by the same factor -- a field that changed
+    # while A_h did not would be a vacuous knob.
+    from legoesm.ocean.experiments.dino import (
+        dino_lat_lon_grid, dino_lat_lon_model_config)
+    doubled = dataclasses.replace(base, U_M=2.0 * base.U_M)
+    assert doubled.U_M == 2.0 * base.U_M
+    assert base.U_M == 0.27, f"expected card rn_Uv=0.27, got {base.U_M}"
+    _g = dino_lat_lon_grid(base)
+    _ah1 = dino_lat_lon_model_config(_g, base, physics=False)[0].lateral_viscosity.A_h
+    _ah2 = dino_lat_lon_model_config(_g, doubled, physics=False)[0].lateral_viscosity.A_h
+    assert abs(_ah2 / _ah1 - 2.0) < 1e-12, (
+        f"--u-m doubling must double A_h; got {_ah1} -> {_ah2}")
+    print(f"OK: --u-m override doubles the lateral viscosity "
+          f"(U_M {base.U_M} -> {doubled.U_M}, A_h {_ah1:.4f} -> {_ah2:.4f} m2/s)")
+
+    # "changes A_h" is only half the claim the pre-registration makes; the other
+    # half is "and nothing else". Diff every leaf of the two built configs and
+    # require exactly one to move, so a future edit that quietly routes U_M into
+    # a second consumer (a CFL-derived substep count, a diagnostic coefficient)
+    # turns this red instead of silently making the ablation two-variable.
+    def _leaves(obj, path=""):
+        if hasattr(obj, "_fields"):
+            for f in obj._fields:
+                yield from _leaves(getattr(obj, f), f"{path}.{f}" if path else f)
+        elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            for f in dataclasses.fields(obj):
+                yield from _leaves(getattr(obj, f.name),
+                                   f"{path}.{f.name}" if path else f.name)
+        else:
+            yield path, obj
+
+    _l1 = dict(_leaves(dino_lat_lon_model_config(_g, base, physics=False)[0]))
+    _l2 = dict(_leaves(dino_lat_lon_model_config(_g, doubled, physics=False)[0]))
+    assert set(_l1) == set(_l2), "the two configs do not have the same leaves"
+    _moved = sorted(k for k in _l1
+                    if not _eq_leaf(_l1[k], _l2[k]))
+    assert _moved == ["lateral_viscosity.A_h"], (
+        f"--u-m must move exactly lateral_viscosity.A_h and nothing else; it "
+        f"moved {_moved} (of {len(_l1)} leaves)")
+    print(f"OK: --u-m moves exactly one of the {len(_l1)} built-config leaves "
+          f"({_moved[0]}) -- the ablation is one variable")
+
+
+def _eq_leaf(a, b) -> bool:
+    """Leaf equality that tolerates arrays and None."""
+    import numpy as _np
+    if a is None or b is None:
+        return a is b
+    try:
+        return bool(_np.array_equal(_np.asarray(a), _np.asarray(b)))
+    except Exception:
+        return a is b or a == b
+
 
 def provenance_gate() -> None:
     """Stamp source provenance and REFUSE to run from a dirty tracked tree.
@@ -1209,6 +1423,7 @@ def main(argv=None):
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_tendency_placement=args.surface_tendency_placement,
+              u_m=args.u_m,
               perturb_seed=args.perturb_seed,
               perturb_baro=args.perturb_baro,
               perturb_baro_key=args.perturb_baro_key,

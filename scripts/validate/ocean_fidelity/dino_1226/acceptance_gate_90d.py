@@ -138,6 +138,14 @@ def load_candidate(path, day=90):
                    "stamp and does not record which vertical ladders it ran "
                    "on; read its run log")
     print(f"vertical ladder of this candidate: {ladder}", flush=True)
+    # #1640 (GLM): the LABEL above is a taxonomy; this is the IDENTITY. Two
+    # runs with the same label and different numbers get different hashes, so
+    # "same grid" is decidable instead of asserted.
+    lhash = (str(d["vertical_ladder_sha256"])
+             if "vertical_ladder_sha256" in d.files
+             else "UNSTAMPED -- predates the content hash; its ladder ARRAYS "
+                  "cannot be compared to any other run's")
+    print(f"vertical ladder content hash: {lhash}", flush=True)
     # #1455 season-bug guard (extend-only): NEMO's analytic surface forcing is
     # a function of the day of year through the absolute step index
     # (usrdef_sbc.F90:536), and the day-180 restart carries adatrj=180.0, so a
@@ -203,14 +211,29 @@ def classify(cand_m, nemo_m, level):
             for k in KEYS]
 
 
-def print_gate(rows, level, tag=""):
+def print_gate(rows, level, tag="", certified=True):
+    """Print the metric table, and the PASS/FAIL tally ONLY when certified.
+
+    ``certified=False`` (#1640) prints the same numbers but withholds every
+    verdict token -- the per-row ``PASS``/``FAIL`` flags AND the tally line.
+    A row status is a verdict, so suppressing only the tally would still have
+    issued one five times over.  The scores stay visible because an off-claim
+    candidate is still worth scoring; what it cannot buy is a certification.
+    """
     print(f"{'metric':<34}{'candidate':>14}{'NEMO d90':>14}{'|diff|':>12}"
           f"{'thresh':>12}  status")
     for k, c, n, d, t, ok in rows:
-        flag = f"PASS({level}x)" if ok else "FAIL  <--"
+        if certified:
+            flag = f"PASS({level}x)" if ok else "FAIL  <--"
+        else:
+            # NOT a verdict: how the number sits against a threshold that does
+            # not apply to this candidate's grid/precision.
+            flag = f"(within {level}x)" if ok else f"(over {level}x)"
         print(f"{LABELS[k]:<34}{c:>14.6f}{n:>14.6f}{d:>12.3e}{t:>12.3e}  {flag}")
     n_pass = sum(ok for *_, ok in rows)
     n_fail = len(rows) - n_pass
+    if not certified:
+        return n_fail
     # fidelity_bar_gate.py tally-line convention (matched in style, not imported)
     print(f"\n{tag}GATE 90D-TWIN: PASS {n_pass} | FAIL {n_fail} | "
           f"level {level}x | total {len(rows)}")
@@ -293,8 +316,43 @@ def main(argv=None):
     print(f"candidate: {args.candidate}")
     print(f"baseline : {RUN_90D_TWIN}/DINO_{KT_DAY90:08d}_restart_* "
           f"(NEMO day-90 continuation of the day-180 restart, NOW level)\n")
-    n_fail = print_gate(classify(metrics(cand, wet), metrics(nemo, wet),
-                                 args.level), args.level)
+    rows = classify(metrics(cand, wet), metrics(nemo, wet), args.level)
+
+    # #1640: SCORE anything, CERTIFY only the claim's grid and precision.
+    # The gate's job is to say which grid a score was earned on, so an
+    # off-claim candidate is still scored and printed in full -- but the
+    # PASS/FAIL verdict is WITHHELD, because a gate that will score anything
+    # cannot certify a claim that depends on being on the reference's ladders
+    # at double precision.
+    #
+    # THIS IS A BEHAVIOUR CHANGE OFF THE CLAIM'S GRID, not a no-op, and an
+    # earlier comment here wrongly called it one. Any recorded protocol that
+    # sweeps ladder modes and reads a verdict per arm -- notably the
+    # `off/e3t_only/gdept_only/both` sweep in `d180_step_walk.py` and the
+    # exit-status expectations in `PREREG_gate90_ladder_promotion.md` -- now
+    # gets UNCERTIFIED (and exit 3) on its non-`both` arms. That is the
+    # intended consequence of the review finding, not a regression: those arms
+    # were being read as verdicts on a claim they cannot support. The metric
+    # numbers in those tables are unchanged and still printed.
+    #
+    # Exit 3, not 2: argparse's own `p.error` exits 2, so 2 would make
+    # "uncertified" indistinguishable from "bad CLI arguments".
+    with np.load(args.candidate) as _stamps:
+        ok, reasons, _ladder, _dtype = (
+            _twin.certifiable_grid_and_precision(_stamps))
+    if not ok:
+        print_gate(rows, args.level, certified=False)
+        print("\nGATE 90D-TWIN: UNCERTIFIED -- no PASS/FAIL verdict issued "
+              "(exit 3).")
+        for r in reasons:
+            print(f"  - {r}")
+        print("  The metric table above is a real score on the grid the "
+              "candidate actually ran on; it is NOT a verdict on the claim, "
+              "which is about "
+              f"nemo_ladder_mode={_twin.CLAIM_LADDER_MODE!r} at "
+              f"control_dtype={_twin.CLAIM_CONTROL_DTYPE!r}.")
+        return 3
+    n_fail = print_gate(rows, args.level)
     return 1 if n_fail else 0
 
 

@@ -1937,16 +1937,22 @@ def test_config_yaml_round_trips_authoritative_values():
     # deck says so at the field.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
-    # convective_cloud ON — mirrors the canonical tuned base
-    # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
-    # parameters; the 30-day A/B TOA cost under prescribed SST is a documented
-    # finding (see the YAML header), not a reason to diverge from the base.
-    assert cfg.convective_cloud is True
+    # convective_cloud OFF since 2026-08-22.  It was on to mirror the canonical
+    # tuned base, but the tropical-rain campaign runs that reproduced observed
+    # ocean rain (0.89 of observed) all ran with it OFF, and production runs
+    # with it on reached only 0.48-0.61.  Production now carries the campaign
+    # science configuration rather than leaving it to a side deck; see the
+    # folded-in block at the end of amip_production.yaml.
+    assert cfg.convective_cloud is False
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85.
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # q_c 5e-6, the campaign value, folded in 2026-08-22 with the rest of the
+    # tropical-rain configuration (production had 1e-4, twenty times larger).
+    # This assertion is the reason the divergence was found at all, so it is
+    # updated rather than removed.
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
     # The detrained-condensate to convective-rain split, on since the
     # bechtold rain-split landed.
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)

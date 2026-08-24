@@ -265,7 +265,6 @@ def compute_two_leaf_canopy_fluxes(
         LAI    = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
     hc         = _get(lp, "hc",       jnp.full(ncol, _DEFAULT_HC))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
-    FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
     CI         = _get(lp, "CI",       jnp.full(ncol, _DEFAULT_CI))
     kn         = _get(lp, "kn",       jnp.full(ncol, _DEFAULT_KN))
 
@@ -385,7 +384,7 @@ def compute_two_leaf_canopy_fluxes(
     sw_rt = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
         SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn, FNonVeg)
+        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
 
     # ---- Thermodynamic / atmosphere variables ----
     Ta    = forcing.T_lowest

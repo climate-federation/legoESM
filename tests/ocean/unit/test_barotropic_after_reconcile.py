@@ -428,7 +428,7 @@ def test_call_site_hands_the_kernel_a_REFERENCE_ladder(method, outer):
     """
     import unittest.mock as mock
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import interp_cell_to_uface
     from legoesm.ocean.vertical import compute_layer_thickness
 
     seen = {}
@@ -445,11 +445,21 @@ def test_call_site_hands_the_kernel_a_REFERENCE_ladder(method, outer):
         naa = getattr(model, method)(s1, _DT)
     assert "h" in seen, "the option's site never ran -- nothing to gate"
 
+    # WHAT THIS TEST DOES AND DOES NOT GATE, corrected after review.  The
+    # cell->face rule here is ``interp_cell_to_uface`` because that is what the
+    # call site uses, so assertion (b) below DOES constrain the weighting axis
+    # too -- an earlier version of this note said it "gates the LADDER axis
+    # alone", which was false and is RETRACTED.  What makes it a LADDER gate
+    # specifically is assertion (c): the captured thickness must differ from
+    # the LIVE (eta-carrying) ladder.  It rebuilds its baseline from the same
+    # operator the code calls, so on its own it cannot tell a changed weighting
+    # rule from a correct one; that axis is gated against HAND-COMPUTED values
+    # in the two tests below.
     mwc = model.config.min_water_column_m
-    ref = min_cell_to_uface(compute_layer_thickness(
+    ref = interp_cell_to_uface(compute_layer_thickness(
         jnp.zeros_like(naa.eta.data), state.H_bathy.data, model.z_coord,
         min_water_column_m=mwc))
-    live = min_cell_to_uface(compute_layer_thickness(
+    live = interp_cell_to_uface(compute_layer_thickness(
         naa.eta.data, state.H_bathy.data, model.z_coord,
         min_water_column_m=mwc))
 
@@ -469,3 +479,276 @@ def test_call_site_hands_the_kernel_a_REFERENCE_ladder(method, outer):
         "this is the exact defect corrected in d27dc0909 (the key_qco "
         "free-surface factor cancels in NEMO, so the faithful weight carries "
         "no eta at all)")
+
+
+# ------------------------------------- the WEIGHTING RULE (not the ladder) --
+# The ladder gate above (`..._hands_the_kernel_a_REFERENCE_ladder`) pins eta=0
+# vs live.  It could not pin MIN vs ARITHMETIC MEAN, because it rebuilt the min
+# rule as its own expected value -- it asserted the code against itself on this
+# axis.  These two tests are hand-computed and use the reviewer's worked case.
+
+# Reviewer's counterexample, verified by hand and reproduced verbatim here.
+# Two levels; the two adjacent cells carry reference thicknesses [10, 1] and
+# [10, 9]; the face velocity is [0, 2]; the target column mean is 0.
+_CX_H_WEST = (10.0, 1.0)
+_CX_H_EAST = (10.0, 9.0)
+_CX_U = (0.0, 2.0)
+# NEMO's rule, e3u_0 = 0.5*(e3t_0(i) + e3t_0(i+1))  -- zgr_lib.F90:231
+_CX_H_FACE_NEMO = (10.0, 5.0)          # 0.5*(10+10), 0.5*(1+9)
+# own mean = (10*0 + 5*2)/15 = 2/3  ->  u - 2/3
+_CX_EXPECT_NEMO = (-2.0 / 3.0, 4.0 / 3.0)
+# the MIN rule (MOM6/MITgcm hFacW) instead gives face [10, 1]:
+_CX_H_FACE_MIN = (10.0, 1.0)
+# own mean = (10*0 + 1*2)/11 = 2/11  ->  u - 2/11
+_CX_EXPECT_MIN = (-2.0 / 11.0, 20.0 / 11.0)
+# and the defect this exposes: re-weighted by the REFERENCE face thickness the
+# min-rule answer does NOT have the target mean.
+# (10*(-2/11) + 5*(20/11))/15 = (80/11)/15 = 16/33
+_CX_RESIDUAL_OF_MIN_RULE = 16.0 / 33.0
+
+
+def test_the_face_thickness_operator_follows_NEMO_and_not_the_min_rule():
+    """The SHARED ``interp_cell_to_*`` must be the arithmetic mean NEMO's
+    DINO/usrdef builder makes ``e3u_0`` with, and must be DISTINGUISHABLE from
+    the min rule on this input -- both halves asserted against hand-computed
+    literals, so neither side of the comparison is produced by the code under
+    test.
+
+    No new operator was added for this fix: ``interp_cell_to_uface`` /
+    ``interp_cell_to_vface`` already existed and are halo-correct across a 2-D
+    partition cut and the north fold, which a rank-local reimplementation
+    would not have been."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_cell_to_uface, interp_cell_to_vface, min_cell_to_uface,
+        min_cell_to_vface,
+    )
+    # one lat row, two lon cells, two levels; u-face 1 sits between them
+    cells = jnp.asarray(np.array([[list(_CX_H_WEST), list(_CX_H_EAST)]]))
+    got_mean = np.asarray(interp_cell_to_uface(cells))[0, 1]
+    got_min = np.asarray(min_cell_to_uface(cells))[0, 1]
+    assert np.allclose(got_mean, np.array(_CX_H_FACE_NEMO), atol=0, rtol=1e-14)
+    assert np.allclose(got_min, np.array(_CX_H_FACE_MIN), atol=0, rtol=1e-14)
+    # v-face sibling: two lat rows, one lon cell; v-face 1 sits between them
+    cells_v = jnp.asarray(np.array([[list(_CX_H_WEST)], [list(_CX_H_EAST)]]))
+    assert np.allclose(np.asarray(interp_cell_to_vface(cells_v))[1, 0],
+                       np.array(_CX_H_FACE_NEMO), atol=0, rtol=1e-14)
+    assert np.allclose(np.asarray(min_cell_to_vface(cells_v))[1, 0],
+                       np.array(_CX_H_FACE_MIN), atol=0, rtol=1e-14)
+
+
+def test_the_min_rule_leaves_a_NONZERO_reference_weighted_column_mean():
+    """WHY the rule matters, as arithmetic rather than as assertion.
+
+    The reconciliation exists to install a target column mean *under NEMO's
+    own weighting*.  Weighted by NEMO's reference face thickness, the min-rule
+    answer misses the target by ``16/33`` on the reviewer's case -- i.e. the
+    min rule fails the one identity the kernel is there to enforce, while the
+    arithmetic mean satisfies it exactly.  Every number below is hand-computed
+    in the block above; nothing here is read back out of the model."""
+    field = jnp.asarray(np.array(_CX_U)).reshape(1, 1, 2)
+    mask = jnp.ones((1, 1, 2))
+    target = jnp.zeros((1, 1, 1))
+    h_nemo = jnp.asarray(np.array(_CX_H_FACE_NEMO)).reshape(1, 1, 2)
+    h_min = jnp.asarray(np.array(_CX_H_FACE_MIN)).reshape(1, 1, 2)
+
+    out_nemo = np.asarray(after_level_column_mean_reconcile(
+        field, h_nemo, target, mask, 1.0e-10))[0, 0]
+    out_min = np.asarray(after_level_column_mean_reconcile(
+        field, h_min, target, mask, 1.0e-10))[0, 0]
+    assert np.allclose(out_nemo, np.array(_CX_EXPECT_NEMO), atol=1e-14)
+    assert np.allclose(out_min, np.array(_CX_EXPECT_MIN), atol=1e-14)
+
+    # re-weight BOTH answers by NEMO's reference face thickness
+    w = np.array(_CX_H_FACE_NEMO)
+    resid_nemo = float(np.sum(w * out_nemo) / np.sum(w))
+    resid_min = float(np.sum(w * out_min) / np.sum(w))
+    assert abs(resid_nemo) < 1e-14, (
+        f"the arithmetic-mean weighting must install the target exactly, "
+        f"got {resid_nemo:.3e}")
+    assert abs(resid_min - _CX_RESIDUAL_OF_MIN_RULE) < 1e-14, (
+        f"the min rule's reference-weighted residual is a hand-computed "
+        f"16/33 = {_CX_RESIDUAL_OF_MIN_RULE:.6f}, got {resid_min:.6f}")
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_call_site_weights_by_the_NEMO_ARITHMETIC_reference_face_thickness(
+        method, outer):
+    """THE CALL-SITE GATE ON THE WEIGHTING RULE.
+
+    Companion to ``test_call_site_hands_the_kernel_a_REFERENCE_ladder``, which
+    cannot gate this axis on its own because it rebuilds its baseline from the
+    same operator the code calls.  MEASURED on a revert of the call site to
+    ``min_cell_to_uface``/``min_cell_to_vface``: FOUR tests go red -- this one
+    on both parametrizations and the ladder test on both.  (An earlier version
+    of this docstring claimed the revert "leaves that one green"; that was
+    written from intent, not measured, and is RETRACTED.)
+
+    Both candidate face thicknesses are rebuilt here from the same cell ladder
+    and the test asserts they are DISTINGUISHABLE on this fixture before
+    asserting which one was used -- otherwise it would pass vacuously on a
+    horizontally uniform full-step card (where the two coincide bit-for-bit,
+    which is exactly why the shipped DINO card is unaffected by the fix)."""
+    import unittest.mock as mock
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        interp_cell_to_uface, min_cell_to_uface,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    seen = {}
+    real = omlc.after_level_column_mean_reconcile
+
+    def _capture(field, h_face_ref, target_mean, face_mask3, min_water_col):
+        seen.setdefault("h", h_face_ref)
+        return real(field, h_face_ref, target_mean, face_mask3, min_water_col)
+
+    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
+                            dino_drag=True)
+    s1 = model._leapfrog_step(state, _DT)
+    with mock.patch.object(omlc, "after_level_column_mean_reconcile", _capture):
+        naa = getattr(model, method)(s1, _DT)
+    assert "h" in seen, "the option's site never ran -- nothing to gate"
+
+    h_cell = compute_layer_thickness(
+        jnp.zeros_like(naa.eta.data), state.H_bathy.data, model.z_coord,
+        min_water_column_m=model.config.min_water_column_m)
+    nemo_rule = np.asarray(interp_cell_to_uface(h_cell))
+    min_rule = np.asarray(min_cell_to_uface(h_cell))
+
+    # (a) the two rules must actually differ here, or this proves nothing
+    spread = float(np.max(np.abs(nemo_rule - min_rule)))
+    assert spread > 1e-6, (
+        f"the arithmetic-mean and min face thicknesses differ by only "
+        f"{spread:.3e} on this fixture, so this test cannot tell them apart "
+        "-- it must be re-fixtured onto a partial-cell bathymetry before it "
+        "is trusted")
+    # (b) and the call site must have used NEMO's arithmetic mean
+    got = np.asarray(seen["h"])
+    assert np.max(np.abs(got - nemo_rule)) < 1e-12, (
+        "the call site handed the kernel a face thickness that is not NEMO's "
+        "arithmetic reference-face rule (e3u_0 = 0.5*(e3t_0(i)+e3t_0(i+1)), "
+        "zgr_lib.F90:231)")
+    assert np.max(np.abs(got - min_rule)) > 1e-6, (
+        "the call site handed the kernel the MIN-rule face thickness -- that "
+        "is the MOM6/MITgcm hFacW convention, a different quantity, and it "
+        "leaves a non-zero reference-weighted column mean (see "
+        "test_the_min_rule_leaves_a_NONZERO_reference_weighted_column_mean)")
+
+
+# ---------------------------------- the Euler-start gap is no longer SILENT --
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
+    """#1640 finding 3.  The forward-Euler start returns before the
+    reconciliation site, so on that one step legoESM COMMITS a depth-mean
+    deposit NEMO removes (NEMO runs mlf_baro_corr on l_1st_euler too).  That
+    was silent while the card claimed the reference's second-site behaviour on
+    every step.
+
+    PARAMETRIZED OVER BOTH OUTER STEPS deliberately.  There are two separate
+    early-return branches, and an earlier version keyed the once-only flag on a
+    single process-wide bool -- so whichever path ran first consumed the
+    warning and the OTHER site was never observed to warn at all.  Review
+    caught it; this is the gate that keeps it caught.
+
+    Not a raise: the shipped twin runs ``bridge_before=False`` by default and
+    would be refused."""
+    import warnings
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+
+    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
+    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
+                            dino_drag=True)
+    assert state.u_before is None, "fixture must start on the Euler path"
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        getattr(model, method)(state, _DT)
+    msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
+    assert any("forward-Euler start" in m and method in m for m in msgs), (
+        f"the Euler-start skip must announce itself from {method}, got {msgs}")
+
+    # once per site, not once per step
+    with warnings.catch_warnings(record=True) as w2:
+        warnings.simplefilter("always")
+        getattr(model, method)(state, _DT)
+    assert not [x for x in w2 if "forward-Euler start" in str(x.message)], (
+        "the warning must be emitted once per site, not on every Euler step")
+
+
+def test_no_euler_warning_when_the_option_is_off():
+    """Non-vacuity for the test above: a warning that fires unconditionally
+    would pass it while telling the operator nothing."""
+    import warnings
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+
+    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
+    state, model = _channel(after="off", dino_drag=True)
+    assert state.u_before is None, (
+        "fixture must start on the Euler path, or this test passes vacuously "
+        "by never reaching the branch it is about")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        model._leapfrog_step(state, _DT)
+    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
+        "the default (option off) must stay silent")
+
+
+def test_the_weighting_fix_is_bit_identical_on_the_SHIPPED_DINO_geometry():
+    """WHY NO A/B WAS RUN FOR THE MIN->MEAN CORRECTION, as a measurement.
+
+    The shipped ``nemo_dino_kamm_mlf`` card runs ``masked_zco``, which makes
+    every cell thickness ``h_partial in {0, dz_ref[k]}`` exactly.  So at any
+    face the both-cells-wet mask leaves OPEN, both cells carry ``dz_ref[k]``
+    and ``min == mean`` bit-for-bit; at a CLOSED face the kernel zeroes the
+    value under either rule.  The correction therefore cannot move a single
+    number on this card, and a 90-day A/B would have been a null measurement
+    of a provable identity.
+
+    Measured on the card's OWN Mercator geometry and the card's OWN water-
+    column floor -- both taken from the shipped constructors rather than
+    hand-picked, after review caught an earlier fixture that built a uniform
+    lat-lon grid and a 0.01 m floor and still called itself "the real DINO
+    geometry".  The exact open-face counts are geometry-dependent and are NOT
+    asserted; what is asserted is the identity and its non-vacuity.
+
+    The closed faces DO differ (by hundreds of metres), which is what makes
+    this non-vacuous -- the two rules are genuinely different operators, and
+    the identity is a property of the shipped geometry, not of the code."""
+    from legoesm.ocean.experiments.dino import (
+        DINOConfig, create_dino_z_star, dino_masked_zco_coordinate,
+        dino_lat_lon_bowl, dino_lat_lon_grid)
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d, interp_cell_to_uface, interp_cell_to_vface,
+        min_cell_to_uface, min_cell_to_vface)
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    cfg = DINOConfig()
+    g = dino_lat_lon_grid(cfg)           # the card's Mercator grid, not uniform
+    coord, H_snap = dino_masked_zco_coordinate(
+        create_dino_z_star(cfg), dino_lat_lon_bowl(g, cfg))
+    # the floor the CALL SITE reads, not a hand-picked one
+    mwc = LatLonCGridOceanConfig.from_flat().min_water_column_m
+    h_cell = compute_layer_thickness(jnp.zeros_like(H_snap), H_snap, coord,
+                                     min_water_column_m=mwc)
+    au, av = compute_face_masks_3d(coord.is_active, g)
+    au, av = np.asarray(au) > 0.5, np.asarray(av) > 0.5
+
+    du = np.abs(np.asarray(min_cell_to_uface(h_cell))
+                - np.asarray(interp_cell_to_uface(h_cell)))
+    dv = np.abs(np.asarray(min_cell_to_vface(h_cell, g))
+                - np.asarray(interp_cell_to_vface(h_cell, g)))
+    assert au.sum() > 10_000 and av.sum() > 10_000, (
+        f"geometry looks wrong: {au.sum()} open u-faces, {av.sum()} v-faces")
+    assert du[au].max() == 0.0, (
+        f"the min and mean rules must agree EXACTLY on every open u-face of "
+        f"the shipped card, got {du[au].max():.3e} -- the fix is then NOT "
+        "inert there and owes an A/B")
+    assert dv[av].max() == 0.0, (
+        f"same for v-faces, got {dv[av].max():.3e}")
+    # non-vacuity: the two rules must be genuinely different operators, or the
+    # assertions above would hold for any input and prove nothing
+    assert du[~au].max() > 1.0 and dv[~av].max() > 1.0, (
+        "min and mean agree even on CLOSED faces here, so this fixture cannot "
+        "tell the two rules apart and the identity above is vacuous")

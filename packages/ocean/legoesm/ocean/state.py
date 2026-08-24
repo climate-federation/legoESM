@@ -934,9 +934,17 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
-        the planetary Coriolis f×u is applied in the forward-backward step
-        function and is NOT included in these diagnostics)
+        The vorticity-flux momentum tendency.  WHAT IT CONTAINS DEPENDS ON THE
+        SELECTED SCHEME, so read it here rather than assuming:
+
+        * ``vorticity_scheme`` in the ``*_total`` family (e.g. ``een_total``,
+          NEMO's ``ln_dynvor_een``): the TOTAL (f+ζ) flux — the planetary part
+          IS included, because those schemes put ``f`` inside the triad and the
+          separate face-``f`` Coriolis add is gated off for exactly that reason
+          (``ocean_pe_latlon_cgrid.py``, the ``_f_vtx_al`` branch).  This is the
+          form that pairs with NEMO's ``dyn_vor`` when comparing term by term.
+        * otherwise: RELATIVE vorticity only (ζ × v_at_u / −ζ × u_at_v), with
+          the planetary Coriolis f×u applied in the step function instead.
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z.  With
         ``adaptive_implicit_vertadv=True`` this holds the start-of-step
@@ -1316,12 +1324,25 @@ class BarotropicConfig(NamedTuple):
     # forward-Euler first step (``state.u_before is None``), which returns
     # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
     # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken) -- but NOT empty for a
-    # FROM-REST run of a card that ships this option, which since #1455 R6
-    # includes nemo_dino_kamm_mlf and therefore its from-rest drivers
+    # real one-step gap. It is NOT empty for a bridged/restart twin, which is
+    # the correction #1640 forced: ``u_before`` arrives populated only under
+    # the twin runner's OPT-IN ``--bridge-before``, and the shipped
+    # ``kamm_twin_90d.py`` defaults it OFF -- so the campaign's own 90-day DINO
+    # twin enters step 1 with ``u_before is None`` and takes this branch. (The
+    # previous wording here, "It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken)", is RETRACTED: it was
+    # true of a --bridge-before run and asserted of every run.) The same
+    # applies to a genuine FROM-REST run of a card that ships this option,
+    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
+    # from-rest drivers
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
-    # acc_momentum_budget.py). Those miss NEMO's reconciliation on step 1 only.
+    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
+    # 1 only. The step is no longer SILENT: the model emits a one-time
+    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
+    # Euler start is taken with the option on. Not a raise, deliberately --
+    # refusing it would break the shipped twin's default invocation; closing
+    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
+    # implicit-vmix path (named and costed at that helper, not done).
     # Selecting this on an outer_integrator that has no such site
     # (forward_euler, ab2) is rejected at model construction, not ignored.
     #
@@ -1895,6 +1916,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
     #   value raises in the operator.
     een_e3f_scheme: str = "min"
+    # Horizontal metric weighting on the AL81/EEN transport:
+    # "off" (default, bit-identical legacy) — the per-unit-width form, exact
+    #   on a uniform-metric grid.
+    # "nemo" — NEMO dyn_vor's own weighting (dynvor.F90:791-792 weights the
+    #   meridional transport by e1v, :804 divides the u-tendency by e1u, and
+    #   symmetrically e2u/e2v for v). Retaining the factors makes discrete
+    #   enstrophy conservation exact on the sphere; dropping them leaves an
+    #   O(dcos phi) residual that grows as dphi*tan(phi), i.e. largest at high
+    #   latitude. This is the SAME weighting barotropic_coriolis="een_metric"
+    #   already applies on the barotropic path. Unknown value raises in
+    #   _bc_pv_flux.
+    een_metric_weighting: str = "off"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution

@@ -333,9 +333,12 @@ def terms(st):
 
 
 # -------------------------------------------------------------------- loaders --
-def load_nemo(day):
+def load_nemo(day, run_dir=None):
+    """NEMO's NOW-level state at `day`.  ``run_dir`` defaults to the recorded
+    90-day twin; pass another oracle run (e.g. the year-long verdict member) to
+    read the same fields off it with the same layout conversion."""
     kt = G.KT_RESTART + day * G.STEPS_PER_DAY
-    pat = f"{G.RUN_90D_TWIN}/DINO_{kt:08d}_restart*.nc"
+    pat = f"{run_dir or G.RUN_90D_TWIN}/DINO_{kt:08d}_restart*.nc"
     if not glob.glob(pat):
         raise SystemExit(f"FATAL: no NEMO restart for day {day} ({pat})")
     raw = rebuild(pat, ["tn", "sn", "un", "vn", "sshn"])

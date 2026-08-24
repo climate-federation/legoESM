@@ -454,6 +454,41 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # SINGLETON (first-step-only, ll_spg_dump=kt==nit000) at :1046 WRITE(8862).
     # Units: [m^2/s] transport per unit width = <SUM_k e3u*u>_substep (map to
     # full transport [m^3/s] via *e2u).
+    # --- #1455 post-tendency stage bisection: the PRIMARY barotropic velocity
+    # the split-explicit loop commits, and the two momentum STATE checkpoints
+    # that bracket the implicit vertical solve.  All three read verbatim from
+    # the instrumented DINO build's own source, not inferred.
+    #
+    # puu_b/pvv_b are written from the Kaa slot explicitly:
+    #   WRITE(8859) ( ( puu_b(ji,jj,Kaa), ...   -- dynspg_ts.F90:1043
+    #   WRITE(8860) ( ( pvv_b(ji,jj,Kaa), ...   -- dynspg_ts.F90:1044
+    # (singleton, ll_spg_dump = kt==nit000; OPEN at :1033/:1035).  Under DINO's
+    # ll_bt_av=.TRUE. (nn_bt_flt=2) this is the boxcar-weighted substep mean
+    # already divided by r1_wgt1s -- a VELOCITY [m/s], unlike un_adv above,
+    # which is a transport per unit width.  This is legoESM's "velocity_avg"
+    # reconcile target and the quantity mlf_baro_corr installs.
+    "spg_dump_puu_b_final.bin": ("after", "dynspg_ts.F90:1043 WRITE(8859) "
+        "puu_b(ji,jj,Kaa); boxcar substep-mean barotropic velocity [m/s] "
+        "committed at the AFTER level (OPEN at :1033, ll_spg_dump singleton)."),
+    "spg_dump_pvv_b_final.bin": ("after", "dynspg_ts.F90:1044 WRITE(8860) "
+        "pvv_b(ji,jj,Kaa); v twin of spg_dump_puu_b_final.bin."),
+    "spg_dump_pssh_final.bin": ("after", "dynspg_ts.F90:1045 WRITE(8861) "
+        "pssh(ji,jj,Kaa); the barotropic loop's committed AFTER sea surface "
+        "height [m]."),
+    # stp_dump_state_and_bt (cfgs/DINO/MY_SRC/stpmlf.F90:885-930) writes the
+    # momentum STATE -- not an RHS -- at the level it is handed, and both call
+    # sites hand it Naa:
+    #   CALL stp_dump_state_and_bt( kstp, 7, 'dynspg', uu(:,:,:,Naa), ... )
+    #                                                       -- stpmlf.F90:337
+    #   CALL stp_dump_state_and_bt( kstp, 8, 'dynzdf', uu(:,:,:,Naa), ... )
+    #                                                       -- stpmlf.F90:403
+    # Filenames are built at :907-908 (u/v) and :920-921 (ub/vb) as
+    # stp_dump_<NN>_<tag>_kt<KT8>_<field>.bin -- note the kt comes BEFORE the
+    # field, which is the opposite order from the seq_dump_ families, so these
+    # cannot ride the _SEQDUMP_KT_WINDOWS expansion and are registered per kt.
+    # Stage 7 carries Nrhs's contents because Nrhs==Naa in this build; that
+    # identity is what s17_dynzdf_bracket.py's control C1 proves bit-exactly.
+    # Both are gated by MOD(kt-nit000, nn_stpdump_every) at :903.
     "spg_dump_un_adv_final.bin": ("now", "dynspg_ts.F90:1046 WRITE(8862) un_adv; "
         "substep time-mean advective transport (:736 accumulate, :999 /r1_wgt2s) "
         "reconciled at Kmm=NOW (:1172 un_adv*r1_hu(Kmm))."),
@@ -569,6 +604,30 @@ for _b, _lv in _SEQDUMP_BASES.items():
         for _kt in _window:
             _DUMP_TIME_LEVEL[f"{_b}_kt{_kt:08d}.bin"] = _lv
 del _SEQDUMP_BASES, _b, _lv, _kt, _window
+
+# stp_dump_state_and_bt's filename puts the kt BEFORE the field name
+# (stpmlf.F90:907-908, :920-921), so these cannot ride the expansion above.
+# Same two windows, same instrumented binary, same WRITE sites -- a kt-range
+# extension of the registrations just above, not a new call site.
+_STPDUMP_STATE = {
+    ("07", "dynspg"): ("stpmlf.F90:337 CALL stp_dump_state_and_bt(kstp,7,"
+                       "'dynspg',uu(:,:,:,Naa),vv(:,:,:,Naa),...) -- the "
+                       "momentum state AFTER dyn_spg and BEFORE dyn_zdf; "
+                       "Nrhs==Naa in this build, so it carries the "
+                       "pre-dyn_zdf Krhs (written at :907-908/:920-921)."),
+    ("08", "dynzdf"): ("stpmlf.F90:403 CALL stp_dump_state_and_bt(kstp,8,"
+                       "'dynzdf',uu(:,:,:,Naa),vv(:,:,:,Naa)) -- the "
+                       "momentum state AFTER the implicit vertical solve, "
+                       "before finalize_lbc (written at :907-908)."),
+}
+for (_st, _tag), _src in _STPDUMP_STATE.items():
+    for _fld in ("u", "v", "ub", "vb"):
+        for _window in _SEQDUMP_KT_WINDOWS:
+            for _kt in _window:
+                _DUMP_TIME_LEVEL[
+                    f"stp_dump_{_st}_{_tag}_kt{_kt:08d}_{_fld}.bin"] = (
+                        "after", _src)
+del _STPDUMP_STATE, _st, _tag, _src, _fld, _kt, _window
 _EIVDIAG_SOURCE_AEIU = _DUMP_TIME_LEVEL["eivdiag_aeiu_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_AEIV = _DUMP_TIME_LEVEL["eivdiag_aeiv_yNN_rankRR.bin"][1]
 _EIVDIAG_SOURCE_WSLPI = _DUMP_TIME_LEVEL["eivdiag_wslpi_yNN_rankRR.bin"][1]
