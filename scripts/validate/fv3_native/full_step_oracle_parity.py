@@ -1227,7 +1227,9 @@ def main(argv=None):
                          "shipped solver has to be measured with this ON, "
                          "because compilation can reassociate arithmetic and "
                          "flip a limiter branch. Ignored unless "
-                         "--backend jax.")
+                         "--backend jax. Compiles the DYNAMICS step only; "
+                         "the physics step has no jit path (refused with "
+                         "--physics).")
     args = ap.parse_args(argv)
     if args.jit and args.backend != "jax":
         raise SystemExit("--jit applies to --backend jax only")
