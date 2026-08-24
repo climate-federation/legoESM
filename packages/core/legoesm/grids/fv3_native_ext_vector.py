@@ -204,6 +204,38 @@ def c2l_ord4_face(u, v, amat, n, ng):
     return ua, va
 
 
+def c2l_ord4_face_jax(u, v, amat, n, ng):
+    """JAX twin of :func:`c2l_ord4_face` -- identical slicing, functional
+    ``.at[].set`` compute-block fill onto the same NaN-filled base (the
+    NaN-outside-compute convention is a contract, preserved exactly).
+    ``n``/``ng`` are static Python ints (``static_argnums`` under ``jax.jit``);
+    differentiable w.r.t. ``u``/``v``.  Matches the NumPy authority to ~1e-12
+    at fp64 (bit-exactness not required for this lane).
+    """
+    import jax.numpy as jnp
+
+    if ng < 2:
+        raise ValueError("c2l_ord4_face_jax: ng must be >= 2 (4th-order "
+                         "stencil reads j-1..j+2 / i-1..i+2)")
+    c1, c2 = 1.125, -0.125
+    a11, a12, a21, a22 = (jnp.asarray(a) for a in amat)
+    u = jnp.asarray(u)
+    v = jnp.asarray(v)
+    s, e = ng, ng + n                    # numpy is..ie (Fortran 1..n), lo = 1-ng
+    cs = slice(s, e)
+    # utmp(i,j): u axis0 = cell i, axis1 = y-face j -> the j-stencil walks columns
+    utmp = (c2 * (u[cs, s - 1:e - 1] + u[cs, s + 2:e + 2])
+            + c1 * (u[cs, s:e] + u[cs, s + 1:e + 1]))
+    # vtmp(i,j): v axis0 = x-face i, axis1 = cell j -> the i-stencil walks rows
+    vtmp = (c2 * (v[s - 1:e - 1, cs] + v[s + 2:e + 2, cs])
+            + c1 * (v[s:e, cs] + v[s + 1:e + 1, cs]))
+    ua = jnp.full((n + 2 * ng, n + 2 * ng), jnp.nan, dtype=jnp.float64)
+    va = jnp.full((n + 2 * ng, n + 2 * ng), jnp.nan, dtype=jnp.float64)
+    ua = ua.at[cs, cs].set(a11[cs, cs] * utmp + a12[cs, cs] * vtmp)
+    va = va.at[cs, cs].set(a21[cs, cs] * utmp + a22[cs, cs] * vtmp)
+    return ua, va
+
+
 def c2l_ord2_cgrid_face(uc: np.ndarray, vc: np.ndarray, dx: np.ndarray,
                         dy: np.ndarray, amat: tuple,
                         n: int, ng: int) -> tuple:

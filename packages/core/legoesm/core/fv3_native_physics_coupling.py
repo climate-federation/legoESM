@@ -126,8 +126,8 @@ def held_suarez_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
 
     Shapes: pt, ua, va, delp, pkz ``(n, n, npz)``; peln, pe ``(n, n, npz+1)``;
     lat ``(n, n)`` radians; pdt [s]; radius [m] (default ``constants.R_earth``).
-    Returns ``(t_dt, u_dt, v_dt)`` each ``(n, n, npz)``.  NumPy authority; the
-    strat teq recursion needs ``lax.scan`` for a JAX twin (deferred).
+    Returns ``(t_dt, u_dt, v_dt)`` each ``(n, n, npz)``.  NumPy authority;
+    :func:`held_suarez_tend_jax` is its ``lax.scan`` JAX twin.
     """
     from legoesm import constants
     if radius is None:
@@ -326,3 +326,112 @@ def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
         v_new = v_new.at[:, :, k].set(vk)
 
     return u_new, v_new, pt_new, ua_new, va_new
+
+
+def held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
+                         strat=True, radius=None):
+    """JAX twin of :func:`held_suarez_tend` (~1e-12 vs the NumPy authority at
+    fp64; bit-exactness not required for this lane).  The Fortran
+    ``teq(k) = teq(k+1) + dt_tropic`` recursion -- the ONLY cross-level
+    dependence -- becomes a ``lax.scan`` over k REVERSED (bottom-up, k axis
+    moved to the front and flipped), carrying ``teq_{k+1}`` of shape
+    ``(ny, nx)`` with a zeros init (the authority's never-written slot npz).
+    ``strat`` is a static Python bool (plain ``if``, one branch traced;
+    ``static_argnums`` under ``jax.jit``); the meso/strat/fric DATA masks stay
+    ``jnp.where``/``jnp.maximum``.  The authority's ``u_dt -= (ua + u_dt)*tmp``
+    onto zeros, each level written once, reduces exactly to
+    ``u_dt = -ua*tmp`` (same for v), and its ``t_dt += ...`` onto zeros to a
+    plain per-level value -- so all three outputs are per-level maps and only
+    ``teq`` rides the carry.  Assumes ``jax_enable_x64`` as elsewhere here.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm import constants
+    if radius is None:
+        radius = constants.R_earth
+    pt = jnp.asarray(pt, dtype=jnp.float64)
+    ua = jnp.asarray(ua, dtype=jnp.float64)
+    va = jnp.asarray(va, dtype=jnp.float64)
+    delp = jnp.asarray(delp, dtype=jnp.float64)
+    peln = jnp.asarray(peln, dtype=jnp.float64)
+    pkz = jnp.asarray(pkz, dtype=jnp.float64)
+    pe = jnp.asarray(pe, dtype=jnp.float64)
+    lat = jnp.asarray(lat, dtype=jnp.float64)
+    ny, nx, npz = pt.shape
+
+    rdt = 1.0 / pdt
+    rad_ratio = radius / _HS_REF_RADIUS
+    kf_day = _HS_SDAY * rad_ratio
+    rkv = pdt / (_HS_KF_DAYS * kf_day)
+    rka = pdt / (_HS_KA_DAYS * kf_day)
+    rks = pdt / (_HS_KS_DAYS * kf_day)
+    t_ms = _HS_MS_DAYS * rad_ratio
+    t_st = _HS_ST_DAYS * rad_ratio
+    tau = (t_st - t_ms) / np.log(_HS_TAU_PREF)       # np on constants only
+    rms = pdt / (t_ms * _HS_SDAY)
+    rmr = 1.0 / (1.0 + rms)
+    rsgb = 1.0 / (1.0 - _HS_SIGB)
+    ap0k = 1.0 / _HS_P0 ** _HS_KAPPA
+    algpk = np.log(ap0k)
+
+    clat = jnp.cos(lat)
+    c2 = clat ** 2
+    tey = ap0k * (_HS_T_EQ0 - _HS_DTY * jnp.sin(lat) ** 2)
+    tez = _HS_DTZ * (ap0k / _HS_KAPPA) * c2
+    ps = pe[:, :, npz]                                  # surface pressure
+    pl = delp / (peln[:, :, 1:] - peln[:, :, :-1])      # layer-mean pressure
+    # plk1 per level: pl[:, :, k+1], clamped to plk at the bottom (k=npz-1),
+    # exactly the authority's ``pl[:, :, k+1] if k+1 < npz else plk``.
+    pl1 = jnp.concatenate([pl[:, :, 1:], pl[:, :, npz - 1:npz]], axis=2)
+
+    def _rev_k(a):          # (ny, nx, npz) -> (npz, ny, nx), bottom level first
+        return jnp.moveaxis(a, 2, 0)[::-1]
+
+    def step(teq_kp1, x):
+        ptk, uak, vak, plk, plk1, pkzk = x
+
+        # troposphere: standard Held & Suarez
+        sigl = plk / ps
+        f1 = jnp.maximum(0.0, (sigl - _HS_SIGB) * rsgb)
+        teq_t = tey - tez * (jnp.log(pkzk) + algpk)
+        teq_t = jnp.maximum(_HS_T0, teq_t * pkzk)
+        rkt = rka + (rks - rka) * f1 * c2 * c2          # cos^4 lat
+        t_trop = rkt * (teq_t - ptk) / (1.0 + rkt) * rdt
+
+        sigf = (sigl - _HS_SIGB) * rsgb * rkv
+        fric = sigf > 0.0
+
+        if strat:
+            dz = _HS_H0 * jnp.log(plk1 / plk)
+            meso = plk <= _HS_P_MESO
+            stratm = (~meso) & (plk <= _HS_P_STRAT)
+            teq_m = teq_kp1 - _HS_STRAT_LAPSE * clat * dz
+            t_meso = ((ptk + rms * teq_m) * rmr - ptk) * rdt
+            relx = pdt / ((t_ms + tau * jnp.log(0.01 * plk)) * _HS_SDAY)
+            teq_s = teq_kp1 + _HS_STRAT_LAPSE * clat * dz
+            t_strat = relx * (teq_s - ptk) / (1.0 + relx) * rdt
+            t_dt_k = jnp.where(meso, t_meso,
+                               jnp.where(stratm, t_strat, t_trop))
+            teq_k = jnp.where(meso, teq_m,
+                              jnp.where(stratm, teq_s, teq_t))
+            fric = fric & ~(meso | stratm)
+        else:
+            t_dt_k = t_trop
+            teq_k = teq_t
+
+        sigf = jnp.where(fric, sigf, 0.0)
+        tmp = sigf / (1.0 + sigf) * rdt
+        u_dt_k = -uak * tmp        # authority: u_dt -= (ua + u_dt)*tmp, u_dt=0
+        v_dt_k = -vak * tmp
+        return teq_k, (t_dt_k, u_dt_k, v_dt_k)
+
+    teq0 = jnp.zeros((ny, nx), dtype=jnp.float64)       # teq slot npz, unread
+    xs = (_rev_k(pt), _rev_k(ua), _rev_k(va),
+          _rev_k(pl), _rev_k(pl1), _rev_k(pkz))
+    _, (t_dt_r, u_dt_r, v_dt_r) = jax.lax.scan(step, teq0, xs)
+
+    def _unrev_k(a):        # (npz, ny, nx) bottom-up -> (ny, nx, npz)
+        return jnp.moveaxis(a[::-1], 0, 2)
+
+    return _unrev_k(t_dt_r), _unrev_k(u_dt_r), _unrev_k(v_dt_r)

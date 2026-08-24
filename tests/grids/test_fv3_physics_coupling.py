@@ -137,6 +137,7 @@ def test_differentiable_wrt_the_tendency(case):
 # ---- Held-Suarez forcing: vectorized authority vs an independent loop ref ----
 from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
     held_suarez_tend,
+    held_suarez_tend_jax,
     _HS_KAPPA, _HS_P_MESO, _HS_P_STRAT,   # column build + regime-coverage guard only
 )
 
@@ -248,6 +249,73 @@ def test_held_suarez_friction_opposes_wind_and_only_in_boundary_layer():
     assert np.all(u_dt[acts] * c["ua"][acts] <= 0.0), "friction not opposing u"
     # and only below sigma_b (boundary layer) -- top levels untouched
     assert not u_dt[:, :, 0].any(), "friction acting at the model top"
+
+
+def _hs_args(c, strat):
+    return (c["pt"], c["ua"], c["va"], c["delp"], c["peln"], c["pkz"],
+            c["pe"], c["lat"], c["pdt"], strat, R_E)
+
+
+@pytest.mark.parametrize("strat", [True, False])
+def test_held_suarez_jax_twin_matches_numpy_and_jit_equals_eager(strat):
+    """The lax.scan twin vs a FRESH call of the NumPy authority on the same
+    inputs (non-vacuous by construction), then jit==eager.  The fixture's
+    regime coverage (meso/strat/tropo all populated) is gated separately by
+    test_held_suarez_exercises_all_three_regimes, so the strat=True branch
+    genuinely exercises the teq scan carry."""
+    import jax
+    c = _hs_column()
+    ref = held_suarez_tend(*_hs_args(c, strat))
+    eager = held_suarez_tend_jax(*_hs_args(c, strat))
+    # strat (index 9) drives a Python `if` -> static; radius stays traced.
+    jf = jax.jit(held_suarez_tend_jax, static_argnums=(9,))
+    jitted = jf(*_hs_args(c, strat))
+    for a, b, g, nm in zip(ref, eager, jitted, ("t_dt", "u_dt", "v_dt")):
+        assert np.asarray(b).dtype == np.float64, f"{nm}: twin demoted to f32"
+        np.testing.assert_allclose(np.asarray(b), a, rtol=0, atol=1e-12,
+                                   err_msg=f"{nm} strat={strat} jax vs numpy")
+        np.testing.assert_allclose(np.asarray(g), np.asarray(b), rtol=0,
+                                   atol=1e-12,
+                                   err_msg=f"{nm} strat={strat} jit vs eager")
+
+
+def test_held_suarez_jax_differentiable_wrt_state():
+    import jax
+    import jax.numpy as jnp
+    from tests.grids.fv3_gate_helpers import (
+        assert_fd_gap_at_roundoff_floor,
+        gated_check_grads,
+    )
+    c = _hs_column()
+    args = tuple(jnp.asarray(c[k]) for k in ("pt", "ua", "va"))
+    rest = tuple(jnp.asarray(c[k]) for k in ("delp", "peln", "pkz", "pe", "lat"))
+
+    def f(pt, ua, va):
+        return held_suarez_tend_jax(pt, ua, va, *rest, c["pdt"], strat=True,
+                                    radius=R_E)
+
+    # grads flow, finite and nonzero (mirrors the orchestrator's gate)
+    def loss(pt, ua, va):
+        t_dt, u_dt, v_dt = f(pt, ua, va)
+        return jnp.sum(t_dt ** 2) + jnp.sum(u_dt ** 2) + jnp.sum(v_dt ** 2)
+
+    grads = jax.grad(loss, argnums=(0, 1, 2))(*args)
+    for g, nm in zip(grads, ("pt", "ua", "va")):
+        assert np.all(np.isfinite(np.asarray(g))), f"non-finite grad wrt {nm}"
+        assert np.abs(np.asarray(g)).max() > 0.0, f"identically-zero grad {nm}"
+
+    # The forcing is AFFINE in (pt, ua, va): every mask and coefficient (meso/
+    # strat/fric, rkt, relx, tmp, the teq column) depends only on pressure and
+    # lat.  So the eps^2 truncation ladder has no signal on these operands
+    # (its precondition would refuse) and the affine-case instrument is the
+    # roundoff-floor gate -- still FD-vs-VJP, still independent of the AD.
+    # margin/atol are provisional headroom (>=1e5 over the paper-derived
+    # roundoff); the gate passes empirically, and the floor helper has no
+    # measure mode to pin them tighter, so they stay as conservative headroom.
+    gated_check_grads("held_suarez_tend_jax pt/ua/va", f, args, order=2,
+                      modes=("fwd", "rev"), eps=1e-3, atol=1e-12, rtol=1e-6)
+    assert_fd_gap_at_roundoff_floor("held_suarez_tend_jax pt/ua/va", f, args,
+                                    margin=10.0, eps=1e-3)
 
 
 # ---------------------------------------------------------------------------
