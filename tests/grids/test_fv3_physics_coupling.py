@@ -248,3 +248,96 @@ def test_held_suarez_friction_opposes_wind_and_only_in_boundary_layer():
     assert np.all(u_dt[acts] * c["ua"][acts] <= 0.0), "friction not opposing u"
     # and only below sigma_b (boundary layer) -- top levels untouched
     assert not u_dt[:, :, 0].any(), "friction acting at the model top"
+
+
+# ---------------------------------------------------------------------------
+# fv_update_phys_dry_duo: the dry-hydrostatic orchestrator that composes the
+# scalar/A-grid update with the certified per-level D-grid wind update.
+# ---------------------------------------------------------------------------
+from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
+    fv_update_phys_dry_duo,
+    fv_update_phys_dry_duo_jax,
+)
+
+NPZ = 4
+
+
+@pytest.fixture(scope="module")
+def case3d(case):
+    rng = np.random.default_rng(1)
+    pt = 250.0 + rng.normal(size=(M, M, NPZ))
+    ua = rng.normal(size=(M, M, NPZ))
+    va = rng.normal(size=(M, M, NPZ))
+    u = rng.normal(size=(M, M + 1, NPZ))
+    v = rng.normal(size=(M + 1, M, NPZ))
+    u_dt = rng.normal(size=(M, M, NPZ))
+    v_dt = rng.normal(size=(M, M, NPZ))
+    t_dt = rng.normal(size=(M, M, NPZ)) * 1e-3
+    return dict(u=u, v=v, pt=pt, ua=ua, va=va, u_dt=u_dt, v_dt=v_dt, t_dt=t_dt,
+                dt=1800.0, vlon=case["vlon"], vlat=case["vlat"],
+                es1=case["es1"], ew2=case["ew2"])
+
+
+def _args3d(c):
+    return (c["u"], c["v"], c["pt"], c["ua"], c["va"], c["u_dt"], c["v_dt"],
+            c["t_dt"], c["dt"], c["vlon"], c["vlat"], c["es1"], c["ew2"], NG)
+
+
+def test_orchestrator_scalar_update_is_dry_hydrostatic(case3d):
+    """pt/ua/va advance by the plain tendency*dt (dry cp factor = 1.0)."""
+    c = case3d
+    _, _, pt_n, ua_n, va_n = fv_update_phys_dry_duo(*_args3d(c))
+    np.testing.assert_allclose(pt_n, c["pt"] + c["t_dt"] * c["dt"], rtol=0, atol=0)
+    np.testing.assert_allclose(ua_n, c["ua"] + c["u_dt"] * c["dt"], rtol=0, atol=0)
+    np.testing.assert_allclose(va_n, c["va"] + c["v_dt"] * c["dt"], rtol=0, atol=0)
+
+
+def test_orchestrator_dgrid_is_the_per_level_helper(case3d):
+    """u_new/v_new stack the certified 2-D helper applied level by level;
+    a mis-indexed loop (wrong k placement) makes this disagree."""
+    c = case3d
+    u_n, v_n, *_ = fv_update_phys_dry_duo(*_args3d(c))
+    for k in range(NPZ):
+        uk, vk = update_dwinds_phys_duo(
+            c["u"][:, :, k], c["v"][:, :, k],
+            c["u_dt"][:, :, k], c["v_dt"][:, :, k],
+            c["dt"], c["vlon"], c["vlat"], c["es1"], c["ew2"], N, NG)
+        np.testing.assert_allclose(u_n[:, :, k], uk, rtol=0, atol=0)
+        np.testing.assert_allclose(v_n[:, :, k], vk, rtol=0, atol=0)
+
+
+def test_orchestrator_does_not_mutate_inputs(case3d):
+    c = case3d
+    snap = {k: np.asarray(v).copy() for k, v in c.items()
+            if isinstance(v, np.ndarray)}
+    fv_update_phys_dry_duo(*_args3d(c))
+    for k, v0 in snap.items():
+        np.testing.assert_array_equal(c[k], v0, err_msg=f"input {k} mutated")
+
+
+def test_orchestrator_jax_twin_matches_and_jit_equals_eager(case3d):
+    import jax
+    c = case3d
+    ref = fv_update_phys_dry_duo(*_args3d(c))
+    eager = fv_update_phys_dry_duo_jax(*_args3d(c))
+    jitted = jax.jit(fv_update_phys_dry_duo_jax, static_argnums=(13,))(*_args3d(c))
+    for a, b, g in zip(ref, eager, jitted):
+        np.testing.assert_allclose(np.asarray(b), a, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(g), np.asarray(b), rtol=0, atol=1e-12)
+
+
+def test_orchestrator_differentiable_wrt_tendencies(case3d):
+    import jax
+    import jax.numpy as jnp
+    c = case3d
+
+    def loss(t_dt, u_dt):
+        u_n, v_n, pt_n, _, _ = fv_update_phys_dry_duo_jax(
+            c["u"], c["v"], c["pt"], c["ua"], c["va"], u_dt, c["v_dt"],
+            t_dt, c["dt"], c["vlon"], c["vlat"], c["es1"], c["ew2"], NG)
+        return jnp.sum(pt_n ** 2) + jnp.sum(u_n ** 2) + jnp.sum(v_n ** 2)
+
+    gt, gu = jax.grad(loss, argnums=(0, 1))(jnp.asarray(c["t_dt"]),
+                                            jnp.asarray(c["u_dt"]))
+    assert np.all(np.isfinite(np.asarray(gt))) and np.abs(np.asarray(gt)).max() > 0
+    assert np.all(np.isfinite(np.asarray(gu))) and np.abs(np.asarray(gu)).max() > 0

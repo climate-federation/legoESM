@@ -213,3 +213,89 @@ def held_suarez_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
         u_dt[:, :, k] -= (ua[:, :, k] + u_dt[:, :, k]) * tmp
         v_dt[:, :, k] -= (va[:, :, k] + v_dt[:, :, k]) * tmp
     return t_dt, u_dt, v_dt
+
+
+def fv_update_phys_dry_duo(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
+                           vlon, vlat, es1, ew2, ng):
+    """Port of FV3 ``fv_update_phys`` restricted to the DRY, HYDROSTATIC,
+    ``moist_phys=.false.`` case on the duo grid (grid_type=0, bounded).
+
+    Fortran (``model/fv_update_phys.F90``), hydrostatic branch, per level k:
+        call moist_cp(...) -> cvm      ! nwat=0 (dry): case default -> cpm=cp_air
+        pt = pt + t_dt*dt*con_cp/cvm   ! con_cp=cp_air, so the dry factor is 1.0
+        ua = ua + dt*u_dt              ! GFS_PHYS undefined -> this block is live
+        va = va + dt*v_dt
+    then, once after the k-loop:
+        call update_dwinds_phys(dt, u_dt, v_dt, u, v, ...)  ! D-grid increment
+    There is NO p_var call: delp is unchanged and there are no physics tracers,
+    so pe/peln/pk/pkz/ps are not rebuilt.  SCOPE: the ``con_cp/cvm`` ratio is
+    1.0 only because the air is dry; a moist coupling must restore it.
+
+    Shapes (one cube face, full data domain ``m = n + 2*ng``, float64): pt, ua,
+    va, u_dt, v_dt, t_dt ``(m,m,npz)``; u ``(m,m+1,npz)`` D-grid west/east;
+    v ``(m+1,m,npz)``; vlon, vlat ``(m,m,3)``, es1 ``(m,m+1,3)``, ew2
+    ``(m+1,m,3)`` the level-invariant wind-vector metrics consumed by
+    ``update_dwinds_phys_duo``; ng the halo width (>=1).  The cell count n is
+    recovered as ``pt.shape[0] - 2*ng``.  Returns fresh
+    ``(u_new, v_new, pt_new, ua_new, va_new)``; no input is mutated.
+
+    The Fortran's single ``update_dwinds_phys`` (k-loop internal) is factored to
+    one ``update_dwinds_phys_duo`` per level: levels are independent, the metrics
+    do not vary with k, and the D-grid update reads the RAW A-grid tendencies
+    (never the updated ua/va), so the ordering is equivalent.
+    """
+    dt = float(dt)
+    ng = int(ng)
+    n = pt.shape[0] - 2 * ng   # cell count; the helper derives m = n + 2*ng
+    npz = pt.shape[2]
+
+    pt_new = pt + t_dt * dt
+    ua_new = ua + u_dt * dt
+    va_new = va + v_dt * dt
+
+    u_new = np.empty_like(u, dtype=np.float64)
+    v_new = np.empty_like(v, dtype=np.float64)
+    for k in range(npz):
+        uk, vk = update_dwinds_phys_duo(
+            u[:, :, k], v[:, :, k],
+            u_dt[:, :, k], v_dt[:, :, k],
+            dt, vlon, vlat, es1, ew2, n, ng)
+        u_new[:, :, k] = uk
+        v_new[:, :, k] = vk
+
+    return u_new, v_new, pt_new, ua_new, va_new
+
+
+def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
+                               vlon, vlat, es1, ew2, ng):
+    """JAX twin of :func:`fv_update_phys_dry_duo`: identical math, jit-safe and
+    differentiable.  npz is a static shape, so the level loop unrolls at trace
+    time (no lax.scan carry, no branch on traced values); the D-grid buffers are
+    built with functional ``.at[].set`` scatters, so nothing is mutated and
+    autodiff is exact.  Assumes ``jax_enable_x64`` as elsewhere in this port.
+    """
+    import jax.numpy as jnp
+
+    (u, v, pt, ua, va, u_dt, v_dt, t_dt,
+     vlon, vlat, es1, ew2) = map(jnp.asarray, (u, v, pt, ua, va,
+                                               u_dt, v_dt, t_dt,
+                                               vlon, vlat, es1, ew2))
+    ng = int(ng)
+    n = int(pt.shape[0]) - 2 * ng   # cell count; helper derives m = n + 2*ng
+    npz = int(pt.shape[2])
+
+    pt_new = pt + t_dt * dt
+    ua_new = ua + u_dt * dt
+    va_new = va + v_dt * dt
+
+    u_new = jnp.zeros_like(u)
+    v_new = jnp.zeros_like(v)
+    for k in range(npz):
+        uk, vk = update_dwinds_phys_duo_jax(
+            u[:, :, k], v[:, :, k],
+            u_dt[:, :, k], v_dt[:, :, k],
+            dt, vlon, vlat, es1, ew2, n, ng)
+        u_new = u_new.at[:, :, k].set(uk)
+        v_new = v_new.at[:, :, k].set(vk)
+
+    return u_new, v_new, pt_new, ua_new, va_new
