@@ -7336,6 +7336,16 @@ def main() -> int:
                   f"(--spmd-persistent-state): full-state gathers only at "
                   f"snapshot/abort/final + counted per-step forcings.")
         else:
+            # Seed the carry ONCE so the state's pytree STRUCTURE is
+            # step-stable before the shard_map is built: the full card's step
+            # PROMOTES None fields to arrays (--gateway-transports fills the
+            # mass-flux capture on the first step), and shard_map's
+            # out_specs are the INPUT specs — a None->Field transition dies
+            # with "pytree structure error ... out_specs" (eORCA025 smoke,
+            # job 9473859).  seed_scan_carry is the designed fix (the scan
+            # lane has always needed it for the same reason); idempotent, no
+            # physics change.
+            state = model.seed_scan_carry(state, dt)
             _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
             # t_sec is always None here (tide-enabled fail-fasts above).
             _ocean_step = (lambda st, sf, fw, t_sec=None:
