@@ -283,8 +283,9 @@ def test_before_level_bridge_is_ON_by_default(instruments):
     REVERT-RED, and this is the whole point of the test: restoring either
     ``bridge_before=False`` default turns it red immediately.  The old default
     made the twin start from a forward-Euler step, which makes the whole
-    trajectory the two-point running mean of the true one (a half-step delay at
-    every frequency) and skips NEMO's step-1 after-level reconciliation.
+    trajectory delayed about half a step, injects a permanent perturbation of
+    half a leap-frog step of tendency, and skips NEMO's step-1 after-level
+    reconciliation.
     """
     import inspect
     kamm_twin_90d = instruments.kamm_twin_90d
@@ -323,8 +324,12 @@ def test_the_euler_start_prints_a_loud_banner_naming_the_running_mean(
     assert kamm_twin_90d.resolve_start_mode(False) == "euler"
     out = capsys.readouterr().out
     assert "!!" in out and "LEGACY FORWARD-EULER START" in out
-    assert "RUNNING MEAN" in out
-    assert "HALF-STEP DELAY" in out
+    # the DELAY term, named with its identity...
+    assert "RUNNING MEAN" in out and "half a step" in out
+    # ...and the INJECTION term, which the identity does NOT describe and which
+    # an earlier banner omitted entirely. Its absence is the failure mode that
+    # makes a reader think shifting a result half a step undoes the Euler start.
+    assert "INJECTS" in out and "2.06e-3 Sv" in out
     assert "reconciliation" in out
     assert "twin start: euler" in out
 
@@ -351,7 +356,11 @@ def test_run_twin_stamps_the_resolved_start_mode(instruments):
     import inspect
     kamm_twin_90d = instruments.kamm_twin_90d
     src = inspect.getsource(kamm_twin_90d.run_twin)
-    assert "start_mode = resolve_start_mode(bridge_before)" in src
+    assert "requested_start = resolve_start_mode(bridge_before)" in src
+    # the stamped value is the one OBSERVED on the built state, checked against
+    # what the flag requested -- not the flag itself
+    assert 'observed_start = "bridged" if st.T_before is not None else "euler"' in src
+    assert "start_mode = observed_start" in src
     assert "twin_start_mode=np.str_(start_mode)" in src
 
 
@@ -364,24 +373,34 @@ def test_start_mode_of_reads_the_stamp_and_admits_when_it_is_missing(instruments
     assert kamm_twin_90d.start_mode_of({"nemo_ladder_mode": "both"}) is None
 
 
-def test_the_start_mode_is_not_a_certification_criterion(instruments):
-    """Disposition of the start mode at the gate (#1455): PRINTED, never a
-    certification criterion.
+def test_the_start_mode_criterion_is_asymmetric(instruments):
+    """Disposition of the start mode at the gate (#1455), as review corrected
+    it: a MISSING stamp is printed and forgiven, a stamped OFF-CLAIM start is a
+    reason.
 
-    No artifact this campaign recorded carries the new stamp -- the
-    verdict-year baseline included -- so a strict criterion would refuse them
-    all for being unstamped and orphan the campaign's own baseline. The ladder
-    and the precision stay criteria; the start mode does not.
+    The bootstrap problem -- no recorded artifact carries the new stamp, so a
+    strict criterion would refuse the campaign's own baseline -- attaches only
+    to the missing case. A run that stamped "euler" was deliberately started
+    off the trajectory the thresholds were earned on, which is the same test
+    the ladder criterion applies. Both directions are asserted, so the guard
+    can pass neither by accepting everything nor by rejecting everything.
     """
-    kamm_twin_90d = instruments.kamm_twin_90d
-    stamped = {"nemo_ladder_mode": "both", "control_dtype": "float64",
-               "twin_start_mode": "euler"}
-    ok, reasons, ladder, dtype = kamm_twin_90d.certifiable_grid_and_precision(stamped)
-    assert ok, f"the start mode must not withhold certification, got {reasons}"
-    assert not any("start" in r for r in reasons)
-    # ... while the two real criteria still bite
-    off_ladder = dict(stamped, nemo_ladder_mode="off")
-    assert not kamm_twin_90d.certifiable_grid_and_precision(off_ladder)[0]
+    k = instruments.kamm_twin_90d
+    base = {"nemo_ladder_mode": "both", "control_dtype": "float64"}
+    ok, reasons, _, _ = k.certifiable_grid_and_precision(dict(base))
+    assert ok and reasons == [], f"a MISSING start stamp must be forgiven: {reasons}"
+    ok, reasons, _, _ = k.certifiable_grid_and_precision(
+        dict(base, twin_start_mode="bridged"))
+    assert ok and reasons == [], f"the claim's own start must certify: {reasons}"
+    ok, reasons, _, _ = k.certifiable_grid_and_precision(
+        dict(base, twin_start_mode="euler"))
+    assert not ok, "a stamped Euler start must withhold the verdict"
+    assert any("start mode" in r for r in reasons), reasons
+    # the two older criteria still bite, so this is not the only thing left
+    assert not k.certifiable_grid_and_precision(
+        dict(base, nemo_ladder_mode="off"))[0]
+    assert not k.certifiable_grid_and_precision(
+        dict(base, control_dtype="float32"))[0]
 
 
 def test_print_before_bridge_verify_reports_zero_for_matched_state(instruments):
@@ -1100,6 +1119,69 @@ def test_the_gate_prints_the_start_mode_of_every_candidate(tmp_path, monkeypatch
     assert expect in out, f"expected {expect!r} in:\n{out}"
 
 
+def test_main_threads_the_start_flag_into_run_twin(instruments, monkeypatch):
+    """MED-4(a): deleting `bridge_before=args.bridge_before` from main() leaves
+    every other test green while --legacy-euler-start silently goes inert --
+    run_twin's default is True, so the flag would do nothing and the artifact
+    would stamp "bridged". This is the one assertion that catches it."""
+    kamm_twin_90d = instruments.kamm_twin_90d
+    seen = {}
+
+    def _spy(*a, **kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(kamm_twin_90d, "run_twin", _spy)
+    monkeypatch.setattr(kamm_twin_90d, "provenance_gate", lambda: None)
+    monkeypatch.setattr(kamm_twin_90d, "_precision_gate", lambda: None)
+    kamm_twin_90d.main(["nemo_dino_kamm_mlf", "o.npz", "--legacy-euler-start"])
+    assert seen["bridge_before"] is False, (
+        "main() did not thread the start flag into run_twin -- the flag is inert")
+    seen.clear()
+    kamm_twin_90d.main(["nemo_dino_kamm_mlf", "o.npz"])
+    assert seen["bridge_before"] is True
+    assert seen["perturb_eps"] == kamm_twin_90d.PERTURB_EPS_DEFAULT
+
+
+def test_run_twin_refuses_a_start_mode_the_built_state_contradicts(instruments,
+                                                                  monkeypatch):
+    """HIGH-1: the stamp must be a RECEIPT read off the built state, not a
+    restatement of the CLI flag. Hand run_twin a state whose before level
+    disagrees with the requested mode and it must refuse rather than stamp
+    either answer."""
+    import types as _t
+    kamm_twin_90d = instruments.kamm_twin_90d
+
+    class _Fld:
+        data = np.zeros((2, 2, 2))
+
+    fake_state = _t.SimpleNamespace(T=_Fld(), T_before=None)
+
+    def _fake_build(*a, **kw):
+        return (None, None, None, None, None, None, fake_state)
+
+    monkeypatch.setattr(kamm_twin_90d, "_build_twin_state", _fake_build)
+    monkeypatch.setattr(kamm_twin_90d, "seasonal_t0_seconds", lambda *a, **k: 0.0)
+    with pytest.raises(SystemExit, match="START-MODE MISMATCH"):
+        kamm_twin_90d.run_twin("nemo_dino_kamm_mlf", "o.npz", bridge_before=True)
+
+
+def test_the_gate_forwards_the_start_flag_it_was_given(instruments, monkeypatch,
+                                                       tmp_path):
+    """MED-4(b): inverting the gate's forwarding line would make every default
+    --run-recipe run produce an Euler-start candidate. run_candidate_twin had
+    no coverage at all; this is it, both directions."""
+    gate = _import_gate()
+    seen = []
+    monkeypatch.setattr(gate.subprocess, "run", lambda cmd, **kw: seen.append(cmd))
+    gate.run_candidate_twin(str(tmp_path / "c.npz"), "nemo_dino_kamm_mlf",
+                            None, True)
+    assert "--bridge-before" in seen[-1] and "--legacy-euler-start" not in seen[-1]
+    gate.run_candidate_twin(str(tmp_path / "c.npz"), "nemo_dino_kamm_mlf",
+                            None, False)
+    assert "--legacy-euler-start" in seen[-1] and "--bridge-before" not in seen[-1]
+
+
 def _import_startmode_scorer():
     import importlib
     _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
@@ -1147,14 +1229,21 @@ def test_startmode_scorer_refuses_arms_on_different_ladders(tmp_path):
     """
     a = tmp_path / "a.npz"
     b = tmp_path / "b.npz"
-    np.savez(a, vertical_ladder_sha256=np.str_("aaaa000000000000"))
-    np.savez(b, vertical_ladder_sha256=np.str_("bbbb000000000000"))
+    d64 = dict(control_dtype=np.str_("float64"))
+    np.savez(a, vertical_ladder_sha256=np.str_("aaaa000000000000"), **d64)
+    np.savez(b, vertical_ladder_sha256=np.str_("bbbb000000000000"), **d64)
     sc = _import_startmode_scorer()
     with pytest.raises(SystemExit, match="DIFFERENT vertical ladders"):
         sc.main([f"A={a}", f"B={b}"])
 
     same = tmp_path / "same.npz"
-    np.savez(same, vertical_ladder_sha256=np.str_("aaaa000000000000"))
+    np.savez(same, vertical_ladder_sha256=np.str_("aaaa000000000000"), **d64)
+
+    # and provenance-less arms are refused before either of those questions
+    naked = tmp_path / "naked.npz"
+    np.savez(naked, x=np.zeros(2))
+    with pytest.raises(SystemExit, match="without provenance"):
+        sc.main([f"A={naked}", f"B={naked}"])
     with pytest.raises(BaseException) as ei:      # SystemExit is not Exception
         sc.main([f"A={a}", f"B={same}"])
     assert "DIFFERENT vertical ladders" not in str(ei.value)

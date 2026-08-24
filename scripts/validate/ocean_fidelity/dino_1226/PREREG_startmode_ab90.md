@@ -136,3 +136,136 @@ CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 python run_fp64.py kamm_twin_90d.py \
 python startmode_ab_score.py B=<b>.npz E=<e>.npz Bp=<bp>.npz Ep=<ep>.npz
 python acceptance_gate_90d.py <b>.npz --level 5   # and the same for <e>.npz
 ```
+
+---
+
+# AMENDMENT 1 — 2026-08-24, after adversarial review, BEFORE any arm was scored
+
+The dual adversarial review (one code, one mechanism) ran while the four arms
+were integrating. **No arm had been scored when this amendment was written**;
+the scorer had not been run once. The mechanism review refuted the physical
+statement this pre-registration rests on and showed the registered decision
+rule contains a dead branch and two non-disjoint verdicts. Both are corrected
+here rather than after the fact.
+
+## R1 — RETRACTED: "an Euler-started leap-frog trajectory IS the two-point running mean of the true one"
+
+That identity is exact **only when the reference's before level equals its now
+level**. A developed NEMO restart's does not. Reproduced independently by the
+reviewer:
+
+| regime | max‖Euler − running-mean(leapfrog)‖ |
+|---|---|
+| reference seeded `before = now`, γ=0 | 2e-16 … 6e-15 (exact) |
+| same, **γ = 0.1** (the card's Asselin) | 0.8 % … 6.4 % of signal |
+| reference with a **real** before level | residual is the same order as the whole error |
+
+The correct statement is a decomposition, verified to 2e-15 at γ=0:
+
+```
+Euler_arm − NEMO = [ RM(NEMO) − NEMO ]  +  RM( Λ[δ, 0] ),    δ = tn − tb
+                     half-step delay        injected perturbation
+```
+
+- **Term 1, the delay**, does not grow. With γ=0.1 the lag is not 0.500 but
+  rises with period toward ≈ 0.5/(1−γ) = 0.556.
+- **Term 2, the injection**, is a permanent state perturbation of half the
+  before-level gap. The running-mean identity says nothing about it, **and it
+  is the term that grows.**
+- **Term 3**, the skipped step-1 after-level reconciliation.
+
+Consequence for the campaign: **shifting an Euler-start result half a step does
+NOT undo it.** The old wording overstated the exactness and understated the
+defect. Corrected at all five sites that carried it.
+
+## R2 — RETRACTED: Fact 3's "3.4e9x the ensemble kick" as the argument for the bar
+
+That ratio compares a smooth, dynamically consistent field against spatially
+white noise **in a state norm**. White noise projects onto dissipated
+grid-scale modes; `tn − tb` projects onto growing ones. Restated in the gate's
+own units, which is what the bar is in:
+
+```
+ACC(tn-level u) = 61.946220 Sv     ACC(tb-level u) = 61.950334 Sv
+one leap-frog step of ACC = 4.114e-3 Sv
+injected physical-mode part ~ delta/2 = 2.06e-3 Sv
+```
+
+The effective ratio to the 1e-14 ensemble's day-90 ACC spread is **~180x**, not
+3.4e9x. The state-norm numbers in Fact 3 stand as measurements; their use as
+the bar's justification is withdrawn.
+
+## R3 — RETRACTED: "one variable: the start"
+
+True of the **flag**, false of the **mechanism**: the Euler branch bundles the
+three terms above. Any attribution of the measured `D` to "the half-step lag"
+alone is unjustified and will not be made.
+
+## R4 — THE BAR, REPLACED
+
+The registered rule was defective in three ways, all confirmed by direct
+measurement of the recorded arms:
+
+- **Rule 2 (`D <= 3F`) is a dead branch.** The 1e-14 ensemble is *still growing*
+  at day 90 — ACC max-pairwise 8.75e-8 (d30) -> 3.26e-7 (d60) -> 1.15e-5 (d90) —
+  so `F` is the floor of an unfinished perturbation, three orders below the
+  comparison. `D ~ 3000 F` by construction.
+- **Rules 1 and 4 were not disjoint**, so a saturated, uninformative result
+  would have been read out as CONFIRMS.
+- **The retraction trigger "F at or above D" was unreachable**, i.e. vacuous.
+
+Replaced by two nulls, in order:
+
+**PRIMARY — the measured saturated config-to-config envelope** (six pairwise
+differences among the four recorded 90-day arms in `results/dino_1455_ab90/`,
+day 90). These are real one-variable physics changes on this card and horizon:
+
+| metric | NULL band (min … max) | median |
+|---|---|---|
+| ACC [Sv] | 1.01e-2 … 7.04e-2 | 3.52e-2 |
+| upper contrast | 6.55e-7 … 1.04e-5 | 5.20e-6 |
+| deep contrast | 1.15e-7 … 1.91e-6 | 9.55e-7 |
+| S-band sigma max | 1.17e-6 … 1.67e-5 | 8.35e-6 |
+| S-band sigma mean | 1.45e-8 … 6.69e-7 | 3.40e-7 |
+
+Caveat carried, and it is the conservative direction: those four arms sit at
+four different source SHAs, so the band is an UPPER envelope.
+
+**SECONDARY — a matched-amplitude within-arm null, measured at THIS commit.**
+Three extra bridged members with `--perturb-eps 1e-5` (comparable to the
+3.38e-5 relative T gap the start mode applies) give three pairwise differences
+from a perturbation that has *saturated*, at one SHA, with no config confound.
+This required a one-line `--perturb-eps` (default 1e-14 unchanged, so every
+recorded ensemble stays byte-comparable).
+
+## R5 — DECISION RULE, REPLACED (disjoint, and no branch that cannot fire)
+
+Let `D_k = |B_k − E_k|`, `N_k` = the matched-amplitude null band (secondary,
+falling back to the primary envelope for any metric it does not cover).
+
+1. **INDISTINGUISHABLE FROM ANY CONFIG CHANGE** — `D_k` inside `N_k` for every
+   metric. Read as: *"the start mode's day-90 endpoint effect is bounded above
+   by the saturated envelope and is not separable from trajectory divergence at
+   n=1."* This is a BOUND, never "no effect".
+2. **MATERIAL** — any `D_k` above `N_k`'s upper end, or above `5 x floor_k`.
+   Report direction and size loudly; escalate the verdict-year re-run with cost.
+3. **INSTRUMENT FAULT** — `D_ACC` below ~1e-3 Sv, which would contradict the
+   measured 2.06e-3 Sv day-0 injection. Not a result; investigate the tool.
+
+The gate verdict is still reported for both arms, with one change forced by the
+same review: a stamped `twin_start_mode="euler"` is now an UNCERTIFIED reason,
+so **arm E scores in full and returns UNCERTIFIED (exit 3) instead of a
+PASS/FAIL tally**. The registered comparison therefore reads arm E's neutral
+`(within 5x)` / `(over 5x)` markers against arm B's `PASS`/`FAIL` — the same
+information without the verdict token.
+
+**The prediction is UNCHANGED** and is now sharper: endpoint metrics move
+little in the sense of rule 1. The mechanism review's own forecast, registered
+here as an independent prediction to score against: `D_ACC` = 1e-2 … 7e-2 Sv.
+
+## R6 — Provenance of the arms
+
+B / E / Bp / Ep first ran at `13edbe446` (pre-review-fix). The review fixes are
+stamping, guards, CLI and prose only — no numerics — so all four are **re-run at
+the post-fix HEAD**, and the old and new arm B are checked for bit-identity as a
+free control on that claim. Any failure of that control is itself reportable.

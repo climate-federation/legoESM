@@ -92,12 +92,27 @@ def main(argv=None):
     # mislabelled file cannot be read as a result
     print("ARMS")
     for label, path in arms.items():
-        s = stamps_of(path)
+        s = stamps_of(path)  # noqa: F841 -- printed below
         print(f"  {label:<10} start={s['start']:<10} ladder={s['ladder']:<6} "
               f"dtype={s['dtype']:<8} ladder_sha={s['hash']}  {path}")
-    hashes = {stamps_of(p)["hash"] for p in arms.values()}
+    # A guard that accepts four UNSTAMPED artifacts because they all collapse
+    # to the same placeholder string is a guard that cannot fail in the case it
+    # exists to catch (review). Absence of provenance is refused FIRST, then
+    # disagreement. Dtype is gated for the same reason it disqualifies a gate
+    # candidate: the same numbers at fp32 and fp64 are not the same experiment.
+    stamps = {label: stamps_of(p) for label, p in arms.items()}
+    missing = [f"{k} ({v})" for k, st in stamps.items()
+               for v in ("hash", "dtype") if st[v] == "UNSTAMPED"]
+    if missing:
+        raise SystemExit("arms without provenance cannot be compared: "
+                         + ", ".join(missing))
+    hashes = {st["hash"] for st in stamps.values()}
     if len(hashes) != 1:
         raise SystemExit(f"arms stand on DIFFERENT vertical ladders {hashes} -- "
+                         "this is not a one-variable comparison")
+    dtypes = {st["dtype"] for st in stamps.values()}
+    if len(dtypes) != 1:
+        raise SystemExit(f"arms were built at DIFFERENT precisions {dtypes} -- "
                          "this is not a one-variable comparison")
     print()
 

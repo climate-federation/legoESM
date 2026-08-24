@@ -169,13 +169,15 @@ def load_candidate(path, day=90):
     start = _twin.start_mode_of(d)
     if start is None:
         start = ("UNSTAMPED -- predates the twin_start_mode stamp and does "
-                 "not record which start it took; read its run log (every "
-                 "recorded twin build audited so far was bridged)")
+                 "not record which start it took; read its run log (the "
+                 "before-level bridge verification line prints if and only if "
+                 "the bridge ran)")
     elif start != "bridged":
-        start = (f"{start} -- LEGACY FORWARD-EULER START: the trajectory is "
-                 "the two-point running mean of the true one (a half-step "
-                 "delay at every frequency), and step 1 skips NEMO's "
-                 "after-level reconciliation")
+        start = (f"{start} -- LEGACY FORWARD-EULER START: delayed about half "
+                 "a step at every frequency AND carrying a permanent injected "
+                 "perturbation of half a leap-frog step of tendency "
+                 "(~2.06e-3 Sv of circumpolar transport at t=0), and step 1 "
+                 "skips NEMO's after-level reconciliation")
     print(f"twin start mode: {start}", flush=True)
     # #1455 season-bug guard (extend-only): NEMO's analytic surface forcing is
     # a function of the day of year through the absolute step index
@@ -303,12 +305,16 @@ def self_test(level):
 def run_candidate_twin(candidate_path, recipe, placement, bridge_before):
     cmd = [sys.executable, f"{_DIR}/kamm_twin_90d.py", recipe, candidate_path,
            "--days", "90", "--save-3d"]
-    # The twin's own default is the bridged start; only the legacy Euler
-    # start needs saying on the command line. Passing --bridge-before here
-    # would still work, but it would put a no-op flag into every recorded RUN:
-    # line and read as if the default were the other way.
-    if not bridge_before:
-        cmd.append("--legacy-euler-start")
+    # BOTH spellings are passed EXPLICITLY, even though --bridge-before is now
+    # the default and so a no-op on the command line. The two reviewers
+    # disagreed here, which is why this comment exists: one wanted the no-op
+    # dropped so a gate log's RUN: line reads honestly; the other pointed out
+    # that dropping it makes a post-flip gate invocation BYTE-IDENTICAL to a
+    # pre-flip Euler-default one -- and the audit that established no recorded
+    # twin was Euler-start worked precisely because the flag was on the command
+    # line as well as in the log. Redundancy in the provenance record wins;
+    # floor90_ensemble.py and verdict360.py already pass it for the same reason.
+    cmd.append("--bridge-before" if bridge_before else "--legacy-euler-start")
     if placement:
         cmd += ["--surface-tendency-placement", placement]
     print("RUN:", " ".join(cmd), flush=True)
@@ -331,7 +337,9 @@ def main(argv=None):
     p.add_argument("--bridge-before", default=True,
                    action=argparse.BooleanOptionalAction,
                    help="forwarded to kamm_twin_90d.py with --run-recipe "
-                        "(default on: nemo_dino_kamm_mlf requires it)")
+                        "(default on since 2026-08-09; --no-bridge-before "
+                        "selects the legacy forward-Euler start, which scores "
+                        "but cannot certify)")
     p.add_argument("--self-test", action="store_true",
                    help="synthetic-violation non-vacuity check (no twin needed)")
     args = p.parse_args(argv)
