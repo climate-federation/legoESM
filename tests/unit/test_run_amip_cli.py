@@ -476,12 +476,27 @@ def test_land_soil_moisture_init_frac_flag_flows_to_config():
 
 
 def test_land_surface_scheme_flag_flows_to_config():
-    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector);
-    default is the SimpleSEB path, 'two_leaf' selects the DifferBESS canopy."""
+    """--land-surface-scheme round-trips (issue #730 two-leaf canopy selector).
+
+    The DEFAULT is now the two-leaf canopy. It used to be SimpleSEB, which
+    measurement retired: on a well-watered column SimpleSEB evaporates at
+    potential with stomata off, and with them on its humidity gradient
+    self-extinguishes.
+
+    The config carries "two_leaf" either way. A canopy needs a multilayer land
+    tile to run inside, and when there is none the DRIVER resolves back to
+    SimpleSEB and warns at setup — the config value is not rewritten, so that
+    fallback is not visible here.
+    """
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.land_surface_scheme == "simple_seb"
+    assert cfg_default.land_surface_scheme == "two_leaf"
+    cfg_ml_default = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-mask-file", "lsm.nc",
+    ]), parser))
+    assert cfg_ml_default.land_surface_scheme == "two_leaf"
 
     # Canopy schemes require --use-multilayer-land (they run inside the multilayer
     # land tile); the flag round-trips with it set.
@@ -522,11 +537,12 @@ def test_canopy_scheme_requires_multilayer_land():
     not a silent drop to the slab land (dispatch-hardening)."""
     parser = build_arg_parser()
     for scheme in ("two_leaf", "clm_ml"):
+        argv = ["--dataset", "analytical", "--land-surface-scheme", scheme]
         with pytest.raises(SystemExit):
-            _postprocess_args(parser.parse_args([
-                "--dataset", "analytical", "--land-surface-scheme", scheme,
-            ]), parser)
-    # simple_seb (the default) is a no-op on the slab and is NOT gated.
+            _postprocess_args(parser.parse_args(argv), parser, argv)
+    # simple_seb is a no-op on the slab and is NOT gated.  (It is no longer the
+    # default — the two-leaf canopy is — but an EXPLICIT canopy request without
+    # the tile is still refused, which is what the loop above checks.)
     _postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--land-surface-scheme", "simple_seb",
     ]), parser)
@@ -1921,16 +1937,22 @@ def test_config_yaml_round_trips_authoritative_values():
     # deck says so at the field.
     assert cfg.surface_tiled is False
     assert cfg.start_year == 1979
-    # convective_cloud ON — mirrors the canonical tuned base
-    # (config/cmip/cmip_tuned_physics.yaml) so AMIP runs the SAME tuned slab
-    # parameters; the 30-day A/B TOA cost under prescribed SST is a documented
-    # finding (see the YAML header), not a reason to diverge from the base.
-    assert cfg.convective_cloud is True
+    # convective_cloud OFF since 2026-08-22.  It was on to mirror the canonical
+    # tuned base, but the tropical-rain campaign runs that reproduced observed
+    # ocean rain (0.89 of observed) all ran with it OFF, and production runs
+    # with it on reached only 0.48-0.61.  Production now carries the campaign
+    # science configuration rather than leaving it to a side deck; see the
+    # folded-in block at the end of amip_production.yaml.
+    assert cfg.convective_cloud is False
     # the run_coupled-mirrored (#647) tuned knobs round-trip from the YAML
     assert cfg.surface_gustiness_zi == 300.0
-    # PROVISIONAL cloud tuning (#899): rh_crit 0.85 / q_c 1e-4 (was 0.77/3e-4)
+    # PROVISIONAL cloud tuning (#899): rh_crit 0.85.
     assert cfg.cloud_rh_crit == pytest.approx(0.85)
-    assert cfg.cloud_q_c_diagnostic == pytest.approx(1e-4)
+    # q_c 5e-6, the campaign value, folded in 2026-08-22 with the rest of the
+    # tropical-rain configuration (production had 1e-4, twenty times larger).
+    # This assertion is the reason the divergence was found at all, so it is
+    # updated rather than removed.
+    assert cfg.cloud_q_c_diagnostic == pytest.approx(5e-6)
     # The detrained-condensate to convective-rain split, on since the
     # bechtold rain-split landed.
     assert cfg.convective_precip_efficiency == pytest.approx(0.8)
@@ -3712,3 +3734,42 @@ def test_capdcycl_land_tau_scale_reaches_the_kernel_and_defaults_to_ifs():
     assert convection_config_for(cfg).bechtold.capdcycl_land_tau_scale == 0.25
     with pytest.raises(ValueError, match="capdcycl_land_tau_scale"):
         ExperimentConfig(bechtold_capdcycl_land_tau_scale=5.0).validate_strict()
+
+
+def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
+    """A blow-up is reported at the first DIAGNOSTIC SAMPLE, not the first bad
+    step, so the cadence bounds how precisely a failure can be located in time.
+    An integer-only cadence pinned that bound at one simulated day.  Sub-daily
+    values must survive the CLI, reach the config, and — critically — must never
+    round down to a zero-step interval, which every guard in the run loop reads
+    as "diagnostics disabled" and would silently turn the blow-up check OFF.
+
+    The step arithmetic is exercised through the PRODUCTION helper the run loops
+    call, not a copy of it: a local re-implementation would keep passing if the
+    real cadence lost its floor.
+    """
+    from legoesm.driver.diagnostics import diagnostic_interval_steps
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--diag-days", "0.01",
+    ]), parser))
+    assert cfg.output.diag_days == pytest.approx(0.01)
+
+    # At the production MPAS timestep: 0.01 d = 11.5 steps -> 11, and a cadence
+    # far below one step floors to 1 rather than collapsing to "off".
+    assert diagnostic_interval_steps(0.01, 75.0, 999) == 11
+    assert diagnostic_interval_steps(1e-6, 75.0, 999) == 1, \
+        "a fine cadence silently disabled the blow-up check"
+    assert diagnostic_interval_steps(1.0, 75.0, 999) == 1152
+    # The "no periodic cadence" sentinel still yields the caller's fallback.
+    assert diagnostic_interval_steps(0.0, 75.0, 999) == 999
+    # A non-finite cadence is refused, not silently reinterpreted.
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="diag_days"):
+            diagnostic_interval_steps(bad, 75.0, 999)
+
+    # The integer default is unchanged.
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.output.diag_days == pytest.approx(5.0)

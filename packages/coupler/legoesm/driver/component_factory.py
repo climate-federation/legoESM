@@ -288,9 +288,10 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # The five scheme selectors are pinned to 'none' by the specific guard.
     "radiation", "convection", "microphysics", "turbulence",
     "gravity_wave_drag",
-    # Output cadence + destination -- the only OutputConfig fields the
-    # lane's snapshot writer reads.
-    "output.output_dir", "output.diag_days",
+    # Output cadence + destination -- the OutputConfig fields the lane's
+    # snapshot + checkpoint writers read (checkpoint_days: slice-2
+    # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
+    "output.output_dir", "output.diag_days", "output.checkpoint_days",
     # CLI-default drift that CANNOT affect the duo dynamics (measured on a
     # stock ``run_amip --discretization fv3_duo`` config, job 9433540):
     # ``--clouds`` defaults to 'xu_randall' at the argparse layer. The duo
@@ -692,9 +693,11 @@ def create_atmosphere_dycore(
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if solver_name == "fv3_duo_primitive_equations":
-        # Slice 1 contract, enforced LOUDLY (the certified core REFUSES
-        # moist coupling: zvir != 0 / consv_te != 0 raise at
-        # fv3_dynamics.py:301-311, and require_f64_jax gates every leaf).
+        # Slice 1 contract, enforced LOUDLY. The core SUPPORTS moist
+        # coupling (zvir != 0) on both arms now, but this lane never
+        # passes it and never routes tracers, so slice 1 stays dry by
+        # construction; consv_te != 0 still raises in the core, and
+        # require_f64_jax gates every leaf.
         # This lane never routes physics tendencies, so any active scheme
         # would be SILENTLY inert — the exact failure mode dispatch
         # hardening exists to prevent.

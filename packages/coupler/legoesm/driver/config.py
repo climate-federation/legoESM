@@ -317,7 +317,7 @@ class EvaluationConfig(NamedTuple):
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""
     output_dir: str = ""
-    diag_days: int = 5
+    diag_days: float = 5.0   # diagnostic cadence [days]; sub-daily values are honoured (a NaN is reported at the first sample, so a coarse cadence only bounds it from above)
     checkpoint_days: int = 0
     monthly_means: bool = False
     cmip_output: bool = False
@@ -824,7 +824,17 @@ class ExperimentConfig(NamedTuple):
     # which holds land ET below potential and breaks the over-evaporation wet loop
     # that the SimpleSEB beta_soil path (=1 at field capacity, no canopy resistance)
     # produces. Only affects use_multilayer_land runs.
-    land_surface_scheme: str = "simple_seb"
+    # DEFAULT: the two-leaf canopy.  It reads per-PFT CANOPY parameters, which
+    # the driver now builds through the same routine the offline LMIP
+    # simulations use; a canopy run without that surfdata is refused rather than
+    # quietly given generic constants.
+    #
+    # "simple_seb" is ACADEMIC ONLY: measured on a well-watered column it
+    # evaporates at potential with stomata off, and with them on its humidity
+    # gradient SELF-EXTINGUISHES — the throttle warms the surface, saturation
+    # rises, the throttle shrinks it back, and evaporation stops (2 W/m2 over
+    # bare soil, surface 8-12 K hot).
+    land_surface_scheme: str = "two_leaf"
     # Initial multilayer soil water as a fraction of saturation (theta_init =
     # frac * theta_sat) for the cold-start (#730). Default 0.5 is byte-identical to
     # the init_multilayer_land_state default. The multilayer over-evaporation wet
@@ -833,6 +843,26 @@ class ExperimentConfig(NamedTuple):
     # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
     # use_multilayer_land runs.
     land_soil_moisture_init_frac: float = 0.5
+    # HOW the multilayer soil is seeded at a cold start.
+    #
+    #   "aridity" (default, unchanged) — from the initial atmosphere's
+    #       near-surface relative humidity, mapped into the plant-available
+    #       range: theta = theta_wp + RH*(theta_fc - theta_wp).  Arid columns
+    #       start near wilting, which is what stops a desert cold-start
+    #       evaporation runaway (#730).  NOTE this caps the start at FIELD
+    #       CAPACITY and makes ``land_soil_moisture_init_frac`` INERT — that
+    #       field was only ever a fallback for an initial state carrying no
+    #       humidity, which a real AMIP run never has (measured 2026-08-19: two
+    #       arms differing only in the fraction were byte-identical).
+    #
+    #   "saturation_fraction" — theta = land_soil_moisture_init_frac * theta_sat,
+    #       so the fraction becomes a real control and the soil can start ABOVE
+    #       field capacity, up to near saturation.  Use it to keep a run out of
+    #       the dry-soil attractor, where low soil water suppresses evaporation,
+    #       which dries the boundary layer, which suppresses evaporation further.
+    #       The trade is the runaway the aridity seed exists to prevent, so a
+    #       wet start wants watching over the first week rather than trusting.
+    land_soil_init: str = "aridity"
     # Prognostic snow + snow-albedo feedback on the AMIP slab-land tile: snow
     # water (SWE) accumulates from snowfall and melts (degree-day), brightening
     # the land albedo (snow ~0.5-0.8 vs vegetation ~0.15) — the positive
@@ -2077,14 +2107,15 @@ class ExperimentConfig(NamedTuple):
                 "no soil column is built and the land-flux handoff is silently "
                 "inert — pass a real --topography or a --land-mask-file."
             )
-        # Deploying the baked land tables under the physics they were calibrated
-        # under.  The overlapping keys are CHECKED, not overridden, so a run can
-        # never believe it is on the calibrated model while one key disagrees;
-        # the settings with no config key (soil growth factor, carbon scheme,
-        # stomatal model) come from the shared calibrated_multilayer_setup().
+        # Deploying the baked land parameters under the physics they were
+        # calibrated under — the biophysics LMIP two-leaf canopy. The
+        # overlapping keys are CHECKED, not overridden, so a run can never
+        # believe it is on the calibrated model while one key disagrees; the
+        # settings with no config key of their own (soil growth factor, the
+        # canopy's intrinsic stomata) come from the one shared setup.
         if self.land_calibrated_physics:
-            from legoesm.land.config import calibrated_multilayer_setup
-            _cal = calibrated_multilayer_setup()
+            from legoesm.land.config import biophysics_lmip_two_leaf_setup
+            _cal = biophysics_lmip_two_leaf_setup()
             _grid = _cal["soil_grid"]
             if not self.use_multilayer_land:
                 errors.append(
@@ -2095,8 +2126,11 @@ class ExperimentConfig(NamedTuple):
                     "model)."
                 )
             _want = {
-                "land_stomatal_beta": (self.land_stomatal_beta, True),
-                "land_surface_scheme": (self.land_surface_scheme, "simple_seb"),
+                # The canopy runs its own Ball-Berry stomata, so the coupled
+                # stomatal beta must be OFF: on, it throttles the same
+                # conductance a second time.
+                "land_stomatal_beta": (self.land_stomatal_beta, False),
+                "land_surface_scheme": (self.land_surface_scheme, "two_leaf"),
                 "multilayer_n_layers": (self.multilayer_n_layers, _grid.n_layers),
                 "multilayer_soil_depth": (self.multilayer_soil_depth,
                                           _grid.total_depth),
@@ -2647,6 +2681,11 @@ class ExperimentConfig(NamedTuple):
                 f"in [1e4, 1e8]; got {self.C_land!r}."
             )
         # Soil-moisture init fraction of saturation: finite, in (0, 1].
+        _soil_init_modes = ("aridity", "saturation_fraction")
+        if self.land_soil_init not in _soil_init_modes:
+            errors.append(
+                f"land_soil_init must be one of {_soil_init_modes}, got "
+                f"{self.land_soil_init!r}.")
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
                 f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "

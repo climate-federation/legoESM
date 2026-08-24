@@ -541,6 +541,135 @@ claims BITWISE parity with a sequential NumPy loop — unroll over the
 static trip count there. Under jit everything is compiled anyway and
 only the ~1e-14 parity contract holds.
 
+## ★ THE NH GAP IS A w-ONLY ACOUSTIC DEFECT (2026-08-20, CONFIRMED)
+
+Open since 2026-08-19, now localised twice over. Corrected measurement,
+`nh_preremap_w_parity.py` job 9448215, four controls passed:
+
+    level 0, ONE shared scale:
+      w     pre 9.3761e-04   post 9.3755e-04
+            |d| 1.3003e-07   |d|  1.3002e-07
+      pt    pre 2.3470e-13
+      delp  pre 3.0193e-10
+
+TWO INDEPENDENT NARROWINGS:
+
+1. **It is generated in the ACOUSTIC LOOP.** The whole 1.3003e-07 m/s
+   gap -- the established figure -- is present when `dyn_core` returns,
+   and the remap changes it by ~1e-11, i.e. 0.008 %. At k=0 the remap
+   is a pass-through. (Scope: k=0 only. Other levels are unmeasured, so
+   the remap is not exonerated globally.)
+2. **It is w-SPECIFIC, by six to nine orders.** `pt` (2.3e-13) and
+   `delp` (3.0e-10) sit at the parity floor while `w` is at 9.4e-04.
+   The defect is not a mass or thermodynamic error propagating into w;
+   it is in the w path itself. In the NH lane w is written by
+   `riem_solver3` every sub-step -- note the separately CONFIRMED
+   ~5.8e-10 libm-`exp` residual there is SIX ORDERS too small to be
+   this.
+
+CONTROL 4 SETTLED THE CROSS-BINARY WORRY OUTRIGHT: the instrumented
+build's own restart against the certified restart is **0.0000e+00,
+bitwise**, on every tile. GLM had bounded the possible drift at
+~5-6e-4 relative, which would have left the verdict a ~15 % margin;
+the actual drift is zero and the margin is the full measurement.
+
+THE 1.418 RATIO I FIRST PUBLISHED WAS THE SCALE ARTIFACT GLM PREDICTED.
+`rel()` takes `max(peaks)` per call; the pre-remap number was level 0
+(peak 1.39e-04) and the full-step number was all-k (peak ~1.9e-03). On
+one domain with one scale the two are 9.3761e-04 and 9.3755e-04 -- the
+ratio is 1.00006, not 1.418, and "the remap slightly reduces it" was an
+artifact of my own denominators.
+
+NEXT, and the instrument already supports it: dump per acoustic
+SUB-STEP rather than once per call, to see whether the w error appears
+at sub-step 1 (a stage is wrong) or accumulates over the eight (a
+coefficient is wrong). The dump call moves from `fv_dynamics.F90` into
+`dyn_core`'s `do it=1,n_split`.
+
+## ★ (SUPERSEDED) the first, mixed-domain reading (2026-08-20)
+
+### RETRACTED, same day: "the remap is exonerated"
+
+Both reviewers (jobs 9448127, 9448128) rejected three of the four
+claims I published, and they were right. What SURVIVES is the
+direction: the worst error exists before the remap. What does NOT:
+
+* **"the remap is exonerated"** -- unsupported. The remap may
+  contribute at levels the dump does not cover, or add an error of
+  OPPOSITE sign at the same cells, in which case it is a second defect
+  partially masking the first rather than innocent.
+* **"the remap slightly reduces it"** -- the 1.418 ratio has at least
+  four readings and none were excluded. The decisive one: `rel()`
+  defaults its scale to `max(peaks)` PER CALL, and the pre-remap number
+  was taken on level 0 while the full-step number was taken over all k.
+  If the column peak is ~1.42x the top-level peak, IDENTICAL ABSOLUTE
+  ERRORS produce exactly the ratio I reported as physics. Different
+  domains, different denominators.
+* **field-wide scope** -- one level licences a statement about the
+  WORST error's level, not about the field.
+
+GLM also bounded the margin: control 3 permits an instrumented-vs-
+certified drift of ~5-6e-4 relative, against a measured 9.4e-4 signal
+and a 3.3e-4 threshold, so the worst-case margin was ~15%, not the
+comfortable 1.42x the output implied.
+
+THE PROBE IS FIXED rather than the claim merely softened: it now
+compares level 0 against level 0 with ONE shared scale, prints the
+absolute differences and the scale beside every ratio, and adds a
+FOURTH control -- the instrumented binary's own restart against the
+certified restart -- because nothing previously authenticated the new
+build as the certified program, so the ratio was dividing readings from
+two different oracle binaries.
+
+Re-run pending; the numbers below are from the SUPERSEDED mixed-domain
+comparison and are kept only to show what was retracted.
+
+## ★ (SUPERSEDED) the first, mixed-domain reading (2026-08-20)
+
+Open since 2026-08-19 and now answered. The named discriminator ran
+(`scripts/validate/fv3_native/nh_preremap_w_parity.py`, job 9448074,
+against the instrumented build from job 9447518):
+
+    pre-remap  w rel   9.3761e-04   at face2 -> tile5
+    full-step  w rel   6.6116e-04
+    ratio pre/full     1.418
+
+**The gap is ALREADY THERE when dyn_core returns**, and is in fact
+slightly LARGER before the remap than after -- the remap reduces it a
+little. `kord_wz` and the vertical remap of `w` are EXONERATED; the
+cause is in the acoustic loop.
+
+Per face, pre-remap: 6.85e-05, 9.376e-04, 4.23e-05, 9.376e-04,
+9.376e-04, 3.95e-04. Three faces sit at the same 9.376e-04 to four
+digits. NOT interpreted further here -- the earlier {1,2,4,5} vs {3,6}
+polar split does not match this grouping, and a spatial pattern in a
+damaged field is where damage LANDED, not where it came from.
+
+THREE INSTRUMENT CONTROLS PASSED BEFORE THE NUMBER WAS READ, and the
+second caught a real defect on the first attempt:
+
+* IC face map re-derived: 3.685e-14 against a 1e-12 floor;
+* the script's OWN full-step w residual: 6.6116e-04, i.e. exactly the
+  established figure, so it is running the configuration under
+  investigation. Its first version read 1.0071e+00 -- it had dropped
+  the face map's dihedral and was comparing differently-oriented faces
+  -- and the control stopped the run rather than letting a pre-remap
+  number out. It RAISES now rather than printing;
+* the oracle's own pre-remap-vs-restart difference: 4.7e-09 to 6.3e-08
+  per tile, non-zero, so the dump is genuinely between dyn_core and the
+  remap rather than the restart wearing a different name.
+
+THE INSTRUMENTED ORACLE (`build_nh_wdump_oracle.sbatch`): the pinned
+tree copied (never patched in place -- it is chmod a-w), a
+w/pt/delp/delz dump added between `dyn_core` and
+`Lagrangian_to_Eulerian`, built WITHOUT `-DSW_DYNAMICS`. That define is
+why `dyncore_dump2d` could not answer this: under it `fv_dynamics` sets
+`akap = 1` and excludes the whole 3-D block.
+
+The port side comes from `fv_dynamics_step(..., return_pre_remap=True)`
+-- by RETURN (C6), not a probe re-running the acoustic chain, which
+would have been a second implementation of the thing under test.
+
 ## The NumPy lane's NH gap is LOCALISED (2026-08-19) — and it is small
 
 The 6.6116e-04 headline was a tiny-signal RELATIVE reading: the
@@ -760,6 +889,264 @@ retracted claim in this campaign.
 
 ---
 
+## ★ ALL FOUR ARMS ORACLE-CERTIFIED, AND THE MOIST COUPLING SEPARATELY (2026-08-20)
+
+TWO NUMBERS PER MOIST ARM, and the second is the one that matters.
+
+The RESIDUAL (port vs oracle one-step state) certifies the step:
+
+| arm | deck | NumPy | JAX |
+|---|---|---|---|
+| hydro dry | run_hydro_1step_gfs | 1.1866e-09 | 1.1866e-09 |
+| hydro moist | run_hydro_1step_moist_gfs | 1.1866e-09 | 1.1866e-09 |
+| NH dry | run_nh_1step_gfs | 6.6116e-04 | 6.6116e-04 |
+| NH moist | run_nh_1step_moist_gfs | 6.6116e-04 | 6.6116e-04 |
+
+All four are GATES now (`--max-rel` per arm in the runner); they used to
+print and exit 0 whatever they said.
+
+The RESPONSE (port(moist)-port(dry) vs oracle(moist)-oracle(dry))
+certifies the COUPLING, and it had to be added because the residual
+cannot do that job on the NH arm:
+
+    hydro moist   3.170e-11 / 3.177e-11   (numpy / jax)
+    NH moist      3.212e-11 / 3.210e-11
+    over 6 scored field/face pairs, limit 2e-01, jobs 9444695/96
+
+WHY THE RESIDUAL IS NOT ENOUGH (GLM M1, job 9444414, and it forced a
+retraction). The moist signal is ~1e-6 of the pt peak; the NH gate floor
+is 6.6e-4, ~660x LARGER. So a port whose moist coupling is dead in an
+NH-only path -- an `r_vir` dropped at the remap, say -- scores 6.6116e-04
+either way, and "NH moist certified" would have been an empty statement.
+The hydrostatic arm is the opposite case: its 1.19e-9 floor sits ~1000x
+BELOW the signal, so there the residual does certify the coupling.
+
+The response gate's own rows are the evidence, and they are worth
+keeping because they say what one step can and cannot see::
+
+    pt   port response  3.248  3.248  1.603  3.248  3.248  1.603
+         oracle         3.248  3.248  1.603  3.248  3.248  1.603
+
+Four digits on every face, polar faces included, and 3.2 K is the
+expected size of `zvir*q*T`. `u`/`v` (~3e-13) and `delp` (~3e-11) carry
+NO moist signal at one step -- so the gate scores a field/face only
+where the oracle's own response clears that field's residual by a
+decade, marks the rest '.', and refuses if nothing clears it. Its first
+version scored everything and failed at exactly `rel = 2.000e+00` on
+delp: `rel()` on two uncorrelated noise fields of equal size returns 2
+by construction. It was comparing two zeros.
+
+## ★ ALL FOUR ARMS ARE ORACLE-CERTIFIED (2026-08-20)
+
+| arm | oracle deck | NumPy (SPEC) | JAX (PORT) |
+|---|---|---|---|
+| hydrostatic dry | run_hydro_1step_gfs | 1.1866e-09 | 1.1866e-09 |
+| hydrostatic MOIST | run_hydro_1step_moist_gfs | 1.1866e-09 | 1.1866e-09 |
+| NH dry | run_nh_1step_gfs | 6.6116e-04 | 6.6116e-04 |
+| **NH MOIST** | run_nh_1step_moist_gfs | **6.6116e-04** | **6.6116e-04** |
+
+Each moist arm lands on its own DRY arm's number, so the moist coupling
+adds nothing on either. Jobs 9442518, 9442762, 9444390.
+`ARM=hydro|nh|moist|nhmoist`.
+
+The NH moist deck did not exist and was built by
+`scripts/cluster/fv3_native/build_nh_moist_oracle.sbatch` (job 9444380):
+the NH deck with `adiabatic` `.true. -> .false.`, ONE line, asserted to
+be the only edit. TRAP: use `build_hydro_gfsconst` (libnetcdf.so.18,
+"FMSConstants: GFS"); `build_hydro_serialnc` is the GFDL build, wants
+so.19, and died rc=127 on every rank in 9444375.
+
+ANTI-VACUITY on both moist arms, because each lands on its dry twin's
+number and that has to be shown not to BE the dry run. The decks' own
+one-step `pt` tendencies differ in the third digit on every face --
+hydro 0.05829/0.002624/0.04613 dry vs 0.05797/0.002658/0.04600 moist;
+NH 0.05833/0.002619/0.04616 dry vs 0.058/0.002653/0.04603 moist -- a
+~1 % difference matching `zvir*q ~ 0.013`, and on EVERY deck the port's
+tendency row equals the oracle's.
+
+## ★ THE MOIST HYDROSTATIC ARM IS ORACLE-CERTIFIED (2026-08-20)
+
+`full_step_oracle_parity.py --moist --tracers`, job 9442518, pin
+`55547c559`, against `run_hydro_{zerostep,1step}_moist_gfs`:
+
+    IC instrument control   3.685e-14   (the dry deck's own floor)
+    tracer IC control       1.425e-15
+    WORST one-step rel      1.1866e-09
+
+Same figure as the dry hydrostatic arm, which is the expected result and
+not a suspicious one: that floor is set by the quad-precision geometry
+seed in the IC, not by the physics.
+
+ANTI-VACUITY, because "identical to the dry number" has to be shown not
+to BE the dry run. The two decks' own one-step `pt` tendencies differ in
+the third digit on every face -- dry 0.05829 / 0.002624 / 0.04613 vs
+moist 0.05797 / 0.002658 / 0.04600 -- a ~1 % difference matching
+`zvir*q ~ 0.013`, and on BOTH decks the port's tendency row equals the
+oracle's. The port reproduces each deck's own physics.
+
+### RETRACTED: "the moist deck is not usable" (same day)
+
+An earlier version of this section said `run_hydro_1step_moist_gfs`
+could not serve as an oracle because `atmosphere.F90:474` calls
+`fv_phys` whenever `.not. adiabatic` and `do_strat_HS_forcing` defaults
+`.true.` (`fv_phys.F90:91`). That was WRONG, and GLM caught the
+contradiction at document scale: the commit that added `--moist`
+shipped this paragraph arguing the opposite of its own code.
+
+`do_strat_HS_forcing` is only an ARGUMENT to `Held_Suarez_Tend`
+(`fv_phys.F90:539`), which is inside `if (do_Held_Suarez)` at `:533`.
+`do_Held_Suarez` lives in `&fv_core_nml`, defaults `.false.`
+(`fv_arrays.F90:511`), and the deck does not set it. Every other scheme
+defaults `.false.` and the deck pins `fv_sg_adj = -1`, so `no_tendency`
+(`fv_phys.F90:227`) is never cleared and `fv_update_phys` (`:590`)
+never runs. `fv_phys` is entered and does nothing.
+
+That reading is no longer a claim: `--moist` runs
+`check_physics_is_inert` (refuses any deck whose switches could clear
+`no_tendency`) and `check_moist_deck` (refuses a deck not resolving
+`adiabatic = .false.`, since `zvir` is derived from it and is nowhere
+in the namelist). Both were shown to FIRE -- the dry deck is refused by
+name. `do_strat_HS_forcing` is deliberately NOT in the switch list, for
+the reason above; re-check `fv_phys.F90:533/:539` before changing that.
+
+### CLOSED: the gate XLA would not compile (2026-08-20)
+
+``test_nh_moist_pkz_is_recomputed_not_trusted[2]`` died with ``LLVM
+compilation error: Cannot allocate memory`` after a ~11 min
+``jit_scan`` compile. MECHANISM NOW MEASURED, not guessed
+(`scripts/validate/fv3_native/nh_ksplit2_compile_probe.py`, job
+9447330):
+
+    4 steps, k_split=2             -> step 1 ok (661 s), step 2 FAILS
+    4 steps, k_split=2, --clear    -> all 4 compile
+    4 steps, k_split=1             -> all 4 compile (~80 s each)
+
+It is compiled-CODE accumulation across eager ``fv_dynamics_step``
+calls, and ``jax.clear_caches()`` between them releases enough of it.
+The test makes FOUR step calls inside one test, which is why it hit the
+wall while the single-call parity gate never did. Un-skipped, with the
+clear between calls.
+
+TWO EXPLANATIONS WERE TESTED AND REFUTED FIRST, so do not re-run them:
+the job's memory limit (9443826, the case alone at 600G: same failure)
+and accumulation across the module's other graphs (9443895, alone in a
+fresh process: same failure). I had called it a resource limit before
+testing it, and the test refuted me.
+
+### The energy fixer's conditioning is MEASURED (2026-08-20)
+
+GLM's MAJOR was that my float64-vs-fixed-point bound was relative to
+``sum |te0-te|*a`` rather than to the CANCELLING
+``|sum (te0-te)*a|`` that actually divides into ``dtmp``, amplified by
+a condition number nobody had measured.
+`scripts/validate/fv3_native/consv_te_conditioning.py` (job 9447329):
+
+    te0 column scale    1.171411e+10
+    kappa               1.757e+02      (cancellation amplification)
+    dtmp   np.sum       2.27705931723455220e-05
+    dtmp   math.fsum    2.27705931723455424e-05
+    |d dtmp| / dtmp     8.928e-16      -> >= 15 real digits
+
+So the honest bound is ``~1e-16 * kappa`` = ~2e-14, still far under the
+gate, and the summation choice is immaterial ON THIS STATE. The
+criticism was right in principle and the measurement clears it -- which
+is the difference between "measuring is not explaining" and having done
+both.
+
+### What is still NOT certified
+
+Nothing in the moist scope -- the NH moist arm was the last gap and it
+closed on 2026-08-20 (job 9444390, 6.6116e-04 both backends, its own dry
+arm's number). All four arms are scored against Fortran runs. The
+twin-port limit no longer bites here: a SYMMETRIC edit to both lanes
+would still pass parity, but it now has to pass four Fortran
+comparisons too.
+
+### RETRACTED: "consv_te has no oracle, so it is not planned"
+
+I wrote that the energy fixer could not be certified because no deck
+resolves `consv_te` non-zero. That was true of the SHIPPED decks and
+FALSE as a statement about what is possible -- deck generation is a
+tested tool now, and the same one-flag machinery that produced the NH
+moist oracle produces this one.
+
+`build_consv_te_oracle.sbatch` (job 9446170): the certified hydrostatic
+deck with `consv_te` `0.0 -> 1.0`, sole edit, asserted. Both arms ran
+rc=0, GFS constants, `consv_te = 1.0` resolved. THE FIXER ENGAGED, and
+the check is a state diff rather than a log line (no `E_Flux` is
+printed on this deck):
+
+    T   max|consv - dry| = 4.220916e-06 K   (rel 1.375e-08)
+    u                    = 0.0  exactly
+    v                    = 0.0  exactly
+    zerostep T           = 0.0  exactly
+
+`u`/`v` unchanged is the right signature -- the fixer touches only `pt`
+(`fv_mapz.F90:975`) -- and the zerostep deck being identical confirms it
+is `last_step`-only. The signal sits ~12x above the hydrostatic gate
+floor of 1.1866e-09, so a residual gate can just see it and a RESPONSE
+gate (consv on minus off, as the moist arm uses) sees it comfortably.
+
+WHAT THE PORT ACTUALLY COSTS, which is more than the line count. The
+fixer is ~119 lines (`fv_mapz.F90:628-747`) plus `compute_total_energy`
+for `te0_2d` (`:1087-1215`, called at `fv_dynamics.F90:359-378`), but
+the structural cost is the reduction: `g_sum` is GLOBAL over all six
+faces while this lane calls `lagrangian_to_eulerian` PER FACE, so
+`dtmp` cannot be known inside a single face's call. Porting it means
+splitting the remap at its own `if (last_step)` boundary into
+compute-te / reduce / apply, in a module currently certified at
+1.1866e-09. The `consv = 0` path must stay bit-identical.
+
+Grid inputs are all present in the port's ext bundle: `area`, `rsin2`,
+`cosa_s`.
+
+## What the oracle's own flags settle
+
+`atmosphere.F90:156-161` is
+
+    zvir = 0.
+    if ( adiabatic ) then ; moist_phys = .false.
+    else ; zvir = rvgas/rdgas - 1. ; moist_phys = .true. ; endif
+
+so in the oracle `adiabatic = .false.` <=> `zvir /= 0` <=> `moist_phys
+= .true.` -- one switch, not three. That is why the moist NH arm passes
+`adiabatic=False` to the remap and why (non-hydrostatic AND moist AND
+`adiabatic=True`) is REFUSED in both lanes: it is unreachable in the
+oracle, and running it would take the port through `fv_mapz.F90:987`
+while the flag names `:985`'s empty branch.
+
+The moist IC is DRY temperature: `test_cases.F90:6760-6768` runs
+`pt = pt/(1. + zvir*q(sphum))` when the deck is not adiabatic, AFTER
+`delz` is built from the still-virtual `pt` at `:6721` and after `sphum`
+is filled at `:6737`. Omitting it left the IC ~3.8 K warm and the
+harness refused the comparison at 1.058e-02 rather than reporting a
+false step residual.
+
+Three cpp defines were confirmed from the BUILD RECIPE of the binary
+the PARITY RUNS use -- `scripts/cluster/fv3_native/build_oracle_hydro_serialnc.sbatch`,
+`DEFS="-DSPMD -Duse_libMPI -Duse_netCDF -DINTERNAL_FILE_NML"` (the same
+line in `dyncore_stage_oracle.sbatch` and `extchain_oracle.sbatch`) --
+not inferred: `USE_COND`, `MOIST_CAPPA` and `FILL2D` are all UNDEFINED,
+so the `q_con` moist_cp/moist_cv arms, the per-cell `cappa` NH pkz, and
+the `moist_phys`-gated condensate fill at `fv_dynamics.F90:546` are
+structurally absent. The ported arms are the `#else` branches.
+
+CITE THE RIGHT BUILD. `fv3_recon/duo_model_build.sbatch` -- the
+instrumented tree with `dyncore_dump2d` -- compiles with
+`-DSW_DYNAMICS`, under which `fv_dynamics.F90:267-269` sets `akap = 1.`
+and the ENTIRE `dp1`/`pkz` block (`:271-343`) and the `pt -> theta_v`
+conversion (`:396-408`) are excluded by the `#else` / `#ifndef`. Nothing
+about `fv_dynamics` may be read off that binary.
+`build_oracle_hydro_serialnc.sbatch` drops the define on purpose (its
+own comment says so) and is what the one-step and stage oracles are
+built from.
+
+`dtmp` is initialised to `0.` at `fv_mapz.F90:627` and assigned only
+inside `consv > consv_min` (`:708`) and `consv < -consv_min`
+(`:738-741`), both refused here, so it is identically zero and
+`:987`'s `(pt + dtmp/cv_air*pkz)/(1+r_vir*q)` reduces EXACTLY to this
+lane's `pt/(1+r_vir*q)`.  `cv_air` vs `cp` cannot matter on a zero term.
+
 ## Lessons file (append, never prune)
 
 Each entry cost something. New sessions read this before touching the port.
@@ -877,3 +1264,313 @@ Each entry cost something. New sessions read this before touching the port.
     function. Never let the identity be the ONLY gate on an operand group —
     that is what happened to mapz's `delp`, and it took the review to see it.
 
+
+---
+
+## Slice 2 — the disposition, measured (2026-08-21)
+
+"Slice 2 (physics coupling, MPI)" has been carried as one remaining item.
+It is TWO items with completely different justification, and they should stop
+being written on one line.
+
+### MPI: recommend NOT building, and keep the refusal loud
+
+Nothing measured asks for it. The certified lane is six faces of C48 with five
+levels in fp64; it runs in one process inside the memory and walltime of a
+`short` job with room to spare, and no run has been blocked on either. The cost
+is not small: the duo halo exchange is the six-face `ext_scalar` / `ext_vector`
+machinery over the full stack, so a decomposition means a duo-grid port of
+what FMS `mpp_domains` does, plus a second correctness ladder (unsharded vs
+sharded, single-rank vs MPI) for a lane whose whole value is bitwise-level
+faithfulness. That is a large, high-risk build against a demand nobody has
+stated.
+
+The refusals stay where they are — `component_factory.py` and the driver lane
+both raise on `distributed` — and they are already loud and specific. The
+entry to revisit this is a MEASUREMENT: a configuration that does not fit, or
+a wall-clock that blocks a science question. Until one exists, this is the
+speculative-need case.
+
+### Physics coupling: real, and the estimate changed after reading the source
+
+This is the campaign's own one-line gap ("certified but not runnable as a
+model"). Four findings, each read in the pinned tree, and two of them move the
+estimate in opposite directions.
+
+1. **The oracle for it can be BUILT, and cheaply.** `fv_phys` (the solo
+   driver's physics) runs whenever `adiabatic = .false.`
+   (`driver/solo/atmosphere.F90:474`), and the Held-Suarez tendencies inside it
+   are gated on `flagstruct%do_Held_Suarez` (`driver/solo/fv_phys.F90:533`) —
+   a namelist flag, not a compile-time one. So a physics-coupled reference deck
+   is two `set_key` edits away, and deck generation is already a tested tool.
+   `do_strat_HS_forcing` is NOT that gate; it is an argument
+   (`fv_phys.F90:539`), which is the same reading error this campaign made once
+   before about the moist deck.
+2. **The wind half is much smaller than it looks.** `update_dwinds_phys`
+   (`model/fv_grid_utils.F90:3363-3547`) is 185 lines, but four of its blocks
+   are guarded on `.not. gridstruct%bounded_domain`, and the duo grid FORCES
+   `bounded_domain = .true.` (`model/fv_arrays.F90:1512`:
+   `regional .or. nested .or. duogrid`). With `grid_type = 0` the live duo path
+   is: rotate the A-grid tendency into a 3-vector with `vlon`/`vlat`, average to
+   cell edges, project onto `es`/`ew`. About 25 lines.
+3. **The scalar half is smaller still, on this deck.** `fv_update_phys`'s live
+   path at `nwat = 0`, `moist_phys = .false.`, `hydrostatic = .false.`,
+   `phys_hydrostatic = .false.` is: advance the tracers, leave `delp` alone
+   (the mass adjustment is multiplication by 1), advance `pt` by
+   `t_dt * dt * cp_air/cv_air` (`model/fv_update_phys.F90:202-205, 396-400`),
+   advance the A-grid winds, then rebuild `pe`/`peln`/`pk`/`ps`. Roughly 60
+   lines. Everything else in that 897-line file is nudging, nesting, diagnostics
+   and moist arms that this deck does not reach.
+4. **THE ACTUAL COST IS GRID MACHINERY THE PORT HAS NEVER NEEDED.** The port's
+   `gridstruct` carries no `vlon`, `vlat`, `es`, `ew`, `a11..a22`, `ec1`, `ec2`
+   — check the key list in `grids/fv3_native_gridstruct.py`. That is not an
+   oversight: the dycore works entirely in grid-relative wind components and
+   never forms a lat-lon A-grid wind, so physics coupling is the FIRST consumer
+   of any of it. These are built from the corner points by cross products and
+   normalisation (`fv_grid_utils.F90:663-684`) and from the cell centres by
+   `unit_vect_latlon` (`:2286-2309, 2362`), so they are not hard — but they are
+   new grid state, and on this campaign's rules new grid state gets its own
+   oracle extract before anything is built on top of it.
+
+There is also one thing that must be MEASURED rather than assumed: before the
+D-grid projection the reference fills a one-cell halo of the A-grid tendencies
+with a plain domain update (`fv_update_phys.F90:640-650`), and there is no
+`duogrid` branch anywhere in that file. What the duo build actually puts in
+those halo cells decides whether the port uses the duo scalar exchange there or
+something else, and it is exactly the kind of seam that has cost this campaign
+measurements before.
+
+**Proposed order, each step certifiable on its own:** grid vectors + their
+oracle extract; `update_dwinds_phys`; `fv_update_phys`'s dry path; the A-grid
+tendency halo, measured; then a `do_Held_Suarez = .true.` deck for an
+end-to-end one-step parity; then the driver wiring, which is where the physics
+refusal in `component_factory.py` finally narrows. The JAX twin follows the
+NumPy authority, as everywhere else in this port.
+
+---
+
+## Session 2026-08-21 — the per-sub-step instrument, and slice 2's first step
+
+### The NH gap: reading it at every acoustic sub-step
+
+The gap was already localised to the acoustic loop and to `w` alone. That loop
+runs eight sub-steps, and a single end-of-loop reading cannot say whether the
+error arrives at once or accumulates, so both sides now report every sub-step.
+
+* **Oracle**: `scripts/cluster/fv3_native/build_nh_wsubstep_oracle.sbatch` — a
+  second instrumented build that patches `dyn_core.F90` to dump `w`/`pt`/`delp`
+  at the end of every sub-step AND keeps the previous instrument's pre-remap
+  dump. Both capture points in ONE binary is what makes the cross-check free.
+* **Port**: `fv_dynamics_step(..., return_substeps=True)` — one deep copy of the
+  six-face bundle per sub-step, by RETURN, the same contract `return_pre_remap`
+  already states. `acoustic_loop_3d` gains `substeps_out`, the per-sub-step twin
+  of `press_out`.
+* **Probe**: `scripts/validate/fv3_native/nh_substep_w_parity.py`, seven
+  controls, no verdict printed.
+
+**BOTH REVIEWERS SAID THE SAME THING FIRST, AND THEY WERE RIGHT** (codex job
+9450542 BLOCKER, GLM job 9450546 M1/M4): an end-of-sub-step series CANNOT
+separate "one stage is wrong" from "a coefficient is wrong". A stage that runs
+every sub-step injects a similar signed error each time and produces the same
+ramp a wrong coefficient would; a coefficient error can excite a mode that is
+nearly full-size after one sub-step. The probe no longer suggests otherwise.
+What it reports instead is what the data supports: the worst cell's face and
+indices, the SIGNED error there, and the final worst cell's error traced
+backwards through every sub-step — because a maximum over cells is free to move
+between sub-steps and then describes no single error's history. **The
+stage-versus-coefficient question needs captures BETWEEN the stages of one
+sub-step**, which is now the named next cut rather than something this
+instrument was pretending to answer.
+
+**The sharpest single finding was GLM's M2**, and it closed a real hole: every
+control ran through the established `derive_face_map`/`apply_map` machinery,
+while the series is read through a hand-rolled window and dihedral chain that
+nothing exercised. A wrong dihedral on one face or a halo off-by-one produces
+gradient-scale garbage that all five original controls accept. Control 7 now
+requires the last sub-step to reproduce the pre-remap instrument's established
+`1.3003e-07` within a factor of two, which authenticates both capture points and
+the mapping at once.
+
+**One reviewer request was DECLINED, in writing.** Codex asked for a no-dump
+control binary, on the grounds that a call inside the hot loop changes what the
+optimizer may do. The deck runs ONE step, so the restart is a deterministic
+function of everything all eight sub-steps did, and control 3 now demands that
+restart be bitwise the certified one on every prognostic with no tolerance — a
+perturbation big enough to move a sub-step would have to cancel to the last bit
+by the end of the same step to hide from it. The build script says to build the
+control binary if this is ever pointed at a multi-step deck, or if control 3 is
+ever relaxed to a tolerance.
+
+Verified in the pinned source while checking control 4's premise, and worth
+keeping: nothing between the loop's end and `dyn_core`'s return writes `w`, but
+`pt` CAN be written there by the dissipative heating block (`:1769, :1774,
+:1796`) when `d_con > 1e-5`. The pinned deck sets `d_con = 0.0`, so the
+`pt` series is clean on THIS deck — the general statement is a `w` statement.
+
+### Slice 2, first step
+
+Per the disposition above, MPI stays refused and physics coupling is the work.
+The first step is done and the second is not:
+
+* the halo-exchange oracle now dumps `vlon`, `vlat`, `es` and `ew` from its own
+  runtime gridstruct — the four quantities `update_dwinds_phys` multiplies by,
+  none of which the port has ever carried;
+* `compute_fv3_native_wind_vectors` builds them, reusing the already-ported
+  `get_unit_vect2` (the edge tangent turns out to be exactly that expression);
+* `tests/grids/test_fv3_wind_vectors.py` pins their geometry — orthonormality,
+  tangency, orientation, and the window upstream leaves unwritten, which comes
+  back NaN rather than a plausible zero.
+
+**NOT DONE, and it is the next thing**: comparing those against the dumped
+oracle fields. Invariants are not a parity certificate. The comparison needs the
+face-map machinery in `compare_gs_metrics.py` extended to Cartesian 3-vector
+families — note that these components live in a frame independent of the panel,
+so the face map applies to the INDEXING only and carries no dihedral sign, while
+the `es`/`ew` pair does swap under a transposing map exactly as the `dx`/`dy`
+family does.
+
+Also fixed on the way past: the halo-exchange oracle job defaulted to a
+throwaway agent worktree, so it had been reading a tree nobody edits. It now
+defaults to the campaign worktree and prints the SHA it ran.
+
+---
+
+## 2026-08-22 — the NH gap is the HEIGHT UPDATE, not the halo fill
+
+Measured (job 9466634, five controls passed, and the previous run's own
+control caught a hand-assembled entry point before it could report).
+
+Layer height, port vs oracle, sub-step 1, full padded box:
+
+| | interior | edge halo | corner halo |
+|---|---|---|---|
+| BEFORE the update | 1.5e-11 | 1.0e-11 | 2.5e-10 |
+| AFTER the update  | **3.7e-05** | 1.0e-11 | 2.5e-10 |
+
+The height enters `update_dz_d` at the parity floor on every ring and
+leaves it wrong in the COMPUTE WINDOW, with the halo untouched (as it
+must be — this deck's damping coefficient takes the branch that writes
+`is:ie, js:je` only). **The duo halo fill of the height is exonerated;
+the operator is the seat.**
+
+WHERE: the interior maximum sits at compute cells 0-1 in from the panel
+corners on all six faces — (0,1), (1,0), (0,0), (46,0), (0,47), (47,47).
+Same two face classes as everything else in this hunt: 3.67e-05 on faces
+1/2/4/5, 1.90e-05 on 3/6.
+
+THE MAGNITUDES LINE UP, which is the part that makes this more than a
+localisation: 3.67e-05 m of height over one 240 s sub-step is
+1.53e-07 m/s, against the 1.30e-07 m/s of `w` the campaign has been
+chasing. Same order, same cells, same face classes.
+
+NEXT: inside `update_dz_d` (nh_utils.F90:194-311). Its corner-region
+behaviour is the remaining space — the transport quotient's corner cells
+and the `del6` term, which is where the port's own docstring already
+flags an unverified substitution (`fv3_native_dsw_tail_3d.py:312-336`
+hands it a Lagrange corner-region fill in place of the oracle's own
+corner-area construction, and predicted in writing that a disagreement
+would "localise to corner-adjacent stencils"). That prediction and this
+measurement are the same sentence.
+
+CAVEAT ON PROCESS: codex could not run for any of this work (expired
+credential, three attempts), so the instrument carries ONE review.
+
+---
+
+## 2026-08-22 — THE NH GAP IS FOUND: the port corrupts its own halo areas
+
+Open since 2026-08-19; closed to a factor of 447 by one substitution.
+
+**The defect.** `update_dz_d` is not handed the gridstruct's `area`. It is
+handed a cached copy built by `nh_exchanged_area6`
+(`fv3_native_dsw_tail_3d.py:312-336`), which takes the port's area, runs its
+own `ext_scalar` exchange over it, and fills the corner region itself. The
+gridstruct's area agrees with the reference at the parity floor EVERYWHERE
+(7.2e-02 on 3.5e+10, ~2e-12 relative). The copy that kernel receives is off
+by **4.1e+09 in the halo edge strips (12%) and 1.4e+09 in the corner wedges
+(4%)**, on all six faces, all 36 corner cells (`nh_area_compare.py`, job
+9466872). The builder is fine; the extra exchange is the defect.
+
+**Why nothing found it for three days.** Every metric arm scored
+`gs6[t]["area"]`, which is correct. The corrupted array is derived from it
+afterwards and lives on the ctx, so the transplant experiments could not
+reach it and their null results were true for the array they tested.
+
+**The substitution, and what it buys** (jobs 9466882, 9466902):
+
+| | baseline | oracle areas at the disagreeing cells |
+|---|---|---|
+| height error after its update, k=0 interior | 3.67e-05 / 1.90e-05 | **1.6e-11** (parity floor) |
+| worst one-step relative, all faces/fields | 6.6116e-04 | **1.4778e-06** |
+| `w` \|d\|max | 1.3003e-07 | ~2.9e-10 |
+
+Both readings were PRE-REGISTERED before the run; the height arm's own
+criterion for "confirms" was the parity floor on all six faces and both
+interfaces, and that is what came back.
+
+**Two premises died on the way, both from prose.** `nh_exchanged_area6`'s
+docstring says the gridstruct "leaves BIG_NUMBER sentinels in the
+corner-diagonal halo cells of `area`" — it does not; the arm's own control
+refused on a real value of 2.55e+10 there. And the earlier "corner cells
+were never transplanted" story rested on the same sentence. Prose is a
+pointer.
+
+**NEXT, and it is a real fix rather than a probe:** make
+`nh_exchanged_area6` produce what the reference produces, or establish that
+the kernel should be handed the gridstruct's `area` unmodified. The
+transplant proves the values are wrong; it does not say which of those two
+is the right repair. The residual after the substitution (1.48e-06, led by
+`w`) is a NEW and smaller term — three orders above the hydrostatic arm's
+1.19e-09 — and has not been characterised.
+
+
+## 2026-08-23 — the maps, and what the residual's LOCATION says
+
+The one-step state is now drawn (`scripts/plot/fv3_duo_face_maps.py`, fed by
+`--save-fields` on the parity script, jobs 9470096 / 9470105). Six faces per
+field, the port above and |port - oracle| below, on the arrays the gate scored.
+
+**No cube-panel imprint in either arm.** The port's fields are smooth across
+every seam at the plotting scale; what structure sits on a panel edge (the `w`
+band along the bottom rows of faces 3/4/5) is in the ORACLE too, to 4e-11.
+
+**The boundary concentration is the SAME in both arms, and that is the finding.**
+Mean |port - oracle| on the 3-cell boundary strip over the interior:
+
+| arm | worst rel | delp f1 | u f2 | w f6 |
+|---|---|---|---|---|
+| hydrostatic | 1.1866e-09 | 75.7x | 66.3x | — |
+| non-hydrostatic | 1.4778e-06 | 90.6x | 66.5x | 81.9x |
+
+The hydrostatic arm, three orders lower and long treated as the floor, is
+boundary-concentrated to the same degree. So "the NH residual is
+boundary-localised" is NOT an NH-specific signature and never was — every
+residual in this port lives on the panel strips. The NH question is the
+MAGNITUDE at those cells, not their location, and any candidate whose story is
+"it happens at the boundary" is not discriminating.
+
+**THE EDGE METRIC THAT DID NOT SURVIVE REVIEW.** The first version compared the
+port's boundary-strip roughness with the oracle's and gated the ratio at 1.5x.
+Codex and GLM-5.2 independently killed it: `port = C * oracle` scores exactly
+1.0000x for any C, a second difference annihilates a smooth edge bias, and a
+handful of bad corner cells averaged over a ~500-cell strip moves the ratio by
+at most a third — i.e. it would have passed the very defect (12% wrong corner
+areas) that had just been fixed. It is report-only now, with the proportional
+blindness pinned as a test. What replaced it needs no constant: the same
+edge/interior ratio on the RESIDUAL, which is the table above.
+
+Neither number is a cross-seam test, and the docstring no longer implies one:
+the saved planes are the compute window, so no halo and no neighbouring panel
+value is in them. GLM's proposal for the real seam test — audit each face's
+halo cells bitwise against the neighbour's owned cells through the exchange's
+own permutation, on both port and oracle — is the next instrument if the seam
+question is asked directly.
+
+Also from that review round: the area fix's premise (the gridstruct carries a
+real area everywhere) is true of the contexts this path is built with and FALSE
+of a raw plain builder result, which does write `-BIG_NUMBER` into the
+corner-diagonal cells. `require_real_area` now checks it in both lanes. The JAX
+twin's docstring still described the exchange it no longer performs, and the
+bitwise assertion the fix advertised existed only on the NumPy side.
+
+Units after all of it: 91 passed, 1 skipped (job 9470106).

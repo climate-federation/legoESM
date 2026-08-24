@@ -63,10 +63,20 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # fails there (SSL hostname mismatch on the UCAR svn mirror).
 : "${CLM_SURFDATA:=${DATA%/amip}/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
 
+# --- harmonized surfdata (CANOPY parameters) ----------------------------------
+# Two different datasets with confusingly similar names. The CLM surfdata above
+# carries soil texture and plant-type cover; this one carries canopy structure
+# (canopy height, roughness ratio, Vcmax25, band albedos). The default land
+# surface scheme is the two-leaf canopy, which REFUSES to run without it rather
+# than fall back to generic constants, so a canopy run needs both staged. Twin
+# of the same block in config/amip/amip_production.sh.
+: "${AMIP_SURFDATA:=${REPO}/data/legoesm_surfdata_c260716.nc}"
+
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
   --ic-path "${ERA5_IC}"
   --topography "${ETOPO}"
+  --surfdata "${AMIP_SURFDATA}"
   --clm-surfdata-path "${CLM_SURFDATA}"
   --forcing-path "${SST_FILE}" --sst-var "${SST_VAR}" --sst-offset "${SST_OFFSET}"
   --sic-path "${SIC_FILE}"     --sic-var "${SIC_VAR}"
@@ -78,9 +88,11 @@ AMIP_PATH_FLAGS=(
 )
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.
-for _f in "${ETOPO}" "${CLM_SURFDATA}"; do
+for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}"; do
   [ -e "${_f}" ] || echo "[ginsburg] NOTE: ${_f} not found — stage it (ETOPO: " \
-    "scripts/data/prep_etopo_topography.py; surfdata: data/clm/), or run a " \
-    "flat-topo smoke (--topography flat)." >&2
+    "scripts/data/prep_etopo_topography.py; CLM surfdata: data/clm/; harmonized " \
+    "surfdata: scripts/data/build_legoesm_surfdata.py), or run a flat-topo " \
+    "smoke (--topography flat).  A missing harmonized surfdata is FATAL for " \
+    "the default two-leaf canopy, not a warning." >&2
 done
 export PY AMIP_PATH_FLAGS

@@ -133,8 +133,18 @@ era5_cadence_hours: 6
 # --- training ---
 n_epochs: 12
 optimizer: "adamw"
-lr: 3.0e-4
-warmup_steps: 500
+# Peak rate sized so a parameter can actually cross its range. Adam moves a
+# leaf by about the learning rate per step, so the total travel available is
+# lr x steps; a sigmoid-bounded parameter needs roughly 5 in the raw
+# pre-constraint space to go from one bound to the other. The previous 3.0e-4
+# over 2880 steps gave 0.9 -- about a fifth of one parameter's span, so the run
+# was rate-limited by its own schedule rather than by the physics. Measured on
+# that run: epoch 2, the first at full rate and the peak of the cosine, bought
+# 0.65%, and every later epoch would have been slower still.
+lr: 1.5e-3
+# 500 steps is more than two full epochs at 240 samples, so the old run spent
+# its first two epochs still ramping and never saw the peak until epoch 2.
+warmup_steps: 200
 weight_decay: 1.0e-5
 grad_clip_norm: 1.0
 grad_accum: 1

@@ -1381,9 +1381,13 @@ class ModelDriver:
                 "A multilayer run was asked to start from a spun-up land state "
                 "and cannot.")
         from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
-        from legoesm.land.config import calibrated_multilayer_setup
+        from legoesm.land.config import biophysics_lmip_two_leaf_setup
         if getattr(cfg, "land_calibrated_physics", False):
-            want_grid = calibrated_multilayer_setup()["soil_grid"]
+            # The soil column a spun-up land state must match is the one the
+            # calibration defines, so this reads the SAME setup the tile is
+            # built from — a second copy of the geometry here would let a
+            # restart pass the check and then run on a different column.
+            want_grid = biophysics_lmip_two_leaf_setup()["soil_grid"]
         else:
             want_grid = SoilGridConfig(
                 n_layers=cfg.multilayer_n_layers,
@@ -2867,20 +2871,184 @@ class ModelDriver:
                 gs_max=self.config.land_gs_max,
             ),
         )
-        # Deploy the tile in EXACTLY the model its baked per-PFT tables were
-        # calibrated under.  ``calibrated_multilayer_setup`` is the ONE definition
-        # the offline calibrator also builds from, so the fitted physics and the
-        # coupled physics cannot drift; ``validate_strict`` has already checked
-        # that the overlapping config keys agree, so this replaces nothing the
-        # user set differently.  It supplies the settings with no config key of
-        # their own: the calibration soil-growth factor and the differland carbon
-        # scheme that selects the FARQUHAR branch of ``compute_effective_beta``
-        # (without it the same dispatch runs Jarvis, a different stomatal model).
+        # Deploy the tile in EXACTLY the model its parameters were calibrated
+        # under: the biophysics LMIP two-leaf canopy
+        # (``templates/land/biophysics/lmip_biophys_2deg.yaml``), which is the
+        # offline configuration scored against observed land fluxes.
+        #
+        # AMIP no longer has a route to the legacy SimpleSEB-fitted bake. That
+        # pairing — SimpleSEB tables under a coupled run — is what produced the
+        # land surface-flux bias, and keeping a switch for it only preserved the
+        # chance of selecting it again. ``calibrated_multilayer_setup`` remains
+        # in the land package for reproducing old OFFLINE runs; nothing coupled
+        # reaches it.
         if getattr(self.config, "land_calibrated_physics", False):
-            from legoesm.land.config import apply_calibrated_multilayer
-            base = apply_calibrated_multilayer(base)
+            from legoesm.land.config import apply_biophysics_lmip_two_leaf
+            base = apply_biophysics_lmip_two_leaf(base)
 
         params, cfg = clm_multilayer_setup(surface_map, base_config=base)
+
+        # RE-APPLY THE CALIBRATION'S ALBEDO SCALARS, AFTER the bake.
+        # ``clm_multilayer_setup`` rebuilds ``land_albedo`` and overwrites all
+        # five scalar fields with its own values, so applying them before it
+        # loses them without a word: a run asking for a fresh-snow albedo of
+        # 0.8077 was measured getting 0.8362. The bake's per-column
+        # ``snow_cover_scale`` map is built here and must survive, so replace
+        # the SCALARS on the object the bake just produced.
+        if getattr(self.config, "land_calibrated_physics", False):
+            from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    **biophysics_lmip_albedo_scalars()))
+
+        # A CANOPY SCHEME GETS CANOPY PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity for a bulk surface.  A canopy scheme
+        # reads different quantities (canopy height, clumping, band albedos,
+        # roughness RATIO, per-PFT Vcmax25) and, given soil parameters, silently
+        # falls back to generic constants, leaving the tuned values inert.
+        #
+        # Those canopy parameters already exist and are already per-PFT:
+        # ``surface_data_to_land_params`` dispatches on the surface scheme and
+        # builds ``CanopyLandParams`` from the harmonized surfdata — the same
+        # route the offline LMIP simulations use, which is why THEY reproduce
+        # observed latent heat and photosynthesis.  The coupled driver simply
+        # never called it; it read the CLM provider, whose only variants are
+        # "slab" and "multilayer".  This is that missing call, not new physics.
+        #
+        # Soil hydraulics / thermal / albedo stay with the CLM map: only the
+        # SURFACE parameters come from the canopy builder.
+        from legoesm.land.canopy import CanopyConfig
+        from legoesm.land.canopy.config import CLMMLCanopyConfig
+        # Both canopy schemes take their per-PFT SURFACE params from
+        # init_land_surface_data: a two-leaf CanopyConfig -> CanopyLandParams
+        # (hc/rz0m); the CLM-ML canopy -> LandSurfaceParams with PRESCRIBED
+        # LAI/SAI/htop (the accurate per-plant structure its interface requires,
+        # vs the LAI-only clm_multilayer_setup fallback that left htop at the 5 m
+        # scalar default).  Explicit positive dispatch on the two canopy types
+        # (not `not SimpleSEBConfig`) so an unknown scheme cannot slip in.  #1624
+        # read params.hc here unconditionally, which crashed CLM-ML (no hc); the
+        # reads below dispatch on the actual struct.
+        if isinstance(cfg.surface_scheme, (CanopyConfig, CLMMLCanopyConfig)):
+            _sd_path = getattr(self.config, "surfdata_path", "")
+            if not _sd_path:
+                raise ValueError(
+                    f"land_surface_scheme selects {type(cfg.surface_scheme).__name__}, "
+                    "which needs per-PFT CANOPY parameters (canopy height, band "
+                    "albedos, roughness ratio, Vcmax25). Those are built from the "
+                    "harmonized surfdata, so --surfdata is required. Without it the "
+                    "canopy would run on generic constants and every tuned per-PFT "
+                    "value would be inert — refusing rather than doing that quietly.")
+            from legoesm.land.boundary_data import init_land_surface_data
+            _clm_params = params
+            # THE CALIBRATION'S OWN TABLES, or none. Without these the builder
+            # leaves the root fields unset and the code below fills them from
+            # the CLM map — i.e. the LEGACY tables — so the calibration's root
+            # depth, wilting point and field capacity never reached the model.
+            # Same for the glacier albedo, which otherwise takes the 0.70/0.50
+            # default instead of the calibrated pair.
+            _cal_on = getattr(self.config, "land_calibrated_physics", False)
+            _pft_root, _glacier_alb = None, None
+            if _cal_on:
+                from legoesm.land.clm_surface_map import (
+                    biophysics_lmip_pft_root_params,
+                    biophysics_lmip_glacier_albedo)
+                _pft_root = biophysics_lmip_pft_root_params()
+                _glacier_alb = biophysics_lmip_glacier_albedo()
+            _, params, _ = init_land_surface_data(
+                _sd_path, self.grid, cfg, float(self.config.start_day),
+                year=(None if getattr(self.config, "start_year", None) is None
+                      else float(self.config.start_year)),
+                pft_root_params=_pft_root, glacier_alb=_glacier_alb)
+            # KEEP THE SOIL-WATER THRESHOLDS THE COMMENT ABOVE PROMISES.
+            # Replacing the parameter object wholesale also dropped the CLM
+            # per-column ROOT DEPTH, WILTING POINT and FIELD CAPACITY, which the
+            # canopy parameter object leaves unset — so the land step silently
+            # fell back to one scalar value per field for the whole globe, and
+            # every column's root-zone moisture stress changed. Those are soil
+            # properties, not surface ones; carry them across (found by both
+            # reviewers).
+            _root_fields = {
+                f: getattr(_clm_params, f)
+                for f in ("root_depth", "theta_wp", "theta_fc")
+                if getattr(params, f, None) is None
+                and getattr(_clm_params, f, None) is not None}
+            if _root_fields:
+                params = params._replace(**_root_fields)
+                logger.info(
+                    "  Land tile: kept the CLM per-column %s with the canopy "
+                    "parameters (they are soil properties, not surface ones).",
+                    ", ".join(sorted(_root_fields)))
+            # TWO PROVIDERS, ONE COLUMN INDEX.  The canopy parameters come from
+            # one dataset and the soil beneath them from another, each regridded
+            # independently.  A differing column COUNT or ORDER would attach every
+            # canopy property to the wrong column and the run would still look
+            # entirely healthy — so check the count structurally, at t=0, rather
+            # than hope (GLM).
+            # Struct differs by scheme: two-leaf -> CanopyLandParams (hc, rz0m);
+            # CLM-ML -> LandSurfaceParams (htop, LAI, NO hc).  Read the column
+            # count off whichever per-column height field the provider set, and
+            # log the fields that exist for that struct.
+            _hc = getattr(params, "hc", None)
+            _height_field = _hc if _hc is not None else params.htop
+            _n_canopy = int(jnp.asarray(_height_field).shape[0])
+            _n_soil = int(jnp.asarray(lat_rad).size)
+            if _n_canopy != _n_soil:
+                raise ValueError(
+                    f"canopy parameters have {_n_canopy} columns but the soil map "
+                    f"has {_n_soil}: the two surface datasets did not regrid onto "
+                    "the same columns, so every canopy property would sit on the "
+                    "wrong one. Check --surfdata and --clm-surfdata-path cover "
+                    "this grid.")
+            if _hc is not None:
+                logger.info(
+                    "  Land tile: %s on per-PFT CANOPY parameters from %s "
+                    "(canopy height %.2f-%.2f m, roughness ratio %.3f-%.3f). NOTE "
+                    "emissivity is a single constant in this builder and the canopy "
+                    "computes its own radiation from soil colour + leaf optics, so "
+                    "the tuned per-PFT emissivity and vegetation albedo do NOT apply "
+                    "to it — those are re-fit items, not wiring.",
+                    type(cfg.surface_scheme).__name__, _sd_path,
+                    float(jnp.min(_hc)), float(jnp.max(_hc)),
+                    float(jnp.min(params.rz0m)), float(jnp.max(params.rz0m)))
+            else:
+                logger.info(
+                    "  Land tile: %s on per-PFT CLM-ML surface parameters from %s "
+                    "(prescribed canopy-top height %.2f-%.2f m, LAI %.2f-%.2f) — "
+                    "the accurate per-plant structure the multilayer canopy needs.",
+                    type(cfg.surface_scheme).__name__, _sd_path,
+                    float(jnp.min(params.htop)), float(jnp.max(params.htop)),
+                    float(jnp.min(params.LAI)), float(jnp.max(params.LAI)))
+
+        # A CANOPY SCHEME MUST NOT SILENTLY RUN ON SOIL PARAMETERS.
+        #
+        # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
+        # roughness, albedo and emissivity.  The two-leaf and CLM-ML canopies
+        # read CANOPY properties (canopy height, band albedos, roughness ratio)
+        # and, finding none, fall back to generic constants: the tuned per-PFT
+        # values are then INERT, which a gradient test caught as exactly zero
+        # sensitivity to the trained roughness.  Inert trained parameters are a
+        # defect here, not a nuisance, and a comment in a document is not a
+        # control (GLM).  Say it at startup, every run, so nobody reports a
+        # canopy run as validating tuned land parameters it never used.
+        from legoesm.land.canopy import CanopyConfig
+        # Two-leaf only: it reads CanopyLandParams (hc/ALB/rz0m).  CLM-ML runs on
+        # a LandSurfaceParams by design (its canopy structure is LAI/SAI/htop),
+        # so this "running on SOIL parameters" check does not apply to it.
+        if isinstance(cfg.surface_scheme, CanopyConfig):
+            _canopy_fields = [f for f in ("hc", "ALB_VIS", "ALB_NIR", "rz0m")
+                              if getattr(params, f, None) is not None]
+            if not _canopy_fields:
+                logger.warning(
+                    "  Land tile: %s is running on SOIL parameters — it reads "
+                    "canopy height, band albedos and roughness ratio, none of "
+                    "which are present, so it is using GENERIC canopy constants "
+                    "and the tuned per-PFT roughness / albedo / emissivity are "
+                    "INERT. Do not report this run as validating tuned land "
+                    "parameters. Use --land-surface-scheme simple_seb to run the "
+                    "scheme those parameters belong to.",
+                    type(cfg.surface_scheme).__name__)
 
         self.physics.land_ml_cfg = cfg
         self.physics.land_ml_params = params
@@ -2891,7 +3059,13 @@ class ModelDriver:
         # baked Vc_max25/g1/LCMA act on the same LAI they were fitted with and no
         # multi-decade carbon spin-up is needed.  Left None otherwise, so a run
         # without the flag is byte-identical.
-        if cfg.stomata.enabled and cfg.carbon.scheme == "differland":
+        # A canopy scheme carries its OWN photosynthesis (Farquhar GPP), so it
+        # also needs the differland carbon state seeded even though the bulk
+        # ``cfg.stomata`` throttle is off — otherwise the calibrated two-leaf
+        # run, fitted WITH differland, would deploy under a "none" carbon cycle.
+        from legoesm.land.surface_scheme import SimpleSEBConfig as _SimpleSEBConfig
+        _is_canopy = not isinstance(cfg.surface_scheme, _SimpleSEBConfig)
+        if (cfg.stomata.enabled or _is_canopy) and cfg.carbon.scheme == "differland":
             from legoesm.land.carbon.carbon_cycle import init_carbon_state
             self.physics.land_ml_carbon = init_carbon_state(
                 (int(lat_rad.size),), cfg.carbon)
@@ -2983,8 +3157,17 @@ class ModelDriver:
             p_s = _flat_cols(self.state.p_s).astype(storage_dtype)
             rh_low = q_v_low / jnp.maximum(
                 saturation_mixing_ratio(T_init, p_s), 1e-12)
-            theta_wp = jnp.asarray(getattr(params, "theta_wp", cfg.theta_wp))
-            theta_fc = jnp.asarray(getattr(params, "theta_fc", cfg.theta_fc))
+            # ``getattr(x, k, default)`` returns the ATTRIBUTE when it exists and
+            # is None, which is not what is wanted here: the canopy parameter
+            # struct declares these fields and leaves them unset unless per-PFT
+            # root parameters were supplied, so the default has to cover None as
+            # well as absent.
+            def _or_cfg(name, fallback):
+                v = getattr(params, name, None)
+                return jnp.asarray(fallback if v is None else v)
+
+            theta_wp = _or_cfg("theta_wp", cfg.theta_wp)
+            theta_fc = _or_cfg("theta_fc", cfg.theta_fc)
             theta_init = aridity_theta_init(
                 rh_low, theta_wp, theta_fc).reshape(-1, 1).astype(storage_dtype)
         else:
@@ -3017,16 +3200,37 @@ class ModelDriver:
             _ic_state, _ic_meta = load_land_restart(
                 _land_ic_path, expected_land_mode="multilayer",
                 expected_ncol=ncol, expected_n_layers=cfg.soil_grid.n_layers,
-                expected_soil_grid=cfg.soil_grid,
+                # Same quantity this driver's PRE-LOAD check already carries
+                # (``load_land_restart_soil_dz`` returns thicknesses), so the
+                # column travels one form through both checks.
+                expected_soil_dz=make_soil_grid(cfg.soil_grid).dz,
                 # The calibrated column is not the historical default, so an
-                # older restart carrying no interfaces is almost certainly on
-                # the wrong one: refuse it rather than warn.
-                require_soil_grid=bool(getattr(
+                # older restart carrying no stamp is almost certainly on the
+                # wrong one: refuse it rather than warn.
+                require_soil_dz=bool(getattr(
                     self.config, "land_calibrated_physics", False)))
             # Graft the restart's prognostic columns onto the canonical template
             # (fixes the pytree structure), then cast the array leaves to the
             # run's storage precision (the restart deserialises float64).
             _merged = merge_land_restart_into_template(_ic_state, _template)
+            # A REGRIDDED state's matric potential is not this run's.  The
+            # Richards step evolves potential directly, but potential and water
+            # content are tied through each column's own soil-texture retention
+            # curve — and a regridded column carries the SOURCE column's
+            # texture in its potential.  Water content is the conserved
+            # quantity, so keep theta and re-derive psi on THIS run's
+            # hydraulics, exactly as the cold-start does.  Scoped to states
+            # whose metadata says they were regridded: a byte-exact same-grid
+            # restart is left untouched.
+            if _ic_meta.get("regridded_from"):
+                from legoesm.land.soil_hydraulics import psi_from_theta
+                _merged = _merged._replace(
+                    psi_soil=psi_from_theta(_merged.theta_soil,
+                                            cfg.hydraulics))
+                logger.info(
+                    "  Land tile: regridded IC (%s) — psi_soil re-derived "
+                    "from theta_soil on this run's soil texture.",
+                    _ic_meta.get("regridded_from"))
             self._land_ml_state = jax.tree_util.tree_map(
                 lambda a: (a.astype(storage_dtype)
                            if hasattr(a, "dtype")
@@ -3059,53 +3263,24 @@ class ModelDriver:
         # cold-starts to T_lowest (converges in ~10 days).
         from legoesm.land.canopy.config import CLMMLCanopyConfig
         if isinstance(cfg.surface_scheme, CLMMLCanopyConfig):
-            from legoesm.core.coupling_fields import AtmToSurface
-            from legoesm.land.multilayer_land import step_multilayer_land
-            from legoesm.land.canopy.clm_ml_interface import extract_clm_ml_grid_info
-            _o = jnp.ones(ncol, dtype=storage_dtype)
-            _warm_forcing = AtmToSurface(
-                sw_down=400.0 * _o, lw_down=350.0 * _o,
-                precip_total=0.0 * _o, precip_snow=0.0 * _o,
-                T_lowest=T_init, q_lowest=0.008 * _o,
-                u_lowest=3.0 * _o, v_lowest=0.0 * _o,
-                p_lowest=0.99e5 * _o, p_surface=1.0e5 * _o, rho_lowest=1.2 * _o,
-                cos_zenith=0.5 * _o, co2_ppmv=400.0 * _o,
-                has_radiation=_o, has_precipitation=_o)
-            # Per-column PFT: OPT-IN (use_surfdata_pft) => each column's DOMINANT PFT
-            # (argmax of the surface map's pft_fractions), a concrete (ncol,) int
-            # array -> mixed-PFT / heterogeneous columns that the group-by-structure
-            # scan compiles at O(#distinct structures).  Default (flag off) => None ->
-            # the single pft_clm for all columns (byte-identical to before).  Stored on
-            # the pipeline so the jitted coupled step re-installs the SAME per-column
-            # topology; it also drives the warm-start below (where patch.itype is set).
-            _clm_ml_pft_per_col = None
-            if getattr(cfg.surface_scheme, "use_surfdata_pft", False):
-                _dom = np.asarray(
-                    surface_map["pft_fractions"]).argmax(axis=1).astype(np.int32)
-                # Surface CLM5 PFT axis (CLM5_PFT_NAMES) aligns with the MLpftcon
-                # canopy table for slots 0..15 (bare, trees, grasses incl c4_grass at
-                # 14, crop_c3==c3_crop at 15).  ONLY surface slot 16 (crop_c4) differs:
-                # MLpftcon 16 is c3_irrigated, NOT a C4 crop.  Cross-walk crop_c4 ->
-                # c3_crop (15) — the nearest CROP structure — rather than install the
-                # wrong (irrigated) canopy; the C4->C3 photosynthesis is the model's
-                # already-documented C4-as-C3 approximation (surface_params CLM5 table
-                # note), so no new physics is lost.  (codex: slot-16 axis mismatch.)
-                _clm_ml_pft_per_col = np.where(_dom == 16, 15, _dom).astype(np.int32)
-            self.physics.clm_ml_pft_per_col = _clm_ml_pft_per_col
-            # Eager cold canopy step (grid_info=None, ncol>1 eager path): builds the
-            # per-column vertical structure and a warm canopy_state.
-            _warm_state, _, _ = step_multilayer_land(
-                self._land_ml_state, _warm_forcing, cfg,
-                self.physics.land_ml_u_min, float(self.config.dycore.dt),
+            # The eager cold-canopy warm-start (builds the per-column grid_info +
+            # a warm canopy_state, host-side) is the ONE shared helper the offline
+            # run_lmip_biophys driver also calls, so they cannot drift.  Per-column
+            # PFT topology is opt-in via use_surfdata_pft (the surface map's
+            # dominant PFT); None keeps the single pft_clm for all columns.
+            from legoesm.land.canopy.clm_ml_interface import warm_start_clm_ml
+            _pft_fracs = (surface_map["pft_fractions"]
+                          if getattr(cfg.surface_scheme, "use_surfdata_pft", False)
+                          else None)
+            self._land_ml_state, _gi, _clm_ml_pft_per_col = warm_start_clm_ml(
+                self._land_ml_state, cfg, params,
                 lat=self.physics.land_ml_lat,
-                carbon_state=self.physics.land_ml_carbon, doy=0.0,
-                land_params=params, clm_ml_grid_info=None,
-                clm_ml_pft_per_col=_clm_ml_pft_per_col)
-            self._land_ml_state = self._land_ml_state._replace(
-                canopy_state=_warm_state.canopy_state)
-            self.physics.clm_ml_grid_info = extract_clm_ml_grid_info(
-                _warm_state.canopy_state)
-            _gi = self.physics.clm_ml_grid_info
+                u_min=self.physics.land_ml_u_min,
+                dt=float(self.config.dycore.dt), ncol=ncol, T_init=T_init,
+                carbon_state=self.physics.land_ml_carbon,
+                pft_fractions=_pft_fracs, dtype=storage_dtype)
+            self.physics.clm_ml_pft_per_col = _clm_ml_pft_per_col
+            self.physics.clm_ml_grid_info = _gi
             logger.info(
                 "  Land tile: CLM-ML canopy warm-started (%d columns; per-column "
                 "grid_info threaded into the jitted step)",
@@ -3131,7 +3306,21 @@ class ModelDriver:
         cover, years, rebuild = _trans
         cover_year = float(self._start_year) + day / 365.0
         fracs = interp_annual(cover, years, jnp.asarray(cover_year))
-        return rebuild(fracs)()
+        _rebuilt = rebuild(fracs)()
+        # The transient rebuild re-weights vegetation params by cover year via the
+        # CLM (LAI-only) provider; it does NOT carry the CLM-ML canopy's prescribed
+        # SAI / htop, which are STRUCTURAL (frozen, not cover-varying).  Carry them
+        # from the setup-time params so a transient CLM-ML run does not silently
+        # revert to the htop=5 / SAI=0.5 scalar defaults after step 0 (codex).
+        _init = getattr(self.physics, "land_ml_params", None)
+        if _init is not None:
+            _carry = {f: getattr(_init, f)
+                      for f in ("SAI", "htop")
+                      if getattr(_rebuilt, f, None) is None
+                      and getattr(_init, f, None) is not None}
+            if _carry:
+                _rebuilt = _rebuilt._replace(**_carry)
+        return _rebuilt
 
     def _surfdata_land_albedo(self, surfdata_path: str, lat_albedo):
         """Static land albedo field from harmonized surface data.
@@ -3156,8 +3345,15 @@ class ModelDriver:
             init_land_surface_data, fill_land_param_gaps,
         )
 
-        # LandConfig defaults to SimpleSEBConfig -> LandSurfaceParams with albedo_veg.
-        land_cfg = LandConfig()
+        # PINNED to the bulk scheme, not the library default.  This adapter wants
+        # ONE number per column — the blended soil/vegetation albedo the radiation
+        # uses — and reads it as ``albedo_veg``.  The default is now the two-leaf
+        # canopy, whose parameter struct has no such field (it carries BAND
+        # albedos and does its own radiative transfer), so inheriting the default
+        # crashed here.  A canopy run gets its albedo from the canopy itself; this
+        # path is the static-map fallback and is bulk by construction.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        land_cfg = LandConfig(surface_scheme=SimpleSEBConfig())
         # Sample transient cover at the run start year; a config without start_year
         # (or a static single-year surfdata) falls back to the legacy year-mean.
         _start_year = getattr(self.config, "start_year", None)
@@ -5879,18 +6075,14 @@ class ModelDriver:
         Returns (step, day).  Detects distributed checkpoint directories
         and loads per-rank data when running under MPI.
 
-        fv3_duo refuses HERE, before any decode: run_amip calls
-        ``load_checkpoint`` before ``_run_fv3_duo``'s own no-restart
-        check, so without this early refusal a restart-configured duo
-        run would first try to decode a foreign-schema (cube) checkpoint
-        and die on an unrelated shape error (codex 2026-08-18 MAJOR).
+        fv3_duo dispatches HERE, before any generic decode: the duo
+        bundle has its own schema (``fv3duo_ckpt_v1``), and the loader
+        is schema-gated so a foreign (cube/lat-lon/MPAS) checkpoint is
+        refused loudly instead of dying on an unrelated shape error
+        deeper in a decode (codex 2026-08-18 MAJOR, kept as a gate).
         """
         if self.config.dycore.discretization == "fv3_duo":
-            raise NotImplementedError(
-                "fv3_duo (slice 1) has no restart: the duo bundle is not "
-                "in the checkpoint schema, so there is no checkpoint this "
-                "lane could decode. Refusing BEFORE any decode is "
-                "attempted. Run from step 0 (drop --restart-from).")
+            return self._load_fv3_duo_checkpoint(Path(path))
         path = Path(path)
 
         # MPAS path: mirror of the dedicated MPAS branch in
@@ -7510,10 +7702,13 @@ class ModelDriver:
     # bound is a diverged integration, not a strong storm.  Numerics guard,
     # not a tunable (same role as the acoustic lane's own envelope).
     _FV3_DUO_BLOWUP_UMAX_MS = 400.0
+    _FV3_DUO_CKPT_SCHEMA = "fv3duo_ckpt_v1"
+    _FV3_DUO_PRESS_KEYS = ("ps", "pe", "peln", "pk", "pkz")
 
     def _run_fv3_duo(self, start_step: int = 0,
                      start_day: float | None = None) -> str:
-        """Dedicated lean lane for the certified FV3 duo-cube step (slice 1).
+        """Dedicated lean lane for the certified FV3 duo-cube step
+        (slice 1 dynamics + slice 2 restart).
 
         Dry adiabatic DCMIP16 baroclinic wave ONLY: the lane builds its
         own IC (the placeholder ``self.state`` from ``_init_state`` is a
@@ -7526,17 +7721,75 @@ class ModelDriver:
         with the face-stacked duo fields; NOT the cube/lat-lon
         checkpoint schema, which the duo layout does not fit).
 
-        Slice-1 refusals (each loud, none silent): no restart, no MPI /
+        Slice-2 restart contract (READ THIS before writing a chain
+        launcher — it deliberately CONTRASTS with ``_run_mpas``):
+        ``cfg.days`` is TOTAL days since the epoch (the cube/lat-lon
+        convention), NOT days-this-job.  A restarted job therefore
+        passes the SAME ``--days`` as the straight run and this loop
+        advances ``n_steps_total - loaded_step`` steps; ``_run_mpas``
+        instead treats ``--days`` as the number of days *this job*
+        advances and its chain launchers pass remaining days — do not
+        copy that convention here.  Restart flows ONLY through
+        WHY THE BUNDLE IS SUFFICIENT (stated, not assumed -- GLM
+        2026-08-19 flagged that "restart is bitwise" proves only that the
+        DYNAMICAL STATE round-trips, and is blind to whatever the driver
+        loop carries): this lane carries NO loop state. There are no
+        diagnostic accumulators (snapshots are written straight from the
+        bundle, no time-means), the blowup guard is stateless (it
+        re-evaluates each snapshot from scratch), the CFL clamp is a pure
+        function of the config, and the step loop runs over GLOBAL step
+        numbers (``range(loaded_step + 1, n_steps_total + 1)``), so the
+        diagnostic and checkpoint cadences are pure functions of the
+        restored step and their phase is restart-invariant by
+        construction. Any FUTURE loop state -- an accumulator, a
+        hysteretic clamp, a physics carry -- breaks that invariant and
+        must join the bundle, not the loop.
+
+        ``load_checkpoint`` on an ``fv3duo_ckpt_v1`` file, which stages
+        the FULL persisted bundle (state/press/q/omga/nh, fp64) —
+        nothing is rebuilt from delp, so the resumed trajectory is
+        BITWISE the straight one (same jitted program, exact fp64 npz
+        round-trip).  Checkpoints are written at the shared
+        ``output.checkpoint_days`` cadence (absolute-step phase) plus
+        the final step, as ``fv3duo_ckpt_step_*.npz`` (atomic:
+        tmp + os.replace).
+
+        Slice-1 refusals that REMAIN (each loud, none silent): no MPI /
         SPMD, no ensemble.  Physics/forcing are already refused at model
-        construction (component factory).  ``cfg.days`` is TOTAL days
-        (the cube/lat-lon convention) — with restart refused the two
-        conventions coincide.
+        construction (component factory).  A restarted run overwrites
+        the status marker (RUNNING-first, as always).
         """
         cfg = self.config
-        if start_step != 0 or self._loaded_checkpoint_step_day is not None:
-            raise NotImplementedError(
-                "fv3_duo (slice 1) has no restart: the duo bundle is not "
-                "in the checkpoint schema. Run from step 0.")
+        loaded = self._loaded_checkpoint_step_day
+        restart_bundle = getattr(self, "_fv3_duo_restart_bundle", None)
+        if (start_step != 0 or loaded is not None) \
+                and restart_bundle is None:
+            raise ValueError(
+                "fv3_duo restart flows ONLY through load_checkpoint on an "
+                "fv3duo_ckpt_v1 checkpoint (which stages the bundle to "
+                "resume from); a bare start_step has no bundle to start "
+                "from. Run from step 0, or pass --restart-from an "
+                "fv3duo_ckpt_step_*.npz.")
+        loaded_step = 0
+        if restart_bundle is not None:
+            if loaded is not None and start_day is not None \
+                    and start_day != loaded[1]:
+                # codex MAJOR: only the STEP was bound, so
+                # run(start_step=step, start_day=<anything>) was accepted
+                # and wrote snapshots stamped with a shifted day. The dry
+                # dynamics never reads day, so the bitwise state test
+                # stayed green while the provenance drifted.
+                raise ValueError(
+                    f"fv3_duo restart: start_day={start_day} does not match "
+                    f"the loaded checkpoint day {loaded[1]}; the pair is "
+                    f"the checkpoint's, not the caller's.")
+            if loaded is None or start_step != loaded[0]:
+                raise ValueError(
+                    f"fv3_duo restart: start_step={start_step} does not "
+                    f"match the loaded checkpoint step "
+                    f"{None if loaded is None else loaded[0]}; pass "
+                    f"load_checkpoint's returned step through unchanged.")
+            loaded_step = start_step
         if cfg.distributed or (self._mpi_world_size or 1) > 1:
             raise NotImplementedError(
                 "fv3_duo (slice 1) is single-process only: the duo halo "
@@ -7556,44 +7809,69 @@ class ModelDriver:
 
         DT = cfg.dycore.dt
         n_steps_total = int(cfg.days * 86400.0 / DT)
-        if n_steps_total < 1:
+        n_this_job = n_steps_total - loaded_step
+        if n_this_job < 1:
             raise ValueError(
-                f"fv3_duo: days={cfg.days} at dt={DT}s yields "
-                f"{n_steps_total} steps; nothing to run.")
-        diag_interval = (int(cfg.output.diag_days * 86400.0 / DT)
-                         if cfg.output.diag_days > 0 else n_steps_total)
-        diag_interval = max(1, diag_interval)
+                f"fv3_duo: days={cfg.days} is TOTAL days ({n_steps_total} "
+                f"steps at dt={DT}s) and the run "
+                f"{'is already at/past that target (checkpoint step ' + str(loaded_step) + ')' if loaded_step else 'yields no steps'}"
+                f"; nothing to run. days counts from the epoch, NOT from "
+                f"the checkpoint (the MPAS days-this-job convention does "
+                f"not apply to this lane).")
+        # The SHARED cadence helper, not an inline copy: it is the single
+        # definition of the diag/blow-up interval and it REFUSES a non-finite
+        # diag_days (NaN/inf) instead of letting it fall through to the
+        # "no cadence" sentinel — the inline form this replaced accepted NaN
+        # and ran with a cadence nobody asked for.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
+        ckpt_interval = (max(1, int(cfg.output.checkpoint_days * 86400.0
+                                    / DT))
+                         if cfg.output.checkpoint_days > 0 else 0)
         if start_day is None:
             start_day = cfg.start_day
 
         logger.info(
-            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f days), "
-            "snapshots every %d steps",
+            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f total "
+            "days, %d this job%s), snapshots every %d steps, checkpoints "
+            "every %s steps",
             cfg.grid.resolution, self.model.config.km,
             "hydrostatic" if self.model.config.hydrostatic
             else "nonhydrostatic",
-            DT, n_steps_total, cfg.days, diag_interval)
+            DT, n_steps_total, cfg.days, n_this_job,
+            f", RESTART from step {loaded_step}" if loaded_step else "",
+            diag_interval, ckpt_interval or "never")
 
         # Overwrite any marker from a prior run in this directory FIRST:
         # setup permits a same-config retry, and a stale COMPLETED/BLOWUP
         # surviving an interrupted retry would misclassify it (codex
         # 2026-08-18 MAJOR). RUNNING is the nonterminal state.
         self._fv3_duo_write_status("RUNNING")
-        bundle = self.model.dcmip16_initial_state(do_pert=True)
+        if restart_bundle is not None:
+            bundle = restart_bundle
+        else:
+            bundle = self.model.dcmip16_initial_state(do_pert=True)
         t0 = time.time()
-        for step in range(1, n_steps_total + 1):
+        for step in range(loaded_step + 1, n_steps_total + 1):
             bundle = self.model.step(bundle, DT)
+            # start_day is the ABSOLUTE day at loaded_step (the day the
+            # checkpoint was written; cfg.start_day on a fresh run), so
+            # `day` is absolute simulated time on both arms of a chain.
+            day = start_day + (step - loaded_step) * DT / 86400.0
             if step % diag_interval == 0 or step == n_steps_total:
-                day = start_day + step * DT / 86400.0
                 blowup = self._fv3_duo_snapshot(bundle, step, day)
                 if blowup is not None:
                     self._fv3_duo_write_status(blowup)
                     return blowup
+            if ckpt_interval and (step % ckpt_interval == 0
+                                  or step == n_steps_total):
+                self._fv3_duo_save_checkpoint(bundle, step, day)
         # Final-state digest (run manifest) hashes self.state — hand it
         # the ACTUAL final bundle, not the unused CD-grid scaffold.
         self.state = bundle
         logger.info("FV3 duo lane COMPLETED: %d steps in %.1fs",
-                    n_steps_total, time.time() - t0)
+                    n_this_job, time.time() - t0)
         self._fv3_duo_write_status("COMPLETED")
         return "COMPLETED"
 
@@ -7651,6 +7929,218 @@ class ModelDriver:
             float(ps_win.max()) / 100.0, path.name)
         return None
 
+    def _fv3_duo_flatten_bundle(self, bundle: dict) -> dict:
+        """Flatten the duo bundle to prefixed fp64 numpy arrays.
+
+        ONE naming convention shared by the checkpoint writer, the
+        loader's inverse, and the bitwise A/B test: ``state_<k>``,
+        ``press_<k>`` (exactly the five p_var keys), ``q_<i>``,
+        ``omga``, and ``nh_<k>`` (non-hydrostatic only).  Refuses a
+        non-float64 leaf — the checkpoint contract is a bit-exact fp64
+        round-trip, so a lossy leaf is a defect, not a cast site.
+        """
+        arrays: dict[str, np.ndarray] = {}
+        for nm, v in bundle["state"].items():
+            arrays[f"state_{nm}"] = np.asarray(v)
+        if set(bundle["press"]) != set(self._FV3_DUO_PRESS_KEYS):
+            raise RuntimeError(
+                f"fv3_duo bundle press keys {sorted(bundle['press'])} != "
+                f"{sorted(self._FV3_DUO_PRESS_KEYS)} — the p_var contract "
+                f"changed under this writer; refusing a partial persist.")
+        for nm in self._FV3_DUO_PRESS_KEYS:
+            arrays[f"press_{nm}"] = np.asarray(bundle["press"][nm])
+        for iq, qt in enumerate(bundle["q"]):
+            arrays[f"q_{iq}"] = np.asarray(qt)
+        arrays["omga"] = np.asarray(bundle["omga"])
+        if bundle["nh"] is not None:
+            for nm, v in bundle["nh"].items():
+                arrays[f"nh_{nm}"] = np.asarray(v)
+        bad = sorted(nm for nm, a in arrays.items()
+                     if a.dtype != np.float64)
+        if bad:
+            raise RuntimeError(
+                f"fv3_duo bundle leaves {bad} are not float64; the "
+                f"checkpoint schema persists fp64 bit-exact only.")
+        return arrays
+
+    def _fv3_duo_save_checkpoint(self, bundle: dict, step: int,
+                                 day: float) -> None:
+        """Persist the FULL duo bundle as ONE fp64 ``fv3duo_ckpt_v1`` npz.
+
+        The bundle IS the state: press/nh are persisted verbatim, never
+        rebuilt from delp at load (a rebuild risks diverging from the
+        certified in-step aliasing).  Atomic: written to a ``.tmp``
+        sibling then ``os.replace``d, so a reader never sees a partial
+        checkpoint and an interrupted write never poisons a restart.
+        """
+        from legoesm.io.git_provenance import git_provenance
+        arrays = self._fv3_duo_flatten_bundle(bundle)
+        mcfg = self.model.config
+        path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
+        # UNIQUE tmp name (GLM 2026-08-19): a fixed "<name>.tmp" lets two
+        # concurrent writers in one directory interleave their bytes, and
+        # os.replace then atomically publishes garbage -- an atomic rename
+        # of a non-atomically-produced file is not atomicity.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        with open(tmp, "wb") as fh:
+            np.savez(
+                fh,
+                _schema=self._FV3_DUO_CKPT_SCHEMA,
+                _step=np.int64(step),
+                _day=np.float64(day),
+                _dt=np.float64(self.config.dycore.dt),
+                _hydrostatic=np.bool_(mcfg.hydrostatic),
+                _km=np.int64(mcfg.km),
+                _resolution=np.int64(self.model.grid.n),
+                # nq is CONTRACT, not decoration: the loader checks the
+                # tracer leaves against it, because a contiguity check
+                # alone accepts the empty set and resumes with tracers
+                # silently dropped (codex BLOCKER 2026-08-19).
+                _nq=np.int64(len(bundle["q"])),
+                _git_sha=git_provenance(Path(__file__)).commit,
+                **arrays)
+            # fsync BEFORE the rename, and the directory after it: page
+            # cache survives SIGKILL but not node loss, and os.replace is
+            # metadata-only. Without this the claim is "kill-atomic", not
+            # crash-durable -- and crash durability is what a checkpoint
+            # is for (GLM 2026-08-19).
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        _dfd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(_dfd)
+        finally:
+            os.close(_dfd)
+        logger.info("  fv3_duo checkpoint: step %d day %.3f -> %s",
+                    step, day, path.name)
+
+    def _load_fv3_duo_checkpoint(self, path: Path) -> tuple[int, float]:
+        """Load an ``fv3duo_ckpt_v1`` bundle and stage it for restart.
+
+        Schema-gated: refuses any npz that does not declare
+        ``_schema='fv3duo_ckpt_v1'`` (a cube/lat-lon/MPAS checkpoint is
+        a foreign schema this lane must never half-decode), then refuses
+        km / resolution / hydrostatic / dt mismatches against the
+        CONSTRUCTED model BEFORE touching any array.  The staged bundle
+        is consumed by ``_run_fv3_duo`` (total-days convention: the
+        resumed job advances ``total - loaded`` steps).
+        """
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        if not isinstance(getattr(self, "model", None),
+                          FV3DuoDynamicsModel):
+            raise RuntimeError(
+                "fv3_duo restart: load_checkpoint validates the bundle "
+                "against the CONSTRUCTED duo model (km/resolution/"
+                "hydrostatic) — call setup() before load_checkpoint.")
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"fv3_duo checkpoint not found (or is a directory): "
+                f"{path}")
+        mcfg = self.model.config
+        schema = self._FV3_DUO_CKPT_SCHEMA
+        with np.load(path, allow_pickle=False) as d:
+            files = set(d.files)
+            if "_schema" not in files or str(d["_schema"]) != schema:
+                got = str(d["_schema"]) if "_schema" in files else "absent"
+                raise ValueError(
+                    f"{path.name} is not an {schema} checkpoint "
+                    f"(_schema={got!r}); the fv3_duo lane decodes ONLY "
+                    f"its own bundle schema — a cube/lat-lon/MPAS "
+                    f"checkpoint cannot restart this lane.")
+            for nm, have, want in (
+                    ("km", int(d["_km"]), int(mcfg.km)),
+                    ("resolution", int(d["_resolution"]),
+                     int(self.model.grid.n)),
+                    ("hydrostatic", bool(d["_hydrostatic"]),
+                     bool(mcfg.hydrostatic))):
+                if have != want:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name} {nm} mismatch: "
+                        f"checkpoint {nm}={have!r} vs constructed model "
+                        f"{nm}={want!r}; restarting would reinterpret "
+                        f"the bundle on the wrong deck. Match the config "
+                        f"to the checkpoint.")
+            dt_ck, dt_now = float(d["_dt"]), float(self.config.dycore.dt)
+            if dt_ck != dt_now:
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} dt mismatch: "
+                    f"checkpoint dt={dt_ck}s vs configured (post-setup) "
+                    f"dt={dt_now}s; the total-days step accounting and "
+                    f"the bitwise restart contract both assume ONE dt "
+                    f"across the chain.")
+
+            def _leaf(nm):
+                a = d[nm]
+                if a.dtype != np.float64:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name}: array {nm!r} "
+                        f"is {a.dtype}, not float64 — the schema is a "
+                        f"bit-exact fp64 round-trip; refusing a lossy "
+                        f"leaf.")
+                return jnp.asarray(a)
+
+            state = {nm[len("state_"):]: _leaf(nm) for nm in sorted(files)
+                     if nm.startswith("state_")}
+            press = {nm[len("press_"):]: _leaf(nm) for nm in sorted(files)
+                     if nm.startswith("press_")}
+            if (not state or "omga" not in files
+                    or set(press) != set(self._FV3_DUO_PRESS_KEYS)):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} is truncated: state "
+                    f"keys {sorted(state)}, press keys {sorted(press)} "
+                    f"(need every press_* of "
+                    f"{sorted(self._FV3_DUO_PRESS_KEYS)}), omga "
+                    f"{'present' if 'omga' in files else 'MISSING'}.")
+            qi = sorted(int(nm[len("q_"):]) for nm in files
+                        if nm.startswith("q_"))
+            # CONTIGUITY IS NOT ENOUGH (codex BLOCKER 2026-08-19): the
+            # empty set is trivially contiguous, so a checkpoint whose
+            # q_* leaves were all dropped loaded as q=[] and RESUMED
+            # SUCCESSFULLY -- silent tracer loss, invisible to a bitwise
+            # state test because zvir=0 keeps the tracer dynamically
+            # passive. The count is part of the deck contract and is
+            # stamped in the checkpoint, so check against it.
+            # _nq is METADATA, so it is read raw and carries the "_"
+            # prefix of the other stamps: routing it through _leaf made
+            # the fp64 lossy-leaf guard refuse an int64 count (job
+            # 9441043 -- the guard working, my naming wrong).
+            n_expect = (int(np.asarray(d["_nq"])) if "_nq" in files
+                        else None)
+            if n_expect is None:
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name} predates the _nq stamp "
+                    f"and cannot prove its tracer set is complete; rewrite "
+                    f"it with the current writer.")
+            if qi != list(range(n_expect)):
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name}: tracer leaves {qi} "
+                    f"are not exactly q_0..q_{n_expect - 1} as the stamped "
+                    f"nq={n_expect} requires (an empty or short set would "
+                    f"otherwise resume with tracers silently dropped).")
+            q = [_leaf(f"q_{i}") for i in qi]
+            omga = _leaf("omga")
+            nh = None
+            if not mcfg.hydrostatic:
+                nh = {nm[len("nh_"):]: _leaf(nm) for nm in sorted(files)
+                      if nm.startswith("nh_")}
+                if not nh:
+                    raise ValueError(
+                        f"fv3_duo checkpoint {path.name}: "
+                        f"non-hydrostatic restart needs the persisted nh "
+                        f"carry (nh_* arrays); found none.")
+            step = int(d["_step"])
+            day = float(d["_day"])
+        self._fv3_duo_restart_bundle = {
+            "state": state, "press": press, "q": q, "omga": omga,
+            "nh": nh}
+        logger.info("  Loaded fv3_duo checkpoint: step=%d, day=%.3f",
+                    step, day)
+        self._loaded_checkpoint_step_day = (step, day)
+        return step, day
+
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -7706,7 +8196,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # Phase of the diagnostic cadence.  A real periodic cadence
         # (diag_days > 0) is phased on the ABSOLUTE step so a restart chain
         # keeps ONE global diagnostic clock (#1353: a restored partial flux
@@ -8664,12 +9160,19 @@ class ModelDriver:
             # configuration, which keeps those runs byte-identical.
             _lml_carbon = getattr(self.physics, "land_ml_carbon", None)
 
+            # Land fraction as a closure constant of the compiled land step,
+            # for the land-weighted held count below.
+            _f_land_cols = jnp.asarray(self._f_land).reshape(-1)
+
             @jax.jit
             def _land_step_fn(land_state, a2s, doy):
-                new_state, resp, _carbon = step_multilayer_land(
-                    land_state, a2s, _lml_cfg, _lml_umin, DT,
-                    lat=_lml_lat, doy=doy, land_params=_lml_params,
-                    carbon_state=_lml_carbon)
+                from legoesm.land.multilayer_land import (
+                    step_multilayer_land_with_diagnostics)
+                new_state, resp, _carbon, _sfc = (
+                    step_multilayer_land_with_diagnostics(
+                        land_state, a2s, _lml_cfg, _lml_umin, DT,
+                        lat=_lml_lat, doy=doy, land_params=_lml_params,
+                        carbon_state=_lml_carbon))
                 # resp.albedo is the END-OF-STEP land albedo, already
                 # snow-brightened by the tile (band_albedo / snow_albedo) and
                 # dry-soil-brightened.  It used to be discarded here, so the
@@ -8682,8 +9185,32 @@ class ModelDriver:
                 # the atmosphere re-applying its own exchange coefficient
                 # delivered ~a tenth of the solved flux -- Amazon latent heat
                 # 78 W/m2 offline vs 7 coupled, land 10 K cold in 30 days).
+                # A column whose surface solve was rejected is HELD: its
+                # state is reverted and it conserves neither energy nor water
+                # over that step. The land step is inside a compiled region
+                # where a print is not available on a GPU-only runtime, so the
+                # count comes out here and the loop below reports it. Without
+                # that, a run whose land is quietly frozen somewhere looks
+                # exactly like a healthy one.
+                _n_held = (_sfc.n_held if _sfc.n_held is not None
+                           else jnp.zeros((), jnp.int32))
+                # The raw count spans EVERY mesh column, but ocean columns run
+                # the land solve on placeholder forcing and their output is
+                # discarded by the land-fraction weighting — a held ocean
+                # column costs nothing physically.  Count the LAND-weighted
+                # holds separately, so the log can tell a frozen continent
+                # from noise on discarded columns (codex, 2026-08-23: the
+                # undivided counter read as half the mesh held when the
+                # physically-meaningful share was unknown).
+                _held_mask = getattr(_sfc, "held", None)
+                _n_held_land = (
+                    jnp.sum((jnp.asarray(_held_mask).reshape(-1)
+                             & (jnp.asarray(_f_land_cols) > 0.5))
+                            .astype(jnp.int32))
+                    if _held_mask is not None
+                    else jnp.zeros((), jnp.int32))
                 return (new_state, resp.T_sfc, resp.albedo, resp.q_surface,
-                        resp.shflx, resp.lhflx)
+                        resp.shflx, resp.lhflx, _n_held, _n_held_land)
 
             # Phase 2b (#1312): per-cell root-zone beta_soil -> the traced
             # ``forcing["beta_land"]`` the turbulence surface flux consumes.
@@ -8711,6 +9238,23 @@ class ModelDriver:
                         "  mpas_land_beta_soil: traced per-cell beta_soil "
                         "REPLACES the static mpas_land_beta=%.2f over land",
                         _land_beta)
+
+            # Held-column accounting. The per-step count stays on the DEVICE
+            # and is read only at the warning cadence, so the step loop pays no
+            # synchronisation for it in between -- it is not free, it is as
+            # frequent as the other post-step warnings.
+            #
+            # The device counter is RESET at every read and the running totals
+            # are kept on the host. A 32-bit counter accumulating a whole run's
+            # column-steps overflows: ten thousand columns at a seventy-five
+            # second timestep reach two billion in about half a simulated year,
+            # after which the warning this exists to guarantee would stop
+            # firing precisely when holds had become systemic.
+            _land_n_held_accum = jnp.zeros((), jnp.int32)
+            _land_n_held_land_accum = jnp.zeros((), jnp.int32)
+            _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+            self._land_n_held_total = 0
+            self._land_n_held_steps = 0
 
             from legoesm.land.forcing.solar import cos_solar_zenith as _csz
             _lml_lon = jnp.asarray(self.grid.lonCell).reshape(-1)
@@ -9507,9 +10051,49 @@ class ModelDriver:
                 if _a2s is not None:
                     (self._land_ml_state, _land_T_skin,
                      _land_albedo_cells, _land_qsfc_step,
-                     _land_shflx_step, _land_lhflx_step) = _land_step_fn(
+                     _land_shflx_step, _land_lhflx_step,
+                     _land_n_held_step, _land_n_held_land_step) = _land_step_fn(
                         self._land_ml_state, _a2s,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    # Accumulate ON DEVICE and read at the same cadence the
+                    # other post-step warnings use: reading it every step
+                    # would stall the accelerator once per step for a number
+                    # that is almost always zero.
+                    _land_n_held_accum = _land_n_held_accum + _land_n_held_step
+                    _land_n_held_land_accum = (
+                        _land_n_held_land_accum + _land_n_held_land_step)
+                    _land_n_held_steps_accum = (
+                        _land_n_held_steps_accum
+                        + (_land_n_held_step > 0).astype(jnp.int32))
+                    if (step % _HARD_SAT_LOG_CADENCE_STEPS) == 0:
+                        _window_cols = int(_land_n_held_accum)
+                        _window_land = int(_land_n_held_land_accum)
+                        _window_steps = int(_land_n_held_steps_accum)
+                        _land_n_held_accum = jnp.zeros((), jnp.int32)
+                        _land_n_held_land_accum = jnp.zeros((), jnp.int32)
+                        _land_n_held_steps_accum = jnp.zeros((), jnp.int32)
+                        if _window_cols:
+                            self._land_n_held_total += _window_cols
+                            self._land_n_held_steps += _window_steps
+                            # Column-steps alone cannot separate one column
+                            # failing every step from many columns failing
+                            # once, and those are different problems: the
+                            # first is a bad column, the second is a bad
+                            # configuration. Report the number of STEPS that
+                            # held as well, and the worst single step.
+                            logger.warning(
+                                "land: %d column-steps held in the last %d "
+                                "steps (%d of them on LAND columns — the "
+                                "physically meaningful share; the rest are "
+                                "ocean columns whose land output is "
+                                "discarded), on %d of those steps (a held "
+                                "column's energy and water budgets do not "
+                                "close); %d column-steps on %d steps since "
+                                "the run began — at step %d",
+                                _window_cols, _HARD_SAT_LOG_CADENCE_STEPS,
+                                _window_land, _window_steps,
+                                self._land_n_held_total,
+                                self._land_n_held_steps, step)
                     # Published only under the same switch that threads f_land
                     # into the turbulence factory: without the land fraction
                     # the consumer refuses the key, and adding it mid-run
@@ -9974,7 +10558,13 @@ class ModelDriver:
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
-        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # A sub-daily cadence must never round DOWN to zero steps: 0 reads as
+        # "diagnostics disabled" at every guard below, so a request for a very
+        # fine cadence would silently turn the blow-up check OFF — the opposite
+        # of what was asked.  Floor it at one step.
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        DIAG_INTERVAL = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, n_steps_total)
         # ``checkpoint_days`` → step cadence (FIX_RESTART_TIME iteration
         # 4: the spectral loop historically wrote NO checkpoints, so a
         # --spectral AMIP run silently ignored --checkpoint-days and
@@ -11298,6 +11888,16 @@ class ModelDriver:
         import math as _math
 
         day_steps = max(1, int(86400.0 / DT))
+        # NOT routed through ``diagnostic_interval_steps``: this lane REFUSES a
+        # sub-step cadence (below) instead of flooring it, because its segment
+        # length is the gcd of the cadences — flooring to one step here would
+        # silently run the whole lane one step per segment.  It still borrows
+        # that helper's finiteness check, because ``NaN > 0`` is False and a
+        # NaN cadence would otherwise slip past as "no cadence" (review).
+        if not _math.isfinite(cfg.output.diag_days):
+            raise ValueError(
+                f"tiled cube SPMD: diag_days must be a finite number of days; "
+                f"got {cfg.output.diag_days!r}.")
         diag_steps = (int(cfg.output.diag_days * 86400.0 / DT)
                       if cfg.output.diag_days > 0 else 0)
         ckpt_steps = (int(cfg.output.checkpoint_days * 86400.0 / DT)
@@ -11903,7 +12503,9 @@ class ModelDriver:
         RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
-        diag_interval = int(cfg.output.diag_days * 86400 / DT)
+        from legoesm.driver.diagnostics import diagnostic_interval_steps
+        diag_interval = diagnostic_interval_steps(
+            cfg.output.diag_days, DT, 0)
         checkpoint_interval = (
             int(cfg.output.checkpoint_days * 86400 / DT)
             if cfg.output.checkpoint_days > 0 else 0
@@ -13276,7 +13878,9 @@ class ModelDriver:
                     if getattr(self.physics, "land_ml_dt", None) is not None:
                         self.physics.land_ml_dt = DT
                     n_steps_total = int(cfg.days * 86400 / DT)
-                    diag_interval = int(cfg.output.diag_days * 86400 / DT)
+                    from legoesm.driver.diagnostics import diagnostic_interval_steps
+                    diag_interval = diagnostic_interval_steps(
+                        cfg.output.diag_days, DT, 0)
                     checkpoint_interval = (
                         int(cfg.output.checkpoint_days * 86400 / DT)
                         if cfg.output.checkpoint_days > 0 else 0

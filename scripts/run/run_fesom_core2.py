@@ -49,6 +49,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Timestep [s]; 1800 is the published CORE2 setting.")
     p.add_argument("--year", type=int, default=1958,
                    help="JRA55-do forcing year (the Zenodo package ships 1958).")
+    p.add_argument("--tke-surface-bc", default="neumann",
+                   choices=("neumann", "dirichlet"),
+                   help="Surface TKE BC: 'neumann' = the C-parity FESOM2 "
+                        "reference (default); 'dirichlet' = the ported NEMO "
+                        "en(1)=max(rn_emin0, rn_ebb*|tau|/rho0) boundary "
+                        "value (fesom-jax cb389c7) -- the first ORCA1-card "
+                        "branch for the three-grid convergence.")
+    p.add_argument("--tke-mxl0-anchor", default="off", choices=("on", "off"),
+                   help="NEMO ln_mxl0 surface mixing-length anchor (ORCA1 "
+                        "sets .true.; NEMO pairs it with the Dirichlet BC — "
+                        "running dirichlet without it is a half-port).")
+    p.add_argument("--allow-half-ported-tke", action="store_true",
+                   help="Permit --tke-surface-bc dirichlet with the surface "
+                        "mixing-length anchor off. The reference card sets "
+                        "both together, so this runs a configuration neither "
+                        "model uses; it exists for isolating which of the two "
+                        "moves a result, and must be stated deliberately.")
+    p.add_argument("--ice-ic", default="fesom", choices=("fesom", "nemo"),
+                   help="Sea-ice cold start: 'fesom' = the C-faithful "
+                        "a_ice=0.9-where-SST<0 seed (SH m_ice=2 m); 'nemo' = "
+                        "NEMO's January Ice_initialization.nc (needs "
+                        "--ice-init-file) -- the NEMO-matched choice for a "
+                        "January start (the fesom seed loads the summer SH "
+                        "with ~40%% ice whose melt freshens the Antarctic).")
+    p.add_argument("--ice-init-file", default=None,
+                   help="Path to NEMO Ice_initialization.nc (at_i/ht_i/ht_s "
+                        "on eORCA1). Required with --ice-ic nemo.")
+    p.add_argument("--forcing", default="jra55",
+                   choices=("jra55", "core2_nyf"),
+                   help="Atmospheric forcing: 'jra55' = JRA55-do --year (the "
+                        "published hindcast card); 'core2_nyf' = the CORE-II "
+                        "normal-year store the NEMO reference and the legoESM "
+                        "tripole/MPAS arms use (needs --nyf-zarr) -- the "
+                        "matched-protocol option for the three-grid "
+                        "comparison. SSS restoring/runoff/chl and the PHC IC "
+                        "stay fesom-side either way; state those residual "
+                        "differences with every scored number.")
+    p.add_argument("--nyf-zarr", default=None,
+                   help="Path to nyf.zarr (built by legoESM's "
+                        "scripts/data/build_core2_nyf_zarr.py). Defaults to "
+                        "the SAME cache the tripole and MPAS arms resolve "
+                        "(legoesm.ocean.forcing.core2_nyf_cache_dir), so a "
+                        "three-grid comparison cannot silently end up with "
+                        "one grid on the raw CORE-II winds and another on "
+                        "the bias-corrected ones.")
     p.add_argument("--snapshot-every-days", type=float, default=30.0)
     p.add_argument("--output", required=True)
     return p
@@ -107,8 +152,31 @@ def write_snapshot(out_dir: Path, tag: str, state, mesh) -> Path:
     return path
 
 
+def validate_tke_pair(args) -> None:
+    """The ported turbulence card sets two things; refuse to run half of it.
+
+    The reference model's card turns the Dirichlet surface value and the
+    surface mixing-length anchor on TOGETHER, and the flags' own help calls
+    either one alone a half port.  BOTH splits are refused, not just the one
+    that reads more naturally: running the anchor against the default Neumann
+    surface value is exactly as unported as the reverse, and an earlier
+    version of this guard admitted it.
+    """
+    dirichlet = args.tke_surface_bc == "dirichlet"
+    anchored = args.tke_mxl0_anchor == "on"
+    if dirichlet == anchored or args.allow_half_ported_tke:
+        return
+    raise SystemExit(
+        f"--tke-surface-bc {args.tke_surface_bc} with --tke-mxl0-anchor "
+        f"{args.tke_mxl0_anchor} is a half port: the reference card sets the "
+        "Dirichlet surface value and the mixing-length anchor together, and "
+        "the pair is what was validated. Select both or neither, or pass "
+        "--allow-half-ported-tke to run the split deliberately (the run is "
+        "then not the ported one).")
+
 def main() -> int:
     args = build_arg_parser().parse_args()
+    validate_tke_pair(args)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -135,14 +203,47 @@ def main() -> int:
         raise SystemExit("FATAL: mesh has ice-shelf cavity nodes; the "
                          "snapshot writer does not support them")
     state = cold_start_state(mesh, args.ic_dir)
+    if args.ice_ic == "nemo":
+        # January ice climatology instead of the C-faithful a_ice=0.9-where-
+        # SST<0 seed, which loads the SH with ~40% mid-summer ice whose melt
+        # builds a fresh Antarctic cap (measured 2026-08-18). The static
+        # forcing a_ice mask is unchanged (prognostic ice supersedes it).
+        from fesom_jax.nemo_ice_ic import seed_ice_from_nemo
+        state = seed_ice_from_nemo(state, mesh, args.ice_init_file)
+        print(f"[ice-ic] NEMO January climatology from {args.ice_init_file}",
+              flush=True)
+    elif args.ice_ic != "fesom":
+        raise SystemExit(f"unknown --ice-ic {args.ice_ic!r}")
     if np.asarray(state.T).shape[0] != mesh.nod2D:
         raise SystemExit("cold_start_state returned non-node-first tracers")
     sst0 = jnp.asarray(state.T[:, 0])
 
     t0 = time.time()
-    forcing = surface_forcing.build_surface_forcing(mesh, args.year, sst_ic=sst0)
-    print(f"[forcing] JRA55-do {args.year} ready in {time.time()-t0:.1f} s",
-          flush=True)
+    if args.ice_ic == "nemo" and not args.ice_init_file:
+        raise SystemExit("--ice-ic nemo requires --ice-init-file")
+    if args.forcing == "core2_nyf":
+        nyf_zarr = args.nyf_zarr
+        if not nyf_zarr:
+            # Same resolution the tripole and MPAS drivers use, so the three
+            # grids cannot drift onto different CORE-II wind fields.
+            from legoesm.ocean.forcing import core2_nyf_cache_dir
+            nyf_zarr = str(core2_nyf_cache_dir() / "nyf.zarr")
+        if not os.path.exists(nyf_zarr):
+            raise SystemExit(
+                f"--forcing core2_nyf: no CORE-II cache at {nyf_zarr}. Build "
+                "it with scripts/data/build_core2_nyf_zarr.py --wind-variant "
+                "mod, or pass --nyf-zarr explicitly.")
+        forcing = surface_forcing.build_surface_forcing(
+            mesh, args.year, sst_ic=sst0, nyf_zarr=nyf_zarr)
+        print(f"[forcing] CORE-II NYF ({nyf_zarr}) ready in "
+              f"{time.time()-t0:.1f} s", flush=True)
+    elif args.forcing == "jra55":
+        forcing = surface_forcing.build_surface_forcing(mesh, args.year,
+                                                        sst_ic=sst0)
+        print(f"[forcing] JRA55-do {args.year} ready in {time.time()-t0:.1f} s",
+              flush=True)
+    else:  # argparse choices guard this; keep the dispatch loud anyway
+        raise SystemExit(f"unknown --forcing {args.forcing!r}")
 
     op = build_ssh_operator(mesh, dt=args.dt)
     stress = jnp.zeros((mesh.elem2D, 2))
@@ -156,12 +257,21 @@ def main() -> int:
                             "fesom_jax": str(Path(
                                 sys.modules["fesom_jax"].__file__).parent)},
         "config": {"dt_s": args.dt, "days": n_days, "year": args.year,
+                   "forcing": args.forcing, "nyf_zarr": args.nyf_zarr,
+                   "ice_ic": args.ice_ic, "ice_init_file": args.ice_init_file,
+                   "tke_surface_bc": args.tke_surface_bc,
+                   "tke_mxl0_anchor": args.tke_mxl0_anchor,
+                   "allow_half_ported_tke": bool(args.allow_half_ported_tke),
                    "physics": ("core2_full.yaml paper card: zstar ALE + "
                                "prognostic TKE + GM + mEVP ice (whichEVP=1); "
                                "AB2-continuous day chunks (bootstrap once)"),
-                   "protocol_note": ("JRA55-do year forcing + PHC3.0 winter "
-                                     "cold start; NOT the xgrid matched-pair "
-                                     "protocol -- three-model comparison")},
+                   "protocol_note": (
+                       "CORE-II NYF atmosphere (NEMO-matched) + PHC3.0 winter "
+                       "cold start; SSS/runoff/chl remain fesom-side"
+                       if args.forcing == "core2_nyf" else
+                       "JRA55-do year forcing + PHC3.0 winter "
+                       "cold start; NOT the xgrid matched-pair "
+                       "protocol -- three-model comparison")},
     }
     (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
@@ -173,7 +283,10 @@ def main() -> int:
     # with is_first_step=False -- exactly integrate()'s own internal split
     # (integrate.py:153-165), just re-entered per chunk so only one day of
     # forcing is resident.
-    cfgs = dict(ale_cfg=AleConfig(), tke_cfg=TkeConfig(), gm_cfg=GMConfig(),
+    _tke_cfg = TkeConfig(
+        use_dirichlet=(args.tke_surface_bc == "dirichlet"),
+        use_mxl0_anchor=(args.tke_mxl0_anchor == "on"))
+    cfgs = dict(ale_cfg=AleConfig(), tke_cfg=_tke_cfg, gm_cfg=GMConfig(),
                 ice_cfg=IceConfig(whichEVP=1))
 
     def _scan_day(state_in, sf_day):
@@ -186,7 +299,19 @@ def main() -> int:
 
     _scan_day_jit = jax.jit(_scan_day)
     n_steps = n_days * steps_per_day
-    all_dates = surface_forcing.dates_for_steps(args.year, args.dt, n_steps)
+    # core2_nyf is a perpetual 365-day climatology: generate the calendar in a
+    # fixed NON-LEAP year so no Feb-29 is ever injected into the cycle (codex
+    # 9431498 HIGH -- a 1960 leap day would shift the atmospheric season by a
+    # day and desynchronise the SSS/chl month), and refuse runs longer than
+    # one cycle until a true no-leap generator exists.
+    if args.forcing == "core2_nyf":
+        if n_days > 365:
+            raise SystemExit("--forcing core2_nyf supports <= 365 days per "
+                             "run (perpetual-year calendar); split the run.")
+        _date_year = 1959                     # any non-leap year
+    else:
+        _date_year = args.year
+    all_dates = surface_forcing.dates_for_steps(_date_year, args.dt, n_steps)
     t_start = time.time()
     wetmask = np.asarray(mesh.node_layer_mask[:, 0]) > 0
     for day in range(1, n_days + 1):

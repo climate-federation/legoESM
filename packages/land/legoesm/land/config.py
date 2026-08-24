@@ -13,7 +13,7 @@ from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.topmodel_runoff import TopmodelConfig
 from legoesm.land.richards import RichardsConfig
-from legoesm.land.surface_scheme import SimpleSEBConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 
 
@@ -76,7 +76,9 @@ class LandConfig(NamedTuple):
     Cd_land: float = 3.0e-3     # Land drag coefficient (constant scheme)
     Ch_land: float = 3.0e-3     # Land heat transfer coefficient (constant)
     beta_min: float = 0.1       # Minimum moisture availability (dry soil)
-    bulk_scheme: str = "constant"  # "constant" or "most"
+    # DEFAULT: Monin-Obukhov, the exchange law the coupled land tile runs;
+    # "constant" is a fixed coefficient for idealized work.
+    bulk_scheme: str = "most"  # "most" or "constant"
     z_ref: float = 10.0           # Reference height for MOST [m]
     bulk_n_iter: int = 5          # MOST iterations
     # Snow/albedo
@@ -91,7 +93,23 @@ class LandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
     # Type hint is ``Any`` because NamedTuple does not support Unions well;
     # dispatch is done via ``isinstance`` inside ``step_land``.
-    surface_scheme: Any = SimpleSEBConfig()
+    # DEFAULT: the two-leaf canopy with Monin-Obukhov surface exchange.
+    #
+    # ``SimpleSEBConfig`` is for ACADEMIC / SIMPLIFIED TESTS ONLY and must not be
+    # a production default (user directive 2026-08-20).  Measured on a
+    # well-watered column, one day, realistic forcing, latent heat in W/m2:
+    #
+    #     simple_seb, stomata off :  405 forest / 283 grass / 194 bare
+    #     simple_seb, stomata on  :  129 forest /   4 grass /   2 bare
+    #
+    # Both are unusable and for opposite reasons.  With stomata off nothing
+    # limits evaporation, so it runs at potential over a soil whose top layer
+    # barely drains.  With stomata on, the Jarvis conductance has NO leaf-area
+    # dependence, so BARE GROUND is throttled by stomata it does not have.  The
+    # two-leaf canopy partitions the cell into canopy and soil and gives each its
+    # own resistance, which is why the LMIP simulations built on it reproduce
+    # observed latent heat and photosynthesis.
+    surface_scheme: Any = TwoLeafCanopyConfig()
     # Runoff scheme (appended for positional-ABI stability): "bucket" (default,
     # Green-Ampt Hortonian + Dunne saturation-excess, byte-identical) or
     # "topmodel" (SIMTOP sub-grid saturated fraction + topographic baseflow,
@@ -140,7 +158,7 @@ class MultiLayerLandConfig(NamedTuple):
     # and unbiased LE vs energy-closure-corrected obs; well within the published
     # forest-floor range (~1e2-1e3 s/m).
     soil_evap_litter_resistance_s_m: float = 300.0
-    bulk_scheme: str = "constant"
+    bulk_scheme: str = "most"       # see LandConfig.bulk_scheme
     z_ref: float = 10.0
     bulk_n_iter: int = 5
     # Snow/albedo
@@ -176,7 +194,23 @@ class MultiLayerLandConfig(NamedTuple):
     # Surface scheme: ``SimpleSEBConfig`` (default), ``TwoLeafCanopyConfig``,
     # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
     # ``step_multilayer_land``.
-    surface_scheme: Any = SimpleSEBConfig()
+    # DEFAULT: the two-leaf canopy with Monin-Obukhov surface exchange.
+    #
+    # ``SimpleSEBConfig`` is for ACADEMIC / SIMPLIFIED TESTS ONLY and must not be
+    # a production default (user directive 2026-08-20).  Measured on a
+    # well-watered column, one day, realistic forcing, latent heat in W/m2:
+    #
+    #     simple_seb, stomata off :  405 forest / 283 grass / 194 bare
+    #     simple_seb, stomata on  :  129 forest /   4 grass /   2 bare
+    #
+    # Both are unusable and for opposite reasons.  With stomata off nothing
+    # limits evaporation, so it runs at potential over a soil whose top layer
+    # barely drains.  With stomata on, the Jarvis conductance has NO leaf-area
+    # dependence, so BARE GROUND is throttled by stomata it does not have.  The
+    # two-leaf canopy partitions the cell into canopy and soil and gives each its
+    # own resistance, which is why the LMIP simulations built on it reproduce
+    # observed latent heat and photosynthesis.
+    surface_scheme: Any = TwoLeafCanopyConfig()
     # Canopy-water interception (shared CLM-ML formulation, land/canopy/
     # interception.py).  ``None`` (default) = off (rain infiltrates directly).
     # When set, the two-leaf / SimpleSEB path intercepts rain into a prognostic
@@ -247,6 +281,11 @@ def calibrated_multilayer_setup() -> dict:
         stomata=StomataConfig(enabled=True),
         carbon=CarbonConfig(scheme="differland"),
         snow_albedo_feedback=True,
+        # simple_seb, because that is what the tables were FITTED under — not
+        # because it is good.  It is structurally broken (its humidity gradient
+        # self-extinguishes) and is no longer the library default.  These tables
+        # must be re-fitted against the two-leaf canopy; until then this records
+        # the scheme they belong to rather than pretending otherwise.
         surface_scheme=SimpleSEBConfig(),
     )
 
@@ -264,3 +303,53 @@ def apply_calibrated_multilayer(config: MultiLayerLandConfig) -> MultiLayerLandC
             "bake and have no slab equivalent."
         )
     return config._replace(**calibrated_multilayer_setup())
+
+
+def biophysics_lmip_two_leaf_setup() -> dict:
+    """Mode settings of the biophysics LMIP calibration (two-leaf canopy).
+
+    Fitted by ``templates/land/biophysics/lmip_biophys_2deg.yaml`` — a 10-year,
+    2-degree offline CRU-JRA run scored against observed fluxes. This is the
+    configuration those parameters BELONG to; running them under another surface
+    scheme is the mismatch the selector exists to prevent.
+
+    Covers the non-spatial MODE choices only, exactly like
+    :func:`calibrated_multilayer_setup`. Per-column hydraulics / thermal /
+    albedo maps still come from the shared ``clm_multilayer_setup`` bake, and
+    the calibration's SCALAR albedo settings are applied on top by
+    :func:`apply_biophysics_lmip_two_leaf`, which needs the existing config and
+    so cannot express them in this dict.
+    """
+    from legoesm.land.clm_surface_map import (
+        BIOPHYS_LMIP_N_LAYERS, BIOPHYS_LMIP_SOIL_DEPTH_M,
+        BIOPHYS_LMIP_SOIL_GROWTH)
+    return dict(
+        soil_grid=SoilGridConfig(n_layers=BIOPHYS_LMIP_N_LAYERS,
+                                 total_depth=BIOPHYS_LMIP_SOIL_DEPTH_M,
+                                 growth_factor=BIOPHYS_LMIP_SOIL_GROWTH),
+        bulk_scheme="most",
+        # The two-leaf canopy carries its OWN Ball-Berry stomata, so the separate
+        # stomatal-beta throttle stays OFF: switching it on down-regulates the
+        # same conductance twice. The offline calibration ran with
+        # ``stomata_enabled: false`` for exactly that reason.
+        stomata=StomataConfig(enabled=False),
+        # The offline LMIP calibration ran with the differland prognostic carbon
+        # cycle active: the canopy carries its own Farquhar PHOTOSYNTHESIS (a GPP
+        # flux), but the carbon POOLS/respiration are differland's, and the
+        # Vc_max25/g1/LCMA tables were fitted with it on. Deploying them under a
+        # "none" carbon scheme runs a model the parameters were not fitted to.
+        carbon=CarbonConfig(scheme="differland"),
+        snow_albedo_feedback=True,
+        surface_scheme=TwoLeafCanopyConfig(),
+    )
+
+
+def apply_biophysics_lmip_two_leaf(config: MultiLayerLandConfig) -> MultiLayerLandConfig:
+    """Apply the biophysics LMIP calibration, including its albedo scalars."""
+    from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
+    cfg = config._replace(**biophysics_lmip_two_leaf_setup())
+    # SCALARS ONLY on the existing albedo config: it also carries the per-column
+    # snow_cover_scale map built from the surfdata, and replacing the whole
+    # object would discard it.
+    return cfg._replace(
+        land_albedo=cfg.land_albedo._replace(**biophysics_lmip_albedo_scalars()))

@@ -1,0 +1,28 @@
+# THE REFERENCE AMIP CONFIGURATION (2026-08-23): fine mesh + Linnia Hawkins'
+# calibrated land with her published spun-up soil.
+#
+# This reproduces run lin90_r5, the best-scoring AMIP of the campaign
+# (10/12 realism; tropical land rain 0.88 of observed vs 0.74 for the best
+# land-free run; reflected shortwave 107.7 W/m2 vs obs 100).  It is the
+# 13 August science configuration (campaign deck + high-entrainment tuning)
+# at MPAS mesh level 5, plus the interactive calibrated two-leaf land and
+# the ten-year spun-up soil state regridded onto this mesh.
+#
+# TO RERUN:
+#   NAME=<outdir> TARGET_DAYS=90 \
+#   EXTRA="--config config/amip/amip_reference_r5_land.yaml \
+#     --params config/amip/params/res5_eps_hi_tuning.yaml \
+#     --subgrid-orography-file /work/bd1083/b309178/diffESM/land_data/extpar_sso_latlon_0p25deg.nc \
+#     --checkpoint-days 10" \
+#   sbatch --job-name=<outdir> scripts/cluster/levante/amip_mpas_gpu_chain.sbatch
+#
+# The tuning file (four convection/microphysics values, deep entrainment 3e-3)
+# rides separately via --params because tuned scheme leaves are not run-config
+# keys; it is committed at config/amip/params/res5_eps_hi_tuning.yaml.
+# The soil state is data/lmip_soil_ic/soil_ic_mpas5.npz, built by
+# scripts/data/regrid_land_ic.py from the published Zenodo state (PR #1624);
+# rebuild for any other mesh with that script.
+include: amip_production.yaml
+
+resolution: 5
+land_ic: data/lmip_soil_ic/soil_ic_mpas5.npz

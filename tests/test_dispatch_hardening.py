@@ -178,6 +178,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "get_turbulence_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "make_turbulence_physics"),
+        # CLUBB cloud_source selector (native ADG1-PDF vs shared grid-scale saturation;
+        # the D9 forced-shared control). A typo must raise, not silently run the PDF cloud.
+        ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):

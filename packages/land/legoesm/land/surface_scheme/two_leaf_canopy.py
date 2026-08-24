@@ -265,7 +265,6 @@ def compute_two_leaf_canopy_fluxes(
         LAI    = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
     hc         = _get(lp, "hc",       jnp.full(ncol, _DEFAULT_HC))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
-    FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
     CI         = _get(lp, "CI",       jnp.full(ncol, _DEFAULT_CI))
     kn         = _get(lp, "kn",       jnp.full(ncol, _DEFAULT_KN))
 
@@ -385,7 +384,7 @@ def compute_two_leaf_canopy_fluxes(
     sw_rt = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
         SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn, FNonVeg)
+        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
 
     # ---- Thermodynamic / atmosphere variables ----
     Ta    = forcing.T_lowest
@@ -451,7 +450,8 @@ def compute_two_leaf_canopy_fluxes(
 
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
+        x_final, n_iters, converged = jax.vmap(_solve_one_col)(
+            initial_state, bundles_k)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -601,6 +601,11 @@ def compute_two_leaf_canopy_fluxes(
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
+        # Whether the Newton closure actually reached a root on this column.
+        # False means the fluxes above are a stopped iterate, not a solution —
+        # the caller decides what to do with the column; it must not simply
+        # spend them.  Carried from the LAST Picard pass.
+        converged=converged,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

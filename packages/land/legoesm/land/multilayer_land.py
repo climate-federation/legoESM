@@ -1294,7 +1294,173 @@ def _step_multilayer_land_impl(
         salt_flux=jnp.zeros(ncol),
     )
 
+    # The hold must be ATOMIC over everything this step advanced. The carbon
+    # pools are stepped above from the SAME rejected GPP and surface
+    # temperature, so a column held in the soil but advanced in carbon would
+    # carry that inconsistency into the restart file.
+    new_state, response, carbon_state_new, _held_mask, _n_held = (
+        _hold_unsolved_columns(state, new_state, response, surface_out,
+                               forcing, config, ncol,
+                               carbon_old=carbon_state,
+                               carbon_new=carbon_state_new))
+    surface_out = surface_out._replace(held=_held_mask, n_held=_n_held)
+
     return new_state, response, carbon_state_new, surface_out
+
+
+# ---------------------------------------------------------------------------
+# Per-column containment: an unsolved column must not be able to kill the model
+# ---------------------------------------------------------------------------
+
+def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
+                           config, ncol, carbon_old=None, carbon_new=None):
+    """Freeze any column the land model failed to solve, and say so.
+
+    Two things make a column's new state untrustworthy:
+
+    * the surface scheme's iterative closure did not reach a root
+      (``SurfaceFluxOutput.converged is False``), so its fluxes are a stopped
+      iterate rather than a solution of the surface energy balance; or
+    * some leaf of the new state or of the tile response came back non-finite.
+
+    Either way the column is HELD: its state (soil, snow, ponding, carbon)
+    reverts to the start of the step and its tile response reports no turbulent
+    exchange and no runoff, with a surface temperature equal to the (finite)
+    previous top-soil temperature and a surface humidity equal to the air's.
+
+    That does NOT mean the atmosphere exchanges nothing with a held column.
+    On the coupled path the land tile hands back only the skin temperature and
+    albedo and the atmosphere recomputes its own sensible and latent fluxes
+    from them, so it keeps exchanging with the held surface — it simply does so
+    against a finite, frozen surface instead of a diverging one.  Making the
+    atmosphere's own flux law honour the hold needs the mask threaded to it and
+    is NOT done here.
+
+    Why this exists.  Before it, ONE column of 2562 that went non-finite
+    reached the atmosphere through the land skin temperature and, via the
+    dynamical core's global mass fixer, made every column of the model
+    non-finite within a single step: a 5-day AMIP run died 7 hours in with a
+    NaN in every field. Containing the damage to the column that produced it
+    turns a dead run into a reported defect.
+
+    This is CONTAINMENT, NOT PHYSICS. A held column conserves neither energy
+    nor water over the step it is held, so it must never be absorbed silently —
+    a run whose land is quietly frozen somewhere is worse than one that stops.
+    Returning the per-column mask and the count is how that is made visible:
+    this function runs inside the jitted step, where a host print is not
+    available on a GPU-only runtime (``jax.debug.print`` raises there), so the
+    caller is responsible for surfacing them.  ``SurfaceFluxOutput.held`` and
+    ``SurfaceFluxOutput.n_held`` carry them out.
+
+    Returns
+    -------
+    held_state, held_response, held_carbon, held_mask (ncol,) bool,
+    n_held () int32
+    """
+    def _is_float_leaf(leaf):
+        # NOT ``dtype.kind in "fc"``: bfloat16 is an extension dtype whose kind
+        # is "V", so a kind test silently skips it and a bfloat16 NaN would go
+        # unheld (reproduced by review).  ``jnp.issubdtype(..., jnp.inexact)``
+        # covers every float and complex dtype JAX supports.
+        dtype = getattr(leaf, "dtype", None)
+        return dtype is not None and jnp.issubdtype(dtype, jnp.inexact)
+
+    def _col_bad(leaf):
+        """Per-column non-finiteness of one (ncol, ...) array leaf."""
+        arr = jnp.asarray(leaf)
+        if arr.ndim == 0 or arr.shape[0] != ncol:
+            return jnp.zeros(ncol, dtype=bool)
+        flat = arr.reshape(ncol, -1)
+        return jnp.any(~jnp.isfinite(flat), axis=-1)
+
+    def _any_bad(tree):
+        # Over tree LEAVES, so a nested carrier (the CLM-ML canopy state) is
+        # inspected too, not just the top-level fields.
+        acc = jnp.zeros(ncol, dtype=bool)
+        for leaf in jax.tree.leaves(tree):
+            if _is_float_leaf(leaf):
+                acc = acc | _col_bad(leaf)
+        return acc
+
+    bad = _any_bad(new_state) | _any_bad(response)
+    if surface_out.converged is not None:
+        bad = bad | ~jnp.asarray(surface_out.converged).reshape(-1).astype(bool)
+
+    n_held = jnp.sum(bad.astype(jnp.int32))
+
+    def _hold_leaf(new_leaf, old_leaf):
+        if not _is_float_leaf(new_leaf) or old_leaf is None:
+            return new_leaf
+        if new_leaf.ndim == 0 or new_leaf.shape[0] != ncol:
+            return new_leaf
+        old_arr = jnp.asarray(old_leaf)
+        if old_arr.shape != new_leaf.shape:
+            return new_leaf
+        mask = bad.reshape((ncol,) + (1,) * (new_leaf.ndim - 1))
+        return jnp.where(mask, old_arr, new_leaf)
+
+    def _hold_field(new_field, old_field):
+        # Per FIELD rather than one tree.map over the whole state: a field that
+        # is None on one side and an array on the other (an optional store
+        # switched on mid-run) makes the two states different pytrees, which a
+        # single tree.map cannot walk.  Inside a field we DO recurse, so a
+        # nested carrier (the CLM-ML canopy state) is held as well.
+        if new_field is None or old_field is None:
+            return new_field
+        if _is_float_leaf(new_field):
+            return _hold_leaf(new_field, old_field)
+        try:
+            return jax.tree.map(_hold_leaf, new_field, old_field)
+        except (ValueError, TypeError):
+            # Structurally different this step (e.g. a carrier rebuilt from
+            # scratch): nothing to revert to, so leave it. Loud rather than
+            # silent — the count below still reports the column as held.
+            return new_field
+
+    held_state = new_state._replace(
+        **{name: _hold_field(getattr(new_state, name), getattr(state, name))
+           for name in new_state._fields})
+
+    # Inert-surface response for a held column.
+    T_prev = state.T_soil[:, 0]
+    eps = jnp.full(ncol, config.emissivity_land)
+    inert = dict(
+        T_sfc=T_prev, T_rad=T_prev,
+        albedo=jnp.full(ncol, config.albedo_land),
+        emissivity=eps,
+        z0=jnp.full(ncol, config.z0_land),
+        # Equal to the air, so any consumer that forms a humidity GRADIENT from
+        # this field gets zero.  Note the coupled atmosphere is not such a
+        # consumer — it recomputes surface humidity from saturation at the skin
+        # temperature and ignores this field (see the note in the docstring).
+        q_surface=jnp.asarray(forcing.q_lowest).reshape(-1),
+        lw_up=eps * constants.sigma_sb * T_prev ** 4,
+    )
+
+    def _hold_response(name, leaf):
+        if leaf is None or not _is_float_leaf(leaf):
+            return leaf
+        arr = jnp.asarray(leaf)
+        if arr.ndim == 0 or arr.shape[0] != ncol:
+            return leaf
+        fallback = inert.get(name, jnp.zeros_like(arr))
+        return jnp.where(bad, jnp.broadcast_to(fallback, arr.shape), arr)
+
+    held_response = response._replace(
+        **{name: _hold_response(name, getattr(response, name))
+           for name in response._fields})
+
+    held_carbon = carbon_new
+    if carbon_old is not None and carbon_new is not None:
+        try:
+            held_carbon = jax.tree.map(_hold_leaf, carbon_new, carbon_old)
+        except (ValueError, TypeError):
+            # The carbon carrier changed structure this step, so there is no
+            # matching value to revert to. Leave it rather than guess; the
+            # column is still reported held by the count below.
+            held_carbon = carbon_new
+
+    return held_state, held_response, held_carbon, bad, n_held
 
 
 def init_multilayer_land_state(
