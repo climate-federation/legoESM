@@ -369,6 +369,11 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
             raise SystemExit(
                 f"{run_dir}: fv_sg_adj must be pinned <= 0 (got {sg}); > 0 runs "
                 f"fv_subgrid_z (fv_phys.F90:305).")
+        if _nml_logical(text, "dwind_2d") is True:
+            raise SystemExit(
+                f"{run_dir}: dwind_2d=.true. switches update_dwinds to the 2-D "
+                f"path (fv_update_phys.F90:688); the port implements only the "
+                f"3-D (dwind_2d=.false.) path.")
         for key in ("hydrostatic", "phys_hydrostatic"):
             if _nml_logical(text, key) is not True:
                 raise SystemExit(
@@ -1258,6 +1263,9 @@ def main(argv=None):
                          "apply_held_suarez_step; the dynamics-only arms keep "
                          "refusing any deck whose physics is ON.")
     args = ap.parse_args(argv)
+    if args.max_rel is None:
+        print("=== REPORT ONLY -- no --max-rel given; exit status 0 does NOT "
+              "certify the residual. Pass --max-rel to gate. ===")
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
     if args.n_steps != 1 and args.step_run in (
@@ -1281,14 +1289,31 @@ def main(argv=None):
     if args.physics == "held_suarez":
         if args.nh or args.moist or args.consv:
             raise SystemExit(
-                "--physics held_suarez is dry + hydrostatic; not with "
+                "--physics held_suarez is hydrostatic; not with "
                 "--nh/--moist/--consv.")
+        # HS runs adiabatic=.false., so atmosphere.F90 sets zvir=rvgas/rdgas-1
+        # (moist_phys=.true. for the DYNAMICS), the cold-start IC is the MOIST
+        # one (test_cases.F90:6760 divides pt by 1+zvir*q), and sphum is
+        # advected with virtual temperature. So the arm uses the moist zerostep
+        # IC + tracers -- the same dynamics setup as --moist -- and adds the HS
+        # forcing on top. (Verified: run_hs INPUT has no restart -> it
+        # cold-starts; the moist zerostep pt is 3.25 K off the dry one.)
+        args.tracers = True
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_moist_gfs"
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_hs_1step_gfs"
-        if not os.path.isdir(args.step_run):
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                raise SystemExit(
+                    f"missing HS oracle run {_r}; the moist IC pair is the "
+                    f"shipped hydrostatic moist zerostep, the step deck comes "
+                    f"from scripts/cluster/fv3_native/build_hs_oracle.sbatch")
+        if args.n_steps != 1:
             raise SystemExit(
-                f"missing HS oracle {args.step_run}; build it with "
-                f"scripts/cluster/fv3_native/build_hs_oracle.sbatch")
+                "--physics held_suarez applies ONE forcing after ONE dynamics "
+                "step (the oracle run_hs_1step_gfs is 1-step); --n-steps must "
+                "be 1.")
     if args.consv:
         if args.moist or args.nh:
             raise SystemExit(
@@ -1341,11 +1366,16 @@ def main(argv=None):
     # direction-blind check_moist_deck, and load_oracle already asserts
     # FMSConstants: GFS per deck via require_gfs_constants.
     for _r in (args.ic_run, args.step_run):
-        # the physics gate applies ONLY to the STEP deck; the IC (zerostep) is
-        # dynamics-only (adiabatic=.true., physics off) and is checked inert.
+        _is_step = _r == args.step_run
+        # The physics gate applies ONLY to the STEP deck. The IC (zerostep) is
+        # checked with physics="none"; but for the HS arm the IC is the MOIST
+        # cold-start (adiabatic=.false.), so it must be checked as moist=True or
+        # the adiabatic==not-moist assertion would reject it.
         check_deck_matches_the_arm(
-            _r, nh=args.nh, moist=args.moist,
-            physics=(args.physics if _r == args.step_run else "none"),
+            _r, nh=args.nh,
+            moist=(args.moist or
+                   (args.physics == "held_suarez" and not _is_step)),
+            physics=(args.physics if _is_step else "none"),
             consv=args.consv)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
@@ -1440,7 +1470,8 @@ def main(argv=None):
     # ---------------- instrument control: the IC ----------------
     state, sphum6 = build_port_ic(
         ctx, ak, bk, nh=args.nh,
-        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0)
+        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0)
+        if (args.moist or args.physics == "held_suarez") else 0.0)
     p_ic = port_window(state, ctx)
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
@@ -1739,13 +1770,19 @@ def main(argv=None):
                       # ADVECTED_TRACERS, matching build_port_tracer_ic.
                       **({"zvir": FV3_RVGAS / FV3_RDGAS - 1.0,
                           "sphum_index": ADVECTED_TRACERS.index("sphum")}
-                         if args.moist else {}),
+                         if (args.moist or args.physics == "held_suarez")
+                         else {}),
                       **({"consv_te": args.consv} if args.consv else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     if args.physics == "held_suarez":
+        # do_strat_HS_forcing (fv_arrays default .true.) selects the strat/meso
+        # regimes inside Held_Suarez_Tend; read it from the deck, do not assume.
+        _hs_strat = _nml_logical(_nml_text(args.step_run), "do_strat_HS_forcing")
+        _hs_strat = True if _hs_strat is None else _hs_strat
         # fv_phys + fv_update_phys, in place on the post-dynamics state
-        apply_held_suarez_step(ctx, state, press, dt=args.dt, n=n, ng=ng, km=KM)
+        apply_held_suarez_step(ctx, state, press, dt=args.dt, n=n, ng=ng, km=KM,
+                               strat=_hs_strat)
     p_1 = port_window(state, ctx)
 
     if args.moist or args.consv:
