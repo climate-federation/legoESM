@@ -93,16 +93,81 @@ def main(argv=None):
     lm = float(np.mean(leak[body])); ls = float(np.std(leak[body]))
     wm = float(np.mean(dEdt[body]))
     print(f"\nLEAK  mean={lm:+.3f}  std={ls:.3f}  W/m^2   (dE_dt mean={wm:+.3f})")
-    print(f"warming rate ~ {wm/ (1004.64*(1.0e5/9.80616)) * 86400:.4f} K/day-equiv "
-          "(dE_dt / (c_pd * p_s/g))")
-    if abs(lm) > 5.0:
-        print("VERDICT: LEAK is LARGE (>5 W/m^2) — energy not conserved in the "
-              "budget; consistent with an internal bookkeeping source (verify "
-              "the instrument caveat before quoting).")
-    else:
-        print("VERDICT: LEAK small (<5 W/m^2) — the atmospheric energy budget "
-              "CLOSES; the warming is a real flux imbalance, not internal "
+
+    # GLM offset-separation (the "large & growing => real" discriminator is
+    # UNSOUND: a MSE-vs-model-energy offset scales with d/dt of column water
+    # and with P, both of which grow during the runaway).  Regress LEAK against
+    # the thermodynamic-bookkeeping predictors we can build from the saved
+    # fields: d(CWV)/dt [latent term, kg/m^2/s] and hfls [~ evaporation/precip].
+    # High R^2 => the leak IS an instrument offset, not internal creation; the
+    # UNEXPLAINED residual is the only part that could be a real leak.
+    cwv = _load_series(a.run_dir, "CWV", n)
+    hfls_s = hfls[:n]
+    verdict_extra = ""
+    if cwv is not None and len(cwv) >= n:
+        dt_s = _median_dt_seconds(a.run_dir, n)
+        dcwv_dt = np.gradient(cwv[:n]) / dt_s              # kg/m^2/s
+        X = np.column_stack([np.ones(n), dcwv_dt, hfls_s])[body]
+        y = leak[body]
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        pred = X @ coef
+        ss_res = float(np.sum((y - pred) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2)) or 1.0
+        r2 = 1.0 - ss_res / ss_tot
+        resid_leak = y - pred
+        rl_mean = float(np.mean(resid_leak))
+        print(f"\noffset-regression  LEAK ~ c0 + c1*d(CWV)/dt + c2*hfls")
+        print(f"  R^2={r2:.3f}  c0={coef[0]:+.3f}  c1={coef[1]:+.3e}  c2={coef[2]:+.4f}")
+        print(f"  UNEXPLAINED residual leak  mean={rl_mean:+.3f}  "
+              f"std={float(np.std(resid_leak)):.3f} W/m^2")
+        if r2 >= 0.7:
+            verdict_extra = (f"the leak is largely EXPLAINED by thermodynamic "
+                             f"bookkeeping (R^2={r2:.2f}) => INSTRUMENT OFFSET, "
+                             f"not internal creation; residual leak "
+                             f"{rl_mean:+.2f} W/m^2 is the only candidate real term.")
+        else:
+            verdict_extra = (f"the leak is NOT explained by d(CWV)/dt or hfls "
+                             f"(R^2={r2:.2f}) => not a simple MSE offset; a real "
+                             f"internal source is in play.")
+    print()
+    if abs(lm) <= 5.0:
+        print("VERDICT: |LEAK| <= 5 W/m^2 — the atmospheric energy budget CLOSES; "
+              "the warming (if any) is a real flux imbalance, not internal "
               "energy creation.")
+    else:
+        print(f"VERDICT: |LEAK| = {abs(lm):.1f} W/m^2 is large. " + (verdict_extra or
+              "Run the offset-regression (needs CWV) before convicting the model: "
+              "a MSE-vs-model-energy offset can masquerade as a leak (GLM)."))
+    # DO NOT use 'large & growing' as the discriminator — GLM: an instrument
+    # offset grows with the signal too. The regression residual is the verdict.
+
+
+def _load_series(run_dir, key, n):
+    incr = os.path.join(run_dir, "timeseries_incremental")
+    cfiles = sorted(f for f in glob.glob(os.path.join(incr, "chunk_*.npz"))
+                    if "energy_chunk" not in f and "moisture_chunk" not in f)
+    vals = []
+    for f in cfiles:
+        z = np.load(f)
+        if key in z.files:
+            vals.append(np.asarray(z[key], dtype=np.float64))
+    return np.concatenate(vals) if vals else None
+
+
+def _median_dt_seconds(run_dir, n):
+    incr = os.path.join(run_dir, "timeseries_incremental")
+    for f in sorted(glob.glob(os.path.join(incr, "chunk_*.npz"))):
+        if "energy_chunk" in f or "moisture_chunk" in f:
+            continue
+        z = np.load(f)
+        for tk in ("time_seconds", "elapsed_seconds", "times_seconds", "time_days"):
+            if tk in z.files:
+                t = np.asarray(z[tk], dtype=np.float64)
+                if tk == "time_days":
+                    t = t * 86400.0
+                if len(t) >= 2:
+                    return float(np.median(np.diff(t)))
+    return 86400.0        # fall back to daily (--diag-days 1)
 
 
 if __name__ == "__main__":
