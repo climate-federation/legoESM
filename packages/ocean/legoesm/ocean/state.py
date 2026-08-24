@@ -1324,12 +1324,25 @@ class BarotropicConfig(NamedTuple):
     # forward-Euler first step (``state.u_before is None``), which returns
     # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
     # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken) -- but NOT empty for a
-    # FROM-REST run of a card that ships this option, which since #1455 R6
-    # includes nemo_dino_kamm_mlf and therefore its from-rest drivers
+    # real one-step gap. It is NOT empty for a bridged/restart twin, which is
+    # the correction #1640 forced: ``u_before`` arrives populated only under
+    # the twin runner's OPT-IN ``--bridge-before``, and the shipped
+    # ``kamm_twin_90d.py`` defaults it OFF -- so the campaign's own 90-day DINO
+    # twin enters step 1 with ``u_before is None`` and takes this branch. (The
+    # previous wording here, "It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken)", is RETRACTED: it was
+    # true of a --bridge-before run and asserted of every run.) The same
+    # applies to a genuine FROM-REST run of a card that ships this option,
+    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
+    # from-rest drivers
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
-    # acc_momentum_budget.py). Those miss NEMO's reconciliation on step 1 only.
+    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
+    # 1 only. The step is no longer SILENT: the model emits a one-time
+    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
+    # Euler start is taken with the option on. Not a raise, deliberately --
+    # refusing it would break the shipped twin's default invocation; closing
+    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
+    # implicit-vmix path (named and costed at that helper, not done).
     # Selecting this on an outer_integrator that has no such site
     # (forward_euler, ab2) is rejected at model construction, not ignored.
     #

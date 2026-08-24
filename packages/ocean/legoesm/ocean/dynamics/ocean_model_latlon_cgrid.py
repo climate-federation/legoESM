@@ -66,6 +66,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks,
     compute_face_masks_3d,
     divergence_cgrid,
+    interp_cell_to_uface,
+    interp_cell_to_vface,
     min_cell_to_uface,
     min_cell_to_vface,
 )
@@ -7902,6 +7904,63 @@ class LatLonCGridOceanModel:
                               dims=state.v.dims, units=state.v.units),
         )
 
+    _WARNED_EULER_SKIP: set = set()
+
+    def _warn_euler_start_skips_after_reconcile(self):
+        """Say out loud that NEMO's SECOND reconciliation is skipped here.
+
+        #1640 finding 3.  The forward-Euler start (``state.u_before is None``)
+        returns from ``_step_impl`` before ``_apply_after_level_reconcile``
+        ever runs, so on THAT step the implicit vertical solve's depth-mean
+        deposit is COMMITTED, where NEMO removes it: NEMO runs
+        ``mlf_baro_corr`` on its ``l_1st_euler`` step too.  One step in the
+        run, but the card claims the reference's second-site behaviour on
+        every step, and it was silent.
+
+        WHY A WARNING AND NOT A RAISE, stated so the next reader does not
+        "harden" it into one.  Refusing this combination would break the
+        SHIPPED default: ``kamm_twin_90d.py`` takes ``bridge_before=False`` by
+        default, so the 90-day DINO twin — on a card that ships
+        ``barotropic_after_reconcile="nemo_mlf_baro_corr"`` — enters step 1
+        with ``u_before is None`` and hits this branch.  A raise would refuse
+        the campaign's own production run.  Closing the gap for real means
+        surfacing the barotropic depth mean (``btu_exp``/``btv_exp``) from the
+        ``_apply_implicit_vmix=True`` path, which changes ``_step_impl``'s
+        return contract at ~8 call sites — named, costed, NOT done here.
+
+        RETRACTED (``state.py`` barotropic_after_reconcile note, which said the
+        gap "is empty for a bridged/restart twin (u_before arrives populated,
+        so that branch is never taken)"): it is NOT empty for the default twin.
+        ``u_before`` arrives populated only under ``--bridge-before``, which is
+        opt-in.
+
+        Emitted once per process: this fires on step 1, and a per-step warning
+        inside a scan-driven run would be noise, not signal.
+        """
+        if self.config.barotropic.barotropic_after_reconcile == "off":
+            return
+        # keyed by CALL SITE, not a single process-wide bool: the two outer
+        # steps have separate early-return branches, and a single flag let
+        # whichever ran first consume the warning forever -- the second site
+        # was then unobservable, which is the silent degradation this exists
+        # to remove (review finding).
+        import sys
+        site = sys._getframe(1).f_code.co_name
+        if site in type(self)._WARNED_EULER_SKIP:
+            return
+        type(self)._WARNED_EULER_SKIP.add(site)
+        import warnings
+        warnings.warn(
+            f"[{site}] barotropic_after_reconcile="
+            f"{self.config.barotropic.barotropic_after_reconcile!r} is ON, but "
+            "this step is the forward-Euler start (no before-level), which "
+            "returns before the reconciliation site. NEMO DOES run "
+            "mlf_baro_corr on its l_1st_euler step, so this step alone commits "
+            "a depth-mean deposit NEMO removes. Bridge the before-level "
+            "(--bridge-before on the DINO twin) to avoid the Euler start "
+            "entirely, or treat step 1 as off-reference.",
+            RuntimeWarning, stacklevel=3)
+
     def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,
                                      u_mask3, v_mask3, grid):
         """NEMO ``mlf_baro_corr``, the SECOND depth-mean reconciliation.
@@ -7962,13 +8021,61 @@ class LatLonCGridOceanModel:
         h_k_ref = compute_layer_thickness(
             jnp.zeros_like(naa.eta.data), state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m)
+        # CELL -> FACE BY THE ARITHMETIC MEAN, via the SHARED
+        # ``interp_cell_to_uface``/``interp_cell_to_vface`` (grids.
+        # operators_latlon_cgrid) -- NOT a local reimplementation: those pad
+        # the lon halo with ``pad_lon_cgrid`` and the lat halo with
+        # ``pad_ns_scalar``, so they span a 2-D partition cut and the north
+        # fold, which a rank-local ``jnp.roll`` would not.
+        #
+        # WHY THE MEAN, AND EXACTLY HOW FAR THAT GOES.  This kernel weights by
+        # NEMO's REFERENCE face thickness ``e3u_0``, and NEMO BUILDS THAT TWO
+        # DIFFERENT WAYS.  Which one is right is a property of the DOMAIN
+        # BUILDER that produced the grid, NOT of ``ln_zco`` vs ``ln_zps``:
+        #   * DINO / usrdef grids average --
+        #     ``pe3u = 0.50_wp * ( pe3t(ji,jj,jk) + pe3t(ji+1,jj,jk) )``,
+        #     ``cfgs/DINO/MY_SRC/zgr_lib.F90:231``.  ``usr_def_zgr`` reaches
+        #     it via ``zgr_sco_mi96`` on BOTH its ``ld_zco`` branch and its
+        #     else branch (``usrdef_zgr.F90:108-139``), so a DINO-built grid
+        #     averages whatever the ln_zco/ln_zps flag says.
+        #   * DOMAINcfg partial-step grids take the MINIMUM --
+        #     ``e3u_0 = MIN( e3t_0(ji,jj,jk), e3t_0(ji+1,jj,jk) )``,
+        #     ``tools/DOMAINcfg/src/domzgr.F90:1166``, inside ``SUBROUTINE
+        #     zgr_zps`` (:987).  So ``min_cell_to_uface`` is NOT merely the
+        #     MOM6/MITgcm ``hFacW`` convention -- it is ALSO NEMO's own rule
+        #     for that grid class.  (An earlier revision of this comment said
+        #     min was "a DIFFERENT quantity" full stop.  RETRACTED.)
+        # The mean is therefore the faithful choice for the ONLY card that
+        # ships this option (``nemo_dino_kamm_mlf``, a DINO-built grid).
+        #
+        # WHAT THIS CHANGE ACTUALLY DOES, stated without overclaiming: it is
+        # INERT on every card that ships the option, EXACTLY -- ``masked_zco``
+        # makes each cell thickness ``h_partial in {0, dz_ref[k]}``, so at any
+        # face the both-cells-wet mask leaves open, both cells carry
+        # ``dz_ref[k]`` and min == mean bit-for-bit (measured over the whole
+        # DINO geometry; closed faces differ but the kernel zeroes them).  It
+        # would MATTER, and would be WRONG, only on a DOMAINcfg partial-step
+        # grid -- which no card enabling this option uses.  Selecting the rule
+        # from the builder instead of hardcoding it is tracked as debt D2.5
+        # (``docs/ocean/fidelity/dino_outstanding_fidelity_debt.md``); it is
+        # deliberately NOT built here, because no such card exists and the two
+        # rules are indistinguishable on every card that does, so the selector
+        # would ship untested.
+        #
+        # RELATED, NOT FIXED HERE (same debt row): the TARGET this installs,
+        # ``btu_exp``, comes from the barotropic solve, whose column depth is
+        # built with the MIN rule.  On a grid where the two rules differ, the
+        # weighting and the target would disagree end-to-end.  On every card
+        # that ships this option they are the same number.
+        #
         # floor matches the caller's own ``_split`` (depth_mean(..., 1.0e-10)),
         # so the two means this composes are taken with the same land guard.
         u_rec = after_level_column_mean_reconcile(
-            naa.u.data, min_cell_to_uface(h_k_ref), btu_exp, u_mask3, 1.0e-10)
+            naa.u.data, interp_cell_to_uface(h_k_ref), btu_exp, u_mask3,
+            1.0e-10)
         u_rec = u_rec.at[:, -1].set(u_rec[:, 0])          # periodic-lon wrap
         v_rec = after_level_column_mean_reconcile(
-            naa.v.data, min_cell_to_vface(h_k_ref, grid), btv_exp,
+            naa.v.data, interp_cell_to_vface(h_k_ref, grid), btv_exp,
             v_mask3, 1.0e-10)
         return naa._replace(u=naa.u.replace(data=u_rec),
                             v=naa.v.replace(data=v_rec))
@@ -8115,6 +8222,7 @@ class LatLonCGridOceanModel:
         # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
         #     Populate Nbb with the pre-step now-fields for the next step.
         if state.u_before is None:
+            self._warn_euler_start_skips_after_reconcile()
             # NEMO's cold-start Euler step does NOT run with an undefined
             # before-level: istate.F90:97-99/135-137 sets Kmm := Kbb (ts/uu/vv
             # copied onto BOTH time-level array slots) before stp_MLF is ever
@@ -8559,6 +8667,7 @@ class LatLonCGridOceanModel:
         #     combine degenerate to forward-Euler regardless of which method
         #     performs it, so there is nothing MLF-specific to transcribe here.
         if state.u_before is None:
+            self._warn_euler_start_skips_after_reconcile()
             _entry = state._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
