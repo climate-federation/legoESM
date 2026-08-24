@@ -236,7 +236,21 @@ def fv_update_phys_dry_duo(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     v ``(m+1,m,npz)``; vlon, vlat ``(m,m,3)``, es1 ``(m,m+1,3)``, ew2
     ``(m+1,m,3)`` the level-invariant wind-vector metrics consumed by
     ``update_dwinds_phys_duo``; ng the halo width (>=1).  The cell count n is
-    recovered as ``pt.shape[0] - 2*ng``.  Returns fresh
+    recovered as ``pt.shape[0] - 2*ng``.
+
+    PRECONDITION -- exchanged tendency halos.  The D-grid projection reads the
+    ONE-CELL halo of ``u_dt``/``v_dt``, so the caller MUST pass them with their
+    one-cell cross-face halos ALREADY EXCHANGED.  With ``dwind_2d=.false.`` (the
+    HS deck) the Fortran completes a ``whalo=ehalo=shalo=nhalo=1`` group update
+    on ``u_dt``/``v_dt`` before ``update_dwinds_phys`` (fv_update_phys.F90:645,
+    698, 761).  This per-face kernel does NOT exchange them -- that is a six-face
+    operation for the end-to-end assembly, exactly as ``update_dwinds_phys_duo``
+    requires already-exchanged ``es``/``ew``.
+
+    OMITS the surface-wind diagnostics ``u_srf = ua[...,npz-1]`` /
+    ``v_srf = va[...,npz-1]`` (fv_update_phys.F90:675-676) and the ``phys_diag``
+    tendency archive: both are diagnostics, not core prognostic state, and are
+    not needed for the fv_core one-step parity.  Returns fresh
     ``(u_new, v_new, pt_new, ua_new, va_new)``; no input is mutated.
 
     The Fortran's single ``update_dwinds_phys`` (k-loop internal) is factored to
@@ -249,9 +263,17 @@ def fv_update_phys_dry_duo(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     n = pt.shape[0] - 2 * ng   # cell count; the helper derives m = n + 2*ng
     npz = pt.shape[2]
 
-    pt_new = pt + t_dt * dt
-    ua_new = ua + u_dt * dt
-    va_new = va + v_dt * dt
+    # Scalar/A-grid update on the COMPUTE DOMAIN only (Fortran loops i=is:ie,
+    # j=js:je; fv_update_phys.F90:365-373,420-427).  Halos are left as passed --
+    # the oracle does NOT touch them here, and the D-grid projection below reads
+    # the u_dt/v_dt halos, not ua/va.
+    ci = slice(ng, ng + n)
+    pt_new = pt.copy()
+    ua_new = ua.copy()
+    va_new = va.copy()
+    pt_new[ci, ci] = pt[ci, ci] + t_dt[ci, ci] * dt
+    ua_new[ci, ci] = ua[ci, ci] + u_dt[ci, ci] * dt
+    va_new[ci, ci] = va[ci, ci] + v_dt[ci, ci] * dt
 
     u_new = np.empty_like(u, dtype=np.float64)
     v_new = np.empty_like(v, dtype=np.float64)
@@ -284,9 +306,11 @@ def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     n = int(pt.shape[0]) - 2 * ng   # cell count; helper derives m = n + 2*ng
     npz = int(pt.shape[2])
 
-    pt_new = pt + t_dt * dt
-    ua_new = ua + u_dt * dt
-    va_new = va + v_dt * dt
+    # compute-domain-only scalar/A-grid update (see the NumPy authority)
+    ci = slice(ng, ng + n)
+    pt_new = pt.at[ci, ci].set(pt[ci, ci] + t_dt[ci, ci] * dt)
+    ua_new = ua.at[ci, ci].set(ua[ci, ci] + u_dt[ci, ci] * dt)
+    va_new = va.at[ci, ci].set(va[ci, ci] + v_dt[ci, ci] * dt)
 
     u_new = jnp.zeros_like(u)
     v_new = jnp.zeros_like(v)

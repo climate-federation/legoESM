@@ -283,13 +283,21 @@ def _args3d(c):
             c["t_dt"], c["dt"], c["vlon"], c["vlat"], c["es1"], c["ew2"], NG)
 
 
-def test_orchestrator_scalar_update_is_dry_hydrostatic(case3d):
-    """pt/ua/va advance by the plain tendency*dt (dry cp factor = 1.0)."""
+def test_orchestrator_scalar_update_is_dry_and_compute_domain_only(case3d):
+    """pt/ua/va advance by tendency*dt (dry cp factor = 1.0) on the COMPUTE
+    DOMAIN only; halos are left exactly as passed (Fortran loops i=is:ie,
+    j=js:je).  A full-array update -- the pre-fix behaviour -- fails the
+    halo-unchanged check because t_dt/u_dt/v_dt are nonzero in the halo."""
     c = case3d
     _, _, pt_n, ua_n, va_n = fv_update_phys_dry_duo(*_args3d(c))
-    np.testing.assert_allclose(pt_n, c["pt"] + c["t_dt"] * c["dt"], rtol=0, atol=0)
-    np.testing.assert_allclose(ua_n, c["ua"] + c["u_dt"] * c["dt"], rtol=0, atol=0)
-    np.testing.assert_allclose(va_n, c["va"] + c["v_dt"] * c["dt"], rtol=0, atol=0)
+    ci = slice(NG, NG + N)
+    np.testing.assert_allclose(pt_n[ci, ci], c["pt"][ci, ci] + c["t_dt"][ci, ci] * c["dt"], rtol=0, atol=0)
+    np.testing.assert_allclose(ua_n[ci, ci], c["ua"][ci, ci] + c["u_dt"][ci, ci] * c["dt"], rtol=0, atol=0)
+    np.testing.assert_allclose(va_n[ci, ci], c["va"][ci, ci] + c["v_dt"][ci, ci] * c["dt"], rtol=0, atol=0)
+    for new_, old_ in ((pt_n, c["pt"]), (ua_n, c["ua"]), (va_n, c["va"])):
+        halo = np.ones(new_.shape[:2], bool)
+        halo[ci, ci] = False
+        np.testing.assert_array_equal(new_[halo], old_[halo])
 
 
 def test_orchestrator_dgrid_is_the_per_level_helper(case3d):
