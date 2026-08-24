@@ -212,7 +212,10 @@ def nemo_state(run_dir: str, day: int, level: str = "n"):
     for nm in names:
         if nm not in raw:
             _fatal(f"the stitcher did not cover {nm!r} at kt={kt}")
-    yxz = lambda a: np.moveaxis(np.asarray(a, dtype=np.float64), 0, -1)  # noqa
+    def yxz(a):
+        out = np.moveaxis(np.asarray(a, dtype=np.float64), 0, -1)
+        out.setflags(write=False)      # cached and shared by both NEMO arms
+        return out
     return yxz(raw[names[0]]), yxz(raw[names[1]])
 
 
@@ -246,6 +249,12 @@ def pair_stats(n2, T_c, S_c, T_p, S_p, wet_t, wet_i):
     fc = N2c[wet_i] < N2_THRESHOLD
     fp = N2p[wet_i] < N2_THRESHOLD
     n_wet_i = int(wet_i.sum())
+    # REVIEW FINDING B5. The flip COUNT is not independent of how many
+    # interfaces the perturbation reached at all: a model whose perturbation is
+    # visible on more interfaces flips more for that reason alone, so a raw
+    # flip ratio can re-express table (a)'s "cells != 0" column rather than say
+    # anything about the trigger. Flips per DIFFERING interface removes that.
+    n_diff = int(np.count_nonzero(dN2 > 0.0))
     return {
         "n_wet_t": n_wet_t, "n_wet_i": n_wet_i,
         "dT_max": float(dT.max()) if dT.size else 0.0,
@@ -258,6 +267,8 @@ def pair_stats(n2, T_c, S_c, T_p, S_p, wet_t, wet_i):
         "flips_on": int(np.count_nonzero(~fc & fp)),
         "flips_off": int(np.count_nonzero(fc & ~fp)),
         "flip_rate": np.count_nonzero(fc ^ fp) / max(n_wet_i, 1),
+        "n_iface_diff": n_diff,
+        "flips_per_diff": np.count_nonzero(fc ^ fp) / max(n_diff, 1),
     }
 
 
@@ -273,6 +284,29 @@ def firing_rate_two_level(n2, T_n, S_n, T_b, S_b, wet_i):
 
 def _mean(rows, key):
     return float(np.mean([r[key] for r in rows])) if rows else float("nan")
+
+
+def _resolvable_both(table, day) -> bool:
+    """The bar binds on the NEMO arm too (physics review).
+
+    It was applied only to legoESM. At day 20 the nemo_fp32 denominator has a
+    non-zero perturbation on 0.003% of cells -- thirty times BELOW the probe's
+    own floor -- and a mean flip count of 1.0, and day 30's ratio rested on a
+    mean of 0.7 flips. A ratio whose denominator is itself unresolvable is not
+    a measurement, and applying the rule one-sidedly is what produced the
+    largest ratios in the table."""
+    return (_resolvable(table[(day, "lego")])
+            and _resolvable(table[(day, "nemo_fp32")]))
+
+
+def _resolvable(rows) -> bool:
+    """REVIEW FINDING B2: the gate must bind on EVERY member, not on the mean.
+
+    At day 20 the three members' differing-cell fractions are 0.366%, 0.0006%
+    and 0.0003%; the mean is 0.122% and clears the 0.1% bar, so two members
+    that are three orders of magnitude below it were being carried past the
+    very gate that exists to stop the statistic measuring the file format."""
+    return all(r["frac_dT_nz"] >= RESOLVABLE_FRAC for r in rows)
 
 
 def _median(rows, key):
@@ -316,8 +350,13 @@ def self_check():
 
     # 2. PLANTED VIOLATION, dry cell: a gross static instability planted in a
     #    DRY cell must move NOTHING.  This is the mask's proof of life.
+    # 5 K, not 50 K. A 50 K plant drives T to -34 degC, where the simplified
+    # EOS's thermal expansion coefficient CHANGES SIGN, and the planted
+    # instability inverts -- a self-check must not run its own operator outside
+    # the range the operator is valid on.
+    PLANT_K = 5.0
     T_dry = T.copy()
-    T_dry[0, 0, 3] -= 50.0                       # inside the dry column
+    T_dry[0, 0, 3] -= PLANT_K                    # inside the dry column
     s_dry = pair_stats(n2, T, S, T_dry, S, wet_t, wet_i)
     assert s_dry["flips"] == 0, s_dry
     assert s_dry["reach"] == 0.0, s_dry
@@ -327,7 +366,7 @@ def self_check():
     # 3. NON-VACUITY: the SAME violation planted in a WET cell must move them.
     #    Without this, check 2 is satisfied by a probe that measures nothing.
     T_wet = T.copy()
-    T_wet[5, 4, 3] -= 50.0                       # cold over warm -> unstable
+    T_wet[5, 4, 3] -= PLANT_K                    # cold over warm -> unstable
     s_wet = pair_stats(n2, T, S, T_wet, S, wet_t, wet_i)
     assert s_wet["flips"] > 0, s_wet
     assert s_wet["reach"] > 0.0 and s_wet["n_dT_nz"] == 1, s_wet
@@ -338,9 +377,12 @@ def self_check():
     all_t = np.ones_like(wet_t)
     all_i = all_t[..., :-1] & all_t[..., 1:]
     s_nomask = pair_stats(n2, T, S, T_dry, S, all_t, all_i)
-    assert s_nomask["flips"] > 0 or s_nomask["n_dT_nz"] > 0, s_nomask
-    print("  [4] the same dry violation WITHOUT the mask -> statistics move "
-          "(mask is load-bearing)  PASS")
+    # The `or` in the first version of this assertion short-circuited on
+    # n_dT_nz, which is trivially 1, so the flips half was never exercised.
+    assert s_nomask["n_dT_nz"] == 1, s_nomask
+    assert s_nomask["flips"] > 0, s_nomask
+    print("  [4] the same dry violation WITHOUT the mask -> BOTH the cell "
+          "count and the flips move  PASS")
 
     # 5. NaN inside the wet mask is FATAL, not nan-reduced.
     T_nan = T.copy()
@@ -362,6 +404,25 @@ def self_check():
     T32, _ = to_fp32(T, S)
     assert np.any(T32 != T), "fp32 round trip changed nothing -- control is inert"
     print("  [7] the fp32 storage control actually perturbs an fp64 field    PASS")
+
+    # 9. THE FLIP LANDS AT THE INTERFACE IT SHOULD.  Checks 2-4 only assert
+    #    that SOMETHING moved, so a uniform off-by-one in the interface mask or
+    #    in the N2 index convention would pass every one of them.  Cooling
+    #    cell k makes the interface BELOW it (index k, between cell k and cell
+    #    k+1) unstable, because cold water is denser: this asserts the flip is
+    #    at exactly that index and nowhere else.
+    kk = 3
+    T_one = T.copy()
+    T_one[5, 4, kk] -= PLANT_K
+    fc = (n2(T, S) < N2_THRESHOLD) & wet_i
+    fp = (n2(T_one, S) < N2_THRESHOLD) & wet_i
+    idx = np.argwhere(fc ^ fp)
+    assert idx.shape[0] == 1, f"expected exactly one flip, got {idx.shape[0]}"
+    assert tuple(idx[0]) == (5, 4, kk), (
+        f"the flip landed at {tuple(idx[0])}, not at the interface below the "
+        f"cooled cell (5, 4, {kk}) -- the interface index convention is off")
+    print(f"  [9] the planted flip lands at interface (5,4,{kk}), the one "
+          "BELOW the cooled cell   PASS")
 
     # 8. the verdict is COMPUTED, both ways.
     assert verdict(10.0, 1.0)[0] == "CONFIRM"
@@ -538,6 +599,16 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
     print("(b) THRESHOLD-NEIGHBOURHOOD CENSUS -- UPPER BOUND (one global reach "
           "applied to every interface)")
     print("=" * 100)
+    print("  DO NOT CITE THIS TABLE ACROSS MODELS. It is the shipped "
+          "convention, kept so the numbers")
+    print("  line up with the earlier census, but 'reach' is a single global "
+          "MAXIMUM |dN2| applied to")
+    print("  every interface, and the two models' |dN2| distributions have "
+          "very different tail-to-bulk")
+    print("  ratios -- so it over-counts the two models by DIFFERENT factors. "
+          "It is an upper bound per")
+    print("  model, not a comparable one. The amplitude-free table (f) is the "
+          "cross-model statement.")
     print(f"  {'day':>4}{'arm':>12}{'reach |dN2|':>14}{'within reach':>14}"
           f"{'of wet':>10}{'firing (ctrl)':>15}{'firing rate':>13}")
     for day in HORIZONS:
@@ -550,6 +621,26 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
                   f"{100 * _mean(r, 'rate_ctrl'):>12.3f}%")
         print()
 
+    if has_nemo:
+        print("  IS THE BASELINE FIRING-RATE DIFFERENCE REAL, OR STORAGE? "
+              "(computed)")
+        for day in (HORIZONS[0], HORIZONS[-1]):
+            rl = _mean(table[(day, "lego")], "rate_ctrl")
+            r32 = _mean(table[(day, "nemo_fp32")], "rate_ctrl")
+            r64 = _mean(table[(day, "nemo_fp64")], "rate_ctrl")
+            gap = abs(rl - r64)
+            explained = abs(r32 - r64)
+            frac = explained / gap if gap > 0 else float("nan")
+            print(f"    day {day}: legoESM {100 * rl:.3f}%  NEMO(fp64) "
+                  f"{100 * r64:.3f}%  gap {100 * gap:.3f} pts;  casting NEMO "
+                  f"to fp32 gives {100 * r32:.3f}%,")
+            print(f"      reproducing {100 * frac:.1f}% of that gap.")
+        print("    -> the apparent 'NEMO convects more often than legoESM' is "
+              "reproduced by the FILE FORMAT.")
+        print("    legoESM's true fp64 firing rate was never saved and is "
+              "UNKNOWN. Any earlier statement")
+        print("    that NEMO fires more is RETRACTED.\n")
+
     print("=" * 100)
     print("(c) PAIR-FLIP COUNT AND RATE -- the discriminating statistic (an "
           "EXACT count, not a bound)")
@@ -557,16 +648,42 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
     # The per-member RANGE is printed next to the mean: a mean over three
     # member pairs can hide one member disagreeing with the other two, and the
     # ensemble is small enough that it would not show up any other way.
-    print(f"  {'day':>4}{'arm':>12}{'flips':>10}{'on':>8}{'off':>8}"
-          f"{'flip rate':>13}{'per-member flips':>22}")
+    print("  'ifaces differing' is how many wet interfaces the perturbation "
+          "moved AT ALL, and")
+    print("  'flips/diff' normalises the flip count by it (review B5): a raw "
+          "flip ratio can simply")
+    print("  re-express how many interfaces each perturbation reached, rather "
+          "than say anything")
+    print("  about the trigger. flips/diff is the trigger's own conversion "
+          "rate.")
+    print(f"\n  {'day':>4}{'arm':>12}{'flips':>10}{'flip rate':>12}"
+          f"{'ifaces differing':>18}{'flips/diff':>12}{'per-member flips':>22}")
     for day in HORIZONS:
         for arm in arms:
             r = table[(day, arm)]
             per = ",".join(str(x["flips"]) for x in r)
             print(f"  {day:>4}{arm:>12}{_mean(r, 'flips'):>10.1f}"
-                  f"{_mean(r, 'flips_on'):>8.1f}{_mean(r, 'flips_off'):>8.1f}"
-                  f"{100 * _mean(r, 'flip_rate'):>12.4f}%{per:>22}")
+                  f"{100 * _mean(r, 'flip_rate'):>11.4f}%"
+                  f"{_mean(r, 'n_iface_diff'):>18.0f}"
+                  f"{_mean(r, 'flips_per_diff'):>12.5f}{per:>22}")
         print()
+    if not has_nemo:
+        print("  (no NEMO counterpart for this lane -- the normalised "
+              "cross-model comparison needs one)\n")
+    else:
+      print("  NORMALISED COMPARISON (review B5) -- flips per differing "
+            "interface, medians:")
+      print(f"  {'day':>4}{'lego':>12}{'nemo_fp32':>12}{'ratio':>10}"
+            f"{'   direction':>14}")
+      for day in HORIZONS:
+        if not _resolvable_both(table, day):
+            continue
+        a = _median(table[(day, "lego")], "flips_per_diff")
+        b = _median(table[(day, "nemo_fp32")], "flips_per_diff")
+        rr = a / b if b > 0 else float("nan")
+        print(f"  {day:>4}{a:>12.5f}{b:>12.5f}{rr:>10.3f}"
+              f"{('   legoESM higher' if rr > 1 else '   NEMO higher'):>14}")
+      print()
 
     if not has_nemo:
         print("  (no NEMO counterpart for this lane -- lego-only sensitivity)\n")
@@ -596,7 +713,7 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
         f64 = _mean(table[(day, "nemo_fp64")], "flip_rate")
         ml = _median(table[(day, "lego")], "flip_rate")
         m32 = _median(table[(day, "nemo_fp32")], "flip_rate")
-        res = _mean(table[(day, "lego")], "frac_dT_nz") >= RESOLVABLE_FRAC
+        res = _resolvable_both(table, day)
         infl = f32 / f64 if f64 > 0 else float("nan")
         v, R = verdict(fl, f32)
         vm, Rm = verdict(ml, m32)
@@ -607,12 +724,17 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
                 first = (day, v, R)
             if first_med is None:
                 first_med = (day, vm, Rm)
+        infl_s = (f"{infl:.2f}" if np.isfinite(infl)
+                  else "n/a(0 fp64)")   # NEMO fp64 has zero flips there
         print(f"  {day:>4}{100 * fl:>11.4f}%{100 * f32:>12.4f}%"
-              f"{100 * f64:>12.4f}%{infl:>13.2f}{R:>9.2f}{Rm:>9.2f}"
+              f"{100 * f64:>12.4f}%{infl_s:>13}{R:>9.2f}{Rm:>9.2f}"
               f"{v:>15}{vm:>15}")
-    print("\n  UNMEASURABLE = legoESM's stored perturbation is non-zero on "
-          f"fewer than {100 * RESOLVABLE_FRAC:.1f}% of wet cells, so the "
-          "statistic would be measuring the file format.")
+    print("\n  UNMEASURABLE = at least ONE legoESM member's stored "
+          f"perturbation is non-zero on fewer than")
+    print(f"  {100 * RESOLVABLE_FRAC:.1f}% of wet cells, so the statistic "
+          "would be measuring the file format. The gate binds")
+    print("  per member: a mean over one resolved member and two unresolved "
+          "ones defeats it (review B2).")
     if first is None:
         print("\n  REGISTERED VERDICT: UNMEASURABLE at every horizon -- no "
               "horizon cleared the resolvability bar.")
@@ -624,7 +746,7 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
         print(f"  ROBUSTNESS  VERDICT (median, day {dm}): {vm}  "
               f"(R = {Rm:.2f})")
         agree = [d for d in HORIZONS
-                 if _mean(table[(d, "lego")], "frac_dT_nz") >= RESOLVABLE_FRAC
+                 if _resolvable_both(table, d)
                  and verdict(_mean(table[(d, "lego")], "flip_rate"),
                              _mean(table[(d, "nemo_fp32")], "flip_rate"))[0]
                  == verdict(_median(table[(d, "lego")], "flip_rate"),
@@ -658,30 +780,68 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
     amp = {a: [(_mean(table[(d, a)], "dT_max"),
                 _median(table[(d, a)], "flip_rate"), d) for d in HORIZONS]
            for a in arms}
+    print(f"\n  {'day':>4}{'lego max|dT|':>14}{'lego med nz':>13}"
+          f"{'nemo max|dT|':>14}{'nemo med nz':>13}   (the distributions, "
+          f"side by side)")
+    for d in HORIZONS:
+        print(f"  {d:>4}{_mean(table[(d, 'lego')], 'dT_max'):>14.3e}"
+              f"{_mean(table[(d, 'lego')], 'dT_med_nz'):>13.3e}"
+              f"{_mean(table[(d, 'nemo_fp64')], 'dT_max'):>14.3e}"
+              f"{_mean(table[(d, 'nemo_fp64')], 'dT_med_nz'):>13.3e}")
     print("  Flip rates in THIS table are MEDIANS over the three member pairs, "
           "not means, for the reason")
     print("  given under (d): legoESM's early flips are carried by a single "
-          "member.")
+          "member. The NEMO arm is the")
+    print("  STORAGE-MATCHED one (review B3): casting to float32 INFLATES the "
+          "flip count, so pairing")
+    print("  legoESM's censored rate against NEMO's uncensored fp64 rate "
+          "would flatter legoESM by")
+    print("  roughly the inflation factor.")
+    print("\n  CAVEAT ON THE MATCHING STATISTIC (review B4): max|dT| is a "
+          "single-cell tail draw and is")
+    print("  NOT monotone in horizon on NEMO's side. The two perturbation "
+          "DISTRIBUTIONS do not overlap")
+    print("  at all -- only their extreme tails do -- so any amplitude match "
+          "is a match of tails. The")
+    print("  median non-zero |dT| of each model is printed beside the max so "
+          "the gap is visible.")
     print(f"\n  {'lego day':>9}{'lego max|dT|':>14}{'lego rate':>11}"
           f"{'~ NEMO day':>12}{'nemo max|dT|':>14}{'nemo rate':>11}"
           f"{'amp ratio':>11}{'R_amp':>9}")
     matched = []
     for a_l, f_l, d_l in amp["lego"]:
-        if _mean(table[(d_l, "lego")], "frac_dT_nz") < RESOLVABLE_FRAC:
+        if not _resolvable_both(table, d_l):
             continue
         if a_l <= 0:
             continue
+        # REVIEW FINDING B3: this MUST be the storage-matched arm. Casting to
+        # float32 INFLATES the flip count (NEMO day 90: 10 -> 233), so pairing
+        # legoESM's censored rate against NEMO's uncensored fp64 rate flatters
+        # legoESM by roughly the inflation factor -- which is the same order as
+        # the ratio being reported. The earlier version of this block used
+        # fp64 AND asserted in prose that the bias ran the other way. Both are
+        # corrected here; the assertion is deleted rather than reworded.
         cand = [(abs(np.log(a_n / a_l)), a_n, f_n, d_n)
-                for a_n, f_n, d_n in amp["nemo_fp64"] if a_n > 0]
+                for a_n, f_n, d_n in amp["nemo_fp32"] if a_n > 0]
         if not cand:
             continue
-        _, a_n, f_n, d_n = min(cand)
+        cand.sort()
+        _, a_n, f_n, d_n = cand[0]
+        # MATCH-CHOICE SENSITIVITY. NEMO's max|dT| swings four orders of
+        # magnitude between adjacent 10-day samples, so the "closest" partner
+        # is close to a tie and the ratio it yields can swing with it. The
+        # three best partners and the spread of R across them are printed, so
+        # a ratio that depends on an arbitrary tie-break is visible as one.
+        alts = [(dd, (f_l / ff) if ff > 0 else float("inf"))
+                for _, aa, ff, dd in cand[:3]]
         ratio = a_n / a_l
         ok = (1.0 / MATCH_TOL) <= ratio <= MATCH_TOL
         R = (f_l / f_n) if f_n > 0 else float("inf")
         print(f"  {d_l:>9}{a_l:>14.3e}{100 * f_l:>10.4f}%"
               f"{d_n:>12}{a_n:>14.3e}{100 * f_n:>10.4f}%{ratio:>11.2f}"
-              f"{R:>9.2f}" + ("" if ok else "   REJECTED (amplitudes too far apart)"))
+              f"{R:>9.2f}"
+              + "  alts " + ",".join(f"d{dd}:{rr:.1f}" for dd, rr in alts)
+              + ("" if ok else "   REJECTED (amplitudes too far apart)"))
         if ok:
             matched.append((d_l, d_n, R, ratio))
     if not matched:
@@ -720,7 +880,7 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
           f"{'members clearing ' + str(int(CONFIRM_RATIO)) + 'x':>20}")
     cleared = {}
     for day in HORIZONS:
-        if _mean(table[(day, "lego")], "frac_dT_nz") < RESOLVABLE_FRAC:
+        if not _resolvable_both(table, day):
             print(f"  {day:>4}{'':>22}{'':>24}{'':>22}{'UNMEASURABLE':>20}")
             continue
         floor = max(x["flips"] for x in table[(day, "nemo_fp32")])
@@ -883,7 +1043,9 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
             Tb, Sb = nemo_state(d0, day, "b")
             N2n = n2(Tn, Sn)
             _no_nan(N2n, wet_i, "N2_now")
-            one = int(np.count_nonzero(N2n[wet_i] < N2_THRESHOLD))
+            # <= on BOTH counts: the table is a DIFFERENCE of two
+            # counts and must not mix comparison operators.
+            one = int(np.count_nonzero(N2n[wet_i] <= N2_THRESHOLD))
             two, _ = firing_rate_two_level(n2, Tn, Sn, Tb, Sb, wet_i)
             print(f"  {day:>4}{one:>15d}{two:>20d}{two - one:>14d}"
                   f"{two / max(one, 1):>9.3f}")
