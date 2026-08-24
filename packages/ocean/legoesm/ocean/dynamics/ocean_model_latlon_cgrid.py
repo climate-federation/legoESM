@@ -5208,7 +5208,7 @@ class LatLonCGridOceanModel:
             getattr(self.config.barotropic, "nemo_stage_mean_imposition", False)
             and _apply_implicit_vmix)
         if _impose_mean:
-            _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord)
+            _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, grid=grid)
 
         tke_new = None
         if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
@@ -5283,7 +5283,7 @@ class LatLonCGridOceanModel:
             # the column. Sign convention: an ADDITIVE column-uniform shift,
             # so the baroclinic deviation u′ is untouched (budget: the
             # depth-integral becomes exactly the barotropic transport).
-            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new, z_coord=z_coord)
+            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new, z_coord=z_coord, grid=grid)
             _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
             _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
             _um = state.u_mask.data[..., jnp.newaxis]
@@ -5346,7 +5346,7 @@ class LatLonCGridOceanModel:
                                _diss_incr, tend.tracer_source)
         return state_new
 
-    def _fixed_depth_means(self, st, z_coord=None):
+    def _fixed_depth_means(self, st, z_coord=None, grid=None):
         """Thickness-weighted depth means of u, v on FIXED reference
         thicknesses (NEMO ``e3u_0``/``r1_hu_0``, the linssh convention used by
         the stprk3_stg:440 zub correction). Face thicknesses by the min-rule,
@@ -5354,6 +5354,7 @@ class LatLonCGridOceanModel:
         (``_depth_average_to_faces``) so imposition restores exactly the mean
         the barotropic solve set."""
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
+        _grid = self.grid if grid is None else grid  # SPMD band override
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
             barotropic_depth_average_to_faces as _depth_average_to_faces,
         )
@@ -5365,7 +5366,7 @@ class LatLonCGridOceanModel:
         return _depth_average_to_faces(
             st.u.data, st.v.data, h_k,
             jnp.asarray(self.config.min_water_column_m, dtype=st.u.data.dtype),
-            st.land_mask.data, st.u_mask.data, st.v_mask.data, self.grid)
+            st.land_mask.data, st.u_mask.data, st.v_mask.data, _grid)
 
     def _tke_prognostic_active(self) -> bool:
         """True iff a prognostic-TKE-carrying vertical-mixing closure is active.
@@ -5498,7 +5499,7 @@ class LatLonCGridOceanModel:
             )
         return (entry_state.T_before.data, entry_state.S_before.data)
 
-    def _tke_bottom_dirichlet(self, state, z_coord=None):
+    def _tke_bottom_dirichlet(self, state, z_coord=None, grid=None):
         """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
 
         Static Python predicate: returns the Dirichlet TKE value when
@@ -5518,6 +5519,7 @@ class LatLonCGridOceanModel:
         caller uses, so the drag path stays bit-identical.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
+        _grid = self.grid if grid is None else grid  # SPMD band override
         vmix = getattr(getattr(self.config, "physics", None),
                        "vertical_mixing", None)
         if vmix is None or vmix.scheme != "tke":
@@ -5596,7 +5598,7 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             compute_face_masks_3d,
         )
-        um3, vm3 = compute_face_masks_3d(_zc.is_active, self.grid)
+        um3, vm3 = compute_face_masks_3d(_zc.is_active, _grid)
         um3 = um3.astype(h_k.dtype)
         vm3 = vm3.astype(h_k.dtype)
 
@@ -6399,10 +6401,10 @@ class LatLonCGridOceanModel:
                     # the legacy 1-D grid.lat is a row mean) — a 1-D (n_lat,)
                     # array cannot right-broadcast against the (n_lat, n_lon,
                     # nlev-1) columns inside nemo_etau_injection.
-                    lat_deg=jnp.degrees(self.grid.lat_T),
+                    lat_deg=jnp.degrees(_grid.lat_T),
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
-                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(state, z_coord=z_coord),
+                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(state, z_coord=z_coord, grid=_grid),
                     tke_bottom_level=self._tke_bottom_level(z_coord=z_coord),
                     n2_tracers_before=n2_tracers_before,
                     # NOW (Nnn) eta for the zdfevd trigger geometry
@@ -6422,7 +6424,7 @@ class LatLonCGridOceanModel:
                     A_v_background=float(self.config.A_v),
                     K_v_background=float(self.config.K_v),
                     eos_fn=_vmix_eos_fn,
-                    lat_deg=jnp.degrees(self.grid.lat_T),
+                    lat_deg=jnp.degrees(_grid.lat_T),
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,

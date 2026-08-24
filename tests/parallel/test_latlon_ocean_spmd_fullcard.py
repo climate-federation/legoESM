@@ -69,9 +69,18 @@ def test_partial_cell_spmd_matches_single_device():
     H_bathy = (4000.0
                - 1500.0 * np.exp(-((lat_idx - n_lat / 2) / 8.0) ** 2)
                - 400.0 * np.cos(2 * np.pi * lon_idx / n_lon))
+    # A bathymetry STEP straddling every band cut (rows 11|12, 23|24, 35|36
+    # at 48/4), so the cut v-faces genuinely exercise the partial-cell
+    # face-activity branch -- a smooth ridge can leave every cut flat and
+    # the seam path untested (GLM review 2026-08-24, "test luck").
+    H_bathy = H_bathy - 600.0 * ((lat_idx % 24) >= 12)
     zc = create_partial_cell_coordinate(zs, jnp.asarray(H_bathy))
-    assert int(np.asarray(zc.bottom_level).min()) != int(
-        np.asarray(zc.bottom_level).max()), "bathymetry must vary"
+    bl = np.asarray(zc.bottom_level)
+    assert int(bl.min()) != int(bl.max()), "bathymetry must vary"
+    for cut in (12, 24, 36):
+        assert (bl[cut - 1] != bl[cut]).any(), (
+            f"no bottom-level jump across the band cut at row {cut}; the "
+            f"seam partial-cell branch would go untested")
 
     cfg = LatLonCGridOceanConfig.from_flat()
     model = LatLonCGridOceanModel(grid, zc, cfg)
@@ -90,7 +99,7 @@ def test_partial_cell_spmd_matches_single_device():
             5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
             + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))),
     )
-    dt, n_steps = 600.0, 3
+    dt, n_steps = 600.0, 60
 
     s = state0
     for _ in range(n_steps):
@@ -115,7 +124,7 @@ def test_partial_cell_spmd_matches_single_device():
     # version demanded 1e-10 and failed at max|dT| = 3.4e-4 — the
     # EXPECTATION was wrong, not the banding (measured, matching the z-star
     # gate's own basis).
-    _ATOL, _RTOL = 2.0e-4, 1.0e-3
+    _ATOL, _RTOL = 2.0e-3, 1.0e-2   # 60 steps: rounding compounds ~sqrt(N)
     for name in ("T", "S", "u", "v", "eta"):
         a = np.asarray(getattr(s, name).data)
         b = np.asarray(getattr(ss, name).data)
@@ -123,6 +132,23 @@ def test_partial_cell_spmd_matches_single_device():
             b, a, atol=_ATOL, rtol=_RTOL,
             err_msg=f"{name} diverged between SPMD and single-device with "
                     f"partial cells")
+
+    # THE DRIFT DISCRIMINATOR (GLM review): a seam defect grows
+    # SYSTEMATICALLY at the cut rows while reduction-reorder rounding is
+    # spatially uniform.  After 60 steps the max |dT| within +-2 rows of the
+    # interior cuts must be comparable to (not a multiple of) the max |dT|
+    # far from every cut.  Ratio 3 allows healthy tail statistics; a walled
+    # or double-counted cut face fails this by orders of magnitude.
+    dT = np.abs(np.asarray(ss.T.data) - np.asarray(s.T.data))
+    cut_rows = sorted({r for c in (12, 24, 36) for r in range(c - 2, c + 2)})
+    interior_rows = [r for r in range(2, 46) if r not in
+                     {r2 for c in (12, 24, 36) for r2 in range(c - 4, c + 4)}]
+    cut_err = float(dT[cut_rows].max())
+    interior_err = float(dT[interior_rows].max())
+    assert cut_err <= 3.0 * max(interior_err, 1e-12), (
+        f"cut-row error {cut_err:.3e} is {cut_err / max(interior_err, 1e-12):.1f}x "
+        f"the interior {interior_err:.3e}: systematic seam defect, not "
+        f"rounding")
 
 
 @pytest.mark.skipif(jax.device_count() < 4,
