@@ -36,7 +36,7 @@ set -euo pipefail
 WT=/work/bd1083/b309178/diffESM/prmerge/fix
 PY=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python
 OUT="${OUT:-${WT}/results/dycore_1354/energy_15d}"
-export REPO="${WT}"
+export AMIP_SURFDATA=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/data/legoesm_surfdata_c260716.nc
 
 cd "${WT}"
 PYTHONPATH="$(ls -d "${WT}"/packages/*/ | paste -sd:)":"${WT}/src":"${WT}"
