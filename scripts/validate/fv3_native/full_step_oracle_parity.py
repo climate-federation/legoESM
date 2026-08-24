@@ -324,7 +324,8 @@ def _nml_real(text: str, key: str):
 
 
 def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
-                               moist: bool, consv: float = 0.0) -> None:
+                               moist: bool, consv: float = 0.0,
+                               physics: str = "none") -> None:
     """The deck must BE the arm the flags say it is.
 
     The redirects fire only on exact default-path equality, so explicit
@@ -341,6 +342,42 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
     ``hydrostatic``/``phys_hydrostatic`` track ``nh``, ``consv_te`` is
     0, and the physics cannot have touched the state.
     """
+    if physics == "held_suarez":
+        # The physics arm is the mirror of the inert check: the deck MUST run
+        # exactly one physics path (Held-Suarez), dry (nwat=0, the cp-factor=1
+        # premise), hydrostatic, no energy fixer, nothing else on.
+        text = _nml_text(run_dir)
+        if _nml_logical(text, "do_held_suarez") is not True:
+            raise SystemExit(
+                f"{run_dir}: --physics held_suarez needs do_held_suarez=.true.")
+        if _nml_logical(text, "adiabatic") is not False:
+            raise SystemExit(
+                f"{run_dir}: the HS arm needs adiabatic=.false. so fv_phys runs "
+                f"(atmosphere.F90:474).")
+        if _nml_int(text, "nwat") != 0:
+            raise SystemExit(
+                f"{run_dir}: the HS apply port assumes nwat=0 (moist_cp default "
+                f"-> cp_air, factor 1.0); deck has nwat={_nml_int(text,'nwat')}.")
+        others = [k for k in _PHYSICS_SWITCHES
+                  if k != "do_held_suarez" and _nml_logical(text, k) is True]
+        if others:
+            raise SystemExit(
+                f"{run_dir}: physics switches {others} beyond do_held_suarez "
+                f"are ON; not ported.")
+        sg = _nml_int(text, "fv_sg_adj")
+        if sg is None or sg > 0:
+            raise SystemExit(
+                f"{run_dir}: fv_sg_adj must be pinned <= 0 (got {sg}); > 0 runs "
+                f"fv_subgrid_z (fv_phys.F90:305).")
+        for key in ("hydrostatic", "phys_hydrostatic"):
+            if _nml_logical(text, key) is not True:
+                raise SystemExit(
+                    f"{run_dir}: the HS arm is hydrostatic; {key} must be .true.")
+        got = _nml_real(text, "consv_te")
+        if got not in (None, 0.0):
+            raise SystemExit(
+                f"{run_dir}: the HS arm expects consv_te 0, got {got}.")
+        return
     check_physics_is_inert(run_dir)
     text = _nml_text(run_dir)
     want_adiab = not moist
@@ -991,6 +1028,85 @@ def _make_jax_step(ctx):
     return _step
 
 
+def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
+    """In place: advance the six-face POST-DYNAMICS duo state by one
+    Held-Suarez physics step -- the port of fv_phys + fv_update_phys for
+    do_Held_Suarez=.true., dry, hydrostatic, nwat=0 (driver/solo/fv_phys.F90:
+    533-591).  fv_dynamics has already run; this mutates state[t]["u"/"v"/"pt"].
+
+    Three passes because the u_dt/v_dt one-cell halo exchange is a cross-face
+    barrier (fv_update_phys.F90:645/698, dwind_2d=.false.): (1) per face, D->A
+    winds (d2a2c_vect_duo), the Held-Suarez tendencies on the compute domain,
+    scattered back into full-domain arrays with zero halos; (2) exchange the
+    u_dt/v_dt halos; (3) per face, apply fv_update_phys_dry_duo.  The pe/peln
+    axis fix (i,k,j)->(i,j,k) and the pe 1-ring window match p_var_hydrostatic
+    (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
+    k-last.  GLM-authored; codex + Claude reviewed.
+    """
+    from legoesm.core.fv3_native_duo_sw_core import d2a2c_vect_duo
+    from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
+    from legoesm.core.fv3_native_physics_coupling import (
+        held_suarez_tend, fv_update_phys_dry_duo)
+    from legoesm.grids.fv3_native_gridstruct import exchange_agrid_scalar_halos
+
+    m = n + 2 * ng
+    ci = slice(ng, ng + n)
+    assert state[0]["pt"].shape == (m, m, km)
+    assert press[0]["pkz"].shape == (n, n, km)
+
+    ua6 = [None] * 6
+    va6 = [None] * 6
+    t_dt6 = [None] * 6
+    u_dt6 = [None] * 6
+    v_dt6 = [None] * 6
+
+    # PASS 1: per-face tendencies on the compute domain
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        d = d2a2c_vect_duo(state[t]["u"], state[t]["v"], gs, ctx["bd"],
+                           n + 1, n + 1)
+        ua_f, va_f = d["ua"], d["va"]                        # (m, m, km)
+        ua6[t], va6[t] = ua_f, va_f
+
+        pt_c = state[t]["pt"][ci, ci]                        # (n, n, km)
+        delp_c = state[t]["delp"][ci, ci]
+        ua_c, va_c = ua_f[ci, ci], va_f[ci, ci]
+        pkz_c = press[t]["pkz"]                              # already (n, n, km)
+        peln_c = np.transpose(press[t]["peln"], (0, 2, 1))   # (i,k,j)->(i,j,k)
+        pe_c = np.transpose(press[t]["pe"][1:n + 1, :, 1:n + 1], (0, 2, 1))
+        lat_c = gs["agrid_lat"][ci, ci]                      # (n, n) radians
+
+        t_dt_c, u_dt_c, v_dt_c = held_suarez_tend(
+            pt_c, ua_c, va_c, delp_c, peln_c, pkz_c, pe_c, lat_c, dt,
+            strat=strat)
+
+        t_dt_f = np.zeros((m, m, km), dtype=np.float64)
+        u_dt_f = np.zeros((m, m, km), dtype=np.float64)
+        v_dt_f = np.zeros((m, m, km), dtype=np.float64)
+        t_dt_f[ci, ci] = t_dt_c
+        u_dt_f[ci, ci] = u_dt_c
+        v_dt_f[ci, ci] = v_dt_c
+        t_dt6[t], u_dt6[t], v_dt6[t] = t_dt_f, u_dt_f, v_dt_f
+
+    # PASS 2: cross-face one-cell halo exchange of the vector tendencies
+    for tile in range(1, 7):
+        exchange_agrid_scalar_halos(u_dt6, tile, n, ng)
+    for tile in range(1, 7):
+        exchange_agrid_scalar_halos(v_dt6, tile, n, ng)
+
+    # PASS 3: apply
+    for t in range(6):
+        gs = ctx["gs6"][t]
+        wv = compute_fv3_native_wind_vectors(
+            gs["grid_lon"], gs["grid_lat"], gs["agrid_lon"], gs["agrid_lat"])
+        u2, v2, pt2, _, _ = fv_update_phys_dry_duo(
+            state[t]["u"], state[t]["v"], state[t]["pt"], ua6[t], va6[t],
+            u_dt6[t], v_dt6[t], t_dt6[t], dt,
+            wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"], ng)
+        state[t]["u"], state[t]["v"], state[t]["pt"] = u2, v2, pt2
+    return None
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_hydro_zerostep")
@@ -1111,6 +1227,14 @@ def main(argv=None):
                          "byte-identical between the two backends, which "
                          "is the whole point (a JAX-specific harness would "
                          "make any difference unattributable).")
+    ap.add_argument("--physics", choices=("none", "held_suarez"),
+                    default="none",
+                    help="run a physics-coupled step after dynamics and score "
+                         "against a deck that ran it. 'held_suarez' targets "
+                         "run_hs_1step_gfs (do_Held_Suarez=.true., dry, "
+                         "hydrostatic, nwat=0) and applies "
+                         "apply_held_suarez_step; the dynamics-only arms keep "
+                         "refusing any deck whose physics is ON.")
     args = ap.parse_args(argv)
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
@@ -1132,6 +1256,17 @@ def main(argv=None):
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
     args.dry_twin_run = None
+    if args.physics == "held_suarez":
+        if args.nh or args.moist or args.consv:
+            raise SystemExit(
+                "--physics held_suarez is dry + hydrostatic; not with "
+                "--nh/--moist/--consv.")
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_hs_1step_gfs"
+        if not os.path.isdir(args.step_run):
+            raise SystemExit(
+                f"missing HS oracle {args.step_run}; build it with "
+                f"scripts/cluster/fv3_native/build_hs_oracle.sbatch")
     if args.consv:
         if args.moist or args.nh:
             raise SystemExit(
@@ -1184,8 +1319,12 @@ def main(argv=None):
     # direction-blind check_moist_deck, and load_oracle already asserts
     # FMSConstants: GFS per deck via require_gfs_constants.
     for _r in (args.ic_run, args.step_run):
-        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist,
-                                   consv=args.consv)
+        # the physics gate applies ONLY to the STEP deck; the IC (zerostep) is
+        # dynamics-only (adiabatic=.true., physics off) and is checked inert.
+        check_deck_matches_the_arm(
+            _r, nh=args.nh, moist=args.moist,
+            physics=(args.physics if _r == args.step_run else "none"),
+            consv=args.consv)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -1582,6 +1721,9 @@ def main(argv=None):
                       **({"consv_te": args.consv} if args.consv else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
+    if args.physics == "held_suarez":
+        # fv_phys + fv_update_phys, in place on the post-dynamics state
+        apply_held_suarez_step(ctx, state, press, dt=args.dt, n=n, ng=ng, km=KM)
     p_1 = port_window(state, ctx)
 
     if args.moist or args.consv:
