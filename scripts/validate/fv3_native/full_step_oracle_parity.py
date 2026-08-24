@@ -1043,7 +1043,8 @@ def _make_jax_step(ctx):
     return _step
 
 
-def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
+def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True,
+                           backend="numpy"):
     """In place: advance the six-face POST-DYNAMICS duo state by one
     Held-Suarez physics step -- the port of fv_phys + fv_update_phys for
     do_Held_Suarez=.true., dry, hydrostatic, nwat=0 (driver/solo/fv_phys.F90:
@@ -1059,6 +1060,15 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     axis fix (i,k,j)->(i,j,k) and the pe 1-ring window match p_var_hydrostatic
     (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
     k-last.  GLM-authored; codex + Claude reviewed.
+
+    ``backend`` ("numpy" | "jax") selects the implementation of the THREE
+    per-face kernels only: "numpy" is the authorities and the established
+    score; "jax" routes them through their twins (c2l_ord4_face_jax,
+    held_suarez_tend_jax, fv_update_phys_dry_duo_jax), marshalling np->jnp
+    on the way in and back to np on the way out at each call.  The two halo
+    exchanges and the state/press dicts stay NumPy in BOTH backends -- they
+    are the exact mpp_update_domains strip-copy assembly glue (the ord4
+    stencil needs the strip copy, NOT ext_vector's wedge re-extrapolation).
     """
     from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face
     from legoesm.grids.fv3_native_gridstruct import (
@@ -1067,6 +1077,53 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     from legoesm.core.fv3_native_physics_coupling import (
         held_suarez_tend, fv_update_phys_dry_duo)
     from legoesm.grids.fv3_native_gridstruct import exchange_agrid_scalar_halos
+
+    # The backend switches ONLY the three per-face kernels: the jax backend
+    # exercises the per-face physics twins; the strip-copy halo exchange is
+    # numpy assembly glue in both backends, matching the dyn lane where the
+    # exchange is not the per-face kernel.
+    if backend == "jax":
+        import jax.numpy as jnp
+
+        from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face_jax
+        from legoesm.core.fv3_native_physics_coupling import (
+            held_suarez_tend_jax, fv_update_phys_dry_duo_jax)
+
+        # np -> jnp on the way in, np.asarray on the way out, at each
+        # per-face call (the _make_jax_step marshalling style), so the
+        # NumPy scatter/assembly around the kernels is identical in both
+        # backends.
+        def _c2l(u, v, amat, n, ng):
+            ua, va = c2l_ord4_face_jax(
+                jnp.asarray(u), jnp.asarray(v),
+                tuple(jnp.asarray(a) for a in amat), n, ng)
+            return np.asarray(ua), np.asarray(va)
+
+        def _hs_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
+                     strat=True):
+            outs = held_suarez_tend_jax(
+                jnp.asarray(pt), jnp.asarray(ua), jnp.asarray(va),
+                jnp.asarray(delp), jnp.asarray(peln), jnp.asarray(pkz),
+                jnp.asarray(pe), jnp.asarray(lat), pdt, strat=strat)
+            return tuple(np.asarray(o) for o in outs)
+
+        def _upd(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
+                 vlon, vlat, es1, ew2, ng):
+            outs = fv_update_phys_dry_duo_jax(
+                jnp.asarray(u), jnp.asarray(v), jnp.asarray(pt),
+                jnp.asarray(ua), jnp.asarray(va), jnp.asarray(u_dt),
+                jnp.asarray(v_dt), jnp.asarray(t_dt), dt,
+                jnp.asarray(vlon), jnp.asarray(vlat),
+                jnp.asarray(es1), jnp.asarray(ew2), ng)
+            return tuple(np.asarray(o) for o in outs)
+    elif backend == "numpy":
+        _c2l = c2l_ord4_face
+        _hs_tend = held_suarez_tend
+        _upd = fv_update_phys_dry_duo
+    else:
+        raise ValueError(
+            f"apply_held_suarez_step: unknown backend {backend!r} "
+            "(choices: 'numpy', 'jax')")
 
     m = n + 2 * ng
     ci = slice(ng, ng + n)
@@ -1108,9 +1165,9 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
         ua_f = np.empty((m, m, km), dtype=np.float64)
         va_f = np.empty((m, m, km), dtype=np.float64)
         for k in range(km):
-            uak, vak = c2l_ord4_face(state[t]["u"][:, :, k],
-                                     state[t]["v"][:, :, k],
-                                     amat, n, ng)
+            uak, vak = _c2l(state[t]["u"][:, :, k],
+                            state[t]["v"][:, :, k],
+                            amat, n, ng)
             ua_f[:, :, k] = uak
             va_f[:, :, k] = vak
         # c2l is valid is-1..ie+1; halos are NaN and never read on the compute
@@ -1127,7 +1184,7 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
         pe_c = np.transpose(press[t]["pe"][1:n + 1, :, 1:n + 1], (0, 2, 1))
         lat_c = gs["agrid_lat"][ci, ci]                      # (n, n) radians
 
-        t_dt_c, u_dt_c, v_dt_c = held_suarez_tend(
+        t_dt_c, u_dt_c, v_dt_c = _hs_tend(
             pt_c, ua_c, va_c, delp_c, peln_c, pkz_c, pe_c, lat_c, dt,
             strat=strat)
 
@@ -1150,7 +1207,7 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
         gs = ctx["gs6"][t]
         wv = compute_fv3_native_wind_vectors(
             gs["grid_lon"], gs["grid_lat"], gs["agrid_lon"], gs["agrid_lat"])
-        u2, v2, pt2, _, _ = fv_update_phys_dry_duo(
+        u2, v2, pt2, _, _ = _upd(
             state[t]["u"], state[t]["v"], state[t]["pt"], ua6[t], va6[t],
             u_dt6[t], v_dt6[t], t_dt6[t], dt,
             wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"], ng)
@@ -1273,19 +1330,25 @@ def main(argv=None):
                          "runs the ported lane through the SAME scoring "
                          "code, IC, oracle files, face map and tolerances, "
                          "so the two numbers are comparable by "
-                         "construction. Only the stepping call differs -- "
-                         "everything upstream and downstream of it is "
-                         "byte-identical between the two backends, which "
-                         "is the whole point (a JAX-specific harness would "
-                         "make any difference unattributable).")
+                         "construction. Only the stepping call (and, with "
+                         "--physics, the physics step's three per-face "
+                         "kernels) differs -- everything upstream and "
+                         "downstream is byte-identical between the two "
+                         "backends, which is the whole point (a JAX-specific "
+                         "harness would make any difference "
+                         "unattributable).")
     ap.add_argument("--physics", choices=("none", "held_suarez"),
                     default="none",
                     help="run a physics-coupled step after dynamics and score "
                          "against a deck that ran it. 'held_suarez' targets "
                          "run_hs_1step_gfs (do_Held_Suarez=.true., dry, "
                          "hydrostatic, nwat=0) and applies "
-                         "apply_held_suarez_step; the dynamics-only arms keep "
-                         "refusing any deck whose physics is ON.")
+                         "apply_held_suarez_step and honors --backend ('jax' "
+                         "routes its three per-face kernels -- c2l_ord4, the "
+                         "HS tendencies, fv_update_phys -- through their JAX "
+                         "twins; the strip-copy halo exchanges stay NumPy in "
+                         "both backends as assembly glue); the dynamics-only "
+                         "arms keep refusing any deck whose physics is ON.")
     args = ap.parse_args(argv)
     if args.max_rel is None:
         print("=== REPORT ONLY -- no --max-rel given; exit status 0 does NOT "
@@ -1809,7 +1872,7 @@ def main(argv=None):
         _hs_strat = True if _hs_strat is None else _hs_strat
         # fv_phys + fv_update_phys, in place on the post-dynamics state
         apply_held_suarez_step(ctx, state, press, dt=args.dt, n=n, ng=ng, km=KM,
-                               strat=_hs_strat)
+                               strat=_hs_strat, backend=args.backend)
     p_1 = port_window(state, ctx)
 
     if args.moist or args.consv:
