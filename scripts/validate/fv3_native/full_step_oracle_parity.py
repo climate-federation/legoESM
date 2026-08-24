@@ -342,6 +342,16 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
     ``hydrostatic``/``phys_hydrostatic`` track ``nh``, ``consv_te`` is
     0, and the physics cannot have touched the state.
     """
+    # Remap-time microphysics (do_sat_adj / do_inline_mp) is passed into
+    # Lagrangian_to_Eulerian (fv_dynamics.F90:625) and is live when on
+    # (fv_mapz.F90:749); the port hard-codes both off (fv3_native_dynamics.py:
+    # 901), so a deck with either ON would score against unported physics.
+    _t0 = _nml_text(run_dir)
+    for _k in ("do_sat_adj", "do_inline_mp"):
+        if _nml_logical(_t0, _k) is True:
+            raise SystemExit(
+                f"{run_dir}: {_k}=.true. runs remap-time microphysics the port "
+                f"does not implement (it hard-codes {_k}=False).")
     if physics == "held_suarez":
         # The physics arm is the mirror of the inert check: the deck MUST run
         # exactly one physics path (Held-Suarez), dry (nwat=0, the cp-factor=1
@@ -1041,7 +1051,8 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
 
     Three passes because the u_dt/v_dt one-cell halo exchange is a cross-face
     barrier (fv_update_phys.F90:645/698, dwind_2d=.false.): (1) per face, D->A
-    winds (d2a2c_vect_duo), the Held-Suarez tendencies on the compute domain,
+    Earth-frame winds (c2l_ord2_face; d2a2c would be the wrong, local frame),
+    the Held-Suarez tendencies on the compute domain,
     scattered back into full-domain arrays with zero halos; (2) exchange the
     u_dt/v_dt halos; (3) per face, apply fv_update_phys_dry_duo.  The pe/peln
     axis fix (i,k,j)->(i,j,k) and the pe 1-ring window match p_var_hydrostatic
@@ -1365,12 +1376,15 @@ def main(argv=None):
     # check_deck_matches_the_arm subsumes check_physics_is_inert and the
     # direction-blind check_moist_deck, and load_oracle already asserts
     # FMSConstants: GFS per deck via require_gfs_constants.
-    for _r in (args.ic_run, args.step_run):
-        _is_step = _r == args.step_run
-        # The physics gate applies ONLY to the STEP deck. The IC (zerostep) is
-        # checked with physics="none"; but for the HS arm the IC is the MOIST
-        # cold-start (adiabatic=.false.), so it must be checked as moist=True or
-        # the adiabatic==not-moist assertion would reject it.
+    if args.ic_run == args.step_run:
+        raise SystemExit(
+            "--ic-run and --step-run must be different runs (the IC and the "
+            "one-step reference); the same directory for both would give the "
+            "IC deck the step gate.")
+    # split by ROLE, not by pathname equality (codex): the physics gate applies
+    # ONLY to the step deck; the IC is checked inert, and for the HS arm the IC
+    # is the MOIST cold-start (adiabatic=.false.), so it is checked moist=True.
+    for _r, _is_step in ((args.ic_run, False), (args.step_run, True)):
         check_deck_matches_the_arm(
             _r, nh=args.nh,
             moist=(args.moist or
