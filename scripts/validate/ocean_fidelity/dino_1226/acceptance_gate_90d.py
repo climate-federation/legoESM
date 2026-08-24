@@ -23,6 +23,16 @@ The density-class CENSUS is EXCLUDED from this gate: its 90-day (and even
 this branch state -- so it remains a multi-year campaign metric only
 (#1492 2.2 comment).
 
+START MODE (#1455, 2026-08-24): the twin runner now CONTINUES NEMO's
+leap-frog by default (``--bridge-before``, formerly opt-in), so ``--run-recipe``
+produces a bridged-start candidate unless ``--no-bridge-before`` is passed.
+This gate PRINTS the candidate's ``twin_start_mode`` stamp and never refuses on
+it -- see ``kamm_twin_90d.certifiable_grid_and_precision`` for why the start
+mode is deliberately NOT a certification dimension the way the ladder and the
+precision are (every recorded artifact, the verdict-year baseline included, is
+Euler-start; refusing them would orphan the campaign's own baseline and buy no
+measurement).
+
 Thresholds: the 2.1 micro-ensemble noise floor (3 members, 1e-14 T
 perturbations -- n=3 caveat inherited: the floor is a small-sample estimate),
 staged 5x / 2x / 1x.  Default gate level 5x; select with --level.
@@ -146,6 +156,26 @@ def load_candidate(path, day=90):
              else "UNSTAMPED -- predates the content hash; its ladder ARRAYS "
                   "cannot be compared to any other run's")
     print(f"vertical ladder content hash: {lhash}", flush=True)
+    # #1455 (2026-08-24): PRINT the time-integration START this candidate took.
+    # Same policy as the ladder -- report, never refuse -- but for a different
+    # reason, and the reason is worth stating because it is the opposite of the
+    # ladder's. An off-ladder arm is a different experiment from the claim; the
+    # Euler start is the mode the claim's OWN recorded baseline ran in. Refusing
+    # to certify it would withhold a verdict from every artifact this campaign
+    # has, the verdict-year baseline included, and buy no measurement. So it is
+    # printed, not gated, and the bound on what it costs comes from the
+    # registered 90-day bridged-vs-Euler A/B instead. See
+    # kamm_twin_90d.certifiable_grid_and_precision for the full disposition.
+    start = _twin.start_mode_of(d)
+    if start is None:
+        start = ("UNSTAMPED -- predates the twin_start_mode stamp; artifacts "
+                 "written before 2026-08-24 took the forward-EULER start")
+    elif start != "bridged":
+        start = (f"{start} -- LEGACY FORWARD-EULER START: the trajectory is "
+                 "the two-point running mean of the true one (a half-step "
+                 "delay at every frequency), and step 1 skips NEMO's "
+                 "after-level reconciliation")
+    print(f"twin start mode: {start}", flush=True)
     # #1455 season-bug guard (extend-only): NEMO's analytic surface forcing is
     # a function of the day of year through the absolute step index
     # (usrdef_sbc.F90:536), and the day-180 restart carries adatrj=180.0, so a
@@ -272,8 +302,12 @@ def self_test(level):
 def run_candidate_twin(candidate_path, recipe, placement, bridge_before):
     cmd = [sys.executable, f"{_DIR}/kamm_twin_90d.py", recipe, candidate_path,
            "--days", "90", "--save-3d"]
-    if bridge_before:
-        cmd.append("--bridge-before")
+    # The twin's own default is the bridged start; only the legacy Euler
+    # start needs saying on the command line. Passing --bridge-before here
+    # would still work, but it would put a no-op flag into every recorded RUN:
+    # line and read as if the default were the other way.
+    if not bridge_before:
+        cmd.append("--legacy-euler-start")
     if placement:
         cmd += ["--surface-tendency-placement", placement]
     print("RUN:", " ".join(cmd), flush=True)

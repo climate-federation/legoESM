@@ -1324,15 +1324,19 @@ class BarotropicConfig(NamedTuple):
     # forward-Euler first step (``state.u_before is None``), which returns
     # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
     # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. It is NOT empty for a bridged/restart twin, which is
-    # the correction #1640 forced: ``u_before`` arrives populated only under
-    # the twin runner's OPT-IN ``--bridge-before``, and the shipped
-    # ``kamm_twin_90d.py`` defaults it OFF -- so the campaign's own 90-day DINO
-    # twin enters step 1 with ``u_before is None`` and takes this branch. (The
-    # previous wording here, "It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken)", is RETRACTED: it was
-    # true of a --bridge-before run and asserted of every run.) The same
-    # applies to a genuine FROM-REST run of a card that ships this option,
+    # real one-step gap. Whether a bridged/restart twin takes it is a
+    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
+    # #1640 forced. ``u_before`` arrives populated only when the before level
+    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
+    # the campaign's own 90-day DINO twin did enter step 1 with ``u_before is
+    # None`` and take this branch, and every artifact recorded before that date
+    # did. Since #1455 the twin default is the bridged start, so the shipped
+    # twin no longer takes it; ``--legacy-euler-start`` still does. (The
+    # original wording here, "It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken)", stays RETRACTED: it
+    # was asserted of every run when it was only ever true of a bridged one.)
+    # The same applies to a genuine FROM-REST run of a card that ships this
+    # option,
     # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
     # from-rest drivers
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and

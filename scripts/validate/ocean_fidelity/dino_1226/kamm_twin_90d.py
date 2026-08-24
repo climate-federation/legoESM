@@ -19,27 +19,36 @@ that runs before any integration and is unit-tested directly (see
 ``tests/ocean/unit/test_dino_1226_instruments.py``): a rest-state start must be
 IMPOSSIBLE to smuggle through un-flagged.
 
-INTEGRATOR-MEMORY HANDSHAKE CAVEAT: by default the bridge carries only
-now-level prognostic fields (T/S/eta/u/v), NOT NEMO's internal integrator
-memory (before-level leapfrog fields, TKE closure state). Days 1-4 of a
-default twin therefore run on a legoESM-native "cold start" for that memory
-while NEMO continues from its own warmed-up state -- expect the two
-trajectories to diverge fastest during this handshake window before settling
-into a slower, scheme-driven drift. Do not read days 1-4 as a
-scheme-fidelity signal for a default (non-bridged) run.
+START MODE (#1455, default flipped 2026-08-24): the twin continues NEMO's
+LEAP-FROG by default -- ``state.{T,S,u,v,eta}_before`` is seeded from the NEMO
+restart's own ``tb/sb/ub/vb``/``sshb`` (the Modified-Leap-Frog integrator's
+third time level), so the twin's step-0 entry state is EXACTLY NEMO's. See
+:func:`resolve_start_mode`; the resolved mode is stamped into the npz as
+``twin_start_mode`` and printed by the acceptance gate.
 
-``--bridge-before`` (#1317) REMOVES this caveat for the leap-frog before-level
-state: it seeds ``state.{T,S,u,v,eta}_before`` from the NEMO restart's own
-``tb/sb/ub/vb``/``sshb`` (the Modified-Leap-Frog integrator's third time
-level), so the twin's step-0 entry state is EXACTLY NEMO's -- a real leap-frog
-continuation, not a forward-Euler-from-now start. Required (not merely
-optional) for ``nemo_dino_kamm_mlf``'s ``tke_n2_time_level="nemo_before"`` /
-``tke_shear_production="nemo_burchard"`` axes: without it, ``model.step``
-raises ``ValueError`` at step 0 (``state.T_before``/``S_before`` are ``None``
-until the model's own Euler-start populates them AFTER step 1 -- too late for
-a card that reads them every step from step 0). ``--bridge-tke`` (TKE closure
-memory) is a SEPARATE, independent caveat/flag -- still cold-start by
-default.
+The old default was a forward-EULER start, and it was not a small thing. An
+Euler-started leap-frog trajectory IS the two-point running mean of the true
+one (exact identity to 1e-15), i.e. a half-step delay at every frequency: the
+"half-step barotropic lag" this campaign published as a model finding was
+measured at 0.470 steps unbridged and 0.000142 bridged, and has been RETRACTED
+as a harness artifact. The same default also skipped NEMO's step-1 after-level
+reconciliation (#1640 finding 3). One root, two symptoms, one default.
+``--legacy-euler-start`` (equivalently ``--no-bridge-before``) selects it back
+with a loud banner, for reproducing artifacts recorded before the flip -- every
+twin recorded before 2026-08-24 ran that way.
+
+Bridging the before level is also REQUIRED (not merely preferred) for
+``nemo_dino_kamm_mlf``'s ``tke_n2_time_level="nemo_before"`` /
+``tke_shear_production="nemo_burchard"`` axes: without it ``model.step`` raises
+``ValueError`` at step 0 (``state.T_before``/``S_before`` are ``None`` until
+the model's own Euler start populates them AFTER step 1 -- too late for a card
+that reads them every step from step 0).
+
+INTEGRATOR-MEMORY HANDSHAKE CAVEAT, what is LEFT of it: ``--bridge-tke`` (TKE
+closure memory) is a SEPARATE, independent flag and is still cold-start by
+default, so days 1-4 of a twin still run on a legoESM-native cold start for
+THAT memory while NEMO continues from its own warmed-up state. Do not read
+days 1-4 of a non-``--bridge-tke`` run as a scheme-fidelity signal.
 
 SEASONAL CLOCK (#1455): the analytic DINO surface forcing follows the DAY OF
 YEAR, so a twin bridged from a mid-year NEMO restart must continue NEMO's own
@@ -331,6 +340,21 @@ def certifiable_grid_and_precision(stamped) -> tuple:
     the score is always printed, and the PASS/FAIL VERDICT is withheld
     (UNCERTIFIED) when the candidate is not on the claim's grid/precision.
 
+    THE START MODE IS DELIBERATELY *NOT* A CRITERION HERE (#1455,
+    2026-08-24), and the reasoning is recorded so it is a decision rather than
+    an omission.  Adding ``twin_start_mode != "bridged"`` to this list would
+    withhold the verdict from EVERY artifact this campaign has recorded --
+    including the verdict-year baseline the gate's own thresholds and claims
+    were established on, all of which ran the Euler start.  That would orphan
+    the baseline without producing a single new number.  The grid and the
+    precision are different: an off-ladder or fp32 arm is a DIFFERENT
+    experiment from the claim, whereas the start mode is a property the claim
+    itself was measured under.  So the gate PRINTS the start mode next to the
+    ladder and the dtype and lets the reader see it; the honest bound on what
+    it costs is a measurement (the registered 90-day A/B), not a refusal.
+    Revisit once that A/B has run: if the start mode moves the gate metrics
+    systematically, it becomes a claim dimension and belongs in this list.
+
     Returns ``(ok, reasons, ladder, dtype)``.  Raises nothing -- the caller
     decides between a verdict and UNCERTIFIED, because an off-claim candidate
     is still worth scoring and printing.
@@ -592,8 +616,95 @@ def resolve_ladder_mode(legacy_1d_ladder: bool = False) -> str:
     return mode
 
 
+# The start mode this runner's twin path takes when nothing selects one.
+TWIN_START_MODE_DEFAULT = "bridged"
+_START_ANNOUNCED: set[str] = set()      # modes whose loud banner already fired
+
+
+def resolve_start_mode(bridge_before: bool) -> str:
+    """Which time-integration START this twin takes, and why -- ``"bridged"``
+    (NEMO's own before level, the DEFAULT) or ``"euler"`` (legacy).
+
+    #1455.  This is the ladder pattern applied to the OTHER harness default
+    that was silently deciding results.  It is pure apart from its printing:
+    it RETURNS the mode and writes nothing.
+
+    WHY THE DEFAULT IS ``"bridged"``.  A twin exists to compare two models on
+    the same state; an Euler start makes legoESM integrate a DIFFERENT
+    trajectory from step 1 for a reason that has nothing to do with the
+    physics under test.  Unfiltered, an Euler-started leap-frog trajectory is
+    EXACTLY the two-point running mean of the true one (identity verified to
+    1e-15), and a two-point running mean is a half-step delay at every
+    frequency.  Measured on the barotropic impulse response: 0.470 steps of
+    lag on the Euler start, 0.000142 bridged -- the campaign's published
+    "half-step model lag" was this default, and is retracted.  The same
+    branch also returns before NEMO's step-1 after-level reconciliation
+    (#1640 finding 3), so step 1 commits a depth-mean deposit NEMO removes.
+
+    WHAT IT IS NOT.  The 5-day evidence says the effect is LAUNCH-concentrated
+    (impulse response 65x better bridged at launch; only 7.6x better late, and
+    the day-5 worst cell marginally WORSE bridged).  So this is not a claim
+    that recorded endpoint metrics are wrong -- that is a measurement, and the
+    90-day A/B that bounds it is registered separately.
+
+    Resolution order, highest first:
+
+      ``--legacy-euler-start`` / ``--no-bridge-before``  -> ``"euler"``, loud
+      nothing                                            -> ``"bridged"``
+
+    There is no environment channel and therefore no disagreement case: unlike
+    the ladder, the only way to select the legacy start is the flag.
+    """
+    mode = TWIN_START_MODE_DEFAULT if bridge_before else "euler"
+    # Banner once per MODE per process (repeating it trains people to ignore
+    # it); the one-line statement is EVERY call, so no twin can be built
+    # without its log saying which start it took.  Keyed to the MODE, not to
+    # the default: if someone flips the default back, the warning survives.
+    if mode != "bridged" and mode not in _START_ANNOUNCED:
+        _START_ANNOUNCED.add(mode)
+        print("\n" + "!" * 78, flush=True)
+        print("!! LEGACY FORWARD-EULER START: this twin does NOT continue "
+              "NEMO's leap-frog.", flush=True)
+        print("!! An Euler-started leap-frog trajectory IS the two-point "
+              "RUNNING MEAN of the", flush=True)
+        print("!! true one (exact identity, 1e-15) -- i.e. a HALF-STEP DELAY "
+              "at every", flush=True)
+        print("!! frequency. Measured: 0.470 steps of barotropic impulse lag "
+              "here against", flush=True)
+        print("!! 0.000142 bridged (#1455). Any phase, lag, wave, "
+              "fast-response or 2-dt", flush=True)
+        print("!! number produced in this mode is that artifact, not a "
+              "model difference.", flush=True)
+        print("!! It ALSO skips NEMO's step-1 after-level reconciliation "
+              "(#1640 finding 3):", flush=True)
+        print("!! step 1 commits a depth-mean deposit NEMO removes.",
+              flush=True)
+        print("!! Historical-reproduction mode ONLY -- every twin recorded "
+              "before 2026-08-24", flush=True)
+        print("!! ran this way, which is the whole reason the flag still "
+              "exists.", flush=True)
+        print("!" * 78 + "\n", flush=True)
+    print(f"twin start: {mode}  [bridge_before={bool(bridge_before)}]  "
+          f"(default {TWIN_START_MODE_DEFAULT!r} = NEMO's own leap-frog "
+          f"before level)", flush=True)
+    return mode
+
+
+def start_mode_of(stamped) -> str | None:
+    """The ``twin_start_mode`` an artifact records, or ``None`` if unstamped.
+
+    Shared so every scorer reads the stamp the same way instead of inferring
+    the start from a filename or from whatever the default was on the day.
+    ``None`` means the artifact PREDATES the stamp -- which, for anything
+    written before 2026-08-24, means the Euler start; but that is history, not
+    something this function is willing to assert about a file it is handed.
+    """
+    return (str(stamped["twin_start_mode"])
+            if "twin_start_mode" in stamped else None)
+
+
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
-                       bridge_tke: bool = False, bridge_before: bool = False,
+                       bridge_tke: bool = False, bridge_before: bool = True,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_tendency_placement: str | None = None,
@@ -718,11 +829,16 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     print("twin from developed NEMO state (br.state, NOT dino_lat_lon_state)")
     verify_day0_matches_restart(st, s, br.land_mask)
 
-    # OPTIONAL: bridge NEMO's leap-frog BEFORE-level state (tb/sb/ub/vb, the
-    # MLF integrator's THIRD time level) onto state.{T,S,u,v,eta}_before, so
-    # the twin's leapfrog entry state is EXACTLY NEMO's -- not a
-    # forward-Euler cold start (see kamm_twin_90d.py module docstring: this
-    # removes the integrator-memory caveat for tracers/velocities).
+    # DEFAULT ON (#1455, 2026-08-24): bridge NEMO's leap-frog BEFORE-level
+    # state (tb/sb/ub/vb, the MLF integrator's THIRD time level) onto
+    # state.{T,S,u,v,eta}_before, so the twin's leap-frog entry state is
+    # EXACTLY NEMO's -- not a forward-Euler cold start. Skipping it makes the
+    # whole trajectory the two-point running mean of the true one (a half-step
+    # delay at every frequency) and skips NEMO's step-1 after-level
+    # reconciliation; see resolve_start_mode for the receipts. Every direct
+    # caller of this helper already passed bridge_before=True explicitly, so
+    # the flipped default changes NO recorded sibling probe -- unlike the
+    # ladder default, which is deliberately NOT resolved here for that reason.
     # nemo_dino_kamm_mlf sets tke_n2_time_level="nemo_before" +
     # tke_shear_production="nemo_burchard", both of which READ these fields
     # every step -- bridging is what makes those axes correct from step 0
@@ -800,7 +916,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
-             bridge_tke: bool = False, bridge_before: bool = False,
+             bridge_tke: bool = False, bridge_before: bool = True,
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_tendency_placement: str | None = None,
@@ -821,9 +937,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     ``numpy.random.default_rng(perturb_seed)``), mirroring
     ``scripts/tmp/_perturb_restart_ensemble.py``'s documented ensemble
     pattern (same eps, same draw shape) but applied post-bridge to the
-    legoESM state's now-level T only -- this twin runner's default
-    (non-``--bridge-before``) state carries no before-level T, so there is
-    no tb to perturb in lockstep.
+    legoESM state's now-level T only.  NOTE (#1455, 2026-08-24): the
+    justification for perturbing only the now level used to be that the
+    default state carries no before-level T.  That is no longer true -- the
+    default now bridges it -- so the now-only perturbation is a deliberate
+    (and unchanged, so every recorded ensemble stays comparable) choice, not a
+    forced one.  A member's tb and tn therefore differ by the kick at step 0;
+    the ensemble measures spread about the same trajectory either way.
 
     ``perturb_baro``/``perturb_baro_key``/``perturb_baro_scale``: #1455
     Phase-2 Measurement 1.  Adds ``scale *`` a depth-uniform barotropic
@@ -851,6 +971,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     # environment, so two ladders can be built in one process without either
     # inheriting the other's setting.
     ladder_mode = resolve_ladder_mode(legacy_1d_ladder)
+    start_mode = resolve_start_mode(bridge_before)
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
@@ -1132,6 +1253,12 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # RETURNED at the top of this function, not a re-read of the environment
         # -- provenance must not come from mutable process state.
         nemo_ladder_mode=np.str_(ladder_mode),
+        # #1455: stamp WHICH time-integration START the twin took. Same reason
+        # as the ladder: a scorer must be able to read the one variable under
+        # test off the artifact instead of trusting a filename or a default
+        # that has since moved. This is the value resolve_start_mode RETURNED
+        # above, not a re-read of the flag.
+        twin_start_mode=np.str_(start_mode),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
         # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
@@ -1188,14 +1315,29 @@ def _parse_args(argv=None):
     p.add_argument("--bridge-tke", action="store_true",
                     help="seed state.tke from the NEMO restart's en (#1317 TKE "
                          "cold-start isolation experiment); default off (cold start)")
-    p.add_argument("--bridge-before", action="store_true",
+    p.add_argument("--bridge-before", default=True,
+                    action=argparse.BooleanOptionalAction,
                     help="seed state.{T,S,u,v,eta}_before from the NEMO restart's "
-                         "tb/sb/ub/vb/sshb (#1317 leap-frog before-level bridge); "
-                         "required for nemo_dino_kamm_mlf's "
-                         "tke_n2_time_level=nemo_before / "
-                         "tke_shear_production=nemo_burchard to read a real "
-                         "before-state from step 0 (else ValueError). Default "
-                         "off (matches the module docstring's cold-start caveat)")
+                         "tb/sb/ub/vb/sshb (#1317 leap-frog before-level bridge), "
+                         "so the twin CONTINUES NEMO's leap-frog. DEFAULT ON "
+                         "since 2026-08-24 (#1455); required anyway for "
+                         "nemo_dino_kamm_mlf's tke_n2_time_level=nemo_before / "
+                         "tke_shear_production=nemo_burchard, which read a real "
+                         "before-state from step 0 (else ValueError). "
+                         "--no-bridge-before is the legacy forward-Euler start "
+                         "-- see --legacy-euler-start")
+    p.add_argument("--legacy-euler-start", dest="bridge_before",
+                   action="store_false",
+                   help="start the twin from a forward-Euler step instead of "
+                        "NEMO's before level (the pre-2026-08-24 default; "
+                        "spelled --no-bridge-before too). HISTORICAL "
+                        "REPRODUCTION ONLY: an Euler-started leap-frog "
+                        "trajectory is EXACTLY the two-point running mean of "
+                        "the true one, i.e. a half-step delay at every "
+                        "frequency (0.470 steps of measured barotropic impulse "
+                        "lag against 0.000142 bridged), and it skips NEMO's "
+                        "step-1 after-level reconciliation. Prints a loud "
+                        "banner.")
     p.add_argument("--vmix-scheme", default=None,
                     help="override DINOConfig.vmix_scheme (e.g. 'constant' for "
                          "the #1317 TKE-vs-constant-mixing discriminator); "
