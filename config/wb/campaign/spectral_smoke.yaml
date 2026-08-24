@@ -23,7 +23,7 @@ cache_dir: ".cache/wb_campaign_era5_smoke"
 train_years: [2020]
 eval_years: [2020]
 era5_cadence_hours: 6
-n_train_days: 2
+n_training_days: 2
 
 n_epochs: 1
 optimizer: "adamw"

@@ -39,8 +39,21 @@ n_lon: 192
 nlev: 32
 spectral:
   n_max: 63
-  dt: 1800.0              # semi-implicit stable large dt; 86400/1800=48 steps/day
+  dt: 1800.0              # outer step; 86400/1800=48 steps/day.  NOT stable on
+                          # its own: only the linear gravity-wave subsystem is
+                          # implicit, and the explicit RK3 advection blows up at
+                          # T63 for dt=1800 (measured 2026-08-23: exponential
+                          # p_s blowup from step ~7, e-fold ~1.5 steps, on L32
+                          # AND L8; advective spectral CFL u*n_max*dt/a exceeds
+                          # the RK3 bound above ~97 m/s).  si_substeps below is
+                          # what makes this dt usable.
   semi_implicit: true
+  # Full-RK3 sub-stepping at dt/3 = 600 s (matrices rebuilt for the sub-step,
+  # tendencies re-evaluated each sub-step — semi_implicit.py).  Measured: 6 h
+  # dycore-only p_s error 9.8 kPa (blowup) without it, 872 Pa with it — the
+  # same ~0.9 kPa as SI dt600 / explicit dt600.  Keeps 12 outer BPTT steps per
+  # 6 h lead (adjoint memory unchanged; outer step is remat'd).
+  si_substeps: 3
   time_integrator: "ssp_rk3"
   hyperdiff_coeff: 2.5e15
   hyperdiff_order: 2

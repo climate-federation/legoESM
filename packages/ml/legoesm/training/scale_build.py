@@ -219,6 +219,91 @@ def build_latlon_config(cfg, yml):
     return ra.build_config_from_args(parsed)
 
 
+# --- campaign-YAML key validation (2026-08-24) ------------------------------
+# Every top-level key this training path actually reads.  A key outside this
+# set is a HARD ERROR: the lr/optimizer keys sat inert in the decks for a
+# whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
+# like ``learning_rate`` would silently reintroduce exactly that.
+_WB_CONSUMED_TOP_KEYS = frozenset({
+    "classical", "convection", "dt", "era5_cadence_hours",
+    "era5_cloud_condensate", "era5_cloud_zarr", "era5_zarr", "eval_years",
+    "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
+    "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
+    "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
+    "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",
+    "turbulence", "warmup_steps", "weight_decay",
+})
+# Deck metadata this trainer never reads but the decks legitimately carry
+# (documentation / other tooling).  Kept OUT of the consumed set so the
+# distinction stays visible; anything here is tolerated, not honoured.
+_WB_METADATA_TOP_KEYS = frozenset({"grid", "cache_dir"})
+# Exactly the keys _spectral_pe_config + the dt lookup read from the
+# ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
+# unstable full step is the same defect class as the inert lr.
+_WB_SPECTRAL_KEYS = frozenset({
+    "n_max", "dt", "hyperdiff_coeff", "hyperdiff_order", "time_integrator",
+    "semi_implicit", "si_T_ref", "si_alpha", "si_substeps", "sponge_sigma",
+    "sponge_tau", "spectral_filter_order", "spectral_filter_strength",
+    "fix_mass", "anchor_mass_to_initial", "vertical_advection_scheme",
+    "frictional_heating",
+})
+
+
+def validate_wb_campaign_yaml(yml: dict) -> None:
+    """Refuse a campaign YAML carrying keys this training path does not read.
+
+    Unknown keys raise with a nearest-match hint.  Covers the top level and
+    the ``spectral`` block; nested per-scheme blocks (``classical``,
+    ``loss``, ...) have their own consumers and are not checked here.
+    """
+    import difflib
+
+    # Common synonyms difflib's ratio cannot reach (``learning_rate`` vs
+    # ``lr`` share two characters).
+    aliases = {"learning_rate": "lr", "epochs": "n_epochs",
+               "weight-decay": "weight_decay", "grad_clip": "grad_clip_norm"}
+
+    def _reject(unknown, known, where):
+        # Suggestions draw ONLY from consumed keys — pointing a typo at a
+        # tolerated-metadata key would "fix" it into a knob that does nothing
+        # (GLM review). Advisory only: nothing is auto-translated.
+        hints = []
+        lower_map = {kk.lower(): kk for kk in known}
+        for k in sorted(unknown):
+            if k in aliases and aliases[k] in known:
+                close = [aliases[k]]
+            else:
+                # match case-insensitively so ``w_t`` suggests ``w_T``
+                close = [lower_map[m] for m in difflib.get_close_matches(
+                    k.lower(), list(lower_map), n=1)]
+            hints.append(f"{k!r}" + (f" (did you mean {close[0]!r}?)"
+                                     if close else ""))
+        raise SystemExit(
+            f"unknown {where} key(s) in campaign YAML: {', '.join(hints)}. "
+            "Keys this trainer does not read are a hard error: inert deck "
+            "keys are how the wb_classical_v2 campaign trained at the wrong "
+            "learning rate.")
+
+    top_known = _WB_CONSUMED_TOP_KEYS | _WB_METADATA_TOP_KEYS
+    unknown = set(yml) - top_known
+    if unknown:
+        _reject(unknown, sorted(_WB_CONSUMED_TOP_KEYS), "top-level")
+    spec = yml.get("spectral") or {}
+    unknown = set(spec) - _WB_SPECTRAL_KEYS
+    if unknown:
+        _reject(unknown, sorted(_WB_SPECTRAL_KEYS), "spectral-block")
+    # Loss block: make_loss_config silently DROPS keys outside
+    # LossConfig._fields ("if k in valid"), so a ``w_t`` typo would fall back
+    # to the default weight — the same inert-key failure mode (codex + GLM).
+    loss = yml.get("loss") or {}
+    if loss:
+        from legoesm.training.losses import LossConfig
+
+        unknown = set(loss) - set(LossConfig._fields)
+        if unknown:
+            _reject(unknown, sorted(LossConfig._fields), "loss-block")
+
+
 def make_loss_config(cfg, yml):
     from legoesm.training.losses import LossConfig
     lb = dict(yml.get("loss", {}))
@@ -320,8 +405,14 @@ def _build_mode_components_spectral(cfg, yml):
     grid = create_gaussian_grid(n_max)
     sigma = create_sigma_coordinate(nlev)
     pe_config = _spectral_pe_config(yml)
-    # No pole-cell clamp on the Gaussian grid; the SI step is stable at large
-    # dt (that is its purpose).  Explicit opt-out gets the AIMIP-proven 600 s.
+    # No pole-cell clamp on the Gaussian grid.  The SI step is NOT stable at
+    # arbitrary dt: only the linear gravity-wave subsystem is implicit, and
+    # the explicit RK3 advection has a spectral CFL bound
+    # (u * n_max * dt_sub / a < sqrt(3), dt_sub = dt / si_substeps).  Measured
+    # 2026-08-23 at T63: dt=1800 with si_substeps=1 blows up exponentially
+    # within 12 steps (any level count); dt<=900, or dt=1800 with
+    # si_substeps>=3, is stable.  Campaign YAMLs must satisfy the bound —
+    # gated by tests/unit/test_wb_campaign_dt_stability.py.
     dt = float(spec.get("dt", 1800.0 if pe_config.semi_implicit else 600.0))
 
     sponge_factor = None
