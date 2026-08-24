@@ -1066,13 +1066,16 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     # JIT the value-and-grad and the line-search candidate score, with the
     # trainable params as the only traced argument (arms/cfgs/args captured as
     # compile-time constants). Without this the whole rollout + reverse-mode ran
-    # EAGERLY, dispatching every primitive op separately; for CLUBB (a 15-moment
-    # closure with implicit band solves) a step measured ~344 s, of which the
-    # jitted steady state recovers ~1.45x (238 s). NET over a full fit is
-    # smaller -- ~1.2x at 8 steps, ~1.4x at 40 -- because the fused-graph
-    # compile is a fixed cost that must amortize (below ~5 steps it is a wash).
-    # The algebraic schemes have few ops so their eager cost was already small;
-    # this is a CLUBB-dominated win.
+    # EAGERLY, dispatching every primitive op separately. The size of the win
+    # depends on whether a scheme is DISPATCH-bound or COMPUTE-bound, and the
+    # dispatch-bound (algebraic) schemes benefit FAR more:
+    #   louis (algebraic):  value_and_grad 14.4 s eager -> 0.36 s jit = ~40x
+    #                       (its real compute is tiny; eager was ~all dispatch).
+    #   CLUBB (15-moment, implicit band solves): 344 s -> 238 s = ~1.45x
+    #                       (genuinely compute-bound; little dispatch to save).
+    # A full 8-scheme cheap-tier seed dropped from 10.8 h to 1.84 h (~5.9x
+    # wall; the fused-graph compile, one per scheme, caps it below the per-eval
+    # 40x). NET is scheme-mix-dependent, biggest where eager dispatch dominated.
     #
     # Two compiles per scheme, not one (codex review): the preflight below
     # traces the FULL param set, then the loop traces the FILTERED trainable set
