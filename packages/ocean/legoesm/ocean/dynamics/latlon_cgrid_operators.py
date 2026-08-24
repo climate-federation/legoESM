@@ -3608,6 +3608,35 @@ def compute_face_masks_3d(
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
+    # SPMD lat-band cut faces: inside the shard_map body, ``a`` is a BAND
+    # slab, so the boundary v-face rows above are walls at the INTERIOR band
+    # cuts — a live face at the cut was silently closed at every level (the
+    # partial-cell equivalence gate caught it as u[cut-row] zero-vs-live;
+    # the vertex-mask docstring warns about exactly this "pole wall at the
+    # cut").  Fetch the neighbour band's adjacent cell row with the same
+    # ppermutes the v-carrier reconstruction uses.  Non-target bands
+    # (global south/north ends) receive 0 -> the product is a wall, which
+    # is exactly the serial semantics there (fold face kept as wall; south
+    # wall on the regular grid), so ONLY the interior cuts change.  Serial
+    # / mpi / single-band paths never arm the spmd backend here -> the
+    # concatenation above is returned unchanged, bit-identical.
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    _mesh = get_spmd_mesh() if get_halo_backend() == "spmd" else None
+    if _mesh is not None and "lat" in tuple(getattr(_mesh, "axis_names", ())):
+        from legoesm.parallel.latlon_spmd import latlon_band_perms
+        n_dev = int(dict(_mesh.shape)["lat"])
+        if n_dev > 1:
+            perm_north, perm_south = latlon_band_perms(n_dev)
+            # perm_north: band b RECEIVES band b+1's payload -> each
+            # source must SEND its FIRST cell row (the row adjacent to its
+            # south cut).  perm_south symmetrically carries each band's
+            # LAST row northward-neighbour-ward.  The first version sent
+            # the opposite rows and opened the cut faces against cells a
+            # whole band away (gate caught it: u at the cut rows 30x off).
+            a_north = jax.lax.ppermute(a[:1], "lat", perm_north)
+            a_south = jax.lax.ppermute(a[-1:], "lat", perm_south)
+            v_mask = v_mask.at[-1:].set(a[-1:] * a_north)
+            v_mask = v_mask.at[:1].set(a_south * a[:1])
     return u_mask, v_mask
 
 
