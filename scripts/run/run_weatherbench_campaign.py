@@ -183,7 +183,10 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
     yml = _load_campaign_yaml(config_path)
     n_epochs = a.n_epochs
     if n_epochs is None and yml.get("n_epochs") is not None:
-        n_epochs = int(yml["n_epochs"])
+        # Same bool/non-integral rejection as the trainer: int() truncation
+        # here would forward --epochs 1 for ``n_epochs: 1.9`` (codex).
+        from train_weatherbench_scale import _yml_int
+        n_epochs = _yml_int(yml, "n_epochs", None)
         if n_epochs < 1:
             raise SystemExit(f"{a.config}: n_epochs must be >= 1, got {n_epochs}")
     eval_year = a.eval_year

@@ -13,7 +13,14 @@ n_lon: 320
 nlev: 32
 spectral:
   n_max: 106
-  dt: 1200.0              # 86400/1200 = 72 steps/day; leads 24/72/120/240 h stay on-grid
+  dt: 1200.0              # outer step; 86400/1200 = 72 steps/day; leads
+                          # 24/72/120/240 h stay on-grid.  NOT stable alone at
+                          # T106: the explicit RK3 advection bound gives
+                          # u_crit ~ 87 m/s at dt_sub=1200 (same defect class
+                          # as the measured T63 dt=1800 blowup, 2026-08-23).
+  # Full-RK3 sub-stepping at dt/3 = 400 s (u_crit ~ 260 m/s); see the T63
+  # decks and tests/unit/test_wb_campaign_dt_stability.py.
+  si_substeps: 3
   semi_implicit: true
   time_integrator: "ssp_rk3"
   hyperdiff_coeff: 1.0e15

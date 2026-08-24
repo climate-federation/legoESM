@@ -396,3 +396,70 @@ def test_every_epoch_writes_all_three_checkpoint_files():
     assert len(writes) == 3, (
         f"on_epoch must write parameters, optimizer state and the frozen list "
         f"atomically; found {len(writes)} atomic write(s)")
+
+
+def test_yaml_training_keys_resolved():
+    """2026-08-23: YAML lr/optimizer were silently inert — the v2 campaign
+    asked for lr 1.5e-3 and trained at the CLI default 3e-4 (manifest proof).
+    CLI wins when given; YAML wins over the historical defaults."""
+    yml = {"lr": 1.5e-3, "optimizer": "muon",
+           "weight_decay": 2.0e-5, "grad_clip_norm": 0.5}
+    cfg = mod.build_scale_config_from_args([])
+    assert cfg.lr is None and cfg.optimizer is None   # CLI silent
+    cfg2, wd, clip = mod._resolve_training_keys(cfg, yml)
+    assert cfg2.lr == 1.5e-3 and cfg2.optimizer == "muon"
+    assert wd == 2.0e-5 and clip == 0.5
+    # CLI overrides YAML.
+    cfg = mod.build_scale_config_from_args(["--lr", "7e-4", "--optimizer", "adam"])
+    cfg2, _, _ = mod._resolve_training_keys(cfg, yml)
+    assert cfg2.lr == 7e-4 and cfg2.optimizer == "adam"
+    # Neither given -> historical defaults.
+    cfg2, wd, clip = mod._resolve_training_keys(
+        mod.build_scale_config_from_args([]), {})
+    assert cfg2.lr == 3.0e-4 and cfg2.optimizer == "adamw"
+    assert wd is None and clip is None                # caller uses TrainingConfig
+
+
+def test_yaml_grad_accum_is_a_hard_error():
+    """grad_accum has no implementation here; a value other than 1 must
+    refuse to run rather than be silently ignored."""
+    cfg = mod.build_scale_config_from_args([])
+    with pytest.raises(SystemExit, match="grad.accum"):
+        mod._resolve_training_keys(cfg, {"grad_accum": 4})
+    with pytest.raises(SystemExit, match="grad.accum"):
+        mod._resolve_training_keys(
+            mod.build_scale_config_from_args(["--grad-accum", "2"]), {})
+
+
+def test_yaml_null_training_keys_fall_back():
+    """`lr:` with no value parses as None; it must fall back, not crash or
+    become the string "None" (GLM diff-review finding)."""
+    cfg = mod.build_scale_config_from_args([])
+    cfg2, wd, clip = mod._resolve_training_keys(
+        cfg, {"lr": None, "optimizer": None, "n_epochs": None,
+              "grad_accum": None, "weight_decay": None,
+              "grad_clip_norm": None})
+    assert cfg2.lr == mod._DEFAULT_LR
+    assert cfg2.optimizer == mod._DEFAULT_OPTIMIZER
+    assert cfg2.n_epochs == mod._DEFAULT_N_EPOCHS
+    assert wd is None and clip is None
+
+
+def test_cli_grad_accum_hard_errors_even_with_yaml_1():
+    """codex P1: --grad-accum 2 with YAML grad_accum: 1 must NOT silently
+    proceed as 1 — both sources hard-error on != 1."""
+    with pytest.raises(SystemExit, match="grad.accum"):
+        mod._resolve_training_keys(
+            mod.build_scale_config_from_args(["--grad-accum", "2"]),
+            {"grad_accum": 1})
+
+
+def test_yaml_non_integral_epochs_rejected():
+    """codex P2: n_epochs: 1.9 must not silently truncate to one epoch."""
+    cfg = mod.build_scale_config_from_args([])
+    with pytest.raises(SystemExit, match="not an integer"):
+        mod._resolve_training_keys(cfg, {"n_epochs": 1.9})
+    with pytest.raises(SystemExit, match="not an integer"):
+        mod._resolve_training_keys(cfg, {"n_epochs": True})
+    cfg2, _, _ = mod._resolve_training_keys(cfg, {"n_epochs": 12.0})
+    assert cfg2.n_epochs == 12
