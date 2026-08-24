@@ -982,7 +982,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               tracer_q_split: int = 0, nord_tr: int = 0,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
-                              consv_te: float = 0.0):
+                              consv_te: float = 0.0, out_shardings=None):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1031,7 +1031,25 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
 
     def _arrays_only(*a, **kw):
         out = run(*a, **kw)
-        return {k: v for k, v in out.items() if k not in _meta}
+        out = {k: v for k, v in out.items() if k not in _meta}
+        if out_shardings is not None:
+            # SPMD boundary pin (measured 2026-08-24, job 9483159): with
+            # face-sharded inputs and an UNCONSTRAINED jit, GSPMD keeps
+            # the interior distributed (halo transfers lower to face/
+            # strip-sized collective-permutes) but resolves the OUTPUTS
+            # fully replicated, so a stepping loop decays to replication
+            # after one step.  Constrain only the FACE-LEADING output
+            # leaves (the state/press/q/omga/nh arrays, leading axis 6);
+            # scalars and schedule leaves (nsplt, stages -- km/k_split
+            # shaped) stay unconstrained: a jit-level out_shardings
+            # prefix would try to tile those and raise IndivisibleError.
+            out = jax.tree.map(
+                lambda x: (jax.lax.with_sharding_constraint(
+                    x, out_shardings)
+                    if getattr(x, "ndim", 0) >= 1 and x.shape[0] == 6
+                    else x),
+                out)
+        return out
 
     _compiled = jax.jit(_arrays_only)
 

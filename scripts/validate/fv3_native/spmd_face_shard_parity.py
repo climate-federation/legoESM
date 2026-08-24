@@ -124,8 +124,16 @@ def main(argv=None):
     single = _flatten_bundle(b)
 
     # ---- arm B: face axis sharded over n_shards devices ----
+    # A SEPARATE model instance pins the step's out_shardings: with the
+    # unconstrained jit, GSPMD keeps the interior distributed but resolves
+    # the OUTPUTS replicated (measured, job 9483159), so the loop decays
+    # after one step. Pinning the boundary is the fix; arm A keeps the
+    # certified unconstrained jit.
     mesh = Mesh(np.array(devs[:args.n_shards]), ("face",))
     shard = NamedSharding(mesh, P("face"))
+    model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
+                                   step_out_shardings=shard)
+    model = model_sh                    # arm B steps below use the pinned jit
     b = _shard_bundle(ic, shard)
     b = model.step(b, args.dt)          # warmup: pays compile for this layout
 

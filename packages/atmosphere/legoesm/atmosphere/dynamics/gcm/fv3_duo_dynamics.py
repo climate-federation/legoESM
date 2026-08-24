@@ -86,7 +86,16 @@ class FV3DuoDynamicsModel:
     ``dt`` does not recompile.
     """
 
-    def __init__(self, grid, config: FV3DuoConfig | None = None):
+    def __init__(self, grid, config: FV3DuoConfig | None = None, *,
+                 step_out_shardings=None):
+        # step_out_shardings: ENGINEERING knob (a jax Sharding pytree
+        # prefix for the jitted step's outputs), not a scientific config
+        # field -- it changes WHERE arrays live, never their values.
+        # Default None = the unconstrained jit the certified lane always
+        # used. SPMD callers pin the face sharding here because an
+        # unconstrained jit resolves sharded-input outputs REPLICATED
+        # (measured, spmd_face_shard_parity 2026-08-24) and a stepping
+        # loop then decays after one step.
         if config is None:
             config = FV3DuoConfig()
         if not isinstance(config, FV3DuoConfig):
@@ -137,6 +146,7 @@ class FV3DuoDynamicsModel:
             kord_tr=config.kord_tr,
             hydrostatic=config.hydrostatic,
             w_limiter=(None if config.hydrostatic else True),
+            out_shardings=step_out_shardings,
         )
 
     # ------------------------------------------------------------------
