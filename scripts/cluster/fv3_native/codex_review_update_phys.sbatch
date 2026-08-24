@@ -14,7 +14,7 @@ echo "host: $(hostname)"; codex --version
 cd $WT; echo "PINNED sha: $(git rev-parse HEAD)"
 
 codex exec --sandbox read-only -C $WT "$(cat <<'PROMPT'
-ADVERSARIAL REVIEW of a GLM-authored port: commit fac9fd345 --
+RE-REVIEW (round 2) confirming two prior findings are addressed. ADVERSARIAL REVIEW of a GLM-authored port: commit a2c8db513 (fixes to fac9fd345) --
 fv_update_phys_dry_duo (+ _jax twin) in
 packages/core/legoesm/core/fv3_native_physics_coupling.py, and its 5 new tests
 in tests/grids/test_fv3_physics_coupling.py (the ones named *orchestrator*).
