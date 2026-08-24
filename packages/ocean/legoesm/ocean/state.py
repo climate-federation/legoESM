@@ -1328,10 +1328,13 @@ class BarotropicConfig(NamedTuple):
     # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
     # #1640 forced. ``u_before`` arrives populated only when the before level
     # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
-    # the campaign's own 90-day DINO twin did enter step 1 with ``u_before is
-    # None`` and take this branch, and every artifact recorded before that date
-    # did. Since #1455 the twin default is the bridged start, so the shipped
-    # twin no longer takes it; ``--legacy-euler-start`` still does. (The
+    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
+    # RETRACTED (#1455, 2026-08-24): the note here previously said the
+    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
+    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
+    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
+    # the twin runner defaults to the bridged start too, so the shipped twin
+    # cannot take it; ``--legacy-euler-start`` still can. (The
     # original wording here, "It is empty for a bridged/restart twin (u_before
     # arrives populated, so that branch is never taken)", stays RETRACTED: it
     # was asserted of every run when it was only ever true of a bridged one.)

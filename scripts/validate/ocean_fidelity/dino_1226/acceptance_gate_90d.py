@@ -29,9 +29,9 @@ produces a bridged-start candidate unless ``--no-bridge-before`` is passed.
 This gate PRINTS the candidate's ``twin_start_mode`` stamp and never refuses on
 it -- see ``kamm_twin_90d.certifiable_grid_and_precision`` for why the start
 mode is deliberately NOT a certification dimension the way the ladder and the
-precision are (every recorded artifact, the verdict-year baseline included, is
-Euler-start; refusing them would orphan the campaign's own baseline and buy no
-measurement).
+precision are (no recorded artifact carries the new stamp at all, the
+verdict-year baseline included, so a strict criterion would refuse them for
+being unstamped and orphan the campaign's own baseline).
 
 Thresholds: the 2.1 micro-ensemble noise floor (3 members, 1e-14 T
 perturbations -- n=3 caveat inherited: the floor is a small-sample estimate),
@@ -168,8 +168,9 @@ def load_candidate(path, day=90):
     # kamm_twin_90d.certifiable_grid_and_precision for the full disposition.
     start = _twin.start_mode_of(d)
     if start is None:
-        start = ("UNSTAMPED -- predates the twin_start_mode stamp; artifacts "
-                 "written before 2026-08-24 took the forward-EULER start")
+        start = ("UNSTAMPED -- predates the twin_start_mode stamp and does "
+                 "not record which start it took; read its run log (every "
+                 "recorded twin build audited so far was bridged)")
     elif start != "bridged":
         start = (f"{start} -- LEGACY FORWARD-EULER START: the trajectory is "
                  "the two-point running mean of the true one (a half-step "

@@ -34,15 +34,29 @@ measured at 0.470 steps unbridged and 0.000142 bridged, and has been RETRACTED
 as a harness artifact. The same default also skipped NEMO's step-1 after-level
 reconciliation (#1640 finding 3). One root, two symptoms, one default.
 ``--legacy-euler-start`` (equivalently ``--no-bridge-before``) selects it back
-with a loud banner, for reproducing artifacts recorded before the flip -- every
-twin recorded before 2026-08-24 ran that way.
+with a loud banner, for reproducing artifacts recorded before the flip.
 
-Bridging the before level is also REQUIRED (not merely preferred) for
-``nemo_dino_kamm_mlf``'s ``tke_n2_time_level="nemo_before"`` /
-``tke_shear_production="nemo_burchard"`` axes: without it ``model.step`` raises
-``ValueError`` at step 0 (``state.T_before``/``S_before`` are ``None`` until
-the model's own Euler start populates them AFTER step 1 -- too late for a card
-that reads them every step from step 0).
+WHO ACTUALLY RAN THE EULER START -- AUDITED, because the claim that started
+this work ("every recorded twin ran the Euler start") is REFUTED. Every twin
+build recorded in this repo's run logs passed the before-level bridge
+explicitly: 18 of 18, including all four 90-day acceptance-gate arms, the
+staircase/divisor arms, the viscosity ablation and the EEN-metric pair. The
+acceptance gate has defaulted the flag ON since 2026-08-09, and the
+verdict-year pre-registration specifies it. What ran the Euler start were
+ad-hoc lego runs launched straight off this CLI without the flag -- which is
+exactly the footgun this default removes, and is where the retracted
+"half-step model lag" came from. The recorded GATE and VERDICT numbers were
+never Euler-start.
+
+WHAT THE EULER START DOES ON THIS CARD, measured rather than inferred: it does
+NOT raise. An earlier version of this docstring said the card's
+``tke_n2_time_level="nemo_before"`` axis makes ``model.step`` raise
+``ValueError`` at step 0 without the bridge; that was true before the #1317
+fix, which now seeds a local ``before := now`` on the Euler-start branch
+(NEMO's own cold-start convention, ``istate.F90:97-99``). RETRACTED: a 1-day
+``--legacy-euler-start`` run of the shipped card completes normally. The
+difference between the two starts is therefore not a crash, it is that the
+Euler arm's before level is its own now level instead of NEMO's ``tb``.
 
 INTEGRATOR-MEMORY HANDSHAKE CAVEAT, what is LEFT of it: ``--bridge-tke`` (TKE
 closure memory) is a SEPARATE, independent flag and is still cold-start by
@@ -342,11 +356,12 @@ def certifiable_grid_and_precision(stamped) -> tuple:
 
     THE START MODE IS DELIBERATELY *NOT* A CRITERION HERE (#1455,
     2026-08-24), and the reasoning is recorded so it is a decision rather than
-    an omission.  Adding ``twin_start_mode != "bridged"`` to this list would
-    withhold the verdict from EVERY artifact this campaign has recorded --
-    including the verdict-year baseline the gate's own thresholds and claims
-    were established on, all of which ran the Euler start.  That would orphan
-    the baseline without producing a single new number.  The grid and the
+    an omission.  The stamp is NEW, so no artifact this campaign has recorded
+    carries it -- the verdict-year baseline the gate's thresholds were
+    established on included.  A strict criterion would therefore refuse to
+    certify all of them for being UNSTAMPED, orphaning the baseline without
+    producing a single new number.  (It would not be catching a contaminated
+    set: audited, every recorded twin build was bridged.)  The grid and the
     precision are different: an off-ladder or fp32 arm is a DIFFERENT
     experiment from the claim, whereas the start mode is a property the claim
     itself was measured under.  So the gate PRINTS the start mode next to the
@@ -679,10 +694,14 @@ def resolve_start_mode(bridge_before: bool) -> str:
               "(#1640 finding 3):", flush=True)
         print("!! step 1 commits a depth-mean deposit NEMO removes.",
               flush=True)
-        print("!! Historical-reproduction mode ONLY -- every twin recorded "
-              "before 2026-08-24", flush=True)
-        print("!! ran this way, which is the whole reason the flag still "
-              "exists.", flush=True)
+        print("!! Historical-reproduction mode ONLY. NOTE: this is NOT how "
+              "the recorded gate", flush=True)
+        print("!! or verdict-year artifacts were produced -- audited, 18 of "
+              "18 recorded twin", flush=True)
+        print("!! builds passed the bridge explicitly. The flag exists for "
+              "ad-hoc runs that", flush=True)
+        print("!! did not, which is where the retracted half-step lag came "
+              "from.", flush=True)
         print("!" * 78 + "\n", flush=True)
     print(f"twin start: {mode}  [bridge_before={bool(bridge_before)}]  "
           f"(default {TWIN_START_MODE_DEFAULT!r} = NEMO's own leap-frog "
@@ -695,9 +714,11 @@ def start_mode_of(stamped) -> str | None:
 
     Shared so every scorer reads the stamp the same way instead of inferring
     the start from a filename or from whatever the default was on the day.
-    ``None`` means the artifact PREDATES the stamp -- which, for anything
-    written before 2026-08-24, means the Euler start; but that is history, not
-    something this function is willing to assert about a file it is handed.
+    ``None`` means the artifact PREDATES the stamp and therefore does not
+    record its start mode.  It does NOT mean "Euler": every recorded twin
+    build audited in this repo's run logs (18 of 18) was bridged, so guessing
+    either way from the date would be wrong more often than right.  Read the
+    run log.
     """
     return (str(stamped["twin_start_mode"])
             if "twin_start_mode" in stamped else None)

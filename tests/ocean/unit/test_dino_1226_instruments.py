@@ -368,10 +368,10 @@ def test_the_start_mode_is_not_a_certification_criterion(instruments):
     """Disposition of the start mode at the gate (#1455): PRINTED, never a
     certification criterion.
 
-    Every artifact this campaign recorded -- the verdict-year baseline
-    included -- is Euler-start, so refusing to certify them would orphan the
-    campaign's own baseline and buy no measurement. The ladder and the
-    precision stay criteria; the start mode does not.
+    No artifact this campaign recorded carries the new stamp -- the
+    verdict-year baseline included -- so a strict criterion would refuse them
+    all for being unstamped and orphan the campaign's own baseline. The ladder
+    and the precision stay criteria; the start mode does not.
     """
     kamm_twin_90d = instruments.kamm_twin_90d
     stamped = {"nemo_ladder_mode": "both", "control_dtype": "float64",
@@ -1082,8 +1082,9 @@ def test_the_gate_prints_the_start_mode_of_every_candidate(tmp_path, monkeypatch
     the bridged default, the legacy Euler start (which must carry the warning
     text, not just the word), and an artifact written before the stamp existed
     (which must be reported as unknown, never guessed at from whatever the
-    default was on the day).  The clock guard is bypassed here because this
-    test is about the start-mode line, not about the clock.
+    default was on the day, which the audit says would be wrong: every
+    recorded twin build was bridged).  The clock guard is bypassed here
+    because this test is about the start-mode line, not about the clock.
     """
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415

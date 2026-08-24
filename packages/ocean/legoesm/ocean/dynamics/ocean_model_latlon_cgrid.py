@@ -7928,14 +7928,18 @@ class LatLonCGridOceanModel:
         which changes ``_step_impl``'s return contract at ~8 call sites —
         named, costed, NOT done here.
 
-        WHAT CHANGED ON 2026-08-24 (#1455): the 90-day DINO twin no longer
-        reaches this branch.  ``kamm_twin_90d.py`` used to default
-        ``bridge_before=False``, so the campaign's own production twin entered
-        step 1 with ``u_before is None``; the default is now the bridged start
-        and that invocation arrives with the before level populated.  An
-        earlier revision of this docstring justified "warning, not raise" by
-        that default — RETRACTED, because the default has moved and the
-        justification above does not depend on it.
+        WHAT CHANGED ON 2026-08-24 (#1455), and a RETRACTION with it.  This
+        docstring used to justify "warning, not raise" by asserting that the
+        campaign's own 90-day production twin took this branch, because
+        ``kamm_twin_90d.py`` defaulted ``bridge_before=False``.  The DEFAULT
+        was as described; the CONCLUSION was wrong.  Audited against the
+        recorded run logs: every twin build on record (18 of 18, all four
+        acceptance-gate arms included) passed the before-level bridge
+        explicitly, and the acceptance gate has defaulted it ON since
+        2026-08-09.  No recorded 90-day twin ever took this branch.  The twin
+        default is now the bridged start as well, so the shipped invocation
+        cannot; ``--legacy-euler-start`` still can.  The "warning, not raise"
+        justification above stands on the two callers, not on any default.
 
         RETRACTED, still (``state.py`` barotropic_after_reconcile note, which
         said the gap "is empty for a bridged/restart twin (u_before arrives
