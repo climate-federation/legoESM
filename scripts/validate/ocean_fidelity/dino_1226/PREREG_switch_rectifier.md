@@ -137,3 +137,72 @@ computed only over rungs that clear the floor.
 **Consequence for the reading.** The question sharpens: does rectification
 appear at the **ensemble's own 1e-14 amplitude**, or only far above it? Only the
 first would explain the recorded 309×. Three rungs could not tell; five can.
+
+---
+
+## AMENDMENT 3 (2026-08-24) — POST-HOC statistic declared, and the registered rule's own answer
+
+Written **after** the six arms were scored. Everything here is post-hoc and is
+labelled as such.
+
+### 3a. The registered rule, applied literally, isolates NOTHING
+
+The rule was: *the rectifier is the arm whose disabling collapses the spread
+below 3 at the step count where the baseline exceeds it.* The baseline exceeds
+3 at **all four** horizons (2031 / 866 / 1540 / 1869). Measured:
+
+* `evd_off` collapses at n=1 only (1.58), then 10.6 / 46.6 / 33.6.
+* `evd_sharp` collapses at n=10 only (1.83), with 524 / 52.0 / 369 elsewhere.
+
+**No arm collapses at every horizon where the baseline is rectified, so under
+the registered rule no arm is identified as the rectifier.** That is the
+pre-registered answer and it is stated first in the result, ahead of anything
+post-hoc.
+
+### 3b. The adjacent-rung pair ratio is POST-HOC
+
+`gain(1e-10) / gain(1e-12)` was chosen **after seeing the ladder**, because the
+full-ladder spread mixes two effects. It is a legitimate statistic and it is
+not a registered one. It is reported as post-hoc, never as the registered
+verdict.
+
+Its originally stated justification — that both rungs are "small enough not to
+outrun the narrow ramp" — is **wrong, by arithmetic**: a 1e-10 nudge moves N²
+by 3.673e-12, which is **37× the 1e-13 ramp width**. Both rungs outrun the
+ramp; only the degree differs (1e-8 outruns it by 3700×). The pair is therefore
+an *empirical observation about two adjacent rungs*, not an a-priori-safe
+bracket.
+
+### 3c. The `evd_sharp` arm was not one-variable either — and the fix
+
+The smoothing branch is `sigmoid(-N2 * sharpness)`: centred on **N² = 0**, and
+it **ignores `n2_threshold`**, while the hard branch fires at `N² < −1e-12`.
+So `evd_sharp` differs from the shipped card in edge sharpness **and** trigger
+location, and the census shows 0.577% of wet interfaces piled into exactly the
+band they disagree about — each able to move by up to 1e7×. The claim "mixing
+field unchanged to the digit" was false for the very population carrying the
+signal.
+
+**Fix, registered here before it was scored:** the arm `evd_thr0` is the
+shipped **hard** switch relocated to `N² < 0`. `evd_sharp` vs `evd_thr0` then
+differ **only** in edge sharpness, and that pair — not `evd_sharp` vs baseline
+— is the one-variable discontinuity comparison.
+
+### 3d. Honest scope, tightened
+
+At 1e-14 zero interfaces are within tipping reach and at 1e-12 only **eight**,
+and "reach" is a global maximum compared against a per-interface distance, so
+eight is an **upper bound**. The first rung with a substantial population is
+1e-10. The defensible scope is therefore **"a rectifier at ≳1e-10 in legoESM,
+silent at the ensembles' 1e-14"** — which means it does **not**, on this
+evidence, explain NEMO's recorded 309×.
+
+### 3e. Known non-blocking limitations, recorded not fixed
+
+* **Rung sets differ across arms** (`evd_off` keeps 4, the others 3), so
+  cross-arm full-ladder spreads are not strictly matched. The adjacent-rung
+  pair is matched, because those two rungs survive in every arm.
+* **Arm validity is measured at t=0 only.** `evd_sharp`'s gains at n=10 run
+  1e6–1e9 against the baseline's 5e3–1e4, i.e. its trajectory diverges; the
+  fix is to print the distance between the two arms' *unperturbed* controls at
+  each horizon, which needs no new run, only storing them.
