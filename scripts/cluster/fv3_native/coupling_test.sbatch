@@ -17,4 +17,4 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 cd $REPO
 echo "SHA=$(git rev-parse HEAD)  dirty=$(git status --porcelain | wc -l)"
-$PY -m pytest tests/grids/test_fv3_physics_coupling.py -q 2>&1 | tail -20
+$PY -m pytest tests/grids/test_fv3_physics_coupling.py tests/grids/test_c2l_ord4_face.py -q 2>&1 | tail -20

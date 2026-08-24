@@ -169,6 +169,41 @@ def c2l_ord2_face(u: np.ndarray, v: np.ndarray, dx: np.ndarray,
     return ua, va
 
 
+def c2l_ord4_face(u, v, amat, n, ng):
+    """c2l_ord4 (cubed_to_latlon, 4th order), DUO/bounded branch, one face one
+    level: fv_grid_utils.F90:2407-2531, bounded_domain path only.  The
+    panel-edge/corner special cases (the non-bounded branch, is==1/ie==npx/...)
+    are DEAD on a duo grid -- the halos carry real cross-face winds -- exactly as
+    for ``update_dwinds_phys_duo``/``d2a2c_vect_duo``.
+
+    ``u`` (m_a, m_b): D-grid x-wind on y-faces; ``v`` (m_b, m_a); m_a=n+2*ng,
+    m_b=m_a+1.  ``amat`` = (a11, a12, a21, a22) each (m_a, m_a).  Returns
+    geographic (Earth-frame) ``ua, va`` (m_a, m_a) valid on the COMPUTE domain
+    is..ie ([ng:ng+n]); the rest is NaN.  The 4th-order interior stencil is
+    UNWEIGHTED (no dx/dy -- that weighting is only in the dead edge cases) and
+    reads a 2-cell halo (j-1..j+2, i-1..i+2), so ng>=2 is required.  A consumer
+    that relied on ord2's is-1..ie+1 output ring will see NaN there.
+    """
+    if ng < 2:
+        raise ValueError("c2l_ord4_face: ng must be >= 2 (4th-order stencil "
+                         "reads j-1..j+2 / i-1..i+2)")
+    c1, c2 = 1.125, -0.125
+    a11, a12, a21, a22 = amat
+    s, e = ng, ng + n                    # numpy is..ie (Fortran 1..n), lo = 1-ng
+    cs = slice(s, e)
+    # utmp(i,j): u axis0 = cell i, axis1 = y-face j -> the j-stencil walks columns
+    utmp = (c2 * (u[cs, s - 1:e - 1] + u[cs, s + 2:e + 2])
+            + c1 * (u[cs, s:e] + u[cs, s + 1:e + 1]))
+    # vtmp(i,j): v axis0 = x-face i, axis1 = cell j -> the i-stencil walks rows
+    vtmp = (c2 * (v[s - 1:e - 1, cs] + v[s + 2:e + 2, cs])
+            + c1 * (v[s:e, cs] + v[s + 1:e + 1, cs]))
+    ua = np.full((n + 2 * ng, n + 2 * ng), np.nan, dtype=np.float64)
+    va = np.full_like(ua, np.nan)
+    ua[cs, cs] = a11[cs, cs] * utmp + a12[cs, cs] * vtmp
+    va[cs, cs] = a21[cs, cs] * utmp + a22[cs, cs] * vtmp
+    return ua, va
+
+
 def c2l_ord2_cgrid_face(uc: np.ndarray, vc: np.ndarray, dx: np.ndarray,
                         dy: np.ndarray, amat: tuple,
                         n: int, ng: int) -> tuple:

@@ -1051,7 +1051,8 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
 
     Three passes because the u_dt/v_dt one-cell halo exchange is a cross-face
     barrier (fv_update_phys.F90:645/698, dwind_2d=.false.): (1) per face, D->A
-    Earth-frame winds (c2l_ord2_face; d2a2c would be the wrong, local frame),
+    Earth-frame winds (c2l_ord4_face, matching the deck's c2l_ord=4; d2a2c
+    would be the wrong, local frame),
     the Held-Suarez tendencies on the compute domain,
     scattered back into full-domain arrays with zero halos; (2) exchange the
     u_dt/v_dt halos; (3) per face, apply fv_update_phys_dry_duo.  The pe/peln
@@ -1059,7 +1060,7 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
     k-last.  GLM-authored; codex + Claude reviewed.
     """
-    from legoesm.grids.fv3_native_ext_vector import c2l_ord2_face
+    from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
     from legoesm.core.fv3_native_physics_coupling import (
         held_suarez_tend, fv_update_phys_dry_duo)
@@ -1086,18 +1087,16 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
         gs = ctx["gs6"][t]
         # A-grid winds in the EARTH (lat-lon) frame -- the frame Held-Suarez
         # friction and update_dwinds (v3 = u_dt*vlon + v_dt*vlat) require.
-        # c2l_ord2_face is the geographic c2l (via the a-matrix rotation);
-        # d2a2c_vect_duo would give LOCAL-grid winds, the wrong frame.
-        # NOTE: the deck is c2l_ord=4; this is the ord2 port (no ord4 wind port
-        # exists), so the boundary-layer friction winds carry an ord2-vs-ord4
-        # approximation -- the expected residual source for this arm.
-        dx, dy, amat = ectx["dx6"][t], ectx["dy6"][t], ectx["amat6"][t]
+        # c2l_ord4_face is the geographic 4th-order c2l (a-matrix rotation),
+        # matching the deck's c2l_ord=4 (fv_arrays.F90:573); d2a2c_vect_duo
+        # would give LOCAL-grid winds (wrong frame) and c2l_ord2 the wrong order.
+        amat = ectx["amat6"][t]
         ua_f = np.empty((m, m, km), dtype=np.float64)
         va_f = np.empty((m, m, km), dtype=np.float64)
         for k in range(km):
-            uak, vak = c2l_ord2_face(state[t]["u"][:, :, k],
+            uak, vak = c2l_ord4_face(state[t]["u"][:, :, k],
                                      state[t]["v"][:, :, k],
-                                     dx, dy, amat, n, ng)
+                                     amat, n, ng)
             ua_f[:, :, k] = uak
             va_f[:, :, k] = vak
         # c2l is valid is-1..ie+1; halos are NaN and never read on the compute
