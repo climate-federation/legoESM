@@ -302,7 +302,10 @@ class TestComponentFactoryDispatch:
         (dict(turbulence="louis"), "silently inert"),
         (dict(gravity_wave_drag="rayleigh"), "silently inert"),
         (dict(precision="fp32"), "fp64"),
-        (dict(held_suarez_forcing=True), "Held-Suarez"),
+        # HS is now SUPPORTED on the hydrostatic arm (certified 3-pass
+        # step); the NH combination stays refused as uncertified.
+        (dict(held_suarez_forcing=True, model_type="nonhydrostatic"),
+         "hydrostatic-only"),
         (dict(distributed=True), "single-process"),
     ])
     def test_slice1_refusals_fire(self, bad, frag):
@@ -316,6 +319,23 @@ class TestComponentFactoryDispatch:
         with pytest.raises(ValueError, match=frag):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
+
+    def test_held_suarez_hydrostatic_constructs(self):
+        """hydro + held_suarez_forcing passes the wall AND the specific
+        guards, and the constructed grid carries the ext bundle
+        (``ectx``/``amat6``) the HS step's c2l Earth-frame winds need."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        cfg = _fv3_duo_config(held_suarez_forcing=True)
+        model = create_atmosphere_dycore(cfg, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert isinstance(model, FV3DuoDynamicsModel)
+        assert model.grid.ctx_np.get("ectx") is not None
+        assert "amat6" in model.grid.ctx_np["ectx"]
 
     def test_bad_nlev_refused(self):
         from legoesm.driver.component_factory import create_atmosphere_dycore
@@ -497,6 +517,40 @@ class TestModelDriverLane:
             for nm in ("u", "v"))
         assert umax < 400.0, f"final max|wind|={umax:.1f} m/s >= 400"
         # (3) Explicit terminal-status marker next to the snapshots.
+        assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
+            == "COMPLETED"
+
+    def test_held_suarez_run_completes_and_changes_pt(self, tmp_path):
+        """HS-on driver run COMPLETEs, and its final pt DIFFERS from the
+        same number of pure-dynamics steps from the same IC — the HS
+        step actually applied (non-vacuous).  The baseline reuses the
+        driver's OWN constructed model, so both arms share one jitted
+        dynamics program and differ ONLY in the HS application."""
+        from legoesm.driver.model_driver import ModelDriver
+        cfg = _fv3_duo_config(output_dir=str(tmp_path),
+                              held_suarez_forcing=True)
+        driver = ModelDriver(cfg, output_dir=tmp_path)
+        driver.setup()
+        status = driver.run()
+        assert status == "COMPLETED", f"HS driver lane returned {status!r}"
+        dt = float(driver.config.dycore.dt)
+        n_steps = int(cfg.days * 86400.0 / dt)
+        # Pure-dynamics baseline: same deterministic IC, same compiled
+        # step, no HS.
+        bundle = driver.model.dcmip16_initial_state(do_pert=True)
+        for _ in range(n_steps):
+            bundle = driver.model.step(bundle, dt)
+        pt_hs = np.asarray(driver.state["state"]["pt"])
+        pt_dry = np.asarray(bundle["state"]["pt"])
+        assert np.isfinite(pt_hs).all()
+        assert float(np.abs(pt_hs - pt_dry).max()) > 1.0e-6, (
+            "final pt is identical to the pure-dynamics run — the "
+            "Held-Suarez step never applied")
+        # u/v moved too (Rayleigh friction), and the run stayed sane.
+        for nm in ("u", "v"):
+            d = float(np.abs(np.asarray(driver.state["state"][nm])
+                             - np.asarray(bundle["state"][nm])).max())
+            assert d > 0.0, f"HS left {nm} bit-identical to dry dynamics"
         assert (tmp_path / "fv3duo_status.txt").read_text().strip() \
             == "COMPLETED"
 
@@ -708,9 +762,15 @@ class TestFV3DuoRestart:
         with pytest.raises(ValueError, match="load_checkpoint"):
             drv._run_fv3_duo(start_step=7)
 
-    @pytest.mark.parametrize("model_type", ["hydrostatic",
-                                            "nonhydrostatic"])
-    def test_restart_roundtrip_bitwise(self, tmp_path, model_type):
+    @pytest.mark.parametrize("model_type,hs", [
+        ("hydrostatic", False),
+        ("nonhydrostatic", False),
+        # HS-on restart: the adapter is stateless (bundle -> bundle) and
+        # checkpoints persist the post-HS bundle, so the chain must stay
+        # bitwise exactly like the dry lane (codex MINOR 2026-08-24).
+        ("hydrostatic", True),
+    ])
+    def test_restart_roundtrip_bitwise(self, tmp_path, model_type, hs):
         """PRE-REGISTERED acceptance (non-negotiable): run A = 2 days
         straight; run B = fresh driver loading A's day-1 checkpoint,
         then the remaining day.  Final bundles must be BITWISE identical
@@ -720,7 +780,8 @@ class TestFV3DuoRestart:
         from legoesm.driver.model_driver import ModelDriver
         dir_a, dir_b = tmp_path / "a", tmp_path / "b"
         dir_a.mkdir(), dir_b.mkdir()
-        mk = dict(days=2, checkpoint_days=1, model_type=model_type)
+        mk = dict(days=2, checkpoint_days=1, model_type=model_type,
+                  held_suarez_forcing=hs)
         cfg_a = _fv3_duo_config(output_dir=str(dir_a), **mk)
         drv_a = ModelDriver(cfg_a, output_dir=dir_a)
         drv_a.setup()

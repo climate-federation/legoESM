@@ -417,3 +417,117 @@ def test_orchestrator_differentiable_wrt_tendencies(case3d):
                                             jnp.asarray(c["u_dt"]))
     assert np.all(np.isfinite(np.asarray(gt))) and np.abs(np.asarray(gt)).max() > 0
     assert np.all(np.isfinite(np.asarray(gu))) and np.abs(np.asarray(gu)).max() > 0
+
+
+# ---------------------------------------------------------------------------
+# apply_held_suarez_step: the promoted 3-pass six-face HS orchestration.
+# The certified score lives in the parity runner (1.7645e-8 vs the Fortran
+# oracle); this section pins (a) ONE implementation total (the script
+# re-exports the core module's function object), and (b) the promoted copy
+# runs on a real six-face duo context and behaves like the spec: pt/u/v move,
+# pt halos and delp/press do not, and a context without the ext bundle is
+# refused loudly.
+# ---------------------------------------------------------------------------
+from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
+    apply_held_suarez_step,
+)
+
+KM_HS = 3
+
+
+def test_apply_held_suarez_step_is_the_scripts_function():
+    """No second implementation: the parity script's name resolves to the
+    SAME function object as the core module's (PEP 562 re-export)."""
+    import sys
+    from pathlib import Path
+    scripts = Path(__file__).resolve().parents[2] / "scripts" / "validate" \
+        / "fv3_native"
+    sys.path.insert(0, str(scripts))
+    try:
+        import full_step_oracle_parity as fsop
+        assert fsop.apply_held_suarez_step is apply_held_suarez_step
+    finally:
+        sys.path.remove(str(scripts))
+
+
+@pytest.fixture(scope="module")
+def hs_case():
+    """Tiny six-face duo context (ext bundle on) + synthetic state/press.
+
+    Pressures come from the lane's OWN ``p_var_hydrostatic`` (the same
+    producer the driver adapter slices), so the per-face pe/peln/pkz
+    layouts are exactly what ``apply_held_suarez_step`` was written
+    against — not a hand-rolled lookalike.
+    """
+    from legoesm.core.fv3_dynamics import p_var_hydrostatic
+    from legoesm.core.fv3_native_duo_stepper import (
+        build_six_face_duo_context,
+    )
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+
+    ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                     oracle_conventions=True)
+    rng = np.random.default_rng(7)
+    ptop, ps = 100.0, 1.0e5
+    state = []
+    delp6 = []
+    for _t in range(6):
+        delp = np.full((M, M, KM_HS), (ps - ptop) / KM_HS)
+        state.append(dict(
+            u=rng.normal(scale=5.0, size=(M, M + 1, KM_HS)),
+            v=rng.normal(scale=5.0, size=(M + 1, M, KM_HS)),
+            pt=250.0 + 5.0 * rng.normal(size=(M, M, KM_HS)),
+            delp=delp,
+        ))
+        delp6.append(delp)
+    press_stacked = p_var_hydrostatic(
+        np.stack(delp6), ptop=ptop, akap=FV3_KAPPA, n=N, ng=NG, km=KM_HS)
+    press = [{nm: np.asarray(press_stacked[nm][t])
+              for nm in ("ps", "pe", "peln", "pk", "pkz")}
+             for t in range(6)]
+    return ctx, state, press
+
+
+def test_apply_held_suarez_step_moves_the_right_fields(hs_case):
+    """pt moves on the compute window ONLY (the scalar update is
+    compute-domain-only); u/v move; delp and press are untouched."""
+    ctx, state, press = hs_case
+    snap = [{k: v.copy() for k, v in face.items()} for face in state]
+    press_snap = [{k: np.asarray(v).copy() for k, v in face.items()}
+                  for face in press]
+    apply_held_suarez_step(ctx, state, press, dt=1800.0, n=N, ng=NG,
+                           km=KM_HS, strat=True, backend="numpy")
+    ci = slice(NG, NG + N)
+    for t in range(6):
+        for nm in ("u", "v", "pt"):
+            assert np.isfinite(state[t][nm]).all(), (t, nm)
+        # non-vacuous: the forcing actually moved the prognostics
+        assert np.abs(state[t]["pt"][ci, ci]
+                      - snap[t]["pt"][ci, ci]).max() > 0.0, t
+        assert np.abs(state[t]["u"] - snap[t]["u"]).max() > 0.0, t
+        assert np.abs(state[t]["v"] - snap[t]["v"]).max() > 0.0, t
+        # pt halo untouched (fv_update_phys scalar loop is is:ie, js:je)
+        halo = np.ones((M, M), bool)
+        halo[ci, ci] = False
+        np.testing.assert_array_equal(state[t]["pt"][halo],
+                                      snap[t]["pt"][halo])
+        # delp and every press field are read-only to the HS step
+        np.testing.assert_array_equal(state[t]["delp"], snap[t]["delp"])
+        for nm, v in press[t].items():
+            np.testing.assert_array_equal(np.asarray(v),
+                                          press_snap[t][nm], err_msg=nm)
+
+
+def test_apply_held_suarez_step_refuses_missing_ectx(hs_case):
+    ctx, state, press = hs_case
+    ctx_no_ext = {**ctx, "ectx": None}
+    with pytest.raises(ValueError, match="ectx"):
+        apply_held_suarez_step(ctx_no_ext, state, press, dt=1800.0,
+                               n=N, ng=NG, km=KM_HS, backend="numpy")
+
+
+def test_apply_held_suarez_step_refuses_unknown_backend(hs_case):
+    ctx, state, press = hs_case
+    with pytest.raises(ValueError, match="backend"):
+        apply_held_suarez_step(ctx, state, press, dt=1800.0, n=N, ng=NG,
+                               km=KM_HS, backend="fortran")

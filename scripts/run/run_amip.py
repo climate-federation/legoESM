@@ -185,8 +185,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # grid_type)`` triple.
     # default=None sentinel: see --grid-type; resolves to "centered".
     # "fv3_duo" is the certified FV3 six-face duo-cube fv_dynamics lane
-    # (cubed_sphere grid only; slice 1: dry, physics-off, fp64, nlev in
-    # {5, 10} — the component factory refuses everything else loudly).
+    # (cubed_sphere grid only; dry dynamics, fp64, nlev in {5, 10};
+    # the only physics is --held-suarez-forcing on the hydrostatic arm —
+    # the component factory refuses everything else loudly).
     parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral",

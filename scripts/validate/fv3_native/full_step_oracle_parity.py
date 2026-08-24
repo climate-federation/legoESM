@@ -1043,176 +1043,21 @@ def _make_jax_step(ctx):
     return _step
 
 
-def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True,
-                           backend="numpy"):
-    """In place: advance the six-face POST-DYNAMICS duo state by one
-    Held-Suarez physics step -- the port of fv_phys + fv_update_phys for
-    do_Held_Suarez=.true., dry, hydrostatic, nwat=0 (driver/solo/fv_phys.F90:
-    533-591).  fv_dynamics has already run; this mutates state[t]["u"/"v"/"pt"].
-
-    Three passes because the u_dt/v_dt one-cell halo exchange is a cross-face
-    barrier (fv_update_phys.F90:645/698, dwind_2d=.false.): (1) per face, D->A
-    Earth-frame winds (c2l_ord4_face, matching the deck's c2l_ord=4; d2a2c
-    would be the wrong, local frame),
-    the Held-Suarez tendencies on the compute domain,
-    scattered back into full-domain arrays with zero halos; (2) exchange the
-    u_dt/v_dt halos; (3) per face, apply fv_update_phys_dry_duo.  The pe/peln
-    axis fix (i,k,j)->(i,j,k) and the pe 1-ring window match p_var_hydrostatic
-    (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
-    k-last.  GLM-authored; codex + Claude reviewed.
-
-    ``backend`` ("numpy" | "jax") selects the implementation of the THREE
-    per-face kernels only: "numpy" is the authorities and the established
-    score; "jax" routes them through their twins (c2l_ord4_face_jax,
-    held_suarez_tend_jax, fv_update_phys_dry_duo_jax), marshalling np->jnp
-    on the way in and back to np on the way out at each call.  The two halo
-    exchanges and the state/press dicts stay NumPy in BOTH backends -- they
-    are the exact mpp_update_domains strip-copy assembly glue (the ord4
-    stencil needs the strip copy, NOT ext_vector's wedge re-extrapolation).
-    """
-    from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face
-    from legoesm.grids.fv3_native_gridstruct import (
-        exchange_dgrid_vector_halos)
-    from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
-    from legoesm.core.fv3_native_physics_coupling import (
-        held_suarez_tend, fv_update_phys_dry_duo)
-    from legoesm.grids.fv3_native_gridstruct import exchange_agrid_scalar_halos
-
-    # The backend switches ONLY the three per-face kernels: the jax backend
-    # exercises the per-face physics twins; the strip-copy halo exchange is
-    # numpy assembly glue in both backends, matching the dyn lane where the
-    # exchange is not the per-face kernel.
-    if backend == "jax":
-        import jax.numpy as jnp
-
-        from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face_jax
+# apply_held_suarez_step was PROMOTED VERBATIM to
+# legoesm.core.fv3_native_physics_coupling (its three per-face kernels
+# already live there; the ModelDriver duo lane cannot import from
+# scripts/).  The call site in main() imports it function-scope, keeping
+# this module's import-time footprint jax-free (--help stays light).  The
+# PEP 562 re-export below keeps `full_step_oracle_parity.
+# apply_held_suarez_step` resolvable so the no-second-implementation
+# identity test (tests/grids/test_fv3_physics_coupling.py) can pin that
+# both names are the SAME function object.
+def __getattr__(name):
+    if name == "apply_held_suarez_step":
         from legoesm.core.fv3_native_physics_coupling import (
-            held_suarez_tend_jax, fv_update_phys_dry_duo_jax)
-
-        # np -> jnp on the way in, np.asarray on the way out, at each
-        # per-face call (the _make_jax_step marshalling style), so the
-        # NumPy scatter/assembly around the kernels is identical in both
-        # backends.
-        def _c2l(u, v, amat, n, ng):
-            ua, va = c2l_ord4_face_jax(
-                jnp.asarray(u), jnp.asarray(v),
-                tuple(jnp.asarray(a) for a in amat), n, ng)
-            return np.asarray(ua), np.asarray(va)
-
-        def _hs_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
-                     strat=True):
-            outs = held_suarez_tend_jax(
-                jnp.asarray(pt), jnp.asarray(ua), jnp.asarray(va),
-                jnp.asarray(delp), jnp.asarray(peln), jnp.asarray(pkz),
-                jnp.asarray(pe), jnp.asarray(lat), pdt, strat=strat)
-            return tuple(np.asarray(o) for o in outs)
-
-        def _upd(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
-                 vlon, vlat, es1, ew2, ng):
-            outs = fv_update_phys_dry_duo_jax(
-                jnp.asarray(u), jnp.asarray(v), jnp.asarray(pt),
-                jnp.asarray(ua), jnp.asarray(va), jnp.asarray(u_dt),
-                jnp.asarray(v_dt), jnp.asarray(t_dt), dt,
-                jnp.asarray(vlon), jnp.asarray(vlat),
-                jnp.asarray(es1), jnp.asarray(ew2), ng)
-            return tuple(np.asarray(o) for o in outs)
-    elif backend == "numpy":
-        _c2l = c2l_ord4_face
-        _hs_tend = held_suarez_tend
-        _upd = fv_update_phys_dry_duo
-    else:
-        raise ValueError(
-            f"apply_held_suarez_step: unknown backend {backend!r} "
-            "(choices: 'numpy', 'jax')")
-
-    m = n + 2 * ng
-    ci = slice(ng, ng + n)
-    assert state[0]["pt"].shape == (m, m, km)
-    assert press[0]["pkz"].shape == (n, n, km)
-    ectx = ctx.get("ectx")
-    if ectx is None:
-        raise ValueError(
-            "apply_held_suarez_step needs ctx['ectx'] (build the duo context "
-            "with use_ext_bundle=True) for the c2l Earth-frame winds")
-
-    ua6 = [None] * 6
-    va6 = [None] * 6
-    t_dt6 = [None] * 6
-    u_dt6 = [None] * 6
-    v_dt6 = [None] * 6
-
-    # The oracle's c2l_ord4 exchanges the D-grid u/v halos before interpolating
-    # (mpp_update_domains gridtype=DGRID_NE, fv_grid_utils.F90:2441); the ord4
-    # edge stencil (compute cells i or j = 1 or n) reads those halos, so exchange
-    # them first (exchange_dgrid_vector_halos = the exact mpp_update_domains
-    # DGRID_NE strip copy, NOT ext_vector's wedge re-extrapolation -- codex).
-    # Halo-only
-    # (the compute interior is untouched), so PASS 3's D-grid update is unaffected.
-    u6 = [state[t]["u"] for t in range(6)]
-    v6 = [state[t]["v"] for t in range(6)]
-    for tile in range(1, 7):
-        exchange_dgrid_vector_halos(u6, v6, tile, n, ng)
-
-    # PASS 1: per-face tendencies on the compute domain
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        # A-grid winds in the EARTH (lat-lon) frame -- the frame Held-Suarez
-        # friction and update_dwinds (v3 = u_dt*vlon + v_dt*vlat) require.
-        # c2l_ord4_face is the geographic 4th-order c2l (a-matrix rotation),
-        # matching the deck's c2l_ord=4 (fv_arrays.F90:573); d2a2c_vect_duo
-        # would give LOCAL-grid winds (wrong frame) and c2l_ord2 the wrong order.
-        amat = ectx["amat6"][t]
-        ua_f = np.empty((m, m, km), dtype=np.float64)
-        va_f = np.empty((m, m, km), dtype=np.float64)
-        for k in range(km):
-            uak, vak = _c2l(state[t]["u"][:, :, k],
-                            state[t]["v"][:, :, k],
-                            amat, n, ng)
-            ua_f[:, :, k] = uak
-            va_f[:, :, k] = vak
-        # c2l is valid is-1..ie+1; halos are NaN and never read on the compute
-        # domain, but zero them so a stray downstream read cannot propagate NaN.
-        ua_f = np.nan_to_num(ua_f, nan=0.0)
-        va_f = np.nan_to_num(va_f, nan=0.0)
-        ua6[t], va6[t] = ua_f, va_f
-
-        pt_c = state[t]["pt"][ci, ci]                        # (n, n, km)
-        delp_c = state[t]["delp"][ci, ci]
-        ua_c, va_c = ua_f[ci, ci], va_f[ci, ci]
-        pkz_c = press[t]["pkz"]                              # already (n, n, km)
-        peln_c = np.transpose(press[t]["peln"], (0, 2, 1))   # (i,k,j)->(i,j,k)
-        pe_c = np.transpose(press[t]["pe"][1:n + 1, :, 1:n + 1], (0, 2, 1))
-        lat_c = gs["agrid_lat"][ci, ci]                      # (n, n) radians
-
-        t_dt_c, u_dt_c, v_dt_c = _hs_tend(
-            pt_c, ua_c, va_c, delp_c, peln_c, pkz_c, pe_c, lat_c, dt,
-            strat=strat)
-
-        t_dt_f = np.zeros((m, m, km), dtype=np.float64)
-        u_dt_f = np.zeros((m, m, km), dtype=np.float64)
-        v_dt_f = np.zeros((m, m, km), dtype=np.float64)
-        t_dt_f[ci, ci] = t_dt_c
-        u_dt_f[ci, ci] = u_dt_c
-        v_dt_f[ci, ci] = v_dt_c
-        t_dt6[t], u_dt6[t], v_dt6[t] = t_dt_f, u_dt_f, v_dt_f
-
-    # PASS 2: cross-face one-cell halo exchange of the vector tendencies
-    for tile in range(1, 7):
-        exchange_agrid_scalar_halos(u_dt6, tile, n, ng)
-    for tile in range(1, 7):
-        exchange_agrid_scalar_halos(v_dt6, tile, n, ng)
-
-    # PASS 3: apply
-    for t in range(6):
-        gs = ctx["gs6"][t]
-        wv = compute_fv3_native_wind_vectors(
-            gs["grid_lon"], gs["grid_lat"], gs["agrid_lon"], gs["agrid_lat"])
-        u2, v2, pt2, _, _ = _upd(
-            state[t]["u"], state[t]["v"], state[t]["pt"], ua6[t], va6[t],
-            u_dt6[t], v_dt6[t], t_dt6[t], dt,
-            wv["vlon"], wv["vlat"], wv["es1"], wv["ew2"], ng)
-        state[t]["u"], state[t]["v"], state[t]["pt"] = u2, v2, pt2
-    return None
+            apply_held_suarez_step)
+        return apply_held_suarez_step
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main(argv=None):
@@ -1866,6 +1711,9 @@ def main(argv=None):
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
     if args.physics == "held_suarez":
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step)
+
         # do_strat_HS_forcing (fv_arrays default .true.) selects the strat/meso
         # regimes inside Held_Suarez_Tend; read it from the deck, do not assume.
         _hs_strat = _nml_logical(_nml_text(args.step_run), "do_strat_HS_forcing")
