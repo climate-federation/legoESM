@@ -3893,6 +3893,11 @@ class ModelDriver:
                 lw_up_toa=kwargs.get('lw_up_toa', None),
                 sw_net_sfc=kwargs.get('sw_net_sfc', None),
                 lw_net_sfc=kwargs.get('lw_net_sfc', None),
+                # #1354/#1515: forward the TOA-down + surface turbulent fluxes
+                # so the energy-budget tracker runs on this (MPAS) path too.
+                sw_down_toa=kwargs.get('sw_down_toa', None),
+                shflx=kwargs.get('shflx', None),
+                lhflx=kwargs.get('lhflx', None),
             )
 
         if self._device_config is not None:

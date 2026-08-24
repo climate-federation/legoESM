@@ -562,3 +562,84 @@ class TestTrackerAreaWeighting:
         # Uniform fields: weighting leaves the means physically sensible.
         assert b.precip_rate > 0.0
         assert b.column_water > 0.0
+
+
+# ---------------------------------------------------------------------------
+# EnergyBudgetTracker across ALL grid layouts (#1354/#1515)
+#
+# The tracker was previously exercised (and wired into the driver) only on the
+# cube/lat-lon full-collector path; the MPAS lane runs collect_lightweight and
+# used to skip it entirely.  After wiring it onto that path too, these tests pin
+# that the tracker's math is grid-agnostic: a (nCells, nlev) MPAS column stack,
+# a (6, n, n, nlev) cube stack, and a (n_lat, n_lon, nlev) lat-lon stack must
+# all produce finite, physically-ordered budgets with the SAME closed-budget
+# identity residual == toa_net - dE_dt.
+# ---------------------------------------------------------------------------
+import numpy as _np
+import pytest as _pytest
+
+
+def _grid_state(shape_h, nlev, T0=250.0):
+    """A uniform at-rest atmosphere on an arbitrary horizontal shape_h."""
+    sigma_full, dsigma = _make_sigma(nlev)
+    T = jnp.ones(shape_h + (nlev,)) * T0
+    q_v = jnp.ones(shape_h + (nlev,)) * 5e-3
+    u = jnp.zeros(shape_h + (nlev,))
+    v = jnp.zeros(shape_h + (nlev,))
+    phis = jnp.zeros(shape_h)
+    p_s = jnp.ones(shape_h) * 1.0e5
+    return T, q_v, u, v, phis, p_s, dsigma, sigma_full
+
+
+@_pytest.mark.parametrize("shape_h,area_shape", [
+    ((642,), (642,)),          # MPAS voronoi: (nCells,) horizontal
+    ((6, 8, 8), (6, 8, 8)),    # cubed sphere
+    ((16, 32), (16, 32)),      # lat-lon
+])
+def test_tracker_is_grid_agnostic(shape_h, area_shape):
+    T, q_v, u, v, phis, p_s, dsigma, sigma_full = _grid_state(shape_h, 12)
+    area = jnp.asarray(_np.random.default_rng(0).uniform(0.5, 1.5, area_shape))
+    trk = EnergyBudgetTracker()
+    fl = jnp.ones(shape_h)
+    # two updates so dE_dt / residual are populated (the first seeds them)
+    for k, day in enumerate((0.0, 1.0)):
+        b = trk.update(
+            T + k * 2.0, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            sw_down_toa=fl * 340.0, sw_up_toa=fl * 100.0, lw_up_toa=fl * 240.0,
+            sw_net_sfc=fl * 170.0, lw_net_sfc=fl * (-60.0),
+            elapsed_seconds=day * 86400.0, area_weights=area,
+        )
+    # finite, scalar budget on every grid
+    assert _np.isfinite(b.toa_net) and _np.isfinite(b.dE_dt)
+    assert _np.isfinite(b.residual) and _np.isfinite(b.column_energy)
+    # the closed-budget identity the #1354 probe relies on
+    npt.assert_allclose(b.residual, b.toa_net - b.dE_dt, rtol=0, atol=1e-6)
+    # warming (T rose 2 K between the two calls) => column energy went up
+    assert b.dE_dt > 0.0
+    # toa_net here is 340 - 100 - 240 = 0 W/m^2 by construction
+    npt.assert_allclose(b.toa_net, 0.0, atol=1e-6)
+
+
+def test_tracker_area_weighting_changes_the_mean():
+    # On a non-uniform field the area-weighted budget must differ from the
+    # unweighted one, or the weights are being ignored (the lat-lon polar bias
+    # this weighting exists to remove).
+    nlev = 10
+    shape_h = (16, 32)
+    sigma_full, dsigma = _make_sigma(nlev)
+    rng = _np.random.default_rng(1)
+    T = jnp.asarray(240.0 + rng.uniform(0, 40, shape_h + (nlev,)))
+    q_v = jnp.ones(shape_h + (nlev,)) * 5e-3
+    z = jnp.zeros(shape_h + (nlev,))
+    phis = jnp.zeros(shape_h); p_s = jnp.ones(shape_h) * 1e5
+    fl = jnp.ones(shape_h)
+    lat = jnp.deg2rad(jnp.linspace(-85, 85, shape_h[0]))
+    area = jnp.cos(lat)[:, None] * jnp.ones((1, shape_h[1]))
+    kw = dict(sw_down_toa=fl * 340.0, sw_up_toa=fl * 100.0, lw_up_toa=fl * 235.0,
+              sw_net_sfc=fl * 170.0, lw_net_sfc=fl * (-60.0),
+              elapsed_seconds=0.0)
+    b_w = EnergyBudgetTracker().update(T, q_v, z, z, phis, p_s, dsigma,
+                                       sigma_full, area_weights=area, **kw)
+    b_u = EnergyBudgetTracker().update(T, q_v, z, z, phis, p_s, dsigma,
+                                       sigma_full, area_weights=None, **kw)
+    assert abs(b_w.column_energy - b_u.column_energy) > 1.0

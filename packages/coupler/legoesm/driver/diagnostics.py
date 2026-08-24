@@ -1332,6 +1332,9 @@ class DiagnosticCollector:
         lw_up_toa,
         sw_net_sfc,
         lw_net_sfc,
+        sw_down_toa=None,
+        shflx=None,
+        lhflx=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1402,11 +1405,37 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
-        # rsdt/hfss/hfls not available in lightweight mode — fill with NaN
-        # so timeseries arrays stay aligned across flush chunks.
-        self.rsdt.append(float('nan'))
-        self.hfss.append(float('nan'))
-        self.hfls.append(float('nan'))
+        # rsdt/hfss/hfls: recorded when the caller provides them (a real AMIP
+        # run does; a bare scaling benchmark does not), else NaN so the
+        # timeseries arrays stay aligned across flush chunks.
+        _rsdt = (float(area_weighted_mean(sw_down_toa, _aw))
+                 if sw_down_toa is not None else float('nan'))
+        _hfss = (float(area_weighted_mean(shflx, _aw))
+                 if shflx is not None else float('nan'))
+        _hfls = (float(area_weighted_mean(lhflx, _aw))
+                 if lhflx is not None else float('nan'))
+        self.rsdt.append(_rsdt)
+        self.hfss.append(_hfss)
+        self.hfls.append(_hfls)
+
+        # Energy-budget tracker on the lightweight path too (#1354/#1515): the
+        # tracker is grid-agnostic (column integral over the trailing level
+        # axis, area weighting over the leading horizontal axes — works on the
+        # MPAS ``(nCells, nlev)`` layout exactly as on the cube ``(6,n,n,nlev)``
+        # one).  Runs only when the radiation fluxes are present, so a bare
+        # scaling benchmark that passes no fluxes keeps its lean path.
+        if sw_down_toa is not None and q_v is not None:
+            self.energy_tracker.update(
+                state.T.data, q_v, state.u.data,
+                (state.v.data if hasattr(state, 'v') else state.u.data),
+                state.phis.data, state.p_s.data,
+                self.dsigma, self.sigma_full,
+                sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
+                elapsed_seconds=elapsed_day * 86400.0,
+                area_weights=_aw,
+                dp=self._dp(state.p_s.data),
+                p_full=self._p_full(state.p_s.data),
+            )
 
         return {
             'mean_sst': mean_sst,
