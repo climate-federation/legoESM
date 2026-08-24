@@ -1424,10 +1424,15 @@ class DiagnosticCollector:
         # MPAS ``(nCells, nlev)`` layout exactly as on the cube ``(6,n,n,nlev)``
         # one).  Runs only when the radiation fluxes are present, so a bare
         # scaling benchmark that passes no fluxes keeps its lean path.
-        if sw_down_toa is not None and q_v is not None:
+        _v_data = getattr(state, 'v', None)
+        _v_data = _v_data.data if _v_data is not None else None
+        if sw_down_toa is not None and q_v is not None and _v_data is not None:
+            # Only the grids that carry a cell-centred v (cube / lat-lon) run
+            # the tracker here; the MPAS edge-wind lane runs it in _run_mpas
+            # with a Perot reconstruction (a None v here means edge winds we
+            # must not feed the column KE term as if they were cell winds).
             self.energy_tracker.update(
-                state.T.data, q_v, state.u.data,
-                (state.v.data if hasattr(state, 'v') else state.u.data),
+                state.T.data, q_v, state.u.data, _v_data,
                 state.phis.data, state.p_s.data,
                 self.dsigma, self.sigma_full,
                 sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,

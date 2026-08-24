@@ -10304,6 +10304,20 @@ class ModelDriver:
                 # toa_net = rsdt - rsut - rlut; the tracker's residual =
                 # toa_net - dE/dt.  hfss/hfls are recorded for the closure
                 # probe (LEAK = sfc_net_rad - hfss - hfls - residual).
+                # FLUX TIMING: these are the last radiation step's INSTANTANEOUS
+                # fluxes (a daily snapshot), not the diagnostic-interval mean.
+                # GLM review: for the GLOBAL mean this is adequate to catch the
+                # ~20 W/m^2 leak we hunt -- a fixed-time global snapshot
+                # integrates over all longitudes == all local times, so rsdt is
+                # S_0/4 exactly and rsut/rlut carry only ~1-5 W/m^2 of day-to-day
+                # noise (SNR ~10 sigma/day).  A REGIONAL/map budget would need
+                # the interval-mean (self._mpas_sfc_accum, CMOR-gated) instead
+                # (codex review); global localisation is deferred.
+                # MPI-partitioned MPAS is skipped: the tracker uses local area
+                # weights + local state with no owned-cell mask or allreduce
+                # (halo double-count), exactly as the moisture tracker is
+                # skipped on that lane (codex review).  Single-GPU / serial
+                # only, which is the #1354 L5 lane.
                 _ebd = getattr(self.diagnostics, "energy_tracker", None)
                 _sd = getattr(self.model, "_sfc_diag", None)
                 _qv_e = (self.state.tracers["q_v"].data
@@ -10317,16 +10331,20 @@ class ModelDriver:
                 _sw_ns, _lw_ns = _slot(0), _slot(1)
                 _shf, _lhf = _slot(6), _slot(7)
                 if (_ebd is not None and _qv_e is not None
+                        and not _is_mpas_cell_partitioned(self)
                         and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
                     from legoesm.diagnostics.energy_budget import (
                         area_weighted_mean as _awm,
                     )
+                    from legoesm.grids.voronoi import reconstruct_cell_velocity
                     _awt = self.diagnostics._area_w
+                    # MPAS u is EDGE-normal (nEdges, nlev); the column KE term
+                    # needs cell-centred east/north winds (codex P0).  Perot
+                    # reconstruction, the same the turbulence/coupler paths use.
+                    _uc, _vc = reconstruct_cell_velocity(self.state.u.data,
+                                                         self.grid)
                     _eb = _ebd.update(
-                        self.state.T.data, _qv_e, self.state.u.data,
-                        (self.state.v.data
-                         if getattr(self.state, "v", None) is not None
-                         else self.state.u.data),
+                        self.state.T.data, _qv_e, _uc, _vc,
                         self.state.phis.data, p_s_data,
                         self.diagnostics.dsigma, self.diagnostics.sigma_full,
                         _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
