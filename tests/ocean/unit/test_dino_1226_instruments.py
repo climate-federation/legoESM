@@ -1100,6 +1100,76 @@ def test_the_gate_prints_the_start_mode_of_every_candidate(tmp_path, monkeypatch
     assert expect in out, f"expected {expect!r} in:\n{out}"
 
 
+def _import_startmode_scorer():
+    import importlib
+    _dir = (Path(__file__).resolve().parents[3] / "scripts" / "validate"
+            / "ocean_fidelity" / "dino_1226")
+    stub = types.ModuleType("acc_thermal_wind")
+    stub.DINO = "/nonexistent"
+    with mock.patch.dict(sys.modules, {"acc_thermal_wind": stub}):
+        for m in ("acceptance_gate_90d", "startmode_ab_score"):
+            sys.modules.pop(m, None)
+        sys.path.insert(0, str(_dir))
+        try:
+            return importlib.import_module("startmode_ab_score")
+        finally:
+            sys.path.remove(str(_dir))
+            for m in ("acceptance_gate_90d", "startmode_ab_score"):
+                sys.modules.pop(m, None)
+
+
+def test_startmode_scorer_reads_every_stamp_and_admits_the_missing_ones(tmp_path):
+    """The A/B scorer prints each arm's provenance before any number, so a
+    mislabelled file cannot be read as a result. An unstamped field must come
+    back as UNSTAMPED, not as a guess."""
+    sc = _import_startmode_scorer()
+    full = tmp_path / "full.npz"
+    np.savez(full, twin_start_mode=np.str_("euler"),
+             nemo_ladder_mode=np.str_("both"),
+             control_dtype=np.str_("float64"),
+             vertical_ladder_sha256=np.str_("abcdef0123456789ff"))
+    got = sc.stamps_of(str(full))
+    assert got["start"] == "euler" and got["ladder"] == "both"
+    assert got["dtype"] == "float64" and got["hash"] == "abcdef0123456789"
+    bare = tmp_path / "bare.npz"
+    np.savez(bare, x=np.zeros(2))
+    assert set(sc.stamps_of(str(bare)).values()) == {"UNSTAMPED"}
+
+
+def test_startmode_scorer_refuses_arms_on_different_ladders(tmp_path):
+    """A pair that does not stand on the same vertical ladder is not a
+    one-variable comparison, and the refusal must happen BEFORE any metric is
+    computed (it does: the guard runs before load_candidate, which is why this
+    test needs no NEMO artifacts at all).
+
+    Non-vacuity: the matching pair gets PAST the guard and fails later, on the
+    missing NEMO baseline -- so the guard is not simply rejecting everything.
+    """
+    a = tmp_path / "a.npz"
+    b = tmp_path / "b.npz"
+    np.savez(a, vertical_ladder_sha256=np.str_("aaaa000000000000"))
+    np.savez(b, vertical_ladder_sha256=np.str_("bbbb000000000000"))
+    sc = _import_startmode_scorer()
+    with pytest.raises(SystemExit, match="DIFFERENT vertical ladders"):
+        sc.main([f"A={a}", f"B={b}"])
+
+    same = tmp_path / "same.npz"
+    np.savez(same, vertical_ladder_sha256=np.str_("aaaa000000000000"))
+    with pytest.raises(BaseException) as ei:      # SystemExit is not Exception
+        sc.main([f"A={a}", f"B={same}"])
+    assert "DIFFERENT vertical ladders" not in str(ei.value)
+
+
+def test_startmode_scorer_flags_the_band_floor_as_a_transfer():
+    """The channel-band transport has no 1e-14 floor of its own; it borrows
+    ACC's. That borrowing must be declared in the module, not silently reused
+    -- this is the campaign's transferred-floor rule applied to its own tool."""
+    sc = _import_startmode_scorer()
+    assert sc.ACCBAND_FLOOR_IS_A_TRANSFER is True
+    assert sc.FLOORS["accband"] == sc.FLOORS["acc"]
+    assert "accband" in sc.KEYS and "acc" in sc.KEYS
+
+
 # ---------------------------------------------------------------------------
 # traadv_fct_probe: the two conditioning-robust statistics added for #1455.
 # The tracer-advection rows are scored with a ratio of SUMS, which on a row
