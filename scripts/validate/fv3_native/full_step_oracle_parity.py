@@ -1043,7 +1043,7 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
     k-last.  GLM-authored; codex + Claude reviewed.
     """
-    from legoesm.core.fv3_native_duo_sw_core import d2a2c_vect_duo
+    from legoesm.grids.fv3_native_ext_vector import c2l_ord2_face
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
     from legoesm.core.fv3_native_physics_coupling import (
         held_suarez_tend, fv_update_phys_dry_duo)
@@ -1053,6 +1053,11 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     ci = slice(ng, ng + n)
     assert state[0]["pt"].shape == (m, m, km)
     assert press[0]["pkz"].shape == (n, n, km)
+    ectx = ctx.get("ectx")
+    if ectx is None:
+        raise ValueError(
+            "apply_held_suarez_step needs ctx['ectx'] (build the duo context "
+            "with use_ext_bundle=True) for the c2l Earth-frame winds")
 
     ua6 = [None] * 6
     va6 = [None] * 6
@@ -1063,9 +1068,26 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     # PASS 1: per-face tendencies on the compute domain
     for t in range(6):
         gs = ctx["gs6"][t]
-        d = d2a2c_vect_duo(state[t]["u"], state[t]["v"], gs, ctx["bd"],
-                           n + 1, n + 1)
-        ua_f, va_f = d["ua"], d["va"]                        # (m, m, km)
+        # A-grid winds in the EARTH (lat-lon) frame -- the frame Held-Suarez
+        # friction and update_dwinds (v3 = u_dt*vlon + v_dt*vlat) require.
+        # c2l_ord2_face is the geographic c2l (via the a-matrix rotation);
+        # d2a2c_vect_duo would give LOCAL-grid winds, the wrong frame.
+        # NOTE: the deck is c2l_ord=4; this is the ord2 port (no ord4 wind port
+        # exists), so the boundary-layer friction winds carry an ord2-vs-ord4
+        # approximation -- the expected residual source for this arm.
+        dx, dy, amat = ectx["dx6"][t], ectx["dy6"][t], ectx["amat6"][t]
+        ua_f = np.empty((m, m, km), dtype=np.float64)
+        va_f = np.empty((m, m, km), dtype=np.float64)
+        for k in range(km):
+            uak, vak = c2l_ord2_face(state[t]["u"][:, :, k],
+                                     state[t]["v"][:, :, k],
+                                     dx, dy, amat, n, ng)
+            ua_f[:, :, k] = uak
+            va_f[:, :, k] = vak
+        # c2l is valid is-1..ie+1; halos are NaN and never read on the compute
+        # domain, but zero them so a stray downstream read cannot propagate NaN.
+        ua_f = np.nan_to_num(ua_f, nan=0.0)
+        va_f = np.nan_to_num(va_f, nan=0.0)
         ua6[t], va6[t] = ua_f, va_f
 
         pt_c = state[t]["pt"][ci, ci]                        # (n, n, km)
