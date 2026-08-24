@@ -777,6 +777,92 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
               "on this evidence.")
     print()
 
+    # ---- THE AMPLITUDE-FREE STATISTIC -------------------------------------
+    # Everything above depends on the perturbation's size, and legoESM's
+    # perturbation is far bigger, which is the confound that stops (d) from
+    # closing anything. THIS statistic does not involve the perturbation at
+    # all: it is the shape of each model's own N2 distribution near the
+    # trigger, on the CONTROL member. An interface can only be tipped if it
+    # sits close to the threshold, so the density of near-threshold interfaces
+    # is the model's intrinsic SUSCEPTIBILITY to rectification -- the part of
+    # the question that "how many sit within tipping reach" was really asking,
+    # asked in a way a bigger perturbation cannot flatter.
+    #
+    # Bands are FIXED and identical for both models. legoESM's N2 carries about
+    # 5e-10 of float32 storage noise, so bands below that are not resolvable on
+    # its side; nemo_fp32 shows directly what the cast does to each band.
+    print("=" * 100)
+    print("(f) THRESHOLD-PROXIMITY DENSITY -- amplitude-free: each model's OWN "
+          "N2 near its own trigger")
+    print("=" * 100)
+    print("  No perturbation enters this table. It is the density of "
+          "interfaces sitting close enough to")
+    print("  the threshold to be tippable at all -- the intrinsic "
+          "susceptibility, which a larger")
+    print("  perturbation cannot inflate. Control member only. Bands are "
+          "identical for both models.")
+    bands = (1e-12, 1e-11, 1e-10, 1e-9, 1e-8)
+    print(f"\n  {'day':>4}{'arm':>12}" +
+          "".join(f"{'|N2-thr|<' + f'{b:.0e}':>16}" for b in bands))
+    faithful = {}
+    ratios = []
+    for day in (HORIZONS[0], HORIZONS[len(HORIZONS) // 2], HORIZONS[-1]):
+        occ = {}
+        for arm in arms:
+            if arm == "lego":
+                Tc, Sc = lego_state(LEGO_LANES[lane], CONTROL, day)
+            else:
+                Tc, Sc = nemo_state(os.path.join(NEMO_LANE,
+                                                 NEMO_MEMBERS[CONTROL]), day)
+                if arm == "nemo_fp32":
+                    Tc, Sc = to_fp32(Tc, Sc)
+            N2 = n2(Tc, Sc)
+            _no_nan(N2, wet_i, f"N2_{arm}_day{day}")
+            d = np.abs(N2[wet_i] - N2_THRESHOLD)
+            occ[arm] = [np.count_nonzero(d < b) / max(nwi, 1) for b in bands]
+            print(f"  {day:>4}{arm:>12}" +
+                  "".join(f"{100 * v:>15.4f}%" for v in occ[arm]))
+        # WHICH BANDS SURVIVE THE CAST?  A band is trustworthy on legoESM's
+        # float32 side only where casting NEMO to float32 barely moves it.
+        # Computed per band, not assumed.
+        band_ok = [abs(occ["nemo_fp32"][i] - occ["nemo_fp64"][i])
+                   <= 0.10 * max(occ["nemo_fp64"][i], 1e-30)
+                   for i in range(len(bands))]
+        faithful[day] = band_ok
+        print(f"  {'':>4}{'fp32 faithful?':>12}" +
+              "".join(f"{('yes' if b else 'NO'):>16}" for b in band_ok))
+        rr = [(occ["lego"][i] / occ["nemo_fp32"][i]
+               if occ["nemo_fp32"][i] > 0 else float("nan"))
+              for i in range(len(bands))]
+        print(f"  {'':>4}{'lego/nemo32':>12}" +
+              "".join(f"{v:>16.3f}" for v in rr))
+        ratios += [occ["lego"][i] / occ["nemo_fp32"][i]
+                   for i in range(len(bands))
+                   if band_ok[i] and occ["nemo_fp32"][i] > 0]
+        print()
+    if ratios:
+        hi = max(ratios)
+        occ_v = ("EXCEEDS" if hi >= CONFIRM_RATIO else
+                 "COMPARABLE" if hi <= REFUTE_RATIO else "INTERMEDIATE")
+        print(f"  SUSCEPTIBILITY VERDICT: across every band the float32 cast "
+              f"leaves faithful, legoESM's")
+        print(f"  near-threshold occupancy is at most {hi:.3f}x NEMO's -> "
+              f"{occ_v}.")
+        if hi <= REFUTE_RATIO:
+            print("  The two models have essentially the SAME density of "
+                  "tippable interfaces. legoESM is")
+            print("  NOT intrinsically more rectifiable, so a higher flip "
+                  "count at a matched horizon is")
+            print("  explained by its LARGER PERTURBATION rather than by a "
+                  "more rectifiable stratification.")
+        print()
+    print("  A model whose N2 piles up near the threshold is intrinsically "
+          "more rectifiable. Read the")
+    print("  nemo_fp64 row against nemo_fp32 first: the difference between "
+          "them is what float32 storage")
+    print("  alone does to each band, and it bounds what can be read off "
+          "legoESM's row.\n")
+
     if do_two_level:
         print("\n" + "=" * 100)
         print("(e) NEMO's OWN TRIGGER RULE -- MIN(rn2, rn2b) vs the single-level "
