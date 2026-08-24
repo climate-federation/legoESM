@@ -638,6 +638,21 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
     south_offsets = (jnp.arange(n_pad, 0, -1, dtype=dtype)[:, None]
                      * dlat_row[None, :])                           # (n_pad, n_lon)
     lat_new = (grid.lat_T[0:1] - south_offsets).astype(dtype)       # monotone south
+    # Past -90 deg the cosine goes NEGATIVE and the 1e-10 clamps below flatten
+    # it (GLM review 2026-08-24).  The pad's contract for LAND rows is only
+    # finite + positive, which the clamp preserves — and the synthetic
+    # full-sphere test grid legitimately extrapolates past the pole (12-deg
+    # rows), so this is a LOUD WARNING, not an error.  Production eORCA
+    # meshes (south edge ~-80 deg, <=3 pad rows of ~0.25 deg) never trigger
+    # it; if a run log shows this line, inspect the mesh before trusting any
+    # diagnostic that reads latitude off the padded rows.
+    _lat_min = float(jnp.min(lat_new))
+    if _lat_min <= -0.5 * float(jnp.pi):
+        print(f"[pad_tripole_grid_south] WARNING: extrapolated south "
+              f"latitude {_lat_min:.4f} rad crosses the pole; the {n_pad} "
+              f"pad rows are LAND and their clamped metrics stay finite and "
+              f"positive, but their latitude values are not physical.",
+              flush=True)
     lat_T_pad = _prepend_rows(grid.lat_T, lat_new)
     lon_T_pad = _edge_pad(grid.lon_T)                               # lon unchanged
 
@@ -657,6 +672,29 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
          jnp.asarray(grid.cos_lat, dtype)])
     sin_lat_pad = jnp.concatenate(
         [jnp.sin(lat_new_1d), jnp.asarray(grid.sin_lat, dtype)])
+
+    # cos_lat_v is the (n_lat+1,) v-FACE profile — it must grow with the v
+    # rows or the SPMD band slicer's [s:e+1] on the padded grid hands the
+    # NORTH band one row fewer than the interior bands, and the per-field
+    # band stack fails with "All input arrays must have the same shape"
+    # (the eORCA025 full-card 4-GPU smoke, job 9471878: this field was
+    # MISSED when it was added to the geometry after this pad was written,
+    # and eORCA1's n_lat=332 divides evenly so the pad — and the miss —
+    # never fired there).  New face values = clamped cos of the new rows'
+    # latitudes (land rows; finite + positive is all dynamics requires).
+    cos_lat_v_pad = jnp.concatenate(
+        [jnp.maximum(jnp.cos(lat_new_1d), 1e-10).astype(dtype),
+         jnp.asarray(grid.cos_lat_v, dtype)])
+
+    # seam_wall_rows is an OPTIONAL (n_lat,) per-row profile (None on the
+    # eORCA builds today, set by the DINO bridge).  If present it must grow
+    # too, or the same band-slice raggedness bites; the new rows are LAND,
+    # so the seam face there is WALLED (1.0).
+    seam_pad = grid.seam_wall_rows
+    if seam_pad is not None:
+        seam_pad = jnp.concatenate(
+            [jnp.ones((n_pad,), dtype=jnp.asarray(seam_pad).dtype),
+             jnp.asarray(seam_pad)])
 
     return grid._replace(
         n_lat=n_lat + n_pad,
@@ -682,7 +720,9 @@ def pad_tripole_grid_south(grid: LatLonCGridGeometry,
                            cap_j=int(fold.cap_j) + n_pad),
         cos_lat=cos_lat_pad,
         sin_lat=sin_lat_pad,
+        cos_lat_v=cos_lat_v_pad,
         lat=lat_1d_pad,
+        seam_wall_rows=seam_pad,
         # lon (n_lon,) unchanged; dlon/dlat sentinels unchanged.
     )
 

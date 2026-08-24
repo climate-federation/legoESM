@@ -589,3 +589,105 @@ class TestCreateTripoleGridFoldDefault:
                 _warnings.simplefilter("error")  # any warning becomes an error
                 geom = create_tripole_grid(path, fold_convention="n_lon-1-i")
         assert geom is not None
+
+
+class TestPadCoversEveryGeometryField:
+    """The pad must grow EVERY array field per its stagger — the tripwire.
+
+    ``cos_lat_v`` was added to the geometry after the pad was written and the
+    pad missed it; nothing failed until the eORCA025 full-card 4-GPU run,
+    where the SPMD band slicer handed the north band one fewer v-face row
+    than the interior bands and the per-field band stack died with "All input
+    arrays must have the same shape" (job 9471878).  eORCA1's n_lat divides
+    evenly, so the pad never fires there and the miss was invisible.  These
+    tests are generic over ``_fields`` so the NEXT field added to the
+    geometry cannot repeat this.
+    """
+
+    def _padded_pair(self, n_lat=15, n_lon=24, n_pad=5):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+        g = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
+        return g, pad_tripole_grid_south(g, n_pad), n_lat, n_pad
+
+    def test_every_array_field_grows_with_its_stagger(self):
+        """Each axis that measured n_lat (or n_lat+1) must grow by n_pad;
+        every other axis is unchanged.  A field the pad forgot keeps its old
+        shape and fails here by construction."""
+        g, gp, n_lat, n_pad = self._padded_pair()
+        checked = 0
+        for name in g._fields:
+            a = getattr(g, name)
+            if not hasattr(a, "shape") or getattr(a, "ndim", 0) == 0:
+                continue                      # scalars / fold descriptor
+            expect = tuple(
+                d + n_pad if d in (n_lat, n_lat + 1) else d
+                for d in a.shape)
+            got = getattr(gp, name)
+            assert got is not None, f"{name} became None under the pad"
+            assert tuple(got.shape) == expect, (
+                f"{name}: pad missed it — {tuple(a.shape)} -> "
+                f"{tuple(got.shape)}, expected {expect}")
+            checked += 1
+        assert checked >= 20                  # the audit actually ran
+
+    def test_cos_lat_v_wet_entries_bit_exact_and_new_entries_sane(self):
+        """Shape alone cannot catch a SHIFTED or recomputed profile (codex +
+        GLM both flagged it): the original v-face entries must survive the
+        pad bit-exact at offset n_pad, and the new land-row entries must be
+        finite and positive."""
+        import numpy as np
+        g, gp, n_lat, n_pad = self._padded_pair()
+        a = np.asarray(g.cos_lat_v)
+        b = np.asarray(gp.cos_lat_v)
+        np.testing.assert_array_equal(
+            b[n_pad:], a, err_msg="cos_lat_v wet entries not preserved")
+        assert bool(np.all(np.isfinite(b[:n_pad])))
+        assert bool(np.all(b[:n_pad] > 0.0))
+
+    def test_past_pole_extrapolation_warns_but_keeps_the_contract(self, capsys):
+        """A past-the-pole extrapolation (the synthetic full-sphere grid does
+        this legitimately) must WARN loudly, and the land-row contract —
+        finite, positive metrics — must still hold via the clamp.  A hard
+        error was tried first and rejected: it broke the full-sphere fixture
+        the existing pad tests rely on."""
+        import numpy as np
+        _, gp, n_lat, n_pad = self._padded_pair()   # 12-deg rows cross -90
+        out = capsys.readouterr().out
+        assert "crosses the pole" in out
+        c = np.asarray(gp.cos_lat_v)
+        assert bool(np.all(np.isfinite(c))) and bool(np.all(c > 0.0))
+
+    def test_padded_grid_band_stacks_are_uniform(self):
+        """The exact operation that crashed at 1/4 degree: slice the padded
+        grid into N bands and stack every array field across them."""
+        import numpy as np
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            _geom_array_field_names, build_band_grids,
+        )
+        _, gp, n_lat, n_pad = self._padded_pair()   # 15 + 5 = 20
+        n_dev = 4                                   # 20 % 4 == 0
+        bands = build_band_grids(gp, n_dev)
+        for name in _geom_array_field_names(bands[0]):
+            shapes = {tuple(np.shape(getattr(b, name))) for b in bands}
+            assert len(shapes) == 1, (
+                f"{name}: ragged across bands {sorted(shapes)} — the "
+                f"eORCA025 stack crash")
+            np.stack([np.asarray(getattr(b, name)) for b in bands])
+
+    def test_seam_wall_rows_grows_and_new_rows_are_walled(self):
+        from legoesm.grids.tripole import (
+            create_synthetic_tripole, pad_tripole_grid_south,
+        )
+        import jax.numpy as jnp
+        import numpy as np
+        n_lat, n_pad = 15, 5
+        g = create_synthetic_tripole(n_lat=n_lat, n_lon=24)
+        seam = jnp.zeros((n_lat,)).at[3:7].set(1.0)
+        g = g._replace(seam_wall_rows=seam)
+        gp = pad_tripole_grid_south(g, n_pad)
+        got = np.asarray(gp.seam_wall_rows)
+        assert got.shape == (n_lat + n_pad,)
+        np.testing.assert_array_equal(got[n_pad:], np.asarray(seam))
+        assert bool(np.all(got[:n_pad] == 1.0)), "new land rows must be walled"
