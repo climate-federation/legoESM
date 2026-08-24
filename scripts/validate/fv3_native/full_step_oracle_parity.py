@@ -1254,7 +1254,7 @@ def main(argv=None):
                          "carry EXTENDED-lattice metrics instead of the "
                          "kinked builder's. fv_grid_tools.F90:749-835 "
                          "shows the duo oracle builds its model grid "
-                         "FROM dg%b_pt with every mpp/fill_corners/"
+                         "FROM dg%%b_pt with every mpp/fill_corners/"
                          "get_symmetry step skipped -- so the extended "
                          "lattice is the FAITHFUL halo geometry and the "
                          "kinked one is the port's residual suspect. "
