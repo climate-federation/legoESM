@@ -90,6 +90,16 @@ ARMS = {
     # stratification, but it is a difference and it is stated.
     "evd_sharp":    lambda mc: _evd(mc, smooth_transition=True,
                                     sigmoid_sharpness=1e13),
+    # THE MATCHED-TRIGGER CONTROL for evd_sharp (review finding 2). The
+    # smoothing branch is sigmoid(-N2 * sharpness): it is centred on N2 = 0 and
+    # IGNORES n2_threshold entirely, while the hard branch fires at
+    # N2 < -1e-12. So evd_sharp differs from the shipped card in TWO ways --
+    # edge sharpness AND trigger location -- and the census shows a pile-up of
+    # interfaces (0.577%) exactly in the -1e-12..0 band the two disagree about.
+    # This arm is the shipped hard switch moved to N2 < 0, so evd_sharp vs
+    # evd_thr0 differ ONLY in edge sharpness. That pair, not evd_sharp vs
+    # baseline, is the one-variable discontinuity comparison.
+    "evd_thr0":     lambda mc: _evd(mc, n2_threshold=0.0),
     "limiter_off":  lambda mc: mc._replace(tracer_advection="centered"),
     "gm_redi_off":  None,               # handled at build time, not on mc
 }
