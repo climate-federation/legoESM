@@ -7346,6 +7346,33 @@ def main() -> int:
             # lane has always needed it for the same reason); idempotent, no
             # physics change.
             state = model.seed_scan_carry(state, dt)
+            # HOST-RESIDENT global state between steps (the eORCA025 memory
+            # ledger): the initial global state is materialized full-size on
+            # EVERY rank's GPU and the loop variable keeps it alive, so it
+            # sat under the band step's ~18 GiB live peak and OOM'd the
+            # full card even at 8 bands (smokes 9474077/9474477).  Pull each
+            # leaf to host numpy and free its device copy; the per-step
+            # scatter stages one leaf at a time, and the global wrapper now
+            # RETURNS host-resident states (gather_state_latlon to_host), so
+            # after this point no global copy ever lives on a device.
+            def _state_to_host(st):
+                import numpy as _np
+                updates = {}
+                for _n in st._fields:
+                    _v = getattr(st, _n)
+                    if _v is None:
+                        updates[_n] = None
+                    elif hasattr(_v, "data") and hasattr(_v.data, "__array__"):
+                        _h = _np.asarray(_v.data)
+                        try:
+                            _v.data.delete()
+                        except Exception:
+                            pass
+                        updates[_n] = _v.replace(data=_h)
+                    else:
+                        updates[_n] = _v
+                return st._replace(**updates)
+            state = _state_to_host(state)
             _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
             # t_sec is always None here (tide-enabled fail-fasts above).
             _ocean_step = (lambda st, sf, fw, t_sec=None:
