@@ -13,9 +13,25 @@ antiphase: legoESM's southern channel in summer against NEMO's in winter, and
 the northern basin the other way round.
 
 Measured in the one-variable A/B (`twin_seasonal_clock_ab.py`, re-run on the
-hardened instruments in `afd8e06b6`): the offset owns **99.1 % of the day-30**
-southern-band surface density gap (-0.013224 -> -0.000125 kg/m3, i.e. from
-139x the noise floor down to 1.3x).
+hardened instruments in `afd8e06b6`): correcting the offset collapsed the
+day-30 southern-band surface density gap from -0.013224 to -0.000125 kg/m3 —
+**from 139x the noise floor to 1.3x, at the two sampled phases**.
+
+> **RETRACTION (2026-08-23, GLM review on PR #1634).** This paragraph said the
+> offset "owns **99.1 %** of" that gap. **The percentage is withdrawn, and no
+> percentage replaces it.** Two sampled phases cannot yield a fraction — that
+> needs a dose-response curve through intermediate offsets — and the implied
+> decomposition assumed error = season + ocean with no interaction term. Quote
+> the two measured multipliers, never a share. (Three mutually inconsistent
+> percentages were in circulation off this one experiment: 99.1 %, 98.7 %, and
+> a 99.46 % obtained by pairing numbers from *different* days.)
+>
+> **BLIND SPOT, unquantified.** An exact 180/360-day antiphase flips only the
+> ODD harmonics, so the **semiannual component is IN PHASE in both arms** and
+> this experiment is blind to semiannual error — including whatever part of the
+> residual is semiannual. Settling the attribution needs a phase sweep
+> (0/45/90/135/180 days) plus a control in which the **reference** model is run
+> with artificially antiphased forcing. Named as follow-up; not run.
 
 Every 90-day twin number this campaign produced was therefore scored across
 that antiphase. This run re-establishes the baseline on the corrected clock,
@@ -53,8 +69,12 @@ Arm A of `c38e8a3ea` (SHA `b06186dea`), day 90, level 5x: **PASS 0 / FAIL 5.**
 
 ## Predictions, recorded before the run
 
-1. **Density metrics collapse toward their floors.** The A/B removed 99.1 % of
-   the day-30 sigma-mean gap. If that carries to day 90, the sigma MEAN gap
+1. **Density metrics collapse toward their floors.** The A/B cut the day-30
+   sigma-mean gap by more than two orders of magnitude (139x floor -> 1.3x) at
+   the two sampled phases. (AS REGISTERED this read "removed 99.1 % of"; the
+   percentage is retracted above and the prediction is restated without one —
+   the bins below are unchanged and were never a function of it.) If that
+   carries to day 90, the sigma MEAN gap
    falls from 2.3e-02 to order 1e-04 - 1e-03 kg/m3, i.e. from 242x the floor
    to single-digit multiples. sigma MAX, upper contrast and deep contrast are
    expected to move the same way and the same direction.
@@ -149,7 +169,11 @@ every density metric is now within 3.8x its floor instead of 17-242x.
 One variable — the clock. Same SHA family, same recipe, same restart, same
 ladder, same gate.
 
-| metric | antiphase gap | corrected gap | cut |
+Read the last column as **the arm-to-arm reduction between these two phases**
+(the quantity the pre-registered bins were written in), NOT as the share of the
+gap the season "owns" — see the retraction box at the top of this document.
+
+| metric | antiphase gap | corrected gap | arm-to-arm reduction |
 |---|---|---|---|
 | sigma MEAN | -2.303e-02 | -2.900e-04 | **98.7 %** |
 | sigma MAX | -2.928e-03 | -3.636e-04 | 87.6 % |
@@ -158,7 +182,10 @@ ladder, same gate.
 | ACC [Sv] | +7.297e-01 | +1.872e+00 | **grew 2.6x** |
 
 **Prediction 1 CONFIRMED**, on the pre-registered band: the sigma MEAN gap fell
-to 2.900e-04, well inside the <=3.0e-03 CONFIRM threshold, a 98.7 % cut. The
+to 2.900e-04, well inside the <=3.0e-03 CONFIRM threshold — a 98.7 %
+**arm-to-arm reduction** between the two sampled phases (the quantity the
+pre-registered bins were written in; NOT a share the season "owns", see the
+retraction box at the top). The
 day-30 collapse does survive to day 90, and all four density metrics move the
 same way and the same direction. They do NOT reach the 1x floor — the residual
 is 1.4-3.8x — so the density bias is reduced to a few noise floors, not closed.
@@ -204,12 +231,47 @@ Two things this shows, both new:
 - Any arm ranked on the five 90-day gate metrics before this commit was scored
   across the antiphase and needs re-measuring on this baseline.
 - The four candidate owners of the southern surface density bias ranked in
-  `a5183778c` stay un-implicated: 98.7 % of that gap was the clock.
+  `a5183778c` stay un-implicated: correcting the clock alone moved that gap
+  from -2.303e-02 to -2.900e-04, and the residual is 1.4-3.8x the floor. (No
+  share is implied for the four candidates either: the ACC row GREW under the
+  same correction, so the errors do not add. AS WRITTEN this said "98.7 % of
+  that gap was the clock" —
+  RETRACTED: that is an attributed share read off two sampled phases, the same
+  unsound step as the 99.1 %. The measured arm-to-arm numbers stand; the
+  ownership claim does not.)
 
 ## Standing caveats, unchanged
 
 `LEGOESM_NEMO_E3T=off` (the 1-D thickness ladder, not NEMO's true `e3t_0`).
 T* vs Qsr within the clock remains PLAUSIBLE and untested — the clock moves both
 cosines together. Floors are an n=3 estimate. Single run, no ensemble.
+Scope of the retraction, stated precisely because an earlier draft of this
+caveat over-reached (it said "no percentage should be read off this experiment
+at all" while this document still publishes four of them, and it pointed
+"below" at a figure that is **above**). What is retracted is the OWNERSHIP
+reading — "the clock owns X % of the gap" — on both the 99.1 % and the 98.7 %.
+What STANDS is the arm-to-arm reduction `(A-B)/A` between two measured numbers,
+which is perfectly well defined and is what the table's renamed column and the
+`>=87 %` pre-registered bin refer to. The ACC row is the reason the distinction
+matters and is the strongest evidence for it: that gap **grew 2.6x** when the
+clock was corrected, which no additive "season + ocean" decomposition can
+produce.
+
+Two further misphasings raised in the same review were CHECKED OFFLINE and are
+both **N/A on this card**, with the proving lines:
+* **12-hour solar error** — none possible: the reference run sets
+  `ln_diu_cyc = .false.` (`RUN_90D_TWIN/namelist_cfg:34`), so
+  `usrdef_sbc.F90:572-576` assigns `qsr = pqsr_dayMean` with no time-of-day
+  term, and legoESM's port has no diurnal code at all
+  (`dino.py::dino_seasonal_cosines` is a pure annual periodicity). Neither side
+  carries a diurnal cycle, so a half-day phase error is unobservable.
+* **Calendar-indexed ancillary fields on the twin's own clock** — none found.
+  T* and Qsr are the ONLY calendar-time consumers in the DINO forcing path and
+  both already route through the corrected clock. Salinity restoring is
+  allocated once and never recomputed (static on both sides); EMP/runoff is off
+  (`RUN_90D_TWIN/namelist_cfg:47 ln_emp_field=.false.`); shortwave penetration
+  takes a fixed Jerlov water type with no chlorophyll climatology; wind stress
+  is a function of latitude only. The remaining time-varying ladder terms are
+  driven by the live model state (eta), not by a calendar.
 
 Artifacts (runtime, gitignored): `/tmp/dino_clock_baseline/twin90_corrected.{npz,log}`.
