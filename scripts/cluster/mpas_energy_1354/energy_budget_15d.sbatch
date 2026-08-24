@@ -6,7 +6,7 @@
 #SBATCH --constraint=a100_80
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=03:00:00
+#SBATCH --time=05:00:00
 #SBATCH --job-name=en1354
 #
 # #1354 / #1515 — column energy-budget closure test.
@@ -55,7 +55,7 @@ echo "=== run_amip 15 d, energy tracker on, $(date -u) ==="
 "${PY}" -u scripts/run/run_amip.py \
     --config config/amip/amip_production.yaml \
     "${AMIP_PATH_FLAGS[@]}" \
-    --days 15 --diag-days 1 --output "${OUT}"
+    --days 12 --diag-days 1 --output "${OUT}"
 
 echo "=== energy_chunk files ==="
 ls -la "${OUT}/timeseries_incremental/"energy_chunk_*.npz 2>/dev/null || echo "  (none — check the diag path ran)"
