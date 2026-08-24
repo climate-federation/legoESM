@@ -62,8 +62,10 @@ campaign; the last three were earned by THIS probe failing them in review.
     every step, it moved the statistic by a ratio of 1.000000); and even
     alternating, the production area weights are already zero on land, so the
     region mask was never the thing being tested.  It now plants an
-    alternating poison AND runs against unmasked weights, and a unit test
-    shows a mask admitting land turns it red.
+    alternating poison (``plant_dry_violation(alternating=True)``, the flag
+    added to the SHARED helper rather than a near-duplicate local copy) AND
+    runs against unmasked weights, and a unit test shows a mask admitting
+    land turns it red.
 
 An amplitude, a floor and a locus are reported for every region and window;
 the interpretation is NOT baked in -- this tool prints numbers, never a
@@ -126,11 +128,11 @@ def fit_decay(amp: np.ndarray) -> dict:
 
     c0 = float(np.median(sm[sm.size // 2:]))
     a0 = float(max(sm[0] - c0, 1e-12))
-    lo = (0.0, 0.0, 0.5)
-    hi = (np.inf, np.inf, 10.0 * sm.size)
+    lo_b = (0.0, 0.0, 0.5)
+    hi_b = (np.inf, np.inf, 10.0 * sm.size)
     try:
         p, cov = curve_fit(model, n, sm, p0=(c0, a0, 10.0),
-                           bounds=(lo, hi), maxfev=100000)
+                           bounds=(lo_b, hi_b), maxfev=100000)
         err = np.sqrt(np.diag(cov))
     except Exception as exc:                       # noqa: BLE001
         return {"converged": False, "reason": str(exc)}
@@ -148,7 +150,26 @@ def fit_decay(amp: np.ndarray) -> dict:
     usable = bool(p[1] > 3.0 * err[1] and p[2] > 3.0 * err[2]
                   and np.isfinite(err[1]) and np.isfinite(err[2])
                   and ss > 0.0 and p[2] < 0.5 * sm.size)
+    # WINDOW SENSITIVITY, not the covariance stderr.  curve_fit's stderr
+    # answers "how tightly does THIS window pin tau", which was +/-2.9% here
+    # while refitting on defensible sub-windows moved tau by +/-47%.  The
+    # honest spread is the one across windows, so it is what gets reported.
+    spread = [p[2]]
+    for lo, hi in ((2, 20), (2, None), (5, None), (0, sm.size // 2)):
+        sub = sm[lo:hi]
+        if sub.size < 8:
+            continue
+        try:
+            q, _ = curve_fit(model, np.arange(sub.size, dtype=float), sub,
+                             p0=(float(np.median(sub[sub.size // 2:])),
+                                 float(max(sub[0] - sub[-1], 1e-12)), 10.0),
+                             bounds=(lo_b, hi_b), maxfev=100000)
+            spread.append(float(q[2]))
+        except Exception:                              # noqa: BLE001, S110
+            pass
     return {"converged": True,
+            "tau_window_sensitivity_steps": [float(min(spread)),
+                                             float(max(spread))],
             "steady_C_m": float(p[0]), "transient_A_m": float(p[1]),
             "tau_steps": float(p[2]),
             "stderr": {"C": float(err[0]), "A": float(err[1]),
@@ -165,8 +186,26 @@ def fit_decay(amp: np.ndarray) -> dict:
 # the no-duplicate-numerics rule exists for.
 
 
+def decorrelation_lag(x: np.ndarray) -> int:
+    """First lag at which the series' autocorrelation drops below 1/e.
+
+    The bootstrap block length is not a free choice: too short and the CI is
+    too narrow, too long and it is too wide.  Measure it rather than picking
+    10 because 10 looks round (review: the measured lag here is 2, and the
+    CI at 10 was wider than the data warrants).
+    """
+    y = np.asarray(x, dtype=float)
+    y = y - y.mean()
+    if y.size < 4 or not np.any(y):
+        return 1
+    ac = np.correlate(y, y, mode="full")[y.size - 1:]
+    ac = ac / ac[0]
+    below = np.nonzero(ac < 1.0 / np.e)[0]
+    return int(below[0]) if below.size else max(1, y.size // 4)
+
+
 def block_bootstrap_ratio_ci(a: np.ndarray, b: np.ndarray,
-                             block: int = 10, n_boot: int = 2000,
+                             block: int | None = None, n_boot: int = 2000,
                              seed: int = 0) -> dict:
     """CI on the ratio of two amplitude series' means, resampling BLOCKS.
 
@@ -183,20 +222,32 @@ def block_bootstrap_ratio_ci(a: np.ndarray, b: np.ndarray,
     n = a.size
     if n != b.size:
         raise SystemExit("block_bootstrap_ratio_ci: series lengths differ")
+    measured = max(decorrelation_lag(a), decorrelation_lag(b))
+    if block is None:
+        block = max(1, measured)
     if n < 2 * block:
         return {"ci90": None, "reason": "window shorter than two blocks"}
     starts = np.arange(n - block + 1)
     k = int(np.ceil(n / block))
+
+    def draw() -> np.ndarray:
+        s0 = rng.choice(starts, size=k)
+        return np.concatenate([np.arange(j, j + block) for j in s0])[:n]
+
+    # The two models are INDEPENDENT trajectories after step 1, so resampling
+    # both at the SAME indices imposes a pairing the data does not have and
+    # narrows the interval.  Each side is drawn on its own indices.
     out = np.empty(n_boot)
     for i in range(n_boot):
-        s0 = rng.choice(starts, size=k)
-        idx = np.concatenate([np.arange(j, j + block) for j in s0])[:n]
-        out[i] = a[idx].mean() / b[idx].mean() if b[idx].mean() > 0 else np.nan
+        db = b[draw()].mean()
+        out[i] = a[draw()].mean() / db if db > 0 else np.nan
     out = out[np.isfinite(out)]
     if out.size < n_boot // 2:
         return {"ci90": None, "reason": "too many degenerate resamples"}
     lo, hi = (float(v) for v in np.percentile(out, [5.0, 95.0]))
-    return {"ci90": [lo, hi], "n_boot": int(out.size), "block": int(block)}
+    return {"ci90": [lo, hi], "n_boot": int(out.size), "block": int(block),
+            "measured_decorrelation_lag": int(measured),
+            "resampling": "independent per side"}
 
 
 def concentration(alt: np.ndarray, mask: np.ndarray, area: np.ndarray,
@@ -227,6 +278,12 @@ def ratio_estimators(a_amp: np.ndarray, b_amp: np.ndarray,
                      mask: np.ndarray, area: np.ndarray,
                      window: slice) -> dict:
     """The SAME comparison under three defensible estimators.
+
+    NOTE the third is NOT area-weighted while the first two are: a median over
+    cells cannot carry cell weights meaningfully. On a grid spanning 70S-70N
+    that makes it a different question, not a worse answer -- "the typical
+    cell" rather than "the typical square metre" -- and it is the estimator
+    least sensitive to a few hot cells, which is why it is kept.
 
     On identical data these disagree by ~30%, so quoting one without naming it
     is spurious precision.  None is privileged here; all three are reported.
@@ -282,7 +339,8 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
             mesh_mask: str = ewt.MESH_MASK,
             self_check: bool = True,
             nemo_free_npz: str | None = None,
-            lego_free_npz: str | None = None) -> dict:
+            lego_free_npz: str | None = None,
+            single: bool = False) -> dict:
     """Compare the two models' 2-step surface mode, per region, over time.
 
     With ``nemo_free_npz``/``lego_free_npz`` the observable becomes each
@@ -294,6 +352,25 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
     its own free run, never the other model's, so a background difference
     cannot leak into the response.
     """
+    # A CONTROL THAT COMPARES A FILE WITH ITSELF CANNOT FAIL.  Pointing both
+    # sides at the same artifact makes every ratio 1.000 BY CONSTRUCTION, and
+    # a reader has no way to tell that from a measured agreement.  The
+    # single-trajectory use (measuring one field's own locus, e.g. a
+    # member-minus-member difference) is legitimate, so it gets an explicit
+    # flag -- and in that mode the cross-model ratios are NULLED rather than
+    # printed as 1.
+    same = (os.path.realpath(nemo_npz) == os.path.realpath(lego_npz)
+            and os.path.realpath(str(nemo_free_npz))
+            == os.path.realpath(str(lego_free_npz)))
+    if same and not single:
+        raise SystemExit(
+            "--nemo and --lego resolve to the SAME file: every ratio would be "
+            "1.000 by construction, not by measurement. Pass --single if you "
+            "meant to measure ONE trajectory's own locus; the cross-model "
+            "ratios are withheld in that mode.")
+    if single and not same:
+        raise SystemExit("--single given but the two sides are different "
+                         "files; drop the flag or pass one trajectory")
     nemo = ewt.load_side(nemo_npz, "NEMO")
     lego = ewt.load_side(lego_npz, "legoESM")
     if (nemo_free_npz is None) != (lego_free_npz is None):
@@ -326,7 +403,14 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
         lat = np.asarray(ds.variables["gphit"][0]).squeeze()
     area = np.where(wet, e1t * e2t, 0.0)
     regions_only = ewt.locus_partition(wet, lat, periodic_i=True)
-    regions = {"all": wet, **regions_only}
+    # The wall is TWO different objects and they do not behave alike; an
+    # aggregate over both hid a sustained excess on the smaller one.  Both
+    # splits are reported: the coarse one for continuity with the campaign's
+    # published numbers, the directional one because it is the resolution the
+    # source question actually needs.
+    walls = ewt.wall_direction_partition(wet, periodic_i=True)
+    regions = {"all": wet, **regions_only,
+               **{k: v for k, v in walls.items() if v.sum() > 0}}
 
     sides = {"NEMO": nemo["eta"], "legoESM": lego["eta"]}
     n_alt = nemo["eta"].shape[0] - 2          # samples after the Nyquist op
@@ -339,7 +423,13 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
 
     out_d: dict = {"dt_seconds": float(nemo["t"][1] - nemo["t"][0]),
                    "n_samples": int(nemo["eta"].shape[0]),
-                   "time_level_registration": _registration(nemo, lego, wet),
+                   # Outside the free lane one side is a RESPONSE field and
+                   # the other a full field, so a step-1 difference between
+                   # them is not a registration statistic -- it compared 0.83 m
+                   # against 1.8e-7 m and reported the ratio.  Nulled there.
+                   "time_level_registration": (
+                       _registration(nemo, lego, wet) if lane == "free"
+                       else {"withheld": "only meaningful in the free lane"}),
                    "regions": {}}
 
     for rname, mask in regions.items():
@@ -351,6 +441,16 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
         for sname, eta in sides.items():
             alt = ewt.two_dt_component(eta)
             amp = region_amplitude(alt, mask, area)
+            # Per-sample floor, aligned: floor index i is amp index i+1.
+            # A window MEAN above 2x its floor is compatible with one sample
+            # carrying it, so the FRACTION of samples that individually clear
+            # their own floor is reported next to every fitted decay constant
+            # -- that is what says whether a fit was run on signal or on
+            # leakage (2026-08-24 review: 1 of 40 response-lane samples
+            # cleared the bar while the mean read 2.03x).
+            floor_ser = ewt.two_dt_leakage_floor(
+                eta, mask, area, mask=mask, return_series=True)
+            amp_al = amp[1:-1]
             side: dict = {"amplitude_by_sample_m": [float(v) for v in amp],
                           "alternation_ratio_first8": ewt.alternation_ratio(
                               [float(v) for v in amp]),
@@ -366,6 +466,11 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
                 # nothing in either direction.  Say so in the artifact rather
                 # than leaving the reader to divide.
                 side[f"{wname}_resolved"] = bool(f > 0.0 and a > 2.0 * f)
+                sl = slice(max(0, (a_sl.start or 0) - 1),
+                           None if a_sl.stop is None else a_sl.stop - 1)
+                aa, ff = amp_al[sl], floor_ser[sl]
+                side[f"{wname}_resolved_sample_fraction"] = (
+                    float(np.mean(aa > 2.0 * ff)) if aa.size else None)
             # Median as well as mean: the late-window ratio is noisy and a
             # mean alone reads more precise than the data supports.
             lh = amp[win["last_half"][0]]
@@ -376,6 +481,13 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
             rec[sname] = side
             alt_cache[sname] = alt
         a, b = rec["legoESM"], rec["NEMO"]
+        if single:
+            rec["ratio_lego_over_nemo"] = {
+                "withheld": "single-trajectory mode: both sides are the same "
+                            "run, so every ratio would be 1.000 by "
+                            "construction"}
+            out_d["regions"][rname] = rec
+            continue
         rec["ratio_lego_over_nemo"] = {
             "first8": _ratio(a["first8_mean_m"], b["first8_mean_m"]),
             "last_half": _ratio(a["last_half_mean_m"], b["last_half_mean_m"]),
@@ -417,9 +529,27 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
     # they answer different questions -- the FIRST SAMPLE (the number the
     # campaign published) and the window's rms field (what the run carries on
     # average over that window).
+    # BOTH partitions, because they answer different questions and the coarse
+    # one hid the answer: "wall vs not" (continuity with the campaign's
+    # published shares) and "which KIND of wall" (where the source question
+    # is actually decided).
     out_d["wall_share"] = {}
+    out_d["wall_share_by_direction"] = {}
     for sname, eta in sides.items():
         alt = ewt.two_dt_component(eta)
+        drec: dict = {}
+        sh0d = ewt.locus_shares(alt[0], walls, area)
+        drec["first_sample"] = {k: v["share"] for k, v in sh0d.items()}
+        drec["first_sample_enrichment"] = {
+            k: v["enrichment"] for k, v in sh0d.items()}
+        for wname, (a_sl, _f) in win.items():
+            rmsd = np.sqrt((alt[a_sl] ** 2).mean(axis=0))
+            shd = ewt.locus_shares(rmsd, walls, area)
+            drec[wname] = {k: v["share"] for k, v in shd.items()}
+            drec[wname + "_enrichment"] = {
+                k: v["enrichment"] for k, v in shd.items()}
+        out_d["wall_share_by_direction"][sname] = drec
+
         rec: dict = {}
         sh0 = ewt.locus_shares(alt[0], regions_only, area)
         rec["first_sample"] = {k: v["share"] for k, v in sh0.items()}
@@ -451,31 +581,6 @@ def analyse(nemo_npz: str, lego_npz: str, out: str,
     return out_d
 
 
-def plant_alternating_dry_violation(eta: np.ndarray,
-                                    wet: np.ndarray) -> np.ndarray:
-    """Poison every DRY cell with a huge value that FLIPS SIGN every sample.
-
-    ``eta_wave_twin.plant_dry_violation`` plants a CONSTANT 1e6, and that is
-    the right poison for the statistics it was written for -- but it is
-    VACUOUS here.  The statistic in this probe is the Nyquist component, whose
-    operator ``x[n] - (x[n-1]+x[n+1])/2`` annihilates a constant exactly, so
-    a constant poison cannot move it whether the mask works or not.  Reusing
-    the sibling helper unchanged would have shipped a land control that could
-    never fire; this is the same "port the reference's exclusions, not just
-    its formula" trap the campaign has been bitten by before.
-
-    An ALTERNATING poison is what a Nyquist statistic can see, so it is what
-    the control has to plant.
-    """
-    if wet.all():
-        raise SystemExit("no dry cells: the mask control cannot fire, so the "
-                         "masking claim would be vacuous")
-    out = eta.copy()
-    sign = ((-1.0) ** np.arange(eta.shape[0]))
-    out[..., ~wet] = 1.0e6 * sign[:, None]
-    return out
-
-
 def _self_check(eta: np.ndarray, wet: np.ndarray, regions: dict,
                 area: np.ndarray) -> dict:
     """Two controls that must both pass before any number above is quoted.
@@ -489,14 +594,14 @@ def _self_check(eta: np.ndarray, wet: np.ndarray, regions: dict,
     # LAND.  Two ways this control was vacuous before review, both fixed here.
     #  (1) the shared poison is a CONSTANT, and the Nyquist operator
     #      annihilates constants exactly -- see
-    #      ``plant_alternating_dry_violation``;
+    #      ``plant_dry_violation(alternating=True)``;
     #  (2) the production ``area`` is ALREADY zeroed on dry cells, so land
     #      carried zero weight before the region mask was ever consulted and
     #      no change inside this file could turn the control red.  The
     #      control therefore runs against UNMASKED weights (raw cell area
     #      everywhere, land included), leaving the region mask as the only
     #      thing standing between land and the mean -- which is the claim.
-    poisoned = plant_alternating_dry_violation(eta, wet)
+    poisoned = ewt.plant_dry_violation(eta, wet, alternating=True)
     area_unmasked = np.where(area > 0.0, area, area[area > 0.0].mean())
     base = region_amplitude(ewt.two_dt_component(eta), regions["all"],
                             area_unmasked)
@@ -532,9 +637,24 @@ def _self_check(eta: np.ndarray, wet: np.ndarray, regions: dict,
                 "recovery_ratio": _ratio(excess, amp_planted),
                 "interior_before_m": int_before,
                 "interior_after_m": int_after,
-                "interior_unchanged": bool(
+                # NOT a leakage test.  The wall and interior masks are
+                # disjoint by construction, so this can only fail if the
+                # partition itself is broken -- which is worth checking, but
+                # it must not be labelled as proof that a wall signal does
+                # not bleed into the interior statistic.  Named for what it
+                # is.
+                "interior_untouched_partition_disjoint": bool(
                     abs(int_after - int_before)
-                    <= 1e-12 * max(int_before, 1e-30))}
+                    <= 1e-12 * max(int_before, 1e-30)),
+                # The quadrature excess assumes the plant is INCOHERENT with
+                # whatever alternating field is already there.  Against a
+                # sign-coherent wall mode of the same amplitude -- exactly the
+                # signature being hunted -- amplitudes add linearly and the
+                # recovery reads ~1.73, which the naive gate would abort on.
+                # So it is reported, and only the large incoherent plant is
+                # gated.
+                "sign_coherent_field_suspected": bool(
+                    excess > 1.5 * amp_planted)}
 
     scale = float(region_amplitude(ewt.two_dt_component(eta),
                                    regions["wall"], area)[:8].mean())
@@ -555,24 +675,32 @@ def main() -> None:
                         "which is the lane in which the two decay RATES are "
                         "comparable (common excitation)")
     p.add_argument("--lego-free", default=None)
+    p.add_argument("--single", action="store_true",
+                   help="both sides are the SAME trajectory on purpose (e.g. "
+                        "a member-minus-member difference): report its locus "
+                        "and amplitudes, withhold every cross-model ratio")
     a = p.parse_args()
     d = analyse(a.nemo, a.lego, a.out, a.mesh_mask,
-                nemo_free_npz=a.nemo_free, lego_free_npz=a.lego_free)
+                nemo_free_npz=a.nemo_free, lego_free_npz=a.lego_free,
+                single=a.single)
     sc = d["self_check"]
     if not sc["land_poison_identical"]:
         raise SystemExit("SELF-CHECK FAILED: a statistic moved when land was "
                          "poisoned under UNMASKED weights -- it is averaging "
                          "land, not masking it")
-    for key, lo, hi in (("plant_large", 0.95, 1.05),
-                        ("plant_at_measurement_scale", 0.80, 1.20)):
+    # Only the large plant is GATED: it is 3 orders above the field, so
+    # coherence cannot bias it.  The measurement-scale plant is reported --
+    # a recovery near 1.73 there is a sign-coherent pre-existing mode, i.e. a
+    # FINDING, not an instrument failure.
+    for key, lo, hi in (("plant_large", 0.95, 1.05),):
         r = sc[key]["recovery_ratio"]
         if r is None or not (lo <= r <= hi):
             raise SystemExit(
                 f"SELF-CHECK FAILED ({key}): a planted wall-band Nyquist mode "
                 f"of known amplitude came back at {r} of its true size")
-        if not sc[key]["interior_unchanged"]:
-            raise SystemExit(f"SELF-CHECK FAILED ({key}): a wall-only plant "
-                             "changed the INTERIOR amplitude")
+        if not sc[key]["interior_untouched_partition_disjoint"]:
+            raise SystemExit(f"SELF-CHECK FAILED ({key}): the wall and "
+                             "interior masks are not disjoint")
     print(json.dumps({k: v for k, v in d.items() if k != "regions"},
                      indent=2, allow_nan=False))
     for rn, rec in d["regions"].items():
@@ -595,6 +723,8 @@ def main() -> None:
         print("  ratio lego/NEMO: " + "  ".join(
             f"{k}={v}" if not isinstance(v, float) else f"{k}={v:.3f}"
             for k, v in r.items()))
+        if "withheld" in r:
+            continue
 
 
 if __name__ == "__main__":

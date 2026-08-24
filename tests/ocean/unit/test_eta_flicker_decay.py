@@ -233,14 +233,14 @@ def test_shared_constant_land_poison_is_vacuous_for_a_nyquist_statistic():
 def test_land_control_is_non_vacuous_with_the_alternating_poison():
     """The alternating poison IS visible to an unmasked Nyquist statistic.
 
-    Fails if ``plant_alternating_dry_violation`` loses its sign flip, which is
+    Fails if the shared helper's alternating branch loses its sign flip, which is
     exactly the way this control would silently become unable to fire.
     """
     wet, area = _grid()
     n = 10
     rng = np.random.default_rng(1)
     eta = rng.normal(size=(n,) + wet.shape)
-    poisoned = efd.plant_alternating_dry_violation(eta, wet)
+    poisoned = efd.ewt.plant_dry_violation(eta, wet, alternating=True)
     masked = efd.region_amplitude(efd.ewt.two_dt_component(eta), wet, area)
     masked_p = efd.region_amplitude(
         efd.ewt.two_dt_component(poisoned), wet, area)
@@ -253,7 +253,7 @@ def test_land_control_is_non_vacuous_with_the_alternating_poison():
 def test_alternating_poison_refuses_an_all_wet_grid():
     wet = np.ones((4, 4), dtype=bool)
     with pytest.raises(SystemExit):
-        efd.plant_alternating_dry_violation(np.zeros((6, 4, 4)), wet)
+        efd.ewt.plant_dry_violation(np.zeros((6, 4, 4)), wet, alternating=True)
 
 
 def _regions(wet):
@@ -273,9 +273,47 @@ def test_self_check_planted_mode_is_attributed_to_the_wall_not_the_interior():
     eta = rng.normal(0.0, 1e-9, size=(n,) + wet.shape)
     out = efd._self_check(eta, wet, regions, area)
     assert out["land_poison_identical"]
+    assert 0.95 <= out["plant_large"]["recovery_ratio"] <= 1.05, out
     for key in ("plant_large", "plant_at_measurement_scale"):
-        assert 0.80 <= out[key]["recovery_ratio"] <= 1.20, (key, out[key])
-        assert out[key]["interior_unchanged"], (key, out[key])
+        assert out[key]["interior_untouched_partition_disjoint"], (key, out[key])
+
+
+def test_measurement_scale_plant_is_reported_not_gated():
+    """A sign-coherent pre-existing wall mode reads ~1.73, and that is a
+    FINDING not an instrument failure -- so it must be reported, not aborted.
+
+    Fails if anyone re-gates the measurement-scale plant to [0.8, 1.2].
+    """
+    wet, area = _grid()
+    regions = _regions(wet)
+    n = 16
+    sign = ((-1.0) ** np.arange(n))[:, None, None]
+    # a wall field that is ALREADY a coherent Nyquist mode of amplitude 1e-6
+    eta = 1e-6 * sign * regions["wall"][None, :, :] * np.ones((n,) + wet.shape)
+    out = efd._self_check(eta, wet, regions, area)
+    r = out["plant_at_measurement_scale"]["recovery_ratio"]
+    assert 1.5 <= r <= 2.0, r
+    assert out["plant_at_measurement_scale"]["sign_coherent_field_suspected"]
+
+
+def test_decorrelation_lag_measures_what_its_name_says():
+    rng = np.random.default_rng(11)
+    white = rng.normal(size=400)
+    assert efd.decorrelation_lag(white) <= 2
+    smooth = np.convolve(rng.normal(size=460), np.ones(30) / 30.0,
+                         mode="valid")
+    assert efd.decorrelation_lag(smooth) > 5
+
+
+def test_bootstrap_uses_the_measured_lag_and_independent_resampling():
+    rng = np.random.default_rng(12)
+    a = 2.0 + rng.normal(0.0, 0.1, size=120)
+    b = 1.0 + rng.normal(0.0, 0.1, size=120)
+    out = efd.block_bootstrap_ratio_ci(a, b)
+    assert out["block"] == out["measured_decorrelation_lag"]
+    assert out["resampling"] == "independent per side"
+    lo, hi = out["ci90"]
+    assert lo < 2.0 < hi, out
 
 
 def test_land_control_goes_red_when_the_region_mask_admits_land():

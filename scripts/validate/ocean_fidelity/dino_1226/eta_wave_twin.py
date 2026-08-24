@@ -549,6 +549,45 @@ def locus_partition(wet: np.ndarray, lat: np.ndarray,
     return {"wall": wall, "equator": eq, "interior": interior}
 
 
+def wall_direction_partition(wet: np.ndarray,
+                            periodic_i: bool = True) -> dict:
+    """Land-adjacent cells split by WHICH DIRECTION the land lies in.
+
+    ``locus_partition`` answers "wall or not".  That is the wrong resolution
+    for a source hunt, because DINO's two kinds of wall are different objects
+    and behave differently: the MERIDIONAL walls (land to the east or west --
+    the north-south running basin sidewalls, 320 cells here) and the ZONAL
+    walls (land to the north or south -- the first wet rows against the closed
+    end walls at about +/-69.5 deg, 100 cells).  Averaging them together
+    reports a matched sub-band and an unmatched one as one number, which is
+    how a sustained 2.7x excess on 0.24% of the area hid inside an aggregate
+    ratio of 1.03 (2026-08-24 review).
+
+    ``periodic_i`` wraps the zonal neighbour test, so the re-entrant channel's
+    seam is not mislabelled -- same reason as in ``locus_partition``.
+
+    NOTE the domain's outermost j rows are DRY in DINO, so they contribute no
+    cells here.  That rules out the dry halo row, NOT the first WET row, which
+    is exactly where the zonal band sits.
+    """
+    dry = ~wet
+    if periodic_i:
+        n_i = np.roll(dry, 1, axis=1) | np.roll(dry, -1, axis=1)
+    else:
+        n_i = np.zeros_like(wet)
+        n_i[:, 1:] |= dry[:, :-1]
+        n_i[:, :-1] |= dry[:, 1:]
+        n_i[:, 0] = n_i[:, -1] = True
+    n_j = np.zeros_like(wet)
+    n_j[1:, :] |= dry[:-1, :]
+    n_j[:-1, :] |= dry[1:, :]
+    n_j[0, :] = n_j[-1, :] = True
+    return {"meridional_wall": wet & n_i & ~n_j,
+            "zonal_wall": wet & n_j & ~n_i,
+            "wall_corner": wet & n_i & n_j,
+            "off_wall": wet & ~(n_i | n_j)}
+
+
 def locus_shares(diff: np.ndarray, regions: dict,
                  area: np.ndarray | None = None) -> dict:
     """Area-weighted share of the squared difference PER REGION, and its
@@ -578,17 +617,29 @@ def locus_shares(diff: np.ndarray, regions: dict,
     return out
 
 
-def plant_dry_violation(eta: np.ndarray, wet: np.ndarray) -> np.ndarray:
+def plant_dry_violation(eta: np.ndarray, wet: np.ndarray,
+                        alternating: bool = False) -> np.ndarray:
     """Poison every DRY cell with a huge value.
 
     Every masked statistic must be bit-identical on the poisoned copy.  A
     statistic that moves is not masking; it is averaging land.
+
+    ``alternating`` flips the poison's sign every sample, and it is REQUIRED
+    for any statistic in the 2-step / Nyquist band.  The default constant
+    poison is annihilated exactly by ``two_dt_component``, so on this data
+    (dry-cell eta is exactly 0.0 at every step in both models) it moves such a
+    statistic by a ratio of 1.000000 -- a control that cannot fire.  Callers
+    budgeting a Nyquist quantity must pass ``alternating=True``.
     """
     if wet.all():
         raise SystemExit("no dry cells: the mask control cannot fire, so the "
                          "masking claim would be vacuous")
     out = eta.copy()
-    out[..., ~wet] = 1.0e6
+    if alternating:
+        sign = ((-1.0) ** np.arange(eta.shape[0]))
+        out[..., ~wet] = 1.0e6 * sign[:, None]
+    else:
+        out[..., ~wet] = 1.0e6
     return out
 
 
@@ -924,7 +975,8 @@ def two_dt_component(field: np.ndarray) -> np.ndarray:
 def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
                          area: np.ndarray | None = None,
                          mask: np.ndarray | None = None,
-                         window: slice = slice(0, 8)) -> float:
+                         window: slice = slice(0, 8),
+                         return_series: bool = False):
     """How much of the reported 2-step amplitude is just a SLOW field leaking.
 
     The 2-step operator is a curvature high-pass, not a notch: about 29% of a
@@ -934,7 +986,13 @@ def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
 
     ``mask`` restricts the floor to one region (the wall band is where the
     slow field's curvature is largest, so its leakage is largest too, and a
-    GLOBAL floor cannot bound a wall-band amplitude).  ``window`` selects
+    GLOBAL floor cannot bound a wall-band amplitude).  ``return_series`` gives
+    the PER-SAMPLE floor instead of a window mean, which is what a caller needs
+    to say what FRACTION of a window's samples clear their own floor -- a
+    window-mean ratio above 2 is compatible with one sample carrying it, and
+    that distinction decided whether a fitted decay constant meant anything
+    (2026-08-24 review).  Its index i corresponds to ``two_dt_component``
+    index i+1, since the two padding-touched samples are dropped.  ``window`` selects
     which samples of the smoothed series the floor averages, and it MUST be
     the same window as the amplitude the floor is quoted against -- a floor
     measured over the launch transient and then subtracted from a late-time
@@ -968,6 +1026,8 @@ def two_dt_leakage_floor(field: np.ndarray, wet: np.ndarray,
                          "the padded ends")
     usable = alt[1:-1]
     amp = weighted_rms_series(usable, wet if mask is None else mask, area)
+    if return_series:
+        return amp
     got = amp[window]
     if got.size == 0:
         raise SystemExit("two_dt_leakage_floor: the requested window selects "
