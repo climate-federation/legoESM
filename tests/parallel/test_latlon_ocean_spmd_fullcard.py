@@ -109,7 +109,8 @@ def test_partial_cell_spmd_matches_single_device():
     dev = create_latlon_mesh(n_devices=4)
     step = make_sharded_ocean_step(model, dev.mesh)
     # The fix's fingerprint: the step must carry non-empty z-coord stacks.
-    assert len(step.aux) == 4, "aux must carry (geom, vmask, zc, iwm) stacks"
+    assert len(step.aux) == 5, ("aux must carry (geom, vmask, zc, iwm, cfg)"
+                            " stacks")
     zc_stacks = step.aux[2]
     assert set(zc_stacks) >= {"h_partial", "bottom_level", "is_active"}
 
@@ -173,6 +174,7 @@ def test_zstar_config_still_has_empty_aux_stacks():
     model._ensure_vertex_mask(state0)
     dev = create_latlon_mesh(n_devices=4)
     step = make_sharded_ocean_step(model, dev.mesh)
-    _geom, _vmask, zc_stacks, iwm_stacks = step.aux
+    _geom, _vmask, zc_stacks, iwm_stacks, cfg_stacks = step.aux
     assert zc_stacks == {}
     assert iwm_stacks is None
+    assert cfg_stacks == {}      # no per-cell config arrays on the bare card
