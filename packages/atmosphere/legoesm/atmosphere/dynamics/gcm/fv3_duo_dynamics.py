@@ -1,10 +1,12 @@
 """FV3 six-face duo-cube dycore — ModelDriver wrapper over the certified lane.
 
-Slice 1 of wiring ``legoesm.core.fv3_dynamics`` (the JAX ``fv_dynamics``
-twin, module 6 of the duo port) into the model: DRY, physics-off, fp64,
-DCMIP16 baroclinic wave only.  Every restriction is the certified lane's
-own contract, enforced loudly here and at the component factory rather
-than assumed:
+Wires ``legoesm.core.fv3_dynamics`` (the JAX ``fv_dynamics`` twin,
+module 6 of the duo port) into the model: DRY dynamics, fp64, DCMIP16
+baroclinic wave IC.  The only physics is the certified Held-Suarez step,
+applied by the driver lane (``_run_fv3_duo``) when
+``held_suarez_forcing`` is set — this model class itself stays
+dynamics-only.  Every restriction is the certified lane's own contract,
+enforced loudly here and at the component factory rather than assumed:
 
 * moist coupling is not routed by THIS wrapper: it passes neither
   ``zvir`` nor a humidity index, so ``dp1`` is never formed.  The core

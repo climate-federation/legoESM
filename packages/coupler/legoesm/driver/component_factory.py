@@ -77,8 +77,10 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
 
     # --- FV3 six-face duo cube (certified fv_dynamics JAX lane) ---
     # ONE solver serves both arms: the certified lane is a single program
-    # with a static ``hydrostatic`` switch.  Slice 1: dry, physics-off,
-    # fp64 only — the branch below refuses everything else loudly.
+    # with a static ``hydrostatic`` switch.  Dry dynamics, fp64; the ONLY
+    # physics is the certified Held-Suarez step (hydrostatic arm,
+    # ``held_suarez_forcing``) — the branch below refuses everything
+    # else loudly.
     ("hydrostatic",   "fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
     ("nonhydrostatic","fv3_duo",        "cubed_sphere"): "fv3_duo_primitive_equations",
 
@@ -288,6 +290,11 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # The five scheme selectors are pinned to 'none' by the specific guard.
     "radiation", "convection", "microphysics", "turbulence",
     "gravity_wave_drag",
+    # The ONLY physics this lane runs: the certified 3-pass Held-Suarez
+    # step (apply_held_suarez_step, gated at 1.7645e-8 vs the Fortran
+    # oracle), applied by _run_fv3_duo after each dynamics step.  Every
+    # other physics/forcing selector stays refused.
+    "held_suarez_forcing",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
@@ -301,7 +308,10 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # "only radiation optics" claim); ``--use-polar-filter`` (BooleanOptionalAction, default None =
     # "no choice") gates a lat-lon-C-grid-only Fourier filter this
     # cubed-sphere lane never builds.  Refusing either would refuse every
-    # stock CLI launch.
+    # stock CLI launch.  Still inert with held_suarez_forcing on: the HS
+    # step (apply_held_suarez_step) consumes pt/ua/va/delp/peln/pkz/pe/lat
+    # only — no cloud field, no filter (codex 2026-08-24 re-raised; the
+    # measured-inert justification survives the HS wiring by read).
     "cloud_scheme", "dycore.use_polar_filter",
 })
 
@@ -709,17 +719,25 @@ def create_atmosphere_dycore(
         }
         if _physics_on:
             raise ValueError(
-                f"fv3_duo (slice 1) is DRY and physics-off: the certified "
-                f"fv_dynamics lane refuses moist coupling "
-                f"(fv3_dynamics.py:301-311) and the driver lane routes no "
-                f"physics tendencies, so these active schemes would be "
-                f"silently inert: {_physics_on}. Set them all to 'none' "
-                f"(with --allow-disabled-physics in run_amip).")
-        if config.held_suarez_forcing:
+                f"fv3_duo runs DRY dynamics: the certified fv_dynamics "
+                f"lane refuses moist coupling (fv3_dynamics.py:301-311) "
+                f"and the driver lane routes no scheme tendencies (the "
+                f"only physics it runs is the certified Held-Suarez step, "
+                f"--held-suarez-forcing), so these active schemes would "
+                f"be silently inert: {_physics_on}. Set them all to "
+                f"'none' (with --allow-disabled-physics in run_amip).")
+        if config.held_suarez_forcing and model_type != "hydrostatic":
+            # The certified HS orchestration is hydrostatic-only (the
+            # parity runner refuses --physics held_suarez with --nh; the
+            # oracle HS deck is hydrostatic), so the NH arm would run an
+            # uncertified combination — refuse rather than extrapolate.
             raise ValueError(
-                "fv3_duo (slice 1) does not apply Held-Suarez forcing — "
-                "the lane steps pure adiabatic dynamics; the flag would be "
-                "silently inert. Drop --held-suarez-forcing.")
+                "fv3_duo Held-Suarez forcing is hydrostatic-only: the "
+                "certified 3-pass HS step (full_step_oracle_parity) is "
+                "gated on the hydrostatic arm; model_type="
+                f"{model_type!r} + held_suarez_forcing is uncertified. "
+                "Use model_type='hydrostatic' or drop "
+                "--held-suarez-forcing.")
         if config.precision != "fp64":
             raise ValueError(
                 f"fv3_duo requires precision='fp64' (require_f64_jax gates "
@@ -752,6 +770,16 @@ def create_atmosphere_dycore(
         # topography accessors) — discretization-keyed wiring, no driver
         # grid dispatch (L1).
         bundle = create_fv3_duo_grid(gc.resolution)
+        if config.held_suarez_forcing and bundle.ctx_np.get("ectx") is None:
+            # create_fv3_duo_grid builds with use_ext_bundle=True, so this
+            # is unreachable today; it fails CLOSED at construction (not
+            # mid-run) if the grid factory ever stops building the ext
+            # bundle the HS step's c2l Earth-frame winds need.
+            raise ValueError(
+                "fv3_duo held_suarez_forcing needs the duo ext bundle "
+                "(ctx['ectx'] with amat6) for the c2l Earth-frame winds; "
+                "the grid bundle was built without it "
+                "(build_six_face_duo_context use_ext_bundle=False?).")
         cfg = FV3DuoConfig(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),

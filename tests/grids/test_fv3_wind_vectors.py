@@ -129,3 +129,49 @@ def test_shape_mismatches_are_refused(face):
     with pytest.raises(ValueError, match="agrid"):
         compute_fv3_native_wind_vectors(g_lon, g_lat, a_lon[:-1, :-1],
                                         a_lat[:-1, :-1])
+
+
+# --- the parity instrument's transform helpers (scripts/validate) ---
+# compare_wind_vectors imports only numpy at module scope (its jax imports are
+# inside main), so these pure-geometry helpers are unit-testable offline.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]
+                        / "scripts" / "validate" / "fv3_native"))
+from compare_wind_vectors import edge_expected_sign, crop_to_oracle  # noqa: E402
+from compare_extchain_oracle import op_vector, OPS  # noqa: E402
+
+
+def test_edge_expected_sign_matches_the_certified_op_vector():
+    """edge_expected_sign must equal the orientation sign the certified covariant
+    transform (op_vector) applies to the es(u)/ew(v) pair, for every dihedral op.
+
+    op_vector on all-ones inputs returns exactly su/sv in the slot each field
+    lands in (index transform of ones is ones), so the slot's constant value IS
+    the orientation sign -- the ground truth for edge_expected_sign."""
+    m = 5
+    u = np.ones((m, m + 1))   # es-like (i-running edge)
+    v = np.ones((m + 1, m))   # ew-like (j-running edge)
+    for op in OPS:
+        sw = op[0]
+        uo, vo = op_vector(u, v, op)
+        es_slot = vo if sw else uo   # es lands in oracle-v under a swap, else -u
+        ew_slot = uo if sw else vo
+        assert np.allclose(es_slot, edge_expected_sign("es1", op)), op
+        assert np.allclose(ew_slot, edge_expected_sign("ew2", op)), op
+
+
+def test_crop_to_oracle_trims_one_ring_and_refuses_asymmetry():
+    a = np.arange(54 * 54, dtype=float).reshape(54, 54)
+    # vlon case: port halo 3 (54) -> oracle halo 2 (52): drop one ring each side
+    c = crop_to_oracle(a, (52, 52))
+    assert c.shape == (52, 52)
+    assert np.array_equal(c, a[1:-1, 1:-1])
+    # es case: already matching (no trim)
+    b = np.zeros((54, 55))
+    assert crop_to_oracle(b, (54, 55)) is b or crop_to_oracle(b, (54, 55)).shape == (54, 55)
+    # a non-symmetric / negative gap is refused
+    with pytest.raises(SystemExit):
+        crop_to_oracle(a, (53, 54))   # odd i-gap
+    with pytest.raises(SystemExit):
+        crop_to_oracle(a, (56, 56))   # port smaller than oracle

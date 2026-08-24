@@ -7694,7 +7694,8 @@ class ModelDriver:
         return day_to_calendar(self._insolation_day(day))
 
     # ------------------------------------------------------------------
-    # FV3 six-face duo-cube lane (slice 1: dry, physics-off, fp64)
+    # FV3 six-face duo-cube lane (dry dynamics + optional certified
+    # Held-Suarez forcing, fp64)
     # ------------------------------------------------------------------
 
     # Wind-speed blowup envelope for the duo lane's snapshot guard [m/s].
@@ -7708,9 +7709,11 @@ class ModelDriver:
     def _run_fv3_duo(self, start_step: int = 0,
                      start_day: float | None = None) -> str:
         """Dedicated lean lane for the certified FV3 duo-cube step
-        (slice 1 dynamics + slice 2 restart).
+        (slice 1 dynamics + slice 2 restart + optional Held-Suarez).
 
-        Dry adiabatic DCMIP16 baroclinic wave ONLY: the lane builds its
+        Dry DCMIP16 baroclinic wave ONLY (adiabatic, or with the
+        certified Held-Suarez forcing when
+        ``cfg.held_suarez_forcing``): the lane builds its
         own IC (the placeholder ``self.state`` from ``_init_state`` is a
         CD-grid scaffold this lane never reads; it is REPLACED by the
         final six-face bundle so the run-manifest digest reflects the
@@ -7755,9 +7758,14 @@ class ModelDriver:
         tmp + os.replace).
 
         Slice-1 refusals that REMAIN (each loud, none silent): no MPI /
-        SPMD, no ensemble.  Physics/forcing are already refused at model
-        construction (component factory).  A restarted run overwrites
-        the status marker (RUNNING-first, as always).
+        SPMD, no ensemble.  All physics/forcing EXCEPT Held-Suarez are
+        refused at model construction (component factory);
+        ``cfg.held_suarez_forcing`` applies the certified 3-pass HS step
+        after each dynamics step.  The HS step is a pure function of the
+        bundle (no accumulators, no memory), so the restart invariant
+        above — this lane carries NO loop state — survives it.  A
+        restarted run overwrites the status marker (RUNNING-first, as
+        always).
         """
         cfg = self.config
         loaded = self._loaded_checkpoint_step_day
@@ -7832,13 +7840,15 @@ class ModelDriver:
         if start_day is None:
             start_day = cfg.start_day
 
+        hs_on = bool(cfg.held_suarez_forcing)
         logger.info(
-            "FV3 duo lane: C%d km=%d %s, dt=%.1fs, %d steps (%.2f total "
-            "days, %d this job%s), snapshots every %d steps, checkpoints "
-            "every %s steps",
+            "FV3 duo lane: C%d km=%d %s, Held-Suarez %s, dt=%.1fs, %d "
+            "steps (%.2f total days, %d this job%s), snapshots every %d "
+            "steps, checkpoints every %s steps",
             cfg.grid.resolution, self.model.config.km,
             "hydrostatic" if self.model.config.hydrostatic
             else "nonhydrostatic",
+            "ON" if hs_on else "off",
             DT, n_steps_total, cfg.days, n_this_job,
             f", RESTART from step {loaded_step}" if loaded_step else "",
             diag_interval, ckpt_interval or "never")
@@ -7855,6 +7865,12 @@ class ModelDriver:
         t0 = time.time()
         for step in range(loaded_step + 1, n_steps_total + 1):
             bundle = self.model.step(bundle, DT)
+            if hs_on:
+                # fv_phys ordering: forcing applied to the POST-dynamics
+                # state, once per outer (bdt) step, exactly as the
+                # certified parity arm does.  Stateless — bundle in,
+                # bundle out; the restart invariant is untouched.
+                bundle = self._fv3_duo_apply_held_suarez(bundle, DT)
             # start_day is the ABSOLUTE day at loaded_step (the day the
             # checkpoint was written; cfg.start_day on a fresh run), so
             # `day` is absolute simulated time on both arms of a chain.
@@ -7874,6 +7890,62 @@ class ModelDriver:
                     n_this_job, time.time() - t0)
         self._fv3_duo_write_status("COMPLETED")
         return "COMPLETED"
+
+    def _fv3_duo_apply_held_suarez(self, bundle: dict, dt: float) -> dict:
+        """One certified Held-Suarez physics step on the duo bundle.
+
+        Thin adapter only — ALL numerics live in
+        ``apply_held_suarez_step`` (the 3-pass orchestration gated at
+        1.7645e-8 vs the Fortran oracle).  That function wants the
+        parity harness's per-face NumPy ``state``/``press`` dicts and
+        mutates ``state[t]["u"/"v"/"pt"]``; the lane's bundle is
+        face-stacked jax, so this unstacks (``state_3d_to_numpy``, the
+        pinned exact inverse of ``state_3d_to_jax``), calls it, and
+        restacks the three mutated fields.  ``press`` is read-only to
+        the HS step (HS changes pt, not delp, so the hydrostatic
+        pressures are unchanged) and the per-face slices of the
+        ``p_var`` stacks are already the oracle's own per-face layouts
+        (pe ``(n+2, km+1, n+2)``, peln ``(n, km+1, n)``, pkz
+        ``(n, n, km)`` — ``p_var_hydrostatic``'s docstring); the HS
+        step's internal transposes were written against exactly those.
+
+        backend="numpy": the SPECIFICATION path that carries the
+        certified score; the jitted dynamics step stays jax, and the
+        per-step np round-trip is fine at the C12-C48 scales this
+        lane runs.  strat=True: Fortran ``do_strat_HS_forcing`` defaults
+        .true. (fv_arrays.F90) and the certified deck resolved .true. —
+        deliberately NOT a config knob.
+
+        Pure bundle -> bundle (inputs never mutated: u/v get writable
+        copies after the unstack, BEFORE the step's in-place halo
+        exchange), so the lane's "NO loop state" restart invariant
+        survives.
+        """
+        from legoesm.core.fv3_cgrid_phase_3d import state_3d_to_numpy
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step,
+        )
+        grid = self.model.grid
+        n, ng, km = grid.n, grid.ng, self.model.config.km
+        state_np = state_3d_to_numpy(bundle["state"])
+        for face in state_np:
+            # np.asarray of a jax leaf can be a READ-ONLY view; the HS
+            # step's PASS-0 D-grid halo exchange writes the u/v halo
+            # strips in place, so those two get writable copies.
+            face["u"] = np.array(face["u"])
+            face["v"] = np.array(face["v"])
+        press_np = [
+            {nm: np.asarray(bundle["press"][nm][t])
+             for nm in self._FV3_DUO_PRESS_KEYS}
+            for t in range(6)]
+        apply_held_suarez_step(
+            grid.ctx_np, state_np, press_np, dt=dt, n=n, ng=ng, km=km,
+            strat=True, backend="numpy")
+        new_state = dict(bundle["state"])
+        for nm in ("u", "v", "pt"):  # the ONLY fields HS mutates
+            new_state[nm] = jnp.asarray(
+                np.stack([face[nm] for face in state_np]))
+        return {**bundle, "state": new_state}
 
     def _fv3_duo_write_status(self, status: str) -> None:
         """Persist the lane's terminal status as an EXPLICIT marker.
