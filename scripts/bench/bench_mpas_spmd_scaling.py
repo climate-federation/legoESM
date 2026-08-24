@@ -551,7 +551,15 @@ def main() -> int:
         _census_fn = lambda st: step(st, dt)  # noqa: E731
     # ONE compile → full per-family census; the CP scalar (the #1113 round-count
     # wall) is the collective_permute member, so no second compile for it.
-    hlo_census = hlo_collective_census(_census_fn, s)
+    # The interior/rim overlap step threads its rim plan as a jit argument, so
+    # re-lowering the PUBLIC step inside the census closes over those sharded
+    # arrays and raises under multi-controller. The census is a diagnostic
+    # (round count, unchanged by the overlap), so skip it there rather than
+    # record a spurious _error on every overlap arm.
+    if os.environ.get("LEGOESM_MPAS_HALO_OVERLAP", "") == "1":
+        hlo_census = {"_skipped": "halo_overlap"}
+    else:
+        hlo_census = hlo_collective_census(_census_fn, s)
     # .get: census can return {"_error": ...} (never-silent contract) — a
     # failed census must not KeyError the bench after the timed loop
     # (it killed every multicontroller arm of job 26820846).
