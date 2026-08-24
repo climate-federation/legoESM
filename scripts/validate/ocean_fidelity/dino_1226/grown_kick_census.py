@@ -275,6 +275,17 @@ def _mean(rows, key):
     return float(np.mean([r[key] for r in rows])) if rows else float("nan")
 
 
+def _median(rows, key):
+    """The ROBUSTNESS arm alongside the registered mean.
+
+    Added after the per-member column showed legoESM's early-horizon flips are
+    carried by ONE member of three (99,0,0 at day 20; 749,0,0 at day 50). A
+    mean over that distribution is not a rate, and a verdict resting on it
+    rests on a single member. The median is reported next to the mean
+    everywhere the mean decides something."""
+    return float(np.median([r[key] for r in rows])) if rows else float("nan")
+
+
 # ------------------------------------------------------------- self-checks ----
 def self_check():
     """Controls that must pass before any measured number is read.  Each one is
@@ -543,15 +554,18 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
     print("(c) PAIR-FLIP COUNT AND RATE -- the discriminating statistic (an "
           "EXACT count, not a bound)")
     print("=" * 100)
+    # The per-member RANGE is printed next to the mean: a mean over three
+    # member pairs can hide one member disagreeing with the other two, and the
+    # ensemble is small enough that it would not show up any other way.
     print(f"  {'day':>4}{'arm':>12}{'flips':>10}{'on':>8}{'off':>8}"
-          f"{'flip rate':>13}   (interfaces where the trigger resolves "
-          f"differently)")
+          f"{'flip rate':>13}{'per-member flips':>22}")
     for day in HORIZONS:
         for arm in arms:
             r = table[(day, arm)]
+            per = ",".join(str(x["flips"]) for x in r)
             print(f"  {day:>4}{arm:>12}{_mean(r, 'flips'):>10.1f}"
                   f"{_mean(r, 'flips_on'):>8.1f}{_mean(r, 'flips_off'):>8.1f}"
-                  f"{100 * _mean(r, 'flip_rate'):>12.4f}%")
+                  f"{100 * _mean(r, 'flip_rate'):>12.4f}%{per:>22}")
         print()
 
     if not has_nemo:
@@ -565,25 +579,37 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
           f"how much the file format alone adds")
     print(f"  R = flip rate(lego) / flip rate(nemo_fp32)   "
           f"CONFIRM >= {CONFIRM_RATIO}, REFUTE <= {REFUTE_RATIO}")
+    print("\n  BOTH the registered MEAN and the MEDIAN over the three member "
+          "pairs are shown. Where they")
+    print("  disagree the median governs the honest reading: legoESM's early "
+          "flips are carried by a SINGLE")
+    print("  member (see the per-member column above), and a mean over "
+          "99,0,0 is not a rate.")
     print(f"\n  {'day':>4}{'lego rate':>12}{'nemo32 rate':>13}"
-          f"{'nemo64 rate':>13}{'storage infl':>14}{'R':>10}{'R64':>10}"
-          f"{'verdict':>16}")
+          f"{'nemo64 rate':>13}{'storage infl':>13}{'R(mean)':>9}"
+          f"{'R(med)':>9}{'verdict(mean)':>15}{'verdict(med)':>15}")
     first = None
+    first_med = None
     for day in HORIZONS:
         fl = _mean(table[(day, "lego")], "flip_rate")
         f32 = _mean(table[(day, "nemo_fp32")], "flip_rate")
         f64 = _mean(table[(day, "nemo_fp64")], "flip_rate")
+        ml = _median(table[(day, "lego")], "flip_rate")
+        m32 = _median(table[(day, "nemo_fp32")], "flip_rate")
         res = _mean(table[(day, "lego")], "frac_dT_nz") >= RESOLVABLE_FRAC
         infl = f32 / f64 if f64 > 0 else float("nan")
         v, R = verdict(fl, f32)
-        _, R64 = verdict(fl, f64)
+        vm, Rm = verdict(ml, m32)
         if not res:
-            v = "UNMEASURABLE"
-        elif first is None:
-            first = (day, v, R)
+            v = vm = "UNMEASURABLE"
+        else:
+            if first is None:
+                first = (day, v, R)
+            if first_med is None:
+                first_med = (day, vm, Rm)
         print(f"  {day:>4}{100 * fl:>11.4f}%{100 * f32:>12.4f}%"
-              f"{100 * f64:>12.4f}%{infl:>14.2f}{R:>10.2f}{R64:>10.2f}"
-              f"{v:>16}")
+              f"{100 * f64:>12.4f}%{infl:>13.2f}{R:>9.2f}{Rm:>9.2f}"
+              f"{v:>15}{vm:>15}")
     print("\n  UNMEASURABLE = legoESM's stored perturbation is non-zero on "
           f"fewer than {100 * RESOLVABLE_FRAC:.1f}% of wet cells, so the "
           "statistic would be measuring the file format.")
@@ -592,8 +618,19 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
               "horizon cleared the resolvability bar.")
     else:
         d, v, R = first
-        print(f"\n  REGISTERED VERDICT (earliest resolvable horizon, day {d}): "
-              f"{v}  (R = {R:.2f})")
+        print(f"\n  REGISTERED VERDICT (mean, earliest resolvable horizon, "
+              f"day {d}): {v}  (R = {R:.2f})")
+        dm, vm, Rm = first_med
+        print(f"  ROBUSTNESS  VERDICT (median, day {dm}): {vm}  "
+              f"(R = {Rm:.2f})")
+        agree = [d for d in HORIZONS
+                 if _mean(table[(d, "lego")], "frac_dT_nz") >= RESOLVABLE_FRAC
+                 and verdict(_mean(table[(d, "lego")], "flip_rate"),
+                             _mean(table[(d, "nemo_fp32")], "flip_rate"))[0]
+                 == verdict(_median(table[(d, "lego")], "flip_rate"),
+                            _median(table[(d, "nemo_fp32")], "flip_rate"))[0]]
+        print(f"  mean and median agree at horizons: "
+              f"{agree if agree else 'NONE'}")
 
     # ---- THE ANTI-CIRCULARITY CONTROL -------------------------------------
     # (d) is HORIZON-matched, and at a matched horizon legoESM's perturbation is
@@ -619,8 +656,12 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
     print(f"  a factor {MATCH_TOL:g}), so the pair differs in the model and not "
           "in the perturbation size.")
     amp = {a: [(_mean(table[(d, a)], "dT_max"),
-                _mean(table[(d, a)], "flip_rate"), d) for d in HORIZONS]
+                _median(table[(d, a)], "flip_rate"), d) for d in HORIZONS]
            for a in arms}
+    print("  Flip rates in THIS table are MEDIANS over the three member pairs, "
+          "not means, for the reason")
+    print("  given under (d): legoESM's early flips are carried by a single "
+          "member.")
     print(f"\n  {'lego day':>9}{'lego max|dT|':>14}{'lego rate':>11}"
           f"{'~ NEMO day':>12}{'nemo max|dT|':>14}{'nemo rate':>11}"
           f"{'amp ratio':>11}{'R_amp':>9}")
@@ -644,21 +685,96 @@ def _report(table, lane, has_nemo, wet_i, n2, do_two_level):
         if ok:
             matched.append((d_l, d_n, R, ratio))
     if not matched:
+        v_amp, R_amp = "UNAVAILABLE", float("nan")
         print("\n  NO amplitude-matched pair exists within the tolerance: "
               "legoESM's perturbation never")
-        print("  overlaps NEMO's in size at any pair of available horizons. "
-              "The rectification asymmetry is")
-        print("  therefore UNSEPARATED from the growth asymmetry by this data, "
-              "and (d) must be read as a")
-        print("  JOINT statement about both.")
+        print("  overlaps NEMO's in size at any pair of available horizons.")
     else:
         R_amp = float(np.median([m[2] for m in matched]))
         v_amp, _ = verdict(R_amp, 1.0)
         print(f"\n  amplitude-matched pairs: {len(matched)};  median R_amp = "
               f"{R_amp:.2f}  ->  {v_amp} on the amplitude-matched footing")
-        print("  (NEMO here is fp64, i.e. resolution-unlimited; legoESM is "
-              "fp32-censored, so R_amp is if")
-        print("   anything an UNDER-estimate of legoESM's flip rate.)")
+
+    # THE STORAGE-NOISE FLOOR, AND HOW MANY legoESM MEMBERS CLEAR IT.
+    #
+    # nemo_fp32 is a trajectory pair whose TRUE flip count is ~0 (nemo_fp64
+    # gives 0 flips for 60 days) put through legoESM's own storage precision.
+    # Its flips are therefore almost entirely MANUFACTURED BY THE FILE FORMAT,
+    # which makes it the noise floor for this statistic: legoESM's count has to
+    # clear it to be a signal at all. The floor is taken as the WORST (largest)
+    # NEMO member, not the mean, so it cannot be beaten by luck.
+    #
+    # The earlier robustness test here was too weak -- it accepted a horizon
+    # whose three legoESM members read 365, 3 and 2. This one asks the question
+    # per member: how many of the three clear the floor by the CONFIRM factor?
+    print("\n" + "=" * 100)
+    print("(d3) THE STORAGE-NOISE FLOOR, AND THE CHAIN-LINK VERDICT -- "
+          "computed, not typed")
+    print("=" * 100)
+    print("  nemo_fp32 has a TRUE flip count of ~0, so its flips are "
+          "manufactured by the file format.")
+    print("  It is the noise floor legoESM's count must clear. The floor is "
+          "the WORST NEMO member.")
+    print(f"\n  {'day':>4}{'floor (worst nemo32)':>22}"
+          f"{'lego per-member flips':>24}{'x floor':>22}"
+          f"{'members clearing ' + str(int(CONFIRM_RATIO)) + 'x':>20}")
+    cleared = {}
+    for day in HORIZONS:
+        if _mean(table[(day, "lego")], "frac_dT_nz") < RESOLVABLE_FRAC:
+            print(f"  {day:>4}{'':>22}{'':>24}{'':>22}{'UNMEASURABLE':>20}")
+            continue
+        floor = max(x["flips"] for x in table[(day, "nemo_fp32")])
+        legos = [x["flips"] for x in table[(day, "lego")]]
+        mult = [(l / floor) if floor > 0 else float("inf") for l in legos]
+        n_ok = sum(1 for m in mult if m >= CONFIRM_RATIO)
+        cleared[day] = (n_ok, floor, legos, mult)
+        print(f"  {day:>4}{floor:>22d}"
+              f"{','.join(str(l) for l in legos):>24}"
+              f"{','.join(f'{m:.1f}' for m in mult):>22}"
+              f"{n_ok:>16} / {len(legos)}")
+
+    n_mem = len(MEMBERS)
+    all_clear = [d for d, (n, *_) in cleared.items() if n == n_mem]
+    most_clear = [d for d, (n, *_) in cleared.items() if n >= (n_mem + 1) // 2]
+    matched_days = sorted({m[0] for m in matched})
+    print(f"\n  horizons where ALL {n_mem} legoESM members clear the floor by "
+          f"{CONFIRM_RATIO:g}x: {all_clear if all_clear else 'NONE'}")
+    print(f"  horizons where a MAJORITY clear it: "
+          f"{most_clear if most_clear else 'NONE'}")
+    print(f"  horizons with an amplitude-matched NEMO partner: "
+          f"{matched_days if matched_days else 'NONE'}")
+    overlap = sorted(set(most_clear) & set(matched_days))
+    print(f"  OVERLAP (majority-clearing AND amplitude-matched): "
+          f"{overlap if overlap else 'NONE'}")
+
+    print()
+    if not most_clear:
+        print("  CHAIN-LINK VERDICT: REFUTE. legoESM's trigger does not "
+              "resolve differently more often")
+        print("  than the file format alone would make it, at any resolvable "
+              "horizon. The rectification")
+        print("  asymmetry is NOT measured, and the 2dt-flicker link WEAKENS.")
+    elif overlap:
+        print(f"  CHAIN-LINK VERDICT: CONFIRM. A majority of members clear the "
+              f"storage-noise floor at")
+        print(f"  horizons {most_clear}, and {overlap} is ALSO "
+              f"amplitude-matched, so the difference is not")
+        print("  merely a consequence of legoESM's larger perturbation.")
+    else:
+        print(f"  CHAIN-LINK VERDICT: UNSEPARATED (partial). A MAJORITY of "
+              f"legoESM members -- not all --")
+        print(f"  clear the storage-noise floor at horizons {most_clear}, "
+              f"by the factors printed above.")
+        print(f"  ALL {n_mem} members clear it at: "
+              f"{all_clear if all_clear else 'NO horizon'}.")
+        print("  But NO horizon is both majority-clearing AND "
+              "amplitude-matched: NEMO's perturbation")
+        print("  never grows to legoESM's amplitude there. So the "
+              "RECTIFICATION asymmetry is NOT separated")
+        print("  from the GROWTH asymmetry by these states, and the "
+              "horizon-matched ratio must be read as")
+        print("  a JOINT statement about both. The chain link does NOT close "
+              "on this evidence.")
     print()
 
     if do_two_level:
