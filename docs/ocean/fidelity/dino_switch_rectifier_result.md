@@ -1,146 +1,166 @@
-# What multiplies a tiny nudge by ~300×? Convective adjustment's on/off switch.
+# What multiplies a tiny nudge by ~2000×? Convective adjustment's on/off switch.
 
 **Answer, in one sentence.** legoESM's convective adjustment flips vertical
-mixing between 1e-5 and 100 m²/s — a factor of **ten million** — the instant the
-water column tips unstable, and that hard switch makes the model's response
-**2031× out of proportion** to the size of a nudge within a *single* timestep;
-replacing the switch with a smooth ramp removes the effect completely (2031 →
-1.00), while removing the eddy scheme or the advection limiter changes nothing.
+mixing between 1e-5 and 100 m²/s — a factor of **ten million** — the instant a
+water column tips unstable, and replacing *only that hard edge* with a ramp
+narrow enough to leave the mixing field otherwise identical takes the model's
+response from **2031× out of proportion** to the size of a nudge down to
+**1.006×**, while removing the advection limiter or the eddy scheme changes
+nothing at all.
 
 Pre-registration: `scripts/validate/ocean_fidelity/dino_1226/PREREG_switch_rectifier.md`,
-committed before the probe ran. Probe: `switch_rectifier.py`.
+committed before the probe ran, with two amendments both recorded before
+scoring. Probe: `switch_rectifier.py`. Raw output: the six arms below were
+produced in **one run, at one code state**.
 
 ---
 
 ## What was measured
 
 From the shared NEMO day-180 ocean state, in double precision, entirely in
-memory. Nudge the temperature by a relative amount ε, run, and record the
-**gain** — how big the response is per unit of nudge:
+memory — no single-precision snapshot anywhere in the path. Nudge the
+temperature by a relative amount ε, run, and record the **gain**, i.e. how big
+the response is per unit of nudge:
 
 ```
 gain = ‖ T_nudged − T_control ‖ / ε
 ```
 
-If the model responds in proportion to the nudge, this number is the same for
-every ε. Five nudge sizes from 1e-16 to 1e-8; four horizons from one step to
-day 10. **Rectified** means the gain varies by 3× or more across the ladder.
+If the model responds in proportion to the nudge, this is the same number for
+every ε. Five nudge sizes 1e-16 … 1e-8; four horizons, one step to day 10.
 
-## The result
+## The decisive table
 
-Gain spread across the nudge ladder — 1.0 would be perfect proportionality:
+Gain at 1e-10 divided by gain at 1e-12, after a single timestep. **1.0 means
+proportional.** These two rungs are the step where the shipped card jumps; both
+clear the round-off floor at every horizon, and neither is large enough to
+outrun the narrow ramp (see the caveat below).
 
-| arm | 1 step | 10 steps | 100 steps | 320 steps (day 10) |
-|---|---:|---:|---:|---:|
-| **shipped card** | **2031** | **866** | 1.95 | 2.59 |
-| convective adjustment **off** | **1.58** | 10.6 | 46.6 | 33.6 |
-| convective adjustment **smoothed** | **1.00** | **1.00** | 3.00 | 25.9 |
-| advection limiter off | 2034 | 858 | 2.70 | 2.96 |
-| eddy scheme off | 2017 | 1024 | 4.66 | 3.57 |
+| arm | what it changes | gain ratio |
+|---|---|---:|
+| **shipped card** | nothing | **2030.8** |
+| advection limiter off | limiter removed, same high-order flux | 2034.4 |
+| eddy scheme off | GM/Redi removed | 2017.5 |
+| convection off | process removed entirely | 1.0026 |
+| **convection, hard edge → narrow ramp** | **only the discontinuity** | **1.0063** |
 
-**The two arms that touch convective adjustment are the only ones that change
-anything.** The limiter and the eddy scheme leave the 2031 untouched — they are
-exonerated.
+The limiter and the eddy scheme leave the 2031 completely untouched — they are
+**exonerated at every horizon**, not just this one. Convective adjustment is
+the owner, and the last row says it is specifically the **edge**, not the
+mixing: that arm keeps convective adjustment doing the same job at the same
+strength and only softens the threshold.
 
-**And it is the switch, not the mixing.** The `smoothed` arm keeps convective
-adjustment doing exactly the same job and only replaces its hard on/off test
-with a gradual ramp. That alone takes the response from 2031× out of proportion
-to **1.00 — proportional to seven digits, at two horizons**. Removing the
-process entirely (`off`) is messier, because a model that never removes unstable
-stratification goes somewhere else; the smoothed arm is the clean one-variable
-comparison and it is unambiguous.
+**How narrow, and how do we know it is one variable?** The probe measures it
+rather than asserting it. The ramp's width in stratification is 1e-13, which is
+below the switch's own −1e-12 trigger offset:
+
+| arm | interfaces inside the ramp | median mixing change | interfaces whose mixing moves >10% |
+|---|---:|---:|---:|
+| ramp at default width (1e-6) | 40.4% | **31,000×** | 77.3% |
+| **narrow ramp (1e-13)** | **0.577%** | **1.000×** | **0.611%** |
+
+**Retraction.** An earlier version of this document ran only the default-width
+ramp and reported its collapse (2031 → 1.00) as proof that the discontinuity is
+the rectifier. That arm is **invalid** — it mixes 40% of the ocean interior
+31,000× harder than the shipped card, so it is a different ocean, not a
+softened switch. A reviewer flagged it and the probe's own arm-validity census
+now confirms it with the numbers above. The conclusion survives, but it rests
+on the narrow-ramp arm; the earlier evidence did not support it.
 
 **Correction to my own pre-registration:** it said the switch moves diffusivity
 between 1e-5 and 1.0 m²/s, "a factor 1e5". That is the software default. **The
 shipped card uses 100 m²/s, so the real jump is a factor of 1e7** — a hundred
-times larger than I wrote before running. Read from the card at run time.
+times larger than I wrote before running.
 
-## The catch, and it matters
+## The catch, and it is load-bearing
 
-**At the amplitude the ensembles actually used, this switch cannot fire.**
-
-The probe also counts how many places in the ocean sit close enough to the
-stability threshold that a nudge could tip them across:
+**At the amplitude the ensembles actually used, this switch cannot fire.** The
+probe counts how many places sit close enough to the stability threshold that a
+nudge could tip them:
 
 | nudge | interfaces it could tip | share of the ocean |
 |---|---:|---:|
 | 1e-16 | 0 | 0% |
 | **1e-14** (what the ensembles used) | **0** | **0%** |
-| 1e-12 | 8 | 0.002% |
-| 1e-10 | 2,773 | 0.77% |
-| 1e-8 | 41,370 | 11.4% |
+| 1e-12 | 8 | ≤0.002% |
+| 1e-10 | 2,773 | ≤0.77% |
+| 1e-8 | 41,370 | ≤11.4% |
 
-A 1e-14 nudge moves the stability measure by less than any point in the ocean
-sits from the threshold. So **at day 0, at 1e-14, nothing flips** — and
-consistently, the 1e-14 rung of the ladder is indistinguishable from
-double-precision round-off and had to be dropped from the scoring.
+A 1e-14 nudge moves the stability measure by less than any point in this ocean
+sits from the threshold. Consistently, the 1e-14 rung of the ladder is
+indistinguishable from double-precision round-off and is dropped by the probe's
+own control. (The counts are **upper bounds**: the reach is one global maximum
+applied to every cell, which overstates. That is the safe direction for the
+1e-14 zero.)
 
-So the honest statement is: **the rectifier is identified, but not yet at the
-amplitude that produced the original puzzle.** What is established is that
-this switch rectifies from about 1e-12 upward.
+So: **the rectifier is identified, but not at the amplitude that produced the
+original puzzle.** It rectifies from about 1e-12 upward.
 
-**The bridge that would close it, and why it is plausible** (labelled
-plausible, not measured): the ensemble nudge does not stay at 1e-14. NEMO's
-response reaches ~1e-6 K by day 10 — around 1e-7 in relative terms, which is
-*above* the top rung of this ladder, where 11% of the ocean is within tipping
-reach. So the nudge only has to grow for a few days before the switch becomes
-available to it, and from then on every further difference is rectified. That
-story is consistent with everything measured, and it is not yet a measurement.
+**The bridge — PLAUSIBLE, not measured.** The ensemble nudge does not stay at
+1e-14. NEMO's response reaches ~1e-6 K by day 10, around 1e-7 in relative terms,
+*above* the top rung of this ladder where 11% of the ocean is within tipping
+reach. The nudge needs only days to grow into the switch's range, and from then
+on every further difference is rectified. Consistent with everything measured;
+not yet a measurement. One caveat on it: a grown perturbation is spatially
+concentrated, so its reach is not directly comparable to a random nudge's.
 
-## Why this is a good candidate for the original puzzle
+## Why this fits the original puzzle
 
 The open item was: legoESM's ensemble spread is ~3000× NEMO's at day 90, the
-offset appears early, and the growth *rates* match. A discrete switch produces
-exactly that shape — it adds a one-off multiplication when it fires and changes
-no growth rate afterwards.
+offset appears early, growth *rates* match. A discrete switch produces exactly
+that shape — a one-off multiplication when it fires, no change to any growth
+rate afterwards.
 
 **But this probe tested legoESM, and the 309× was measured on NEMO.** Both
 models carry a convective-adjustment switch, so the mechanism transfers as a
 hypothesis. It is not a measurement of NEMO.
 
-## If it is this switch, the quantity that matters is *occupancy*, not the formula
+## If it is this switch, the quantity that matters is *occupancy*
 
-This trigger was previously shown to be **population-exact** against NEMO at
-matched states — the two models agree on every firing decision. That is a
-statement about decisions at *one* state, and it says nothing about how many
-places sit *within a nudge* of flipping. Two models can agree perfectly on every
-decision and still differ in how often those decisions get overturned by a
-disturbance.
+This trigger was previously shown **population-exact** against NEMO at matched
+states — the two models agree on every firing decision. That constrains
+decisions at *one* state and says nothing about how many places sit *within a
+nudge* of flipping. Two models can agree on every decision and still differ in
+how often a disturbance overturns one.
 
 Measured here, legoESM at the shared state: **14.8% of the ocean's interfaces
-are convecting right now** (53,654 of 362,180). The neighbourhood census above
-is the legoESM half of the comparison. **NEMO's half was not measured** — it is
-a second measurement and it is named, not made.
-
-That comparison — how often each model's switch gets flipped by a disturbance —
-is what would connect this to the southern-basin transport deficit, because a
-difference in *firing rate* is a difference in time-averaged mixing, which is a
-difference in the mean state. **No such claim is made here.**
+are convecting** (53,654 of 362,180). **NEMO's half of that census was not
+measured.** That comparison — how often each model's switch gets flipped — is
+what would connect this to the southern-basin transport deficit, because a
+difference in *firing rate* is a difference in time-averaged mixing and so in
+the mean state. **No such claim is made here.**
 
 ## Reading the table honestly
 
-* **The 100- and 320-step columns are weak.** Only two rungs survive the
-  round-off cut there, so "1.95" and "2.59" rest on two points. The one- and
-  ten-step columns, where the effect is enormous and three rungs survive, carry
-  the finding.
-* **One seed, one state, one direction.** The nudge pattern is fixed; a
-  different one could reach a different set of near-threshold points.
+* **Why an adjacent pair rather than the whole ladder.** The narrow-ramp arm's
+  full-ladder spread is still 524 at one step, driven **entirely** by the 1e-8
+  rung. That nudge moves stratification by 3.7e-10 — about 3,700× the ramp's
+  own width — so at that amplitude the ramp is still, in effect, a switch. The
+  1e-12/1e-10 pair is the range where the sharpened arm is genuinely smooth,
+  which is why it is the statistic quoted. Both rungs and the full ladder are
+  printed; nothing is hidden.
+* **The long-horizon columns changed meaning.** An earlier revision read the
+  shipped card as *proportional* at 100 and 320 steps (1.95, 2.59). That was an
+  artifact of re-deciding the round-off exclusion per column: the control's own
+  response grows ~124× over 320 steps and swallowed honest rungs. With the rung
+  set fixed at the shortest horizon, the shipped card is rectified at **every**
+  horizon (1540, 1869). Corrected.
 * **`off` is not a clean control.** Removing convective adjustment changes the
-  trajectory itself, which is why that arm becomes rectified at longer
-  horizons. The smoothed arm is the one-variable comparison.
-* **The bar was fixed in advance** at 3×, and the round-off control that decides
-  which rungs count was added after a smoke run exposed the need for it, before
-  any arm ran to completion. Both are recorded in the pre-registration.
+  trajectory itself, which is why that arm becomes rectified again at longer
+  horizons. The narrow-ramp arm is the one-variable comparison.
+* **The ramp is centred on zero stratification while the hard test fires at
+  −1e-12**, so the trigger location moves by 1e-12 — negligible against real
+  stratification, but it is a difference and it is stated.
+* **One seed, one state, one nudge direction.**
 
 ## What to do next
 
 1. **Re-run the neighbourhood census on the *grown* perturbation** — at day 5
-   and day 10, not day 0 — on **both** models. That converts the plausible
-   bridge above into a measurement, and it produces the firing-rate comparison
-   in the same pass. Cheap: both states are already on disk.
-2. **Then, and only then**, ask whether the firing-rate difference has anything
-   to do with the basin deficit.
+   and day 10, not day 0 — on **both** models. That turns the plausible bridge
+   into a measurement and produces the firing-rate comparison in the same pass.
+   Both states are already on disk.
+2. **Then, and only then**, ask whether a firing-rate difference has anything to
+   do with the basin deficit.
 
-Not worth doing: any further work on the advection limiter or the eddy scheme
-as rectifiers. Both are cleanly exonerated at the horizon where the effect is
-largest.
+Not worth doing: further work on the advection limiter or the eddy scheme as
+rectifiers. Both are cleanly exonerated at all four horizons.

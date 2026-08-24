@@ -202,6 +202,20 @@ def spread(gain_by_eps, n, exclude=()):
     return float("inf") if lo == 0.0 else float(np.max(v)) / lo
 
 
+def pair_ratio(gain_by_eps, n, lo=1e-12, hi=1e-10):
+    """Gain at ``hi`` divided by gain at ``lo`` -- the DECISIVE statistic.
+
+    The max/min spread over the whole ladder mixes two different things: the
+    rectification between adjacent rungs, and the fact that the largest rung
+    (1e-8) moves N2 by 3700x the sharpened ramp's own width and therefore still
+    meets a switch. This pair isolates the first. ``lo``/``hi`` bracket the
+    step where the shipped card jumps by three orders of magnitude, and both
+    clear the round-off floor at every horizon.
+    """
+    a, b = gain_by_eps[lo][n], gain_by_eps[hi][n]
+    return float("nan") if a == 0 else b / a
+
+
 def _self_check():
     """The arithmetic this probe owns: the spread statistic and the bar."""
     lin = {1e-14: {1: 5.0}, 1e-12: {1: 5.0}, 1e-10: {1: 5.0}}
@@ -240,6 +254,10 @@ def _self_check():
     # fewer than two usable rungs is NaN, never a flattering 1.0
     assert np.isnan(spread({1e-16: {1: 1.0}, 1e-14: {1: 1.0}}, 1,
                            {1e-16, 1e-14}))
+    # pair_ratio(): the decisive adjacent-rung statistic
+    pr = {1e-12: {1: 5.0}, 1e-10: {1: 15.0}}
+    assert abs(pair_ratio(pr, 1) - 3.0) < 1e-12
+    assert np.isnan(pair_ratio({1e-12: {1: 0.0}, 1e-10: {1: 1.0}}, 1))
     # _grid() reports only step counts EVERY arm reached
     r = {"a": {1e-14: {1: 0.0, 10: 0.0}}, "b": {1e-14: {1: 0.0}}}
     assert _grid(r) == (1,), _grid(r)
@@ -337,6 +355,19 @@ def table(results):
             cells.append(f"{s:>10.2f} {'R' if s >= SPREAD_BAR else '.':<3}")
         print(f"{arm:<16}" + "".join(cells))
     print("  R = rectified at that horizon, . = proportional")
+
+    print("\n" + "=" * 100)
+    print("THE DECISIVE PAIR -- gain(1e-10) / gain(1e-12), the step where the "
+          "shipped card jumps")
+    print("=" * 100)
+    print("Both rungs clear the round-off floor at every horizon, and neither "
+          "is large enough to outrun a")
+    print("sharpened ramp. 1.0 means the response is proportional between "
+          "them; the shipped card is ~2000.")
+    print(f"{'arm':<16}" + "".join(f"{'n=' + str(n):>14}" for n in grid))
+    for arm, g in results.items():
+        print(f"{arm:<16}" + "".join(f"{pair_ratio(g, n):>14.4g}"
+                                     for n in grid))
 
 
 # ------------------------------------------------------------------- census ---
