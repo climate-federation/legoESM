@@ -1060,8 +1060,9 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     (verified against fv3_native_dynamics.py:198-234); pkz is already cell-domain
     k-last.  GLM-authored; codex + Claude reviewed.
     """
-    from legoesm.grids.fv3_native_ext_vector import (
-        c2l_ord4_face, ext_vector_dgrid_sixface)
+    from legoesm.grids.fv3_native_ext_vector import c2l_ord4_face
+    from legoesm.grids.fv3_native_gridstruct import (
+        exchange_dgrid_vector_halos)
     from legoesm.grids.fv3_native_metrics import compute_fv3_native_wind_vectors
     from legoesm.core.fv3_native_physics_coupling import (
         held_suarez_tend, fv_update_phys_dry_duo)
@@ -1086,11 +1087,14 @@ def apply_held_suarez_step(ctx, state, press, *, dt, n, ng, km, strat=True):
     # The oracle's c2l_ord4 exchanges the D-grid u/v halos before interpolating
     # (mpp_update_domains gridtype=DGRID_NE, fv_grid_utils.F90:2441); the ord4
     # edge stencil (compute cells i or j = 1 or n) reads those halos, so exchange
-    # them first or the panel-edge rows carry a stale-halo residual. Halo-only
+    # them first (exchange_dgrid_vector_halos = the exact mpp_update_domains
+    # DGRID_NE strip copy, NOT ext_vector's wedge re-extrapolation -- codex).
+    # Halo-only
     # (the compute interior is untouched), so PASS 3's D-grid update is unaffected.
     u6 = [state[t]["u"] for t in range(6)]
     v6 = [state[t]["v"] for t in range(6)]
-    ext_vector_dgrid_sixface(u6, v6, ectx)
+    for tile in range(1, 7):
+        exchange_dgrid_vector_halos(u6, v6, tile, n, ng)
 
     # PASS 1: per-face tendencies on the compute domain
     for t in range(6):
