@@ -43,8 +43,25 @@ RUN = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
 # initial state -- which makes lego's 1-year ACC growth directly comparable
 # to NEMO's own growth over the same year from the same state.
 INIT_RESTART = os.environ.get("DINO_INIT_RESTART")
+INIT_RESTART_PATH = INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc"
 g = read_nemo_mesh_mask(f"{RUN}/mesh_mask.nc", nn_hls=0)
-s = read_nemo_restart(INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc", nn_hls=0)
+s = read_nemo_restart(INIT_RESTART_PATH, nn_hls=0)
+# #1455 SEASONAL CLOCK: DINO's analytic forcing follows the DAY OF YEAR, so a
+# screen STATE-INITIALIZED from a developed NEMO restart must continue that
+# restart's own seasonal clock instead of restarting the year at zero.
+#
+# ONLY in DINO_INIT_RESTART (matched-state growth) mode. The DEFAULT arm starts
+# from the ANALYTIC REST state (`dino_lat_lon_state` below); its kt=320 restart
+# is a GEOMETRY DONOR ONLY and never supplies the state, so relative time IS
+# the day of year there and the offset must be 0. Applying the restart's
+# 10-day offset to the from-rest arm would put it out of phase with NEMO's own
+# year-1 spin-up AND break this script's stated control that the two arms
+# differ in the initial state alone.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kamm_twin_90d import seasonal_t0_seconds  # noqa: E402
+T0_SEC = seasonal_t0_seconds(INIT_RESTART_PATH) if INIT_RESTART else 0.0
+print(f"seasonal clock: t0 = {T0_SEC:.0f} s "
+      f"({'restart adatrj' if INIT_RESTART else 'from-rest arm -> 0'})")
 br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
@@ -181,12 +198,12 @@ for year in range(1, YEARS + 1):
         kglob += 1
         if USE_RHS:
             st, ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=kglob * DT,
+                st, forcing, br.z_coord, cfg, DT, t_seconds=T0_SEC + kglob * DT,
                 return_rate=True)
             st = dyn(st, ext_rate)
         else:
             st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                    t_seconds=kglob * DT)
+                                                    t_seconds=T0_SEC + kglob * DT)
             st = dyn(st)
         if k >= ACC0:
             for f in acc: acc[f] = acc[f] + getattr(st, f).data

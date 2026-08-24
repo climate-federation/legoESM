@@ -717,3 +717,69 @@ class TestPrognosticCarryHardening:
         restored = load_restart(p, state)  # template carry is None
         assert restored.tke is not None
         assert bool(jnp.allclose(restored.tke.data, tke_arr))
+
+
+class TestNemoBn2OnMPAS:
+    """MPAS must EXECUTE the card's stratification, not merely be allowed it.
+
+    The ORCA1 card sets n2_mode="nemo_bn2" with n2_eos_form="teos10", and MPAS
+    shares that card. Codex 9408814 #5 named this as the gap the other tests
+    miss: source inspection cannot catch bad kwargs, wrong shapes, or a JIT
+    failure on the bridge. This runs the profile function.
+    """
+
+    def test_profiles_run_with_nemo_bn2_and_teos10(self, mesh, z_coord, state):
+        """The card's exact stratification settings, executed on MPAS."""
+        import numpy as np
+        pf = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(n2_mode="nemo_bn2", n2_eos_form="teos10")))
+        A_v, K_v = pf(state, mesh, z_coord)
+        nc, nl = state.T.data.shape[0], state.T.data.shape[1] - 1
+        for name, arr in (("A_v", A_v), ("K_v", K_v)):
+            a = np.asarray(arr)
+            assert a.shape == (nc, nl), f"{name} shape {a.shape} != {(nc, nl)}"
+            assert np.all(np.isfinite(a)), f"{name} has non-finite entries"
+            assert np.all(a >= 0.0), f"{name} went negative"
+
+    def test_prognostic_profiles_run_with_nemo_bn2(self, mesh, z_coord, state):
+        """The ORCA1 card runs PROGNOSTIC TKE; that is a different return
+        arity and a different code path from the diagnostic one above."""
+        import numpy as np
+        pf = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(prognostic=True, n2_mode="nemo_bn2",
+                          n2_eos_form="teos10")))
+        A_v, K_v, tke_new = pf(state, mesh, z_coord, _wind_forcing(state),
+                               dt_tke=3600.0)
+        for name, arr in (("A_v", A_v), ("K_v", K_v), ("tke", tke_new)):
+            a = np.asarray(arr)
+            assert np.all(np.isfinite(a)), f"{name} has non-finite entries"
+            assert np.all(a >= 0.0), f"{name} went negative"
+
+    def test_nemo_bn2_changes_the_answer_on_mpas(self, mesh, z_coord, state):
+        """Non-vacuity: if the ladders never reached the kernel the two
+        stratification modes would return the same array and the test above
+        would pass while proving nothing."""
+        import numpy as np
+        base = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke", tke=TKEConfig(n2_mode="insitu")))(
+                state, mesh, z_coord)[1]
+        bn2 = make_tke_profiles_mpas(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(n2_mode="nemo_bn2", n2_eos_form="teos10")))(
+                state, mesh, z_coord)[1]
+        # `not allclose` is satisfied by NaN, so a broken kernel would pass
+        # this "non-vacuity" check vacuously. Require finite first.
+        assert np.all(np.isfinite(np.asarray(bn2)))
+        assert not np.allclose(np.asarray(base), np.asarray(bn2)), (
+            "nemo_bn2 gave the insitu answer on MPAS -- the depth ladders "
+            "are not reaching the kernel")
+
+    def test_adiabatic_still_refused_on_mpas(self):
+        """The narrowing must not have opened the mode that genuinely needs
+        the cell-centre hydrostatic pressure this bridge does not compute."""
+        import pytest as _pytest
+        with _pytest.raises(NotImplementedError, match="adiabatic"):
+            make_tke_profiles_mpas(VerticalMixingConfig(
+                scheme="tke", tke=TKEConfig(n2_mode="adiabatic")))

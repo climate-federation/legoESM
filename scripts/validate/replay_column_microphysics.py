@@ -148,14 +148,22 @@ def replay_cells(state, cells, cfg, dt, *, perturb_key=None,
     _count_nonfinite("p_s", p_s, ledger)
 
     q_v = trc("q_v")
-    hyd = HydrometeorState(
-        q_c=trc("q_c"), q_r=trc("q_r"), q_i=trc("q_i"), q_s=trc("q_s"),
-        q_g=trc("q_g"), N_c=trc("N_c"), N_r=trc("N_r"), N_i=trc("N_i"),
-    )
     T_j = jnp.asarray(T)
     p_full = jnp.asarray(sigma_full)[None, :] * jnp.asarray(p_s)[:, None]
     p_half = jnp.asarray(sigma_half)[None, :] * jnp.asarray(p_s)[:, None]
     rho = compute_rho(T_j, p_full, q_v)
+    # Mirror the production bridge: stored N_c/N_r are per MASS [1/kg]; the
+    # scheme wants per VOLUME.  A replay that skips this no longer replays.
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        number_per_mass_to_per_volume,
+    )
+    hyd = HydrometeorState(
+        q_c=trc("q_c"), q_r=trc("q_r"), q_i=trc("q_i"), q_s=trc("q_s"),
+        q_g=trc("q_g"),
+        N_c=number_per_mass_to_per_volume(trc("N_c"), rho),
+        N_r=number_per_mass_to_per_volume(trc("N_r"), rho),
+        N_i=trc("N_i"),
+    )
     dz = compute_layer_dz(T_j, p_half, q_v)
 
     out = morrison_microphysics(T_j, q_v, hyd, p_full, p_half, rho, dz,

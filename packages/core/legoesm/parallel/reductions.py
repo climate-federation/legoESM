@@ -555,28 +555,35 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
     return global_val
 
 
-def global_min_mpi(local_value: jax.Array) -> jax.Array:
+def global_min_mpi(local_value: jax.Array, comm=None) -> jax.Array:
     """Compute a global minimum across all MPI ranks.
 
     **Not differentiable**: ``allreduce(MIN)`` has no meaningful gradient.
-    Use only in diagnostics, logging, or CFL monitoring — never in a
-    loss function or inside ``jax.grad``.
+    Use only in diagnostics, logging, CFL monitoring, or host-side control
+    flow — never in a loss function or inside ``jax.grad``.
 
     Parameters
     ----------
     local_value : jax.Array
         Scalar (or array) local partial minimum.
+    comm : MPI communicator, optional
+        Defaults to ``MPI.COMM_WORLD`` — mirrors :func:`global_sum_mpi` so a
+        caller on a subset communicator reduces over ITS group (a hardcoded
+        world communicator would hang when nonmembers never enter the
+        reduction — codex 2026-08-16, non-finite-guard review, finding 1).
 
     Returns
     -------
     jax.Array
-        The global minimum across all processes.
+        The global minimum across the communicator's processes.
     """
     mpi4jax, MPI = require_mpi_stack()
 
     with mpi_timer("global_min_mpi"):
         global_val = mpi4jax_array_result(
-            mpi4jax.allreduce(local_value, op=MPI.MIN, comm=MPI.COMM_WORLD),
+            mpi4jax.allreduce(
+                local_value, op=MPI.MIN,
+                comm=comm if comm is not None else MPI.COMM_WORLD),
         )
     return global_val
 

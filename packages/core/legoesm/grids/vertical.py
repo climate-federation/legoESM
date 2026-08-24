@@ -33,6 +33,7 @@ References
 from __future__ import annotations
 
 import logging
+import math
 from typing import Callable, NamedTuple
 
 import jax
@@ -99,6 +100,113 @@ class SigmaCoordinate(NamedTuple):
 
     def layer_thickness_dp(self, p_s):
         return self.dsigma * p_s[..., None]
+
+
+#: Cost per cell per level, picoseconds, MEASURED on one A100 in float32 with
+#: the icosahedral dynamical core at 163,842 cells, 60 timed steps per arm,
+#: two replicates each, spreads at or under 1% apart from one 4.8% outlier
+#: (2026-08-19, jobs 27070658 / 27073083 / 27073084 / 27074125 / 27074126 /
+#: 27074455 / 27076677).  Level counts NOT listed here were not measured.
+_LEVEL_COST_PS = {
+    13: 3520, 16: 1547, 18: 2318, 20: 1524, 21: 2578, 22: 4910, 24: 4147,
+    25: 4224, 26: 4755, 27: 3861, 28: 4058, 30: 4591, 31: 3741, 32: 1629,
+    34: 2949, 36: 1706, 40: 1664, 52: 1621,
+}
+#: Anything at or below this is "as cheap as the cheapest counts measured".
+_LEVEL_COST_FAST_PS = 1800
+#: The counts that came in at or under that bar, cheapest first by count.
+_LEVELS_MEASURED_FAST = tuple(
+    n for n in sorted(_LEVEL_COST_PS) if _LEVEL_COST_PS[n] <= _LEVEL_COST_FAST_PS
+)
+
+
+def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
+    """Warn when the level count was MEASURED expensive ON THE UNSTRUCTURED CORE.
+
+    SCOPE, and it is narrow. The lat-lon core was measured over the same
+    level counts on one GPU and is FLAT: 16 through 40 levels span 851 to
+    954 picoseconds per column per level, a 1.12x spread end to end, with 26
+    levels at 1.04x the cheapest and every arm reproducing to 0.0% (job
+    27078027). So this is NOT a compiler or hardware property that every
+    model pays -- it belongs to the unstructured core's kernels, and this
+    function is called from there rather than from the vertical-coordinate
+    factories, which serve both.
+
+    On this model, in float32, on one A100, the cost per cell per level
+    varies by a factor of three between level counts, and NOT in any pattern
+    that a rule can express.  Measured, picoseconds per cell per level:
+
+        16  1547     18  2318     20  1524     21  2578     22  4910
+        24  4147     25  4224     26  4755     27  3861     28  4058
+        30  4591     31  3741     32  1629     34  2949     36  1706
+        40  1664     52  1621
+
+    Sixteen, twenty, thirty-two, thirty-six, forty and fifty-two are cheap.
+    Everything from twenty-two to thirty-one is about three times more
+    expensive per level, and so are eighteen, twenty-one and thirty-four.
+    The step at thirty levels is 22.6 ms and at thirty-two it is 8.5 ms --
+    more work, a third of the time.  Production runs twenty-six.
+
+    TWO EXPLANATIONS WERE TESTED AND BOTH FAILED.  Byte alignment of a
+    cell's column: twenty-four and twenty-eight levels give 96- and
+    112-byte strides, both multiples of the 16-byte vector width, and both
+    are slow.  Cache capacity: fifty-two levels holds the largest live set
+    of any count measured and is the cheapest.  The sharp irregular
+    transitions -- thirty slow, thirty-two fast, thirty-four slow,
+    thirty-six fast -- look like the compiler choosing different code per
+    shape, but that is not established either, so this warning names no
+    cause.
+
+    What that costs the reader: the table is specific to this model, this
+    GPU, this compiler version and float32, and may move under any of them.
+    A level count absent from the table is UNMEASURED, not fast.
+
+    ``dtype`` is the dtype the STATE arrays are stored in, resolved from the
+    active precision policy when omitted; the measurement is float32 and
+    other widths are left alone rather than extrapolated.
+
+    ``where`` names the caller so the message points at the model being
+    built.
+    """
+    import warnings
+
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().storage
+        except Exception:
+            dtype = jnp.float32
+    try:
+        itemsize = int(np.dtype(dtype).itemsize)
+    except TypeError:
+        # An unusual dtype object is not a reason to fail coordinate
+        # construction; skip the advisory rather than raise from it.
+        return
+    n_levels = int(n_levels)
+    if n_levels <= 0 or itemsize != 4:
+        return
+    cost = _LEVEL_COST_PS.get(n_levels)
+    if cost is None or cost <= _LEVEL_COST_FAST_PS:
+        return
+    best = min(_LEVEL_COST_PS[n] for n in _LEVELS_MEASURED_FAST)
+    warnings.warn(
+        f"{where}: {n_levels} vertical levels was MEASURED expensive on the "
+        f"unstructured core — {cost} picoseconds per cell per level against "
+        f"{best} for "
+        f"the cheapest counts measured, a factor of {cost / best:.1f}. At "
+        f"163,842 cells the step is 22.6 ms at 30 levels and 8.5 ms at 32: "
+        f"more work, a third of the time. Level counts measured cheap: "
+        f"{', '.join(str(n) for n in _LEVELS_MEASURED_FAST)}. The cause is "
+        f"NOT established — byte alignment of the column stride and cache "
+        f"capacity were both tested and both refuted — so this is a table of "
+        f"measurements, not a rule, and counts absent from it are unmeasured "
+        f"rather than cheap. If {n_levels} is a physics requirement, keep it "
+        f"and expect the cost. The lat-lon core does NOT show this — it is "
+        f"flat to 1.12x across the same level counts — so this is specific "
+        f"to the unstructured kernels. Re-measure on different hardware or "
+        f"a different compiler before trusting any of it.",
+        stacklevel=3,
+    )
 
 
 def create_sigma_coordinate(

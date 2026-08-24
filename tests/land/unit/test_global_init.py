@@ -500,13 +500,16 @@ def test_zonal_climate_varies_with_latitude():
 # None), STRICT grid-match (fail-loud), and phi validation.
 # ---------------------------------------------------------------------------
 def _write_finidat(path, ncol, *, lat_deg=None, lon_deg=None, phi=None,
-                   with_phi=True, drop_pool=None, som_scale=1000.0):
+                   with_phi=True, drop_pool=None, som_scale=1000.0,
+                   land_mask=None, drop_land_mask=False):
     """Write a tiny finidat global_carbon_ic.npz with the 8 pools (+ optional phi).
 
     Pool values are per-cell and DISTINCT per pool so a round-trip cannot alias
     two fields; SOM is seeded large (``som_scale``) so a seeded-vs-cold test has a
     clear separation.  ``drop_pool`` omits a pool (to exercise the detection gate);
     ``with_phi=False`` omits ``soil_frozen_fraction`` (a legacy finidat).
+    ``land_mask`` defaults to all-land (so every existing caller is unchanged);
+    ``drop_land_mask`` omits the field entirely.
     """
     fields = CarbonState._fields
     d = {}
@@ -519,7 +522,9 @@ def _write_finidat(path, ncol, *, lat_deg=None, lon_deg=None, phi=None,
                 else np.linspace(-80.0, 80.0, ncol))
     d["lon"] = (np.asarray(lon_deg, float) if lon_deg is not None
                 else np.linspace(0.0, 350.0, ncol))
-    d["land_mask"] = np.ones(ncol, bool)
+    if not drop_land_mask:
+        d["land_mask"] = (np.ones(ncol, bool) if land_mask is None
+                          else np.asarray(land_mask, bool))
     if with_phi:
         d["soil_frozen_fraction"] = (np.asarray(phi, float) if phi is not None
                                      else np.linspace(0.0, 1.0, ncol))
@@ -621,3 +626,188 @@ def test_load_finidat_carbon_ic_latlon_grid_glue(tmp_path):
         p, expect_ncol=ncol,
         target_lat_deg=lat2d.ravel(), target_lon_deg=lon2d.ravel())
     assert carbon is not None and np.asarray(carbon.C_som_active).shape == (ncol,)
+
+
+# ---------------------------------------------------------------------------
+# load_finidat_carbon_ic_at_point: seeding a SINGLE-COLUMN run (run_lmip) from
+# the nearest land cell of the global finidat.  Covers the nearest-cell pick,
+# the land-only restriction, the 0/360 seam, the distance guard, and the
+# great-circle metric (which a lat/lon Euclidean metric gets WRONG at high
+# latitude -- the case the naive metric fails is asserted explicitly).
+# ---------------------------------------------------------------------------
+def _pool_value(field, cell, ncol=None, som_scale=1000.0):
+    """The value _write_finidat puts in `field` at flat index `cell`."""
+    base = (som_scale if field.startswith("C_som")
+            else 10.0 * (CarbonState._fields.index(field) + 1))
+    return base + cell
+
+
+def test_point_ic_picks_nearest_cell_and_shapes_one_column(tmp_path):
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    lat = np.array([-40.0, 0.0, 10.0, 55.0])
+    lon = np.array([0.0, 0.0, 0.0, 0.0])
+    p = _write_finidat(tmp_path / "gcic.npz", 4, lat_deg=lat, lon_deg=lon,
+                       phi=np.array([0.0, 0.1, 0.2, 0.9]))
+
+    carbon, phi, match = load_finidat_carbon_ic_at_point(p, 11.0, 0.0)
+
+    assert match.index == 2                      # 10.0 is nearest to 11.0
+    assert match.lat_deg == 10.0 and match.is_land
+    npt.assert_allclose(match.distance_deg, 1.0, atol=1e-9)
+    for f in CarbonState._fields:
+        got = np.asarray(getattr(carbon, f))
+        assert got.shape == (1,)                 # shaped for a 1-column run
+        npt.assert_allclose(got, [_pool_value(f, 2)])
+    npt.assert_allclose(np.asarray(phi), [0.2])
+
+
+def test_point_ic_skips_ocean_cells(tmp_path):
+    """The nearest cell overall is ocean -> the nearest LAND cell is used."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    lat = np.array([0.0, 10.0, 12.0])
+    lon = np.zeros(3)
+    p = _write_finidat(tmp_path / "gcic.npz", 3, lat_deg=lat, lon_deg=lon,
+                       land_mask=[True, False, True])   # cell 1 is ocean
+
+    _c, _phi, match = load_finidat_carbon_ic_at_point(p, 10.4, 0.0)
+    assert match.index == 2                      # NOT 1, which is 0.4 deg away
+    npt.assert_allclose(match.distance_deg, 1.6, atol=1e-9)
+
+    # Without the land restriction the ocean cell IS the nearest -- so the
+    # restriction, not the geometry, is what moved the answer.
+    _c2, _phi2, m2 = load_finidat_carbon_ic_at_point(
+        p, 10.4, 0.0, require_land=False)
+    assert m2.index == 1
+
+
+def test_point_ic_longitude_wraps_at_the_seam(tmp_path):
+    """A -10 deg request matches a cell stored at 350 deg (same meridian)."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    lat = np.array([0.0, 0.0])
+    lon = np.array([350.0, 20.0])
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=lat, lon_deg=lon)
+
+    _c, _phi, match = load_finidat_carbon_ic_at_point(p, 0.0, -10.0)
+    assert match.index == 0
+    npt.assert_allclose(match.distance_deg, 0.0, atol=1e-9)
+
+
+def test_point_ic_uses_great_circle_not_latlon_euclidean(tmp_path):
+    """At 85 N a 40 deg longitude offset is only ~3.4 deg of arc, i.e. CLOSER
+    than a 4 deg latitude offset.  A lat/lon Euclidean metric ranks these the
+    other way round, so this case discriminates the two metrics."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    lat = np.array([85.0, 81.0])
+    lon = np.array([40.0, 0.0])
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=lat, lon_deg=lon)
+
+    _c, _phi, match = load_finidat_carbon_ic_at_point(
+        p, 85.0, 0.0, max_distance_deg=5.0)
+    assert match.index == 0                      # great circle: 3.42 < 4.0
+    npt.assert_allclose(match.distance_deg, 3.418, atol=1e-2)
+    # The metric the code must NOT be using would have chosen cell 1:
+    naive = np.hypot(lat - 85.0, lon - 0.0)
+    assert int(np.argmin(naive)) == 1
+
+
+def test_point_ic_too_far_raises(tmp_path):
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 2,
+                       lat_deg=np.array([80.0, 85.0]), lon_deg=np.zeros(2))
+    with pytest.raises(ValueError, match="beyond max_distance_deg"):
+        load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+
+
+def test_point_ic_not_a_carbon_finidat_raises(tmp_path):
+    """Unlike the auto-detecting strict loader (which returns None), an explicit
+    point request for a non-finidat is an ERROR -- the caller named the file."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 3, lat_deg=np.zeros(3),
+                       lon_deg=np.zeros(3), drop_pool="C_wood")
+    with pytest.raises(ValueError, match="not a carbon finidat"):
+        load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+
+
+def test_point_ic_no_land_mask_requires_opt_out(tmp_path):
+    """A finidat with no land_mask cannot honour require_land -> fail loud, and
+    require_land=False is the explicit opt-out."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=np.zeros(2),
+                       lon_deg=np.array([0.0, 1.0]), drop_land_mask=True)
+    with pytest.raises(ValueError, match="no 'land_mask'"):
+        load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+    _c, _phi, match = load_finidat_carbon_ic_at_point(
+        p, 0.0, 0.0, require_land=False)
+    assert match.index == 0
+
+
+def test_point_ic_legacy_finidat_without_phi(tmp_path):
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=np.zeros(2),
+                       lon_deg=np.array([0.0, 1.0]), with_phi=False)
+    _c, phi, _m = load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+    assert phi is None
+
+
+def test_point_ic_reports_the_spinup_soil_column(tmp_path):
+    """The match carries the soil column the pools were spun up on, so a caller
+    can compare it against its own grid (the pools have no vertical dimension,
+    so a difference is a consistency warning, not a load failure)."""
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=np.zeros(2),
+                       lon_deg=np.array([0.0, 1.0]))
+    _c, _phi, match = load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+    # _write_finidat stores no geometry -> None, never a fabricated default.
+    assert match.n_layers is None and match.soil_depth_m is None
+
+    import numpy as _np
+    with _np.load(p, allow_pickle=True) as z:
+        d = {k: z[k] for k in z.files}
+    d["n_layers"] = _np.asarray(10)
+    d["soil_depth"] = _np.asarray(3.0)
+    p2 = tmp_path / "gcic_geom.npz"
+    _np.savez(p2, **d)
+    _c2, _phi2, m2 = load_finidat_carbon_ic_at_point(p2, 0.0, 0.0)
+    assert m2.n_layers == 10
+    npt.assert_allclose(m2.soil_depth_m, 3.0)
+
+
+def test_point_ic_reports_the_cells_dominant_cover(tmp_path):
+    """A finidat cell is a PFT MIXTURE; the match surfaces which cover dominates
+    it (and by how much) so a single-veg_type point run can see the mismatch."""
+    import numpy as _np
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 2, lat_deg=_np.zeros(2),
+                       lon_deg=_np.array([0.0, 1.0]))
+    with _np.load(p, allow_pickle=True) as z:
+        d = {k: z[k] for k in z.files}
+    d["dominant_pft"] = _np.array([2, 1])
+    d["pft_names"] = _np.array(["bare_soil", "c3_grass", "broadleaf"], dtype="<U40")
+    w = _np.zeros((2, 3)); w[0, 2] = 0.6; w[0, 1] = 0.4; w[1, 1] = 1.0
+    d["pft_weights"] = w
+    p2 = tmp_path / "gcic_pft.npz"
+    _np.savez(p2, **d)
+
+    _c, _phi, m = load_finidat_carbon_ic_at_point(p2, 0.0, 0.0)
+    assert m.index == 0
+    assert m.dominant_pft == "broadleaf"
+    npt.assert_allclose(m.dominant_pft_weight, 0.6)
+    # A finidat without the cover fields reports None, never a fabricated cover.
+    _c2, _phi2, m2 = load_finidat_carbon_ic_at_point(p, 0.0, 0.0)
+    assert m2.dominant_pft is None and m2.dominant_pft_weight is None
+
+
+def test_point_ic_misaligned_selection_array_raises(tmp_path):
+    """A finidat whose lat/land_mask length disagrees with the pools would make
+    the nearest-cell pick index a DIFFERENT column -- fail loud instead."""
+    import numpy as _np
+    from legoesm.land.carbon.global_init import load_finidat_carbon_ic_at_point
+    p = _write_finidat(tmp_path / "gcic.npz", 4, lat_deg=_np.zeros(4),
+                       lon_deg=_np.arange(4.0))
+    with _np.load(p, allow_pickle=True) as z:
+        d = {k: z[k] for k in z.files}
+    d["lat"] = _np.zeros(3)          # 3 coords vs 4 pool cells
+    p2 = tmp_path / "gcic_bad.npz"
+    _np.savez(p2, **d)
+    with pytest.raises(ValueError, match="different cells"):
+        load_finidat_carbon_ic_at_point(p2, 0.0, 0.0)

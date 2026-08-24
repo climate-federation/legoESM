@@ -74,6 +74,7 @@ class CampaignConfig(NamedTuple):
     sota_csv: str | None
     metric: str
     smoke: bool
+    resume: bool = False
 
 
 def _parse_csv_ints(s, name):
@@ -154,6 +155,11 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
                    help="Scorecard metric to plot.")
     p.add_argument("--smoke", action="store_true",
                    help="Tiny wiring check: forwards --smoke to the trainer.")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue each family from its last completed epoch "
+                        "(parameters, optimizer state and trainable set). The "
+                        "self-chaining SLURM wrapper passes this on every link "
+                        "after the first.")
     p.add_argument("--allow-missing-artifacts", action="store_true",
                    dest="allow_missing_artifacts",
                    help="Do not fail the campaign when a requested eval finds no "
@@ -202,6 +208,7 @@ def build_campaign_config_from_args(argv=None) -> CampaignConfig:
         sota_csv=(a.sota_csv or None),
         metric=a.metric,
         smoke=a.smoke,
+        resume=a.resume,
     )
 
 
@@ -221,11 +228,13 @@ def build_train_argv(cfg: CampaignConfig, mode: str) -> list:
         "--mode", mode,
         "--training-core", cfg.training_core,
         "--out", mode_out_dir(cfg.out_root, mode),
-        # NOTE: no --resume. train_weatherbench_scale parses the flag but never
-        # acts on it (no checkpoint restore), so passing it advertised a
-        # restart-chaining contract the trainer does not honor. Omit until the
-        # trainer implements resume; a restart currently retrains from scratch.
     ]
+    # The trainer now honours --resume: it restores the parameters, the
+    # optimizer state and the frozen-leaf list from the last completed epoch.
+    # Without it a chained link restarts at epoch 0, which is what made a
+    # multi-link run silently repeat its first epochs forever.
+    if cfg.resume:
+        argv += ["--resume"]
     if cfg.n_epochs is not None:
         argv += ["--epochs", str(cfg.n_epochs)]
     if cfg.smoke:
@@ -301,8 +310,8 @@ def run_campaign(cfg: CampaignConfig):
 
     log = logging.getLogger("wb_campaign")
 
-    import train_weatherbench_scale as trainer
     import run_weatherbench_eval as evaler
+    import train_weatherbench_scale as trainer
 
     def _train(mode):
         trainer.main(build_train_argv(cfg, mode))

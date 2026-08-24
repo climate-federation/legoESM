@@ -976,7 +976,7 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
-def _make_jax_step(ctx):
+def _make_jax_step(ctx, jit=False):
     """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
 
     The scoring below is ~400 lines that read six per-face NumPy dicts
@@ -1003,6 +1003,7 @@ def _make_jax_step(ctx):
     from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
 
     jctx = build_jax_duo_stepper_context(ctx)
+    _cache: dict = {}
 
     def _stack(per_face, key=None):
         # jnp, not np: the module indexes these with `.at[...]`, which a
@@ -1025,7 +1026,32 @@ def _make_jax_step(ctx):
         jq = [_jnp.asarray(_np.stack([_np.asarray(q_in[t][iq])
                                       for t in range(6)]))
               for iq in range(_nq)]
-        out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+        if jit:
+            # THE PATH THE MODEL ACTUALLY RUNS. `FV3DuoDynamicsModel` steps
+            # through the COMPILED builder, and compilation is not neutral
+            # here -- fused multiply-adds and reassociation can flip an
+            # upwind selector bit, which is the class of difference this
+            # port already had to unroll a scan to remove. Scoring the eager
+            # function therefore scored a lane nobody deploys.
+            _dyn = {k: kw.pop(k) for k in ("bdt", "omga", "nh") if k in kw}
+            # Key the compiled fn by the STATIC deck, not merely by presence:
+            # zvir / consv_te / sphum_index are baked into the jitted program
+            # (make_fv_dynamics_step_jit marks them static), so a moist/consv
+            # scored arm and its dry twin need DIFFERENT compiled functions.
+            # Caching one and reusing it would run the dry twin on the moist
+            # deck and silently invalidate the response gate. Array deck
+            # constants (ak/bk/ptop) are invariant across arms, so the scalar
+            # kwargs are a sufficient key.
+            _key = tuple(sorted(
+                (k, v) for k, v in kw.items()
+                if isinstance(v, (int, float, bool, str, type(None)))))
+            if _key not in _cache:
+                _static = dict(kw)
+                _cache[_key] = _jdyn.make_fv_dynamics_step_jit(
+                    jctx, _static.pop("km"), **_static)
+            out = _cache[_key](jstate, jpress, jq, **_dyn)
+        else:
+            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
 
         # Write back IN PLACE -- see the docstring.
         st = out["state"] if "state" in out else out
@@ -1194,7 +1220,17 @@ def main(argv=None):
                          "twins; the strip-copy halo exchanges stay NumPy in "
                          "both backends as assembly glue); the dynamics-only "
                          "arms keep refusing any deck whose physics is ON.")
+    ap.add_argument("--jit", action="store_true",
+                    help="run the COMPILED step, which is the one the model "
+                         "deploys. Off by default so the established score "
+                         "keeps its meaning; a parity claim about the "
+                         "shipped solver has to be measured with this ON, "
+                         "because compilation can reassociate arithmetic and "
+                         "flip a limiter branch. Ignored unless "
+                         "--backend jax.")
     args = ap.parse_args(argv)
+    if args.jit and args.backend != "jax":
+        raise SystemExit("--jit applies to --backend jax only")
     if args.max_rel is None:
         print("=== REPORT ONLY -- no --max-rel given; exit status 0 does NOT "
               "certify the residual. Pass --max-rel to gate. ===")
@@ -1688,7 +1724,7 @@ def main(argv=None):
     # (pt round-trips K -> theta_v -> K inside each call).
     step_fn = fv_dynamics_step
     if args.backend == "jax":
-        step_fn = _make_jax_step(ctx)
+        step_fn = _make_jax_step(ctx, jit=args.jit)
     for _step in range(args.n_steps):
         out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
                       k_split=args.k_split, n_split=args.n_split,

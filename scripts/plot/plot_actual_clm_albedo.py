@@ -99,7 +99,7 @@ def main():
     M._BULK_SCHEME = "most"
     data = M.load_training_data(args.npz, 100000, 0, args.days)
     cp = {k: jnp.asarray(v) for k, v in json.load(open(args.tuned)).items()}
-    _, A, _ = M.forward_ml(cp, data)
+    _, A, _, _ = M.forward_ml(cp, data)
     D = np.load(args.npz); nlat, nlon = D["lat"].size, D["lon"].size
     lidx = np.where((D["lsm"].reshape(nlat, nlon) > 0.5).ravel())[0]
     sub = np.random.default_rng(0).choice(lidx.size, min(100000, lidx.size), replace=False)

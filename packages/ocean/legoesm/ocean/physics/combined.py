@@ -215,7 +215,8 @@ def make_ocean_physics(
             constants_config=config.constants,
         ))
     if config.lateral_mixing.scheme != "none":
-        fns.append(make_lateral_mixing_physics(config.lateral_mixing))
+        fns.append(make_lateral_mixing_physics(
+            config.lateral_mixing, constants_config=config.constants))
     if config.surface_forcing.scheme != "none":
         fns.append(make_surface_forcing_physics(config.surface_forcing))
     # Physics-level bottom drag is deprecated — use the dynamics-level

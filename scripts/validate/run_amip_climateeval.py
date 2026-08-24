@@ -38,9 +38,24 @@ DEFAULT_REPORT_NAME = "climateeval_report.html"
 _MONTHLY_CMOR_TABLES = ("Amon", "Omon", "SImon", "Lmon", "Emon", "fx")
 
 
-def era5_only_suite_def(suite_def: list[Any]) -> list[Any]:
-    """Strip ``other_data`` (CMIP6 model comparisons) and force every
-    variable's ``reference_data`` to ``climateeval.data.ERA5Monthly``.
+def obs_only_suite_def(
+    suite_def: list[Any], force_reference: str | None = None
+) -> list[Any]:
+    """Strip ``other_data`` (CMIP6 model comparisons), optionally forcing one
+    reference dataset for every variable.
+
+    With ``force_reference=None`` (the default) each variable keeps the
+    reference the suite declares for it — CERES-EBAF for the TOA fluxes, GPCP
+    for ``pr``, ESACCI-CLOUD for the cloud fields, HadCRUT5 for ``tas``, ERA5
+    for the rest. That matters: forcing ERA5 everywhere silently DROPS every
+    variable ERA5 does not carry, and the local ERA5 tree has no
+    ``rsut``/``rlut``/``rsutcs``/``swcre``/``hfls``, i.e. the entire top-of-
+    atmosphere radiation budget went unscored ("No reference data available
+    for Variable(id='rsut'): skipping metrics calculation").
+
+    Pass ``force_reference="climateeval.data.ERA5Monthly"`` to restore the
+    single-reference behaviour when a like-for-like ERA5-only comparison is
+    what is wanted.
 
     A ClimateEval suite YAML is a list of diagnostic blocks, each with a
     ``variables`` list of per-variable settings dicts (some diagnostics
@@ -60,8 +75,8 @@ def era5_only_suite_def(suite_def: list[Any]) -> list[Any]:
         for var_settings in variables:
             if isinstance(var_settings, dict):
                 var_settings.pop("other_data", None)
-                if "reference_data" in var_settings:
-                    var_settings["reference_data"] = "climateeval.data.ERA5Monthly"
+                if force_reference and "reference_data" in var_settings:
+                    var_settings["reference_data"] = force_reference
     return suite_def
 
 
@@ -105,6 +120,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timerange", default="",
                          help="Variable timerange override, e.g. 19790101/19791231. "
                               "Empty = use the model output's own time span.")
+    parser.add_argument(
+        "--force-reference", default=None,
+        help="Override EVERY variable's reference dataset with this "
+             "climateeval.data class (e.g. climateeval.data.ERA5Monthly). "
+             "Default: keep each variable's suite-declared reference, so the "
+             "TOA fluxes score against CERES-EBAF instead of being dropped.")
     parser.add_argument("--fail-on-missing-data", action="store_true", default=False)
     parser.add_argument("--download-missing-data", action="store_true", default=False)
     parser.add_argument("--output-dir", required=True,
@@ -171,7 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         tmp_yml = Path(tempfile.mktemp(suffix=".yml"))
         try:
             with (suite_dir / f"{suite}.yml").open() as f:
-                suite_def = era5_only_suite_def(yaml.safe_load(f))
+                suite_def = obs_only_suite_def(
+                    yaml.safe_load(f), force_reference=args.force_reference
+                )
             with tmp_yml.open("w") as f:
                 yaml.dump(suite_def, f)
             Suite(

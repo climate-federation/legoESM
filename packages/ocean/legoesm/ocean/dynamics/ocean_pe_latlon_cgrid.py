@@ -1974,6 +1974,7 @@ def _bc_pv_flux(
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
     een_e3f_scheme="min",
+    een_metric_weighting="off",
     dz_ref=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
@@ -2000,6 +2001,14 @@ def _bc_pv_flux(
         raise ValueError(
             f"unknown een_e3f_scheme {een_e3f_scheme!r}; expected "
             f"'min' or 'nemo_avg'"
+        )
+    # Fail-early on an unknown EEN transport metric weighting (static config
+    # value). "off" is the per-unit-width form this operator has always used;
+    # "nemo" supplies dyn_vor's e1v/e1u (and e2u/e2v) scale factors.
+    if een_metric_weighting not in ("off", "nemo"):
+        raise ValueError(
+            f"unknown een_metric_weighting {een_metric_weighting!r}; expected "
+            f"'off' or 'nemo'"
         )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
@@ -2234,11 +2243,23 @@ def _bc_pv_flux(
                     vertex_coriolis,
                 )
                 _f_vtx_al = vertex_coriolis(grid)
+            # NEMO vor_een weights the transport by the neighbour face width
+            # and normalises by the local one (dynvor.F90:791-792, :804-806).
+            # The same weighting the barotropic EEN Coriolis already applies
+            # under barotropic_coriolis="een_metric"
+            # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
+            # baroclinic path's selector for it. "off" is bit-identical.
+            _mw = None
+            if een_metric_weighting == "nemo":
+                from legoesm.grids.latlon import ensure_geometry
+                _g = ensure_geometry(grid)
+                _mw = (_g.dx_u, _g.dx_v, _g.dy_u, _g.dy_v)
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
+                metric_widths=_mw,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -2673,6 +2694,37 @@ def _bc_horizontal_viscosity(
         # No-op when slope_foot_alpha = 0 (factors are 1.0 scalars).
         return t_u * _slope_E_u, t_v * _slope_E_v
 
+    _lv_prof = config.lateral_viscosity.A_h_lat_profile
+    if _lv_prof is not None:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0:
+            raise ValueError(
+                "A_h_lat_profile and A_h_eq_boost are both equatorial "
+                "shapings of A_h and would silently multiply; set exactly "
+                "one.")
+        _prof_u = jnp.asarray(_lv_prof, dtype=grid.lat.dtype)
+        if _prof_u.shape[0] != grid.lat.shape[0]:
+            raise ValueError(
+                f"A_h_lat_profile has {_prof_u.shape[0]} entries but the "
+                f"grid has {grid.lat.shape[0]} latitude rows.")
+        _prof_v = jnp.concatenate([
+            _prof_u[:1], 0.5 * (_prof_u[:-1] + _prof_u[1:]), _prof_u[-1:]])
+    else:
+        _prof_u = _prof_v = None
+
+    def _floor_after_reduction(s_u, s_v):
+        # codex 9430935 MAJOR-2: an equatorial REDUCTION (A_h_eq_boost < 1)
+        # must not undercut the documented minimum effective viscosity
+        # (A_h_floor).  Applied ONLY in the boost<1 regime so every
+        # historical (boost>=1) config stays bit-identical -- there the
+        # composed scale already sits above the floored cos scaling.
+        _lv = config.lateral_viscosity
+        _has_reduction = (_lv.A_h_eq_boost < 1.0
+                          or _lv.A_h_lat_profile is not None)
+        if _has_reduction and _lv.A_h_floor > 0.0 and _lv.A_h > 0:
+            _fr = _lv.A_h_floor / _lv.A_h
+            return jnp.maximum(s_u, _fr), jnp.maximum(s_v, _fr)
+        return s_u, s_v
+
     # Lateral A_h-viscosity OPERATOR dispatch (dispatch discipline: unknown ->
     # ValueError). "flux_divergence" = Veros's component-wise harmonic friction
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
@@ -2727,7 +2779,8 @@ def _bc_horizontal_viscosity(
         # DELIBERATELY IGNORED here (NEMO owns the cos φ shape through MAX(e1,e2));
         # eq-boost / cap-boost / floor / B_h instead RAISE below (they would silently
         # double-scale or be silently dropped — vector-Laplacian extensions, not NEMO's).
-        if (config.lateral_viscosity.A_h_eq_boost > 1.0
+        if (config.lateral_viscosity.A_h_eq_boost != 1.0
+                or config.lateral_viscosity.A_h_lat_profile is not None
                 or config.lateral_viscosity.A_h_cap_boost > 1.0
                 or config.lateral_viscosity.A_h_floor > 0.0):
             raise ValueError(
@@ -2804,7 +2857,7 @@ def _bc_horizontal_viscosity(
         # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
         # of Veros's harmonic friction, so reject those combinations rather than
         # silently ignoring them (they would change answers without effect here).
-        if config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0 or config.lateral_viscosity.A_h_lat_profile is not None or config.lateral_viscosity.A_h_cap_boost > 1.0 or config.lateral_viscosity.A_h_floor > 0.0:
             raise ValueError(
                 "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
                 "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
@@ -2874,35 +2927,45 @@ def _bc_horizontal_viscosity(
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
+            if _prof_u is not None:
+                lap_scale_u = lap_scale_u * _prof_u
+                lap_scale_v = lap_scale_v * _prof_v
             if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
                     grid, config.lateral_viscosity.A_h_cap_lat_deg,
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
+            lap_scale_u, lap_scale_v = _floor_after_reduction(lap_scale_u, lap_scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
+        elif (config.lateral_viscosity.A_h_eq_boost != 1.0
+              or config.lateral_viscosity.A_h_lat_profile is not None
+              or config.lateral_viscosity.A_h_cap_boost > 1.0):
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
+            if _prof_u is not None:
+                scale_u = scale_u * _prof_u
+                scale_v = scale_v * _prof_v
             if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
                     grid, config.lateral_viscosity.A_h_cap_lat_deg,
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
+            scale_u, scale_v = _floor_after_reduction(scale_u, scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * _vlap_v
             if _want_kdiss_flux:
@@ -2939,35 +3002,45 @@ def _bc_horizontal_viscosity(
             _floor = config.lateral_viscosity.A_h_floor / config.lateral_viscosity.A_h if config.lateral_viscosity.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
                 grid, power=config.lateral_viscosity.A_h_cos_power, floor=_floor)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 lap_scale_u = lap_scale_u * eb_u
                 lap_scale_v = lap_scale_v * eb_v
+            if _prof_u is not None:
+                lap_scale_u = lap_scale_u * _prof_u
+                lap_scale_v = lap_scale_v * _prof_v
             if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
                     grid, config.lateral_viscosity.A_h_cap_lat_deg,
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 lap_scale_u = lap_scale_u * cap_u
                 lap_scale_v = lap_scale_v * cap_v
+            lap_scale_u, lap_scale_v = _floor_after_reduction(lap_scale_u, lap_scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * lap_scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
                 _ah_scale_center = config.lateral_viscosity.A_h * lap_scale_u
-        elif config.lateral_viscosity.A_h_eq_boost > 1.0 or config.lateral_viscosity.A_h_cap_boost > 1.0:
+        elif (config.lateral_viscosity.A_h_eq_boost != 1.0
+              or config.lateral_viscosity.A_h_lat_profile is not None
+              or config.lateral_viscosity.A_h_cap_boost > 1.0):
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
-            if config.lateral_viscosity.A_h_eq_boost > 1.0:
+            if config.lateral_viscosity.A_h_eq_boost != 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.lateral_viscosity.A_h_eq_sigma_deg, config.lateral_viscosity.A_h_eq_boost)
                 scale_u = scale_u * eb_u
                 scale_v = scale_v * eb_v
+            if _prof_u is not None:
+                scale_u = scale_u * _prof_u
+                scale_v = scale_v * _prof_v
             if config.lateral_viscosity.A_h_cap_boost > 1.0:
                 cap_u, cap_v = polar_cap_boost_factor(
                     grid, config.lateral_viscosity.A_h_cap_lat_deg,
                     config.lateral_viscosity.A_h_cap_boost, config.lateral_viscosity.A_h_cap_width_deg)
                 scale_u = scale_u * cap_u
                 scale_v = scale_v * cap_v
+            scale_u, scale_v = _floor_after_reduction(scale_u, scale_v)
             diag_Ah_lap_u = config.lateral_viscosity.A_h * scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.lateral_viscosity.A_h * scale_v[:, None, None] * vlap_v
             if _want_kdiss_flux:
@@ -3006,6 +3079,16 @@ def _bc_horizontal_viscosity(
             f"got {_side_bc!r}"
         )
     if _side_bc == "no_slip" and config.lateral_viscosity.A_h > 0:
+        if config.lateral_viscosity.A_h_eq_boost != 1.0:
+            # codex 9430935 MAJOR-3: the side-drag takes a SCALAR A_h and
+            # would silently ignore the equatorial shaping -- refuse rather
+            # than run two different viscosities under one name.  (The
+            # pre-existing lat-scaling inconsistency of this term is
+            # documented above; the new shaping must not extend it.)
+            raise ValueError(
+                'lateral_side_bc="no_slip" does not support A_h_eq_boost '
+                "!= 1 (the wall side-drag would keep the unshaped A_h); "
+                "use free_slip or leave the equatorial shaping off.")
         du_drag, dv_drag = no_slip_sidedrag_cgrid(
             u, v, grid, config.lateral_viscosity.A_h, u_mask=u_mask, v_mask=v_mask, mask=mask)
         du_drag, dv_drag = _apply_slope_foot(du_drag, dv_drag)
@@ -4109,6 +4192,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_e3f_scheme=config.een_e3f_scheme,
+            een_metric_weighting=getattr(
+                config, "een_metric_weighting", "off"),
             dz_ref=z_coord.dz_ref,
         )
 

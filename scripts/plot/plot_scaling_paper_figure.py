@@ -39,7 +39,10 @@ SOURCES = {
                 "ragged A/B 26824483 (s8@16) + 26825520 (s9@32), "
                 "s8 np32-128 26549646/26538474, s9 26600095, "
                 "s8-lloyd0 26628076, s10@128 26677812, "
-                "size-colouring A/B 26857404 (s9@64 8.11 ms), ladder 26859802",
+                "size-colouring A/B 26857404 (s9@64 8.11 ms), ladder 26859802, "
+                "wide-halo A/B 26880593 (s9@64 8.13→6.98), "
+                "METIS A/B 26885812 (s9@32 10.44/10.62→9.26/9.59), "
+                "s10@128 baseline 26892202/26896489 (12.78/12.54/12.83)",
     "atm_ico_cpu": "26495083 (f32), 26495437 (f64) — both block:cyclic; "
                    "lat-lon 2-D r512 26628073",
     "oc_latlon": "26460444-501/26460365/26493592, LL2304@96/128 26646038/26646039, fused A/B 26692291",
@@ -57,10 +60,22 @@ PANELS = [
                 ("f32 (LL2304)", [(96, 7.87), (144, 5.78)]),
                 ("f32 LL2048 fused+ovl", [(64, 5.278), (128, 4.745)]),
                 ("f32 LL2048 packed exch", [(128, 4.527)]),
+                # 2^n ladder 2026-08-18/19 (jobs 27051xxx), best env
+                # (packed exch + overlap + mcp2p), 60-step blocks:
+                ("f32 LL2048 ladder (best env)",
+                 [(1, 201.48), (2, 110.92), (4, 55.40), (8, 27.72),
+                  (16, 14.26), (32, 6.98), (64, 4.74), (128, 3.96)]),
+                ("f32 LL4096 ladder (best env)",
+                 [(4, 222.76), (8, 111.85), (16, 55.97), (32, 29.27),
+                  (64, 16.24), (128, 9.33)]),
                 ],
         scatter=[("LL1536 @64", 64, 4.97), ("LL2048 f64 @128", 128, 9.60),
-                 ("LL2880 @144", 144, 7.40)],
-        note="packed exchange @128 GPUs: −11.8%\n(5.131→4.527 ms, 25→13 CPs/step,\njob 26891278) — new LL2048 best",
+                 ("LL2880 @144", 144, 7.40),
+                 # 27036060: first atm 192-GPU point, 63.98 GC/s (lane best).
+                 # LL2304@192 (12-row bands) deadlocks NCCL init — thin-band
+                 # trigger, 7 env candidates refuted; >=15-row bands run.
+                 ("LL2880 @192", 192, 6.74)],
+        note="packed exchange @128: −11.8 %\n(25→13 collectives/step)\nLL4096 ladder: 87 % eff @128, 93.5 GC/s",
     ),
     dict(
         key="atm_cube", title="cubed-sphere", sub="C384/C768 L60 · A100 NCCL",
@@ -73,15 +88,33 @@ PANELS = [
         series=[("f32 (s8 · lloyd-50)", [(2, 19.90), (4, 14.12), (8, 6.92),
                                          (16, 7.10), (32, 8.13), (64, 5.27),
                                          (128, 6.47)]),
-                ("float32 (subdiv-9)", [(32, 12.47), (64, 9.60), (128, 11.48)]),
-                ("f32 (s8 lloyd-0)", [(8, 6.58), (16, 6.43), (32, 7.29)]),
-                ("f32 (s10 lloyd-0)", [(128, 18.20)]),
-                ("f32 s8@16+s9@32 ragged", [(16, 4.86), (32, 9.78)]),
-                ("f32 s8+s9 size-colouring", [(16, 5.65)]),
-                ("f32 s9 size-colouring", [(16, 21.22), (32, 10.52), (64, 8.40)]),
-                ("f32 s10 size-colouring", [(128, 17.01)]),
+                ("f32 s9 · step 0 (baseline)",
+                 [(32, 12.47), (64, 9.60), (128, 11.48)]),
+                ("f32 s9 · step 1 (size-colouring)",
+                 [(16, 21.22), (32, 10.52), (64, 8.40)]),
+                ("f32 s9 · step 2 (METIS + wide halo)",
+                 [(32, 9.26), (64, 6.98)]),
+                # step 3: NCCL multi-channel p2p env pair
+                # (MIN/MAX_NCHANNELS=8 + P2P_NET_CHUNKSIZE=131072), wide
+                # halo, sfc — CONFIRMED jobs 26999539 + 27002564
+                # (5.87/5.88 replicated vs same-job base 7.18/7.26).
+                ("f32 s9 · step 3 (NCCL mcp2p)", [(64, 5.87)]),
+                # step 4: ragged_all_to_all halo (2 collectives/fill,
+                # 27040575 ratio 0.933 vs coloured) + mcp2p pair —
+                # 27041921: 5.70/5.75 vs same-job ragged base 6.26/6.17.
+                ("f32 s9 · step 4 (ragged + mcp2p)", [(64, 5.73)]),
+                # 2^n ladder 2026-08-18/19, best env (wide + ragged +
+                # mcp2p), 60-step blocks; s9@64 5.74 reproduces step 4:
+                ("f32 s9 ladder (best env)",
+                 [(1, 173.84), (2, 81.76), (4, 42.03), (8, 23.06),
+                  (16, 19.16), (32, 7.20), (64, 5.74), (128, 5.09)]),
+                ("f32 s10 ladder (best env)",
+                 [(2, 264.56), (4, 117.91), (8, 87.60), (16, 37.51),
+                  (32, 19.95), (64, 15.91), (128, 8.57)]),
+                ("f32 s10 · now (was 18.20)", [(128, 12.54), (192, 10.57)]),
                 ("float64 (subdiv-8)", [(2, 38.34), (4, 20.09), (8, 18.98)])],
-        note="size-colouring: −12 to −20% everywhere;\nweak matched-tile 1.49×/4× (s8@16 5.65,\ns9@64 8.40); s10@128 rec 16.03 GC/s",
+        scatter=[("s10 2026-06", 128, 18.20)],
+        note="each step is an A/B receipt:\nsize-colouring −12…−20 %, METIS −10.5 %,\nwide halo −14.1 %, NCCL mcp2p −13…−18 %,\nragged 2-collective halo −8 %",
     ),
     dict(
         key="atm_ico_cpu", title="ico + lat-lon 2-D", sub="subdiv-7 / r512 L26 · Milan CPU–MPI",
@@ -136,12 +169,16 @@ COLORS = {"float32": "#0072B2", "float64": "#D55E00",
           "f64 lat-lon 2-D (r512)": "#CC79A7",
           "f32 (s8 lloyd-0)": "#009E73",
           "f32 (s10 lloyd-0)": "#000000",
+          "f32 s9 · step 3 (NCCL mcp2p)": "#009E73",
           "f32 (LL2304)": "#CC79A7",
           "f32 LL2048 fused+ovl": "#000000",
           "f32 LL2048 packed exch": "#E31A1C",
           "f32 LL2304 fused": "#000000",
           "f32 s8@16+s9@32 ragged": "#000000",
-          "f32 s9 size-colouring": "#D62728",
+          "f32 s9 · step 0 (baseline)": "#56B4E9",
+          "f32 s9 · step 1 (size-colouring)": "#D62728",
+          "f32 s9 · step 2 (METIS + wide halo)": "#E31A1C",
+          "f32 s10 · now (was 18.20)": "#7B3294",
           "f32 s8+s9 size-colouring": "#2CA02C",
           "f32 (s8 · lloyd-50)": "#0072B2", "float32 (subdiv-9)": "#56B4E9",
           "float64 (subdiv-7)": "#D55E00", "float64 (subdiv-8)": "#E69F00",
@@ -154,14 +191,17 @@ MARKERS = {"float32": "o", "float64": "s", "mixed (f64 store)": "D",
            "f64 lat-lon 2-D (r512)": "D",
            "f32 (s8 lloyd-0)": "v",
            "f32 (s10 lloyd-0)": "*",
+           "f32 s9 · step 3 (NCCL mcp2p)": "P",
            "f32 (LL2304)": "^",
            "f32 LL2048 fused+ovl": "*",
            "f32 LL2048 packed exch": "P",
            "f32 LL2304 fused": "*",
            "f32 s8@16+s9@32 ragged": "*",
-           "f32 s9 size-colouring": "X",
+           "f32 s9 · step 0 (baseline)": "^",
+           "f32 s9 · step 1 (size-colouring)": "X",
+           "f32 s9 · step 2 (METIS + wide halo)": "P",
+           "f32 s10 · now (was 18.20)": "P",
            "f32 s8+s9 size-colouring": "X",
-           "f32 s10 size-colouring": "X",
            "f32 (s8 · lloyd-50)": "o", "float32 (subdiv-9)": "^",
            "float64 (subdiv-7)": "s", "float64 (subdiv-8)": "v",
            "FESOM2 native (CORE2 ref)": "P"}

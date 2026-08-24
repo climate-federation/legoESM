@@ -81,6 +81,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.les_suite.scm_coupling import liquid_water_theta  # noqa: E402
+
+
+def _record_theta_l(st, ref):
+    """The 3D liquid-water potential temperature θ_l field to RECORD as the moist LES's
+    thermodynamic truth. The spectral moist LES prognoses ACTUAL θ (``state.theta``; the IC
+    saturation-adjusts θ_l→θ), so θ_l must be DERIVED from θ and the LES's own cloud liquid
+    q_c (tracer slot 1) for the artifact — otherwise the score would compare LES θ to SCM θ_l.
+    q_c only (not q_r), matching the SCM reduction in ``scm_final_moist_on``."""
+    exner = np.asarray(ref.exner_c)[None, None, :]
+    return np.asarray(liquid_water_theta(
+        np.asarray(st.theta), np.asarray(st.tracers[..., 1]), exner))
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
@@ -246,7 +258,11 @@ def parse_args():
                         "hydrometeor tracers remain unfiltered.")
     p.add_argument("--print-every", type=int, default=500)
     p.add_argument("--record-frames", type=int, default=12)
-    p.add_argument("--case-label", type=str, default="bomex")
+    p.add_argument("--emit-suite-artifact", type=Path, default=None,
+                   help="after the run, assemble the les_record prof_NNN.npz series into a "
+                        "moist LESReferenceArtifact (bridge format) at this path for the "
+                        "SCM-tuning suite. Requires --record-frames > 0.")
+    p.add_argument("--case-label", type=str, default="bomex_cu")
     p.add_argument("--output", type=Path, default=Path("results/les_bomex"))
     return p.parse_args()
 
@@ -345,6 +361,64 @@ def build(args, dtype):
                 tls=jnp.asarray(tls, dtype), qls=jnp.asarray(qls, dtype),
                 th_flux=th_flux, qv_flux=qv_flux, sfc=sfc0)
     return g, st, ref, forc, th_prof
+
+
+def _emit_suite_artifact(args, forc, out_path):
+    """Assemble a moist ``LESReferenceArtifact`` from the les_record ``prof_NNN.npz`` series.
+
+    The suite's SCM tuner consumes this self-describing artifact: the truth profiles (θ_l, q_t,
+    u, v) + resolved fluxes ⟨w'θ_l'⟩/⟨w'q_t'⟩ from the prof series, AND the exact forcing the
+    LES received (surface kinematic fluxes, Coriolis + geostrophic wind, large-scale
+    subsidence + advective tendencies) from ``forc`` — so the SCM and LES share byte-identical
+    forcing (the controlled-comparison rule). ``theta`` in the moist prof IS θ_l — DERIVED at
+    record time from the LES's prognostic actual θ and its cloud liquid q_c (``_record_theta_l``;
+    the spectral moist LES prognoses θ, not θ_l), so it matches the SCM's θ_l. Signs follow the
+    artifact convention (fluxes +up; subsidence_w +up).
+    """
+    from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
+        LESReferenceArtifact, save_artifact)
+    prof_dir = Path(args.output) / "profiles"
+    files = sorted(prof_dir.glob("prof_*.npz"))
+    if not files:
+        raise SystemExit(
+            "[emit-suite-artifact] no prof_*.npz in "
+            f"{prof_dir} — run with --record-frames > 0")
+    frames = [np.load(f) for f in files]
+    z = np.asarray(frames[0]["z"], np.float64)
+    times = np.array([float(f["t_hours"]) * 3600.0 for f in frames], np.float64)
+
+    def stack(key):
+        return np.stack([np.asarray(f[key], np.float64) for f in frames])  # (nt, nz)
+
+    nt = len(frames)
+    wtheta = stack("wtheta")
+    wqt = stack("wqt")
+    # LASD dynamic SGS (``--dynamic``, default on) overrides the static ``--sgs-model``;
+    # label the artifact with what actually ran so it matches the CBL/SBL sgs variants.
+    sgs = "lasd" if getattr(args, "dynamic", False) else args.sgs_model
+    art = LESReferenceArtifact(
+        case_name=args.case_label, sgs=sgs,
+        heights_m=z, times_s=times,
+        theta=stack("theta"),                 # θ_l for the moist prognostic
+        u=stack("u"), v=stack("v"),
+        wtheta_resolved=wtheta, wtheta_sgs=np.zeros_like(wtheta),
+        qt=stack("qt"),
+        # Cloud water, so a consumer can tell a cloudy start from a clear one
+        # without guessing from saturation; absent for a run that carried none.
+        qc=(stack("qc") if "qc" in frames[0] else None),
+        wqt_resolved=wqt, wqt_sgs=np.zeros_like(wqt),
+        prescribe="fluxes",
+        w_theta_s=np.full(nt, float(forc["th_flux"]), np.float64),
+        w_qv_s=np.full(nt, float(forc["qv_flux"]), np.float64),
+        f_c=float(_FCOR),
+        u_geo=np.asarray(forc["ug"], np.float64),
+        v_geo=np.asarray(forc["vg"], np.float64),
+        subsidence_w=np.asarray(forc["w_ls"], np.float64),
+        theta_adv=np.asarray(forc["tls"], np.float64),
+        qv_adv=np.asarray(forc["qls"], np.float64))
+    save_artifact(art, out_path)
+    print(f"[emit-suite-artifact] moist LESReferenceArtifact "
+          f"({nt} frames, nz={len(z)}, sgs={sgs}) -> {out_path}", flush=True)
 
 
 def make_forcing_fn(g, ref, forc, dtype):
@@ -517,7 +591,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
             les_record.record_frame(
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
-                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c),
@@ -779,10 +853,11 @@ def main():
             les_record.record_frame(
                 args.output, frame, t_hours, args.case_label, zc_np,
                 np.asarray(st.u), np.asarray(st.v), np.asarray(sl.f2c(st.w)),
-                np.asarray(st.theta), args.Lx, args.Ly, h_idx, h_z, args.z0,
+                _record_theta_l(st, ref), args.Lx, args.Ly, h_idx, h_z, args.z0,
                 qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
-                rho_z=np.asarray(ref.rho_c))
+                rho_z=np.asarray(ref.rho_c),
+                qr3=np.asarray(st.tracers[..., 2]))
             frame += 1
             _last_rec_h[0] = t_hours
 
@@ -843,6 +918,8 @@ def main():
           f"LWP={d['lwp']:.2f} inst / {lwp_avg:.2f} mean g/m² (ref ~5-10), "
           f"qc_max={d['qc'].max():.2e}")
     print(f"  profiles -> {args.output}/bomex_les_final.npz")
+    if args.emit_suite_artifact is not None:
+        _emit_suite_artifact(args, forc, args.emit_suite_artifact)
     return 0
 
 

@@ -179,3 +179,9 @@ data/*
 !data/les_cases/**/
 !data/les_cases/**
 e3sm-source/
+
+# Published DEPHY-format case files, downloaded by
+# scripts/data/fetch_dephy_cases.py from the groups that publish them. NOT
+# vendored: the transition composites are 36 MB each, and provenance belongs
+# upstream. The gSAM decks above stay tracked; these do not.
+data/les_cases/dephy/

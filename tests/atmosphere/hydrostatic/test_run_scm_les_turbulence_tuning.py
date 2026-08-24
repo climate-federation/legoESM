@@ -45,11 +45,26 @@ def test_scheme_list_matches_the_dispatch():
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
 def test_every_scheme_builds_a_config(scheme):
+    """Only turbulence varies. Microphysics is ON -- and identical across arms.
+
+    This used to assert microphysics was "none" along with everything else.
+    That was the old default, and it meant the single column could not
+    condense: no liquid, no condensation buoyancy, and no cloud for the
+    stratocumulus cases' longwave to cool from. What the comparison actually
+    requires is that the non-turbulence components do not VARY between arms,
+    not that they are switched off, so that is what is asserted.
+    """
     cfg = drv.build_physics_config(scheme, prescribed_fluxes=False)
     assert cfg.turbulence.scheme == scheme
-    for other in ("radiation", "convection", "microphysics",
-                  "gravity_wave_drag"):
+    for other in ("radiation", "convection", "gravity_wave_drag"):
         assert getattr(cfg, other).scheme == "none"
+    assert cfg.microphysics.scheme == "morrison", (
+        "condensation must be on by default; a dry column is a different "
+        "regime from the LES it is scored against")
+    reference = drv.build_physics_config(drv.TURBULENCE_SCHEMES[0],
+                                         prescribed_fluxes=False)
+    assert cfg.microphysics == reference.microphysics, (
+        "microphysics must not depend on the turbulence scheme")
 
 
 @pytest.mark.parametrize("scheme", drv.TURBULENCE_SCHEMES)
@@ -97,19 +112,47 @@ def test_prescribed_fluxes_zero_the_bulk_heat_coefficient(scheme):
 
 # --- confounded cases are refused, not silently scored ----------------------
 
-def test_dycoms_is_refused_for_a_radiation_mismatch():
-    assert "dycoms" in drv._RADIATION_MISMATCH
-    with pytest.raises(SystemExit, match="Stevens"):
-        drv.main(["--case", "dycoms", "--les-dir", "/nonexistent"])
+def test_dycoms_is_matched_by_simple_lw_rather_than_refused():
+    """DYCOMS WAS refused; it is not any more, and the reason must be real.
+
+    Both stratocumulus decks set ``dolongwave = .true., doradsimple = .true.``
+    and the SCM now selects the same Stevens (2005) kernel, so the case is
+    matched instead of confounded and ``_RADIATION_MISMATCH`` is empty. The
+    old test asserted the refusal and went red when that landed; asserting the
+    RESOLUTION is what keeps it honest -- deleting `simple_lw` from the arm
+    config would put a radiation confound back without the refusal to catch it.
+    """
+    assert drv._RADIATION_MISMATCH == {}
+    # RF02's prm sets doradsimple too, so it joins its RF01 sibling here; if it
+    # did not, its SCM arm would run a different longwave from its LES.
+    assert {"dycoms", "rf02", "astex"} <= drv._SIMPLE_LW_CASES
+    for case in ("dycoms", "rf02", "astex"):
+        cfg = drv.build_physics_config(
+            "louis", prescribed_fluxes=True, simple_lw=True)
+        assert cfg.radiation.scheme == "simple_lw", (
+            f"{case} needs the LES's own longwave on the SCM side")
+    assert drv.build_physics_config(
+        "louis", prescribed_fluxes=True).radiation.scheme != "simple_lw", (
+        "a case that does NOT set doradsimple must not get the kernel")
 
 
-def test_dycoms_override_gets_past_the_refusal(tmp_path):
-    """--allow-radiation-mismatch must change the failure mode, not be a no-op."""
+def test_the_radiation_refusal_still_works_for_the_next_case(monkeypatch,
+                                                             tmp_path):
+    """The mechanism outlived its only instance, so it is tested with one.
+
+    The NEXT case whose LES applies a forcing the SCM cannot reproduce must be
+    refused rather than scored, and ``--allow-radiation-mismatch`` must change
+    the failure mode rather than being a no-op.
+    """
+    monkeypatch.setitem(drv._RADIATION_MISMATCH, "bomex", "SYNTHETIC mismatch")
+    with pytest.raises(SystemExit, match="SYNTHETIC mismatch"):
+        drv.main(["--case", "bomex", "--les-dir", "/nonexistent"])
     with pytest.raises(Exception) as excinfo:
-        drv.main(["--case", "dycoms", "--les-dir", str(tmp_path),
+        drv.main(["--case", "bomex", "--les-dir", str(tmp_path),
                   "--allow-radiation-mismatch"])
-    # it should now fail on the missing LES reference, not the refusal
-    assert "Stevens" not in str(excinfo.value)
+    assert "SYNTHETIC mismatch" not in str(excinfo.value), (
+        "the override must get past the refusal and fail on the missing "
+        "reference instead")
 
 
 def test_unknown_scheme_on_the_cli_is_a_hard_error():
@@ -367,26 +410,62 @@ def test_clubb_prognostic_can_be_disabled():
     assert cfg.turbulence.clubb.prognostic is False
 
 
-def test_unimplemented_clubb_params_are_named_and_real():
-    """Each listed parameter must exist on CLUBBParams (so the list cannot rot
-    into naming nonsense) AND appear nowhere in clubb.py as an attribute read.
+def test_unimplemented_clubb_params_are_derived_and_real():
+    """The dead set is DERIVED from the module now, not listed.
+
+    The hardcoded tuple this replaced named 13 of CLUBB's 29 dead tunables, so
+    16 reached the optimizer wired to nothing.
+
+    The FIRST derived version was itself inert: it stripped only the field
+    declaration, and ``__param_spec__`` names all 102 parameters in the same
+    file, so every one read as live and the set came back EMPTY. Hence the
+    non-emptiness assertion below -- an empty set is the exact failure this
+    check has already had once.
     """
-    import re
-    from pathlib import Path
     from legoesm.atmosphere.physics.turbulence.clubb import CLUBBParams
 
-    fields = set(CLUBBParams._fields)
-    src = Path(
-        "packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py"
-    ).read_text()
-    assert drv.CLUBB_UNIMPLEMENTED_PARAMS, "list should not be empty"
-    for name in drv.CLUBB_UNIMPLEMENTED_PARAMS:
-        assert name in fields, f"{name} is not a CLUBBParams field"
-        # an attribute read would look like `.name` / `params.name`
-        assert not re.search(rf"\.{re.escape(name)}\b", src), (
-            f"{name} IS read in clubb.py; it should be removed from "
-            "CLUBB_UNIMPLEMENTED_PARAMS"
-        )
+    dead = drv._dead_params_for("clubb")
+    assert len(dead) > 30, (
+        f"only {len(dead)} dead CLUBB parameters; the registry lists ~43, and "
+        "an empty or tiny set means the consumer scan is matching the spec "
+        "dict or the declaration again")
+    assert dead <= set(CLUBBParams._fields)
+
+
+def test_the_derived_set_catches_what_the_old_list_missed():
+    """NON-VACUITY, and the reason for the change.
+
+    These five are among the sixteen the hardcoded tuple omitted; the live
+    five must NOT be swept up, or the check would silently shrink the search
+    space instead of widening it.
+    """
+    dead = drv._dead_params_for("clubb")
+    for name in ("C_invrs_tau_wpxp_Ri", "z_displace", "xp3_coef_base",
+                 "C13", "omicron"):
+        assert name in dead, f"{name} should be detected as dead"
+    for name in ("beta", "c_K", "gamma_coef", "mu", "C8"):
+        assert name not in dead, f"{name} IS used by clubb.py"
+
+
+def test_the_dead_check_covers_every_scheme_not_just_clubb():
+    """It is not CLUBB-specific, and MYNN-2.5 has dead fields too.
+
+    ``C4`` is documented dead (NN09 sets it to zero and the port does not read
+    it) and ``tke_min`` is declared but unused. Both are already excluded from
+    ``__param_spec__``, so neither reaches the tuner -- but the check must SEE
+    them, or it is only ever going to notice CLUBB.
+    """
+    from legoesm.atmosphere.physics.turbulence import config as turb_config
+
+    assert drv._dead_params_for("mynn25") == {"C4", "tke_min"}
+    # Schemes whose every field is consumed must come back EMPTY -- the
+    # assertion that fails loudly if the resolver ever returns everything,
+    # which would silently freeze the whole model.
+    for scheme in ("ysu", "louis", "edmf", "holtslag_boville",
+                   "smagorinsky", "clubb_lite", "tke"):
+        got = drv._dead_params_for(scheme)
+        assert got == frozenset(), f"{scheme}: unexpected dead fields {got}"
+        assert turb_config is not None
 
 
 # --- surface layer: one derived config, identical on every arm --------------
@@ -622,12 +701,21 @@ def test_a_penalty_valued_candidate_is_never_accepted():
     """
     import inspect
     src = inspect.getsource(drv.tune_scheme_multicase)
-    i = src.index("cand_loss = float(loss_fn(cand))")
-    window = src[i:i + 700]
-    assert "cand_loss >= NONFINITE_PENALTY" in window, (
+    # Anchored on the symbols that RUN today. The earlier anchor was the
+    # string `cand_loss = float(loss_fn(cand))`, which the per-case rewrite
+    # deleted -- so the test raised ValueError on a missing substring instead
+    # of checking anything, which is a red gate that proves nothing.
+    reject = src.index("NONFINITE_PENALTY")
+    improve = src.index("cand_loss < loss_val")
+    assert reject < improve, (
         "the line search must reject a candidate at or above the penalty "
         "BEFORE the improvement test; otherwise a NaN rollout is accepted "
         "whenever the current loss exceeds the sentinel")
+    # PER CASE, not on the aggregate: the objective is a mean over cases, so
+    # one blown case among eight contributes ~1/8 of the penalty and never
+    # trips a test on the aggregate.
+    assert "cand_per_case.values()" in src[reject - 200:improve], (
+        "the penalty test must look at the per-case scores")
 
 
 def test_tuned_nonfinite_flag_reaches_the_result():
@@ -760,3 +848,750 @@ def test_safe_sqrt_still_returns_zero_for_nan():
     import jax.numpy as jnp
     from legoesm.training.scm_rce_metrics import safe_sqrt
     assert float(safe_sqrt(jnp.asarray(float("nan")))) == 0.0
+
+
+# --- profile capture: DEFAULT and TUNED both reach the npz ------------------
+
+def _profiles_arm(nlev: int = 5):
+    """The minimum CaseArm surface `_write_case_profiles` reads."""
+    import types
+    import numpy as _np
+    ref = types.SimpleNamespace(
+        mask=_np.ones(nlev, dtype=bool),
+        weights=_np.full(nlev, 1.0 / nlev),
+        z_les=_np.linspace(20.0, 3000.0, 8),
+        window_hours=(4.0, 6.0),
+        profiles={"theta": _np.linspace(300.0, 303.0, nlev)},
+        profiles_les={"theta": _np.linspace(300.0, 303.0, 8)},
+    )
+    case = types.SimpleNamespace(
+        z_full=_np.linspace(3000.0, 20.0, nlev),
+        p_full=_np.linspace(7.0e4, 1.0e5, nlev),
+    )
+    return types.SimpleNamespace(
+        name="bomex", case=case, reference=ref, scored=("theta",))
+
+
+def test_write_case_profiles_carries_both_parameter_states(tmp_path):
+    """The npz must hold the tuned profiles as well as the default ones.
+
+    Without the tuned family the per-case figure can only draw the STARTING
+    point of the fit, which is what made the earlier figure carry default
+    curves under a tuned legend order.
+    """
+    import numpy as _np
+    nlev = 5
+    arm = _profiles_arm(nlev)
+    default = {"louis": {"theta": _np.full(nlev, 300.0),
+                         "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                         "v": _np.zeros(nlev)}}
+    tuned = {"louis": {"theta": _np.full(nlev, 301.0),
+                       "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                       "v": _np.zeros(nlev)}}
+    drv._write_case_profiles(tmp_path, arm, default, tuned)
+
+    data = _np.load(tmp_path / "profiles_bomex.npz", allow_pickle=True)
+    assert "scm_louis_theta" in data.files
+    assert "scm_louis_tuned_theta" in data.files
+    # Distinguishable, so a plot cannot draw one and label it the other.
+    assert float(data["scm_louis_theta"][0]) == 300.0
+    assert float(data["scm_louis_tuned_theta"][0]) == 301.0
+
+
+def test_an_untuned_scheme_contributes_no_tuned_keys(tmp_path):
+    """An excluded/failed arm has no tuned rollout; the npz must say so by
+    OMITTING the key rather than by duplicating its default profile, which a
+    plotter would draw as 'tuning changed nothing'."""
+    import numpy as _np
+    nlev = 5
+    arm = _profiles_arm(nlev)
+    default = {"mynn25": {"theta": _np.full(nlev, 300.0),
+                          "qv": _np.zeros(nlev), "u": _np.zeros(nlev),
+                          "v": _np.zeros(nlev)}}
+    drv._write_case_profiles(tmp_path, arm, default, {})
+    data = _np.load(tmp_path / "profiles_bomex.npz", allow_pickle=True)
+    assert "scm_mynn25_theta" in data.files
+    assert "scm_mynn25_tuned_theta" not in data.files
+
+
+def test_scheme_result_declares_the_tuned_profile_slot():
+    """`main` copies this field off the tuning result; a rename that misses
+    one side would silently drop every tuned profile."""
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(drv.SchemeResult)}
+    assert "profiles_tuned" in fields
+
+
+# --- the report names the parameter VALUES, prior and tuned -----------------
+
+def _minimal_arm_for_report():
+    import types
+    import numpy as _np
+    ref = types.SimpleNamespace(
+        window_label="4.00-6.00 h (13 frames)", window_hours=(4.0, 6.0),
+        n_frames=13, mask=_np.ones(4, dtype=bool),
+    )
+    case = types.SimpleNamespace(
+        nlev=4, p_s=1.0e5,
+        spec=types.SimpleNamespace(bulk_ch=None, bulk_ce=None),
+        forcing=types.SimpleNamespace(prescribe="fluxes"),
+    )
+    return types.SimpleNamespace(
+        name="bomex", case=case, reference=ref, scored=("theta",),
+        les_dir="/nowhere", dt=60.0, prescribed_fluxes=True,
+        surface=types.SimpleNamespace(Cd_neutral=1.07e-3, Ch_neutral=0.0,
+                                      z0=1e-4, z_ref=20.0),
+    )
+
+
+def _report_args(tmp_path):
+    import types
+    return types.SimpleNamespace(
+        case=None, radiation_confound=None, nlev=4, tier="extended",
+        optimizer="muon", lr=0.1, steps=2, joint_aggregation="mean",
+        relative_norm_floor=0.05, microphysics="none",
+    )
+
+
+def test_summary_lists_the_prior_and_tuned_value_of_every_trained_param(
+        tmp_path):
+    """A score says the fit helped; only the values say what it DID.
+
+    They were previously reachable only by reading tuned_parameters.json by
+    hand, which is not a report.
+    """
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+    res.frozen = {"atm.turb.LouisConfig.b_unstable": "|grad| <= 1e-14"}
+    res.parameters = [
+        {"name": "atm.turb.LouisConfig.b_stable", "units": "1",
+         "default": 5.0, "tuned": 6.25, "lower": 1.0, "upper": 20.0,
+         "trained": True, "frozen_reason": None},
+        {"name": "atm.turb.LouisConfig.b_unstable", "units": "1",
+         "default": 7.5, "tuned": None, "lower": 1.0, "upper": 20.0,
+         "trained": False,
+         "frozen_reason": "|grad| <= 1e-14 in preflight"},
+    ]
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+
+    assert "## Parameters, prior and tuned" in text
+    assert "b_stable" in text
+    assert "5" in text and "6.25" in text
+    assert "+25.0%" in text, "the report must say how far each parameter moved"
+    # The frozen one is COUNTED but not listed: with 48 leaves and 15 frozen,
+    # listing them buries the ones that moved.
+    assert "1 trained, 1 frozen" in text
+    assert "b_unstable" not in text
+
+
+def test_a_zero_prior_does_not_print_an_infinite_change(tmp_path):
+    """`(tuned - 0)/|0|` is inf, which renders as a percentage and reads as a
+    real number."""
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="tke", status="tuned")
+    res.score_default, res.score_tuned = 0.8, 0.7
+    res.parameters = [
+        {"name": "atm.turb.TKEConfig.some_offset", "units": "1",
+         "default": 0.0, "tuned": 0.25, "lower": -1.0, "upper": 1.0,
+         "trained": True, "frozen_reason": None},
+    ]
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "inf" not in text.lower()
+    assert "+0.25 (prior 0)" in text
+
+
+def test_a_scheme_with_nothing_trained_says_so(tmp_path):
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="mynn25", status="no_active_gradient")
+    res.score_default = 1.2
+    res.frozen = {"a": "x", "b": "y"}
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "no trained parameters (no_active_gradient; 2 frozen)" in text
+
+
+def test_the_multicase_report_is_titled_with_its_regimes(tmp_path):
+    """args.case is None under --cases, which titled every multi-case report
+    'vs LES - None'."""
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="ok", score_default=0.5)
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res])
+    head = (tmp_path / "summary.md").read_text().splitlines()[0]
+    assert "None" not in head and "bomex" in head
+
+
+# --- the tuned non-finite flag, and partial reports --------------------------
+
+def test_a_tuned_blowup_reaches_the_report_and_loses_its_rank(tmp_path,
+                                                              monkeypatch):
+    """An arm whose TUNED parameters blow up must not stay rankable.
+
+    `tune_scheme_multicase` computes the tuned evaluation's non-finite flag on
+    its OWN fresh SchemeResult, and `main`'s handoff list omitted it, so the
+    flag was computed and dropped -- a scheme that blew up only after tuning
+    kept the clean flag from its default evaluation and could be ranked first.
+    Exercises the HANDOFF, which a source search of the tuning function cannot.
+    """
+    arm = _minimal_arm_for_report()
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.20    # "best" on score alone
+    res.nonfinite_cases = ["bomex"]                    # ... but it blew up
+    clean = drv.SchemeResult(scheme="tke", status="tuned")
+    clean.score_default, clean.score_tuned = 0.9, 0.8
+
+    drv._write_outputs(tmp_path, _report_args(tmp_path), [arm], [res, clean])
+    rows = (tmp_path / "ranking.csv").read_text().splitlines()
+    by_scheme = {r.split(",")[1]: r.split(",")[0] for r in rows[1:]}
+    assert by_scheme["louis"] == "EXCLUDED", (
+        "an arm with a non-finite case must not be ranked, however good its "
+        f"score; got rank {by_scheme['louis']}")
+    assert by_scheme["tke"] == "1"
+    assert "nonfinite_rollout" in (tmp_path / "summary.md").read_text()
+
+
+def test_main_unions_the_default_and_tuned_nonfinite_flags():
+    """A plain copy would OVERWRITE the default flag with the tuned one, so
+    an arm that blew up before tuning and not after would come back clean."""
+    import inspect
+    src = inspect.getsource(drv.main)
+    # Anchored on the TUNED side, not on the first `res.nonfinite_cases` --
+    # that one is the DEFAULT evaluation's assignment and matching it made the
+    # window miss the handoff entirely.
+    i = src.index("set(tuned.nonfinite_cases or [])")
+    window = src[max(0, i - 200):i + 60]
+    assert "set(res.nonfinite_cases or [])" in window and "|" in window, (
+        "the handoff must UNION the default and tuned flags; a copy would "
+        "overwrite the default one")
+
+
+def test_a_partial_report_says_so(tmp_path):
+    """The report is rewritten after every scheme so a killed campaign still
+    yields what finished. Without a completeness marker that partial report is
+    indistinguishable from a full one, and its own prose describes a finished
+    comparison."""
+    import json
+    arm = _minimal_arm_for_report()
+    args = _report_args(tmp_path)
+    args.resolved_schemes = ["louis", "tke", "ysu"]
+    args.run_complete = False
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+
+    drv._write_outputs(tmp_path, args, [arm], [res])
+    text = (tmp_path / "summary.md").read_text()
+    assert "PARTIAL" in text and "1 of 3" in text
+    assert "tke" in text and "ysu" in text, "must name what is still missing"
+    payload = json.loads((tmp_path / "tuned_parameters.json").read_text())
+    assert payload["run_complete"] is False
+    assert payload["schemes_missing"] == ["tke", "ysu"]
+
+
+def test_a_finished_report_carries_no_partial_banner(tmp_path):
+    import json
+    arm = _minimal_arm_for_report()
+    args = _report_args(tmp_path)
+    args.resolved_schemes = ["louis"]
+    args.run_complete = True
+    res = drv.SchemeResult(scheme="louis", status="tuned")
+    res.score_default, res.score_tuned = 0.48, 0.43
+
+    drv._write_outputs(tmp_path, args, [arm], [res])
+    assert "PARTIAL" not in (tmp_path / "summary.md").read_text()
+    payload = json.loads((tmp_path / "tuned_parameters.json").read_text())
+    assert payload["run_complete"] is True
+    assert payload["schemes_missing"] == []
+
+
+# --- a time-varying flux is never frozen into the closure's scalar ----------
+
+def test_a_time_varying_flux_is_not_handed_to_the_closures_scalar():
+    """SurfaceLayerConfig carries ONE scalar. Handing Wangara's diurnal cycle
+    to it froze the 09:00 value for all 8 h AND switched the SCMForcing
+    channel off, so the SCM ran a constant 113.4 W/m^2 against an LES driven
+    by the cycle. Every closure then scored ~9x the LES profile's own spread
+    there -- scheme-independent, i.e. the arm, not the closures.
+
+    Declining the SCALAR is now a route SELECTION, not the end of the handover:
+    such a case goes through ``SCMForcing.flux_to_closure`` instead (below).
+    """
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    wangara = load_analytic_scm_case("wangara", nlev=16, dt=10.0)
+    assert wangara.forcing.prescribe == "fluxes"
+    assert drv.surface_flux_varies_in_time(wangara)
+    assert drv.deck_surface_scalar_fluxes(wangara) is None, (
+        "a case whose flux varies in time must decline the SCALAR route")
+
+    surface = drv.build_surface_config(wangara, flux_to_closure=True)
+    assert surface.prescribed_shflx_w_m2 is None
+    assert surface.prescribed_lhflx_w_m2 is None
+    # ...and the closure's own heat exchange stays zeroed, so the per-step
+    # override is the ONLY source of the surface heat flux (no double count).
+    assert surface.Ch_neutral == 0.0
+
+
+def test_the_time_varying_route_keeps_the_forcing_channel_live():
+    """The two routes differ in WHERE the flux is applied, not whether.
+
+    The steady route switches ``prescribe`` off and writes a config scalar;
+    the time-varying route leaves ``prescribe='fluxes'`` and ``w_th_s`` intact
+    and flips ``flux_to_closure``, which redirects the same callable from a
+    column tendency to the closure's boundary condition. Getting these
+    backwards -- switching the channel off without a scalar to replace it --
+    is what silently gave the closure a surface heat flux of zero.
+    """
+    import dataclasses
+
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    from legoesm.atmosphere.forcing.scm.scm_forcing import validate_forcing
+
+    wangara = load_analytic_scm_case("wangara", nlev=16, dt=10.0)
+    routed = dataclasses.replace(
+        wangara, forcing=wangara.forcing._replace(flux_to_closure=True))
+    validate_forcing(routed.forcing)
+    assert routed.forcing.prescribe == "fluxes"
+    assert routed.forcing.w_th_s is not None
+    # The cycle is real: the flux at 09:00 is not the flux four hours later.
+    # (t is seconds since the run start; the case adds its own t_start_s.)
+    early = float(routed.forcing.w_th_s(0.0))
+    later = float(routed.forcing.w_th_s(4.0 * 3600.0))
+    assert abs(later - early) > 0.01, (
+        f"Wangara's surface flux must vary over the run: {early} -> {later}")
+
+
+def test_a_steady_case_does_not_take_the_time_varying_route():
+    """NON-VACUITY for the predicate that selects between the two routes."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    for name in ("cbl", "gabls1", "ekman"):
+        case = load_analytic_scm_case(name, nlev=16, dt=10.0)
+        assert not drv.surface_flux_varies_in_time(case), name
+
+
+@pytest.mark.parametrize("case_name", ["cbl", "gabls1"])
+def test_a_steady_flux_is_still_handed_over(case_name):
+    """NON-VACUOUS: the refusal must be specific to the time-varying case, or
+    it has silently disabled the flag everywhere."""
+    from legoesm.atmosphere.forcing.scm.analytic_scm_case import (
+        load_analytic_scm_case,
+    )
+    case = load_analytic_scm_case(case_name, nlev=16, dt=10.0)
+    got = drv.deck_surface_scalar_fluxes(case)
+    assert got is not None, case_name
+    shf, lhf = got
+    assert abs(shf) > 1.0 and lhf == 0.0, (case_name, shf, lhf)
+    surface = drv.build_surface_config(case, flux_to_closure=True)
+    assert surface.prescribed_shflx_w_m2 == pytest.approx(shf)
+
+
+# --- line search: stalled-fit verdict ---------------------------------------
+
+def test_line_search_verdict_branches():
+    """Accept wins outright; an uphill direction earns exactly ONE retry."""
+    v = drv.line_search_verdict
+    # Accepted -> nothing else matters, including an uphill dL (the scale that
+    # was accepted is the evidence, not the sign of the full-length step).
+    assert v(accepted=True, restarted=False, dir_deriv=+1.0) == "accept"
+    assert v(accepted=True, restarted=True, dir_deriv=-1.0) == "accept"
+    # Rejected and DESCENT: shrinking the same direction is all the ladder can
+    # do and it already failed, so the fit has genuinely stalled.
+    assert v(accepted=False, restarted=False, dir_deriv=-1.0) == "stop"
+    assert v(accepted=False, restarted=False, dir_deriv=0.0) == "stop"
+    # Rejected and UPHILL: retry once without the momentum buffer...
+    assert v(accepted=False, restarted=False, dir_deriv=+1.0) == "restart"
+    # ...but only once, or a persistently uphill step loops forever.
+    assert v(accepted=False, restarted=True, dir_deriv=+1.0) == "stop"
+
+
+def test_stale_momentum_really_can_point_uphill():
+    """NON-VACUOUS premise check for the retry above.
+
+    The retry only pays for itself if Adam's update can genuinely disagree in
+    SIGN with the current gradient. Feed the optimizer a large gradient and
+    then its opposite: the momentum average still points the old way, so
+    ``sum(grad . update) > 0`` -- an uphill direction that no line-search scale
+    can rescue. Re-initialising the state (what the driver does on a stall)
+    must restore a descent direction on the SAME gradient.
+    """
+    import jax.numpy as jnp
+    import optax
+
+    opt = optax.adam(learning_rate=1e-2)
+    params = jnp.array([1.0])
+    state = opt.init(params)
+
+    for _ in range(6):                      # build momentum pointing one way
+        updates, state = opt.update(jnp.array([+1.0]), state, params)
+    g_now = jnp.array([-1.0])               # gradient reverses
+    updates, _ = opt.update(g_now, state, params)
+    assert float(jnp.sum(g_now * updates)) > 0.0, "premise: no uphill step"
+
+    updates_fresh, _ = opt.update(g_now, opt.init(params), params)
+    assert float(jnp.sum(g_now * updates_fresh)) < 0.0, (
+        "a freshly initialised optimizer must descend on the current gradient")
+
+
+# --- DYCOMS-II RF02 SCM arm -------------------------------------------------
+
+def _rf02_available() -> bool:
+    try:
+        from legoesm.atmosphere.forcing.scm.sam_case_scm import (
+            SAM_SCM_CASES, resolve_sam_case_dir,
+        )
+        return Path(
+            resolve_sam_case_dir(SAM_SCM_CASES["rf02"].gsam_dir)).is_dir()
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_is_a_selectable_case_with_a_running_column():
+    """The new case must reach the tuner's own entry points, not just the
+    registry: a case that loads but cannot be integrated is not a case."""
+    jax.config.update("jax_enable_x64", True)
+    import numpy as _np
+
+    assert "rf02" in drv.ALL_CASES
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    assert case.name == "rf02"
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True)
+    assert cfg.radiation.scheme == "simple_lw"
+    hours = 5 * 30.0 / 3600.0                      # exactly 5 steps
+    means, ps_hist = drv._rollout_means(
+        None, base_cfg=cfg, case=case, dt=30.0, hours=hours,
+        analysis_hours=hours, chunk_steps=4,
+    )
+    assert ps_hist.shape == (5,)
+    for name in ("T", "qv", "u", "v"):
+        arr = _np.asarray(means[name])
+        assert arr.shape == (16,), (name, arr.shape)
+        assert _np.all(_np.isfinite(arr)), name
+    drv._assert_surface_pressure_static(ps_hist, case.p_s)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_rf02_scm_arm_takes_the_deck_prescribed_fluxes():
+    """RF02's deck fixes SHF/LHF (SFC_FLX_FXD), so the SCM must not also run a
+    bulk heat exchange on top of them."""
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    fluxes = drv.deck_surface_scalar_fluxes(case)
+    assert fluxes is not None
+    assert case.forcing.prescribe == "fluxes"
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_simple_lw_sees_no_cloud_on_the_scm_side_without_microphysics():
+    """What switching condensation OFF costs, kept as a live demonstration.
+
+    `--microphysics none` leaves the column carrying q_v and nothing else. The
+    Stevens (2005) kernel's optical depth is an integral of LIQUID, so it
+    collapses to its clear-sky term while the LES runs Morrison and holds real
+    liquid -- the stratocumulus cases lose their entire energy source. This was
+    the DEFAULT until the default became the LES's own scheme; it is pinned
+    here so the cost of choosing it stays visible.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    case = drv.load_case("rf02", nlev=32, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="none")
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    carry = (scm.state, scm.phys_state)
+    for k in range(5):
+        carry, _ = step(carry, jnp.asarray(k))
+    state, _ = carry
+    assert set(state.tracers) == {"q_v"}, (
+        "a condensate tracer appeared; the shared-longwave caveat needs "
+        f"revisiting. tracers={sorted(state.tracers)}")
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_default_arm_condenses_and_carries_the_case_droplet_number():
+    """The default single-column arm forms liquid, at the LES's droplet number.
+
+    Two things have to hold for a stratocumulus closure to be scored against
+    its LES at all: the column must actually condense (otherwise the shared
+    longwave has no cloud and the case has no cloud-top cooling), and it must
+    condense with the droplet concentration the LES prescribes (otherwise the
+    two sides drizzle at different rates). RF02's 55 cm^-3 against RF01's 140
+    is a factor 5 in autoconversion, so a library default of 1e8 here would be
+    a real mis-forcing, not a detail.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    import numpy as _np
+
+    case = drv.load_case("rf02", nlev=32, dt=30.0)
+    cfg = drv.build_physics_config(
+        "louis", prescribed_fluxes=True, simple_lw=True,
+        n_c_m3=case.spec.les_n_c_m3)
+    assert cfg.microphysics.scheme == "morrison"
+    assert cfg.microphysics.morrison.Nc_0 == pytest.approx(55.0e6)
+
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    carry = (scm.state, scm.phys_state)
+    for k in range(10):
+        carry, _ = step(carry, jnp.asarray(k))
+    state, _ = carry
+    assert "q_c" in state.tracers, "the default arm must be able to condense"
+    q_c = _np.asarray(state.tracers["q_c"].data)
+    assert _np.all(_np.isfinite(q_c))
+    assert float(q_c.max()) > 1.0e-5, (
+        f"RF02's saturated sub-inversion layer must form liquid; got "
+        f"max q_c={float(q_c.max()):.3e} kg/kg")
+
+
+def test_droplet_number_default_is_not_silently_the_library_value():
+    """The guard above is only meaningful if 55e6 differs from the default."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    assert MorrisonConfig().Nc_0 != pytest.approx(55.0e6)
+    plain = drv.build_physics_config("louis", prescribed_fluxes=True)
+    assert plain.microphysics.morrison.Nc_0 == pytest.approx(
+        MorrisonConfig().Nc_0), (
+        "a case that prescribes no droplet number must keep the scheme default")
+
+
+@pytest.mark.parametrize("case_name,n_c", [("dycoms", 140.0e6),
+                                           ("rf02", 55.0e6),
+                                           ("astex", 100.0e6)])
+def test_scm_droplet_number_matches_the_les_driver(case_name, n_c):
+    """The two arms must prescribe the SAME droplet concentration.
+
+    The LES driver and the single-column spec hold the number separately, so
+    this is the same drift guard the Coriolis parameter already has.
+    """
+    import importlib.util as _ilu
+    from legoesm.atmosphere.forcing.scm.sam_case_scm import SAM_SCM_CASES
+    path = _ROOT / "scripts" / "run" / "run_dycoms_les.py"
+    spec = _ilu.spec_from_file_location("_strato_les_nc", path)
+    mod = _ilu.module_from_spec(spec)
+    sys.modules["_strato_les_nc"] = mod
+    spec.loader.exec_module(mod)
+    assert mod._STRATOCUMULUS_CASES[case_name]["n_c_m3"] == pytest.approx(n_c)
+    assert SAM_SCM_CASES[case_name].les_n_c_m3 == pytest.approx(n_c)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+@pytest.mark.parametrize("scheme", ["kessler", "morrison"])
+@pytest.mark.parametrize("substeps", [1, 2])
+def test_tracer_set_is_invariant_under_a_compiled_scan(scheme, substeps):
+    """The exact failure the q_g pre-allocation fixed, pinned at its own level.
+
+    The SCM used to pre-allocate q_c/q_r/q_i/q_s always but q_g only when
+    substepping was on. Both schemes return a q_g tendency on their first call
+    regardless, so the tracer dict gained a key after step 1, the carry pytree
+    changed between iterations, and every scanned rollout died with "cond
+    branch outputs must have the same pytree structure". Stepping eagerly does
+    NOT reproduce that -- only a compiled scan does -- so this runs one.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from jax import lax
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics=scheme,
+                                   n_c_m3=case.spec.les_n_c_m3)
+    scm = case.create_scm(physics_config=cfg, dt=30.0,
+                          microphysics_substeps=substeps)
+    before = sorted(scm.state.tracers)
+    assert "q_g" in before, "graupel must be allocated before the first step"
+    step = drv._make_step_once(scm, 30.0)
+    (state, _), _ = lax.scan(jax.jit(step), (scm.state, scm.phys_state),
+                             jnp.arange(6))
+    assert sorted(state.tracers) == before
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_kessler_allocates_graupel_but_never_makes_any():
+    """The pre-allocation is bookkeeping, not a new hydrometeor.
+
+    Kessler is a warm-rain scheme with no frozen category, so a non-zero q_g
+    under it would be a wiring bug rather than a harmless zero field. Measured
+    here rather than argued.
+    """
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    import numpy as _np
+    from jax import lax
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="kessler")
+    scm = drv._create_scm(cfg, case, 30.0)
+    step = drv._make_step_once(scm, 30.0)
+    (state, _), _ = lax.scan(jax.jit(step), (scm.state, scm.phys_state),
+                             jnp.arange(6))
+    q_g = _np.asarray(state.tracers["q_g"].data)
+    assert _np.max(_np.abs(q_g)) == 0.0, _np.max(_np.abs(q_g))
+    # and the field it DOES make is not zero, or the check above is vacuous
+    assert float(_np.max(_np.asarray(state.tracers["q_c"].data))) > 1.0e-5
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_the_arm_actually_receives_the_case_droplet_number():
+    """Not "the two tables agree" -- what the arm the driver builds ends up with.
+
+    A table can be right while the value never reaches the config that runs.
+    """
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    arm = type("Arm", (), {"case": case, "name": "rf02",
+                           "prescribed_fluxes": True, "surface": None})()
+    args = type("Args", (), {"microphysics": "morrison",
+                             "clubb_prognostic": True})()
+    cfg = drv._arm_config("louis", arm, args)
+    assert cfg.microphysics.scheme == "morrison"
+    assert cfg.microphysics.morrison.Nc_0 == pytest.approx(55.0e6), (
+        "the arm must run RF02's 55 cm^-3, not the library default")
+
+
+def test_the_les_drivers_still_run_the_scm_default_scheme():
+    """The single-column default is Morrison because that is what the LES runs.
+
+    Nothing derives it: the default is a literal. That is fine only while every
+    LES driver actually runs Morrison, so this asserts exactly that, and goes
+    red the day one of them changes -- at which point the comparison has
+    stopped being like-for-like and the default has to follow or become
+    per case.
+    """
+    for script in ("run_dycoms_les.py", "run_bomex_les.py", "run_rico_les.py"):
+        src = (_ROOT / "scripts" / "run" / script).read_text()
+        assert '"--microphysics", default="morrison"' in src \
+            or "'--microphysics', default='morrison'" in src, (
+            f"{script} no longer defaults to morrison; the SCM arm's default "
+            "is now a different scheme from its LES")
+
+
+# --- the column carries what its scheme needs -------------------------------
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_two_moment_scheme_gets_its_number_tracers():
+    """The column used to carry six water masses and nothing else.
+
+    The physics bridge substitutes zeros for absent tracers, so a two-moment
+    scheme ran with rain and ice number pinned at zero every step -- measured,
+    that switches graupel formation off outright and moves the rain tendency by
+    2.8x. Names, order and units now come from the same registry the global
+    model uses.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    scm = drv._create_scm(cfg, case, 30.0)
+    registry = make_full_moisture_registry()
+    assert set(scm.state.tracers) == set(registry.names), sorted(scm.state.tracers)
+    for name, field in scm.state.tracers.items():
+        want = next(t for t in registry.tracers if t.name == name)
+        assert field.units == want.units, (name, field.units, want.units)
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_single_moment_scheme_gets_no_number_tracers():
+    """Kessler needs no number variables, and must still get every water MASS.
+
+    Sizing the allocation purely by what the scheme declares would give Kessler
+    only vapour, cloud and rain -- and the bridge's tendency dictionary carries
+    all six masses for every scheme, so ice and snow would reappear at step 1.
+    That is the tracer-set growth the allocation exists to prevent.
+    """
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="kessler")
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    assert set(tracers) == {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g"}
+
+
+@pytest.mark.skipif(not _rf02_available(),
+                    reason="DYCOMS_RF02 gSAM deck not cached")
+def test_number_tracers_start_empty_which_the_optics_read_as_specified():
+    """Zero droplet number is the DOCUMENTED signal, not a gap.
+
+    The cloud optics read a droplet number at or below 1 as "this scheme does
+    not predict droplet number", substitute their own specified value, and
+    reconstruct in-cloud condensate as q_c / cloud_fraction so a specified
+    IN-CLOUD number is paired with in-cloud water. Seeding a large number
+    instead takes the prognostic branch and pairs that in-cloud number with
+    GRID-MEAN water: droplets too small by cf^(1/3), optical depth too large by
+    cf^(-1/3), a brightening that grows without bound as a layer breaks up.
+    Pinned because seeding it looks like the safer choice and is not.
+
+    Rain and ice number are likewise empty: the model grows them.
+    """
+    import numpy as _np
+
+    case = drv.load_case("rf02", nlev=16, dt=30.0)
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   simple_lw=True, microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3)
+    tracers = drv._create_scm(cfg, case, 30.0).state.tracers
+    for name in ("N_c", "N_r", "N_i"):
+        got = _np.asarray(tracers[name].data)
+        assert _np.all(got == 0.0), (name, got.max())
+
+
+def test_slot_count_uses_the_scheme_config_not_just_its_name():
+    """SDM needs two slots for condensation and EIGHT with coalescence.
+
+    Passing only the scheme's name silently gives the coalescence
+    configuration six mass slots and no number slots, so its cloud- and
+    rain-number tendencies would be dropped -- the same silent zero-fill this
+    change exists to remove, one config flag deeper.
+    """
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        min_tracer_slots,
+    )
+
+    base = MicrophysicsConfig(scheme="sdm")
+    plain = min_tracer_slots("sdm", base.sdm)
+    coalescing = min_tracer_slots(
+        "sdm", base.sdm._replace(column_do_coalescence=True))
+    assert coalescing > plain, (plain, coalescing)
+    assert min_tracer_slots("sdm") == plain, (
+        "if the name-only lookup already matched the coalescing case this "
+        "test would be vacuous")
+
+
+@pytest.mark.parametrize("scheme", ["kessler", "morrison", "seifert_beheng",
+                                    "thompson", "p3", "fast_sbm"])
+def test_every_shipped_scheme_can_be_built_in_the_column(scheme):
+    """A scheme that cannot be constructed is a scheme nobody can run.
+
+    fast_sbm and p3 declare the full nine-slot layout but express their droplet
+    closure differently from Morrison; an allocation that insisted on reading a
+    Morrison-style droplet concentration refused them outright.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
+
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=False,
+                                   microphysics=scheme)
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=8, dt=60.0,
+        T_profile=jnp.linspace(230.0, 290.0, 8),
+        q_v_profile=jnp.full((8,), 1.0e-3))
+    assert "q_g" in scm.state.tracers, scheme

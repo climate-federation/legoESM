@@ -50,6 +50,15 @@ _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 _load_interior = _bn2_alpha_compare._load_interior
 
+# #1455: which NEMO dump run/lane this probe measures against (gdb_y5 default,
+# byte-identical to the prior hardcoded RUN_GDB/kt=57601 pairing; d180 via
+# DINO_1226_LANE=d180) -- ONE shared selector, same importlib-by-path idiom.
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.eos import make_eos_fn
 from legoesm.ocean.experiments.dino import (
     dino_config_for_recipe, dino_lat_lon_model_config,
@@ -70,8 +79,8 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
 # from RUN_TRAJ and the restart from RUN_Y5_REBUILD against RUN_GDB's dumps --
 # a cross-run-directory mismatch. mesh_mask.nc also exists in RUN_GDB itself
 # (verified), so there is no reason to reach outside it.
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 FLOOR = 1.0e-12
 OFFSETS = (-2, -1, 0, 1, 2)
@@ -376,11 +385,12 @@ def offset_scan(lego, nemo, wet, offsets=OFFSETS):
     return out
 
 
-def per_element_report(name, lego, nemo, wet):
+def per_element_report(name, lego, nemo, wet, quiet=False):
     """Full per-element report at a fixed (already-chosen) offset alignment.
 
     lego/nemo/wet must already share the SAME level axis (caller has sliced
     to the offset-aligned overlap range)."""
+    _p = (lambda *a, **k: None) if quiet else print
     m = wet & np.isfinite(lego) & np.isfinite(nemo)
     lo, ne = lego[m], nemo[m]
     n = int(m.sum())
@@ -416,29 +426,29 @@ def per_element_report(name, lego, nemo, wet):
     frac_near0 = float(near0.mean()) if n else float("nan")
     trustworthy_pointwise = frac_near0 < 0.05
 
-    print(f"\n--- {name}: at chosen offset ---")
-    print(f"  n wet elements       = {n}")
-    print(f"  corr                 = {corr:.6f}")
-    print(f"  |x| ratio (sum|lego|/sum|nemo|) = {abs_ratio:.6f}")
-    print(f"  RMS(nemo over wet)   = {rms_nemo:.6e}")
-    print(f"  pointwise |rel| (REFERENCE ONLY, sign-changing field):")
-    print(f"    median={med_rel_pt:.3e}  p99={p99_rel_pt:.3e}  max={max_rel_pt:.3e}")
-    print(f"  err_norm = |lego-nemo|/RMS(nemo) (CONDITIONING-ROBUST):")
-    print(f"    median={med_en:.3e}  p99={p99_en:.3e}  max={max_en:.3e}")
-    print(f"    max err_norm at (j,i,level)={idx}  |nemo| there = {abs(nemo_at_max):.6e} "
+    _p(f"\n--- {name}: at chosen offset ---")
+    _p(f"  n wet elements       = {n}")
+    _p(f"  corr                 = {corr:.6f}")
+    _p(f"  |x| ratio (sum|lego|/sum|nemo|) = {abs_ratio:.6f}")
+    _p(f"  RMS(nemo over wet)   = {rms_nemo:.6e}")
+    _p(f"  pointwise |rel| (REFERENCE ONLY, sign-changing field):")
+    _p(f"    median={med_rel_pt:.3e}  p99={p99_rel_pt:.3e}  max={max_rel_pt:.3e}")
+    _p(f"  err_norm = |lego-nemo|/RMS(nemo) (CONDITIONING-ROBUST):")
+    _p(f"    median={med_en:.3e}  p99={p99_en:.3e}  max={max_en:.3e}")
+    _p(f"    max err_norm at (j,i,level)={idx}  |nemo| there = {abs(nemo_at_max):.6e} "
           f"(nemo={nemo_at_max:+.6e}, lego={float(lego[idx]):+.6e})")
-    print(f"  CONDITIONING: fraction of wet points with |nemo| < 1e-3*RMS(nemo) "
+    _p(f"  CONDITIONING: fraction of wet points with |nemo| < 1e-3*RMS(nemo) "
           f"= {frac_near0 * 100:.3f}%  ({int(near0.sum())}/{n})")
     if trustworthy_pointwise:
-        print(f"  -> pointwise-relative stats for {name} are LIKELY TRUSTWORTHY "
+        _p(f"  -> pointwise-relative stats for {name} are LIKELY TRUSTWORTHY "
               f"(near-zero fraction < 5%).")
     else:
-        print(f"  -> pointwise-relative stats for {name} are NOT TRUSTWORTHY "
+        _p(f"  -> pointwise-relative stats for {name} are NOT TRUSTWORTHY "
               f"(large near-zero-denominator fraction); use err_norm.")
 
     # (4) per-level median err_norm
     nlev = wet.shape[-1]
-    print(f"  per-level median err_norm ({nlev} levels):")
+    _p(f"  per-level median err_norm ({nlev} levels):")
     level_meds = []
     line = []
     for k in range(nlev):
@@ -450,7 +460,7 @@ def per_element_report(name, lego, nemo, wet):
         med_k = float(np.median(ek))
         level_meds.append((k, med_k))
         line.append(f"k{k}:{med_k:.2e}")
-    print("    " + "  ".join(line))
+    _p("    " + "  ".join(line))
     if level_meds:
         meds = np.array([v for _, v in level_meds])
         kbest = level_meds[int(np.argmin(meds))][0]
@@ -471,17 +481,19 @@ def per_element_report(name, lego, nemo, wet):
             verdict_lv = "FLAT (roundoff-like)"
         else:
             verdict_lv = "STRUCTURED (points at a term)"
-        print(f"  per-level spread: min={meds.min():.3e} (k={kbest})  "
+        _p(f"  per-level spread: min={meds.min():.3e} (k={kbest})  "
               f"max={meds.max():.3e} (k={kworst})  max/min={spread:.1f}x  "
               f"-> {verdict_lv}")
 
     return dict(n=n, corr=corr, abs_ratio=abs_ratio, rms_nemo=rms_nemo,
                 med_rel_pt=med_rel_pt, p99_rel_pt=p99_rel_pt, max_rel_pt=max_rel_pt,
                 med_en=med_en, p99_en=p99_en, max_en=max_en,
-                frac_near0=frac_near0, trustworthy_pointwise=trustworthy_pointwise)
+                frac_near0=frac_near0, trustworthy_pointwise=trustworthy_pointwise,
+                level_meds=level_meds)
 
 
 def main() -> int:
+    print(dump_lane.banner())
     print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}")
     print(f"dump dir used = {RUN_DIR}")
     print(f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')}")
@@ -498,6 +510,11 @@ def main() -> int:
     print(f"grid interior (nj,ni) = ({nj},{ni})  wet T-columns = {int(st['mask'].sum())}")
 
     summary = {}
+    prd_lever = {}
+    # NaN until section (M)(3)(a) measures them, so a skipped or failed
+    # (M) prints 'nan' rather than a number that was never measured.
+    metric_live = {"e1u": (float("nan"), float("nan")),
+                   "e2v": (float("nan"), float("nan"))}
     for comp, dump_name in DUMP_META.items():
         print("\n" + "=" * 78)
         print(f"COMPONENT: {comp}  (dump={dump_name})")
@@ -1310,6 +1327,7 @@ def main() -> int:
                           f"cannot compare cell-for-cell")
                     continue
                 rel = np.abs(o - n) / np.maximum(np.abs(n), FLOOR)
+                metric_live[nm] = (float(np.median(rel)), float(rel.max()))
                 print(f"      (a) {nm} vs NEMO mesh_mask (vs-NEMO): median|rel|="
                       f"{np.median(rel):.3e}  max|rel|={rel.max():.3e}  -> "
                       f"{'MATCH' if rel.max() < 1e-12 else 'MISMATCH'}")
@@ -1462,6 +1480,153 @@ def main() -> int:
             print("      Reporting the failure rather than a fabricated number; "
                   "the aeiu row needs the ldf_eiv driver's own argument set.")
 
+    # =====================================================================
+    # (N) prd SUBSTITUTION LEVER -- does the density INPUT own the four slope
+    #     rows, or does the slope FORMULA?
+    #
+    #     Section (K) measures how well our prd matches NEMO's; it does NOT
+    #     say how much of the SLOPE error that prd residual buys.  The two are
+    #     different questions whenever the slope is a ratio of DIFFERENCES of
+    #     prd: a fixed prd residual costs more slope error wherever the
+    #     horizontal prd gradient is weaker.  This is the perturbation test
+    #     that discriminates them -- feed the operator NEMO's OWN prd (as
+    #     rho = rho_0*(1+prd_nemo)) and re-measure all four rows.
+    #
+    #     The substitution is CLEAN: inside compute_nemo_native_slopes, rho is
+    #     used only via prd = rho/rho_0 - 1 and is passed on to
+    #     _nemo_wpoint_e3w_wmask_n2, whose slope_n2='nemo_bn2' branch builds
+    #     N^2 from T/S and never reads rho (gm_redi_latlon_cgrid.py:830-861).
+    #     Guarded below: the section REFUSES TO RUN unless the N^2 branch in
+    #     use is 'nemo_bn2', so this stays a prd-only lever and cannot silently
+    #     become a prd+N^2 lever.  (Verified in source: inside
+    #     compute_nemo_native_slopes, ``rho`` reaches only ``prd = rho/rho_0-1``
+    #     and _nemo_wpoint_e3w_wmask_n2; that function's 'nemo_bn2' branch,
+    #     gm_redi_latlon_cgrid.py:836-880, uses rho for dtype and shape ONLY
+    #     and builds N^2 from T/S -- while its 'adiabatic' sibling DOES read
+    #     rho by value at :880, which is exactly why the guard is needed.
+    #     hml/nmln likewise come from _nemo_mld(T, S, ...), not from rho.)
+    # =====================================================================
+    print("\n" + "=" * 78)
+    print("(N) prd SUBSTITUTION LEVER (NEMO's own prd into the slope operator)")
+    print("=" * 78)
+    if our_prd is None:
+        print("  ABORTING (N): our prd local was not captured.")
+    elif st["slope_n2_used"] != "nemo_bn2":
+        print(f"  ABORTING (N): slope_n2={st['slope_n2_used']!r}; the "
+              "rho-only-touches-prd guarantee this lever rests on holds for "
+              "'nemo_bn2' (N^2 from T/S). Refusing to run a lever whose scope "
+              "is not the one documented.")
+    else:
+        nk_s = min(our_prd.shape[-1], nemo_prd.shape[-1])
+        # Only substitute on the levels NEMO actually wrote; elsewhere keep our
+        # own prd, so an unwritten pad level is never fed in as a real zero.
+        prd_sub = np.asarray(our_prd).copy()
+        # WET points only, and only on levels NEMO actually wrote.  Dry cells
+        # carry a fill value on each side (ours is the EOS evaluated at the
+        # dry T=S=0 sentinel, NEMO's is a hard 0), so swapping them would make
+        # this a "prd AND the dry-cell fill" lever instead of a prd lever --
+        # and the dry-cell difference is ~2.4e-2, 25x the RMS of prd itself,
+        # i.e. it would dominate the printed perturbation size.
+        take = np.zeros(prd_sub.shape, dtype=bool)
+        take[:, :, :nk_s] = act[:, :, :nk_s] & lev_ok[None, None, :nk_s]
+        prd_sub[take] = np.asarray(nemo_prd[:, :, :prd_sub.shape[-1]])[take]
+        rho_sub = jnp.asarray(
+            st["rho_0"] * (1.0 + prd_sub), dtype=st["rho"].dtype)
+        d_wet = np.abs(prd_sub - np.asarray(our_prd))[take]
+        print(f"      substituted at {int(take.sum())} WET points on "
+              f"{int(lev_ok[:nk_s].sum())}/{nk_s} levels; over those points "
+              f"max|prd_sub-our_prd|={d_wet.max():.3e} "
+              f"median={np.median(d_wet):.3e}  (a ZERO perturbation here "
+              f"would make the lever vacuous)")
+        u_s, v_s, wi_s, wj_s = compute_nemo_native_slopes(
+            rho_sub, st["T"], st["S"], jnp.asarray(st["mask"].astype(float),
+                                                   dtype=st["T"].dtype),
+            st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
+            st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
+            active_3d=st["active_3d"], jacobian=st["jacobian"])
+        sub_fields = {"wslpi": wi_s, "wslpj": wj_s, "uslp": u_s, "vslp": v_s}
+
+        # ---- THE NULL CONTROL (both 2026-08-21 reviewers asked for it, and
+        # it is the one arm that can FALSIFY this lever).  The call above is a
+        # hand-rebuilt argument bundle, not the production closure ``recall``
+        # that produced ``summary``.  A plumbing difference between the two
+        # routes -- the float->bool->float mask round-trip, the
+        # rho_0*(1+prd) round-trip -- would masquerade as the effect.  So run
+        # the SAME rebuilt route with our OWN rho and require it to reproduce
+        # the shipped arrays EXACTLY.  Anything but 0.0 and every collapse
+        # percentage below is uninterpretable.
+        u_c, v_c, wi_c, wj_c = compute_nemo_native_slopes(
+            jnp.asarray(st["rho"]), st["T"], st["S"],
+            jnp.asarray(st["mask"].astype(float), dtype=st["T"].dtype),
+            st["u_mask"], st["v_mask"], st["z_coord"], st["grid"],
+            st["gm_cfg"], st["eos_fn"], rho_0=st["rho_0"], g=st["g"],
+            active_3d=st["active_3d"], jacobian=st["jacobian"])
+        ctrl_fields = {"wslpi": wi_c, "wslpj": wj_c, "uslp": u_c, "vslp": v_c}
+        ctrl_max = max(
+            float(np.abs(np.asarray(ctrl_fields[c]) - st["lego"][c]).max())
+            for c in DUMP_META)
+        print(f"      NULL CONTROL (same rebuilt route, our own rho): "
+              f"max|rebuilt - as-shipped| over all four rows = {ctrl_max:.3e}"
+              + ("  [route is identical]" if ctrl_max == 0.0 else
+                 "  [ROUTE DIFFERS -- the collapse below is NOT interpretable]"))
+
+        # CONDITIONING of the slope, measured from NEMO's OWN prd alone (no
+        # legoESM field enters): the slope numerator is a one-cell difference
+        # of prd, so the SAME absolute prd residual costs more slope error
+        # wherever that difference is smaller.  Reported as the ratio of the
+        # gradient's RMS to prd's own RMS, per direction, so the i-vs-j
+        # asymmetry is visible.
+        _pn = np.asarray(nemo_prd)[:, :, :nk_s]
+        _w = act[:, :, :nk_s] & lev_ok[None, None, :nk_s]
+        _rms = lambda a, m: float(np.sqrt(np.mean(a[m] ** 2))) if m.any() else float("nan")
+        rms_prd = _rms(_pn, _w)
+        gi = np.roll(_pn, -1, axis=1) - _pn
+        gj = np.roll(_pn, -1, axis=0) - _pn
+        wi = _w & np.roll(_w, -1, axis=1)
+        wj = _w & np.roll(_w, -1, axis=0)
+        print(f"      NEMO-only conditioning: RMS(prd)={rms_prd:.4e}  "
+              f"RMS(d_i prd)={_rms(gi, wi):.4e} ({_rms(gi, wi)/rms_prd:.3e} of prd)  "
+              f"RMS(d_j prd)={_rms(gj, wj):.4e} ({_rms(gj, wj)/rms_prd:.3e} of prd)")
+        # The MEDIAN alone cannot exonerate a depth-dependent term: on these
+        # rows the deepest levels sit ~4 decades above the median, so p99, max
+        # and the per-level tail are reported alongside it.  A term the lever
+        # does NOT touch (the e3/7e3 slope bound, which reads thicknesses and
+        # not prd) would survive in exactly that tail.
+        print(f"      {'row':<8}{'stat':<8}{'as shipped':<14}{'NEMO prd in':<14}"
+              f"{'collapse':<10}")
+        for comp in DUMP_META:
+            base = summary.get(comp)
+            if base is None:
+                print(f"      {comp:<8}(row failed upstream)")
+                continue
+            _, nemo_al, wet_al = base["_al"]
+            # Slice the substituted field with the SAME offset alignment the
+            # baseline used, not with a bare leading slice -- they coincide
+            # only for a non-negative offset, and OFFSETS reaches -2.
+            k_lo = max(0, -base["best_off"])
+            lego_sub = np.asarray(sub_fields[comp])[
+                :, :, k_lo:k_lo + nemo_al.shape[-1]]
+            rep_s = per_element_report(comp, lego_sub, nemo_al, wet_al,
+                                       quiet=True)
+            if rep_s["n"] != base["n"]:
+                print(f"      {comp:<8}POINT COUNT CHANGED "
+                      f"({base['n']} -> {rep_s['n']}): the two err_norms are "
+                      "normalised over different sets and are NOT comparable.")
+                continue
+            for stat, key in (("median", "med_en"), ("p99", "p99_en"),
+                              ("max", "max_en")):
+                b, a = base[key], rep_s[key]
+                coll = (1.0 - a / b) * 100 if b > 0 else float("nan")
+                floor_note = "  (baseline already <1e-12: collapse of a roundoff number)" \
+                    if b < 1.0e-12 else ""
+                print(f"      {comp if stat == 'median' else '':<8}{stat:<8}"
+                      f"{b:<14.3e}{a:<14.3e}{coll:<10.1f}%{floor_note}")
+            deep = [f"k{k}:{v:.1e}" for k, v in rep_s["level_meds"][-5:]]
+            deep_b = [f"k{k}:{v:.1e}" for k, v in base["level_meds"][-5:]]
+            print(f"      {'':<8}{'deep5':<8}{' '.join(deep_b)}")
+            print(f"      {'':<8}{'':<8}{' '.join(deep)}   <- with NEMO's prd")
+            prd_lever[comp] = (base["med_en"], rep_s["med_en"], ctrl_max)
+
     print("\n" + "=" * 78)
     print("SUMMARY (<=12-line)")
     print("=" * 78)
@@ -1483,6 +1648,18 @@ def main() -> int:
                      "SMOOTHER" if ratio <= 0.1 else "BOTH (no single owner)")
             print(f"(I) {comp:6s}: stageA(formula) err_norm median={a:.3e} vs "
                   f"stageB(final) {b:.3e}  -> A/B={ratio:.3f}; owner = {owner}")
+    if prd_lever:
+        _ctrl = next(iter(prd_lever.values()))[2]
+        print(f"(N) prd lever: null control max|rebuilt-as_shipped|={_ctrl:.3e}"
+              + ("" if _ctrl == 0.0 else "  <-- NONZERO, LEVER NOT INTERPRETABLE"))
+        for comp, (b, a, _c) in prd_lever.items():
+            print(f"(N) {comp:6s}: err_norm median {b:.3e} (as shipped) -> "
+                  f"{a:.3e} (NEMO's own prd substituted) = "
+                  f"{(1.0 - a / b) * 100 if b > 0 else float('nan'):.1f}% of "
+                  f"this row's median residual is INHERITED from prd")
+    else:
+        print("(N) prd lever: DID NOT RUN (see section (N) for why) -- this "
+              "row's prd-vs-formula split is UNMEASURED on this lane.")
     if our_prd is not None and rep_depth is not None:
         _closed = rep_base["med_en"] < 1.0e-9
         print(f"(K) prd   : err_norm median {rep_base['med_en']:.3e} (as shipped) "
@@ -1497,11 +1674,18 @@ def main() -> int:
         print(f"(L) pn2   : slope-path N^2 vs rn2b err_norm median "
               f"{rep_pn2['med_en']:.3e}; the CLOSED eos_rab/bn2 path (live "
               f"ladders) reaches {rep_closed['med_en']:.3e} on the same dump.")
-        print(f"(M) vslp  : our e1u matches NEMO EXACTLY (0.0) but our e2v does "
-              f"NOT (median|rel| 2.798e-05, max 8.241e-03). Substituting NEMO's "
-              f"own e2v collapses vslp 1.609e-06 -> 3.807e-10; the same "
-              f"substitution on the i-side (e1u) moves uslp 0.0%. The e2 METRIC "
-              f"owns the i-vs-j asymmetry.")
+        # This line used to print four HARDCODED literals (e2v median|rel|
+        # 2.798e-05 etc.) describing a 2026-07-28 measurement, unconditionally
+        # and next to live (K)/(L) lines -- so it announced a year-5 metric
+        # defect as freshly measured on whatever lane was running, long after
+        # metric_convention="nemo_isotropic" closed it.  Print what section
+        # (M)(3)(a) actually measured on THIS lane instead.
+        print(f"(M) metric: e1u vs NEMO mesh_mask median|rel|="
+              f"{metric_live['e1u'][0]:.3e} max={metric_live['e1u'][1]:.3e}; "
+              f"e2v median|rel|={metric_live['e2v'][0]:.3e} "
+              f"max={metric_live['e2v'][1]:.3e}  (LIVE on this lane; the "
+              f"i-vs-j metric asymmetry recorded in 2026-07 is CLOSED when "
+              f"both read 0.0)")
     except NameError:
         pass
     return 0

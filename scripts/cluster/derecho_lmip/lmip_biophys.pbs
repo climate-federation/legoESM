@@ -6,13 +6,13 @@
 # --config`` against the real CRU-JRA reanalysis on glade + the Zenodo-hosted
 # CLM5 surfdata (staged by ``scripts/data/download_lmip_data.sh``).
 #
-# Default template: biophysics/lmip_canopy_4deg_smoke — a ~4 deg global shakedown
+# Default template: biophysics/smoke_4deg — a ~4 deg global shakedown
 # (two_leaf_canopy + MOST + soil freeze/thaw ON), the small-first test before
-# scaling to the 2 deg lmip_canopy_10yr production spin-up.
+# scaling to the 2 deg lmip_biophys_2deg production spin-up.
 #
 # Usage:
 #   qsub -A <ACCOUNT> scripts/cluster/derecho_lmip/lmip_biophys.pbs
-#   qsub -A <ACCOUNT> -v TEMPLATE=biophysics/lmip_canopy_10yr,RESOLUTION=90 \
+#   qsub -A <ACCOUNT> -v TEMPLATE=biophysics/lmip_biophys_2deg,RESOLUTION=90 \
 #        scripts/cluster/derecho_lmip/lmip_biophys.pbs
 #
 # Requirements before submitting:
@@ -25,7 +25,7 @@
 #
 # Override knobs via qsub -v (all optional; unset = the template's own default):
 #   LEGOESM_CONDA_ENV=legoesm-lmip  — conda env with jax + xarray + legoesm
-#   TEMPLATE=biophysics/lmip_canopy_4deg_smoke  — any templates/land/<name>.yaml
+#   TEMPLATE=biophysics/smoke_4deg  — any templates/land/<name>.yaml
 #   YEAR=""                         — override forcing.year_start (CRU-JRA year)
 #   YEAR_END=""                     — override forcing.year_end (multi-year span)
 #   RESOLUTION=""                   — override grid.resolution (latlon N; 45=4deg, 90=2deg)
@@ -51,7 +51,7 @@
 set -euo pipefail
 
 # --- knobs (empty = use the template's own value) ---
-TEMPLATE="${TEMPLATE:-biophysics/lmip_canopy_4deg_smoke}"
+TEMPLATE="${TEMPLATE:-biophysics/smoke_4deg}"
 YEAR="${YEAR:-}"
 YEAR_END="${YEAR_END:-}"
 RESOLUTION="${RESOLUTION:-}"

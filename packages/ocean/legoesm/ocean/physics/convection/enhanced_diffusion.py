@@ -121,6 +121,17 @@ def convective_K_A_flag(
             f"{cfg.n2_mode!r}; expected 'insitu', 'insitu_signed', "
             "'adiabatic' or 'nemo_bn2'."
         )
+    # Same gate for the alpha/beta selector the nemo_bn2 branch forwards
+    # (mirrors ``eos.compute_buoyancy_frequency_nemo_bn2``'s own allowed set;
+    # validated HERE too so a typo raises even under an n2_mode that never
+    # reaches the kernel).
+    if cfg.n2_eos_form not in ("seos", "teos10"):
+        raise ValueError(
+            "Unknown EnhancedDiffusionConfig.n2_eos_form="
+            f"{cfg.n2_eos_form!r}; expected 'seos' (NEMO's 3-term simplified "
+            "EOS) or 'teos10' (NEMO's Roquet polynomial with the TEOS-10 "
+            "coefficient set, which is what ORCA1 runs: ln_teos10=.true.)."
+        )
 
     dz_actual = dz_ref * jacobian[..., jnp.newaxis]               # (..., nlev)
     dry_iface = (dz_actual[..., :-1] <= 0.0) | (dz_actual[..., 1:] <= 0.0)
@@ -158,7 +169,13 @@ def convective_K_A_flag(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
-        N2 = compute_buoyancy_frequency_nemo_bn2(T, S, t_depth, w_depth, g=g)
+        # ``eos_form`` selects WHICH alpha/beta the bn2 assembly uses; this
+        # forward was MISSING, so the EVD trigger always took the S-EOS
+        # branch even on a TEOS-10 card whose TKE sibling
+        # (``TKEConfig.n2_eos_form``, threaded at
+        # vertical_mixing/_shared.py) used the Roquet polynomial.
+        N2 = compute_buoyancy_frequency_nemo_bn2(
+            T, S, t_depth, w_depth, g=g, eos_form=cfg.n2_eos_form)
     else:
         # In-situ density N² (SIGNED); reference density on dry columns keeps
         # the numerator finite too (BIT-IDENTICAL legacy path).

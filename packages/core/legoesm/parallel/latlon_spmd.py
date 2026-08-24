@@ -24,6 +24,7 @@ methodology.  ``check_vma=False`` follows the cube SPMD halo bodies.
 """
 from __future__ import annotations
 
+import re
 from functools import partial
 
 import jax
@@ -38,6 +39,154 @@ from legoesm.parallel.shard_map_compat import shard_map
 # honest without threading the runtime halo through the chooser (see
 # choose_latlon_2d_topology).
 _FOLD_REF_HALO = 2
+
+
+def _resolve_halo_nocomm(env_value: str) -> str:
+    """Resolve ``LEGOESM_LATLON_HALO_NOCOMM`` to one of three arms.
+
+    ``''``/``'0'``   off (default): the real exchange, the right answer.
+    ``'1'``          the collective is replaced by an optimization barrier --
+                     no wire traffic at all, and the answer is wrong.
+    ``'wire'``       the collective RUNS and its result is then discarded, so
+                     the arm pays the wire time while following the SAME wrong
+                     trajectory as ``'1'``.
+
+    The third arm exists because subtracting ``'1'`` from the full run does
+    not isolate communication: the two arms carry different fields after the
+    first step, so their local work can differ too, and a contamination that
+    is merely constant is invisible to any drift check.  ``full - '1'`` is
+    therefore an upper bound; ``'wire' - '1'`` differs from ``'1'`` ONLY by
+    the collective, with the trajectory identical by construction, and is the
+    number to quote as wire time.
+
+    A MEASUREMENT knob that DELIBERATELY BREAKS THE ANSWER -- in both timing
+    arms each device keeps its OWN edge rows instead of the neighbour's, so
+    every ghost row is wrong and the run is meaningless as physics.  It
+    exists because the step time alone cannot be split: the profiler on this
+    stack does not record the halo collectives.  Every other line -- the
+    pack, the concatenate, the split, the pole fold, the wall constants, the
+    kernel count and the shapes -- is unchanged.
+
+    The barrier (rather than a bare identity) is load-bearing: without it the
+    receive-side slices fold back to the send-side buffer and XLA deletes the
+    pack, so the arm would time a different program.  Same lesson as
+    ``sharded_dynamics._resolve_halo_nocomm``, whose MPAS knob this mirrors.
+
+    Never valid in production.  Unknown values raise (dispatch hardening).
+    """
+    if env_value in ("", "0"):
+        return "off"
+    if env_value in ("1", "wire"):
+        return env_value
+    raise ValueError(
+        f"LEGOESM_LATLON_HALO_NOCOMM={env_value!r}: must be '0', '1' or "
+        f"'wire' (empty = off). It is a timing knob that BREAKS the answer; "
+        f"a typo must not silently enable it.")
+
+
+#: Canonical decimal integer, no sign / whitespace / underscores / leading
+#: zeros -- the spellings ``int()`` would silently accept.
+_CANONICAL_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _resolve_halo_ballast(env_value: str) -> int:
+    """Resolve ``LEGOESM_LATLON_HALO_BALLAST``: wire-payload multiplier for
+    the lat-band exchange; ``''``/``'1'`` = off (default).
+
+    A MEASUREMENT knob, never a production one, and unlike the no-comm knob
+    it is bit-identical: each message is sent ``N`` times and the copies are
+    dropped on receipt, so the bytes scale while the collective count, the
+    schedule, the arithmetic and the answer do not.  The step's response to
+    ``N`` IS the bandwidth term.
+
+    Why it is needed here: the lat-band decomposition gives every device a
+    FIXED halo -- two rows of the whole longitude circle -- no matter how
+    many devices there are, yet the measured communication time doubled
+    between 32 and 64 devices (0.676 to 1.483 ms).  Constant bytes and
+    rising time means the cost is per-operation, not payload, and that
+    distinction decides whether a two-dimensional decomposition (which cuts
+    bytes but adds collectives) can help at all.
+
+    Unknown or non-canonical values raise (dispatch hardening): a typo must
+    not silently run a different payload multiple.
+    """
+    if env_value in ("", "1"):
+        return 1
+    if _CANONICAL_INT_RE.fullmatch(env_value) is None:
+        raise ValueError(
+            f"LEGOESM_LATLON_HALO_BALLAST={env_value!r}: must be a canonical "
+            f"decimal integer >= 1 (empty or '1' = off)")
+    n = int(env_value)
+    if not 1 <= n <= 8:
+        raise ValueError(
+            f"LEGOESM_LATLON_HALO_BALLAST={n}: out of range 1..8. It "
+            f"multiplies every halo message, so a large value runs the node "
+            f"out of memory rather than measuring anything.")
+    return n
+
+
+def _halo_ppermute(x, axis_name, perm):
+    """Halo ``ppermute``, or one of the two timing substitutes.
+
+    Single choke point for every lat-lon SPMD halo exchange so a budget arm
+    covers all of them at once.  Both knobs resolve at TRACE time (a Python
+    branch on a static env value), so the compiled program contains one path
+    or the other, never a select.
+
+    ``LEGOESM_LATLON_HALO_NOCOMM=1`` drops the collective entirely (wrong
+    answers, times the program without communication);
+    ``LEGOESM_LATLON_HALO_NOCOMM=wire`` keeps the collective but discards what
+    it returns, so the arm pays the wire time on the SAME wrong trajectory as
+    ``=1`` -- the pair prices communication without a trajectory difference
+    between the two sides of the subtraction.
+    ``LEGOESM_LATLON_HALO_BALLAST=N`` sends N copies and keeps the first
+    (bit-identical answers, times the payload slope).
+    """
+    import os
+
+    nocomm = _resolve_halo_nocomm(
+        os.environ.get("LEGOESM_LATLON_HALO_NOCOMM", ""))
+    ballast = _resolve_halo_ballast(
+        os.environ.get("LEGOESM_LATLON_HALO_BALLAST", ""))
+
+    # The payload multiple is built BEFORE the no-comm branch on purpose, so
+    # the two knobs COMPOSE: running both gives an arm that pays the extra
+    # concatenate and slice with no wire at all. Without that arm the
+    # payload delta is confounded -- it contains the device-side packing the
+    # multiplier itself adds, and the packing cost is not small (the raw
+    # delta came out LARGER than the whole communication term, which is only
+    # possible if the packing is being counted as payload).
+    rows = x.shape[0]
+    send = jnp.concatenate([x] * ballast, axis=0) if ballast > 1 else x
+
+    if nocomm == "1":
+        recv = jax.lax.optimization_barrier(send)
+    elif nocomm == "wire":
+        # Run the real collective, then keep the LOCAL rows anyway.
+        #
+        # Holding the exchange in a discarded tuple element is not enough --
+        # XLA deletes a collective nothing consumes, and the first version of
+        # this arm moved zero bytes.  Selecting between the two on a flag the
+        # compiler cannot fold makes the exchange a live operand of the
+        # result, so it survives; the flag is false at run time, so the value
+        # is bit-for-bit the local one the no-communication arm produces.
+        wired = jax.lax.ppermute(send, axis_name, perm)
+        keep_local = jax.lax.optimization_barrier(
+            jnp.zeros((), dtype=jnp.bool_))
+        recv = jnp.where(keep_local, wired, send)
+    else:
+        recv = jax.lax.ppermute(send, axis_name, perm)
+    if ballast > 1:
+        # The barrier keeps the enlarged send buffer alive: without it XLA
+        # may rewrite slice(ppermute(concat(x, x))) back to ppermute(x),
+        # which preserves every value while shipping the ORIGINAL bytes --
+        # an arm that measures nothing and looks fine. Asserted by an HLO
+        # census in tests/parallel/test_latlon_halo_nocomm.py, not argued.
+        recv = jax.lax.optimization_barrier(recv)
+        # The kept slice is the same buffer that would have been sent, so
+        # the answer is unchanged; only the bytes on the wire scale.
+        return recv[:rows]
+    return recv
 
 
 def latlon_band_perms(n_dev: int):
@@ -107,8 +256,8 @@ def lon_ring_ghosts_spmd(f, mesh, halo: int = 1):
     perm_to_west, perm_to_east = latlon_lon_ring_perms(p_lon)
     # My EAST ghost = east neighbour's west edge (sources send WEST edges to
     # their west neighbour); my WEST ghost = west neighbour's east edge.
-    east_ghost = jax.lax.ppermute(f[:, :halo], "lon", perm_to_west)
-    west_ghost = jax.lax.ppermute(f[:, -halo:], "lon", perm_to_east)
+    east_ghost = _halo_ppermute(f[:, :halo], "lon", perm_to_west)
+    west_ghost = _halo_ppermute(f[:, -halo:], "lon", perm_to_east)
     return jnp.concatenate([west_ghost, f, east_ghost], axis=1)
 
 
@@ -137,7 +286,7 @@ def reconstruct_vface_lower(v_lower, axis: str, perm_north):
     -------
     array ``(n_lat_band + 1, n_lon[, nlev])`` — the band's full v-faces.
     """
-    boundary = jax.lax.ppermute(v_lower[0:1], axis, perm_north)
+    boundary = _halo_ppermute(v_lower[0:1], axis, perm_north)
     return jnp.concatenate([v_lower, boundary], axis=0)
 
 
@@ -199,7 +348,7 @@ def reconstruct_vface_lower_multi(v_lowers, axis: str, perm_north):
             flats.append(row.reshape(1, w))
         buf = jnp.concatenate(flats, axis=1)
         # ONE ppermute for the whole dtype group (north band receives 0).
-        recv = jax.lax.ppermute(buf, axis, perm_north)
+        recv = _halo_ppermute(buf, axis, perm_north)
         off = 0
         for k, i in enumerate(idxs):
             w = widths[k]
@@ -249,7 +398,7 @@ def reconstruct_uface_left(u_left, axis: str, p_lon: int):
         boundary = u_left[:, 0:1]
     else:
         perm_to_west, _ = latlon_lon_ring_perms(p_lon)
-        boundary = jax.lax.ppermute(u_left[:, 0:1], axis, perm_to_west)
+        boundary = _halo_ppermute(u_left[:, 0:1], axis, perm_to_west)
     return jnp.concatenate([u_left, boundary], axis=1)
 
 
@@ -389,7 +538,7 @@ def partner_pole_fold_window(edge, lon_index, mesh, halo: int, negate: bool):
     # 2. ONE antipodal ppermute over the lon ring (shift by p_lon/2 is a
     # bijection, and c' != c for every even p_lon >= 2).
     perm_anti = [(s, (s + p_lon // 2) % p_lon) for s in range(p_lon)]
-    recv = jax.lax.ppermute(ext, "lon", perm_anti)
+    recv = _halo_ppermute(ext, "lon", perm_anti)
     # 3. lat-mirror + sign (the _pole_fold row flip), then the window
     # column map (derivation above; seam-straddling windows mix branches).
     sign = -1.0 if negate else 1.0
@@ -463,8 +612,8 @@ def make_latlon_band_pad_body(mesh, halo: int = 1, negate: bool = False):
         # so row 0 is the SOUTH edge, row -1 the NORTH edge).
         south_edge = data_lon[:halo]   # my south rows -> band below (b-1)'s N ghost
         north_edge = data_lon[-halo:]  # my north rows -> band above (b+1)'s S ghost
-        north_recv = jax.lax.ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
-        south_recv = jax.lax.ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
+        north_recv = _halo_ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
+        south_recv = _halo_ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
 
         # 3. pole fold at the end bands (ppermute non-targets receive zeros).
         b = jax.lax.axis_index(axis)
@@ -559,8 +708,8 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
             north_recv = jnp.zeros_like(tile[:halo])
             south_recv = jnp.zeros_like(tile[-halo:])
         else:
-            north_recv = jax.lax.ppermute(tile[:halo], "lat", perm_north)
-            south_recv = jax.lax.ppermute(tile[-halo:], "lat", perm_south)
+            north_recv = _halo_ppermute(tile[:halo], "lat", perm_north)
+            south_recv = _halo_ppermute(tile[-halo:], "lat", perm_south)
         ext = jnp.concatenate([south_recv, tile, north_recv], axis=0)
 
         # 2. longitude ring ghosts on the lat-EXTENDED block (fills corners
@@ -577,6 +726,265 @@ def make_latlon_2d_pad_body(mesh, halo: int = 1, negate: bool = False):
                                 ext[-halo:])
         return jnp.concatenate(
             [south_ghost, ext[halo:ext.shape[0] - halo], north_ghost], axis=0)
+
+    return body
+
+
+def _chan_pack(slabs):
+    """Pack slabs that share their two leading axes into one buffer.
+
+    Every slab is viewed as ``(d0, d1, -1)`` and the views are concatenated
+    on that trailing channel axis.  The two leading axes survive, which is
+    what lets the packed buffer go through the SAME lon ring, row flip and
+    column take the per-field path uses -- a ravel would destroy them.
+    """
+    dtypes = {x.dtype for x in slabs}
+    if len(dtypes) != 1:
+        # Concatenating promotes (bfloat16 with float32 gives float32) and
+        # nothing casts back, so a mixed group would silently change field
+        # dtypes. The per-field path preserves them.
+        raise ValueError(
+            f"_chan_pack: all slabs must share one dtype to ride in one "
+            f"buffer; got {sorted(str(d) for d in dtypes)}. Group by dtype "
+            f"before packing.")
+    views = [x.reshape(x.shape[0], x.shape[1], -1) for x in slabs]
+    widths = [int(v.shape[2]) for v in views]
+    return jnp.concatenate(views, axis=2), widths
+
+
+def _chan_unpack(buf, widths, slabs):
+    """Inverse of :func:`_chan_pack`, restoring each slab's shape.
+
+    ``buf``'s two leading axes may differ from the inputs' (the ring pads
+    them), so each piece is reshaped to the leading axes of the BUFFER plus
+    the slab's trailing axes.
+    """
+    out, off = [], 0
+    for w, ref in zip(widths, slabs):
+        piece = buf[:, :, off:off + w]
+        out.append(piece.reshape(buf.shape[0], buf.shape[1], *ref.shape[2:]))
+        off += w
+    return out
+
+
+def make_latlon_2d_packed_pad_body(mesh, specs):
+    """PACKED multi-field 2-D TILE halo body — the tiled twin of
+    :func:`make_latlon_band_packed_pad_body`.
+
+    Why it exists, with the receipt. The tiled decomposition moves 5.3x
+    fewer halo bytes than latitude bands at 64 devices (3.483 MB against
+    18.515, counted from the compiled program) and yet measured 27% SLOWER,
+    because the packed stage-entry exchange refuses any mesh that is not
+    one-dimensional and the tiled lane therefore ran one message PER FIELD:
+    108 messages against the band lane's 13, at about 26 microseconds each
+    against one microsecond packed (jobs 27078940, 27078941). This body
+    carries every field of a stage's epoch in ONE message per direction, so
+    the byte cut survives without the message count.
+
+    Message count per call, independent of the number of fields: two for
+    the latitude cut, two for the longitude ring, and six for the pole fold
+    — three per pole edge, its own ring pair plus the antipodal exchange,
+    run for the south edge and the north edge. Ten in total, which is the
+    measured figure. The per-field path costs that many PER FIELD.
+
+    Ten is the count when BOTH axes are genuinely split. The degenerate meshes
+    emit fewer, because their exchanges become local: ``p_lat == 1`` drops the
+    two latitude messages (a single band has no neighbour band), and
+    ``p_lon == 1`` drops the two longitude messages AND all six of the fold's,
+    since a tile spanning the whole ring wraps onto itself.
+
+    All fields must share one dtype: a packed buffer promotes mixed widths
+    and nothing casts back, so a mixed group would silently change field
+    dtypes. Group by dtype and call once per group.
+
+    ``specs`` — STATIC tuple, one ``("fold", halo, negate)`` entry per field,
+    the same fold family :func:`make_latlon_2d_pad_body` handles. All fields
+    must share one halo depth, since they ride in one buffer. A ``"wall"``
+    entry raises: the lat-only wall pad has its own body and packing it here
+    would silently apply fold semantics to it.
+
+    Bit-identical to calling :func:`make_latlon_2d_pad_body` once per field:
+    the exchange is a bit-copy, the pack is a reshape and a concatenate, and
+    every per-field semantic -- the pole fold's sign flip and its window
+    column map -- is applied AFTER the split, never on the packed buffer.
+
+    The assembly touches each field's data TWICE, and that is load-bearing.
+    Cutting the message count did not make this body fast: a byte census of the
+    compiled program found it moving 194 MB of local data to exchange 0.81 MB
+    over the wire, because it built the lat-extended block, then the
+    lat-and-lon-extended block, then sliced the interior back out and stacked
+    the ghost rows on again -- four passes over every field. The longitude
+    exchange does need lat-extended COLUMNS to fill the corners, but those are
+    only ``halo`` wide and are built directly from the edge slices and the rows
+    that just arrived, so the full block is never materialised. What remains is
+    one pass to widen the interior rows and one to stack the ghost rows, and
+    the same census now reports 68.7 MB. Anything added here that copies a
+    whole field again gives that back.
+
+    That two-pass count assumes a tile wide against its halo, which is what the
+    campaign runs (``w >= 4h``). At the narrowest width this body accepts,
+    ``w == 2h``, the two edge column strips are the entire field and the
+    assembly costs three passes rather than two -- still fewer than four, but
+    a smaller saving than the census above suggests.
+
+    Even ``p_lon`` with ``w >= 4h`` only, which is the tiling the campaign
+    runs. Odd ``p_lon`` needs the all_gather fold, whose packed form is a
+    follow-up; it raises rather than silently falling back to the per-field
+    path, because a silent fallback here is exactly the 108-message defect
+    this body exists to remove.
+
+    Returns ``body(*fields) -> tuple(padded_fields)`` for use INSIDE a
+    shard_map over a ``("lat", "lon")`` mesh.
+    """
+    if tuple(mesh.axis_names) != ("lat", "lon"):
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: needs a 2-D ('lat', 'lon') "
+            f"tile mesh; got {tuple(mesh.axis_names)}. The band twin is "
+            f"make_latlon_band_packed_pad_body.")
+    specs = tuple(tuple(sp) for sp in specs)
+    if not specs:
+        raise ValueError("specs must name >= 1 field")
+    halos = set()
+    for sp in specs:
+        if sp[0] != "fold":
+            raise ValueError(
+                f"make_latlon_2d_packed_pad_body: only 'fold' specs are "
+                f"packed here; got {sp[0]!r}. The lat-only wall pad has its "
+                f"own body — packing it here would apply fold semantics to "
+                f"it.")
+        if len(sp) != 3:
+            raise ValueError(f"fold spec must be (kind, halo, negate): {sp}")
+        halos.add(int(sp[1]))
+    if len(halos) != 1:
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: all fields must share one halo "
+            f"depth to ride in one buffer; got {sorted(halos)}")
+    halo = halos.pop()
+    n_fields = len(specs)
+
+    p_lat = int(mesh.shape["lat"])
+    p_lon = int(mesh.shape["lon"])
+    if p_lon > 1 and p_lon % 2:
+        raise ValueError(
+            f"make_latlon_2d_packed_pad_body: odd lon split {p_lon} needs "
+            f"the all_gather pole fold, whose packed form is not built. Use "
+            f"an even lon split, or the per-field body.")
+    perm_north, perm_south = latlon_band_perms(p_lat)
+
+    def body(*fields):
+        if len(fields) != n_fields:
+            raise ValueError(
+                f"packed 2-D pad body built for {n_fields} fields, got "
+                f"{len(fields)}")
+
+        # 1. ONE latitude message per direction, all fields.
+        if p_lat == 1:
+            north_recv = [jnp.zeros_like(f[:halo]) for f in fields]
+            south_recv = [jnp.zeros_like(f[-halo:]) for f in fields]
+        else:
+            south_edges = [f[:halo] for f in fields]
+            north_edges = [f[-halo:] for f in fields]
+            sbuf, sw = _chan_pack(south_edges)
+            nbuf, nw = _chan_pack(north_edges)
+            north_recv = _chan_unpack(
+                _halo_ppermute(sbuf, "lat", perm_north), sw, south_edges)
+            south_recv = _chan_unpack(
+                _halo_ppermute(nbuf, "lat", perm_south), nw, north_edges)
+
+        # 2. The longitude exchange has to carry LAT-EXTENDED columns, because
+        #    that is what fills the corners. It does NOT need the whole
+        #    lat-extended block to get them: the columns are only `halo` wide,
+        #    so they are built directly from the edge slices and the rows that
+        #    just arrived. Materialising the full lat-extended block here, and
+        #    then again after the longitude exchange, is what made this body
+        #    copy every field four times over.
+        west_cols = [jnp.concatenate([s[:, :halo], f[:, :halo], n[:, :halo]],
+                                     axis=0)
+                     for s, f, n in zip(south_recv, fields, north_recv)]
+        east_cols = [jnp.concatenate([s[:, -halo:], f[:, -halo:], n[:, -halo:]],
+                                     axis=0)
+                     for s, f, n in zip(south_recv, fields, north_recv)]
+        if p_lon == 1:
+            # The wrap: with one tile spanning the whole ring, my east ghost is
+            # my own west columns. Same values jnp.pad(mode="wrap") gives, with
+            # no full-block pad to produce them.
+            east_ghost, west_ghost = west_cols, east_cols
+        else:
+            perm_to_west, perm_to_east = latlon_lon_ring_perms(p_lon)
+            wbuf, ww = _chan_pack(west_cols)
+            ebuf, ew = _chan_pack(east_cols)
+            east_ghost = _chan_unpack(
+                _halo_ppermute(wbuf, "lon", perm_to_west), ww, west_cols)
+            west_ghost = _chan_unpack(
+                _halo_ppermute(ebuf, "lon", perm_to_east), ew, east_cols)
+
+        # 3. Pole fold. The two collectives it needs — the 2h ring extension
+        #    and the antipodal exchange — run ONCE on a packed buffer; the
+        #    row mirror, the sign flip and the window column map are local
+        #    and stay per field, which is what keeps this bit-identical to
+        #    the per-field body.
+        b = jax.lax.axis_index("lat")
+        s_edges = [f[:halo] for f in fields]
+        n_edges = [f[-halo:] for f in fields]
+        if p_lon == 1:
+            pad_lon = ((0, 0), (halo, halo))
+            def _fold_all(edges):
+                return [_pole_fold(
+                            jnp.pad(e, pad_lon + ((0, 0),) * (e.ndim - 2),
+                                    mode="wrap"), sp[2])
+                        for e, sp in zip(edges, specs)]
+            s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
+        else:
+            w_tile = fields[0].shape[1]
+            if w_tile < 2 * halo:
+                # The per-field partner fold accepts w >= 2h; matching it
+                # exactly, so this body is not narrower than the one it
+                # claims parity with.
+                raise ValueError(
+                    f"make_latlon_2d_packed_pad_body: tile lon width "
+                    f"{w_tile} is under 2x the halo {halo}, which the "
+                    f"antipodal fold cannot serve.")
+            c = jax.lax.axis_index("lon")
+            W = w_tile * p_lon
+            perm_anti = [(src, (src + p_lon // 2) % p_lon)
+                         for src in range(p_lon)]
+            t = jnp.arange(w_tile + 2 * halo)
+            r = jnp.where(c * w_tile + t < W // 2 + halo, t + 2 * halo, t)
+
+            def _fold_all(edges):
+                buf, widths = _chan_pack(edges)
+                ext = lon_ring_ghosts_spmd(buf, mesh, halo=2 * halo)
+                recv = _halo_ppermute(ext, "lon", perm_anti)
+                pieces = _chan_unpack(recv, widths, edges)
+                out = []
+                for piece, sp in zip(pieces, specs):
+                    sign = -1.0 if sp[2] else 1.0
+                    out.append(jnp.take(sign * piece[::-1], r, axis=1))
+                return out
+
+            s_fold, n_fold = _fold_all(s_edges), _fold_all(n_edges)
+
+        # 4. Assemble each padded field in TWO passes over its data instead of
+        #    four: one to widen the interior rows, one to stack the ghost rows
+        #    on top and below. Every other piece here is `halo` rows or `halo`
+        #    columns, which is negligible against the field at the tile widths
+        #    the campaign runs (w >= 4h) but NOT at the narrowest width this
+        #    body accepts: at w == 2h the two edge column strips together are
+        #    the whole field, and the assembly is three passes, not two.
+        out = []
+        for f, s_mid, n_mid, wg, eg, sf, nf in zip(
+                fields, south_recv, north_recv, west_ghost, east_ghost,
+                s_fold, n_fold):
+            mid = jnp.concatenate(
+                [wg[halo:wg.shape[0] - halo], f,
+                 eg[halo:eg.shape[0] - halo]], axis=1)
+            south_row = jnp.concatenate([wg[:halo], s_mid, eg[:halo]], axis=1)
+            north_row = jnp.concatenate([wg[-halo:], n_mid, eg[-halo:]],
+                                        axis=1)
+            south_row = jnp.where(b == 0, sf, south_row)
+            north_row = jnp.where(b == p_lat - 1, nf, north_row)
+            out.append(jnp.concatenate([south_row, mid, north_row], axis=0))
+        return tuple(out)
 
     return body
 
@@ -621,8 +1029,8 @@ def make_latlon_band_wall_pad_body(mesh, halo: int = 1,
         # leaves lon untouched).
         south_edge = tile[:halo]       # my south rows -> band below (b-1)'s N ghost
         north_edge = tile[-halo:]      # my north rows -> band above (b+1)'s S ghost
-        north_recv = jax.lax.ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
-        south_recv = jax.lax.ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
+        north_recv = _halo_ppermute(south_edge, axis, perm_north)  # b's N ghost = b+1's south edge
+        south_recv = _halo_ppermute(north_edge, axis, perm_south)  # b's S ghost = b-1's north edge
 
         # CONSTANT wall pad at the physical pole end bands (ppermute non-targets
         # receive zeros from these rows, but the where below overrides them with
@@ -706,8 +1114,8 @@ def make_latlon_band_wall_multi_pad_body(mesh, halo: int = 1,
             south_buf = jnp.concatenate([s for s, _ in flats], axis=1)
             north_buf = jnp.concatenate([n for _, n in flats], axis=1)
             # ONE ppermute pair for the whole dtype group.
-            north_recv = jax.lax.ppermute(south_buf, axis, perm_north)
-            south_recv = jax.lax.ppermute(north_buf, axis, perm_south)
+            north_recv = _halo_ppermute(south_buf, axis, perm_north)
+            south_recv = _halo_ppermute(north_buf, axis, perm_south)
             off = 0
             for k, i in enumerate(idxs):
                 w = widths[k]
@@ -859,8 +1267,8 @@ def make_latlon_band_packed_pad_body(mesh, specs):
             # ONE ppermute pair for the whole dtype group.  My NORTH ghost
             # = north neighbour's south rows (perm_north sends s -> s-1);
             # my SOUTH ghost = south neighbour's north rows.
-            n_recv_buf = jax.lax.ppermute(south_buf, axis, perm_north)
-            s_recv_buf = jax.lax.ppermute(north_buf, axis, perm_south)
+            n_recv_buf = _halo_ppermute(south_buf, axis, perm_north)
+            s_recv_buf = _halo_ppermute(north_buf, axis, perm_south)
             off = 0
             for k, i in enumerate(idxs):
                 h = int(specs[i][1])

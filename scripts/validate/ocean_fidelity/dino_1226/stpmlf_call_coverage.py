@@ -93,6 +93,9 @@ CALLS: list[CallEntry] = [
     CallEntry(137, "iom_setkt", WAIVED, "restart-file I/O plumbing."),
     CallEntry(160, "day", WAIVED, "calendar bookkeeping."),
     CallEntry(161, "iom_setkt", WAIVED, "I/O plumbing (tell IOM the current step)."),
+    CallEntry(171, "iom_setkt", WAIVED, "restart-file I/O plumbing (SI3 restart context; DINO has no sea ice)."),
+    CallEntry(177, "iom_setkt", WAIVED, "restart-file I/O plumbing (ABL restart context; DINO has no ABL)."),
+    CallEntry(181, "iom_setkt", WAIVED, "I/O plumbing: tells XIOS the current step number; touches no ocean state."),
 
     # --- external forcing update (lines 166-172) ---
     CallEntry(166, "tide_update", WAIVED,
@@ -440,6 +443,11 @@ CALLS: list[CallEntry] = [
               "writes raw dump files consumed by the Python probes that "
               "produced several fidelity_bar_gate.py rows already."),
     CallEntry(270, "stp_dump_krhs('dynadv')", WAIVED, "same #1226 debug instrumentation as line 225."),
+    CallEntry(343, "trddump_acc_baro", WAIVED, "#1455 SG-B accumulation instrumentation (oracle d1ae0ef); writes own module accumulators only; physics-unchanged proven bit-identical by the two controls in oracle 0a1a0cf."),
+    CallEntry(406, "trddump_acc_plant", WAIVED, "#1455 SG-B accumulation instrumentation (oracle d1ae0ef); synthetic-plant hook, inert unless rn_acc_plant set; physics-unchanged per oracle 0a1a0cf controls."),
+    CallEntry(409, "trddump_acc_state", WAIVED, "#1455 SG-B accumulation instrumentation (oracle d1ae0ef); state snapshot into own accumulators; physics-unchanged per oracle 0a1a0cf controls."),
+    CallEntry(589, "trddump_acc_state", WAIVED, "#1455 SG-B accumulation instrumentation (oracle d1ae0ef); state snapshot into own accumulators; physics-unchanged per oracle 0a1a0cf controls."),
+    CallEntry(590, "trddump_acc_state", WAIVED, "#1455 SG-B accumulation instrumentation (oracle d1ae0ef); state snapshot into own accumulators; physics-unchanged per oracle 0a1a0cf controls."),
     CallEntry(274, "stp_dump_krhs('dynvor')", WAIVED, "same #1226 debug instrumentation as line 225."),
     CallEntry(278, "stp_dump_krhs('dynldf')", WAIVED, "same #1226 debug instrumentation as line 225."),
     CallEntry(284, "stp_dump_krhs('dynhpg')", WAIVED, "same #1226 debug instrumentation as line 225."),
@@ -448,6 +456,8 @@ CALLS: list[CallEntry] = [
     CallEntry(393, "stp_dump_ts_krhs('trasbc')", WAIVED, "same #1226 debug instrumentation as line 225."),
     CallEntry(397, "stp_dump_ts_krhs('traqsr')", WAIVED, "same #1226 debug instrumentation as line 225."),
     CallEntry(423, "stp_dump_ts_krhs('traadv')", WAIVED, "same #1226 debug instrumentation as line 225."),
+    CallEntry(547, "stp_dump_ts_krhs('before_traldf')", WAIVED, "same #1226 debug instrumentation as line 225 (#1455 term-sweep pair)."),
+    CallEntry(549, "stp_dump_ts_krhs('after_traldf')", WAIVED, "same #1226 debug instrumentation as line 225 (#1455 term-sweep pair)."),
     CallEntry(435, "stp_dump_ts_krhs('trazdf')", WAIVED, "same #1226 debug instrumentation as line 225."),
 ]
 

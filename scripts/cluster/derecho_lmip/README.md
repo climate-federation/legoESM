@@ -4,9 +4,9 @@ Global biophysics-only LMIP on Derecho (branch `lmip-biophys-stable`).  Runs
 `scripts/run/run_lmip_biophys.py` (config-driven) against the real CRU-JRA
 reanalysis on glade + the CLM5 surfdata hosted on Zenodo.
 
-The default job is the **`biophysics/lmip_canopy_4deg_smoke`** template — a ~4°
+The default job is the **`biophysics/smoke_4deg`** template — a ~4°
 global shakedown (two-leaf canopy + MOST + soil freeze/thaw ON), the small-first
-test before scaling to the 2° `lmip_canopy_10yr` production spin-up.
+test before scaling to the 2° `lmip_biophys_2deg` production spin-up.
 
 ## One-time setup
 
@@ -49,7 +49,7 @@ tail -f lmip_biophys.o<jobid>
 
 Expected: a few minutes wall clock at 4° for the 30-day default; the console
 banner prints `template:`, resolved `overrides:`, and `freeze_thaw=on`; the
-experiment lands in `$SCRATCH/lmip_lmip_canopy_4deg_smoke/` with a resolved
+experiment lands in `$SCRATCH/lmip_smoke_4deg/` with a resolved
 `config.yaml`, a monthly `lmip_biophys.monthly.nc` tape, and a
 `restart_<year>_d<DDD>h<HH>.npz` end-state.
 
@@ -64,7 +64,7 @@ All optional — unset means "use the template's own value".
 
 | var | meaning |
 |---|---|
-| `TEMPLATE` | template under `templates/land/` (default `biophysics/lmip_canopy_4deg_smoke`; e.g. `biophysics/lmip_canopy_10yr`) |
+| `TEMPLATE` | template under `templates/land/` (default `biophysics/smoke_4deg`; e.g. `biophysics/lmip_biophys_2deg`) |
 | `YEAR` / `YEAR_END` | CRU-JRA `forcing.year_start` / `year_end` (must be staged locally) |
 | `RESOLUTION` | latlon N (N × 2N): 45 = 4°, 90 = 2° |
 | `DT` | timestep [s] (3600 = 1 h) |
@@ -79,7 +79,7 @@ All optional — unset means "use the template's own value".
 Examples:
 ```bash
 # 2° production 10-yr spin-up (real thing; long walltime)
-qsub -A <ACCOUNT> -v TEMPLATE=biophysics/lmip_canopy_10yr scripts/cluster/derecho_lmip/lmip_biophys.pbs
+qsub -A <ACCOUNT> -v TEMPLATE=biophysics/lmip_biophys_2deg scripts/cluster/derecho_lmip/lmip_biophys.pbs
 
 # freeze/thaw OFF control (reproduce the boreal-NaN baseline for comparison)
 qsub -A <ACCOUNT> -v FREEZE_THAW=false,OUT_TAG=_noft scripts/cluster/derecho_lmip/lmip_biophys.pbs

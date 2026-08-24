@@ -5,6 +5,8 @@ logic from run_amip.py into a reusable class.
 """
 from __future__ import annotations
 
+import math as _math
+
 from pathlib import Path
 
 import numpy as np
@@ -145,6 +147,35 @@ _PS_BLOWUP_MAX_PA = 115000.0
 # Tolerance for "global T_min sits AT the dycore floor": the clip is an exact
 # jnp.maximum, so a pinned column reports T_min == floor up to fp rounding.
 _T_FLOOR_TOL_K = 1e-3
+
+
+def diagnostic_interval_steps(diag_days, dt_s, fallback_steps):
+    """Diagnostic / blow-up-check cadence in STEPS, from a cadence in days.
+
+    ``diag_days <= 0`` is the "no periodic cadence" sentinel and returns
+    ``fallback_steps`` (each run loop decides what that means — one sample at
+    the end of the link, or the writer disabled).
+
+    A positive cadence never returns 0.  A sub-step request (``diag_days``
+    below one timestep) truncates to zero steps, and every guard in every run
+    loop reads a zero interval as "diagnostics disabled" — so asking for the
+    FINEST possible cadence would silently switch the blow-up check OFF, the
+    exact opposite of the request.  One step is the floor.
+
+    This is the single definition of that arithmetic: the cadence decides how
+    precisely a blow-up can be located in time (the reported failure is the
+    first SAMPLE, not the first bad step), so a lane that quietly computed it
+    differently would report a different failure time for the same run.
+    """
+    if not _math.isfinite(diag_days):
+        # NaN would take the "no cadence" branch below and inf would overflow
+        # the int(); either way the run would proceed with a cadence nobody
+        # asked for, so refuse instead.
+        raise ValueError(
+            f"diag_days must be a finite number of days; got {diag_days!r}.")
+    if diag_days <= 0.0:
+        return fallback_steps
+    return max(1, int(diag_days * 86400.0 / dt_s))
 
 
 def physical_state_blowup_reason(elapsed_day, T_min, T_max,
@@ -1413,6 +1444,7 @@ class DiagnosticCollector:
         hfls=None,
         rsutcs=None,
         rlutcs=None,
+        wap=None,
         flux_interval_days=None,
     ) -> bool:
         """Feed the CMIP spatial (``Amon``/``day``) + zonal-mean monthly
@@ -1796,6 +1828,10 @@ class DiagnosticCollector:
                 ('hus', q_v_np),
                 ('ua', u_east_np),
                 ('va', v_north_np),
+                # Pressure vertical velocity: same plev19 + regrid path as the
+                # rest, so subsidence becomes a published field instead of a
+                # continuity guess made downstream from monthly-mean winds.
+                ('wap', None if wap is None else np.asarray(wap)),
             ):
                 if _src is None:
                     continue

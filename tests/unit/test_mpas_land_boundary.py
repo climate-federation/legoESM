@@ -197,6 +197,107 @@ def test_mpas_turbulence_beta_throttles_land_only(mpas_mesh, sigma_coord,
     assert (dq_beta[land] >= 0.0).all()
 
 
+def _land_forcing(ncell, shflx=None, lhflx=None):
+    f = {"T_sfc": jnp.full((ncell,), 300.0)}
+    if shflx is not None:
+        f["shflx_land"] = jnp.full((ncell,), shflx)
+        f["lhflx_land"] = jnp.full((ncell,), lhflx)
+    return f
+
+
+# Which schemes may be handed the land model's own turbulent fluxes is decided
+# by one property: does the kernel declare a ``surface_flux`` argument?  It is
+# NOT the same question as whether the scheme carries prognostic turbulent
+# energy — clubb and clubb_lite do both.
+_LAND_FLUX_REFUSED = ["smagorinsky", "holtslag_boville", "ysu", "tke",
+                      "mynn25", "edmf"]
+_LAND_FLUX_ACCEPTED = ["louis", "clubb", "clubb_lite"]
+
+
+def test_the_admissible_set_matches_the_hand_written_split():
+    """Ties the signature scan to the two lists the tests below are built from.
+
+    Written out by hand on purpose: if a kernel gains or loses the argument,
+    this fails and forces the parametrised cases to move with it, instead of
+    both sides drifting together and proving nothing.
+    """
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        schemes_accepting_surface_flux,
+    )
+    assert set(schemes_accepting_surface_flux()) == set(_LAND_FLUX_ACCEPTED)
+    assert not set(schemes_accepting_surface_flux()) & set(_LAND_FLUX_REFUSED)
+
+
+@pytest.mark.parametrize("scheme", _LAND_FLUX_REFUSED)
+def test_land_fluxes_are_refused_by_a_scheme_that_cannot_consume_them(
+        mpas_mesh, sigma_coord, mpas_state, scheme):
+    """Handing the land model's fluxes to a scheme that computes its own.
+
+    These kernels take no ``surface_flux`` argument.  Passing the fluxes
+    anyway used to raise TypeError from inside a traced column; silently
+    dropping them would be worse still, because the run would advertise land
+    coupling while the atmosphere applied a surface flux the land model never
+    solved.
+    """
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.ones((ncell,)))
+    with pytest.raises(ValueError, match="cannot be handed the land surface"):
+        fn(mpas_state, mpas_mesh, sigma_coord,
+           forcing=_land_forcing(ncell, 40.0, 90.0))
+
+
+@pytest.mark.parametrize("scheme", _LAND_FLUX_ACCEPTED)
+def test_land_fluxes_actually_reach_every_scheme_the_guard_admits(
+        mpas_mesh, sigma_coord, mpas_state, scheme):
+    """The other half of the guard, for EVERY scheme it lets through.
+
+    A guard that only ever refuses would be satisfied by a coupling that never
+    works, and declaring the keyword is not the same as using it.  A large
+    sensible-heat flux into the lowest layer must WARM it, so the direction is
+    pinned too, not just that something moved: a sign-inverted hand-over would
+    otherwise pass.
+    """
+    ncell = mpas_state.T.data.shape[0]
+    fn = _make_mpas_turbulence(
+        TurbulenceConfig(scheme=scheme), 300.0, f_land=jnp.ones((ncell,)))
+
+    without = fn(mpas_state, mpas_mesh, sigma_coord,
+                 forcing=_land_forcing(ncell))
+    # Both far larger than anything the bulk formula produces here, so neither
+    # the difference nor its sign can be round-off — and DELIBERATELY unequal,
+    # so a consumer that swapped the sensible and latent members of the flux
+    # tuple could not satisfy both assertions below.
+    with_flux = fn(mpas_state, mpas_mesh, sigma_coord,
+                   forcing=_land_forcing(ncell, 400.0, 40.0))
+    if isinstance(without, tuple):
+        without, with_flux = without[0], with_flux[0]
+    # ``dT_dt`` is a Field on this lane; ``.data`` is (nCells, nlev).
+    dT_without = np.asarray(without.dT_dt.data)[:, -1]
+    dT_with = np.asarray(with_flux.dT_dt.data)[:, -1]
+    assert not np.allclose(dT_without, dT_with), (
+        f"{scheme}: the land sensible-heat flux was accepted and then ignored")
+    assert (dT_with > dT_without).all(), (
+        f"{scheme}: +400 W/m2 into the surface layer must warm it; the "
+        "hand-over has the wrong sign")
+
+    # The latent half is the headline of this coupling and needs its own pin:
+    # a kernel that consumes the sensible flux and drops the latent one would
+    # pass every assertion above.
+    wetter = fn(mpas_state, mpas_mesh, sigma_coord,
+                forcing=_land_forcing(ncell, 400.0, 400.0))
+    if isinstance(wetter, tuple):
+        wetter = wetter[0]
+    dq_without = np.asarray(without.tracer_tendencies["q_v"])[:, -1]
+    dq_with = np.asarray(with_flux.tracer_tendencies["q_v"])[:, -1]
+    dq_wetter = np.asarray(wetter.tracer_tendencies["q_v"])[:, -1]
+    assert not np.allclose(dq_without, dq_with), (
+        f"{scheme}: the land latent-heat flux was accepted and then ignored")
+    assert (dq_wetter > dq_with).all(), (
+        f"{scheme}: raising the land latent flux from 40 to 400 W/m2 must "
+        "moisten the surface layer more; the hand-over has the wrong sign")
+
+
 def test_mpas_turbulence_beta_one_bit_identical(mpas_mesh, sigma_coord,
                                                  mpas_state):
     """beta=1 with f_land supplied must be byte-identical to no knobs."""

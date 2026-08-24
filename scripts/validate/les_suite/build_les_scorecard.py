@@ -1,0 +1,154 @@
+#!/usr/bin/env python
+"""Generate the LES-suite scorecard (Q2 ranking + Q3 coefficient spread).
+
+Reads the per-(closure, regime) tuned-result JSONs written by
+``scripts/run/tune_scm_to_les.py`` (default: ``results/les_suite/tuned/*.json``),
+looks up each case's regime from the LESCase registry, and assembles the Q2/Q3
+scorecard via ``legoesm.atmosphere.les_suite.scorecard``.
+
+Usage::
+
+    python scripts/validate/les_suite/build_les_scorecard.py \\
+        --tuned-dir results/les_suite/tuned \\
+        --output results/les_suite/scorecard.md
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+from legoesm.atmosphere.les_suite import (
+    SigmaLESError,
+    get_case,
+    list_cases,
+    register_default_catalog,
+    sigma_les_prognostic,
+)
+from legoesm.atmosphere.les_suite.bridge import load_artifact
+from legoesm.atmosphere.les_suite.scorecard import assemble_scorecard, render_markdown
+
+# scheme suffix on a tuned filename ``<artifact>__<scheme>__df.json`` — used only to
+# recover per-flux provenance for LEGACY records that predate the tuner stamping
+# ``artifact``/``q0`` into the JSON itself.
+_Q0_RE = re.compile(r"__q0_([0-9]*\.?[0-9]+)")
+
+# The D7 SGS-spread closures whose same-case artifacts (from ``run_les_suite --sgs``)
+# define σ_LES. Explicit list, NOT a glob (a glob would grab flux-sweep artifacts).
+_SGS_SPREAD = ("lasd", "smagorinsky", "vreman")
+
+
+def _sigma_les_by_regime(records: list[dict], artifacts_dir: Path) -> dict[str, float]:
+    """Per-regime σ_LES (loss units) from each case's SGS-spread artifacts, for the D7
+    gate on the Q1b margins. A case needs ≥2 emitted variants; regimes with several cases
+    take the MAX σ_LES — the most conservative bar, though NOT strictly case-comparable:
+    one pathological (e.g. wind-dominated Ug=0) case can veto another's real result, so
+    prefer per-case gating once a regime has several cases (moot while it has one).
+    Missing/short/erroring/unreadable variant sets are skipped WITH a warning — the gate
+    just stays off there, never crashes."""
+    by_regime: dict[str, float] = {}
+    for case in sorted({r["case"] for r in records}):
+        arts = []
+        for s in _SGS_SPREAD:
+            path = artifacts_dir / f"{case}__{s}.npz"
+            if not path.exists():
+                continue
+            try:
+                arts.append(load_artifact(path))
+            except Exception as e:  # noqa: BLE001 — a corrupt artifact must not crash the card
+                print(f"[warn] σ_LES: could not load {path.name}: {e}", file=sys.stderr)
+        if len(arts) < 2:
+            print(f"[warn] σ_LES for {case}: <2 usable SGS-spread artifacts "
+                  f"(found {len(arts)}); gate stays off for its regime", file=sys.stderr)
+            continue
+        try:
+            sl = sigma_les_prognostic(arts)
+        except SigmaLESError as e:
+            print(f"[warn] σ_LES for {case}: {e}", file=sys.stderr)
+            continue
+        regime = get_case(case).regime
+        by_regime[regime] = max(by_regime.get(regime, 0.0), sl.sigma_combined)
+    return by_regime
+
+
+def _backfill_provenance(rec: dict, path: Path) -> None:
+    """Ensure ``artifact`` + ``q0`` are set so the scorecard groups per flux.
+
+    New records carry them (written by ``tune_scm_to_les.py``). For legacy records
+    they are recovered from the tuned filename ``<artifact>__<scheme>__df.json``:
+    the artifact stem is everything before ``__<scheme>__df`` and the flux, if the
+    stem is ``…__q0_<val>``, from that tag. A stem with no ``q0`` tag is a distinct
+    (unlabelled) flux slice and keeps ``q0=None`` — never coerced to a guess.
+    """
+    if rec.get("artifact") is None:
+        scheme = rec.get("scheme", "")
+        stem = path.stem  # e.g. cbl_nieuwstadt__lasd__q0_0.02__smagorinsky__df
+        suffix = f"__{scheme}__df"
+        rec["artifact"] = stem[: -len(suffix)] if stem.endswith(suffix) else stem
+    if rec.get("q0") is None:
+        m = _Q0_RE.search(rec["artifact"])
+        if m:
+            rec["q0"] = float(m.group(1))
+
+
+def _load_tuned(tuned_dir: Path) -> list[dict]:
+    """Load tuned JSONs and attach each case's regime from the registry."""
+    if not list_cases():
+        register_default_catalog()
+    records: list[dict] = []
+    for path in sorted(tuned_dir.glob("*.json")):
+        with open(path) as f:
+            rec = json.load(f)
+        case = rec.get("case")
+        try:
+            rec["regime"] = get_case(case).regime
+        except Exception:  # noqa: BLE001 — unknown case: skip with a warning
+            print(f"[warn] {path.name}: case {case!r} not in registry; skipped",
+                  file=sys.stderr)
+            continue
+        _backfill_provenance(rec, path)
+        records.append(rec)
+    return records
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--tuned-dir", type=Path, default=Path("results/les_suite/tuned"))
+    p.add_argument("--output", type=Path, default=Path("results/les_suite/scorecard.md"))
+    p.add_argument("--sgs-artifacts-dir", type=Path, default=None,
+                   help="if given, compute σ_LES per regime from each case's SGS-spread "
+                        "artifacts here and GATE the Q1b margins on it (D7)")
+    args = p.parse_args(argv)
+
+    if not args.tuned_dir.exists():
+        print(f"error: {args.tuned_dir} does not exist (run tune_scm_to_les first)",
+              file=sys.stderr)
+        return 2
+    records = _load_tuned(args.tuned_dir)
+    if not records:
+        print(f"error: no usable tuned records in {args.tuned_dir}", file=sys.stderr)
+        return 1
+
+    sigma_les_by_regime = None
+    if args.sgs_artifacts_dir is not None:
+        sigma_les_by_regime = _sigma_les_by_regime(records, args.sgs_artifacts_dir)
+        if not sigma_les_by_regime:
+            print("[warn] --sgs-artifacts-dir given but no case had >=2 SGS-spread "
+                  "artifacts; the Q1b σ_LES gate stays off", file=sys.stderr)
+
+    card = assemble_scorecard(records)
+    md = render_markdown(card, sigma_les_by_regime)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(md)
+    print(md)
+    print(f"\n-> {args.output}  ({len(records)} tuned records, "
+          f"{len(card.rankings)} regimes, {len(card.per_flux)} regime×flux slices, "
+          f"{len(card.spreads)} coefficients)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

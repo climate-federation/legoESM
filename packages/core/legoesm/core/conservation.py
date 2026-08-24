@@ -88,18 +88,19 @@ def energy_consistent_moisture_floor(q_v_raw, T):
 
 #: Tracers eligible for the column-conserving borrow: PER-MASS fields whose
 #: dsigma-weighted column integral is what mass-weighted transport conserves —
-#: the water mixing ratios [kg/kg] and the per-mass numbers [#/kg]
-#: (``N_i``/``N_s``/``N_g``).  ``N_c``/``N_r`` are per-VOLUME [#/m^3]
-#: (HydrometeorState), so this weight has no conservation meaning for them:
-#: they keep the plain clip pending a density-aware repair (codex 2026-07-28;
-#: their invention rate is ~e15 slower than N_i's was).
+#: the water mixing ratios [kg/kg] and ALL the numbers, which are stored
+#: per MASS [#/kg] since 2026-08-14 (``N_c``/``N_r`` were per-volume before;
+#: the exclusion that this list used to encode was the density-aware repair
+#: they were waiting for).  The microphysics still works in per-volume
+#: internally; the conversion lives at the physics bridge.
 #:
 #: Lives here, next to the clip it gates, rather than in the MPAS PE dycore:
 #: the serial (atmosphere) and MPI (parallel) lanes both need it, and the
 #: parallel one importing an atmosphere module broke the "legoesm-core member
 #: imports nothing above it" contract.
 BORROW_ELIGIBLE_TRACERS = frozenset(
-    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i", "N_s", "N_g"})
+    {"q_v", "q_c", "q_r", "q_i", "q_s", "q_g",
+     "N_c", "N_r", "N_i", "N_s", "N_g"})
 
 
 def is_borrow_eligible_tracer(name: str) -> bool:

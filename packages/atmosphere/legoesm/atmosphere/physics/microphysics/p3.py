@@ -300,6 +300,22 @@ def p3_microphysics(
     # exponential overflows fp32 at the very cold tropopause / sponge
     # temperatures of an RCEMIP column (→ N_i = inf → NaN in tracer slot 8).
     # ``jnp.minimum`` clamps even an inf exponential to the finite cap.
+    #
+    # GRADIENT NOTE (2026-08-16 audit).  Both ``N_i0`` and ``cooper_a`` audit as
+    # `blocked`: read by the code, finite-difference effect 153, gradient
+    # exactly 0.  The severing clamp is the OUTER ``N_i_nuc_max`` one, not
+    # ``_COOPER_EXP_CAP`` — that inner cap needs ``T_freeze - T > 263 K``
+    # (T < 10 K) and never binds in an atmosphere, and ``N_i0`` multiplies
+    # OUTSIDE the exponential so only the outer cap can sever both.  At a
+    # realistic 50 K supercooling the Cooper expression gives ~2e7 against a
+    # 1e5 cap.
+    #
+    # The zero gradient is therefore CORRECT, not a defect: while nucleation is
+    # cap-limited neither parameter changes the answer, exactly as with
+    # Morrison's mass-limited ``melt_rate``.  Do NOT paper over it with a
+    # straight-through estimator — that treatment belongs to gates whose
+    # saturation is a smoothing artefact (see ``_triggers.cape_trigger``), not
+    # to a physical cap taken from the oracle.
     N_i_target = jnp.minimum(
         config.N_i0
         * jnp.exp(jnp.minimum(config.cooper_a * jnp.maximum(T_freeze - T, 0.0), _COOPER_EXP_CAP)),

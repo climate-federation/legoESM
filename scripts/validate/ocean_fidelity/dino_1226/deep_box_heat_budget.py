@@ -127,7 +127,10 @@ import numpy as np
 _THIS_DIR = __file__.rsplit("/", 1)[0]
 sys.path.insert(0, _THIS_DIR)
 sys.path.insert(0, _THIS_DIR.rsplit("/", 1)[0])  # scripts/validate/ocean_fidelity/ -- rebuild_nemo_restart.py
-from kamm_twin_90d import _build_twin_state, RUN_TRAJ, RUN_STEPDUMP, DT, STEPS_PER_DAY  # noqa: E402
+from kamm_twin_90d import (  # noqa: E402
+    _build_twin_state, RUN_TRAJ, RUN_STEPDUMP, DT, STEPS_PER_DAY,
+    seasonal_t0_seconds,
+)
 
 from legoesm.ocean.experiments.dino import apply_dino_lat_lon_surface_forcing  # noqa: E402
 from legoesm.ocean.fidelity.box_heat_budget import (  # noqa: E402
@@ -185,13 +188,17 @@ def _run_lego_accumulator(recipe: str, n_days: int, *, use_gm_redi: bool | None,
     dyn = jax.jit(lambda st, t: model.step(st, DT, surface_forcing=sf, t_seconds=t))
     sample_dt = STEPS_PER_DAY * DT
 
-    t_seconds = 0.0
+    # #1455 SEASONAL CLOCK: NEMO's own day-of-year, read from the bridged
+    # restart. The accumulator re-derives T*/Qsr from t_seconds too
+    # (box_heat_budget.py:413-415), so the SAME clock must reach both.
+    t0_sec = seasonal_t0_seconds(f"{RUN_STEPDUMP}/{restart_file}")
+    t_seconds = t0_sec
     for acc in accs.values():
         acc.sample(st, dt_step=sample_dt, t_seconds=t_seconds)
     for k in range(nsteps):
         st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                  t_seconds=(k + 1) * DT)
-        t_seconds = (k + 1) * DT
+                                                  t_seconds=t0_sec + (k + 1) * DT)
+        t_seconds = t0_sec + (k + 1) * DT
         st = dyn(st, jnp.asarray(t_seconds))
         if (k + 1) % STEPS_PER_DAY == 0:
             for acc in accs.values():
@@ -203,7 +210,7 @@ def _run_lego_accumulator(recipe: str, n_days: int, *, use_gm_redi: bool | None,
             if (k + 1) % (STEPS_PER_DAY * 10) == 0:
                 print(f"  day {(k+1)*DT/86400:5.1f}  T[{Td[m].min():.2f},{Td[m].max():.2f}]", flush=True)
 
-    total_seconds = t_seconds
+    total_seconds = t_seconds - t0_sec
     return {name: acc.summary(total_seconds) for name, acc in accs.items()}, total_seconds
 
 

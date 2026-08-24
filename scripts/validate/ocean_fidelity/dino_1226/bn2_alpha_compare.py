@@ -39,12 +39,18 @@ import numpy as np
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 # DINO is FULL-STEP (ln_zps_nam=.false.; ocean.output "partial steps l_zps = F"),
 # so NEMO's gdept_0 is horizontally UNIFORM and a 1-D ladder represents it
-# EXACTLY.  But mesh_mask carries TWO different 1-D ladders: e3t_1d (sums to
-# 4506.375 m) and e3t_0 (deepest wet column exactly 4000.0 m); they diverge by
-# up to 105 m at depth.  bridge_nemo_to_legoesm_topo DEFAULTS to the e3t_1d one
-# ("off") for a documented dynamical reason, which is wrong for a geometry
-# comparison -- pin the NEMO ladder here.  (Static t=0 comparison, so the
-# documented multi-day instability of "both" does not apply.)
+# EXACTLY.  But mesh_mask carries TWO different 1-D ladders, e3t_1d and e3t_0.
+# They sum to the SAME depth on either window -- 4000.000 m over the 35 wet
+# levels, 4506.375 m over all 36 -- so comparing one's 36-level sum against the
+# other's 35-level column depth, as this comment used to, is a mismatched
+# window rather than a difference between the ladders.  What they really do is
+# REDISTRIBUTE thickness below k=25 (up to 70.4 m per level = 12.9% of e3t_0 /
+# 14.8% of e3t_1d), which moves the T-point depths by up to 105.0 m at k=32.
+# bridge_nemo_to_legoesm_topo DEFAULTS to the e3t_1d one ("off"), which is
+# wrong for a geometry comparison -- pin the NEMO ladder here.  (The recorded
+# reason for that default, a multi-day instability of "both", did not reproduce
+# in 2026-08 measurements and is now an unexplained observation, #1455; this is
+# a static t=0 comparison, so it never applied here either way.)
 os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 
 from legoesm.ocean.eos import (  # noqa: E402

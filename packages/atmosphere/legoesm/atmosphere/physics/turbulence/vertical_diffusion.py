@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 
@@ -241,3 +240,38 @@ def implicit_vertical_diffusion_theta(
         theta, K_half, rho, dz, dz_half, dt, surface_flux_theta,
     )
     return theta_new * exner
+
+
+def diagnostic_heat_flux_full(
+    theta: jax.Array,
+    dz_half: jax.Array,
+    Kh_half: jax.Array,
+    gamma_theta_half: jax.Array | None = None,
+) -> jax.Array:
+    """Diagnostic kinematic heat flux ``⟨w'θ'⟩ = −Kh·(∂θ/∂z − γ)`` on FULL levels.
+
+    The ONE shared reduction for the LES-suite Q1 diagnostic score
+    (``TurbulenceOutput.wtheta_flux``) — every K-closure exposes its flux through
+    this helper so local and nonlocal schemes are scored apples-to-apples.
+
+    Sign convention (matches the atm column: index 0 = model top, index −1 =
+    surface; ``dz_half > 0``): ``∂θ/∂z`` is positive when θ increases upward, so a
+    stable layer (``∂θ/∂z > 0``) with ``γ = 0`` gives a downward (negative) flux —
+    correct down-gradient sign. A local closure passes ``gamma_theta_half=None``
+    (γ ≡ 0); a nonlocal closure passes its counter-gradient ``γ`` [K/m] so a CBL
+    mixed layer carries an UPWARD flux against a weakly stable gradient.
+
+    The interface flux (``nlev−1`` values) is averaged to full levels exactly the
+    way ``Kh_full`` is derived from ``Kh_half`` in every scheme (interior mean,
+    edge interfaces copied) so it co-locates with the full-level θ the diagnostic
+    score compares against. PURE diagnostic — the tendencies come from the implicit
+    flux-divergence solve, never from this value, so it can change no run.
+    """
+    dtheta_dz_half = (theta[:, :-1] - theta[:, 1:]) / dz_half
+    if gamma_theta_half is not None:
+        dtheta_dz_half = dtheta_dz_half - gamma_theta_half
+    flux_half = -Kh_half * dtheta_dz_half  # (ncol, nlev-1) interface flux [K m/s]
+    flux_interior = 0.5 * (flux_half[:, :-1] + flux_half[:, 1:])
+    return jnp.concatenate(
+        [flux_half[:, :1], flux_interior, flux_half[:, -1:]], axis=1,
+    )

@@ -67,6 +67,15 @@ _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 _load_interior = _bn2_alpha_compare._load_interior
 
+# #1455: which NEMO dump run/lane this probe measures against (gdb_y5 default,
+# byte-identical to the prior hardcoded RUN_GDB/kt=57601 pairing; d180 via
+# DINO_1226_LANE=d180) -- ONE shared selector, same importlib-by-path idiom.
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
@@ -87,8 +96,8 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_density_and_jacobian, _nemo_native_active_3d,
 )
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 # rel = |lego - nemo| / max(|nemo|, FLOOR). alpha/beta ~ O(1e-4 - 1e-1),
 # N^2 ~ O(1e-8 - 1e-4); 1e-10 is >=2 orders below the smallest real signal
@@ -235,6 +244,7 @@ def build_state():
 
 
 def main() -> int:
+    print(dump_lane.banner())
     print(f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')}  "
           f"(pinned NEMO e3t ladder -- see script header / bn2_alpha_compare.py)")
     st = build_state()

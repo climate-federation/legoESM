@@ -40,9 +40,16 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
+from legoesm.atmosphere.forcing import wangara_day33  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
+
+# Frame label per --case, i.e. the name `legoesm.training.les_reference` will
+# accept for a reference built from this driver's output. The driver's own
+# option spelling ("nieuwstadt") is not the reference registry's ("cbl"), so
+# the map is explicit rather than `args.case` passed straight through.
+_CASE_LABELS: dict[str, str] = {"nieuwstadt": "cbl", "wangara": "wangara"}
 
 
 def build(args, dtype):
@@ -97,6 +104,16 @@ def main():
     p.add_argument("--theta0", type=float, default=300.0)
     p.add_argument("--gamma", type=float, default=0.008, help="inversion dθ/dz [K/m]")
     p.add_argument("--zi0", type=float, default=800.0, help="initial inversion height [m]")
+    p.add_argument("--case", choices=["nieuwstadt", "wangara"],
+                   default="nieuwstadt",
+                   help="nieuwstadt = CBL_N91: constant Q0, no Coriolis, no "
+                        "geostrophic wind, theta0 = 300 K. wangara = Wangara "
+                        "Day 33: DIURNAL surface flux, southern-hemisphere "
+                        "Coriolis and a height-dependent easterly geostrophic "
+                        "wind, theta0 = 277 K. The two are different cases; "
+                        "running this driver at its defaults and calling the "
+                        "result Wangara is what produced a mislabelled "
+                        "reference.")
     p.add_argument("--Q0", type=float, default=0.06, help="surface heat flux [K m/s]")
     p.add_argument("--dt", type=float, default=0.5)
     p.add_argument("--hours", type=float, default=1.0)
@@ -121,20 +138,57 @@ def main():
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=20,
                    help="evenly-spaced frames (snapshots + profiles); 0 disables.")
-    p.add_argument("--case-label", type=str, default="cbl",
-                   help="This driver integrates Nieuwstadt CBL_N91, NOT "
-                        "Wangara Day 33 (which is moist, rotating and "
-                        "diurnally forced). It was labelled \"wangara\" for "
-                        "years; the label is corrected here so a reference "
-                        "cannot be mistaken for the other case.")
+    p.add_argument("--case-label", type=str, default=None,
+                   help="Label stamped into every recorded frame, which "
+                        "`legoesm.training.les_reference` checks against the "
+                        "case it is asked to build. DEFAULTS TO THE --case IT "
+                        "WAS GIVEN (nieuwstadt -> 'cbl', wangara -> "
+                        "'wangara'); pass it only to override. It used to "
+                        "default to the literal 'cbl' for BOTH cases, so "
+                        "`--case wangara` without this flag stamped a genuine "
+                        "8 h Wangara run (theta0 = 277 K) as 'cbl' and the "
+                        "reference loader refused it -- correctly, since the "
+                        "two are not cross-aliased.")
     p.add_argument("--output", type=Path, default=Path("results/spectral_cbl"))
     args = p.parse_args()
+    # Derive the frame label from the case unless it was given explicitly. The
+    # old literal default meant the ONE flag that identifies the reference was
+    # wrong precisely when it mattered -- `--case wangara` produced 8 h of a
+    # genuine Wangara run stamped "cbl", which the reference loader then
+    # refused (it does not cross-alias the two, and should not: accepting the
+    # alias would let a real Wangara directory become the CBL reference).
+    args.case_label = args.case_label or _CASE_LABELS[args.case]
+    if args.case == "wangara":
+        # Wangara's own initial state and forcing, taken from the SHARED module
+        # the SCM case reads, so the two sides cannot drift apart.
+        if "--theta0" not in sys.argv:
+            args.theta0 = wangara_day33.THETA_INIT_K
+        args.f_cor = wangara_day33.coriolis_parameter()
+        args.t_start_s = wangara_day33.T_START_S
+        # Q0 is TIME-VARYING here; the scalar is kept only for the diagnostic
+        # scales printed at startup, evaluated at the run's first instant.
+        args.Q0 = float(
+            wangara_day33.surface_theta_flux(args.t_start_s))
+    else:
+        args.f_cor = 0.0
+        args.t_start_s = 0.0
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
 
     g, st = build(args, dtype)
-    step = jax.jit(partial(sl.step, g=g, u_geo=(0.0, 0.0), f_cor=0.0,
-                           force=(0.0, 0.0), sfc_theta_flux=args.Q0),
+    # u_geo broadcasts against (ny, nx, nz), so a (nz,) profile is a
+    # height-dependent geostrophic wind; sgs_and_wall takes u_geo but does not
+    # read it, so a profile is safe there too.
+    if args.case == "wangara":
+        u_geo = (wangara_day33.geostrophic_u(g.z_c).astype(dtype),
+                 jnp.zeros_like(g.z_c, dtype=dtype))
+    else:
+        u_geo = (0.0, 0.0)
+    # sfc_theta_flux is a TRACED argument rather than baked into the partial:
+    # Wangara's is diurnal, and closing over a constant would silently freeze
+    # it at its first value.
+    step = jax.jit(partial(sl.step, g=g, u_geo=u_geo, f_cor=args.f_cor,
+                           force=(0.0, 0.0)),
                    static_argnames=("first",))
     wstar0 = (constants.g / args.theta0 * args.Q0 * args.zi0) ** (1.0 / 3.0)
     tstar = args.zi0 / wstar0
@@ -167,7 +221,22 @@ def main():
     dt = jnp.asarray(dt0, dtype)
     T = args.hours * 3600.0
     print(f"  dt={dt0:.3f}s ({'static-CFL' if args.adaptive_dt else 'fixed'})")
-    st, us = step(st, dt=dt, first=True)
+    def sfc_flux_at(t_elapsed_s):
+        """Surface kinematic heat flux [K m/s] at ``t_elapsed_s`` into the run.
+
+        Wangara's is diurnal and its clock is ABSOLUTE seconds since local
+        midnight, so the run's own elapsed time is offset by the 09:00 start.
+        Evaluating the cosine on run-relative time would start the convective
+        case with a negative surface flux.
+        """
+        if args.case == "wangara":
+            return jnp.asarray(
+                wangara_day33.surface_theta_flux(args.t_start_s + t_elapsed_s),
+                dtype)
+        return jnp.asarray(args.Q0, dtype)
+
+    st, us = step(st, dt=dt, first=True,
+                  sfc_theta_flux=sfc_flux_at(0.0))
     if rec:
         _save(0.0)
     t = float(dt); i = 1
@@ -176,8 +245,9 @@ def main():
     t0 = time.time()
     while t < T:
         dth = float(dt)
-        for _ in range(blk):
-            st, us = step(st, dt=dt, first=False)
+        for k in range(blk):
+            st, us = step(st, dt=dt, first=False,
+                          sfc_theta_flux=sfc_flux_at(t + k * dth))
         t += blk * dth; i += blk
         mw = float(jnp.max(jnp.abs(st.w)))
         if not np.isfinite(mw) or mw > 1e3:

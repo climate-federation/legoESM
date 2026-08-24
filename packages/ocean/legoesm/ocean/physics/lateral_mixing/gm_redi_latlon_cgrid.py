@@ -880,7 +880,11 @@ def _nemo_wpoint_e3w_wmask_n2(rho, T, S, z_coord, eos_fn, rho_0, g, act,
                   * gdept)[None, None, :] * jnp.ones_like(rho)
         J1 = jnp.ones((nlat, nlon), dtype=dtype)
         n2_int = compute_buoyancy_frequency_adiabatic(
-            T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn)      # (...,nlev-1)
+            T, S, p_cell, z_coord.dz_ref, J1, eos_fn=eos_fn,
+            # SAME pair the pressure three lines above was built from. Left to
+            # the library defaults these disagree with it on any card that
+            # pins its own constants (#1627).
+            rho_ref=rho_0, g=g)                                   # (...,nlev-1)
     else:
         raise ValueError(
             f"unknown GMRediConfig.slope_n2 {slope_n2!r}; "
@@ -3487,6 +3491,7 @@ def gm_redi_tracer_tendency_latlon(
         else:
             kappa_GM = compute_treguier_kappa_gm(
                 rho, S_x, S_y, z_coord, jacobian, f_coriolis, _treg,
+                rho_ref=rho_0, g=g,
                 omega=omega,
             )
     elif cfg.visbeck.enabled:
@@ -3509,11 +3514,16 @@ def gm_redi_tracer_tendency_latlon(
             if isinstance(z_coord, OceanPartialCellCoordinate):
                 _h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
             _p_vb = compute_hydrostatic_pressure(
-                rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=_h_actual,
+                rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
+                h_actual=_h_actual,
             )
             _T_vb, _S_vb, _eos_vb = T, S, eos_fn
         kappa_GM = compute_visbeck_kappa_gm(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+            # The SAME pair the pressure above was built from. Threading the
+            # density and defaulting the gravity is how this path kept a
+            # library-gravity buoyancy frequency under a configured pressure.
+            rho_ref=rho_0, g=g,
             T=_T_vb, S=_S_vb, p_cell=_p_vb, eos_fn=_eos_vb,
         )
     else:
@@ -4671,7 +4681,7 @@ def _eke_stage1_fields(
         if isinstance(z_coord, OceanPartialCellCoordinate):
             h_actual = compute_layer_thickness(eta, H_bathy, z_coord)
         p_cell = compute_hydrostatic_pressure(
-            rho, eta, z_coord.dz_ref, jacobian, rho_0, h_actual=h_actual,
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, g, h_actual=h_actual,
         )
         T_eos, S_eos, eos_for_n2 = T, S, eos_fn
     return (mask, jacobian, rho, S_x, S_y, f_coriolis, beta,
@@ -4724,7 +4734,7 @@ def compute_eke_step_kappa(
     )
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
-        cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
+        cfg.visbeck, cfg.eke, rho_ref=rho_0, g=g, beta=beta,
         depth_resolved=depth_resolved,
         T=T_eos, S=S_eos, p_cell=p_cell, eos_fn=eos_for_n2,
     )

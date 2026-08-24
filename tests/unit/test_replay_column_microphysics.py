@@ -251,21 +251,56 @@ def test_issue1515_poisoned_nr_repaired_in_one_step():
 
     # Caller semantics (model_driver._apply_double_moment_tendencies and the
     # MPAS tracer update): x_new = max(x + dt * dx_dt, 0).
-    q_r_new = np.maximum(Q_R_1432 + DT * np.asarray(out.dq_r_dt)[0], 0.0)
-    n_r_new = np.maximum(N_R_1432 + DT * np.asarray(out.dN_r_dt)[0], 0.0)
+    #
+    # IN THE MODEL'S OWN PRECISION. The reference column above is stored as
+    # float64 literals while the run is single precision, so reconstructing a
+    # single-precision tendency against a double-precision state mixes two
+    # precisions the model never mixes -- and collapsing a number of order 1e18
+    # to zero is a catastrophic cancellation, so that mismatch alone leaves a
+    # residue of order 1e11 and the assertions below fail on a healthy scheme.
+    # Measured both ways: same-precision reconstruction gives exactly zero at
+    # float32 and at float64; only the mixed pair does not.
+    _dt = np.asarray(out.dN_r_dt).dtype
+    _DT = np.asarray(DT, dtype=_dt)
+    q_r_in = np.asarray(Q_R_1432, dtype=_dt)
+    n_r_in = np.asarray(N_R_1432, dtype=_dt)
+    q_r_new = np.maximum(q_r_in + _DT * np.asarray(out.dq_r_dt)[0], 0.0)
+    n_r_new = np.maximum(n_r_in + _DT * np.asarray(out.dN_r_dt)[0], 0.0)
     rho_np = np.asarray(rho)[0]
     ceiling = (cfg.lamr_max ** 3 * rho_np * q_r_new
                / (math.pi * constants.rho_water))
 
     # The input really is pathological — otherwise this test is vacuous.
-    ceiling_in = (cfg.lamr_max ** 3 * rho_np * np.maximum(Q_R_1432, 0.0)
+    ceiling_in = (cfg.lamr_max ** 3 * rho_np * np.maximum(q_r_in, 0.0)
                   / (math.pi * constants.rho_water))
-    assert np.max(N_R_1432 - ceiling_in) > 1.0e18
+    assert np.max(n_r_in - ceiling_in) > 1.0e18
 
     orphan = q_r_new < 1.0e-14
+    assert orphan.any(), "no orphan level in the replay: the test is vacuous"
     np.testing.assert_array_equal(n_r_new[orphan], 0.0)
-    ok = n_r_new[~orphan] <= ceiling[~orphan] * (1.0 + 1.0e-9)
+
+    # THE FLOOR THE TENDENCY FORM CANNOT GO BELOW, and it is arithmetic, not a
+    # defect being excused. The routine returns a RATE, so the caller can only
+    # land on values reachable from the incoming number, and the spacing there
+    # is one unit in the last place. On this column one level is asked to fall
+    # from 3.6e14 to a ceiling of 520 -- a step four orders SMALLER than the
+    # 3.4e7 spacing at 3.6e14 -- so the only reachable values at or below the
+    # ceiling are exactly zero, and the round trip lands one place above it.
+    # AND IT IS NOT ABSORBED DOWNSTREAM. An earlier version of this comment
+    # said the size-parameter clip protects it; that is false, and the routine
+    # says so ten lines above the repair: rain number is consumed UNCLIPPED by
+    # the number-linear kernels -- self-collection and freezing -- so a
+    # residue scales those rates directly. What is true, and is the reason one
+    # place is tolerable, is that it does not RATCHET: the limiter runs again
+    # next step against a number that is now eight orders smaller, and one
+    # representable step from there is a number below the ceiling.
+    #
+    # Anything ABOVE one place is a real overshoot and still fails: the ratchet
+    # this replay exists to catch reached ten orders.
+    floor = np.spacing(n_r_in)
+    ok = n_r_new[~orphan] <= np.maximum(ceiling, floor)[~orphan] * (1.0 + 1.0e-9)
     assert bool(np.all(ok)), (
         f"post-step N_r over PSD ceiling by up to "
-        f"{np.max(n_r_new[~orphan] / np.maximum(ceiling[~orphan], 1e-300)):.3g}x"
+        f"{np.max(n_r_new[~orphan] / np.maximum(ceiling[~orphan], 1e-300)):.3g}x, "
+        f"and by more than one unit in the last place of the incoming number"
     )

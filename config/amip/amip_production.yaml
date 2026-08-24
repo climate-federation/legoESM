@@ -72,7 +72,7 @@ a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
-rad_update_steps: 12
+rad_update_steps: 48
 clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
@@ -120,7 +120,7 @@ hard_saturation_adjustment: true
 # run) in progress. To restore the prior default: rh_crit 0.77, q_c 3.0e-4,
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
-cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+cloud_q_c_diagnostic: 5.0e-6   # was 3.0e-4 ("thinner cloud" -> lower albedo)
 
 # --- Cloud-optics corrections (#1519) -----------------------------------------
 # WITHOUT these two the radiation solver sees ONE homogeneous overcast column at
@@ -143,16 +143,19 @@ cloud_q_c_diagnostic: 1.0e-4   # was 3.0e-4 ("thinner cloud" -> lower albedo)
 # correction, not compensating-error tuning.
 #
 # cloud_fsd is the width parameter the two_region optic consumes and is INERT
-# under "constant" — the three keys are one lever, not three.
+# under "constant".  two_region + cloud_fsd are the in-cloud INHOMOGENEITY lever;
+# they are computed before the partial-coverage/overlap branch and so apply
+# independently of the sub-grid OVERLAP lever described next.
 #
-# NOT set here: cloud_vertical_overlap_optics.  "max_random" is MUTUALLY
-# EXCLUSIVE with two_column (config.py:1799 refuses the pair) — they are two
-# complete alternative treatments of the same degree of freedom, not composable
-# corrections.  Measured on a matched 30-day window: max_random rsut 140.98 vs
-# two_column 145.70 (control 168.57), i.e. 4.7 W/m2 better but short of the
-# 8 W/m2 pre-registered as materially better, and it re-solves each column as 8
-# subcolumns.  two_column is the cheaper choice at equal skill.
-cloud_partial_coverage_optics: two_column
+# Sub-grid cloud OVERLAP lever: cloud_partial_coverage_optics and
+# cloud_vertical_overlap_optics are MUTUALLY EXCLUSIVE (config.py:1799 refuses
+# the pair) — two complete alternative treatments of the same degree of freedom.
+# This config selects max_random (set in the block below as
+# cloud_vertical_overlap_optics, 8 deterministic McICA subcolumns) and turns the
+# analytic two-column path OFF here.  Measured on a matched 30-day window:
+# max_random rsut 140.98 vs two_column 145.70 (control 168.57), i.e. 4.7 W/m2
+# better; max_random adopted to match the validated tropical-rain campaign.
+cloud_partial_coverage_optics: none
 cloud_optics_inhomogeneity: two_region
 cloud_fsd: 1.0
 convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain split
@@ -168,11 +171,12 @@ convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain spl
                             # 0.03 (=obs), rlut 175->179->187, rsut 231->223->219.
                             # 0.0 = bit-exact legacy no-split (kept for A/Bs).
                             # History: #899 intended 0.5; #932 blocked it pre-#929.
-# convective_cloud (Slingo-1987 cumulus cloud fraction): ON, to MIRROR the
-# canonical tuned-physics base (config/cmip/cmip_tuned_physics.yaml ships
-# convective_cloud: true) so this AMIP runs the SAME tuned slab parameters as the
-# coupled CMIP config (the stated purpose of the run_coupled-mirrored knobs, #647:
-# isolate the tuned atmosphere under prescribed SST).
+# convective_cloud (Slingo-1987 cumulus cloud fraction): OFF here.  The canonical
+# tuned-physics base (config/cmip/cmip_tuned_physics.yaml) ships it true for the
+# COUPLED run, but under prescribed SST it is a pure radiative cost (see the A/B
+# below), so this AMIP config and the validated tropical-rain campaign both turn
+# it off.  (#647 rationale for mirroring the coupled knobs still holds for the
+# rest; this ONE knob is deliberately not mirrored — see the finding below.)
 #   DOCUMENTED FINDING (not a reason to diverge): a matched 30-day C48/L40 A/B
 #   (jobs 25929869 ON vs 25929870 OFF, both q_c=3e-4) shows that under PRESCRIBED
 #   SST conv-cloud=ON degrades the TOA budget — albedo 0.295->0.370, OLR
@@ -181,15 +185,14 @@ convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain spl
 #   in the COUPLED base is OLR-trapping warming a FREE surface (cuts the ~4.5 K
 #   tropical cold bias / SST drift); with SST pinned that lever is inert and only
 #   the radiative cost shows. AMIP thus EXPOSES conv-cloud as a coupled-mode
-#   SST-drift compensator. Kept ON here for parameter-identity with the tuned base.
-#   NOTE: the CMIP6 production science chain (scripts/cluster/amip/
-#   amip_cmip6_chain.sbatch) deliberately OVERRIDES this to false via an
-#   include-YAML (best prescribed-SST TOA, per the A/B above) — production
-#   science runs diverge from the tracked value in exactly this ONE knob.
+#   SST-drift compensator, which is why it is OFF under prescribed SST here.
+#   This now matches the CMIP6 production science chain (scripts/cluster/amip/
+#   amip_cmip6_chain.sbatch), which already set false (best prescribed-SST TOA,
+#   per the A/B above) — the tracked value and the science chain now agree.
 #   NOTE (MPAS lane): the standalone MPAS/spectral radiation path FORCES this
-#   OFF (loudly, at setup) — it does not thread conv_precip.  The value is
-#   kept true for FV-lane parity with the tuned base.
-convective_cloud: true
+#   OFF regardless (loudly, at setup); the value is false here, so both the FV
+#   and MPAS lanes agree.
+convective_cloud: false
 
 # --- Tiled surface + interactive REAL land (multilayer Richards, SOTA) ---------
 # COARE3 ocean / land-MOST surface fluxes + multilayer Richards soil + CLM
@@ -257,3 +260,52 @@ checkpoint_days: 30
 monthly_means: true
 cmip_output: true
 clear_sky_diag: true
+
+# --- levers whose DEFAULT preserves a diagnosed defect (see CLAUDE.md RULE 3) ---
+# Each of these was fixed in code and then left switched off, so every run that
+# does not name them inherits the bug the fix was written to remove.  Named here
+# so production runs get the fix and a future audit can see the choice.
+#
+# Non-orographic gravity waves released at 700 hPa.  Unset means SURFACE launch,
+# where 55% of the wave momentum is deposited below 1 km and brakes the
+# near-surface wind that drives ocean evaporation.
+hines_launch_p: 70000.0
+# Moist-static-energy-conserving form of the per-step vapour floor: the latent
+# heat of clipped vapour is removed with the vapour instead of being left
+# behind. Unset means the non-conserving form.
+energy_consistent_moisture_clip: true
+
+# --- the tropical-rain science configuration (folded in 2026-08-22) ----------
+# These were previously named only in amip_campaign_mpas.yaml.  A run built on
+# production alone therefore got a DIFFERENT climate from the campaign runs,
+# and the difference was large: tropical ocean rain 0.48-0.61 of observed
+# against 0.89, on ocean evaporation 0.54-0.62 against 0.83.  Nobody chose
+# that -- the settings simply fell to code defaults, several of which preserve
+# an already-diagnosed defect.  Naming them here makes the science
+# configuration the DEFAULT rather than something a side deck has to remember.
+#
+# Radiation and cloud optics.  Maximum-random overlap is measured at -30% cloud
+# albedo and +18 W/m2 outgoing longwave against a Monte-Carlo reference; it is
+# mutually exclusive with the two-column partial-coverage treatment, which is
+# why that one is off above.
+cloud_vertical_overlap_optics: max_random
+cloud_n_subcolumns: 8
+# Microphysics: saturation over ice below freezing, a homogeneous freezing
+# source for ice number, and droplet number from the aerosol field.
+hard_sat_ice_curve: true
+homogeneous_ice_nucleation: true
+aerosol_ccn: true
+# Grid-scale moisture smoothing, the positivity fixer that borrows within a
+# column rather than creating water, and the prognostic sea-ice skin.
+mpas_qv_smooth_del2_m2s: 2.0e5
+mpas_conservative_tracer_clamp: true
+mpas_ice_skin_prognostic: true
+
+# --- the interactive land surface -------------------------------------------
+# The calibrated two-leaf canopy on a 3 m, ten-layer soil with the per-plant
+# root, wilting-point, field-capacity and albedo tables.  Runs need --surfdata
+# for the per-plant canopy parameters.
+land_calibrated_physics: true
+land_surface_scheme: two_leaf
+mpas_land_beta_soil: true
+land_soil_init: aridity

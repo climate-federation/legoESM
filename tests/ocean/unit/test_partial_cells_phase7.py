@@ -645,3 +645,373 @@ class TestVerticalVelocityAtPartialSeafloor:
         assert max_w < 1e-10, (
             f"w at partial seafloor not zero: max|w| = {max_w:.3e} m/s"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. NEMO dyn_spg_ts N6 momentum-reconciliation target
+#    (barotropic_reconcile_target: velocity_avg | transport_avg)
+# ---------------------------------------------------------------------------
+
+
+class TestBarotropicReconcileTarget:
+    """``barotropic_reconcile_target`` selects which time-averaged barotropic
+    mean the 3-D momentum depth-mean is reconciled onto after the substep
+    window (NEMO dyn_spg_ts N6, dynspg_ts.F90:1170-1172).
+
+    Driven through the REAL solver (``barotropic_substeps_latlon_cgrid``) on a
+    PARTIAL-CELL coordinate with a nonuniform eta (so the two averaging kernels
+    genuinely differ).  The transport target is checked against the solver's
+    OWN returned ``Hu_avg`` divided by the public NOW u-face column depth — the
+    same thickness the production tracer path uses — NOT a hand-written copy of
+    the substep kernel.  The synthetic-violation guard is
+    ``test_target_changes_reconciled_depth_mean``: reverting the option (both
+    arms fall back to ``velocity_avg``) makes the two arms EQUAL and the test
+    goes red (proven in the task transcript)."""
+
+    # kamm-MLF barotropic composition (DINO_RECIPES["nemo_dino_kamm_mlf"]).
+    _KAMM_MLF_BARO = dict(
+        barotropic_solver="explicit_substep",
+        barotropic_time_filter="nemo_boxcar_ab3",
+        barotropic_coriolis="een_metric",
+        barotropic_diffusion_alpha=0.0,
+        n_barotropic_substeps=23,
+    )
+
+    def _cfg(self, reconcile_target):
+        return LatLonCGridOceanConfig.from_flat(
+            K_h=0.0, K_bih=0.0, K_v=0.0,
+            A_h=0.0, B_h=0.0, A_v=0.0,
+            C_smag=0.0,
+            bottom_drag_r=0.0,
+            physics=None,
+            use_conservation_fixer=False,
+            barotropic_reconcile_target=reconcile_target,
+            **self._KAMM_MLF_BARO,
+        )
+
+    def _perturbed_state(self, grid, partial_coord, H_bathy, z_coord, seed=7):
+        state = _stratified_state_partial(grid, z_coord, H_bathy, partial_coord)
+        eta = (
+            0.4 * jnp.sin(2.0 * grid.lon2d) * jnp.cos(3.0 * grid.lat2d)
+        ) * state.land_mask.data
+        key = jax.random.PRNGKey(seed)
+        ku, kv = jax.random.split(key)
+        u0 = 0.05 * jax.random.normal(ku, state.u.data.shape)
+        v0 = 0.05 * jax.random.normal(kv, state.v.data.shape)
+        return state._replace(
+            eta=state.eta.replace(data=eta),
+            u=state.u.replace(data=u0 * state.u_mask.data[..., jnp.newaxis]),
+            v=state.v.replace(data=v0 * state.v_mask.data[..., jnp.newaxis]),
+        )
+
+    def _run(self, grid, z_coord, reconcile_target):
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        cfg = self._cfg(reconcile_target)
+        n = 23
+        state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
+            state, 600.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True,
+        )
+        h_k_old = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, partial_coord,
+            min_water_column_m=cfg.min_water_column_m,
+        )
+        return state, state_new, Hu_avg, Hv_avg, h_k_old, partial_coord
+
+    def test_dtypes_fp64(self, grid, z_coord):
+        _, state_new, Hu_avg, _, h_k_old, _ = self._run(
+            grid, z_coord, "transport_avg")
+        for name, arr in (("state_new.u", state_new.u.data),
+                          ("Hu_avg", Hu_avg), ("h_k_old", h_k_old)):
+            assert np.asarray(arr).dtype == np.float64, (
+                f"{name} dtype = {np.asarray(arr).dtype}, want float64")
+
+    def test_target_changes_reconciled_depth_mean(self, grid, z_coord):
+        """The two targets produce DIFFERENT 3-D velocity depth-means, and the
+        transport target's depth-mean equals the solver's Hu_avg/H_u exactly
+        while the velocity target's does not."""
+        _, sv, Hu_v, Hv_v, h_k_old, pc = self._run(
+            grid, z_coord, "velocity_avg")
+        _, st, Hu_t, Hv_t, _, _ = self._run(grid, z_coord, "transport_avg")
+
+        # Hu_avg is a solver INVARIANT of the reconciliation choice (it is
+        # accumulated inside the substep loop, before N6) — sanity that the
+        # only thing we changed is the momentum add-term.
+        np.testing.assert_array_equal(
+            np.asarray(Hu_v), np.asarray(Hu_t),
+            err_msg="Hu_avg must not depend on reconcile_target")
+
+        # NOW u-face column depth — the public thickness the tracer path uses.
+        h_u_old = min_cell_to_uface(h_k_old)
+        H_u_old = jnp.sum(h_u_old, axis=-1)
+        u_mask_3d, _ = compute_face_masks_3d(pc.is_active, grid)
+        u_mask_3d = u_mask_3d.astype(h_u_old.dtype)
+
+        # depth-mean of each arm's 3-D velocity (thickness-weighted, masked).
+        def depth_mean(u3d):
+            num = jnp.sum(u3d * h_u_old * u_mask_3d, axis=-1)
+            return num / jnp.maximum(H_u_old, 1e-10)
+
+        dm_v = depth_mean(sv.u.data)
+        dm_t = depth_mean(st.u.data)
+
+        # transport target: depth-mean == Hu_avg / H_u exactly (NEMO un_adv/hu).
+        target = Hu_t / jnp.maximum(H_u_old, 1e-10)
+        wet = jnp.sum(u_mask_3d, axis=-1) > 0
+        np.testing.assert_allclose(
+            np.asarray(dm_t[wet]), np.asarray(target[wet]),
+            rtol=0, atol=1e-12,
+            err_msg="transport_avg depth-mean != Hu_avg/H_u")
+
+        # velocity target: NOT equal to the transport target (feature is live).
+        diff = float(jnp.max(jnp.abs((dm_t - dm_v)[wet])))
+        assert diff > 1e-6, (
+            f"velocity_avg and transport_avg give the SAME depth-mean "
+            f"(max diff {diff:.2e}) — the option is not wired / the two "
+            f"kernels coincide on this state")
+
+    def test_default_is_velocity_avg_bit_identical(self, grid, z_coord):
+        """The DEFAULT (no reconcile_target set) is byte-identical to explicit
+        velocity_avg — verified with np.array_equal, not a tolerance."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        n = 23
+
+        cfg_default = LatLonCGridOceanConfig.from_flat(
+            K_h=0.0, K_bih=0.0, K_v=0.0, A_h=0.0, B_h=0.0, A_v=0.0,
+            C_smag=0.0, bottom_drag_r=0.0, physics=None,
+            use_conservation_fixer=False, **self._KAMM_MLF_BARO,
+        )
+        assert (cfg_default.barotropic.barotropic_reconcile_target
+                == "velocity_avg")
+        cfg_explicit = self._cfg("velocity_avg")
+
+        sd, (Hu_d, Hv_d) = barotropic_substeps_latlon_cgrid(
+            state, 600.0 / n, n, grid, partial_coord, cfg_default,
+            add_barotropic_coriolis=True)
+        se, (Hu_e, Hv_e) = barotropic_substeps_latlon_cgrid(
+            state, 600.0 / n, n, grid, partial_coord, cfg_explicit,
+            add_barotropic_coriolis=True)
+        assert np.array_equal(np.asarray(sd.u.data), np.asarray(se.u.data))
+        assert np.array_equal(np.asarray(sd.v.data), np.asarray(se.v.data))
+        assert np.array_equal(np.asarray(Hu_d), np.asarray(Hu_e))
+        assert np.array_equal(np.asarray(Hv_d), np.asarray(Hv_e))
+
+    def test_unknown_reconcile_target_raises(self, grid, z_coord):
+        """Dispatch hardening: an unknown value raises at the substep entry."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        cfg = self._cfg("velocity_avg")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_reconcile_target="bogus"))
+        n = 23
+        with pytest.raises(ValueError, match="barotropic_reconcile_target"):
+            barotropic_substeps_latlon_cgrid(
+                state, 600.0 / n, n, grid, partial_coord, cfg,
+                add_barotropic_coriolis=True)
+
+
+    def test_ssh_avg_face_depth_divisor_convention(self, grid, z_coord):
+        """F1 (adversarial review): on the ``transport_avg`` branch, run with
+        the card's barotropic composition (``barotropic_face_depth=
+        "nemo_ssh_avg"``, inherited from nemo_dino_kamm), the divisor
+        convention is pinned:
+
+        SCOPE, corrected 2026-08-21 (#1455 R6): this exercises the
+        ``transport_avg`` branch, which the kamm_mlf card NO LONGER selects --
+        it now ships ``velocity_avg`` + ``barotropic_after_reconcile=
+        "nemo_mlf_baro_corr"``.  The divisor convention pinned here is still a
+        live invariant of that branch and of the option as a whole, but do not
+        read this as certifying the card's own composition; the card's pair is
+        gated by ``TestBarotropicReconcileTargetCard`` (wiring) and by the
+        90-day twin (behaviour).  Nothing drives the card's ACTUAL pair through
+        the solver in this file -- a known coverage gap, named not filled.
+        the reconciled depth-mean STILL equals ``Hu_avg / H_u_min_rule``
+        exactly (internal ``puu_b`` consistency — the deliberate choice
+        documented on ``BarotropicConfig.barotropic_reconcile_target``), and
+        its deviation from the ssh-avg-divisor alternative (NEMO's literal
+        ``r1_hu(Kmm)`` under key_qco, domqco.F90:227) is nonzero but bounded
+        at the measured ~1.3e-4 relative scale.  If a future change moves the
+        divisor to ssh-avg, the FIRST assertion goes red — forcing both sides
+        of the reconciliation to move together, never the divisor alone."""
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            nemo_ssh_avg_face_depth,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        cfg = LatLonCGridOceanConfig.from_flat(
+            K_h=0.0, K_bih=0.0, K_v=0.0, A_h=0.0, B_h=0.0, A_v=0.0,
+            C_smag=0.0, bottom_drag_r=0.0, physics=None,
+            use_conservation_fixer=False,
+            barotropic_reconcile_target="transport_avg",
+            barotropic_face_depth="nemo_ssh_avg",
+            # The card sets this too, and it selects a DIFFERENT branch for
+            # the loop-entry seed. Leaving it at the default certified the
+            # min-rule-seed path while the card runs the other one.
+            barotropic_seed_face_depth="nemo_ssh_avg",
+            **self._KAMM_MLF_BARO,
+        )
+        n = 23
+        # The card runs multi-level time stepping, so the substep is entered
+        # with BEFORE-level fields. That is what turns on the seed override,
+        # and with it the branch that rebuilds the subtracted depth-mean from
+        # the NOW state. Calling without them exercised the other branch
+        # entirely, so this test's claim to pin "the card's composition" was
+        # about a composition the card never runs (codex).
+        eta_before = state.eta.data * 0.5
+        u_before = state.u.data * 0.9
+        v_before = state.v.data * 0.9
+        state_new, (Hu_avg, _) = barotropic_substeps_latlon_cgrid(
+            state, 600.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True,
+            eta_init=eta_before, u_init=u_before, v_init=v_before,
+        )
+        h_k_old = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, partial_coord,
+            min_water_column_m=cfg.min_water_column_m,
+        )
+        h_u_old = min_cell_to_uface(h_k_old)
+        H_u_min = jnp.sum(h_u_old, axis=-1)
+        u_mask_3d, _ = compute_face_masks_3d(partial_coord.is_active, grid)
+        u_mask_3d = u_mask_3d.astype(h_u_old.dtype)
+        wet = jnp.sum(u_mask_3d, axis=-1) > 0
+
+        dm = (jnp.sum(state_new.u.data * h_u_old * u_mask_3d, axis=-1)
+              / jnp.maximum(H_u_min, 1e-10))
+
+        # (1) the shipped convention: depth-mean == Hu_avg / H_u(min-rule),
+        # exactly, EVEN when the substep fluxes ran ssh-avg depths.
+        target_min = Hu_avg / jnp.maximum(H_u_min, 1e-10)
+        np.testing.assert_allclose(
+            np.asarray(dm[wet]), np.asarray(target_min[wet]),
+            rtol=0, atol=1e-12,
+            err_msg="transport_avg divisor is no longer the min-rule NOW "
+                    "depth -- if this is deliberate, BOTH sides of the "
+                    "reconciliation must move to ssh-avg together (see the "
+                    "F1 note on BarotropicConfig.barotropic_reconcile_target)")
+
+        # (2) the F1 gap vs NEMO's literal ssh-avg divisor is real (nonzero)
+        # and second-order (<= 5e-4 relative on this bathymetry).
+        from legoesm.grids.latlon import ensure_geometry
+        _geom = ensure_geometry(grid)
+        H_u_ssh, _ = nemo_ssh_avg_face_depth(
+            state.eta.data, state.H_bathy.data, state.land_mask.data,
+            state.u_mask.data, state.v_mask.data, grid, _geom.area,
+            h_u_old.dtype)
+        target_ssh = Hu_avg / jnp.maximum(H_u_ssh, 1e-10)
+        rel = jnp.abs(target_min - target_ssh) / jnp.maximum(
+            jnp.abs(target_ssh), 1e-10)
+        rel_max = float(jnp.max(jnp.where(wet, rel, 0.0)))
+        assert rel_max > 0.0, (
+            "min-rule and ssh-avg divisors are IDENTICAL here -- this "
+            "fixture cannot exercise the F1 gap (flat bathymetry or zero "
+            "eta?); use a stepped bathymetry with nonuniform eta")
+        assert rel_max < 5e-4, (
+            f"F1 divisor gap {rel_max:.3e} exceeds the documented ~1.3e-4 "
+            "scale by >3x -- re-measure and update the "
+            "BarotropicConfig docstring")
+
+
+    def test_the_before_state_inputs_are_not_ignored(self, grid, z_coord):
+        """Non-vacuity for the test above.
+
+        That test only certifies the card's path if handing the substep
+        BEFORE-level fields actually selects a different branch. If they were
+        ignored, it would be the old test wearing new arguments.
+        """
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            barotropic_substeps_latlon_cgrid,
+        )
+        H_bathy = _step_bathy(grid)
+        partial_coord = create_partial_cell_coordinate(z_coord, H_bathy)
+        state = self._perturbed_state(grid, partial_coord, H_bathy, z_coord)
+        cfg = LatLonCGridOceanConfig.from_flat(
+            K_h=0.0, K_bih=0.0, K_v=0.0, A_h=0.0, B_h=0.0, A_v=0.0,
+            C_smag=0.0, bottom_drag_r=0.0, physics=None,
+            use_conservation_fixer=False,
+            barotropic_reconcile_target="transport_avg",
+            barotropic_face_depth="nemo_ssh_avg",
+            barotropic_seed_face_depth="nemo_ssh_avg",
+            **self._KAMM_MLF_BARO,
+        )
+        n = 3
+        plain, _ = barotropic_substeps_latlon_cgrid(
+            state, 60.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True)
+        seeded, _ = barotropic_substeps_latlon_cgrid(
+            state, 60.0 / n, n, grid, partial_coord, cfg,
+            add_barotropic_coriolis=True,
+            eta_init=state.eta.data * 0.5,
+            u_init=state.u.data * 0.9, v_init=state.v.data * 0.9)
+        assert not np.allclose(np.asarray(plain.u.data),
+                               np.asarray(seeded.u.data), rtol=0, atol=1e-14), (
+            "the before-level fields changed nothing, so the test above is "
+            "still exercising the branch the card does not run")
+
+
+class TestBarotropicReconcileTargetCard:
+    """Card wiring: nemo_dino_kamm_mlf ships the NEMO-faithful reconciliation
+    PAIR (#1455 R6 arm D) -- ``barotropic_reconcile_target="velocity_avg"``
+    (NEMO commits ``uu_b(Kaa)``, the primary VELOCITY-weighted boxcar, under
+    ``ln_dynadv_vec=.TRUE.``) TOGETHER WITH
+    ``barotropic_after_reconcile="nemo_mlf_baro_corr"`` (NEMO's second site,
+    ``stpmlf.F90`` ``mlf_baro_corr``).
+
+    NON-VACUITY. ``"velocity_avg"`` is ALSO the config default, so asserting
+    only the resolved value would still pass if the card's entry were deleted
+    -- and deleting it would silently drop the ``barotropic_after_reconcile``
+    line beside it, reverting the card to a non-NEMO arm. So this asserts the
+    keys are present IN THE CARD DICT as well as their resolved values. The
+    parent card ``nemo_dino_kamm`` sets NEITHER key, so the membership check
+    cannot be satisfied by inheritance. Reverting either card line turns three
+    tests red: both tests in this class and
+    ``test_barotropic_after_reconcile.py::test_kamm_mlf_ships_the_faithful_pair``."""
+
+    _FAITHFUL_PAIR = {
+        "barotropic_reconcile_target": "velocity_avg",
+        "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+    }
+
+    def test_kamm_mlf_card_pins_the_faithful_pair_explicitly(self):
+        from legoesm.ocean.experiments.dino import DINO_RECIPES
+        card = DINO_RECIPES["nemo_dino_kamm_mlf"]
+        for key, want in self._FAITHFUL_PAIR.items():
+            assert key in card, (
+                f"nemo_dino_kamm_mlf no longer pins {key!r} explicitly. The "
+                "two knobs are ONE choice (#1455 R6): dropping either reverts "
+                "the card to an arm that is NEMO at neither reconciliation "
+                "site.")
+            assert card[key] == want, (
+                f"nemo_dino_kamm_mlf: {key} = {card[key]!r}, want {want!r}")
+
+    def test_resolved_pair_on_kamm_mlf_and_off_elsewhere(self):
+        from legoesm.ocean.experiments.dino import dino_config_for_recipe
+        c = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        assert c.barotropic_reconcile_target == "velocity_avg"
+        assert c.barotropic_after_reconcile == "nemo_mlf_baro_corr"
+        # No OTHER shipped card runs either half of the pair -- all six,
+        # not a sample, so a new card cannot pick it up unnoticed.
+        for recipe in ("legoesm_default", "nemo_dino_kamm", "nemo_paper",
+                       "veros", "mitgcm", "oceananigans"):
+            o = dino_config_for_recipe(recipe)
+            assert o.barotropic_reconcile_target == "velocity_avg", (
+                f"{recipe}: got {o.barotropic_reconcile_target}")
+            assert o.barotropic_after_reconcile == "off", (
+                f"{recipe}: got {o.barotropic_after_reconcile}")

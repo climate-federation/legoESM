@@ -1970,3 +1970,41 @@ class TestMxlChoice3LdownSeed:
         assert bool(jnp.isfinite(l_eps).all())
         assert l_k.shape == (2, 3, n)
         assert l_eps.shape == (2, 3, n)
+
+
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO TestFaceNativeUnderRK3 CLASS HERE (codex 9406102)
+# ---------------------------------------------------------------------------
+# One was added on 2026-08-14 asserting that nemo_face_native may construct off
+# the leap-frog family, on the argument that NEMO's RK3 step calls
+# `zdf_phy( kstp, Nbb, Nbb, Nrhs )` (stprk3.F90:165) so the now x before
+# product is a square on one time level. The source observation is correct and
+# both ORCA1 oracle runs are RK3 builds. The conclusion did not follow, for
+# three reasons, and the whole change was reverted:
+#
+#   1. legoESM's "RK3" is momentum_time_integrator, NOT outer_integrator --
+#      outer_integrator has no RK3 value at all (forward_euler, ab2, leapfrog,
+#      nemo_mlf). So "we are an RK3 model like NEMO" was a category error.
+#
+#   2. NEMO evaluates zdf_phy BEFORE stage 1, from the step-entry Nbb state.
+#      legoESM calls _apply_implicit_vertical_mixing(state_new, ...) AFTER the
+#      RK3 momentum stages and the barotropic solve, so its "now" is a
+#      post-stage value, not NEMO's Nbb. Feeding it as both factors is
+#      therefore NOT an Nbb x Nbb transcription.
+#
+#   3. The k_profiles branch written to support it was UNREACHABLE: the
+#      _needs_before raise fires for nemo_face_native before the else-branch
+#      is ever considered. The construction test added alongside it passed
+#      while proving nothing about the runtime path -- it exercised the
+#      constructor, which was the only thing the change had actually altered.
+#
+# Codex also showed the sibling rn2b argument was wrong in the other
+# direction: stprk3.F90:156 sets `rn2 = rn2b` before zdf_phy, so under RK3
+# they ARE equal, and tke_n2_time_level="nemo_before" is leapfrog-only for the
+# same missing-entry-state reason, not because RK3 keeps the levels distinct.
+#
+# Closing this properly means splitting the closure call in two: a step-entry
+# (NEMO Nbb) state for the face shear and rn2b, and the post-stage state for
+# the implicit vertical solve. That is a real refactor, not a guard tweak, and
+# until it exists the constructor guard is correct as written.

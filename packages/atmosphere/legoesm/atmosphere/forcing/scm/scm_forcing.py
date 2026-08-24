@@ -82,6 +82,27 @@ class SCMForcing(NamedTuple):
         Prescribed surface kinematic heat / moisture fluxes, returning
         scalars [K m/s] and [(kg/kg) m/s] (consumed when
         ``prescribe == "fluxes"``).
+    flux_to_closure
+        WHERE the prescribed flux is applied, when ``prescribe == "fluxes"``.
+
+        ``False`` (default, the historical behaviour): it enters the column
+        as a flux-divergence tendency at the lowest cell, and the TURBULENCE
+        closure sees a surface heat flux of exactly ZERO.  That is fine for a
+        local gradient-diffusion scheme but disables the defining input of
+        every flux-driven nonlocal one (YSU, Holtslag-Boville, EDMF all scale
+        their countergradient / mixed-layer velocity on ``w'theta'_0``).
+
+        ``True``: the flux is instead written per step into
+        ``PhysicsState.surface_wth_override`` / ``surface_wqv_override`` and
+        applied by the closure as its lower boundary condition, so a nonlocal
+        scheme receives it.  ``compute_forcing_tendencies`` then skips the
+        column injection, because applying BOTH counts the same flux twice.
+
+        This is what lets a case whose flux VARIES IN TIME reach the closure
+        at all: ``SurfaceLayerConfig.prescribed_shflx_w_m2`` is one scalar for
+        the whole run, so the config route can only carry one instant of a
+        diurnal cycle (Wangara Day 33 measured 113.4 W/m^2 held for 8 h
+        against a cycle peaking at 13:00).
     """
     f_c: float = 0.0
     u_geo: Optional[ProfileFn] = None
@@ -93,6 +114,7 @@ class SCMForcing(NamedTuple):
     T_s: Optional[ScalarFn] = None
     w_th_s: Optional[ScalarFn] = None
     w_qv_s: Optional[ScalarFn] = None
+    flux_to_closure: bool = False
 
 
 def default_forcing() -> SCMForcing:
@@ -138,6 +160,15 @@ def validate_forcing(forcing: SCMForcing) -> None:
             raise ValueError(
                 "prescribe='fluxes' requires at least one of w_th_s, w_qv_s."
             )
+    elif forcing.flux_to_closure:
+        # Silently inert otherwise: nothing outside the prescribe='fluxes'
+        # branch reads it, so a caller that set it on the wrong forcing would
+        # believe the closure had a surface flux it never received.
+        raise ValueError(
+            "SCMForcing.flux_to_closure=True requires prescribe='fluxes'; "
+            f"got prescribe={forcing.prescribe!r}, where there is no "
+            "prescribed surface flux to hand to the closure."
+        )
 
 
 def validate_forcing_against_state(
@@ -321,7 +352,12 @@ def compute_forcing_tendencies(
     # the bulk-formula path does not double-count the prescribed
     # sensible/latent heat flux.  Momentum drag (``Cd``) can stay live
     # — it is not duplicated by these kinematic-flux channels.
-    if forcing.prescribe == "fluxes":
+    #
+    # ``flux_to_closure=True`` moves the SAME flux to the closure's lower
+    # boundary condition (``PhysicsState.surface_wth_override``, written by
+    # ``scm._tendency_fn``), so this injection is skipped: running both would
+    # apply the flux twice.  Static Python ``if`` on a config bool.
+    if forcing.prescribe == "fluxes" and not forcing.flux_to_closure:
         dz_layer = compute_layer_dz(
             T.reshape(1, nlev),
             p_half.reshape(1, nlev + 1),
@@ -435,6 +471,50 @@ def inject_prescribed_T_sfc_into_phys_state(phys_state, T_s_value):
         )
     new_override = jnp.broadcast_to(T_s_arr, override_shape)
     return phys_state._replace(surface_T_sfc_override=new_override)
+
+
+def inject_prescribed_surface_fluxes_into_phys_state(
+    phys_state, *, wth=None, wqv=None,
+):
+    """Write this step's prescribed surface KINEMATIC fluxes into PhysicsState.
+
+    The flux sibling of :func:`inject_prescribed_T_sfc_into_phys_state`, used
+    for ``SCMForcing(prescribe="fluxes", flux_to_closure=True)``.  The
+    turbulence integration reads these in
+    ``turbulence.integration._resolve_prescribed_surface_fluxes`` and applies
+    them as the closure's lower boundary condition, which is what a nonlocal
+    scheme needs: ``SurfaceLayerConfig.prescribed_shflx_w_m2`` is one scalar
+    for the whole run and cannot carry a diurnal cycle.
+
+    ``wth`` [K m/s] and ``wqv`` [(kg/kg) m/s], positive UPWARD — the same
+    units and sign as ``SCMForcing.w_th_s`` / ``w_qv_s``, unconverted.  Either
+    may be ``None``, which leaves that channel absent (a dry case has no
+    moisture flux, and writing a zero would be a different statement).
+
+    NO host-side validation here, deliberately, and this is the one real
+    difference from the ``T_s`` injector: the value comes from a callable of a
+    TRACED time inside the SCM's ``lax.scan``, so ``np.asarray`` on it would
+    raise.  It does not need one either — absence is signalled by ``None``,
+    not by an in-band sentinel, so a ``NaN`` flux stays ``NaN`` and surfaces
+    downstream instead of silently reading as "no override" (which is exactly
+    the failure the ``T_s`` injector's check exists to prevent).
+    """
+    if phys_state is None:
+        return phys_state
+    # Shape and dtype from the sibling override, which is always materialised
+    # as ``(ncol,)`` by ``init_physics_state``.
+    shape = phys_state.surface_T_sfc_override.shape
+    dtype = phys_state.surface_T_sfc_override.dtype
+    updates = {}
+    if wth is not None:
+        updates["surface_wth_override"] = jnp.broadcast_to(
+            jnp.asarray(wth, dtype=dtype), shape)
+    if wqv is not None:
+        updates["surface_wqv_override"] = jnp.broadcast_to(
+            jnp.asarray(wqv, dtype=dtype), shape)
+    if not updates:
+        return phys_state
+    return phys_state._replace(**updates)
 
 
 def add_tendencies(

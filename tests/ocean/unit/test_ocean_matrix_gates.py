@@ -175,7 +175,15 @@ def test_igw_l2_is_no_longer_gated():
     is within 0.3% of the IC."""
     M = _matrix()
     src = (_REPO / "scripts" / "matrix" / "run_ocean_test_matrix.py").read_text()
-    body = src[src.index("def run_inertia_gravity_wave"):]
+    # EXACT signature, not a name prefix. "def run_inertia_gravity_wave"
+    # also matches run_inertia_gravity_wave_CHANNEL, which is defined
+    # earlier in the file, so the prefix form silently inspected the wrong
+    # function and this test asserted about a body it had never meant to
+    # read (found 2026-08-13, the same class as asserting against a
+    # delegating wrapper).
+    anchor = "def run_inertia_gravity_wave(tc: TestCase"
+    assert src.count(anchor) == 1, "the global IGW runner's signature moved"
+    body = src[src.index(anchor):]
     body = body[:body.index("\ndef ")]
     assert "L2_UNGATED" in body
     assert 'label="IGW L2 vs analytical"' not in body, (

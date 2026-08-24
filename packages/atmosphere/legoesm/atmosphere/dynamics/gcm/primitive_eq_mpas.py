@@ -97,9 +97,10 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Column-conserving tracer positivity clamp (borrow the clipped deficit
     # from the positives) instead of the mass-CREATING plain max(q, 0).  See
     # the "--- 3. Floors ---" note: the naive clamp invents ~+30 kg/m2/yr of
-    # water on the AMIP century.  Default False keeps existing MPAS results
-    # bit-identical; flip after validation.
-    conservative_tracer_clamp: bool = False
+    # water on the AMIP century.  Default TRUE since 2026-08-16 (owner
+    # decision: "conserving form always"); False restores the legacy clamp
+    # for bit-comparison against older runs.
+    conservative_tracer_clamp: bool = True
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -782,7 +783,26 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     ):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
+        # The unstructured core's cost per cell per level varies threefold
+        # with the level count, and the lat-lon core measured flat over the
+        # same counts — so the advisory belongs here, not in the shared
+        # vertical-coordinate factory.
+        from legoesm.grids.vertical import warn_if_unaligned_levels
+        warn_if_unaligned_levels(
+            getattr(sigma_coord, "n_levels", 0),
+            where="MPASPrimitiveEquationModel")
         self.config = config or MPASPrimitiveEquationConfig()
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must announce itself. Static Python at build
+        # time (never in traced code).
+        if not self.config.conservative_tracer_clamp:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MPAS floors: NON-CONSERVING plain max(q, 0) tracer clamp "
+                "selected (conservative_tracer_clamp=False). This clamp "
+                "CREATES mass at every transport undershoot (+30 kg/m2/yr "
+                "of water measured on the AMIP century) — legacy "
+                "bit-comparison mode only.")
         # Pre-compute the global total area once at construction time so
         # the per-step mass fixer does not include this constant in its
         # cross-device reduction payload (drops 3-element allreduce → 2).
@@ -1086,9 +1106,9 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # and +10 K/yr of warming.
         #
         # ``conservative_tracer_clamp`` swaps the naive clamp for the
-        # column-conserving borrow (shared with the LES lane).  Default False
-        # so existing MPAS results are bit-identical until the flag is set;
-        # the default is known-wrong and should flip once validated.
+        # column-conserving borrow (shared with the LES lane).  Default TRUE
+        # since 2026-08-16 (owner decision: conserving form always); False
+        # restores the legacy mass-creating clamp for bit-comparison runs.
         if state_new.tracers is not None:
             if self.config.conservative_tracer_clamp:
                 # PER-MASS tracers get the conserving borrow — the mixing

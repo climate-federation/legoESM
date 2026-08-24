@@ -1,0 +1,122 @@
+# Land spin-up for the AMIP campaign, on the land model the tuned tables were
+# actually fitted to. Companion to config/amip/amip_land_calibrated.yaml — read
+# that file first; this one exists so the soil state handed to the coupled run is
+# equilibrated under the SAME land model the coupled run will step, which the
+# original spin-up config was not.
+#
+# WHAT CHANGED FROM config/lmip/amip_mpas4_spinup.yaml, and why each mattered:
+#
+#   * THE SURFACE MODEL. That config runs the two-leaf canopy; the tables were
+#     fitted with the bulk surface energy balance. A soil column equilibrated
+#     against a different surface model hands the coupled run the wrong moisture.
+#     (That file's own header says it runs the bulk scheme "because the canopy is
+#     not wired on this lane" while its setting says the canopy — the prose and
+#     the setting disagree, and the setting is what runs.)
+#   * THE PLANT MODEL. Stomata were switched on there but the carbon scheme was
+#     not, so the plants ran the Jarvis model. The tables were fitted under
+#     Farquhar. The single switch below selects the fitted combination.
+#   * THE SOIL COLUMN. That config leaves the driver's default 6.375 m column;
+#     the tables were fitted on 3 m. The two columns place every soil
+#     temperature and moisture value at different depths.
+#
+# One switch selects all three, from the same shared definition the offline
+# calibrator builds from, so these cannot drift apart again. The three settings
+# it overlaps are stated explicitly below and CHECKED against it — a
+# disagreement fails the run rather than quietly changing the land model.
+#
+# Everything else (mesh, calendar, forcing, output) is unchanged from the
+# original, and the reasoning for those choices is in that file's header.
+#
+# Usage:
+#   python scripts/run/run_lmip_biophys.py \
+#       --config config/lmip/amip_mpas4_spinup_calibrated.yaml \
+#       --output-dir results/land/land_spinup_calibrated
+# then hand the restart to the coupled run with:
+#   --land-ic <restart> --land-calibrated-physics --land-stomatal-beta \
+#   --land-surface-scheme simple_seb --snow-albedo-feedback \
+#   --mpas-land-beta-soil --multilayer-n-layers 8 --multilayer-soil-depth 3.0
+# (--mpas-land-beta-soil is required: without it the mesh lane discards the land
+# tile's solved fluxes and the calibrated plant model never reaches the air.)
+#
+template_name: biophysics/amip_mpas4_spinup_calibrated
+template_version: 1.0.0
+description: 5-year CRU-JRA land spin-up on the AMIP MPAS mesh, calibrated land model
+
+grid:
+  # MUST MATCH THE AMIP RUN THIS FEEDS. The restart loader compares column counts
+  # and refuses a mismatch rather than interpolating. 4 = 2562 cells (the res-4
+  # campaign arms); the production AMIP config runs resolution 5 = 10242 cells,
+  # so a spin-up for THAT run needs this changed to 5 and re-run.
+  type: voronoi
+  resolution: 4
+
+physics:
+  land_mode: multilayer
+  # One switch for the fitted land PHYSICS: bulk surface energy balance, MOST
+  # exchange, Farquhar stomata on a prescribed leaf carbon, and the 3 m
+  # calibration soil column (the soil column has no key of its own).
+  #
+  # PHYSICS, not parameters. This driver builds its per-plant-type parameter
+  # values from its own surface dataset, not from the tuned tables the coupled
+  # run uses, so the schemes and the soil column match while the values do not.
+  # Closing that gap means changing which surface dataset this driver reads.
+  calibrated_land_physics: true
+  # Stated explicitly because they overlap the switch above and are CHECKED
+  # against it, so a typo here fails the run instead of changing the land model.
+  surface_scheme: simple_seb
+  bulk_scheme: most
+  stomata_enabled: true
+  stomatal_model: ball_berry
+  snow_albedo_feedback: true
+  # OFF, unlike the original spin-up config, because the tables were fitted with
+  # it off and the coupled run has it off: the whole point of this file is that
+  # the soil state is equilibrated under the model that will step it. The
+  # original turned it on because boreal winter columns diverge without it; if
+  # they do here, the fix is to add freeze/thaw to the shared calibrated model
+  # and RE-FIT, not to let the spin-up differ. The driver reverts NaN columns
+  # per cell and reports the tally, so a divergence shows up rather than
+  # silently poisoning the state.
+  enable_freeze_thaw: false
+
+forcing:
+  source: cru_jra
+  data_dir: data/crujra
+  prefix: clmforc.CRUJRAv2.5_0.5x0.5
+  suffix: ""
+  year_start: 1974
+  year_end: 1978
+  k_neighbors: 4
+
+surfdata:
+  path: data/legoesm_surfdata_c260716.nc
+  land_cover_dataset: clm5
+
+time:
+  dt: 3600.0
+  n_steps: 43800                # 5 years hourly (5 x 8760)
+  start_doy: 0.0
+
+restart:
+  from: ""
+
+land_frac_min: 0.0
+land_mask_file: ""
+
+output:
+  # Names and averaging modes copied from the shipped 5-year template, not
+  # invented: a tape asking for a variable the driver does not publish dies
+  # mid-scan with a bare KeyError, which is how the first version of this file
+  # was caught.
+  tapes:
+    - name: monthly
+      freq: monthly
+      average: mean
+      vars: [T_sfc, shflx, lhflx, albedo, runoff, precip, soil_evap]
+
+    # The equilibrium diagnostic: the year-over-year drift of these three is
+    # what says whether the spin-up has settled. Instantaneous, because a
+    # monthly MEAN soil moisture hides the drift the end-of-year value shows.
+    - name: monthly_state
+      freq: monthly
+      average: inst
+      vars: [T_soil_top, theta_soil_top, snow_depth]

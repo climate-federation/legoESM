@@ -200,15 +200,23 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # convection -> _resolve_convection (physics_pipeline)
     "atm.conv.SBMConfig.tau_c": "sbm_tau_c",
     "atm.conv.SBMConfig.rh_ref": "sbm_RH_ref",
-    # The two cape_threshold entries are tunable_tier 0 (AD-unreachable
-    # trigger, #1417): they stay in this map because the map's contract is
-    # "what the pipeline actually threads", but the tier gate in
-    # apply_params_to_config REFUSES them on the --params route (#1518) —
-    # settable only via the explicit --config/CLI scalars.
+    # The two cape_threshold entries were tunable_tier 0 (AD-unreachable
+    # trigger, #1417) and refused on the --params route by the tier gate in
+    # apply_params_to_config (#1518).  They are tier 2 as of the smooth-trigger
+    # work, so the --params route now accepts them; the gate still refuses any
+    # parameter whose spec says tier 0, whichever those are.
     "atm.conv.SBMConfig.cape_threshold": "sbm_cape_threshold",
     "atm.conv.BechtoldConfig.cape_threshold": "bechtold_cape_threshold",
     "atm.conv.BechtoldConfig.rprcon": "bechtold_rprcon",
+    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
+    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
+    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
+    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
+    "atm.conv.BechtoldConfig.capdcycl_land_tau_scale": "bechtold_capdcycl_land_tau_scale",
+    "atm.conv.BechtoldConfig.subcloud_evap_scale": "bechtold_subcloud_evap_scale",
+    "atm.conv.BechtoldConfig.rhebc_land": "bechtold_rhebc_land",
+    "atm.conv.BechtoldConfig.rhebc_land_deep": "bechtold_rhebc_land_deep",
     # cloud inhomogeneity (Cahalan) + convective autoconversion split (Sundqvist)
     # -> build_cloud_config / _resolve_convection (physics_pipeline)
     # NOTE: cloud_inhomogeneity_factor was REMOVED from this map 2026-07-23:

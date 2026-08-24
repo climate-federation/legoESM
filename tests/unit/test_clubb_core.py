@@ -17,11 +17,13 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     CLUBBForcing,
     CLUBBMomentState,
     advance_clubb_core,
+    calc_sfc_varnce,
     compute_clubb_diagnostics,
     compute_pdf_closure,
     init_clubb_moments,
@@ -366,6 +368,174 @@ def test_diagnostics_jit_and_grad():
 
     assert jnp.isfinite(jax.jit(loss)(kw["wp2"]))
     assert jnp.all(jnp.isfinite(jax.grad(loss)(kw["wp2"])))
+
+
+# --- calc_sfc_varnce: CLUBB's surface second-moment BC (#1508) --------------
+#
+# The two known answers below are stated by the reference source itself
+# (``sfc_varnce_module.F90``, "Notes: 1) With 'a' having a value of 1.8, the
+# surface correlations of both w & rt and w & thl have a value of about 0.878.
+# 2) The surface correlation of rt & thl is 0.5."), so they are independent of
+# how the port is written rather than a re-derivation of it.
+
+
+def _sfc_varnce_call(cfg, upwp, vpwp, wpthlp, wprtp, ng=1, nzm=5):
+    """Run the BC on all-zero moment arrays; returns the level-0 row of each."""
+    z = jnp.zeros((ng, nzm))
+    a = lambda v: jnp.full((ng,), v)  # noqa: E731
+    out = calc_sfc_varnce(z, z, z, z, z, z,
+                          a(upwp), a(vpwp), a(wpthlp), a(wprtp), cfg)
+    return [np.asarray(o)[:, 0] for o in out]
+
+
+def test_sfc_varnce_reproduces_the_reference_surface_correlations():
+    cfg = CLUBBConfig(prognostic=True)
+    # Unstable surface layer: both fluxes well away from their tolerances, so
+    # neither variance is sitting on its floor and neither correlation is
+    # clipped by the min-wp2 branch.
+    wp2, up2, vp2, thlp2, rtp2, rtpthlp = _sfc_varnce_call(
+        cfg, upwp=-0.15, vpwp=0.05, wpthlp=0.12, wprtp=8.0e-5)
+
+    corr_w_thl = 0.12 / np.sqrt(wp2 * thlp2)
+    corr_w_rt = 8.0e-5 / np.sqrt(wp2 * rtp2)
+    corr_rt_thl = rtpthlp / np.sqrt(rtp2 * thlp2)
+    np.testing.assert_allclose(corr_w_thl, 0.878, atol=5e-4)
+    np.testing.assert_allclose(corr_w_rt, 0.878, atol=5e-4)
+    np.testing.assert_allclose(corr_rt_thl, 0.5, rtol=1e-12)
+    # Horizontal variances carry up2_sfc_coef * a_const * uf^2, i.e. exactly
+    # up2_sfc_coef times wp2 while the min-wp2 correction is inactive.
+    np.testing.assert_allclose(up2, cfg.params.up2_sfc_coef * wp2, rtol=1e-12)
+    np.testing.assert_array_equal(up2, vp2)
+
+
+def test_sfc_varnce_neutral_case_is_exact_and_floors_the_scalar_variances():
+    cfg = CLUBBConfig(prognostic=True)
+    p = cfg.params
+    # Pure shear, no buoyancy flux: w* = 0, so uf^2 = |tau|/rho exactly.
+    wp2, up2, vp2, thlp2, rtp2, rtpthlp = _sfc_varnce_call(
+        cfg, upwp=-0.1, vpwp=0.0, wpthlp=0.0, wprtp=0.0)
+    uf_sqd = 0.1
+    np.testing.assert_allclose(wp2, p.a_const * uf_sqd, rtol=1e-12)
+    np.testing.assert_allclose(up2, p.up2_sfc_coef * p.a_const * uf_sqd,
+                               rtol=1e-12)
+    np.testing.assert_allclose(thlp2, cfg.thl_tol ** 2, rtol=1e-12)
+    np.testing.assert_allclose(rtp2, cfg.rt_tol ** 2, rtol=1e-12)
+    np.testing.assert_array_equal(rtpthlp, np.zeros_like(rtpthlp))
+
+
+def test_sfc_varnce_min_wp2_correction_is_taken_out_of_the_horizontal_variances():
+    """No stress and no flux: uf hits ufmin, so the w_tol^2 floor bites."""
+    cfg = CLUBBConfig(prognostic=True)
+    p = cfg.params
+    wp2, up2, vp2, thlp2, rtp2, rtpthlp = _sfc_varnce_call(
+        cfg, upwp=0.0, vpwp=0.0, wpthlp=0.0, wprtp=0.0)
+    uf_sqd = 0.01 ** 2                      # ufmin
+    raw_wp2 = p.a_const * uf_sqd
+    assert raw_wp2 < cfg.w_tol ** 2         # the branch under test is live
+    correction = cfg.w_tol ** 2 - raw_wp2
+    np.testing.assert_allclose(wp2, cfg.w_tol ** 2, rtol=1e-12)
+    np.testing.assert_allclose(
+        up2, p.up2_sfc_coef * raw_wp2 - 0.5 * correction, rtol=1e-12)
+    np.testing.assert_array_equal(up2, vp2)
+
+
+def test_sfc_varnce_stable_branch_kills_wstar_and_keeps_gradients_finite():
+    cfg = CLUBBConfig(prognostic=True)
+    # A downward heat flux must give the same answer as no heat flux at all,
+    # because w* is defined only for wpthlp > 0.
+    stable = _sfc_varnce_call(cfg, -0.1, 0.0, -0.3, 0.0)[0]
+    neutral = _sfc_varnce_call(cfg, -0.1, 0.0, 0.0, 0.0)[0]
+    np.testing.assert_array_equal(stable, neutral)
+
+    def loss(wpthlp):
+        z = jnp.zeros((1, 5))
+        one = jnp.ones((1,))
+        out = calc_sfc_varnce(z, z, z, z, z, z, -0.1 * one, 0.0 * one,
+                              wpthlp * one, 1.0e-5 * one, cfg)
+        return sum(jnp.sum(o) for o in out)
+
+    # The cube root never RECEIVES a non-positive argument (jnp.where is not
+    # lazy, so the inner where is what does the work), in the primal or the
+    # VJP, so the gradient stays finite at and below wpthlp = 0.
+    for x in (-0.3, 0.0, 0.12):
+        assert jnp.isfinite(jax.grad(loss)(jnp.asarray(x)))
+
+
+def test_sfc_varnce_convective_velocity_term_is_the_reference_one():
+    """Pin w* itself: uf^2 = u*^2 + 0.3 w*^2 with w* = ((g/T0)*wpthlp*1 m)^(1/3).
+
+    The neutral and floor cases above are blind to the w* term (it is zero or
+    clamped away there), so a wrong 0.3, a wrong z_const or a wrong T0 would
+    pass them. Here the stress is small and the heat flux large, so w* carries
+    41% of uf^2 on top of the shear part.
+    """
+    cfg = CLUBBConfig(prognostic=True)
+    upwp, wpthlp = -0.02, 0.3
+    wp2 = _sfc_varnce_call(cfg, upwp=upwp, vpwp=0.0, wpthlp=wpthlp,
+                           wprtp=0.0)[0]
+    wstar = ((constants.g / cfg.T0) * wpthlp * 1.0) ** (1.0 / 3.0)
+    uf_sqd = abs(upwp) + 0.3 * wstar ** 2
+    np.testing.assert_allclose(wp2, cfg.params.a_const * uf_sqd, rtol=1e-12)
+    assert uf_sqd > 1.4 * abs(upwp)      # non-vacuous: w* is a large share
+    assert np.sqrt(uf_sqd) > 10.0 * 0.01  # and uf is well clear of ufmin
+
+
+def test_sfc_varnce_correlation_floor_is_inert_at_the_default_a_const():
+    """The 0.99 flux-correlation bound and the 0.4 prefactor, pinned by the
+    a_const value at which the bound starts to bite.
+
+    Both scalar-variance formulas carry the SAME uf, so wherever a tolerance
+    floor is not binding the correlation term is uf^2/(0.4*a*0.99^2) against a
+    RAW surface wp2 of a*uf^2 — a pure function of a_const.  The two are equal
+    at a = 1/(sqrt(0.4)*0.99) = 1.597, so at the CAM default a_const = 1.8 the
+    bound never fires (the reference's own note says the surface correlations
+    come out at ~0.878, comfortably inside 0.99) and the only term of
+    min_wp2_sfc_val that can raise wp2 is w_tol^2, which the test above covers.
+    Lower a_const and the bound corrects, to a value this test pins exactly —
+    which is what makes 0.4 and 0.99 observable at all.  Stated of the RAW
+    a*uf^2: the wp2_max cap is applied afterwards and can in principle sit
+    below the correlation term, which is reference behaviour.
+    """
+    args = dict(upwp=-0.09, vpwp=0.0, wpthlp=0.2, wprtp=1.0e-4)
+
+    def wp2_and_up2(a_const):
+        cfg = CLUBBConfig(prognostic=True)
+        cfg = cfg._replace(params=cfg.params._replace(a_const=a_const))
+        wp2, up2, *_ = _sfc_varnce_call(cfg, **args)
+        uf_sqd = 0.09 + 0.3 * ((constants.g / cfg.T0) * 0.2) ** (2.0 / 3.0)
+        return wp2, up2, a_const * uf_sqd, cfg.params.up2_sfc_coef
+
+    wp2, up2, raw, coef = wp2_and_up2(1.8)          # CAM default: inert
+    np.testing.assert_allclose(wp2, raw, rtol=1e-12)
+    np.testing.assert_allclose(up2, coef * raw, rtol=1e-12)
+
+    a_lo = 1.2                                      # below 1.597: bound bites
+    wp2, up2, raw, coef = wp2_and_up2(a_lo)
+    uf_sqd = raw / a_lo
+    floor = uf_sqd / (0.4 * a_lo * 0.99 ** 2)       # the exact expected value
+    assert floor > raw                              # non-vacuous: it really binds
+    np.testing.assert_allclose(wp2, floor, rtol=1e-12)
+    np.testing.assert_allclose(up2, coef * raw - 0.5 * (floor - raw), rtol=1e-12)
+
+
+def test_sfc_varnce_is_jit_clean_and_differentiable_at_zero_stress():
+    """A zero-stress column is a legal prescribed BC; jit and grad must survive."""
+    cfg = CLUBBConfig(prognostic=True)
+    z = jnp.zeros((2, 5))
+    zero = jnp.zeros((2,))
+
+    @jax.jit
+    def run(upwp, vpwp, wpthlp, wprtp):
+        return calc_sfc_varnce(z, z, z, z, z, z, upwp, vpwp, wpthlp, wprtp, cfg)
+
+    out = run(zero, zero, zero, zero)
+    for a in out:
+        assert jnp.all(jnp.isfinite(a))
+
+    def loss(upwp):
+        return sum(jnp.sum(a) for a in run(upwp, zero, zero, zero))
+
+    assert jnp.all(jnp.isfinite(jax.grad(loss)(zero)))
 
 
 if __name__ == "__main__":

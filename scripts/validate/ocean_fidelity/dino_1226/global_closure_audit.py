@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import sys
 
 import numpy as np
@@ -220,9 +221,16 @@ def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
     e3t_mode = require_explicit_e3t_mode(context="global_closure_audit")
     print(f"LEGOESM_NEMO_E3T={e3t_mode}")
 
+    # #1492: cfg.surface_tendency_placement must AGREE with the return_rate
+    # route this audit selects below (_check_surface_tendency_placement in
+    # dino.py raises on a mismatch) -- forward the same kwarg
+    # kamm_twin_90d.py's own A/B already threads through _build_twin_state
+    # (dataclasses.replace(cfg, surface_tendency_placement=...)), previously
+    # missing here.
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         "nemo_dino_kamm_mlf", RUN_TRAJ, RUN_STEPDUMP_Y20, bridge_tke=True,
         bridge_before=True, restart_file=restart_file,
+        surface_tendency_placement=surface_tendency_placement,
     )
     require_fp64(br.geometry, br.z_coord, st, context="global_closure_audit")
     print("DTYPES (state, first 5 float leaves):", describe_float_leaves(st)[:5])
@@ -236,6 +244,27 @@ def run_audit(out_path: str, n_days: int, *, fix_eta_drift: bool = True,
     if asselin_gamma is not None:
         mc = mc._replace(asselin_gamma=asselin_gamma)
         print(f"ABLATION: asselin_gamma={asselin_gamma}")
+    # #1492 P3: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
+    # nemo_mlf_step_transcription_spec.md resolved decision 2), same pattern
+    # as dino_year_screen_fullframe.py / kamm_twin_90d.py. Default "" = legacy
+    # (outer_integrator="leapfrog", unchanged); "nemo_mlf" routes to the
+    # single-pass stpmlf.F90 transcription via the REAL outer_integrator
+    # dispatch. Opt-in measurement knob only. Unknown value raises.
+    _oi = os.environ.get("DINO_OUTER_INTEGRATOR", "")
+    if _oi:
+        if _oi not in ("leapfrog", "nemo_mlf"):
+            raise SystemExit(
+                f"Unknown DINO_OUTER_INTEGRATOR={_oi!r}: expected "
+                "'leapfrog' or 'nemo_mlf'")
+        # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
+        # (spec resolved decision 4) -- auto-force it so the env knob alone
+        # is sufficient.
+        mc = mc._replace(
+            outer_integrator=_oi,
+            implicit_vmix_e3t_now_divisor=(
+                True if _oi == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        print(f"ABLATION: outer_integrator={mc.outer_integrator} "
+              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
     print(f"fix_eta_drift={mc.fix_eta_drift}  use_conservation_fixer={mc.use_conservation_fixer}")
     assert mc.use_conservation_fixer is False, (
         "use_conservation_fixer=True would force-conserve heat/salt every "

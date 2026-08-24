@@ -201,17 +201,54 @@ def bridge_nemo_to_legoesm(
     )
 
 
+#: The vertical-ladder selections :func:`effective_vertical_scale_factors`
+#: accepts, and the only values ``LEGOESM_NEMO_E3T`` may take. Exported so a
+#: harness validates against THIS tuple instead of re-listing the literals and
+#: drifting out of step with the function that raises on them.
+NEMO_E3T_MODES = ("off", "e3t_only", "gdept_only", "both")
+
+
 def effective_vertical_scale_factors(grid, tmask, mode=None):
     """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
 
     NEMO integrates with the 3-D scale factors ``e3t_0`` (``key_vco_3d``).
-    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO they agree
-    in the upper ocean and diverge below ~2000 m by up to 12.9%: ``e3t_1d`` sums
-    to 4506.375 m while ``e3t_0`` is stretched so the deepest wet column is
-    exactly the 4000 m domain depth. Building legoESM's grid from ``e3t_1d`` put
-    its abyssal layers 7-13% off and its water columns ~22 m too deep --
-    precisely where #1226's ACC deficit is sourced (80% of the missing thermal
-    wind below 2000 m), and thermal wind integrates density x THICKNESS.
+    ``e3t_1d`` is a DIFFERENT, unstretched reference ladder. For DINO the two agree
+    in the upper ocean and part company below the ~1000 m re-anchor: they agree to
+    roundoff (2.8e-14 m) through k=24, and k=25 is the first level where they
+    differ AT ALL, by 3.317 m, its top face sitting at 982.4 m -- DINO's
+    ``rn_hco = 1000 m``.  Below that the per-level thickness
+    difference REVERSES SIGN once, running -2.1% at k=25 through -8.5% at k=28
+    to +14.8% at k=34.  All percentages here are relative to ``e3t_1d``; the
+    same deepest-level gap is 70.389 m, which is 14.8% of ``e3t_1d`` and 12.9%
+    of ``e3t_0`` -- an earlier version of this docstring "corrected" 12.9% to
+    14.8% as an understatement, which was wrong: they are one measurement under
+    two denominators, and a percentage here without its denominator is not a
+    number.  (All figures measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc.)
+
+    What the redistribution costs, measured rather than asserted:
+
+    * TOTAL column depth is unchanged -- both ladders sum to exactly 4000.000 m
+      over the 35 wet levels and to 4506.375 m over all 36.  That holds for the
+      ladder THIS FUNCTION BUILDS; a reader who sums raw ``e3t_0`` over all 36
+      levels gets 4617.462 m instead, because level 36 has no wet cell anywhere
+      and the loop below leaves ``e3t_1d``'s 506.375 m there rather than
+      ``e3t_0``'s 617.462.  The model never integrates that level.
+    * PER-COLUMN depth is NOT.  It is identical only in the 7442 of 9920 wet
+      columns that reach the full 35 levels (75%).  In the other 25% the 1-D
+      ladder puts the bottom 70.4-104.2 m too DEEP, and the mean over all wet
+      columns is 21.9 m -- so this docstring's long-standing "~22 m too deep"
+      is CORRECT and stands; a 2026-08-21 attempt to withdraw it was itself
+      withdrawn after measurement.
+    * WET VOLUME differs by 4.70e-03 relative to the 1-D ladder's own volume
+      (2.546363e+17 vs 2.534390e+17 m3 -- 4.72e-03 against the other
+      denominator), which is the "volume 4.7e-03 -> 6.0e-09" the body comment
+      below already records.
+
+    Thermal wind integrates density x THICKNESS, and bottom-referenced
+    transport integrates it over the column depth, so both the sign-reversing
+    per-level error and the 25% of columns whose bottom is misplaced feed
+    straight into it.  That is where #1226's ACC deficit is sourced (80% of the
+    missing thermal wind below 2000 m).
 
     Falls back to the 1-D ladder when the mesh_mask predates ``e3t_0`` (GYRE,
     ``key_linssh``, where the two coincide -- which is why this went unnoticed).
@@ -228,7 +265,8 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     t_depth = np.asarray(grid.gdept_1d).ravel().astype(np.float64)
     # DIAGNOSTIC (#1226, temporary): LEGOESM_NEMO_E3T isolates which half of
     # NEMO's 3-D geometry drives a regression -- the thickness ladder or the
-    # T-depth ladder.  "both" (default) | "e3t_only" | "gdept_only" | "off"
+    # T-depth ladder.  "off" (this function's default, see below) | "e3t_only"
+    # | "gdept_only" | "both"
     import os as _os
     # DEFAULT IS "off" -- i.e. the KNOWN-WRONG 1-D ladder. This is deliberate
     # and temporary. Adopting NEMO's true e3t_0 thicknesses is CORRECT (it makes
@@ -241,12 +279,57 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     # => legoESM is UNSTABLE ON NEMO'S ACTUAL GRID and was stable only because
     #    it ran on a wrong one. That second defect must be found before this can
     #    default to "both". Do NOT flip this default to hide the instability.
+    #
+    # 2026-08-20/21, #1455: THE INSTABILITY ABOVE DID NOT REPRODUCE, and the
+    # same measurements show this default is expensive.
+    #
+    # Non-reproduction. Four 90-day DINO twin arms from the day-180 restart
+    # (corrected seasonal clock, --bridge-before), differing ONLY in this mode
+    # and bit-identical at day 0, were ALL STABLE over 2880 steps: day-90
+    # max|u| = 0.6332 ("off"), 0.6341 ("e3t_only"), 0.6344 ("gdept_only"),
+    # 0.6347 ("both"). Re-measured under an fp64 precision policy on branch
+    # fidelity/dino-step-walk, the two end arms give max|u| = 0.6332 ("off")
+    # and 0.6350 ("both") -- so 4/4 arms stable at 0.633-0.635 m/s, agreeing to
+    # three decimals, none growing, nothing near the 2.2-3 m/s above. The
+    # comment does not record the state or configuration its measurement came
+    # from, so this is a NON-REPRODUCTION under ONE configuration, not proof
+    # that it was never true -- but it IS the stated blocker, and it did not
+    # fire.
+    #
+    # Cost of this default, day-90 circumpolar (channel-band) transport error
+    # vs NEMO, fp64, mean reduction over longitudes 2..-2: "off" +2.93 Sv
+    # against "both" +0.29 Sv. Full-section ACC error over the same pair:
+    # +1.87 Sv against -0.60 Sv. The four-arm fp32 sweep that first ranked them
+    # put the halves at "e3t_only" +0.69 and "gdept_only" +2.89 Sv; those two
+    # numbers have NOT been re-measured at fp64 and are quoted only for the
+    # split they show -- the THICKNESS ladder fixes the barotropic component
+    # and the DEPTH ladder the baroclinic one, so neither half alone is the
+    # answer, and "gdept_only" is in any case an internally INCONSISTENT grid
+    # (cells from one ladder, T-points from the other -- 110 m off the cell
+    # centre at k=32).
+    #
+    # This default is UNCHANGED and still resolves to the 1-D reference ladder,
+    # because the note above is a non-reproduction rather than a refutation and
+    # this function serves every caller, not only oracle twins. What DID change
+    # (2026-08-21) is scoped strictly to bridged DINO twin runs:
+    # scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py resolves this
+    # variable to "both" when nothing sets it, on the argument that a twin only
+    # isolates SCHEME differences if both models stand on the same grid. It does
+    # NOT write this environment variable -- it passes the resolved mode down as
+    # the ``e3t_mode`` argument and stamps it into its output. An explicit
+    # LEGOESM_NEMO_E3T still wins there. See
+    # kamm_twin_90d.resolve_ladder_mode and
+    # scripts/validate/ocean_fidelity/dino_1226/d180_step_walk.py for the
+    # measurements, the retractions attached to them, and the discriminating run
+    # that is still owed (pin the EOS depth back to the 1-D ladder on the
+    # "gdept_only" arm to find out whether the equation of state, or N^2/the
+    # pressure-gradient geometry, owns the response).
     _mode = (mode if mode is not None
              else _os.environ.get("LEGOESM_NEMO_E3T", "off"))
-    if _mode not in ("off", "e3t_only", "gdept_only", "both"):
+    if _mode not in NEMO_E3T_MODES:
         raise ValueError(
-            f"unknown vertical-scale-factor mode {_mode!r}; expected "
-            '"off", "e3t_only", "gdept_only" or "both"')
+            f"unknown vertical-scale-factor mode {_mode!r}; expected one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     e3t3 = getattr(grid, "e3t_0", None)
     if e3t3 is None or _mode == "off":
         return e3t, t_depth, "e3t_1d"
@@ -357,6 +440,7 @@ def bridge_nemo_to_legoesm_topo(
     f_rtol: float = 1e-3,
     full_step: bool = False,
     metric_convention: str = "auto",
+    e3t_mode: str | None = None,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
 
@@ -415,12 +499,38 @@ def bridge_nemo_to_legoesm_topo(
         the v-face metric (#516) or the Coriolis/``f_rtol`` check below,
         which reads ``geom.f_T`` (unaffected by this flag).
 
+    ``e3t_mode`` selects which vertical ladder to build on, forwarded verbatim to
+    :func:`effective_vertical_scale_factors`. ``None`` (the default, and the
+    behaviour every existing caller keeps) falls back to the ``LEGOESM_NEMO_E3T``
+    environment variable and, failing that, to the 1-D reference ladder. Passing
+    it EXPLICITLY is strictly better for a caller that knows what it wants: it
+    removes the need to mutate a process-global variable that this function and
+    every concurrent caller share, and it lets two different ladders be built in
+    one process without either one silently inheriting the other's setting.
+
+    PARTIAL-CELL CAVEAT, worth knowing before selecting a mode: the
+    horizontal-spread guard that rejects an ``ln_zps`` grid lives past the
+    ``"off"`` early return, so ``"off"`` accepts a partial-cell mesh_mask
+    silently while ``"e3t_only"``, ``"gdept_only"`` and ``"both"`` all raise on
+    it. Selecting NEMO's own ladders therefore ADDS a guard rather than removing
+    one; ``"off"`` is the mode that still relies on the caller's ``ln_zps=F``
+    promise.
+
     Raises
     ------
     ValueError
         If ``gphiv`` is missing, the bathymetry is not full-step, or the built
         Coriolis does not match NEMO ``ff_t`` to ``f_rtol``.
+        Also if ``e3t_mode`` is not ``None`` or one of ``NEMO_E3T_MODES``
+        (checked at entry, before any geometry is built).
     """
+    # Validate HERE, on the static argument, rather than ~180 lines further in
+    # when the vertical grid is built: a typo should stop the call, not surface
+    # after the geometry has been constructed.
+    if e3t_mode is not None and e3t_mode not in NEMO_E3T_MODES:
+        raise ValueError(
+            f"unknown e3t_mode {e3t_mode!r}; expected None or one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     # metric_convention="auto" (DEFAULT): ASK THE ORACLE instead of assuming.
     # NEMO's mesh_mask carries e1t and e2t, so the convention is observable:
     # DINO's usr_def_hgr sets pe2t = pe1t (Mercator conformality imposed
@@ -525,7 +635,8 @@ def bridge_nemo_to_legoesm_topo(
         )
     # NEMO integrates with e3t_0, not the 1-D ladder e3t_1d -- see
     # effective_vertical_scale_factors for why this matters (#1226).
-    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(grid, tmask)
+    e3t_1d, _t_depth, _e3t_src = effective_vertical_scale_factors(
+        grid, tmask, mode=e3t_mode)
 
     depth_cum = np.cumsum(e3t_1d)                        # bottom-interface depth
     H_bathy = np.where(

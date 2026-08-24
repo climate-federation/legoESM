@@ -133,7 +133,13 @@ def compute_surface_fluxes(
             stable_beta=config.most_stable_beta,
             z0h_z0_ratio=config.z0h_z0_ratio,
         )
-        return tau_x, tau_y, shflx, lhflx, ustar
+        # The prescribed-flux override applies on THIS branch too. Returning
+        # early without it would let a config that sets both a MOST scheme and
+        # a prescribed flux silently ignore the prescription -- the closure
+        # would run on MOST-derived fluxes while the caller believed it had
+        # pinned them to the deck.
+        return _apply_prescribed_scalar_fluxes(
+            config, tau_x, tau_y, shflx, lhflx, ustar)
 
     # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
@@ -155,6 +161,28 @@ def compute_surface_fluxes(
         u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed, Cd, Ch,
     )
 
+    return _apply_prescribed_scalar_fluxes(
+        config, tau_x, tau_y, shflx, lhflx, ustar)
+
+
+def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar):
+    """Override the computed surface SCALAR fluxes with the deck's, if set.
+
+    A case deck that prescribes its surface heat and moisture fluxes needs the
+    closure to receive them as the diffusion's lower boundary condition. The
+    caller must then NOT also inject them as a separate column tendency, or the
+    flux is counted twice.
+
+    Momentum is untouched by design: the decks that fix scalar fluxes leave the
+    stress interactive (SAM's ``SFC_TAU_FXD = .false.``).
+
+    Static Python ``if`` on a config value that is either ``None`` or a float --
+    the feature-gating pattern, not a traced selection.
+    """
+    if config.prescribed_shflx_w_m2 is not None:
+        shflx = jnp.full_like(shflx, config.prescribed_shflx_w_m2)
+    if config.prescribed_lhflx_w_m2 is not None:
+        lhflx = jnp.full_like(lhflx, config.prescribed_lhflx_w_m2)
     return tau_x, tau_y, shflx, lhflx, ustar
 
 

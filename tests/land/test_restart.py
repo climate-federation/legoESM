@@ -140,3 +140,278 @@ def test_merge_land_restart_shape_skew_raises():
     )
     with pytest.raises(ValueError, match="soil-layer skew"):
         merge_land_restart_into_template(loaded, template)
+
+
+# ---------------------------------------------------------------------------
+# The layer COUNT does not identify a soil column. Ten layers over 3 m and ten
+# over 6.4 m have the same array shapes, so a warm start across them loaded
+# without complaint and read the profile at the wrong depths. Found by codex
+# on the calibrated-LMIP PR, which is what made the column configurable.
+# ---------------------------------------------------------------------------
+
+def _grid(n_layers=_NLAY, total_depth=3.0):
+    from legoesm.land.soil_grid import SoilGridConfig
+    return SoilGridConfig(n_layers=n_layers, total_depth=total_depth)
+
+
+def _write(tmp_path, state, soil_grid):
+    return save_land_restart(
+        tmp_path / "r.npz", state, land_mode="multilayer", t_end_s=1.0,
+        n_steps_completed=1, soil_grid=soil_grid)
+
+
+def test_a_deeper_column_with_the_same_layer_count_is_refused(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=6.375))
+
+
+def test_the_same_column_loads(tmp_path):
+    st = _fake_state(seed=7)
+    _write(tmp_path, st, _grid(total_depth=3.0))
+    loaded, _ = load_land_restart(
+        tmp_path / "r.npz", expected_land_mode="multilayer", expected_ncol=_NCOL,
+        expected_n_layers=_NLAY, expected_soil_grid=_grid(total_depth=3.0))
+    assert loaded.T_soil.shape == (_NCOL, _NLAY)
+
+
+def test_a_file_without_the_geometry_warns_rather_than_pretending(tmp_path):
+    """The published initial states predate the stamp, so this cannot raise --
+    but it must not read as a verified match either.
+
+    Only on the HISTORICAL DEFAULT column: that is the one the published
+    states are on, so it is the only one where an unstamped file is a
+    reasonable thing to be handed. Every other column refuses.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    st = _fake_state(seed=7)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)   # no soil_grid
+    with pytest.warns(RuntimeWarning, match="cannot be checked"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=SoilGridConfig())
+
+
+def test_an_unstamped_file_can_be_refused_outright(tmp_path):
+    """Warning is not a check for the file most people load.
+
+    The published initial states predate the interface stamp, so an unstamped
+    file cannot be refused by default. But a run on a column that is NOT the
+    historical default has no business accepting one: an old file is then
+    almost certainly on the other column, and a warning it scrolls past is how
+    the wrong soil profile gets used anyway.
+    """
+    st = _fake_state(seed=9)
+    save_land_restart(tmp_path / "r.npz", st, land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)     # no soil_grid
+    with pytest.raises(ValueError, match="not the historical default"):
+        load_land_restart(tmp_path / "r.npz", expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0),
+                          require_soil_grid=True)
+
+
+def test_the_two_spellings_of_a_soil_column_are_one_column():
+    """Two independent fixes for one defect met at a merge.
+
+    One identifies a soil column by its layer INTERFACES, the other by its
+    layer THICKNESSES. They are the same fact -- the interfaces are the
+    running sum -- so both spellings are accepted and reduced to one form
+    before anything is compared. If they ever stop agreeing, every guard built
+    on them is comparing different things.
+    """
+    from legoesm.land.restart import _soil_dz_from
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    dz = make_soil_grid(grid).dz
+    np.testing.assert_allclose(
+        np.asarray(_soil_dz_from(grid, None, what="t")),
+        np.asarray(_soil_dz_from(None, dz, what="t")))
+    # Both together are allowed when they agree, and refused when they do not.
+    _soil_dz_from(grid, dz, what="t")
+    with pytest.raises(ValueError, match="DIFFERENT columns"):
+        _soil_dz_from(grid, np.asarray(dz) * 2.0, what="t")
+
+
+def test_a_file_stamped_one_way_is_checkable_the_other_way(tmp_path):
+    """Files written by either lane are in the wild, so either loads."""
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    dz = np.asarray(make_soil_grid(grid).dz)
+    other = _grid(total_depth=6.375)
+
+    # written from the grid, checked against thicknesses
+    a = tmp_path / "a.npz"
+    save_land_restart(a, _fake_state(seed=11), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_grid=grid)
+    load_land_restart(a, expected_land_mode="multilayer", expected_ncol=_NCOL,
+                      expected_n_layers=_NLAY, expected_soil_dz=dz)
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(a, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_dz=make_soil_grid(other).dz)
+
+    # written from thicknesses, checked against the grid
+    b = tmp_path / "b.npz"
+    save_land_restart(b, _fake_state(seed=12), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_dz=dz)
+    load_land_restart(b, expected_land_mode="multilayer", expected_ncol=_NCOL,
+                      expected_n_layers=_NLAY, expected_soil_grid=grid)
+    with pytest.raises(ValueError, match="wrong depths"):
+        load_land_restart(b, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=other)
+
+
+def test_the_pre_load_check_reads_the_stamp_the_writer_wrote(tmp_path):
+    """A reader that keeps its own key after the writer moves returns 'no
+    stamp' for every file and switches the check off in silence -- which is
+    exactly what happened once here."""
+    from legoesm.land.restart import load_land_restart_soil_dz
+    from legoesm.land.soil_grid import make_soil_grid
+
+    grid = _grid(total_depth=3.0)
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=13), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1, soil_grid=grid)
+    got = load_land_restart_soil_dz(path)
+    assert got is not None, "the pre-load check cannot see a stamp it wrote"
+    np.testing.assert_allclose(np.asarray(got),
+                               np.asarray(make_soil_grid(grid).dz))
+
+
+# ---------------------------------------------------------------------------
+# Second reviewer, on the merge: the edges of carrying two stamps for one fact.
+# ---------------------------------------------------------------------------
+
+def test_two_stamps_that_disagree_are_refused(tmp_path):
+    """The writer derives both from one column, but a file is not always
+    written by this writer: a post-processing tool can rewrite one key and not
+    the other. Picking a winner is how the wrong profile gets used in silence
+    (GLM-5.2)."""
+    from legoesm.land.soil_grid import make_soil_grid
+
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=21), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1,
+                      soil_grid=_grid(total_depth=3.0))
+    d = dict(np.load(path, allow_pickle=False))
+    # Rewrite ONE stamp, as an external tool would.
+    d["soil_dz"] = np.asarray(make_soil_grid(_grid(total_depth=6.375)).dz,
+                              dtype=np.float64)
+    np.savez_compressed(path, **d)
+    with pytest.raises(ValueError, match="TWO soil-column stamps that disagree"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))
+    # ...and it is refused even when the run's column happens to match the
+    # stamp that was NOT rewritten -- otherwise the file passes on the strength
+    # of one of two records that are known to contradict each other.
+    with pytest.raises(ValueError, match="TWO soil-column stamps that disagree"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=6.375))
+
+
+def test_a_stamp_that_is_not_a_column_is_refused(tmp_path):
+    """The n versus n+1 relation is enforced, not inferred: guessing at a
+    malformed stamp is worse than saying it cannot be read."""
+    path = tmp_path / "r.npz"
+    save_land_restart(path, _fake_state(seed=22), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1,
+                      soil_grid=_grid(total_depth=3.0))
+    d = dict(np.load(path, allow_pickle=False))
+    d.pop("soil_dz")
+    d["soil_z_interface"] = np.array([0.0, 1.0, 0.5, 2.0])   # not increasing
+    np.savez_compressed(path, **d)
+    with pytest.raises(ValueError, match="increasing layer"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))
+
+
+def test_reconstructing_a_column_from_its_interfaces_is_well_conditioned():
+    """The measurement that decided against an absolute tolerance floor.
+
+    A reviewer argued one was needed: differencing interfaces to recover
+    thicknesses was said to carry an error of order eps x TOTAL depth, which
+    on a 3 m column would be 1.4e-5 relative on a 2.6 cm top layer -- past the
+    relative tolerance, refusing valid files. Measured, it is not: the shallow
+    interfaces are themselves small, so differencing near the surface
+    subtracts small numbers and the error scales with the LOCAL depth.
+
+    This pins the real number over the thinnest column this model builds, so
+    the tolerance stays justified by a measurement rather than by an argument.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
+    from legoesm.land.restart import _SOIL_DZ_RTOL
+
+    worst = 0.0
+    for n_layers, depth, growth in ((8, 3.0, 2.0), (10, 3.0, 1.5),
+                                    (8, 6.375, 2.0)):
+        g = make_soil_grid(SoilGridConfig(n_layers=n_layers, total_depth=depth,
+                                          growth_factor=growth))
+        dz = np.asarray(g.dz, dtype=np.float64)
+        zi = np.asarray(g.z_interface, dtype=np.float64)
+        # the same column stored at single precision, then differenced
+        recovered = np.diff(zi.astype(np.float32).astype(np.float64))
+        worst = max(worst, float(np.max(np.abs(recovered - dz) / dz)))
+    assert worst < 0.1 * _SOIL_DZ_RTOL, (
+        f"recovering thicknesses from single-precision interfaces now costs "
+        f"{worst:.2e} relative, within a factor of ten of the {_SOIL_DZ_RTOL:g} "
+        f"tolerance; the comparison needs an absolute floor after all")
+
+
+def test_a_translated_column_is_not_mistaken_for_the_right_one():
+    """Thicknesses are the DIFFERENCES of the interfaces, so a column shifted
+    bodily downwards differences to exactly the right thicknesses. Accepting
+    it puts every state value a metre from where it belongs (codex)."""
+    from legoesm.land.restart import _recorded_soil_dz
+    from legoesm.land.soil_grid import make_soil_grid
+
+    class _Npz(dict):
+        @property
+        def files(self):
+            return list(self)
+
+    grid = _grid(total_depth=3.0)
+    zi = np.asarray(make_soil_grid(grid).z_interface, dtype=np.float64)
+    np.testing.assert_allclose(
+        _recorded_soil_dz(_Npz(soil_z_interface=zi)), np.diff(zi))
+    with pytest.raises(ValueError, match="AT the surface"):
+        _recorded_soil_dz(_Npz(soil_z_interface=zi + 1.0), "shifted.npz")
+
+
+def test_any_non_default_column_requires_a_stamp(tmp_path):
+    """The predicate is the COLUMN, not a preset's name.
+
+    Three callers asked for the strict behaviour by passing a calibration
+    flag, which left every other non-default column -- any run that sets its
+    own layer count or depth -- accepting an unstamped file and reading its
+    profile at the wrong depths. Both reviewers found this independently.
+    """
+    from legoesm.land.soil_grid import SoilGridConfig
+
+    path = tmp_path / "legacy.npz"
+    save_land_restart(path, _fake_state(seed=31), land_mode="multilayer",
+                      t_end_s=1.0, n_steps_completed=1)      # unstamped
+
+    # The historical default may still load one: the published states are on
+    # that column and predate the stamp.
+    with pytest.warns(RuntimeWarning, match="cannot be checked"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=SoilGridConfig())
+
+    # Any other column may not, with no flag passed anywhere.
+    with pytest.raises(ValueError, match="not the historical default"):
+        load_land_restart(path, expected_land_mode="multilayer",
+                          expected_ncol=_NCOL, expected_n_layers=_NLAY,
+                          expected_soil_grid=_grid(total_depth=3.0))

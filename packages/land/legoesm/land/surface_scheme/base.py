@@ -76,6 +76,12 @@ class SurfaceFluxOutput(NamedTuple):
     gs_Sun: jax.Array | None = None        # sunlit stomatal conductance [m/s]
     gs_Sh: jax.Array | None = None         # shaded stomatal conductance [m/s]
     n_iters: jax.Array | None = None       # canopy Newton iteration count
+    # Per-column flag: did the canopy Newton closure reach a root?  ``False``
+    # means the accompanying fluxes come from a stopped iterate (iteration cap
+    # hit, or a singular Jacobian whose step had to be discarded) and are NOT a
+    # solution of the surface energy balance.  ``None`` for schemes that do not
+    # iterate.  Consumers must treat a False column as "no solution this step"
+    # rather than spending its fluxes — see ``multilayer_land`` containment.
     f_veg: jax.Array | None = None         # vegetation cover fraction [0-1]
     fSun: jax.Array | None = None          # sunlit canopy fraction [0-1]
     # Ts_solve: converged soil skin T from the canopy Picard loop (for
@@ -137,3 +143,21 @@ class SurfaceFluxOutput(NamedTuple):
     # None for SimpleSEB (negligible for thin canopies without explicit storage).
     stflx_air: jax.Array | None = None
     stflx_veg: jax.Array | None = None
+
+    # ---- Solver / containment status (appended: adding these anywhere earlier
+    #      would shift every following field's POSITION, so a positional
+    #      constructor would silently bind the wrong values) ----
+    # Did the surface scheme's iterative closure reach a root on this column?
+    # ``False`` means the fluxes above come from a stopped iterate (iteration
+    # cap, or a singular Jacobian whose step had to be discarded) and are NOT a
+    # solution of the surface energy balance.  ``None`` for schemes that do not
+    # iterate.
+    converged: jax.Array | None = None
+    # Per-column containment result, filled in by the land step (not by the
+    # surface scheme): ``held`` marks columns whose new state was rejected and
+    # reverted, ``n_held`` counts them.  A non-zero ``n_held`` means the land
+    # model could not solve somewhere — a defect report, not a diagnostic to
+    # ignore.
+    held: jax.Array | None = None
+    n_held: jax.Array | None = None
+

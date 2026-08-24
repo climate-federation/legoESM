@@ -676,3 +676,71 @@ def test_nemo_dirichlet_surface_bc_production_path():
     # pulled to the e_sfc scale (coupled, not exact) and >> the flux response
     assert 0.3 * e_sfc < top_d <= 1.01 * e_sfc
     assert top_d > 5.0 * top_f
+
+
+def test_nn_mxl_choices_3_and_4_end_to_end_anchor_and_jacobian():
+    """END-TO-END cover for the two guards nn_mxl=2 (choice 4) changed.
+
+    The dedicated choice-4 unit tests inject ``l_surface_anchor`` and
+    ``dz_cell`` directly, so they never exercise (a) the ``(3, 4)`` guard in the
+    ln_mxl0 anchor helper or (b) the ``(3, 4)`` guard that builds ``dz_cell``
+    from ``dz_ref``/``jacobian`` (codex).  Both live behind
+    ``tke_set_diffusivities``, so drive them from there.
+
+    Failure modes this catches:
+      * a missed anchor guard -> choice 4 becomes WIND-INSENSITIVE at the
+        surface (identical K for very different stress);
+      * a missed geometry guard -> a raise, or silently reference thicknesses.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+    zc, J, eos_fn, T, S, p, dz_half, dz_surface = _column_setup()
+    u = jnp.zeros_like(T)
+    tke_old = jnp.full((1, 1, 3), 2.0e-4)
+    calm = jnp.zeros((1, 1))
+    windy = jnp.full((1, 1), 0.4)          # |tau| = 0.4 N/m^2
+
+    def _run(cfg, taum):
+        # taum_surface is the NEMO stress-modulus channel the anchor reads.
+        return tke_set_diffusivities(
+            u, u, T, S, eos_fn(T, S, p), dz_half, tke_old, None, None,
+            cfg, RHO_0, G, taum_surface=taum, p_cell=p,
+            dz_ref=zc.dz_ref, jacobian=J, eos_fn=eos_fn,
+            z_interface=zc.z_half_ref[1:-1], dz_surface=dz_surface)
+
+    for choice in (3, 4):
+        cfg = PM_CFG._replace(tke_mxl_choice=choice)
+        # (b) the dz_ref/jacobian geometry path must work WITHOUT dz_cell
+        K_calm, _, _ = _run(cfg, calm)
+        K_wind, _, _ = _run(cfg, windy)
+        assert bool(jnp.all(jnp.isfinite(K_calm))), choice
+        assert bool(jnp.all(jnp.isfinite(K_wind))), choice
+        # (a) the ln_mxl0 anchor must respond to wind stress for BOTH choices
+        assert not jnp.allclose(K_calm, K_wind), (
+            f"tke_mxl_choice={choice}: K is wind-insensitive at the surface, "
+            "so the ln_mxl0 anchor guard is not firing for this choice")
+
+    # How the two choices must and must NOT differ, under identical forcing.
+    K3, H3, ctx3 = _run(PM_CFG._replace(tke_mxl_choice=3), windy)
+    K4, H4, ctx4 = _run(PM_CFG._replace(tke_mxl_choice=4), windy)
+
+    # (i) the EDDY COEFFICIENTS must be IDENTICAL at a fixed TKE.  avm/avt use
+    # l_k, which choices 3 and 4 share (it is computed BEFORE the split), so a
+    # difference here would mean l_k was disturbed -- not the intended change.
+    # This encodes the correction that nn_mxl=2 does not directly "mix less":
+    # it changes DISSIPATION, and a shallower mixed layer is a coupled
+    # consequence over time, not an instantaneous algebraic one.  (An earlier
+    # version of this test asserted K3 != K4 and failed for exactly that
+    # reason -- the code was right and the assertion was wrong.)
+    assert jnp.allclose(K3, K4, rtol=0.0, atol=0.0), (
+        "l_k must be identical between nn_mxl=3 and nn_mxl=2")
+    assert jnp.allclose(H3, H4, rtol=0.0, atol=0.0)
+
+    # (ii) the DISSIPATION length must differ, and choice 4's must be smaller
+    # (min(lup,ldn) <= sqrt(lup*ldn)).  This is the fallthrough detector.
+    assert ctx3.l_eps is not None and ctx4.l_eps is not None, \
+        "ctx.l_eps is required to tell the two schemes apart end-to-end"
+    assert not jnp.allclose(ctx3.l_eps, ctx4.l_eps), (
+        "choice 4 produced the choice-3 dissipation length end-to-end -- "
+        "it fell through to nn_mxl=3")
+    assert bool(jnp.all(ctx4.l_eps <= ctx3.l_eps + 1e-12))

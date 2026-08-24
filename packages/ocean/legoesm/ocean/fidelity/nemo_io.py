@@ -54,10 +54,15 @@ class NemoGrid(NamedTuple):
     # existing flat-bottom NemoGrid constructors (GYRE) stay valid.
     # NEMO's ACTUAL 3-D vertical scale factors (key_vco_3d). NEMO integrates
     # with THESE, not with the 1-D reference ladder above: for DINO, e3t_1d is
-    # the unstretched analytic ladder (sums to 4506.375 m) while e3t_0 is
-    # stretched so the deepest wet column is exactly the domain depth
-    # (4000.000 m). They agree in the upper ocean and diverge below ~2000 m by
-    # up to 12.9% (#1226). Optional so existing GYRE constructors stay valid --
+    # the unstretched analytic ladder while e3t_0 is stretched. Both sum to the
+    # same 4000.000 m over the 35 wet levels, so the difference is a
+    # REDISTRIBUTION of thickness, not a change of domain depth: identical to
+    # roundoff through k=24, then up to 70.4 m apart at the deepest wet level --
+    # 12.9% of e3t_0, 14.8% of e3t_1d (#1226, re-measured 2026-08-21; quote the
+    # denominator, the two figures are one measurement and have been mistaken
+    # for two). See effective_vertical_scale_factors in nemo_state_bridge for
+    # what the redistribution costs. Optional so existing GYRE constructors
+    # stay valid --
     # GYRE is key_linssh where the two coincide, which is why this went
     # unnoticed.
     e3t_0: np.ndarray | None = None      # (n_lat, n_lon, nlev) [m]

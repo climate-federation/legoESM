@@ -66,6 +66,32 @@ def temperature_from_theta(
     return theta_pos * (p_pos / constants.p_ref) ** constants.kappa
 
 
+def potential_temperature_from_temperature(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Potential temperature from temperature and pressure — the exact inverse of
+    :func:`temperature_from_theta`.
+
+    θ = T * (p_0 / p)^kappa
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Potential temperature [K].
+    """
+    T_pos = jnp.clip(T, _THETA_MIN, None)
+    p_pos = jnp.clip(p, _P_MIN, _P_MAX)
+    return T_pos * (constants.p_ref / p_pos) ** constants.kappa
+
+
 def sanitize_theta_rho(
     theta: jax.Array,
     rho: jax.Array,

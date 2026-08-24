@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -116,3 +117,50 @@ class TestPolarCapBoostCombined:
         # Polar: eq=1, cap=10.
         assert float(eq_u[idx_85]) < 1.05
         assert float(cap_u[idx_85]) > 9.0
+
+
+class TestEquatorialReduction:
+    """boost < 1 = NEMO-style equatorial viscosity REDUCTION (ORCA1's
+    eddy_viscosity_3D drops ahm 20000 -> 1000 m2/s at the equator)."""
+
+    def test_reduction_at_equator_unity_far_away(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        bu, bv = equatorial_boost_factor(g, sigma_deg=7.0, boost=0.05)
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_eq = int(np.argmin(np.abs(lat_deg - 0.0)))
+        idx_45 = int(np.argmin(np.abs(lat_deg - 45.0)))
+        assert float(bu[idx_eq]) < 0.1          # ~0.05 at the equator
+        assert float(bu[idx_45]) > 0.99         # untouched at midlatitude
+        assert float(bu.min()) > 0.0            # never zero/negative
+
+    def test_nonpositive_boost_raises(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        with pytest.raises(ValueError):
+            equatorial_boost_factor(g, sigma_deg=7.0, boost=0.0)
+        with pytest.raises(ValueError):
+            equatorial_boost_factor(g, sigma_deg=7.0, boost=-2.0)
+
+    def test_bad_sigma_raises(self):
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        for sig in (0.0, -3.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                equatorial_boost_factor(g, sigma_deg=sig, boost=0.5)
+
+    def test_floor_binds_under_reduction(self):
+        """codex 9430935 MAJOR-2: with A_h_floor set, the composed scale may
+        not drop below floor/A_h under an equatorial reduction."""
+        import jax.numpy as jnp
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        cfg = LatLonCGridOceanConfig().replace_flat(
+            A_h=1.0e5, A_h_floor=2.0e4, A_h_eq_boost=0.05,
+            A_h_eq_sigma_deg=7.0)
+        lv = cfg.lateral_viscosity
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        eb_u, _ = equatorial_boost_factor(g, lv.A_h_eq_sigma_deg,
+                                          lv.A_h_eq_boost)
+        # the branch guard mirrored from ocean_pe_latlon_cgrid
+        fr = lv.A_h_floor / lv.A_h
+        shaped = jnp.maximum(eb_u, fr)
+        assert float(shaped.min()) >= fr - 1e-12
+        # and the unfloored reduction WOULD have gone below it (test bites)
+        assert float(eb_u.min()) < fr

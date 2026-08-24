@@ -293,6 +293,49 @@ def smooth_lowest_crossing_index(
 # Convenience wrapper used at convection-trigger call sites
 # ---------------------------------------------------------------------------
 
+#: Factor by which the BACKWARD pass widens the CAPE-trigger sigmoid.
+#:
+#: WHY THIS EXISTS.  ``sigmoid`` saturates to EXACTLY 1.0 in float64 once its
+#: argument exceeds ~36.7, so its derivative ``s*(1-s)`` is exactly 0 there
+#: (measured: x=36 -> 2.220e-16, x=37 -> 0.0).  A deep-tropical column carries
+#: CAPE of a few thousand J/kg against a threshold of tens, so the trigger sits
+#: far inside that dead zone and ``d(output)/d(cape_threshold)`` is exactly
+#: zero — the parameter is invisible to any gradient-based trainer.  That is
+#: why the CAPE thresholds are declared ``tunable_tier 0`` (#1417).
+#:
+#: They are NOT physically inert, which is what makes the zero a defect rather
+#: than a fact: in the 2026-08-16 SCM-RCE campaign, `dca` improved its
+#: temperature-and-humidity score by 65 % (6.06 -> 2.13) by tuning its CAPE
+#: threshold alone, found by a DERIVATIVE-FREE search precisely because the
+#: gradient could not see it.
+#:
+#: The forward value is unchanged — the trigger still saturates, so the physics
+#: and every existing answer are bit-identical — while the backward pass uses a
+#: sigmoid widened by this factor, which is non-zero out to CAPE differences of
+#: order ``sharpness**-1 * _TRIGGER_GRADIENT_WIDENING * 36``.  With the shipped
+#: sharpnesses that covers the whole physical CAPE range.
+_TRIGGER_GRADIENT_WIDENING = 1.0e3
+
+
+def _straight_through_step(x: jax.Array, sharpness: float) -> jax.Array:
+    """``smooth_step`` forward, a WIDER sigmoid's derivative backward.
+
+    ``soft + stop_gradient(hard - soft)`` evaluates to ``hard`` exactly (the
+    two ``soft`` terms cancel in the forward pass, bit for bit) while the only
+    term carrying a derivative is ``soft``.  A straight-through estimator in
+    the standard sense: the answer is the hard gate, the gradient is a usable
+    surrogate rather than zero.
+
+    This does not make the surrogate gradient EQUAL to the true derivative of
+    the saturated sigmoid — that derivative is genuinely zero.  It supplies a
+    descent direction with the correct SIGN, which is what a trainer needs and
+    what a hard threshold cannot provide.
+    """
+    hard = smooth_step(x, sharpness)
+    soft = smooth_step(x, sharpness / _TRIGGER_GRADIENT_WIDENING)
+    return soft + jax.lax.stop_gradient(hard - soft)
+
+
 def cape_trigger(
     cape: jax.Array,
     threshold: jax.Array | float,
@@ -322,4 +365,4 @@ def cape_trigger(
     jax.Array
         Same shape as ``cape``; values in ``(0, 1)``.
     """
-    return smooth_step(cape - threshold, sharpness)
+    return _straight_through_step(cape - threshold, sharpness)

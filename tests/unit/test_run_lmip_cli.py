@@ -12,9 +12,15 @@ def test_land_surface_scheme_dispatch():
     from legoesm.land.surface_scheme import SimpleSEBConfig, TwoLeafCanopyConfig
     from legoesm.land.canopy.config import CLMMLCanopyConfig
 
-    # Default is SimpleSEB (byte-identical to no flag).
+    # Default is the TWO-LEAF CANOPY since 2026-08-20 (the simplified scheme is
+    # academic-only: its evaporation runs at potential with stomata off and its
+    # humidity gradient self-extinguishes with them on).
     default = build_config_from_args(_parse_args(["--lat", "45.0"])).land
-    assert isinstance(default.surface_scheme, SimpleSEBConfig)
+    assert isinstance(default.surface_scheme, TwoLeafCanopyConfig)
+    # and the simplified scheme still arrives when explicitly selected
+    seb = build_config_from_args(
+        _parse_args(["--lat", "45.0", "--land-surface-scheme", "simple_seb"])).land
+    assert isinstance(seb.surface_scheme, SimpleSEBConfig)
 
     two = build_config_from_args(
         _parse_args(["--lat", "45.0", "--land-surface-scheme", "two_leaf"])).land
@@ -50,10 +56,11 @@ def test_clm_ml_subflags_flow_to_config():
 
 
 def test_clm_ml_subflags_ignored_without_clm_ml():
-    """CLM-ML sub-flags on a non-clm_ml scheme don't change the (SEB) config."""
+    """CLM-ML sub-flags on a non-clm_ml scheme don't change the config."""
     from legoesm.land.surface_scheme import SimpleSEBConfig
     cfg = build_config_from_args(_parse_args([
-        "--lat", "45.0", "--clm-ml-pft", "13"])).land
+        "--lat", "45.0", "--land-surface-scheme", "simple_seb",
+        "--clm-ml-pft", "13"])).land
     assert isinstance(cfg.surface_scheme, SimpleSEBConfig)
 
 
@@ -259,3 +266,22 @@ def test_example_params_file_loads_and_applies():
     cfg = build_config_from_args(_parse_args(["--lat", "0.0"]))
     out = apply_params_to_config(cfg, load_params_config(str(p)), driver="run_lmip")
     assert out.land.Cd_land == 3.0e-3
+
+
+def test_carbon_ic_flag_round_trips():
+    """--carbon-ic reaches args; it defaults to "" (off, byte-identical)."""
+    assert _parse_args(["--lat", "0.0"]).carbon_ic == ""
+    args = _parse_args(["--lat", "0.0", "--carbon-ic", "/tmp/global_carbon_ic.npz"])
+    assert args.carbon_ic == "/tmp/global_carbon_ic.npz"
+
+
+def test_carbon_ic_config_yaml_round_trips_to_args():
+    """The committed config/lmip/lmip_carbon_ic.yaml is a valid LMIP config and
+    carries the seed keys (a config file whose keys are not argparse dests would
+    raise at load)."""
+    p = _lmip_example_config().parent / "lmip_carbon_ic.yaml"
+    args = _parse_args(["--config", str(p)])
+    assert args.carbon_scheme == "differland"
+    assert args.carbon_ic.endswith("global_carbon_ic.npz")
+    # A seeded config must still build a usable land config.
+    assert build_config_from_args(args).land is not None

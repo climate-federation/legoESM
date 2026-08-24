@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import matplotlib
@@ -33,6 +34,18 @@ SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 INK_2 = "#52514e"
 MUTED = "#9a9994"
+
+# Above this the panels wrap onto a second row. One row of nine at 4 inches
+# each is a 36-inch strip nobody can read side by side; the five-case campaign
+# that set the format was six panels wide.
+_MAX_PANELS_PER_ROW = 6
+
+
+def _grid(n_panels: int) -> tuple[int, int]:
+    """(nrows, ncols) for ``n_panels``, wrapping onto two rows when wide."""
+    if n_panels <= _MAX_PANELS_PER_ROW:
+        return 1, n_panels
+    return 2, math.ceil(n_panels / 2)
 
 
 def _panel(ax, names, before, after, title, ylabel, annotate_worst=True):
@@ -117,23 +130,32 @@ def main(argv=None) -> int:
     panels = [("combined", None, None)] + [
         (c, "per_case_default", "per_case_tuned") for c in cases
     ]
-    fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.6))
-    axes = np.atleast_1d(axes)
+    nrows, ncols = _grid(len(panels))
+    fig, axgrid = plt.subplots(nrows, ncols,
+                               figsize=(4.0 * ncols, 5.6 * nrows))
+    axes = np.atleast_1d(axgrid).ravel()
+    # A wrapped grid can have spare cells; an empty box with axes drawn on it
+    # reads as a panel whose data went missing.
+    for spare in axes[len(panels):]:
+        spare.set_visible(False)
     fig.patch.set_facecolor(SURFACE)
 
     medians = {}
-    for ax, (label, kd, kt) in zip(axes, panels):
+    for i, (ax, (label, kd, kt)) in enumerate(zip(axes, panels)):
         ax.set_facecolor(SURFACE)
         if kd is None:
             before = [s["score_default"] for s in arms]
             after = [s["score_tuned"] for s in arms]
             title = "combined score"
-            ylabel = "normalized profile RMSE  (lower = better)"
         else:
             before = [(s.get(kd) or {}).get(label, np.nan) for s in arms]
             after = [(s.get(kt) or {}).get(label, np.nan) for s in arms]
             title = label
-            ylabel = None
+        # The y axis is the same quantity in every panel, so it is labelled
+        # once per ROW rather than once per figure -- on two rows, labelling
+        # only the first panel leaves the whole second row unlabelled.
+        ylabel = ("normalized profile RMSE  (lower = better)"
+                  if i % ncols == 0 else None)
         medians[label] = _panel(ax, names, before, after, title, ylabel)
 
     mb, ma = medians["combined"]
@@ -142,18 +164,23 @@ def main(argv=None) -> int:
     wins = "  ".join(f"{c['case']} {c['window_hours'][0]:.1f}-"
                      f"{c['window_hours'][1]:.1f} h"
                      for c in payload["cases"])
+    # The header band is a FRACTION of the figure, so it has to shrink as the
+    # figure grows a second row or the title floats a long way above the plots.
+    y_title = 0.975 if nrows == 1 else 0.987
+    y_sub = 0.925 if nrows == 1 else 0.962
+    top = 0.90 if nrows == 1 else 0.945
     fig.suptitle(
         f"SCM turbulence closures before and after joint tuning against LES "
         f"—  median {mb:.4f} → {ma:.4f} "
         f"({100.0 * (ma - mb) / mb:+.1f}%)",
-        fontsize=12.5, color=INK, y=0.975,
+        fontsize=12.5, color=INK, y=y_title,
     )
-    fig.text(0.5, 0.925,
+    fig.text(0.5, y_sub,
              f"{len(arms)} schemes x {len(cases)} cases, ONE parameter set per "
              f"scheme across all cases; segments join a scheme's own pair.  "
              f"LES time-mean windows: {wins} (same window both sides).",
              ha="center", fontsize=9.5, color=INK_2)
-    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.tight_layout(rect=(0, 0, 1, top))
     out = args.out or (args.indir / "tuning_before_after.png")
     fig.savefig(out, dpi=150, facecolor=SURFACE)
     print(f"wrote {out}")
