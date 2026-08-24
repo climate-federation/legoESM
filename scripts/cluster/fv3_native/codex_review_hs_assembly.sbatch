@@ -14,7 +14,7 @@ echo "host: $(hostname)"; codex --version
 cd $WT; echo "PINNED sha: $(git rev-parse HEAD)"
 
 codex exec --sandbox read-only -C $WT "$(cat <<'PROMPT'
-ADVERSARIAL REVIEW of a GLM-authored assembly: commit 8a646a44e --
+ADVERSARIAL REVIEW of a GLM-authored assembly: commit 0ed4a0c14 (moist-dyn + all review fixes) --
 apply_held_suarez_step + the --physics held_suarez wiring in
 scripts/validate/fv3_native/full_step_oracle_parity.py. Cite file:line, classify
 BLOCKER/MAJOR/MINOR, smallest fix, and say where you found NOTHING.
