@@ -228,7 +228,10 @@ def fv_update_phys_dry_duo(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     then, once after the k-loop:
         call update_dwinds_phys(dt, u_dt, v_dt, u, v, ...)  ! D-grid increment
     There is NO p_var call: delp is unchanged and there are no physics tracers,
-    so pe/peln/pk/pkz/ps are not rebuilt.  SCOPE: the ``con_cp/cvm`` ratio is
+    so pe/peln/pk/pkz/ps are not rebuilt.  (The oracle DOES rebuild pe/peln/pk/ps
+    unconditionally at fv_update_phys.F90:662-686, but with unchanged, internally
+    consistent delp that rebuild is idempotent -- it returns the same arrays, so
+    this kernel omitting it is numerically exact for this scope.)  SCOPE: the ``con_cp/cvm`` ratio is
     1.0 only because the air is dry; a moist coupling must restore it.
 
     Shapes (one cube face, full data domain ``m = n + 2*ng``, float64): pt, ua,
