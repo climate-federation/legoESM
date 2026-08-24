@@ -76,10 +76,34 @@ def main(argv=None):
     ap.add_argument("run_dir")
     a = ap.parse_args(argv)
 
-    e = load_energy_chunks(a.run_dir)
-    hfss, hfls = load_sh_lh(a.run_dir)
-    toa = e["toa_net"]; dEdt = e["dE_dt"]; resid = e["residual"]
-    sws = e["sfc_sw_net"]; lws = e["sfc_lw_net"]
+    # Two layouts: the full-collector path writes energy_chunk_*.npz; the MPAS
+    # lane (_run_mpas -> _save_lightweight_timeseries) writes one timeseries.npz
+    # with the energy_* series inline.  Prefer the MPAS single file if present.
+    ts_path = os.path.join(a.run_dir, "timeseries.npz")
+    if os.path.exists(ts_path):
+        z = np.load(ts_path)
+        def _g(k):
+            return (np.asarray(z[k], dtype=np.float64).ravel()
+                    if k in z.files else np.array([]))
+        toa, dEdt, resid = _g("energy_toa_net"), _g("energy_dE_dt"), _g("energy_residual")
+        sws, lws = _g("sw_net_sfc"), _g("lw_net_sfc")
+        hfss, hfls = _g("hfss"), _g("hfls")
+        # residual is stored, dE_dt too; reconstruct residual if only one path
+        if resid.size == 0 and toa.size and dEdt.size:
+            resid = toa - dEdt
+    else:
+        e = load_energy_chunks(a.run_dir)
+        hfss, hfls = load_sh_lh(a.run_dir)
+        toa = e["toa_net"]; dEdt = e["dE_dt"]; resid = e["residual"]
+        sws = e["sfc_sw_net"]; lws = e["sfc_lw_net"]
+    # drop leading NaN samples (diag steps before the tracker had fluxes)
+    if toa.size:
+        _fin = np.isfinite(toa) & np.isfinite(dEdt) & np.isfinite(sws) \
+            & np.isfinite(lws) & np.isfinite(hfss) & np.isfinite(hfls)
+        if _fin.any():
+            k0 = int(np.argmax(_fin))
+            toa, dEdt, resid = toa[k0:], dEdt[k0:], resid[k0:]
+            sws, lws, hfss, hfls = sws[k0:], lws[k0:], hfss[k0:], hfls[k0:]
     lens = {"toa": len(toa), "dE_dt": len(dEdt), "residual": len(resid),
             "sfc_sw": len(sws), "sfc_lw": len(lws), "hfss": len(hfss), "hfls": len(hfls)}
     n = min(lens.values())

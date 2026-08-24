@@ -9416,6 +9416,10 @@ class ModelDriver:
             "days": [], "T_atm": [], "T_min": [], "T_max": [],
             "max_wind": [], "dry_mass_ps": [], "T_finite": [], "CWV": [],
             "moisture_residual": [],
+            # Energy-budget series (#1354/#1515): the MPAS lane runs the
+            # EnergyBudgetTracker per diag step from self.model._sfc_diag.
+            "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
+            "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
         }
 
         t_start = time.time()
@@ -10292,6 +10296,59 @@ class ModelDriver:
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
                 _ts["CWV"].append(_cwv)
+                # Energy-budget tracker on the MPAS lane (#1354/#1515).  The
+                # per-step INSTANTANEOUS fluxes are in self.model._sfc_diag
+                # (slot 0 sw_net_sfc, 1 lw_net_sfc [+into surface]; 3 rlut=
+                # lw_up_toa, 4 rsut=sw_up_toa, 5 rsdt=sw_down_toa; 6 shflx,
+                # 7 lhflx [+up]) — the same tuple the ice-skin advance reads.
+                # toa_net = rsdt - rsut - rlut; the tracker's residual =
+                # toa_net - dE/dt.  hfss/hfls are recorded for the closure
+                # probe (LEAK = sfc_net_rad - hfss - hfls - residual).
+                _ebd = getattr(self.diagnostics, "energy_tracker", None)
+                _sd = getattr(self.model, "_sfc_diag", None)
+                _qv_e = (self.state.tracers["q_v"].data
+                         if (self.state.tracers is not None
+                             and "q_v" in self.state.tracers) else None)
+
+                def _slot(i):
+                    return (_sd[i].data if (_sd is not None and len(_sd) > i
+                                            and _sd[i] is not None) else None)
+                _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
+                _sw_ns, _lw_ns = _slot(0), _slot(1)
+                _shf, _lhf = _slot(6), _slot(7)
+                if (_ebd is not None and _qv_e is not None
+                        and None not in (_sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns)):
+                    from legoesm.diagnostics.energy_budget import (
+                        area_weighted_mean as _awm,
+                    )
+                    _awt = self.diagnostics._area_w
+                    _eb = _ebd.update(
+                        self.state.T.data, _qv_e, self.state.u.data,
+                        (self.state.v.data
+                         if getattr(self.state, "v", None) is not None
+                         else self.state.u.data),
+                        self.state.phis.data, p_s_data,
+                        self.diagnostics.dsigma, self.diagnostics.sigma_full,
+                        _sw_dn, _sw_up, _lw_up, _sw_ns, _lw_ns,
+                        elapsed_seconds=elapsed_day * 86400.0,
+                        area_weights=_awt,
+                        dp=self.diagnostics._dp(p_s_data),
+                        p_full=self.diagnostics._p_full(p_s_data),
+                    )
+                    _ts["energy_toa_net"].append(float(_eb.toa_net))
+                    _ts["energy_dE_dt"].append(float(_eb.dE_dt))
+                    _ts["energy_residual"].append(float(_eb.residual))
+                    _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
+                    _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
+                    _ts["hfss"].append(float(_awm(_shf, _awt))
+                                       if _shf is not None else float("nan"))
+                    _ts["hfls"].append(float(_awm(_lhf, _awt))
+                                       if _lhf is not None else float("nan"))
+                else:
+                    for _ek in ("energy_toa_net", "energy_dE_dt",
+                                "energy_residual", "sw_net_sfc", "lw_net_sfc",
+                                "hfss", "hfls"):
+                        _ts[_ek].append(float("nan"))
                 # Latest closure the CMOR feed recorded, or NaN before the
                 # first complete diagnostic window.  NaN, never 0: a zero here
                 # reads as "the budget closes", which is the one answer this
@@ -11261,6 +11318,11 @@ class ModelDriver:
             lw_net_sfc=_arr("lw_net_sfc") if "lw_net_sfc" in ts else nan,
             energy_residual=_arr("energy_residual") if "energy_residual" in ts else nan,
             moisture_residual=_arr("moisture_residual") if "moisture_residual" in ts else nan,
+            # #1354/#1515 energy-budget closure inputs (MPAS lane).
+            energy_toa_net=_arr("energy_toa_net") if "energy_toa_net" in ts else nan,
+            energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
+            hfss=_arr("hfss") if "hfss" in ts else nan,
+            hfls=_arr("hfls") if "hfls" in ts else nan,
         )
         # Persist the run summary in the same place run_amip's main path
         # writes it, so `validate_amip_run.py` can read the status line.
