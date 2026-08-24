@@ -16,14 +16,22 @@ atmospheric budget is  dE_dt = toa_net - F_sfc_net.  So the numerical LEAK is
          = F_sfc_net - (toa_net - dE_dt)
          = (sw_net_sfc + lw_net_sfc - hfss - hfls) - residual        [W/m^2]
 
-VERDICT (GLM #1354): a PERSISTENT LEAK ~ +20 W/m^2 while dE_dt > 0 (warming) =
-energy created internally = a physics BOOKKEEPING BUG.  LEAK ~ 0 = the budget
-closes, so the warming is driven by a genuine flux imbalance (find which flux).
+VERDICT: LEAK ~ 0 = the budget closes (warming, if any, is a genuine flux
+imbalance).  A large LEAK is NOT automatically a bookkeeping bug -- see caveat.
 
-CAVEAT (instrument, not physics): the tracker's E is moist static energy with a
+CAVEAT (GLM review, DECISIVE): the tracker's E is moist static energy with a
 fixed c_pd / L_v.  If the model conserves a slightly different energy, dE_dt
-carries a definitional offset and a SMALL constant LEAK is inconclusive.  A
-LARGE or GROWING leak (toward the day-165 detonation) is the unambiguous signal.
+carries a definitional offset that scales with d/dt of column water and with
+precipitation -- both of which GROW during the runaway -- so "large and growing"
+does NOT distinguish an instrument offset from a real leak.  The verdict is the
+OFFSET REGRESSION: regress LEAK on d(CWV)/dt and hfls; a high R^2 means the leak
+is an MSE-vs-model-energy offset and only the UNEXPLAINED residual is a
+candidate real internal source.
+
+NOTE (codex review): this reads the full-collector EnergyBudgetTracker output.
+The MPAS lane runs collect_lightweight and does NOT update the tracker, so an
+MPAS run produces no energy_chunk_*.npz -- the tracker must first be wired into
+the MPAS diagnostic path (or a manual budget built from MPAS CMOR fluxes).
 """
 import argparse
 import glob
@@ -37,8 +45,7 @@ def load_energy_chunks(run_dir):
     efiles = sorted(glob.glob(os.path.join(incr, "energy_chunk_*.npz")))
     if not efiles:
         raise SystemExit(f"no energy_chunk_*.npz under {incr} — did the diag path run?")
-    keys = ("energy_toa_net", "energy_dE_dt", "energy_residual",
-            "sw_net_sfc", "lw_net_sfc")
+    keys = ("toa_net", "dE_dt", "residual", "sfc_sw_net", "sfc_lw_net")
     out = {k: [] for k in keys}
     for f in efiles:
         z = np.load(f)
@@ -71,11 +78,19 @@ def main(argv=None):
 
     e = load_energy_chunks(a.run_dir)
     hfss, hfls = load_sh_lh(a.run_dir)
-    toa = e["energy_toa_net"]; dEdt = e["energy_dE_dt"]; resid = e["energy_residual"]
-    sws = e["sw_net_sfc"]; lws = e["lw_net_sfc"]
-    n = min(len(toa), len(dEdt), len(resid), len(sws), len(lws), len(hfss), len(hfls))
+    toa = e["toa_net"]; dEdt = e["dE_dt"]; resid = e["residual"]
+    sws = e["sfc_sw_net"]; lws = e["sfc_lw_net"]
+    lens = {"toa": len(toa), "dE_dt": len(dEdt), "residual": len(resid),
+            "sfc_sw": len(sws), "sfc_lw": len(lws), "hfss": len(hfss), "hfls": len(hfls)}
+    n = min(lens.values())
     if n == 0:
-        raise SystemExit("no overlapping samples across energy + hfss/hfls arrays")
+        raise SystemExit(f"no overlapping samples: {lens} — the MPAS lane uses "
+                         "collect_lightweight and does NOT run EnergyBudgetTracker; "
+                         "this probe needs the full-collector path (or MPAS energy "
+                         "instrumentation wired in).")
+    if max(lens.values()) != n:
+        raise SystemExit(f"array length mismatch {lens}; refusing to truncate-align "
+                         "(would shift hfss vs the energy series). Fix the writer.")
     toa, dEdt, resid = toa[:n], dEdt[:n], resid[:n]
     sws, lws, hfss, hfls = sws[:n], lws[:n], hfss[:n], hfls[:n]
 
@@ -104,7 +119,7 @@ def main(argv=None):
     cwv = _load_series(a.run_dir, "CWV", n)
     hfls_s = hfls[:n]
     verdict_extra = ""
-    if cwv is not None and len(cwv) >= n:
+    if cwv is not None and len(cwv) >= n and (n - 1) >= 5:
         dt_s = _median_dt_seconds(a.run_dir, n)
         dcwv_dt = np.gradient(cwv[:n]) / dt_s              # kg/m^2/s
         X = np.column_stack([np.ones(n), dcwv_dt, hfls_s])[body]
@@ -160,10 +175,10 @@ def _median_dt_seconds(run_dir, n):
         if "energy_chunk" in f or "moisture_chunk" in f:
             continue
         z = np.load(f)
-        for tk in ("time_seconds", "elapsed_seconds", "times_seconds", "time_days"):
+        for tk in ("days", "time_seconds", "elapsed_seconds", "times_seconds", "time_days"):
             if tk in z.files:
                 t = np.asarray(z[tk], dtype=np.float64)
-                if tk == "time_days":
+                if tk in ("time_days", "days"):
                     t = t * 86400.0
                 if len(t) >= 2:
                     return float(np.median(np.diff(t)))
