@@ -1231,6 +1231,18 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.jit and args.backend != "jax":
         raise SystemExit("--jit applies to --backend jax only")
+    if args.jit and args.physics != "none":
+        # The two flags predate each other (--jit from #1630, --physics from
+        # #1653; the guard above encoded a world without --physics).  With
+        # both on, the residual mixes physics-port error + dynamics-port
+        # error + jit-vs-eager drift -- three contributors, one number, so
+        # nothing is attributable to one lane, which is this runner's whole
+        # contract.  The physics step has no jit path; refuse rather than
+        # score a confound (GLM merge review 2026-08-24).
+        raise SystemExit("--jit cannot be combined with --physics: the "
+                         "physics step has no jit path, so the residual "
+                         "would mix jit-vs-eager dynamics drift with the "
+                         "physics-port error and attribute to neither.")
     if args.max_rel is None:
         print("=== REPORT ONLY -- no --max-rel given; exit status 0 does NOT "
               "certify the residual. Pass --max-rel to gate. ===")
