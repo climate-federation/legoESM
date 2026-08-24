@@ -482,7 +482,7 @@ def append_vface_wall_row(v_lower):
     return jnp.concatenate([v_lower, wall], axis=0)
 
 
-def gather_state_latlon(state, mesh):
+def gather_state_latlon(state, mesh, *, to_host: bool = False):
     """Inverse of :func:`shard_state_latlon`: gather every leaf to a single device
     and rebuild the full ``(n_lat+1, ...)`` ``v`` / ``v_mask`` by appending the
     pole-wall row (zeros) the layout dropped.
@@ -512,7 +512,26 @@ def gather_state_latlon(state, mesh):
     _mp = jax.process_count() > 1
 
     def _gather_arr(a):
-        return replicate_leaf(a, rep, multiprocess=_mp)
+        out = replicate_leaf(a, rep, multiprocess=_mp)
+        if not to_host:
+            return out
+        # HOST-RESIDENT gather (the eORCA025 full-card memory fix): keeping
+        # every gathered leaf REPLICATED on every device holds a whole extra
+        # global state (~15-30 GB f64) resident per GPU, which is what pushed
+        # the 8-band full card over 48 GB even after the step's own live
+        # peak had scaled down to ~18 GiB (smoke 9474077).  Pull each leaf
+        # to host numpy and FREE the device copy immediately, so only ONE
+        # leaf (~1 GB) ever stages on the device at a time.  The host loop
+        # consumes numpy anyway, and shard_state_latlon device_puts from
+        # any backing on the way back in.  Collective count/order per rank
+        # is UNCHANGED (one replicate per leaf) -- the multiprocess safety
+        # contract above is untouched.
+        host = np.asarray(out)
+        try:
+            out.delete()
+        except Exception:               # pragma: no cover - non-deletable
+            pass
+        return host
 
     updates = {}
     for name in _V_STAGGERED_STATE_FIELDS:
@@ -521,8 +540,16 @@ def gather_state_latlon(state, mesh):
             updates[name] = None
             continue
         v_lower = _gather_arr(field.data)
-        # north pole-wall / cap row (the shared reconstruction helper)
-        updates[name] = field.replace(data=append_vface_wall_row(v_lower))
+        # north pole-wall / cap row (the shared reconstruction helper).
+        # Under to_host the append runs in numpy so the result STAYS on the
+        # host (jnp.concatenate would silently re-device-put the leaf).
+        if to_host:
+            wall = np.zeros((1,) + tuple(v_lower.shape[1:]),
+                            dtype=v_lower.dtype)
+            updates[name] = field.replace(
+                data=np.concatenate([np.asarray(v_lower), wall], axis=0))
+        else:
+            updates[name] = field.replace(data=append_vface_wall_row(v_lower))
     for name in state._fields:
         if name in _V_STAGGERED_STATE_FIELDS:
             continue
@@ -1174,6 +1201,6 @@ def make_sharded_ocean_step_global(model, mesh):
         ss = inner(ss, dt,
                    surface_forcing=shard_forcing_latlon(surface_forcing, mesh),
                    freshwater=shard_forcing_latlon(freshwater, mesh))
-        return gather_state_latlon(ss, mesh)
+        return gather_state_latlon(ss, mesh, to_host=True)
 
     return sharded_step_global

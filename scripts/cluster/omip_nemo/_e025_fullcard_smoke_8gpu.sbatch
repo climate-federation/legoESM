@@ -2,8 +2,8 @@
 #SBATCH --account=glab
 #SBATCH --partition=short
 #SBATCH --job-name=e025smk
-#SBATCH --nodes=2
-#SBATCH --ntasks=4
+#SBATCH --nodes=4
+#SBATCH --ntasks=8
 #SBATCH --ntasks-per-node=2
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
@@ -40,7 +40,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 FORCING=/burg-archive/home/pg2328/.cache/legoesm/ocean_fidelity/forcing/core2_nyf_mod
 OUT=$MAIN/results/omip_nemo/e025_fullcard_smoke
-LOG=$MAIN/omip_nemo/e025smk_${SLURM_JOB_ID}_full.log
+LOG=$MAIN/omip_nemo/e025smk_${SLURM_JOB_ID}_8g.log
 echo "HEAD: $(git rev-parse --short HEAD)  $(git log --oneline -1)"
 echo "=== ALLOC ==="; date; echo "nodes: $SLURM_JOB_NODELIST"
 scontrol show hostnames "$SLURM_JOB_NODELIST"
@@ -48,11 +48,11 @@ scontrol show hostnames "$SLURM_JOB_NODELIST"
 
 # srun: 1 process/GPU; jax.distributed bootstraps from PMIx; local GPU via
 # SLURM_LOCALID (see run_eorca025_4gpu_multinode.sbatch for the topology notes).
-# Full faithful card + --n-gpus 4 --distributed, dt=75, RK3, ~2.2 sim-days.
+# Full faithful card + --n-gpus 8 --distributed, dt=75, RK3, ~2.2 sim-days.
 srun --mpi=pmix \
   env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
   $PY "$MAIN/scripts/run/run_omip_core2.py" --grid tripole \
-    --mesh data/grids/eORCA025_mesh_mask.nc --n-gpus 4 --distributed \
+    --mesh data/grids/eORCA025_mesh_mask.nc --n-gpus 8 --distributed \
     --barotropic-solver implicit_cn \
     --dt 75 --min-levels 2 --nemo-vertical --balanced-init \
     --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
@@ -75,7 +75,7 @@ srun --mpi=pmix \
     --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
     --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
     --forcing-path $FORCING \
-    --output $OUT 2>&1 | tee "$LOG" | tail -120
+    --output ${OUT}_8g 2>&1 | tee "$LOG" | tail -120
 rc=${PIPESTATUS[0]}
 echo "e025smk_rc=${rc}"
 echo "=== smoke verdict ==="
