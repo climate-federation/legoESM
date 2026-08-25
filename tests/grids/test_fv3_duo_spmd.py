@@ -19,12 +19,16 @@ N, NG = 12, 3
 
 
 @pytest.fixture(scope="module")
-def tab():
+def duo_ctx():
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
+    return build_six_face_duo_context(N, NG, use_ext_bundle=True,
+                                      oracle_conventions=True)
+
+
+@pytest.fixture(scope="module")
+def tab(duo_ctx):
     from legoesm.grids.fv3_duo_halos import build_jax_duo_halo_tables
-    ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
-                                     oracle_conventions=True)
-    return build_jax_duo_halo_tables(ctx["ectx"], ctx["gs6"], nq=1)
+    return build_jax_duo_halo_tables(duo_ctx["ectx"], duo_ctx["gs6"], nq=1)
 
 
 def test_census_matches_the_measured_depth(tab):
@@ -256,3 +260,160 @@ def test_poison_instrument_can_fire(tab, monkeypatch):
     assert not np.array_equal(got, ref, equal_nan=True), (
         "narrow-border poison run still matched: the poison instrument "
         "cannot fire and every poison pass is vacuous")
+
+
+# ---- M3 wiring: the public exchanges dispatch on tab.ring_comm ----
+
+class _Sentinel(Exception):
+    pass
+
+
+def test_dispatch_default_path_is_the_impl(tab, monkeypatch):
+    """With ring_comm=None (the builder's default) each public exchange
+    must reach its *_impl body -- proven by a sentinel-raising impl, not
+    by reading source."""
+    import legoesm.grids.fv3_duo_halos as halos
+
+    assert tab.ring_comm is None            # the builder's default
+    for pub, impl in [
+            (lambda: halos.ext_scalar_sixface(None, tab, "A"),
+             "ext_scalar_sixface_impl"),
+            (lambda: halos.ext_vector_dgrid_sixface(None, None, tab),
+             "ext_vector_dgrid_sixface_impl"),
+            (lambda: halos.ext_vector_cgrid_sixface(None, None, tab),
+             "ext_vector_cgrid_sixface_impl")]:
+        def _boom(*a, **k):
+            raise _Sentinel
+        monkeypatch.setattr(halos, impl, _boom)
+        with pytest.raises(_Sentinel):
+            pub()
+
+
+def test_dispatch_routes_to_ring_comm(tab, monkeypatch):
+    """With ring_comm set, each public exchange must call the matching
+    ring method with the caller's arrays -- recorded on a fake ring, so
+    no devices are needed."""
+    import legoesm.grids.fv3_duo_halos as halos
+
+    calls = []
+
+    class _FakeRing:
+        def ext_scalar(self, f6, stag):
+            calls.append(("scalar", f6, stag))
+            return "S"
+
+        def ext_vector_dgrid(self, u6, v6):
+            calls.append(("dgrid", u6, v6))
+            return "D"
+
+        def ext_vector_cgrid(self, uc6, vc6):
+            calls.append(("cgrid", uc6, vc6))
+            return "C"
+
+    monkeypatch.setattr(tab, "ring_comm", _FakeRing())
+    f, u, v = object(), object(), object()
+    assert halos.ext_scalar_sixface(f, tab, "B") == "S"
+    assert halos.ext_vector_dgrid_sixface(u, v, tab) == "D"
+    assert halos.ext_vector_cgrid_sixface(u, v, tab) == "C"
+    assert calls == [("scalar", f, "B"), ("dgrid", u, v),
+                     ("cgrid", u, v)]
+
+
+def test_ring_comm_refuses_unknown_stagger():
+    """Dispatch hardening: an unknown stagger raises, never a silent
+    default."""
+    from legoesm.grids.fv3_duo_spmd import DuoRingComm
+
+    rc = DuoRingComm()
+    rc._scalar = {}
+    with pytest.raises(ValueError, match="stagger"):
+        rc.ext_scalar(None, "C")
+
+
+def test_public_dispatch_runs_the_ring_no_recursion(tab, monkeypatch):
+    """The behavioural recursion guard: build a real ring_comm, set it on
+    tab, and call the PUBLIC exchanges on sharded arrays.  If the ring
+    bodies routed back through the dispatchers, shard_map-inside-
+    shard_map would raise -- so a bitwise-clean pass IS the guard test,
+    for all three exchanges."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    import legoesm.grids.fv3_duo_halos as halos
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+
+    devs = _devices_or_skip(6)
+    mesh = Mesh(np.array(devs), ("face",))
+    sh = NamedSharding(mesh, P("face"))
+
+    m = tab.n + 2 * tab.ng
+    rng = np.random.default_rng(6)
+    f6 = jnp.asarray(rng.standard_normal((6, m, m)))
+    ud, vd = map(jnp.asarray, _vec_fixture(tab, "D", 7))
+    uc, vc = map(jnp.asarray, _vec_fixture(tab, "C", 8))
+
+    # certified references from the impls (never dispatch)
+    ref_s = np.asarray(halos.ext_scalar_sixface_impl(f6, tab, "A"))
+    ref_du, ref_dv = (np.asarray(x) for x in
+                      halos.ext_vector_dgrid_sixface_impl(ud, vd, tab))
+    ref_cu, ref_cv = (np.asarray(x) for x in
+                      halos.ext_vector_cgrid_sixface_impl(uc, vc, tab))
+
+    monkeypatch.setattr(tab, "ring_comm", build_ring_comm(tab, mesh))
+    got_s = np.asarray(halos.ext_scalar_sixface(
+        jax.device_put(f6, sh), tab, "A"))
+    got_du, got_dv = halos.ext_vector_dgrid_sixface(
+        jax.device_put(ud, sh), jax.device_put(vd, sh), tab)
+    got_cu, got_cv = halos.ext_vector_cgrid_sixface(
+        jax.device_put(uc, sh), jax.device_put(vc, sh), tab)
+    assert np.array_equal(got_s, ref_s)
+    assert np.array_equal(np.asarray(got_du), ref_du, equal_nan=True)
+    assert np.array_equal(np.asarray(got_dv), ref_dv, equal_nan=True)
+    assert np.array_equal(np.asarray(got_cu), ref_cu, equal_nan=True)
+    assert np.array_equal(np.asarray(got_cv), ref_cv, equal_nan=True)
+
+
+def test_stepper_context_threads_the_mesh(duo_ctx):
+    """build_jax_duo_stepper_context(spmd_mesh=...) attaches a ring_comm;
+    the default builds ring_comm=None (certified path)."""
+    import jax
+    from jax.sharding import Mesh
+
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+    from legoesm.grids.fv3_duo_spmd import DuoRingComm
+
+    jax.config.update("jax_enable_x64", True)   # the context's f64 gate
+    devs = _devices_or_skip(2)
+    ctx_default = build_jax_duo_stepper_context(duo_ctx)
+    assert ctx_default.tab.ring_comm is None
+    mesh = Mesh(np.array(devs), ("face",))
+    ctx_ring = build_jax_duo_stepper_context(duo_ctx, spmd_mesh=mesh)
+    assert isinstance(ctx_ring.tab.ring_comm, DuoRingComm)
+    assert ctx_ring.tab.ring_comm.depth == 7
+
+
+def test_model_knob_threads_the_mesh_without_mutating_the_bundle():
+    """FV3DuoDynamicsModel(step_spmd_mesh=...) rebuilds a ring-enabled
+    context; the SHARED grid bundle's certified context is untouched
+    (mutating an identity-hashed static arg would leave a stale jit
+    cache).  Construction only -- the sbatch probe steps it."""
+    import jax
+    from jax.sharding import Mesh
+
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    from legoesm.grids.fv3_duo_spmd import DuoRingComm
+
+    jax.config.update("jax_enable_x64", True)
+    devs = _devices_or_skip(2)
+    bundle = create_fv3_duo_grid(N)
+    default = FV3DuoDynamicsModel(bundle, FV3DuoConfig())
+    assert default._ctx_jax is bundle.ctx_jax
+    mesh = Mesh(np.array(devs), ("face",))
+    ring = FV3DuoDynamicsModel(bundle, FV3DuoConfig(),
+                               step_spmd_mesh=mesh)
+    assert isinstance(ring._ctx_jax.tab.ring_comm, DuoRingComm)
+    assert ring._ctx_jax is not bundle.ctx_jax
+    assert bundle.ctx_jax.tab.ring_comm is None

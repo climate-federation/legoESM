@@ -401,7 +401,8 @@ class DuoStepperContext:
 
 
 def build_jax_duo_stepper_context(ctx: dict, *,
-                                  skip_b_endpoints: bool = False
+                                  skip_b_endpoints: bool = False,
+                                  spmd_mesh=None
                                   ) -> DuoStepperContext:
     """Convert the NumPy ``build_six_face_duo_context`` dict ONCE.
 
@@ -471,6 +472,14 @@ def build_jax_duo_stepper_context(ctx: dict, *,
 
     tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=_STEPPER_NQ,
                                     skip_b_endpoints=skip_b_endpoints)
+    if spmd_mesh is not None:
+        # ENGINEERING knob (M3): route every step-side halo exchange
+        # through the O(halo) shard_map ring on this mesh.  Selects no
+        # scientific configuration; the ring exchanges are bitwise-equal
+        # to the certified path (test_fv3_duo_spmd).  Default None keeps
+        # the certified single-device trace byte-identical.
+        from legoesm.grids.fv3_duo_spmd import build_ring_comm
+        tab.ring_comm = build_ring_comm(tab, spmd_mesh)
 
     out = DuoStepperContext()
     out.n, out.ng = n, ng

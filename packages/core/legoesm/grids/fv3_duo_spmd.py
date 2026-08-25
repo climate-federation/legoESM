@@ -25,6 +25,7 @@ import numpy as np
 __all__ = [
     "census_cross_face_depth",
     "assert_ring_width_covers",
+    "build_ring_comm",
 ]
 
 
@@ -167,7 +168,7 @@ def assert_ring_width_covers(tab, ring_width: int) -> int:
 # ring exchange -- the O(halo) shard_map scalar exchange (v1.1)
 # ---------------------------------------------------------------------------
 #
-# Wraps the certified ext_scalar_sixface in a shard_map over a 'face' mesh
+# Wraps the certified ext_scalar_sixface_impl in a shard_map over a 'face' mesh
 # axis: each device holds a contiguous block of faces, gathers only the
 # width-w full BORDERS of every face (O(halo) -- the census above proves all
 # cross-face reads land inside them), rebuilds a stack that is real where
@@ -213,7 +214,9 @@ def make_ring_ext_scalar_sixface(tab, stag: str, mesh, *,
     from jax.sharding import PartitionSpec as P
     from jax.experimental.shard_map import shard_map
 
-    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface
+    # the *_impl body, NOT the public dispatcher: with tab.ring_comm
+    # set, the public name would recurse into this very shard_map
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_impl
 
     depth = assert_ring_width_covers(tab, ring_width)
     if stag == "A":
@@ -259,7 +262,7 @@ def make_ring_ext_scalar_sixface(tab, stag: str, mesh, *,
         rows = me * g + jnp.arange(g)
         stack = stack.at[rows, :].set(f6_local.reshape(g, m * m))
         # 4. certified tables, verbatim
-        out = ext_scalar_sixface(stack.reshape(6, m, m), tab, stag)
+        out = ext_scalar_sixface_impl(stack.reshape(6, m, m), tab, stag)
         # 5. keep own faces
         return jax.lax.dynamic_slice_in_dim(out, me * g, g, axis=0)
 
@@ -273,8 +276,9 @@ def make_ring_ext_vector_sixface(tab, grid: str, mesh, *,
                                  poison: bool = False):
     """shard_map'd VECTOR exchange (D or C grid), O(halo) comm.
 
-    ``grid``: ``"D"`` wraps ``ext_vector_dgrid_sixface`` (u ``(6,ma,mb)``,
-    v ``(6,mb,ma)``); ``"C"`` wraps ``ext_vector_cgrid_sixface`` (uc
+    ``grid``: ``"D"`` wraps ``ext_vector_dgrid_sixface_impl`` (u
+    ``(6,ma,mb)``, v ``(6,mb,ma)``); ``"C"`` wraps
+    ``ext_vector_cgrid_sixface_impl`` (uc
     ``(6,mb,ma)``, vc ``(6,ma,mb)``).  Returns ``(fn, depth)`` with
     ``fn(u_local, v_local) -> (u_local, v_local)``.
 
@@ -297,18 +301,20 @@ def make_ring_ext_vector_sixface(tab, grid: str, mesh, *,
     from jax.sharding import PartitionSpec as P
     from jax.experimental.shard_map import shard_map
 
+    # the *_impl bodies, NOT the public dispatchers (recursion guard,
+    # same as the scalar ring)
     from legoesm.grids.fv3_duo_halos import (
-        ext_vector_cgrid_sixface,
-        ext_vector_dgrid_sixface,
+        ext_vector_cgrid_sixface_impl,
+        ext_vector_dgrid_sixface_impl,
     )
 
     depth = assert_ring_width_covers(tab, ring_width)
     ma = tab.n + 2 * tab.ng
     mb = ma + 1
     if grid == "D":
-        shapes, flow = ((ma, mb), (mb, ma)), ext_vector_dgrid_sixface
+        shapes, flow = ((ma, mb), (mb, ma)), ext_vector_dgrid_sixface_impl
     elif grid == "C":
-        shapes, flow = ((mb, ma), (ma, mb)), ext_vector_cgrid_sixface
+        shapes, flow = ((mb, ma), (ma, mb)), ext_vector_cgrid_sixface_impl
     else:
         raise ValueError(
             f"make_ring_ext_vector_sixface: grid {grid!r} (expected 'D' "
@@ -360,3 +366,72 @@ def _border_mask_rect(m0: int, m1: int, w: int) -> np.ndarray:
     mask[:, :w] = True
     mask[:, -w:] = True
     return mask
+
+
+# ---------------------------------------------------------------------------
+# ring_comm -- the bundle the halo dispatchers route through (M3 wiring)
+# ---------------------------------------------------------------------------
+
+class DuoRingComm:
+    """The prebuilt ring exchanges for ONE ``(tab, mesh)`` pair.
+
+    Rides on ``DuoHaloTables.ring_comm``; the tables are a STATIC jit
+    argument, so this object is identity-hashable exactly like its host
+    (two structurally identical bundles compile twice -- build one per
+    context and reuse).  The closures are built up front (both scalar
+    staggers and both vector grids) because ``stag``/grid are static at
+    every call site; dispatch here is a trace-time dict lookup.
+    """
+
+    __slots__ = ("_scalar", "_dgrid", "_cgrid", "ring_width", "depth")
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+    def __repr__(self):                              # pragma: no cover
+        return (f"DuoRingComm(ring_width={self.ring_width}, "
+                f"depth={self.depth})")
+
+    def ext_scalar(self, f6, stag: str):
+        try:
+            fn = self._scalar[stag]
+        except KeyError:
+            raise ValueError(
+                f"DuoRingComm.ext_scalar: stagger {stag!r} not "
+                f"implemented (the certified scalar exchange supports "
+                f"'A' and 'B' only)") from None
+        return fn(f6)
+
+    def ext_vector_dgrid(self, u6, v6):
+        return self._dgrid(u6, v6)
+
+    def ext_vector_cgrid(self, uc6, vc6):
+        return self._cgrid(uc6, vc6)
+
+
+def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
+    """Build the :class:`DuoRingComm` for ``tab`` on ``mesh``.
+
+    Attach it as ``tab.ring_comm`` to route every step-side exchange
+    (the three public ``ext_*_sixface`` dispatchers in
+    ``fv3_duo_halos``) through the O(halo) shard_map ring.  Each
+    ``make_ring_*`` factory re-runs the census gate against ``tab``, so
+    a ring the tables outread is refused here, at build time.
+    """
+    rc = DuoRingComm()
+    scalar = {}
+    depth = -1
+    for stag in ("A", "B"):
+        scalar[stag], depth = make_ring_ext_scalar_sixface(
+            tab, stag, mesh, ring_width=ring_width)
+    rc._scalar = scalar
+    rc._dgrid, _ = make_ring_ext_vector_sixface(
+        tab, "D", mesh, ring_width=ring_width)
+    rc._cgrid, _ = make_ring_ext_vector_sixface(
+        tab, "C", mesh, ring_width=ring_width)
+    rc.ring_width = int(ring_width)
+    rc.depth = int(depth)
+    return rc

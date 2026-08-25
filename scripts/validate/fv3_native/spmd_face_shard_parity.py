@@ -86,6 +86,14 @@ def main(argv=None):
     ap.add_argument("--n-shards", type=int, default=6, choices=(2, 3, 6),
                     help="devices the face axis is split over (6 % n == 0)")
     ap.add_argument("--dt", type=float, default=120.0)
+    ap.add_argument("--ring", action="store_true",
+                    help="arm B additionally routes the step's halo "
+                         "exchanges through the M3 shard_map ring "
+                         "(step_spmd_mesh=mesh). The ring exchanges are "
+                         "proven bitwise vs the certified ones, so "
+                         "parity is expected at 0.0 -- but the report/"
+                         "gate semantics are unchanged; the sbatch "
+                         "decides.")
     ap.add_argument("--max-abs", type=float, default=None,
                     help="gate: worst |sharded - single| over all fields. "
                          "Omit for report-only (first runs MEASURE the "
@@ -132,7 +140,9 @@ def main(argv=None):
     mesh = Mesh(np.array(devs[:args.n_shards]), ("face",))
     shard = NamedSharding(mesh, P("face"))
     model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
-                                   step_out_shardings=shard)
+                                   step_out_shardings=shard,
+                                   step_spmd_mesh=(mesh if args.ring
+                                                   else None))
     model = model_sh                    # arm B steps below use the pinned jit
     b = _shard_bundle(ic, shard)
     b = model.step(b, args.dt)          # warmup: pays compile for this layout
@@ -177,7 +187,8 @@ def main(argv=None):
     worst, worst_name = 0.0, ""
     print(f"face-shard parity, C{args.resolution} km={args.km} "
           f"{args.n_steps} steps, {args.n_shards} shards "
-          f"({devs[0].platform}):")
+          f"({devs[0].platform})"
+          f"{', RING exchanges' if args.ring else ''}:")
     for name in sorted(single):
         d = float(np.abs(single[name] - sharded[name]).max())
         sc = float(np.abs(single[name]).max())
