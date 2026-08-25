@@ -643,3 +643,54 @@ def test_tracker_area_weighting_changes_the_mean():
     b_u = EnergyBudgetTracker().update(T, q_v, z, z, phis, p_s, dsigma,
                                        sigma_full, area_weights=None, **kw)
     assert abs(b_w.column_energy - b_u.column_energy) > 1.0
+
+
+def test_frozen_mse_is_phase_complete_under_deposition():
+    # #1354/#1515: vapor->ice DEPOSITION releases L_s = L_v + L_f of sensible
+    # heat while removing L_v*q_v.  The conserved column energy is the FROZEN
+    # MSE (c_pT + L_v*q_v - L_f*q_frozen + Phi + KE); with the -L_f*q_frozen
+    # term deposition is energy-NEUTRAL, and WITHOUT it the diagnostic reads a
+    # spurious +L_f*dq source.  That spurious source is exactly the #1354
+    # instrument artifact on a mixed-phase spin-up.
+    from legoesm import constants
+    nlev = 12
+    sigma_full, dsigma = _make_sigma(nlev)
+    shape = (8, 16)
+    T0 = jnp.ones(shape + (nlev,)) * 250.0
+    qv0 = jnp.ones(shape + (nlev,)) * 4e-3
+    qf0 = jnp.zeros(shape + (nlev,))
+    z = jnp.zeros(shape + (nlev,))
+    phis = jnp.zeros(shape); p_s = jnp.ones(shape) * 1e5
+
+    # deposition of delta kg/kg vapor -> ice in every cell/level
+    delta = 1e-4
+    L_s = constants.L_v + constants.L_f
+    T1 = T0 + L_s * delta / constants.c_pd
+    qv1 = qv0 - delta
+    qf1 = qf0 + delta
+
+    def E(T, qv, qf, use_frozen):
+        return column_moist_static_energy(
+            T, qv, z, z, phis, p_s, dsigma, sigma_full,
+            q_frozen=(qf if use_frozen else None))
+
+    # Isolate the FROZEN term from the (pre-existing, separate) column-
+    # geopotential term: the geopotential change under heating is IDENTICAL
+    # with and without q_frozen, so it cancels in the difference.  The
+    # frozen-complete deposition change MINUS the vapor-only deposition change
+    # must equal exactly -L_f * delta * (column mass) -- i.e. the -L_f*q_frozen
+    # term removes precisely the spurious +L_f source the vapor-only energy
+    # manufactures.
+    dE_frozen = E(T1, qv1, qf1, True) - E(T0, qv0, qf0, True)
+    dE_vapor = E(T1, qv1, qf1, False) - E(T0, qv0, qf0, False)
+    removed = float(jnp.mean(dE_frozen - dE_vapor))     # J/m^2, should be -L_f*delta*mass
+    expect = -constants.L_f * delta * (1e5 / constants.g)
+    npt.assert_allclose(removed, expect, rtol=1e-6)
+
+    # And the vapor-only energy DOES read the deposition as a spurious source
+    # (the artifact this term fixes): its change exceeds the frozen-complete
+    # change by exactly +L_f*delta*mass.
+    assert float(jnp.mean(dE_vapor - dE_frozen)) > 0.0
+
+    # q_frozen=None is byte-identical to the pre-fix vapor-only energy.
+    npt.assert_array_equal(E(T0, qv0, qf0, False), E(T0, qv0, None, False))

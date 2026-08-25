@@ -10323,6 +10323,16 @@ class ModelDriver:
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
+                # Frozen condensate (q_i+q_s+q_g) for the phase-complete energy
+                # (#1354/#1515): without the -L_f*q_frozen term, deposition and
+                # freezing read as a spurious source.  Sum whatever frozen
+                # species this microphysics carries (None -> vapor-only MSE).
+                _qfrz_e = None
+                if self.state.tracers is not None:
+                    for _fk in ("q_i", "q_s", "q_g"):
+                        if _fk in self.state.tracers:
+                            _fd = self.state.tracers[_fk].data
+                            _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
 
                 def _slot(i):
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
@@ -10352,6 +10362,7 @@ class ModelDriver:
                         area_weights=_awt,
                         dp=self.diagnostics._dp(p_s_data),
                         p_full=self.diagnostics._p_full(p_s_data),
+                        q_frozen=_qfrz_e,
                     )
                     _ts["energy_toa_net"].append(float(_eb.toa_net))
                     _ts["energy_dE_dt"].append(float(_eb.dE_dt))

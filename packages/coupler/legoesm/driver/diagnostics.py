@@ -26,6 +26,25 @@ from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.io.cmor_output import CMIP6_PLEV19
 
 
+def _frozen_condensate(state):
+    """Summed frozen condensate q_i+q_s+q_g from a state's tracers, or None.
+
+    The phase-completeness input for the energy tracker (#1354/#1515): the
+    conserved column energy carries −L_f·q_frozen.  Sums whatever frozen
+    species the active microphysics carries (Morrison: q_i/q_s/q_g; warm-rain:
+    none → None → vapor-only moist static energy, byte-identical legacy).
+    """
+    tr = getattr(state, "tracers", None)
+    if not tr:
+        return None
+    total = None
+    for k in ("q_i", "q_s", "q_g"):
+        if k in tr and tr[k] is not None:
+            d = tr[k].data
+            total = d if total is None else total + d
+    return total
+
+
 class _StructuredRegridWeights:
     """Precomputed bilinear interpolation weights for structured grids."""
     __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
@@ -986,6 +1005,7 @@ class DiagnosticCollector:
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
             p_full=self._p_full(state.p_s.data),
+            q_frozen=_frozen_condensate(state),
         )
 
         # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
@@ -1440,6 +1460,7 @@ class DiagnosticCollector:
                 area_weights=_aw,
                 dp=self._dp(state.p_s.data),
                 p_full=self._p_full(state.p_s.data),
+                q_frozen=_frozen_condensate(state),
             )
 
         return {
