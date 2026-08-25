@@ -4144,10 +4144,29 @@ def make_voronoi_sharded_step(
                     T=state_new.T.replace(
                         data=jnp.maximum(state_new.T.data, cfg.T_min)))
             if state_new.tracers is not None:
-                state_new = state_new._replace(tracers={
+                # #1354/#1515: plain max(q,0) ADDS water at negatives; when the
+                # flag is on, correct q_v AND T together (remove the injected
+                # water's latent heat via energy_consistent_moisture_floor) so
+                # the SPMD hard floor does not leak +L_v*deficit of column
+                # heat.  Mirrors the serial MPAS hard-floor branch.  NOTE: this
+                # SPMD path ALWAYS hard-floors and does NOT honour
+                # conservative_tracer_clamp (pre-existing divergence from the
+                # serial borrow default) -- flagged, not changed here.
+                _hard = {
                     k: f.replace(data=jnp.maximum(f.data, 0.0))
                     for k, f in state_new.tracers.items()
-                })
+                }
+                if (getattr(cfg, "energy_consistent_moisture_clip", False)
+                        and "q_v" in state_new.tracers):
+                    from legoesm.core.conservation import (
+                        energy_consistent_moisture_floor)
+                    _qv_out, _T_out = energy_consistent_moisture_floor(
+                        state_new.tracers["q_v"].data, state_new.T.data)
+                    _hard["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
+                    state_new = state_new._replace(
+                        T=state_new.T.replace(data=_T_out), tracers=_hard)
+                else:
+                    state_new = state_new._replace(tracers=_hard)
 
             # --- 4. Global mass fixer ---
             if cfg.fix_mass:

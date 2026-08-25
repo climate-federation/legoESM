@@ -1251,10 +1251,26 @@ def make_voronoi_mpi_step(
                     for k in sorted(state_new.tracers)
                 })
             else:
-                state_new = state_new._replace(tracers={
+                # Plain hard floor (conservative_tracer_clamp=False).  #1354/
+                # #1515: when the flag is on, correct q_v AND T together so the
+                # injected water's latent heat is removed (else +L_v*deficit of
+                # spurious column heat) -- mirrors the serial MPAS hard-floor
+                # branch.  Column-local, no halo/allreduce needed.
+                _hard = {
                     k: f.replace(data=jnp.maximum(f.data, 0.0))
                     for k, f in state_new.tracers.items()
-                })
+                }
+                if (getattr(config, "energy_consistent_moisture_clip", False)
+                        and "q_v" in state_new.tracers):
+                    from legoesm.core.conservation import (
+                        energy_consistent_moisture_floor)
+                    _qv_out, _T_out = energy_consistent_moisture_floor(
+                        state_new.tracers["q_v"].data, state_new.T.data)
+                    _hard["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
+                    state_new = state_new._replace(
+                        T=state_new.T.replace(data=_T_out), tracers=_hard)
+                else:
+                    state_new = state_new._replace(tracers=_hard)
 
         # (mass fixer moved above the floors — codex round-2 finding 5.)
 

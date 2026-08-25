@@ -490,6 +490,7 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
             # Issue #273 Phase 3: forward the implicit gravity-wave
             # damping switches from the canonical driver config.
             # Default off (both 0/False) keeps the explicit path
@@ -656,6 +657,7 @@ def create_atmosphere_dycore(
             nu_vert4_T=dc.mpas_nu_vert4_T,
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
+            energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
         )

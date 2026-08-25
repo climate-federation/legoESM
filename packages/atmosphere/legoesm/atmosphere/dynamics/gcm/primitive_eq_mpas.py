@@ -101,6 +101,14 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
+    # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
+    # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
+    # column MSE is conserved instead of leaving +L_v*deficit of spurious heat.
+    # The default conservative BORROW is already column-MSE-neutral (it
+    # preserves the q_v integral with T untouched), so this is a no-op there and
+    # must NOT be stacked on it (that would inject -L_v*deficit of cooling).
+    energy_consistent_moisture_clip: bool = False
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -1152,10 +1160,27 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                     for k, f in state_new.tracers.items()
                 })
             else:
-                state_new = state_new._replace(tracers={
+                # Plain hard floor (conservative_tracer_clamp=False): max(q,0)
+                # ADDS water at negatives.  #1354/#1515: when enabled, correct
+                # q_v AND T together so the added water's latent heat is removed
+                # (energy_consistent_moisture_floor), else +L_v*deficit of
+                # spurious column heat.  Other tracers keep the plain floor.
+                _hard = {
                     k: f.replace(data=jnp.maximum(f.data, 0.0))
                     for k, f in state_new.tracers.items()
-                })
+                }
+                if (self.config.energy_consistent_moisture_clip
+                        and "q_v" in state_new.tracers):
+                    from legoesm.core.conservation import (
+                        energy_consistent_moisture_floor,
+                    )
+                    _qv_out, _T_out = energy_consistent_moisture_floor(
+                        state_new.tracers["q_v"].data, state_new.T.data)
+                    _hard["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
+                    state_new = state_new._replace(
+                        T=state_new.T.replace(data=_T_out), tracers=_hard)
+                else:
+                    state_new = state_new._replace(tracers=_hard)
 
         # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
         # there; running it after the tracer clamp shifted diagnosed column

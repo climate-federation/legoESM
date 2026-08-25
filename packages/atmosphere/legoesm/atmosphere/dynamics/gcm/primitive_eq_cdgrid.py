@@ -123,6 +123,12 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
+    # #1354/#1515: when True, the post-RK q_v floor removes the latent heat
+    # tied to the clipped (un-removable) vapour so column MSE is conserved
+    # (energy_consistent_moisture_floor), instead of a plain max(q,0) that
+    # leaves +L_v*deficit of spurious heat.  Only the HARD floor needs this;
+    # a column-conserving borrow would not (it is already MSE-neutral).
+    energy_consistent_moisture_clip: bool = False
     time_integrator: str = "ssp_rk3"
     T_diss_coeff: float = 0.0
         # Velocity-dependent T diffusion: nu_T = coeff*|v|*dx. Typical 0.1-0.5 when used.
@@ -1992,10 +1998,26 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # forcing's contract relies on).  Tracers are untouched by the
         # wind/sponge/vorticity-damping post-steps above.
         if state_new.tracers is not None:
-            state_new = state_new._replace(tracers={
+            _floored = {
                 _k: _f.replace(data=jnp.maximum(_f.data, 0.0))
                 for _k, _f in state_new.tracers.items()
-            })
+            }
+            # #1354/#1515: the q_v floor ADDS water (max(q,0) at negatives);
+            # without removing the latent heat that the physics already
+            # deposited for the un-removable vapour, that is +L_v*deficit of
+            # spurious column heat.  Correct q_v AND T together when enabled.
+            if (self.config.energy_consistent_moisture_clip
+                    and "q_v" in state_new.tracers):
+                from legoesm.core.conservation import (
+                    energy_consistent_moisture_floor,
+                )
+                _qv_out, _T_out = energy_consistent_moisture_floor(
+                    state_new.tracers["q_v"].data, state_new.T.data)
+                _floored["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
+                state_new = state_new._replace(
+                    T=state_new.T.replace(data=_T_out), tracers=_floored)
+            else:
+                state_new = state_new._replace(tracers=_floored)
 
         state_out = cast_pytree(state_new, None, "storage")
 

@@ -1126,3 +1126,38 @@ class TestLatLonSWPolarFilterForwarding:
         assert model.config.use_polar_filter is False
         assert model._polar_mask is None
         assert model._polar_mask_v is None
+
+
+# =========================================================================
+# energy_consistent_moisture_clip wiring (#1354/#1515)
+# =========================================================================
+
+class TestEnergyConsistentMoistureClipWiring:
+    """The ExperimentConfig flag must reach the cube + MPAS core configs.
+
+    Non-vacuity: flip the flag and require the core config field to follow
+    (a stuck-False plumbing bug fails the True case).
+    """
+
+    def test_experiment_flag_defaults_off(self):
+        assert _make_config().energy_consistent_moisture_clip is False
+
+    def test_cube_core_config_carries_the_flag(self):
+        grid = _make_cubed_sphere_grid()
+        sigma = _make_sigma()
+        for want in (False, True):
+            config = _make_config(model_type="hydrostatic")._replace(
+                energy_consistent_moisture_clip=want)
+            model = create_atmosphere_dycore(config, grid, sigma)
+            assert model.config.energy_consistent_moisture_clip is want
+
+    def test_core_configs_accept_and_default_the_field(self):
+        # MPAS mesh build is heavy; assert the config contract directly.
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+            MPASPrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig)
+        assert MPASPrimitiveEquationConfig().energy_consistent_moisture_clip is False
+        assert CDGridPrimitiveEquationConfig().energy_consistent_moisture_clip is False
+        assert MPASPrimitiveEquationConfig(
+            energy_consistent_moisture_clip=True).energy_consistent_moisture_clip is True
