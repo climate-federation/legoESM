@@ -2009,11 +2009,16 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # hard-floor fallback adds the per-species latent-heat T correction
             # incl ice.  dp = TRUE layer mass so the borrow conserves the
             # physical column integral on hybrid as well as pure sigma.
+            # ponytail: serial sum_fn (jnp.sum).  Under face-scatter cube MPI
+            # the per-column borrow is still EXACT (a column lives on one face,
+            # never split); only the rare net-negative-column global rescue
+            # reduces per-rank — a #1354/#1515 follow-up (pass a face-scatter
+            # allreduce sum_fn), negligible on smooth water fields.
             from legoesm.core.conservation import apply_water_positivity
             _coord = self.sigma_coord
             _ps = state_new.p_s.data
             if isinstance(_coord, HybridSigmaPressureCoordinate):
-                _dp = dp_from_hybrid(_coord, _ps)
+                _dp = jnp.maximum(dp_from_hybrid(_coord, _ps), 0.0)  # +weight contract
             else:
                 _dp = _ps[..., jnp.newaxis] * _coord.dsigma.astype(_ps.dtype)
             _tr_out, _T_out = apply_water_positivity(

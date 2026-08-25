@@ -2212,6 +2212,12 @@ def make_tiled_fv3_hydrostatic_moist_step_stage_2d(mesh, cdgrid, coord, n: int,
 
         ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
             (ud0, vd0, T0, ps0, q0), _F, _dt)
+        # ponytail: PLAIN floor, NOT the shared conserving borrow.  This
+        # tiled WB/AIMIP training lane packs q as (6,n,n,nlev,3)=[q_v,q_c,q_r]
+        # (no ice) and takes no positivity config, so it is deliberately left
+        # on the legacy clamp — routing it through apply_water_positivity
+        # (unpack -> borrow with tile-global dp -> repack) is a named #1354/
+        # #1515 follow-up, tracked so the bypass is documented not hidden.
         q3 = jnp.maximum(q3, 0.0)                   # post-step tracer floor
         return ud3, vd3, T3, ps3, q3
 
@@ -2401,6 +2407,9 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
 
             ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
                 (u_d, v_d, T, p_s, q), _F, _dt)
+            # ponytail: PLAIN floor (see the stage_2d note) — the shared
+            # conserving borrow is a named #1354/#1515 follow-up on this packed
+            # tiled lane, deliberately not wired here.
             q3 = jnp.maximum(q3, 0.0)          # post-step tracer floor
             out_rest = (q3,)
         else:

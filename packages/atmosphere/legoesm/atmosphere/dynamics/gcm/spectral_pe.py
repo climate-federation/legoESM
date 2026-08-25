@@ -1700,7 +1700,7 @@ class SpectralPrimitiveEquationModel:
         # residual mass-weighted.
         p_s = jnp.exp(sh_synthesis(self.grid, state.lnps_hat.data))
         if isinstance(coord, HybridSigmaPressureCoordinate):
-            dp = dp_from_hybrid(coord, p_s)
+            dp = jnp.maximum(dp_from_hybrid(coord, p_s), 0.0)  # +weight contract
         else:
             dp = p_s[..., None] * coord.dsigma.astype(p_s.dtype)
         tracers_out, _ = apply_water_positivity(

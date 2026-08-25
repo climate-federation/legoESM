@@ -4143,27 +4143,6 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     T=state_new.T.replace(
                         data=jnp.maximum(state_new.T.data, cfg.T_min)))
-            if state_new.tracers is not None:
-                # ONE shared positivity stage (#1354/#1515), matching the serial
-                # MPAS floors.  Under GSPMD the borrow's global residual sum is a
-                # plain jnp.sum over the (sharded) cells axis — XLA lowers it to
-                # a single allreduce, exactly like the mass fixer above, so
-                # sum_fn=None is decomposition-independent (no halo duplication
-                # on this lane, unlike explicit MPI).  Borrow (default) is
-                # frozen-MSE-neutral for vapour AND condensate; the hard-floor
-                # fallback carries the per-species latent-heat T correction incl
-                # ice.  dp = TRUE layer mass (non-positive dp zero-weighted).
-                from legoesm.core.conservation import apply_water_positivity
-                _ph = sigma.pressure_at_half(state_new.p_s.data)
-                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                _tr_out, _T_out = apply_water_positivity(
-                    state_new.tracers, state_new.T.data, _dp,
-                    conservative=getattr(
-                        cfg, "conservative_tracer_clamp", False),
-                    energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
-                state_new = state_new._replace(
-                    tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
             # --- 4. Global mass fixer ---
             if cfg.fix_mass:
@@ -4195,6 +4174,29 @@ def make_voronoi_sharded_step(
                 state_new = state_new._replace(
                     p_s=state_new.p_s.replace(
                         data=(_ps + correction).astype(_ps.dtype)))
+
+            # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
+            # dp must be the FINAL layer mass, so this runs post-fix (the serial
+            # MPAS lane likewise mass-fixes before its floors).  ONE shared
+            # positivity stage: under GSPMD the borrow's global residual is a
+            # plain jnp.sum over the sharded cells axis — XLA lowers it to a
+            # single allreduce, exactly like the mass fixer above, so
+            # sum_fn=None is decomposition-independent (no halo duplication on
+            # this lane).  Borrow (default) is frozen-MSE-neutral for vapour AND
+            # condensate; the hard-floor fallback carries the per-species
+            # latent-heat T correction incl ice.
+            if state_new.tracers is not None:
+                from legoesm.core.conservation import apply_water_positivity
+                _ph = sigma.pressure_at_half(state_new.p_s.data)
+                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+                _tr_out, _T_out = apply_water_positivity(
+                    state_new.tracers, state_new.T.data, _dp,
+                    conservative=getattr(
+                        cfg, "conservative_tracer_clamp", False),
+                    energy_consistent=getattr(
+                        cfg, "energy_consistent_moisture_clip", False))
+                state_new = state_new._replace(
+                    tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
             return cast_pytree(state_new, None, "storage"), phys_state_out
 

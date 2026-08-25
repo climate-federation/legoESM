@@ -1380,7 +1380,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             from legoesm.core.conservation import apply_water_positivity
             _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
             if _hybrid:
-                _dp = dp_from_hybrid(sigma_coord, state.p_s)
+                _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
             else:
                 _dp = state.p_s[..., jnp.newaxis] * sigma_coord.dsigma
             _tr_out, _T_out = apply_water_positivity(
