@@ -77,6 +77,13 @@ from legoesm.timestepping.semi_implicit import (
 )
 from legoesm import constants
 
+
+def _run_cdtype(grid):
+    """Complex dtype for the grid's runtime precision — complex64 for the fp32
+    spectral runtime (grid tables float32), complex128 otherwise.  Mirrors the
+    SW ``_cdt`` pattern so spectral operators do not promote a c64 state."""
+    return jnp.complex64 if grid.Pnm.dtype == jnp.float32 else jnp.complex128
+
 # Log-surface-pressure clamp bounds [ln Pa].  Pure host constants — use
 # ``math.log`` (not ``jnp.log``) so this module imports without dispatching a
 # device computation.  An eager ``float(jnp.log(...))`` here compiles a tiny
@@ -561,7 +568,7 @@ def _tracer_advection_gaussian(
         Tracer tendency ``∂q/∂t`` on grid (no physics added).
     """
     a = grid.radius
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    im_over_a = (1j * grid.ms / a).astype(_run_cdtype(grid))
     one_over_a = 1.0 / a
 
     # Horizontal flux ``q·v_h`` with cos-φ weighting absorbed; pair the
@@ -675,7 +682,7 @@ def spectral_pe_tendencies(
     # Append the three 2D fields as single-level slots.  ``im·lnps_hat``
     # is the spectral pre-multiply that yields ``∂(lnps)/∂λ`` on the
     # grid post-synthesis (Loop 147 trick).
-    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
+    _ims_lnps = (1j * grid.ms).astype(_run_cdtype(grid)) * state.lnps_hat.data  # (n_sh,)
     _all_hat_flat = jnp.concatenate(
         [
             _hat_flat,
@@ -794,7 +801,7 @@ def spectral_pe_tendencies(
         dp_s_dt_grid = p_s * dlnps_dt_grid
 
     # --- 9. Spectral operators ---
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a  # (n_sh,)
+    im_over_a = (1j * grid.ms / a).astype(_run_cdtype(grid))  # (n_sh,)
     one_over_a = 1.0 / a
 
     # --- 10. Vorticity fluxes: (zeta+f)*u*cos, (zeta+f)*v*cos ---
@@ -2475,16 +2482,19 @@ def isothermal_rest_state_spectral(
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
 
-    # Zero winds -> zero vorticity and divergence
-    vor_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
-    div_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    # Zero winds -> zero vorticity and divergence.  Spectral state at the run
+    # complex dtype (c64 for the fp32 runtime); grid-space fields at the grid's
+    # real run dtype so sh_analysis yields run-dtype coefficients.
+    _rdt = grid.Pnm.dtype
+    vor_hat = jnp.zeros((n_sh, nlev), dtype=_run_cdtype(grid))
+    div_hat = jnp.zeros((n_sh, nlev), dtype=_run_cdtype(grid))
 
     # Uniform temperature with perturbation at lowest level
-    T_grid = jnp.full((grid.n_lat, grid.n_lon), T_init, dtype=jnp.float64)
+    T_grid = jnp.full((grid.n_lat, grid.n_lon), T_init, dtype=_rdt)
     if perturbation_amplitude != 0.0:
         key = jax.random.PRNGKey(seed)
         noise = jax.random.normal(key, (grid.n_lat, grid.n_lon),
-                                  dtype=jnp.float64)
+                                  dtype=_rdt)
         T_grid_pert = T_grid + perturbation_amplitude * noise
     else:
         T_grid_pert = T_grid
@@ -2498,14 +2508,14 @@ def isothermal_rest_state_spectral(
 
     # Surface pressure (hydrostatic adjustment for topography)
     if phis is not None:
-        phis_grid = jnp.asarray(phis, dtype=jnp.float64)
+        phis_grid = jnp.asarray(phis, dtype=_rdt)
         p_s_grid = p_s_init * jnp.exp(-phis_grid / (constants.R_d * T_init))
         lnps_grid = jnp.log(p_s_grid)
     else:
         lnps_grid = jnp.full(
-            (grid.n_lat, grid.n_lon), jnp.log(p_s_init), dtype=jnp.float64,
+            (grid.n_lat, grid.n_lon), jnp.log(p_s_init), dtype=_rdt,
         )
-        phis_grid = jnp.zeros((grid.n_lat, grid.n_lon), dtype=jnp.float64)
+        phis_grid = jnp.zeros((grid.n_lat, grid.n_lon), dtype=_rdt)
 
     lnps_hat = sh_analysis(grid, lnps_grid)
 
