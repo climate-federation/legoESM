@@ -190,6 +190,21 @@ def print_latest_complete_signature(root):
         cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
         if best is None or cand[0] > best[0]:
             best = cand
+    if best is None:
+        # A persisted reachability-probe result IS resumable progress: the
+        # next link restores it and skips the ~9 h probe (see
+        # _read_probe_freeze). Without this, a link that finished only the
+        # probe would trip the wrapper's epoch-0 restart-loop guard and the
+        # chain would stop exactly where resuming has the most to save.
+        for d in [root] + [os.path.join(root, x) for x in children]:
+            try:
+                st = os.stat(_probe_freeze_path(d))
+            except OSError:
+                continue
+            cand = (st.st_mtime_ns,
+                    f"{_probe_freeze_path(d)}:{st.st_mtime_ns}:{st.st_size}")
+            if best is None or cand[0] > best[0]:
+                best = cand
     if best is not None:
         print(best[1])
 
@@ -257,6 +272,36 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         "rollout_steps": int(roll_steps),
         "n_global_samples": int(n_global_samples), "nproc": int(nproc),
     }
+
+
+def _probe_freeze_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "probe_freeze.json")
+
+
+def _read_probe_freeze(out_dir, expect_fp):
+    """The persisted reachability-probe result, or None.
+
+    Honoured only when its fingerprint matches the CURRENT run exactly — the
+    frozen set is a measurement on the initial parameters, shard and config,
+    so any drift invalidates it the same way it invalidates an optimizer
+    state.
+    """
+    import json as _json
+
+    try:
+        with open(_probe_freeze_path(out_dir)) as fh:
+            obj = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("frozen"), list):
+        return None
+    if obj.get("fingerprint") != expect_fp:
+        return None
+    if not all(isinstance(x, str) for x in obj["frozen"]):
+        return None
+    return obj["frozen"]
 
 
 def _atomic_write(path, write_fn):
@@ -651,8 +696,25 @@ def _main(argv=None):
             # between writes). Both start from zero: a parameters-only restore
             # would restart AdamW cold with the learning rate back at warmup
             # while reporting a resumed run.
-            log.info("resume: no COMPLETE epoch checkpoint under %s -- "
-                     "starting from epoch 0", cfg.out_dir)
+            # The reachability probe result IS restorable on its own: at T63
+            # with si_substeps=3 the probe alone costs ~9 h, so a link killed
+            # between probe and first-epoch write would otherwise re-measure
+            # forever inside a 12 h walltime (job 27194893). The probe is a
+            # pure function of the initial parameters + shard + config, all
+            # covered by the fingerprint, so restoring it changes WALLTIME
+            # and nothing else.
+            _now_fp = _run_fingerprint(cfg, yml, warmup, roll_steps,
+                                       len(local) * nproc, nproc)
+            _pf = _read_probe_freeze(cfg.out_dir, _now_fp)
+            if _pf is not None:
+                resumed_frozen = set(_pf)
+                log.info("resume: no complete epoch, but a fingerprint-"
+                         "matched probe result exists (%d frozen leaves) -- "
+                         "skipping the reachability probe, training from "
+                         "epoch 0", len(resumed_frozen))
+            else:
+                log.info("resume: no COMPLETE epoch checkpoint under %s -- "
+                         "starting from epoch 0", cfg.out_dir)
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
             params = eqx.tree_deserialise_leaves(_pp, params)
@@ -756,6 +818,27 @@ def _main(argv=None):
         else:
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
                 params, _probe_vg, local, n_probe=None, num_processes=nproc)
+            # Persist the measurement immediately: at T63/si_substeps=3 the
+            # probe costs ~9 h, and a link killed between here and the first
+            # epoch write would otherwise re-measure on every chained resume
+            # (job 27194893 died exactly there). Fingerprint-gated on read.
+            if rank == 0:
+                import os as _os
+
+                _os.makedirs(cfg.out_dir, exist_ok=True)
+                _pf_payload = {
+                    "schema": _MANIFEST_SCHEMA,
+                    "fingerprint": _run_fingerprint(
+                        cfg, yml, warmup, roll_steps, len(local) * nproc,
+                        nproc),
+                    "frozen": sorted(frozen_names),
+                }
+                import pathlib as _pathlib
+
+                _atomic_write(
+                    _probe_freeze_path(cfg.out_dir),
+                    lambda t: _pathlib.Path(t).write_text(
+                        json.dumps(_pf_payload)))
         n_live = len(jax.tree.leaves(arr))
         if n_probe_used is None:
             log.info("trainable leaves: %d live, %d frozen (RESTORED from the "
