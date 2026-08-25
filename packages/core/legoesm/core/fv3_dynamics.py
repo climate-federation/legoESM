@@ -1038,17 +1038,21 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             # the interior distributed (halo transfers lower to face/
             # strip-sized collective-permutes) but resolves the OUTPUTS
             # fully replicated, so a stepping loop decays to replication
-            # after one step.  Constrain only the FACE-LEADING output
-            # leaves (the state/press/q/omga/nh arrays, leading axis 6);
-            # scalars and schedule leaves (nsplt, stages -- km/k_split
-            # shaped) stay unconstrained: a jit-level out_shardings
-            # prefix would try to tile those and raise IndivisibleError.
-            out = jax.tree.map(
-                lambda x: (jax.lax.with_sharding_constraint(
-                    x, out_shardings)
-                    if getattr(x, "ndim", 0) >= 1 and x.shape[0] == 6
-                    else x),
-                out)
+            # after one step.  Constrain by OUTPUT ROOT, not by extent
+            # (codex MAJOR: nsplt is (km,), so a shape[0]==6 test would
+            # shard a VERTICAL schedule over faces at km=6): every leaf
+            # under the face-stacked roots is face-leading by
+            # construction, and the schedule leaves (nsplt,
+            # nsplt_exceeded, stages) stay untouched.  A jit-level
+            # out_shardings prefix is not usable here -- it would try to
+            # tile those non-face leaves and raise IndivisibleError.
+            _face_roots = ("state", "press", "q", "omga", "nh")
+            out = {**out,
+                   **{k: jax.tree.map(
+                          lambda x: jax.lax.with_sharding_constraint(
+                              x, out_shardings), out[k])
+                      for k in _face_roots
+                      if out.get(k) is not None}}
         return out
 
     _compiled = jax.jit(_arrays_only)

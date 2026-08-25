@@ -88,11 +88,13 @@ class FV3DuoDynamicsModel:
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
                  step_out_shardings=None):
-        # step_out_shardings: ENGINEERING knob (a jax Sharding pytree
-        # prefix for the jitted step's outputs), not a scientific config
-        # field -- it changes WHERE arrays live, never their values.
-        # Default None = the unconstrained jit the certified lane always
-        # used. SPMD callers pin the face sharding here because an
+        # step_out_shardings: ENGINEERING knob -- ONE jax.sharding.Sharding
+        # applied to each face-stacked output leaf (state/press/q/omga/nh;
+        # NOT a jit out_shardings pytree prefix).  It selects no scientific
+        # configuration; sharding can move last-bit float results via
+        # reduction/fusion order (measured 4e-15 rel, inside the parity
+        # gate).  Default None = the unconstrained jit the certified lane
+        # always used. SPMD callers pin the face sharding here because an
         # unconstrained jit resolves sharded-input outputs REPLICATED
         # (measured, spmd_face_shard_parity 2026-08-24) and a stepping
         # loop then decays after one step.
