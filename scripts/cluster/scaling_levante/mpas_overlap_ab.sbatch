@@ -62,7 +62,7 @@ run_arm () {  # xla_overlap mpas_overlap tag
       --ntasks-per-node="$GPN" --gpus-per-node="$GPN" --gpu-bind=none \
       --kill-on-bad-exit=1 \
     "$PY" scripts/bench/bench_mpas_spmd_scaling.py \
-      --multicontroller --n-devices "$NDEV" --subdivision 9 --nlev 26 --lloyd 0 \
+      --multicontroller --n-devices "$NDEV" --subdivision "${SUBDIV:-9}" --nlev 26 --lloyd 0 \
       --steps 60 --warmup 15 --halo-strategy ppermute \
       --partition-method metis \
       --out "$OUTDIR/${TAG}.jsonl" || { echo "ARM $TAG FAILED"; rc=1; }
