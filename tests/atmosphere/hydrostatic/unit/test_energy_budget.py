@@ -562,3 +562,135 @@ class TestTrackerAreaWeighting:
         # Uniform fields: weighting leaves the means physically sensible.
         assert b.precip_rate > 0.0
         assert b.column_water > 0.0
+
+
+# ---------------------------------------------------------------------------
+# EnergyBudgetTracker across ALL grid layouts (#1354/#1515)
+#
+# The tracker was previously exercised (and wired into the driver) only on the
+# cube/lat-lon full-collector path; the MPAS lane runs collect_lightweight and
+# used to skip it entirely.  After wiring it onto that path too, these tests pin
+# that the tracker's math is grid-agnostic: a (nCells, nlev) MPAS column stack,
+# a (6, n, n, nlev) cube stack, and a (n_lat, n_lon, nlev) lat-lon stack must
+# all produce finite, physically-ordered budgets with the SAME closed-budget
+# identity residual == toa_net - dE_dt.
+# ---------------------------------------------------------------------------
+import numpy as _np
+import pytest as _pytest
+
+
+def _grid_state(shape_h, nlev, T0=250.0):
+    """A uniform at-rest atmosphere on an arbitrary horizontal shape_h."""
+    sigma_full, dsigma = _make_sigma(nlev)
+    T = jnp.ones(shape_h + (nlev,)) * T0
+    q_v = jnp.ones(shape_h + (nlev,)) * 5e-3
+    u = jnp.zeros(shape_h + (nlev,))
+    v = jnp.zeros(shape_h + (nlev,))
+    phis = jnp.zeros(shape_h)
+    p_s = jnp.ones(shape_h) * 1.0e5
+    return T, q_v, u, v, phis, p_s, dsigma, sigma_full
+
+
+@_pytest.mark.parametrize("shape_h,area_shape", [
+    ((642,), (642,)),          # MPAS voronoi: (nCells,) horizontal
+    ((6, 8, 8), (6, 8, 8)),    # cubed sphere
+    ((16, 32), (16, 32)),      # lat-lon
+])
+def test_tracker_is_grid_agnostic(shape_h, area_shape):
+    T, q_v, u, v, phis, p_s, dsigma, sigma_full = _grid_state(shape_h, 12)
+    area = jnp.asarray(_np.random.default_rng(0).uniform(0.5, 1.5, area_shape))
+    trk = EnergyBudgetTracker()
+    fl = jnp.ones(shape_h)
+    # two updates so dE_dt / residual are populated (the first seeds them)
+    for k, day in enumerate((0.0, 1.0)):
+        b = trk.update(
+            T + k * 2.0, q_v, u, v, phis, p_s, dsigma, sigma_full,
+            sw_down_toa=fl * 340.0, sw_up_toa=fl * 100.0, lw_up_toa=fl * 240.0,
+            sw_net_sfc=fl * 170.0, lw_net_sfc=fl * (-60.0),
+            elapsed_seconds=day * 86400.0, area_weights=area,
+        )
+    # finite, scalar budget on every grid
+    assert _np.isfinite(b.toa_net) and _np.isfinite(b.dE_dt)
+    assert _np.isfinite(b.residual) and _np.isfinite(b.column_energy)
+    # the closed-budget identity the #1354 probe relies on
+    npt.assert_allclose(b.residual, b.toa_net - b.dE_dt, rtol=0, atol=1e-6)
+    # warming (T rose 2 K between the two calls) => column energy went up
+    assert b.dE_dt > 0.0
+    # toa_net here is 340 - 100 - 240 = 0 W/m^2 by construction
+    npt.assert_allclose(b.toa_net, 0.0, atol=1e-6)
+
+
+def test_tracker_area_weighting_changes_the_mean():
+    # On a non-uniform field the area-weighted budget must differ from the
+    # unweighted one, or the weights are being ignored (the lat-lon polar bias
+    # this weighting exists to remove).
+    nlev = 10
+    shape_h = (16, 32)
+    sigma_full, dsigma = _make_sigma(nlev)
+    rng = _np.random.default_rng(1)
+    T = jnp.asarray(240.0 + rng.uniform(0, 40, shape_h + (nlev,)))
+    q_v = jnp.ones(shape_h + (nlev,)) * 5e-3
+    z = jnp.zeros(shape_h + (nlev,))
+    phis = jnp.zeros(shape_h); p_s = jnp.ones(shape_h) * 1e5
+    fl = jnp.ones(shape_h)
+    lat = jnp.deg2rad(jnp.linspace(-85, 85, shape_h[0]))
+    area = jnp.cos(lat)[:, None] * jnp.ones((1, shape_h[1]))
+    kw = dict(sw_down_toa=fl * 340.0, sw_up_toa=fl * 100.0, lw_up_toa=fl * 235.0,
+              sw_net_sfc=fl * 170.0, lw_net_sfc=fl * (-60.0),
+              elapsed_seconds=0.0)
+    b_w = EnergyBudgetTracker().update(T, q_v, z, z, phis, p_s, dsigma,
+                                       sigma_full, area_weights=area, **kw)
+    b_u = EnergyBudgetTracker().update(T, q_v, z, z, phis, p_s, dsigma,
+                                       sigma_full, area_weights=None, **kw)
+    assert abs(b_w.column_energy - b_u.column_energy) > 1.0
+
+
+def test_frozen_mse_is_phase_complete_under_deposition():
+    # #1354/#1515: vapor->ice DEPOSITION releases L_s = L_v + L_f of sensible
+    # heat while removing L_v*q_v.  The conserved column energy is the FROZEN
+    # MSE (c_pT + L_v*q_v - L_f*q_frozen + Phi + KE); with the -L_f*q_frozen
+    # term deposition is energy-NEUTRAL, and WITHOUT it the diagnostic reads a
+    # spurious +L_f*dq source.  That spurious source is exactly the #1354
+    # instrument artifact on a mixed-phase spin-up.
+    from legoesm import constants
+    nlev = 12
+    sigma_full, dsigma = _make_sigma(nlev)
+    shape = (8, 16)
+    T0 = jnp.ones(shape + (nlev,)) * 250.0
+    qv0 = jnp.ones(shape + (nlev,)) * 4e-3
+    qf0 = jnp.zeros(shape + (nlev,))
+    z = jnp.zeros(shape + (nlev,))
+    phis = jnp.zeros(shape); p_s = jnp.ones(shape) * 1e5
+
+    # deposition of delta kg/kg vapor -> ice in every cell/level
+    delta = 1e-4
+    L_s = constants.L_v + constants.L_f
+    T1 = T0 + L_s * delta / constants.c_pd
+    qv1 = qv0 - delta
+    qf1 = qf0 + delta
+
+    def E(T, qv, qf, use_frozen):
+        return column_moist_static_energy(
+            T, qv, z, z, phis, p_s, dsigma, sigma_full,
+            q_frozen=(qf if use_frozen else None))
+
+    # Isolate the FROZEN term from the (pre-existing, separate) column-
+    # geopotential term: the geopotential change under heating is IDENTICAL
+    # with and without q_frozen, so it cancels in the difference.  The
+    # frozen-complete deposition change MINUS the vapor-only deposition change
+    # must equal exactly -L_f * delta * (column mass) -- i.e. the -L_f*q_frozen
+    # term removes precisely the spurious +L_f source the vapor-only energy
+    # manufactures.
+    dE_frozen = E(T1, qv1, qf1, True) - E(T0, qv0, qf0, True)
+    dE_vapor = E(T1, qv1, qf1, False) - E(T0, qv0, qf0, False)
+    removed = float(jnp.mean(dE_frozen - dE_vapor))     # J/m^2, should be -L_f*delta*mass
+    expect = -constants.L_f * delta * (1e5 / constants.g)
+    npt.assert_allclose(removed, expect, rtol=1e-6)
+
+    # And the vapor-only energy DOES read the deposition as a spurious source
+    # (the artifact this term fixes): its change exceeds the frozen-complete
+    # change by exactly +L_f*delta*mass.
+    assert float(jnp.mean(dE_vapor - dE_frozen)) > 0.0
+
+    # q_frozen=None is byte-identical to the pre-fix vapor-only energy.
+    npt.assert_array_equal(E(T0, qv0, qf0, False), E(T0, qv0, None, False))

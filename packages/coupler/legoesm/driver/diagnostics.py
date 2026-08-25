@@ -26,6 +26,25 @@ from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.io.cmor_output import CMIP6_PLEV19
 
 
+def _frozen_condensate(state):
+    """Summed frozen condensate q_i+q_s+q_g from a state's tracers, or None.
+
+    The phase-completeness input for the energy tracker (#1354/#1515): the
+    conserved column energy carries −L_f·q_frozen.  Sums whatever frozen
+    species the active microphysics carries (Morrison: q_i/q_s/q_g; warm-rain:
+    none → None → vapor-only moist static energy, byte-identical legacy).
+    """
+    tr = getattr(state, "tracers", None)
+    if not tr:
+        return None
+    total = None
+    for k in ("q_i", "q_s", "q_g"):
+        if k in tr and tr[k] is not None:
+            d = tr[k].data
+            total = d if total is None else total + d
+    return total
+
+
 class _StructuredRegridWeights:
     """Precomputed bilinear interpolation weights for structured grids."""
     __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
@@ -986,6 +1005,7 @@ class DiagnosticCollector:
             area_weights=self._area_w,
             dp=self._dp(state.p_s.data),
             p_full=self._p_full(state.p_s.data),
+            q_frozen=_frozen_condensate(state),
         )
 
         # Moisture budget.  lhflx is the SAME field reported as CMOR hfls
@@ -1332,6 +1352,9 @@ class DiagnosticCollector:
         lw_up_toa,
         sw_net_sfc,
         lw_net_sfc,
+        sw_down_toa=None,
+        shflx=None,
+        lhflx=None,
     ) -> dict:
         """Collect only scalar reduction diagnostics (no host materialization).
 
@@ -1402,11 +1425,43 @@ class DiagnosticCollector:
         self.sw_net_sfc.append(mean_sw_sfc)
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
-        # rsdt/hfss/hfls not available in lightweight mode — fill with NaN
-        # so timeseries arrays stay aligned across flush chunks.
-        self.rsdt.append(float('nan'))
-        self.hfss.append(float('nan'))
-        self.hfls.append(float('nan'))
+        # rsdt/hfss/hfls: recorded when the caller provides them (a real AMIP
+        # run does; a bare scaling benchmark does not), else NaN so the
+        # timeseries arrays stay aligned across flush chunks.
+        _rsdt = (float(area_weighted_mean(sw_down_toa, _aw))
+                 if sw_down_toa is not None else float('nan'))
+        _hfss = (float(area_weighted_mean(shflx, _aw))
+                 if shflx is not None else float('nan'))
+        _hfls = (float(area_weighted_mean(lhflx, _aw))
+                 if lhflx is not None else float('nan'))
+        self.rsdt.append(_rsdt)
+        self.hfss.append(_hfss)
+        self.hfls.append(_hfls)
+
+        # Energy-budget tracker on the lightweight path too (#1354/#1515): the
+        # tracker is grid-agnostic (column integral over the trailing level
+        # axis, area weighting over the leading horizontal axes — works on the
+        # MPAS ``(nCells, nlev)`` layout exactly as on the cube ``(6,n,n,nlev)``
+        # one).  Runs only when the radiation fluxes are present, so a bare
+        # scaling benchmark that passes no fluxes keeps its lean path.
+        _v_data = getattr(state, 'v', None)
+        _v_data = _v_data.data if _v_data is not None else None
+        if sw_down_toa is not None and q_v is not None and _v_data is not None:
+            # Only the grids that carry a cell-centred v (cube / lat-lon) run
+            # the tracker here; the MPAS edge-wind lane runs it in _run_mpas
+            # with a Perot reconstruction (a None v here means edge winds we
+            # must not feed the column KE term as if they were cell winds).
+            self.energy_tracker.update(
+                state.T.data, q_v, state.u.data, _v_data,
+                state.phis.data, state.p_s.data,
+                self.dsigma, self.sigma_full,
+                sw_down_toa, sw_up_toa, lw_up_toa, sw_net_sfc, lw_net_sfc,
+                elapsed_seconds=elapsed_day * 86400.0,
+                area_weights=_aw,
+                dp=self._dp(state.p_s.data),
+                p_full=self._p_full(state.p_s.data),
+                q_frozen=_frozen_condensate(state),
+            )
 
         return {
             'mean_sst': mean_sst,
