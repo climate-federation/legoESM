@@ -44,7 +44,9 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 import jax
-jax.config.update("jax_enable_x64", True)
+# Precision (fp32/fp64/mixed) is selected by --precision and applied in main()
+# via apply_precision, which enables JAX x64 for the fp64/mixed roles.  Default
+# is fp64 (preserves the prior unconditional-x64 behaviour).
 
 import jax.numpy as jnp
 import numpy as np
@@ -633,6 +635,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "validated against each scheme's __param_spec__ bounds "
                         "and spliced into the nested land *Config NamedTuples "
                         "(soil thermal/hydraulics, carbon, stomata...). (#691)")
+    p.add_argument("--precision", type=str, default="fp64",
+                   choices=["fp32", "fp64", "mixed"],
+                   help="Precision mode: fp32 (all float32), fp64 (all "
+                        "float64, the default — preserves prior behaviour), or "
+                        "mixed (float32 storage/compute, float64 "
+                        "accumulate/control). Applied before model build.")
     p.add_argument("--lat", type=float, default=None,
                    help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
@@ -833,6 +841,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+
+    # Apply the precision policy BEFORE any model state is built (enables JAX
+    # x64 for the fp64/mixed roles).
+    from legoesm.runtime.precision import apply_precision
+    apply_precision(args.precision)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

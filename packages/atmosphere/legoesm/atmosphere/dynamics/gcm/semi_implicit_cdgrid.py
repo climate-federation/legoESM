@@ -62,6 +62,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.operators_cdgrid import cgrid_divergence
+from legoesm.core.precision import cast
 from legoesm.grids.halo import pad_halo
 
 
@@ -303,7 +304,19 @@ def cg_helmholtz_solve(
     rel_res : jax.Array, optional
         Final externally verified relative residual.
     """
-    area = cdgrid.base.area.astype(rhs.dtype)
+    # Semi-implicit Helmholtz solve runs at the CONTROL role precision (float64
+    # in mixed/fp64).  The operator is stiff (condition number ~1e6); float32
+    # loses the high-wavenumber correction that stabilises it.  ``cast`` UPCASTS
+    # to control and skips downcasts, so an f64 caller (default-policy fp64 grid)
+    # is never demoted, while a mixed-mode f32 rhs is promoted to f64.  The
+    # solution is cast back to the caller's dtype at return so bulk dynamics
+    # stay at compute.  NOTE: the grid metrics inside cdgrid_scalar_laplacian
+    # carry the grid's storage dtype (f32 in mixed), so the residual floors at
+    # ~1e-7 metric precision in mixed — build the grid fp64 for a 1e-10 solve.
+    _in_dtype = rhs.dtype
+    rhs = cast(rhs, None, "control")
+    coeff = cast(jnp.asarray(coeff), None, "control")
+    area = cast(cdgrid.base.area, None, "control")
     sqrt_area = jnp.sqrt(area)
     inv_sqrt_area = 1.0 / sqrt_area
 
@@ -337,8 +350,8 @@ def cg_helmholtz_solve(
         rel_res = jnp.linalg.norm(
             (rhs - A_phys(sol)).ravel(),
         ) / rhs_norm
-        return sol, rel_res
-    return sol
+        return sol.astype(_in_dtype), rel_res
+    return sol.astype(_in_dtype)
 
 
 def richardson_helmholtz_solve(
