@@ -982,7 +982,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               tracer_q_split: int = 0, nord_tr: int = 0,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
-                              consv_te: float = 0.0):
+                              consv_te: float = 0.0, out_shardings=None):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1031,7 +1031,33 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
 
     def _arrays_only(*a, **kw):
         out = run(*a, **kw)
-        return {k: v for k, v in out.items() if k not in _meta}
+        out = {k: v for k, v in out.items() if k not in _meta}
+        if out_shardings is not None:
+            # SPMD boundary pin (measured 2026-08-24, job 9483159): with
+            # face-sharded inputs and an UNCONSTRAINED jit, GSPMD keeps
+            # the interior distributed (halo transfers lower to face/
+            # strip-sized collective-permutes) but resolves the OUTPUTS
+            # fully replicated, so a stepping loop decays to replication
+            # after one step.  Constrain by OUTPUT ROOT, not by extent
+            # (codex MAJOR: nsplt is (km,), so a shape[0]==6 test would
+            # shard a VERTICAL schedule over faces at km=6): every leaf
+            # under the face-stacked roots is face-leading by
+            # construction, and the schedule leaves (nsplt,
+            # nsplt_exceeded, stages) stay untouched.  A jit-level
+            # out_shardings prefix is not usable here -- it would try to
+            # tile those non-face leaves and raise IndivisibleError.
+            # stages IS face-stacked (S10/S11/S16 stack six faces --
+            # codex: sharding them is layout-correct) and leaving it
+            # unconstrained makes GSPMD resolve it REPLICATED, i.e. a
+            # full gather of every stage array at each step's boundary.
+            _face_roots = ("state", "press", "q", "omga", "nh", "stages")
+            out = {**out,
+                   **{k: jax.tree.map(
+                          lambda x: jax.lax.with_sharding_constraint(
+                              x, out_shardings), out[k])
+                      for k in _face_roots
+                      if out.get(k) is not None}}
+        return out
 
     _compiled = jax.jit(_arrays_only)
 
