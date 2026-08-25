@@ -1046,7 +1046,11 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             # nsplt_exceeded, stages) stay untouched.  A jit-level
             # out_shardings prefix is not usable here -- it would try to
             # tile those non-face leaves and raise IndivisibleError.
-            _face_roots = ("state", "press", "q", "omga", "nh")
+            # stages IS face-stacked (S10/S11/S16 stack six faces --
+            # codex: sharding them is layout-correct) and leaving it
+            # unconstrained makes GSPMD resolve it REPLICATED, i.e. a
+            # full gather of every stage array at each step's boundary.
+            _face_roots = ("state", "press", "q", "omga", "nh", "stages")
             out = {**out,
                    **{k: jax.tree.map(
                           lambda x: jax.lax.with_sharding_constraint(
