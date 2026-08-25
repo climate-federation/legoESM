@@ -152,7 +152,10 @@ def spectral_sw_tendencies(
     # where U = flux_lon*cosφ, V = flux_mer*cosφ.
     # The 1/cos²φ weighting is baked into Pnm_oc2 and Dnm matrices (pole-safe).
 
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    # Complex dtype follows the grid's runtime precision (complex64 for the
+    # fp32 spectral runtime, complex128 otherwise).
+    _cdt = jnp.complex64 if grid.Pnm.dtype == jnp.float32 else jnp.complex128
+    im_over_a = (1j * grid.ms / a).astype(_cdt)
     one_over_a = 1.0 / a
 
     # Vorticity fluxes: U = (ζ+f)*u*cosφ, V = (ζ+f)*v*cosφ
@@ -303,9 +306,11 @@ class SpectralShallowWaterModel:
         if self.config.spectral_filter_order > 0:
             alpha = -jnp.log(jnp.float64(self.config.spectral_filter_cutoff))
             ratio = self.grid.ls.astype(jnp.float64) / self.grid.n_max
+            # Built in f64 (one-time), stored at the grid's runtime dtype so
+            # the per-step multiply does not promote a complex64 state.
             self._spectral_filter = jnp.exp(
                 -alpha * ratio ** self.config.spectral_filter_order
-            )
+            ).astype(self.grid.Pnm.dtype)
         else:
             self._spectral_filter = None
 
@@ -320,7 +325,7 @@ class SpectralShallowWaterModel:
         if self.config.dealiasing_fraction > 0.0:
             self._dealias_state = dealiasing_mask(
                 self.grid, self.config.dealiasing_fraction,
-            )
+            ).astype(self.grid.Pnm.dtype)
         else:
             self._dealias_state = None
 
@@ -696,7 +701,10 @@ def compute_spectral_diagnostics(
         ],
         axis=-1,
     ) * dA[..., None]
-    _diag = jnp.sum(_intg, axis=tuple(range(dA.ndim)))
+    # Retained-f64 reduction: mass/energy/enstrophy are near-cancelling
+    # extensive sums, so accumulate in float64 (real when x64 is enabled;
+    # a pure fp32 run without x64 gets fp32 sums and larger drift).
+    _diag = jnp.sum(_intg.astype(jnp.float64), axis=tuple(range(dA.ndim)))
     mass, energy, enstrophy = _diag[0], _diag[1], _diag[2]
 
     # One device→host transfer instead of three separate ``float(...)``
