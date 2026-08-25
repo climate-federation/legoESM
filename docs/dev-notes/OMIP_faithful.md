@@ -7,9 +7,18 @@ byte-identical card of the validated 180-day run
 (`results/omip_nemo/nemolev_trp_long180`).  Scored against NEMO's matched
 GATEWAY cold start (5-day means, same January IC): SST rmse 0.515/0.495/0.456
 C at d30/d60/d90 (d90 verdict "excellent"), SSS rmse 0.46-0.70, nino3 warm
-bias +1.42 -> +1.43 -> +0.70 (halves between d60 and d90: a bounded, closing
-1-degree spin-up transient, not a drift).  The corrected (_MOD) CORE-II
-forcing is the default resolver, gated by
+bias +1.42 -> +1.43 -> +0.70.  RETRACTION (GLM adversarial review,
+2026-08-25): the d60->d90 bias drop is REFERENCE-attributable — NEMO warmed
++1.39 K into the Mar-Apr warm season while we warmed only +0.66 K (our nino3
+seasonal amplitude is ~48% of NEMO's).  The bias is BOUNDED (not growing),
+but "closing transient" is NOT established; a damped-seasonal-cycle error
+predicts the bias REOPENS in the Aug-Sep-Oct cold season, which no matched
+NEMO record yet covers.  Revalidation conditions attached to this standard:
+(1) extend the matched NEMO GATEWAY run to >=365 days and pre-register an
+ASO nino3 criterion; (2) mixed-layer heat-budget attribution of the day-30
++1.4 K onset; (3) track SSS (rmse grew 0.46->0.62->0.70, monotonic) and
+regionally-decomposed MLD (rmse 21.5->39.5 m) on every A/B scorecard.
+The corrected (_MOD) CORE-II forcing is the default resolver, gated by
 `tests/ocean/unit/test_core2_corrected_cache_default.py`.
 Change ONE flag per new run and A/B against this card; never edit it in place.
 Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
