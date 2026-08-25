@@ -32,10 +32,18 @@ def collect(seed_dirs: list[str]) -> dict[str, list]:
     return by_scheme
 
 
-def median_params(by_scheme: dict[str, list]) -> dict[str, float]:
-    """Lower-median seed per scheme -> a REAL seed, never an average."""
+def median_params(by_scheme: dict[str, list], min_seeds: int) -> dict[str, float]:
+    """Lower-median seed per scheme -> a REAL seed, never an average.
+
+    A scheme with fewer than ``min_seeds`` tuned seeds is EXCLUDED: its median is
+    not yet trustworthy, and silently emitting it (e.g. CLUBB at 2 seeds) would
+    make the committed file non-reproducible the moment more seeds land.
+    """
     canonical: dict[str, float] = {}
-    for scheme, entries in by_scheme.items():
+    for scheme, entries in sorted(by_scheme.items()):
+        if len(entries) < min_seeds:
+            print(f"  SKIP {scheme}: {len(entries)} < {min_seeds} tuned seeds")
+            continue
         entries.sort(key=lambda e: e[0])
         mi = (len(entries) - 1) // 2
         canonical.update(entries[mi][1])
@@ -71,11 +79,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", nargs="+", required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--min-seeds", type=int, default=5,
+                    help="exclude a scheme with fewer tuned seeds "
+                         "(default 5); keeps under-sampled schemes "
+                         "like CLUBB out until their campaign fills.")
     args = ap.parse_args()
     by_scheme = collect(args.seeds)
     if not by_scheme:
         raise SystemExit("no tuned seeds found under the given dirs")
-    write_yaml(median_params(by_scheme), args.out, by_scheme)
+    write_yaml(median_params(by_scheme, args.min_seeds), args.out, by_scheme)
     return 0
 
 

@@ -83,3 +83,38 @@ def test_yaml_is_valid_amip_params_format():
     assert isinstance(raw, dict) and raw
     for k, v in raw.items():
         assert k.startswith("atm.turb.") and isinstance(v, (int, float)), (k, v)
+
+
+def test_typod_class_key_raises(tmp_path):
+    """A class-name typo must fail loudly, not silently leave the scheme untuned."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("atm.turb.YSUConfg.Pr_t: 0.6\n")     # 'YSUConfg' typo
+    with pytest.raises(ValueError, match="unknown turbulence config class"):
+        load_les_tuned_overrides(str(bad))
+
+
+def test_unknown_field_raises(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("atm.turb.YSUConfig.not_a_field: 0.6\n")
+    with pytest.raises(ValueError, match="no spec'd param"):
+        load_les_tuned_overrides(str(bad))
+
+
+def test_out_of_bounds_value_raises(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("atm.turb.YSUConfig.Pr_t: 99.0\n")    # bounds (0.33, 3.0)
+    with pytest.raises(ValueError, match="outside spec bounds"):
+        load_les_tuned_overrides(str(bad))
+
+
+def test_non_numeric_value_raises(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("atm.turb.YSUConfig.Pr_t: true\n")    # bool coerces to 1.0 -> reject
+    with pytest.raises(ValueError, match="is not a number"):
+        load_les_tuned_overrides(str(bad))
+
+
+def test_scheme_none_is_noop():
+    """scheme='none' (valid, no sub-config) must return unchanged, not raise."""
+    turb = scm_turbulence_config("none")          # les_tuned default True
+    assert turb == TurbulenceConfig(scheme="none")
