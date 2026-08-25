@@ -168,8 +168,9 @@ def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
 
 def build_cbl_scm_from_artifact(
     artifact: LESReferenceArtifact,
-    turbulence: TurbulenceConfig,
+    turbulence: TurbulenceConfig | str,
     *,
+    les_tuned: bool = True,
     nlev: int = 32,
     sigma_top: float | None = None,
     dt: float = 5.0,
@@ -191,7 +192,18 @@ def build_cbl_scm_from_artifact(
     ``sigma_top=None`` (default) auto-sizes the SCM domain to sit ~30% above the LES
     domain top — a domain that ends at/below the LES top lets the CBL hit the model
     lid and the temperature collapses.
+
+    ``turbulence`` may be a scheme NAME (str) or an explicit ``TurbulenceConfig``.
+    A name builds the config via :func:`scm_turbulence_config`, which applies the
+    LES-tuned coefficients by DEFAULT (``les_tuned=True``); pass ``les_tuned=False``
+    for the library defaults. An explicit ``TurbulenceConfig`` is used verbatim --
+    the caller's own config always wins, and ``les_tuned`` is ignored for it.
     """
+    if isinstance(turbulence, str):
+        from legoesm.atmosphere.physics.turbulence.les_tuned import (
+            scm_turbulence_config,
+        )
+        turbulence = scm_turbulence_config(turbulence, les_tuned=les_tuned)
     if artifact.w_theta_s is None:
         raise ValueError(
             f"{artifact.case_name}: CBL SCM requires a prescribed surface heat flux "
