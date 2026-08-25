@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=glab
 #SBATCH --partition=short
-#SBATCH --job-name=e025smk
+#SBATCH --job-name=e025smkB
 #SBATCH --nodes=4
 #SBATCH --ntasks=8
 #SBATCH --ntasks-per-node=2
@@ -41,7 +41,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 FORCING=/burg-archive/home/pg2328/.cache/legoesm/ocean_fidelity/forcing/core2_nyf_mod
 OUT=$MAIN/results/omip_nemo/e025_fullcard_smoke
-LOG=$MAIN/omip_nemo/e025smk_${SLURM_JOB_ID}_8g.log
+LOG=$MAIN/omip_nemo/e025smk_${SLURM_JOB_ID}_8g_nobbl.log
 echo "HEAD: $(git rev-parse --short HEAD)  $(git log --oneline -1)"
 echo "=== ALLOC ==="; date; echo "nodes: $SLURM_JOB_NODELIST"
 scontrol show hostnames "$SLURM_JOB_NODELIST"
@@ -81,7 +81,7 @@ srun --mpi=pmix \
     --bottom-drag-scheme nemo_quadratic \
     --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
     --dm2dc --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
-    --bbl-adv --woa-init \
+    --woa-init \
     --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc \
     --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc \
     --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
@@ -91,7 +91,7 @@ srun --mpi=pmix \
     --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
     --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
     --forcing-path $FORCING \
-    --output ${OUT}_8g 2>&1 | tee "$LOG" | tail -120
+    --output ${OUT}_8g_nobbl 2>&1 | tee "$LOG" | tail -120
 rc=${PIPESTATUS[0]}
 echo "e025smk_rc=${rc}"
 echo "=== smoke verdict ==="

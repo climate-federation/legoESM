@@ -1,5 +1,22 @@
 # OMIP-Faithful: legoESM ocean vs NEMO ORCA1
 
+## ★ STANDARD CONFIGURATION (declared 2026-08-25)
+The standard NEMO-faithful 1-degree tripole card is
+`scripts/cluster/omip_nemo/run_standard_faithful_1deg.sbatch` — the
+byte-identical card of the validated 180-day run
+(`results/omip_nemo/nemolev_trp_long180`).  Scored against NEMO's matched
+GATEWAY cold start (5-day means, same January IC): SST rmse 0.515/0.495/0.456
+C at d30/d60/d90 (d90 verdict "excellent"), SSS rmse 0.46-0.70, nino3 warm
+bias +1.42 -> +1.43 -> +0.70 (halves between d60 and d90: a bounded, closing
+1-degree spin-up transient, not a drift).  The corrected (_MOD) CORE-II
+forcing is the default resolver, gated by
+`tests/ocean/unit/test_core2_corrected_cache_default.py`.
+Change ONE flag per new run and A/B against this card; never edit it in place.
+Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
+--iwm --nemo-monthly-init` or the `--tke-*` knobs (driver hard-errors), so
+matched three-grid comparisons run a reduced common card on ALL grids — see
+`_xgrid_mpas.sbatch` header.
+
 **Goal.** Run reference NEMO ORCA1 (morays, COREv2 normal-year forcing) and drive
 legoESM ocean on **all 5 grids** under the *same* forcing; iterate legoESM code
 until integral/climatological diagnostics match NEMO. Review every code change
