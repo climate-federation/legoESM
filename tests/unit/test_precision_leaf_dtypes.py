@@ -131,12 +131,19 @@ def test_mpas_pe_leaf_dtypes(mode):
 @pytest.mark.parametrize("mode", [
     "fp64",
     pytest.param("mixed", marks=pytest.mark.xfail(
-        reason="lat-lon PE promotes a moist tracer (q_c) to float64 in mixed — "
-               "a 3D contagion the MPAS lane does not have; the likely source "
-               "is the shared flux-form tracer transport's float64 budget "
-               "accumulator not casting the tracer back to storage. Separate "
-               "fix from the p_s/CG/LMIP precision batch; when fixed this "
-               "xfail turns xpass (strict) and should be removed.",
+        reason="lat-lon PE promotes ALL moist tracers (q_v/q_c/q_r) to float64 "
+               "in mixed. Root cause traced: p_s is the intentional f64 "
+               "conservation field, and the tracer transport derives dp = "
+               "p_s·dsigma → f64 mass fluxes → f64 tracer tendency. MPAS casts "
+               "tendencies back per-leaf and stays clean; the lat-lon C-grid "
+               "does not, and cast_pytree(...,'storage') only UPcasts. A "
+               "downcast at the _step_cgrid exit did NOT take (the tracers "
+               "re-promote downstream, in the model.step wrapper / physics "
+               "carry), so the fix point is upstream of the observed leak and "
+               "needs a role-aware cast on the tracer-tendency application. "
+               "Mixed-lat-lon only — no fp32/fp64, no MPAS, no scaling/prod "
+               "impact. Deferred to a focused follow-up; xpass (strict) when "
+               "fixed → remove this marker.",
         strict=True)),
 ])
 def test_latlon_pe_leaf_dtypes(mode):
