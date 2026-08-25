@@ -114,7 +114,7 @@ def test_ring_exchange_matches_certified_bitwise(tab, n_dev, stag):
         f"{np.abs(got - ref).max():.3e}")
 
 
-@pytest.mark.parametrize("stag", ["A"])
+@pytest.mark.parametrize("stag", ["A", "B"])
 def test_ring_exchange_poison_proves_no_out_of_ring_read(tab, stag):
     """poison=True fills every non-border, non-own cell with NaN; the
     output must STILL match the certified exchange bitwise.  One NaN in
@@ -128,7 +128,7 @@ def test_ring_exchange_poison_proves_no_out_of_ring_read(tab, stag):
     from legoesm.grids.fv3_duo_spmd import make_ring_ext_scalar_sixface
 
     devs = _devices_or_skip(6)
-    m = tab.n + 2 * tab.ng
+    m = tab.n + 2 * tab.ng + (1 if stag == "B" else 0)
     rng = np.random.default_rng(4)
     f6 = jnp.asarray(rng.standard_normal((6, m, m)))
     ref = np.asarray(ext_scalar_sixface(f6, tab, stag))
@@ -155,9 +155,10 @@ def _vec_fixture(tab, grid, seed):
             rng.standard_normal((6, ma, mb)))
 
 
-@pytest.mark.parametrize("n_dev", [2, 6])
+@pytest.mark.parametrize("seed", [11, 23, 47])
+@pytest.mark.parametrize("n_dev", [2, 3, 6])
 @pytest.mark.parametrize("grid", ["D", "C"])
-def test_ring_vector_matches_certified_bitwise(tab, n_dev, grid):
+def test_ring_vector_matches_certified_bitwise(tab, n_dev, grid, seed):
     """Full 7-step vector flow under the ring exchange must equal the
     certified single-device flow BITWISE on own faces: other faces' ring
     c2l values are recomputed from their gathered u/v rings (same inputs,
@@ -172,7 +173,7 @@ def test_ring_vector_matches_certified_bitwise(tab, n_dev, grid):
     from legoesm.grids.fv3_duo_spmd import make_ring_ext_vector_sixface
 
     devs = _devices_or_skip(n_dev)
-    u6, v6 = map(jnp.asarray, _vec_fixture(tab, grid, 11))
+    u6, v6 = map(jnp.asarray, _vec_fixture(tab, grid, seed))
     flow = (ext_vector_dgrid_sixface if grid == "D"
             else ext_vector_cgrid_sixface)
     ru, rv = flow(u6, v6, tab)
@@ -211,8 +212,47 @@ def test_ring_vector_poison_proves_ring_sufficiency(tab, grid):
     ru, rv = flow(u6, v6, tab)
 
     mesh = Mesh(np.array(devs), ("face",))
+    # Observability (codex): the comparison can only catch a wrong NaN
+    # where the certified reference is FINITE -- pin that the reference
+    # halo band genuinely is (its NaN slots are the structural c2l-band
+    # ones only, a bounded count), so equal_nan cannot hide a defect.
+    n_nan_u = int(np.isnan(np.asarray(ru)).sum())
+    n_nan_v = int(np.isnan(np.asarray(rv)).sum())
+    assert n_nan_u < np.asarray(ru).size // 4, "reference u mostly NaN"
+    assert n_nan_v < np.asarray(rv).size // 4, "reference v mostly NaN"
     fn, _ = make_ring_ext_vector_sixface(tab, grid, mesh, poison=True)
     sh = NamedSharding(mesh, P("face"))
     gu, gv = fn(jax.device_put(u6, sh), jax.device_put(v6, sh))
     assert np.array_equal(np.asarray(gu), np.asarray(ru), equal_nan=True)
     assert np.array_equal(np.asarray(gv), np.asarray(rv), equal_nan=True)
+
+
+def test_poison_instrument_can_fire(tab, monkeypatch):
+    """NEGATIVE CONTROL (codex): with the border NARROWER than the tables
+    read (mask width 4, gate bypassed by patching the mask builder), the
+    poisoned exchange MUST diverge from the certified one -- proving the
+    poison instrument can actually fail.  Without this, every poison
+    pass above could be vacuous."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    import legoesm.grids.fv3_duo_spmd as spmd
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface
+
+    devs = _devices_or_skip(6)
+    m = tab.n + 2 * tab.ng
+    rng = np.random.default_rng(5)
+    f6 = jnp.asarray(rng.standard_normal((6, m, m)))
+    ref = np.asarray(ext_scalar_sixface(f6, tab, "A"))
+
+    real_mask = spmd._border_mask
+    monkeypatch.setattr(spmd, "_border_mask",
+                        lambda mm, w: real_mask(mm, 4))   # too narrow
+    mesh = Mesh(np.array(devs), ("face",))
+    fn, _ = spmd.make_ring_ext_scalar_sixface(tab, "A", mesh, poison=True)
+    got = np.asarray(fn(jax.device_put(
+        f6, NamedSharding(mesh, P("face")))))
+    assert not np.array_equal(got, ref, equal_nan=True), (
+        "narrow-border poison run still matched: the poison instrument "
+        "cannot fire and every poison pass is vacuous")

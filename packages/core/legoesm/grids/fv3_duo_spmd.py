@@ -174,11 +174,13 @@ def assert_ring_width_covers(tab, ring_width: int) -> int:
 # the tables read (borders everywhere + own faces in full), runs the
 # certified flat tables VERBATIM, and keeps its own faces' slice.
 #
-# Scope (v1.1, dual-reviewed): SCALAR exchange only.  The vector flows
-# (ext_vector_dgrid/cgrid_sixface) need their second, mid-flow gather of
-# owner-computed ua/va rings plus own-face slicing of c2l/a2d (codex
-# BLOCKERs on the naive form) and land separately; until then they FAIL
-# CLOSED here.  Ceiling: the face axis is the only spatial shard (<= 6
+# Scope (v1.1, dual-reviewed): scalar AND vector exchanges.  The vector
+# flows need NO second mid-flow collective: an a4-depth-7 geo read maps
+# to a c2l value at stepper depth 6 whose +-1 staggered u/v reads reach
+# depth 5 -- inside the width-8 border -- so other faces' ring c2l
+# values are recomputed locally from their gathered u/v rings, bitwise
+# equal to owner-computed (codex-verified dependency arithmetic + the
+# poison test).  Ceiling: the face axis is the only spatial shard (<= 6
 # devices); v2 splits the tables into own-tile/neighbor-strip index sets.
 
 def _border_mask(m: int, w: int) -> np.ndarray:
