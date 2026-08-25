@@ -2613,6 +2613,57 @@ def resolve_param_selection(
     return "aggressive", include_tier0, exclude
 
 
+def apply_tuned_preset(base_cfg, scheme, preset_dir):
+    """Apply a committed SCM-RCE tuned preset to ``base_cfg``'s convection sub.
+
+    Reads ``<preset_dir>/<scheme>.yaml`` (the recommended per-scheme medians)
+    and overlays it on the active convection subconfig with the SAME
+    ``apply_param_overrides`` path the tuner uses, so a basic (non-tuning) run
+    reproduces the tuned parameters and a tuning run STARTS from them.  Returns
+    ``(cfg, n_applied)``; a missing file or a header-only preset (kuo) is a
+    no-op returning ``(base_cfg, 0)`` rather than an error, because "no moved
+    parameters" is a legitimate result of the campaign.
+
+    Keys are the qualified ``scheme_key.field`` names; only those whose
+    ``scheme_key`` matches THIS scheme's active convection subconfig are
+    applied, so a mis-pointed file cannot silently tune the wrong scheme.
+    """
+    from pathlib import Path as _Path
+
+    from legoesm.driver.run_config_yaml import load_params_config
+
+    path = _Path(preset_dir) / f"{scheme}.yaml"
+    if not path.exists():
+        return base_cfg, 0
+    raw = load_params_config(path)
+    if not raw:
+        return base_cfg, 0
+    import sys as _sys
+
+    _c, _sel, sub = _active_subconfig(base_cfg, "convection")
+    # scheme_key lives in the module-level __param_spec__ keyed by class name;
+    # apply_param_overrides ALSO raises on any field the config lacks, so a
+    # mis-pointed preset fails safe either way — this just gives a clearer msg.
+    _spec = getattr(_sys.modules.get(type(sub).__module__), "__param_spec__", {})
+    sub_key = (_spec.get(type(sub).__name__, {}) or {}).get("scheme_key")
+    field_values = {}
+    for qualified, val in raw.items():
+        key, _, field = qualified.rpartition(".")
+        if sub_key is not None and key != sub_key:
+            # A preset for a DIFFERENT scheme: refuse silently-wrong tuning.
+            raise ValueError(
+                f"preset {path} carries {qualified!r} but the active "
+                f"convection subconfig is {sub_key!r}; wrong preset for "
+                f"convection={scheme!r}")
+        field_values[field] = val
+    if not field_values:
+        return base_cfg, 0
+    from legoesm.core.param_overrides import apply_param_overrides
+    tuned_sub = apply_param_overrides(sub, field_values)
+    return _set_active_subconfig(base_cfg, "convection", tuned_sub), len(
+        field_values)
+
+
 def tune_category_winner(
     category: str,
     base_cfg: PhysicsConfig,

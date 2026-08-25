@@ -83,6 +83,7 @@ camp = _load_campaign()
 #: unchanged.
 PROFILE_PLOT_TOP_KM = 15.0
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTDIR = Path("results/scm_rce_convection_intercomparison")
 # Convection schemes to intercompare (the campaign's convection sweep).
 CONVECTION_SCHEMES = camp.SCHEME_SWEEPS["convection"]
@@ -487,6 +488,7 @@ def evaluate_scheme(
     subsidence_solve: str = "as_shipped",
     microphysics: str = camp.BASELINE_SCHEMES["microphysics"],
     hard_saturation_adjustment: bool = False,
+    tuned_defaults_dir=None,
     bl_anchor_top_m: float = camp.DEFAULT_SCM_RCE_BL_TOP_M,
     turbulence: str = camp.BASELINE_SCHEMES["turbulence"],
     tune_mode: str = "convection",
@@ -525,6 +527,13 @@ def evaluate_scheme(
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
+    # SCM DEFAULT: apply the committed tuned preset for this scheme, so a basic
+    # (tune_evals=0) run reproduces the tuned parameters and a tuning run STARTS
+    # from them.  Opt out with tuned_defaults_dir=None.  The convection sub is
+    # the only category presets exist for; turbulence/microphysics are untouched.
+    if tuned_defaults_dir is not None:
+        base_cfg, _n_preset = camp.apply_tuned_preset(
+            base_cfg, scheme, tuned_defaults_dir)
     if emanuel_unsaturated_downdraft:
         # Emanuel's downdraft re-evaporation is a STATIC Python branch that
         # ships OFF, so its efficiency parameter is read by no executed code
@@ -1199,6 +1208,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--last-reference-files", type=int,
                         default=camp.DEFAULT_LAST_REFERENCE_FILES)
     parser.add_argument("--tune-evals", type=int, default=48)
+    parser.add_argument(
+        "--tuned-defaults-dir", type=Path,
+        default=_REPO_ROOT / "config" / "params" / "scm_rce_tuned_f0",
+        help="directory of committed per-scheme tuned-parameter YAMLs applied "
+             "to each scheme's base config BEFORE the a-priori run and tuning. "
+             "This is the SCM default so a basic run reproduces the tuned "
+             "parameters; AMIP is unaffected (it opts in via --params).")
+    parser.add_argument(
+        "--no-tuned-defaults", dest="tuned_defaults_dir",
+        action="store_const", const=None,
+        help="run each scheme at its shipped *Config defaults, not the tuned "
+             "preset.")
     parser.add_argument("--tune-seed", type=int, default=20260705)
     parser.add_argument(
         "--radiation", default="rrtmgp", choices=("rrtmgp", "gray"),
@@ -1492,6 +1513,7 @@ def main(argv: list[str] | None = None) -> int:
                 subsidence_solve=args.subsidence_solve,
                 microphysics=args.microphysics,
                 hard_saturation_adjustment=args.hard_saturation_adjustment,
+                tuned_defaults_dir=args.tuned_defaults_dir,
                 bl_anchor_top_m=args.bl_anchor_top_m,
                 turbulence=args.turbulence,
                 tune_mode=args.tune_mode,
