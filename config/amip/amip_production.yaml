@@ -49,11 +49,16 @@ resolution: 6               # icosahedral SCVT level 6 = 40962 cells (~1.1°).
                             # fast iteration only (override via --resolution 5).
 nlev: 30
 discretization: mpas
-dt: 75.0
+dt: 112.5               # dt ladder 2026-08-25 (5-day res6 arms at 90/112.5/150,
+                            # all stable): 112.5 captures the full ~1.38x speedup
+                            # (150 ties it and exceeds the 138 s advective limit).
+                            # a_h_scale is raised 0.25->0.375 in step so the
+                            # PHYSICAL viscosity A_h = a_h_scale*3e-3*dx_min^2/dt
+                            # is unchanged from the storm-track-validated value.
 vertical_coord: sigma
 precision: fp64             # dycore fp64; rrtmgp runs fp32 on the MPAS path
                             # (mpas_rrtmgp_fp32 default, perf — validated)
-a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
+a_h_scale: 0.375            # Laplacian viscosity multiplier (A_h = a_h_scale
                             # * 3e-3 * dx_min^2/dt).  The default 1.0 gives
                             # A_h ~ 1.4e6 m2/s on this mesh — tau ~ 0.8 d for
                             # a 2000 km eddy, at baroclinic growth rate — and
@@ -75,7 +80,7 @@ a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
-rad_update_steps: 48
+rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
 clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by

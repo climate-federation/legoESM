@@ -10483,7 +10483,7 @@ class ModelDriver:
                     + ("" if _cwv != _cwv else f"  CWV={_cwv:.1f}kg/m2")
                     + ("" if _ni_max != _ni_max
                        else f"  Ni^max={_ni_max:.1e}/kg")
-                    + f"  ({rate:.1f} sim-days/s)"
+                    + f"  ({rate:.4f} sim-days/s, {elapsed:.0f}s)"
                 )
 
                 # Budget-ledger emission (#1311): interval-mean per-column
@@ -11238,7 +11238,7 @@ class ModelDriver:
                 logger.info(
                     f"  Day {elapsed_day:6.1f}: T=[{T_min:.1f},{T_max:.1f}]K "
                     f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
-                    f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
+                    f"|v|_max={max_wind:.1f}m/s  ({rate:.4f} sim-days/s, {elapsed:.0f}s)"
                 )
 
                 from legoesm.driver.diagnostics import (
