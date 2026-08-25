@@ -297,6 +297,8 @@ def _read_probe_freeze(out_dir, expect_fp):
         return None
     if not isinstance(obj, dict) or not isinstance(obj.get("frozen"), list):
         return None
+    if obj.get("schema") != _MANIFEST_SCHEMA:
+        return None          # unknown schema fails toward re-probing (GLM)
     if obj.get("fingerprint") != expect_fp:
         return None
     if not all(isinstance(x, str) for x in obj["frozen"]):
@@ -772,7 +774,17 @@ def _main(argv=None):
             # and nothing else.
             _now_fp = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                        len(local) * nproc, nproc)
-            _pf = _read_probe_freeze(cfg.out_dir, _now_fp)
+            # Single-process only: under MPI an uncoordinated restore (one
+            # rank reads the file, another hits an OSError and re-probes)
+            # would leave ranks in different collectives and hang (codex).
+            # Multi-rank WB training re-probes until a root-read + broadcast
+            # exists. NOTE (codex, deferred): the fingerprint identifies the
+            # shard by sample COUNT, not content — CLI --n-days is not in it;
+            # the campaign path never passes --n-days, and adding the key
+            # would orphan payloads already written under the current key
+            # set. Add it at the next fingerprint schema change.
+            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp)
+                   if nproc == 1 else None)
             if _pf is not None:
                 resumed_frozen = set(_pf)
                 log.info("resume: no complete epoch, but a fingerprint-"

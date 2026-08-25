@@ -548,6 +548,11 @@ def test_probe_freeze_restored_without_complete_epoch(tmp_path):
     assert mod._read_probe_freeze(str(tmp_path / "nope"), fp) is None
     (tmp_path / "probe_freeze.json").write_text("{trunc")
     assert mod._read_probe_freeze(str(tmp_path), fp) is None
+    # Unknown schema fails toward re-probing.
+    (tmp_path / "probe_freeze.json").write_text(json.dumps(
+        {"schema": mod._MANIFEST_SCHEMA + 1, "fingerprint": fp,
+         "frozen": ["a"]}))
+    assert mod._read_probe_freeze(str(tmp_path), fp) is None
 
 
 def test_probe_freeze_counts_as_chain_progress(tmp_path, capsys):
