@@ -681,7 +681,10 @@ def power_spectrum(grid: GaussianGrid, coeffs_hat: jax.Array) -> jax.Array:
     get the difference-field spectrum.
     """
     power = jnp.abs(coeffs_hat.astype(jnp.complex128)) ** 2  # f64
-    return jax.ops.segment_sum(power, grid.ls, num_segments=grid.n_max + 1)
+    # One-sided SH storage keeps only m>=0; each m>0 coefficient stands for the
+    # +m and -m conjugate pair, so it carries twice the power (Parseval).
+    weight = jnp.where(grid.ms == 0, 1.0, 2.0)
+    return jax.ops.segment_sum(power * weight, grid.ls, num_segments=grid.n_max + 1)
 
 
 def compute_spectral_diagnostics(
