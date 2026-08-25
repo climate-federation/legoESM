@@ -44,9 +44,14 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 import jax
-# Precision (fp32/fp64/mixed) is selected by --precision and applied in main()
-# via apply_precision, which enables JAX x64 for the fp64/mixed roles.  Default
-# is fp64 (preserves the prior unconditional-x64 behaviour).
+# x64 is enabled BEFORE the legoesm imports because some land modules build
+# module-level constants at import (e.g. canopy/solver.py::_LM_XSCALE), whose
+# dtype is frozen at import time — so the default fp64 path must have x64 on
+# here to stay byte-identical.  --precision {fp32,fp64,mixed} still selects the
+# policy in main() (fp64/mixed both need x64; both work now).
+# ponytail: true all-fp32 LMIP additionally needs those import-time constants
+# (_LM_XSCALE and siblings) made policy-aware — deferred; fp64/mixed unaffected.
+jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np

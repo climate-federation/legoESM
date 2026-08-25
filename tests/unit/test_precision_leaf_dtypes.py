@@ -122,6 +122,22 @@ def _assert_leaf_dtypes(state, storage, accum):
     assert checked_ps, "no p_s leaf found — test would be vacuous"
 
 
+def test_sharded_ps_carry_guard():
+    """The loud guard for the DEFERRED sharded p_s carry-seed: mixed/fp64 must
+    reject a float32 p_s carry (else the sharded scan silently carries p_s f32
+    the whole run); fp32 policy never fires."""
+    from legoesm.runtime.precision import apply_precision
+    from legoesm.parallel.sharded_dynamics import _assert_sharded_ps_carry_f64
+
+    for mode in ("mixed", "fp64"):
+        apply_precision(mode)
+        with pytest.raises(RuntimeError, match="seeded float64"):
+            _assert_sharded_ps_carry_f64(jnp.float32)
+        _assert_sharded_ps_carry_f64(jnp.float64)  # f64 carry: no raise
+    apply_precision("fp32")
+    _assert_sharded_ps_carry_f64(jnp.float32)  # fp32: correct, no raise
+
+
 @pytest.mark.parametrize("mode", MODES)
 def test_mpas_pe_leaf_dtypes(mode):
     state, storage, accum = _run_mpas(mode)
@@ -131,19 +147,18 @@ def test_mpas_pe_leaf_dtypes(mode):
 @pytest.mark.parametrize("mode", [
     "fp64",
     pytest.param("mixed", marks=pytest.mark.xfail(
-        reason="lat-lon PE promotes ALL moist tracers (q_v/q_c/q_r) to float64 "
-               "in mixed. Root cause traced: p_s is the intentional f64 "
-               "conservation field, and the tracer transport derives dp = "
-               "p_s·dsigma → f64 mass fluxes → f64 tracer tendency. MPAS casts "
-               "tendencies back per-leaf and stays clean; the lat-lon C-grid "
-               "does not, and cast_pytree(...,'storage') only UPcasts. A "
-               "downcast at the _step_cgrid exit did NOT take (the tracers "
-               "re-promote downstream, in the model.step wrapper / physics "
-               "carry), so the fix point is upstream of the observed leak and "
-               "needs a role-aware cast on the tracer-tendency application. "
-               "Mixed-lat-lon only — no fp32/fp64, no MPAS, no scaling/prod "
-               "impact. Deferred to a focused follow-up; xpass (strict) when "
-               "fixed → remove this marker.",
+        reason="lat-lon PE promotes moist tracers to float64 in mixed — a 3D "
+               "contagion the MPAS lane does not have. Traced (codex) to the "
+               "POST-STEP mass fixer's dp-ratio at "
+               "primitive_eq_latlon_cgrid.py:1351: p_s_post is f64 (the mass "
+               "fix, decision A), so ratio = dp_pre/dp_post is f64 and "
+               "`q * ratio` promotes every tracer. A naive "
+               "`q * ratio.astype(q.dtype)` did NOT empirically clear it "
+               "(tracers still f64 after model.step — the tendency application "
+               "interacts with the physics-carry / step wrapper), so the exact "
+               "leaf-cast point needs nailing. Mixed-lat-lon only — no "
+               "fp32/fp64, no MPAS, no scaling/prod impact. Deferred, not "
+               "fixed inline; xpass (strict) when fixed → remove this marker.",
         strict=True)),
 ])
 def test_latlon_pe_leaf_dtypes(mode):

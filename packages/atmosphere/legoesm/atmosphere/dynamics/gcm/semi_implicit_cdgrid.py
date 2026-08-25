@@ -241,6 +241,23 @@ def make_helmholtz_op(coeff, cdgrid) -> Callable[[jnp.ndarray], jnp.ndarray]:
     return A
 
 
+def cg_metric_residual_floor(cdgrid) -> float:
+    """Backward-error floor of ``cg_helmholtz_solve`` set by the metric dtype.
+
+    ``cdgrid_scalar_laplacian`` reads the grid's metric arrays, which carry the
+    grid's storage dtype.  With float32 metrics the operator coefficients are
+    only ~1e-7 accurate, so the relative residual cannot beat ~1e-6 regardless
+    of ``tol`` — a benign backward error, not under-convergence.  A caller's
+    convergence gate should accept a solve down to this floor instead of
+    treating it as failure (which would drop the semi-implicit damping every
+    step).  Returns 0.0 for float64 metrics (the requested tol is achievable).
+    """
+    dt = getattr(getattr(cdgrid, "base", None), "area", None)
+    if dt is None or jnp.dtype(dt.dtype).itemsize >= 8:
+        return 0.0
+    return 1.0e-6
+
+
 def cg_helmholtz_solve(
     rhs,
     coeff,
@@ -312,7 +329,12 @@ def cg_helmholtz_solve(
     # solution is cast back to the caller's dtype at return so bulk dynamics
     # stay at compute.  NOTE: the grid metrics inside cdgrid_scalar_laplacian
     # carry the grid's storage dtype (f32 in mixed), so the residual floors at
-    # ~1e-7 metric precision in mixed — build the grid fp64 for a 1e-10 solve.
+    # ~1e-7 metric precision in mixed (a benign BACKWARD error, per review — the
+    # operator coefficients are only f32-accurate, not under-convergence).  The
+    # effective solution error is ~ kappa * 1e-7 worst case; re-evaluate if a
+    # future config raises dt (raises the Helmholtz condition number kappa).
+    # Callers gate on cg_metric_residual_floor() so a floor-limited solve is
+    # accepted; building the grid fp64 restores a 1e-10 solve.
     _in_dtype = rhs.dtype
     rhs = cast(rhs, None, "control")
     coeff = cast(jnp.asarray(coeff), None, "control")
@@ -336,22 +358,27 @@ def cg_helmholtz_solve(
         B_op, tilde_rhs, x0=tilde_x0, tol=tol, maxiter=maxiter,
     )
     sol = inv_sqrt_area * tilde_sol
+    sol_ret = sol.astype(_in_dtype)
 
     if return_residual:
-        # External verification in *physical* space so the reported
-        # residual is the quantity the caller cares about, not the
-        # M^{1/2}-transformed one.
+        # External verification in *physical* space, on the RETURNED
+        # (caller-dtype) solution — not the control-f64 one — so the production
+        # gate reads the residual of the array it will actually use.  The
+        # measurement itself runs at control precision (upcast the returned
+        # solution) so it reports the true backward error, not f32 arithmetic
+        # noise on top of it.
         def A_phys(p):
             return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
 
+        _s = sol_ret.astype(rhs.dtype)
         rhs_norm = jnp.maximum(
             jnp.linalg.norm(rhs.ravel()), 1.0e-30,
         )
         rel_res = jnp.linalg.norm(
-            (rhs - A_phys(sol)).ravel(),
+            (rhs - A_phys(_s)).ravel(),
         ) / rhs_norm
-        return sol.astype(_in_dtype), rel_res
-    return sol.astype(_in_dtype)
+        return sol_ret, rel_res
+    return sol_ret
 
 
 def richardson_helmholtz_solve(

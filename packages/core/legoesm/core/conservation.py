@@ -383,6 +383,16 @@ def conservation_accumulator():
     precision and lets the "skip per-stage ``zero_mean_tendency`` when
     end-step fixer is on" scaling optimisation be lossless even in
     float32 storage/compute mode.
+
+    DIAGNOSTIC-ONLY (precision-consistency audit 2026-08-25).  Reading
+    ``jax_enable_x64`` instead of the policy is deliberate and safe *as long as
+    the f64 value only feeds a budget sum whose correction is then ADDED to a
+    float32 ``p_s``* — the add rounds the correction back to float32, so in
+    strict-fp32 this never changes state, only the diagnostic value.  If this
+    accumulator is ever wired into a mass fixer that keeps ``p_s`` at the f64
+    accumulate dtype (so the f64 add is NOT rounded away), it becomes
+    state-affecting under an fp32 policy and must be re-reviewed against the
+    policy's ``accumulate`` role instead of the global x64 flag.
     """
     if jax.config.read("jax_enable_x64"):
         return jnp.float64

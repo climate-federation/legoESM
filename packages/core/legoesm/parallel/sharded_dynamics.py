@@ -3588,6 +3588,33 @@ def _ragged_halo_fill(cell_pack, u_shard, ragged_sl, max_lc, max_le):
     return cell_local[:max_lc], u_local[:max_le]
 
 
+def _assert_sharded_ps_carry_f64(p_s_dtype):
+    """Loud guard for the deferred sharded p_s carry-seed (decision A).
+
+    In mixed/fp64 the surface pressure ``p_s`` is the intentional always-f64
+    conservation field.  On the SHARDED Voronoi path the per-step mass fixer
+    casts ``p_s`` back to the scan carry dtype to hold the ``lax.scan``
+    carry-dtype contract — so ``p_s`` can only be f64 if the scan's INITIAL
+    carry is already f64, which requires seeding at state construction (IC
+    builder / driver).  That seeding is NOT yet implemented.  Without this
+    guard a mixed+sharded run would silently carry ``p_s`` in float32 for the
+    whole integration.  Fail loudly instead.  Fires only for mixed/fp64
+    (accumulate == float64); an fp32/x64-off sharded run correctly keeps
+    ``p_s`` float32 and is unaffected.
+    """
+    from legoesm.core.precision import resolve_dtype
+    if (resolve_dtype(None, "accumulate") == jnp.float64
+            and jnp.dtype(p_s_dtype) != jnp.float64):
+        raise RuntimeError(
+            f"mixed/fp64 + sharded Voronoi step: p_s carry is "
+            f"{jnp.dtype(p_s_dtype)} but the policy accumulate dtype is "
+            f"float64. p_s must be seeded float64 in the scan INITIAL carry "
+            f"(decision A) — the IC-builder seeding is not implemented, so "
+            f"mixed+sharded MPAS is unsupported until it lands. Use fp32 "
+            f"(x64 off) for sharded runs, or run serial for mixed."
+        )
+
+
 def make_voronoi_sharded_step(
     model,
     dev_config: DeviceConfig,
@@ -4444,6 +4471,11 @@ def make_voronoi_sharded_step(
         @jax.jit
         def _step(state, dt, forcing, phys_state,
                   mesh_arg, halo_arg, area_arg, wide_arg, rim_arg):
+            # Loud guard: the incoming scan-carry p_s must be float64 in
+            # mixed/fp64 (decision A); the sharded carry-seed is deferred, so a
+            # float32 p_s here would be silently carried the whole run.
+            # Trace-time check — the dtype is static.
+            _assert_sharded_ps_carry_f64(state.p_s.data.dtype)
             # Canonical tracer wire order — static at trace time (part
             # of the state's pytree structure).
             tkeys = (tuple(sorted(state.tracers))
