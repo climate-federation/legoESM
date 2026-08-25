@@ -1097,6 +1097,14 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat * _dealias_3d
         dlnps_hat = dlnps_hat * _dealias
 
+    # Dry-mass theorem: the (0,0) global-mean lnps tendency is analytically zero
+    # (Gauss — integral of the surface-pressure flux divergence over the sphere
+    # vanishes), but in fp32 it is a cancellation residual ~1e-8 that random-
+    # walks total mass. Zero it explicitly (same mechanism as the SW h00 fix).
+    # Gated to the fp32 runtime so the fp64 path stays byte-identical.
+    if grid.Pnm.dtype == jnp.float32:
+        dlnps_hat = jnp.where(grid.ls == 0, jnp.zeros_like(dlnps_hat), dlnps_hat)
+
     # --- 18. Tracer tendencies ---
     # When the input state carries a ``tracers`` dict the tendency
     # must mirror the same pytree structure for SSP-RK ``tree.map``.

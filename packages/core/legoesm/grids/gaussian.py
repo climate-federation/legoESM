@@ -1294,7 +1294,9 @@ def uv_from_vordiv_3d(
     dpsi_dtheta = pc_dtheta[..., 0]
     dchi_dtheta = pc_dtheta[..., 1]
 
-    im_pc = (1j * grid.ms)[:, None] * pc_flat
+    # 1j is a weak complex128; cast to the coefficient dtype so a complex64
+    # runtime is not promoted to complex128 (would bypass the SI c64 bridge).
+    im_pc = (1j * grid.ms).astype(pc_flat.dtype)[:, None] * pc_flat
     pc_dlon_flat = sh_synthesis_3d(grid, im_pc) / a
     pc_dlon = pc_dlon_flat.reshape(
         pc_dlon_flat.shape[0], pc_dlon_flat.shape[1], nlev_pc, 2,
