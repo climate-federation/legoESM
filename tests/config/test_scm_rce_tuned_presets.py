@@ -26,7 +26,7 @@ def test_preset_dir_exists_and_is_populated():
 
 @pytest.mark.parametrize("path", _presets(), ids=lambda p: p.stem)
 def test_preset_loads_and_is_in_spec_bounds(path):
-    from legoesm.coupler.driver.run_config_yaml import load_params_config
+    from legoesm.driver.run_config_yaml import load_params_config
     from legoesm.training.param_collector import build_registry
 
     params = load_params_config(path)
