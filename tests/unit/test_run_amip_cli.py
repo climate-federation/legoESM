@@ -1914,16 +1914,17 @@ def test_config_yaml_round_trips_authoritative_values():
     # against a config that had been the icosahedral MPAS one for weeks --
     # red on main, and blind to any further drift while it was.  Values below
     # are the shipped deck: icosahedral level 5 (about 2.2 degrees), 30 sigma
-    # levels, dt 75 s.  The five keys are recipe-sensitive together (the YAML
+    # levels, dt 112.5 s (2026-08-25 dt ladder; level 6 default same day).  The
+    # five keys are recipe-sensitive together (the YAML
     # header records that L40 + hybrid + automatic dt blew up on day one), so
     # a change here is a stability A/B, not an edit.
-    assert args.resolution == 5
+    assert args.resolution == 6
     assert args.nlev == 30
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
     # spellings to one name, so assert the resolved value the run uses.
     assert args.grid_type == "mpas"
-    assert args.dt == 75.0
+    assert args.dt == 112.5
     cfg = build_config_from_args(args)
     assert cfg.convection == "bechtold"   # mass-flux, water-conserving (#771)
     # orographic AND non-orographic; the orographic-only spelling is the
