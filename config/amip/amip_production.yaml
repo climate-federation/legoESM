@@ -43,7 +43,10 @@
 # History: the cube C48/L40 cd-grid dt150 lane (with its fp64-barotropic
 # requirement) lives on only in git history and issues #1294-#1296.
 grid_type: voronoi
-resolution: 5               # icosahedral SCVT level 5 = 10242 cells (~2.2°)
+resolution: 6               # icosahedral SCVT level 6 = 40962 cells (~1.1°).
+                            # DEFAULT per user directive 2026-08-25: res6 is
+                            # the production AMIP configuration; res5 is for
+                            # fast iteration only (override via --resolution 5).
 nlev: 30
 discretization: mpas
 dt: 75.0
