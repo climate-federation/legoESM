@@ -54,7 +54,11 @@ def _basin_mask(lat, lon, name):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--legoesm-snapshot", required=True)
+    ap.add_argument("--legoesm-snapshot", required=True, action="append",
+                    help="repeatable: N snapshots -> MLD computed PER "
+                         "snapshot then AVERAGED (mean-of-diagnostic, "
+                         "matching NEMO's 5-day-mean mldr10_1), the codex/"
+                         "GLM protocol-mismatch discriminator")
     ap.add_argument("--nemo-gridt", required=True)
     ap.add_argument("--nemo-time-idx", type=int, required=True)
     ap.add_argument("--png", default=None, help="Pacific zoom diff figure")
@@ -64,19 +68,28 @@ def main() -> int:
                                    regrid_curv_to_latlon)
     from legoesm.ocean.diagnostics import mixed_layer_depth
 
-    L = _load_legoesm(args.legoesm_snapshot)
     N = _load_nemo(args.nemo_gridt, args.nemo_time_idx)
     if N.get("mld") is None:
         print("FATAL: NEMO file has no mldr10_1")
         return 1
 
-    z_c = np.asarray(L["z_center_ref"], np.float64)
-    Hb = np.asarray(L["H_bathy"], np.float64)
-    wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
-           & (L["mask"][..., None] > 0.5)).astype(np.float64)
-    mldL = np.asarray(mixed_layer_depth(
-        L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
-        wet_mask=wet, bottom_depth=Hb))
+    mlds, sss_l, sst_l = [], [], []
+    for snap in args.legoesm_snapshot:
+        L = _load_legoesm(snap)
+        z_c = np.asarray(L["z_center_ref"], np.float64)
+        Hb = np.asarray(L["H_bathy"], np.float64)
+        wet = ((z_c[(None,) * Hb.ndim + (slice(None),)] < Hb[..., None])
+               & (L["mask"][..., None] > 0.5)).astype(np.float64)
+        mlds.append(np.asarray(mixed_layer_depth(
+            L["T3d"], L["S3d"], z_c, delta_sigma=0.01,
+            wet_mask=wet, bottom_depth=Hb)))
+        sss_l.append(L["sss"])
+        sst_l.append(L["sst"])
+    mldL = np.mean(mlds, axis=0)      # mean-of-diagnostic, like mldr10_1
+    L = dict(L, sss=np.mean(sss_l, axis=0), sst=np.mean(sst_l, axis=0))
+    if len(mlds) > 1:
+        print(f"# MLD averaged over {len(mlds)} snapshots "
+              f"(mean-of-diagnostic; protocol matched to NEMO 5-day mean)")
 
     tgt_lat = np.arange(-89.5, 90.0, 1.0)
     tgt_lon = np.arange(0.5, 360.0, 1.0)
@@ -197,7 +210,7 @@ def main() -> int:
             im = ax.imshow(ff, origin="lower", extent=ext, cmap=cm,
                            vmin=vl[0], vmax=vl[1], aspect="auto")
             ax.set_title(t); fig.colorbar(im, ax=ax, shrink=0.8)
-        fig.suptitle(f"Pacific MLD: {Path(args.legoesm_snapshot).name} "
+        fig.suptitle(f"Pacific MLD: {Path(args.legoesm_snapshot[0]).name} "
                      f"vs GATEWAY rec {args.nemo_time_idx}")
         fig.savefig(args.png, dpi=110)
         print(f"wrote {args.png}")
