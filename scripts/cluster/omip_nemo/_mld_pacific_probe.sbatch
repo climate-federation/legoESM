@@ -28,6 +28,7 @@ for pair in "0030 5" "0090 17"; do
 done
 
 echo "=============== T-vs-S decomposition (d90) ==============="
+# --snapshot takes label=path (a bare path parses to an empty file name).
 $PY scripts/validate/ocean_fidelity/mld_decomposition.py \
-  --snapshot $OUT/snapshot_day0090.npz 2>&1 | tail -30
+  --snapshot d90=$OUT/snapshot_day0090.npz 2>&1 | tail -30
 echo DONE

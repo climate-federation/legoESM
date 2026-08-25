@@ -145,6 +145,40 @@ def main() -> int:
         rN = bj(mldN_g, eq_rows) / max(bj(mldN_g, off_rows), 1e-9)
         print(f"  {bs:9s} ours ratio {rL:5.2f}   nemo ratio {rN:5.2f}")
 
+    # RESIDUAL REGRESSION (GLM discriminator, 2026-08-25): if the tropical
+    # Pacific MLD residual is COLLOCATED with the SSS residual, the shallow
+    # bias is a salinity barrier layer (precip/freshwater placement), not a
+    # mixing-strength error; collocation with the SST residual instead
+    # supports the entrainment/cold-tongue loop.  Zero-cost: both fields are
+    # already in the snapshot and the NEMO record.
+    sssL_g, _ = regrid_curv_to_latlon(L["sss"], L["lat"], L["lon"],
+                                      L["mask"], tgt_lat, tgt_lon)
+    sssN_g, _ = regrid_curv_to_latlon(N["sss"], N["lat"], N["lon"],
+                                      N["mask"], tgt_lat, tgt_lon)
+    sstL_g, _ = regrid_curv_to_latlon(L["sst"], L["lat"], L["lon"],
+                                      L["mask"], tgt_lat, tgt_lon)
+    sstN_g, _ = regrid_curv_to_latlon(N["sst"], N["lat"], N["lon"],
+                                      N["mask"], tgt_lat, tgt_lon)
+    dmld = mldL_g - mldN_g
+    dsss = sssL_g - sssN_g
+    dsst = sstL_g - sstN_g
+    print("\n# residual collocation: corr(dMLD, dSSS) and corr(dMLD, dSST)"
+          "\n#   strong NEGATIVE corr(dMLD,dSSS): fresh cap where MLD shallow"
+          " = barrier-layer/precip placement"
+          "\n#   strong POSITIVE corr(dMLD,dSST): warm where MLD shallow"
+          " = entrainment loop")
+    for bs in BASINS:
+        bm = _basin_mask(lat2, lon2, bs)
+        for bd, (lo, hi) in BANDS.items():
+            m = (ocean & bm & (lat2 >= lo) & (lat2 < hi)
+                 & np.isfinite(dsss) & np.isfinite(dsst))
+            if m.sum() < 50:
+                continue
+            cs = float(np.corrcoef(dmld[m], dsss[m])[0, 1])
+            ct = float(np.corrcoef(dmld[m], dsst[m])[0, 1])
+            print(f"  {bs:9s} {bd:17s} corr(dMLD,dSSS)={cs:+5.2f}  "
+                  f"corr(dMLD,dSST)={ct:+5.2f}  n={int(m.sum())}")
+
     if args.png:
         import matplotlib
         matplotlib.use("Agg")
