@@ -244,6 +244,15 @@ def spectral_sw_tendencies(
     ddiv_hat = ddiv_hat * _dealias
     dphi_hat = dphi_hat * _dealias
 
+    # Mass is a THEOREM, not a measurement: the global-mean (n=0, m=0)
+    # geopotential tendency is analytically zero (Gauss theorem — the integral
+    # of the flux divergence -div(Φv) over the sphere vanishes).  Under exact
+    # Gaussian quadrature it is machine zero in f64, but fp32 transform roundoff
+    # leaves ~1e-9 there and that random-walks total mass.  Zero it explicitly.
+    # Gated to the fp32 runtime so the fp64 path stays byte-identical.
+    if grid.Pnm.dtype == jnp.float32:
+        dphi_hat = jnp.where(grid.ls == 0, jnp.zeros_like(dphi_hat), dphi_hat)
+
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
@@ -661,13 +670,30 @@ def spectral_to_grid(
     }
 
 
+def power_spectrum(grid: GaussianGrid, coeffs_hat: jax.Array) -> jax.Array:
+    """Per-total-wavenumber power ``sum_m |coeffs(n,m)|^2``, accumulated in f64.
+
+    Returns an ``(n_max+1,)`` float64 array indexed by total wavenumber ``n``.
+    Unlike the endpoint scalar drift (which is floor-limited), this
+    per-wavenumber reduction is the diagnostic that sees the fp32 spectral
+    noise floor on the ``k^-3`` tail — the regression harness for the fp32
+    spectral runtime.  Use on a ``(state_a − state_b)`` coefficient field to
+    get the difference-field spectrum.
+    """
+    power = jnp.abs(coeffs_hat.astype(jnp.complex128)) ** 2  # f64
+    return jax.ops.segment_sum(power, grid.ls, num_segments=grid.n_max + 1)
+
+
 def compute_spectral_diagnostics(
     state: SpectralSWState,
     grid: GaussianGrid,
 ) -> dict[str, float]:
     """Compute conservation diagnostics for the spectral model.
 
-    Returns mass, energy, and enstrophy integrals.
+    Returns mass, energy, and enstrophy integrals, plus f64-accumulated KE and
+    enstrophy per-wavenumber SPECTRA (``ke_spectrum`` / ``enstrophy_spectrum``,
+    each ``(n_max+1,)``) — the tail diagnostics that reveal the fp32 noise
+    floor.
     """
     g = constants.g
     fields = spectral_to_grid(state, grid)
@@ -711,8 +737,19 @@ def compute_spectral_diagnostics(
     # casts — this diagnostic is called every save_every steps in
     # validation/test loops.
     _h = jax.device_get(jnp.stack([mass, energy, enstrophy]))
+
+    # f64 per-wavenumber spectra (KE from streamfunction/velocity-potential:
+    # KE_n = 0.5 * a^2/(n(n+1)) * (|vor_n|^2 + |div_n|^2); enstrophy_n = |vor_n|^2).
+    Pvor = power_spectrum(grid, state.vor_hat.data)
+    Pdiv = power_spectrum(grid, state.div_hat.data)
+    ns = jnp.arange(grid.n_max + 1, dtype=jnp.float64)
+    inv_nn = jnp.where(ns > 0, a2 / (ns * (ns + 1.0)), 0.0)
+    ke_spectrum = 0.5 * inv_nn * (Pvor + Pdiv)
+    ke_np, ens_np = jax.device_get((ke_spectrum, Pvor))
     return {
         'mass': float(_h[0]),
         'energy': float(_h[1]),
         'enstrophy': float(_h[2]),
+        'ke_spectrum': ke_np,
+        'enstrophy_spectrum': ens_np,
     }

@@ -302,7 +302,9 @@ class GaussianGrid(NamedTuple):
 
     @property
     def grid_total_area(self):
-        return jnp.sum(self.grid_area)
+        # Retained-f64 reduction: sphere-wide area sum in float64 so an fp32
+        # grid does not lose precision in the mass-integral normaliser.
+        return jnp.sum(self.grid_area.astype(jnp.float64))
 
     @property
     def grid_coriolis(self) -> jax.Array:
@@ -378,8 +380,11 @@ def create_gaussian_grid(
     """
     # IFS-inspired f32 runtime: tables are built in numpy float64 (the Legendre
     # recurrence is precision-sensitive) and cast to run_dtype for storage +
-    # transforms.  A float32 runtime uses complex64 transforms and does NOT need
-    # JAX x64; only the float64 runtime does.  See spectral-f32-feasibility.
+    # runtime transforms (complex64 at run_dtype=float32 — the 2x win).  BOTH
+    # runtimes require JAX x64: float64 for its arithmetic, and float32 because
+    # the mass/energy/enstrophy REDUCTIONS are kept in float64 (the retained
+    # set) which needs x64.  A pure no-x64 f32 mode is deferred (needs the
+    # structural h00 mean-mode fix).  See spectral-f32-feasibility.
     import warnings
     _run_dtype = jnp.dtype(run_dtype)
     _f32_run = (_run_dtype == jnp.float32)
@@ -388,13 +393,13 @@ def create_gaussian_grid(
             f"create_gaussian_grid: run_dtype must be float32 or float64, "
             f"got {_run_dtype}.")
 
-    # Hard guard: the float64 runtime requires JAX_ENABLE_X64.
-    if not _f32_run and not jax.config.jax_enable_x64:
+    # Hard guard: spectral grids require JAX_ENABLE_X64 (both runtimes).
+    if not jax.config.jax_enable_x64:
         raise RuntimeError(
-            "Spectral/Gaussian grids at run_dtype=float64 require "
-            "JAX_ENABLE_X64=True. Set JAX_ENABLE_X64=1, call "
-            "jax.config.update('jax_enable_x64', True) before importing, or "
-            "pass run_dtype=jnp.float32 for the complex64 runtime."
+            "Spectral/Gaussian grids require JAX_ENABLE_X64=True. "
+            "Set the environment variable JAX_ENABLE_X64=1 or call "
+            "jax.config.update('jax_enable_x64', True) before importing. "
+            "run_dtype=jnp.float32 still needs x64 for the float64 reductions."
         )
 
     # Extract allow_unsupported from global config if provided
@@ -424,10 +429,9 @@ def create_gaussian_grid(
             )
         allow_unsupported_backend = True
 
-    # Guard: the float64 runtime requires float64/complex128 backend support.
-    # The float32 runtime (complex64 transforms) does not.
-    if not _f32_run:
-        check_spectral_backend(allow_unsupported=allow_unsupported_backend)
+    # Guard: spectral code requires float64/complex128 backend support (both
+    # runtimes — the float32 runtime keeps its reductions in float64).
+    check_spectral_backend(allow_unsupported=allow_unsupported_backend)
 
     # Grid dimensions based on dealiasing rule
     if dealiasing == "cubic":
