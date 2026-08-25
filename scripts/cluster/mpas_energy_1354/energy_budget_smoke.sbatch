@@ -30,7 +30,8 @@
 # EXACT #1354 recipe: config/amip/amip_production.yaml (MPAS Voronoi L5 / L30 /
 # sigma / dt 75, bechtold + morrison + multilayer land, conservative tracer
 # clamp default-on, real CMIP6 forcing, ERA5 IC).  Machine paths from
-# amip_production.sh.  15 days is enough for the residual; --diag-days 1.
+# amip_production.sh.  A 3-day smoke is enough to read a persistent global
+# residual (nonzero from day 1); --diag-days 1.
 set -euo pipefail
 
 WT=/work/bd1083/b309178/diffESM/prmerge/fix
@@ -51,7 +52,7 @@ echo "sha=$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain)" ] && e
 nvidia-smi --query-gpu=name --format=csv,noheader || true
 "${PY}" -c "import jax; print('jax', jax.__version__, jax.devices())"
 
-echo "=== run_amip 15 d, energy tracker on, $(date -u) ==="
+echo "=== run_amip 3 d smoke, energy tracker on, $(date -u) ==="
 "${PY}" -u scripts/run/run_amip.py \
     --config config/amip/amip_production.yaml \
     "${AMIP_PATH_FLAGS[@]}" \
