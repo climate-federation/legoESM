@@ -68,3 +68,75 @@ def test_census_refuses_an_unknown_op_family(tab):
 
     with pytest.raises(TypeError, match="fail closed"):
         _max_cross_depth(_Alien(), tab.lay_a)
+
+
+# ---- ring exchange: bitwise parity vs the certified exchange + poison ----
+#
+# Needs >= 6 devices: the sbatch wrapper sets
+# XLA_FLAGS=--xla_force_host_platform_device_count=6 BEFORE jax imports.
+
+def _devices_or_skip(n):
+    import jax
+    if len(jax.devices()) < n:
+        pytest.skip(f"needs {n} devices (set "
+                    f"xla_force_host_platform_device_count)")
+    return jax.devices()[:n]
+
+
+@pytest.mark.parametrize("n_dev", [2, 3, 6])
+@pytest.mark.parametrize("stag", ["A", "B"])
+def test_ring_exchange_matches_certified_bitwise(tab, n_dev, stag):
+    """The ring exchange copies the same VALUES the certified exchange
+    reads (borders are copies, own faces are originals), then runs the
+    SAME table program -- own-face outputs must be BITWISE equal.  A
+    tolerance here would hide an index shift."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface
+    from legoesm.grids.fv3_duo_spmd import make_ring_ext_scalar_sixface
+
+    devs = _devices_or_skip(n_dev)
+    m = tab.n + 2 * tab.ng + (1 if stag == "B" else 0)
+    rng = np.random.default_rng(3)
+    f6 = jnp.asarray(rng.standard_normal((6, m, m)))
+    ref = np.asarray(ext_scalar_sixface(f6, tab, stag))
+
+    mesh = Mesh(np.array(devs), ("face",))
+    fn, depth = make_ring_ext_scalar_sixface(tab, stag, mesh)
+    assert depth == 7
+    f6s = jax.device_put(f6, NamedSharding(mesh, P("face")))
+    got = np.asarray(fn(f6s))
+    assert got.shape == ref.shape
+    assert np.array_equal(got, ref), (
+        f"ring exchange diverged: |d|max="
+        f"{np.abs(got - ref).max():.3e}")
+
+
+@pytest.mark.parametrize("stag", ["A"])
+def test_ring_exchange_poison_proves_no_out_of_ring_read(tab, stag):
+    """poison=True fills every non-border, non-own cell with NaN; the
+    output must STILL match the certified exchange bitwise.  One NaN in
+    the output = a read outside the census's ring -- the design's failure
+    mode, made loud (GLM: zeros are indistinguishable from real data)."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface
+    from legoesm.grids.fv3_duo_spmd import make_ring_ext_scalar_sixface
+
+    devs = _devices_or_skip(6)
+    m = tab.n + 2 * tab.ng
+    rng = np.random.default_rng(4)
+    f6 = jnp.asarray(rng.standard_normal((6, m, m)))
+    ref = np.asarray(ext_scalar_sixface(f6, tab, stag))
+
+    mesh = Mesh(np.array(devs), ("face",))
+    fn, _ = make_ring_ext_scalar_sixface(tab, stag, mesh, poison=True)
+    f6s = jax.device_put(f6, NamedSharding(mesh, P("face")))
+    got = np.asarray(fn(f6s))
+    assert np.isfinite(got).all(), \
+        "NaN reached the output: the tables read outside the ring"
+    assert np.array_equal(got, ref)

@@ -161,3 +161,106 @@ def assert_ring_width_covers(tab, ring_width: int) -> int:
             f"(n={tab.n}, ng={tab.ng}, ngp={tab.ngp}) -- the exchange "
             f"would silently read zeros. Widen the ring.")
     return depth
+
+
+# ---------------------------------------------------------------------------
+# ring exchange -- the O(halo) shard_map scalar exchange (v1.1)
+# ---------------------------------------------------------------------------
+#
+# Wraps the certified ext_scalar_sixface in a shard_map over a 'face' mesh
+# axis: each device holds a contiguous block of faces, gathers only the
+# width-w full BORDERS of every face (O(halo) -- the census above proves all
+# cross-face reads land inside them), rebuilds a stack that is real where
+# the tables read (borders everywhere + own faces in full), runs the
+# certified flat tables VERBATIM, and keeps its own faces' slice.
+#
+# Scope (v1.1, dual-reviewed): SCALAR exchange only.  The vector flows
+# (ext_vector_dgrid/cgrid_sixface) need their second, mid-flow gather of
+# owner-computed ua/va rings plus own-face slicing of c2l/a2d (codex
+# BLOCKERs on the naive form) and land separately; until then they FAIL
+# CLOSED here.  Ceiling: the face axis is the only spatial shard (<= 6
+# devices); v2 splits the tables into own-tile/neighbor-strip index sets.
+
+def _border_mask(m: int, w: int) -> np.ndarray:
+    """Boolean (m, m) mask of the width-w full border (corner blocks
+    included -- the tables read diagonal corner cells)."""
+    mask = np.zeros((m, m), dtype=bool)
+    mask[:w, :] = True
+    mask[-w:, :] = True
+    mask[:, :w] = True
+    mask[:, -w:] = True
+    return mask
+
+
+def make_ring_ext_scalar_sixface(tab, stag: str, mesh, *,
+                                 ring_width: int = 8,
+                                 poison: bool = False):
+    """Build the shard_map'd scalar exchange for ``mesh`` (axis 'face').
+
+    Returns ``fn(f6_local) -> f6_local`` operating on the LOCAL face block
+    ``(6//d, m, m)`` of a global ``(6, m, m)`` array sharded ``P('face')``
+    in certified face order (jax shards a (6,...) axis into contiguous
+    blocks in axis order, so device i holds faces ``i*g..(i+1)*g-1`` --
+    the face-order/mesh-order identity the design asserts).
+
+    The certified tables run verbatim on a reconstructed stack; the
+    census gate refuses a ring the tables outread.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from jax.experimental.shard_map import shard_map
+
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface
+
+    depth = assert_ring_width_covers(tab, ring_width)
+    if stag == "A":
+        m = tab.n + 2 * tab.ng
+    elif stag == "B":
+        m = tab.n + 2 * tab.ng + 1
+    else:
+        raise ValueError(
+            f"make_ring_ext_scalar_sixface: stag {stag!r} (the certified "
+            f"scalar exchange supports 'A' and 'B'; vector flows land "
+            f"separately -- fail closed)")
+    (ax_name, ax_size), = ((n, s) for n, s in
+                          zip(mesh.axis_names, mesh.devices.shape))
+    if 6 % ax_size != 0:
+        raise ValueError(
+            f"mesh axis {ax_name!r} has {ax_size} devices; 6 faces "
+            f"require a divisor (1, 2, 3, 6)")
+    g = 6 // ax_size                       # faces per device
+    w = ring_width
+    mask = _border_mask(m, w)
+    # border cells enumerated ONCE, statically: (nb,) flat indices per face
+    bidx = np.flatnonzero(mask.ravel())
+
+    def _body(f6_local):
+        # f6_local: (g, m, m) this device's faces, certified face order.
+        # 1. own borders, fused into one payload
+        borders = f6_local.reshape(g, m * m)[:, bidx]        # (g, nb)
+        # 2. ONE all_gather of everyone's borders (O(halo)):
+        #    (d, g, nb) -> (6, nb) in face order (axis order == face
+        #    order under P('face') contiguous sharding).
+        allb = jax.lax.all_gather(borders, ax_name)          # (d, g, nb)
+        allb = allb.reshape(6, bidx.size)
+        # 3. reconstruct: borders everywhere, own faces in full.  Zeros
+        #    elsewhere -- the census proves the tables never read them,
+        #    and the poison=True test PROVES the proof: NaN there instead
+        #    of zeros, so any out-of-ring read corrupts the output
+        #    loudly instead of silently contributing a plausible zero
+        #    (GLM: zeros are indistinguishable from real data).
+        fill = jnp.nan if poison else 0.0
+        stack = jnp.full((6, m * m), fill, dtype=f6_local.dtype)
+        stack = stack.at[:, bidx].set(allb)
+        me = jax.lax.axis_index(ax_name)
+        rows = me * g + jnp.arange(g)
+        stack = stack.at[rows, :].set(f6_local.reshape(g, m * m))
+        # 4. certified tables, verbatim
+        out = ext_scalar_sixface(stack.reshape(6, m, m), tab, stag)
+        # 5. keep own faces
+        return jax.lax.dynamic_slice_in_dim(out, me * g, g, axis=0)
+
+    return shard_map(_body, mesh=mesh,
+                     in_specs=P(ax_name), out_specs=P(ax_name),
+                     check_rep=False), depth
