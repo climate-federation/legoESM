@@ -252,8 +252,11 @@ def cg_metric_residual_floor(cdgrid) -> float:
     treating it as failure (which would drop the semi-implicit damping every
     step).  Returns 0.0 for float64 metrics (the requested tol is achievable).
     """
-    dt = getattr(getattr(cdgrid, "base", None), "area", None)
-    if dt is None or jnp.dtype(dt.dtype).itemsize >= 8:
+    # Check an ACTUAL operator metric (rdxc), not base.area — the Laplacian
+    # reads rdxc/rdyc/dx_edge_y/dy_edge_x, and metric_dtype can make those f32
+    # on an f64 base grid, so base.area would miss the floor there.
+    metric = getattr(cdgrid, "rdxc", None)
+    if metric is None or jnp.dtype(metric.dtype).itemsize >= 8:
         return 0.0
     return 1.0e-6
 

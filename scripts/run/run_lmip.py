@@ -641,7 +641,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "and spliced into the nested land *Config NamedTuples "
                         "(soil thermal/hydraulics, carbon, stomata...). (#691)")
     p.add_argument("--precision", type=str, default="fp64",
-                   choices=["fp32", "fp64", "mixed"],
+                   # fp32 omitted: x64 is enabled before imports (canopy
+                   # _LM_XSCALE and siblings freeze their dtype there), so a
+                   # true all-fp32 land run needs those constants made
+                   # policy-aware first — deferred. fp64/mixed both work.
+                   choices=["fp64", "mixed"],
                    help="Precision mode: fp32 (all float32), fp64 (all "
                         "float64, the default — preserves prior behaviour), or "
                         "mixed (float32 storage/compute, float64 "
