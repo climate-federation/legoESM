@@ -383,7 +383,8 @@ class DuoRingComm:
     every call site; dispatch here is a trace-time dict lookup.
     """
 
-    __slots__ = ("_scalar", "_dgrid", "_cgrid", "ring_width", "depth")
+    __slots__ = ("_scalar", "_dgrid", "_cgrid", "ring_width", "depth",
+                 "mesh")
 
     def __hash__(self):
         return id(self)
@@ -421,7 +422,32 @@ def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
     ``make_ring_*`` factory re-runs the census gate against ``tab``, so
     a ring the tables outread is refused here, at build time.
     """
+    import jax
+
+    # Contract enforcement (codex MINOR): the advertised knob is a
+    # single-'face'-axis mesh; accepting any axis name would let a
+    # differently-purposed mesh slip in silently.
+    if tuple(mesh.axis_names) != ("face",):
+        raise ValueError(
+            f"build_ring_comm: mesh axes {tuple(mesh.axis_names)} != "
+            f"('face',) -- the ring runs on a single face axis only")
+    # Multi-node fail-closed (GLM): a mesh built from local_devices() --
+    # or before jax.distributed.initialize() -- is a valid SUBMESH of the
+    # global world, and every process would then ring over its own local
+    # faces with halos never crossing processes: deterministic wrong
+    # answers, no crash. Under multiple processes, refuse any mesh that
+    # does not span the world. (Single-process partial meshes -- e.g. 2
+    # of 6 host devices in the parity tests -- are legitimate.)
+    if jax.process_count() > 1 and mesh.size != jax.device_count():
+        raise ValueError(
+            f"build_ring_comm: mesh spans {mesh.size} of "
+            f"{jax.device_count()} global devices under "
+            f"{jax.process_count()} processes -- a partial-device ring "
+            f"would exchange within each process only (halos never "
+            f"cross processes). Build the mesh from jax.devices() "
+            f"AFTER jax.distributed.initialize().")
     rc = DuoRingComm()
+    rc.mesh = mesh          # for the caller-side identity assert
     scalar = {}
     depth = -1
     for stag in ("A", "B"):

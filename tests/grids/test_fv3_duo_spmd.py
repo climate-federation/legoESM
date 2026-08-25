@@ -417,3 +417,14 @@ def test_model_knob_threads_the_mesh_without_mutating_the_bundle():
     assert isinstance(ring._ctx_jax.tab.ring_comm, DuoRingComm)
     assert ring._ctx_jax is not bundle.ctx_jax
     assert bundle.ctx_jax.tab.ring_comm is None
+
+
+def test_build_ring_comm_refuses_wrong_axis_name(tab):
+    """codex MINOR: the knob's contract is a single 'face' axis."""
+    import jax
+    from jax.sharding import Mesh
+    from legoesm.grids.fv3_duo_spmd import build_ring_comm
+    devs = _devices_or_skip(6)
+    bad = Mesh(np.array(devs), ("tiles",))
+    with pytest.raises(ValueError, match="face"):
+        build_ring_comm(tab, bad)
