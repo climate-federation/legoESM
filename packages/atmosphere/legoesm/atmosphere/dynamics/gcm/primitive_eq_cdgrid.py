@@ -123,11 +123,17 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
-    # #1354/#1515: when True, the post-RK q_v floor removes the latent heat
-    # tied to the clipped (un-removable) vapour so column MSE is conserved
-    # (energy_consistent_moisture_floor), instead of a plain max(q,0) that
-    # leaves +L_v*deficit of spurious heat.  Only the HARD floor needs this;
-    # a column-conserving borrow would not (it is already MSE-neutral).
+    # #1354/#1515: column-conserving tracer positivity BORROW (shared with the
+    # MPAS lane).  Default TRUE — the post-RK max(q,0) clamp CREATES water at
+    # every transport undershoot; the borrow moves the deficit between levels so
+    # the column integral is unchanged (frozen-MSE-neutral for vapour AND
+    # condensate).  False restores the legacy mass-creating clamp.
+    conservative_tracer_clamp: bool = True
+    # #1354/#1515: applies ONLY to the hard-floor path (conservative_tracer_clamp
+    # =False).  Then the floor also removes the per-species latent heat tied to
+    # the clipped water (vapour cools, ice warms, liquid unchanged) so frozen
+    # MSE is conserved instead of leaking spurious heat.  No-op under the borrow
+    # (already MSE-neutral) — must NOT be stacked on it.
     energy_consistent_moisture_clip: bool = False
     time_integrator: str = "ssp_rk3"
     T_diss_coeff: float = 0.0
@@ -1998,26 +2004,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         # forcing's contract relies on).  Tracers are untouched by the
         # wind/sponge/vorticity-damping post-steps above.
         if state_new.tracers is not None:
-            _floored = {
-                _k: _f.replace(data=jnp.maximum(_f.data, 0.0))
-                for _k, _f in state_new.tracers.items()
-            }
-            # #1354/#1515: the q_v floor ADDS water (max(q,0) at negatives);
-            # without removing the latent heat that the physics already
-            # deposited for the un-removable vapour, that is +L_v*deficit of
-            # spurious column heat.  Correct q_v AND T together when enabled.
-            if (self.config.energy_consistent_moisture_clip
-                    and "q_v" in state_new.tracers):
-                from legoesm.core.conservation import (
-                    energy_consistent_moisture_floor,
-                )
-                _qv_out, _T_out = energy_consistent_moisture_floor(
-                    state_new.tracers["q_v"].data, state_new.T.data)
-                _floored["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
-                state_new = state_new._replace(
-                    T=state_new.T.replace(data=_T_out), tracers=_floored)
+            # #1354/#1515: ONE shared positivity stage for every dycore.  Borrow
+            # (default) is frozen-MSE-neutral for vapour AND condensate; the
+            # hard-floor fallback adds the per-species latent-heat T correction
+            # incl ice.  dp = TRUE layer mass so the borrow conserves the
+            # physical column integral on hybrid as well as pure sigma.
+            from legoesm.core.conservation import apply_water_positivity
+            _coord = self.sigma_coord
+            _ps = state_new.p_s.data
+            if isinstance(_coord, HybridSigmaPressureCoordinate):
+                _dp = dp_from_hybrid(_coord, _ps)
             else:
-                state_new = state_new._replace(tracers=_floored)
+                _dp = _ps[..., jnp.newaxis] * _coord.dsigma.astype(_ps.dtype)
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=self.config.conservative_tracer_clamp,
+                energy_consistent=self.config.energy_consistent_moisture_clip)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         state_out = cast_pytree(state_new, None, "storage")
 

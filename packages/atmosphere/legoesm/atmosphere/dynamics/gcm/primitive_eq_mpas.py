@@ -1118,69 +1118,29 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # since 2026-08-16 (owner decision: conserving form always); False
         # restores the legacy mass-creating clamp for bit-comparison runs.
         if state_new.tracers is not None:
-            if self.config.conservative_tracer_clamp:
-                # PER-MASS tracers get the conserving borrow — the mixing
-                # ratios AND the per-mass numbers N_i/N_s/N_g.  The former
-                # blanket number exclusion conflated PROCESS-level number
-                # non-conservation (microphysics may create/destroy number
-                # freely) with TRANSPORT-level conservation: advection
-                # conserves every mass-weighted per-mass field, and the naive
-                # clip INVENTS it at each undershoot.  MEASURED (checkpoint
-                # day 40, 2026-07-28): 28k cells/step undershoot, invention
-                # 6.8e-4 of the N_i field PER STEP = x2.2/day compound
-                # growth; N_i reached 1e193 and overflowed into NaN at day
-                # 803 of century3.  N_c/N_r are per-VOLUME [#/m^3] (see
-                # HydrometeorState), so a dsigma-weighted borrow has no
-                # conservation meaning for them (codex 2026-07-28) — they
-                # keep the plain clip pending a density-aware repair
-                # (follow-up; N_r inflation is ~e15 slower than N_i's and
-                # overflows only at ~year 36 at the measured rate).
-                # Borrow weight = TRUE layer mass dp (post-mass-fix p_s —
-                # the dry-mass fixer runs before the floors).  On pure sigma
-                # dp = dsigma*p_s and the per-column p_s factor cancels in
-                # the rescale, so results are unchanged there; on HYBRID
-                # grids dsigma is NOT the layer mass (documented above) and
-                # would mis-conserve the physical dp-integral by O(0.1%)
-                # (codex 2026-07-28 round 2).  Non-positive dp (a broken
-                # hybrid layer) is zero-weighted rather than borrowed from.
-                _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
-                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                # GLOBAL variant: the column-local fixer zeroes net-negative
-                # columns, and on spiky number fields that zeroing alone
-                # re-created x2.74/day growth (868/10242 columns per step at
-                # century4 d90) — the global residual redistribution closes
-                # the budget exactly (serial jnp.sum here; the MPI lane
-                # passes an allreduce-SUM reduction).
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=(
-                        conservative_positive_clip_global(
-                            f.data, _dp, axis=-1)[0]
-                        if is_borrow_eligible_tracer(k)
-                        else jnp.maximum(f.data, 0.0)))
-                    for k, f in state_new.tracers.items()
-                })
-            else:
-                # Plain hard floor (conservative_tracer_clamp=False): max(q,0)
-                # ADDS water at negatives.  #1354/#1515: when enabled, correct
-                # q_v AND T together so the added water's latent heat is removed
-                # (energy_consistent_moisture_floor), else +L_v*deficit of
-                # spurious column heat.  Other tracers keep the plain floor.
-                _hard = {
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                }
-                if (self.config.energy_consistent_moisture_clip
-                        and "q_v" in state_new.tracers):
-                    from legoesm.core.conservation import (
-                        energy_consistent_moisture_floor,
-                    )
-                    _qv_out, _T_out = energy_consistent_moisture_floor(
-                        state_new.tracers["q_v"].data, state_new.T.data)
-                    _hard["q_v"] = state_new.tracers["q_v"].replace(data=_qv_out)
-                    state_new = state_new._replace(
-                        T=state_new.T.replace(data=_T_out), tracers=_hard)
-                else:
-                    state_new = state_new._replace(tracers=_hard)
+            # Borrow weight = TRUE layer mass dp (post-mass-fix p_s — the
+            # dry-mass fixer runs before the floors).  On pure sigma dp =
+            # dsigma*p_s and the per-column p_s cancels in the rescale; on
+            # HYBRID dsigma is NOT the layer mass (mis-conserves by O(0.1%)),
+            # so use real dp.  Non-positive dp (broken hybrid layer) is
+            # zero-weighted rather than borrowed from.  The naive max(q,0)
+            # clamp INVENTED +30 kg/m2/yr of water (MEASURED 2026-07-26, 96%
+            # from the spiky q_i/q_c fields; N_i reached 1e193/NaN by day 803
+            # of century3) — the conserving BORROW is the default cure.
+            _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
+            _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+            # ONE shared positivity stage for every dycore (#1354/#1515):
+            # borrow (default) is frozen-MSE-neutral for vapour AND condensate;
+            # the hard-floor fallback carries the per-species latent-heat T
+            # correction incl ice.  Serial jnp.sum here; the MPI lane passes an
+            # allreduce-SUM reduction.
+            from legoesm.core.conservation import apply_water_positivity
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=self.config.conservative_tracer_clamp,
+                energy_consistent=self.config.energy_consistent_moisture_clip)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
         # there; running it after the tracer clamp shifted diagnosed column

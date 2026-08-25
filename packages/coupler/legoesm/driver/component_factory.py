@@ -490,6 +490,7 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
             # Issue #273 Phase 3: forward the implicit gravity-wave
             # damping switches from the canonical driver config.
@@ -589,6 +590,7 @@ def create_atmosphere_dycore(
             # branch contract).
             fix_mass=dc.fix_mass and dc.conservation_fixer,
             anchor_mass_to_initial=dc.fix_mass and dc.conservation_fixer,
+            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
         )
         return SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
@@ -922,6 +924,8 @@ def create_atmosphere_dycore(
         cfg = CGridLatLonPrimitiveEquationConfig(
             A_h=_A_h,
             fix_mass=_fix_mass,
+            conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,  # #1354/#1515 borrow (grid-general knob)
+            energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (hard-floor path only)
             # Stage 3-E: pass polar-filter parameters through.  When
             # use_polar_filter is False (default) the model's filter
             # mask is None and no FFT is applied — bit-identical to

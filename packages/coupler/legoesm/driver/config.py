@@ -234,6 +234,10 @@ class DycoreConfig(NamedTuple):
     # Default TRUE since 2026-08-16 (owner decision: "conserving form
     # always"); ``--no-mpas-conservative-tracer-clamp`` restores the legacy
     # mass-creating clamp for bit-comparison against older runs.
+    # #1354/#1515: this knob is now GRID-GENERAL — it also drives the borrow on
+    # the cube, spectral and lat-lon lanes (each previously had a plain clamp or
+    # NO floor at all), so every grid's tracer positivity is equivalent.  The
+    # ``mpas_`` prefix is legacy; a rename is deferred to avoid a schema churn.
     mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
