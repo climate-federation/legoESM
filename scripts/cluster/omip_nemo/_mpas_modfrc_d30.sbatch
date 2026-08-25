@@ -31,12 +31,21 @@ echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
 rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
+# codex review fixes (job 9499087): --years overshoots to 30.05 d so the
+# day-30 cadence snapshot is actually written (0.0821355 y = 29.979 d wrote
+# only snapshot_final); --adaptive-implicit-vertadv/--momentum-rk3 DROPPED
+# (the MPAS builder silently ignores both -- carrying them would claim
+# physics the arm does not run); the four --tke-* knobs ADDED (legal on MPAS
+# under --mpas-vmix tke since the tke-card wiring; matches the standard
+# card's closure exactly).
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke \
-  --dt 150 --nemo-vertical --partial-cell --adaptive-implicit-vertadv \
-  --momentum-rk3 --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
+  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
+  --tke-kappa-convention veros_sqrte \
+  --dt 150 --nemo-vertical --partial-cell \
+  --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
   --sss-restore-bound-mmday 4 --sss-ice-gate-nemo --prognostic-sea-ice \
-  --prognostic-ice-dynamics free_drift --years 0.0821355 --snapshot-every-days 30 \
+  --prognostic-ice-dynamics free_drift --years 0.0823288 --snapshot-every-days 30 \
   --diag-every-days 5 --tracer-advection superbee --runoff-depth-nemo-ini \
   --river-mouth-restoring-gate --bottom-drag-scheme nemo_quadratic \
   --ice-ocean-heat-coeff 70 \
@@ -53,6 +62,7 @@ echo "=== run rc=$run_rc"
 export JAX_PLATFORMS=cpu
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
 echo "=== day 30 vs GATEWAY rec 5 ==="
+[ -f $OUT/snapshot_day0030.npz ] || { echo "FATAL: day-30 snapshot missing"; exit 1; }
 $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot $OUT/snapshot_day0030.npz \
   --nemo-gridt "$GW_T" --nemo-time-idx 5 --freeze-clamp-C -1.8 \
   --sss-faithful --grid-label mpas_modfrc_d30 \

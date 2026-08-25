@@ -10,8 +10,10 @@
 #
 # ============================================================================
 # THE STANDARD NEMO-FAITHFUL 1-DEGREE TRIPOLE CONFIGURATION (user-declared
-# standard, 2026-08-25).  This is the byte-identical card of the validated
-# 180-day drift run (results/omip_nemo/nemolev_trp_long180, job 9471858),
+# standard, 2026-08-25).  This is the FLAG-IDENTICAL card of the validated
+# 180-day drift run (results/omip_nemo/nemolev_trp_long180, job 9471858) --
+# run length is parameterized (+0.05 d overshoot, see YEARS below), so a
+# DAYS=180 invocation is 10 steps shorter than long180's 180.017 d,
 # which against NEMO's matched GATEWAY cold start scored:
 #   d30: SST rmse 0.515 C (bias +0.01) SSS rmse 0.464  nino3 +1.42
 #   d60: SST rmse 0.495 C (bias +0.00) SSS rmse 0.617  nino3 +1.43
@@ -40,7 +42,11 @@ export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/nemolev_trp_${NAME}
-YEARS=$($PY -c "print(${DAYS}/365.0)")
+# +0.05 day overshoot: the driver SKIPS the cadence snapshot at the final
+# step (codex HIGH: DAYS=90 with exact-length run wrote only snapshot_final,
+# so the advertised d90 self-score never ran).  The overshoot makes every
+# 15-day cadence snapshot, day DAYS included, land as a normal cadence write.
+YEARS=$($PY -c "print((${DAYS}+0.05)/365.0)")
 
 echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
@@ -76,15 +82,21 @@ echo "=== run rc=$run_rc"
 export JAX_PLATFORMS=cpu
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
 echo "=== GATEWAY-matched scores (5-day means; only to day 90) ==="
+score_fail=0
 for pair in "0030 5" "0060 11" "0090 17"; do
   set -- $pair
+  [ $((10#$1)) -le "$DAYS" ] || continue
   SNAP=$OUT/snapshot_day$1.npz
-  [ -f "$SNAP" ] || continue
+  # A missing in-range snapshot is FATAL (codex: silent continue hid the
+  # endpoint-snapshot bug), not skipped.
+  [ -f "$SNAP" ] || { echo "FATAL: expected $SNAP missing"; score_fail=1; continue; }
   echo "### day $1 vs GATEWAY rec $2 ###"
   $PY scripts/validate/compare_omip_nemo.py --legoesm-snapshot "$SNAP" \
     --nemo-gridt "$GW_T" --nemo-time-idx "$2" --freeze-clamp-C -1.8 \
     --sss-faithful --grid-label ${NAME}_d$1 \
     --output-dir $ROOT/results/omip_nemo/compare_${NAME}_d$1 2>&1 \
     | grep -E "nino3_5S5N|verdict|\[SST\]|\[SSS\]" | head -6
+  [ ${PIPESTATUS[0]} -eq 0 ] || { echo "FATAL: scorer failed for day $1"; score_fail=1; }
 done
+[ $score_fail -eq 0 ] || { echo "[STANDARD-SCORE-FAIL]"; exit 1; }
 echo DONE

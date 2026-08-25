@@ -22,9 +22,12 @@ The corrected (_MOD) CORE-II forcing is the default resolver, gated by
 `tests/ocean/unit/test_core2_corrected_cache_default.py`.
 Change ONE flag per new run and A/B against this card; never edit it in place.
 Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
---iwm --nemo-monthly-init` or the `--tke-*` knobs (driver hard-errors), so
-matched three-grid comparisons run a reduced common card on ALL grids — see
-`_xgrid_mpas.sbatch` header.
+--iwm --nemo-monthly-init` (driver hard-errors), and it silently IGNORES
+`--adaptive-implicit-vertadv`/`--momentum-rk3` (builder does not forward
+them — do not pass flags an arm does not run).  The `--tke-*` knobs ARE now
+legal on MPAS under `--mpas-vmix tke` (the older `_xgrid_mpas.sbatch` header
+predates that wiring).  Matched three-grid comparisons therefore run the
+maximal common card; each arm's number carries its reduced-card caveat.
 
 **Goal.** Run reference NEMO ORCA1 (morays, COREv2 normal-year forcing) and drive
 legoESM ocean on **all 5 grids** under the *same* forcing; iterate legoESM code
