@@ -140,3 +140,79 @@ def test_ring_exchange_poison_proves_no_out_of_ring_read(tab, stag):
     assert np.isfinite(got).all(), \
         "NaN reached the output: the tables read outside the ring"
     assert np.array_equal(got, ref)
+
+
+# ---- vector ring exchange: bitwise parity + poison, D and C flows ----
+
+def _vec_fixture(tab, grid, seed):
+    ma = tab.n + 2 * tab.ng
+    mb = ma + 1
+    rng = np.random.default_rng(seed)
+    if grid == "D":
+        return (rng.standard_normal((6, ma, mb)),
+                rng.standard_normal((6, mb, ma)))
+    return (rng.standard_normal((6, mb, ma)),
+            rng.standard_normal((6, ma, mb)))
+
+
+@pytest.mark.parametrize("n_dev", [2, 6])
+@pytest.mark.parametrize("grid", ["D", "C"])
+def test_ring_vector_matches_certified_bitwise(tab, n_dev, grid):
+    """Full 7-step vector flow under the ring exchange must equal the
+    certified single-device flow BITWISE on own faces: other faces' ring
+    c2l values are recomputed from their gathered u/v rings (same inputs,
+    same op).  NaN slots (c2l band edges, pack_p1) must match too --
+    array_equal with equal_nan pins the whole layout."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    from legoesm.grids.fv3_duo_halos import (
+        ext_vector_cgrid_sixface, ext_vector_dgrid_sixface)
+    from legoesm.grids.fv3_duo_spmd import make_ring_ext_vector_sixface
+
+    devs = _devices_or_skip(n_dev)
+    u6, v6 = map(jnp.asarray, _vec_fixture(tab, grid, 11))
+    flow = (ext_vector_dgrid_sixface if grid == "D"
+            else ext_vector_cgrid_sixface)
+    ru, rv = flow(u6, v6, tab)
+    ru, rv = np.asarray(ru), np.asarray(rv)
+
+    mesh = Mesh(np.array(devs), ("face",))
+    fn, depth = make_ring_ext_vector_sixface(tab, grid, mesh)
+    assert depth == 7
+    sh = NamedSharding(mesh, P("face"))
+    gu, gv = fn(jax.device_put(u6, sh), jax.device_put(v6, sh))
+    gu, gv = np.asarray(gu), np.asarray(gv)
+    assert np.array_equal(gu, ru, equal_nan=True), (
+        f"u diverged: |d|max={np.nanmax(np.abs(gu - ru)):.3e}")
+    assert np.array_equal(gv, rv, equal_nan=True), (
+        f"v diverged: |d|max={np.nanmax(np.abs(gv - rv)):.3e}")
+
+
+@pytest.mark.parametrize("grid", ["D", "C"])
+def test_ring_vector_poison_proves_ring_sufficiency(tab, grid):
+    """poison=True: non-ring, non-own cells are NaN.  The composed flow's
+    EFFECTIVE cross-face footprint (strips + c2l-feeding-geo, GLM's
+    compounding-depth hole) must fit inside width 8 -- a NaN escaping
+    into a certified-finite own-face cell fails array_equal loudly."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+    from legoesm.grids.fv3_duo_halos import (
+        ext_vector_cgrid_sixface, ext_vector_dgrid_sixface)
+    from legoesm.grids.fv3_duo_spmd import make_ring_ext_vector_sixface
+
+    devs = _devices_or_skip(6)
+    u6, v6 = map(jnp.asarray, _vec_fixture(tab, grid, 12))
+    flow = (ext_vector_dgrid_sixface if grid == "D"
+            else ext_vector_cgrid_sixface)
+    ru, rv = flow(u6, v6, tab)
+
+    mesh = Mesh(np.array(devs), ("face",))
+    fn, _ = make_ring_ext_vector_sixface(tab, grid, mesh, poison=True)
+    sh = NamedSharding(mesh, P("face"))
+    gu, gv = fn(jax.device_put(u6, sh), jax.device_put(v6, sh))
+    assert np.array_equal(np.asarray(gu), np.asarray(ru), equal_nan=True)
+    assert np.array_equal(np.asarray(gv), np.asarray(rv), equal_nan=True)

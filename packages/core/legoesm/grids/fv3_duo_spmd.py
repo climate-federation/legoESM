@@ -264,3 +264,97 @@ def make_ring_ext_scalar_sixface(tab, stag: str, mesh, *,
     return shard_map(_body, mesh=mesh,
                      in_specs=P(ax_name), out_specs=P(ax_name),
                      check_rep=False), depth
+
+
+def make_ring_ext_vector_sixface(tab, grid: str, mesh, *,
+                                 ring_width: int = 8,
+                                 poison: bool = False):
+    """shard_map'd VECTOR exchange (D or C grid), O(halo) comm.
+
+    ``grid``: ``"D"`` wraps ``ext_vector_dgrid_sixface`` (u ``(6,ma,mb)``,
+    v ``(6,mb,ma)``); ``"C"`` wraps ``ext_vector_cgrid_sixface`` (uc
+    ``(6,mb,ma)``, vc ``(6,ma,mb)``).  Returns ``(fn, depth)`` with
+    ``fn(u_local, v_local) -> (u_local, v_local)``.
+
+    ONE fused all_gather of both components' width-w borders replaces the
+    design's second mid-flow collective: the composed flow's only
+    cross-face reads are (1) the strip scatters (census depth <= 6) and
+    (2) the geo-lattice exchange, whose sources are ``c2l`` values at a4
+    depth <= 7 -- and ``c2l``/``pack_p1`` read only +-1 cell, so OTHER
+    faces' ring c2l values are recomputed here from their gathered u/v
+    rings, BITWISE equal to owner-computed (same inputs, same op).  The
+    interior garbage of non-own faces never reaches an own-face output;
+    ``poison=True`` (NaN fill) makes any violation loud, and the bitwise
+    parity test is the proof.  Non-own-face compute is redundant by
+    6/g -- a constant-factor cost on cheap diagnostic-grade ops, accepted
+    at the <= 6-device ceiling and re-measured on the GPU ladder; the
+    O(state) comm it replaces was the measured killer.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from jax.experimental.shard_map import shard_map
+
+    from legoesm.grids.fv3_duo_halos import (
+        ext_vector_cgrid_sixface,
+        ext_vector_dgrid_sixface,
+    )
+
+    depth = assert_ring_width_covers(tab, ring_width)
+    ma = tab.n + 2 * tab.ng
+    mb = ma + 1
+    if grid == "D":
+        shapes, flow = ((ma, mb), (mb, ma)), ext_vector_dgrid_sixface
+    elif grid == "C":
+        shapes, flow = ((mb, ma), (ma, mb)), ext_vector_cgrid_sixface
+    else:
+        raise ValueError(
+            f"make_ring_ext_vector_sixface: grid {grid!r} (expected 'D' "
+            f"or 'C')")
+    (ax_name, ax_size), = ((n, s) for n, s in
+                          zip(mesh.axis_names, mesh.devices.shape))
+    if 6 % ax_size != 0:
+        raise ValueError(
+            f"mesh axis {ax_name!r} has {ax_size} devices; 6 faces "
+            f"require a divisor (1, 2, 3, 6)")
+    g = 6 // ax_size
+    w = ring_width
+    bidx = [np.flatnonzero(_border_mask_rect(s0, s1, w).ravel())
+            for (s0, s1) in shapes]
+
+    def _body(u_local, v_local):
+        payloads = []
+        for arr, (s0, s1), bi in zip((u_local, v_local), shapes, bidx):
+            payloads.append(arr.reshape(g, s0 * s1)[:, bi])
+        fused = jnp.concatenate(payloads, axis=1)         # (g, nb_u+nb_v)
+        allb = jax.lax.all_gather(fused, ax_name)          # (d, g, nb)
+        allb = allb.reshape(6, -1)
+        me = jax.lax.axis_index(ax_name)
+        rows = me * g + jnp.arange(g)
+        fill = jnp.nan if poison else 0.0
+        stacks = []
+        off = 0
+        for arr, (s0, s1), bi in zip((u_local, v_local), shapes, bidx):
+            st = jnp.full((6, s0 * s1), fill, dtype=arr.dtype)
+            st = st.at[:, bi].set(allb[:, off:off + bi.size])
+            st = st.at[rows, :].set(arr.reshape(g, s0 * s1))
+            stacks.append(st.reshape(6, s0, s1))
+            off += bi.size
+        u_out, v_out = flow(stacks[0], stacks[1], tab)
+        return (jax.lax.dynamic_slice_in_dim(u_out, me * g, g, axis=0),
+                jax.lax.dynamic_slice_in_dim(v_out, me * g, g, axis=0))
+
+    return shard_map(_body, mesh=mesh,
+                     in_specs=(P(ax_name), P(ax_name)),
+                     out_specs=(P(ax_name), P(ax_name)),
+                     check_rep=False), depth
+
+
+def _border_mask_rect(m0: int, m1: int, w: int) -> np.ndarray:
+    """Boolean (m0, m1) full-border mask, corner blocks included."""
+    mask = np.zeros((m0, m1), dtype=bool)
+    mask[:w, :] = True
+    mask[-w:, :] = True
+    mask[:, :w] = True
+    mask[:, -w:] = True
+    return mask
