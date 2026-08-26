@@ -209,7 +209,11 @@ def print_latest_complete_signature(root):
         print(best[1])
 
 
-_MANIFEST_SCHEMA = 1
+# Schema 2, 2026-08-26: the terrain-reconciliation fix changed the CONTENT of
+# every ingested sample while leaving the config fingerprint unchanged (the
+# ingest transform is code, not YAML) — a schema-1 checkpoint or probe result
+# was measured on pre-fix data and must not resume against post-fix samples.
+_MANIFEST_SCHEMA = 2
 
 
 def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
