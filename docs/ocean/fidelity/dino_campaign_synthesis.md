@@ -131,8 +131,16 @@ The 10-year ensemble that set the constants was fully saturated by years 3–5; 
 relative by day 90. Consequence, stated plainly in the source: **"5/5 at the
 gate" means "within declared acceptance tolerances", NOT "indistinguishable from
 NEMO."** Re-scored at the measured floor, the shipped arm's 90-day transport gap
-is ~25,000 floors. The gate constants were **not** touched — changing them goes
-through the owner — but they should lose the "noise floor" label.
+is **~25,000 floors** — and the campaign's later full-section budget scores the
+same card at **25,000× (full section) and 3,900× (channel)**. The gate constants
+were **not** touched — changing them goes through the owner — but they should
+lose the "noise floor" label.
+
+**Read that ratio's denominator carefully.** Those multiples are quoted verbatim
+and are scored against the *measured 90-day **difference** floor* — the bar for
+comparing two runs — which is **not** the single-run spread tabulated above.
+Dividing a gap by 1.15e-05 will not reproduce them and is not how the source
+computed them. Quote the multiples, or quote the spread; do not mix the two.
 
 The NEMO side was then measured too: NEMO's own 90-day spread is **1.5e-07 Sv**
 against legoESM's 1.15e-05, i.e. 10–100× tighter, and the combined RSS bar
@@ -141,10 +149,13 @@ two-sided. legoESM's larger spread is an **upper bound** — fp32 snapshot stora
 bounds it from above.
 
 The one place the 0.05–0.09 Sv constant is validated is the **1-year** horizon:
-prediction P1 in the verdict run confirmed the floors grow into that class by
-year end (legoESM day-360 ACC spread 0.0447 std / 0.102 range against the
-transferred 0.050 / 0.091 — growth from day 90 of ×2200). So the verdict run's
-own floors are measured, not transferred; the 90-day gate's are transferred.
+prediction P1 in the verdict run confirmed it, for the **ACC transport** metric
+specifically (legoESM day-360 spread 0.0447 std / 0.102 range against the
+transferred 0.050 / 0.091 — growth from day 90 of ×2200). Two things follow, and
+they are different claims: P1 validated **one constant's magnitude class** at one
+year, and separately **every floor in the day-360 table above was measured
+directly** from that run's own ensembles rather than transferred. The 90-day
+gate's constants are the transferred ones.
 
 **Deep ocean.** Excluded explicitly by the headline sentence. Density metrics at
 day 360 all score `no` against floors of 1e-6 or less, with absolute gaps 1e-4
