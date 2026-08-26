@@ -1492,11 +1492,21 @@ def main(argv: list[str] | None = None) -> int:
     # --reference-dir (its basename's trailing digits, default 300); its ref is
     # `ref` above so the profile record and albedo stay tied to it.
     _ssts = [float(x) for x in str(args.ssts).split(",") if x.strip()]
+    if len(set(_ssts)) != len(_ssts):
+        raise SystemExit(
+            f"--ssts has duplicate values {_ssts}; a repeated SST silently "
+            "re-weights the joint mean.")
     _primary_sst = 300.0
     import re as _re
     _m = _re.search(r"(\d{3})$", args.reference_dir.name)
     if _m:
         _primary_sst = float(_m.group(1))
+    if _primary_sst not in _ssts:
+        raise SystemExit(
+            f"--reference-dir implies primary SST {_primary_sst} K but --ssts "
+            f"is {_ssts}; the primary reference must be one of the tuned SSTs "
+            "(otherwise the profile/albedo are built for an SST not scored). "
+            "Point --reference-dir at a matching rcemip_ref_sam<SST> dir.")
     if args.joint_reference_dirs:
         _dirs = [Path(d) for d in args.joint_reference_dirs.split(",")]
     else:
@@ -1508,6 +1518,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{len(_dirs)}; they must match 1:1.")
     for _s, _d in zip(_ssts, _dirs):
         _dm = _re.search(r"(\d{3})$", Path(_d).name)
+        if args.joint_reference_dirs and _dm is None:
+            raise SystemExit(
+                f"--joint-reference-dirs entry {_d} has no trailing 3-digit "
+                f"SST, so it cannot be validated against its paired SST "
+                f"{_s} K; name it rcemip_ref_sam<SST> so a reversed list is "
+                "caught.")
         if _dm and float(_dm.group(1)) != float(_s):
             raise SystemExit(
                 f"--joint-reference-dirs mismatch: SST {_s} K paired with "

@@ -77,3 +77,32 @@ def test_albedo_tracks_sst():
     # The ocean albedo is SST-dependent (weakly); the two must at least be
     # resolved from the same code path without error and be finite.
     assert np.isfinite(a295) and np.isfinite(a305)
+
+
+# --- CLI input guards (codex review round 2) --------------------------------
+
+def _run_main(argv):
+    import importlib.util
+    path = _REPO / "scripts" / "run" / "run_scm_rce_convection_intercomparison.py"
+    spec = importlib.util.spec_from_file_location("scm_rce_ic_cli", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod.main(argv)
+
+
+def test_duplicate_ssts_are_rejected():
+    with pytest.raises(SystemExit, match="duplicate"):
+        _run_main(["--schemes", "dca", "--ssts", "295,300,300,305",
+                   "--reference-dir",
+                   "/burg-archive/glab/users/pg2328/legoESM/results/"
+                   "rcemip_ref_sam300", "--no-merge"])
+
+
+def test_primary_sst_not_in_ssts_is_rejected():
+    # --ssts 295 with a 300 K reference dir would silently tune 300.
+    with pytest.raises(SystemExit, match="primary reference must be one of"):
+        _run_main(["--schemes", "dca", "--ssts", "295",
+                   "--reference-dir",
+                   "/burg-archive/glab/users/pg2328/legoESM/results/"
+                   "rcemip_ref_sam300", "--no-merge"])
