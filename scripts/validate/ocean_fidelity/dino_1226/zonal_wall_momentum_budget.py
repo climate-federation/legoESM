@@ -61,12 +61,23 @@ TERM_MAP = {
     "vertadv": (("zad",), ("vertadv_u", "vertadv_v")),
     "lateral_visc": (("ldf",), ("Ah_lap_u", "Bh_bilap_u", "Cs_smag_u",
                                 "Cl_leith_u")),
-    "botdrag": (("bfr", "bfri"), ("botdrag_u", "botdrag_v")),
-    "surface_phys": (("tau",), ("phys_u", "phys_v")),
 }
 #: NEMO trends with no baroclinic-diagnostic counterpart.  Reported, never
 #: silently dropped.
-UNCOMPARABLE = ("spg", "zdf", "atf")
+UNCOMPARABLE = {
+    "spg": ("the barotropic surface-pressure-gradient term; legoESM applies "
+            "it inside the barotropic substep loop, so it has no counterpart "
+            "in the baroclinic diagnostic set. THIS IS WHERE A FREE-SURFACE "
+            "TWO-STEP SOURCE WOULD MOST PLAUSIBLY LIVE."),
+    "zdf": "vertical viscosity; applied implicitly in legoESM",
+    "atf": "the Asselin filter; not a tendency in this sense",
+    "bfr": ("bottom drag: NEMO folds it into zdf and legoESM applies it "
+            "implicitly, so BOTH sides are identically zero. Uncomparable by "
+            "PLACEMENT, not absent -- at a shallow end-wall row bottom drag "
+            "is not obviously negligible, so this is a gap, not an exclusion."),
+    "tau": ("surface stress: same placement story as bfr; both sides read "
+            "exactly zero"),
+}
 
 #: A term whose oracle rms on a band is below this is DEAD there; a relative
 #: difference against it would be division by a structural zero.
@@ -193,7 +204,9 @@ def resolve_alignment(lego: np.ndarray, nemo: np.ndarray, wet3: np.ndarray,
     one more latitude row, and which face index means which physical face is a
     CONVENTION, not something to infer from a docstring.  So it is measured:
     the offset is chosen by correlation against the oracle over the whole wet
-    domain, and if no offset correlates decisively the probe REFUSES rather
+    domain.  A GLOBAL offset cannot be locally wrong: it is an integer index
+    convention applied uniformly to the array, not a fitted field.  If no
+    offset correlates decisively the probe REFUSES rather
     than quietly picking the best of three bad options -- a misaligned pairing
     would put every "difference" on the wrong cells, which is exactly how a
     wall-row finding gets manufactured.
@@ -219,6 +232,12 @@ def resolve_alignment(lego: np.ndarray, nemo: np.ndarray, wet3: np.ndarray,
                                "domain, so no correlation can select an "
                                "offset")}
         c = float(np.corrcoef(x, y)[0, 1])
+        if not np.isfinite(c):
+            raise SystemExit(
+                f"resolve_alignment: correlation is {c} at offset {off} -- a "
+                "NaN anywhere in a field would leave `best` pinned at its "
+                "first value and slip past the refusal guard, putting every "
+                "difference on the wrong cells")
         scores[off] = c
         if best is None or c > scores[best]:
             best = off
@@ -227,13 +246,22 @@ def resolve_alignment(lego: np.ndarray, nemo: np.ndarray, wet3: np.ndarray,
             f"resolve_alignment: no offset produced matching shapes -- lego "
             f"{lego.shape}, nemo {nemo.shape}, axis {axis}")
     ranked = sorted(scores.values(), reverse=True)
-    if ranked[0] < 0.5:
+    # The bar is the MARGIN as well as the level.  A threshold on the absolute
+    # best alone would accept a pair scoring 0.51 against 0.50, which is a
+    # coin toss dressed as a measurement.
+    # Judge the RESIDUAL, not the raw gap.  Two offsets can both correlate
+    # above 0.98 while one is right to 4e-6 and the other wrong by 2e-2 -- a
+    # 4000x difference in what is left over, which a subtraction of the
+    # correlations hides completely.
+    resid = [max(1.0 - c, 1e-16) for c in ranked]
+    ratio = resid[1] / resid[0] if len(resid) > 1 else np.inf
+    if ranked[0] < 0.9 or ratio < 10.0:
         raise SystemExit(
-            f"resolve_alignment: best correlation {ranked[0]:.3f} on axis "
-            f"{axis} -- the term pairing or the layout is wrong, and a budget "
-            "built on it would attribute differences to the wrong cells. "
-            f"scores={scores}")
-    return {"offset": int(best), "correlations": scores, "dead": False}
+            f"resolve_alignment: best correlation {ranked[0]:.6f}, residual "
+            f"ratio {ratio:.1f} on axis {axis} -- the term pairing or the "
+            f"layout is wrong, or the offset is not decided. scores={scores}")
+    return {"offset": int(best), "correlations": scores,
+            "residual_ratio": float(ratio), "dead": False}
 
 
 def take(lego: np.ndarray, off: int, axis: int, n: int) -> np.ndarray:
@@ -251,8 +279,15 @@ def one_state(kt: int, run_stepdump: str, run_traj: str, recipe: str) -> dict:
     br, cfg, mc, model, forcing, sf, st = ktw._build_twin_state(  # noqa: SLF001
         recipe, run_traj, run_stepdump, bridge_before=True,
         restart_file=f"DINO_{kt:08d}_restart.nc")
+    # NEMO evaluates lateral friction at the BEFORE level
+    # (dyn_ldf(kstp, Nbb, Nnn, ...), stpmlf.F90:319), and legoESM's production
+    # leapfrog path matches it.  Omitting this compared lego(now) against
+    # NEMO(before) for that one term and measured A_h*lap(u_now - u_before) --
+    # a quantity the instrument manufactured.
+    ldf_state = (st.T_before.data, st.S_before.data,
+                 st.u_before.data, st.v_before.data)
     _tend, diag = model.tendencies_with_diagnostics(
-        st, surface_forcing=sf, dt=ktw.DT)
+        st, surface_forcing=sf, dt=ktw.DT, ldf_state=ldf_state)
 
     mm = netCDF4.Dataset(os.path.join(run_stepdump, "mesh_mask.nc"))
     umask = _llz(mm.variables["umask"][0]) > 0.5
@@ -290,6 +325,7 @@ def one_state(kt: int, run_stepdump: str, run_traj: str, recipe: str) -> dict:
 
     out: dict = {"kt": kt, "kt_next": kt + 1, "bands": {}, "alignment": {},
                  "uncomparable_nemo_trends": list(UNCOMPARABLE)}
+    cells: dict = {}
     for comp, axis in (("u", 1), ("v", 0)):
         wet3 = msk3[comp]
         for term, (ntrd, lnames) in TERM_MAP.items():
@@ -297,15 +333,32 @@ def one_state(kt: int, run_stepdump: str, run_traj: str, recipe: str) -> dict:
             for t in ntrd:
                 v = _llz(ds.variables[f"{comp}trd_{t}"][0]).astype(float)
                 nemo = v if nemo is None else nemo + v
-            names = tuple(n for n in lnames if n.endswith(f"_{comp}")) or lnames
-            lego_full = lego_term(names, comp)
+            # ``lego_term`` strips any _u/_v suffix and re-appends ``comp``,
+            # so filtering the names by component beforehand could never
+            # change the result -- that filter was dead logic and would have
+            # silently mis-selected the day a genuinely mixed-component list
+            # appeared.  Deleted.
+            lego_full = lego_term(lnames, comp)
             key = f"{comp}:{term}"
             al = resolve_alignment(lego_full, nemo, wet3, axis)
             out["alignment"][key] = al
             lego = take(lego_full, al["offset"], axis, nemo.shape[axis])
             d = (lego - nemo) * wet3
             rec = {}
+            # Per-cell values on the WALL bands are retained across states so
+            # the 2-step component can be taken PER CELL and only then
+            # aggregated -- the order the sea-surface result uses.  Taking the
+            # band mean first cancels any signal whose sign varies along the
+            # wall or down the column, measured at 44x to 80000x depending on
+            # term (2026-08-25 review).  The interior band is NOT retained:
+            # 9256 cells x 36 levels x 9 states x 12 keys does not fit, and
+            # the interior is only ever used as the rms reference.
             for bname, bmask in pts[comp].items():
+                if bname != "interior":
+                    cells[f"{key}|{bname}"] = {
+                        "diff": d[bmask].astype(np.float32),
+                        "nemo": (nemo * wet3)[bmask].astype(np.float32),
+                        "lego": (lego * wet3)[bmask].astype(np.float32)}
                 n_rms = weighted_rms(nemo * wet3, bmask, area[comp], e3, wet3)
                 rec[bname] = {
                     "nemo_rms_ms2": n_rms,
@@ -318,35 +371,74 @@ def one_state(kt: int, run_stepdump: str, run_traj: str, recipe: str) -> dict:
                     "cells": int(bmask.sum()),
                     "dead": bool(n_rms < DEAD_TERM_MS2),
                 }
+                # "one side is identically zero" cannot say WHICH, and the
+                # claims doc asserted NEMO's without the instrument knowing.
+                rec[bname]["zero_side"] = (
+                    "both" if (rec[bname]["nemo_rms_ms2"] < DEAD_TERM_MS2
+                               and rec[bname]["lego_rms_ms2"] < DEAD_TERM_MS2)
+                    else "nemo" if rec[bname]["nemo_rms_ms2"] < DEAD_TERM_MS2
+                    else "lego" if rec[bname]["lego_rms_ms2"] < DEAD_TERM_MS2
+                    else "neither")
                 rec[bname]["relative_diff"] = (
                     None if rec[bname]["dead"]
                     else rec[bname]["diff_rms_ms2"] / n_rms)
             out["bands"][key] = rec
-    return out
+        # Weights for the retained bands, so a per-cell statistic aggregates
+        # with exactly the weighting the band statistics used.
+        for bname, bmask in pts[comp].items():
+            if bname != "interior":
+                out.setdefault("weights", {})[f"{comp}|{bname}"] = (
+                    _volume_weights(bmask, area[comp], e3,
+                                    msk3[comp]).astype(np.float32))
+    return out, cells
 
 
-def verdict_inputs(states: list) -> dict:
+def per_cell_nyquist(series: np.ndarray, weights: np.ndarray) -> float:
+    """2-step amplitude taken PER CELL, then aggregated. Order matters.
+
+    ``series`` is (n_states, n_cells, n_levels); ``weights`` is
+    (n_cells, n_levels).  The sea-surface result takes the Nyquist component
+    per cell and then aggregates, and this does the same -- so the budget and
+    the amplitude cannot be decided by two estimators that disagree.
+
+    The first version of this probe reduced to a band MEAN per state and only
+    then took the Nyquist component.  That cancels any signal whose sign
+    varies along the wall or down the column, and review measured the
+    suppression at 44x to 80000x depending on term (worst for lateral
+    viscosity, the very stencil most worth suspecting).  A null computed that
+    way was a property of the reduction, not of the model.
+    """
+    if series.shape[0] < 3:
+        raise SystemExit("per_cell_nyquist needs at least 3 states")
+    alt = ewt.two_dt_component(series.astype(np.float64))
+    amp = np.sqrt((alt ** 2).mean(axis=0))
+    tot = float(weights.sum())
+    if tot <= 0.0:
+        raise SystemExit("per_cell_nyquist: band carries no weight")
+    return float(np.sqrt(float((weights * amp ** 2).sum()) / tot))
+
+
+def verdict_inputs(states: list, cells: list, weights: dict) -> dict:
     """The pre-registered rule's INPUTS, per term. Not a verdict.
 
     RUN 3 of /tmp/dino_flicker/PREREGISTRATION.md:
       SOURCE     -- some comparable term with R(zonal) >= 3*R(interior) AND a
-                    2-step signature in its zonal band-mean difference.  The
+                    2-step signature in its zonal-wall difference.  The
                     registration wrote that second condition as a SIGN-FLIP
-                    COUNT; that statistic is blind to an alternating part
-                    smaller than the steady offset it rides on, so it is
-                    reported but the condition is DECIDED on
-                    ``nyquist_over_steady``.  The substitution is recorded as
-                    a deviation from the registration rather than made
-                    silently.
-      SLOW FIELD -- every comparable term with R(zonal) <= 1.5*R(interior) and
-                    no term alternating on more than 1 of 4 -- and even then
-                    the honest statement is "not in the six comparable terms",
-                    because the barotropic surface-pressure-gradient term is
-                    not among them.
+                    COUNT on the band mean; that statistic is blind to an
+                    alternating part smaller than the steady offset, AND the
+                    band-mean reduction suppresses a spatially incoherent
+                    signal by orders of magnitude.  The condition is decided on
+                    ``nyquist_per_cell_diff_ms2`` relative to the SAME
+                    statistic on the oracle term, so the null has a scale.
+                    Both substitutions are recorded as deviations from the
+                    registration rather than made silently.
+      SLOW FIELD -- every comparable term with R(zonal) <= 1.5*R(interior).
       otherwise  -- INCONCLUSIVE.
-    The two numbers each arm needs are computed here; the reading is left to
-    the analysis, because a probe that prints its own verdict gets that verdict
-    echoed back as evidence.
+
+    Per-state SPREAD is reported next to every mean: thresholding a mean whose
+    scatter is not shown is how a term that crosses the bar on 6 of 9 states
+    gets read as a stable 2.3x.
     """
     keys = sorted(states[0]["bands"])
     out = {}
@@ -356,28 +448,75 @@ def verdict_inputs(states: list) -> dict:
         if any(r["dead"] for r in zo) or any(r["dead"] for r in it):
             out[k] = {"dead_on_some_state": True}
             continue
+        per_state = [r["relative_diff"] / i["relative_diff"]
+                     if i["relative_diff"] > 0 else None
+                     for r, i in zip(zo, it)]
         rz = float(np.mean([r["relative_diff"] for r in zo]))
         ri = float(np.mean([r["relative_diff"] for r in it]))
         means = [r["diff_mean_ms2"] for r in zo]
-        steady = float(abs(np.mean(means)))
-        nyq = nyquist_amplitude(means)
-        out[k] = {
+        comp = k.split(":")[0]
+        rec = {
             "relative_diff_zonal": rz,
             "relative_diff_interior": ri,
             "enrichment_zonal_over_interior": (rz / ri) if ri > 0 else None,
+            "enrichment_by_state": per_state,
+            "enrichment_min": (min(v for v in per_state if v is not None)
+                               if any(v is not None for v in per_state)
+                               else None),
+            "enrichment_max": (max(v for v in per_state if v is not None)
+                               if any(v is not None for v in per_state)
+                               else None),
             "zonal_diff_mean_by_state_ms2": means,
-            # The source statistic. A steady operator offset gives a Nyquist
-            # amplitude orders below the offset; an injecting stencil gives one
-            # comparable to it.
-            "zonal_steady_offset_ms2": steady,
-            "zonal_nyquist_amplitude_ms2": nyq,
-            "nyquist_over_steady": (nyq / steady) if steady > 0 else None,
-            # Reported for continuity only -- see the docstring; it cannot see
-            # an alternating part smaller than the steady offset.
+            "zonal_steady_offset_ms2": float(abs(np.mean(means))),
+            # Reported for continuity only; see ``alternation_count``.
+            "band_mean_nyquist_ms2": nyquist_amplitude(means),
             "sign_alternations": alternation_count(means),
             "n_states": len(states),
         }
+        for band in ("zonal_wall", "meridional_wall"):
+            ck = f"{k}|{band}"
+            if ck not in cells[0]:
+                continue
+            w = weights[f"{comp}|{band}"]
+            got = {}
+            for what in ("diff", "nemo", "lego"):
+                arr = np.stack([c[ck][what] for c in cells])
+                got[what] = per_cell_nyquist(arr, w)
+            rec[f"{band}_nyquist_per_cell"] = {
+                "diff_ms2": got["diff"],
+                "nemo_ms2": got["nemo"],
+                "lego_ms2": got["lego"],
+                # THE SCALE THE NULL NEEDS: how much 2-step content the oracle
+                # term itself carries there. A tiny diff against a tiny oracle
+                # signal says nothing.
+                "diff_over_nemo": (got["diff"] / got["nemo"]
+                                   if got["nemo"] > 0 else None),
+                "lego_over_nemo": (got["lego"] / got["nemo"]
+                                   if got["nemo"] > 0 else None),
+            }
+        out[k] = rec
     return out
+
+
+def zonal_wall_rows(run_stepdump: str) -> dict:
+    """WHICH rows the zonal band actually is, and how the weight splits.
+
+    The band was described in prose as "rows j=1 and j=197".  It is not: any
+    wet cell with a dry north/south neighbour and wet east/west neighbours
+    qualifies, which picks up interior shelf edges too.  Review found the two
+    end walls also contribute very unequally.  A band statistic quoted against
+    a wrong row list is a mislabelled finding, so the real list is stamped.
+    """
+    import netCDF4  # noqa: PLC0415
+    mm = netCDF4.Dataset(os.path.join(run_stepdump, "mesh_mask.nc"))
+    tmask = _llz(mm.variables["tmask"][0]) > 0.5
+    lat = np.asarray(mm.variables["gphit"][0]).squeeze()
+    band = t_point_bands(tmask[..., 0])["zonal_wall"]
+    rows = {}
+    for j in np.unique(np.nonzero(band)[0]):
+        rows[int(j)] = {"cells": int(band[j].sum()),
+                        "lat_deg": float(lat[j, band[j]].mean())}
+    return {"rows": rows, "total_cells": int(band.sum())}
 
 
 def self_check(kt: int, run_stepdump: str) -> dict:
@@ -393,6 +532,7 @@ def self_check(kt: int, run_stepdump: str) -> dict:
     mm = netCDF4.Dataset(os.path.join(run_stepdump, "mesh_mask.nc"))
     tmask = _llz(mm.variables["tmask"][0]) > 0.5
     umask = _llz(mm.variables["umask"][0]) > 0.5
+    vmask = _llz(mm.variables["vmask"][0]) > 0.5
     e1u = np.asarray(mm.variables["e1u"][0]).squeeze()
     e2u = np.asarray(mm.variables["e2u"][0]).squeeze()
     e3 = np.asarray(mm.variables["e3t_1d"][:]).squeeze()
@@ -409,14 +549,32 @@ def self_check(kt: int, run_stepdump: str) -> dict:
     poisoned = field.copy()
     sign = ((-1.0) ** np.arange(field.shape[-1]))
     poisoned[~umask] = 1.0e6 * np.broadcast_to(sign, field.shape)[~umask]
+    # BOTH defences have to be un-installed for the control to test anything.
+    # Passing mask3d=umask here zeroed the poison inside _volume_weights before
+    # the band mask was ever consulted, so the control passed for a reason
+    # unrelated to its claim -- the SAME defect class already found and fixed
+    # once in the sea-surface probe, and it matters because 13% of this band's
+    # u cells are dry levels. Run against fully unmasked weights.
     area_unmasked = np.where(e1u * e2u > 0, e1u * e2u, 1.0)
+    ones3 = np.ones_like(umask, dtype=bool)
     bu = to_u_points(bands["zonal_wall"], umask[..., 0])
-    base = weighted_rms(field, bu, area_unmasked, e3, umask)
-    pois = weighted_rms(poisoned, bu, area_unmasked, e3, umask)
+    bv = to_v_points(bands["zonal_wall"], vmask[..., 0])
+    base = weighted_rms(field, bu, area_unmasked, e3, ones3)
+    pois = weighted_rms(poisoned, bu, area_unmasked, e3, ones3)
+    # And the honest version: with the 3-D mask installed it MUST be identical.
+    base_m = weighted_rms(field, bu, area_unmasked, e3, umask)
+    pois_m = weighted_rms(poisoned, bu, area_unmasked, e3, umask)
     return {"band_overlaps": ov,
             "bands_disjoint": all(v == 0 for v in ov.values()),
-            "land_poison_identical": bool(base == pois),
+            # the real control: masked statistics unmoved by the poison
+            "land_poison_identical": bool(base_m == pois_m),
+            # proof the control is NOT vacuous: unmasked, the poison DOES move
+            "unmasked_moves_under_poison": bool(base != pois),
+            "unmasked_base": float(base), "unmasked_poisoned": float(pois),
+            "dry_level_fraction_zonal_u": float(
+                1.0 - umask[bu].sum() / umask[bu].size),
             "zonal_wall_u_faces": int(bu.sum()),
+            "zonal_wall_v_faces": int(bv.sum()),
             "zonal_wall_t_cells": int(bands["zonal_wall"].sum())}
 
 
@@ -443,24 +601,42 @@ def main() -> None:
         raise SystemExit(f"SELF-CHECK FAILED: bands overlap {sc}")
     if not sc["land_poison_identical"]:
         raise SystemExit("SELF-CHECK FAILED: a band statistic moved when land "
-                         "was poisoned under unmasked weights")
+                         "was poisoned")
+    if not sc["unmasked_moves_under_poison"]:
+        raise SystemExit("SELF-CHECK FAILED: the land control is VACUOUS -- "
+                         "the poison does not move the statistic even with "
+                         "the masks removed, so passing it proves nothing")
 
-    states = [one_state(a.kt0 + i, rs, rt, a.recipe)
-              for i in range(a.n_states)]
+    if a.n_states < 3:
+        raise SystemExit("--n-states must be >= 3: the 2-step statistic needs "
+                         "three samples, and validating that only after every "
+                         "state has been computed wastes the whole run")
+    pairs = [one_state(a.kt0 + i, rs, rt, a.recipe)
+             for i in range(a.n_states)]
+    states = [p_[0] for p_ in pairs]
+    cells = [p_[1] for p_ in pairs]
+    weights = states[0]["weights"]
+    for st_ in states:
+        st_.pop("weights", None)
     doc = ewt.provenance({
         "probe": "zonal_wall_momentum_budget",
         "recipe": a.recipe, "kt0": a.kt0, "n_states": a.n_states,
         "run_stepdump": rs,
         "self_check": sc,
-        "uncomparable_nemo_trends": list(UNCOMPARABLE),
+        "uncomparable_nemo_trends": UNCOMPARABLE,
         "scope_limit": (
             "utrd_spg/vtrd_spg (the barotropic surface-pressure-gradient "
             "term) has NO counterpart in the baroclinic diagnostic set and is "
             "the term a free-surface source would most likely live in. A null "
             "over the six comparable terms narrows the source to "
-            "{spg, zdf, atf} or to the slow field; it does not establish "
-            "either."),
-        "verdict_inputs": verdict_inputs(states),
+            "{spg, zdf, atf, bfr, tau} or to the slow field; it does not "
+            "establish either. It also cannot see a source that requires "
+            "legoESM's OWN oscillation to exist: every state is re-bridged "
+            "from NEMO, so the trajectory never carries legoESM's mode "
+            "forward, and any amplification or step-to-step feedback is "
+            "invisible by construction."),
+        "zonal_wall_rows": zonal_wall_rows(rs),
+        "verdict_inputs": verdict_inputs(states, cells, weights),
         "states": states})
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as fh:

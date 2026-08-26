@@ -123,7 +123,44 @@ def test_alignment_picks_the_offset_that_matches_and_reports_it():
     out = zwb.resolve_alignment(lego, nemo, wet3, axis=1)
     assert out["offset"] == 1, out
     assert out["correlations"][1] > 0.99
+    assert out["residual_ratio"] > 10.0
     assert not out["dead"]
+
+
+def test_alignment_judges_the_residual_not_the_raw_gap():
+    """Two offsets can both correlate above 0.98 while one is right to 4e-6.
+
+    Subtracting the correlations hides a 4000x difference in what is left
+    over, and a raw-gap guard rejected the real DINO pairing. Fails if the
+    guard reverts to `best - runner_up`.
+    """
+    # A field SMOOTH along the shifted axis, which is what real neighbouring
+    # C-grid faces look like: shifting by one still correlates ~0.98, so a
+    # raw-gap guard sees a margin of ~0.02 and refuses the correct pairing.
+    j = np.arange(64)[None, :, None]
+    smooth = np.sin(2.0 * np.pi * j / 64.0) * np.ones((8, 1, 4))
+    nemo = smooth[:, 1:61, :]
+    lego = smooth[:, :61, :]                     # offset 1 is exact
+    wet3 = np.ones(nemo.shape, dtype=bool)
+    out = zwb.resolve_alignment(lego, nemo, wet3, axis=1)
+    assert out["offset"] == 1
+    assert out["correlations"][1] > 0.9999       # exact
+    assert out["correlations"][0] > 0.9          # the loser still correlates
+    assert out["residual_ratio"] > 10.0
+    # and the RAW GAP is small -- the guard that used it refused this pairing
+    assert (out["correlations"][1] - out["correlations"][0]) < 0.05
+
+
+def test_alignment_refuses_a_nan_correlation():
+    """A NaN left `best` pinned at its first value AND slipped past the
+    refusal guard, because every comparison with NaN is False."""
+    rng = np.random.default_rng(4)
+    nemo = rng.normal(size=(6, 5, 3))
+    lego = np.concatenate([rng.normal(size=(6, 1, 3)), nemo], axis=1)
+    lego[0, 0, 0] = np.nan
+    wet3 = np.ones((6, 5, 3), dtype=bool)
+    with pytest.raises(SystemExit):
+        zwb.resolve_alignment(lego, nemo, wet3, axis=1)
 
 
 def test_alignment_refuses_when_no_offset_correlates():
@@ -153,8 +190,36 @@ def test_verdict_inputs_marks_a_dead_term_and_does_not_divide_by_it():
                        "diff_mean_ms2": 0.0},
         "interior": {"dead": True, "relative_diff": None,
                      "diff_mean_ms2": 0.0}}}}]
-    out = zwb.verdict_inputs(states)
+    out = zwb.verdict_inputs(states, [{}], {})
     assert out["u:x"]["dead_on_some_state"]
+
+
+def test_per_cell_nyquist_is_not_the_band_mean_nyquist():
+    """THE defect that voided the first null.
+
+    A source whose sign varies along the wall survives a per-cell Nyquist and
+    is annihilated by a band mean taken first. Fails if the aggregation order
+    is swapped back.
+    """
+    n_states, n_cells, n_lev = 9, 40, 3
+    sign_state = ((-1.0) ** np.arange(n_states))[:, None, None]
+    sign_cell = ((-1.0) ** np.arange(n_cells))[None, :, None]
+    amp = 1e-12
+    series = amp * sign_state * sign_cell * np.ones((1, 1, n_lev))
+    w = np.ones((n_cells, n_lev))
+    per_cell = zwb.per_cell_nyquist(series, w)
+    band_mean_first = zwb.nyquist_amplitude(
+        [float(series[i].mean()) for i in range(n_states)])
+    assert np.isclose(per_cell, amp, rtol=1e-9), per_cell
+    assert band_mean_first < 1e-24, band_mean_first
+
+
+def test_per_cell_nyquist_refuses_too_few_states_and_zero_weight():
+    w = np.ones((4, 2))
+    with pytest.raises(SystemExit):
+        zwb.per_cell_nyquist(np.ones((2, 4, 2)), w)
+    with pytest.raises(SystemExit):
+        zwb.per_cell_nyquist(np.ones((5, 4, 2)), np.zeros((4, 2)))
 
 
 def test_verdict_inputs_computes_the_registered_two_numbers():
@@ -164,7 +229,7 @@ def test_verdict_inputs_computes_the_registered_two_numbers():
     states = [{"bands": {"u:x": {"zonal_wall": rec(0.3, m),
                                  "interior": rec(0.1, 0.0)}}}
               for m in means]
-    out = zwb.verdict_inputs(states)["u:x"]
+    out = zwb.verdict_inputs(states, [{}] * len(states), {})["u:x"]
     assert np.isclose(out["enrichment_zonal_over_interior"], 3.0)
     assert out["sign_alternations"] == 8
 
@@ -217,7 +282,7 @@ def test_verdict_inputs_reports_the_nyquist_ratio():
     states = [{"bands": {"u:x": {
         "zonal_wall": rec(0.3, steady + alt * (-1.0) ** i),
         "interior": rec(0.1, 0.0)}}} for i in range(9)]
-    out = zwb.verdict_inputs(states)["u:x"]
-    assert np.isclose(out["zonal_nyquist_amplitude_ms2"], alt, rtol=1e-6)
-    assert np.isclose(out["nyquist_over_steady"], alt / steady, rtol=5e-3)
+    out = zwb.verdict_inputs(states, [{}] * len(states), {})["u:x"]
+    assert np.isclose(out["band_mean_nyquist_ms2"], alt, rtol=1e-6)
     assert out["sign_alternations"] == 0
+    assert out["enrichment_min"] is not None
