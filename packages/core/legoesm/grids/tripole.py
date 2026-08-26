@@ -102,6 +102,22 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
     return out
 
 
+def _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation):
+    """Row where the grid starts deviating from regular lat-lon (bipolar
+    cap start): first row whose dlat deviates from the southern-half median
+    by more than ``cap_dlat_rel_deviation`` (relative)."""
+    n_lon = gphit.shape[1]
+    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
+    dlat = jnp.diff(lat_col)
+    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
+    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
+    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation,
+                               size=n_lat - 1)
+    if len(cap_candidates[0]) > 0:
+        return int(cap_candidates[0][0])
+    return fold_j  # no cap detected (very regular grid)
+
+
 def _detect_fold(
     glamt: jax.Array,
     gphit: jax.Array,
@@ -165,6 +181,49 @@ def _detect_fold(
         "n_lon-1-i": jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32),
         "(n_lon-i)%n_lon": (n_lon - jnp.arange(n_lon, dtype=jnp.int32)) % n_lon,
     }
+
+    # --- EXACT storage-layout classification (measured convention, 2026-08-26;
+    # see scripts/validate/ocean_fidelity/check_tripole_fold_pairing.py and the
+    # NEMO T-pivot reference lbc_nfd_generic.h90).  Real ORCA meshes hit one of
+    # these to <1e-6 deg; synthetic/legacy grids fall through to the lat-only
+    # auto-detect below (byte-identical legacy behaviour).
+    #   pivot_row_stored (de-haloed, e.g. eORCA025): stored top T row is the
+    #     SELF-symmetric pivot row under P_T=(n_lon-i)%n_lon.
+    #   halo_row_stored (e.g. eORCA1.2): stored top T row == permuted copy of
+    #     the row below under n_lon-1-i.
+    def _wrap_dlon(a, b):
+        d = jnp.abs(a - b) % 360.0
+        return jnp.minimum(d, 360.0 - d)
+
+    lon_fold = glamt[fold_j]
+    _exact = 1.0e-5
+    _idx = jnp.arange(n_lon, dtype=jnp.int32)
+    _p_self = (n_lon - _idx) % n_lon
+    _m_self = _p_self != _idx
+    _self_ok = bool(
+        (jnp.max(jnp.where(_m_self, jnp.abs(lat_fold - lat_fold[_p_self]), 0.0))
+         < _exact)
+        and (jnp.max(jnp.where(_m_self,
+                               _wrap_dlon(lon_fold, lon_fold[_p_self]), 0.0))
+             < _exact))
+    if _self_ok:
+        # De-haloed T-pivot mesh (eORCA025 class): per-point-type maps from
+        # the measured coincidences (T/U self on the pivot row; V/F pair with
+        # the row below): P_T=(-i)%n, P_U=(-i-1)%n; V uses P_T, F uses P_U.
+        return FoldDescriptor(
+            is_active=True, fold_j=fold_j,
+            cap_j=_detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation),
+            perm_T=_p_self,
+            perm_v=_p_self,
+            vector_sign_u=-1.0, vector_sign_v=-1.0,
+            pivot_row_stored=True,
+            perm_u=(n_lon - _idx - 1) % n_lon,
+            perm_f=(n_lon - _idx - 1) % n_lon,
+        )
+    # Halo-row-stored meshes (eORCA1.2 class: stored top row duplicates the
+    # row below; validated by the 1-degree campaign) intentionally fall
+    # through to the LEGACY lat-symmetry auto-detect below — byte-identical
+    # behaviour for every existing working configuration.
     if fold_convention not in ("auto", *perm_candidates):
         raise ValueError(
             f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
@@ -216,18 +275,7 @@ def _detect_fold(
     # For v/q stagger the permutation is the same for the ORCA T-fold.
     perm_v = perm_T
 
-    # Detect cap latitude: where the grid starts deviating from regular
-    # lat-lon.  On ORCA1 this is around j where gphit starts to diverge
-    # significantly from a linear latitude progression.
-    lat_col = gphit[:, n_lon // 4]  # sample column away from fold poles
-    dlat = jnp.diff(lat_col)
-    median_dlat = jnp.median(dlat[:n_lat // 2])  # use southern half
-    deviation = jnp.abs(dlat - median_dlat) / jnp.abs(median_dlat)
-    cap_candidates = jnp.where(deviation > cap_dlat_rel_deviation, size=n_lat - 1)
-    if len(cap_candidates[0]) > 0:
-        cap_j = int(cap_candidates[0][0])
-    else:
-        cap_j = fold_j  # no cap detected (very regular grid)
+    cap_j = _detect_cap_j(gphit, n_lat, fold_j, cap_dlat_rel_deviation)
 
     return FoldDescriptor(
         is_active=True,
