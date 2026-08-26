@@ -392,16 +392,30 @@ def main() -> int:
     # Preflight has passed -> JAX may now be imported (deferred for #1361).
     _import_jax()
 
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     # Single source of truth = the LIVE jax x64 flag (an in-process caller
     # may have enabled it without the env var; keying on the env would
     # build fp32 states while every gate/metadata site keys on
     # jax.config — the exact mislabel this block exists to kill; codex).
-    if jax.config.jax_enable_x64:
+    _ocean_mixed = os.environ.get("LEGOESM_OCEAN_MIXED", "") == "1"
+    if _ocean_mixed and not jax.config.jax_enable_x64:
+        raise SystemExit(
+            "LEGOESM_OCEAN_MIXED=1 requires JAX x64 enabled (the mixed policy "
+            "accumulates in float64), but jax_enable_x64 is off. Re-run with "
+            "x64 on (JAX_ENABLE_X64=1) or unset LEGOESM_OCEAN_MIXED.")
+    if _ocean_mixed:
+        set_policy(PrecisionPolicy.mixed())
+    elif jax.config.jax_enable_x64:
         set_policy(PrecisionPolicy.fp64())
     else:
         set_policy(PrecisionPolicy.fp32())
+    # Single source of truth for precision-derived reporting, from the arm +
+    # the active policy -- NOT jax_enable_x64, which would mislabel mixed as
+    # float64/8B (mixed stores + ships float32 halos).
+    _prec_label = "mixed" if _ocean_mixed else (
+        "float64" if jax.config.jax_enable_x64 else "float32")
+    _storage_bytes = np.dtype(get_policy().storage).itemsize
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init). Shared helper:
@@ -572,7 +586,7 @@ def main() -> int:
 
     # --- Correctness gates (before any timing is reported) -----------------
     if args.parity_gate or args.check_conservation:
-        prec = "float64" if jax.config.jax_enable_x64 else "float32"
+        prec = _prec_label
         rank0 = jax.process_index() == 0
         if args.check_conservation:
             from bench_ocean_mpi_scaling import (
@@ -704,7 +718,7 @@ def main() -> int:
             model.config, model.config.barotropic.n_barotropic_substeps)
     else:
         _halo_est = None
-    _dtype_bytes = 8 if jax.config.jax_enable_x64 else 4
+    _dtype_bytes = _storage_bytes
     _n_reductions = None
     if nd <= 1:
         _msgs, _n_reductions = 0, 0
@@ -789,7 +803,7 @@ def main() -> int:
         grid_type="tripole" if args.tripole else "latlon",
         resolution=n_lat,
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         physics_level="none",
         backend=jax.default_backend(),
         **tidy_throughput_fields(
@@ -819,7 +833,7 @@ def main() -> int:
         component="ocean",
         resolution=f"{n_lat}x{args.n_lon}",
         n_levels=args.nlev,
-        precision="float64" if jax.config.jax_enable_x64 else "float32",
+        precision=_prec_label,
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
         decomposition="band" if nd > 1 else "none",
