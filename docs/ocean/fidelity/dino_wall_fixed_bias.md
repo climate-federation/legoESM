@@ -22,7 +22,7 @@ latitude structure. One cheap pre-registered arm settles it (§6).
 
 Artifact: `results/dino_1455/baro_fixed_bias_wall_map.json`.
 Probe: `scripts/validate/ocean_fidelity/dino_1226/baro_fixed_bias_wall_map.py`.
-Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (42).
+Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (55).
 
 Everything below is measured in the arm where **NEMO's own frozen slow forcing
 is substituted into legoESM's own loop** from a bit-identical entry state
@@ -205,11 +205,43 @@ this document listed four and called them "decreasing strength". Adversarial
 review took the second apart; the fourth never worked at the southern wall. The
 honest structure is one decider and two partial supports.
 
-**The decider — structural.** The fixed bias is measured in the arm where
-NEMO's own `zu_frc`/`zv_frc` are substituted into legoESM's loop. Every
-difference in how legoESM *assembles* its slow forcing, wind term included, is
-already removed there by construction. Any wind-placement difference lives in
-that assembly, so in this arm it is identically zero. **This alone settles it.**
+**The decider — structural, and it has four premises, not one.** The fixed bias
+is measured in the arm where NEMO's own `zu_frc`/`zv_frc` are substituted into
+legoESM's loop, so every difference in how legoESM *assembles* its slow forcing,
+wind term included, is removed there by construction.
+
+| # | premise | status |
+|---|---|---|
+| 1 | the barotropic loop carries no wind-stress term of its own, so there is no second route in | **verified by source** (review round 2) |
+| 2 | the substitution replaces the forcing and nothing else | **verified by source** |
+| 3 | these maps are the wind-**on** arm | **now asserted from the maps' own stamps** (§5a) |
+| 4 | the loop does not re-scale the substituted forcing by legoESM's own face depth | **UNVERIFIED** |
+
+So this is a **strong argument, not a closed one**, and the earlier sentence
+"this alone settles it" is withdrawn. Premise 4 is the one to close before the
+arm is ever again described as loop-only.
+
+### 5a. The provenance gate premise 3 now rests on
+
+Round-2 review found this probe **discarding** the two provenance fields the
+deposit maps already carry. That was not a theoretical exposure: a map produced
+with the wind switches off is a well-formed array on the identical wet mask, so
+no numerical guard in the file could have told it from a wind-on one, and the
+whole of §5 would then have compared an *unforced* ocean against a *forced*
+increment. This campaign has already shipped and retracted exactly that class of
+error.
+
+The probe now refuses to run unless the five maps agree with each other on the
+physics switches and the oracle directory given on the command line is one the
+maps were actually produced from. Two things measured rather than assumed while
+fixing it:
+
+* the five states legitimately carry **five different oracle dump directories**
+  (each state has its own), which is why the command-line directory has to be
+  checked against them rather than assumed;
+* the wind increment is **step-invariant to 4.3e-08** across all five of those
+  directories — loaded from each and compared, not taken on trust — so reading
+  it from one directory is valid.
 
 **Support (partial) — shape, zonal channel only.** The zonal wind increment
 peaks at row 48, in the westerly band, and at the wall rows is **571×** (south)
@@ -229,6 +261,13 @@ bias's at −0.187. The candidate vanishes where the bias is largest.
 At the southern wall the wind term is comparable to or larger than the bias in
 both channels. Size excludes at the north and **not** at the south, and the
 probe now prints that verdict per row rather than leaving it to prose.
+
+**And the northern exclusion is thinner than it looks.** At an
+assumption-free response of 1.0 the rotated northern bound clears the 3×
+margin by only **1.30×** — it would flip at a modestly larger response factor.
+The probe prints that headroom next to every verdict, so "excludes" cannot read
+as comfortable when it is marginal. This is a further reason the section rests
+on the structural ground and not on size.
 
 ### RETRACTED: "the candidate has no wall-normal component at all"
 
@@ -265,8 +304,12 @@ more than roundoff.
 
 NEMO builds DINO's mesh isotropically — its two v-face scale factors are equal
 **bit-for-bit** — with both evaluated at NEMO's own v-point latitude. legoESM's
-matching convention fixes the *meridional* width but leaves the *zonal* one on
-the cosine of the midpoint between the two adjacent tracer rows. On DINO's
+matching convention (`metric_convention="nemo_isotropic"` in
+`packages/core/legoesm/grids/latlon.py`, selected by the DINO card in
+`packages/ocean/legoesm/ocean/experiments/dino.py`) fixes the *meridional* width
+but leaves the *zonal* one on the cosine of the midpoint between the two
+adjacent tracer rows. That is where a fix would go — **not** in the barotropic
+solver, which merely consumes the metric. On DINO's
 stretched meridional grid that midpoint is not NEMO's v-point latitude; they
 differ by up to 0.0011°. The resulting gap:
 
@@ -282,11 +325,13 @@ the same fraction — the right sign and the right order for the deficit in §2.
 the two wall rows the prediction lands at **1.05-1.28× the measured deficit with
 no fitted parameter**.
 
-**Why it is not yet the owner, by this document's own standard.** Two rows
-agreeing is exactly the reading §3 had to retract. Over all 196 wet rows the
-row-wise correlation between the predicted gap and the measured relative
-deficit is **−0.045** — essentially zero — and the per-row ratio swings from
-0.15 to 128. The measured deficit peaks at row 134; the predicted gap peaks at
+**Why it is not yet the owner, by this document's own standard — and the probe
+now says so with a flag, not with prose.** Two rows agreeing is exactly the
+reading §3 had to retract, so the shape test carries a boolean verdict
+(`SHAPE TEST: NOT SUPPORTED — right order, wrong latitude structure`) exactly
+as §3 and §4 do. Over all 196 wet rows the row-wise correlation between the
+predicted gap and the measured relative deficit is **−0.045** — essentially
+zero — and the per-row ratio spans **0.03 to 1649**. The measured deficit peaks at row 134; the predicted gap peaks at
 the walls. *(The mechanism reviewer reported +0.52 for this correlation, over a
 selected subset of rows. Over all rows, unselected, it is −0.045. The
 disagreement is entirely the row selection, and the unselected number is the
@@ -353,7 +398,13 @@ substituted arm is described as "loop-only". **Unverified.**
 * "Ten times the interior, boundary-localised" is retracted (§2): two interior
   rows exceed both walls, and the relative deficit peaks at row 134.
 * The v-face metric is a **candidate**, not the owner (§6). Its basin-wide
-  shape correlation with the measured deficit is −0.045.
+  shape correlation with the measured deficit is −0.045, and the probe's own
+  shape test returns NOT SUPPORTED.
+* The wind's structural exclusion has **four** premises, two verified by source,
+  one now gated on the maps' provenance, and one still **unverified** (§5).
+  "This alone settles it" is withdrawn.
+* The northern rotated size bound clears its margin by only 1.30× at an
+  assumption-free response (§5); it is not a comfortable exclusion.
 
 ## 8. A scope caution this document owes the campaign
 

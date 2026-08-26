@@ -452,12 +452,18 @@ def test_exclusion_verdict_is_computed_not_asserted(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------
 # loader guards that back the state series
 # --------------------------------------------------------------------------
-def _write_map(path, kt, wetu, wetv, n=(M.JPJ, M.JPI)):
+_STAMP = ("[provenance x] DINO_HU_WIND=None DINO_ZUFRC_WIND=None "
+          "DINO_SEAM_WIND=None LEGOESM_NEMO_E3T='both' DINO_RECONCILE=None")
+
+
+def _write_map(path, kt, wetu, wetv, n=(M.JPJ, M.JPI), seqdump="/oracle/d180",
+               stamp=_STAMP):
     z = {"dU_avg": np.zeros(n), "dU_sub": np.zeros(n),
          "wetu": wetu.astype(float), "nemo_Ubar_avg": np.ones(n),
          "dV_avg": np.zeros(n), "dV_sub": np.zeros(n),
          "wetv": wetv.astype(float), "nemo_Vbar_avg": np.ones(n),
-         "wgt_primary": np.ones(68) / 68.0, "ic_step": kt}
+         "wgt_primary": np.ones(68) / 68.0, "ic_step": kt,
+         "seqdump": seqdump, "provenance": stamp}
     np.savez(path, **z)
 
 
@@ -603,3 +609,227 @@ def test_vface_shape_test_scores_an_unrelated_shape_near_zero():
     got = M.vface_shape_test({"_gphit": gphit, "_gphiv": gphiv},
                              bias, vel, wetv)
     assert abs(got["corr"]) < 0.4
+
+
+# --------------------------------------------------------------------------
+# BLOCKER 1 (review round 2): the rotated bound's MAGNITUDE and its COMPONENT.
+# Every term in dv = |f|*F_u*dt^2*kernel*R is linear in the rotation rate, so
+# the earlier f-scaling test passed for a bound with the wrong dt power, half
+# the kernel, the substep index instead of its square, or the wrong grid's wall
+# rows.  These pin the number, not just its proportionality.
+# --------------------------------------------------------------------------
+def _uniform_wind_case(tmp_path, monkeypatch, n_sub, f=1.0e-4, amp=1.0):
+    wu = np.zeros((M.JPJ, M.JPI))
+    wu[5:60, :] = amp
+    wetu = (wu != 0.0)
+    wu.tofile(tmp_path / "wnd_dump_zu_frc_inc.bin")
+    np.zeros_like(wu).tofile(tmp_path / "wnd_dump_zv_frc_inc.bin")
+    monkeypatch.setattr(M, "coriolis_at_row", lambda seqdump, j: f)
+    return str(tmp_path), wetu, np.ones(n_sub) / n_sub
+
+
+def test_rotated_bound_matches_its_closed_form_magnitude(tmp_path, monkeypatch):
+    """Uniform weights over n substeps give kernel = (n+1)(2n+1)/12.
+
+    At n=68 that is exactly 787.75.  With f=1e-4, F_u=1, dt=2, R=1 the deposit
+    is 1e-4 * 1 * 4 * 787.75 = 0.31510.  Dropping dt^2 gives 0.0787 (117x off),
+    halving the kernel gives 0.1576, and using k instead of k^2 gives 0.0069
+    (45x off) -- all previously green.
+    """
+    sd, wetu, wgt = _uniform_wind_case(tmp_path, monkeypatch, 68)
+    got = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                           np.zeros((M.JPJ, M.JPI)), wetu, wetu, wgt,
+                           1.0, 2.0)
+    assert got["rotated_bound_kernel_sum_w_k2_over_2"] == pytest.approx(787.75)
+    dv = got["bounds"]["response_1.0"]["rotated_meridional"]["south"][
+        "rotated_v_deposit_from_FULL_wind_term"]
+    assert dv == pytest.approx(0.31510, rel=1e-9)
+
+
+def test_rotated_bound_kernel_closed_form_at_a_second_length(tmp_path,
+                                                             monkeypatch):
+    """A second n, so the test cannot pass by hardcoding one constant."""
+    sd, wetu, wgt = _uniform_wind_case(tmp_path, monkeypatch, 10)
+    got = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                           np.zeros((M.JPJ, M.JPI)), wetu, wetu, wgt, 1.0, 1.0)
+    assert got["rotated_bound_kernel_sum_w_k2_over_2"] == pytest.approx(
+        (10 + 1) * (2 * 10 + 1) / 12.0)
+
+
+def test_rotated_bound_is_quadratic_in_dt_not_linear(tmp_path, monkeypatch):
+    sd, wetu, wgt = _uniform_wind_case(tmp_path, monkeypatch, 68)
+
+    def _dv(dt):
+        return M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                                np.zeros((M.JPJ, M.JPI)), wetu, wetu, wgt,
+                                1.0, dt)["bounds"]["response_1.0"][
+            "rotated_meridional"]["south"][
+            "rotated_v_deposit_from_FULL_wind_term"]
+    assert _dv(2.0) == pytest.approx(4.0 * _dv(1.0))
+
+
+def test_rotated_bound_reads_the_MERIDIONAL_wall_rows_and_bias(tmp_path,
+                                                               monkeypatch):
+    """The wrong-component-at-a-wall class, inside the fix for that class.
+
+    The two grids are given genuinely DIFFERENT masks, so a bound that reached
+    for the zonal wall rows or the zonal bias would pick up the wrong numbers.
+    Both earlier tests passed the same mask twice and never exercised this.
+    """
+    wu = np.zeros((M.JPJ, M.JPI))
+    wu[5:60, :] = 1.0
+    wu.tofile(tmp_path / "wnd_dump_zu_frc_inc.bin")
+    np.zeros_like(wu).tofile(tmp_path / "wnd_dump_zv_frc_inc.bin")
+    wetu = (wu != 0.0)                       # zonal walls at rows 5 and 59
+    wetv = np.zeros((M.JPJ, M.JPI), dtype=bool)
+    wetv[20:41, :] = True                    # meridional walls at 20 and 40
+
+    seen = []
+    monkeypatch.setattr(M, "coriolis_at_row",
+                        lambda seqdump, j: (seen.append(j), 1.0e-4)[1])
+    bias_u = np.zeros((M.JPJ, M.JPI))
+    bias_u[5] = 111.0
+    bias_u[59] = 111.0                       # zonal-only, must NOT be read
+    bias_v = np.zeros((M.JPJ, M.JPI))
+    bias_v[20] = 7.0
+    bias_v[40] = 9.0
+    got = M.wind_candidate(str(tmp_path), bias_u, bias_v, wetu, wetv,
+                           np.ones(68) / 68.0, 1.0, 1.0)
+    # Coriolis was queried at the MERIDIONAL wall rows, not the zonal ones.
+    assert sorted(seen) == [20, 40]
+    # and the meridional bias was read from the meridional grid
+    assert got["bias_v_at_south_wall"] == pytest.approx(7.0)
+    assert got["bias_v_at_north_wall"] == pytest.approx(9.0)
+    assert got["bias_u_at_south_wall"] == pytest.approx(111.0)
+
+
+def test_exclusion_margin_is_three_not_a_bare_greater_than(tmp_path,
+                                                           monkeypatch):
+    """The margin decides the southern verdict, so it is pinned.
+
+    Review round 2: relaxing 3.0 to 0.1 flips the southern wall from DOES NOT
+    EXCLUDE to excludes, and nothing caught it.
+    """
+    sd, wetu, wgt = _uniform_wind_case(tmp_path, monkeypatch, 68, amp=1.0)
+
+    def _excl(bias_amp):
+        bv = np.zeros((M.JPJ, M.JPI))
+        bv[5] = bias_amp
+        bv[59] = bias_amp
+        return M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)), bv, wetu, wetu,
+                                wgt, 1.0, 1.0)["bounds"]["response_1.0"][
+            "rotated_meridional"]["south"]["EXCLUDES"]
+    base = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                            np.zeros((M.JPJ, M.JPI)), wetu, wetu, wgt,
+                            1.0, 1.0)["bounds"]["response_1.0"][
+        "rotated_meridional"]["south"][
+        "rotated_v_deposit_from_FULL_wind_term"]
+    assert _excl(2.0 * base) is False        # inside the margin
+    assert _excl(4.0 * base) is True         # clears it
+
+
+# --------------------------------------------------------------------------
+# BLOCKER 2 (review round 2): the maps' provenance was being discarded
+# --------------------------------------------------------------------------
+def test_loader_refuses_a_map_with_no_provenance(tmp_path):
+    """The stamp is the ONLY thing that can tell a wind-off map apart."""
+    wet = np.ones((M.JPJ, M.JPI), dtype=bool)
+    np.savez(tmp_path / "deposit_map_kt5760.npz",
+             dU_avg=np.zeros((M.JPJ, M.JPI)), dU_sub=np.zeros((M.JPJ, M.JPI)),
+             wetu=wet.astype(float), nemo_Ubar_avg=np.ones((M.JPJ, M.JPI)),
+             dV_avg=np.zeros((M.JPJ, M.JPI)), dV_sub=np.zeros((M.JPJ, M.JPI)),
+             wetv=wet.astype(float), nemo_Vbar_avg=np.ones((M.JPJ, M.JPI)),
+             wgt_primary=np.ones(68) / 68.0, ic_step=5760)
+    with pytest.raises(SystemExit, match="provenance|seqdump"):
+        M.load_maps(str(tmp_path), kts=(5760,))
+
+
+def test_provenance_gate_rejects_maps_made_with_different_wind_switches():
+    """A wind-OFF map mixed into a wind-on series must abort the run."""
+    on = M.parse_stamp(_STAMP)
+    assert on["DINO_ZUFRC_WIND"] == "None"
+    off = _STAMP.replace("DINO_ZUFRC_WIND=None", "DINO_ZUFRC_WIND='off'")
+    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP},
+              {"path": "b", "seqdump": "/oracle/d180", "provenance": off}]
+    with pytest.raises(SystemExit, match="different physics"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+
+
+def test_provenance_gate_rejects_a_cli_seqdump_from_another_run():
+    """The wind increment and the bias must come from the same oracle run."""
+    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP}]
+    with pytest.raises(SystemExit, match="not any of the oracle directories"):
+        M.assert_map_provenance(stamps, "/oracle/SOMEWHERE_ELSE")
+    got = M.assert_map_provenance(stamps, "/oracle/d180")
+    assert got["cli_seqdump_matches_map"] is True
+
+
+def test_provenance_gate_allows_per_state_oracle_directories():
+    """Each state legitimately has its OWN dump dir; that must not abort."""
+    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP},
+              {"path": "b", "seqdump": "/oracle/kt5764", "provenance": _STAMP}]
+    got = M.assert_map_provenance(stamps, "/oracle/kt5764")
+    assert got["seqdumps"] == ["/oracle/d180", "/oracle/kt5764"]
+
+
+def test_wind_step_invariance_flags_a_differing_dump(tmp_path):
+    """If the wind dump differs between states, the comparison is not one run."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    w = np.ones((M.JPJ, M.JPI))
+    w.tofile(a / "wnd_dump_zu_frc_inc.bin")
+    (w * 2.0).tofile(b / "wnd_dump_zu_frc_inc.bin")
+    got = M.wind_step_invariance(
+        [{"seqdump": str(a)}, {"seqdump": str(b)}])
+    assert got["n_dumps"] == 2
+    assert got["STEP_INVARIANT"] is False
+    assert got["max_relative_spread"] == pytest.approx(1.0)
+
+
+def test_wind_step_invariance_passes_identical_dumps(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    w = np.ones((M.JPJ, M.JPI))
+    w.tofile(a / "wnd_dump_zu_frc_inc.bin")
+    w.tofile(b / "wnd_dump_zu_frc_inc.bin")
+    got = M.wind_step_invariance([{"seqdump": str(a)}, {"seqdump": str(b)}])
+    assert got["STEP_INVARIANT"] is True
+
+
+def test_wind_step_invariance_reports_untested_rather_than_passing(tmp_path):
+    """One dump cannot establish invariance; it must NOT read as invariant."""
+    a = tmp_path / "a"
+    a.mkdir()
+    np.ones((M.JPJ, M.JPI)).tofile(a / "wnd_dump_zu_frc_inc.bin")
+    got = M.wind_step_invariance([{"seqdump": str(a)}])
+    assert got["max_relative_spread"] is None
+    assert "STEP_INVARIANT" not in got
+
+
+def test_shape_test_raises_a_FLAG_and_does_not_merely_narrate():
+    """Section 6 must FAIL LOUDLY like sections 3 and 4, not in prose.
+
+    A candidate of the right magnitude but the wrong latitude structure is the
+    two-row reading this file exists to refuse, so the verdict is a boolean.
+    """
+    nlat, nlon = 40, 5
+    gphit = np.linspace(-69.0, 69.0, nlat + 1)[:, None] * np.ones((1, nlon))
+    gphiv = np.zeros_like(gphit)
+    gphiv[:-1] = 0.5 * (gphit[:-1] + gphit[1:]) + 0.001 * np.sign(
+        0.5 * (gphit[:-1] + gphit[1:]))
+    wetv = np.ones((nlat, nlon), dtype=bool)
+    vel = np.ones((nlat, nlon))
+    rng = np.random.default_rng(11)
+    unrelated = np.abs(rng.standard_normal((nlat, nlon))) * 3e-5
+    bad = M.vface_shape_test({"_gphit": gphit, "_gphiv": gphiv},
+                             unrelated, vel, wetv)
+    assert bad["SHAPE_SUPPORTS_CANDIDATE"] is False
+    assert "NOT SUPPORTED" in bad["SHAPE_TEST_VERDICT"]
+
+    _, gap = M.vface_gap_from_latitudes(gphit, gphiv)
+    good = M.vface_shape_test({"_gphit": gphit, "_gphiv": gphiv},
+                              np.abs(gap[:nlat]) * vel, vel, wetv)
+    assert good["SHAPE_SUPPORTS_CANDIDATE"] is True
+    assert good["SHAPE_TEST_VERDICT"] == "SUPPORTED"

@@ -37,15 +37,18 @@ prevents (see the retraction ledger in `dino_wall_deposit_nyquist.md`):
     run: the two wall rows' amplitude ratios (11.73 vs 11.67) agree to 0.5 %
     while the per-cell correlation at the northern wall is 0.05.  Without it a
     proportionality would have been reported as a finding.
-  * ONE DELIBERATE DOUBLE RATIO, NAMED.  Every reported quantity is bare, with
-    its denominator named, EXCEPT the amplitude-coincidence trigger in
-    `mirrored_pairs`, which is by necessity a ratio of ratios (it asks whether
-    the bias's north/south amplitude ratio equals the velocity's).  That one is
-    allowed because it is a dimensionless proportionality TEST rather than a
-    reported result, and because both of its operands are also printed bare.  A
-    previous version's HEADLINE was a double ratio that factorised into a wall
-    ratio over an interior ratio and moved 1.7x on a basin-wide constant with
-    nothing to do with walls; nothing here is reported that way.
+  * TWO DELIBERATE RATIOS-OF-RATIOS, BOTH NAMED.  Every reported quantity is
+    bare, with its denominator named, except (a) the amplitude-coincidence
+    trigger in `mirrored_pairs`, which asks whether the bias's north/south
+    amplitude ratio equals the velocity's, and (b) the per-row
+    measured-over-predicted ratio in `vface_shape_test`.  Both are
+    dimensionless proportionality TESTS rather than reported results, and both
+    print their operands bare alongside.  (The header claimed only ONE until
+    round-2 review pointed out section 6 had quietly added the second -- the
+    same class of scope word this file has now got wrong twice.)  What is
+    banned, and absent, is a HEADLINE double ratio: a previous version's
+    factorised into a wall ratio over an interior ratio and moved 1.7x on a
+    basin-wide constant with nothing to do with walls.
   * NO BAND SUMS.  Row profiles are per row over the full grid; the wall bands
     are reported alongside the interior they are being contrasted with, never
     as a lone aggregate.
@@ -111,6 +114,7 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
     """
     keys = ("dU_avg", "dU_sub", "wetu", "nemo_Ubar_avg",
             "dV_avg", "dV_sub", "wetv", "nemo_Vbar_avg", "wgt_primary")
+    meta = ("seqdump", "provenance")
     fields, stamps = {}, []
     for kt in kts:
         path = os.path.join(map_dir, f"deposit_map_kt{kt}.npz")
@@ -122,11 +126,16 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
         got = int(z["ic_step"])
         if got != kt:
             raise SystemExit(f"FATAL: {path} carries ic_step={got}, want {kt}")
-        for key in keys:
+        for key in keys + meta:
             if key not in z:
                 raise SystemExit(f"FATAL: {path} has no {key!r}")
+        # meta keys are STRINGS -- presence-checked above, carried on the
+        # stamp, never stacked into the numeric arrays.
+        for key in keys:
             fields.setdefault(key, []).append(np.asarray(z[key], float))
-        stamps.append({"kt": kt, "path": path})
+        stamps.append({"kt": kt, "path": path,
+                       "seqdump": str(z["seqdump"]),
+                       "provenance": str(z["provenance"])})
     out = {k: np.stack(v, axis=0) for k, v in fields.items()}
     for key in ("wetu", "wetv", "wgt_primary"):
         a = out[key]
@@ -136,6 +145,91 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
                 "average different cells at different times.")
     out["_stamps"] = stamps
     return out
+
+
+# The switches that decide WHICH PHYSICS produced a deposit map.  A map made
+# with the wind off is a perfectly well-formed array of the right shape on the
+# right mask, so no numerical guard in this file can tell it from a wind-on one
+# -- the wet mask is identical either way.  Only the stamp can.
+_WIND_SWITCHES = ("DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+                  "LEGOESM_NEMO_E3T", "DINO_RECONCILE")
+
+
+def parse_stamp(prov: str) -> dict:
+    """Pull the physics switches out of a probe provenance stamp."""
+    import re
+    out = {}
+    for key in _WIND_SWITCHES:
+        m = re.search(key + r"=('[^']*'|\S+)", prov)
+        out[key] = m.group(1).strip("'") if m else None
+    return out
+
+
+def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
+    """Refuse to run unless the maps agree with each other AND with the CLI.
+
+    ADDED AFTER REVIEW 2026-08-26, which found this file discarding the two
+    provenance fields the deposit maps already carry.  The exposure was not
+    theoretical: the whole wind section compares a wind increment read from a
+    CLI-supplied oracle directory against a bias read from the maps, and if the
+    maps had been produced with the wind switches off, that section would be
+    measuring an unforced ocean against a forced increment.  This campaign has
+    already shipped and retracted exactly that class of error.
+
+    Note what the five maps legitimately DO differ in: each state carries its
+    OWN oracle dump directory (kt5760 from the D180 lane, kt5764 from the
+    KT5764 lane).  That is correct, and it is precisely why the CLI directory
+    must be checked to be one of them rather than assumed -- and why the wind
+    increment's step-invariance is MEASURED in `wind_step_invariance` rather
+    than taken on trust.
+    """
+    parsed = [parse_stamp(st["provenance"]) for st in stamps]
+    first = parsed[0]
+    for st, got in zip(stamps[1:], parsed[1:]):
+        diff = {k: (first[k], got[k]) for k in _WIND_SWITCHES
+                if first[k] != got[k]}
+        if diff:
+            raise SystemExit(
+                f"FATAL: {st['path']} was produced with different physics "
+                f"switches from {stamps[0]['path']}: {diff}. Averaging these "
+                "five states would mix two configurations.")
+    seqdumps = [st["seqdump"] for st in stamps]
+    cli = os.path.normpath(cli_seqdump)
+    if cli not in [os.path.normpath(x) for x in seqdumps]:
+        raise SystemExit(
+            f"FATAL: --seqdump {cli} is not any of the oracle directories the "
+            f"maps were produced from ({sorted(set(seqdumps))}). The wind "
+            "increment and the bias would come from different runs.")
+    return {"switches": first, "seqdumps": seqdumps,
+            "cli_seqdump_matches_map": True}
+
+
+def wind_step_invariance(stamps: list) -> dict:
+    """Is the wind increment the same in every state's own oracle dump?
+
+    The wind dump is the one file in an oracle directory with no step in its
+    name, so the frame guard cannot tell one state's from another's.  Rather
+    than assume it is step-invariant, load it from EVERY state's own directory
+    and report the spread.  If this is large the single-directory comparison in
+    `wind_candidate` is invalid and says so.
+    """
+    fields, missing = [], []
+    for st in stamps:
+        path = os.path.join(st["seqdump"], "wnd_dump_zu_frc_inc.bin")
+        if not os.path.exists(path):
+            missing.append(path)
+            continue
+        fields.append(load_nemo_2d(st["seqdump"], "wnd_dump_zu_frc_inc.bin"))
+    if len(fields) < 2:
+        return {"n_dumps": len(fields), "missing": missing,
+                "max_relative_spread": None,
+                "note": "fewer than two dumps available; invariance UNTESTED"}
+    a = np.stack(fields, axis=0)
+    ref = np.abs(a[0]).max()
+    spread = float(np.abs(a - a[0]).max() / max(ref, 1e-300))
+    return {"n_dumps": len(fields), "missing": missing,
+            "max_relative_spread": spread,
+            "STEP_INVARIANT": bool(spread < 1e-3)}
 
 
 def load_nemo_2d(seqdump: str, name: str) -> np.ndarray:
@@ -330,9 +424,11 @@ def mirrored_pairs(bias: np.ndarray, vel: np.ndarray, wet: np.ndarray,
                    depth: int = 14) -> list:
     """Rows at equal distance from the two end walls, side by side.
 
-    The wall GEOMETRY of this configuration is north/south symmetric (section
-    5), so a bias generated by the boundary geometry alone would come out
-    symmetric here.  Each pair carries its amplitude ratio AND both per-cell
+    The wall GEOMETRY of this configuration is NEARLY mirror-symmetric but not
+    exactly (section 5: same latitude and same zonal spacing, but the northern
+    column is 14.7 % deeper, which raises that section's asymmetry flag).  A
+    bias generated by boundary geometry alone would therefore come out within
+    ~1.15x here, not exactly equal.  Each pair carries its amplitude ratio AND both per-cell
     correlations, and a flag when the two disagree.
     """
     j_s, j_n = wall_rows(wet)
@@ -382,11 +478,19 @@ def wind_candidate(seqdump: str, bias_u: np.ndarray, bias_v: np.ndarray,
     (`wnd_dump_z{u,v}_frc_inc.bin`, the term at dynspg_ts.F90:443-444), so the
     candidate's footprint is read rather than reconstructed.
 
-    WHAT DECIDES THIS SECTION, and what does NOT.  The decider is STRUCTURAL and
-    is stated at the call site: this bias is measured in the arm where NEMO's
-    own zu_frc/zv_frc are substituted into legoESM's loop, so every difference
-    in how legoESM ASSEMBLES its slow forcing -- the wind term included -- has
-    already been removed.  The quantities below are INDEPENDENT SUPPORTING
+    WHAT DECIDES THIS SECTION, and what does NOT.  The decider is STRUCTURAL:
+    this bias is measured in the arm where NEMO's own zu_frc/zv_frc are
+    substituted into legoESM's loop, so every difference in how legoESM
+    ASSEMBLES its slow forcing -- the wind term included -- has already been
+    removed.  THAT ARGUMENT HAS FOUR PREMISES, not one, and only two of them
+    are verified by source (the loop carries no stress term of its own, so
+    there is no second route in; and the substitution replaces the forcing
+    only).  The third -- that these maps ARE the wind-on arm -- is now asserted
+    from the maps' own provenance rather than assumed (`assert_map_provenance`,
+    after review 2026-08-26 found nothing checked it).  The fourth -- whether
+    the loop re-scales the substituted forcing by legoESM's OWN face depth --
+    is UNVERIFIED and named as such here and in the accompanying document.  So
+    this is a strong argument, not a closed one.  The quantities below are INDEPENDENT SUPPORTING
     CHECKS, each of which is partial, and each is reported with the part of the
     question it cannot answer:
 
@@ -531,8 +635,11 @@ def wind_candidate(seqdump: str, bias_u: np.ndarray, bias_v: np.ndarray,
 def wall_geometry(seqdump: str) -> dict:
     """Latitude, column depth and meridional grid spacing at the two end walls.
 
-    The point of the section: if the geometry is symmetric and the bias is not,
-    the bias is not generated by the boundary geometry alone.
+    The point of the section: the two walls are NEARLY mirror images -- same
+    latitude, same zonal spacing -- but NOT exactly, the northern column being
+    14.7 % deeper.  That residual asymmetry bounds what boundary geometry alone
+    could produce (~1.15x) and is reported next to the measured contrast
+    (11.7x) rather than rounded off to the word "symmetric".
     """
     path = os.path.join(seqdump, "domain_cfg_out.nc")
     if not os.path.exists(path):
@@ -644,7 +751,20 @@ def vface_shape_test(vm: dict, bias_v: np.ndarray, vel_v: np.ndarray,
     peak = int(rows[int(np.argmax(meas_a))])
     sample = [j for j in (1, 3, 65, 100, 129, 137, 169, 190, 196)
               if j in rows]
+    ratios = [m / max(p_, 1e-300) for m, p_ in zip(meas, pred)]
+    # THE FLAG.  Sections 3 and 4 raise one when their evidence fails; this
+    # section narrated its own failure in prose and left the reader to notice.
+    # A candidate whose latitude structure does not track the measurement is
+    # NOT SUPPORTED by this test, however well it lands at two rows -- which is
+    # exactly the two-row reading section 3 had to retract.
+    supported = bool(abs(corr) > 0.5) if np.isfinite(corr) else False
     return {"n_rows": len(rows), "corr": corr,
+            "SHAPE_SUPPORTS_CANDIDATE": supported,
+            "SHAPE_TEST_VERDICT": ("SUPPORTED" if supported
+                                   else "NOT SUPPORTED -- right order, wrong "
+                                        "latitude structure"),
+            "per_row_ratio_min": float(min(ratios)),
+            "per_row_ratio_max": float(max(ratios)),
             "measured_peak_row": peak,
             "measured_peak": float(meas_a.max()),
             "rows": [{"j": j, "measured": meas[rows.index(j)],
@@ -757,6 +877,25 @@ def main() -> None:
     M = load_maps(args.map_dir)
     wetu, wetv = M["wetu"][0] > 0.5, M["wetv"][0] > 0.5
     wgt = M["wgt_primary"][0]
+    prov = assert_map_provenance(M["_stamps"], args.seqdump)
+    inv = wind_step_invariance(M["_stamps"])
+    print("\n=== MAP PROVENANCE GATE ===")
+    print(f"  physics switches, identical across all five maps: "
+          f"{prov['switches']}")
+    print(f"  each state carries its own oracle dump; --seqdump matches one "
+          f"of them: {prov['cli_seqdump_matches_map']}")
+    if inv["max_relative_spread"] is None:
+        print(f"  wind-increment step-invariance UNTESTED ({inv['note']})")
+    else:
+        print(f"  wind increment across {inv['n_dumps']} state dumps: max "
+              f"relative spread {inv['max_relative_spread']:.2e} -> "
+              f"step-invariant {inv['STEP_INVARIANT']}")
+        if not inv["STEP_INVARIANT"]:
+            raise SystemExit(
+                "FATAL: the wind increment differs between the states' own "
+                "oracle dumps, so comparing a single directory's increment "
+                "against a five-state mean bias is not one experiment.")
+
     comps = {}
     for tag, key, wet, vkey, label in (
             ("u", "dU_sub", wetu, "nemo_Ubar_avg", "TANGENTIAL to the walls"),
@@ -856,9 +995,15 @@ def main() -> None:
               f"({'excludes' if b['u_EXCLUDES_north'] else 'DOES NOT EXCLUDE'})")
         for tag in ("south", "north"):
             r = b["rotated_meridional"][tag]
+            # How much room is there above the 3x margin?  The northern
+            # exclusion at R=1 clears by only ~1.3x, i.e. it would FLIP at a
+            # modestly larger response factor.  Printing the headroom stops
+            # "excludes" reading as comfortable when it is marginal.
+            head = r["ratio_bias_over_rotated_wind"] / 3.0
             print(f"     ROTATED {tag:5s} v-bias/rotated-wind = "
                   f"{r['ratio_bias_over_rotated_wind']:.2f}x "
-                  f"({'excludes' if r['EXCLUDES'] else 'DOES NOT EXCLUDE'})"
+                  f"({'excludes' if r['EXCLUDES'] else 'DOES NOT EXCLUDE'}"
+                  f", clears the 3x margin by {head:.2f}x)"
                   f"   [rotated deposit "
                   f"{r['rotated_v_deposit_from_FULL_wind_term']:.3e} vs "
                   f"measured {r['measured_v_bias']:.3e} m/s]")
@@ -919,8 +1064,11 @@ def main() -> None:
               f"{shp['n_rows']} rows: {shp['corr']:+.3f}")
         print(f"  measured deficit peaks at row {shp['measured_peak_row']} "
               f"({shp['measured_peak']:.3e}); the predicted gap peaks at the "
-              f"WALLS. The shapes agree in ORDER and at the southern wall, "
-              f"and DISAGREE in where they peak.")
+              f"WALLS.")
+        print(f"  per-row ratio spans {shp['per_row_ratio_min']:.2f} to "
+              f"{shp['per_row_ratio_max']:.1f}")
+        print(f"  *** SHAPE TEST: {shp['SHAPE_TEST_VERDICT']} *** "
+              f"(supports candidate: {shp['SHAPE_SUPPORTS_CANDIDATE']})")
         print("  THIS IS A PREDICTION, NOT A VERDICT: the override arm that "
               "would settle ownership has not been run.")
     else:
@@ -930,6 +1078,7 @@ def main() -> None:
         c.pop("_bias", None)
     payload = {"provenance": provenance(), "selftest": st,
                "components": comps, "wind_candidate": wind, "geometry": geo,
+               "map_provenance": prov, "wind_step_invariance": inv,
                "vface_zonal_metric": {k: v for k, v in vm.items()
                                      if not k.startswith("_")},
                "response_used": args.response, "dt_s_used": args.dt_s,
