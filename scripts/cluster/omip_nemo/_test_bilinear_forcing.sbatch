@@ -4,7 +4,7 @@
 #SBATCH --partition=short
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --time=0:40:00
+#SBATCH --time=2:30:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/t_bilin_%j.out
 # Gate for the bilinear tripole forcing fix: new sampler tests + the scan-lane
 # equivalence tests + a stripe demo image from the REAL forcing cache.
@@ -16,6 +16,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
 $PY -m pytest -q tests/ocean/unit/test_forcing_bilinear_sampling.py \
+  tests/ocean/unit/test_scm_column_twins.py \
   tests/ocean/unit/test_omip2_forcing_scan.py \
   tests/ocean/unit/test_mass_flux_store.py 2>&1 | tail -5
 

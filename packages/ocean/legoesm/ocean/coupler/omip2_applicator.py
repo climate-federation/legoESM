@@ -91,6 +91,23 @@ def _bolton_q_sat(T_K, p_hpa: float = constants.p_atm_std / 100.0):
 # fancy-index.
 _NN_INDEX_CACHE: dict = {}
 
+def _coord_key(*arrays):
+    """Collision-safe cache key from coordinate arrays: full-content hash
+    (shape + dtype + bytes).  The float-checksum keys previously used
+    (first/last/sum) could collide between two different same-length target
+    sets and silently reuse another grid's indices/weights (codex YELLOW,
+    2026-08-26).  Coordinate arrays are small and hashed once per (src, dst)
+    pair, so the full hash costs microseconds."""
+    import hashlib
+    h = hashlib.sha1()
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        h.update(str(a.shape).encode())
+        h.update(str(a.dtype).encode())
+        h.update(a.tobytes())
+    return h.hexdigest()
+
+
 
 def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
                          dst_lat_deg_pts, dst_lon_deg_pts):
@@ -107,16 +124,7 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
     src_lon = np.asarray(src_lon_deg, dtype=np.float64) % 360.0
     dst_lat = np.asarray(dst_lat_deg_pts, dtype=np.float64)
     dst_lon = np.asarray(dst_lon_deg_pts, dtype=np.float64) % 360.0
-    # Robust signature of BOTH source and destination coords (codex: the dst
-    # longitude checksum was missing, so two same-shape targets differing only
-    # in interior lon could collide and reuse the wrong index map).
-    key = (
-        src_lat.size, src_lon.size, dst_lat.size,
-        float(src_lat[0]), float(src_lat[-1]), float(src_lat.sum()),
-        float(src_lon[0]), float(src_lon[-1]), float(src_lon.sum()),
-        float(dst_lat[0]), float(dst_lat[-1]), float(dst_lat.sum()),
-        float(dst_lon[0]), float(dst_lon[-1]), float(dst_lon.sum()),
-    )
+    key = _coord_key(src_lat, src_lon, dst_lat, dst_lon)
     idx = _NN_INDEX_CACHE.get(key)
     if idx is None:
         # nearest source latitude (absolute difference)
@@ -159,13 +167,7 @@ def _bilinear_point_maps(src_lat_deg, src_lon_deg,
     src_lon = np.asarray(src_lon_deg, dtype=np.float64) % 360.0
     dst_lat = np.asarray(dst_lat_deg_pts, dtype=np.float64)
     dst_lon = np.asarray(dst_lon_deg_pts, dtype=np.float64) % 360.0
-    key = (
-        "bilin", src_lat.size, src_lon.size, dst_lat.size,
-        float(src_lat[0]), float(src_lat[-1]), float(src_lat.sum()),
-        float(src_lon[0]), float(src_lon[-1]), float(src_lon.sum()),
-        float(dst_lat[0]), float(dst_lat[-1]), float(dst_lat.sum()),
-        float(dst_lon[0]), float(dst_lon[-1]), float(dst_lon.sum()),
-    )
+    key = _coord_key(src_lat, src_lon, dst_lat, dst_lon)
     maps = _BILIN_MAP_CACHE.get(key)
     if maps is not None:
         return maps
