@@ -147,7 +147,7 @@ _SIGNATURE_FIELDS = (
     "surface_wind_m_s", "coriolis_s_inv",
     "scm_microphysics_substeps", "scm_convection_substeps",
     "subsidence_solve",
-    "reference_dir", "last_reference_files",
+    "reference_dir", "last_reference_files", "ssts",
     # The column's saturation treatment is part of the experiment: the ice
     # super-saturation allowance only exists in the ice-capable schemes, and
     # the in-scheme liquid guard changes the condensation rate every step.  A
@@ -579,10 +579,15 @@ def evaluate_scheme(
         # default run are the same config, so they hit the same cache entry —
         # the a-priori column is not paid for twice.
         tune_stats = dict(camp.EMPTY_TUNE_STATS)
+        if joint_refs is not None:
+            raise SystemExit(
+                "focused (sub-cloud) tuning is single-SST only; --ssts with "
+                "more than one value is not supported in --tune-mode focused.")
         _best_cfg, records, _default_run, tuned = camp.tune_focused_params(
             base_cfg,
             ref,
             cache,
+            sst_K=primary_sst_K,
             categories=FOCUSED_TUNE_CATEGORIES,
             include=focused_include,
             tune_evals=tune_evals,
@@ -597,6 +602,7 @@ def evaluate_scheme(
             ref,
             cache,
             joint_refs=joint_refs,
+            primary_sst_K=primary_sst_K,
             tune_evals=tune_evals,
             seed=seed,
             objective=objective,
@@ -1500,6 +1506,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             f"--ssts has {len(_ssts)} entries but --joint-reference-dirs has "
             f"{len(_dirs)}; they must match 1:1.")
+    for _s, _d in zip(_ssts, _dirs):
+        _dm = _re.search(r"(\d{3})$", Path(_d).name)
+        if _dm and float(_dm.group(1)) != float(_s):
+            raise SystemExit(
+                f"--joint-reference-dirs mismatch: SST {_s} K paired with "
+                f"{_d} (trailing {_dm.group(1)}); reversing the list would "
+                "score a CRM profile against the wrong-SST column.")
     joint_refs = []
     for _s, _d in zip(_ssts, _dirs):
         _r = (ref if float(_s) == _primary_sst and Path(_d) == args.reference_dir
@@ -1507,7 +1520,9 @@ def main(argv: list[str] | None = None) -> int:
                   _d, args.last_reference_files,
                   precip_analysis_days=args.analysis_days))
         joint_refs.append((float(_s), _r))
-    # A single-SST run keeps joint_refs=None (the exact previous behaviour).
+    # Multi-SST -> joint. A single SST keeps joint_refs=None and relies on
+    # primary_sst_K (threaded below) so a single 295 or 305 run tunes at the
+    # RIGHT SST, not the 300 K default.
     joint_refs = joint_refs if len(joint_refs) > 1 else None
     print(f"[joint] SSTs={_ssts} primary={_primary_sst} "
           f"refs={[str(d) for d in _dirs]}", flush=True)

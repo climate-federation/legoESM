@@ -2701,6 +2701,7 @@ def tune_category_winner(
     cache: dict[str, RunDiagnostics],
     *,
     joint_refs=None,
+    primary_sst_K: float = FIXED_SST_K,
     days: float,
     dt: float,
     analysis_days: float,
@@ -2736,7 +2737,7 @@ def tune_category_winner(
     # when given, drives the score.  A single-SST call (joint_refs=None) keeps
     # the exact previous behaviour.
     _sst_pairs = (list(joint_refs) if joint_refs
-                  else [(FIXED_SST_K, ref)])
+                  else [(primary_sst_K, ref)])
 
     def _joint_eval(trial_cfg, label):
         runs = []
@@ -2759,14 +2760,21 @@ def tune_category_winner(
                 subcloud_top_m=subcloud_top_m,
                 thermo_humidity=thermo_humidity)))
         all_ok = all(r.status == "ok" for _s, r in runs)
-        # MEAN across SSTs is the generalization objective; a candidate that
-        # fails to equilibrate at ANY SST is disqualified (inf), never rewarded
-        # for a lucky single-SST fit.
+        # MEAN across SSTs is the generalization objective; a candidate that is
+        # INVALID at ANY SST (crash / NaN / blow-up -> status != "ok") is
+        # disqualified (inf), never rewarded for a lucky single-SST fit.
+        # Whether a merely-drifting run counts as valid follows the caller's
+        # require_equilibrium, exactly as in the single-SST path.
         score = (float(np.mean([objective_value(r, objective)
                                 for _s, r in runs]))
                  if all_ok else float("inf"))
-        primary = next((r for _s, r in runs if _s == FIXED_SST_K), runs[0][1])
-        return score, primary, all_ok
+        _prim = [r for _s, r in runs if _s == primary_sst_K]
+        if not _prim:
+            raise ValueError(
+                f"primary SST {primary_sst_K} not among joint SSTs "
+                f"{[s for s, _ in runs]}; the reported profile and the albedo/"
+                "base_cfg would be built for different SSTs.")
+        return score, _prim[0], all_ok
 
     default_score, default_run, _default_ok = _joint_eval(
         base_cfg, f"tune-default:{category}:{scheme}")
@@ -2805,9 +2813,10 @@ def tune_category_winner(
     best_values = defaults
     # A non-finite incumbent score makes EVERY ``trial < best`` comparison
     # False, so the tuner would report the defaults as "tuned" while silently
-    # discarding every trial.  ``objective_value`` maps NaN to +inf for exactly
-    # that reason.
-    best_score = objective_value(default_run, objective)
+    # discarding every trial.  ``default_score`` is the JOINT mean (inf if any
+    # SST was invalid), so the incumbent the search must beat is the joint
+    # default, not one SST's objective_value.
+    best_score = default_score
     # The random phase gets the budget minus whatever the refinement stage is
     # given.  Computed BEFORE the loop so the two phases cannot overspend
     # between them, and floored at 1 so `refine_frac=1.0` still evaluates the
@@ -3057,6 +3066,7 @@ def tune_focused_params(
 
     default_run = run_cached(
         cache, base_cfg, ref,
+        sst_K=sst_K,
         label="focused-tune-default",
         days=days, dt=dt, analysis_days=analysis_days,
         require_equilibrium=require_equilibrium,
