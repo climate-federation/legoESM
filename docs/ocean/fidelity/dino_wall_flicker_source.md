@@ -36,9 +36,14 @@ brief's hypothesis 1 is therefore **not refuted — it is RELOCATED** (zonal,
 not meridional) and reduced about 2.5x from the published size. Hypothesis 2
 is refuted.
 
-**No suspect is named.** Both candidates proposed so far were refuted (see the
-retractions), and the discriminator that would name one is written into the
-hand-off below rather than guessed at.
+**No suspect is named, and the discriminator was RUN rather than proposed.**
+A term-by-term momentum budget on those rows, nine matched states, finds NO
+two-step injection signature in any of the four comparable explicit terms —
+every difference is a steady offset, and the largest alternating part falls
+about 300x short of the observed surface flicker. That narrows the source to
+the barotropic pressure-gradient / implicit-mixing / filter group, which this
+budget structurally cannot see, or to the slow field. Both suspects proposed
+before it were refuted outright (see the retractions).
 
 **Geography worth flagging, and it is not the reviewers' claim or mine:** the
 southern zonal wall row sits at about 69.5 deg S — the same wall row as the
@@ -222,40 +227,133 @@ exchange is inert at single rank, which is how the twin runs. Both caveats
 would bite on a wetting-drying case or a restart that does not zero land
 velocities; that debt is recorded in `dino_wall_ldf_alignment.md`.
 
-## Hand-off: the one measurement that would name the source
+## The zonal-wall momentum budget — RUN, and it is a null
 
-**Do not guess a third suspect.** Two have been proposed and both were
-refuted, and the geometry alone cannot distinguish the two remaining stories:
+Pre-registered as RUN 3 before the probe existed. Nine consecutive matched
+states (kt = 5760..5768): bridge NEMO's own state, before level included, into
+legoESM; evaluate ONE per-term tendency breakdown; compare each term against
+NEMO's own `utrd_*`/`vtrd_*` trend from the next dump. No time integration and
+no GPU-hours — NEMO's per-step dumps already carry the trends.
 
-* a **source** on the zonal walls — some term's stencil at rows j=1 and
-  j=197 injecting alternating-sign noise the oracle's equivalent does not; or
-* a locally **different slow field** at those rows, whose curvature the
-  Nyquist high-pass partially passes, with no source at all.
+Probe: `scripts/validate/ocean_fidelity/dino_1226/zonal_wall_momentum_budget.py`
+(18 tests). Face alignment is MEASURED, not assumed — offset 1 for every live
+term, minimum correlation 0.99984. Controls: the three bands are disjoint, and
+poisoning every dry cell under UNMASKED weights leaves every statistic
+bit-identical.
 
-**The discriminator is a one-step, term-by-term momentum budget on rows j=1
-and j=197**, both models, from the same bridged state: decompose the
-sea-surface tendency into its contributing terms and compare them term by
-term on those 100 cells. A source shows up as one term differing with the
-alternating sign structure; a different slow field shows up as every term
-differing smoothly in proportion. Both models' per-term machinery already
-exists in this campaign, so this is instrumentation, not new physics.
+| term | relative diff, zonal | interior | enrichment | Nyquist / steady |
+|---|---|---|---|---|
+| u: vertical mom. advection | 1.59e-2 | 4.13e-3 | **3.85** | 1.1e-5 |
+| v: lateral viscosity | 2.69e-2 | 1.16e-2 | 2.31 | **1.4e-2** |
+| u: vorticity + Coriolis | 6.15e-5 | 5.06e-5 | 1.22 | 2.8e-6 |
+| v: KE + pressure gradient | 6.77e-3 | 8.12e-3 | 0.83 | 2.4e-8 |
+| u: KE + pressure gradient | 9.60e-3 | 1.24e-2 | 0.77 | 2.8e-7 |
+| v: vorticity + Coriolis | 2.62e-5 | 5.18e-5 | 0.51 | 1.5e-7 |
+| v: vertical mom. advection | 9.32e-3 | 1.88e-2 | 0.50 | 8.2e-6 |
+| u: lateral viscosity | 9.75e-3 | 2.52e-2 | 0.39 | 4.1e-3 |
 
-Two things to carry into that budget:
+**NO term carries a two-step injection signature.** Every term's difference is
+a STEADY offset: the largest alternating component is 1.4% of its own steady
+part and every other term is at or below 1e-5. Order of magnitude, and
+labelled as such: the largest measured alternating term (1.85e-14 m/s²) drives
+about 4e-9 m of sea-surface change per step against the 1.2e-6 m flicker
+actually observed there — short by a factor of roughly 300.
 
-* record the LAST-HALF footprint next to the first-sample one. They differ,
-  and the first-sample one — the published 85% — is the transient, not the
-  thing being hunted.
-* the zonal band is 0.24% of the wet area and its NEMO side has half its
-  variance in a single cell. Any statistic on it needs its own floor and its
-  own interval, not the wall aggregate's.
+**By the registered rule the outcome is INCONCLUSIVE, not "slow field".**
+The source arm fails its two-step condition everywhere; the slow-field arm
+fails because two terms exceed its 1.5x enrichment bar — vertical momentum
+advection on u at 3.85x and lateral viscosity on v at 2.31x. They are **not**
+named as the flicker's cause: a steady momentum-tendency offset and a
+Nyquist-band surface excess are not connected by any route this measurement
+establishes.
+
+**And those two enrichments do not survive a consistency check, which I ran on
+my own numbers before publishing them.** Every term that is enriched in one
+velocity component is DEPLETED in the other:
+
+| term | u | v |
+|---|---|---|
+| vertical mom. advection | 3.85 | 0.50 |
+| lateral viscosity | 0.39 | 2.31 |
+| vorticity + Coriolis | 1.22 | 0.51 |
+| KE + pressure gradient | 0.77 | 0.83 |
+
+Only the pressure-gradient term agrees in direction between components, and it
+is depleted in both. For a ZONAL wall — land to the north or south — the
+constrained face is the V face, and vertical momentum advection is enriched in
+the UNCONSTRAINED component while being depleted in the constrained one. That
+is the opposite of what a wall-stencil defect in that term would look like. So
+the two "largest steady differences" read more like a component-dependent
+redistribution than a term that is systematically worse at the wall, and
+neither should be carried forward as a structural finding on this evidence.
+
+### A defect in my own statistic, found before the reviewers
+
+The registration wrote the two-step condition as a SIGN-FLIP COUNT. That
+statistic is blind to an alternating component smaller than the steady offset
+it rides on — and these offsets are ~4e-9 m/s² while any alternating part is
+~1e-14, so the count reads zero whether or not a source exists. **It could not
+fail.** The condition is now decided on the Nyquist amplitude — the same
+operator the sea-surface measurement uses, so the budget and the amplitude
+result are decided by one estimator rather than two that could disagree. The
+substitution is a deviation from the registration and is recorded as one; the
+old count is still reported. The conclusion did not change, but it was
+unsupported until the statistic was fixed.
+
+### What this budget CANNOT see, which bounds everything above
+
+It compares four of NEMO's nine momentum trends: pressure + KE gradient,
+relative + planetary vorticity, vertical momentum advection, and lateral
+viscosity. It cannot compare:
+
+* **`utrd_spg`, the barotropic surface-pressure-gradient term** — legoESM
+  applies it inside the barotropic substep loop, so it has no counterpart in
+  the baroclinic diagnostic set. **This is where a free-surface two-step
+  source would most plausibly live, and this budget does not look there.**
+* `utrd_zdf` (vertical viscosity, applied implicitly) and `utrd_atf` (the
+  Asselin filter).
+* bottom drag and surface stress: NEMO's `utrd_bfr` and `utrd_tau` are
+  identically zero in these dumps, so both sides read zero and the comparison
+  is dead rather than passing. At a shallow end-wall row bottom drag is not
+  obviously negligible, so this is a gap, not a clean exclusion.
+
+So the honest statement is: **no two-step source among the four comparable
+explicit terms, which narrows the source to the barotropic pressure-gradient /
+implicit-mixing / filter group, or to the slow field.** It does not close the
+question, and it does not name a suspect.
+
+### Also worth stating about the design
+
+Each state is independently re-bridged from NEMO, so legoESM never carries its
+own leap-frog oscillation forward. That is the right design for finding a term
+that INJECTS noise from a clean state, and the wrong one for finding a
+mechanism that AMPLIFIES an oscillation already present. A feedback would not
+show up here. Which of those the zonal-wall excess is, is not settled.
+
+## The geography, PLAUSIBLE and no stronger
+
+Row j=1 sits at about 69.5 deg S, the campaign's southern-basin
+transport-deficit wall row, and vertical momentum advection is the term with
+the largest steady difference there. The overlay against the basin torque-gap
+row profile that would test a link was NOT run: with the two-step signature
+absent, the link would be between the deficit and a STEADY term difference,
+which is a different question from this branch's and belongs to the
+southern-basin thread. Recorded as a lead, labelled PLAUSIBLE, not pursued —
+"everything interesting happens at the boundary" is the null hypothesis a
+correlation on a 100-cell band could not overturn.
 
 ## What was NOT done, and why
 
-No fix, no A/B, no ensemble-spread prediction. The brief gated them on naming
-a source with matching geometry AND the right generation/damping signature.
-The signature is now in hand for the zonal band — but the source is not named,
-and building an A/B before the budget above would be choosing a suspect by
-elimination among two candidates that have already both been wrong. The
+No fix and no A/B. The brief gated them on naming a source, the budget was run
+rather than deferred, and it did not name one — it excluded a group and
+pointed at the group it cannot see. Building an A/B now would mean choosing a
+suspect by elimination among candidates that have already both been wrong.
+
+**The named next step, and it is instrumentation rather than compute:** the
+barotropic substep loop's own per-term contributions at rows j=1 and j=197,
+compared against NEMO's `utrd_spg`. That is the one term a free-surface
+two-step source would most plausibly live in, it is the largest gap in the
+budget above, and nothing in this campaign currently exposes it per-term. The
 launch transient: stopped, deliberately.
 
 ## Instrument defects found and fixed, since the instrument decides what we believe
