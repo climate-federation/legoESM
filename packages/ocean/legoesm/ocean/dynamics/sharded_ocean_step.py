@@ -867,9 +867,16 @@ def make_sharded_ocean_step(model, mesh):
     # like z_coord; the in-body config is a TRACED closure (it already carries
     # array slabs), so an array leaf there is consistent, and the outer static
     # model.config keeps its tuple untouched.
-    # ponytail: the in-body `_prof_v` half-average uses band-local edge rows at
-    # band seams (not the neighbour band's row) -- a <1%, second-order error on
-    # a smooth lat profile; add a 1-row profile ppermute if it ever matters.
+    # KNOWN LIMITATION (GLM #1666 review): the in-body `_prof_v` half-average is
+    # computed on the BAND profile, so at band seams it uses the band-local edge
+    # row instead of the neighbour band's row.  This is a FIRST-order viscosity
+    # error at the seam (the two devices disagree at the shared v-point by the
+    # full row-to-row `Δprof`), and the number of affected rows grows with
+    # n_dev.  It is <1% for a SMOOTH profile (e.g. the cos(lat) equatorial
+    # reduction the eORCA025 card uses) but O(10-20%) for a SHARP profile (a
+    # tanh gate / few-row transition) whose structure lands on a seam.  Upgrade
+    # when a sharp profile is used under SPMD: pre-slice a GLOBAL `_prof_v`
+    # (n_lat+1 v-points) and thread it, or halo the band profile by one row.
     _config_for_bands = model.config
     _lv_cfg = getattr(_config_for_bands, "lateral_viscosity", None)
     _prof_tuple = (getattr(_lv_cfg, "A_h_lat_profile", None)
