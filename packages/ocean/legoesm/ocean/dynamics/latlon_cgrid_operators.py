@@ -3551,6 +3551,54 @@ def neumann_fill_vertex(
 # Utility: compute face masks from cell mask
 # =============================================================================
 
+
+def _spmd_cut_vfaces(v_mask, a):
+    """Open the SPMD lat-band CUT v-face rows of ``v_mask`` using the
+    neighbour band's adjacent cell row of ``a`` (2-D or 3-D cell mask).
+
+    Inside the shard_map body the local ``a[:-1]*a[1:]`` product cannot see
+    the neighbour band, so both boundary v-face rows of the band come out as
+    WALLS at interior cuts — the "pole wall at the cut" failure.  perm_north
+    delivers band r+1's FIRST cell row (each source sends its own first row);
+    perm_south delivers band r-1's LAST row.  Non-target bands (the global
+    south end and the tripolar fold at the north) receive 0, so the product
+    reproduces the serial wall semantics there and ONLY interior cuts change.
+    Serial / mpi / single-band paths (backend not "spmd") return ``v_mask``
+    unchanged, bit-identical.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    _mesh = get_spmd_mesh() if get_halo_backend() == "spmd" else None
+    if _mesh is None or "lat" not in tuple(getattr(_mesh, "axis_names", ())):
+        return v_mask
+    from legoesm.parallel.latlon_spmd import latlon_band_perms
+    n_dev = int(dict(_mesh.shape)["lat"])
+    if n_dev <= 1:
+        return v_mask
+    perm_north, perm_south = latlon_band_perms(n_dev)
+    a_north = jax.lax.ppermute(a[:1], "lat", perm_north)
+    a_south = jax.lax.ppermute(a[-1:], "lat", perm_south)
+    v_mask = v_mask.at[-1:].set(a[-1:] * a_north)
+    v_mask = v_mask.at[:1].set(a_south * a[:1])
+    return v_mask
+
+
+def _reject_yreentrant_under_spmd(where: str) -> None:
+    """The meridionally-periodic / flat wrap treats each band's OWN first and
+    last rows as the wrap pair, which under lat-band SPMD wires every interior
+    cut into a bogus local wrap.  The halo backend documents periodic-y as
+    local-only; refuse loudly instead of silently mis-wiring (codex
+    2026-08-24 finding 3)."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    _mesh = get_spmd_mesh() if get_halo_backend() == "spmd" else None
+    if _mesh is not None and "lat" in tuple(getattr(_mesh, "axis_names", ())):
+        if int(dict(_mesh.shape)["lat"]) > 1:
+            raise NotImplementedError(
+                f"{where}: meridionally-periodic/flat y-boundaries are not "
+                "supported under lat-band SPMD (each band would wrap onto "
+                "itself at the cuts); run single-band or implement the ring "
+                "exchange.")
+
+
 def compute_face_masks_3d(
     is_active_3d: jnp.ndarray,
     grid=None,
@@ -3602,12 +3650,15 @@ def compute_face_masks_3d(
     from legoesm.grids.halo_latlon import (
         get_meridionally_flat, get_meridionally_periodic)
     if get_meridionally_periodic() or get_meridionally_flat():
+        _reject_yreentrant_under_spmd("compute_face_masks_3d")
         wrap = a[-1:] * a[0:1]
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
+    # SPMD lat-band interior cuts: see _spmd_cut_vfaces (no-op unless armed).
+    v_mask = _spmd_cut_vfaces(v_mask, a)
     return u_mask, v_mask
 
 
@@ -4644,6 +4695,7 @@ def compute_face_masks(
     from legoesm.grids.halo_latlon import (
         get_meridionally_flat, get_meridionally_periodic)
     if get_meridionally_periodic() or get_meridionally_flat():
+        _reject_yreentrant_under_spmd("compute_face_masks")
         wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
@@ -4654,5 +4706,8 @@ def compute_face_masks(
     # that drives an instability over ~40 steps.
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
-
+    # SPMD lat-band interior cuts (codex finding 2: the MLE path calls this
+    # 2-D builder IN-BODY and ANDs it into the 3-D mask, re-walling every cut
+    # the 3-D fix had opened).  Same shared exchange, no-op unless armed.
+    v_mask = _spmd_cut_vfaces(v_mask, land_mask)
     return u_mask, v_mask

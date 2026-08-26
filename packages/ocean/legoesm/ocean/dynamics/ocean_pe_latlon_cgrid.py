@@ -2706,8 +2706,21 @@ def _bc_horizontal_viscosity(
             raise ValueError(
                 f"A_h_lat_profile has {_prof_u.shape[0]} entries but the "
                 f"grid has {grid.lat.shape[0]} latitude rows.")
-        _prof_v = jnp.concatenate([
-            _prof_u[:1], 0.5 * (_prof_u[:-1] + _prof_u[1:]), _prof_u[-1:]])
+        # #1666: the SPMD wrapper injects the exact band v-face profile
+        # (band-sliced from the GLOBAL v-profile, so interior band seams carry
+        # the neighbour-averaged value, not the band-local wall copy).  Use it
+        # when present; otherwise derive band-locally (serial / single device,
+        # bit-identical to before).
+        _lv_prof_v = config.lateral_viscosity.A_h_lat_profile_v
+        if _lv_prof_v is not None:
+            _prof_v = jnp.asarray(_lv_prof_v, dtype=grid.lat.dtype)
+            if _prof_v.shape[0] != grid.lat.shape[0] + 1:
+                raise ValueError(
+                    f"A_h_lat_profile_v has {_prof_v.shape[0]} entries but the "
+                    f"grid has {grid.lat.shape[0] + 1} v-face rows.")
+        else:
+            _prof_v = jnp.concatenate([
+                _prof_u[:1], 0.5 * (_prof_u[:-1] + _prof_u[1:]), _prof_u[-1:]])
     else:
         _prof_u = _prof_v = None
 
