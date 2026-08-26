@@ -941,6 +941,13 @@ class ExperimentConfig(NamedTuple):
     # slab knobs (C_land, emissivity_land, beta_land) become unused and
     # the multilayer config below takes over.
     use_multilayer_land: bool = False
+    # Land-tile call interval [s]; 0.0 (default) advances the land every
+    # host step (legacy).  A positive value calls the tile every
+    # round(land_update_seconds/dt) steps with the atmosphere forcing
+    # AVERAGED over the interval (mass/energy of the interval conserved)
+    # and the tile's fluxes/skin held in between — the same shape as the
+    # hourly radiation cadence.  MPAS multilayer-land lane only.
+    land_update_seconds: float = 0.0
     multilayer_n_layers: int = 10        # soil discretization
     multilayer_soil_depth: float = 3.0   # m
     # Run the multilayer land tile in EXACTLY the configuration its baked
@@ -1690,6 +1697,22 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"days must be > 0, got {self.days}")
         if self.seed < 0:
             errors.append(f"seed must be >= 0, got {self.seed}")
+        if (self.land_update_seconds < 0
+                or not math.isfinite(self.land_update_seconds)):
+            errors.append(
+                f"land_update_seconds must be a finite value >= 0 "
+                f"(0 = every step), got {self.land_update_seconds}")
+        if self.land_update_seconds > 0 and not self.use_multilayer_land:
+            errors.append(
+                "land_update_seconds > 0 requires use_multilayer_land: the "
+                "slab land has no held-flux cadence — the knob would be "
+                "silently inert.")
+        if (self.land_update_seconds > 0
+                and self.grid.grid_type not in ("mpas", "voronoi")):
+            errors.append(
+                "land_update_seconds > 0 is implemented only on the MPAS "
+                f"lane; grid_type={self.grid.grid_type!r} would silently "
+                "ignore it.")
         if self.forcing_update_days <= 0:
             errors.append(
                 f"forcing_update_days must be > 0, got "
