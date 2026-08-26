@@ -44,6 +44,13 @@ if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
 import jax
+# x64 is enabled BEFORE the legoesm imports because some land modules build
+# module-level constants at import (e.g. canopy/solver.py::_LM_XSCALE), whose
+# dtype is frozen at import time — so the default fp64 path must have x64 on
+# here to stay byte-identical.  --precision {fp32,fp64,mixed} still selects the
+# policy in main() (fp64/mixed both need x64; both work now).
+# ponytail: true all-fp32 LMIP additionally needs those import-time constants
+# (_LM_XSCALE and siblings) made policy-aware — deferred; fp64/mixed unaffected.
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
@@ -633,6 +640,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "validated against each scheme's __param_spec__ bounds "
                         "and spliced into the nested land *Config NamedTuples "
                         "(soil thermal/hydraulics, carbon, stomata...). (#691)")
+    p.add_argument("--precision", type=str, default="fp64",
+                   # fp32 omitted: x64 is enabled before imports (canopy
+                   # _LM_XSCALE and siblings freeze their dtype there), so a
+                   # true all-fp32 land run needs those constants made
+                   # policy-aware first — deferred. fp64/mixed both work.
+                   choices=["fp64", "mixed"],
+                   help="Precision mode: fp32 (all float32), fp64 (all "
+                        "float64, the default — preserves prior behaviour), or "
+                        "mixed (float32 storage/compute, float64 "
+                        "accumulate/control). Applied before model build.")
     p.add_argument("--lat", type=float, default=None,
                    help="Latitude [deg] (required — via CLI or the --config file)")
     p.add_argument("--lon", type=float, default=0.0,
@@ -833,6 +850,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+
+    # Apply the precision policy BEFORE any model state is built (enables JAX
+    # x64 for the fp64/mixed roles).
+    from legoesm.runtime.precision import apply_precision
+    apply_precision(args.precision)
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)

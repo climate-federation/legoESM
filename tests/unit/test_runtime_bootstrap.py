@@ -133,22 +133,13 @@ class TestPrecisionResolution:
         policy = apply_precision("fp32")
         assert get_policy() == policy
 
-    def test_apply_precision_mixed_sets_overrides(self):
-        from legoesm.runtime.precision import (
-            apply_precision,
-            get_module_overrides,
-            clear_module_overrides,
-        )
-        clear_module_overrides()
-        apply_precision("mixed")
-        overrides = get_module_overrides()
-        # Mixed mode should set recommended overrides for key modules.
-        assert len(overrides) > 0
+    def test_apply_precision_mixed_is_refused(self):
+        # #1665 interim: apply_precision refuses mixed loudly.
+        import pytest
+        from legoesm.runtime.precision import apply_precision
+        with pytest.raises(NotImplementedError, match="disabled"):
+            apply_precision("mixed")
 
-
-# =========================================================================
-# 4. Full bootstrap (runtime.config)
-# =========================================================================
 
 class TestBootstrap:
     """Tests for the one-shot bootstrap function."""
@@ -173,12 +164,13 @@ class TestBootstrap:
         assert rc.x64 is True
         assert rc.precision.compute == jnp.float64
 
-    def test_bootstrap_mixed_enables_x64(self):
+    def test_bootstrap_mixed_is_refused(self):
+        # #1665 interim: bootstrap refuses mixed before touching x64.
+        import pytest
         from legoesm.runtime.config import bootstrap
-        rc = bootstrap(precision="mixed")
-        assert rc.x64 is True
-        assert rc.precision.accumulate == jnp.float64
-        assert rc.precision.compute == jnp.float32
+        with pytest.raises(NotImplementedError, match="disabled"):
+            bootstrap(precision="mixed")
+
 
     def test_bootstrap_sets_singleton(self):
         from legoesm.runtime.config import bootstrap, get_runtime_config
@@ -393,20 +385,17 @@ class TestYamlBootstrap:
         assert rc.precision.compute == jnp.float64
         assert rc.x64 is True
 
-    def test_yaml_mixed_via_conservation(self):
+    def test_yaml_mixed_via_conservation_is_refused(self):
+        # #1665 interim: legacy dyn=fp32+cons=fp64 derives the now-refused mixed.
+        import pytest
         from legoesm.runtime.config import bootstrap_from_yaml_config
         config = self._make_config({
             "hardware.precision.dynamics": "float32",
             "hardware.precision.conservation": "float64",
         })
-        rc = bootstrap_from_yaml_config(config)
-        assert rc.precision.accumulate == jnp.float64
-        assert rc.precision.compute == jnp.float32
+        with pytest.raises(NotImplementedError, match="disabled"):
+            bootstrap_from_yaml_config(config)
 
-
-# =========================================================================
-# 7. Legacy backward compatibility
-# =========================================================================
 
 class TestLegacyCompat:
     """Tests that legacy core.hardware imports still work."""
