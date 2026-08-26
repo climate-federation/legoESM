@@ -83,17 +83,27 @@ def test_decks_found():
 
 def test_runtime_guard_check_advective_cfl():
     """The runtime companion of this gate (enforced when the training
-    integrator is built) must refuse the measured blowup config and accept
-    the shipped fix — including NOT crediting substeps on the explicit path."""
+    integrator is built) must FLAG the measured blowup config and accept the
+    shipped fix — including NOT crediting substeps on the explicit path.
+
+    #1663: the guard WARNS rather than hard-errors (u_ref=150 is a design
+    envelope and the SSP-RK3 bound over-blocked legitimate configs), so the
+    blowup class surfaces as a RuntimeWarning; the stable arm must stay silent.
+    """
+    import warnings
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
         SpectralPEConfig,
         check_advective_cfl,
     )
 
     bad = SpectralPEConfig(semi_implicit=True, si_substeps=1)
-    with pytest.raises(ValueError, match="advective Courant"):
+    with pytest.warns(RuntimeWarning, match="advective Courant"):
         check_advective_cfl(63, 1800.0, bad)
-    check_advective_cfl(63, 1800.0, bad._replace(si_substeps=3))
-    with pytest.raises(ValueError, match="advective Courant"):
+    # Fix (3 substeps) is stable -> no warning.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check_advective_cfl(63, 1800.0, bad._replace(si_substeps=3))
+    # Explicit path does NOT credit substeps -> still flagged.
+    with pytest.warns(RuntimeWarning, match="advective Courant"):
         check_advective_cfl(
             63, 1800.0, bad._replace(si_substeps=3, semi_implicit=False))

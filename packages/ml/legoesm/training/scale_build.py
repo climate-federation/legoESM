@@ -247,14 +247,30 @@ _WB_SPECTRAL_KEYS = frozenset({
     "fix_mass", "anchor_mass_to_initial", "vertical_advection_scheme",
     "frictional_heating",
 })
+# Exactly the keys the classical / neural_gcm / sfno builders read from their
+# nested blocks (#1663 review: these were unvalidated, so a nested typo like
+# ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
+_WB_CLASSICAL_KEYS = frozenset({
+    "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
+    "rad_update_interval_steps", "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
+    "turbulence",
+})
+# neural_gcm and sfno share one arch/drag key surface (both neural cores); kept
+# permissive across the two so a valid arch key is never falsely rejected.
+_WB_NEURAL_KEYS = frozenset({
+    "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
+    "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
+})
 
 
 def validate_wb_campaign_yaml(yml: dict) -> None:
     """Refuse a campaign YAML carrying keys this training path does not read.
 
     Unknown keys raise with a nearest-match hint.  Covers the top level and
-    the ``spectral`` block; nested per-scheme blocks (``classical``,
-    ``loss``, ...) have their own consumers and are not checked here.
+    the ``spectral``, ``loss``, ``classical``, ``neural_gcm`` and ``sfno``
+    blocks (#1663: the last three were unchecked, so a nested typo silently
+    defaulted).
     """
     import difflib
 
@@ -302,6 +318,14 @@ def validate_wb_campaign_yaml(yml: dict) -> None:
         unknown = set(loss) - set(LossConfig._fields)
         if unknown:
             _reject(unknown, sorted(LossConfig._fields), "loss-block")
+    # Nested per-scheme blocks (#1663): typo'd keys here silently defaulted.
+    for _blk, _known in (("classical", _WB_CLASSICAL_KEYS),
+                         ("neural_gcm", _WB_NEURAL_KEYS),
+                         ("sfno", _WB_NEURAL_KEYS)):
+        _b = yml.get(_blk) or {}
+        _u = set(_b) - _known
+        if _u:
+            _reject(_u, sorted(_known), f"{_blk}-block")
 
 
 def make_loss_config(cfg, yml):

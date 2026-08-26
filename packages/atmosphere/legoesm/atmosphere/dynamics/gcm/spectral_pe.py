@@ -1247,17 +1247,29 @@ def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None
     ``si_substeps`` subdivides the step ONLY on the semi-implicit path;
     an explicit configuration advances at the full ``dt``.
     """
+    import warnings
     n_sub = int(config.si_substeps) if config.semi_implicit else 1
     dt_step = float(dt) / max(n_sub, 1)
     c = advective_cfl_courant(n_max, dt_step)
     if c > RK3_ADVECTIVE_BOUND:
-        raise ValueError(
-            f"unstable spectral configuration: advective Courant number "
-            f"{c:.2f} > {RK3_ADVECTIVE_BOUND:.2f} at u_ref="
-            f"{ADVECTIVE_CFL_U_REF:.0f} m/s (n_max={n_max}, dt={dt}, "
-            f"si_substeps={config.si_substeps}, "
-            f"semi_implicit={config.semi_implicit}). This is the T63 dt=1800 "
-            "blowup class of 2026-08-23; raise si_substeps or lower dt.")
+        # WARN, do not raise (#1663 review): u_ref=150 is a DESIGN envelope
+        # (~2x midlatitude jets), and RK3_ADVECTIVE_BOUND is the SSP-RK3
+        # imaginary-axis limit — so a hard error over-blocked legitimate configs
+        # (the T42 dt=1800 Held-Suarez benchmark, u_crit~146, runs ~40 m/s jets
+        # stably; ssp_rk34/rk4/ssp_rk54 carry larger stability intervals than
+        # RK3). The 2026-08-23 T63 dt=1800 blowup (u_crit~97 < real winter jets)
+        # still surfaces here loudly.
+        warnings.warn(
+            f"spectral advective Courant number {c:.2f} > "
+            f"{RK3_ADVECTIVE_BOUND:.2f} (SSP-RK3 bound) at the u_ref="
+            f"{ADVECTIVE_CFL_U_REF:.0f} m/s design envelope (n_max={n_max}, "
+            f"dt={dt}, si_substeps={config.si_substeps}, "
+            f"semi_implicit={config.semi_implicit}, "
+            f"time_integrator={config.time_integrator}). If expected winds "
+            "approach u_ref this is the T63 dt=1800 blowup class of 2026-08-23 "
+            "(raise si_substeps or lower dt); for a larger-stability integrator "
+            "or a low-jet case (e.g. Held-Suarez) it may be a false alarm.",
+            RuntimeWarning, stacklevel=2)
 
 
 def apply_spectral_filter_to_state(state, spectral_filter, *,
