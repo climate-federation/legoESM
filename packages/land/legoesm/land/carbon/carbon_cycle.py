@@ -708,6 +708,15 @@ def step_carbon_differland(
     validate_som_transfer_fractions(
         config.f_active_to_slow, config.f_slow_to_passive,
         config.cwd_humification_eff)
+    # #1675 site 2 (GLM review): upcast the pools to the COMPUTE dtype (that of
+    # the f64 forcing in mixed-storage mode) at entry, so the stiff CENTURY
+    # semi-analytic SOM solve runs structurally in f64 — not reliant on
+    # promotion-by-operand-order (a pool-only coefficient built before the
+    # forcing is touched would otherwise run fp32 and ill-condition the solve).
+    # step_carbon casts the pools back to storage dtype on the way out.  No-op
+    # for fp64 and strict-fp32 (result_type == pool dtype there) -> byte-identical.
+    _compute_dt = jnp.result_type(sw_down, T, co2_ppmv, beta, precip)
+    state = jax.tree.map(lambda a: a.astype(_compute_dt), state)
     dt_days = dt / _SPD
 
     # LAI from foliar carbon
@@ -1203,6 +1212,10 @@ def step_carbon(
         # to the input dtype here (the single chokepoint every caller routes
         # through).  No-op for strict-fp32 (x64 off, no promotion) and fp64
         # (input already f64) -> those paths stay byte-identical.
+        # Ceiling (fp32 storage, GLM review): ~6e-8 rel/step round-to-nearest
+        # floor; monotone accumulation slower than ~0.2%/century stalls
+        # deterministically — orders below the passive-SOM secular responses of
+        # interest, so acceptable as the chosen mixed-storage behaviour.
         _new = _out[0]
         if _new is not None:
             _new = jax.tree.map(

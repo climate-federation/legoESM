@@ -9,10 +9,18 @@ rollout keeps fp32 storage.  No-op for strict-fp32 (x64 off) and fp64.
 Runs with x64 ON — that IS the mixed condition (f64 arithmetic, fp32 storage).
 """
 import jax
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+import pytest
 
-from legoesm.land.carbon.carbon_cycle import step_carbon, init_carbon_state
+# Needs x64 ON (the mixed condition: f64 arithmetic, fp32 storage).  SKIP rather
+# than force-set x64 at import — forcing it leaks a global into later tests
+# (collection-order precision bleed).  The sci-test run sets JAX_ENABLE_X64=1.
+if not jax.config.read("jax_enable_x64"):
+    pytest.skip(
+        "needs x64 (run under JAX_ENABLE_X64=1)", allow_module_level=True)
+
+from legoesm.land.carbon.carbon_cycle import (
+    step_carbon, step_carbon_differland, init_carbon_state)
 from legoesm.land.carbon.config import CarbonConfig
 
 _CFG = CarbonConfig(scheme="differland")
@@ -50,12 +58,19 @@ def test_step_carbon_preserves_fp32_storage_under_f64_forcing():
                 f"step {step}: step_carbon must cast the carry to storage dtype")
 
 
-def test_step_carbon_fp64_is_unchanged():
-    # fp64 pools stay fp64 — the cast is a no-op there (byte-identical path).
+def test_step_carbon_fp64_is_byte_identical():
+    # fp64 in: both casts (entry upcast + exit cast) are astype(f64->f64) =
+    # identity, so the wrapped step must be BYTE-IDENTICAL to the un-wrapped
+    # differland step — not merely the same dtype.
     state = init_carbon_state((_NCOL,), _CFG)  # f64 under x64
     assert all(getattr(state, x).dtype == jnp.float64 for x in state._fields)
     f = _forcing(_NCOL)
-    state, _ = step_carbon(
-        state, f["sw_down"], f["T"], f["co2_ppmv"], f["beta"],
-        f["lat"], 1.0, f["precip"], _CFG, dt=86400.0)
-    assert all(getattr(state, x).dtype == jnp.float64 for x in state._fields)
+    args = (state, f["sw_down"], f["T"], f["co2_ppmv"], f["beta"],
+            f["lat"], 1.0, f["precip"], _CFG)
+    wrapped, flux_w = step_carbon(*args, dt=86400.0)
+    direct, flux_d = step_carbon_differland(*args, dt=86400.0)
+    assert jnp.array_equal(flux_w, flux_d)
+    for name in state._fields:
+        assert getattr(wrapped, name).dtype == jnp.float64
+        assert jnp.array_equal(
+            getattr(wrapped, name), getattr(direct, name)), name
