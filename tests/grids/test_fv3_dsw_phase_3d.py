@@ -1266,7 +1266,10 @@ def test_shape_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     # Accept both, refuse only the vacuous case (runs AND matches).
     try:
         bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
-    except ValueError:
+    except ValueError as e:
+        # Narrow (codex MINOR): only the stagger-slip's own broadcast
+        # error counts; an unrelated ValueError must FAIL this test.
+        assert "Incompatible shapes for broadcasting" in str(e), e
         return  # the slip is now caught structurally -- gate non-vacuous
     # `equal_nan=True`: these stacks carry NaN scratch by construction
     # (the halo lane's tripwire fill), and plain array_equal calls two

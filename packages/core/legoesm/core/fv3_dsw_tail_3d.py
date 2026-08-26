@@ -916,16 +916,16 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     zh6 = upd["zh"]
     pkc6 = upd["pkc"]
 
-    # zh + pkc duo exchanges (:1482-1483), ONE interface level at a time
-    # with all six faces present for that level -- the spec's k loop and
-    # the same one-level-at-a-time discipline as barrier 2.  Each
-    # level's exchange reads and writes only its own plane, so no
-    # iteration reads another's write; source order is preserved.
-    for k in range(km + 1):
-        zh6 = zh6.at[:, :, :, k].set(
-            _ext_scalar_planes_6(zh6[:, :, :, k], ctx))
-        pkc6 = pkc6.at[:, :, :, k].set(
-            _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+    # zh + pkc duo exchanges (:1482-1483).  Batched over the km+1
+    # interface levels via the allk public (M3 v2a; codex MAJOR -- these
+    # two loops were the un-batched stragglers behind the "60 -> 6"
+    # claim): the certified (ring_comm=None) path inside the allk fn is
+    # the SAME ascending-k per-level loop relocated verbatim, so
+    # statement order and per-level independence are unchanged; the ring
+    # path collapses 2*(km+1) collectives into 2.
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_allk
+    zh6 = ext_scalar_sixface_allk(zh6, ctx.tab, "A")
+    pkc6 = ext_scalar_sixface_allk(pkc6, ctx.tab, "A")
 
     # gz = zh*grav over the two-cell halo box (:1487-1494).  The spec's
     # face loop vectorises over the leading axis of the IDENTICAL
@@ -942,9 +942,7 @@ def dgrid_nh_pressure_phase_3d(ctx, csw_press, dsw_outs, tail_outs, nh, km,
     # first exchange and it only gz changes, so it is idempotent -- kept
     # for statement-order fidelity, exactly as the spec gates it.
     if square_domain:
-        for k in range(km + 1):
-            pkc6 = pkc6.at[:, :, :, k].set(
-                _ext_scalar_planes_6(pkc6[:, :, :, k], ctx))
+        pkc6 = ext_scalar_sixface_allk(pkc6, ctx.tab, "A")
 
     # nh_p_grad (:1534-1543): beta = 0 on the deck.  It takes the
     # ORIGINAL ctx.gs6[t] (rdx/rdy metrics), not the exchanged-area
