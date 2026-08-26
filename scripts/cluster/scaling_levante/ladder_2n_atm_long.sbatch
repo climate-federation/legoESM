@@ -36,7 +36,7 @@ echo "=== ladder $LANE ndev=$NDEV nodes=$NODES $(date +%T) git=$(git rev-parse -
 #   both lanes: NCCL mcp2p pair (-13..-18% MPAS@64, -6.1% LL@32, -8% rag@64)
 #   mpas: wide halo + ragged 2-collective exchange (5.73 ms receipt)
 #   latlon: packed stage-entry exchange (-11.8%@128) + overlap flags
-export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16 NCCL_P2P_NET_CHUNKSIZE=131072
 rc=0
 if [ "$LANE" = "mpas" ]; then
   LEGOESM_MPAS_WIDE_HALO=1 LEGOESM_MPAS_RAGGED_HALO=1 JAX_ENABLE_X64=0 \
