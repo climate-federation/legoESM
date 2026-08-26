@@ -144,23 +144,18 @@ def test_mpas_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-@pytest.mark.parametrize("mode", [
-    "fp64",
-    pytest.param("mixed", marks=pytest.mark.xfail(
-        reason="lat-lon PE promotes moist tracers to float64 in mixed — a 3D "
-               "contagion the MPAS lane does not have. Traced (codex) to the "
-               "POST-STEP mass fixer's dp-ratio at "
-               "primitive_eq_latlon_cgrid.py:1351: p_s_post is f64 (the mass "
-               "fix, decision A), so ratio = dp_pre/dp_post is f64 and "
-               "`q * ratio` promotes every tracer. A naive "
-               "`q * ratio.astype(q.dtype)` did NOT empirically clear it "
-               "(tracers still f64 after model.step — the tendency application "
-               "interacts with the physics-carry / step wrapper), so the exact "
-               "leaf-cast point needs nailing. Mixed-lat-lon only — no "
-               "fp32/fp64, no MPAS, no scaling/prod impact. Deferred, not "
-               "fixed inline; xpass (strict) when fixed → remove this marker.",
-        strict=True)),
-])
+@pytest.mark.parametrize("mode", ["fp64"])  # #1665 interim: mixed refused
+# (the mixed lat-lon tracer-promotion is the tracked mixed-consistency campaign;
+# the refusal itself is pinned by test_mixed_precision_is_refused below).
 def test_latlon_pe_leaf_dtypes(mode):
     state, storage, accum = _run_latlon(mode)
     _assert_leaf_dtypes(state, storage, accum)
+
+
+def test_mixed_precision_is_refused():
+    """#1665 interim: mixed is refused loudly; pin the refusal explicitly (the
+    lat-lon leaf-dtype consistency for mixed is the tracked campaign)."""
+    import pytest
+    from legoesm.runtime.precision import apply_precision
+    with pytest.raises(NotImplementedError, match="disabled"):
+        apply_precision("mixed")

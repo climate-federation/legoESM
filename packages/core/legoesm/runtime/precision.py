@@ -58,7 +58,14 @@ _FP64_STORAGE_MODES = frozenset({"fp64", "float64", "mixed_fp64_storage"})
 
 
 def available_precision_modes() -> tuple[str, ...]:
-    """Sorted names of the precision modes ``apply_precision`` accepts."""
+    """Sorted names of the KNOWN precision modes.
+
+    NOTE (#1665): listed does NOT mean activatable — ``'mixed'`` /
+    ``'mixed_fp64_storage'`` are known modes that ``apply_precision`` currently
+    REFUSES (raises ``NotImplementedError``) until the mixed-consistency
+    campaign lands. Enumerating consumers should treat only ``'fp32'``/
+    ``'fp64'`` as runnable in the interim.
+    """
     return tuple(sorted(_MODE_FACTORIES))
 
 
