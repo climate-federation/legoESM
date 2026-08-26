@@ -147,52 +147,99 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
     return out
 
 
-# The switches that decide WHICH PHYSICS produced a deposit map.  A map made
-# with the wind off is a perfectly well-formed array of the right shape on the
-# right mask, so no numerical guard in this file can tell it from a wind-on one
-# -- the wet mask is identical either way.  Only the stamp can.
-_WIND_SWITCHES = ("DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
-                  "LEGOESM_NEMO_E3T", "DINO_RECONCILE")
+# WHICH KNOBS ACTUALLY DECIDE THE PHYSICS OF A DEPOSIT MAP.
+#
+# Round-3 review demolished the first version of this list.  It checked
+# DINO_HU_WIND / DINO_ZUFRC_WIND / DINO_SEAM_WIND -- which are INERT for this
+# producer.  They are continuity controls belonging to OTHER probes
+# (hu_avg_perface_diff, zu_frc_assembly_table, seq_seam_walk) and land in this
+# stamp only because the provenance helper records one shared environment list
+# for the whole directory.  `substep_traj_compare`, which writes these maps,
+# never reads them.  Meanwhile the one stamped knob it DOES read that changes
+# the wind -- the seasonal clock, on a card whose wind has an annual cycle --
+# was omitted entirely.  So the gate was checking three switches that cannot
+# matter and missing the one that can.
+_PRODUCER_KNOBS = ("DINO_1226_T_SECONDS", "DINO_1226_IC_STEP",
+                   "LEGOESM_NEMO_E3T")
+# Recorded for the audit trail, explicitly NOT used as a wind-on witness.
+_INERT_KNOBS = ("DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
+                "DINO_RECONCILE")
 
 
 def parse_stamp(prov: str) -> dict:
-    """Pull the physics switches out of a probe provenance stamp."""
+    """Pull the producer's own knobs, and the inert ones, out of a stamp."""
     import re
     out = {}
-    for key in _WIND_SWITCHES:
+    for key in _PRODUCER_KNOBS + _INERT_KNOBS:
         m = re.search(key + r"=('[^']*'|\S+)", prov)
         out[key] = m.group(1).strip("'") if m else None
     return out
 
 
 def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
-    """Refuse to run unless the maps agree with each other AND with the CLI.
+    """Refuse to run unless the maps agree AND are in the expected ON state.
 
-    ADDED AFTER REVIEW 2026-08-26, which found this file discarding the two
-    provenance fields the deposit maps already carry.  The exposure was not
-    theoretical: the whole wind section compares a wind increment read from a
-    CLI-supplied oracle directory against a bias read from the maps, and if the
-    maps had been produced with the wind switches off, that section would be
-    measuring an unforced ocean against a forced increment.  This campaign has
-    already shipped and retracted exactly that class of error.
+    AGREEMENT IS NOT ENOUGH, which is what round-3 review caught: five
+    identical wind-OFF maps agree perfectly with each other and sailed straight
+    through the first version of this gate.  So each knob the producer actually
+    consumes is checked against its expected value, not merely against its
+    neighbours.
 
-    Note what the five maps legitimately DO differ in: each state carries its
-    OWN oracle dump directory (kt5760 from the D180 lane, kt5764 from the
-    KT5764 lane).  That is correct, and it is precisely why the CLI directory
-    must be checked to be one of them rather than assumed -- and why the wind
-    increment's step-invariance is MEASURED in `wind_step_invariance` rather
-    than taken on trust.
+    What is checked, and why each one can change the answer:
+
+      * ``LEGOESM_NEMO_E3T`` must be ``'both'``.  Anything else silently swaps
+        the vertical ladder -- the default that this card's history records as
+        having contaminated four separate measurements before it was gated.
+      * ``DINO_1226_T_SECONDS`` must be UNSET, so the seasonal clock is derived
+        from the step rather than overridden.  DINO's wind has an annual cycle,
+        so an overridden clock is a different wind field at the same step.
+      * the stamped ``DINO_1226_IC_STEP`` must equal the map's own ``kt``.
+        Together with the clause above this pins the clock: derived, and
+        derived from the right step.
+
+    THE RESIDUAL GAP, named rather than papered over.  The ORACLE side's
+    wind-on state IS witnessed, by `wind_candidate`'s frame guard: NEMO's wind
+    increment is nonzero on every one of the wet u faces, which a wind-off
+    oracle run could not produce.  legoESM's OWN wind-on state is not directly
+    stamped in these maps at all; the clock checks above are the strongest
+    proxy available from the saved artifacts, and they are a proxy.  Closing
+    that properly means stamping the resolved stress amplitude in the producer.
     """
     parsed = [parse_stamp(st["provenance"]) for st in stamps]
     first = parsed[0]
+
+    # (1) agreement across the five
     for st, got in zip(stamps[1:], parsed[1:]):
-        diff = {k: (first[k], got[k]) for k in _WIND_SWITCHES
-                if first[k] != got[k]}
+        diff = {k: (first[k], got[k]) for k in _PRODUCER_KNOBS
+                if first[k] != got[k] and k != "DINO_1226_IC_STEP"}
         if diff:
             raise SystemExit(
                 f"FATAL: {st['path']} was produced with different physics "
-                f"switches from {stamps[0]['path']}: {diff}. Averaging these "
-                "five states would mix two configurations.")
+                f"knobs from {stamps[0]['path']}: {diff}. Averaging these five "
+                "states would mix two configurations.")
+
+    # (2) the ON-STATE itself, per knob, not merely consistency
+    if first["LEGOESM_NEMO_E3T"] != "both":
+        raise SystemExit(
+            f"FATAL: the maps were produced with LEGOESM_NEMO_E3T="
+            f"{first['LEGOESM_NEMO_E3T']!r}, not 'both'. That is a different "
+            "vertical ladder, and this card's history records that default "
+            "contaminating four measurements before it was gated.")
+    for st, got in zip(stamps, parsed):
+        if got["DINO_1226_T_SECONDS"] not in (None, "None"):
+            raise SystemExit(
+                f"FATAL: {st['path']} carries an OVERRIDDEN seasonal clock "
+                f"(DINO_1226_T_SECONDS={got['DINO_1226_T_SECONDS']!r}). DINO's "
+                "wind has an annual cycle, so an overridden clock is a "
+                "different wind field at the same step.")
+        if got["DINO_1226_IC_STEP"] not in (None, str(st["kt"])):
+            raise SystemExit(
+                f"FATAL: {st['path']} is map kt={st['kt']} but its stamp says "
+                f"IC_STEP={got['DINO_1226_IC_STEP']}. The seasonal clock is "
+                "derived from that step, so the wind would be from another "
+                "time.")
+
+    # (3) the CLI oracle directory must be one the maps came from
     seqdumps = [st["seqdump"] for st in stamps]
     cli = os.path.normpath(cli_seqdump)
     if cli not in [os.path.normpath(x) for x in seqdumps]:
@@ -200,8 +247,12 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
             f"FATAL: --seqdump {cli} is not any of the oracle directories the "
             f"maps were produced from ({sorted(set(seqdumps))}). The wind "
             "increment and the bias would come from different runs.")
-    return {"switches": first, "seqdumps": seqdumps,
-            "cli_seqdump_matches_map": True}
+    return {"producer_knobs": {k: first[k] for k in _PRODUCER_KNOBS},
+            "inert_knobs_recorded_not_checked": {k: first[k]
+                                                 for k in _INERT_KNOBS},
+            "seqdumps": seqdumps,
+            "cli_seqdump_matches_map": True,
+            "lego_wind_on_directly_stamped": False}
 
 
 def wind_step_invariance(stamps: list) -> dict:
@@ -593,18 +644,62 @@ def wind_candidate(seqdump: str, bias_u: np.ndarray, bias_v: np.ndarray,
     k = np.arange(1, wgt.size + 1, dtype=float)
     rot_kernel = float((wgt * k ** 2).sum()) / 2.0
     j_s_v, j_n_v = wall_rows(wetv)
-    f_wall = {}
+
+    # *** CO-LOCATION, and it flipped a verdict (review round 3). ***
+    # The rotated bound evaluates a MERIDIONAL response, so it lives on the v
+    # grid's wall rows -- but the forcing driving it is ZONAL and lives on the u
+    # grid.  The first version took the forcing from the u grid's OWN wall rows.
+    # In the south those coincide (both row 1); in the NORTH they do not (u wall
+    # 197, v wall 196), and the wind increment climbs steeply away from the
+    # wall -- 2.6x one row in, 25x by ten rows.  Reading the forcing a row too
+    # far out UNDERSTATED it by 2.57x at the north and turned a 1.5x
+    # non-exclusion into a 3.9x "exclusion".
+    #
+    # A v face at row j is flanked by the u faces at rows j and j+1, so the
+    # forcing is taken over exactly those, and the MAX is used because this is
+    # an upper bound and the max is the generous direction for the candidate.
+    # Which rows each side came from is REPORTED, not left implicit.
+    def _wind_amp_adjacent(j_v):
+        rows, amps = [], []
+        for j in (j_v, j_v + 1):
+            if 0 <= j < wu.shape[0] and wetu[j].any():
+                rows.append(int(j))
+                amps.append(float(np.sqrt((wu[j][wetu[j]] ** 2).mean())))
+        if not amps:
+            raise SystemExit(
+                f"FATAL: v wall row {j_v} has no wet u face at rows "
+                f"{j_v} or {j_v + 1}; the rotated bound has no forcing to "
+                "co-locate with and would silently read zero.")
+        i = int(np.argmax(amps))
+        return amps[i], rows, rows[i]
+
+    f_wall, rot_forcing = {}, {}
     for tag, j in (("south", j_s_v), ("north", j_n_v)):
         f_wall[tag] = float(coriolis_at_row(seqdump, j))
+        amp, rows, picked = _wind_amp_adjacent(j)
+        rot_forcing[tag] = {"amp": amp, "v_response_row": int(j),
+                            "u_forcing_rows_considered": rows,
+                            "u_forcing_row_used": picked}
     out["rotated_bound_kernel_sum_w_k2_over_2"] = rot_kernel
     out["coriolis_at_v_wall_rows"] = f_wall
+    out["rotated_forcing_colocation"] = rot_forcing
+    # HONESTY NOTE 1 (review round 3, verified independently): the small-angle
+    # step used to build this kernel is applied OUTSIDE its stated regime -- by
+    # the end of the window the rotation angle |f|*n*dt reaches ~1.09 rad, not
+    # a small angle.  The error is in the CONSERVATIVE direction for an
+    # exclusion (the true rotated response is ~6.5% SMALLER than this bound),
+    # so the bound remains an upper bound; it is recorded rather than buried.
+    out["rotation_angle_rad_at_window_end"] = {
+        tag: abs(f_wall[tag]) * float(wgt.size) * dt_s for tag in f_wall}
+    out["small_angle_overstatement_frac"] = 0.065
     out["bias_v_at_south_wall"] = _bias_rms(bias_v, wetv, j_s_v)
     out["bias_v_at_north_wall"] = _bias_rms(bias_v, wetv, j_n_v)
 
     for label, R in (("measured_response", response), ("response_1.0", 1.0)):
         factor = R * jbar * dt_s
         rot = {}
-        for tag, wind_amp in (("south", at_south), ("north", at_north)):
+        for tag in ("south", "north"):
+            wind_amp = rot_forcing[tag]["amp"]
             dv = abs(f_wall[tag]) * wind_amp * (dt_s ** 2) * rot_kernel * R
             bias_v_amp = out[f"bias_v_at_{tag}_wall"]
             rot[tag] = {
@@ -880,8 +975,14 @@ def main() -> None:
     prov = assert_map_provenance(M["_stamps"], args.seqdump)
     inv = wind_step_invariance(M["_stamps"])
     print("\n=== MAP PROVENANCE GATE ===")
-    print(f"  physics switches, identical across all five maps: "
-          f"{prov['switches']}")
+    print(f"  producer's OWN knobs, checked against their ON state: "
+          f"{prov['producer_knobs']}")
+    print(f"  inert knobs (belong to other probes; recorded, NOT a wind-on "
+          f"witness): {prov['inert_knobs_recorded_not_checked']}")
+    print(f"  legoESM wind-on directly stamped in the maps: "
+          f"{prov['lego_wind_on_directly_stamped']}  <- the oracle side IS "
+          f"witnessed (nonzero increment on every wet u face); this side "
+          f"rests on the clock checks above, which are a proxy")
     print(f"  each state carries its own oracle dump; --seqdump matches one "
           f"of them: {prov['cli_seqdump_matches_map']}")
     if inv["max_relative_spread"] is None:
@@ -982,6 +1083,17 @@ def main() -> None:
           "every difference in how\n              legoESM ASSEMBLES its slow "
           "forcing -- the wind term included --\n              is already "
           "removed by construction.")
+    print(f"  rotated-bound kernel on the REAL saved weights: "
+          f"{wind['rotated_bound_kernel_sum_w_k2_over_2']:.1f} "
+          f"(the synthetic uniform-68 case used by the tests is 787.75 -- "
+          f"they differ because the real window is uniform over only 45 of 68 "
+          f"substeps, starting at 24)")
+    _ang = wind["rotation_angle_rad_at_window_end"]
+    print(f"  SMALL-ANGLE CAVEAT: the rotation angle reaches "
+          f"{max(_ang.values()):.2f} rad by window end, so the small-angle "
+          f"step is used outside its stated regime. The error is CONSERVATIVE "
+          f"(true response ~{100 * wind['small_angle_overstatement_frac']:.1f}%"
+          f" SMALLER), so this stays an upper bound.")
     _sc = wind["row_profile_shape_corr_with_bias"]
     print("  row-profile shape correlation with the bias (WHOLE-DOMAIN "
           "context, not a wall statistic): "
@@ -995,6 +1107,7 @@ def main() -> None:
               f"({'excludes' if b['u_EXCLUDES_north'] else 'DOES NOT EXCLUDE'})")
         for tag in ("south", "north"):
             r = b["rotated_meridional"][tag]
+            co = wind["rotated_forcing_colocation"][tag]
             # How much room is there above the 3x margin?  The northern
             # exclusion at R=1 clears by only ~1.3x, i.e. it would FLIP at a
             # modestly larger response factor.  Printing the headroom stops
@@ -1004,6 +1117,9 @@ def main() -> None:
                   f"{r['ratio_bias_over_rotated_wind']:.2f}x "
                   f"({'excludes' if r['EXCLUDES'] else 'DOES NOT EXCLUDE'}"
                   f", clears the 3x margin by {head:.2f}x)"
+                  f"  [v response row {co['v_response_row']}, forcing from u "
+                  f"row {co['u_forcing_row_used']} of "
+                  f"{co['u_forcing_rows_considered']}]"
                   f"   [rotated deposit "
                   f"{r['rotated_v_deposit_from_FULL_wind_term']:.3e} vs "
                   f"measured {r['measured_v_bias']:.3e} m/s]")

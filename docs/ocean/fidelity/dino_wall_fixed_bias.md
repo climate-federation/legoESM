@@ -1,10 +1,16 @@
 # The barotropic loop's fixed bias: not a wall object, and not the wind
 
 **Outcome.** The state-constant part of the barotropic end-wall residual is
-characterised directly, without any projector; the one unstarted candidate on
-the card — the wind-stress placement difference — is **excluded**; and a new
-candidate with a measured coefficient is named and ranked. Two loop ingredients
-are refuted by measurement and two more excluded for free.
+characterised directly, without any projector; the wind-stress placement
+difference — the one unstarted candidate on the card — is **excluded on a
+structural argument, but on that argument alone**; and a new candidate with a
+measured coefficient is named and ranked. Two loop ingredients are refuted by
+measurement and two more excluded for free.
+
+**Read §5 before quoting the wind verdict.** The independent size check
+excludes the wind at **neither wall** once its forcing is co-located with its
+response, and the structural argument that carries the exclusion has four
+premises, one of which is still unverified.
 
 **The headline is a retraction.** This residual is **not a wall object at all**.
 In the zonal component it is the largest of three alternating, zonally coherent,
@@ -22,7 +28,7 @@ latitude structure. One cheap pre-registered arm settles it (§6).
 
 Artifact: `results/dino_1455/baro_fixed_bias_wall_map.json`.
 Probe: `scripts/validate/ocean_fidelity/dino_1226/baro_fixed_bias_wall_map.py`.
-Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (55).
+Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (63).
 
 Everything below is measured in the arm where **NEMO's own frozen slow forcing
 is substituted into legoESM's own loop** from a bit-identical entry state
@@ -221,53 +227,76 @@ So this is a **strong argument, not a closed one**, and the earlier sentence
 "this alone settles it" is withdrawn. Premise 4 is the one to close before the
 arm is ever again described as loop-only.
 
-### 5a. The provenance gate premise 3 now rests on
+### 5a. The provenance gate premise 3 rests on, and what it still does not cover
 
-Round-2 review found this probe **discarding** the two provenance fields the
-deposit maps already carry. That was not a theoretical exposure: a map produced
-with the wind switches off is a well-formed array on the identical wet mask, so
-no numerical guard in the file could have told it from a wind-on one, and the
-whole of §5 would then have compared an *unforced* ocean against a *forced*
-increment. This campaign has already shipped and retracted exactly that class of
-error.
+Round-2 review found this probe **discarding** the provenance the maps already
+carry. A map made with the wind off is a well-formed array on an identical wet
+mask, so no numerical guard could tell it from a wind-on one, and §5 would have
+compared an *unforced* ocean against a *forced* increment. Round 3 then found
+the first fix inadequate in two specific ways, both now closed:
 
-The probe now refuses to run unless the five maps agree with each other on the
-physics switches and the oracle directory given on the command line is one the
-maps were actually produced from. Two things measured rather than assumed while
-fixing it:
+* **Agreement is not an on-state.** The gate only checked that the five maps
+  agreed with each other — and five identical *wind-off* maps agree perfectly.
+  Each knob is now checked against its expected value, not against its
+  neighbours.
+* **It was checking the wrong knobs.** The three switches it examined are
+  continuity controls belonging to *other* probes; they reach this stamp only
+  because one shared environment list is recorded for the whole directory, and
+  the producer of these maps never reads them. Meanwhile the one stamped knob
+  it *does* read that changes the wind — **the seasonal clock**, on a card whose
+  wind has an annual cycle — was omitted entirely. The gate now checks the
+  clock (it must be derived, not overridden, and derived from the step the map
+  actually is), and the vertical ladder; the three inert switches are recorded
+  for audit and explicitly **not** treated as a wind-on witness.
 
-* the five states legitimately carry **five different oracle dump directories**
-  (each state has its own), which is why the command-line directory has to be
-  checked against them rather than assumed;
-* the wind increment is **step-invariant to 4.3e-08** across all five of those
-  directories — loaded from each and compared, not taken on trust — so reading
-  it from one directory is valid.
+Two things measured rather than assumed while fixing it: the five states
+legitimately carry **five different oracle dump directories**, which is why the
+command-line directory is checked against them; and the wind increment is
+**step-invariant to 4.3e-08** across all five, loaded from each and compared.
 
-**Support (partial) — shape, zonal channel only.** The zonal wind increment
+**The gap that remains, named.** The *oracle* side's wind-on state **is**
+witnessed — its wind increment is nonzero on every one of the wet faces, which
+a wind-off oracle run could not produce. legoESM's **own** wind-on state is not
+directly stamped in these maps at all. The clock checks are the strongest proxy
+the saved artifacts allow, and they are a proxy. Closing it properly means
+stamping the resolved stress amplitude in the producer.
+
+**Support (partial) — shape, zonal channel only.****Support (partial) — shape, zonal channel only.** The zonal wind increment
 peaks at row 48, in the westerly band, and at the wall rows is **571×** (south)
 and **1308×** below that peak; its whole-domain row profile correlates with the
 bias's at −0.187. The candidate vanishes where the bias is largest.
 
-**Support (partial, and it fails at one wall) — size.** Deliberately generous:
-100 % of the wind term, not the small measured placement offset.
+**Support (partial) — size, and it now excludes at NEITHER wall.** Deliberately
+generous: 100 % of the wind term, not the small measured placement offset.
 
 | | measured response (0.148) | response 1.0 |
 |---|---|---|
 | zonal, south wall | 0.79× — **does not exclude** | 0.12× — **does not exclude** |
 | zonal, north wall | 21.3× — excludes | 3.2× — excludes |
-| rotated meridional, south | 2.2× — **does not exclude** | 0.32× — **does not exclude** |
-| rotated meridional, north | 26.2× — excludes | 3.9× — excludes |
+| rotated meridional, south | 0.85× — **does not exclude** | 0.13× — **does not exclude** |
+| rotated meridional, north | 10.2× — excludes | **1.51× — does not exclude** |
 
-At the southern wall the wind term is comparable to or larger than the bias in
-both channels. Size excludes at the north and **not** at the south, and the
-probe now prints that verdict per row rather than leaving it to prose.
+At an assumption-free response the size bound **fails to exclude the wind at
+either wall in the across-wall channel**, and at the southern wall it fails in
+both channels at both responses. The probe prints the verdict and the headroom
+per row.
 
-**And the northern exclusion is thinner than it looks.** At an
-assumption-free response of 1.0 the rotated northern bound clears the 3×
-margin by only **1.30×** — it would flip at a modestly larger response factor.
-The probe prints that headroom next to every verdict, so "excludes" cannot read
-as comfortable when it is marginal. This is a further reason the section rests
-on the structural ground and not on size.
+### RETRACTED: the northern size exclusion, which the co-location error created
+
+Round-3 review found the rotated bound taking its **forcing** from the
+along-wall grid's own wall row while evaluating the **response** on the
+across-wall grid's. In the south those are the same row and nothing changed. In
+the **north they are different rows** — and the wind climbs steeply away from
+the wall there (2.6× one row in, 25× by ten). Reading the forcing one row too
+far out understated it by **2.57×** and turned a 1.51× *non*-exclusion into a
+3.9× "exclusion".
+
+Co-located properly — a meridional face is flanked by two zonal faces, and the
+larger of the two is used because this is an upper bound — the northern rotated
+ratio is **1.51×**, below the 3× margin. **The wind-placement candidate is NOT
+excluded at the north wall by size.** This consumed exactly the 1.30× headroom
+that the previous round added, which is the argument for having added it. The
+probe now prints which row each side of the comparison came from.
 
 ### RETRACTED: "the candidate has no wall-normal component at all"
 
@@ -286,7 +315,18 @@ bound that fails to exclude is still a failure to exclude.
 
 The rotated bound is now computed by the probe from NEMO's own Coriolis
 parameter, printed per wall with an explicit `DOES NOT EXCLUDE`, and pinned by
-a test that it is linear in *f* and exactly zero at *f* = 0. Confusing a null
+tests on its *magnitude* as well as its proportionality — an independent
+reviewer verified the closed form at two window lengths and confirmed it is a
+genuine upper bound. Two caveats it now carries in its own output rather than
+in prose:
+
+* the small-angle step is used **outside its stated regime** — the rotation
+  angle reaches **1.09 rad** by the end of the averaging window, not a small
+  angle. The error is in the conservative direction (the true response is about
+  **6.5 % smaller**), so it remains an upper bound, but the regime is stated;
+* the kernel on the **real** saved weights is **1142**, not the 787.75 of the
+  synthetic uniform-window case the tests pin. Both are printed, because the
+  real averaging window is uniform over only 45 of its 68 substeps. Confusing a null
 forcing with a null response is a mistake this campaign has paid for before, so
 the refutation is kept in the source rather than only here.
 
@@ -403,8 +443,15 @@ substituted arm is described as "loop-only". **Unverified.**
 * The wind's structural exclusion has **four** premises, two verified by source,
   one now gated on the maps' provenance, and one still **unverified** (§5).
   "This alone settles it" is withdrawn.
-* The northern rotated size bound clears its margin by only 1.30× at an
-  assumption-free response (§5); it is not a comfortable exclusion.
+* **The wind is not excluded at the north wall by size** (§5). The earlier
+  northern exclusion was an artifact of reading the forcing one row off the
+  response's row, and is retracted. At an assumption-free response the size
+  bound excludes at neither wall in the across-wall channel.
+* The rotated bound uses the small-angle step outside its regime (1.09 rad by
+  window end). The error is conservative (~6.5 %), so it is still an upper
+  bound (§5).
+* legoESM's own wind-on state is **not** stamped in the maps; the gate's clock
+  checks are a proxy (§5a). The oracle side is directly witnessed.
 
 ## 8. A scope caution this document owes the campaign
 

@@ -453,7 +453,8 @@ def test_exclusion_verdict_is_computed_not_asserted(monkeypatch, tmp_path):
 # loader guards that back the state series
 # --------------------------------------------------------------------------
 _STAMP = ("[provenance x] DINO_HU_WIND=None DINO_ZUFRC_WIND=None "
-          "DINO_SEAM_WIND=None LEGOESM_NEMO_E3T='both' DINO_RECONCILE=None")
+          "DINO_SEAM_WIND=None LEGOESM_NEMO_E3T='both' DINO_RECONCILE=None "
+          "DINO_1226_T_SECONDS=None DINO_1226_IC_STEP='5760'")
 
 
 def _write_map(path, kt, wetu, wetv, n=(M.JPJ, M.JPI), seqdump="/oracle/d180",
@@ -744,20 +745,24 @@ def test_loader_refuses_a_map_with_no_provenance(tmp_path):
         M.load_maps(str(tmp_path), kts=(5760,))
 
 
-def test_provenance_gate_rejects_maps_made_with_different_wind_switches():
-    """A wind-OFF map mixed into a wind-on series must abort the run."""
+def test_provenance_gate_rejects_an_overridden_seasonal_clock():
+    """DINO's wind has an annual cycle, so an overridden clock is another wind."""
     on = M.parse_stamp(_STAMP)
-    assert on["DINO_ZUFRC_WIND"] == "None"
-    off = _STAMP.replace("DINO_ZUFRC_WIND=None", "DINO_ZUFRC_WIND='off'")
-    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP},
-              {"path": "b", "seqdump": "/oracle/d180", "provenance": off}]
-    with pytest.raises(SystemExit, match="different physics"):
+    assert on["DINO_1226_T_SECONDS"] == "None"
+    off = _STAMP.replace("DINO_1226_T_SECONDS=None",
+                         "DINO_1226_T_SECONDS='999.0'")
+    stamps = [{"path": "a", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP},
+              {"path": "b", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": off}]
+    with pytest.raises(SystemExit, match="different physics|OVERRIDDEN"):
         M.assert_map_provenance(stamps, "/oracle/d180")
 
 
 def test_provenance_gate_rejects_a_cli_seqdump_from_another_run():
     """The wind increment and the bias must come from the same oracle run."""
-    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP}]
+    stamps = [{"path": "a", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP}]
     with pytest.raises(SystemExit, match="not any of the oracle directories"):
         M.assert_map_provenance(stamps, "/oracle/SOMEWHERE_ELSE")
     got = M.assert_map_provenance(stamps, "/oracle/d180")
@@ -766,8 +771,10 @@ def test_provenance_gate_rejects_a_cli_seqdump_from_another_run():
 
 def test_provenance_gate_allows_per_state_oracle_directories():
     """Each state legitimately has its OWN dump dir; that must not abort."""
-    stamps = [{"path": "a", "seqdump": "/oracle/d180", "provenance": _STAMP},
-              {"path": "b", "seqdump": "/oracle/kt5764", "provenance": _STAMP}]
+    stamps = [{"path": "a", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP},
+              {"path": "b", "kt": 5760, "seqdump": "/oracle/kt5764",
+               "provenance": _STAMP}]
     got = M.assert_map_provenance(stamps, "/oracle/kt5764")
     assert got["seqdumps"] == ["/oracle/d180", "/oracle/kt5764"]
 
@@ -833,3 +840,132 @@ def test_shape_test_raises_a_FLAG_and_does_not_merely_narrate():
                               np.abs(gap[:nlat]) * vel, vel, wetv)
     assert good["SHAPE_SUPPORTS_CANDIDATE"] is True
     assert good["SHAPE_TEST_VERDICT"] == "SUPPORTED"
+
+
+# --------------------------------------------------------------------------
+# ROUND-3 DEFECT: the rotated bound must CO-LOCATE forcing with response.
+# Reading the forcing from the u grid's own wall row understated it 2.57x at
+# the north wall and turned a 1.5x non-exclusion into a 3.9x "exclusion".
+# --------------------------------------------------------------------------
+def _staggered_wind_case(tmp_path, monkeypatch, wall_amp, inner_amp):
+    """u wall at row 59, v wall at row 58 -- the real staggering, and a wind
+    that climbs steeply away from the wall as the real one does."""
+    wu = np.zeros((M.JPJ, M.JPI))
+    wu[5:60, :] = inner_amp
+    wu[59, :] = wall_amp                      # the u WALL row, weakest
+    wetu = (wu != 0.0)
+    wetv = np.zeros((M.JPJ, M.JPI), dtype=bool)
+    wetv[5:59, :] = True                      # v wall rows 5 and 58
+    wu.tofile(tmp_path / "wnd_dump_zu_frc_inc.bin")
+    np.zeros_like(wu).tofile(tmp_path / "wnd_dump_zv_frc_inc.bin")
+    monkeypatch.setattr(M, "coriolis_at_row", lambda seqdump, j: 1.0e-4)
+    return str(tmp_path), wetu, wetv
+
+
+def test_rotated_forcing_is_colocated_with_the_meridional_response(
+        tmp_path, monkeypatch):
+    """The northern v wall (58) must draw its forcing from u rows 58/59.
+
+    Taking it from the u grid's own wall row (59, the weak one) is the defect.
+    Here the inner rows are 10x the wall row, so the two choices differ by 10x
+    and the test cannot pass by accident.
+    """
+    sd, wetu, wetv = _staggered_wind_case(tmp_path, monkeypatch,
+                                          wall_amp=1.0, inner_amp=10.0)
+    got = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                           np.zeros((M.JPJ, M.JPI)), wetu, wetv,
+                           np.ones(68) / 68.0, 1.0, 1.0)
+    co = got["rotated_forcing_colocation"]["north"]
+    assert co["v_response_row"] == 58
+    assert co["u_forcing_rows_considered"] == [58, 59]
+    # the MAX over the pair -> the strong inner row, not the weak wall row
+    assert co["u_forcing_row_used"] == 58
+    dv = got["bounds"]["response_1.0"]["rotated_meridional"]["north"][
+        "rotated_v_deposit_from_FULL_wind_term"]
+    # 10x larger than the defect would have produced
+    assert dv == pytest.approx(1.0e-4 * 10.0 * 787.75, rel=1e-9)
+
+
+def test_rotated_forcing_reports_which_rows_each_side_came_from(
+        tmp_path, monkeypatch):
+    """Co-location must be auditable, not implicit."""
+    sd, wetu, wetv = _staggered_wind_case(tmp_path, monkeypatch, 1.0, 10.0)
+    got = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                           np.zeros((M.JPJ, M.JPI)), wetu, wetv,
+                           np.ones(68) / 68.0, 1.0, 1.0)
+    for tag in ("south", "north"):
+        co = got["rotated_forcing_colocation"][tag]
+        assert set(co) == {"amp", "v_response_row",
+                           "u_forcing_rows_considered", "u_forcing_row_used"}
+        assert co["u_forcing_row_used"] in co["u_forcing_rows_considered"]
+
+
+def test_rotated_forcing_refuses_a_v_row_with_no_adjacent_wet_u_face(
+        tmp_path, monkeypatch):
+    """Silently reading zero forcing would fake an infinite exclusion."""
+    wu = np.zeros((M.JPJ, M.JPI))
+    wu[5:60, :] = 1.0
+    wetu = (wu != 0.0)
+    wetv = np.zeros((M.JPJ, M.JPI), dtype=bool)
+    wetv[100:120, :] = True                   # nowhere near any wet u face
+    wu.tofile(tmp_path / "wnd_dump_zu_frc_inc.bin")
+    np.zeros_like(wu).tofile(tmp_path / "wnd_dump_zv_frc_inc.bin")
+    monkeypatch.setattr(M, "coriolis_at_row", lambda seqdump, j: 1.0e-4)
+    with pytest.raises(SystemExit, match="no wet u face"):
+        M.wind_candidate(str(tmp_path), np.zeros((M.JPJ, M.JPI)),
+                         np.zeros((M.JPJ, M.JPI)), wetu, wetv,
+                         np.ones(68) / 68.0, 1.0, 1.0)
+
+
+# --------------------------------------------------------------------------
+# ROUND-3 Q1: agreement alone let five identical wind-OFF maps through
+# --------------------------------------------------------------------------
+def test_gate_rejects_five_maps_that_AGREE_but_are_in_the_wrong_state():
+    """The exact hole: perfect agreement, wrong physics, previously green."""
+    bad = _STAMP.replace("DINO_1226_T_SECONDS=None",
+                         "DINO_1226_T_SECONDS='999.0'")
+    stamps = [{"path": f"m{i}", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": bad} for i in range(5)]
+    with pytest.raises(SystemExit, match="OVERRIDDEN seasonal clock"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+
+
+def test_gate_rejects_a_wrong_vertical_ladder_even_if_all_five_agree():
+    bad = _STAMP.replace("LEGOESM_NEMO_E3T='both'", "LEGOESM_NEMO_E3T='off'")
+    stamps = [{"path": f"m{i}", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": bad} for i in range(5)]
+    with pytest.raises(SystemExit, match="vertical ladder"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+
+
+def test_gate_rejects_a_stamp_whose_step_disagrees_with_the_map():
+    """The clock is derived from the step, so a mismatched step is another wind."""
+    stamps = [{"path": "a", "kt": 5761, "seqdump": "/oracle/d180",
+               "provenance": _STAMP}]          # stamp says 5760
+    with pytest.raises(SystemExit, match="IC_STEP"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+
+
+def test_gate_does_not_use_the_inert_switches_as_a_wind_on_witness():
+    """Those three belong to other probes; flipping them must not gate this."""
+    flipped = _STAMP.replace("DINO_HU_WIND=None", "DINO_HU_WIND='0'")
+    stamps = [{"path": "a", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": flipped}]
+    got = M.assert_map_provenance(stamps, "/oracle/d180")
+    assert got["inert_knobs_recorded_not_checked"]["DINO_HU_WIND"] == "0"
+    assert got["lego_wind_on_directly_stamped"] is False
+
+
+# --------------------------------------------------------------------------
+# ROUND-3 Q2: the kernel is right; record the regime it is used outside of
+# --------------------------------------------------------------------------
+def test_small_angle_caveat_is_recorded_with_the_real_rotation_angle(
+        tmp_path, monkeypatch):
+    sd, wetu, wgt = _uniform_wind_case(tmp_path, monkeypatch, 68, f=1.366e-4)
+    got = M.wind_candidate(sd, np.zeros((M.JPJ, M.JPI)),
+                           np.zeros((M.JPJ, M.JPI)), wetu, wetu, wgt,
+                           1.0, 117.391304)
+    ang = got["rotation_angle_rad_at_window_end"]["south"]
+    assert ang == pytest.approx(1.366e-4 * 68 * 117.391304, rel=1e-9)
+    assert ang > 1.0                      # emphatically not a small angle
+    assert got["small_angle_overstatement_frac"] > 0.0
