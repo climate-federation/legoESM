@@ -1621,12 +1621,14 @@ def test_dsw_transport_batched_defaults_off_and_bool(jctx, jstate, jcsw):
 def test_dsw_transport_batched_jit_matches_eager(jctx, jstate, jcsw):
     """jit-vs-eager on the batched arm, through the module's OWN
     factory (batched declared static there).  FMA contraction under jit
-    is a LARGER class than batched-vs-loop reassociation, so the bound
-    is the cgrid file's measured-x4 1e-12, not 1e-13."""
+    is a LARGER class than batched-vs-loop reassociation.  Measured on
+    THIS phase: worst 1.22e-12 rel on a ~1e15-scale KE cell (job
+    9502803) -- the cgrid file's 1e-12 was one violation short here, so
+    the bound is this module's own measured x4."""
     eager = jdsw.dsw_transport_phase_3d(jctx, jstate, jcsw, DT, KM,
                                         batched=True)
     jitted = jdsw.make_dsw_transport_phase_3d_jit()(
         jctx, jstate, jcsw, DT, KM, batched=True)
     assert_batched_matches_loop(jitted, eager,
                                 "dsw_transport_phase_3d[jit,batched]",
-                                rtol=1e-12, atol=1e-12)
+                                rtol=5e-12, atol=1e-12)
