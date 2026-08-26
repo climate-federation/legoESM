@@ -41,49 +41,23 @@ OUT=/burg-archive/glab/users/pg2328/legoESM/results/rcemip1_n128_ocean
 # grew monotonically under radiative destabilisation.  The band-noise seed
 # breaks the horizontal symmetry so convection can initiate.
 #
-# 207360 steps @ dt=20 s = 48.0 sim days.  Snapshots (3D volumes) at days
-# 30..48 every 2 days = 10 volumes, so --last-reference-files 5 (days
-# 40,42,44,46,48) has margin, and all are far past spin-up.
-#
-# WHY 48 DAYS AND NOT 80 (measured, not assumed).  Attempt 1 (job 9248515) ran
-# this EXACT configuration and went non-finite at day 52.25, writing zero
-# volumes because its first snapshot day was 62.  Its own log shows the run is
-# quasi-stationary for 40 days -- max(theta') 55-80 K and max|w| 0.3-0.9 m/s
-# from day 3 to day 40 -- and then transitions abruptly: theta' jumps 80 -> 400 K
-# between days 39.9 and 43.2, reaching 640 K before NaN.  So the configuration
-# is not inherently unstable; it has a long stable window followed by a
-# late-time tip.  The reference is therefore taken from INSIDE the measured
-# stable window rather than fighting the transition.
-#
-# Attempt 2 (job 9260006) tried --si-w-filter-nu 0.35, on the strength of that
-# flag's help ("0.3-0.4 fully damps the structural exponential mode ...
-# Recommended for RCE runs with theta_noise_amp > 0").  It made things far
-# WORSE: NaN at step 360 (2 sim-hours).  The 6-arm pilot matrix (job 9262160,
-# 1 sim-day per arm, one variable per arm) isolated the cause:
-#     filter 0.00 / noise 0.5  -> survives      (= this config)
-#     filter 0.35 / noise 0.2  -> NON-FINITE
-#     filter 0.35 / noise 0.0  -> NON-FINITE    <- filter alone, no noise
-#     filter 0.00 / noise 0.2  -> survives
-#     filter 0.00 / noise 0.1  -> survives
-#     filter 0.15 / noise 0.2  -> survives
-# The w-filter at 0.35 is itself the destabiliser at this resolution (nlev=30,
-# dz ~ 1100 m, 12 acoustic substeps) regardless of the noise amplitude; the
-# documented 0.3-0.4 band evidently was not calibrated for this setup.  The
-# filter stays OFF.  Note also that a 1-day pilot CANNOT see the day-40 tip --
-# arm A survives 1 day and still failed at day 52 in the long run.
+# 345600 steps @ dt=20 s = 80.0 sim days.  Snapshots (3D volumes) are taken
+# at days 62..80 every 2 days = 10 volumes, so --last-reference-files 5
+# (days 72,74,76,78,80) has margin, and all are far past spin-up.
 # ---------------------------------------------------------------------------
 JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_rcemip_plane.py \
   --nx 128 --ny 128 --nlev 30 --dx 2000 --dt 20.0 \
-  --steps 207360 \
+  --steps 345600 \
   --semi-implicit --n-acoustic-substeps 12 --off-centering 0.2 \
   --smag-cs 0.2 --hyperdiff 5e6 \
   --radiation rrtmgp --radiation-interval 90 \
   --microphysics kessler \
   --precision float64 \
-  --theta-noise-amp 0.5 --seed-kind band_noise --seed-kmax 6 \
+  --theta-noise-amp 0.2 --seed-kind band_noise --seed-kmax 6 \
+  --si-w-filter-nu 0.35 \
   --print-every 360 \
   --snapshot-days 0.5 \
-  --snapshot3d-days "30,32,34,36,38,40,42,44,46,48" \
+  --snapshot3d-days "62,64,66,68,70,72,74,76,78,80" \
   --checkpoint-every 21600 \
   --restart "${RESTART:-}" \
   --output $OUT 2>&1
