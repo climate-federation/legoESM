@@ -390,7 +390,7 @@ class DuoStepperContext:
     """
 
     __slots__ = ("n", "ng", "npx", "m_a", "bd", "tab", "gs6", "flags6",
-                 "hs6", "duogrid")
+                 "hs6", "duogrid", "_batched_gs")
 
     def __hash__(self):
         return id(self)
@@ -521,6 +521,11 @@ def build_jax_duo_stepper_context(ctx: dict, *,
         out.hs6 = stack6([np.asarray(h) for h in hs6])
     _require_f64_jax("build_jax_duo_stepper_context", {"hs6": out.hs6})
     out.duogrid = True
+    # Lazily filled by fv3_phase3d_common.build_batched_gs (the
+    # face-batched vmap arm's stacked view of gs6/flags6); None = not
+    # built.  Initialised here so slot-copying clones (the tests') never
+    # hit an unset-slot AttributeError.
+    out._batched_gs = None
     return out
 
 

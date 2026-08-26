@@ -47,6 +47,8 @@ from legoesm.core.fv3_native_state_3d import field_shape
 
 __all__ = [
     "CSW_OUT_LIKE",
+    "PER_FACE_FLAG_FIELDS",
+    "build_batched_gs",
     "require_f64_jax",
     "require_bool",
     "require_km",
@@ -75,6 +77,125 @@ CSW_OUT_LIKE = {
     # the call site.
     "pkc": "pk",
 }
+
+
+# ---------------------------------------------------------------------
+# face-batched context view (face-batching ladder step 1)
+# ---------------------------------------------------------------------
+
+# The ONLY GridFlags fields that legitimately differ per face.  They are
+# used ARITHMETICALLY inside the kernels (``(damp_c*da_min)**(nord+1)``
+# and ``(da_min_c*d4_bg)**(nord+1)``), so a face-batched arm may carry
+# them as ``(6,)`` arrays; every OTHER field is a STATIC Python branch
+# selector, and :func:`build_batched_gs` REFUSES a context on which one
+# of those differs across faces -- silently broadcasting face 1's value
+# to all six would be plausible wrong physics, not an error message.
+PER_FACE_FLAG_FIELDS = ("da_min", "da_min_c")
+
+
+def build_batched_gs(ctx) -> dict:
+    """Face-BATCHED view of ``ctx.gs6`` / ``ctx.flags6``, built once.
+
+    The 3-D phases' certified path is a Python ``for t in range(6)``
+    over per-face kernel calls.  Under SPMD that loop is the measured
+    2-GPU wall (every device computes all six faces, and each traced
+    ``x[t]`` read costs a masked select + all-reduce); the fix is to
+    ``jax.vmap`` the per-face kernel over a leading ``(6, ...)`` batch
+    axis, which GSPMD then partitions with zero communication.  This
+    function provides the stacked operands that vmap arm consumes:
+
+    ``"gs"``
+        ``{key: (6, ...)}`` -- the six per-face metric dicts stacked on
+        a new leading face axis, key by key.  ``jnp.stack`` is a pure
+        index copy, so ``view["gs"][key][t]`` equals ``ctx.gs6[t][key]``
+        EXACTLY (pinned by a round-trip test).  Only keys whose shape is
+        identical on all six faces are stacked; the rest are recorded in
+        ``"unstacked_keys"`` and stay loop-path-only -- a vmapped kernel
+        that needs one fails LOUDLY with a ``KeyError`` naming it, never
+        with face-1 values broadcast.  A per-face KEY split raises here
+        (fail closed): stacking different metrics into one batch slot
+        would be silent.
+    ``"da_min6"``, ``"da_min_c6"``
+        ``(6,)`` float64 arrays from ``flags6[t].da_min`` /
+        ``.da_min_c`` -- the two per-face flag fields, batchable because
+        kernels use them arithmetically (:data:`PER_FACE_FLAG_FIELDS`).
+    ``"flags"``
+        Dict of every OTHER ``GridFlags`` field, single shared value.
+        Guarded by the common-mode assert: any of those fields differing
+        across the six faces RAISES naming the field, because they are
+        static branch selectors and a batched arm can only pass ONE
+        value to the kernel.
+    ``"unstacked_keys"``
+        Tuple of gs keys excluded from ``"gs"`` for shape mismatch.
+
+    CACHED on the context (``ctx._batched_gs``) so the stack runs once
+    per context, not once per phase call.  The cache is validated by
+    IDENTITY of ``ctx.gs6`` / ``ctx.flags6`` -- a clone that swaps in a
+    fresh ``flags6`` tuple (the test helpers do) gets a fresh view, and
+    a ctx without the cache slot still gets a correct, merely uncached,
+    view.
+    """
+    cached = getattr(ctx, "_batched_gs", None)
+    if cached is not None:
+        src_gs, src_flags, view = cached
+        if src_gs is ctx.gs6 and src_flags is ctx.flags6:
+            return view
+
+    gs6, flags6 = ctx.gs6, ctx.flags6
+    if len(gs6) != 6 or len(flags6) != 6:
+        raise ValueError(
+            f"build_batched_gs: ctx carries {len(gs6)} gridstructs and "
+            f"{len(flags6)} flag sets, not 6 of each -- the face batch "
+            f"axis is the cube's six faces")
+
+    keys0 = set(gs6[0])
+    for t in range(1, 6):
+        if set(gs6[t]) != keys0:
+            missing = sorted(keys0 - set(gs6[t]))
+            extra = sorted(set(gs6[t]) - keys0)
+            raise KeyError(
+                f"build_batched_gs: gs6[{t}] key set differs from "
+                f"gs6[0]'s (missing {missing}, extra {extra}); a "
+                f"per-face key split would stack a different metric "
+                f"into the same batch slot")
+
+    stacked, unstacked = {}, []
+    for key in sorted(keys0):
+        shapes = {tuple(jnp.shape(gs6[t][key])) for t in range(6)}
+        if len(shapes) != 1:
+            unstacked.append(key)
+            continue
+        stacked[key] = jnp.stack([gs6[t][key] for t in range(6)], axis=0)
+
+    f0 = flags6[0]
+    for name in f0._fields:
+        if name in PER_FACE_FLAG_FIELDS:
+            continue
+        vals = [getattr(flags6[t], name) for t in range(6)]
+        if any(v != vals[0] for v in vals):
+            raise ValueError(
+                f"build_batched_gs: GridFlags.{name} differs across "
+                f"faces ({vals}). It is a STATIC branch selector, so a "
+                f"face-batched kernel call can only take one value -- "
+                f"broadcasting face 1's would silently run face 1's "
+                f"branch on all six faces. Only "
+                f"{list(PER_FACE_FLAG_FIELDS)} may vary per face.")
+
+    view = {
+        "gs": stacked,
+        "unstacked_keys": tuple(unstacked),
+        "da_min6": jnp.asarray([fl.da_min for fl in flags6],
+                               dtype=jnp.float64),
+        "da_min_c6": jnp.asarray([fl.da_min_c for fl in flags6],
+                                 dtype=jnp.float64),
+        "flags": {name: getattr(f0, name) for name in f0._fields
+                  if name not in PER_FACE_FLAG_FIELDS},
+    }
+    try:
+        ctx._batched_gs = (gs6, flags6, view)
+    except (AttributeError, TypeError):
+        pass  # a ctx without the cache slot gets a correct uncached view
+    return view
 
 
 # ---------------------------------------------------------------------
