@@ -69,10 +69,12 @@ SEED=${SEEDS[$(( SLURM_ARRAY_TASK_ID / 10 ))]}
 # compared term-by-term against a pinned one by accident.
 CORIOLIS=${CORIOLIS:-0.0}
 PROTO_TAG=${PROTO_TAG:-f0}
-# Joint multi-SST tuning for generalization: comma-separated SSTs scored
-# together (each candidate at all three; the mean drives the search). Default
-# "300" keeps the single-SST behaviour. The primary reference-dir must match
-# the primary SST; the driver resolves sibling rcemip_ref_sam<SST> dirs.
+# Joint multi-SST tuning for generalization. sbatch --export SPLITS a value on
+# commas, so the SSTs are passed DASH-joined (SSTS=295-300-305) and converted to
+# the comma list the driver's --ssts expects HERE, inside the job. Default 300
+# keeps single-SST behaviour. The driver resolves sibling rcemip_ref_sam<SST>
+# dirs; the primary reference-dir must match one of the SSTs.
+SSTS=${SSTS//-/,}
 SSTS=${SSTS:-300}
 OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_${PROTO_TAG}_seed${SEED}
 
