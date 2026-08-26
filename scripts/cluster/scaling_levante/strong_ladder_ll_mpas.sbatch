@@ -27,6 +27,7 @@ cd "$REPO"
 OUTDIR="$SCRATCH/legoesm_scaling/strong_ladder_j${SLURM_JOB_ID}"; mkdir -p "$OUTDIR"
 export LEGOESM_JIT_CACHE_DIR="$OUTDIR/jitcache"; mkdir -p "$LEGOESM_JIT_CACHE_DIR"
 GPN=4
+NODES="${SLURM_JOB_NUM_NODES:-32}"
 
 rc=0
 
@@ -34,8 +35,8 @@ rc=0
 run_arm() {
   local grid="$1" res="$2" nrs="$3" nd="$4" x64="$5"
   local nn=$(( (nd + GPN - 1) / GPN ))
-  if (( nn > 32 )); then
-    echo "[skip] ${grid}_${res} d${nd}: needs ${nn} nodes (>32)"
+  if (( nn > NODES )); then
+    echo "[skip] ${grid}_${res} d${nd}: needs ${nn} nodes (>${NODES})"
     return 0
   fi
   local tag="${grid}_${res}_d${nd}_x${x64}"
