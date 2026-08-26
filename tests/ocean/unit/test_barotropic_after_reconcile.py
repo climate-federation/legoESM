@@ -650,8 +650,12 @@ def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
     warning and the OTHER site was never observed to warn at all.  Review
     caught it; this is the gate that keeps it caught.
 
-    Not a raise: the shipped twin runs ``bridge_before=False`` by default and
-    would be refused."""
+    Not a raise: a genuine FROM-REST run of a card that ships this option has
+    no before level to bridge, and the DINO twin's ``--legacy-euler-start``
+    exists to reproduce artifacts recorded before 2026-08-24.  (An earlier
+    version of this docstring justified that by the twin's default being
+    ``bridge_before=False`` -- RETRACTED, the default is the bridged start
+    since #1455; see the companion test below.)"""
     import warnings
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel)
@@ -673,6 +677,41 @@ def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
         getattr(model, method)(state, _DT)
     assert not [x for x in w2 if "forward-Euler start" in str(x.message)], (
         "the warning must be emitted once per site, not on every Euler step")
+
+
+def test_no_euler_warning_once_the_before_level_is_populated():
+    """#1455 (2026-08-24): under the twin's NEW default the warning must NOT
+    fire -- and that is a property of the model, not of the harness.
+
+    The bridged start hands ``model.step`` a populated ``u_before``, so the
+    early-return branch the warning lives on is never taken.  The fixture gets
+    there the same way the model does: step 1 is the Euler start (and warns),
+    step 2 runs with the before level populated and must be silent.  Without
+    this, "the default no longer warns" would be an assertion about a flag
+    default rather than about the code path it selects.
+    """
+    import warnings
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+
+    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
+    state, model = _channel(after="nemo_mlf_baro_corr", dino_drag=True)
+    s1 = model._leapfrog_step(state, _DT)          # the Euler start itself
+    assert s1.u_before is not None, (
+        "fixture must reach a populated before level, or this test passes "
+        "vacuously by staying on the Euler path")
+    # non-vacuity: the warning DID fire on the step that took the Euler branch
+    assert "_leapfrog_step" in LatLonCGridOceanModel._WARNED_EULER_SKIP
+
+    # ...and must not fire again now that the before level exists. Cleared, so
+    # a silent result cannot be the once-per-site latch instead of the branch.
+    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        model._leapfrog_step(s1, _DT)
+    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
+        "a leap-frog step with a populated before level must never claim to "
+        "be the Euler start")
 
 
 def test_no_euler_warning_when_the_option_is_off():

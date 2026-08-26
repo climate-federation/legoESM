@@ -1096,8 +1096,37 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
                                         cfgs=cfgs, case_norm=case_norm)
         return joint
 
-    preflight_loss, preflight_grads = eqx.filter_value_and_grad(loss_fn)(
-        params_all)
+    # JIT the value-and-grad and the line-search candidate score, with the
+    # trainable params as the only traced argument (arms/cfgs/args captured as
+    # compile-time constants). Without this the whole rollout + reverse-mode ran
+    # EAGERLY, dispatching every primitive op separately. The size of the win
+    # depends on whether a scheme is DISPATCH-bound or COMPUTE-bound, and the
+    # dispatch-bound (algebraic) schemes benefit FAR more:
+    #   louis (algebraic):  value_and_grad 14.4 s eager -> 0.36 s jit = ~40x
+    #                       (its real compute is tiny; eager was ~all dispatch).
+    #   CLUBB (15-moment, implicit band solves): 344 s -> 238 s = ~1.45x
+    #                       (genuinely compute-bound; little dispatch to save).
+    # A full 8-scheme cheap-tier seed dropped from 10.8 h to 1.84 h (~5.9x
+    # wall; the fused-graph compile, one per scheme, caps it below the per-eval
+    # 40x). NET is scheme-mix-dependent, biggest where eager dispatch dominated.
+    #
+    # Two compiles per scheme, not one (codex review): the preflight below
+    # traces the FULL param set, then the loop traces the FILTERED trainable set
+    # (frozen leaves dropped), a different cache key. Both are one-time.
+    #
+    # jit fuses/reassociates, so loss and gradient match eager to fp round-off
+    # (loss ~3e-16, grad ~2e-14 on a bomex CLUBB step; the 3-step trajectory was
+    # byte-identical), NOT bitwise. A near-TIED line-search candidate could
+    # therefore be accepted differently step-to-step -- a different valid step,
+    # not a wrong one (codex/GLM review). The loss path has no RNG or wall-clock
+    # (the only jax.random is the one-time init jitter, outside this), so there
+    # is no host state for jit to freeze.
+    jit_value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(loss_fn))
+    jit_candidate_score = eqx.filter_jit(
+        lambda p: joint_score(scheme, arms, args, params=p,
+                              cfgs=cfgs, case_norm=case_norm))
+
+    preflight_loss, preflight_grads = jit_value_and_grad(params_all)
     if not np.isfinite(float(preflight_loss)):
         result.status = "failed"
         result.error = f"preflight loss non-finite: {float(preflight_loss)}"
@@ -1165,7 +1194,7 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
     loss_history = [float(preflight_loss)]
 
     for step in range(1, args.steps + 1):
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+        loss, grads = jit_value_and_grad(params)
         loss_val = float(loss)
         bad = {n: st for n, st in _grad_stats(
             grads, args.grad_nonzero_tol).items()
@@ -1210,9 +1239,7 @@ def tune_scheme_multicase(scheme: str, *, arms, args, cfgs,
                 # not reliably reject a blown-up candidate, and could not
                 # reject one at all under an aggregation that divides each
                 # case by a normalizer above 1.
-                cand_joint, cand_per_case, _ = joint_score(
-                    scheme, arms, args, params=cand, cfgs=cfgs,
-                    case_norm=case_norm)
+                cand_joint, cand_per_case, _ = jit_candidate_score(cand)
                 cand_loss = float(cand_joint)
                 if any(float(v) >= NONFINITE_PENALTY
                        for v in cand_per_case.values()):

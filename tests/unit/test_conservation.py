@@ -13,6 +13,8 @@ from legoesm.core.conservation import (
     apply_conservation_fixer,
     compute_conservation_diagnostics,
     energy_consistent_moisture_floor,
+    energy_consistent_water_floor,
+    apply_water_positivity,
 )
 from legoesm.core.operators import global_integral
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -356,3 +358,95 @@ class TestFixTotalWater:
         target = compute_global_moisture(total, p_s, dsigma, grid) * 0.8
         out = fix_total_water(tracers, target, p_s, dsigma, grid)
         assert bool(jnp.all(out["dust"] == tracers["dust"]))
+
+
+# =========================================================================
+# Cross-grid water positivity: shared borrow + energy-consistent hard floor
+# (#1354/#1515 — every dycore routes through apply_water_positivity)
+# =========================================================================
+
+def _frozen_mse_cell(tracers, T):
+    """Per-cell frozen MSE water+thermal part: c_pd*T + L_v*q_v - L_f*q_frozen."""
+    g = lambda k: tracers[k].data if k in tracers else 0.0
+    q_frozen = g("q_i") + g("q_s") + g("q_g")
+    return constants.c_pd * T + constants.L_v * g("q_v") - constants.L_f * q_frozen
+
+
+def _mixed_water_state():
+    """A 3-level column with negatives in vapour AND ice (transport overshoot)."""
+    F = lambda name, arr: Field(data=jnp.asarray(arr, dtype=jnp.float64),
+                                name=name, dims=("z",), units="kg/kg")
+    tracers = {
+        "q_v": F("q_v", [1.0e-2, -3.0e-4, 5.0e-3]),   # negative aloft
+        "q_c": F("q_c", [2.0e-4, 1.0e-4, -5.0e-5]),   # liquid, one negative
+        "q_i": F("q_i", [-2.0e-4, 4.0e-4, 1.0e-4]),   # ice, negative at surface
+        "q_s": F("q_s", [0.0, -1.0e-5, 2.0e-5]),
+    }
+    T = jnp.asarray([250.0, 240.0, 288.0], dtype=jnp.float64)
+    dp = jnp.asarray([3000.0, 3000.0, 4000.0], dtype=jnp.float64)
+    return tracers, T, dp
+
+
+def test_borrow_conserves_every_species_column_integral():
+    tracers, T, dp = _mixed_water_state()
+    out, T_out = apply_water_positivity(
+        tracers, T, dp, conservative=True, energy_consistent=False)
+    # T untouched by the borrow (frozen-MSE-neutral, Claim A)
+    assert jnp.allclose(T_out, T)
+    for k in tracers:
+        pre = float(jnp.sum(tracers[k].data * dp))
+        post = float(jnp.sum(out[k].data * dp))
+        assert jnp.all(out[k].data >= -1e-30), k
+        # column integral preserved where it was >= 0 (all these are)
+        assert abs(post - pre) <= 1e-9 * max(abs(pre), 1e-30) + 1e-18, (k, pre, post)
+
+
+def test_hard_floor_energy_consistent_conserves_frozen_mse_incl_ice():
+    tracers, T, dp = _mixed_water_state()
+    h_pre = _frozen_mse_cell(tracers, T)  # per-cell, BEFORE floor
+    out, T_out = apply_water_positivity(
+        tracers, T, dp, conservative=False, energy_consistent=True)
+    h_post = _frozen_mse_cell(out, T_out)
+    for k in out:
+        assert jnp.all(out[k].data >= 0.0), k
+    # frozen MSE conserved per cell to roundoff (vapour cooled, ice warmed)
+    assert jnp.allclose(h_post, h_pre, rtol=0, atol=1e-6), (h_pre, h_post)
+
+
+def test_plain_floor_breaks_frozen_mse_nonvacuity():
+    # Same floor WITHOUT the energy correction must NOT conserve frozen MSE,
+    # else the energy-consistent test above proves nothing.
+    tracers, T, dp = _mixed_water_state()
+    h_pre = _frozen_mse_cell(tracers, T)
+    out, T_out = apply_water_positivity(
+        tracers, T, dp, conservative=False, energy_consistent=False)
+    assert jnp.allclose(T_out, T)  # plain floor leaves T alone
+    h_post = _frozen_mse_cell(out, T_out)
+    # vapour floor at level 1 injects +L_v*3e-4; ice floor injects -L_f*...:
+    # the net is nonzero somewhere -> NOT conserved.
+    assert not jnp.allclose(h_post, h_pre, atol=1e-6)
+
+
+def test_ice_correction_sign_is_warming():
+    # An ice-only negative: flooring it up must WARM (opposite to vapour).
+    F = lambda n, a: Field(data=jnp.asarray(a, dtype=jnp.float64), name=n,
+                           dims=("z",), units="kg/kg")
+    tracers = {"q_i": F("q_i", [-1.0e-4, 2.0e-4])}
+    T = jnp.asarray([250.0, 250.0], dtype=jnp.float64)
+    out, T_out = energy_consistent_water_floor(tracers, T)
+    assert float(T_out[0]) > 250.0          # warmed where ice was floored up
+    assert jnp.isclose(T_out[0], 250.0 + constants.L_f / constants.c_pd * 1.0e-4)
+    assert jnp.isclose(T_out[1], 250.0)     # untouched where ice was positive
+
+
+def test_water_floor_is_differentiable():
+    tracers, T, _ = _mixed_water_state()
+
+    def loss(qv0):
+        tt = dict(tracers)
+        tt["q_v"] = tt["q_v"].replace(data=tt["q_v"].data.at[1].set(qv0))
+        out, T_out = energy_consistent_water_floor(tt, T)
+        return jnp.sum(T_out) + jnp.sum(out["q_v"].data)
+
+    g = jax.grad(loss)(-3.0e-4)
+    assert jnp.isfinite(g)

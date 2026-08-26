@@ -149,6 +149,16 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     anchor_mass_to_initial: bool = False  # Mirror cubed-sphere: anchor fixer to initial mass
     T_min: float = 50.0           # Temperature floor [K]
     p_floor: float = 100.0        # Pressure floor [Pa] for surface pressure positivity
+    # #1354/#1515: column-conserving tracer positivity BORROW (shared MPAS form).
+    # Default TRUE — this lane previously had NO tracer floor, so transport
+    # undershoots left negative water; the borrow moves the deficit between
+    # levels (frozen-MSE-neutral for vapour AND condensate).  False = no floor.
+    conservative_tracer_clamp: bool = True
+    # #1354/#1515: hard-floor path only (conservative_tracer_clamp=False): the
+    # floor removes the per-species latent heat of the clipped water (vapour
+    # cools, ice warms, liquid unchanged) so frozen MSE is conserved.  No-op
+    # under the borrow.
+    energy_consistent_moisture_clip: bool = False
     zero_mean_ps_tendency: bool = True
     use_ppm_transport: bool = True  # PPM scalar transport (vs cell-centered gradient)
     use_polar_filter: bool = False
@@ -1356,6 +1366,28 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 state = state._replace(tracers=new_tracers)
 
             state = state._replace(p_s=p_s_post)
+
+        # #1354/#1515: shared tracer positivity stage — this lane previously had
+        # NO tracer floor, so negatives from non-monotone transport persisted.
+        # Borrow (default) is frozen-MSE-neutral for vapour AND condensate; the
+        # hard-floor fallback adds the per-species latent-heat T correction incl
+        # ice.  dp = TRUE layer mass from the FINAL (post-mass-fix) p_s.
+        # ponytail: the borrow's GLOBAL net-negative-column residual uses
+        # jnp.sum; under lat-band SPMD that reduces per-band, not globally — a
+        # tiny correction that only fires on fully net-negative columns (rare on
+        # smooth water fields).  A band-aware psum sum_fn is the SPMD upgrade.
+        if state.tracers:
+            from legoesm.core.conservation import apply_water_positivity
+            _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+            if _hybrid:
+                _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
+            else:
+                _dp = state.p_s[..., jnp.newaxis] * sigma_coord.dsigma
+            _tr_out, _T_out = apply_water_positivity(
+                state.tracers, state.T, _dp,
+                conservative=self.config.conservative_tracer_clamp,
+                energy_consistent=self.config.energy_consistent_moisture_clip)
+            state = state._replace(tracers=_tr_out, T=_T_out)
 
         return state
 

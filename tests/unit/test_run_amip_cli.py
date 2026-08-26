@@ -61,6 +61,30 @@ def test_multilayer_land_flags_flow_to_config():
     assert cfg_on.multilayer_soil_depth == 4.5
 
 
+def test_land_update_seconds_flows_to_config_and_validates():
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.land_update_seconds == 0.0
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--land-mask-file", "lsm.nc",
+        "--use-multilayer-land",
+        "--land-update-seconds", "300",
+    ]), parser))
+    assert cfg_on.land_update_seconds == 300.0
+
+    # A cadence without the multilayer land is a silently-inert knob and
+    # must be refused by validate_strict.
+    import pytest
+    cfg_bad = cfg_off._replace(land_update_seconds=300.0)
+    with pytest.raises(ValueError, match="land_update_seconds"):
+        cfg_bad.validate_strict()
+    with pytest.raises(ValueError, match="land_update_seconds"):
+        cfg_on._replace(land_update_seconds=-1.0).validate_strict()
+
+
 def test_hard_saturation_adjustment_flag_flows_to_config():
     """--hard-saturation-adjustment round-trips to ExperimentConfig (opt-in
     warm-rain hard saturation-adjustment guard; default OFF)."""
@@ -1913,11 +1937,13 @@ def test_config_yaml_round_trips_authoritative_values():
     # was not moved with it, so it asserted the retired C48/L40 cube deck
     # against a config that had been the icosahedral MPAS one for weeks --
     # red on main, and blind to any further drift while it was.  Values below
-    # are the shipped deck: icosahedral level 5 (about 2.2 degrees), 30 sigma
-    # levels, dt 75 s.  The five keys are recipe-sensitive together (the YAML
-    # header records that L40 + hybrid + automatic dt blew up on day one), so
-    # a change here is a stability A/B, not an edit.
-    assert args.resolution == 5
+    # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
+    # production default per the 2026-08-25 directive; level 5 remains the
+    # fast-iteration override), 30 sigma levels, dt 75 s.  The five keys are
+    # recipe-sensitive together (the YAML header records that L40 + hybrid +
+    # automatic dt blew up on day one), so a change here is a stability A/B,
+    # not an edit.
+    assert args.resolution == 6
     assert args.nlev == 30
     assert args.discretization == "mpas"
     # The deck spells the mesh "voronoi"; the parser normalises the family's
