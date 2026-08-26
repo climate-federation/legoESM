@@ -28,7 +28,7 @@ latitude structure. One cheap pre-registered arm settles it (§6).
 
 Artifact: `results/dino_1455/baro_fixed_bias_wall_map.json`.
 Probe: `scripts/validate/ocean_fidelity/dino_1226/baro_fixed_bias_wall_map.py`.
-Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (69).
+Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (70).
 
 Everything below is measured in the arm where **NEMO's own frozen slow forcing
 is substituted into legoESM's own loop** from a bit-identical entry state
@@ -244,7 +244,10 @@ the first fix inadequate in two specific ways, both now closed:
   is now inside the loop; the cross-map agreement clause was **removed** once
   it was, because with both present neither could be tested — deleting either
   one left the suite green while the other silently covered for it, which is
-  the "guard that cannot fail" this work exists to refuse.)
+  the "guard that cannot fail" this work exists to refuse. Each of the three
+  per-map checks now has a test that fails when it is moved back outside the
+  loop — including the step-stamp check, which the deleted clause had always
+  excluded, so the loop was its only guard and nothing had ever tested that.)
 * **It was checking the wrong knobs.** The three switches it examined are
   continuity controls belonging to *other* probes; they reach this stamp only
   because one shared environment list is recorded for the whole directory, and

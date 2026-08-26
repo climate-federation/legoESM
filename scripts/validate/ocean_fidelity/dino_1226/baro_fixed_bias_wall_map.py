@@ -223,11 +223,13 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
 
     # the ON-STATE itself, per knob and PER MAP, not merely consistency.
     # The ladder check used to sit outside this loop and inspect only the first
-    # map, which left the agreement clause above as the sole guard against
-    # map 0 being right and maps 1-4 wrong (confirmation pass 2026-08-26).
-    # Every on-state check is now inside the loop, so each map is judged on its
-    # own and the agreement clause is a second line of defence rather than the
-    # only one.
+    # map, so a series with map 0 right and maps 1-4 wrong walked straight
+    # through (confirmation pass 2026-08-26).  Every on-state check is now
+    # inside this loop, and this loop is the ONLY guard -- the cross-map
+    # agreement clause was deleted for the reason given above, so there is no
+    # second line of defence and none is wanted: two guards that alibi each
+    # other cannot be tested apart.  Each check below therefore has to hold on
+    # its own, and each has a test that fails when it is moved outside.
     for st, got in zip(stamps, parsed):
         if got["LEGOESM_NEMO_E3T"] != "both":
             raise SystemExit(
@@ -1134,10 +1136,12 @@ def main() -> None:
     _ov = wind["small_angle_overstatement_frac"]
     print(f"  SMALL-ANGLE CAVEAT: the rotation angle reaches "
           f"{max(_ang.values()):.2f} rad by window end, so the small-angle "
-          f"step is used outside its stated regime. DERIVED overstatement: "
+          f"step is used outside its stated regime. DERIVED overstatement, "
+          f"as a fraction OF THE SMALL-ANGLE BOUND ITSELF "
+          f"(1 - exact/approx, both averaged over this window's weights): "
           + ", ".join(f"{t} {100 * vv:.1f}%" for t, vv in sorted(_ov.items()))
-          + " (true response SMALLER, i.e. CONSERVATIVE), so this stays an "
-            "upper bound.")
+          + " (the exact response is that much SMALLER, i.e. CONSERVATIVE), "
+            "so this stays an upper bound.")
     _sc = wind["row_profile_shape_corr_with_bias"]
     print("  row-profile shape correlation with the bias (WHOLE-DOMAIN "
           "context, not a wall statistic): "

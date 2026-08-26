@@ -946,6 +946,27 @@ def test_gate_rejects_a_stamp_whose_step_disagrees_with_the_map():
         M.assert_map_provenance(stamps, "/oracle/d180")
 
 
+def test_step_stamp_check_runs_on_EVERY_map_not_only_the_first():
+    """Map 0's step is right; a LATER map's is wrong.
+
+    The one-element list in the test above cannot distinguish a per-map check
+    from a first-map-only one, and the step knob was deliberately excluded from
+    the (now deleted) cross-map agreement clause -- so this loop has always been
+    its only guard, and until now nothing failed when it stopped being a loop.
+    """
+    stamps = [{"path": f"m{i}", "kt": 5760 + i, "seqdump": "/oracle/d180",
+               "provenance": _STAMP.replace(
+                   "DINO_1226_IC_STEP='5760'",
+                   f"DINO_1226_IC_STEP='{5760 + i}'")}
+              for i in range(5)]
+    # every map self-consistent -> passes
+    M.assert_map_provenance(stamps, "/oracle/d180")
+    # now break map 3 only, leaving map 0 perfect
+    stamps[3] = dict(stamps[3], kt=9999)
+    with pytest.raises(SystemExit, match="m3"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+
+
 def test_gate_does_not_use_the_inert_switches_as_a_wind_on_witness():
     """Those three belong to other probes; flipping them must not gate this."""
     flipped = _STAMP.replace("DINO_HU_WIND=None", "DINO_HU_WIND='0'")
