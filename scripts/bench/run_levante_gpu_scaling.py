@@ -121,16 +121,9 @@ def _configure_jax(precision: str) -> None:
     JAX pick its default backend; respect any value the user / SLURM
     wrapper has already set.
     """
-    if precision == "mixed":
-        # "mixed" = f64 STATE (x64 on) with f32 work in the env-gated ocean
-        # hot paths (vertical-mixing solve + baroclinic/EOS).
-        os.environ["LEGOESM_VMIX_F32_SOLVE"] = "1"
-        os.environ["LEGOESM_BAROCLINIC_F32"] = "1"
-    else:
-        # Hermetic arms for the precision comparison: a stray exported knob
-        # must not silently turn an f32/f64 arm into mixed.
-        os.environ.pop("LEGOESM_VMIX_F32_SOLVE", None)
-        os.environ.pop("LEGOESM_BAROCLINIC_F32", None)
+    # float64 and mixed both need x64 (mixed = fp32 storage/compute + fp64
+    # accumulate; the fp64 accumulator requires x64).  The ocean precision
+    # POLICY (storage dtype) is set per-arm by the ocean bench, not here.
     if precision in ("float64", "mixed"):
         os.environ["JAX_ENABLE_X64"] = "1"
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")

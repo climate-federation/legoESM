@@ -247,6 +247,18 @@ def main() -> int:
 
     _configure_jax(args.precision)
     import jax
+    # The ocean STATE storage dtype comes from the precision POLICY
+    # (rest_state_* use get_policy().storage, default fp32) — the x64 flag
+    # alone does NOT change it.  Set the policy per arm so f32/f64/mixed are
+    # real; mixed = fp32 storage/compute + fp64 accumulate (GPU-bandwidth
+    # scaling with fp64 stability).  Clear the env-gated f32-solve knobs so a
+    # stray export cannot silently contaminate the f64 arm.
+    os.environ.pop("LEGOESM_VMIX_F32_SOLVE", None)
+    os.environ.pop("LEGOESM_BAROCLINIC_F32", None)
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy({"float32": PrecisionPolicy.fp32,
+                "float64": PrecisionPolicy.fp64,
+                "mixed": PrecisionPolicy.mixed}[args.precision]())
     out_dir = Path(args.output_dir)
     if not args.no_timestamp:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
