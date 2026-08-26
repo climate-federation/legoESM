@@ -402,11 +402,23 @@ def finalize_to_storage(pytree):
     storage = resolve_dtype(None, "storage")
     accum = resolve_dtype(None, "accumulate")
 
+    def _is_p_s(path):
+        # EXACT field-name match (GLM #1675 review): a substring test on the
+        # keystr false-positives on ``p_soil``/``p_src``/``dp_s`` (kept f64 ->
+        # re-contamination) and is the brittle part of this change.  Match the
+        # p_s field itself anywhere in the path (``state.p_s`` or the Field's
+        # ``state.p_s.data``).
+        for k in path:
+            if (getattr(k, "name", None) == "p_s"
+                    or getattr(k, "key", None) == "p_s"):
+                return True
+        return False
+
     def _fix(path, leaf):
         if not (isinstance(leaf, jax.Array)
                 and jnp.issubdtype(leaf.dtype, jnp.floating)):
             return leaf
-        target = accum if "p_s" in jax.tree_util.keystr(path) else storage
+        target = accum if _is_p_s(path) else storage
         return leaf.astype(target) if leaf.dtype != target else leaf
 
     return jax.tree_util.tree_map_with_path(_fix, pytree)
