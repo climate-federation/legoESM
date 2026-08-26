@@ -42,6 +42,8 @@ from jax import lax
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     WING_P_SFC,
+    WING_Q_SFC_BY_SST,
+    wing2018_T_v0,
     wing2018_pressure_profile,
     wing2018_qv_profile,
     wing2018_temperature_profile,
@@ -486,6 +488,7 @@ def _subcloud_diagnostics(
     *,
     subcloud_top_m: float,
     evap_mm_day: float,
+    sst_K: float = FIXED_SST_K,
 ) -> dict[str, float]:
     """Sub-cloud profile scores plus the lowest level's bulk-flux state.
 
@@ -510,7 +513,7 @@ def _subcloud_diagnostics(
         T_air_K=jnp.asarray(T_profile[-1], dtype=jnp.float64),
         r_air=jnp.asarray(qv_profile[-1], dtype=jnp.float64),
         p_air_Pa=jnp.asarray(ref.sigma_full[-1] * WING_P_SFC, dtype=jnp.float64),
-        sst_K=jnp.asarray(FIXED_SST_K, dtype=jnp.float64),
+        sst_K=jnp.asarray(sst_K, dtype=jnp.float64),
         p_sfc_Pa=jnp.asarray(WING_P_SFC, dtype=jnp.float64),
     )
     return {
@@ -918,10 +921,27 @@ def make_sigma_coordinate_from_reference(ref: ReferenceProfiles) -> SigmaCoordin
     )
 
 
-def wing_initial_profiles(ref: ReferenceProfiles) -> tuple[jax.Array, jax.Array]:
+def wing_initial_profiles(
+    ref: ReferenceProfiles, sst_K: float = FIXED_SST_K,
+) -> tuple[jax.Array, jax.Array]:
+    """Wing (2018) analytic T and q_v IC for the RCEMIP case at ``sst_K``.
+
+    The surface humidity q0 is CASE data (12 / 18.65 / 24 g/kg at 295/300/305 K,
+    "adjusted so RH ~ 80% in the lower atmosphere for each SST"), and T_v0 =
+    T0*(1+0.608*q0) follows it -- pinning the 300 K q0 at another SST reproduces
+    the ~139% supersaturated IC that the case-specific T_v0 was introduced to
+    remove.  Only the three RCEMIP SSTs have a defined q0.
+    """
     z = jnp.asarray(ref.z_m, dtype=jnp.float64)
-    T = wing2018_temperature_profile(z)
-    qv = wing2018_qv_profile(z)
+    q_sfc = WING_Q_SFC_BY_SST.get(float(sst_K))
+    if q_sfc is None:
+        raise ValueError(
+            f"no RCEMIP surface humidity q0 defined for SST={sst_K} K; "
+            f"defined only for {sorted(WING_Q_SFC_BY_SST)} "
+            "(Wing 2018 Table 1). 298/302 K have no reference or IC.")
+    T_v0 = wing2018_T_v0(T_sfc=float(sst_K), q_sfc=q_sfc)
+    T = wing2018_temperature_profile(z, T_v0=T_v0, q_sfc=q_sfc)
+    qv = wing2018_qv_profile(z, q_sfc=q_sfc)
     return T, qv
 
 
@@ -934,6 +954,7 @@ def make_physics_config(
     gravity_wave_drag: str = BASELINE_SCHEMES["gravity_wave_drag"],
     convection: str = BASELINE_SCHEMES["convection"],
     base: PhysicsConfig | None = None,
+    sst_K: float = FIXED_SST_K,
     prognostic_spectral_gwd_thermal_tendency: bool = (
         SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY
     ),
@@ -968,7 +989,7 @@ def make_physics_config(
                 ch4_ppbv=1700.0,
                 n2o_ppbv=320.0,
                 sfc_albedo_direct=float(
-                    sam_ocean_albedo(RCEMIP_COS_ZENITH, FIXED_SST_K)
+                    sam_ocean_albedo(RCEMIP_COS_ZENITH, sst_K)
                 ),
                 sfc_albedo=0.07,
                 include_clouds=True,
@@ -1093,6 +1114,7 @@ def _config_cache_key(
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
     thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -1112,6 +1134,7 @@ def _config_cache_key(
         "large_scale_forcing": large_scale_forcing,
         "bl_anchor_top_m": bl_anchor_top_m,
         "subcloud_top_m": subcloud_top_m,
+        "sst_K": sst_K,
         # Post-processing only, like subcloud_top_m, but it decides WHICH
         # humidity term becomes thermo_score, so a cache entry computed under
         # one variable must never be served for another.
@@ -1128,6 +1151,7 @@ def _make_scm_rce_forcing(
     surface_wind_m_s: float,
     coriolis_s_inv: float,
     large_scale_forcing: str,
+    sst_K: float = FIXED_SST_K,
 ) -> SCMForcing:
     if large_scale_forcing not in SCM_RCE_LARGE_SCALE_FORCING_CHOICES:
         raise ValueError(
@@ -1152,7 +1176,7 @@ def _make_scm_rce_forcing(
         subsidence_w = lambda _t, w=w_sub: w
     return SCMForcing(
         prescribe="T_s",
-        T_s=lambda _t: FIXED_SST_K,
+        T_s=lambda _t, _sst=sst_K: _sst,
         f_c=coriolis_s_inv,
         u_geo=lambda _t: wind_profile,
         v_geo=lambda _t: zero_wind_profile,
@@ -1447,6 +1471,7 @@ def run_scm_rce(
     ref: ReferenceProfiles,
     *,
     label: str,
+    sst_K: float = FIXED_SST_K,
     days: float,
     dt: float,
     analysis_days: float,
@@ -1469,12 +1494,13 @@ def run_scm_rce(
             f"run_scm_rce: unknown thermo_humidity {thermo_humidity!r}; "
             f"expected one of {THERMO_HUMIDITY_VARIABLES}")
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
-    T0, qv0 = wing_initial_profiles(ref)
+    T0, qv0 = wing_initial_profiles(ref, sst_K=sst_K)
     forcing = _make_scm_rce_forcing(
         ref,
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        sst_K=sst_K,
     )
     radiation_interval = max(1, int(cfg.radiation.update_interval_steps))
     use_cached_radiation = (
@@ -1528,7 +1554,7 @@ def run_scm_rce(
             dt=dt / effective_convection_substeps,
         )
 
-    sst_col = jnp.asarray([FIXED_SST_K], dtype=jnp.float64)
+    sst_col = jnp.asarray([sst_K], dtype=jnp.float64)
     forcing_dict = {"T_sfc": sst_col}
     z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
     z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
@@ -1548,7 +1574,7 @@ def run_scm_rce(
     convective_precip_diagnostic = _make_convective_precip_diagnostic(cfg, dt)
 
     def apply_surface_sst_anchor(state):
-        T_bl = jnp.asarray(FIXED_SST_K, dtype=state.T.data.dtype) - (
+        T_bl = jnp.asarray(sst_K, dtype=state.T.data.dtype) - (
             DEFAULT_SCM_RCE_BL_LAPSE_K_M
             * z_above_lowest.astype(state.T.data.dtype)
         )
@@ -1938,6 +1964,7 @@ def run_scm_rce(
                 _subcloud_diagnostics(
                     ref, T_profile, qv_profile,
                     subcloud_top_m=subcloud_top_m, evap_mm_day=evap_mm_day,
+                    sst_K=sst_K,
                 )
                 # A non-finite column would make the saturation call return
                 # garbage rather than raise; leave the sub-cloud fields at NaN
@@ -2010,6 +2037,7 @@ def run_cached(
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
     thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -2026,6 +2054,7 @@ def run_cached(
         subcloud_top_m,
         # Same argument: it selects WHICH humidity term becomes thermo_score.
         thermo_humidity,
+        sst_K,
     )
     if key not in cache:
         # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
@@ -2059,6 +2088,7 @@ def run_cached(
             bl_anchor_top_m=bl_anchor_top_m,
             subcloud_top_m=subcloud_top_m,
             thermo_humidity=thermo_humidity,
+            sst_K=sst_K,
         )
     cached = cache[key]
     return RunDiagnostics(
@@ -2670,6 +2700,7 @@ def tune_category_winner(
     ref: ReferenceProfiles,
     cache: dict[str, RunDiagnostics],
     *,
+    joint_refs=None,
     days: float,
     dt: float,
     analysis_days: float,
@@ -2698,28 +2729,47 @@ def tune_category_winner(
             f"{refine_frac!r}")
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
-    default_run = run_cached(
-        cache,
-        base_cfg,
-        ref,
-        label=f"tune-default:{category}:{scheme}",
-        days=days,
-        dt=dt,
-        analysis_days=analysis_days,
-        require_equilibrium=require_equilibrium,
-        require_realism=require_realism,
-        equil_T_tol_K=equil_T_tol_K,
-        equil_qv_tol=equil_qv_tol,
-        equil_qcond_tol=equil_qcond_tol,
-        scm_microphysics_substeps=scm_microphysics_substeps,
-        scm_convection_substeps=scm_convection_substeps,
-        surface_wind_m_s=surface_wind_m_s,
-        coriolis_s_inv=coriolis_s_inv,
-        large_scale_forcing=large_scale_forcing,
-        bl_anchor_top_m=bl_anchor_top_m,
-        subcloud_top_m=subcloud_top_m,
-        thermo_humidity=thermo_humidity,
-    )
+    # JOINT multi-SST objective for generalization: each candidate is scored at
+    # EVERY (sst, ref) pair and the scores are averaged, so the winner is the
+    # parameter set that fits all SSTs at once rather than one.  ``ref`` remains
+    # the PRIMARY reference (the run whose profiles are reported); joint_refs,
+    # when given, drives the score.  A single-SST call (joint_refs=None) keeps
+    # the exact previous behaviour.
+    _sst_pairs = (list(joint_refs) if joint_refs
+                  else [(FIXED_SST_K, ref)])
+
+    def _joint_eval(trial_cfg, label):
+        runs = []
+        for _sst, _r in _sst_pairs:
+            runs.append((_sst, run_cached(
+                cache, trial_cfg, _r,
+                label=f"{label}:sst{int(_sst)}",
+                sst_K=_sst,
+                days=days, dt=dt, analysis_days=analysis_days,
+                require_equilibrium=require_equilibrium,
+                require_realism=require_realism,
+                equil_T_tol_K=equil_T_tol_K, equil_qv_tol=equil_qv_tol,
+                equil_qcond_tol=equil_qcond_tol,
+                scm_microphysics_substeps=scm_microphysics_substeps,
+                scm_convection_substeps=scm_convection_substeps,
+                surface_wind_m_s=surface_wind_m_s,
+                coriolis_s_inv=coriolis_s_inv,
+                large_scale_forcing=large_scale_forcing,
+                bl_anchor_top_m=bl_anchor_top_m,
+                subcloud_top_m=subcloud_top_m,
+                thermo_humidity=thermo_humidity)))
+        all_ok = all(r.status == "ok" for _s, r in runs)
+        # MEAN across SSTs is the generalization objective; a candidate that
+        # fails to equilibrate at ANY SST is disqualified (inf), never rewarded
+        # for a lucky single-SST fit.
+        score = (float(np.mean([objective_value(r, objective)
+                                for _s, r in runs]))
+                 if all_ok else float("inf"))
+        primary = next((r for _s, r in runs if _s == FIXED_SST_K), runs[0][1])
+        return score, primary, all_ok
+
+    default_score, default_run, _default_ok = _joint_eval(
+        base_cfg, f"tune-default:{category}:{scheme}")
     if scheme_key is None or subcfg is None:
         return base_cfg, [], default_run, EMPTY_TUNE_STATS
     tier, include_tier0, exclude = resolve_param_selection(scheme_key, param_set)
@@ -2817,31 +2867,9 @@ def tune_category_winner(
         tuned_tunable = apply_param_overrides(_tunable_subconfig(subcfg), field_values)
         tuned_subcfg = _rewrap_tunable_subconfig(subcfg, tuned_tunable)
         trial_cfg = _set_active_subconfig(base_cfg, category, tuned_subcfg)
-        trial_run = run_cached(
-            cache,
-            trial_cfg,
-            ref,
-            label=label,
-            days=days,
-            dt=dt,
-            analysis_days=analysis_days,
-            require_equilibrium=require_equilibrium,
-            require_realism=require_realism,
-            equil_T_tol_K=equil_T_tol_K,
-            equil_qv_tol=equil_qv_tol,
-            equil_qcond_tol=equil_qcond_tol,
-            scm_microphysics_substeps=scm_microphysics_substeps,
-            scm_convection_substeps=scm_convection_substeps,
-            surface_wind_m_s=surface_wind_m_s,
-            coriolis_s_inv=coriolis_s_inv,
-            large_scale_forcing=large_scale_forcing,
-            bl_anchor_top_m=bl_anchor_top_m,
-            subcloud_top_m=subcloud_top_m,
-            thermo_humidity=thermo_humidity,
-        )
+        trial_score, trial_run, trial_ok = _joint_eval(trial_cfg, label)
         stats["unique_evals"] = len(set(cache) - _keys_before)
-        trial_score = objective_value(trial_run, objective)
-        if trial_run.status == "ok" and trial_score < best_score:
+        if trial_ok and trial_score < best_score:
             best_score = trial_score
             best_cfg = trial_cfg
             best_run = trial_run
@@ -2924,8 +2952,8 @@ def tune_category_winner(
                 # score: a record whose "score_tuned" comes from a different
                 # metric than the search used reads as a failed search whenever
                 # the two disagree.  ``tune_focused_params`` already does this.
-                score_default=objective_value(default_run, objective),
-                score_tuned=objective_value(best_run, objective),
+                score_default=default_score,
+                score_tuned=best_score,
             )
         )
     return best_cfg, records, best_run, stats
@@ -2936,6 +2964,7 @@ def tune_focused_params(
     ref: ReferenceProfiles,
     cache: dict[str, RunDiagnostics],
     *,
+    joint_refs=None,
     categories: Sequence[str],
     include: Sequence[str],
     days: float,
@@ -2958,6 +2987,7 @@ def tune_focused_params(
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
     subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
     thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
 ) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics, RunDiagnostics]:
     """Tune ONE NAMED parameter set that spans SEVERAL scheme categories.
 
@@ -3103,6 +3133,7 @@ def tune_focused_params(
             bl_anchor_top_m=bl_anchor_top_m,
             subcloud_top_m=subcloud_top_m,
             thermo_humidity=thermo_humidity,
+            sst_K=sst_K,
         )
         trial_score = objective_value(trial_run, objective)
         if trial_run.status == "ok" and trial_score < best_score:
@@ -3134,8 +3165,8 @@ def tune_focused_params(
                 units=meta.units,
                 # The objective actually minimised, so a reader cannot mistake
                 # a sub-cloud tune for a combined-score one.
-                score_default=objective_value(default_run, objective),
-                score_tuned=objective_value(best_run, objective),
+                score_default=default_score,
+                score_tuned=best_score,
             )
         )
     return best_cfg, records, default_run, best_run

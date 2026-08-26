@@ -473,6 +473,8 @@ def evaluate_scheme(
     scheme: str,
     ref,
     *,
+    joint_refs=None,
+    primary_sst_K: float = 300.0,
     days: float,
     dt: float,
     analysis_days: float,
@@ -524,6 +526,7 @@ def evaluate_scheme(
         turbulence=turbulence,
         microphysics=microphysics,
         hard_saturation_adjustment=hard_saturation_adjustment,
+        sst_K=primary_sst_K,
     )
     base_cfg, solve_status = camp.apply_subsidence_solve_override(
         base_cfg, subsidence_solve, category="convection")
@@ -567,7 +570,8 @@ def evaluate_scheme(
         subcloud_top_m=subcloud_top_m,
         thermo_humidity=thermo_humidity,
     )
-    prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}", **common)
+    prior = camp.run_cached(cache, base_cfg, ref, label=f"prior:{scheme}",
+                            sst_K=primary_sst_K, **common)
     if tune_mode == "focused":
         # The sub-cloud experiment: ONE named parameter set spanning the
         # boundary-layer scheme, the microphysics' rain re-evaporation and the
@@ -592,6 +596,7 @@ def evaluate_scheme(
             base_cfg,
             ref,
             cache,
+            joint_refs=joint_refs,
             tune_evals=tune_evals,
             seed=seed,
             objective=objective,
@@ -1200,7 +1205,20 @@ def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, exposed so tests exercise the REAL parser (a hand-rolled
     namespace would keep passing after a flag is renamed or dropped)."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reference-dir", type=Path, default=camp.DEFAULT_REFERENCE_DIR)
+    parser.add_argument("--reference-dir", type=Path, default=camp.DEFAULT_REFERENCE_DIR,
+                        help="the PRIMARY (profile-reporting) reference; also the "
+                             "sole reference when --ssts is a single value.")
+    parser.add_argument(
+        "--ssts", default="300",
+        help="comma-separated SSTs [K] to tune JOINTLY for generalization "
+             "(e.g. '295,300,305'). Each candidate is scored at every SST and "
+             "the mean drives the search. Only the RCEMIP SSTs 295/300/305 have "
+             "an external CRM reference and a defined IC.")
+    parser.add_argument(
+        "--joint-reference-dirs", default=None,
+        help="comma-separated reference dirs matching --ssts, in the same "
+             "order. Default: sibling dirs named rcemip_ref_sam<SST> next to "
+             "--reference-dir.")
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     parser.add_argument("--days", type=float, default=camp.DEFAULT_DAYS)
     parser.add_argument("--dt", type=float, default=camp.DEFAULT_DT_S)
@@ -1464,6 +1482,36 @@ def main(argv: list[str] | None = None) -> int:
         precip_analysis_days=args.analysis_days,
     )
 
+    # JOINT multi-SST references. The primary SST is the one whose reference is
+    # --reference-dir (its basename's trailing digits, default 300); its ref is
+    # `ref` above so the profile record and albedo stay tied to it.
+    _ssts = [float(x) for x in str(args.ssts).split(",") if x.strip()]
+    _primary_sst = 300.0
+    import re as _re
+    _m = _re.search(r"(\d{3})$", args.reference_dir.name)
+    if _m:
+        _primary_sst = float(_m.group(1))
+    if args.joint_reference_dirs:
+        _dirs = [Path(d) for d in args.joint_reference_dirs.split(",")]
+    else:
+        _dirs = [args.reference_dir.parent / f"rcemip_ref_sam{int(s)}"
+                 for s in _ssts]
+    if len(_dirs) != len(_ssts):
+        raise SystemExit(
+            f"--ssts has {len(_ssts)} entries but --joint-reference-dirs has "
+            f"{len(_dirs)}; they must match 1:1.")
+    joint_refs = []
+    for _s, _d in zip(_ssts, _dirs):
+        _r = (ref if float(_s) == _primary_sst and Path(_d) == args.reference_dir
+              else camp.build_reference_profiles(
+                  _d, args.last_reference_files,
+                  precip_analysis_days=args.analysis_days))
+        joint_refs.append((float(_s), _r))
+    # A single-SST run keeps joint_refs=None (the exact previous behaviour).
+    joint_refs = joint_refs if len(joint_refs) > 1 else None
+    print(f"[joint] SSTs={_ssts} primary={_primary_sst} "
+          f"refs={[str(d) for d in _dirs]}", flush=True)
+
     meta = dict(
         radiation=args.radiation, dt=args.dt, days=args.days,
         analysis_days=args.analysis_days,
@@ -1501,6 +1549,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[scheme] convection={scheme} ...", flush=True)
             res = evaluate_scheme(
                 scheme, ref,
+                joint_refs=joint_refs, primary_sst_K=_primary_sst,
                 days=args.days, dt=args.dt, analysis_days=args.analysis_days,
                 tune_evals=args.tune_evals, seed=args.tune_seed,
                 scm_microphysics_substeps=args.scm_microphysics_substeps,
