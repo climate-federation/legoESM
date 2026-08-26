@@ -146,6 +146,12 @@ arm, three arms. No new instrument.
 
 ### On the board, no work assigned
 
+- **The wall-row RESCORE (offline, no new compute).** The lateral-friction
+  refutation was decided on the layer-averaged instrument later retracted; its
+  own source ranks the rescore first and cheapest and records that it has not
+  been re-run. Bottom drag has independent later evidence (bit-exact coefficient,
+  0.1% substitution collapse) and stands; **lateral friction is PROVISIONAL until
+  this rescore lands.**
 - The **grown-noise census** at days 5/10 in both models — states already on
   disk. The convective switch's ~300× rectification is established at ≳1e-10 and
   **silent at 1e-14**, so on current evidence the edge does not explain the
@@ -174,11 +180,14 @@ its lateral-friction term.
 Every row here was tested and eliminated with a decisive number. The full table
 with citations is `dino_campaign_synthesis.md` §2.3. Do not re-test:
 
+**Not on this list — lateral friction.** Free-slip is identical at 0/372,528
+corners and the viscosity ablation makes it a lever rather than an owner, but
+that refutation was scored on the retracted layer-averaged instrument and has not
+been re-run. It is PROVISIONAL pending the rescore above, not closed.
+
 surface forcing / wind (1e-10 per row, torque constant across all 36 windows) ·
 water masses (4e-5 kg/m³, with the density-*gradient* caveat) · bottom drag
-(coefficient bit-exact 0/9758; assembled increment 3.9e-18) · lateral friction
-end-to-end (free-slip identical at 0/372,528 corners; viscosity is a lever, not
-an owner) · EEN vorticity scheme (fixed, transport-inert) · e3f at dry-neighbour
+(coefficient bit-exact 0/9758; assembled increment 3.9e-18) · EEN vorticity scheme (fixed, transport-inert) · e3f at dry-neighbour
 vertices (95× too small, 0% closure) · face-depth divisor (fixed, 0.0000 Sv) ·
 every post-tendency stage at the matched step (wrong sign **and** wrong shape) ·
 salinity advection (improves at day 180 on every part) · isoneutral slopes

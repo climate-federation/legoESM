@@ -20,8 +20,9 @@ Tracker: issue **#1455**. Result documents: `dino_verdict360_result.md`,
 
 ### 1.1 The registered headline, verbatim
 
-From `dino_verdict360_result.md`, lines 3–9, written before any number existed
-in it:
+From `dino_verdict360_result.md`, lines 3–9. (The *pre-registration* is a
+separate file, `PREREG_verdict360.md`, committed before any run started; these
+lines are the result it was registered against.)
 
 > **Result, in one sentence.** From a shared NEMO day-180 restart, one year of
 > legoESM drift away from NEMO is **no larger than the two models' own
@@ -96,14 +97,29 @@ The corrected-clock baseline (issue #1455, "NEW BASELINE (corrected clock, day
 Gate constants unmodified; day-0 bit-identical; harness change `8e56daafa`;
 baseline `3855a2173`.
 
+**One unresolved conflict on that baseline, recorded because the record never
+closed it:** the ordered day-180 walk's shipped-grid arm reads **+1.659 Sv**
+where this recorded baseline reads **+1.872**. Same bit-deterministic harness, no
+model change. The source calls the discrepancy *"real and unexplained"* and it
+was never resolved. Treat the +1.872 as the recorded value, not a verified one.
+
 A **5/5 pass was subsequently reached and shipped** — the NEMO-faithful
 barotropic reconciliation pair became the `kamm_mlf` card default (`1d5b19a1d`),
-measured 5/5 at 0.411 Sv ACC gap on the 90-day gate (issue #1455, "CORRECTIONS
-to my milestone comment above ... + the default is shipped"). Later fixes moved
-the same reduction to **−0.401 Sv full-section and +0.063 Sv channel** (issue
-#1455, "THE OWNER IS NAMED"). So "4/5" is the honest description of the
-corrected-clock baseline, and "5/5" the honest description of the shipped card;
-both are tolerance verdicts, not noise-floor verdicts — see next.
+measured 5/5 at **0.411 Sv** ACC gap on the 90-day gate *at the moment of
+shipping*. That figure has since moved twice and should be date-stamped whenever
+it is quoted: the three drag fixes took the day-90 channel gap from 0.41 to
+**0.382 Sv**, which is what the shipped card reads today.
+
+Note also what the **−0.401 Sv full-section / +0.063 Sv channel** pair is and is
+not. It is a **re-measurement, not a later improvement**: the source states that
+the older −0.597/+0.287 figures *predate* the faithful reconciliation pair, and
+that on the shipped card the same reductions give −0.401/+0.063 — i.e. the pair
+had **already** cut the channel gap 78% when those older numbers were being
+quoted. Do not read it as "later fixes moved the metric".
+
+So "4/5" is the honest description of the corrected-clock baseline, and "5/5" the
+honest description of the shipped card; both are tolerance verdicts, not
+noise-floor verdicts — see next.
 
 ### 1.4 What "indistinguishable" does and does not claim
 
@@ -266,6 +282,13 @@ From `dino_basin_budget_result.md` (phases 1+2, dual-reviewed, `660942b08`):
   net-convergence mechanism is ruled out.
 - The transport error and the surface excess are **one object**: 0.25 mm per row
   predicts 1.0 mm of the measured 1.72 mm over four rows.
+
+- **The shape is an overshoot, not a shortfall, and this is the signature every
+  candidate has to reproduce.** legoESM's westward wall return lobe is **34% too
+  STRONG** while the rest of the basin is right to 3%. In the source's words it
+  *"is not a failure to build the eastward flow — it is an overshoot of the
+  wall's return lobe."* Getting this direction backwards sends the next lane
+  looking for a missing source instead of an excess one.
 - The balance is **geostrophic**: the day-360 circulation difference decomposes
   into **91.0% sea-surface slope, 6.7% density gradient, 2.3% ageostrophic**
   (robust 78.9–94.1% across aggregates, and 93.3–95.6% across four member
@@ -281,18 +304,18 @@ tested and eliminated, so that nobody spends a week re-eliminating it.
 
 | candidate | verdict | the decisive number | where |
 |---|---|---|---|
-| **Surface forcing / wind** | EXONERATED | the oracle's dumped wind stress matches the analytic form legoESM uses to **1e-10 per row**, and the torque applied to these rows is **17.811 in every one of the 36 ten-day windows** — DINO's wind has no time dependence at all. Earlier, independently: identical analytic forcing, agreement 6e-17. Wall-row wind stress exonerated to 15 decimals in absolute units. | `dino_basin_budget_result.md`; issue #1455 "§D consolidated update", "The EEN chase" |
+| **Surface forcing / wind** | EXONERATED | the oracle's dumped wind stress matches the analytic form legoESM uses to **1e-10 per row**, and the torque **legoESM** applies to these rows is **17.811 in every one of the 36 ten-day windows** — DINO's wind has no time dependence at all. (One-sided constancy: the oracle's vertical-solve row reads 18.100, explained in the source.) **Scope:** this exonerates the wind *forcing*. The wind-stress **placement** at a wind-driven wall row is a separate question and is still OPEN — see §2.4 item 3. Earlier, independently: identical analytic forcing, agreement 6e-17. Wall-row wind stress exonerated to 15 decimals in absolute units. | `dino_basin_budget_result.md`; issue #1455 "§D consolidated update", "The EEN chase" |
 | **Water masses** | EXONERATED as the *bulk* cause; the gradient is a small same-signed contributor | basin-mean densities agree to **4e-5 kg/m³** on a 1027 kg/m³ field, so mechanisms working by changing the water masses are ruled out **at the basin scale**. The document's own headline adds a caveat — that the density *gradient* in the rows owning the gap was never measured — and **that caveat is superseded later in the same file**: the gradient WAS measured, with a common reference profile so the hydrostatic common mode cancels rather than being differenced, and it comes out at **6.7% and same-signed**, i.e. it *adds to* the explanation rather than competing with it. Three independent implementations agree. The later measurement wins. | `dino_basin_budget_result.md` (headline vs Part 4) |
-| **Bottom drag (as a defect)** | REFUTED, over-determined | drag coefficient bit-exact (0 of 9758 cells differing), bottom index 0/9758, assembled increment **3.9e-18** — seven orders under the bar. The whole drag term bounds any drag-borne defect at 45% of itself, impossible against a bit-exact coefficient. Independently: 0.1% collapse under substitution against a pre-registered bar. **Supersession:** `dino_basin_budget_result.md` records drag as "not shaped like the deficit, and not retired"; the later bit-exactness result refutes it. Later wins. | issue #1455 "The funnel converges"; `dino_wall_fixed_bias.md` |
-| **Lateral friction / free-slip wall treatment** | EXONERATED end-to-end | free-slip identical at **0 disagreements out of 372,528 corner points, on every one of the 36 levels**; wall stress measured **exactly 0.0 on both sides**. The 13-row alignment table finds no wall-treatment difference that could carry the lobe: 11 rows MATCH outright, and the two rows carrying a real code-level difference quantify to **exactly 0.0** on the actual state (a mask-dimensionality difference, worth 4.08e-6 m/s² only under a planted perturbation) and **1e-4 relative** (a thickness-weighting difference). Viscosity ablation at 1.0/1.5/2.0× (rn_Uv 0.27/0.405/0.54) gives unsigned southern-band error **0.4459 → 1.1407 → 1.8002 Sv**, linear to **1.6%** and monotone — the registered verdict being *"the lateral viscosity is a LEVER on the wall error, not its OWNER."* | `dino_wall_ldf_alignment.md`; issue #1455 "Wall operator: MATCH on every row" |
-| **EEN vorticity scheme** | FIXED and INERT | before the fix it was the **worst-matched operator the campaign has reported** — pointwise relative disagreement 2.1e-3 at the wall against a matched-operator floor of 1.5e-5, wall reduction 5.25× the bar, enrichment 8.74×. The true owner of the tendency mismatch was then found: NEMO width-weights the north-south transport in the vorticity scheme and divides by the local width; legoESM did not. Supplying it closes **96–98%** of the wall-row disagreement. NEMO's `vor_een` transcribed verbatim reproduces NEMO's own dumped tendency to **2.0e-20 m/s², i.e. 7.7e-15 of the field's RMS** (issue #1455 renders this as "15 significant figures"; the document's own number is the one quoted here). The controlled 90-day pair then moved **nothing**: wall rows −0.2884 → −0.2946 Sv, basin −0.4258 → −0.4324, circumpolar 0.3823 → 0.3761, all inside floors, all five gated metrics PASS on both arms. Switched ON for the oracle card anyway on faithfulness grounds. | issue #1455 "The EEN chase" |
-| **e3f construction at dry-neighbour vertices** | REFUTED as owner | real — a 74× enrichment in the e3f error itself — but propagated through the triad it delivers only 3.25e-12 m/s², **95× too small**, closing **0%** of the mismatch | issue #1455 "The EEN chase" |
+| **Bottom drag (as a defect)** | REFUTED, over-determined | drag coefficient bit-exact (0 of 9758 cells differing), bottom index 0/9758, assembled increment **3.9e-18** — seven orders under the bar. The whole drag term bounds any drag-borne defect at 45% of itself, impossible against a bit-exact coefficient. Independently: 0.1% collapse under substitution against a pre-registered bar. **Supersession:** `dino_basin_budget_result.md` records drag as "not shaped like the deficit, and not retired"; the later bit-exactness result refutes it. Later wins. **Rescore status:** the *earlier* drag refutation was decided on the layer-averaged instrument later retracted (see §4, layer-vs-thickness weighting), and its rescore is recorded as outstanding. The bit-exact coefficient and the 0.1% substitution collapse are independent of that instrument and are what carry this verdict — the rescore would confirm, not decide it. | issue #1455 "The funnel converges"; `dino_wall_fixed_bias.md` |
+| **Lateral friction / free-slip wall treatment** | EXONERATED end-to-end — but **PROVISIONAL**, see rescore | free-slip identical at **0 disagreements out of 372,528 corner points, on every one of the 36 levels**; wall stress measured **exactly 0.0 on both sides**. The 13-row alignment table finds no wall-treatment difference that could carry the lobe: 11 rows MATCH outright, and the two rows carrying a real code-level difference quantify to **exactly 0.0** on the actual state (a mask-dimensionality difference, worth 4.08e-6 m/s² only under a planted perturbation) and **1e-4 relative** (a thickness-weighting difference). Viscosity ablation at 1.0/1.5/2.0× (rn_Uv 0.27/0.405/0.54) gives unsigned southern-band error **0.4459 → 1.1407 → 1.8002 Sv**, linear to **1.6%** and monotone — the registered verdict being *"the lateral viscosity is a LEVER on the wall error, not its OWNER."* **Rescore status — read before relying on this row:** this refutation was decided on the layer-averaged instrument that §4 records as retracted, and unlike drag it has **no independent later evidence**. Its own source says the drag and lateral-friction refutations *"were scored on the same instrument and have not been re-run"*, and ranks that rescore first and cheapest among next actions. It is offline, no new compute. **Treat this row as PROVISIONAL until the rescore lands** (§3, on the board). | `dino_wall_ldf_alignment.md`; issue #1455 "Wall operator: MATCH on every row" |
+| **EEN vorticity scheme** | FIXED and INERT | before the fix it was reported as the **worst-matched operator of the campaign** — pointwise relative disagreement 2.1e-3 at the wall against a matched-operator floor of 1.5e-5, wall reduction 5.25× the bar, enrichment 8.74×. **Those pre-fix figures are layer-averaged and therefore come from the instrument §4 records as retracted**; mass-weighted, the enrichment is **5.15×, not 8.74×**. Quote the mass-weighted value. The *fix* below is unaffected — it was decided on a matched-state substitution, not on the enrichment. The true owner of the tendency mismatch was then found: NEMO width-weights the north-south transport in the vorticity scheme and divides by the local width; legoESM did not. Supplying it closes **96–98%** of the wall-row disagreement. NEMO's `vor_een` transcribed verbatim reproduces NEMO's own dumped tendency to **2.0e-20 m/s², i.e. 7.7e-15 of the field's RMS** (issue #1455 renders this as "15 significant figures"; the document's own number is the one quoted here). The controlled 90-day pair then moved **nothing**: wall rows −0.2884 → −0.2946 Sv, basin −0.4258 → −0.4324, circumpolar 0.3823 → 0.3761, all inside floors, all five gated metrics PASS on both arms. Switched ON for the oracle card anyway on faithfulness grounds. | `dino_wall_ldf_alignment.md` (all figures); issue #1455 "The EEN chase" (rounded restatement) |
+| **e3f construction at dry-neighbour vertices** | REFUTED as owner | real — a 74× enrichment in the e3f error itself — but propagated through the triad it delivers only 3.25e-12 m/s², **95× too small**, closing **0%** of the mismatch | `dino_wall_ldf_alignment.md`; issue #1455 "The EEN chase" |
 | **Face-depth divisor** | FIXED and INERT | three-arm A/B: climate-inert to **0.0000 Sv** on the wall band; refuted as owner against a 0.05 Sv registered bar. The handed premise was also refuted — the divisor error is *smallest* at the wall (0.57×). Shipped on correctness; the repo now carries one face-depth rule. | issue #1455 "Post-tendency bisection" |
-| **Every post-tendency stage** | REFUTED — wrong sign AND wrong shape | one-step stage table from an identical day-180 state: barotropic solve + recombination −0.047 Sv, after-level reconciliation +0.047 (one object, 99% cancelling by design), implicit vertical solve +1e-5, filter 0. Committed net **+4.9e-4 Sv with the wrong sign and 9× interior-enriched**, against a registered requirement of wall-enriched. Magnitude leg honestly recorded INCONCLUSIVE; the refutation rests on sign and shape. | issue #1455 "Post-tendency bisection" |
+| **Every post-tendency stage** | REFUTED — wrong sign AND wrong shape | one-step stage table from an identical day-180 state: barotropic solve + recombination −0.047 Sv, after-level reconciliation +0.047 (one object, 99% cancelling by design), implicit vertical solve +1e-5, filter 0. Committed net **+4.9e-4 Sv with the wrong sign and 9× interior-enriched**, against a registered requirement of wall-enriched. Magnitude leg honestly recorded INCONCLUSIVE; the refutation rests on sign and shape. **Scope the source attaches:** refuted *"under linear retention only … not that these stages can never matter."* | issue #1455 "Post-tendency bisection" |
 | **Convective adjustment's hard switch** | SHARED, not differential | the switch is a genuine ~300× rectifier (edge sharpness alone 294×, trigger location 6.9×) but **both models have it** — NEMO's own EVD is also a hard switch. Per unit of perturbation legoESM's switch fires **less** (0.57–0.61; NEMO is 1.6–1.75× more trigger-happy) and the two models' stratification is equally tippable (≤1.045×). The raw 4.8–8.6× flip excess is a growth-difference confound. | issue #1455 "The rectifier is NAMED", then "Grown-noise census" |
 | **Per-step injections (barotropic, both survivors)** | EXONERATED for the accumulation | the retention operator was measured directly across eight 90-day arms over a 200× amplitude range: a deposit-shaped one-step kick retains R(day 1) ≈ 0.19–0.29 and falls below 1% by day 5–7. Retention-corrected, the frozen-forcing share integrates to +0.049 Sv and the in-loop constant to +0.037 Sv against a needed −0.401: **8–11× short, wrong sign.** | issue #1455 "Retention verdict" |
 | **Meridional (sidewall) 2Δt flicker** | TRANSIENT, cancels | 6.6× early → **0.95× late**, locus collapsing 24× → 3.9×, and **depleted (0.90) in member differences** — it cancels in exactly the statistic ensemble spreads are made of. Nothing downstream. | `dino_wall_flicker_source.md`; issue #1455 "Flicker hunt FINAL" |
-| **Zonal (±69.5° end-wall) excess** | SUSTAINED, **still unowned** | 2.68/2.85 late with CI [1.26, 5.10] excluding one, both floors cleared, second start state reproduces, member-difference enrichment 8.6×, damping equal within ~1.5×. Later reframed: **95% of it is a FIXED field**, which every two-step instrument cancels by construction. | `dino_wall_flicker_source.md`; issue #1455 "Re-projection verdict" |
+| **Zonal (±69.5° end-wall) excess** | SUSTAINED, **still unowned** | **2.68 / 2.85 / 7.59** under the three estimators, late-half, with CI [1.26, 5.10] excluding one, both floors cleared, second start state reproduces, member-difference enrichment 8.6×, damping equal within ~1.5×. Later reframed: **95% of it is a FIXED field**, which every two-step instrument cancels by construction. | `dino_wall_flicker_source.md`; issue #1455 "Re-projection verdict" |
 | **Grid metric (v-face zonal width)** | **PARTIAL — ~25% at the walls** | one cell-face width 3.3e-05 too large at both walls. Override arm (substitute NEMO's own array, same entry state): collapse **16.2% basin / 24.9% wall rows / 9.1% south / 25.6% north** against registered bars of 50% owner / 10% refuted — PARTIAL on every registered reduction. Staggering control passes 292–307×. Mechanism confirmed (+0.750 against the arm's own response) but the shape test is NOT SUPPORTED against the measurement (−0.200). Band decomposition: 74% of the effect is in rows ≥185 with collapse **falling toward the wall** (83.5% at row 185 → 25.6% at the wall) — the candidate explains the wall row *worst*. | `dino_wall_fixed_bias.md` §6a; issue #1455 "Override arm" |
 | **Salinity advection** | EXONERATED | the "×10 worse at day 180" was a ratio-of-summed-magnitudes capped by sign-cancellation luck. Scored as rms-difference over rms-reference and split into horizontal and vertical parts (immune to their mutual cancellation), **every part improves at day 180** (full tendency 9.79e-3 → 8.87e-3; correlation 0.99995 → 0.99997). | issue #1455 "Operator debts #2/#3" |
 | **Isoneutral slopes** | EXONERATED | feeding NEMO's own density into the production routine collapses all four slope rows **99.3–99.9%** at both states; the operator inherits its residual from a density input differing by 90–270 ulp. Slope error ~1e-13 against NEMO's own 1e-2 cap — cannot produce tenths of a Sverdrup. | issue #1455 "Operator debts #2/#3" |
@@ -300,7 +323,7 @@ tested and eliminated, so that nobody spends a week re-eliminating it.
 | **Barotropic time filter** | EXONERATED | per-step two-level rate and endpoint-to-endpoint circulation drift agree to **0.02%**, against a 23% deficit | `dino_basin_budget_result.md`, Decider 2 |
 | **Face-thickness convention** | REFUTED as owner | accounts for about **1%** and is *anti-aligned* with the deficit; logged as convention debt | `dino_basin_budget_result.md` |
 | **Rigid meridional position error** | REFUTED by its own residual | explains **0.8%** of the per-row shape difference | `dino_basin_budget_result.md`, Decider 0 |
-| **Half-step impulse-response lag** | RETRACTED as a model finding | owned by the twin's **forward-Euler start** — an exact identity, predicted 0.500, measured 0.4702, falling to 0.000142 once bridged. And the scare that followed was itself closed: **18 of 18 recorded gate/verdict runs already used the bridged start**; only ad-hoc CLI runs were Euler. Bounding A/B: start-mode difference 0.0181 Sv at day 90, inside the measured config-change envelope (0.0101–0.0704) and 5× under the gate floor. **Nothing re-baselines.** | issue #1455 "Centroid discriminator FINAL", "Euler-start scare CLOSED"; PR #1654 |
+| **Half-step impulse-response lag** | RETRACTED as a model finding | owned by the twin's **forward-Euler start** — predicted 0.500, measured 0.4702, falling to 0.000142 once bridged. (Mechanism wording as later corrected: a half-step delay **plus** a growing injected perturbation, ~0.002 Sv; the exact running-mean identity holds only for coincident restart time levels.) And the scare that followed was itself closed: **18 of 18 recorded gate/verdict runs already used the bridged start**; only ad-hoc CLI runs were Euler. Bounding A/B: start-mode difference 0.0181 Sv at day 90, inside the measured config-change envelope (0.0101–0.0704) and 5× under the gate floor. **Nothing re-baselines.** | issue #1455 "Centroid discriminator FINAL", "Euler-start scare CLOSED"; PR #1654 |
 
 **The summary line the campaign wrote for itself**, after the post-tendency
 bisection: *forcing exact · water masses exact · drag refuted (over-determined)
@@ -308,6 +331,11 @@ bisection: *forcing exact · water masses exact · drag refuted (over-determined
 e3f inert · nonlinear tendency terms matched (with headroom) · divisor
 fixed-and-inert · every post-tendency stage wrong-sign/wrong-shape at the
 matched step · no net convergence (pure recirculation).*
+
+**One amendment to that line.** It was written before the layer-versus-thickness
+weighting retraction. "Lateral friction exonerated end-to-end" rests on the
+retracted instrument and has not been re-scored, so read it as PROVISIONAL. Every
+other clause survives on evidence independent of that instrument.
 
 **And the conclusion drawn from it:** the deficit is **not producible by any
 operator difference at a matched state**. It must be **rectification** —
@@ -345,9 +373,11 @@ Three, stated as open questions rather than leads.
    remaining term at the wall rows.
 
 2. **The end-wall sustained excess.** The ±69.5° zonal-wall excess survives
-   bridging and sharpens: after the bridged start the free-run 2Δt flicker drops
-   18×, landing at **2.9× the oracle but concentrating 85% on walls against
-   NEMO's 4%**. Hypothesis 1 was RELOCATED, not refuted: a source-class
+   bridging and sharpens. Un-bridged, the free-run 2Δt flicker stands at **17.95×
+   the oracle**; bridged, at **2.89×** — an amplitude fall of about 6.2×
+   (7.00e-6 → 1.13e-6 m). ("Drops 18×" would conflate the starting ratio with the
+   size of the drop.) The bridged residual still concentrates **85% on the walls
+   against NEMO's 4%**. Hypothesis 1 was RELOCATED, not refuted: a source-class
    difference on the end walls, about 2.5× smaller than first published. **j=1
    is the basin deficit's own wall row.** No suspect is named. Live candidates
    recorded: the barotropic split-explicit machinery, and the explicit-versus-
@@ -395,7 +425,11 @@ That is precisely the Rule-8 pattern — raising faithfulness on one half of a
 cancelling pair makes the metric worse — and this campaign recorded it four
 times: the vertical-ladder paradox, seven faithful transcription fixes (the ACC
 gap magnitude went 1.557 → 1.708 Sv), the reconciliation kernel (+0.048 Sv), and
-the convection trigger (+0.032 Sv). **Supersession, stated because it matters to how
+the convection trigger (+0.032 Sv). **A confound rides on those magnitudes, and
+it is this document's own rule applied to itself:** all three arm numbers were
+recorded on the **old seasonal clock**, and §4's season rule says every arm
+ranking recorded on that clock was superseded. The count of four is sourced; the
+magnitudes have not been re-measured on the corrected clock. **Supersession, stated because it matters to how
 much weight the pattern carries:** the first of those four, the ladder paradox,
 was later overturned twice — first retracted as an artifact of the
 surface-placement defect, then reversed outright when the twin was put on NEMO's
@@ -451,6 +485,13 @@ the decisions the campaign escalated. Ranked by value-per-cost.
 **Also on the board, no new work assigned** (each is a real observation with a
 named cheap next step, none is ranked above the pair):
 
+- **The wall-row RESCORE (offline, no compute, ranked cheapest by its own
+  source).** The layer-averaged instrument that decided the **lateral-friction**
+  refutation was later retracted (§4). Its source says the drag and
+  lateral-friction refutations *"were scored on the same instrument and have not
+  been re-run"*. Drag has independent later evidence and stands; **friction does
+  not**, so its row in §2.3 is PROVISIONAL until this lands. Do this before
+  trusting that exoneration.
 - The **grown-noise census** on the perturbation at days 5/10 in both models —
   states already on disk. The convective switch's ~300× rectification is
   established at ≳1e-10 perturbations and **silent at 1e-14**, so on current
@@ -473,8 +514,9 @@ legoESM carries wall-enriched 2Δt flicker NEMO lacks (CONFIRMED) → noise grow
 past ~1e-10 within days (measured growth curves) → convective adjustment's hard
 edge rectifies it ~300×/step (CONFIRMED at the sampled state, but **shared with
 NEMO**, so not differential) → tracer differences migrate into the wall rows
-over the year (CONFIRMED) → the depth-uniform geostrophic wall lobe carries a
-34% difference (the −0.95 Sv deficit, CONFIRMED as a characterization). Note the
+over the year (CONFIRMED) → the wall's westward return lobe **overshoots by 34%**
+while the rest of the basin is right to 3% (the −0.95 Sv net deficit, CONFIRMED
+as a characterization). Note the
 faithfulness subtlety recorded with it: NEMO's own EVD is also a hard switch, so
 the difference is **not the edge but the noise feeding it** — the faithful-fix
 target is the 2Δt mode's source, with edge-smoothing usable only as a mechanism
@@ -503,7 +545,8 @@ just by casting NEMO to fp32. Conservation and cancellation-prone diagnostics
 are gated at fp64, enforced by an AST test so no future driver can skip it.
 
 **Provenance and dirty trees.** A shrink-only baseline seeded from a **mid-PR
-working tree** certified nothing and stayed stale for 289 commits. Every arm now
+working tree** certified nothing and stayed stale while *"289 commits changed
+nothing"* (PR #1603). Every arm now
 carries a producer SHA; a baseline written by a `+dirty` tree was re-run at the
 clean tree and had to reproduce exactly before being cited.
 
@@ -642,9 +685,10 @@ than warns.
 Twelve defects found and corrected in the recent arc, each with a test and a
 measured before/after. Eight are **NEMO-faithfulness** fixes (1, 2, 4–9); the
 rest are a solver defect (3), a correctness consolidation (10), a harness
-default (11) and an instrument defect (12). The honest headline is that **every
-one of the late faithfulness fixes is climate-inert** — they were shipped on
-correctness, not because they moved a metric.
+default (11) and an instrument defect (12). The honest headline is that **fixes 4–7, 9 and 10 are climate-inert** — each
+moved its gate metric by less than its own floor and shipped on correctness, not
+because it moved a number. Fixes 1, 2 and 8 plainly did move metrics, and are why
+the card passes its gate at all.
 
 | # | fix | measured effect | where |
 |---|---|---|---|
@@ -667,7 +711,10 @@ outside `model.step`, where the leapfrog combine cancels it** — retention
 `(1−2γ)/(2(1−γ))` = 4/9, so **56% of every applied surface flux was discarded**.
 With NEMO's placement, in a 20-year from-rest A/B differing in that one field:
 ACC year 5 67.06 → **91.41** (NEMO 91.13), year 10 83.03 → **121.58** (NEMO
-121.07), and the missing densest classes appear at 0.94–1.03× NEMO's volume. A
+121.07), and the missing densest classes appear at 0.94–1.03× NEMO's volume.
+**Carried with it, because its own review attached them:** the headline magnitude
+was never independently reproduced, arm B overshoots 1.02–1.05× after year 10,
+and the recorded review verdict is **RESULT QUALIFIED** — not clean. A
 per-operator bar could never have found it — `tra_sbc` was AT BAR throughout,
 and remains so, because the increment it computes was always correct. Only where
 the integrator consumed it was wrong.
@@ -745,13 +792,17 @@ Two parent branches were **closed as subsumed**, not abandoned: #1640
 (`fidelity/dino-southern-basin`) and #1644. Nothing was lost — the ladder work a
 squash-merge had silently reverted was verified present in `main`.
 
-**Unmerged and outstanding: `fidelity/dino-wall-flicker`** — 18 commits, 25
-files, +12,192 / −104. It sits directly on `origin/main` and fully contains
-`fix/twin-euler-start-default`'s 5 commits. This is the stack the accompanying
-PR body covers. Also unmerged, carrying probe work: `fidelity/dino-carryover`
-(24), `fidelity/dino-carryover-2` (32), `fidelity/dino-eta-waves` (15),
-`fidelity/dino-ts-atlas` (3), `fidelity/dino-kick-asymmetry` (27),
-`fix/zdf-face-control-volume` (1).
+**Unmerged and outstanding: `fidelity/dino-wall-flicker`.** It sits directly on
+`origin/main`, fully contains `fix/twin-euler-start-default`, and is the stack the
+accompanying PR body covers. Also unmerged, carrying probe work:
+`fidelity/dino-carryover`, `fidelity/dino-carryover-2`, `fidelity/dino-eta-waves`,
+`fidelity/dino-ts-atlas`, `fidelity/dino-kick-asymmetry`,
+`fix/zdf-face-control-volume`.
+
+*(Commit counts are deliberately omitted. They move every time anything lands,
+and a stale count in a hand-off is worse than no count —
+`git rev-list --count origin/main..<branch>` is authoritative and takes a
+second.)*
 
 ### 5.4 Review statistics
 
