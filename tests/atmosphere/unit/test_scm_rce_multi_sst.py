@@ -27,8 +27,10 @@ def _camp():
 
 class _Ref:
     # minimal ReferenceProfiles stand-in: only z_m is read by the IC builder.
+    # The campaign's reference is TOP-DOWN (index -1 = surface, z=0), so the
+    # stand-in must match or the surface q0 lands at the wrong index.
     def __init__(self, n=40):
-        self.z_m = np.linspace(0.0, 30000.0, n)
+        self.z_m = np.linspace(30000.0, 0.0, n)
 
 
 def test_ic_surface_humidity_increases_with_sst():
