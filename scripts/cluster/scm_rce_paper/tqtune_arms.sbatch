@@ -69,6 +69,11 @@ SEED=${SEEDS[$(( SLURM_ARRAY_TASK_ID / 10 ))]}
 # compared term-by-term against a pinned one by accident.
 CORIOLIS=${CORIOLIS:-0.0}
 PROTO_TAG=${PROTO_TAG:-f0}
+# Joint multi-SST tuning for generalization: comma-separated SSTs scored
+# together (each candidate at all three; the mean drives the search). Default
+# "300" keeps the single-SST behaviour. The primary reference-dir must match
+# the primary SST; the driver resolves sibling rcemip_ref_sam<SST> dirs.
+SSTS=${SSTS:-300}
 OUT=$REPO/results/scm_rce_tqtune/arm_${OBJECTIVE}_${PARAM_SET}_${PROTO_TAG}_seed${SEED}
 
 cd $WT || exit 90
@@ -139,7 +144,7 @@ fi
 [ "$EVALS" -gt "$EVALS_MAX" ] && EVALS=$EVALS_MAX
 
 echo "SCHEME=$SCHEME  SEED=$SEED  KERNEL_ARM=$ARM  objective=$OBJECTIVE"
-echo "PROTOCOL: coriolis=$CORIOLIS ($PROTO_TAG)  outdir=$OUT"
+echo "PROTOCOL: coriolis=$CORIOLIS ($PROTO_TAG)  SSTs=$SSTS  outdir=$OUT"
 echo "param_set=$PARAM_SET  n_params=$NPARAM  tune_evals=$EVALS"
 echo "refine_frac=$REFINE_FRAC  bl_anchor_top_m=$BL_ANCHOR"
 echo "REFERENCE=$REF"
@@ -163,6 +168,7 @@ JAX_ENABLE_X64=1 $PY $WT/scripts/run/run_scm_rce_convection_intercomparison.py \
   --scm-convection-substeps 10 \
   --scm-microphysics-substeps 30 \
   --bl-anchor-top-m $BL_ANCHOR \
+  --ssts $SSTS \
   --tune-evals $EVALS \
   --tune-seed $SEED \
   --coriolis-s-inv $CORIOLIS \
