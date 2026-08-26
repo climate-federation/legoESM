@@ -1070,11 +1070,52 @@ def main():
                 f"FATAL: legoESM's stored dx_v is {_dxv_p.shape}, not the "
                 f"({jpj + 1}, {jpi}) v-face frame this substitution assumes.")
         _dnc = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
-        _e1v_n = np.asarray(_dnc.variables["e1v"][0], dtype=np.float64)
-        _dnc.close()
+        try:
+            _mm = {_n: np.asarray(_dnc.variables[_n][0], dtype=np.float64)
+                   for _n in ("e1v", "e2v", "e1u", "e2u", "e1t", "e2t")}
+        finally:
+            _dnc.close()
+        _e1v_n = _mm["e1v"]
         if _e1v_n.shape != (jpj, jpi):
             raise SystemExit(f"FATAL: NEMO e1v is {_e1v_n.shape}, want "
                              f"({jpj}, {jpi})")
+        # The alignment below is scored on COLUMN 0 alone.  That is sound only
+        # if NEMO's e1v carries no zonal structure, so measure it rather than
+        # assume it -- a column-0 score on an i-varying field would be blind to
+        # exactly the half of the array it does not look at.
+        _e1v_izonal = float(np.abs(_e1v_n - _e1v_n[:, :1]).max())
+        if _e1v_izonal != 0.0:
+            raise SystemExit(
+                f"FATAL: NEMO's e1v varies along i (max spread "
+                f"{_e1v_izonal:.3e}); the column-0 alignment score below would "
+                "be blind to that structure.")
+        # SECTION 6'S EXCLUSIVITY PREMISE, VERIFIED AT THE POINT OF USE rather
+        # than relayed from prose.  The whole arm rests on "the v-face zonal
+        # width is the ONLY horizontal metric off by more than roundoff": if a
+        # second metric were also off, substituting one of them would be a
+        # partial arm and the collapse would read LOW.  Note this also bounds
+        # the mixed-metric worry -- the substitution leaves `area` on
+        # legoESM's own value, which is only harmless because it IS NEMO's.
+        _geom_p = _k_sub["grid"]
+        _excl = {
+            "dx_u vs e1u": (np.asarray(_geom_p.dx_u, np.float64)[:, :-1],
+                            _mm["e1u"]),
+            "dy_u vs e2u": (np.asarray(_geom_p.dy_u, np.float64)[:, :-1],
+                            _mm["e2u"]),
+            "dy_v vs e2v": (np.asarray(_geom_p.dy_v, np.float64)[1:jpj],
+                            _mm["e2v"][0:jpj - 1]),
+            "area vs e1t*e2t": (np.asarray(_geom_p.area, np.float64),
+                                _mm["e1t"] * _mm["e2t"]),
+        }
+        for _nm, (_a, _b) in _excl.items():
+            _rel = float(np.abs(_a - _b).max() / np.abs(_b).max())
+            print(f"    metric exclusivity {_nm:18s}: max rel {_rel:.3e}")
+            if _rel > 1e-12:
+                raise SystemExit(
+                    f"FATAL: {_nm} differs by {_rel:.3e}, so the v-face zonal "
+                    "width is NOT the only horizontal metric off by more than "
+                    "roundoff and substituting it alone is a PARTIAL arm whose "
+                    "collapse would read low.")
         # ALIGNMENT, calibrated against a known answer rather than assumed --
         # the same two-hypothesis discriminator the drag arm uses.  legoESM's
         # own width must already agree with NEMO's to ~1e-5 under the CORRECT
@@ -1095,12 +1136,18 @@ def main():
                   f"{_sc:.3e}"
                   + ("   <- the CORRECT map (asserted below)" if _sh == -1
                      else f"   ({_sc / max(_vf_scores[-1], 1e-300):.0f}x worse)"))
-        assert _vf_scores[-1] < 1e-3 and _vf_scores[-1] * 100.0 < _vf_best_wrong, (
-            "v-face metric row alignment NOT established: the chosen map "
-            "scores %.3e and the best WRONG map scores %.3e (%.1fx), so the "
-            "control cannot tell them apart and the substitution is aborted"
-            % (_vf_scores[-1], _vf_best_wrong,
-               _vf_best_wrong / max(_vf_scores[-1], 1e-300)))
+        # SystemExit, not assert: `python -O` deletes asserts, and this
+        # discriminator is the only thing standing between the arm and a
+        # silently mis-aligned array.  (The polar guards below already raise.)
+        if not (_vf_scores[-1] < 1e-3
+                and _vf_scores[-1] * 100.0 < _vf_best_wrong):
+            raise SystemExit(
+                "FATAL: v-face metric row alignment NOT established: the "
+                "chosen map scores %.3e and the best WRONG map scores %.3e "
+                "(%.1fx), so the control cannot tell them apart and the "
+                "substitution is aborted"
+                % (_vf_scores[-1], _vf_best_wrong,
+                   _vf_best_wrong / max(_vf_scores[-1], 1e-300)))
         # The two polar v-rows are legoESM's closed-wall convention (exactly 0)
         # and have no NEMO counterpart in this map.  They are left untouched by
         # BOTH arms -- which is only one-variable-clean if they carry no wet
@@ -1122,10 +1169,13 @@ def main():
                                              0, jpj - 1)]
         _dxv_sub[jpj] = _dxv_p[jpj]          # the north wall stays legoESM's 0
         _vf_touched = int((_dxv_sub != _dxv_p).sum())
-        _vf_relmax = float(np.abs((_dxv_sub - _dxv_p)[1:jpj]).max()
-                           / _dxv_p[1:jpj].max())
+        # PER-ROW, not against the basin maximum.  Dividing by the equatorial
+        # width under-reports the wall rows by ~2.8x, and this is the one
+        # printed number a reader checks against section 6's 3.3e-05.
+        _vf_relmax = float((np.abs(_dxv_sub - _dxv_p)[1:jpj]
+                            / _dxv_p[1:jpj]).max())
         print(f"    substituted rows 1..{jpj - 1} ({_vf_touched} cells); "
-              f"max relative change {_vf_relmax:.3e}")
+              f"max PER-ROW relative change {_vf_relmax:.3e}")
         # THE SUBSTITUTION.  `grid` covers every in-loop consumer that reads
         # the stored width; `een_pre` was built OUTSIDE the loop from the same
         # array, so it is replaced with the SAME array or the EEN consumer
@@ -1147,10 +1197,19 @@ def main():
         _k_vfx["een_pre"] = dict(_een_p)
         _k_vfx["een_pre"]["e1v"] = jnp.asarray(
             _dxv_sub, dtype=_een_p["e1v"].dtype)
-        # ONE VARIABLE, MECHANICALLY: every other loop input is the SAME OBJECT
-        # as in the forcing-substituted arm, and inside the two containers that
-        # do change, every other leaf is too.  Identity, not equality -- an
-        # equal-but-rebuilt array is a rebuild this arm never asked for.
+        # ONE VARIABLE, and the gate that can actually FAIL.
+        #
+        # The three identity sweeps below are cheap regression tripwires for a
+        # future edit, but on THIS code they are true by construction -- the
+        # containers are shallow copies with one key reassigned -- so they are
+        # NOT the one-variable evidence and are no longer described as it.
+        # (Adversarial review, round 1: "three tautologies elevated to a
+        # mechanical gate".)  The gate that can fail is the CONTENT SWEEP
+        # underneath: every array reachable by the loop is compared, BY VALUE,
+        # against legoESM's original width, and the set that matches must be
+        # exactly the two the substitution replaced.  A THIRD match is a
+        # consumer this arm MISSED -- which would shrink the perturbation and
+        # bias the collapse toward REFUTED with nothing firing.
         for _kk in set(_k_vfx) | set(_k_sub):
             if _kk in ("grid", "een_pre"):
                 continue
@@ -1167,8 +1226,57 @@ def main():
                 continue
             if _k_vfx["een_pre"].get(_kk) is not _een_p.get(_kk):
                 raise SystemExit(f"FATAL: een_pre[{_kk!r}] changed")
-        print("    one-variable check: every other loop input, grid field and "
-              "EEN pre-block leaf is the SAME OBJECT as the baseline arm's")
+
+        # REACHABILITY.  Each of the three consumers exists only under a card
+        # setting, and a card that switched one off would silently shrink this
+        # arm to two consumers.  Assert the settings instead of reading them
+        # off a log afterwards.
+        _cfg_bt = _k_sub["config"].barotropic
+        from legoesm.grids.operators_latlon_cgrid import (
+            reads_stored_vface_metric as _reads_stored)
+        _reach = {
+            "continuity divergence reads the STORED width":
+                bool(_reads_stored(_grid_p)),
+            "ssh-average face depth is active (barotropic_face_depth)":
+                _cfg_bt.barotropic_face_depth == "nemo_ssh_avg",
+            "EEN rotation coefficient is METRIC-COMPLETE":
+                bool(_een_p.get("metric_complete", False)),
+        }
+        for _nm, _ok in _reach.items():
+            print(f"    consumer reachable: {_nm}: {_ok}")
+            if not _ok:
+                raise SystemExit(
+                    f"FATAL: {_nm} is FALSE on this card, so the substituted "
+                    "array does not reach that consumer and this arm is a "
+                    "partial perturbation whose collapse reads low.")
+
+        # THE CONTENT SWEEP -- the gate that can fail.
+        _matches = []
+        for _kk, _vv in _k_vfx.items():
+            if _kk in ("grid", "een_pre") or _vv is None:
+                continue
+            _av = np.asarray(_vv, dtype=np.float64) if getattr(
+                _vv, "shape", None) == _dxv_p.shape else None
+            if _av is not None and np.array_equal(_av, _dxv_p):
+                _matches.append(f"loop kwarg {_kk}")
+        for _f in _grid_p._fields:
+            _vv = getattr(_grid_p, _f)
+            if getattr(_vv, "shape", None) == _dxv_p.shape and np.array_equal(
+                    np.asarray(_vv, dtype=np.float64), _dxv_p):
+                _matches.append(f"grid.{_f}")
+        for _kk, _vv in _een_p.items():
+            if getattr(_vv, "shape", None) == _dxv_p.shape and np.array_equal(
+                    np.asarray(_vv, dtype=np.float64), _dxv_p):
+                _matches.append(f"een_pre[{_kk!r}]")
+        print(f"    content sweep: arrays carrying legoESM's own v-face zonal "
+              f"width = {sorted(_matches)}")
+        if sorted(_matches) != ["een_pre['e1v']", "grid.dx_v"]:
+            raise SystemExit(
+                "FATAL: the arrays carrying legoESM's own v-face zonal width "
+                f"are {sorted(_matches)}, not exactly the two this arm "
+                "substitutes.  A third is a consumer the arm MISSED (partial "
+                "perturbation, collapse biased low); a missing one means the "
+                "substitution has nothing to replace.")
         jax.lax.fori_loop = _fori_capture
         try:
             with jax.disable_jit():
@@ -1210,13 +1318,19 @@ def main():
         lego_Vbar_avg_sub = _lego_vavg_vfx
         _dV_sub = _dV_vfx
         _dep_sub = _dep_vfx
+    # LABEL THE ARM.  When the v-face substitution is on, `_dep_sub` below is
+    # the SUBSTITUTED-METRIC in-loop deposit, not the plain frozen-forcing one;
+    # the four lines would otherwise report an arm number under the baseline's
+    # name.  The line prefixes are unchanged because the walk driver parses
+    # them; the arm is named after the number.
+    _vf_tag = (f"   [+ NEMO's own e1v, mode={_vf_mode}]" if _vf_mode else "")
     print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
     print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
-          f"({100*_dep_sub/_dep_vel:.1f}% of it survives)")
+          f"({100*_dep_sub/_dep_vel:.1f}% of it survives){_vf_tag}")
     print(f"    -> IN-LOOP share (assumption-free) = {_dep_sub:+.4e} Sv/step "
-          f"= {100*_dep_sub/_TARGET:.1f}% of the -2.80e-4 budget row")
+          f"= {100*_dep_sub/_TARGET:.1f}% of the -2.80e-4 budget row{_vf_tag}")
     print(f"       FORCING share                   = {_dep_vel - _dep_sub:+.4e} "
-          f"Sv/step")
+          f"Sv/step{_vf_tag}")
 
     # ===================================================================
     # #1455 PHASE-2: the PRE-REDUCTION deposit fields, written only when asked.

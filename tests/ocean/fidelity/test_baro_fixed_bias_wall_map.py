@@ -1068,3 +1068,57 @@ def test_overstatement_is_positive_ie_the_bound_errs_conservatively():
     """If this ever goes negative the bound is no longer an upper bound."""
     wgt = np.ones(68) / 68.0
     assert M.small_angle_overstatement(1.366e-4, 117.391304, wgt) > 0.0
+
+
+# --------------------------------------------------------------------------
+# ROUND-4 REVIEW: the v-face metric ARM is stamped on every map, and the gate
+# had no reader for it.  An arm map and a baseline map are well-formed arrays
+# on an identical wet mask -- exactly the wind-off failure mode this gate
+# exists for -- so the caller must SAY which arm it is scoring and every map
+# must be it.  The cross-map agreement clause is gone, so as this file's own
+# docstring requires, the new knob gets a PER-MAP on-state check and a test
+# that fails when that check is moved outside the loop.
+# --------------------------------------------------------------------------
+_STAMP_NEMO_ARM = _STAMP + " DINO_1455_SUB_VFACE='nemo'"
+_STAMP_NO_ARM = _STAMP + " DINO_1455_SUB_VFACE=None"
+
+
+def test_vface_arm_of_normalises_an_unstamped_map_to_none():
+    """Maps produced before the arm existed carry no token at all."""
+    assert M.vface_arm_of(M.parse_stamp(_STAMP)) == "none"
+    assert M.vface_arm_of(M.parse_stamp(_STAMP_NO_ARM)) == "none"
+    assert M.vface_arm_of(M.parse_stamp(_STAMP_NEMO_ARM)) == "nemo"
+
+
+def test_gate_refuses_arm_maps_scored_as_the_baseline():
+    """The exact silent blend: five arm maps read as the plain arm."""
+    stamps = [{"path": f"m{i}", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP_NEMO_ARM} for i in range(5)]
+    with pytest.raises(SystemExit, match="v-face metric arm"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+    got = M.assert_map_provenance(stamps, "/oracle/d180", "nemo")
+    assert got["vface_arm"] == "nemo"
+
+
+def test_gate_refuses_a_MIXED_arm_directory_and_judges_every_map():
+    """Map 0 baseline, maps 1-4 arm.
+
+    The mutation this guards: moving the arm check outside the per-map loop
+    would inspect map 0, find the expected 'none', and wave a directory
+    through whose five-state mean is neither arm.
+    """
+    good = {"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+            "provenance": _STAMP_NO_ARM}
+    stamps = [good] + [{"path": f"m{i}", "kt": 5760,
+                        "seqdump": "/oracle/d180",
+                        "provenance": _STAMP_NEMO_ARM} for i in range(1, 5)]
+    with pytest.raises(SystemExit, match="m1"):
+        M.assert_map_provenance(stamps, "/oracle/d180", "none")
+
+
+def test_gate_refuses_an_unknown_arm_name():
+    """A typo must not silently become 'score everything as the baseline'."""
+    stamps = [{"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP_NO_ARM}]
+    with pytest.raises(SystemExit, match="expected one of"):
+        M.assert_map_provenance(stamps, "/oracle/d180", "nmeo")

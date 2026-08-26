@@ -160,7 +160,7 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
 # was omitted entirely.  So the gate was checking three switches that cannot
 # matter and missing the one that can.
 _PRODUCER_KNOBS = ("DINO_1226_T_SECONDS", "DINO_1226_IC_STEP",
-                   "LEGOESM_NEMO_E3T")
+                   "LEGOESM_NEMO_E3T", "DINO_1455_SUB_VFACE")
 # Recorded for the audit trail, explicitly NOT used as a wind-on witness.
 _INERT_KNOBS = ("DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
                 "DINO_RECONCILE")
@@ -176,7 +176,20 @@ def parse_stamp(prov: str) -> dict:
     return out
 
 
-def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
+#: The v-face metric arms a map directory can hold.  "none" is the plain
+#: frozen-forcing arm (a map produced before the arm existed carries no stamp
+#: at all and normalises to this).
+_VFACE_ARMS = ("none", "nemo", "stagger")
+
+
+def vface_arm_of(parsed: dict) -> str:
+    """Normalise one stamp's v-face arm to a member of ``_VFACE_ARMS``."""
+    got = parsed.get("DINO_1455_SUB_VFACE")
+    return "none" if got in (None, "None", "") else got
+
+
+def assert_map_provenance(stamps: list, cli_seqdump: str,
+                          vface_arm: str = "none") -> dict:
     """Refuse to run unless the maps agree AND are in the expected ON state.
 
     AGREEMENT IS NOT ENOUGH, which is what round-3 review caught: five
@@ -205,6 +218,9 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
     proxy available from the saved artifacts, and they are a proxy.  Closing
     that properly means stamping the resolved stress amplitude in the producer.
     """
+    if vface_arm not in _VFACE_ARMS:
+        raise SystemExit(
+            f"vface_arm={vface_arm!r}: expected one of {_VFACE_ARMS}")
     parsed = [parse_stamp(st["provenance"]) for st in stamps]
     first = parsed[0]
 
@@ -249,6 +265,19 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
                 f"IC_STEP={got['DINO_1226_IC_STEP']}. The seasonal clock is "
                 "derived from that step, so the wind would be from another "
                 "time.")
+        # THE V-FACE METRIC ARM, per map.  A map produced with NEMO's own e1v
+        # substituted into the loop is a well-formed array on an identical wet
+        # mask, so no numerical guard can tell it from a baseline one -- the
+        # same failure mode as the wind-off maps this gate was built for.  The
+        # caller must SAY which arm it is scoring and every map must be it,
+        # because a mixed directory would be averaged into a five-state mean
+        # that is neither arm.
+        if vface_arm_of(got) != vface_arm:
+            raise SystemExit(
+                f"FATAL: {st['path']} was produced with the v-face metric arm "
+                f"{vface_arm_of(got)!r}, but this run is scoring "
+                f"{vface_arm!r}. Mixing arms in one directory averages two "
+                "different experiments into one five-state mean.")
 
     # (3) the CLI oracle directory must be one the maps came from
     seqdumps = [st["seqdump"] for st in stamps]
@@ -259,6 +288,7 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
             f"maps were produced from ({sorted(set(seqdumps))}). The wind "
             "increment and the bias would come from different runs.")
     return {"producer_knobs": {k: first[k] for k in _PRODUCER_KNOBS},
+            "vface_arm": vface_arm,
             "inert_knobs_recorded_not_checked": {k: first[k]
                                                  for k in _INERT_KNOBS},
             "seqdumps": seqdumps,
@@ -980,6 +1010,12 @@ def main() -> None:
                     help="loop response to a steady forcing; measured by "
                          "substep_traj_compare.py (R_deposit)")
     ap.add_argument("--dt-s", type=float, default=MEASURED_DT_S)
+    ap.add_argument("--vface-arm", default="none", choices=_VFACE_ARMS,
+                    help="which v-face metric arm these maps are: 'none' (the "
+                         "plain frozen-forcing arm), 'nemo' (NEMO's own e1v "
+                         "substituted), or 'stagger' (the un-shifted array, "
+                         "the registered staggering control). Every map in "
+                         "the directory must carry this arm.")
     ap.add_argument("--out", default=os.path.join(
         REPO, "results", "dino_1455", "baro_fixed_bias_wall_map.json"))
     args = ap.parse_args()
@@ -1016,9 +1052,11 @@ def main() -> None:
     M = load_maps(args.map_dir)
     wetu, wetv = M["wetu"][0] > 0.5, M["wetv"][0] > 0.5
     wgt = M["wgt_primary"][0]
-    prov = assert_map_provenance(M["_stamps"], args.seqdump)
+    prov = assert_map_provenance(M["_stamps"], args.seqdump, args.vface_arm)
     inv = wind_step_invariance(M["_stamps"])
     print("\n=== MAP PROVENANCE GATE ===")
+    print(f"  v-face metric arm these maps are scored as: {args.vface_arm!r} "
+          f"(checked per map against each map's own stamp)")
     print(f"  producer's OWN knobs, checked against their ON state: "
           f"{prov['producer_knobs']}")
     print(f"  inert knobs (belong to other probes; recorded, NOT a wind-on "
