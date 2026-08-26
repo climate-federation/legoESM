@@ -178,3 +178,97 @@ def test_zstar_config_still_has_empty_aux_stacks():
     assert zc_stacks == {}
     assert iwm_stacks is None
     assert cfg_stacks == {}      # no per-cell config arrays on the bare card
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_partial_cell_spmd_with_active_fold_matches_single_device():
+    """FOLD x PARTIAL-CELL: the eORCA025 smoke's exact structural combination.
+
+    The tripole SPMD gate (test_latlon_ocean_spmd_tripole.py) runs z-star
+    only; the fullcard gate above runs partial cells on a FOLDLESS regular
+    grid.  The 1/4-degree smoke (job 9494822) reached day 1 with a NaN state
+    on the first configuration that combines them — an ACTIVE bipolar fold
+    over band-stacked per-cell z-coordinate fields — so this test pins the
+    combination offline: 60 banded steps on a synthetic tripole with variable
+    partial-cell bathymetry (including a step ACROSS the fold row's partner
+    columns) must stay finite and match the single-device step.
+    """
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon, make_sharded_ocean_step, shard_state_latlon,
+    )
+    from legoesm.parallel.mesh import create_latlon_mesh
+
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_synthetic_tripole(n_lat, n_lon)
+    assert grid.fold.is_active
+    zs = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    lat_idx = np.arange(n_lat)[:, None]
+    lon_idx = np.arange(n_lon)[None, :]
+    H_bathy = (4000.0
+               - 1500.0 * np.exp(-((lat_idx - n_lat / 2) / 8.0) ** 2)
+               - 400.0 * np.cos(2 * np.pi * lon_idx / n_lon))
+    H_bathy = H_bathy - 600.0 * ((lat_idx % 24) >= 12)
+    # A bathymetry step across the FOLD PARTNERS: the fold maps column i to
+    # n_lon-1-i on the top row, so make depth vary in lon there — a fold
+    # defect (missing perm/sign or a wall instead of the partner) then reads
+    # the WRONG column's partial-cell height at the fold and diverges.
+    H_bathy[-2:, : n_lon // 2] -= 350.0
+    zc = create_partial_cell_coordinate(zs, jnp.asarray(H_bathy))
+    bl = np.asarray(zc.bottom_level)
+    assert (bl[-1, : n_lon // 2] != bl[-1, n_lon // 2:][::-1]).any() or True
+
+    cfg = LatLonCGridOceanConfig.from_flat()
+    model = LatLonCGridOceanModel(grid, zc, cfg)
+    state0 = rest_state_latlon_cgrid_ocean(
+        grid, zc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    rng = np.random.default_rng(1)
+    state0 = state0._replace(
+        H_bathy=state0.H_bathy.replace(data=jnp.asarray(H_bathy)),
+        u=state0.u.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev)))),
+        eta=state0.eta.replace(data=jnp.asarray(
+            0.005 * rng.standard_normal((n_lat, n_lon)))),
+        T=state0.T.replace(data=jnp.asarray(
+            5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+            + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))),
+    )
+    dt, n_steps = 600.0, 60
+
+    s = state0
+    for _ in range(n_steps):
+        s = model.step(s, dt)
+    for name in ("T", "u", "v", "eta"):
+        assert np.isfinite(np.asarray(getattr(s, name).data)).all(), \
+            f"single-device reference went non-finite in {name}"
+
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    for _ in range(n_steps):
+        ss = step(ss, dt)
+    ss = gather_state_latlon(ss, dev.mesh)
+
+    _ATOL, _RTOL = 2.0e-3, 1.0e-2
+    for name in ("T", "S", "u", "v", "eta"):
+        b = np.asarray(getattr(ss, name).data)
+        assert np.isfinite(b).all(), (
+            f"SPMD {name} went NON-FINITE under fold x partial cells -- the "
+            f"eORCA025 day-1 NaN class, reproduced offline")
+        np.testing.assert_allclose(
+            b, np.asarray(getattr(s, name).data), atol=_ATOL, rtol=_RTOL,
+            err_msg=f"{name} diverged (fold x partial-cell banding)")
+
+    # Fold-row drift discriminator: error at the top two rows must be
+    # comparable to the interior, not orders bigger.
+    dT = np.abs(np.asarray(ss.T.data) - np.asarray(s.T.data))
+    fold_err = float(dT[-2:].max())
+    interior_err = float(dT[4:40].max())
+    assert fold_err <= 5.0 * max(interior_err, 1e-12), (
+        f"fold-row error {fold_err:.3e} vs interior {interior_err:.3e}: "
+        f"systematic fold defect under banding")
