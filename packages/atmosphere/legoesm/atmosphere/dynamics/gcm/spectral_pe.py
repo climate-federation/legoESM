@@ -1227,6 +1227,90 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     )
 
 
+# --- explicit-advection stability gate (2026-08-23 WB blowup) --------------
+# The semi-implicit step treats ONLY the linear gravity-wave subsystem
+# implicitly; the RK3 advection stays explicit with the spectral bound
+#     u_ref * n_max * dt_step / R_earth <= sqrt(3)
+# (imaginary-axis limit of SSP-RK3 on the fastest resolved advective mode).
+# Measured at T63: dt=1800 with si_substeps=1 sits at u_crit ~ 97 m/s — under
+# real winter jets — and blew up exponentially within 12 steps on every level
+# count, feeding an entire training campaign mid-blowup 6-hour states.
+# u_ref is a design wind envelope ABOVE expected maxima (~2x midlatitude
+# jets), not the measured threshold: gating at the measured 97 m/s would
+# re-legalise the blowup configuration at equality.
+# One bound, one home: the deck gate (tests/unit/test_wb_campaign_dt_stability)
+# and the runtime check both import these.
+ADVECTIVE_CFL_U_REF = 150.0        # [m/s]
+# Hard-error floor (#1663): real winter jets reach ~100 m/s; a spectral config
+# whose u_crit falls below this on ssp_rk3 is the measured 2026-08-23 blowup
+# class, not a design-margin false alarm.  Between this and u_ref it WARNS.
+U_CRIT_HARD_FLOOR = 100.0          # [m/s]
+RK3_ADVECTIVE_BOUND = math.sqrt(3.0)
+
+
+def advective_cfl_courant(n_max: int, dt_step: float,
+                          u_ref: float = ADVECTIVE_CFL_U_REF) -> float:
+    """Courant number of the explicit advective step at wind ``u_ref``."""
+    return u_ref * float(n_max) * float(dt_step) / constants.R_earth
+
+
+def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None:
+    """Refuse a spectral configuration whose explicit advection is unstable.
+
+    ``si_substeps`` subdivides the step ONLY on the semi-implicit path;
+    an explicit configuration advances at the full ``dt``.
+    """
+    import warnings
+    n_sub = int(config.si_substeps) if config.semi_implicit else 1
+    dt_step = float(dt) / max(n_sub, 1)
+    c = advective_cfl_courant(n_max, dt_step)
+    if c <= RK3_ADVECTIVE_BOUND:
+        return
+    # #1663 review (warn-plus-refuse): the old blanket hard error keyed on the
+    # u_ref=150 m/s DESIGN envelope over-blocked legitimate configs — the T42
+    # dt=1800 Held-Suarez benchmark (u_crit~146, real jets ~40 m/s, stable) and
+    # larger-stability integrators (ssp_rk34/rk4/ssp_rk54) for which the SSP-RK3
+    # sqrt(3) bound is conservative.  But downgrading to a bare warning would
+    # be void in a campaign harness (printed once per location, ignored by the
+    # builder), silently re-admitting the 2026-08-23 blowup.  So: hard-error
+    # ONLY the measured blowup class, warn the design-margin band / non-RK3.
+    #   u_crit = the wind at which the SSP-RK3 advective Courant number hits the
+    #   bound.  Real winter jets reach ~100 m/s (the incident sat at u_crit~97),
+    #   so u_crit below that floor on ssp_rk3 is a genuine blowup risk.
+    u_crit = RK3_ADVECTIVE_BOUND * constants.R_earth / (float(n_max) * dt_step)
+    _detail = (f"advective Courant number {c:.2f} > {RK3_ADVECTIVE_BOUND:.2f} "
+               f"(SSP-RK3 bound): u_crit={u_crit:.0f} m/s (n_max={n_max}, "
+               f"dt={dt}, si_substeps={config.si_substeps}, "
+               f"semi_implicit={config.semi_implicit}, "
+               f"time_integrator={config.time_integrator}).")
+    # Normalise the integrator name (GLM re-review: exact-match broke on
+    # "SSP_RK3"/"ssp-rk3").  Gated to ssp_rk3 — the measured-blowup + default
+    # integrator; the larger-stability schemes (ssp_rk34/rk4/ssp_rk54) carry
+    # more headroom than the sqrt(3) u_crit assumes, so they WARN.  FOLLOW-UP
+    # (GLM): a per-integrator advective bound would let the hard gate cover
+    # them precisely, and the 100 m/s floor could rise toward ~120 for NN
+    # training wind transients; both are threshold choices left to the owner.
+    # The SI path ALWAYS executes ssp_rk3 (ssp_rk3_step_si) regardless of the
+    # time_integrator field, so semi_implicit=True is ssp_rk3 for CFL purposes
+    # (codex re-review: else semi_implicit + time_integrator=ssp_rk54 would warn
+    # while actually running SSP-RK3).  Only the EXPLICIT path honours the field.
+    _integrator = str(config.time_integrator).strip().lower().replace("-", "_")
+    _is_rk3 = bool(config.semi_implicit) or _integrator == "ssp_rk3"
+    if u_crit < U_CRIT_HARD_FLOOR and _is_rk3:
+        raise ValueError(
+            f"unstable spectral configuration: {_detail} u_crit is below the "
+            f"{U_CRIT_HARD_FLOOR:.0f} m/s winter-jet floor on ssp_rk3 — the T63 "
+            "dt=1800 blowup class of 2026-08-23 that silently trained a whole "
+            "campaign mid-blowup. Raise si_substeps or lower dt.")
+    warnings.warn(
+        f"{_detail} u_crit is in the {U_CRIT_HARD_FLOOR:.0f}-"
+        f"{ADVECTIVE_CFL_U_REF:.0f} m/s design-margin band (or a "
+        "larger-stability integrator where the SSP-RK3 bound is conservative) "
+        "— likely a false alarm for a low-jet case such as Held-Suarez, but "
+        "verify the run's expected winds stay below u_crit.",
+        RuntimeWarning, stacklevel=2)
+
+
 def apply_spectral_filter_to_state(state, spectral_filter, *,
                                    filter_lnps: bool = False):
     """Apply exponential spectral filter to the prognostic fields.
