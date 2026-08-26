@@ -1,0 +1,17 @@
+# SCM-RCE tuned parameters for convection=zhang_mcfarlane
+# corrected nonrotating protocol (coriolis=0), median of 5 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.ZhangMcFarlaneConfig.M_b_max: 0.135919  # default 0.05, seed-spread 48% of range, kg/m^2/s
+atm.conv.ZhangMcFarlaneConfig.cape_threshold: 32.9546  # default 70, seed-spread 73% of range, J/kg
+atm.conv.ZhangMcFarlaneConfig.cmt_c_d: 1.17448  # default 0.55, seed-spread 51% of range
+atm.conv.ZhangMcFarlaneConfig.cmt_c_u: 0.266455  # default 0.55, seed-spread 53% of range
+atm.conv.ZhangMcFarlaneConfig.delta_0: 0.00124243  # default 0.001, seed-spread 12% of range, 1/m
+atm.conv.ZhangMcFarlaneConfig.dmpdz: -0.00204179  # default -0.001, seed-spread 82% of range, 1/m
+atm.conv.ZhangMcFarlaneConfig.parcel_dq: 0.000744724  # default 0.001, seed-spread 85% of range, kg/kg
+atm.conv.ZhangMcFarlaneConfig.pbl_top_pa: 75848.8  # default 70000, seed-spread 36% of range, Pa
+atm.conv.ZhangMcFarlaneConfig.tau_cape: 4135.76  # default 3600, seed-spread 57% of range, s
+atm.conv.ZhangMcFarlaneConfig.tiedke_add: 0.960851  # default 0.5, seed-spread 61% of range, K

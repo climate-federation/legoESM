@@ -28,6 +28,7 @@ dependencies = [
     "jaxlib>=0.4.35",
     "numpy>=1.26",
     "equinox>=0.11",
+    "pyyaml>=6.0",
 ]
 
 # Optional heavy feature reaching UP into the ML layer.  The BASE atmosphere

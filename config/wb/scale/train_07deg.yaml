@@ -12,7 +12,6 @@ n_lat: 256
 n_lon: 512
 nlev: 32
 dt: 300.0                 # CFL-conservative for 0.7 deg; smoke-tune before scale
-resolution_deg: 0.7
 
 # --- ERA5 ---
 era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
@@ -35,7 +34,6 @@ era5_cadence_hours: 6
 #   # ... (repeat per year)
 
 # --- training ---
-mode: "neural_gcm"        # physics | neural_gcm | sfno  (CLI --mode wins)
 n_epochs: 40
 optimizer: "adamw"
 lr: 3.0e-4

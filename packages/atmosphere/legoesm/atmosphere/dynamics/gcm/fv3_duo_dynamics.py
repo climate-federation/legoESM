@@ -1,10 +1,12 @@
 """FV3 six-face duo-cube dycore — ModelDriver wrapper over the certified lane.
 
-Slice 1 of wiring ``legoesm.core.fv3_dynamics`` (the JAX ``fv_dynamics``
-twin, module 6 of the duo port) into the model: DRY, physics-off, fp64,
-DCMIP16 baroclinic wave only.  Every restriction is the certified lane's
-own contract, enforced loudly here and at the component factory rather
-than assumed:
+Wires ``legoesm.core.fv3_dynamics`` (the JAX ``fv_dynamics`` twin,
+module 6 of the duo port) into the model: DRY dynamics, fp64, DCMIP16
+baroclinic wave IC.  The only physics is the certified Held-Suarez step,
+applied by the driver lane (``_run_fv3_duo``) when
+``held_suarez_forcing`` is set — this model class itself stays
+dynamics-only.  Every restriction is the certified lane's own contract,
+enforced loudly here and at the component factory rather than assumed:
 
 * moist coupling is not routed by THIS wrapper: it passes neither
   ``zvir`` nor a humidity index, so ``dp1`` is never formed.  The core
@@ -84,7 +86,18 @@ class FV3DuoDynamicsModel:
     ``dt`` does not recompile.
     """
 
-    def __init__(self, grid, config: FV3DuoConfig | None = None):
+    def __init__(self, grid, config: FV3DuoConfig | None = None, *,
+                 step_out_shardings=None):
+        # step_out_shardings: ENGINEERING knob -- ONE jax.sharding.Sharding
+        # applied to each face-stacked output leaf (state/press/q/omga/nh;
+        # NOT a jit out_shardings pytree prefix).  It selects no scientific
+        # configuration; sharding can move last-bit float results via
+        # reduction/fusion order (measured 4e-15 rel, inside the parity
+        # gate).  Default None = the unconstrained jit the certified lane
+        # always used. SPMD callers pin the face sharding here because an
+        # unconstrained jit resolves sharded-input outputs REPLICATED
+        # (measured, spmd_face_shard_parity 2026-08-24) and a stepping
+        # loop then decays after one step.
         if config is None:
             config = FV3DuoConfig()
         if not isinstance(config, FV3DuoConfig):
@@ -135,6 +148,7 @@ class FV3DuoDynamicsModel:
             kord_tr=config.kord_tr,
             hydrostatic=config.hydrostatic,
             w_limiter=(None if config.hydrostatic else True),
+            out_shardings=step_out_shardings,
         )
 
     # ------------------------------------------------------------------

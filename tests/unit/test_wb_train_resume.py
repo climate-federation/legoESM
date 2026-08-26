@@ -16,6 +16,7 @@ import pathlib
 
 import pytest
 
+import scripts.run.train_weatherbench_scale as mod
 from scripts.run.train_weatherbench_scale import _atomic_write, _checkpoint_paths
 
 
@@ -528,3 +529,39 @@ def test_the_optimizer_default_hash_ignores_unrelated_settings():
     for field in ("weight_decay", "muon_lr_scale", "adamw_weight_decay_scale"):
         assert hasattr(TrainingConfig(), field), field
     assert isinstance(base, str) and len(base) == 16
+
+
+def test_probe_freeze_restored_without_complete_epoch(tmp_path):
+    """A link killed between the reachability probe (~9 h at T63/sub3) and
+    the first epoch write must NOT re-measure on resume: the persisted probe
+    result is honoured iff its fingerprint matches the current run exactly."""
+    import json
+
+    fp = {"config_sha256": "abc", "lr": 1.5e-3}
+    (tmp_path / "probe_freeze.json").write_text(json.dumps(
+        {"schema": mod._MANIFEST_SCHEMA, "fingerprint": fp,
+         "frozen": ["a", "b"]}))
+    assert mod._read_probe_freeze(str(tmp_path), fp) == ["a", "b"]
+    # Any fingerprint drift invalidates it.
+    assert mod._read_probe_freeze(str(tmp_path), {**fp, "lr": 3e-4}) is None
+    # Absent / truncated files are None, not errors.
+    assert mod._read_probe_freeze(str(tmp_path / "nope"), fp) is None
+    (tmp_path / "probe_freeze.json").write_text("{trunc")
+    assert mod._read_probe_freeze(str(tmp_path), fp) is None
+    # Unknown schema fails toward re-probing.
+    (tmp_path / "probe_freeze.json").write_text(json.dumps(
+        {"schema": mod._MANIFEST_SCHEMA + 1, "fingerprint": fp,
+         "frozen": ["a"]}))
+    assert mod._read_probe_freeze(str(tmp_path), fp) is None
+
+
+def test_probe_freeze_counts_as_chain_progress(tmp_path, capsys):
+    """The chain wrapper asks the trainer for a progress signature; a
+    probe-only output dir must produce one, or the wrapper's epoch-0
+    restart-loop guard stops the chain exactly where resume saves ~9 h."""
+    sub = tmp_path / "physics"
+    sub.mkdir()
+    (sub / "probe_freeze.json").write_text("{}")
+    mod.print_latest_complete_signature(str(tmp_path))
+    out = capsys.readouterr().out
+    assert "probe_freeze.json" in out

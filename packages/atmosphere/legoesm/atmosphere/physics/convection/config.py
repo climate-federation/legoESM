@@ -1681,6 +1681,10 @@ class BechtoldConfig(NamedTuple):
     # and therefore also delivers more rain to the surface.  Defaults are the
     # IFS values, whose setting assumes a far finer mesh than we run.
     subcloud_evap_scale: float = 1.0
+    # Defaults are the IFS reference values; the AMIP production deck
+    # (config/amip/params/w7_eps_hi_tuning.yaml) overrides to 0.65/0.60
+    # (pr30 screen 2026-08-24: less land sub-cloud re-evaporation closed a
+    # third of the tropical humid-land rain deficit; ocean untouched).
     rhebc_land: float = 0.75
     rhebc_land_deep: float = 0.70
     # IFS land RH break for the sub-cloud rain evaporation (cuflxn.F90:

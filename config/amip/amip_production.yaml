@@ -43,14 +43,22 @@
 # History: the cube C48/L40 cd-grid dt150 lane (with its fp64-barotropic
 # requirement) lives on only in git history and issues #1294-#1296.
 grid_type: voronoi
-resolution: 5               # icosahedral SCVT level 5 = 10242 cells (~2.2°)
+resolution: 6               # icosahedral SCVT level 6 = 40962 cells (~1.1°).
+                            # DEFAULT per user directive 2026-08-25: res6 is
+                            # the production AMIP configuration; res5 is for
+                            # fast iteration only (override via --resolution 5).
 nlev: 30
 discretization: mpas
-dt: 75.0
+dt: 112.5               # dt ladder 2026-08-25 (5-day res6 arms at 90/112.5/150,
+                            # all stable): 112.5 captures the full ~1.38x speedup
+                            # (150 ties it and exceeds the 138 s advective limit).
+                            # a_h_scale is raised 0.25->0.375 in step so the
+                            # PHYSICAL viscosity A_h = a_h_scale*3e-3*dx_min^2/dt
+                            # is unchanged from the storm-track-validated value.
 vertical_coord: sigma
 precision: fp64             # dycore fp64; rrtmgp runs fp32 on the MPAS path
                             # (mpas_rrtmgp_fp32 default, perf — validated)
-a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
+a_h_scale: 0.375            # Laplacian viscosity multiplier (A_h = a_h_scale
                             # * 3e-3 * dx_min^2/dt).  The default 1.0 gives
                             # A_h ~ 1.4e6 m2/s on this mesh — tau ~ 0.8 d for
                             # a 2000 km eddy, at baroclinic growth rate — and
@@ -72,7 +80,7 @@ a_h_scale: 0.25             # Laplacian viscosity multiplier (A_h = a_h_scale
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
-rad_update_steps: 48
+rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
 clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
@@ -203,6 +211,11 @@ convective_cloud: false
 # internet).  Deep 3 m / 10-layer soil needs a multi-year cold spin-up before its
 # T/moisture fields are trustworthy.
 use_multilayer_land: true
+land_update_seconds: 300.0  # land tile every ~300 s on interval-mean forcing
+                            # (2026-08-25 step profile: the tile was 58% of
+                            # wall time called every 75 s; 300 s is the canopy
+                            # design substep ceiling. Fluxes held in between,
+                            # same shape as the hourly radiation cadence.)
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 # Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep

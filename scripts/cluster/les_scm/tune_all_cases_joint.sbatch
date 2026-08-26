@@ -126,9 +126,18 @@ CASE_LIST="ekman gabls1 cbl wangara bomex rico astex dycoms"
 # the run would then fit ONE scheme and report it as the whole job.
 SCHEMES=${SCHEMES:-all}
 SCHEMES=${SCHEMES//+/,}
+# SEED: when set, the driver jitters the INITIAL params with this seed so
+# distinct seeds explore distinct optima (uncertainty sweep). Unset =
+# deterministic prior, unchanged. Submit as a SLURM array (--array=0-9)
+# and pass SEED=$SLURM_ARRAY_TASK_ID; each seed writes $OUT/seedNN.
+SEED=${SEED:-${SLURM_ARRAY_TASK_ID:-}}
+SMAG_FORM=${SMAG_FORM:-lilly}
 STEPS=${STEPS:-40}
 AGG=${AGG:-default_relative}
 OUT=${OUT:-$R/scm_les_turbulence/all_eight_sfcv}
+# Each seed gets its own directory so the aggregator can read them side by
+# side; a bare (unseeded) run keeps the plain OUT.
+if [ -n "$SEED" ]; then OUT="$OUT/seed$(printf %02d "$SEED")"; fi
 
 # PREFLIGHT: refuse to start if any reference is missing. This is a long job
 # and discovering a missing deck after the queue wait wastes the slot.
@@ -163,7 +172,7 @@ sys.exit(0 if ok else 1)
 PYEOF
 done
 echo "all stamps accepted"
-echo "cases: $CASES"
+echo "cases: $CASES"; echo "SEED=${SEED:-<none>}  SMAG_FORM=$SMAG_FORM  SCHEMES=$SCHEMES"
 
 rm -rf "$OUT"
 t0=$SECONDS
@@ -172,7 +181,9 @@ t0=$SECONDS
 # $? is the driver's own status.
 $PY scripts/run/run_scm_les_turbulence_tuning.py \
     --cases "$CASES" --outdir "$OUT" --nlev 48 --steps "$STEPS" \
-    --joint-aggregation "$AGG" --schemes "$SCHEMES" --surface-flux-to-closure
+    --joint-aggregation "$AGG" --schemes "$SCHEMES" --surface-flux-to-closure \
+    --smag-stability-form "$SMAG_FORM" \
+    ${SEED:+--seed "$SEED"}
 rc=$?
 echo "driver rc=$rc wall=$((SECONDS - t0))s"
 

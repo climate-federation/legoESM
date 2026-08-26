@@ -23,6 +23,11 @@ OUT=${OUT:-$REPO/results/scm_rce_tqtune/_dryrun}
 cd $WT || exit 90
 HEAD_SHA=$(git rev-parse HEAD); echo "PINNED sha: $HEAD_SHA"
 [ "$HEAD_SHA" = "$PIN" ] || { echo "PREFLIGHT FAIL: $HEAD_SHA != $PIN"; exit 91; }
+git diff --quiet && git diff --cached --quiet || {
+  echo "PREFLIGHT FAIL: DIRTY TREE at $HEAD_SHA — uncommitted edits would run"
+  git status --porcelain | head -20
+  exit 94
+}
 export TMPDIR=${SLURM_TMPDIR:-/burg-archive/glab/users/pg2328/_jobtmp/${SLURM_JOB_ID:-$$}}
 mkdir -p "$TMPDIR"
 export JAX_PLATFORMS=cpu

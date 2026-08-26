@@ -324,7 +324,8 @@ def _nml_real(text: str, key: str):
 
 
 def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
-                               moist: bool, consv: float = 0.0) -> None:
+                               moist: bool, consv: float = 0.0,
+                               physics: str = "none") -> None:
     """The deck must BE the arm the flags say it is.
 
     The redirects fire only on exact default-path equality, so explicit
@@ -341,6 +342,57 @@ def check_deck_matches_the_arm(run_dir: str, *, nh: bool,
     ``hydrostatic``/``phys_hydrostatic`` track ``nh``, ``consv_te`` is
     0, and the physics cannot have touched the state.
     """
+    # Remap-time microphysics (do_sat_adj / do_inline_mp) is passed into
+    # Lagrangian_to_Eulerian (fv_dynamics.F90:625) and is live when on
+    # (fv_mapz.F90:749); the port hard-codes both off (fv3_native_dynamics.py:
+    # 901), so a deck with either ON would score against unported physics.
+    _t0 = _nml_text(run_dir)
+    for _k in ("do_sat_adj", "do_inline_mp"):
+        if _nml_logical(_t0, _k) is True:
+            raise SystemExit(
+                f"{run_dir}: {_k}=.true. runs remap-time microphysics the port "
+                f"does not implement (it hard-codes {_k}=False).")
+    if physics == "held_suarez":
+        # The physics arm is the mirror of the inert check: the deck MUST run
+        # exactly one physics path (Held-Suarez), dry (nwat=0, the cp-factor=1
+        # premise), hydrostatic, no energy fixer, nothing else on.
+        text = _nml_text(run_dir)
+        if _nml_logical(text, "do_held_suarez") is not True:
+            raise SystemExit(
+                f"{run_dir}: --physics held_suarez needs do_held_suarez=.true.")
+        if _nml_logical(text, "adiabatic") is not False:
+            raise SystemExit(
+                f"{run_dir}: the HS arm needs adiabatic=.false. so fv_phys runs "
+                f"(atmosphere.F90:474).")
+        if _nml_int(text, "nwat") != 0:
+            raise SystemExit(
+                f"{run_dir}: the HS apply port assumes nwat=0 (moist_cp default "
+                f"-> cp_air, factor 1.0); deck has nwat={_nml_int(text,'nwat')}.")
+        others = [k for k in _PHYSICS_SWITCHES
+                  if k != "do_held_suarez" and _nml_logical(text, k) is True]
+        if others:
+            raise SystemExit(
+                f"{run_dir}: physics switches {others} beyond do_held_suarez "
+                f"are ON; not ported.")
+        sg = _nml_int(text, "fv_sg_adj")
+        if sg is None or sg > 0:
+            raise SystemExit(
+                f"{run_dir}: fv_sg_adj must be pinned <= 0 (got {sg}); > 0 runs "
+                f"fv_subgrid_z (fv_phys.F90:305).")
+        if _nml_logical(text, "dwind_2d") is True:
+            raise SystemExit(
+                f"{run_dir}: dwind_2d=.true. switches update_dwinds to the 2-D "
+                f"path (fv_update_phys.F90:688); the port implements only the "
+                f"3-D (dwind_2d=.false.) path.")
+        for key in ("hydrostatic", "phys_hydrostatic"):
+            if _nml_logical(text, key) is not True:
+                raise SystemExit(
+                    f"{run_dir}: the HS arm is hydrostatic; {key} must be .true.")
+        got = _nml_real(text, "consv_te")
+        if got not in (None, 0.0):
+            raise SystemExit(
+                f"{run_dir}: the HS arm expects consv_te 0, got {got}.")
+        return
     check_physics_is_inert(run_dir)
     text = _nml_text(run_dir)
     want_adiab = not moist
@@ -1017,6 +1069,23 @@ def _make_jax_step(ctx, jit=False):
     return _step
 
 
+# apply_held_suarez_step was PROMOTED VERBATIM to
+# legoesm.core.fv3_native_physics_coupling (its three per-face kernels
+# already live there; the ModelDriver duo lane cannot import from
+# scripts/).  The call site in main() imports it function-scope, keeping
+# this module's import-time footprint jax-free (--help stays light).  The
+# PEP 562 re-export below keeps `full_step_oracle_parity.
+# apply_held_suarez_step` resolvable so the no-second-implementation
+# identity test (tests/grids/test_fv3_physics_coupling.py) can pin that
+# both names are the SAME function object.
+def __getattr__(name):
+    if name == "apply_held_suarez_step":
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step)
+        return apply_held_suarez_step
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--ic-run", default=f"{ORACLE_ROOT}/run_hydro_zerostep")
@@ -1132,11 +1201,25 @@ def main(argv=None):
                          "runs the ported lane through the SAME scoring "
                          "code, IC, oracle files, face map and tolerances, "
                          "so the two numbers are comparable by "
-                         "construction. Only the stepping call differs -- "
-                         "everything upstream and downstream of it is "
-                         "byte-identical between the two backends, which "
-                         "is the whole point (a JAX-specific harness would "
-                         "make any difference unattributable).")
+                         "construction. Only the stepping call (and, with "
+                         "--physics, the physics step's three per-face "
+                         "kernels) differs -- everything upstream and "
+                         "downstream is byte-identical between the two "
+                         "backends, which is the whole point (a JAX-specific "
+                         "harness would make any difference "
+                         "unattributable).")
+    ap.add_argument("--physics", choices=("none", "held_suarez"),
+                    default="none",
+                    help="run a physics-coupled step after dynamics and score "
+                         "against a deck that ran it. 'held_suarez' targets "
+                         "run_hs_1step_gfs (do_Held_Suarez=.true., dry, "
+                         "hydrostatic, nwat=0) and applies "
+                         "apply_held_suarez_step and honors --backend ('jax' "
+                         "routes its three per-face kernels -- c2l_ord4, the "
+                         "HS tendencies, fv_update_phys -- through their JAX "
+                         "twins; the strip-copy halo exchanges stay NumPy in "
+                         "both backends as assembly glue); the dynamics-only "
+                         "arms keep refusing any deck whose physics is ON.")
     ap.add_argument("--jit", action="store_true",
                     help="run the COMPILED step, which is the one the model "
                          "deploys. Off by default so the established score "
@@ -1144,10 +1227,27 @@ def main(argv=None):
                          "shipped solver has to be measured with this ON, "
                          "because compilation can reassociate arithmetic and "
                          "flip a limiter branch. Ignored unless "
-                         "--backend jax.")
+                         "--backend jax. Compiles the DYNAMICS step only; "
+                         "the physics step has no jit path (refused with "
+                         "--physics).")
     args = ap.parse_args(argv)
     if args.jit and args.backend != "jax":
         raise SystemExit("--jit applies to --backend jax only")
+    if args.jit and args.physics != "none":
+        # The two flags predate each other (--jit from #1630, --physics from
+        # #1653; the guard above encoded a world without --physics).  With
+        # both on, the residual mixes physics-port error + dynamics-port
+        # error + jit-vs-eager drift -- three contributors, one number, so
+        # nothing is attributable to one lane, which is this runner's whole
+        # contract.  The physics step has no jit path; refuse rather than
+        # score a confound (GLM merge review 2026-08-24).
+        raise SystemExit("--jit cannot be combined with --physics: the "
+                         "physics step has no jit path, so the residual "
+                         "would mix jit-vs-eager dynamics drift with the "
+                         "physics-port error and attribute to neither.")
+    if args.max_rel is None:
+        print("=== REPORT ONLY -- no --max-rel given; exit status 0 does NOT "
+              "certify the residual. Pass --max-rel to gate. ===")
     if args.n_steps < 1:
         raise SystemExit(f"--n-steps must be >= 1, got {args.n_steps}")
     if args.n_steps != 1 and args.step_run in (
@@ -1168,6 +1268,34 @@ def main(argv=None):
         if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
             args.step_run = f"{ORACLE_ROOT}/run_nh_1step_gfs"
     args.dry_twin_run = None
+    if args.physics == "held_suarez":
+        if args.nh or args.moist or args.consv:
+            raise SystemExit(
+                "--physics held_suarez is hydrostatic; not with "
+                "--nh/--moist/--consv.")
+        # HS runs adiabatic=.false., so atmosphere.F90 sets zvir=rvgas/rdgas-1
+        # (moist_phys=.true. for the DYNAMICS), the cold-start IC is the MOIST
+        # one (test_cases.F90:6760 divides pt by 1+zvir*q), and sphum is
+        # advected with virtual temperature. So the arm uses the moist zerostep
+        # IC + tracers -- the same dynamics setup as --moist -- and adds the HS
+        # forcing on top. (Verified: run_hs INPUT has no restart -> it
+        # cold-starts; the moist zerostep pt is 3.25 K off the dry one.)
+        args.tracers = True
+        if args.ic_run == f"{ORACLE_ROOT}/run_hydro_zerostep":
+            args.ic_run = f"{ORACLE_ROOT}/run_hydro_zerostep_moist_gfs"
+        if args.step_run == f"{ORACLE_ROOT}/run_hydro_1step_gfs":
+            args.step_run = f"{ORACLE_ROOT}/run_hs_1step_gfs"
+        for _r in (args.ic_run, args.step_run):
+            if not os.path.isdir(_r):
+                raise SystemExit(
+                    f"missing HS oracle run {_r}; the moist IC pair is the "
+                    f"shipped hydrostatic moist zerostep, the step deck comes "
+                    f"from scripts/cluster/fv3_native/build_hs_oracle.sbatch")
+        if args.n_steps != 1:
+            raise SystemExit(
+                "--physics held_suarez applies ONE forcing after ONE dynamics "
+                "step (the oracle run_hs_1step_gfs is 1-step); --n-steps must "
+                "be 1.")
     if args.consv:
         if args.moist or args.nh:
             raise SystemExit(
@@ -1219,9 +1347,21 @@ def main(argv=None):
     # check_deck_matches_the_arm subsumes check_physics_is_inert and the
     # direction-blind check_moist_deck, and load_oracle already asserts
     # FMSConstants: GFS per deck via require_gfs_constants.
-    for _r in (args.ic_run, args.step_run):
-        check_deck_matches_the_arm(_r, nh=args.nh, moist=args.moist,
-                                   consv=args.consv)
+    if args.ic_run == args.step_run:
+        raise SystemExit(
+            "--ic-run and --step-run must be different runs (the IC and the "
+            "one-step reference); the same directory for both would give the "
+            "IC deck the step gate.")
+    # split by ROLE, not by pathname equality (codex): the physics gate applies
+    # ONLY to the step deck; the IC is checked inert, and for the HS arm the IC
+    # is the MOIST cold-start (adiabatic=.false.), so it is checked moist=True.
+    for _r, _is_step in ((args.ic_run, False), (args.step_run, True)):
+        check_deck_matches_the_arm(
+            _r, nh=args.nh,
+            moist=(args.moist or
+                   (args.physics == "held_suarez" and not _is_step)),
+            physics=(args.physics if _is_step else "none"),
+            consv=args.consv)
 
     from legoesm.core.fv3_native_duo_stepper import build_six_face_duo_context
     from legoesm.core.fv3_native_dynamics import (
@@ -1315,7 +1455,8 @@ def main(argv=None):
     # ---------------- instrument control: the IC ----------------
     state, sphum6 = build_port_ic(
         ctx, ak, bk, nh=args.nh,
-        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0) if args.moist else 0.0)
+        zvir=(FV3_RVGAS / FV3_RDGAS - 1.0)
+        if (args.moist or args.physics == "held_suarez") else 0.0)
     p_ic = port_window(state, ctx)
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
@@ -1614,10 +1755,22 @@ def main(argv=None):
                       # ADVECTED_TRACERS, matching build_port_tracer_ic.
                       **({"zvir": FV3_RVGAS / FV3_RDGAS - 1.0,
                           "sphum_index": ADVECTED_TRACERS.index("sphum")}
-                         if args.moist else {}),
+                         if (args.moist or args.physics == "held_suarez")
+                         else {}),
                       **({"consv_te": args.consv} if args.consv else {}))
         if out["pt_units"] != "K":
             raise SystemExit(f"driver left pt in {out['pt_units']}, not K")
+    if args.physics == "held_suarez":
+        from legoesm.core.fv3_native_physics_coupling import (
+            apply_held_suarez_step)
+
+        # do_strat_HS_forcing (fv_arrays default .true.) selects the strat/meso
+        # regimes inside Held_Suarez_Tend; read it from the deck, do not assume.
+        _hs_strat = _nml_logical(_nml_text(args.step_run), "do_strat_HS_forcing")
+        _hs_strat = True if _hs_strat is None else _hs_strat
+        # fv_phys + fv_update_phys, in place on the post-dynamics state
+        apply_held_suarez_step(ctx, state, press, dt=args.dt, n=n, ng=ng, km=KM,
+                               strat=_hs_strat, backend=args.backend)
     p_1 = port_window(state, ctx)
 
     if args.moist or args.consv:

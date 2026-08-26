@@ -1635,6 +1635,14 @@ class LateralViscosityConfig(NamedTuple):
     # Built by the driver from the file's zonal median (see run_omip_core2
     # --A-h-profile-file); v-face values are midpoint-averaged from these.
     A_h_lat_profile: tuple | None = None
+    # v-face (n_lat+1) profile OVERRIDE, set ONLY by the SPMD wrapper (#1666):
+    # a band derives its v-faces from its LOCAL cell profile, which wall-copies
+    # the band edges and so gets the interior band SEAMS wrong (first-order,
+    # material for a sharp profile -- codex+GLM).  The wrapper computes the
+    # exact global v-face profile once and band-slices it here so each band's
+    # seam faces match serial.  ``None`` (serial / non-profile) = derive from
+    # ``A_h_lat_profile``, bit-identical to before.  Hashable tuple (static).
+    A_h_lat_profile_v: tuple | None = None
 
 class PolarFilterConfig(NamedTuple):
     """Fourier polar-filter parameters (#501 config grouping).
