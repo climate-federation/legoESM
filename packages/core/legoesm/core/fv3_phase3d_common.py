@@ -55,6 +55,7 @@ __all__ = [
     "require_nord",
     "validate_stacked",
     "stack_levels",
+    "stack_levels_batched",
     "stack_faces",
 ]
 
@@ -339,6 +340,36 @@ def stack_levels(fname: str, name: str, per_level: list, want2d=None):
                 f"{arr.shape}, {ref} {want}. A stagger or window "
                 f"mismatch here would broadcast, not raise.")
     return jnp.stack(per_level, axis=2)
+
+
+def stack_levels_batched(fname: str, name: str, per_level: list):
+    """``km`` FACE-BATCHED per-level stacks -> one array with ``km`` at
+    AXIS 3.
+
+    The vmapped arms' twin of :func:`stack_levels`: each element is a
+    ``(6, i, j[, slot])`` face-batched plane, so the level axis is
+    inserted at position 3 -- the loop path's per-face axis 2 with the
+    face axis prepended -- and both arms return the same
+    ``(6, i, j, km[, slot])`` layout (the convention the first batched
+    arm, ``_csw_phase_3d_batched``, states inline).  Level 0's shape is
+    the reference, exactly :func:`stack_levels`'s ``want2d=None`` arm
+    and for the same reason: the d_sw kernels publish no shape table,
+    and re-deriving their Fortran bound expressions here would be the
+    restatement that drifts.
+    """
+    if not per_level:
+        raise ValueError(
+            f"{fname}: {name!r} got an empty per-level list; km >= 1 is "
+            f"enforced by require_km, so an empty list here means the "
+            f"level loop never ran")
+    want = tuple(per_level[0].shape)
+    for k, arr in enumerate(per_level[1:], start=1):
+        if tuple(arr.shape) != want:
+            raise ValueError(
+                f"{fname}: level {k} output {name!r} has shape "
+                f"{arr.shape}, level 0 has {want}. A stagger or window "
+                f"mismatch here would broadcast, not raise.")
+    return jnp.stack(per_level, axis=3)
 
 
 def stack_faces(fname: str, per_face: list) -> dict:
