@@ -1097,13 +1097,15 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat * _dealias_3d
         dlnps_hat = dlnps_hat * _dealias
 
-    # Dry-mass theorem: the (0,0) global-mean lnps tendency is analytically zero
-    # (Gauss — integral of the surface-pressure flux divergence over the sphere
-    # vanishes), but in fp32 it is a cancellation residual ~1e-8 that random-
-    # walks total mass. Zero it explicitly (same mechanism as the SW h00 fix).
-    # Gated to the fp32 runtime so the fp64 path stays byte-identical.
-    if grid.Pnm.dtype == jnp.float32:
-        dlnps_hat = jnp.where(grid.ls == 0, jnp.zeros_like(dlnps_hat), dlnps_hat)
+    # NOTE (#1667 review): the (0,0) mode of the lnps tendency is NOT
+    # analytically zero for the PE.  Gauss makes ∫(∂p_s/∂t) dA = 0 — the mean of
+    # ∂p_s/∂t — but the prognostic is ln p_s, whose tendency mean is
+    # ∫ (1/p_s)(∂p_s/∂t) dA / ∫dA, a p_s-weighted integral that vanishes only for
+    # uniform p_s.  (The SW h00 fix is valid because SW's h is LINEAR; ln p_s is
+    # not.)  Zeroing the l=0 mode therefore suppressed a real tendency and broke
+    # AD there.  Removed: the ~1e-8 fp32 residual it targeted is negligible, and
+    # real total-mass drift is handled by the anchored-mass fixer
+    # (global_dry_mass / anchor_lnps_to_mass), which conserves ∫p_s directly.
 
     # --- 18. Tracer tendencies ---
     # When the input state carries a ``tracers`` dict the tendency
