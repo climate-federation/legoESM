@@ -1190,12 +1190,24 @@ def step_carbon(
     if config.scheme == "differland":
         if carbon_state is None:
             raise ValueError("differland scheme requires a CarbonState")
-        return step_carbon_differland(
+        _out = step_carbon_differland(
             carbon_state, sw_down, T, co2_ppmv, beta, lat, doy,
             precip, config, dt, gpp_override=gpp_override,
             return_diagnostics=return_diagnostics,
             soil_frozen_fraction=soil_frozen_fraction,
         )
+        # #1675 site 2: preserve the pool STORAGE dtype across the step.  The
+        # f64 forcing/lat/doy and the traced f64 carbon_phi promote the fp32
+        # pools to f64 in mixed-storage mode, so a one-time init cast does not
+        # hold — the carry re-promotes every step.  Cast the returned pools back
+        # to the input dtype here (the single chokepoint every caller routes
+        # through).  No-op for strict-fp32 (x64 off, no promotion) and fp64
+        # (input already f64) -> those paths stay byte-identical.
+        _new = _out[0]
+        if _new is not None:
+            _new = jax.tree.map(
+                lambda o, i: o.astype(i.dtype), _new, carbon_state)
+        return (_new, *_out[1:])
     if return_diagnostics:
         raise ValueError(
             f"return_diagnostics is only supported for the 'differland' "
