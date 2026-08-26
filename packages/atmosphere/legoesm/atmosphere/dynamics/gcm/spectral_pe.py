@@ -1281,8 +1281,13 @@ def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None
     # (GLM): a per-integrator advective bound would let the hard gate cover
     # them precisely, and the 100 m/s floor could rise toward ~120 for NN
     # training wind transients; both are threshold choices left to the owner.
+    # The SI path ALWAYS executes ssp_rk3 (ssp_rk3_step_si) regardless of the
+    # time_integrator field, so semi_implicit=True is ssp_rk3 for CFL purposes
+    # (codex re-review: else semi_implicit + time_integrator=ssp_rk54 would warn
+    # while actually running SSP-RK3).  Only the EXPLICIT path honours the field.
     _integrator = str(config.time_integrator).strip().lower().replace("-", "_")
-    if u_crit < U_CRIT_HARD_FLOOR and _integrator == "ssp_rk3":
+    _is_rk3 = bool(config.semi_implicit) or _integrator == "ssp_rk3"
+    if u_crit < U_CRIT_HARD_FLOOR and _is_rk3:
         raise ValueError(
             f"unstable spectral configuration: {_detail} u_crit is below the "
             f"{U_CRIT_HARD_FLOOR:.0f} m/s winter-jet floor on ssp_rk3 — the T63 "

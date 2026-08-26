@@ -261,6 +261,7 @@ _WB_CLASSICAL_KEYS = frozenset({
 _WB_NEURAL_KEYS = frozenset({
     "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
     "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
+    "sfno_mlp_expansion",
 })
 
 

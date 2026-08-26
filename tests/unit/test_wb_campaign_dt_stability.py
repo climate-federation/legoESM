@@ -112,7 +112,14 @@ def test_runtime_guard_check_advective_cfl():
     # #1663 fix: T42 dt=1800 (u_crit~146, design-margin band) WARNS, not raises.
     with pytest.warns(RuntimeWarning, match="design-margin"):
         check_advective_cfl(42, 1800.0, bad)
-    # #1663 fix: a larger-stability integrator at the same u_crit~97 WARNS
-    # (the sqrt(3) bound is conservative for it) rather than hard-blocking.
+    # #1663 fix: an EXPLICIT larger-stability integrator at the same u_crit~97
+    # WARNS (sqrt(3) is conservative for it) rather than hard-blocking. Must be
+    # semi_implicit=False -- the SI path always runs ssp_rk3, so a semi-implicit
+    # ssp_rk54 config still hard-errors (codex re-review).
     with pytest.warns(RuntimeWarning, match="advective Courant"):
-        check_advective_cfl(63, 1800.0, bad._replace(time_integrator="ssp_rk54"))
+        check_advective_cfl(63, 1800.0, bad._replace(
+            semi_implicit=False, time_integrator="ssp_rk54"))
+    # ...and the SI path with a mislabeled integrator STILL hard-errors.
+    with pytest.raises(ValueError, match="advective Courant"):
+        check_advective_cfl(63, 1800.0, bad._replace(
+            semi_implicit=True, time_integrator="ssp_rk54"))
