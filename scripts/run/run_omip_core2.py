@@ -7547,7 +7547,7 @@ def main() -> int:
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
-        f_stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
+        f_stack, nn_i, nn_j, nn_w, gshape = build_core2_forcing_device_stack(
             forcing, grid, "tripole")
         # Scan blocks trace _step_impl directly — prime build-once
         # caches from the concrete state first (vertex-mask constant).
@@ -7578,7 +7578,7 @@ def main() -> int:
             idx_block = jnp.asarray(
                 [_idx_t(step + 1 + k, dt, n_rec) for k in range(nb)],
                 dtype=jnp.int32)
-            state = block_fn(state, f_stack, nn_i, nn_j, idx_block,
+            state = block_fn(state, f_stack, nn_i, nn_j, nn_w, idx_block,
                              jnp.int32(step + 1))
             step += nb
             day = step * dt / _SEC_PER_DAY

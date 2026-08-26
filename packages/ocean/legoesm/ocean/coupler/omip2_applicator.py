@@ -131,6 +131,95 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
     return np.asarray(field)[i, j]
 
 
+# Cache of precomputed 4-point bilinear (i4, j4, w4) maps, same keying scheme
+# as _NN_INDEX_CACHE.
+_BILIN_MAP_CACHE: dict = {}
+
+
+def _bilinear_point_maps(src_lat_deg, src_lon_deg,
+                         dst_lat_deg_pts, dst_lon_deg_pts):
+    """4-point bilinear interpolation maps from a regular 1-D
+    ``(src_lat, src_lon)`` grid to target points: ``(i4, j4, w4)``, each
+    ``(4, n_pts)``, with ``sum_k w4[k] == 1``.
+
+    Nearest-neighbour sampling of the ~1.9-degree CORE-II grid onto the
+    1-degree tripole copies each coarse source ROW onto 1-2 adjacent target
+    rows, printing zonally aligned bands into every forcing channel (wind,
+    shortwave, precip) that surface mixing then inherits — the unphysical
+    zonal MLD banding reported 2026-08-26.  NEMO interpolates CORE-II
+    bilinearly (its weights files), so bilinear is also the faithful choice.
+
+    Latitude: linear between the two bracketing source rows, clamped to the
+    edge row beyond the source's outermost latitudes (CORE-II stops ~89.5
+    deg short of the pole).  Handles ascending or descending source lat.
+    Longitude: periodic bracketing on the circle (the seam target between
+    the last and first source column interpolates across the wrap).
+    """
+    src_lat = np.asarray(src_lat_deg, dtype=np.float64)
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64) % 360.0
+    dst_lat = np.asarray(dst_lat_deg_pts, dtype=np.float64)
+    dst_lon = np.asarray(dst_lon_deg_pts, dtype=np.float64) % 360.0
+    key = (
+        "bilin", src_lat.size, src_lon.size, dst_lat.size,
+        float(src_lat[0]), float(src_lat[-1]), float(src_lat.sum()),
+        float(src_lon[0]), float(src_lon[-1]), float(src_lon.sum()),
+        float(dst_lat[0]), float(dst_lat[-1]), float(dst_lat.sum()),
+        float(dst_lon[0]), float(dst_lon[-1]), float(dst_lon.sum()),
+    )
+    maps = _BILIN_MAP_CACHE.get(key)
+    if maps is not None:
+        return maps
+
+    # --- latitude bracket (sorted ascending view; indices mapped back) ---
+    order = np.argsort(src_lat)
+    lat_sorted = src_lat[order]
+    hi = np.searchsorted(lat_sorted, dst_lat)            # first >= target
+    hi = np.clip(hi, 1, lat_sorted.size - 1)
+    lo = hi - 1
+    span = lat_sorted[hi] - lat_sorted[lo]
+    wlat = np.where(span > 0.0,
+                    (dst_lat - lat_sorted[lo]) / np.where(span > 0.0, span, 1.0),
+                    0.0)
+    wlat = np.clip(wlat, 0.0, 1.0)      # clamp: beyond edges -> edge row
+    i_lo = order[lo].astype(np.int32)
+    i_hi = order[hi].astype(np.int32)
+
+    # --- longitude bracket, periodic ---
+    lorder = np.argsort(src_lon)
+    lon_sorted = src_lon[lorder]
+    jhi = np.searchsorted(lon_sorted, dst_lon)
+    at_wrap = (jhi == 0) | (jhi == lon_sorted.size)
+    jhi_in = np.clip(jhi, 1, lon_sorted.size - 1)
+    jlo_in = jhi_in - 1
+    # wrap bracket: last column .. first column across the seam
+    j_lo = np.where(at_wrap, lorder[-1], lorder[jlo_in]).astype(np.int32)
+    j_hi = np.where(at_wrap, lorder[0], lorder[jhi_in]).astype(np.int32)
+    lon_lo = np.where(at_wrap, lon_sorted[-1], lon_sorted[jlo_in])
+    lon_hi = np.where(at_wrap, lon_sorted[0], lon_sorted[jhi_in])
+    dspan = (lon_hi - lon_lo) % 360.0
+    dpos = (dst_lon - lon_lo) % 360.0
+    wlon = np.where(dspan > 0.0, dpos / np.where(dspan > 0.0, dspan, 1.0), 0.0)
+    wlon = np.clip(wlon, 0.0, 1.0)
+
+    i4 = np.stack([i_lo, i_lo, i_hi, i_hi])              # (4, n)
+    j4 = np.stack([j_lo, j_hi, j_lo, j_hi])
+    w4 = np.stack([(1 - wlat) * (1 - wlon), (1 - wlat) * wlon,
+                   wlat * (1 - wlon), wlat * wlon])
+    maps = (i4, j4, w4)
+    _BILIN_MAP_CACHE[key] = maps
+    return maps
+
+
+def _bilinear_interp_to_points(field, src_lat_deg, src_lon_deg,
+                               dst_lat_deg_pts, dst_lon_deg_pts):
+    """Bilinear sample of one 2-D field at target points (see
+    :func:`_bilinear_point_maps`)."""
+    i4, j4, w4 = _bilinear_point_maps(src_lat_deg, src_lon_deg,
+                                      dst_lat_deg_pts, dst_lon_deg_pts)
+    f = np.asarray(field, dtype=np.float64)
+    return (f[i4, j4] * w4).sum(axis=0)
+
+
 # Cache of pre-computed conservative-regrid weights, keyed by
 # (src_lat_shape, src_lon_shape, src_lat_first, src_lon_first,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
@@ -288,12 +377,19 @@ def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
     return out
 
 
-def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg):
-    """Nearest-neighbour sample the forcing channels at a set of points
-    (cube / MPAS cell centres)."""
+def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg,
+                           method: str = "nearest"):
+    """Sample the forcing channels at a set of points (cube / MPAS / tripole
+    cell centres).  ``method``: "nearest" (legacy) or "bilinear" (the tripole
+    default — see :func:`_bilinear_point_maps` for why nearest-neighbour onto
+    a finer structured grid prints zonal forcing bands)."""
+    if method not in ("nearest", "bilinear"):
+        raise ValueError(f"_sample_forcing_points: unknown method {method!r}")
+    interp = (_bilinear_interp_to_points if method == "bilinear"
+              else _nn_interp_to_points)
     out = {}
     for name in _forcing_channels(forcing):
-        out[name] = _nn_interp_to_points(
+        out[name] = interp(
             getattr(forcing, name)[idx_t],
             forcing.lat, forcing.lon,
             lat_pts_deg, lon_pts_deg,
@@ -451,8 +547,9 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         # Curvilinear tripolar grid: same C-grid state layout as latlon
         # (T cell-centred; u/v on EW/NS faces) but the T-point coordinates are
         # 2-D (lat_T, lon_T). Conservative regrid needs a regular destination
-        # grid, so sample CORE-II at each T cell by nearest-neighbour (as the
-        # cube / MPAS paths do). NOTE: tau_x/tau_y are geographic (eastward /
+        # grid, so sample CORE-II at each T cell BILINEARLY (nearest-neighbour
+        # copied ~1.9-deg source rows onto the 1-deg grid and printed zonal
+        # forcing bands -- see _bilinear_point_maps; cube/MPAS stay nearest). NOTE: tau_x/tau_y are geographic (eastward /
         # northward); south of the ~50 deg N tripole join the grid is regular
         # lat-lon (grid-i == east exactly), so only in the largely ice-masked
         # Arctic fold is the unrotated stress application an approximation
@@ -461,7 +558,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         lon_pts = np.degrees(np.asarray(grid.lon_T))
         shp = lat_pts.shape
         forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
         )
         for _k, _v in forc.items():
             forc[_k] = _v.reshape(shp)
@@ -601,7 +698,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
         lon_pts = np.degrees(np.asarray(grid.lon_T))
         shp = lat_pts.shape
         forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type == "cubed_sphere":
@@ -1085,7 +1182,11 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
         )
     lat_pts = np.degrees(np.asarray(grid.lat_T)).reshape(-1)
     lon_pts = np.degrees(np.asarray(grid.lon_T)).reshape(-1)
-    nn_i, nn_j = core2_forcing_nn_indices(forcing, lat_pts, lon_pts)
+    # BILINEAR maps (i4, j4, w4), matching the host tripole sample exactly
+    # (the scan lane and the host loop must apply the SAME forcing; nearest
+    # printed zonal bands -- see _bilinear_point_maps).
+    nn_i, nn_j, nn_w = _bilinear_point_maps(
+        np.asarray(forcing.lat), np.asarray(forcing.lon), lat_pts, lon_pts)
     channels = ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down",
                 "precip")
     forcing_stack = {
@@ -1105,11 +1206,13 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
         np.full_like(ref, float(constants.p_atm_std)) if slp is None
         else np.asarray(slp))
     grid_shape = tuple(np.asarray(grid.lat_T).shape)
-    return forcing_stack, jnp.asarray(nn_i), jnp.asarray(nn_j), grid_shape
+    return (forcing_stack, jnp.asarray(nn_i), jnp.asarray(nn_j),
+            jnp.asarray(nn_w), grid_shape)
 
 
 def compute_omip2_surface_forcing_jax(
     state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=constants.rho_air,
+    nn_w=None,
 ):
     """Pure-JAX, ``lax.scan``-traceable form of
     :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
@@ -1137,7 +1240,10 @@ def compute_omip2_surface_forcing_jax(
 
     def _sample(name):
         rec = forcing_stack[name][idx_t]            # (n_lat_f, n_lon_f)
-        return rec[nn_i, nn_j].reshape(grid_shape)  # (n_lat, n_lon)
+        if nn_w is None:                       # legacy pure-NN indices (N,)
+            return rec[nn_i, nn_j].reshape(grid_shape)
+        # 4-point bilinear: (4, N) index/weight stacks -> (n_lat, n_lon)
+        return (rec[nn_i, nn_j] * nn_w).sum(axis=0).reshape(grid_shape)
 
     u10 = _sample("u10")
     v10 = _sample("v10")
@@ -1209,11 +1315,12 @@ def build_omip2_scan_block_fn(
     apply_ramp = ramp_s > 0.0  # static gate (CLAUDE.md feature-gating)
 
     @jax.jit
-    def block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0):
+    def block_fn(state, forcing_stack, nn_i, nn_j, nn_w, idx_t_block, step0):
         def _body(carry, idx_t):
             st, step = carry
             sf = compute_omip2_surface_forcing_jax(
                 st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
+                nn_w=nn_w,
                 grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
             )
             if apply_ramp:
