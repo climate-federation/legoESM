@@ -404,6 +404,12 @@ def main() -> int:
             "LEGOESM_OCEAN_MIXED=1 requires JAX x64 enabled (the mixed policy "
             "accumulates in float64), but jax_enable_x64 is off. Re-run with "
             "x64 on (JAX_ENABLE_X64=1) or unset LEGOESM_OCEAN_MIXED.")
+    if _ocean_mixed and (args.parity_gate or args.check_conservation):
+        raise SystemExit(
+            "mixed precision has no validated parity/conservation-gate "
+            "tolerances here (SPMD_PARITY_TOLS/CONS_RTOL_DEFAULTS key on "
+            "float32/float64); run f32/f64 for gated correctness checks and "
+            "drop --parity-gate/--check-conservation for a mixed timing arm.")
     if _ocean_mixed:
         set_policy(PrecisionPolicy.mixed())
     elif jax.config.jax_enable_x64:
