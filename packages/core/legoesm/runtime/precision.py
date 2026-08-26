@@ -102,19 +102,12 @@ def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     This is the **one-shot** entry point used by :func:`runtime.bootstrap`
     AND by the driver CLIs directly, so gating a mode here covers every caller.
     """
-    # #1665 interim: 'mixed' (fp32 storage / fp64 compute) is NOT yet consistent
-    # — it silently runs fp64 under x64, its grid metrics floor the semi-implicit
-    # solve, and its mass-fix correction is state-affecting. Refuse it LOUDLY
-    # instead of misrepresenting the precision that actually runs; fp64 is what
-    # mixed was really doing. (A dedicated mixed-consistency campaign is tracked
-    # separately.) fp32/fp64 unaffected.
-    if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
-        raise NotImplementedError(
-            f"precision={mode!r} is disabled (#1665 interim): the mixed "
-            "fp32-storage/fp64-compute path is not yet consistent. Use "
-            "precision='fp64' (what mixed was actually running) or "
-            "precision='fp32'."
-        )
+    # #1675: 'mixed' enabled. Bulk 3D state + carbon pools store fp32; the
+    # surface pressure p_s (one 2D field) stays f64 EVERYWHERE (compiled carry,
+    # eager finalize, sharded assertion) so global dry mass is exact (~1e-12).
+    # site 2 (#1676) keeps run_lmip pools fp32; finalize_to_storage re-casts the
+    # eager step's bulk state to fp32 while exempting p_s, matching the compiled
+    # scan carry.  fp32/fp64 unaffected.
     policy = resolve_precision(mode)
 
     # Activate globally.

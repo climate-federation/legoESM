@@ -261,26 +261,6 @@ def cg_metric_residual_floor(cdgrid) -> float:
     return 1.0e-6
 
 
-def _with_control_metrics(cdgrid):
-    """#1675 site 1: cast ONLY the Helmholtz-operator metrics
-    (``rdxc``/``rdyc``/``dy_edge_x``/``dx_edge_y`` + ``base.area``) to the
-    control role (f64 in mixed).  The semi-implicit solve is stiff
-    (kappa ~1e6); at f32 metrics the CG residual floors at ~1e-7 metric
-    precision = ~O(0.1) forward error at that condition number.  This casts the
-    ~5 operator metrics WITHOUT promoting any bulk-state field.  ``cast``
-    upcasts to control and skips downcasts, so for fp64/strict-fp32 grids
-    (where control == the storage dtype) every field is unchanged and the solve
-    is byte-identical; only the mixed f32-storage grid is upcast here."""
-    base = cdgrid.base
-    return cdgrid._replace(
-        rdxc=cast(cdgrid.rdxc, None, "control"),
-        rdyc=cast(cdgrid.rdyc, None, "control"),
-        dy_edge_x=cast(cdgrid.dy_edge_x, None, "control"),
-        dx_edge_y=cast(cdgrid.dx_edge_y, None, "control"),
-        base=base._replace(area=cast(base.area, None, "control")),
-    )
-
-
 def cg_helmholtz_solve(
     rhs,
     coeff,
@@ -361,18 +341,14 @@ def cg_helmholtz_solve(
     _in_dtype = rhs.dtype
     rhs = cast(rhs, None, "control")
     coeff = cast(jnp.asarray(coeff), None, "control")
-    # #1675 site 1: run the operator at CONTROL-precision metrics so the mixed
-    # f32-storage grid does not floor the residual at ~1e-7 (byte-identical for
-    # fp64/strict-fp32, where the cast is a no-op).
-    _cdg = _with_control_metrics(cdgrid)
-    area = cast(_cdg.base.area, None, "control")
+    area = cast(cdgrid.base.area, None, "control")
     sqrt_area = jnp.sqrt(area)
     inv_sqrt_area = 1.0 / sqrt_area
 
     def B_op(tilde_p):
         p = inv_sqrt_area * tilde_p
         return tilde_p - coeff * sqrt_area * cdgrid_scalar_laplacian(
-            p, _cdg,
+            p, cdgrid,
         )
 
     tilde_rhs = sqrt_area * rhs
@@ -395,7 +371,7 @@ def cg_helmholtz_solve(
         # solution) so it reports the true backward error, not f32 arithmetic
         # noise on top of it.
         def A_phys(p):
-            return p - coeff * cdgrid_scalar_laplacian(p, _cdg)
+            return p - coeff * cdgrid_scalar_laplacian(p, cdgrid)
 
         _s = sol_ret.astype(rhs.dtype)
         rhs_norm = jnp.maximum(

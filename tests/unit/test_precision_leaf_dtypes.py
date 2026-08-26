@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-MODES = ["fp64"]  # #1665 interim: mixed refused
+MODES = ["fp64", "mixed"]  # #1675: mixed enabled
 
 
 def _cast_to_storage(state, storage):
@@ -144,7 +144,7 @@ def test_mpas_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-@pytest.mark.parametrize("mode", ["fp64"])  # #1665 interim: mixed refused
+@pytest.mark.parametrize("mode", ["fp64", "mixed"])  # #1675: mixed enabled
 # (the mixed lat-lon tracer-promotion is the tracked mixed-consistency campaign;
 # the refusal itself is pinned by test_mixed_precision_is_refused below).
 def test_latlon_pe_leaf_dtypes(mode):
@@ -152,10 +152,47 @@ def test_latlon_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-def test_mixed_precision_is_refused():
-    """#1665 interim: mixed is refused loudly; pin the refusal explicitly (the
-    lat-lon leaf-dtype consistency for mixed is the tracked campaign)."""
-    import pytest
+def test_mixed_precision_enabled():
+    """#1675: mixed enabled; the parametrized leaf-dtype tests above run it and
+    assert p_s stays f64 while every other prognostic is fp32 storage."""
     from legoesm.runtime.precision import apply_precision
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+    p = apply_precision("mixed")
+    assert p.storage == jnp.float32 and p.control == jnp.float64
+
+
+def test_mixed_latlon_rollout_capstone():
+    """#1675 capstone: a 20-step mixed lat-lon PE rollout keeps bulk state fp32
+    and p_s f64, and conserves global dry mass near-f64 (p_s carried at f64
+    accumulate + the fix_mass fixer)."""
+    from legoesm.runtime.precision import apply_precision
+    apply_precision("mixed")
+    from legoesm.core.precision import resolve_dtype
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+        hydrostatic_to_cgrid,
+    )
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
+    storage = resolve_dtype(None, "storage"); accum = resolve_dtype(None, "accumulate")
+    assert storage == jnp.float32 and accum == jnp.float64
+    grid = create_latlon_grid(n_lat=8); sigma = create_sigma_coordinate(8)
+    state = hydrostatic_to_cgrid(
+        baroclinic_wave_init_latlon(grid, sigma, perturbed=True, moist=True), grid)
+    state = _cast_to_storage(state, storage)
+    cfg = CGridLatLonPrimitiveEquationConfig(
+        A_h=1.0e4, time_integrator="ssp_rk3", fix_mass=True,
+        zero_mean_ps_tendency=False, use_ppm_transport=True)
+    dt = 100.0
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
+    area = jnp.asarray(grid.area, jnp.float64)
+    mass0 = float(jnp.sum(jnp.asarray(state.p_s, jnp.float64) * area))
+    drifts = []
+    for _ in range(20):
+        state = model.step(state, dt=dt)
+        drifts.append(abs(float(jnp.sum(jnp.asarray(state.p_s, jnp.float64) * area)) - mass0) / mass0)
+    _assert_leaf_dtypes(state, storage, accum)  # bulk fp32, p_s f64
+    # near-f64 mass (p_s is f64): tight bound + non-accumulating
+    assert max(drifts) < 1e-8, f"mass drift too large for f64 p_s: {max(drifts):.2e}"
+    assert drifts[-1] <= 2.0 * max(drifts[:10]) + 1e-15, f"mass drift accumulating: {drifts}"
+    print(f"\n#1675 capstone measured max mass drift = {max(drifts):.2e} (p_s f64)")

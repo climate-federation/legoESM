@@ -113,7 +113,7 @@ def amip_runs(tmp_path_factory):
     """
     tmp_dir = str(tmp_path_factory.mktemp("precision_amip"))
     results = {}
-    for mode in ("fp64", "fp32"):  # #1665: mixed refused (fast refuse test below)
+    for mode in ("fp64", "fp32", "mixed"):  # #1675: mixed enabled (end-to-end run)
         # Reset precision state before each run to avoid cross-contamination.
         clear_module_overrides()
         set_policy(PrecisionPolicy.fp32())
@@ -142,13 +142,9 @@ class TestPrecisionAMIPStability:
         """fp32 run should complete without blow-up."""
         assert amip_runs["fp32"]._run_status == "COMPLETED"
 
-    def test_mixed_is_refused(self):
-        """#1665 interim: mixed is refused loudly (was: mixed AMIP completes).
-        Fast — no simulation; the fp64-vs-mixed AMIP validation is the tracked
-        mixed-consistency campaign."""
-        from legoesm.runtime.precision import apply_precision
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed")
+    def test_mixed_completes(self, amip_runs):
+        """#1675: a 5-day C8/L5 AMIP in mixed completes (end-to-end run)."""
+        assert amip_runs["mixed"]._run_status == "COMPLETED"
 
 
 @pytest.mark.slow

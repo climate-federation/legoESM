@@ -50,18 +50,19 @@ def _restore_precision():
     set_policy(PrecisionPolicy.fp64())
 
 
-def test_mixed_is_refused():
-    # #1665 interim: mixed is refused loudly until it is consistent.
-    import pytest
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_mixed_installs_ocean_fp64_overrides():
+    # #1675: mixed enabled — the precision-sensitive ocean kernels stay fp64
+    # (the barotropic elliptic / EOS overrides), while storage is fp32.
+    apply_precision("mixed")
+    for mod in _OCEAN_SENSITIVE:
+        assert resolve_dtype(mod, "compute") == jnp.dtype("float64"), mod
 
 
-def test_mixed_storage_refused():
-    # #1665 interim: mixed refused (was: fp32 storage assertion).
-    import pytest
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+def test_mixed_storage_is_fp32():
+    # #1675: mixed stores fp32 (the bulk-state saving); p_s stays f64 (accumulate).
+    apply_precision("mixed")
+    assert resolve_dtype(None, "storage") == jnp.dtype("float32")
+    assert resolve_dtype(None, "accumulate") == jnp.dtype("float64")
 
 
 def test_fp64_mode_is_all_fp64():

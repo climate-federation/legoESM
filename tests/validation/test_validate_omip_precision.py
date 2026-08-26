@@ -25,10 +25,11 @@ def _restore_fp64():
     set_policy(PrecisionPolicy.fp64())
 
 
-def test_mixed_precision_is_refused():
-    """#1665 interim: the fp64-vs-mixed validation harness is deferred to the
-    mixed-consistency campaign; mixed is refused loudly for now. Pin that the
+def test_mixed_precision_enabled():
+    """#1675: mixed is enabled; the fp64-vs-mixed harness precondition
+    (apply_precision resolves the mixed policy) now holds.  Pin that the
     request raises rather than silently running fp64."""
     from legoesm.runtime.precision import apply_precision
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+    import jax.numpy as _jnp
+    p = apply_precision("mixed")
+    assert p.storage == _jnp.float32 and p.control == _jnp.float64
