@@ -1232,6 +1232,10 @@ def apply_sponge_filter(state, sponge_factor, sponge_factor_T):
 # One bound, one home: the deck gate (tests/unit/test_wb_campaign_dt_stability)
 # and the runtime check both import these.
 ADVECTIVE_CFL_U_REF = 150.0        # [m/s]
+# Hard-error floor (#1663): real winter jets reach ~100 m/s; a spectral config
+# whose u_crit falls below this on ssp_rk3 is the measured 2026-08-23 blowup
+# class, not a design-margin false alarm.  Between this and u_ref it WARNS.
+U_CRIT_HARD_FLOOR = 100.0          # [m/s]
 RK3_ADVECTIVE_BOUND = math.sqrt(3.0)
 
 
@@ -1251,25 +1255,38 @@ def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None
     n_sub = int(config.si_substeps) if config.semi_implicit else 1
     dt_step = float(dt) / max(n_sub, 1)
     c = advective_cfl_courant(n_max, dt_step)
-    if c > RK3_ADVECTIVE_BOUND:
-        # WARN, do not raise (#1663 review): u_ref=150 is a DESIGN envelope
-        # (~2x midlatitude jets), and RK3_ADVECTIVE_BOUND is the SSP-RK3
-        # imaginary-axis limit — so a hard error over-blocked legitimate configs
-        # (the T42 dt=1800 Held-Suarez benchmark, u_crit~146, runs ~40 m/s jets
-        # stably; ssp_rk34/rk4/ssp_rk54 carry larger stability intervals than
-        # RK3). The 2026-08-23 T63 dt=1800 blowup (u_crit~97 < real winter jets)
-        # still surfaces here loudly.
-        warnings.warn(
-            f"spectral advective Courant number {c:.2f} > "
-            f"{RK3_ADVECTIVE_BOUND:.2f} (SSP-RK3 bound) at the u_ref="
-            f"{ADVECTIVE_CFL_U_REF:.0f} m/s design envelope (n_max={n_max}, "
-            f"dt={dt}, si_substeps={config.si_substeps}, "
-            f"semi_implicit={config.semi_implicit}, "
-            f"time_integrator={config.time_integrator}). If expected winds "
-            "approach u_ref this is the T63 dt=1800 blowup class of 2026-08-23 "
-            "(raise si_substeps or lower dt); for a larger-stability integrator "
-            "or a low-jet case (e.g. Held-Suarez) it may be a false alarm.",
-            RuntimeWarning, stacklevel=2)
+    if c <= RK3_ADVECTIVE_BOUND:
+        return
+    # #1663 review (warn-plus-refuse): the old blanket hard error keyed on the
+    # u_ref=150 m/s DESIGN envelope over-blocked legitimate configs — the T42
+    # dt=1800 Held-Suarez benchmark (u_crit~146, real jets ~40 m/s, stable) and
+    # larger-stability integrators (ssp_rk34/rk4/ssp_rk54) for which the SSP-RK3
+    # sqrt(3) bound is conservative.  But downgrading to a bare warning would
+    # be void in a campaign harness (printed once per location, ignored by the
+    # builder), silently re-admitting the 2026-08-23 blowup.  So: hard-error
+    # ONLY the measured blowup class, warn the design-margin band / non-RK3.
+    #   u_crit = the wind at which the SSP-RK3 advective Courant number hits the
+    #   bound.  Real winter jets reach ~100 m/s (the incident sat at u_crit~97),
+    #   so u_crit below that floor on ssp_rk3 is a genuine blowup risk.
+    u_crit = RK3_ADVECTIVE_BOUND * constants.R_earth / (float(n_max) * dt_step)
+    _detail = (f"advective Courant number {c:.2f} > {RK3_ADVECTIVE_BOUND:.2f} "
+               f"(SSP-RK3 bound): u_crit={u_crit:.0f} m/s (n_max={n_max}, "
+               f"dt={dt}, si_substeps={config.si_substeps}, "
+               f"semi_implicit={config.semi_implicit}, "
+               f"time_integrator={config.time_integrator}).")
+    if u_crit < U_CRIT_HARD_FLOOR and str(config.time_integrator) == "ssp_rk3":
+        raise ValueError(
+            f"unstable spectral configuration: {_detail} u_crit is below the "
+            f"{U_CRIT_HARD_FLOOR:.0f} m/s winter-jet floor on ssp_rk3 — the T63 "
+            "dt=1800 blowup class of 2026-08-23 that silently trained a whole "
+            "campaign mid-blowup. Raise si_substeps or lower dt.")
+    warnings.warn(
+        f"{_detail} u_crit is in the {U_CRIT_HARD_FLOOR:.0f}-"
+        f"{ADVECTIVE_CFL_U_REF:.0f} m/s design-margin band (or a "
+        "larger-stability integrator where the SSP-RK3 bound is conservative) "
+        "— likely a false alarm for a low-jet case such as Held-Suarez, but "
+        "verify the run's expected winds stay below u_crit.",
+        RuntimeWarning, stacklevel=2)
 
 
 def apply_spectral_filter_to_state(state, spectral_filter, *,

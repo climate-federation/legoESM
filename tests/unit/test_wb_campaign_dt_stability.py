@@ -83,12 +83,13 @@ def test_decks_found():
 
 def test_runtime_guard_check_advective_cfl():
     """The runtime companion of this gate (enforced when the training
-    integrator is built) must FLAG the measured blowup config and accept the
-    shipped fix — including NOT crediting substeps on the explicit path.
+    integrator is built) must HARD-REFUSE the measured blowup class and accept
+    the shipped fix — including NOT crediting substeps on the explicit path.
 
-    #1663: the guard WARNS rather than hard-errors (u_ref=150 is a design
-    envelope and the SSP-RK3 bound over-blocked legitimate configs), so the
-    blowup class surfaces as a RuntimeWarning; the stable arm must stay silent.
+    #1663 (warn-plus-refuse): the measured T63 dt=1800 ssp_rk3 blowup (u_crit
+    ~97 < the 100 m/s winter-jet floor) still RAISES; the design-margin band
+    (u_crit 100..150, e.g. T42 dt=1800) and larger-stability integrators only
+    WARN, so legitimate configs are no longer over-blocked.
     """
     import warnings
     from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
@@ -97,13 +98,21 @@ def test_runtime_guard_check_advective_cfl():
     )
 
     bad = SpectralPEConfig(semi_implicit=True, si_substeps=1)
-    with pytest.warns(RuntimeWarning, match="advective Courant"):
+    # Measured blowup class (u_crit~97 < 100 on ssp_rk3): HARD ERROR.
+    with pytest.raises(ValueError, match="advective Courant"):
         check_advective_cfl(63, 1800.0, bad)
-    # Fix (3 substeps) is stable -> no warning.
+    # Fix (3 substeps) is stable -> silent (no raise, no warning).
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         check_advective_cfl(63, 1800.0, bad._replace(si_substeps=3))
-    # Explicit path does NOT credit substeps -> still flagged.
-    with pytest.warns(RuntimeWarning, match="advective Courant"):
+    # Explicit path does NOT credit substeps -> still hard-refused.
+    with pytest.raises(ValueError, match="advective Courant"):
         check_advective_cfl(
             63, 1800.0, bad._replace(si_substeps=3, semi_implicit=False))
+    # #1663 fix: T42 dt=1800 (u_crit~146, design-margin band) WARNS, not raises.
+    with pytest.warns(RuntimeWarning, match="design-margin"):
+        check_advective_cfl(42, 1800.0, bad)
+    # #1663 fix: a larger-stability integrator at the same u_crit~97 WARNS
+    # (the sqrt(3) bound is conservative for it) rather than hard-blocking.
+    with pytest.warns(RuntimeWarning, match="advective Courant"):
+        check_advective_cfl(63, 1800.0, bad._replace(time_integrator="ssp_rk54"))
