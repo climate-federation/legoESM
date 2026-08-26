@@ -1608,3 +1608,41 @@ def aridity_theta_init(rh_surface, theta_wp, theta_fc):
     """
     rh = jnp.clip(rh_surface, 0.0, 1.0)
     return theta_wp + rh * (theta_fc - theta_wp)
+
+
+# --- Packed land columns (2026-08-25 step-cost profile) ---------------------
+# The coupled driver solves the tile only on the f_land > 0 columns and keeps
+# the full-grid state between calls; these three helpers are the whole
+# contract, factored here so the gather/scatter convention is testable
+# without a driver.  A leaf participates iff its LEADING axis is the full
+# column count — every other leaf (scalars, per-PFT tables) passes through.
+
+def gather_land_columns(tree, idx, ncol_full: int):
+    """Gather leading-``ncol_full`` leaves of ``tree`` onto columns ``idx``."""
+    return jax.tree_util.tree_map(
+        lambda x: (x[idx]
+                   if (hasattr(x, "shape") and getattr(x, "ndim", 0) >= 1
+                       and x.shape[0] == ncol_full)
+                   else x),
+        tree)
+
+
+def scatter_land_columns(full_tree, packed_tree, idx, ncol_full: int):
+    """Write packed leaves back into the full-grid tree at columns ``idx``.
+
+    Non-column leaves take the PACKED (advanced) value — they were passed
+    through the solve unpacked, so the solved value is the current one.
+    """
+    return jax.tree_util.tree_map(
+        lambda full, packed: (
+            full.at[idx].set(packed)
+            if (hasattr(full, "shape") and getattr(full, "ndim", 0) >= 1
+                and full.shape[0] == ncol_full)
+            else packed),
+        full_tree, packed_tree)
+
+
+def scatter_cells(v, idx, ncol_full: int):
+    """Packed per-column vector -> full-grid cells, zero fill (never NaN:
+    the consumers multiply by f_land, and 0 * NaN would contaminate them)."""
+    return jnp.zeros((ncol_full,), v.dtype).at[idx].set(v.reshape(-1))

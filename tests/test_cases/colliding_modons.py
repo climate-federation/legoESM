@@ -234,7 +234,8 @@ def colliding_modons_spectral(grid):
     u_cos = u_east * cos_lat
     v_cos = v_north * cos_lat
 
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / R
+    _cdt = jnp.complex64 if grid.Pnm.dtype == jnp.float32 else jnp.complex128
+    im_over_a = (1j * grid.ms / R).astype(_cdt)
     one_over_a = 1.0 / R
 
     vor_hat = (
