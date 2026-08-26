@@ -204,6 +204,22 @@ def build_cbl_scm_from_artifact(
             scm_turbulence_config,
         )
         turbulence = scm_turbulence_config(turbulence, les_tuned=les_tuned)
+    elif les_tuned:
+        # An explicit TurbulenceConfig is used verbatim (documented opt-out), but
+        # if the caller expected the LES-tuned default and its scheme HAS a tuned
+        # entry, the splice is silently bypassed — warn so name-vs-config paths
+        # don't diverge unnoticed (GLM review P2 #4). Pass a name to get tuning.
+        import logging
+        from legoesm.atmosphere.physics.turbulence.les_tuned import (
+            load_les_tuned_overrides,
+        )
+        _sub = getattr(turbulence, turbulence.scheme, None)
+        if _sub is not None and type(_sub).__name__ in load_les_tuned_overrides():
+            logging.getLogger(__name__).warning(
+                "run_scm: explicit TurbulenceConfig(scheme=%r) bypasses the "
+                "LES-tuned splice (its class has a tuned entry). Pass the scheme "
+                "NAME for the tuned default, or les_tuned=False to silence.",
+                turbulence.scheme)
     if artifact.w_theta_s is None:
         raise ValueError(
             f"{artifact.case_name}: CBL SCM requires a prescribed surface heat flux "

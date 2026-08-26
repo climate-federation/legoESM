@@ -53,13 +53,13 @@ def _read_tuned_yaml_text(path: str | None) -> tuple[str, str]:
             raise FileNotFoundError(
                 f"LES-tuned turbulence YAML not found at {src}. Regenerate with "
                 "scripts/data/build_tuned_turbulence_yaml.py.")
-        return src.read_text(), str(src)
+        return src.read_text(encoding='utf-8'), str(src)
     res = resources.files(__package__) / _TUNED_YAML_NAME
     if not res.is_file():
         raise FileNotFoundError(
             f"packaged {_TUNED_YAML_NAME} missing from {__package__}. Regenerate "
             "with scripts/data/build_tuned_turbulence_yaml.py.")
-    return res.read_text(), f"{__package__}/{_TUNED_YAML_NAME}"
+    return res.read_text(encoding='utf-8'), f"{__package__}/{_TUNED_YAML_NAME}"
 
 
 # Registry-qualified names are ``atm.turb.<ClassName>.<field>``.
@@ -183,7 +183,9 @@ def write_active_scheme_params(scheme: str, out_path: str,
             f"tuned schemes: {sorted(load_les_tuned_overrides(path))}.")
     slice_doc = {f"{_QUAL_PREFIX}{cls_name}.{f}": v
                  for f, v in sorted(overrides.items())}
-    Path(out_path).write_text(yaml.safe_dump(slice_doc, sort_keys=True))
+    dest = Path(out_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(yaml.safe_dump(slice_doc, sort_keys=True), encoding='utf-8')
     return len(slice_doc)
 
 
