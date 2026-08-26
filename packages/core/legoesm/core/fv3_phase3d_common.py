@@ -107,7 +107,8 @@ def build_batched_gs(ctx) -> dict:
 
     ``"gs"``
         ``{key: (6, ...)}`` -- the six per-face metric dicts stacked on
-        a new leading face axis, key by key.  ``jnp.stack`` is a pure
+        a new leading face axis, key by key.  ``np.stack`` on the HOST (a
+        cached jnp.stack would trap tracers) is a pure
         index copy, so ``view["gs"][key][t]`` equals ``ctx.gs6[t][key]``
         EXACTLY (pinned by a round-trip test).  Only keys whose shape is
         identical on all six faces are stacked; the rest are recorded in
@@ -162,11 +163,18 @@ def build_batched_gs(ctx) -> dict:
 
     stacked, unstacked = {}, []
     for key in sorted(keys0):
-        shapes = {tuple(jnp.shape(gs6[t][key])) for t in range(6)}
+        shapes = {tuple(np.shape(gs6[t][key])) for t in range(6)}
         if len(shapes) != 1:
             unstacked.append(key)
             continue
-        stacked[key] = jnp.stack([gs6[t][key] for t in range(6)], axis=0)
+        # np.stack, NOT jnp: gs6 holds HOST numpy metric constants, and
+        # the view is CACHED on the ctx.  A jnp.stack executed inside a
+        # jit trace would cache TRACERS, and the next trace's reuse is
+        # an UnexpectedTracerError (measured: the composed step's first
+        # call built the cache in-trace, job 9503200).  Host arrays are
+        # constants in every trace that closes over them.
+        stacked[key] = np.stack([np.asarray(gs6[t][key])
+                                 for t in range(6)], axis=0)
 
     f0 = flags6[0]
     for name in f0._fields:
@@ -185,10 +193,11 @@ def build_batched_gs(ctx) -> dict:
     view = {
         "gs": stacked,
         "unstacked_keys": tuple(unstacked),
-        "da_min6": jnp.asarray([fl.da_min for fl in flags6],
-                               dtype=jnp.float64),
-        "da_min_c6": jnp.asarray([fl.da_min_c for fl in flags6],
-                                 dtype=jnp.float64),
+        # np, not jnp: same cached-tracer hazard as the gs stack above.
+        "da_min6": np.asarray([fl.da_min for fl in flags6],
+                              dtype=np.float64),
+        "da_min_c6": np.asarray([fl.da_min_c for fl in flags6],
+                                dtype=np.float64),
         "flags": {name: getattr(f0, name) for name in f0._fields
                   if name not in PER_FACE_FLAG_FIELDS},
     }

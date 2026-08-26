@@ -760,7 +760,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                                        dt=mdt, q_split=tracer_q_split,
                                        nord_tr=nord_tr, trdm=trdm2,
                                        lim_fac=lim_fac, z_tracer=z_tracer,
-                                       inline_q=inline_q)
+                                       inline_q=inline_q, batched=batched)
             # The routine returns a DICT (C4: everything the spec
             # mutates). Binding the whole dict to qq made the remap's
             # `qq[i]` a KeyError on any run with tracers.
@@ -819,64 +819,127 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             pr["pk"] = pr["pk"].at[:, ia:ia + n, ia:ia + n, :].set(g["pk"])
 
         # :618 the remap, ONE FACE PER CALL -- the callee's contract is
-        # per-face with the numpy-lane layouts, so this stays a 6-deep
-        # static (unrolled) face loop; no face reads another's writes
-        fs = []
-        for t in range(6):
-            fs.append(lagrangian_to_eulerian(
-                pe=pr["pe"][t], peln=pr["peln"][t], pk=pr["pk"][t],
-                pkz=pr["pkz"][t], delp=st["delp"][t], pt=st["pt"][t],
-                u=st["u"][t], v=st["v"][t], ps=pr["ps"][t],
-                ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
-                r_vir=zvir, km=km, n=n, ng=ng,
-                kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
-                q=[qq[i][t] for i in range(nq)],
-                omga=om[t], sphum_index=sphum_index,
-                last_step=last_step, hydrostatic=hydrostatic,
-                adiabatic=adiabatic_flag, consv=consv_te,
-                w=(None if hydrostatic else st["w"][t]),
-                delz=(None if hydrostatic else st["delz"][t]),
-                ws=(None if hydrostatic else g["ws"][t]),
-                kord_wz=kord_wz, w_limiter=w_limiter,
-                rdgas=(None if hydrostatic else _FV3_RDGAS),
-                grav=(None if hydrostatic else _FV3_GRAV),
-                fill=False, do_sat_adj=False, do_inline_mp=False,
-                do_adiabatic_init=False,
-                defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
-        # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
-        # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
-        # from scratch DROPS a hydrostatic run's `w` -- which the state
-        # still carries (build_state_3d allocates it zeroed either way).
-        # lax.scan then rejects the k_split loop with "carry input and
-        # carry output must have the same pytree structure ... symmetric
-        # difference {'w'}". Any key the remap does not own is carried
-        # through untouched rather than recreated, so the structure is
-        # whatever the caller handed in.
-        _st_in = st
-        st = {"delp": jnp.stack([o.delp for o in fs]),
-              "pt": jnp.stack([o.pt for o in fs]),
-              "u": jnp.stack([o.u for o in fs]),
-              "v": jnp.stack([o.v for o in fs])}
-        if not hydrostatic:
-            st["w"] = jnp.stack([o.w for o in fs])
-            st["delz"] = jnp.stack([o.delz for o in fs])
-        for _k in _st_in:
-            if _k not in st:
-                st[_k] = _st_in[_k]
-        pr = {"ps": jnp.stack([o.ps for o in fs]),
-              "pe": jnp.stack([o.pe for o in fs]),
-              "peln": jnp.stack([o.peln for o in fs]),
-              "pk": jnp.stack([o.pk for o in fs]),
-              "pkz": jnp.stack([o.pkz for o in fs])}
-        if nq > 0:
-            # rebuild the list of stacked tracers from the per-face lists
-            # list(), not the tree_map result as-is: the callee returns
-            # its tracers as a tuple, and a carry that goes in a list and
-            # comes out a tuple is a pytree-structure mismatch under
-            # lax.scan even though every leaf matches.
-            qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
-                                             *[o.q for o in fs]))
-        om = jnp.stack([o.omga for o in fs])
+        # per-face with the numpy-lane layouts.  Two arms: the certified
+        # default is the 6-deep static (unrolled) face loop below (no
+        # face reads another's writes); `batched` (face-batching ladder
+        # step 6, pattern 4c7198bd1) vmaps the SAME callee over the face
+        # axis instead -- each traced `x[t]` read in the loop is a
+        # masked-select + all-reduce under SPMD, and the remap was one
+        # of the two remaining per-face `[t]` sites.
+        if batched:
+            # in_axes: every per-face operand at axis 0 -- the press
+            # bundle (pe/peln/pk/pkz/ps), the state (delp/pt/u/v),
+            # each tracer leaf of the q list, omga, and on the NH arm
+            # w/delz/ws (vmap's default in_axes=0 over the positional
+            # args of the wrapper).  Closed over (face-invariant at
+            # trace time): ak/bk/ptop/akap/cp_air/zvir/km/n/ng, the
+            # three kords, kord_wz/w_limiter, hydrostatic/adiabatic/
+            # consv_te/sphum_index, and last_step/defer_close (Python
+            # bools per k_split iteration).  The callee Python-branches
+            # only on those statics, never on a per-face VALUE (read,
+            # fv3_mapz.py:1319-1720), so the six faces are one program.
+            _defer = bool(last_step) and abs(consv_te) > _CONSV_MIN
+
+            def _remap_face(pe_t, peln_t, pk_t, pkz_t, delp_t, pt_t,
+                            u_t, v_t, ps_t, q_t, om_t, *nh_t):
+                w_t, delz_t, ws_t = nh_t if nh_t else (None, None, None)
+                return lagrangian_to_eulerian(
+                    pe=pe_t, peln=peln_t, pk=pk_t, pkz=pkz_t,
+                    delp=delp_t, pt=pt_t, u=u_t, v=v_t, ps=ps_t,
+                    ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
+                    r_vir=zvir, km=km, n=n, ng=ng,
+                    kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
+                    q=list(q_t), omga=om_t, sphum_index=sphum_index,
+                    last_step=last_step, hydrostatic=hydrostatic,
+                    adiabatic=adiabatic_flag, consv=consv_te,
+                    w=w_t, delz=delz_t, ws=ws_t,
+                    kord_wz=kord_wz, w_limiter=w_limiter,
+                    rdgas=(None if hydrostatic else _FV3_RDGAS),
+                    grav=(None if hydrostatic else _FV3_GRAV),
+                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    do_adiabatic_init=False, defer_close=_defer)
+
+            _nh_ops = (() if hydrostatic
+                       else (st["w"], st["delz"], g["ws"]))
+            o = jax.vmap(_remap_face)(
+                pr["pe"], pr["peln"], pr["pk"], pr["pkz"],
+                st["delp"], st["pt"], st["u"], st["v"], pr["ps"],
+                list(qq), om, *_nh_ops)
+            # Assembly mirrors the loop arm KEY-FOR-KEY: vmap stacks
+            # every output leaf at axis 0, which is exactly what the
+            # loop arm's jnp.stack builds, and the same carry-contract
+            # rules apply (w/delz only on NH; unowned keys carried
+            # through; q back to a LIST -- the callee returns a tuple).
+            _st_in = st
+            st = {"delp": o.delp, "pt": o.pt, "u": o.u, "v": o.v}
+            if not hydrostatic:
+                st["w"] = o.w
+                st["delz"] = o.delz
+            for _k in _st_in:
+                if _k not in st:
+                    st[_k] = _st_in[_k]
+            pr = {"ps": o.ps, "pe": o.pe, "peln": o.peln,
+                  "pk": o.pk, "pkz": o.pkz}
+            if nq > 0:
+                qq = list(o.q)
+            om = o.omga
+        else:
+            fs = []
+            for t in range(6):
+                fs.append(lagrangian_to_eulerian(
+                    pe=pr["pe"][t], peln=pr["peln"][t], pk=pr["pk"][t],
+                    pkz=pr["pkz"][t], delp=st["delp"][t], pt=st["pt"][t],
+                    u=st["u"][t], v=st["v"][t], ps=pr["ps"][t],
+                    ak=ak, bk=bk, ptop=ptop, akap=akap, cp=cp_air,
+                    r_vir=zvir, km=km, n=n, ng=ng,
+                    kord_mt=kord_mt, kord_tm=kord_tm, kord_tr=kord_tr,
+                    q=[qq[i][t] for i in range(nq)],
+                    omga=om[t], sphum_index=sphum_index,
+                    last_step=last_step, hydrostatic=hydrostatic,
+                    adiabatic=adiabatic_flag, consv=consv_te,
+                    w=(None if hydrostatic else st["w"][t]),
+                    delz=(None if hydrostatic else st["delz"][t]),
+                    ws=(None if hydrostatic else g["ws"][t]),
+                    kord_wz=kord_wz, w_limiter=w_limiter,
+                    rdgas=(None if hydrostatic else _FV3_RDGAS),
+                    grav=(None if hydrostatic else _FV3_GRAV),
+                    fill=False, do_sat_adj=False, do_inline_mp=False,
+                    do_adiabatic_init=False,
+                    defer_close=(bool(last_step) and abs(consv_te) > _CONSV_MIN)))
+            # PYTREE STRUCTURE IS PART OF THE CARRY CONTRACT. The remap owns
+            # delp/pt/u/v always and w/delz only on the NH arm, so rebuilding
+            # from scratch DROPS a hydrostatic run's `w` -- which the state
+            # still carries (build_state_3d allocates it zeroed either way).
+            # lax.scan then rejects the k_split loop with "carry input and
+            # carry output must have the same pytree structure ... symmetric
+            # difference {'w'}". Any key the remap does not own is carried
+            # through untouched rather than recreated, so the structure is
+            # whatever the caller handed in.
+            _st_in = st
+            st = {"delp": jnp.stack([o.delp for o in fs]),
+                  "pt": jnp.stack([o.pt for o in fs]),
+                  "u": jnp.stack([o.u for o in fs]),
+                  "v": jnp.stack([o.v for o in fs])}
+            if not hydrostatic:
+                st["w"] = jnp.stack([o.w for o in fs])
+                st["delz"] = jnp.stack([o.delz for o in fs])
+            for _k in _st_in:
+                if _k not in st:
+                    st[_k] = _st_in[_k]
+            pr = {"ps": jnp.stack([o.ps for o in fs]),
+                  "pe": jnp.stack([o.pe for o in fs]),
+                  "peln": jnp.stack([o.peln for o in fs]),
+                  "pk": jnp.stack([o.pk for o in fs]),
+                  "pkz": jnp.stack([o.pkz for o in fs])}
+            if nq > 0:
+                # rebuild the list of stacked tracers from the per-face lists
+                # list(), not the tree_map result as-is: the callee returns
+                # its tracers as a tuple, and a carry that goes in a list and
+                # comes out a tuple is a pytree-structure mismatch under
+                # lax.scan even though every leaf matches.
+                qq = list(jax.tree_util.tree_map(lambda *xs: jnp.stack(xs),
+                                                 *[o.q for o in fs]))
+            om = jnp.stack([o.omga for o in fs])
 
         if last_step and abs(consv_te) > _CONSV_MIN:
             # THE REDUCTION, and the reason the remap was split. fv_mapz
