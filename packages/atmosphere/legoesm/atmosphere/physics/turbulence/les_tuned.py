@@ -8,9 +8,13 @@ a :class:`TurbulenceConfig` for the ACTIVE scheme.
 Split of responsibility (deliberate):
   * SCM -- applies these by DEFAULT via :func:`scm_turbulence_config`
     (``les_tuned=True``); the single-column model is what they were fit on.
-  * AMIP / production -- OPT-IN only, via ``run_amip.py --params
-    configs/tuned/turbulence_les.yaml`` (the same registry-qualified format).
-    A global run is not a column, so the LES-column fit is offered, not imposed.
+  * AMIP / production -- OPT-IN only, via ``run_amip.py --params <file>``
+    (the same registry-qualified format).  A global run is not a column, so the
+    LES-column fit is offered, not imposed.  NOTE: the tracked YAML carries the
+    tuned params for ALL eight closures at once; the generic ``--params`` router
+    (correctly) ABORTS on any param whose scheme is not the one selected for the
+    run.  So for AMIP pass only the ACTIVE scheme's slice --
+    :func:`write_active_scheme_params` writes that slice for a given scheme.
 
 Production ``*Config`` NamedTuple defaults are NEVER mutated (repo rule): the
 overrides are spliced with :func:`legoesm.core.param_overrides.apply_param_overrides`
@@ -19,6 +23,8 @@ returns the library defaults unchanged.
 """
 from __future__ import annotations
 
+import logging
+from importlib import resources
 from pathlib import Path
 
 from legoesm.core.param_overrides import apply_param_overrides
@@ -26,27 +32,35 @@ from legoesm.core.param_overrides import apply_param_overrides
 from . import config as _turb_config
 from .config import TurbulenceConfig
 
+_log = logging.getLogger(__name__)
 
-def _find_repo_file(rel: str) -> Path:
-    """Locate a repo-root file by walking up from this module.
+#: The tuned coefficients ship as package data (next to this module), so a
+#: normal ``pip install`` wheel carries them -- unlike the old repo-root
+#: ``configs/`` path, which only existed in an editable checkout.
+_TUNED_YAML_NAME = "turbulence_les_tuned.yaml"
 
-    The double-name federation layout puts ``configs/`` at the repo root, not in
-    any package, so relative-to-``__file__`` with a hardcoded parent count is
-    brittle. Walk up until a directory containing both ``pyproject.toml`` and the
-    target is found; raise with the search root if neither turns up.
+
+def _read_tuned_yaml_text(path: str | None) -> tuple[str, str]:
+    """Return ``(text, source_label)`` for the tuned YAML.
+
+    ``path`` overrides the packaged default (used by tests / hand-edited files).
+    The default is read via :mod:`importlib.resources`, so it resolves in both
+    an editable checkout and an installed wheel.
     """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        cand = parent / rel
-        if cand.exists() and (parent / "pyproject.toml").exists():
-            return cand
-    raise FileNotFoundError(
-        f"{rel} not found walking up from {here}. Regenerate with "
-        "scripts/data/build_tuned_turbulence_yaml.py, and confirm it runs from "
-        "the repo (editable install).")
+    if path is not None:
+        src = Path(path)
+        if not src.exists():
+            raise FileNotFoundError(
+                f"LES-tuned turbulence YAML not found at {src}. Regenerate with "
+                "scripts/data/build_tuned_turbulence_yaml.py.")
+        return src.read_text(), str(src)
+    res = resources.files(__package__) / _TUNED_YAML_NAME
+    if not res.is_file():
+        raise FileNotFoundError(
+            f"packaged {_TUNED_YAML_NAME} missing from {__package__}. Regenerate "
+            "with scripts/data/build_tuned_turbulence_yaml.py.")
+    return res.read_text(), f"{__package__}/{_TUNED_YAML_NAME}"
 
-
-LES_TUNED_YAML = _find_repo_file("configs/tuned/turbulence_les.yaml")
 
 # Registry-qualified names are ``atm.turb.<ClassName>.<field>``.
 _QUAL_PREFIX = "atm.turb."
@@ -71,13 +85,9 @@ def load_les_tuned_overrides(
     """
     import yaml
 
-    src = Path(path) if path is not None else LES_TUNED_YAML
-    if not src.exists():
-        raise FileNotFoundError(
-            f"LES-tuned turbulence YAML not found at {src}. Regenerate with "
-            "scripts/data/build_tuned_turbulence_yaml.py.")
+    text, src = _read_tuned_yaml_text(path)
     spec = _turb_config.__param_spec__
-    raw = yaml.safe_load(src.read_text()) or {}
+    raw = yaml.safe_load(text) or {}
     grouped: dict[str, dict[str, float]] = {}
     for qual, value in raw.items():
         if not qual.startswith(_QUAL_PREFIX):
@@ -139,9 +149,42 @@ def apply_les_tuned_turbulence(
     cls_name = type(sub).__name__
     scheme_overrides = overrides.get(cls_name)
     if not scheme_overrides:
+        # No tuned entry for the ACTIVE scheme (e.g. CLUBB, campaign unfinished).
+        # Returning library defaults is correct, but "les_tuned" then silently
+        # runs untuned physics -- warn so the label can't mislead (P1 #3).
+        _log.warning(
+            "les_tuned: scheme %r (%s) has no tuned entry in the LES YAML; "
+            "running LIBRARY DEFAULTS untuned. Tuned schemes: %s.",
+            turb.scheme, cls_name, sorted(overrides))
         return turb
     tuned_sub = apply_param_overrides(sub, scheme_overrides)
     return turb._replace(**{field: tuned_sub})
+
+
+def write_active_scheme_params(scheme: str, out_path: str,
+                               *, path: str | None = None) -> int:
+    """Write the tuned params for ONE ``scheme`` as a ``run_amip --params`` slice.
+
+    The tracked YAML holds all eight closures; the generic ``--params`` router
+    aborts on any param whose scheme is not selected for the run, so an AMIP
+    opt-in must pass only the active scheme's slice.  This writes that slice
+    (``atm.turb.<ActiveClass>.<field>: value``) and returns the count.  Raises if
+    ``scheme`` has no tuned entry (nothing to opt into).
+    """
+    import yaml
+
+    probe = TurbulenceConfig(scheme=scheme)
+    field = _subconfig_field_for_scheme(probe, scheme)
+    cls_name = type(getattr(probe, field)).__name__
+    overrides = load_les_tuned_overrides(path).get(cls_name)
+    if not overrides:
+        raise ValueError(
+            f"scheme {scheme!r} ({cls_name}) has no tuned entry in the LES YAML; "
+            f"tuned schemes: {sorted(load_les_tuned_overrides(path))}.")
+    slice_doc = {f"{_QUAL_PREFIX}{cls_name}.{f}": v
+                 for f, v in sorted(overrides.items())}
+    Path(out_path).write_text(yaml.safe_dump(slice_doc, sort_keys=True))
+    return len(slice_doc)
 
 
 def scm_turbulence_config(

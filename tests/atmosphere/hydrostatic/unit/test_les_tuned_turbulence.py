@@ -12,7 +12,7 @@ import yaml
 
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 from legoesm.atmosphere.physics.turbulence.les_tuned import (
-    LES_TUNED_YAML,
+    _read_tuned_yaml_text,
     apply_les_tuned_turbulence,
     load_les_tuned_overrides,
     scm_turbulence_config,
@@ -24,7 +24,8 @@ _TUNED_SCHEMES = ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
 
 
 def test_yaml_exists_and_parses():
-    assert LES_TUNED_YAML.exists(), LES_TUNED_YAML
+    # packaged resource resolves (raises if missing); loader validates fully
+    _read_tuned_yaml_text(None)
     grouped = load_les_tuned_overrides()
     # 8 scheme config classes, CLUBB absent
     assert len(grouped) == 8
@@ -79,7 +80,7 @@ def test_every_value_in_spec_bounds():
 
 def test_yaml_is_valid_amip_params_format():
     """Same file must be a flat `qualified_name: value` map (the --params shape)."""
-    raw = yaml.safe_load(LES_TUNED_YAML.read_text())
+    raw = yaml.safe_load(_read_tuned_yaml_text(None)[0])
     assert isinstance(raw, dict) and raw
     for k, v in raw.items():
         assert k.startswith("atm.turb.") and isinstance(v, (int, float)), (k, v)
@@ -118,3 +119,26 @@ def test_scheme_none_is_noop():
     """scheme='none' (valid, no sub-config) must return unchanged, not raise."""
     turb = scm_turbulence_config("none")          # les_tuned default True
     assert turb == TurbulenceConfig(scheme="none")
+
+
+def test_write_active_scheme_params_is_single_scheme_slice(tmp_path):
+    # P1 #1: AMIP opt-in needs only the active scheme's params (the full file
+    # aborts on unselected schemes). The slice must be a valid --params doc with
+    # exactly one turbulence class.
+    from legoesm.atmosphere.physics.turbulence.les_tuned import (
+        write_active_scheme_params)
+    out = tmp_path / "louis_slice.yaml"
+    n = write_active_scheme_params("louis", str(out))
+    assert n > 0
+    doc = yaml.safe_load(out.read_text())
+    classes = {k.rsplit(".", 1)[0] for k in doc}
+    assert len(classes) == 1 and next(iter(classes)) == "atm.turb.LouisConfig"
+    for k, v in doc.items():
+        assert k.startswith("atm.turb.") and isinstance(v, (int, float))
+
+
+def test_write_active_scheme_params_raises_for_untuned_scheme(tmp_path):
+    from legoesm.atmosphere.physics.turbulence.les_tuned import (
+        write_active_scheme_params)
+    with pytest.raises(ValueError, match="no tuned entry"):
+        write_active_scheme_params("clubb", str(tmp_path / "x.yaml"))
