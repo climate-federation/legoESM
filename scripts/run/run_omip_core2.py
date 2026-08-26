@@ -7336,6 +7336,43 @@ def main() -> int:
                   f"(--spmd-persistent-state): full-state gathers only at "
                   f"snapshot/abort/final + counted per-step forcings.")
         else:
+            # Seed the carry ONCE so the state's pytree STRUCTURE is
+            # step-stable before the shard_map is built: the full card's step
+            # PROMOTES None fields to arrays (--gateway-transports fills the
+            # mass-flux capture on the first step), and shard_map's
+            # out_specs are the INPUT specs — a None->Field transition dies
+            # with "pytree structure error ... out_specs" (eORCA025 smoke,
+            # job 9473859).  seed_scan_carry is the designed fix (the scan
+            # lane has always needed it for the same reason); idempotent, no
+            # physics change.
+            state = model.seed_scan_carry(state, dt)
+            # HOST-RESIDENT global state between steps (the eORCA025 memory
+            # ledger): the initial global state is materialized full-size on
+            # EVERY rank's GPU and the loop variable keeps it alive, so it
+            # sat under the band step's ~18 GiB live peak and OOM'd the
+            # full card even at 8 bands (smokes 9474077/9474477).  Pull each
+            # leaf to host numpy and free its device copy; the per-step
+            # scatter stages one leaf at a time, and the global wrapper now
+            # RETURNS host-resident states (gather_state_latlon to_host), so
+            # after this point no global copy ever lives on a device.
+            def _state_to_host(st):
+                import numpy as _np
+                updates = {}
+                for _n in st._fields:
+                    _v = getattr(st, _n)
+                    if _v is None:
+                        updates[_n] = None
+                    elif hasattr(_v, "data") and hasattr(_v.data, "__array__"):
+                        _h = _np.asarray(_v.data)
+                        try:
+                            _v.data.delete()
+                        except Exception:
+                            pass
+                        updates[_n] = _v.replace(data=_h)
+                    else:
+                        updates[_n] = _v
+                return st._replace(**updates)
+            state = _state_to_host(state)
             _spmd_step = make_sharded_ocean_step_global(model, _spmd_mesh)
             # t_sec is always None here (tide-enabled fail-fasts above).
             _ocean_step = (lambda st, sf, fw, t_sec=None:
@@ -7510,7 +7547,7 @@ def main() -> int:
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
-        f_stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
+        f_stack, nn_i, nn_j, nn_w, gshape = build_core2_forcing_device_stack(
             forcing, grid, "tripole")
         # Scan blocks trace _step_impl directly — prime build-once
         # caches from the concrete state first (vertex-mask constant).
@@ -7541,7 +7578,7 @@ def main() -> int:
             idx_block = jnp.asarray(
                 [_idx_t(step + 1 + k, dt, n_rec) for k in range(nb)],
                 dtype=jnp.int32)
-            state = block_fn(state, f_stack, nn_i, nn_j, idx_block,
+            state = block_fn(state, f_stack, nn_i, nn_j, nn_w, idx_block,
                              jnp.int32(step + 1))
             step += nb
             day = step * dt / _SEC_PER_DAY
