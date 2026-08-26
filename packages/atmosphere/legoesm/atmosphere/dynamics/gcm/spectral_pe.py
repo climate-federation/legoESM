@@ -1100,12 +1100,14 @@ def spectral_pe_tendencies(
     # NOTE (#1667 review): the (0,0) mode of the lnps tendency is NOT
     # analytically zero for the PE.  Gauss makes ∫(∂p_s/∂t) dA = 0 — the mean of
     # ∂p_s/∂t — but the prognostic is ln p_s, whose tendency mean is
-    # ∫ (1/p_s)(∂p_s/∂t) dA / ∫dA, a p_s-weighted integral that vanishes only for
-    # uniform p_s.  (The SW h00 fix is valid because SW's h is LINEAR; ln p_s is
-    # not.)  Zeroing the l=0 mode therefore suppressed a real tendency and broke
-    # AD there.  Removed: the ~1e-8 fp32 residual it targeted is negligible, and
-    # real total-mass drift is handled by the anchored-mass fixer
-    # (global_dry_mass / anchor_lnps_to_mass), which conserves ∫p_s directly.
+    # ∫ (1/p_s)(∂p_s/∂t) dA / ∫dA (the ∂p_s/∂t is 1/p_s-weighted); that is not
+    # implied to vanish for non-uniform p_s.  (The SW h00 fix is valid because
+    # SW's h is LINEAR in the conserved mass; ln p_s is not.)  Zeroing the l=0
+    # mode therefore suppressed a real tendency and broke AD there.  Removed: the
+    # ~1e-8 fp32 residual it targeted is negligible, and real total-mass drift is
+    # handled — when enabled (fix_mass + anchor_mass_to_initial) — by the
+    # anchored-mass fixer (global_dry_mass / anchor_lnps_to_mass), which
+    # conserves the ∫p_s integral directly.
 
     # --- 18. Tracer tendencies ---
     # When the input state carries a ``tracers`` dict the tendency
