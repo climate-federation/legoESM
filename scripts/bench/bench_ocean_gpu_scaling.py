@@ -172,7 +172,7 @@ def _time_step(model, state, n_warmup: int, n_timing: int, dt: float):
 def _bench_one(label: str, build_fn, key, prec: str,
                solver_tag: str = "default") -> TimingResult:
     import jax, jax.numpy as jnp
-    model, state, n_cells = build_fn(key, prec == "float64")
+    model, state, n_cells = build_fn(key, prec in ("float64", "mixed"))
     compile_s, warmup_s, timing_s = _time_step(
         model, state, N_WARMUP, N_TIMING, DT_BAROCLINIC,
     )
@@ -214,7 +214,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--output-dir", default="results/scaling_gpu_ocean")
     p.add_argument("--no-timestamp", action="store_true")
-    p.add_argument("--precision", choices=["float32", "float64"],
+    p.add_argument("--precision", choices=["float32", "float64", "mixed"],
                    default="float64")
     p.add_argument("--grids", default="latlon,mpas",
                    help="Comma list of {latlon,mpas}")
