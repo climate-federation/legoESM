@@ -1172,6 +1172,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--config YAML enables it (e.g. for the MPAS/spectral "
                              "backends, whose standalone physics carries a passive "
                              "land tile and cannot step the soil column).")
+    parser.add_argument("--land-update-seconds", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_update_seconds,
+                        dest="land_update_seconds",
+                        help="Multilayer-land call interval [s]; 0 = every "
+                             "host step (legacy). A positive value calls the "
+                             "tile every round(interval/dt) steps on the "
+                             "interval-MEAN forcing and holds its fluxes in "
+                             "between (same shape as the hourly radiation "
+                             "cadence).")
     parser.add_argument("--multilayer-n-layers", type=int,
                         default=_EXPERIMENT_DEFAULTS.multilayer_n_layers,
                         help="Number of soil layers for --use-multilayer-land.")
@@ -1982,6 +1991,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         use_multilayer_land=args.use_multilayer_land,
+        land_update_seconds=args.land_update_seconds,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
         land_calibrated_physics=args.land_calibrated_physics,
