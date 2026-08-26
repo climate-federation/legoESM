@@ -813,7 +813,14 @@ def gradient_y_cgrid(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        f_partner = f[-1:, fold.perm_T]
+        # Beyond-the-fold neighbour of cell (i, J): halo layout -> the
+        # stored top row's permuted image (legacy); pivot layout -> the row
+        # BELOW the pivot permuted (crossing the fold from (i, J) lands on
+        # (perm_T(i), J-1); permuting the stored pivot row reads the land
+        # mirror twins — codex fold-fix RED 6).
+        _src = (f[-2:-1] if bool(getattr(fold, "pivot_row_stored", False))
+                else f[-1:])
+        f_partner = _src[:, fold.perm_T]
         dy_fold = grid.dy_v[-1:]
         if f.ndim == 3:
             dy_fold = dy_fold[:, :, jnp.newaxis]

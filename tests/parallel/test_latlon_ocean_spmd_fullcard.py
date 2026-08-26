@@ -402,14 +402,21 @@ def test_pivot_layout_fold_stays_finite_and_matches_single_device():
     from legoesm.ocean.init_latlon_cgrid import replace_land_mask
     state0 = replace_land_mask(state0, jnp.asarray(lm))
     rng = np.random.default_rng(2)
+    # NONZERO v + a meridional tracer gradient concentrated at the top rows:
+    # the TVD north second-neighbour and the fold V/F constructions only
+    # bind when meridional flux crosses the seam (codex fold-fix round 2 —
+    # the first gate left v=0 and could not see the RED TVD/EEN sites).
+    T3 = (5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+          + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))
+    T3 += 2.0 * (np.arange(n_lat) / n_lat)[:, None, None]   # S->N gradient
     state0 = state0._replace(
         u=state0.u.replace(data=jnp.asarray(
             0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev)))),
+        v=state0.v.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal((n_lat + 1, n_lon, nlev)))),
         eta=state0.eta.replace(data=jnp.asarray(
             0.005 * rng.standard_normal((n_lat, n_lon)))),
-        T=state0.T.replace(data=jnp.asarray(
-            5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
-            + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))),
+        T=state0.T.replace(data=jnp.asarray(T3)),
     )
     dt, n_steps = 600.0, 60
 

@@ -4003,10 +4003,16 @@ def density_jacobian_pgf_smc03_y(
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        rho_F = rho_per_cell[-1:, fold.perm_T, :]
-        h_F = h_partial[-1:, fold.perm_T, :]
-        z_c_F = z_centroid[-1:, fold.perm_T, :]
-        sigma_F = sigma[-1:, fold.perm_T, :]
+        # Beyond-the-fold partner cells: halo layout permutes the stored top
+        # row (legacy); pivot layout permutes the row BELOW the pivot
+        # (crossing the fold from (i, J) lands on (perm_T(i), J-1);
+        # permuting the stored pivot row reads the land mirror twins —
+        # codex fold-fix RED 6).
+        _pj = -2 if bool(getattr(fold, "pivot_row_stored", False)) else -1
+        rho_F = rho_per_cell[_pj:_pj + 1 or None, fold.perm_T, :]
+        h_F = h_partial[_pj:_pj + 1 or None, fold.perm_T, :]
+        z_c_F = z_centroid[_pj:_pj + 1 or None, fold.perm_T, :]
+        sigma_F = sigma[_pj:_pj + 1 or None, fold.perm_T, :]
         z_c_L = z_centroid[-1:]
         z_target_fold = jnp.minimum(z_c_L, z_c_F)
         P_fold = compute_pressure_at_target_smc03(

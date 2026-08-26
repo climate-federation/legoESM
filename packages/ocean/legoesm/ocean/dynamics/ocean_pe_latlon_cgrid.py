@@ -422,7 +422,12 @@ def tvd_to_v_points(
         # fold_is_local is False under SPMD, so key off north_fold_mask (tripole
         # + SPMD armed) — else this would edge-clamp the tripole fold seam.
         if fold_is_local(grid) or north_fold_mask(grid) is not None:
-            _fn = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+            # Pivot-layout meshes (eORCA025): the J+1 ghost is the row BELOW
+            # the pivot permuted (J+k <- J-k); permuting the stored pivot row
+            # itself reads the land mirror twins (codex fold-fix RED 5).
+            _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                          False)) else f[-1])
+            _fn = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
         else:
             _fn = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
         f_north2 = jnp.where(north_mask, _fn, f_north2)
@@ -432,7 +437,9 @@ def tvd_to_v_points(
             f_south2 = f_south2.at[1].set(f_south[1])
         if north_is_pole:
             if fold_is_local(grid):
-                f_north2 = f_north2.at[n_lat - 1].set(f[-1][grid.fold.perm_T])
+                _src = (f[-2] if bool(getattr(grid.fold, "pivot_row_stored",
+                                              False)) else f[-1])
+                f_north2 = f_north2.at[n_lat - 1].set(_src[grid.fold.perm_T])
             else:
                 f_north2 = f_north2.at[n_lat - 1].set(f_north[n_lat - 1])
     t_grad = ratio_grad_floor(f.dtype)
@@ -1937,7 +1944,17 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
         fold = grid.fold
-        if een_e3f_scheme == "nemo_avg":
+        if bool(getattr(fold, "pivot_row_stored", False)):
+            # Pivot layout (eORCA025): the top F/vertex row is the MIRROR of
+            # the vertex row below (measured: F row J = perm_f(F row J-1)),
+            # so the completed row below permuted with the F map IS the top
+            # row — no partner-cell construction from the (half-land) stored
+            # pivot T row (codex fold-fix RED 6).
+            from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+            h_vtx_north = h_vtx[-2:-1][:, fold_perm_f(fold), :]
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
+        elif een_e3f_scheme == "nemo_avg":
             h_k_partner = h_k[-1:, fold.perm_T, :]
             h_sw_partner = h_sw[-1:, fold.perm_T, :]
             t_k_partner = t_k[-1:, fold.perm_T, :]
@@ -1958,7 +1975,9 @@ def een_e3f_h_vtx(h_k, Fu, u, grid, een_e3f_scheme, dz_ref=None):
                 jnp.minimum(h_k_active[-1:], h_sw_active[-1:]),
                 jnp.minimum(h_k_partner, h_sw_partner),
             )
-        h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid, north_mask=nmask)
+        if not bool(getattr(fold, "pivot_row_stored", False)):
+            h_vtx = apply_north_fold(h_vtx, h_vtx_north, grid,
+                                     north_mask=nmask)
     h_vtx = jnp.concatenate(
         [h_vtx, h_vtx[:, 0:1, :]], axis=1,
     )  # (n_lat+1, n_lon+1, nlev)
