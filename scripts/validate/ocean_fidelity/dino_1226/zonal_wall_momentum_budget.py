@@ -75,8 +75,31 @@ UNCOMPARABLE = {
             "implicitly, so BOTH sides are identically zero. Uncomparable by "
             "PLACEMENT, not absent -- at a shallow end-wall row bottom drag "
             "is not obviously negligible, so this is a gap, not an exclusion."),
-    "tau": ("surface stress: same placement story as bfr; both sides read "
-            "exactly zero"),
+    # RETRACTED 2026-08-25: "same placement story as bfr" was FALSE, and it
+    # hid a live candidate behind a plausible-sounding reason.  bfr's zero is
+    # genuine implicit folding -- with ln_drgimp=.TRUE. NEMO's SELECT CASE
+    # never reaches jpdyn_bfr at all.  utrd_tau's zero is a DEAD SLOT in this
+    # campaign's own oracle-capture module: NEMO's stock trddyn.F90 computes
+    # utrd_tau = (utau_b+utauU)/(e3u*rho0) and sends it to iom_put only, and
+    # trd_dyn is never INVOKED with jpdyn_tau anywhere in the build, so
+    # the slot is allocated, zero-initialised and never written.  The
+    # discriminator: a physical zero would be latitude-dependent; utrd_tau is
+    # exactly 0.0 over the WHOLE domain, which is the signature of dead code.
+    # NEMO's actual wind stress is applied inside dyn_zdf (dynzdf.F90 MLF
+    # branch) and is therefore bundled into the nonzero utrd_zdf; legoESM's
+    # DINO card runs surface_stress_implicit=False and applies it as an
+    # explicit top-cell source instead.  That is a real placement difference,
+    # and it is MEASURABLE from data already on disk -- utau_b is present and
+    # nonzero -- so this entry is a gap in THIS probe's coverage, not a
+    # property of the oracle.
+    "tau": ("surface stress: NEMO's utrd_tau slot is never written by the "
+            "oracle's dump path -- trd_dyn is never invoked with the tau "
+            "index anywhere in the build, so the slot is allocated and never "
+            "written (dead code, zero domain-wide) -- NOT folded "
+            "like bfr. NEMO applies the stress inside dyn_zdf so it is "
+            "bundled into utrd_zdf; legoESM applies it explicitly "
+            "(surface_stress_implicit=False on this card). Reconstructible "
+            "offline from utau_b -- a coverage gap here, not an exclusion."),
 }
 
 #: A term whose oracle rms on a band is below this is DEAD there; a relative

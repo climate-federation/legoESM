@@ -742,9 +742,13 @@ def main():
     _Fe_prod = np.asarray(_k_loop["F_slow_eta"])
 
     # The v-face and cell mappings are CALIBRATED against a known answer rather
-    # than assumed: legoESM's own F_slow_v already reproduces NEMO's zv_frc to
-    # ~1e-6 relative under the CORRECT row alignment and to O(1) under the wrong
-    # one, so the alignment is read off the data and then asserted.
+    # than assumed: legoESM's own F_slow_v reproduces NEMO's zv_frc to ~7e-4
+    # relative under the CORRECT row alignment and to O(1) under the wrong one
+    # -- a discrimination of ~1500x -- so the alignment is read off the data and
+    # then asserted.  (The figure quoted here used to be 1e-6, which this
+    # probe's own output contradicts by ~700x; corrected 2026-08-26.  Note the
+    # residual is NOT roundoff: the forcing assembly agrees at the median and
+    # departs in a tail, which is a live question elsewhere on this card.)
     _vmask2 = np.asarray(_k_loop["v_mask"]) > 0.5
     def _v_resid(shift):
         cand = _Fv_prod[shift:shift + jpj]
@@ -767,6 +771,16 @@ def main():
     _Fu_sub[:, 0] = zu_frc[:, -1]        # zonal periodicity, established above
     _Fv_sub = np.array(_Fv_prod)
     _Fv_sub[1:1 + jpj] = _zv_frc
+    # Row 0 is outside NEMO's haloless array and keeps legoESM's own forcing.
+    # For the substitution to be ONE VARIABLE that row must carry no wet v
+    # face, or the arm silently mixes two forcings.  The u side handles its
+    # edge explicitly by periodicity above; this one is asserted rather than
+    # assumed (round-2 review: "probably harmless" is the wrong standard for a
+    # one-variable claim).
+    assert not bool(_vmask2[0].any()), (
+        "row 0 of the v grid carries wet faces, so replacing rows 1.. only "
+        "leaves legoESM's own forcing on a live row: the forcing substitution "
+        "would not be a one-variable experiment")
     _Fe_sub = np.array(_ssh_frc)
     _k_sub = dict(_k_loop)
     _k_sub["F_slow_u"] = jnp.asarray(_Fu_sub, dtype=_Fu_prod.dtype)
@@ -784,6 +798,94 @@ def main():
         _lego_avg_sub = _lego_avg_sub + wf_n[j - 1] * _cell(
             np.asarray(U_bar_stk_s[j - 1]))
     _dep_sub = acc_sv((_lego_avg_sub - nemo_Ubar_avg) * _wetu)
+
+    # =================================================================
+    # THE MERIDIONAL (v-face) DEPOSIT.  Added 2026-08-26 after BOTH
+    # adversarial reviews returned NO-SHIP on a u-only wall result for the same
+    # reason: the scored walls are ZONAL walls (land to the north/south), so
+    # the wall-NORMAL component there is v, and it is the convergence of the
+    # wall-normal transport that sets the sea surface against a closed wall.
+    # A u-only measurement at a zonal wall measures the TANGENTIAL component.
+    #
+    # Every input was already on disk and already parsed; only the carry index
+    # changed.  The v row alignment is NOT assumed -- it is the shift=1 mapping
+    # this file already calibrates against NEMO's own zv_frc above, and the two
+    # reconstructions below are validated against NEMO's and legoESM's own
+    # final fields exactly as the u side is.
+    _v_bar_stk = np.asarray(carries[2])
+    _v_bar_stk_s = np.asarray(captured["carries"][2])     # substitution run
+    # The substitution run's u side had NO absolute check -- adversarial review
+    # 2026-08-26 pointed out that _lego_avg_sub was the one reconstruction in
+    # this file pinned by nothing, while its two siblings are pinned to 1e-10
+    # and 1e-12.  Pin it the same way, against the substitution run's OWN
+    # model-computed average, before anything downstream reads it.
+    _u_sum_model_s = np.asarray(captured["carries"][6])[Kpit - 1]
+    _lego_avg_model_s = _cell(_u_sum_model_s / float(np.asarray(wt)))
+    _rel_lego_s = (np.abs((_lego_avg_sub - _lego_avg_model_s)[_wetu]).max()
+                   / max(np.abs(_lego_avg_model_s[_wetu]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (lego side, SUBSTITUTED run): rebuilt boxcar "
+          f"vs model U_sum/w_total rel={_rel_lego_s:.3e}")
+    assert _rel_lego_s < 1e-12, "the substituted legoESM deposit map is wrong"
+
+    def _cell_v(a2d):
+        """lego v-arrays carry one extra row at the start (shift=1, calibrated
+        against zv_frc above); NEMO's are haloless (jpj, jpi)."""
+        return a2d[1:1 + jpj] if a2d.shape[0] == jpj + 1 else a2d
+
+    _pvv_b = np.fromfile(os.path.join(SEQDUMP, "spg_dump_pvv_b_final.bin"),
+                         dtype="<f8").reshape(jpj + 2 * HLS, jpi + 2 * HLS
+                                              )[HLS:-HLS, HLS:-HLS]
+    nemo_Vbar_avg = np.zeros_like(_pvv_b)
+    for j in range(1, Kpit + 1):
+        nemo_Vbar_avg = nemo_Vbar_avg + wgtbtp1[j - 1] * subs[j]["va_e"]
+    _d4 = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+    _vmask3 = np.asarray(_d4.variables["vmask"][0], dtype=np.float64)
+    _e1v_2d = np.asarray(_d4.variables["e1v"][0], dtype=np.float64)
+    _d4.close()
+    _wetv = (_vmask3[0] > 0.5)
+    _rel_pvb = (np.abs((nemo_Vbar_avg - _pvv_b)[_wetv]).max()
+                / max(np.abs(_pvv_b[_wetv]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (v, NEMO): boxcar(dumped va_e) vs "
+          f"spg_dump_pvv_b_final rel={_rel_pvb:.3e}")
+    assert _rel_pvb < 1e-10, (
+        f"the substep->pvv_b map is WRONG (rel {_rel_pvb:.3e}): the meridional "
+        "deposit cannot be trusted")
+
+    lego_Vbar_avg = np.zeros_like(_pvv_b)
+    for j in range(1, Kpit + 1):
+        lego_Vbar_avg = lego_Vbar_avg + wf_n[j - 1] * _cell_v(
+            np.asarray(_v_bar_stk[j - 1]))
+    _v_sum_model = np.asarray(carries[7])[Kpit - 1]
+    _lego_vavg_model = _cell_v(_v_sum_model / float(np.asarray(wt)))
+    _rel_lego_v = (np.abs((lego_Vbar_avg - _lego_vavg_model)[_wetv]).max()
+                   / max(np.abs(_lego_vavg_model[_wetv]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (v, lego): rebuilt boxcar vs model "
+          f"V_sum/w_total rel={_rel_lego_v:.3e}")
+    assert _rel_lego_v < 1e-12, "the legoESM meridional deposit map is wrong"
+
+    lego_Vbar_avg_sub = np.zeros_like(_pvv_b)
+    for j in range(1, Kpit + 1):
+        lego_Vbar_avg_sub = lego_Vbar_avg_sub + wf_n[j - 1] * _cell_v(
+            np.asarray(_v_bar_stk_s[j - 1]))
+    # ... and PIN IT.  Round-1 review found the u substituted run was the one
+    # reconstruction constrained by nothing; round 2 found this one had the
+    # same hole, on the side that carried the claim.  Same fix, same bar.
+    _v_sum_model_s = np.asarray(captured["carries"][7])[Kpit - 1]
+    _lego_vavg_model_s = _cell_v(_v_sum_model_s / float(np.asarray(wt)))
+    _rel_lego_vs = (np.abs((lego_Vbar_avg_sub
+                            - _lego_vavg_model_s)[_wetv]).max()
+                    / max(np.abs(_lego_vavg_model_s[_wetv]).max(), 1e-300))
+    print(f"    INSTRUMENT CHECK (v, lego, SUBSTITUTED run): rebuilt boxcar "
+          f"vs model V_sum/w_total rel={_rel_lego_vs:.3e}")
+    assert _rel_lego_vs < 1e-12, (
+        "the substituted legoESM meridional deposit map is wrong")
+    dV_avg = (lego_Vbar_avg - nemo_Vbar_avg) * _wetv
+    _dV_sub = (lego_Vbar_avg_sub - nemo_Vbar_avg) * _wetv
+    # v-face weight, mirroring acc_w = e2u * H1d on the u face.
+    _h1d_v = np.tensordot(e3t_1d, _vmask3, axes=(0, 0))
+    acc_w_v = _e1v_2d * _h1d_v
+    print(f"    meridional deposit built: max|dV_avg|={np.abs(dV_avg).max():.3e}"
+          f"  max|dV_sub|={np.abs(_dV_sub).max():.3e} m/s")
 
     # ===================================================================
     # #1455 PHASE-2: the CANDIDATE-ARRAY substitution, on TOP of the forcing
@@ -998,13 +1100,38 @@ def main():
             f"({_rt_tot!r} vs {_dep_vel!r}, {_rt_sub!r} vs {_dep_sub!r})")
         for _nm, _a in (("dU_avg", dU_avg), ("dU_sub", _dU_sub),
                         ("acc_w", acc_w), ("per_lon_total", _pl_tot),
-                        ("per_lon_in_loop", _pl_sub)):
+                        ("per_lon_in_loop", _pl_sub),
+                        ("lego_Ubar_avg", lego_Ubar_avg),
+                        ("nemo_Ubar_avg", nemo_Ubar_avg),
+                        ("lego_Ubar_avg_sub", _lego_avg_sub),
+                        ("dV_avg", dV_avg), ("dV_sub", _dV_sub),
+                        ("acc_w_v", acc_w_v),
+                        ("lego_Vbar_avg", lego_Vbar_avg),
+                        ("nemo_Vbar_avg", nemo_Vbar_avg),
+                        ("lego_Vbar_avg_sub", lego_Vbar_avg_sub)):
             if not np.all(np.isfinite(_a)):
                 raise SystemExit(f"FATAL: non-finite values in {_nm}")
         os.makedirs(os.path.dirname(os.path.abspath(_map_out)), exist_ok=True)
         np.savez(_map_out,
                  dU_avg=dU_avg, dU_sub=_dU_sub, acc_w=acc_w,
                  wetu=_wetu.astype(np.int8),
+                 # The two SIDES, not only their difference.  A difference
+                 # field answers "do the two disagree"; it cannot answer "which
+                 # one carries the signal", and a two-step hunt needs the
+                 # latter -- an alternating difference is produced equally by
+                 # lego alternating and by NEMO alternating.
+                 lego_Ubar_avg=lego_Ubar_avg, nemo_Ubar_avg=nemo_Ubar_avg,
+                 lego_Ubar_avg_sub=_lego_avg_sub,
+                 # the MERIDIONAL side: the wall-normal component at a zonal
+                 # wall, which a u-only projection cannot see.
+                 # legoESM's own primary boxcar weights, so a downstream
+                 # projection can MEASURE this window's attenuation of a
+                 # substep-alternating source instead of quoting a number.
+                 wgt_primary=np.asarray(wf_n, dtype=np.float64),
+                 dV_avg=dV_avg, dV_sub=_dV_sub, acc_w_v=acc_w_v,
+                 wetv=_wetv.astype(np.int8),
+                 lego_Vbar_avg=lego_Vbar_avg, nemo_Vbar_avg=nemo_Vbar_avg,
+                 lego_Vbar_avg_sub=lego_Vbar_avg_sub,
                  per_lon_total=_pl_tot, per_lon_in_loop=_pl_sub,
                  dep_total=np.float64(_dep_vel), dep_in_loop=np.float64(_dep_sub),
                  ic_step=np.int64(mr.IC_STEP), seqdump=np.array(SEQDUMP),
@@ -1021,6 +1148,34 @@ def main():
         assert _rt2_tot == _dep_vel and _rt2_sub == _dep_sub, (
             "the SAVED FILE does not reproduce the printed deposits "
             f"({_rt2_tot!r} vs {_dep_vel!r}, {_rt2_sub!r} vs {_dep_sub!r})")
+        # A ROUND-TRIP, NOT A CONTROL, and labelled as one after adversarial
+        # review 2026-08-26 showed the earlier wording over-claimed it.  The
+        # difference is DEFINED as (lego - nemo)*wet from these very operands,
+        # so this equality is structural: it can catch a wrong array bound to a
+        # keyword or a storage/dtype fault, and it can catch NOTHING about the
+        # per-side ABSOLUTE levels that the side statistic reads.  Those are
+        # constrained upstream instead, and each of the four now has its own
+        # assert: nemo_Ubar_avg vs spg_dump_puu_b_final (1e-10), nemo_Vbar_avg
+        # vs spg_dump_pvv_b_final (1e-10), and both legoESM boxcars vs the
+        # model's own U_sum/V_sum (1e-12), plus the substituted run's.
+        _wb = _rb["wetu"].astype(bool)
+        for _nm, _a, _b in (
+                ("dU_avg", (_rb["lego_Ubar_avg"] - _rb["nemo_Ubar_avg"]) * _wb,
+                 _rb["dU_avg"]),
+                ("dU_sub",
+                 (_rb["lego_Ubar_avg_sub"] - _rb["nemo_Ubar_avg"]) * _wb,
+                 _rb["dU_sub"]),
+                ("dV_avg",
+                 (_rb["lego_Vbar_avg"] - _rb["nemo_Vbar_avg"])
+                 * _rb["wetv"].astype(bool), _rb["dV_avg"]),
+                ("dV_sub",
+                 (_rb["lego_Vbar_avg_sub"] - _rb["nemo_Vbar_avg"])
+                 * _rb["wetv"].astype(bool), _rb["dV_sub"])):
+            if not np.array_equal(_a, _b):
+                raise SystemExit(
+                    f"FATAL: the saved sides do not reconstruct {_nm} "
+                    f"(max|d|={np.abs(_a - _b).max():.3e}); a per-side "
+                    "two-step projection would name the wrong model.")
         # WHERE THE DEPOSIT LIVES IN LATITUDE, against the band the ACC
         # actually occupies.  The section reducer sums EVERY latitude and is
         # only a circumpolar-transport surrogate because the closed-basin rows
