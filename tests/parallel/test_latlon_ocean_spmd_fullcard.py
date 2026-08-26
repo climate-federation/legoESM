@@ -178,3 +178,70 @@ def test_zstar_config_still_has_empty_aux_stacks():
     assert zc_stacks == {}
     assert iwm_stacks is None
     assert cfg_stacks == {}      # no per-cell config arrays on the bare card
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_a_h_lat_profile_is_band_sliced_under_spmd():
+    """#1666: A_h_lat_profile is a hashable TUPLE, so tree_flatten explodes it
+    into scalar leaves the array-leaf band-stacker skips -> the band body keeps
+    the GLOBAL-length profile and raises `n_lat vs nl_band`.  With the fix the
+    profile is band-sliced; the SPMD run matches single-device.
+
+    NON-VACUITY: revert the sharded_ocean_step fix and this raises ValueError
+    ("A_h_lat_profile has 48 entries but the grid has 12 latitude rows").
+    """
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon, make_sharded_ocean_step, shard_state_latlon,
+    )
+    from legoesm.parallel.mesh import create_latlon_mesh
+
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+    zc = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+
+    # A smooth cos(lat)-like equatorial A_h reduction, one entry per lat row
+    # (the profile's contract: len == grid.lat).  A_h>0 so it actually scales,
+    # eq_boost left at 1.0 (the profile and eq_boost are mutually exclusive).
+    lat = np.linspace(-1.0, 1.0, n_lat)
+    prof = tuple(float(0.2 + 0.8 * np.cos(lat[i] * np.pi / 2) ** 2)
+                 for i in range(n_lat))
+    base = LatLonCGridOceanConfig.from_flat()
+    cfg = base._replace(
+        lateral_viscosity=base.lateral_viscosity._replace(
+            A_h=20000.0, A_h_eq_boost=1.0, A_h_lat_profile=prof))
+
+    model = LatLonCGridOceanModel(grid, zc, cfg)
+    state0 = rest_state_latlon_cgrid_ocean(
+        grid, zc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    rng = np.random.default_rng(0)
+    state0 = state0._replace(
+        u=state0.u.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev)))),
+        eta=state0.eta.replace(data=jnp.asarray(
+            0.005 * rng.standard_normal((n_lat, n_lon)))),
+    )
+    dt, n_steps = 600.0, 20
+
+    s = state0
+    for _ in range(n_steps):
+        s = model.step(s, dt)
+
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)   # must not raise
+    ss = shard_state_latlon(state0, dev.mesh)
+    for _ in range(n_steps):
+        ss = step(ss, dt)                              # in-body: must not raise
+    ss = gather_state_latlon(ss, dev.mesh)
+
+    _ATOL, _RTOL = 2.0e-3, 1.0e-2
+    for name in ("T", "S", "u", "v", "eta"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(ss, name).data),
+            np.asarray(getattr(s, name).data),
+            atol=_ATOL, rtol=_RTOL,
+            err_msg=f"{name} diverged SPMD vs single-device with A_h profile")
