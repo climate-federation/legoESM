@@ -22,9 +22,13 @@ withdrawn below, along with a third about the wind's meridional channel.
 
 **The leading candidate** is a horizontal grid metric: legoESM's zonal width of
 the meridional cell face is 3.3e-05 too large at both walls, the only metric off
-by more than roundoff. It predicts the wall-normal deficit at the walls to
-within 5-28 % with no fitted parameter — and fails to reproduce its basin-wide
-latitude structure. One cheap pre-registered arm settles it (§6).
+by more than roundoff. **The pre-registered arm has now been run and the verdict
+is PARTIAL** (§6a): substituting NEMO's own array removes 16 % of the
+state-constant wall-normal residual basin-wide and 25 % at the wall rows, against
+bars of 50 % for OWNER and 10 % for REFUTED. The candidate is a real and
+correctly-shaped term — the arm's own response tracks the predicted latitude gap
+at **+0.75** — but it is not the residual's owner, and a **larger sibling error in
+the same coefficient** is now named.
 
 Artifact: `results/dino_1455/baro_fixed_bias_wall_map.json`.
 Probe: `scripts/validate/ocean_fidelity/dino_1226/baro_fixed_bias_wall_map.py`.
@@ -394,18 +398,176 @@ one reported here.)*
 So: right order, right sign, right place at the walls, **wrong basin-wide
 shape**. That is a lead worth one cheap arm, not a verdict.
 
-### The ranked remainder, and the pre-registered next test
+## 6a. THE ARM WAS RUN. The verdict is PARTIAL
 
-1. **Override the v-face zonal metric with NEMO's own array and rerun the
-   in-loop arm** from the same bit-identical entry state — the same
-   freeze-and-vary that refuted bottom drag. **Pre-register: OWNER if the
-   state-constant wall-normal residual collapses by more than 50 %; REFUTED
-   below 10 %.** Include the staggering control (feed the un-shifted array),
-   which must make things clearly worse. This settles §6 either way and is the
-   only test on this list that can.
-2. **Face depths**, measurable offline the same way the metrics were — compare
+Three arms, all five states, all produced at one clean tree and scored by the
+**unmodified** probe: the plain frozen-forcing baseline, NEMO's own `e1v`
+substituted, and the registered staggering control. The substitution is one
+array reaching the three in-loop consumers that read the same width — the
+continuity divergence, the metric-complete EEN rotation coefficient, and the
+ssh-average face depth — and all three are verified reachable on this card at
+run time rather than read off a log afterwards.
+
+### The registered number
+
+| reduction of the state-constant WALL-NORMAL residual | baseline | arm | collapse |
+|---|---|---|---|
+| basin-wide state-mean RMS | 1.8475e-07 | 1.5484e-07 | **16.2 %** |
+| restricted to the two wall rows | 2.6725e-07 | 2.0065e-07 | **24.9 %** |
+| southern wall row 1 | 7.034e-08 | 6.394e-08 | **9.1 %** |
+| northern wall row 196 | 3.713e-07 | 2.765e-07 | **25.6 %** |
+
+**PARTIAL** on every reduction but one: the southern wall row alone lands at
+9.1 %, 0.9 points inside the REFUTED band. The verdict does not depend on which
+reduction §2 and §6 meant — the oracle velocity is bit-identical between the
+arms, so the relative-deficit collapse equals the raw-RMS collapse to the digit
+(9.1 % and 25.6 % either way). The arm's residual is still a fixed field (worst
+state-to-state departure 1.83 %, cross-state correlation +0.9997), so the
+comparison is like for like.
+
+The **tangential** channel, which the registration did not score, moved nearly
+three times as much: **46.0 %** basin-wide. §6's mechanism argued the oversized
+rotation coefficient makes the *wall-normal* velocity too small; it does not
+predict that.
+
+### The staggering control: it fires, and it calibrates the response
+
+Feeding the un-shifted array — same 10 296 cells, only the row alignment
+differs — makes the wall-normal residual **292-307× WORSE** at every reduction,
+against a bar registered in advance at 50 % above baseline. It is not a
+degenerate path: the wrong array's metric error is 656× the candidate's and its
+residual change is 510× larger, i.e. the loop's response to this metric is
+near-linear across a 656× span, and no NaN or infinity is involved.
+
+### The band decomposition: it acts on the northern lobe, not on the bands
+
+| band (wall-normal) | baseline | arm | collapse |
+|---|---|---|---|
+| rows 57-73 (southern interior) | 2.787e-07 | 2.892e-07 | **−3.7 %** |
+| rows 121-153 (northern interior) | 2.091e-07 | 2.149e-07 | **−2.8 %** |
+| rows 185-197 (northern lobe) | 3.814e-07 | 1.460e-07 | **+61.7 %** |
+
+So the answer to "does it act on the bands or only the walls" is **neither**.
+The two interior bands are untouched — marginally worse, not better — while
+rows ≥185 carry **74 %** of the arm's whole variance reduction. And inside that
+lobe the collapse *falls as the wall is approached*: 83.5 % at row 185, 71 % at
+192, 53 % at 194, 25.6 % at the wall itself. The wall row is the part of the
+northern lobe this candidate explains **worst**, which is the opposite of the
+wall-localised reading §6 was built on.
+
+### The shape test, re-printed post-substitution — and a sharper version of it
+
+The probe's own test is unchanged (its predicted gap comes from NEMO's mesh and
+no arm touches it). Post-substitution it still returns **NOT SUPPORTED**, and
+the correlation moves *away* from support, −0.045 → **−0.200**.
+
+But the test compares a predicted metric gap against the measured *residual*,
+and the arm now supplies the missing third field — the residual's response to
+that metric. Against **the arm's own response** the correlation is **+0.750**
+over the same 196 rows. Read together these say something sharper than "right
+order, wrong shape": **the mechanism is real and its latitude footprint is
+exactly where §6 predicted; the residual it was supposed to explain simply has
+a different and larger owner.**
+
+A caveat on the test's own power, which the control exposes: on the staggering
+arm the shape test returns **SUPPORTED** with the measured peak moving to the
+wall row. That is a residual which is ~100 % metric-driven, so it demonstrates
+the test is not vacuous but says nothing about its power at the candidate's own
+30 %. A scaled-candidate ladder would measure that threshold; it has not been
+run.
+
+### Why a 16 % collapse is not a small response — amplitude versus alignment
+
+The collapse statistic conflates two things and both are measurable from the
+same maps:
+
+| channel | residual RMS | the arm's own change | corr | best-fit rescale α | variance explained |
+|---|---|---|---|---|---|
+| wall-normal | 1.8475e-07 | 1.0732e-07 (**58 %** of it) | +0.548 | **0.941** | **30 %** |
+| tangential | 1.2235e-07 | 1.0113e-07 (**83 %** of it) | +0.852 | **1.018** | **73 %** |
+
+α is the least-squares rescaling that would best fit the residual, and it comes
+out at 0.94 and 1.02 — **the arm's amplitude is right with no fitted
+parameter**. Nothing is left on the table by amplitude; the entire shortfall is
+alignment. Note also what the registered bar demanded: a 50 % RMS collapse
+requires the candidate to explain 75 % of the variance. That bar stands as
+written, but it is a stiffer test than "is this term the dominant one".
+
+Corollary, and it **weakens §6's own headline**: the balance argument predicts a
+transfer gain of exactly 1 — a rotation coefficient too large by ε makes the
+balanced wall-normal velocity too small by ε. Measured on the arm's own
+response the gain is **0.77 (south) and 0.66 (north)** at the walls and **0.33**
+basin-wide. §6's "the prediction lands at 1.05-1.28× the measured deficit with
+no fitted parameter" was therefore two compensating errors — the prediction
+over-states the true response by ~1.3-1.5× at the walls, and the deficit it was
+compared against is only partly metric-driven. The two-row agreement was partly
+luck.
+
+### The sibling error this arm uncovered, and did not remove
+
+Mechanism review asked whether a second error of the same class could be
+masking the first. There is one, it is **larger**, it sits in the **same** EEN
+rotation coefficient, and it has the **opposite sign**. legoESM builds the
+Coriolis parameter at the vertex as the average of the two adjacent tracer-row
+values; NEMO evaluates it at its own f-point latitude. Measured against NEMO's
+own dumped `ff_f`:
+
+| | median | RMS | at the walls | at the equator |
+|---|---|---|---|---|
+| v-face zonal metric gap (this arm's candidate) | **+1.86e-05** | 2.08e-05 | +3.35e-05 | +2.9e-09 |
+| Coriolis at the vertex | **−5.48e-05** | 6.15e-05 | −2.50e-05 | −9.19e-05 |
+
+The two are exactly complementary: the metric error peaks at the walls and
+vanishes at the equator, the Coriolis error does the reverse, and their signed
+latitude profiles correlate at +1.000 (their *magnitudes* at −1.000 — the same
+fact stated two ways). In the coefficient, which goes as `e1v · f`, a positive
+relative error in one and a negative one in the other **partially cancel**. This
+arm removed the smaller of the two.
+
+**And one third of that Coriolis gap is not a discretisation convention at
+all.** It decomposes into a uniform **−1.578e-05** and a latitude-varying
+**−3.90e-05** median. The uniform part is simply a different Earth: legoESM's
+`constants.Omega` is **7.292e-05**, NEMO's is **7.2921150830e-05** (2π over the
+sidereal day, confirmed from NEMO's own `phycst.F90` and independently from the
+dumped `ff_f`). An oracle-matching card is running on a rotation rate the oracle
+does not use. Verified premises: legoESM's tracer latitudes equal NEMO's
+`gphit` to 1.4e-14 degrees, so this is a constant, not a grid difference.
+
+### Stamps
+
+fp64 control dtype; vertical ladder `LEGOESM_NEMO_E3T=both`; seasonal clock
+derived per state (day 180.03 → 180.16), never overridden; wind on
+(`wind_through_step=True`, τ_x ∈ [−0.1999, 0.1000] Pa) at every state; entry
+state bit-identical to NEMO's restart at every state
+(`max|dT| = max|d_eta| = max|du| = max|dv| = 0`); card `face_depth='nemo_ssh_avg'`,
+`time_filter='nemo_boxcar_ab3'`, `coriolis='een_metric'`,
+`reconcile='velocity_avg'`. All fifteen maps carry one producer SHA, and every
+untouched array — legoESM's own-forcing deposit, the oracle side, the weights
+and the masks — is **bit-identical across the three arms at all five states**
+(65 array comparisons), so the only thing that moved between them is the
+substituted width. The earlier baseline, written by a `+dirty` tree, was re-run
+at the clean tree and reproduces `1.8475e-07` exactly.
+
+**Also verified at the point of use rather than relayed**, because the whole arm
+rests on it: `dx_u` vs `e1u`, `dy_u` vs `e2u` and `dy_v` vs `e2v` agree with
+NEMO's mesh to 1.3e-16, and the cell area to 2.3e-16. The v-face zonal width
+really is the only horizontal metric off by more than roundoff.
+
+### The ranked remainder, after the arm
+
+1. **Substitute NEMO's own `ff_f` for the vertex Coriolis** — three arms (f
+   alone, `e1v` alone which is done, and both together), pre-registering the
+   verdict on the **joint** arm. It is the same freeze-and-vary at the same
+   cost, it is the only test that can settle whether the two coefficient errors
+   were cancelling, and its target is 3× the RMS of the one just removed.
+   Separately and cheaper: legoESM's `Omega` is not NEMO's, which is a constant,
+   not a scheme.
+2. ~~**Override the v-face zonal metric with NEMO's own array**~~ — **DONE, see
+   §6a. PARTIAL: 16.2 % basin-wide, 24.9 % at the wall rows, against 50 %/10 %.
+   The staggering control fired at 292-307× worse.**
+3. **Face depths**, measurable offline the same way the metrics were — compare
    the loop's face depths against NEMO's dumped ones before spending a run.
-3. **Discriminate "the bias tracks the flow" from "the bias tracks the
+4. **Discriminate "the bias tracks the flow" from "the bias tracks the
    geometry."** Cheapest version, suggested by review and better than the
    two-day comparison: rerun the in-loop arm from a **zero entry state** with
    the same frozen forcing. Because the loop is near-linear that splits the
@@ -414,9 +576,9 @@ shape**. That is a lead worth one cheap arm, not a verdict.
    disk predates two fixes to this quantity — at the same state its residual
    correlates with the current one at **−0.18** — and regenerating day 230
    needs a tiled oracle restart that exists only for day 180.)*
-4. **The blend and the time filter.** A weight or phase offset gives a
+5. **The blend and the time filter.** A weight or phase offset gives a
    state-constant residual, but with no reason to carry a latitude shape. Low.
-5. **The north fold: excluded at no cost.** DINO's grid carries no fold, and
+6. **The north fold: excluded at no cost.** DINO's grid carries no fold, and
    the fold machinery is the identity in a serial run.
 
 ### One route the substituted arm may not close
@@ -451,9 +613,34 @@ substituted arm is described as "loop-only". **Unverified.**
   interior in the zonal component.
 * "Ten times the interior, boundary-localised" is retracted (§2): two interior
   rows exceed both walls, and the relative deficit peaks at row 134.
-* The v-face metric is a **candidate**, not the owner (§6). Its basin-wide
-  shape correlation with the measured deficit is −0.045, and the probe's own
-  shape test returns NOT SUPPORTED.
+* The v-face metric is a **candidate**, not the owner (§6) — and the arm has now
+  measured that: it removes 16.2 % of the state-constant wall-normal residual
+  basin-wide and 24.9 % at the wall rows, which is **PARTIAL**, not ownership
+  (§6a). Its basin-wide shape correlation with the measured deficit is −0.045
+  post-substitution −0.200, and the probe's own shape test returns NOT
+  SUPPORTED in both.
+* **RETRACTED: "the prediction lands at 1.05-1.28× the measured deficit with no
+  fitted parameter" is not the endorsement it reads as** (§6a). The balance
+  argument predicts a transfer gain of 1; the arm's measured gain is 0.77/0.66
+  at the walls and 0.33 basin-wide. The two-row agreement was two compensating
+  errors — an over-stated prediction against a deficit that is only partly
+  metric-driven.
+* **The bias is NOT owned by this metric at the walls specifically.** The arm's
+  effect is a northern-lobe object (rows ≥185 carry 74 % of its whole variance
+  reduction) whose collapse *falls* from 83.5 % at row 185 to 25.6 % at the wall
+  row, and the two interior bands are untouched (§6a).
+* The arm removed **one of two opposing coefficient errors**. legoESM's Coriolis
+  at the vertex differs from NEMO's `ff_f` by −5.48e-05 median, 3× the metric
+  gap's RMS, with the opposite sign and a complementary latitude shape; a third
+  of it is simply a different rotation rate (§6a). No claim is made about what
+  the joint arm would give — that test is unrun.
+* The wall-normal collapse's **amplitude** is not the shortfall: the arm's own
+  change is 58 % of the residual's RMS at a best-fit rescaling of 0.94, i.e. the
+  amplitude is right unfitted and the whole shortfall is alignment (§6a).
+* The shape test's non-vacuity demonstration is **untested at the candidate's
+  own amplitude** (§6a): it returns SUPPORTED on the staggering control, whose
+  residual is ~100 % metric-driven, and that says nothing about its power at
+  30 %.
 * The wind's structural exclusion has **four** premises, two verified by source,
   one now gated on the maps' provenance, and one still **unverified** (§5).
   "This alone settles it" is withdrawn.
