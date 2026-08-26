@@ -968,4 +968,82 @@ def test_small_angle_caveat_is_recorded_with_the_real_rotation_angle(
     ang = got["rotation_angle_rad_at_window_end"]["south"]
     assert ang == pytest.approx(1.366e-4 * 68 * 117.391304, rel=1e-9)
     assert ang > 1.0                      # emphatically not a small angle
-    assert got["small_angle_overstatement_frac"] > 0.0
+    # DERIVED per wall from the arrays in scope, not a pasted constant.
+    ov = got["small_angle_overstatement_frac"]
+    assert isinstance(ov, dict) and set(ov) == {"south", "north"}
+    assert all(0.0 < x < 0.5 for x in ov.values())
+
+
+# --------------------------------------------------------------------------
+# CONFIRMATION PASS: the cross-map AGREEMENT clause was itself untested.
+# Every other gate test builds all five stamps from one string, so a map-0-
+# right / maps-1-4-wrong series had no coverage at all.
+# --------------------------------------------------------------------------
+def test_gate_rejects_a_series_where_only_the_FIRST_map_is_right():
+    """Map 0 correct, maps 1-4 wrong.
+
+    The case that motivated the confirmation pass: an on-state check sitting
+    outside the per-map loop inspects map 0, finds it perfect, and waves the
+    series through. Must fail for BOTH knobs.
+    """
+    good = {"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+            "provenance": _STAMP}
+    for bad_stamp in (
+            _STAMP.replace("LEGOESM_NEMO_E3T='both'",
+                           "LEGOESM_NEMO_E3T='off'"),
+            _STAMP.replace("DINO_1226_T_SECONDS=None",
+                           "DINO_1226_T_SECONDS='999.0'")):
+        stamps = [good] + [{"path": f"m{i}", "kt": 5760,
+                            "seqdump": "/oracle/d180",
+                            "provenance": bad_stamp} for i in range(1, 5)]
+        with pytest.raises(SystemExit):
+            M.assert_map_provenance(stamps, "/oracle/d180")
+
+
+def test_ladder_check_runs_on_EVERY_map_not_only_the_first():
+    """The on-state check must judge each map on its own.
+
+    This is now the ONLY guard for the case, the cross-map agreement clause
+    having been removed precisely because the two could not be tested apart.
+    """
+    good = {"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+            "provenance": _STAMP}
+    bad = {"path": "m1", "kt": 5760, "seqdump": "/oracle/d180",
+           "provenance": _STAMP.replace("LEGOESM_NEMO_E3T='both'",
+                                        "LEGOESM_NEMO_E3T='off'")}
+    with pytest.raises(SystemExit, match="m1"):
+        M.assert_map_provenance([good, bad], "/oracle/d180")
+
+
+# --------------------------------------------------------------------------
+# CONFIRMATION PASS nit: the overstatement is DERIVED, not pasted
+# --------------------------------------------------------------------------
+def test_small_angle_overstatement_vanishes_in_the_small_angle_limit():
+    """At a tiny rotation angle the approximation IS the exact answer."""
+    wgt = np.ones(68) / 68.0
+    assert M.small_angle_overstatement(1e-12, 1.0, wgt) == pytest.approx(
+        0.0, abs=1e-9)
+
+
+def test_small_angle_overstatement_grows_with_the_rotation_angle():
+    wgt = np.ones(68) / 68.0
+    small = M.small_angle_overstatement(1e-5, 117.4, wgt)
+    big = M.small_angle_overstatement(1e-4, 117.4, wgt)
+    assert 0.0 <= small < big < 1.0
+
+
+def test_small_angle_overstatement_matches_its_closed_form():
+    """1 - <1-cos(theta)> / <theta^2/2>, computed independently here."""
+    wgt = np.ones(5) / 5.0
+    f, dt = 1.0e-4, 100.0
+    theta = f * dt * np.arange(1, 6)
+    want = 1.0 - float((1.0 - np.cos(theta)).mean()) / float(
+        (theta ** 2).mean() / 2.0)
+    assert M.small_angle_overstatement(f, dt, wgt) == pytest.approx(want,
+                                                                    rel=1e-12)
+
+
+def test_overstatement_is_positive_ie_the_bound_errs_conservatively():
+    """If this ever goes negative the bound is no longer an upper bound."""
+    wgt = np.ones(68) / 68.0
+    assert M.small_angle_overstatement(1.366e-4, 117.391304, wgt) > 0.0

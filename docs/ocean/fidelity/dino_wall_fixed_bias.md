@@ -28,7 +28,7 @@ latitude structure. One cheap pre-registered arm settles it (§6).
 
 Artifact: `results/dino_1455/baro_fixed_bias_wall_map.json`.
 Probe: `scripts/validate/ocean_fidelity/dino_1226/baro_fixed_bias_wall_map.py`.
-Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (63).
+Tests: `tests/ocean/fidelity/test_baro_fixed_bias_wall_map.py` (69).
 
 Everything below is measured in the arm where **NEMO's own frozen slow forcing
 is substituted into legoESM's own loop** from a bit-identical entry state
@@ -237,8 +237,14 @@ the first fix inadequate in two specific ways, both now closed:
 
 * **Agreement is not an on-state.** The gate only checked that the five maps
   agreed with each other — and five identical *wind-off* maps agree perfectly.
-  Each knob is now checked against its expected value, not against its
-  neighbours.
+  Each knob is now checked against its expected value, **per map**, not against
+  its neighbours. (The confirmation pass then found the on-state check for the
+  vertical ladder sitting *outside* the per-map loop, so a series whose first
+  map was right and whose other four were wrong would have passed. Every check
+  is now inside the loop; the cross-map agreement clause was **removed** once
+  it was, because with both present neither could be tested — deleting either
+  one left the suite green while the other silently covered for it, which is
+  the "guard that cannot fail" this work exists to refuse.)
 * **It was checking the wrong knobs.** The three switches it examined are
   continuity controls belonging to *other* probes; they reach this stamp only
   because one shared environment list is recorded for the whole directory, and
@@ -322,8 +328,13 @@ in prose:
 
 * the small-angle step is used **outside its stated regime** — the rotation
   angle reaches **1.09 rad** by the end of the averaging window, not a small
-  angle. The error is in the conservative direction (the true response is about
-  **6.5 % smaller**), so it remains an upper bound, but the regime is stated;
+  angle. The error is in the conservative direction (the true response is
+  **6.1 % smaller**), so it remains an upper bound, but the regime is stated.
+  That figure is now **derived** from the window's own weights rather than
+  pasted: writing it out showed the pasted 6.5 % was slightly off, and writing
+  it out *stably* mattered too — the literal `1 − cos θ` form cancels to zero
+  at small angles and would have reported a 100 % overstatement in exactly the
+  regime where the approximation is perfect;
 * the kernel on the **real** saved weights is **1142**, not the 787.75 of the
   synthetic uniform-window case the tests pin. Both are printed, because the
   real averaging window is uniform over only 45 of its 68 substeps. Confusing a null

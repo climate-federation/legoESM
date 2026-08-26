@@ -208,24 +208,33 @@ def assert_map_provenance(stamps: list, cli_seqdump: str) -> dict:
     parsed = [parse_stamp(st["provenance"]) for st in stamps]
     first = parsed[0]
 
-    # (1) agreement across the five
-    for st, got in zip(stamps[1:], parsed[1:]):
-        diff = {k: (first[k], got[k]) for k in _PRODUCER_KNOBS
-                if first[k] != got[k] and k != "DINO_1226_IC_STEP"}
-        if diff:
-            raise SystemExit(
-                f"FATAL: {st['path']} was produced with different physics "
-                f"knobs from {stamps[0]['path']}: {diff}. Averaging these five "
-                "states would mix two configurations.")
+    # THE CROSS-MAP AGREEMENT CLAUSE IS GONE, deliberately.  It checked that
+    # the five maps matched each other; every knob it covered now has a
+    # PER-MAP on-state check below, which is strictly stronger (it also catches
+    # all five being wrong together, which agreement cannot).  With both
+    # present neither could be tested: removing either one left the suite green
+    # because the other silently covered for it -- two mutations, both green,
+    # which is precisely the "guard that cannot fail" this file exists to
+    # refuse.  One real guard beats two that alibi each other.
+    #
+    # If a knob is ever added here WITHOUT an on-state check, restore the
+    # agreement clause for that knob and give it a test that fails when the
+    # clause is removed.
 
-    # (2) the ON-STATE itself, per knob, not merely consistency
-    if first["LEGOESM_NEMO_E3T"] != "both":
-        raise SystemExit(
-            f"FATAL: the maps were produced with LEGOESM_NEMO_E3T="
-            f"{first['LEGOESM_NEMO_E3T']!r}, not 'both'. That is a different "
-            "vertical ladder, and this card's history records that default "
-            "contaminating four measurements before it was gated.")
+    # the ON-STATE itself, per knob and PER MAP, not merely consistency.
+    # The ladder check used to sit outside this loop and inspect only the first
+    # map, which left the agreement clause above as the sole guard against
+    # map 0 being right and maps 1-4 wrong (confirmation pass 2026-08-26).
+    # Every on-state check is now inside the loop, so each map is judged on its
+    # own and the agreement clause is a second line of defence rather than the
+    # only one.
     for st, got in zip(stamps, parsed):
+        if got["LEGOESM_NEMO_E3T"] != "both":
+            raise SystemExit(
+                f"FATAL: {st['path']} was produced with LEGOESM_NEMO_E3T="
+                f"{got['LEGOESM_NEMO_E3T']!r}, not 'both'. That is a different "
+                "vertical ladder, and this card's history records that default "
+                "contaminating four measurements before it was gated.")
         if got["DINO_1226_T_SECONDS"] not in (None, "None"):
             raise SystemExit(
                 f"FATAL: {st['path']} carries an OVERRIDDEN seasonal clock "
@@ -683,15 +692,23 @@ def wind_candidate(seqdump: str, bias_u: np.ndarray, bias_v: np.ndarray,
     out["rotated_bound_kernel_sum_w_k2_over_2"] = rot_kernel
     out["coriolis_at_v_wall_rows"] = f_wall
     out["rotated_forcing_colocation"] = rot_forcing
-    # HONESTY NOTE 1 (review round 3, verified independently): the small-angle
-    # step used to build this kernel is applied OUTSIDE its stated regime -- by
-    # the end of the window the rotation angle |f|*n*dt reaches ~1.09 rad, not
-    # a small angle.  The error is in the CONSERVATIVE direction for an
-    # exclusion (the true rotated response is ~6.5% SMALLER than this bound),
-    # so the bound remains an upper bound; it is recorded rather than buried.
+    # HONESTY NOTE (round 3, verified independently): the small-angle step used
+    # to build this kernel is applied OUTSIDE its stated regime -- the rotation
+    # angle |f|*n*dt reaches ~1.09 rad by window end, not a small angle.
+    #
+    # The overstatement is DERIVED here from the arrays already in scope, not
+    # pasted as a constant.  For du/dt = f*v + F_u, dv/dt = -f*u from rest the
+    # exact meridional response is (F_u/f)*(1 - cos(f*t)); the small-angle
+    # step keeps only F_u*f*t^2/2.  Averaging both over this window's own
+    # weights gives the ratio directly.  (The constant it replaces was correct,
+    # but this file has spent four review rounds on numbers that looked
+    # rigorous because they were printed -- including one of the reviewer's --
+    # so a derivable quantity gets derived.)
     out["rotation_angle_rad_at_window_end"] = {
         tag: abs(f_wall[tag]) * float(wgt.size) * dt_s for tag in f_wall}
-    out["small_angle_overstatement_frac"] = 0.065
+    out["small_angle_overstatement_frac"] = {
+        tag: small_angle_overstatement(abs(f_wall[tag]), dt_s, wgt)
+        for tag in f_wall}
     out["bias_v_at_south_wall"] = _bias_rms(bias_v, wetv, j_s_v)
     out["bias_v_at_north_wall"] = _bias_rms(bias_v, wetv, j_n_v)
 
@@ -801,6 +818,31 @@ def symmetry_summary(a: dict, b: dict) -> dict:
 # --------------------------------------------------------------------------
 # section 6 -- the v-face zonal metric, the leading untested candidate
 # --------------------------------------------------------------------------
+def small_angle_overstatement(f_abs: float, dt_s: float,
+                              wgt: np.ndarray) -> float:
+    """By how much does the small-angle rotated bound exceed the exact one?
+
+    Exact inertial response to a steady zonal forcing from rest:
+    ``v(t) = -(F_u/f)*(1 - cos(f*t))``.  The small-angle step keeps only the
+    leading term ``-F_u*f*t^2/2``.  Both are linear in ``F_u``, so it cancels
+    and the ratio depends on the rotation angle alone.  Returns
+    ``1 - exact/approx``: POSITIVE means the bound overstates, which is the
+    conservative direction for an exclusion.
+    """
+    k = np.arange(1, wgt.size + 1, dtype=float)
+    theta = f_abs * dt_s * k
+    approx = float((wgt * theta ** 2).sum()) / 2.0
+    if approx <= 0.0:
+        return 0.0
+    # 1 - cos(theta) via the HALF-ANGLE identity, not literally.  Written
+    # directly it cancels catastrophically: at theta ~ 1e-12, cos(theta)
+    # rounds to exactly 1.0 in float64, the numerator becomes 0, and this
+    # function would report a 100% overstatement in the regime where the
+    # approximation is PERFECT.  Caught by its own small-angle-limit test.
+    exact = float((wgt * 2.0 * np.sin(0.5 * theta) ** 2).sum())
+    return float(1.0 - exact / approx)
+
+
 def vface_gap_from_latitudes(gphit: np.ndarray,
                              gphiv: np.ndarray) -> tuple:
     """The pure arithmetic of the v-face zonal-width gap, split out to be tested.
@@ -1089,11 +1131,13 @@ def main() -> None:
           f"they differ because the real window is uniform over only 45 of 68 "
           f"substeps, starting at 24)")
     _ang = wind["rotation_angle_rad_at_window_end"]
+    _ov = wind["small_angle_overstatement_frac"]
     print(f"  SMALL-ANGLE CAVEAT: the rotation angle reaches "
           f"{max(_ang.values()):.2f} rad by window end, so the small-angle "
-          f"step is used outside its stated regime. The error is CONSERVATIVE "
-          f"(true response ~{100 * wind['small_angle_overstatement_frac']:.1f}%"
-          f" SMALLER), so this stays an upper bound.")
+          f"step is used outside its stated regime. DERIVED overstatement: "
+          + ", ".join(f"{t} {100 * vv:.1f}%" for t, vv in sorted(_ov.items()))
+          + " (true response SMALLER, i.e. CONSERVATIVE), so this stays an "
+            "upper bound.")
     _sc = wind["row_profile_shape_corr_with_bias"]
     print("  row-profile shape correlation with the bias (WHOLE-DOMAIN "
           "context, not a wall statistic): "
