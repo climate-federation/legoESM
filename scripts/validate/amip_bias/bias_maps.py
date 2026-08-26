@@ -11,7 +11,8 @@ variable, not a single convenient one:
 
     albedo, rsut, rlut   CERES-EBAF 4.2.1   (2000-2025)
     clt, clivi, lwp      ESACCI-CLOUD AVHRR (1982-2016)
-    tas, ta, prw, pr     ERA5               (1979-)
+    tas, ta, prw         ERA5               (1979-)
+    pr                   GPCP               (1979-)
 
 EPOCH, stated because it bounds every number here. Each reference is averaged
 over ITS OWN full record from 1979 on, restricted to the calendar months the
@@ -42,6 +43,7 @@ import numpy as np
 _DIR = pathlib.Path(__file__).resolve().parent
 _ROOT = "/work/bd1179/b309141/climateeval_input"
 CERES = f"{_ROOT}/observation_CERES-EBAF/mon"
+GPCP = f"{_ROOT}/observation_GPCP/mon"
 ESACCI = f"{_ROOT}/observation_ESACCI-CLOUD/mon"
 ERA5 = f"{_ROOT}/reanalysis_ERA5/mon"
 
@@ -58,11 +60,12 @@ SPEC = {
     "tas": (ERA5, "ERA5", "RdYlBu_r", 10.0, "K"),
     "prw": (ERA5, "ERA5", "YlGnBu", 10.0, "kg m-2"),
     "evspsbl": (ERA5, "ERA5", "YlGnBu", 3.0, "mm day-1"),
+    "pr": (GPCP, "GPCP", "YlGnBu", 3.0, "mm day-1"),
 }
 
 # display scaling applied to BOTH model and reference before plotting, for
 # variables whose CMOR unit is not the one a reader expects to see on a map.
-_DISPLAY_SCALE = {"evspsbl": 86400.0}
+_DISPLAY_SCALE = {"evspsbl": 86400.0, "pr": 86400.0}
 
 
 def _model_clim(run, var):
@@ -282,7 +285,7 @@ def main(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--vars", nargs="+",
                     default=["albedo", "rsut", "rlut", "clt", "tas", "prw",
-                             "evspsbl"])
+                             "evspsbl", "pr"])
     ap.add_argument("--out", default=".")
     ap.add_argument("--no-section", action="store_true")
     args = ap.parse_args(argv)

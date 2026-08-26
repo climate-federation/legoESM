@@ -282,7 +282,8 @@ def cosine_bell_spectral(grid, beta=jnp.pi / 4):
     from legoesm.grids.gaussian import (
         sh_analysis_oc2, sh_analysis_dmu)
 
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / R
+    _cdt = jnp.complex64 if grid.Pnm.dtype == jnp.float32 else jnp.complex128
+    im_over_a = (1j * grid.ms / R).astype(_cdt)
     one_over_a = 1.0 / R
 
     # vor_hat = -(im/a * sh_oc2(V) + (1/a) * sh_dmu(U))  [sign: curl]

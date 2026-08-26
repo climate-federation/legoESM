@@ -20,6 +20,11 @@ import argparse
 from typing import NamedTuple
 
 VALID_MODES = ("physics", "neural_gcm", "sfno")
+# Historical CLI defaults, now the LAST fallback behind the campaign YAML
+# (single source: parser help, resolver and tests all read these).
+_DEFAULT_LR = 3.0e-4
+_DEFAULT_OPTIMIZER = "adamw"
+_DEFAULT_N_EPOCHS = 40
 VALID_TRAINING_CORES = ("latlon", "spectral")
 
 
@@ -185,6 +190,21 @@ def print_latest_complete_signature(root):
         cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
         if best is None or cand[0] > best[0]:
             best = cand
+    if best is None:
+        # A persisted reachability-probe result IS resumable progress: the
+        # next link restores it and skips the ~9 h probe (see
+        # _read_probe_freeze). Without this, a link that finished only the
+        # probe would trip the wrapper's epoch-0 restart-loop guard and the
+        # chain would stop exactly where resuming has the most to save.
+        for d in [root] + [os.path.join(root, x) for x in children]:
+            try:
+                st = os.stat(_probe_freeze_path(d))
+            except OSError:
+                continue
+            cand = (st.st_mtime_ns,
+                    f"{_probe_freeze_path(d)}:{st.st_mtime_ns}:{st.st_size}")
+            if best is None or cand[0] > best[0]:
+                best = cand
     if best is not None:
         print(best[1])
 
@@ -252,6 +272,38 @@ def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
         "rollout_steps": int(roll_steps),
         "n_global_samples": int(n_global_samples), "nproc": int(nproc),
     }
+
+
+def _probe_freeze_path(out_dir):
+    import os
+
+    return os.path.join(out_dir, "probe_freeze.json")
+
+
+def _read_probe_freeze(out_dir, expect_fp):
+    """The persisted reachability-probe result, or None.
+
+    Honoured only when its fingerprint matches the CURRENT run exactly — the
+    frozen set is a measurement on the initial parameters, shard and config,
+    so any drift invalidates it the same way it invalidates an optimizer
+    state.
+    """
+    import json as _json
+
+    try:
+        with open(_probe_freeze_path(out_dir)) as fh:
+            obj = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("frozen"), list):
+        return None
+    if obj.get("schema") != _MANIFEST_SCHEMA:
+        return None          # unknown schema fails toward re-probing (GLM)
+    if obj.get("fingerprint") != expect_fp:
+        return None
+    if not all(isinstance(x, str) for x in obj["frozen"]):
+        return None
+    return obj["frozen"]
 
 
 def _atomic_write(path, write_fn):
@@ -418,15 +470,23 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    help="latlon = explicit C-grid production core; spectral = "
                         "Gaussian semi-implicit training core (#817 blocker 1: "
                         "bounded adjoint, no pole-cell dt clamp).")
-    p.add_argument("--epochs", type=int, default=40, dest="n_epochs")
+    # None = YAML ``n_epochs``, else the historical 40 (same contract as --lr).
+    p.add_argument("--epochs", type=int, default=None, dest="n_epochs")
     p.add_argument("--n-days", type=int, default=None, dest="n_days",
                    help="Training-window length [days] per train year (#1047). "
                         "Default None = YAML n_training_days, else 3. More days = "
                         "more samples (the WB arm was data-starved at 3). --smoke "
                         "forces 1.")
     p.add_argument("--multi-step-hours", default="6,12", dest="multi_step_hours")
-    p.add_argument("--lr", type=float, default=3.0e-4)
-    p.add_argument("--optimizer", default="adamw")
+    # None = take the campaign YAML's ``lr`` / ``optimizer`` (falling back to
+    # the historical 3e-4 / adamw).  The CLI default used to be 3e-4 outright,
+    # which silently overrode the YAML: the wb_classical_v2 campaign asked for
+    # lr 1.5e-3 in its deck and trained at 3e-4 (checkpoint manifest proof).
+    p.add_argument("--lr", type=float, default=None,
+                   help=f"Peak LR. Default: YAML `lr`, else {_DEFAULT_LR}.")
+    p.add_argument("--optimizer", default=None,
+                   help="adamw|adam|muon|muon_partitioned. Default: YAML "
+                        f"`optimizer`, else {_DEFAULT_OPTIMIZER}.")
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--out", default="results/wb_scale", dest="out_dir")
     p.add_argument("--resume", action="store_true")
@@ -435,7 +495,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
     a = p.parse_args(argv)
     # --mode is already restricted by argparse ``choices=VALID_MODES`` (exits 2
     # on an unknown value), so no manual membership guard is needed here.
-    if a.n_epochs < 1:
+    if a.n_epochs is not None and a.n_epochs < 1:
         # total_steps = n_epochs * n_local_samples feeds optax's cosine
         # decay_steps, which must be positive; a zero/negative epoch count
         # would make it non-positive.
@@ -504,6 +564,66 @@ def main(argv=None):
     return mpi_abort_on_uncaught(_main)(argv)
 
 
+def _yml_int(yml, key, default):
+    """Integer YAML value; bools and non-integral numerics are hard errors
+    rather than silent truncation (``n_epochs: 1.9`` used to train ONE epoch).
+    """
+    v = _yml_or(yml, key, default)
+    if isinstance(v, bool) or (isinstance(v, float) and not v.is_integer()) \
+            or not isinstance(v, (int, float)):
+        raise SystemExit(f"YAML {key}={v!r} is not an integer")
+    return int(v)
+
+
+def _yml_or(yml, key, default):
+    """YAML value unless the key is absent OR present-but-null.  An explicit
+    ``lr:`` with no value parses as None, and ``float(None)``/``str(None)``
+    would crash or produce the string "None" (GLM diff review)."""
+    v = yml.get(key)
+    return default if v is None else v
+
+
+def _resolve_training_keys(cfg, yml):
+    """Resolve lr/optimizer from CLI-else-YAML and read the optimizer keys the
+    YAML owns.  Returns ``(cfg, weight_decay, grad_clip_norm)`` where the two
+    floats are ``None`` when the YAML is silent (caller substitutes
+    ``TrainingConfig`` defaults, which live behind a JAX import).
+
+    Every campaign YAML carries ``lr``/``optimizer``/``weight_decay``/
+    ``grad_clip_norm``/``grad_accum``; until 2026-08-23 only ``warmup_steps``
+    was actually read, so a deck could change its schedule and the run would
+    silently keep the CLI defaults.  ``grad_accum`` has no implementation in
+    this trainer, so any resolved value other than 1 is a hard error rather
+    than a silently-ignored knob.
+    """
+    n_epochs = cfg.n_epochs if cfg.n_epochs is not None \
+        else _yml_int(yml, "n_epochs", _DEFAULT_N_EPOCHS)
+    if n_epochs < 1:
+        raise SystemExit(f"n_epochs must be >= 1, got {n_epochs}")
+    cfg = cfg._replace(
+        lr=float(_yml_or(yml, "lr", _DEFAULT_LR)) if cfg.lr is None else cfg.lr,
+        optimizer=(str(_yml_or(yml, "optimizer", _DEFAULT_OPTIMIZER))
+                   if cfg.optimizer is None else cfg.optimizer),
+        n_epochs=n_epochs,
+    )
+    # BOTH sources hard-error on != 1: gradient accumulation has no
+    # implementation here, and it used to be a silent no-op from either side
+    # (every prior run with the flag had a smaller effective batch than its
+    # owner believed).
+    for src, accum in (("--grad-accum", int(cfg.grad_accum)),
+                       ("YAML grad_accum", _yml_int(yml, "grad_accum", 1))):
+        if accum != 1:
+            raise SystemExit(
+                f"{src}={accum} requested but gradient accumulation is not "
+                "implemented in train_weatherbench_scale; remove it or "
+                "implement it (a silently-ignored optimizer knob is how the "
+                "v2 campaign trained at the wrong learning rate).")
+    wd = _yml_or(yml, "weight_decay", None)
+    clip = _yml_or(yml, "grad_clip_norm", None)
+    return (cfg, None if wd is None else float(wd),
+            None if clip is None else float(clip))
+
+
 def _main(argv=None):
     cfg = build_scale_config_from_args(argv)
 
@@ -525,8 +645,24 @@ def _main(argv=None):
     log = logging.getLogger("wb_scale")
 
     yml = yaml.safe_load(open(cfg.config_path))
+    from legoesm.training.scale_build import validate_wb_campaign_yaml
+    validate_wb_campaign_yaml(yml)
+    cfg, _wd, _clip = _resolve_training_keys(cfg, yml)
+    _t_defaults = TrainingConfig()
+    weight_decay = _t_defaults.weight_decay if _wd is None else _wd
+    grad_clip_norm = _t_defaults.grad_clip_norm if _clip is None else _clip
     if cfg.smoke:  # tiny, gray-radiation single-GPU wiring check (see helper)
         cfg = _apply_smoke_overrides(cfg, yml)
+    # Logged AFTER the smoke override so n_epochs is what the run executes.
+    if _wd is not None and cfg.optimizer in ("adam", "muon"):
+        # TrainingConfig documents decay as ignored for adam; plain muon
+        # applies it only through its (default-zero) scale fields.
+        log.warning("YAML weight_decay=%g with optimizer=%s is partially or "
+                    "fully inert (see TrainingConfig)", _wd, cfg.optimizer)
+    log.info("training keys resolved: lr=%g optimizer=%s n_epochs=%d "
+             "weight_decay=%g grad_clip_norm=%g "
+             "(CLI overrides YAML; YAML overrides defaults)",
+             cfg.lr, cfg.optimizer, cfg.n_epochs, weight_decay, grad_clip_norm)
     # Resolution comes FROM the YAML grid; an explicit mismatched --resolution
     # is a hard error, not a silent no-op (#817 papercut). Under --smoke the
     # grid is forced to 32x64, so the derived value is used verbatim.
@@ -629,8 +765,35 @@ def _main(argv=None):
             # between writes). Both start from zero: a parameters-only restore
             # would restart AdamW cold with the learning rate back at warmup
             # while reporting a resumed run.
-            log.info("resume: no COMPLETE epoch checkpoint under %s -- "
-                     "starting from epoch 0", cfg.out_dir)
+            # The reachability probe result IS restorable on its own: at T63
+            # with si_substeps=3 the probe alone costs ~9 h, so a link killed
+            # between probe and first-epoch write would otherwise re-measure
+            # forever inside a 12 h walltime (job 27194893). The probe is a
+            # pure function of the initial parameters + shard + config, all
+            # covered by the fingerprint, so restoring it changes WALLTIME
+            # and nothing else.
+            _now_fp = _run_fingerprint(cfg, yml, warmup, roll_steps,
+                                       len(local) * nproc, nproc)
+            # Single-process only: under MPI an uncoordinated restore (one
+            # rank reads the file, another hits an OSError and re-probes)
+            # would leave ranks in different collectives and hang (codex).
+            # Multi-rank WB training re-probes until a root-read + broadcast
+            # exists. NOTE (codex, deferred): the fingerprint identifies the
+            # shard by sample COUNT, not content — CLI --n-days is not in it;
+            # the campaign path never passes --n-days, and adding the key
+            # would orphan payloads already written under the current key
+            # set. Add it at the next fingerprint schema change.
+            _pf = (_read_probe_freeze(cfg.out_dir, _now_fp)
+                   if nproc == 1 else None)
+            if _pf is not None:
+                resumed_frozen = set(_pf)
+                log.info("resume: no complete epoch, but a fingerprint-"
+                         "matched probe result exists (%d frozen leaves) -- "
+                         "skipping the reachability probe, training from "
+                         "epoch 0", len(resumed_frozen))
+            else:
+                log.info("resume: no COMPLETE epoch checkpoint under %s -- "
+                         "starting from epoch 0", cfg.out_dir)
         else:
             _pp, _op, _fp = _checkpoint_paths(cfg.out_dir, _ep)
             params = eqx.tree_deserialise_leaves(_pp, params)
@@ -734,6 +897,27 @@ def _main(argv=None):
         else:
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
                 params, _probe_vg, local, n_probe=None, num_processes=nproc)
+            # Persist the measurement immediately: at T63/si_substeps=3 the
+            # probe costs ~9 h, and a link killed between here and the first
+            # epoch write would otherwise re-measure on every chained resume
+            # (job 27194893 died exactly there). Fingerprint-gated on read.
+            if rank == 0:
+                import os as _os
+
+                _os.makedirs(cfg.out_dir, exist_ok=True)
+                _pf_payload = {
+                    "schema": _MANIFEST_SCHEMA,
+                    "fingerprint": _run_fingerprint(
+                        cfg, yml, warmup, roll_steps, len(local) * nproc,
+                        nproc),
+                    "frozen": sorted(frozen_names),
+                }
+                import pathlib as _pathlib
+
+                _atomic_write(
+                    _probe_freeze_path(cfg.out_dir),
+                    lambda t: _pathlib.Path(t).write_text(
+                        json.dumps(_pf_payload)))
         n_live = len(jax.tree.leaves(arr))
         if n_probe_used is None:
             log.info("trainable leaves: %d live, %d frozen (RESTORED from the "
@@ -762,6 +946,7 @@ def _main(argv=None):
     optimizer = create_optimizer(TrainingConfig(
         lr=cfg.lr, optimizer=cfg.optimizer,
         warmup_steps=warmup, total_steps=total_steps,
+        weight_decay=weight_decay, grad_clip_norm=grad_clip_norm,
     ))
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
