@@ -3248,6 +3248,7 @@ class LatLonCGridOceanModel:
     def tendencies_with_diagnostics(
         self, state: LatLonCGridOceanState, surface_forcing=None,
         sponge=None, dt=300.0, *, grid=None, vertex_mask=None,
+        ldf_state=None,
         z_coord=None, config=None,
     ):
         """Compute baroclinic tendencies + per-term momentum-tendency
@@ -3271,9 +3272,24 @@ class LatLonCGridOceanModel:
         time-mean budget this converges to the actually-applied
         tendency at O(dt) accuracy.
 
-        ``grid``/``vertex_mask`` (optional, SPMD): default ``None`` →
+        ``grid``/``vertex_mask`` (optional, SPMD): default ``None`` ->
         ``self.grid``/``self._vertex_mask`` (bit-identical); a band-local
         grid is injected by a future ``shard_map`` wrapper.
+
+        ``ldf_state`` (T, S, u, v at the BEFORE level), forwarded verbatim to
+        ``tendencies``, which has always accepted it.  IT MATTERS FOR ANY
+        ORACLE COMPARISON: NEMO evaluates lateral friction at the before level
+        (``dyn_ldf(kstp, Nbb, Nnn, ...)``, stpmlf.F90:319 -- a leapfrog-centred
+        diffusion is unconditionally unstable, so this is required rather than
+        incidental), and legoESM's production leapfrog path matches it.  This
+        wrapper omitted the parameter, so every caller silently got NOW-level
+        lateral friction while comparing against NEMO's BEFORE-level trend,
+        measuring ``A_h*lap(u_now - u_before)`` -- a quantity the instrument
+        manufactured.  Found 2026-08-25 by adversarial review of the
+        zonal-wall momentum budget; the affected term was the only one in that
+        budget whose difference was time-noisy.  Leave it ``None`` only for a
+        non-leapfrog card or when the now/before distinction is genuinely
+        irrelevant.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -3288,6 +3304,7 @@ class LatLonCGridOceanModel:
             diagnose_momentum=True,
             surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
             vertex_mask=_vmask,
+            ldf_state=ldf_state,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
