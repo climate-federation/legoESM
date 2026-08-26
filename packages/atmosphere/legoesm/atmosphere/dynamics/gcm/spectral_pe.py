@@ -1274,7 +1274,15 @@ def check_advective_cfl(n_max: int, dt: float, config: SpectralPEConfig) -> None
                f"dt={dt}, si_substeps={config.si_substeps}, "
                f"semi_implicit={config.semi_implicit}, "
                f"time_integrator={config.time_integrator}).")
-    if u_crit < U_CRIT_HARD_FLOOR and str(config.time_integrator) == "ssp_rk3":
+    # Normalise the integrator name (GLM re-review: exact-match broke on
+    # "SSP_RK3"/"ssp-rk3").  Gated to ssp_rk3 — the measured-blowup + default
+    # integrator; the larger-stability schemes (ssp_rk34/rk4/ssp_rk54) carry
+    # more headroom than the sqrt(3) u_crit assumes, so they WARN.  FOLLOW-UP
+    # (GLM): a per-integrator advective bound would let the hard gate cover
+    # them precisely, and the 100 m/s floor could rise toward ~120 for NN
+    # training wind transients; both are threshold choices left to the owner.
+    _integrator = str(config.time_integrator).strip().lower().replace("-", "_")
+    if u_crit < U_CRIT_HARD_FLOOR and _integrator == "ssp_rk3":
         raise ValueError(
             f"unstable spectral configuration: {_detail} u_crit is below the "
             f"{U_CRIT_HARD_FLOOR:.0f} m/s winter-jet floor on ssp_rk3 — the T63 "
