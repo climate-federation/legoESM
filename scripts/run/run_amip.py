@@ -185,8 +185,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # grid_type)`` triple.
     # default=None sentinel: see --grid-type; resolves to "centered".
     # "fv3_duo" is the certified FV3 six-face duo-cube fv_dynamics lane
-    # (cubed_sphere grid only; slice 1: dry, physics-off, fp64, nlev in
-    # {5, 10} — the component factory refuses everything else loudly).
+    # (cubed_sphere grid only; dry dynamics, fp64, nlev in {5, 10};
+    # the only physics is --held-suarez-forcing on the hydrostatic arm —
+    # the component factory refuses everything else loudly).
     parser.add_argument("--discretization", type=str, default=None,
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral",
@@ -1171,6 +1172,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "--config YAML enables it (e.g. for the MPAS/spectral "
                              "backends, whose standalone physics carries a passive "
                              "land tile and cannot step the soil column).")
+    parser.add_argument("--land-update-seconds", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_update_seconds,
+                        dest="land_update_seconds",
+                        help="Multilayer-land call interval [s]; 0 = every "
+                             "host step (legacy). A positive value calls the "
+                             "tile every round(interval/dt) steps on the "
+                             "interval-MEAN forcing and holds its fluxes in "
+                             "between (same shape as the hourly radiation "
+                             "cadence).")
     parser.add_argument("--multilayer-n-layers", type=int,
                         default=_EXPERIMENT_DEFAULTS.multilayer_n_layers,
                         help="Number of soil layers for --use-multilayer-land.")
@@ -1981,6 +1991,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         use_multilayer_land=args.use_multilayer_land,
+        land_update_seconds=args.land_update_seconds,
         multilayer_n_layers=args.multilayer_n_layers,
         multilayer_soil_depth=args.multilayer_soil_depth,
         land_calibrated_physics=args.land_calibrated_physics,

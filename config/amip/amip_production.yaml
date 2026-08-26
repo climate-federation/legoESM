@@ -43,7 +43,10 @@
 # History: the cube C48/L40 cd-grid dt150 lane (with its fp64-barotropic
 # requirement) lives on only in git history and issues #1294-#1296.
 grid_type: voronoi
-resolution: 5               # icosahedral SCVT level 5 = 10242 cells (~2.2°)
+resolution: 6               # icosahedral SCVT level 6 = 40962 cells (~1.1°).
+                            # DEFAULT per user directive 2026-08-25: res6 is
+                            # the production AMIP configuration; res5 is for
+                            # fast iteration only (override via --resolution 5).
 nlev: 30
 discretization: mpas
 dt: 75.0
@@ -203,6 +206,11 @@ convective_cloud: false
 # internet).  Deep 3 m / 10-layer soil needs a multi-year cold spin-up before its
 # T/moisture fields are trustworthy.
 use_multilayer_land: true
+land_update_seconds: 300.0  # land tile every ~300 s on interval-mean forcing
+                            # (2026-08-25 step profile: the tile was 58% of
+                            # wall time called every 75 s; 300 s is the canopy
+                            # design substep ceiling. Fluxes held in between,
+                            # same shape as the hourly radiation cadence.)
 multilayer_n_layers: 10
 multilayer_soil_depth: 3.0
 # Drier soil cold-start (theta_init = 0.25*theta_sat, vs 0.5 default): the deep

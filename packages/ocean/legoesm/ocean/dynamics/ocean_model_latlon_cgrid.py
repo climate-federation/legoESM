@@ -7950,21 +7950,35 @@ class LatLonCGridOceanModel:
         every step, and it was silent.
 
         WHY A WARNING AND NOT A RAISE, stated so the next reader does not
-        "harden" it into one.  Refusing this combination would break the
-        SHIPPED default: ``kamm_twin_90d.py`` takes ``bridge_before=False`` by
-        default, so the 90-day DINO twin — on a card that ships
-        ``barotropic_after_reconcile="nemo_mlf_baro_corr"`` — enters step 1
-        with ``u_before is None`` and hits this branch.  A raise would refuse
-        the campaign's own production run.  Closing the gap for real means
-        surfacing the barotropic depth mean (``btu_exp``/``btv_exp``) from the
-        ``_apply_implicit_vmix=True`` path, which changes ``_step_impl``'s
-        return contract at ~8 call sites — named, costed, NOT done here.
+        "harden" it into one.  Two live callers legitimately take this branch:
+        a genuine FROM-REST run of a card that ships the option (there is no
+        before level to bridge — the run has to start somewhere), and the DINO
+        twin's ``--legacy-euler-start``, which exists precisely to reproduce
+        artifacts recorded before 2026-08-24.  A raise would refuse both.
+        Closing the gap for real means surfacing the barotropic depth mean
+        (``btu_exp``/``btv_exp``) from the ``_apply_implicit_vmix=True`` path,
+        which changes ``_step_impl``'s return contract at ~8 call sites —
+        named, costed, NOT done here.
 
-        RETRACTED (``state.py`` barotropic_after_reconcile note, which said the
-        gap "is empty for a bridged/restart twin (u_before arrives populated,
-        so that branch is never taken)"): it is NOT empty for the default twin.
-        ``u_before`` arrives populated only under ``--bridge-before``, which is
-        opt-in.
+        WHAT CHANGED ON 2026-08-24 (#1455), and a RETRACTION with it.  This
+        docstring used to justify "warning, not raise" by asserting that the
+        campaign's own 90-day production twin took this branch, because
+        ``kamm_twin_90d.py`` defaulted ``bridge_before=False``.  The DEFAULT
+        was as described; the CONCLUSION was wrong.  Audited against the
+        recorded run logs: every twin build on record (18 of 18, all four
+        acceptance-gate arms included) passed the before-level bridge
+        explicitly, and the acceptance gate has defaulted it ON since
+        2026-08-09.  No recorded 90-day twin ever took this branch.  The twin
+        default is now the bridged start as well, so the shipped invocation
+        cannot; ``--legacy-euler-start`` still can.  The "warning, not raise"
+        justification above stands on the two callers, not on any default.
+
+        RETRACTED, still (``state.py`` barotropic_after_reconcile note, which
+        said the gap "is empty for a bridged/restart twin (u_before arrives
+        populated, so that branch is never taken)"): that was asserted of every
+        run when it was only true of a bridged one.  It is true of the twin's
+        default again — but as a consequence of the flipped default, not as a
+        property of being a twin.
 
         Emitted once per process: this fires on step 1, and a per-step warning
         inside a scan-driven run would be noise, not signal.
@@ -7989,8 +8003,9 @@ class LatLonCGridOceanModel:
             "returns before the reconciliation site. NEMO DOES run "
             "mlf_baro_corr on its l_1st_euler step, so this step alone commits "
             "a depth-mean deposit NEMO removes. Bridge the before-level "
-            "(--bridge-before on the DINO twin) to avoid the Euler start "
-            "entirely, or treat step 1 as off-reference.",
+            "(the DINO twin's default; --legacy-euler-start turns it off) "
+            "to avoid the Euler start entirely, or treat step 1 as "
+            "off-reference.",
             RuntimeWarning, stacklevel=3)
 
     def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,

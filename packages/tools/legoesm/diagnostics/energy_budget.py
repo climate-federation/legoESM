@@ -106,10 +106,21 @@ def column_moist_static_energy(
     sigma_full: jax.Array,
     dp: jax.Array | None = None,
     p_full: jax.Array | None = None,
+    q_frozen: jax.Array | None = None,
 ) -> jax.Array:
-    """Compute column-integrated moist static energy.
+    """Compute column-integrated (frozen) moist static energy.
 
-    E = ∫ (c_p·T + L_v·q + g·z + ½(u²+v²)) dp/g
+    E = ∫ (c_p·T + L_v·q_v − L_f·q_frozen + g·z + ½(u²+v²)) dp/g
+
+    ``q_frozen`` (the summed FROZEN condensate mixing ratio q_i + q_s + q_g) is
+    the phase-completeness term (#1354/#1515): the quantity conserved under all
+    phase changes is the FROZEN moist static energy, which carries ``−L_f·q_ice``
+    in addition to ``+L_v·q_v``.  Vapor→ice deposition releases L_s = L_v + L_f
+    of sensible heat while removing L_v·q_v; without the ``−L_f·q_frozen`` term
+    the diagnostic reads that L_f as a spurious energy SOURCE (and freezing of
+    existing liquid likewise).  Liquid condensate needs no term — liquid↔vapor
+    is already balanced by ``+L_v·q_v`` against ``c_p·T``.  ``q_frozen=None``
+    keeps the vapor-only moist static energy (byte-identical legacy behaviour).
 
     For a hydrostatic sigma-coordinate model, dp = p_s · dσ, so:
     E = Σ_k (c_p·T_k + L_v·q_k + Φ_k + ½(u_k²+v_k²)) · p_s · dσ_k / g
@@ -231,9 +242,13 @@ def column_moist_static_energy(
     else:
         Phi = Phi_bottom[..., None]
 
-    # Energy integrand per level: (c_p * T + L_v * q + Phi + KE) * dp / g
+    # Energy integrand per level: (c_p*T + L_v*q_v − L_f*q_frozen + Phi + KE)*dp/g
     KE = 0.5 * (u ** 2 + v ** 2)
-    integrand = (c_p * T + L_v * q_v + Phi + KE) * dp / g
+    latent = L_v * q_v
+    if q_frozen is not None:
+        L_f = jnp.asarray(constants.L_f, dtype=_acc_e)
+        latent = latent - L_f * q_frozen.astype(_acc_e)
+    integrand = (c_p * T + latent + Phi + KE) * dp / g
 
     # Sum over vertical
     E = jnp.sum(integrand, axis=-1)
@@ -431,8 +446,14 @@ class EnergyBudgetTracker:
         area_weights: jax.Array | None = None,
         dp: jax.Array | None = None,
         p_full: jax.Array | None = None,
+        q_frozen: jax.Array | None = None,
     ) -> EnergyBudget:
         """Compute and record energy budget at current time.
+
+        ``q_frozen`` (summed frozen condensate q_i+q_s+q_g, same shape as
+        ``q_v``) makes the column energy phase-complete (#1354/#1515): without
+        it, vapor→ice deposition and liquid→ice freezing read as a spurious
+        energy source.  ``None`` keeps the vapor-only moist static energy.
 
         Parameters
         ----------
@@ -468,7 +489,7 @@ class EnergyBudgetTracker:
         # check.
         E = column_moist_static_energy(
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
-            dp=dp, p_full=p_full,
+            dp=dp, p_full=p_full, q_frozen=q_frozen,
         )
         _h = np.asarray(jnp.stack([
             area_weighted_mean(E, area_weights),

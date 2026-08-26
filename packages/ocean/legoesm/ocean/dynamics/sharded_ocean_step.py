@@ -858,7 +858,39 @@ def make_sharded_ocean_step(model, mesh):
     # (n_lat rows -> [r*nl:(r+1)*nl]; n_lat+1 v-rows -> [s:e+1]); everything
     # else is reconstructed in-body from the static leaf values (the
     # geometry template._replace pattern applied to the whole config tree).
-    _cfg_leaves, _cfg_treedef = jax.tree_util.tree_flatten(model.config)
+    # A_h_lat_profile is a hashable TUPLE (static-config / jit-cache-key
+    # contract), so tree_flatten explodes it into scalar float leaves that the
+    # array-leaf band-stacker below SKIPS -- the band body then keeps the
+    # GLOBAL-length profile and raises `n_lat vs nl_band` on the eORCA025
+    # full-card SPMD path (#1666).  Present the profile to the flatten AS AN
+    # ARRAY (single lat-row leaf) so the generic stacker band-slices it exactly
+    # like z_coord; the in-body config is a TRACED closure (it already carries
+    # array slabs), so an array leaf there is consistent, and the outer static
+    # model.config keeps its tuple untouched.
+    #
+    # SEAM CORRECTNESS (codex+GLM #1666, both P1): a band derives its v-face
+    # profile from its LOCAL cell profile, which wall-copies the band edges and
+    # so gets interior band SEAMS wrong by the full row-to-row Δprof (first
+    # order; material for a sharp profile).  Fix: compute the EXACT global
+    # v-face profile here (n_lat+1) and inject it as `A_h_lat_profile_v` -- the
+    # generic stacker's `n_lat+1` branch slices it to each band's [s : e+1]
+    # v-faces (correct neighbour-averaged seam values), and the consumer uses
+    # it instead of deriving band-locally.
+    _config_for_bands = model.config
+    _lv_cfg = getattr(_config_for_bands, "lateral_viscosity", None)
+    _prof_tuple = (getattr(_lv_cfg, "A_h_lat_profile", None)
+                   if _lv_cfg is not None else None)
+    if _prof_tuple is not None:
+        _prof_u_arr = jnp.asarray(_prof_tuple)
+        _prof_v_arr = jnp.concatenate([          # exact serial v-faces (n_lat+1)
+            _prof_u_arr[:1],
+            0.5 * (_prof_u_arr[:-1] + _prof_u_arr[1:]),
+            _prof_u_arr[-1:]])
+        _config_for_bands = _config_for_bands._replace(
+            lateral_viscosity=_lv_cfg._replace(
+                A_h_lat_profile=_prof_u_arr,
+                A_h_lat_profile_v=_prof_v_arr))
+    _cfg_leaves, _cfg_treedef = jax.tree_util.tree_flatten(_config_for_bands)
     _cfg_array_idx = []
     _raw_cfg = {}
     for _i, _leaf in enumerate(_cfg_leaves):

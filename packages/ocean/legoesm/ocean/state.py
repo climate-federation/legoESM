@@ -1324,15 +1324,22 @@ class BarotropicConfig(NamedTuple):
     # forward-Euler first step (``state.u_before is None``), which returns
     # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
     # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. It is NOT empty for a bridged/restart twin, which is
-    # the correction #1640 forced: ``u_before`` arrives populated only under
-    # the twin runner's OPT-IN ``--bridge-before``, and the shipped
-    # ``kamm_twin_90d.py`` defaults it OFF -- so the campaign's own 90-day DINO
-    # twin enters step 1 with ``u_before is None`` and takes this branch. (The
-    # previous wording here, "It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken)", is RETRACTED: it was
-    # true of a --bridge-before run and asserted of every run.) The same
-    # applies to a genuine FROM-REST run of a card that ships this option,
+    # real one-step gap. Whether a bridged/restart twin takes it is a
+    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
+    # #1640 forced. ``u_before`` arrives populated only when the before level
+    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
+    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
+    # RETRACTED (#1455, 2026-08-24): the note here previously said the
+    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
+    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
+    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
+    # the twin runner defaults to the bridged start too, so the shipped twin
+    # cannot take it; ``--legacy-euler-start`` still can. (The
+    # original wording here, "It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken)", stays RETRACTED: it
+    # was asserted of every run when it was only ever true of a bridged one.)
+    # The same applies to a genuine FROM-REST run of a card that ships this
+    # option,
     # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
     # from-rest drivers
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
@@ -1628,6 +1635,14 @@ class LateralViscosityConfig(NamedTuple):
     # Built by the driver from the file's zonal median (see run_omip_core2
     # --A-h-profile-file); v-face values are midpoint-averaged from these.
     A_h_lat_profile: tuple | None = None
+    # v-face (n_lat+1) profile OVERRIDE, set ONLY by the SPMD wrapper (#1666):
+    # a band derives its v-faces from its LOCAL cell profile, which wall-copies
+    # the band edges and so gets the interior band SEAMS wrong (first-order,
+    # material for a sharp profile -- codex+GLM).  The wrapper computes the
+    # exact global v-face profile once and band-slices it here so each band's
+    # seam faces match serial.  ``None`` (serial / non-profile) = derive from
+    # ``A_h_lat_profile``, bit-identical to before.  Hashable tuple (static).
+    A_h_lat_profile_v: tuple | None = None
 
 class PolarFilterConfig(NamedTuple):
     """Fourier polar-filter parameters (#501 config grouping).

@@ -187,10 +187,15 @@ def test_mpas_config_flag_defaults_on_and_is_wired():
     # clamp blamed in ``_run_per_step`` while the century ran ``_run_mpas``.
     src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
     assert "conservative_tracer_clamp" in src
-    assert "conservative_positive_clip" in src
-    assert "jnp.maximum(f.data, 0.0)" in src, (
-        "the default (flag off) path must still be the plain clamp so "
-        "existing MPAS results stay bit-identical")
+    # #1354/#1515: the borrow now lives in the shared positivity stage; the
+    # step must ROUTE the flag into it (a dropped route is the defect guarded).
+    assert "apply_water_positivity" in src
+    from legoesm.core.conservation import apply_water_positivity
+    hsrc = inspect.getsource(apply_water_positivity)
+    assert "conservative_positive_clip_global" in hsrc
+    assert "jnp.maximum" in hsrc, (
+        "the flag-off path must still be the plain clamp so existing MPAS "
+        "results stay bit-identical")
 
 
 def test_cli_round_trip_and_factory_wiring():
@@ -246,9 +251,12 @@ class TestAllTracersBorrowed:
             MPASPrimitiveEquationModel,
         )
         src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
-        assert "conservative_positive_clip" in src
-        assert "is_borrow_eligible_tracer" in src
-        assert "_is_water_mass_tracer" not in src, (
+        assert "apply_water_positivity" in src
+        from legoesm.core.conservation import apply_water_positivity
+        hsrc = inspect.getsource(apply_water_positivity)
+        assert "conservative_positive_clip_global" in hsrc
+        assert "is_borrow_eligible_tracer" in hsrc
+        assert "_is_water_mass_tracer" not in hsrc, (
             "the number exclusion reappeared — it invents number x2.2/day")
 
     def test_eligibility_rule(self):
@@ -279,8 +287,11 @@ class TestAllTracersBorrowed:
 
         from legoesm.parallel import voronoi_mpi
         src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
-        assert "is_borrow_eligible_tracer" in src
-        assert "_is_water_mass_tracer" not in src, (
+        assert "apply_water_positivity" in src
+        from legoesm.core.conservation import apply_water_positivity
+        hsrc = inspect.getsource(apply_water_positivity)
+        assert "is_borrow_eligible_tracer" in hsrc
+        assert "_is_water_mass_tracer" not in hsrc, (
             "the MPI floors reintroduced the number exclusion")
 
     def test_naive_clip_invents_number_borrow_does_not(self):
@@ -352,11 +363,14 @@ class TestCodexFindings:
         from legoesm.parallel import voronoi_mpi
         src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
         assert "conservative_tracer_clamp" in src
-        assert "conservative_positive_clip" in src
+        assert "apply_water_positivity" in src
+        from legoesm.core.conservation import apply_water_positivity
+        hsrc = inspect.getsource(apply_water_positivity)
+        assert "conservative_positive_clip" in hsrc
         # 2026-07-28 reversal: the borrow now covers EVERY tracer (the
         # number exclusion invented number x2.2/day — see
         # TestAllTracersBorrowed).
-        assert "_is_water_mass_tracer" not in src
+        assert "_is_water_mass_tracer" not in hsrc
 
 
 class TestRound2Findings:
@@ -537,7 +551,10 @@ class TestGlobalResidualRedistribution:
             inspect.getsource(MPASPrimitiveEquationModel._step_jit),
             inspect.getsource(voronoi_mpi.make_voronoi_mpi_step),
         ):
-            assert "conservative_positive_clip_global" in src
+            assert "apply_water_positivity" in src
+        from legoesm.core.conservation import apply_water_positivity
+        assert "conservative_positive_clip_global" in inspect.getsource(
+            apply_water_positivity)
 
 
 def test_global_variant_keeps_tiny_positive_field():
@@ -556,7 +573,11 @@ def test_mpi_floor_iterates_tracers_sorted():
 
     from legoesm.parallel import voronoi_mpi
     src = inspect.getsource(voronoi_mpi.make_voronoi_mpi_step)
-    assert "sorted(state_new.tracers)" in src
+    assert "apply_water_positivity" in src
+    # the sorted per-tracer iteration (so every rank pairs the collectives)
+    # now lives in the shared stage.
+    from legoesm.core.conservation import apply_water_positivity
+    assert "sorted(tracers)" in inspect.getsource(apply_water_positivity)
 
 
 class TestPerStepDriverConservingFloor:
