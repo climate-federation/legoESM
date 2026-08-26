@@ -141,6 +141,18 @@ if (( _IS_LATLON )); then
 else
     DAYS_THIS_JOB=$(( TARGET_DAYS - LATEST_DAY ))
 fi
+# Lane-confirmed NCCL recipe (measured @64 GPUs; comm-only, no numerics change). Any manual NCCL knob wins.
+if [[ -z "${NCCL_MIN_NCHANNELS:-}" && -z "${NCCL_MAX_NCHANNELS:-}" && -z "${NCCL_P2P_NET_CHUNKSIZE:-}" ]]; then
+    if (( _IS_LATLON )); then
+        export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
+        echo "[nccl-recipe] lat-lon lane: NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16 (chunk not isolated; left unset)"
+    else
+        export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
+        echo "[nccl-recipe] mpas lane: NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072"
+    fi
+else
+    echo "[nccl-recipe] manual override kept: NCCL_MIN_NCHANNELS=${NCCL_MIN_NCHANNELS:-} NCCL_MAX_NCHANNELS=${NCCL_MAX_NCHANNELS:-} NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-}"
+fi
 echo "  This link runs to/for ${DAYS_THIS_JOB} days (target ${TARGET_DAYS}, resume day ${LATEST_DAY})"
 # The run-manifest guard hashes the FULL config incl. --days, so the
 # remaining-days convention makes every link a "different config" in the

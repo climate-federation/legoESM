@@ -498,10 +498,17 @@ def si_correction(
     lnps_correction = -alpha * dt * jnp.sum(delta_div_weighted, axis=-1) / sigma_range
     lnps_hat_corrected = state_explicit.lnps_hat.data + lnps_correction
 
+    # SI bridge for the fp32 spectral runtime: the reference matrices/tau are
+    # float64 (retained — the Helmholtz conditioning is ~1e6, where f32 dies),
+    # so the solve and the einsum/matmul promote a complex64 state to c128.
+    # Cast the corrected fields back to the input (run) dtype so a c64 spectral
+    # state stays c64 and the fori_loop substep carry dtype is stable.  No-op in
+    # the f64 runtime (already c128).
+    _run_cdt = div_hat_explicit.dtype
     return state_explicit._replace(
-        div_hat=state_explicit.div_hat.replace(data=div_hat_corrected),
-        T_hat=state_explicit.T_hat.replace(data=T_hat_corrected),
-        lnps_hat=state_explicit.lnps_hat.replace(data=lnps_hat_corrected),
+        div_hat=state_explicit.div_hat.replace(data=div_hat_corrected.astype(_run_cdt)),
+        T_hat=state_explicit.T_hat.replace(data=T_hat_corrected.astype(_run_cdt)),
+        lnps_hat=state_explicit.lnps_hat.replace(data=lnps_hat_corrected.astype(_run_cdt)),
     )
 
 
