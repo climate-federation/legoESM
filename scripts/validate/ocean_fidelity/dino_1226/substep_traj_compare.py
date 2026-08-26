@@ -1017,6 +1017,199 @@ def main():
                     "OWNER" if _collapse > 50.0 else
                     "REFUTED" if _collapse < 10.0 else "INCONCLUSIVE")
         print(f"    VERDICT (from the measured collapse): {_verdict}")
+
+    # ===================================================================
+    # #1455 sec-D: THE PRE-REGISTERED V-FACE ZONAL METRIC ARM.
+    #
+    # THE CANDIDATE (docs/ocean/fidelity/dino_wall_fixed_bias.md sec 6).  NEMO
+    # builds DINO's mesh isotropically and evaluates BOTH v-face scale factors
+    # at its own v-point latitude `gphiv`.  legoESM's `nemo_isotropic`
+    # convention fixes the v-face MERIDIONAL width but leaves the ZONAL one on
+    # `R*cos(lat_v)*dlon` with `lat_v` the arithmetic MIDPOINT of the two
+    # adjacent tracer rows.  On DINO's stretched meridional grid that midpoint
+    # is not `gphiv`, so legoESM's v-face is zonally WIDER by up to 3.3e-05 --
+    # the only horizontal metric off by more than roundoff.  It sits INSIDE the
+    # barotropic loop, so the forcing substitution above does not remove it.
+    #
+    # THE ARM, as registered: substitute NEMO's OWN `e1v` for that one width,
+    # rerun the SAME loop from the SAME entry state with the SAME (substituted)
+    # forcing, and re-measure.  ONE VARIABLE -- one array.  It reaches three
+    # in-loop consumers, all of which read the same width: the C-grid
+    # continuity divergence's v-face length, the metric-complete EEN rotation
+    # coefficient's `e1v` (the card runs `barotropic_coriolis='een_metric'`),
+    # and the ssh-average face depth's `1/(e1v*e2v)`.  Feeding all three from
+    # the substituted array is what makes it one variable rather than three.
+    #
+    # PRE-REGISTERED VERDICTS (dino_wall_fixed_bias.md sec 6, ranked test 1),
+    # scored by the committed probe over the FIVE-state mean, not here:
+    #   OWNER    if the state-constant wall-normal residual collapses > 50 %
+    #   REFUTED  if it collapses < 10 %
+    #   PARTIAL  in between.
+    # This block writes the arm's own deposit maps; `baro_fixed_bias_wall_map.py`
+    # is run UNCHANGED on them and its numbers carry the verdict.
+    #
+    # THE STAGGERING CONTROL, also registered: feed the UN-SHIFTED array.  Both
+    # arms overwrite exactly the same rows, so the ONLY difference between them
+    # is the row alignment.  The control passes when it is CLEARLY WORSE --
+    # pre-registered here, before either arm was run, as a state-constant
+    # wall-normal residual more than 50 % ABOVE the unsubstituted baseline's.
+    # If the control does not fire, the loop is insensitive to this array and
+    # NO verdict may be issued from the correct arm either.
+    _vf_mode = os.environ.get("DINO_1455_SUB_VFACE", "")
+    if _vf_mode:
+        if _vf_mode not in ("nemo", "stagger"):
+            raise SystemExit(
+                f"DINO_1455_SUB_VFACE={_vf_mode!r}: expected 'nemo' (the "
+                "registered arm) or 'stagger' (the registered staggering "
+                "control).  A silent default here would run an unlabelled arm.")
+        print(f"\n  === CANDIDATE SUBSTITUTION: NEMO's own e1v  [mode={_vf_mode}] ===")
+        _grid_p = _k_sub["grid"]
+        _dxv_p = np.asarray(_grid_p.dx_v, dtype=np.float64)
+        if _dxv_p.ndim != 2 or _dxv_p.shape != (jpj + 1, jpi):
+            raise SystemExit(
+                f"FATAL: legoESM's stored dx_v is {_dxv_p.shape}, not the "
+                f"({jpj + 1}, {jpi}) v-face frame this substitution assumes.")
+        _dnc = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+        _e1v_n = np.asarray(_dnc.variables["e1v"][0], dtype=np.float64)
+        _dnc.close()
+        if _e1v_n.shape != (jpj, jpi):
+            raise SystemExit(f"FATAL: NEMO e1v is {_e1v_n.shape}, want "
+                             f"({jpj}, {jpi})")
+        # ALIGNMENT, calibrated against a known answer rather than assumed --
+        # the same two-hypothesis discriminator the drag arm uses.  legoESM's
+        # own width must already agree with NEMO's to ~1e-5 under the CORRECT
+        # row map (that residual IS the candidate) and disagree by O(1e-2)
+        # under any shift, because one row of this stretched grid changes
+        # cos(lat) by ~dlat*tan(lat) at 69.5 deg.  A one-sided tolerance would
+        # certify nothing on a field this smooth.
+        def _vf_resid(shift):
+            j = np.arange(1, jpj + 1) + shift          # NEMO row for lego row j
+            ok = (j >= 0) & (j < jpj) & (_dxv_p[1:jpj + 1, 0] > 0.0)
+            cand = _e1v_n[np.clip(j, 0, jpj - 1), 0]
+            return float(np.median(np.abs(_dxv_p[1:jpj + 1, 0][ok]
+                                          - cand[ok]) / cand[ok]))
+        _vf_scores = {sh: _vf_resid(sh) for sh in (-2, -1, 0, 1, 2)}
+        _vf_best_wrong = min(v for sh, v in _vf_scores.items() if sh != -1)
+        for _sh, _sc in sorted(_vf_scores.items()):
+            print(f"    row map lego j <- NEMO j{_sh:+d}: median rel="
+                  f"{_sc:.3e}"
+                  + ("   <- the CORRECT map (asserted below)" if _sh == -1
+                     else f"   ({_sc / max(_vf_scores[-1], 1e-300):.0f}x worse)"))
+        assert _vf_scores[-1] < 1e-3 and _vf_scores[-1] * 100.0 < _vf_best_wrong, (
+            "v-face metric row alignment NOT established: the chosen map "
+            "scores %.3e and the best WRONG map scores %.3e (%.1fx), so the "
+            "control cannot tell them apart and the substitution is aborted"
+            % (_vf_scores[-1], _vf_best_wrong,
+               _vf_best_wrong / max(_vf_scores[-1], 1e-300)))
+        # The two polar v-rows are legoESM's closed-wall convention (exactly 0)
+        # and have no NEMO counterpart in this map.  They are left untouched by
+        # BOTH arms -- which is only one-variable-clean if they carry no wet
+        # face, so assert it rather than trusting the convention.
+        _vmask_full = np.asarray(_k_sub["v_mask"])
+        for _jw in (0, jpj):
+            if bool((np.abs(_vmask_full[_jw]) > 0.5).any()):
+                raise SystemExit(
+                    f"FATAL: v row {_jw} is left at legoESM's own metric by "
+                    "this substitution but carries wet faces; the arm would "
+                    "not be one variable.")
+            if _dxv_p[_jw].max() != 0.0:
+                raise SystemExit(
+                    f"FATAL: v row {_jw} is not the pole-zeroed wall this "
+                    f"substitution assumes (max {_dxv_p[_jw].max():.3e}).")
+        _dxv_sub = np.array(_dxv_p)
+        _shift = -1 if _vf_mode == "nemo" else 0
+        _dxv_sub[1:jpj + 1] = _e1v_n[np.clip(np.arange(1, jpj + 1) + _shift,
+                                             0, jpj - 1)]
+        _dxv_sub[jpj] = _dxv_p[jpj]          # the north wall stays legoESM's 0
+        _vf_touched = int((_dxv_sub != _dxv_p).sum())
+        _vf_relmax = float(np.abs((_dxv_sub - _dxv_p)[1:jpj]).max()
+                           / _dxv_p[1:jpj].max())
+        print(f"    substituted rows 1..{jpj - 1} ({_vf_touched} cells); "
+              f"max relative change {_vf_relmax:.3e}")
+        # THE SUBSTITUTION.  `grid` covers every in-loop consumer that reads
+        # the stored width; `een_pre` was built OUTSIDE the loop from the same
+        # array, so it is replaced with the SAME array or the EEN consumer
+        # would keep the old metric and the arm would not be one variable.
+        _k_vfx = dict(_k_sub)
+        _k_vfx["grid"] = _grid_p._replace(
+            dx_v=jnp.asarray(_dxv_sub, dtype=_grid_p.dx_v.dtype))
+        _een_p = _k_sub["een_pre"]
+        if _een_p is None or "e1v" not in _een_p:
+            raise SystemExit(
+                "FATAL: the loop carries no metric-complete EEN pre-block, so "
+                "the rotation-coefficient half of this candidate is not even "
+                "active on this card and the arm would test something else.")
+        if not np.array_equal(np.asarray(_een_p["e1v"], dtype=np.float64),
+                              _dxv_p):
+            raise SystemExit(
+                "FATAL: the EEN pre-block's e1v is not the grid's own dx_v, so "
+                "replacing both with one array is not one variable.")
+        _k_vfx["een_pre"] = dict(_een_p)
+        _k_vfx["een_pre"]["e1v"] = jnp.asarray(
+            _dxv_sub, dtype=_een_p["e1v"].dtype)
+        # ONE VARIABLE, MECHANICALLY: every other loop input is the SAME OBJECT
+        # as in the forcing-substituted arm, and inside the two containers that
+        # do change, every other leaf is too.  Identity, not equality -- an
+        # equal-but-rebuilt array is a rebuild this arm never asked for.
+        for _kk in set(_k_vfx) | set(_k_sub):
+            if _kk in ("grid", "een_pre"):
+                continue
+            if _k_vfx.get(_kk) is not _k_sub.get(_kk):
+                raise SystemExit(f"FATAL: loop input {_kk!r} changed; the "
+                                 "v-face arm is not one variable")
+        for _f in _grid_p._fields:
+            if _f == "dx_v":
+                continue
+            if getattr(_k_vfx["grid"], _f) is not getattr(_grid_p, _f):
+                raise SystemExit(f"FATAL: grid field {_f!r} changed")
+        for _kk in set(_k_vfx["een_pre"]) | set(_een_p):
+            if _kk == "e1v":
+                continue
+            if _k_vfx["een_pre"].get(_kk) is not _een_p.get(_kk):
+                raise SystemExit(f"FATAL: een_pre[{_kk!r}] changed")
+        print("    one-variable check: every other loop input, grid field and "
+              "EEN pre-block leaf is the SAME OBJECT as the baseline arm's")
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_vfx)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _U_vfx = np.asarray(captured["carries"][1])
+        _V_vfx = np.asarray(captured["carries"][2])
+        _lego_avg_vfx = np.zeros_like(_puu_b)
+        _lego_vavg_vfx = np.zeros_like(_pvv_b)
+        for j in range(1, Kpit + 1):
+            _lego_avg_vfx = _lego_avg_vfx + wf_n[j - 1] * _cell(
+                np.asarray(_U_vfx[j - 1]))
+            _lego_vavg_vfx = _lego_vavg_vfx + wf_n[j - 1] * _cell_v(
+                np.asarray(_V_vfx[j - 1]))
+        _dep_vfx = acc_sv((_lego_avg_vfx - nemo_Ubar_avg) * _wetu)
+        _dV_vfx = (_lego_vavg_vfx - nemo_Vbar_avg) * _wetv
+        # PER-STATE PREVIEW ONLY.  The registered quantity is the STATE-CONSTANT
+        # (five-state mean) wall-normal residual and it is scored by the
+        # committed probe on the maps this run writes, never here: a one-state
+        # number cannot carry a verdict about a state-constant field.
+        _wv_rows = [j for j in range(_wetv.shape[0]) if _wetv[j].any()]
+        _j_s_v, _j_n_v = _wv_rows[0], _wv_rows[-1]
+        def _rms_row(a, j):
+            return float(np.sqrt((a[j][_wetv[j]] ** 2).mean()))
+        print(f"    zonal (tangential) deposit: baseline {_dep_sub:+.4e} -> "
+              f"arm {_dep_vfx:+.4e} Sv/step")
+        for _tag, _jj in (("south", _j_s_v), ("north", _j_n_v)):
+            _b, _a = _rms_row(_dV_sub, _jj), _rms_row(_dV_vfx, _jj)
+            print(f"    PREVIEW (this state only) wall-normal RMS at the "
+                  f"{_tag} wall row {_jj}: baseline {_b:.4e} -> arm {_a:.4e}  "
+                  f"({100.0 * (1.0 - _a / max(_b, 1e-300)):+.1f}% change)")
+        print("    (the REGISTERED collapse is the five-state mean, scored by "
+              "baro_fixed_bias_wall_map.py on the maps written below)")
+        # The maps this run writes are now the ARM's in-loop arrays, and they
+        # say so in their own provenance so an arm map can never be read as a
+        # baseline one.
+        _lego_avg_sub = _lego_avg_vfx
+        lego_Vbar_avg_sub = _lego_vavg_vfx
+        _dV_sub = _dV_vfx
+        _dep_sub = _dep_vfx
     print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
     print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
           f"({100*_dep_sub/_dep_vel:.1f}% of it survives)")
@@ -1135,7 +1328,17 @@ def main():
                  per_lon_total=_pl_tot, per_lon_in_loop=_pl_sub,
                  dep_total=np.float64(_dep_vel), dep_in_loop=np.float64(_dep_sub),
                  ic_step=np.int64(mr.IC_STEP), seqdump=np.array(SEQDUMP),
-                 provenance=np.array(mr.provenance("substep_deposit_map")))
+                 # The v-face metric arm is stamped INTO the map, both
+                 # as its own key and in the provenance string, so an
+                 # arm map can never be read as a baseline one -- the
+                 # two are well-formed arrays on an identical wet mask
+                 # and no numerical guard could tell them apart.
+                 vface_arm=np.array(os.environ.get(
+                     "DINO_1455_SUB_VFACE", "") or "none"),
+                 provenance=np.array(
+                     mr.provenance("substep_deposit_map")
+                     + " DINO_1455_SUB_VFACE=%r" % (
+                         os.environ.get("DINO_1455_SUB_VFACE") or None,)))
         # Round-trip from the FILE, not from the in-memory operands: an
         # assertion that re-runs acc_sv() on the same objects it was just
         # called on is true by construction and proves nothing about what
