@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-MODES = ["fp64", "mixed"]  # #1675: mixed enabled
+MODES = ["fp64"]  # #1665 interim: mixed refused
 
 
 def _cast_to_storage(state, storage):
@@ -144,7 +144,7 @@ def test_mpas_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-@pytest.mark.parametrize("mode", ["fp64", "mixed"])  # #1675: mixed enabled
+@pytest.mark.parametrize("mode", ["fp64"])  # #1665 interim: mixed refused
 # (the mixed lat-lon tracer-promotion is the tracked mixed-consistency campaign;
 # the refusal itself is pinned by test_mixed_precision_is_refused below).
 def test_latlon_pe_leaf_dtypes(mode):
@@ -152,48 +152,10 @@ def test_latlon_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-def test_mixed_precision_enabled():
-    """#1675: mixed is enabled; the parametrized leaf-dtype tests above now run
-    it and assert every prognostic leaf stays at fp32 storage."""
+def test_mixed_precision_is_refused():
+    """#1665 interim: mixed is refused loudly; pin the refusal explicitly (the
+    lat-lon leaf-dtype consistency for mixed is the tracked campaign)."""
+    import pytest
     from legoesm.runtime.precision import apply_precision
-    p = apply_precision("mixed")
-    assert p.storage == jnp.float32 and p.control == jnp.float64
-
-
-def test_mixed_latlon_rollout_capstone():
-    """#1675 capstone: a 20-step mixed lat-lon PE rollout keeps per-field storage
-    dtypes stable (p_s f64, every other prognostic fp32 — no gradual promotion)
-    AND conserves global dry mass, non-accumulating (p_s is carried at f64
-    accumulate precision + the fix_mass fixer, so mass stays near-f64)."""
-    from legoesm.runtime.precision import apply_precision
-    apply_precision("mixed")
-    from legoesm.core.precision import resolve_dtype
-    from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
-        hydrostatic_to_cgrid,
-    )
-    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
-    storage = resolve_dtype(None, "storage"); accum = resolve_dtype(None, "accumulate")
-    assert storage == jnp.float32 and accum == jnp.float64  # mixed sanity
-    grid = create_latlon_grid(n_lat=8); sigma = create_sigma_coordinate(8)
-    state = hydrostatic_to_cgrid(
-        baroclinic_wave_init_latlon(grid, sigma, perturbed=True, moist=True), grid)
-    state = _cast_to_storage(state, storage)
-    cfg = CGridLatLonPrimitiveEquationConfig(
-        A_h=1.0e4, time_integrator="ssp_rk3", fix_mass=True,
-        zero_mean_ps_tendency=False, use_ppm_transport=True)
-    dt = 100.0
-    model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg, dt=dt)
-    area = jnp.asarray(grid.area, jnp.float64)
-    mass0 = float(jnp.sum(jnp.asarray(state.p_s, jnp.float64) * area))
-    drifts = []
-    for _ in range(20):
-        state = model.step(state, dt=dt)
-        drifts.append(abs(float(jnp.sum(jnp.asarray(state.p_s, jnp.float64) * area)) - mass0) / mass0)
-    # dtypes stay consistent after the whole rollout (the contagion guard)
-    _assert_leaf_dtypes(state, storage, accum)
-    # mass bounded and NON-accumulating (final not the running max => no secular growth)
-    assert max(drifts) < 1e-6, f"mass drift too large: {max(drifts):.2e}"
-    assert drifts[-1] <= 2.0 * max(drifts[:10]) + 1e-12, f"mass drift accumulating: {drifts}"
+    with pytest.raises(NotImplementedError, match="disabled"):
+        apply_precision("mixed")

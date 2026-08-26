@@ -102,14 +102,19 @@ def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     This is the **one-shot** entry point used by :func:`runtime.bootstrap`
     AND by the driver CLIs directly, so gating a mode here covers every caller.
     """
-    # #1675: 'mixed' is enabled. The campaign closed its sites: site 1 (Helmholtz
-    # operator runs at control-role f64 metrics); site 2 (run_lmip storage dtype,
-    # #1676); site 3 (the EAGER dycore step boundary now re-establishes storage
-    # dtype via finalize_to_storage, matching the compiled scan-carry — so the
-    # f64 mass-fixer/control values no longer leak into the fp32 state). MEASURED:
-    # mixed == fp32-compute where no f64 control-role solve runs, uses f64 for the
-    # stiff Helmholtz solve + reductions, keeps fp32 storage on both eager and
-    # compiled paths, and conserves grid-space global dry mass to ~4e-10 (accepted).
+    # #1665 interim: 'mixed' (fp32 storage / fp64 compute) is NOT yet consistent
+    # — it silently runs fp64 under x64, its grid metrics floor the semi-implicit
+    # solve, and its mass-fix correction is state-affecting. Refuse it LOUDLY
+    # instead of misrepresenting the precision that actually runs; fp64 is what
+    # mixed was really doing. (A dedicated mixed-consistency campaign is tracked
+    # separately.) fp32/fp64 unaffected.
+    if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
+        raise NotImplementedError(
+            f"precision={mode!r} is disabled (#1665 interim): the mixed "
+            "fp32-storage/fp64-compute path is not yet consistent. Use "
+            "precision='fp64' (what mixed was actually running) or "
+            "precision='fp32'."
+        )
     policy = resolve_precision(mode)
 
     # Activate globally.
