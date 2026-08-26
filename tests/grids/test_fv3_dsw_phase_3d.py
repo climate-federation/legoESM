@@ -1256,8 +1256,18 @@ def test_shape_gate_is_non_vacuous(jctx, jstate, jcsw, monkeypatch):
     monkeypatch.setattr(jdsw, "validate_stacked", lambda *a, **k: None)
     bad_in = dict(jcsw)
     bad_in["uc"] = jnp.swapaxes(jcsw["uc"], 1, 2)
-    bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
-
+    # ⛔ CORRECTED AGAIN (2026-08-26, the allk batching): the k-batched
+    # exchange path (ext_*_allk, M3 v2a) rebuilds stacks with explicit
+    # shape-carrying .at[].set writes, so the transposed operand that
+    # used to run to completion on the wrong cells now trips a
+    # BROADCAST error mid-phase.  Loud beats silently-wrong: the
+    # neutered call RAISING is a STRONGER outcome than "succeeds and
+    # differs", and either outcome proves the gate is load-bearing.
+    # Accept both, refuse only the vacuous case (runs AND matches).
+    try:
+        bad = jdsw.dsw_transport_phase_3d(jctx, jstate, bad_in, DT, KM)
+    except ValueError:
+        return  # the slip is now caught structurally -- gate non-vacuous
     # `equal_nan=True`: these stacks carry NaN scratch by construction
     # (the halo lane's tripwire fill), and plain array_equal calls two
     # identical NaN arrays UNEQUAL -- which would make `moved` non-empty

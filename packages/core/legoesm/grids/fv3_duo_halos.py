@@ -1942,6 +1942,72 @@ def ext_vector_cgrid_sixface(uc6, vc6, tab: DuoHaloTables):
         return ext_vector_cgrid_sixface_impl(uc6, vc6, tab)
     return ring.ext_vector_cgrid(uc6, vc6)
 
+
+# ---------------------------------------------------------------------------
+# k-batched exchanges (v2a) -- ONE call per exchange SITE, not per level
+# ---------------------------------------------------------------------------
+# The step-side callers exchange (6, m0, m1, K) stacks one trailing
+# slice at a time; on the ring path each per-level call pays a fixed
+# ~10 ms (shard_map region + all_gather launch + O(state) zero-stack
+# rebuild + full table run), which is the measured C192/C384 SPMD
+# slowdown (jobs 9495469).  These `*_allk` publics accept the whole
+# stack -- K is the trailing axis; a caller may fold tracer x level
+# into it, any trailing size is legal -- and dispatch exactly like the
+# per-level publics above:
+#
+# * ``ring_comm is None`` (certified): the CALLER's own per-level loop,
+#   relocated VERBATIM (same `.at[..., k].set(impl(...))` operations in
+#   the same order), so moving the loop inside changes nothing
+#   semantically and the existing bitwise gates keep certifying it.
+# * ring: ONE collective for all K (``DuoRingComm.*_allk``).
+
+def ext_scalar_sixface_allk(f6k, tab: DuoHaloTables, stag: str):
+    """Batched :func:`ext_scalar_sixface` over a ``(6, m0, m1, K)`` stack.
+
+    Certified path: the per-level caller loop (e.g.
+    ``fv3_acoustic_3d._exchange_scalar_stack``), relocated verbatim --
+    each trailing slice exchanged by the certified impl, in ascending
+    ``k`` order, reading/writing only its own slice.  Byte-identical to
+    the pre-batching callers by construction.
+    """
+    ring = getattr(tab, "ring_comm", None)
+    if ring is None:
+        for k in range(f6k.shape[-1]):
+            f6k = f6k.at[..., k].set(
+                ext_scalar_sixface_impl(f6k[..., k], tab, stag))
+        return f6k
+    return ring.ext_scalar_allk(f6k, stag)
+
+
+def ext_vector_dgrid_sixface_allk(u6k, v6k, tab: DuoHaloTables):
+    """Batched :func:`ext_vector_dgrid_sixface`; trailing K on both
+    components.  Certified path = the relocated per-level loop of
+    ``fv3_acoustic_3d._exchange_dgrid_winds_stack``, verbatim."""
+    ring = getattr(tab, "ring_comm", None)
+    if ring is None:
+        for k in range(u6k.shape[-1]):
+            uk, vk = ext_vector_dgrid_sixface_impl(
+                u6k[..., k], v6k[..., k], tab)
+            u6k = u6k.at[..., k].set(uk)
+            v6k = v6k.at[..., k].set(vk)
+        return u6k, v6k
+    return ring.ext_vector_dgrid_allk(u6k, v6k)
+
+
+def ext_vector_cgrid_sixface_allk(uc6k, vc6k, tab: DuoHaloTables):
+    """Batched :func:`ext_vector_cgrid_sixface`; trailing K on both
+    components.  Certified path = the per-level caller loop of
+    ``fv3_dsw_phase_3d.exchange_post_pgrad_3d``, relocated verbatim."""
+    ring = getattr(tab, "ring_comm", None)
+    if ring is None:
+        for k in range(uc6k.shape[-1]):
+            uk, vk = ext_vector_cgrid_sixface_impl(
+                uc6k[..., k], vc6k[..., k], tab)
+            uc6k = uc6k.at[..., k].set(uk)
+            vc6k = vc6k.at[..., k].set(vk)
+        return uc6k, vc6k
+    return ring.ext_vector_cgrid_allk(uc6k, vc6k)
+
 # ---------------------------------------------------------------------------
 # jit policies -- the ONE place each entry point's staticness is decided
 # ---------------------------------------------------------------------------

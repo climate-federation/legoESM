@@ -202,7 +202,7 @@ import jax
 import jax.numpy as jnp
 from legoesm.core.fv3_duo_stepper import (
     SWConfig,
-    exchange_post_pgrad_sixface,
+    exchange_post_pgrad_sixface_allk,
 )
 from legoesm.core.fv3_duo_sw_core import d_sw1_duo, d_sw2_duo
 from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
@@ -426,18 +426,20 @@ def exchange_post_pgrad_3d(ctx, csw_outs: dict, km, *, nord: int) -> dict:
     THE GATE IS ``nord``, the DIVERGENCE-damping order ``d_sw5`` runs,
     not ``nord_v``, the vorticity-damping order.  The shipped decks set
     both to 2, so gating on the wrong one is invisible there -- which
-    is exactly why it is stated.  ``exchange_post_pgrad_sixface`` owns
-    the gate; this routine only supplies the per-level cadence.
+    is exactly why it is stated.  ``exchange_post_pgrad_sixface_allk``
+    owns the gate (identically to the per-level helper); this routine
+    only validates and forwards the whole stacks.
 
     Omitting these leaves the ``uc``/``vc``/``divgd`` halos stale and
     ``d_sw1`` transports garbage: in the NumPy lane the first sub-step
     produced ``delp ~ -1.5e39`` and 267 non-finite ``u`` values before
     any exchange was added.
 
-    The oracle's exchanges are 3-D calls over the whole column; this
-    lane holds one 2-D plane per level, so it drives the shared
-    six-face helper once per ``k``.  Level-independent by construction
-    -- ``ext_scalar`` / ``ext_vector`` are horizontal operators.
+    The oracle's exchanges are 3-D calls over the whole column; since
+    v2a this lane matches that shape, driving the k-batched six-face
+    helper ONCE per call site (level-independent by construction --
+    ``ext_scalar`` / ``ext_vector`` are horizontal operators, so the
+    batched certified path is the former per-``k`` loop verbatim).
 
     Returns ``{"divg_d", "uc", "vc"}`` face-stacked and
     ``(6, i, j, km)``-shaped.  The spec MUTATES those three keys of
@@ -452,27 +454,19 @@ def exchange_post_pgrad_3d(ctx, csw_outs: dict, km, *, nord: int) -> dict:
     require_f64_jax("exchange_post_pgrad_3d",
                      {k: csw_outs[k] for k in _EXCHANGE_FIELDS})
 
-    per_level = {name: [] for name in _EXCHANGE_FIELDS}
     # R1a, level axis: `ext_scalar`/`ext_vector` are HORIZONTAL
     # operators -- each level's exchange reads and writes only that
     # level's plane, and this lane is functional, so the NumPy lane's
-    # strided `fort` views onto one buffer do not exist here.  No
-    # iteration reads a location another writes.  Independent,
-    # therefore vectorisable, therefore NOT vectorised (C2): the halo
-    # tables index a FLAT (6, m, m) layout, so a batched level axis
-    # would need its own table and its own equivalence gate.
-    for k in range(km):
-        dg_k, uc_k, vc_k = exchange_post_pgrad_sixface(
-            ctx, csw_outs["divg_d"][:, :, :, k], csw_outs["uc"][:, :, :, k],
-            csw_outs["vc"][:, :, :, k], nord=nord)
-        per_level["divg_d"].append(dg_k)
-        per_level["uc"].append(uc_k)
-        per_level["vc"].append(vc_k)
-    # Each per-level entry is already face-stacked `(6, i, j)`, so the
-    # level axis goes to position 3 here, not 2 -- the result is
-    # `(6, i, j, km)`, which is `(6,) + field_shape(name, n, ng, km)`.
-    return {name: jnp.stack(per_level[name], axis=3)
-            for name in _EXCHANGE_FIELDS}
+    # strided `fort` views onto one buffer do not exist here.
+    # Independent, therefore batched (v2a): the `*_allk` exchanges keep
+    # the FLAT (6, m, m) tables and vmap them over the trailing level
+    # axis (certified path = the former per-k loop, relocated
+    # verbatim), turning 2*km collectives per call into 2 on the ring
+    # path.  Fields are already `(6, i, j, km)` in and out.
+    dg, uc, vc = exchange_post_pgrad_sixface_allk(
+        ctx, csw_outs["divg_d"], csw_outs["uc"], csw_outs["vc"],
+        nord=nord)
+    return {"divg_d": dg, "uc": uc, "vc": vc}
 
 
 # ---------------------------------------------------------------------

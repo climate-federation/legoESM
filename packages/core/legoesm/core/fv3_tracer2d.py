@@ -59,7 +59,7 @@ from legoesm.core.fv3_phase3d_common import require_f64_jax
 from legoesm.core.fv3_tp_core import fv_tp_2d
 from legoesm.grids.fv3_duo_halos import (
     average_shared_edge_cgrid,
-    ext_scalar_sixface,
+    ext_scalar_sixface_allk,
 )
 
 # fv_tracer2d.F90:243 -- `if (trdm > 1.e-4)` gates the dp1 halo
@@ -311,13 +311,18 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
     nsplt_exceeded = jnp.any(nsplt_i > NSPLT_MAX)
     frac = 1.0 / nsplt_f
 
-    # ---- q halo update (:276-281): the halo module's ext_scalar, per
-    # (level, tracer) slab -- a horizontal operator, same exchange.
-    q = q6
-    for k in range(km):
-        for iq in range(nq):
-            q = q.at[:, iq, :, :, k].set(
-                ext_scalar_sixface(q[:, iq, :, :, k], tab, "A"))
+    # ---- q halo update (:276-281): the halo module's ext_scalar over
+    # every (level, tracer) slab -- a horizontal operator, so the
+    # (iq, k) pair folds into ONE trailing batch axis and the whole
+    # update is ONE batched exchange call (v2a; nq*km collectives -> 1
+    # on the ring path).  moveaxis/reshape are bijective relabellings;
+    # each slab still gets the certified per-level exchange, values
+    # identical to the former per-(k, iq) loop (slabs independent).
+    q = jnp.moveaxis(
+        ext_scalar_sixface_allk(
+            jnp.moveaxis(q6, 1, -1).reshape(6, m_a, m_a, km * nq),
+            tab, "A").reshape(6, m_a, m_a, km, nq),
+        -1, 1)
 
     # ---- the k loop (:284-388), one lax.scan of NSPLT_MAX per level ---
     dp1 = dp1_6
@@ -414,11 +419,13 @@ def tracer_2d_1l_sixface(ctx: dict, q6, dp1_6, flux_cap: dict, *, km: int,
                     base = base.at[t, iq].set(
                         qm_l[t].at[ng:ng + n, ng:ng + n].set(u))
             # :361-379: dp1 = dp2 (compute window), then the qn2 halo
-            # refresh -- the halo module's ext_scalar (:371-377).
-            exch = jnp.zeros_like(qn2)
-            for iq in range(nq):
-                exch = exch.at[:, iq].set(
-                    ext_scalar_sixface(base[:, iq], tab, "A"))
+            # refresh -- the halo module's ext_scalar (:371-377), all nq
+            # tracers batched into the trailing axis: ONE exchange call
+            # per subcycle iteration instead of nq (v2a).
+            exch = jnp.moveaxis(
+                ext_scalar_sixface_allk(
+                    jnp.moveaxis(base, 1, -1), tab, "A"),
+                -1, 1)
             # PROVEN no-op when inactive: where returns the old arrays
             # bit-exactly; both arms are total and finite (rule 2).
             return (jnp.where(run, exch, qn2),

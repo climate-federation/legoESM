@@ -369,6 +369,163 @@ def _border_mask_rect(m0: int, m1: int, w: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# k-batched ring exchanges (v2a) -- one collective per SITE, not per level
+# ---------------------------------------------------------------------------
+#
+# The per-level ring closures above pay a fixed ~10 ms per call
+# (shard_map region + all_gather launch + O(state) zero-stack rebuild +
+# full table run); a step makes hundreds of them, which is the measured
+# C192 2-GPU 50 s vs 6.6 s single / C384 190.9 s vs 23.5 s slowdown
+# (jobs 9495469).  These `*_allk` factories take the whole (…, K)
+# stack: own borders for ALL K ride in ONE payload, ONE all_gather, one
+# sparse-stack rebuild with K on the trailing axis, and the certified
+# per-level impl applied via ``jax.vmap`` over that trailing axis.  The
+# static tables stay (6, m, m)-flat -- K is NEVER folded into the flat
+# index space; vmap batches the gathers/scatters natively.
+
+def make_ring_ext_scalar_sixface_allk(tab, stag: str, mesh, *,
+                                      ring_width: int = 8,
+                                      poison: bool = False):
+    """k-batched twin of :func:`make_ring_ext_scalar_sixface`.
+
+    Returns ``(fn, depth)`` with ``fn(f6k_local) -> f6k_local`` on the
+    LOCAL block ``(6//d, m, m, K)`` of a global ``(6, m, m, K)`` array
+    sharded ``P('face')`` (trailing K replicated per face, any static
+    size -- callers may fold tracer x level into it).  Same census
+    gate, same border mask, same zero/NaN fill as the per-level ring;
+    the only new op is the vmap over the trailing axis.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from jax.experimental.shard_map import shard_map
+
+    # the *_impl body, NOT the public dispatcher (recursion guard)
+    from legoesm.grids.fv3_duo_halos import ext_scalar_sixface_impl
+
+    depth = assert_ring_width_covers(tab, ring_width)
+    if stag == "A":
+        m = tab.n + 2 * tab.ng
+    elif stag == "B":
+        m = tab.n + 2 * tab.ng + 1
+    else:
+        raise ValueError(
+            f"make_ring_ext_scalar_sixface_allk: stag {stag!r} (the "
+            f"certified scalar exchange supports 'A' and 'B' only -- "
+            f"fail closed)")
+    (ax_name, ax_size), = ((n, s) for n, s in
+                          zip(mesh.axis_names, mesh.devices.shape))
+    if 6 % ax_size != 0:
+        raise ValueError(
+            f"mesh axis {ax_name!r} has {ax_size} devices; 6 faces "
+            f"require a divisor (1, 2, 3, 6)")
+    g = 6 // ax_size
+    mask = _border_mask(m, ring_width)
+    bidx = np.flatnonzero(mask.ravel())
+
+    def _body(f6k_local):
+        # f6k_local: (g, m, m, K), this device's faces, certified order.
+        kk = f6k_local.shape[-1]
+        # 1. own borders for ALL K, one payload
+        borders = f6k_local.reshape(g, m * m, kk)[:, bidx, :]  # (g, nb, K)
+        # 2. ONE all_gather for the whole stack
+        allb = jax.lax.all_gather(borders, ax_name)         # (d, g, nb, K)
+        allb = allb.reshape(6, bidx.size, kk)
+        # 3. reconstruct: borders everywhere, own faces in full; the
+        #    census proves the tables never read the fill (poison=NaN
+        #    makes any violation loud, as in the per-level ring).
+        fill = jnp.nan if poison else 0.0
+        stack = jnp.full((6, m * m, kk), fill, dtype=f6k_local.dtype)
+        stack = stack.at[:, bidx, :].set(allb)
+        me = jax.lax.axis_index(ax_name)
+        rows = me * g + jnp.arange(g)
+        stack = stack.at[rows].set(f6k_local.reshape(g, m * m, kk))
+        # 4. certified tables verbatim, vmapped over trailing K
+        out = jax.vmap(
+            lambda f2: ext_scalar_sixface_impl(f2, tab, stag),
+            in_axes=-1, out_axes=-1)(stack.reshape(6, m, m, kk))
+        # 5. keep own faces
+        return jax.lax.dynamic_slice_in_dim(out, me * g, g, axis=0)
+
+    return shard_map(_body, mesh=mesh,
+                     in_specs=P(ax_name), out_specs=P(ax_name),
+                     check_rep=False), depth
+
+
+def make_ring_ext_vector_sixface_allk(tab, grid: str, mesh, *,
+                                      ring_width: int = 8,
+                                      poison: bool = False):
+    """k-batched twin of :func:`make_ring_ext_vector_sixface`.
+
+    ``fn(u_local, v_local) -> (u_local, v_local)`` with trailing K on
+    both components; both components' width-w borders for ALL K ride
+    ONE fused all_gather, and the certified vector flow is vmapped over
+    the trailing axis.
+    """
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import PartitionSpec as P
+    from jax.experimental.shard_map import shard_map
+
+    # the *_impl bodies, NOT the public dispatchers (recursion guard)
+    from legoesm.grids.fv3_duo_halos import (
+        ext_vector_cgrid_sixface_impl,
+        ext_vector_dgrid_sixface_impl,
+    )
+
+    depth = assert_ring_width_covers(tab, ring_width)
+    ma = tab.n + 2 * tab.ng
+    mb = ma + 1
+    if grid == "D":
+        shapes, flow = ((ma, mb), (mb, ma)), ext_vector_dgrid_sixface_impl
+    elif grid == "C":
+        shapes, flow = ((mb, ma), (ma, mb)), ext_vector_cgrid_sixface_impl
+    else:
+        raise ValueError(
+            f"make_ring_ext_vector_sixface_allk: grid {grid!r} "
+            f"(expected 'D' or 'C')")
+    (ax_name, ax_size), = ((n, s) for n, s in
+                          zip(mesh.axis_names, mesh.devices.shape))
+    if 6 % ax_size != 0:
+        raise ValueError(
+            f"mesh axis {ax_name!r} has {ax_size} devices; 6 faces "
+            f"require a divisor (1, 2, 3, 6)")
+    g = 6 // ax_size
+    bidx = [np.flatnonzero(_border_mask_rect(s0, s1, ring_width).ravel())
+            for (s0, s1) in shapes]
+
+    def _body(u_local, v_local):
+        kk = u_local.shape[-1]
+        payloads = []
+        for arr, (s0, s1), bi in zip((u_local, v_local), shapes, bidx):
+            payloads.append(arr.reshape(g, s0 * s1, kk)[:, bi, :])
+        fused = jnp.concatenate(payloads, axis=1)   # (g, nb_u+nb_v, K)
+        allb = jax.lax.all_gather(fused, ax_name)   # (d, g, nb, K)
+        allb = allb.reshape(6, -1, kk)
+        me = jax.lax.axis_index(ax_name)
+        rows = me * g + jnp.arange(g)
+        fill = jnp.nan if poison else 0.0
+        stacks = []
+        off = 0
+        for arr, (s0, s1), bi in zip((u_local, v_local), shapes, bidx):
+            st = jnp.full((6, s0 * s1, kk), fill, dtype=arr.dtype)
+            st = st.at[:, bi, :].set(allb[:, off:off + bi.size, :])
+            st = st.at[rows].set(arr.reshape(g, s0 * s1, kk))
+            stacks.append(st.reshape(6, s0, s1, kk))
+            off += bi.size
+        u_out, v_out = jax.vmap(
+            lambda u2, v2: flow(u2, v2, tab),
+            in_axes=(-1, -1), out_axes=(-1, -1))(stacks[0], stacks[1])
+        return (jax.lax.dynamic_slice_in_dim(u_out, me * g, g, axis=0),
+                jax.lax.dynamic_slice_in_dim(v_out, me * g, g, axis=0))
+
+    return shard_map(_body, mesh=mesh,
+                     in_specs=(P(ax_name), P(ax_name)),
+                     out_specs=(P(ax_name), P(ax_name)),
+                     check_rep=False), depth
+
+
+# ---------------------------------------------------------------------------
 # ring_comm -- the bundle the halo dispatchers route through (M3 wiring)
 # ---------------------------------------------------------------------------
 
@@ -383,8 +540,9 @@ class DuoRingComm:
     every call site; dispatch here is a trace-time dict lookup.
     """
 
-    __slots__ = ("_scalar", "_dgrid", "_cgrid", "ring_width", "depth",
-                 "mesh")
+    __slots__ = ("_scalar", "_dgrid", "_cgrid",
+                 "_scalar_allk", "_dgrid_allk", "_cgrid_allk",
+                 "ring_width", "depth", "mesh")
 
     def __hash__(self):
         return id(self)
@@ -411,6 +569,22 @@ class DuoRingComm:
 
     def ext_vector_cgrid(self, uc6, vc6):
         return self._cgrid(uc6, vc6)
+
+    def ext_scalar_allk(self, f6k, stag: str):
+        try:
+            fn = self._scalar_allk[stag]
+        except KeyError:
+            raise ValueError(
+                f"DuoRingComm.ext_scalar_allk: stagger {stag!r} not "
+                f"implemented (the certified scalar exchange supports "
+                f"'A' and 'B' only)") from None
+        return fn(f6k)
+
+    def ext_vector_dgrid_allk(self, u6k, v6k):
+        return self._dgrid_allk(u6k, v6k)
+
+    def ext_vector_cgrid_allk(self, uc6k, vc6k):
+        return self._cgrid_allk(uc6k, vc6k)
 
 
 def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
@@ -449,14 +623,22 @@ def build_ring_comm(tab, mesh, *, ring_width: int = 8) -> DuoRingComm:
     rc = DuoRingComm()
     rc.mesh = mesh          # for the caller-side identity assert
     scalar = {}
+    scalar_allk = {}
     depth = -1
     for stag in ("A", "B"):
         scalar[stag], depth = make_ring_ext_scalar_sixface(
             tab, stag, mesh, ring_width=ring_width)
+        scalar_allk[stag], _ = make_ring_ext_scalar_sixface_allk(
+            tab, stag, mesh, ring_width=ring_width)
     rc._scalar = scalar
+    rc._scalar_allk = scalar_allk
     rc._dgrid, _ = make_ring_ext_vector_sixface(
         tab, "D", mesh, ring_width=ring_width)
     rc._cgrid, _ = make_ring_ext_vector_sixface(
+        tab, "C", mesh, ring_width=ring_width)
+    rc._dgrid_allk, _ = make_ring_ext_vector_sixface_allk(
+        tab, "D", mesh, ring_width=ring_width)
+    rc._cgrid_allk, _ = make_ring_ext_vector_sixface_allk(
         tab, "C", mesh, ring_width=ring_width)
     rc.ring_width = int(ring_width)
     rc.depth = int(depth)

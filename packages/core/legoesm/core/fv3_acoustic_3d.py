@@ -88,8 +88,8 @@ from legoesm.core.fv3_phase3d_common import (
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import (
-    ext_scalar_sixface,
-    ext_vector_dgrid_sixface,
+    ext_scalar_sixface_allk,
+    ext_vector_dgrid_sixface_allk,
 )
 from legoesm.grids.fv3_native_gridstruct import FV3_GRAV
 
@@ -131,16 +131,17 @@ def _duo_tables(ctx):
 
 
 def _exchange_scalar_stack(f6, tab, km):
-    """Per-level A-grid scalar halo refresh on a (6, m, m, km) stack.
+    """A-grid scalar halo refresh on a (6, m, m, km) stack, ONE batched
+    exchange call (v2a).
 
-    Each level's exchange reads and writes only that level, so no
-    iteration reads what an earlier one writes; the loop stays a Python
-    loop over static km because the halo routine's contract -- and the
-    spec's per-k call -- is per level.  The extent is the halo
-    module's, never re-derived here.
+    Each level's exchange reads and writes only that level; the former
+    per-k Python loop now lives verbatim inside
+    ``ext_scalar_sixface_allk``'s certified path (byte-identical), and
+    the ring path replaces km collectives with one -- the per-call
+    fixed cost was the measured C192/C384 SPMD slowdown (jobs 9495469).
 
-    ⛔ ``ext_scalar_sixface``, NOT ``exchange_agrid_scalar_halos``.  The
-    spec routes every one of these sites through ``_pad_scalars_6``,
+    ⛔ ``ext_scalar_sixface_allk``, NOT ``exchange_agrid_scalar_halos``.
+    The spec routes every one of these sites through ``_pad_scalars_6``,
     which uses the EXT bundle and falls back to the interim
     index-copy helper only when the context explicitly declares the
     substitution.  The two are not interchangeable: the interim helper
@@ -151,21 +152,27 @@ def _exchange_scalar_stack(f6, tab, km):
     as a 37 % delp disagreement against the spec on the first composed
     run (job 9417519).
     """
-    for k in range(km):
-        f6 = f6.at[..., k].set(ext_scalar_sixface(f6[..., k], tab, "A"))
-    return f6
+    if f6.shape[-1] != km:
+        raise ValueError(
+            f"_exchange_scalar_stack: trailing axis {f6.shape[-1]} != "
+            f"km {km} -- the batched exchange runs the WHOLE stack, so "
+            f"a mismatch would exchange different levels than the old "
+            f"per-k loop")
+    return ext_scalar_sixface_allk(f6, tab, "A")
 
 
 def _exchange_dgrid_winds_stack(u6, v6, tab, km):
-    """Per-level ``ext_vector`` duo exchange of the D winds (the k2e
-    Lagrange exchange that replaces the WHOLE padded array, corner
-    diagonals included -- dyn_core.F90:504).  Same independence argument
-    as the scalar stack: levels do not interact."""
-    for k in range(km):
-        uk, vk = ext_vector_dgrid_sixface(u6[..., k], v6[..., k], tab)
-        u6 = u6.at[..., k].set(uk)
-        v6 = v6.at[..., k].set(vk)
-    return u6, v6
+    """``ext_vector`` duo exchange of the D winds (the k2e Lagrange
+    exchange that replaces the WHOLE padded array, corner diagonals
+    included -- dyn_core.F90:504), ONE batched call (v2a): the former
+    per-k loop lives verbatim inside
+    ``ext_vector_dgrid_sixface_allk``'s certified path.  Levels do not
+    interact (same independence argument as the scalar stack)."""
+    if u6.shape[-1] != km or v6.shape[-1] != km:
+        raise ValueError(
+            f"_exchange_dgrid_winds_stack: trailing axes "
+            f"({u6.shape[-1]}, {v6.shape[-1]}) != km {km}")
+    return ext_vector_dgrid_sixface_allk(u6, v6, tab)
 
 
 def _check_sane_state(state: dict, label: str) -> None:
@@ -410,13 +417,11 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
         if first_substep:
             # :535-557 -- duo-exchange gz, then save zh = gz (padded).
             if exchange:
-                gz = nh["gz"]
-                for k in range(km + 1):
-                    # stag "A" (0,0): gz is a cell-centred scalar plane;
-                    # per level, all six faces -- the halo module's extent.
-                    gz = gz.at[..., k].set(
-                        ext_scalar_sixface(gz[..., k], tab, "A"))
-                nh = {**nh, "gz": gz}
+                # stag "A" (0,0): gz is a cell-centred scalar per level,
+                # all six faces -- the halo module's extent.  km+1
+                # interface levels, ONE batched call (v2a).
+                nh = {**nh,
+                      "gz": ext_scalar_sixface_allk(nh["gz"], tab, "A")}
             nh = {**nh, "zh": nh["gz"]}
         else:
             # :559-581 -- restore gz = zh (padded).
