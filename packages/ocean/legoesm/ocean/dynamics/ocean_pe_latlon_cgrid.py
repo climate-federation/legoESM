@@ -2135,8 +2135,12 @@ def _bc_pv_flux(
     # Fu_ext padded in the fused exchange above; (n_lat+2, n_lon+1, nlev).
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
         Fu_fold_row = fold_row(
-            Fu[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            fold_ghost_source_T(Fu, _f), fold_perm_u(_f),
+            _f.vector_sign_u, _f.perm_T.shape[0])
         Fu_ext = apply_north_fold(Fu_ext, Fu_fold_row, grid, north_mask=nmask)
     Fu_at_v = 0.25 * (Fu_ext[:-1, :-1, :] + Fu_ext[:-1, 1:, :]
                        + Fu_ext[1:, :-1, :] + Fu_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
@@ -2166,8 +2170,11 @@ def _bc_pv_flux(
     # (``nmask`` computed at the Fu fold block above — same grid, same scope.)
     if fold_is_local(grid) or nmask is not None:
         _f = grid.fold
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T as _fgsT, fold_perm_u as _fpu,
+        )
         u_fold_row = fold_row(
-            u[-1:], _f.perm_T, _f.vector_sign_u, _f.perm_T.shape[0])
+            _fgsT(u, _f), _fpu(_f), _f.vector_sign_u, _f.perm_T.shape[0])
         u_ext = apply_north_fold(u_ext, u_fold_row, grid, north_mask=nmask)
     u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
                       + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)

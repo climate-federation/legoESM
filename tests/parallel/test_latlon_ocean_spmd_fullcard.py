@@ -364,3 +364,74 @@ def test_partial_cell_spmd_with_active_fold_matches_single_device():
     assert fold_err <= 5.0 * max(interior_err, 1e-12), (
         f"fold-row error {fold_err:.3e} vs interior {interior_err:.3e}: "
         f"systematic fold defect under banding")
+
+
+@pytest.mark.skipif(jax.device_count() < 4,
+                    reason="needs >=4 devices (XLA_FLAGS host device count)")
+@pytest.mark.skipif(not _have_sharded_step(),
+                    reason="sharded_ocean_step module not present")
+def test_pivot_layout_fold_stays_finite_and_matches_single_device():
+    """PIVOT-ROW-STORED fold layout (eORCA025 class): finiteness + SPMD
+    equivalence with a WET, de-duplicated fold row.
+
+    Mimics the eORCA025 structure that killed the 1/4-degree smoke in ~23
+    steps: the top row is the self-symmetric pivot row, one mirror half is
+    LAND (the tmaskutil de-duplication), and the fold ghosts must source
+    the row BELOW the pivot with the per-stagger maps — permuting the
+    stored top row instead reads the land mirror twins (T=0/S=0 ghost
+    water) and blows up.  60 steps, single-device finite AND SPMD-equal.
+    """
+    from legoesm.grids.tripole import create_synthetic_tripole_pivot
+    from legoesm.ocean.dynamics.sharded_ocean_step import (
+        gather_state_latlon, make_sharded_ocean_step, shard_state_latlon,
+    )
+    from legoesm.parallel.mesh import create_latlon_mesh
+
+    n_lat, n_lon, nlev = 48, 96, 10
+    grid = create_synthetic_tripole_pivot(n_lat, n_lon)
+    assert grid.fold.is_active and grid.fold.pivot_row_stored
+    zc = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    model = LatLonCGridOceanModel(grid, zc, LatLonCGridOceanConfig.from_flat())
+    state0 = rest_state_latlon_cgrid_ocean(
+        grid, zc, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0)
+    # De-duplicated wet fold row: land the mirror half i in (n_lon//2, n_lon)
+    # of the TOP row (tmaskutil convention), wet elsewhere.
+    lm = np.asarray(state0.land_mask.data).copy()
+    lm[-1, n_lon // 2 + 1:] = 0.0
+    from legoesm.ocean.init_latlon_cgrid import replace_land_mask
+    state0 = replace_land_mask(state0, jnp.asarray(lm))
+    rng = np.random.default_rng(2)
+    state0 = state0._replace(
+        u=state0.u.replace(data=jnp.asarray(
+            0.02 * rng.standard_normal((n_lat, n_lon + 1, nlev)))),
+        eta=state0.eta.replace(data=jnp.asarray(
+            0.005 * rng.standard_normal((n_lat, n_lon)))),
+        T=state0.T.replace(data=jnp.asarray(
+            5.0 + 15.0 * np.exp(np.linspace(0, -4, nlev))[None, None, :]
+            + 0.05 * rng.standard_normal((n_lat, n_lon, nlev)))),
+    )
+    dt, n_steps = 600.0, 60
+
+    s = state0
+    for _ in range(n_steps):
+        s = model.step(s, dt)
+    for name in ("T", "S", "u", "v", "eta"):
+        a = np.asarray(getattr(s, name).data)
+        assert np.isfinite(a).all(), (
+            f"single-device {name} non-finite under the pivot fold layout "
+            f"(the eORCA025 step-23 NaN class)")
+
+    model._ensure_vertex_mask(state0)
+    dev = create_latlon_mesh(n_devices=4)
+    step = make_sharded_ocean_step(model, dev.mesh)
+    ss = shard_state_latlon(state0, dev.mesh)
+    for _ in range(n_steps):
+        ss = step(ss, dt)
+    ss = gather_state_latlon(ss, dev.mesh)
+    for name in ("T", "S", "u", "v", "eta"):
+        b = np.asarray(getattr(ss, name).data)
+        assert np.isfinite(b).all(), f"SPMD {name} non-finite (pivot fold)"
+        np.testing.assert_allclose(
+            b, np.asarray(getattr(s, name).data), atol=2e-3, rtol=1e-2,
+            err_msg=f"{name} SPMD != single-device under the pivot fold")

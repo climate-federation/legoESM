@@ -848,6 +848,44 @@ def create_synthetic_tripole(
     return geom._replace(fold=fold)
 
 
+def create_synthetic_tripole_pivot(n_lat: int, n_lon: int | None = None,
+                                   radius: float = constants.R_earth,
+                                   omega: float = constants.Omega,
+                                   dtype=None):
+    """Synthetic tripole with the DE-HALOED pivot-row-stored fold layout.
+
+    The eORCA025 storage convention (measured 2026-08-26, see
+    ``check_tripole_fold_pairing.py``): the stored top T row is the
+    SELF-symmetric T-pivot row — cell ``(i, j_max)`` and
+    ``(perm_T[i], j_max)`` are the same physical cell under
+    ``perm_T = (n_lon - i) % n_lon`` — the duplicated halo row was
+    stripped, U points self-map under ``(n_lon - i - 1) % n_lon``, and
+    V/F rows pair with the row BELOW.  ``create_synthetic_tripole``
+    models the OTHER layout (eORCA1.2, halo row stored); the two fixtures
+    together pin both fold code paths.
+
+    Returns a regular lat-lon geometry with the pivot-layout fold
+    descriptor attached (same idealization as the halo-layout fixture:
+    metrics stay regular; only the fold BC dispatch is exercised).
+    """
+    geom = create_latlon_geometry(n_lat, n_lon, radius, omega, dtype)
+    n_lon_eff = geom.n_lon
+    idx = jnp.arange(n_lon_eff, dtype=jnp.int32)
+    fold = FoldDescriptor(
+        is_active=True,
+        fold_j=n_lat - 1,
+        cap_j=max(0, n_lat - n_lat // 4),
+        perm_T=(n_lon_eff - idx) % n_lon_eff,
+        perm_v=(n_lon_eff - idx) % n_lon_eff,
+        vector_sign_u=-1.0,
+        vector_sign_v=-1.0,
+        pivot_row_stored=True,
+        perm_u=(n_lon_eff - idx - 1) % n_lon_eff,
+        perm_f=(n_lon_eff - idx - 1) % n_lon_eff,
+    )
+    return geom._replace(fold=fold)
+
+
 def download_orca1_grid(
     dest_dir: str | Path = "data/grids",
     *,

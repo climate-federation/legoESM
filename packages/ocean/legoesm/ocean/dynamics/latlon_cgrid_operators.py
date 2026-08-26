@@ -127,7 +127,14 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
     if fold_is_local(grid) or nmask is not None:
-        north = fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u,
+        # Layout-aware ghost: pivot-row-stored meshes (eORCA025) source the
+        # row BELOW the pivot with the U-stagger map; halo-row-stored keeps
+        # the legacy byte-identical formula (see fold_ghost_source_T).
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_ghost_source_T, fold_perm_u,
+        )
+        north = fold_row(fold_ghost_source_T(interior, fold),
+                         fold_perm_u(fold), fold.vector_sign_u,
                          fold.perm_T.shape[0])
         padded = apply_north_fold(padded, north, grid, north_mask=nmask)
     return padded
