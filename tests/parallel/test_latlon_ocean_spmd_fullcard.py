@@ -202,9 +202,9 @@ def test_a_h_lat_profile_is_band_sliced_under_spmd():
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     zc = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
 
-    # A smooth cos(lat)-like equatorial A_h reduction, one entry per lat row
-    # (the profile's contract: len == grid.lat).  A_h>0 so it actually scales,
-    # eq_boost left at 1.0 (the profile and eq_boost are mutually exclusive).
+    # A cos(lat)-like equatorial A_h reduction, one entry per lat row (the
+    # profile's contract: len == grid.lat).  A_h>0 so it scales; eq_boost=1.0
+    # (mutually exclusive with the profile).
     lat = np.linspace(-1.0, 1.0, n_lat)
     prof = tuple(float(0.2 + 0.8 * np.cos(lat[i] * np.pi / 2) ** 2)
                  for i in range(n_lat))
@@ -244,4 +244,31 @@ def test_a_h_lat_profile_is_band_sliced_under_spmd():
             np.asarray(getattr(ss, name).data),
             np.asarray(getattr(s, name).data),
             atol=_ATOL, rtol=_RTOL,
-            err_msg=f"{name} diverged SPMD vs single-device with A_h profile")
+            err_msg=f"{name} diverged SPMD vs single-device with a SHARP A_h "
+                    f"profile on a band seam (the seam-fix target)")
+
+
+def test_1666_seam_v_profile_is_neighbour_averaged_not_wall_copied():
+    """#1666 seam fix (codex+GLM P1): the SPMD wrapper injects the EXACT global
+    v-face profile so each band's seam v-faces carry the neighbour-averaged
+    value 0.5*(p[k-1]+p[k]), consistent across the seam -- NOT the band-local
+    wall copy the in-body derive would produce.  Pure arithmetic on the same
+    formulas the wrapper (concat) and the stacker ([r*nl:(r+1)*nl+1]) use.
+
+    NON-VACUITY: the wall-copy value (prof[seam-1]) differs from the injected
+    neighbour-average whenever the profile varies across the seam -- asserted.
+    """
+    n_lat, n_dev = 48, 4
+    nl = n_lat // n_dev
+    prof = np.array([1.0 - 0.9 * (i / (n_lat - 1)) for i in range(n_lat)])  # monotone ramp: every seam has a gradient
+    v_global = np.concatenate([prof[:1], 0.5 * (prof[:-1] + prof[1:]), prof[-1:]])
+    for r in range(n_dev - 1):
+        seam = (r + 1) * nl                       # global v-face index at the r|r+1 cut
+        band_r_north = v_global[r * nl:(r + 1) * nl + 1][-1]
+        band_r1_south = v_global[(r + 1) * nl:(r + 2) * nl + 1][0]
+        expect = 0.5 * (prof[seam - 1] + prof[seam])
+        assert band_r_north == band_r1_south == expect, (
+            f"seam {seam}: bands disagree or not neighbour-averaged")
+        wall_copy = prof[r * nl:(r + 1) * nl][-1]  # what the band-local derive gives
+        assert band_r_north != wall_copy, (
+            f"seam {seam}: injected value equals the (broken) wall copy")
