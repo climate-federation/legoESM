@@ -94,6 +94,7 @@ from legoesm.core.conservation import (
     conservation_accumulator,
 )
 from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import finalize_to_storage
 from legoesm.core.operators_fv_latlon import (
     fv_gradient_lon_3d as _fv_gradient_lon_3d,
     fv_gradient_lat_3d as _fv_gradient_lat_3d,
@@ -1243,7 +1244,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state_new = self._apply_safety_rails(
             state_new, target_mass, state, grid=grid, sigma_coord=sigma_coord)
 
-        state_out = cast_pytree(state_new, None, "storage")
+        state_out = finalize_to_storage(state_new)
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state yields the carry-out

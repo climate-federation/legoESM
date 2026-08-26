@@ -39,6 +39,7 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del4,
 )
 from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import finalize_to_storage
 from legoesm.core.state import MPASShallowWaterState, MPASShallowWaterTendencies
 from legoesm.grids.operator_adapters import mpas_edge_operators
 from legoesm.grids.voronoi import VoronoiMesh
@@ -237,7 +238,7 @@ class MPASShallowWaterModel(IntegrationMixin):
             state_new = fix_energy_mpas(
                 state_new, state, self.mesh, self.config.g)
 
-        return cast_pytree(state_new, None, "storage")
+        return finalize_to_storage(state_new)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

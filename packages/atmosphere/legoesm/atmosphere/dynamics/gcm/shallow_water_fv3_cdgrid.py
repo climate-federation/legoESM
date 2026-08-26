@@ -31,6 +31,7 @@ import jax.numpy as jnp
 
 from legoesm.core.fv3_sw_core import fv3_fb_sw_step
 from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import finalize_to_storage
 # SW state pytrees now live in core (shared with the ocean barotropic solver).
 from legoesm.core.shallow_water_state import (
     CDGridShallowWaterState,
@@ -1122,7 +1123,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state_new = state_new._replace(h=h_fixed)
 
         # Cast back to storage precision.
-        return cast_pytree(state_new, None, "storage")
+        return finalize_to_storage(state_new)
 
 
 # ==============================================================================
@@ -1313,7 +1314,7 @@ class FV3FBShallowWaterModel:
             )
             state_new = state_new._replace(h=h_fixed)
 
-        return cast_pytree(state_new, None, "storage")
+        return finalize_to_storage(state_new)
 
 
 # ==============================================================================
@@ -1519,7 +1520,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             )
             state_new = state_new._replace(h=h_fixed)
 
-        return cast_pytree(state_new, None, "storage")
+        return finalize_to_storage(state_new)
 
 
 # ==============================================================================

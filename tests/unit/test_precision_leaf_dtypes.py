@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-MODES = ["fp64"]  # #1665 interim: mixed refused
+MODES = ["fp64", "mixed"]  # #1675: mixed enabled
 
 
 def _cast_to_storage(state, storage):
@@ -144,7 +144,7 @@ def test_mpas_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-@pytest.mark.parametrize("mode", ["fp64"])  # #1665 interim: mixed refused
+@pytest.mark.parametrize("mode", ["fp64", "mixed"])  # #1675: mixed enabled
 # (the mixed lat-lon tracer-promotion is the tracked mixed-consistency campaign;
 # the refusal itself is pinned by test_mixed_precision_is_refused below).
 def test_latlon_pe_leaf_dtypes(mode):
@@ -152,10 +152,9 @@ def test_latlon_pe_leaf_dtypes(mode):
     _assert_leaf_dtypes(state, storage, accum)
 
 
-def test_mixed_precision_is_refused():
-    """#1665 interim: mixed is refused loudly; pin the refusal explicitly (the
-    lat-lon leaf-dtype consistency for mixed is the tracked campaign)."""
-    import pytest
+def test_mixed_precision_enabled():
+    """#1675: mixed is enabled; the parametrized leaf-dtype tests above now run
+    it and assert every prognostic leaf stays at fp32 storage."""
     from legoesm.runtime.precision import apply_precision
-    with pytest.raises(NotImplementedError, match="disabled"):
-        apply_precision("mixed")
+    p = apply_precision("mixed")
+    assert p.storage == jnp.float32 and p.control == jnp.float64

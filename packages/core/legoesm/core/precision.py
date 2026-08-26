@@ -380,6 +380,38 @@ def cast_pytree(pytree, module: str | None, role: str, *,
     return jax.tree.map(_maybe_cast, pytree)
 
 
+def finalize_to_storage(pytree):
+    """Restore a dycore step's OUTPUT to per-field policy dtypes at the step
+    boundary: the ``p_s`` surface-pressure leaf (the intentional always-f64
+    conservation field, carried at accumulate precision) stays f64; every other
+    float leaf is (down)cast to storage.
+
+    #1675: this re-establishes precision the way the compiled ``lax.scan`` path
+    does — ``compiled_segments._match_dtype`` casts each field back to the carry
+    leaf's dtype (p_s carry f64, the rest f32).  Under mixed the mass fixer /
+    control-role solves promote fields to f64; without this, an f64 ``p_s``
+    contaminates the fp32 3D prognostics (``q_c``/``T``/winds -> f64) on the
+    eager path (the compiled path is protected by its fixed-dtype carry).  A
+    blanket ``cast_pytree(..., "storage", allow_downcast=True)`` is wrong: it
+    would also flatten ``p_s`` to fp32 and destroy the always-f64 conservation
+    field.  Matching the policy roles by leaf name is exactly the compiled rule.
+
+    No-op for fp64/strict-fp32 (accumulate == storage there), so those paths are
+    byte-identical; only mixed is affected.
+    """
+    storage = resolve_dtype(None, "storage")
+    accum = resolve_dtype(None, "accumulate")
+
+    def _fix(path, leaf):
+        if not (isinstance(leaf, jax.Array)
+                and jnp.issubdtype(leaf.dtype, jnp.floating)):
+            return leaf
+        target = accum if "p_s" in jax.tree_util.keystr(path) else storage
+        return leaf.astype(target) if leaf.dtype != target else leaf
+
+    return jax.tree_util.tree_map_with_path(_fix, pytree)
+
+
 # ---------------------------------------------------------------------------
 # Reduction wrappers — accumulation-precision aware
 # ---------------------------------------------------------------------------

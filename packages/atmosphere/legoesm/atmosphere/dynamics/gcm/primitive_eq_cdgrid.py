@@ -52,6 +52,7 @@ from legoesm.core.operators import (
     laplacian_compact,
 )
 from legoesm.core.precision import resolve_dtype, cast_pytree
+from legoesm.core.precision import finalize_to_storage
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -2034,7 +2035,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
-        state_out = cast_pytree(state_new, None, "storage")
+        state_out = finalize_to_storage(state_new)
 
         # Operator-split physics carry (issue #413): one extra physics
         # evaluation on the POST-STEP state produces the carry-out

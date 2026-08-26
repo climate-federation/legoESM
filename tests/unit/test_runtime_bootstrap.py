@@ -133,12 +133,12 @@ class TestPrecisionResolution:
         policy = apply_precision("fp32")
         assert get_policy() == policy
 
-    def test_apply_precision_mixed_is_refused(self):
-        # #1665 interim: apply_precision refuses mixed loudly.
-        import pytest
+    def test_apply_precision_mixed(self):
+        # #1675: mixed enabled.
         from legoesm.runtime.precision import apply_precision
-        with pytest.raises(NotImplementedError, match="disabled"):
-            apply_precision("mixed")
+        policy = apply_precision("mixed")
+        assert policy.storage == jnp.float32
+        assert policy.control == jnp.float64
 
 
 class TestBootstrap:
@@ -164,12 +164,12 @@ class TestBootstrap:
         assert rc.x64 is True
         assert rc.precision.compute == jnp.float64
 
-    def test_bootstrap_mixed_is_refused(self):
-        # #1665 interim: bootstrap refuses mixed before touching x64.
-        import pytest
+    def test_bootstrap_mixed(self):
+        # #1675: bootstrap enables mixed (x64 on for the f64 control role).
         from legoesm.runtime.config import bootstrap
-        with pytest.raises(NotImplementedError, match="disabled"):
-            bootstrap(precision="mixed")
+        rc = bootstrap(precision="mixed")
+        assert rc.precision.storage == jnp.float32
+        assert rc.x64 is True
 
 
     def test_bootstrap_sets_singleton(self):
@@ -385,16 +385,15 @@ class TestYamlBootstrap:
         assert rc.precision.compute == jnp.float64
         assert rc.x64 is True
 
-    def test_yaml_mixed_via_conservation_is_refused(self):
-        # #1665 interim: legacy dyn=fp32+cons=fp64 derives the now-refused mixed.
-        import pytest
+    def test_yaml_mixed_via_conservation(self):
+        # #1675: legacy dyn=fp32+cons=fp64 derives mixed, now enabled.
         from legoesm.runtime.config import bootstrap_from_yaml_config
         config = self._make_config({
             "hardware.precision.dynamics": "float32",
             "hardware.precision.conservation": "float64",
         })
-        with pytest.raises(NotImplementedError, match="disabled"):
-            bootstrap_from_yaml_config(config)
+        rc = bootstrap_from_yaml_config(config)
+        assert rc.precision.storage == jnp.float32
 
 
 class TestLegacyCompat:

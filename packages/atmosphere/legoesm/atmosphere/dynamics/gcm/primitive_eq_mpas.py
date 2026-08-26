@@ -34,6 +34,7 @@ from legoesm.core.conservation import (
     is_borrow_eligible_tracer,
 )
 from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import finalize_to_storage
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -1194,7 +1195,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 (_s_phy - _s_dyn) / dt
                 - _led_phys_rows.astype(_s_pre.dtype).sum(axis=1))
 
-        return (cast_pytree(state_new, None, "storage"), phys_state_out,
+        return (finalize_to_storage(state_new), phys_state_out,
                 sfc_diag, _led_step)
 
     # integrate() and integrate_scan() inherited from IntegrationMixin

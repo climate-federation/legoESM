@@ -60,6 +60,7 @@ from legoesm.grids.polar_filter import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
+from legoesm.core.precision import finalize_to_storage
 from legoesm.core.conservation import conservation_accumulator
 from legoesm import constants
 
@@ -672,7 +673,7 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
             h_fixed = jnp.maximum(h_fixed, 0.0)
             state_new = state_new._replace(h=h_fixed)
 
-        return cast_pytree(state_new, None, "storage")
+        return finalize_to_storage(state_new)
 
 
 # ==============================================================================
