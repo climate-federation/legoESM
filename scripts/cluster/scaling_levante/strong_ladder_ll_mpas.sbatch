@@ -58,7 +58,7 @@ run_arm() {
     export NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8 NCCL_P2P_NET_CHUNKSIZE=131072
     export LEGOESM_MESH_CACHE_DIR=/work/bd1083/b309178/diffESM/legoesm_mesh_cache
     bench="scripts/bench/bench_mpas_spmd_scaling.py"
-    args+=(--subdivision "$nrs" --nlev 26 --wide-halo --partition-method sfc)
+    args+=(--subdivision "$nrs" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc)
   fi
   args+=(--steps 60 --warmup 10 --out "$OUTDIR/${tag}.jsonl")
 
