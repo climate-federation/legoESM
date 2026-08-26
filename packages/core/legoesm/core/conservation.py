@@ -384,15 +384,22 @@ def conservation_accumulator():
     end-step fixer is on" scaling optimisation be lossless even in
     float32 storage/compute mode.
 
-    DIAGNOSTIC-ONLY (precision-consistency audit 2026-08-25).  Reading
-    ``jax_enable_x64`` instead of the policy is deliberate and safe *as long as
-    the f64 value only feeds a budget sum whose correction is then ADDED to a
-    float32 ``p_s``* — the add rounds the correction back to float32, so in
-    strict-fp32 this never changes state, only the diagnostic value.  If this
-    accumulator is ever wired into a mass fixer that keeps ``p_s`` at the f64
-    accumulate dtype (so the f64 add is NOT rounded away), it becomes
-    state-affecting under an fp32 policy and must be re-reviewed against the
-    policy's ``accumulate`` role instead of the global x64 flag.
+    Returns f64 whenever x64 is enabled — a higher dtype than fp32 storage. The
+    mass fixers KEEP the correction in f64 and add it to ``p_s`` WITHOUT rounding
+    back to storage (this exact-arithmetic correction is load-bearing: it is what
+    delivers ~machine-precision mass fixing and the anchored ~1e-12 MPAS
+    guarantee — rounding it to fp32 would let sub-ULP corrections vanish and
+    destroy those). Consequences by mode (#1665):
+
+    * **strict fp32** (x64 off): the f64 branch is inactive; the correction is
+      float32; ``p_s`` stays fp32.
+    * **fp64**: ``p_s`` is already f64; no promotion.
+    * **mixed** (fp32 storage + x64): the f64 correction added to an fp32 ``p_s``
+      DOES promote it to f64 — a real state-affecting inconsistency. This is one
+      reason ``mixed`` is refused at
+      :func:`runtime.precision.apply_precision` in the interim; the durable fix
+      (a mixed scheme that keeps the f64 correction but stores at fp32 without
+      losing exactness) is the tracked mixed-consistency campaign.
     """
     if jax.config.read("jax_enable_x64"):
         return jnp.float64

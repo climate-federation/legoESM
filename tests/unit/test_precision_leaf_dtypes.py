@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-MODES = ["fp64", "mixed"]
+MODES = ["fp64"]  # #1665 interim: mixed refused
 
 
 def _cast_to_storage(state, storage):
@@ -129,7 +129,7 @@ def test_sharded_ps_carry_guard():
     from legoesm.runtime.precision import apply_precision
     from legoesm.parallel.sharded_dynamics import _assert_sharded_ps_carry_f64
 
-    for mode in ("mixed", "fp64"):
+    for mode in ("fp64",):  # #1665: mixed refused
         apply_precision(mode)
         with pytest.raises(RuntimeError, match="seeded float64"):
             _assert_sharded_ps_carry_f64(jnp.float32)
