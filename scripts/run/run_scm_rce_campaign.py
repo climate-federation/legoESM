@@ -62,7 +62,6 @@ from legoesm.atmosphere.physics._shared import (
     compute_rho as _compute_rho,
 )
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.atmosphere.physics.physics_state import update_physics_state
 from legoesm.atmosphere.physics.microphysics.integration import (
     get_microphysics_fn,
     min_tracer_slots,

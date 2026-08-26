@@ -4,4 +4,3 @@
 # line is how far the seeds disagreed. A large spread means the median is one
 # point in a flat basin, not a calibrated value. Opt in with --params; this
 # file never mutates a production *Config default.
-
