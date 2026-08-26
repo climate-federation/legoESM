@@ -1937,17 +1937,12 @@ def test_config_yaml_round_trips_authoritative_values():
     # was not moved with it, so it asserted the retired C48/L40 cube deck
     # against a config that had been the icosahedral MPAS one for weeks --
     # red on main, and blind to any further drift while it was.  Values below
-    # are the shipped deck: icosahedral level 5 (about 2.2 degrees), 30 sigma
-    # levels, dt 112.5 s (2026-08-25 dt ladder; level 6 default same day).  The
-    # five keys are recipe-sensitive together (the YAML
-    # header records that L40 + hybrid + automatic dt blew up on day one), so
-    # a change here is a stability A/B, not an edit.
     # are the shipped deck: icosahedral level 6 (about 1.1 degrees, the
     # production default per the 2026-08-25 directive; level 5 remains the
-    # fast-iteration override), 30 sigma levels, dt 75 s.  The five keys are
-    # recipe-sensitive together (the YAML header records that L40 + hybrid +
-    # automatic dt blew up on day one), so a change here is a stability A/B,
-    # not an edit.
+    # fast-iteration override), 30 sigma levels, dt 112.5 s (2026-08-25 dt
+    # ladder).  The five keys are recipe-sensitive together (the YAML header
+    # records that L40 + hybrid + automatic dt blew up on day one), so a change
+    # here is a stability A/B, not an edit.
     assert args.resolution == 6
     assert args.nlev == 30
     assert args.discretization == "mpas"
