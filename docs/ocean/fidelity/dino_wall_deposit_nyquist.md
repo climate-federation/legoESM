@@ -125,8 +125,26 @@ latitude; this field is exactly 0.0 over the *whole* domain.
 
 NEMO applies the stress inside the implicit vertical solve, bundling it into the
 nonzero vertical-mixing trend; legoESM's card applies it as an explicit top-cell
-source. That placement difference is real and **measurable offline from data
-already on disk**, since the before-level stress field is present and nonzero.
+source.
+
+**CORRECTED 2026-08-26** (`dino_wall_fixed_bias.md` §5, from a source trace of
+both models): that is only half of NEMO's wiring. NEMO applies the wind stress
+**twice, independently** — once explicitly into the *barotropic* slow forcing
+(`dynspg_ts.F90:443-444`) and once as the implicit solve's top boundary
+condition (`dynzdf.F90:353-363`). Since `dyn_spg` runs *before* `dyn_zdf`, the
+implicit application cannot feed the same step's barotropic loop, which is
+exactly why the barotropic term is re-derived explicitly. Also: the placement
+term never needed reconstructing — NEMO dumps its own barotropic wind increment
+(`wnd_dump_z{u,v}_frc_inc.bin`), and the "dead dump slot" finding above concerns
+the per-term *trend* diagnostics, a different instrument. Both stand.
+
+**The comparison has now been run, and the wind is EXCLUDED** — on the
+structural ground that this residual is measured in the arm where NEMO's own
+`zu_frc` is substituted in, so every slow-forcing assembly difference including
+wind is already removed. Note one claim made in passing there and since
+retracted: the meridional wind increment is exactly zero, but that is a fact
+about the *forcing*, and a zonal forcing in a rotating loop still deposits
+meridional velocity. See `dino_wall_fixed_bias.md` §5.
 The before-level wrapper fix has no bearing on it.
 
 The reason string is corrected in place. This is the cleanest unstarted
