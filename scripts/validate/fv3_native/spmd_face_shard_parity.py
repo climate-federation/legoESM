@@ -86,6 +86,11 @@ def main(argv=None):
     ap.add_argument("--n-shards", type=int, default=6, choices=(2, 3, 6),
                     help="devices the face axis is split over (6 % n == 0)")
     ap.add_argument("--dt", type=float, default=120.0)
+    ap.add_argument("--face-batched", action="store_true",
+                    help="arm B additionally routes the 3-D phases "
+                         "through their vmapped face-batched arms "
+                         "(step_face_batched=True) -- the fix for the "
+                         "per-face x[t] all-reduce storm.")
     ap.add_argument("--ring", action="store_true",
                     help="arm B additionally routes the step's halo "
                          "exchanges through the M3 shard_map ring "
@@ -151,7 +156,8 @@ def main(argv=None):
     model_sh = FV3DuoDynamicsModel(bundle_grid, FV3DuoConfig(km=args.km),
                                    step_out_shardings=shard,
                                    step_spmd_mesh=(mesh if args.ring
-                                                   else None))
+                                                   else None),
+                                   step_face_batched=args.face_batched)
     model = model_sh                    # arm B steps below use the pinned jit
     b = _shard_bundle(ic, shard)
     b = model.step(b, args.dt)          # warmup: pays compile for this layout

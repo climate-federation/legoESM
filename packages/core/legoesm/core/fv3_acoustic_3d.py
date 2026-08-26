@@ -287,7 +287,8 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                         use_logp: bool = False,
                         flux_cap: dict | None = None,
                         check_state: bool = False,
-                        substep: int | None = None) -> dict:
+                        substep: int | None = None,
+                        batched: bool = False) -> dict:
     """One ``it`` of ``do it=1,n_split`` (dyn_core.F90:339).  Returns:
 
     state     delp/pt/u/v updated -- delp/pt from d_sw2 AFTER the
@@ -395,7 +396,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
                                         scalars=first_substep, winds=True,
                                         w_field=not hydrostatic)
 
-    csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2,
+    csw = csw_phase_3d(ctx, state, dt2=dt2, km=km, nord=2, batched=batched,
                        hydrostatic=hydrostatic,
                        remap_follows=remap_follows)
 
@@ -441,6 +442,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     csw = {**csw, "uc": csw_press["uc"], "vc": csw_press["vc"]}
 
     dsw = dsw_transport_phase_3d(ctx, state, csw, dt=dt, km=km, cfg=cfg,
+                                 batched=batched,
                                  hydrostatic=hydrostatic,
                                  remap_follows=remap_follows,
                                  flux_cap=flux_cap)
@@ -475,6 +477,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
            "divg_d": dsw["divg_d"]}
 
     tail = dsw_tail_phase_3d(ctx, state, csw, dsw, dt=dt, km=km, cfg=cfg,
+                             batched=batched,
                              hydrostatic=hydrostatic,
                              remap_follows=remap_follows)
 
@@ -488,6 +491,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
 
     if hydrostatic:
         press = dgrid_pressure_phase_3d(ctx, dsw, tail, km, dt=dt,
+                                        batched=batched,
                                         ptop=ptop, akap=akap,
                                         cp_air=cp_air, a2b_ord=a2b_ord,
                                         remap_step=remap_step,
@@ -499,6 +503,7 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     else:
         res = dgrid_nh_pressure_phase_3d(
             ctx, csw_press, dsw, tail, nh, km, dt=dt, ptop=ptop,
+            batched=batched,
             akap=akap, cp_air=cp_air, p_fac=p_fac, a_imp=a_imp,
             dp0=dp0, delz=state["delz"], remap_step=remap_step,
             use_logp=use_logp, cfg=cfg, remap_follows=remap_follows)
@@ -685,7 +690,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
                      cp_air, cfg=None, check_state=False,
                      remap_follows=False, hydrostatic=True, nh=None,
                      p_fac=0.05, a_imp=1.0, dp0=None, use_logp=False,
-                     flux_cap=None):
+                     flux_cap=None, batched: bool = False):
     """``do it = 1, n_split`` -- one outer dynamics step, JAX lane.
 
     ``dt = bdt/n_split`` (dyn_core.F90:249); the shipped duo decks run
@@ -774,7 +779,7 @@ def acoustic_loop_3d(ctx, state, dt_atmos, km, *, n_split, ptop, akap,
             akap=akap, cp_air=cp_air, cfg=cfg, remap_step=remap,
             remap_follows=remap_follows, hydrostatic=hydrostatic, nh=nh_,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0, use_logp=use_logp,
-            flux_cap=flux_cap_)
+            flux_cap=flux_cap_, batched=batched)
         # Part A returns a DICT, not the 5-tuple this part was authored
         # against: the two halves were written in separate calls and the
         # seam is exactly where a contract goes missing.  Unpacked ONCE,

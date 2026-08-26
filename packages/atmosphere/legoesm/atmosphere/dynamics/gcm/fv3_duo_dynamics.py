@@ -87,7 +87,13 @@ class FV3DuoDynamicsModel:
     """
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
-                 step_out_shardings=None, step_spmd_mesh=None):
+                 step_out_shardings=None, step_spmd_mesh=None,
+                 step_face_batched: bool = False):
+        # step_face_batched: ENGINEERING knob (face-batching ladder) --
+        # routes the 3-D phases' per-face loops through their vmapped
+        # arms (batched==loop gated at rtol 1e-13 per phase). Selects no
+        # scientific configuration; default False = the certified loop
+        # trace, byte-identical.
         # step_out_shardings: ENGINEERING knob -- ONE jax.sharding.Sharding
         # applied to each face-stacked output leaf (state/press/q/omga/nh;
         # NOT a jit out_shardings pytree prefix).  It selects no scientific
@@ -173,6 +179,7 @@ class FV3DuoDynamicsModel:
             hydrostatic=config.hydrostatic,
             w_limiter=(None if config.hydrostatic else True),
             out_shardings=step_out_shardings,
+            batched=step_face_batched,
         )
 
     # ------------------------------------------------------------------

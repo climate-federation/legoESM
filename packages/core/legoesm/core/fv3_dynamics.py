@@ -423,6 +423,7 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
                      kord_mt: int, kord_tm: int, kord_tr,
                      q, omga=None, nh=None,
                      zvir: float = 0.0, consv_te: float = 0.0,
+                     batched: bool = False,
                      sphum_index: int | None = None,
                      n_sponge: int = -1, tau: float = -1.0,
                      hydrostatic: bool = True,
@@ -733,7 +734,8 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
         fc = alloc_flux_capacitors(n, ng, km) if nq > 0 else None
         # :502 dyn_core; press_out's role is taken by ac["press"] (the
         # callee contract supplies it, replacing the spec's length check)
-        ac = acoustic_loop_3d(ctx, st, mdt, km, n_split=n_split, ptop=ptop,
+        ac = acoustic_loop_3d(ctx, st, mdt, km, batched=batched,
+                              n_split=n_split, ptop=ptop,
                               akap=akap, cp_air=cp_air, cfg=cfg,
                               check_state=check_state,
                               remap_follows=remapped,
@@ -982,7 +984,8 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               tracer_q_split: int = 0, nord_tr: int = 0,
                               trdm2=0.0, lim_fac=1.0, z_tracer: bool = True,
                               inline_q: bool = False, zvir: float = 0.0,
-                              consv_te: float = 0.0, out_shardings=None):
+                              consv_te: float = 0.0, out_shardings=None,
+                              batched: bool = False):
     """Static (C3/D5): ctx, km and every DECK constant.  Dynamic: only
     state, press, q, bdt, omga and nh.
 
@@ -1004,7 +1007,7 @@ def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
             cfg=cfg, a2b_ord=a2b_ord, check_state=check_state,
             hord_tr=hord_tr, tracer_q_split=tracer_q_split,
             nord_tr=nord_tr, trdm2=trdm2, lim_fac=lim_fac,
-            z_tracer=z_tracer, inline_q=inline_q)
+            z_tracer=z_tracer, inline_q=inline_q, batched=batched)
 
     # THE RETURN CARRIES TWO NON-ARRAY LEAVES -- `pt_units` (a str) and
     # `omga_is_meaningless` (a bool) -- and jit refuses to return either
