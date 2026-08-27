@@ -296,17 +296,25 @@ def native_ladders_snapshot(z):
 # SBC wind-stress modulus (fail on out-of-range record, do not clamp)
 # ===========================================================================
 def load_sbc_taum(sbc_path, rec, twins):
+    """Return (taum_field, sbc_lat, sbc_lon) at record ``rec``.
+
+    The SBC field is on the NEMO output grid, whose shape differs from both our
+    snapshot grid and the restart grid, so its OWN nav_lat/nav_lon MUST travel
+    with it — sampling it against another grid's coordinates is a shape/geo bug.
+    """
     import netCDF4 as nc
     d = nc.Dataset(sbc_path)
     name = twins._find_data_var(d, _TAUM_CANDS)
     a = np.asarray(d[name][:], dtype=np.float64)
+    sbc_lat = np.asarray(d["nav_lat"][:], dtype=np.float64)
+    sbc_lon = np.asarray(d["nav_lon"][:], dtype=np.float64) % 360.0
     d.close()
     nt = a.shape[0]
     if not (0 <= rec < nt):
         raise SystemExit(f"SBC record {rec} out of range [0,{nt}) — no clamp")
     field = np.where(np.abs(a[rec]) > 1e10, np.nan, a[rec])
     print(f"[stress] SBC {name} record {rec}/{nt - 1} (5-day mean)")
-    return field
+    return field, sbc_lat, sbc_lon
 
 
 # ===========================================================================
@@ -465,8 +473,9 @@ def run_control(args, oracle, twins):
 
     dz_ref, t_depth_ref, _wint = native_ladders_snapshot(z)
     u_cell, v_cell = centre_uv_extra_column(z["u"], z["v"])
-    taum = load_sbc_taum(args.nemo_sbc, args.rec, twins)
-    tau_cols = sample_at_columns(taum, lat, lon, lat[band], lon[band], twins)
+    taum, sbc_lat, sbc_lon = load_sbc_taum(args.nemo_sbc, args.rec, twins)
+    tau_cols = sample_at_columns(taum, sbc_lat, sbc_lon, lat[band], lon[band],
+                                 twins)
     print(f"[stress] control |tau| median {np.nanmedian(tau_cols):.4f} N/m^2")
     print("[caveat] taum is a 5-DAY-MEAN SBC record and H is a global-constant "
           "depth; both feed only the ln_mxl0 SURFACE anchor, which has decayed "
@@ -562,8 +571,8 @@ def run_nemo(args, oracle, twins):
     if "ssh" not in R or np.isnan(R["ssh"][band]).all():
         raise SystemExit("restart carries no usable sshn (eta) — required")
     eta = R["ssh"][band][None, :]
-    taum = load_sbc_taum(args.nemo_sbc, args.rec, twins)
-    tau_cols = sample_at_columns(taum, nav_lat, nav_lon,
+    taum, sbc_lat, sbc_lon = load_sbc_taum(args.nemo_sbc, args.rec, twins)
+    tau_cols = sample_at_columns(taum, sbc_lat, sbc_lon,
                                  nav_lat[band], nav_lon[band], twins)
     print(f"[stress] NEMO |tau| median {np.nanmedian(tau_cols):.4f} N/m^2")
     print("[caveat] taum is a 5-DAY-MEAN SBC record and H is a global-constant "
