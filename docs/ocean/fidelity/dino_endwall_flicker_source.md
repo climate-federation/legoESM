@@ -10,6 +10,14 @@ The accepted run receipt below names the clean probe commit, registered
 preregistration commit and content hashes. The full source/operand hash map is
 printed before any measurement output.
 
+Accepted run: clean probe commit
+`18107779e9c8af083b15addd1c444679e07af3d8`, preregistration commit
+`4869209d918843c86bbc1368abdd16db209d7831`, current preregistration SHA-256
+`e2217a90d40ab64f4c82b300f8623ef5dfeea46d838edc78f2bd028204f41ee3`,
+and probe SHA-256
+`0b6cdc0a93947a66b4881c5632cf89675afb38d30ef0cfe457db0bd935bfd9e9`.
+The run used CPU fp64, `LEGOESM_NEMO_E3T=both`, the d180 lane and kt=5761.
+
 ## Outcome
 
 The DINO `jpdyn_tau` slot is not evidence that wind is zero. It is emitted to
@@ -138,6 +146,10 @@ Statistics are pointwise on wet faces before spatial aggregation.
 
 Controls pass: both NEMO meridional operands are exact zero; legoESM's direct
 operand is zero and `F_slow` maximum is `3.388e-21 m/s2`, below `1e-12`.
+The emitted `utrd_tau/vtrd_tau` slots are exact zero; the wired copy preserves
+exact-zero lower levels and reconstructs the brackets with maximum absolute
+error `1.388e-17` against a registered `1.844e-16` rounding bar. Planted
+emitted-slot, lower-level and top-reconstruction violations all fire.
 The helper gives exact 0x and exact doubling at 2x for both components; a
 one-ULP mutation makes each equality fail. The corrected probe additionally
 requires exact 1x entry identity, exact non-stress fields across arms, and the
@@ -181,6 +193,36 @@ finalized.
   selector was added, the nominal barotropic GPU arm was removed, the two
   missing DIFF rows were added, and the next discriminator is registered at
   the first consumer.
+- Second evidence review: the accepted log named a stale prereg commit, the
+  temporary Kmm state was incorrectly called a live `dyn_zdf` input, and the
+  diagnostic slot was bypassed. Disposition: the probe now binds the final
+  prereg commit, Kmm is closed as momentum bookkeeping, and source scoring
+  runs through a controlled offline-wired copy of the emitted 3-D slot.
+- Second mechanism review: the GPU commands produced daily fp32 eta, the Kmm
+  bookkeeping DIFF was not live, cross-model divergence could not assign an
+  LBC mechanism, and normalized `un_adv/vn_adv` had a second LBC. Disposition:
+  the twin now has a fail-closed per-step fp64 eta contract with exact
+  NEMO/scorer invocations; Kmm is closed; candidate A requires same-input
+  counterfactuals; and the second LBC is listed and scoped to tracer transport.
+
+## Verification receipts
+
+- Clean offline probe at the accepted commit: PASS, frozen science tuple
+  unchanged, all entry/helper/order/slot/structural-zero controls PASS.
+- Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
+  harness: PASS.
+- Twin selector/config smoke and implicit-arm construction on CPU: PASS;
+  resolved active path is `leapfrog` + `explicit_substep` +
+  `surface_stress_implicit=True`.
+- Zero-day artifact-contract smoke: PASS; primary eta is fp64 per-step shape,
+  relative `t_seconds`, `capture_every_steps=1`, daily eta is preserved, and
+  the resolved placement stamp is true.
+- `test_nemo_mlf_rejects_surface_stress_implicit` and
+  `test_kamm_mlf_ships_the_faithful_pair`: PASS.
+- Existing `test_surface_stress_implicit_wiring` remains RED at the unchanged
+  base and current branch because it expects the old non-split solver guard;
+  the production split-explicit exemption predates this lane. No failure was
+  hidden or threshold relaxed.
 
 Standing retractions:
 
