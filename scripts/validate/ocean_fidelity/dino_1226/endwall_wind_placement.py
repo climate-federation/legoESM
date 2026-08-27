@@ -57,7 +57,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "25588c724e0b276d46af7d3d5fe14423bef140d2"
+PREREG_COMMIT = "7618c666f82c694f0cfb3085c636a9d51bb09c9b"
 
 
 def _git(args: list[str]) -> str:
@@ -99,11 +99,18 @@ def _stats(lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> dict:
     }
 
 
-def _participation(delta: np.ndarray, mask: np.ndarray) -> float:
-    """Effective number of faces carrying squared residual amplitude."""
+def _inverse_participation(delta: np.ndarray, mask: np.ndarray) -> float:
+    """Conventional inverse participation of squared residual amplitude."""
     d2 = np.square(np.asarray(delta, dtype=np.float64)[mask])
     denom = float(np.sum(d2 * d2))
     return float(np.sum(d2) ** 2 / denom) if denom > 0.0 else 0.0
+
+
+def _peak_equivalent_faces(delta: np.ndarray, mask: np.ndarray) -> float:
+    """Reviewer metric: residual energy in units of its largest face."""
+    d2 = np.square(np.asarray(delta, dtype=np.float64)[mask])
+    peak = float(np.max(d2)) if d2.size else 0.0
+    return float(np.sum(d2) / peak) if peak > 0.0 else 0.0
 
 
 def _one_percent_outliers(
@@ -149,12 +156,14 @@ def _localize(
     row_scaled_max = float(abs(delta[argmax]) / row_scale)
     outliers = _one_percent_outliers(lego, nemo, wet)
     row_outliers = outliers & row_mask
-    p_row = _participation(delta, row_mask)
-    p_domain = _participation(delta, wet)
+    p_row = _peak_equivalent_faces(delta, row_mask)
+    p_domain = _peak_equivalent_faces(delta, wet)
+    inverse_p_row = _inverse_participation(delta, row_mask)
+    inverse_p_domain = _inverse_participation(delta, wet)
 
-    scale = max(1.0, float(np.max(np.abs(lego))), float(np.max(np.abs(nemo))))
-    roundoff_bar = 128.0 * np.finfo(np.float64).eps * scale
-    full_support = np.abs(delta) > roundoff_bar
+    peak_delta = float(np.max(np.abs(delta)))
+    material_bar = 0.01 * peak_delta
+    full_support = np.abs(delta) >= material_bar
     support_count = int(full_support.sum())
     coastal_count = int((full_support & coastal).sum())
     coastal_fraction = (float(coastal_count / support_count)
@@ -187,7 +196,7 @@ def _localize(
     planted_delta[pj, pi] = delta[argmax]
     planted_lego = nemo + planted_delta
     planted_outliers = _one_percent_outliers(planted_lego, nemo, wet) & row_mask
-    planted_p = _participation(planted_delta, row_mask)
+    planted_p = _peak_equivalent_faces(planted_delta, row_mask)
     second_face_fires = bool(
         planted_p > 1.9 and planted_outliers.sum() > row_outliers.sum())
 
@@ -210,14 +219,16 @@ def _localize(
         },
         "row_nemo_mean": row_nemo_mean,
         "row_scaled_max_abs": row_scaled_max,
-        "participation_j1": p_row,
-        "participation_domain": p_domain,
+        "peak_equivalent_faces_j1": p_row,
+        "peak_equivalent_faces_domain": p_domain,
+        "inverse_participation_j1_descriptive": inverse_p_row,
+        "inverse_participation_domain_descriptive": inverse_p_domain,
         "wet_j1_count": int(row_mask.sum()),
         "wet_domain_count": int(wet.sum()),
         "one_percent_j1_count": int(row_outliers.sum()),
         "one_percent_domain_count": int(outliers.sum()),
         "one_percent_outliers": coord_records,
-        "full_plane_roundoff_bar": roundoff_bar,
+        "full_plane_material_bar": material_bar,
         "full_plane_support_count": support_count,
         "full_plane_support_coastal_count": coastal_count,
         "full_plane_support_coastal_fraction": coastal_fraction,
@@ -524,11 +535,16 @@ def main() -> int:
     content_sha256[str(Path(__file__).resolve())] = _sha256(Path(__file__).resolve())
     content_sha256[str(_DIR / "PREREG_endwall_wind_placement.md")] = _sha256(
         _DIR / "PREREG_endwall_wind_placement.md")
+    content_sha256[str(
+        _DIR / "PREREG_endwall_onecell_round2_correction.md")] = _sha256(
+            _DIR / "PREREG_endwall_onecell_round2_correction.md")
     print("RETRACTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER_2.0966766111")
     print("RETRACTION_REASON=zDt_2_equals_rDt_over_2_and_union_mask_admitted_"
           "324_dry_coastal_u_faces_gate_had_no_reachable_REFUTE")
     print("RETRACTION=south_j1_Pearson_correlation_gate_unreachable_for_"
           "effectively_constant_NEMO_row")
+    print("RETRACTION=round2_domain_participation_name_used_inverse_"
+          "participation_instead_of_review_peak_equivalent_faces")
     print(json.dumps({
         "provenance": {
             "git_sha": sha,
