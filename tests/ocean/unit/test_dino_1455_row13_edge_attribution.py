@@ -63,31 +63,63 @@ def test_blocked_partition_rejects_nonzero_blocked_column():
 @pytest.mark.parametrize(
     ("values", "expected"),
     [
-        ((0.85, 0.70, 0.20, 0.20), "CONFIRMED_BASIN_EDGE_RELATIONSHIP"),
-        ((0.20, 0.20, 0.85, 0.70), "CONFIRMED_CHANNEL_EDGE_RELATIONSHIP"),
-        ((0.20, 0.20, 0.25, 0.25), "CONFIRMED_OWN_OBJECT_NEITHER_RELATIONSHIP"),
-        ((0.85, 0.70, 0.80, 0.70), "UNRESOLVED_MIXED"),
+        ((0.85, 0.70, 0.20, 0.20), "DESCRIPTIVE_BASIN_EDGE_MATCH_LOW_N"),
+        ((0.20, 0.20, 0.85, 0.70), "DESCRIPTIVE_CHANNEL_EDGE_MATCH_LOW_N"),
+        ((0.20, 0.20, 0.25, 0.25), "DESCRIPTIVE_OWN_OBJECT_NEITHER_LOW_N"),
+        ((0.85, 0.70, 0.80, 0.70), "UNRESOLVED_LOW_N"),
     ],
 )
-def test_registered_attribution_outcomes_are_distinct(values, expected):
-    high = np.asarray([0.9, 0.85, 0.8, 0.2])
-    low = np.asarray([0.2, 0.1, 0.15, 0.25])
-    basin_members = high if values[0] >= E.R_HIGH else low
-    channel_members = high if values[2] >= E.R_HIGH else low
-    got = E.relationship_status(
-        values[0], values[1], values[2], values[3], basin_members, channel_members
-    )[0]
+def test_review_corrected_descriptive_routes_are_distinct(values, expected):
+    got = E.relationship_status(*values)[0]
     assert got == expected
 
 
-def test_symmetry_control_cannot_pass_outside_amplitude_bar():
-    members = np.asarray([0.9, 0.85, 0.8, 0.2])
-    assert E.symmetry_status(1.0, 0.85, members, 3.0, 1.0)[0] == (
-        "CONFIRMED_TOPOLOGY_SYMMETRIC_RESPONSE"
+def test_opposite_neighbor_veto_blocks_wrong_side_route():
+    status, basin_veto, _ = E.relationship_status(0.90, 0.70, 0.20, 0.95)
+    assert basin_veto
+    assert status == "UNRESOLVED_LOW_N"
+
+
+def test_symmetry_has_amplitude_aware_row13_dominance_cell():
+    assert E.symmetry_status(1.0, 0.85) == "DESCRIPTIVE_TOPOLOGY_SYMMETRIC_LOW_N"
+    assert E.symmetry_status(1.5, 0.85) != "DESCRIPTIVE_TOPOLOGY_SYMMETRIC_LOW_N"
+    assert E.symmetry_status(0.10, 0.20) == (
+        "DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE_UNSATURATED"
     )
-    assert E.symmetry_status(1.5, 0.85, members, 3.0, 1.0)[0] != (
-        "CONFIRMED_TOPOLOGY_SYMMETRIC_RESPONSE"
+
+
+def test_n4_exact_null_receipts_are_uniform():
+    assert E.exact_n4_null_p(0.778) == pytest.approx(0.222)
+    assert E.exact_n4_null_p(-0.905) == pytest.approx(0.095)
+    assert E.EFFECTIVE_INDEPENDENT_MEMBERS == 1
+
+
+def test_held_out_horizon_does_not_enter_its_template_and_is_rms_normalized():
+    rng = np.random.default_rng(49)
+    paired = {
+        day: rng.normal(size=(E.N_MEM, E.R.A.NY)).astype(np.float64) for day in E.HORIZONS
+    }
+    _, folds_before = E._loo_profile_amplitudes(paired, E.C.CHANNEL_ROWS)
+    changed = {day: values.copy() for day, values in paired.items()}
+    changed[180][:, E.C.CHANNEL_ROWS] += 1e6
+    _, folds_after = E._loo_profile_amplitudes(changed, E.C.CHANNEL_ROWS)
+    fold_before = next(f for f in folds_before if f["held_out_day"] == 180)
+    fold_after = next(f for f in folds_after if f["held_out_day"] == 180)
+    np.testing.assert_array_equal(
+        fold_before["template_mean_gap_sv"], fold_after["template_mean_gap_sv"]
     )
+    assert fold_before["projection_divisor_row_sv"] == pytest.approx(
+        fold_before["n_rows"] * fold_before["template_rms_sv"]
+    )
+
+
+def test_synthetic_power_control_runs_projection_and_pearson_pipeline():
+    assert E._synthetic_pipeline_cases() == {
+        "basin": "DESCRIPTIVE_BASIN_EDGE_MATCH_LOW_N",
+        "channel": "DESCRIPTIVE_CHANNEL_EDGE_MATCH_LOW_N",
+        "neither": "DESCRIPTIVE_OWN_OBJECT_NEITHER_LOW_N",
+        "mixed": "UNRESOLVED_LOW_N",
+    }
 
 
 def test_upstream_hash_mutation_is_rejected(monkeypatch):

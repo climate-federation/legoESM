@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """#1455 characterize and attribute DINO transport gaps at rows 13 and 49.
 
-Pre-registration: ``PREREG_row13_edge_attribution.md`` at ``ea416520b``,
-committed before any new statistic in this file was computed.  This probe is
-offline: it loads the saved verdict360 states and never steps either model.
+Pre-registration: ``PREREG_row13_edge_attribution.md`` at ``ea416520b``.
+Adversarial-review correction protocol: the same file at ``59646d40d``,
+committed before corrected statistics were computed.  This probe is offline:
+it loads the saved verdict360 states and never steps either model.
 
 Usage:
   JAX_ENABLE_X64=1 row13_edge_attribution.py --self-test
@@ -54,11 +55,11 @@ R_HIGH = 0.70
 R_LOW = 0.30
 R_NEIGHBOR = 0.50
 R_MARGIN = 0.20
-R_MEMBER = 0.50
-R_MEMBER_COUNT = 3
 SYMMETRY_RATIO = (0.75, 1.25)
 ASYMMETRY_RATIO_MAX = 0.50
 ROW_BAR = R.V.K_PREREG
+EFFECTIVE_INDEPENDENT_MEMBERS = 1
+CORRECTION_COMMIT = "59646d40dc80302d1d21e78f1898c538f8bb203f"
 
 UPSTREAM_REGIONAL_COMMIT = "102ef501a"
 UPSTREAM_REGIONAL_SHA256 = "2f2bbc03afed792ea0148002029a6ad6481c93bd2ee37679b4bf615aab392fe7"
@@ -299,23 +300,21 @@ def relationship_status(
     basin_neighbor,
     channel_profile,
     channel_neighbor,
-    basin_member_abs,
-    channel_member_abs,
 ):
-    """Apply the registered basin/channel/neither attribution bars."""
-    basin_robust = int(np.sum(_f64(basin_member_abs) >= R_MEMBER))
-    channel_robust = int(np.sum(_f64(channel_member_abs) >= R_MEMBER))
+    """Apply post-review descriptive routing, including opposite-side vetoes."""
+    basin_veto = basin_neighbor < channel_neighbor
+    channel_veto = channel_neighbor < basin_neighbor
     basin_ok = (
         basin_profile >= R_HIGH
         and basin_neighbor >= R_NEIGHBOR
-        and basin_robust >= R_MEMBER_COUNT
         and basin_profile - channel_profile >= R_MARGIN
+        and not basin_veto
     )
     channel_ok = (
         channel_profile >= R_HIGH
         and channel_neighbor >= R_NEIGHBOR
-        and channel_robust >= R_MEMBER_COUNT
         and channel_profile - basin_profile >= R_MARGIN
+        and not channel_veto
     )
     neither = (
         basin_profile <= R_LOW
@@ -324,50 +323,111 @@ def relationship_status(
         and channel_neighbor <= R_LOW
     )
     if basin_ok:
-        status = "CONFIRMED_BASIN_EDGE_RELATIONSHIP"
+        status = "DESCRIPTIVE_BASIN_EDGE_MATCH_LOW_N"
     elif channel_ok:
-        status = "CONFIRMED_CHANNEL_EDGE_RELATIONSHIP"
+        status = "DESCRIPTIVE_CHANNEL_EDGE_MATCH_LOW_N"
     elif neither:
-        status = "CONFIRMED_OWN_OBJECT_NEITHER_RELATIONSHIP"
+        status = "DESCRIPTIVE_OWN_OBJECT_NEITHER_LOW_N"
     else:
-        status = "UNRESOLVED_MIXED"
-    return status, basin_robust, channel_robust
+        status = "UNRESOLVED_LOW_N"
+    return status, basin_veto, channel_veto
 
 
-def symmetry_status(amplitude_ratio, trajectory_abs, member_abs, row13_ratio, row49_ratio):
-    robust = int(np.sum(_f64(member_abs) >= R_MEMBER))
+def symmetry_status(amplitude_ratio, trajectory_abs):
+    """Amplitude-aware descriptive cell; correlations do not provide replication."""
     if (
         SYMMETRY_RATIO[0] <= amplitude_ratio <= SYMMETRY_RATIO[1]
         and trajectory_abs >= R_HIGH
-        and robust >= R_MEMBER_COUNT
     ):
-        return "CONFIRMED_TOPOLOGY_SYMMETRIC_RESPONSE", robust
-    if amplitude_ratio <= ASYMMETRY_RATIO_MAX and row13_ratio > ROW_BAR and row49_ratio <= ROW_BAR:
-        return "CONFIRMED_ROW13_AMPLITUDE_ASYMMETRY", robust
-    return "UNRESOLVED", robust
+        return "DESCRIPTIVE_TOPOLOGY_SYMMETRIC_LOW_N"
+    if amplitude_ratio <= ASYMMETRY_RATIO_MAX:
+        return "DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE_UNSATURATED"
+    return "UNRESOLVED_LOW_N"
 
 
-def _profile_amplitudes(paired_rows, rows):
-    template = np.mean(paired_rows[360][:, rows], axis=0)
-    denominator = float(np.dot(template, template))
-    if not denominator > 0.0:
-        raise ValueError("profile projection is UNMEASURABLE on a zero template")
-    amp = np.asarray(
-        [
-            [float(np.dot(paired_rows[day][m, rows], template) / denominator) for day in HORIZONS]
-            for m in range(N_MEM)
-        ],
-        dtype=np.float64,
+def exact_n4_null_p(r):
+    """Exact two-sided Pearson tail under the n=4 independent Gaussian null."""
+    return 1.0 - abs(float(r))
+
+
+def _loo_profile_amplitudes(paired_rows, rows):
+    """Horizon-held-out projection onto an RMS-normalized regional template."""
+    indices = np.arange(R.A.NY)[rows]
+    n_rows = int(len(indices))
+    amp = np.empty((N_MEM, len(HORIZONS)), dtype=np.float64)
+    folds = []
+    for ti, day in enumerate(HORIZONS):
+        training = [h for h in HORIZONS if h != day]
+        template = np.mean(
+            np.concatenate([_f64(paired_rows[h][:, rows]) for h in training], axis=0),
+            axis=0,
+        )
+        squared_norm = float(np.dot(template, template))
+        rms = float(np.sqrt(np.mean(template * template)))
+        if not rms > 0.0:
+            raise ValueError("profile projection is UNMEASURABLE on a zero-RMS template")
+        divisor = float(n_rows * rms)
+        amp[:, ti] = _f64(paired_rows[day][:, rows]) @ template / divisor
+        folds.append(
+            {
+                "held_out_day": int(day),
+                "training_days": training,
+                "n_rows": n_rows,
+                "template_mean_gap_sv": template.tolist(),
+                "template_squared_norm_sv2": squared_norm,
+                "template_rms_sv": rms,
+                "projection_divisor_row_sv": divisor,
+            }
+        )
+    return amp, folds
+
+
+def _correlation_record(target, reference):
+    signed = np.asarray(
+        [C.pearson(target[m], reference[m])[0] for m in range(N_MEM)], dtype=np.float64
     )
-    return amp, template, denominator
+    absolute = np.abs(signed)
+    return {
+        "primary_member": 0,
+        "primary_signed_r": float(signed[0]),
+        "primary_abs_r": float(absolute[0]),
+        "primary_exact_n4_null_two_sided_p": exact_n4_null_p(signed[0]),
+        "all_member_signed_r": signed.tolist(),
+        "all_member_exact_n4_null_two_sided_p": [exact_n4_null_p(r) for r in signed],
+        "nudge_sensitivity_abs_r_range_members_1_3": [
+            float(np.min(absolute[1:])),
+            float(np.max(absolute[1:])),
+        ],
+        "descriptive_all_member_median_abs_r": float(np.median(absolute)),
+        "effective_independent_member_tests_approx": EFFECTIVE_INDEPENDENT_MEMBERS,
+    }
+
+
+def _relationship_from_trajectories(
+    target, basin_amp, channel_amp, basin_neighbor, channel_neighbor
+):
+    records = {
+        "basin_profile": _correlation_record(target, basin_amp),
+        "channel_profile": _correlation_record(target, channel_amp),
+        "basin_neighbor": _correlation_record(target, basin_neighbor),
+        "channel_neighbor": _correlation_record(target, channel_neighbor),
+    }
+    primary = {name: rec["primary_abs_r"] for name, rec in records.items()}
+    status, basin_veto, channel_veto = relationship_status(
+        primary["basin_profile"],
+        primary["basin_neighbor"],
+        primary["channel_profile"],
+        primary["channel_neighbor"],
+    )
+    return status, records, primary, basin_veto, channel_veto
 
 
 def attribution(paired_rows):
-    """Registered trajectory attribution for both topology-matched rows."""
-    channel_amp, channel_template, channel_den = _profile_amplitudes(paired_rows, C.CHANNEL_ROWS)
+    """Review-corrected low-n attribution for both topology-matched rows."""
+    channel_amp, channel_folds = _loo_profile_amplitudes(paired_rows, C.CHANNEL_ROWS)
     result = {}
     for row, spec in TARGETS.items():
-        basin_amp, basin_template, basin_den = _profile_amplitudes(paired_rows, spec["basin_rows"])
+        basin_amp, basin_folds = _loo_profile_amplitudes(paired_rows, spec["basin_rows"])
         target = np.asarray(
             [[paired_rows[d][m, row] for d in HORIZONS] for m in range(N_MEM)], dtype=np.float64
         )
@@ -380,28 +440,8 @@ def attribution(paired_rows):
             dtype=np.float64,
         )
 
-        def correlations(reference):
-            return np.asarray(
-                [C.pearson(target[m], reference[m])[0] for m in range(N_MEM)], dtype=np.float64
-            )
-
-        rb = correlations(basin_amp)
-        rc = correlations(channel_amp)
-        rbn = correlations(basin_neighbor)
-        rcn = correlations(channel_neighbor)
-        scores = {
-            "basin_profile_median_abs_r": float(np.median(np.abs(rb))),
-            "channel_profile_median_abs_r": float(np.median(np.abs(rc))),
-            "basin_neighbor_median_abs_r": float(np.median(np.abs(rbn))),
-            "channel_neighbor_median_abs_r": float(np.median(np.abs(rcn))),
-        }
-        status, bcount, ccount = relationship_status(
-            scores["basin_profile_median_abs_r"],
-            scores["basin_neighbor_median_abs_r"],
-            scores["channel_profile_median_abs_r"],
-            scores["channel_neighbor_median_abs_r"],
-            np.abs(rb),
-            np.abs(rc),
+        status, records, primary, basin_veto, channel_veto = _relationship_from_trajectories(
+            target, basin_amp, channel_amp, basin_neighbor, channel_neighbor
         )
         result[row] = {
             "status": status,
@@ -410,24 +450,22 @@ def attribution(paired_rows):
             "basin_neighbor": spec["basin_neighbor"],
             "channel_neighbor": spec["channel_neighbor"],
             "target_trajectories_sv": target.tolist(),
-            "basin_projection_amplitudes": basin_amp.tolist(),
-            "channel_projection_amplitudes": channel_amp.tolist(),
-            "correlations": {
-                "basin_profile_signed_r": rb.tolist(),
-                "channel_profile_signed_r": rc.tolist(),
-                "basin_neighbor_signed_r": rbn.tolist(),
-                "channel_neighbor_signed_r": rcn.tolist(),
+            "basin_loo_rms_normalized_projection_sv_per_row": basin_amp.tolist(),
+            "channel_loo_rms_normalized_projection_sv_per_row": channel_amp.tolist(),
+            "correlation_receipts": records,
+            "primary_control_member_abs_r": primary,
+            "primary_profile_separation_abs_r": float(
+                primary["basin_profile"] - primary["channel_profile"]
+            ),
+            "opposite_neighbor_veto": {
+                "basin_route_vetoed": bool(basin_veto),
+                "channel_route_vetoed": bool(channel_veto),
             },
-            "scores": scores,
-            "basin_member_abs_r_ge_0_50": bcount,
-            "channel_member_abs_r_ge_0_50": ccount,
-            "basin_template_day360_mean_gap_sv": basin_template.tolist(),
-            "basin_projection_denominator_sv2": basin_den,
-            "channel_projection_denominator_sv2": channel_den,
-            "channel_template_day360_mean_gap_sv": channel_template.tolist(),
+            "basin_leave_one_horizon_out_folds": basin_folds,
+            "channel_leave_one_horizon_out_folds": channel_folds,
             "qualification": (
-                "trajectory relationship only; one cycle cannot separate "
-                "seasonal phase from elapsed-time evolution"
+                "exploratory low-n trajectory relationship only; n=4 exact null "
+                "p=1-|r|; nudge members are sensitivity traces, not replication"
             ),
         }
     return result
@@ -556,9 +594,26 @@ def _full_characterization(row_values, components):
 
 
 def _symmetry(paired_rows, characterization):
-    amp13 = float(np.median(np.abs(paired_rows[360][:, 13])))
-    amp49 = float(np.median(np.abs(paired_rows[360][:, 49])))
-    ratio = amp49 / amp13 if amp13 > 0.0 else float("inf")
+    amplitude_cells = {}
+    for day in HORIZONS:
+        amp13 = float(np.median(np.abs(paired_rows[day][:, 13])))
+        amp49 = float(np.median(np.abs(paired_rows[day][:, 49])))
+        ratio = amp49 / amp13 if amp13 > 0.0 else float("inf")
+        if SYMMETRY_RATIO[0] <= ratio <= SYMMETRY_RATIO[1]:
+            amplitude_status = "DESCRIPTIVE_AMPLITUDE_MATCH"
+        elif ratio <= ASYMMETRY_RATIO_MAX:
+            amplitude_status = "DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE"
+        else:
+            amplitude_status = "DESCRIPTIVE_OTHER_AMPLITUDE_RATIO"
+        amplitude_cells[day] = {
+            "row13_median_abs_gap_sv": amp13,
+            "row49_median_abs_gap_sv": amp49,
+            "row49_over_row13_ratio": ratio,
+            "absolute_amplitude_difference_sv": abs(amp13 - amp49),
+            "status": amplitude_status,
+            "qualification": "saved-state amplitudes; row floors are unsaturated",
+        }
+    ratio = amplitude_cells[360]["row49_over_row13_ratio"]
     signed = np.asarray(
         [
             C.pearson(
@@ -568,21 +623,70 @@ def _symmetry(paired_rows, characterization):
             for m in range(N_MEM)
         ]
     )
-    r13 = characterization[13]["trajectory"][360]["gap_over_floor"]
-    r49 = characterization[49]["trajectory"][360]["gap_over_floor"]
-    status, robust = symmetry_status(
-        ratio, float(np.median(np.abs(signed))), np.abs(signed), r13, r49
-    )
+    primary_abs = float(abs(signed[0]))
+    status = symmetry_status(ratio, primary_abs)
     return {
         "status": status,
-        "row49_over_row13_day360_median_abs_gap": ratio,
-        "row13_day360_median_abs_gap_sv": amp13,
-        "row49_day360_median_abs_gap_sv": amp49,
+        "amplitude_aware_cells": amplitude_cells,
         "member_signed_trajectory_r": signed.tolist(),
-        "median_abs_trajectory_r": float(np.median(np.abs(signed))),
-        "member_abs_r_ge_0_50": robust,
-        "qualification": ("matched topology control; P1 and P3 dynamics are not assumed symmetric"),
+        "primary_control_member_abs_trajectory_r": primary_abs,
+        "primary_exact_n4_null_two_sided_p": exact_n4_null_p(signed[0]),
+        "nudge_sensitivity_abs_r_range_members_1_3": [
+            float(np.min(np.abs(signed[1:]))),
+            float(np.max(np.abs(signed[1:]))),
+        ],
+        "descriptive_all_member_median_abs_trajectory_r": float(np.median(np.abs(signed))),
+        "effective_independent_member_tests_approx": EFFECTIVE_INDEPENDENT_MEMBERS,
+        "qualification": (
+            "matched-topology low-n control; amplitudes are unsaturated upper bounds; "
+            "P1 and P3 dynamics are not assumed symmetric"
+        ),
     }
+
+
+def _synthetic_pipeline_cases():
+    """Exercise real LOO projection, Pearson, veto, and routing on trajectories."""
+    rng = np.random.default_rng(1349)
+    for _ in range(1000):
+        paired = {
+            day: rng.normal(size=(N_MEM, R.A.NY)).astype(np.float64) for day in HORIZONS
+        }
+        basin_amp, _ = _loo_profile_amplitudes(paired, TARGETS[13]["basin_rows"])
+        channel_amp, _ = _loo_profile_amplitudes(paired, C.CHANNEL_ROWS)
+        if abs(C.pearson(basin_amp[0], channel_amp[0])[0]) <= 0.15:
+            break
+    else:
+        raise AssertionError("could not construct separated synthetic profile arms")
+
+    def members(values):
+        return np.tile(_f64(values), (N_MEM, 1))
+
+    basin_target = members(basin_amp[0])
+    channel_target = members(channel_amp[0])
+    quiet = None
+    for _ in range(1000):
+        candidate = rng.normal(size=len(HORIZONS))
+        if (
+            abs(C.pearson(candidate, basin_amp[0])[0]) <= 0.25
+            and abs(C.pearson(candidate, channel_amp[0])[0]) <= 0.25
+        ):
+            quiet = members(candidate)
+            break
+    if quiet is None:
+        raise AssertionError("could not construct synthetic neither trajectory")
+
+    mixed = members(basin_amp[0] + channel_amp[0])
+    cases = {}
+    for name, target, bn, cn in (
+        ("basin", basin_target, basin_target, quiet),
+        ("channel", channel_target, quiet, channel_target),
+        ("neither", quiet, basin_target, channel_target),
+        ("mixed", mixed, mixed, mixed),
+    ):
+        cases[name] = _relationship_from_trajectories(
+            target, basin_amp, channel_amp, bn, cn
+        )[0]
+    return cases
 
 
 def _load_full_states(provenance):
@@ -689,19 +793,12 @@ def self_test(run_upstream=True):
         lambda: np.testing.assert_array_equal(globalized, local),
     )
 
-    high = np.asarray([0.9, 0.85, 0.8, 0.2])
-    low = np.asarray([0.2, 0.1, 0.15, 0.25])
-    cases = {
-        "basin": relationship_status(0.85, 0.70, 0.20, 0.20, high, low)[0],
-        "channel": relationship_status(0.20, 0.20, 0.85, 0.70, low, high)[0],
-        "neither": relationship_status(0.20, 0.20, 0.25, 0.25, low, low)[0],
-        "mixed": relationship_status(0.85, 0.70, 0.80, 0.70, high, high)[0],
-    }
+    cases = _synthetic_pipeline_cases()
     expected = {
-        "basin": "CONFIRMED_BASIN_EDGE_RELATIONSHIP",
-        "channel": "CONFIRMED_CHANNEL_EDGE_RELATIONSHIP",
-        "neither": "CONFIRMED_OWN_OBJECT_NEITHER_RELATIONSHIP",
-        "mixed": "UNRESOLVED_MIXED",
+        "basin": "DESCRIPTIVE_BASIN_EDGE_MATCH_LOW_N",
+        "channel": "DESCRIPTIVE_CHANNEL_EDGE_MATCH_LOW_N",
+        "neither": "DESCRIPTIVE_OWN_OBJECT_NEITHER_LOW_N",
+        "mixed": "UNRESOLVED_LOW_N",
     }
     if cases != expected:
         raise AssertionError((cases, expected))
@@ -710,15 +807,27 @@ def self_test(run_upstream=True):
         lambda: np.testing.assert_array_equal(list(cases.values()), [cases["basin"]] * 4),
     )
 
-    status, _ = symmetry_status(1.0, 0.85, high, 3.0, 1.0)
-    if status != "CONFIRMED_TOPOLOGY_SYMMETRIC_RESPONSE":
+    status = symmetry_status(1.0, 0.85)
+    if status != "DESCRIPTIVE_TOPOLOGY_SYMMETRIC_LOW_N":
         raise AssertionError(status)
+    dominance = symmetry_status(0.10, 0.20)
+    if dominance != "DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE_UNSATURATED":
+        raise AssertionError(dominance)
     _plant_fires(
         "out-of-bar amplitude cannot pass symmetric control",
         lambda: (
             (_ for _ in ()).throw(AssertionError())
-            if symmetry_status(1.5, 0.85, high, 3.0, 1.0)[0]
-            != "CONFIRMED_TOPOLOGY_SYMMETRIC_RESPONSE"
+            if symmetry_status(1.5, 0.85)
+            != "DESCRIPTIVE_TOPOLOGY_SYMMETRIC_LOW_N"
+            else None
+        ),
+    )
+    _plant_fires(
+        "local-floor scaling cannot suppress amplitude-aware asymmetry",
+        lambda: (
+            (_ for _ in ()).throw(AssertionError())
+            if symmetry_status(0.10, 0.20)
+            == "DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE_UNSATURATED"
             else None
         ),
     )
@@ -746,17 +855,37 @@ def run(out_dir):
         "pre_registration": {
             "path": "scripts/validate/ocean_fidelity/dino_1226/PREREG_row13_edge_attribution.md",
             "commit": "ea416520b",
+            "post_review_correction_commit": CORRECTION_COMMIT,
+            "correction_is_post_registration": True,
         },
+        "retractions": [
+            (
+                "RETRACTED: original day-360-template attribution; the scored horizon "
+                "helped define the template and dominated n=4."
+            ),
+            (
+                "RETRACTED: row 49 CONFIRMED P3 basin-edge; that claim depended on the "
+                "circular statistic and ignored the stronger channel-side neighbour."
+            ),
+        ],
         "verdict_bars": {
             "R_HIGH": R_HIGH,
+            "R_HIGH_exact_n4_null_two_sided_p": exact_n4_null_p(R_HIGH),
             "R_LOW": R_LOW,
+            "R_LOW_exact_n4_null_two_sided_p": exact_n4_null_p(R_LOW),
             "R_NEIGHBOR": R_NEIGHBOR,
+            "R_NEIGHBOR_exact_n4_null_two_sided_p": exact_n4_null_p(R_NEIGHBOR),
             "R_MARGIN": R_MARGIN,
-            "R_MEMBER": R_MEMBER,
-            "R_MEMBER_COUNT": R_MEMBER_COUNT,
+            "R_MARGIN_qualification": (
+                "descriptive routing only; not a significance threshold at n=4"
+            ),
             "SYMMETRY_RATIO": list(SYMMETRY_RATIO),
             "ASYMMETRY_RATIO_MAX": ASYMMETRY_RATIO_MAX,
             "ROW_BAR": ROW_BAR,
+            "correlation_bar_qualification": (
+                "n=4 exact null p=1-|r|; unadjusted; four nudge members have "
+                "effective independent tests approximately one"
+            ),
         },
         "targets": list(TARGET_ROWS),
         "horizons": list(HORIZONS),
@@ -795,6 +924,12 @@ def run(out_dir):
             "longitude_reducer": "mean over columns 2:-2",
             "bottom_reference": ("u_bottom * H; not a true depth mean or independent ownership"),
             "relationship_scope": ("trajectory relationship, not causal or separably seasonal"),
+            "profile_projection": (
+                "leave-one-horizon-out template; RMS-normalized spatial projection"
+            ),
+            "member_inference": (
+                "member 0 primary; 1e-14 nudge members are sensitivity traces, not replication"
+            ),
         },
     }
 
@@ -810,17 +945,53 @@ def run(out_dir):
     path = out / "row13_edge_attribution.json"
     payload = json.dumps(artifact, indent=2, sort_keys=True, allow_nan=False)
     path.write_text(payload + "\n")
+    print(artifact["retractions"][0])
+    print(artifact["retractions"][1])
+    print(
+        "CORRECTED METHOD: horizon-held-out RMS-normalized templates; member 0 primary; "
+        "effective independent member tests ~= 1"
+    )
+    print(
+        f"CORRELATION BARS: HIGH {R_HIGH:.2f} (exact n=4 null p={exact_n4_null_p(R_HIGH):.2f}); "
+        f"NEIGHBOR {R_NEIGHBOR:.2f} (p={exact_n4_null_p(R_NEIGHBOR):.2f}); "
+        f"LOW {R_LOW:.2f} (p={exact_n4_null_p(R_LOW):.2f}); descriptive only"
+    )
     print(f"artifact: {path}")
     print(f"artifact sha256: {hashlib.sha256((payload + chr(10)).encode()).hexdigest()}")
     for row in TARGET_ROWS:
         d360 = characterization[row]["trajectory"][360]
+        rec = relationships[row]["correlation_receipts"]
         print(
             f"row {row}: gap {d360['control_gap_sv']:+.9f} Sv, "
             f"floor {d360['floor_sv']:.9f} Sv, "
             f"{d360['gap_over_floor']:.3f}x, "
             f"{relationships[row]['status']}"
         )
+        for name in ("basin_profile", "channel_profile", "basin_neighbor", "channel_neighbor"):
+            receipt = rec[name]
+            print(
+                f"  {name}: control r={receipt['primary_signed_r']:+.4f}, "
+                f"|r|={receipt['primary_abs_r']:.2f}, "
+                f"exact n=4 null p={receipt['primary_exact_n4_null_two_sided_p']:.2f}"
+            )
+        print(
+            "  basin-channel profile separation "
+            f"{relationships[row]['primary_profile_separation_abs_r']:+.2f}; "
+            "descriptive and inside n=4 sampling uncertainty"
+        )
     print(f"symmetry: {symmetry['status']}")
+    day360_cell = symmetry["amplitude_aware_cells"][360]
+    print(
+        "  amplitude-aware day360: "
+        f"row49/row13={day360_cell['row49_over_row13_ratio']:.3f}, "
+        f"difference={day360_cell['absolute_amplitude_difference_sv']:.6f} Sv, "
+        f"{day360_cell['status']}"
+    )
+    print(
+        "  trajectory control |r|="
+        f"{symmetry['primary_control_member_abs_trajectory_r']:.2f}, "
+        f"exact n=4 null p={symmetry['primary_exact_n4_null_two_sided_p']:.2f}"
+    )
     return artifact
 
 
