@@ -144,8 +144,20 @@ def main() -> int:
     if A_fixed is None:
         raise SystemExit("production closure did not return momentum viscosity")
     shape_components = [c for c in components if c["K_M"].shape == A_fixed.shape]
-    final = min(shape_components,
-                key=lambda c: float(np.max(np.abs(c["K_M"] - A_fixed))))
+    if not shape_components:
+        raise SystemExit("no spied coefficient call matches production A_v shape")
+    component_distances = [
+        float(np.max(np.abs(c["K_M"] - A_fixed))) for c in shape_components]
+    component_pick = int(np.argmin(component_distances))
+    component_pick_error = component_distances[component_pick]
+    component_pick_tolerance = 1.0e-12 * max(
+        1.0, float(np.max(np.abs(A_fixed))))
+    if component_pick_error > component_pick_tolerance:
+        raise SystemExit(
+            "closest spied coefficient call is not the returned production "
+            f"A_v: max_abs_error={component_pick_error}, "
+            f"tolerance={component_pick_tolerance}")
+    final = shape_components[component_pick]
     shape_solves = [s for s in solves if s.shape == A_fixed.shape]
     if len(shape_solves) != 1:
         raise SystemExit(f"expected one production TKE solve, got {len(shape_solves)}")
@@ -218,9 +230,12 @@ def main() -> int:
     replay_target = artifact["tke_equation_decomposition_10m"][
         "structural_surface_floor_replay"]["arm_over_nemo_geometric_mean"]
     en_stats = ratio_summary(en_ratio)
+    match_relative_tolerance = 1.0e-10
+    match_lower = replay_target * (1.0 - match_relative_tolerance)
+    match_upper = replay_target * (1.0 + match_relative_tolerance)
     verdict = (
         "CONFIRM_REAL_FIX_MATCHES_OFFLINE_REPLAY"
-        if (en_stats["geometric_mean"] <= replay_target * (1.0 + 1e-10)
+        if (match_lower <= en_stats["geometric_mean"] <= match_upper
             and float(np.mean(toward)) == 1.0)
         else "REFUTE_REAL_FIX_MATCHES_OFFLINE_REPLAY")
     if verdict.startswith("REFUTE"):
@@ -274,6 +289,16 @@ def main() -> int:
         "momentum_viscosity_ratio_fixed_over_nemo": ratio_summary(avm_ratio),
         "columns_energy_moved_toward_nemo_fraction": float(np.mean(toward)),
         "expected_replay_energy_ratio": float(replay_target),
+        "replay_match_two_sided_band": {
+            "lower": float(match_lower), "upper": float(match_upper),
+            "relative_tolerance": match_relative_tolerance,
+        },
+        "spied_component_pick": {
+            "matching_shape_calls": len(shape_components),
+            "selected_zero_based": component_pick,
+            "max_abs_error": component_pick_error,
+            "assertion_tolerance": component_pick_tolerance,
+        },
         "legacy_energy_ratio_reconstruction": reconstructed_energy_ratio,
         "per_column": per_column,
         "source_contract": {
