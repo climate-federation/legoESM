@@ -16,11 +16,13 @@ _SPEC.loader.exec_module(E)
 
 
 def test_weighted_nrms_is_thickness_weighted():
-    lego = np.array([[2.0, 2.0]])
+    # Non-uniform error: an unweighted implementation returns sqrt(1/2), while
+    # the 3x-thicker exact cell reduces the registered answer to 1/2.
+    lego = np.array([[2.0, 1.0]])
     nemo = np.array([[1.0, 1.0]])
     weights = np.array([[1.0, 3.0]])
     wet = np.ones_like(lego, dtype=bool)
-    assert E.weighted_nrms(lego, nemo, weights, wet) == pytest.approx(1.0)
+    assert E.weighted_nrms(lego, nemo, weights, wet) == pytest.approx(0.5)
 
 
 def test_empty_mask_fails_closed():

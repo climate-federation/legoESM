@@ -117,3 +117,60 @@ All controls run before a verdict is emitted and are demonstrated able to fail.
 7. A deliberate 2x coefficient plant must alter the first-step implicit
    momentum result; this proves the substitution path is live.
 
+## Review-mandated reissue (A3/A4; registered before decomposition)
+
+The original two-consecutive-interface confirmation clause is retained above
+for provenance but is retracted as physically mis-specified for this metric.
+The regional shear readout spans 5--26 m, so the 10.14 m interface is itself a
+shear-setting level. Requiring the adjacent 20.59 m interface to fail too
+would make a surface-anchored viscosity mechanism impossible to confirm.
+
+The corrected offline bar is:
+
+* **CONFIRM_VISCOSITY_PRIME_SUSPECT** if thickness-weighted 10--40 m NRMS is at
+  least 0.25 and either (a) two consecutive ratios lie outside [0.75, 1.25] in
+  the same direction, or (b) the 10.14 m shear-setting interface alone lies
+  outside that interval and its sign predicts the observed weak 5--26 m shear
+  and deeper core.
+* **REFUTE_VISCOSITY_PRIME_SUSPECT** keeps the original refutation bar: NRMS
+  at most 0.10 and all level ratios within [0.90, 1.10].
+* otherwise **UNRESOLVED_VISCOSITY_PRIME_SUSPECT**.
+
+This reissue is compelled by the adversarial review and is not represented as
+having preceded the first measurement. It does precede the attribution
+measurement below.
+
+## 10.14 m TKE-closure attribution bar
+
+At equator row 99 and the declared lego interface 0 / NEMO jk=2 alignment,
+decompose each positive, wet, non-floor column using the executed avm branch:
+
+```
+log(avm_L / avm_N) = log(Ck_L / rn_ediff_N)
+                    + log(mxl_L / zmxlm_N)
+                    + 0.5 * log(en_L / en_N).
+```
+
+NEMO's `rn_ediff` is the viscosity coefficient in the executed
+`zav=rn_ediff*zmxlm*sqrt(en)` branch. If no independent multiplicative
+stability function acts on avm, the coefficient/stability contribution is
+explicitly zero rather than being silently folded into another piece.
+
+Controls and eligibility:
+
+* both direct avm values must exceed their background floors;
+* the three-factor reconstruction must reproduce each direct avm within
+  `1e-10` relative; otherwise abort attribution;
+* at least 75% of wet equatorial columns must be eligible;
+* the dry-cell and one-level-shift plants must fail as in the parent probe;
+* all component dumps must resolve through the shared time-level registry and
+  their SHA-256 values must be recorded and read back.
+
+For columns with direct `avm_L/avm_N > 1.25`, define each piece's band score as
+the median absolute log contribution. A closure piece is labelled
+**CARRIES_10M_EXCESS** when it supplies at least 60% of the sum of the three
+scores and its signed contribution agrees with the total excess in at least
+75% of excess columns. If no piece clears both bars, attribution is
+**DISTRIBUTED_OR_UNRESOLVED**. Also report geometric-mean factors,
+interquartile ranges, and the exact per-column reconstruction control; those
+diagnostics do not alter the registered label.
