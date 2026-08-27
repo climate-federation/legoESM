@@ -440,11 +440,11 @@ them.
    floor**. Whether that agreement is physical or arithmetic is open, and it is
    the single highest-value hour in this list. The same applies to every
    standing INDISTINGUISHABLE verdict in the campaign. Offline, minutes.
-1b. **Explain P6.** The northern subpolar band has the highest escalating-row
+2. **Explain P6.** The northern subpolar band has the highest escalating-row
    fraction in the section (41 of 48, 85 %), with the two north-wall rows at 81×
    and 72×, and a band net that reads INDISTINGUISHABLE. This audit measured it
    and does not explain it.
-2. **The matched-state substitution for the equatorial layer.** Feed NEMO's own
+3. **The matched-state substitution for the equatorial layer.** Feed NEMO's own
    day-360 T, S, u, v at the equator into legoESM's shipped vertical-mixing
    closure and compare the resulting mixing coefficient against NEMO's dumped
    `avm_k`, level by level, over the top 40 m. If they differ at a matched
@@ -453,8 +453,10 @@ them.
    circularity, and until it runs no sentence about this gap may contain the
    word "mixing".** The NEMO restarts carry `avm_k`, `en`, and the full momentum
    trend decomposition.
-3. **A ten-minute first cut:** a fixed-density-threshold mixed-layer depth at the
+4. **A ten-minute first cut:** a fixed-density-threshold mixed-layer depth at the
    equator row, same criterion both sides, all 20 horizons.
-4. **Do not tune the equatorial transport.** It is at 0.98× its floor while the
-   profile behind it is at 166×, and the band number is 1.5 % of its own signal.
-   Optimising it would move the structure in an unconstrained direction.
+5. **Do not tune the equatorial transport.** It is at 0.98× its own floor while
+   the profile behind it is at 166×, and the band number retains under 3 % of
+   that band's summed per-row magnitude. Optimising the number that is already
+   right would move the structure in an unconstrained direction — the same trap
+   the campaign recorded for lateral viscosity and channel transport.
