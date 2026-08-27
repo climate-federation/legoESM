@@ -30,7 +30,7 @@
       }
     },
     "fix_review_disposition": "SHIP_BY_BOTH_REVIEWERS_NO_BLOCKERS",
-    "live_ab_day10": {
+    "live_ab_day10_day90": {
       "artifacts_sha256": {
         "ab_fix.json": "b64ac051be2bcd96de9a4cdaa555b651f335ebe389eb255bd680708a59ab6083",
         "ab_fix.log": "0db236bf77a17efdc0127cf690bb25bba19ae973fe7be1e5067e941c3353ed41",
@@ -82,15 +82,95 @@
           "verdict": "CONFIRM"
         },
         "global_do_no_harm": {
-          "verdict": "PENDING"
+          "acceptance_gate": "acceptance_gate_90d level 5x",
+          "acc_sv": {
+            "fix": 64.9876,
+            "nemo": 65.3692,
+            "prefix": 64.9838,
+            "result": "FIX moved toward NEMO"
+          },
+          "fix_gate": "CERTIFIED exit 0 PASS 5 | FAIL 0",
+          "prefix_gate": "CERTIFIED exit 0 PASS 5 | FAIL 0",
+          "prefix_to_fix_absolute_deltas_vs_threshold": {
+            "acc_sv": {
+              "delta": 0.00382,
+              "threshold": 0.455
+            },
+            "deep_contrast_kg_m3": {
+              "delta_approx": 1e-09,
+              "threshold": 0.000225
+            },
+            "s_band_sigma_max_kg_m3": {
+              "delta_approx": 1e-06,
+              "threshold": 0.000475
+            },
+            "s_band_sigma_mean_kg_m3": {
+              "delta_upper_bound": 1e-06,
+              "threshold": 0.000475
+            },
+            "upper_contrast_kg_m3": {
+              "delta": 2e-06,
+              "threshold": 0.00055
+            }
+          },
+          "result": "every PREFIX-to-FIX move is 2-5 orders inside tolerance",
+          "self_test": "PASS: synthetic violation fails all 5 metrics",
+          "verdict": "CONFIRM"
         },
         "persistence_day90": {
-          "verdict": "PENDING"
+          "bar": "CONFIRM ratio in [0.85,1.20]; approximately 0.70 REFUTE",
+          "extraction": "regional-audit probe imported at 91153f2aa; equator-row wet zonal-mean u, 5-26 m shear",
+          "fix_over_nemo": 0.9731,
+          "nemo_reference": "RUN_VERDICT360_M0 kt=8640",
+          "prefix_over_nemo": 0.7106,
+          "prefix_instrument_check": "reproduces recorded approximately 0.70",
+          "verdict": "CONFIRM"
         }
+      },
+      "day90_executor_provenance": {
+        "artifacts": {
+          "fix_npz": {
+            "path": "/tmp/dino_euc_mechanism/twin90_fix/twin90_fix.npz",
+            "sha256": "66d00735c22b3106c37eca3b91022d38477b578bef8cc2c997d215c2395f1f2d"
+          },
+          "fix_run_log": {
+            "path": "/tmp/dino_euc_mechanism/twin90_fix.log",
+            "sha256": "897a51c52c32775c40149bc1c8bb1a5d219bbb4a19ce5a16db70c4f3df97f2c9"
+          },
+          "fix_gate_log": {
+            "path": "/tmp/dino_euc_mechanism/gate_fix.log",
+            "sha256": "4bc8489be90b327c114ca885e036582e0b22d3695b96b650b7a09f95760e7078"
+          },
+          "prefix_npz": {
+            "path": "/tmp/dino_euc_mechanism/twin90_prefix/twin90_prefix.npz",
+            "sha256": "47e3fc69cf53c76d37b564d3bcbdcc691c945112d563e79ad05e9db0dcb037db"
+          },
+          "prefix_run_log": {
+            "path": "/tmp/dino_euc_mechanism/twin90_prefix.log",
+            "sha256": "5ec5e02194fdca8033c9ac573659d714b3da30bb9c65dd086f6aaa82288d31ed"
+          },
+          "prefix_gate_log": {
+            "path": "/tmp/dino_euc_mechanism/gate_prefix.log",
+            "sha256": "d5b18df09be08672c29593f40389889ef2317d57dcc3391c3e2eca3cf7ae06d6"
+          }
+        },
+        "control_dtype": "float64",
+        "day0_gate": "all maxima exactly zero",
+        "dirty_tracked_files_both": 0,
+        "harness": "kamm_twin_90d.py verified byte-identical across arms",
+        "harness_sha256": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+        "invocation": "kamm_twin_90d.py nemo_dino_kamm_mlf <out>.npz --days 90 --save-3d --bridge-before",
+        "ladder": "both",
+        "ladder_sha256": "9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9",
+        "source": "coordinator executor",
+        "stable_finite_both": true,
+        "start": "bridged",
+        "steps_each": 2880,
+        "worktrees": "clean"
       },
       "runner_sha256_both_arms": "b2de13ca7039a6954a7c3e115af249e834dc4b9be83343cc0188e56893d12845",
       "state_controls": "day-0 identity and all bridge maxima exactly zero",
-      "verdict": "CONFIRMED_AT_DAY_10"
+      "verdict": "CONFIRMED_DAY10_DAY90_DO_NO_HARM"
     },
     "residual_owner": {
       "label": "PLAUSIBLE_MOMENTUM_SHEAR_RESIDUAL",
@@ -1292,7 +1372,7 @@
       "nemo_below_1e_4_fraction": 1.0,
       "nemo_source": "cfgs/DINO/MY_SRC/zdftke.F90:361 holds rn_emin0 at jk=1; :564-565 floors solved jk=2..jpkm1 with rn_emin",
       "registered_chain_prediction": "fix -> en_L/en_N approaches 1 at 10.14 m -> buoyancy-limited mxl and avm ratios approach 1 -> 5-26 m shear strengthens and the EUC core shoals toward NEMO",
-      "trajectory_result": "CONFIRMED_AT_DAY_10; persistence and global do-no-harm PENDING",
+      "trajectory_result": "CONFIRMED_DAY10_DAY90_DO_NO_HARM; day-10 response, day-90 persistence, and global do-no-harm all CONFIRM",
       "verdict": "CONFIRM_MISPLACED_SURFACE_MIN_CLAMP"
     },
     "surface_boundary": {

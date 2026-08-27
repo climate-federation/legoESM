@@ -7,9 +7,10 @@ State: shared NEMO day-180 restart; matched first step `kt=5761`
 ## Reported outcome
 
 **FIX-FIRST verdict: SHIP `d86d97d49`; live PREFIX/FIX response
-`CONFIRMED_AT_DAY_10`.** Both round-6 reviewers found no blocker. Persistence
-and global do-no-harm remain `PENDING`. The prior headline that vertical
-mixing was unsupported is retracted. The audited shear spans
+`CONFIRMED_DAY10_DAY90_DO_NO_HARM`.** Both round-6 reviewers found no blocker;
+the day-10 causal response, day-90 persistence, and global do-no-harm bars all
+CONFIRM. The prior headline that vertical mixing was unsupported is retracted.
+The audited shear spans
 5--26 m, so the 10.14 m interface is shear-setting, not peripheral. At that
 interface legoESM's momentum viscosity is 2.0514 times NEMO's while the model's
 shear is about 0.68 times NEMO's; `A_v * shear` is consequently similar
@@ -84,11 +85,33 @@ The pre-registered physics-review bars, registered before scoring, read:
 | P2 shear-error ratio | `0.099` | **CONFIRM** (`<=0.50`) |
 | P3 per-level errors | all improved; same-sign `+0.0074/-0.0053/-0.0074/-0.0036` | **CONFIRM** |
 | P4 crossing | `33.103 m`; no overshoot (frozen arm overshot to `28.27 m`) | **CONFIRM** |
-| persistence at day 90 | not yet scored | **PENDING** |
-| global do-no-harm | not yet scored | **PENDING** |
+| persistence at day 90 | shear ratio PREFIX/NEMO `0.7106` (instrument check reproduces recorded ~0.70); FIX/NEMO `0.9731`, inside registered `[0.85,1.20]` | **CONFIRM** |
+| global do-no-harm | both arms `CERTIFIED`, exit 0, `PASS 5 | FAIL 0` at level 5x; every PREFIX-to-FIX move is 2--5 orders inside tolerance | **CONFIRM** |
 
-Overall live label: **`CONFIRMED_AT_DAY_10`**. Persistence and global
-do-no-harm remain explicitly pending.
+Overall live label: **`CONFIRMED_DAY10_DAY90_DO_NO_HARM`**.
+
+The persistence extraction is the regional-audit probe imported at
+`91153f2aa`, applied to equator-row wet-zonal-mean `u` at 5--26 m against NEMO
+`RUN_VERDICT360_M0`, `kt=8640`. Its preregistered bar is CONFIRM in
+`[0.85,1.20]` and approximately `0.70` REFUTE; PREFIX=`0.7106` validates the
+instrument and FIX=`0.9731` confirms persistence.
+
+For do-no-harm, FIX versus PREFIX changes are: ACC `3.82e-3 Sv` against a
+`4.55e-1` threshold; upper contrast `2e-6` against `5.5e-4`; deep contrast
+approximately `1e-9` against `2.25e-4`; S-band sigma maximum approximately
+`1e-6` against `4.75e-4`; and S-band sigma mean below `1e-6` against
+`4.75e-4`. FIX ACC=`64.9876 Sv`, PREFIX=`64.9838 Sv`, and NEMO=`65.3692 Sv`,
+so the fix moves ACC toward NEMO. The gate self-test also passes: a synthetic
+violation fails all five metrics.
+
+Executor provenance: clean worktrees with `dirty_tracked_files=0`; identical
+`kamm_twin_90d.py` harness; 2,880 stable, finite steps per arm; day-0 gate
+maxima all zero; ladder=`both`, ladder SHA-256
+`9536f62732ab8823b2899d26ae0c4582cca09e4b2f49d9e17ff1234f88584ff9`;
+start=`bridged`; control dtype=`float64`. Standard invocation:
+`kamm_twin_90d.py nemo_dino_kamm_mlf <out>.npz --days 90 --save-3d --bridge-before`.
+Artifacts are `/tmp/dino_euc_mechanism/twin90_{prefix,fix}/` and
+`gate_{prefix,fix}.log`.
 
 ## Why this was the discriminator
 
@@ -403,8 +426,9 @@ downstream of the same prior over-mixing.
 The day-10 executor A/B confirms the registered chain: fixing the clamp drives
 the near-surface closure toward NEMO, strengthens 5--26 m shear from 0.017060
 to 0.023512 s⁻¹, and shoals the crossing from 34.836 to 33.103 m without
-overshooting the 32.744 m control. Day-90 persistence and global do-no-harm
-remain pending.
+overshooting the 32.744 m control. The day-90 shear ratio remains near NEMO
+(`0.9731`) and both 5x acceptance gates certify `PASS 5 | FAIL 0`, completing
+the persistence and global do-no-harm confirmations.
 
 ## Provenance
 
