@@ -3,17 +3,21 @@
 #SBATCH --partition=short
 #SBATCH --job-name=fv3_mprt
 #SBATCH --nodes=3
-#SBATCH --ntasks=3
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-task=2
+#SBATCH --ntasks=6
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:45:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM_fv3jax/scripts/tmp/fv3_mprt_%j.out
 
 # Multi-process fv3_duo checkpoint SAVE->LOAD->STEP bitwise round-trip
-# (tail item 3 correctness gate). Same 3-node x 2-GPU per-task binding as
-# spmd_multiprocess_3node_6gpu.sbatch: 6 global devices = 6 cube faces.
+# (tail item 3 correctness gate). Same 6-device shape as
+# spmd_multiprocess_3node_6gpu.sbatch: --gres=gpu:2 --ntasks-per-node=2
+# over 3 nodes = 6 tasks x 1 GPU = 6 global devices = 6 cube faces
+# (--gpus-per-task is unsupported by this cluster's SLURM). Bare
+# jax.distributed.initialize() auto-derives each task's GPU from
+# SLURM_LOCALID.
 # Proves a checkpoint+restart run is BITWISE the uninterrupted run across
 # the multi-process gather/broadcast/reshard I/O path.
 #

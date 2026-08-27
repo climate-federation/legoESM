@@ -3,28 +3,26 @@
 #SBATCH --partition=short
 #SBATCH --job-name=fv3_mp6gpu
 #SBATCH --nodes=3
-#SBATCH --ntasks=3
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-task=2
+#SBATCH --ntasks=6
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:45:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM_fv3jax/scripts/tmp/fv3_mp6gpu_%j.out
 
-# PER-TASK MULTI-GPU BINDING FIX (tail item 1, 2026-08-27): the prior 3-node
-# spmd_multiprocess_parity run bound only 1 GPU/task (3 global devices) --
-# SLURM's default GPU allocation is 1 GPU/task unless told otherwise. This job
-# requests ONE task per NODE (--ntasks-per-node=1) and TWO GPUs per that task
-# (--gpus-per-task=2), so SLURM sets CUDA_VISIBLE_DEVICES to both node GPUs
-# for the single task -- jax.distributed.initialize()'s SLURM auto-detect then
-# sees 2 local devices per process with no cross-task GPU contention (unlike
-# the eORCA025 2-tasks/node template, which needs local_device_ids=SLURM_LOCALID
-# to disambiguate SHARED node GPUs -- not needed here since each task owns its
-# node's GPUs exclusively). 3 nodes x 2 GPUs = 6 global devices = 6 cube faces,
-# the natural (1 face/device, no ring-neighbor grouping) SPMD case.
+# 6-DEVICE MULTI-NODE SPMD (tail item 1, 2026-08-27): the prior 3-node run
+# saw only 1 GPU/task = 3 global devices. --gpus-per-task=2 is UNSUPPORTED
+# by this cluster's SLURM SelectType plugin, so the fix is the proven
+# eORCA025-multinode resource shape instead: --gres=gpu:2 --ntasks-per-node=2
+# over 3 nodes = 6 tasks, ONE GPU per task, 6 GLOBAL devices = 6 cube faces
+# (1 face/device). Bare jax.distributed.initialize() under SLURM auto-derives
+# each task's local_device_ids from SLURM_LOCALID (jax's own SLURM cluster
+# detection), so the two co-located tasks bind DIFFERENT GPUs with no manual
+# --gpu-bind (which the eORCA025 template warns deadlocks the cross-node
+# topology exchange).
 #
-# PREFLIGHT (HARD rule): refuse a dirty tree -- a job must run the PINNED
-# commit, never uncommitted edits a later commit could silently change under it.
+# PREFLIGHT (HARD): refuse a dirty TRACKED tree -- must run the pinned commit.
 set -uo pipefail
 if [ -n "${SLURM_JOB_ID:-}" ] && command -v scontrol >/dev/null 2>&1; then
   _SELF=$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null \
