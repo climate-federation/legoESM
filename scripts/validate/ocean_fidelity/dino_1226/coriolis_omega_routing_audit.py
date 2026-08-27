@@ -50,6 +50,8 @@ import sys
 
 import numpy as np
 
+from legoesm.ocean.constants_config import NEMO_OMEGA
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS_OCEAN_FIDELITY = os.path.dirname(_THIS_DIR)
 for _p in (_THIS_DIR, _SCRIPTS_OCEAN_FIDELITY):
@@ -116,7 +118,7 @@ _PLACEMENT_CONTAMINATED = (
 
 
 def _classify(om: float, omega_lego: float, omega_nemo: float,
-              omega_phycst: float | None = None) -> str:
+              omega_phycst: float = NEMO_OMEGA) -> str:
     """Name the Earth a recovered rate belongs to, or refuse to name one.
 
     THREE references, not two, and the distinction is the point of the audit:
@@ -126,11 +128,14 @@ def _classify(om: float, omega_lego: float, omega_nemo: float,
     surface -- so the pin is named as a pin and phycst's computed value is a
     separate reference.  (Adversarial review, round 2.)
     """
+    # The phycst reference DEFAULTS to NEMO's real rate rather than to None.
+    # With a None default a three-argument call silently dropped the reference
+    # and resolved every NEMO-side rate to the card-pin label -- which is how
+    # this file shipped a red test (adversarial review, round 2).  There is now
+    # no argument list that turns the distinction off.
     refs = [("legoESM constants.Omega", omega_lego),
-            ("NEMO card pin (7-figure key_cice literal)", omega_nemo)]
-    if omega_phycst is not None:
-        refs.append(("NEMO phycst.F90 2*pi/rsiday (what DINO runs)",
-                     omega_phycst))
+            ("NEMO card pin (7-figure key_cice literal)", omega_nemo),
+            ("NEMO phycst.F90 2*pi/rsiday (what DINO runs)", omega_phycst)]
     # Most specific first: if the card's pin has been corrected to phycst's
     # value the two references coincide, and the phycst name is the true one.
     for tag, ref in reversed(refs):
@@ -155,7 +160,10 @@ def main() -> None:
     # rsiday the sidereal day; NEMO_CONSTANTS_CONFIG carries the 7-figure
     # literal.  Both are printed so a reader can see which one this audit's
     # "NEMO" column means.
-    omega_phycst_full = 7.2921150830e-05
+    # TRANSCRIBED, not a truncated copy -- a probe whose whole finding is
+    # "transcribe the expression, do not paste a rounded literal" must not
+    # paste a rounded literal (the 6-figure form is 6.3e-12 off).
+    omega_phycst_full = float(NEMO_OMEGA)
 
     print("=" * 78)
     print("STEP 0 -- Coriolis rotation-rate ROUTING audit (instantiated)")

@@ -1365,7 +1365,19 @@ class LatLonCGridOceanModel:
             _gap = float(jnp.max(jnp.abs(
                 _fv_int - 0.5 * (_fT[:-1] + _fT[1:]))))
             _scale = float(jnp.max(jnp.abs(_fT))) or 1.0
-            if _gap <= 1e-12 * _scale:
+            # AND ONLY WHEN THE TWO CONVENTIONS ACTUALLY DIFFER ON THIS GRID.
+            # The cell average equals the face value EXACTLY wherever f is
+            # LINEAR between the rows -- every beta-plane and every f-plane.
+            # There the setting is not being ignored, it is indistinguishable,
+            # and raising would abort a perfectly valid run (adversarial
+            # review, round 2, measured: beta-plane and f-plane both gap 0.0
+            # and both tripped the guard).  Curvature of f along the rows is
+            # the discriminator, and on a lat-lon grid it is exactly the second
+            # difference of f_T.
+            _curv = (float(jnp.max(jnp.abs(_fT[2:] - 2.0 * _fT[1:-1] + _fT[:-2])))
+                     if _fT.shape[0] >= 3 else 0.0)
+            _conventions_differ = _curv > 1e-12 * _scale
+            if _conventions_differ and _gap <= 1e-12 * _scale:
                 raise ValueError(
                     "coriolis_placement="
                     f"{self.config.coriolis_placement!r} was requested, but "
@@ -1373,7 +1385,10 @@ class LatLonCGridOceanModel:
                     "LatLonCGridGeometry whose f_v is the cell average (max "
                     f"departure {_gap:.3e} <= {1e-12 * _scale:.3e}). "
                     "ensure_geometry passes a pre-built geometry through "
-                    "unchanged, so this setting would be silently ignored. "
+                    "unchanged, so this setting would be silently ignored "
+                    f"(f_T curvature {_curv:.3e} shows the two conventions DO "
+                    "differ on this grid, so this is a real no-op and not a "
+                    "beta-plane coincidence). "
                     "Select the placement where the geometry is built "
                     "(create_latlon_geometry / ensure_geometry / "
                     "bridge_nemo_to_legoesm_topo)."

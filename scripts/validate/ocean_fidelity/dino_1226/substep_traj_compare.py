@@ -1340,16 +1340,19 @@ def main():
     # this campaign has recorded three times, and the response registered for
     # it is a JOINT arm, never a revert of the half already fixed.
     #
-    # A THIRD OF THIS GAP IS NOT A DISCRETISATION CONVENTION.  It decomposes
-    # into a uniform -1.59e-05 and a latitude-varying -3.61e-05, summing to
+    # WHAT THIS ARM MEASURES DEPENDS ON WHEN IT WAS RUN, so read the stamp.
+    # BEFORE the rotation-rate fix, this gap decomposed into a uniform
+    # -1.59e-05 (a different Earth: the twin's geometry was built on legoESM's
+    # rounded `constants.Omega` while NEMO's own ff_f inverts to
+    # 7.292115083046e-05) and a latitude-varying -3.61e-05, summing to
     # -5.20e-05 -- the median over the |sin(phi)| >= 0.1 rows the split is
     # conditioned on, NOT the -5.48e-05 all-rows median quoted above.  Two
-    # windows; they are not interchangeable
-    # (coriolis_omega_routing_audit.py, committed).  The uniform part is a
-    # different Earth: the twin's GEOMETRY is built on legoESM's rounded
-    # `constants.Omega`, while NEMO's own ff_f inverts to 7.292115083046e-05.
-    # Substituting NEMO's own array removes BOTH halves at once, which is what
-    # this arm is for -- it measures the pair's Coriolis side complete.
+    # windows; they are not interchangeable.
+    # AFTER the fix (one rate now reaches every site), the routing audit
+    # reports the constant part as exactly 0.0 and the gap is PURE PLACEMENT,
+    # so this arm is a single-variable convention arm.  An arm map produced
+    # before that fix carries BOTH variables at once and must say so
+    # (coriolis_omega_routing_audit.py, committed, stamps which).
     #
     # THE ARM: substitute NEMO's OWN `ff_f` for the ONE array the loop's
     # Coriolis reads, rerun the SAME loop from the SAME entry state with the
@@ -1608,6 +1611,7 @@ def main():
                     "grid.f_u": np.abs(np.asarray(_g_in.f_u)).max(),
                     "grid.f_v": np.abs(np.asarray(_g_in.f_v)).max(),
                     "grid.f_T": np.abs(np.asarray(_g_in.f_T)).max(),
+                    "grid.omega": abs(float(_g_in.omega)),
                     "een_pre f_vtx row 0": np.abs(_fvtx_p[0]).max(),
                     "een_pre f_vtx row jpj": np.abs(_fvtx_p[jpj]).max()}
         for _nm, _mx in _corrupt.items():
@@ -1651,7 +1655,7 @@ def main():
                 f"(scaling them all by 1e3 moved the carry by {_inert_gap:.3e}"
                 "), so substituting only een_pre['f_vtx'] is a PARTIAL "
                 "perturbation and the collapse would read low.  Isolate which "
-                "of the six by re-running them one at a time, then substitute "
+                "of the seven by re-running them one at a time, then substitute "
                 "it too before anything is scored.")
 
         jax.lax.fori_loop = _fori_capture

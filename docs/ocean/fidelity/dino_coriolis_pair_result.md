@@ -5,9 +5,18 @@
 registered**. legoESM's vertex-Coriolis error and its v-face zonal-metric error
 are **not** a cancelling pair in the wall-normal tendency: the v-face zonal
 width enters the **zonal** tendency only, and its effect on the meridional
-tendency is **exactly zero**. In the registered channel the Coriolis error is
-unpaired, nothing cancels it, and the three arms bear this out — the joint arm
-is the **sum** of its halves, never more. The two halves own **disjoint bands**.
+tendency **through the Coriolis operator is exactly zero**. In the registered
+channel the Coriolis error is unpaired *in that operator*, and the three arms
+bear it out — the joint arm is the **sum** of its halves, never more, and the
+two halves own **disjoint bands**.
+
+**Scope that sentence carefully, because I first wrote it too strongly.**
+"Exactly zero" is a statement about the **Coriolis term**, not about the loop:
+`e1v` still reaches the meridional velocity through the continuity divergence
+and the ssh-average face depth, and the metric arm's meridional response is
+**58 % of the baseline residual's own amplitude**. At system level its effect
+is emphatically not zero — it simply does not travel by the Coriolis route the
+"cancelling pair" claim invoked.
 
 The registered verdict is **PARTIAL**, the staggering control **fires**, and the
 pre-registered condition therefore **withholds** the 90-day gate run.
@@ -39,10 +48,20 @@ coriolis`, metric-complete, +1 % on one array at a time, fp64):
 The metric-complete operator scales the meridional velocity by `e1v` before the
 triad and normalises the **zonal** output by `e1u`; the meridional output
 carries `e2u` and is normalised by `e2v`. `e1v` therefore cannot reach the
-meridional tendency at all. The Coriolis error reaches both.
+meridional tendency **through this operator** at all. The Coriolis error
+reaches both.
 
-**So the pair is real in the ZONAL tendency and ABSENT in the meridional one —
-and the pre-registration scores the meridional (wall-normal) component.** The
+**It does reach it by another route**, and the arms measure that: `e1v` also
+feeds the continuity divergence and the ssh-average face depth, both of which
+act on sea level and therefore on the meridional velocity. The metric arm's
+meridional response has basin RMS 1.073e-07 against a 1.847e-07 baseline
+residual. So the correct statement is *"the pair does not cancel in the
+Coriolis coefficient of the meridional tendency"* — not *"the metric does
+nothing there"*.
+
+**So the pair is real in the ZONAL tendency and absent from the Coriolis
+coefficient of the meridional one — and the pre-registration scores the
+meridional (wall-normal) component.** The
 verdict below is reported as registered; the registration itself is retracted as
 mis-aimed. Credit: the mechanism review caught this; it was then re-measured
 independently before being written down.
@@ -126,6 +145,34 @@ alignment/amplitude triple (+0.548 / 0.941 / 0.300 wall-normal, +0.852 / 1.018 /
 0.726 tangential). The routing probe independently reproduces the campaign's
 recorded −5.48e-05 row-map median.
 
+### PROVENANCE: every number in this section predates the rotation-rate fix
+
+**Read this before quoting any arm number.** All five arm directories stamp
+`git=5e17e105…` — they were produced *before* the rotation-rate fix in
+`15653c392`. Two consequences, and neither is cosmetic:
+
+1. **Arm F is a TWO-variable arm, not a convention arm.** Substituting NEMO's
+   own `ff_f` on the pre-fix tree replaced the rotation rate (uniform
+   −1.578e-05) *and* the placement (−3.90e-05 median) together. The constant is
+   ~29 % of the substituted gap. "The Coriolis owns both interior bands" is
+   therefore "NEMO's own `ff_f` owns them", rate and convention combined.
+2. **The baseline no longer exists on HEAD.** BASE, E1V and JOINT were all
+   scored against a geometry built on legoESM's rounded rate. The whole
+   collapse table's denominator has moved.
+
+**What this does and does not invalidate.** The retraction in §1 is an operator
+measurement and does not depend on the arms at all. The exact superposition,
+the disjointness, and the additivity refutation are *relative* statements among
+arms produced on one identical tree, so they stand. What must be re-measured
+before the percentages are quoted as properties of the shipped model is the
+collapse table itself.
+
+**The required re-run, named and costed:** all five arms on HEAD (~2.5 h on one
+GPU, the same driver and the same five states). On the fixed tree arm F becomes
+a genuine single-variable convention arm, which is what the round-1 mechanism
+review asked for and what makes the Coriolis half interpretable. This is the
+first thing to do, before anything in §7.
+
 ### The collapse table
 
 State-constant residual, five-state mean, % collapse against BASE:
@@ -143,9 +190,15 @@ State-constant residual, five-state mean, % collapse against BASE:
 | in-loop zonal deposit | 1.2610e-03 Sv/step | −2.4 | **+69.5** | +67.1 | +67.1 | −0.0 |
 
 **The two halves are disjoint — CONFIRMED.** The metric owns the northern lobe
-(61.7 %) and does nothing to the interior bands (−3.7 %, −2.8 %). The Coriolis
-owns both interior bands (32.1 %, 25.8 %) and the zonal deposit (69.5 %), and
-does nothing to the lobe (−1.5 %). That the campaign's three-band residual has
+(61.7 %); the Coriolis owns both interior bands (32.1 %, 25.8 %) and the zonal
+deposit (69.5 %) while leaving the lobe alone (−1.5 %).
+
+**"Does nothing" is the wrong word for the metric in the interior, and the
+negative percentages say so.** Its response there is 15 % and 11 % of the local
+residual — substantial, but *misaligned* (alignment +0.145 and −0.036), which is
+exactly why the RMS goes slightly **up** rather than down. A −3.7 % collapse is
+evidence of an incoherent effect, not of no effect. The one genuine "nothing" is
+the Coriolis half in the lobe, at 3.5 % of local amplitude. That the campaign's three-band residual has
 one term per band is a measurement.
 
 **WHY they are disjoint is NOT measured, and there are two live explanations —
@@ -153,8 +206,14 @@ PLAUSIBLE, both of them.** They are different claims with different
 consequences and the arms above cannot tell them apart:
 
 1. **Latitude structure.** The metric gap peaks at the walls and vanishes at
-   the equator; the Coriolis gap does the reverse. Each half then acts where
-   its own error lives.
+   the equator; each half then acts where its own error lives.
+   **Correction, because the companion half of this sentence was wrong:** it
+   used to read "the Coriolis gap does the reverse [peaks at the equator]".
+   Only the RELATIVE gap does, and it does so because `f → 0` there, which is
+   also where the inversion is ill-conditioned. The quantity that drives a
+   tendency is the ABSOLUTE gap `Δf = 2Ω sinφ ·(−Δφ²/8) ∝ sinφ cos²φ`, which
+   **vanishes at the equator and peaks near 35°S**. Do not repeat "the Coriolis
+   gap peaks at the equator".
 2. **Disjoint operator sets.** `e1v` reaches three in-loop consumers — the
    continuity divergence, the ssh-average face depth, and the EEN rotation
    coefficient — of which only the last is a Coriolis term. The first two act
@@ -162,6 +221,14 @@ consequences and the arms above cannot tell them apart:
    entirely. `f_vtx` is a *pure* Coriolis perturbation. On this reading the
    two arms barely share an operator, and the band split is a consequence of
    that rather than of latitude.
+
+**Explanation 1 is quantitatively insufficient on its own**, which settles the
+ranking without the new arm: the response contrast between a half's strong and
+weak bands beats its *error* contrast by 4–6× in both halves (metric 10.7× vs
+1.9×; Coriolis 7.3× vs 2.7×). Where the error is big explains at most a fifth
+of the split. The two are therefore composable rather than competing —
+explanation 2 sets *which channel* a half acts in, explanation 1 modulates the
+amplitude within it.
 
 Explanation 2 is the stronger candidate on the operator measurement in §1 —
 `e1v` cannot reach the meridional tendency through the Coriolis term *at all*,
@@ -179,10 +246,23 @@ the consumers are already separable there — and it costs what the arms above
 cost. Until it is run, no mechanism for the band split should be quoted as
 established.
 
-**Additivity.** `joint − (E1V + F)` is +0.6 to +6.2 points, ≤ 2.9 on every
-reduction but the basin. A cancelling pair predicts the joint arm to *exceed*
-the sum; it equals it. The pair framing is refuted by the arms as well as by
-the operator.
+**The halves SUPERPOSE EXACTLY — this, not the point spread, is the
+refutation.** Comparing the response *fields* rather than the reduced
+percentages:
+
+    ‖(Δ_E1V + Δ_F) − Δ_JOINT‖ / ‖Δ_JOINT‖  =  4.93e-06  (wall-normal)
+                                              6.53e-06  (tangential)
+
+The joint arm IS the linear sum of its halves to five decimal places. A
+cancelling pair predicts the joint arm to *exceed* the sum; there is no
+interaction at all.
+
+The `joint − (E1V + F)` spread of +0.6 to +6.2 points in the table above is
+therefore **not** an interaction — it is the RMS-collapse statistic's own
+nonlinearity (`1 − ‖r+Δ‖/‖r‖` is not additive even when `Δ` is). Feeding the
+exactly-linear sum back through the same statistic reproduces the measured
+JOINT column to 0.1 point on every row. Quote the superposition residual, not
+the point spread.
 
 ### The registered verdict
 
@@ -269,8 +349,13 @@ area. Measured with legoESM's own curl operator on the DINO latitudes:
 
 | construction | median \|curl(solid body) − f_v\| / 2Ω |
 |---|---:|
-| row average (`cell_average`) | 2.1e-06 |
-| f at the face latitude | **2.1e-05** (10× worse) |
+| row average (`cell_average`) | **4.1e-15 — exact, to machine precision** |
+| f at the face latitude | **2.0e-05** |
+
+(Re-measured with legoESM's own curl operator and now a committed test,
+`tests/ocean/unit/test_coriolis_placement.py`, rather than a throwaway probe.
+The first row is *exact*, not merely 10× better, so the trade is larger than an
+earlier draft of this document stated.)
 
 So `"face_latitude"` trades a **10× degradation in discrete planetary-vorticity
 (Kelvin/Stokes) consistency** for oracle fidelity: after the change the
@@ -278,11 +363,15 @@ planetary part is no longer the discrete curl of anything, and a fluid in exact
 solid-body co-rotation acquires a spurious potential vorticity of order 1e-08
 per second, fixed in space.
 
-**It does NOT trade energy or enstrophy conservation.** The Sadourny/AL81
-identities are generic in the vertex field — a *random* vertex Coriolis array
-gives a work residual of ≤ 4.3e-19 — so the conservation property depends on
-every paired `(u, v)` contribution sharing ONE vertex value, not on how that
-value was computed. And NEMO itself uses the face-latitude value with the same
+**It does NOT trade energy or enstrophy conservation ON THE EEN PATH.** The
+Sadourny/AL81 identities are generic in the vertex field — a *random* vertex
+Coriolis array gives a work residual of ≤ 4.3e-19 — so the conservation
+property depends on every paired `(u, v)` contribution sharing ONE vertex
+value, not on how that value was computed. **Scope it there and no further:**
+the option also feeds `coriolis_at_faces`, the semi-implicit and
+`explicit_ab2` face-f Coriolis, whose work cancellation is *not* the AL81
+identity — it depends on the `(f_u, f_v)` pair, and this flag moves `f_v` while
+leaving `f_u`. That path's work residual is **UNMEASURED**. And NEMO itself uses the face-latitude value with the same
 scheme, so the oracle is on the less curl-consistent choice. (Enstrophy is
 argued from the coefficient algebra and the machine-zero energy result, not
 measured on a time-stepped run: PLAUSIBLE, not CONFIRMED.)
@@ -331,8 +420,22 @@ row would have bought nothing.
   tangential RMS only 7.6 %. Two different reductions of the same field; they
   must never be quoted as one number.
 
+  **But the gap between them is itself the finding, and it is geometric, not an
+  artifact.** There is no sign-structured cancellation (the Coriolis arm is
+  cleanly anti-aligned with the residual, corr −0.456). Measured directly, the
+  transport-deposit direction captures only **16.9 %** of the baseline
+  residual's norm, while the Coriolis arm's response is **48.6 %** aligned with
+  it — and the metric arm's is **0.2 %**, i.e. essentially orthogonal. The
+  Coriolis error's damage is ~3× concentrated in the net-transport mode
+  relative to the residual as a whole, and the metric error is not in that mode
+  at all. That is the strongest argument in this document for re-registering on
+  the transport channel.
+
 ## 7. Named next steps, not started
 
+0. **Re-run the five arms on HEAD** (see the provenance box in §3). Everything
+   below is worth less until the collapse table is a measurement of the shipped
+   model rather than of its predecessor.
 1. **Re-register on the zonal channel.** That is where the pair exists, where
    the joint arm already explains 80 % of the variance at α = 0.995, and where
    the transport-relevant deposit lives.

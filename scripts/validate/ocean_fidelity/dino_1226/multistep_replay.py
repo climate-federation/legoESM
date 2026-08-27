@@ -284,9 +284,18 @@ def build_replay_ic(*, recipe: str = RECIPE, run_traj: str = RUN_TRAJ,
 
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s0 = nemo_now_state_at(IC_STEP, run_twin_step1=run_twin_step1)
-    br = bridge_nemo_to_legoesm_topo(g, s0, periodic_i=True, full_step=True)
     cfg = dataclasses.replace(dino_config_for_recipe(recipe),
                                lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
+    # THE CARD'S OWN CONSTANTS AND CONVENTIONS REACH THE GEOMETRY, not just the
+    # model config (#1455).  `omega` defaults to NEMO's Earth in the bridge now,
+    # but passing the card's value explicitly makes the routing visible at the
+    # call site rather than resting on a default; and `coriolis_placement` MUST
+    # be passed here, because ensure_geometry hands a pre-built geometry through
+    # unchanged -- setting it on the card alone would be silently ignored on
+    # this lane (the model refuses that case rather than running the default).
+    br = bridge_nemo_to_legoesm_topo(
+        g, s0, periodic_i=True, full_step=True, omega=cfg.omega,
+        coriolis_placement=cfg.coriolis_placement)
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
 

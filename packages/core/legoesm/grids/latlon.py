@@ -1478,6 +1478,24 @@ def create_latlon_geometry(
           defines its Coriolis at the F-point does; select it to match
           one.
 
+        THE TRADE, measured by ``tests/ocean/unit/
+        test_coriolis_placement.py`` with the model's own curl operator
+        on a stretched mesh, NOT asserted here: the cell average IS the
+        discrete curl of solid-body rotation (``|curl - f_v|/2Omega``
+        median 4.1e-15, i.e. exact), and ``"face_latitude"`` is 2.0e-05
+        off it.  So selecting the face convention buys oracle fidelity
+        and gives up discrete planetary-vorticity (Kelvin/Stokes)
+        consistency: a fluid in exact solid-body co-rotation acquires a
+        spurious vorticity, fixed in space.  It does NOT give up the
+        EEN energy/enstrophy identities, which are generic in the vertex
+        field -- a RANDOM vertex array conserves just as well, because
+        those need every paired (u, v) contribution to share ONE vertex
+        value, not a particular value.  That exoneration is measured on
+        the EEN triads ONLY; the face-f path
+        (``barotropic_common.coriolis_at_faces``) pairs ``f_u`` with
+        ``f_v`` and this flag moves ``f_v`` alone, so its work residual
+        is UNMEASURED.  NEMO itself is on the face convention.
+
         The two agree to ``cos(dphi/2)`` on a grid with CONSTANT
         latitude spacing — a uniform factor there, indistinguishable
         from a rotation-rate change — and disagree with a genuine
@@ -1750,7 +1768,11 @@ def create_latlon_geometry(
     f_u_interior = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_interior, f_u_interior[:, 0:1]], axis=1)
 
-    # f at v-points -- the ONE place the vertex Coriolis convention lives.
+    # f at v-points -- the one place the REGULAR LAT-LON vertex Coriolis
+    # convention lives.  Scope, because "the ONE place" was too strong: the
+    # tripolar builder and create_beta_plane_cgrid_geometry each construct
+    # their own f_v and do NOT take this option (on a beta-plane the two
+    # conventions coincide exactly, so there is nothing there to select).
     # Every C-grid Coriolis path in the repo reads THIS array, through one of
     # two helpers: `latlon_cgrid_operators.vertex_coriolis` (the barotropic EEN
     # pre-block and the 3-D EEN/ENE vorticity flux) and

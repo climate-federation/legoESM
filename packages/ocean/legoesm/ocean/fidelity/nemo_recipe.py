@@ -35,14 +35,21 @@ from legoesm.ocean.physics.vertical_mixing.config import (
 from legoesm.ocean.state import LatLonCGridOceanConfig
 
 from legoesm import constants
-
-NEMO_CONSTANTS_CONFIG = ConstantsConfig(
-    g=constants.g_nemo,
-    rho_0=constants.rho_ocean_nemo,
-    c_sw=constants.c_p_seawater,
-    Omega=constants.Omega,
-    R_earth=constants.R_earth,
+from legoesm.ocean.constants_config import (
+    NEMO_CONSTANTS_CONFIG as _CANONICAL_NEMO_CONSTANTS,
 )
+
+# THE CANONICAL NEMO PRESET, re-exported -- not a second one built here.
+#
+# This module used to define its own ConstantsConfig under the SAME NAME as
+# ocean.constants_config.NEMO_CONSTANTS_CONFIG, agreeing on g/rho_0/c_sw/R_earth
+# and differing on Omega alone: it carried legoESM's rounded constants.Omega
+# while the canonical preset carries NEMO's own 2*pi/rsiday, 1.578e-05 apart.
+# Two same-named constants blocks with one silently divergent field is exactly
+# the shadowing pattern that put the DINO oracle lane on the wrong planet
+# (#1455); a NEMO card must not be able to pick the wrong NEMO.  Re-exported
+# rather than re-declared so there is one object and no way to drift.
+NEMO_CONSTANTS_CONFIG = _CANONICAL_NEMO_CONSTANTS
 
 
 class NEMORecipe(NamedTuple):

@@ -411,7 +411,13 @@ line". Season and elapsed time are degenerate in a single year.
 > operator carries `e1v` into the zonal output and `e2u` into the meridional
 > one. The wall-normal (meridional) residual this campaign scores therefore
 > sees an **unpaired** Coriolis error, and there is nothing for the metric half
-> to cancel against.
+> to cancel against *in that coefficient*.
+>
+> **Scope it exactly:** "exactly zero" is true of the Coriolis operator and
+> FALSE of the loop. `e1v` still reaches the meridional velocity through the
+> continuity divergence and the ssh-average face depth, and the metric arm's
+> meridional response is 58 % of the baseline residual's amplitude. What is
+> refuted is the *cancellation mechanism*, not the metric's relevance.
 >
 > The three arms were run anyway and confirm it independently: the joint arm is
 > the **sum** of its halves (`joint − sum` ≤ +6.2 points, ≤ +2.9 on every

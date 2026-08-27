@@ -637,11 +637,12 @@ def bridge_nemo_to_legoesm_topo(
             "2*pi/rsiday, which is what this bound was tightened to catch."
         )
     # SEPARATE BOUND, deliberately.  ``f_rtol`` was tightened from 1e-3 to 1e-9
-    # to catch a rotation-rate error in the CORIOLIS check above; it was shared
-    # with this metric check and the dy one below, where 1e-9 is far tighter
-    # than the reconstruction those guards tolerate by design.  Tightening one
-    # guard must not silently re-scope two others, so the metric checks keep
-    # their own bound at the value they were calibrated on.
+    # to catch a rotation-rate error in the CORIOLIS check above, and it was
+    # shared with THIS check (the ``dy_T`` guard below always carried its own
+    # hardcoded 5e-2 and was never affected -- an earlier version of this
+    # comment said "two others", which adversarial review corrected to one).
+    # 1e-9 is far tighter than the reconstruction residual this guard tolerates
+    # by design, so it keeps the bound it was calibrated on.
     _metric_rtol = 1e-3
     dx_err = float(np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)))
     if dx_err > _metric_rtol * float(np.max(np.abs(grid.e1t))):

@@ -100,9 +100,10 @@ class DINOConfig:
     # Earth rotation rate [rad/s], feeds f = 2*omega*sin(lat) at grid
     # construction (create_mercator_grid). Defaults to legoESM's canonical
     # (rounded) value; the NEMO oracle card pins NEMO's own value via
-    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:89, the
-    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday,
-    # matching the key_cice literal to 8 sig figs). legoESM's rounded
+    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:91, the
+    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday --
+    # :89 is the key_cice literal, which DINO does NOT take and which this
+    # preset used to carry). legoESM's rounded
     # constants.Omega is a 4-sig-fig rounding of the SAME physical constant,
     # not a different convention -- global constants.Omega is left alone
     # (125 call sites across atm/ocean/ice, canaried by
