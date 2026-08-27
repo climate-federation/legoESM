@@ -174,3 +174,42 @@ scores and its signed contribution agrees with the total excess in at least
 **DISTRIBUTED_OR_UNRESOLVED**. Also report geometric-mean factors,
 interquartile ranges, and the exact per-column reconstruction control; those
 diagnostics do not alter the registered label.
+
+## Follow-up: single-root energy propagation test
+
+Registered before reading the following ratios. The population is the same
+10.14 m equatorial excess set used above (`avm_L/avm_N > 1.25`, positive,
+wet, non-floor, exact-factorization columns).
+
+The executed NEMO raw buoyancy limb is
+`MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall)))` at
+`cfgs/DINO/MY_SRC/zdftke.F90:757-760`; the DINO `nn_mxl=3` distance-bounding
+sweeps then apply at `:799-812`.
+
+Measurements:
+
+1. Per-column energy ratio `en_L/en_N`. Report geometric mean, median and IQR.
+2. Per-column normalized-length ratio
+   `(mxl_L/sqrt(en_L))/(mxl_N/sqrt(en_N))`.
+3. Active limb on both models. A column is `BUOYANCY_LIMITED` when final mixing
+   length agrees with its raw buoyancy length within `1e-8` relative. It is
+   `DISTANCE_BOUNDED` when final length is smaller by more than `1e-8`; an
+   impossible final length above the raw limb aborts. NEMO's raw limb uses the
+   same-step `tke_dump_en` and `tke_dump_rn2`; legoESM's uses the final captured
+   `en`, `N2`, and the production `mxl_min`.
+
+Verdict bars:
+
+* **CONFIRM_TKE_ENERGY_SINGLE_ROOT** if all hold: geometric-mean `en_L/en_N`
+  is in [2.03, 2.48] (within 10% of 2.256); geometric-mean normalized length
+  is in [0.95, 1.05]; at least 75% of excess columns individually have
+  normalized-length ratio in [0.90, 1.10]; and at least 75% of excess columns
+  are buoyancy-limited in each model.
+* **REFUTE_TKE_ENERGY_SINGLE_ROOT** if the normalized-length geometric mean is
+  outside [0.90, 1.10], or fewer than 50% of excess columns are
+  buoyancy-limited in NEMO.
+* otherwise **UNRESOLVED_TKE_ENERGY_SINGLE_ROOT**.
+
+The limb classification and normalized ratio are required together: equal
+algebraic factors do not establish a single energy root if a distance bound is
+actually active.
