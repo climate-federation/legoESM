@@ -24,6 +24,8 @@
     "bootstrap_retained": 0,
     "bootstrap_dropped": 5000,
     "n_positions": 35,
+    "horizon_degrees_of_freedom": 3,
+    "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
     "n_eff_median": 3.0,
     "n_eff_min": 3.0,
     "by_shift": {
@@ -228,6 +230,8 @@
      "bootstrap_retained": 0,
      "bootstrap_dropped": 5000,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 3.0,
      "n_eff_min": 3.0,
      "by_shift": {
@@ -431,6 +435,8 @@
      "bootstrap_retained": 0,
      "bootstrap_dropped": 5000,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 3.0,
      "n_eff_min": 3.0,
      "by_shift": {
@@ -634,6 +640,8 @@
      "bootstrap_retained": 0,
      "bootstrap_dropped": 5000,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 3.0,
      "n_eff_min": 3.0,
      "by_shift": {
@@ -837,6 +845,8 @@
      "bootstrap_retained": 0,
      "bootstrap_dropped": 5000,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 3.0,
      "n_eff_min": 3.0,
      "by_shift": {
@@ -1060,6 +1070,8 @@
     "bootstrap_retained": 5000,
     "bootstrap_dropped": 0,
     "n_positions": 35,
+    "horizon_degrees_of_freedom": 3,
+    "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
     "n_eff_median": 6.494163854362258,
     "n_eff_min": 4.099112314092428,
     "by_shift": {
@@ -1271,6 +1283,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 6.472908258966993,
      "n_eff_min": 4.100181333270537,
      "by_shift": {
@@ -1481,6 +1495,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 6.154696356607721,
      "n_eff_min": 4.104765622219308,
      "by_shift": {
@@ -1691,6 +1707,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 6.554510378144178,
      "n_eff_min": 4.162094122456386,
      "by_shift": {
@@ -1901,6 +1919,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 6.788688355915454,
      "n_eff_min": 4.056308642539062,
      "by_shift": {
@@ -2128,7 +2148,7 @@
   "nrmse_refute_bar": 0.7
  },
  "wind": {
-  "status": "EXCLUDED_A_PRIORI_TIME_INDEPENDENT",
+  "status": "EXCLUDED_A_PRIORI_ZERO_FORCING_GAP",
   "remaining_drivers": [
    "density_inventory",
    "vertical_stratification",
@@ -2156,15 +2176,19 @@
    "IF( utau(ji,jj) > 0 )   taum(ji,jj) = taum(ji,jj) * 1.3_wp   ! Boost in westerlies for TKE",
    "WRITE(8810) ( ( utau(ji,jj), ji=1,jpi ), jj=1,jpj )"
   ],
-  "reason": "the card's annual-cycle branch recomputes T* and Qsr only; both model wind functions depend on latitude and fixed knots, not time"
+  "stress_time_independent": true,
+  "wind_work_caveat": "time-independent stress does not make tau*u time-independent because velocity evolves",
+  "reason": "the prescribed stress is identical in legoESM and NEMO, so its cross-model forcing gap is identically zero"
  },
  "drivers": {
   "density_inventory": {
-   "status": "REFUTES_PHASE_TRACKING (u)",
+   "status": "NO DETECTED PHASE RELATION \u2014 indistinguishable from random quarter relabelling (u)",
+   "status_code": "NO_DETECTED_PHASE_RELATION (u)",
+   "registered_status": "REFUTES_PHASE_TRACKING (u)",
    "phase": {
-    "status": "REFUTES_PHASE_TRACKING",
+    "status": "NO_DETECTED_PHASE_RELATION",
     "ensemble_mean": {
-     "status": "REFUTES_PHASE_TRACKING",
+     "status": "NO_DETECTED_PHASE_RELATION",
      "correct_phase_score": 0.05761616935561314,
      "correct_phase_signed_r": -0.05761616935561314,
      "correct_phase_oriented_horizon_r": [
@@ -2192,6 +2216,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 9.161664805344058,
      "n_eff_min": 3.3873980537409274,
      "by_shift": {
@@ -2371,11 +2397,12 @@
        "measurable": true,
        "reason": ""
       }
-     }
+     },
+     "registered_status": "REFUTES_PHASE_TRACKING"
     },
     "members": [
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.09529657352962365,
       "correct_phase_signed_r": -0.09529657352962365,
       "correct_phase_oriented_horizon_r": [
@@ -2403,6 +2430,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 10.272450189997398,
       "n_eff_min": 3.3947075691587845,
       "by_shift": {
@@ -2582,10 +2611,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.09597298050271717,
       "correct_phase_signed_r": -0.09597298050271717,
       "correct_phase_oriented_horizon_r": [
@@ -2613,6 +2643,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 9.722889777801889,
       "n_eff_min": 3.3841291442999504,
       "by_shift": {
@@ -2792,10 +2824,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.018976952245114715,
       "correct_phase_signed_r": -0.018976952245114715,
       "correct_phase_oriented_horizon_r": [
@@ -2823,6 +2856,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 8.972289075387433,
       "n_eff_min": 3.4314905272056544,
       "by_shift": {
@@ -3002,10 +3037,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.018440534465613882,
       "correct_phase_signed_r": -0.018440534465613882,
       "correct_phase_oriented_horizon_r": [
@@ -3033,6 +3069,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 7.964856488980108,
       "n_eff_min": 3.3636509972139583,
       "by_shift": {
@@ -3212,17 +3250,26 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      }
     ],
     "member_statuses": [
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION"
+    ],
+    "confirm_rule": "ensemble mean and all 4 members",
+    "refute_rule": "ensemble mean and at least 3 of 4 members",
+    "registered_status": "REFUTES_PHASE_TRACKING",
+    "registered_member_statuses": [
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING"
     ],
-    "confirm_rule": "ensemble mean and all 4 members",
-    "refute_rule": "ensemble mean and at least 3 of 4 members"
+    "reporting_reason": "all advantage intervals straddle zero; with only three seasonal degrees of freedom, entry into the registered low-score arm supports non-detection, not affirmative refutation"
    },
    "saturation": {
     "saturated": 0,
@@ -4963,11 +5010,13 @@
    "weighting": "e1t*e2t*e3t_0 volume"
   },
   "vertical_stratification": {
-   "status": "REFUTES_PHASE_TRACKING (u)",
+   "status": "NO DETECTED PHASE RELATION \u2014 indistinguishable from random quarter relabelling (u)",
+   "status_code": "NO_DETECTED_PHASE_RELATION (u)",
+   "registered_status": "REFUTES_PHASE_TRACKING (u)",
    "phase": {
-    "status": "REFUTES_PHASE_TRACKING",
+    "status": "NO_DETECTED_PHASE_RELATION",
     "ensemble_mean": {
-     "status": "REFUTES_PHASE_TRACKING",
+     "status": "NO_DETECTED_PHASE_RELATION",
      "correct_phase_score": 0.12268273217795025,
      "correct_phase_signed_r": -0.12268273217795025,
      "correct_phase_oriented_horizon_r": [
@@ -4995,6 +5044,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 8.039663835663113,
      "n_eff_min": 3.7108017006637075,
      "by_shift": {
@@ -5174,11 +5225,12 @@
        "measurable": true,
        "reason": ""
       }
-     }
+     },
+     "registered_status": "REFUTES_PHASE_TRACKING"
     },
     "members": [
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.10035806598362854,
       "correct_phase_signed_r": -0.10035806598362854,
       "correct_phase_oriented_horizon_r": [
@@ -5206,6 +5258,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 8.633665780198527,
       "n_eff_min": 3.717537550681174,
       "by_shift": {
@@ -5385,10 +5439,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.10472076661753257,
       "correct_phase_signed_r": -0.10472076661753257,
       "correct_phase_oriented_horizon_r": [
@@ -5416,6 +5471,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 8.225622300373699,
       "n_eff_min": 3.703380185491582,
       "by_shift": {
@@ -5595,10 +5652,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.14021603057816284,
       "correct_phase_signed_r": -0.14021603057816284,
       "correct_phase_oriented_horizon_r": [
@@ -5626,6 +5684,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 7.9061748365510995,
       "n_eff_min": 3.768441677298398,
       "by_shift": {
@@ -5805,10 +5865,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.1363894263860378,
       "correct_phase_signed_r": -0.1363894263860378,
       "correct_phase_oriented_horizon_r": [
@@ -5836,6 +5897,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 7.356223065050239,
       "n_eff_min": 3.6801209009395053,
       "by_shift": {
@@ -6015,17 +6078,26 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      }
     ],
     "member_statuses": [
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION"
+    ],
+    "confirm_rule": "ensemble mean and all 4 members",
+    "refute_rule": "ensemble mean and at least 3 of 4 members",
+    "registered_status": "REFUTES_PHASE_TRACKING",
+    "registered_member_statuses": [
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING"
     ],
-    "confirm_rule": "ensemble mean and all 4 members",
-    "refute_rule": "ensemble mean and at least 3 of 4 members"
+    "reporting_reason": "all advantage intervals straddle zero; with only three seasonal degrees of freedom, entry into the registered low-score arm supports non-detection, not affirmative refutation"
    },
    "saturation": {
     "saturated": 0,
@@ -7766,11 +7838,13 @@
    "weighting": "e1t*e2t*e3t_0 weighted regression"
   },
   "mixed_layer_depth": {
-   "status": "REFUTES_PHASE_TRACKING (u)",
+   "status": "NO DETECTED PHASE RELATION \u2014 indistinguishable from random quarter relabelling (u)",
+   "status_code": "NO_DETECTED_PHASE_RELATION (u)",
+   "registered_status": "REFUTES_PHASE_TRACKING (u)",
    "phase": {
-    "status": "REFUTES_PHASE_TRACKING",
+    "status": "NO_DETECTED_PHASE_RELATION",
     "ensemble_mean": {
-     "status": "REFUTES_PHASE_TRACKING",
+     "status": "NO_DETECTED_PHASE_RELATION",
      "correct_phase_score": 0.060963699995540986,
      "correct_phase_signed_r": -0.060963699995540986,
      "correct_phase_oriented_horizon_r": [
@@ -7798,6 +7872,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 35,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 24.858356008086737,
      "n_eff_min": 11.210658087329831,
      "by_shift": {
@@ -7977,11 +8053,12 @@
        "measurable": true,
        "reason": ""
       }
-     }
+     },
+     "registered_status": "REFUTES_PHASE_TRACKING"
     },
     "members": [
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.07253992334267449,
       "correct_phase_signed_r": -0.07253992334267449,
       "correct_phase_oriented_horizon_r": [
@@ -8009,6 +8086,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 26.532489906795988,
       "n_eff_min": 12.046742629000303,
       "by_shift": {
@@ -8188,10 +8267,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.023967314270246724,
       "correct_phase_signed_r": -0.023967314270246724,
       "correct_phase_oriented_horizon_r": [
@@ -8219,6 +8299,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 22.944787167489146,
       "n_eff_min": 10.223476782223994,
       "by_shift": {
@@ -8398,10 +8480,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.034438018771297034,
       "correct_phase_signed_r": -0.034438018771297034,
       "correct_phase_oriented_horizon_r": [
@@ -8429,6 +8512,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 23.03198026639818,
       "n_eff_min": 11.429749208413561,
       "by_shift": {
@@ -8608,10 +8693,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.12022412239607749,
       "correct_phase_signed_r": -0.12022412239607749,
       "correct_phase_oriented_horizon_r": [
@@ -8639,6 +8725,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 35,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 24.924475000434327,
       "n_eff_min": 12.227174312964324,
       "by_shift": {
@@ -8818,17 +8906,26 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      }
     ],
     "member_statuses": [
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION"
+    ],
+    "confirm_rule": "ensemble mean and all 4 members",
+    "refute_rule": "ensemble mean and at least 3 of 4 members",
+    "registered_status": "REFUTES_PHASE_TRACKING",
+    "registered_member_statuses": [
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING"
     ],
-    "confirm_rule": "ensemble mean and all 4 members",
-    "refute_rule": "ensemble mean and at least 3 of 4 members"
+    "reporting_reason": "all advantage intervals straddle zero; with only three seasonal degrees of freedom, entry into the registered low-score arm supports non-detection, not affirmative refutation"
    },
    "saturation": {
     "saturated": 0,
@@ -10569,11 +10666,13 @@
    "weighting": "e1t*e2t surface area after canonical 0.01/10m MLD"
   },
   "thermal_wind": {
-   "status": "REFUTES_PHASE_TRACKING (u)",
+   "status": "NO DETECTED PHASE RELATION \u2014 indistinguishable from random quarter relabelling (u)",
+   "status_code": "NO_DETECTED_PHASE_RELATION (u)",
+   "registered_status": "REFUTES_PHASE_TRACKING (u)",
    "phase": {
-    "status": "REFUTES_PHASE_TRACKING",
+    "status": "NO_DETECTED_PHASE_RELATION",
     "ensemble_mean": {
-     "status": "REFUTES_PHASE_TRACKING",
+     "status": "NO_DETECTED_PHASE_RELATION",
      "correct_phase_score": 0.04031511435546238,
      "correct_phase_signed_r": -0.04031511435546238,
      "correct_phase_oriented_horizon_r": [
@@ -10601,6 +10700,8 @@
      "bootstrap_retained": 5000,
      "bootstrap_dropped": 0,
      "n_positions": 34,
+     "horizon_degrees_of_freedom": 3,
+     "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
      "n_eff_median": 24.071532872407698,
      "n_eff_min": 4.9801773315294415,
      "by_shift": {
@@ -10780,11 +10881,12 @@
        "measurable": true,
        "reason": ""
       }
-     }
+     },
+     "registered_status": "REFUTES_PHASE_TRACKING"
     },
     "members": [
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.10396855276770349,
       "correct_phase_signed_r": -0.10396855276770349,
       "correct_phase_oriented_horizon_r": [
@@ -10812,6 +10914,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 34,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 26.877367544240826,
       "n_eff_min": 5.187405646759784,
       "by_shift": {
@@ -10991,10 +11095,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.02336056118003644,
       "correct_phase_signed_r": -0.02336056118003644,
       "correct_phase_oriented_horizon_r": [
@@ -11022,6 +11127,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 34,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 18.56909265500851,
       "n_eff_min": 4.86643171563917,
       "by_shift": {
@@ -11201,10 +11308,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.0007240941589529399,
       "correct_phase_signed_r": -0.0007240941589529399,
       "correct_phase_oriented_horizon_r": [
@@ -11232,6 +11340,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 34,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 23.223041582622045,
       "n_eff_min": 4.885858738003084,
       "by_shift": {
@@ -11411,10 +11521,11 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      },
      {
-      "status": "REFUTES_PHASE_TRACKING",
+      "status": "NO_DETECTED_PHASE_RELATION",
       "correct_phase_score": 0.07145687355341544,
       "correct_phase_signed_r": -0.07145687355341544,
       "correct_phase_oriented_horizon_r": [
@@ -11442,6 +11553,8 @@
       "bootstrap_retained": 5000,
       "bootstrap_dropped": 0,
       "n_positions": 34,
+      "horizon_degrees_of_freedom": 3,
+      "fisher_dependency_caveat": "mean removal leaves three seasonal degrees of freedom; the four Fisher entries are dependent",
       "n_eff_median": 23.385608790507362,
       "n_eff_min": 5.0342059598012625,
       "by_shift": {
@@ -11621,17 +11734,26 @@
         "measurable": true,
         "reason": ""
        }
-      }
+      },
+      "registered_status": "REFUTES_PHASE_TRACKING"
      }
     ],
     "member_statuses": [
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION",
+     "NO_DETECTED_PHASE_RELATION"
+    ],
+    "confirm_rule": "ensemble mean and all 4 members",
+    "refute_rule": "ensemble mean and at least 3 of 4 members",
+    "registered_status": "REFUTES_PHASE_TRACKING",
+    "registered_member_statuses": [
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING",
      "REFUTES_PHASE_TRACKING"
     ],
-    "confirm_rule": "ensemble mean and all 4 members",
-    "refute_rule": "ensemble mean and at least 3 of 4 members"
+    "reporting_reason": "all advantage intervals straddle zero; with only three seasonal degrees of freedom, entry into the registered low-score arm supports non-detection, not affirmative refutation"
    },
    "saturation": {
     "saturated": 0,
@@ -15132,6 +15254,38 @@
     ]
    ]
   ],
+  "seasonal_correlation_context": {
+   "ensemble_profile_matrix": [
+    [
+     1.0,
+     0.03950546681309878,
+     -0.6151935688439206,
+     -0.2981421254085947
+    ],
+    [
+     0.03950546681309878,
+     0.9999999999999998,
+     0.6361870546759424,
+     -0.9164500381892163
+    ],
+    [
+     -0.6151935688439206,
+     0.6361870546759424,
+     1.0,
+     -0.5449432025802335
+    ],
+    [
+     -0.2981421254085947,
+     -0.9164500381892166,
+     -0.5449432025802335,
+     1.0
+    ]
+   ],
+   "mean_pairwise_correlation": -0.28317273558882067,
+   "balanced_four_phase_baseline": -0.3333333333333333,
+   "baseline_reason": "four row-wise anomaly fields sum to zero; -1/3 is the balanced equal-energy mean-pairwise baseline",
+   "horizon_degrees_of_freedom": 3
+  },
   "upstream_gap_max_abs_reproduction_residual_sv": 0.0,
   "target_saturation": {
    "saturated_rows": 0,
@@ -15140,11 +15294,696 @@
   },
   "target_label": "CONFIRMED coherent seasonal reorganization; amplitude remains PLAUSIBLE because 0/35 row floors are saturated"
  },
+ "controls": {
+  "status": "PASSED",
+  "plants_fired": 7,
+  "plants": [
+   {
+    "label": "pinned source hash mutation",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "time-dependent wind signature",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "layer average cannot replace volume-weighted density",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "MLD crossing is mobile",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "meridional density perturbation moves thermal wind",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "adjacent rows are not 35 independent rows",
+    "status": "PLANT_FIRED"
+   },
+   {
+    "label": "autocorrelated phase plant cannot claim independent rows",
+    "status": "PLANT_FIRED"
+   }
+  ],
+  "autocorrelated_case_effective_rows": [
+   9.59929025852849,
+   7.193747362534055,
+   3.0,
+   5.915810959350188
+  ],
+  "iid_confirm_plant_retracted": true,
+  "confirm_sensitivity_claim": "deferred to full autocorrelated power sweep",
+  "autocorrelated_power": {
+   "status": "MEASURED",
+   "definition": "lowest planted rho confirming in all six realizations",
+   "detectable_effect_floor_rho": 0.9,
+   "detectable_effect_floor_label": "rho >= 0.9",
+   "phi": 0.85,
+   "workers": 8,
+   "bootstrap_draws_per_realization": 5000,
+   "horizon_degrees_of_freedom": 3,
+   "sweep": [
+    {
+     "rho": 0.6,
+     "confirmed": 0,
+     "realizations": 6,
+     "matched_score_range": [
+      0.28632116914324635,
+      0.5634605558087108
+     ],
+     "minimum_effective_rows_range": [
+      3.140137368076236,
+      9.093010954482024
+     ],
+     "outcomes": [
+      {
+       "rho": 0.6,
+       "source_seed": 1455,
+       "decision_seed": 1826,
+       "status": "REFUTES_PHASE_TRACKING",
+       "matched_score": 0.28632116914324635,
+       "best_null_score": 0.1707664014104221,
+       "delta_block_ci": [
+        -0.10830152025439625,
+        0.3482095997723387
+       ],
+       "n_eff_median": 10.535265345403271,
+       "n_eff_min": 7.86184776783232,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.6,
+       "source_seed": 1456,
+       "decision_seed": 1926,
+       "status": "UNRESOLVED",
+       "matched_score": 0.5423595778410099,
+       "best_null_score": 0.4834348678944028,
+       "delta_block_ci": [
+        -0.0683905748322712,
+        0.2804664503031164
+       ],
+       "n_eff_median": 5.431983056305184,
+       "n_eff_min": 3.526315510297376,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.6,
+       "source_seed": 1457,
+       "decision_seed": 2026,
+       "status": "UNRESOLVED",
+       "matched_score": 0.5522704717985109,
+       "best_null_score": 0.2792492928185785,
+       "delta_block_ci": [
+        0.01729309136114167,
+        0.4941352126716906
+       ],
+       "n_eff_median": 14.816609492092423,
+       "n_eff_min": 7.7518696273349565,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.6,
+       "source_seed": 1458,
+       "decision_seed": 2126,
+       "status": "UNRESOLVED",
+       "matched_score": 0.5549033623712999,
+       "best_null_score": 0.25205774799107467,
+       "delta_block_ci": [
+        0.041790201716410465,
+        0.45570920845867974
+       ],
+       "n_eff_median": 11.842065055155988,
+       "n_eff_min": 3.140137368076236,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.6,
+       "source_seed": 1459,
+       "decision_seed": 2226,
+       "status": "UNRESOLVED",
+       "matched_score": 0.5634605558087108,
+       "best_null_score": 0.45374080046189386,
+       "delta_block_ci": [
+        -0.0513242658311165,
+        0.337540798514595
+       ],
+       "n_eff_median": 9.144913770953039,
+       "n_eff_min": 3.8625697187228045,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.6,
+       "source_seed": 1460,
+       "decision_seed": 2326,
+       "status": "UNRESOLVED",
+       "matched_score": 0.3478359566753994,
+       "best_null_score": 0.10368908464036,
+       "delta_block_ci": [
+        -0.18856597753310703,
+        0.31294219051197397
+       ],
+       "n_eff_median": 18.764643556862325,
+       "n_eff_min": 9.093010954482024,
+       "bootstrap_retained": 5000
+      }
+     ]
+    },
+    {
+     "rho": 0.75,
+     "confirmed": 4,
+     "realizations": 6,
+     "matched_score_range": [
+      0.47652408332163176,
+      0.7375341206107725
+     ],
+     "minimum_effective_rows_range": [
+      3.0,
+      6.911775997128404
+     ],
+     "outcomes": [
+      {
+       "rho": 0.75,
+       "source_seed": 1455,
+       "decision_seed": 1976,
+       "status": "UNRESOLVED",
+       "matched_score": 0.47652408332163176,
+       "best_null_score": 0.17862212161416435,
+       "delta_block_ci": [
+        0.07714011765584773,
+        0.4703074581842637
+       ],
+       "n_eff_median": 7.681150278679958,
+       "n_eff_min": 5.741352918929455,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.75,
+       "source_seed": 1456,
+       "decision_seed": 2076,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.7062382032827931,
+       "best_null_score": 0.5905657781647542,
+       "delta_block_ci": [
+        0.029257596323809757,
+        0.3730232551163212
+       ],
+       "n_eff_median": 4.14548989313615,
+       "n_eff_min": 3.417436518228981,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.75,
+       "source_seed": 1457,
+       "decision_seed": 2176,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.7093736791242679,
+       "best_null_score": 0.3656762427551344,
+       "delta_block_ci": [
+        0.11814467789031949,
+        0.5848578894440343
+       ],
+       "n_eff_median": 12.200732000761976,
+       "n_eff_min": 6.911775997128404,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.75,
+       "source_seed": 1458,
+       "decision_seed": 2276,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.7328136570576568,
+       "best_null_score": 0.30532658336405205,
+       "delta_block_ci": [
+        0.14979664351149552,
+        0.5979423998133166
+       ],
+       "n_eff_median": 8.9507397213569,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.75,
+       "source_seed": 1459,
+       "decision_seed": 2376,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.7375341206107725,
+       "best_null_score": 0.5029941620292369,
+       "delta_block_ci": [
+        0.10248070129360261,
+        0.47537372384176524
+       ],
+       "n_eff_median": 8.728509705438466,
+       "n_eff_min": 3.8418163854276766,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.75,
+       "source_seed": 1460,
+       "decision_seed": 2476,
+       "status": "UNRESOLVED",
+       "matched_score": 0.5799891907057876,
+       "best_null_score": 0.18874346250204524,
+       "delta_block_ci": [
+        0.004275652068526147,
+        0.4893695579120494
+       ],
+       "n_eff_median": 10.066837541852827,
+       "n_eff_min": 6.889975397838845,
+       "bootstrap_retained": 5000
+      }
+     ]
+    },
+    {
+     "rho": 0.9,
+     "confirmed": 6,
+     "realizations": 6,
+     "matched_score_range": [
+      0.7960520245075094,
+      0.8974321410541066
+     ],
+     "minimum_effective_rows_range": [
+      3.0,
+      6.251502238802042
+     ],
+     "outcomes": [
+      {
+       "rho": 0.9,
+       "source_seed": 1455,
+       "decision_seed": 2126,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.7960520245075094,
+       "best_null_score": 0.3192770255748202,
+       "delta_block_ci": [
+        0.29724775313031265,
+        0.6607918015198319
+       ],
+       "n_eff_median": 6.830307804585348,
+       "n_eff_min": 3.478190136789036,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.9,
+       "source_seed": 1456,
+       "decision_seed": 2226,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.8826703772449612,
+       "best_null_score": 0.6885475802466291,
+       "delta_block_ci": [
+        0.1360643523469861,
+        0.45284031048964896
+       ],
+       "n_eff_median": 3.3906604653162256,
+       "n_eff_min": 3.2912842544751406,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.9,
+       "source_seed": 1457,
+       "decision_seed": 2326,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.8826325751360593,
+       "best_null_score": 0.4842658666841026,
+       "delta_block_ci": [
+        0.21073688795737747,
+        0.6833880473741374
+       ],
+       "n_eff_median": 9.543431933190298,
+       "n_eff_min": 6.251502238802042,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.9,
+       "source_seed": 1458,
+       "decision_seed": 2426,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.8967227147195114,
+       "best_null_score": 0.3621386918655352,
+       "delta_block_ci": [
+        0.21601704188163534,
+        0.7391079373582112
+       ],
+       "n_eff_median": 6.061715558085359,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.9,
+       "source_seed": 1459,
+       "decision_seed": 2526,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.8974321410541066,
+       "best_null_score": 0.541295286540879,
+       "delta_block_ci": [
+        0.22443597945595642,
+        0.6151701365179463
+       ],
+       "n_eff_median": 7.31608456899494,
+       "n_eff_min": 3.798478977392571,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.9,
+       "source_seed": 1460,
+       "decision_seed": 2626,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.8333599633855525,
+       "best_null_score": 0.32028698413411466,
+       "delta_block_ci": [
+        0.2578254899059753,
+        0.6778375662524901
+       ],
+       "n_eff_median": 5.810594499098479,
+       "n_eff_min": 5.061258617161452,
+       "bootstrap_retained": 5000
+      }
+     ]
+    },
+    {
+     "rho": 0.95,
+     "confirmed": 6,
+     "realizations": 6,
+     "matched_score_range": [
+      0.9111062675240552,
+      0.9487009960919692
+     ],
+     "minimum_effective_rows_range": [
+      3.0,
+      6.0592469267284255
+     ],
+     "outcomes": [
+      {
+       "rho": 0.95,
+       "source_seed": 1455,
+       "decision_seed": 2176,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9111062675240552,
+       "best_null_score": 0.39117909602155293,
+       "delta_block_ci": [
+        0.3244932985736241,
+        0.7386398531650346
+       ],
+       "n_eff_median": 6.640965560105329,
+       "n_eff_min": 3.130811567696099,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.95,
+       "source_seed": 1456,
+       "decision_seed": 2276,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9418784881187576,
+       "best_null_score": 0.7135140269963921,
+       "delta_block_ci": [
+        0.1421013323359859,
+        0.49911090141805564
+       ],
+       "n_eff_median": 3.2977427495844305,
+       "n_eff_min": 3.0809268004303036,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.95,
+       "source_seed": 1457,
+       "decision_seed": 2376,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9420628353462803,
+       "best_null_score": 0.5268476003575435,
+       "delta_block_ci": [
+        0.24030560591224703,
+        0.7039930993206883
+       ],
+       "n_eff_median": 8.81994556970724,
+       "n_eff_min": 6.0592469267284255,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.95,
+       "source_seed": 1458,
+       "decision_seed": 2476,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9476162278883365,
+       "best_null_score": 0.3843687819791632,
+       "delta_block_ci": [
+        0.2385919574424888,
+        0.7838243552128162
+       ],
+       "n_eff_median": 5.298788234285141,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.95,
+       "source_seed": 1459,
+       "decision_seed": 2576,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9487009960919692,
+       "best_null_score": 0.5483964393049122,
+       "delta_block_ci": [
+        0.2771417803557386,
+        0.6551642901265243
+       ],
+       "n_eff_median": 6.959920427233689,
+       "n_eff_min": 3.776647066059038,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.95,
+       "source_seed": 1460,
+       "decision_seed": 2676,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9197529309255713,
+       "best_null_score": 0.37059019153069483,
+       "delta_block_ci": [
+        0.3317756200978494,
+        0.7608208093208735
+       ],
+       "n_eff_median": 5.091785782123814,
+       "n_eff_min": 4.543677994392815,
+       "bootstrap_retained": 5000
+      }
+     ]
+    },
+    {
+     "rho": 0.975,
+     "confirmed": 6,
+     "realizations": 6,
+     "matched_score_range": [
+      0.9587961310639693,
+      0.9743013548548901
+     ],
+     "minimum_effective_rows_range": [
+      3.0,
+      5.971064945065524
+     ],
+     "outcomes": [
+      {
+       "rho": 0.975,
+       "source_seed": 1455,
+       "decision_seed": 2201,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9587961310639693,
+       "best_null_score": 0.4331649950071861,
+       "delta_block_ci": [
+        0.32909200012554973,
+        0.7795439814002121
+       ],
+       "n_eff_median": 6.570700872488639,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.975,
+       "source_seed": 1456,
+       "decision_seed": 2301,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9714681013686707,
+       "best_null_score": 0.7212699822681367,
+       "delta_block_ci": [
+        0.14706976450055528,
+        0.5257017268975832
+       ],
+       "n_eff_median": 3.266274445908216,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.975,
+       "source_seed": 1457,
+       "decision_seed": 2401,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.971452441315295,
+       "best_null_score": 0.5491886668541082,
+       "delta_block_ci": [
+        0.25517212948435053,
+        0.7396522832383928
+       ],
+       "n_eff_median": 8.510594187518361,
+       "n_eff_min": 5.971064945065524,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.975,
+       "source_seed": 1458,
+       "decision_seed": 2501,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9732168460244394,
+       "best_null_score": 0.39803728939912847,
+       "delta_block_ci": [
+        0.2440969873036303,
+        0.8102470486928326
+       ],
+       "n_eff_median": 4.939521319045925,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.975,
+       "source_seed": 1459,
+       "decision_seed": 2601,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9743013548548901,
+       "best_null_score": 0.5483717609113048,
+       "delta_block_ci": [
+        0.2925823304421926,
+        0.6936870223441496
+       ],
+       "n_eff_median": 6.7945985957638735,
+       "n_eff_min": 3.763776876400098,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.975,
+       "source_seed": 1460,
+       "decision_seed": 2701,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9612983752956253,
+       "best_null_score": 0.40581410294922976,
+       "delta_block_ci": [
+        0.3636594728899957,
+        0.8039889742008112
+       ],
+       "n_eff_median": 4.763768494643978,
+       "n_eff_min": 4.436735878304576,
+       "bootstrap_retained": 5000
+      }
+     ]
+    },
+    {
+     "rho": 0.99,
+     "confirmed": 6,
+     "realizations": 6,
+     "matched_score_range": [
+      0.9843742871080727,
+      0.9897031360871581
+     ],
+     "minimum_effective_rows_range": [
+      3.0,
+      5.926717822542503
+     ],
+     "outcomes": [
+      {
+       "rho": 0.99,
+       "source_seed": 1455,
+       "decision_seed": 2216,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9843742871080727,
+       "best_null_score": 0.4415232907908417,
+       "delta_block_ci": [
+        0.31357044178522875,
+        0.8115832096861952
+       ],
+       "n_eff_median": 6.554779160942122,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.99,
+       "source_seed": 1456,
+       "decision_seed": 2316,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9889222404744077,
+       "best_null_score": 0.7216622791974644,
+       "delta_block_ci": [
+        0.1458506270105197,
+        0.5605265956267539
+       ],
+       "n_eff_median": 3.25712404982601,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.99,
+       "source_seed": 1457,
+       "decision_seed": 2416,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.988727403096281,
+       "best_null_score": 0.5629762035498335,
+       "delta_block_ci": [
+        0.2586521151478133,
+        0.7526166990670453
+       ],
+       "n_eff_median": 8.152429910473508,
+       "n_eff_min": 5.926717822542503,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.99,
+       "source_seed": 1458,
+       "decision_seed": 2516,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9890043060329708,
+       "best_null_score": 0.4052604282168857,
+       "delta_block_ci": [
+        0.23791915140193298,
+        0.8314173391319313
+       ],
+       "n_eff_median": 4.690997268070211,
+       "n_eff_min": 3.0,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.99,
+       "source_seed": 1459,
+       "decision_seed": 2616,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9897031360871581,
+       "best_null_score": 0.5446394784316614,
+       "delta_block_ci": [
+        0.304078908423359,
+        0.7018928709225013
+       ],
+       "n_eff_median": 6.690064342393148,
+       "n_eff_min": 3.7554647015356135,
+       "bootstrap_retained": 5000
+      },
+      {
+       "rho": 0.99,
+       "source_seed": 1460,
+       "decision_seed": 2716,
+       "status": "CONFIRMS_PHASE_TRACKING",
+       "matched_score": 0.9850818384997132,
+       "best_null_score": 0.43042881526690563,
+       "delta_block_ci": [
+        0.3655054316166024,
+        0.8392340305849706
+       ],
+       "n_eff_median": 4.578205727771535,
+       "n_eff_min": 4.439175913777497,
+       "bootstrap_retained": 5000
+      }
+     ]
+    }
+   ],
+   "original_iid_confirm_plant_retracted": true
+  }
+ },
  "_stamp": {
-  "producer_sha": "e9f0574af7480163fb160faa726f9a0e4cc8797c",
+  "producer_sha": "738c2c23d005aa38586b37810ee02d64fe6385a9",
   "producer_tree_dirty": false,
   "probe": "channel_seasonal.py",
-  "prereg": "PREREG_channel_seasonal.md@76622ff2f",
+  "prereg": "PREREG_channel_seasonal.md@76622ff2f; post-review-amendment@fc36d3099",
   "horizons": [
    90,
    180,
@@ -15222,12 +16061,23 @@
    "N_BOOT": 5000,
    "BOOT_SEED": 1226,
    "N_DRIVER_LEGS": 4,
-   "familywise_confidence": 0.9875
+   "familywise_confidence": 0.9875,
+   "seasonal_horizon_degrees_of_freedom": 3
   },
   "weighting": "thickness/volume weighted throughout; no layer average",
   "wind_excluded_before_driver_scoring": true,
   "post_run_corrections": [
-   "the first clean run aborted before scoring because a relation had zero Fisher weight at N_eff=3; the engine now emits UNRESOLVED_EFFECTIVE_N for that registered no-information case"
-  ]
+   "the first clean run aborted before scoring because a relation had zero Fisher weight at N_eff=3; the engine now emits UNRESOLVED_EFFECTIVE_N for that registered no-information case",
+   "post-review amendment fc36d3099 retracts the iid confirm plant, adds an autocorrelated power sweep, and relabels driver low-score outcomes as no detected relation"
+  ],
+  "reviewer_measured_pushback": {
+   "rho_0.90_confirmations": "0/6",
+   "rho_0.95_confirmations": "2/6",
+   "rho_0.60_matched_score_range": [
+    0.49,
+    0.68
+   ],
+   "source": "adversarial review fix_list.md"
+  }
  }
 }
