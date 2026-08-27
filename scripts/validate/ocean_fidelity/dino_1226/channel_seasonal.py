@@ -15,6 +15,7 @@ import concurrent.futures
 import hashlib
 import inspect
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -439,7 +440,9 @@ def autocorrelated_power_plant(*, n_boot=N_BOOT):
         for i, source_seed in enumerate(POWER_SEEDS)
     ]
     workers = min(8, len(jobs), os.cpu_count() or 1)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+    context = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers, mp_context=context) as pool:
         measured = list(pool.map(_power_realization, jobs))
     sweep = []
     detectable = None
