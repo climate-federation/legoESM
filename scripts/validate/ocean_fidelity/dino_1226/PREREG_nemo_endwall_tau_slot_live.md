@@ -65,6 +65,8 @@ SLOT_ROOT=/tmp/nemo-tau-slot-eaef2a1e1
 test ! -e "$SLOT_ROOT"
 git clone --shared /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 "$SLOT_ROOT"
 mkdir -p "$SLOT_ROOT/cfgs/DINO"
+cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/work_cfgs.txt \
+  "$SLOT_ROOT/cfgs/"
 cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/cpp_DINO.fcm \
   "$SLOT_ROOT/cfgs/DINO/"
 cp -a /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC \
@@ -117,3 +119,11 @@ status. Then, from the legoESM checkout:
 
 STOP after printing the classification. A later wind-placement/eta run may
 cite `CONFIRMED_SLOT_WIRED`; it may not reinterpret any other classification.
+
+## Refused execution audit
+
+The first temporary-clone build produced no executable or measurement.
+`makenemo -n DINO` stopped because the Git clone did not contain the oracle's
+untracked `cfgs/work_cfgs.txt`, so DINO was absent from the work-configuration
+registry. The copy step above was added and committed before retrying. No
+classification or threshold changed.
