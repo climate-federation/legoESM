@@ -402,7 +402,41 @@ line". Season and elapsed time are degenerate in a single year.
 
 ### #1 — The Coriolis PAIR. Fix both halves together, never one.
 
-**This is the ranked-first successor and it is not started.**
+> **RETRACTED 2026-08-26 — THIS ITEM'S CENTRAL PREMISE IS FALSE IN THE CHANNEL
+> IT REGISTERS.** The claim below that the two errors "enter the same EEN
+> rotation coefficient `e1v · f`" and "partially cancel" is true in the
+> **zonal** tendency and false in the **meridional** one. Measured on the
+> operator: perturbing `e1v` by +1 % moves the zonal tendency by 1.431e-06 and
+> the meridional tendency by **exactly 0.000e+00** — the metric-complete EEN
+> operator carries `e1v` into the zonal output and `e2u` into the meridional
+> one. The wall-normal (meridional) residual this campaign scores therefore
+> sees an **unpaired** Coriolis error, and there is nothing for the metric half
+> to cancel against.
+>
+> The three arms were run anyway and confirm it independently: the joint arm is
+> the **sum** of its halves (`joint − sum` ≤ +6.2 points, ≤ +2.9 on every
+> reduction but one), where a cancelling pair predicts it to exceed the sum.
+> The two halves own **disjoint bands** — the metric owns the northern lobe
+> (61.7 % against the Coriolis half's −1.5 %), the Coriolis owns both interior
+> bands (32.1 % / 25.8 % against the metric half's −3.7 % / −2.8 %).
+>
+> Registered verdict on the joint arm: **PARTIAL** (basin 32.3 %, lobe 61.8 %,
+> OWNER bar 50 % on both). The staggering control fires at +12 340 %. The
+> 90-day gate was **not** run, per the registered condition.
+>
+> **A separate finding in this item stands and was material:** the twin's
+> geometry really was built on legoESM's rounded rotation rate while the config
+> carried the card's pin — but the split is **config versus geometry**, not
+> "card versus global constant", and the card's own pin cited NEMO's `key_cice`
+> branch when DINO takes the sidereal one. Both are fixed. One rotation rate now
+> reaches every site, bit-identical to the rate recovered from NEMO's own `ff_f`.
+>
+> Full account, with the operator measurement and the arm tables:
+> **`dino_coriolis_pair_result.md`**. Everything below is the superseded
+> framing, kept because the numbers in it are still the measured gaps.
+
+**This is the ranked-first successor and it is not started.** *(Superseded: it
+was run. See the retraction above.)*
 
 legoESM builds the Coriolis parameter at the vertex as the **average of the two
 adjacent tracer-row values**; NEMO evaluates it at **its own f-point latitude**.
