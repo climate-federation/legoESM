@@ -55,7 +55,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "5b9ac54f711fcb2211653e22b4a86b05f6337e84"
+PREREG_COMMIT = "e16948c8af39a280f85352e93328541e7d3e8603"
 
 
 def _git(args: list[str]) -> str:
@@ -134,10 +134,16 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     ocmod.barotropic_substeps_latlon_cgrid = spy_baro
     LatLonCGridOceanModel._apply_implicit_vertical_mixing = spy_vmix
     pemod.surface_stress_faces = spy_stress
+    if state.tau_x_prev is None or state.tau_y_prev is None:
+        raise SystemExit("centred wind arm requires the bridged previous stress")
+    state_scaled = state._replace(
+        tau_x_prev=jnp.asarray(state.tau_x_prev) * scale,
+        tau_y_prev=jnp.asarray(state.tau_y_prev) * scale,
+    )
     try:
         with jax.disable_jit():
             model.step(
-                state, DT,
+                state_scaled, DT,
                 surface_forcing=_scaled_surface_forcing(sf, scale),
                 external_tracer_rate=external_rate,
             )
