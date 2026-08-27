@@ -67,7 +67,8 @@ def test_single_root_requires_buoyancy_limb_and_normalized_length_closure():
     lego_avm = 0.1 * lego_mxl * np.sqrt(lego_en)
     got = E.single_root_energy_test(
         lego_avm, nemo_avm, lego_en, nemo_en, lego_mxl, nemo_mxl,
-        n2, n2, np.ones(4, dtype=bool), lego_mxl_min=1e-6)
+        n2, n2, np.ones(4, dtype=bool), lego_mxl_min=1e-6,
+        floor_lego=1e-4, floor_nemo=1e-4)
     assert got["verdict"] == "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
     assert got["normalized_mxl_over_sqrt_en_ratio"]["geometric_mean"] == pytest.approx(1.0)
     assert got["active_limb"]["nemo_buoyancy_limited_fraction"] == 1.0

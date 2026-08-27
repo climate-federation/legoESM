@@ -224,7 +224,8 @@ def single_root_energy_test(
         lego_en: np.ndarray, nemo_en: np.ndarray,
         lego_mxl: np.ndarray, nemo_mxl: np.ndarray,
         lego_n2: np.ndarray, nemo_n2: np.ndarray, wet: np.ndarray,
-        *, lego_mxl_min: float, nemo_mxl_min: float = 1.0e-6) -> dict[str, Any]:
+        *, lego_mxl_min: float, floor_lego: float, floor_nemo: float,
+        nemo_mxl_min: float = 1.0e-6) -> dict[str, Any]:
     """Preregistered test of whether the length excess is algebraic TKE carry."""
     arrays = (lego_avm, nemo_avm, lego_en, nemo_en, lego_mxl, nemo_mxl,
               lego_n2, nemo_n2)
@@ -232,6 +233,8 @@ def single_root_energy_test(
     for a in arrays:
         valid &= np.isfinite(a)
     valid &= (lego_en > 0) & (nemo_en > 0) & (lego_mxl > 0) & (nemo_mxl > 0)
+    valid &= (lego_avm > floor_lego * (1.0 + 1e-12)) \
+             & (nemo_avm > floor_nemo * (1.0 + 1e-12))
     excess = valid & (lego_avm / nemo_avm > 1.25)
     if not np.any(excess):
         raise ValueError("single-root test has no excess columns")
@@ -508,7 +511,8 @@ def main() -> int:
         component_final["e"][equator_row, :, 0], en_nemo[equator_row, :, 1],
         component_final["l_k"][equator_row, :, 0], mxl_nemo[equator_row, :, 1],
         component_final["N2"][equator_row, :, 0], rn2_nemo[equator_row, :, 1],
-        wet[:, 0], lego_mxl_min=component_final["mxl_min"])
+        wet[:, 0], lego_mxl_min=component_final["mxl_min"],
+        floor_lego=component_final["floor"], floor_nemo=1.2e-4)
     single_root["depth_m"] = float(z[0])
     single_root["next_target"] = {
         "name": "TKE-equation term decomposition",
