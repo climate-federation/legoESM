@@ -18,6 +18,545 @@
     "row_zero_based": 99,
     "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"
   },
+  "faithful_surface_floor_fix": {
+    "columns_energy_moved_toward_nemo_fraction": 1.0,
+    "configuration_reachability": {
+      "behavior_change": "Only nemo_dino_kamm and inherited nemo_dino_kamm_mlf ship nemo_z0. Generic programmatic/audit overrides selecting nemo_z0 also receive the corrected interior floor. All other shipped cards remain interior_pinned and byte-pinned.",
+      "resolved_cards": {
+        "legoesm_default": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "kpp"
+        },
+        "mitgcm": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "kpp"
+        },
+        "nemo_dino_kamm": {
+          "tke_surface_bc_level": "nemo_z0",
+          "vmix_scheme": "tke"
+        },
+        "nemo_dino_kamm_mlf": {
+          "tke_surface_bc_level": "nemo_z0",
+          "vmix_scheme": "tke"
+        },
+        "nemo_paper": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "tke"
+        },
+        "oceananigans": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "catke"
+        },
+        "veros": {
+          "tke_surface_bc_level": "interior_pinned",
+          "vmix_scheme": "tke"
+        }
+      },
+      "shipped_nemo_z0_cards": [
+        "nemo_dino_kamm",
+        "nemo_dino_kamm_mlf"
+      ]
+    },
+    "depth_m": 10.13875112538517,
+    "energy_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.054275004129711,
+      "iqr": [
+        1.0348545881944946,
+        1.0569215364364002
+      ],
+      "max": 1.1722186616315895,
+      "median": 1.0417783653443824,
+      "min": 1.024404728244825
+    },
+    "expected_replay_energy_ratio": 1.054275004129711,
+    "fix_commit": "d86d97d496463b9317764426573af958fe5f20b9",
+    "legacy_energy_ratio_reconstruction": 2.2556351135780925,
+    "mixing_length_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.0267789447030766,
+      "iqr": [
+        1.0172780319051424,
+        1.0280665216422582
+      ],
+      "max": 1.0826904712693655,
+      "median": 1.0206754440334969,
+      "min": 1.0121288085924474
+    },
+    "momentum_viscosity_ratio_fixed_over_nemo": {
+      "geometric_mean": 1.0542750027076373,
+      "iqr": [
+        1.034854591277218,
+        1.056921530603507
+      ],
+      "max": 1.1722186591045354,
+      "median": 1.041778363698679,
+      "min": 1.024404726713796
+    },
+    "n_columns": 47,
+    "per_column": [
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1722186591045354,
+        "fixed_en_over_nemo": 1.1722186616315895,
+        "fixed_mxl_over_nemo": 1.0826904712693655,
+        "legacy_en_over_nemo": 3.552439122097292,
+        "longitude_deg": 2.5,
+        "x_index_zero_based": 3
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1369060989589088,
+        "fixed_en_over_nemo": 1.1369061027072223,
+        "fixed_mxl_over_nemo": 1.0662579871731772,
+        "legacy_en_over_nemo": 3.1899441801573913,
+        "longitude_deg": 3.5,
+        "x_index_zero_based": 4
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1338761799155055,
+        "fixed_en_over_nemo": 1.1338761847305463,
+        "fixed_mxl_over_nemo": 1.0648362198481345,
+        "legacy_en_over_nemo": 2.305932650626343,
+        "longitude_deg": 4.5,
+        "x_index_zero_based": 5
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1210422426353344,
+        "fixed_en_over_nemo": 1.1210422474036141,
+        "fixed_mxl_over_nemo": 1.058792821031128,
+        "legacy_en_over_nemo": 2.089613225672512,
+        "longitude_deg": 5.5,
+        "x_index_zero_based": 6
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.1065059076440613,
+        "fixed_en_over_nemo": 1.106505912934628,
+        "fixed_mxl_over_nemo": 1.0519058429125179,
+        "legacy_en_over_nemo": 2.0506105895290703,
+        "longitude_deg": 6.5,
+        "x_index_zero_based": 7
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0933188882858944,
+        "fixed_en_over_nemo": 1.0933188937453673,
+        "fixed_mxl_over_nemo": 1.0456188994210183,
+        "legacy_en_over_nemo": 2.1007843038166025,
+        "longitude_deg": 7.5,
+        "x_index_zero_based": 8
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0840180513479423,
+        "fixed_en_over_nemo": 1.0840180564929893,
+        "fixed_mxl_over_nemo": 1.0411618731988292,
+        "legacy_en_over_nemo": 2.1190271333876813,
+        "longitude_deg": 8.5,
+        "x_index_zero_based": 9
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0772522049904503,
+        "fixed_en_over_nemo": 1.0772522097814126,
+        "fixed_mxl_over_nemo": 1.0379076067740753,
+        "legacy_en_over_nemo": 2.1390830045069347,
+        "longitude_deg": 9.5,
+        "x_index_zero_based": 10
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0716549500507895,
+        "fixed_en_over_nemo": 1.0716549546550302,
+        "fixed_mxl_over_nemo": 1.0352076822775944,
+        "legacy_en_over_nemo": 2.1611524072976738,
+        "longitude_deg": 10.5,
+        "x_index_zero_based": 11
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0667964568910149,
+        "fixed_en_over_nemo": 1.0667964616271066,
+        "fixed_mxl_over_nemo": 1.032858389206828,
+        "legacy_en_over_nemo": 2.1882814009897293,
+        "longitude_deg": 11.5,
+        "x_index_zero_based": 12
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0624762008699284,
+        "fixed_en_over_nemo": 1.06247620602427,
+        "fixed_mxl_over_nemo": 1.0307648595657435,
+        "legacy_en_over_nemo": 2.222262656993156,
+        "longitude_deg": 12.5,
+        "x_index_zero_based": 13
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0587043874578228,
+        "fixed_en_over_nemo": 1.0587043930804496,
+        "fixed_mxl_over_nemo": 1.0289336139106333,
+        "legacy_en_over_nemo": 2.2386312825525954,
+        "longitude_deg": 13.5,
+        "x_index_zero_based": 14
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.055138673749191,
+        "fixed_en_over_nemo": 1.0551386797923508,
+        "fixed_mxl_over_nemo": 1.0271994293738833,
+        "legacy_en_over_nemo": 2.2300788988119105,
+        "longitude_deg": 14.5,
+        "x_index_zero_based": 15
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0515219585714148,
+        "fixed_en_over_nemo": 1.0515219648312544,
+        "fixed_mxl_over_nemo": 1.025437444367805,
+        "legacy_en_over_nemo": 2.2141384077445694,
+        "longitude_deg": 15.5,
+        "x_index_zero_based": 16
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0486497158225978,
+        "fixed_en_over_nemo": 1.048649721976743,
+        "fixed_mxl_over_nemo": 1.0240359904165734,
+        "legacy_en_over_nemo": 2.2167394078666893,
+        "longitude_deg": 16.5,
+        "x_index_zero_based": 17
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0482224730995666,
+        "fixed_en_over_nemo": 1.048222478771113,
+        "fixed_mxl_over_nemo": 1.0238273621211833,
+        "legacy_en_over_nemo": 2.148210587810033,
+        "longitude_deg": 17.5,
+        "x_index_zero_based": 18
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0486868654066819,
+        "fixed_en_over_nemo": 1.0486868702594694,
+        "fixed_mxl_over_nemo": 1.0240541296991554,
+        "legacy_en_over_nemo": 2.0934636588109,
+        "longitude_deg": 18.5,
+        "x_index_zero_based": 19
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0480148782994188,
+        "fixed_en_over_nemo": 1.0480148822439743,
+        "fixed_mxl_over_nemo": 1.0237259762040147,
+        "legacy_en_over_nemo": 2.110333892179083,
+        "longitude_deg": 19.5,
+        "x_index_zero_based": 20
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0472175390138017,
+        "fixed_en_over_nemo": 1.0472175421640537,
+        "fixed_mxl_over_nemo": 1.0233364724583744,
+        "legacy_en_over_nemo": 2.1001651389902265,
+        "longitude_deg": 20.5,
+        "x_index_zero_based": 21
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0463260105027155,
+        "fixed_en_over_nemo": 1.0463260130548444,
+        "fixed_mxl_over_nemo": 1.0229007810880713,
+        "legacy_en_over_nemo": 2.1071281859299007,
+        "longitude_deg": 21.5,
+        "x_index_zero_based": 22
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0453616676644746,
+        "fixed_en_over_nemo": 1.045361669857604,
+        "fixed_mxl_over_nemo": 1.0224292960744745,
+        "legacy_en_over_nemo": 2.1106934974456064,
+        "longitude_deg": 22.5,
+        "x_index_zero_based": 23
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0444137070943025,
+        "fixed_en_over_nemo": 1.0444137091183454,
+        "fixed_mxl_over_nemo": 1.0219656085555224,
+        "legacy_en_over_nemo": 2.103548918358442,
+        "longitude_deg": 23.5,
+        "x_index_zero_based": 24
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0432726848458922,
+        "fixed_en_over_nemo": 1.0432726867500397,
+        "fixed_mxl_over_nemo": 1.0214072072105935,
+        "legacy_en_over_nemo": 2.0822824985582473,
+        "longitude_deg": 24.5,
+        "x_index_zero_based": 25
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.041778363698679,
+        "fixed_en_over_nemo": 1.0417783653443824,
+        "fixed_mxl_over_nemo": 1.0206754440334969,
+        "legacy_en_over_nemo": 2.064809018488128,
+        "longitude_deg": 25.5,
+        "x_index_zero_based": 26
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0405668927694496,
+        "fixed_en_over_nemo": 1.0405668939091652,
+        "fixed_mxl_over_nemo": 1.0200818063418904,
+        "legacy_en_over_nemo": 2.0639680538341296,
+        "longitude_deg": 26.5,
+        "x_index_zero_based": 27
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0403407538375984,
+        "fixed_en_over_nemo": 1.040340754209325,
+        "fixed_mxl_over_nemo": 1.019970957167836,
+        "legacy_en_over_nemo": 2.037311469817539,
+        "longitude_deg": 27.5,
+        "x_index_zero_based": 28
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.040233218779851,
+        "fixed_en_over_nemo": 1.040233218216496,
+        "fixed_mxl_over_nemo": 1.019918241499389,
+        "legacy_en_over_nemo": 2.027963035268895,
+        "longitude_deg": 28.5,
+        "x_index_zero_based": 29
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0398861076437755,
+        "fixed_en_over_nemo": 1.0398861060895714,
+        "fixed_mxl_over_nemo": 1.0197480616299202,
+        "legacy_en_over_nemo": 2.041713498101163,
+        "longitude_deg": 29.5,
+        "x_index_zero_based": 30
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0396948268351591,
+        "fixed_en_over_nemo": 1.039694824459215,
+        "fixed_mxl_over_nemo": 1.0196542694517112,
+        "legacy_en_over_nemo": 2.0503147548061014,
+        "longitude_deg": 30.5,
+        "x_index_zero_based": 31
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0395431356554405,
+        "fixed_en_over_nemo": 1.0395431327188072,
+        "fixed_mxl_over_nemo": 1.0195798833794603,
+        "legacy_en_over_nemo": 2.05576409351705,
+        "longitude_deg": 31.5,
+        "x_index_zero_based": 32
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0390640330337764,
+        "fixed_en_over_nemo": 1.0390640298628193,
+        "fixed_mxl_over_nemo": 1.0193449054195218,
+        "legacy_en_over_nemo": 2.060028428348294,
+        "longitude_deg": 32.5,
+        "x_index_zero_based": 33
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0380774454580943,
+        "fixed_en_over_nemo": 1.0380774423356411,
+        "fixed_mxl_over_nemo": 1.0188608583023238,
+        "legacy_en_over_nemo": 2.075202246688665,
+        "longitude_deg": 33.5,
+        "x_index_zero_based": 34
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0367111689391175,
+        "fixed_en_over_nemo": 1.0367111658657524,
+        "fixed_mxl_over_nemo": 1.0181901453129876,
+        "legacy_en_over_nemo": 2.1111731962774694,
+        "longitude_deg": 34.5,
+        "x_index_zero_based": 35
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0354921219608306,
+        "fixed_en_over_nemo": 1.035492119062397,
+        "fixed_mxl_over_nemo": 1.0175913348978873,
+        "legacy_en_over_nemo": 2.1568426499838877,
+        "longitude_deg": 35.5,
+        "x_index_zero_based": 36
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0347302869588606,
+        "fixed_en_over_nemo": 1.0347302842260322,
+        "fixed_mxl_over_nemo": 1.0172169334471821,
+        "legacy_en_over_nemo": 2.169584364883363,
+        "longitude_deg": 36.5,
+        "x_index_zero_based": 37
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.033930560999343,
+        "fixed_en_over_nemo": 1.0339305581778984,
+        "fixed_mxl_over_nemo": 1.0168237624194212,
+        "legacy_en_over_nemo": 2.2228773185109345,
+        "longitude_deg": 37.5,
+        "x_index_zero_based": 38
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.03387308617567,
+        "fixed_en_over_nemo": 1.0338730830699108,
+        "fixed_mxl_over_nemo": 1.0167955002267808,
+        "legacy_en_over_nemo": 2.2467744068306637,
+        "longitude_deg": 38.5,
+        "x_index_zero_based": 39
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0348805779018473,
+        "fixed_en_over_nemo": 1.0348805746962746,
+        "fixed_mxl_over_nemo": 1.0172908045919906,
+        "legacy_en_over_nemo": 2.1781228945008464,
+        "longitude_deg": 39.5,
+        "x_index_zero_based": 40
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0348286046525887,
+        "fixed_en_over_nemo": 1.0348286016927144,
+        "fixed_mxl_over_nemo": 1.0172652592182942,
+        "legacy_en_over_nemo": 2.2186633631113843,
+        "longitude_deg": 40.5,
+        "x_index_zero_based": 41
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0342461343304323,
+        "fixed_en_over_nemo": 1.03424613181511,
+        "fixed_mxl_over_nemo": 1.0169789264511606,
+        "legacy_en_over_nemo": 2.240903621788162,
+        "longitude_deg": 41.5,
+        "x_index_zero_based": 42
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0340905532681548,
+        "fixed_en_over_nemo": 1.0340905513922196,
+        "fixed_mxl_over_nemo": 1.0169024314771253,
+        "legacy_en_over_nemo": 2.272689480234098,
+        "longitude_deg": 42.5,
+        "x_index_zero_based": 43
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0341005878851641,
+        "fixed_en_over_nemo": 1.0341005867669828,
+        "fixed_mxl_over_nemo": 1.0169073650059504,
+        "legacy_en_over_nemo": 2.323991819570637,
+        "longitude_deg": 43.5,
+        "x_index_zero_based": 44
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0346495705265752,
+        "fixed_en_over_nemo": 1.0346495702495384,
+        "fixed_mxl_over_nemo": 1.0171772563342203,
+        "legacy_en_over_nemo": 2.3374738678992015,
+        "longitude_deg": 44.5,
+        "x_index_zero_based": 45
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0339517839546775,
+        "fixed_en_over_nemo": 1.0339517843884702,
+        "fixed_mxl_over_nemo": 1.0168341966716525,
+        "legacy_en_over_nemo": 2.3028077577270993,
+        "longitude_deg": 45.5,
+        "x_index_zero_based": 46
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0292789061475756,
+        "fixed_en_over_nemo": 1.0292789073292994,
+        "fixed_mxl_over_nemo": 1.0145338362843555,
+        "legacy_en_over_nemo": 2.608770934249898,
+        "longitude_deg": 46.5,
+        "x_index_zero_based": 47
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.024404726713796,
+        "fixed_en_over_nemo": 1.024404728244825,
+        "fixed_mxl_over_nemo": 1.0121288085924474,
+        "legacy_en_over_nemo": 3.267465725409393,
+        "longitude_deg": 47.5,
+        "x_index_zero_based": 48
+      },
+      {
+        "energy_moved_toward_nemo": true,
+        "fixed_avm_over_nemo": 1.0323134476424756,
+        "fixed_en_over_nemo": 1.0323134494179542,
+        "fixed_mxl_over_nemo": 1.0160282702105277,
+        "legacy_en_over_nemo": 4.489353050467041,
+        "longitude_deg": 48.5,
+        "x_index_zero_based": 49
+      }
+    ],
+    "provenance": {
+      "input_sha256": {
+        "fixed_tke_source": "77d1d5ddfaee85248a627f8ef456095301ecf91703ae4d6ad3f7ac24f2cbfe6f",
+        "mesh_mask": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+        "nemo_avm": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+        "nemo_en": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+        "nemo_zmxlm": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
+        "regression_test": "b91883f7ced87c8595259dd3c4bbf56baf67e97be25fac047441de9edb3a66b3",
+        "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+        "verifier": "d9ec9df7f506eb394f76435bd3e8a6d275eb21b5cf905a6bf26b964634799cdd"
+      },
+      "pinned_reducers": {
+        "bn2_alpha_compare.py": "2ac9e4a457c4dded55a116d67938dfda035e79a3a98ccbb070d9a0ec3d11e40e",
+        "dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+        "euc_mechanism.py": "7cf83a31ee4ede6fff6ae7dc095e215ce155809a74d0620288a6cbf55e5621d5",
+        "kamm_twin_90d.py": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+        "zdftke_avm_offset_scan.py": "7ec40312dba6d70b7d6bb9ed5349b5861c7fa1b1ab4859b7c2f9c5c785300feb"
+      },
+      "repo": {
+        "branch": "fidelity/dino-euc-mechanism-codex",
+        "dirty": false,
+        "head": "b9946ccf93bd2f51f05f2c14dbb8cad0db3b7939"
+      }
+    },
+    "source_contract": {
+      "lego_fix": "tke.py: surface-min clamp guarded by surface_bc_level == 'interior_pinned'",
+      "nemo_interior": "cfgs/DINO/MY_SRC/zdftke.F90:564-565 rn_emin at jk=2..jpkm1",
+      "nemo_surface": "cfgs/DINO/MY_SRC/zdftke.F90:361 rn_emin0 at surface jk=1"
+    },
+    "state": "shared NEMO day-180 restart; first matched step kt=5761",
+    "tests": {
+      "combined_order_probe": "91 passed, 2 MPAS dtype failures after global precision-state leak; both failures pass in clean fixed and pre-fix processes",
+      "focused_tke": "127 passed",
+      "red_before_fix": "1 failed: actual [1e-4,1e-6], hand-computed expected [1e-6,1e-6]",
+      "vertical_mixing_consumers_mpas_clean_process": "36 passed",
+      "vertical_mixing_consumers_non_mpas": "57 passed"
+    },
+    "verdict": "CONFIRM_REAL_FIX_MATCHES_OFFLINE_REPLAY",
+    "verification_producer_head": "b9946ccf93bd2f51f05f2c14dbb8cad0db3b7939"
+  },
   "headline_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT",
   "import_receipt": {
     "module": "/tmp/euc-mechanism-localgit/packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
@@ -75,7 +614,7 @@
     "reason": "the 10.14 m interface sets the audited 5-26 m shear; its 2.05x avm excess predicts both weaker shear and a deeper core",
     "status": "RETRACTED"
   },
-  "schema": "dino-euc-mechanism-v2-review",
+  "schema": "dino-euc-mechanism-v3-faithful-fix",
   "scores": {
     "closure_avm": {
       "diagnostic_nrms_20_40m": 0.03184802669844877,

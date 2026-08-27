@@ -19,7 +19,7 @@ The closure root is now isolated: **equatorial near-surface TKE energy is
 shear-setting interface.** The resulting mixing-length excess is algebraic,
 not independent.
 
-The TKE-equation decomposition now names the implementation owner:
+The TKE-equation decomposition named the implementation owner:
 **legoESM incorrectly applies the `1e-4` surface-TKE minimum to its first
 interior interface under `tke_surface_bc_level="nemo_z0"`.** NEMO holds
 `rn_emin0` only at the separate surface row (`jk=1`) and solves/floors `jk=2`
@@ -27,15 +27,21 @@ with `rn_emin=1e-6`. A preregistered replay removing only that misplaced
 interior clamp closes 94.35% of the median log-energy gap and moves all 47
 columns toward NEMO; the residual energy ratio is 1.0543.
 
+The faithful production fix is now built in commit
+`d86d97d496463b9317764426573af958fe5f20b9`. A clean, committed real-path
+replay—not the earlier emulation—exactly reproduced the registered residual:
+the 47-column geometric-mean energy ratio is `1.054275004`, and all 47 columns
+move toward NEMO. Mixing length falls to `1.026778945` and momentum viscosity
+to `1.054275003` in geometric mean.
+
 The review-corrected offline bar confirms because 10--40 m NRMS is 0.68865 and
 the single shear-setting 10.14 m ratio exceeds 1.25. The original
 `UNRESOLVED_CLOSURE_DIFFERENCE` label is retained in the artifact only as a
 retracted result from a physically invalid two-consecutive-level clause.
 
-The registered 10-day causal leg is `DESIGN_ONLY_NO_CUDA_IN_SANDBOX`.  With
-`CUDA_VISIBLE_DEVICES=0`, JAX reported `CUDA_ERROR_NO_DEVICE`; running on CPU
-would violate the registered execution condition.  No response verdict is
-claimed.
+The registered 10-day causal leg remains a chain prediction, not a response
+verdict. Per instruction, this lane stops after the CPU structural replay;
+the coordinator's executor owns the GPU shear/core-depth response run.
 
 The adversarial review's initial accusation that this CUDA status was false is
 withdrawn. GPU logs and the untracked runner belong to the coordinator's
@@ -264,23 +270,71 @@ geometric-mean energy ratio is 1.054275.
 NEMO makes the separation explicit. The executed surface BC is
 `en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )` at
 `cfgs/DINO/MY_SRC/zdftke.F90:361`. After solving `jk=2..jpkm1`, it applies
-`MAX(en,rn_emin)` only over those interior rows at `:561-565`. legoESM first
-applies `tke_background` and then unconditionally resets `e_new[...,0]` to at
-least `tke_surface_min` at
-`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1377-1381`, even
+`MAX(en,rn_emin)` only over those interior rows at `:561-565`. Pre-fix
+legoESM first applied `tke_background` and then unconditionally reset
+`e_new[...,0]` to at least `tke_surface_min` at
+`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1377-1386`, even
 though the `nemo_z0` branch has already created a distinct virtual surface
 row.
 
-**Faithful fix design (not built):** guard the `tke_surface_min` clamp with
-`surface_bc_level == "interior_pinned"`. Under `nemo_z0`, retain only the
-ordinary `tke_background`/`rn_emin` clamp on solved interface 0; the virtual
-z=0 row remains the sole owner of `rn_emin0`.
+### Faithful fix built and verified
+
+Commit `d86d97d496463b9317764426573af958fe5f20b9` guards the
+`tke_surface_min` clamp with `surface_bc_level == "interior_pinned"`. Under
+`nemo_z0`, solved interface 0 now retains only `tke_background` (`rn_emin`);
+the separate virtual z=0 Dirichlet row remains the sole owner of
+`tke_surface_min` (`rn_emin0`). This matches the executed DINO source at
+`cfgs/DINO/MY_SRC/zdftke.F90:361` for the surface and `:564-565` for solved
+interior rows.
+
+The shipped-card reachability audit resolves every DINO recipe as follows:
+
+| recipe | mixing scheme | surface-BC layout | behavior changed? |
+|---|---|---|---|
+| `legoesm_default` | KPP | `interior_pinned` | no |
+| `mitgcm` | KPP | `interior_pinned` | no |
+| `nemo_dino_kamm` | TKE | `nemo_z0` | **yes** |
+| `nemo_dino_kamm_mlf` | TKE | `nemo_z0` | **yes** |
+| `nemo_paper` | TKE | `interior_pinned` | no |
+| `oceananigans` | CATKE | `interior_pinned` | no |
+| `veros` | TKE | `interior_pinned` | no |
+
+Thus `nemo_z0` is oracle-card-only among shipped cards: the direct oracle card
+and its MLF inheritance are the only affected recipes. Generic callers and
+audit scripts that explicitly select `nemo_z0` also receive the correction.
+All non-`nemo_z0` paths retain the old operation byte-for-byte and are pinned
+by exact-array tests for both `None` and explicit surface-Dirichlet inputs.
+
+The hand-computed two-interface regression was red before the fix: with zero
+production, buoyancy, diffusion, and old energy `1e-6`, the legacy branch
+returned `[1e-4, 1e-6]` instead of the NEMO-faithful `[1e-6, 1e-6]`. It is
+green after the fix. Test receipts are 127 focused TKE tests, 57 non-MPAS
+vertical-mixing consumer tests, and 36 MPAS TKE consumer tests, all passing in
+clean processes. A combined-order probe produced 91 passes and two MPAS dtype
+failures after another test changed global precision state; those same tests
+pass independently on both pre-fix and fixed trees.
+
+The committed verifier calls the fixed production closure on the exact shared
+day-180 state. It first reconstructs the frozen 47-column cohort and recovers
+the prior energy ratio `2.255635114`, then scores the real fixed result:
+
+| real fixed quantity at 10.138751 m | geometric mean | IQR | min--max |
+|---|---:|---:|---:|
+| `en_L/en_N` | 1.054275004 | [1.034854588, 1.056921536] | 1.024404728--1.172218662 |
+| `mxl_L/mxl_N` | 1.026778945 | [1.017278032, 1.028066522] | 1.012128809--1.082690471 |
+| `avm_L/avm_N` | 1.054275003 | [1.034854591, 1.056921531] | 1.024404727--1.172218659 |
+
+Verdict: `CONFIRM_REAL_FIX_MATCHES_OFFLINE_REPLAY`. Energy moves toward NEMO
+in 47/47 columns. The complete per-column receipt is stored under
+`faithful_surface_floor_fix.per_column` in the JSON artifact; its `x=3..49`
+energy ratios are all reported there (range 1.024405--1.172219).
 
 Registered causal-chain prediction: fix the clamp -> `en_L/en_N -> 1` at
 10.14 m -> the active buoyancy-limited `zmxlm` ratio and `avm` ratio -> 1 ->
-5--26 m shear strengthens and EUC core depth shoals toward NEMO. The existing
-short causal trajectory arms must test the final shear/core response; this
-offline finding does not promote that prediction to a trajectory verdict.
+5--26 m shear strengthens and EUC core depth shoals toward NEMO. The
+coordinator's GPU executor must test the final shear/core response; this lane
+stops here, and the offline finding does not promote that prediction to a
+trajectory verdict.
 
 ## Provenance
 
@@ -300,9 +354,11 @@ SHA-256 values are:
 
 The scorer hash-pins and reuses the committed bridge/dump reducers.  It writes
 the receipt, reads it back, and rejects a provenance mismatch.
-The final receipt was regenerated from clean committed HEAD
-`5673a51e98b2aff668558e8ef028ed85e8bf63f8` on the named campaign branch and
-records `dirty:false`; its probe and time-registry hashes are also recorded.
+The faithful-fix receipt was regenerated from clean committed HEAD
+`b9946ccf93bd2f51f05f2c14dbb8cad0db3b7939` on the named campaign branch and
+records `dirty:false`. It SHA-256-pins the production fix, regression test,
+verifier, shared restart, NEMO energy/mixing fields, mesh, and every imported
+reducer.
 
 Repository note: no `AGENTS.md` exists in this checkout, its tracked tree,
 `.agents`, `.codex`, `/home/dbalwada/legoESM`, `/home/dbalwada`, or `/tmp`.
