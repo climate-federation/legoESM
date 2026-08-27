@@ -57,7 +57,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "4869209d918843c86bbc1368abdd16db209d7831"
+PREREG_COMMIT = "25588c724e0b276d46af7d3d5fe14423bef140d2"
 
 
 def _git(args: list[str]) -> str:
@@ -97,6 +97,140 @@ def _stats(lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> dict:
         "rms_ratio": rl / rn if rn > 0.0 else float("nan"),
         "max_abs_delta": float(np.max(np.abs(x - y))),
     }
+
+
+def _participation(delta: np.ndarray, mask: np.ndarray) -> float:
+    """Effective number of faces carrying squared residual amplitude."""
+    d2 = np.square(np.asarray(delta, dtype=np.float64)[mask])
+    denom = float(np.sum(d2 * d2))
+    return float(np.sum(d2) ** 2 / denom) if denom > 0.0 else 0.0
+
+
+def _one_percent_outliers(
+        lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(mask, dtype=bool)
+    valid = mask & np.isfinite(lego) & np.isfinite(nemo) & (nemo != 0.0)
+    out[valid] = np.abs(lego[valid] / nemo[valid] - 1.0) > 0.01
+    return out
+
+
+def _one_cell_label(participation: float, count: int,
+                    row_scaled_max: float) -> str:
+    if participation <= 1.01 and count == 1 and row_scaled_max >= 0.20:
+        return "CONFIRMED_ONE_CELL_SIGNATURE"
+    if participation >= 2.0 or count >= 2 or row_scaled_max <= 0.01:
+        return "REFUTED_ONE_CELL_SIGNATURE"
+    return "UNRESOLVED_ONE_CELL_SIGNATURE"
+
+
+def _coastal_label(overlap_fraction: float, argmax_coastal: bool) -> str:
+    if overlap_fraction >= 0.90 and argmax_coastal:
+        return "CONFIRMED_COASTAL_UNMASK"
+    if overlap_fraction <= 0.10 or not argmax_coastal:
+        return "REFUTED_COASTAL_UNMASK"
+    return "UNRESOLVED_COASTAL_UNMASK"
+
+
+def _localize(
+        name: str, lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
+        coastal: np.ndarray, coastal_multiplier: np.ndarray,
+        tmask_w: np.ndarray, tmask_e: np.ndarray) -> dict:
+    """Registered wet one-cell and separate full-plane coastal localization."""
+    delta = lego - nemo
+    row_mask = wet & (np.arange(wet.shape[0])[:, None] == SOUTH_ROW)
+    if not row_mask.any():
+        raise SystemExit(f"{name}: no wet face on registered south row")
+    row_abs = np.where(row_mask, np.abs(delta), -np.inf)
+    argmax = tuple(int(v) for v in np.unravel_index(np.argmax(row_abs), delta.shape))
+    row_nemo_mean = float(np.mean(nemo[row_mask]))
+    row_scale = abs(row_nemo_mean)
+    if row_scale == 0.0:
+        raise SystemExit(f"{name}: zero NEMO row mean")
+    row_scaled_max = float(abs(delta[argmax]) / row_scale)
+    outliers = _one_percent_outliers(lego, nemo, wet)
+    row_outliers = outliers & row_mask
+    p_row = _participation(delta, row_mask)
+    p_domain = _participation(delta, wet)
+
+    scale = max(1.0, float(np.max(np.abs(lego))), float(np.max(np.abs(nemo))))
+    roundoff_bar = 128.0 * np.finfo(np.float64).eps * scale
+    full_support = np.abs(delta) > roundoff_bar
+    support_count = int(full_support.sum())
+    coastal_count = int((full_support & coastal).sum())
+    coastal_fraction = (float(coastal_count / support_count)
+                        if support_count else 0.0)
+    argmax_coastal = bool(coastal[argmax])
+    one_cell = _one_cell_label(p_row, int(row_outliers.sum()), row_scaled_max)
+    coastal_verdict = _coastal_label(coastal_fraction, argmax_coastal)
+
+    coords = np.argwhere(outliers)
+    coord_records = [
+        {
+            "j": int(j), "i": int(i),
+            "delta": float(delta[j, i]),
+            "ratio_minus_one": float(lego[j, i] / nemo[j, i] - 1.0),
+            "umask": int(wet[j, i]),
+            "tmask_w": int(tmask_w[j, i]),
+            "tmask_e": int(tmask_e[j, i]),
+            "coastal_multiplier": float(coastal_multiplier[j, i]),
+            "coastal_unmask": bool(coastal[j, i]),
+        }
+        for j, i in coords
+    ]
+
+    # Planted controls exercise the registered decision mechanics.
+    candidates = np.argwhere(row_mask & ~row_outliers)
+    if candidates.size == 0:
+        raise SystemExit(f"{name}: no row face available for planted outlier")
+    pj, pi = (int(v) for v in candidates[0])
+    planted_delta = delta.copy()
+    planted_delta[pj, pi] = delta[argmax]
+    planted_lego = nemo + planted_delta
+    planted_outliers = _one_percent_outliers(planted_lego, nemo, wet) & row_mask
+    planted_p = _participation(planted_delta, row_mask)
+    second_face_fires = bool(
+        planted_p > 1.9 and planted_outliers.sum() > row_outliers.sum())
+
+    synthetic_coastal = np.ones_like(coastal, dtype=bool)
+    synthetic_coastal[argmax] = False
+    flipped_label = _coastal_label(0.0, bool(synthetic_coastal[argmax]))
+    coastal_flip_fires = flipped_label == "REFUTED_COASTAL_UNMASK"
+    print(f"CONTROL {name} localization: second_face_fires={second_face_fires} "
+          f"planted_P={planted_p:.9g} coastal_flip_fires={coastal_flip_fires}")
+    if not (second_face_fires and coastal_flip_fires):
+        raise SystemExit(f"{name}: localization planted control failed")
+
+    result = {
+        "argmax": {
+            "j": argmax[0], "i": argmax[1],
+            "delta": float(delta[argmax]),
+            "nemo": float(nemo[argmax]),
+            "lego": float(lego[argmax]),
+            "coastal_unmask": argmax_coastal,
+        },
+        "row_nemo_mean": row_nemo_mean,
+        "row_scaled_max_abs": row_scaled_max,
+        "participation_j1": p_row,
+        "participation_domain": p_domain,
+        "wet_j1_count": int(row_mask.sum()),
+        "wet_domain_count": int(wet.sum()),
+        "one_percent_j1_count": int(row_outliers.sum()),
+        "one_percent_domain_count": int(outliers.sum()),
+        "one_percent_outliers": coord_records,
+        "full_plane_roundoff_bar": roundoff_bar,
+        "full_plane_support_count": support_count,
+        "full_plane_support_coastal_count": coastal_count,
+        "full_plane_support_coastal_fraction": coastal_fraction,
+        "one_cell_label": one_cell,
+        "coastal_label": coastal_verdict,
+        "controls": {
+            "second_face_fires": second_face_fires,
+            "planted_participation": planted_p,
+            "coastal_flip_fires": coastal_flip_fires,
+        },
+    }
+    print(f"LOCALIZATION {name} " + json.dumps(result, sort_keys=True))
+    return {"result": result, "outliers": outliers}
 
 
 def _scaled_surface_forcing(sf, scale: float):
@@ -343,7 +477,7 @@ def main() -> int:
 
     set_policy(PrecisionPolicy.fp64())
     sha = _git(["rev-parse", "HEAD"])
-    dirty = _git(["status", "--porcelain"])
+    dirty = _git(["status", "--porcelain", "--untracked-files=no"])
     expected_lane = os.path.join(_DINO, "RUN_SEQDUMP_D180_1R")
     expected_step1 = os.path.join(_DINO, "RUN_D180_STEP1")
     lane_inputs = {
@@ -390,6 +524,11 @@ def main() -> int:
     content_sha256[str(Path(__file__).resolve())] = _sha256(Path(__file__).resolve())
     content_sha256[str(_DIR / "PREREG_endwall_wind_placement.md")] = _sha256(
         _DIR / "PREREG_endwall_wind_placement.md")
+    print("RETRACTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER_2.0966766111")
+    print("RETRACTION_REASON=zDt_2_equals_rDt_over_2_and_union_mask_admitted_"
+          "324_dry_coastal_u_faces_gate_had_no_reachable_REFUTE")
+    print("RETRACTION=south_j1_Pearson_correlation_gate_unreachable_for_"
+          "effectively_constant_NEMO_row")
     print(json.dumps({
         "provenance": {
             "git_sha": sha,
@@ -478,6 +617,11 @@ def main() -> int:
     n_fv = ptsb._load("wnd_dump_zv_frc_inc.bin")
     um = np.asarray(g.umask, dtype=bool)[..., 0]
     vm = np.asarray(g.vmask, dtype=bool)[..., 0]
+    tmask_w = np.asarray(g.tmask, dtype=bool)[..., 0]
+    tmask_e = np.roll(tmask_w, -1, axis=1)
+    coastal_multiplier = ((2.0 - um.astype(np.float64))
+                          * np.maximum(tmask_w, tmask_e))
+    coastal_unmask = (~um) & (coastal_multiplier == 2.0)
 
     # Direct vertical-route deposit, matching _bc_external_surface_forcing's
     # tau/(rho0*dz0) source integrated over the leapfrog rDt.  Do not use B1:
@@ -508,6 +652,34 @@ def main() -> int:
         "domain_u_fslow": _stats(lfu, n_fu, masks["domain_u"]),
         "south_j1_u_fslow": _stats(lfu, n_fu, masks["south_j1_u"]),
     }
+    localization_zdf = _localize(
+        "zdf", lu, n_ws_u, um, coastal_unmask, coastal_multiplier,
+        tmask_w, tmask_e)
+    localization_fslow = _localize(
+        "fslow", lfu, n_fu, um, coastal_unmask, coastal_multiplier,
+        tmask_w, tmask_e)
+    z_support = localization_zdf["outliers"]
+    f_support = localization_fslow["outliers"]
+    union = int((z_support | f_support).sum())
+    intersection = int((z_support & f_support).sum())
+    support_jaccard = float(intersection / union) if union else 1.0
+    support_label = (
+        "CONFIRMED_COMMON_UPSTREAM_SUPPORT" if support_jaccard >= 0.90 else
+        "REFUTED_COMMON_UPSTREAM_SUPPORT" if support_jaccard <= 0.10 else
+        "UNRESOLVED_COMMON_UPSTREAM_SUPPORT")
+    planted_support = f_support.copy()
+    planted_index = tuple(int(v) for v in np.argwhere(~z_support)[0])
+    planted_support[planted_index] = ~planted_support[planted_index]
+    planted_union = int((z_support | planted_support).sum())
+    planted_intersection = int((z_support & planted_support).sum())
+    planted_jaccard = (float(planted_intersection / planted_union)
+                       if planted_union else 1.0)
+    jaccard_plant_fires = planted_jaccard < support_jaccard
+    print("CONTROL common support: "
+          f"jaccard={support_jaccard:.9g} planted={planted_jaccard:.9g} "
+          f"plant_fires={jaccard_plant_fires}")
+    if not jaccard_plant_fires:
+        raise SystemExit("common-support planted control failed")
 
     # Structural-zero v control: use max norms, since correlation/normalised
     # error are undefined against an exact zero.
@@ -524,18 +696,19 @@ def main() -> int:
     if not vpass:
         raise SystemExit("meridional structural-zero control failed")
 
-    term_confirmed = (
-        all(scores[k]["err_norm"] <= 0.05 and scores[k]["corr"] >= 0.999
-            for k in ("domain_u_zdf", "south_j1_u_zdf"))
-        and all(scores[k]["err_norm"] <= 0.05
-                for k in ("domain_u_fslow", "south_j1_u_fslow"))
-    )
-    material_diff = (
-        scores["south_j1_u_zdf"]["err_norm"] >= 0.25
-        or scores["south_j1_u_fslow"]["err_norm"] >= 0.25
-    )
-    label = ("CONFIRMED_ALGEBRAIC_EQUIVALENCE" if term_confirmed else
-             "CONFIRMED_MATERIAL_DIFF" if material_diff else
+    domain_close = (
+        scores["domain_u_zdf"]["err_norm"] <= 0.05
+        and scores["domain_u_zdf"]["corr"] >= 0.999
+        and scores["domain_u_fslow"]["err_norm"] <= 0.05)
+    localized_diff = any(
+        localization["result"]["one_cell_label"]
+        == "CONFIRMED_ONE_CELL_SIGNATURE"
+        for localization in (localization_zdf, localization_fslow))
+    row_close = all(
+        localization["result"]["row_scaled_max_abs"] <= 0.01
+        for localization in (localization_zdf, localization_fslow))
+    label = ("CONFIRMED_LOCALIZED_SOURCE_DIFF" if localized_diff else
+             "CONFIRMED_ALGEBRAIC_EQUIVALENCE" if domain_close and row_close else
              "PLAUSIBLE_UNRESOLVED")
     out = {
         "provenance": {"git_sha": sha, "prereg_commit": PREREG_COMMIT,
@@ -559,6 +732,13 @@ def main() -> int:
         },
         "v_structural_zero": v_zero,
         "scores": scores,
+        "localization": {
+            "zdf": localization_zdf["result"],
+            "fslow": localization_fslow["result"],
+            "one_percent_support_jaccard": support_jaccard,
+            "support_label": support_label,
+            "jaccard_plant_fires": bool(jaccard_plant_fires),
+        },
         "term_label": label,
         "ownership_label": "UNRESOLVED_REQUIRES_REGISTERED_FREE_RUN",
         "retractions": [
@@ -574,6 +754,12 @@ def main() -> int:
             "the offline probe reconstructs source operands; it does not fill the oracle slot",
             "this source-operand score measures neither the implicit-solve "
             "response nor eta ownership",
+            "CONFIRMED_NAMED_AND_APPLIED_DIFFER and 2.0966766111: zDt_2 is "
+            "rDt/2 and a union mask admitted 324 dry coastal u faces; the "
+            "former source-distinction gate had no reachable REFUTE state",
+            "south-j1 Pearson correlation as an equivalence gate: NEMO's row "
+            "is effectively constant, so row max-absolute error over its mean "
+            "is used instead",
         ],
     }
     print("RESULT " + json.dumps(out, indent=2, sort_keys=True))
