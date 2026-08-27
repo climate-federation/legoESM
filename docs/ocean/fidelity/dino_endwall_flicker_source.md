@@ -10,12 +10,12 @@ The accepted run receipt below names the clean probe commit, registered
 preregistration commit and content hashes. The full source/operand hash map is
 printed before any measurement output.
 
-Accepted round-2 run: clean probe commit
-`1720482b90a2d62d0460a879c767b5f52168b54f`, correction-preregistration
-commit `7618c666f82c694f0cfb3085c636a9d51bb09c9b`, probe SHA-256
-`9e88c81dcde0d8061d543fc05b1c6e6fc9f22e50ab42ab4e8a2520dc3b65d493`,
+Accepted donor-aware round-2 run: clean probe commit
+`6572f6e7469fd13be3e54cc57ccd73bf36d4671b`, donor preregistration commit
+`25a5afef6dd3f4e50c8b9d7febdbaf69b3b87095`, probe SHA-256
+`2a5a27543e981d4df6b3f253a89921daa0bf79955f5d0e3391fa1dd52f1be252`,
 and retained log SHA-256
-`2c5002d963a18843c6eefec31850a8fb1d5208427141ba9b870ba357173fdea9`.
+`825c22478ca4e19a422a46fdbe5e9c5cfd2ba5753f86d3a2623459e1663c8dff`.
 The run used CPU fp64, `LEGOESM_NEMO_E3T=both`, the d180 lane and kt=5761.
 
 ## Outcome
@@ -52,13 +52,23 @@ Across 9,758 wet U faces, their peak-equivalent counts are 24.27148675 and
 24.27150701. All 162 faces exceeding one percent lie at `i=49`; “about 24
 faces” is effective squared-error support, not a literal outlier count.
 
-The proposed coastal-unmask owner is **REFUTED**. The `j=1` argmax has
-`umask=1`, both adjacent surface T cells wet, and the exact
-`sbcmod.F90:543-544` multiplier is 1, not the coastal-unmask value 2.
-`F_slow`'s full-plane material support has zero coastal overlap. The fourth
-wind premise is now stronger and citable: `F_slow` preserves the same
-localized upstream support without a second face-depth division, while the
-remaining faces agree at roundoff-to-small residual scale.
+The earlier receiving-face and receiving-support coastal verdicts are
+**RETRACTED**. They classified the wet receiver, which cannot itself have
+`umask=0`, rather than the upstream donor. The donor-aware one-cell trace
+**CONFIRMS_COASTAL_DONOR_DOUBLE_INTERPOLATION**. NEMO restart `utau_b` is
+already a U-point field, but the bridge stores it in legoESM's T-point
+`tau_x_prev`; the first step interpolates it to U again. At receiver `(1,49)`,
+the east donor `(1,50)` is dry coastal-unmasked with multiplier 2 and carries
+exactly twice the receiver stress (`4.6526513163130625e-4` versus
+`2.3263256581565312e-4 Pa`). The resulting production stress exceeds the
+stagger-correct value by exactly the predicted donor contribution.
+
+The predicted direct increment is `3.020321760467329e-5 m/s` versus measured
+`3.0203216696068663e-5 m/s` (relative error `3.0083e-8`). Predicted/direct and
+predicted/`F_slow` material-support Jaccards are both 1.0; predicted domain
+support is 24.27023460 peak-equivalent faces versus measured 24.27148675.
+Thus the fourth wind premise is closed at the source: the same one-column
+donor error enters both direct and barotropic paths before either consumer.
 
 Candidate B placement ownership remains **UNRESOLVED** after the five-day GPU
 A/B: implicit placement collapses the first-eight wall share to 0.05596, near
@@ -71,8 +81,10 @@ same-input boundary/fixer consumers.
 Before writing a loader, this lane searched the campaign tree for
 `RUN_SEQDUMP_D180_1R`, `RUN_SEQDUMP_KT`, `wnd_dump`, `zdf_dump`, `jpdyn_tau`,
 `utrd_tau`, `build_replay_ic`, `_load`, `eta_flicker_decay`, `wall_direction`,
-`barotropic_substep`, `spg_substep_chain`, and `substep_traj_compare`. It
-reused:
+`barotropic_substep`, `spg_substep_chain`, `substep_traj_compare`, `utau_b`,
+`tau_x_prev`, `surface_stress_faces`, and `interp_cell_to_uface`. That search
+found the existing restart loader and bridge carry in `nemo_io.py` and
+`nemo_state_bridge.py`, plus the shared production interpolator; it reused:
 
 - `multistep_replay.build_replay_ic` for the kt=5760 bridge, geometry, masks,
   u-face offset, and day-180 lane conventions;
@@ -122,7 +134,7 @@ implementation difference whose wall-row consequence remains to be measured.
 | 9 | Primary velocity/ssh sums use `wgtbtp1`; transport uses the secondary tail; all normalize after the loop. Filter 2 constructs a `2*nn_e` boxcar and tail (`dynspg_ts.F90:733-738,974-1003,1242-1292`). | Weight construction, accumulators and normalized velocity/transport outputs are explicit (`barotropic_latlon_cgrid.py:1131-1140,1577-1616`). | **MATCH**. |
 | 10 | NEMO commits a second LBC on normalized `un_adv/vn_adv` after the loop (`dynspg_ts.F90:999-1011`). | legoESM returns its separately accumulated transport output without a corresponding statement-level halo commit (`barotropic_latlon_cgrid.py:1577-1616`). | **DIFF (transport boundary representation)**, but scoped out of eta ownership: this output feeds tracer transport, not the completed eta. It remains a control unless a next-step eta consumer is demonstrated. |
 | 11 | Immediately before `dyn_zdf`, NEMO temporarily installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | legoESM retains the primary velocity-average momentum state and routes Hu/Hv separately to tracer transport (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1618-1650,1760`). | **DIFF (bookkeeping only; CLOSED as momentum candidate)**. Active vector `dyn_zdf` builds Kaa from Kbb and Krhs (`cfgs/DINO/MY_SRC/dynzdf.F90:133-159`), not Kmm velocity, and later reconciliation restores the momentum mean. |
-| 12 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
+| 12 | After `dyn_spg` returns, active MLF proceeds through `dyn_zdf` and the normal ssh-after/filter path without a spatially uniform post-solver eta projection (`cfgs/DINO/MY_SRC/stpmlf.F90:396-455`). | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
 | 13 | `ssh_atf` applies the plain Robert-Asselin update to Nnn ssh; its variable-volume freshwater correction is exactly zero for DINO (`cfgs/DINO/MY_SRC/stpmlf.F90:455-472`; stock `src/OCE/DYN/sshwzv.F90:390-443`, RA at `:419-425`; active instrumented override mirrors it at `cfgs/DINO/MY_SRC/sshwzv.F90:480-553`, RA at `:513-522`; `usrdef_sbc.F90:251-259`). | `_leapfrog_step` applies `now + gamma*(before-2*now+after)` to eta and stores it as the next before level (`ocean_model_latlon_cgrid.py:8644-8665,8683-8689`). | **MATCH** formula/time levels. The existing forward bracket reports correlation 1 and ratio 0.99999995; its tiny residual is not a source verdict. |
 | 14 | After tracer completion, `mlf_baro_corr` installs the after barotropic mean (`cfgs/DINO/MY_SRC/stpmlf.F90:578`; reconcile body `:752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8081-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
 | 15 | `finalize_lbc` commits U/V after-level vector signs and halos before momentum filtering (`cfgs/DINO/MY_SRC/stpmlf.F90:579-613,820-836`). | The serial domain continuously masks/wraps after-level arrays and has no discrete post-solver halo commit (`ocean_model_latlon_cgrid.py:8524-8530,8744-8759`). | **DIFF (final boundary representation)**. Existing sign/idempotence controls pass, but its next-step wall-Nyquist consequence is not exonerated; it joins the registered same-input boundary counterfactual. |
@@ -144,9 +156,9 @@ confirms.
 | Order | NEMO active statement | legoESM symbol | Alignment |
 |---:|---|---|---|
 | 1 | DINO constructs zonal stress from the analytic latitude spline and sets meridional stress exactly zero (`cfgs/DINO/MY_SRC/usrdef_sbc.F90:157-163,200-201,219-223`). | DINO provides the same forcing class; `surface_stress_faces` owns sign/interpolation/rotation (`packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:3607-3643`). | **MATCH** forcing class; established field identity is not re-derived here. |
-| 2 | Step entry swaps current face stress into `utau_b/vtau_b`; restart/cold start reads or seeds it (`src/OCE/SBC/sbcmod.F90:378-393,549-575`). | `tau_x_prev/tau_y_prev` carry the prior step and are averaged with current stress (`ocean_model_latlon_cgrid.py:3475-3498`). | **MATCH** time levels and 0.5 centring. |
-| 3 | `sbc` constructs U/V stress with neighbour averages and the explicit coastal multiplier `(2-umask)*MAX(tmask_i,tmask_i+1)` (`sbcmod.F90:539-547`, U formula `:543-544`). | `surface_stress_faces` uses the plain two-cell `interp_cell_to_uface` and has no coastal multiplier (`ocean_pe_latlon_cgrid.py:3607-3643`; `operators_latlon_cgrid.py:332-352`). | **DIFF (representation), localized but coastal owner REFUTED**. The wet error is one `i=49` face per affected row; at `j=1` that face is wet-wet with multiplier 1. |
-| 4 | `dynspg_ts` adds centred wind divided by full face-column depth to frozen slow forcing (`cfgs/DINO/MY_SRC/dynspg_ts.F90:423-445`). | The explicit route's depth mean enters `F_slow`; the implicit route restores `tau/(rho0*H)` explicitly (`ocean_model_latlon_cgrid.py:3607-3640`), and the substep consumes it directly (`barotropic_latlon_cgrid.py:932-961`). | **MATCH** source algebra. The offline `F_slow` score confirms no second face-depth division. |
+| 2 | Step entry carries prior face stress in `utau_b/vtau_b`; restart reads explicitly declare `cd_type='U'/'V'` (`src/OCE/SBC/sbcmod.F90:378-393,549-575`, declarations at `:554-558`). | `read_nemo_restart_before` labels/loads `utau_b/vtau_b` as if T-point (`packages/ocean/legoesm/ocean/fidelity/nemo_io.py:225-265`), and `bridge_before_state_topo` stores them directly in T-point `tau_x_prev/tau_y_prev` (`packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py:802-833`) before centring (`ocean_model_latlon_cgrid.py:3489-3498`). | **DIFF (bridged first-step stagger)**. Later legoESM steps replace the carry from native current forcing (`ocean_model_latlon_cgrid.py:8690-8699`), so this is a bridge-entry source, not a perpetual carry-type claim. |
+| 3 | `sbc` constructs U/V stress with neighbour averages and the explicit coastal multiplier `(2-umask)*MAX(tmask_i,tmask_i+1)` (`sbcmod.F90:539-547`, U formula `:543-544`). | `surface_stress_faces` applies plain T-to-U interpolation to the already-U prior carry after centring (`ocean_pe_latlon_cgrid.py:3607-3643`; `operators_latlon_cgrid.py:332-352`). | **DIFF (coastal donor double interpolation), CONFIRMED at source**. Receiver `(1,49)` is wet, but its interpolated east donor `(1,50)` is dry coastal-unmasked, multiplier 2, and exactly twice the receiver stress. |
+| 4 | `dynspg_ts` adds centred U-face wind divided by full face-column depth to frozen slow forcing (`cfgs/DINO/MY_SRC/dynspg_ts.F90:423-445`). | The explicit route's depth mean enters `F_slow`; the implicit route restores `tau/(rho0*H)` explicitly (`ocean_model_latlon_cgrid.py:3607-3640`), and the substep consumes it directly (`barotropic_latlon_cgrid.py:932-961`). | **DIFF on the bridged first entry; MATCH after a representation-consistent carry**. `F_slow` reproduces the donor prediction with support Jaccard 1.0 and no second face-depth division. |
 | 5 | `dyn_zdf` forms `Kbb+rDt*Krhs`, removes the after barotropic mean, then applies its vertical boundary condition (`cfgs/DINO/MY_SRC/dynzdf.F90:133-170`). | Shipped `surface_stress_implicit=False` keeps stress in the explicit tendency before the barotropic solve; `withhold_stress` selects the alternative route (`ocean_pe_latlon_cgrid.py:3684-3701,4495-4501`). | **DIFF (shipped placement)**. |
 | 6 | MLF adds `zDt_2*(tau_b+tau_now)/(rho0*e3_face(Kaa))` between tridiagonal recurrences (`dynzdf.F90:340-373,535-566`). | The alternative arm adds `dt_mom*tau/(rho0*dz0)` to the solve input before the same vertical diffusion solve (`ocean_model_latlon_cgrid.py:6681-6702,7003-7009`). | **MATCH** source formula in the alternative arm. Its dynamic response is unmeasured offline. |
 | 7 | Active DINO `trddyn` computes the named diagnostic as `(tau_b+tau_now)/(rho0*e3_face(Kmm))` (`cfgs/DINO/MY_SRC/trddyn.F90:159-170`). The original dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but emits its unpopulated slot (`:329-330`) and waived accumulated tau (`:389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). `dyn_zdf` applies the MLF half-sum with `zDt_2=rDt/2` (`cfgs/DINO/MY_SRC/dynzdf.F90:115,340-373,535-566`). | The offline source probe scores the applied pre/post bracket. The committed patch copies the named array to the dormant slot and a stream through two write paths. | **MATCH (wet arithmetic), CHECKED-CLEAN plumbing**: named is twice applied on wet faces to `1e-8`. The old 2.09668 source-DIFF claim is retracted as half-step identity plus dry-union-mask artifact. |
@@ -180,15 +192,37 @@ The aggregates conceal the registered one-cell result:
 | max abs / absolute NEMO row mean | 0.2500117364 | 0.2826356698 |
 | peak-equivalent faces, `j=1` / domain | 1.0000000231 / 24.27148675 | 1.0000000231 / 24.27150701 |
 | wet faces with pointwise ratio error >1%, `j=1` / domain | 1 / 162 | 1 / 162 |
-| argmax coastal-unmask state | false: wet-wet, multiplier 1 | false: wet-wet, multiplier 1 |
-| material-support coastal fraction | 0.5134 | 0.0 |
-| preregistered labels | `CONFIRMED_ONE_CELL_SIGNATURE`; `REFUTED_COASTAL_UNMASK` | `CONFIRMED_ONE_CELL_SIGNATURE`; `REFUTED_COASTAL_UNMASK` |
+| receiving argmax context (descriptive, not source verdict) | wet-wet, multiplier 1 | wet-wet, multiplier 1 |
+| receiving-support coastal fraction (descriptive) | 0.5134 | 0.0 |
+| current one-cell label | `CONFIRMED_ONE_CELL_SIGNATURE` | `CONFIRMED_ONE_CELL_SIGNATURE` |
 
 The one-percent supports are identical (Jaccard 1.0) and occupy column `i=49`
 across 162 rows. Peak-equivalent faces is
 `sum(delta**2)/max(delta**2)`; the first execution's inverse-participation name
 is retracted and retained only as a descriptive value. The corrected
-participation, second-face, coastal-flip and support-Jaccard controls all fire.
+participation, second-face and support-Jaccard controls all fire. The former
+receiving-support coastal labels are retracted because they did not trace the
+donor.
+
+The donor-aware centerpiece measures:
+
+| Quantity | Value |
+|---|---:|
+| receiver / east donor | `(1,49)` / `(1,50)` |
+| receiver / donor prior ocean-sign stress | `2.3263256581565312e-4` / `4.6526513163130625e-4 Pa` |
+| donor/receiver ratio | `2.0` |
+| receiver / donor `umask`, coastal multiplier | `1, 1.0` / `0, 2.0` |
+| production / stagger-correct receiver stress | `2.907907072695664e-4` / `2.326325658156531e-4 Pa` |
+| predicted / measured direct delta | `3.020321760467329e-5` / `3.0203216696068663e-5 m/s` |
+| prediction relative error | `3.0083042e-8` |
+| predicted/direct; predicted/`F_slow` support Jaccard | `1.0`; `1.0` |
+| predicted / measured domain peak-equivalent faces | `24.27023460` / `24.27148675` |
+| verdict | `CONFIRMED_COASTAL_DONOR_DOUBLE_INTERPOLATION` |
+
+The shifted-donor control lands on noncoastal `(1,51)`, replacing the donor
+with receiver stress annihilates the exact re-interpolation anomaly, and
+synthetic donor support moves the overlap gate from 1.0/CONFIRM to
+0.0/REFUTE. All three controls fire.
 
 Controls pass: both NEMO meridional operands are exact zero; legoESM's direct
 operand is zero and `F_slow` maximum is `3.388e-21 m/s2`, below `1e-12`.
@@ -210,14 +244,15 @@ The downstream B1 response is diagnostic only: zonal wind produces a
 the barotropic loop has already rotated momentum. Comparing that v response to
 NEMO's direct zero meridional deposit is retracted.
 
-**Candidate-B source verdict: CONFIRMED_LOCALIZED_SOURCE_DIFF; proposed
-coastal-unmask owner REFUTED.** The old `j=1` Pearson gate is retracted because
-NEMO's row is effectively constant. The registered max-absolute/row-mean gate
-confirms the one-cell difference in both source paths. The discriminating next
-offline measurement is now the `i=49` T-to-U face construction immediately
-before `sbcmod` versus `surface_stress_faces`, including face-index/periodic
-closure and wind spline values; placement ownership still requires the
-post-transient live discriminator.
+**Candidate-B source verdict:
+CONFIRMED_COASTAL_DONOR_DOUBLE_INTERPOLATION for the bridged first step.** The
+old `j=1` Pearson gate is retracted because NEMO's row is effectively constant.
+The measured receiver, donor ratio, production reconstruction, direct-delta
+prediction and both support maps clear every frozen donor gate. This assigns
+the source discrepancy, not free-run flicker ownership. The discriminating
+next measurement is the preregistered one-step same-state counterfactual with
+a reconstructed T-point previous-stress carry, followed—only if that gate
+passes—by the representation-consistent explicit/implicit GPU pair.
 
 ## Live named `jpdyn_tau` wiring receipt
 
@@ -239,15 +274,22 @@ hash `33c0c1a2...a115c`. The named reference hashes were
 are identical to the accepted preserved-run operands, showing the applied-wind
 brackets were unchanged. This is a write-path plumbing check.
 
-The preregistered verifier at Git commit `b43bf5746` printed:
+The strengthened verifier at clean probe commit `6572f6e74` (script SHA-256
+`c45989d6fc9427c87239cc2804ee4a9dc168bb115be742e514f2c0fa0d753fc9`,
+retained log SHA-256
+`8160cc3f2ef7195aa7094888cdc06a8b9f9bb6c6969561cde66eeb0e87d74fb8`)
+printed:
 
 - zonal slot/reference nonzero cells: 10,082 / 10,082;
 - lower-level maximum: exact zero;
 - meridional slot and named-reference maxima: exact zero;
 - storage maximum and normalized error: exact zero versus the
   `1.7763568394002505e-15` bar;
-- historical union-mask ratio `2.0966766111118194`, now retracted;
-- lower/top storage controls: fired;
+- wet pointwise ratio mean `2.0000000004056662`, absolute mean error
+  `4.0567e-10`, standard deviation `9.9839e-9`, and descriptive maximum
+  error `1.6380e-7`;
+- lower/top storage, single-face ratio-spread, and uniform `+1` ratio-mean
+  controls: fired;
 - round-2 classification: **CHECKED-CLEAN write-only**. The slot and stream
   are the same in-memory array through two output paths, and the offline
   `rDt*((post-pre)/rDt)` reconstruction is a float64 round trip, not an
@@ -272,13 +314,18 @@ in explicit) and its approximately eight-step decay is consistent with, but
 does not prove, a placement-swap startup shock against an explicit-consistent
 bridged restart.
 
-The preregistered follow-up discards exactly 32 steps, scores samples 33--40
-as the primary post-transient window and 33--160 as a companion, and requires
-a fail-closed scorer selector plus off-by-one control. Control validity is
-explicit ratio `[2.30,3.60]` and wall share `[0.30,0.65]`; implicit CONFIRM is
-ratio `<=1.25` and share `<=0.17`, REFUTE is ratio `>=2.30` and share `>=0.30`.
-If implicit sample 33 remains over 10 times explicit, STOP and design an
-implicit-consistent restart. No GPU or post-transient scorer ran here.
+The discard-32 proposal is **retracted as a decisive ownership test** because
+it only hides the now-measured U-as-T bridge shock. The preregistered follow-up
+first adds fail-closed `--bridge-before-stress-tpoint`, reconstructs prior
+T-point analytic stress at the restart's seasonal clock, and requires a
+same-state CPU counterfactual to remove 99.9999% of the `(1,49)` excess while
+a planted legacy-stagger swap restores it to `1e-6` relative error. Only then
+may the coordinator run the exact five-day explicit/implicit commands in
+`PREREG_endwall_wind_placement.md`. The primary bars remain corrected-explicit
+ratio `[2.60,3.18]`, share `[0.38,0.59]`; implicit CONFIRM requires ratio
+`<=1.25` and share `<=0.17`, REFUTE requires ratio `>=2.30` and share `>=0.38`.
+Samples 33--40/33--160 are descriptive only. The selector is not implemented,
+so this lane stops without another GPU run.
 
 ## Review disposition and retractions
 
@@ -334,6 +381,11 @@ claims before these findings were finalized.
   and aggregates concealed a one-face row discrepancy. Disposition: both
   claims are retracted in the tools; wet-only arithmetic and row-scale gates
   replace them; the one-cell/coastal probe was preregistered and run clean.
+- Donor-aware mechanism review: the receiving-face classifier was unreachable,
+  and source inspection showed NEMO `utau_b` is U-point while the bridge stores
+  it as a T-point carry. Disposition: receiving-support verdicts are retracted,
+  the exact donor interpolation is reconstructed under reachable controls, and
+  the GPU follow-up now requires a representation-consistent bridge.
 
 ## Verification receipts
 
@@ -345,9 +397,11 @@ claims before these findings were finalized.
   top-level zonal values in both slot/reference, exact-zero storage error and
   lower/meridional controls. The old independent source distinction is
   retracted; wet arithmetic is named=2*applied to `1e-8`.
-- Round-2 one-cell probe at clean commit `1720482b9`: PASS; direct and `F_slow`
-  one-cell, second-face, coastal-flip, Jaccard, entry/helper/order/slot, and
-  structural-zero controls all fire/pass.
+- Donor-aware one-cell probe at clean commit `6572f6e74`: PASS; direct and
+  `F_slow` one-cell, second-face, identical/disjoint Jaccard, shifted/equalized
+  donor, donor-overlap, entry/helper/order/slot, and structural-zero controls
+  all fire/pass. Independent mechanism-review rerun also exited zero (log
+  SHA-256 `c91d054ac58103d5dc27743ba287b8dd4ae9fd7dfb436dda51ab4ff2b78b595f`).
 - Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
   harness: PASS.
 - Twin selector/config smoke and implicit-arm construction on CPU: PASS. The
@@ -381,6 +435,11 @@ Standing retractions:
 - The first round-2 domain “participation” label is retracted: it printed
   inverse participation. The corrected review metric is peak-equivalent
   faces, 24.27149 in both source paths.
+- Receiving-face and receiving-support coastal classifications are retracted:
+  they tested the wet recipient rather than its dry coastal-unmasked east
+  donor. The donor-aware result supersedes them.
+- Discarding 32 startup steps is retracted as a decisive placement test; a
+  representation-consistent prior-stress carry is required first.
 - NEMO wind is not implicit-only; it enters `dynspg_ts` and `dyn_zdf`.
 - Whole-B1 stress linearity is not a valid exact helper control.
 - Expecting one stress-helper call was wrong: active leapfrog evaluates the
