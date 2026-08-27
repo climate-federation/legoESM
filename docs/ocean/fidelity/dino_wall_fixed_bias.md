@@ -841,10 +841,240 @@ is *"a joint arm, never a revert"*, and one metric now matching the oracle
 exactly is not a defect. No identity breaks: `q` enters the AL81 triad
 symmetrically, so the kinetic-energy cancellation measured above is
 `q`-independent and EEN enstrophy conservation is a property of the triad
-structure rather than of `q`'s divisor. But it is now the **largest known
-horizontal-metric infidelity in the twin**, at the same order as the one just
-closed and in the same operator the campaign is chasing, so it is registered as
-the next cheap offline item.
+structure rather than of `q`'s divisor.
+
+### §6c — the vertex area: the diff named, the pair REFUTED as a pair, the fix shipped
+
+**Same day, 2026-08-27.** Probe: `vertex_area_pair_analysis.py` (self-test
+PASS). Tests: `tests/ocean/unit/test_dino_vertex_area_nemo.py`.
+
+**THE CONSTRUCTION DIFF.** It is not a different radius, dlon or rounding, and
+it is not a different latitude either — it is a different **QUADRATURE**. NEMO
+(`usrdef_hgr.F90`) builds the F-cell area as a PRODUCT of two scale factors
+taken at the F-point's own Mercator latitude:
+
+    zfj   = REAL(mjg(jj,0) - nn_jeq_s) + 0.5                     :97
+    pphif = 1./rad * ASIN(TANH(rn_e1_deg*rad*zfj))               :109
+    pe1f  = ra * rad * COS(rad*pphif) * rn_e1_deg                :114
+    pe2f  = ra * rad * COS(rad*pphif) * rn_e1_deg                :118
+
+legoESM built the exact spherical cap between the two adjacent TRACER
+latitudes. On a Mercator coordinate `sin φ = tanh(Δλ·j)`, so
+`d(sin φ)/dj = Δλ·cos²φ` and the cap is `R²Δλ²` times the **exact interval
+integral** of `cos²φ` while NEMO's product is `R²Δλ²` times its **midpoint
+value**. Exact quadrature versus the midpoint rule on `sech²`:
+
+    relative gap  =  (Δλ² / 12) · (3 sin²φ_f − 1)
+
+| | signed median | \|·\| median | \|·\| max | sign change |
+|---|---|---|---|---|
+| measured, vs NEMO's dumped mesh | +1.1747e-05 | 2.2230e-05 | 4.1585e-05 | −35.08° |
+| the closed form above | +1.1748e-05 | — | 4.1585e-05 | ±35.26° |
+| **measured / predicted** | **0.999984** (min 0.9993, max 1.0022) | | | |
+
+The **sign change** is the discriminating feature: no wrong radius, dlon or
+rounding can produce one, and it is where `3sin²φ = 1`.
+
+`zfj` (:97) and `zvj` (:96) carry the SAME `+0.5` row offset, so `pphif ==
+pphiv` and **`e1f·e2f == e1v·e2v` exactly** on NEMO's own mesh (0.0 relative).
+The F-cell area is therefore the SQUARE of the v-face width §6b just corrected,
+and the fix reuses that width rather than deriving a second latitude.
+
+| the vertex area vs NEMO's `e1f·e2f`, interior rows | signed median | \|·\| max |
+|---|---|---|
+| exact (old) | +1.0791e-05 | 4.0965e-05 |
+| **nemo_isotropic (fixed)** | **+4.9e-16** | **3.1e-15** |
+
+Measured on the model's own NEMO-faithful R1 grid against NEMO's transform
+rebuilt end to end, so the fix does not depend on being handed NEMO's mesh. The
+two **wall rows** are deliberately left on the old cap: they span pole-to-first-
+tracer-row, are fully masked, and sit under the curl's positivity guard.
+
+**THE PAIR ANALYSIS — REFUTED AS A PAIR.** Rule 8's standing answer is a joint
+arm, so this was run BEFORE shipping. The vertex area and the vertex Coriolis
+are the same class of defect at the same point (`−(Δλ²/4)cos²φ_f` for the
+Coriolis half, signed median −3.998e-05) and they meet in ONE quantity: the
+F-point absolute vorticity `ζ + f` that EEN's `q` is built from.
+
+*Pre-registered before any number was read:* the two are a cancelling pair
+requiring a joint fix **iff the area half is within a factor of 10 of the
+Coriolis half at the median in that channel.**
+
+Measured on NEMO's own day-5760 restart, 333,318 wet F-points:
+
+| | median | p99 | max |
+|---|---|---|---|
+| \|ζ\| [1/s] | 2.0513e-08 | 2.4048e-06 | — |
+| \|f\| [1/s] | 1.0184e-04 | 1.3613e-04 | — |
+| area half of the `ζ+f` error [1/s] | 4.0182e-13 | 7.5738e-11 | — |
+| Coriolis half [1/s] | 3.0018e-09 | 4.2748e-09 | — |
+| **ratio area / Coriolis** | **1.5050e-04** | 6.867e-02 | 4.249e-01 |
+
+**1.51e-04 against a bar of 1e-01 — BELOW by a factor of 660.** The two
+REINFORCE at 59.9% of wet points; at the 0.51% of points where the area half
+does exceed the bar, 79.6% REINFORCE, so removing it helps there too.
+
+> **RETRACTION, loud, and it reversed a sign.** The first version of this
+> section reported *"removing the area half moves the total error by
+> +0.055%"* — a **worsening**. That number was a **ratio of two medians of two
+> different distributions**, which is not the change in the error, and it
+> contradicted the reinforce/oppose split printed directly above it (if a
+> majority reinforce, removing one half must help at the median). The correct
+> **paired, per-point** statistic is:
+>
+> | | |
+> |---|---|
+> | median per-point change | **−0.001232%** (an IMPROVEMENT) |
+> | mean | −0.103% |
+> | improves at | **59.9%** of wet F-points, worsens at 40.1% |
+> | energy-norm ratio (L2 after / before) | 0.999542 |
+> | max \|error\| | 4.2753e-09 → 4.2748e-09 |
+>
+> Wrong sign and ~45× too large. The fix *reduces* the absolute-vorticity
+> error at the median, at the maximum, and in the L2 norm. Caught by
+> adversarial review, not by me; the probe now computes the paired statistic
+> and the ratio-of-medians is gone.
+
+**REGIONAL, because a global median hides a structural enrichment.** The
+Coriolis half vanishes at the equator while the area half tracks relative
+vorticity, so the ratio is worst there:
+
+| band | ratio median | fraction above the 0.1 bar |
+|---|---|---|
+| \|lat\| < 5° | 5.74e-03 | 3.11% |
+| \|lat\| 5–40° | 5.86e-05 | 0.01% |
+| \|lat\| > 40° | 1.93e-04 | 0.63% |
+
+Still 17× under the bar even in the equatorial band, and the maximum anywhere
+is 0.42, so the area half never dominates — but **"unpaired-safe" carries the
+qualifier "except within a few degrees of the equator"**, where the margin is
+one order rather than three. In the
+other active channel — the NEMO-faithful lateral viscosity, which divides by
+`e1f·e2f` — `f` does not appear at all, so the area is structurally unpaired
+there and the fix strictly improves it. A consumer sweep found the one
+genuinely self-cancelling use of the vertex area (the Smagorinsky/om4p25
+raw-stress path, where it multiplies back out) is **INACTIVE on the DINO card**
+(`C_smag = 0`).
+
+**VERDICT: unpaired-safe. Shipped alone.** This is the first of the five
+recorded Rule-8 instances to be REFUTED as a pair by measurement rather than
+handled with a joint arm.
+
+**THE COST, named rather than buried.** The (cap, cell-average) pair is what
+makes the discrete curl of solid-body rotation equal the discrete `f`
+*exactly*, so the fix gives that up:
+
+| `\|curl(solid body) − f\| / f`, interior rows | median | \|·\| max |
+|---|---|---|
+| legoESM before (cap, cell_average) | −1.1e-16 | 1.6e-14 |
+| **after this fix (e1f·e2f, cell_average)** | **+1.1748e-05** | 4.1585e-05 |
+| Coriolis half alone (cap, face_latitude) | −3.9022e-05 | 7.6149e-05 |
+| **NEMO itself (e1f·e2f, face_latitude)** | **−2.7274e-05** | **1.0153e-04** |
+
+**THE BAR, APPLIED HERE TOO — and here it FAILS.** The first version of this
+section scored the pre-registered bar only in the absolute-vorticity channel,
+where it passes by 660×, and never applied it in this one. A bar applied only
+where it passes is not a bar. In this channel the ratio of the two halves is
+`|3sin²φ − 1| / (3cos²φ)`: **median 0.333, range 0.005–4.53 — AT OR ABOVE the
+0.1 bar.** By the registered criterion, *in this channel the two ARE a
+cancelling pair.* And the column an oracle lane actually cares about, distance
+to NEMO, was not computed at all; it is **3.116e-05 → 3.902e-05 at the median
+(worse)**, 1.0153e-04 → 7.6149e-05 at the max (better), improving at 58% of
+rows.
+
+**SO WHY SHIP ALONE.** The two channels disagree, and the argument for
+preferring one has to be stated rather than assumed — this document chose its
+channel before measuring (the pre-registration names the absolute vorticity),
+but it did not anticipate a second channel that fails. The discriminator:
+
+* the **absolute vorticity is a TERM in the equations** — every tendency the
+  model integrates passes through `q`, and there the area half is 1.5e-04 of
+  the Coriolis half because real ocean relative vorticity sits four orders
+  below planetary;
+* the **solid-body identity is a DIAGNOSTIC PROPERTY of the operator pair** —
+  it is a statement about one specific idealised flow, not a quantity the
+  model advances.
+
+State-dependent channel decides; the diagnostic channel is the recorded cost.
+NEMO's own discretisation is *less* solid-body-consistent than what this fix
+lands on, so the twin's internal consistency now sits between legoESM's and the
+oracle's. This is the same trade the `coriolis_placement` selector already
+documents; it is recorded, not hidden. **If the Coriolis half is ever fixed
+too, this channel is where the joint arm must be scored.**
+
+**CONSERVATION, measured rather than assumed.** The vertex area is a pure
+DIVISOR in every active DINO consumer, so no identity constrains its VALUE —
+what is constrained is that every consumer shares ONE value, and one did not:
+`vertex_area_cgrid` recomputed the cap while the curl read the stored array.
+They agreed to dtype roundoff while both were caps and would now differ by
+2.2e-05, so that helper was moved onto the stored array (its own contract is
+that `A·ζ` IS the circulation the curl formed).
+
+**Test non-vacuity, corrected after review:** with the source change stashed,
+**7 assertions go RED** — 6 in the vertex-area module plus the narrowed
+convention pin in the grids suite — not the 5 first reported. The rest stay
+green by design and now say so: two are no-regression checks (the wall rows,
+and the q-independent energy identity), and the pair-analysis class is
+closed-form receipts for the numbers above rather than a test of this diff.
+
+| identity | result |
+|---|---|
+| curl / vertex-area helper read ONE array | equal; control fires at 4.1e-05 |
+| circulation `A·ζ` invariant under an area-only swap | < 1e-13 relative |
+| curl's response equals the midpoint-rule gap | < 1e-9 over 8,460 cells |
+| EEN metric-weighting energy identity | net work < 1e-14 of domain KE |
+| wall rows stay positive, unchanged, and hard-zeroed in the helper | holds |
+
+**ONE-STATE RESPONSE: INERT.** Pre-registered as material only above 1%.
+Measured at the single day-220 replay state (`substep_traj_compare`,
+`LEGOESM_NEMO_E3T=both`, fp64):
+
+| statistic | before | after | change |
+|---|---|---|---|
+| wall max diff, jn=68 | 7.2393e-02 | 7.2385e-02 | **−0.011%** |
+| meridional deposit max\|dV_avg\| | 5.035e-05 | 5.033e-05 | **−0.040%** |
+| substituted-forcing max\|dV_sub\| | 2.629e-06 | 2.629e-06 | 0.000% |
+| `zu_frc` ACC residual | +9.0521e-05 Sv | +9.0521e-05 Sv | 0.000% |
+
+Both moving statistics move TOWARD NEMO. **Stated against my own prediction,
+which was wrong by 100×:** I predicted ≲1e-4 %, measured 1.1e-2 %. The verdict
+and the direction survive; the magnitude estimate does not, and I have not
+established which path carries the extra factor — that is PLAUSIBLE-at-best and
+is not claimed.
+
+**THE SCALING TEST, added after review, because a one-state null whose own
+prediction was falsified by 100× is not yet a result.** The campaign's standing
+rule is that a proposed mechanism must survive a scaling test: perturb by a
+known factor and check the response follows. The area perturbation was scaled
+×10 through the same one-state harness (temporary builder knob, reverted; the
+×1 arm reproduced the shipped number exactly, so the knob is inert at unity).
+
+| arm | wall max diff, jn=68 | response vs baseline |
+|---|---|---|
+| baseline (no fix) | 7.2393e-02 | — |
+| **×1 (shipped)** | 7.2385e-02 | −8.0e-06 |
+| **×10** | 7.2310e-02 | −8.3e-05 |
+
+**Response ratio 10.4 for a 10× perturbation** (predicted 10.0 if linear).
+
+*Provenance limitation, stated rather than glossed:* the replay harness stamps
+only the environment variables it knows about, so the scale factor does **not**
+appear in the arms' own artifacts — it is recorded here and in the commit
+instead. The control that the knob was actually in the path is the ×1 arm
+reproducing the shipped number **exactly** (7.2385e-02) while ×10 produced a
+different one; an unwired knob would have returned the same value for both.
+The diagnostic prints 5 significant figures, so the ×1 response is 8 quanta and
+the ratio carries ~±12% — 10.4 ± 1.3 against a predicted 10.0. **The response
+is LINEAR in the perturbation to the resolution available**, which is what
+licenses extrapolating the one-state margin instead of merely asserting it: the
+null is a real ~1e-4 sensitivity, not a cancellation that happened at this
+state. No multi-state arm was run, now on the strength of this rather than on
+the pre-registration alone.
+
+*Not claimed:* the meridional deposit moved 5.035e-05 → 5.033e-05 → 5.023e-05,
+a ratio of 6.0, but it is printed to 4 significant figures so the ×1 response is
+2 quanta and the ratio is bounded at ±50%. That statistic cannot discriminate
+linear from non-linear here and is recorded, not used.
 
 ### The ranked remainder, after the arm
 

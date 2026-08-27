@@ -154,17 +154,39 @@ arm, three arms. No new instrument.
   (16%, same order). Its ENRICHMENT leg does cross the 3× bar (2.35× → 5.16×) —
   reported, not buried, and far too small to matter. **Lateral friction is
   EXONERATED, not provisional.**
-- **The VERTEX area is not NEMO's `e1f·e2f` — newly EXPOSED, offline, cheap
-  (2026-08-27).** legoESM forms relative vorticity by dividing the circulation
-  by the exact spherical cap `R²·Δλ·|Δsin φ|`; NEMO divides by `e1f·e2f`. The
-  gap was **7.79e-06 median / 2.54e-05 max** and is now **2.22e-05 / 4.16e-05**,
-  because the compensating error in `e1f` was just removed (the v-face zonal
-  width fix). Pre-existing, not a new defect — and the fifth recorded instance
-  of the campaign's cancelling-pair pattern. No identity breaks (`q` enters the
-  AL81 triad symmetrically), but it is now the largest known horizontal-metric
-  infidelity in the twin, at the same order as the one just closed and in the
-  same operator the campaign is chasing. Same offline freeze-and-vary as the
-  v-face arm.
+- ~~**The VERTEX area is not NEMO's `e1f·e2f`**~~ — **CLOSED 2026-08-27, the
+  same day it was opened.** The construction diff is named and the fix shipped
+  inside `metric_convention="nemo_isotropic"`. legoESM built the vertex area as
+  the exact spherical cap between adjacent TRACER latitudes; NEMO forms it as
+  the product `e1f·e2f` of two scale factors taken at the F-point's own
+  Mercator latitude (`usrdef_hgr.F90` :97/:109/:114/:118). On a Mercator
+  coordinate `sin φ = tanh(Δλ·j)` gives `d(sin φ)/dj = Δλ·cos²φ`, so the cap is
+  the EXACT interval integral of `cos²φ` where NEMO's product is its MIDPOINT
+  value — **exact quadrature versus the midpoint rule**, gap
+  `(Δλ²/12)(3sin²φ − 1)`, reproduced to a measured/predicted ratio of
+  **0.999984** including the sign change at ±35.26°. The corrected area
+  reproduces NEMO's own closed form to **3.1e-15** relative, from 4.10e-05.
+  Because `pphif == pphiv` (:97 and :96 carry the same +0.5 offset), NEMO's
+  F-cell area IS the square of its v-face width, so this reuses the width the
+  previous fix corrected rather than deriving a second latitude.
+  **PAIR ANALYSIS: UNPAIRED-SAFE, measured not argued** (`vertex_area_pair_
+  analysis.py`). The area and the vertex Coriolis are the same defect at the
+  same point and meet in the F-point absolute vorticity `ζ + f`; on a
+  pre-registered bar of 1/10, the area half is **1.51e-04** of the Coriolis
+  half at the median (p99 6.9e-02), because `|ζ|` median 2.05e-08 sits four
+  orders below `|f|` median 1.02e-04. Removing it moves the total
+  absolute-vorticity error by +0.050%. In the other active channel — the
+  NEMO-faithful lateral viscosity, which divides by `e1f·e2f` — `f` does not
+  appear at all, so it is structurally unpaired there. The one genuinely
+  self-cancelling use of the vertex area (the Smagorinsky/om4p25 raw-stress
+  path) is INACTIVE on the DINO card.
+  **THE COST, named:** the (cap, cell-average) pair made the discrete curl of
+  solid-body rotation equal `f` EXACTLY; the fix lands that at +1.17e-05
+  median. NEMO's own pair is worse (−2.73e-05 median, 1.02e-04 max), so the
+  twin's internal consistency now sits between legoESM's and the oracle's.
+  **One-state response: INERT** — against a pre-registered 1% bar, the wall-row
+  fixed-bias residual moved −0.011% and the meridional deposit −0.040%, both
+  toward NEMO. No multi-state arm run.
 - **A pre-existing NaN in the adjoint of the sea-surface-height-average face
   depth**, found by review while checking the v-face fix and NOT caused by it.
   The barotropic face-depth helper divides by the v-face cell area without a

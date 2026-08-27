@@ -410,12 +410,42 @@ class TestNemoIsotropicMetricConvention:
         # rather than by this argument, in
         # tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::
         # TestInvariantsSurviveTheCorrectedWidth.
-        for f in ("area_q", "cos_alpha_v", "sin_alpha_v"):
+        #
+        # NARROWED A THIRD TIME 2026-08-27 (#1455), for area_q, on the same
+        # footing and with the same evidence.  area_q is the VERTEX (F-cell)
+        # dual area -- it is not a v-face field at all, and it appears in
+        # neither invariant: strain_rate_cgrid / stress_divergence_cgrid take
+        # a LatLonGrid (no area_q), and the divergence/advection mass
+        # consistency is built from cell areas and face widths.  Its ONE role
+        # is as the divisor curl_vertex_cgrid forms vorticity with, and the
+        # sentence at the top of this block covers it exactly: the property
+        # holds because every operator SHARES the metric, not because of its
+        # value.  It is NEMO's e1f*e2f (usrdef_hgr.F90:114/:118), the product
+        # of two scale factors at the F-point's own Mercator latitude, where
+        # legoESM built the exact spherical cap between adjacent TRACER
+        # latitudes -- the exact interval integral of cos^2 against NEMO's
+        # midpoint value of it.  Under "nemo_isotropic" it must therefore
+        # MOVE.  Re-measured on the corrected geometry, by measurement rather
+        # than by this argument, in
+        # tests/ocean/unit/test_dino_vertex_area_nemo.py.
+        for f in ("cos_alpha_v", "sin_alpha_v"):
             np.testing.assert_array_equal(
                 getattr(geom_exact, f), getattr(geom_iso, f),
                 err_msg=f"v-face field {f!r} changed under metric_convention "
                         "-- #516 invariant violated",
             )
+        # area_q MUST change too, and by the recorded amount -- pinned so the
+        # narrowing above permits exactly the intended move and nothing else.
+        # The two END rows are the wall carve-out and stay identical.
+        _aq_e = np.asarray(geom_exact.area_q, dtype=np.float64)
+        _aq_i = np.asarray(geom_iso.area_q, dtype=np.float64)
+        np.testing.assert_array_equal(_aq_i[0], _aq_e[0])
+        np.testing.assert_array_equal(_aq_i[-1], _aq_e[-1])
+        _rel_aq = np.abs(_aq_i[1:-1] - _aq_e[1:-1]) / _aq_e[1:-1]
+        assert 1e-6 < float(_rel_aq.max()) < 1e-4, (
+            f"the vertex area moved by {_rel_aq.max():.3e} relative under "
+            f"metric_convention; the midpoint-rule gap it is permitted to "
+            f"close is 1e-6..1e-4 (4.1e-05 on the DINO R1 mesh)")
         # dx_v MUST change too, and by the recorded amount -- pinned so the
         # narrowing above permits exactly the intended move and nothing else.
         _dxv_e = np.asarray(geom_exact.dx_v, dtype=np.float64)

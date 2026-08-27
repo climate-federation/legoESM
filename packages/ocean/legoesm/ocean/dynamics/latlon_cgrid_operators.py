@@ -670,6 +670,26 @@ def streamfunction_vorticity_operator(
     return curl_vertex_cgrid(u_bt, v_bt, grid)
 
 
+def _stored_or_recomputed_vertex_area(grid, dtype=None):
+    """The ONE way a regular lat-lon operator gets its vertex dual-cell area
+    (#1455 adversarial review, MAJOR 4).
+
+    Prefer the geometry's STORED ``area_q``; fall back to the spherical-cap
+    recompute only for a bare ``LatLonGrid`` that has none.  Every consumer must
+    route through here, because the identities the vertex area appears in hold
+    by every operator SHARING one value -- and under
+    ``metric_convention="nemo_isotropic"`` the stored array is NEMO's
+    ``e1f*e2f`` while the recompute is the spherical cap, which differ by up to
+    4.1e-05.  Recording that hazard in prose (as the first version of this fix
+    did) leaves the next caller to trip over it.
+    """
+    if hasattr(grid, "area_q"):
+        A = jnp.abs(grid.area_q[:, 0])
+        return A if dtype is None else A.astype(dtype)
+    lat = grid.lat if dtype is None else jnp.asarray(grid.lat, dtype=dtype)
+    return _vertex_dual_area_interior(lat, grid.radius, grid.dlon)
+
+
 def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
     """Dual-cell area at vertex (corner) points, shape (n_lat+1, n_lon+1).
 
@@ -689,7 +709,20 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
         return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
-    A_lat = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)  # (n_lat+1,)
+    # Routed through the shared reader so this helper and ``curl_vertex_cgrid``
+    # cannot drift apart: the discrete-Stokes property in the docstring above
+    # is the statement that THIS area is the one the curl divided by.  Cast to
+    # the recompute's dtype so moving to the stored array cannot silently
+    # PROMOTE the caller -- this becomes ``RigidLidStaticData.A_vertex`` and
+    # enters the CG solve, and the stored ``area_q`` is fp64 under an fp32
+    # policy.  On the Cartesian beta-plane the recompute this replaces returned
+    # an all-but-zero area (it differences a pseudo-latitude that is not the
+    # Cartesian spacing) where the stored ``dx*dy`` is correct, so this is a fix
+    # on that grid too -- pinned in ``test_dino_vertex_area_nemo.py``.
+    A_lat = _stored_or_recomputed_vertex_area(
+        grid,
+        dtype=_vertex_dual_area_interior(
+            grid.lat, grid.radius, grid.dlon).dtype)
     # Interior rows carry area; pole rows (wall BC) zero — consistent with
     # curl_vertex_cgrid computing vorticity only on interior rows.
     A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
@@ -1638,6 +1671,20 @@ def _vertex_dual_area_interior(lat, radius, dlon):
     """Raw vertex dual-cell area ``R**2 * dlon * |Δsin(lat)|`` of shape
     ``(n_lat+1,)`` (#515 consolidation).
 
+    SCOPE (#1455), recorded here rather than guarded, exactly as the analogous
+    ``dx_v`` hazard is recorded in ``vface_zonal_cos_lat``.  This builds the
+    ``metric_convention="exact"`` spherical cap.  A geometry built with
+    ``"nemo_isotropic"`` stores NEMO's ``e1f*e2f`` instead -- the midpoint
+    value of ``cos^2`` rather than its exact interval integral -- and the two
+    differ by up to 4.1e-05.  ``curl_vertex_cgrid`` and ``vertex_area_cgrid``
+    both read the STORED array and so never mix the two; the remaining callers
+    below (``strain_rate_cgrid``'s vertex floor and ``vertex_area_1d``)
+    recompute unconditionally and WOULD mix them.  Those are the Smagorinsky /
+    Leith / backscatter / lateral-friction paths, every one of which is off by
+    default and off on the DINO card, so the combination is unreached today.
+    Promote them to the stored array if any of those is ever switched on with
+    this convention selected.
+
     The single source for the interior of the regular (non-tripolar) lat-lon
     vertex/q-cell area, previously recomputed verbatim in ``vertex_area_cgrid``,
     ``strain_rate_cgrid`` and the Smagorinsky ``A_vertex`` floor.  Callers keep
@@ -2230,8 +2277,10 @@ def strain_rate_cgrid(
         _fdtype = jnp.result_type(float)
         lat_f = jnp.asarray(lat, dtype=_fdtype)
         cos_lat_f = jnp.asarray(cos_lat, dtype=_fdtype)
+        # Shared reader (#1455 MAJOR 4): the strain rate at a corner and the
+        # vorticity at the SAME corner must divide by the same area.
         A_vertex = jnp.maximum(
-            _vertex_dual_area_interior(lat_f, R, dlon), 1e-30)
+            _stored_or_recomputed_vertex_area(grid, dtype=_fdtype), 1e-30)
 
         dx_cell = R * cos_lat_f * dlon
         dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
@@ -2652,7 +2701,7 @@ def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
         Area of each vertex dual cell.  Pole rows are set to a small
         positive floor (1e-30) to avoid division by zero.
     """
-    A_v = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)
+    A_v = _stored_or_recomputed_vertex_area(grid)   # #1455 MAJOR 4
     return jnp.maximum(A_v, 1e-30)
 
 
