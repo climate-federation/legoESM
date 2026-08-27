@@ -144,11 +144,18 @@ def main(argv=None):
             for k, v in bundle["nh"].items():
                 yield f"nh.{k}", v
 
-    ref = dict(_leaves(a))
+    # The reference (arm A) leaves are multi-process GLOBAL arrays -- a
+    # plain np.asarray on one spans non-addressable devices and raises.
+    # process_allgather (tiled) assembles each on host, identical on
+    # every rank, so a local restart shard's .index slice can be
+    # compared against it.
+    from jax.experimental import multihost_utils as _mhu
+    ref = {name: np.asarray(_mhu.process_allgather(leaf, tiled=True))
+           for name, leaf in _leaves(a)}
     rank = jax.process_index()
     fails = []
     for name, leaf in _leaves(restart):
-        want_full = np.asarray(ref[name])
+        want_full = ref[name]
         for sh in leaf.addressable_shards:
             got = np.asarray(sh.data)
             want = want_full[sh.index]
