@@ -620,6 +620,15 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
         for ratio, history in zip(ratios, row_histories):
             can_void, x2yes, last_growth = R.u_is_material(
                 float(ratio), history, 360)
+            combined_270 = float(np.hypot(history[("lego", 270)],
+                                          history[("nemo", 270)]))
+            combined_360 = float(np.hypot(history[("lego", 360)],
+                                          history[("nemo", 360)]))
+            combined_growth = (combined_360 / combined_270
+                               if combined_270 > 0.0 else float("inf"))
+            combined_can_void = bool(
+                combined_growth > 1.0
+                and x2yes <= combined_growth ** R.V.UNSAT_CREDIT_QUARTERS)
             survives = bool(ratio > ESCALATION_BAR and not can_void)
             material.append(survives)
             material_details.append({
@@ -627,6 +636,8 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
                 "unsaturated_no_can_be_voided": bool(can_void),
                 "x2yes": float(x2yes),
                 "largest_last_quarter_side_growth": float(last_growth),
+                "combined_floor_last_quarter_growth": combined_growth,
+                "combined_floor_variant_can_be_voided": combined_can_void,
                 "survives_gt5_materiality": survives,
             })
         within_n = int(np.sum(ratios <= ROW_BAR))
@@ -651,6 +662,10 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
     x = x_values[0]
     x2 = x2_values[0]
     member_statuses = [entry["status"] for entry in member_rows]
+    reviewer_variant_voided = int(sum(
+        detail["raw_ratio_upper_bound"] > ESCALATION_BAR
+        and detail["combined_floor_variant_can_be_voided"]
+        for detail in control_rows["per_row_materiality"]))
     row_level = {
         "status": control_rows["status"],
         "all_members_same_classification": len(set(member_statuses)) == 1,
@@ -670,11 +685,23 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
         "voided_by_unsaturated_materiality_n": (
             control_rows["raw_gt5floor_upper_bound_n"]
             - control_rows["material_gt5floor_n"]),
+        "reviewer_combined_floor_variant": {
+            "status": "NOT_SCORED_REPO_RULE_USES_PER_SIDE_GROWTH",
+            "voided_n": reviewer_variant_voided,
+            "surviving_n": (control_rows["raw_gt5floor_upper_bound_n"]
+                            - reviewer_variant_voided),
+            "denominator": N_ROWS,
+        },
         "member_classifications": member_rows,
         "X_gross_sv_control": x,
         "X_gross_sv_by_member": x_values,
         "X_gross_sv_member_mean": float(np.mean(x_values)),
         "X_gross_sv_member_sample_std": float(np.std(x_values, ddof=1)),
+        "X_mean_over_member_sample_std": (
+            float(np.mean(x_values)) / float(np.std(x_values, ddof=1))),
+        "profile_amplitude_label": (
+            "PLAUSIBLE_ABOVE_CURRENT_ENSEMBLE_SPREAD; current floors are "
+            "unsaturated, so this is not promoted to CONFIRMED"),
         "X2_floor_excess_sv": x2, "X2_over_X": x2 / x,
         "X2_bound_status": (
             "UPPER bound on floor-excess magnitude because the day-360 "
@@ -708,12 +735,14 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
                              + np.std(nemo[360], axis=0, ddof=1) ** 2)
     for row in (CHANNEL_ROWS.start - 1, CHANNEL_ROWS.stop):
         wet_columns = int(np.sum(np.any(R.A.umask[row], axis=1)))
+        wet_t_columns = int(np.sum(np.any(R.A.tmask[row], axis=1)))
         outside[str(row)] = {
             "gap_sv": float(full_gap[row]),
             "row_floor_sv": float(full_floor_360[row]),
             "gap_over_band_floor": float(full_gap[row] / band_floor),
             "gap_over_band_net": float(full_gap[row] / band_net),
             "wet_u_columns": wet_columns,
+            "wet_t_columns": wet_t_columns,
             "total_u_columns": int(R.A.NX),
             "topology": "blocked; not a circumpolar channel boundary option",
         }
@@ -726,8 +755,9 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
         "day360_control_C": abs(band_net) / x,
         "band_floor_sv": band_floor, "J_one_row_over_band_floor": jackknife,
         "day360_net_over_band_floor": abs(band_net) / band_floor,
-        "day360_net_ppm_of_nemo_band": (
+        "day360_net_ppm_of_exact_day360_nemo_band": (
             1e6 * abs(band_net) / abs(float(band_n[0]))),
+        "day360_nemo_band_denominator_sv": float(band_n[0]),
         "day360_band_status": "UNMEASURABLE_BELOW_OWN_ENSEMBLE_FLOOR",
         "band_saturation": band_saturation,
         "withdrawn_edge_decider": {
@@ -741,13 +771,18 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
 
     legs, final = compose_verdict(time, member, spatial, row_level,
                                   sensitivity)
+    audit_voided = (control_rows["raw_gt5floor_upper_bound_n"]
+                    - control_rows["material_gt5floor_n"])
     retractions = [
         {
             "claim": "genuine row-level agreement REFUTED",
             "status": "RETRACTED",
             "replacement": (
-                "D UNRESOLVED: raw 17/35 >5-floor rows is an upper bound; "
-                "the audit materiality rule voids 9, leaving 8/35"),
+                f"D UNRESOLVED: raw "
+                f"{control_rows['raw_gt5floor_upper_bound_n']}/35 >5-floor "
+                f"rows is an upper bound; regional_audit.u_is_material "
+                f"voids {audit_voided}, "
+                f"leaving {control_rows['material_gt5floor_n']}/35"),
         },
         {
             "claim": "member-stable pattern CONFIRMED as independent evidence",
