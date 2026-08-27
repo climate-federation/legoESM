@@ -4,6 +4,23 @@ Frozen before the first execution of `endwall_wind_placement.py` on this
 branch.  The source alignment was read first; no array in the four KT lanes
 was numerically reduced before this file was committed.
 
+## Version 2 control correction — frozen before rerun
+
+The first execution produced **no valid measurement**: its 2x planted control
+was applied to the whole B1 state and failed (`1.108443e-10 m/s` against an
+absolute `1e-12` gate).  That control premise was wrong.  B1 is downstream of
+the state-dependent barotropic recurrence, so it is not the linear operator
+the control claimed to test.  No threshold is relaxed and no failed score is
+reused.
+
+The rerun moves the same 0x/1x/2x control to `surface_stress_faces`, the
+single-owner linear stress sign/interpolation/rotation helper that supplies
+both placements.  It requires exact equality of `tau(0x)=0` and
+`tau(2x)=2*tau(1x)`; a planted `nextafter` mutation of one returned wet-face
+value must make that equality fail.  Whole-step 2x departures are printed as
+diagnostics only and carry no gate.  The primary operands and all four science
+statistics below are unchanged from version 1.
+
 ## Claim and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
@@ -41,13 +58,12 @@ For the whole wet u-face domain and separately for the southern end-wall row
 4. `placement_delta_rms`: the numerator RMS in item 1, in m/s.  This, not the
    dead `utrd_tau`, is the measured placement term.
 
-The 2x arm is a planted violation/control: both the pre-solve deposit and the
-slow-forcing deposit must satisfy
-`max|delta_2x - 2*delta_1x| <= 1e-12 * max(1, max|delta_2x|)`.  The meridional
-stress is a structural-zero control on this DINO forcing and must be exactly
-zero on the oracle side and no larger than the same numerical bound on the
-legoESM side.  A hook count other than one per arm, a non-finite value, a
-failed entry-state identity gate, or a failed control invalidates every score.
+The 2x planted control is applied at `surface_stress_faces` as specified in
+version 2 above.  The meridional stress is a structural-zero control on this
+DINO forcing and must be exactly zero on the oracle side and no larger than
+`1e-12` on the legoESM side.  A hook count other than one per arm, a non-finite
+value, a failed entry-state identity gate, or a failed control invalidates
+every score.
 
 ## Interpretation frozen in advance
 
@@ -86,4 +102,3 @@ CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
 The arm must stamp `surface_stress_implicit=True`; an otherwise identical
 control stamps `False`.  The existing per-step eta extractor and
 `eta_flicker_decay.py` score the first 160 samples.  No GPU arm is run here.
-
