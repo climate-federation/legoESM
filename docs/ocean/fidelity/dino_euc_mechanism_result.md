@@ -19,6 +19,14 @@ The closure root is now isolated: **equatorial near-surface TKE energy is
 shear-setting interface.** The resulting mixing-length excess is algebraic,
 not independent.
 
+The TKE-equation decomposition now names the implementation owner:
+**legoESM incorrectly applies the `1e-4` surface-TKE minimum to its first
+interior interface under `tke_surface_bc_level="nemo_z0"`.** NEMO holds
+`rn_emin0` only at the separate surface row (`jk=1`) and solves/floors `jk=2`
+with `rn_emin=1e-6`. A preregistered replay removing only that misplaced
+interior clamp closes 94.35% of the median log-energy gap and moves all 47
+columns toward NEMO; the residual energy ratio is 1.0543.
+
 The review-corrected offline bar confirms because 10--40 m NRMS is 0.68865 and
 the single shear-setting 10.14 m ratio exceeds 1.25. The original
 `UNRESOLVED_CLOSURE_DIFFERENCE` label is retained in the artifact only as a
@@ -214,24 +222,65 @@ The archived one-GPU control reports 93 s through day 10 (including JIT) and
 for the pair, plus approximately 50 MiB total when retaining only day-0/day-10
 3-D states and daily reducers.
 
-## Costed next decomposition target — not run
+## TKE-equation term decomposition — executed
 
-The next target is the TKE equation itself, not another mixing-length test.
-Use the same 47 columns and substitute one NEMO term at a time into legoESM's
-single TKE solve while holding every other dumped operand fixed:
+The offline pass used the same 47 excess columns and captured legoESM's actual
+single TKE solve. BASE replay reproduced the captured matrix result within
+`8.48e-16` relative and reconstructed final post-`etau` energy within
+`7.76e-16`. The one-level-shift control worsened mean absolute log error from
+0.8134 to 1.6971, and a 2x production plant changed energy by
+`4.56e-4 m2/s2`, proving the replay path can fail.
 
-| TKE term | same-step evidence |
-|---|---|
-| shear production | `tke_dump_sh2.bin` |
-| buoyancy destruction | `tke_dump_rn2.bin` |
-| carried dissipation | `tke_dump_dissl.bin` |
-| energy response | `tke_dump_en.bin` |
-| surface boundary | `tke_dump_en.bin` and `tke_dump_zmxlm.bin` at jk=1, plus `sbc_dump_utau.bin` and analytical DINO `taum` |
+The four preregistered input factors are all near unity and none carries the
+2.2556x response:
 
-Score how much each substitution closes the 2.2556x energy gap. This requires
-no trajectory integration: budget one offline matched-step pass, approximately
-60 CPU-seconds and less than 10 MiB. Per coordinator instruction it is designed
-and costed here but **not run**.
+| candidate (causal direction) | geometric-mean factor | registered label | median replay closure | toward NEMO |
+|---|---:|---|---:|---:|
+| production `sh2_L/sh2_N` | 1.046834 | `NEAR_UNITY` | 0% | 0% |
+| buoyancy sink `(avt_N rn2_N)/(K_H,L N2_L)` | 0.966319 | `NEAR_UNITY` | 0% | 0% |
+| dissipation `dissl_N/dissl_L` | 1.000199 | `NEAR_UNITY` | 0% | 0% |
+| held surface energy `en_sfc,L/en_sfc,N` | 1.000000 | `NEAR_UNITY` | 0% | 0% |
+
+The surface receipts are exact, not merely close: analytical DINO `taum`, held
+surface `en`, and surface `zmxlm` ratios are 1.000000 in all 47 columns; both
+models reconstruct `en_sfc=max(1e-4,67.83*taum/1026)` and NEMO surface `avm`
+with zero reported relative error. Thus the surface coefficient is not a
+one-line coefficient mismatch.
+
+The registered four-input result remains `UNRESOLVED_TKE_EQUATION_OWNER`
+because none of those ratios passes its attribution bar. The preserved
+response ledger then exposes the structural boundary-placement error:
+legoESM's matrix energy is exactly `1e-4` in every excess column, whereas
+NEMO's solved `jk=2` energy ranges from `2.2275e-5` to `4.9311e-5`. The
+post-solve `etau` increment is only `1.0324e-13`, so it cannot explain the
+gap.
+
+The preregistered residual arm is
+`CONFIRM_MISPLACED_SURFACE_MIN_CLAMP`: BASE is pinned in 100% of columns,
+NEMO is below `1e-4` in 100%, lowering only the replay clamp to `1e-6` closes
+94.3549% of the median log gap, and all 47 columns move toward NEMO. The arm's
+geometric-mean energy ratio is 1.054275.
+
+NEMO makes the separation explicit. The executed surface BC is
+`en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )` at
+`cfgs/DINO/MY_SRC/zdftke.F90:361`. After solving `jk=2..jpkm1`, it applies
+`MAX(en,rn_emin)` only over those interior rows at `:561-565`. legoESM first
+applies `tke_background` and then unconditionally resets `e_new[...,0]` to at
+least `tke_surface_min` at
+`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:1377-1381`, even
+though the `nemo_z0` branch has already created a distinct virtual surface
+row.
+
+**Faithful fix design (not built):** guard the `tke_surface_min` clamp with
+`surface_bc_level == "interior_pinned"`. Under `nemo_z0`, retain only the
+ordinary `tke_background`/`rn_emin` clamp on solved interface 0; the virtual
+z=0 row remains the sole owner of `rn_emin0`.
+
+Registered causal-chain prediction: fix the clamp -> `en_L/en_N -> 1` at
+10.14 m -> the active buoyancy-limited `zmxlm` ratio and `avm` ratio -> 1 ->
+5--26 m shear strengthens and EUC core depth shoals toward NEMO. The existing
+short causal trajectory arms must test the final shear/core response; this
+offline finding does not promote that prediction to a trajectory verdict.
 
 ## Provenance
 
@@ -245,11 +294,14 @@ SHA-256 values are:
 - mesh mask: `3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622`.
 - NEMO final TKE energy: `b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565`;
 - NEMO final mixing length: `60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830`.
+- NEMO shear production: `2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53`;
+- NEMO carried dissipation: `facba1529b41577cf12b5d4cf5f43dc0ec9fed63ec4b073de17748204e8e15df`;
+- NEMO surface `utau`: `9c6943a02c5221feeb5b56d023418e69860d31d5ea0ded51437e7886811641f8`.
 
 The scorer hash-pins and reuses the committed bridge/dump reducers.  It writes
 the receipt, reads it back, and rejects a provenance mismatch.
 The final receipt was regenerated from clean committed HEAD
-`63f015f2f3ce24d52a1ad059c3842f67fe3d083f` on the named campaign branch and
+`5673a51e98b2aff668558e8ef028ed85e8bf63f8` on the named campaign branch and
 records `dirty:false`; its probe and time-registry hashes are also recorded.
 
 Repository note: no `AGENTS.md` exists in this checkout, its tracked tree,

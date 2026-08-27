@@ -39,7 +39,7 @@
     "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
     "nemo_tke_self_diffusion_input": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
     "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
-    "probe_source": "3a944612096e5ac86a912b2e5009cbf093d91085c4e10573e52a050645906cc6",
+    "probe_source": "7cf83a31ee4ede6fff6ae7dc095e215ce155809a74d0620288a6cbf55e5621d5",
     "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
   },
@@ -67,7 +67,7 @@
   "repo": {
     "branch": "fidelity/dino-euc-mechanism-codex",
     "dirty": false,
-    "head": "a09faeef8624f6eb58ceb1fc6eee65c46a1391f5"
+    "head": "5673a51e98b2aff668558e8ef028ed85e8bf63f8"
   },
   "review_retraction": {
     "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
@@ -334,7 +334,7 @@
     "verdict": "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
   },
   "tke_equation_decomposition_10m": {
-    "combined_physics_owner": null,
+    "combined_physics_owner": "legoESM_misplaced_surface_min_clamp_at_first_interior_interface",
     "controls": {
       "base_final_energy_reconstruction_max_relative_error": 7.756466684383205e-16,
       "base_solve_replay_max_relative_error": 8.478109567956923e-16,
@@ -560,7 +560,7 @@
     },
     "structural_surface_floor_replay": {
       "arm_over_nemo_geometric_mean": 1.054275004129711,
-      "base_pinned_to_1e_4_fraction": 0.0,
+      "base_pinned_to_1e_4_fraction": 1.0,
       "closure_iqr": [
         0.9311458526413244,
         0.9559388648577125
@@ -573,7 +573,7 @@
       "nemo_below_1e_4_fraction": 1.0,
       "nemo_source": "cfgs/DINO/MY_SRC/zdftke.F90:361 holds rn_emin0 at jk=1; :564-565 floors solved jk=2..jpkm1 with rn_emin",
       "registered_chain_prediction": "fix -> en_L/en_N approaches 1 at 10.14 m -> buoyancy-limited mxl and avm ratios approach 1 -> 5-26 m shear strengthens and the EUC core shoals toward NEMO; causal trajectory arms remain required",
-      "verdict": "REFUTE_MISPLACED_SURFACE_MIN_CLAMP"
+      "verdict": "CONFIRM_MISPLACED_SURFACE_MIN_CLAMP"
     },
     "surface_boundary": {
       "en_surface_lego_over_nemo": {
