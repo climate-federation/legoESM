@@ -9,8 +9,9 @@
 #
 # INSTANT-vs-INSTANT frozen-column TKE twin: does OUR closure equal NEMO's when
 # both see NEMO's OWN instantaneous equatorial column WITH NEMO's OWN turbulent
-# energy en?  We feed NEMO's day-30 restart (tn,sn,un,vn,en) into our closure,
-# read K from a SINGLE evaluation, and compare to NEMO's OWN closure
+# energy en?  We feed NEMO's day-30 restart (tn,sn,un,vn,en) into our closure's
+# DIRECT diagnostic pair (compute_mixing_lengths + compute_K_from_tke -- NO en
+# advance, unlike tke_vertical_mixing), and compare to NEMO's OWN closure
 # diffusivities avm_k/avt_k (NEMO field_def: "from closure schemes" -- the pure
 # TKE part, before the additive IWM and before EVD -> no IWM confound, and no
 # 5-day-mean K(mean state) artifact).
@@ -44,33 +45,35 @@ HARNESS=scripts/validate/ocean_fidelity/frozen_column_tke_twin.py
 ARM=$ROOT/results/omip_nemo/nemolev_trp_kmean_d30
 SNAP=$ARM/snapshot_day0030.npz
 MANI=$ARM/run_manifest.json
-# NEMO day-30 INSTANTANEOUS restart (32 tiles) + the 5-day SBC (taum).
+# NEMO day-30 INSTANTANEOUS restart (32 tiles) + the 5-day SBC (taum) + an
+# ORCA1 mesh_mask tile (native gdept_1d/gdepw_1d/e3t_1d vertical ladders).
 D30=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY_D30
 RGLOB="$D30/ORCA1_00000720_restart_oce_*.nc"
 SBC=$D30/ORCA1_5d_20000101_20000130_SBC.nc
+MESH=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_SMOKE/mesh_mask_0001.nc
 
-for f in "$SNAP" "$MANI" "$SBC"; do
+for f in "$SNAP" "$MANI" "$SBC" "$MESH"; do
   [ -e "$f" ] || { echo "FATAL: missing input $f"; exit 1; }
 done
 ls $RGLOB >/dev/null 2>&1 || { echo "FATAL: no restart tiles match $RGLOB"; exit 1; }
 
 echo "===================== STEP 1: self-recovery CONTROL ====================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --dt 150
+    --nemo-sbc "$SBC"
 rc1=$?
 echo "[gate] control exit = $rc1"
 [ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- instrument not trusted; NEMO twin NOT run."; exit 1; }
 
 echo "===================== STEP 2: NON-VACUITY (N2 x4) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --dt 150 --perturb-n2 4.0
+    --nemo-sbc "$SBC" --perturb-n2 4.0
 rc2=$?
 echo "[gate] non-vacuity exit = $rc2  (0 = reproduction correctly BROKE)"
 [ "$rc2" -eq 0 ] || { echo "FATAL: control STILL reproduced stored K under N2 x4 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
 
 echo "===================== STEP 3: NEMO instant frozen-column TWIN ==========="
 $PY -u "$HARNESS" --mode nemo --manifest "$MANI" \
-    --restart-glob "$RGLOB" --nemo-sbc "$SBC" --dt 3600
+    --restart-glob "$RGLOB" --nemo-meshmask "$MESH" --nemo-sbc "$SBC"
 rc3=$?
 echo "[done] nemo twin exit = $rc3"
 exit $rc3
