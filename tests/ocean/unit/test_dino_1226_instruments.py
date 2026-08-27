@@ -440,6 +440,122 @@ def test_print_before_bridge_verify_reports_zero_for_matched_state(instruments):
 
 
 # ---------------------------------------------------------------------------
+# kamm_twin_90d: --bridge-before-stress-tpoint (round-3 end-wall gate)
+# ---------------------------------------------------------------------------
+def test_tpoint_stress_selector_defaults_off_and_parses(instruments):
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    build_sig = inspect.signature(k._build_twin_state)
+    run_sig = inspect.signature(k.run_twin)
+    assert build_sig.parameters["bridge_before_stress_tpoint"].default is False
+    assert run_sig.parameters["bridge_before_stress_tpoint"].default is False
+    base = k._parse_args(["nemo_dino_kamm_mlf", "out.npz"])
+    selected = k._parse_args([
+        "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
+    assert base.bridge_before_stress_tpoint is False
+    assert selected.bridge_before_stress_tpoint is True
+
+
+def test_tpoint_stress_reconstruction_reuses_loader_and_changes_only_carry(
+        instruments, monkeypatch):
+    """Red if the selector inverts utau_b, edits a prognostic, or bypasses
+    either existing DINO forcing loader."""
+    from collections import namedtuple
+
+    k = instruments.kamm_twin_90d
+    calls = []
+    forcing_token = object()
+    expected_x = np.array([[-1.0, -2.0], [-3.0, -4.0]])
+    expected_y = np.zeros_like(expected_x)
+
+    def _arrays(grid, cfg):
+        calls.append(("arrays", grid, cfg))
+        return forcing_token
+
+    def _surface(forcing):
+        calls.append(("surface", forcing))
+        return types.SimpleNamespace(tau_x=expected_x, tau_y=expected_y)
+
+    monkeypatch.setattr(k, "dino_lat_lon_surface_forcing_arrays", _arrays)
+    monkeypatch.setattr(k, "dino_step_surface_forcing", _surface)
+    State = namedtuple(
+        "State", "T S u v eta tau_x_prev tau_y_prev tke")
+    sentinel_fields = [object() for _ in range(6)]
+    state = State(
+        *sentinel_fields[:5], np.full_like(expected_x, 99.0),
+        np.full_like(expected_y, 88.0), sentinel_fields[5])
+    grid, cfg = object(), object()
+
+    rebuilt, receipt = k.reconstruct_dino_before_stress_tpoint(
+        state, grid, cfg, t_seconds=15_552_000.0)
+    assert calls == [("arrays", grid, cfg), ("surface", forcing_token)]
+    assert np.array_equal(np.asarray(rebuilt.tau_x_prev), expected_x)
+    assert np.array_equal(np.asarray(rebuilt.tau_y_prev), expected_y)
+    # Exact sign is load-bearing: negating the analytic T field to mimic the
+    # raw NEMO face convention makes this assertion red.
+    assert float(np.asarray(rebuilt.tau_x_prev)[0, 0]) == -1.0
+    for name in ("T", "S", "u", "v", "eta", "tke"):
+        assert getattr(rebuilt, name) is getattr(state, name)
+    assert receipt["bridge_before_stress_stagger"] == "T"
+    assert receipt["bridge_before_stress_reconstruction_seconds"] == 15_552_000.0
+    assert receipt["bridge_before_stress_sha256"] == k._stress_content_sha256(
+        expected_x, expected_y)
+
+
+def test_tpoint_stress_hash_and_time_controls_can_fail(instruments):
+    k = instruments.kamm_twin_90d
+    x = np.arange(6.0).reshape(2, 3)
+    y = np.zeros_like(x)
+    planted = x.copy()
+    planted[0, 0] = np.nextafter(planted[0, 0], np.inf)
+    assert k._stress_content_sha256(x, y) != k._stress_content_sha256(planted, y)
+    with pytest.raises(ValueError, match="finite and >=0"):
+        k._analytic_dino_tpoint_stress(object(), object(), t_seconds=-1.0)
+
+
+def test_tpoint_stress_selector_refuses_euler_start_before_io(
+        instruments, monkeypatch):
+    k = instruments.kamm_twin_90d
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("selector must refuse before reading an oracle file")
+
+    monkeypatch.setattr(k, "read_nemo_mesh_mask", _boom)
+    with pytest.raises(SystemExit, match="requires --bridge-before"):
+        k._build_twin_state(
+            "nemo_dino_kamm_mlf", "/unused", "/unused",
+            bridge_before=False, bridge_before_stress_tpoint=True)
+
+
+def test_tpoint_stress_selector_threads_and_stamps_receipts(
+        instruments, monkeypatch):
+    """Red if the CLI goes inert or artifacts omit any registered receipt."""
+    import inspect
+
+    k = instruments.kamm_twin_90d
+    seen = {}
+    src = inspect.getsource(k.run_twin)
+
+    def _spy(*args, **kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(k, "run_twin", _spy)
+    monkeypatch.setattr(k, "provenance_gate", lambda: None)
+    monkeypatch.setattr(k, "_precision_gate", lambda: None)
+    k.main([
+        "nemo_dino_kamm_mlf", "out.npz", "--bridge-before-stress-tpoint"])
+    assert seen["bridge_before_stress_tpoint"] is True
+
+    assert 'bridge_before_stress_stagger = "T"' in src
+    assert "np.array_equal(np.asarray(st.tau_x_prev)" in src
+    assert "bridge_before_stress_stagger=np.str_(bridge_before_stress_stagger)" in src
+    assert "bridge_before_stress_reconstruction_seconds=np.float64(" in src
+    assert "bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256)" in src
+
+
+# ---------------------------------------------------------------------------
 # heat_discriminator: drift profile + crossing depth
 # ---------------------------------------------------------------------------
 def test_wet_mean_profile_basic(instruments):
