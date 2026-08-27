@@ -57,7 +57,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "7618c666f82c694f0cfb3085c636a9d51bb09c9b"
+PREREG_COMMIT = "681d189a349bb82e5d0a9f4244ac221a06d798d8"
 
 
 def _git(args: list[str]) -> str:
@@ -130,10 +130,10 @@ def _one_cell_label(participation: float, count: int,
     return "UNRESOLVED_ONE_CELL_SIGNATURE"
 
 
-def _coastal_label(overlap_fraction: float, argmax_coastal: bool) -> str:
-    if overlap_fraction >= 0.90 and argmax_coastal:
+def _coastal_label(overlap_fraction: float) -> str:
+    if overlap_fraction >= 0.90:
         return "CONFIRMED_COASTAL_UNMASK"
-    if overlap_fraction <= 0.10 or not argmax_coastal:
+    if overlap_fraction <= 0.10:
         return "REFUTED_COASTAL_UNMASK"
     return "UNRESOLVED_COASTAL_UNMASK"
 
@@ -170,7 +170,7 @@ def _localize(
                         if support_count else 0.0)
     argmax_coastal = bool(coastal[argmax])
     one_cell = _one_cell_label(p_row, int(row_outliers.sum()), row_scaled_max)
-    coastal_verdict = _coastal_label(coastal_fraction, argmax_coastal)
+    coastal_verdict = _coastal_label(coastal_fraction)
 
     coords = np.argwhere(outliers)
     coord_records = [
@@ -200,13 +200,20 @@ def _localize(
     second_face_fires = bool(
         planted_p > 1.9 and planted_outliers.sum() > row_outliers.sum())
 
-    synthetic_coastal = np.ones_like(coastal, dtype=bool)
-    synthetic_coastal[argmax] = False
-    flipped_label = _coastal_label(0.0, bool(synthetic_coastal[argmax]))
-    coastal_flip_fires = flipped_label == "REFUTED_COASTAL_UNMASK"
+    coastal_points = np.argwhere(coastal)
+    noncoastal_points = np.argwhere(~coastal)
+    nplant = min(10, len(coastal_points), len(noncoastal_points))
+    if nplant == 0:
+        raise SystemExit(f"{name}: coastal planted-control population absent")
+    synthetic_confirm = _coastal_label(1.0)
+    synthetic_refute = _coastal_label(0.0)
+    coastal_both_branches_fire = bool(
+        synthetic_confirm == "CONFIRMED_COASTAL_UNMASK"
+        and synthetic_refute == "REFUTED_COASTAL_UNMASK")
     print(f"CONTROL {name} localization: second_face_fires={second_face_fires} "
-          f"planted_P={planted_p:.9g} coastal_flip_fires={coastal_flip_fires}")
-    if not (second_face_fires and coastal_flip_fires):
+          f"planted_P={planted_p:.9g} "
+          f"coastal_both_branches_fire={coastal_both_branches_fire}")
+    if not (second_face_fires and coastal_both_branches_fire):
         raise SystemExit(f"{name}: localization planted control failed")
 
     result = {
@@ -237,7 +244,7 @@ def _localize(
         "controls": {
             "second_face_fires": second_face_fires,
             "planted_participation": planted_p,
-            "coastal_flip_fires": coastal_flip_fires,
+            "coastal_both_branches_fire": coastal_both_branches_fire,
         },
     }
     print(f"LOCALIZATION {name} " + json.dumps(result, sort_keys=True))
@@ -538,6 +545,9 @@ def main() -> int:
     content_sha256[str(
         _DIR / "PREREG_endwall_onecell_round2_correction.md")] = _sha256(
             _DIR / "PREREG_endwall_onecell_round2_correction.md")
+    content_sha256[str(
+        _DIR / "PREREG_endwall_round2_review_corrections.md")] = _sha256(
+            _DIR / "PREREG_endwall_round2_review_corrections.md")
     print("RETRACTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER_2.0966766111")
     print("RETRACTION_REASON=zDt_2_equals_rDt_over_2_and_union_mask_admitted_"
           "324_dry_coastal_u_faces_gate_had_no_reachable_REFUTE")
@@ -545,6 +555,8 @@ def main() -> int:
           "effectively_constant_NEMO_row")
     print("RETRACTION=round2_domain_participation_name_used_inverse_"
           "participation_instead_of_review_peak_equivalent_faces")
+    print("RETRACTION=coastal_gate_required_wet_argmax_to_have_umask_zero_"
+          "and_was_unreachable")
     print(json.dumps({
         "provenance": {
             "git_sha": sha,
@@ -683,6 +695,16 @@ def main() -> int:
         "CONFIRMED_COMMON_UPSTREAM_SUPPORT" if support_jaccard >= 0.90 else
         "REFUTED_COMMON_UPSTREAM_SUPPORT" if support_jaccard <= 0.10 else
         "UNRESOLVED_COMMON_UPSTREAM_SUPPORT")
+    coastal_labels = (
+        localization_zdf["result"]["coastal_label"],
+        localization_fslow["result"]["coastal_label"],
+    )
+    coastal_overall_label = (
+        "CONFIRMED_COASTAL_UNMASK" if all(
+            x == "CONFIRMED_COASTAL_UNMASK" for x in coastal_labels) else
+        "REFUTED_COASTAL_UNMASK" if any(
+            x == "REFUTED_COASTAL_UNMASK" for x in coastal_labels) else
+        "UNRESOLVED_COASTAL_UNMASK")
     planted_support = f_support.copy()
     planted_index = tuple(int(v) for v in np.argwhere(~z_support)[0])
     planted_support[planted_index] = ~planted_support[planted_index]
@@ -753,6 +775,7 @@ def main() -> int:
             "fslow": localization_fslow["result"],
             "one_percent_support_jaccard": support_jaccard,
             "support_label": support_label,
+            "coastal_overall_label": coastal_overall_label,
             "jaccard_plant_fires": bool(jaccard_plant_fires),
         },
         "term_label": label,

@@ -194,7 +194,7 @@ def main() -> int:
         return 3
 
     print("WET_ARITHMETIC_IDENTITY=" + (
-        "CONFIRMED_NAMED_IS_TWICE_APPLIED_TO_1E-8" if identity_ok
+        "CONFIRMED_NAMED_IS_TWICE_APPLIED_RATIO_STD_LE_1E-8" if identity_ok
         else "REFUTED_OR_UNRESOLVED"))
 
     if u_nonzero_count == 0 and u_reference_nonzero_count > 0:
