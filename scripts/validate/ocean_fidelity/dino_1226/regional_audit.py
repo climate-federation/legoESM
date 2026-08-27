@@ -2223,10 +2223,11 @@ def figures(rows, ts, keep, jets, rowgap, rowfloor, days, w, wet, out_dir):
     _rr = [abs(float(rowgap[360][i][_p4].sum()
                      / np.abs(rowgap[360][i][_p4]).sum()))
            for i in range(N_MEM)]
-    fig.suptitle("Per-row transport gap and per-row floor\n"
-                 "The band numbers are sums of the top panel; at day 360 the "
-                 f"equatorial band's sum retains under {100 * max(_rr):.0f}% of "
-                 "its own summed magnitude (sign undetermined across members).")
+    fig.suptitle(
+        "Per-row transport gap and per-row floor\n"
+        "The band numbers are sums of the top panel; at day 360 the\n"
+        f"equatorial band's sum retains under {100 * max(_rr):.0f}% of its own "
+        "summed magnitude\n(sign undetermined across members).", fontsize=10)
     fig.tight_layout()
     fig.savefig(f"{out_dir}/F5_per_row_gap.png", dpi=140)
     plt.close(fig)
