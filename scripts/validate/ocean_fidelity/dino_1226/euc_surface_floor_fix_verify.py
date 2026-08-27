@@ -190,20 +190,24 @@ def main() -> int:
         & np.isfinite(legacy_avm[row]) & np.isfinite(avm_nemo[row, :, 1])
         & (legacy_avm[row] > final["floor"] * (1.0 + 1e-12))
         & (avm_nemo[row, :, 1] > 1.2e-4 * (1.0 + 1e-12)))
-    population = eligible & (legacy_avm[row] / avm_nemo[row, :, 1] > 1.25)
+    legacy_avm_ratio_all = np.divide(
+        legacy_avm[row], avm_nemo[row, :, 1],
+        out=np.full_like(legacy_avm[row], np.nan),
+        where=np.abs(avm_nemo[row, :, 1]) > 0)
+    population = eligible & (legacy_avm_ratio_all > 1.25)
     if int(np.count_nonzero(population)) != 47:
         raise SystemExit(f"frozen legacy population changed: {population.sum()} != 47")
 
     artifact_path = ROOT / args.artifact
     artifact = json.loads(artifact_path.read_text())
-    prior_zonal_ratio = artifact["scores"]["closure_avm"]["lego_over_nemo"][0]
-    reconstructed_zonal_ratio = float(
-        np.mean(legacy_avm[row, wmask[row, :, 1]])
-        / np.mean(avm_nemo[row, wmask[row, :, 1], 1]))
-    if abs(reconstructed_zonal_ratio / prior_zonal_ratio - 1.0) > 1.0e-10:
+    prior_energy_ratio = artifact["tke_energy_single_root_10m"][
+        "energy_ratio"]["geometric_mean"]
+    reconstructed_energy_ratio = float(np.exp(np.mean(np.log(
+        legacy_en[row, population] / en_nemo[row, population, 1]))))
+    if abs(reconstructed_energy_ratio / prior_energy_ratio - 1.0) > 1.0e-10:
         raise SystemExit(
-            "legacy mask reconstruction failed old zonal ratio: "
-            f"{reconstructed_zonal_ratio} vs {prior_zonal_ratio}")
+            "legacy cohort reconstruction failed old energy ratio: "
+            f"{reconstructed_energy_ratio} vs {prior_energy_ratio}")
 
     idx = np.flatnonzero(population)
     en_ratio = fixed_en[row, idx] / en_nemo[row, idx, 1]
@@ -270,7 +274,7 @@ def main() -> int:
         "momentum_viscosity_ratio_fixed_over_nemo": ratio_summary(avm_ratio),
         "columns_energy_moved_toward_nemo_fraction": float(np.mean(toward)),
         "expected_replay_energy_ratio": float(replay_target),
-        "legacy_zonal_avm_ratio_reconstruction": reconstructed_zonal_ratio,
+        "legacy_energy_ratio_reconstruction": reconstructed_energy_ratio,
         "per_column": per_column,
         "source_contract": {
             "nemo_surface": (
