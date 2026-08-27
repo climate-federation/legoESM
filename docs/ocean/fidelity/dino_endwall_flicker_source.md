@@ -20,12 +20,22 @@ The run used CPU fp64, `LEGOESM_NEMO_E3T=both`, the d180 lane and kt=5761.
 
 ## Outcome
 
-The DINO `jpdyn_tau` slot is not evidence that wind is zero. It is emitted to
-the step-5764 restart but never populated. The offline probe proves the donor
-slot is exact zero, copies its allocated 3-D arrays, wires only their top level
-from NEMO's pre/post-stress brackets, proves every lower level remains zero,
-and routes the source score through that wired slot. The oracle artifact itself
-is read-only and unchanged.
+The preserved DINO `jpdyn_tau` slot is not evidence that wind is zero. It is
+emitted to the step-5764 restart but was never populated. The original offline
+probe proves that donor slot is exact zero, copies its allocated 3-D arrays,
+wires only their top level from NEMO's pre/post-stress brackets, proves every
+lower level remains zero, and routes the source score through that copy. The
+oracle artifact itself is read-only and unchanged.
+
+The literal source gap is now closed in an isolated CPU one-step run. A
+committed NEMO patch writes the exact `dyn_zdf` post-minus-pre level-1 stress
+increment into `jpdyn_tau` in trend units without adding tau to the registered
+nine-term interval accumulator. The patched restart has 9,758 nonzero zonal
+top cells, exact-zero lower levels and meridional slot, and reconstructs its
+independently written bracket to `1.388e-17`, below the frozen
+`1.776e-15` bar. Classification: **CONFIRMED_SLOT_WIRED**. This validates the
+diagnostic route and the offline number; it does not measure the tridiagonal
+placement response or eta ownership.
 
 The wired top-cell source operand and the independently captured
 barotropic `F_slow` entry agree in RMS amplitude to within 4.1% on southern
@@ -127,7 +137,7 @@ confirms.
 | 4 | `dynspg_ts` adds centred wind divided by full face-column depth to frozen slow forcing (`cfgs/DINO/MY_SRC/dynspg_ts.F90:423-445`). | The explicit route's depth mean enters `F_slow`; the implicit route restores `tau/(rho0*H)` explicitly (`ocean_model_latlon_cgrid.py:3607-3640`), and the substep consumes it directly (`barotropic_latlon_cgrid.py:932-961`). | **MATCH** source algebra. The offline `F_slow` score confirms no second face-depth division. |
 | 5 | `dyn_zdf` forms `Kbb+rDt*Krhs`, removes the after barotropic mean, then applies its vertical boundary condition (`cfgs/DINO/MY_SRC/dynzdf.F90:133-170`). | Shipped `surface_stress_implicit=False` keeps stress in the explicit tendency before the barotropic solve; `withhold_stress` selects the alternative route (`ocean_pe_latlon_cgrid.py:3684-3701,4495-4501`). | **DIFF (shipped placement)**. |
 | 6 | MLF adds `zDt_2*(tau_b+tau_now)/(rho0*e3_face(Kaa))` between tridiagonal recurrences (`dynzdf.F90:340-373,535-566`). | The alternative arm adds `dt_mom*tau/(rho0*dz0)` to the solve input before the same vertical diffusion solve (`ocean_model_latlon_cgrid.py:6681-6702,7003-7009`). | **MATCH** source formula in the alternative arm. Its dynamic response is unmeasured offline. |
-| 7 | `trddyn` computes `utrd_tau` for XIOS (`src/OCE/TRD/trddyn.F90:153-165`). DINO's dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but later emits the unpopulated slot (`:329-330,389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). | The offline probe loads the emitted 3-D slot, proves it is zero, copies it, wires top level from the bracketing dumps, and scores through that copy. | **DIFF (diagnostic wiring only)**; not a physical zero or placement response. |
+| 7 | `trddyn` computes `utrd_tau` for XIOS (`src/OCE/TRD/trddyn.F90:153-165`). DINO's original dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but emits the unpopulated slot (`:329-330,389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). | The offline probe first scored through a controlled copy. The committed oracle patch now calls `trddump_tau` from the exact `dyn_zdf` bracket and a CPU one-step restart confirms the live store reconstructs that bracket. | **MATCH (diagnostic source, patched and measured)**; still not a placement-response or eta-ownership measurement. |
 | 8 | `mlf_baro_corr` follows `dyn_zdf` (`stpmlf.F90:396-409,752-790`). | The active shipped `leapfrog`/split-explicit path accepts either stress placement and retains the configured post-vmix reconciliation. `kamm_twin_90d.py` now exposes and stamps the existing Boolean selector. | **MATCH (arm availability)** for the registered A/B. The separate `outer_integrator="nemo_mlf"` path still has its own guard and is not this arm. |
 
 ## Offline wind source-operand measurement
@@ -172,6 +182,38 @@ NEMO's direct zero meridional deposit is retracted.
 close, but the direct j=1 pattern misses the frozen equivalence correlation
 bar and neither j=1 normalized error reaches the material-DIFF bar.
 
+## Live `jpdyn_tau` wiring receipt
+
+The source patch, preregistration and verifier are committed as
+`nemo_endwall_tau_slot.patch`, `PREREG_nemo_endwall_tau_slot_live.md`, and
+`verify_nemo_endwall_tau_slot.py`. Their SHA-256 values at execution were
+`7ac8f3b1...b5b8ef20`, `5cebefe0...fdea4b`, and
+`319034ab...e1c4d`. The temporary clone retained oracle revision `dcc7fb8`
+and copied the campaign's untracked DINO `MY_SRC`, work-configuration registry
+and `arch-conda.fcm` before applying the patch.
+
+The only model execution used the direct single-rank binary after three
+fail-closed setup refusals (missing work registry, missing compiler
+architecture, and PMIx socket denial). It exited zero. Patched source hashes
+were `aec531e1...a7ab8` (`trddump.F90`) and
+`57a36d14...e1b941` (`dynzdf.F90`); executable hash
+`43667212...a2209`; input restart hash `0cc00f99...ff3e`; output restart hash
+`d0902a82...1381`. The four bracket hashes are identical to the accepted
+preserved-run operands, proving this source hook changed diagnostic storage,
+not the measured wind term.
+
+The preregistered verifier at Git commit `c1380f9e1` printed:
+
+- zonal slot/bracket nonzero cells: 9,758 / 9,758;
+- lower-level maximum: exact zero;
+- meridional slot and bracket maxima: exact zero;
+- reconstruction maximum: `1.3877787807814457e-17` versus
+  `1.7763568394002505e-15` bar;
+- normalized reconstruction error: `8.37195276218268e-17`;
+- both planted controls: fired;
+- `CLASSIFICATION=CONFIRMED_SLOT_WIRED` and
+  `PLACEMENT_OWNERSHIP=UNRESOLVED`.
+
 **Candidate-B placement/ownership verdict: UNRESOLVED.** The registered GPU
 discriminator runs the same bridged state for five days with only
 `surface_stress_implicit` changed. The committed preregistration contains the
@@ -211,11 +253,29 @@ finalized.
   the twin now has a fail-closed per-step fp64 eta contract with exact
   NEMO/scorer invocations; Kmm is closed; candidate A requires same-input
   counterfactuals; and the second LBC is listed and scoped to tracer transport.
+- Final evidence review: the offline copy still did not satisfy the literal
+  request to wire NEMO's emitted `jpdyn_tau` store. Disposition: a committed
+  source patch now writes the exact bracket in trend units, an isolated
+  patched NEMO CPU step produced a real restart, and the preregistered
+  independent reconstruction classified it `CONFIRMED_SLOT_WIRED`.
+- Final mechanism review: the GPU preregistration mixed whole-domain
+  first-eight amplitude, first-sample aggregate-wall share, and a last-half
+  zonal-wall label; its extractor pointed at a directory without retained
+  restart tiles; and alignment A stopped before the Asselin/final-LBC/swap
+  feedback chain. Disposition: one coherent first-eight domain/locus pair is
+  frozen, the certified NEMO eta artifact and scorer are SHA-bound, rows 13-17
+  complete the active chain, and final `finalize_lbc` joins the same-input
+  boundary counterfactual.
 
 ## Verification receipts
 
 - Clean offline probe at the accepted commit: PASS, frozen science tuple
   unchanged, all entry/helper/order/slot/structural-zero controls PASS.
+- NEMO source patch: `git apply --check` PASS; isolated DINO fp64 build PASS;
+  direct single-rank one-step CPU execution PASS (exit 0).
+- Live-slot verifier: `CONFIRMED_SLOT_WIRED`; 9,758 nonzero top-level zonal
+  values, exact-zero lower/meridional controls, `1.388e-17` reconstruction
+  maximum against `1.776e-15`, and both planted violations fire.
 - Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
   harness: PASS.
 - Twin selector/config smoke and implicit-arm construction on CPU: PASS;
@@ -234,6 +294,9 @@ finalized.
 Standing retractions:
 
 - `utrd_tau == 0` does not mean the physical wind term is zero.
+- “Every emitted `utrd_tau` artifact is unwired” is retracted: the preserved
+  campaign artifact is unwired, while the isolated patched one-step artifact
+  is source-wired and independently verified.
 - NEMO wind is not implicit-only; it enters `dynspg_ts` and `dyn_zdf`.
 - Whole-B1 stress linearity is not a valid exact helper control.
 - Expecting one stress-helper call was wrong: active leapfrog evaluates the
