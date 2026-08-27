@@ -230,7 +230,7 @@ def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
 
 
 def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
-             sphum_index=None, q_scale=1.0, batched=False):
+             sphum_index=None, q_scale=1.0, batched=False, consv_te=0.0):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
     # Tracer-major, matching this module's contract (nq entries, each
@@ -239,10 +239,11 @@ def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
     q = [jnp.asarray(np.stack([_t[t][iq] for t in range(6)]))
          for iq in range(NQ)]
     press = _press_jax(jst, ptop)
+    _extra = {"consv_te": consv_te} if consv_te else {}
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q, batched=batched,
                                  **_common(ptop, ak, bk, hydrostatic,
                                            k_split, n_split),
-                                 **_moist(zvir, sphum_index))
+                                 **_moist(zvir, sphum_index), **_extra)
 
 
 def _out_state(got):
@@ -872,6 +873,44 @@ def test_batched_matches_loop(jctx, eta, hydrostatic):
             bat[nm], loop[nm],
             f"fv_dynamics_step[{nm},hydro={hydrostatic}]",
             rtol=5e-12, atol=5e-12)
+
+
+def test_batched_matches_loop_consv_fixer(jctx, eta):
+    """Exercise the ENERGY FIXER's close_out_pt face loop (the last
+    dormant per-face x[t] site, batched here): hydrostatic + dry +
+    consv_te=1.0 + k_split=1 so the only step is last_step and the
+    fixer fires. Without consv_te the fixer branch never runs, so the
+    other batched tests never covered it."""
+    loop = _run_jax(jctx, eta, hydrostatic=True, k_split=1,
+                    consv_te=1.0)
+    bat = _run_jax(jctx, eta, hydrostatic=True, k_split=1,
+                   consv_te=1.0, batched=True)
+    for nm in ["state", "press", "q", "omga", "nsplt", "nsplt_exceeded"]:
+        assert_batched_matches_loop(
+            bat[nm], loop[nm], f"consv_fixer[{nm}]",
+            rtol=5e-12, atol=5e-12)
+    # NON-VACUITY (codex MINOR): prove the fixer actually MOVED pt, so
+    # this parity check cannot pass merely because dtmp happened to be
+    # 0 (a bug zeroing/mis-pairing dtmp would trivially agree with
+    # itself on both branches otherwise).
+    off = _run_jax(jctx, eta, hydrostatic=True, k_split=1, consv_te=0.0)
+    correction = float(jnp.abs(loop["state"]["pt"]
+                                - off["state"]["pt"]).max())
+    assert correction > 1e-6, (
+        f"consv_te=1.0 fixer produced a near-zero pt correction "
+        f"({correction:.3e}); the batched-vs-loop parity above would "
+        f"pass vacuously if the fixer were disabled or its dtmp "
+        f"mis-paired to zero.")
+    # NOTE (why there is no jit arm here): the consv_te total-energy
+    # fixer is EAGER-ONLY. Its energy integrals (fixer_energy_2d /
+    # _hs_face_jax) np.asarray traced arrays, so the whole consv_te>0
+    # branch raises TracerArrayConversionError under jit -- a
+    # PRE-EXISTING property, unrelated to this face-batching change.
+    # The duo lane's jitted step always runs consv_te=0 (the fixer is
+    # exercised only through the eager fv_dynamics_step spec path), so
+    # the vmapped close_out_pt arm never executes under jit in
+    # production; eager batched-vs-loop parity above is the whole of
+    # its reachable coverage.
 
 
 def test_batched_defaults_off(jctx, eta):

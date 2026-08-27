@@ -963,13 +963,29 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             dtmp = energy_fixer_dtmp_jax(te0_2d, te_2d, zsum0, _area,
                                          consv=consv_te, n=n, ng=ng)
             st = dict(st)
-            st["pt"] = jnp.stack([
-                close_out_pt(st["pt"][t], pr["pkz"][t],
-                             [qq[i][t] for i in range(nq)],
-                             sphum_index=sphum_index, r_vir=zvir,
-                             dtmp=dtmp, cp=cp_air, n=n, ng=ng,
-                             fixer_on=True)
-                for t in range(6)])
+            if batched:
+                # Face-batch the energy fixer's close_out_pt (the last
+                # dormant per-face x[t] read; consv_te-only).  dtmp is a
+                # GLOBAL scalar reduction (energy_fixer_dtmp_jax sums over
+                # every face) so it is face-invariant -> closed over, NOT
+                # mapped; pt/pkz and each q leaf are per-face -> in_axes 0.
+                # A positional-only wrapper keeps the kwargs (static +
+                # the closed dtmp) out of vmap's in_axes.
+                def _close_one(pt_t, pkz_t, q_t):
+                    return close_out_pt(
+                        pt_t, pkz_t, q_t, sphum_index=sphum_index,
+                        r_vir=zvir, dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                        fixer_on=True)
+                st["pt"] = jax.vmap(_close_one, in_axes=(0, 0, 0))(
+                    st["pt"], pr["pkz"], [qq[i] for i in range(nq)])
+            else:
+                st["pt"] = jnp.stack([
+                    close_out_pt(st["pt"][t], pr["pkz"][t],
+                                 [qq[i][t] for i in range(nq)],
+                                 sphum_index=sphum_index, r_vir=zvir,
+                                 dtmp=dtmp, cp=cp_air, n=n, ng=ng,
+                                 fixer_on=True)
+                    for t in range(6)])
 
         return (st, pr, qq, om, nhc, nspl, nexc), ac["stages"]
 
