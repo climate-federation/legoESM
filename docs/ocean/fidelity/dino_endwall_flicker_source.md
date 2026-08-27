@@ -90,17 +90,19 @@ implementation difference whose wall-row consequence remains to be measured.
 | 7 | Half-back pressure gradient, live `dyn_cor_2D`, drag, frozen forcing, then masking update velocity (`dynspg_ts.F90:766-784,818-850`). | `_run_substep_loop` builds pressure, live EEN Coriolis, drag, adds `F_slow`, then masks (`barotropic_latlon_cgrid.py:903-961`). | **MATCH** order. `F_slow` is not depth-divided again. |
 | 8 | Every substep commits ssh and velocity halos with `lbc_lnk`, including vector signs (`dynspg_ts.F90:899-916`). | Updated serial arrays are multiplied by local wet masks; there is no statement-level halo commit (`barotropic_latlon_cgrid.py:932-961`; rationale at `ocean_model_latlon_cgrid.py:8744-8759`). | **DIFF (boundary representation)**; equivalence at the wall Nyquist mode is unmeasured. |
 | 9 | Primary velocity/ssh sums use `wgtbtp1`; transport uses the secondary tail; all normalize after the loop. Filter 2 constructs a `2*nn_e` boxcar and tail (`dynspg_ts.F90:733-738,974-1003,1242-1292`). | Weight construction, accumulators and normalized velocity/transport outputs are explicit (`barotropic_latlon_cgrid.py:1131-1140,1577-1616`). | **MATCH**. |
-| 10 | Immediately before `dyn_zdf`, NEMO installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | The shipped return path installs the configured primary velocity average before vmix (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1760`). | **DIFF (temporary pre-vmix state)**. The later paired reconciliation aligns. Whether any downstream active stencil consumes this velocity difference is unverified. |
-| 11 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
-| 12 | After `dyn_zdf`, `mlf_baro_corr` installs the after barotropic mean (`stpmlf.F90:396-409,752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8100-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
+| 10 | NEMO commits a second LBC on normalized `un_adv/vn_adv` after the loop (`dynspg_ts.F90:999-1011`). | legoESM returns its separately accumulated transport output without a corresponding statement-level halo commit (`barotropic_latlon_cgrid.py:1577-1616`). | **DIFF (transport boundary representation)**, but scoped out of eta ownership: this output feeds tracer transport, not the completed eta. It remains a control unless a next-step eta consumer is demonstrated. |
+| 11 | Immediately before `dyn_zdf`, NEMO temporarily installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | legoESM retains the primary velocity-average momentum state and routes Hu/Hv separately to tracer transport (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1618-1650,1760`). | **DIFF (bookkeeping only; CLOSED as momentum candidate)**. Active vector `dyn_zdf` builds Kaa from Kbb and Krhs (`cfgs/DINO/MY_SRC/dynzdf.F90:133-159`), not Kmm velocity, and later reconciliation restores the momentum mean. |
+| 12 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
+| 13 | After `dyn_zdf`, `mlf_baro_corr` installs the after barotropic mean (`stpmlf.F90:396-409,752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8100-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
 
 **Candidate-A verdict: UNRESOLVED.** There is no justified single-variable GPU
-arm yet. The next discriminator must use the existing substep loaders with
-wind on and find the first subsequent face-depth/flux, pressure-gradient, or
-Coriolis stencil whose j=1/j=197 value differs because of one alignment DIFF.
-A before/after dump of the physical row alone is insufficient for a halo
-candidate. The barotropic preregistration explicitly stops before a GPU arm
-until that first consumer selects one mechanism.
+arm yet. Cross-model first divergence cannot assign a mechanism while other
+state/operator residuals coexist. The registered STOP now requires two
+same-input counterfactuals: literal NEMO LBC versus shipped boundary
+representation at the first consumers, and fixer correction `c` versus zero at
+the next-step consumers. Each predicts an independently dumped residual under
+frozen error/correlation/explained-fraction bars. No free run is authorized
+until exactly one counterfactual confirms.
 
 ## Alignment B — wind-stress entry and placement
 
@@ -156,8 +158,9 @@ bar and neither j=1 normalized error reaches the material-DIFF bar.
 **Candidate-B placement/ownership verdict: UNRESOLVED.** The registered GPU
 discriminator runs the same bridged state for five days with only
 `surface_stress_implicit` changed. The committed preregistration contains the
-exact implicit/control commands, artifact stamp, baseline acceptance interval,
-and `1.25/0.08` confirmation versus `2.30/0.68` refutation bars.
+exact implicit/control commands, per-step fp64 capture contract, NEMO extractor
+and scorer invocations, artifact stamp, baseline acceptance interval, and
+`1.25/0.08` confirmation versus `2.30/0.68` refutation bars.
 
 ## Review disposition and retractions
 

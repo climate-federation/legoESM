@@ -134,7 +134,7 @@ Exact implicit arm:
 CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
   .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
   nemo_dino_kamm_mlf results/dino_1455/wind_place_implicit.npz \
-  --days 5 --bridge-before --save-3d --surface-stress-implicit
+  --days 5 --bridge-before --save-step-eta --surface-stress-implicit
 ```
 
 Exact explicit control:
@@ -143,9 +143,39 @@ Exact explicit control:
 CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
   .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
   nemo_dino_kamm_mlf results/dino_1455/wind_place_explicit.npz \
-  --days 5 --bridge-before --save-3d --no-surface-stress-implicit
+  --days 5 --bridge-before --save-step-eta --no-surface-stress-implicit
 ```
 
 The artifacts must stamp `surface_stress_implicit=True` and `False`,
-respectively. Use the existing per-step eta extractor and
-`eta_flicker_decay.py` to score the first 160 samples. No GPU arm runs here.
+respectively. `--save-step-eta` makes the primary `eta` payload exactly 160
+per-step fp64 samples, writes relative `t_seconds=2700..432000`, stamps
+`capture_every_steps=1`, and refuses a non-fp64 materialized state. Daily eta
+is retained separately as `eta_daily`.
+
+Rebuild the registered NEMO comparator from its existing certified per-step
+run (the extractor verifies kt, `rDt=2700`, fp64, and NEMO's Asselin identity):
+
+```sh
+.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_wave_twin.py \
+  extract-nemo --run-dir /tmp/dino_eta_waves/nemo_5d \
+  --kt0 5760 --nsteps 160 \
+  --out results/dino_1455/nemo_day180_5d_eta.npz
+```
+
+Score each arm against that same comparator with the exact registered tool:
+
+```sh
+.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_flicker_decay.py \
+  --nemo results/dino_1455/nemo_day180_5d_eta.npz \
+  --lego results/dino_1455/wind_place_implicit.npz \
+  --out results/dino_1455/wind_place_implicit_flicker.json
+
+.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_flicker_decay.py \
+  --nemo results/dino_1455/nemo_day180_5d_eta.npz \
+  --lego results/dino_1455/wind_place_explicit.npz \
+  --out results/dino_1455/wind_place_explicit_flicker.json
+```
+
+The NEMO extractor's binary md5 must remain the registered
+`d3cf9242289b633d671013d0299803a3`; any missing run or changed receipt is a
+STOP, not permission to substitute daily output. No GPU arm runs here.

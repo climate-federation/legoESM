@@ -31,27 +31,44 @@ bridge must be bit-identical.
 
 ## Registered next discriminator — STOP before a GPU arm
 
-The source audit leaves several live implementation differences: NEMO's
-per-substep halo/LBC commit versus legoESM's masked serial array; the temporary
-pre-`dyn_zdf` transport-mean versus velocity-mean installation; and legoESM's
-post-solver uniform `fix_eta_drift` projection. Source reading does not show
-which, if any, first changes a consuming wall-row stencil.
+The live eta candidates are (i) NEMO's per-substep ssh/velocity halo/LBC
+commit versus legoESM's masked serial representation and (ii) legoESM's
+post-solver uniform `fix_eta_drift` projection. The temporary NEMO Kmm
+transport-mean installation is **not** a candidate: active vector `dyn_zdf`
+constructs Kaa from Kbb and Krhs, tracer transport is routed separately, and
+`mlf_baro_corr` later restores the momentum mean.
 
-Extend the existing `spg_substep_chain.py`/`substep_traj_compare.py` dump
-convention with wind ON to print, for every substep, the first nonzero
-NEMO-lego difference at the *first subsequent stencil that consumes committed
-values* (face-depth/flux, pressure gradient, or Coriolis), separately on j=1
-and j=197. Comparing the physical row immediately before/after a halo write is
-not sufficient: the row may be unchanged while the next stencil consumes a
-changed halo.
+Cross-model first divergence is only context, not attribution. Before any GPU
+arm, build two same-input counterfactual probes, reusing
+`spg_substep_chain.py`/`substep_traj_compare.py` conventions with wind ON:
 
-- If the first consuming-stencil divergence is uniquely attributable to one
-  alignment DIFF, amend this preregistration with the exact selector and
-  invocation **before** a five-day run, then use the frozen ownership bars.
-- If no divergence appears, refute that statement-level mechanism and run no
-  GPU arm.
-- If multiple differences appear together, report `UNRESOLVED`; do not
-  combine them.
+1. **Boundary representation.** From one identical substep state and identical
+   tendencies, evaluate the first subsequent face-depth/flux,
+   pressure-gradient, and Coriolis consumers twice: once with the shipped
+   serial mask/periodic representation and once with a literal mapped NEMO
+   `lbc_lnk` scalar/vector commit. Print j=1/j=197 pointwise deltas. A planted
+   vector-sign or halo-offset violation must fail. The exact primary score is
+   prediction normalized error of this counterfactual delta against the
+   independently dumped NEMO-minus-lego first-consumer residual; correlation
+   is the companion. **CONFIRMS statement ownership** at error `<=0.10` and
+   correlation `>=0.99`; **REFUTES** at explained RMS fraction `<=0.10` or
+   correlation `<=0.20`; otherwise `UNRESOLVED`. NEMO's second post-loop LBC
+   on normalized `un_adv/vn_adv` is tracer-transport bookkeeping and must be
+   dumped as a control, but is scoped out of eta ownership unless a next-step
+   eta consumer is demonstrated.
+2. **Uniform eta fixer.** Capture the shipped pre-fix eta and exact scalar
+   correction. From that same state, evaluate the next step's first
+   face-depth/flux and pressure-gradient consumers with correction `c` versus
+   zero, holding every other input fixed. Print the same prediction error,
+   correlation and explained fraction against the independently dumped
+   next-step residual, separately at j=1/j=197. Plant a known nonzero `c` and
+   require the consumer to move. Apply the same `0.10/0.99` confirmation and
+   `0.10/0.20` refutation bars.
+
+Only a counterfactual that confirms uniquely may receive an executable
+one-variable selector. Amend this preregistration with that selector and exact
+invocation **before** the five-day free run, then apply the frozen ownership
+bars above. If both confirm, report `UNRESOLVED` and do not combine them.
 
 No executable barotropic candidate selector exists yet, so this registration
 deliberately contains no nominal GPU command. No GPU arm runs in this lane.
