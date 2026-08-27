@@ -47,6 +47,16 @@ live barotropic pass. Swapping the first two event labels is the planted
 violation and must fail the order equality. No score from the refused run is
 reused and no science threshold changes.
 
+Evidence re-review found that version 7 still *bypassed* rather than wired the
+allocated diagnostic slot. Version 8 registers the actual offline wiring:
+load `utrd_tau/vtrd_tau` from `DINO_00005764_restart.nc`, require their emitted
+3-D arrays to be exact zero, copy them, populate only top level `k=1` with
+`(poststress-prestress)/rDt`, require every lower level to remain exact zero,
+and feed all source scoring through `rDt*wired_slot[k=1]`. Controls plant a
+nonzero in the emitted slot, a nonzero at a lower level, and a material top-
+level reconstruction error; each must fire. The restart file joins the hashed
+inputs. This changes the data route, not the registered quantity or bars.
+
 ## Candidate and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
@@ -63,9 +73,9 @@ production `surface_stress_faces` and barotropic call. It runs the same bridged
 state with 0x, 1x and 2x centred stress; every non-stress input must be exact.
 
 The oracle `utrd_store(:,:,:,jpdyn_tau)` /
-`vtrd_store(:,:,:,jpdyn_tau)` slot is emitted to output but never populated by
-the DINO dump path. The probe does not fill or mutate the slot; it reconstructs
-the equivalent source operand from `(poststress-prestress)/rDt`.
+`vtrd_store(:,:,:,jpdyn_tau)` slot is emitted to the step-5764 restart but
+never populated by the DINO dump path. The offline probe preserves that donor,
+copies its 3-D arrays, and wires the copies as registered in version 8.
 
 ## Exact offline numbers
 
