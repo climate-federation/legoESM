@@ -978,16 +978,24 @@ class TestFV3DuoSpmdDriver:
             drv.setup()
 
     def test_spmd_constructs_with_the_knobs(self, tmp_path):
+        """NON-VACUOUS (codex MAJOR: the first cut asserted something
+        true of the serial model too): the knobs must PROVABLY have
+        taken -- a ring-enabled context distinct from the bundle's, its
+        tables carrying a ring_comm whose mesh spans the local
+        devices."""
         import jax
-        if 6 % len(jax.local_devices()) != 0:
-            pytest.skip("local device count does not divide 6")
+        if len(jax.local_devices()) < 2 or 6 % len(jax.local_devices()):
+            pytest.skip("needs 2/3/6 local devices")
         from legoesm.driver.model_driver import ModelDriver
         drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
         drv.setup()
-        # the knobs took: the ring comm rides the model's context tables
-        tab = drv.model._ctx.tab if hasattr(drv.model, "_ctx") else None
-        # cheap, structural: a second, ring-enabled context was built
-        assert drv.model.grid.ctx_jax is not None
+        ctx = drv.model._ctx_jax
+        assert ctx is not drv.model.grid.ctx_jax, \
+            "spmd model reused the bundle's serial context"
+        rc = ctx.tab.ring_comm
+        assert rc is not None, "ring_comm not attached"
+        assert tuple(rc.mesh.axis_names) == ("face",)
+        assert rc.mesh.size == len(jax.local_devices())
 
     def test_spmd_short_run_completes(self, tmp_path):
         import jax

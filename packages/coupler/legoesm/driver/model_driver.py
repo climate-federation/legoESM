@@ -7763,8 +7763,9 @@ class ModelDriver:
         the final step, as ``fv3duo_ckpt_step_*.npz`` (atomic:
         tmp + os.replace).
 
-        Slice-1 refusals that REMAIN (each loud, none silent): no MPI /
-        SPMD, no ensemble.  All physics/forcing EXCEPT Held-Suarez are
+        Refusals that REMAIN (each loud, none silent): no MPI, no
+        MULTI-PROCESS SPMD (single-process face SPMD is supported via
+        --distributed-mode spmd), no ensemble.  All physics/forcing EXCEPT Held-Suarez are
         refused at model construction (component factory);
         ``cfg.held_suarez_forcing`` applies the certified 3-pass HS step
         after each dynamics step.  The HS step is a pure function of the

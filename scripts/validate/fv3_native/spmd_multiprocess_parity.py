@@ -23,6 +23,13 @@ pre-registered few-ulp gate (per-field ``atol + rtol*scale``).  A wrong
 neighbor graph across processes (device-order bugs, local submesh) is
 exactly what the per-process slice comparison catches: process p's faces
 would carry another face's halo values.
+
+WHAT THIS DOES NOT CERTIFY (GLM): only that multi-process sharded
+execution agrees with an independent single-device recomputation of the
+SAME code -- not absolute correctness against the external oracle (the
+Fortran parity gates own that), not defects shared by both lanes, and
+not shard-decomposition fidelity beyond this probe's own index
+arithmetic (``addressable_shards[i].index`` slicing the host reference).
 """
 from __future__ import annotations
 

@@ -798,6 +798,18 @@ def create_atmosphere_dycore(
             from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
             devs = jax.local_devices()
+            if len(devs) == 1:
+                # GLM: a GPU-less env (JAX_PLATFORMS=cpu fallback, CUDA
+                # visibility failure) yields a silent 1-device mesh and
+                # the "SPMD" run executes unsharded while claiming
+                # distribution. Refuse: a 1-device distributed run
+                # certifies nothing.
+                raise ValueError(
+                    "fv3_duo spmd: only ONE local device is visible "
+                    f"({devs[0]}); a 1-device 'distributed' run would "
+                    "execute unsharded. Drop --distributed, or provide "
+                    "2/3/6 devices (GPUs, or "
+                    "xla_force_host_platform_device_count).")
             if 6 % len(devs) != 0:
                 raise ValueError(
                     f"fv3_duo spmd: {len(devs)} local devices does not "
