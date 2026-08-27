@@ -57,7 +57,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "75ddb78ec476f27bab697f126ee93452e481c497"
+PREREG_COMMIT = "4869209d918843c86bbc1368abdd16db209d7831"
 
 
 def _git(args: list[str]) -> str:
