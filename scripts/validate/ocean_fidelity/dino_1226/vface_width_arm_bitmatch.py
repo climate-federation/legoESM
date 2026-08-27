@@ -64,6 +64,12 @@ def stamp() -> None:
     print(f"PROVENANCE  HEAD={sha}  dirty_tracked={len(dirt.splitlines())}")
     print(f"PROVENANCE  seqdump={SEQDUMP}")
     print(f"PROVENANCE  JAX_ENABLE_X64={os.environ.get('JAX_ENABLE_X64')}")
+    try:
+        import jax
+        print(f"PROVENANCE  backend={jax.default_backend()} "
+              f"devices={[d.platform for d in jax.devices()]}")
+    except Exception as _e:                      # pragma: no cover
+        print(f"PROVENANCE  backend=UNKNOWN ({_e})")
 
 
 def main() -> int:
@@ -184,9 +190,34 @@ def main() -> int:
         rel = np.abs(diff[jj, ii]) / np.maximum(np.abs(dxv_arm[jj, ii]), 1e-30)
         print(f"  max |relative|        : {rel.max():.6e}")
 
+    # THE BACKEND MATTERS AND IT WAS NEARLY MISSED (2026-08-27).  The first
+    # run of this probe was on CPU and reported 0 differing cells; the same
+    # probe on GPU reports 1352, at a max RELATIVE difference of 2.5e-16 --
+    # one ulp of float64, from the device transcendental library rounding
+    # cos() differently.  That is 1.3e11 times smaller than the 3.3485e-05
+    # defect and physically irrelevant, but "BIT-IDENTICAL" is a claim about
+    # bits and it is FALSE on GPU.  So the verdict is three-valued and the
+    # backend is stamped above, rather than a CPU run being quoted as though
+    # it were universal.
+    ulp = 2.220446049250313e-16                  # float64 eps
+    rel_max = 0.0
+    if n_diff:
+        jj, ii = np.nonzero(diff)
+        rel_max = float((np.abs(diff[jj, ii])
+                         / np.maximum(np.abs(dxv_arm[jj, ii]), 1e-30)).max())
     # The registered call, COMPUTED from the numbers above.
     print()
-    if n_diff == 0:
+    if 0 < n_diff and rel_max <= 4.0 * ulp:
+        print(f"  VERDICT: EQUIVALENT TO {rel_max / ulp:.1f} ULP, not "
+              f"bit-identical on this backend.")
+        print(f"  {n_diff} cells differ, max relative {rel_max:.3e} -- "
+              f"float64 rounding in the device")
+        print("  cos(), NOT a construction difference. It is "
+              f"{3.3485e-05 / rel_max:.1e}x smaller than the")
+        print("  defect being fixed. The construction is the same one; the "
+              "bits are not.")
+        rc = 0
+    elif n_diff == 0:
         print("  VERDICT: BIT-IDENTICAL. The faithful construction produces "
               "exactly the array the")
         print("  override arm substituted.")

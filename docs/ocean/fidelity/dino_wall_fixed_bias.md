@@ -706,12 +706,24 @@ offline, no model run:
     cells differing 10296, max relative 3.3485e-05  -- the control fires
 ```
 
-**Zero of 10,400 cells differ.** Two honest qualifications on that headline,
-both from adversarial review. First, 104 of those cells are the two end-wall
-rows, which the arm leaves at legoESM's own value and which are therefore equal
-by construction; the probe now *asserts* they are the pole-zeroed wall instead
-of silently counting them as agreements, so the real statement is **0 of 10,296
-substituted cells differ, and the 104 uncompared cells are checked to be zero.**
+**Zero of 10,400 cells differ — on CPU.** Three honest qualifications on that
+headline. The first was caught by re-running the probe on the other backend
+after the fix was already committed, and it is the sharpest: **this result is
+backend-dependent.** On GPU the same probe reports **1,352 cells differing at a
+maximum RELATIVE difference of 2.5e-16 — 1.1 ulp of float64** — because the
+device transcendental library rounds `cos()` differently. That is **1.3e+11×
+smaller than the 3.3485e-05 defect** and physically meaningless, but
+"bit-identical" is a claim about bits and it is false on GPU. The probe now
+stamps its backend and returns a three-valued verdict, so a CPU run can no
+longer be quoted as though it were universal. The construction is the same one
+on both backends; the bits are not.
+
+The remaining two qualifications come from adversarial review. 104 of those
+cells are the two end-wall rows, which the arm leaves at legoESM's own value and
+which are therefore equal by construction; the probe now *asserts* they are the pole-zeroed wall (and that
+NEMO's own `vmask` shows them carrying no wet faces) instead of silently counting
+them as agreements, so the real statement is **0 of 10,296 substituted cells
+differ on CPU, and the 104 uncompared cells are checked to be zero.**
 Second, the control's 10,296 does match the touched-cell count §6a records for
 the arm — but `10,296 = 198 × 52` is what the substitution overwrites on *any*
 array of this shape, so it corroborates the shape, not the identity. The
