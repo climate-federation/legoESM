@@ -9,7 +9,7 @@ received a second adversarial pass.
 
 **Instrument:**
 `scripts/validate/ocean_fidelity/dino_1226/row13_edge_attribution.py` at clean
-producer `2a1c7ca23a484562e4888061a1ee4595eeb174a0`.
+producer `c5fe3cb63d05b78974a8ee6f54f27e263326b17f`.
 
 **Pre-registration:** `PREREG_row13_edge_attribution.md` at `ea416520b`,
 committed before the first state statistic was computed.  The review-mandated
@@ -18,7 +18,7 @@ corrected statistic was computed; it is explicitly post-registration.
 
 **Artifact:** `docs/ocean/fidelity/dino_row13_edge_attribution_artifact.json`,
 SHA-256
-`6447be3c028d0a9d98c3c317266eda020f4e1d58677efbd9f50b5e157dc2f8c3`.
+`2b28cd6a1793982b6555c5a76e632b97975268f97fe8cea2a353609a87d1e6d7`.
 It contains every member, horizon, level and longitude.  Everything is offline
 from the saved verdict360 states; no model was stepped.
 
@@ -47,12 +47,15 @@ and are printed before any corrected score.
 > low-n, boundary-adjacent saved-state pattern with P3-profile similarity but
 > no attributable owner.**
 
-For four horizons, Pearson's null is exactly uniform on `[-1,1]`, so every
-unadjusted two-sided receipt is `p = 1 - |r|`.  The `0.70`, `0.50`, and `0.30`
-bars therefore correspond to `p = 0.30`, `0.50`, and `0.70`; they are only
-descriptive routing bars.  The four 1e-14-nudge members have effective
-independent replication approximately one.  Member 0 is primary; members 1--3
-are sensitivity traces, and no median-over-members evidentiary gain is claimed.
+For four independent bivariate-normal horizon pairs, Pearson's null is exactly
+uniform on `[-1,1]`, so the theoretical unadjusted two-sided receipt is
+`p = 1 - |r|`.  The `0.70`, `0.50`, and `0.30` bars therefore correspond to
+`p = 0.30`, `0.50`, and `0.70`; they are only descriptive routing bars.
+Seasonal dependence and overlapping leave-one-out training folds mean these
+receipts are not inferential p-values here.  The four 1e-14-nudge members have
+effective independent replication approximately one.  Member 0 is primary;
+members 1--3 are sensitivity traces, and no median-over-members evidentiary
+gain is claimed.
 
 Both absolute gap verdicts are withheld.  At day 360 row 13 is
 `+0.0322305 Sv / 0.0038435 Sv = 8.386` current floors and row 49 is
