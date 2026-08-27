@@ -942,7 +942,7 @@ def run(out_dir):
     artifact["provenance"]["producer_dirty_end"] = dirty_end
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / "row13_edge_attribution.json"
+    path = out / "dino_row13_edge_attribution_artifact.json"
     payload = json.dumps(artifact, indent=2, sort_keys=True, allow_nan=False)
     path.write_text(payload + "\n")
     print(artifact["retractions"][0])
