@@ -482,27 +482,24 @@ def run_control(args, oracle, twins):
           "by the 65-105 m entrainment band, so the reported band K is weakly "
           "sensitive to either (no per-column bathymetry invented).")
 
-    def call(Tc, Sc):
+    def call(Tc, Sc, en_scale=1.0):
         return direct_K(
             T=Tc[band][None], S=Sc[band][None],
             u_cell=u_cell[band][None], v_cell=v_cell[band][None],
-            en=np.asarray(z["tke"])[band][None], taum=tau_cols[None, :],
+            en=np.asarray(z["tke"])[band][None] * en_scale, taum=tau_cols[None, :],
             eta=np.asarray(z["eta"])[band][None], lat=lat[band][None, :],
             dz_ref=dz_ref, t_depth_ref=t_depth_ref, cfg=cfg,
             eos_name=eos, rho0=rho0, g=g)
 
     Tc = np.asarray(z["T"], dtype=np.float64)
     Sc = np.asarray(z["S"], dtype=np.float64)
-    # State fed to the gate: perturbed under --perturb-n2 (non-vacuity), else
-    # the true snapshot state.  N2 -> scale T,S deviation from the surface by
-    # sqrt(f) so d(T,S)/dz -> sqrt(f)* and N2 -> ~f* (verified below, not assumed).
-    if args.perturb_n2 != 1.0:
-        s = np.sqrt(args.perturb_n2)
-        Tg = Tc[..., :1] + s * (Tc - Tc[..., :1])
-        Sg = Sc[..., :1] + s * (Sc - Sc[..., :1])
-    else:
-        Tg, Sg = Tc, Sc
-    avm, avt, zk, N2g = call(Tg, Sg)
+    # State fed to the gate: perturbed under --perturb-en (non-vacuity), else the
+    # true snapshot state.  Non-vacuity scales the INPUT turbulent energy en:
+    # K_M = c_k * l_k * sqrt(2 en) with l_k ~ sqrt(2 en)/N, so K ~ en — a strong,
+    # monotone, deterministic coupling (the earlier T,S->N2 perturbation moved the
+    # band N2 only ~1.24x, codex #6).  The resulting band-K ratio is measured, and
+    # the REAL STEP-1 gate must reject.
+    avm, avt, zk, N2g = call(Tc, Sc, en_scale=args.perturb_en)
 
     # our stored K (FULL = closure + additive IWM), reduced over the SAME wet box
     # columns and the SAME interior interfaces as ours (codex #4 common mask).
@@ -529,17 +526,15 @@ def run_control(args, oracle, twins):
           f"(in [x{1/args.control_tol:.2f}, x{args.control_tol}] = {in_band}; "
           "shortfall = additive-IWM fraction)")
 
-    if args.perturb_n2 != 1.0:
+    if args.perturb_en != 1.0:
         # Real-gate non-vacuity (codex #5): rerun the ACTUAL STEP-1 assertion
-        # (closure/stored in the band) under the perturbation and require it to
-        # now FAIL.  Also MEASURE the band N2 ratio so the "N2 x{f}" claim is
-        # verified, not assumed.
-        _, _, _, N2_base = call(Tc, Sc)
-        n_base = band_reduce(N2_base, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
-        n_pert = band_reduce(N2g, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
-        n_ratio = n_pert / n_base if n_base else float("nan")
-        print(f"[control] NON-VACUITY N2 x{args.perturb_n2} requested; MEASURED "
-              f"band N2 ratio perturbed/control = x{n_ratio:.3f}")
+        # (closure/stored in the band) under an en perturbation and require it to
+        # now FAIL.  MEASURE the resulting band-K ratio so the effect is verified.
+        avm_b, _, _, _ = call(Tc, Sc)
+        k_base = band_reduce(avm_b, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+        k_ratio = c_avm / k_base if k_base else float("nan")
+        print(f"[control] NON-VACUITY en x{args.perturb_en}; MEASURED band avm "
+              f"ratio perturbed/control = x{k_ratio:.3f}")
         broke = not in_band
         print(f"[control] NON-VACUITY: STEP-1 assertion now FAILS = {broke} "
               "(must be True -> the real gate can reject)")
@@ -638,9 +633,10 @@ def build_arg_parser():
     p.add_argument("--lon-west", type=float, default=DEFAULT_LON_WEST)
     p.add_argument("--lon-east", type=float, default=DEFAULT_LON_EAST)
     p.add_argument("--snapshot", type=Path, default=None)
-    p.add_argument("--perturb-n2", type=float, default=1.0,
-                   help="non-vacuity: scale N2 by this; the STEP-1 closure/"
-                        "stored band assertion must then FAIL (real gate)")
+    p.add_argument("--perturb-en", type=float, default=1.0,
+                   help="non-vacuity: scale input TKE en by this (K ~ en); the "
+                        "STEP-1 closure/stored band assertion must then FAIL "
+                        "(real gate)")
     p.add_argument("--control-tol", type=float, default=1.5)
     p.add_argument("--restart-glob", type=str, default=None)
     p.add_argument("--nemo-meshmask", type=Path, default=None,

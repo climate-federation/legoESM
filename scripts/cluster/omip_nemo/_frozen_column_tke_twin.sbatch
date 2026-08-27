@@ -63,12 +63,12 @@ rc1=$?
 echo "[gate] control exit = $rc1"
 [ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- instrument not trusted; NEMO twin NOT run."; exit 1; }
 
-echo "===================== STEP 2: NON-VACUITY (N2 x4) ======================="
+echo "===================== STEP 2: NON-VACUITY (en x0.1) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --rec 4 --perturb-n2 4.0
+    --nemo-sbc "$SBC" --rec 4 --perturb-en 0.1
 rc2=$?
 echo "[gate] non-vacuity exit = $rc2  (0 = STEP-1 assertion correctly FAILED)"
-[ "$rc2" -eq 0 ] || { echo "FATAL: STEP-1 assertion STILL passed under N2 x4 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
+[ "$rc2" -eq 0 ] || { echo "FATAL: STEP-1 assertion STILL passed under en x0.1 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
 
 echo "===================== STEP 3: NEMO instant frozen-column TWIN ==========="
 $PY -u "$HARNESS" --mode nemo --manifest "$MANI" \
