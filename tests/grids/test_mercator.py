@@ -363,10 +363,11 @@ class TestNemoIsotropicMetricConvention:
                 getattr(geom_default, f), getattr(geom_exact, f))
 
     def test_vface_metric_invariant_under_metric_convention(self):
-        """#516 constraint: the v-face metric (dx_v, dy_v, area_q,
-        cos_alpha_v) that ``vface_zonal_cos_lat`` and the strain/stress
-        adjoint pair depend on must be BIT-IDENTICAL between "exact" and
-        "nemo_isotropic" -- this flag only touches the T/u-face metric."""
+        """#516 scope: which v-face fields this flag may move, and which it
+        may not.  ``area_q``/``cos_alpha_v``/``sin_alpha_v`` must be
+        BIT-IDENTICAL between "exact" and "nemo_isotropic"; ``dx_v`` (NEMO's
+        e1v) and ``dy_v`` (NEMO's e2v) must both follow the convention, by the
+        recorded amount and no more.  See the narrowing notes below."""
         from legoesm.grids import create_latlon_geometry
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             vface_zonal_cos_lat,
@@ -394,12 +395,49 @@ class TestNemoIsotropicMetricConvention:
         # conservatively, not because the invariant consumes it.  It is NEMO's
         # e2v, and ldf_slp's vslp divides by it, so it MUST follow the
         # convention (#1226: NEMO usrdef_hgr.F90:117 sets pe2v = pe1v).
-        for f in ("dx_v", "area_q", "cos_alpha_v", "sin_alpha_v"):
+        #
+        # NARROWED AGAIN 2026-08-27 (#1455), for the SAME reason and with the
+        # same evidence, this time for dx_v itself.  dx_v was in this list on
+        # the identical conservative footing dy_v was: the sentence three lines
+        # up -- "both hold because every operator SHARES that metric, not
+        # because of its value" -- says outright that pinning its VALUE is
+        # stronger than the invariant being protected.  It is NEMO's e1v
+        # (usrdef_hgr.F90:113), evaluated at the V-point's own Mercator
+        # latitude gphiv, and legoESM was evaluating it at the arithmetic mean
+        # of the two adjacent TRACER latitudes -- 3.3e-05 relatively too large
+        # at DINO's walls.  Under "nemo_isotropic" it must therefore MOVE.
+        # The invariants are re-run on the corrected geometry, by measurement
+        # rather than by this argument, in
+        # tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::
+        # TestInvariantsSurviveTheCorrectedWidth.
+        for f in ("area_q", "cos_alpha_v", "sin_alpha_v"):
             np.testing.assert_array_equal(
                 getattr(geom_exact, f), getattr(geom_iso, f),
                 err_msg=f"v-face field {f!r} changed under metric_convention "
                         "-- #516 invariant violated",
             )
+        # dx_v MUST change too, and by the recorded amount -- pinned so the
+        # narrowing above permits exactly the intended move and nothing else.
+        _dxv_e = np.asarray(geom_exact.dx_v, dtype=np.float64)
+        _dxv_i = np.asarray(geom_iso.dx_v, dtype=np.float64)
+        _int = slice(1, -1)          # the two END faces are zero under both
+        _rel = np.abs(_dxv_i[_int] - _dxv_e[_int]) / _dxv_e[_int]
+        assert 1e-5 < float(_rel.max()) < 1e-4, (
+            f"dx_v moved by {float(_rel.max()):.3e} relative under "
+            "nemo_isotropic; the recorded v-face zonal-width correction on "
+            "this mesh is ~3.3e-05 (#1455) -- a different size means a "
+            "different change is being made")
+        # The END faces keep the #516 transport-metric convention (exactly 0)
+        # under BOTH conventions -- only the interior latitude moved.
+        np.testing.assert_array_equal(_dxv_i[0], _dxv_e[0])
+        np.testing.assert_array_equal(_dxv_i[-1], _dxv_e[-1])
+        assert float(np.abs(_dxv_i[0]).max()) == 0.0
+        assert float(np.abs(_dxv_i[-1]).max()) == 0.0
+        # Under nemo_isotropic the two v-face scale factors are ONE quantity
+        # (usrdef_hgr.F90:113 == :117), bit-for-bit on the interior.
+        np.testing.assert_array_equal(
+            _dxv_i[_int], np.asarray(geom_iso.dy_v, dtype=np.float64)[_int],
+            err_msg="nemo_isotropic must give e1v == e2v on the interior")
         # dy_v MUST change -- pin it, so the new behaviour is asserted rather
         # than merely permitted by the narrowing above.
         assert not np.array_equal(

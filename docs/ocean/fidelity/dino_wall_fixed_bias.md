@@ -581,7 +581,258 @@ at the clean tree and reproduces `1.8475e-07` exactly.
 **Also verified at the point of use rather than relayed**, because the whole arm
 rests on it: `dx_u` vs `e1u`, `dy_u` vs `e2u` and `dy_v` vs `e2v` agree with
 NEMO's mesh to 1.3e-16, and the cell area to 2.3e-16. The v-face zonal width
-really is the only horizontal metric off by more than roundoff.
+really is the only horizontal metric off by more than roundoff — **scoped, as
+adversarial review required (2026-08-27): that sweep covers the metrics the
+barotropic loop reads, and does NOT cover the VERTEX area, which legoESM builds
+as the exact spherical cap `R²·Δλ·|Δsin φ|` while NEMO divides the circulation
+by `e1f·e2f`. Those disagree by ~1.9e-05 median — the same order as the defect
+this arm removed. It sits outside the loop the arm exercised, so the arm's
+premise survives; as a statement about the twin's horizontal metrics generally,
+the sentence is too broad.** See the debt register.
+
+## 6b. THE FAITHFUL CONSTRUCTION. Named, fixed, and bit-matched to the arm
+
+The arm above substituted NEMO's `e1v` **array**. That proved the mechanism
+real; it did not say why legoESM's own array was wrong. This section answers
+that, ships the fix, and shows that the two are the same experiment.
+
+### The DIFF, read from both models' source
+
+It is **not** a different formula, a different radius, or a rounding. Both
+models compute the same thing, `R·Δλ·cos φ`. They evaluate it at a **different
+latitude**.
+
+NEMO, `cfgs/DINO/MY_SRC/usrdef_hgr.F90`:
+
+```fortran
+zvj = REAL( mjg(jj,0) - nn_jeq_s, wp ) + 0.5                     ! :98
+pphiv(ji,jj) = 1./rad * ASIN( TANH( rn_e1_deg *rad* zvj ) )      ! :108
+pe1v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg  ! :113
+pe2v (ji,jj) = ra * rad * COS( rad * pphiv(ji,jj) ) * rn_e1_deg  ! :117
+```
+
+The Mercator transform is taken at the **half-integer row index** — the
+V-point's own latitude. (`ra = 6371229 m`, `rad = π/180` from `phycst.F90:26,37`;
+`rn_e1_deg = 1` from `usrdef_nam.F90:30`, not overridden in DINO's
+`namelist_cfg`. `ln_read_cfg = .false.`, so this file — not a `domain_cfg.nc` —
+is what builds the mesh, and nothing downstream alters `e1v` but a halo fill.)
+
+legoESM, `create_latlon_geometry` in `packages/core/legoesm/grids/latlon.py`,
+built the same width from `cos(½·(lat_T[j-1] + lat_T[j]))` — the arithmetic
+mean of the two adjacent **tracer latitudes**.
+
+`asin(tanh(·))` is nonlinear, so
+`asin(tanh(x+½)) ≠ ½·[asin(tanh(x)) + asin(tanh(x+1))]`: **the midpoint was
+being taken in latitude space instead of in Mercator index space.** On DINO the
+two latitudes differ by up to **0.0011°**, which is exactly the 3.3e-05.
+
+The sharpest form of the diagnosis: legoESM **already had the correct face
+latitudes** and was already using them for the *meridional* v-face scale factor
+(NEMO's `e2v`) under the same convention. Only the *zonal* one was left on the
+tracer midpoint. The two are one quantity in NEMO — `:113` and `:117` are the
+same expression — and now they are one quantity here too, bit-for-bit on the
+interior.
+
+### The fix, and why it is a fix rather than a new option
+
+It lands inside the existing `metric_convention="nemo_isotropic"` selector,
+whose entire contract is *"reproduce NEMO's `usr_def_hgr.F90`"*. Under that
+contract the old width was simply wrong, so no new switch is warranted: recipe
+doctrine puts the faithful value on the oracle card, and `nemo_isotropic` is
+selected **only** by the DINO oracle cards and by the NEMO bridge's
+auto-detect. Every other grid runs `"exact"` and is byte-identical to before.
+
+One builder change reaches every consumer, because there is only one stored
+width: the model converts whatever it is handed into a `LatLonCGridGeometry` at
+construction and *"all downstream operators see the enriched geometry"*, and
+the shared-metric helper reads that stored array on any rich geometry. The two
+END v-faces stay hard-zeroed — that is the transport-metric contract (no
+meridional flux through the closed wall), and NEMO enforces the same no-flux
+through its `vmask` rather than through its metric. Only the interior latitude
+moved.
+
+Direct test: `tests/ocean/unit/test_dino_vface_zonal_width_nemo.py`. It pins the
+corrected width against NEMO's own array at both walls with hand-quoted values
+(south wall `39899.4776639535 m` at −68.9727620197°, north wall the same at
++68.9727620197°, the near-equatorial face `111194.6894417521 m`), establishes
+the row correspondence **by latitude** rather than by an assumed halo offset,
+and checks every interior v-face rather than the five quoted ones — against
+NEMO's transform rebuilt **end to end and independently of legoESM's own
+latitudes** (`gphiv = asin(tanh(rn_e1_deg·rad·(j − nn_jeq_s + ½)))`, `:98`/`:108`),
+so it verifies that the two models' latitudes agree and not merely that
+legoESM is self-consistent. legoESM's v-face latitudes reproduce NEMO's own
+transform to better than 1e-9 degrees across the whole interior. Every fidelity
+assertion is paired with the same assertion under `"exact"`, which must FAIL —
+so the test provably fires if the fix is removed, and reverting the fix was
+confirmed to redden exactly those assertions and no others.
+
+The five hand-quoted literals were themselves re-verified against NEMO's
+`domain_cfg_out.nc`, matched **by latitude** (agreement 2e-12 to 5e-11 degrees,
+widths to 5e-11 m), with the row map `lego j → NEMO j+1` recovered
+independently — so a transcription slip cannot make the test self-consistent
+and wrong.
+
+The convention is **inert on uniform-latitude grids**, where the two
+constructions are mathematically identical and there is nothing to correct;
+that inertness is itself pinned by a test.
+
+| the width, vs NEMO's `e1v` | at the walls | over the whole interior |
+|---|---|---|
+| `"exact"` (the old construction) | +3.3175e-05 | 3.3175e-05 max |
+| `"nemo_isotropic"` (fixed) | −3.6471e-16 | 1.4895e-15 max |
+
+Measured on the standalone NEMO-faithful R1 grid, fp64 storage, with legoESM
+computing its own Mercator latitudes — its `lat_v` agrees with NEMO's `gphiv` to
+**2.8e-14 degrees**, so the fix does not depend on being handed NEMO's mesh.
+(At the default fp32 storage the agreement is bounded at ~1.7e-07 by the stored
+dtype, still 195× better than the defect; the oracle lane runs fp64.)
+
+### The bit-match: the arm's table IS this fix's evidence
+
+Registered before it was run: if the corrected construction produces the same
+array the arm substituted, the arm's five states already measure the fix and no
+re-run is owed; if it does not, the fix reaches consumers the arm did not and
+the arm's numbers may not be quoted for it.
+
+`scripts/validate/ocean_fidelity/dino_1226/vface_width_arm_bitmatch.py`,
+offline, no model run:
+
+```
+  cells compared        : 10400
+  cells differing       : 0
+  max |difference| [m]  : 0.000000e+00
+  VERDICT: BIT-IDENTICAL.
+  CONTROL (the pre-fix T-midpoint construction vs the same arm array):
+    cells differing 10296, max relative 3.3485e-05  -- the control fires
+```
+
+**Zero of 10,400 cells differ.** Two honest qualifications on that headline,
+both from adversarial review. First, 104 of those cells are the two end-wall
+rows, which the arm leaves at legoESM's own value and which are therefore equal
+by construction; the probe now *asserts* they are the pole-zeroed wall instead
+of silently counting them as agreements, so the real statement is **0 of 10,296
+substituted cells differ, and the 104 uncompared cells are checked to be zero.**
+Second, the control's 10,296 does match the touched-cell count §6a records for
+the arm — but `10,296 = 198 × 52` is what the substitution overwrites on *any*
+array of this shape, so it corroborates the shape, not the identity. The
+discriminating check is the row alignment, which the probe re-establishes
+against the arm's own two-hypothesis test (correct map 0.000e+00, best wrong map
+1.218e-02) rather than assuming it.
+
+### What the bit-match does and does NOT license — a correction
+
+**Retracted, in place:** an earlier draft of this section said the equality means
+"no re-run is owed" full stop. That overclaims, and the reason is the one this
+campaign keeps relearning — **an identical array is not an identical
+experiment.**
+
+The arm substituted into the *barotropic substep loop's* kwargs and its EEN
+pre-block and ran that loop. The builder fix changes the width for the whole
+model. So the equality licenses exactly this:
+
+* **Licensed.** The arm's five states already measure this width's effect
+  **inside the barotropic substep loop**, and no re-run is owed to re-measure
+  that. §6a's collapse figures — 16.2 % basin, 24.9 % wall rows, 9.1 % south,
+  25.6 % north, staggering control 292–307× — stand as that evidence, and **the
+  PARTIAL verdict is unchanged.** (The arm's own FATAL guard, that the EEN
+  pre-block's copy of the width must BE the grid's `dx_v`, is what makes the two
+  configurations equivalent inside the loop rather than merely similar: the
+  pre-block is built from `dx_v`, so fixing `dx_v` fixes it too.)
+* **NOT licensed.** The fix also moves baroclinic-side consumers the arm never
+  perturbed, all of which read the stored width by value: the F-point lateral
+  viscosity coefficient `ahmf = ½·rn_Uv·max(e1f,e2f)`, GM/Redi's isoneutral
+  tensor component `e1v/e2v`, the bolus streamfunction and its transport→velocity
+  division, MLE, and the baroclinic EEN weighting. **Their magnitude on the
+  climate is unmeasured**, and no number here may be quoted for them.
+
+Every one of those moves **toward** NEMO, and one of them is now exact. Measured
+at the bridged geometry, F-point rows aligned to NEMO's:
+
+| the lateral viscosity coefficient `ahmf`, vs NEMO's | max relative gap |
+|---|---|
+| before the fix | 3.3485e-05 |
+| after the fix | **0.0000e+00** |
+
+That is a direct cross-link to the lateral-friction lane: the alignment table's
+row 3 recorded legoESM's F-point coefficient as matching NEMO only
+approximately, attributing the residual to the discrete `max(e1,e2)` convention.
+The residual was this width. With `e1f = e2f` restored, `max` is exact and so is
+the coefficient. It does not reopen anything — friction's refutation rests on a
+~1e-4 *relative* effect being too small to carry a 34 % transport error, and
+closing a 3.3e-05 coefficient gap only makes that leg safer.
+
+So: the fix removes a real infidelity from the twin, in more places than the arm
+tested. It does not promote the candidate, and the banded residual remains
+unowned.
+
+### The conservation question, checked rather than assumed
+
+Unlike the Coriolis placement, a metric width has no solid-body-curl trade to
+lose — but "no trade" is an argument, not a measurement, and the width does sit
+inside three discrete identities. All three were re-run on the corrected
+geometry (`TestInvariantsSurviveTheCorrectedWidth`), and the reason they hold is
+structural: each needs every operator to share **one** width, and the fix moved
+that one width rather than one operator's copy of it.
+
+* **Strain ↔ stress adjointness.** `<strain(u,v), T> = <(u,v), stress_div(T)>`
+  holds to better than 1e-11 relative on the corrected `nemo_isotropic`
+  geometry.
+* **Continuity ↔ flux-form advection mass consistency.** The advection's v-face
+  transport length and the divergence's agree to <1e-9 m, so no mass leaks
+  between the two — and, separately pinned, the width they now share is the
+  **corrected** one (a shared but stale metric would pass the consistency check
+  while leaving the defect in place).
+* **The EEN `e3f` normalization does not enter.** Read at the point of use:
+  the vertex thickness is built from layer thicknesses alone, with no
+  horizontal metric anywhere in it. Nothing to check.
+* **The EEN metric weighting's energy identity, which does enter**, because the
+  DINO card ships it and its entire justification is that it conserves the
+  *physical* kinetic-energy norm rather than the per-area one. Measured, not
+  reasoned: the vorticity flux still does zero net work on the corrected width,
+  to better than 1e-14 of the domain kinetic energy. The width appears once in
+  the transport weight and once in the energy norm and telescopes — but that is
+  the class of claim this campaign keeps retracting, so it is a test.
+
+The two pole/wall faces stay exactly zero under both conventions, so the
+closed-wall no-flux property is untouched.
+
+**One test was narrowed, deliberately.** A grids test pinned `dx_v`
+bit-identical between the two conventions. Its own comment says the invariant
+being protected *"holds because every operator SHARES that metric — not because
+of its value"*, i.e. the pin was strictly stronger than the invariant, and the
+sibling field `dy_v` had already been removed from that same list for exactly
+this reason. `dx_v` is now pinned the other way: it must move, by 1e-5–1e-4
+relative and no more, keep its zeroed end faces, and equal `dy_v` on the
+interior.
+
+### What the fix EXPOSED: a cancelling pair, and the campaign's own Rule 8
+
+Raised by adversarial review and measured here rather than relayed. legoESM
+builds the **vertex** area as the exact spherical cap `R²·Δλ·|Δsin φ|` and
+divides the circulation by it to form relative vorticity; NEMO divides by
+`e1f·e2f`. Those are different quantities, and this fix moves one of them:
+
+| `|area_q − e1f·e2f| / (e1f·e2f)`, interior rows | median | max |
+|---|---|---|
+| before the fix | 7.79e-06 | 2.54e-05 |
+| **after the fix** | **2.22e-05** | **4.16e-05** |
+
+Read this correctly. The vertex-area gap is **pre-existing and untouched** —
+`area_q` is built exactly as it always was, and NEMO always divided by
+`e1f·e2f`. What changed is that the compensating error in `e1f` is gone, so the
+gap is no longer partly hidden. **This is the Rule-8 cancelling-pair pattern
+this campaign has now recorded five times:** raising faithfulness on one half of
+a pair makes a derived metric look worse.
+
+It does not argue for reverting — the campaign's own standing answer to Rule 8
+is *"a joint arm, never a revert"*, and one metric now matching the oracle
+exactly is not a defect. No identity breaks: `q` enters the AL81 triad
+symmetrically, so the kinetic-energy cancellation measured above is
+`q`-independent and EEN enstrophy conservation is a property of the triad
+structure rather than of `q`'s divisor. But it is now the **largest known
+horizontal-metric infidelity in the twin**, at the same order as the one just
+closed and in the same operator the campaign is chasing, so it is registered as
+the next cheap offline item.
 
 ### The ranked remainder, after the arm
 

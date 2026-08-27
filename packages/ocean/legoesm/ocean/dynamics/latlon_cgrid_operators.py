@@ -1670,6 +1670,24 @@ def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
       mean-of-cos ``0.5·(cos lat[j-1] + cos lat[j])`` — they differ at
       O(dlat²) on a stretched grid because ``cos(½(a+b)) ≠
       ½(cos a + cos b)``);
+
+      SCOPE (#1455): that is the ``metric_convention="exact"``
+      construction, and it is what the RECOMPUTE branch below builds.
+      A rich geometry built with ``metric_convention="nemo_isotropic"``
+      instead stores a width evaluated at the TRUE v-face latitude
+      (NEMO's ``gphiv``, ``usrdef_hgr.F90:113``) — a different latitude,
+      because on a Mercator coordinate the midpoint of two latitudes is
+      not the latitude of the midpoint index.  Such a grid takes the
+      stored branch on any MERIDIONALLY-CLOSED topology, so it never
+      reaches the recompute and the two do not mix; the invariants
+      below hold either way, because they need every operator to share
+      ONE width, not a particular value.  SCOPED deliberately: under a
+      meridionally-PERIODIC topology this helper recomputes (see
+      ``reads_stored_vface_metric``) while direct readers of the stored
+      ``grid.dx_v`` would not, so that combination WOULD mix the two
+      constructions at 3.3e-05.  It is unreached today -- every card
+      selecting ``nemo_isotropic`` is a closed basin -- and is recorded
+      here rather than guarded;
     * the two polar walls ``j = 0`` and ``j = n_lat`` → EXACTLY ``0``
       (transport metric: no meridional flux through the pole wall).
 

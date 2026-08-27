@@ -146,12 +146,44 @@ arm, three arms. No new instrument.
 
 ### On the board, no work assigned
 
-- **The wall-row RESCORE (offline, no new compute).** The lateral-friction
-  refutation was decided on the layer-averaged instrument later retracted; its
-  own source ranks the rescore first and cheapest and records that it has not
-  been re-run. Bottom drag has independent later evidence (bit-exact coefficient,
-  0.1% substitution collapse) and stands; **lateral friction is PROVISIONAL until
-  this rescore lands.**
+- ~~**The wall-row RESCORE**~~ — **DONE. It landed 2026-08-23 and this entry was
+  stale on the day it was written**, quoting the source file's to-do list rather
+  than the section beneath it that had already executed it. Re-run at HEAD
+  2026-08-27: **nothing reopens.** Friction's mask-dimensionality leg is exactly
+  0.0 under both weightings and its magnitude leg moves 6.7541e-05 → 5.6500e-05
+  (16%, same order). Its ENRICHMENT leg does cross the 3× bar (2.35× → 5.16×) —
+  reported, not buried, and far too small to matter. **Lateral friction is
+  EXONERATED, not provisional.**
+- **The VERTEX area is not NEMO's `e1f·e2f` — newly EXPOSED, offline, cheap
+  (2026-08-27).** legoESM forms relative vorticity by dividing the circulation
+  by the exact spherical cap `R²·Δλ·|Δsin φ|`; NEMO divides by `e1f·e2f`. The
+  gap was **7.79e-06 median / 2.54e-05 max** and is now **2.22e-05 / 4.16e-05**,
+  because the compensating error in `e1f` was just removed (the v-face zonal
+  width fix). Pre-existing, not a new defect — and the fifth recorded instance
+  of the campaign's cancelling-pair pattern. No identity breaks (`q` enters the
+  AL81 triad symmetrically), but it is now the largest known horizontal-metric
+  infidelity in the twin, at the same order as the one just closed and in the
+  same operator the campaign is chasing. Same offline freeze-and-vary as the
+  v-face arm.
+- **A pre-existing NaN in the adjoint of the sea-surface-height-average face
+  depth**, found by review while checking the v-face fix and NOT caused by it.
+  The barotropic face-depth helper divides by the v-face cell area without a
+  positivity guard, which is `inf` on the two zero-width end-wall rows; the
+  forward run is rescued by a later replace, but the reverse pass multiplies
+  that `inf` by a zero cotangent and yields **96 NaN gradient entries** (2 rows
+  × 48 columns), identical under both metric conventions. The repo already
+  guards the identical pattern correctly one file away with a
+  `where(width > 0, 1/width, 0)`. One-line fix; matters to anyone
+  differentiating through the barotropic solver. NOT actioned here — out of
+  scope for the register items, recorded so it is not lost.
+- **PLAUSIBLE, not confirmed — the overturning / heat-transport diagnostic's
+  v-face width.** One reviewer reported that this diagnostic reconstructs the
+  face metric rather than reading the model's own, at ~3e-03 relative on a
+  stretched grid (90x the gap just fixed). Reading the code, the primary branch
+  DOES read the stored width, and the fallback that does not is reached only
+  when the grid carries no face-latitude axis — which is not the DINO case, and
+  I did not reproduce the number. Recorded as a flagged path to check, NOT as a
+  measured defect, and pre-existing either way.
 - The **grown-noise census** at days 5/10 in both models — states already on
   disk. The convective switch's ~300× rectification is established at ≳1e-10 and
   **silent at 1e-14**, so on current evidence the edge does not explain the
@@ -180,10 +212,12 @@ its lateral-friction term.
 Every row here was tested and eliminated with a decisive number. The full table
 with citations is `dino_campaign_synthesis.md` §2.3. Do not re-test:
 
-**Not on this list — lateral friction.** Free-slip is identical at 0/372,528
-corners and the viscosity ablation makes it a lever rather than an owner, but
-that refutation was scored on the retracted layer-averaged instrument and has not
-been re-run. It is PROVISIONAL pending the rescore above, not closed.
+**Now ON this list — lateral friction (2026-08-27).** Free-slip is identical at
+0/372,528 corners and the viscosity ablation makes it a lever rather than an
+owner. The earlier caveat here — that this rested on the retracted layer-averaged
+instrument — is **RETRACTED twice over**: the rescore had already landed, and the
+ablation is scored on 90-day Sv transports, which carry no vertical weighting at
+all and so could never have been touched by that instrument. **Do not re-test.**
 
 surface forcing / wind (1e-10 per row, torque constant across all 36 windows) ·
 water masses (4e-5 kg/m³, with the density-*gradient* caveat) · bottom drag
