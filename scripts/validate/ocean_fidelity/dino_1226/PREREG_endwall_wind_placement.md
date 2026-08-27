@@ -21,6 +21,20 @@ value must make that equality fail.  Whole-step 2x departures are printed as
 diagnostics only and carry no gate.  The primary operands and all four science
 statistics below are unchanged from version 1.
 
+## Version 3 arm correction — frozen before second rerun
+
+The version-2 rerun also produced **no valid measurement**.  Its helper
+control reported `zero_exact=False` and `double_exact=False` because the arm
+scaled only the current stress.  This card applies
+`0.5*(state.tau_*_prev + surface_forcing.tau_*)`; leaving the previous carry at
+1x means the alleged 0x arm is physically a 0.5x arm and the alleged 2x arm is
+1.5x.  The control correctly exposed that confound.
+
+Version 3 scales `state.tau_x_prev/state.tau_y_prev` and the current forcing
+together.  Those two fields are one centred wind input, not two variables.
+The exact helper control, primary operands, statistics and bars are otherwise
+unchanged.  Neither invalid run yielded a classified term score.
+
 ## Claim and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
