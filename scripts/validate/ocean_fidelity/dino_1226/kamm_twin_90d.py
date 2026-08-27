@@ -1025,6 +1025,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              perturb_baro_key: str = "dU_avg",
              perturb_baro_scale: float = 1.0,
              daily_acc: bool = False,
+             save_step_eta: bool = False,
              snap_days: tuple[int, ...] | None = None,
              legacy_1d_ladder: bool = False) -> bool:
     """Run the state-initialized twin for ``n_days`` and save an npz. Returns stable.
@@ -1067,6 +1068,10 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     days NEMO's own ``nn_stock`` restarts land on -- the alternative,
     growing the module-level tuple, would silently change every sibling
     probe's artifact.
+
+    ``save_step_eta``: replace the default daily/float32 ``eta`` payload with
+    every-step/float64 eta plus relative ``t_seconds`` for the campaign's
+    Nyquist-safe 2dt scorer. The daily field remains under ``eta_daily``.
     """
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
@@ -1159,6 +1164,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_stress_implicit": surface_stress_implicit,
         "surface_tendency_placement": surface_tendency_placement,
+        "save_step_eta": bool(save_step_eta),
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
     }, sort_keys=True)
 
@@ -1284,6 +1290,15 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     sst_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     u_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
     v_daily = np.full((n_days, n_lat, n_lon), np.nan, dtype=np.float32)
+    eta_step = None
+    if save_step_eta:
+        if control_dtype_stamp != "float64":
+            raise SystemExit(
+                "--save-step-eta requires a materialized float64 control "
+                f"state, got {control_dtype_stamp}; casting fp32 output to "
+                "float64 would forge precision")
+        eta_step = np.full((nsteps, n_lat, n_lon), np.nan, dtype=np.float64)
+        print(f"per-step eta enabled: {nsteps} samples at float64", flush=True)
 
     snaps = resolve_snap_days(snap_days, n_days, save_3d)
     t3d, s3d, eta3d, u3d, v3d = {}, {}, {}, {}, {}
@@ -1311,6 +1326,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             st = apply_dino_lat_lon_surface_forcing(
                 st, forcing, br.z_coord, cfg, DT, t_seconds=t0_sec + (k + 1) * DT)
             st = dyn(st)
+
+        if eta_step is not None:
+            eta_now64 = np.asarray(st.eta.data, dtype=np.float64)
+            if not np.isfinite(eta_now64).all():
+                raise SystemExit(
+                    f"FATAL: non-finite per-step eta at step {k + 1}")
+            eta_step[k] = eta_now64
 
         if (k + 1) % STEPS_PER_DAY == 0:
             day_idx = (k + 1) // STEPS_PER_DAY - 1
@@ -1423,6 +1445,16 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # The MEASURED injected transport, the number every retention factor
         # divides by.  Stamped so the scorer never has to be told it.
         save_kwargs["injected_sv"] = np.float64(_injected_sv)
+    if eta_step is not None:
+        # eta_wave_twin.load_side expects relative elapsed time on both model
+        # artifacts. seasonal_t0_seconds separately stamps the absolute DINO
+        # clock used by the forcing, so no phase information is lost.
+        save_kwargs["eta_daily"] = save_kwargs["eta"]
+        save_kwargs["eta"] = eta_step
+        save_kwargs["t_seconds"] = (
+            np.arange(1, nsteps + 1, dtype=np.float64) * DT)
+        save_kwargs["capture_every_steps"] = np.int32(1)
+        save_kwargs["dt_seconds"] = np.float64(DT)
     for d in snaps:
         if d in t3d:
             save_kwargs[f"T3d_day{d}"] = t3d[d]
@@ -1545,6 +1577,10 @@ def _parse_args(argv=None):
                         "The 0/30/60/90 snapshot grid cannot resolve a decay "
                         "timescale of days, which is what the retention "
                         "measurement is pre-registered to discriminate.")
+    p.add_argument("--save-step-eta", action="store_true",
+                   help="store every-step eta at float64 under the scorer's "
+                        "eta/t_seconds contract; preserve daily eta as "
+                        "eta_daily. Required for 2dt/Nyquist scoring")
     return p.parse_args(argv)
 
 
@@ -1727,6 +1763,7 @@ def main(argv=None):
               perturb_baro_key=args.perturb_baro_key,
               perturb_baro_scale=args.perturb_baro_scale,
               daily_acc=args.daily_acc,
+              save_step_eta=args.save_step_eta,
               snap_days=(None if args.snap_days is None else
                          tuple(int(x) for x in args.snap_days.split(","))),
               legacy_1d_ladder=args.legacy_1d_ladder)
