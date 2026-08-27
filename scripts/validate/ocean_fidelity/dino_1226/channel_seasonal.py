@@ -201,7 +201,18 @@ def _weighted_phase_stats(target, driver, shift):
     n_eff = np.asarray(n_eff, dtype=np.float64)
     weights = np.maximum(n_eff - 3.0, 0.0)
     if not float(weights.sum()) > 0.0:
-        raise ValueError("phase score UNMEASURABLE: no effective rows above 3")
+        return {
+            "score": None,
+            "signed_r": None,
+            "correlations": correlations.tolist(),
+            "n_eff": n_eff.tolist(),
+            "n_eff_median": float(np.median(n_eff)),
+            "n_eff_min": float(np.min(n_eff)),
+            "weights": weights.tolist(),
+            "denominators": denominators,
+            "measurable": False,
+            "reason": "no Bartlett effective row count exceeds 3",
+        }
     z = np.arctanh(np.clip(correlations, -1.0 + 1e-12, 1.0 - 1e-12))
     zbar = float(np.sum(weights * z) / np.sum(weights))
     return {
@@ -212,7 +223,7 @@ def _weighted_phase_stats(target, driver, shift):
         "n_eff_median": float(np.median(n_eff)),
         "n_eff_min": float(np.min(n_eff)),
         "weights": weights.tolist(),
-        "denominators": denominators,
+        "denominators": denominators, "measurable": True, "reason": "",
     }
 
 
@@ -225,6 +236,29 @@ def phase_decider(target, driver, *, n_boot=N_BOOT, seed=BOOT_SEED,
         raise ValueError(f"phase profiles require shape (4,n), got {x.shape}/{q.shape}")
     by_shift = {str(s): _weighted_phase_stats(x, q, s) for s in range(4)}
     matched = by_shift["0"]
+    if not all(value["measurable"] for value in by_shift.values()):
+        return {
+            "status": "UNRESOLVED_EFFECTIVE_N",
+            "correct_phase_score": matched["score"],
+            "correct_phase_signed_r": matched["signed_r"],
+            "correct_phase_oriented_horizon_r": None,
+            "cyclic_scores": {
+                key: value["score"] for key, value in by_shift.items()},
+            "best_null_shift_quarters": None,
+            "best_null_score": None,
+            "delta_vs_best_cyclic": None,
+            "delta_block_ci": None,
+            "confidence": confidence,
+            "block_length_rows": None,
+            "bootstrap_requested": n_boot,
+            "bootstrap_retained": 0,
+            "bootstrap_dropped": n_boot,
+            "n_positions": x.shape[1],
+            "n_eff_median": matched["n_eff_median"],
+            "n_eff_min": matched["n_eff_min"],
+            "by_shift": by_shift,
+            "reason": "at least one cyclic assignment has no Fisher weight",
+        }
     best_shift = max(range(1, 4), key=lambda s: by_shift[str(s)]["score"])
     best_null = by_shift[str(best_shift)]["score"]
     orientation = 1.0 if matched["signed_r"] >= 0.0 else -1.0
@@ -686,6 +720,11 @@ def run(out_dir):
             },
             "weighting": "thickness/volume weighted throughout; no layer average",
             "wind_excluded_before_driver_scoring": True,
+            "post_run_corrections": [
+                "the first clean run aborted before scoring because a relation "
+                "had zero Fisher weight at N_eff=3; the engine now emits "
+                "UNRESOLVED_EFFECTIVE_N for that registered no-information case"
+            ],
         },
     }
     out = Path(out_dir)
