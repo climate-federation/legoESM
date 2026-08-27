@@ -6,8 +6,10 @@ State: shared NEMO day-180 restart; matched first step `kt=5761`
 
 ## Reported outcome
 
-**Restated verdict: `CONFIRM_VISCOSITY_PRIME_SUSPECT`.** The prior headline
-that vertical mixing was unsupported is retracted. The audited shear spans
+**FIX-FIRST verdict: SHIP `d86d97d49`; live PREFIX/FIX response
+`CONFIRMED_AT_DAY_10`.** Both round-6 reviewers found no blocker. Persistence
+and global do-no-harm remain `PENDING`. The prior headline that vertical
+mixing was unsupported is retracted. The audited shear spans
 5--26 m, so the 10.14 m interface is shear-setting, not peripheral. At that
 interface legoESM's momentum viscosity is 2.0514 times NEMO's while the model's
 shear is about 0.68 times NEMO's; `A_v * shear` is consequently similar
@@ -20,7 +22,7 @@ shear-setting interface.** The resulting mixing-length excess is algebraic,
 not independent.
 
 The TKE-equation decomposition named the implementation owner:
-**legoESM incorrectly applies the `1e-4` surface-TKE minimum to its first
+**pre-fix legoESM incorrectly applied the `1e-4` surface-TKE minimum to its first
 interior interface under `tke_surface_bc_level="nemo_z0"`.** NEMO holds
 `rn_emin0` only at the separate surface row (`jk=1`) and solves/floors `jk=2`
 with `rn_emin=1e-6`. A preregistered replay removing only that misplaced
@@ -39,14 +41,54 @@ the single shear-setting 10.14 m ratio exceeds 1.25. The original
 `UNRESOLVED_CLOSURE_DIFFERENCE` label is retained in the artifact only as a
 retracted result from a physically invalid two-consecutive-level clause.
 
-The registered 10-day causal leg remains a chain prediction, not a response
-verdict. Per instruction, this lane stops after the CPU structural replay;
-the coordinator's executor owns the GPU shear/core-depth response run.
+The coordinator's live 10-day PREFIX/FIX run now confirms the registered
+causal chain. This lane did not run a GPU; it reads and records the executor's
+completed artifacts below. The runner that produced those arms is now
+committed, and its historical frozen-`A_v` verdict is explicitly superseded.
 
-The adversarial review's initial accusation that this CUDA status was false is
-withdrawn. GPU logs and the untracked runner belong to the coordinator's
-executor lane; this lane's no-CUDA status was honest. The coordinator is
-scoring those separate response arms.
+## ROUND-6 RETRACTIONS — DO NOT CITE THE SUPERSEDED CLAIMS
+
+**RETRACTED: the frozen-`A_v` arm did not close 89% of a physical gap and is
+UNINFORMATIVE about the clamp fix.** At 5.03/15.32/25.96/37.01 m its BASE
+velocity errors versus NEMO were `+0.0553/-0.0173/-0.0953/-0.0124 m/s`
+(RMS `0.0561`), while NEMO_AVM errors were
+`+0.0520/+0.0697/+0.0689/+0.0333 m/s` (RMS `0.0579`). The frozen arm shifted
+the upper 37 m roughly `+0.06 m/s` eastward and degraded upper-ocean RMS by
+about 3%. Its apparent scalar-shear improvement was sign cancellation. Both
+`top_depth` and `shear_5_26` are dominated by `u(26 m)`, so they were one
+effective metric, not two. The arm's `REFUTE` was a bar artifact.
+
+**RETRACTED: the four one-term replays' `0.0` closure values do not exonerate
+production, buoyancy, dissipation, or the surface term.** The misplaced
+`1e-4` post-solve clamp saturated every replay, giving
+`arm_max_abs_change_at_10m=0.0`; those arms could not respond. Only the
+direct factor ratios `1.0468/0.9663/1.0002/1.0000` remain legitimate evidence.
+
+## Live PREFIX/FIX A/B — CONFIRMED at day 10
+
+Executor artifacts: `/tmp/dino_euc_mechanism/ab_prefix.{log,json}` and
+`ab_fix.{log,json}`. Runner SHA-256
+`b2de13ca7039a6954a7c3e115af249e834dc4b9be83343cc0188e56893d12845`
+was byte-identical for both arms; day-0 identity and all bridges were exactly
+zero, and arm A reproduced the prior baseline bit-for-bit.
+
+`PREFIX (2cb678259)`: top_depth `34.836 m`, shear `0.017060`; `FIX
+(26d706b14)`: top_depth `33.103 m`, shear `0.023512`; NEMO control
+`32.744 m / 0.024218`.
+
+The pre-registered physics-review bars, registered before scoring, read:
+
+| bar | result | verdict |
+|---|---|---|
+| P1 top-four-level velocity-error RMS | `FIX/PREFIX = 0.00614/0.05612 = 0.109` | **CONFIRM** (`<=0.70`) |
+| P2 shear-error ratio | `0.099` | **CONFIRM** (`<=0.50`) |
+| P3 per-level errors | all improved; same-sign `+0.0074/-0.0053/-0.0074/-0.0036` | **CONFIRM** |
+| P4 crossing | `33.103 m`; no overshoot (frozen arm overshot to `28.27 m`) | **CONFIRM** |
+| persistence at day 90 | not yet scored | **PENDING** |
+| global do-no-harm | not yet scored | **PENDING** |
+
+Overall live label: **`CONFIRMED_AT_DAY_10`**. Persistence and global
+do-no-harm remain explicitly pending.
 
 ## Why this was the discriminator
 
@@ -129,10 +171,11 @@ log(avm_L/avm_N) = log(Ck_L/rn_ediff_N)
 ```
 
 to `2.22e-16` maximum log residual and reconstructs direct avm with zero
-reported relative error. The registered result is
-`DISTRIBUTED_OR_UNRESOLVED` under the 60% single-carrier bar, but the physical
-decomposition is specific: **TKE energy and mixing length co-carry the
-infidelity, essentially 50/50 in log space**.
+reported relative error. The registered `DISTRIBUTED_OR_UNRESOLVED` label and
+50/50 log split are retained only as historical arithmetic. They are **not an
+independent decomposition result**: on the active buoyancy limb,
+`zmxlm=sqrt(2 en/N²)`, so `avm ∝ zmxlm*sqrt(en) ∝ en`. Equal energy/length
+log shares are therefore an algebraic identity and a consistency check.
 
 | piece | median absolute log score | score share | geometric-mean factor | sign agreement |
 |---|---:|---:|---:|---:|
@@ -141,9 +184,8 @@ infidelity, essentially 50/50 in log space**.
 | coefficient/stability, `Ck/rn_ediff` | 0 | 0% | 1.000000 | 0% |
 
 Thus the 2.05x zonal-mean excess is not carried by `rn_ediff` or a hidden
-momentum stability function. The raw factorization assigns equal log shares to
-TKE energy and mixing length, but that split does not yet establish two
-independent roots because the buoyancy mixing length itself depends on TKE.
+momentum stability function. The equal factors establish one TKE-energy root,
+not two distributed roots.
 
 ### Single-root test
 
@@ -208,7 +250,13 @@ and coefficient handoff to implicit mixing are in
 the closure entry is `physics/vertical_mixing/k_profiles.py:108`.  The import
 receipt resolves that module inside this worktree.
 
-## Costed short-run design
+## Frozen-`A_v` short-run design — superseded
+
+This registered design is retained for audit history, but its physics verdict
+is retracted as described above. Its committed runner is
+`scripts/validate/ocean_fidelity/dino_1226/euc_substitution_run.py`; the runner
+still calculates the historical Cz bar but prints it as superseded and emits
+`SUPERSEDED_FROZEN_AVM_UNINFORMATIVE`.
 
 Run two 10-day, 320-step arms from the same exact bridge on GPU 0:
 
@@ -237,15 +285,19 @@ single TKE solve. BASE replay reproduced the captured matrix result within
 0.8134 to 1.6971, and a 2x production plant changed energy by
 `4.56e-4 m2/s2`, proving the replay path can fail.
 
-The four preregistered input factors are all near unity and none carries the
-2.2556x response:
+The four direct input-factor ratios are legitimate measurements, but their
+one-term replay responses are saturated and cannot attribute or exonerate:
 
-| candidate (causal direction) | geometric-mean factor | registered label | median replay closure | toward NEMO |
-|---|---:|---|---:|---:|
-| production `sh2_L/sh2_N` | 1.046834 | `NEAR_UNITY` | 0% | 0% |
-| buoyancy sink `(avt_N rn2_N)/(K_H,L N2_L)` | 0.966319 | `NEAR_UNITY` | 0% | 0% |
-| dissipation `dissl_N/dissl_L` | 1.000199 | `NEAR_UNITY` | 0% | 0% |
-| held surface energy `en_sfc,L/en_sfc,N` | 1.000000 | `NEAR_UNITY` | 0% | 0% |
+| candidate (causal direction) | geometric-mean factor | replay label |
+|---|---:|---|
+| production `sh2_L/sh2_N` | 1.046834 | `SATURATED_NOT_EVIDENCE` |
+| buoyancy sink `(avt_N rn2_N)/(K_H,L N2_L)` | 0.966319 | `SATURATED_NOT_EVIDENCE` |
+| dissipation `dissl_N/dissl_L` | 1.000199 | `SATURATED_NOT_EVIDENCE` |
+| held surface energy `en_sfc,L/en_sfc,N` | 1.000000 | `SATURATED_NOT_EVIDENCE` |
+
+For every row, the misplaced `1e-4` clamp held the result fixed and
+`arm_max_abs_change_at_10m=0.0`. The formerly printed `0% closure` and
+`0% toward NEMO` values are retracted as evidence.
 
 The surface receipts are exact, not merely close: analytical DINO `taum`, held
 surface `en`, and surface `zmxlm` ratios are 1.000000 in all 47 columns; both
@@ -253,9 +305,9 @@ models reconstruct `en_sfc=max(1e-4,67.83*taum/1026)` and NEMO surface `avm`
 with zero reported relative error. Thus the surface coefficient is not a
 one-line coefficient mismatch.
 
-The registered four-input result remains `UNRESOLVED_TKE_EQUATION_OWNER`
-because none of those ratios passes its attribution bar. The preserved
-response ledger then exposes the structural boundary-placement error:
+The registered four-input result was `UNRESOLVED_TKE_EQUATION_OWNER` because
+the response arms were saturated. The preserved response ledger instead
+exposes the structural boundary-placement error:
 legoESM's matrix energy is exactly `1e-4` in every excess column, whereas
 NEMO's solved `jk=2` energy ranges from `2.2275e-5` to `4.9311e-5`. The
 post-solve `etau` increment is only `1.0324e-13`, so it cannot explain the
@@ -282,8 +334,12 @@ row.
 Commit `d86d97d496463b9317764426573af958fe5f20b9` guards the
 `tke_surface_min` clamp with `surface_bc_level == "interior_pinned"`. Under
 `nemo_z0`, solved interface 0 now retains only `tke_background` (`rn_emin`);
-the separate virtual z=0 Dirichlet row remains the sole owner of
-`tke_surface_min` (`rn_emin0`). This matches the executed DINO source at
+the separate virtual z=0 Dirichlet row consumes `cfg.tke_surface_min` as its
+`rn_emin0` floor. Follow-up commit
+`b127bc29ae88b74ba523eb5f2031f2117e713c47` routes that field into the row;
+previously the row read module constant `_NEMO_TKE_EMIN0`, making the knob a
+silent no-op under `nemo_z0`. A coupled-solve regression proves changing the
+field changes the interior answer. This matches the executed DINO source at
 `cfgs/DINO/MY_SRC/zdftke.F90:361` for the surface and `:564-565` for solved
 interior rows.
 
@@ -298,6 +354,7 @@ The shipped-card reachability audit resolves every DINO recipe as follows:
 | `nemo_paper` | TKE | `interior_pinned` | no |
 | `oceananigans` | CATKE | `interior_pinned` | no |
 | `veros` | TKE | `interior_pinned` | no |
+| `audit_orca1_tke_card.py` | auditor expectation, not a shipped card | expects `nemo_z0` | expectation follows corrected behavior |
 
 Thus `nemo_z0` is oracle-card-only among shipped cards: the direct oracle card
 and its MLF inheritance are the only affected recipes. Generic callers and
@@ -307,12 +364,19 @@ by exact-array tests for both `None` and explicit surface-Dirichlet inputs.
 
 The hand-computed two-interface regression was red before the fix: with zero
 production, buoyancy, diffusion, and old energy `1e-6`, the legacy branch
-returned `[1e-4, 1e-6]` instead of the NEMO-faithful `[1e-6, 1e-6]`. It is
-green after the fix. Test receipts are 127 focused TKE tests, 57 non-MPAS
-vertical-mixing consumer tests, and 36 MPAS TKE consumer tests, all passing in
-clean processes. A combined-order probe produced 91 passes and two MPAS dtype
-failures after another test changed global precision state; those same tests
-pass independently on both pre-fix and fixed trees.
+returned `[1e-4, 1e-6]` instead of the NEMO-faithful `[1e-6, 1e-6]`. Round-6
+review reproduced **2 failures** at `2cb678259`; the prior report's “1 failed”
+receipt is retracted.
+
+Exact clean-process test ledger:
+
+- **52 passed in 37.95s** — `env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH="$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_nemo_terms.py`
+- **76 passed in 129.34s** — `env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH="$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_nemo_identity.py tests/ocean/unit/test_tke_prognostic.py`
+- **57 passed in 110.32s** — `env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH="$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_tke_integration.py tests/ocean/unit/test_combined_pipeline_tke_evd_gate.py tests/ocean/unit/test_implicit_vertical_mixing.py tests/ocean/unit/test_tke_post_mixing.py tests/ocean/unit/test_tke_dry_wmask.py tests/ocean/unit/test_tke_n2_before_advection.py`
+- **36 passed, 9 warnings in 43.05s** — `env -u JAX_ENABLE_X64 CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu PYTHONPATH="$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_mpas_tke.py`
+
+For audit completeness, **34 passed, 2 failed, 9 warnings in 39.41s** —
+`env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH="$PWD/packages/ocean:$PWD/packages/core:$PWD/src:${PYTHONPATH:-}" /home/dbalwada/legoESM/.venv/bin/python -m pytest -q tests/ocean/unit/test_mpas_tke.py`. Those failures are the known float64-input/float32-policy scan mismatch, not a passing receipt.
 
 The committed verifier calls the fixed production closure on the exact shared
 day-180 state. It first reconstructs the frozen 47-column cohort and recovers
@@ -329,12 +393,18 @@ in 47/47 columns. The complete per-column receipt is stored under
 `faithful_surface_floor_fix.per_column` in the JSON artifact; its `x=3..49`
 energy ratios are all reported there (range 1.024405--1.172219).
 
-Registered causal-chain prediction: fix the clamp -> `en_L/en_N -> 1` at
-10.14 m -> the active buoyancy-limited `zmxlm` ratio and `avm` ratio -> 1 ->
-5--26 m shear strengthens and EUC core depth shoals toward NEMO. The
-coordinator's GPU executor must test the final shear/core response; this lane
-stops here, and the offline finding does not promote that prediction to a
-trajectory verdict.
+The remaining `1.054275` energy ratio has a plausible owner rather than being
+left unattributed. Direct shear production is `sh2_L/sh2_N=1.046834`; the
+closure self-limitation `en ∝ P^(2/3)` predicts approximately `1.031`, close
+to the measured residual. **Label: `PLAUSIBLE_MOMENTUM_SHEAR_RESIDUAL`.** The
+remaining mismatch is the momentum/shear field difference, itself plausibly
+downstream of the same prior over-mixing.
+
+The day-10 executor A/B confirms the registered chain: fixing the clamp drives
+the near-surface closure toward NEMO, strengthens 5--26 m shear from 0.017060
+to 0.023512 s⁻¹, and shoals the crossing from 34.836 to 33.103 m without
+overshooting the 32.744 m control. Day-90 persistence and global do-no-harm
+remain pending.
 
 ## Provenance
 
