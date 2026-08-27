@@ -275,7 +275,7 @@ The scorer SHA-256 must remain
 Any missing or changed artifact is a STOP, not permission to re-extract from
 the incomplete directory or substitute daily output. No GPU arm runs here.
 
-## Round-2 GPU result and transient discriminator — preregistered STOP
+## Round-2 GPU result and representation-consistent discriminator — preregistered STOP
 
 The clean implicit artifact at the same Git SHA measured ratio
 201.41187344917114 and wall share 0.055963889374377046. The original mechanical
@@ -284,23 +284,55 @@ REFUTE. Its approximately eight-step decaying, diffuse launch anomaly is
 consistent with an explicit-consistent bridged state shocked by the implicit
 placement, but that interpretation is not yet a finding.
 
-The follow-up discards exactly 32 steps (four preregistered eight-step decay
-times) and scores samples 33--40 as the primary post-transient eight-sample
-window, with samples 33--160 as a companion. Both are the same area-weighted
-wet-domain RMS of the 2dt-alternating eta component and same-window aggregate
-wall share. Before scoring, extend `eta_flicker_decay.py` with a fail-closed
-`--first-sample 33` selector and a planted off-by-one control; do not slice an
-artifact by hand. Run both existing clean arms against the same certified
-NEMO artifact and require all original provenance/SHA gates.
+Mechanism review identified a concrete startup representation error, so the
+earlier discard-32 follow-up is **RETRACTED as a decisive ownership test**.
+It may be run only as a post-hoc/descriptive rescore of the retained artifacts.
+NEMO restart `utau_b/vtau_b` are U/V-point fields, but the bridge puts them in
+legoESM's T-point `tau_x_prev/tau_y_prev` carry. The first legoESM step centres
+that carry with current T-point forcing and interpolates it again. Discarding
+the resulting shock does not test the source faithfully.
 
-For the post-transient first eight samples, control validity is explicit ratio
-in `[2.30, 3.60]` and wall share in `[0.30, 0.65]`. **CONFIRMS equilibrium
-placement ownership** iff the implicit ratio is `<=1.25` and wall share
-`<=0.17`; **REFUTES** iff ratio is `>=2.30` and share `>=0.30`; otherwise
-**UNRESOLVED**. These bands are symmetric in requiring amplitude and locus.
-The 128-sample companion cannot override the primary classification. If the
-explicit control fails, or if the implicit amplitude at sample 33 remains
-more than 10 times the explicit amplitude, STOP as unresolved startup
-contamination and design an implicit-consistent restart; do not run a longer
-GPU arm under this registration. No GPU or post-transient scorer run is
-authorized in this sandbox round.
+Before another live arm, add a fail-closed harness selector named
+`--bridge-before-stress-tpoint`. It must reconstruct the previous T-point DINO
+analytic stress at the restart's own prior seasonal time through the existing
+forcing loader; it must not invert `utau_b/vtau_b`, edit prognostic fields, or
+change later-step carry behavior. The artifact must stamp
+`bridge_before_stress_stagger="T"`, the reconstruction time, and content hash.
+First run the committed one-step CPU counterfactual from the identical bridge:
+legacy U-as-T carry versus reconstructed T carry, holding all other leaves
+bit-identical. It must print the direct and `F_slow` deltas at `(1,49)`, their
+wet material-support Jaccards against the donor prediction, and a planted
+stagger swap. The representation correction is valid only if it removes at
+least 99.9999% of the measured `(1,49)` direct excess and the planted legacy
+swap restores that excess within `1e-6` relative error. Otherwise STOP; no GPU
+arm is authorized.
+
+Once that CPU gate passes, the coordinator's exact representation-consistent
+GPU invocations are:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/wind_place_tcarry_explicit.npz \
+  --days 5 --bridge-before --bridge-before-stress-tpoint --save-step-eta \
+  --no-surface-stress-implicit
+
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/wind_place_tcarry_implicit.npz \
+  --days 5 --bridge-before --bridge-before-stress-tpoint --save-step-eta \
+  --surface-stress-implicit
+```
+
+Score both complete 160-sample artifacts against the same certified NEMO
+comparator with the exact scorer commands above, changing only output names.
+The primary remains samples 1--8. Control validity is corrected-explicit ratio
+in `[2.60,3.18]` and wall share in `[0.38,0.59]`.
+**CONFIRMS placement ownership** iff corrected-implicit ratio is `<=1.25` and
+wall share `<=0.17`; **REFUTES** iff ratio is `>=2.30` and wall share `>=0.38`;
+otherwise **UNRESOLVED**. Both conditions require amplitude and locus. If the
+corrected explicit control is outside its band, STOP without classifying the
+implicit arm. Samples 33--40 and 33--160 may be printed as descriptive
+companions but cannot change the primary verdict. The selector does not exist
+yet: this is a preregistered design and mandatory STOP, not authorization to
+run either command in this sandbox.
