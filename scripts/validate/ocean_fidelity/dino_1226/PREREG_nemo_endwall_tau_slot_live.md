@@ -85,8 +85,7 @@ ln -s /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_0000
 ln -s "$SLOT_ROOT/cfgs/DINO/BLD/bin/nemo.exe" \
   "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/nemo"
 cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
-/home/dbalwada/miniconda3/envs/nemo-build/bin/mpirun -np 1 ./nemo \
-  >run_1step.log 2>&1
+./nemo >run_1step.log 2>&1
 ```
 
 Before verification print SHA-256 for the patched `trddump.F90`,
@@ -141,3 +140,9 @@ The first run invocation produced no model output: the base shell returned
 127 before launch because `mpirun` is not on its `PATH`. The absolute launcher
 from the registered `nemo-build` environment was added above and committed
 before retrying. No classification or threshold changed.
+
+The absolute launcher then stopped in PMIx before NEMO initialization because
+the sandbox denied its listener socket (`pmix_ifinit: socket() failed with
+errno=1`, exit 213). No model file was created. The single-rank direct
+executable fallback above was committed before retrying; it uses the same
+binary and namelists and changes no classification or threshold.
