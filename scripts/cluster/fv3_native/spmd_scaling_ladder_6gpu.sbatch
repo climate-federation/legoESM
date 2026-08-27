@@ -9,7 +9,7 @@
 #SBATCH --constraint=a100
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM_fv3jax/scripts/tmp/fv3_scale_%j.out
 
 # FV3 duo multi-NODE SPMD scaling ladder: sharded (6 devices, 3 nodes,
