@@ -1,148 +1,122 @@
-# Preregistration: live NEMO `jpdyn_tau` slot wiring
+# Preregistration: live NEMO named `jpdyn_tau` slot wiring
 
-Status: **PREREGISTERED CPU ONE-STEP ARM.** This file and the source
-patch/verifier were committed at `eaef2a1e17b7f990434f181186d3d03a36e751c8`
-before the preserved unpatched artifact was classified. The oracle tree is
-read-only, so the patched build must use the temporary clone recipe below;
-the source tree and retained artifacts remain unchanged. This is a one-step
-diagnostic write on CPU, not a free-running twin or a GPU ownership arm.
+Status: **CORRECTED AND PREREGISTERED BEFORE THE CORRECTED RUN.** The first
+registration incorrectly called the applied `dynzdf` surface increment divided
+by `rDt` NEMO's named `utrd_tau` diagnostic. Independent mechanism review
+refuted that identity: active `trddyn.F90:164-168` defines the named diagnostic
+without the MLF factor 1/2 and with `e3u/e3v(...,Kmm)`, whereas active
+`dynzdf.F90:536-560` applies the half-sum using after-level thickness. The old
+`CONFIRMED_SLOT_WIRED` label is therefore retracted here before another run.
+That run demonstrated diagnostic transport for the applied-increment operand;
+it did not wire the named diagnostic.
 
-## Claim and exact number
+This corrected arm is a one-step CPU diagnostic write, not a free-running twin
+or GPU ownership arm. The read-only oracle and its retained artifacts remain
+unchanged; the source edit is applied in the isolated temporary clone.
 
-The instrumented DINO restart advertises `utrd_tau`/`vtrd_tau`, but the current
-`trddump` store never receives `jpdyn_tau`. The proposed patch writes the exact
-level-1 increment bracketed inside active `dyn_zdf`, divided by `rDt` so the
-restart slot retains trend units. It deliberately does not enter the interval
-accumulator or `nacc_trd`: this is a one-step source operand, not a new member
-of the nine-term closure.
+## Claim and exact numbers
 
-The verifier prints these registered numbers for the zonal slot:
+The dormant restart slot must receive the exact 2-D arrays that active
+`trddyn.F90` supplies to `iom_put("utrd_tau")` and `iom_put("vtrd_tau")`.
+The patch therefore calls `trddump_tau(z2dx,z2dy)` immediately after those
+arrays are computed and writes independent one-step stream references from the
+same arrays. It does not multiply by `r1_Dt`, and it deliberately does not
+enter the interval accumulator or `nacc_trd`.
 
-1. `u_slot_nonzero_count` over the interior;
-2. `u_lower_max_abs` over levels 2..jpk;
-3. `u_reconstruction_max_abs = max(abs(rDt*utrd_tau[0] -
-   (zdf_u1_poststress-zdf_u1_prestress)))`;
-4. `u_reconstruction_normalized_error`, the RMS reconstruction error divided
-   by the RMS bracket over nonzero bracket points.
+The verifier prints these frozen numbers:
 
-The meridional slot and bracket are structural-zero controls and are printed
-separately.
+1. `u_slot_nonzero_count` and `u_reference_nonzero_count`;
+2. `u_lower_max_abs` over levels 2..jpk and the meridional structural-zero
+   maxima;
+3. `u_storage_max_abs = max(abs(utrd_tau[0]-u_reference))`;
+4. `u_storage_normalized_error`, the RMS storage error divided by the RMS
+   reference over nonzero reference points;
+5. separately, `u_named_to_applied_rms_ratio`,
+   `u_named_vs_applied_normalized_error`, and their correlation, where
+   `applied = (zdf_u1_poststress-zdf_u1_prestress)/rDt`.
 
-## Frozen classification
+## Frozen classifications
 
-- **CONFIRMED_SLOT_WIRED** iff `u_slot_nonzero_count > 0`, every lower-level
-  value is exactly zero, the meridional slot/bracket are exactly zero, and
-  `u_reconstruction_max_abs <= 8*eps*max(1, max(abs(bracket)))`.
-- **REFUTED_UNWIRED** iff `u_slot_nonzero_count == 0` while the zonal bracket
-  has a nonzero value.
-- **REFUTED_WRONG_SOURCE** iff a lower level is nonzero, the meridional
-  structural-zero control fails, or `u_reconstruction_normalized_error >=
-  0.05`.
-- Anything else is **UNRESOLVED**. No placement or eta-ownership verdict is
-  licensed by this slot check.
+- **CONFIRMED_NAMED_TAU_SLOT_WIRED** iff `u_slot_nonzero_count > 0`, every
+  lower-level value is exactly zero, the meridional slot/reference are exactly
+  zero, and both storage maxima are no larger than
+  `8*eps*max(1,max(abs(u_reference)))`.
+- **REFUTED_UNWIRED** iff the zonal slot is zero while its reference is nonzero.
+- **REFUTED_WRONG_SOURCE** iff a lower level is nonzero, a meridional
+  structural-zero control fails, or `u_storage_normalized_error >= 0.05`.
+- Anything else is **UNRESOLVED**.
 
-The verifier must also prove that planted nonzero-lower-level and
-top-reconstruction violations make their corresponding gates fail.
+The source distinction is independently **CONFIRMED_NAMED_AND_APPLIED_DIFFER**
+if the named-versus-applied normalized error is at least 0.25,
+**REFUTED_NAMED_AND_APPLIED_MATCH** if it is at most 0.05, and **UNRESOLVED**
+otherwise. These classifications establish instrument identity only. No
+wind-placement or eta-flicker ownership verdict is licensed by them.
+
+The verifier must prove that planted nonzero-lower-level and top-storage
+violations fire their corresponding gates.
 
 ## Registered source edit
 
-Apply
-`scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch` at the
-NEMO 5.0.2 root. The patch adds `trddump_tau` and calls it from the same
-`kt==nit000`, one-rank bracket block in `cfgs/DINO/MY_SRC/dynzdf.F90`. The
-routine zeroes the whole tau store and writes only level 1 from the already
-captured post-minus-pre increment times `r1_Dt`.
+Apply `nemo_endwall_tau_slot.patch` at the NEMO 5.0.2 root. It adds
+`trddump_tau`, calls it from the active `CASE(jpdyn_zdf)` in
+`cfgs/DINO/MY_SRC/trddyn.F90`, and dumps the exact named arrays independently.
+The existing `dynzdf` pre/post-stress streams remain untouched and provide the
+separate applied-increment operand.
 
-## Exact temporary CPU execution
+## Exact corrected temporary CPU execution
 
-The initial external-tree handoff below remains valid for the coordinator.
-This sandbox instead uses an isolated temporary clone so it can complete the
-literal source-write check without mutating the oracle. From the legoESM
-checkout, with `SLOT_ROOT` required to be the exact fresh path shown:
+The existing isolated clone is reset only at the three touched override files,
+using byte-for-byte copies from the read-only oracle, before applying the
+corrected patch. A new run directory prevents confusion with the retracted
+artifact.
 
 ```bash
 SLOT_ROOT=/tmp/nemo-tau-slot-eaef2a1e1
-test ! -e "$SLOT_ROOT"
-git clone --shared /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 "$SLOT_ROOT"
-cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/arch/arch-conda.fcm \
-  "$SLOT_ROOT/arch/"
-mkdir -p "$SLOT_ROOT/cfgs/DINO"
-cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/work_cfgs.txt \
-  "$SLOT_ROOT/cfgs/"
-cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/cpp_DINO.fcm \
-  "$SLOT_ROOT/cfgs/DINO/"
-cp -a /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC \
-  "$SLOT_ROOT/cfgs/DINO/"
+ORACLE=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
+cp "$ORACLE/cfgs/DINO/MY_SRC/trddump.F90" "$SLOT_ROOT/cfgs/DINO/MY_SRC/"
+cp "$ORACLE/cfgs/DINO/MY_SRC/trddyn.F90" "$SLOT_ROOT/cfgs/DINO/MY_SRC/"
+cp "$ORACLE/cfgs/DINO/MY_SRC/dynzdf.F90" "$SLOT_ROOT/cfgs/DINO/MY_SRC/"
 git -C "$SLOT_ROOT" apply \
   /tmp/codex-basin-rect/scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch
-conda run -n nemo-build "$SLOT_ROOT/makenemo" -n DINO -m conda -j 4
-mkdir "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
-cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_D180_1STEP_1R/namelist_cfg \
-  /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_D180_1STEP_1R/namelist_ref \
-  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/"
-ln -s /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc \
-  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/DINO_00005760_restart.nc"
+CONDA_NO_PLUGINS=true conda run -n nemo-build \
+  "$SLOT_ROOT/makenemo" -n DINO -m conda -j 4
+mkdir "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R"
+cp "$ORACLE/cfgs/DINO/RUN_D180_1STEP_1R/namelist_cfg" \
+   "$ORACLE/cfgs/DINO/RUN_D180_1STEP_1R/namelist_ref" \
+   "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/"
+ln -s "$ORACLE/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc" \
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/DINO_00005760_restart.nc"
 ln -s "$SLOT_ROOT/cfgs/DINO/BLD/bin/nemo.exe" \
-  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/nemo"
-cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/nemo"
+cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R"
 ./nemo >run_1step.log 2>&1
 ```
 
-Before verification print SHA-256 for the patched `trddump.F90`,
-`dynzdf.F90`, executable, namelists, restart and four brackets. Then run the
-same verifier invocation below with the temporary run directory and
-`DINO_00005761_restart.nc`. STOP after its classification.
-
-## Exact coordinator handoff
-
-From `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2`:
-
-```bash
-git apply --check /path/to/legoesm/scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch
-git apply /path/to/legoesm/scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch
-conda run -n nemo-build ./makenemo -n DINO -m conda -j 4
-cp -a cfgs/DINO/RUN_D180_1STEP_1R cfgs/DINO/RUN_D180_TAU_SLOT_1R
-cd cfgs/DINO/RUN_D180_TAU_SLOT_1R
-ln -sfn ../BLD/bin/nemo.exe nemo
-rm DINO_00005761_restart.nc ocean.output run_1step.log
-mpirun -np 1 ./nemo >run_1step.log 2>&1
-```
-
-The copied namelist is frozen at `nn_it000=nn_itend=5761` and reads the
-step-5760 restart. Before accepting the output, record the patched source
-SHA-256 values, NEMO executable SHA-256, namelist SHA-256, and `mpirun` exit
-status. Then, from the legoESM checkout:
+Before verification, print SHA-256 for patched `trddump.F90`, `trddyn.F90`,
+unchanged `dynzdf.F90`, executable, namelists, input/output restart, both named
+reference streams, and all four `dynzdf` bracket streams. Then run:
 
 ```bash
 .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/verify_nemo_endwall_tau_slot.py \
-  --run-dir /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_D180_TAU_SLOT_1R \
+  --run-dir /tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R \
   --restart DINO_00005761_restart.nc --rdt-seconds 5400
 ```
 
-STOP after printing the classification. A later wind-placement/eta run may
-cite `CONFIRMED_SLOT_WIRED`; it may not reinterpret any other classification.
+STOP after the classifications.
 
-## Refused execution audit
+## Coordinator handoff
 
-The first temporary-clone build produced no executable or measurement.
-`makenemo -n DINO` stopped because the Git clone did not contain the oracle's
-untracked `cfgs/work_cfgs.txt`, so DINO was absent from the work-configuration
-registry. The copy step above was added and committed before retrying. No
-classification or threshold changed.
+On a writable copy of the oracle, apply and build the same patch, copy
+`RUN_D180_1STEP_1R` to a fresh `RUN_D180_TAU_SLOT_NAMED_1R`, point its `nemo`
+symlink at the rebuilt executable, and run its frozen step-5761 namelist. Hash
+the same sources, executable, inputs, output, references, and bracket streams;
+then invoke the verifier above with that run directory. A later wind/eta run
+may cite only `CONFIRMED_NAMED_TAU_SLOT_WIRED`.
 
-The second build also produced no executable or measurement. After recognizing
-DINO, `makenemo` stopped with `Compiler not existing` because
-`arch/arch-conda.fcm` is another untracked oracle file omitted by the clone.
-Its exact copy step was added above and committed before retrying. No
-classification or threshold changed.
+## Refused-execution audit inherited from the first arm
 
-The first run invocation produced no model output: the base shell returned
-127 before launch because `mpirun` is not on its `PATH`. The absolute launcher
-from the registered `nemo-build` environment was added above and committed
-before retrying. No classification or threshold changed.
-
-The absolute launcher then stopped in PMIx before NEMO initialization because
-the sandbox denied its listener socket (`pmix_ifinit: socket() failed with
-errno=1`, exit 213). No model file was created. The single-rank direct
-executable fallback above was committed before retrying; it uses the same
-binary and namelists and changes no classification or threshold.
+The temporary clone required the oracle's untracked `cfgs/work_cfgs.txt`,
+`arch/arch-conda.fcm`, and `cfgs/DINO/MY_SRC`; these were copied before build.
+The sandbox denied PMIx listener creation, so the preregistered one-rank direct
+executable fallback is used. Those operational changes produced no scientific
+classification and changed no threshold.
