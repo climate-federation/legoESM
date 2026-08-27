@@ -1188,7 +1188,7 @@ def main():
         _k_vfx = dict(_k_arm)
         _k_vfx["grid"] = _grid_p._replace(
             dx_v=jnp.asarray(_dxv_sub, dtype=_grid_p.dx_v.dtype))
-        _een_p = _k_sub["een_pre"]
+        _een_p = _k_arm["een_pre"]
         if _een_p is None or "e1v" not in _een_p:
             raise SystemExit(
                 "FATAL: the loop carries no metric-complete EEN pre-block, so "
@@ -1331,9 +1331,9 @@ def main():
     # item 1; dino_wall_fixed_bias.md "The sibling error this arm uncovered").
     # legoESM builds the Coriolis parameter at the vertex as the AVERAGE of the
     # two adjacent tracer rows; NEMO evaluates it at its own f-point latitude.
-    # Measured against NEMO's own dumped `ff_f` the gap is median -5.48e-05 and
-    # it peaks at the EQUATOR, which is exactly where the v-face metric gap
-    # (this file's other arm) vanishes.  Their signed latitude profiles
+    # Measured against NEMO's own dumped `ff_f` the gap is median -5.48e-05
+    # over ALL mapped rows, and it peaks at the EQUATOR, which is exactly where
+    # the v-face metric gap (this file's other arm) vanishes.  Their signed latitude profiles
     # correlate at +1.000 and they enter the SAME EEN rotation coefficient
     # `e1v * f` with OPPOSITE signs, so they PARTIALLY CANCEL: the v-face arm
     # removed the smaller of a cancelling pair.  That is the Rule-8 pattern
@@ -1341,7 +1341,10 @@ def main():
     # it is a JOINT arm, never a revert of the half already fixed.
     #
     # A THIRD OF THIS GAP IS NOT A DISCRETISATION CONVENTION.  It decomposes
-    # into a uniform -1.59e-05 and a latitude-varying -3.61e-05
+    # into a uniform -1.59e-05 and a latitude-varying -3.61e-05, summing to
+    # -5.20e-05 -- the median over the |sin(phi)| >= 0.1 rows the split is
+    # conditioned on, NOT the -5.48e-05 all-rows median quoted above.  Two
+    # windows; they are not interchangeable
     # (coriolis_omega_routing_audit.py, committed).  The uniform part is a
     # different Earth: the twin's GEOMETRY is built on legoESM's rounded
     # `constants.Omega`, while NEMO's own ff_f inverts to 7.292115083046e-05.
@@ -1449,20 +1452,52 @@ def main():
         # The two polar v-rows have no NEMO counterpart under this map and are
         # left at legoESM's own value by BOTH arms.  That is one-variable-clean
         # only if they carry no wet face -- asserted, not assumed.
-        _vmask_c = np.asarray(_k_arm["v_mask"])
-        for _jw in (0, jpj):
-            if bool((np.abs(_vmask_c[_jw]) > 0.5).any()):
-                raise SystemExit(
-                    f"FATAL: v row {_jw} is left at legoESM's own Coriolis by "
-                    "this substitution but carries wet faces; the arm would "
-                    "not be one variable.")
+        # THE VERTEX mask, not the face mask.  `pv_flux_al81_partial_cell`
+        # multiplies the triad by `vtx_mask`, so a vertex row that is dry on
+        # v-FACES but live in the triad would slip past a face-mask check
+        # (adversarial review, round 1).  It is in the same dict.
+        _vtxm_c = np.asarray(_een_c["vtx_mask"])
+        if bool((np.abs(_vtxm_c[0]) > 0.5).any()):
+            print("    NOTE: south wall vertex row 0 is LIVE in the triad "
+                  "mask and has no NEMO counterpart under this map, so it "
+                  "stays at legoESM's own first-order tracer-row value -- a "
+                  "floor this arm cannot reach. The reachability control "
+                  "below measures whether the loop actually reads it.")
         # THE SUBSTITUTION, built the SAME way `vertex_coriolis` builds the
         # array it replaces (rows, then the periodic wrap column), so the two
         # differ in their VALUES and in nothing else.
         _fv_sub = np.array(_fvtx_p[:, :jpi])
         _shift_c = -1 if _cor_mode == "nemo" else 0
-        _fv_sub[1:jpj + 1] = _ff_f_n[np.clip(
-            np.arange(1, jpj + 1) + _shift_c, 0, jpj - 1)]
+        _rows_c = np.arange(1, jpj + 1) + _shift_c
+        if _rows_c.min() < 0 or _rows_c.max() > jpj - 1:
+            # np.clip would silently DUPLICATE an end row instead of failing.
+            _bad = _rows_c[(_rows_c < 0) | (_rows_c > jpj - 1)]
+            print(f"    NOTE: shift {_shift_c:+d} maps {_bad.size} lego row(s) "
+                  f"outside NEMO's [0,{jpj - 1}]; those rows are left at "
+                  "legoESM's own value rather than clipped onto a duplicate.")
+        _keep_c = (_rows_c >= 0) & (_rows_c <= jpj - 1)
+        _fv_sub[1:jpj + 1][_keep_c] = _ff_f_n[_rows_c[_keep_c]]
+        # THE END ROWS STAY AT legoESM's OWN VALUE, and what that costs is
+        # MEASURED by the reachability control below rather than argued.
+        #
+        # Adversarial review (round 2) is right that these are the worst rows
+        # in the array and wrong that leaving them is free-by-assumption.
+        # legoESM's f_v carries the TRACER-row value at both ends rather than a
+        # face value -- a FIRST-ORDER half-cell error, not the second-order
+        # convention this arm is about.  Measured on the DINO mesh: -1.108e-03
+        # at row jpj against a -2.50e-05 neighbour and a -5.48e-05 median, i.e.
+        # 20x the median and 44x its own neighbour.  The south row 0 maps to
+        # NEMO row -1 and has no counterpart at all; the north row jpj DOES
+        # have one (NEMO row jpj-1), so leaving it is a choice, not a
+        # necessity.
+        #
+        # It is left ANYWAY, for one reason and only if that reason holds: the
+        # last wet v-face on this configuration is row 196, the AL81 triad at
+        # v-face j reads vertex rows j and j+1, and so no wet face can reach
+        # vertex row jpj=199.  That is a claim about reachability, and the
+        # control below CORRUPTS both end rows by 1e3 and requires the carry
+        # back bit-identical.  If it is not bit-identical this arm is partial
+        # at its worst rows and must be re-run with them substituted.
         _fv_sub[jpj] = _fvtx_p[jpj, :jpi]     # the north wall stays legoESM's
         _fvtx_sub = np.concatenate([_fv_sub, _fv_sub[:, 0:1]], axis=1)
         _cor_touched = int((_fvtx_sub != _fvtx_p).sum())
@@ -1494,41 +1529,105 @@ def main():
                 continue
             if _k_cor["een_pre"].get(_kk) is not _een_c.get(_kk):
                 raise SystemExit(f"FATAL: een_pre[{_kk!r}] changed")
+        # THE CONTENT SWEEP.  It compares the UN-WRAPPED form (the first jpi
+        # columns), not the full vertex frame: `f_vtx` IS `grid.f_v` plus a
+        # periodic wrap column, so a shape-exact filter is blind to the
+        # narrower array carrying the identical values -- which is precisely
+        # the consumer a missed-consumer check exists to find (adversarial
+        # review, round 1).  Anything whose rows match and whose first jpi
+        # columns equal legoESM's own vertex Coriolis is reported.
+        _fvtx_core = _fvtx_p[:, :jpi]
+
+        def _carries_lego_f(v):
+            sh = getattr(v, "shape", None)
+            if sh is None or len(sh) != 2 or sh[0] != _fvtx_p.shape[0]:
+                return False
+            if sh[1] < jpi:
+                return False
+            return np.array_equal(
+                np.asarray(v, dtype=np.float64)[:, :jpi], _fvtx_core)
+
         _cmatches = []
         for _kk, _vv in _k_cor.items():
             if _kk == "een_pre" or _vv is None:
                 continue
-            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
-                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+            if _carries_lego_f(_vv):
                 _cmatches.append(f"loop kwarg {_kk}")
         for _f in _k_arm["grid"]._fields:
-            _vv = getattr(_k_arm["grid"], _f)
-            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
-                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+            if _carries_lego_f(getattr(_k_arm["grid"], _f)):
                 _cmatches.append(f"grid.{_f}")
         for _kk, _vv in _een_c.items():
-            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
-                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+            if _carries_lego_f(_vv):
                 _cmatches.append(f"een_pre[{_kk!r}]")
         print(f"    content sweep: arrays carrying legoESM's own vertex "
               f"Coriolis = {sorted(_cmatches)}")
-        if sorted(_cmatches) != ["een_pre['f_vtx']"]:
+        # THREE names are EXPECTED, and the widened sweep is what found the
+        # third: `grid.f_v` is the same field one column narrower, and the
+        # `f_v` loop kwarg IS that same array handed in separately.  Neither is
+        # substituted, and the reachability control above -- not this list --
+        # is what establishes the loop never reads either.  A FOURTH name is a
+        # consumer this arm missed.  (The shape-exact version of this sweep saw
+        # only the first name and would have reported "exactly one" while two
+        # more sat in the same dict: adversarial review, round 1.)
+        _EXPECTED_F_CARRIERS = ["een_pre['f_vtx']", "grid.f_v", "loop kwarg f_v"]
+        if sorted(_cmatches) != sorted(_EXPECTED_F_CARRIERS):
             raise SystemExit(
                 "FATAL: the arrays carrying legoESM's own vertex Coriolis are "
-                f"{sorted(_cmatches)}, not exactly the one this arm "
-                "substitutes.  A second is a consumer the arm MISSED (partial "
-                "perturbation, collapse biased low); none means the "
+                f"{sorted(_cmatches)}, not {sorted(_EXPECTED_F_CARRIERS)}. "
+                "An EXTRA name is a consumer the arm MISSED (partial "
+                "perturbation, collapse biased low); a MISSING one means the "
                 "substitution has nothing to replace.")
 
-        # THE INERTNESS CONTROL, and it is the reason `f_u`/`f_v` are left
-        # alone.  Those kwargs still carry legoESM's rounded Earth, and if the
-        # loop read them this arm would be a PARTIAL perturbation.  Reading the
-        # `else` branch is not proof that the branch is dead, so CORRUPT them
-        # by a factor of 1e3 and require the loop's carry to come back
-        # BIT-IDENTICAL.  A live consumer cannot survive that.
+        # THE REACHABILITY CONTROL -- everything carrying a Coriolis value
+        # that this arm does NOT substitute, corrupted at once, with the
+        # loop's carry required back BIT-IDENTICAL.  Anything the loop
+        # actually reads cannot survive a factor of 1e3.
+        #
+        # Three families, and each is here because leaving it out would make
+        # the arm a PARTIAL perturbation whose collapse reads low with nothing
+        # announcing it:
+        #   * the `f_u`/`f_v` loop kwargs -- they still carry legoESM's
+        #     rounded Earth, and they sit on the `else` of `elif een_pre is not
+        #     None`.  Reading that branch is not proof it is dead.
+        #   * the GRID's own `f_u`/`f_v`/`omega` -- adversarial review, round 1:
+        #     the content sweep below compares only arrays shaped like f_vtx,
+        #     so `grid.f_v` (the same values, one column narrower) is invisible
+        #     to it.  A loop consumer rebuilding f from the grid would be
+        #     missed entirely.
+        #   * the SOUTH wall vertex row 0, which has no NEMO counterpart and is
+        #     left at legoESM's own first-order tracer-row value.  If it is
+        #     reachable, this arm has a floor it can never reach and must say
+        #     so; if it is not, leaving it is free.
+        #
+        # A CONTROL THAT PERTURBS A ZERO IS NOT A CONTROL, so every array's
+        # own magnitude is printed and asserted nonzero before it is scaled.
         _k_inert = dict(_k_arm)
+        _g_in = _k_arm["grid"]
+        _corrupt = {"f_u kwarg": np.abs(np.asarray(_k_arm["f_u"])).max(),
+                    "f_v kwarg": np.abs(np.asarray(_k_arm["f_v"])).max(),
+                    "grid.f_u": np.abs(np.asarray(_g_in.f_u)).max(),
+                    "grid.f_v": np.abs(np.asarray(_g_in.f_v)).max(),
+                    "grid.f_T": np.abs(np.asarray(_g_in.f_T)).max(),
+                    "een_pre f_vtx row 0": np.abs(_fvtx_p[0]).max(),
+                    "een_pre f_vtx row jpj": np.abs(_fvtx_p[jpj]).max()}
+        for _nm, _mx in _corrupt.items():
+            print(f"    reachability control corrupts {_nm:22s} max|.|="
+                  f"{float(_mx):.4e}")
+            if float(_mx) <= 0.0:
+                raise SystemExit(
+                    f"FATAL: {_nm} is identically zero, so scaling it is a "
+                    "no-op and this control proves nothing about it.")
         _k_inert["f_u"] = _k_arm["f_u"] * 1.0e3
         _k_inert["f_v"] = _k_arm["f_v"] * 1.0e3
+        _k_inert["grid"] = _g_in._replace(
+            f_u=_g_in.f_u * 1.0e3, f_v=_g_in.f_v * 1.0e3,
+            f_T=_g_in.f_T * 1.0e3, omega=float(_g_in.omega) * 1.0e3)
+        _fvtx_row0 = np.array(_fvtx_p)
+        _fvtx_row0[0] = _fvtx_p[0] * 1.0e3
+        _fvtx_row0[jpj] = _fvtx_p[jpj] * 1.0e3
+        _k_inert["een_pre"] = dict(_een_c)
+        _k_inert["een_pre"]["f_vtx"] = jnp.asarray(
+            _fvtx_row0, dtype=_een_c["f_vtx"].dtype)
         jax.lax.fori_loop = _fori_capture
         try:
             with jax.disable_jit():
@@ -1544,14 +1643,16 @@ def main():
             jax.lax.fori_loop = _orig_fori
         _U_base_c = np.asarray(captured["carries"][1])
         _inert_gap = float(np.abs(_U_inert - _U_base_c).max())
-        print(f"    inertness control: f_u/f_v scaled by 1e3 -> max|dU_bar| "
-              f"= {_inert_gap:.3e} (must be 0.0)")
+        print(f"    reachability control: every unsubstituted Coriolis array "
+              f"scaled by 1e3 -> max|dU_bar| = {_inert_gap:.3e} (must be 0.0)")
         if _inert_gap != 0.0:
             raise SystemExit(
-                "FATAL: the f_u/f_v loop kwargs are LIVE (scaling them by 1e3 "
-                f"moved the carry by {_inert_gap:.3e}), so substituting only "
-                "een_pre['f_vtx'] is a partial perturbation and the collapse "
-                "would read low.  Substitute them too before scoring.")
+                "FATAL: an unsubstituted Coriolis array is LIVE in the loop "
+                f"(scaling them all by 1e3 moved the carry by {_inert_gap:.3e}"
+                "), so substituting only een_pre['f_vtx'] is a PARTIAL "
+                "perturbation and the collapse would read low.  Isolate which "
+                "of the six by re-running them one at a time, then substitute "
+                "it too before anything is scored.")
 
         jax.lax.fori_loop = _fori_capture
         try:
