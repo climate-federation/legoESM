@@ -223,22 +223,38 @@ it.
 Volume-weighted rms of (legoESM − NEMO), **thickness-weighted by `e3t_0`**, never
 layer-averaged. Day 360, as multiples of each band-and-class's **own** floor:
 
+`*` marks a floor whose two sides differ by over a decade; UNMEAS marks one at
+or under 10× its own fp32 storage quantum, where the multiple would be measuring
+the file format and is withheld (which is **not** a pass).
+
 | band | upper <200 m | interior 200–1400 m | abyss >1400 m |
 |---|---:|---:|---:|
 | P1 south of band | 4.4× | 3.7× | 2.8× |
 | P2 channel band | 40.8× | 2.7× | 7.4× |
-| **P3 southern subtropics** | **214×** | **415×** | **467×** |
-| P4 equatorial ±20 | 24.2× | 8.9× | 12.6× |
-| P5 northern subtropics | 7.1× | 57.8× | 82.2× |
-| P6 northern subpolar | 9.4× | 6.8× | 19.6× |
+| **P3 southern subtropics** | **214×** | **415×** | UNMEAS |
+| P4 equatorial ±20 | 24.2×`*` | 8.9× | 12.6× |
+| P5 northern subtropics | 7.1×`*` | 57.8×`*` | UNMEAS |
+| P6 northern subpolar | 9.4×`*` | 6.8×`*` | 19.6×`*` |
+| E10 equatorial ±10 | 24.1×`*` | 7.9× | 8.3× |
 
 **This ranking is partly a ranking of denominators, and the table now says so.**
+Share of each floor's variance that is legoESM's **own** dispersion:
+
+| band | upper <200 m | interior | abyss |
+|---|---:|---:|---:|
+| P1 south of band | 88.3 % | 86.4 % | 70.3 % |
+| P2 channel band | 74.9 % | 77.3 % | 94.4 % |
+| P3 southern subtropics | 77.6 % | 87.3 % | 85.0 % |
+| **P4 equatorial ±20** | **0.2 %** | **3.7 %** | 51.1 % |
+| P5 northern subtropics | 100.0 % | 99.9 % | 98.1 % |
+| P6 northern subpolar | 99.9 % | 99.8 % | 99.8 % |
+
 The equatorial upper class is **the one place in the domain where NEMO is the
-noisier model** — its ensemble spread there is ~24× legoESM's, so that floor is
-**99.8 % NEMO's own dispersion**. This *inverts* the verdict run's standing
-limitation #1 (that 77–99 % of the combined floor is legoESM's spread). A
-per-band "whose dispersion is this floor" table now ships beside the multiples.
-P3's floor, by contrast, is genuinely two-sided.
+noisier model**: its floor there is **99.8 % NEMO's own dispersion**, which
+*inverts* the verdict run's standing limitation #1 (that 77–99 % of the combined
+floor is legoESM's spread). A large multiple in another band is partly telling
+you where NEMO is quiet, not only where legoESM is wrong. P3's floor, by
+contrast, is genuinely two-sided at 78–87 %.
 
 **Does each band hold its own divergence pattern?** The registered statistic —
 forward retention of the day-10 hotspot set against a 0.05 geometric null — **is
