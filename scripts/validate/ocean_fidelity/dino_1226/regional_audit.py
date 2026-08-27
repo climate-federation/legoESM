@@ -166,6 +166,48 @@ DEPTH_RANK_FIELD = float(np.max(np.asarray(A.gdept0, dtype=np.float64))) \
     + 1.0 - np.asarray(A.gdept0, dtype=np.float64)
 
 
+RANDOM_NULL_DRAWS = 200
+RANDOM_NULL_SEED = 20260827
+
+
+def level_matched_random_null(hot, w, sel, n_draws=RANDOM_NULL_DRAWS):
+    """Retention of random sets drawn with the SAME per-level volume as `hot`.
+
+    Why this exists, and it is not the same control as ``level_rank_field``.
+    Inside a single depth class the LEVEL baseline DEGENERATES: the upper class
+    is three levels and over 90% of its cells sit in one of them, so a
+    level-constant ranking field is an order-preserving transform of the field
+    itself and picks very nearly the same cells.  Every published upper-class
+    ratio lives in that regime.  This null keeps the hot set's per-level volume
+    -- so it cannot be beaten by knowing WHICH level -- and scrambles the
+    horizontal placement, which is the only thing left to be right about.
+
+    Returns (mean, 95th percentile) of the null retention.
+    """
+    rng = np.random.default_rng(RANDOM_NULL_SEED)
+    lev_target = [float(w[:, :, k][hot[:, :, k]].sum()) for k in range(A.NZ)]
+    idx = [np.argwhere(sel[:, :, k]) for k in range(A.NZ)]
+    out = []
+    for _ in range(n_draws):
+        pick = np.zeros_like(hot)
+        for k in range(A.NZ):
+            if lev_target[k] <= 0.0 or idx[k].size == 0:
+                continue
+            order = rng.permutation(len(idx[k]))
+            wk = w[:, :, k]
+            acc, chosen = 0.0, []
+            for t in order:
+                j, i = idx[k][t]
+                chosen.append((j, i))
+                acc += float(wk[j, i])
+                if acc >= lev_target[k]:
+                    break
+            for j, i in chosen:
+                pick[j, i, k] = True
+        out.append(pick)
+    return out
+
+
 def level_rank_field(d, w, sel):
     """A HORIZONTALLY UNIFORM field carrying the day-10 per-level rms.
 
@@ -1433,6 +1475,14 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
         m, bar = e["split_margin"], V.K_PREREG * e["floor_split"]
         if abs(m) <= bar:
             verd = "UNRESOLVED"
+        elif e["margin_is_gap"]:
+            # NO DIRECTIONAL VERDICT WHERE THE MARGIN IS THE GAP.  On these rows
+            # "bottom-referenced-led" restates "this band has a gap" -- it says
+            # nothing about vertical structure, because the margin and the gap
+            # are the same number.  The leg MAGNITUDES beside it are what carry
+            # any vertical claim.  Suppressed rather than printed and then
+            # caveated, because a printed verdict is what gets quoted.
+            verd = "(no vertical verdict -- margin IS the gap)"
         else:
             # NOT "barotropic": retraction #7 relabelled this leg
             # BOTTOM-REFERENCED, per acc_driver_decomp's own docstring, and the
@@ -1461,6 +1511,12 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     print("  OPPOSITE signs, |bc| - |bt| IS the band gap.  Those rows re-score")
     print("  the ledger's own number against a different bar; they are not")
     print("  independent evidence about the vertical structure.")
+    print("  REGISTERED-RULE DEVIATION, disclosed: PREREG sec.5 registers the")
+    print("  floor as the RSS of the two SIDES' own spreads.  The margin does")
+    print("  not factorise that way -- it is a single cross-model quantity, so")
+    print("  there is one ensemble of it and its floor is that ensemble's std.")
+    print("  Every other floor in this audit is the registered RSS; this one")
+    print("  statistic is not, and it deviates by DISCLOSURE, not silently.")
     art["split_ordering"] = {
         b: {"gap_bt": ledger[(b, 360)]["gap_bt"],
             "gap_bc": ledger[(b, 360)]["gap_bc"],
@@ -1638,15 +1694,58 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
                 cells.append(f"{rr:>9.3f}{rl:>9.3f}{rr / rl:>8.1f}")
                 ret[(bname, key, day, "upper")] = rr
                 ret[(bname, key, day, "upper_level")] = rl
+            # THE CEILING, inside the upper class.  Without it a band scoring at
+            # its baseline is open to the objection that its divergence simply
+            # went quiet -- that nothing is concentrated anywhere, so no set
+            # could score.  The day-360 field's retention of its OWN day-360
+            # hotspot set answers that: a high ceiling beside a floor-level
+            # retention means the field IS concentrated, just somewhere else.
+            d360u = np.where(sel, keep[360]["d" + key], 0.0)
+            ceil_u = X.retention(d360u, wb,
+                                 X.hotspot_set(d360u, wb, X.Q2_NULL))
+            ret[(bname, key, "upper_ceil")] = ceil_u
+            # THE MEASURED NULL for these ratios.  The LEVEL baseline
+            # degenerates inside one depth class (see
+            # level_matched_random_null), and every ratio in this table lives
+            # there, so the honest denominator is a null that keeps the hot
+            # set's per-level volume and scrambles only the horizontal
+            # placement.  Committed rather than quoted.
+            draws = level_matched_random_null(hot, w, sel)
+            nulls = [X.retention(d360u, wb, pk) for pk in draws]
+            rnull = float(np.mean(nulls))
+            rnull95 = float(np.percentile(nulls, 95))
+            ret[(bname, key, "upper_random_null")] = rnull
+            ret[(bname, key, "upper_random_null_p95")] = rnull95
+            r360 = ret[(bname, key, 360, "upper")]
+            cells.append(f"{ceil_u:>9.3f}{rnull:>9.3f}"
+                         f"{r360 / rnull if rnull > 0 else float('inf'):>8.1f}")
             lines.append(f"d{key} {bname:<22}" + "".join(cells))
     _tbl("--- upper class only (<200 m): retention against the LEVEL baseline "
          "-- the horizontal-memory statistic ---",
          f"{'field / band':<27}" + "".join(f"{'ret d' + str(d):>9}{'LEVEL':>9}"
-                                           f"{'x':>8}" for d in (90, 360)),
+                                           f"{'x':>8}" for d in (90, 360))
+         + f"{'CEIL':>9}{'RANDnull':>9}{'x/RAND':>8}",
          lines)
     print("  ret/LEVEL is the ratio that means `horizontal memory'.  A band at")
     print("  ~1.0 has none: its day-10 set does no better than a field that is")
     print("  constant within every level.")
+    print("  CEIL is the day-360 field's retention of its OWN day-360 hotspot")
+    print("  set, inside the same class.  A band at ~1.0 with a HIGH ceiling")
+    print("  has a concentrated divergence that has MOVED; it has not gone")
+    print("  quiet.  That is the difference between `no memory' and `nothing")
+    print("  to remember', and only the ceiling separates them.")
+    print("  RANDnull is the MEASURED null: the mean retention over "
+          f"{RANDOM_NULL_DRAWS} random")
+    print("  sets drawn with the hot set's OWN per-level volume, so knowing")
+    print("  WHICH LEVEL buys nothing and only horizontal placement is scored.")
+    print("  It exists because the LEVEL baseline DEGENERATES inside a single")
+    print("  depth class -- the upper class is three levels with over 90% of")
+    print("  its cells in one -- and every ratio in this table lives there.")
+    print("  x/RAND is the ratio to quote for these rows.")
+    print("  NO n=4 ENSEMBLE FLOOR: both LEVEL and RANDnull are STRUCTURAL")
+    print("  baselines.  Ratios of 5x and above are safe against any plausible")
+    print("  ensemble floor; the 1.0-2.5x ORDERING is UNSCORED, and no band may")
+    print("  be ranked against another inside that range.")
     art["retention"] = {"|".join(str(x) for x in k):
                         (list(v) if isinstance(v, tuple) else float(v))
                         for k, v in ret.items()}

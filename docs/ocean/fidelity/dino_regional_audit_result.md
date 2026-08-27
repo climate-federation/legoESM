@@ -29,6 +29,12 @@ wall, at **−0.2773 Sv** — four times the equator row's magnitude, but only 2
 its own (much larger) floor. The two rankings answer different questions and
 this document keeps them apart.
 
+**And the same reduction underlies the campaign's best-known fidelity result.**
+The circumpolar channel — matched to NEMO at 17 parts per million over a full
+year — has **17 of its 35 rows over 5× their own floor** and retains **2 %** of
+its own summed per-row magnitude. Whether that agreement is physical or
+arithmetic is **open**, and settling it is the first thing §11 asks for.
+
 This is a statement about **one year from a common ocean state**. It is not a
 statement that the two models share a climate, and the deep ocean has not
 adjusted on this timescale. Every floor is measured on **n = 4** members per side
@@ -174,7 +180,22 @@ hemisphere.
 The equatorial +0.0059 Sv inside it is 1.5 % of 0.402 Sv of per-row signal on the
 control member, and under 3 % on every member (§3.2). The three bands cancel *as reduced numbers*; their rows do not.
 
-### 5.1 Two bands this audit measured and does not resolve
+### 5.1 The channel's 17 parts per million is also a cancellation
+
+**This is the most consequential measurement in the audit and it is not about
+P3.** The circumpolar channel band — the campaign's headline fidelity result,
+`+0.0015 Sv on a 34 Sv transport, 17 ppm`, reproduced here unchanged — has
+**17 of its 35 rows exceeding 5× their own floor** and a net that retains
+**+0.020** of its own summed per-row magnitude.
+
+The verdict run's channel number is **not disputed**: it is the same functional
+on both sides and the gap is valid. What is new is that it survived a reduction
+which discards ~98 % of the per-row magnitude in that band, exactly as the
+equatorial band's does. **Whether the channel's agreement is physical or
+arithmetic is open**, and this audit does not settle it — it only shows that the
+question exists and that the standing evidence cannot answer it.
+
+### 5.2 Two more bands this audit measured and does not resolve
 
 Both are reported rather than deferred silently, because each is the same
 cancellation signature as the headline.
@@ -186,14 +207,9 @@ rows against the north wall at **81×** and **72×**, while the band net is
 the equatorial signature in a different basin, and this audit does not explain
 it.
 
-**P2, the circumpolar channel, has 17 of 35 rows over 5× their own floor** and
-net/Σ|row| = **+0.020**. This is the first evidence that the campaign's
-best-known fidelity result — the channel band matching NEMO to 17 parts per
-million over a full year — **is also a cancellation**. The verdict run's number
-is reproduced here and is not disputed; what is new is that it survived a
-reduction which discards 98 % of the per-row magnitude in that band. Whether
-the channel's agreement is physical or arithmetic is **open**, and it is the
-first thing §11 asks the next lane to settle.
+**P5, the northern subtropics**, is the only other band with a resolvable band
+gap (−0.0081 Sv at 3.22×), and it too is bottom-referenced-led. It is reported
+for completeness and is not investigated here.
 
 **But three of the words I first used for P3 do not survive scrutiny.**
 
@@ -218,12 +234,19 @@ margin's own bar, is:
 
 | band, day 360 | \|gap bt\| | \|gap bc\| | margin | 2× its own floor | verdict |
 |---|---:|---:|---:|---:|:--|
-| P1 south of band | 2.4782 | 1.5262 | −0.9519 | 0.1126 | bottom-referenced-led |
-| P2 channel band | 0.0499 | 0.0523 | +0.0024 | 0.0182 | **UNRESOLVED** |
-| P3 southern subtropics | 0.0373 | 0.0024 | −0.0349 | 0.0142 | bottom-referenced-led (2.5×) |
-| P4 equatorial ±20 | 0.0528 | 0.0587 | +0.0059 | 0.0153 | **UNRESOLVED** |
-| P5 northern subtropics | 0.0231 | 0.0149 | −0.0081 | 0.0062 | bottom-referenced-led |
-| P6 northern subpolar | 0.0299 | 0.0333 | +0.0034 | 0.0038 | **UNRESOLVED** |
+| band | \|gap bt\| | \|gap bc\| | margin | 2× its own floor | flips | verdict |
+|---|---:|---:|---:|---:|---:|:--|
+| P1 south of band | 2.4782 | 1.5262 | −0.9519 | 0.1126 | 0 | *(no vertical verdict — margin IS the gap)* |
+| P2 channel band | 0.0499 | 0.0523 | +0.0024 | 0.0182 | 2 | **UNRESOLVED** |
+| **P3 southern subtropics** | 0.0373 | 0.0024 | −0.0349 | 0.0142 | 0 | **bottom-referenced-led (2.5× the bar)** |
+| P4 equatorial ±20 | 0.0528 | 0.0587 | +0.0059 | 0.0153 | 2 | **UNRESOLVED** |
+| P5 northern subtropics | 0.0231 | 0.0149 | −0.0081 | 0.0062 | 0 | *(no vertical verdict — margin IS the gap)* |
+| P6 northern subpolar | 0.0299 | 0.0333 | +0.0034 | 0.0038 | 0 | **UNRESOLVED** |
+
+**The tool now REFUSES a directional verdict on the IDENT rows** rather than
+printing one and caveating it, because a printed verdict is what gets quoted:
+on those rows "bottom-referenced-led" would restate "this band has a gap". Only
+P3 gets a direction.
 
 **This table is WEAK evidence, and the reason is algebraic.** `bt + bc == gap`
 by construction, so wherever the two legs carry **opposite signs** — 6 of these
@@ -236,16 +259,28 @@ The bar above is the **margin's own** floor — the sample std of the four
 member-pair margins. An earlier version RSS'd the two legs' floors, which is
 wrong for a quantity that is not a difference of independent parts; both
 reviewers found it independently. The corrected bars are 1.03× to 23× *smaller*
-and no verdict flips, but P3's ordering weakens honestly from 5.2× to **2.5×**.
+and no verdict flips, but P3's ordering weakens honestly from **5.2× its floor**
+to **2.5× the 2× bar** — two different denominators, named here because quoting
+them side by side without saying so is how a weakening reads as a collapse.
+Where the margin *is* the gap the two floor constructions differ by at most 2×
+with no systematic direction, so the correction is immaterial on those rows; it
+matters only on P3, the one row that is a separate statement.
 For the equatorial band, **2 of the 4 member pairs take the opposite sign** —
 measured, not asserted.
+
+**Registered-rule deviation, disclosed:** the pre-registration fixes every floor
+as the RSS of the two *sides'* spreads. The margin does not factorise that way —
+it is a single cross-model quantity, so there is one ensemble of it and its floor
+is that ensemble's standard deviation. This is the only statistic in the audit
+whose floor is not the registered RSS, and it deviates by disclosure.
 
 **What is honestly left of the P3 finding:** the rows immediately north of the
 channel carry a coherent (net/Σ\|row\| = −0.74) gap of −0.0397 Sv at 5.8× its own
 floor, about half of which is consistent with a ~1 km displacement of the ACC's
 northern flank. It is the only *coherent* band gap outside the southern basin
 (net/Σ|row| = −0.74), and its bottom-referenced character clears its own bar at
-2.5× — the one row of the ordering table that is not the band gap in disguise.
+2.5× the registered bar — the one row of the ordering table that is not the
+band gap in disguise.
 
 ## 6. Finding 3 — the equatorial current structure
 
@@ -331,38 +366,62 @@ keeps the true vertical profile and removes every horizontal cue, so a set that
 beats it is using horizontal information and nothing else. Ranked within the
 upper class, at day 360:
 
-| band | dT retention | LEVEL baseline | ratio | horizontal margin |
-|---|---:|---:|---:|---:|
-| **P5 northern subtropics** | 0.581 | 0.092 | **6.3×** | +0.489 |
-| **P4 equatorial ±20** | 0.643 | 0.123 | **5.2×** | **+0.520** |
-| E10 equatorial ±10 | 0.440 | 0.125 | 3.5× | +0.315 |
-| P3 southern subtropics | 0.091 | 0.036 | 2.5× | +0.055 |
-| P6 northern subpolar | 0.073 | 0.068 | 1.1× | +0.005 |
-| **P1 south of band** | 0.049 | 0.044 | **1.1×** | **+0.005** |
-| P2 channel band | 0.099 | 0.096 | 1.0× | +0.003 |
+| band | dT retention | LEVEL | ×LEVEL | RANDOM null | ×RANDOM | ceiling |
+|---|---:|---:|---:|---:|---:|---:|
+| **P4 equatorial ±20** | 0.643 | 0.123 | 5.2× | 0.103 | **6.3×** | 0.969 |
+| E10 equatorial ±10 | 0.440 | 0.125 | 3.5× | 0.096 | 4.6× | 0.933 |
+| **P5 northern subtropics** | 0.581 | 0.092 | **6.3×** | 0.148 | 3.9× | 0.761 |
+| P3 southern subtropics | 0.091 | 0.036 | 2.5× | 0.033 | 2.7× | 0.570 |
+| P2 channel band | 0.099 | 0.096 | 1.0× | 0.053 | 1.9× | 0.557 |
+| P6 northern subpolar | 0.073 | 0.068 | 1.1× | 0.051 | 1.4× | 0.373 |
+| **P1 south of band** | 0.049 | 0.044 | **1.1×** | 0.051 | **1.0×** | **0.830** |
 
-**Two things change from the first version of this document, and the second is
-the one that matters.**
+**Two denominators, because the first one degenerates here.** Inside a single
+depth class the LEVEL baseline is nearly the field's own ranking — the upper
+class is three levels with over 90 % of its cells in one — so the shipped table
+also carries a **measured** null: the mean retention over 200 random sets drawn
+with the hot set's **own per-level volume**, which cannot be beaten by knowing
+*which* level and scores horizontal placement alone. The published ratios are
+**conservative** against it (P4 5.2× → 6.3×).
 
-First, three bands I credited with horizontal memory have none: P2, P6 and P1
-sit at **1.0–1.1×**, where I printed 12×, 3× and 0.9× against the weaker
-baseline. Their day-10 hotspot sets do no better than a field that is constant
-within every level.
+**The ceiling column kills the obvious objection.** The southern basin's
+retention of 0.049 is not "its divergence went quiet": its day-360 field
+retains **0.830** of its own day-360 hotspot set. The divergence there is
+strongly concentrated — it has simply **moved**. That is the difference between
+*no memory* and *nothing to remember*, and only the ceiling separates them.
 
-Second, **the effect is not equatorially specific.** The northern subtropics
-*leads* at 6.3×. So the correct statement is:
+**These ratios carry NO measured ensemble floor.** Both LEVEL and RANDOM are
+**structural** baselines, not n = 4 floors. Ratios of 5× and above are safe
+against any plausible ensemble floor; **the 1.0–2.5× ordering is UNSCORED**, and
+no band inside that range may be ranked against another.
 
-> **The wind-driven upper ocean holds its horizontal divergence pattern; the
-> southern basin does not.** The equatorial horizontal margin is **+0.520**
-> against the southern basin's **+0.005** — a hundredfold separation — but the
-> northern subtropics shares the property, so this is a property of the
-> wind-driven surface layer and not of the equator.
+**Two things change from the first version of this document.**
 
-Salinity gives the same ordering more strongly (P4 11.0×, E10 7.5×, P5 4.7×,
-P1 1.2×).
+First, three bands I credited with horizontal memory have little or none: P1,
+P2 and P6 sit at **1.0–1.9×**, where I printed 12×, 3× and 0.9× against the
+weaker baseline.
 
-**Both baselines are kept in the shipped table**, because their contrast is what
-demonstrates that stratification was doing the work in the registered statistic.
+Second — and this corrects a factual error in the intervening version — **the
+result is not equatorially specific, and the two tracers do not agree on the
+leader.** Temperature puts the northern subtropics ahead against the LEVEL
+baseline (6.3× vs 5.2×); salinity puts the equator ahead and by a wider margin
+(11.0× vs 4.7×); against the measured RANDOM null the equator leads in both. So:
+
+> **The equatorial and northern-subtropical upper oceans both hold their
+> horizontal divergence pattern, at 5–11× a horizontally-uniform baseline,
+> against 1.0–1.2× for the southern basin. Which of the two leads depends on the
+> tracer and on the baseline, so this audit does not rank them.**
+
+No mechanism is attached to that. It is tempting to call it a wind-driven
+surface-layer property, and this document previously did — but P3 and P5 are
+mirrored bands under a symmetric wind and they score 2.7× and 3.9×, so a
+symmetric forcing does not explain an asymmetric result. **The hemispheric
+asymmetry is the interesting question this audit leaves open**; that the
+southern flank is the one stirred by the ACC is a hypothesis, not a finding.
+
+**All three baselines are kept in the shipped table**, because their contrast is
+what demonstrates that stratification was doing the work in the registered
+statistic.
 
 ## 8. The registered predictions, scored
 
@@ -371,7 +430,7 @@ demonstrates that stratification was doing the work in the registered statistic.
 | R1 | the equatorial band carries a transport gap over its own floor at day 360 | **REFUTED as scored, and the scoring is the finding** | band +0.0059 Sv at 0.98× — but per row the equator is at **206×** and 22 of 41 rows clear 5× |
 | R2 | P1 is still the largest absolute band gap | CONFIRMED | P1 at 0.9519 Sv |
 | R3 | the equatorial gap is predominantly baroclinic | **UNRESOLVED** | margin +0.0059 Sv against a 2× bar of **0.0153** (the margin's own floor); **2 of 4 member pairs flip the sign** — measured |
-| R4 | the equatorial T divergence holds its own hotspots | **CONFIRMED, but restated** | as registered 0.9794 vs a 0.9985 depth baseline and a 0.9979 level baseline (void); level-controlled 0.643 vs 0.123 = 5.2×. **The northern subtropics leads at 6.3×**, so the property is the wind-driven upper ocean's, not the equator's |
+| R4 | the equatorial T divergence holds its own hotspots | **CONFIRMED, but restated and NOT equatorially specific** | as registered 0.9794 against a 0.9985 depth and 0.9979 level baseline (void); level-controlled 0.643 vs 0.123 = 5.2×, and 6.3× against a measured random null. **The northern subtropics scores as highly (6.3× on temperature), and which band leads depends on the tracer and the baseline**, so the two are not ranked |
 | R5 | P6 gap is smaller than P5 | CONFIRMED | 0.0034 vs 0.0081 Sv |
 
 ## 9. Controls
@@ -412,7 +471,9 @@ document. Every claim below was in it.**
 | 3 | "the top two levels are ~37 m of a 4506 m column" | **RETRACTED — arithmetic error.** They span 0–20.6 m; 37 m is level 3's centre depth. The top three hold 77 % of the thickness-weighted column difference. |
 | 4 | "the cancellation is **why** the transport reads indistinguishable" | **DOWNGRADED to PLAUSIBLE.** The two functionals differ by the per-level wet count and the width weighting; consistency is not demonstration. |
 | **5** | "the equatorial T divergence holds its own hotspots (0.979 vs a 0.05 null)" | **RETRACTED as registered.** A depth-only mask scores 0.9985 — the registered statistic was measuring stratification. Re-established only on a **level**-controlled statistic (0.643 vs 0.123 = 5.2×). |
-| **5b** | the depth-controlled ranking "P4 26×, P2 12×, P3 10×, P6 3×" | **RETRACTED.** The depth-only baseline is monotone from the surface while the divergence peaks at the mixed-layer base, so a set could beat it with vertical information. Against the **level** baseline: **P5 6.3× (leads), P4 5.2×, E10 3.5×, P3 2.5×, and P1/P2/P6 at 1.0–1.1×, i.e. no horizontal memory at all.** The effect is also **not equatorially specific**. |
+| **5b** | the depth-controlled ranking "P4 26×, P2 12×, P3 10×, P6 3×" | **RETRACTED.** The depth-only baseline is monotone from the surface while the divergence peaks at the mixed-layer base, so a set could beat it with vertical information. Against the **level** baseline and a **measured random null**: P4 5.2×/6.3×, P5 6.3×/3.9×, E10 3.5×/4.6×, P3 2.5×/2.7×, and P1/P2/P6 at 1.0–1.9×. The effect is **not equatorially specific** and the two bands are **not ranked**. |
+| **5f** | "salinity gives the same ordering more strongly" | **RETRACTED — factually wrong.** Salinity **inverts** the leader (P4 11.0× vs P5 4.7×, where temperature has P5 6.3× vs P4 5.2×), and P2/P6 double to 2.2× in salinity, so "no horizontal memory at all" was temperature-only. |
+| **5g** | "a property of the wind-driven upper ocean" | **WITHDRAWN as a mechanism label.** P3 and P5 are mirrored bands under a symmetric wind and score 2.7× and 3.9×; a symmetric forcing does not explain an asymmetric result. The hemispheric asymmetry is left open. |
 | **5c** | R3 scored against an RSS-of-legs bar | **RETRACTED.** `bt + bc == gap`, so with opposite-sign legs the margin **is** the band gap and the RSS bar was up to 23× too large. Re-scored on the margin's own floor; no verdict flips, but P3 weakens 5.2× → **2.5×**. |
 | **5d** | "the band net retains 1.5 %" quoted with its sign | **QUALIFIED.** Across members the ratio is +0.015/+0.022/−0.013/−0.015: the **sign is undetermined** at day 360. Magnitude only. |
 | **5e** | "two of four members flip it" (R3) | **WAS A CODE COMMENT, NOT A MEASUREMENT.** Now computed and printed; it happens to be correct. |

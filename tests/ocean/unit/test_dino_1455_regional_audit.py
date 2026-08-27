@@ -462,28 +462,81 @@ def test_the_level_baseline_is_horizontally_uniform_and_keeps_the_profile(R):
     assert lf[:, :, k][sel[:, :, k]][0] == pytest.approx(want)
 
 
-def test_a_purely_stratified_field_cannot_beat_the_level_baseline(R):
-    """Non-vacuity of the stronger control: a field with NO horizontal
-    structure -- even one peaking at depth rather than at the surface, which is
-    the case the depth baseline misses -- must not beat the LEVEL baseline."""
+# NO SYNTHETIC TEST SEPARATES THE TWO RETENTION BASELINES, and that is
+# recorded here rather than papered over with a case tuned until it passes.
+# Two were attempted and both failed for reasons that are properties of the
+# statistic, not of the attempts:
+#   * a level-constant field -- ``level_rank_field`` is an order-preserving
+#     transform of it, so the two sets agree 99.59% BY CONSTRUCTION and the
+#     retentions differ by 8e-12.  The original version of this test passed
+#     only on its 1e-9 tolerance; the code review caught it.
+#   * a field peaking at 100 m, meant to defeat the depth-only baseline --
+#     5% of a band's VOLUME is a thin enough surface layer that it already
+#     reaches past 100 m, so the depth set overlaps the hot set 99.6% and
+#     retention saturates at 0.999999 for all three sets.
+# The independent adversarial reviewer hit the same saturation.  What replaces
+# them is the data-backed pin below: the real measured ratio, which moves if the
+# baseline construction changes.  The CONSTRUCTION of both fields is still
+# tested directly (above, and in the random-null test).
+
+
+def test_the_equatorial_horizontal_memory_ratio_is_pinned_to_its_measured_value(R):
+    """The data-backed pin that replaces the tautology above.
+
+    A synthetic case cannot separate a genuine horizontal-memory signal from
+    the baseline (the reviewer tried and hit saturation), so the guard against
+    a silent regression in ``level_rank_field`` is the REAL measured ratio.  If
+    the baseline construction changes, this moves and the test says so.
+
+    Values from the stamped artifact (upper class, day 360, temperature):
+    the equatorial band retains 0.643 against a level baseline of 0.123, and
+    the southern basin 0.049 against 0.044.  Skipped when the recorded states
+    are not on this machine, because it is a pin on real data.
+    """
+    import json
+    import os
+    art = "/tmp/dino_regional_audit_final/regional_audit.json"
+    if not os.path.exists(art):
+        pytest.skip("no stamped artifact on this machine")
+    ret = json.load(open(art))["retention"]
+    p4, p1 = "P4 equatorial +/-20", "P1 south of band"
+    assert ret[f"{p4}|T|360|upper"] == pytest.approx(0.643, abs=5e-3)
+    assert ret[f"{p4}|T|360|upper_level"] == pytest.approx(0.123, abs=5e-3)
+    assert ret[f"{p1}|T|360|upper"] == pytest.approx(0.049, abs=5e-3)
+    assert ret[f"{p1}|T|360|upper_level"] == pytest.approx(0.044, abs=5e-3)
+    # the separation the finding rests on: a hundredfold in the margin
+    m4 = ret[f"{p4}|T|360|upper"] - ret[f"{p4}|T|360|upper_level"]
+    m1 = ret[f"{p1}|T|360|upper"] - ret[f"{p1}|T|360|upper_level"]
+    assert m4 > 50 * m1, (m4, m1)
+
+
+def test_the_random_null_matches_the_hot_sets_per_level_volume(R):
+    """The null that replaces the degenerate level baseline inside one class.
+
+    It must be beatable ONLY by horizontal placement, so it has to carry the
+    same per-level volume as the set it scores against -- otherwise knowing
+    which level to sit in still buys a score.
+    """
     import ts_divergence_atlas as X
     import acc_thermal_wind as A
     wet, w = X.build_weights(np.ones((A.NY, A.NX)))
-    sel = R.band_cell_mask(R.BANDS[3][1]) & wet
-    z = np.asarray(A.gdept0, dtype=np.float64)
-    # peaks at ~100 m, NOT at the surface: this is what defeats DEPTH_RANK_FIELD
-    prof = np.where(sel, np.exp(-((z - 100.0) / 40.0) ** 2), 0.0)
-    hot = X.hotspot_set(prof, w * sel, X.Q2_NULL)
-    lvl = X.hotspot_set(R.level_rank_field(prof, w, sel), w * sel, X.Q2_NULL)
-    dep = X.hotspot_set(np.where(sel, R.DEPTH_RANK_FIELD, 0.0), w * sel,
-                        X.Q2_NULL)
-    r_hot = X.retention(prof, w * sel, hot)
-    r_lvl = X.retention(prof, w * sel, lvl)
-    r_dep = X.retention(prof, w * sel, dep)
-    assert r_hot <= r_lvl + 1e-9, "a stratified field beat the LEVEL baseline"
-    # and the demonstration that the DEPTH baseline was the weaker control
-    assert r_hot > r_dep, ("this case is supposed to defeat the depth-only "
-                           "baseline; if it does not, the test proves nothing")
+    sel = R.band_depth_sel(R.BANDS[3][1], X.DEPTH_CLASSES[0][0], wet)
+    rng = np.random.default_rng(5)
+    d = np.where(sel, rng.normal(size=sel.shape), 0.0)
+    wb = np.where(sel, w, 0.0)
+    hot = X.hotspot_set(d, wb, X.Q2_NULL)
+    draws = R.level_matched_random_null(hot, w, sel, n_draws=3)
+    assert len(draws) == 3
+    for pk in draws:
+        assert not pk[~sel].any(), "the null leaked outside the selection"
+        for k in range(A.NZ):
+            got = float(w[:, :, k][pk[:, :, k]].sum())
+            wantv = float(w[:, :, k][hot[:, :, k]].sum())
+            if wantv <= 0.0:
+                assert got == 0.0
+            else:
+                # one cell of overshoot is inherent to a greedy volume fill
+                assert got >= wantv and got <= wantv * 1.5, (k, got, wantv)
 
 
 def test_the_split_margin_floor_is_measured_on_the_margin(R):
