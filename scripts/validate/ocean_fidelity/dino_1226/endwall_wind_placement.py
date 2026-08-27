@@ -1,0 +1,317 @@
+#!/usr/bin/env python
+"""Measure DINO's real explicit-versus-implicit wind placement offline.
+
+Pre-registration: ``PREREG_endwall_wind_placement.md``.  The oracle term is
+not ``utrd_tau`` (that slot is allocated and emitted but never populated).
+It is wired here from NEMO's own dyn_zdf bracket:
+
+    tau_increment = zdf_dump_*1_poststress - zdf_dump_*1_prestress
+
+The legoESM term is the difference between otherwise identical 1x-wind and
+0x-wind calls at the state handed to implicit vertical mixing.  A 2x arm is a
+planted linearity violation/control.  The same A/B captures the exact
+``F_slow`` argument entering the production barotropic loop, closing the
+fourth structural premise without re-deriving its face-depth convention.
+
+This probe classifies the term only.  It does not infer sea-surface ownership
+from a momentum increment; the registered free-run arm is required for that.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+_DIR = Path(__file__).resolve().parent
+_ROOT = _DIR.parents[3]
+for _p in (str(_DIR), str(_DIR.parent)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+_DINO = os.environ.get(
+    "DINO_ORACLE_ROOT",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO",
+)
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
+os.environ.setdefault("DINO_1226_LANE", "d180")
+os.environ.setdefault("DINO_1226_IC_STEP", "5760")
+os.environ.setdefault("DINO_NEMO_RUN_TWIN_STEP1",
+                      os.path.join(_DINO, "RUN_D180_STEP1"))
+
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+import netCDF4 as nc  # noqa: E402
+import numpy as np  # noqa: E402
+
+import dump_lane  # noqa: E402
+import post_tendency_stage_birth as ptsb  # noqa: E402
+
+KT = 5761
+DT = 2700.0
+RDT = 2.0 * DT
+SOUTH_ROW = 1
+PREREG_COMMIT = "2d3d4f7a2870926890418c64044d6f6c851af02c"
+
+
+def _git(args: list[str]) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(_ROOT), *args], text=True).strip()
+
+
+def _stats(lego: np.ndarray, nemo: np.ndarray, mask: np.ndarray) -> dict:
+    if lego.shape != nemo.shape or mask.shape != lego.shape:
+        raise SystemExit(
+            f"shape mismatch lego={lego.shape} nemo={nemo.shape} mask={mask.shape}")
+    if not (np.isfinite(lego).all() and np.isfinite(nemo).all()):
+        raise SystemExit("non-finite operand -- fatal")
+    x, y = lego[mask], nemo[mask]
+    if x.size < 2:
+        raise SystemExit("statistic mask contains fewer than two faces")
+    rn = float(np.sqrt(np.mean(y * y)))
+    rl = float(np.sqrt(np.mean(x * x)))
+    rd = float(np.sqrt(np.mean((x - y) ** 2)))
+    corr = (float(np.corrcoef(x, y)[0, 1])
+            if x.std() > 0.0 and y.std() > 0.0 else float("nan"))
+    return {
+        "n": int(x.size),
+        "nemo_rms": rn,
+        "lego_rms": rl,
+        "delta_rms": rd,
+        "err_norm": rd / rn if rn > 0.0 else float("nan"),
+        "corr": corr,
+        "rms_ratio": rl / rn if rn > 0.0 else float("nan"),
+        "max_abs_delta": float(np.max(np.abs(x - y))),
+    }
+
+
+def _scaled_surface_forcing(sf, scale: float):
+    return sf._replace(
+        tau_x=jnp.asarray(sf.tau_x) * scale,
+        tau_y=jnp.asarray(sf.tau_y) * scale,
+    )
+
+
+def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
+    """Capture the actual pre-vmix state and F_slow once for one stress scale."""
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocmod
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    cap: dict[str, np.ndarray | int] = {"baro_calls": 0, "vmix_calls": 0}
+    real_baro = ocmod.barotropic_substeps_latlon_cgrid
+    real_vmix = LatLonCGridOceanModel._apply_implicit_vertical_mixing
+
+    def spy_baro(*args, **kwargs):
+        if kwargs.get("eta_init") is not None:
+            cap["baro_calls"] = int(cap["baro_calls"]) + 1
+            if "F_slow_u" not in cap:
+                cap["F_slow_u"] = np.asarray(kwargs["F_slow_u"], dtype=np.float64)
+                cap["F_slow_v"] = np.asarray(kwargs["F_slow_v"], dtype=np.float64)
+        return real_baro(*args, **kwargs)
+
+    def spy_vmix(self, state_in, *args, **kwargs):
+        if kwargs.get("do_momentum", True) and "B1_u" not in cap:
+            cap["vmix_calls"] = int(cap["vmix_calls"]) + 1
+            cap["B1_u"] = np.asarray(state_in.u.data, dtype=np.float64)
+            cap["B1_v"] = np.asarray(state_in.v.data, dtype=np.float64)
+        return real_vmix(self, state_in, *args, **kwargs)
+
+    ocmod.barotropic_substeps_latlon_cgrid = spy_baro
+    LatLonCGridOceanModel._apply_implicit_vertical_mixing = spy_vmix
+    try:
+        with jax.disable_jit():
+            model.step(
+                state, DT,
+                surface_forcing=_scaled_surface_forcing(sf, scale),
+                external_tracer_rate=external_rate,
+            )
+    finally:
+        ocmod.barotropic_substeps_latlon_cgrid = real_baro
+        LatLonCGridOceanModel._apply_implicit_vertical_mixing = real_vmix
+    required = {"F_slow_u", "F_slow_v", "B1_u", "B1_v"}
+    if not required <= cap.keys():
+        raise SystemExit(f"arm {scale} missed hooks: {required - cap.keys()}")
+    if cap["baro_calls"] != 1 or cap["vmix_calls"] != 1:
+        raise SystemExit(
+            f"arm {scale}: expected one baro/vmix hook, got "
+            f"{cap['baro_calls']}/{cap['vmix_calls']}")
+    return cap
+
+
+def _linearity(name: str, d1: np.ndarray, d2: np.ndarray) -> float:
+    err = float(np.max(np.abs(d2 - 2.0 * d1)))
+    bar = 1.0e-12 * max(1.0, float(np.max(np.abs(d2))))
+    print(f"CONTROL {name}: max|2x-2*1x|={err:.6e} bar={bar:.6e} "
+          f"{'PASS' if err <= bar else 'FAIL'}")
+    if err > bar:
+        raise SystemExit(f"planted 2x control failed for {name}")
+    return err
+
+
+def main() -> int:
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.fidelity.precision_gate import require_fp64
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.experiments.dino import (
+        apply_dino_lat_lon_surface_forcing,
+        dino_lat_lon_model_config,
+        dino_lat_lon_surface_forcing_arrays,
+        dino_step_surface_forcing,
+    )
+    import multistep_replay as mr
+
+    set_policy(PrecisionPolicy.fp64())
+    sha = os.environ.get("DINO_PROBE_COMMIT", _git(["rev-parse", "HEAD"]))
+    dirty = _git(["status", "--porcelain"])
+    print(json.dumps({
+        "provenance": {
+            "git_sha": sha,
+            "worktree_git_sha": _git(["rev-parse", "HEAD"]),
+            "git_dirty": bool(dirty),
+            "prereg_commit": PREREG_COMMIT,
+            "oracle_root": _DINO,
+            "oracle_lane": dump_lane.RUN_DIR,
+            "kt": KT,
+            "dt_s": DT,
+            "flags": {
+                "JAX_PLATFORMS": os.environ.get("JAX_PLATFORMS"),
+                "JAX_ENABLE_X64": os.environ.get("JAX_ENABLE_X64"),
+                "LEGOESM_NEMO_E3T": os.environ.get("LEGOESM_NEMO_E3T"),
+            },
+            "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    }, indent=2, sort_keys=True))
+    ptsb.dump_lane.banner()
+
+    g, br, cfg, state = mr.build_replay_ic()
+    mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
+    if mc.outer_integrator != "leapfrog":
+        raise SystemExit(f"active path changed: outer_integrator={mc.outer_integrator!r}")
+    if mc.surface_stress_implicit:
+        raise SystemExit("baseline no longer uses explicit surface stress")
+    require_fp64(br.geometry, br.z_coord, state,
+                 context="endwall_wind_placement bridged state")
+    model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
+    forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
+    sf = dino_step_surface_forcing(forcing)
+    if sf is None or sf.tau_x is None or sf.tau_y is None:
+        raise SystemExit("wind-through-step forcing absent")
+
+    placement = getattr(cfg, "surface_tendency_placement", "applied_now")
+    external_rate = None
+    if placement == "leapfrog_rhs":
+        state, external_rate = apply_dino_lat_lon_surface_forcing(
+            state, forcing, br.z_coord, cfg, DT,
+            t_seconds=KT * DT, return_rate=True)
+    else:
+        state = apply_dino_lat_lon_surface_forcing(
+            state, forcing, br.z_coord, cfg, DT, t_seconds=KT * DT)
+    print(f"ACTIVE card outer_integrator={mc.outer_integrator!r} "
+          f"surface_stress_implicit={mc.surface_stress_implicit!r} "
+          f"surface_tendency_placement={placement!r}")
+
+    arms = {s: _run_arm(model, state, sf, external_rate=external_rate, scale=s)
+            for s in (0.0, 1.0, 2.0)}
+    b1u = arms[1.0]["B1_u"] - arms[0.0]["B1_u"]
+    b1v = arms[1.0]["B1_v"] - arms[0.0]["B1_v"]
+    b2u = arms[2.0]["B1_u"] - arms[0.0]["B1_u"]
+    b2v = arms[2.0]["B1_v"] - arms[0.0]["B1_v"]
+    f1u = arms[1.0]["F_slow_u"] - arms[0.0]["F_slow_u"]
+    f1v = arms[1.0]["F_slow_v"] - arms[0.0]["F_slow_v"]
+    f2u = arms[2.0]["F_slow_u"] - arms[0.0]["F_slow_u"]
+    f2v = arms[2.0]["F_slow_v"] - arms[0.0]["F_slow_v"]
+    controls = {
+        "b1_u": _linearity("B1_u", b1u, b2u),
+        "b1_v": _linearity("B1_v", b1v, b2v),
+        "fslow_u": _linearity("F_slow_u", f1u, f2u),
+        "fslow_v": _linearity("F_slow_v", f1v, f2v),
+    }
+
+    # Reuse the campaign's registered loader and known u-face offset.
+    n_pre_u = ptsb._load("zdf_dump_u1_prestress.bin")
+    n_post_u = ptsb._load("zdf_dump_u1_poststress.bin")
+    n_pre_v = ptsb._load("zdf_dump_v1_prestress.bin")
+    n_post_v = ptsb._load("zdf_dump_v1_poststress.bin")
+    n_ws_u = n_post_u - n_pre_u
+    n_ws_v = n_post_v - n_pre_v
+    n_fu = ptsb._load("wnd_dump_zu_frc_inc.bin")
+    n_fv = ptsb._load("wnd_dump_zv_frc_inc.bin")
+    with nc.Dataset(os.path.join(dump_lane.RUN_DIR, "mesh_mask.nc")) as ds:
+        um = np.asarray(ds["umask"][0, 0], dtype=bool)[2:-2, 2:-2]
+        vm = np.asarray(ds["vmask"][0, 0], dtype=bool)[2:-2, 2:-2]
+
+    # NEMO u(i) maps to lego u(i+1); v(j) maps directly on this bridge.
+    lu = np.asarray(b1u)[:, 1:1 + n_ws_u.shape[1], 0]
+    lv = np.asarray(b1v)[:n_ws_v.shape[0], :n_ws_v.shape[1], 0]
+    lfu = np.asarray(f1u)[:, 1:1 + n_fu.shape[1]]
+    lfv = np.asarray(f1v)[:n_fv.shape[0], :n_fv.shape[1]]
+    masks = {
+        "domain_u": um,
+        "south_j1_u": um & (np.arange(um.shape[0])[:, None] == SOUTH_ROW),
+        "domain_v": vm,
+        "south_j1_v": vm & (np.arange(vm.shape[0])[:, None] == SOUTH_ROW),
+    }
+    scores = {
+        "domain_u_zdf": _stats(lu, n_ws_u, masks["domain_u"]),
+        "south_j1_u_zdf": _stats(lu, n_ws_u, masks["south_j1_u"]),
+        "domain_u_fslow": _stats(lfu, n_fu, masks["domain_u"]),
+        "south_j1_u_fslow": _stats(lfu, n_fu, masks["south_j1_u"]),
+    }
+
+    # Structural-zero v control: use max norms, since correlation/normalised
+    # error are undefined against an exact zero.
+    v_zero = {
+        "nemo_zdf_max": float(np.max(np.abs(n_ws_v))),
+        "nemo_fslow_max": float(np.max(np.abs(n_fv))),
+        "lego_zdf_max": float(np.max(np.abs(lv[vm]))),
+        "lego_fslow_max": float(np.max(np.abs(lfv[vm]))),
+    }
+    vbar = 1.0e-12
+    vpass = all(x <= vbar for x in v_zero.values())
+    print(f"CONTROL meridional structural zero: {v_zero} bar={vbar:.1e} "
+          f"{'PASS' if vpass else 'FAIL'}")
+    if not vpass:
+        raise SystemExit("meridional structural-zero control failed")
+
+    term_confirmed = all(
+        scores[k]["err_norm"] <= 0.05 and scores[k]["corr"] >= 0.999
+        for k in scores
+    )
+    material_diff = (
+        scores["south_j1_u_zdf"]["err_norm"] >= 0.25
+        or scores["south_j1_u_fslow"]["err_norm"] >= 0.25
+    )
+    label = ("CONFIRMED_ALGEBRAIC_EQUIVALENCE" if term_confirmed else
+             "CONFIRMED_MATERIAL_DIFF" if material_diff else
+             "PLAUSIBLE_UNRESOLVED")
+    out = {
+        "provenance": {"git_sha": sha, "prereg_commit": PREREG_COMMIT,
+                       "oracle_lane": dump_lane.RUN_DIR, "kt": KT},
+        "controls": controls,
+        "v_structural_zero": v_zero,
+        "scores": scores,
+        "term_label": label,
+        "ownership_label": "UNRESOLVED_REQUIRES_REGISTERED_FREE_RUN",
+        "retractions": [
+            "utrd_tau is not a physical zero: its dump slot is allocated but never written",
+            "NEMO wind is not implicit-only: dynspg_ts adds it independently to zu_frc",
+            "this term score does not by itself assign the eta 2dt residual",
+        ],
+    }
+    print("RESULT " + json.dumps(out, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
