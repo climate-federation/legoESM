@@ -106,10 +106,34 @@ def _omega_eff(f: np.ndarray, lat_rad: np.ndarray, *, name: str,
     }
 
 
-def _classify(om: float, omega_lego: float, omega_nemo: float) -> str:
-    """Name the Earth a recovered rate belongs to, or refuse to name one."""
-    for tag, ref in (("legoESM constants.Omega", omega_lego),
-                     ("NEMO phycst.F90 omega", omega_nemo)):
+#: Sites whose recovered rate is NOT a pure rotation rate: legoESM builds the
+#: v-point f as a ROW AVERAGE, so the placement error rides along and the
+#: inversion returns a blend.  They are audited and printed like any other
+#: site, and excluded from the COUNT of distinct rates -- counting them would
+#: report a discretisation convention as if it were a third planet.
+_PLACEMENT_CONTAMINATED = (
+    "geometry.f_v", "vertex_coriolis(grid)", "coriolis_at_faces -> f_v")
+
+
+def _classify(om: float, omega_lego: float, omega_nemo: float,
+              omega_phycst: float | None = None) -> str:
+    """Name the Earth a recovered rate belongs to, or refuse to name one.
+
+    THREE references, not two, and the distinction is the point of the audit:
+    the DINO card pins a SEVEN-FIGURE literal that NEMO uses only under
+    ``key_cice``, while DINO takes the sidereal-day branch.  Calling the card's
+    pin "NEMO's omega" would erase exactly the discrepancy this probe exists to
+    surface -- so the pin is named as a pin and phycst's computed value is a
+    separate reference.  (Adversarial review, round 2.)
+    """
+    refs = [("legoESM constants.Omega", omega_lego),
+            ("NEMO card pin (7-figure key_cice literal)", omega_nemo)]
+    if omega_phycst is not None:
+        refs.append(("NEMO phycst.F90 2*pi/rsiday (what DINO runs)",
+                     omega_phycst))
+    # Most specific first: if the card's pin has been corrected to phycst's
+    # value the two references coincide, and the phycst name is the true one.
+    for tag, ref in reversed(refs):
         if abs(om - ref) <= 1e-9 * abs(ref):
             return tag
     return "NEITHER (unrecognised)"
@@ -160,7 +184,8 @@ def main() -> None:
     def _scalar_site(name, where, value, note=""):
         rec = {"site": name, "where": where, "kind": "scalar",
                "omega_received": float(value),
-               "earth": _classify(float(value), omega_lego, omega_nemo),
+               "earth": _classify(float(value), omega_lego, omega_nemo,
+                                  omega_phycst_full),
                "note": note}
         sites.append(rec)
         return rec
@@ -170,7 +195,7 @@ def main() -> None:
         rec.update({"site": name, "where": where, "kind": "array",
                     "omega_received": rec["omega_median"],
                     "earth": _classify(rec["omega_median"], omega_lego,
-                                       omega_nemo),
+                                       omega_nemo, omega_phycst_full),
                     "note": note})
         sites.append(rec)
         return rec
@@ -189,11 +214,22 @@ def main() -> None:
         "ocean/state.py ConstantsConfig.Omega",
         mc.constants.Omega,
         "GM/Redi Treguier f20 + EKE/GEOMETRIC call sites read this")
-    _scalar_site(
-        "physics block constants.Omega",
-        "ocean/state.py physics_with_constants",
-        getattr(getattr(mc.physics, "constants", None), "Omega", float("nan")),
-        "propagated set")
+    # physics_with_constants explicitly permits physics.constants to be None,
+    # so a getattr default of NaN here would manufacture a spurious extra
+    # "Earth" AND emit a bare NaN token into the JSON (adversarial review,
+    # round 2).  Absent is recorded as absent.
+    _phys_c = getattr(mc.physics, "constants", None)
+    if _phys_c is None:
+        sites.append({"site": "physics block constants.Omega",
+                      "where": "ocean/state.py physics_with_constants",
+                      "kind": "scalar", "omega_received": None,
+                      "earth": "N/A (physics carries no constants block)",
+                      "note": "not propagated on this card"})
+    else:
+        _scalar_site(
+            "physics block constants.Omega",
+            "ocean/state.py physics_with_constants",
+            _phys_c.Omega, "propagated set")
     _scalar_site(
         "geometry.omega (stored scalar)",
         "grids/latlon.py LatLonCGridGeometry.omega",
@@ -257,6 +293,29 @@ def main() -> None:
                 "CARRIES THE PLACEMENT ERROR")
 
     # -- the table ---------------------------------------------------------
+    ff_f = np.asarray(g.ff_f, dtype=np.float64)
+    # WHICH EARTH IS NEMO'S OWN ff_f ON?  Recover it from NEMO's own arrays
+    # -- ff_f against gphiv (the F-point and the v-face share a latitude on a
+    # Mercator lat-lon grid).  This is the non-circular check that the "NEMO
+    # omega" column above really is the rate the oracle integrated with, and
+    # it simultaneously confirms the F-point latitude convention: a wrong
+    # latitude would show up as a recovered rate that is not a clean constant.
+    _ff_om = _omega_eff(ff_f, gphiv, name="NEMO ff_f",
+                        lat_name="NEMO gphiv (F-point latitude)")
+    print("\n  NEMO's own ff_f, inverted against its own gphiv:")
+    print(f"    omega recovered = {_ff_om['omega_median']:.12e}  "
+          f"(spread over rows {_ff_om['omega_spread_rel']:.2e} relative)")
+    print(f"    vs phycst 2pi/rsiday  {(_ff_om['omega_median'] - omega_phycst_full) / omega_phycst_full:+.3e}")
+    print(f"    vs the card's pin     {(_ff_om['omega_median'] - omega_nemo) / omega_nemo:+.3e}")
+    print(f"    vs constants.Omega    {(_ff_om['omega_median'] - omega_lego) / omega_lego:+.3e}")
+    _ff_om["site"] = "NEMO ff_f (the ORACLE's own array)"
+    _ff_om["where"] = "RUN_TRAJ/mesh_mask.nc ff_f"
+    _ff_om["kind"] = "array"
+    _ff_om["omega_received"] = _ff_om["omega_median"]
+    _ff_om["earth"] = _classify(_ff_om["omega_median"], omega_lego,
+                                omega_nemo, omega_phycst_full)
+    sites.append(_ff_om)
+
     print("\n" + "-" * 78)
     print("ROUTING TABLE -- the rate each site ACTUALLY received")
     print("-" * 78)
@@ -265,9 +324,30 @@ def main() -> None:
         print(f"  {rec['site'][:44]:44s} {rec['omega_received']:18.12e}  "
               f"{rec['earth']}")
 
-    earths = sorted({r["earth"] for r in sites})
-    two_earths = len(earths) > 1
-    print(f"\n  DISTINCT ROTATION RATES IN ONE RUN: {len(earths)} -> {earths}")
+    # COUNT THE RATES, NOT THE LABELS.  Every unrecognised value used to land
+    # in one "NEITHER" bucket, so N genuinely different rates read as 1 and the
+    # printed count was right only by luck (adversarial review, round 2).  The
+    # placement-contaminated sites are excluded because their recovered value
+    # is a blend of a rate and a discretisation convention, not a rate.
+    _rate_sites = [r for r in sites
+                   if r.get("omega_received") is not None
+                   and r["site"] not in _PLACEMENT_CONTAMINATED
+                   and r["site"] != "NEMO ff_f (the ORACLE's own array)"]
+    _rates = sorted({float(f"{r['omega_received']:.15e}") for r in _rate_sites})
+    earths = sorted({r["earth"] for r in _rate_sites})
+    print(f"\n  DISTINCT ROTATION RATES REACHING legoESM's OWN SITES: "
+          f"{len(_rates)}")
+    for _r in _rates:
+        _who = [x["site"] for x in _rate_sites
+                if float(f"{x['omega_received']:.15e}") == _r]
+        print(f"    {_r:.12e}  <- {len(_who)} site(s): {', '.join(_who[:3])}"
+              + (" ..." if len(_who) > 3 else ""))
+    print(f"    (the oracle's own ff_f, for comparison: "
+          f"{_ff_om['omega_median']:.12e})")
+    print(f"    labels in use: {earths}")
+    print("    The three placement-contaminated sites (a row average, so the "
+          "recovered value blends rate and convention) are audited above and "
+          "EXCLUDED from this count.")
 
     # -- separate the constant from the placement -------------------------
     # NEMO's own ff_f is the oracle for the vertex Coriolis.  Divide BOTH
@@ -276,7 +356,6 @@ def main() -> None:
     # it.  Row map: legoESM v row j+1 <-> NEMO f row j (the same -1 shift the
     # v-face metric arm calibrated); it is re-calibrated here against a known
     # answer rather than transferred.
-    ff_f = np.asarray(g.ff_f, dtype=np.float64)
     jpj, jpi = ff_f.shape
     f_v_lego = np.asarray(geom.f_v, dtype=np.float64)
     if f_v_lego.shape != (jpj + 1, jpi):
@@ -308,26 +387,6 @@ def main() -> None:
             f" best wrong {best_wrong:.3e}); the separation below would be "
             "reading the wrong rows against each other.")
 
-    # WHICH EARTH IS NEMO'S OWN ff_f ON?  Recover it from NEMO's own arrays
-    # -- ff_f against gphiv (the F-point and the v-face share a latitude on a
-    # Mercator lat-lon grid).  This is the non-circular check that the "NEMO
-    # omega" column above really is the rate the oracle integrated with, and
-    # it simultaneously confirms the F-point latitude convention: a wrong
-    # latitude would show up as a recovered rate that is not a clean constant.
-    _ff_om = _omega_eff(ff_f, gphiv, name="NEMO ff_f",
-                        lat_name="NEMO gphiv (F-point latitude)")
-    print("\n  NEMO's own ff_f, inverted against its own gphiv:")
-    print(f"    omega recovered = {_ff_om['omega_median']:.12e}  "
-          f"(spread over rows {_ff_om['omega_spread_rel']:.2e} relative)")
-    print(f"    vs phycst 2pi/rsiday  {(_ff_om['omega_median'] - omega_phycst_full) / omega_phycst_full:+.3e}")
-    print(f"    vs the card's pin     {(_ff_om['omega_median'] - omega_nemo) / omega_nemo:+.3e}")
-    print(f"    vs constants.Omega    {(_ff_om['omega_median'] - omega_lego) / omega_lego:+.3e}")
-    _ff_om["site"] = "NEMO ff_f (the ORACLE's own array)"
-    _ff_om["where"] = "RUN_TRAJ/mesh_mask.nc ff_f"
-    _ff_om["kind"] = "array"
-    _ff_om["omega_received"] = _ff_om["omega_median"]
-    _ff_om["earth"] = _classify(_ff_om["omega_median"], omega_lego, omega_nemo)
-    sites.append(_ff_om)
 
     j = np.arange(1, jpj + 1) - 1
     ok = (j >= 0) & (j < jpj)
@@ -367,7 +426,11 @@ def main() -> None:
         "rows_scored": int(keep.sum()),
         "sites": sites,
         "distinct_earths": earths,
-        "two_rotation_rates_in_one_run": bool(two_earths),
+        "distinct_rates_reaching_legoesm_sites": _rates,
+        "n_distinct_rates": len(_rates),
+        "oracle_own_rate": _ff_om["omega_median"],
+        "placement_contaminated_sites_excluded_from_count":
+            list(_PLACEMENT_CONTAMINATED),
         "row_map_scores": {str(k): v for k, v in scores.items()},
         "gap_split_relative": {
             "total_median": float(np.median(total_rel[keep])),

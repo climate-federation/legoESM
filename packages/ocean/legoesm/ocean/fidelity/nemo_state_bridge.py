@@ -44,6 +44,7 @@ from legoesm.grids.latlon import (
     create_latlon_geometry,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
+from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
@@ -435,11 +436,28 @@ def bridge_nemo_to_legoesm_topo(
     state: NemoState,
     *,
     periodic_i: bool = True,
-    omega: float = constants.Omega,
+    # A NEMO bridge defaults to NEMO'S EARTH.  It used to default to
+    # ``legoesm.constants.Omega``, a four-significant-figure rounding of the
+    # same physical constant, and no DINO caller overrode it -- so the ENTIRE
+    # oracle-matching lane (the 90-day twin and every fidelity probe in
+    # scripts/validate/ocean_fidelity/dino_1226/) built its Coriolis arrays on
+    # a planet 1.578e-05 away from the one the oracle integrated, while the
+    # card's own pinned rate reached the config-side consumers.  Two Earths in
+    # one run, and the config-vs-geometry split is exactly the one an oracle
+    # harness must not have.  Measured, per site, by
+    # coriolis_omega_routing_audit.py (#1455 next-action 1, STEP 0).
+    omega: float = NEMO_CONSTANTS_CONFIG.Omega,
     radius: float = constants.R_earth,
-    f_rtol: float = 1e-3,
+    # Tightened from 1e-3 once the rate above stopped being wrong.  The old
+    # bound was 63x too loose to see the 1.578e-05 rotation-rate gap, which is
+    # how a whole lane ran on the wrong planet with a green guard.  The
+    # built f_T now matches NEMO's ff_t to ~1e-16 relative on DINO; 1e-9 keeps
+    # four orders of headroom for a different NEMO mesh's own roundoff while
+    # still failing on any real constant or latitude error.
+    f_rtol: float = 1e-9,
     full_step: bool = False,
     metric_convention: str = "auto",
+    coriolis_placement: str = "cell_average",
     e3t_mode: str | None = None,
 ) -> NemoBridgeOutput:
     """Bridge a NEMO **Mercator + topography** config (e.g. DINO) to legoESM.
@@ -564,6 +582,11 @@ def bridge_nemo_to_legoesm_topo(
         lat_1d=jnp.asarray(lat_1d), lon_1d=jnp.asarray(lon_1d),
         lat_face_1d=jnp.asarray(lat_face),
         metric_convention=metric_convention,
+        # Where the vertex Coriolis is EVALUATED.  Default "cell_average" is
+        # bit-identical to every bridge caller; "face_latitude" reproduces
+        # NEMO's own ff_f convention (2*omega*sin(gphif)).  See
+        # create_latlon_geometry's docstring for the measured gap.
+        coriolis_placement=coriolis_placement,
     )
     # Partial-periodic seam wall (NEMO DINO): ALL interior cells are wet,
     # but the zonal seam u-face is closed outside the ACC channel — carried
@@ -593,13 +616,35 @@ def bridge_nemo_to_legoesm_topo(
     f_nemo = np.asarray(grid.ff_t)
     f_scale = float(np.max(np.abs(f_nemo)))
     f_err = float(np.max(np.abs(f_built - f_nemo)))
-    if f_err > f_rtol * f_scale:
+    # PRECISION-AWARE BOUND.  ``f_rtol`` is tight enough (1e-9) to catch a
+    # rotation-rate or latitude error in fp64, which is the precision every
+    # oracle comparison runs at.  The geometry is stored at the PRECISION
+    # POLICY's dtype, though, and in fp32 the array itself only carries ~1.2e-07
+    # relative -- so a fixed 1e-9 would be unsatisfiable by construction and
+    # would fail on rounding rather than on physics.  The effective bound is
+    # therefore the looser of the two, and it is REPORTED so nobody reads an
+    # fp32 pass as an fp64 one.
+    _eps = float(np.finfo(f_built.dtype).eps) if np.issubdtype(
+        f_built.dtype, np.floating) else 0.0
+    _bound = max(f_rtol, 8.0 * _eps)
+    if f_err > _bound * f_scale:
         raise ValueError(
             f"Mercator Coriolis mismatch vs NEMO ff_t: max|Δ|={f_err:.3e} > "
-            f"{f_rtol:.1e}·{f_scale:.3e}. Check gphit/omega."
+            f"{_bound:.1e}·{f_scale:.3e} (relative {f_err / f_scale:.3e}; "
+            f"f_rtol={f_rtol:.1e}, dtype={f_built.dtype}, 8*eps="
+            f"{8.0 * _eps:.1e}). Check gphit/omega -- a relative gap near "
+            "1.58e-05 is legoESM's rounded constants.Omega against NEMO's own "
+            "2*pi/rsiday, which is what this bound was tightened to catch."
         )
+    # SEPARATE BOUND, deliberately.  ``f_rtol`` was tightened from 1e-3 to 1e-9
+    # to catch a rotation-rate error in the CORIOLIS check above; it was shared
+    # with this metric check and the dy one below, where 1e-9 is far tighter
+    # than the reconstruction those guards tolerate by design.  Tightening one
+    # guard must not silently re-scope two others, so the metric checks keep
+    # their own bound at the value they were calibrated on.
+    _metric_rtol = 1e-3
     dx_err = float(np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)))
-    if dx_err > f_rtol * float(np.max(np.abs(grid.e1t))):
+    if dx_err > _metric_rtol * float(np.max(np.abs(grid.e1t))):
         raise ValueError(
             f"Mercator dx_T mismatch vs NEMO e1t: max|Δ|={dx_err:.3e}. Check "
             "glamt (lon-separable?) / radius."

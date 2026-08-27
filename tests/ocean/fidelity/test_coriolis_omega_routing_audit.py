@@ -14,6 +14,9 @@ import os
 import numpy as np
 import pytest
 
+from legoesm import constants
+from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
 _PROBE = os.path.join(
     os.path.dirname(__file__), "..", "..", "..", "scripts", "validate",
     "ocean_fidelity", "dino_1226", "coriolis_omega_routing_audit.py")
@@ -29,8 +32,12 @@ def _load():
 
 M = _load()
 
-_OM_LEGO = 7.292e-05
-_OM_NEMO = 7.292116e-05
+# The two rates are IMPORTED, never re-typed.  Typing them as literals put this
+# file in the hardcoded-constant ratchet, and worse, it would let the test keep
+# passing against a stale copy of a constant the production code had moved --
+# which is the exact class of drift this whole action was about.
+_OM_LEGO = float(constants.Omega)
+_OM_NEMO = float(NEMO_CONSTANTS_CONFIG.Omega)
 
 
 # --------------------------------------------------------------------------
@@ -116,13 +123,35 @@ def test_zonal_structure_is_measured_not_assumed():
 # --------------------------------------------------------------------------
 def test_classifier_separates_the_two_earths():
     assert M._classify(_OM_LEGO, _OM_LEGO, _OM_NEMO) == "legoESM constants.Omega"
-    assert M._classify(_OM_NEMO, _OM_LEGO, _OM_NEMO) == "NEMO phycst.F90 omega"
+    # The NEMO label must name PHYCST, not "the card's pin": once the pin was
+    # corrected to the sidereal-day value the two references coincide, and the
+    # classifier resolves most-specific-first so the true provenance wins.
+    assert "phycst" in M._classify(_OM_NEMO, _OM_LEGO, _OM_NEMO)
+
+
+def test_classifier_names_a_STALE_card_pin_as_a_pin_not_as_NEMOs_omega():
+    """The defect this audit exists to surface, in the classifier itself.
+
+    NEMO computes omega = 2*pi/rsiday except under key_cice, where it is the
+    literal 7.292116e-05.  DINO is not key_cice.  While the preset carried the
+    key_cice literal, calling it "NEMO's omega" would have erased the
+    discrepancy -- so a value matching the pin but NOT phycst must be named as
+    a pin.  Exercised with the historical literal so the guard keeps working
+    if a future preset regresses to it.
+    """
+    stale_pin = 7.292116e-05          # const-ok: the historical key_cice literal, the thing under test
+    phycst = 7.2921150830e-05         # const-ok: NEMO phycst.F90 :91, the reference it must be told apart from
+    got = M._classify(stale_pin, _OM_LEGO, stale_pin, phycst)
+    assert "pin" in got and "phycst" not in got
+    assert M._classify(phycst, _OM_LEGO, stale_pin, phycst) != got
 
 
 def test_classifier_refuses_to_name_a_third_rate():
-    """The row-averaged f_v is neither Earth; calling it one would erase the
-    finding this audit exists to make."""
-    third = 7.291732522372e-05
+    """The row-averaged f_v inverts to neither Earth; calling it one would
+    erase the finding this audit exists to make.  The stand-in is DERIVED as a
+    rate a few parts per million below legoESM's, which is the size of the
+    real placement contamination -- not a pasted measurement."""
+    third = _OM_LEGO * (1.0 - 3.7e-05)
     assert M._classify(third, _OM_LEGO, _OM_NEMO) == "NEITHER (unrecognised)"
 
 

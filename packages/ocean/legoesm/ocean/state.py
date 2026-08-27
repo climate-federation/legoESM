@@ -1771,6 +1771,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     # LatLonCGridOceanModel._validate_config on an unknown value.
     metric_convention: str = "exact"
 
+    # Where the Coriolis parameter at the v-point / vertex is EVALUATED
+    # (#1455).  Fed to ``legoesm.grids.latlon.ensure_geometry`` at model
+    # construction, exactly like ``metric_convention`` above.
+    #   "cell_average"  (default, BIT-IDENTICAL to every prior release)
+    #                   f_v is the mean of the two adjacent tracer rows' f.
+    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face
+    #                   latitude -- NEMO's own ff_f convention, and what any
+    #                   C-grid model defining its Coriolis at the F-point does.
+    # f_v is the single array every C-grid Coriolis path reads, through one of
+    # two helpers: latlon_cgrid_operators.vertex_coriolis (barotropic EEN
+    # pre-block, 3-D EEN/ENE vorticity flux) and
+    # barotropic_common.coriolis_at_faces (semi-implicit / explicit_ab2
+    # face-f Coriolis).
+    # NB a grid that ARRIVES as a pre-built LatLonCGridGeometry (the NEMO
+    # bridge builds one) is passed through ensure_geometry unchanged, so the
+    # convention must be selected where THAT geometry is built.  The model
+    # raises rather than silently ignoring a non-default request in that case
+    # (LatLonCGridOceanModel._validate_config).  Dispatch raises on an unknown
+    # value there too.
+    coriolis_placement: str = "cell_average"
+
     # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
     lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
 

@@ -122,6 +122,18 @@ class DINOConfig:
     # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
     metric_convention: str = "exact"
 
+    # Where the vertex Coriolis is EVALUATED (#1455).  "cell_average"
+    # (default, BIT-IDENTICAL to every prior DINO run) averages the two
+    # adjacent tracer rows; "face_latitude" evaluates f AT the v-face
+    # latitude, which is NEMO's own ff_f convention (2*omega*sin(gphif)).
+    # Measured against NEMO's dumped ff_f on the DINO mesh, the cell average
+    # is low by a median 3.6e-05 relative once the rotation rate is divided
+    # out (coriolis_omega_routing_audit.py). Threaded into
+    # LatLonCGridOceanConfig.coriolis_placement below; the bridged oracle lane
+    # must ALSO pass it to bridge_nemo_to_legoesm_topo, which is where that
+    # lane's geometry is built.
+    coriolis_placement: str = "cell_average"
+
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
     # b = g_φ · g_λ · (H_deep - H_shallow) + H_shallow  per the
@@ -3321,6 +3333,8 @@ def dino_lat_lon_model_config(
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
+        # #1455: vertex-Coriolis placement (see the DINOConfig field).
+        coriolis_placement=cfg.coriolis_placement,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).

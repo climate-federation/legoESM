@@ -1349,8 +1349,38 @@ class LatLonCGridOceanModel:
         # geometry carries fold descriptor and rotation angles.
         # ``metric_convention`` (#1226) is validated above, so the raise on
         # an unknown value happens before this call.
+        # THE SILENT-IGNORE CASE, refused rather than documented away.
+        # ``ensure_geometry`` passes a pre-built LatLonCGridGeometry through
+        # UNCHANGED, so a non-default placement requested on the config would
+        # do nothing at all -- the model would run the default convention while
+        # its own config said otherwise.  A supplied geometry is therefore
+        # CHECKED against the request, by the one identity that separates the
+        # conventions without needing the face latitudes: under "cell_average"
+        # the interior ``f_v`` IS the mean of the two adjacent ``f_T`` rows, to
+        # the arithmetic that built it.
+        if (self.config.coriolis_placement != "cell_average"
+                and hasattr(grid, "f_v") and hasattr(grid, "f_T")):
+            _fT = jnp.asarray(grid.f_T)
+            _fv_int = jnp.asarray(grid.f_v)[1:-1]
+            _gap = float(jnp.max(jnp.abs(
+                _fv_int - 0.5 * (_fT[:-1] + _fT[1:]))))
+            _scale = float(jnp.max(jnp.abs(_fT))) or 1.0
+            if _gap <= 1e-12 * _scale:
+                raise ValueError(
+                    "coriolis_placement="
+                    f"{self.config.coriolis_placement!r} was requested, but "
+                    "the grid handed to this model is an ALREADY-BUILT "
+                    "LatLonCGridGeometry whose f_v is the cell average (max "
+                    f"departure {_gap:.3e} <= {1e-12 * _scale:.3e}). "
+                    "ensure_geometry passes a pre-built geometry through "
+                    "unchanged, so this setting would be silently ignored. "
+                    "Select the placement where the geometry is built "
+                    "(create_latlon_geometry / ensure_geometry / "
+                    "bridge_nemo_to_legoesm_topo)."
+                )
         self.grid = ensure_geometry(
-            grid, metric_convention=self.config.metric_convention)
+            grid, metric_convention=self.config.metric_convention,
+            coriolis_placement=self.config.coriolis_placement)
         # Push the meridionally-FLAT (Oceananigans `Flat`-y) mode to the grid-
         # operators backend PROCESS-GLOBAL (same pattern as the halo backend).
         # CONSTRAINT: this is process-global, so it assumes ONE lat-lon ocean model
@@ -1729,6 +1759,14 @@ class LatLonCGridOceanModel:
                 "metric_convention must be 'exact' or 'nemo_isotropic', got "
                 f"{config.metric_convention!r}"
             )
+
+        # #1455: the vertex-Coriolis placement, same dispatch pattern.
+        if config.coriolis_placement not in ("cell_average", "face_latitude"):
+            raise ValueError(
+                "coriolis_placement must be 'cell_average' or "
+                f"'face_latitude', got {config.coriolis_placement!r}"
+            )
+
 
         # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
         # horizontal viscosity via config.lateral_viscosity.A_h/config.lateral_viscosity.B_h, GM/Redi via the
