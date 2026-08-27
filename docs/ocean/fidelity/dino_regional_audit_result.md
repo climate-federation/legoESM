@@ -171,8 +171,8 @@ rows as one number attributed a 30-row signal to the tropics and the northern
 hemisphere.
 
 **That +0.0012 Sv is itself a cancellation, and must not be read as agreement.**
-The equatorial +0.0059 Sv inside it is 1.5 % of 0.402 Sv of per-row signal
-(§3.2). The three bands cancel *as reduced numbers*; their rows do not.
+The equatorial +0.0059 Sv inside it is 1.5 % of 0.402 Sv of per-row signal on the
+control member, and under 3 % on every member (§3.2). The three bands cancel *as reduced numbers*; their rows do not.
 
 ### 5.1 Two bands this audit measured and does not resolve
 
@@ -407,7 +407,7 @@ document. Every claim below was in it.**
 
 | # | claim as first written | status |
 |---|---|---|
-| **1** | "the equatorial bands are INDISTINGUISHABLE; R1 is refuted; the tropics are clean" | **RETRACTED — inverted.** True of the band reduction, false of the ocean. Per row the equator is at 206× its own floor and 22 of 41 rows clear 5×; the band net retains 1.5 % of its own summed per-row magnitude. |
+| **1** | "the equatorial bands are INDISTINGUISHABLE; R1 is refuted; the tropics are clean" | **RETRACTED — inverted.** True of the band reduction, false of the ocean. Per row the equator is at 206× its own floor and 22 of 41 rows clear 5×; the band net retains under 3 % of its own summed per-row magnitude. |
 | **2** | "legoESM's equatorial westward surface jet is ~10 % weak" | **RETRACTED — understated ~3×.** It is a ~30 % shear error with a 9–11 % deeper wind-driven layer. |
 | 3 | "the top two levels are ~37 m of a 4506 m column" | **RETRACTED — arithmetic error.** They span 0–20.6 m; 37 m is level 3's centre depth. The top three hold 77 % of the thickness-weighted column difference. |
 | 4 | "the cancellation is **why** the transport reads indistinguishable" | **DOWNGRADED to PLAUSIBLE.** The two functionals differ by the per-level wet count and the width weighting; consistency is not demonstration. |
