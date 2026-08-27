@@ -387,6 +387,22 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
         enj, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_int,
         N2_prandtl=N2, p_sh2_override=None)
     zk = np.abs(np.asarray(z_coord.z_half_ref[1:-1]))
+    # State-swap decomposition (GLM 2026-08-27): band-median en, N2, S2, Ri of
+    # the state being fed to the closure, so a control run (our snapshot state)
+    # and a nemo run (NEMO restart state) reveal WHICH input carries the coupled
+    # avm gap. l_k is master length; K_M ~ c_k*l_k*sqrt(2 en).
+    _en = np.asarray(enj)[0]; _n2 = np.asarray(N2)[0]
+    _s2 = np.asarray(shear_sq)[0]; _lk = np.asarray(l_k)[0]
+    _bk = (zk >= ENTRAINMENT_LO) & (zk <= ENTRAINMENT_HI)
+    if _bk.any():
+        def _bm(a):
+            v = a[:, _bk]; v = v[np.isfinite(v)]
+            return float(np.median(v)) if v.size else float("nan")
+        _ri = _bm(np.where(_s2 > 0, _n2 / np.where(_s2 > 0, _s2, np.nan),
+                           np.nan))
+        print(f"[state] band 65-105 m: en={_bm(_en):.3e}  N2={_bm(_n2):.3e}  "
+              f"S2={_bm(_s2):.3e}  Ri={_ri:.3f}  l_k={_bm(_lk):.3e} m  "
+              f"sqrt(2en)={_bm(np.sqrt(2*np.abs(_en))):.3e}")
     return np.asarray(K_M)[0], np.asarray(K_H)[0], zk, np.asarray(N2)[0]
 
 
