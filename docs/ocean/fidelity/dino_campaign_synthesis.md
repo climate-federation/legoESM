@@ -426,9 +426,20 @@ line". Season and elapsed time are degenerate in a single year.
 > (61.7 % against the Coriolis half's −1.5 %), the Coriolis owns both interior
 > bands (32.1 % / 25.8 % against the metric half's −3.7 % / −2.8 %).
 >
-> Registered verdict on the joint arm: **PARTIAL** (basin 32.3 %, lobe 61.8 %,
-> OWNER bar 50 % on both). The staggering control fires at +12 340 %. The
-> 90-day gate was **not** run, per the registered condition.
+> Registered verdict on the joint arm: **PARTIAL**. Measured twice — first on
+> the two-Earth tree (basin 32.3 %, lobe 61.8 %) and again after the
+> rotation-rate fix, on the one-Earth model, where arm F is a clean convention
+> arm (**basin 29.8 %, lobe 62.0 %**, OWNER bar 50 % on both). The staggering
+> control fires at +12 808 %. The 90-day gate was **not** run, per the
+> registered condition.
+>
+> **The Ω fix's own contribution is now separated and small**: it moves the
+> baseline residual 3.62 % basin-wide, and it does so *entirely in the two
+> interior bands* (−8.6 %, −7.0 %) while leaving the walls and the northern
+> lobe untouched. Rate and convention compose multiplicatively to six digits
+> (3.62 % and 6.55 % giving the old combined 9.93 %). So the campaign's
+> hand-off residual on the corrected model is **1.7806e-07**, and the
+> rotation-rate defect was never the bulk of it.
 >
 > **A separate finding in this item stands and was material:** the twin's
 > geometry really was built on legoESM's rounded rotation rate while the config

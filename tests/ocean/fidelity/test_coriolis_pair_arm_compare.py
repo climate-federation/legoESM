@@ -165,3 +165,45 @@ def test_the_northern_lobe_band_is_the_one_the_verdict_names():
     assert any("northern lobe" in n for n in names)
     lobe = [b for b in M.BANDS if "northern lobe" in b[0]][0]
     assert (lobe[1], lobe[2]) == (185, 197)
+
+
+# --------------------------------------------------------------------------
+# THE TRANSPORT-MODE CONCENTRATION, given a committed reduction.
+# The results document calls this its strongest number, and it had no scored
+# artifact -- it was reconstructed by hand from the accumulation weights, which
+# by this repo's own rule makes it unmeasured (review of the scoring, item 5).
+# The reduction now lives here, with its own known-answer tests.
+# --------------------------------------------------------------------------
+def test_transport_alignment_is_one_on_a_pure_transport_field():
+    """A field that IS the transport direction must score 100%."""
+    w = np.ones((6, 4), dtype=bool)
+    acc = np.arange(24, dtype=float).reshape(6, 4) + 1.0
+    g = M.transport_direction(acc, w)
+    assert M.transport_alignment(acc * w, g, w) == pytest.approx(1.0)
+
+
+def test_transport_alignment_is_zero_on_an_orthogonal_field():
+    w = np.ones((6, 4), dtype=bool)
+    acc = np.ones((6, 4))
+    g = M.transport_direction(acc, w)
+    alt = np.where((np.arange(24).reshape(6, 4) % 2) == 0, 1.0, -1.0)
+    assert M.transport_alignment(alt, g, w) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_transport_alignment_is_sign_blind():
+    """Removing and adding the same mode are equally 'in' that mode."""
+    w = np.ones((6, 4), dtype=bool)
+    acc = np.arange(24, dtype=float).reshape(6, 4) + 1.0
+    g = M.transport_direction(acc, w)
+    a = M.transport_alignment(acc * w, g, w)
+    b = M.transport_alignment(-acc * w, g, w)
+    assert a == pytest.approx(b)
+
+
+def test_transport_direction_is_a_unit_vector_on_the_wet_mask():
+    w = np.zeros((6, 4), dtype=bool)
+    w[2:5] = True
+    acc = np.arange(24, dtype=float).reshape(6, 4) + 1.0
+    g = M.transport_direction(acc, w)
+    assert float(np.linalg.norm(g[w])) == pytest.approx(1.0)
+    assert not g[~w].any()          # never leaks onto dry cells

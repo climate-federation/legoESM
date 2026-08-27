@@ -112,6 +112,35 @@ def _row_mask(wet: np.ndarray, j0: int, j1: int) -> np.ndarray:
     return m
 
 
+def transport_direction(acc_w: np.ndarray, wet: np.ndarray) -> np.ndarray:
+    """Unit vector along the SIGNED, area-weighted transport reduction.
+
+    The deposit scalar this campaign quotes as a circumpolar-transport
+    stand-in is a signed weighted sum, i.e. the projection of the residual
+    field onto one direction.  Materialising that direction lets the question
+    "how much of the residual even lives in the transport mode" be answered by
+    a projection instead of by comparing two incommensurable reductions.
+    """
+    g = np.zeros_like(acc_w, dtype=float)
+    g[wet] = acc_w[wet]
+    n = float(np.linalg.norm(g[wet]))
+    if n == 0.0:
+        raise SystemExit("FATAL: the transport direction is identically zero "
+                         "on the wet mask; a projection onto it is undefined.")
+    return g / n
+
+
+def transport_alignment(field: np.ndarray, direction: np.ndarray,
+                        wet: np.ndarray) -> float:
+    """|<field, direction>| / ||field||, on the wet mask.  Sign-blind: removing
+    and adding the same mode are equally 'in' it."""
+    f = field[wet]
+    nf = float(np.linalg.norm(f))
+    if nf == 0.0:
+        return 0.0
+    return float(abs(f @ direction[wet]) / nf)
+
+
 def collapse_pct(arm: float, base: float) -> float:
     """Per-cent collapse of an arm's residual against the baseline's.
 
@@ -249,11 +278,17 @@ def main() -> None:
               + "".join(f"{coll[k]:+11.1f}%" for k in keys))
         table[r] = {"state_mean_rms": vals, "collapse_pct": coll}
 
-    # ADDITIVITY -- a DESCRIPTION of the pair, registered as not carrying the
-    # verdict.  A cancelling pair predicts the joint arm EXCEEDS the sum of the
-    # halves; the opposite would say the two are independent, not cancelling.
+    # ADDITIVITY -- printed for continuity with the registration, and it does
+    # NOT carry the pair claim.  The premise this block used to state ("a
+    # cancelling pair predicts the joint arm EXCEEDS the sum of the halves") is
+    # UNSOUND and is withdrawn: the two perturbation FIELDS superpose exactly
+    # (measured at ~3.5e-06 relative), so `joint - sum` in PER CENT is a
+    # second-order norm-geometry effect fully determined by that superposition
+    # and carries no information about cancellation either way.  The evidence
+    # against the pair is the field-level superposition, not these points.
     print("\n" + "-" * 78)
-    print("ADDITIVITY (registered as a description, NOT a verdict criterion)")
+    print("ADDITIVITY (continuity with the registration; the points below are")
+    print("NOT evidence about the pair -- see the field-level superposition)")
     print("-" * 78)
     for r in rows:
         c = table[r]["collapse_pct"]
@@ -281,10 +316,22 @@ def main() -> None:
     # gap is ~5.48e-05.  So the control demonstrates sensitivity at 234x the
     # signal, and it is arm F's OWN measured response -- reported in the table
     # above -- that demonstrates sensitivity at the signal's own amplitude.
-    print(f"  control amplitude 1.281e-02 relative vs the candidate's "
-          f"5.480e-05: the control fires at 234x the signal, so it licenses "
-          f"'the loop reads this array', NOT 'the loop resolves 5.5e-05'. "
-          f"Arm F's own response is the evidence for the latter.")
+    # THE CANDIDATE'S AMPLITUDE DEPENDS ON WHICH TREE THIS IS.  On the
+    # two-Earth tree the row-map median gap was 5.480e-05 (rotation rate +
+    # convention); with one rate it is 3.902e-05 (convention alone), measured
+    # by coriolis_omega_routing_audit.py on each tree.  Quoting the old number
+    # after the fix UNDERSTATES how much larger the control is than the signal,
+    # i.e. it errs in the flattering direction (adversarial review of the
+    # scoring).  Both are printed so the ratio can never be read off the wrong
+    # one.
+    _CTRL_AMP = 1.281e-02          # coeff-ok: one-row shift of ff_f, measured
+    for _tag, _sig in (("two-Earth tree (rate + convention)", 5.480e-05),
+                       ("one-Earth tree (convention alone)", 3.902e-05)):
+        print(f"  control amplitude {_CTRL_AMP:.3e} vs the candidate's "
+              f"{_sig:.3e} on the {_tag}: {_CTRL_AMP / _sig:.0f}x")
+    print(f"  -> the control licenses 'the loop READS this array', NOT 'the "
+          f"loop RESOLVES the candidate's amplitude'. Arm F's own measured "
+          f"response is the only evidence for the latter.")
 
     # THE VERDICT, BUILT FROM THE MEASURED VALUES, never hardcoded, and
     # registered on the JOINT arm alone.

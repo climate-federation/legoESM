@@ -7,14 +7,15 @@ are **not** a cancelling pair in the wall-normal tendency: the v-face zonal
 width enters the **zonal** tendency only, and its effect on the meridional
 tendency **through the Coriolis operator is exactly zero**. In the registered
 channel the Coriolis error is unpaired *in that operator*, and the three arms
-bear it out — the joint arm is the **sum** of its halves, never more, and the
-two halves own **disjoint bands**.
+bear it out — the two perturbations superpose **exactly**, with no interaction,
+and the two halves own **disjoint bands**.
 
 **Scope that sentence carefully, because I first wrote it too strongly.**
 "Exactly zero" is a statement about the **Coriolis term**, not about the loop:
 `e1v` still reaches the meridional velocity through the continuity divergence
 and the ssh-average face depth, and the metric arm's meridional response is
-**58 % of the baseline residual's own amplitude**. At system level its effect
+**58 % of the baseline residual's own amplitude** (pre-fix tree; 60 % at HEAD).
+At system level its effect
 is emphatically not zero — it simply does not travel by the Coriolis route the
 "cancelling pair" claim invoked.
 
@@ -27,7 +28,9 @@ building its Coriolis on a different planet from the oracle; it is fixed here.
 Pre-registration: `scripts/validate/ocean_fidelity/dino_1226/PREREG_coriolis_pair.md`
 (committed before any arm was scored). Probes: `coriolis_omega_routing_audit.py`,
 `coriolis_pair_arm_compare.py`, and the `DINO_1455_SUB_CORIOLIS` arm inside
-`substep_traj_compare.py`. Artifacts: `results/dino_1455/arms/`.
+`substep_traj_compare.py`. Artifacts: `results/dino_1455/arms_head/` (the HEAD re-run, which every number
+in §3 comes from) and `results/dino_1455/arms/` (the superseded two-Earth pass,
+kept for the cross-tree comparison).
 
 ---
 
@@ -66,8 +69,14 @@ verdict below is reported as registered; the registration itself is retracted as
 mis-aimed. Credit: the mechanism review caught this; it was then re-measured
 independently before being written down.
 
-The arms confirm it without reference to the operator algebra: a cancelling pair
-predicts the joint arm **exceeds** the sum of its halves. It does not.
+The arms confirm it without reference to the operator algebra, and by the right
+statistic: the two perturbation **fields superpose exactly** (‖(Δ_E1V + Δ_F) −
+Δ_JOINT‖ / ‖Δ_JOINT‖ = 3.5e-06). They are linearly independent contributions,
+with no interaction of either sign. **Do not use the `joint − sum` percentages
+for this** — a per-cent difference between a joint arm and the sum of two halves
+is a second-order norm-geometry effect fully determined by the exact
+superposition, and carries no information about cancellation either way. That
+framing appeared in an earlier draft and in the harness, and is withdrawn.
 
 ---
 
@@ -138,161 +147,165 @@ consecutive states `kt = 5760…5764`.
 
 ### The instrument was validated against a known answer three times
 
-The re-run **E1V** arm reproduces the recorded `dino_wall_fixed_bias.md` §6a
+*(On the FIRST pass, against the two-Earth tree the §6a numbers were recorded
+on — which is what makes it a valid known-answer check. The HEAD numbers are
+further down and are not expected to reproduce these, since the baseline moved.)*
+
+The first-pass **E1V** arm reproduces the recorded `dino_wall_fixed_bias.md` §6a
 numbers **to the digit** on all six reductions (basin 16.2 %, wall rows 24.9 %,
 south 9.1 %, north 25.6 %, tangential 46.0 %, northern lobe 61.7 %) and on the
 alignment/amplitude triple (+0.548 / 0.941 / 0.300 wall-normal, +0.852 / 1.018 /
 0.726 tangential). The routing probe independently reproduces the campaign's
 recorded −5.48e-05 row-map median.
 
-### PROVENANCE: every number in this section predates the rotation-rate fix
+### THE ARMS WERE RE-RUN AT HEAD, ON THE ONE-EARTH MODEL
 
-**Read this before quoting any arm number.** All five arm directories stamp
-`git=5e17e105…` — they were produced *before* the rotation-rate fix in
-`15653c392`. Two consequences, and neither is cosmetic:
+The first pass ran on a tree carrying two rotation rates, which made arm F a
+two-variable arm and put the baseline on a geometry that no longer exists. All
+five directories were re-run at `99e170f6e` into `results/dino_1455/arms_head/`;
+the pre-fix maps are kept at `results/dino_1455/arms/` for the comparison below.
+**Everything in this section is the HEAD re-run.**
 
-1. **Arm F is a TWO-variable arm, not a convention arm.** Substituting NEMO's
-   own `ff_f` on the pre-fix tree replaced the rotation rate (uniform
-   −1.578e-05) *and* the placement (−3.90e-05 median) together. The constant is
-   ~29 % of the substituted gap. "The Coriolis owns both interior bands" is
-   therefore "NEMO's own `ff_f` owns them", rate and convention combined.
-2. **The baseline no longer exists on HEAD.** BASE, E1V and JOINT were all
-   scored against a geometry built on legoESM's rounded rate. The whole
-   collapse table's denominator has moved.
+#### The new baseline, and whether the pre-registered bars still transfer
 
-**What this does and does not invalidate.** The retraction in §1 is an operator
-measurement and does not depend on the arms at all. The exact superposition,
-the disjointness, and the additivity refutation are *relative* statements among
-arms produced on one identical tree, so they stand. What must be re-measured
-before the percentages are quoted as properties of the shipped model is the
-collapse table itself.
+| reduction | pre-fix (2 Earths) | **HEAD (1 Earth)** | change |
+|---|---:|---:|---:|
+| wall-normal basin | 1.8475e-07 | **1.7806e-07** | −3.62 % |
+| both wall rows | 2.6725e-07 | 2.6719e-07 | −0.02 % |
+| south wall row | 7.0338e-08 | 7.1429e-08 | +1.55 % |
+| north wall row | 3.7135e-07 | 3.7106e-07 | −0.08 % |
+| band 57–73 | 2.7875e-07 | 2.5483e-07 | **−8.58 %** |
+| band 121–153 | 2.0909e-07 | 1.9450e-07 | **−6.97 %** |
+| lobe 185–197 | 3.8139e-07 | 3.8438e-07 | +0.78 % |
+| tangential basin | 1.2235e-07 | 1.1834e-07 | −3.28 % |
 
-**The required re-run, named and costed:** all five arms on HEAD (~2.5 h on one
-GPU, the same driver and the same five states). On the fixed tree arm F becomes
-a genuine single-variable convention arm, which is what the round-1 mechanism
-review asked for and what makes the Coriolis half interpretable. This is the
-first thing to do, before anything in §7.
+**The bars transfer, and the reason is stated rather than assumed.** The
+pre-registered thresholds (OWNER > 50 % on both the basin and the lobe,
+REFUTED < 10 %) are *fractional collapses of a state-constant residual*. Two
+things have to hold for them to keep their meaning, and both are measured:
+the object is still state-constant at HEAD (worst state-to-state departure
+**1.59 %**, min signed cross-state correlation **+0.99977**, against 1.53 % /
++0.99979 before), and the denominator moved **3.6 %** — an order of magnitude
+inside the nearest threshold, so no arm changes verdict band on account of it.
+Concretely: turning the joint arm's 29.8 % into an OWNER call would need the
+basin baseline to be **40 % larger** than it is, eleven times the move.
 
-### The collapse table
+**Quote both numbers, because the scalar is far steadier than the object under
+it.** The baseline's *magnitude* moved 3.6 %, but the baseline *field* moved
+**11.5 %** (L2 of the five-state residual stack, pre-fix against HEAD). The bar
+transferring cleanly is a statement about a ratio, not a claim that this is the
+same residual.
 
-State-constant residual, five-state mean, % collapse against BASE:
+**The Ω fix alone is NOT the headline** — it moved the basin residual 3.6 %.
+**Its latitude signature is.** The rotation-rate error was uniform in latitude,
+and removing it moved *only the two interior bands* (−8.6 %, −7.0 %) while the
+walls and the northern lobe did not move at all (−0.02 %, +0.78 %). Those are
+exactly the bands the Coriolis half owns and exactly the ones the metric half
+does not. The wrong Earth was living in the Coriolis half's territory, which is
+why the first pass's arm F was a two-variable arm — and the re-run makes it a
+clean one.
 
-| reduction | BASE | E1V | F | E1V+F | JOINT | joint − sum |
-|---|---:|---:|---:|---:|---:|---:|
-| wall-normal basin | 1.8475e-07 | +16.2 | +9.9 | +26.1 | **+32.3** | +6.2 |
-| wall-normal, both wall rows | 2.6725e-07 | +24.9 | +0.4 | +25.3 | +25.9 | +0.6 |
-| south wall row | 7.0338e-08 | +9.1 | −2.6 | +6.5 | +5.8 | −0.6 |
-| north wall row | 3.7135e-07 | +25.6 | +0.5 | +26.0 | +26.7 | +0.7 |
-| band, southern interior 57–73 | 2.7875e-07 | −3.7 | **+32.1** | +28.4 | +31.3 | +2.9 |
-| band, northern interior 121–153 | 2.0909e-07 | −2.8 | **+25.8** | +23.0 | +24.7 | +1.6 |
-| band, northern lobe 185–197 | 3.8139e-07 | **+61.7** | −1.5 | +60.2 | **+61.8** | +1.6 |
-| tangential basin | 1.2235e-07 | +46.0 | +7.6 | +53.6 | +54.7 | +1.1 |
-| in-loop zonal deposit | 1.2610e-03 Sv/step | −2.4 | **+69.5** | +67.1 | +67.1 | −0.0 |
+#### The rate-and-convention split, now separable
 
-**The two halves are disjoint — CONFIRMED.** The metric owns the northern lobe
-(61.7 %); the Coriolis owns both interior bands (32.1 %, 25.8 %) and the zonal
-deposit (69.5 %) while leaving the lobe alone (−1.5 %).
+Arm F substitutes NEMO's own `ff_f`, which on the old tree removed the rotation
+rate *and* the placement convention together. With the rate fixed, the two
+separate, on the wall-normal basin reduction:
 
-**"Does nothing" is the wrong word for the metric in the interior, and the
-negative percentages say so.** Its response there is 15 % and 11 % of the local
-residual — substantial, but *misaligned* (alignment +0.145 and −0.036), which is
-exactly why the RMS goes slightly **up** rather than down. A −3.7 % collapse is
-evidence of an incoherent effect, not of no effect. The one genuine "nothing" is
-the Coriolis half in the lobe, at 3.5 % of local amplitude. That the campaign's three-band residual has
-one term per band is a measurement.
+| component | collapse |
+|---|---:|
+| rate **and** convention together (pre-fix arm F) | +9.93 % |
+| **rate alone** (the baseline's own move) | **+3.62 %** |
+| **convention alone** (HEAD arm F) | **+6.55 %** |
 
-**WHY they are disjoint is NOT measured, and there are two live explanations —
-PLAUSIBLE, both of them.** They are different claims with different
-consequences and the arms above cannot tell them apart:
+They compose multiplicatively: `(1 − 0.0362)(1 − 0.0655) = 0.900692` against
+`(1 − 0.0993) = 0.900692`. **That identity is NOT an independent check and is
+not offered as one** — it telescopes. Because arm F's absolute residual is the
+same on both trees, `(BASE_head/BASE_pre)·(F_head/BASE_head) = F_head/BASE_pre`
+identically, so the six-digit agreement encodes exactly one fact: that arm F is
+invariant across the fix. That fact is measured directly, and far more tightly,
+in the table below (1.6e-11, not 1e-6). Cite that, not this.
 
-1. **Latitude structure.** The metric gap peaks at the walls and vanishes at
-   the equator; each half then acts where its own error lives.
-   **Correction, because the companion half of this sentence was wrong:** it
-   used to read "the Coriolis gap does the reverse [peaks at the equator]".
-   Only the RELATIVE gap does, and it does so because `f → 0` there, which is
-   also where the inversion is ill-conditioned. The quantity that drives a
-   tendency is the ABSOLUTE gap `Δf = 2Ω sinφ ·(−Δφ²/8) ∝ sinφ cos²φ`, which
-   **vanishes at the equator and peaks near 35°S**. Do not repeat "the Coriolis
-   gap peaks at the equator".
-2. **Disjoint operator sets.** `e1v` reaches three in-loop consumers — the
-   continuity divergence, the ssh-average face depth, and the EEN rotation
-   coefficient — of which only the last is a Coriolis term. The first two act
-   on sea level and therefore on the meridional velocity by a different route
-   entirely. `f_vtx` is a *pure* Coriolis perturbation. On this reading the
-   two arms barely share an operator, and the band split is a consequence of
-   that rather than of latitude.
+**And the split is SEQUENTIAL, not a share.** "Convention alone = 6.55 %" means
+*convention, given the rate is already fixed*. The other ordering — the
+convention's effect on the old Earth — would need an arm that was never run.
+The placement convention is roughly two thirds of what substituting NEMO's
+array used to buy, in this ordering.
 
-**Explanation 1 is quantitatively insufficient on its own**, which settles the
-ranking without the new arm: the response contrast between a half's strong and
-weak bands beats its *error* contrast by 4–6× in both halves (metric 10.7× vs
-1.9×; Coriolis 7.3× vs 2.7×). Where the error is big explains at most a fifth
-of the split. The two are therefore composable rather than competing —
-explanation 2 sets *which channel* a half acts in, explanation 1 modulates the
-amplitude within it.
+#### The check that the two trees differ in exactly one thing
 
-Explanation 2 is the stronger candidate on the operator measurement in §1 —
-`e1v` cannot reach the meridional tendency through the Coriolis term *at all*,
-yet the metric arm collapses the meridional residual 16 % basin-wide, so
-whatever it does there it does through continuity or the face depth. That is an
-argument, not a measurement.
+An arm that **substitutes** NEMO's own `ff_f` replaces legoESM's `f` outright,
+so the rotation-rate fix cannot reach it; an arm that **keeps** legoESM's own
+`f` must move. Measured, as `max|pre-fix − HEAD| / max|field|`:
 
-**The discriminating measurement, named and not run:** substitute NEMO's `e1v`
-into the EEN rotation coefficient ONLY, leaving the continuity divergence and
-the face depth on legoESM's own width. If the northern-lobe collapse survives,
-the lobe is a Coriolis-coefficient object and explanation 1 carries it; if it
-vanishes, the metric arm's whole meridional effect is continuity/free-surface
-and explanation 2 carries it. It is one more arm on the existing instrument —
-the consumers are already separable there — and it costs what the arms above
-cost. Until it is run, no mechanism for the band split should be quoted as
-established.
+| arm | what it does with f | change across the fix |
+|---|---|---:|
+| BASE | keeps legoESM's | 5.0e-02 |
+| E1V | keeps legoESM's | 8.4e-02 |
+| F | substitutes NEMO's | **1.6e-11** |
+| JOINT | substitutes NEMO's | **2.6e-11** |
+| CTRLF | substitutes NEMO's | **2.1e-13** |
 
-**The halves SUPERPOSE EXACTLY — this, not the point spread, is the
-refutation.** Comparing the response *fields* rather than the reduced
-percentages:
+Exactly the two arms that should have moved did, and the three that should not
+did not. (They are not bit-identical — 1e-11 relative, not 1e-16 — so something
+still differs in the last bits of an inert path; it is eleven orders below the
+smallest effect in the table and is not chased here, but it is recorded rather
+than rounded to "identical".)
 
-    ‖(Δ_E1V + Δ_F) − Δ_JOINT‖ / ‖Δ_JOINT‖  =  4.93e-06  (wall-normal)
-                                              6.53e-06  (tangential)
+### The collapse table — HEAD
 
-The joint arm IS the linear sum of its halves to five decimal places. A
-cancelling pair predicts the joint arm to *exceed* the sum; there is no
-interaction at all.
+State-constant residual, five-state mean, % collapse against the HEAD baseline:
 
-The `joint − (E1V + F)` spread of +0.6 to +6.2 points in the table above is
-therefore **not** an interaction — it is the RMS-collapse statistic's own
-nonlinearity (`1 − ‖r+Δ‖/‖r‖` is not additive even when `Δ` is). Feeding the
-exactly-linear sum back through the same statistic reproduces the measured
-JOINT column to 0.1 point on every row. Quote the superposition residual, not
-the point spread.
+| reduction | BASE | E1V | F | E1V+F | JOINT |
+|---|---:|---:|---:|---:|---:|
+| wall-normal basin | 1.7806e-07 | +18.9 | +6.5 | +25.4 | **+29.8** |
+| wall-normal, both wall rows | 2.6719e-07 | +25.2 | +0.4 | +25.5 | +25.9 |
+| south wall row | 7.1429e-08 | +8.5 | −1.1 | +7.5 | +7.3 |
+| north wall row | 3.7106e-07 | +25.9 | +0.4 | +26.3 | +26.6 |
+| band, southern interior 57–73 | 2.5483e-07 | −3.6 | **+25.7** | +22.1 | +24.8 |
+| band, northern interior 121–153 | 1.9450e-07 | −2.6 | **+20.2** | +17.6 | +19.0 |
+| band, northern lobe 185–197 | 3.8438e-07 | **+61.8** | −0.7 | +61.0 | **+62.0** |
+| tangential basin | 1.1834e-07 | +47.7 | +4.5 | +52.2 | +53.2 |
 
-### The registered verdict
+**The disjointness survives the deconfounding, which is the point of the
+re-run.** With the rotation rate no longer riding along, the Coriolis half is a
+pure convention arm and it *still* owns both interior bands (+25.7 %, +20.2 %)
+and *still* does nothing to the northern lobe (−0.7 %); the metric half still
+owns the lobe (+61.8 %) and still moves the interior bands the wrong way
+(−3.6 %, −2.6 %). Every number is smaller than on the old tree — because the Ω
+fix already removed part of what arm F used to remove — and the structure is
+unchanged.
 
-Registered on the **joint arm alone**: OWNER above 50 % on **both** the
-basin-wide and the northern-lobe reduction, REFUTED below 10 %.
+**The halves still superpose exactly:**
+`‖(Δ_E1V + Δ_F) − Δ_JOINT‖ / ‖Δ_JOINT‖` = **3.47e-06** (wall-normal),
+**4.12e-06** (tangential). There is no interaction, on either tree. A cancelling
+pair would show one.
 
-- JOINT basin-wide **+32.3 %** — below the OWNER bar.
-- JOINT northern lobe **+61.8 %** — above it.
+### The registered verdict at HEAD
 
-**VERDICT: PARTIAL.**
+- JOINT basin-wide **+29.8 %** — below the OWNER bar (was +32.3 % pre-fix; it
+  *fell*, because the Ω fix took interior-band error out of the baseline that
+  arm F used to be credited with removing).
+- JOINT northern lobe **+62.0 %** — above it (essentially unchanged from +61.8 %,
+  as it must be: nothing the Ω fix touched lives there).
 
-**The staggering control FIRES**: the un-shifted `ff_f` puts the wall-normal
-basin residual **+12 340 %** above baseline, against a registered bar of +50 %.
-Every arm's residual is still a fixed field (worst state-to-state departure
-1.53–2.26 %, min signed cross-state correlation ≥ +0.9995), so the comparison is
-like for like.
+**VERDICT: PARTIAL** — the same band as the first pass, on a cleaner
+measurement. The **staggering control FIRES** at **+12 808 %** above baseline
+against a +50 % bar. Every arm's residual is still a fixed field.
 
 **Two caveats on the control, adopted from review rather than argued with.**
 (a) It is `(metric off, Coriolis staggered)`, so it is *not* one variable off
 the joint arm it gates; what it establishes is that the loop reads this array at
-all, and JOINT inherits that. (b) It fires at **234×** the candidate's own
-amplitude (1.281e-02 against 5.480e-05), so it licenses "the loop reads this
-array", **not** "the loop resolves 5.5e-05". For the latter the evidence is the
-Coriolis arm's own measured response.
+all, and the joint arm inherits that. The stricter `(metric on, Coriolis
+staggered)` control was not run. (b) It fires at **328×** the candidate's own
+amplitude on the corrected model (1.281e-02 against the convention-only
+3.902e-05). It was 234× against the two-Earth tree's combined 5.480e-05, and
+quoting *that* number after the fix understates the mismatch — the control is a
+worse match to the signal than the old line said. So it licenses "the loop reads
+this array", **not** "the loop resolves the candidate". For the latter the only
+evidence is arm F's own measured response.
 
-### The 90-day gate: NOT RUN, per the registered condition
-
-The pre-registration made the gate conditional on the joint arm clearing 50 %
-per-step. It reads 32.3 %. The gate is **not** run and the chain prediction is
-**not** issued. This is the compute-discipline rule working as intended.
+**The 90-day gate is NOT bought**, by the pre-registered condition (joint arm
+must clear 50 % per-step; it reads 29.8 %).
 
 ### Post-hoc, and labelled as such: alignment versus amplitude
 
@@ -302,19 +315,22 @@ the best-fit rescale:
 
 | arm | channel | corr | best-fit rescale α | variance explained |
 |---|---|---:|---:|---:|
-| E1V | wall-normal | +0.548 | 0.941 | 0.300 |
-| F | wall-normal | +0.436 | 1.077 | 0.190 |
-| **JOINT** | **wall-normal (registered)** | +0.740 | 1.109 | 0.548 |
-| E1V | tangential | +0.852 | 1.018 | 0.726 |
-| F | tangential | +0.456 | 1.738 | 0.208 |
-| **JOINT** | **tangential (the pair's real channel)** | **+0.891** | **0.995** | **0.795** |
+| E1V | wall-normal | +0.586 | 0.971 | 0.343 |
+| F | wall-normal | +0.364 | 1.185 | 0.132 |
+| **JOINT** | **wall-normal (registered)** | +0.716 | 1.108 | 0.513 |
+| E1V | tangential | +0.859 | 0.997 | 0.737 |
+| F | tangential | +0.387 | 1.964 | 0.150 |
+| **JOINT** | **tangential (the pair's real channel)** | **+0.884** | **0.992** | **0.781** |
+
+(HEAD re-run. The pre-fix tree gave +0.740 / 1.109 / 0.548 and +0.891 / 0.995 /
+0.795 — the deconfounding barely moves this diagnostic.)
 
 **Amplitude is right with no fitted parameter** (α within 11 % of 1 on the
-registered channel, within 0.5 % on the tangential one); the shortfall is
+registered channel, within 1 % on the tangential one); the shortfall is
 alignment. On the channel where the pair actually exists the joint arm explains
-**80 %** of the variance. Read against the review's proposed bar (corr > 0.85
-*and* α ∈ [0.8, 1.25]) the joint arm **passes on the tangential channel and
-fails on the wall-normal one** — which is the same conclusion the operator
+**78 %** of the variance. Read against the review's proposed bar (corr > 0.85
+*and* α ∈ [0.8, 1.25]) the joint arm **passes on the tangential channel
+(+0.884, 0.992) and fails on the wall-normal one (+0.716)** — which is the same conclusion the operator
 measurement reached, arrived at independently.
 
 ---
@@ -421,11 +437,17 @@ row would have bought nothing.
   must never be quoted as one number.
 
   **But the gap between them is itself the finding, and it is geometric, not an
-  artifact.** There is no sign-structured cancellation (the Coriolis arm is
-  cleanly anti-aligned with the residual, corr −0.456). Measured directly, the
-  transport-deposit direction captures only **16.9 %** of the baseline
-  residual's norm, while the Coriolis arm's response is **48.6 %** aligned with
-  it — and the metric arm's is **0.2 %**, i.e. essentially orthogonal. The
+  artifact.** There is no sign-structured cancellation: the Coriolis arm's
+  *response field* correlates with the baseline residual at **+0.364** at HEAD
+  (positive means it removes something aligned with the residual, which is what
+  a real fix does). An earlier draft quoted **−0.456** here — that was the
+  pre-fix tree AND a different pairing, and the sign made it read as
+  anti-alignment; both are corrected. Measured directly, the
+  transport-deposit direction captures only **14.3 %** of the baseline
+  residual's norm, while the Coriolis arm's response is **52.7 %** aligned with
+  it — and the metric arm's is **0.2 %**, i.e. essentially orthogonal (HEAD
+  re-run; the pre-fix tree gave 16.9 % / 48.6 % / 0.2 %, so the deconfounding
+  sharpened the concentration rather than explaining it away). The
   Coriolis error's damage is ~3× concentrated in the net-transport mode
   relative to the residual as a whole, and the metric error is not in that mode
   at all. That is the strongest argument in this document for re-registering on
@@ -433,15 +455,16 @@ row would have bought nothing.
 
 ## 7. Named next steps, not started
 
-0. **Re-run the five arms on HEAD** (see the provenance box in §3). Everything
-   below is worth less until the collapse table is a measurement of the shipped
-   model rather than of its predecessor.
+0. ~~Re-run the five arms on HEAD.~~ **DONE** — §3 is the HEAD re-run, arm F is
+   now a clean convention arm, and the verdict is unchanged at PARTIAL.
 1. **Re-register on the zonal channel.** That is where the pair exists, where
    the joint arm already explains 80 % of the variance at α = 0.995, and where
    the transport-relevant deposit lives.
-2. **A rotation-rate-only arm** would separate the constant from the convention
-   inside arm F. It is now moot for future arms — the constant is fixed — but
-   the F numbers in §3 were recorded *before* that fix and therefore carry both.
+2. ~~A rotation-rate-only arm to separate the constant from the convention.~~
+   **DONE, and without a new arm**: the baseline's own move under the Ω fix
+   (+3.62 %) IS the rate-only collapse, and it composes multiplicatively with
+   the HEAD arm F (+6.55 %) to reproduce the old two-variable +9.93 % to six
+   digits. See §3.
 3. **Swap the RMS-collapse bar for correlation-plus-rescale.** An RMS threshold
    conflates alignment with amplitude and is sign-blind.
 4. **The wall-row first-order defect** is real, is 20× the convention error, and
