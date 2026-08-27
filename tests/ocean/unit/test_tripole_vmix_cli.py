@@ -75,13 +75,18 @@ def test_orca1_zdftke_namelist_mapping():
     # molecular by build_tripole so nothing is double-counted.
     assert cfg.kappaM_min == 1.2e-4             # rn_avm0
     assert cfg.kappaH_min == 1.2e-5             # rn_avt0
-    # ln_zdfiwm: zdfiwm_init forces avmb/avtb to molecular — the wave field
-    # is the interior background.
+    assert cfg.mxl_min == 1.0e-8                # non-IWM model default
+    # ln_zdfiwm: zdfiwm_init forces avmb/avtb to molecular (the wave field is the
+    # interior background) AND zdftke.F90:840-843 forces the TKE/mixing-length
+    # floors rn_emin -> 1e-10, rmxl_min -> 1e-3.
     cfg_iwm = r.orca1_zdftke_config(iwm_enabled=True)
     assert cfg_iwm.kappaM_min == constants.nu_ocean_molecular
     assert cfg_iwm.kappaH_min == 1.0e-10
+    assert cfg_iwm.tke_background == 1.0e-10    # rn_emin under ln_zdfiwm
+    assert cfg_iwm.mxl_min == 1.0e-3            # rmxl_min under ln_zdfiwm
     assert cfg_iwm._replace(
-        kappaM_min=cfg.kappaM_min, kappaH_min=cfg.kappaH_min) == cfg
+        kappaM_min=cfg.kappaM_min, kappaH_min=cfg.kappaH_min,
+        tke_background=cfg.tke_background, mxl_min=cfg.mxl_min) == cfg
     assert cfg.bg_diff_scale == 0.0             # nn_avb = 0 (no depth profile)
     # rn_ebb=67.83 has no config field: it is tke.py's module constant.
     from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
