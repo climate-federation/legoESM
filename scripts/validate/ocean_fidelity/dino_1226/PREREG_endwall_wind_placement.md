@@ -45,6 +45,23 @@ uses `g.umask/g.vmask` from `multistep_replay.build_replay_ic`, the same shared
 loader and already-aligned masks that built the bridged state.  Criteria and
 science operands are unchanged.
 
+## Version 5 operand correction — frozen before fourth rerun
+
+The version-4 execution refused at the meridional structural-zero control,
+before classification.  NEMO's direct dyn-zdf deposit is meridionally zero,
+but legoESM's full B1 wind-on/off response is not: B1 is downstream of the
+rotating barotropic loop, so zonal stress has already produced meridional
+velocity there.  NEMO has that independent barotropic response too, but it is
+not present in `poststress-prestress`.  The two B1 operands therefore bracket
+different control-flow spans.
+
+The valid direct comparison uses the already captured production
+`surface_stress_faces` outputs and computes legoESM's explicit vertical-route
+increment exactly as its source does: `rDt*tau/(rho0*dz0)`.  That is compared
+to NEMO's actual direct `poststress-prestress` increment.  B1 remains printed
+as a labelled downstream diagnostic and is not scored.  The `F_slow` score,
+term bars, ownership bars and helper controls are unchanged.
+
 ## Claim and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
@@ -71,8 +88,9 @@ For the whole wet u-face domain and separately for the southern end-wall row
 `j=1`, the probe will print:
 
 1. `zdf_increment_err_norm`: RMS of
-   `(lego B1[wind]-lego B1[zero]) - (NEMO poststress-NEMO prestress)`, divided
-   by the RMS of the NEMO bracket, both in m/s.
+   `lego rDt*tau/(rho0*dz0) - (NEMO poststress-NEMO prestress)`, divided by the
+   RMS of the NEMO bracket, both in m/s.  Version 5 replaces the confounded B1
+   operand; the source helper is captured from the same production call.
 2. `zdf_increment_corr` and `zdf_increment_rms_ratio` for the same operands.
 3. `fslow_err_norm`: RMS of
    `(lego F_slow[wind]-lego F_slow[zero]) - NEMO wnd_dump_z*_frc_inc`, divided
