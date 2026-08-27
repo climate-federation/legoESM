@@ -69,7 +69,7 @@
       "min": 1.024404728244825
     },
     "expected_replay_energy_ratio": 1.054275004129711,
-    "fix_commit": "d86d97d496463b9317764426573af958fe5f20b9",
+    "fix_commit": "b127bc29ae88b74ba523eb5f2031f2117e713c47",
     "legacy_energy_ratio_reconstruction": 2.2556351135780925,
     "mixing_length_ratio_fixed_over_nemo": {
       "geometric_mean": 1.0267789447030766,
@@ -519,14 +519,14 @@
     ],
     "provenance": {
       "input_sha256": {
-        "fixed_tke_source": "77d1d5ddfaee85248a627f8ef456095301ecf91703ae4d6ad3f7ac24f2cbfe6f",
+        "fixed_tke_source": "608d4f55fe935382881ed6c584befc905de20baf7d730db344abe1cad3902fea",
         "mesh_mask": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
         "nemo_avm": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
         "nemo_en": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
         "nemo_zmxlm": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
-        "regression_test": "b91883f7ced87c8595259dd3c4bbf56baf67e97be25fac047441de9edb3a66b3",
+        "regression_test": "a19cfc2d45c5c3009f0f242057c789cd42604c0cab26eb2683640c94279e60b4",
         "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
-        "verifier": "d9ec9df7f506eb394f76435bd3e8a6d275eb21b5cf905a6bf26b964634799cdd"
+        "verifier": "809305cbeba8ff16e19c58142f30fb605d09943484dc0ca0467ab2ee2d8738a3"
       },
       "pinned_reducers": {
         "bn2_alpha_compare.py": "2ac9e4a457c4dded55a116d67938dfda035e79a3a98ccbb070d9a0ec3d11e40e",
@@ -538,13 +538,24 @@
       "repo": {
         "branch": "fidelity/dino-euc-mechanism-codex",
         "dirty": false,
-        "head": "b9946ccf93bd2f51f05f2c14dbb8cad0db3b7939"
+        "head": "40b496dfae795e3ada003571cadbe622a58d8775"
       }
+    },
+    "replay_match_two_sided_band": {
+      "lower": 1.0542750040242836,
+      "relative_tolerance": 1e-10,
+      "upper": 1.0542750042351385
     },
     "source_contract": {
       "lego_fix": "tke.py: surface-min clamp guarded by surface_bc_level == 'interior_pinned'",
       "nemo_interior": "cfgs/DINO/MY_SRC/zdftke.F90:564-565 rn_emin at jk=2..jpkm1",
       "nemo_surface": "cfgs/DINO/MY_SRC/zdftke.F90:361 rn_emin0 at surface jk=1"
+    },
+    "spied_component_pick": {
+      "assertion_tolerance": 2.1570576469956052e-12,
+      "matching_shape_calls": 2,
+      "max_abs_error": 0.0,
+      "selected_zero_based": 1
     },
     "state": "shared NEMO day-180 restart; first matched step kt=5761",
     "tests": {
@@ -555,7 +566,7 @@
       "vertical_mixing_consumers_non_mpas": "57 passed"
     },
     "verdict": "CONFIRM_REAL_FIX_MATCHES_OFFLINE_REPLAY",
-    "verification_producer_head": "b9946ccf93bd2f51f05f2c14dbb8cad0db3b7939"
+    "verification_producer_head": "40b496dfae795e3ada003571cadbe622a58d8775"
   },
   "headline_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT",
   "import_receipt": {
