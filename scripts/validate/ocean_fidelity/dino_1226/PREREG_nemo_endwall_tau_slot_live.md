@@ -63,8 +63,9 @@ The former source distinction
 normalized-error gate had no reachable REFUTE state. On every wet U face,
 active `dynzdf` uses `zDt_2=rDt/2`, so the named no-half diagnostic is exactly
 twice the applied increment. The corrected verifier prints that wet-only
-identity and requires maximum relative error `<=1e-8`; a planted wet-face
-mutation must exceed the bar. It issues no source-distinction classification.
+identity and requires pointwise wet ratio standard deviation `<=1e-8`; maximum
+pointwise deviation is descriptive only. A planted wet-face mutation must make
+the ratio standard deviation exceed the bar. It issues no source-distinction classification.
 This is an arithmetic/source-plumbing check, not independent physics evidence.
 
 The verifier must prove that planted nonzero-lower-level, top-storage, and
