@@ -1138,8 +1138,12 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
               f"u-cell anywhere in the band -- DINO's tropical bathymetry, not "
               f"a mis-specified band.  The truncation is printed rather than "
               f"averaged over nothing.")
+        # EVERY level down to 10, then every third.  A uniform stride of 3 hid
+        # the structure on the first pass: the equatorial difference is a
+        # DIPOLE peaking at level 2, which a k=0,3,6 sample steps straight over.
         lines = []
-        for k in range(0, kmax + 1, 3):
+        klist = list(range(0, min(11, kmax + 1))) + list(range(12, kmax + 1, 3))
+        for k in klist:
             cells = []
             for day in HORIZONS:
                 a = jets[day][(tag, "lego")][k]
@@ -1150,6 +1154,13 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
             lines.append(f"{k:>3d}{float(A.gdept1d[k]):>8.0f}"
                          f"{int(jets[HORIZONS[0]][(tag, 'n_wet')][k]):>6d}"
                          + "".join(cells))
+        print("  READ THE `xfloor` COLUMNS RIGHT: at day 90 the 1e-14 kick has")
+        print("  barely grown, so the ensemble denominator is 3-5 orders under")
+        print("  its day-360 value and every multiple in that column is enormous")
+        print("  for that reason alone.  The day-360 column is the one whose")
+        print("  floor was measured on a grown ensemble.  Same rule as the")
+        print("  transport table: the bar belongs to the statistic AND to the")
+        print("  horizon.")
         _tbl(f"--- {tag}: zonal-mean u(z) ---",
              f"{'k':>3}{'depth':>8}{'nwet':>6}"
              + "".join(f"{'lego d' + str(d):>8}{'nemo':>8}{'diff':>8}{'xfloor':>8}"
@@ -1178,6 +1189,43 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
                                    f"{'diff':>9}{'rel':>9}{'xfloor':>10}"
                                    for d in HORIZONS),
          lines)
+    # The dipole, and the cancellation that reconciles section 3 with section 1.
+    print("\n--- POST-HOC: the SHAPE of the equatorial difference, and why the")
+    print("    transport statistic cannot see it ---")
+    print("The difference is not a uniform weakening: it changes sign in the")
+    print("upper ocean.  Reported here are its two extrema, the depth where it")
+    print("crosses zero, and its THICKNESS-WEIGHTED vertical integral over the")
+    print("top 200 m -- which is the quantity a depth-integrated transport")
+    print("actually sees.  POST-HOC: registered nowhere.")
+    e3 = _f64(A.e3t1d)
+    for tag in ("equator row", "E10 +/-10"):
+        for day in HORIZONS:
+            a = jets[day][(tag, "lego")]
+            b = jets[day][(tag, "nemo")]
+            d = a - b
+            top = _f64(A.gdept1d)[:len(d)] < 200.0
+            kp, kn = int(np.argmax(d)), int(np.argmin(d))
+            # the shallowest sign change
+            sgn = np.sign(d)
+            cross = np.where(sgn[:-1] * sgn[1:] < 0)[0]
+            zc = (f"{float(A.gdept1d[int(cross[0])]):.0f}-"
+                  f"{float(A.gdept1d[int(cross[0]) + 1]):.0f} m"
+                  if cross.size else "none")
+            pos = float(np.sum(np.where(d > 0, d, 0.0)[top] * e3[:len(d)][top]))
+            neg = float(np.sum(np.where(d < 0, d, 0.0)[top] * e3[:len(d)][top]))
+            net = pos + neg
+            canc = abs(net) / max(abs(pos), abs(neg)) if max(abs(pos), abs(neg)) > 0 else float("nan")
+            print(f"  {tag:<14} day {day:3d}: peak {d[kp]:+.4f} m/s at "
+                  f"{float(A.gdept1d[kp]):.0f} m, trough {d[kn]:+.4f} m/s at "
+                  f"{float(A.gdept1d[kn]):.0f} m, sign change at {zc}")
+            print(f"  {'':<14}          top-200 m integral: "
+                  f"+{pos:.5f} / {neg:.5f} = NET {net:+.5f} m2/s "
+                  f"-- the two lobes cancel to {canc:.1%} of the larger")
+    print("  The lobes largely cancel in the vertical integral, which is why a")
+    print("  depth-integrated TRANSPORT statistic reads INDISTINGUISHABLE over")
+    print("  the same rows where the profile plainly is not.  The transport is")
+    print("  not wrong; it is the wrong functional for this difference.")
+
     # where does the profile disagreement LIVE?  Registered nowhere, so this is
     # POST-HOC and labelled: the deepest level at which the two models still
     # differ by more than 1% of NEMO's own value there.
@@ -1357,25 +1405,56 @@ def figures(rows, ts, keep, jets, days, w, wet, out_dir):
     fig.savefig(f"{out_dir}/F2_band_floor_multiples.png", dpi=140)
     plt.close(fig)
 
-    # F3 -- the equatorial jet profiles
-    fig, axes = plt.subplots(1, len(HORIZONS), figsize=(13, 5), sharey=True)
+    # F3 -- the equatorial jet profiles.
+    # THREE rows, because one is misleading: the full column is 4506 m and the
+    # disagreement lives in the top ~50 m, so a single full-depth panel squashes
+    # the entire finding into a sliver a reader cannot see.  Row 1 is the full
+    # column (so nobody can accuse the zoom of hiding deep structure), row 2 is
+    # the top 200 m where the difference actually is, and row 3 is the
+    # difference itself against the band's OWN measured ensemble floor.
     z = _f64(A.gdept1d)
-    for axx, day in zip(axes, HORIZONS):
+    fig, axes = plt.subplots(3, len(HORIZONS), figsize=(14, 11))
+    for col, day in enumerate(HORIZONS):
+        for row, zmax in enumerate((None, 200.0)):
+            axx = axes[row, col]
+            for tag, ls in (("equator row", "-"), ("E10 +/-10", "--")):
+                nk = len(jets[day][(tag, "lego")])
+                axx.plot(jets[day][(tag, "lego")], z[:nk], ls, color="C0", lw=1.4,
+                         label=f"legoESM, {tag}")
+                axx.plot(jets[day][(tag, "nemo")], z[:nk], ls, color="C3", lw=1.4,
+                         label=f"NEMO, {tag}")
+            axx.axvline(0.0, color="k", lw=0.6)
+            axx.invert_yaxis()
+            if zmax is not None:
+                axx.set_ylim(zmax, 0.0)
+            axx.set_title(f"day {day}" + ("" if zmax is None
+                                          else "  (top 200 m)"), fontsize=9)
+            axx.set_xlabel("zonal-mean u [m/s]", fontsize=8)
+            axx.tick_params(labelsize=7)
+        axd = axes[2, col]
         for tag, ls in (("equator row", "-"), ("E10 +/-10", "--")):
-            # the profile is truncated at the deepest wet level of the band
             nk = len(jets[day][(tag, "lego")])
-            axx.plot(jets[day][(tag, "lego")], z[:nk], ls, color="C0",
-                     label=f"lego {tag}")
-            axx.plot(jets[day][(tag, "nemo")], z[:nk], ls, color="C3",
-                     label=f"NEMO {tag}")
-        axx.axvline(0.0, color="k", lw=0.6)
-        axx.set_title(f"day {day}")
-        axx.set_xlabel("zonal-mean u [m/s]")
-    axes[0].set_ylabel("depth [m]")
-    axes[0].invert_yaxis()
-    axes[0].legend(fontsize=6)
-    fig.suptitle("Equatorial current structure, both models "
-                 "(wet-cell zonal mean; no f-weighted statistic anywhere)")
+            d = jets[day][(tag, "lego")] - jets[day][(tag, "nemo")]
+            fl = jets[day][(tag, "floor")]
+            axd.plot(d, z[:nk], ls, color="C2", lw=1.4,
+                     label=f"legoESM - NEMO, {tag}")
+            axd.fill_betweenx(z[:nk], -2.0 * fl, 2.0 * fl, color="0.8",
+                              lw=0, label="2x this band's own floor"
+                              if tag == "equator row" else None)
+        axd.axvline(0.0, color="k", lw=0.6)
+        axd.set_ylim(200.0, 0.0)
+        axd.set_xlabel("difference [m/s]", fontsize=8)
+        axd.set_title(f"day {day}  difference (top 200 m)", fontsize=9)
+        axd.tick_params(labelsize=7)
+    axes[0, 0].set_ylabel("depth [m]")
+    axes[1, 0].set_ylabel("depth [m]")
+    axes[2, 0].set_ylabel("depth [m]")
+    axes[0, 0].legend(fontsize=6)
+    axes[2, 0].legend(fontsize=6)
+    fig.suptitle("Equatorial current structure, both models -- wet-cell zonal "
+                 "mean, no f-weighted statistic anywhere.\n"
+                 "The grey band in the bottom row is 2x that band's OWN measured "
+                 "ensemble floor: outside it, the two models differ.")
     fig.tight_layout()
     fig.savefig(f"{out_dir}/F3_equatorial_jets.png", dpi=140)
     plt.close(fig)
