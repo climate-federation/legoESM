@@ -42,8 +42,9 @@ The verifier prints these frozen numbers:
 3. `u_storage_max_abs = max(abs(utrd_tau[0]-u_reference))`;
 4. `u_storage_normalized_error`, the RMS storage error divided by the RMS
    reference over nonzero reference points;
-5. separately, `u_named_to_applied_rms_ratio`,
-   `u_named_vs_applied_normalized_error`, and their correlation, where
+5. separately, wet-only `u_named_to_applied_rms_ratio`, correlation,
+   pointwise ratio mean error from 2, ratio standard deviation, and maximum
+   pointwise deviation, where
    `applied = (zdf_u1_poststress-zdf_u1_prestress)/rDt`.
 
 ## Frozen classifications
@@ -63,9 +64,11 @@ The former source distinction
 normalized-error gate had no reachable REFUTE state. On every wet U face,
 active `dynzdf` uses `zDt_2=rDt/2`, so the named no-half diagnostic is exactly
 twice the applied increment. The corrected verifier prints that wet-only
-identity and requires pointwise wet ratio standard deviation `<=1e-8`; maximum
-pointwise deviation is descriptive only. A planted wet-face mutation must make
-the ratio standard deviation exceed the bar. It issues no source-distinction classification.
+identity and requires both absolute mean-ratio error from 2 and pointwise wet
+ratio standard deviation `<=1e-8`; maximum pointwise deviation is descriptive
+only. A planted single-face mutation must make the ratio standard deviation
+fail, and a planted uniform +1 ratio shift must make the mean gate fail. It
+issues no source-distinction classification.
 This is an arithmetic/source-plumbing check, not independent physics evidence.
 
 The verifier must prove that planted nonzero-lower-level, top-storage, and
