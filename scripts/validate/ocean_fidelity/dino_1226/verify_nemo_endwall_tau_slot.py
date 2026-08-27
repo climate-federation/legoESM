@@ -50,6 +50,11 @@ def main() -> int:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--restart", required=True)
     parser.add_argument("--rdt-seconds", required=True, type=float)
+    parser.add_argument(
+        "--mesh-mask", type=Path,
+        default=Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+                     "cfgs/DINO/RUN_SEQDUMP_D180_1R/mesh_mask.nc"),
+    )
     args = parser.parse_args()
 
     run_dir = args.run_dir.resolve()
@@ -63,6 +68,7 @@ def main() -> int:
         "u_post": run_dir / "zdf_dump_u1_poststress.bin",
         "v_pre": run_dir / "zdf_dump_v1_prestress.bin",
         "v_post": run_dir / "zdf_dump_v1_poststress.bin",
+        "mesh_mask": args.mesh_mask.resolve(),
     }
     for name, path in inputs.items():
         if not path.is_file():
@@ -82,6 +88,14 @@ def main() -> int:
     with Dataset(restart) as dataset:
         u_slot = np.asarray(dataset.variables["utrd_tau"][0], dtype=np.float64)
         v_slot = np.asarray(dataset.variables["vtrd_tau"][0], dtype=np.float64)
+    with Dataset(inputs["mesh_mask"]) as dataset:
+        u_mask_raw = np.asarray(dataset.variables["umask"][0], dtype=np.float64)
+    if u_mask_raw.shape == (JPK, NJ, NI):
+        u_wet = u_mask_raw[0] > 0.5
+    elif u_mask_raw.shape == (NJ, NI, JPK):
+        u_wet = u_mask_raw[..., 0] > 0.5
+    else:
+        raise ValueError(f"unexpected umask shape {u_mask_raw.shape}")
     expected_shape = (JPK, NJ, NI)
     if u_slot.shape != expected_shape or v_slot.shape != expected_shape:
         raise ValueError(
@@ -116,21 +130,27 @@ def main() -> int:
     else:
         u_storage_norm_err = float("inf")
 
-    source_mask = (u_reference != 0.0) | (u_applied != 0.0)
-    if np.any(source_mask) and _rms(u_applied[source_mask]) > 0.0:
-        u_named_to_applied_rms_ratio = _rms(u_reference[source_mask]) / _rms(
-            u_applied[source_mask]
+    wet_nonzero = u_wet & (u_applied != 0.0)
+    if np.any(wet_nonzero) and _rms(u_applied[wet_nonzero]) > 0.0:
+        u_named_to_applied_rms_ratio = _rms(u_reference[wet_nonzero]) / _rms(
+            u_applied[wet_nonzero]
         )
-        u_named_vs_applied_norm_err = _rms(
-            u_reference[source_mask] - u_applied[source_mask]
-        ) / _rms(u_applied[source_mask])
-        u_named_applied_corr = float(
-            np.corrcoef(u_reference[source_mask], u_applied[source_mask])[0, 1]
-        )
+        u_named_applied_corr = float(np.corrcoef(
+            u_reference[wet_nonzero], u_applied[wet_nonzero])[0, 1])
+        pointwise_ratio = u_reference[wet_nonzero] / u_applied[wet_nonzero]
+        pointwise_ratio_std = float(np.std(pointwise_ratio))
+        pointwise_ratio_max_error = float(np.max(np.abs(pointwise_ratio - 2.0)))
+        identity_ok = pointwise_ratio_std <= 1.0e-8
+        planted_ratio = pointwise_ratio.copy()
+        planted_ratio[0] += 1.0e-3
+        identity_plant_fires = float(np.std(planted_ratio)) > 1.0e-8
     else:
         u_named_to_applied_rms_ratio = float("nan")
-        u_named_vs_applied_norm_err = float("inf")
         u_named_applied_corr = float("nan")
+        pointwise_ratio_std = float("inf")
+        pointwise_ratio_max_error = float("inf")
+        identity_ok = False
+        identity_plant_fires = False
 
     lower_ok = u_lower_max == 0.0 and float(np.max(np.abs(v_slot[1:]))) == 0.0
     meridional_ok = v_slot_max == 0.0 and v_reference_max == 0.0
@@ -145,6 +165,11 @@ def main() -> int:
     top_plant_fires = top_plant_error > eps_bar
 
     print("RETRACTION=prior applied-increment/rDt hook was not NEMO_named_utrd_tau")
+    print("RETRACTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER_2.0966766111")
+    print("RETRACTION_REASON=zDt_2_equals_rDt_over_2_plus_324_dry_coastal_"
+          "faces_from_union_mask_and_unreachable_REFUTE_gate")
+    print("CHECK_SCOPE=named_slot_and_reference_are_two_output_paths_from_"
+          "one_in_memory_array_not_independent_evidence")
     print(f"u_slot_nonzero_count={u_nonzero_count}")
     print(f"u_reference_nonzero_count={u_reference_nonzero_count}")
     print(f"u_lower_max_abs={u_lower_max:.17e}")
@@ -154,34 +179,35 @@ def main() -> int:
     print(f"v_storage_max_abs={v_storage_max:.17e}")
     print(f"u_storage_normalized_error={u_storage_norm_err:.17e}")
     print(f"u_named_to_applied_rms_ratio={u_named_to_applied_rms_ratio:.17e}")
-    print(f"u_named_vs_applied_normalized_error={u_named_vs_applied_norm_err:.17e}")
     print(f"u_named_vs_applied_correlation={u_named_applied_corr:.17e}")
+    print(f"u_wet_nonzero_count={int(wet_nonzero.sum())}")
+    print(f"u_wet_pointwise_ratio_std={pointwise_ratio_std:.17e}")
+    print(f"u_wet_pointwise_ratio_max_error_from_2="
+          f"{pointwise_ratio_max_error:.17e}")
     print(f"v_applied_max_abs={float(np.max(np.abs(v_applied))):.17e}")
     print(f"rounding_bar={eps_bar:.17e}")
     print(f"CONTROL_lower_level_plant_fires={lower_plant_fires}")
     print(f"CONTROL_top_storage_plant_fires={top_plant_fires}")
-    if not lower_plant_fires or not top_plant_fires:
+    print(f"CONTROL_wet_ratio_plant_fires={identity_plant_fires}")
+    if not lower_plant_fires or not top_plant_fires or not identity_plant_fires:
         print("CLASSIFICATION=INVALID_CONTROL_FAILURE")
         return 3
 
-    if u_named_vs_applied_norm_err >= 0.25:
-        print("SOURCE_DISTINCTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER")
-    elif u_named_vs_applied_norm_err <= 0.05:
-        print("SOURCE_DISTINCTION=REFUTED_NAMED_AND_APPLIED_MATCH")
-    else:
-        print("SOURCE_DISTINCTION=UNRESOLVED")
+    print("WET_ARITHMETIC_IDENTITY=" + (
+        "CONFIRMED_NAMED_IS_TWICE_APPLIED_TO_1E-8" if identity_ok
+        else "REFUTED_OR_UNRESOLVED"))
 
     if u_nonzero_count == 0 and u_reference_nonzero_count > 0:
         classification = "REFUTED_UNWIRED"
     elif not lower_ok or not meridional_ok or u_storage_norm_err >= 0.05:
         classification = "REFUTED_WRONG_SOURCE"
     elif u_nonzero_count > 0 and storage_ok:
-        classification = "CONFIRMED_NAMED_TAU_SLOT_WIRED"
+        classification = "CHECKED_CLEAN_WRITE_ONLY"
     else:
         classification = "UNRESOLVED"
     print(f"CLASSIFICATION={classification}")
     print("PLACEMENT_OWNERSHIP=UNRESOLVED")
-    return 0 if classification == "CONFIRMED_NAMED_TAU_SLOT_WIRED" else 2
+    return 0 if classification == "CHECKED_CLEAN_WRITE_ONLY" else 2
 
 
 if __name__ == "__main__":
