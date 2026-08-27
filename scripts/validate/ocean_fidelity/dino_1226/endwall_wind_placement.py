@@ -54,7 +54,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "4d87fe112f93137f5129b3d21b9a81b5348053d6"
+PREREG_COMMIT = "ae0a25e191e2c5f9415c5c2e6b949d53d20bcbf6"
 
 
 def _git(args: list[str]) -> str:
@@ -113,6 +113,8 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
         if out is not None and "tau_i_u" not in cap:
             cap["tau_i_u"] = np.asarray(out[0], dtype=np.float64)
             cap["tau_j_v"] = np.asarray(out[1], dtype=np.float64)
+            cap["dz0_u"] = np.asarray(out[2], dtype=np.float64)
+            cap["dz0_v"] = np.asarray(out[3], dtype=np.float64)
         return out
 
     def spy_baro(*args, **kwargs):
@@ -151,7 +153,7 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
         LatLonCGridOceanModel._apply_implicit_vertical_mixing = real_vmix
         pemod.surface_stress_faces = real_stress
     required = {"F_slow_u", "F_slow_v", "B1_u", "B1_v",
-                "tau_i_u", "tau_j_v"}
+                "tau_i_u", "tau_j_v", "dz0_u", "dz0_v"}
     if not required <= cap.keys():
         raise SystemExit(f"arm {scale} missed hooks: {required - cap.keys()}")
     if cap["baro_calls"] != 1 or cap["vmix_calls"] != 1:
@@ -289,9 +291,17 @@ def main() -> int:
     um = np.asarray(g.umask, dtype=bool)[..., 0]
     vm = np.asarray(g.vmask, dtype=bool)[..., 0]
 
+    # Direct vertical-route deposit, matching _bc_external_surface_forcing's
+    # tau/(rho0*dz0) source integrated over the leapfrog rDt.  Do not use B1:
+    # that state already includes the independent rotating barotropic route.
+    rho0 = float(mc.constants.rho_0)
+    direct_u = (RDT * np.asarray(arms[1.0]["tau_i_u"])
+                / (rho0 * np.asarray(arms[1.0]["dz0_u"])))
+    direct_v = (RDT * np.asarray(arms[1.0]["tau_j_v"])
+                / (rho0 * np.asarray(arms[1.0]["dz0_v"])))
     # NEMO u(i) maps to lego u(i+1); v(j) maps directly on this bridge.
-    lu = np.asarray(b1u)[:, 1:1 + n_ws_u.shape[1], 0]
-    lv = np.asarray(b1v)[:n_ws_v.shape[0], :n_ws_v.shape[1], 0]
+    lu = direct_u[:, 1:1 + n_ws_u.shape[1]]
+    lv = direct_v[:n_ws_v.shape[0], :n_ws_v.shape[1]]
     lfu = np.asarray(f1u)[:, 1:1 + n_fu.shape[1]]
     lfv = np.asarray(f1v)[:n_fv.shape[0], :n_fv.shape[1]]
     masks = {
@@ -338,6 +348,10 @@ def main() -> int:
                        "oracle_lane": dump_lane.RUN_DIR, "kt": KT},
         "controls": controls,
         "whole_step_linearity_diagnostics": whole_step_diagnostics,
+        "b1_downstream_max": {
+            "u": float(np.max(np.abs(b1u))),
+            "v": float(np.max(np.abs(b1v))),
+        },
         "v_structural_zero": v_zero,
         "scores": scores,
         "term_label": label,
