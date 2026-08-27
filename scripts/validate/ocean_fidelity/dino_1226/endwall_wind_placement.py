@@ -295,10 +295,14 @@ def main() -> int:
     # tau/(rho0*dz0) source integrated over the leapfrog rDt.  Do not use B1:
     # that state already includes the independent rotating barotropic route.
     rho0 = float(mc.constants.rho_0)
-    direct_u = (RDT * np.asarray(arms[1.0]["tau_i_u"])
-                / (rho0 * np.asarray(arms[1.0]["dz0_u"])))
-    direct_v = (RDT * np.asarray(arms[1.0]["tau_j_v"])
-                / (rho0 * np.asarray(arms[1.0]["dz0_v"])))
+    dz0u = np.asarray(arms[1.0]["dz0_u"])
+    dz0v = np.asarray(arms[1.0]["dz0_v"])
+    direct_u = np.zeros_like(dz0u)
+    direct_v = np.zeros_like(dz0v)
+    np.divide(RDT * np.asarray(arms[1.0]["tau_i_u"]), rho0 * dz0u,
+              out=direct_u, where=dz0u > 0.0)
+    np.divide(RDT * np.asarray(arms[1.0]["tau_j_v"]), rho0 * dz0v,
+              out=direct_v, where=dz0v > 0.0)
     # NEMO u(i) maps to lego u(i+1); v(j) maps directly on this bridge.
     lu = direct_u[:, 1:1 + n_ws_u.shape[1]]
     lv = direct_v[:n_ws_v.shape[0], :n_ws_v.shape[1]]
@@ -358,6 +362,9 @@ def main() -> int:
         "ownership_label": "UNRESOLVED_REQUIRES_REGISTERED_FREE_RUN",
         "retractions": [
             "first run invalid: whole B1 is not an exactly linear stress control",
+            "second run invalid: 0x/2x failed to scale the previous centred-stress carry",
+            "third run invalid: an already halo-free oracle mask was stripped twice",
+            "fourth run invalid: B1 includes the rotating barotropic response and is not the direct dyn-zdf deposit",
             "utrd_tau is not a physical zero: its dump slot is allocated but never written",
             "NEMO wind is not implicit-only: dynspg_ts adds it independently to zu_frc",
             "this term score does not by itself assign the eta 2dt residual",
