@@ -364,7 +364,8 @@ def main() -> int:
             "first run invalid: whole B1 is not an exactly linear stress control",
             "second run invalid: 0x/2x failed to scale the previous centred-stress carry",
             "third run invalid: an already halo-free oracle mask was stripped twice",
-            "fourth run invalid: B1 includes the rotating barotropic response and is not the direct dyn-zdf deposit",
+            "fourth run invalid: B1 includes the rotating barotropic response "
+            "and is not the direct dyn-zdf deposit",
             "utrd_tau is not a physical zero: its dump slot is allocated but never written",
             "NEMO wind is not implicit-only: dynspg_ts adds it independently to zu_frc",
             "this term score does not by itself assign the eta 2dt residual",
