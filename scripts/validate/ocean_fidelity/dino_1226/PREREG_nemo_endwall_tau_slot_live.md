@@ -85,7 +85,8 @@ ln -s /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_0000
 ln -s "$SLOT_ROOT/cfgs/DINO/BLD/bin/nemo.exe" \
   "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/nemo"
 cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
-mpirun -np 1 ./nemo >run_1step.log 2>&1
+/home/dbalwada/miniconda3/envs/nemo-build/bin/mpirun -np 1 ./nemo \
+  >run_1step.log 2>&1
 ```
 
 Before verification print SHA-256 for the patched `trddump.F90`,
@@ -135,3 +136,8 @@ DINO, `makenemo` stopped with `Compiler not existing` because
 `arch/arch-conda.fcm` is another untracked oracle file omitted by the clone.
 Its exact copy step was added above and committed before retrying. No
 classification or threshold changed.
+
+The first run invocation produced no model output: the base shell returned
+127 before launch because `mpirun` is not on its `PATH`. The absolute launcher
+from the registered `nemo-build` environment was added above and committed
+before retrying. No classification or threshold changed.
