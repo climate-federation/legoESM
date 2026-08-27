@@ -346,7 +346,7 @@ def symmetry_status(amplitude_ratio, trajectory_abs):
 
 
 def exact_n4_null_p(r):
-    """Exact two-sided Pearson tail under the n=4 independent Gaussian null."""
+    """Exact tail for n=4 independent bivariate-normal horizon pairs."""
     return 1.0 - abs(float(r))
 
 
@@ -464,8 +464,10 @@ def attribution(paired_rows):
             "basin_leave_one_horizon_out_folds": basin_folds,
             "channel_leave_one_horizon_out_folds": channel_folds,
             "qualification": (
-                "exploratory low-n trajectory relationship only; n=4 exact null "
-                "p=1-|r|; nudge members are sensitivity traces, not replication"
+                "exploratory low-n trajectory relationship only; theoretical n=4 "
+                "independent-pair null p=1-|r|; overlapping LOO folds and seasonal "
+                "dependence preclude an inferential p-value; nudge members are "
+                "sensitivity traces, not replication"
             ),
         }
     return result
@@ -883,8 +885,9 @@ def run(out_dir):
             "ASYMMETRY_RATIO_MAX": ASYMMETRY_RATIO_MAX,
             "ROW_BAR": ROW_BAR,
             "correlation_bar_qualification": (
-                "n=4 exact null p=1-|r|; unadjusted; four nudge members have "
-                "effective independent tests approximately one"
+                "n=4 independent-pair null p=1-|r|; unadjusted; overlapping LOO "
+                "folds and seasonal dependence preclude inferential use; four nudge "
+                "members have effective independent tests approximately one"
             ),
         },
         "targets": list(TARGET_ROWS),
@@ -952,7 +955,8 @@ def run(out_dir):
         "effective independent member tests ~= 1"
     )
     print(
-        f"CORRELATION BARS: HIGH {R_HIGH:.2f} (exact n=4 null p={exact_n4_null_p(R_HIGH):.2f}); "
+        f"CORRELATION BARS: HIGH {R_HIGH:.2f} "
+        f"(n=4 independent-pair null p={exact_n4_null_p(R_HIGH):.2f}); "
         f"NEIGHBOR {R_NEIGHBOR:.2f} (p={exact_n4_null_p(R_NEIGHBOR):.2f}); "
         f"LOW {R_LOW:.2f} (p={exact_n4_null_p(R_LOW):.2f}); descriptive only"
     )

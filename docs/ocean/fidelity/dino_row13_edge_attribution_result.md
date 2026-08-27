@@ -1,36 +1,58 @@
 # Rows 13 and 49 at the DINO channel edges
 
-**Status: measurement complete; independent adversarial review unavailable.**
-The Claude reviewer failed with DNS `ENOTFOUND`, the local Codex fallback could
-not initialize its read-only state, and no GLM reviewer was exposed.  All
-mechanical controls below passed, but this result remains formally UNREVIEWED.
+**Status: corrected after an independent adversarial NO-SHIP review.**  The
+reviewer reproduced every original number, then identified circular reuse of
+day 360, low-n overclaiming, an incomplete power control, incomparable raw
+projection scales, a missing opposite-neighbour veto, an unreachable
+asymmetry arm, and an uncommitted artifact.  The corrected result has not yet
+received a second adversarial pass.
 
 **Instrument:**
 `scripts/validate/ocean_fidelity/dino_1226/row13_edge_attribution.py` at clean
-producer `cc7296ce5a602c73b920c4674c230bc0b63bd73a`.
+producer `2a1c7ca23a484562e4888061a1ee4595eeb174a0`.
 
 **Pre-registration:** `PREREG_row13_edge_attribution.md` at `ea416520b`,
-committed before the first state statistic was computed.
+committed before the first state statistic was computed.  The review-mandated
+correction protocol was fixed in the same file at `59646d40d`, before any
+corrected statistic was computed; it is explicitly post-registration.
 
-**Artifact:** `/tmp/dino_row13_edge/row13_edge_attribution.json`, SHA-256
-`6899b2ac7b3990d206901973ba9a07acb9f6e979cbcd1ab7036babc6be35ad3c`.
+**Artifact:** `docs/ocean/fidelity/dino_row13_edge_attribution_artifact.json`,
+SHA-256
+`6447be3c028d0a9d98c3c317266eda020f4e1d58677efbd9f50b5e157dc2f8c3`.
 It contains every member, horizon, level and longitude.  Everything is offline
 from the saved verdict360 states; no model was stepped.
 
+## Retractions
+
+The original day-360-template attribution is **retracted**.  Day 360 defined
+the regional template and also dominated the four-point correlation.  The
+original **“row 49 CONFIRMED P3 basin-edge”** statement is likewise
+**retracted**.  Both retractions are first-class fields in the committed JSON
+and are printed before any corrected score.
+
 ## Verdict
 
-> **Row 13 is a mixed boundary object, not attributable under the registered
-> bars.**  Its four-horizon trajectory follows both the P1 southern-basin
-> profile (`median |r| = 0.967`) and the channel profile (`0.778`).  Their
-> separation is `0.189`, just below the pre-registered `0.20` ownership bar;
-> the immediate neighbours support both relationships.  It is therefore
-> neither a confirmed northern edge of P1, a confirmed southern edge of the
-> channel pattern, nor a confirmed independent object.
+> **Row 13 is UNRESOLVED_LOW_N.**  With horizon-held-out, RMS-normalized
+> templates, the control-member trajectory has `r = +0.981` against P1
+> (`p = 0.019`) and `r = -0.868` against the channel (`p = 0.132`).  Absolute
+> profile separation is only `0.11`, and channel-side row 14 (`|r| = 0.989`)
+> is closer than basin-side row 12 (`0.862`), vetoing a basin route.
 
-> **Row 49 passes the registered P3 basin-edge relationship.**  Its trajectory
-> follows the target-excluded P3 profile at `median |r| = 0.905`, versus
-> `0.484` for the channel profile, with a `0.421` separation.  Its day-360
-> transport is 98% bottom-reference rather than shear.
+> **Row 49 is UNRESOLVED_LOW_N; the P3 ownership claim is withdrawn.**  Its
+> control trajectory has `r = +0.914` against held-out P3 (`p = 0.086`) and
+> `r = +0.638` against the channel profile (`p = 0.362`).  Although the
+> descriptive profile separation is `0.28`, channel-side row 48 (`|r| =
+> 0.928`) remains closer than basin-side row 50 (`0.887`) and activates the
+> opposite-neighbour veto.  The replacement statement is: **row 49 is a
+> low-n, boundary-adjacent saved-state pattern with P3-profile similarity but
+> no attributable owner.**
+
+For four horizons, Pearson's null is exactly uniform on `[-1,1]`, so every
+unadjusted two-sided receipt is `p = 1 - |r|`.  The `0.70`, `0.50`, and `0.30`
+bars therefore correspond to `p = 0.30`, `0.50`, and `0.70`; they are only
+descriptive routing bars.  The four 1e-14-nudge members have effective
+independent replication approximately one.  Member 0 is primary; members 1--3
+are sensitivity traces, and no median-over-members evidentiary gain is claimed.
 
 Both absolute gap verdicts are withheld.  At day 360 row 13 is
 `+0.0322305 Sv / 0.0038435 Sv = 8.386` current floors and row 49 is
@@ -39,12 +61,12 @@ unsaturated and the audit's exact materiality test says continued floor growth
 could overturn both `no` verdicts**.  These are gap **upper bounds**, not
 confirmed gaps.
 
-The row-49 symmetry control is **UNRESOLVED**, not symmetric: its day-360
-median absolute gap is only `0.1005` of row 13's and the two trajectories have
-`median |r| = 0.207`, with 0/4 members clearing 0.50.  It cannot pass the
-registered asymmetry verdict either, because row 49 itself remains 9.6 current
-floors from zero.  The result still rules out a simple mirrored response at the
-two topology-matched channel edges.
+The amplitude-aware symmetry cell now fires independently of locally scaled
+floors: row 49's day-360 median absolute gap is `0.1005` of row 13's, an
+absolute difference of `0.029543 Sv`, so the saved states show
+**DESCRIPTIVE_ROW13_AMPLITUDE_DOMINANCE_UNSATURATED**.  Trajectory symmetry is
+still unsupported: control `|r| = 0.247`, exact `p = 0.753`.  This is an
+upper-bound amplitude description, not a confirmed physical asymmetry.
 
 ## Per-member, per-horizon trajectories
 
@@ -134,8 +156,9 @@ reduction-cancellation error in reverse.
 
 Row 49 is bottom-reference-led across members at day 360.  The control bottom
 reference is `9.22` of its own component floor (`0.0003323 Sv`); shear is
-`0.52` of its floor (`0.0001032 Sv`).  This is the same registered vertical
-character as P3, while remaining an unsaturated total-gap upper bound.
+`0.52` of its floor (`0.0001032 Sv`).  This descriptive vertical resemblance
+to P3 does not assign ownership, and the total gap remains an unsaturated
+upper bound.
 
 ## Thickness-weighted depth structure
 
@@ -189,28 +212,65 @@ structure.  The blocked columns contribute exactly zero and are not part of
 the reducer.  The topological break distinguishes these rows from the channel,
 but the measured gap is not localized at that break.
 
-## Registered relationship scores
+## Corrected leave-one-horizon-out relationship scores
 
-The profile statistic projects each target-excluded day-360 regional row-gap
-template onto every member/horizon, then correlates that amplitude against the
-target's four-horizon trajectory.  Absolute correlation is primary because a
-boundary lobe may have the opposite sign of its parent mode.  One annual cycle
-cannot separate seasonal phase from elapsed-time evolution; these are
-trajectory relationships, not mechanisms.
+For each scored horizon, the regional template is the mean profile over the
+other three horizons and all four members.  The held-out profile is projected
+onto that template after normalizing the template to unit spatial RMS.  Thus a
+horizon never helps define the template used to score itself, and projections
+from regions with different row counts have the common unit `Sv per row`.
+Each fold's raw squared norm, RMS and final divisor are in the artifact.
 
-| target | basin profile | channel profile | basin neighbour | channel neighbour | profile separation | verdict |
+The table uses the control member only.  Exact p-values are unadjusted; there
+are four reference comparisons for each of two target rows.
+
+| target | basin profile | channel profile | basin neighbour | channel neighbour | profile separation | corrected verdict |
 |---:|---:|---:|---:|---:|---:|---|
-| 13 | **0.967** | **0.778** | 0.888 (row 12) | 0.987 (row 14) | 0.189 | **UNRESOLVED/MIXED** |
-| 49 | **0.905** | 0.484 | 0.895 (row 50) | 0.928 (row 48) | 0.421 | **CONFIRMED P3 basin-edge relationship** |
+| 13 | +0.98 (`p=.02`) | −0.87 (`p=.13`) | +0.86, row 12 (`p=.14`) | +0.99, row 14 (`p=.01`) | +0.11 | **UNRESOLVED_LOW_N** |
+| 49 | +0.91 (`p=.09`) | +0.64 (`p=.36`) | +0.89, row 50 (`p=.11`) | +0.93, row 48 (`p=.07`) | +0.28 | **UNRESOLVED_LOW_N** |
 
-All four row-13 member correlations with P1 are strong and positive
-(`0.981, 0.964, 0.969, 0.948`), but so are the channel correlations
-(`0.745, 0.792, 0.819, 0.763`).  The registered margin, not judgment, withholds
-the attribution.  Row 49's P3 correlations are `0.870, 0.661, 0.978, 0.941`;
-three of four clear the 0.50 member bar and the aggregate separation clears
-0.20.  Its high correlation with immediate channel row 48 is reported rather
-than hidden: the registered attribution is to the regional phase profile, not
-to adjacency alone.
+Separations are deliberately shown to two decimal places: with four horizons,
+additional digits imply resolution the statistic does not have.  Row 13 fails
+the `0.20` descriptive separation and the basin route is also vetoed by the
+stronger channel-side neighbour.  Row 49 clears the descriptive profile
+separation but is vetoed because its closest immediate neighbour remains on
+the channel side.  Neither row supports an ownership statement.
+
+The nudge traces do not change that disposition.  Row-13 signed P1 sensitivity
+correlations are `[0.962, 0.968, 0.947]`, while channel values are
+`[-0.906, -0.875, -0.793]`.  Row-49 P3 sensitivities are
+`[0.734, 0.903, 0.953]`, while channel values are `[0.655, 0.465, 0.604]`.
+Their close agreement describes perturbation sensitivity only; it is not four
+independent tests.
+
+## Review fixes B1--B8
+
+1. **B1:** retracted the day-360-template results and replaced them with
+   horizon-held-out templates.
+2. **B2:** recorded exact `n=4` null p-values beside every correlation and bar;
+   margins are rounded to two decimals and no longer treated as inferential.
+3. **B3:** member 0 is primary; the nudge twins are sensitivity traces with
+   effective independent replication approximately one.
+4. **B4:** the power plant now generates row trajectories and traverses the
+   actual held-out template, normalization, projection, Pearson, veto and
+   routing path.  A held-out-day poison separately proves non-leakage.
+5. **B5:** projections use unit-RMS templates and report raw and normalized
+   fold divisors.
+6. **B6:** an opposite-neighbour veto prevents either regional arm from
+   winning when the closer immediate match lies across the boundary.
+7. **B7:** per-horizon amplitude cells compare the two rows directly, without
+   requiring row 49 to be inside its locally scaled floor.
+8. **B8:** the complete 489 kB JSON artifact is committed beside this report.
+
+Measured pushback on B5: the review correctly measured a roughly `222x`
+difference between the original row-13 raw template squared norms.  However,
+those were fixed positive scale factors across the original four-horizon
+trajectory, and Pearson correlation is exactly invariant to such scaling.
+Recomputing all original arms after restoring their denominators changed `r`
+by at most `2.22e-16`.  Thus the denominator ratio did not make the original
+correlation margins incommensurable; circular reuse and `n=4` were the actual
+decisive faults.  Normalization is nevertheless necessary in the corrected
+cross-fit because its template scale varies by held-out horizon.
 
 ## Provenance and controls
 
@@ -240,22 +300,23 @@ The artifact read and records all available input stamps:
 
 Mechanical gates: the upstream audit self-test passed; the channel rescore's
 6/6 planted violations fired; the row probe's reducer-hash, depth, zonal,
-component, thickness, blocked-column, local-floor, four-way attribution and
-symmetry plants all fired; direct pytest reports **10 passed**; ruff is clean;
+component, thickness, blocked-column, local-floor, end-to-end synthetic
+attribution, held-out-day poison, opposite-neighbour veto and amplitude-aware
+symmetry plants all fired; direct pytest reports **14 passed**; ruff is clean;
 producer SHA and clean state were identical at the start and end of the run.
 
 ## Honest campaign disposition
 
-1. **Row 13 remains an unsaturated, mixed-attribution adjacent-basin finding.**
-   Its +0.0322 Sv magnitude is real in the recorded states, broadly distributed
-   across open longitudes, and vertically cancellation-rich.  No owner among
-   P1, channel, or neither clears the registered rule.
-2. **Row 49 is the northern edge of P3 in trajectory and vertical character**,
-   but its absolute gap remains an unsaturated upper bound.
-3. **The equal topology does not produce equal behavior.**  The northern edge
-   is one-tenth the southern edge in day-360 amplitude and their time paths do
-   not match, yet the strict symmetry/asymmetry control remains unresolved
-   because row 49 is not within its own floor.
+1. **Row 13 is unresolved at low n.**  Its +0.0322 Sv saved-state magnitude is
+   broadly distributed across open longitudes and vertically
+   cancellation-rich, but neither P1 nor channel ownership survives the
+   cross-fit, low-n qualification, and neighbour veto together.
+2. **Row 49 is not attributable to P3.**  It has P3-profile and vertical
+   resemblance, but row 48 is the closer immediate trajectory match.  Its
+   +0.00312 Sv magnitude remains an unsaturated upper bound.
+3. **The equal topology has unequal saved-state amplitudes.**  Row 49 is
+   one-tenth row 13 at day 360, so the amplitude-aware cell records row-13
+   dominance.  Weak four-point trajectory correlation and unsaturated floors
+   prevent promotion to a physical symmetry or asymmetry claim.
 4. No physics change follows from this state-only measurement.  The row-13
-   ownership question remains open rather than being forced into one of the
-   three offered categories.
+   and row-49 ownership questions both remain open.
