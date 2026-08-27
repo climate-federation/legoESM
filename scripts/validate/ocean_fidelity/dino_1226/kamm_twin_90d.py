@@ -1048,6 +1048,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = True,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
+                       surface_stress_implicit: bool | None = None,
                        surface_tendency_placement: str | None = None,
                        u_m: float | None = None,
                        restart_file: str = RESTART_FILE,
@@ -1079,6 +1080,10 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     tendency rate is folded into the Nnn RHS instead, see dino.py:262-281).
     ``None`` (default) leaves the recipe's own value.
 
+    ``surface_stress_implicit``: optional one-variable override of the wind
+    boundary-condition placement. ``None`` leaves the recipe unchanged;
+    True routes the same centred stress through the implicit vertical solve.
+
     ``u_m``: optional override of ``DINOConfig.U_M`` (NEMO ``rn_Uv``, the
     lateral viscous velocity scale [m/s], card default 0.27).  It is the
     ONLY input to the lateral-viscosity coefficient on this card --
@@ -1104,6 +1109,9 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
         cfg = dataclasses.replace(cfg, vmix_scheme=vmix_scheme)
     if use_gm_redi is not None:
         cfg = dataclasses.replace(cfg, use_gm_redi=use_gm_redi)
+    if surface_stress_implicit is not None:
+        cfg = dataclasses.replace(
+            cfg, surface_stress_implicit=bool(surface_stress_implicit))
     if surface_tendency_placement is not None:
         cfg = dataclasses.replace(cfg, surface_tendency_placement=surface_tendency_placement)
     if u_m is not None:
@@ -1261,6 +1269,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
              bridge_tke: bool = False, bridge_before: bool = True,
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
+             surface_stress_implicit: bool | None = None,
              surface_tendency_placement: str | None = None,
              u_m: float | None = None,
              restart_file: str = RESTART_FILE,
@@ -1323,6 +1332,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
+        surface_stress_implicit=surface_stress_implicit,
         surface_tendency_placement=surface_tendency_placement,
         u_m=u_m, e3t_mode=ladder_mode)
 
@@ -1402,6 +1412,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "restart_file": restart_file,
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
+        "surface_stress_implicit": surface_stress_implicit,
         "surface_tendency_placement": surface_tendency_placement,
         "perturb_seed": perturb_seed, "perturb_eps": float(perturb_eps),
         # DELIBERATELY NOT recorded here: --fp64-3d. run_config is compared
@@ -1694,6 +1705,9 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # and produce a confidently wrong sign. Taken from the BUILT config,
         # not from the CLI argument, so it records what the model used.
         rn_Uv=np.float64(cfg.U_M),
+        # The wind-placement arm must be selected and scored from artifact
+        # content, never inferred from a filename or CLI transcript.
+        surface_stress_implicit=np.bool_(mc.surface_stress_implicit),
         # #1640 (GLM): a label is a taxonomy, not an identity. Hash the
         # vertical-coordinate arrays ACTUALLY in memory so "same grid" is
         # decidable rather than asserted -- nemo_ladder_mode records intent,
@@ -1816,6 +1830,11 @@ def _parse_args(argv=None):
                          "(#1492 A/B: 'applied_now' legacy defect vs "
                          "'leapfrog_rhs' NEMO-faithful fix); default None "
                          "leaves the recipe's own value")
+    p.add_argument("--surface-stress-implicit", default=None,
+                   action=argparse.BooleanOptionalAction,
+                   help="override DINOConfig.surface_stress_implicit for the "
+                        "wind-placement A/B; default None leaves the recipe "
+                        "unchanged. Artifacts stamp the resolved model value")
     p.add_argument("--u-m", dest="u_m", type=float, default=None,
                    help="override DINOConfig.U_M (NEMO rn_Uv, the lateral "
                         "viscous velocity [m/s]; card default 0.27). The "
@@ -1920,6 +1939,13 @@ def _smoke_check_vmix_scheme_override():
     print("OK: --surface-tendency-placement override changes "
           f"cfg.surface_tendency_placement "
           f"({base.surface_tendency_placement} -> {_other})")
+
+    assert base.surface_stress_implicit is False
+    wind_implicit = dataclasses.replace(base, surface_stress_implicit=True)
+    assert wind_implicit.surface_stress_implicit is True
+    assert base.surface_stress_implicit is False
+    print("OK: --surface-stress-implicit override changes "
+          "cfg.surface_stress_implicit (False -> True)")
 
     # --u-m: the #1455 Munk ablation knob. Assert BOTH that the field moves
     # and that the quantity it feeds (the lateral-viscosity coefficient the
@@ -2043,6 +2069,7 @@ def main(argv=None):
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
+              surface_stress_implicit=args.surface_stress_implicit,
               surface_tendency_placement=args.surface_tendency_placement,
               u_m=args.u_m,
               perturb_seed=args.perturb_seed, perturb_eps=args.perturb_eps,
