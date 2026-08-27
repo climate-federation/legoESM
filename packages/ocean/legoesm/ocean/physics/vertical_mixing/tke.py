@@ -1375,10 +1375,16 @@ def _solve_tke_backward_euler(
     # DROPPED the `* wmask`; ``w_active`` (TKEConfig.tke_dry_wmask) restores
     # it. None ⇒ BIT-IDENTICAL legacy.
     e_new = jnp.maximum(e_new, cfg.tke_background)
-    # Floor at surface_min on the topmost interface only.
-    e_new = e_new.at[..., 0].set(
-        jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
-    )
+    # The legoESM surface slot is interface 0 only for the historical
+    # ``interior_pinned`` layout.  Under ``nemo_z0`` the true surface is the
+    # separate virtual Dirichlet row assembled above: NEMO applies rn_emin0
+    # there (MY_SRC/zdftke.F90:361), then applies only rn_emin to the solved
+    # interior jk=2..jpkm1 (:564-565).  Reapplying tke_surface_min here would
+    # incorrectly pin NEMO jk=2 to the surface floor.
+    if surface_bc_level == "interior_pinned":
+        e_new = e_new.at[..., 0].set(
+            jnp.maximum(e_new[..., 0], cfg.tke_surface_min),
+        )
     if w_active is not None:
         # LAST statement, exactly as at :565 (the `* wmask` closes tke_tke);
         # this also masks interface 0 (NEMO's jk=2) on a wholly-dry column,
