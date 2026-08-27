@@ -256,3 +256,97 @@ def test_an_empty_band_and_depth_selection_aborts_rather_than_returning_nan(R):
     d = np.zeros((A.NY, A.NX, A.NZ))
     with pytest.raises(SystemExit, match="zero wet volume"):
         X.wrms(d, w, np.zeros_like(wet, dtype=bool))
+
+
+# ---------------------------------------------------------------------------
+# The four defects the code review of 17881d91d found.  Each test below FAILS
+# if its fix is reverted, which is the only reason any of them exist.
+# ---------------------------------------------------------------------------
+def test_the_registered_cuts_are_symmetric_about_the_f_zero_row(R):
+    """C4: a one-row shift of the equatorial band passed the ENTIRE self-test,
+    because K7 only checks that the bands partition 199 rows and that E10 is
+    inside P4 -- and both survive any shift.  The module now asserts these three
+    relations at import; this makes the same check fail in CI."""
+    import acc_thermal_wind as A
+    z = R.STRUCTURAL_ZERO_ROW
+    assert R._EQ20_LO + R._EQ20_HI == 2 * z
+    assert R._EQ10_LO + R._EQ10_HI == 2 * z
+    assert R._SUBTROP_N_HI == 2 * z - A.J1
+
+
+def test_day0_control_aborts_when_the_two_sides_differ(R):
+    """C2: the old K3 compared the day-0 gap against the fp32 quantum -- but the
+    legoESM day-0 snapshot IS fp32(NEMO day-0), so gap and quantum are the same
+    number and the assertion was |x| <= 10|x|, reading 1.000000 in all seven
+    bands.  The replacement is an exact bit-identity, and it can fail."""
+    import acc_thermal_wind as A
+    shape = (A.NY, A.NX, A.NZ)
+    wet = np.ones(shape, dtype=bool)
+    nemo = {"T": np.full(shape, 4.0), "S": np.full(shape, 35.0),
+            "u": np.zeros(shape)}
+    same = {k: np.float32(v).astype(np.float64) for k, v in nemo.items()}
+    rows = {"lego": {0: {0: {n: 0.0 for n, _ in R.ALL_BANDS}}},
+            "nemo": {0: {0: {n: 0.0 for n, _ in R.ALL_BANDS}}}}
+    q = {n: 1e-9 for n, _ in R.ALL_BANDS}
+    R.control_day0(same, nemo, wet, wet, rows, q)          # identical: passes
+    broken = {k: v.copy() for k, v in same.items()}
+    broken["T"][10, 10, 0] += 1e-3
+    with pytest.raises(SystemExit, match="NOT starting from the same state"):
+        R.control_day0(broken, nemo, wet, wet, rows, q)
+
+
+def test_band_and_depth_selections_are_disjoint_in_both_directions(R):
+    """C1: the old K5b planted a 'dry' T-cell drawn from the whole domain and
+    scored it through a P4-UPPER selection.  The cell landed at 4253 m, so the
+    DEPTH mask killed the poison before the wet mask was consulted -- the
+    campaign's own double-mask defect, inside the control that claimed to design
+    against it.  What this file owns is the band-AND-depth intersection."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, _ = X.build_weights(np.ones((A.NY, A.NX)))
+    p4u = R.band_depth_sel(R.BANDS[3][1], X.DEPTH_CLASSES[0][0], wet)
+    p5u = R.band_depth_sel(R.BANDS[4][1], X.DEPTH_CLASSES[0][0], wet)
+    p4a = R.band_depth_sel(R.BANDS[3][1], X.DEPTH_CLASSES[2][0], wet)
+    assert p4u.any() and p5u.any() and p4a.any()
+    assert not (p4u & p5u).any(), "two bands share a cell"
+    assert not (p4u & p4a).any(), "two depth classes share a cell"
+
+
+def test_a_poison_outside_a_selection_cannot_reach_its_rms(R):
+    """The measured half of the same fix, with its non-vacuity partner."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, w = X.build_weights(np.ones((A.NY, A.NX)))
+    p4u = R.band_depth_sel(R.BANDS[3][1], X.DEPTH_CLASSES[0][0], wet)
+    p5u = R.band_depth_sel(R.BANDS[4][1], X.DEPTH_CLASSES[0][0], wet)
+    base = np.zeros((A.NY, A.NX, A.NZ)) + 1e-9
+    ref = X.wrms(base, w, p4u)
+    outside = base.copy()
+    outside[tuple(np.argwhere(p5u)[0])] = 1e6
+    assert X.wrms(outside, w, p4u) == ref
+    inside = base.copy()
+    inside[tuple(np.argwhere(p4u)[0])] = 1e6
+    assert X.wrms(inside, w, p4u) > 1.0        # non-vacuity
+
+
+def test_a_split_margin_inside_its_own_bar_is_unresolved(R):
+    """C3: R3 was reported CONFIRMED on an 0.0059 Sv margin against legs whose
+    own floors are 0.0129 and 0.0119 Sv -- and two of the four ensemble members
+    flip the comparison.  A near-cancelling decomposition needs a bar on the
+    MARGIN, and inside that bar the ordering is UNRESOLVED, not refuted."""
+    import verdict360 as V
+    f_split = float(np.hypot(0.0129, 0.0119))
+    assert abs(0.0587) - abs(0.0528) < V.K_PREREG * f_split      # UNRESOLVED
+    # and the P3-style case, which DOES clear it and must not be swept up
+    f_p3 = float(np.hypot(0.0067, 0.0003))
+    assert abs(0.0024) - abs(0.0373) < -V.K_PREREG * f_p3        # barotropic-led
+
+
+def test_the_artifact_refuses_a_tree_that_moved_mid_run(R, tmp_path):
+    """The stamp recorded a commit that landed WHILE THE RUN WAS IN FLIGHT: the
+    log read one sha at the top and another at the bottom, with dirty=False."""
+    sha_now, dirty_now = R.git_sha_now()
+    with pytest.raises(SystemExit, match="CHANGED during this run"):
+        R.stamp({}, str(tmp_path), "0" * 40, dirty_now)
+    R.stamp({}, str(tmp_path), sha_now, dirty_now)     # unmoved: writes
+    assert (tmp_path / "regional_audit.json").exists()

@@ -86,6 +86,22 @@ _LAT = np.asarray(A.gphit, dtype=np.float64)[:, 25]
 _EQ20_LO, _EQ20_HI = 79, 119                   # |lat| <= 20 deg
 _EQ10_LO, _EQ10_HI = 89, 109                   # |lat| <= 10 deg
 _SUBTROP_N_HI = 150                            # +45.353 deg, the channel's mirror
+# The structural zero, needed here because the registered cuts are defined
+# RELATIVE to it.  Registered in PREREG sec.7 and re-asserted by K11.
+OMEGA = 7.292115e-5
+STRUCTURAL_ZERO_ROW = 99
+# ASSERTED, not merely printed.  Code review of 17881d91d planted a one-row
+# shift of the equatorial band (79-119 -> 80-120, i.e. -18.7..+20.6 deg,
+# asymmetric about the f=0 row) and the ENTIRE self-test passed: K7 only checks
+# that the six bands partition 199 rows and that E10 is inside P4, and both
+# survive any shift.  The registered latitudes were printed and never checked.
+# These three lines catch every off-by-one in the registered cuts.
+assert _EQ20_LO + _EQ20_HI == 2 * STRUCTURAL_ZERO_ROW, \
+    "P4 is not symmetric about the f=0 row"
+assert _EQ10_LO + _EQ10_HI == 2 * STRUCTURAL_ZERO_ROW, \
+    "E10 is not symmetric about the f=0 row"
+assert _SUBTROP_N_HI == 2 * STRUCTURAL_ZERO_ROW - A.J1, \
+    "P5's north cut is not the channel's southern mirror"
 
 BANDS = (
     ("P1 south of band",        _P1),
@@ -104,10 +120,6 @@ HORIZONS = (90, 180, 270, 360)                 # registered, scored
 CONTROL_DAYS = (0, 10)                         # controls only, never scored
 KEEP_DAYS = (10, 90, 180, 270, 360)            # difference fields retained
 N_MEM = X.N_MEM
-
-# The structural zero.  Registered in PREREG sec.7 and asserted by K11.
-OMEGA = 7.292115e-5
-STRUCTURAL_ZERO_ROW = 99
 
 # The verdict run's own recorded day-360 "south of band" gap, reproduced by K9.
 D360_P1_RECORDED_SV = X.D360_SOUTH_GAP_RECORDED_SV      # -0.95191
@@ -412,24 +424,50 @@ def control_stamps():
     return prov, clock
 
 
-def control_day0(rows_by_side, quantum):
-    """K3: at day 0 the two models hold the SAME state, so every band gap must
-    sit under that band's own fp32 storage quantum."""
+def control_day0(lego0, nemo0, wet, wet_u, rows_by_side, quantum):
+    """K3: at day 0 the two models hold the SAME state.
+
+    THE PREVIOUS VERSION OF THIS CONTROL COULD NOT FAIL, and the code review of
+    17881d91d proved it.  It compared the day-0 band transport gap against that
+    band's fp32 storage quantum -- but the legoESM day-0 snapshot IS
+    ``fp32(NEMO day-0)``, so the gap and the quantum are the SAME NUMBER with a
+    sign, and the assertion was |x| <= 10|x|.  It read 1.000000 in every one of
+    the seven bands and the matching mantissas were printed without comment.
+    (It also silently applied ``QUANTUM_MARGIN`` where PREREG sec.8 registers
+    the bare quantum -- an undisclosed 10x loosening.)
+
+    Replaced by the statement that is actually true and actually checkable:
+    the two sides are BIT-IDENTICAL at day 0 on the wet mask, once NEMO is cast
+    to the precision legoESM stored.  That can fail -- a re-ingested restart, a
+    different member, a changed mask all break it -- and it makes the identity
+    the old control was hiding explicit instead of dressing it as agreement.
+    """
     print("[K3 DAY-0 IDENTITY]")
+    ident = (("T", lego0["T"], nemo0["T"], wet),
+             ("S", lego0["S"], nemo0["S"], wet),
+             ("u", lego0["u"], nemo0["u"], wet_u))
+    for name, a, b, m in ident:
+        b32 = np.asarray(b, dtype=np.float32).astype(np.float64)
+        if not np.array_equal(a[m], b32[m]):
+            bad = int(np.sum(a[m] != b32[m]))
+            raise SystemExit(
+                f"FATAL K3: legoESM day-0 {name} differs from fp32(NEMO day-0) "
+                f"in {bad} wet cells (max {np.abs(a[m] - b32[m]).max():.3e}) -- "
+                f"the two sides are NOT starting from the same state")
+        print(f"  {name}: legoESM day-0 is BIT-IDENTICAL to fp32(NEMO day-0) on "
+              f"all {int(m.sum())} wet cells")
+    print("  CONSEQUENCE, stated so nobody reads the next line as agreement:")
+    print("  the day-0 band transport gap below is EXACTLY this band's fp32")
+    print("  storage quantum, by construction.  It is an identity, not a test.")
     worst = 0.0
     for name, _ in ALL_BANDS:
         gap = (rows_by_side["lego"][0][0][name]
                - rows_by_side["nemo"][0][0][name])
-        q = quantum[name]
-        ok = abs(gap) <= max(q, 1e-12) * V.QUANTUM_MARGIN
         worst = max(worst, abs(gap))
-        print(f"  {name:<26} day-0 gap {gap:+.3e} Sv   quantum {q:.3e} "
-              f"{'ok' if ok else 'OVER'}")
-        if not ok:
-            raise SystemExit(
-                f"FATAL K3: {name} differs by {gap:.3e} Sv at day 0, over "
-                f"{V.QUANTUM_MARGIN:.0f}x its fp32 storage quantum {q:.3e} -- "
-                f"the two sides are not starting from the same state")
+        q = quantum[name]
+        r = abs(gap) / q if q > 0 else float("nan")
+        print(f"  {name:<26} day-0 gap {gap:+.6e} Sv   quantum {q:.6e}   "
+              f"ratio {r:.6f}")
     print(f"  worst day-0 band gap {worst:.3e} Sv")
     return worst
 
@@ -509,32 +547,53 @@ def control_plant(st, wet_u, wet_t, w):
     if d_p1 != 0.0:
         raise SystemExit(f"FATAL K6: a plant inside P4 moved P1 by "
                          f"{d_p1:.3e} Sv -- the bands are not disjoint")
-    # the same pair on the VOLUME weights the T/S reductions use
-    d = np.zeros((A.NY, A.NX, A.NZ), dtype=np.float64)
-    dry_t = np.argwhere(~wet_t)
-    if dry_t.size == 0:
-        raise SystemExit("FATAL K5b: no dry T-cell to plant in")
-    jt, it, kt = dry_t[len(dry_t) // 2]
-    sel = band_depth_sel(BANDS[3][1], X.DEPTH_CLASSES[0][0], wet_t)
-    d[jt, it, kt] = 1e6
-    base_rms = X.wrms(np.zeros_like(d) + 1e-9, w, sel)
-    poisoned_rms = X.wrms(np.where(d != 0.0, d, 1e-9), w, sel)
-    print(f"  dry T plant at (row {jt}, col {it}, lev {kt}) d=1e6: "
-          f"band rms {base_rms:.6e} -> {poisoned_rms:.6e}")
-    if poisoned_rms != base_rms:
-        raise SystemExit("FATAL K5b: a dry T-cell reached a volume-weighted rms")
-    wet_in = np.argwhere(sel)
-    if wet_in.size == 0:
-        raise SystemExit("FATAL K6b: the P4-upper selection is empty")
-    jw2, iw2, kw2 = wet_in[len(wet_in) // 2]
-    d2 = np.zeros_like(d) + 1e-9
-    d2[jw2, iw2, kw2] = 1e6
-    wet_rms = X.wrms(d2, w, sel)
-    print(f"  wet T plant at (row {jw2}, col {iw2}, lev {kw2}) d=1e6: "
-          f"band rms {base_rms:.6e} -> {wet_rms:.6e}")
+    # THE T/S LEG, REBUILT.  The previous K5b/K6b were VACUOUS and the code
+    # review of 17881d91d proved it twice over.  (1) It drew a "dry" T-cell from
+    # the whole domain and scored it through a P4-UPPER selection; the cell it
+    # picked sat at 4253 m, so the DEPTH mask killed the poison before the wet
+    # mask was ever consulted -- the campaign's own double-mask defect, in the
+    # control that claimed to design against it.  (2) Even with an honest dry
+    # cell inside P4-upper it still proved nothing, because ``build_weights``
+    # already zeroes the volume weight on land, so the ``& wet`` term in the
+    # selection is redundant with the weight and the leg only re-tested the
+    # imported atlas's own C5.
+    #
+    # What THIS file owns in the T/S path is the band-AND-depth INTERSECTION,
+    # so that is what is planted against: a poison in one band's cells must not
+    # reach another band's rms, and must reach its own.
+    print("[K5t/K6t BAND-DEPTH SELECTION]")
+    sel_p4u = band_depth_sel(BANDS[3][1], X.DEPTH_CLASSES[0][0], wet_t)
+    sel_p5u = band_depth_sel(BANDS[4][1], X.DEPTH_CLASSES[0][0], wet_t)
+    sel_p4a = band_depth_sel(BANDS[3][1], X.DEPTH_CLASSES[2][0], wet_t)
+    for nm, sl in (("P4-upper", sel_p4u), ("P5-upper", sel_p5u),
+                   ("P4-abyss", sel_p4a)):
+        if not sl.any():
+            raise SystemExit(f"FATAL K5t: the {nm} selection is empty")
+    base_d = np.zeros((A.NY, A.NX, A.NZ), dtype=np.float64) + 1e-9
+    base_rms = X.wrms(base_d, w, sel_p4u)
+    for nm, other in (("another BAND (P5-upper)", sel_p5u),
+                      ("another DEPTH CLASS (P4-abyss)", sel_p4a)):
+        d_out = base_d.copy()
+        cells = np.argwhere(other & ~sel_p4u)
+        if cells.size == 0:
+            raise SystemExit(f"FATAL K5t: {nm} does not disjointly exist")
+        d_out[tuple(cells[len(cells) // 2])] = 1e6
+        got = X.wrms(d_out, w, sel_p4u)
+        print(f"  poison in {nm}: P4-upper rms "
+              f"{base_rms:.6e} -> {got:.6e}")
+        if got != base_rms:
+            raise SystemExit(
+                f"FATAL K5t: a poison in {nm} reached the P4-upper rms -- the "
+                f"band-and-depth selection is not disjoint")
+    d_in = base_d.copy()
+    own = np.argwhere(sel_p4u)
+    d_in[tuple(own[len(own) // 2])] = 1e6
+    wet_rms = X.wrms(d_in, w, sel_p4u)
+    print(f"  poison INSIDE P4-upper: rms {base_rms:.6e} -> {wet_rms:.6e}")
     if not wet_rms > 1.0:
-        raise SystemExit("FATAL K6b: the wet T plant did not move the rms -- "
-                         "K5b is vacuous")
+        raise SystemExit("FATAL K6t: a poison inside P4-upper did not move its "
+                         "own rms -- K5t is vacuous")
+
     # K3c -- the named exception, MEASURED.  Poison BOTH entire domain-wall
     # rows and require every reported band statistic to move by exactly 0.0.
     # This is what admits rows 0 and 198 into P1/P6; without it the admission
@@ -565,7 +624,8 @@ def control_plant(st, wet_u, wet_t, w):
     print(f"  the same poison on the volume weights: P6-upper rms "
           f"{rms3:.3e} (want 1.000e-09) -- the walls carry no volume")
     return {"dry_worst_sv": float(worst), "wet_p4_move_sv": float(d_p4),
-            "dry_rms": float(base_rms), "wet_rms": float(wet_rms),
+            "p4upper_base_rms": float(base_rms),
+            "p4upper_wet_rms": float(wet_rms),
             "dry_wall_worst_sv": float(worst3),
             "layout_shift_sv": float(layout_shift)}
 
@@ -616,6 +676,36 @@ def control_dtype(*arrays):
         if np.asarray(a).dtype != np.float64:
             raise SystemExit(f"FATAL K10: a comparison array is "
                              f"{np.asarray(a).dtype}, not float64")
+
+
+def ts_quantum(nemo_st, wet, w):
+    """Per (band, depth class, field): the fp32 STORAGE quantum of the rms.
+
+    Measured the same way ``band_quantum`` measures the transport's -- on the
+    ORACLE side, which is the one stored at full precision -- as the
+    volume-weighted rms of ``NEMO - fp32(NEMO)``.  Without it the T/S table
+    prints multiples up to 7e8 that are a floor sitting at the storage quantum,
+    and a paragraph telling the reader to discount a column is not a bar.
+    """
+    out = {}
+    for fld in ("T", "S"):
+        a = _f64(nemo_st[fld])
+        d = np.where(wet, a - np.asarray(a, dtype=np.float32).astype(np.float64),
+                     0.0)
+        for bname, rows in ALL_BANDS:
+            for dname, _ in X.DEPTH_CLASSES:
+                sel = band_depth_sel(rows, dname, wet)
+                out[(bname, dname, fld)] = X.wrms(d, w, sel)
+    return out
+
+
+def jet_quantum(nemo_st, wet_u):
+    """Per (band, level): the fp32 storage quantum of the zonal-mean profile."""
+    lo = {"u": np.asarray(nemo_st["u"], dtype=np.float32).astype(np.float64)}
+    a = jet_profiles([nemo_st], [nemo_st], wet_u)
+    b = jet_profiles([lo], [lo], wet_u)
+    return {t: np.abs(a[(t, "lego")] - b[(t, "lego")])
+            for t in ("equator row", "E10 +/-10", "P4 +/-20")}
 
 
 def band_quantum(nemo_st, wet_u):
@@ -779,6 +869,10 @@ def self_test():
 # ------------------------------------------------------------------------ run ---
 def run(out_dir):
     os.makedirs(out_dir, exist_ok=True)
+    sha_start, dirty_start = git_sha_now()
+    print(f"producer revision at START of run: {sha_start}"
+          f"{' +dirty' if dirty_start else ''}  (re-checked before the artifact "
+          f"is written; a tree that moves mid-run is REFUSED)")
     print("=" * 78)
     print("#1455 REGIONAL AUDIT -- the equatorial and northern bands")
     print("=" * 78)
@@ -808,6 +902,8 @@ def run(out_dir):
 
     nemo0 = load_nemo(0, 0)
     quantum = band_quantum(nemo0, wet_u)
+    tsq = ts_quantum(nemo0, wet, w)
+    jq = jet_quantum(nemo0, wet_u)
     plant = control_plant(nemo0, wet_u, wet, w)
 
     # ---- the sweep -------------------------------------------------------
@@ -826,13 +922,15 @@ def run(out_dir):
             control_finite(f"lego m{i} day {day}", rows["lego"][i][day].values())
             control_finite(f"nemo m{i} day {day}", rows["nemo"][i][day].values())
         ts[day] = ts_rows(st_l, st_n, wet, w)
+        control_finite(f"T/S table day {day}",
+                       [v for tup in ts[day].values() for v in tup])
         jets[day] = jet_profiles(st_l, st_n, wet_u)
         if day in KEEP_DAYS:
             keep[day] = {"dT": np.where(wet, st_l[0]["T"] - st_n[0]["T"], 0.0),
                          "dS": np.where(wet, st_l[0]["S"] - st_n[0]["S"], 0.0)}
         print(f"  day {day:3d} done", flush=True)
 
-    control_day0(rows, quantum)
+    control_day0(lego0, nemo0, wet, wet_u, rows, quantum)
     worst_partition = control_full_section(rows, 360)
     print(f"[K7b PARTITION ON DATA] six bands sum to the full section at day "
           f"360 to {worst_partition:.1e} Sv over all 8 runs "
@@ -840,11 +938,11 @@ def run(out_dir):
           f"not because physics can break it)")
     p1_360 = control_known_answer(rows)
 
-    art = report(rows, ts, keep, jets, days, quantum, w, wet, out_dir)
+    art = report(rows, ts, keep, jets, days, quantum, tsq, jq, w, wet, out_dir)
     art.update({"provenance": prov, "clock": clock, "geometry": geom,
                 "plant": plant, "day360_P1_gap_sv": p1_360})
     figures(rows, ts, keep, jets, days, w, wet, out_dir)
-    stamp(art, out_dir)
+    stamp(art, out_dir, sha_start, dirty_start)
     return art
 
 
@@ -932,8 +1030,11 @@ def jet_profiles(st_l, st_n, wet_u):
             # members, level by level.  Without it the jet comparison is a
             # difference with no bar, which is the one thing this campaign
             # refuses to publish.
-            out[(tag, side, "spread")] = np.std(np.asarray(profs), axis=0,
-                                                ddof=1)
+            # ddof=1 needs n>1; jet_quantum calls this with a single state and
+            # wants only the profile, never the spread.
+            out[(tag, side, "spread")] = (
+                np.std(np.asarray(profs), axis=0, ddof=1) if len(profs) > 1
+                else np.zeros_like(profs[0]))
         out[(tag, "floor")] = np.sqrt(out[(tag, "lego", "spread")] ** 2
                                       + out[(tag, "nemo", "spread")] ** 2)
         out[(tag, "n_wet")] = n[:kmax + 1]
@@ -950,7 +1051,7 @@ def _tbl(title, header, lines):
         print(ln)
 
 
-def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
+def report(rows, ts, keep, jets, days, quantum, tsq, jq, w, wet, out_dir):
     art = {}
     print("\n" + "=" * 78)
     print("1. THE REGIONAL TRANSPORT LEDGER")
@@ -976,7 +1077,11 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
             verd, ratio, flag = classify(gap, fl, ls, ns, quantum[bname], sat)
             # the `u` flag is only ATTACHED where it could overturn the row
             mat, x2yes, glast = (True, float("nan"), float("nan"))
-            if not sat and ratio is not None:
+            # Only a `no` can be overturned by a growing floor.  Applying the
+            # materiality test to an INDISTINGUISHABLE row prints a YES that
+            # means nothing, which is how the headline row (P4 at day 360) came
+            # to carry a decorative flag.  Caught in code review of 17881d91d.
+            if not sat and ratio is not None and verd.startswith("gap-at-"):
                 mat, x2yes, glast = u_is_material(ratio, sp, day)
                 if not mat and "u" in flag.split(","):
                     flag = ",".join([f for f in flag.split(",") if f != "u"]
@@ -986,22 +1091,52 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
                    - rows["nemo"][0][day][bname + " |bt"])
             gbc = (rows["lego"][0][day][bname + " |bc"]
                    - rows["nemo"][0][day][bname + " |bc"])
+            # The two legs get their OWN floors.  Code review of 17881d91d found
+            # R3 ("the equatorial gap is predominantly baroclinic") scored
+            # CONFIRMED on an 0.0059 Sv margin -- HALF the floor of either leg --
+            # with no floor computed anywhere, while two of the four ensemble
+            # members flip the comparison.  A decomposition whose two legs are
+            # ~10x the band total and nearly cancel cannot be published without
+            # a bar on the difference.
+            fbt = two_sided_floor(
+                [rows["lego"][i][day][bname + " |bt"] for i in range(N_MEM)],
+                [rows["nemo"][i][day][bname + " |bt"] for i in range(N_MEM)])[0]
+            fbc = two_sided_floor(
+                [rows["lego"][i][day][bname + " |bc"] for i in range(N_MEM)],
+                [rows["nemo"][i][day][bname + " |bc"] for i in range(N_MEM)])[0]
+            f_split = float(np.sqrt(fbt ** 2 + fbc ** 2))
+            split_margin = abs(gbc) - abs(gbt)
             ledger[(bname, day)] = {
                 "gap": gap, "floor": fl, "lego_spread": ls, "nemo_spread": ns,
                 "ratio": ratio, "verdict": verd, "flag": flag,
                 "gap_bt": gbt, "gap_bc": gbc, "saturated": sat,
+                "floor_bt": fbt, "floor_bc": fbc, "floor_split": f_split,
+                "split_margin": split_margin,
                 "sat_why": why, "quantum": quantum[bname],
                 "u_material": bool(mat), "x2yes": x2yes, "g_lastQ": glast,
                 "lego_share_of_floor": lego_share,
                 "lego": rows["lego"][0][day][bname],
                 "nemo": rows["nemo"][0][day][bname]}
+            # K_WELCH, registered in PREREG sec.6 as its own column and
+            # missing from the first version of this table.  The floor is a
+            # variance ESTIMATE with 3 dof per side, so the two-sided ~95%
+            # constant is a Welch t at nu~6 of about 2.45, not 2.0.  Ratios in
+            # [2.0, 2.45) are printed `no` by the REGISTERED rule while NOT
+            # being statistically resolved; this column marks that band and
+            # never overturns the verdict.
+            welch = ("" if ratio is None else
+                     "unres" if V.K_PREREG < ratio < V.K_WELCH else "")
             lines.append(
                 f"{bname:<26}{gap:>+10.4f}{fl:>11.4f}"
                 f"{('  --  ' if ratio is None else f'{ratio:>8.2f}')}"
-                f"  {verd:<22}{gbt:>+9.4f}{gbc:>+9.4f}  {flag}")
+                f"{welch:>7}"
+                f"  {verd:<22}{gbt:>+9.4f}{fbt:>8.4f}{gbc:>+9.4f}{fbc:>8.4f}"
+                f"  {flag}")
         _tbl(f"--- day {day} ---",
              f"{'band':<26}{'gap[Sv]':>10}{'floor[Sv]':>11}{'x':>8}"
-             f"  {'verdict':<22}{'gap bt':>9}{'gap bc':>9}  flags",
+             f"{'welch':>7}"
+             f"  {'verdict':<22}{'gap bt':>9}{'fl bt':>8}{'gap bc':>9}"
+             f"{'fl bc':>8}  flags",
              lines)
     art["ledger"] = {f"{b}|{d}": v for (b, d), v in ledger.items()}
 
@@ -1012,9 +1147,12 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
         for day in HORIZONS:
             e = ledger[(bname, day)]
             r = e["ratio"]
+            is_no = e["verdict"].startswith("gap-at-")
             cells.append(f"{(r if r is not None else float('nan')):>8.2f}"
                          f"{e['x2yes']:>8.2f}{e['g_lastQ']:>9.2f}"
-                         f"{('YES' if (not e['saturated'] and e['u_material']) else 'no'):>5}")
+                         f"{('YES' if (is_no and not e['saturated']
+                                       and e['u_material']) else
+                            ('n/a' if not is_no else 'no')):>5}")
         lines.append(f"{bname:<26}" + "".join(cells)
                      + f"{ledger[(bname, 360)]['lego_share_of_floor']:>9.1%}")
     _tbl("--- DOES `u` MATTER?  the growth an unsaturated floor would need "
@@ -1044,9 +1182,49 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
     print("            RSS floor is numerically ONE model's own dispersion.")
     print("        q = the legoESM spread is at or under 10x this band's fp32")
     print("            storage quantum -> UNMEASURABLE, which is NOT a pass.")
+    print(f"     welch= the ratio is in [{V.K_PREREG}, {V.K_WELCH}), where the")
+    print(f"            REGISTERED rule says `no` but an ESTIMATED floor with 3")
+    print(f"            degrees of freedom per side does not resolve it. Marked,")
+    print(f"            never used to overturn -- the registered rule decides.")
     print("        u!= unsaturated as a FACT, but the growth it shows could not")
     print("            close the gap in another year -- the flag does NOT void")
     print("            this row's verdict.")
+
+    # Is each band's barotropic-vs-baroclinic ORDERING resolved at all?
+    # The two legs are routinely ~10x the band total and nearly cancel, so
+    # "predominantly barotropic" is a claim about a MARGIN and needs the
+    # margin's own bar.  Without this table the ordering is a coin flip
+    # published as a finding -- which is exactly what happened to R3.
+    lines = []
+    for bname, _ in ALL_BANDS:
+        e = ledger[(bname, 360)]
+        m = abs(e["gap_bc"]) - abs(e["gap_bt"])
+        bar = V.K_PREREG * e["floor_split"]
+        if abs(m) <= bar:
+            verd = "UNRESOLVED"
+        else:
+            verd = "baroclinic-led" if m > 0 else "barotropic-led"
+        lines.append(f"{bname:<26}{abs(e['gap_bt']):>10.4f}"
+                     f"{abs(e['gap_bc']):>10.4f}{m:>+10.4f}{bar:>10.4f}"
+                     f"  {verd}")
+    _tbl("--- day 360: is the barotropic/baroclinic ORDERING resolved? ---",
+         f"{'band':<26}{'|gap bt|':>10}{'|gap bc|':>10}{'margin':>10}"
+         f"{'2x floor':>10}  verdict",
+         lines)
+    print("  margin = |gap bc| - |gap bt|; the bar is the registered "
+          f"{V.K_PREREG:.0f}x")
+    print("  applied to the margin's OWN two-sided floor (the RSS of the two")
+    print("  legs' floors).  UNRESOLVED means the ordering is inside the bar --")
+    print("  neither leg is shown to lead, and no `predominantly' claim is")
+    print("  supportable for that band.")
+    art["split_ordering"] = {
+        b: {"gap_bt": ledger[(b, 360)]["gap_bt"],
+            "gap_bc": ledger[(b, 360)]["gap_bc"],
+            "floor_bt": ledger[(b, 360)]["floor_bt"],
+            "floor_bc": ledger[(b, 360)]["floor_bc"],
+            "margin": abs(ledger[(b, 360)]["gap_bc"]) - abs(ledger[(b, 360)]["gap_bt"]),
+            "bar": V.K_PREREG * ledger[(b, 360)]["floor_split"]}
+        for b, _ in ALL_BANDS}
 
     # the trajectory, POST-HOC
     lines = []
@@ -1076,15 +1254,20 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
                 cells = []
                 for dname, _ in X.DEPTH_CLASSES:
                     gap, fl, ls, ns = ts[day][(bname, dname, key)]
-                    r = gap / fl if fl > 0 else float("inf")
-                    cells.append(f"{gap:>10.3e}/{r:>7.1f}")
+                    q = tsq[(bname, dname, key)]
+                    if ls <= V.QUANTUM_MARGIN * q:
+                        cells.append(f"{gap:>10.3e}/{'UNMEAS':>7}")
+                    else:
+                        r = gap / fl if fl > 0 else float("inf")
+                        cells.append(f"{gap:>10.3e}/{r:>7.1f}")
                 lines.append(f"{bname:<26}" + "".join(cells))
             _tbl(f"--- day {day}: d{key} [{unit}]  (value / multiples of that "
-                 f"band-and-class's OWN measured floor) ---",
+                 f"band-and-class's OWN measured floor; UNMEAS = that band's "
+                 f"legoESM spread is at or under {V.QUANTUM_MARGIN:.0f}x its "
+                 f"own fp32 storage quantum, so the multiple would be measuring "
+                 f"the npz dtype -- withheld, NOT a pass) ---",
                  f"{'band':<26}" + "".join(f"{n:>18}" for n, _ in X.DEPTH_CLASSES),
                  lines)
-    art["ts"] = {f"{b}|{d}|{k}": list(v) for day in HORIZONS
-                 for (b, d, k), v in ts[day].items() if day == HORIZONS[-1]}
     art["ts_all"] = {f"{day}|{b}|{d}|{k}": list(v)
                      for day in HORIZONS for (b, d, k), v in ts[day].items()}
 
@@ -1149,8 +1332,13 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
                 a = jets[day][(tag, "lego")][k]
                 b = jets[day][(tag, "nemo")][k]
                 fl = jets[day][(tag, "floor")][k]
-                r = abs(a - b) / fl if fl > 0 else float("inf")
-                cells.append(f"{a:>+8.4f}{b:>+8.4f}{a - b:>+8.4f}{r:>8.1f}")
+                ls = jets[day][(tag, "lego", "spread")][k]
+                if ls <= V.QUANTUM_MARGIN * jq[tag][k]:
+                    cells.append(f"{a:>+8.4f}{b:>+8.4f}{a - b:>+8.4f}"
+                                 f"{'UNMEAS':>8}")
+                else:
+                    r = abs(a - b) / fl if fl > 0 else float("inf")
+                    cells.append(f"{a:>+8.4f}{b:>+8.4f}{a - b:>+8.4f}{r:>8.1f}")
             lines.append(f"{k:>3d}{float(A.gdept1d[k]):>8.0f}"
                          f"{int(jets[HORIZONS[0]][(tag, 'n_wet')][k]):>6d}"
                          + "".join(cells))
@@ -1179,9 +1367,11 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
             a = float(jets[day][(tag, "lego")][0])
             b = float(jets[day][(tag, "nemo")][0])
             fl = float(jets[day][(tag, "floor")][0])
-            r = abs(a - b) / fl if fl > 0 else float("inf")
+            ls = float(jets[day][(tag, "lego", "spread")][0])
+            rtxt = ("UNMEAS" if ls <= V.QUANTUM_MARGIN * jq[tag][0]
+                    else f"{abs(a - b) / fl:.0f}" if fl > 0 else "inf")
             cells.append(f"{a:>+9.4f}{b:>+9.4f}{a - b:>+9.4f}"
-                         f"{100.0 * (a - b) / b:>+8.1f}%{r:>10.0f}")
+                         f"{100.0 * (a - b) / b:>+8.1f}%{rtxt:>10}")
         lines.append(f"{tag:<16}" + "".join(cells))
     _tbl("--- surface (k=0) zonal-mean u [m/s], with each band's OWN measured "
          "floor for THIS statistic ---",
@@ -1221,10 +1411,18 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
             print(f"  {'':<14}          top-200 m integral: "
                   f"+{pos:.5f} / {neg:.5f} = NET {net:+.5f} m2/s "
                   f"-- the two lobes cancel to {canc:.1%} of the larger")
-    print("  The lobes largely cancel in the vertical integral, which is why a")
-    print("  depth-integrated TRANSPORT statistic reads INDISTINGUISHABLE over")
-    print("  the same rows where the profile plainly is not.  The transport is")
-    print("  not wrong; it is the wrong functional for this difference.")
+    print("  READ THE CANCELLATION PER BAND, not as one sentence: on the")
+    print("  +/-10 band the residual is 1-17% of the larger lobe, i.e. the")
+    print("  vertical integral annihilates most of the signal.  On the SINGLE")
+    print("  equator row it is 45-57%, which is not 'largely cancels' and is")
+    print("  not claimed to be.  The first version of this line covered both")
+    print("  with one phrase and is withdrawn.")
+    print("  AND THE LINK IS PLAUSIBLE, NOT MEASURED.  This integral is over a")
+    print("  WET-CELL-COUNT zonal mean times the reference thicknesses; the")
+    print("  band transport is a width- and thickness-weighted SUM.  The two")
+    print("  functionals differ by the per-level wet count and by the e2u row")
+    print("  weighting, so the cancellation is CONSISTENT WITH the transport")
+    print("  reading INDISTINGUISHABLE and is not a demonstration of it.")
 
     # where does the profile disagreement LIVE?  Registered nowhere, so this is
     # POST-HOC and labelled: the deepest level at which the two models still
@@ -1252,7 +1450,15 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
             bad = np.where(rel >= 0.01)[0]
             k0 = int(bad.max()) + 1 if bad.size else 0
             zz = float(A.gdept1d[min(k0, A.NZ - 1)])
-            share = float(np.abs(a - b)[:2].sum() / np.abs(a - b).sum())
+            # THICKNESS-WEIGHTED.  The first version summed |diff| over 36
+            # levels ranging 10 m to 545 m thick with no e3, in the one probe
+            # that lectures about layer-vs-thickness weighting -- and PREREG
+            # sec.4 states in as many words that no unweighted mean over cells
+            # of unequal volume appears here.  Caught in code review of
+            # 17881d91d; it overstated the surface share by up to 18 points.
+            ee = e3[:len(d)]
+            share = float((np.abs(a - b)[:2] * ee[:2]).sum()
+                          / (np.abs(a - b) * ee).sum())
             print(f"  {tag:<14} day {day:3d}: |diff| is under 1% of the "
                   f"surface magnitude ({scale:.4f} m/s) from level {k0:2d} "
                   f"({zz:.0f} m) down; the top TWO levels hold "
@@ -1291,7 +1497,8 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
           f"FINDING and needs dual sign-off.")
     if esc:
         for b in esc:
-            worst = max((ledger[(b, d)]["ratio"] or 0.0) for d in HORIZONS)
+            worst = max(ledger[(b, d)]["ratio"] for d in HORIZONS
+                        if ledger[(b, d)]["ratio"] is not None)
             print(f"  ESCALATED: {b}  worst {worst:.1f}x its own floor")
     else:
         print("  none -- no band clears the escalation bar")
@@ -1334,10 +1541,23 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
     preds.append(("R2 P1 (south) is still the largest absolute band gap",
                   biggest == p1, f"largest is {biggest} at "
                   f"{abs(d360[biggest]['gap']):.4f} Sv"))
+    # R3 is scored against a BAR, not on the sign of a margin.  Registered as
+    # "|bc| > |bt|"; the honest scoring of that against this campaign's own rule
+    # is |margin| > K_PREREG x the margin's own floor, and anything inside the
+    # bar is UNRESOLVED -- neither confirmed nor refuted.
+    m3, f3 = d360[p4]["split_margin"], d360[p4]["floor_split"]
+    r3_resolved = abs(m3) > V.K_PREREG * f3
     preds.append(("R3 the equatorial gap is predominantly BAROCLINIC",
-                  abs(d360[p4]["gap_bc"]) > abs(d360[p4]["gap_bt"]),
-                  f"P4 bt {d360[p4]['gap_bt']:+.4f} vs bc "
-                  f"{d360[p4]['gap_bc']:+.4f} Sv"))
+                  r3_resolved and m3 > 0.0,
+                  f"P4 bt {d360[p4]['gap_bt']:+.4f} (floor "
+                  f"{d360[p4]['floor_bt']:.4f}) vs bc "
+                  f"{d360[p4]['gap_bc']:+.4f} (floor "
+                  f"{d360[p4]['floor_bc']:.4f}) Sv; margin |bc|-|bt| = "
+                  f"{m3:+.4f} Sv against {V.K_PREREG:.0f}x its own floor "
+                  f"{V.K_PREREG * f3:.4f} -- "
+                  + ("RESOLVED" if r3_resolved else
+                     "UNRESOLVED: the margin is inside the bar, so this "
+                     "prediction is neither confirmed nor refuted")))
     rt = ret[(p4, "T", 360)][0]
     preds.append(("R4 the equatorial T divergence holds its own hotspots",
                   rt > X.Q2_RET_BAR,
@@ -1348,10 +1568,18 @@ def report(rows, ts, keep, jets, days, quantum, w, wet, out_dir):
                   f"P6 {abs(d360[p6]['gap']):.4f} vs P5 "
                   f"{abs(d360[p5]['gap']):.4f} Sv"))
     for name, ok, why in preds:
-        print(f"  [{'CONFIRMED' if ok else '  FAILED '}] {name}\n"
-              f"                 {why}")
-    art["predictions"] = [{"prediction": n, "confirmed": bool(o), "evidence": e}
-                          for n, o, e in preds]
+        # THREE states, not two.  A prediction whose margin sits inside its own
+        # bar is UNRESOLVED -- printing it as FAILED claims a refutation the
+        # measurement does not support, which is the mirror of the CONFIRMED it
+        # replaced.  R3 is the case that forced this.
+        tag = ("UNRESOLVED" if "UNRESOLVED" in why
+               else "CONFIRMED" if ok else "REFUTED")
+        print(f"  [{tag:^10}] {name}\n                 {why}")
+    art["predictions"] = [
+        {"prediction": n,
+         "status": ("UNRESOLVED" if "UNRESOLVED" in e
+                    else "CONFIRMED" if o else "REFUTED"),
+         "evidence": e} for n, o, e in preds]
     return art
 
 
@@ -1520,9 +1748,8 @@ def figures(rows, ts, keep, jets, days, w, wet, out_dir):
     print(f"\nfigures written to {out_dir}/F1..F4")
 
 
-def stamp(art, out_dir):
-    """Provenance on the artifact.  A stampless artifact is refused elsewhere in
-    this campaign; one written by this probe must not be refusable."""
+def git_sha_now():
+    """(sha, dirty) of the tree this process is running from."""
     try:
         sha = subprocess.run(["git", "-C", _DIR, "rev-parse", "HEAD"],
                              capture_output=True, text=True,
@@ -1531,8 +1758,29 @@ def stamp(art, out_dir):
                                     capture_output=True, text=True,
                                     check=True).stdout.strip())
     except Exception as exc:                                # pragma: no cover
-        raise SystemExit(f"FATAL: cannot stamp the artifact with a producer "
-                         f"revision ({exc}) -- an unstamped artifact is refused")
+        raise SystemExit(f"FATAL: cannot read a producer revision ({exc}) -- "
+                         f"an unstamped artifact is refused")
+    return sha, dirty
+
+
+def stamp(art, out_dir, sha_start, dirty_start):
+    """Provenance on the artifact.  A stampless artifact is refused elsewhere in
+    this campaign; one written by this probe must not be refusable."""
+    # The revision is captured at the START of the run and RE-CHECKED here.
+    # Code review of 17881d91d caught this artifact stamped with a commit that
+    # landed WHILE THE RUN WAS IN FLIGHT: the log's own provenance line read
+    # fe2ec432f at the top and the stamp read 17881d91d at the bottom, and
+    # `producer_tree_dirty` was written False. A stamp naming a revision that
+    # did not produce the numbers is worse than no stamp, because it is
+    # believed. The run is now REFUSED rather than mislabelled.
+    sha, dirty = git_sha_now()
+    if (sha, dirty) != (sha_start, dirty_start):
+        raise SystemExit(
+            f"FATAL: the working tree CHANGED during this run -- it started at "
+            f"{sha_start}{' +dirty' if dirty_start else ''} and ended at "
+            f"{sha}{' +dirty' if dirty else ''}. The numbers above were not all "
+            f"produced by one revision and the artifact is refused rather than "
+            f"stamped with whichever commit happened to be HEAD at write time.")
     art["_stamp"] = {
         "producer_sha": sha,
         "producer_tree_dirty": dirty,
