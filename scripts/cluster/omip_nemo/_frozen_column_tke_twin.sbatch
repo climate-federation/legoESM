@@ -7,24 +7,27 @@
 #SBATCH --time=08:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/frztke_%j.out
 #
-# THE DECISIVE FROZEN-COLUMN TWIN: does OUR TKE closure equal NEMO's when both
-# see NEMO's OWN equatorial state?  We spin our prognostic TKE energy `en` to
-# equilibrium on a FROZEN background (T,S,u,v,wind stress) and read avm/avt.
+# INSTANT-vs-INSTANT frozen-column TKE twin: does OUR closure equal NEMO's when
+# both see NEMO's OWN instantaneous equatorial column WITH NEMO's OWN turbulent
+# energy en?  We feed NEMO's day-30 restart (tn,sn,un,vn,en) into our closure,
+# read K from a SINGLE evaluation, and compare to NEMO's OWN closure
+# diffusivities avm_k/avt_k (NEMO field_def: "from closure schemes" -- the pure
+# TKE part, before the additive IWM and before EVD -> no IWM confound, and no
+# 5-day-mean K(mean state) artifact).
 #
 # GATE-FIRST (this campaign has been burned by unvalidated instruments):
-#   STEP 1  self-recovery CONTROL -- our closure must reproduce our OWN stored
-#           K_M_diag/K_H_diag from our OWN snapshot column, in the 65-105 m
-#           entrainment band, within +-25%.  Exit 0 required.
-#   STEP 2  NON-VACUITY -- rerun the control with u,v scaled x2; the harness
-#           returns 0 ONLY IF the reproduction BREAKS.  Proves the gate can
-#           fail (a control that always passes proves nothing).
-#   STEP 3  the NEMO twin runs ONLY after 1 AND 2 pass.  It prints avm/avt and
-#           the ratio to NEMO grid_W -- NO verdict, interpretation is the
-#           reader's.
-#
-# The bare-column closure omits the additive internal-wave-mixing K that the
-# stored/published K includes; STEP 1 MEASURES that residual and gates on it,
-# so a large IWM contribution ABORTS here rather than contaminating the twin.
+#   STEP 1  self-recovery CONTROL -- our closure, fed our OWN snapshot column and
+#           our OWN stored en, reproduces our OWN stored K_M_diag/K_H_diag in the
+#           65-105 m entrainment band within the tolerance.  Exit 0 required.
+#   STEP 2  NON-VACUITY -- rerun the control with a DETERMINISTIC N2 x4
+#           perturbation (T,S deviation x2); K ~ 1/sqrt(N2) via the buoyancy
+#           length, so band K must drop ~x0.5 (clear of the x1.5 tol) and the
+#           reproduction MUST break.
+#           The harness returns 0 ONLY IF it breaks.  Proves the ratio gate can
+#           reject (shear x2 was rejected: at floored en band K is
+#           shear-insensitive -- codex #2).
+#   STEP 3  the NEMO twin runs ONLY after 1 AND 2 pass.  Prints avm/avt and the
+#           ratio to NEMO avm_k/avt_k -- NO verdict.
 set -uo pipefail
 PIN=${1:?usage: sbatch _frozen_column_tke_twin.sbatch <pinned-sha>}
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd "$ROOT" || exit 1
@@ -37,43 +40,37 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
 HARNESS=scripts/validate/ocean_fidelity/frozen_column_tke_twin.py
-# Snapshot arm that carries BOTH the stored diffusivities AND T/S/u/v/tke, plus
-# its run_manifest.json (the TKE-config source -- no hidden config choice).
+# Our snapshot arm: stored diffusivities + full state (T/S/u/v/tke) + manifest.
 ARM=$ROOT/results/omip_nemo/nemolev_trp_kmean_d30
 SNAP=$ARM/snapshot_day0030.npz
 MANI=$ARM/run_manifest.json
-# NEMO 5-day gateway output, record 5 = days 26-30 (all four grids same record).
-GW_DIR=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY
-STEM=ORCA1_5d_20000101_20000331
-GT=$GW_DIR/${STEM}_grid_T.nc
-GU=$GW_DIR/${STEM}_grid_U.nc
-GV=$GW_DIR/${STEM}_grid_V.nc
-GWv=$GW_DIR/${STEM}_grid_W.nc
-REC=5
+# NEMO day-30 INSTANTANEOUS restart (32 tiles) + the 5-day SBC (taum).
+D30=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY_D30
+RGLOB="$D30/ORCA1_00000720_restart_oce_*.nc"
+SBC=$D30/ORCA1_5d_20000101_20000130_SBC.nc
 
-for f in "$SNAP" "$MANI" "$GT" "$GU" "$GV" "$GWv"; do
+for f in "$SNAP" "$MANI" "$SBC"; do
   [ -e "$f" ] || { echo "FATAL: missing input $f"; exit 1; }
 done
+ls $RGLOB >/dev/null 2>&1 || { echo "FATAL: no restart tiles match $RGLOB"; exit 1; }
 
 echo "===================== STEP 1: self-recovery CONTROL ====================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-gridu "$GU" --nemo-gridv "$GV" --rec "$REC" --dt 150
+    --nemo-sbc "$SBC" --dt 150
 rc1=$?
 echo "[gate] control exit = $rc1"
-[ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- instrument is not trusted; NEMO twin NOT run."; exit 1; }
+[ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- instrument not trusted; NEMO twin NOT run."; exit 1; }
 
-echo "===================== STEP 2: NON-VACUITY (shear x2) ===================="
+echo "===================== STEP 2: NON-VACUITY (N2 x4) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-gridu "$GU" --nemo-gridv "$GV" --rec "$REC" --dt 150 \
-    --perturb-shear 2.0
+    --nemo-sbc "$SBC" --dt 150 --perturb-n2 4.0
 rc2=$?
 echo "[gate] non-vacuity exit = $rc2  (0 = reproduction correctly BROKE)"
-[ "$rc2" -eq 0 ] || { echo "FATAL: control STILL reproduced stored K under a 2x shear perturbation -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
+[ "$rc2" -eq 0 ] || { echo "FATAL: control STILL reproduced stored K under N2 x4 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
 
-echo "===================== STEP 3: NEMO frozen-column TWIN ===================="
+echo "===================== STEP 3: NEMO instant frozen-column TWIN ==========="
 $PY -u "$HARNESS" --mode nemo --manifest "$MANI" \
-    --nemo-gridt "$GT" --nemo-gridu "$GU" --nemo-gridv "$GV" --nemo-gridw "$GWv" \
-    --rec "$REC" --dt 150
+    --restart-glob "$RGLOB" --nemo-sbc "$SBC" --dt 3600
 rc3=$?
 echo "[done] nemo twin exit = $rc3"
 exit $rc3
