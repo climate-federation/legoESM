@@ -286,3 +286,35 @@ only through the committed time-level registry with SHA-256 recorded and
 read back.  The analysis is thickness-aware by retaining the campaign's
 10.14 m interface control-volume provenance; its deciding population is a
 single interface, so no unweighted vertical average is introduced.
+
+### Residual structural discriminator (registered after the term null)
+
+The registered term pass above returned no matching input factor and no arm
+response at 10.14 m.  Its non-deciding response ledger, inspected only after
+that verdict, showed legoESM's matrix result equal to `tke_surface_min=1e-4`
+in all 47 columns while NEMO's solved `jk=2` energy is below `1e-4`.  Source
+inspection supplies a single structural hypothesis: legoESM applies its
+surface-minimum clamp unconditionally to interior interface 0 after creating
+the virtual `nemo_z0` row, whereas NEMO applies `rn_emin0` only to held `jk=1`
+and applies `rn_emin` to solved `jk=2..jpkm1`.
+
+Before computing the following arm, register one replay changing only
+`tke_surface_min` from `1e-4` to `tke_background=1e-6` in the already captured
+legoESM matrix solve.  This emulates the faithful branch condition without
+editing production physics; all equation operands and the post-solve etau
+addition remain BASE.
+
+* **CONFIRM_MISPLACED_SURFACE_MIN_CLAMP** if at least 95% of BASE columns are
+  exactly pinned to `1e-4`, at least 75% of corresponding NEMO `jk=2` values
+  are below `1e-4`, the arm closes at least 60% of the median log-energy gap,
+  and it moves toward NEMO in at least 75% of columns.
+* **REFUTE_MISPLACED_SURFACE_MIN_CLAMP** if fewer than 50% of BASE columns are
+  pinned or median log-gap closure is at most 10%.
+* otherwise **UNRESOLVED_MISPLACED_SURFACE_MIN_CLAMP**.
+
+This diagnostic cannot retroactively change the registered four-input verdict.
+If it confirms, the combined physics finding may name the surface-BC placement
+clamp as the owner and specify (but not implement) a branch-conditional fix:
+apply `tke_surface_min` only for `interior_pinned`; under `nemo_z0`, clamp the
+solved first interior interface only to `tke_background`, because the separate
+virtual row already carries the surface Dirichlet value.
