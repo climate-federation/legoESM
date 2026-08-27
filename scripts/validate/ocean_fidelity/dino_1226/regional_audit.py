@@ -64,6 +64,8 @@ import sys
 
 import numpy as np
 
+from legoesm import constants
+
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.dirname(_DIR))
@@ -88,7 +90,12 @@ _EQ10_LO, _EQ10_HI = 89, 109                   # |lat| <= 10 deg
 _SUBTROP_N_HI = 150                            # +45.353 deg, the channel's mirror
 # The structural zero, needed here because the registered cuts are defined
 # RELATIVE to it.  Registered in PREREG sec.7 and re-asserted by K11.
-OMEGA = 7.292115e-5
+# From ``legoesm.constants``, never a literal -- the repo forbids a hardcoded
+# 7.292e-5 in scripts as much as in the model.  The K11 assertion below is in
+# any case INDEPENDENT of the value: f = 2*Omega*sin(phi) is exactly 0 at
+# phi = 0 for every Omega, so the control tests the GRID, which is what it
+# claims to test, and cannot be made to pass or fail by the choice of constant.
+OMEGA = constants.Omega
 STRUCTURAL_ZERO_ROW = 99
 # ASSERTED, not merely printed.  Code review of 17881d91d planted a one-row
 # shift of the equatorial band (79-119 -> 80-120, i.e. -18.7..+20.6 deg,

@@ -421,3 +421,14 @@ def test_the_zero_crossing_search_is_confined_to_the_wind_driven_layer(R):
     src = inspect.getsource(R.report)
     assert "ZC_MAX_M" in src
     assert "none in the top" in src, "an absent crossing must be reported absent"
+
+
+def test_the_rotation_rate_comes_from_the_shared_constants_module(R):
+    """Repo rule: no hardcoded 7.292e-5 in scripts either.  And the K11
+    assertion is independent of the value -- sin(0) is 0 for every Omega -- so
+    the control tests the GRID, which is what it claims to test."""
+    from legoesm import constants
+    assert R.OMEGA is constants.Omega or R.OMEGA == constants.Omega
+    import inspect
+    src = inspect.getsource(R)
+    assert "7.292" not in src.split("Omega")[0] or "constants.Omega" in src
