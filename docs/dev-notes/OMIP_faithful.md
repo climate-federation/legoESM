@@ -20,6 +20,15 @@ ASO nino3 criterion; (2) mixed-layer heat-budget attribution of the day-30
 regionally-decomposed MLD (rmse 21.5->39.5 m) on every A/B scorecard.
 The corrected (_MOD) CORE-II forcing is the default resolver, gated by
 `tests/ocean/unit/test_core2_corrected_cache_default.py`.
+FORCING INTERPOLATION (user decision 2026-08-27): BILINEAR on the tripole
+(commits 089d10b75/a90bd1935) is the standard — kept despite the
+pre-registered stripe A/B falling short (MLD stripe index -32% vs -50%
+target; SST rmse 0.515->0.527 from the expected Jensen stress weakening) —
+because it is NEMO's own convention, removes the stairstep forcing at the
+source (114->0 duplicated rows), and improves MLD (21.5->20.5 m) and SSS.
+Standard-card numbers quoted above predate the switch; the next standard
+run re-baselines.  Follow-up: locate the residual MLD banding source
+(remaining nearest-sampled static maps).
 Change ONE flag per new run and A/B against this card; never edit it in place.
 Cross-grid caveat: MPAS cannot take `--dm2dc --isf --bbl-adv --sw-rgb-chl
 --iwm --nemo-monthly-init` (driver hard-errors), and it silently IGNORES
