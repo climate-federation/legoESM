@@ -122,6 +122,103 @@ def classify_offline(nrms: float, ratios: np.ndarray) -> str:
     return "UNRESOLVED_CLOSURE_DIFFERENCE"
 
 
+def classify_offline_review(nrms: float, ratios: np.ndarray,
+                            depths_m: np.ndarray) -> str:
+    """A3/A4 review reissue: a shear-setting surface level may confirm alone."""
+    finite = np.isfinite(ratios)
+    if nrms <= 0.10 and np.all((ratios[finite] >= 0.90) & (ratios[finite] <= 1.10)):
+        return "REFUTE_VISCOSITY_PRIME_SUSPECT"
+    consecutive = False
+    last = 0
+    run = 0
+    for r in ratios[finite]:
+        sign = -1 if r < 0.75 else (1 if r > 1.25 else 0)
+        run = run + 1 if sign and sign == last else (1 if sign else 0)
+        last = sign
+        consecutive |= run >= 2
+    shear_setting = np.flatnonzero(finite & (depths_m >= 5.0) & (depths_m <= 26.0))
+    # Excess viscosity is the registered sign that predicts weaker shear and
+    # a deeper zero crossing; a deficit would not predict the observed pair.
+    single_predictive = bool(np.any(ratios[shear_setting] > 1.25))
+    if nrms >= 0.25 and (consecutive or single_predictive):
+        return "CONFIRM_VISCOSITY_PRIME_SUSPECT"
+    return "UNRESOLVED_VISCOSITY_PRIME_SUSPECT"
+
+
+def closure_attribution(lego_avm: np.ndarray, nemo_avm: np.ndarray,
+                        lego_en: np.ndarray, nemo_en: np.ndarray,
+                        lego_mxl: np.ndarray, nemo_mxl: np.ndarray,
+                        wet: np.ndarray, *, c_lego: float, c_nemo: float,
+                        floor_lego: float, floor_nemo: float) -> dict[str, Any]:
+    """Registered per-column log-factor attribution at the 10.14 m interface."""
+    arrays = (lego_avm, nemo_avm, lego_en, nemo_en, lego_mxl, nemo_mxl)
+    finite = wet.copy()
+    for a in arrays:
+        finite &= np.isfinite(a) & (a > 0)
+    eligible = finite & (lego_avm > floor_lego * (1.0 + 1e-12)) \
+                      & (nemo_avm > floor_nemo * (1.0 + 1e-12))
+    n_wet = int(np.count_nonzero(wet))
+    n_eligible = int(np.count_nonzero(eligible))
+    if n_eligible < 0.75 * n_wet:
+        raise ValueError(f"attribution eligibility {n_eligible}/{n_wet} is below 75%")
+
+    recon_l = c_lego * lego_mxl * np.sqrt(lego_en)
+    recon_n = c_nemo * nemo_mxl * np.sqrt(nemo_en)
+    rel_l = np.abs(recon_l[eligible] / lego_avm[eligible] - 1.0)
+    rel_n = np.abs(recon_n[eligible] / nemo_avm[eligible] - 1.0)
+    max_recon = float(max(np.max(rel_l), np.max(rel_n)))
+    if max_recon > 1e-10:
+        raise ValueError(f"three-factor avm reconstruction failed: {max_recon:.3e}")
+
+    d_c = np.full(lego_avm.shape, np.log(c_lego / c_nemo))
+    d_l = np.log(lego_mxl / nemo_mxl)
+    d_e = 0.5 * np.log(lego_en / nemo_en)
+    d_a = np.log(lego_avm / nemo_avm)
+    closure = float(np.max(np.abs((d_c + d_l + d_e - d_a)[eligible])))
+    if closure > 1e-10:
+        raise ValueError(f"log-factor closure failed: {closure:.3e}")
+    excess = eligible & (lego_avm / nemo_avm > 1.25)
+    if not np.any(excess):
+        raise ValueError("no >1.25 excess columns for registered attribution")
+
+    pieces = {"coefficient_stability": d_c, "mixing_length": d_l, "tke_energy": d_e}
+    scores = {name: float(np.median(np.abs(v[excess]))) for name, v in pieces.items()}
+    score_sum = sum(scores.values())
+    detail = {}
+    carriers = []
+    for name, values in pieces.items():
+        vals = values[excess]
+        share = scores[name] / score_sum if score_sum else 0.0
+        agreement = float(np.mean(np.sign(vals) == np.sign(d_a[excess])))
+        detail[name] = {
+            "median_abs_log_score": scores[name],
+            "score_share": share,
+            "sign_agreement_fraction": agreement,
+            "geometric_mean_factor": float(np.exp(np.mean(vals))),
+            "factor_iqr": np.exp(np.quantile(vals, [0.25, 0.75])).tolist(),
+        }
+        if share >= 0.60 and agreement >= 0.75:
+            carriers.append(name)
+    label = (f"{carriers[0].upper()}_CARRIES_10M_EXCESS"
+             if len(carriers) == 1 else "DISTRIBUTED_OR_UNRESOLVED")
+    return {
+        "label": label,
+        "n_wet": n_wet,
+        "n_eligible": n_eligible,
+        "eligible_fraction": n_eligible / n_wet,
+        "n_excess": int(np.count_nonzero(excess)),
+        "max_direct_reconstruction_relative_error": max_recon,
+        "max_log_factor_closure_error": closure,
+        "direct_zonal_mean_ratio": float(np.mean(lego_avm[wet]) / np.mean(nemo_avm[wet])),
+        "pieces": detail,
+        "executed_branch": (
+            "MY_SRC/zdftke.F90:832-837: zsqen=SQRT(en); "
+            "zav=rn_ediff*zmxlm*zsqen; p_avm=MAX(zav,avmb)*wmask. "
+            "No pdlr/stability multiplier acts on avm; :841-844 updates avt only."
+        ),
+    }
+
+
 def wrong_shift(a: np.ndarray, fill: float = np.nan) -> np.ndarray:
     out = np.full_like(a, fill)
     out[..., :-1] = a[..., 1:]
@@ -183,6 +280,8 @@ def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.precision_gate import require_fp64
+    from legoesm.ocean.fidelity.time_levels import time_level_for_dump
+    import legoesm.ocean.physics.vertical_mixing.tke as tke_module
     set_policy(PrecisionPolicy.fp64())
 
     br, cfg, mc, model, forcing, sf, state = kt._build_twin_state(
@@ -199,13 +298,48 @@ def main() -> int:
     closure_model = LatLonCGridOceanModel(
         br.geometry, br.z_coord,
         mc._replace(physics=mc.physics._replace(convection=conv_off)))
-    K_cl, A_cl = zos.run_and_capture(closure_model, state, sf)
+    # Capture the actual final e and mixing length passed to the production
+    # coefficient constructor. This is observation of the shipped path, not a
+    # parallel reimplementation of the TKE closure.
+    real_compute_k = tke_module.compute_K_from_tke
+    component_calls: list[dict[str, Any]] = []
+
+    def component_spy(e, l_k, tke_cfg, *a, **kw):
+        out = real_compute_k(e, l_k, tke_cfg, *a, **kw)
+        component_calls.append({
+            "e": np.asarray(e), "l_k": np.asarray(l_k),
+            "K_M": np.asarray(out[0]), "c_k": float(tke_cfg.c_k),
+            "kappa_convention": str(tke_cfg.kappa_convention),
+            "floor": float(tke_cfg.kappaM_min),
+        })
+        return out
+
+    tke_module.compute_K_from_tke = component_spy
+    try:
+        K_cl, A_cl = zos.run_and_capture(closure_model, state, sf)
+    finally:
+        tke_module.compute_K_from_tke = real_compute_k
     if A_prod is None or A_cl is None:
         raise SystemExit("momentum viscosity was not returned")
+    if not component_calls:
+        raise SystemExit("TKE component spy captured no coefficient calls")
+    shape_calls = [c for c in component_calls if c["K_M"].shape == A_cl.shape]
+    if not shape_calls:
+        raise SystemExit("no captured TKE coefficient has the closure output shape")
+    component_final = min(
+        shape_calls, key=lambda c: float(np.max(np.abs(c["K_M"] - A_cl))))
+    component_output_max_abs = float(np.max(np.abs(component_final["K_M"] - A_cl)))
 
     jpi, jpj, jpk, hls = bac._read_dims(dl.RUN_DIR)
     avm = bac._load_interior(dl.dump_path("tke_dump_avm_final.bin"), jpi - 2*hls, jpj - 2*hls)
     avt = bac._load_interior(dl.dump_path("tke_dump_avt_final.bin"), jpi - 2*hls, jpj - 2*hls)
+    en_nemo = bac._load_interior(dl.dump_path("tke_dump_en.bin"), jpi - 2*hls, jpj - 2*hls)
+    mxl_nemo = bac._load_interior(dl.dump_path("tke_dump_zmxlm.bin"), jpi - 2*hls, jpj - 2*hls)
+    component_time_levels = {
+        name: time_level_for_dump(name) for name in (
+            "tke_dump_en.bin", "tke_dump_zmxlm.bin",
+            "tke_dump_avm_final.bin", "dump_avm.bin", "dump_avt.bin")
+    }
     # zdf_phy's post-EVD dumps retain the model halos; zdftke's internal
     # final-coefficient dumps above are already interior-only.
     avm_real = bac._load_haloed(dl.dump_path("dump_avm.bin"), jpi, jpj, hls)
@@ -263,11 +397,25 @@ def main() -> int:
             "lego_level_mean_m2_s": lm.tolist(),
             "nemo_level_mean_m2_s": nm.tolist(),
             "lego_over_nemo": ratios.tolist(),
-            "verdict": classify_offline(nrms, ratios),
+            "original_verdict": classify_offline(nrms, ratios),
+            "review_reissued_verdict": classify_offline_review(
+                nrms, ratios, z[score_k]),
         }
         if name.startswith("realized_"):
             scored[name]["nemo_evd_fraction_by_level"] = np.mean(
                 wm & (nn >= 50.0), axis=0).tolist()
+
+    convention = component_final["kappa_convention"]
+    c_lego = component_final["c_k"] * (np.sqrt(2.0) if convention == "gaspar_sqrt2e" else 1.0)
+    attribution = closure_attribution(
+        A_cl[equator_row, :, 0], avm[equator_row, :, 1],
+        component_final["e"][equator_row, :, 0], en_nemo[equator_row, :, 1],
+        component_final["l_k"][equator_row, :, 0], mxl_nemo[equator_row, :, 1],
+        wet[:, 0], c_lego=c_lego, c_nemo=0.1,
+        floor_lego=component_final["floor"], floor_nemo=1.2e-4)
+    attribution["depth_m"] = float(z[0])
+    attribution["lego_component_call_matches_closure_max_abs"] = component_output_max_abs
+    attribution["time_levels"] = component_time_levels
 
     # Controls proven able to fail: the declared mapping must beat a one-level
     # shift, a wet coefficient planted in a dry cell must be detected, and an
@@ -305,14 +453,28 @@ def main() -> int:
         "mesh_mask": Path(dl.RUN_DIR) / "mesh_mask.nc",
         "nemo_avm_closure": Path(dl.dump_path("tke_dump_avm_final.bin")),
         "nemo_avt_closure": Path(dl.dump_path("tke_dump_avt_final.bin")),
+        "nemo_tke_energy": Path(dl.dump_path("tke_dump_en.bin")),
+        "nemo_mixing_length": Path(dl.dump_path("tke_dump_zmxlm.bin")),
         "nemo_avm_realized": Path(dl.dump_path("dump_avm.bin")),
         "nemo_avt_realized": Path(dl.dump_path("dump_avt.bin")),
         "namelist": Path(dl.RUN_DIR) / "namelist_cfg",
         "ocean_output": Path(dl.RUN_DIR) / "ocean.output",
         "nemo_binary": Path(dl.RUN_DIR) / "nemo",
+        "time_level_registry": ROOT / "packages/ocean/legoesm/ocean/fidelity/time_levels.py",
+        "probe_source": Path(__file__).resolve(),
     }
     artifact = {
-        "schema": "dino-euc-mechanism-v1",
+        "schema": "dino-euc-mechanism-v2-review",
+        "headline_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT",
+        "review_retraction": {
+            "old_headline": "vertical mixing not supported at core depth",
+            "status": "RETRACTED",
+            "reason": (
+                "the 10.14 m interface sets the audited 5-26 m shear; its 2.05x "
+                "avm excess predicts both weaker shear and a deeper core"
+            ),
+            "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
+        },
         "state": "shared day-180, first matched step kt=5761",
         "lane": {"name": dl.LANE, "run_dir": dl.RUN_DIR, "restart": dl.RESTART, "kt": dl.KT_DUMP},
         "precision": {"jax_enable_x64": os.environ["JAX_ENABLE_X64"], "state_dtype": str(np.asarray(state.T.data).dtype)},
@@ -333,6 +495,7 @@ def main() -> int:
         "equator": {"row_zero_based": equator_row, "latitude_deg": equator_lat,
                      "depth_window_m": [10.0, 40.0], "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"},
         "scores": scored,
+        "tke_closure_attribution_10m": attribution,
         "controls": controls,
         "short_run": {"status": "DESIGN_ONLY_NO_CUDA_IN_SANDBOX", **substitution_design()},
     }
@@ -343,8 +506,11 @@ def main() -> int:
     reread = json.loads(out.read_text())
     if reread["input_sha256"] != artifact["input_sha256"]:
         raise SystemExit("provenance read-back mismatch")
-    print(json.dumps({"out": str(out), "equator": artifact["equator"],
+    print(json.dumps({"out": str(out), "headline_verdict": artifact["headline_verdict"],
+                      "retraction": artifact["review_retraction"],
+                      "equator": artifact["equator"],
                       "scores": scored, "controls": controls,
+                      "tke_closure_attribution_10m": attribution,
                       "short_run_status": artifact["short_run"]["status"]}, indent=2))
     return 0
 

@@ -37,6 +37,26 @@ def test_offline_bars_are_mutually_discriminating():
     assert E.classify_offline(0.20, np.array([0.80, 1.20])) == "UNRESOLVED_CLOSURE_DIFFERENCE"
 
 
+def test_review_bar_allows_single_shear_setting_level():
+    ratios = np.array([2.05, 0.99, 1.01])
+    depths = np.array([10.14, 20.59, 31.43])
+    assert E.classify_offline_review(0.689, ratios, depths) == "CONFIRM_VISCOSITY_PRIME_SUSPECT"
+
+
+def test_attribution_names_energy_when_energy_owns_exact_factorization():
+    nemo_e = np.ones(4)
+    lego_e = 4.0 * nemo_e
+    mxl = np.ones(4)
+    nemo_avm = 0.1 * mxl * np.sqrt(nemo_e)
+    lego_avm = 0.1 * mxl * np.sqrt(lego_e)
+    got = E.closure_attribution(
+        lego_avm, nemo_avm, lego_e, nemo_e, mxl, mxl,
+        np.ones(4, dtype=bool), c_lego=0.1, c_nemo=0.1,
+        floor_lego=1e-4, floor_nemo=1e-4)
+    assert got["label"] == "TKE_ENERGY_CARRIES_10M_EXCESS"
+    assert got["max_direct_reconstruction_relative_error"] < 1e-14
+
+
 def test_wrong_shift_control_changes_vertical_mapping():
     a = np.arange(6.0).reshape(2, 3)
     shifted = E.wrong_shift(a)
