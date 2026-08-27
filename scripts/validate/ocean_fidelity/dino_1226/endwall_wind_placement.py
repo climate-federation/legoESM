@@ -55,7 +55,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "2d3d4f7a2870926890418c64044d6f6c851af02c"
+PREREG_COMMIT = "5b9ac54f711fcb2211653e22b4a86b05f6337e84"
 
 
 def _git(args: list[str]) -> str:
@@ -99,6 +99,7 @@ def _scaled_surface_forcing(sf, scale: float):
 def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     """Capture the actual pre-vmix state and F_slow once for one stress scale."""
     import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocmod
+    import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pemod
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
@@ -106,6 +107,14 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     cap: dict[str, np.ndarray | int] = {"baro_calls": 0, "vmix_calls": 0}
     real_baro = ocmod.barotropic_substeps_latlon_cgrid
     real_vmix = LatLonCGridOceanModel._apply_implicit_vertical_mixing
+    real_stress = pemod.surface_stress_faces
+
+    def spy_stress(*args, **kwargs):
+        out = real_stress(*args, **kwargs)
+        if out is not None and "tau_i_u" not in cap:
+            cap["tau_i_u"] = np.asarray(out[0], dtype=np.float64)
+            cap["tau_j_v"] = np.asarray(out[1], dtype=np.float64)
+        return out
 
     def spy_baro(*args, **kwargs):
         if kwargs.get("eta_init") is not None:
@@ -124,6 +133,7 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
 
     ocmod.barotropic_substeps_latlon_cgrid = spy_baro
     LatLonCGridOceanModel._apply_implicit_vertical_mixing = spy_vmix
+    pemod.surface_stress_faces = spy_stress
     try:
         with jax.disable_jit():
             model.step(
@@ -134,7 +144,9 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     finally:
         ocmod.barotropic_substeps_latlon_cgrid = real_baro
         LatLonCGridOceanModel._apply_implicit_vertical_mixing = real_vmix
-    required = {"F_slow_u", "F_slow_v", "B1_u", "B1_v"}
+        pemod.surface_stress_faces = real_stress
+    required = {"F_slow_u", "F_slow_v", "B1_u", "B1_v",
+                "tau_i_u", "tau_j_v"}
     if not required <= cap.keys():
         raise SystemExit(f"arm {scale} missed hooks: {required - cap.keys()}")
     if cap["baro_calls"] != 1 or cap["vmix_calls"] != 1:
@@ -144,14 +156,38 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     return cap
 
 
-def _linearity(name: str, d1: np.ndarray, d2: np.ndarray) -> float:
+def _whole_step_linearity_diagnostic(
+        name: str, d1: np.ndarray, d2: np.ndarray) -> float:
     err = float(np.max(np.abs(d2 - 2.0 * d1)))
-    bar = 1.0e-12 * max(1.0, float(np.max(np.abs(d2))))
-    print(f"CONTROL {name}: max|2x-2*1x|={err:.6e} bar={bar:.6e} "
-          f"{'PASS' if err <= bar else 'FAIL'}")
-    if err > bar:
-        raise SystemExit(f"planted 2x control failed for {name}")
+    print(f"DIAGNOSTIC {name}: whole-step max|2x-2*1x|={err:.6e} "
+          "(not gated; downstream recurrence is state-dependent)")
     return err
+
+
+def _stress_helper_control(arms: dict) -> dict:
+    """Exact 0x/1x/2x check on the genuinely linear single-owner helper."""
+    out = {}
+    for key in ("tau_i_u", "tau_j_v"):
+        z = np.asarray(arms[0.0][key])
+        one = np.asarray(arms[1.0][key])
+        two = np.asarray(arms[2.0][key])
+        zero_exact = bool(np.array_equal(z, np.zeros_like(z)))
+        double_exact = bool(np.array_equal(two, 2.0 * one))
+        # Prove the equality gate can fail by changing one finite value by one
+        # representable step and sending it through the identical comparison.
+        planted = two.copy()
+        idx = np.unravel_index(int(np.argmax(np.abs(one))), one.shape)
+        planted[idx] = np.nextafter(planted[idx], np.inf)
+        plant_fires = not np.array_equal(planted, 2.0 * one)
+        print(f"CONTROL {key}: zero_exact={zero_exact} "
+              f"double_exact={double_exact} planted_nextafter_fires="
+              f"{plant_fires}")
+        if not (zero_exact and double_exact and plant_fires):
+            raise SystemExit(f"surface-stress helper control failed for {key}")
+        out[key] = {"zero_exact": zero_exact,
+                    "double_exact": double_exact,
+                    "planted_nextafter_fires": plant_fires}
+    return out
 
 
 def main() -> int:
@@ -228,11 +264,12 @@ def main() -> int:
     f1v = arms[1.0]["F_slow_v"] - arms[0.0]["F_slow_v"]
     f2u = arms[2.0]["F_slow_u"] - arms[0.0]["F_slow_u"]
     f2v = arms[2.0]["F_slow_v"] - arms[0.0]["F_slow_v"]
-    controls = {
-        "b1_u": _linearity("B1_u", b1u, b2u),
-        "b1_v": _linearity("B1_v", b1v, b2v),
-        "fslow_u": _linearity("F_slow_u", f1u, f2u),
-        "fslow_v": _linearity("F_slow_v", f1v, f2v),
+    controls = _stress_helper_control(arms)
+    whole_step_diagnostics = {
+        "b1_u": _whole_step_linearity_diagnostic("B1_u", b1u, b2u),
+        "b1_v": _whole_step_linearity_diagnostic("B1_v", b1v, b2v),
+        "fslow_u": _whole_step_linearity_diagnostic("F_slow_u", f1u, f2u),
+        "fslow_v": _whole_step_linearity_diagnostic("F_slow_v", f1v, f2v),
     }
 
     # Reuse the campaign's registered loader and known u-face offset.
@@ -296,11 +333,13 @@ def main() -> int:
         "provenance": {"git_sha": sha, "prereg_commit": PREREG_COMMIT,
                        "oracle_lane": dump_lane.RUN_DIR, "kt": KT},
         "controls": controls,
+        "whole_step_linearity_diagnostics": whole_step_diagnostics,
         "v_structural_zero": v_zero,
         "scores": scores,
         "term_label": label,
         "ownership_label": "UNRESOLVED_REQUIRES_REGISTERED_FREE_RUN",
         "retractions": [
+            "first run invalid: whole B1 is not an exactly linear stress control",
             "utrd_tau is not a physical zero: its dump slot is allocated but never written",
             "NEMO wind is not implicit-only: dynspg_ts adds it independently to zu_frc",
             "this term score does not by itself assign the eta 2dt residual",
