@@ -18,8 +18,9 @@
     "row_zero_based": 99,
     "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"
   },
+  "headline_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT",
   "import_receipt": {
-    "module": "/tmp/codex-euc-mechanism/packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
+    "module": "/tmp/euc-mechanism-localgit/packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
     "within_worktree": true
   },
   "input_sha256": {
@@ -30,8 +31,12 @@
     "nemo_avt_closure": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
     "nemo_avt_realized": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
     "nemo_binary": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "nemo_mixing_length": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
+    "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
     "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
-    "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e"
+    "probe_source": "34138471c9c412ec90e6330f68f164bde3abc8a74fafb89b6eca2998de249c15",
+    "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
   },
   "lane": {
     "kt": 5761,
@@ -56,10 +61,16 @@
   },
   "repo": {
     "branch": "fidelity/dino-euc-mechanism-codex",
-    "dirty": true,
-    "head": "d7109d9b0b95c80eb5c3155d7aa249bec5f66b83"
+    "dirty": false,
+    "head": "a8361054d95858baab8bd51ed8e6af253bb8f872"
   },
-  "schema": "dino-euc-mechanism-v1",
+  "review_retraction": {
+    "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
+    "old_headline": "vertical mixing not supported at core depth",
+    "reason": "the 10.14 m interface sets the audited 5-26 m shear; its 2.05x avm excess predicts both weaker shear and a deeper core",
+    "status": "RETRACTED"
+  },
+  "schema": "dino-euc-mechanism-v2-review",
   "scores": {
     "closure_avm": {
       "diagnostic_nrms_20_40m": 0.03184802669844877,
@@ -85,7 +96,8 @@
         0.0004412905904531085
       ],
       "nrms": 0.6886528366932417,
-      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT"
     },
     "closure_avt": {
       "diagnostic_nrms_20_40m": 0.04606982852006467,
@@ -111,7 +123,8 @@
         0.0003705267602429116
       ],
       "nrms": 0.8204455094775336,
-      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "CONFIRM_VISCOSITY_PRIME_SUSPECT"
     },
     "realized_avm": {
       "diagnostic_nrms_20_40m": 5.512835849377933e-07,
@@ -142,7 +155,8 @@
         20.000206537067793
       ],
       "nrms": 1.883166136202312e-05,
-      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "UNRESOLVED_VISCOSITY_PRIME_SUSPECT"
     },
     "realized_avt": {
       "diagnostic_nrms_20_40m": 7.752730774304767e-07,
@@ -173,7 +187,8 @@
         20.00013577323758
       ],
       "nrms": 1.7819341061642592e-05,
-      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+      "original_verdict": "UNRESOLVED_CLOSURE_DIFFERENCE",
+      "review_reissued_verdict": "UNRESOLVED_VISCOSITY_PRIME_SUSPECT"
     }
   },
   "short_run": {
@@ -213,5 +228,56 @@
     "nemo_namelist": "RUN_VERDICT360_M0/namelist_cfg:384-401 (TKE+EVD, nn_evdm=1)",
     "nemo_tke_mixing_length": "src/OCE/ZDF/zdftke.F90:575-724"
   },
-  "state": "shared day-180, first matched step kt=5761"
+  "state": "shared day-180, first matched step kt=5761",
+  "tke_closure_attribution_10m": {
+    "depth_m": 10.13875112538517,
+    "direct_zonal_mean_ratio": 2.051442151585441,
+    "eligible_fraction": 0.98,
+    "executed_branch": "MY_SRC/zdftke.F90:832-837: zsqen=SQRT(en); zav=rn_ediff*zmxlm*zsqen; p_avm=MAX(zav,avmb)*wmask. No pdlr/stability multiplier acts on avm; :841-844 updates avt only.",
+    "label": "DISTRIBUTED_OR_UNRESOLVED",
+    "max_direct_reconstruction_relative_error": 0.0,
+    "max_log_factor_closure_error": 2.220446049250313e-16,
+    "n_eligible": 49,
+    "n_excess": 47,
+    "n_wet": 50,
+    "pieces": {
+      "coefficient_stability": {
+        "factor_iqr": [
+          1.0,
+          1.0
+        ],
+        "geometric_mean_factor": 1.0,
+        "median_abs_log_score": 0.0,
+        "score_share": 0.0,
+        "sign_agreement_fraction": 0.0
+      },
+      "mixing_length": {
+        "factor_iqr": [
+          1.4462149002158422,
+          1.4965851654848727
+        ],
+        "geometric_mean_factor": 1.5018771945445477,
+        "median_abs_log_score": 0.3843227108986063,
+        "score_share": 0.5000000018207927,
+        "sign_agreement_fraction": 1.0
+      },
+      "tke_energy": {
+        "factor_iqr": [
+          1.4462149066377044,
+          1.4965851676390733
+        ],
+        "geometric_mean_factor": 1.5018771965703763,
+        "median_abs_log_score": 0.38432270809951824,
+        "score_share": 0.4999999981792072,
+        "sign_agreement_fraction": 1.0
+      }
+    },
+    "time_levels": {
+      "dump_avm.bin": "now",
+      "dump_avt.bin": "now",
+      "tke_dump_avm_final.bin": "now",
+      "tke_dump_en.bin": "now",
+      "tke_dump_zmxlm.bin": "now"
+    }
+  }
 }
