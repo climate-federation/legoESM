@@ -64,6 +64,8 @@ checkout, with `SLOT_ROOT` required to be the exact fresh path shown:
 SLOT_ROOT=/tmp/nemo-tau-slot-eaef2a1e1
 test ! -e "$SLOT_ROOT"
 git clone --shared /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 "$SLOT_ROOT"
+cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/arch/arch-conda.fcm \
+  "$SLOT_ROOT/arch/"
 mkdir -p "$SLOT_ROOT/cfgs/DINO"
 cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/work_cfgs.txt \
   "$SLOT_ROOT/cfgs/"
@@ -126,4 +128,10 @@ The first temporary-clone build produced no executable or measurement.
 `makenemo -n DINO` stopped because the Git clone did not contain the oracle's
 untracked `cfgs/work_cfgs.txt`, so DINO was absent from the work-configuration
 registry. The copy step above was added and committed before retrying. No
+classification or threshold changed.
+
+The second build also produced no executable or measurement. After recognizing
+DINO, `makenemo` stopped with `Compiler not existing` because
+`arch/arch-conda.fcm` is another untracked oracle file omitted by the clone.
+Its exact copy step was added above and committed before retrying. No
 classification or threshold changed.
