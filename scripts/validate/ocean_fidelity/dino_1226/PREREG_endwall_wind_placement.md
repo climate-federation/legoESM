@@ -113,16 +113,24 @@ coefficient will be invented.
 
 ## Free-run placement/ownership discriminator — GPU handoff
 
-The exact primary number is the last-half, per-cell-first zonal-wall 2dt
-amplitude ratio `A_lego/A_nemo`; wall variance share is reported alongside it.
+Review found that the previous registration incorrectly mixed three different
+observables: the whole-domain first-eight ratio (2.89), the aggregate-wall
+first-sample share (0.852), and a last-half zonal-wall label. It is retracted.
+The exact primary number is now one coherent observable from
+`eta_flicker_decay.py`: `regions.all.ratio_lego_over_nemo.first8`, the ratio of
+the mean of the first eight per-sample area-weighted wet-domain RMS
+amplitudes. The companion is the same-window aggregate-wall locus,
+`wall_share.legoESM.first8.wall`. The certified baseline values are
+2.886305221717904 and 0.48541937969116244; NEMO's same-window wall share is
+0.0686300413685866. The often-cited 0.8524656 is the first sample only and is
+context, not a gate.
 
-- **Control validity:** explicit-placement ratio in `[2.60, 3.18]`
-  (registered 2.89 ±10%) and wall share in `[0.75, 0.95]`
-  (registered 0.85 ±0.10).
-- **CONFIRMS ownership:** implicit-placement ratio `<=1.25` and wall share
-  `<=0.08` while the control is valid.
-- **REFUTES ownership:** implicit-placement ratio `>=2.30` and wall share
-  `>=0.68` while the control is valid.
+- **Control validity:** explicit-placement first-eight whole-domain ratio in
+  `[2.60, 3.18]` and first-eight aggregate-wall share in `[0.38, 0.59]`.
+- **CONFIRMS ownership:** implicit-placement ratio `<=1.25` and first-eight
+  aggregate-wall share `<=0.17` while the control is valid.
+- **REFUTES ownership:** implicit-placement ratio `>=2.30` and first-eight
+  aggregate-wall share `>=0.38` while the control is valid.
 - Otherwise: **UNRESOLVED**.
 
 The active shipped outer integrator is `leapfrog` with the split-explicit
@@ -152,30 +160,31 @@ per-step fp64 samples, writes relative `t_seconds=2700..432000`, stamps
 `capture_every_steps=1`, and refuses a non-fp64 materialized state. Daily eta
 is retained separately as `eta_daily`.
 
-Rebuild the registered NEMO comparator from its existing certified per-step
-run (the extractor verifies kt, `rDt=2700`, fp64, and NEMO's Asselin identity):
+Use the already certified fp64 160-sample NEMO comparator. The earlier
+extractor command is retracted because `/tmp/dino_eta_waves/nemo_5d` no longer
+contains its per-step restart tiles. Refuse unless the retained artifact has
+this exact SHA-256:
 
 ```sh
-.venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_wave_twin.py \
-  extract-nemo --run-dir /tmp/dino_eta_waves/nemo_5d \
-  --kt0 5760 --nsteps 160 \
-  --out results/dino_1455/nemo_day180_5d_eta.npz
+test "$(sha256sum /tmp/dino_eta_waves/nemo_5d_eta.npz | cut -d' ' -f1)" = \
+  52bc6c70697126f7522114dbe2fc5cda5b56ce566db28f488d6809b79997b47a
 ```
 
 Score each arm against that same comparator with the exact registered tool:
 
 ```sh
 .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_flicker_decay.py \
-  --nemo results/dino_1455/nemo_day180_5d_eta.npz \
+  --nemo /tmp/dino_eta_waves/nemo_5d_eta.npz \
   --lego results/dino_1455/wind_place_implicit.npz \
   --out results/dino_1455/wind_place_implicit_flicker.json
 
 .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/eta_flicker_decay.py \
-  --nemo results/dino_1455/nemo_day180_5d_eta.npz \
+  --nemo /tmp/dino_eta_waves/nemo_5d_eta.npz \
   --lego results/dino_1455/wind_place_explicit.npz \
   --out results/dino_1455/wind_place_explicit_flicker.json
 ```
 
-The NEMO extractor's binary md5 must remain the registered
-`d3cf9242289b633d671013d0299803a3`; any missing run or changed receipt is a
-STOP, not permission to substitute daily output. No GPU arm runs here.
+The scorer SHA-256 must remain
+`13916d43f75586358eb4bedec603d023433c23bf61eaf77c320e012f4570568c`.
+Any missing or changed artifact is a STOP, not permission to re-extract from
+the incomplete directory or substitute daily output. No GPU arm runs here.

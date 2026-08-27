@@ -15,13 +15,17 @@ bridge, not free-run amplification.
 
 The final ownership measurement, once one statement-level mechanism is
 selected, is a five-day per-step free-run A/B from the same bridged day-180
-state. The primary number is the last-half, per-cell-first zonal-wall 2dt
-amplitude ratio `A_lego/A_nemo`; the companion is wall variance share.
+state. The prior last-half/zonal-wall wording is retracted: its bars came from
+the whole-domain first-eight ratio and first-sample aggregate-wall share. The
+primary is now coherently
+`regions.all.ratio_lego_over_nemo.first8` from `eta_flicker_decay.py`; the
+companion is `wall_share.legoESM.first8.wall`. Certified shipped-card values
+are 2.886305221717904 and 0.48541937969116244.
 
-- **Control validity:** shipped-card ratio in `[2.60, 3.18]` (registered 2.89
-  ±10%) and wall share in `[0.75, 0.95]` (registered 0.85 ±0.10).
-- **CONFIRMS ownership:** candidate ratio `<=1.25` and share `<=0.08`.
-- **REFUTES ownership:** candidate ratio `>=2.30` and share `>=0.68`.
+- **Control validity:** shipped-card ratio in `[2.60, 3.18]` and first-eight
+  aggregate-wall share in `[0.38, 0.59]`.
+- **CONFIRMS ownership:** candidate ratio `<=1.25` and share `<=0.17`.
+- **REFUTES ownership:** candidate ratio `>=2.30` and share `>=0.38`.
 - Otherwise: **UNRESOLVED**.
 
 The candidate may replace only one measured statement-level DIFF with literal
@@ -46,8 +50,11 @@ arm, build two same-input counterfactual probes, reusing
    tendencies, evaluate the first subsequent face-depth/flux,
    pressure-gradient, and Coriolis consumers twice: once with the shipped
    serial mask/periodic representation and once with a literal mapped NEMO
-   `lbc_lnk` scalar/vector commit. Print j=1/j=197 pointwise deltas. A planted
-   vector-sign or halo-offset violation must fail. The exact primary score is
+   `lbc_lnk` scalar/vector commit. Repeat at the final post-solver
+   `finalize_lbc` boundary commit and evaluate the first next-step consumers;
+   do not assume continuous masking exonerates its wall-Nyquist feedback.
+   Print j=1/j=197 pointwise deltas. A planted vector-sign or halo-offset
+   violation must fail. The exact primary score is
    prediction normalized error of this counterfactual delta against the
    independently dumped NEMO-minus-lego first-consumer residual; correlation
    is the companion. **CONFIRMS statement ownership** at error `<=0.10` and

@@ -1,9 +1,11 @@
 # Preregistration: live NEMO `jpdyn_tau` slot wiring
 
-Status: **DESIGN ONLY — STOP before running a rebuilt oracle.** This file and
-the source patch/verifier must be committed before any patched NEMO output is
-produced. The oracle tree is outside this writable sandbox, so the coordinator
-owns the build and one-step execution.
+Status: **PREREGISTERED CPU ONE-STEP ARM.** This file and the source
+patch/verifier were committed at `eaef2a1e17b7f990434f181186d3d03a36e751c8`
+before the preserved unpatched artifact was classified. The oracle tree is
+read-only, so the patched build must use the temporary clone recipe below;
+the source tree and retained artifacts remain unchanged. This is a one-step
+diagnostic write on CPU, not a free-running twin or a GPU ownership arm.
 
 ## Claim and exact number
 
@@ -51,6 +53,42 @@ NEMO 5.0.2 root. The patch adds `trddump_tau` and calls it from the same
 routine zeroes the whole tau store and writes only level 1 from the already
 captured post-minus-pre increment times `r1_Dt`.
 
+## Exact temporary CPU execution
+
+The initial external-tree handoff below remains valid for the coordinator.
+This sandbox instead uses an isolated temporary clone so it can complete the
+literal source-write check without mutating the oracle. From the legoESM
+checkout, with `SLOT_ROOT` required to be the exact fresh path shown:
+
+```bash
+SLOT_ROOT=/tmp/nemo-tau-slot-eaef2a1e1
+test ! -e "$SLOT_ROOT"
+git clone --shared /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 "$SLOT_ROOT"
+mkdir -p "$SLOT_ROOT/cfgs/DINO"
+cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/cpp_DINO.fcm \
+  "$SLOT_ROOT/cfgs/DINO/"
+cp -a /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC \
+  "$SLOT_ROOT/cfgs/DINO/"
+git -C "$SLOT_ROOT" apply \
+  /tmp/codex-basin-rect/scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch
+conda run -n nemo-build "$SLOT_ROOT/makenemo" -n DINO -m conda -j 4
+mkdir "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
+cp /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_D180_1STEP_1R/namelist_cfg \
+  /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_D180_1STEP_1R/namelist_ref \
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/"
+ln -s /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc \
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/DINO_00005760_restart.nc"
+ln -s "$SLOT_ROOT/cfgs/DINO/BLD/bin/nemo.exe" \
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R/nemo"
+cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_1R"
+mpirun -np 1 ./nemo >run_1step.log 2>&1
+```
+
+Before verification print SHA-256 for the patched `trddump.F90`,
+`dynzdf.F90`, executable, namelists, restart and four brackets. Then run the
+same verifier invocation below with the temporary run directory and
+`DINO_00005761_restart.nc`. STOP after its classification.
+
 ## Exact coordinator handoff
 
 From `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2`:
@@ -79,4 +117,3 @@ status. Then, from the legoESM checkout:
 
 STOP after printing the classification. A later wind-placement/eta run may
 cite `CONFIRMED_SLOT_WIRED`; it may not reinterpret any other classification.
-
