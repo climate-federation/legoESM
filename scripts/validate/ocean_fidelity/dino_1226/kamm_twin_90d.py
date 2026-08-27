@@ -128,6 +128,7 @@ CLI flags, for portability off this box.
 """
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import time
@@ -135,6 +136,7 @@ import time
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.field import Field
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import (
     apply_dino_lat_lon_surface_forcing,
@@ -143,7 +145,6 @@ from legoesm.ocean.experiments.dino import (
     dino_lat_lon_surface_forcing_arrays,
     dino_step_surface_forcing,
 )
-from legoesm.core.field import Field
 from legoesm.ocean.fidelity.nemo_io import (
     read_nemo_mesh_mask,
     read_nemo_restart,
@@ -201,6 +202,64 @@ LEGACY_STORAGE_DTYPES = {"T3d": "float32", "S3d": "float32", "eta3d": "float32",
                          "u3d": "float32", "v3d": "float32",
                          "eta": "float32", "sst": "float32",
                          "u": "float32", "v": "float32"}
+
+
+def _stress_content_sha256(tau_x, tau_y) -> str:
+    """Content identity for the two T-point before-stress arrays."""
+    digest = hashlib.sha256()
+    for name, value in (("tau_x", tau_x), ("tau_y", tau_y)):
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(name.encode("ascii"))
+        digest.update(str(array.dtype).encode("ascii"))
+        digest.update(json.dumps(array.shape).encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _analytic_dino_tpoint_stress(grid, cfg, *, t_seconds: float):
+    """Load analytic DINO T-point stress and bind it to one seasonal time."""
+    if not np.isfinite(t_seconds) or t_seconds < 0.0:
+        raise ValueError(
+            f"before-stress reconstruction time must be finite and >=0, got "
+            f"{t_seconds!r}")
+    forcing = dino_lat_lon_surface_forcing_arrays(grid, cfg)
+    surface = dino_step_surface_forcing(forcing)
+    if surface is None or surface.tau_x is None or surface.tau_y is None:
+        raise SystemExit("DINO analytic T-point stress loader returned no stress")
+    tau_x = jnp.asarray(surface.tau_x)
+    tau_y = jnp.asarray(surface.tau_y)
+    return tau_x, tau_y, _stress_content_sha256(tau_x, tau_y)
+
+
+def reconstruct_dino_before_stress_tpoint(state, grid, cfg, *, t_seconds: float):
+    """Replace only the bridged before-stress carry with analytic T stress.
+
+    This is oracle-mimicry glue: NEMO restart ``utau_b/vtau_b`` are already
+    U/V-point fields, whereas legoESM's canonical carry is T-point.  Rebuild
+    the prior T field through DINO's existing forcing loaders; never invert
+    the face field.  DINO wind is time independent, but ``t_seconds`` binds
+    this reconstruction to the restart's actual prior seasonal clock.
+    """
+    tau_x, tau_y, content_hash = _analytic_dino_tpoint_stress(
+        grid, cfg, t_seconds=t_seconds)
+    if state.tau_x_prev is None or state.tau_y_prev is None:
+        raise SystemExit(
+            "--bridge-before-stress-tpoint requires bridged before stress")
+    if (tau_x.shape != state.tau_x_prev.shape
+            or tau_y.shape != state.tau_y_prev.shape):
+        raise SystemExit(
+            "T-point before-stress shape mismatch: "
+            f"analytic={tau_x.shape}/{tau_y.shape} "
+            f"bridge={state.tau_x_prev.shape}/{state.tau_y_prev.shape}")
+    rebuilt = state._replace(tau_x_prev=tau_x, tau_y_prev=tau_y)
+    receipt = {
+        "bridge_before_stress_stagger": "T",
+        "bridge_before_stress_reconstruction_seconds": float(t_seconds),
+        "bridge_before_stress_sha256": content_hash,
+    }
+    print("BEFORE-STRESS BRIDGE: reconstructed analytic T-point carry "
+          f"at t={t_seconds:.0f}s sha256={content_hash}", flush=True)
+    return rebuilt, receipt
 
 
 def verify_day0_matches_restart(st, restart_state, land_mask, *, tol: float = 1e-8) -> None:
@@ -1046,6 +1105,7 @@ def start_mode_of(stamped) -> str | None:
 
 def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
                        bridge_tke: bool = False, bridge_before: bool = True,
+                       bridge_before_stress_tpoint: bool = False,
                        vmix_scheme: str | None = None,
                        use_gm_redi: bool | None = None,
                        surface_stress_implicit: bool | None = None,
@@ -1084,6 +1144,11 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     boundary-condition placement. ``None`` leaves the recipe unchanged;
     True routes the same centred stress through the implicit vertical solve.
 
+    ``bridge_before_stress_tpoint``: bridge-only correction for NEMO's U/V
+    restart stress. Requires ``bridge_before`` and replaces only legoESM's
+    T-point previous-stress carry with the existing analytic DINO forcing at
+    the restart's own time. It is not a model-config selector.
+
     ``u_m``: optional override of ``DINOConfig.U_M`` (NEMO ``rn_Uv``, the
     lateral viscous velocity scale [m/s], card default 0.27).  It is the
     ONLY input to the lateral-viscosity coefficient on this card --
@@ -1099,6 +1164,10 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # recorded on; the twin default is applied in run_twin, one level up and
     # handed down through e3t_mode. e3t_mode=None keeps the bridge's own
     # resolution (LEGOESM_NEMO_E3T, else the 1-D ladder) exactly as before.
+    if bridge_before_stress_tpoint and not bridge_before:
+        raise SystemExit(
+            "--bridge-before-stress-tpoint requires --bridge-before; a "
+            "T-point prior-stress carry cannot be attached to an Euler start")
     g = read_nemo_mesh_mask(f"{run_traj}/mesh_mask.nc", nn_hls=0)
     s = read_nemo_restart(f"{run_stepdump}/{restart_file}", nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True,
@@ -1193,10 +1262,15 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
     # tke_shear_production="nemo_burchard", both of which READ these fields
     # every step -- bridging is what makes those axes correct from step 0
     # instead of only after the model's own Euler-start populates them.
+    restart_path = f"{run_stepdump}/{restart_file}"
     if bridge_before:
-        before = read_nemo_restart_before(f"{run_stepdump}/{restart_file}", nn_hls=0)
+        before = read_nemo_restart_before(restart_path, nn_hls=0)
         st = bridge_before_state_topo(br._replace(state=st), g, before, periodic_i=True)
         _print_before_bridge_verify(st, before, g)
+        if bridge_before_stress_tpoint:
+            prior_time = _restart_elapsed_seconds(restart_path)
+            st, _ = reconstruct_dino_before_stress_tpoint(
+                st, br.geometry, cfg, t_seconds=prior_time)
 
     # OPTIONAL: bridge NEMO's developed TKE closure memory (`en`) onto lego's
     # cold-start `state.tke` -- isolates whether the TKE cold-start (vs the
@@ -1267,6 +1341,7 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = False,
              run_traj: str = RUN_TRAJ, run_stepdump: str = RUN_STEPDUMP,
              bridge_tke: bool = False, bridge_before: bool = True,
+             bridge_before_stress_tpoint: bool = False,
              vmix_scheme: str | None = None,
              use_gm_redi: bool | None = None,
              surface_stress_implicit: bool | None = None,
@@ -1327,6 +1402,10 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     ``save_step_eta``: replace the default daily/float32 ``eta`` payload with
     every-step/float64 eta plus relative ``t_seconds`` for the campaign's
     Nyquist-safe 2dt scorer. The daily field remains under ``eta_daily``.
+
+    ``bridge_before_stress_tpoint`` reconstructs only the initial T-point
+    previous-stress carry. Later-step carry behavior remains the model's
+    ordinary ``_seed_centred_forcing_carry`` path.
     """
     # Resolved here and handed DOWN as an argument -- nothing is written into the
     # environment, so two ladders can be built in one process without either
@@ -1336,6 +1415,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
     br, cfg, mc, model, forcing, sf, st = _build_twin_state(
         recipe, run_traj, run_stepdump, bridge_tke=bridge_tke,
         bridge_before=bridge_before, vmix_scheme=vmix_scheme,
+        bridge_before_stress_tpoint=bridge_before_stress_tpoint,
         use_gm_redi=use_gm_redi, restart_file=restart_file,
         surface_stress_implicit=surface_stress_implicit,
         surface_tendency_placement=surface_tendency_placement,
@@ -1366,6 +1446,35 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
             "to stamp either answer -- the twin's start mode and the state it "
             "actually starts from must agree.")
     start_mode = observed_start
+
+    # Receipt, not a restatement of the selector: reconstruct the expected
+    # analytic T field through the same loaders and compare it to the carry
+    # actually present on the built state before stamping "T".
+    restart_path = f"{run_stepdump}/{restart_file}"
+    if bridge_before_stress_tpoint:
+        reconstruction_time = _restart_elapsed_seconds(restart_path)
+        expected_x, expected_y, expected_hash = _analytic_dino_tpoint_stress(
+            br.geometry, cfg, t_seconds=reconstruction_time)
+        if (not np.array_equal(np.asarray(st.tau_x_prev), np.asarray(expected_x))
+                or not np.array_equal(
+                    np.asarray(st.tau_y_prev), np.asarray(expected_y))):
+            raise SystemExit(
+                "BEFORE-STRESS STAMP MISMATCH: selector requested T-point "
+                "reconstruction but the built carry differs from the "
+                "existing DINO analytic forcing loader")
+        bridge_before_stress_stagger = "T"
+        bridge_before_stress_sha256 = expected_hash
+    else:
+        reconstruction_time = float("nan")
+        bridge_before_stress_stagger = (
+            "U_AS_T_LEGACY" if bridge_before else "NONE")
+        bridge_before_stress_sha256 = (
+            _stress_content_sha256(st.tau_x_prev, st.tau_y_prev)
+            if st.tau_x_prev is not None and st.tau_y_prev is not None else "")
+    print("BEFORE-STRESS RECEIPT: "
+          f"stagger={bridge_before_stress_stagger} "
+          f"reconstruction_seconds={reconstruction_time} "
+          f"sha256={bridge_before_stress_sha256}", flush=True)
 
     # #1455 512517fdc + review a0cd04b8: the BINDING precision check, on the
     # materialized geometry and state (arrays cannot lie about their dtype the
@@ -1416,6 +1525,7 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         "run_traj": run_traj, "run_stepdump": run_stepdump,
         "restart_file": restart_file,
         "bridge_tke": bool(bridge_tke), "bridge_before": bool(bridge_before),
+        "bridge_before_stress_tpoint": bool(bridge_before_stress_tpoint),
         "vmix_scheme": vmix_scheme, "use_gm_redi": use_gm_redi,
         "surface_stress_implicit": surface_stress_implicit,
         "surface_tendency_placement": surface_tendency_placement,
@@ -1719,6 +1829,13 @@ def run_twin(recipe: str, out_path: str, *, n_days: int = 90, save_3d: bool = Fa
         # content hash exists to prevent, and this dimension gets the same
         # treatment.
         twin_start_mode=np.str_(start_mode),
+        # Round-3 bridge-only stagger receipt. "T" is stamped only after the
+        # built carry was compared byte-for-byte with the existing analytic
+        # DINO forcing loader at the restart's own time.
+        bridge_before_stress_stagger=np.str_(bridge_before_stress_stagger),
+        bridge_before_stress_reconstruction_seconds=np.float64(
+            reconstruction_time),
+        bridge_before_stress_sha256=np.str_(bridge_before_stress_sha256),
         # #1455 512517fdc: stamp the precision the arm was built at.
         control_dtype=np.str_(control_dtype_stamp),
         # #1455: stamp the lateral viscous velocity the arm ran at (NEMO's
@@ -1833,6 +1950,13 @@ def _parse_args(argv=None):
                          "earlier help string said it did; retracted). "
                          "--no-bridge-before is the legacy forward-Euler start "
                          "-- see --legacy-euler-start")
+    p.add_argument("--bridge-before-stress-tpoint", action="store_true",
+                   help="replace only the bridged NEMO U/V-point prior-stress "
+                        "carry with analytic DINO T-point stress reconstructed "
+                        "through the existing forcing loader at the restart's "
+                        "own prior seasonal time. Requires --bridge-before; "
+                        "stamps stagger/time/content identity. Does not change "
+                        "model config or later-step carry behavior")
     p.add_argument("--legacy-euler-start", dest="bridge_before",
                    action="store_false",
                    help="start the twin from a forward-Euler step instead of "
@@ -2104,6 +2228,7 @@ def main(argv=None):
     run_twin(args.recipe, args.out, n_days=args.days, save_3d=args.save_3d,
               run_traj=args.run_traj, run_stepdump=args.run_stepdump,
               bridge_tke=args.bridge_tke, bridge_before=args.bridge_before,
+              bridge_before_stress_tpoint=args.bridge_before_stress_tpoint,
               vmix_scheme=args.vmix_scheme, use_gm_redi=args.use_gm_redi,
               surface_stress_implicit=args.surface_stress_implicit,
               surface_tendency_placement=args.surface_tendency_placement,
