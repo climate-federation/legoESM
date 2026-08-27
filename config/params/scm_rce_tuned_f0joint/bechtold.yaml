@@ -1,0 +1,34 @@
+# SCM-RCE tuned parameters for convection=bechtold
+# corrected nonrotating protocol (coriolis=0), median of 2 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.BechtoldConfig.M_b_max: 0.112981  # default 0.05, seed-spread 4% of range, kg/m^2/s
+atm.conv.BechtoldConfig.autoconv_pe_max: 0.819378  # default 0.9, seed-spread 37% of range
+atm.conv.BechtoldConfig.autoconv_q_c_crit: 0.00150697  # default 0.0005, seed-spread 37% of range, kg/kg
+atm.conv.BechtoldConfig.capdcycl_land_tau_scale: 0.177082  # default 1, seed-spread 17% of range
+atm.conv.BechtoldConfig.cape_pbl_depth: 1181.18  # default 500, seed-spread 18% of range, m
+atm.conv.BechtoldConfig.cape_qadv_weight: 0.667399  # default 0.8, seed-spread 7% of range
+atm.conv.BechtoldConfig.cape_threshold: 180.324  # default 70, seed-spread 11% of range, J/kg
+atm.conv.BechtoldConfig.cloud_depth_shallow_max: 1275.89  # default 1500, seed-spread 31% of range, m
+atm.conv.BechtoldConfig.cmt_c_d: 1.41876  # default 0.7, seed-spread 22% of range
+atm.conv.BechtoldConfig.cmt_c_u: 0.610424  # default 0.7, seed-spread 22% of range
+atm.conv.BechtoldConfig.delta_deep: 0.000109036  # default 7.5e-05, seed-spread 73% of range, 1/m
+atm.conv.BechtoldConfig.delta_midlevel: 0.000318541  # default 0.0002, seed-spread 59% of range, 1/m
+atm.conv.BechtoldConfig.delta_shallow: 9.44733e-05  # default 7.5e-05, seed-spread 10% of range, 1/m
+atm.conv.BechtoldConfig.dnoprc: 0.000833729  # default 0.0003, seed-spread 43% of range, kg/kg
+atm.conv.BechtoldConfig.downdraft_alpha: 0.743625  # default 0.3, seed-spread 17% of range
+atm.conv.BechtoldConfig.downdraft_entrain_rate: 0.000942558  # default 0.0003, seed-spread 76% of range, 1/m
+atm.conv.BechtoldConfig.downdraft_evap_efficiency: 0.296851  # default 0.05, seed-spread 69% of range
+atm.conv.BechtoldConfig.epsilon_deep: 0.000966663  # default 0.00175, seed-spread 13% of range, 1/m
+atm.conv.BechtoldConfig.parcel_dq: 0.000229551  # default 0.001, seed-spread 3% of range, kg/kg
+atm.conv.BechtoldConfig.rhebc_land: 0.718339  # default 0.75, seed-spread 62% of range
+atm.conv.BechtoldConfig.rhebc_land_deep: 0.837617  # default 0.7, seed-spread 0% of range
+atm.conv.BechtoldConfig.rprcon: 0.00487493  # default 0.0014, seed-spread 17% of range, 1/m
+atm.conv.BechtoldConfig.stochastic_amplitude: 0.560402  # default 0.5, seed-spread 5% of range
+atm.conv.BechtoldConfig.stochastic_decorrelation: 15228.4  # default 7200, seed-spread 30% of range, s
+atm.conv.BechtoldConfig.subcloud_evap_scale: 1.11927  # default 1, seed-spread 13% of range
+atm.conv.BechtoldConfig.tau_M_u_relax: 1998.29  # default 1800, seed-spread 0% of range, s
+atm.conv.BechtoldConfig.tau_bl: 7213.8  # default 3600, seed-spread 32% of range, s

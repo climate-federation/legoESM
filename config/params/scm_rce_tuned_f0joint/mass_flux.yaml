@@ -1,0 +1,12 @@
+# SCM-RCE tuned parameters for convection=mass_flux
+# corrected nonrotating protocol (coriolis=0), median of 2 seeds.
+# NON-IDENTIFIABLE for multi-parameter schemes: the spread comment on each
+# line is how far the seeds disagreed. A large spread means the median is one
+# point in a flat basin, not a calibrated value. Opt in with --params; this
+# file never mutates a production *Config default.
+
+atm.conv.MassFluxConfig.M_scale: 0.0189866  # default 0.01, seed-spread 22% of range, kg/m^2/s
+atm.conv.MassFluxConfig.cape_activation_scale: 7.65048  # default 10, seed-spread 20% of range, J/kg
+atm.conv.MassFluxConfig.cape_threshold: 77.9958  # default 70, seed-spread 12% of range, J/kg
+atm.conv.MassFluxConfig.delta_0: 0.00139957  # default 0.001, seed-spread 40% of range, 1/m
+atm.conv.MassFluxConfig.tau_adj: 6286.57  # default 3600, seed-spread 7% of range, s
