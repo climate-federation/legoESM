@@ -37,8 +37,9 @@
     "nemo_shear_production": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
     "nemo_surface_utau": "9c6943a02c5221feeb5b56d023418e69860d31d5ea0ded51437e7886811641f8",
     "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+    "nemo_tke_self_diffusion_input": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
     "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
-    "probe_source": "7839bc2592595f419778d4397fcfffe0c62f8bb1edf3c09afb533c981621d8fe",
+    "probe_source": "b55e93e4a1340fec0a263f8241cfb6f4f18256ebe2da2cc3e453f8e91eee28c2",
     "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
   },
@@ -66,7 +67,7 @@
   "repo": {
     "branch": "fidelity/dino-euc-mechanism-codex",
     "dirty": false,
-    "head": "9e2554a157219980df89a23dd6526504e8a02d46"
+    "head": "c0514afc4bde18dd2a5e17e54816a0aae6ebafdd"
   },
   "review_retraction": {
     "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
@@ -281,6 +282,7 @@
       "dump_avt.bin": "now",
       "sbc_dump_utau.bin": "now",
       "tke_dump_avm_final.bin": "now",
+      "tke_dump_avm_in.bin": "before",
       "tke_dump_dissl.bin": "now",
       "tke_dump_en.bin": "now",
       "tke_dump_rn2.bin": "now",
@@ -459,6 +461,102 @@
       }
     },
     "owner": null,
+    "response_ledger": {
+      "arm_max_abs_change_at_10m": {
+        "buoyancy_sink_rn2": 0.0,
+        "dissipation_dissl": 0.0,
+        "production_sh2": 0.0,
+        "surface_boundary_condition": 0.0
+      },
+      "dt_times_term_magnitude": {
+        "buoyancy": {
+          "geometric_mean": 0.0003808092616650287,
+          "iqr": [
+            0.00030797097610265256,
+            0.0005195291978542095
+          ],
+          "max": 0.0005619040702786827,
+          "median": 0.0004554083950567112,
+          "min": 7.544751604425365e-05
+        },
+        "dissipation_explicit_half": {
+          "geometric_mean": 0.0006684686330880215,
+          "iqr": [
+            0.000548739825058133,
+            0.0009091760962448663
+          ],
+          "max": 0.0009833321229876942,
+          "median": 0.0007969646913492444,
+          "min": 0.00014600088340162946
+        },
+        "production": {
+          "geometric_mean": 0.0017380080584383914,
+          "iqr": [
+            0.0014155936880786164,
+            0.002370738280106784
+          ],
+          "max": 0.0025668473634591076,
+          "median": 0.0020817660359618243,
+          "min": 0.0003375492924266927
+        }
+      },
+      "lego_matrix_solve_en": {
+        "geometric_mean": 9.999999999999991e-05,
+        "iqr": [
+          0.0001,
+          0.0001
+        ],
+        "max": 0.0001,
+        "median": 0.0001,
+        "min": 0.0001
+      },
+      "lego_matrix_solve_floor_fraction": 0.0,
+      "lego_postsolve_etau_addition": {
+        "geometric_mean": 1.0324454778523038e-13,
+        "iqr": [
+          1.0324454778522923e-13,
+          1.0324454778522923e-13
+        ],
+        "max": 1.0324454778522923e-13,
+        "median": 1.0324454778522923e-13,
+        "min": 1.0324454778522923e-13
+      },
+      "nemo_final_en": {
+        "geometric_mean": 4.433341168581807e-05,
+        "iqr": [
+          4.464750380168286e-05,
+          4.781173647673374e-05
+        ],
+        "max": 4.931056353795186e-05,
+        "median": 4.636406837744588e-05,
+        "min": 2.2274924466642527e-05
+      },
+      "nemo_inferred_pre_etau_floor_fraction": 0.0,
+      "nemo_pre_etau_inferred_with_identical_injection": {
+        "geometric_mean": 4.433341158112813e-05,
+        "iqr": [
+          4.4647503698438314e-05,
+          4.781173637348919e-05
+        ],
+        "max": 4.931056343470731e-05,
+        "median": 4.6364068274201334e-05,
+        "min": 2.227492436339798e-05
+      },
+      "unregistered_tke_self_diffusion_input_avm_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2551864434211057,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.000198950360976,
+        "iqr": [
+          1.0000175804362241,
+          1.0001000277502587
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0000470054006778,
+        "n_eligible": 47,
+        "n_population": 47
+      }
+    },
     "surface_boundary": {
       "en_surface_lego_over_nemo": {
         "eligible_fraction": 1.0,
@@ -494,7 +592,20 @@
         "n_eligible": 47,
         "n_population": 47
       },
-      "zmxlm_surface_lego_value_note": "legoESM surface-face viscosity uses its production ln_mxl0 anchor; NEMO comparison uses dumped zmxlm(jk=1)"
+      "zmxlm_surface_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.255635113578093,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 0.9999999999999998,
+        "iqr": [
+          0.9999999999999998,
+          0.9999999999999998
+        ],
+        "label": "NEAR_UNITY",
+        "median": 0.9999999999999998,
+        "n_eligible": 47,
+        "n_population": 47
+      }
     },
     "verdict": "UNRESOLVED_TKE_EQUATION_OWNER"
   }
