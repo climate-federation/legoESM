@@ -67,3 +67,7 @@ No driver merely misses a confidence bound while retaining a large matched effec
 The producer was clean at commit `e9f0574af7480163fb160faa726f9a0e4cc8797c`. The first clean attempt emitted no result because a test relation had `N_eff=3` and zero Fisher weight; the committed correction reports that registered no-information case as `UNRESOLVED_EFFECTIVE_N` rather than crashing or fabricating a score. No verdict threshold changed.
 
 Artifact: `docs/ocean/fidelity/dino_channel_seasonal_artifact.json`, SHA-256 `7eb2ec619ccf74fb4ef5613e4a3c7d50fe78a10efbd2b9908c89568518da6466`.
+
+## Verification status
+
+`ruff` passes and the focused unit suite passes `10/10`; the prescribed interpreter imports `legoesm.ocean.experiments.dino` from this worktree. Independent dual review is **UNVERIFIED** in this offline lane: the available Claude CLI review attempt failed with `ENOTFOUND`, and no GLM review route was exposed. This is a review-process limitation, not a statistical-verdict override.
