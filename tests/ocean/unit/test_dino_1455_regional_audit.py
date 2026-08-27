@@ -350,3 +350,74 @@ def test_the_artifact_refuses_a_tree_that_moved_mid_run(R, tmp_path):
         R.stamp({}, str(tmp_path), "0" * 40, dirty_now)
     R.stamp({}, str(tmp_path), sha_now, dirty_now)     # unmoved: writes
     assert (tmp_path / "regional_audit.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# The physics review of 37a51f9ef: three measurements it required, and the
+# ranking-field defect found while adding them.
+# ---------------------------------------------------------------------------
+def test_per_row_transports_sum_to_their_band_exactly(R):
+    """The per-row ledger and the band ledger must be ONE measurement, or the
+    band's cancellation ratio compares two different things."""
+    import acc_thermal_wind as A
+    rng = np.random.default_rng(3)
+    u = np.ascontiguousarray(rng.normal(size=(A.NY, A.NX, A.NZ)))
+    rt = R.row_transports(u, A.umask)
+    assert rt.shape == (A.NY,)
+    for name, rows in R.ALL_BANDS:
+        assert rt[rows].sum() == pytest.approx(
+            R.band_transport(u, A.umask, rows), abs=1e-9), name
+
+
+def test_the_cancellation_ratio_separates_a_cancelling_band_from_a_coherent_one(R):
+    """The instrument the physics review required: a band whose per-row gaps
+    cancel must be distinguishable from one whose gaps add.  Without it the
+    equatorial band reads INDISTINGUISHABLE while retaining 1.5% of its own
+    summed per-row magnitude."""
+    coherent = np.array([0.1, 0.1, 0.1, 0.1])
+    cancelling = np.array([1.0, -1.0, 1.0, -0.97])
+    assert abs(coherent.sum() / np.abs(coherent).sum()) == pytest.approx(1.0)
+    assert abs(cancelling.sum() / np.abs(cancelling).sum()) < 0.01
+
+
+def test_the_depth_only_hotspot_baseline_selects_the_SHALLOWEST_cells(R):
+    """The ranking-field defect: ``hotspot_set`` ranks by |d0|, so a field that
+    is merely negative-and-large at depth ranks the DEEPEST cells first.  The
+    first version used -gdept0 with -1e30 off-band and scored 0.0000."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, w = X.build_weights(np.ones((A.NY, A.NX)))
+    band = R.band_cell_mask(R.BANDS[3][1]) & wet
+    wb = np.where(band, w, 0.0)
+    rank = np.where(band, R.DEPTH_RANK_FIELD, 0.0)
+    sel = X.hotspot_set(rank, wb, X.Q2_NULL)
+    z = np.asarray(A.gdept0, dtype=np.float64)
+    assert sel[band].any()
+    # every selected in-band cell must be shallower than every unselected one
+    assert z[sel & band].max() <= z[(~sel) & band].min() + 1e-9
+    assert z[sel & band].max() < 400.0, "the shallowest 5% is not shallow"
+
+
+def test_the_depth_baseline_is_what_makes_the_retention_readable(R):
+    """Non-vacuity of the control itself: on a field that is PURELY stratified
+    -- no horizontal structure at all -- the day-10 hotspot set must NOT beat
+    the depth-only baseline, which is the case that voided R4 as registered."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, w = X.build_weights(np.ones((A.NY, A.NX)))
+    band = R.band_cell_mask(R.BANDS[3][1]) & wet
+    wb = np.where(band, w, 0.0)
+    z = np.asarray(A.gdept0, dtype=np.float64)
+    strat = np.where(band, np.exp(-z / 50.0), 0.0)      # depth only
+    hot = X.hotspot_set(strat, wb, X.Q2_NULL)
+    base = X.hotspot_set(np.where(band, R.DEPTH_RANK_FIELD, 0.0), wb, X.Q2_NULL)
+    assert X.retention(strat, wb, hot) <= X.retention(strat, wb, base) + 1e-9
+
+
+def test_the_zero_crossing_search_is_confined_to_the_wind_driven_layer(R):
+    """An unrestricted search returned 1178 m and printed it beside a label
+    reading 'the top of the eastward undercurrent'."""
+    import inspect
+    src = inspect.getsource(R.report)
+    assert "ZC_MAX_M" in src
+    assert "none in the top" in src, "an absent crossing must be reported absent"
