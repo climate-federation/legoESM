@@ -267,10 +267,16 @@ def main() -> int:
     if nemo_z0_cards != ["nemo_dino_kamm", "nemo_dino_kamm_mlf"]:
         raise SystemExit(f"unexpected shipped nemo_z0 cards: {nemo_z0_cards}")
 
-    fix_commit = subprocess.check_output(
+    source_followup_commit = subprocess.check_output(
         ["git", "log", "-1", "--format=%H", "--",
          "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py"],
         cwd=ROOT, text=True).strip()
+    clamp_fix_commit = subprocess.check_output(
+        ["git", "log", "-1", "--format=%H",
+         "--grep=keep NEMO surface floor off interior TKE"],
+        cwd=ROOT, text=True).strip()
+    if not clamp_fix_commit:
+        raise SystemExit("cannot resolve faithful surface-floor fix commit")
     repo_head = git_output("git", "rev-parse", "HEAD")
     repo_dirty = bool(git_output("git", "status", "--porcelain"))
     if repo_dirty:
@@ -290,7 +296,8 @@ def main() -> int:
     ]
     result = {
         "verdict": verdict,
-        "fix_commit": fix_commit,
+        "fix_commit": clamp_fix_commit,
+        "surface_knob_followup_commit": source_followup_commit,
         "verification_producer_head": repo_head,
         "state": "shared NEMO day-180 restart; first matched step kt=5761",
         "depth_m": float(gdepw[1]),
@@ -331,15 +338,66 @@ def main() -> int:
                 "other shipped cards remain interior_pinned and byte-pinned."),
         },
         "tests": {
-            "red_before_fix": (
-                "1 failed: actual [1e-4,1e-6], hand-computed expected "
-                "[1e-6,1e-6]"),
-            "focused_tke": "127 passed",
-            "vertical_mixing_consumers_non_mpas": "57 passed",
-            "vertical_mixing_consumers_mpas_clean_process": "36 passed",
-            "combined_order_probe": (
-                "91 passed, 2 MPAS dtype failures after global precision-state "
-                "leak; both failures pass in clean fixed and pre-fix processes"),
+            "focused_surface_terms": {
+                "command": (
+                    "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu "
+                    "JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:"
+                    "$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" "
+                    "/home/dbalwada/legoESM/.venv/bin/python -m pytest -q "
+                    "tests/ocean/unit/test_tke_nemo_terms.py"),
+                "result": "52 passed in 37.95s",
+            },
+            "focused_identity_and_prognostic": {
+                "command": (
+                    "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu "
+                    "JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:"
+                    "$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" "
+                    "/home/dbalwada/legoESM/.venv/bin/python -m pytest -q "
+                    "tests/ocean/unit/test_tke_nemo_identity.py "
+                    "tests/ocean/unit/test_tke_prognostic.py"),
+                "result": "76 passed in 129.34s",
+            },
+            "vertical_mixing_consumers_non_mpas": {
+                "command": (
+                    "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu "
+                    "JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:"
+                    "$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" "
+                    "/home/dbalwada/legoESM/.venv/bin/python -m pytest -q "
+                    "tests/ocean/unit/test_tke_integration.py "
+                    "tests/ocean/unit/test_combined_pipeline_tke_evd_gate.py "
+                    "tests/ocean/unit/test_implicit_vertical_mixing.py "
+                    "tests/ocean/unit/test_tke_post_mixing.py "
+                    "tests/ocean/unit/test_tke_dry_wmask.py "
+                    "tests/ocean/unit/test_tke_n2_before_advection.py"),
+                "result": "57 passed in 110.32s",
+            },
+            "vertical_mixing_consumers_mpas": {
+                "command": (
+                    "env -u JAX_ENABLE_X64 CUDA_VISIBLE_DEVICES='' "
+                    "JAX_PLATFORMS=cpu PYTHONPATH=\"$PWD/packages/ocean:"
+                    "$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" "
+                    "/home/dbalwada/legoESM/.venv/bin/python -m pytest -q "
+                    "tests/ocean/unit/test_mpas_tke.py"),
+                "result": "36 passed, 9 warnings in 43.05s",
+            },
+            "mpas_forced_x64_diagnostic_not_a_pass": {
+                "command": (
+                    "env CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu "
+                    "JAX_ENABLE_X64=1 PYTHONPATH=\"$PWD/packages/ocean:"
+                    "$PWD/packages/core:$PWD/src:${PYTHONPATH:-}\" "
+                    "/home/dbalwada/legoESM/.venv/bin/python -m pytest -q "
+                    "tests/ocean/unit/test_mpas_tke.py"),
+                "result": "34 passed, 2 failed, 9 warnings in 39.41s",
+                "cause": (
+                    "forced process-global x64 makes scan inputs float64 "
+                    "against the MPAS float32 policy; the supported clean "
+                    "policy command above passes"),
+            },
+            "red_before_fix": {
+                "result": (
+                    "reviewer reproduction at 2cb678259: 2 failed; the prior "
+                    "report's 1-failed count is retracted"),
+            },
         },
         "provenance": {
             "repo": {"head": repo_head, "dirty": repo_dirty,
