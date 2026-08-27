@@ -90,15 +90,15 @@ git -C "$SLOT_ROOT" apply \
   /tmp/codex-basin-rect/scripts/validate/ocean_fidelity/dino_1226/nemo_endwall_tau_slot.patch
 CONDA_NO_PLUGINS=true conda run -n nemo-build \
   "$SLOT_ROOT/makenemo" -n DINO -m conda -j 4
-mkdir "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R"
+mkdir "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R"
 cp "$ORACLE/cfgs/DINO/RUN_D180_1STEP_1R/namelist_cfg" \
    "$ORACLE/cfgs/DINO/RUN_D180_1STEP_1R/namelist_ref" \
-   "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/"
+   "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R/"
 ln -s "$ORACLE/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc" \
-  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/DINO_00005760_restart.nc"
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R/DINO_00005760_restart.nc"
 ln -s "$SLOT_ROOT/cfgs/DINO/BLD/bin/nemo.exe" \
-  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R/nemo"
-cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R"
+  "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R/nemo"
+cd "$SLOT_ROOT/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R"
 ./nemo >run_1step.log 2>&1
 ```
 
@@ -108,7 +108,7 @@ reference streams, and all four `dynzdf` bracket streams. Then run:
 
 ```bash
 .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/verify_nemo_endwall_tau_slot.py \
-  --run-dir /tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/RUN_TAU_SLOT_NAMED_1R \
+  --run-dir /tmp/nemo-tau-slot-eaef2a1e1/cfgs/DINO/RUN_TAU_SLOT_NATIVE_1R \
   --restart DINO_00005761_restart.nc --rdt-seconds 5400
 ```
 
