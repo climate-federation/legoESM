@@ -1122,3 +1122,63 @@ def test_gate_refuses_an_unknown_arm_name():
                "provenance": _STAMP_NO_ARM}]
     with pytest.raises(SystemExit, match="expected one of"):
         M.assert_map_provenance(stamps, "/oracle/d180", "nmeo")
+
+
+# --------------------------------------------------------------------------
+# #1455 next-action 1: the VERTEX-CORIOLIS arm gets the same treatment, and it
+# needs its own because the pair's registered JOINT arm sets BOTH knobs.  A
+# directory carrying both substitutions and a directory carrying only the e1v
+# one are indistinguishable in the arrays; the stamp is the only difference,
+# so each knob is checked separately and neither may alibi the other.
+# --------------------------------------------------------------------------
+_STAMP_COR_ARM = _STAMP + " DINO_1455_SUB_CORIOLIS='nemo'"
+_STAMP_JOINT_ARM = (_STAMP + " DINO_1455_SUB_VFACE='nemo'"
+                    " DINO_1455_SUB_CORIOLIS='nemo'")
+
+
+def test_coriolis_arm_of_normalises_an_unstamped_map_to_none():
+    assert M.coriolis_arm_of(M.parse_stamp(_STAMP)) == "none"
+    assert M.coriolis_arm_of(M.parse_stamp(_STAMP_NEMO_ARM)) == "none"
+    assert M.coriolis_arm_of(M.parse_stamp(_STAMP_COR_ARM)) == "nemo"
+
+
+def test_gate_refuses_coriolis_arm_maps_scored_as_the_baseline():
+    stamps = [{"path": f"m{i}", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP_COR_ARM} for i in range(5)]
+    with pytest.raises(SystemExit, match="vertex-Coriolis"):
+        M.assert_map_provenance(stamps, "/oracle/d180")
+    got = M.assert_map_provenance(stamps, "/oracle/d180", "none", "nemo")
+    assert got["coriolis_arm"] == "nemo"
+
+
+def test_gate_separates_the_JOINT_arm_from_the_e1v_arm():
+    """The pair's whole point: 'both together' must not read as 'e1v alone'.
+
+    This is the mutation that would sink the three-arm test -- scoring the
+    joint arm's maps under the e1v arm's label would attribute the pair's
+    collapse to one half of it.
+    """
+    stamps = [{"path": f"m{i}", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP_JOINT_ARM} for i in range(5)]
+    with pytest.raises(SystemExit, match="vertex-Coriolis"):
+        M.assert_map_provenance(stamps, "/oracle/d180", "nemo", "none")
+    got = M.assert_map_provenance(stamps, "/oracle/d180", "nemo", "nemo")
+    assert got["vface_arm"] == "nemo" and got["coriolis_arm"] == "nemo"
+
+
+def test_gate_refuses_a_MIXED_coriolis_directory_and_judges_every_map():
+    """Map 0 baseline, maps 1-4 arm: the check must live INSIDE the loop."""
+    good = {"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+            "provenance": _STAMP}
+    stamps = [good] + [{"path": f"m{i}", "kt": 5760,
+                        "seqdump": "/oracle/d180",
+                        "provenance": _STAMP_COR_ARM} for i in range(1, 5)]
+    with pytest.raises(SystemExit, match="m1"):
+        M.assert_map_provenance(stamps, "/oracle/d180", "none", "none")
+
+
+def test_gate_refuses_an_unknown_coriolis_arm_name():
+    stamps = [{"path": "m0", "kt": 5760, "seqdump": "/oracle/d180",
+               "provenance": _STAMP}]
+    with pytest.raises(SystemExit, match="expected one of"):
+        M.assert_map_provenance(stamps, "/oracle/d180", "none", "nmeo")

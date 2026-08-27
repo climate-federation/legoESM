@@ -517,12 +517,31 @@ own dumped `ff_f`:
 | v-face zonal metric gap (this arm's candidate) | **+1.86e-05** | 2.08e-05 | +3.35e-05 | +2.9e-09 |
 | Coriolis at the vertex | **−5.48e-05** | 6.15e-05 | −2.50e-05 | −9.19e-05 |
 
-The two are exactly complementary: the metric error peaks at the walls and
-vanishes at the equator, the Coriolis error does the reverse, and their signed
-latitude profiles correlate at +1.000 (their *magnitudes* at −1.000 — the same
-fact stated two ways). In the coefficient, which goes as `e1v · f`, a positive
-relative error in one and a negative one in the other **partially cancel**. This
-arm removed the smaller of the two.
+The two are exactly complementary in LATITUDE: the metric error peaks at the
+walls and vanishes at the equator, the Coriolis error does the reverse, and
+their signed latitude profiles correlate at +1.000 (their *magnitudes* at
+−1.000 — the same fact stated two ways). That part stands.
+
+> **RETRACTED 2026-08-26 — the sentence that used to follow is wrong.** It read:
+> "In the coefficient, which goes as `e1v · f`, a positive relative error in one
+> and a negative one in the other **partially cancel**." They do — in the
+> **zonal** tendency. They do **not** in the meridional one, which is the
+> wall-normal component this document scores. Measured on
+> `een_barotropic_coriolis` (metric-complete, +1 % on one array at a time):
+> `e1v` moves the zonal tendency by 1.431e-06 and the meridional tendency by
+> **exactly 0.000e+00**, because the operator carries `e1v` into the zonal
+> output and `e2u` into the meridional one. In this document's own registered
+> channel the Coriolis error is **unpaired**, and there is nothing for the
+> metric half to cancel against.
+>
+> The registered three-arm test was run and agrees independently: the joint arm
+> is the SUM of its halves, not more, and the two halves act on DISJOINT bands —
+> the metric owns the northern lobe (61.7 % against the Coriolis half's −1.5 %),
+> the Coriolis owns both interior bands (32.1 % / 25.8 % against the metric
+> half's −3.7 % / −2.8 %). See `dino_coriolis_pair_result.md`.
+
+This arm removed the smaller of the two *in the zonal tendency*, and one of two
+independent errors in the meridional one.
 
 **And one third of that Coriolis gap is not a discretisation convention at
 all.** It decomposes into a uniform **−1.578e-05** and a latitude-varying
@@ -532,6 +551,17 @@ sidereal day, confirmed from NEMO's own `phycst.F90` and independently from the
 dumped `ff_f`). An oracle-matching card is running on a rotation rate the oracle
 does not use. Verified premises: legoESM's tracer latitudes equal NEMO's
 `gphit` to 1.4e-14 degrees, so this is a constant, not a grid difference.
+
+> **UPDATED 2026-08-26 — right, and the mechanism is one step further back than
+> "the card".** The card's pinned rate DID reach every config-side consumer;
+> what it never reached was the GEOMETRY, whose Coriolis arrays the NEMO bridge
+> built from its own default argument (legoESM's rounded constant). The split
+> was config-versus-geometry. And `7.2921150830e-05` is NEMO's `#else` branch:
+> the preset carried the `key_cice` literal `7.292116e-05`, a further 1.257e-07
+> away — 125x smaller than the gap that mattered, and not to be quoted as its
+> peer. Both fixed; one rotation rate now reaches every site, bit-identical to
+> the rate recovered from NEMO's own `ff_f`. See
+> `dino_coriolis_pair_result.md` §2.
 
 ### Stamps
 

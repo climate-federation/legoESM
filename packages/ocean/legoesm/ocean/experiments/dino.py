@@ -100,9 +100,10 @@ class DINOConfig:
     # Earth rotation rate [rad/s], feeds f = 2*omega*sin(lat) at grid
     # construction (create_mercator_grid). Defaults to legoESM's canonical
     # (rounded) value; the NEMO oracle card pins NEMO's own value via
-    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:89, the
-    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday,
-    # matching the key_cice literal to 8 sig figs). legoESM's rounded
+    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:91, the
+    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday --
+    # :89 is the key_cice literal, which DINO does NOT take and which this
+    # preset used to carry). legoESM's rounded
     # constants.Omega is a 4-sig-fig rounding of the SAME physical constant,
     # not a different convention -- global constants.Omega is left alone
     # (125 call sites across atm/ocean/ice, canaried by
@@ -121,6 +122,18 @@ class DINOConfig:
     # exemption). Default "exact" is BIT-IDENTICAL to every prior DINO run;
     # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
     metric_convention: str = "exact"
+
+    # Where the vertex Coriolis is EVALUATED (#1455).  "cell_average"
+    # (default, BIT-IDENTICAL to every prior DINO run) averages the two
+    # adjacent tracer rows; "face_latitude" evaluates f AT the v-face
+    # latitude, which is NEMO's own ff_f convention (2*omega*sin(gphif)).
+    # Measured against NEMO's dumped ff_f on the DINO mesh, the cell average
+    # is low by a median 3.6e-05 relative once the rotation rate is divided
+    # out (coriolis_omega_routing_audit.py). Threaded into
+    # LatLonCGridOceanConfig.coriolis_placement below; the bridged oracle lane
+    # must ALSO pass it to bridge_nemo_to_legoesm_topo, which is where that
+    # lane's geometry is built.
+    coriolis_placement: str = "cell_average"
 
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
@@ -3321,6 +3334,8 @@ def dino_lat_lon_model_config(
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
+        # #1455: vertex-Coriolis placement (see the DINOConfig field).
+        coriolis_placement=cfg.coriolis_placement,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).

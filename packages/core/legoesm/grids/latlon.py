@@ -1022,6 +1022,7 @@ def ensure_geometry(
     omega: float | None = None,
     *,
     metric_convention: str = "exact",
+    coriolis_placement: str = "cell_average",
 ) -> "LatLonCGridGeometry":
     """Convert a ``LatLonGrid`` to ``LatLonCGridGeometry`` if needed.
 
@@ -1044,6 +1045,14 @@ def ensure_geometry(
         through the conversion — the previous ``constants.Omega``
         default silently re-rotated it (#521, codex 2026-07-03
         round-4 HIGH).
+    coriolis_placement : {"cell_average", "face_latitude"}, optional
+        Forwarded to :func:`create_latlon_geometry` when converting
+        from a ``LatLonGrid``.  **A no-op when *grid* is ALREADY a**
+        ``LatLonCGridGeometry`` -- the early returns above skip
+        conversion entirely, so a caller holding a pre-built geometry
+        (the NEMO bridge builds one) must select the convention where
+        that geometry is built, not here.  Default ``"cell_average"``
+        is BIT-IDENTICAL to every existing caller.
     metric_convention : {"exact", "nemo_isotropic"}, optional (#1226)
         Forwarded to :func:`create_latlon_geometry` when converting
         from a ``LatLonGrid`` (a no-op when *grid* is already a
@@ -1087,6 +1096,7 @@ def ensure_geometry(
         # geometries are bit-unchanged.
         lat_face_1d=getattr(grid, "lat_v", None),
         metric_convention=metric_convention,
+        coriolis_placement=coriolis_placement,
     )
 
 
@@ -1384,6 +1394,7 @@ def create_latlon_geometry(
     lon_1d: jax.Array | None = None,
     lat_face_1d: jax.Array | None = None,
     metric_convention: str = "exact",
+    coriolis_placement: str = "cell_average",
 ) -> LatLonCGridGeometry:
     """Create a regular lat-lon ``LatLonCGridGeometry``.
 
@@ -1447,10 +1458,73 @@ def create_latlon_geometry(
         on uniform-dlat grids (scalar-dlat branch has no ``dlat_1d``
         to override).
 
+    coriolis_placement : {"cell_average", "face_latitude"}, optional
+        Where the Coriolis parameter at the v-point / vertex is
+        EVALUATED.  ``f_T`` and ``f_u`` are unaffected by this flag and
+        never need to be: on a lat-lon grid the u-point shares the
+        tracer row's latitude, so ``f_u`` is already ``f`` at its own
+        point (the zonal 4-point average of a latitude-only field is
+        that field).  The v-point does not, and there the two
+        conventions differ:
+
+        * ``"cell_average"`` (default, BIT-IDENTICAL to every existing
+          caller) — ``f_v`` is the arithmetic mean of the two adjacent
+          tracer rows' ``f``, with the polar rows carried over from the
+          nearest tracer row.
+        * ``"face_latitude"`` — ``f_v = 2 Omega sin(phi_face)``,
+          evaluated at the v-face latitude itself.  This is what NEMO
+          does (``ff_f = 2 omega sin(gphif)``, ``domain.F90`` /
+          ``usrdef_hgr.F90``), and it is what any C-grid model that
+          defines its Coriolis at the F-point does; select it to match
+          one.
+
+        THE TRADE, measured by ``tests/ocean/unit/
+        test_coriolis_placement.py`` with the model's own curl operator
+        on a stretched mesh, NOT asserted here: the cell average IS the
+        discrete curl of solid-body rotation (``|curl - f_v|/2Omega``
+        median 4.1e-15, i.e. exact), and ``"face_latitude"`` is 2.0e-05
+        off it.  So selecting the face convention buys oracle fidelity
+        and gives up discrete planetary-vorticity (Kelvin/Stokes)
+        consistency: a fluid in exact solid-body co-rotation acquires a
+        spurious vorticity, fixed in space.  It does NOT give up the
+        EEN energy/enstrophy identities, which are generic in the vertex
+        field -- a RANDOM vertex array conserves just as well, because
+        those need every paired (u, v) contribution to share ONE vertex
+        value, not a particular value.  That exoneration is measured on
+        the EEN triads ONLY; the face-f path
+        (``barotropic_common.coriolis_at_faces``) pairs ``f_u`` with
+        ``f_v`` and this flag moves ``f_v`` alone, so its work residual
+        is UNMEASURED.  NEMO itself is on the face convention.
+
+        The two agree to ``cos(dphi/2)`` on a grid with CONSTANT
+        latitude spacing — a uniform factor there, indistinguishable
+        from a rotation-rate change — and disagree with a genuine
+        latitude structure on a stretched (Mercator) grid.  On NEMO's
+        DINO mesh the cell-average convention is low by a median
+        3.6e-05 relative against NEMO's own dumped ``ff_f``
+        (``scripts/validate/ocean_fidelity/dino_1226/
+        coriolis_omega_routing_audit.py``).
+
+        ``f_v`` is the SINGLE array every C-grid Coriolis path reads,
+        through one of two helpers, so this is the only place the
+        convention has to change (verified by grep, not asserted):
+        ``latlon_cgrid_operators.vertex_coriolis`` -> ``grid.f_v``
+        serves the barotropic EEN pre-block and the 3-D EEN/ENE
+        vorticity flux, and ``barotropic_common.coriolis_at_faces``
+        -> ``grid.f_u``/``grid.f_v`` serves the semi-implicit and
+        ``explicit_ab2`` face-f Coriolis.  ``f_u`` is returned
+        unchanged by this flag for the reason given above.  Raises
+        ``ValueError`` on any other value.
+
     Returns
     -------
     LatLonCGridGeometry
     """
+    if coriolis_placement not in ("cell_average", "face_latitude"):
+        raise ValueError(
+            f"coriolis_placement must be 'cell_average' or 'face_latitude', "
+            f"got {coriolis_placement!r}"
+        )
     if metric_convention not in ("exact", "nemo_isotropic"):
         raise ValueError(
             f"metric_convention must be 'exact' or 'nemo_isotropic', "
@@ -1694,9 +1768,30 @@ def create_latlon_geometry(
     f_u_interior = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_interior, f_u_interior[:, 0:1]], axis=1)
 
-    # f at v-points: average of cells sharing the lat-face
-    f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
-    f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
+    # f at v-points -- the one place the REGULAR LAT-LON vertex Coriolis
+    # convention lives.  Scope, because "the ONE place" was too strong: the
+    # tripolar builder and create_beta_plane_cgrid_geometry each construct
+    # their own f_v and do NOT take this option (on a beta-plane the two
+    # conventions coincide exactly, so there is nothing there to select).
+    # Every C-grid Coriolis path in the repo reads THIS array, through one of
+    # two helpers: `latlon_cgrid_operators.vertex_coriolis` (the barotropic EEN
+    # pre-block and the 3-D EEN/ENE vorticity flux) and
+    # `barotropic_common.coriolis_at_faces` (the semi-implicit and
+    # `explicit_ab2` face-f Coriolis).  So the selector belongs here and
+    # nowhere else.
+    if coriolis_placement == "cell_average":
+        # The arithmetic mean of the two adjacent tracer rows; the polar rows
+        # carry over from the nearest tracer row.
+        f_v_interior = 0.5 * (f_T[:-1] + f_T[1:])
+        f_v = jnp.concatenate([f_T[0:1], f_v_interior, f_T[-1:]], axis=0)
+    else:  # "face_latitude" -- validated at function entry
+        # f evaluated AT the v-face latitude, NEMO's ff_f convention.  Computed
+        # in native precision and cast once, exactly as f_T is, so the two
+        # arrays are consistent to the storage dtype rather than to whatever
+        # order the arithmetic happened to fall in.  The polar rows are the
+        # true wall latitudes here (sin = +-1), not a carried-over tracer row.
+        f_v = _c(2.0 * omega * jnp.sin(lat_face)[:, jnp.newaxis]
+                 * jnp.ones((1, n_lon)))
 
     # ------- Rotation angles (zero for regular lat-lon) -------
     cos_alpha_u = jnp.ones((n_lat, n_lon + 1), dtype=dtype)

@@ -160,7 +160,8 @@ def load_maps(map_dir: str, kts=CONSECUTIVE_KTS) -> dict:
 # was omitted entirely.  So the gate was checking three switches that cannot
 # matter and missing the one that can.
 _PRODUCER_KNOBS = ("DINO_1226_T_SECONDS", "DINO_1226_IC_STEP",
-                   "LEGOESM_NEMO_E3T", "DINO_1455_SUB_VFACE")
+                   "LEGOESM_NEMO_E3T", "DINO_1455_SUB_VFACE",
+                   "DINO_1455_SUB_CORIOLIS")
 # Recorded for the audit trail, explicitly NOT used as a wind-on witness.
 _INERT_KNOBS = ("DINO_HU_WIND", "DINO_ZUFRC_WIND", "DINO_SEAM_WIND",
                 "DINO_RECONCILE")
@@ -181,6 +182,12 @@ def parse_stamp(prov: str) -> dict:
 #: at all and normalises to this).
 _VFACE_ARMS = ("none", "nemo", "stagger")
 
+#: The vertex-Coriolis arms, added for #1455 next-action 1.  Same three states
+#: and the same reason: a map produced with NEMO's own ff_f substituted into
+#: the loop is a well-formed array on an identical wet mask, so which arm made
+#: it can only travel with it as a stamp.
+_CORIOLIS_ARMS = ("none", "nemo", "stagger")
+
 
 def vface_arm_of(parsed: dict) -> str:
     """Normalise one stamp's v-face arm to a member of ``_VFACE_ARMS``."""
@@ -188,8 +195,15 @@ def vface_arm_of(parsed: dict) -> str:
     return "none" if got in (None, "None", "") else got
 
 
+def coriolis_arm_of(parsed: dict) -> str:
+    """Normalise one stamp's vertex-Coriolis arm to ``_CORIOLIS_ARMS``."""
+    got = parsed.get("DINO_1455_SUB_CORIOLIS")
+    return "none" if got in (None, "None", "") else got
+
+
 def assert_map_provenance(stamps: list, cli_seqdump: str,
-                          vface_arm: str = "none") -> dict:
+                          vface_arm: str = "none",
+                          coriolis_arm: str = "none") -> dict:
     """Refuse to run unless the maps agree AND are in the expected ON state.
 
     AGREEMENT IS NOT ENOUGH, which is what round-3 review caught: five
@@ -221,6 +235,9 @@ def assert_map_provenance(stamps: list, cli_seqdump: str,
     if vface_arm not in _VFACE_ARMS:
         raise SystemExit(
             f"vface_arm={vface_arm!r}: expected one of {_VFACE_ARMS}")
+    if coriolis_arm not in _CORIOLIS_ARMS:
+        raise SystemExit(
+            f"coriolis_arm={coriolis_arm!r}: expected one of {_CORIOLIS_ARMS}")
     parsed = [parse_stamp(st["provenance"]) for st in stamps]
     first = parsed[0]
 
@@ -278,6 +295,17 @@ def assert_map_provenance(stamps: list, cli_seqdump: str,
                 f"{vface_arm_of(got)!r}, but this run is scoring "
                 f"{vface_arm!r}. Mixing arms in one directory averages two "
                 "different experiments into one five-state mean.")
+        # THE VERTEX-CORIOLIS ARM, per map, for exactly the same reason.  The
+        # #1455 pair is scored on a JOINT arm, so a directory can legitimately
+        # carry BOTH substitutions -- which is precisely why each has to be
+        # named and checked separately: "the joint arm" and "the e1v arm" are
+        # indistinguishable in the arrays and differ only here.
+        if coriolis_arm_of(got) != coriolis_arm:
+            raise SystemExit(
+                f"FATAL: {st['path']} was produced with the vertex-Coriolis "
+                f"arm {coriolis_arm_of(got)!r}, but this run is scoring "
+                f"{coriolis_arm!r}. Mixing arms in one directory averages two "
+                "different experiments into one five-state mean.")
 
     # (3) the CLI oracle directory must be one the maps came from
     seqdumps = [st["seqdump"] for st in stamps]
@@ -289,6 +317,7 @@ def assert_map_provenance(stamps: list, cli_seqdump: str,
             "increment and the bias would come from different runs.")
     return {"producer_knobs": {k: first[k] for k in _PRODUCER_KNOBS},
             "vface_arm": vface_arm,
+            "coriolis_arm": coriolis_arm,
             "inert_knobs_recorded_not_checked": {k: first[k]
                                                  for k in _INERT_KNOBS},
             "seqdumps": seqdumps,
@@ -1016,6 +1045,13 @@ def main() -> None:
                          "substituted), or 'stagger' (the un-shifted array, "
                          "the registered staggering control). Every map in "
                          "the directory must carry this arm.")
+    ap.add_argument("--coriolis-arm", default="none", choices=_CORIOLIS_ARMS,
+                    help="which vertex-Coriolis arm these maps are: 'none', "
+                         "'nemo' (NEMO's own ff_f substituted) or 'stagger' "
+                         "(the un-shifted array, the registered staggering "
+                         "control). Independent of --vface-arm: the #1455 "
+                         "pair's JOINT arm sets BOTH to 'nemo'. Every map in "
+                         "the directory must carry this arm.")
     ap.add_argument("--out", default=os.path.join(
         REPO, "results", "dino_1455", "baro_fixed_bias_wall_map.json"))
     args = ap.parse_args()
@@ -1052,11 +1088,15 @@ def main() -> None:
     M = load_maps(args.map_dir)
     wetu, wetv = M["wetu"][0] > 0.5, M["wetv"][0] > 0.5
     wgt = M["wgt_primary"][0]
-    prov = assert_map_provenance(M["_stamps"], args.seqdump, args.vface_arm)
+    prov = assert_map_provenance(M["_stamps"], args.seqdump, args.vface_arm,
+                                 args.coriolis_arm)
     inv = wind_step_invariance(M["_stamps"])
     print("\n=== MAP PROVENANCE GATE ===")
     print(f"  v-face metric arm these maps are scored as: {args.vface_arm!r} "
           f"(checked per map against each map's own stamp)")
+    print(f"  vertex-Coriolis arm these maps are scored as: "
+          f"{args.coriolis_arm!r} (checked per map against each map's own "
+          f"stamp)")
     print(f"  producer's OWN knobs, checked against their ON state: "
           f"{prov['producer_knobs']}")
     print(f"  inert knobs (belong to other probes; recorded, NOT a wind-on "
