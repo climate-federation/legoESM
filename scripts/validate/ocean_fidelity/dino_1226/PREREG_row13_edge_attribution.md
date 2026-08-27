@@ -243,3 +243,65 @@ exact scored paths and days; legoESM launch SHA; every candidate's
 the NEMO member directories; oracle restart path and recovered elapsed clock;
 legacy-clock environment before and after the audited compatibility path; and
 the exact effective data-path strings used by the loaders.
+
+## 10. Adversarial-review correction protocol (post-registration amendment)
+
+This section was fixed after the first result and before any corrected state
+statistic was computed.  It is a review-mandated amendment, **not** part of the
+original pre-registration.  The original day-360-template attribution and its
+row-49 P3 claim are retracted: day 360 both defined the template and dominated
+the four-point correlation.
+
+For reference region `S` and held-out horizon `t`, the corrected template is
+
+```
+M[S,-t,j] = mean over members m and horizons h != t of G[m,h,j]
+```
+
+so the state being scored never contributes at its horizon to its template.
+The held-out profile is projected onto an RMS-normalized template:
+
+```
+Q[S,m,t] = mean_j(G[m,t,j] * M[S,-t,j]) / rms_j(M[S,-t,j])
+```
+
+This has units of Sv per row and removes the original incommensurable raw
+`dot(M,M)` denominators between regions.  Every fold's raw squared norm, RMS,
+and effective divisor `n_rows * rms` are recorded.  A zero-RMS template is
+UNMEASURABLE.
+
+The four 1e-14-nudge members are not independent replicates.  The control
+member (`m=0`) is the sole primary score; members 1--3 are sensitivity traces
+and their median/range confer no replication.  Effective independent member
+tests are approximately one.  With four horizons, Pearson's null is exactly
+uniform on `[-1,1]`, hence the unadjusted two-sided tail probability is
+`p = 1 - abs(r)`.  This receipt is printed beside every correlation and every
+correlation bar.  The eight target/reference comparisons are exploratory and
+receive no multiplicity claim.
+
+The original numerical bars are retained only as descriptive routing rules,
+not significance thresholds.  The member-count condition is deleted.  A
+basin-side descriptive match additionally requires its immediate basin
+neighbour correlation to be at least the immediate channel-neighbour
+correlation; a channel-side match has the symmetric requirement.  Thus an arm
+cannot win while the closest immediate-neighbour match is on the opposite
+side.  Separations are printed to two decimals and explicitly labelled as
+smaller than the sampling resolution of four horizons.  Outputs use
+`DESCRIPTIVE_*_LOW_N` or `UNRESOLVED_LOW_N`, never `CONFIRMED_*`.
+
+The symmetry output gains an amplitude-aware cell at every horizon: median
+absolute gap for each row, row49/row13 ratio, and their absolute difference.
+At day 360 a ratio in `[0.75, 1.25]` is descriptively amplitude-matched; a ratio
+`<= 0.50` is descriptively row-13-dominant.  This cell does not require row 49
+to fall within its locally scaled floor.  Unsaturated row floors still qualify
+the amplitudes as saved-state upper bounds, not physical-gap confirmations.
+Trajectory symmetry remains a separate four-point correlation with its exact
+null receipt.
+
+The power control must generate synthetic row trajectories, build the real
+horizon-held-out normalized templates, perform the real projections and
+Pearson correlations, and only then invoke the routing rule.  Passing
+pre-computed scores to the classifier is no longer accepted.  The corrected
+JSON artifact is committed at
+`docs/ocean/fidelity/dino_row13_edge_attribution_artifact.json`, and printed
+output starts with both explicit retractions.
