@@ -38,7 +38,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export PYTHONPATH="$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src"
 cd "$REPO"
 
-for RES in 192 384; do
+for RES in ${RESLIST:-192 384}; do
   echo "=== C${RES} km=10 ==="
   srun --mpi=pmix \
     env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
