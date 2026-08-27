@@ -101,16 +101,21 @@ implementation difference whose wall-row consequence remains to be measured.
 | 10 | NEMO commits a second LBC on normalized `un_adv/vn_adv` after the loop (`dynspg_ts.F90:999-1011`). | legoESM returns its separately accumulated transport output without a corresponding statement-level halo commit (`barotropic_latlon_cgrid.py:1577-1616`). | **DIFF (transport boundary representation)**, but scoped out of eta ownership: this output feeds tracer transport, not the completed eta. It remains a control unless a next-step eta consumer is demonstrated. |
 | 11 | Immediately before `dyn_zdf`, NEMO temporarily installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | legoESM retains the primary velocity-average momentum state and routes Hu/Hv separately to tracer transport (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1618-1650,1760`). | **DIFF (bookkeeping only; CLOSED as momentum candidate)**. Active vector `dyn_zdf` builds Kaa from Kbb and Krhs (`cfgs/DINO/MY_SRC/dynzdf.F90:133-159`), not Kmm velocity, and later reconciliation restores the momentum mean. |
 | 12 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
-| 13 | After `dyn_zdf`, `mlf_baro_corr` installs the after barotropic mean (`stpmlf.F90:396-409,752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8100-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
+| 13 | `ssh_atf` applies the plain Robert-Asselin update to Nnn ssh; its variable-volume freshwater correction is exactly zero for DINO (`cfgs/DINO/MY_SRC/stpmlf.F90:455-472`; `sshwzv.F90:518-531`; `usrdef_sbc.F90:251-259`). | `_leapfrog_step` applies `now + gamma*(before-2*now+after)` to eta and stores it as the next before level (`ocean_model_latlon_cgrid.py:8644-8665,8683-8689`). | **MATCH** formula/time levels. The existing forward bracket reports correlation 1 and ratio 0.99999995; its tiny residual is not a source verdict. |
+| 14 | After tracer completion, `mlf_baro_corr` installs the after barotropic mean (`cfgs/DINO/MY_SRC/stpmlf.F90:578`; reconcile body `:752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8081-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
+| 15 | `finalize_lbc` commits U/V after-level vector signs and halos before momentum filtering (`cfgs/DINO/MY_SRC/stpmlf.F90:579-613,820-836`). | The serial domain continuously masks/wraps after-level arrays and has no discrete post-solver halo commit (`ocean_model_latlon_cgrid.py:8524-8530,8744-8759`). | **DIFF (final boundary representation)**. Existing sign/idempotence controls pass, but its next-step wall-Nyquist consequence is not exonerated; it joins the registered same-input boundary counterfactual. |
+| 16 | Active vector `dyn_atf_qco` applies the plain velocity Robert-Asselin filter to Nnn after `finalize_lbc` (`cfgs/DINO/MY_SRC/stpmlf.F90:612-613`; `dynatf_qco.F90:150-167`). | `_leapfrog_step` uses the same formula and stores filtered u/v as the next before level (`ocean_model_latlon_cgrid.py:8644-8660,8683-8689`). | **MATCH** formula/order; the committed forward bracket is exact for u and v. |
+| 17 | The index swap makes filtered Nnn the next Nbb and after Naa the next Nnn (`cfgs/DINO/MY_SRC/stpmlf.F90:620-624`). | The returned `naa` carries after fields as current and the filtered fields in `*_before` (`ocean_model_latlon_cgrid.py:8683-8700`). | **MATCH** return contract. |
 
 **Candidate-A verdict: UNRESOLVED.** There is no justified single-variable GPU
 arm yet. Cross-model first divergence cannot assign a mechanism while other
 state/operator residuals coexist. The registered STOP now requires two
-same-input counterfactuals: literal NEMO LBC versus shipped boundary
-representation at the first consumers, and fixer correction `c` versus zero at
-the next-step consumers. Each predicts an independently dumped residual under
-frozen error/correlation/explained-fraction bars. No free run is authorized
-until exactly one counterfactual confirms.
+same-input counterfactuals: literal NEMO per-substep plus final post-solver LBC
+versus shipped boundary representation at their first next-step consumers,
+and fixer correction `c` versus zero at the next-step consumers. Each predicts
+an independently dumped residual under frozen error/correlation/explained-
+fraction bars. No free run is authorized until exactly one counterfactual
+confirms.
 
 ## Alignment B — wind-stress entry and placement
 
@@ -170,9 +175,11 @@ bar and neither j=1 normalized error reaches the material-DIFF bar.
 **Candidate-B placement/ownership verdict: UNRESOLVED.** The registered GPU
 discriminator runs the same bridged state for five days with only
 `surface_stress_implicit` changed. The committed preregistration contains the
-exact implicit/control commands, per-step fp64 capture contract, NEMO extractor
-and scorer invocations, artifact stamp, baseline acceptance interval, and
-`1.25/0.08` confirmation versus `2.30/0.68` refutation bars.
+exact implicit/control commands, per-step fp64 capture contract, certified
+NEMO artifact and scorer hashes, and coherent first-eight whole-domain plus
+aggregate-wall gates: `1.25/0.17` confirmation versus `2.30/0.38` refutation.
+The previous last-half/zonal-wall labels and first-sample 0.85 gate are
+retracted because they mixed different observables.
 
 ## Review disposition and retractions
 
