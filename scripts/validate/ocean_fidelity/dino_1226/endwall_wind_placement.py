@@ -47,7 +47,6 @@ os.environ.setdefault("DINO_NEMO_RUN_TWIN_STEP1",
 import dump_lane  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-import netCDF4  # noqa: E402
 import numpy as np  # noqa: E402
 import post_tendency_stage_birth as ptsb  # noqa: E402
 
@@ -55,7 +54,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "e16948c8af39a280f85352e93328541e7d3e8603"
+PREREG_COMMIT = "4d87fe112f93137f5129b3d21b9a81b5348053d6"
 
 
 def _git(args: list[str]) -> str:
@@ -287,9 +286,8 @@ def main() -> int:
     n_ws_v = n_post_v - n_pre_v
     n_fu = ptsb._load("wnd_dump_zu_frc_inc.bin")
     n_fv = ptsb._load("wnd_dump_zv_frc_inc.bin")
-    with netCDF4.Dataset(os.path.join(dump_lane.RUN_DIR, "mesh_mask.nc")) as ds:
-        um = np.asarray(ds["umask"][0, 0], dtype=bool)[2:-2, 2:-2]
-        vm = np.asarray(ds["vmask"][0, 0], dtype=bool)[2:-2, 2:-2]
+    um = np.asarray(g.umask, dtype=bool)[..., 0]
+    vm = np.asarray(g.vmask, dtype=bool)[..., 0]
 
     # NEMO u(i) maps to lego u(i+1); v(j) maps directly on this bridge.
     lu = np.asarray(b1u)[:, 1:1 + n_ws_u.shape[1], 0]
