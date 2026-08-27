@@ -23,6 +23,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     _NEMO_TKE_EMIN0,
     _NEMO_TKE_LC_CSD,
     _solve_tke_backward_euler,
+    _surface_tke_dirichlet,
     nemo_etau_injection,
     nemo_langmuir_tke_source,
     tke_vertical_mixing,
@@ -579,6 +580,41 @@ class TestNemoZ0SurfaceBCPlacement:
         actual = self._floor_only_solve(
             surface_bc_level="nemo_z0", surface_dirichlet=1.0e-4)
         np.testing.assert_array_equal(actual, np.asarray([1.0e-6, 1.0e-6]))
+
+    def test_nemo_z0_surface_min_knob_is_live_at_virtual_dirichlet_row(self):
+        """Changing tke_surface_min changes the coupled nemo_z0 solution.
+
+        The field is NEMO's rn_emin0 and therefore belongs to the virtual
+        surface Dirichlet row, not the first solved interior interface.  This
+        catches the dead-knob regression where the row read a module constant
+        and silently ignored the configuration field.
+        """
+        shape = (1, 1, 2)
+        zeros = jnp.zeros(shape)
+        taum = jnp.zeros((1, 1))
+
+        def solve(surface_min):
+            cfg = TKEConfig(
+                surface_bc="nemo_dirichlet",
+                tke_surface_bc_level="nemo_z0",
+                tke_surface_min=surface_min,
+                c_eps=0.0,
+            )
+            surface = _surface_tke_dirichlet(cfg, taum, _RHO0)
+            return np.asarray(_solve_tke_backward_euler(
+                e_old=jnp.full(shape, cfg.tke_background),
+                K_M_old=jnp.full(shape, 1.0e-3), K_H_old=zeros,
+                P_s=zeros, N2=zeros, l_eps=jnp.ones(shape),
+                dz_half=jnp.ones(shape), surface_flux=jnp.zeros((1, 1)),
+                dt=1.0, cfg=cfg, dz_surface=jnp.ones((1, 1)),
+                surface_dirichlet=surface, surface_bc_level="nemo_z0",
+                K_M_surface=jnp.full((1, 1), 1.0e-3),
+            ))
+
+        low = solve(1.0e-4)
+        high = solve(4.0e-4)
+        assert high[0, 0, 0] > low[0, 0, 0]
+        assert not np.array_equal(low, high)
 
     @pytest.mark.parametrize("surface_dirichlet", [None, 5.0e-5])
     def test_non_nemo_z0_paths_retain_first_interface_surface_min_byte_pin(
