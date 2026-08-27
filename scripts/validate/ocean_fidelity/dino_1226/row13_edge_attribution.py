@@ -669,18 +669,16 @@ def self_test(run_upstream=True):
     )
 
     for row in TARGET_ROWS:
-        classes, _, _ = zonal_classes(row)
-        blocked = classes["blocked"]
+        _, blocked, _ = zonal_classes(row)
         official = zonal_contributions(u, row)
-        if blocked.size and not np.array_equal(official[blocked], np.zeros(blocked.size)):
+        if not np.array_equal(official[blocked], np.zeros(blocked.size)):
             raise AssertionError("official blocked columns are nonzero")
-        if blocked.size:
-            poisoned = official.copy()
-            poisoned[blocked[0]] = 1e-3
-            _plant_fires(
-                "blocked-column poison",
-                lambda p=poisoned, b=blocked: np.testing.assert_array_equal(p[b], np.zeros(len(b))),
-            )
+        poisoned = official.copy()
+        poisoned[blocked[0]] = 1e-3
+        _plant_fires(
+            "blocked-column poison",
+            lambda p=poisoned, b=blocked: np.testing.assert_array_equal(p[b], np.zeros(len(b))),
+        )
 
     gaps = np.asarray([1.0, 5.0])
     floors = np.asarray([0.1, 10.0])

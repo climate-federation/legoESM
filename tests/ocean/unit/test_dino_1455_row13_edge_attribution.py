@@ -54,13 +54,10 @@ def test_blocked_partition_rejects_nonzero_blocked_column():
         assert len(blocked) == 3
         assert int(open_col.sum()) == 49
         contribution = np.zeros(E.R.A.NX)
-        scored_blocked = classes["blocked"]
-        if len(scored_blocked):
-            contribution[scored_blocked[0]] = 1.0
-            with pytest.raises(AssertionError):
-                np.testing.assert_array_equal(
-                    contribution[scored_blocked], np.zeros(len(scored_blocked))
-                )
+        assert len(classes["blocked"]) == 0
+        contribution[blocked[0]] = 1.0
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(contribution[blocked], np.zeros(len(blocked)))
 
 
 @pytest.mark.parametrize(
