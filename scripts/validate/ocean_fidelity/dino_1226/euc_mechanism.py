@@ -368,7 +368,8 @@ def tke_equation_decomposition(
         *, solve_fn, solve_record: dict[str, Any], final_lego_en: np.ndarray,
         nemo_en: np.ndarray, nemo_sh2: np.ndarray, nemo_rn2: np.ndarray,
         nemo_dissl: np.ndarray, nemo_avt_restart: np.ndarray,
-        nemo_mxl: np.ndarray, nemo_avm: np.ndarray, lego_surface_taum: np.ndarray,
+        nemo_mxl: np.ndarray, nemo_avm: np.ndarray, nemo_avm_in: np.ndarray,
+        lego_surface_taum: np.ndarray,
         nemo_utau: np.ndarray, equator_row: int, wet_at_interface: np.ndarray,
         excess_population: np.ndarray, rho_0: float) -> dict[str, Any]:
     """Run the preregistered per-term ratios and one-variable TKE replays."""
@@ -425,6 +426,8 @@ def tke_equation_decomposition(
     if max(nemo_bc_rel, lego_bc_rel) > 1.0e-10:
         raise ValueError(
             f"surface BC reconstruction failed: nemo={nemo_bc_rel:.3e}, lego={lego_bc_rel:.3e}")
+    surface_mxl_l = np.asarray(kw["K_M_surface"]) \
+        / (0.1 * np.sqrt(np.maximum(surface_l, 1.0e-300)))
 
     row = equator_row
     k = 0
@@ -466,6 +469,48 @@ def tke_equation_decomposition(
         name: _replay_summary(arm[..., k], base_final[..., k], e_n[..., k], pop2)
         for name, arm in arm_arrays.items()
     }
+    # Non-deciding ledger for why a registered arm can have little response:
+    # split the final energy into the matrix-solve result and the post-solve
+    # etau addition, and expose the TKE self-diffusion input (not a registered
+    # owner candidate in this follow-up).  This prevents a floor-clamped arm
+    # from being mistaken for evidence that its input was never substituted.
+    def pop_summary(a: np.ndarray) -> dict[str, Any]:
+        x = np.asarray(a)[row, excess_population]
+        return {
+            "geometric_mean": float(np.exp(np.mean(np.log(np.maximum(x, 1.0e-300))))),
+            "median": float(np.median(x)),
+            "iqr": np.quantile(x, [0.25, 0.75]).tolist(),
+            "min": float(np.min(x)), "max": float(np.max(x)),
+        }
+
+    nemo_pre_etau = e_n[..., k] - etau_delta[..., k]
+    floor = float(cfg.tke_background)
+    response_ledger = {
+        "lego_matrix_solve_en": pop_summary(base_solve[..., k]),
+        "lego_postsolve_etau_addition": pop_summary(etau_delta[..., k]),
+        "nemo_final_en": pop_summary(e_n[..., k]),
+        "nemo_pre_etau_inferred_with_identical_injection": pop_summary(nemo_pre_etau),
+        "lego_matrix_solve_floor_fraction": float(np.mean(
+            base_solve[row, excess_population, k] <= floor * (1.0 + 1.0e-12))),
+        "nemo_inferred_pre_etau_floor_fraction": float(np.mean(
+            nemo_pre_etau[row, excess_population] <= floor * (1.0 + 1.0e-12))),
+        "arm_max_abs_change_at_10m": {
+            name: float(np.max(np.abs(
+                arm[row, excess_population, k] - base_final[row, excess_population, k])))
+            for name, arm in arm_arrays.items()
+        },
+        "dt_times_term_magnitude": {
+            "production": pop_summary(float(kw["dt"]) * np.abs(p_l[..., k])),
+            "buoyancy": pop_summary(float(kw["dt"]) * np.abs(buoy_l[..., k])),
+            "dissipation_explicit_half": pop_summary(
+                float(kw["dt"]) * 0.5 * float(cfg.c_eps)
+                * dissl_l[..., k] * e_old[..., k]),
+        },
+        "unregistered_tke_self_diffusion_input_avm_lego_over_nemo":
+            _positive_factor_summary(
+                np.asarray(kw["K_M_old"])[..., k] / nemo_avm_in[..., 1],
+                en_ratio, pop2),
+    }
     qualifiers = []
     secondary = []
     for name in factors:
@@ -504,6 +549,7 @@ def tke_equation_decomposition(
         "energy_ratio": _positive_factor_summary(en_ratio, en_ratio, pop2),
         "factors": factors,
         "one_term_replays": replays,
+        "response_ledger": response_ledger,
         "surface_boundary": {
             "nemo_source": (
                 "cfgs/DINO/MY_SRC/zdftke.F90:334,356-365; line 361: "
@@ -519,9 +565,8 @@ def tke_equation_decomposition(
             "taum_lego_over_nemo": _positive_factor_summary(
                 lego_surface_taum / taum_n, en_ratio, pop2),
             "en_surface_lego_over_nemo": factors["surface_boundary_condition"],
-            "zmxlm_surface_lego_value_note": (
-                "legoESM surface-face viscosity uses its production ln_mxl0 anchor; "
-                "NEMO comparison uses dumped zmxlm(jk=1)"),
+            "zmxlm_surface_lego_over_nemo": _positive_factor_summary(
+                surface_mxl_l / surface_mxl_n, en_ratio, pop2),
         },
         "controls": {
             "base_solve_replay_max_relative_error": replay_rel,
@@ -671,6 +716,7 @@ def main() -> int:
     mxl_nemo = bac._load_interior(dl.dump_path("tke_dump_zmxlm.bin"), jpi - 2*hls, jpj - 2*hls)
     rn2_nemo = bac._load_interior(dl.dump_path("tke_dump_rn2.bin"), jpi - 2*hls, jpj - 2*hls)
     sh2_nemo = bac._load_interior(dl.dump_path("tke_dump_sh2.bin"), jpi - 2*hls, jpj - 2*hls)
+    avm_in_nemo = bac._load_interior(dl.dump_path("tke_dump_avm_in.bin"), jpi - 2*hls, jpj - 2*hls)
     dissl_nemo = bac._load_interior(dl.dump_path("tke_dump_dissl.bin"), jpi - 2*hls, jpj - 2*hls)
     # The shared 3-D stream loader represents a 2-D dump with a singleton
     # vertical axis.  Remove that axis explicitly and reject any other shape;
@@ -687,7 +733,7 @@ def main() -> int:
     component_time_levels = {
         name: time_level_for_dump(name) for name in (
             "tke_dump_en.bin", "tke_dump_zmxlm.bin", "tke_dump_rn2.bin",
-            "tke_dump_sh2.bin", "tke_dump_dissl.bin", "sbc_dump_utau.bin",
+            "tke_dump_sh2.bin", "tke_dump_avm_in.bin", "tke_dump_dissl.bin", "sbc_dump_utau.bin",
             "tke_dump_avm_final.bin", "dump_avm.bin", "dump_avt.bin")
     }
     # zdf_phy's post-EVD dumps retain the model halos; zdftke's internal
@@ -812,6 +858,7 @@ def main() -> int:
         final_lego_en=component_final["e"], nemo_en=en_nemo,
         nemo_sh2=sh2_nemo, nemo_rn2=rn2_nemo, nemo_dissl=dissl_nemo,
         nemo_avt_restart=avt_restart, nemo_mxl=mxl_nemo, nemo_avm=avm,
+        nemo_avm_in=avm_in_nemo,
         lego_surface_taum=np.asarray(sf.taum), nemo_utau=utau_nemo,
         equator_row=equator_row, wet_at_interface=wmask[..., 1],
         excess_population=fixed_excess, rho_0=float(mc.constants.rho_0))
@@ -857,6 +904,7 @@ def main() -> int:
         "nemo_mixing_length": Path(dl.dump_path("tke_dump_zmxlm.bin")),
         "nemo_buoyancy_frequency": Path(dl.dump_path("tke_dump_rn2.bin")),
         "nemo_shear_production": Path(dl.dump_path("tke_dump_sh2.bin")),
+        "nemo_tke_self_diffusion_input": Path(dl.dump_path("tke_dump_avm_in.bin")),
         "nemo_carried_dissipation": Path(dl.dump_path("tke_dump_dissl.bin")),
         "nemo_surface_utau": Path(dl.dump_path("sbc_dump_utau.bin")),
         "nemo_avm_realized": Path(dl.dump_path("dump_avm.bin")),
