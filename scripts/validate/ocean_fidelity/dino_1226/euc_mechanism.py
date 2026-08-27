@@ -460,6 +460,9 @@ def tke_equation_decomposition(
         "K_M_surface": jnp.asarray(km_surface_n),
     }, surface_scale)
     double_prod = replay({"P_s": jnp.asarray(2.0 * p_l)})
+    floor_cfg = dataclasses.replace(
+        cfg, tke_surface_min=float(cfg.tke_background))
+    floor_arm = replay({"cfg": floor_cfg})
 
     arm_arrays = {
         "production_sh2": prod_arm, "buoyancy_sink_rn2": buoy_arm,
@@ -469,6 +472,25 @@ def tke_equation_decomposition(
         name: _replay_summary(arm[..., k], base_final[..., k], e_n[..., k], pop2)
         for name, arm in arm_arrays.items()
     }
+    floor_replay = _replay_summary(
+        floor_arm[..., k], base_final[..., k], e_n[..., k], pop2)
+    base_pin_fraction = float(np.mean(np.isclose(
+        base_final[row, excess_population, k], float(cfg.tke_surface_min),
+        rtol=0.0, atol=1.0e-15)))
+    nemo_below_surface_floor_fraction = float(np.mean(
+        e_n[row, excess_population, k] < float(cfg.tke_surface_min)))
+    floor_confirm = (
+        base_pin_fraction >= 0.95
+        and nemo_below_surface_floor_fraction >= 0.75
+        and floor_replay["median_log_gap_closure"] >= 0.60
+        and floor_replay["moves_toward_nemo_fraction"] >= 0.75)
+    floor_refute = (
+        base_pin_fraction < 0.50
+        or floor_replay["median_log_gap_closure"] <= 0.10)
+    floor_verdict = (
+        "CONFIRM_MISPLACED_SURFACE_MIN_CLAMP" if floor_confirm else
+        "REFUTE_MISPLACED_SURFACE_MIN_CLAMP" if floor_refute else
+        "UNRESOLVED_MISPLACED_SURFACE_MIN_CLAMP")
     # Non-deciding ledger for why a registered arm can have little response:
     # split the final energy into the matrix-solve result and the post-solve
     # etau addition, and expose the TKE self-diffusion input (not a registered
@@ -530,6 +552,9 @@ def tke_equation_decomposition(
     else:
         verdict = "UNRESOLVED_TKE_EQUATION_OWNER"
         owner = None
+    physics_owner = (
+        "legoESM_misplaced_surface_min_clamp_at_first_interior_interface"
+        if floor_confirm else owner)
 
     shifted = nemo_en[..., 2]
     correct_gap = float(np.mean(np.abs(np.log(
@@ -544,11 +569,34 @@ def tke_equation_decomposition(
     return {
         "verdict": verdict,
         "owner": owner,
+        "combined_physics_owner": physics_owner,
         "n_excess": int(np.count_nonzero(excess_population)),
         "depth_m": 10.14,
         "energy_ratio": _positive_factor_summary(en_ratio, en_ratio, pop2),
         "factors": factors,
         "one_term_replays": replays,
+        "structural_surface_floor_replay": {
+            "verdict": floor_verdict,
+            "base_pinned_to_1e_4_fraction": base_pin_fraction,
+            "nemo_below_1e_4_fraction": nemo_below_surface_floor_fraction,
+            **floor_replay,
+            "nemo_source": (
+                "cfgs/DINO/MY_SRC/zdftke.F90:361 holds rn_emin0 at jk=1; "
+                ":564-565 floors solved jk=2..jpkm1 with rn_emin"),
+            "lego_source": (
+                "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:"
+                "1377-1381 applies tke_background, then unconditionally applies "
+                "tke_surface_min to e_new[...,0] even under nemo_z0"),
+            "faithful_fix_design_not_built": (
+                "Guard the :1378-1381 tke_surface_min clamp with "
+                "surface_bc_level == 'interior_pinned'. Under nemo_z0 the held "
+                "virtual z=0 row already owns rn_emin0; solved interface 0 "
+                "must retain only the tke_background/rn_emin clamp."),
+            "registered_chain_prediction": (
+                "fix -> en_L/en_N approaches 1 at 10.14 m -> buoyancy-limited "
+                "mxl and avm ratios approach 1 -> 5-26 m shear strengthens and "
+                "the EUC core shoals toward NEMO; causal trajectory arms remain required"),
+        },
         "response_ledger": response_ledger,
         "surface_boundary": {
             "nemo_source": (
