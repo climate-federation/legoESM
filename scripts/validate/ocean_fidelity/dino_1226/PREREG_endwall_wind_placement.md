@@ -35,6 +35,16 @@ together.  Those two fields are one centred wind input, not two variables.
 The exact helper control, primary operands, statistics and bars are otherwise
 unchanged.  Neither invalid run yielded a classified term score.
 
+## Version 4 mask-loader correction — frozen before third rerun
+
+The version-3 execution passed the helper and structural setup controls, then
+refused before its first statistic: the raw `mesh_mask.nc` in this lane is
+already `199x52`, and the probe stripped a second two-cell halo, producing a
+`195x48` mask against `199x52` operands.  No score was computed.  The rerun
+uses `g.umask/g.vmask` from `multistep_replay.build_replay_ic`, the same shared
+loader and already-aligned masks that built the bridged state.  Criteria and
+science operands are unchanged.
+
 ## Claim and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
