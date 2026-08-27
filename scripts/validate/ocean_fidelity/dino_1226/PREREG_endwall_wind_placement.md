@@ -47,8 +47,8 @@ live barotropic pass. Swapping the first two event labels is the planted
 violation and must fail the order equality. No score from the refused run is
 reused and no science threshold changes.
 
-Evidence re-review found that version 7 still *bypassed* rather than wired the
-allocated diagnostic slot. Version 8 registers the actual offline wiring:
+Evidence re-review found that version 7 did not exercise the allocated restart
+shape. Version 8 registered a controlled offline copy:
 load `utrd_tau/vtrd_tau` from `DINO_00005764_restart.nc`, require their emitted
 3-D arrays to be exact zero, copy them, populate only top level `k=1` with
 `(poststress-prestress)/rDt`, require every lower level to remain exact zero,
@@ -56,6 +56,16 @@ and feed all source scoring through `rDt*wired_slot[k=1]`. Controls plant a
 nonzero in the emitted slot, a nonzero at a lower level, and a material top-
 level reconstruction error; each must fire. The restart file joins the hashed
 inputs. This changes the data route, not the registered quantity or bars.
+
+Final evidence review found that version 8's words “actual offline wiring” and
+`jpdyn_tau wiring` incorrectly identified that controlled copy as NEMO's named
+diagnostic. **Those labels are retracted.** Active DINO `trddyn` defines the
+named diagnostic without the MLF half factor and with Kmm thickness; the
+offline copy contains only the independently dumped applied `dynzdf` bracket
+divided by `rDt`. Version 9 renames the routine/output to “applied-term
+slot-shape copy” and prints the retraction. No operand, number, bar, or prior
+classification changes; named-diagnostic wiring is measured only by
+`verify_nemo_endwall_tau_slot.py` under its separate preregistration.
 
 ## Candidate and inputs
 
@@ -75,7 +85,8 @@ state with 0x, 1x and 2x centred stress; every non-stress input must be exact.
 The oracle `utrd_store(:,:,:,jpdyn_tau)` /
 `vtrd_store(:,:,:,jpdyn_tau)` slot is emitted to the step-5764 restart but
 never populated by the DINO dump path. The offline probe preserves that donor,
-copies its 3-D arrays, and wires the copies as registered in version 8.
+copies its 3-D shape, and places the applied `dynzdf` term in that controlled
+copy. It does not call this NEMO's named diagnostic.
 
 ## Exact offline numbers
 

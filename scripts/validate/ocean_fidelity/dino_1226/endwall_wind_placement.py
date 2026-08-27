@@ -263,8 +263,9 @@ def _stress_helper_control(arms: dict) -> dict:
     return out
 
 
-def _wire_tau_slots(bracket_u: np.ndarray, bracket_v: np.ndarray) -> tuple:
-    """Populate the emitted 3-D jpdyn_tau slots offline from oracle brackets."""
+def _copy_applied_term_to_slot_shape(
+        bracket_u: np.ndarray, bracket_v: np.ndarray) -> tuple:
+    """Copy the applied dynzdf term into the dormant slot's 3-D shape."""
     import netCDF4
 
     restart = Path(dump_lane.RUN_DIR) / "DINO_00005764_restart.nc"
@@ -283,28 +284,29 @@ def _wire_tau_slots(bracket_u: np.ndarray, bracket_v: np.ndarray) -> tuple:
     emitted_plant_fires = not np.array_equal(
         planted_emitted, np.zeros_like(planted_emitted))
 
-    wired_u, wired_v = emitted_u.copy(), emitted_v.copy()
-    wired_u[0] = bracket_u / RDT
-    wired_v[0] = bracket_v / RDT
-    lower_zero = (np.array_equal(wired_u[1:], np.zeros_like(wired_u[1:]))
-                  and np.array_equal(wired_v[1:], np.zeros_like(wired_v[1:])))
-    planted_lower = wired_u.copy()
+    applied_u, applied_v = emitted_u.copy(), emitted_v.copy()
+    applied_u[0] = bracket_u / RDT
+    applied_v[0] = bracket_v / RDT
+    lower_zero = (np.array_equal(applied_u[1:], np.zeros_like(applied_u[1:]))
+                  and np.array_equal(applied_v[1:], np.zeros_like(applied_v[1:])))
+    planted_lower = applied_u.copy()
     planted_lower[1].flat[0] = np.nextafter(0.0, 1.0)
     lower_plant_fires = not np.array_equal(
         planted_lower[1:], np.zeros_like(planted_lower[1:]))
 
-    recon_u, recon_v = RDT * wired_u[0], RDT * wired_v[0]
+    recon_u, recon_v = RDT * applied_u[0], RDT * applied_v[0]
     recon_err = max(float(np.max(np.abs(recon_u - bracket_u))),
                     float(np.max(np.abs(recon_v - bracket_v))))
     scale = max(float(np.max(np.abs(bracket_u))),
                 float(np.max(np.abs(bracket_v))), 1.0e-300)
     recon_bar = 8.0 * np.finfo(np.float64).eps * scale
-    planted_top = wired_u.copy()
+    planted_top = applied_u.copy()
     idx = np.unravel_index(int(np.argmax(np.abs(bracket_u))), bracket_u.shape)
     planted_top[(0,) + idx] += 1.0e-6 * scale / RDT
     top_plant_fires = float(np.max(
         np.abs(RDT * planted_top[0] - bracket_u))) > recon_bar
-    print("CONTROL offline jpdyn_tau wiring: "
+    print("RETRACTION=offline_dynzdf_copy_is_not_NEMO_named_jpdyn_tau")
+    print("CONTROL offline applied-term slot-shape copy: "
           f"emitted_zero={emitted_zero} emitted_plant_fires={emitted_plant_fires} "
           f"lower_zero={lower_zero} lower_plant_fires={lower_plant_fires} "
           f"recon_err={recon_err:.6e} recon_bar={recon_bar:.6e} "
@@ -312,8 +314,8 @@ def _wire_tau_slots(bracket_u: np.ndarray, bracket_v: np.ndarray) -> tuple:
     if not (emitted_zero and emitted_plant_fires and lower_zero
             and lower_plant_fires and recon_err <= recon_bar
             and top_plant_fires):
-        raise SystemExit("offline jpdyn_tau wiring control failed")
-    return wired_u, wired_v, {
+        raise SystemExit("offline applied-term slot-shape control failed")
+    return applied_u, applied_v, {
         "emitted_zero": bool(emitted_zero),
         "emitted_plant_fires": bool(emitted_plant_fires),
         "lower_zero": bool(lower_zero),
@@ -462,12 +464,16 @@ def main() -> int:
     n_post_v = ptsb._load("zdf_dump_v1_poststress.bin")
     bracket_u = n_post_u - n_pre_u
     bracket_v = n_post_v - n_pre_v
-    wired_tau_u, wired_tau_v, slot_control = _wire_tau_slots(
-        bracket_u, bracket_v)
-    # All scoring now reads through the populated diagnostic slot.  The
-    # bracketing dumps are its source, not a parallel science operand.
-    n_ws_u = RDT * wired_tau_u[0]
-    n_ws_v = RDT * wired_tau_v[0]
+    applied_tau_u, applied_tau_v, copy_control = (
+        _copy_applied_term_to_slot_shape(
+            bracket_u, bracket_v)
+    )
+    # All scoring reads the applied dynzdf term through a controlled copy that
+    # reuses the dormant slot's 3-D shape. This is not NEMO's named tau
+    # diagnostic, which active trddyn defines without the MLF half factor and
+    # with Kmm thickness.
+    n_ws_u = RDT * applied_tau_u[0]
+    n_ws_v = RDT * applied_tau_v[0]
     n_fu = ptsb._load("wnd_dump_zu_frc_inc.bin")
     n_fv = ptsb._load("wnd_dump_zv_frc_inc.bin")
     um = np.asarray(g.umask, dtype=bool)[..., 0]
@@ -536,7 +542,7 @@ def main() -> int:
                        "oracle_lane": dump_lane.RUN_DIR, "kt": KT},
         "controls": {"entry_identity": entry_control,
                      "stress_helper": controls,
-                     "offline_tau_slot": slot_control,
+                     "offline_applied_term_copy": copy_control,
                      "hook_order": {
                          str(scale): {
                              "events": arms[scale]["events"],
