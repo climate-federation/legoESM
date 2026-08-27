@@ -29,8 +29,9 @@ changed. The failed run may not be cited as a wind-placement measurement.
 The dormant restart slot must receive the exact 2-D arrays that active
 `trddyn.F90` supplies to `iom_put("utrd_tau")` and `iom_put("vtrd_tau")`.
 The patch therefore calls `trddump_tau(z2dx,z2dy)` immediately after those
-arrays are computed and writes independent one-step stream references from the
-same arrays. It does not multiply by `r1_Dt`, and it deliberately does not
+arrays are computed and writes one-step stream references from the same
+in-memory arrays. These are two output paths, not independent evidence. It does
+not multiply by `r1_Dt`, and it deliberately does not
 enter the interval accumulator or `nacc_trd`.
 
 The verifier prints these frozen numbers:
@@ -47,7 +48,7 @@ The verifier prints these frozen numbers:
 
 ## Frozen classifications
 
-- **CONFIRMED_NAMED_TAU_SLOT_WIRED** iff `u_slot_nonzero_count > 0`, every
+- **CHECKED_CLEAN_WRITE_ONLY** iff `u_slot_nonzero_count > 0`, every
   lower-level value is exactly zero, the meridional slot/reference are exactly
   zero, and both storage maxima are no larger than
   `8*eps*max(1,max(abs(u_reference)))`.
@@ -125,7 +126,8 @@ On a writable copy of the oracle, apply and build the same patch, copy
 symlink at the rebuilt executable, and run its frozen step-5761 namelist. Hash
 the same sources, executable, inputs, output, references, and bracket streams;
 then invoke the verifier above with that run directory. A later wind/eta run
-may cite only `CONFIRMED_NAMED_TAU_SLOT_WIRED`.
+may cite only `CHECKED_CLEAN_WRITE_ONLY` and must state that slot/reference
+share one in-memory array.
 
 ## Refused-execution audit inherited from the first arm
 

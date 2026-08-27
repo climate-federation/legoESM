@@ -10,12 +10,12 @@ The accepted run receipt below names the clean probe commit, registered
 preregistration commit and content hashes. The full source/operand hash map is
 printed before any measurement output.
 
-Accepted run: clean probe commit
-`18107779e9c8af083b15addd1c444679e07af3d8`, preregistration commit
-`4869209d918843c86bbc1368abdd16db209d7831`, current preregistration SHA-256
-`e2217a90d40ab64f4c82b300f8623ef5dfeea46d838edc78f2bd028204f41ee3`,
-and probe SHA-256
-`0b6cdc0a93947a66b4881c5632cf89675afb38d30ef0cfe457db0bd935bfd9e9`.
+Accepted round-2 run: clean probe commit
+`1720482b90a2d62d0460a879c767b5f52168b54f`, correction-preregistration
+commit `7618c666f82c694f0cfb3085c636a9d51bb09c9b`, probe SHA-256
+`9e88c81dcde0d8061d543fc05b1c6e6fc9f22e50ab42ab4e8a2520dc3b65d493`,
+and retained log SHA-256
+`2c5002d963a18843c6eefec31850a8fb1d5208427141ba9b870ba357173fdea9`.
 The run used CPU fp64, `LEGOESM_NEMO_E3T=both`, the d180 lane and kt=5761.
 
 ## Outcome
@@ -27,38 +27,44 @@ wires only their top level from NEMO's pre/post-stress brackets, proves every
 lower level remains zero, and routes the source score through that copy. The
 oracle artifact itself is read-only and unchanged.
 
-The literal source gap is now closed in an isolated CPU one-step run. A
-committed NEMO patch writes the exact active `trddyn` named diagnostic into
-`jpdyn_tau` without adding tau to the registered nine-term interval
-accumulator. The patched restart and independent stream reference contain the
-same 10,082 nonzero zonal top cells; their maximum and normalized storage
-errors are exact zero, as are all lower levels and meridional controls.
-Classification: **CONFIRMED_NAMED_TAU_SLOT_WIRED**.
+The isolated CPU patch writes the active `trddyn` named array into
+`jpdyn_tau`. Its restart slot and stream have the same 10,082 nonzero top
+values and exact-zero storage residual, but both are output paths from the
+same in-memory array. The result is therefore **CHECKED-CLEAN write-only
+plumbing**, not independent verification. The patched restart has about
+10,082 nonzero `utrd_tau` entries where base `trddump.F90` asserts the slot is
+zero, so downstream budget-summing tools would differ.
 
-That named diagnostic is not the stress increment applied inside `dyn_zdf`.
-Measured against the independent pre/post-stress bracket divided by `rDt`, its
-RMS ratio is 2.0966766111, normalized difference 1.1815467878, and correlation
-0.9459345292. The preregistered source distinction is therefore
-**CONFIRMED_NAMED_AND_APPLIED_DIFFER**. This closes the previously unverified
-premise about what the dump slot represents; it does not measure the
-tridiagonal placement response or eta ownership.
+**RETRACTED loudly:** `CONFIRMED_NAMED_AND_APPLIED_DIFFER` and 2.0966766111.
+Active `dynzdf` uses `zDt_2=rDt/2`; on wet U faces the no-half named diagnostic
+is exactly twice the applied increment. The old union mask admitted 324 dry
+coastal faces, and its normalized-difference REFUTE state was unreachable.
+The replacement claim is only the wet arithmetic identity, verified to
+`1e-8`; it is not a placement or ownership finding.
 
-The wired top-cell source operand and the independently captured
-barotropic `F_slow` entry agree in RMS amplitude to within 4.1% on southern
-row j=1. The frozen source-operand verdict is nevertheless
-**PLAUSIBLE/UNRESOLVED**: the direct-deposit row correlation is 0.418, below
-the registered 0.999 equivalence bar, while both row normalized errors are
-well below the 0.25 material-DIFF bar. The `F_slow` normalized error is 0.0403
-at j=1, so the fourth wind premise is **CONFIRMED**: the supplied wind slow
-forcing reaches the split-explicit loop in tendency units without another
-face-depth division.
+The round-2 one-cell probe **CONFIRMS a localized source difference**. On
+southern row `j=1`, both direct `dynzdf` and `F_slow` put the discrepancy at
+the single face `(j=1,i=49)` out of 49: direct delta
+`3.0203216696068663e-5 m/s`, row-scale maximum `0.2500117364`, and
+peak-equivalent face count `1.0000000231`. The `F_slow` row-scale maximum is
+`0.2826356698`; the direct and `F_slow` one-percent supports have Jaccard 1.0.
+Across 9,758 wet U faces, their peak-equivalent counts are 24.27148675 and
+24.27150701. All 162 faces exceeding one percent lie at `i=49`; “about 24
+faces” is effective squared-error support, not a literal outlier count.
 
-This is not a measurement of the explicit-versus-implicit *response* through
-the tridiagonal vertical solve and is not an eta ownership test. Candidate B
-therefore remains **UNRESOLVED** pending the registered five-day placement
-A/B. Candidate A, the split-explicit machinery, also remains **UNRESOLVED**:
-source alignment leaves several statement-level differences and does not yet
-identify the first one that changes a consuming wall-row stencil.
+The proposed coastal-unmask owner is **REFUTED**. The `j=1` argmax has
+`umask=1`, both adjacent surface T cells wet, and the exact
+`sbcmod.F90:543-544` multiplier is 1, not the coastal-unmask value 2.
+`F_slow`'s full-plane material support has zero coastal overlap. The fourth
+wind premise is now stronger and citable: `F_slow` preserves the same
+localized upstream support without a second face-depth division, while the
+remaining faces agree at roundoff-to-small residual scale.
+
+Candidate B placement ownership remains **UNRESOLVED** after the five-day GPU
+A/B: implicit placement collapses the first-eight wall share to 0.05596, near
+NEMO's locus, but explodes amplitude to 201.41 through a diffuse startup
+transient. Candidate A also remains **UNRESOLVED** pending the registered
+same-input boundary/fixer consumers.
 
 ## Search and reuse audit
 
@@ -117,7 +123,7 @@ implementation difference whose wall-row consequence remains to be measured.
 | 10 | NEMO commits a second LBC on normalized `un_adv/vn_adv` after the loop (`dynspg_ts.F90:999-1011`). | legoESM returns its separately accumulated transport output without a corresponding statement-level halo commit (`barotropic_latlon_cgrid.py:1577-1616`). | **DIFF (transport boundary representation)**, but scoped out of eta ownership: this output feeds tracer transport, not the completed eta. It remains a control unless a next-step eta consumer is demonstrated. |
 | 11 | Immediately before `dyn_zdf`, NEMO temporarily installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | legoESM retains the primary velocity-average momentum state and routes Hu/Hv separately to tracer transport (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1618-1650,1760`). | **DIFF (bookkeeping only; CLOSED as momentum candidate)**. Active vector `dyn_zdf` builds Kaa from Kbb and Krhs (`cfgs/DINO/MY_SRC/dynzdf.F90:133-159`), not Kmm velocity, and later reconciliation restores the momentum mean. |
 | 12 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
-| 13 | `ssh_atf` applies the plain Robert-Asselin update to Nnn ssh; its variable-volume freshwater correction is exactly zero for DINO (`cfgs/DINO/MY_SRC/stpmlf.F90:455-472`; `sshwzv.F90:518-531`; `usrdef_sbc.F90:251-259`). | `_leapfrog_step` applies `now + gamma*(before-2*now+after)` to eta and stores it as the next before level (`ocean_model_latlon_cgrid.py:8644-8665,8683-8689`). | **MATCH** formula/time levels. The existing forward bracket reports correlation 1 and ratio 0.99999995; its tiny residual is not a source verdict. |
+| 13 | `ssh_atf` applies the plain Robert-Asselin update to Nnn ssh; its variable-volume freshwater correction is exactly zero for DINO (`cfgs/DINO/MY_SRC/stpmlf.F90:455-472`; stock `src/OCE/DYN/sshwzv.F90:390-443`, RA at `:419-425`; active instrumented override mirrors it at `cfgs/DINO/MY_SRC/sshwzv.F90:480-553`, RA at `:513-522`; `usrdef_sbc.F90:251-259`). | `_leapfrog_step` applies `now + gamma*(before-2*now+after)` to eta and stores it as the next before level (`ocean_model_latlon_cgrid.py:8644-8665,8683-8689`). | **MATCH** formula/time levels. The existing forward bracket reports correlation 1 and ratio 0.99999995; its tiny residual is not a source verdict. |
 | 14 | After tracer completion, `mlf_baro_corr` installs the after barotropic mean (`cfgs/DINO/MY_SRC/stpmlf.F90:578`; reconcile body `:752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8081-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
 | 15 | `finalize_lbc` commits U/V after-level vector signs and halos before momentum filtering (`cfgs/DINO/MY_SRC/stpmlf.F90:579-613,820-836`). | The serial domain continuously masks/wraps after-level arrays and has no discrete post-solver halo commit (`ocean_model_latlon_cgrid.py:8524-8530,8744-8759`). | **DIFF (final boundary representation)**. Existing sign/idempotence controls pass, but its next-step wall-Nyquist consequence is not exonerated; it joins the registered same-input boundary counterfactual. |
 | 16 | Active vector `dyn_atf_qco` applies the plain velocity Robert-Asselin filter to Nnn after `finalize_lbc` (`cfgs/DINO/MY_SRC/stpmlf.F90:612-613`; `dynatf_qco.F90:150-167`). | `_leapfrog_step` uses the same formula and stores filtered u/v as the next before level (`ocean_model_latlon_cgrid.py:8644-8660,8683-8689`). | **MATCH** formula/order; the committed forward bracket is exact for u and v. |
@@ -139,11 +145,11 @@ confirms.
 |---:|---|---|---|
 | 1 | DINO constructs zonal stress from the analytic latitude spline and sets meridional stress exactly zero (`cfgs/DINO/MY_SRC/usrdef_sbc.F90:157-163,200-201,219-223`). | DINO provides the same forcing class; `surface_stress_faces` owns sign/interpolation/rotation (`packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py:3607-3643`). | **MATCH** forcing class; established field identity is not re-derived here. |
 | 2 | Step entry swaps current face stress into `utau_b/vtau_b`; restart/cold start reads or seeds it (`src/OCE/SBC/sbcmod.F90:378-393,549-575`). | `tau_x_prev/tau_y_prev` carry the prior step and are averaged with current stress (`ocean_model_latlon_cgrid.py:3475-3498`). | **MATCH** time levels and 0.5 centring. |
-| 3 | `sbc` constructs U/V stress with neighbour averages and coastal masks (`sbcmod.F90:529-547`). | `surface_stress_faces` interpolates T stress to faces and returns top-cell face thickness (`ocean_pe_latlon_cgrid.py:3619-3643`). | **DIFF (representation)**. Direct-source normalized error is 0.0278 domain / 0.0357 j=1: close, not bit-identical. |
+| 3 | `sbc` constructs U/V stress with neighbour averages and the explicit coastal multiplier `(2-umask)*MAX(tmask_i,tmask_i+1)` (`sbcmod.F90:539-547`, U formula `:543-544`). | `surface_stress_faces` uses the plain two-cell `interp_cell_to_uface` and has no coastal multiplier (`ocean_pe_latlon_cgrid.py:3607-3643`; `operators_latlon_cgrid.py:332-352`). | **DIFF (representation), localized but coastal owner REFUTED**. The wet error is one `i=49` face per affected row; at `j=1` that face is wet-wet with multiplier 1. |
 | 4 | `dynspg_ts` adds centred wind divided by full face-column depth to frozen slow forcing (`cfgs/DINO/MY_SRC/dynspg_ts.F90:423-445`). | The explicit route's depth mean enters `F_slow`; the implicit route restores `tau/(rho0*H)` explicitly (`ocean_model_latlon_cgrid.py:3607-3640`), and the substep consumes it directly (`barotropic_latlon_cgrid.py:932-961`). | **MATCH** source algebra. The offline `F_slow` score confirms no second face-depth division. |
 | 5 | `dyn_zdf` forms `Kbb+rDt*Krhs`, removes the after barotropic mean, then applies its vertical boundary condition (`cfgs/DINO/MY_SRC/dynzdf.F90:133-170`). | Shipped `surface_stress_implicit=False` keeps stress in the explicit tendency before the barotropic solve; `withhold_stress` selects the alternative route (`ocean_pe_latlon_cgrid.py:3684-3701,4495-4501`). | **DIFF (shipped placement)**. |
 | 6 | MLF adds `zDt_2*(tau_b+tau_now)/(rho0*e3_face(Kaa))` between tridiagonal recurrences (`dynzdf.F90:340-373,535-566`). | The alternative arm adds `dt_mom*tau/(rho0*dz0)` to the solve input before the same vertical diffusion solve (`ocean_model_latlon_cgrid.py:6681-6702,7003-7009`). | **MATCH** source formula in the alternative arm. Its dynamic response is unmeasured offline. |
-| 7 | Active DINO `trddyn` computes the named diagnostic as `(tau_b+tau_now)/(rho0*e3_face(Kmm))` (`cfgs/DINO/MY_SRC/trddyn.F90:159-170`). The original dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but emits its unpopulated slot (`:329-330`) and waived accumulated tau (`:389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). `dyn_zdf` instead applies the MLF half-sum with after-level thickness (`cfgs/DINO/MY_SRC/dynzdf.F90:535-566`; u-side `:340-373`). | The offline source probe scores the actually applied pre/post bracket. The committed oracle patch independently wires the exact active named `trddyn` array to the dormant slot. | **DIFF (named diagnostic versus applied term), measured**: named/applied RMS ratio 2.09668, normalized difference 1.18155. This is not a placement-response or eta-ownership measurement. |
+| 7 | Active DINO `trddyn` computes the named diagnostic as `(tau_b+tau_now)/(rho0*e3_face(Kmm))` (`cfgs/DINO/MY_SRC/trddyn.F90:159-170`). The original dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but emits its unpopulated slot (`:329-330`) and waived accumulated tau (`:389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). `dyn_zdf` applies the MLF half-sum with `zDt_2=rDt/2` (`cfgs/DINO/MY_SRC/dynzdf.F90:115,340-373,535-566`). | The offline source probe scores the applied pre/post bracket. The committed patch copies the named array to the dormant slot and a stream through two write paths. | **MATCH (wet arithmetic), CHECKED-CLEAN plumbing**: named is twice applied on wet faces to `1e-8`. The old 2.09668 source-DIFF claim is retracted as half-step identity plus dry-union-mask artifact. |
 | 8 | `mlf_baro_corr` follows `dyn_zdf` (`stpmlf.F90:396-409,752-790`). | The active shipped `leapfrog`/split-explicit path accepts either stress placement and retains the configured post-vmix reconciliation. `kamm_twin_90d.py` now exposes and stamps the existing Boolean selector. | **MATCH (arm availability)** for the registered A/B. The separate `outer_integrator="nemo_mlf"` path still has its own guard and is not this arm. |
 
 ## Offline wind source-operand measurement
@@ -165,6 +171,25 @@ Statistics are pointwise on wet faces before spatial aggregation.
 | NEMO slow-forcing RMS (m/s2) | 2.41774e-8 | 1.01955e-10 |
 | wet u faces | 9,758 | 49 |
 
+The aggregates conceal the registered one-cell result:
+
+| Localizer | Direct `dynzdf` | `F_slow` |
+|---|---:|---:|
+| `j=1` argmax | `(1,49)` | `(1,49)` |
+| argmax delta | `3.02032167e-5 m/s` | `2.87883172e-11 m/s2` |
+| max abs / absolute NEMO row mean | 0.2500117364 | 0.2826356698 |
+| peak-equivalent faces, `j=1` / domain | 1.0000000231 / 24.27148675 | 1.0000000231 / 24.27150701 |
+| wet faces with pointwise ratio error >1%, `j=1` / domain | 1 / 162 | 1 / 162 |
+| argmax coastal-unmask state | false: wet-wet, multiplier 1 | false: wet-wet, multiplier 1 |
+| material-support coastal fraction | 0.5134 | 0.0 |
+| preregistered labels | `CONFIRMED_ONE_CELL_SIGNATURE`; `REFUTED_COASTAL_UNMASK` | `CONFIRMED_ONE_CELL_SIGNATURE`; `REFUTED_COASTAL_UNMASK` |
+
+The one-percent supports are identical (Jaccard 1.0) and occupy column `i=49`
+across 162 rows. Peak-equivalent faces is
+`sum(delta**2)/max(delta**2)`; the first execution's inverse-participation name
+is retracted and retained only as a descriptive value. The corrected
+participation, second-face, coastal-flip and support-Jaccard controls all fire.
+
 Controls pass: both NEMO meridional operands are exact zero; legoESM's direct
 operand is zero and `F_slow` maximum is `3.388e-21 m/s2`, below `1e-12`.
 The preserved emitted `utrd_tau/vtrd_tau` slots are exact zero; the controlled
@@ -185,9 +210,14 @@ The downstream B1 response is diagnostic only: zonal wind produces a
 the barotropic loop has already rotated momentum. Comparing that v response to
 NEMO's direct zero meridional deposit is retracted.
 
-**Candidate-B source verdict: PLAUSIBLE/UNRESOLVED.** Source amplitudes are
-close, but the direct j=1 pattern misses the frozen equivalence correlation
-bar and neither j=1 normalized error reaches the material-DIFF bar.
+**Candidate-B source verdict: CONFIRMED_LOCALIZED_SOURCE_DIFF; proposed
+coastal-unmask owner REFUTED.** The old `j=1` Pearson gate is retracted because
+NEMO's row is effectively constant. The registered max-absolute/row-mean gate
+confirms the one-cell difference in both source paths. The discriminating next
+offline measurement is now the `i=49` T-to-U face construction immediately
+before `sbcmod` versus `surface_stress_faces`, including face-index/periodic
+closure and wind spline values; placement ownership still requires the
+post-transient live discriminator.
 
 ## Live named `jpdyn_tau` wiring receipt
 
@@ -206,8 +236,8 @@ documented setup refusals and exited zero. Patched source hashes were
 hash `6cfd6161...19e7`; input restart hash `0cc00f99...ff3e`; output restart
 hash `33c0c1a2...a115c`. The named reference hashes were
 `34c4beb3...0d111` (u) and `72ecf1fe...b7d4a` (v). The four bracket hashes
-are identical to the accepted preserved-run operands, proving the hook changed
-diagnostic storage, not the applied wind term.
+are identical to the accepted preserved-run operands, showing the applied-wind
+brackets were unchanged. This is a write-path plumbing check.
 
 The preregistered verifier at Git commit `b43bf5746` printed:
 
@@ -216,12 +246,12 @@ The preregistered verifier at Git commit `b43bf5746` printed:
 - meridional slot and named-reference maxima: exact zero;
 - storage maximum and normalized error: exact zero versus the
   `1.7763568394002505e-15` bar;
-- named/applied RMS ratio `2.0966766111118194`, normalized difference
-  `1.1815467878135875`, correlation `0.9459345292292405`;
-- both planted controls: fired;
-- `SOURCE_DISTINCTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER`,
-  `CLASSIFICATION=CONFIRMED_NAMED_TAU_SLOT_WIRED`, and
-  `PLACEMENT_OWNERSHIP=UNRESOLVED`.
+- historical union-mask ratio `2.0966766111118194`, now retracted;
+- lower/top storage controls: fired;
+- round-2 classification: **CHECKED-CLEAN write-only**. The slot and stream
+  are the same in-memory array through two output paths, and the offline
+  `rDt*((post-pre)/rDt)` reconstruction is a float64 round trip, not an
+  independent validation.
 
 The preceding corrected run is a retained failed-instrument control. Its
 explicit `(jpi,jpj)` dummy did not conform to the active 52-by-199 `T2D(0)`
@@ -230,14 +260,25 @@ actual bounds inside the 56-by-203 haloed domain, so the verifier classified
 native-bound correction before the accepted rerun. The earlier claim that an
 applied-increment hook was the named `utrd_tau` diagnostic is retracted.
 
-**Candidate-B placement/ownership verdict: UNRESOLVED.** The registered GPU
-discriminator runs the same bridged state for five days with only
-`surface_stress_implicit` changed. The committed preregistration contains the
-exact implicit/control commands, per-step fp64 capture contract, certified
-NEMO artifact and scorer hashes, and coherent first-eight whole-domain plus
-aggregate-wall gates: `1.25/0.17` confirmation versus `2.30/0.38` refutation.
-The previous last-half/zonal-wall labels and first-sample 0.85 gate are
-retracted because they mixed different observables.
+**Candidate-B placement/ownership verdict: UNRESOLVED.** The clean explicit
+control at Git `4d00f81bb78caa29dd07ab6e3a4081e6d57a4bd2` measured first-eight
+ratio 2.8824000013 and wall share 0.4855027388, inside its validity band. Its
+NPZ is pinned by SHA-256
+`2845a5c7166baad483f89ae91a1fb1c9b03971a6a63c4e41506615b2a632df5f`.
+The implicit arm measured ratio 201.41187345 and wall share 0.0559638894.
+Mechanical bars are UNRESOLVED: amplitude fails CONFIRM while locus fails
+REFUTE. The implicit field is diffuse (2,234 cells for half variance versus 74
+in explicit) and its approximately eight-step decay is consistent with, but
+does not prove, a placement-swap startup shock against an explicit-consistent
+bridged restart.
+
+The preregistered follow-up discards exactly 32 steps, scores samples 33--40
+as the primary post-transient window and 33--160 as a companion, and requires
+a fail-closed scorer selector plus off-by-one control. Control validity is
+explicit ratio `[2.30,3.60]` and wall share `[0.30,0.65]`; implicit CONFIRM is
+ratio `<=1.25` and share `<=0.17`, REFUTE is ratio `>=2.30` and share `>=0.30`.
+If implicit sample 33 remains over 10 times explicit, STOP and design an
+implicit-consistent restart. No GPU or post-transient scorer ran here.
 
 ## Review disposition and retractions
 
@@ -272,8 +313,8 @@ claims before these findings were finalized.
 - Final evidence review: the offline copy still did not satisfy the literal
   request to wire NEMO's emitted `jpdyn_tau` store. Disposition: a committed
   source patch produced an isolated NEMO CPU restart. The later mechanism
-  review corrected its source identity; the named-diagnostic result is the
-  independently verified one reported below.
+  review corrected its source identity; round-2 review further limits the
+  named-diagnostic result to checked-clean write-path plumbing.
 - Final mechanism review: the GPU preregistration mixed whole-domain
   first-eight amplitude, first-sample aggregate-wall share, and a last-half
   zonal-wall label; its extractor pointed at a directory without retained
@@ -286,8 +327,13 @@ claims before these findings were finalized.
   applied `dynzdf` bracket, but active `trddyn.F90:164-170` names a different
   no-half, Kmm-thickness diagnostic. Disposition: the old classification is
   retracted in the tool and preregistration; the hook now copies the exact
-  active `trddyn` arrays, an independent stream proves exact storage, and the
-  named-versus-applied distinction is reported separately.
+  active `trddyn` arrays. Round-2 review downgrades this to checked-clean
+  write-path plumbing because slot and stream share one in-memory array.
+- Round-2 cross-family review: 2.0966766111 was a half-step identity plus 324
+  dry faces admitted by a union mask, the `j=1` Pearson bar was unreachable,
+  and aggregates concealed a one-face row discrepancy. Disposition: both
+  claims are retracted in the tools; wet-only arithmetic and row-scale gates
+  replace them; the one-cell/coastal probe was preregistered and run clean.
 
 ## Verification receipts
 
@@ -295,15 +341,19 @@ claims before these findings were finalized.
   unchanged, all entry/helper/order/slot/structural-zero controls PASS.
 - NEMO source patch: `git apply --check` PASS; isolated DINO fp64 build PASS;
   direct single-rank one-step CPU execution PASS (exit 0).
-- Live-slot verifier: `CONFIRMED_NAMED_TAU_SLOT_WIRED`; 10,082 nonzero
+- Live-slot verifier: `CHECKED-CLEAN write-only`; 10,082 nonzero
   top-level zonal values in both slot/reference, exact-zero storage error and
-  lower/meridional controls, and both planted violations fire. Independent
-  source distinction: `CONFIRMED_NAMED_AND_APPLIED_DIFFER`.
+  lower/meridional controls. The old independent source distinction is
+  retracted; wet arithmetic is named=2*applied to `1e-8`.
+- Round-2 one-cell probe at clean commit `1720482b9`: PASS; direct and `F_slow`
+  one-cell, second-face, coastal-flip, Jaccard, entry/helper/order/slot, and
+  structural-zero controls all fire/pass.
 - Python compile and ruff on the new probe: PASS; E501 check on the legacy twin
   harness: PASS.
-- Twin selector/config smoke and implicit-arm construction on CPU: PASS;
-  resolved active path is `leapfrog` + `explicit_substep` +
-  `surface_stress_implicit=True`.
+- Twin selector/config smoke and implicit-arm construction on CPU: PASS. The
+  shipped card resolves `leapfrog` + `explicit_substep` +
+  `surface_stress_implicit=False`; `--surface-stress-implicit` is the treatment
+  and `--no-surface-stress-implicit` is the control.
 - Zero-day artifact-contract smoke: PASS; primary eta is fp64 per-step shape,
   relative `t_seconds`, `capture_every_steps=1`, daily eta is preserved, and
   the resolved placement stamp is true.
@@ -319,10 +369,18 @@ Standing retractions:
 - `utrd_tau == 0` does not mean the physical wind term is zero.
 - “Every emitted `utrd_tau` artifact is unwired” is retracted: the preserved
   campaign artifact is unwired, while the isolated patched one-step artifact
-  is source-wired and independently verified.
+  is source-wired and checked clean through two non-independent output paths.
 - The former `CONFIRMED_SLOT_WIRED` result is retracted as a statement about
   NEMO's named `utrd_tau`: that hook stored the applied increment divided by
   `rDt`. The corrected named slot is separately verified above.
+- `CONFIRMED_NAMED_AND_APPLIED_DIFFER` and 2.0966766111 are retracted. Wet
+  faces obey named=2*applied; 324 dry coastal faces and an unreachable gate
+  produced the former headline.
+- The `j=1` Pearson equivalence gate is retracted. NEMO's row is effectively
+  constant; max-absolute delta divided by absolute row mean replaces it.
+- The first round-2 domain “participation” label is retracted: it printed
+  inverse participation. The corrected review metric is peak-equivalent
+  faces, 24.27149 in both source paths.
 - NEMO wind is not implicit-only; it enters `dynspg_ts` and `dyn_zdf`.
 - Whole-B1 stress linearity is not a valid exact helper control.
 - Expecting one stress-helper call was wrong: active leapfrog evaluates the
