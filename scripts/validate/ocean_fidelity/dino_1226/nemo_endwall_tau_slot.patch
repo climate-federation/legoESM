@@ -10,7 +10,7 @@ index 655206997..3d081d309 100644
     PUBLIC   trddump_tra     ! called by trd_tra_iom  (MY_SRC/trdtra.F90)
     PUBLIC   trddump_state   ! called by trd_dyn_iom at the hpg term (MY_SRC/trddyn.F90)
     PUBLIC   trddump_write   ! called by rst_write    (MY_SRC/restart.F90)
-@@ -130,6 +131,24 @@ CONTAINS
+@@ -130,6 +131,27 @@ CONTAINS
     END SUBROUTINE trddump_dyn
  
  
@@ -19,7 +19,8 @@ index 655206997..3d081d309 100644
 +      !! Copy NEMO's named jpdyn_tau diagnostic into the dormant restart slot.
 +      !! This deliberately does not enter the interval trend accumulators.
 +      !!---------------------------------------------------------------------
-+      REAL(wp), DIMENSION(jpi,jpj), INTENT(in) ::   putrd, pvtrd
++      REAL(wp), DIMENSION(T2D(0)), INTENT(in) ::   putrd, pvtrd
++      INTEGER ::   ji, jj
 +      !!---------------------------------------------------------------------
 +      IF( .NOT. ALLOCATED( utrd_store ) ) THEN
 +         ALLOCATE( utrd_store(jpi,jpj,jpk,jptot_dyn), vtrd_store(jpi,jpj,jpk,jptot_dyn) )
@@ -27,8 +28,10 @@ index 655206997..3d081d309 100644
 +      ENDIF
 +      utrd_store(:,:,:,jpdyn_tau) = 0._wp
 +      vtrd_store(:,:,:,jpdyn_tau) = 0._wp
-+      utrd_store(:,:,1,jpdyn_tau) = putrd(:,:)
-+      vtrd_store(:,:,1,jpdyn_tau) = pvtrd(:,:)
++      DO_2D( 0, 0, 0, 0 )
++         utrd_store(ji,jj,1,jpdyn_tau) = putrd(ji,jj)
++         vtrd_store(ji,jj,1,jpdyn_tau) = pvtrd(ji,jj)
++      END_2D
 +   END SUBROUTINE trddump_tau
 +
 +

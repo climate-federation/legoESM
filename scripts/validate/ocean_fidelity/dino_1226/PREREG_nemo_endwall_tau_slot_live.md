@@ -14,6 +14,16 @@ This corrected arm is a one-step CPU diagnostic write, not a free-running twin
 or GPU ownership arm. The read-only oracle and its retained artifacts remain
 unchanged; the source edit is applied in the isolated temporary clone.
 
+The first corrected run classified **REFUTED_WRONG_SOURCE** and is retained as
+a failed-instrument control. Runtime provenance showed `jpi=56`, `jpj=203`,
+while the active untiled `T2D(0)` bounds are `Nis0:Nie0=3:54` and
+`Njs0:Nje0=3:201` (52 by 199). The hook's explicit `(jpi,jpj)` dummy therefore
+read beyond each 52-by-199 actual argument; its nonzero meridional slot and
+0.579 zonal storage error were instrument corruption, not physics. Before the
+next run, the registered edit changes the dummy to NEMO's native `T2D(0)` and
+copies with `DO_2D(0,0,0,0)`. No number, gate, or scientific classification
+changed. The failed run may not be cited as a wind-placement measurement.
+
 ## Claim and exact numbers
 
 The dormant restart slot must receive the exact 2-D arrays that active
