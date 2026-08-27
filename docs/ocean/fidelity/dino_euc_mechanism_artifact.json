@@ -31,10 +31,11 @@
     "nemo_avt_closure": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
     "nemo_avt_realized": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
     "nemo_binary": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "nemo_buoyancy_frequency": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
     "nemo_mixing_length": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
     "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
     "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
-    "probe_source": "34138471c9c412ec90e6330f68f164bde3abc8a74fafb89b6eca2998de249c15",
+    "probe_source": "0dae4f0ae96efde4b428168548bd9ad94ed98dae4c83af87e567d2681bcbf8fd",
     "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
   },
@@ -62,7 +63,7 @@
   "repo": {
     "branch": "fidelity/dino-euc-mechanism-codex",
     "dirty": false,
-    "head": "a8361054d95858baab8bd51ed8e6af253bb8f872"
+    "head": "63f015f2f3ce24d52a1ad059c3842f67fe3d083f"
   },
   "review_retraction": {
     "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
@@ -277,7 +278,51 @@
       "dump_avt.bin": "now",
       "tke_dump_avm_final.bin": "now",
       "tke_dump_en.bin": "now",
+      "tke_dump_rn2.bin": "now",
       "tke_dump_zmxlm.bin": "now"
     }
+  },
+  "tke_energy_single_root_10m": {
+    "active_limb": {
+      "lego_buoyancy_limited_fraction": 1.0,
+      "lego_distance_bounded_fraction": 0.0,
+      "nemo_buoyancy_limited_fraction": 1.0,
+      "nemo_distance_bounded_fraction": 0.0,
+      "relative_equality_tolerance": 1e-08
+    },
+    "depth_m": 10.13875112538517,
+    "energy_ratio": {
+      "geometric_mean": 2.2556351135780925,
+      "iqr": [
+        2.0915384422417063,
+        2.239767452170379
+      ],
+      "median": 2.1568426499838877
+    },
+    "executed_nemo_branch": "cfgs/DINO/MY_SRC/zdftke.F90:757-760 raw zmxlm=MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall))); nn_mxl=3 distance bounds at :799-812",
+    "n_excess": 47,
+    "next_target": {
+      "cost": "one offline matched-step pass; approximately 60 CPU-s and <10 MiB",
+      "design": "At the same 47 excess columns, substitute NEMO one term at a time into legoESM's single TKE solve, report closure of the 2.26x en gap, and preserve all other dumped operands. No trajectory integration.",
+      "name": "TKE-equation term decomposition",
+      "status": "DESIGN_ONLY_DO_NOT_RUN_THIS_TURN",
+      "terms_and_same_step_dumps": {
+        "buoyancy_sink": "tke_dump_rn2.bin",
+        "carried_dissipation": "tke_dump_dissl.bin",
+        "energy_response": "tke_dump_en.bin",
+        "shear_production": "tke_dump_sh2.bin",
+        "surface_boundary": "tke_dump_en.bin jk=1 + tke_dump_zmxlm.bin jk=1; stress receipt sbc_dump_utau.bin and analytical DINO taum"
+      }
+    },
+    "normalized_mxl_over_sqrt_en_ratio": {
+      "geometric_mean": 0.9999999986511358,
+      "iqr": [
+        0.9999999956320352,
+        1.0000000020496618
+      ],
+      "median": 0.9999999982800973
+    },
+    "normalized_ratio_in_0p90_1p10_fraction": 1.0,
+    "verdict": "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
   }
 }

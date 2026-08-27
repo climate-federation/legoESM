@@ -14,6 +14,11 @@ shear is about 0.68 times NEMO's; `A_v * shear` is consequently similar
 (`2.16e-5` versus `1.55e-5`). Excess near-surface viscosity predicts both
 observed signs: weaker 5--26 m shear and a deeper zero crossing.
 
+The closure root is now isolated: **equatorial near-surface TKE energy is
+2.255635 times NEMO in geometric mean across the 47 excess columns at the
+shear-setting interface.** The resulting mixing-length excess is algebraic,
+not independent.
+
 The review-corrected offline bar confirms because 10--40 m NRMS is 0.68865 and
 the single shear-setting 10.14 m ratio exceeds 1.25. The original
 `UNRESOLVED_CLOSURE_DIFFERENCE` label is retained in the artifact only as a
@@ -122,11 +127,39 @@ infidelity, essentially 50/50 in log space**.
 | coefficient/stability, `Ck/rn_ediff` | 0 | 0% | 1.000000 | 0% |
 
 Thus the 2.05x zonal-mean excess is not carried by `rn_ediff` or a hidden
-momentum stability function. It is the coupled TKE-energy/mixing-length state:
-each supplies about a 1.50x geometric-mean amplification in excess columns.
-The factors are coupled physically because the buoyancy mixing length itself
-depends on TKE; “50/50” is the registered multiplicative decomposition, not a
-claim of independent causality.
+momentum stability function. The raw factorization assigns equal log shares to
+TKE energy and mixing length, but that split does not yet establish two
+independent roots because the buoyancy mixing length itself depends on TKE.
+
+### Single-root test
+
+The follow-up bar was committed before reading these ratios in
+`ecf236af95672bea1a18253e7824803a21fedeff`. Its verdict is
+`CONFIRM_TKE_ENERGY_SINGLE_ROOT`:
+
+| diagnostic over 47 excess columns | result |
+|---|---:|
+| geometric-mean `en_L/en_N` | 2.255635114 |
+| median `en_L/en_N` | 2.156842650 |
+| `en`-ratio IQR | [2.091538442, 2.239767452] |
+| geometric-mean `(mxl_L/sqrt(en_L))/(mxl_N/sqrt(en_N))` | 0.9999999987 |
+| normalized-ratio IQR | [0.9999999956, 1.0000000020] |
+| columns within normalized [0.90, 1.10] | 100% |
+| legoESM buoyancy-limited limb active | 100% |
+| NEMO buoyancy-limited limb active | 100% |
+| distance-bounded limb active, either model | 0% |
+
+The executed NEMO branch constructs the raw length as
+`zmxlm=MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall)))` at
+`cfgs/DINO/MY_SRC/zdftke.F90:757-760`, before the `nn_mxl=3` distance bounds at
+`:799-812`. Because the raw buoyancy limb is active in every excess column and
+`mxl/sqrt(en)` is invariant between models, the apparent 1.501877x length
+factor is exactly propagation of the TKE-energy factor:
+`sqrt(2.255635114)=1.501877`. The length scale carries no independent
+infidelity.
+
+**Root finding:** equatorial near-surface TKE energy is approximately 2.26x
+NEMO at the 10.14 m shear-setting interface.
 
 ## Model paths verified
 
@@ -181,6 +214,25 @@ The archived one-GPU control reports 93 s through day 10 (including JIT) and
 for the pair, plus approximately 50 MiB total when retaining only day-0/day-10
 3-D states and daily reducers.
 
+## Costed next decomposition target — not run
+
+The next target is the TKE equation itself, not another mixing-length test.
+Use the same 47 columns and substitute one NEMO term at a time into legoESM's
+single TKE solve while holding every other dumped operand fixed:
+
+| TKE term | same-step evidence |
+|---|---|
+| shear production | `tke_dump_sh2.bin` |
+| buoyancy destruction | `tke_dump_rn2.bin` |
+| carried dissipation | `tke_dump_dissl.bin` |
+| energy response | `tke_dump_en.bin` |
+| surface boundary | `tke_dump_en.bin` and `tke_dump_zmxlm.bin` at jk=1, plus `sbc_dump_utau.bin` and analytical DINO `taum` |
+
+Score how much each substitution closes the 2.2556x energy gap. This requires
+no trajectory integration: budget one offline matched-step pass, approximately
+60 CPU-seconds and less than 10 MiB. Per coordinator instruction it is designed
+and costed here but **not run**.
+
 ## Provenance
 
 The machine-readable receipt is `dino_euc_mechanism_artifact.json`.  Key input
@@ -197,7 +249,7 @@ SHA-256 values are:
 The scorer hash-pins and reuses the committed bridge/dump reducers.  It writes
 the receipt, reads it back, and rejects a provenance mismatch.
 The final receipt was regenerated from clean committed HEAD
-`a8361054d95858baab8bd51ed8e6af253bb8f872` on the named campaign branch and
+`63f015f2f3ce24d52a1ad059c3842f67fe3d083f` on the named campaign branch and
 records `dirty:false`; its probe and time-registry hashes are also recorded.
 
 Repository note: no `AGENTS.md` exists in this checkout, its tracked tree,
