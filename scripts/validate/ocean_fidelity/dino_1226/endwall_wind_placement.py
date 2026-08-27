@@ -57,7 +57,7 @@ KT = 5761
 DT = 2700.0
 RDT = 2.0 * DT
 SOUTH_ROW = 1
-PREREG_COMMIT = "681d189a349bb82e5d0a9f4244ac221a06d798d8"
+PREREG_COMMIT = "25a5afef6dd3f4e50c8b9d7febdbaf69b3b87095"
 
 
 def _git(args: list[str]) -> str:
@@ -130,19 +130,11 @@ def _one_cell_label(participation: float, count: int,
     return "UNRESOLVED_ONE_CELL_SIGNATURE"
 
 
-def _coastal_label(overlap_fraction: float) -> str:
-    if overlap_fraction >= 0.90:
-        return "CONFIRMED_COASTAL_UNMASK"
-    if overlap_fraction <= 0.10:
-        return "REFUTED_COASTAL_UNMASK"
-    return "UNRESOLVED_COASTAL_UNMASK"
-
-
 def _localize(
         name: str, lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
         coastal: np.ndarray, coastal_multiplier: np.ndarray,
         tmask_w: np.ndarray, tmask_e: np.ndarray) -> dict:
-    """Registered wet one-cell and separate full-plane coastal localization."""
+    """Registered wet one-cell localization; coastal context is descriptive."""
     delta = lego - nemo
     row_mask = wet & (np.arange(wet.shape[0])[:, None] == SOUTH_ROW)
     if not row_mask.any():
@@ -170,7 +162,6 @@ def _localize(
                         if support_count else 0.0)
     argmax_coastal = bool(coastal[argmax])
     one_cell = _one_cell_label(p_row, int(row_outliers.sum()), row_scaled_max)
-    coastal_verdict = _coastal_label(coastal_fraction)
 
     coords = np.argwhere(outliers)
     coord_records = [
@@ -197,23 +188,12 @@ def _localize(
     planted_lego = nemo + planted_delta
     planted_outliers = _one_percent_outliers(planted_lego, nemo, wet) & row_mask
     planted_p = _peak_equivalent_faces(planted_delta, row_mask)
-    second_face_fires = bool(
-        planted_p > 1.9 and planted_outliers.sum() > row_outliers.sum())
-
-    coastal_points = np.argwhere(coastal)
-    noncoastal_points = np.argwhere(~coastal)
-    nplant = min(10, len(coastal_points), len(noncoastal_points))
-    if nplant == 0:
-        raise SystemExit(f"{name}: coastal planted-control population absent")
-    synthetic_confirm = _coastal_label(1.0)
-    synthetic_refute = _coastal_label(0.0)
-    coastal_both_branches_fire = bool(
-        synthetic_confirm == "CONFIRMED_COASTAL_UNMASK"
-        and synthetic_refute == "REFUTED_COASTAL_UNMASK")
+    planted_label = _one_cell_label(
+        planted_p, int(planted_outliers.sum()), row_scaled_max)
+    second_face_fires = planted_label == "REFUTED_ONE_CELL_SIGNATURE"
     print(f"CONTROL {name} localization: second_face_fires={second_face_fires} "
-          f"planted_P={planted_p:.9g} "
-          f"coastal_both_branches_fire={coastal_both_branches_fire}")
-    if not (second_face_fires and coastal_both_branches_fire):
+          f"planted_P={planted_p:.9g} planted_label={planted_label}")
+    if not second_face_fires:
         raise SystemExit(f"{name}: localization planted control failed")
 
     result = {
@@ -238,17 +218,194 @@ def _localize(
         "full_plane_material_bar": material_bar,
         "full_plane_support_count": support_count,
         "full_plane_support_coastal_count": coastal_count,
-        "full_plane_support_coastal_fraction": coastal_fraction,
+        "receiving_support_coastal_fraction_descriptive": coastal_fraction,
         "one_cell_label": one_cell,
-        "coastal_label": coastal_verdict,
         "controls": {
             "second_face_fires": second_face_fires,
             "planted_participation": planted_p,
-            "coastal_both_branches_fire": coastal_both_branches_fire,
+            "planted_label": planted_label,
         },
     }
     print(f"LOCALIZATION {name} " + json.dumps(result, sort_keys=True))
     return {"result": result, "outliers": outliers}
+
+
+def _jaccard(a: np.ndarray, b: np.ndarray) -> float:
+    union = int((a | b).sum())
+    return float((a & b).sum() / union) if union else 1.0
+
+
+def _support_label(value: float) -> str:
+    if value >= 0.90:
+        return "CONFIRMED_COMMON_UPSTREAM_SUPPORT"
+    if value <= 0.10:
+        return "REFUTED_COMMON_UPSTREAM_SUPPORT"
+    return "UNRESOLVED_COMMON_UPSTREAM_SUPPORT"
+
+
+def _support_overlap(support: np.ndarray, source_mask: np.ndarray) -> float:
+    count = int(support.sum())
+    return float((support & source_mask).sum() / count) if count else 0.0
+
+
+def _source_overlap_label(value: float) -> str:
+    if value >= 0.90:
+        return "CONFIRMED_DONOR_SOURCE_OVERLAP"
+    if value <= 0.10:
+        return "REFUTED_DONOR_SOURCE_OVERLAP"
+    return "UNRESOLVED_DONOR_SOURCE_OVERLAP"
+
+
+def _donor_trace(
+        state, sf, arms: dict, *, direct_delta: np.ndarray,
+        fslow_delta: np.ndarray, wet: np.ndarray, coastal: np.ndarray,
+        coastal_multiplier: np.ndarray, tmask_w: np.ndarray,
+        tmask_e: np.ndarray, rho0: float, dz0_u: np.ndarray) -> dict:
+    """Trace the bridged U-as-T carry through its second U interpolation."""
+    from legoesm.grids.operators_latlon_cgrid import interp_cell_to_uface
+
+    row_mask = wet & (np.arange(wet.shape[0])[:, None] == SOUTH_ROW)
+    receiver = tuple(int(v) for v in np.unravel_index(
+        np.argmax(np.where(row_mask, np.abs(direct_delta), -np.inf)),
+        direct_delta.shape))
+    donor = (receiver[0], (receiver[1] + 1) % wet.shape[1])
+    shifted_donor = (receiver[0], (donor[1] + 1) % wet.shape[1])
+
+    # The bridge stores NEMO restart utau_b (already U-point, atmosphere
+    # sign) in tau_x_prev. Production then treats it as T-point. Work in the
+    # ocean-reaction sign used by surface_stress_faces.
+    prior_u = -np.asarray(state.tau_x_prev, dtype=np.float64)
+    current_t = -np.asarray(sf.tau_x, dtype=np.float64)
+    current_u = np.asarray(interp_cell_to_uface(current_t),
+                           dtype=np.float64)[:, 1:]
+    production_u = np.asarray(arms[1.0]["tau_i_u"],
+                              dtype=np.float64)[:, 1:]
+    stagger_correct_u = 0.5 * (prior_u + current_u)
+    anomaly_tau = production_u - stagger_correct_u
+    predicted_delta = np.zeros_like(anomaly_tau)
+    np.divide(RDT * anomaly_tau, rho0 * dz0_u,
+              out=predicted_delta, where=dz0_u > 0.0)
+
+    observed = float(direct_delta[receiver])
+    predicted = float(predicted_delta[receiver])
+    prediction_relative_error = (
+        abs(predicted - observed) / abs(observed)
+        if observed != 0.0 else float("inf"))
+
+    def material_support(a: np.ndarray) -> np.ndarray:
+        peak = float(np.max(np.abs(a[wet])))
+        return wet & (np.abs(a) >= 0.01 * peak) if peak > 0.0 else np.zeros_like(wet)
+
+    predicted_support = material_support(predicted_delta)
+    direct_support = material_support(direct_delta)
+    fslow_support = material_support(fslow_delta)
+    predicted_direct_jaccard = _jaccard(predicted_support, direct_support)
+    predicted_fslow_jaccard = _jaccard(predicted_support, fslow_support)
+
+    donor_ratio = float(prior_u[donor] / prior_u[receiver])
+    donor_is_coastal = bool(coastal[donor])
+    receiver_ok = receiver == (1, 49)
+    ratio_ok = abs(donor_ratio - 2.0) <= 1.0e-8
+    prediction_ok = prediction_relative_error <= 1.0e-6
+    support_ok = (predicted_direct_jaccard >= 0.90
+                  and predicted_fslow_jaccard >= 0.90)
+    if receiver_ok and donor_is_coastal and ratio_ok and prediction_ok and support_ok:
+        verdict = "CONFIRMED_COASTAL_DONOR_DOUBLE_INTERPOLATION"
+    elif (not donor_is_coastal or abs(donor_ratio - 2.0) >= 0.10
+          or prediction_relative_error >= 0.10
+          or predicted_direct_jaccard <= 0.10
+          or predicted_fslow_jaccard <= 0.10):
+        verdict = "REFUTED_COASTAL_DONOR_DOUBLE_INTERPOLATION"
+    else:
+        verdict = "UNRESOLVED_COASTAL_DONOR_DOUBLE_INTERPOLATION"
+
+    # (a) A one-index donor shift must leave the registered coastal source.
+    shifted_donor_fires = not bool(coastal[shifted_donor])
+    # (b) Re-run the exact interpolation on a copied field after replacing
+    # the east donor. The original anomaly must be nonzero and the replaced
+    # donor must annihilate it at the receiver.
+    bad_prior_u = np.asarray(interp_cell_to_uface(prior_u),
+                             dtype=np.float64)[:, 1:]
+    original_prior_anomaly = float(
+        0.5 * (bad_prior_u[receiver] - prior_u[receiver]))
+    equalized_prior = prior_u.copy()
+    equalized_prior[donor] = equalized_prior[receiver]
+    equalized_bad_prior = np.asarray(
+        interp_cell_to_uface(equalized_prior), dtype=np.float64)[:, 1:]
+    equalized_prior_anomaly = float(
+        0.5 * (equalized_bad_prior[receiver] - equalized_prior[receiver]))
+    equalized_donor_fires = bool(
+        original_prior_anomaly != 0.0 and equalized_prior_anomaly == 0.0)
+    # (c) Exercise the actual overlap calculation and both decision branches.
+    donor_coastal_at_receiver = np.roll(coastal, -1, axis=1)
+    confirm_points = np.argwhere(wet & donor_coastal_at_receiver)
+    refute_points = np.argwhere(wet & ~donor_coastal_at_receiver)
+    if not len(confirm_points) or not len(refute_points):
+        raise SystemExit("donor overlap planted-control populations absent")
+    synthetic_confirm = np.zeros_like(wet)
+    synthetic_refute = np.zeros_like(wet)
+    synthetic_confirm[tuple(confirm_points[0])] = True
+    synthetic_refute[tuple(refute_points[0])] = True
+    confirm_overlap = _support_overlap(
+        synthetic_confirm, donor_coastal_at_receiver)
+    refute_overlap = _support_overlap(
+        synthetic_refute, donor_coastal_at_receiver)
+    overlap_gate_fires = bool(
+        _source_overlap_label(confirm_overlap)
+        == "CONFIRMED_DONOR_SOURCE_OVERLAP"
+        and _source_overlap_label(refute_overlap)
+        == "REFUTED_DONOR_SOURCE_OVERLAP")
+    print("CONTROL donor trace: "
+          f"shifted_donor={shifted_donor} shifted_donor_fires={shifted_donor_fires} "
+          f"original_prior_anomaly={original_prior_anomaly:.17e} "
+          f"equalized_prior_anomaly={equalized_prior_anomaly:.17e} "
+          f"equalized_donor_fires={equalized_donor_fires} "
+          f"confirm_overlap={confirm_overlap:.9g} "
+          f"refute_overlap={refute_overlap:.9g} "
+          f"overlap_gate_fires={overlap_gate_fires}")
+    if not (shifted_donor_fires and equalized_donor_fires
+            and overlap_gate_fires):
+        raise SystemExit("donor trace planted control failed")
+
+    def point_record(index: tuple[int, int]) -> dict:
+        return {
+            "j": index[0], "i": index[1],
+            "prior_ocean_sign_stress": float(prior_u[index]),
+            "umask": int(wet[index]),
+            "tmask_w": int(tmask_w[index]),
+            "tmask_e": int(tmask_e[index]),
+            "coastal_multiplier": float(coastal_multiplier[index]),
+            "coastal_unmask": bool(coastal[index]),
+        }
+
+    result = {
+        "receiver": point_record(receiver),
+        "east_donor": point_record(donor),
+        "shifted_donor": point_record(shifted_donor),
+        "donor_to_receiver_stress_ratio": donor_ratio,
+        "tau_production_receiver": float(production_u[receiver]),
+        "tau_stagger_correct_receiver": float(stagger_correct_u[receiver]),
+        "measured_direct_delta_receiver": observed,
+        "predicted_direct_delta_receiver": predicted,
+        "prediction_relative_error": prediction_relative_error,
+        "predicted_peak_equivalent_faces_domain": _peak_equivalent_faces(
+            predicted_delta, wet),
+        "predicted_direct_support_jaccard": predicted_direct_jaccard,
+        "predicted_fslow_support_jaccard": predicted_fslow_jaccard,
+        "predicted_support_count": int(predicted_support.sum()),
+        "direct_support_count": int(direct_support.sum()),
+        "fslow_support_count": int(fslow_support.sum()),
+        "verdict": verdict,
+        "controls": {
+            "shifted_donor_fires": shifted_donor_fires,
+            "original_prior_anomaly": original_prior_anomaly,
+            "equalized_prior_anomaly": equalized_prior_anomaly,
+            "equalized_donor_fires": equalized_donor_fires,
+            "overlap_gate_fires": overlap_gate_fires,
+        },
+    }
+    print("DONOR_TRACE " + json.dumps(result, sort_keys=True))
+    return result
 
 
 def _scaled_surface_forcing(sf, scale: float):
@@ -548,6 +705,9 @@ def main() -> int:
     content_sha256[str(
         _DIR / "PREREG_endwall_round2_review_corrections.md")] = _sha256(
             _DIR / "PREREG_endwall_round2_review_corrections.md")
+    content_sha256[str(
+        _DIR / "PREREG_endwall_coastal_donor_source.md")] = _sha256(
+            _DIR / "PREREG_endwall_coastal_donor_source.md")
     print("RETRACTION=CONFIRMED_NAMED_AND_APPLIED_DIFFER_2.0966766111")
     print("RETRACTION_REASON=zDt_2_equals_rDt_over_2_and_union_mask_admitted_"
           "324_dry_coastal_u_faces_gate_had_no_reachable_REFUTE")
@@ -557,6 +717,8 @@ def main() -> int:
           "participation_instead_of_review_peak_equivalent_faces")
     print("RETRACTION=coastal_gate_required_wet_argmax_to_have_umask_zero_"
           "and_was_unreachable")
+    print("RETRACTION=receiving_support_coastal_overlap_did_not_test_the_"
+          "upstream_donor_and_is_descriptive_only")
     print(json.dumps({
         "provenance": {
             "git_sha": sha,
@@ -688,36 +850,33 @@ def main() -> int:
         tmask_w, tmask_e)
     z_support = localization_zdf["outliers"]
     f_support = localization_fslow["outliers"]
-    union = int((z_support | f_support).sum())
-    intersection = int((z_support & f_support).sum())
-    support_jaccard = float(intersection / union) if union else 1.0
-    support_label = (
-        "CONFIRMED_COMMON_UPSTREAM_SUPPORT" if support_jaccard >= 0.90 else
-        "REFUTED_COMMON_UPSTREAM_SUPPORT" if support_jaccard <= 0.10 else
-        "UNRESOLVED_COMMON_UPSTREAM_SUPPORT")
-    coastal_labels = (
-        localization_zdf["result"]["coastal_label"],
-        localization_fslow["result"]["coastal_label"],
-    )
-    coastal_overall_label = (
-        "CONFIRMED_COASTAL_UNMASK" if all(
-            x == "CONFIRMED_COASTAL_UNMASK" for x in coastal_labels) else
-        "REFUTED_COASTAL_UNMASK" if any(
-            x == "REFUTED_COASTAL_UNMASK" for x in coastal_labels) else
-        "UNRESOLVED_COASTAL_UNMASK")
-    planted_support = f_support.copy()
-    planted_index = tuple(int(v) for v in np.argwhere(~z_support)[0])
-    planted_support[planted_index] = ~planted_support[planted_index]
-    planted_union = int((z_support | planted_support).sum())
-    planted_intersection = int((z_support & planted_support).sum())
-    planted_jaccard = (float(planted_intersection / planted_union)
-                       if planted_union else 1.0)
-    jaccard_plant_fires = planted_jaccard < support_jaccard
+    support_jaccard = _jaccard(z_support, f_support)
+    support_label = _support_label(support_jaccard)
+    synthetic_a = np.zeros_like(z_support)
+    synthetic_b = np.zeros_like(z_support)
+    synthetic_c = np.zeros_like(z_support)
+    synthetic_a.flat[0] = True
+    synthetic_b.flat[0] = True
+    synthetic_c.flat[1] = True
+    identical_jaccard = _jaccard(synthetic_a, synthetic_b)
+    disjoint_jaccard = _jaccard(synthetic_a, synthetic_c)
+    jaccard_plant_fires = bool(
+        _support_label(identical_jaccard)
+        == "CONFIRMED_COMMON_UPSTREAM_SUPPORT"
+        and _support_label(disjoint_jaccard)
+        == "REFUTED_COMMON_UPSTREAM_SUPPORT")
     print("CONTROL common support: "
-          f"jaccard={support_jaccard:.9g} planted={planted_jaccard:.9g} "
+          f"jaccard={support_jaccard:.9g} "
+          f"identical={identical_jaccard:.9g} disjoint={disjoint_jaccard:.9g} "
           f"plant_fires={jaccard_plant_fires}")
     if not jaccard_plant_fires:
         raise SystemExit("common-support planted control failed")
+
+    donor_trace = _donor_trace(
+        state, sf, arms, direct_delta=lu - n_ws_u,
+        fslow_delta=lfu - n_fu, wet=um, coastal=coastal_unmask,
+        coastal_multiplier=coastal_multiplier, tmask_w=tmask_w,
+        tmask_e=tmask_e, rho0=rho0, dz0_u=dz0u[:, 1:])
 
     # Structural-zero v control: use max norms, since correlation/normalised
     # error are undefined against an exact zero.
@@ -775,9 +934,9 @@ def main() -> int:
             "fslow": localization_fslow["result"],
             "one_percent_support_jaccard": support_jaccard,
             "support_label": support_label,
-            "coastal_overall_label": coastal_overall_label,
             "jaccard_plant_fires": bool(jaccard_plant_fires),
         },
+        "coastal_donor_trace": donor_trace,
         "term_label": label,
         "ownership_label": "UNRESOLVED_REQUIRES_REGISTERED_FREE_RUN",
         "retractions": [
@@ -799,6 +958,8 @@ def main() -> int:
             "south-j1 Pearson correlation as an equivalence gate: NEMO's row "
             "is effectively constant, so row max-absolute error over its mean "
             "is used instead",
+            "receiving-face and receiving-support coastal verdicts: a wet "
+            "receiver cannot itself be the dry coastal-unmasked donor",
         ],
     }
     print("RESULT " + json.dumps(out, indent=2, sort_keys=True))
