@@ -1459,8 +1459,13 @@ def figures(rows, ts, keep, jets, days, w, wet, out_dir):
     fig.savefig(f"{out_dir}/F3_equatorial_jets.png", dpi=140)
     plt.close(fig)
 
-    # F4 -- zonal-mean dT by row and depth at day 360, with the bands drawn
-    fig, ax = plt.subplots(figsize=(9, 5))
+    # F4 -- zonal-mean dT by row and depth at day 360, with the six bands drawn.
+    # TWO panels, because ONE is a lie either way.  A linear scale set by the
+    # field's own maximum is set by the single most extreme equatorial cell and
+    # blanks every other band; a symmetric-log scale shows all of them but
+    # exaggerates the near-zero interior.  Both are shown, both are labelled,
+    # and the linear panel's limit is a stated PERCENTILE rather than the max,
+    # so the reader can see what the choice cost.
     d = keep[360]["dT"]
     n = wet.sum(axis=1).astype(np.float64)
     # the two DRY DOMAIN-WALL rows (0 and NY-1) have no wet cell at any level.
@@ -1476,18 +1481,39 @@ def figures(rows, ts, keep, jets, days, w, wet, out_dir):
     zm = np.where(wet, d, 0.0).sum(axis=1) / np.where(n > 0, n, 1.0)
     zm = np.where(n > 0, zm, np.nan)
     zm[~interior, :] = np.nan
-    v = float(np.nanmax(np.abs(zm)))
-    im = ax.pcolormesh(np.arange(A.NY), z, zm.T, cmap="RdBu_r",
-                       vmin=-v, vmax=v, shading="auto")
-    for _, brows in BANDS[1:]:
-        ax.axvline(brows.start - 0.5, color="k", lw=0.8)
-    ax.axvline(STRUCTURAL_ZERO_ROW, color="0.4", lw=0.8, ls=":")
-    ax.invert_yaxis()
-    ax.set_xlabel("T-row (dotted = row 99, where f is exactly 0; the two dry\n"
-                  "domain-wall rows 0 and 198 are blanked, not zero-filled)")
-    ax.set_ylabel("depth [m]")
-    fig.colorbar(im, ax=ax, label="zonal-mean (legoESM - NEMO) T [K], day 360")
-    ax.set_title("Where the water differs at one year, with the six bands drawn")
+    finite = zm[np.isfinite(zm)]
+    vmax_full = float(np.max(np.abs(finite)))
+    v995 = float(np.percentile(np.abs(finite), 99.5))
+    lin_thresh = float(np.percentile(np.abs(finite), 50.0))
+    fig, axes = plt.subplots(2, 1, figsize=(9.5, 9), sharex=True)
+    norms = (
+        ("linear, clipped at the 99.5th percentile of |value|",
+         matplotlib.colors.Normalize(vmin=-v995, vmax=v995)),
+        ("symmetric log (every band visible; the near-zero interior is "
+         "exaggerated by construction)",
+         matplotlib.colors.SymLogNorm(linthresh=max(lin_thresh, 1e-12),
+                                      vmin=-vmax_full, vmax=vmax_full)),
+    )
+    for axx, (label, norm) in zip(axes, norms):
+        im = axx.pcolormesh(np.arange(A.NY), z, zm.T, cmap="RdBu_r",
+                            norm=norm, shading="auto")
+        for _, brows in BANDS[1:]:
+            axx.axvline(brows.start - 0.5, color="k", lw=0.8)
+        axx.axvline(STRUCTURAL_ZERO_ROW, color="0.4", lw=0.8, ls=":")
+        axx.invert_yaxis()
+        axx.set_ylabel("depth [m]")
+        axx.set_title(label, fontsize=9)
+        fig.colorbar(im, ax=axx, label="zonal-mean (lego - NEMO) T [K]")
+    for a, (bname, brows) in enumerate(BANDS):
+        j = np.arange(A.NY)[brows]
+        axes[0].text(float(np.mean(j)), 150.0, bname.split()[0],
+                     ha="center", fontsize=7, color="0.25")
+    axes[1].set_xlabel("T-row (dotted = row 99, where f is exactly 0; the two "
+                       "dry domain-wall rows 0 and 198 are blanked, not "
+                       "zero-filled)")
+    fig.suptitle(f"Where the water differs at one year, with the six bands "
+                 f"drawn\nfull-field max |value| = {vmax_full:.3f} K, 99.5th "
+                 f"percentile = {v995:.4f} K")
     fig.tight_layout()
     fig.savefig(f"{out_dir}/F4_zonal_mean_dT_day360.png", dpi=140)
     plt.close(fig)
