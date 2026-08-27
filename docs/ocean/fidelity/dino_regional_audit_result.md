@@ -19,9 +19,15 @@ above it.
 
 > From a shared NEMO day-180 restart, the largest single-row transport
 > disagreement anywhere in the DINO section at one year is **on the equator, at
-> 206 times its own measured run-to-run floor** — and the reduction the campaign
-> has been using reports that same band as indistinguishable, because the
-> tropical current system cancels within it.
+> 206 times its own measured run-to-run floor — the largest IN FLOOR MULTIPLES,
+> not in Sverdrups** — and the reduction the campaign has been using reports that
+> same band as indistinguishable, because the tropical current system cancels
+> within it.
+
+**The largest gap in Sverdrups is a different row**: row 1, against the southern
+wall, at **−0.2773 Sv** — four times the equator row's magnitude, but only 23×
+its own (much larger) floor. The two rankings answer different questions and
+this document keeps them apart.
 
 This is a statement about **one year from a common ocean state**. It is not a
 statement that the two models share a climate, and the deep ocean has not
@@ -91,9 +97,17 @@ fires on more than half of it.
 | P6 northern subpolar | +0.0034 | 0.1022 | +0.034 |
 | E10 equatorial ±10 | +0.0055 | 0.3706 | +0.015 |
 
-The equatorial band's net retains **1.5 %** of its own summed per-row magnitude.
-The sum of the per-row gaps reproduces the band number to **5e−15 Sv**, so this
-is not two instruments disagreeing — it is one instrument cancelling.
+The equatorial band's net retains **under 3 %** of its own summed per-row
+magnitude. The sum of the per-row gaps reproduces the band number to **5e−15 Sv**,
+so this is not two instruments disagreeing — it is one instrument cancelling.
+
+**Quote the magnitude, not the sign.** Across the four member pairs that ratio
+runs **+0.015 / +0.022 / −0.013 / −0.015** at day 360: its spread exceeds its
+own value, so the *sign* of the residue is undetermined and only its
+*magnitude* is measured. That is all the argument needs — a band retaining a
+couple of per cent of its own summed per-row magnitude is not measuring how far
+apart the two models are, whichever way the residue points. (At day 90 the sign
+is stable.)
 
 **Every band that reads INDISTINGUISHABLE in the table below sits at 1.5–3.4 %.
 Both bands that read as gaps sit at 72–74 %.** The three "clean" bands are clean
@@ -116,15 +130,17 @@ is `sqrt(spread_lego² + spread_NEMO²)`, each a sample std over that side's **o
 four members **in that band at that day**. **No global floor is transferred.**
 Registered rule: **INDISTINGUISHABLE ⟺ |gap| ≤ 2 × floor.**
 
-| band | gap [Sv] | floor [Sv] | ×floor | verdict | net/Σ\|row\| |
-|---|---:|---:|---:|:--|---:|
-| P1 south of band | −0.9519 | 0.0617 | 15.42 | **gap-at-15.4×** | −0.725 |
-| P2 channel band | +0.0024 | 0.0096 | 0.25 | INDISTINGUISHABLE | **+0.020** |
-| P3 southern subtropics | −0.0397 | 0.0069 | 5.80 | **gap-at-5.8×** | −0.740 |
-| P4 equatorial ±20 | +0.0059 | 0.0061 | 0.98 | INDISTINGUISHABLE | **+0.015** |
-| P5 northern subtropics | −0.0081 | 0.0025 | 3.22 | gap-at-3.22× | −0.246 |
-| P6 northern subpolar | +0.0034 | 0.0039 | 0.89 | INDISTINGUISHABLE | **+0.034** |
-| E10 equatorial ±10 | +0.0055 | 0.0040 | 1.36 | INDISTINGUISHABLE | **+0.015** |
+| band | gap [Sv] | floor [Sv] | ×floor | verdict | rows >5× | net/Σ\|row\| |
+|---|---:|---:|---:|:--|---:|---:|
+| P1 south of band | −0.9519 | 0.0617 | 15.42 | **gap-at-15.4×** | 11/14 | −0.725 |
+| P2 channel band | +0.0024 | 0.0096 | 0.25 | INDISTINGUISHABLE | **17/35** | **+0.020** |
+| P3 southern subtropics | −0.0397 | 0.0069 | 5.80 | **gap-at-5.8×** | 14/30 | −0.740 |
+| P4 equatorial ±20 | +0.0059 | 0.0061 | 0.98 | INDISTINGUISHABLE | **22/41** | **+0.015** |
+| P5 northern subtropics | −0.0081 | 0.0025 | 3.22 | gap-at-3.22× | 19/31 | −0.246 |
+| P6 northern subpolar | +0.0034 | 0.0039 | 0.89 | INDISTINGUISHABLE | **41/48** | **+0.034** |
+| E10 equatorial ±10 | +0.0055 | 0.0040 | 1.36 | INDISTINGUISHABLE | **16/21** | **+0.015** |
+
+"rows >5×" counts that band's rows exceeding **5× their own** floor.
 
 **The four INDISTINGUISHABLE verdicts are statements about the functional.** They
 are correct as scored and they must never be quoted without the last column.
@@ -154,6 +170,31 @@ recorded full-section −0.9880.
 rows as one number attributed a 30-row signal to the tropics and the northern
 hemisphere.
 
+**That +0.0012 Sv is itself a cancellation, and must not be read as agreement.**
+The equatorial +0.0059 Sv inside it is 1.5 % of 0.402 Sv of per-row signal
+(§3.2). The three bands cancel *as reduced numbers*; their rows do not.
+
+### 5.1 Two bands this audit measured and does not resolve
+
+Both are reported rather than deferred silently, because each is the same
+cancellation signature as the headline.
+
+**P6, the northern subpolar band, has the highest fraction of escalating rows in
+the section: 41 of 48 rows (85 %) exceed 5× their own floor**, including the two
+rows against the north wall at **81×** and **72×**, while the band net is
++0.0034 Sv at 0.89× — INDISTINGUISHABLE — with net/Σ|row| = **+0.034**. That is
+the equatorial signature in a different basin, and this audit does not explain
+it.
+
+**P2, the circumpolar channel, has 17 of 35 rows over 5× their own floor** and
+net/Σ|row| = **+0.020**. This is the first evidence that the campaign's
+best-known fidelity result — the channel band matching NEMO to 17 parts per
+million over a full year — **is also a cancellation**. The verdict run's number
+is reproduced here and is not disputed; what is new is that it survived a
+reduction which discards 98 % of the per-row magnitude in that band. Whether
+the channel's agreement is physical or arithmetic is **open**, and it is the
+first thing §11 asks the next lane to settle.
+
 **But three of the words I first used for P3 do not survive scrutiny.**
 
 **"Stable" is a property of the sum, not of the field.** The net is flat
@@ -163,8 +204,9 @@ moving by 3.7×, 1.4× and a sign reversal, summing to a constant.
 
 **About half of it is a displaced front.** A single-parameter rigid meridional
 shift fitted over rows 40–70 against NEMO's own per-row profile explains **55 %
-of the variance at day 360** (correlation 0.74; 0.61/0.61/0.75/0.74 across the
-four horizons) for a displacement of **0.011 rows ≈ 0.9 km, about 1 % of a grid
+of the variance at day 360** (correlation 0.74; 0.61/0.61/0.75/0.74 across the four
+horizons; the fit is through the origin, so the figure quoted is the fraction of
+the gap's own sum of squares removed, **not** `corr²`) for a displacement of **0.011 rows ≈ 0.9 km, about 1 % of a grid
 cell**. The registered P2/P3 boundary sits close to the structure's zero
 crossing, so where the band edge falls changes how the signal splits between
 "clean channel" and "P3 gap".
@@ -176,17 +218,34 @@ margin's own bar, is:
 
 | band, day 360 | \|gap bt\| | \|gap bc\| | margin | 2× its own floor | verdict |
 |---|---:|---:|---:|---:|:--|
-| P1 south of band | 2.4782 | 1.5262 | −0.9519 | 0.7769 | bottom-referenced-led |
-| P2 channel band | 0.0499 | 0.0523 | +0.0024 | 0.4465 | **UNRESOLVED** |
-| P3 southern subtropics | 0.0373 | 0.0024 | −0.0349 | 0.0133 | bottom-referenced-led |
-| P4 equatorial ±20 | 0.0528 | 0.0587 | +0.0059 | 0.0350 | **UNRESOLVED** |
-| P5 northern subtropics | 0.0231 | 0.0149 | −0.0081 | 0.0051 | bottom-referenced-led |
-| P6 northern subpolar | 0.0299 | 0.0333 | +0.0034 | 0.0078 | **UNRESOLVED** |
+| P1 south of band | 2.4782 | 1.5262 | −0.9519 | 0.1126 | bottom-referenced-led |
+| P2 channel band | 0.0499 | 0.0523 | +0.0024 | 0.0182 | **UNRESOLVED** |
+| P3 southern subtropics | 0.0373 | 0.0024 | −0.0349 | 0.0142 | bottom-referenced-led (2.5×) |
+| P4 equatorial ±20 | 0.0528 | 0.0587 | +0.0059 | 0.0153 | **UNRESOLVED** |
+| P5 northern subtropics | 0.0231 | 0.0149 | −0.0081 | 0.0062 | bottom-referenced-led |
+| P6 northern subpolar | 0.0299 | 0.0333 | +0.0034 | 0.0038 | **UNRESOLVED** |
+
+**This table is WEAK evidence, and the reason is algebraic.** `bt + bc == gap`
+by construction, so wherever the two legs carry **opposite signs** — 6 of these
+7 rows — `|bc| − |bt|` **is the band gap itself**. Those rows re-score §4's own
+number against a different bar whose severity varies 23× across the table; they
+are not independent evidence about vertical structure. Only P3, whose legs share
+a sign, is a genuinely separate statement.
+
+The bar above is the **margin's own** floor — the sample std of the four
+member-pair margins. An earlier version RSS'd the two legs' floors, which is
+wrong for a quantity that is not a difference of independent parts; both
+reviewers found it independently. The corrected bars are 1.03× to 23× *smaller*
+and no verdict flips, but P3's ordering weakens honestly from 5.2× to **2.5×**.
+For the equatorial band, **2 of the 4 member pairs take the opposite sign** —
+measured, not asserted.
 
 **What is honestly left of the P3 finding:** the rows immediately north of the
 channel carry a coherent (net/Σ\|row\| = −0.74) gap of −0.0397 Sv at 5.8× its own
 floor, about half of which is consistent with a ~1 km displacement of the ACC's
-northern flank. It is the only *coherent* band gap outside the southern basin.
+northern flank. It is the only *coherent* band gap outside the southern basin
+(net/Σ|row| = −0.74), and its bottom-referenced character clears its own bar at
+2.5× — the one row of the ordering table that is not the band gap in disguise.
 
 ## 6. Finding 3 — the equatorial current structure
 
@@ -258,28 +317,52 @@ contrast, is genuinely two-sided at 78–87 %.
 
 **Does each band hold its own divergence pattern?** The registered statistic —
 forward retention of the day-10 hotspot set against a 0.05 geometric null — **is
-void in the band it was used on**. A **depth-only** mask, chosen with zero
-knowledge of the pattern, scores **0.9985** in the equatorial band against the
-day-10 set's **0.9794**: the set's horizontal information content there is
-negative, and it was measuring stratification.
+void in the band it was used on**, and it took **two** controls to see why.
 
-Ranked **within the upper class**, which removes the depth information and asks
-the question the prediction meant to ask:
+A **depth-only** mask scores **0.9985** in the equatorial band against the day-10
+set's **0.9794**. But that control is itself too weak: it ranks cells
+monotonically from the surface, whereas the divergence peaks at the
+**mixed-layer base**, so a hotspot set can beat it by locating the right *level*
+— vertical information dressed as horizontal.
 
-| band | dT retention, day 360 | its depth-only baseline | ratio |
-|---|---:|---:|---:|
-| **P4 equatorial ±20** | **0.643** | 0.025 | **26×** |
-| E10 equatorial ±10 | 0.440 | 0.025 | 18× |
-| P5 northern subtropics | 0.581 | 0.014 | 41× |
-| P2 channel band | 0.099 | 0.008 | 12× |
-| P3 southern subtropics | 0.091 | 0.009 | 10× |
-| P6 northern subpolar | 0.073 | 0.023 | 3× |
-| **P1 south of band** | **0.049** | 0.052 | **0.9× — at its baseline** |
+The honest control is a **horizontally uniform** field carrying the day-10
+**per-level** volume-weighted rms, cut by the identical 5 %-of-volume rule. It
+keeps the true vertical profile and removes every horizontal cue, so a set that
+beats it is using horizontal information and nothing else. Ranked within the
+upper class, at day 360:
 
-**So the substance survives, on the controlled statistic only:** the equatorial
-divergence holds its horizontal pattern (26× its baseline) while the southern
-basin sits *at* its baseline, i.e. has no horizontal memory of where it was at
-day 10 — reproducing the atlas's own finding for P1 by an independent route.
+| band | dT retention | LEVEL baseline | ratio | horizontal margin |
+|---|---:|---:|---:|---:|
+| **P5 northern subtropics** | 0.581 | 0.092 | **6.3×** | +0.489 |
+| **P4 equatorial ±20** | 0.643 | 0.123 | **5.2×** | **+0.520** |
+| E10 equatorial ±10 | 0.440 | 0.125 | 3.5× | +0.315 |
+| P3 southern subtropics | 0.091 | 0.036 | 2.5× | +0.055 |
+| P6 northern subpolar | 0.073 | 0.068 | 1.1× | +0.005 |
+| **P1 south of band** | 0.049 | 0.044 | **1.1×** | **+0.005** |
+| P2 channel band | 0.099 | 0.096 | 1.0× | +0.003 |
+
+**Two things change from the first version of this document, and the second is
+the one that matters.**
+
+First, three bands I credited with horizontal memory have none: P2, P6 and P1
+sit at **1.0–1.1×**, where I printed 12×, 3× and 0.9× against the weaker
+baseline. Their day-10 hotspot sets do no better than a field that is constant
+within every level.
+
+Second, **the effect is not equatorially specific.** The northern subtropics
+*leads* at 6.3×. So the correct statement is:
+
+> **The wind-driven upper ocean holds its horizontal divergence pattern; the
+> southern basin does not.** The equatorial horizontal margin is **+0.520**
+> against the southern basin's **+0.005** — a hundredfold separation — but the
+> northern subtropics shares the property, so this is a property of the
+> wind-driven surface layer and not of the equator.
+
+Salinity gives the same ordering more strongly (P4 11.0×, E10 7.5×, P5 4.7×,
+P1 1.2×).
+
+**Both baselines are kept in the shipped table**, because their contrast is what
+demonstrates that stratification was doing the work in the registered statistic.
 
 ## 8. The registered predictions, scored
 
@@ -287,8 +370,8 @@ day 10 — reproducing the atlas's own finding for P1 by an independent route.
 |---|---|:--|---|
 | R1 | the equatorial band carries a transport gap over its own floor at day 360 | **REFUTED as scored, and the scoring is the finding** | band +0.0059 Sv at 0.98× — but per row the equator is at **206×** and 22 of 41 rows clear 5× |
 | R2 | P1 is still the largest absolute band gap | CONFIRMED | P1 at 0.9519 Sv |
-| R3 | the equatorial gap is predominantly baroclinic | **UNRESOLVED** | margin +0.0059 Sv against a 2× bar of 0.0350; two of four members flip it |
-| R4 | the equatorial T divergence holds its own hotspots | **CONFIRMED, on a statistic the registered one had to be replaced by** | as registered 0.9794 vs a 0.9985 depth baseline (void); depth-controlled 0.643 vs 0.025 |
+| R3 | the equatorial gap is predominantly baroclinic | **UNRESOLVED** | margin +0.0059 Sv against a 2× bar of **0.0153** (the margin's own floor); **2 of 4 member pairs flip the sign** — measured |
+| R4 | the equatorial T divergence holds its own hotspots | **CONFIRMED, but restated** | as registered 0.9794 vs a 0.9985 depth baseline and a 0.9979 level baseline (void); level-controlled 0.643 vs 0.123 = 5.2×. **The northern subtropics leads at 6.3×**, so the property is the wind-driven upper ocean's, not the equator's |
 | R5 | P6 gap is smaller than P5 | CONFIRMED | 0.0034 vs 0.0081 Sv |
 
 ## 9. Controls
@@ -328,7 +411,11 @@ document. Every claim below was in it.**
 | **2** | "legoESM's equatorial westward surface jet is ~10 % weak" | **RETRACTED — understated ~3×.** It is a ~30 % shear error with a 9–11 % deeper wind-driven layer. |
 | 3 | "the top two levels are ~37 m of a 4506 m column" | **RETRACTED — arithmetic error.** They span 0–20.6 m; 37 m is level 3's centre depth. The top three hold 77 % of the thickness-weighted column difference. |
 | 4 | "the cancellation is **why** the transport reads indistinguishable" | **DOWNGRADED to PLAUSIBLE.** The two functionals differ by the per-level wet count and the width weighting; consistency is not demonstration. |
-| **5** | "the equatorial T divergence holds its own hotspots (0.979 vs a 0.05 null)" | **RETRACTED as registered.** A depth-only mask scores 0.9985 — the registered statistic was measuring stratification. The claim is re-established on the depth-controlled statistic (0.643 vs 0.025) and only there. |
+| **5** | "the equatorial T divergence holds its own hotspots (0.979 vs a 0.05 null)" | **RETRACTED as registered.** A depth-only mask scores 0.9985 — the registered statistic was measuring stratification. Re-established only on a **level**-controlled statistic (0.643 vs 0.123 = 5.2×). |
+| **5b** | the depth-controlled ranking "P4 26×, P2 12×, P3 10×, P6 3×" | **RETRACTED.** The depth-only baseline is monotone from the surface while the divergence peaks at the mixed-layer base, so a set could beat it with vertical information. Against the **level** baseline: **P5 6.3× (leads), P4 5.2×, E10 3.5×, P3 2.5×, and P1/P2/P6 at 1.0–1.1×, i.e. no horizontal memory at all.** The effect is also **not equatorially specific**. |
+| **5c** | R3 scored against an RSS-of-legs bar | **RETRACTED.** `bt + bc == gap`, so with opposite-sign legs the margin **is** the band gap and the RSS bar was up to 23× too large. Re-scored on the margin's own floor; no verdict flips, but P3 weakens 5.2× → **2.5×**. |
+| **5d** | "the band net retains 1.5 %" quoted with its sign | **QUALIFIED.** Across members the ratio is +0.015/+0.022/−0.013/−0.015: the **sign is undetermined** at day 360. Magnitude only. |
+| **5e** | "two of four members flip it" (R3) | **WAS A CODE COMMENT, NOT A MEASUREMENT.** Now computed and printed; it happens to be correct. |
 | 6 | "P3's gap is REMARKABLY STABLE" | **RETRACTED as physics.** The sum is stable; Σ\|row\| grows 33 % and the internal composition rotates. |
 | 7 | "P3's gap is almost entirely BAROTROPIC" | **RELABELLED.** It is bottom-referenced, per the reducer's own docstring, and every band shares a negative bt gap; P3 is where the compensation is absent. The ordering does clear its bar. |
 | 8 | R3 "CONFIRMED" | **RETRACTED to UNRESOLVED.** The margin is half the floor of either leg, and two of four members flip it. |
@@ -347,10 +434,16 @@ them.
 
 ## 11. What the next lane should do first
 
-1. **Score the campaign's standing verdicts per row, not per band.** This audit's
-   central lesson is that the band reduction cancels; the verdict run's own
-   INDISTINGUISHABLE channel result deserves the same cancellation column
-   (P2 sits at +0.020). Offline, minutes.
+1. **Re-score the channel's 17-parts-per-million result per row.** It is the
+   campaign's best-known fidelity claim, and this audit finds the channel band
+   sitting at net/Σ|row| = **+0.020** with **17 of its 35 rows over 5× their own
+   floor**. Whether that agreement is physical or arithmetic is open, and it is
+   the single highest-value hour in this list. The same applies to every
+   standing INDISTINGUISHABLE verdict in the campaign. Offline, minutes.
+1b. **Explain P6.** The northern subpolar band has the highest escalating-row
+   fraction in the section (41 of 48, 85 %), with the two north-wall rows at 81×
+   and 72×, and a band net that reads INDISTINGUISHABLE. This audit measured it
+   and does not explain it.
 2. **The matched-state substitution for the equatorial layer.** Feed NEMO's own
    day-360 T, S, u, v at the equator into legoESM's shipped vertical-mixing
    closure and compare the resulting mixing coefficient against NEMO's dumped
