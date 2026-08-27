@@ -142,12 +142,42 @@ State-constant residual, five-state mean, % collapse against BASE:
 | tangential basin | 1.2235e-07 | +46.0 | +7.6 | +53.6 | +54.7 | +1.1 |
 | in-loop zonal deposit | 1.2610e-03 Sv/step | −2.4 | **+69.5** | +67.1 | +67.1 | −0.0 |
 
-**The two halves are disjoint.** The metric owns the northern lobe (61.7 %) and
-does nothing to the interior bands (−3.7 %, −2.8 %). The Coriolis owns both
-interior bands (32.1 %, 25.8 %) and the zonal deposit (69.5 %), and does nothing
-to the lobe (−1.5 %). This matches the two error profiles — the metric gap peaks
-at the walls, the Coriolis gap at the equator — and it explains the campaign's
-three-band decomposition with one term per band.
+**The two halves are disjoint — CONFIRMED.** The metric owns the northern lobe
+(61.7 %) and does nothing to the interior bands (−3.7 %, −2.8 %). The Coriolis
+owns both interior bands (32.1 %, 25.8 %) and the zonal deposit (69.5 %), and
+does nothing to the lobe (−1.5 %). That the campaign's three-band residual has
+one term per band is a measurement.
+
+**WHY they are disjoint is NOT measured, and there are two live explanations —
+PLAUSIBLE, both of them.** They are different claims with different
+consequences and the arms above cannot tell them apart:
+
+1. **Latitude structure.** The metric gap peaks at the walls and vanishes at
+   the equator; the Coriolis gap does the reverse. Each half then acts where
+   its own error lives.
+2. **Disjoint operator sets.** `e1v` reaches three in-loop consumers — the
+   continuity divergence, the ssh-average face depth, and the EEN rotation
+   coefficient — of which only the last is a Coriolis term. The first two act
+   on sea level and therefore on the meridional velocity by a different route
+   entirely. `f_vtx` is a *pure* Coriolis perturbation. On this reading the
+   two arms barely share an operator, and the band split is a consequence of
+   that rather than of latitude.
+
+Explanation 2 is the stronger candidate on the operator measurement in §1 —
+`e1v` cannot reach the meridional tendency through the Coriolis term *at all*,
+yet the metric arm collapses the meridional residual 16 % basin-wide, so
+whatever it does there it does through continuity or the face depth. That is an
+argument, not a measurement.
+
+**The discriminating measurement, named and not run:** substitute NEMO's `e1v`
+into the EEN rotation coefficient ONLY, leaving the continuity divergence and
+the face depth on legoESM's own width. If the northern-lobe collapse survives,
+the lobe is a Coriolis-coefficient object and explanation 1 carries it; if it
+vanishes, the metric arm's whole meridional effect is continuity/free-surface
+and explanation 2 carries it. It is one more arm on the existing instrument —
+the consumers are already separable there — and it costs what the arms above
+cost. Until it is run, no mechanism for the band split should be quoted as
+established.
 
 **Additivity.** `joint − (E1V + F)` is +0.6 to +6.2 points, ≤ 2.9 on every
 reduction but the basin. A cancelling pair predicts the joint arm to *exceed*
