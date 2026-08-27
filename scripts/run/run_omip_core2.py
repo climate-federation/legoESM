@@ -789,7 +789,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # SCOPE OF "exact", stated narrowly on purpose (codex 9400815 #2):
         # `veros_sqrte` is c_k*l_k*sqrt(max(0,e)) and is EXACT against NEMO on
         # wet rows of this card's normal trajectory, because positivity="floor"
-        # ends every solve at e >= tke_background = 1e-6 = rn_emin, so
+        # ends every solve at e >= tke_background = rn_emin (1e-6, or 1e-10 under
+        # --iwm per zdftke.F90:840), so
         # sqrt(max(0,e)) == sqrt(e) there.  It is NOT globally identical: NEMO
         # zeroes dry rows via *wmask while this card leaves tke_dry_wmask=False
         # and keeps the background there, and the e<=0 branch differs (ours
