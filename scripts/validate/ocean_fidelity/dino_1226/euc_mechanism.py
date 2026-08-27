@@ -219,6 +219,90 @@ def closure_attribution(lego_avm: np.ndarray, nemo_avm: np.ndarray,
     }
 
 
+def single_root_energy_test(
+        lego_avm: np.ndarray, nemo_avm: np.ndarray,
+        lego_en: np.ndarray, nemo_en: np.ndarray,
+        lego_mxl: np.ndarray, nemo_mxl: np.ndarray,
+        lego_n2: np.ndarray, nemo_n2: np.ndarray, wet: np.ndarray,
+        *, lego_mxl_min: float, nemo_mxl_min: float = 1.0e-6) -> dict[str, Any]:
+    """Preregistered test of whether the length excess is algebraic TKE carry."""
+    arrays = (lego_avm, nemo_avm, lego_en, nemo_en, lego_mxl, nemo_mxl,
+              lego_n2, nemo_n2)
+    valid = wet.copy()
+    for a in arrays:
+        valid &= np.isfinite(a)
+    valid &= (lego_en > 0) & (nemo_en > 0) & (lego_mxl > 0) & (nemo_mxl > 0)
+    excess = valid & (lego_avm / nemo_avm > 1.25)
+    if not np.any(excess):
+        raise ValueError("single-root test has no excess columns")
+
+    en_ratio = lego_en / nemo_en
+    normalized_length_ratio = ((lego_mxl / np.sqrt(lego_en))
+                               / (nemo_mxl / np.sqrt(nemo_en)))
+    # Executed branches: legoESM uses max(N2,1e-12); NEMO uses rsmall
+    # (1e-20 in phycst) at MY_SRC zdftke.F90:758 before the nn_mxl=3 bounds.
+    raw_l = np.maximum(lego_mxl_min,
+                       np.sqrt(2.0 * lego_en / np.maximum(lego_n2, 1.0e-12)))
+    raw_n = np.maximum(nemo_mxl_min,
+                       np.sqrt(2.0 * nemo_en / np.maximum(nemo_n2, 1.0e-20)))
+    tol = 1.0e-8
+    if np.any(lego_mxl[valid] > raw_l[valid] * (1.0 + tol)):
+        raise ValueError("lego final mixing length exceeds its raw buoyancy limb")
+    if np.any(nemo_mxl[valid] > raw_n[valid] * (1.0 + tol)):
+        raise ValueError("NEMO final mixing length exceeds its raw buoyancy limb")
+    buoy_l = np.abs(lego_mxl / raw_l - 1.0) <= tol
+    buoy_n = np.abs(nemo_mxl / raw_n - 1.0) <= tol
+    bounded_l = lego_mxl < raw_l * (1.0 - tol)
+    bounded_n = nemo_mxl < raw_n * (1.0 - tol)
+
+    def summary(a: np.ndarray) -> dict[str, Any]:
+        x = a[excess]
+        return {
+            "geometric_mean": float(np.exp(np.mean(np.log(x)))),
+            "median": float(np.median(x)),
+            "iqr": np.quantile(x, [0.25, 0.75]).tolist(),
+        }
+
+    energy = summary(en_ratio)
+    normalized = summary(normalized_length_ratio)
+    norm_in_band = float(np.mean(
+        (normalized_length_ratio[excess] >= 0.90)
+        & (normalized_length_ratio[excess] <= 1.10)))
+    frac_buoy_l = float(np.mean(buoy_l[excess]))
+    frac_buoy_n = float(np.mean(buoy_n[excess]))
+    confirm = (
+        2.03 <= energy["geometric_mean"] <= 2.48
+        and 0.95 <= normalized["geometric_mean"] <= 1.05
+        and norm_in_band >= 0.75
+        and frac_buoy_l >= 0.75
+        and frac_buoy_n >= 0.75)
+    refute = (normalized["geometric_mean"] < 0.90
+              or normalized["geometric_mean"] > 1.10
+              or frac_buoy_n < 0.50)
+    verdict = ("CONFIRM_TKE_ENERGY_SINGLE_ROOT" if confirm else
+               "REFUTE_TKE_ENERGY_SINGLE_ROOT" if refute else
+               "UNRESOLVED_TKE_ENERGY_SINGLE_ROOT")
+    return {
+        "verdict": verdict,
+        "n_excess": int(np.count_nonzero(excess)),
+        "energy_ratio": energy,
+        "normalized_mxl_over_sqrt_en_ratio": normalized,
+        "normalized_ratio_in_0p90_1p10_fraction": norm_in_band,
+        "active_limb": {
+            "lego_buoyancy_limited_fraction": frac_buoy_l,
+            "nemo_buoyancy_limited_fraction": frac_buoy_n,
+            "lego_distance_bounded_fraction": float(np.mean(bounded_l[excess])),
+            "nemo_distance_bounded_fraction": float(np.mean(bounded_n[excess])),
+            "relative_equality_tolerance": tol,
+        },
+        "executed_nemo_branch": (
+            "cfgs/DINO/MY_SRC/zdftke.F90:757-760 raw "
+            "zmxlm=MAX(rmxl_min,SQRT(2*en/MAX(rn2,rsmall))); "
+            "nn_mxl=3 distance bounds at :799-812"
+        ),
+    }
+
+
 def wrong_shift(a: np.ndarray, fill: float = np.nan) -> np.ndarray:
     out = np.full_like(a, fill)
     out[..., :-1] = a[..., 1:]
@@ -311,6 +395,8 @@ def main() -> int:
             "K_M": np.asarray(out[0]), "c_k": float(tke_cfg.c_k),
             "kappa_convention": str(tke_cfg.kappa_convention),
             "floor": float(tke_cfg.kappaM_min),
+            "mxl_min": float(tke_cfg.mxl_min),
+            "N2": (None if kw.get("N2") is None else np.asarray(kw["N2"])),
         })
         return out
 
@@ -334,9 +420,10 @@ def main() -> int:
     avt = bac._load_interior(dl.dump_path("tke_dump_avt_final.bin"), jpi - 2*hls, jpj - 2*hls)
     en_nemo = bac._load_interior(dl.dump_path("tke_dump_en.bin"), jpi - 2*hls, jpj - 2*hls)
     mxl_nemo = bac._load_interior(dl.dump_path("tke_dump_zmxlm.bin"), jpi - 2*hls, jpj - 2*hls)
+    rn2_nemo = bac._load_interior(dl.dump_path("tke_dump_rn2.bin"), jpi - 2*hls, jpj - 2*hls)
     component_time_levels = {
         name: time_level_for_dump(name) for name in (
-            "tke_dump_en.bin", "tke_dump_zmxlm.bin",
+            "tke_dump_en.bin", "tke_dump_zmxlm.bin", "tke_dump_rn2.bin",
             "tke_dump_avm_final.bin", "dump_avm.bin", "dump_avt.bin")
     }
     # zdf_phy's post-EVD dumps retain the model halos; zdftke's internal
@@ -414,6 +501,35 @@ def main() -> int:
         floor_lego=component_final["floor"], floor_nemo=1.2e-4)
     attribution["depth_m"] = float(z[0])
     attribution["time_levels"] = component_time_levels
+    if component_final["N2"] is None:
+        raise SystemExit("final TKE coefficient call did not carry N2")
+    single_root = single_root_energy_test(
+        A_cl[equator_row, :, 0], avm[equator_row, :, 1],
+        component_final["e"][equator_row, :, 0], en_nemo[equator_row, :, 1],
+        component_final["l_k"][equator_row, :, 0], mxl_nemo[equator_row, :, 1],
+        component_final["N2"][equator_row, :, 0], rn2_nemo[equator_row, :, 1],
+        wet[:, 0], lego_mxl_min=component_final["mxl_min"])
+    single_root["depth_m"] = float(z[0])
+    single_root["next_target"] = {
+        "name": "TKE-equation term decomposition",
+        "status": "DESIGN_ONLY_DO_NOT_RUN_THIS_TURN",
+        "terms_and_same_step_dumps": {
+            "shear_production": "tke_dump_sh2.bin",
+            "buoyancy_sink": "tke_dump_rn2.bin",
+            "carried_dissipation": "tke_dump_dissl.bin",
+            "energy_response": "tke_dump_en.bin",
+            "surface_boundary": (
+                "tke_dump_en.bin jk=1 + tke_dump_zmxlm.bin jk=1; "
+                "stress receipt sbc_dump_utau.bin and analytical DINO taum"
+            ),
+        },
+        "design": (
+            "At the same 47 excess columns, substitute NEMO one term at a time "
+            "into legoESM's single TKE solve, report closure of the 2.26x en gap, "
+            "and preserve all other dumped operands. No trajectory integration."
+        ),
+        "cost": "one offline matched-step pass; approximately 60 CPU-s and <10 MiB",
+    }
 
     # Controls proven able to fail: the declared mapping must beat a one-level
     # shift, a wet coefficient planted in a dry cell must be detected, and an
@@ -453,6 +569,7 @@ def main() -> int:
         "nemo_avt_closure": Path(dl.dump_path("tke_dump_avt_final.bin")),
         "nemo_tke_energy": Path(dl.dump_path("tke_dump_en.bin")),
         "nemo_mixing_length": Path(dl.dump_path("tke_dump_zmxlm.bin")),
+        "nemo_buoyancy_frequency": Path(dl.dump_path("tke_dump_rn2.bin")),
         "nemo_avm_realized": Path(dl.dump_path("dump_avm.bin")),
         "nemo_avt_realized": Path(dl.dump_path("dump_avt.bin")),
         "namelist": Path(dl.RUN_DIR) / "namelist_cfg",
@@ -494,6 +611,7 @@ def main() -> int:
                      "depth_window_m": [10.0, 40.0], "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"},
         "scores": scored,
         "tke_closure_attribution_10m": attribution,
+        "tke_energy_single_root_10m": single_root,
         "controls": controls,
         "short_run": {"status": "DESIGN_ONLY_NO_CUDA_IN_SANDBOX", **substitution_design()},
     }
@@ -509,6 +627,7 @@ def main() -> int:
                       "equator": artifact["equator"],
                       "scores": scored, "controls": controls,
                       "tke_closure_attribution_10m": attribution,
+                      "tke_energy_single_root_10m": single_root,
                       "short_run_status": artifact["short_run"]["status"]}, indent=2))
     return 0
 

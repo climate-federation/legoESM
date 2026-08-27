@@ -57,6 +57,22 @@ def test_attribution_names_energy_when_energy_owns_exact_factorization():
     assert got["max_direct_reconstruction_relative_error"] < 1e-14
 
 
+def test_single_root_requires_buoyancy_limb_and_normalized_length_closure():
+    nemo_en = np.ones(4)
+    lego_en = np.full(4, 2.25)
+    n2 = np.full(4, 2.0)
+    nemo_mxl = np.sqrt(2.0 * nemo_en / n2)
+    lego_mxl = np.sqrt(2.0 * lego_en / n2)
+    nemo_avm = 0.1 * nemo_mxl * np.sqrt(nemo_en)
+    lego_avm = 0.1 * lego_mxl * np.sqrt(lego_en)
+    got = E.single_root_energy_test(
+        lego_avm, nemo_avm, lego_en, nemo_en, lego_mxl, nemo_mxl,
+        n2, n2, np.ones(4, dtype=bool), lego_mxl_min=1e-6)
+    assert got["verdict"] == "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
+    assert got["normalized_mxl_over_sqrt_en_ratio"]["geometric_mean"] == pytest.approx(1.0)
+    assert got["active_limb"]["nemo_buoyancy_limited_fraction"] == 1.0
+
+
 def test_wrong_shift_control_changes_vertical_mapping():
     a = np.arange(6.0).reshape(2, 3)
     shifted = E.wrong_shift(a)
