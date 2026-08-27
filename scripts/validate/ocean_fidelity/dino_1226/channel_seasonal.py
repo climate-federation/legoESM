@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import inspect
 import json
@@ -47,7 +48,19 @@ CHANNEL_SHA256 = "a3b51de6292df22b90fa9bd385dcb22ab47a3049c737f2e2abf1a28eb5a18b
 CHANNEL_ARTIFACT_PATH = "docs/ocean/fidelity/dino_channel_rescore_artifact.json"
 CHANNEL_ARTIFACT_SHA256 = "fd39b99842e7c20a5f42b069f8ff732e6c515dee0b0ab00bea1ddae2f52ef11b"
 
-PREREG = "PREREG_channel_seasonal.md@76622ff2f"
+PREREG = (
+    "PREREG_channel_seasonal.md@76622ff2f; "
+    "post-review-amendment@fc36d3099"
+)
+
+POWER_PHI = 0.85
+POWER_RHOS = (0.60, 0.75, 0.90, 0.95, 0.975, 0.99)
+POWER_SEEDS = tuple(range(1455, 1461))
+NO_DETECTED_CODE = "NO_DETECTED_PHASE_RELATION"
+NO_DETECTED_LABEL = (
+    "NO DETECTED PHASE RELATION — indistinguishable from random quarter "
+    "relabelling"
+)
 
 
 def _git_object(commit: str, path: str, expected: str) -> bytes:
@@ -120,7 +133,7 @@ def _plant_fires(label, fn):
         fn()
     except (AssertionError, SystemExit, ValueError):
         print(f"  PLANT FIRED: {label}")
-        return
+        return {"label": label, "status": "PLANT_FIRED"}
     raise AssertionError(f"planted violation did not fire: {label}")
 
 
@@ -164,7 +177,7 @@ def wind_receipts():
     if any("zcos_sais" in line for line in utau_lines):
         raise SystemExit("FATAL: oracle wind assignment now contains seasonal phase")
     return {
-        "status": "EXCLUDED_A_PRIORI_TIME_INDEPENDENT",
+        "status": "EXCLUDED_A_PRIORI_ZERO_FORCING_GAP",
         "remaining_drivers": [
             "density_inventory", "vertical_stratification",
             "mixed_layer_depth", "thermal_wind",
@@ -178,9 +191,14 @@ def wind_receipts():
         "oracle_usrdef_sbc": str(oracle_source),
         "oracle_usrdef_sbc_sha256": _sha_file(oracle_source),
         "oracle_utau_assignments": utau_lines,
+        "stress_time_independent": True,
+        "wind_work_caveat": (
+            "time-independent stress does not make tau*u time-independent "
+            "because velocity evolves"
+        ),
         "reason": (
-            "the card's annual-cycle branch recomputes T* and Qsr only; both "
-            "model wind functions depend on latitude and fixed knots, not time"
+            "the prescribed stress is identical in legoESM and NEMO, so its "
+            "cross-model forcing gap is identically zero"
         ),
     }
 
@@ -254,6 +272,11 @@ def phase_decider(target, driver, *, n_boot=N_BOOT, seed=BOOT_SEED,
             "bootstrap_retained": 0,
             "bootstrap_dropped": n_boot,
             "n_positions": x.shape[1],
+            "horizon_degrees_of_freedom": len(HORIZONS) - 1,
+            "fisher_dependency_caveat": (
+                "mean removal leaves three seasonal degrees of freedom; the "
+                "four Fisher entries are dependent"
+            ),
             "n_eff_median": matched["n_eff_median"],
             "n_eff_min": matched["n_eff_min"],
             "by_shift": by_shift,
@@ -305,6 +328,11 @@ def phase_decider(target, driver, *, n_boot=N_BOOT, seed=BOOT_SEED,
         "bootstrap_retained": len(draws),
         "bootstrap_dropped": dropped,
         "n_positions": n,
+        "horizon_degrees_of_freedom": len(HORIZONS) - 1,
+        "fisher_dependency_caveat": (
+            "mean removal leaves three seasonal degrees of freedom; the four "
+            "Fisher entries are dependent"
+        ),
         "n_eff_median": matched["n_eff_median"],
         "n_eff_min": matched["n_eff_min"],
         "by_shift": by_shift,
@@ -337,9 +365,136 @@ def phase_collection(target, driver, *, n_boot=N_BOOT, seed=BOOT_SEED):
     }
 
 
+def relabel_driver_phase(phase):
+    """Retain registered decisions while reporting honest four-season power."""
+    result = json.loads(json.dumps(phase))
+    result["registered_status"] = result["status"]
+    if result["status"] == "REFUTES_PHASE_TRACKING":
+        result["status"] = NO_DETECTED_CODE
+    for entry in [result["ensemble_mean"], *result["members"]]:
+        entry["registered_status"] = entry["status"]
+        if entry["status"] == "REFUTES_PHASE_TRACKING":
+            entry["status"] = NO_DETECTED_CODE
+    result["registered_member_statuses"] = list(result["member_statuses"])
+    result["member_statuses"] = [
+        NO_DETECTED_CODE if status == "REFUTES_PHASE_TRACKING" else status
+        for status in result["member_statuses"]
+    ]
+    result["reporting_reason"] = (
+        "all advantage intervals straddle zero; with only three seasonal "
+        "degrees of freedom, entry into the registered low-score arm supports "
+        "non-detection, not affirmative refutation"
+    )
+    return result
+
+
+def _ar1_rows(rng, phi=POWER_PHI):
+    innovations = rng.normal(size=(len(HORIZONS), C.N_ROWS))
+    values = np.empty_like(innovations)
+    values[:, 0] = innovations[:, 0]
+    scale = np.sqrt(1.0 - phi * phi)
+    for j in range(1, C.N_ROWS):
+        values[:, j] = phi * values[:, j - 1] + scale * innovations[:, j]
+    values -= np.mean(values, axis=1, keepdims=True)
+    spread = np.std(values, axis=1, ddof=1, keepdims=True)
+    return values / spread
+
+
+def autocorrelated_phase_case(seed, rho, phi=POWER_PHI):
+    """Registered smooth, four-phase sensitivity case."""
+    rng = np.random.default_rng(seed)
+    target = _ar1_rows(rng, phi=phi)
+    noise = _ar1_rows(rng, phi=phi)
+    target -= np.mean(target, axis=0, keepdims=True)
+    noise -= np.mean(noise, axis=0, keepdims=True)
+    driver = rho * target + np.sqrt(1.0 - rho * rho) * noise
+    driver -= np.mean(driver, axis=0, keepdims=True)
+    return _f64(target), _f64(driver)
+
+
+def _power_realization(args):
+    rho, i, source_seed, n_boot = args
+    target, driver = autocorrelated_phase_case(source_seed, rho)
+    decision_seed = BOOT_SEED + 100 * i + round(1000 * rho)
+    decision = phase_decider(target, driver, n_boot=n_boot, seed=decision_seed)
+    return {
+        "rho": rho,
+        "source_seed": source_seed,
+        "decision_seed": decision_seed,
+        "status": decision["status"],
+        "matched_score": decision["correct_phase_score"],
+        "best_null_score": decision["best_null_score"],
+        "delta_block_ci": decision["delta_block_ci"],
+        "n_eff_median": decision["n_eff_median"],
+        "n_eff_min": decision["n_eff_min"],
+        "bootstrap_retained": decision["bootstrap_retained"],
+    }
+
+
+def autocorrelated_power_plant(*, n_boot=N_BOOT):
+    """Measure the all-realization detectable-effect floor after review."""
+    jobs = [
+        (rho, i, source_seed, n_boot)
+        for rho in POWER_RHOS
+        for i, source_seed in enumerate(POWER_SEEDS)
+    ]
+    workers = min(8, len(jobs), os.cpu_count() or 1)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+        measured = list(pool.map(_power_realization, jobs))
+    sweep = []
+    detectable = None
+    for rho in POWER_RHOS:
+        realizations = [item for item in measured if item["rho"] == rho]
+        confirmed = sum(
+            item["status"] == "CONFIRMS_PHASE_TRACKING"
+            for item in realizations)
+        scores = [item["matched_score"] for item in realizations]
+        effective = [item["n_eff_min"] for item in realizations]
+        sweep.append({
+            "rho": rho,
+            "confirmed": confirmed,
+            "realizations": len(realizations),
+            "matched_score_range": [min(scores), max(scores)],
+            "minimum_effective_rows_range": [min(effective), max(effective)],
+            "outcomes": realizations,
+        })
+        if detectable is None and confirmed == len(realizations):
+            detectable = rho
+    return {
+        "status": "MEASURED",
+        "definition": "lowest planted rho confirming in all six realizations",
+        "detectable_effect_floor_rho": detectable,
+        "detectable_effect_floor_label": (
+            f"rho >= {detectable:g}" if detectable is not None else "rho > 0.99"
+        ),
+        "phi": POWER_PHI,
+        "workers": workers,
+        "bootstrap_draws_per_realization": n_boot,
+        "horizon_degrees_of_freedom": len(HORIZONS) - 1,
+        "sweep": sweep,
+        "original_iid_confirm_plant_retracted": True,
+    }
+
+
 def seasonal_anomaly(a):
     x = _f64(a)
     return x - np.mean(x, axis=1, keepdims=True)
+
+
+def seasonal_correlation_context(anomaly):
+    profile = _f64(anomaly).mean(axis=0)
+    matrix = np.corrcoef(profile)
+    upper = matrix[np.triu_indices(len(HORIZONS), k=1)]
+    return {
+        "ensemble_profile_matrix": matrix.tolist(),
+        "mean_pairwise_correlation": float(np.mean(upper)),
+        "balanced_four_phase_baseline": -1.0 / (len(HORIZONS) - 1),
+        "baseline_reason": (
+            "four row-wise anomaly fields sum to zero; -1/3 is the balanced "
+            "equal-energy mean-pairwise baseline"
+        ),
+        "horizon_degrees_of_freedom": len(HORIZONS) - 1,
+    }
 
 
 def proportionality(target, predictor):
@@ -555,10 +710,15 @@ def score_driver(name, values, target_gap, *, n_boot=N_BOOT):
                              seed=BOOT_SEED + 1000 * (1 + list(
                                  ("density_inventory", "vertical_stratification",
                                   "mixed_layer_depth", "thermal_wind")).index(name)))
+    phase = relabel_driver_phase(phase)
     saturation = saturation_summary(values["lego"], values["nemo"])
-    suffix = " (u)" if saturation["unsaturated"] else ""
+    suffix = " (u)" if saturation["saturated"] == 0 else ""
+    displayed = (NO_DETECTED_LABEL if phase["status"] == NO_DETECTED_CODE
+                 else phase["status"])
     return {
-        "status": phase["status"] + suffix,
+        "status": displayed + suffix,
+        "status_code": phase["status"] + suffix,
+        "registered_status": phase["registered_status"] + suffix,
         "phase": phase,
         "saturation": saturation,
         "driver_gap": driver_gap.tolist(),
@@ -574,17 +734,18 @@ def score_driver(name, values, target_gap, *, n_boot=N_BOOT):
 
 def self_test(n_boot=300):
     print("CHANNEL SEASONAL SELF-TEST")
-    _plant_fires(
+    plants = []
+    plants.append(_plant_fires(
         "pinned source hash mutation",
         lambda: _git_object(AUDIT_COMMIT, AUDIT_PATH, "0" * 64),
-    )
+    ))
     from legoesm.ocean.experiments.dino import dino_wind_stress
     _wind_signature_guard(dino_wind_stress)
-    _plant_fires(
+    plants.append(_plant_fires(
         "time-dependent wind signature",
         lambda: _wind_signature_guard(
             lambda lat_deg, t_seconds, cfg=None: lat_deg + t_seconds),
-    )
+    ))
 
     wet = R.A.tmask.copy()
     rho = np.where(wet, 1027.0, np.nan)
@@ -592,10 +753,10 @@ def self_test(n_boot=300):
     official, _ = density_profiles(rho, wet)
     layer = np.mean(np.where(wet[CHANNEL_ROWS], rho[CHANNEL_ROWS], 0.0),
                     axis=(1, 2))
-    _plant_fires(
+    plants.append(_plant_fires(
         "layer average cannot replace volume-weighted density",
         lambda: np.testing.assert_allclose(layer, official, rtol=1e-12, atol=1e-12),
-    )
+    ))
 
     from legoesm.ocean.diagnostics import mixed_layer_depth
     z = np.asarray([5.0, 15.0, 30.0, 60.0], dtype=np.float64)
@@ -617,7 +778,8 @@ def self_test(n_boot=300):
         eos_fn=synthetic_eos))[0])
     if not abs(cross - flat) > 1.0:
         raise AssertionError("MLD plant did not move the canonical diagnostic")
-    _plant_fires("MLD crossing is mobile", lambda: _assert_close(cross, flat, 1.0))
+    plants.append(_plant_fires(
+        "MLD crossing is mobile", lambda: _assert_close(cross, flat, 1.0)))
 
     constant = np.where(wet, 1027.0, np.nan)
     base = thermal_wind_profile(constant, wet)
@@ -626,34 +788,42 @@ def self_test(n_boot=300):
     moved = thermal_wind_profile(moved_rho, wet)
     if not np.max(np.abs(moved - base)) > 0.0:
         raise AssertionError("thermal-wind plant did not move")
-    _plant_fires("meridional density perturbation moves thermal wind",
-                 lambda: np.testing.assert_allclose(moved, base, atol=0.0))
+    plants.append(_plant_fires(
+        "meridional density perturbation moves thermal wind",
+        lambda: np.testing.assert_allclose(moved, base, atol=0.0)))
 
     block_profile = np.repeat(np.arange(7, dtype=np.float64), 5)
     n_eff, _ = C.effective_rows(block_profile, block_profile)
-    _plant_fires("adjacent rows are not 35 independent rows",
-                 lambda: _assert_close(n_eff, 35.0))
+    plants.append(_plant_fires(
+        "adjacent rows are not 35 independent rows",
+        lambda: _assert_close(n_eff, 35.0)))
 
-    rng = np.random.default_rng(1455)
-    patterns = rng.normal(size=(len(HORIZONS), C.N_ROWS))
-    known = phase_decider(patterns, patterns, n_boot=n_boot, seed=77)
-    shifted = phase_decider(patterns, np.roll(patterns, 1, axis=0),
-                            n_boot=n_boot, seed=78)
-    if known["status"] != "CONFIRMS_PHASE_TRACKING":
-        raise AssertionError(f"known aligned phases classified {known['status']}")
-    _plant_fires(
-        "one-quarter relabelling cannot keep the aligned verdict",
-        lambda: (_ for _ in ()).throw(AssertionError())
-        if shifted["status"] != known["status"] else None,
-    )
-    print("CHANNEL SEASONAL SELF-TEST PASSED -- 7/7 local plants fired")
+    target, driver = autocorrelated_phase_case(POWER_SEEDS[0], POWER_RHOS[-1])
+    planted_ne = [C.effective_rows(target[t], driver[t])[0]
+                  for t in range(len(HORIZONS))]
+    plants.append(_plant_fires(
+        "autocorrelated phase plant cannot claim independent rows",
+        lambda: np.testing.assert_allclose(planted_ne, C.N_ROWS)))
+    result = {
+        "status": "PASSED",
+        "plants_fired": len(plants),
+        "plants": plants,
+        "autocorrelated_case_effective_rows": planted_ne,
+        "iid_confirm_plant_retracted": True,
+        "confirm_sensitivity_claim": "deferred to full autocorrelated power sweep",
+    }
+    print(f"CHANNEL SEASONAL SELF-TEST PASSED -- {len(plants)}/{len(plants)} "
+          "local plants fired")
+    return result
 
 
 def run(out_dir):
     sha_start, dirty_start = _git_state()
     if dirty_start:
         raise SystemExit(f"FATAL: producer tree {sha_start} is dirty")
-    self_test()
+    controls = self_test()
+    print("measuring autocorrelated confirm-arm power", flush=True)
+    controls["autocorrelated_power"] = autocorrelated_power_plant(n_boot=N_BOOT)
     wind = wind_receipts()
     upstream = upstream_artifact()
     transport, drivers, input_provenance = load_measurements()
@@ -689,6 +859,8 @@ def run(out_dir):
             "lego_row_transport_sv": transport["lego"].tolist(),
             "nemo_row_transport_sv": transport["nemo"].tolist(),
             "gap_seasonal_anomaly_sv": transport_gap_anomaly.tolist(),
+            "seasonal_correlation_context": seasonal_correlation_context(
+                transport_gap_anomaly),
             "upstream_gap_max_abs_reproduction_residual_sv": upstream_residual,
             "target_saturation": upstream["_stamp"]["floor_saturation_measured"],
             "target_label": (
@@ -696,6 +868,7 @@ def run(out_dir):
                 "PLAUSIBLE because 0/35 row floors are saturated"
             ),
         },
+        "controls": controls,
         "_stamp": {
             "producer_sha": sha_start,
             "producer_tree_dirty": dirty_start,
@@ -717,14 +890,24 @@ def run(out_dir):
                 "N_BOOT": N_BOOT, "BOOT_SEED": BOOT_SEED,
                 "N_DRIVER_LEGS": N_DRIVER_LEGS,
                 "familywise_confidence": CONFIDENCE,
+                "seasonal_horizon_degrees_of_freedom": len(HORIZONS) - 1,
             },
             "weighting": "thickness/volume weighted throughout; no layer average",
             "wind_excluded_before_driver_scoring": True,
             "post_run_corrections": [
                 "the first clean run aborted before scoring because a relation "
                 "had zero Fisher weight at N_eff=3; the engine now emits "
-                "UNRESOLVED_EFFECTIVE_N for that registered no-information case"
+                "UNRESOLVED_EFFECTIVE_N for that registered no-information case",
+                "post-review amendment fc36d3099 retracts the iid confirm plant, "
+                "adds an autocorrelated power sweep, and relabels driver low-score "
+                "outcomes as no detected relation",
             ],
+            "reviewer_measured_pushback": {
+                "rho_0.90_confirmations": "0/6",
+                "rho_0.95_confirmations": "2/6",
+                "rho_0.60_matched_score_range": [0.49, 0.68],
+                "source": "adversarial review fix_list.md",
+            },
         },
     }
     out = Path(out_dir)
@@ -735,6 +918,9 @@ def run(out_dir):
         "trivial": trivial["status"],
         "wind": wind["status"],
         "drivers": {name: value["status"] for name, value in scored.items()},
+        "detectable_effect_floor": controls["autocorrelated_power"][
+            "detectable_effect_floor_label"],
+        "balanced_pairwise_baseline": -1.0 / (len(HORIZONS) - 1),
         "artifact": str(path), "producer_sha": sha_start,
     }, indent=1))
     return result

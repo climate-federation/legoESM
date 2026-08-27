@@ -41,15 +41,29 @@ def test_wind_signature_guard_rejects_time_argument():
         S._wind_signature_guard(time_dependent)
 
 
-def test_phase_decider_confirms_known_alignment_and_rejects_relabelling():
-    pattern = _patterns()
-    aligned = S.phase_decider(pattern, pattern, n_boot=250, seed=1)
-    shifted = S.phase_decider(
-        pattern, np.roll(pattern, 1, axis=0), n_boot=250, seed=2)
-    assert aligned["status"] == "CONFIRMS_PHASE_TRACKING"
-    assert aligned["correct_phase_score"] > S.PERSIST_HI
-    assert aligned["delta_block_ci"][0] > 0.0
-    assert shifted["status"] != aligned["status"]
+def test_power_case_is_autocorrelated_and_has_three_horizon_dof():
+    target, driver = S.autocorrelated_phase_case(1455, 0.95)
+    assert target.shape == (len(S.HORIZONS), S.C.N_ROWS)
+    assert np.allclose(target.sum(axis=0), 0.0, atol=1e-12)
+    assert np.allclose(driver.sum(axis=0), 0.0, atol=1e-12)
+    effective = [S.C.effective_rows(target[t], driver[t])[0]
+                 for t in range(len(S.HORIZONS))]
+    assert min(effective) < S.C.N_ROWS
+
+
+def test_driver_refute_label_is_downgraded_but_registered_status_retained():
+    entry = {"status": "REFUTES_PHASE_TRACKING"}
+    phase = {
+        "status": "REFUTES_PHASE_TRACKING",
+        "ensemble_mean": entry.copy(),
+        "members": [entry.copy() for _ in range(S.N_MEM)],
+        "member_statuses": ["REFUTES_PHASE_TRACKING"] * S.N_MEM,
+    }
+    result = S.relabel_driver_phase(phase)
+    assert result["status"] == S.NO_DETECTED_CODE
+    assert result["registered_status"] == "REFUTES_PHASE_TRACKING"
+    assert all(status == S.NO_DETECTED_CODE
+               for status in result["member_statuses"])
 
 
 def test_phase_decider_refuses_constant_profile():
