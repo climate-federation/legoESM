@@ -460,8 +460,10 @@ def tke_equation_decomposition(
         "K_M_surface": jnp.asarray(km_surface_n),
     }, surface_scale)
     double_prod = replay({"P_s": jnp.asarray(2.0 * p_l)})
-    floor_cfg = dataclasses.replace(
-        cfg, tke_surface_min=float(cfg.tke_background))
+    floor_cfg = (cfg._replace(tke_surface_min=float(cfg.tke_background))
+                 if hasattr(cfg, "_replace") else
+                 dataclasses.replace(
+                     cfg, tke_surface_min=float(cfg.tke_background)))
     floor_arm = replay({"cfg": floor_cfg})
 
     arm_arrays = {
