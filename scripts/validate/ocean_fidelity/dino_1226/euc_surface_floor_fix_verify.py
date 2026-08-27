@@ -146,8 +146,19 @@ def main() -> int:
     shape_components = [c for c in components if c["K_M"].shape == A_fixed.shape]
     if not shape_components:
         raise SystemExit("no spied coefficient call matches production A_v shape")
+    is_active = getattr(br.z_coord, "is_active", None)
+    wet_interface = (
+        np.ones_like(A_fixed, dtype=bool) if is_active is None
+        else np.asarray(is_active[..., 1:]) > 0.5)
+    if wet_interface.shape != A_fixed.shape:
+        raise SystemExit(
+            f"production wet mask {wet_interface.shape} != A_v {A_fixed.shape}")
+    # compute_vertical_K_profiles applies this W-interface mask after the TKE
+    # constructor returns. Compare like with like; an unmasked dry-column
+    # value is not a different closure component.
+    component_outputs = [c["K_M"] * wet_interface for c in shape_components]
     component_distances = [
-        float(np.max(np.abs(c["K_M"] - A_fixed))) for c in shape_components]
+        float(np.max(np.abs(out - A_fixed))) for out in component_outputs]
     component_pick = int(np.argmin(component_distances))
     component_pick_error = component_distances[component_pick]
     component_pick_tolerance = 1.0e-12 * max(
