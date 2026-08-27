@@ -175,7 +175,9 @@ from legoesm.grids.fv3_duo_halos import (
     average_shared_edge_bgrid,
     build_jax_duo_halo_tables,
     ext_scalar_sixface,
+    ext_scalar_sixface_allk,
     ext_vector_cgrid_sixface,
+    ext_vector_cgrid_sixface_allk,
     ext_vector_dgrid_sixface,
     stack6,
 )
@@ -193,6 +195,7 @@ __all__ = [
     "p_grad_c_1lev",
     "one_grad_p_1lev",
     "exchange_post_pgrad_sixface",
+    "exchange_post_pgrad_sixface_allk",
     "csw_step_sixface",
     "dsw12_step_sixface",
     "acoustic_step_sixface",
@@ -387,7 +390,7 @@ class DuoStepperContext:
     """
 
     __slots__ = ("n", "ng", "npx", "m_a", "bd", "tab", "gs6", "flags6",
-                 "hs6", "duogrid")
+                 "hs6", "duogrid", "_batched_gs")
 
     def __hash__(self):
         return id(self)
@@ -401,7 +404,8 @@ class DuoStepperContext:
 
 
 def build_jax_duo_stepper_context(ctx: dict, *,
-                                  skip_b_endpoints: bool = False
+                                  skip_b_endpoints: bool = False,
+                                  spmd_mesh=None
                                   ) -> DuoStepperContext:
     """Convert the NumPy ``build_six_face_duo_context`` dict ONCE.
 
@@ -471,6 +475,14 @@ def build_jax_duo_stepper_context(ctx: dict, *,
 
     tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=_STEPPER_NQ,
                                     skip_b_endpoints=skip_b_endpoints)
+    if spmd_mesh is not None:
+        # ENGINEERING knob (M3): route every step-side halo exchange
+        # through the O(halo) shard_map ring on this mesh.  Selects no
+        # scientific configuration; the ring exchanges are bitwise-equal
+        # to the certified path (test_fv3_duo_spmd).  Default None keeps
+        # the certified single-device trace byte-identical.
+        from legoesm.grids.fv3_duo_spmd import build_ring_comm
+        tab.ring_comm = build_ring_comm(tab, spmd_mesh)
 
     out = DuoStepperContext()
     out.n, out.ng = n, ng
@@ -509,6 +521,11 @@ def build_jax_duo_stepper_context(ctx: dict, *,
         out.hs6 = stack6([np.asarray(h) for h in hs6])
     _require_f64_jax("build_jax_duo_stepper_context", {"hs6": out.hs6})
     out.duogrid = True
+    # Lazily filled by fv3_phase3d_common.build_batched_gs (the
+    # face-batched vmap arm's stacked view of gs6/flags6); None = not
+    # built.  Initialised here so slot-copying clones (the tests') never
+    # hit an unset-slot AttributeError.
+    out._batched_gs = None
     return out
 
 
@@ -684,18 +701,40 @@ def exchange_post_pgrad_sixface(ctx: DuoStepperContext, divgd6, uc6, vc6,
     Returns ``(divgd6, uc6, vc6)`` face-stacked.  Every face-stacked
     operand is ``(6, …)``.
     """
-    if nord != int(nord):
-        # a damping ORDER is integral by construction; the deck dicts
-        # mix ints and floats, so int() would round 2.7 to 2 without a
-        # word.  Reject instead (mirrors the NumPy guard).
-        raise ValueError(
-            f"nord must be an integral damping order, got {nord!r}")
-    nord = int(nord)
+    nord = _validated_nord(nord)
     tab = ctx.tab
     if nord > 0:
         divgd6 = ext_scalar_sixface(divgd6, tab, "B")
     uc6, vc6 = ext_vector_cgrid_sixface(uc6, vc6, tab)
     return divgd6, uc6, vc6
+
+
+def _validated_nord(nord) -> int:
+    """A damping ORDER is integral by construction; the deck dicts mix
+    ints and floats, so ``int()`` would round 2.7 to 2 without a word.
+    Reject instead (mirrors the NumPy guard)."""
+    if nord != int(nord):
+        raise ValueError(
+            f"nord must be an integral damping order, got {nord!r}")
+    return int(nord)
+
+
+def exchange_post_pgrad_sixface_allk(ctx: DuoStepperContext, divgd6k,
+                                     uc6k, vc6k, *, nord: int):
+    """k-batched :func:`exchange_post_pgrad_sixface` (v2a): the same
+    two exchanges -- ``ext_scalar(divgd, …, 1,1)`` gated on ``nord >
+    0``, ``ext_vector(uc, vc, …, 1,0,0,1)`` ungated -- over
+    ``(6, i, j, K)`` stacks with the level axis TRAILING, one batched
+    exchange call per operand instead of one per level.  The gate
+    semantics live here exactly as in the per-level helper; see its
+    docstring for the nord-not-nord_v argument.
+    """
+    nord = _validated_nord(nord)
+    tab = ctx.tab
+    if nord > 0:
+        divgd6k = ext_scalar_sixface_allk(divgd6k, tab, "B")
+    uc6k, vc6k = ext_vector_cgrid_sixface_allk(uc6k, vc6k, tab)
+    return divgd6k, uc6k, vc6k
 
 
 # ---------------------------------------------------------------------

@@ -202,21 +202,23 @@ import jax
 import jax.numpy as jnp
 from legoesm.core.fv3_duo_stepper import (
     SWConfig,
-    exchange_post_pgrad_sixface,
+    exchange_post_pgrad_sixface_allk,
 )
-from legoesm.core.fv3_duo_sw_core import d_sw1_duo, d_sw2_duo
+from legoesm.core.fv3_duo_sw_core import GridFlags, d_sw1_duo, d_sw2_duo
 from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
 from legoesm.core.fv3_native_state_3d import (
     STATE_FIELDS,
     require_no_remap_needed,
 )
 from legoesm.core.fv3_phase3d_common import (
+    build_batched_gs,
     require_bool,
     require_f64_jax,
     require_km,
     require_nord,
     stack_faces,
     stack_levels,
+    stack_levels_batched,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import average_allflux_shared_edges
@@ -426,18 +428,20 @@ def exchange_post_pgrad_3d(ctx, csw_outs: dict, km, *, nord: int) -> dict:
     THE GATE IS ``nord``, the DIVERGENCE-damping order ``d_sw5`` runs,
     not ``nord_v``, the vorticity-damping order.  The shipped decks set
     both to 2, so gating on the wrong one is invisible there -- which
-    is exactly why it is stated.  ``exchange_post_pgrad_sixface`` owns
-    the gate; this routine only supplies the per-level cadence.
+    is exactly why it is stated.  ``exchange_post_pgrad_sixface_allk``
+    owns the gate (identically to the per-level helper); this routine
+    only validates and forwards the whole stacks.
 
     Omitting these leaves the ``uc``/``vc``/``divgd`` halos stale and
     ``d_sw1`` transports garbage: in the NumPy lane the first sub-step
     produced ``delp ~ -1.5e39`` and 267 non-finite ``u`` values before
     any exchange was added.
 
-    The oracle's exchanges are 3-D calls over the whole column; this
-    lane holds one 2-D plane per level, so it drives the shared
-    six-face helper once per ``k``.  Level-independent by construction
-    -- ``ext_scalar`` / ``ext_vector`` are horizontal operators.
+    The oracle's exchanges are 3-D calls over the whole column; since
+    v2a this lane matches that shape, driving the k-batched six-face
+    helper ONCE per call site (level-independent by construction --
+    ``ext_scalar`` / ``ext_vector`` are horizontal operators, so the
+    batched certified path is the former per-``k`` loop verbatim).
 
     Returns ``{"divg_d", "uc", "vc"}`` face-stacked and
     ``(6, i, j, km)``-shaped.  The spec MUTATES those three keys of
@@ -452,27 +456,19 @@ def exchange_post_pgrad_3d(ctx, csw_outs: dict, km, *, nord: int) -> dict:
     require_f64_jax("exchange_post_pgrad_3d",
                      {k: csw_outs[k] for k in _EXCHANGE_FIELDS})
 
-    per_level = {name: [] for name in _EXCHANGE_FIELDS}
     # R1a, level axis: `ext_scalar`/`ext_vector` are HORIZONTAL
     # operators -- each level's exchange reads and writes only that
     # level's plane, and this lane is functional, so the NumPy lane's
-    # strided `fort` views onto one buffer do not exist here.  No
-    # iteration reads a location another writes.  Independent,
-    # therefore vectorisable, therefore NOT vectorised (C2): the halo
-    # tables index a FLAT (6, m, m) layout, so a batched level axis
-    # would need its own table and its own equivalence gate.
-    for k in range(km):
-        dg_k, uc_k, vc_k = exchange_post_pgrad_sixface(
-            ctx, csw_outs["divg_d"][:, :, :, k], csw_outs["uc"][:, :, :, k],
-            csw_outs["vc"][:, :, :, k], nord=nord)
-        per_level["divg_d"].append(dg_k)
-        per_level["uc"].append(uc_k)
-        per_level["vc"].append(vc_k)
-    # Each per-level entry is already face-stacked `(6, i, j)`, so the
-    # level axis goes to position 3 here, not 2 -- the result is
-    # `(6, i, j, km)`, which is `(6,) + field_shape(name, n, ng, km)`.
-    return {name: jnp.stack(per_level[name], axis=3)
-            for name in _EXCHANGE_FIELDS}
+    # strided `fort` views onto one buffer do not exist here.
+    # Independent, therefore batched (v2a): the `*_allk` exchanges keep
+    # the FLAT (6, m, m) tables and vmap them over the trailing level
+    # axis (certified path = the former per-k loop, relocated
+    # verbatim), turning 2*km collectives per call into 2 on the ring
+    # path.  Fields are already `(6, i, j, km)` in and out.
+    dg, uc, vc = exchange_post_pgrad_sixface_allk(
+        ctx, csw_outs["divg_d"], csw_outs["uc"], csw_outs["vc"],
+        nord=nord)
+    return {"divg_d": dg, "uc": uc, "vc": vc}
 
 
 # ---------------------------------------------------------------------
@@ -486,7 +482,8 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
                            kgb: float | None = None,
                            nord_w: int | None = None,
                            damp_w: float | None = None,
-                           flux_cap: dict | None = None) -> dict:
+                           flux_cap: dict | None = None,
+                           batched: bool = False) -> dict:
     """``d_sw1`` (per k) -> BARRIER 1 (per k) -> ``d_sw2`` (per k).
 
     The exchanges at ``dyn_core.F90:652``/``:655`` run FIRST, before
@@ -530,10 +527,18 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     * ``uc`` / ``vc`` / ``divg_d``, exchanged (stage S07);
     * ``w`` and ``dw`` on the NH arm only;
     * ``mfx`` / ``mfy`` / ``cx`` / ``cy`` when ``flux_cap`` was given.
+
+    ``batched`` (STATIC, default False) selects the vmap-over-faces arm
+    (C2a, face-batching ladder step 3): same kernels, same level loops,
+    the two face loops replaced by ``jax.vmap`` over
+    ``build_batched_gs``'s stacked view -- BARRIER 1 and the exchanges
+    stay exactly where they are, on the full six-face stack.  False is
+    the certified loop path, untouched.
     """
     km = require_km("dsw_transport_phase_3d", km)
     for nm, vv in (("hydrostatic", hydrostatic),
-                   ("remap_follows", remap_follows)):
+                   ("remap_follows", remap_follows),
+                   ("batched", batched)):
         require_bool("dsw_transport_phase_3d", nm, vv)
     require_no_remap_needed(km, remap_follows=remap_follows)
     c = _resolve_cfg("dsw_transport_phase_3d", cfg)
@@ -573,6 +578,12 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # to 2 before `exchange_post_pgrad_3d`'s guard could refuse it.
     ex = exchange_post_pgrad_3d(ctx, csw_outs, km, nord=c.nord)
     uc6, vc6, divgd6 = ex["uc"], ex["vc"], ex["divg_d"]
+
+    if batched:
+        return _dsw_transport_phase_3d_batched(
+            ctx, states, uc6, vc6, divgd6, dt, km, c=c,
+            hydrostatic=hydrostatic, kgb=kgb, nord_w=nord_w,
+            damp_w=damp_w, flux_cap=flux_cap)
 
     # --- d_sw1 at every level, on every face (:744 / :831) ------------
     # Held as [face][k] rather than merged: the barrier consumes one
@@ -746,6 +757,172 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     return out
 
 
+def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
+                                    km, *, c, hydrostatic, kgb, nord_w,
+                                    damp_w, flux_cap) -> dict:
+    """The vmap-over-faces arm of :func:`dsw_transport_phase_3d` (C2a).
+
+    Entry gates and the post-``p_grad_c`` exchanges already ran in the
+    caller -- the exchanges are six-face collectives and are IDENTICAL
+    on both arms.  The ``d_sw1`` and ``d_sw2`` FACE loops become one
+    ``jax.vmap`` per level over ``build_batched_gs``'s stacked view;
+    the LEVEL loops stay Python (the oracle's own ``do k=1,npz``,
+    dyn_core.F90:744 / :914); and BARRIER 1 sits exactly where the loop
+    path puts it -- between d_sw1 and d_sw2, one level at a time, on
+    the full six-face stack (dyn_core.F90:872).  The barrier is a
+    CROSS-FACE collective, so it is not and cannot be face-batched.
+
+    ``da_min`` / ``da_min_c`` are the two per-face ``GridFlags`` fields
+    (``PER_FACE_FLAG_FIELDS``); every consumer on this chain is
+    ARITHMETIC-ONLY -- ``fv_tp_2d``/``deln_flux``'s ``damp =
+    (damp_c*da_min)**(nord+1)`` ("``damp`` rides as a dynamic
+    multiplier (it is never compared)", del6_vt_flux's contract) and
+    ``d_sw2_duo``'s ``(damp_w*da_min_c)**(nord_w+1)``; the Python
+    branches sit on ``damp_c``/``damp_w``/``damp_smag``, which are deck
+    statics -- so each face's scalar rides the vmap as a traced operand
+    and is rebuilt into a ``GridFlags`` inside the batched body,
+    WITHOUT changing any kernel signature.  Every OTHER flag field is
+    face-invariant by ``build_batched_gs``'s common-mode gate (which
+    RAISES otherwise) and closes over as the one shared Python value.
+
+    in_axes: the five state planes, the exchanged ``uc``/``vc`` planes,
+    the four capacitor planes, the gridstruct dict and the
+    ``da_min6``/``da_min_c6`` scalars are 0 (per face).  Closed over
+    (face-invariant): ``bd``/``npx``/the ``SWConfig`` knobs/``kgb``/
+    ``nord_w``/``damp_w``/``hydrostatic`` (static Python values), plus
+    ``dt`` (traced but shared).
+    """
+    fname = "dsw_transport_phase_3d[batched]"
+    bview = build_batched_gs(ctx)
+    shared = bview["flags"]
+    da6, dac6 = bview["da_min6"], bview["da_min_c6"]
+    bd, npx, n, m_a = ctx.bd, ctx.npx, ctx.n, ctx.m_a
+
+    # --- d_sw1 at every level, faces vmapped (:744 / :831) ------------
+    def one_face_sw1(delp2, pt2, w2, uc2, vc2, xf, yf, cxk, cyk, gs_t,
+                     da_t, dac_t):
+        fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
+        return d_sw1_duo(delp2, pt2, w2, uc2, vc2, xf, yf, cxk, cyk,
+                         gs_t, fl, bd, npx, npx, dt=dt,
+                         hord_tr=c.hord_tr, hord_vt=c.hord_vt,
+                         hord_tm=c.hord_tm, hord_dp=c.hord_dp,
+                         nord_v=c.nord_v, nord_t=0,
+                         damp_v=c.damp_v, damp_t=0.0,
+                         hydrostatic=hydrostatic,
+                         workspace_sentinel=0.0)
+
+    vf1 = jax.vmap(one_face_sw1, in_axes=(0,) * 12)
+    zx6 = jnp.zeros((6, npx, n), dtype=jnp.float64)
+    zy6 = jnp.zeros((6, n, npx), dtype=jnp.float64)
+    zcx6 = jnp.zeros((6, npx, m_a), dtype=jnp.float64)
+    zcy6 = jnp.zeros((6, m_a, npx), dtype=jnp.float64)
+    per_level = []
+    for k in range(km):
+        if flux_cap is None:
+            xfk, yfk, cxk, cyk = zx6, zy6, zcx6, zcy6
+        else:
+            # D4, unchanged: mfx/mfy sliced to the kernel window, cx/cy
+            # passed whole -- with the face axis in front.
+            xfk = flux_cap["mfx"][:, :, :n, k]
+            yfk = flux_cap["mfy"][:, :n, :, k]
+            cxk = flux_cap["cx"][:, :, :, k]
+            cyk = flux_cap["cy"][:, :, :, k]
+        per_level.append(vf1(
+            states["delp"][:, :, :, k], states["pt"][:, :, :, k],
+            states["w"][:, :, :, k], uc6[:, :, :, k], vc6[:, :, :, k],
+            xfk, yfk, cxk, cyk, bview["gs"], da6, dac6))
+
+    # --- capacitor write-back (R4 / C4), face-stacked ----------------
+    caps = None
+    if flux_cap is not None:
+        caps = {}
+        for name in CAPACITOR_FIELDS:
+            src = _CAP_FROM_DSW1[name]
+            arr = jnp.asarray(flux_cap[name])
+            for k in range(km):
+                v = per_level[k][src]
+                if name == "mfx":
+                    arr = arr.at[:, :, :n, k].set(v)
+                elif name == "mfy":
+                    arr = arr.at[:, :n, :, k].set(v)
+                else:
+                    arr = arr.at[:, :, :, k].set(v)
+            caps[name] = arr
+
+    # --- BARRIER 1, verbatim: one level at a time, all six faces ------
+    # (dyn_core.F90:872/:877; slot selection :856 owned by
+    # average_allflux_shared_edges through tab.allflux_slots.)
+    afx_pre = stack_levels_batched(
+        fname, "allflux_x",
+        [per_level[k]["allflux_x"] for k in range(km)])
+    afy_pre = stack_levels_batched(
+        fname, "allflux_y",
+        [per_level[k]["allflux_y"] for k in range(km)])
+    _require_barrier_nq(fname, ctx, int(afx_pre.shape[-1]))
+    _require_barrier_layout(fname, ctx, afx_pre, afy_pre, km)
+
+    afx_lv, afy_lv = [], []
+    for k in range(km):
+        ax, ay = average_allflux_shared_edges(afx_pre[:, :, :, k, :],
+                                              afy_pre[:, :, :, k, :],
+                                              ctx.tab)
+        afx_lv.append(ax)
+        afy_lv.append(ay)
+    afx6 = jnp.stack(afx_lv, axis=3)
+    afy6 = jnp.stack(afy_lv, axis=3)
+
+    # --- d_sw2 at every level, faces vmapped (:914 / :950) ------------
+    names2 = ("delp", "pt") + (() if hydrostatic else ("w", "dw"))
+
+    if hydrostatic:
+        def one_face_sw2(delp2, pt2, afx_k, afy_k, gs_t, da_t, dac_t):
+            fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
+            return d_sw2_duo(delp2, pt2, afx_k, afy_k, gs_t, fl, bd,
+                             w=None, npx=npx, npy=npx, dt=dt, kgb=kgb,
+                             nord_w=nord_w, damp_w=damp_w,
+                             hydrostatic=True)
+        vf2 = jax.vmap(one_face_sw2, in_axes=(0,) * 7)
+    else:
+        def one_face_sw2(delp2, pt2, w2, afx_k, afy_k, gs_t, da_t,
+                         dac_t):
+            fl = GridFlags(da_min=da_t, da_min_c=dac_t, **shared)
+            return d_sw2_duo(delp2, pt2, afx_k, afy_k, gs_t, fl, bd,
+                             w=w2, npx=npx, npy=npx, dt=dt, kgb=kgb,
+                             nord_w=nord_w, damp_w=damp_w,
+                             hydrostatic=False)
+        vf2 = jax.vmap(one_face_sw2, in_axes=(0,) * 8)
+
+    s2_levels = {name: [] for name in names2}
+    for k in range(km):
+        s1 = per_level[k]
+        w_args = () if hydrostatic else (s1["w"],)
+        s2 = vf2(s1["delp"], s1["pt"], *w_args,
+                 afx6[:, :, :, k, :], afy6[:, :, :, k, :],
+                 bview["gs"], da6, dac6)
+        for name in names2:
+            if name not in s2 or s2[name] is None:
+                raise KeyError(
+                    f"d_sw2 returned no {name!r} (keys "
+                    f"{sorted(s2)}); the 3-D assembler must not "
+                    f"silently drop a stage output")
+            s2_levels[name].append(s2[name])
+
+    # --- assembly: identical keys and layouts to the loop path --------
+    out = {name: stack_levels_batched(
+        fname, name, [per_level[k][name] for k in range(km)])
+        for name in DSW1_OUT_2D if not name.startswith("allflux_")}
+    out["allflux_x"] = afx6
+    out["allflux_y"] = afy6
+    out["allflux_x_prebarrier"] = afx_pre
+    out["allflux_y_prebarrier"] = afy_pre
+    for name in names2:
+        out[name] = stack_levels_batched(fname, name, s2_levels[name])
+    out["uc"], out["vc"], out["divg_d"] = uc6, vc6, divgd6
+    if caps is not None:
+        out.update(caps)
+    return out
+
+
 # ---------------------------------------------------------------------
 # jit factories -- ONE policy per public routine, declared here so a
 # call site can never invent a different static split.
@@ -787,4 +964,4 @@ def make_dsw_transport_phase_3d_jit(fn=dsw_transport_phase_3d):
     return jax.jit(fn, static_argnums=(0, 4),
                    static_argnames=("km", "cfg", "hydrostatic",
                                     "remap_follows", "kgb", "nord_w",
-                                    "damp_w"))
+                                    "damp_w", "batched"))
