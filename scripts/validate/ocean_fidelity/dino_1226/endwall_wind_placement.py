@@ -152,8 +152,8 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
         LatLonCGridOceanModel,
     )
 
-    cap: dict[str, np.ndarray | int] = {
-        "baro_calls": 0, "vmix_calls": 0, "stress_calls": 0,
+    cap: dict[str, object] = {
+        "baro_calls": 0, "vmix_calls": 0, "stress_calls": 0, "events": [],
     }
     real_baro = ocmod.barotropic_substeps_latlon_cgrid
     real_vmix = LatLonCGridOceanModel._apply_implicit_vertical_mixing
@@ -162,6 +162,7 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     def spy_stress(*args, **kwargs):
         out = real_stress(*args, **kwargs)
         cap["stress_calls"] = int(cap["stress_calls"]) + 1
+        cap["events"].append("stress")
         if out is not None and "tau_i_u" not in cap:
             cap["tau_i_u"] = np.asarray(out[0], dtype=np.float64)
             cap["tau_j_v"] = np.asarray(out[1], dtype=np.float64)
@@ -172,6 +173,7 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     def spy_baro(*args, **kwargs):
         if kwargs.get("eta_init") is not None:
             cap["baro_calls"] = int(cap["baro_calls"]) + 1
+            cap["events"].append("baro")
             if "F_slow_u" not in cap:
                 cap["F_slow_u"] = np.asarray(kwargs["F_slow_u"], dtype=np.float64)
                 cap["F_slow_v"] = np.asarray(kwargs["F_slow_v"], dtype=np.float64)
@@ -180,6 +182,7 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
     def spy_vmix(self, state_in, *args, **kwargs):
         if kwargs.get("do_momentum", True):
             cap["vmix_calls"] = int(cap["vmix_calls"]) + 1
+            cap["events"].append("vmix")
             if "B1_u" not in cap:
                 cap["B1_u"] = np.asarray(state_in.u.data, dtype=np.float64)
                 cap["B1_v"] = np.asarray(state_in.v.data, dtype=np.float64)
@@ -209,11 +212,20 @@ def _run_arm(model, state, sf, *, external_rate, scale: float) -> dict:
                 "tau_i_u", "tau_j_v", "dz0_u", "dz0_v"}
     if not required <= cap.keys():
         raise SystemExit(f"arm {scale} missed hooks: {required - cap.keys()}")
+    expected_events = ("stress", "baro", "stress", "vmix")
+    observed_events = tuple(cap["events"])
+    planted_events = list(observed_events)
+    planted_events[0], planted_events[1] = planted_events[1], planted_events[0]
+    event_plant_fires = tuple(planted_events) != expected_events
+    print(f"CONTROL arm {scale} hook order: observed={observed_events} "
+          f"expected={expected_events} planted_swap_fires={event_plant_fires}")
     if (cap["baro_calls"] != 1 or cap["vmix_calls"] != 1
-            or cap["stress_calls"] != 1):
+            or cap["stress_calls"] != 2
+            or observed_events != expected_events or not event_plant_fires):
         raise SystemExit(
-            f"arm {scale}: expected one baro/vmix/stress hook, got "
-            f"{cap['baro_calls']}/{cap['vmix_calls']}/{cap['stress_calls']}")
+            f"arm {scale}: expected baro/vmix/stress=1/1/2 in order "
+            f"{expected_events}, got {cap['baro_calls']}/{cap['vmix_calls']}/"
+            f"{cap['stress_calls']} in {observed_events}")
     return cap
 
 
