@@ -1,0 +1,63 @@
+--- a/cfgs/DINO/MY_SRC/trddump.F90
++++ b/cfgs/DINO/MY_SRC/trddump.F90
+@@ -25,6 +25,7 @@
+    PRIVATE
+ 
+    PUBLIC   trddump_dyn     ! called by trd_dyn_iom  (MY_SRC/trddyn.F90)
++   PUBLIC   trddump_tau     ! #1455: exact dyn_zdf level-1 wind operand
+    PUBLIC   trddump_tra     ! called by trd_tra_iom  (MY_SRC/trdtra.F90)
+    PUBLIC   trddump_state   ! called by trd_dyn_iom at the hpg term (MY_SRC/trddyn.F90)
+    PUBLIC   trddump_write   ! called by rst_write    (MY_SRC/restart.F90)
+@@ -145,6 +146,33 @@
+    END SUBROUTINE trddump_dyn
+ 
+ 
++   SUBROUTINE trddump_tau( puinc, pvinc )
++      !!---------------------------------------------------------------------
++      !! #1455. Populate the instantaneous tau slot from dyn_zdf's exact
++      !! post-minus-pre level-1 stress increment. Keep levels 2:jpk zero and
++      !! do not touch utrd_acc/nacc_trd: tau is not a member of the registered
++      !! nine-term interval closure and this hook fires only on nit000.
++      !!---------------------------------------------------------------------
++      REAL(wp), DIMENSION(jpi,jpj), INTENT(in) ::   puinc, pvinc
++      INTEGER ::   ji, jj
++      !!---------------------------------------------------------------------
++      IF( .NOT. ALLOCATED( utrd_store ) ) THEN
++         ALLOCATE( utrd_store(jpi,jpj,jpk,jptot_dyn), vtrd_store(jpi,jpj,jpk,jptot_dyn) )
++         utrd_store(:,:,:,:) = 0._wp   ;   vtrd_store(:,:,:,:) = 0._wp
++      ENDIF
++      ! A restart may be written after other trend calls have reused the
++      ! store. Clear this diagnostic slot explicitly before filling level 1.
++      utrd_store(:,:,:,jpdyn_tau) = 0._wp
++      vtrd_store(:,:,:,jpdyn_tau) = 0._wp
++      DO jj = Njs0, Nje0
++         DO ji = Nis0, Nie0
++            utrd_store(ji,jj,1,jpdyn_tau) = puinc(ji,jj) * r1_Dt
++            vtrd_store(ji,jj,1,jpdyn_tau) = pvinc(ji,jj) * r1_Dt
++         END DO
++      END DO
++   END SUBROUTINE trddump_tau
++
++
+    SUBROUTINE trddump_acc_baro( pub_aa, pvb_aa )
+       !!---------------------------------------------------------------------
+       !! #1455 SG-B.  Accumulate uu_b(:,:,Naa)*r1_Dt, sampled by stpmlf
+--- a/cfgs/DINO/MY_SRC/dynzdf.F90
++++ b/cfgs/DINO/MY_SRC/dynzdf.F90
+@@ -25,6 +25,7 @@
+    USE ldfdyn         ! lateral diffusion: eddy viscosity coef. and type of operator
+    USE trd_oce        ! trends: ocean variables
+    USE trddyn         ! trend manager: dynamics
++   USE trddump   , ONLY: trddump_tau   ! #1455 exact level-1 wind operand
+    !
+    USE in_out_manager ! I/O manager
+    USE lib_mpp        ! MPP library
+@@ -577,6 +578,8 @@
+       ! Interior Nis0:Nie0 x Njs0:Nje0 (halo columns stay 0 in the
+       ! accumulators; stress is applied on interior points only).
+       IF( kt == nit000 .AND. ( .NOT. l_istiled .OR. ntile == 1 ) ) THEN
++         CALL trddump_tau( z1226_u1_post - z1226_u1_pre,   &
++            &              z1226_v1_post - z1226_v1_pre )
+          OPEN( UNIT=9104, FILE='zdf_dump_u1_prestress.bin',  ACCESS='STREAM', &
+             &  FORM='UNFORMATTED', STATUS='REPLACE' )
+          OPEN( UNIT=9105, FILE='zdf_dump_u1_poststress.bin', ACCESS='STREAM', &
