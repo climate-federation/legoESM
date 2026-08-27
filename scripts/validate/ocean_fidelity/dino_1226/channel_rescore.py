@@ -430,6 +430,10 @@ def evaluate(lego, nemo):
         "P5_numerator": int(np.sum(ratios > ESCALATION_BAR)),
         "P5_denominator": N_ROWS, "X_gross_sv": x,
         "X2_floor_excess_sv": x2, "X2_over_X": x2 / x,
+        "X2_bound_status": (
+            "UPPER bound on floor-excess magnitude because the day-360 "
+            "floors are unsaturated"
+        ),
         "row_ratios_upper_bound": ratios.tolist(),
     }
 
