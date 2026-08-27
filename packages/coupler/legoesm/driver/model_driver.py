@@ -4437,6 +4437,12 @@ class ModelDriver:
         """
         # Device config was set by _bootstrap_runtime().  If None or
         # single-device without distribution, nothing to do.
+        if self.config.dycore.discretization == "fv3_duo":
+            # The duo lane owns its own SPMD (face-axis sharding via the
+            # model knobs, PR #1656); the generic layouts below assume
+            # the standard cubed-sphere/lat-lon state and would build a
+            # face-partition MPI layout the duo bundle never consumes.
+            return
         if self._device_config is None:
             return
         if (not self._device_config.is_distributed
@@ -7798,10 +7804,18 @@ class ModelDriver:
                     f"{None if loaded is None else loaded[0]}; pass "
                     f"load_checkpoint's returned step through unchanged.")
             loaded_step = start_step
-        if cfg.distributed or (self._mpi_world_size or 1) > 1:
+        if (self._mpi_world_size or 1) > 1:
             raise NotImplementedError(
-                "fv3_duo (slice 1) is single-process only: the duo halo "
-                "exchange runs the full six-face stack in one program.")
+                "fv3_duo driver runs are single-PROCESS (multi-process "
+                "needs per-rank restart/snapshot I/O, not designed; the "
+                "MODEL lane itself is multi-process-proven -- "
+                "spmd_multiprocess_parity, 3 nodes GREEN). Launch one "
+                "process; --distributed-mode spmd shards the face axis "
+                "over this process's local devices.")
+        if cfg.distributed and cfg.distributed_mode != "spmd":
+            raise NotImplementedError(
+                "fv3_duo distributed runs are SPMD-only "
+                "(--distributed-mode spmd); mpi mode is not wired.")
         if self._ensemble_size != 1:
             raise NotImplementedError(
                 f"fv3_duo (slice 1) does not thread an ensemble axis; got "

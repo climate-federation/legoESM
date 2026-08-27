@@ -41,9 +41,23 @@ def main(argv=None):
     ap.add_argument("--gate-atol", type=float, default=1e-12)
     args = ap.parse_args(argv)
 
+    import os
+    import sys
+
+    def _log(msg):
+        print(f"[pre-init pid={os.getpid()} "
+              f"SLURM_PROCID={os.environ.get('SLURM_PROCID')}] {msg}",
+              flush=True, file=sys.stderr)
+
+    _log("importing jax")
     import jax
 
-    jax.distributed.initialize()          # SLURM auto-detect
+    _log("calling jax.distributed.initialize()")
+    jax.distributed.initialize(
+        initialization_timeout=180)       # SLURM auto-detect; fail FAST
+    _log(f"initialize OK: process {jax.process_index()} of "
+         f"{jax.process_count()}, local devices "
+         f"{[str(d) for d in jax.local_devices()]}")
     jax.config.update("jax_enable_x64", True)
     rank = jax.process_index()
     nproc = jax.process_count()
