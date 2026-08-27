@@ -32,10 +32,13 @@
     "nemo_avt_realized": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
     "nemo_binary": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
     "nemo_buoyancy_frequency": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "nemo_carried_dissipation": "facba1529b41577cf12b5d4cf5f43dc0ec9fed63ec4b073de17748204e8e15df",
     "nemo_mixing_length": "60ed331574d813885fb29399b2dbf041a6913ea965d45c09e2890eef8b3ef830",
+    "nemo_shear_production": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "nemo_surface_utau": "9c6943a02c5221feeb5b56d023418e69860d31d5ea0ded51437e7886811641f8",
     "nemo_tke_energy": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
     "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
-    "probe_source": "0dae4f0ae96efde4b428168548bd9ad94ed98dae4c83af87e567d2681bcbf8fd",
+    "probe_source": "7839bc2592595f419778d4397fcfffe0c62f8bb1edf3c09afb533c981621d8fe",
     "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
     "time_level_registry": "a0f0a16702ac4ce1b2c9ac63e19df1fbef154031cf6f2e2df71c6cc779f21fad"
   },
@@ -63,7 +66,7 @@
   "repo": {
     "branch": "fidelity/dino-euc-mechanism-codex",
     "dirty": false,
-    "head": "63f015f2f3ce24d52a1ad059c3842f67fe3d083f"
+    "head": "9e2554a157219980df89a23dd6526504e8a02d46"
   },
   "review_retraction": {
     "cuda_integrity_accusation": "WITHDRAWN_BY_REVIEWER; original no-CUDA status was honest",
@@ -276,9 +279,12 @@
     "time_levels": {
       "dump_avm.bin": "now",
       "dump_avt.bin": "now",
+      "sbc_dump_utau.bin": "now",
       "tke_dump_avm_final.bin": "now",
+      "tke_dump_dissl.bin": "now",
       "tke_dump_en.bin": "now",
       "tke_dump_rn2.bin": "now",
+      "tke_dump_sh2.bin": "before",
       "tke_dump_zmxlm.bin": "now"
     }
   },
@@ -305,7 +311,7 @@
       "cost": "one offline matched-step pass; approximately 60 CPU-s and <10 MiB",
       "design": "At the same 47 excess columns, substitute NEMO one term at a time into legoESM's single TKE solve, report closure of the 2.26x en gap, and preserve all other dumped operands. No trajectory integration.",
       "name": "TKE-equation term decomposition",
-      "status": "DESIGN_ONLY_DO_NOT_RUN_THIS_TURN",
+      "status": "EXECUTED_IN_THIS_FOLLOWUP",
       "terms_and_same_step_dumps": {
         "buoyancy_sink": "tke_dump_rn2.bin",
         "carried_dissipation": "tke_dump_dissl.bin",
@@ -324,5 +330,172 @@
     },
     "normalized_ratio_in_0p90_1p10_fraction": 1.0,
     "verdict": "CONFIRM_TKE_ENERGY_SINGLE_ROOT"
+  },
+  "tke_equation_decomposition_10m": {
+    "controls": {
+      "base_final_energy_reconstruction_max_relative_error": 7.756466684383205e-16,
+      "base_solve_replay_max_relative_error": 8.478109567956923e-16,
+      "correct_level_mean_abs_log_gap": 0.8134315801191752,
+      "double_production_plant_live": true,
+      "double_production_plant_max_abs_energy_change": 0.0004555580261575362,
+      "one_level_shift_fails": true,
+      "one_level_shift_mean_abs_log_gap": 1.697109321024835
+    },
+    "depth_m": 10.14,
+    "energy_ratio": {
+      "eligible_fraction": 1.0,
+      "en_ratio_over_factor_geometric_mean": 1.0,
+      "en_ratio_over_factor_in_0p80_1p20_fraction": 1.0,
+      "geometric_mean": 2.2556351135780925,
+      "iqr": [
+        2.0915384422417063,
+        2.239767452170379
+      ],
+      "label": "MATCHES_EN_EXCESS",
+      "median": 2.1568426499838877,
+      "n_eligible": 47,
+      "n_population": 47
+    },
+    "executed_equation": "cfgs/DINO/MY_SRC/zdftke.F90:499-516: p_sh2 - p_avt*rn2 + 0.5*rn_ediss*dissl*en on RHS; 1.5*dt*rn_ediss*dissl on diagonal",
+    "factors": {
+      "buoyancy_sink_rn2": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.334255490608656,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 0.9663188638317978,
+        "iqr": [
+          0.9639333901358681,
+          0.9828846178822178
+        ],
+        "label": "NEAR_UNITY",
+        "median": 0.9784170985937456,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "dissipation_dissl": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2551864434211057,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.000198950360976,
+        "iqr": [
+          1.0000175804362241,
+          1.0001000277502585
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.000047005400678,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "production_sh2": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.154721406328354,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0468337609462448,
+        "iqr": [
+          1.0326009129153242,
+          1.0495832750124894
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0383371054513268,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "surface_boundary_condition": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      }
+    },
+    "n_excess": 47,
+    "one_term_replays": {
+      "buoyancy_sink_rn2": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47
+      },
+      "dissipation_dissl": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47
+      },
+      "production_sh2": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47
+      },
+      "surface_boundary_condition": {
+        "arm_over_nemo_geometric_mean": 2.2556351135780925,
+        "closure_iqr": [
+          0.0,
+          0.0
+        ],
+        "median_log_gap_closure": 0.0,
+        "moves_toward_nemo_fraction": 0.0,
+        "n_eligible": 47
+      }
+    },
+    "owner": null,
+    "surface_boundary": {
+      "en_surface_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "lego_formula_max_relative_error": 0.0,
+      "lego_source": "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:231-244: MAX(1e-4,67.83/rho_0*taum)",
+      "nemo_formula_max_relative_error": 0.0,
+      "nemo_source": "cfgs/DINO/MY_SRC/zdftke.F90:334,356-365; line 361: en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )",
+      "nemo_surface_avm_from_en_zmxlm_max_relative_error": 0.0,
+      "nemo_taum_source": "cfgs/DINO/MY_SRC/usrdef_sbc.F90:380-383: ABS(utau), x1.3 where utau>0",
+      "taum_lego_over_nemo": {
+        "eligible_fraction": 1.0,
+        "en_ratio_over_factor_geometric_mean": 2.2556351135780925,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": 0.0,
+        "geometric_mean": 1.0,
+        "iqr": [
+          1.0,
+          1.0
+        ],
+        "label": "NEAR_UNITY",
+        "median": 1.0,
+        "n_eligible": 47,
+        "n_population": 47
+      },
+      "zmxlm_surface_lego_value_note": "legoESM surface-face viscosity uses its production ln_mxl0 anchor; NEMO comparison uses dumped zmxlm(jk=1)"
+    },
+    "verdict": "UNRESOLVED_TKE_EQUATION_OWNER"
   }
 }
