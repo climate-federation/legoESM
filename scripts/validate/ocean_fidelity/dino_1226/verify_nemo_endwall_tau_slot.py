@@ -138,19 +138,28 @@ def main() -> int:
         u_named_applied_corr = float(np.corrcoef(
             u_reference[wet_nonzero], u_applied[wet_nonzero])[0, 1])
         pointwise_ratio = u_reference[wet_nonzero] / u_applied[wet_nonzero]
+        pointwise_ratio_mean = float(np.mean(pointwise_ratio))
+        pointwise_ratio_mean_error = abs(pointwise_ratio_mean - 2.0)
         pointwise_ratio_std = float(np.std(pointwise_ratio))
         pointwise_ratio_max_error = float(np.max(np.abs(pointwise_ratio - 2.0)))
-        identity_ok = pointwise_ratio_std <= 1.0e-8
+        identity_ok = (pointwise_ratio_mean_error <= 1.0e-8
+                       and pointwise_ratio_std <= 1.0e-8)
         planted_ratio = pointwise_ratio.copy()
         planted_ratio[0] += 1.0e-3
-        identity_plant_fires = float(np.std(planted_ratio)) > 1.0e-8
+        ratio_std_plant_fires = float(np.std(planted_ratio)) > 1.0e-8
+        uniform_shifted_ratio = pointwise_ratio + 1.0
+        ratio_mean_plant_fires = abs(
+            float(np.mean(uniform_shifted_ratio)) - 2.0) > 1.0e-8
     else:
         u_named_to_applied_rms_ratio = float("nan")
         u_named_applied_corr = float("nan")
+        pointwise_ratio_mean = float("nan")
+        pointwise_ratio_mean_error = float("inf")
         pointwise_ratio_std = float("inf")
         pointwise_ratio_max_error = float("inf")
         identity_ok = False
-        identity_plant_fires = False
+        ratio_std_plant_fires = False
+        ratio_mean_plant_fires = False
 
     lower_ok = u_lower_max == 0.0 and float(np.max(np.abs(v_slot[1:]))) == 0.0
     meridional_ok = v_slot_max == 0.0 and v_reference_max == 0.0
@@ -181,6 +190,9 @@ def main() -> int:
     print(f"u_named_to_applied_rms_ratio={u_named_to_applied_rms_ratio:.17e}")
     print(f"u_named_vs_applied_correlation={u_named_applied_corr:.17e}")
     print(f"u_wet_nonzero_count={int(wet_nonzero.sum())}")
+    print(f"u_wet_pointwise_ratio_mean={pointwise_ratio_mean:.17e}")
+    print(f"u_wet_pointwise_ratio_mean_error_from_2="
+          f"{pointwise_ratio_mean_error:.17e}")
     print(f"u_wet_pointwise_ratio_std={pointwise_ratio_std:.17e}")
     print(f"u_wet_pointwise_ratio_max_error_from_2="
           f"{pointwise_ratio_max_error:.17e}")
@@ -188,13 +200,15 @@ def main() -> int:
     print(f"rounding_bar={eps_bar:.17e}")
     print(f"CONTROL_lower_level_plant_fires={lower_plant_fires}")
     print(f"CONTROL_top_storage_plant_fires={top_plant_fires}")
-    print(f"CONTROL_wet_ratio_plant_fires={identity_plant_fires}")
-    if not lower_plant_fires or not top_plant_fires or not identity_plant_fires:
+    print(f"CONTROL_wet_ratio_std_plant_fires={ratio_std_plant_fires}")
+    print(f"CONTROL_wet_ratio_mean_plant_fires={ratio_mean_plant_fires}")
+    if (not lower_plant_fires or not top_plant_fires
+            or not ratio_std_plant_fires or not ratio_mean_plant_fires):
         print("CLASSIFICATION=INVALID_CONTROL_FAILURE")
         return 3
 
     print("WET_ARITHMETIC_IDENTITY=" + (
-        "CONFIRMED_NAMED_IS_TWICE_APPLIED_RATIO_STD_LE_1E-8" if identity_ok
+        "CONFIRMED_NAMED_IS_TWICE_APPLIED_MEAN_AND_STD_LE_1E-8" if identity_ok
         else "REFUTED_OR_UNRESOLVED"))
 
     if u_nonzero_count == 0 and u_reference_nonzero_count > 0:

@@ -78,7 +78,8 @@ wet-ratio violations fire their corresponding gates.
 
 Apply `nemo_endwall_tau_slot.patch` at the NEMO 5.0.2 root. It adds
 `trddump_tau`, calls it from the active `CASE(jpdyn_zdf)` in
-`cfgs/DINO/MY_SRC/trddyn.F90`, and dumps the exact named arrays independently.
+`cfgs/DINO/MY_SRC/trddyn.F90`, and dumps the exact named arrays through a
+second output path from the same in-memory values.
 The existing `dynzdf` pre/post-stress streams remain untouched and provide the
 separate applied-increment operand.
 
