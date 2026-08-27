@@ -213,3 +213,76 @@ Verdict bars:
 The limb classification and normalized ratio are required together: equal
 algebraic factors do not establish a single energy root if a distance bound is
 actually active.
+
+## Follow-up: TKE-equation owner decomposition
+
+Registered before loading or reducing `tke_dump_sh2.bin`,
+`tke_dump_dissl.bin`, the restart `avt_k`, or `sbc_dump_utau.bin`, and before
+running any one-term replay.  The population is frozen to the same 47
+equatorial columns whose direct 10.14 m `avm_L/avm_N` exceeds 1.25 in the
+single-root test.  The response is final `en` at legoESM interface 0 / NEMO
+`jk=2`, after the `nn_etau=1` addition.  Surface diagnostics additionally use
+NEMO `jk=1`, the held z=0 row.
+
+The executed NEMO equation is the matrix/RHS branch at
+`cfgs/DINO/MY_SRC/zdftke.F90:499-516`: positive shear production is `p_sh2`,
+buoyancy work is `-p_avt*rn2`, and the carried `dissl` is split between the
+1.5 diagonal and 0.5 RHS terms.  The held surface row is
+`en(ji,jj,1)=MAX(rn_emin0,(rn_ebb/rho0)*taum(ji,jj))` at `:334,356-365`.
+The DINO stress modulus is `ABS(utau)`, multiplied by 1.3 only for positive
+`utau`, at `MY_SRC/usrdef_sbc.F90:380-383`.
+
+For each candidate define a causal-direction factor `q` (values above one
+predict excess legoESM energy):
+
+* production: `q = sh2_L / sh2_N` on columns where both are positive;
+* stable buoyancy sink: `q = (avt_N*rn2_N)/(K_H_L*N2_L)` on columns where both
+  sink magnitudes are positive;
+* dissipation: `q = dissl_N/dissl_L` on positive columns (the two closures use
+  the same `rn_ediss=0.7` split coefficient);
+* surface-BC class: `q = en_surface_L/en_surface_N`, accompanied by the
+  independently reconstructed `taum` and surface `zmxlm`/`avm` ratios.
+
+A factor **MATCHES_EN_EXCESS** only when its geometric mean is in [2.03, 2.48],
+the geometric mean of `(en_L/en_N)/q` is in [0.90, 1.10], and at least 75% of
+its eligible columns have that normalized ratio in [0.80, 1.20].  A factor is
+**NEAR_UNITY** when its geometric mean lies in [0.90, 1.10].  Zero/sign-mixed
+terms are labelled **INELIGIBLE_SIGN_OR_FLOOR**, never silently discarded;
+every term reports its eligible count, geometric mean, median and IQR.
+
+As the causal guard, replay legoESM's captured production TKE solve four
+times, changing one equation input only:
+
+1. replace `P_s` by NEMO `p_sh2`;
+2. replace the explicit `K_H*N2` product by restart `avt_k * tke_dump_rn2`;
+3. replace the carried `sqrt(en_old)/l_eps` by NEMO `dissl`;
+4. replace the held surface `en` and surface-face viscosity by NEMO
+   `tke_dump_en(jk=1)` and the corresponding dumped `zmxlm(jk=1)` value.  Its
+   `nn_etau=1` addition is scaled by the substituted held surface energy.
+
+All other captured operands remain legoESM BASE.  BASE replay must reproduce
+the production captured solve and final energy within `1e-10` relative or the
+decomposition aborts.  For arm `t`, per column define log-gap closure
+
+```
+C_t = 1 - abs(log(en_t/en_N)) / abs(log(en_BASE/en_N)).
+```
+
+A term **CARRIES_TKE_EN_EXCESS** only if it both MATCHES_EN_EXCESS and its
+replay has median `C_t >= 0.60`, moves energy toward NEMO in at least 75% of
+eligible columns, and no other qualifying term reaches median `C_t >= 0.25`.
+If more than one term clears 0.25, label **DISTRIBUTED_TKE_EQUATION_OWNER**;
+if none clears the full owner bar, label **UNRESOLVED_TKE_EQUATION_OWNER**.
+The surface boundary is a distinct candidate class and must also pass direct
+stress/BC reconstruction: NEMO surface `en` must match its quoted formula and
+legoESM's imposed surface `en` must match `_surface_tke_dirichlet` within
+`1e-10` relative.  A failed reconstruction aborts rather than refuting the
+surface class.
+
+Controls proven able to fail: the fixed 47-column mask is read back from the
+single-root result; a one-level NEMO shift must worsen BASE energy agreement;
+a 2x production plant must alter replayed energy; and each dump is accepted
+only through the committed time-level registry with SHA-256 recorded and
+read back.  The analysis is thickness-aware by retaining the campaign's
+10.14 m interface control-volume provenance; its deciding population is a
+single interface, so no unweighted vertical average is introduced.
