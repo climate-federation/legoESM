@@ -328,7 +328,6 @@ def main() -> int:
         raise SystemExit("no captured TKE coefficient has the closure output shape")
     component_final = min(
         shape_calls, key=lambda c: float(np.max(np.abs(c["K_M"] - A_cl))))
-    component_output_max_abs = float(np.max(np.abs(component_final["K_M"] - A_cl)))
 
     jpi, jpj, jpk, hls = bac._read_dims(dl.RUN_DIR)
     avm = bac._load_interior(dl.dump_path("tke_dump_avm_final.bin"), jpi - 2*hls, jpj - 2*hls)
@@ -414,7 +413,6 @@ def main() -> int:
         wet[:, 0], c_lego=c_lego, c_nemo=0.1,
         floor_lego=component_final["floor"], floor_nemo=1.2e-4)
     attribution["depth_m"] = float(z[0])
-    attribution["lego_component_call_matches_closure_max_abs"] = component_output_max_abs
     attribution["time_levels"] = component_time_levels
 
     # Controls proven able to fail: the declared mapping must beat a one-level
