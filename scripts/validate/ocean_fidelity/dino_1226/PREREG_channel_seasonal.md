@@ -220,3 +220,51 @@ effective rows; `u` flags; thickness/area weighting; provenance stamps read and
 recorded; and all deviations/retractions.  One annual cycle cannot separate
 season from elapsed time, so even a confirmed driver remains a phase tracker.
 
+## 9. Post-review amendment — 2026-08-27
+
+This amendment is necessarily post-result and does not change a computed
+correlation, cyclic score, bootstrap interval, saturation flag or weighting.
+It corrects the sensitivity control and the strength of the reported labels in
+response to the adversarial `SHIP AFTER CORRECTIONS` review.
+
+The original section 7.9 registered a **smooth** known-phase plant.  The first
+implementation instead used iid Gaussian rows with `N_eff=35` and exact
+per-horizon `r=1`; that substitution overstated the confirm-arm sensitivity and
+is retracted.  Its replacement is fixed before its values are computed:
+
+* Six deterministic realizations use seeds 1455 through 1460 and 35 rows.
+* Independent target and noise innovations are each smoothed along rows as an
+  AR(1) recursion with coefficient `phi=0.85`, standardized by horizon, and
+  projected onto the same four-horizon anomaly subspace by removing each
+  row's horizon mean.
+* For planted tracking strengths `rho = 0.60, 0.75, 0.90, 0.95, 0.975, 0.99`,
+  the driver is `rho*x + sqrt(1-rho^2)*noise`, followed by the same anomaly
+  projection and the production `phase_decider` with 5,000 moving-block draws,
+  seed `1226 + 100*realization + round(1000*rho)`.
+* The **detectable-effect floor** is the lowest planted `rho` for which all six
+  realizations satisfy the original confirm arm.  If none does, the floor is
+  reported as greater than 0.99.  Confirmation counts, matched-score ranges,
+  effective-row ranges and all six outcomes at each strength are retained in
+  the artifact.  This control diagnoses power; it cannot promote a real leg.
+
+Because the driver advantage intervals all straddle zero and cyclic-null scores
+can themselves exceed the old 0.30 low bar, the old `REFUTES_PHASE_TRACKING`
+driver wording is withdrawn.  A real driver leg that entered that arm is now
+reported as **NO DETECTED PHASE RELATION — indistinguishable from random
+quarter relabelling**.  The registered raw classification remains in the
+artifact for auditability.  The four anomaly horizons have only three degrees
+of freedom after mean removal; the Fisher aggregate's four entries are
+dependent, so its score is descriptive and the block interval is not evidence
+for four independent seasonal observations.
+
+The wind rationale is also narrowed: time-independent stress does not make
+wind work `tau*u` time-independent because `u` evolves.  Wind is excluded only
+as a prescribed **forcing-gap** driver because the same `tau` is applied on
+both sides, making the imposed stress gap identically zero.  Controls and their
+measured outputs must be embedded in the committed artifact.
+
+Finally, the first clean production attempt exposed a registered no-information
+case with every Fisher weight zero at `N_eff=3`.  The subsequently added
+`UNRESOLVED_EFFECTIVE_N` category is explicitly accepted here as a prereg
+amendment: it reports no score and cannot enter either confirmation or
+non-detection counts.  No threshold was changed to create that category.
