@@ -29,6 +29,7 @@ os.environ.setdefault("LEGOESM_NEMO_E3T", "both")
 os.environ.setdefault("DINO_1226_LANE", "d180")
 
 import jax
+import jax.numpy as jnp
 import netCDF4 as nc
 import numpy as np
 
@@ -306,6 +307,237 @@ def single_root_energy_test(
     }
 
 
+def _positive_factor_summary(
+        factor: np.ndarray, en_ratio: np.ndarray, population: np.ndarray,
+        *, minimum_fraction: float = 0.50) -> dict[str, Any]:
+    """Score one preregistered causal-direction factor on the fixed set."""
+    eligible = (population & np.isfinite(factor) & (factor > 0)
+                & np.isfinite(en_ratio) & (en_ratio > 0))
+    n_population = int(np.count_nonzero(population))
+    n = int(np.count_nonzero(eligible))
+    if n < minimum_fraction * n_population:
+        return {
+            "label": "INELIGIBLE_SIGN_OR_FLOOR", "n_eligible": n,
+            "n_population": n_population,
+            "eligible_fraction": n / n_population,
+        }
+    q = factor[eligible]
+    normalized = en_ratio[eligible] / q
+    gm = float(np.exp(np.mean(np.log(q))))
+    norm_gm = float(np.exp(np.mean(np.log(normalized))))
+    norm_band = float(np.mean((normalized >= 0.80) & (normalized <= 1.20)))
+    matches = 2.03 <= gm <= 2.48 and 0.90 <= norm_gm <= 1.10 and norm_band >= 0.75
+    near_unity = 0.90 <= gm <= 1.10
+    return {
+        "label": ("MATCHES_EN_EXCESS" if matches else
+                  "NEAR_UNITY" if near_unity else "DOES_NOT_MATCH_EN_EXCESS"),
+        "n_eligible": n,
+        "n_population": n_population,
+        "eligible_fraction": n / n_population,
+        "geometric_mean": gm,
+        "median": float(np.median(q)),
+        "iqr": np.quantile(q, [0.25, 0.75]).tolist(),
+        "en_ratio_over_factor_geometric_mean": norm_gm,
+        "en_ratio_over_factor_in_0p80_1p20_fraction": norm_band,
+    }
+
+
+def _replay_summary(arm_en: np.ndarray, base_en: np.ndarray,
+                    nemo_en: np.ndarray, population: np.ndarray) -> dict[str, Any]:
+    valid = (population & np.isfinite(arm_en) & (arm_en > 0)
+             & np.isfinite(base_en) & (base_en > 0)
+             & np.isfinite(nemo_en) & (nemo_en > 0))
+    base_gap = np.abs(np.log(base_en[valid] / nemo_en[valid]))
+    nonzero = base_gap > 1.0e-12
+    if np.count_nonzero(nonzero) < 0.75 * np.count_nonzero(valid):
+        raise ValueError("too few nonzero baseline log gaps for replay closure")
+    arm_gap = np.abs(np.log(arm_en[valid][nonzero] / nemo_en[valid][nonzero]))
+    closure = 1.0 - arm_gap / base_gap[nonzero]
+    toward = arm_gap < base_gap[nonzero]
+    return {
+        "n_eligible": int(np.count_nonzero(nonzero)),
+        "median_log_gap_closure": float(np.median(closure)),
+        "closure_iqr": np.quantile(closure, [0.25, 0.75]).tolist(),
+        "moves_toward_nemo_fraction": float(np.mean(toward)),
+        "arm_over_nemo_geometric_mean": float(np.exp(np.mean(
+            np.log(arm_en[valid][nonzero] / nemo_en[valid][nonzero])))),
+    }
+
+
+def tke_equation_decomposition(
+        *, solve_fn, solve_record: dict[str, Any], final_lego_en: np.ndarray,
+        nemo_en: np.ndarray, nemo_sh2: np.ndarray, nemo_rn2: np.ndarray,
+        nemo_dissl: np.ndarray, nemo_avt_restart: np.ndarray,
+        nemo_mxl: np.ndarray, nemo_avm: np.ndarray, lego_surface_taum: np.ndarray,
+        nemo_utau: np.ndarray, equator_row: int, wet_at_interface: np.ndarray,
+        excess_population: np.ndarray, rho_0: float) -> dict[str, Any]:
+    """Run the preregistered per-term ratios and one-variable TKE replays."""
+    kw = solve_record["kwargs"]
+    base_solve = np.asarray(solve_fn(**kw))
+    captured_solve = solve_record["output"]
+    replay_rel = float(np.max(np.abs(base_solve - captured_solve)
+                              / np.maximum(np.abs(captured_solve), 1.0e-30)))
+    if replay_rel > 1.0e-10:
+        raise ValueError(f"BASE TKE replay mismatch: {replay_rel:.3e}")
+    etau_delta = final_lego_en - captured_solve
+    base_final = base_solve + etau_delta
+    final_rel = float(np.max(np.abs(base_final - final_lego_en)
+                             / np.maximum(np.abs(final_lego_en), 1.0e-30)))
+    if final_rel > 1.0e-10:
+        raise ValueError(f"BASE final-energy reconstruction mismatch: {final_rel:.3e}")
+
+    nlev = base_solve.shape[-1]
+    aligned = slice(1, 1 + nlev)
+    sh2_n = nemo_sh2[..., aligned]
+    rn2_n = nemo_rn2[..., aligned]
+    dissl_n = nemo_dissl[..., aligned]
+    avt_n = nemo_avt_restart[..., aligned]
+    e_n = nemo_en[..., aligned]
+
+    e_old = np.asarray(kw["e_old"])
+    kh_old = np.asarray(kw["K_H_old"])
+    p_l = np.asarray(kw["P_s"])
+    n2_l = np.asarray(kw["N2"])
+    l_eps_l = np.asarray(kw["l_eps"])
+    cfg = kw["cfg"]
+    dissl_l = np.sqrt(np.maximum(e_old, float(cfg.tke_background))) \
+        / np.maximum(l_eps_l, float(cfg.mxl_min))
+    buoy_l = kh_old * n2_l
+    buoy_n = avt_n * rn2_n
+
+    surface_l = np.asarray(kw["surface_dirichlet"])
+    surface_n = nemo_en[..., 0]
+    surface_mxl_n = nemo_mxl[..., 0]
+    surface_avm_n_recon = np.maximum(
+        0.1 * surface_mxl_n * np.sqrt(np.maximum(surface_n, 0.0)), 1.2e-4)
+    surface_avm_rel = float(np.max(
+        np.abs(surface_avm_n_recon[wet_at_interface] / nemo_avm[..., 0][wet_at_interface] - 1.0)))
+    if surface_avm_rel > 1.0e-10:
+        raise ValueError(f"NEMO surface avm reconstruction failed: {surface_avm_rel:.3e}")
+
+    taum_n = np.abs(nemo_utau) * np.where(nemo_utau > 0.0, 1.3, 1.0)
+    surface_n_formula = np.maximum(1.0e-4, 67.83 / rho_0 * taum_n)
+    nemo_bc_rel = float(np.max(np.abs(
+        surface_n_formula[wet_at_interface] / surface_n[wet_at_interface] - 1.0)))
+    lego_bc_formula = np.maximum(1.0e-4, 67.83 / rho_0 * lego_surface_taum)
+    lego_bc_rel = float(np.max(np.abs(
+        lego_bc_formula[wet_at_interface] / surface_l[wet_at_interface] - 1.0)))
+    if max(nemo_bc_rel, lego_bc_rel) > 1.0e-10:
+        raise ValueError(
+            f"surface BC reconstruction failed: nemo={nemo_bc_rel:.3e}, lego={lego_bc_rel:.3e}")
+
+    row = equator_row
+    k = 0
+    pop2 = np.zeros_like(wet_at_interface, dtype=bool)
+    pop2[row] = excess_population
+    en_ratio = final_lego_en[..., k] / e_n[..., k]
+    factors = {
+        "production_sh2": _positive_factor_summary(p_l[..., k] / sh2_n[..., k], en_ratio, pop2),
+        "buoyancy_sink_rn2": _positive_factor_summary(buoy_n[..., k] / buoy_l[..., k], en_ratio, pop2),
+        "dissipation_dissl": _positive_factor_summary(dissl_n[..., k] / dissl_l[..., k], en_ratio, pop2),
+        "surface_boundary_condition": _positive_factor_summary(surface_l / surface_n, en_ratio, pop2),
+    }
+
+    def replay(changes: dict[str, Any], delta_scale: np.ndarray | float = 1.0) -> np.ndarray:
+        arm_kw = dict(kw)
+        arm_kw.update(changes)
+        return np.asarray(solve_fn(**arm_kw)) + etau_delta * np.asarray(delta_scale)[..., None]
+
+    prod_arm = replay({"P_s": jnp.asarray(sh2_n)})
+    n2_sub = np.where(np.abs(kh_old) > 1.0e-30, buoy_n / kh_old, n2_l)
+    buoy_arm = replay({"N2": jnp.asarray(n2_sub)})
+    l_eps_sub = np.where(dissl_n > 0.0,
+                         np.sqrt(np.maximum(e_old, float(cfg.tke_background))) / dissl_n,
+                         l_eps_l)
+    diss_arm = replay({"l_eps": jnp.asarray(l_eps_sub)})
+    km_surface_n = surface_avm_n_recon
+    surface_scale = np.divide(surface_n, surface_l, out=np.ones_like(surface_n), where=surface_l > 0)
+    surface_arm = replay({
+        "surface_dirichlet": jnp.asarray(surface_n),
+        "K_M_surface": jnp.asarray(km_surface_n),
+    }, surface_scale)
+    double_prod = replay({"P_s": jnp.asarray(2.0 * p_l)})
+
+    arm_arrays = {
+        "production_sh2": prod_arm, "buoyancy_sink_rn2": buoy_arm,
+        "dissipation_dissl": diss_arm, "surface_boundary_condition": surface_arm,
+    }
+    replays = {
+        name: _replay_summary(arm[..., k], base_final[..., k], e_n[..., k], pop2)
+        for name, arm in arm_arrays.items()
+    }
+    qualifiers = []
+    secondary = []
+    for name in factors:
+        r = replays[name]
+        if r["median_log_gap_closure"] >= 0.25:
+            secondary.append(name)
+        if (factors[name]["label"] == "MATCHES_EN_EXCESS"
+                and r["median_log_gap_closure"] >= 0.60
+                and r["moves_toward_nemo_fraction"] >= 0.75):
+            qualifiers.append(name)
+    if len(qualifiers) == 1 and len(secondary) == 1:
+        verdict = f"{qualifiers[0].upper()}_CARRIES_TKE_EN_EXCESS"
+        owner = qualifiers[0]
+    elif len(secondary) > 1:
+        verdict = "DISTRIBUTED_TKE_EQUATION_OWNER"
+        owner = None
+    else:
+        verdict = "UNRESOLVED_TKE_EQUATION_OWNER"
+        owner = None
+
+    shifted = nemo_en[..., 2]
+    correct_gap = float(np.mean(np.abs(np.log(
+        final_lego_en[row, excess_population, k] / nemo_en[row, excess_population, 1]))))
+    shifted_gap = float(np.mean(np.abs(np.log(
+        final_lego_en[row, excess_population, k] / shifted[row, excess_population]))))
+    plant_change = float(np.max(np.abs(double_prod - base_final)))
+    if shifted_gap <= correct_gap or plant_change <= 0.0:
+        raise ValueError(
+            f"fail-capable controls failed: shifted={shifted_gap}, correct={correct_gap}, plant={plant_change}")
+
+    return {
+        "verdict": verdict,
+        "owner": owner,
+        "n_excess": int(np.count_nonzero(excess_population)),
+        "depth_m": 10.14,
+        "energy_ratio": _positive_factor_summary(en_ratio, en_ratio, pop2),
+        "factors": factors,
+        "one_term_replays": replays,
+        "surface_boundary": {
+            "nemo_source": (
+                "cfgs/DINO/MY_SRC/zdftke.F90:334,356-365; line 361: "
+                "en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )"),
+            "nemo_taum_source": (
+                "cfgs/DINO/MY_SRC/usrdef_sbc.F90:380-383: ABS(utau), x1.3 where utau>0"),
+            "lego_source": (
+                "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py:231-244: "
+                "MAX(1e-4,67.83/rho_0*taum)"),
+            "nemo_formula_max_relative_error": nemo_bc_rel,
+            "lego_formula_max_relative_error": lego_bc_rel,
+            "nemo_surface_avm_from_en_zmxlm_max_relative_error": surface_avm_rel,
+            "taum_lego_over_nemo": _positive_factor_summary(
+                lego_surface_taum / taum_n, en_ratio, pop2),
+            "en_surface_lego_over_nemo": factors["surface_boundary_condition"],
+            "zmxlm_surface_lego_value_note": (
+                "legoESM surface-face viscosity uses its production ln_mxl0 anchor; "
+                "NEMO comparison uses dumped zmxlm(jk=1)"),
+        },
+        "controls": {
+            "base_solve_replay_max_relative_error": replay_rel,
+            "base_final_energy_reconstruction_max_relative_error": final_rel,
+            "one_level_shift_mean_abs_log_gap": shifted_gap,
+            "correct_level_mean_abs_log_gap": correct_gap,
+            "one_level_shift_fails": True,
+            "double_production_plant_max_abs_energy_change": plant_change,
+            "double_production_plant_live": True,
+        },
+        "executed_equation": (
+            "cfgs/DINO/MY_SRC/zdftke.F90:499-516: p_sh2 - p_avt*rn2 + "
+            "0.5*rn_ediss*dissl*en on RHS; 1.5*dt*rn_ediss*dissl on diagonal"),
+    }
+
+
 def wrong_shift(a: np.ndarray, fill: float = np.nan) -> np.ndarray:
     out = np.full_like(a, fill)
     out[..., :-1] = a[..., 1:]
@@ -389,7 +621,9 @@ def main() -> int:
     # coefficient constructor. This is observation of the shipped path, not a
     # parallel reimplementation of the TKE closure.
     real_compute_k = tke_module.compute_K_from_tke
+    real_solve_tke = tke_module._solve_tke_backward_euler
     component_calls: list[dict[str, Any]] = []
+    solve_calls: list[dict[str, Any]] = []
 
     def component_spy(e, l_k, tke_cfg, *a, **kw):
         out = real_compute_k(e, l_k, tke_cfg, *a, **kw)
@@ -403,11 +637,18 @@ def main() -> int:
         })
         return out
 
+    def solve_spy(*a, **kw):
+        out = real_solve_tke(*a, **kw)
+        solve_calls.append({"args": a, "kwargs": dict(kw), "output": np.asarray(out)})
+        return out
+
     tke_module.compute_K_from_tke = component_spy
+    tke_module._solve_tke_backward_euler = solve_spy
     try:
         K_cl, A_cl = zos.run_and_capture(closure_model, state, sf)
     finally:
         tke_module.compute_K_from_tke = real_compute_k
+        tke_module._solve_tke_backward_euler = real_solve_tke
     if A_prod is None or A_cl is None:
         raise SystemExit("momentum viscosity was not returned")
     if not component_calls:
@@ -417,6 +658,11 @@ def main() -> int:
         raise SystemExit("no captured TKE coefficient has the closure output shape")
     component_final = min(
         shape_calls, key=lambda c: float(np.max(np.abs(c["K_M"] - A_cl))))
+    shape_solves = [c for c in solve_calls if c["output"].shape == A_cl.shape]
+    if len(shape_solves) != 1:
+        raise SystemExit(
+            f"expected exactly one production-shape TKE solve, got {len(shape_solves)}")
+    solve_record = shape_solves[0]
 
     jpi, jpj, jpk, hls = bac._read_dims(dl.RUN_DIR)
     avm = bac._load_interior(dl.dump_path("tke_dump_avm_final.bin"), jpi - 2*hls, jpj - 2*hls)
@@ -424,9 +670,15 @@ def main() -> int:
     en_nemo = bac._load_interior(dl.dump_path("tke_dump_en.bin"), jpi - 2*hls, jpj - 2*hls)
     mxl_nemo = bac._load_interior(dl.dump_path("tke_dump_zmxlm.bin"), jpi - 2*hls, jpj - 2*hls)
     rn2_nemo = bac._load_interior(dl.dump_path("tke_dump_rn2.bin"), jpi - 2*hls, jpj - 2*hls)
+    sh2_nemo = bac._load_interior(dl.dump_path("tke_dump_sh2.bin"), jpi - 2*hls, jpj - 2*hls)
+    dissl_nemo = bac._load_interior(dl.dump_path("tke_dump_dissl.bin"), jpi - 2*hls, jpj - 2*hls)
+    utau_nemo = bac._load_haloed(dl.dump_path("sbc_dump_utau.bin"), jpi, jpj, hls)
+    with nc.Dataset(dl.restart_path()) as restart:
+        avt_restart = np.moveaxis(np.asarray(restart["avt_k"][0]), 0, -1)
     component_time_levels = {
         name: time_level_for_dump(name) for name in (
             "tke_dump_en.bin", "tke_dump_zmxlm.bin", "tke_dump_rn2.bin",
+            "tke_dump_sh2.bin", "tke_dump_dissl.bin", "sbc_dump_utau.bin",
             "tke_dump_avm_final.bin", "dump_avm.bin", "dump_avt.bin")
     }
     # zdf_phy's post-EVD dumps retain the model halos; zdftke's internal
@@ -535,6 +787,27 @@ def main() -> int:
         "cost": "one offline matched-step pass; approximately 60 CPU-s and <10 MiB",
     }
 
+    fixed_excess = (
+        wet[:, 0]
+        & np.isfinite(A_cl[equator_row, :, 0])
+        & np.isfinite(avm[equator_row, :, 1])
+        & (A_cl[equator_row, :, 0] > component_final["floor"] * (1.0 + 1e-12))
+        & (avm[equator_row, :, 1] > 1.2e-4 * (1.0 + 1e-12))
+        & (A_cl[equator_row, :, 0] / avm[equator_row, :, 1] > 1.25)
+    )
+    if int(np.count_nonzero(fixed_excess)) != 47:
+        raise SystemExit(
+            f"fixed single-root excess population changed: {np.count_nonzero(fixed_excess)} != 47")
+    equation_decomposition = tke_equation_decomposition(
+        solve_fn=real_solve_tke, solve_record=solve_record,
+        final_lego_en=component_final["e"], nemo_en=en_nemo,
+        nemo_sh2=sh2_nemo, nemo_rn2=rn2_nemo, nemo_dissl=dissl_nemo,
+        nemo_avt_restart=avt_restart, nemo_mxl=mxl_nemo, nemo_avm=avm,
+        lego_surface_taum=np.asarray(sf.taum), nemo_utau=utau_nemo,
+        equator_row=equator_row, wet_at_interface=wmask[..., 1],
+        excess_population=fixed_excess, rho_0=float(mc.constants.rho_0))
+    single_root["next_target"]["status"] = "EXECUTED_IN_THIS_FOLLOWUP"
+
     # Controls proven able to fail: the declared mapping must beat a one-level
     # shift, a wet coefficient planted in a dry cell must be detected, and an
     # empty mask must raise rather than returning a flattering zero.
@@ -574,6 +847,9 @@ def main() -> int:
         "nemo_tke_energy": Path(dl.dump_path("tke_dump_en.bin")),
         "nemo_mixing_length": Path(dl.dump_path("tke_dump_zmxlm.bin")),
         "nemo_buoyancy_frequency": Path(dl.dump_path("tke_dump_rn2.bin")),
+        "nemo_shear_production": Path(dl.dump_path("tke_dump_sh2.bin")),
+        "nemo_carried_dissipation": Path(dl.dump_path("tke_dump_dissl.bin")),
+        "nemo_surface_utau": Path(dl.dump_path("sbc_dump_utau.bin")),
         "nemo_avm_realized": Path(dl.dump_path("dump_avm.bin")),
         "nemo_avt_realized": Path(dl.dump_path("dump_avt.bin")),
         "namelist": Path(dl.RUN_DIR) / "namelist_cfg",
@@ -616,6 +892,7 @@ def main() -> int:
         "scores": scored,
         "tke_closure_attribution_10m": attribution,
         "tke_energy_single_root_10m": single_root,
+        "tke_equation_decomposition_10m": equation_decomposition,
         "controls": controls,
         "short_run": {"status": "DESIGN_ONLY_NO_CUDA_IN_SANDBOX", **substitution_design()},
     }
@@ -632,6 +909,7 @@ def main() -> int:
                       "scores": scored, "controls": controls,
                       "tke_closure_attribution_10m": attribution,
                       "tke_energy_single_root_10m": single_root,
+                      "tke_equation_decomposition_10m": equation_decomposition,
                       "short_run_status": artifact["short_run"]["status"]}, indent=2))
     return 0
 
