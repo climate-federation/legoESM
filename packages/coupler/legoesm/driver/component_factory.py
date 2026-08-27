@@ -797,7 +797,21 @@ def create_atmosphere_dycore(
             import numpy as np
             from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-            devs = jax.local_devices()
+            # Multi-controller SPMD (>1 process): the mesh must span the
+            # GLOBAL device set (jax.devices()), not this process's local
+            # devices -- the proven pattern in
+            # spmd_multiprocess_parity.py. Single-process keeps
+            # jax.local_devices() (identical to jax.devices() there).
+            multiprocess = jax.process_count() > 1
+            devs = jax.devices() if multiprocess else jax.local_devices()
+            if jax.local_device_count() < 1:
+                # Unreachable in practice (a process with zero local
+                # devices could not have run this far), kept as the
+                # loud failure mode instead of a confusing IndexError
+                # deeper in mesh construction.
+                raise ValueError(
+                    "fv3_duo spmd: this process has no local devices "
+                    "visible.")
             if len(devs) == 1:
                 # GLM: a GPU-less env (JAX_PLATFORMS=cpu fallback, CUDA
                 # visibility failure) yields a silent 1-device mesh and
@@ -805,15 +819,19 @@ def create_atmosphere_dycore(
                 # distribution. Refuse: a 1-device distributed run
                 # certifies nothing.
                 raise ValueError(
-                    "fv3_duo spmd: only ONE local device is visible "
-                    f"({devs[0]}); a 1-device 'distributed' run would "
+                    "fv3_duo spmd: only ONE device is visible "
+                    f"({'globally' if multiprocess else 'locally'}: "
+                    f"{devs[0]}); a 1-device 'distributed' run would "
                     "execute unsharded. Drop --distributed, or provide "
                     "2/3/6 devices (GPUs, or "
                     "xla_force_host_platform_device_count).")
             if 6 % len(devs) != 0:
                 raise ValueError(
-                    f"fv3_duo spmd: {len(devs)} local devices does not "
-                    f"divide the 6 cube faces (need 1, 2, 3 or 6).")
+                    f"fv3_duo spmd: {len(devs)} "
+                    f"{'global' if multiprocess else 'local'} devices "
+                    f"does not divide the 6 cube faces (need 1, 2, 3 "
+                    f"or 6). Every rank owning a whole face is what the "
+                    f"restart/snapshot resharding assumes.")
             mesh = Mesh(np.array(devs), ("face",))
             return FV3DuoDynamicsModel(
                 bundle, cfg,

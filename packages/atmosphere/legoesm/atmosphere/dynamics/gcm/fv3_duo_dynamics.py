@@ -151,6 +151,13 @@ class FV3DuoDynamicsModel:
 
         self.grid = grid
         self.config = config
+        # Retained (not just consumed) so a multi-process restart loader
+        # can reconstruct GSPMD-sharded arrays against the EXACT sharding
+        # object the compiled step uses, instead of an independently
+        # rebuilt "similar" one that could drift in mesh/device order
+        # (codex MAJOR, mp-driver-io design review 2026-08-27).
+        self.step_out_shardings = step_out_shardings
+        self.step_spmd_mesh = step_spmd_mesh
         # The grid bundle's ctx_jax was built WITHOUT a mesh; a ring-
         # enabled context is rebuilt here from ctx_np rather than
         # mutating the shared bundle's tables in place (the tables hash

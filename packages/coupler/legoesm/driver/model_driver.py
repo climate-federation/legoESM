@@ -7764,15 +7764,20 @@ class ModelDriver:
         tmp + os.replace).
 
         Refusals that REMAIN (each loud, none silent): no MPI, no
-        MULTI-PROCESS SPMD (single-process face SPMD is supported via
-        --distributed-mode spmd), no ensemble.  All physics/forcing EXCEPT Held-Suarez are
-        refused at model construction (component factory);
-        ``cfg.held_suarez_forcing`` applies the certified 3-pass HS step
-        after each dynamics step.  The HS step is a pure function of the
-        bundle (no accumulators, no memory), so the restart invariant
-        above — this lane carries NO loop state — survives it.  A
-        restarted run overwrites the status marker (RUNNING-first, as
-        always).
+        HELD-SUAREZ under multi-process SPMD (dry dynamics only there —
+        the HS step is single-process-only, see the guard above), no
+        ensemble.  Single- AND multi-process face SPMD (dry dynamics)
+        are both supported via --distributed-mode spmd; multi-process
+        checkpoint/snapshot I/O goes through
+        ``_fv3_duo_reshard_bundle_global`` / the gather-then-root-write
+        helpers, not the single-process ``np.asarray`` path directly.
+        All physics/forcing EXCEPT Held-Suarez are refused at model
+        construction (component factory); ``cfg.held_suarez_forcing``
+        applies the certified 3-pass HS step after each dynamics step.
+        The HS step is a pure function of the bundle (no accumulators,
+        no memory), so the restart invariant above — this lane carries
+        NO loop state — survives it.  A restarted run overwrites the
+        status marker (RUNNING-first, as always).
         """
         cfg = self.config
         loaded = self._loaded_checkpoint_step_day
@@ -7805,14 +7810,30 @@ class ModelDriver:
                     f"{None if loaded is None else loaded[0]}; pass "
                     f"load_checkpoint's returned step through unchanged.")
             loaded_step = start_step
-        if (self._mpi_world_size or 1) > 1:
+        if (self._mpi_world_size or 1) > 1 and not self._is_spmd_multiprocess():
             raise NotImplementedError(
-                "fv3_duo driver runs are single-PROCESS (multi-process "
-                "needs per-rank restart/snapshot I/O, not designed; the "
-                "MODEL lane itself is multi-process-proven -- "
-                "spmd_multiprocess_parity, 3 nodes GREEN). Launch one "
-                "process; --distributed-mode spmd shards the face axis "
-                "over this process's local devices.")
+                "fv3_duo driver runs refuse multi-process EXCEPT "
+                "multi-controller SPMD (--distributed "
+                "--distributed-mode spmd); MPI mode is not wired for "
+                "this lane. Launch one process, or pass "
+                "--distributed-mode spmd.")
+        if self._is_spmd_multiprocess() and cfg.held_suarez_forcing:
+            # _fv3_duo_apply_held_suarez round-trips the bundle through
+            # per-process NumPy (state_3d_to_numpy / np.asarray on each
+            # leaf), which is correct only when every leaf is fully
+            # host-addressable -- true single-process (all shards
+            # local), false under multi-process SPMD where each rank is
+            # addressable for only its own face shards (codex BLOCKER,
+            # mp-driver-io design review 2026-08-27). Multi-process SPMD
+            # runs dry dynamics only until that path is designed.
+            raise NotImplementedError(
+                "fv3_duo multi-process SPMD does not support "
+                "held_suarez_forcing: the certified 3-pass HS step is "
+                "single-process-only (it np.asarray's per-face leaves "
+                "of the bundle, which are not fully host-addressable "
+                "under multi-process SPMD). Run dry "
+                "(held_suarez_forcing=False), or drop --distributed for "
+                "a single-process HS run.")
         if cfg.distributed and cfg.distributed_mode != "spmd":
             raise NotImplementedError(
                 "fv3_duo distributed runs are SPMD-only "
@@ -7877,6 +7898,16 @@ class ModelDriver:
             bundle = restart_bundle
         else:
             bundle = self.model.dcmip16_initial_state(do_pert=True)
+        # Multi-process SPMD: BOTH a fresh IC and a restart-loaded bundle
+        # come out of the above as fully-addressable arrays (dcmip16_
+        # initial_state builds identically on every rank; the restart
+        # loader's multi-process branch already broadcasts to an
+        # identical-on-every-rank host bundle) -- neither is yet
+        # sharded the way the compiled step's GSPMD mesh expects. This
+        # reshards ONCE, uniformly, for either origin (codex: "one
+        # model/helper method shared by initialization and restart").
+        # No-op single-process.
+        bundle = self._fv3_duo_reshard_bundle_global(bundle)
         t0 = time.time()
         for step in range(loaded_step + 1, n_steps_total + 1):
             bundle = self.model.step(bundle, DT)
@@ -7962,6 +7993,52 @@ class ModelDriver:
                 np.stack([face[nm] for face in state_np]))
         return {**bundle, "state": new_state}
 
+    def _fv3_duo_reshard_bundle_global(self, bundle: dict) -> dict:
+        """Reconstruct every bundle leaf as a properly GSPMD-sharded
+        ``jax.Array`` spanning the multi-process device mesh.
+
+        No-op outside multi-process SPMD: single-process (including
+        single-process multi-GPU) already gets correct sharding from
+        the model's own jitted step under GSPMD auto-partitioning --
+        nothing to fix there.  Under multi-process SPMD, every leaf of
+        *bundle* MUST already be identical host-visible data on every
+        rank -- true for a freshly built ``dcmip16_initial_state()``
+        bundle (built from the same deterministic deck on every rank)
+        and true for a restart bundle (the checkpoint loader's
+        multi-process branch, ``_broadcast_fv3_duo_bundle``, already
+        broadcasts to every rank before returning).  Calls
+        ``jax.make_array_from_callback`` identically on every rank,
+        each materialising only its own addressable shards -- the SAME
+        idiom ``spmd_multiprocess_parity.py``'s ``_global_arrays``
+        proved correct, against the model's OWN ``step_out_shardings``
+        (not an independently rebuilt one -- codex MAJOR, mp-driver-io
+        design review 2026-08-27) so a fresh run and a restart both
+        step under the identical certified sharding.  Used for BOTH a
+        fresh IC and a restart bundle (codex: "one model/helper method
+        shared by initialization and restart"), not just restart.
+        """
+        if not self._is_spmd_multiprocess():
+            return bundle
+        sharding = self.model.step_out_shardings
+        if sharding is None:
+            raise RuntimeError(
+                "fv3_duo multi-process SPMD: the model was constructed "
+                "without step_out_shardings -- the component factory "
+                "and this reshard helper have gone out of sync.")
+
+        def _put(x):
+            h = np.asarray(x)
+            return jax.make_array_from_callback(
+                h.shape, sharding, lambda idx: h[idx])
+
+        out = {"state": {k: _put(v) for k, v in bundle["state"].items()},
+               "press": {k: _put(v) for k, v in bundle["press"].items()},
+               "q": [_put(qv) for qv in bundle["q"]],
+               "omga": _put(bundle["omga"])}
+        out["nh"] = (None if bundle.get("nh") is None else
+                     {k: _put(v) for k, v in bundle["nh"].items()})
+        return out
+
     def _fv3_duo_write_status(self, status: str) -> None:
         """Persist the lane's terminal status as an EXPLICIT marker.
 
@@ -7974,8 +8051,45 @@ class ModelDriver:
         written afterwards by ``run()`` and can still fail
         independently — consult the manifest for provenance, the marker
         for loop outcome.
+
+        Multi-process SPMD: root-gated (every process running an
+        unconditional ``write_text`` on the SAME file is a data race)
+        and rendezvous'd via ``_spmd_barrier_on_root_error`` (codex
+        MAJOR, mp-driver-io design review 2026-08-27), so a root write
+        failure aborts every process in lockstep instead of leaving the
+        others to hang on the next collective.  Single-process path is
+        the original one-liner, untouched.
         """
-        (self._output_dir / "fv3duo_status.txt").write_text(status + "\n")
+        if not self._is_spmd_multiprocess():
+            (self._output_dir / "fv3duo_status.txt").write_text(
+                status + "\n")
+            return
+        err = None
+        if jax.process_index() == 0:
+            try:
+                (self._output_dir / "fv3duo_status.txt").write_text(
+                    status + "\n")
+            except Exception as exc:
+                err = exc
+        self._spmd_barrier_on_root_error(err)
+
+    def _fv3_duo_snapshot_fields_and_blowup(self, bundle: dict):
+        """Pure field-extraction + blowup-check for the MULTI-PROCESS
+        ``_fv3_duo_snapshot`` arm only (the single-process arm keeps
+        its ORIGINAL statement order -- savez before the blowup check
+        -- verbatim, rather than sharing this helper, so that arm is
+        not just equivalent but textually unchanged; codex MAJOR,
+        mp-driver-io diff review round 2: an earlier version reordered
+        the single-process arm to share this helper)."""
+        fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
+        fields["ps"] = np.asarray(bundle["press"]["ps"])
+        for iq, qt in enumerate(bundle["q"]):
+            fields[f"q{iq}"] = np.asarray(qt)
+        bad = sorted(nm for nm, a in fields.items()
+                     if not np.isfinite(a).all())
+        umax = max(float(np.abs(fields["u"]).max()),
+                   float(np.abs(fields["v"]).max()))
+        return fields, bad, umax
 
     def _fv3_duo_snapshot(self, bundle: dict, step: int, day: float):
         """Write one minimal duo snapshot; return a BLOWUP status or None.
@@ -7985,36 +8099,82 @@ class ModelDriver:
         ``_step`` / ``_day`` stamps.  The finite + wind-envelope guard
         runs on the SAME host copies the write uses, so a diverged state
         is both persisted (for autopsy) and reported.
-        """
-        fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
-        fields["ps"] = np.asarray(bundle["press"]["ps"])
-        for iq, qt in enumerate(bundle["q"]):
-            fields[f"q{iq}"] = np.asarray(qt)
-        path = self._output_dir / f"fv3duo_snapshot_step_{step:06d}.npz"
-        np.savez(path, _step=np.int64(step), _day=np.float64(day), **fields)
 
-        bad = sorted(nm for nm, a in fields.items()
-                     if not np.isfinite(a).all())
-        umax = max(float(np.abs(fields["u"]).max()),
-                   float(np.abs(fields["v"]).max()))
-        if bad or umax > self._FV3_DUO_BLOWUP_UMAX_MS:
-            logger.error(
-                "FV3 duo BLOWUP at step %d (day %.3f): non-finite=%s, "
-                "max|wind|=%.3g m/s (envelope %.0f); state saved to %s",
-                step, day, bad or "none", umax,
-                self._FV3_DUO_BLOWUP_UMAX_MS, path)
-            return f"BLOWUP at day {day:.3f} (step {step})"
-        # ps stats over the COMPUTE window only — the padded halo rows are
-        # zero by construction and would print as a fake 0 hPa minimum.
-        _n, _ng = self.model.grid.n, self.model.grid.ng
-        ps_win = fields["ps"][:, _ng:_ng + _n, _ng:_ng + _n]
-        logger.info(
-            "  fv3_duo step %d day %.3f: max|wind|=%.2f m/s, "
-            "ps=[%.1f, %.1f] hPa -> %s",
-            step, day, umax,
-            float(ps_win.min()) / 100.0,
-            float(ps_win.max()) / 100.0, path.name)
-        return None
+        Multi-process SPMD: *bundle* is gathered to identical
+        host-visible data on EVERY rank first (a collective, so every
+        rank must call this); the blowup/finiteness verdict is then a
+        pure function of that identical data (no reduction needed, and
+        no risk of ranks disagreeing), while the actual ``np.savez``
+        write + its logging is root-gated and rendezvous'd end to end
+        -- not just the write call, the path construction too -- so a
+        root-only failure (path prep, logging, the write itself)
+        aborts every process in lockstep (codex MAJOR, mp-driver-io
+        design review 2026-08-27).  The single-process arm below is
+        the ORIGINAL code, untouched (not even reordered).
+        """
+        if not self._is_spmd_multiprocess():
+            fields = {nm: np.asarray(v) for nm, v in bundle["state"].items()}
+            fields["ps"] = np.asarray(bundle["press"]["ps"])
+            for iq, qt in enumerate(bundle["q"]):
+                fields[f"q{iq}"] = np.asarray(qt)
+            path = self._output_dir / f"fv3duo_snapshot_step_{step:06d}.npz"
+            np.savez(path, _step=np.int64(step), _day=np.float64(day),
+                     **fields)
+
+            bad = sorted(nm for nm, a in fields.items()
+                         if not np.isfinite(a).all())
+            umax = max(float(np.abs(fields["u"]).max()),
+                       float(np.abs(fields["v"]).max()))
+            if bad or umax > self._FV3_DUO_BLOWUP_UMAX_MS:
+                logger.error(
+                    "FV3 duo BLOWUP at step %d (day %.3f): non-finite=%s, "
+                    "max|wind|=%.3g m/s (envelope %.0f); state saved to %s",
+                    step, day, bad or "none", umax,
+                    self._FV3_DUO_BLOWUP_UMAX_MS, path)
+                return f"BLOWUP at day {day:.3f} (step {step})"
+            # ps stats over the COMPUTE window only — the padded halo rows are
+            # zero by construction and would print as a fake 0 hPa minimum.
+            _n, _ng = self.model.grid.n, self.model.grid.ng
+            ps_win = fields["ps"][:, _ng:_ng + _n, _ng:_ng + _n]
+            logger.info(
+                "  fv3_duo step %d day %.3f: max|wind|=%.2f m/s, "
+                "ps=[%.1f, %.1f] hPa -> %s",
+                step, day, umax,
+                float(ps_win.min()) / 100.0,
+                float(ps_win.max()) / 100.0, path.name)
+            return None
+
+        # ---- multi-process SPMD ----
+        bundle = self._gather_spmd_tree_to_host(bundle)
+        fields, bad, umax = self._fv3_duo_snapshot_fields_and_blowup(bundle)
+        blown = bool(bad) or umax > self._FV3_DUO_BLOWUP_UMAX_MS
+        err = None
+        if jax.process_index() == 0:
+            try:
+                path = (self._output_dir
+                        / f"fv3duo_snapshot_step_{step:06d}.npz")
+                np.savez(path, _step=np.int64(step), _day=np.float64(day),
+                         **fields)
+                if blown:
+                    logger.error(
+                        "FV3 duo BLOWUP at step %d (day %.3f): "
+                        "non-finite=%s, max|wind|=%.3g m/s (envelope "
+                        "%.0f); state saved to %s",
+                        step, day, bad or "none", umax,
+                        self._FV3_DUO_BLOWUP_UMAX_MS, path)
+                else:
+                    _n, _ng = self.model.grid.n, self.model.grid.ng
+                    ps_win = fields["ps"][:, _ng:_ng + _n, _ng:_ng + _n]
+                    logger.info(
+                        "  fv3_duo step %d day %.3f: max|wind|=%.2f m/s, "
+                        "ps=[%.1f, %.1f] hPa -> %s",
+                        step, day, umax,
+                        float(ps_win.min()) / 100.0,
+                        float(ps_win.max()) / 100.0, path.name)
+            except Exception as exc:
+                err = exc
+        self._spmd_barrier_on_root_error(err)
+        return (f"BLOWUP at day {day:.3f} (step {step})") if blown else None
 
     def _fv3_duo_flatten_bundle(self, bundle: dict) -> dict:
         """Flatten the duo bundle to prefixed fp64 numpy arrays.
@@ -8050,20 +8210,15 @@ class ModelDriver:
                 f"checkpoint schema persists fp64 bit-exact only.")
         return arrays
 
-    def _fv3_duo_save_checkpoint(self, bundle: dict, step: int,
-                                 day: float) -> None:
-        """Persist the FULL duo bundle as ONE fp64 ``fv3duo_ckpt_v1`` npz.
-
-        The bundle IS the state: press/nh are persisted verbatim, never
-        rebuilt from delp at load (a rebuild risks diverging from the
-        certified in-step aliasing).  Atomic: written to a ``.tmp``
-        sibling then ``os.replace``d, so a reader never sees a partial
-        checkpoint and an interrupted write never poisons a restart.
-        """
+    def _fv3_duo_checkpoint_write(self, arrays: dict, mcfg, step: int,
+                                  day: float, nq: int, path: Path) -> None:
+        """The ROOT-ONLY write body shared by both arms of
+        ``_fv3_duo_save_checkpoint``: open the unique tmp file, write,
+        fsync, atomically publish, fsync the directory, log.  Pulled
+        out so the multi-process arm can wrap the WHOLE thing (not
+        just ``np.savez``) in one try/except before the rendezvous
+        (codex MAJOR, mp-driver-io design review 2026-08-27)."""
         from legoesm.io.git_provenance import git_provenance
-        arrays = self._fv3_duo_flatten_bundle(bundle)
-        mcfg = self.model.config
-        path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
         # UNIQUE tmp name (GLM 2026-08-19): a fixed "<name>.tmp" lets two
         # concurrent writers in one directory interleave their bytes, and
         # os.replace then atomically publishes garbage -- an atomic rename
@@ -8083,7 +8238,7 @@ class ModelDriver:
                 # tracer leaves against it, because a contiguity check
                 # alone accepts the empty set and resumes with tracers
                 # silently dropped (codex BLOCKER 2026-08-19).
-                _nq=np.int64(len(bundle["q"])),
+                _nq=np.int64(nq),
                 _git_sha=git_provenance(Path(__file__)).commit,
                 **arrays)
             # fsync BEFORE the rename, and the directory after it: page
@@ -8102,30 +8257,65 @@ class ModelDriver:
         logger.info("  fv3_duo checkpoint: step %d day %.3f -> %s",
                     step, day, path.name)
 
-    def _load_fv3_duo_checkpoint(self, path: Path) -> tuple[int, float]:
-        """Load an ``fv3duo_ckpt_v1`` bundle and stage it for restart.
+    def _fv3_duo_save_checkpoint(self, bundle: dict, step: int,
+                                 day: float) -> None:
+        """Persist the FULL duo bundle as ONE fp64 ``fv3duo_ckpt_v1`` npz.
+
+        The bundle IS the state: press/nh are persisted verbatim, never
+        rebuilt from delp at load (a rebuild risks diverging from the
+        certified in-step aliasing).  Atomic: written to a ``.tmp``
+        sibling then ``os.replace``d, so a reader never sees a partial
+        checkpoint and an interrupted write never poisons a restart.
+
+        Multi-process SPMD: *bundle* is gathered to identical
+        host-visible data on every rank first (a collective -- every
+        rank must call this), then the ENTIRE write (not just
+        ``np.savez``) runs root-gated and rendezvous'd via
+        ``_spmd_barrier_on_root_error``, with a best-effort cleanup of
+        the unique tmp file on a failed root write (codex MINOR).  The
+        single-process arm below is the original code, untouched.
+        """
+        mcfg = self.model.config
+        path = self._output_dir / f"fv3duo_ckpt_step_{step:09d}.npz"
+        if not self._is_spmd_multiprocess():
+            arrays = self._fv3_duo_flatten_bundle(bundle)
+            self._fv3_duo_checkpoint_write(
+                arrays, mcfg, step, day, len(bundle["q"]), path)
+            return
+
+        # ---- multi-process SPMD ----
+        bundle = self._gather_spmd_tree_to_host(bundle)
+        arrays = self._fv3_duo_flatten_bundle(bundle)
+        nq = len(bundle["q"])
+        err = None
+        if jax.process_index() == 0:
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            try:
+                self._fv3_duo_checkpoint_write(arrays, mcfg, step, day,
+                                               nq, path)
+            except Exception as exc:
+                err = exc
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        self._spmd_barrier_on_root_error(err)
+
+    def _decode_fv3_duo_checkpoint_arrays(self, path: Path):
+        """Read + fully validate ONE ``fv3duo_ckpt_v1`` npz; return
+        ``(state, press, q, omga, nh, step, day)``.
 
         Schema-gated: refuses any npz that does not declare
         ``_schema='fv3duo_ckpt_v1'`` (a cube/lat-lon/MPAS checkpoint is
         a foreign schema this lane must never half-decode), then refuses
         km / resolution / hydrostatic / dt mismatches against the
-        CONSTRUCTED model BEFORE touching any array.  The staged bundle
-        is consumed by ``_run_fv3_duo`` (total-days convention: the
-        resumed job advances ``total - loaded`` steps).
-        """
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-            FV3DuoDynamicsModel,
-        )
-        if not isinstance(getattr(self, "model", None),
-                          FV3DuoDynamicsModel):
-            raise RuntimeError(
-                "fv3_duo restart: load_checkpoint validates the bundle "
-                "against the CONSTRUCTED duo model (km/resolution/"
-                "hydrostatic) — call setup() before load_checkpoint.")
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"fv3_duo checkpoint not found (or is a directory): "
-                f"{path}")
+        CONSTRUCTED model BEFORE touching any array.  Pulled out of
+        ``_load_fv3_duo_checkpoint`` verbatim (single-process behavior
+        unchanged) so the multi-process arm can wrap the WHOLE decode
+        in one try/except before the rendezvous, and so
+        ``_broadcast_fv3_duo_bundle`` has a template-shaped return to
+        reuse (codex BLOCKER/MAJOR, mp-driver-io design review
+        2026-08-27)."""
         mcfg = self.model.config
         schema = self._FV3_DUO_CKPT_SCHEMA
         with np.load(path, allow_pickle=False) as d:
@@ -8220,6 +8410,216 @@ class ModelDriver:
                         f"carry (nh_* arrays); found none.")
             step = int(d["_step"])
             day = float(d["_day"])
+        return state, press, q, omga, nh, step, day
+
+    def _validate_fv3_duo_broadcast_source(self, src_flat, template,
+                                           nq: int, path: Path) -> None:
+        """Rank-0-only: prove *src_flat* (the decoded checkpoint,
+        flattened) matches EXACTLY the leaf set/shape/dtype
+        ``_broadcast_fv3_duo_bundle`` will need, BEFORE any broadcast
+        collective runs (codex BLOCKER, mp-driver-io diff review round
+        2: an unvalidated mismatch would otherwise surface as a
+        confusing ``broadcast_one_to_all`` collective failure on some
+        ranks only -- not a clean, loud error on every rank).
+        *template* is the model's own fresh IC, flattened the SAME way
+        -- the source of truth for every non-``q_`` leaf's shape/dtype
+        and for the whole non-``q_`` name set; ``q_`` leaves are sized
+        against ``template["q_0"]`` (this deck's tracers share one
+        field shape) over the *nq* range."""
+        if "q_0" not in template:
+            raise RuntimeError(
+                "fv3_duo multi-process restart: the template IC has no "
+                "q_0 tracer leaf to size the broadcast against.")
+        q_shape, q_dtype = template["q_0"].shape, template["q_0"].dtype
+        # GLM finding F5 (round 2b): nq was only checked for SELF-
+        # consistency (it came from len(dq), so `expect` always agreed
+        # with itself) -- never against this DECK's own tracer count.
+        # A checkpoint with nq=0 (or any foreign count) would silently
+        # pass. Cross-check against the template's own q_* count.
+        template_nq = sum(1 for nm in template if nm.startswith("q_"))
+        if nq != template_nq:
+            raise ValueError(
+                f"fv3_duo checkpoint {path.name}: checkpoint nq={nq} "
+                f"!= this deck's own tracer count {template_nq} (from "
+                f"the constructed model's template IC); refusing a "
+                f"foreign/corrupt tracer count.")
+        expect = ({nm for nm in template if not nm.startswith("q_")}
+                  | {f"q_{i}" for i in range(nq)})
+        got = set(src_flat)
+        if got != expect:
+            raise ValueError(
+                f"fv3_duo checkpoint {path.name}: decoded leaf set "
+                f"{sorted(got)} != expected {sorted(expect)} (model "
+                f"template + stamped nq={nq}); refusing to broadcast "
+                f"a mismatched bundle.")
+        for nm, arr in src_flat.items():
+            want_shape, want_dtype = self._fv3_duo_broadcast_leaf_spec(
+                nm, template, q_shape, q_dtype)
+            if arr.shape != want_shape or arr.dtype != want_dtype:
+                raise ValueError(
+                    f"fv3_duo checkpoint {path.name}: leaf {nm!r} is "
+                    f"shape={arr.shape} dtype={arr.dtype}, expected "
+                    f"{want_shape}/{want_dtype} from the constructed "
+                    f"model's own template.")
+
+    def _fv3_duo_broadcast_leaf_spec(self, nm: str, template, q_shape,
+                                     q_dtype):
+        """The (shape, dtype) a broadcast leaf named *nm* must have --
+        ONE definition shared by ``_validate_fv3_duo_broadcast_source``
+        and ``_broadcast_fv3_duo_bundle`` (GLM finding F6, round 2b: a
+        duplicated ternary in both could drift and let a validated
+        shape disagree with the shape actually broadcast)."""
+        return ((q_shape, q_dtype) if nm.startswith("q_")
+                else (template[nm].shape, template[nm].dtype))
+
+    def _broadcast_fv3_duo_bundle(self, template, hdr, src_flat):
+        """Multi-process SPMD: given a header array (step, day, nq) and
+        rank 0's ALREADY-VALIDATED flat leaf dict (``src_flat``,
+        ``None`` on every other rank -- see
+        ``_validate_fv3_duo_broadcast_source``, which the caller runs
+        BEFORE this), broadcast to the SAME 7-tuple, identical on
+        every rank.
+
+        Two-stage protocol (codex BLOCKER: ``broadcast_one_to_all``
+        needs every rank to already know the exact shape/dtype it is
+        receiving): first broadcast the header, then broadcast every
+        array leaf by name, sized against *template* (built from a
+        throwaway ``dcmip16_initial_state()`` -- identical on every
+        rank by construction, so no further file access is needed).
+        Assumes the CALLER already rendezvous'd on
+        ``_spmd_barrier_on_root_error`` so every rank reaches this
+        point only after rank 0's decode+validate is known to have
+        SUCCEEDED."""
+        from jax.experimental import multihost_utils as _mhu
+        is_root = jax.process_index() == 0
+        mcfg = self.model.config
+
+        hdr = np.asarray(_mhu.broadcast_one_to_all(hdr, is_source=is_root))
+        step, day, nq = int(round(hdr[0])), float(hdr[1]), int(round(hdr[2]))
+
+        q_shape, q_dtype = template["q_0"].shape, template["q_0"].dtype
+        # SORTED (GLM finding F4, round 2b): every rank must issue the
+        # SAME SEQUENCE of broadcast_one_to_all calls in the SAME
+        # order (each call is a separate collective) -- plain dict
+        # iteration order is deterministic in CPython given identical
+        # insertion order, which _fv3_duo_flatten_bundle already
+        # guarantees, but an explicit sort removes any doubt rather
+        # than relying on that guarantee holding forever.
+        names = sorted(nm for nm in template if not nm.startswith("q_"))
+        names += [f"q_{i}" for i in range(nq)]
+
+        out: dict[str, np.ndarray] = {}
+        for nm in names:
+            shape, dtype = self._fv3_duo_broadcast_leaf_spec(
+                nm, template, q_shape, q_dtype)
+            src = src_flat[nm] if is_root else np.zeros(shape, dtype=dtype)
+            out[nm] = np.asarray(
+                _mhu.broadcast_one_to_all(src, is_source=is_root))
+
+        state = {nm[len("state_"):]: jnp.asarray(v)
+                 for nm, v in out.items() if nm.startswith("state_")}
+        press = {nm[len("press_"):]: jnp.asarray(v)
+                 for nm, v in out.items() if nm.startswith("press_")}
+        q = [jnp.asarray(out[f"q_{i}"]) for i in range(nq)]
+        omga = jnp.asarray(out["omga"])
+        nh = None
+        if not mcfg.hydrostatic:
+            nh = {nm[len("nh_"):]: jnp.asarray(v)
+                  for nm, v in out.items() if nm.startswith("nh_")}
+        return state, press, q, omga, nh, step, day
+
+    def _load_fv3_duo_checkpoint(self, path: Path) -> tuple[int, float]:
+        """Load an ``fv3duo_ckpt_v1`` bundle and stage it for restart.
+
+        The staged bundle is consumed by ``_run_fv3_duo`` (total-days
+        convention: the resumed job advances ``total - loaded`` steps).
+
+        Multi-process SPMD: ONLY rank 0 reads the file (avoids N-way
+        NFS reads and any reliance on cross-node close-to-open
+        visibility semantics) -- the file-existence check, the FULL
+        single-process decode+validation
+        (``_decode_fv3_duo_checkpoint_arrays``, unchanged), and a
+        pre-broadcast shape/key validation
+        (``_validate_fv3_duo_broadcast_source``) ALL run inside ONE
+        try block that EVERY rank enters (not just root -- GLM finding
+        F1, mp-driver-io review round 2b: the per-rank template
+        construction every rank needs for its broadcast placeholders
+        was previously OUTSIDE any try/barrier, so a failure there on
+        ANY rank -- root or not -- would crash that rank before it
+        ever reached the barrier, hanging every other rank in the
+        allgather.  Every rank now feeds ITS OWN local error into the
+        SAME ``_spmd_barrier_on_root_error`` rendezvous
+        (``_spmd_barrier_on_root_error``'s contract supports a
+        non-root local error too, not just root's -- it allgathers
+        every rank's flag and re-raises each rank's own exception on
+        that rank), so no rank can raise before every rank reaches the
+        barrier, and no rank proceeds to a broadcast collective a
+        failed rank will never join.  Single-process is the original
+        code path, untouched.
+        """
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoDynamicsModel,
+        )
+        if not isinstance(getattr(self, "model", None),
+                          FV3DuoDynamicsModel):
+            raise RuntimeError(
+                "fv3_duo restart: load_checkpoint validates the bundle "
+                "against the CONSTRUCTED duo model (km/resolution/"
+                "hydrostatic) — call setup() before load_checkpoint.")
+
+        mp = self._is_spmd_multiprocess()
+        if not mp:
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"fv3_duo checkpoint not found (or is a directory): "
+                    f"{path}")
+            state, press, q, omga, nh, step, day = (
+                self._decode_fv3_duo_checkpoint_arrays(path))
+            self._fv3_duo_restart_bundle = {
+                "state": state, "press": press, "q": q, "omga": omga,
+                "nh": nh}
+            logger.info("  Loaded fv3_duo checkpoint: step=%d, day=%.3f",
+                        step, day)
+            self._loaded_checkpoint_step_day = (step, day)
+            return step, day
+
+        # ---- multi-process SPMD ----
+        # Pre-try inits are raise-free `= None` bindings ONLY (codex
+        # BLOCKER, round 3: even `np.zeros(3)` must be inside the try
+        # -- a rank-local allocation failure there would exit that
+        # rank before the barrier and hang the rest). EVERYTHING that
+        # can raise is inside the single try every rank enters.
+        template = None
+        hdr = None
+        src_flat = None
+        err = None
+        try:
+            hdr = np.zeros(3, dtype=np.float64)
+            # template: derivable from the CONSTRUCTED model alone
+            # (grid + config, identical on every rank by construction)
+            # -- built by EVERY rank (needed by all for broadcast
+            # placeholders), inside this same try so a per-rank
+            # failure here is caught too (GLM F1, round 2b).
+            template = self._fv3_duo_flatten_bundle(
+                self.model.dcmip16_initial_state(do_pert=True))
+            if jax.process_index() == 0:
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"fv3_duo checkpoint not found (or is a "
+                        f"directory): {path}")
+                decoded = self._decode_fv3_duo_checkpoint_arrays(path)
+                dstate, dpress, dq, domga, dnh, dstep, dday = decoded
+                src_flat = self._fv3_duo_flatten_bundle(
+                    {"state": dstate, "press": dpress, "q": dq,
+                     "omga": domga, "nh": dnh})
+                self._validate_fv3_duo_broadcast_source(
+                    src_flat, template, len(dq), path)
+                hdr[:] = (float(dstep), dday, float(len(dq)))
+        except Exception as exc:
+            err = exc
+        self._spmd_barrier_on_root_error(err)
+        state, press, q, omga, nh, step, day = (
+            self._broadcast_fv3_duo_bundle(template, hdr, src_flat))
         self._fv3_duo_restart_bundle = {
             "state": state, "press": press, "q": q, "omga": omga,
             "nh": nh}
