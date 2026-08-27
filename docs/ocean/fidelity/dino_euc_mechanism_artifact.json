@@ -1,0 +1,217 @@
+{
+  "controls": {
+    "correct_nrms": 0.6886528366932417,
+    "day0_identity": "verified by _build_twin_state; max dT,deta,du,dv,dbefore,dTKE all 0 in log",
+    "dry_cell_plant_count": 86,
+    "dry_cell_plant_detected": true,
+    "empty_mask_raises": true,
+    "evd_nonvacuity_max_abs_Kv_prod_minus_closure": 99.99896739300415,
+    "wrong_shift_fails": true,
+    "wrong_shift_nrms": 1.2686120575106166
+  },
+  "equator": {
+    "depth_window_m": [
+      10.0,
+      40.0
+    ],
+    "latitude_deg": 0.0,
+    "row_zero_based": 99,
+    "weighting": "interface 0.5*(e3t_0[k]+e3t_0[k+1])"
+  },
+  "import_receipt": {
+    "module": "/tmp/codex-euc-mechanism/packages/ocean/legoesm/ocean/physics/vertical_mixing/__init__.py",
+    "within_worktree": true
+  },
+  "input_sha256": {
+    "mesh_mask": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "namelist": "0e75f4cb32dad3ed3fc17b721651ec12e0366c2978df8c65a6e95ae80b48d68b",
+    "nemo_avm_closure": "1240ccb86e674edd1309831e2292a244aaabc3bca2f245b530fd3b88b59c275f",
+    "nemo_avm_realized": "ad8104d352838ff36c1c09cb3b21231eacabeb00ce7bd2b5477cc40ead4faed0",
+    "nemo_avt_closure": "6f34238727e142e4036a629ed20fde47220e290d2f11f20618aef34e72d91c34",
+    "nemo_avt_realized": "a6cc3fca6348c10c73ab0bf3bf4081c38be8d20a6f2cbdd00de521e21252eeca",
+    "nemo_binary": "545b383996e644591492e0fc7c82663a2d47272e2c7172ad8bbc58e5cd7d5239",
+    "ocean_output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "restart": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e"
+  },
+  "lane": {
+    "kt": 5761,
+    "name": "d180",
+    "restart": "DINO_00005760_restart.nc",
+    "run_dir": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R"
+  },
+  "oracle_repo": {
+    "branch": "master",
+    "dirty": true,
+    "head": "0f6b6ac34b9e07425f47dc97eaf35838a5327532"
+  },
+  "pinned_reducers": {
+    "bn2_alpha_compare.py": "2ac9e4a457c4dded55a116d67938dfda035e79a3a98ccbb070d9a0ec3d11e40e",
+    "dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+    "kamm_twin_90d.py": "00b5f0d6c6c58ef984e010825239af27f768b83cf431e8763d236325c7cf68e6",
+    "zdftke_avm_offset_scan.py": "7ec40312dba6d70b7d6bb9ed5349b5861c7fa1b1ab4859b7c2f9c5c785300feb"
+  },
+  "precision": {
+    "jax_enable_x64": "1",
+    "state_dtype": "float64"
+  },
+  "repo": {
+    "branch": "fidelity/dino-euc-mechanism-codex",
+    "dirty": true,
+    "head": "d7109d9b0b95c80eb5c3155d7aa249bec5f66b83"
+  },
+  "schema": "dino-euc-mechanism-v1",
+  "scores": {
+    "closure_avm": {
+      "diagnostic_nrms_20_40m": 0.03184802669844877,
+      "diagnostic_nrms_26_40m": 0.032383569149015384,
+      "lego_level_mean_m2_s": [
+        0.0014776672106566041,
+        0.00030048746523774557,
+        0.00044753764745197845
+      ],
+      "lego_over_nemo": [
+        2.05144215158544,
+        0.9861809374330623,
+        1.0141563340212072
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0007203065460630227,
+        0.00030469810744860535,
+        0.0004412905904531085
+      ],
+      "nrms": 0.6886528366932417,
+      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+    },
+    "closure_avt": {
+      "diagnostic_nrms_20_40m": 0.04606982852006467,
+      "diagnostic_nrms_26_40m": 0.04395277901735231,
+      "lego_level_mean_m2_s": [
+        0.0013262584135499101,
+        0.0002677249395727572,
+        0.0003784983937106147
+      ],
+      "lego_over_nemo": [
+        2.2715923394819257,
+        0.9731380424272813,
+        1.0215143258815558
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0005838452571346429,
+        0.00027511506888064466,
+        0.0003705267602429116
+      ],
+      "nrms": 0.8204455094775336,
+      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+    },
+    "realized_avm": {
+      "diagnostic_nrms_20_40m": 5.512835849377933e-07,
+      "diagnostic_nrms_26_40m": 4.932712174529429e-07,
+      "lego_level_mean_m2_s": [
+        0.0014776672106566041,
+        0.00030048746523774557,
+        20.00021231867003
+      ],
+      "lego_over_nemo": [
+        2.05144215158544,
+        0.9861809374330623,
+        1.0000002890771267
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_evd_fraction_by_level": [
+        0.0,
+        0.0,
+        0.19230769230769232
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0007203065460630227,
+        0.00030469810744860535,
+        20.000206537067793
+      ],
+      "nrms": 1.883166136202312e-05,
+      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+    },
+    "realized_avt": {
+      "diagnostic_nrms_20_40m": 7.752730774304767e-07,
+      "diagnostic_nrms_26_40m": 6.590544541665125e-07,
+      "lego_level_mean_m2_s": [
+        0.0013262584135499101,
+        0.0002677249395727572,
+        20.00014327941629
+      ],
+      "lego_over_nemo": [
+        2.2715923394819257,
+        0.9731380424272813,
+        1.0000003753063875
+      ],
+      "level_depth_m": [
+        10.13875112538517,
+        20.593063338905267,
+        31.428849032898142
+      ],
+      "nemo_evd_fraction_by_level": [
+        0.0,
+        0.0,
+        0.19230769230769232
+      ],
+      "nemo_level_mean_m2_s": [
+        0.0005838452571346429,
+        0.00027511506888064466,
+        20.00013577323758
+      ],
+      "nrms": 1.7819341061642592e-05,
+      "verdict": "UNRESOLVED_CLOSURE_DIFFERENCE"
+    }
+  },
+  "short_run": {
+    "arm": "at every legoESM step replace only non-EVD momentum viscosity K_m passed to the implicit vertical momentum solve by frozen NEMO day-180 tke_dump_avm_final[jk=2..36]; retain legoESM K_v, TKE evolution, surface forcing, and cells where the native EVD trigger sets K_m=100 m2/s",
+    "base": "shipped nemo_dino_kamm_mlf",
+    "confirm": "Cz >= 0.50 toward NEMO and shear absolute error worsens by no more than 10%",
+    "controls": [
+      "day-0 BASE/arm state identity bit-for-bit",
+      "hook returns bit-identical K_v and TKE to BASE and changes K_m only outside native EVD cells",
+      "dry/wet-mask plant and one-level vertical-shift plant must fail",
+      "2x K_m plant must change first-step momentum tendency",
+      "BASE must reproduce the archived verdict360 control at day 10",
+      "read and re-record every NPZ provenance stamp and all coefficient/source hashes"
+    ],
+    "cost": {
+      "basis": "archived shipped m0_control.log reports day 10 wall=93 s and day 360 wall=637 s on one GPU; separate BASE/arm processes each compile",
+      "gpu_seconds_pair_estimate_including_separate_jit": 186,
+      "gpu_seconds_per_arm_estimate_including_jit": 93,
+      "steady_state_gpu_seconds_per_10_day_arm": 18,
+      "storage_estimate": "roughly 25 MiB per arm with only day-0/day-10 3-D snapshots"
+    },
+    "device": "CUDA_VISIBLE_DEVICES=0",
+    "duration_days": 10,
+    "initial_state": "bit-identical NEMO/legoESM day-180 now,before,TKE restart bridge",
+    "readout": "daily equatorial wet-zonal-mean u(z); shallowest 0-100 m zero crossing and 2-level shear",
+    "refute": "Cz <= 0.10 or response is away from NEMO",
+    "status": "DESIGN_ONLY_NO_CUDA_IN_SANDBOX",
+    "steps": 320,
+    "unmeasurable": "BASE day-10 core-depth error < 0.5 m"
+  },
+  "source_trace": {
+    "lego_call_path": "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:6347-6519",
+    "lego_closure": "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py:108",
+    "lego_config": "packages/ocean/legoesm/ocean/experiments/dino.py:2890-2941,3234-3259",
+    "nemo_dispatch": "src/OCE/ZDF/zdfphy.F90:264-286,311-323",
+    "nemo_evd": "src/OCE/ZDF/zdfevd.F90:92-120",
+    "nemo_namelist": "RUN_VERDICT360_M0/namelist_cfg:384-401 (TKE+EVD, nn_evdm=1)",
+    "nemo_tke_mixing_length": "src/OCE/ZDF/zdftke.F90:575-724"
+  },
+  "state": "shared day-180, first matched step kt=5761"
+}
