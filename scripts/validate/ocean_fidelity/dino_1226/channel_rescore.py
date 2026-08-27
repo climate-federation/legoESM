@@ -741,6 +741,10 @@ def evaluate(lego, nemo, n_boot=N_BOOT):
             "row_floor_sv": float(full_floor_360[row]),
             "gap_over_band_floor": float(full_gap[row] / band_floor),
             "gap_over_band_net": float(full_gap[row] / band_net),
+            "largest_abs_in_channel_control_sv":
+                float(np.max(np.abs(g))),
+            "gap_over_largest_abs_in_channel_control":
+                float(abs(full_gap[row]) / np.max(np.abs(g))),
             "wet_u_columns": wet_columns,
             "wet_t_columns": wet_t_columns,
             "total_u_columns": int(R.A.NX),
