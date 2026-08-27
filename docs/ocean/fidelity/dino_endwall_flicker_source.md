@@ -6,14 +6,20 @@ Branch: `fidelity/dino-basin-rectification-codex`. Oracle repository revision:
 not fully pinned by that oracle Git revision, the committed probe prints
 SHA-256 hashes for every cited source and every binary operand.
 
+The accepted run receipt below names the clean probe commit, registered
+preregistration commit and content hashes. The full source/operand hash map is
+printed before any measurement output.
+
 ## Outcome
 
 The DINO `jpdyn_tau` slot is not evidence that wind is zero. It is emitted to
-the dump but never populated. The offline probe bypasses that diagnostic gap
-by reconstructing NEMO's vertical-route source operand from its pre/post-stress
-brackets. It does not mutate or fill the oracle slot.
+the step-5764 restart but never populated. The offline probe proves the donor
+slot is exact zero, copies its allocated 3-D arrays, wires only their top level
+from NEMO's pre/post-stress brackets, proves every lower level remains zero,
+and routes the source score through that wired slot. The oracle artifact itself
+is read-only and unchanged.
 
-The reconstructed top-cell source operand and the independently captured
+The wired top-cell source operand and the independently captured
 barotropic `F_slow` entry agree in RMS amplitude to within 4.1% on southern
 row j=1. The frozen source-operand verdict is nevertheless
 **PLAUSIBLE/UNRESOLVED**: the direct-deposit row correlation is 0.418, below
@@ -84,7 +90,7 @@ implementation difference whose wall-row consequence remains to be measured.
 | 7 | Half-back pressure gradient, live `dyn_cor_2D`, drag, frozen forcing, then masking update velocity (`dynspg_ts.F90:766-784,818-850`). | `_run_substep_loop` builds pressure, live EEN Coriolis, drag, adds `F_slow`, then masks (`barotropic_latlon_cgrid.py:903-961`). | **MATCH** order. `F_slow` is not depth-divided again. |
 | 8 | Every substep commits ssh and velocity halos with `lbc_lnk`, including vector signs (`dynspg_ts.F90:899-916`). | Updated serial arrays are multiplied by local wet masks; there is no statement-level halo commit (`barotropic_latlon_cgrid.py:932-961`; rationale at `ocean_model_latlon_cgrid.py:8744-8759`). | **DIFF (boundary representation)**; equivalence at the wall Nyquist mode is unmeasured. |
 | 9 | Primary velocity/ssh sums use `wgtbtp1`; transport uses the secondary tail; all normalize after the loop. Filter 2 constructs a `2*nn_e` boxcar and tail (`dynspg_ts.F90:733-738,974-1003,1242-1292`). | Weight construction, accumulators and normalized velocity/transport outputs are explicit (`barotropic_latlon_cgrid.py:1131-1140,1577-1616`). | **MATCH**. |
-| 10 | Immediately before `dyn_zdf`, NEMO installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | The shipped return path installs the configured primary velocity average before vmix (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1760`). | **DIFF (temporary pre-vmix state)**. The later paired reconciliation aligns, but this intermediate state is consumed by `dyn_zdf`. |
+| 10 | Immediately before `dyn_zdf`, NEMO installs the transport-mean correction in Kmm (`dynspg_ts.F90:1170-1174`). | The shipped return path installs the configured primary velocity average before vmix (`barotropic_latlon_cgrid.py:1627-1651`; `packages/ocean/legoesm/ocean/experiments/dino.py:1760`). | **DIFF (temporary pre-vmix state)**. The later paired reconciliation aligns. Whether any downstream active stencil consumes this velocity difference is unverified. |
 | 11 | No NEMO statement projects the completed split-explicit eta by a spatially uniform correction after the solver. | `_step_impl` applies `fix_eta_drift` after the barotropic solve (`ocean_model_latlon_cgrid.py:4216-4260`); DINO keeps it on while documenting no NEMO analogue (`packages/ocean/legoesm/ocean/experiments/dino.py:1561-1595`). | **DIFF (uniform projection)**. Its contribution to the end-wall 2dt mode is unmeasured; uniformity alone is not an exoneration. |
 | 12 | After `dyn_zdf`, `mlf_baro_corr` installs the after barotropic mean (`stpmlf.F90:396-409,752-790`). | DINO selects `barotropic_after_reconcile="nemo_mlf_baro_corr"` at the post-vmix site (`packages/ocean/legoesm/ocean/experiments/dino.py:1761`; `ocean_model_latlon_cgrid.py:8100-8128,8761-8770`). | **MATCH** for the paired shipped configuration. |
 
@@ -106,7 +112,7 @@ until that first consumer selects one mechanism.
 | 4 | `dynspg_ts` adds centred wind divided by full face-column depth to frozen slow forcing (`cfgs/DINO/MY_SRC/dynspg_ts.F90:423-445`). | The explicit route's depth mean enters `F_slow`; the implicit route restores `tau/(rho0*H)` explicitly (`ocean_model_latlon_cgrid.py:3607-3640`), and the substep consumes it directly (`barotropic_latlon_cgrid.py:932-961`). | **MATCH** source algebra. The offline `F_slow` score confirms no second face-depth division. |
 | 5 | `dyn_zdf` forms `Kbb+rDt*Krhs`, removes the after barotropic mean, then applies its vertical boundary condition (`cfgs/DINO/MY_SRC/dynzdf.F90:133-170`). | Shipped `surface_stress_implicit=False` keeps stress in the explicit tendency before the barotropic solve; `withhold_stress` selects the alternative route (`ocean_pe_latlon_cgrid.py:3684-3701,4495-4501`). | **DIFF (shipped placement)**. |
 | 6 | MLF adds `zDt_2*(tau_b+tau_now)/(rho0*e3_face(Kaa))` between tridiagonal recurrences (`dynzdf.F90:340-373,535-566`). | The alternative arm adds `dt_mom*tau/(rho0*dz0)` to the solve input before the same vertical diffusion solve (`ocean_model_latlon_cgrid.py:6681-6702,7003-7009`). | **MATCH** source formula in the alternative arm. Its dynamic response is unmeasured offline. |
-| 7 | `trddyn` computes `utrd_tau` for XIOS (`src/OCE/TRD/trddyn.F90:153-165`). DINO's dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but later emits the unpopulated slot (`:329-330,389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). | The offline probe reconstructs the source operand from bracketing dumps without filling the oracle slot. | **DIFF (diagnostic wiring only)**; not a physical zero or placement response. |
+| 7 | `trddyn` computes `utrd_tau` for XIOS (`src/OCE/TRD/trddyn.F90:153-165`). DINO's dump live-slot list excludes tau (`cfgs/DINO/MY_SRC/trddump.F90:97-105`) but later emits the unpopulated slot (`:329-330,389-390`); `jpdyn_tau=11` (`src/OCE/TRD/trd_oce.F90:74`). | The offline probe loads the emitted 3-D slot, proves it is zero, copies it, wires top level from the bracketing dumps, and scores through that copy. | **DIFF (diagnostic wiring only)**; not a physical zero or placement response. |
 | 8 | `mlf_baro_corr` follows `dyn_zdf` (`stpmlf.F90:396-409,752-790`). | The active shipped `leapfrog`/split-explicit path accepts either stress placement and retains the configured post-vmix reconciliation. `kamm_twin_90d.py` now exposes and stamps the existing Boolean selector. | **MATCH (arm availability)** for the registered A/B. The separate `outer_integrator="nemo_mlf"` path still has its own guard and is not this arm. |
 
 ## Offline wind source-operand measurement
@@ -158,7 +164,7 @@ and `1.25/0.08` confirmation versus `2.30/0.68` refutation bars.
 Two independent read-only reviewers returned HOLD before these findings were
 finalized.
 
-- Evidence review: the probe measured a reconstructed source operand, not the
+- Evidence review: the probe measured a wired source operand, not the
   implicit-placement response; the `jpdyn_tau` slot is emitted but not
   populated; provenance did not bind untracked `MY_SRC` content; and the
   correlation gate exceeded the preregistration. Disposition: scope narrowed,
