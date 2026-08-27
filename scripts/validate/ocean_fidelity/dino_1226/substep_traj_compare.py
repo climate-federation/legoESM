@@ -1018,6 +1018,11 @@ def main():
                     "REFUTED" if _collapse < 10.0 else "INCONCLUSIVE")
         print(f"    VERDICT (from the measured collapse): {_verdict}")
 
+    # The COMPOSABLE arm kwargs.  Each arm below applies its substitution to
+    # `_k_arm` and reassigns it, so the JOINT arm (both substitutions at once)
+    # is the same code path as either half alone rather than a third copy.
+    _k_arm = _k_sub
+
     # ===================================================================
     # #1455 sec-D: THE PRE-REGISTERED V-FACE ZONAL METRIC ARM.
     #
@@ -1180,7 +1185,7 @@ def main():
         # the stored width; `een_pre` was built OUTSIDE the loop from the same
         # array, so it is replaced with the SAME array or the EEN consumer
         # would keep the old metric and the arm would not be one variable.
-        _k_vfx = dict(_k_sub)
+        _k_vfx = dict(_k_arm)
         _k_vfx["grid"] = _grid_p._replace(
             dx_v=jnp.asarray(_dxv_sub, dtype=_grid_p.dx_v.dtype))
         _een_p = _k_sub["een_pre"]
@@ -1210,10 +1215,10 @@ def main():
         # exactly the two the substitution replaced.  A THIRD match is a
         # consumer this arm MISSED -- which would shrink the perturbation and
         # bias the collapse toward REFUTED with nothing firing.
-        for _kk in set(_k_vfx) | set(_k_sub):
+        for _kk in set(_k_vfx) | set(_k_arm):
             if _kk in ("grid", "een_pre"):
                 continue
-            if _k_vfx.get(_kk) is not _k_sub.get(_kk):
+            if _k_vfx.get(_kk) is not _k_arm.get(_kk):
                 raise SystemExit(f"FATAL: loop input {_kk!r} changed; the "
                                  "v-face arm is not one variable")
         for _f in _grid_p._fields:
@@ -1277,6 +1282,7 @@ def main():
                 "substitutes.  A third is a consumer the arm MISSED (partial "
                 "perturbation, collapse biased low); a missing one means the "
                 "substitution has nothing to replace.")
+        _k_arm = _k_vfx
         jax.lax.fori_loop = _fori_capture
         try:
             with jax.disable_jit():
@@ -1318,12 +1324,284 @@ def main():
         lego_Vbar_avg_sub = _lego_vavg_vfx
         _dV_sub = _dV_vfx
         _dep_sub = _dep_vfx
+    # ===================================================================
+    # #1455 next-action 1: THE PRE-REGISTERED VERTEX-CORIOLIS ARM.
+    #
+    # THE CANDIDATE (docs/ocean/fidelity/dino_campaign_synthesis.md sec 3
+    # item 1; dino_wall_fixed_bias.md "The sibling error this arm uncovered").
+    # legoESM builds the Coriolis parameter at the vertex as the AVERAGE of the
+    # two adjacent tracer rows; NEMO evaluates it at its own f-point latitude.
+    # Measured against NEMO's own dumped `ff_f` the gap is median -5.48e-05 and
+    # it peaks at the EQUATOR, which is exactly where the v-face metric gap
+    # (this file's other arm) vanishes.  Their signed latitude profiles
+    # correlate at +1.000 and they enter the SAME EEN rotation coefficient
+    # `e1v * f` with OPPOSITE signs, so they PARTIALLY CANCEL: the v-face arm
+    # removed the smaller of a cancelling pair.  That is the Rule-8 pattern
+    # this campaign has recorded three times, and the response registered for
+    # it is a JOINT arm, never a revert of the half already fixed.
+    #
+    # A THIRD OF THIS GAP IS NOT A DISCRETISATION CONVENTION.  It decomposes
+    # into a uniform -1.59e-05 and a latitude-varying -3.61e-05
+    # (coriolis_omega_routing_audit.py, committed).  The uniform part is a
+    # different Earth: the twin's GEOMETRY is built on legoESM's rounded
+    # `constants.Omega`, while NEMO's own ff_f inverts to 7.292115083046e-05.
+    # Substituting NEMO's own array removes BOTH halves at once, which is what
+    # this arm is for -- it measures the pair's Coriolis side complete.
+    #
+    # THE ARM: substitute NEMO's OWN `ff_f` for the ONE array the loop's
+    # Coriolis reads, rerun the SAME loop from the SAME entry state with the
+    # SAME (substituted) forcing, and re-measure.  Under this card
+    # (`barotropic_coriolis="een_metric"`) the loop's Coriolis is
+    # `een_barotropic_coriolis(..., een_pre)` and reads `een_pre["f_vtx"]`
+    # ALONE; the `f_u`/`f_v` loop kwargs are on the dead `else` branch.  That
+    # is not taken on trust -- the sentinel control below CORRUPTS them and
+    # requires the loop's output to be bit-identical.
+    #
+    # PRE-REGISTERED VERDICTS.  Scored by `baro_fixed_bias_wall_map.py` over
+    # the FIVE-state mean, never here, and REGISTERED ON THE JOINT ARM:
+    #   OWNER    if the state-constant wall-normal residual collapses > 50 %
+    #            both basin-wide AND on the northern lobe
+    #   REFUTED  if it collapses < 10 %
+    #   PARTIAL  in between.
+    # The staggering control must be CLEARLY WORSE (> 50 % above baseline).
+    _cor_mode = os.environ.get("DINO_1455_SUB_CORIOLIS", "")
+    if _cor_mode:
+        if _cor_mode not in ("nemo", "stagger"):
+            raise SystemExit(
+                f"DINO_1455_SUB_CORIOLIS={_cor_mode!r}: expected 'nemo' (the "
+                "registered arm) or 'stagger' (the registered staggering "
+                "control).  A silent default here would run an unlabelled arm.")
+        print(f"\n  === CANDIDATE SUBSTITUTION: NEMO's own ff_f  "
+              f"[mode={_cor_mode}] ===")
+        _een_c = _k_arm["een_pre"]
+        if _een_c is None or "f_vtx" not in _een_c:
+            raise SystemExit(
+                "FATAL: the loop carries no EEN pre-block, so the vertex "
+                "Coriolis this arm substitutes is not the array the loop's "
+                "Coriolis reads on this card and the arm would test nothing.")
+        _fvtx_p = np.asarray(_een_c["f_vtx"], dtype=np.float64)
+        if _fvtx_p.shape != (jpj + 1, jpi + 1):
+            raise SystemExit(
+                f"FATAL: legoESM's f_vtx is {_fvtx_p.shape}, not the "
+                f"({jpj + 1}, {jpi + 1}) vertex frame this arm assumes.")
+        _dnc_c = nc.Dataset(os.path.join(SEQDUMP, "mesh_mask.nc"))
+        try:
+            _ff_f_n = np.asarray(_dnc_c.variables["ff_f"][0], dtype=np.float64)
+            _gphiv_n = np.asarray(_dnc_c.variables["gphiv"][0],
+                                  dtype=np.float64)
+        finally:
+            _dnc_c.close()
+        if _ff_f_n.shape != (jpj, jpi):
+            raise SystemExit(f"FATAL: NEMO ff_f is {_ff_f_n.shape}, want "
+                             f"({jpj}, {jpi})")
+        # The column-0 alignment score below is sound only if NEMO's ff_f
+        # carries no zonal structure.  Measure it; do not assume it.
+        _ff_izonal = float(np.abs(_ff_f_n - _ff_f_n[:, :1]).max())
+        if _ff_izonal != 0.0:
+            raise SystemExit(
+                f"FATAL: NEMO's ff_f varies along i (max spread "
+                f"{_ff_izonal:.3e}); the column-0 alignment score would be "
+                "blind to that structure.")
+        # WHICH EARTH THE SUBSTITUTED ARRAY CARRIES, recovered from the array
+        # itself rather than quoted, so the arm's own stamp records what it
+        # actually fed the loop.  The row spread doubles as the check that the
+        # F-point latitude convention is the one assumed: a wrong latitude
+        # cannot return a clean constant.
+        _s_n = np.sin(np.deg2rad(_gphiv_n[:, 0]))
+        _keep_n = np.abs(_s_n) >= 0.10
+        _om_nemo_arr = _ff_f_n[_keep_n, 0] / (2.0 * _s_n[_keep_n])
+        _om_lego_geom = float(_k_arm["grid"].omega)
+        print(f"    NEMO's ff_f inverts to omega = "
+              f"{np.median(_om_nemo_arr):.12e} "
+              f"(row spread {float((_om_nemo_arr.max() - _om_nemo_arr.min()) / abs(np.median(_om_nemo_arr))):.2e} rel)")
+        print(f"    legoESM's geometry was built on omega = "
+              f"{_om_lego_geom:.12e}  (rel gap "
+              f"{(_om_lego_geom - float(np.median(_om_nemo_arr))) / float(np.median(_om_nemo_arr)):+.4e})")
+        # ALIGNMENT, calibrated against a known answer rather than assumed --
+        # the same two-hypothesis discriminator the drag and v-face arms use.
+        def _cor_resid(shift):
+            j = np.arange(1, jpj + 1) + shift
+            ok = (j >= 0) & (j < jpj)
+            cand = _ff_f_n[np.clip(j, 0, jpj - 1), 0]
+            a = _fvtx_p[1:jpj + 1, 0][ok]
+            b = cand[ok]
+            fine = np.abs(b) > 1e-6         # drop the equatorial row: a
+            # relative score against f ~ 0 is unbounded and would swamp the
+            # discriminator with one cell.
+            return float(np.median(np.abs(a[fine] - b[fine])
+                                   / np.abs(b[fine])))
+        _cor_scores = {sh: _cor_resid(sh) for sh in (-2, -1, 0, 1, 2)}
+        _cor_best_wrong = min(v for sh, v in _cor_scores.items() if sh != -1)
+        for _sh, _sc in sorted(_cor_scores.items()):
+            print(f"    row map lego j <- NEMO j{_sh:+d}: median rel="
+                  f"{_sc:.3e}"
+                  + ("   <- the CORRECT map (asserted below)" if _sh == -1
+                     else f"   ({_sc / max(_cor_scores[-1], 1e-300):.0f}x worse)"))
+        if not (_cor_scores[-1] < 1e-3
+                and _cor_scores[-1] * 100.0 < _cor_best_wrong):
+            raise SystemExit(
+                "FATAL: vertex-Coriolis row alignment NOT established: the "
+                "chosen map scores %.3e and the best WRONG map scores %.3e "
+                "(%.1fx), so the control cannot tell them apart and the "
+                "substitution is aborted"
+                % (_cor_scores[-1], _cor_best_wrong,
+                   _cor_best_wrong / max(_cor_scores[-1], 1e-300)))
+        # The two polar v-rows have no NEMO counterpart under this map and are
+        # left at legoESM's own value by BOTH arms.  That is one-variable-clean
+        # only if they carry no wet face -- asserted, not assumed.
+        _vmask_c = np.asarray(_k_arm["v_mask"])
+        for _jw in (0, jpj):
+            if bool((np.abs(_vmask_c[_jw]) > 0.5).any()):
+                raise SystemExit(
+                    f"FATAL: v row {_jw} is left at legoESM's own Coriolis by "
+                    "this substitution but carries wet faces; the arm would "
+                    "not be one variable.")
+        # THE SUBSTITUTION, built the SAME way `vertex_coriolis` builds the
+        # array it replaces (rows, then the periodic wrap column), so the two
+        # differ in their VALUES and in nothing else.
+        _fv_sub = np.array(_fvtx_p[:, :jpi])
+        _shift_c = -1 if _cor_mode == "nemo" else 0
+        _fv_sub[1:jpj + 1] = _ff_f_n[np.clip(
+            np.arange(1, jpj + 1) + _shift_c, 0, jpj - 1)]
+        _fv_sub[jpj] = _fvtx_p[jpj, :jpi]     # the north wall stays legoESM's
+        _fvtx_sub = np.concatenate([_fv_sub, _fv_sub[:, 0:1]], axis=1)
+        _cor_touched = int((_fvtx_sub != _fvtx_p).sum())
+        _fint = slice(1, jpj)
+        _cor_relmax = float((np.abs(_fvtx_sub - _fvtx_p)[_fint]
+                             / np.maximum(np.abs(_fvtx_p[_fint]), 1e-12)).max())
+        _cor_relmed = float(np.median(
+            np.abs(_fvtx_sub - _fvtx_p)[_fint]
+            / np.maximum(np.abs(_fvtx_p[_fint]), 1e-12)))
+        print(f"    substituted rows 1..{jpj - 1} ({_cor_touched} cells); "
+              f"median PER-CELL relative change {_cor_relmed:.3e}, "
+              f"max {_cor_relmax:.3e} (the max sits at the equator, where f "
+              f"-> 0 and a RELATIVE change is unbounded)")
+        _k_cor = dict(_k_arm)
+        _k_cor["een_pre"] = dict(_een_c)
+        _k_cor["een_pre"]["f_vtx"] = jnp.asarray(
+            _fvtx_sub, dtype=_een_c["f_vtx"].dtype)
+
+        # ONE VARIABLE.  Identity sweep first (a cheap regression tripwire,
+        # true by construction here), then the CONTENT sweep that can fail.
+        for _kk in set(_k_cor) | set(_k_arm):
+            if _kk == "een_pre":
+                continue
+            if _k_cor.get(_kk) is not _k_arm.get(_kk):
+                raise SystemExit(f"FATAL: loop input {_kk!r} changed; the "
+                                 "Coriolis arm is not one variable")
+        for _kk in set(_k_cor["een_pre"]) | set(_een_c):
+            if _kk == "f_vtx":
+                continue
+            if _k_cor["een_pre"].get(_kk) is not _een_c.get(_kk):
+                raise SystemExit(f"FATAL: een_pre[{_kk!r}] changed")
+        _cmatches = []
+        for _kk, _vv in _k_cor.items():
+            if _kk == "een_pre" or _vv is None:
+                continue
+            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
+                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+                _cmatches.append(f"loop kwarg {_kk}")
+        for _f in _k_arm["grid"]._fields:
+            _vv = getattr(_k_arm["grid"], _f)
+            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
+                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+                _cmatches.append(f"grid.{_f}")
+        for _kk, _vv in _een_c.items():
+            if getattr(_vv, "shape", None) == _fvtx_p.shape and np.array_equal(
+                    np.asarray(_vv, dtype=np.float64), _fvtx_p):
+                _cmatches.append(f"een_pre[{_kk!r}]")
+        print(f"    content sweep: arrays carrying legoESM's own vertex "
+              f"Coriolis = {sorted(_cmatches)}")
+        if sorted(_cmatches) != ["een_pre['f_vtx']"]:
+            raise SystemExit(
+                "FATAL: the arrays carrying legoESM's own vertex Coriolis are "
+                f"{sorted(_cmatches)}, not exactly the one this arm "
+                "substitutes.  A second is a consumer the arm MISSED (partial "
+                "perturbation, collapse biased low); none means the "
+                "substitution has nothing to replace.")
+
+        # THE INERTNESS CONTROL, and it is the reason `f_u`/`f_v` are left
+        # alone.  Those kwargs still carry legoESM's rounded Earth, and if the
+        # loop read them this arm would be a PARTIAL perturbation.  Reading the
+        # `else` branch is not proof that the branch is dead, so CORRUPT them
+        # by a factor of 1e3 and require the loop's carry to come back
+        # BIT-IDENTICAL.  A live consumer cannot survive that.
+        _k_inert = dict(_k_arm)
+        _k_inert["f_u"] = _k_arm["f_u"] * 1.0e3
+        _k_inert["f_v"] = _k_arm["f_v"] * 1.0e3
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_inert)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _U_inert = np.asarray(captured["carries"][1])
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_arm)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _U_base_c = np.asarray(captured["carries"][1])
+        _inert_gap = float(np.abs(_U_inert - _U_base_c).max())
+        print(f"    inertness control: f_u/f_v scaled by 1e3 -> max|dU_bar| "
+              f"= {_inert_gap:.3e} (must be 0.0)")
+        if _inert_gap != 0.0:
+            raise SystemExit(
+                "FATAL: the f_u/f_v loop kwargs are LIVE (scaling them by 1e3 "
+                f"moved the carry by {_inert_gap:.3e}), so substituting only "
+                "een_pre['f_vtx'] is a partial perturbation and the collapse "
+                "would read low.  Substitute them too before scoring.")
+
+        jax.lax.fori_loop = _fori_capture
+        try:
+            with jax.disable_jit():
+                _orig_run(*_a_loop, **_k_cor)
+        finally:
+            jax.lax.fori_loop = _orig_fori
+        _k_arm = _k_cor
+        _U_cor = np.asarray(captured["carries"][1])
+        _V_cor = np.asarray(captured["carries"][2])
+        _lego_avg_cor = np.zeros_like(_puu_b)
+        _lego_vavg_cor = np.zeros_like(_pvv_b)
+        for j in range(1, Kpit + 1):
+            _lego_avg_cor = _lego_avg_cor + wf_n[j - 1] * _cell(
+                np.asarray(_U_cor[j - 1]))
+            _lego_vavg_cor = _lego_vavg_cor + wf_n[j - 1] * _cell_v(
+                np.asarray(_V_cor[j - 1]))
+        _dep_cor = acc_sv((_lego_avg_cor - nemo_Ubar_avg) * _wetu)
+        _dV_cor = (_lego_vavg_cor - nemo_Vbar_avg) * _wetv
+        # PER-STATE PREVIEW ONLY.  The registered quantity is the five-state
+        # mean and it is scored by the committed probe on the maps this run
+        # writes, never here.
+        _wv_rows_c = [j for j in range(_wetv.shape[0]) if _wetv[j].any()]
+        _j_s_c, _j_n_c = _wv_rows_c[0], _wv_rows_c[-1]
+
+        def _rms_row_c(a, j):
+            return float(np.sqrt((a[j][_wetv[j]] ** 2).mean()))
+        print(f"    zonal (tangential) deposit: entering {_dep_sub:+.4e} -> "
+              f"arm {_dep_cor:+.4e} Sv/step")
+        for _tag, _jj in (("south", _j_s_c), ("north", _j_n_c)):
+            _b, _a = _rms_row_c(_dV_sub, _jj), _rms_row_c(_dV_cor, _jj)
+            print(f"    PREVIEW (this state only) wall-normal RMS at the "
+                  f"{_tag} wall row {_jj}: entering {_b:.4e} -> arm {_a:.4e}  "
+                  f"({100.0 * (1.0 - _a / max(_b, 1e-300)):+.1f}% change)")
+        print("    (the REGISTERED collapse is the five-state mean, scored by "
+              "baro_fixed_bias_wall_map.py on the maps written below)")
+        _lego_avg_sub = _lego_avg_cor
+        lego_Vbar_avg_sub = _lego_vavg_cor
+        _dV_sub = _dV_cor
+        _dep_sub = _dep_cor
+
     # LABEL THE ARM.  When the v-face substitution is on, `_dep_sub` below is
     # the SUBSTITUTED-METRIC in-loop deposit, not the plain frozen-forcing one;
     # the four lines would otherwise report an arm number under the baseline's
     # name.  The line prefixes are unchanged because the walk driver parses
     # them; the arm is named after the number.
-    _vf_tag = (f"   [+ NEMO's own e1v, mode={_vf_mode}]" if _vf_mode else "")
+    _vf_tag = ("   [" + " + ".join(
+        ([f"NEMO's own e1v, mode={_vf_mode}"] if _vf_mode else [])
+        + ([f"NEMO's own ff_f, mode={_cor_mode}"] if _cor_mode else [])
+    ) + "]") if (_vf_mode or _cor_mode) else ""
     print(f"    deposit with legoESM's own forcing = {_dep_vel:+.4e} Sv/step")
     print(f"    deposit with NEMO's frozen forcing = {_dep_sub:+.4e} Sv/step  "
           f"({100*_dep_sub/_dep_vel:.1f}% of it survives){_vf_tag}")
@@ -1449,10 +1727,13 @@ def main():
                  # and no numerical guard could tell them apart.
                  vface_arm=np.array(os.environ.get(
                      "DINO_1455_SUB_VFACE", "") or "none"),
+                 coriolis_arm=np.array(os.environ.get(
+                     "DINO_1455_SUB_CORIOLIS", "") or "none"),
                  provenance=np.array(
                      mr.provenance("substep_deposit_map")
-                     + " DINO_1455_SUB_VFACE=%r" % (
-                         os.environ.get("DINO_1455_SUB_VFACE") or None,)))
+                     + " DINO_1455_SUB_VFACE=%r DINO_1455_SUB_CORIOLIS=%r" % (
+                         os.environ.get("DINO_1455_SUB_VFACE") or None,
+                         os.environ.get("DINO_1455_SUB_CORIOLIS") or None)))
         # Round-trip from the FILE, not from the in-memory operands: an
         # assertion that re-runs acc_sv() on the same objects it was just
         # called on is true by construction and proves nothing about what

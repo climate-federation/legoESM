@@ -181,6 +181,11 @@ def provenance(tag: str = "") -> str:
             # #1455 PHASE 1: the seasonal clock is a knob that changes the
             # answer on a forcing_annual_cycle=True card, so it is stamped.
             "DINO_1226_T_SECONDS",
+            # #1455 next-action 1: the two SUBSTITUTION ARMS. An arm map and a
+            # baseline map are well-formed arrays on an identical wet mask and
+            # no numerical guard could tell them apart, so which arm produced a
+            # map has to travel WITH the map.
+            "DINO_1455_SUB_VFACE", "DINO_1455_SUB_CORIOLIS",
         ))
     line = (f"[provenance{(' ' + tag) if tag else ''}] "
             f"git={sha}{'+dirty-TRACKED' if dirty else ''}"
