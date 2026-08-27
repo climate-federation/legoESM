@@ -1,6 +1,6 @@
 # Preregistration: live NEMO named `jpdyn_tau` slot wiring
 
-Status: **CORRECTED AND PREREGISTERED BEFORE THE CORRECTED RUN.** The first
+Status: **ROUND-2 RETRACTION APPLIED.** The first
 registration incorrectly called the applied `dynzdf` surface increment divided
 by `rDt` NEMO's named `utrd_tau` diagnostic. Independent mechanism review
 refuted that identity: active `trddyn.F90:164-168` defines the named diagnostic
@@ -56,14 +56,18 @@ The verifier prints these frozen numbers:
   structural-zero control fails, or `u_storage_normalized_error >= 0.05`.
 - Anything else is **UNRESOLVED**.
 
-The source distinction is independently **CONFIRMED_NAMED_AND_APPLIED_DIFFER**
-if the named-versus-applied normalized error is at least 0.25,
-**REFUTED_NAMED_AND_APPLIED_MATCH** if it is at most 0.05, and **UNRESOLVED**
-otherwise. These classifications establish instrument identity only. No
-wind-placement or eta-flicker ownership verdict is licensed by them.
+The former source distinction
+`CONFIRMED_NAMED_AND_APPLIED_DIFFER` and its 2.0966766111 ratio are
+**RETRACTED**. The union mask admitted 324 dry coastal U faces, and the
+normalized-error gate had no reachable REFUTE state. On every wet U face,
+active `dynzdf` uses `zDt_2=rDt/2`, so the named no-half diagnostic is exactly
+twice the applied increment. The corrected verifier prints that wet-only
+identity and requires maximum relative error `<=1e-8`; a planted wet-face
+mutation must exceed the bar. It issues no source-distinction classification.
+This is an arithmetic/source-plumbing check, not independent physics evidence.
 
-The verifier must prove that planted nonzero-lower-level and top-storage
-violations fire their corresponding gates.
+The verifier must prove that planted nonzero-lower-level, top-storage, and
+wet-ratio violations fire their corresponding gates.
 
 ## Registered source edit
 

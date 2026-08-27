@@ -18,8 +18,10 @@ selected, is a five-day per-step free-run A/B from the same bridged day-180
 state. The prior last-half/zonal-wall wording is retracted: its bars came from
 the whole-domain first-eight ratio and first-sample aggregate-wall share. The
 primary is now coherently
-`regions.all.ratio_lego_over_nemo.first8` from `eta_flicker_decay.py`; the
-companion is `wall_share.legoESM.first8.wall`. Certified shipped-card values
+`regions.all.ratio_lego_over_nemo.first8` from `eta_flicker_decay.py`; this is
+the mean of the first eight per-sample area-weighted wet-domain RMS amplitudes
+of the **2dt-alternating eta component**. Its companion is
+`wall_share.legoESM.first8.wall`. Certified shipped-card values
 are 2.886305221717904 and 0.48541937969116244.
 
 - **Control validity:** shipped-card ratio in `[2.60, 3.18]` and first-eight
@@ -56,10 +58,13 @@ arm, build two same-input counterfactual probes, reusing
    Print j=1/j=197 pointwise deltas. A planted vector-sign or halo-offset
    violation must fail. The exact primary score is
    prediction normalized error of this counterfactual delta against the
-   independently dumped NEMO-minus-lego first-consumer residual; correlation
-   is the companion. **CONFIRMS statement ownership** at error `<=0.10` and
-   correlation `>=0.99`; **REFUTES** at explained RMS fraction `<=0.10` or
-   correlation `<=0.20`; otherwise `UNRESOLVED`. NEMO's second post-loop LBC
+   independently dumped NEMO-minus-lego first-consumer residual. Define
+   explained RMS fraction as
+   `E = 1 - RMS(residual - prediction) / RMS(residual)`; correlation is the
+   companion. **CONFIRMS statement ownership** only when normalized error is
+   `<=0.10`, `E>=0.90`, and correlation `>=0.99`; **REFUTES** only when
+   normalized error is `>=0.90`, `E<=0.10`, and correlation `<=0.20`;
+   otherwise `UNRESOLVED`. NEMO's second post-loop LBC
    on normalized `un_adv/vn_adv` is tracer-transport bookkeeping and must be
    dumped as a control, but is scoped out of eta ownership unless a next-step
    eta consumer is demonstrated.
@@ -69,8 +74,9 @@ arm, build two same-input counterfactual probes, reusing
    zero, holding every other input fixed. Print the same prediction error,
    correlation and explained fraction against the independently dumped
    next-step residual, separately at j=1/j=197. Plant a known nonzero `c` and
-   require the consumer to move. Apply the same `0.10/0.99` confirmation and
-   `0.10/0.20` refutation bars.
+   require the consumer to move. Apply the same symmetric confirmation
+   (`error<=0.10`, `E>=0.90`, correlation `>=0.99`) and refutation
+   (`error>=0.90`, `E<=0.10`, correlation `<=0.20`) bars.
 
 Only a counterfactual that confirms uniquely may receive an executable
 one-variable selector. Amend this preregistration with that selector and exact

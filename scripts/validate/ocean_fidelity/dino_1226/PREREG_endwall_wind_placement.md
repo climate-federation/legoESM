@@ -67,6 +67,67 @@ slot-shape copy” and prints the retraction. No operand, number, bar, or prior
 classification changes; named-diagnostic wiring is measured only by
 `verify_nemo_endwall_tau_slot.py` under its separate preregistration.
 
+## Round-2 correction and one-cell preregistration
+
+Cross-family review **RETRACTS** the live-slot headline
+`CONFIRMED_NAMED_AND_APPLIED_DIFFER` and its value 2.0966766111. On wet U
+faces, `zDt_2=rDt/2` makes the named `trddyn` diagnostic exactly twice the
+applied `dynzdf` increment; the prior union mask admitted 324 dry coastal
+faces and the normalized-difference REFUTE band was unreachable. The only
+retained claim is plumbing: the patched named slot is `CHECKED-CLEAN`, and the
+named diagnostic is twice the applied increment on every wet face to `1e-8`.
+
+Before the round-2 execution, the existing probe is extended with a one-cell
+localizer. It reuses the same kt=5761 arrays, bridge, `umask`, T masks, and
+NEMO-to-lego U offset; it does not define a second loader. For both direct
+`dynzdf` increment and captured `F_slow`, it prints:
+
+1. the wet `j=1` argmax `(j,i)`, signed delta, NEMO value, lego value, and
+   `max(abs(delta))/abs(mean(NEMO[j=1,wet]))`;
+2. the participation number
+   `P=(sum(delta**2)**2)/sum(delta**4)` on the 49 wet `j=1` faces and on all
+   9,758 wet U faces;
+3. the count and coordinates for which
+   `abs(lego/NEMO - 1) > 0.01`, restricted to finite, nonzero NEMO wet faces;
+4. the Jaccard overlap of the direct and `F_slow` one-percent outlier sets;
+5. for every outlier coordinate, NEMO `umask`, its two adjacent surface
+   `tmask` values, the exact `sbcmod.F90:543-544` multiplier
+   `(2-umask)*max(tmask_w,tmask_e)`, and whether the point is a coastal-unmask
+   point (`umask=0`, multiplier=2); and
+6. independently on the full 199x52 U plane, the overlap between non-roundoff
+   source residuals and that coastal-unmask set. This full-plane result is
+   never merged into the wet-face score.
+
+The expected buried signature is `P=1.0000` and one one-percent outlier over
+49 wet `j=1` faces, a direct argmax delta about `3.02e-5 m/s` and normalized
+row maximum about 0.25, approximately 24 one-percent outliers over 9,758 wet
+domain faces, and identical direct/`F_slow` support. This expectation is
+context, not a gate.
+
+The one-cell signature is **CONFIRMED** separately for each operand iff
+`P_j1 <= 1.01`, exactly one of 49 wet row faces exceeds one percent, and its
+row-normalized maximum is `>=0.20`. It is **REFUTED** iff `P_j1 >= 2.0`, at
+least two row faces exceed one percent, or the normalized maximum is
+`<=0.01`; otherwise it is **UNRESOLVED**. Common upstream support is
+**CONFIRMED** iff direct/`F_slow` outlier Jaccard is `>=0.90`, **REFUTED** iff
+it is `<=0.10`, otherwise **UNRESOLVED**.
+
+The coastal-unmask hypothesis is **CONFIRMED** iff at least 90% of the
+full-plane non-roundoff residual support is in the exact coastal-unmask set
+and the `j=1` argmax itself is in that set. It is **REFUTED** iff at most 10%
+overlaps or the `j=1` argmax is not a coastal-unmask point; otherwise it is
+**UNRESOLVED**. `non-roundoff` means
+`abs(delta) > 128*eps*max(1, max(abs(NEMO)), max(abs(lego)))`, fixed before
+the run. The wet-only classification remains separate even if this source
+formula acts outside `umask`.
+
+Controls must plant a second argmax-sized residual on a previously
+non-outlying wet row face (forcing `P` above 1.9 and the one-percent count to
+increase), flip the coastal flag at the measured argmax (forcing the coastal
+classifier to reject), and perturb a copy of one support set at a known index
+(forcing Jaccard below its original value). Any control failure invalidates
+the localization.
+
 ## Candidate and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
@@ -111,12 +172,14 @@ or order, non-finite data, or failed entry identity invalidates every score.
 
 ## Frozen interpretation
 
-The offline source test **CONFIRMS algebraic source-operand equivalence** when,
-on both the domain and `j=1`, direct-increment normalized error is `<=0.05`,
-direct-increment correlation is `>=0.999`, and `F_slow` normalized error is
-`<=0.05`. Correlation was not registered as an `F_slow` gate. It **CONFIRMS a
-material source DIFF** when either end-wall normalized error is `>=0.25`.
-Values between are `PLAUSIBLE/UNRESOLVED`.
+The domain source test **CONFIRMS algebraic source-operand equivalence** when
+direct-increment normalized error is `<=0.05`, domain direct correlation is
+`>=0.999`, and `F_slow` normalized error is `<=0.05`. On `j=1`, Pearson
+correlation is **RETRACTED as a gate** because the NEMO row is effectively
+constant. Its replacement is the registered row-scale statistic above:
+direct and `F_slow` each match at max-absolute delta divided by absolute NEMO
+row mean `<=0.01`, and materially differ at `>=0.20`; values between are
+`UNRESOLVED`. The aggregate normalized errors remain descriptive only.
 
 These bars classify source operands only. They do not classify the response
 through the implicit solve or sea-surface ownership, and no post-hoc transfer
@@ -129,12 +192,24 @@ observables: the whole-domain first-eight ratio (2.89), the aggregate-wall
 first-sample share (0.852), and a last-half zonal-wall label. It is retracted.
 The exact primary number is now one coherent observable from
 `eta_flicker_decay.py`: `regions.all.ratio_lego_over_nemo.first8`, the ratio of
-the mean of the first eight per-sample area-weighted wet-domain RMS
-amplitudes. The companion is the same-window aggregate-wall locus,
+the mean of the first eight per-sample area-weighted wet-domain RMS amplitudes
+of the **2dt-alternating eta component**. The companion is the same-window aggregate-wall locus,
 `wall_share.legoESM.first8.wall`. The certified baseline values are
 2.886305221717904 and 0.48541937969116244; NEMO's same-window wall share is
 0.0686300413685866. The often-cited 0.8524656 is the first sample only and is
 context, not a gate.
+
+Round 2 pins the load-bearing clean explicit control to Git
+`4d00f81bb78caa29dd07ab6e3a4081e6d57a4bd2` and these committed artifacts:
+`wind_place_explicit.npz` SHA-256
+`2845a5c7166baad483f89ae91a1fb1c9b03971a6a63c4e41506615b2a632df5f`,
+log SHA-256
+`fc4841aea5a8107f8935ecdd7170957f31feda061f8d2f465f8360180de9046d`,
+and scorer JSON SHA-256
+`452c29a77b36b7da121be48b5b430c039945bcfdcb20e0f714a5dd27b583c9f6`.
+The log stamps `dirty_tracked_files=0`, fp64, bridged before-level, seasonal
+clock, and `surface_stress_implicit=False`. Its measured control ratio
+2.882400001277192 and wall share 0.4855027387838016 pass the frozen band.
 
 - **Control validity:** explicit-placement first-eight whole-domain ratio in
   `[2.60, 3.18]` and first-eight aggregate-wall share in `[0.38, 0.59]`.
@@ -199,3 +274,33 @@ The scorer SHA-256 must remain
 `13916d43f75586358eb4bedec603d023433c23bf61eaf77c320e012f4570568c`.
 Any missing or changed artifact is a STOP, not permission to re-extract from
 the incomplete directory or substitute daily output. No GPU arm runs here.
+
+## Round-2 GPU result and transient discriminator — preregistered STOP
+
+The clean implicit artifact at the same Git SHA measured ratio
+201.41187344917114 and wall share 0.055963889374377046. The original mechanical
+bars therefore return **UNRESOLVED**: amplitude fails CONFIRM while locus fails
+REFUTE. Its approximately eight-step decaying, diffuse launch anomaly is
+consistent with an explicit-consistent bridged state shocked by the implicit
+placement, but that interpretation is not yet a finding.
+
+The follow-up discards exactly 32 steps (four preregistered eight-step decay
+times) and scores samples 33--40 as the primary post-transient eight-sample
+window, with samples 33--160 as a companion. Both are the same area-weighted
+wet-domain RMS of the 2dt-alternating eta component and same-window aggregate
+wall share. Before scoring, extend `eta_flicker_decay.py` with a fail-closed
+`--first-sample 33` selector and a planted off-by-one control; do not slice an
+artifact by hand. Run both existing clean arms against the same certified
+NEMO artifact and require all original provenance/SHA gates.
+
+For the post-transient first eight samples, control validity is explicit ratio
+in `[2.30, 3.60]` and wall share in `[0.30, 0.65]`. **CONFIRMS equilibrium
+placement ownership** iff the implicit ratio is `<=1.25` and wall share
+`<=0.17`; **REFUTES** iff ratio is `>=2.30` and share `>=0.30`; otherwise
+**UNRESOLVED**. These bands are symmetric in requiring amplitude and locus.
+The 128-sample companion cannot override the primary classification. If the
+explicit control fails, or if the implicit amplitude at sample 33 remains
+more than 10 times the explicit amplitude, STOP as unresolved startup
+contamination and design an implicit-consistent restart; do not run a longer
+GPU arm under this registration. No GPU or post-transient scorer run is
+authorized in this sandbox round.
