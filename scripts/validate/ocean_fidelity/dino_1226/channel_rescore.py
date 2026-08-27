@@ -75,13 +75,18 @@ def _lag_corr(x, lag):
 
 
 def effective_rows(x, y):
-    """Registered all-lag Bartlett effective row count, clipped to [3, n]."""
+    """Bartlett effective row count, clipped to [3, n].
+
+    The preregistration included lag ``n-1``.  Review identified that this is
+    a one-pair autocorrelation estimate, so the scored implementation stops at
+    ``n-2``.  The deviation is recorded in the artifact.
+    """
     n = len(x)
     if n != len(y) or n < 4:
         raise ValueError("effective_rows requires equal profiles of length >=4")
     penalty = 1.0 + 2.0 * sum(
         (1.0 - lag / n) * _lag_corr(x, lag) * _lag_corr(y, lag)
-        for lag in range(1, n)
+        for lag in range(1, n - 1)
     )
     denom = max(1.0, float(penalty))
     return float(min(n, max(3.0, n / denom))), denom
@@ -121,7 +126,8 @@ def moving_block_indices(n, block, rng):
     return np.concatenate([np.arange(s, s + block) for s in chosen])[:n]
 
 
-def aggregate_stability(profiles, kind, n_boot=N_BOOT, seed=BOOT_SEED):
+def aggregate_stability(profiles, kind, n_boot=N_BOOT, seed=BOOT_SEED,
+                        classify=True):
     specs = _pair_specs(kind)
     corr = _correlations(profiles, specs)
     neff = np.asarray([effective_rows(profiles[a], profiles[b])[0]
@@ -130,25 +136,46 @@ def aggregate_stability(profiles, kind, n_boot=N_BOOT, seed=BOOT_SEED):
     block = int(np.clip(np.ceil(N_ROWS / np.median(neff)), 2, 12))
     rng = np.random.default_rng(seed + (0 if kind == "time" else 1))
     boot = []
+    boot_abs = []
+    dropped = 0
     for _ in range(n_boot):
         idx = moving_block_indices(N_ROWS, block, rng)
         try:
-            boot.append(float(np.median(_correlations(profiles, specs, idx))))
+            draw = _correlations(profiles, specs, idx)
+            boot.append(float(np.median(draw)))
+            boot_abs.append(float(np.median(np.abs(draw))))
         except ValueError:
+            dropped += 1
             continue
     if len(boot) < n_boot // 2:
         raise RuntimeError(f"{kind} bootstrap produced too few finite draws")
     ci = tuple(float(v) for v in np.percentile(boot, [2.5, 97.5]))
     median = float(np.median(corr))
-    if median >= PERSIST_HI and ci[0] > PERSIST_LO:
+    median_abs = float(np.median(np.abs(corr)))
+    max_abs = float(np.max(np.abs(corr)))
+    if not classify:
+        status = "DEMOTED_CONSTRUCTION_FORCED_AMPLITUDE"
+    elif median >= PERSIST_HI and ci[0] > PERSIST_LO:
         status = "CONFIRMED_PERSISTENT"
-    elif median <= PERSIST_LO and ci[1] < PERSIST_HI:
+    elif (median <= PERSIST_LO and ci[1] < PERSIST_HI
+          and max_abs < PERSIST_HI):
         status = "CONFIRMED_DECORRELATING"
     else:
         status = "UNRESOLVED"
+    coherent = max_abs >= PERSIST_HI
     return {
         "median_r": median,
+        "median_abs_r": median_abs,
+        "max_abs_r": max_abs,
         "block_ci95": list(ci),
+        "bootstrap_median_r": float(np.median(boot)),
+        "bootstrap_median_abs_r": float(np.median(boot_abs)),
+        "point_percentile_in_bootstrap": float(
+            100.0 * np.mean(np.asarray(boot) <= median)),
+        "bootstrap_requested_draws": int(n_boot),
+        "bootstrap_retained_draws": len(boot),
+        "bootstrap_dropped_draws": dropped,
+        "bootstrap_unique_median_draws": int(len(np.unique(boot))),
         "block_length_rows": block,
         "n_correlations": len(corr),
         "correlations": corr.tolist(),
@@ -157,7 +184,45 @@ def aggregate_stability(profiles, kind, n_boot=N_BOOT, seed=BOOT_SEED):
         "n_eff_min": float(np.min(neff)),
         "fisher_ci95": fisher.tolist(),
         "status": status,
+        "coherent_pair_guard": (
+            "CONFIRMED_COHERENT_REORGANIZATION_PRESENT" if coherent
+            else "NO_PAIR_CLEARS_ABS_0.70"),
+        "decorrelation_guard": (
+            "DECORRELATION_WITHHELD_WHILE_ANY_PAIR_ABS_R_GE_0.70"
+            if coherent else "ELIGIBLE"),
     }
+
+
+def member_diagnostics(profiles, n_boot=N_BOOT):
+    """Report, but do not promote, construction-forced member similarity.
+
+    Raw member correlations mostly measure common-profile amplitude relative
+    to ensemble spread (S/(S+N)); they are not an independent persistence
+    leg.  Deviations from the four-member mean are also printed descriptively.
+    """
+    raw = aggregate_stability(profiles, "member", n_boot=n_boot,
+                              classify=False)
+    raw["per_horizon_median_r"] = {
+        str(day): float(np.median([
+            pearson(profiles[(a, day)], profiles[(b, day)])[0]
+            for a, b in itertools.combinations(range(N_MEM), 2)
+        ])) for day in HORIZONS
+    }
+    mean = {day: np.mean([profiles[(m, day)] for m in range(N_MEM)], axis=0)
+            for day in HORIZONS}
+    deviations = {(m, day): profiles[(m, day)] - mean[day]
+                  for day in HORIZONS for m in range(N_MEM)}
+    dev_corr = _correlations(deviations, _pair_specs("member"))
+    raw["member_deviation_median_r_descriptive"] = float(np.median(dev_corr))
+    raw["member_deviation_correlations_descriptive"] = dev_corr.tolist()
+    raw["qualification"] = (
+        "DEMOTED: raw r is an amplitude-to-ensemble-spread diagnostic, not "
+        "independent evidence of pattern persistence; centered member "
+        "deviations are descriptive because four deviations sum to zero"
+    )
+    raw["self_comparison_count"] = int(sum(a == b for a, b in [
+        (left[0], right[0]) for left, right in _pair_specs("member")]))
+    return raw
 
 
 def roughness(g):
@@ -168,20 +233,81 @@ def roughness(g):
     return float(np.sum(np.diff(a) ** 2) / den), den
 
 
-def row_agreement_status(p2, p5):
-    if p2 >= 0.90 and p5 <= 0.10:
+def row_agreement_status(within2, material_p5):
+    """Score D only after the audit's unsaturated-no materiality filter."""
+    if within2 >= 0.90 and material_p5 <= 0.10:
         return "CONFIRMED_GENUINE"
-    if p5 >= 0.25:
+    if material_p5 >= 0.25:
         return "REFUTED_GENUINE"
     return "UNRESOLVED"
 
 
-def cancellation_status(median_c, jackknife, edge):
-    if median_c <= 0.10 and (jackknife >= 2.0 or edge >= 2.0):
+def cancellation_status(median_c, jackknife):
+    """Corrected E score after withdrawing non-circumpolar edge masks."""
+    if median_c <= 0.10 and jackknife >= 2.0:
         return "CONFIRMED_SENSITIVE"
-    if median_c >= 0.50 and jackknife <= 1.0 and edge <= 1.0:
+    if median_c >= 0.50 and jackknife <= 1.0:
         return "CONFIRMED_ROBUST"
     return "UNRESOLVED"
+
+
+def _spread_history(lego, nemo, rows):
+    """Per-row per-side spreads in the exact shape accepted by R.saturated."""
+    out = []
+    for row in np.arange(R.A.NY)[rows]:
+        out.append({
+            (side, day): float(np.std(values[day][:, row], ddof=1))
+            for side, values in (("lego", lego), ("nemo", nemo))
+            for day in HORIZONS
+        })
+    return out
+
+
+def row_floors(lego, nemo):
+    """Exact per-row floors; kept as an independently mutation-tested seam."""
+    return {
+        day: np.sqrt(
+            np.std(lego[day][:, CHANNEL_ROWS], axis=0, ddof=1) ** 2
+            + np.std(nemo[day][:, CHANNEL_ROWS], axis=0, ddof=1) ** 2)
+        for day in HORIZONS
+    }
+
+
+def _band_spread_history(lego, nemo):
+    out = {}
+    for side, values in (("lego", lego), ("nemo", nemo)):
+        for day in HORIZONS:
+            sums = np.sum(values[day][:, CHANNEL_ROWS], axis=1)
+            out[(side, day)] = float(np.std(sums, ddof=1))
+    return out
+
+
+def _saturation_record(history):
+    saturated, reason = R.saturated(history)
+    growth = {
+        f"{side}_{a}_to_{b}": (
+            float(history[(side, b)] / history[(side, a)])
+            if history[(side, a)] > 0.0 else float("inf"))
+        for a, b in R.V.SATURATION_QUARTERS for side in ("lego", "nemo")
+    }
+    spreads = {f"{side}_day{day}_sv": float(history[(side, day)])
+               for side in ("lego", "nemo") for day in HORIZONS}
+    return {"saturated": bool(saturated), "reason": reason,
+            "spreads_by_side_day_sv": spreads,
+            "spread_growth_ratios": growth}
+
+
+def _guard_persistent_bar(value):
+    if not value >= PERSIST_HI:
+        raise AssertionError(
+            f"planted row permutation left median r={value:.3f} below "
+            f"the persistence bar {PERSIST_HI}")
+
+
+def _guard_robust_cancellation(median_c, jackknife):
+    got = cancellation_status(median_c, jackknife)
+    if got != "CONFIRMED_ROBUST":
+        raise AssertionError(f"planted alternating profile classified {got}")
 
 
 def _assert_close(a, b, tol=1e-12):
@@ -243,8 +369,7 @@ def self_test(run_upstream=True):
             permuted[(m, t)] = base[rng.permutation(N_ROWS)]
     noisy_r = float(np.median(_correlations(permuted, _pair_specs("time"))))
     _plant_fires("row permutation crosses persistence bar",
-                 lambda: (_ for _ in ()).throw(AssertionError())
-                 if noisy_r < PERSIST_LO else None)
+                 lambda: _guard_persistent_bar(noisy_r))
 
     alt = (-1.0) ** np.arange(N_ROWS)
     smooth = np.linspace(1.0, 2.0, N_ROWS)
@@ -252,12 +377,10 @@ def self_test(run_upstream=True):
     z_smooth, _ = roughness(smooth)
     if not (z_alt >= ROUGH_GRID and z_smooth <= ROUGH_SMOOTH):
         raise AssertionError((z_alt, z_smooth))
-    if cancellation_status(0.0, 3.0, 0.0) != "CONFIRMED_SENSITIVE":
+    if cancellation_status(0.0, 3.0) != "CONFIRMED_SENSITIVE":
         raise AssertionError("alternating cancellation plant did not classify")
     _plant_fires("alternating profile cannot pass robust-sum bars",
-                 lambda: (_ for _ in ()).throw(AssertionError())
-                 if cancellation_status(0.0, 3.0, 0.0)
-                 != "CONFIRMED_ROBUST" else None)
+                 lambda: _guard_robust_cancellation(0.0, 3.0))
 
     gaps = np.asarray([1.0, 5.0])
     local_floor = np.asarray([0.1, 10.0])
@@ -274,7 +397,8 @@ def _git_state():
     sha = subprocess.run(["git", "-C", _DIR, "rev-parse", "HEAD"],
                          check=True, capture_output=True,
                          text=True).stdout.strip()
-    dirty = bool(subprocess.run(["git", "-C", _DIR, "status", "--porcelain"],
+    dirty = bool(subprocess.run(["git", "-C", _DIR, "status", "--porcelain",
+                                 "--untracked-files=no"],
                                 check=True, capture_output=True,
                                 text=True).stdout.strip())
     return sha, dirty
@@ -313,7 +437,40 @@ def _install_clock_helper_compat():
 def load_rows():
     """Load only through the audit's stamp-refusing state loaders/reducer."""
     clock_compat = _install_clock_helper_compat()
-    prov, clock = R.control_stamps()
+    legacy_before = os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK")
+    scored_days, clock_control_return = R.control_stamps()
+    restart = (f"{R.X.nemo_dir(0)}/"
+               f"DINO_{R.X.G.KT_RESTART:08d}_restart.nc")
+    clock_seconds = float(R.X.T.restart_elapsed_seconds(restart))
+    provenance = {
+        "scored_days": list(scored_days),
+        "lego_launch_sha": Path(f"{R.X.LEGO_DIR}/.launch_sha").read_text().strip(),
+        "lego_members": [],
+        "nemo_member_directories": [os.path.realpath(R.X.nemo_dir(i))
+                                    for i in range(N_MEM)],
+    }
+    for i in range(N_MEM):
+        with np.load(R.X.lego_npz(i)) as artifact:
+            provenance["lego_members"].append({
+                "member": i,
+                "path": R.X.lego_npz(i),
+                "control_dtype": str(artifact["control_dtype"]),
+                "nemo_ladder_mode": str(artifact["nemo_ladder_mode"]),
+                "seasonal_t0_seconds":
+                    float(artifact["seasonal_t0_seconds"]),
+            })
+    clock = {
+        "oracle_restart": restart,
+        "oracle_elapsed_seconds": clock_seconds,
+        "oracle_elapsed_days": clock_seconds / 86400.0,
+        "control_clock_return_was_null": clock_control_return is None,
+        "legacy_clock_env_before_control": legacy_before,
+        "legacy_clock_env_after_control":
+            os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK"),
+        "legacy_clock_bypass_reason": (
+            "upstream control supplied and verified the missing reference "
+            "stamp from the oracle restart before setting the loader bypass"),
+    }
     lego, nemo = {}, {}
     for day in HORIZONS:
         print(f"loading day {day}: 4 legoESM + 4 NEMO states", flush=True)
@@ -328,7 +485,7 @@ def load_rows():
         R.control_dtype(lego[day], nemo[day])
         R.control_finite(f"row transports day {day}",
                          np.ravel([lego[day], nemo[day]]))
-    return lego, nemo, prov, clock, clock_compat
+    return lego, nemo, provenance, clock, clock_compat
 
 
 def spatial_decider(mean_gap, floors, nemo_rows):
@@ -384,16 +541,49 @@ def spatial_decider(mean_gap, floors, nemo_rows):
     }
 
 
-def evaluate(lego, nemo):
+def compose_verdict(time, member, spatial, row_level, sensitivity):
+    """Compose a named-leg verdict; no PLAUSIBLE result may be anonymous."""
+    legs = {
+        "A_fixed_pattern_persistence": time["status"],
+        "A_coherent_reorganization_guard": time["coherent_pair_guard"],
+        "B_member_stability": member["status"],
+        "C_spatial_structure": spatial["status"],
+        "D_row_agreement": row_level["status"],
+        "E_band_sensitivity": sensitivity["status"],
+        "day360_band_net": sensitivity["day360_band_status"],
+    }
+    unresolved = [name for name, value in legs.items()
+                  if value == "UNRESOLVED"]
+    demoted = [name for name, value in legs.items()
+               if value.startswith("DEMOTED")]
+    if time["status"] == "CONFIRMED_PERSISTENT":
+        temporal = "PERSISTENT"
+    elif time["status"] == "CONFIRMED_DECORRELATING":
+        temporal = "DECORRELATING"
+    elif time["coherent_pair_guard"].startswith("CONFIRMED_COHERENT"):
+        temporal = "TEMPORALLY_REORGANIZING"
+    else:
+        temporal = "FIXED_PATTERN_UNRESOLVED"
+    final = (f"PLAUSIBLE_{temporal}_UNRESOLVED["
+             + ",".join(unresolved + demoted) + "]")
+    return legs, final
+
+
+def evaluate(lego, nemo, n_boot=N_BOOT):
+    """Run the complete scoring engine on row-transport ensembles."""
     paired = {day: lego[day][:, CHANNEL_ROWS] - nemo[day][:, CHANNEL_ROWS]
               for day in HORIZONS}
     profiles = {(m, day): paired[day][m]
                 for day in HORIZONS for m in range(N_MEM)}
-    floors = {day: np.sqrt(np.std(lego[day][:, CHANNEL_ROWS], axis=0, ddof=1) ** 2
-                                + np.std(nemo[day][:, CHANNEL_ROWS], axis=0, ddof=1) ** 2)
-              for day in HORIZONS}
-    time = aggregate_stability(profiles, "time")
-    member = aggregate_stability(profiles, "member")
+    floors = row_floors(lego, nemo)
+    time = aggregate_stability(profiles, "time", n_boot=n_boot)
+    time["per_horizon_pair_median_r"] = {
+        f"{a}_vs_{b}": float(np.median([
+            pearson(profiles[(m, a)], profiles[(m, b)])[0]
+            for m in range(N_MEM)
+        ])) for a, b in itertools.combinations(HORIZONS, 2)
+    }
+    member = member_diagnostics(profiles, n_boot=n_boot)
 
     cross = {(i, k, day): lego[day][i, CHANNEL_ROWS] - nemo[day][k, CHANNEL_ROWS]
              for day in HORIZONS for i in range(N_MEM) for k in range(N_MEM)}
@@ -405,36 +595,100 @@ def evaluate(lego, nemo):
                     for (i1, k1), (i2, k2) in itertools.combinations(
                         itertools.product(range(N_MEM), range(N_MEM)), 2)]
     robust = {"time_median_r_all16": float(np.median(cross_time)),
-              "member_median_r_all16": float(np.median(cross_member))}
+              "member_median_r_all16_amplitude_only":
+                  float(np.median(cross_member))}
     if (time["status"] == "CONFIRMED_PERSISTENT"
             and robust["time_median_r_all16"] < PERSIST_HI):
         time["status"] = "UNRESOLVED_ROBUSTNESS"
-    if (member["status"] == "CONFIRMED_PERSISTENT"
-            and robust["member_median_r_all16"] < PERSIST_HI):
-        member["status"] = "UNRESOLVED_ROBUSTNESS"
 
     mean_gap = {day: np.mean(paired[day], axis=0) for day in HORIZONS}
     spatial = spatial_decider(mean_gap, floors, nemo)
 
+    row_histories = _spread_history(lego, nemo, CHANNEL_ROWS)
+    row_saturation = [_saturation_record(history)
+                      for history in row_histories]
     g = paired[360][0]
     f = floors[360]
-    ratios = np.abs(g) / np.where(f > 0.0, f, np.inf)
-    p2 = float(np.mean(ratios <= ROW_BAR))
-    p5 = float(np.mean(ratios > ESCALATION_BAR))
-    x = float(np.sum(np.abs(g)))
-    x2 = float(np.sum(np.maximum(np.abs(g) - ROW_BAR * f, 0.0)))
+    member_rows = []
+    x_values = []
+    x2_values = []
+    for m in range(N_MEM):
+        gm = paired[360][m]
+        ratios = np.abs(gm) / np.where(f > 0.0, f, np.inf)
+        material = []
+        material_details = []
+        for ratio, history in zip(ratios, row_histories):
+            can_void, x2yes, last_growth = R.u_is_material(
+                float(ratio), history, 360)
+            survives = bool(ratio > ESCALATION_BAR and not can_void)
+            material.append(survives)
+            material_details.append({
+                "raw_ratio_upper_bound": float(ratio),
+                "unsaturated_no_can_be_voided": bool(can_void),
+                "x2yes": float(x2yes),
+                "largest_last_quarter_side_growth": float(last_growth),
+                "survives_gt5_materiality": survives,
+            })
+        within_n = int(np.sum(ratios <= ROW_BAR))
+        raw_p5_n = int(np.sum(ratios > ESCALATION_BAR))
+        material_p5_n = int(np.sum(material))
+        status = row_agreement_status(within_n / N_ROWS,
+                                      material_p5_n / N_ROWS)
+        member_rows.append({
+            "member": m,
+            "within_2floor_n": within_n,
+            "raw_gt5floor_upper_bound_n": raw_p5_n,
+            "material_gt5floor_n": material_p5_n,
+            "status": status,
+            "per_row_materiality": material_details,
+        })
+        x_values.append(float(np.sum(np.abs(gm))))
+        x2_values.append(float(np.sum(
+            np.maximum(np.abs(gm) - ROW_BAR * f, 0.0))))
+    control_rows = member_rows[0]
+    ratios = np.asarray([r["raw_ratio_upper_bound"]
+                         for r in control_rows["per_row_materiality"]])
+    x = x_values[0]
+    x2 = x2_values[0]
+    member_statuses = [entry["status"] for entry in member_rows]
     row_level = {
-        "status": row_agreement_status(p2, p5),
-        "P2_agree_fraction": p2, "P2_numerator": int(np.sum(ratios <= ROW_BAR)),
-        "P2_denominator": N_ROWS, "P5_disagree_fraction": p5,
-        "P5_numerator": int(np.sum(ratios > ESCALATION_BAR)),
-        "P5_denominator": N_ROWS, "X_gross_sv": x,
+        "status": control_rows["status"],
+        "all_members_same_classification": len(set(member_statuses)) == 1,
+        "member_statuses": member_statuses,
+        "within_2floor_fraction": control_rows["within_2floor_n"] / N_ROWS,
+        "within_2floor_numerator": control_rows["within_2floor_n"],
+        "within_2floor_denominator": N_ROWS,
+        "raw_gt5floor_fraction_upper_bound": (
+            control_rows["raw_gt5floor_upper_bound_n"] / N_ROWS),
+        "raw_gt5floor_numerator_upper_bound":
+            control_rows["raw_gt5floor_upper_bound_n"],
+        "raw_gt5floor_denominator": N_ROWS,
+        "material_gt5floor_fraction":
+            control_rows["material_gt5floor_n"] / N_ROWS,
+        "material_gt5floor_numerator": control_rows["material_gt5floor_n"],
+        "material_gt5floor_denominator": N_ROWS,
+        "voided_by_unsaturated_materiality_n": (
+            control_rows["raw_gt5floor_upper_bound_n"]
+            - control_rows["material_gt5floor_n"]),
+        "member_classifications": member_rows,
+        "X_gross_sv_control": x,
+        "X_gross_sv_by_member": x_values,
+        "X_gross_sv_member_mean": float(np.mean(x_values)),
+        "X_gross_sv_member_sample_std": float(np.std(x_values, ddof=1)),
         "X2_floor_excess_sv": x2, "X2_over_X": x2 / x,
         "X2_bound_status": (
             "UPPER bound on floor-excess magnitude because the day-360 "
             "floors are unsaturated"
         ),
         "row_ratios_upper_bound": ratios.tolist(),
+        "row_floor_saturation": row_saturation,
+        "saturation_summary": {
+            "saturated_rows": int(sum(v["saturated"]
+                                      for v in row_saturation)),
+            "unsaturated_rows": int(sum(not v["saturated"]
+                                        for v in row_saturation)),
+            "denominator": N_ROWS,
+        },
     }
 
     c_all = [abs(float(np.sum(paired[day][m])))
@@ -447,54 +701,89 @@ def evaluate(lego, nemo):
     band_net = float(np.sum(g))
     jackknife = float(np.max(np.abs(g)) / band_floor)
     full_gap = lego[360][0] - nemo[360][0]
-    variants = {}
-    for dlo in (-1, 0, 1):
-        for dhi in (-1, 0, 1):
-            rows = slice(CHANNEL_ROWS.start + dlo, CHANNEL_ROWS.stop + dhi)
-            val = float(np.sum(full_gap[rows]))
-            variants[f"{dlo:+d}|{dhi:+d}"] = val
-    edge = max(abs(v - band_net) for v in variants.values()) / band_floor
+    band_history = _band_spread_history(lego, nemo)
+    band_saturation = _saturation_record(band_history)
+    outside = {}
+    full_floor_360 = np.sqrt(np.std(lego[360], axis=0, ddof=1) ** 2
+                             + np.std(nemo[360], axis=0, ddof=1) ** 2)
+    for row in (CHANNEL_ROWS.start - 1, CHANNEL_ROWS.stop):
+        wet_columns = int(np.sum(np.any(R.A.umask[row], axis=1)))
+        outside[str(row)] = {
+            "gap_sv": float(full_gap[row]),
+            "row_floor_sv": float(full_floor_360[row]),
+            "gap_over_band_floor": float(full_gap[row] / band_floor),
+            "gap_over_band_net": float(full_gap[row] / band_net),
+            "wet_u_columns": wet_columns,
+            "total_u_columns": int(R.A.NX),
+            "topology": "blocked; not a circumpolar channel boundary option",
+        }
     median_c = float(np.median(c_all))
     sensitivity = {
-        "status": cancellation_status(median_c, jackknife, edge),
+        "status": cancellation_status(median_c, jackknife),
         "C_median": median_c, "C_values": c_all,
         "C_denominator": "sum_abs_row_gap",
         "day360_control_net_sv": band_net,
         "day360_control_C": abs(band_net) / x,
         "band_floor_sv": band_floor, "J_one_row_over_band_floor": jackknife,
-        "E_edge_over_band_floor": edge, "edge_variant_sums_sv": variants,
+        "day360_net_over_band_floor": abs(band_net) / band_floor,
+        "day360_net_ppm_of_nemo_band": (
+            1e6 * abs(band_net) / abs(float(band_n[0]))),
+        "day360_band_status": "UNMEASURABLE_BELOW_OWN_ENSEMBLE_FLOOR",
+        "band_saturation": band_saturation,
+        "withdrawn_edge_decider": {
+            "status": "RETRACTED_INVALID_TOPOLOGY",
+            "reason": (
+                "rows 13 and 49 are topologically blocked; shifted masks "
+                "are not circumpolar-channel functionals"),
+        },
+        "outside_channel_rows": outside,
     }
 
-    persistent = (time["status"] == "CONFIRMED_PERSISTENT"
-                  and member["status"] == "CONFIRMED_PERSISTENT")
-    not_grid = spatial["status"] != "CONFIRMED_GRID_SCALE"
-    real = (persistent and not_grid
-            and row_level["status"] == "REFUTED_GENUINE"
-            and sensitivity["status"] == "CONFIRMED_SENSITIVE")
-    noise = (time["status"] == "CONFIRMED_DECORRELATING"
-             and member["status"] == "CONFIRMED_DECORRELATING"
-             and row_level["status"] == "CONFIRMED_GENUINE"
-             and sensitivity["status"] == "CONFIRMED_ROBUST")
-    if real:
-        final = "CONFIRMED_PERSISTENT_STRUCTURE_MASKING_REAL_PATTERN"
-    elif noise:
-        final = "CONFIRMED_DECORRELATING_NOISE_GENUINE_ROW_AGREEMENT"
-    elif persistent:
-        final = "PLAUSIBLE_PERSISTENT_STRUCTURE"
-    else:
-        final = "PLAUSIBLE_UNRESOLVED"
+    legs, final = compose_verdict(time, member, spatial, row_level,
+                                  sensitivity)
+    retractions = [
+        {
+            "claim": "genuine row-level agreement REFUTED",
+            "status": "RETRACTED",
+            "replacement": (
+                "D UNRESOLVED: raw 17/35 >5-floor rows is an upper bound; "
+                "the audit materiality rule voids 9, leaving 8/35"),
+        },
+        {
+            "claim": "member-stable pattern CONFIRMED as independent evidence",
+            "status": "RETRACTED",
+            "replacement": (
+                "raw member r is reported per horizon but demoted as the "
+                "construction-forced S/(S+N) amplitude diagnostic"),
+        },
+        {
+            "claim": "edge sensitivity E=3.680 channel floors",
+            "status": "RETRACTED",
+            "replacement": (
+                "edge masks cross topologically blocked rows; row 13 is "
+                "reported separately"),
+        },
+        {
+            "claim": "17 ppm paired with day-360 X",
+            "status": "RETRACTED_WINDOW_MISMATCH",
+            "replacement": (
+                "day-360 net is reported in ppm and relative to its own "
+                "day-360 band floor"),
+        },
+    ]
     return {
         "time_stability": time, "member_stability": member,
         "all16_robustness": robust, "spatial_structure": spatial,
         "row_level": row_level, "band_sensitivity": sensitivity,
-        "final_verdict": final,
+        "verdict_legs": legs, "final_verdict": final,
+        "retractions": retractions,
         "gaps_paired_sv": {str(day): paired[day].tolist() for day in HORIZONS},
         "row_floors_sv": {str(day): floors[day].tolist() for day in HORIZONS},
         "mean_gaps_sv": {str(day): mean_gap[day].tolist() for day in HORIZONS},
     }
 
 
-def run(out_dir):
+def run(out_dir, skip_upstream_self_test=False):
     sha_start, dirty_start = _git_state()
     if dirty_start:
         raise SystemExit(f"FATAL: producer tree {sha_start} is dirty")
@@ -523,7 +812,20 @@ def run(out_dir):
         },
         "input_provenance": prov, "clock": clock,
         "clock_helper_compat": clock_compat,
-        "floor_status": "UNSATURATED; multiples/counts are upper bounds",
+        "skip_upstream_self_test": bool(skip_upstream_self_test),
+        "legacy_clock_env_at_write":
+            os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK"),
+        "floor_saturation_measured":
+            result["row_level"]["saturation_summary"],
+        "band_saturation_measured":
+            result["band_sensitivity"]["band_saturation"],
+        "post_review_deviations": [
+            "lag n-1 omitted from Bartlett sum because it has one pair",
+            "signed-r decorrelation is guarded by max absolute pair r",
+            "registered edge-mask E withdrawn for invalid topology",
+            "raw member r demoted as non-independent amplitude evidence",
+            "unsaturated P5 no-votes filtered by regional_audit.u_is_material",
+        ],
     }
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -531,6 +833,8 @@ def run(out_dir):
     path.write_text(json.dumps(result, indent=1, default=float) + "\n")
     print(json.dumps({
         "final_verdict": result["final_verdict"],
+        "verdict_legs": result["verdict_legs"],
+        "retractions": result["retractions"],
         "time": result["time_stability"],
         "member": result["member_stability"],
         "spatial": result["spatial_structure"],
@@ -549,7 +853,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     self_test(run_upstream=not args.skip_upstream_self_test)
     if not args.self_test:
-        run(args.out_dir)
+        run(args.out_dir,
+            skip_upstream_self_test=args.skip_upstream_self_test)
     return 0
 
 

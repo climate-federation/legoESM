@@ -87,9 +87,9 @@ def test_roughness_and_cancellation_plants_fire():
     smooth = np.linspace(1.0, 2.0, C.N_ROWS)
     assert C.roughness(alternating)[0] >= C.ROUGH_GRID
     assert C.roughness(smooth)[0] <= C.ROUGH_SMOOTH
-    assert C.cancellation_status(0.0, 3.0, 0.0) == "CONFIRMED_SENSITIVE"
-    assert C.cancellation_status(0.8, 0.5, 0.5) == "CONFIRMED_ROBUST"
-    assert C.cancellation_status(0.0, 3.0, 0.0) != "CONFIRMED_ROBUST"
+    assert C.cancellation_status(0.0, 3.0) == "CONFIRMED_SENSITIVE"
+    assert C.cancellation_status(0.8, 0.5) == "CONFIRMED_ROBUST"
+    assert C.cancellation_status(0.0, 3.0) != "CONFIRMED_ROBUST"
 
 
 def test_row_specific_floor_plant_fires():
@@ -106,7 +106,7 @@ def test_final_classifiers_have_indeterminate_middle():
     assert C.row_agreement_status(0.95, 0.05) == "CONFIRMED_GENUINE"
     assert C.row_agreement_status(0.40, 0.30) == "REFUTED_GENUINE"
     assert C.row_agreement_status(0.80, 0.15) == "UNRESOLVED"
-    assert C.cancellation_status(0.25, 1.5, 1.5) == "UNRESOLVED"
+    assert C.cancellation_status(0.25, 1.5) == "UNRESOLVED"
 
 
 def test_clock_helper_compat_aliases_rename_without_wrapping():
@@ -123,3 +123,125 @@ def test_clock_helper_compat_aliases_rename_without_wrapping():
             delattr(C.R.X.T, "restart_elapsed_seconds")
         else:
             C.R.X.T.restart_elapsed_seconds = original_public
+
+
+def _synthetic_ensemble(pattern_removed=False):
+    """Four-member/four-horizon row ensembles with an analytic answer."""
+    rng = np.random.default_rng(1455)
+    y = np.linspace(-1.0, 1.0, C.R.A.NY)
+    channel_y = np.linspace(-1.0, 1.0, C.N_ROWS)
+    smooth = 0.012 * (0.3 + np.sin(np.pi * channel_y))
+    hetero = np.linspace(0.15, 1.8, C.N_ROWS)
+    independent = {
+        day: rng.normal(0.0, 0.012, C.N_ROWS) for day in C.HORIZONS
+    }
+    lego, nemo = {}, {}
+    member_coeff = np.asarray([-1.5, -0.5, 0.5, 1.5])
+    for it, day in enumerate(C.HORIZONS):
+        lego[day] = np.empty((C.N_MEM, C.R.A.NY), dtype=np.float64)
+        nemo[day] = np.empty_like(lego[day])
+        signal = independent[day] if pattern_removed else smooth * (1 + 0.04 * it)
+        for m, coeff in enumerate(member_coeff):
+            oracle = 34.0 + 0.2 * np.sin(3.0 * y) + coeff * 2e-5 * (1 + y)
+            member_shape = coeff * 2e-4 * hetero * (
+                1.0 + 0.15 * np.cos((m + 1) * np.pi * channel_y))
+            gap = signal + member_shape
+            nemo[day][m] = oracle
+            lego[day][m] = oracle
+            lego[day][m, C.CHANNEL_ROWS] += gap
+    return lego, nemo
+
+
+def _assert_engine_oracle(known, removed, known_data):
+    assert known["final_verdict"] == (
+        "PLAUSIBLE_PERSISTENT_UNRESOLVED["
+        "E_band_sensitivity,B_member_stability]")
+    assert removed["final_verdict"] == (
+        "PLAUSIBLE_DECORRELATING_UNRESOLVED["
+        "C_spatial_structure,B_member_stability]")
+    assert removed["time_stability"]["status"] != "CONFIRMED_PERSISTENT"  # M12
+    assert removed["spatial_structure"]["status"] != (                    # M14
+        "CONFIRMED_PHYSICAL_STRUCTURE")
+
+    expected_floor = np.sqrt(
+        np.std(known_data[0][360][:, C.CHANNEL_ROWS],
+               axis=0, ddof=1) ** 2
+        + np.std(known_data[1][360][:, C.CHANNEL_ROWS],
+                 axis=0, ddof=1) ** 2)
+    np.testing.assert_allclose(known["row_floors_sv"]["360"], expected_floor)
+    assert np.ptp(expected_floor) > 1e-4                              # M8
+    assert known["time_stability"]["bootstrap_unique_median_draws"] > 5  # M11
+    assert known["member_stability"]["self_comparison_count"] == 0       # M16
+    assert known["member_stability"]["per_horizon_median_r"]["360"] < 1.0
+
+
+def test_engine_known_pattern_and_pattern_removed_twin_kill_mutants():
+    """End-to-end oracle for formerly surviving M8/M11/M12/M14/M16."""
+    known_data = _synthetic_ensemble(False)
+    known = C.evaluate(*known_data, n_boot=400)
+    removed = C.evaluate(*_synthetic_ensemble(True), n_boot=400)
+    _assert_engine_oracle(known, removed, known_data)
+
+
+@pytest.mark.parametrize("mutation", ["M8", "M11", "M12", "M14", "M16"])
+def test_formerly_surviving_engine_mutations_now_go_red(monkeypatch, mutation):
+    """Inject each reviewed mutation and prove the end-to-end oracle rejects it."""
+    original_floor = C.row_floors
+    original_spatial = C.spatial_decider
+    original_pairs = C._pair_specs
+    original_compose = C.compose_verdict
+
+    if mutation == "M8":
+        def global_floor(lego, nemo):
+            local = original_floor(lego, nemo)
+            return {day: np.full(C.N_ROWS, np.mean(value))
+                    for day, value in local.items()}
+        monkeypatch.setattr(C, "row_floors", global_floor)
+    elif mutation == "M11":
+        monkeypatch.setattr(
+            C, "moving_block_indices",
+            lambda n, block, rng: np.arange(n))
+    elif mutation == "M12":
+        def forced_persistent(time, member, spatial, row_level, sensitivity):
+            mutated_time = dict(time)
+            mutated_time["status"] = "CONFIRMED_PERSISTENT"
+            return original_compose(mutated_time, member, spatial, row_level,
+                                    sensitivity)
+        monkeypatch.setattr(C, "compose_verdict", forced_persistent)
+    elif mutation == "M14":
+        def forced_physical(*args, **kwargs):
+            result = original_spatial(*args, **kwargs)
+            result["status"] = "CONFIRMED_PHYSICAL_STRUCTURE"
+            return result
+        monkeypatch.setattr(C, "spatial_decider", forced_physical)
+    elif mutation == "M16":
+        def self_pairs(kind):
+            if kind == "member":
+                return [((m, day), (m, day)) for day in C.HORIZONS
+                        for m in range(C.N_MEM)]
+            return original_pairs(kind)
+        monkeypatch.setattr(C, "_pair_specs", self_pairs)
+
+    known_data = _synthetic_ensemble(False)
+    known = C.evaluate(*known_data, n_boot=200)
+    removed = C.evaluate(*_synthetic_ensemble(True), n_boot=200)
+    with pytest.raises(AssertionError):
+        _assert_engine_oracle(known, removed, known_data)
+
+
+def test_signed_r_decorrelation_guard_fires_on_coherent_sign_reversal():
+    base = np.sin(np.linspace(0.0, 2.0 * np.pi, C.N_ROWS))
+    profiles = {}
+    for m in range(C.N_MEM):
+        for it, day in enumerate(C.HORIZONS):
+            profiles[(m, day)] = (-base if it == 3 else base) + 0.001 * m
+    scored = C.aggregate_stability(profiles, "time", n_boot=200)
+    assert scored["max_abs_r"] >= C.PERSIST_HI
+    assert scored["status"] != "CONFIRMED_DECORRELATING"
+    assert "WITHHELD" in scored["decorrelation_guard"]
+
+
+def test_upstream_sha_pin_rejects_mutated_reducer(monkeypatch):
+    monkeypatch.setattr(C, "UPSTREAM_REGIONAL_SHA256", "0" * 64)
+    with pytest.raises(SystemExit, match="exact reducer reuse is not proven"):
+        C._verify_upstream()
