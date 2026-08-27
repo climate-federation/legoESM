@@ -107,3 +107,19 @@ def test_final_classifiers_have_indeterminate_middle():
     assert C.row_agreement_status(0.40, 0.30) == "REFUTED_GENUINE"
     assert C.row_agreement_status(0.80, 0.15) == "UNRESOLVED"
     assert C.cancellation_status(0.25, 1.5, 1.5) == "UNRESOLVED"
+
+
+def test_clock_helper_compat_aliases_rename_without_wrapping():
+    original_public = getattr(C.R.X.T, "restart_elapsed_seconds", None)
+    private = C.R.X.T._restart_elapsed_seconds
+    if original_public is not None:
+        delattr(C.R.X.T, "restart_elapsed_seconds")
+    try:
+        label = C._install_clock_helper_compat()
+        assert "compat alias" in label
+        assert C.R.X.T.restart_elapsed_seconds is private
+    finally:
+        if original_public is None:
+            delattr(C.R.X.T, "restart_elapsed_seconds")
+        else:
+            C.R.X.T.restart_elapsed_seconds = original_public

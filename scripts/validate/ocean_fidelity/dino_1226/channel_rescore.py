@@ -290,8 +290,29 @@ def _verify_upstream():
     return got
 
 
+def _install_clock_helper_compat():
+    """Bridge the post-audit public-to-private rename, with no logic change.
+
+    ``git diff fidelity/dino-regional-audit -- kamm_twin_90d.py`` shows the
+    helper body unchanged: only ``restart_elapsed_seconds`` became
+    ``_restart_elapsed_seconds`` and its two in-file call sites moved with it.
+    The imported audit still calls the former public spelling.
+    """
+    twin = R.X.T
+    if hasattr(twin, "restart_elapsed_seconds"):
+        return "native restart_elapsed_seconds"
+    helper = getattr(twin, "_restart_elapsed_seconds", None)
+    if helper is None:
+        raise SystemExit(
+            "FATAL: neither clock helper spelling exists; provenance cannot "
+            "be checked")
+    twin.restart_elapsed_seconds = helper
+    return "compat alias restart_elapsed_seconds -> _restart_elapsed_seconds"
+
+
 def load_rows():
     """Load only through the audit's stamp-refusing state loaders/reducer."""
+    clock_compat = _install_clock_helper_compat()
     prov, clock = R.control_stamps()
     lego, nemo = {}, {}
     for day in HORIZONS:
@@ -307,7 +328,7 @@ def load_rows():
         R.control_dtype(lego[day], nemo[day])
         R.control_finite(f"row transports day {day}",
                          np.ravel([lego[day], nemo[day]]))
-    return lego, nemo, prov, clock
+    return lego, nemo, prov, clock, clock_compat
 
 
 def spatial_decider(mean_gap, floors, nemo_rows):
@@ -474,7 +495,7 @@ def run(out_dir):
     if dirty_start:
         raise SystemExit(f"FATAL: producer tree {sha_start} is dirty")
     upstream_hash = _verify_upstream()
-    lego, nemo, prov, clock = load_rows()
+    lego, nemo, prov, clock, clock_compat = load_rows()
     result = evaluate(lego, nemo)
     sha_end, dirty_end = _git_state()
     if (sha_end, dirty_end) != (sha_start, dirty_start):
@@ -497,6 +518,7 @@ def run(out_dir):
             "N_BOOT": N_BOOT, "BOOT_SEED": BOOT_SEED,
         },
         "input_provenance": prov, "clock": clock,
+        "clock_helper_compat": clock_compat,
         "floor_status": "UNSATURATED; multiples/counts are upper bounds",
     }
     out = Path(out_dir)
