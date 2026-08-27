@@ -672,7 +672,16 @@ def main() -> int:
     rn2_nemo = bac._load_interior(dl.dump_path("tke_dump_rn2.bin"), jpi - 2*hls, jpj - 2*hls)
     sh2_nemo = bac._load_interior(dl.dump_path("tke_dump_sh2.bin"), jpi - 2*hls, jpj - 2*hls)
     dissl_nemo = bac._load_interior(dl.dump_path("tke_dump_dissl.bin"), jpi - 2*hls, jpj - 2*hls)
-    utau_nemo = bac._load_haloed(dl.dump_path("sbc_dump_utau.bin"), jpi, jpj, hls)
+    # The shared 3-D stream loader represents a 2-D dump with a singleton
+    # vertical axis.  Remove that axis explicitly and reject any other shape;
+    # otherwise NumPy would broadcast (y,x,1) against (y,x) cross-column.
+    utau_nemo = np.squeeze(
+        bac._load_haloed(dl.dump_path("sbc_dump_utau.bin"), jpi, jpj, hls),
+        axis=-1)
+    expected_horizontal = (jpj - 2*hls, jpi - 2*hls)
+    if utau_nemo.shape != expected_horizontal:
+        raise SystemExit(
+            f"surface utau shape {utau_nemo.shape} != horizontal grid {expected_horizontal}")
     with nc.Dataset(dl.restart_path()) as restart:
         avt_restart = np.moveaxis(np.asarray(restart["avt_k"][0]), 0, -1)
     component_time_levels = {
