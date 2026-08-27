@@ -1,146 +1,128 @@
-# PREREGISTRATION — end-wall wind-stress placement
+# PREREGISTRATION — end-wall wind source and placement response
 
 Frozen before the first execution of `endwall_wind_placement.py` on this
-branch.  The source alignment was read first; no array in the four KT lanes
-was numerically reduced before this file was committed.
+branch. The source alignment was read first; no array in the KT lane was
+numerically reduced before version 1 was committed.
 
-## Version 2 control correction — frozen before rerun
+## Audit trail: four refused runs
 
-The first execution produced **no valid measurement**: its 2x planted control
-was applied to the whole B1 state and failed (`1.108443e-10 m/s` against an
-absolute `1e-12` gate).  That control premise was wrong.  B1 is downstream of
-the state-dependent barotropic recurrence, so it is not the linear operator
-the control claimed to test.  No threshold is relaxed and no failed score is
-reused.
+No result from these runs is reused.
 
-The rerun moves the same 0x/1x/2x control to `surface_stress_faces`, the
-single-owner linear stress sign/interpolation/rotation helper that supplies
-both placements.  It requires exact equality of `tau(0x)=0` and
-`tau(2x)=2*tau(1x)`; a planted `nextafter` mutation of one returned wet-face
-value must make that equality fail.  Whole-step 2x departures are printed as
-diagnostics only and carry no gate.  The primary operands and all four science
-statistics below are unchanged from version 1.
+1. Version 1 put the exact 0x/1x/2x linearity control on the downstream B1
+   state. It fired because the intervening barotropic recurrence is
+   state-dependent; the premise was invalid.
+2. Version 2 moved the control to `surface_stress_faces`, but scaled current
+   stress without the previous centred-stress carry. The exact-zero and
+   exact-doubling controls correctly failed.
+3. Version 3 scaled both stress time levels, then refused on a shape mismatch:
+   it stripped a halo from an already aligned `199x52` mask.
+4. Version 4 passed setup controls, then refused because it compared unequal
+   control-flow spans: NEMO's direct `dyn_zdf` deposit against legoESM's B1
+   state after the rotating barotropic loop. The valid lego operand is the
+   direct production helper result `rDt*tau/(rho0*dz0)`; B1 is diagnostic.
 
-## Version 3 arm correction — frozen before second rerun
+Version 5 made that operand correction without changing the science bars.
+Independent review then found that its prose still called a reconstructed
+source operand a measured *placement response*. Version 6 restricts the
+offline claim to source-operand agreement. Neither the alternative implicit
+arm nor its tridiagonal response runs in the offline probe. The dynamic
+placement response and eta ownership require the free-run A/B below.
 
-The version-2 rerun also produced **no valid measurement**.  Its helper
-control reported `zero_exact=False` and `double_exact=False` because the arm
-scaled only the current stress.  This card applies
-`0.5*(state.tau_*_prev + surface_forcing.tau_*)`; leaving the previous carry at
-1x means the alleged 0x arm is physically a 0.5x arm and the alleged 2x arm is
-1.5x.  The control correctly exposed that confound.
+Version 6 also proves exact 1x entry identity and that 0x/2x change stress
+fields only; counts every stress, barotropic and momentum-vmix hook; stamps all
+lane-selector environment values; and SHA-256 hashes the probe, current
+preregistration, six operands, and every cited NEMO source. This is required
+because the DINO `MY_SRC` files are not pinned by the oracle Git revision
+alone. No science threshold changes.
 
-Version 3 scales `state.tau_x_prev/state.tau_y_prev` and the current forcing
-together.  Those two fields are one centred wind input, not two variables.
-The exact helper control, primary operands, statistics and bars are otherwise
-unchanged.  Neither invalid run yielded a classified term score.
-
-## Version 4 mask-loader correction — frozen before third rerun
-
-The version-3 execution passed the helper and structural setup controls, then
-refused before its first statistic: the raw `mesh_mask.nc` in this lane is
-already `199x52`, and the probe stripped a second two-cell halo, producing a
-`195x48` mask against `199x52` operands.  No score was computed.  The rerun
-uses `g.umask/g.vmask` from `multistep_replay.build_replay_ic`, the same shared
-loader and already-aligned masks that built the bridged state.  Criteria and
-science operands are unchanged.
-
-## Version 5 operand correction — frozen before fourth rerun
-
-The version-4 execution refused at the meridional structural-zero control,
-before classification.  NEMO's direct dyn-zdf deposit is meridionally zero,
-but legoESM's full B1 wind-on/off response is not: B1 is downstream of the
-rotating barotropic loop, so zonal stress has already produced meridional
-velocity there.  NEMO has that independent barotropic response too, but it is
-not present in `poststress-prestress`.  The two B1 operands therefore bracket
-different control-flow spans.
-
-The valid direct comparison uses the already captured production
-`surface_stress_faces` outputs and computes legoESM's explicit vertical-route
-increment exactly as its source does: `rDt*tau/(rho0*dz0)`.  That is compared
-to NEMO's actual direct `poststress-prestress` increment.  B1 remains printed
-as a labelled downstream diagnostic and is not scored.  The `F_slow` score,
-term bars, ownership bars and helper controls are unchanged.
-
-## Claim and inputs
+## Candidate and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
 whereas the shipped `nemo_dino_kamm_mlf` card places the same increment in the
-explicit momentum RHS before the implicit solve.  NEMO also adds the same
-centred stress independently to `zu_frc`; this registration does not confuse
-that barotropic add with the vertical placement.
+explicit momentum RHS before the implicit solve. NEMO independently adds the
+same centred stress to barotropic `zu_frc`; this registration treats that as a
+separate entry point.
 
-The primary offline state is kt=5761.  NEMO inputs are the committed
-`RUN_SEQDUMP_KT5761_1R/zdf_dump_{u,v}1_{pre,post}stress.bin` brackets and
-`wnd_dump_z{u,v}_frc_inc.bin`.  The legoESM side reuses
-`multistep_replay.build_replay_ic`, `post_tendency_stage_birth`'s stage hook,
-and the production `surface_stress_faces`/barotropic call.  It runs the same
-bridged state with 0x, 1x and 2x stress; every other input is identical.
+The primary offline state is kt=5761. NEMO inputs are
+`RUN_SEQDUMP_D180_1R/zdf_dump_{u,v}1_{pre,post}stress.bin` and
+`wnd_dump_z{u,v}_frc_inc.bin`. The legoESM side reuses
+`multistep_replay.build_replay_ic`, `post_tendency_stage_birth._load`, and the
+production `surface_stress_faces` and barotropic call. It runs the same bridged
+state with 0x, 1x and 2x centred stress; every non-stress input must be exact.
 
-The dead oracle slot being repaired offline is
-`utrd_store(:,:,:,jpdyn_tau)` / `vtrd_store(:,:,:,jpdyn_tau)`: the probe fills
-its top level with `(poststress-prestress)/rDt` instead of reading the emitted
-all-zero slot.  This is an analysis repair only; it does not alter the oracle.
+The oracle `utrd_store(:,:,:,jpdyn_tau)` /
+`vtrd_store(:,:,:,jpdyn_tau)` slot is emitted to output but never populated by
+the DINO dump path. The probe does not fill or mutate the slot; it reconstructs
+the equivalent source operand from `(poststress-prestress)/rDt`.
 
 ## Exact offline numbers
 
-For the whole wet u-face domain and separately for the southern end-wall row
-`j=1`, the probe will print:
+For the whole wet u-face domain and separately for southern row `j=1`, print:
 
 1. `zdf_increment_err_norm`: RMS of
-   `lego rDt*tau/(rho0*dz0) - (NEMO poststress-NEMO prestress)`, divided by the
-   RMS of the NEMO bracket, both in m/s.  Version 5 replaces the confounded B1
-   operand; the source helper is captured from the same production call.
-2. `zdf_increment_corr` and `zdf_increment_rms_ratio` for the same operands.
+   `lego rDt*tau/(rho0*dz0) - (NEMO poststress-NEMO prestress)`, divided by
+   NEMO RMS, in m/s.
+2. Direct-increment correlation and lego/NEMO RMS ratio.
 3. `fslow_err_norm`: RMS of
-   `(lego F_slow[wind]-lego F_slow[zero]) - NEMO wnd_dump_z*_frc_inc`, divided
-   by the NEMO RMS, both in m/s2.  This is also the dynamic check of premise 4:
-   the supplied slow forcing reaches the loop in tendency units, without a
-   second face-depth scaling.
-4. `placement_delta_rms`: the numerator RMS in item 1, in m/s.  This, not the
-   dead `utrd_tau`, is the measured placement term.
+   `(lego F_slow[wind]-lego F_slow[zero]) - NEMO wnd_dump_zu_frc_inc`, divided
+   by NEMO RMS, in m/s2. This directly tests premise 4: `F_slow` reaches the
+   loop in tendency units without another face-depth scaling.
+4. The numerator RMS for items 1 and 3 in their native units.
 
-The 2x planted control is applied at `surface_stress_faces` as specified in
-version 2 above.  The meridional stress is a structural-zero control on this
-DINO forcing and must be exactly zero on the oracle side and no larger than
-`1e-12` on the legoESM side.  A hook count other than one per arm, a non-finite
-value, a failed entry-state identity gate, or a failed control invalidates
-every score.
+The exact 0x/1x/2x control is on `surface_stress_faces`: `tau(0x)=0` and
+`tau(2x)=2*tau(1x)` must be bit-exact, and a one-ULP planted mutation must make
+the equality fail. Meridional forcing must be exactly zero on the oracle side
+and no larger than `1e-12` on the legoESM side. A hook count other than one per
+arm, non-finite data, or failed entry identity invalidates every score.
 
-## Interpretation frozen in advance
+## Frozen interpretation
 
-This offline term test **CONFIRMS algebraic placement equivalence** when, on
-both the domain and `j=1`, `zdf_increment_err_norm <= 0.05`, correlation is at
-least 0.999, and `fslow_err_norm <= 0.05`.  It **CONFIRMS a material placement
-DIFF** when either end-wall normalized error is at least 0.25.  Values between
-are `PLAUSIBLE/UNRESOLVED`.  These bars classify the measured term, not
-ownership of sea-surface flicker; the quantities have different units and no
-post-hoc transfer coefficient will be invented.
+The offline source test **CONFIRMS algebraic source-operand equivalence** when,
+on both the domain and `j=1`, direct-increment normalized error is `<=0.05`,
+direct-increment correlation is `>=0.999`, and `F_slow` normalized error is
+`<=0.05`. Correlation was not registered as an `F_slow` gate. It **CONFIRMS a
+material source DIFF** when either end-wall normalized error is `>=0.25`.
+Values between are `PLAUSIBLE/UNRESOLVED`.
 
-Ownership requires the one-variable free-run arm below.  Its exact primary
-number is the last-half, per-cell-first zonal-wall 2dt amplitude ratio
-`A_lego/A_nemo`, with wall variance share reported alongside it.  Starting
-from the bridged day-180 state:
+These bars classify source operands only. They do not classify the response
+through the implicit solve or sea-surface ownership, and no post-hoc transfer
+coefficient will be invented.
 
-- **CONFIRMS ownership:** implicit-placement arm ratio `<= 1.25` and wall share
-  `<= 0.08`, while the control reproduces `2.89` within its registered
-  interval and NEMO's share is about `0.04`.
-- **REFUTES ownership:** implicit-placement arm ratio `>= 2.30` and wall share
-  `>= 0.68` (at least 80% of the present 2.89 ratio and 85% share remain).
-- Anything else is **UNRESOLVED** and is reported without a causal label.
+## Free-run placement/ownership discriminator — GPU handoff
 
-The required implementation must make `surface_stress_implicit=True`
-compatible with the active leapfrog reconciliation before running; the current
-constructor deliberately refuses that combination.  Exact invocation after
-that faithful path exists:
+The exact primary number is the last-half, per-cell-first zonal-wall 2dt
+amplitude ratio `A_lego/A_nemo`; wall variance share is reported alongside it.
+
+- **Control validity:** explicit-placement ratio in `[2.60, 3.18]`
+  (registered 2.89 ±10%) and wall share in `[0.75, 0.95]`
+  (registered 0.85 ±0.10).
+- **CONFIRMS ownership:** implicit-placement ratio `<=1.25` and wall share
+  `<=0.08` while the control is valid.
+- **REFUTES ownership:** implicit-placement ratio `>=2.30` and wall share
+  `>=0.68` while the control is valid.
+- Otherwise: **UNRESOLVED**.
+
+The active shipped outer integrator is `leapfrog` with the split-explicit
+solver, which accepts either placement. The twin harness exposes the existing
+config field as a one-variable selector and stamps the resolved model value.
+Exact implicit arm:
 
 ```sh
 CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
   .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
   nemo_dino_kamm_mlf results/dino_1455/wind_place_implicit.npz \
-  --days 5 --bridge-before --save-3d
+  --days 5 --bridge-before --save-3d --surface-stress-implicit
 ```
 
-The arm must stamp `surface_stress_implicit=True`; an otherwise identical
-control stamps `False`.  The existing per-step eta extractor and
-`eta_flicker_decay.py` score the first 160 samples.  No GPU arm is run here.
+Exact explicit control:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 LEGOESM_NEMO_E3T=both \
+  .venv/bin/python scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf results/dino_1455/wind_place_explicit.npz \
+  --days 5 --bridge-before --save-3d --no-surface-stress-implicit
+```
+
+The artifacts must stamp `surface_stress_implicit=True` and `False`,
+respectively. Use the existing per-step eta extractor and
+`eta_flicker_decay.py` to score the first 160 samples. No GPU arm runs here.
