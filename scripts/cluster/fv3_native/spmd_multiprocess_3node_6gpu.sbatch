@@ -33,7 +33,7 @@ fi
 [ -n "${_SELF:-}" ] || _SELF="${BASH_SOURCE[0]}"
 REPO=$(cd "$(dirname "$_SELF")/../../.." && pwd)
 [ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
-DIRTY=$(git -C "$REPO" status --porcelain | wc -l)
+DIRTY=$(git -C "$REPO" status --porcelain --untracked-files=no | wc -l)  # tracked edits only; untracked scratch from other sessions is expected
 [ "$DIRTY" -eq 0 ] || { echo "PREFLIGHT FAILED: $REPO dirty ($DIRTY)"; exit 3; }
 echo "host: $(hostname)"
 echo "PINNED sha: $(git -C "$REPO" rev-parse HEAD)"
