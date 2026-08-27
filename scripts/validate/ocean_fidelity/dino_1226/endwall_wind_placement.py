@@ -465,7 +465,16 @@ def main() -> int:
         "provenance": {"git_sha": sha, "prereg_commit": PREREG_COMMIT,
                        "oracle_lane": dump_lane.RUN_DIR, "kt": KT},
         "controls": {"entry_identity": entry_control,
-                     "stress_helper": controls},
+                     "stress_helper": controls,
+                     "hook_order": {
+                         str(scale): {
+                             "events": arms[scale]["events"],
+                             "stress_calls": arms[scale]["stress_calls"],
+                             "baro_calls": arms[scale]["baro_calls"],
+                             "vmix_calls": arms[scale]["vmix_calls"],
+                         }
+                         for scale in (0.0, 1.0, 2.0)
+                     }},
         "whole_step_linearity_diagnostics": whole_step_diagnostics,
         "b1_downstream_max": {
             "u": float(np.max(np.abs(b1u))),
@@ -481,6 +490,8 @@ def main() -> int:
             "third run invalid: an already halo-free oracle mask was stripped twice",
             "fourth run invalid: B1 includes the rotating barotropic response "
             "and is not the direct dyn-zdf deposit",
+            "fifth run invalid: active leapfrog has two ordered stress-helper "
+            "calls, not one",
             "utrd_tau is not a physical zero: its dump slot is emitted but never populated",
             "NEMO wind is not implicit-only: dynspg_ts adds it independently to zu_frc",
             "the offline probe reconstructs source operands; it does not fill the oracle slot",
