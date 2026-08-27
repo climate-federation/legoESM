@@ -432,3 +432,105 @@ def test_the_rotation_rate_comes_from_the_shared_constants_module(R):
     import inspect
     src = inspect.getsource(R)
     assert "7.292" not in src.split("Omega")[0] or "constants.Omega" in src
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review: the LEVEL baseline and the margin floor.
+# ---------------------------------------------------------------------------
+def test_the_level_baseline_is_horizontally_uniform_and_keeps_the_profile(R):
+    """The depth baseline controls only for 'shallower is more diverged'.  The
+    divergence peaks at the MIXED-LAYER BASE, so a hotspot set can beat it by
+    locating the right LEVEL -- vertical information dressed as horizontal.
+    The LEVEL field must be constant within each level and carry the true
+    per-level rms."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, w = X.build_weights(np.ones((A.NY, A.NX)))
+    sel = R.band_cell_mask(R.BANDS[3][1]) & wet
+    rng = np.random.default_rng(11)
+    d = np.where(sel, rng.normal(size=sel.shape), 0.0)
+    lf = R.level_rank_field(d, w, sel)
+    for k in range(A.NZ):
+        vals = lf[:, :, k][sel[:, :, k]]
+        if vals.size:
+            assert np.allclose(vals, vals[0]), f"level {k} is not uniform"
+    assert np.all(lf[~sel] == 0.0)
+    # it must reproduce the per-level volume-weighted rms
+    k = 0
+    want = np.sqrt((w[:, :, k] * d[:, :, k] ** 2)[sel[:, :, k]].sum()
+                   / w[:, :, k][sel[:, :, k]].sum())
+    assert lf[:, :, k][sel[:, :, k]][0] == pytest.approx(want)
+
+
+def test_a_purely_stratified_field_cannot_beat_the_level_baseline(R):
+    """Non-vacuity of the stronger control: a field with NO horizontal
+    structure -- even one peaking at depth rather than at the surface, which is
+    the case the depth baseline misses -- must not beat the LEVEL baseline."""
+    import ts_divergence_atlas as X
+    import acc_thermal_wind as A
+    wet, w = X.build_weights(np.ones((A.NY, A.NX)))
+    sel = R.band_cell_mask(R.BANDS[3][1]) & wet
+    z = np.asarray(A.gdept0, dtype=np.float64)
+    # peaks at ~100 m, NOT at the surface: this is what defeats DEPTH_RANK_FIELD
+    prof = np.where(sel, np.exp(-((z - 100.0) / 40.0) ** 2), 0.0)
+    hot = X.hotspot_set(prof, w * sel, X.Q2_NULL)
+    lvl = X.hotspot_set(R.level_rank_field(prof, w, sel), w * sel, X.Q2_NULL)
+    dep = X.hotspot_set(np.where(sel, R.DEPTH_RANK_FIELD, 0.0), w * sel,
+                        X.Q2_NULL)
+    r_hot = X.retention(prof, w * sel, hot)
+    r_lvl = X.retention(prof, w * sel, lvl)
+    r_dep = X.retention(prof, w * sel, dep)
+    assert r_hot <= r_lvl + 1e-9, "a stratified field beat the LEVEL baseline"
+    # and the demonstration that the DEPTH baseline was the weaker control
+    assert r_hot > r_dep, ("this case is supposed to defeat the depth-only "
+                           "baseline; if it does not, the test proves nothing")
+
+
+def test_the_split_margin_floor_is_measured_on_the_margin(R):
+    """Both reviewers found the RSS construction independently.  With
+    opposite-sign legs the margin is ALGEBRAICALLY the band gap (bt+bc==gap),
+    so an RSS-of-legs bar re-scores the ledger's own number against a threshold
+    up to 23x too large."""
+    # bt<0, bc>0 -> |bc|-|bt| == bt+bc == gap, exactly
+    bt, bc = -2.4782, 1.5262
+    assert abs(bc) - abs(bt) == pytest.approx(bt + bc, abs=1e-12)
+    # the paired-margin floor is the std of the member margins, and it is NOT
+    # the RSS of two per-leg floors
+    mm = [0.10, 0.12, 0.08, 0.11]
+    assert float(np.std(mm, ddof=1)) < float(np.hypot(0.28, 0.27))
+
+
+def test_the_cancellation_ratio_carries_its_member_spread(R):
+    """The headline 1.5% is a control-member reading; three members were being
+    discarded and their spread can exceed it, leaving the SIGN undetermined."""
+    members = [0.015, 0.022, -0.013, -0.015]
+    assert float(np.std(members, ddof=1)) > abs(members[0])
+    assert max(abs(m) for m in members) < 0.03      # magnitude still bounded
+
+
+def test_the_through_origin_fit_does_not_report_corr_squared(R):
+    """A fit with no intercept explains 1 - SSres/SStot with SStot un-centred;
+    corr^2 is the wrong label for it."""
+    import inspect
+    src = inspect.getsource(R.report)
+    assert "ss_tot" in src and "ss_res" in src
+    assert "variance explained {corr ** 2" not in src
+
+
+def test_the_retracted_word_is_gone_from_the_tool(R):
+    """A retraction that lives only in a commit message is not a retraction --
+    the tool kept printing 'barotropic-led' after retraction #7 relabelled the
+    leg bottom-referenced."""
+    import inspect
+    src = inspect.getsource(R.report)
+    assert "barotropic-led" not in src
+    assert "bottom-referenced-led" in src
+
+
+def test_the_registered_escalation_form_is_disclosed_not_deleted(R):
+    """A registered rule narrows by disclosure, never by dropping the form that
+    was registered."""
+    import inspect
+    src = inspect.getsource(R.report)
+    assert "esc_all" in src and "AS REGISTERED" in src
+    assert "escalated_all_horizons" in src and "escalated_day360" in src

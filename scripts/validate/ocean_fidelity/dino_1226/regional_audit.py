@@ -166,6 +166,24 @@ DEPTH_RANK_FIELD = float(np.max(np.asarray(A.gdept0, dtype=np.float64))) \
     + 1.0 - np.asarray(A.gdept0, dtype=np.float64)
 
 
+def level_rank_field(d, w, sel):
+    """A HORIZONTALLY UNIFORM field carrying the day-10 per-level rms.
+
+    The stronger of the two baselines, and the one the physics review of
+    84d7f9a56 required.  ``DEPTH_RANK_FIELD`` controls only for "shallower is
+    more diverged", monotone from the surface -- but the divergence peaks at the
+    MIXED-LAYER BASE, not at the surface, so a day-10 hotspot set can beat it by
+    locating the right LEVEL, which is vertical information dressed as
+    horizontal.  Ranking a field that is constant within each level removes
+    every horizontal cue while keeping the true vertical profile, so a set that
+    beats THIS one is using horizontal information and nothing else.
+    """
+    num = np.where(sel, w * d * d, 0.0).sum(axis=(0, 1))
+    den = np.where(sel, w, 0.0).sum(axis=(0, 1))
+    prof = np.sqrt(np.divide(num, den, out=np.zeros_like(num), where=den > 0))
+    return np.where(sel, np.broadcast_to(prof, sel.shape), 0.0)
+
+
 def depth_cell_mask(name):
     return np.ones((A.NY, A.NX, 1), dtype=bool) & DEPTH_SEL[name][None, None, :]
 
@@ -1170,14 +1188,38 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             fbc = two_sided_floor(
                 [rows["lego"][i][day][bname + " |bc"] for i in range(N_MEM)],
                 [rows["nemo"][i][day][bname + " |bc"] for i in range(N_MEM)])[0]
-            f_split = float(np.sqrt(fbt ** 2 + fbc ** 2))
-            split_margin = abs(gbc) - abs(gbt)
+            # THE MARGIN'S FLOOR IS MEASURED ON THE MARGIN, not RSS'd from the
+            # two legs.  Both reviewers found the RSS construction independently
+            # and they were right: |bc| - |bt| is NOT a difference of two
+            # independent quantities.  When the legs carry opposite signs -- 6
+            # of the 7 bands here -- it is ALGEBRAICALLY the band gap itself,
+            # because bt + bc == gap by construction, so the RSS bar re-scores
+            # the ledger's own number against a threshold up to 23x too large
+            # (P2 printed a 0.4465 Sv bar against a 0.0024 Sv margin).
+            # The margin is a single cross-model quantity, so its ensemble is
+            # the four member PAIRS and its floor is their sample std.  This
+            # also yields the per-member sign count for free, which is the
+            # number a code comment was previously asserting without computing.
+            mm = [abs(rows["lego"][i][day][bname + " |bc"]
+                      - rows["nemo"][i][day][bname + " |bc"])
+                  - abs(rows["lego"][i][day][bname + " |bt"]
+                        - rows["nemo"][i][day][bname + " |bt"])
+                  for i in range(N_MEM)]
+            split_margin = mm[0]
+            f_split = float(np.std(mm, ddof=1))
+            f_split_rss = float(np.sqrt(fbt ** 2 + fbc ** 2))
+            n_flip = int(sum(1 for m in mm
+                             if np.sign(m) != np.sign(mm[0]) and m != 0.0))
+            # the identity flag: with opposite-sign legs the margin IS the gap
+            margin_is_gap = abs(abs(split_margin) - abs(gap)) < 1e-9
             ledger[(bname, day)] = {
                 "gap": gap, "floor": fl, "lego_spread": ls, "nemo_spread": ns,
                 "ratio": ratio, "verdict": verd, "flag": flag,
                 "gap_bt": gbt, "gap_bc": gbc, "saturated": sat,
                 "floor_bt": fbt, "floor_bc": fbc, "floor_split": f_split,
-                "split_margin": split_margin,
+                "floor_split_rss": f_split_rss, "split_margin": split_margin,
+                "split_members": mm, "n_flip": n_flip,
+                "margin_is_gap": margin_is_gap,
                 "sat_why": why, "quantum": quantum[bname],
                 "u_material": bool(mat), "x2yes": x2yes, "g_lastQ": glast,
                 "lego_share_of_floor": lego_share,
@@ -1192,15 +1234,20 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             # never overturns the verdict.
             welch = ("" if ratio is None else
                      "unres" if V.K_PREREG < ratio < V.K_WELCH else "")
+            _rb = np.arange(A.NY)[dict(ALL_BANDS)[bname]]
+            _rr = (np.abs(rowgap[day][0][dict(ALL_BANDS)[bname]])
+                   / np.where(rowfloor[day][dict(ALL_BANDS)[bname]] > 0,
+                              rowfloor[day][dict(ALL_BANDS)[bname]], np.inf))
+            nrow = f"{int((_rr > ESCALATION_FLOORS).sum())}/{len(_rb)}"
             lines.append(
                 f"{bname:<26}{gap:>+10.4f}{fl:>11.4f}"
                 f"{('  --  ' if ratio is None else f'{ratio:>8.2f}')}"
-                f"{welch:>7}"
+                f"{welch:>7}{nrow:>8}"
                 f"  {verd:<22}{gbt:>+9.4f}{fbt:>8.4f}{gbc:>+9.4f}{fbc:>8.4f}"
                 f"  {flag}")
         _tbl(f"--- day {day} ---",
              f"{'band':<26}{'gap[Sv]':>10}{'floor[Sv]':>11}{'x':>8}"
-             f"{'welch':>7}"
+             f"{'welch':>7}{'rows>5x':>8}"
              f"  {'verdict':<22}{'gap bt':>9}{'fl bt':>8}{'gap bc':>9}"
              f"{'fl bc':>8}  flags",
              lines)
@@ -1252,6 +1299,9 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     print(f"            REGISTERED rule says `no` but an ESTIMATED floor with 3")
     print(f"            degrees of freedom per side does not resolve it. Marked,")
     print(f"            never used to overturn -- the registered rule decides.")
+    print("  rows>5x = how many of that band's rows exceed 5x their OWN floor.")
+    print("        A band verdict of INDISTINGUISHABLE beside a large rows>5x")
+    print("        is a statement about the reduction, not about the ocean.")
     print("        u!= unsaturated as a FACT, but the growth it shows could not")
     print("            close the gap in another year -- the flag does NOT void")
     print("            this row's verdict.")
@@ -1261,17 +1311,34 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     # summed per-row magnitude, i.e. the band reduction annihilates the signal.
     # A net/sum|row| ratio belongs in the table, not in a reviewer's note.
     lines = []
+    cancel = {}
     for bname, brows in ALL_BANDS:
         cells = []
         for day in HORIZONS:
+            # ALL FOUR member pairs, not just the control.  Three of them were
+            # being discarded, and for the equatorial band their spread EXCEEDS
+            # the ratio itself -- so the headline "retains 1.5%" is a control-
+            # member reading whose SIGN is not determined at day 360.  Found by
+            # code review of 84d7f9a56.
+            rr = [float(rowgap[day][i][brows].sum()
+                        / np.abs(rowgap[day][i][brows]).sum())
+                  for i in range(N_MEM)]
             g = rowgap[day][0][brows]
+            sd = float(np.std(rr, ddof=1))
+            cancel[(bname, day)] = {"ratio": rr[0], "members": rr, "std": sd}
             cells.append(f"{g.sum():>+9.4f}{np.abs(g).sum():>9.4f}"
-                         f"{g.sum() / np.abs(g).sum():>+8.3f}")
+                         f"{rr[0]:>+8.3f}{sd:>8.3f}")
         lines.append(f"{bname:<26}" + "".join(cells))
     _tbl("--- DOES THE BAND REDUCTION SURVIVE ITS OWN CANCELLATION? ---",
          f"{'band':<26}" + "".join(f"{'net d' + str(d):>9}{'sum|row|':>9}"
-                                   f"{'ratio':>8}" for d in HORIZONS),
+                                   f"{'ratio':>8}{'+/-':>8}" for d in HORIZONS),
          lines)
+    print("  ratio is the CONTROL member's; `+/-' is the sample std over all")
+    print("  four member pairs.  Where the spread exceeds the ratio, the SIGN")
+    print("  of the ratio is undetermined and only its MAGNITUDE may be quoted")
+    print("  -- which is all the argument needs: a band retaining under a few")
+    print("  per cent of its own summed per-row magnitude is not measuring how")
+    print("  far apart the two models are, whichever way the residue points.")
     print("  ratio = net / sum|per-row gap|.  A ratio near +/-1 means the band")
     print("  number IS the signal; a ratio near 0 means the band number is what")
     print("  survived cancellation between rows and is NOT a measure of how far")
@@ -1279,7 +1346,10 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     print("  verdict above against this column.")
     art["cancellation"] = {
         b: {str(d): {"net": float(rowgap[d][0][r].sum()),
-                     "sum_abs": float(np.abs(rowgap[d][0][r]).sum())}
+                     "sum_abs": float(np.abs(rowgap[d][0][r]).sum()),
+                     "ratio": cancel[(b, d)]["ratio"],
+                     "ratio_members": cancel[(b, d)]["members"],
+                     "ratio_std": cancel[(b, d)]["std"]}
             for d in HORIZONS} for b, r in ALL_BANDS}
 
     # THE PER-ROW LEDGER -- what the band reduction hides.
@@ -1304,6 +1374,20 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             print(f"      row {jj:3d} (lat {_LAT[jj]:+6.2f}): gap "
                   f"{g[jj]:+.5f} Sv, floor {f[jj]:.6f}, "
                   f"{abs(g[jj]) / f[jj]:8.1f}x")
+    print("\n  GLOBAL top-10 rows by multiples of their own floor, day 360 --")
+    print("  printed because the document was quoting rows the log did not:")
+    gg, ff = rowgap[360][0], rowfloor[360]
+    rr = np.abs(gg) / np.where(ff > 0, ff, np.inf)
+    for jj in np.argsort(-rr)[:10]:
+        band = next(b for b, r in BANDS if jj in np.arange(A.NY)[r])
+        print(f"    row {jj:3d} (lat {_LAT[jj]:+6.2f}, {band:<22}): gap "
+              f"{gg[jj]:+.5f} Sv, floor {ff[jj]:.6f}, {rr[jj]:7.1f}x")
+    print(f"  LARGEST IN SVERDRUPS, which is a different row: "
+          f"{int(np.argmax(np.abs(gg)))} "
+          f"(lat {_LAT[int(np.argmax(np.abs(gg)))]:+.2f}) at "
+          f"{gg[int(np.argmax(np.abs(gg)))]:+.4f} Sv, "
+          f"{rr[int(np.argmax(np.abs(gg)))]:.0f}x its floor.  The equator row's "
+          f"206x is the largest IN FLOOR MULTIPLES, not in Sv.")
     art["rowgap"] = {str(d): rowgap[d][0].tolist() for d in HORIZONS}
     art["rowfloor"] = {str(d): rowfloor[d].tolist() for d in HORIZONS}
 
@@ -1321,12 +1405,19 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
         denom = float(dref @ dref)
         delta = float(dref @ g) / denom if denom > 0 else float("nan")
         pred = delta * dref
-        ss = float(np.sum((g - g.mean()) ** 2))
-        corr = (float(np.corrcoef(pred, g)[0, 1]) if ss > 0 else float("nan"))
-        print(f"  day {day:3d}: shift {delta:+.4f} rows "
-              f"({delta * 111.0 * (float(_LAT[51]) - float(_LAT[50])) / 1.0:+.2f} "
-              f"km approx), correlation {corr:+.3f}, "
-              f"variance explained {corr ** 2:.1%}")
+        corr = float(np.corrcoef(pred, g)[0, 1])
+        # THROUGH-ORIGIN fit: the model has no intercept, so the fraction of
+        # variance it explains is 1 - SSres/SStot with SStot about ZERO, not
+        # corr^2.  Labelling corr^2 "variance explained" is only correct for a
+        # fit that removes the mean.  Caught in code review of 84d7f9a56; the
+        # conclusion survives, the label did not.
+        ss_res = float(np.sum((g - pred) ** 2))
+        ss_tot = float(np.sum(g ** 2))
+        frac = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+        km = float(delta) * 111.0 * abs(float(_LAT[51]) - float(_LAT[50]))
+        print(f"  day {day:3d}: shift {delta:+.4f} rows ({km:+.2f} km approx), "
+              f"correlation {corr:+.3f}, fraction of the gap's own sum of "
+              f"squares removed {frac:.1%}")
     print("  A high correlation means most of the structure north of the")
     print("  channel is the SAME flow displaced, not a different flow.  The")
     print("  residual is what any band-scoped claim actually owns.")
@@ -1339,25 +1430,37 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     lines = []
     for bname, _ in ALL_BANDS:
         e = ledger[(bname, 360)]
-        m = abs(e["gap_bc"]) - abs(e["gap_bt"])
-        bar = V.K_PREREG * e["floor_split"]
+        m, bar = e["split_margin"], V.K_PREREG * e["floor_split"]
         if abs(m) <= bar:
             verd = "UNRESOLVED"
         else:
-            verd = "baroclinic-led" if m > 0 else "barotropic-led"
+            # NOT "barotropic": retraction #7 relabelled this leg
+            # BOTTOM-REFERENCED, per acc_driver_decomp's own docstring, and the
+            # tool kept printing the retracted word.  Fourth instance in this
+            # campaign of a retraction living only in a commit message.
+            verd = "shear-led" if m > 0 else "bottom-referenced-led"
         lines.append(f"{bname:<26}{abs(e['gap_bt']):>10.4f}"
                      f"{abs(e['gap_bc']):>10.4f}{m:>+10.4f}{bar:>10.4f}"
+                     f"{V.K_PREREG * e['floor_split_rss']:>10.4f}"
+                     f"{e['n_flip']:>6d}"
+                     f"{('  IDENT' if e['margin_is_gap'] else '       ')}"
                      f"  {verd}")
-    _tbl("--- day 360: is the barotropic/baroclinic ORDERING resolved? ---",
+    _tbl("--- day 360: is the bottom-referenced / shear ORDERING resolved? ---",
          f"{'band':<26}{'|gap bt|':>10}{'|gap bc|':>10}{'margin':>10}"
-         f"{'2x floor':>10}  verdict",
+         f"{'2x floor':>10}{'2x RSS':>10}{'flip':>6}{'':>7}  verdict",
          lines)
-    print("  margin = |gap bc| - |gap bt|; the bar is the registered "
-          f"{V.K_PREREG:.0f}x")
-    print("  applied to the margin's OWN two-sided floor (the RSS of the two")
-    print("  legs' floors).  UNRESOLVED means the ordering is inside the bar --")
-    print("  neither leg is shown to lead, and no `predominantly' claim is")
-    print("  supportable for that band.")
+    print("  margin = |gap bc| - |gap bt| on the control member; the bar is the")
+    print(f"  registered {V.K_PREREG:.0f}x applied to the margin's OWN floor --")
+    print("  the sample std of the FOUR member-pair margins, not an RSS of the")
+    print("  two legs.  `2x RSS' is the discarded construction, shown so the")
+    print("  correction is visible: it runs 1.03x to 23x larger.  `flip' counts")
+    print("  member pairs whose margin takes the opposite sign to the control's.")
+    print("  IDENT flags the algebraic identity that makes this table WEAK "
+          "evidence:")
+    print("  bt + bc == gap by construction, so whenever the two legs carry")
+    print("  OPPOSITE signs, |bc| - |bt| IS the band gap.  Those rows re-score")
+    print("  the ledger's own number against a different bar; they are not")
+    print("  independent evidence about the vertical structure.")
     art["split_ordering"] = {
         b: {"gap_bt": ledger[(b, 360)]["gap_bt"],
             "gap_bc": ledger[(b, 360)]["gap_bc"],
@@ -1480,28 +1583,38 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             # ranking-field defect in this campaign.
             depth_rank = np.where(bmask, DEPTH_RANK_FIELD, 0.0)
             base_set = X.hotspot_set(depth_rank, wb, X.Q2_NULL)
+            lvl_set = X.hotspot_set(level_rank_field(d10, w, bmask), wb,
+                                    X.Q2_NULL)
             cells = []
             for day in (90, 180, 270, 360):
                 dd = np.where(bmask, keep[day]["d" + key], 0.0)
                 r = X.retention(dd, wb, hot)
                 rb = X.retention(dd, wb, base_set)
+                rl = X.retention(dd, wb, lvl_set)
                 c = X.wcorr(d10, dd, wb)
-                ret[(bname, key, day)] = (r, c, rb)
-                cells.append(f"{r:>8.3f}{rb:>8.3f}{c:>+8.3f}")
+                ret[(bname, key, day)] = (r, c, rb, rl)
+                cells.append(f"{r:>8.3f}{rb:>8.3f}{rl:>8.3f}{c:>+8.3f}")
             d360 = np.where(bmask, keep[360]["d" + key], 0.0)
             ceil = X.retention(d360, wb, X.hotspot_set(d360, wb, X.Q2_NULL))
             ret[(bname, key, "ceil")] = ceil
             lines.append(f"{bname:<26}" + "".join(cells) + f"{ceil:>8.3f}")
         _tbl(f"--- d{key}: forward retention of the day-10 hotspot set, its "
-             f"DEPTH-ONLY baseline, and the pattern correlation vs day 10 ---",
+             f"DEPTH-ONLY and LEVEL baselines, and the correlation vs day 10 ---",
              f"{'band':<26}" + "".join(f"{'ret d' + str(d):>8}{'BASE':>8}"
-                                       f"{'corr':>8}"
+                                       f"{'LEVEL':>8}{'corr':>8}"
                                        for d in (90, 180, 270, 360))
              + f"{'CEIL':>8}",
              lines)
-        print("  A band whose ret is at or BELOW its BASE has shown nothing")
-        print("  about horizontal pattern.  Compare ret against BASE first and")
-        print("  against CEIL second; the 0.05 geometric null is not the bar.")
+        print("  BASE controls for `shallower is more diverged'.  LEVEL is the")
+        print("  STRONGER control and the one to read: it is a horizontally")
+        print("  UNIFORM field carrying the day-10 per-level rms, so it keeps")
+        print("  the true vertical profile and removes every horizontal cue.")
+        print("  The divergence peaks at the MIXED-LAYER BASE rather than at the")
+        print("  surface, so a hotspot set can beat BASE by locating the right")
+        print("  LEVEL -- vertical information dressed as horizontal.  Only")
+        print("  ret/LEVEL is a horizontal-memory statistic.  Read ret against")
+        print("  LEVEL first, BASE second, CEIL as the ceiling; the 0.05")
+        print("  geometric null is not the bar in any of the three.")
 
     # And the question C4 actually wants: is the pattern held HORIZONTALLY?
     # Ranking within one depth class removes the stratification that the
@@ -1515,21 +1628,25 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             wb = np.where(sel, w, 0.0)
             d10 = np.where(sel, keep[10]["d" + key], 0.0)
             hot = X.hotspot_set(d10, wb, X.Q2_NULL)
-            depth_rank = np.where(sel, DEPTH_RANK_FIELD, 0.0)
-            base_set = X.hotspot_set(depth_rank, wb, X.Q2_NULL)
+            lvl_set = X.hotspot_set(level_rank_field(d10, w, sel), wb,
+                                    X.Q2_NULL)
             cells = []
             for day in (90, 360):
                 dd = np.where(sel, keep[day]["d" + key], 0.0)
-                cells.append(f"{X.retention(dd, wb, hot):>9.3f}"
-                             f"{X.retention(dd, wb, base_set):>9.3f}")
-                ret[(bname, key, day, "upper")] = X.retention(dd, wb, hot)
-                ret[(bname, key, day, "upper_base")] = X.retention(dd, wb,
-                                                                   base_set)
+                rr = X.retention(dd, wb, hot)
+                rl = X.retention(dd, wb, lvl_set)
+                cells.append(f"{rr:>9.3f}{rl:>9.3f}{rr / rl:>8.1f}")
+                ret[(bname, key, day, "upper")] = rr
+                ret[(bname, key, day, "upper_level")] = rl
             lines.append(f"d{key} {bname:<22}" + "".join(cells))
-    _tbl("--- upper class only (<200 m): retention and its depth-only base ---",
-         f"{'field / band':<27}" + "".join(f"{'ret d' + str(d):>9}{'BASE':>9}"
-                                           for d in (90, 360)),
+    _tbl("--- upper class only (<200 m): retention against the LEVEL baseline "
+         "-- the horizontal-memory statistic ---",
+         f"{'field / band':<27}" + "".join(f"{'ret d' + str(d):>9}{'LEVEL':>9}"
+                                           f"{'x':>8}" for d in (90, 360)),
          lines)
+    print("  ret/LEVEL is the ratio that means `horizontal memory'.  A band at")
+    print("  ~1.0 has none: its day-10 set does no better than a field that is")
+    print("  constant within every level.")
     art["retention"] = {"|".join(str(x) for x in k):
                         (list(v) if isinstance(v, tuple) else float(v))
                         for k, v in ret.items()}
@@ -1739,17 +1856,15 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             # of unequal volume appears here.  Caught in code review of
             # 17881d91d; it overstated the surface share by up to 18 points.
             ee = e3[:len(d)]
-            share = float((np.abs(a - b)[:2] * ee[:2]).sum()
-                          / (np.abs(a - b) * ee).sum())
+            tot_w = float((np.abs(a - b) * ee).sum())
+            share = float((np.abs(a - b)[:2] * ee[:2]).sum() / tot_w)
             # the SPAN of the top two levels, not the CENTRE DEPTH of the
             # third.  The first version said "the top two levels are ~37 m",
             # which is level 3's centre; they span 0 to 20.6 m.  Caught in the
             # physics review of 37a51f9ef.
             span2 = float(np.sum(_f64(A.e3t1d)[:2]))
             span3 = float(np.sum(_f64(A.e3t1d)[:3]))
-            ee = _f64(A.e3t1d)[:len(d)]
-            share3 = float((np.abs(a - b)[:3] * ee[:3]).sum()
-                           / (np.abs(a - b) * ee).sum())
+            share3 = float((np.abs(a - b)[:3] * ee[:3]).sum() / tot_w)
             print(f"  {tag:<14} day {day:3d}: |diff| is under 1% of the "
                   f"surface magnitude ({scale:.4f} m/s) from level {k0:2d} "
                   f"({zz:.0f} m) down; the top TWO levels (0-{span2:.1f} m) "
@@ -1783,14 +1898,21 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
                   + (f"  [{e['flag']}]" if e["flag"] else ""))
 
     # escalation
-    esc = sorted({b for (b, d), e in ledger.items()
-                  if e["ratio"] is not None and e["ratio"] > ESCALATION_FLOORS})
     esc360 = [b for b, _ in ALL_BANDS
               if ledger[(b, 360)]["ratio"] is not None
               and ledger[(b, 360)]["ratio"] > ESCALATION_FLOORS]
     print(f"\nESCALATION (PREREG sec.10, registered before any number): a band "
           f"over {ESCALATION_FLOORS:.0f}x its own floor is a NEW REGIONAL "
           f"FINDING and needs dual sign-off.")
+    esc_all = sorted({b for (b, d), e in ledger.items()
+                      if e["ratio"] is not None
+                      and e["ratio"] > ESCALATION_FLOORS})
+    print(f"  AS REGISTERED, across all four horizons, the rule escalates: "
+          f"{len(esc_all)} of {len(ALL_BANDS)} bands "
+          f"({', '.join(b.split()[0] for b in esc_all)}).  That form is")
+    print("  reported rather than deleted -- a registered rule narrows by")
+    print("  DISCLOSURE, never by quietly dropping the form that was")
+    print("  registered.  What follows is the narrowing, and its reason.")
     print("  APPLIED AT THE DAY-360 ENDPOINT, which is THE gate.  The")
     print("  all-horizon form of the same rule escalates all seven bands and")
     print("  therefore decides nothing: the day-90 floors are 3-5 orders under")
@@ -1816,7 +1938,10 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
             print(f"    {bname:<26} {n5:3d} of {len(j):3d} rows over "
                   f"{ESCALATION_FLOORS:.0f}x; worst row {worst} "
                   f"(lat {_LAT[worst]:+.2f}) at {r.max():.0f}x")
-    art["escalated"] = esc360
+    # DISTINCT KEYS.  art["escalated"] previously aliased the day-360 list,
+    # silently changing what a key that already existed in earlier artifacts
+    # meant.  Both forms are now stored under their own names.
+    art["escalated_all_horizons"] = esc_all
     art["escalated_day360"] = esc360
 
     # predictions
@@ -1838,6 +1963,7 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     # is |margin| > K_PREREG x the margin's own floor, and anything inside the
     # bar is UNRESOLVED -- neither confirmed nor refuted.
     m3, f3 = d360[p4]["split_margin"], d360[p4]["floor_split"]
+    flip3 = d360[p4]["n_flip"]
     r3_resolved = abs(m3) > V.K_PREREG * f3
     preds.append(("R3 the equatorial gap is predominantly BAROCLINIC",
                   r3_resolved and m3 > 0.0,
@@ -1850,9 +1976,9 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
                   + ("RESOLVED" if r3_resolved else
                      "UNRESOLVED: the margin is inside the bar, so this "
                      "prediction is neither confirmed nor refuted")))
-    rt, _, rt_base = ret[(p4, "T", 360)]
+    rt, _, rt_base, rt_lvl = ret[(p4, "T", 360)]
     rt_up = ret[(p4, "T", 360, "upper")]
-    rt_up_base = ret[(p4, "T", 360, "upper_base")]
+    rt_up_lvl = ret[(p4, "T", 360, "upper_level")]
     # R4 is scored against the registered bar AND against the depth-only
     # baseline the physics review supplied.  Clearing 0.25 while sitting BELOW
     # a mask that knows nothing about the pattern is not evidence of anything.
@@ -1863,16 +1989,20 @@ def report(rows, ts, keep, jets, rowgap, rowfloor, nemo_rows, days, quantum,
     # the pattern.  It was measuring stratification.  Ranking within the upper
     # class removes the depth information and asks the horizontal question R4
     # was written to ask.
-    r4_ok = rt_up > rt_up_base * 2.0
+    r4_ok = rt_up > V.K_PREREG * rt_up_lvl
     preds.append(("R4 the equatorial T divergence holds its own hotspots",
                   r4_ok,
                   f"AS REGISTERED the statistic is VOID here: retention "
-                  f"{rt:.4f} against a DEPTH-ONLY baseline of {rt_base:.4f} -- "
-                  f"below a mask with no knowledge of the pattern, so it was "
-                  f"measuring stratification, and that reading is WITHDRAWN. "
-                  f"DEPTH-CONTROLLED (ranked within the upper class): "
-                  f"{rt_up:.3f} against a baseline of {rt_up_base:.3f}, "
-                  f"{rt_up / rt_up_base:.0f}x -- "
+                  f"{rt:.4f} against a DEPTH-ONLY baseline of {rt_base:.4f} "
+                  f"and a LEVEL baseline of {rt_lvl:.4f} -- below masks with no "
+                  f"knowledge of the pattern, so it was measuring "
+                  f"stratification, and that reading is WITHDRAWN. "
+                  f"LEVEL-CONTROLLED (ranked within the upper class against a "
+                  f"horizontally UNIFORM field carrying the day-10 per-level "
+                  f"rms, which is the only baseline that removes vertical "
+                  f"information): {rt_up:.3f} against {rt_up_lvl:.3f}, "
+                  f"{rt_up / rt_up_lvl:.1f}x the registered {V.K_PREREG:.0f}x "
+                  f"bar -- "
                   + ("the horizontal pattern IS held" if r4_ok
                      else "UNRESOLVED")))
     preds.append(("R5 P6 (subpolar) gap is smaller than P5 (subtropics)",
@@ -2085,9 +2215,18 @@ def figures(rows, ts, keep, jets, rowgap, rowfloor, days, w, wet, out_dir):
                      float(np.max(rowgap[360][0])) * 0.9,
                      bname.split()[0], ha="center", fontsize=7, color="0.25")
     axes[1].set_xlabel("T-row  (dotted = row 99, where f is exactly 0)")
+    # COMPUTED, not asserted.  This caption previously hardcoded "1.5%" into a
+    # figure whose own code computes nothing of the sort -- a probe printing a
+    # number it did not measure, which is the defect class this campaign has
+    # caught most often.  Code review of 84d7f9a56.
+    _p4 = BANDS[3][1]
+    _rr = [abs(float(rowgap[360][i][_p4].sum()
+                     / np.abs(rowgap[360][i][_p4]).sum()))
+           for i in range(N_MEM)]
     fig.suptitle("Per-row transport gap and per-row floor\n"
-                 "The band numbers are sums of the top panel; the equatorial "
-                 "band's sum retains 1.5% of its own summed magnitude.")
+                 "The band numbers are sums of the top panel; at day 360 the "
+                 f"equatorial band's sum retains under {100 * max(_rr):.0f}% of "
+                 "its own summed magnitude (sign undetermined across members).")
     fig.tight_layout()
     fig.savefig(f"{out_dir}/F5_per_row_gap.png", dpi=140)
     plt.close(fig)
