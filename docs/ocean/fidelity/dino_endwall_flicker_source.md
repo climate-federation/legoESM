@@ -132,8 +132,11 @@ Controls pass: both NEMO meridional operands are exact zero; legoESM's direct
 operand is zero and `F_slow` maximum is `3.388e-21 m/s2`, below `1e-12`.
 The helper gives exact 0x and exact doubling at 2x for both components; a
 one-ULP mutation makes each equality fail. The corrected probe additionally
-requires exact 1x entry identity, exact non-stress fields across arms, and one
-call each to the stress, barotropic, and momentum-vmix hooks.
+requires exact 1x entry identity, exact non-stress fields across arms, and the
+active leapfrog event sequence `stress(Nnn), barotropic(Nnn), stress(Nbb),
+momentum-vmix`. The first stress call feeds the live barotropic pass; the
+second comes from the Nbb dissipative pass whose barotropic result is
+discarded. A planted event swap must make the order gate fail.
 
 The downstream B1 response is diagnostic only: zonal wind produces a
 0.129398 m/s u change and `6.34021e-4 m/s` v change by the pre-vmix hook because
@@ -175,6 +178,8 @@ Standing retractions:
 - `utrd_tau == 0` does not mean the physical wind term is zero.
 - NEMO wind is not implicit-only; it enters `dynspg_ts` and `dyn_zdf`.
 - Whole-B1 stress linearity is not a valid exact helper control.
+- Expecting one stress-helper call was wrong: active leapfrog evaluates the
+  helper in both its live Nnn advective pass and its Nbb dissipative pass.
 - Scaling current stress without its previous centred carry is a confounded
   arm.
 - The raw lane mask is already aligned; stripping another halo is wrong.

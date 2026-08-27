@@ -35,6 +35,18 @@ preregistration, six operands, and every cited NEMO source. This is required
 because the DINO `MY_SRC` files are not pinned by the oracle Git revision
 alone. No science threshold changes.
 
+Version 6's first rerun produced **no valid measurement**: the strengthened
+counter found two production helper calls, not the preregistered one. Source
+tracing shows that active leapfrog evaluates `_step_impl` first on Nnn for the
+advective/barotropic pass and again on Nbb for the dissipative pass whose
+barotropic result is discarded (`ocean_model_latlon_cgrid.py:8396-8455` and
+the following Nbb pass). Version 7 registers the live order as
+`stress(Nnn), barotropic(Nnn), stress(Nbb), final momentum-vmix`. The source
+operand is captured from the first call, whose explicit tendency feeds the
+live barotropic pass. Swapping the first two event labels is the planted
+violation and must fail the order equality. No score from the refused run is
+reused and no science threshold changes.
+
 ## Candidate and inputs
 
 Candidate: NEMO places the centred surface-stress increment inside `dyn_zdf`,
@@ -72,8 +84,9 @@ For the whole wet u-face domain and separately for southern row `j=1`, print:
 The exact 0x/1x/2x control is on `surface_stress_faces`: `tau(0x)=0` and
 `tau(2x)=2*tau(1x)` must be bit-exact, and a one-ULP planted mutation must make
 the equality fail. Meridional forcing must be exactly zero on the oracle side
-and no larger than `1e-12` on the legoESM side. A hook count other than one per
-arm, non-finite data, or failed entry identity invalidates every score.
+and no larger than `1e-12` on the legoESM side. Each arm must show the exact
+event sequence `stress, barotropic, stress, momentum-vmix`; a different count
+or order, non-finite data, or failed entry identity invalidates every score.
 
 ## Frozen interpretation
 
