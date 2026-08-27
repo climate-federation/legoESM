@@ -20,13 +20,12 @@
 #   STEP 1  self-recovery CONTROL -- our closure, fed our OWN snapshot column and
 #           our OWN stored en, reproduces our OWN stored K_M_diag/K_H_diag in the
 #           65-105 m entrainment band within the tolerance.  Exit 0 required.
-#   STEP 2  NON-VACUITY -- rerun the control with a DETERMINISTIC N2 x4
-#           perturbation (T,S deviation x2); K ~ 1/sqrt(N2) via the buoyancy
-#           length, so band K must drop ~x0.5 (clear of the x1.5 tol) and the
-#           reproduction MUST break.
-#           The harness returns 0 ONLY IF it breaks.  Proves the ratio gate can
-#           reject (shear x2 was rejected: at floored en band K is
-#           shear-insensitive -- codex #2).
+#   STEP 2  NON-VACUITY -- rerun the EXACT STEP-1 assertion (closure/stored band
+#           ratio in [1/tol, tol]) under a DETERMINISTIC N2 x4 perturbation
+#           (T,S deviation x2), and require that assertion to now FAIL (the
+#           ratio falls outside the band).  The harness also MEASURES and prints
+#           the actual band N2 ratio (not assumed).  Returns 0 ONLY IF the real
+#           gate now rejects -- proving it can reject (codex #5).
 #   STEP 3  the NEMO twin runs ONLY after 1 AND 2 pass.  Prints avm/avt and the
 #           ratio to NEMO avm_k/avt_k -- NO verdict.
 set -uo pipefail
@@ -59,21 +58,21 @@ ls $RGLOB >/dev/null 2>&1 || { echo "FATAL: no restart tiles match $RGLOB"; exit
 
 echo "===================== STEP 1: self-recovery CONTROL ====================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC"
+    --nemo-sbc "$SBC" --rec 4
 rc1=$?
 echo "[gate] control exit = $rc1"
 [ "$rc1" -eq 0 ] || { echo "FATAL: control did NOT reproduce our own stored K -- instrument not trusted; NEMO twin NOT run."; exit 1; }
 
 echo "===================== STEP 2: NON-VACUITY (N2 x4) ======================="
 $PY -u "$HARNESS" --mode control --manifest "$MANI" --snapshot "$SNAP" \
-    --nemo-sbc "$SBC" --perturb-n2 4.0
+    --nemo-sbc "$SBC" --rec 4 --perturb-n2 4.0
 rc2=$?
-echo "[gate] non-vacuity exit = $rc2  (0 = reproduction correctly BROKE)"
-[ "$rc2" -eq 0 ] || { echo "FATAL: control STILL reproduced stored K under N2 x4 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
+echo "[gate] non-vacuity exit = $rc2  (0 = STEP-1 assertion correctly FAILED)"
+[ "$rc2" -eq 0 ] || { echo "FATAL: STEP-1 assertion STILL passed under N2 x4 -- the gate is VACUOUS; NEMO twin NOT run."; exit 1; }
 
 echo "===================== STEP 3: NEMO instant frozen-column TWIN ==========="
 $PY -u "$HARNESS" --mode nemo --manifest "$MANI" \
-    --restart-glob "$RGLOB" --nemo-meshmask "$MESH" --nemo-sbc "$SBC"
+    --restart-glob "$RGLOB" --nemo-meshmask "$MESH" --nemo-sbc "$SBC" --rec 4
 rc3=$?
 echo "[done] nemo twin exit = $rc3"
 exit $rc3

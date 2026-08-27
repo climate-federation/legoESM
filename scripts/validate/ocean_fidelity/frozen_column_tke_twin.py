@@ -77,7 +77,6 @@ DEFAULT_LON_EAST = 260.0
 SURFACE_LO, SURFACE_HI = 5.0, 65.0
 ENTRAINMENT_LO, ENTRAINMENT_HI = 65.0, 105.0     # the reported band
 MIN_COLUMNS = 20                                 # gate: too few columns => FAIL
-NONVAC_FRACTION = 0.75                           # perturbed band-K must be < this x unperturbed
 
 _T_CANDS = ("tn", "thetao", "votemper", "toce", "to")
 _S_CANDS = ("sn", "so", "vosaline", "soce")
@@ -380,19 +379,40 @@ def direct_K(*, T, S, u_cell, v_cell, en, taum, eta, lat, dz_ref, t_depth_ref,
         enj, l_k, cfg, N2=N2, shear_sq=shear_sq, z_interface=z_int,
         N2_prandtl=N2, p_sh2_override=None)
     zk = np.abs(np.asarray(z_coord.z_half_ref[1:-1]))
-    return np.asarray(K_M)[0], np.asarray(K_H)[0], zk
+    return np.asarray(K_M)[0], np.asarray(K_H)[0], zk, np.asarray(N2)[0]
 
 
 # ===========================================================================
-# ONE reduction, matching the oracle (spatial median per depth -> band median)
+# ONE reduction, matching the oracle (spatial median per depth -> band median),
+# through a COMMON validity mask so ours/stored/NEMO drop the SAME cells.
 # ===========================================================================
-def band_reduce(K_cols, zk, lo, hi):
+def common_mask(*arrs):
+    """(ncol, nk) boolean: finite AND positive on EVERY operand.
+
+    The operands share the interior-interface indexing (k -> the same physical
+    interface), so a single per-(column, interface) mask applies to all — our
+    floored-positive sub-seafloor rows and NEMO's zeroed ones drop together, and
+    no operand independently keeps a cell another one lacks (codex #4).  NEMO's
+    wet/tmask is captured by ``avm_k > 0`` (NEMO zeroes dry interfaces).
+    """
+    m = None
+    for a in arrs:
+        a = np.asarray(a, dtype=np.float64)
+        ok = np.isfinite(a) & (a > 0)
+        m = ok if m is None else (m & ok)
+    return m
+
+
+def band_reduce(K_cols, zk, lo, hi, mask=None):
+    """Spatial median per depth over the masked columns, then median over band."""
     K = np.asarray(K_cols, dtype=np.float64)
     zk = np.abs(np.asarray(zk, dtype=np.float64))
     prof = []
     for k in range(K.shape[1]):
-        col = K[:, k]
-        col = col[np.isfinite(col) & (col > 0)]
+        sel = np.isfinite(K[:, k]) & (K[:, k] > 0)
+        if mask is not None:
+            sel = sel & mask[:, k]
+        col = K[sel, k]
         if col.size:
             prof.append((zk[k], float(np.median(col))))
     band = [p for d, p in prof if lo <= d <= hi]
@@ -448,6 +468,10 @@ def run_control(args, oracle, twins):
     taum = load_sbc_taum(args.nemo_sbc, args.rec, twins)
     tau_cols = sample_at_columns(taum, lat, lon, lat[band], lon[band], twins)
     print(f"[stress] control |tau| median {np.nanmedian(tau_cols):.4f} N/m^2")
+    print("[caveat] taum is a 5-DAY-MEAN SBC record and H is a global-constant "
+          "depth; both feed only the ln_mxl0 SURFACE anchor, which has decayed "
+          "by the 65-105 m entrainment band, so the reported band K is weakly "
+          "sensitive to either (no per-column bathymetry invented).")
 
     def call(Tc, Sc):
         return direct_K(
@@ -460,50 +484,61 @@ def run_control(args, oracle, twins):
 
     Tc = np.asarray(z["T"], dtype=np.float64)
     Sc = np.asarray(z["S"], dtype=np.float64)
-    avm, avt, zk = call(Tc, Sc)
-    c_avm = band_reduce(avm, zk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-    c_avt = band_reduce(avt, zk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-
+    # State fed to the gate: perturbed under --perturb-n2 (non-vacuity), else
+    # the true snapshot state.  N2 -> scale T,S deviation from the surface by
+    # sqrt(f) so d(T,S)/dz -> sqrt(f)* and N2 -> ~f* (verified below, not assumed).
     if args.perturb_n2 != 1.0:
-        # DETERMINISTIC N2 perturbation: scale T,S deviation from surface by
-        # sqrt(f) so d(T,S)/dz -> sqrt(f)* and N2 -> ~f*. Gate the PERTURBED
-        # band-K against the UNPERTURBED band-K (closure/closure), not stored.
         s = np.sqrt(args.perturb_n2)
-        Tp = Tc[..., :1] + s * (Tc - Tc[..., :1])
-        Sp = Sc[..., :1] + s * (Sc - Sc[..., :1])
-        pavm, pavt, _ = call(Tp, Sp)
-        p_avm = band_reduce(pavm, zk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-        p_avt = band_reduce(pavt, zk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-        print(f"[control] NON-VACUITY N2 x{args.perturb_n2}: band avm "
-              f"{c_avm:.3e}->{p_avm:.3e}  avt {c_avt:.3e}->{p_avt:.3e}")
-        if not _finite_positive(c_avm, c_avt, p_avm, p_avt):
-            print("[control] NON-VACUITY: non-finite band K -> FAIL")
-            return 3
-        broke = (p_avm < NONVAC_FRACTION * c_avm) and (p_avt < NONVAC_FRACTION * c_avt)
-        print(f"[control] NON-VACUITY: perturbed < {NONVAC_FRACTION}x unperturbed "
-              f"= {broke} (must be True)")
-        return 0 if broke else 3
+        Tg = Tc[..., :1] + s * (Tc - Tc[..., :1])
+        Sg = Sc[..., :1] + s * (Sc - Sc[..., :1])
+    else:
+        Tg, Sg = Tc, Sc
+    avm, avt, zk, N2g = call(Tg, Sg)
 
-    # normal control: reproduce our stored K (full = closure + additive IWM)
-    oavm, oavt, _b, olat, olon, ozk = oracle._load_ours(Path(args.snapshot))
-    oband = _box(olat, olon, args)
-    s_avm = band_reduce(oavm[oband], ozk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-    s_avt = band_reduce(oavt[oband], ozk, ENTRAINMENT_LO, ENTRAINMENT_HI)
-    print("\n[control] entrainment band 65-105 m:")
+    # our stored K (FULL = closure + additive IWM), reduced over the SAME wet box
+    # columns and the SAME interior interfaces as ours (codex #4 common mask).
+    oavm, oavt, _b, _olat, _olon, ozk = oracle._load_ours(Path(args.snapshot))
+    s_avm_cols, s_avt_cols = oavm[band], oavt[band]
+    maskM = common_mask(avm, s_avm_cols)
+    maskH = common_mask(avt, s_avt_cols)
+    c_avm = band_reduce(avm, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+    c_avt = band_reduce(avt, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
+    st_avm = band_reduce(s_avm_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+    st_avt = band_reduce(s_avt_cols, ozk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskH)
+
+    print("\n[control] entrainment band 65-105 m (common wet/interface mask):")
     print(f"[control]   our closure   avm={c_avm:.4e}  avt={c_avt:.4e}")
-    print(f"[control]   our stored    avm={s_avm:.4e}  avt={s_avt:.4e}  "
+    print(f"[control]   our stored    avm={st_avm:.4e}  avt={st_avt:.4e}  "
           "(FULL = closure + additive IWM)")
-    if not _finite_positive(c_avm, c_avt, s_avm, s_avt):
+    if not _finite_positive(c_avm, c_avt, st_avm, st_avt):
         print("[control]   non-finite/empty band reduction -> FAIL")
         return 4
-    r_m, r_t = c_avm / s_avm, c_avt / s_avt
-    print(f"[control]   ratio closure/stored  avm x{r_m:.3f}  avt x{r_t:.3f}  "
-          "(shortfall = additive-IWM fraction)")
+    r_m, r_t = c_avm / st_avm, c_avt / st_avt
     lo, hi = 1.0 / args.control_tol, args.control_tol
-    ok = (lo <= r_m <= hi) and (lo <= r_t <= hi)
+    in_band = (lo <= r_m <= hi) and (lo <= r_t <= hi)
+    print(f"[control]   ratio closure/stored  avm x{r_m:.3f}  avt x{r_t:.3f}  "
+          f"(in [x{1/args.control_tol:.2f}, x{args.control_tol}] = {in_band}; "
+          "shortfall = additive-IWM fraction)")
+
+    if args.perturb_n2 != 1.0:
+        # Real-gate non-vacuity (codex #5): rerun the ACTUAL STEP-1 assertion
+        # (closure/stored in the band) under the perturbation and require it to
+        # now FAIL.  Also MEASURE the band N2 ratio so the "N2 x{f}" claim is
+        # verified, not assumed.
+        _, _, _, N2_base = call(Tc, Sc)
+        n_base = band_reduce(N2_base, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+        n_pert = band_reduce(N2g, zk, ENTRAINMENT_LO, ENTRAINMENT_HI, maskM)
+        n_ratio = n_pert / n_base if n_base else float("nan")
+        print(f"[control] NON-VACUITY N2 x{args.perturb_n2} requested; MEASURED "
+              f"band N2 ratio perturbed/control = x{n_ratio:.3f}")
+        broke = not in_band
+        print(f"[control] NON-VACUITY: STEP-1 assertion now FAILS = {broke} "
+              "(must be True -> the real gate can reject)")
+        return 0 if broke else 3
+
     print(f"[control]   CONFIRMED: closure reproduces stored K within x"
-          f"{args.control_tol} = {ok}")
-    return 0 if ok else 4
+          f"{args.control_tol} = {in_band}")
+    return 0 if in_band else 4
 
 
 def run_nemo(args, oracle, twins):
@@ -531,8 +566,11 @@ def run_nemo(args, oracle, twins):
     tau_cols = sample_at_columns(taum, nav_lat, nav_lon,
                                  nav_lat[band], nav_lon[band], twins)
     print(f"[stress] NEMO |tau| median {np.nanmedian(tau_cols):.4f} N/m^2")
+    print("[caveat] taum is a 5-DAY-MEAN SBC record and H is a global-constant "
+          "depth; both feed only the ln_mxl0 SURFACE anchor, weak at the "
+          "65-105 m band (no per-column bathymetry invented).")
 
-    avm, avt, zk = direct_K(
+    avm, avt, zk, _N2 = direct_K(
         T=R["T"][band][None], S=R["S"][band][None],
         u_cell=u_cell[band][None], v_cell=v_cell[band][None],
         en=R["en"][band][:, 1:][None], taum=tau_cols[None, :], eta=eta,
@@ -545,22 +583,33 @@ def run_nemo(args, oracle, twins):
     ok_all = True
     for name, lo, hi in (("SURFACE 5-65 m", SURFACE_LO, SURFACE_HI),
                          ("ENTRAINMENT 65-105 m", ENTRAINMENT_LO, ENTRAINMENT_HI)):
-        o_m = band_reduce(avm, zk, lo, hi)
-        o_t = band_reduce(avt, zk, lo, hi)
-        n_m = band_reduce(n_avmk, w_interior, lo, hi)
-        n_t = band_reduce(n_avtk, w_interior, lo, hi)
+        # PRIMARY: avm (viscosity) — the EUC-relevant quantity, and apples-to-
+        # apples (no Prandtl time-level difference).  Common mask across ours+NEMO.
+        maskM = common_mask(avm, n_avmk)
+        o_m = band_reduce(avm, zk, lo, hi, maskM)
+        n_m = band_reduce(n_avmk, w_interior, lo, hi, maskM)
         print(f"\n[nemo] {name}:")
-        print(f"[nemo]   ours (closure)   avm={o_m:.4e}  avt={o_t:.4e}")
-        print(f"[nemo]   NEMO avm_k/avt_k  avm={n_m:.4e}  avt={n_t:.4e}")
-        if _finite_positive(o_m, o_t, n_m, n_t):
-            print(f"[nemo]   ratio ours/NEMO   avm x{o_m / n_m:.3f}  "
-                  f"avt x{o_t / n_t:.3f}  "
-                  f"(median-local Pr ratio x{(o_m / n_m) / (o_t / n_t):.3f})")
+        print(f"[nemo]   PRIMARY avm  ours={o_m:.4e}  NEMO avm_k={n_m:.4e}", end="")
+        if _finite_positive(o_m, n_m):
+            print(f"  ->  ratio ours/NEMO x{o_m / n_m:.3f}")
         else:
-            print("[nemo]   non-finite/empty band reduction on this band")
-            ok_all = False
-    print("\n[nemo] instant-vs-instant, NEMO's OWN en, closure-vs-closure "
-          "(avm_k/avt_k). Numbers only, no verdict.")
+            print("  ->  non-finite/empty band reduction"); ok_all = False
+        # SECONDARY: avt (heat) — NEMO's avt_k applies a post-solve Prandtl
+        # pdlr from rn2b (BEFORE-level N2) and face-native Burchard shear, while
+        # our direct call uses current N2 + centered u/v, so this is NOT
+        # apples-to-apples (codex #1). Reported, caveated, not gated.
+        maskH = common_mask(avt, n_avtk)
+        o_t = band_reduce(avt, zk, lo, hi, maskH)
+        n_t = band_reduce(n_avtk, w_interior, lo, hi, maskH)
+        print(f"[nemo]   avt (heat, Prandtl-time-level CAVEAT — NOT apples-to-"
+              f"apples)  ours={o_t:.4e}  NEMO avt_k={n_t:.4e}", end="")
+        if _finite_positive(o_t, n_t):
+            print(f"  ->  ratio x{o_t / n_t:.3f}")
+        else:
+            print("  ->  non-finite/empty band reduction")
+    print("\n[nemo] instant-vs-instant, NEMO's OWN en, closure-vs-closure. "
+          "avm is the PRIMARY trusted number; avt carries the Prandtl "
+          "time-level caveat. Numbers only, no verdict.")
     return 0 if ok_all else 5
 
 
@@ -581,8 +630,8 @@ def build_arg_parser():
     p.add_argument("--lon-east", type=float, default=DEFAULT_LON_EAST)
     p.add_argument("--snapshot", type=Path, default=None)
     p.add_argument("--perturb-n2", type=float, default=1.0,
-                   help="non-vacuity: scale N2 by this; perturbed band-K must "
-                        f"fall below {NONVAC_FRACTION}x the unperturbed band-K")
+                   help="non-vacuity: scale N2 by this; the STEP-1 closure/"
+                        "stored band assertion must then FAIL (real gate)")
     p.add_argument("--control-tol", type=float, default=1.5)
     p.add_argument("--restart-glob", type=str, default=None)
     p.add_argument("--nemo-meshmask", type=Path, default=None,
