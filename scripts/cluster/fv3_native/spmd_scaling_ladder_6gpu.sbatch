@@ -37,13 +37,21 @@ scontrol show hostnames "$SLURM_JOB_NODELIST"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export PYTHONPATH="$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src"
 cd "$REPO"
+BENCH=scripts/bench/bench_fv3_duo_spmd_scaling.py
 
-for RES in ${RESLIST:-192 384}; do
-  echo "=== C${RES} km=10 ==="
-  srun --mpi=pmix \
+for RES in ${RESLIST:-96}; do
+  echo "=== C${RES} km=10 : sharded (6 dev, 3 nodes) ==="
+  srun --mpi=pmix --nodes=3 --ntasks=6 --ntasks-per-node=2 \
     env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-    $PY scripts/bench/bench_fv3_duo_spmd_scaling.py \
-      --resolution $RES --km 10 --dt 120.0 --n-warmup 2 --n-timed 20
-  echo "C${RES}_rc=$?"
+    $PY $BENCH --mode sharded --resolution $RES --km 10 --dt 120.0 \
+      --n-warmup 3 --n-timed 20
+  echo "C${RES}_sharded_rc=$?"
+
+  echo "=== C${RES} km=10 : single-device (1 GPU) ==="
+  srun --nodes=1 --ntasks=1 --gres=gpu:1 \
+    env JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+    $PY $BENCH --mode single --resolution $RES --km 10 --dt 120.0 \
+      --n-warmup 3 --n-timed 20
+  echo "C${RES}_single_rc=$?"
 done
 echo DONE
