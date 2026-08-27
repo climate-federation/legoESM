@@ -477,7 +477,7 @@ def tke_equation_decomposition(
     floor_replay = _replay_summary(
         floor_arm[..., k], base_final[..., k], e_n[..., k], pop2)
     base_pin_fraction = float(np.mean(np.isclose(
-        base_final[row, excess_population, k], float(cfg.tke_surface_min),
+        base_solve[row, excess_population, k], float(cfg.tke_surface_min),
         rtol=0.0, atol=1.0e-15)))
     nemo_below_surface_floor_fraction = float(np.mean(
         e_n[row, excess_population, k] < float(cfg.tke_surface_min)))
