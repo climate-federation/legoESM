@@ -2050,7 +2050,41 @@ def figures(rows, ts, keep, jets, rowgap, rowfloor, days, w, wet, out_dir):
     fig.tight_layout()
     fig.savefig(f"{out_dir}/F4_zonal_mean_dT_day360.png", dpi=140)
     plt.close(fig)
-    print(f"\nfigures written to {out_dir}/F1..F4")
+    # F5 -- the per-row ledger, which is the headline and had no figure.
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    jj = np.arange(A.NY)
+    for day, c in zip(HORIZONS, ("0.7", "0.5", "0.3", "C3")):
+        axes[0].plot(jj, rowgap[day][0], color=c, lw=1.2, label=f"day {day}")
+    axes[0].axhline(0.0, color="k", lw=0.6)
+    axes[0].set_ylabel("per-row transport gap [Sv]")
+    axes[0].legend(fontsize=7)
+    axes[0].set_title("The gap the band reduction cancels away")
+    r = np.abs(rowgap[360][0]) / np.where(rowfloor[360] > 0, rowfloor[360],
+                                          np.inf)
+    axes[1].semilogy(jj, np.maximum(r, 1e-3), color="C3", lw=1.2)
+    axes[1].axhline(V.K_PREREG, color="k", ls="--", lw=0.8,
+                    label=f"{V.K_PREREG:.0f}x  INDISTINGUISHABLE bar")
+    axes[1].axhline(ESCALATION_FLOORS, color="C1", ls=":", lw=1.0,
+                    label=f"{ESCALATION_FLOORS:.0f}x  escalation bar")
+    axes[1].set_ylabel("|gap| / that ROW's own floor, day 360")
+    axes[1].legend(fontsize=7)
+    for ax in axes:
+        for _, brows in BANDS[1:]:
+            ax.axvline(brows.start - 0.5, color="k", lw=0.8)
+        ax.axvline(STRUCTURAL_ZERO_ROW, color="0.4", lw=0.8, ls=":")
+    for bname, brows in BANDS:
+        b = np.arange(A.NY)[brows]
+        axes[0].text(float(np.mean(b)),
+                     float(np.max(rowgap[360][0])) * 0.9,
+                     bname.split()[0], ha="center", fontsize=7, color="0.25")
+    axes[1].set_xlabel("T-row  (dotted = row 99, where f is exactly 0)")
+    fig.suptitle("Per-row transport gap and per-row floor\n"
+                 "The band numbers are sums of the top panel; the equatorial "
+                 "band's sum retains 1.5% of its own summed magnitude.")
+    fig.tight_layout()
+    fig.savefig(f"{out_dir}/F5_per_row_gap.png", dpi=140)
+    plt.close(fig)
+    print(f"\nfigures written to {out_dir}/F1..F5")
 
 
 def git_sha_now():
