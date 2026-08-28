@@ -25,15 +25,18 @@ def instruments():
         import validate.ocean_fidelity.dino_1226.heat_discriminator as heat_discriminator
         import validate.ocean_fidelity.dino_1226.kamm_twin_90d as kamm_twin_90d
         import validate.ocean_fidelity.dino_1226.mode_projection as mode_projection
+        import validate.ocean_fidelity.dino_1226.tcarry_baseline_reconcile as tcarry_reconcile
         import validate.ocean_fidelity.dino_1226.tcarry_basin_reverdict as tcarry_reverdict
         importlib.reload(mode_projection)
         importlib.reload(heat_discriminator)
         importlib.reload(kamm_twin_90d)
+        importlib.reload(tcarry_reconcile)
         importlib.reload(tcarry_reverdict)
         return types.SimpleNamespace(
             kamm_twin_90d=kamm_twin_90d,
             heat_discriminator=heat_discriminator,
             mode_projection=mode_projection,
+            tcarry_reconcile=tcarry_reconcile,
             tcarry_reverdict=tcarry_reverdict,
         )
     finally:
@@ -1629,3 +1632,31 @@ def test_tcarry_retained_stage1_producer_is_independent_of_amended_scorer_head(
     assert expected(90, scorer) == instruments.tcarry_reverdict.STAGE1_PRODUCER_GIT_SHA
     assert expected(90, scorer) != scorer
     assert expected(360, scorer) == scorer
+
+
+def test_tcarry_reconciliation_old_gap_receipt_is_numeric_and_red_capable(
+        instruments):
+    gate = instruments.tcarry_reconcile._old_gap_matches
+    expected = -0.010717232432999602
+    assert gate(expected + 8.9e-16, expected)
+    assert not gate(expected + 1.0e-6, expected)
+    assert not gate(np.nan, expected)
+
+
+def test_tcarry_reconciliation_clock_escape_is_scoped_to_historical_artifact(
+        instruments, monkeypatch):
+    reconcile = instruments.tcarry_reconcile
+    seen = []
+
+    def fake_load(_path, day):
+        seen.append((day, os.environ.get("DINO_GATE_ALLOW_LEGACY_CLOCK")))
+        return {"u": np.zeros(1)}
+
+    monkeypatch.delenv("DINO_GATE_ALLOW_LEGACY_CLOCK", raising=False)
+    monkeypatch.setattr(reconcile.G, "load_candidate", fake_load)
+    monkeypatch.setattr(reconcile.R, "_reduce", lambda state: (0.0, np.zeros(14)))
+    nemo = {"u": np.zeros(1)}
+    reconcile._gap("old.npz", 30, nemo, historical=True)
+    reconcile._gap("current.npz", 30, nemo, historical=False)
+    assert seen == [(30, "1"), (30, None)]
+    assert "DINO_GATE_ALLOW_LEGACY_CLOCK" not in os.environ
