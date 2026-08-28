@@ -82,6 +82,7 @@ sh2_probe = _import_sibling("_zdf_sh2_capture", "sh2_canonical.py")
 sh2_walk = _import_sibling("_zdf_sh2_walk", "sh2_walk.py")
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
+    _nemo_bn2_zrw,
     NemoSEOSConfig,
     compute_buoyancy_frequency_nemo_bn2,
     nemo_bn2_depth_ladders,
@@ -1203,7 +1204,14 @@ def main() -> int:
                             t_lo = np.asarray(T)[..., 1:1 + npr]
                             s_up = np.asarray(S)[..., :npr]
                             s_lo = np.asarray(S)[..., 1:1 + npr]
-                            zrw_l = (gw_l - gd_lo) / (gd_up - gd_lo)
+                            zrw_l = np.asarray(_nemo_bn2_zrw(
+                                jnp.asarray(np.asarray(gdept)[..., :npr + 1]),
+                                jnp.asarray(gw_l), evaluation="nemo_literal",
+                                gdept_0=jnp.asarray(
+                                    np.asarray(zrw_gdept_0)[..., :npr + 1]),
+                                gdepw_0=jnp.asarray(
+                                    np.asarray(zrw_gdepw_0)[..., :npr]),
+                                stretch=jnp.asarray(zrw_stretch)))
                             zaw_l = aa_lo * (1.0 - zrw_l) + aa_up * zrw_l
                             zbw_l = bb_lo * (1.0 - zrw_l) + bb_up * zrw_l
                             num_l = np.float64(NEMO_CONSTANTS_CONFIG.g) * (
