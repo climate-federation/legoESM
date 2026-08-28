@@ -81,6 +81,65 @@ artifact-binding amendment.  The paired scorer now carries the new baseline,
 new floor, floor-output hash, and both retained artifact hashes; its frozen
 classifier and compensation rules are unchanged.
 
+### 2026-08-28 final paired score — UNRESOLVED/FLOOR
+
+The hash-bound paired scorer ran at clean commit
+`e22db0c387bacd1a0ff7954bf0a69c7e3f88dc00`, scorer SHA-256
+`4e1b7c3ae699b3d0ea43a21226be6f1af1dad50644d855db0edfc18fea8afa7e`.
+The floor receipt, retained artifact hashes, producer/config/stagger receipts,
+day-0 bit identity, independent basin reducers, and every planted control
+passed.  The registered basin outputs are:
+
+| quantity | legacy U-as-T | corrected T | corrected − legacy |
+|---|---:|---:|---:|
+| `Gbasin90` [Sv] | `-0.4390855099920348` | `-0.43905611603502415` | `+0.00002939395701062608` |
+| `G4` rows 1..4 [Sv] | `-0.2971375104352858` | `-0.29719818378611107` | `-0.00006067335082526881` |
+
+`R90 = Delta90 / abs(Glegacy90) = 0.00006694358238138922`
+(`0.006694358238138922%`).  But the frozen classifier applies the floor branch
+first: `abs(Delta90) = 0.00002939395701062608 Sv` is only
+`0.09626824938878994` of
+`2F90_current = 0.00030533386861451427 Sv`.  The mechanical verdict is
+therefore **UNRESOLVED/FLOOR**.  The otherwise sub-2% ratio cannot be promoted
+to REFUTED because the registered decision order makes that branch
+unreachable inside `2F`.
+
+The complete row battery is:
+
+| row `j` | legacy [Sv] | corrected [Sv] | delta [Sv] |
+|---:|---:|---:|---:|
+| 0 | `0` | `0` | `0` |
+| 1 | `-0.07088386596773866` | `-0.0708998081403559` | `-0.000015942172617244843` |
+| 2 | `-0.08117908510875305` | `-0.08119610933637306` | `-0.000017024227620010546` |
+| 3 | `-0.08810307286198249` | `-0.08811839383697104` | `-0.000015320974988547453` |
+| 4 | `-0.05697148649681161` | `-0.0569838724724111` | `-0.000012385975599493726` |
+| 5 | `-0.05266128077617971` | `-0.05267467673638504` | `-0.000013395960205331292` |
+| 6 | `-0.03831368521133194` | `-0.038323682001471404` | `-0.000009996790139465972` |
+| 7 | `-0.027969468239574802` | `-0.02796631418510942` | `+0.0000031540544653818614` |
+| 8 | `-0.02057923932879091` | `-0.020570519785424013` | `+0.000008719543366897398` |
+| 9 | `-0.012030726034930161` | `-0.012022903939897356` | `+0.00000782209503280562` |
+| 10 | `-0.002109427890088389` | `-0.002097883789627164` | `+0.000011544100461224893` |
+| 11 | `+0.002730282784913385` | `+0.0027432250296582916` | `+0.000012942244744906795` |
+| 12 | `+0.004570590067720315` | `+0.004573887439333624` | `+0.000003297371613308897` |
+| 13 | `+0.004414955071513571` | `+0.004480935720008183` | `+0.00006598064849461238` |
+
+Every compensation control is safe:
+
+| acceptance metric | corrected-minus-legacy absolute-gap change | allowed |
+|---|---:|---:|
+| ACC | `+0.0005189000472256566` | `0.091` |
+| upper contrast | `-1.3781865026984974e-07` | `0.00011` |
+| deep contrast | `-7.306341100361824e-08` | `0.000045` |
+| surface sigma max | `-5.068818609288428e-07` | `0.000095` |
+| surface sigma mean | `-3.194503950254557e-08` | `0.000095` |
+
+Both arms are inside all five 5x acceptance gates.  Output
+`/tmp/tcarry_basin_reverdict_current.json` has SHA-256
+`a4ddaf7e3c5862ac6c661ca447e72476a085f929c16ade1ba5bedd07b0bb8f89`.
+The corrected bridge carry owns most wall flicker, but its day-90 southern-
+basin transport response is below the measured two-sided floor; this lane
+does not establish basin-deficit ownership or non-ownership.
+
 ## 2026-08-28 baseline re-registration after epoch ownership
 
 The hash-bound EEN-by-bridge-Omega fourth corner measured

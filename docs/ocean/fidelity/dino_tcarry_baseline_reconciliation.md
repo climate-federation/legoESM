@@ -188,3 +188,36 @@ re-registered as `Glegacy90 = -0.43908550999203477 Sv`, but its historical
 floor is invalidated rather than transferred.  STOP now belongs only to the
 unmeasured current-SHA floor: seed arms 1/2/3 remain, followed by one CPU
 floor reduction and one CPU re-score of the retained corrected-T pair.
+
+## 2026-08-28 final reconciliation — basin effect is at the floor
+
+The complete Rule-1e chain is now closed:
+
+1. The historical `-0.4257848785815366 Sv` baseline belonged to the old
+   EEN-off/rounded-Omega epoch; the current legacy arm measured
+   `-0.43908550999203477 Sv`, so the original paired scorer correctly stopped.
+2. Current-trajectory EEN-off alone measured `-0.3484425774226274 Sv` and
+   REFUTED single-axis ownership.
+3. Rounded bridge Omega alone measured `-0.4326316717808396 Sv` and REFUTED
+   single-axis ownership.
+4. Their measured fourth corner was `-0.42606954856856305 Sv`, inside the
+   frozen historical endpoint band, with a large non-additive interaction
+   `I = -0.0840808093571308 Sv`.  This CONFIRMED combined EEN+Omega epoch
+   ownership and licensed the current baseline.
+5. The new legoESM control+seed spread is
+   `0.0001526669333485373 Sv`.  Directly re-deriving the unchanged NEMO
+   `RUN_VERDICT360_M0..M3` side gives `1.7109343555843327e-08 Sv`; the same
+   two-sided RSS rule as the old floor yields
+   `F90_current = 0.00015266693430725714 Sv`.
+6. Against that baseline and floor, corrected T carry moves
+   `Gbasin90` from `-0.4390855099920348` to `-0.43905611603502415 Sv`:
+   `Delta90 = +0.00002939395701062608 Sv`, only 0.0963 of `2F`, while every
+   acceptance/compensation gate passes.  The frozen verdict is therefore
+   **UNRESOLVED/FLOOR**, before the ratio-based CONFIRM/REFUTE branches.
+
+The physical and campaign conclusions are deliberately separate.  The T-carry
+bridge glue remains the measured dominant owner of the five-day wall flicker.
+At day 90, however, its southern-basin transport response is not distinguishable
+from the current two-sided ensemble floor.  The full row and gate batteries are
+recorded in `PREREG_tcarry_basin_reverdict.md`; paired-score output SHA-256 is
+`a4ddaf7e3c5862ac6c661ca447e72476a085f929c16ade1ba5bedd07b0bb8f89`.
