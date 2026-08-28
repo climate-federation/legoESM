@@ -1603,9 +1603,10 @@ def test_tcarry_basin_day0_identity_rejects_nonfinite_and_changed_bits(instrumen
 def test_tcarry_basin_baseline_gate_can_fail(instruments):
     gate = instruments.tcarry_reverdict._check_baseline
     assert instruments.tcarry_reverdict.BASELINE[90] == -0.43908550999203477
-    assert np.isnan(instruments.tcarry_reverdict.FLOOR[90])
-    with pytest.raises(SystemExit, match="F90 is UNMEASURED"):
-        gate(instruments.tcarry_reverdict.BASELINE[90], 90)
+    assert instruments.tcarry_reverdict.FLOOR[90] == 0.00015266693430725714
+    gate(instruments.tcarry_reverdict.BASELINE[90], 90)
+    with pytest.raises(SystemExit, match="misses registered"):
+        gate(instruments.tcarry_reverdict.BASELINE[90] + 3.0, 90)
     gate(instruments.tcarry_reverdict.BASELINE[360], 360)
     with pytest.raises(SystemExit, match="misses registered"):
         gate(instruments.tcarry_reverdict.BASELINE[360] + 3.0, 360)
