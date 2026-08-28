@@ -348,17 +348,23 @@ def main() -> int:
                 "first_passing_substitution": (
                     "NEMO carried p_avm" if avm_sub_m["pass"] else None),
                 "next_round_fix_design": {
-                    "option": "tke_shear_avm_source",
+                    "option": "tke_preclosure_coeff_source",
                     "faithful_default": "carried_previous_step",
                     "legacy_opt_in": "current_subiteration",
                     "state_change": "carry avm/avt closure fields across steps; "
                                     "seed bridged runs from restart avm/avt",
-                    "kernel_change": "thread carried avm into zdf_sh2 and the "
-                                     "rn2b*p_avm Prandtl numerator while leaving "
-                                     "current K_M for the TKE solve/closure update",
+                    "kernel_change": "thread carried p_avm through zdf_sh2, "
+                                     "the rn2b*p_avm Prandtl numerator, TKE "
+                                     "matrix diagonals, and wave surface "
+                                     "denominator; thread carried p_avt through "
+                                     "the -p_avt*rn2 RHS. Only tke_avn after "
+                                     "the solve overwrites the closure fields "
+                                     "for the next step",
                     "required_red_tests": [
                         "distinct carried/current arrays select carried bits",
                         "restart avm bridge identity and next-step carry",
+                        "matrix, RHS, and wave denominator consume carried fields",
+                        "tke_avn overwrite happens only after the solve",
                         "legacy arm reproduces current-subiteration bits",
                         "JIT and finite gradients",
                     ],
@@ -483,7 +489,11 @@ def main() -> int:
         HERE / "dump_lane.py",
         HERE / "eos_rab_bn2_per_element.py",
         ORACLE / "cfgs/DINO/MY_SRC/stpmlf.F90",
+        ORACLE / "cfgs/DINO/MY_SRC/zdftke.F90",
+        ORACLE / "cfgs/DINO/WORK/zdfphy.F90",
+        ORACLE / "cfgs/DINO/WORK/zdfsh2.F90",
         ORACLE / "src/OCE/TRA/eosbn2.F90",
+        ORACLE / "src/OCE/ZDF/zdfsh2.F90",
     ]
     input_paths = [
         RUN / "DINO_00005760_restart.nc", RUN / "mesh_mask.nc", RUN / "ocean.output",
