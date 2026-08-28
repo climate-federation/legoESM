@@ -181,13 +181,14 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
         if a is None:
             continue
         _arr = jnp.asarray(a)
-        if _arr.ndim == 0:
-            # scalar timestep / damping coeff (dt, dt2, kgb, ...):
-            # weak-promoting, not a field -- it does not drive the
-            # phase's storage dtype, so it is not part of the field
-            # uniformity invariant (fp32/mixed increment 2). A real
-            # strong-f64 scalar leaking still surfaces as an f64 FIELD
-            # at the next phase's gate.
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
             continue
         dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):

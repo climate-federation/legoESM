@@ -248,13 +248,14 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
         if a is None:
             continue
         _arr = jnp.asarray(a)
-        if _arr.ndim == 0:
-            # scalar timestep / damping coeff (dt, dt2, kgb, ...):
-            # weak-promoting, not a field -- it does not drive the
-            # phase's storage dtype, so it is not part of the field
-            # uniformity invariant (fp32/mixed increment 2). A real
-            # strong-f64 scalar leaking still surfaces as an f64 FIELD
-            # at the next phase's gate.
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
             continue
         dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
@@ -446,6 +447,11 @@ def _dot_static(w: np.ndarray, v):
     Fortran/NumPy accumulation order -- ``jnp.sum`` would let XLA
     reassociate.
     """
+    # w is an fp64 host weight table; cast to the traced field's dtype so
+    # an f32 exchange stays f32 (fp32/mixed increment 2). fp64 is byte-
+    # identical (v is f64 -> w stays f64). The cast is once, hoisted out
+    # of the unrolled accumulation.
+    w = jnp.asarray(w, jnp.asarray(v).dtype)
     acc = w[..., 0] * v[..., 0]
     for lev in range(1, w.shape[-1]):
         acc = acc + w[..., lev] * v[..., lev]
@@ -470,11 +476,20 @@ def _apply_scatter(flat, sc: _Scatter, sign: float = 1.0):
     # tracer exists and cannot contaminate a gradient (see the module
     # docstring's layout contract, item 6).
     eff = sc.base * np.where(sc.sgn_pow == 1, float(sign), 1.0)
-    return flat.at[sc.dst].set(flat[sc.src] * eff)
+    # eff is the exchange-WEIGHT record (fp64 host constant); cast it to
+    # the field's storage dtype so an f32 halo exchange does not promote
+    # to f64 and scatter-narrow back (fp32/mixed increment 2; codex+GLM
+    # located this as the residual f64->f32 scatter). fp64 is byte-
+    # identical (flat is f64 -> eff stays f64).
+    return flat.at[sc.dst].set(flat[sc.src] * jnp.asarray(eff, flat.dtype))
 
 
 def _apply_blend(flat, bl: _Blend):
-    return flat.at[bl.dst].set(0.5 * (flat[bl.dst] + bl.sign * flat[bl.src]))
+    # bl.sign is an fp64 record constant -> cast to the field dtype (same
+    # reason as _apply_scatter; byte-identical for fp64).
+    return flat.at[bl.dst].set(
+        0.5 * (flat[bl.dst] + jnp.asarray(bl.sign, flat.dtype)
+               * flat[bl.src]))
 
 
 def _apply_stencil(out_flat, src_flat, st: _Stencil):
@@ -1697,7 +1712,8 @@ def average_allflux_shared_edges(afx6, afy6, tab: DuoHaloTables):
     flat = jnp.concatenate([x, y], axis=1)
     bl = tab.avg_c
     flat = flat.at[:, bl.dst].set(
-        0.5 * (flat[:, bl.dst] + bl.sign * flat[:, bl.src]))
+        0.5 * (flat[:, bl.dst]
+               + jnp.asarray(bl.sign, flat.dtype) * flat[:, bl.src]))
     nx = x.shape[1]
     xs = jnp.moveaxis(flat[:, :nx].reshape((sel.size,) + afx6.shape[:-1]),
                       0, -1)
