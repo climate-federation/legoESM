@@ -36,6 +36,12 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "dump_beta_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
     "tke_dump_rn2b.bin": ("before", "rn2b = bn2(ts(...,Nbb)); zdfmxl.F90:98 integrates rn2b"),
+    # Geometry paired with the before T/S above is nevertheless Kmm=Nnn.
+    # ldftra's instrumentation writes the live arrays verbatim at the same
+    # step; register geometry by its own level instead of inheriting the T/S
+    # label from rn2b.
+    "eiv_dump_gdept.bin": ("now", "ldftra.F90:951 gdept(...,Kmm); Kmm=Nnn"),
+    "eiv_dump_e3w.bin": ("now", "ldftra.F90:951 e3w(...,Kmm); Kmm=Nnn"),
     # #1226 item-11 Prandtl-stage instrumentation (zdftke.F90:206-244, the
     # SAME "IF(kt==nit000.AND.nn_pdl==1)" dump block as tke_dump_rn2b.bin
     # above): sh2/avm_in are the INPUT p_sh2/p_avm arrays tke_tke receives

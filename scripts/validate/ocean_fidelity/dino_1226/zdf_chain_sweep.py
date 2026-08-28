@@ -55,7 +55,9 @@ from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.eos import (
     NemoSEOSConfig,
     compute_buoyancy_frequency_nemo_bn2,
+    nemo_bn2_depth_ladders,
     nemo_bn2_live_ladders,
+    nemo_r3t_stretch,
     nemo_seos_alpha_beta,
 )
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump
@@ -243,6 +245,15 @@ def main() -> int:
         add("NEMO dumped alpha/beta", assemble_bn2(
             jnp.asarray(alpha_n[..., :nk + 1]), jnp.asarray(beta_n[..., :nk + 1]),
             TT, SS, gd, gw, derived_e3w))
+        # NEMO stores and stretches e3w as its own operand: e3w_0*(1+r3t).
+        # This candidate is constructible in production without an oracle dump
+        # and distinguishes that operation order from diff(gdept_0*stretch).
+        gd_ref, _ = nemo_bn2_depth_ladders(st["z_coord"])
+        e3w_ref = jnp.diff(jnp.asarray(gd_ref, dtype=T.dtype))[..., :nk]
+        stretch = nemo_r3t_stretch(st["z_coord"], st["eta"], st["H_bathy"])
+        e3w_factorized = e3w_ref[None, None, :] * stretch[..., None]
+        add("factorized e3w_0*(1+r3t) divisor", assemble_bn2(
+            aa, bb, TT, SS, gd, gw, e3w_factorized))
         e3w_dump = jnp.asarray(e3w_n_full[..., 1:1 + nk], dtype=T.dtype)
         add("NEMO live e3w(Kmm) divisor", assemble_bn2(aa, bb, TT, SS, gd, gw,
                                                        e3w_dump))
@@ -254,6 +265,9 @@ def main() -> int:
             "derived_e3w_vs_dump": metrics(np.asarray(derived_e3w),
                                             np.asarray(e3w_dump), wet, focus,
                                             POINTWISE_BAR),
+            "factorized_e3w_vs_dump": metrics(np.asarray(e3w_factorized),
+                                               np.asarray(e3w_dump), wet, focus,
+                                               POINTWISE_BAR),
             "candidates_in_nemo_evaluation_order": candidates,
             "first_passing_substitution": first_passing,
         }
@@ -280,7 +294,8 @@ def main() -> int:
         "jax": importlib.metadata.version("jax"), "numpy": np.__version__,
         "jax_backend": jax.default_backend(),
         "time_levels": {x: time_level_for_dump(x) for x in
-                        ("dump_alpha_b.bin", "dump_beta_b.bin", "tke_dump_rn2b.bin")},
+                        ("dump_alpha_b.bin", "dump_beta_b.bin", "tke_dump_rn2b.bin",
+                         "eiv_dump_gdept.bin", "eiv_dump_e3w.bin")},
         "focus_columns_ji": [list(x) for x in focus],
         "bars": {"pointwise_column": POINTWISE_BAR, "corr": CORR_BAR,
                  "rms_ratio_epsilon": RATIO_EPS},
