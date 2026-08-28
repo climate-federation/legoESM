@@ -69,6 +69,19 @@ Round-2 machine-readable result:
 The stamped probe/tree SHA is
 `a58c33d5c7b7d4788f921d8626d9f499e29ff445`.  All planted controls fired.
 
+### Round-2 adversarial review
+
+Two independent final read-only reviews ended `NON-HOLD`.  The measurement
+reviewer reran the committed CPU/fp64 sweep from the final production delta and
+reproduced the artifact byte-for-byte (SHA256 above), verified every source and
+input stamp, and passed 92 delta-focused tests.  The physics reviewer passed 25
+prior-regression tests and mutation-tested the production MLD helper: replacing
+only its multiplier with reconstructed `diff(gdept)` changes the doubled-native
+case from 20 m/base 1 to 40 m/base 2, so the shared-e3w control is red-capable.
+Review HOLDs on generic MPAS/ORCA geometry, the flat NEMO bridge, native operand
+validation, row-4 provenance, and the full pre-`tke_avn` carry design were all
+fixed before sign-off.
+
 The remainder of this document preserves the accepted round-1 evidence and
 design history; its statement that the sweep stopped at row 2 is historical.
 
