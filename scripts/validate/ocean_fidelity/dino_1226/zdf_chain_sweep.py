@@ -1005,9 +1005,11 @@ def main() -> int:
                         bshear = np.float64(pr_cfg.bshear_floor)
                         zdiv_l = sh2_l + bshear
                         safe_zdiv_l = np.where(zdiv_l == 0.0, 1.0, zdiv_l)
-                        zri_strat_l = rn2b_l * avm_l * np.where(
-                            zdiv_l == 0.0, 1.0 / bshear,
-                            1.0 / safe_zdiv_l)
+                        numerator_l = rn2b_l * avm_l
+                        zri_strat_l = np.where(
+                            zdiv_l == 0.0,
+                            numerator_l / bshear,
+                            numerator_l / safe_zdiv_l)
                         zri_l = np.where(rn2b_l <= 0.0, 0.0, zri_strat_l)
 
                         zri_n_full = base._load_interior(
@@ -1048,6 +1050,8 @@ def main() -> int:
                         row11_primary["resolved_constants"] = {
                             "rn_bshear": float(bshear),
                             "ri_cri": float(1.0 / pr_cfg.prandtl_ri_coeff),
+                            "tke_n2_evaluation_stage": (
+                                pr_cfg.tke_n2_evaluation_stage),
                         }
                         row11_primary["controls"] = {
                             "zri": planted_controls(
