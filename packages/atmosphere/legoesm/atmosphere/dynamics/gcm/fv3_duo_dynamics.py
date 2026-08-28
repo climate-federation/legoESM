@@ -13,7 +13,11 @@ enforced loudly here and at the component factory rather than assumed:
   itself now SUPPORTS ``zvir != 0`` on both arms; ``consv_te != 0`` is
   still refused there.  Slice 1 is dry by construction here, not by the
   core's refusal, and the config wall below is what enforces it;
-* f64 is REQUIRED (``require_f64_jax`` gates every leaf);
+* f64 is the DEFAULT and certified storage dtype (``storage_dtype``);
+  the phase gates enforce dtype UNIFORMITY and ``step`` enforces the
+  configured storage dtype at the boundary. fp32/mixed storage is
+  accepted by the config but the RUNTIME is not yet wired (refused at
+  construction);
 * the vertical coordinate is ``set_eta_analytic``'s ``km in {5, 10}``
   branch (fv_eta.F90:334-344) — any other km raises there;
 * ``kord_tm`` must be NEGATIVE: a positive value selects a different
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -74,6 +79,18 @@ class FV3DuoConfig(NamedTuple):
     kord_mt: int = 9
     kord_tm: int = -9
     kord_tr: int = 9
+    # Storage/compute dtype of the prognostic carry. DEFAULT "float64" is
+    # the certified oracle path (byte-identical to every prior run). A
+    # COARSE precision policy: "float32" runs the whole step in fp32 (the
+    # gates enforce dtype UNIFORMITY, not strict fp64, so an f32 IC flows
+    # through). Per-op mixed (fp64 pressure column / energy fixer, fp32
+    # elsewhere) is a SEPARATE later increment; this field only selects a
+    # single uniform storage dtype. NOTE (2026-08-28): fp32 is NOT yet
+    # runnable end-to-end -- the in-phase workspace allocations and grid
+    # metrics are still fp64-pinned; those must be threaded to this dtype
+    # before an fp32 step passes the uniformity gates. Setting "float32"
+    # today fails LOUDLY at the first fp64 workspace, by design.
+    storage_dtype: str = "float64"
 
 
 class FV3DuoDynamicsModel:
@@ -121,6 +138,34 @@ class FV3DuoDynamicsModel:
             raise TypeError(
                 f"FV3DuoDynamicsModel: config must be an FV3DuoConfig, got "
                 f"{type(config).__name__}")
+        # COARSE precision policy (2026-08-28). The dtype gates are now
+        # uniformity gates (require_uniform_float_jax) and this config
+        # carries a storage_dtype, but the fp32/mixed RUNTIME is not yet
+        # wired: the in-phase workspace allocations (~57 jnp.float64 zeros
+        # across the phase modules) and the grid metrics / halo tables are
+        # still fp64-pinned, so an fp32 step would trip a uniformity gate
+        # the moment an fp64 workspace meets the f32 carry. Refuse it HERE,
+        # loudly, with the remainder named -- rather than deep in a phase
+        # -- until that surgery lands. fp64 is the certified default and is
+        # byte-identical (uniform-f64 passes every gate exactly as strict-
+        # f64 did).
+        # Normalise once (np.dtype gives a loud ValueError on a bad
+        # string, not a silent mismatch later). self._storage_dtype is the
+        # single source of truth the per-step boundary guard checks the
+        # incoming carry against.
+        self._storage_dtype = np.dtype(config.storage_dtype)
+        if self._storage_dtype != np.float64:
+            raise NotImplementedError(
+                f"fv3_duo storage_dtype={config.storage_dtype!r}: the "
+                f"coarse fp32/mixed precision FOUNDATION is in place (dtype-"
+                f"uniformity gates + this config field + factory "
+                f"acceptance), but the RUNTIME is not yet wired -- the "
+                f"in-phase fp64 workspace allocations and the fp64 grid "
+                f"metrics/halo tables must be threaded to storage_dtype "
+                f"(and the pressure column / energy fixer kept fp64 for a "
+                f"true mixed mode) before an fp32 step passes the "
+                f"uniformity gates. Use storage_dtype='float64' (the "
+                f"certified default). Tracked: fv3 fp32/mixed increment 2.")
         for attr in ("ctx_np", "ctx_jax", "n", "ng"):
             if not hasattr(grid, attr):
                 raise TypeError(
@@ -215,6 +260,29 @@ class FV3DuoDynamicsModel:
                 f"FV3DuoDynamicsModel.step: state must be a dict with keys "
                 f"{sorted(FV3_DUO_STATE_KEYS)}, got {got}. Build it with "
                 f"dcmip16_initial_state().")
+        # BOUNDARY dtype guard (2026-08-28, triple-review fix): the phase
+        # gates now check dtype UNIFORMITY, not strict fp64, so a
+        # uniformly-f32 carry fed to an fp64-configured run would sail
+        # through them and run SILENTLY in f32 -- the exact
+        # "lost bits before step 1" bug the old strict gate caught
+        # incidentally. The relocated protection lives HERE: every inexact
+        # leaf of the incoming bundle MUST equal the configured storage
+        # dtype (symmetric -- also blocks a silent f64->f32 upcast for a
+        # future fp32 run). Host-side aval read, no device work, so the
+        # certified fp64 step stays byte-identical. `raise`, never
+        # `assert` (elidable under -O). Non-inexact leaves (int indices,
+        # bool masks) are skipped.
+        for leaf in jax.tree_util.tree_leaves(state):
+            _ldt = getattr(leaf, "dtype", None)   # NOT `dt` -- that is the
+            if _ldt is not None and jnp.issubdtype(_ldt, jnp.inexact) \
+                    and np.dtype(_ldt) != self._storage_dtype:  # timestep arg
+                raise TypeError(
+                    f"FV3DuoDynamicsModel.step: a state leaf is {np.dtype(_ldt)} "
+                    f"but the configured storage_dtype is "
+                    f"{self._storage_dtype} -- refusing a silent precision "
+                    f"change. Cast the bundle to storage_dtype (a stray "
+                    f"float32 IC, e.g. a bare jnp.zeros or a restart read, "
+                    f"is the usual cause).")
         out = self._step_fn(state["state"], state["press"], state["q"],
                             dt, state["omga"], state["nh"])
         # C5, on concrete outputs OUTSIDE jit: an nsplt above NSPLT_MAX
@@ -265,5 +333,18 @@ class FV3DuoDynamicsModel:
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),
             dtype=jnp.float64)
-        return {"state": jstate, "press": press, "q": q, "omga": omga,
-                "nh": nh}
+        bundle = {"state": jstate, "press": press, "q": q, "omga": omga,
+                  "nh": nh}
+        # Correct-by-construction (GLM review): the primary IC provenance
+        # ends AT the configured storage dtype, so the boundary guard in
+        # step() never has to reject the model's own IC. For the certified
+        # fp64 default this is an identity cast (every leaf is already
+        # float64 -> astype is a no-op, byte-identical). For a future fp32
+        # run it is the one place the IC is downcast; every OTHER
+        # provenance (restart reads, external ICs) is caught by step()'s
+        # boundary guard instead.
+        return jax.tree_util.tree_map(
+            lambda a: (a.astype(self._storage_dtype)
+                       if jnp.issubdtype(getattr(a, "dtype", np.int64),
+                                         jnp.inexact) else a),
+            bundle)

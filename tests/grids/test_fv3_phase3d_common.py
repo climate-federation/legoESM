@@ -39,14 +39,39 @@ def _stacked(name, *, n=N, ng=NG, km=KM):
 
 # ---------------------------------------------------------------- dtype
 
-def test_require_f64_accepts_f64_and_skips_none():
+def test_require_uniform_accepts_f64_and_skips_none():
     common.require_f64_jax("t", {"a": jnp.zeros(3, dtype=jnp.float64),
                                  "b": None})
 
 
-def test_require_f64_rejects_f32():
-    with pytest.raises(TypeError, match="must be float64"):
-        common.require_f64_jax("t", {"a": jnp.zeros(3, dtype=jnp.float32)})
+def test_require_uniform_accepts_uniform_f32():
+    # The gate is now a UNIFORMITY gate (coarse fp32/fp64 policy,
+    # 2026-08-28): a uniformly-f32 phase is ACCEPTED (was rejected under
+    # the old strict-f64 gate).
+    common.require_uniform_float_jax(
+        "t", {"a": jnp.zeros(3, dtype=jnp.float32),
+              "b": jnp.zeros(2, dtype=jnp.float32)})
+
+
+def test_require_uniform_rejects_mixed_dtypes():
+    # The real hazard the gate now catches: an f64 operand (a leaked
+    # metric/workspace) mixed into an f32 phase -> silent promotion.
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        common.require_uniform_float_jax(
+            "t", {"a": jnp.zeros(3, dtype=jnp.float32),
+                  "b": jnp.zeros(3, dtype=jnp.float64)})
+
+
+def test_require_uniform_rejects_non_float():
+    with pytest.raises(TypeError, match="float32 or float64"):
+        common.require_uniform_float_jax(
+            "t", {"a": jnp.zeros(3, dtype=jnp.int32)})
+
+
+def test_require_f64_alias_points_at_uniform_gate():
+    # Back-compat: the historical name is an alias, so the ~40 call sites
+    # and the private copies keep working.
+    assert common.require_f64_jax is common.require_uniform_float_jax
 
 
 # ----------------------------------------------------------------- bool
