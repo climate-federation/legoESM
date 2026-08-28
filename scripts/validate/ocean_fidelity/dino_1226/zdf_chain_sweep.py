@@ -266,6 +266,11 @@ def main() -> int:
         gdepw_mesh_live = gdepw0_mesh[..., 1:1 + nk] * stretch[..., None]
         gdepw_identity = metrics(np.asarray(gw), np.asarray(gdepw_mesh_live),
                                  wet, focus, POINTWISE_BAR)
+        if not (t_identity["pass"] and s_identity["pass"]
+                and gdepw_identity["pass"]):
+            raise AssertionError(
+                "operand identity precondition failed for T, S, or gdepw; "
+                "refusing to attribute the first divergence to a later operand")
         add("mesh gdepw_0*(1+r3t) in zrw", assemble_bn2(
             aa, bb, TT, SS, gd, gdepw_mesh_live, derived_e3w))
         add("NEMO gdept(Kmm) in zrw", assemble_bn2(aa, bb, TT, SS, gd_dump, gw,
