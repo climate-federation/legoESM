@@ -3,6 +3,92 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-10 result: literal Langmuir closed; ordered stop at row 17
+
+`tke_langmuir_evaluation="nemo_literal"` is implemented and defaults only on
+`nemo_dino_kamm` and `nemo_dino_kamm_mlf`. It transcribes the active no-Stokes
+chain at `zdftke.F90:422-463` with ordered JAX scans, strict threshold
+semantics, and each column's own `mbkt+1` no-crossing fallback. The final
+line-463 update also preserves NEMO's `((rn_Dt*zus3)*zwlc^3)/zhlc`
+association. `vectorized` remains the exact historical default on every other
+DINO, generic NEMO, and ACC card and is the explicit legacy opt-in on the two
+DINO oracle cards. The literal path rejects mixed generic/Langmuir sources.
+
+The ordered CPU/fp64 disposition is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1--9 | `eos_rab` through bottom TKE boundary | `VERIFIED` | unchanged | 4/4 pass |
+| 10 | complete Langmuir operation through line 463 | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 exact** |
+| 11 | Richardson `zri/p_pdlr` | `VERIFIED` | 0/9,920; max `2.877796e-16` | 4/4 pass |
+| 12 | literal TKE matrix, including `dissl` | `VERIFIED` | 0/9,920; max `0` | 4/4 exact |
+| 13--15 | shear, stratification, and dissipation RHS operands | `VERIFIED` | each 0/9,920; max `0` | 4/4 exact |
+| 16 | wave surface boundary | `WAIVED` | resolved DINO has `ln_wave=F` | inactive |
+| 17 | TKE tridiagonal solve application | **`DIVERGED`** | **1,374/9,920; max `0.3044579`** | **4/4 pass** |
+| 18--32 | postsolve closure through EVD, assembly, `ldf_slp`, and implicit applications | `UNMEASURED` | ordered stop at row 17 | ordered stop |
+
+### Row-10 receipt and the final two-column localization
+
+The first literal-source rerun made the source rate itself exact but left two
+post-update columns outside the `1e-15` bar (maximum
+`1.997411720059583e-15`). That residual was the last operation at NEMO line
+463, not another source operand: the generic solver multiplied `rn_Dt` after
+the source had already been divided by `zhlc`. Carrying the separately
+source-ordered post-Langmuir `en` closes the direct dump at **0/9,920**, maximum
+zero, with all four southern focus columns exact. The planted unequal-bottom
+control makes the historical global-bottom fallback disagree, and a hand case
+makes the rate-first line-463 association differ by one bit.
+
+The write-only instrument bracket remains exact across all 131 shared numeric
+restart variables, and the source-rate, solver-source, line-463 update, direct
+post-Langmuir stream, time-level, source, binary, and bracket hashes are all
+stamped in the artifact. The tracked row-11 qualification remains loud: its
+intermediate numerator misses 3/9,920 columns even though the subsequent
+`/e3w` and complete `zri/pdlr` row pass. It is not claimed bit-identical.
+
+### First divergence: row-17 solve application
+
+The active oracle applies the matrix as:
+
+```fortran
+zdiag(ji,jk) = zdiag(ji,jk) - zd_lw(ji,jk) * &
+               zd_up(ji,jk-1) / zdiag(ji,jk-1)       ! :548-550
+zd_lw(ji,jk) = en(ji,jj,jk) - zd_lw(ji,jk) / &
+               zdiag(ji,jk-1) * zd_lw(ji,jk-1)       ! :555-557
+en(ji,jj,jpkm1) = zd_lw(ji,jpkm1) / zdiag(ji,jpkm1) ! :558-560
+en(ji,jj,jk) = (zd_lw(ji,jk) - zd_up(ji,jk) * &
+                en(ji,jj,jk+1)) / zdiag(ji,jk)       ! :561-563
+en(ji,jj,jk) = MAX(en(ji,jj,jk),rn_emin)*wmask(ji,jj,jk) ! :564-565
+```
+
+Production's shared normalized Thomas solve diverges in **1,374/9,920**
+columns, maximum normalized error `0.3044579035485571`; the four southern
+focus columns pass (`8.40e-17` to `3.36e-16`). The matrix, composite RHS,
+post-Langmuir base, bottom scatter, forward diagonal, and forward RHS each
+score 0/9,920. Most decisively, the committed post-hoc transcription of the
+full NEMO recurrence produces the postsolve oracle at **0/9,920**, maximum
+zero. The first failing operand is therefore the production recurrence and
+terminal/back-substitution application at `zdftke.F90:547-565`, not its
+inputs.
+
+The registered next option is `tke_solver_evaluation`: `nemo_literal` becomes
+the default only on the two complete DINO oracle cards; `shared_thomas`
+remains byte-identical elsewhere and is their legacy opt-in. The literal path
+will use ordered differentiable scans for the reciprocal surface seed, the
+two separate forward recurrences, the direct `jpkm1` seed, reverse
+substitution, and the final floor/mask. This is a new differentiable solver
+path with boundary, JIT, and gradient obligations and is too large for this
+round, so the ordered sweep stops here.
+
+### Climate status
+
+**CLIMATE ARMS NOT AUTHORIZED.** Rows 18--32 are unmeasured. The frozen
+southern day-90 MLD prediction remains baseline `22.479491 m`, CONFIRM
+`<=11.2397455 m`, REFUTE `>=20.2775 m`, with the legacy-baseline (`0.001 m`),
+acceptance-floor, 5x pass-tally, and southern-density gates unchanged. The
+future faithful command remains option-free; the legacy control now includes
+`--tke-langmuir-evaluation vectorized`, as printed below in round 9.
+
 ## Round-9 result: matrix receipt closed; ordered stop corrected to row 10
 
 `tke_matrix_evaluation="nemo_literal"` is implemented and defaults only on
