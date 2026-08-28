@@ -249,6 +249,13 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
 # consuming code before being added (see PR description for the exact
 # call-site line numbers).
 HARNESS_ONLY: dict[str, str] = {
+    "dino_wind_profile_evaluation": (
+        "consumed by dino_wind_stress through "
+        "dino_lat_lon_surface_forcing_arrays, a forcing-construction call "
+        "site outside dino_lat_lon_model_config; the selector chooses the "
+        "NEMO literal versus historical factored cubic and is not a model-"
+        "config leaf (dino.py:2052-2114, 3815-3856)"
+    ),
     "vertical_coordinate": (
         "branch selector consumed inside dino_lat_lon_model_config / "
         "dino_mpas_model_config construction (zstar vs masked_zco chooses "

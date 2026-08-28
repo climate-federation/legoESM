@@ -3,6 +3,104 @@
 Date: 2026-08-28.  Lane: CPU-only, one-rank matched day-180 state
 (`RUN_SEQDUMP_D180_1R`, `kt=5761`).
 
+## Round-5 result: row 8 closed; ordered stop at row 10
+
+`dino_wind_profile_evaluation="nemo_literal"` is now the default on the
+complete `nemo_dino_kamm` and `nemo_dino_kamm_mlf` cards.  It retains NEMO's
+raw degree-valued `gphiu` operand from `mesh_mask.nc`, uses NEMO's nearest-node
+interval selection, and preserves the left-associated cubic at
+`usrdef_sbc.F90:632`.  `factored_smoothstep` remains byte-identical by default
+on all five other DINO cards and is the explicit legacy opt-in on the two
+complete cards.  A matched-state dump control proves the historical
+construction remains red: 154/9,920 columns fail against `sbc_dump_utau.bin`.
+
+The ordered rerun is:
+
+| Row | Operation | Disposition | Whole-domain per-column result | Southern focus |
+|---:|---|---|---|---|
+| 1 | `eos_rab(Nbb)` | `VERIFIED` | 0/9,920; alpha max `3.087467e-16` | 4/4 pass |
+| 2 | `bn2(Nbb)` | `VERIFIED` | 0/9,920; max `5.968673e-16` | 4/4 pass |
+| 3 | `eos_rab/bn2(Nnn)` | `VERIFIED` | 0/9,920; max `5.968545e-16` | 4/4 pass |
+| 4 | complete `zdf_sh2` | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 5 | bottom-drag coefficient | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 6 | native MLD index `nmln` | `VERIFIED` | exact integer equality; 0/9,920 | 4/4 pass at zero |
+| 7 | native MLD depth `hmlp` | `VERIFIED` | 0/9,920; max `5.670461e-16` | 4/4 pass at zero |
+| 8 | surface TKE Dirichlet boundary | **`VERIFIED`** | **0/9,920; max `0`** | **4/4 pass at zero** |
+| 9 | bottom TKE Dirichlet boundary | `VERIFIED` | 0/9,920; max `0` | 4/4 pass at zero |
+| 10 | Langmuir PE/depth/source | **`DIVERGED`** | **9,155/9,920; max `3.861848`** | **4/4 fail** |
+| 11--32 | Prandtl through EVD, coefficient assembly, `ldf_slp`, and both implicit solves | `UNMEASURED` | ordered stop at row 10 | ordered stop |
+
+### First failing row-10 operand
+
+NEMO computes and freezes both stability fields on the Nnn geometry before
+entering vertical physics (`cfgs/DINO/MY_SRC/stpmlf.F90:204-210`):
+
+```fortran
+CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nnn )
+CALL eos_rab( ts(:,:,:,:,Nnn), rab_n, Nnn )
+CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nnn )
+CALL bn2    ( ts(:,:,:,:,Nnn), rab_n, rn2, Nnn  )
+CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )
+```
+
+The Langmuir PE integral then consumes that carried `rn2b` with the same live
+Nnn geometry (`cfgs/DINO/MY_SRC/zdftke.F90:436-440`):
+
+```fortran
+zpelc(ji,1) = MAX( rn2b(ji,jj,1), 0._wp ) * gdepw(ji,jj,1,Kmm) * e3w(ji,jj,1,Kmm)
+zpelc(ji,jk) = zpelc(ji,jk-1) + MAX( rn2b(ji,jj,jk), 0._wp ) &
+             * gdepw(ji,jj,jk,Kmm) * e3w(ji,jj,jk,Kmm)
+```
+
+legoESM instead recomputes `rn2b` when the implicit-mixing state is assembled
+(`k_profiles.py:827-831`) and calls the Langmuir kernel with static
+`-z_interface` and generic `dz_half` (`tke.py:2305-2322`).  The operand walk
+therefore fails before any Langmuir arithmetic: `taum` is exact, but the
+captured `rn2b`, `gdepw`, and `e3w` fail in all 9,920 columns, with normalized
+maxima `4.150232e-07`, `6.294510e-04`, and `1.197581e-02`; all four southern
+focus columns fail each operand.  Offset-zero controls are much worse, ruling
+out an indexing explanation.  Perturbation, i-roll, and nonfinite controls all
+fire.
+
+Registered next-round design: add `tke_n2_evaluation_stage`, with
+`step_entry` the faithful default on the two complete DINO NEMO cards and
+`implicit_solve_state` the legacy default everywhere else and explicit opt-in
+on those cards.  At step entry, compute and freeze the exact
+`(rn2, rn2b, gdepw_Kmm, e3w_Kmm)` raw-mesh/live-geometry bundle and carry it
+through `zdf_mxl` and every `zdf_tke` consumer.  Langmuir receives the frozen
+live `gdepw/e3w`, not `-z_interface/dz_half`.  Every non-oracle card remains
+byte-identical.
+
+### Climate status
+
+**CLIMATE ARMS NOT AUTHORIZED.**  Row 10 is a large, basin-visible divergence
+and rows 11--32 remain ordered-unmeasured.  The prediction remains frozen at
+baseline `22.479491 m`, CONFIRM `<=11.2397455 m`, REFUTE `>=20.2775 m`, with
+the previously registered acceptance-floor, pass-tally, legacy-baseline, and
+southern-density conditions unchanged.  Once row 10 is fixed and the later
+rows are disposed, the faithful command remains option-free; the historical
+control adds this round's selector to the three row-4 opt-outs:
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_faithful_d90.npz --days 90 --save-3d --bridge-tke
+
+CUDA_VISIBLE_DEVICES=<gpu> JAX_ENABLE_X64=1 python scripts/validate/ocean_fidelity/run_fp64.py \
+  scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py \
+  nemo_dino_kamm_mlf /tmp/zdf_legacy_d90.npz --days 90 --save-3d --bridge-tke \
+  --tke-preclosure-coeff-source current_subiteration \
+  --tke-shear-evaluation-stage implicit_solve_state \
+  --tke-shear-metric-source tpoint_jacobian \
+  --dino-wind-profile-evaluation factored_smoothstep
+```
+
+Round-5 artifact:
+`docs/ocean/fidelity/dino_zdf_chain_sweep_round5_artifact.json`, SHA256
+`dc6046b7760adb1555dca89d830cd1770b4fb45bf95e21f705fd9e5bffbe33d0`.
+Its stamped parent/probe SHA is
+`bfe13b64c6ffc288b122431e33fb81dc46b2e88f`.
+
 ## Round-4 result: row 4 closed; ordered stop at row 8
 
 The registered `tke_shear_evaluation_stage=step_entry` implementation is now
