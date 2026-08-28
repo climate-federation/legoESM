@@ -357,8 +357,8 @@ descriptive only.
 
 **DESCRIPTIVE pending re-frozen bars:** compared with the round-1 uncorrected
 explicit baseline (`2.882400001277192`, `0.4855027387838016`), the corrected
-T carry removes `91.4616888188504%` of the excess-over-one amplitude and
-`87.8167530444577%` of the excess wall share above NEMO
+T carry removes `91.46168881885039%` of the excess-over-one amplitude and
+`87.81675304445774%` of the excess wall share above NEMO
 (`0.0686300413685866`). The bridge representation defect, not wind placement,
 owned most of the baseline wall flicker. The old measurements are not
 retracted; they describe the old bridge.
@@ -389,34 +389,49 @@ locus it is NEMO wall share `0.0686300413685866`. This gives:
 ### Mandatory one-step implicit-shock diagnosis
 
 No replacement implicit GPU arm is authorized until a committed CPU probe
-tests this source-derived hypothesis. Under `surface_stress_implicit=True`,
-`ocean_model_latlon_cgrid.py:3616-3640` adds the centred wind
-`tau/(rho H)` to barotropic `F_slow`, after the stress has been withheld from
-the 3-D `du_dt`; lines `3642-3647` then subtract the *augmented* `F_slow` from
-that stress-free `du_dt`. The candidate inconsistent state is therefore the
-provisional baroclinic after velocity `u_naa`, through its `du_dt_pert` input,
-not the already-corrected `tau_x_prev` carry.
+identifies and tests the first state inconsistency introduced by the placement
+swap. The earlier proposed depth-uniform `du_dt_pert` subtraction is
+**WITHDRAWN BEFORE PROBE**: the shipped leapfrog reconstruction and
+`mlf_baro_corr` remove/re-pin that column mean, so its eta REFUTE state is not
+reachable while `F_slow` is unchanged.
 
-The one-step CPU counterfactual starts both arms from the identical corrected-T
-bridge and implicit-placement config. Arm A is the current construction. Arm B
-keeps augmented `F_slow` for the barotropic solver and keeps the same implicit
-top-cell stress deposit, but forms `du_dt_pert` using the pre-augmentation
-stress-free depth mean. No persistent state, coefficient, forcing, or later
-carry differs. A planted arm restores the current augmented subtraction.
+The candidate persistent inconsistent state is the post-`dyn_zdf`,
+post-`mlf_baro_corr` zonal-velocity leapfrog carry: the pair `u` (after/NOW on
+the next call) and `u_before` (Asselin-filtered BEFORE). The first corrected-T
+step is traced for explicit and implicit placement at the centred face stress,
+`F_slow` entering the barotropic solver, every substep eta, pre-`dyn_zdf`
+`u_naa`, post-`dyn_zdf` u, post-reconcile u, and filtered `u_before`. It must
+show equal `F_slow` and substep eta through the first barotropic solve and name
+post-`dyn_zdf` u as the first differing persistent state. If an upstream item
+differs instead, STOP: this registered carry counterfactual is not run and the
+first differing item becomes the next preregistration target.
 
-The probe must print, on wet support and at `(j=1,i=49)`, current/corrected/
-planted `du_dt_pert`, provisional `u_naa`, `F_slow`, post-step `u`, and eta;
-the primary number is wet-domain RMS of one-step
-`eta_implicit - eta_explicit` from the same corrected bridge. It also prints
-the material-support Jaccard between the `du_dt_pert` correction and the eta
-response. The retained first-step max-absolute controls are
+The discriminating one-step CPU counterfactual is the *next* model step. Its
+reference arms are corrected-T explicit and corrected-T implicit. The
+counterfactual starts from the implicit arm after step one and replaces only
+the zonal-velocity leapfrog pair (`u`, `u_before`) with the explicit arm's
+pair; T, S, eta, v, every forcing/carry/config leaf, coefficients, and the
+later stress carry remain bit-identical to implicit. A planted arm restores
+the original implicit velocity pair byte-for-byte.
+
+The primary is `E = RMS_wet_T(eta_implicit_step2-eta_explicit_step2)` and the
+counterfactual removal is exactly `1-E_counterfactual/E`. Material support is
+defined on the common T grid: thickness-average each 3-D U field using the
+production `min_cell_to_uface` thickness, take the maximum absolute difference
+across the NOW/BEFORE pair, then map U faces to T cells by the maximum of the
+west/east adjacent face magnitudes. The eta target is
+`abs(eta_implicit_step2-eta_explicit_step2)`. Each support is cells at or above
+`1%` of its own wet-domain maximum; dry T cells are excluded. Jaccard is
+intersection/union of those two Boolean supports and is a STOP if either
+support is empty. The retained first-step max-absolute controls are
 `0.0012013470296322257 m` implicit versus NEMO and
 `7.03693132994565e-06 m` explicit versus NEMO.
 
-- **CONFIRMS this shock source** iff Arm B removes at least `99%` of the
-  current implicit-minus-explicit eta RMS, the planted old subtraction restores
-  that RMS within `1e-6` relative error, and support Jaccard is `>=0.99`.
-- **REFUTES** iff Arm B removes `<=10%` of that RMS.
+- **CONFIRMS this shock source** iff the carry substitution removes at least
+  `99%` of `E`, the planted implicit-pair restoration reproduces `E` within
+  `1e-6` relative error, and support Jaccard is `>=0.99`.
+- **REFUTES** iff the carry substitution removes `<=10%` of `E` while the
+  planted restoration passes.
 - Otherwise **UNRESOLVED**. All other state leaves and build inputs must be
   bit-identical, with planted state/config and decision-bar failures.
 

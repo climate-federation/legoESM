@@ -377,8 +377,8 @@ descriptive shock evidence only.
 
 **DESCRIPTIVE pending re-frozen bars:** against the round-1 uncorrected
 explicit baseline (`2.882400001277192`, `0.4855027387838016`), the T-carry
-bridge correction removed `91.4616888188504%` of the excess-over-one flicker
-ratio and `87.8167530444577%` of the excess wall share above NEMO
+bridge correction removed `91.46168881885039%` of the excess-over-one flicker
+ratio and `87.81675304445774%` of the excess wall share above NEMO
 (`0.0686300413685866`). Thus the bridge representation defect, not wind
 placement, owned most of the baseline wall flicker. This is not a registered
 placement verdict. The round-1 numbers remain true of the uncorrected bridge;
@@ -391,17 +391,23 @@ fp64, stable for 160 samples, and stamped T carry, reconstruction time
 The explicit/implicit NPZ SHA-256 values are
 `8b290ff1a2bd06bb757366d5e08d51a81f8bc4259975d26e376241a42ab97cc7`
 and `ffd77c118772d3d6cc859995c2c75a791eceeb556caae86f8d7678d27f86f58d`;
+their clean run-log hashes are
+`ecff84341c4ab0960f3b08276d69666d83de0a144dca47863693b49e054ccb17`
+and `aa9c91492361a836a850a370ab2edfbe64c2143c1bbe005f797e563edbcbe0aa`;
 their scorer JSON hashes are
 `5fd033345548dd5b80390293b0ee786d3c23f2a68055ae86afe2b616ad4e5dd0`
 and `b2727b02c402b0746eb2ac8ca44440b47eaece84cdf855d271597c1130c23060`.
 
-The carry-independent implicit shock must pass the one-step CPU diagnosis in
-the amended placement preregistration before a replacement GPU arm may be
-classified. Source inspection makes the provisional 3-D baroclinic momentum
-state `u_naa` (formed from `du_dt_pert`) the discriminating state: the implicit
-branch withholds stress from `du_dt`, augments `F_slow` with `tau/(rho H)`, then
-subtracts that augmented value from the stress-free `du_dt`. This is a
-preregistered hypothesis, not yet a finding.
+The first implicit-shock counterfactual proposed after Round 4 is withdrawn
+before execution: its depth-uniform `du_dt_pert` change is removed by the
+barotropic reconstruction/reconciliation, so it could not remove eta while
+`F_slow` stayed fixed. The replacement preregistration names the post-`dyn_zdf`,
+post-reconcile zonal-velocity leapfrog pair (`u`, filtered `u_before`) as the
+candidate inconsistent carry. A first-divergence trace must first prove equal
+step-one `F_slow`/substep eta and locate the first persistent difference there;
+then a one-step step-two substitution, planted restoration, and explicitly
+mapped 1%-material T-grid support decide the mechanism. No GPU rerun is
+authorized before that CPU gate.
 
 **Human decision required — current -> proposed:** keep the twin default as legacy U-as-T carry (known wrong) -> make reconstructed T carry the default?
 No default is changed in this lane.
