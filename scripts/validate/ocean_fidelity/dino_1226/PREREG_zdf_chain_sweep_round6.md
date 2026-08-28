@@ -67,3 +67,32 @@ the new opt-out:
 
 in addition to the four round-5 opt-outs. No GPU command is authorized by
 this preregistration.
+
+## Dated amendment: row-11 literal arithmetic fix
+
+Date: 2026-08-28. Written after the first row-11 measurement and before the
+production change or post-fix rerun. Row 10 passed with 0/9,920 failing wet
+columns. Row 11 then failed in 153/9,920 columns at the `1e-15` bar even
+though its dumped `rn2b`, carried `p_avm`, and frozen `p_sh2` operands each
+passed in all 9,920 columns. All four focus columns passed; that does not
+waive the whole-domain failure.
+
+The registered fix is a literal transcription of the two evaluated NEMO
+expressions, preserving their source association:
+
+```text
+zri    = (rn2b * p_avm) / zdiv
+p_pdlr = max(0.1, ri_cri / max(ri_cri, zri))
+Pr     = 1 / p_pdlr
+```
+
+The exact-zero `zdiv` arm substitutes `rn_bshear` exactly as NEMO does. The
+old multiplication by `1/zdiv` and algebraic `clamp((1/ri_cri)*zri,1,10)`
+route become the planted red alternatives. An oracle-input diagnostic
+reproduced `tke_dump_zri.bin` and `tke_dump_pdlr.bin` bit-for-bit with the
+registered expressions; this diagnostic is targeting only and is not the
+post-fix score.
+
+The post-fix row-11 bar remains unchanged: 0/9,920 failing columns, maximum
+normalized column error `<=1e-15`, 4/4 focus columns passing, and every
+control firing. Only after that pass may row 12 be measured.
