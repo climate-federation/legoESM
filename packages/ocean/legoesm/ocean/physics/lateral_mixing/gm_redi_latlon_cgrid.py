@@ -530,12 +530,12 @@ def _nemo_mld_from_n2_integral(T, S, mask, z_coord, eos_fn, rho_c, g, rho_0,
             rho_ref=rho_0, g=g)                       # (...,nlev-1)
     # e3w(jk) for interface m = spacing between the bracketing T-centres.
     # It MUST be built from the SAME gdept ladder the N^2 was divided by, or the
-    # exact e3w cancellation below is broken.  compute_buoyancy_frequency_nemo_bn2
-    # divides by diff(t_depth_ref) (NEMO's gdept_0), whereas z_centers is the
-    # ARITHMETIC-midpoint ladder cumsum(dz)-dz/2 -- and on DINO those differ by
-    # up to 11.3 m.  Mixing them left a residual that survived every other fix
-    # and produced 14 mismatched MLD columns whose below-threshold decisions
-    # were otherwise identical to NEMO's at every level (#1226).
+    # exact e3w cancellation below is broken.  The faithful bn2 branch divides
+    # by raw-mesh e3w_0*(1+r3t); the explicit legacy branch derives spacing
+    # from t_depth_ref.  In either case this local ``e3w`` is the exact operand
+    # selected above.  Rebuilding the multiplier from the arithmetic-midpoint
+    # ladder cumsum(dz)-dz/2 left a residual and produced 14 mismatched DINO
+    # MLD columns whose below-threshold decisions otherwise matched NEMO.
     if not _use_nemo_bn2:
         e3w = z_centers[1:] - z_centers[:-1]         # (nlev-1,)
     # The MLD CRITERION is thickness-free, and that is not an approximation --
