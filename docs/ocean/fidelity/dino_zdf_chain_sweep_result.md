@@ -51,10 +51,20 @@ pn2(ji,jj,jk) = grav * (zaw*dT-zbw*dS) / e3w(ji,jj,jk,Kmm) * wmask(ji,jj,jk)
 
 the full 3-D `gdepw_0` is essential at partial cells. The initial use of
 `gdepw_1d` was rejected by the probe before a result was admitted. With the
-raw W ladder and raw `gdept_0*(1+r3t)` feeding `eos_rab`, the NEMO `zrw`,
-`zaw`, `zbw`, numerator, and result streams are bit-identical on all scored
-wet points. Rows 2, 3, and 10 consequently also improve from sub-bar residuals
-to exact zero.
+raw W ladder and raw `gdept_0*(1+r3t)` feeding `eos_rab`, `zrw` and `zbw` are
+bit-identical. `zaw`, numerator, and result retain last-bit differences in
+9,425, 9,275, and 9,205 columns, respectively. `zaw` and the final result pass
+their registered bars (max `4.658093e-16` and `3.979116e-16`); the intermediate
+numerator misses in 3/9,920 columns (max `1.174266e-15`) before division by
+the exact `e3w` operand closes the final result to 0/9,920 failures. Rows 2,
+3, and 10 consequently also improve from sub-bar residuals to exact zero.
+
+**LOUD RETRACTION:** an earlier draft of this round's result called all five
+intermediate streams bit-identical. The committed artifact never supported
+that statement: only `zrw` and `zbw` are exact. The intermediate numerator is
+also not VERIFIED at its diagnostic bar (3 failing columns); only `zaw` and
+the final `/e3w` result are VERIFIED. The row-11 disposition is based on that
+final result and the downstream `zri/pdlr`, both 0/9,920 at the bar.
 
 Scope is narrow:
 

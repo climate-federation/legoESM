@@ -30,11 +30,17 @@ def _step_entry_helper_fixture(tke_cfg):
     ny, nx, nz = 2, 2, 3
     gdept0 = np.broadcast_to(
         np.asarray([0.5, 2.0, 4.5]), (ny, nx, nz)).copy()
+    gdepw0 = np.broadcast_to(
+        np.asarray([0.0, 1.0, 3.0]), (ny, nx, nz)).copy()
+    # Partial-cell-like column variation: replacing this with the 1-D ladder
+    # changes the literal eosbn2 result and must turn the integration test red.
+    gdepw0[0, 1, 1:] = np.asarray([0.9, 2.8])
     e3w0 = np.broadcast_to(
         np.asarray([1.0, 1.5, 2.5]), (ny, nx, nz)).copy()
     horizontal = np.ones((ny, nx))
     raw = create_z_star_from_thicknesses(
         [1.0, 2.0, 3.0], nemo_gdept_0_m=gdept0,
+        nemo_gdepw_0_m=gdepw0,
         nemo_e3w_0_m=e3w0, nemo_hu_0_m=horizontal,
         nemo_hv_0_m=horizontal, nemo_e1e2t_m=horizontal,
         nemo_e1e2u_m=horizontal, nemo_e1e2v_m=horizontal)
@@ -231,7 +237,8 @@ def test_step_entry_n2_bundle_matches_live_geometry_construction():
     gdept, gdepw, e3w = nemo_bn2_live_geometry(
         model.z_coord, state.eta.data, state.H_bathy.data,
         r3t_evaluation="nemo_reciprocal")
-    gdept0, gdepw0 = nemo_bn2_depth_ladders(model.z_coord)
+    gdept0 = model.z_coord.nemo_gdept_0
+    gdepw0 = model.z_coord.nemo_gdepw_0[..., 1:]
     stretch = nemo_r3t_stretch(
         model.z_coord, state.eta.data, state.H_bathy.data,
         evaluation="nemo_reciprocal")
@@ -249,10 +256,27 @@ def test_step_entry_n2_bundle_matches_live_geometry_construction():
     np.testing.assert_array_equal(got.gdepw_Kmm, gdepw)
     np.testing.assert_array_equal(got.e3w_Kmm, e3w)
 
+    _gd_1d, gw_1d = nemo_bn2_depth_ladders(model.z_coord)
+    planted_1d = compute_buoyancy_frequency_nemo_bn2(
+        state.T.data, state.S.data, gdept, gdepw, g=constants.g,
+        e3w_int=e3w, e3w_source="mesh_reference",
+        zrw_evaluation="nemo_literal", zrw_gdept_0=gdept0,
+        zrw_gdepw_0=gw_1d, zrw_stretch=stretch)
+    assert not np.array_equal(np.asarray(got.rn2), np.asarray(planted_1d))
+
     legacy_model, legacy_state = _step_entry_helper_fixture(
         tke_cfg._replace(tke_n2_evaluation_stage="implicit_solve_state"))
     assert LatLonCGridOceanModel._tke_step_entry_n2_bundle(
         legacy_model, legacy_state) is None
+
+
+def test_step_entry_n2_bundle_fails_closed_without_raw_w_mesh():
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    model.z_coord = model.z_coord._replace(nemo_gdepw_0=None)
+    with pytest.raises(ValueError, match="requires raw NEMO"):
+        LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, state)
 
 
 def test_base_dino_fe_card_constructs_its_step_entry_squared_shear():

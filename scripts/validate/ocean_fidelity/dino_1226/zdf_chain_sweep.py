@@ -1498,28 +1498,54 @@ def main() -> int:
                                       * dissl_jk * wmask_jk)
 
                             solve_kwargs = tke_capture["solve_calls"][0][0]
-                            avm_operand_l = np.asarray(
-                                solve_kwargs["K_M_old"])[..., :nmat]
-                            e3w_operand_l = np.asarray(
+                            avm_old_l = np.asarray(solve_kwargs["K_M_old"])
+                            avm_operand_l = avm_old_l[..., :nmat]
+                            avm_up_sum_l = np.maximum(
+                                avm_old_l[..., 1:1 + nmat]
+                                + avm_old_l[..., :nmat],
+                                np.float64(2.0e-5))
+                            avm_surface_l = np.asarray(
+                                solve_kwargs["K_M_surface"])
+                            avm_lw_sum_l = np.maximum(
+                                np.concatenate([
+                                    avm_surface_l[..., None]
+                                    + avm_old_l[..., :1],
+                                    (avm_old_l[..., 1:nmat]
+                                     + avm_old_l[..., :nmat - 1]),
+                                ], axis=-1),
+                                np.float64(2.0e-5))
+                            zcof_l = (
+                                -np.float64(0.5) * dt64
+                                * np.float64(tke_cfg.alpha_tke)
+                                * np.ones_like(tmask_jk))
+                            incoming_e3w_l = np.asarray(
                                 solve_kwargs["dz_half"])[..., :nmat]
                             dz_cell_operand = solve_kwargs["dz_cell"]
                             if dz_cell_operand is None:
-                                # Legacy assembly has no e3t operand. For its
-                                # upper coefficient, dz_int_eff is the first
-                                # e3w row repeated, then the preceding e3w
-                                # row. Score that actual effective denominator
-                                # against NEMO's explicit e3t(jk,Kmm).
+                                # Legacy assembly feeds e3w into the face-
+                                # gradient slot where NEMO reads e3t. Its
+                                # control-volume slot is the first e3w row
+                                # repeated, then the preceding e3w row.
                                 dz_legacy = np.asarray(
                                     solve_kwargs["dz_half"])
-                                e3t_operand_l = np.concatenate(
+                                up_e3t_operand_l = dz_legacy[..., :nmat]
+                                effective_e3w_l = np.concatenate(
                                     [dz_legacy[..., :1],
                                      dz_legacy[..., :nmat - 1]], axis=-1)
-                                e3t_operand_source = (
-                                    "legacy effective dz_int_eff; dz_cell=None")
+                                lw_e3t_operand_l = np.concatenate(
+                                    [np.asarray(solve_kwargs["dz_surface"])
+                                     [..., None],
+                                     dz_legacy[..., :nmat - 1]], axis=-1)
+                                metric_operand_source = (
+                                    "legacy dz_face/dz_int_eff; dz_cell=None")
                             else:
-                                e3t_operand_l = np.asarray(
+                                up_e3t_operand_l = np.asarray(
                                     dz_cell_operand)[..., 1:1 + nmat]
-                                e3t_operand_source = "live dz_cell jk"
+                                lw_e3t_operand_l = np.asarray(
+                                    dz_cell_operand)[..., :nmat]
+                                effective_e3w_l = incoming_e3w_l
+                                metric_operand_source = (
+                                    "live dz_cell and dz_half")
                             dissl_operand_l = (
                                 np.sqrt(np.maximum(
                                     np.asarray(solve_kwargs["e_old"])[..., :nmat],
@@ -1528,14 +1554,29 @@ def main() -> int:
                                     np.asarray(solve_kwargs["l_eps"])[..., :nmat],
                                     np.float64(tke_cfg.mxl_min)))
                             row12_operands = {
+                                "zcof_tmask": metrics(
+                                    zcof_l, zcof_n, wet_mat, focus,
+                                    POINTWISE_BAR),
                                 "p_avm_jk": metrics(
                                     avm_operand_l, avm_jk, wet_mat, focus,
                                     POINTWISE_BAR),
-                                "e3t_jk_Kmm": metrics(
-                                    e3t_operand_l, e3t_jk, wet_mat, focus,
+                                "up_avm_sum": metrics(
+                                    avm_up_sum_l, avm_up_sum_n, wet_mat,
+                                    focus, POINTWISE_BAR),
+                                "lower_avm_sum": metrics(
+                                    avm_lw_sum_l, avm_lw_sum_n, wet_mat,
+                                    focus, POINTWISE_BAR),
+                                "up_e3t_jk_Kmm": metrics(
+                                    up_e3t_operand_l, e3t_jk, wet_mat, focus,
                                     POINTWISE_BAR),
-                                "e3w_jk_Kmm": metrics(
-                                    e3w_operand_l, e3w_m, wet_mat, focus,
+                                "lower_e3t_jkm1_Kmm": metrics(
+                                    lw_e3t_operand_l, e3t_lw, wet_mat, focus,
+                                    POINTWISE_BAR),
+                                "effective_e3w_jk_Kmm": metrics(
+                                    effective_e3w_l, e3w_m, wet_mat, focus,
+                                    POINTWISE_BAR),
+                                "incoming_e3w_Kmm_control": metrics(
+                                    incoming_e3w_l, e3w_m, wet_mat, focus,
                                     POINTWISE_BAR),
                                 "dissl_jk": metrics(
                                     dissl_operand_l, dissl_jk, wet_mat, focus,
@@ -1564,8 +1605,8 @@ def main() -> int:
                                 "rn_Dt": float(dt64),
                                 "rn_ediss": float(ediss64),
                                 "minimum_avm_sum": 2.0e-5,
-                                "production_e3t_operand_source":
-                                    e3t_operand_source,
+                                "production_metric_operand_source":
+                                    metric_operand_source,
                             }
                             row12_primary["controls"] = {
                                 name: planted_controls(
@@ -1577,10 +1618,20 @@ def main() -> int:
                             row4["continuation_preview"]["rows"][
                                 "12_tke_diffusion_matrix"] = row12_primary
                             if first_coeff is not None:
+                                coefficient_operands = {
+                                    "zd_up": (
+                                        "zcof_tmask", "up_avm_sum",
+                                        "up_e3t_jk_Kmm",
+                                        "effective_e3w_jk_Kmm"),
+                                    "zd_lw": (
+                                        "zcof_tmask", "lower_avm_sum",
+                                        "lower_e3t_jkm1_Kmm",
+                                        "effective_e3w_jk_Kmm"),
+                                    "zdiag": ("dissl_jk",),
+                                }
                                 first_operand = next(
-                                    (name for name in (
-                                        "p_avm_jk", "e3t_jk_Kmm",
-                                        "e3w_jk_Kmm", "dissl_jk")
+                                    (name for name in
+                                     coefficient_operands[first_coeff]
                                      if not row12_operands[name]["pass"]),
                                     "literal coefficient evaluation order")
                                 row4["continuation_preview"][

@@ -5836,14 +5836,13 @@ class LatLonCGridOceanModel:
         gdept_0 = getattr(_zc, "nemo_gdept_0", None)
         gdepw_0 = getattr(_zc, "nemo_gdepw_0", None)
         if gdept_0 is None or gdepw_0 is None:
-            # Complete DINO oracle cards must carry the raw mesh fields.  The
-            # fallback keeps hand-built test coordinates explicit and does
-            # not widen this faithful path to legacy cards.
-            gdept_0, gdepw_0 = nemo_bn2_depth_ladders(_zc)
-        else:
-            # The raw NEMO W ladder includes the zero-depth surface point;
-            # eosbn2 starts at jk=2, so its first operand is gdepw_0(2).
-            gdepw_0 = gdepw_0[..., 1:]
+            raise ValueError(
+                "tke_n2_evaluation_stage='step_entry' requires raw NEMO "
+                "nemo_gdept_0/nemo_gdepw_0 mesh fields; the 1-D/reconstructed "
+                "ladder is not a faithful eosbn2 operand")
+        # The raw NEMO W ladder includes the zero-depth surface point;
+        # eosbn2 starts at jk=2, so its first operand is gdepw_0(2).
+        gdepw_0 = gdepw_0[..., 1:]
         zrw_stretch = nemo_r3t_stretch(
             _zc, state.eta.data, state.H_bathy.data,
             evaluation="nemo_reciprocal")
