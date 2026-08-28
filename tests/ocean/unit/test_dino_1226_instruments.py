@@ -1712,3 +1712,24 @@ def test_tcarry_bridge_omega_scorer_has_complete_committed_bindings(instruments)
     assert scorer._require_bound() is None
     assert scorer.BOUND_PRODUCER_SHA == (
         "9e339ad1b2032bc47ec132fb2ad6f00ea071bbb9")
+    assert scorer.FOURTH_PRODUCER_SHA == (
+        "b14a17dd6f14592594daacc4b64c6a1de2a0a004")
+    assert scorer.FOURTH_ARTIFACT_SHA256 == (
+        "678a6a914367561596a259cc27a50f9294d14e7c0ed32c68aefe9ee6fff2a6f8")
+
+
+def test_tcarry_een_omega_interaction_decision_tree_is_red_capable(instruments):
+    scorer = instruments.tcarry_omega
+    locked = (scorer.LOCKED_A, scorer.LOCKED_B, scorer.LOCKED_C)
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE) == (
+            "CONFIRMED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        *locked, scorer.HISTORICAL_BASELINE + 2.0 * scorer.TWO_F) == (
+            "REFUTED_COMBINED_EEN_OMEGA_OWNERSHIP")
+    assert scorer.classify_interaction(
+        scorer.LOCKED_A + 2.0 * scorer.LOCKED_TOL,
+        scorer.LOCKED_B, scorer.LOCKED_C, scorer.HISTORICAL_BASELINE) == (
+            "INVALID_STOP_LOCKED_CORNER")
+    assert scorer.classify_additivity(0.0) == "ADDITIVE_BELOW_BAND"
+    assert scorer.classify_additivity(2.0 * scorer.TWO_F) == "NON_ADDITIVE"
